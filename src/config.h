@@ -203,6 +203,11 @@ namespace config {
        * key, and not updated by a web save until Polaris restarts.
        */
       std::string saved_streaming_output;
+      /**
+       * @brief Which backend Host Virtual Display uses: auto, evdi, kwin, wlr or kscreen.
+       * Kept last: the defaults in config.cpp are positional.
+       */
+      std::string virtual_display_backend;
     } linux_display;
 
     std::string fallback_mode;

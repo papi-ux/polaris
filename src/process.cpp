@@ -4524,6 +4524,29 @@ namespace proc {
       (blank(app.source) || boost::iequals(boost::trim_copy(app.source), "manual"));
   }
 
+  bool is_one_game(const ctx_t &app) {
+    const auto present = [](const std::string &value) {
+      return !boost::trim_copy(value).empty();
+    };
+    if (present(app.steam_appid)) {
+      return true;
+    }
+    if (app.desktop_mirror || launches_nothing(app) || is_steam_big_picture_launcher(app)) {
+      return false;
+    }
+    const auto source = boost::trim_copy(app.source);
+    if (boost::iequals(source, emulator_library::source_name)) {
+      return present(app.rom_path);
+    }
+    if (boost::iequals(source, "heroic")) {
+      return present(app.heroic_app_name);
+    }
+    if (boost::iequals(source, "lutris")) {
+      return present(app.lutris_slug);
+    }
+    return true;
+  }
+
 #ifdef __linux__
   struct steam_big_picture_guard_runtime_t {
     std::atomic<bool> stop_requested {false};
@@ -8103,9 +8126,10 @@ namespace proc {
       if (isLinuxVDisplayAvailable()) {
         int target_fps = launch_session->fps ? launch_session->fps : 60000;
 
-        // Convert from milliHz to Hz if needed (Apollo uses milliHz internally)
+        // Convert from milliHz to Hz if needed (Apollo uses milliHz internally).
+        // Rounded: 59940 is 60 Hz, and truncating it asked a KWin screen for 59.
         if (target_fps >= 1000) {
-          target_fps /= 1000;
+          target_fps = (target_fps + 500) / 1000;
         }
 
         if (config::video.double_refreshrate) {
@@ -8134,6 +8158,12 @@ namespace proc {
                           << " ("sv << render_width << "x"sv << render_height
                           << "@"sv << target_fps << "Hz) via "sv
                           << virtual_display::backend_name(linux_vdisplay->backend);
+          // A KWin virtual screen carries no HDR. Record why, so an HDR request
+          // that comes out SDR has an answer in the Doctor.
+          if (linux_vdisplay->backend == virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT && launch_session->enable_hdr) {
+            stream_stats::update_hdr_policy(false, "kwin_virtual_output_sdr", launch_session->device_name);
+            BOOST_LOG(info) << "Virtual Display: HDR was requested, and a KWin virtual screen carries none; streaming SDR"sv;
+          }
 
           // Set output_name to the newly created virtual display so the
           // capture pipeline uses the correct output. If platform mapping is
@@ -12111,6 +12141,8 @@ namespace proc {
           ctx.emulator = app_node.value("emulator", "");
           ctx.rom_path = app_node.value("rom-path", "");
           ctx.rom_folder = app_node.value("rom-folder", "");
+          ctx.heroic_app_name = app_node.value("heroic-app-name", "");
+          ctx.lutris_slug = app_node.value("lutris-slug", "");
           ctx.last_launched = app_node.value("last-launched", (int64_t)0);
           if (app_node.contains("genres") && app_node["genres"].is_array()) {
             for (const auto &g : app_node["genres"]) {

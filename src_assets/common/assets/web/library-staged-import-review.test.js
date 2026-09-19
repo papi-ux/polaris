@@ -1,7 +1,10 @@
 import { shallowMount } from '@vue/test-utils'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nextTick, ref } from 'vue'
 
+import { forgetInstallJobs } from './composables/useRomSources'
 import AppsView from './views/AppsView.vue'
 
 const scannerState = {
@@ -32,16 +35,24 @@ vi.mock('./composables/useGameScanner', () => ({
   useGameScanner: () => scannerState,
 }))
 
+// The console's English, so an assertion reads what a player sees and a missing key shows as itself.
+const enLocale = JSON.parse(readFileSync(join(process.cwd(), 'src_assets/common/assets/web/public/assets/locale/en.json'), 'utf8'))
 const i18n = {
-  t(key) { return key },
+  t(key, params = {}) {
+    const message = key.split('.').reduce((node, part) => node?.[part], enLocale)
+    if (typeof message !== 'string') return key
+    return message.replace(/\{(\w+)\}/g, (whole, name) => (name in params ? String(params[name]) : whole))
+  },
 }
 
 function flushAppsViewLoad() {
   return Promise.resolve().then(() => Promise.resolve()).then(() => nextTick())
 }
 
-function mountAppsView() {
-  global.fetch = vi.fn((url) => {
+function mountAppsView(route = () => null) {
+  global.fetch = vi.fn((url, options) => {
+    const routed = route(String(url), options)
+    if (routed) return routed
     if (String(url).includes('./api/apps')) {
       return Promise.resolve({
         json: () => Promise.resolve({ apps: [], current_app: '', host_name: 'Test Host', host_uuid: 'host-1' }),
@@ -141,6 +152,7 @@ describe('AppsView staged import review', () => {
 
 describe('AppsView ROM folder emulator install', () => {
   afterEach(() => {
+    forgetInstallJobs()
     vi.useRealTimers()
     vi.restoreAllMocks()
     delete global.fetch
@@ -197,7 +209,7 @@ describe('AppsView ROM folder emulator install', () => {
     const card = () => wrapper.find('[data-rom-folder]')
     expect(card().text()).toContain('Eden not found')
     expect(card().text()).toContain('will not start until it is')
-    expect(wrapper.find('[data-rom-folder-install]').text()).toBe('Install from Flathub')
+    expect(wrapper.find('[data-rom-folder-install]').text()).toBe('Install From Flathub')
 
     await wrapper.find('[data-rom-folder-install]').trigger('click')
     await flushAppsViewLoad()
@@ -219,6 +231,41 @@ describe('AppsView ROM folder emulator install', () => {
     expect(wrapper.find('[data-rom-folder-installing]').exists()).toBe(false)
     expect(wrapper.find('[data-rom-folder-check]').text()).toContain('prod.keys')
     expect(scannerState.scan.mock.calls.length).toBe(scansBefore + 1)
+  })
+
+  it('reports an install that finished on another page as soon as the player is back on Apps', async () => {
+    resetScannerState()
+    let job = { state: 'installing', message: 'Installing Eden from Flathub.', started_at: 1, finished_at: 0 }
+    const sources = (url) => url !== './api/library/sources' ? null : Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({
+        status: true,
+        presets: [{
+          id: 'eden', label: 'Eden', platform: 'Nintendo Switch', installable: true, install_job: job, prerequisites: [],
+          install: job.state === 'installed' ? { kind: 'flatpak', location: 'dev.eden_emu.eden' } : { kind: 'missing', location: '' },
+        }],
+        sources: [],
+      }),
+    })
+
+    // Import Games reads the folder list and sees the install running; then the player leaves.
+    const first = mountAppsView(sources)
+    await flushAppsViewLoad()
+    await first.find('button').trigger('click')
+    await flushAppsViewLoad()
+    await flushAppsViewLoad()
+    first.unmount()
+
+    job = { state: 'installed', message: 'Eden is installed.', started_at: 1, finished_at: 2 }
+    const scansBefore = scannerState.scan.mock.calls.length
+    const second = mountAppsView(sources)
+    await flushAppsViewLoad()
+    await flushAppsViewLoad()
+
+    // Without opening Import Games: the list is read again and the finish rescans once.
+    expect(global.fetch.mock.calls.filter(([url]) => url === './api/library/sources')).toHaveLength(1)
+    expect(scannerState.scan.mock.calls.length).toBe(scansBefore + 1)
+    second.unmount()
   })
 
   it('keeps Flatpak\'s reason on the card when an install fails', async () => {
@@ -247,6 +294,6 @@ describe('AppsView ROM folder emulator install', () => {
     await flushAppsViewLoad()
 
     expect(wrapper.find('[data-rom-folder-install-failed]').text()).toBe('Installing DuckStation from Flathub failed: Nothing matches org.duckstation.DuckStation in remote flathub')
-    expect(wrapper.find('[data-rom-folder-install]').text()).toBe('Install from Flathub')
+    expect(wrapper.find('[data-rom-folder-install]').text()).toBe('Install From Flathub')
   })
 })

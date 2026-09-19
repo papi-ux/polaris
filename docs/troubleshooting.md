@@ -352,6 +352,9 @@ journalctl --user -u polaris -b --no-pager | grep -E 'Thread priority|RealtimeKi
 Installing and running RealtimeKit can also allow priority elevation without granting broad
 capabilities to the Polaris binary.
 
+The Doctor reports this as a host configuration warning too, with the limits that applied, so a
+support bundle exported after the stream still has it.
+
 Packaged Linux user units are ordered with `graphical-session.target` and pass through common
 desktop environment variables such as `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, and
 `DBUS_SESSION_BUS_ADDRESS`. In private Headless Stream mode, a missing parent `WAYLAND_DISPLAY`
@@ -508,7 +511,7 @@ static metadata such as display primaries or max display luminance was missing.
 
 ## HDR never engages
 
-`stream_hdr_enabled=false` on every launch, whatever you toggle, is five independent gates and
+`stream_hdr_enabled=false` on every launch, whatever you toggle, is six independent gates and
 any one of them is enough. Check them in this order; each has a line in
 `journalctl --user -u polaris` that names it.
 
@@ -519,11 +522,73 @@ any one of them is enough. Check them in this order; each has a line in
 | binary lacks `CAP_SYS_ADMIN` | `Failed to gain CAP_SYS_ADMIN`, `Couldn't get handle for DRM Framebuffer [...]: Probably not permitted` | `sudo -H polaris --setup-host --enable-kms`, restart |
 | client forced off on the host | Doctor `hdr_disabled_by_saved_setting`; `client_profiles.json` `hdr: false` or `device_db.json` `hdr_capable: false` | clear both, or let the client's own HDR10 report win (1.4.8) |
 | client never asked | `portal HDR force -> 0 from enable_hdr=false`, `client_dynamic_range=0` | turn on Request HDR in the client; in Nova it is off by default |
+| Host Virtual Display got a KWin screen | Doctor `hdr_unavailable_on_kwin_virtual_screen`; `HDR was requested, and a KWin virtual screen carries none` | KWin virtual screens have no HDR; use Mirror Desktop from an HDR monitor with `capture = kms` |
 
-When all five pass, the session logs `HDR metadata: available=true usable=true`,
+When all six pass, the session logs `HDR metadata: available=true usable=true`,
 `Color coding: HDR (Rec. 2020 + SMPTE 2084 PQ)` and `stream_hdr_enabled=true` after
 `Session started for [...]`. The encoder probe logs the same lines earlier even when the session
 will not, so read the ones after the session starts.
+
+## Host Virtual Display on KDE
+
+On KDE Plasma 6, Host Virtual Display gets a new screen from KWin (see
+[Launch modes and capture paths](launch-modes.md)). The Virtual Display panel on the Audio/Video
+tab names the backend in use and, when it cannot run, why.
+
+- **KWin does not offer its screencast protocol to Polaris.** KWin only offers it to a program a
+  desktop entry names. Polaris writes one to `~/.local/share/applications` the first time and
+  waits a few seconds for KWin to pick it up. If a launch still misses it, Polaris checks again
+  after half a minute, so try again then. If it keeps failing, check that the entry exists and
+  that its `Exec` line is the Polaris binary that is running.
+- **The stream runs at 60 Hz when the client asked for more.** A KWin screen starts with one
+  60 Hz mode, and Polaris adds the client's rate as a custom mode with kscreen-doctor. The log
+  says `did not take mode` when KWin refused it.
+- **KWin says it cannot tell which program Polaris is, or the automatic order borrows a monitor
+  instead.** KWin offers a screen only to a program it can match to its permission entry, and it
+  cannot match one that holds file capabilities, such as the `cap_sys_admin` that `--enable-kms`
+  grants for KMS capture. On the automatic order such a Polaris skips the KWin screen and falls back
+  to kscreen-doctor. Set Backend to KWin (`linux_virtual_display_backend = kwin`), leave `capture`
+  on `auto` or `portal`, and restart Polaris: it then drops the capability at start. KMS capture
+  and a KWin screen do not go together.
+- **kscreen-doctor is not installed.** It comes with Plasma. Polaris needs it to place the screen
+  beside your monitors at scale 1; without it KWin can put a new screen on top of your monitor.
+- **A game opened on my monitor instead of the stream.** Polaris moves windows onto the stream
+  screen with a small KWin script it loads for the stream. The log says `new windows will not be
+  moved` when KWin refused to load it or dropped it; the stream then shows an empty screen while
+  the game runs on your monitor. With two Polaris screens at once, the newer one gets new windows.
+- **A window I opened at the desk jumped to the stream.** While a stream runs, every new
+  application window is moved onto its screen. Drag it back, or use Meta+Shift+Left. The
+  desktop's own prompts stay on your monitor: polkit password prompts, ksshaskpass, KWallet and
+  KRunner.
+- **My second monitor's desktop or panel moved.** Plasma gives each screen rank its own desktop
+  and panel. Polaris ranks the stream screen after all of yours and keeps your screens in their
+  order; the log says `not ranked as they were` when KWin would not keep that ranking.
+- **Choosing another backend.** Set Backend on the Virtual Display panel
+  (`linux_virtual_display_backend`) to `evdi` or `kscreen` to use that one instead; the choice
+  applies without a restart.
+
+## A client cannot pick its resolution
+
+A device with a **Display Mode Override** saved on the host gets that mode whatever it asks for,
+so choosing 1080p on the client changes nothing. When the override replaced a different request,
+the Doctor checklist shows a **Display mode** warning naming the mode the client asked for, and
+Session Snapshot's **Display mode** tile shows both. Clear
+**Display Mode Override** for that device on the **Devices** page, or set it to the mode you want;
+see [Devices](devices.md). A launch that carries the client's own resolved profile, as Nova's
+does, keeps the client's mode, so the same device can behave differently in Nova and Moonlight.
+
+## Stutter over Tailscale
+
+Session Snapshot's **Network path** tile says how the client reached this host. The Doctor and
+support bundles carry the same thing as `client_network_path`: `lan`, `cgnat` (the shared
+`100.64.0.0/10` range, which Tailscale uses on IPv4), `tailscale` (its IPv6 range), `link-local`,
+`public` or `loopback`. It stays after the stream ends, so a support bundle exported afterwards
+still has it, and it never records the address itself.
+
+A tailnet stream is fine while Tailscale connects the two machines directly. When it cannot, it
+relays the traffic through its DERP servers, and the stream stutters and its latency climbs. Run
+`tailscale ping` with the host's name on the client: `via DERP` in the answer means the stream is
+relayed, an address and port mean it is direct.
 
 ## A launch was refused
 
@@ -616,6 +681,13 @@ words such as password, token, secret, cookie, auth and credential, run-together
 apikey, and key when something qualifies it, as in api_key. Names that merely contain one of those,
 such as keyboard, stay readable so the bundle remains worth reading. The exact rule is stated in
 the bundle itself under `redaction_notice`.
+
+Network addresses are replaced too, in the bundle, the pre-filled issue and copied support text.
+Each one becomes a label that keeps what kind of address it was, such as `[lan-1]`, `[cgnat-1]`
+(the range Tailscale uses on IPv4), `[tailscale-1]`, `[link-local-1]` or `[public-1]`, and the same
+address keeps the same label throughout one export. That keeps the part that usually matters, such
+as a client that moved from your LAN to a tailnet, without saying which address it had. Loopback,
+multicast and example addresses stay as they are.
 
 Redaction is not a promise that a bundle is safe to publish unread. Look at it first.
 

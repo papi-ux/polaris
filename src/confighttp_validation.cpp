@@ -225,6 +225,7 @@ namespace confighttp::validation {
       "linux_stream_mode"sv,
       "linux_streaming_output"sv,
       "linux_use_cage_compositor"sv,
+      "linux_virtual_display_backend"sv,
       "locale"sv,
       "log_path"sv,
       "max_bitrate"sv,
@@ -727,7 +728,8 @@ namespace confighttp::validation {
 
   bool is_live_applied_config_key(std::string_view key) {
     return is_ai_config_key(key) || key == "steamgriddb_api_key" || key == "adaptive_bitrate_enabled" ||
-           key == "trusted_subnets" || key == "trusted_subnet_auto_pairing";
+           key == "trusted_subnets" || key == "trusted_subnet_auto_pairing" ||
+           key == "linux_virtual_display_backend";
   }
 
   bool config_change_requires_restart(const std::vector<std::string> &changed_keys) {

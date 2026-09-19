@@ -170,7 +170,7 @@ const streamDisplayModeDefinitions = [
   },
 ]
 
-// kscreen-doctor is the fallback when neither EVDI nor a Hyprland session can
+// kscreen-doctor is the fallback when no EVDI, KWin or Hyprland backend can
 // add an output. It borrows an existing connector instead, so the default
 // "adds a display" copy would promise something this host cannot do.
 const hostVirtualDisplayKscreenCopy = {

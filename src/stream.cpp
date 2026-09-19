@@ -594,6 +594,9 @@ namespace stream {
     std::string optimization_normalization_reason;
     int optimization_recommendation_version = 0;
     int paired_target_bitrate_kbps = 0;
+    std::string display_mode_requested;
+    std::string display_mode_applied;
+    bool display_mode_pinned_by_host = false;
     crypto::PERM permission;
 
     std::list<crypto::command_entry_t> do_cmds;
@@ -3126,6 +3129,14 @@ namespace stream {
 
       // Update legacy single-client stats for backward compatibility
       stream_stats::update_stream_active(true, session.device_name, addr_string);
+      // A watcher streams the owner's mode, so the owner's decision stays the one reported.
+      if (!session.watch_only && !session.display_mode_applied.empty()) {
+        stream_stats::record_display_mode_decision(
+          session.display_mode_requested,
+          session.display_mode_applied,
+          session.display_mode_pinned_by_host
+        );
+      }
       stream_stats::update_video_stats(
         0,  // fps starts at 0
         session.config.monitor.bitrate,
@@ -3203,6 +3214,9 @@ namespace stream {
       session->optimization_reasoning = launch_session.optimization_reasoning;
       session->optimization_normalization_reason = launch_session.optimization_normalization_reason;
       session->optimization_recommendation_version = launch_session.optimization_recommendation_version;
+      session->display_mode_requested = launch_session.display_mode_requested;
+      session->display_mode_applied = launch_session.display_mode_applied;
+      session->display_mode_pinned_by_host = launch_session.display_mode_pinned_by_host;
       session->paired_target_bitrate_kbps = launch_session.paired_target_bitrate_kbps.value_or(0);
       session->permission = launch_session.perm;
       session->watch_only = launch_session.watch_only;

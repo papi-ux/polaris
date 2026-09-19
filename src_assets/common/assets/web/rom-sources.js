@@ -124,8 +124,11 @@ export function romEmulatorId(entry = {}) {
   return entry.emulator ?? entry.id ?? ''
 }
 
-/** Why the last install failed, while the emulator is still missing; Flatpak's own reason when it gave one. */
-export function romEmulatorInstallFailure(entry = {}) {
+/**
+ * Why the last install failed, while the emulator is still missing; Flatpak's own reason when it
+ * gave one, else the fallback the console passes in its own language.
+ */
+export function romEmulatorInstallFailure(entry = {}, fallback = 'The install from Flathub failed.') {
   if (entry.install_job?.state !== 'failed' || entry.install?.kind !== 'missing') return ''
-  return entry.install_job.message || 'The install from Flathub failed.'
+  return entry.install_job.message || fallback
 }

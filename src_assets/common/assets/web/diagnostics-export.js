@@ -1,3 +1,5 @@
+import { NetworkAddressBook, pseudonymizeNetworkAddresses } from './network-address-pseudonyms.js'
+
 // Words that mean "secret" wherever they appear as a whole segment of a name.
 const SENSITIVE_SEGMENT_WORDS = [
   'password', 'passwd', 'token', 'secret', 'cookie', 'auth', 'authorization', 'credential',
@@ -262,11 +264,21 @@ function redactAssignments(text) {
   return output + source.slice(cursor)
 }
 
-export function redactSensitiveText(value) {
-  return redactAssignments(String(value || '')
+/**
+ * Redact credentials from free text, then replace network addresses with labels.
+ *
+ * Addresses are part of this rather than an extra step for callers to remember,
+ * because every caller is producing text meant to leave the machine: a bundle, a
+ * prefilled public issue, copied support text. Pass one `addresses` book to every
+ * call that contributes to the same output so an address reads the same
+ * throughout it; a call on its own gets a book of its own.
+ */
+export function redactSensitiveText(value, addresses = new NetworkAddressBook()) {
+  const withoutCredentials = redactAssignments(String(value || '')
     .replace(URL_CREDENTIAL_PATTERN, `$1${REDACTED_VALUE}:${REDACTED_VALUE}@`)
     .replace(AUTH_HEADER_PATTERN, (_, scheme) => `${scheme} ${REDACTED_VALUE}`)
     .replace(COOKIE_HEADER_PATTERN, (_, label, separator) => `${label}${separator}${REDACTED_VALUE}`))
+  return pseudonymizeNetworkAddresses(withoutCredentials, addresses)
 }
 
 
@@ -278,10 +290,10 @@ export function redactSensitiveText(value) {
  * is JSON either way. Which names count as credentials stays with
  * isSensitiveFieldName rather than becoming a second definition here.
  */
-function sanitizeEntries(entries, seen) {
+function sanitizeEntries(entries, seen, addresses) {
   return Object.fromEntries(entries.map(([key, item]) => [
     String(key),
-    isSensitiveFieldName(String(key)) ? REDACTED_VALUE : sanitizeDiagnosticsValue(item, seen),
+    isSensitiveFieldName(String(key)) ? REDACTED_VALUE : sanitizeDiagnosticsValue(item, seen, addresses),
   ]))
 }
 
@@ -297,11 +309,11 @@ function sanitizeEntries(entries, seen) {
  * The stack is deliberately not carried. The bundle already ships log text, and
  * a stack adds host paths without adding much a maintainer cannot get there.
  */
-function sanitizeError(error, seen) {
+function sanitizeError(error, seen, addresses) {
   return {
     name: String(error.name || 'Error'),
-    message: redactSensitiveText(error.message || ''),
-    ...sanitizeEntries(Object.entries(error), seen),
+    message: redactSensitiveText(error.message || '', addresses),
+    ...sanitizeEntries(Object.entries(error), seen, addresses),
   }
 }
 
@@ -313,20 +325,26 @@ function sanitizeError(error, seen) {
  * safe direction and the useless one: the bundle still opened and still read as
  * complete while carrying nothing.
  */
-function sanitizeObjectLike(value, seen) {
-  if (Array.isArray(value)) return value.map((item) => sanitizeDiagnosticsValue(item, seen))
+function sanitizeObjectLike(value, seen, addresses) {
+  if (Array.isArray(value)) return value.map((item) => sanitizeDiagnosticsValue(item, seen, addresses))
   // An invalid date has no ISO form and toISOString throws on it, which would
   // take the whole export down over one bad field.
   if (value instanceof Date) return Number.isFinite(value.getTime()) ? value.toISOString() : null
-  if (value instanceof Error) return sanitizeError(value, seen)
-  if (value instanceof Map) return sanitizeEntries([...value.entries()], seen)
-  if (value instanceof Set) return [...value].map((item) => sanitizeDiagnosticsValue(item, seen))
-  return sanitizeEntries(Object.entries(value), seen)
+  if (value instanceof Error) return sanitizeError(value, seen, addresses)
+  if (value instanceof Map) return sanitizeEntries([...value.entries()], seen, addresses)
+  if (value instanceof Set) return [...value].map((item) => sanitizeDiagnosticsValue(item, seen, addresses))
+  return sanitizeEntries(Object.entries(value), seen, addresses)
 }
 
-export function sanitizeDiagnosticsValue(value, seen = new WeakSet()) {
+/**
+ * Sanitise a value for export, recursively.
+ *
+ * @param addresses One address book for the whole value, so an address that
+ *   appears in the logs and again in a field carries the same label in both.
+ */
+export function sanitizeDiagnosticsValue(value, seen = new WeakSet(), addresses = new NetworkAddressBook()) {
   if (value === null || value === undefined) return value
-  if (typeof value === 'string') return redactSensitiveText(value)
+  if (typeof value === 'string') return redactSensitiveText(value, addresses)
   if (typeof value !== 'object') return value
   // Only an ancestor is a cycle. `seen` used to keep every object the walk had
   // ever visited, so the second reference to a shared object was reported as
@@ -336,7 +354,7 @@ export function sanitizeDiagnosticsValue(value, seen = new WeakSet()) {
   if (seen.has(value)) return '[circular]'
   seen.add(value)
   try {
-    return sanitizeObjectLike(value, seen)
+    return sanitizeObjectLike(value, seen, addresses)
   } finally {
     seen.delete(value)
   }
@@ -460,6 +478,31 @@ function linuxConfigurationWarnings(stats = {}) {
   return []
 }
 
+// Only an override that replaced a different request is worth an item: that is why a client
+// "cannot select 1080p", since the host ignores its choice without telling it.
+function displayModeOverrideItem(stats = {}) {
+  const decision = stats?.display_mode_decision || {}
+  const requested = String(decision.requested || '')
+  const applied = String(decision.applied || '')
+  if (!decision.pinned_by_host || !requested || !applied || requested === applied) return null
+  return checklistItem(
+    'display-mode',
+    'Display mode',
+    'warning',
+    `This device's Display Mode Override of ${applied} replaced the ${requested} the client asked for.`,
+    'Clear Display Mode Override for this device on the Devices page to let the client choose.'
+  )
+}
+
+function formatDisplayModeDecision(decision = {}) {
+  const applied = decision?.applied
+  if (!applied) return ''
+  if (decision.pinned_by_host && decision.requested && decision.requested !== applied) {
+    return `${applied} (Display Mode Override; the client asked for ${decision.requested})`
+  }
+  return decision.pinned_by_host ? `${applied} (Display Mode Override)` : applied
+}
+
 function hostConfigurationWarningItem(stats = {}) {
   const warning = linuxConfigurationWarnings(stats)[0]
   if (!warning) return null
@@ -547,6 +590,7 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
       ? checklistItem('connection', 'Connection', 'pass', 'Live telemetry is connected and a stream is active.', 'Keep this page open while reproducing the issue.')
       : checklistItem('connection', 'Connection', 'warning', 'Telemetry is connected, but no active stream is running.', 'Start the affected game/session before exporting diagnostics.')
   const hostConfig = hostConfigurationWarningItem(stats)
+  const displayMode = displayModeOverrideItem(stats)
 
   const loss = Number.isFinite(packetLoss)
     ? packetLoss > 2
@@ -617,6 +661,7 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
   return [
     connection,
     ...(hostConfig ? [hostConfig] : []),
+    ...(displayMode ? [displayMode] : []),
     loss,
     capture,
     encoder,
@@ -743,7 +788,7 @@ function formatDoctorEvidence(doctor = {}) {
   return doctor.evidence.slice(0, 8).map((entry) => `- ${formatIssueValue(entry.id || entry.label, 'evidence')}: ${formatIssueValue(entry.detail || entry.value || entry.reason, '')}`).join('\n')
 }
 
-export function buildStreamEvidence(input = {}) {
+export function buildStreamEvidence(input = {}, { addresses = new NetworkAddressBook() } = {}) {
   const stats = input.session_snapshot || input.stream_stats || {}
   const doctor = stats?.doctor || input.doctor || {}
   return sanitizeDiagnosticsValue({
@@ -756,11 +801,11 @@ export function buildStreamEvidence(input = {}) {
     doctor,
     fix_my_stream_checklist: input.fix_my_stream_checklist || [],
     recent_issues: input.recent_issues || [],
-  })
+  }, new WeakSet(), addresses)
 }
 
-export function buildGithubIssueDraft(input = {}) {
-  const safeInput = sanitizeDiagnosticsValue(input)
+export function buildGithubIssueDraft(input = {}, { addresses = new NetworkAddressBook() } = {}) {
+  const safeInput = sanitizeDiagnosticsValue(input, new WeakSet(), addresses)
   const stats = safeInput.session_snapshot || safeInput.stream_stats || {}
   const config = safeInput.config || {}
   const system = safeInput.system_stats || {}
@@ -818,6 +863,8 @@ export function buildGithubIssueDraft(input = {}) {
     issueDraftLine('Launch mode', firstNonEmpty(stats.launch_mode, stats.stream_display_mode, stats.runtime_backend)),
     issueDraftLine('Encoder', firstNonEmpty(stats.encoder, stats.encode_target_device, config.encoder)),
     issueDraftLine('Capture', capture),
+    issueDraftLine('Network path', stats.client_network_path),
+    issueDraftLine('Display mode', formatDisplayModeDecision(stats.display_mode_decision)),
     ...gpuDiagnosticLines,
     issueDraftLine('Active stream', summarizeActiveStream(stats)),
     '',
@@ -840,7 +887,7 @@ Suggested safe action: ${formatIssueValue(doctor.safe_recovery_action.id)}${doct
     '',
     '## What I already tried',
     formatIssueValue(safeInput.user_notes, 'Not provided yet.'),
-  ].filter((line) => line !== '').join('\n'))
+  ].filter((line) => line !== '').join('\n'), addresses)
 }
 
 function statusRank(status) {
@@ -1195,7 +1242,7 @@ export const ISSUE_FORM_TEMPLATE = 'bug_report.yml'
 export const MAX_ISSUE_URL_LENGTH = 6000
 const TRUNCATION_NOTICE = '[truncated, see the attached support bundle for the full evidence]'
 
-function issueEvidenceSummary(input = {}, crash = {}, silentFailures = []) {
+function issueEvidenceSummary(input = {}, crash = {}, silentFailures = [], addresses = new NetworkAddressBook()) {
   const stats = input.session_snapshot || input.stream_stats || {}
   const lines = []
   const crashSummary = describePreviousRun(crash)
@@ -1207,7 +1254,7 @@ function issueEvidenceSummary(input = {}, crash = {}, silentFailures = []) {
     lines.push(`${[entry.timestamp, entry.level].filter(Boolean).join(' ')}: ${entry.message || entry.detail || ''}`.trim())
   }
   if (!lines.length && stats.capture_path_reason) lines.push(`Capture path reason: ${stats.capture_path_reason}`)
-  return redactSensitiveText(lines.join('\n'))
+  return redactSensitiveText(lines.join('\n'), addresses)
 }
 
 /**
@@ -1219,7 +1266,9 @@ function issueEvidenceSummary(input = {}, crash = {}, silentFailures = []) {
  * the user completes rather than an automatic submission.
  */
 export function buildGithubIssueUrl(input = {}, options = {}) {
-  const safeInput = sanitizeDiagnosticsValue(input)
+  // Pass the book the attached bundle was built with, so a device has one label in both.
+  const addresses = options.addresses || createExportAddressBook(input)
+  const safeInput = sanitizeDiagnosticsValue(input, new WeakSet(), addresses)
   const stats = safeInput.session_snapshot || safeInput.stream_stats || {}
   const config = safeInput.config || {}
   const system = safeInput.system_stats || {}
@@ -1258,7 +1307,7 @@ export function buildGithubIssueUrl(input = {}, options = {}) {
     return `${repositoryUrl}/issues/new?${params.toString()}`
   }
 
-  const evidence = issueEvidenceSummary(safeInput, crash, silentFailures)
+  const evidence = issueEvidenceSummary(safeInput, crash, silentFailures, addresses)
   let candidate = build(evidence)
   if (candidate.length <= maxLength) return candidate
 
@@ -1273,9 +1322,35 @@ export function buildGithubIssueUrl(input = {}, options = {}) {
   return build(TRUNCATION_NOTICE)
 }
 
-export function buildAnonymizedDiagnosticsBundle(input = {}) {
-  const streamEvidence = input.stream_evidence || buildStreamEvidence(input)
-  const issueDraft = input.issue_draft || buildGithubIssueDraft({ ...input, stream_evidence: streamEvidence })
+/**
+ * One address book for a whole export.
+ *
+ * Every part of a bundle that is built separately (stream evidence, the issue
+ * draft, the bundle itself) shares it, and so does anything shared alongside
+ * the bundle, such as the prefilled issue or the AI explanation's summary. Separate books only agree when they
+ * happen to meet the same addresses in the same order, which today they do
+ * because each part sanitises the whole input first. That is a coincidence of
+ * traversal rather than a guarantee, and the day one part walks a different
+ * subset, its [lan-1] and the logs' [lan-1] can be two different devices, which
+ * is worse than no label. Labels already present in the input are reserved
+ * before any part is built, so a new address never takes a label that already
+ * means something else.
+ */
+export function createExportAddressBook(input) {
+  const addresses = new NetworkAddressBook()
+  try {
+    addresses.reserveExistingLabels(JSON.stringify(input))
+  } catch {
+    // A cyclic input cannot be stringified. The sanitiser reserves labels string
+    // by string as it walks, which still covers everything except a label that
+    // appears only after the address it would collide with.
+  }
+  return addresses
+}
+
+export function buildAnonymizedDiagnosticsBundle(input = {}, { addresses = createExportAddressBook(input) } = {}) {
+  const streamEvidence = input.stream_evidence || buildStreamEvidence(input, { addresses })
+  const issueDraft = input.issue_draft || buildGithubIssueDraft({ ...input, stream_evidence: streamEvidence }, { addresses })
   return sanitizeDiagnosticsValue({
     generated_at: input.generated_at || new Date().toISOString(),
     export_kind: 'polaris-anonymized-diagnostics',
@@ -1292,11 +1367,16 @@ export function buildAnonymizedDiagnosticsBundle(input = {}) {
       'such as keyboard or monkey, stay readable so the bundle remains useful. In raw log text a',
       'bare key assignment is also redacted, because a log line carries no surrounding context to',
       'say whether it names a label or a secret.',
+      'Network addresses are replaced with labels that keep what kind of address they were, such as',
+      'lan, cgnat (the range Tailscale uses on IPv4), tailscale, link-local or public, and stay the',
+      'same throughout one export, so two lines about the same device still match without saying',
+      'which device it was. Loopback, multicast and example addresses stay readable.',
     ].join(' '),
     // 4: older_run_logs and kernel_gpu_messages ride along.
-    support_bundle_version: 4,
+    // 5: network addresses are replaced with labels.
+    support_bundle_version: 5,
     ...input,
     stream_evidence: streamEvidence,
     issue_draft: issueDraft,
-  })
+  }, new WeakSet(), addresses)
 }

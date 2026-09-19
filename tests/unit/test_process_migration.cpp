@@ -1218,6 +1218,133 @@ TEST(ProcessRuntimeConfigTests, AnEntryThatLaunchesNothingStreamsTheDesktop) {
   }
 }
 
+TEST(ProcessRuntimeConfigTests, OnlyAnEntryThatNamesItsGameIsOneGame) {
+  // The entries a pc-papi library actually had when a title lookup gave Heroic the completion
+  // time of a game called Heroic Dungeon.
+  proc::ctx_t heroic {};
+  heroic.name = "Heroic";
+  heroic.source = "heroic";
+  heroic.detached = {"setsid flatpak run com.heroicgameslauncher.hgl"};
+  EXPECT_FALSE(proc::is_one_game(heroic));
+
+  proc::ctx_t heroic_game {};
+  heroic_game.name = "Alan Wake 2";
+  heroic_game.source = "heroic";
+  heroic_game.heroic_app_name = "dc9d2e595d0e4650b35d659f90d41059";
+  heroic_game.detached = {"setsid flatpak run com.heroicgameslauncher.hgl 'heroic://launch?appName=dc9d2e595d0e4650b35d659f90d41059'"};
+  EXPECT_TRUE(proc::is_one_game(heroic_game));
+
+  proc::ctx_t lutris {};
+  lutris.name = "Lutris";
+  lutris.source = "lutris";
+  lutris.detached = {"setsid lutris"};
+  EXPECT_FALSE(proc::is_one_game(lutris));
+
+  proc::ctx_t lutris_game {};
+  lutris_game.name = "PEAK";
+  lutris_game.source = "lutris";
+  lutris_game.lutris_slug = "peak";
+  lutris_game.detached = {"setsid lutris lutris:rungame/peak"};
+  EXPECT_TRUE(proc::is_one_game(lutris_game));
+
+  proc::ctx_t emulator {};
+  emulator.name = "Eden";
+  emulator.source = "emulator";
+  emulator.emulator = "eden";
+  emulator.cmd = "flatpak run dev.eden_emu.eden";
+  EXPECT_FALSE(proc::is_one_game(emulator));
+
+  proc::ctx_t rom {};
+  rom.name = "The Legend of Zelda - Breath of the Wild";
+  rom.source = "emulator";
+  rom.emulator = "eden";
+  rom.rom_path = "/games/switch/botw.xci";
+  EXPECT_TRUE(proc::is_one_game(rom));
+
+  proc::ctx_t big_picture {};
+  big_picture.name = "Steam Big Picture";
+  big_picture.detached = {"setsid steam -gamepadui"};
+  EXPECT_FALSE(proc::is_one_game(big_picture));
+
+  proc::ctx_t desktop {};
+  desktop.name = "Desktop";
+  desktop.desktop_mirror = true;
+  EXPECT_FALSE(proc::is_one_game(desktop));
+
+  // An upgraded host's Low Res Desktop has no flag and launches nothing.
+  proc::ctx_t low_res {};
+  low_res.name = "Low Res Desktop";
+  EXPECT_FALSE(proc::is_one_game(low_res));
+
+  proc::ctx_t steam_game {};
+  steam_game.name = "Hades";
+  steam_game.source = "steam";
+  steam_game.steam_appid = "1145360";
+  steam_game.detached = {"setsid steam steam://rungameid/1145360"};
+  EXPECT_TRUE(proc::is_one_game(steam_game));
+
+  // Whatever a player added by hand is taken at its word.
+  proc::ctx_t manual {};
+  manual.name = "A Game";
+  manual.source = "manual";
+  manual.cmd = "/usr/bin/a-game";
+  EXPECT_TRUE(proc::is_one_game(manual));
+}
+
+TEST(ProcessMigrationTests, ReadsTheGameIdentityHeroicAndLutrisImportsCarry) {
+  const auto file_path = test_paths::root() / "launcher_game_identity.json";
+  const nlohmann::json apps_file = {
+    {"version", 14},
+    {"apps", {
+      {
+        {"name", "Heroic"},
+        {"uuid", "33333333-3333-4333-8333-333333333333"},
+        {"source", "heroic"},
+        {"detached", {"setsid flatpak run com.heroicgameslauncher.hgl"}}
+      },
+      {
+        {"name", "Alan Wake 2"},
+        {"uuid", "44444444-4444-4444-8444-444444444444"},
+        {"source", "heroic"},
+        {"heroic-app-name", "dc9d2e595d0e4650b35d659f90d41059"},
+        {"detached", {"setsid flatpak run com.heroicgameslauncher.hgl 'heroic://launch?appName=dc9d2e595d0e4650b35d659f90d41059'"}}
+      },
+      {
+        {"name", "PEAK"},
+        {"uuid", "55555555-5555-4555-8555-555555555555"},
+        {"source", "lutris"},
+        {"lutris-slug", "peak"},
+        {"detached", {"setsid lutris lutris:rungame/peak"}}
+      }
+    }}
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps_file.dump(2)), 0);
+  auto parsed_proc = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  const auto &apps = parsed_proc->get_apps();
+  const auto by_uuid = [&](const std::string &uuid) {
+    return std::find_if(apps.begin(), apps.end(), [&](const auto &app) {
+      return app.uuid == uuid;
+    });
+  };
+  const auto heroic = by_uuid("33333333-3333-4333-8333-333333333333");
+  const auto heroic_game = by_uuid("44444444-4444-4444-8444-444444444444");
+  const auto lutris_game = by_uuid("55555555-5555-4555-8555-555555555555");
+  ASSERT_NE(heroic, apps.end());
+  ASSERT_NE(heroic_game, apps.end());
+  ASSERT_NE(lutris_game, apps.end());
+  EXPECT_EQ(heroic->heroic_app_name, "");
+  EXPECT_FALSE(proc::is_one_game(*heroic));
+  EXPECT_EQ(heroic_game->heroic_app_name, "dc9d2e595d0e4650b35d659f90d41059");
+  EXPECT_TRUE(proc::is_one_game(*heroic_game));
+  EXPECT_EQ(lutris_game->lutris_slug, "peak");
+  EXPECT_TRUE(proc::is_one_game(*lutris_game));
+
+  std::filesystem::remove(file_path);
+}
+
 TEST(ProcessRuntimeConfigTests, SteamBigPictureInputGuardIsScopedToPrivateCompatibilitySessions) {
   proc::ctx_t big_picture {};
   big_picture.name = "Steam Big Picture";

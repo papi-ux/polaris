@@ -26,6 +26,7 @@
 #include "config.h"
 #include "crypto.h"
 #include "logging.h"
+#include "network.h"
 #include "stream_stats.h"
 #include "utility.h"
 #include "verified_action.h"
@@ -534,6 +535,13 @@ namespace stream_stats {
     j["streaming"] = streaming;
     j["client_name"] = client_name;
     j["client_ip"] = client_ip;
+    j["client_network_path"] = client_network_path;
+    // Named apart from the session status display_mode object, which describes the virtual display.
+    j["display_mode_decision"] = {
+      {"requested", display_mode_requested},
+      {"applied", display_mode_applied},
+      {"pinned_by_host", display_mode_pinned_by_host},
+    };
 #ifdef __linux__
     {
       const auto policy = current_stream_policy();
@@ -1109,6 +1117,7 @@ namespace stream_stats {
     if (!stats.hdr_policy_hdr && !stats.hdr_policy_reason.empty()) {
       const auto &reason = stats.hdr_policy_reason;
       const auto device = stats.hdr_policy_device.empty() ? std::string {"this device"} : stats.hdr_policy_device;
+      std::string id = "hdr_disabled_by_saved_setting";
       std::string message;
       std::string action;
       if (reason == "paired_device_hdr_unsupported") {
@@ -1126,10 +1135,17 @@ namespace stream_stats {
                   "profile when the stream was resolved.";
         action = "Check the encoder row. If NVENC or VA-API fell back, fix that first; HDR "
                  "follows the encoder.";
+      } else if (reason == "kwin_virtual_output_sdr") {
+        // Not a saved setting: the screen Host Virtual Display got cannot carry HDR at all.
+        id = "hdr_unavailable_on_kwin_virtual_screen";
+        message = "HDR was asked for, but this stream runs on a screen KWin created for Host Virtual "
+                  "Display, and KWin virtual screens carry no HDR. The stream is SDR.";
+        action = "For HDR on KDE, stream Mirror Desktop from an HDR monitor with capture = kms, as "
+                 "Linux HDR and Main10 in the configuration docs describes.";
       }
       if (!message.empty()) {
         configuration_warnings.push_back({
-          {"id", "hdr_disabled_by_saved_setting"},
+          {"id", id},
           {"severity", "info"},
           {"message", message},
           {"action", action}
@@ -1200,6 +1216,26 @@ namespace stream_stats {
         });
       }
     }
+
+#ifdef __linux__
+    // Capture, encode and audio threads running at ordinary priority. Polaris logs this once, at
+    // the first stream, and carries on; a support bundle exported later carried it only in raw log
+    // text, beside a microstutter report it may well have explained. It stays a warning rather
+    // than a failure because many hosts stream well without it.
+    if (const auto limits = platf::thread_priority_unavailable_note(); !limits.empty()) {
+      configuration_warnings.push_back({
+        {"id", "thread_priority_unavailable"},
+        {"severity", "warning"},
+        {"message", "Polaris could not raise the priority of its capture, encode and audio threads (" + limits +
+                      "), so they share the ordinary scheduler with the game. When the game is loading the CPU "
+                      "hard, that can show up as stutter in the stream."},
+        {"action", "Run Polaris as the packaged polaris.service, which asks for realtime priority where the user "
+                   "manager allows it, rather than starting it some other way, or install RealtimeKit. "
+                   "Troubleshooting, under Thread priority warning during a stream, has the commands that show "
+                   "which limit applies."}
+      });
+    }
+#endif
 
     nlohmann::json profile = {
       {"encoder_api", stats.encode_target_device},
@@ -1973,6 +2009,64 @@ namespace stream_stats {
         "Round-trip latency reported by the active client control channel." :
         "No current media or control-channel latency sample is available for this stream."
     );
+    // Both rows below survive the end of a stream, so they say which one they describe.
+    const std::string last_stream_prefix = stats.streaming ? "" : "From the last stream. ";
+    const std::string last_launch_prefix = stats.streaming ? "" : "From the last launch. ";
+    // The path the client came in by. Informational only: a tailnet stream is fine when its path
+    // is direct, so this never grades anything and only says what to check. A support bundle's
+    // microstutter came down to one client having moved from the LAN to Tailscale, which nothing
+    // else in this report could show.
+    if (!stats.client_network_path.empty()) {
+      const auto &path = stats.client_network_path;
+      constexpr auto relay_hint =
+        " That is fine when the connection is direct. When Tailscale relays it instead, expect stutter "
+        "and extra latency; running tailscale ping with this host's name on the client says which.";
+      std::string detail;
+      if (path == "lan") {
+        detail = "The client is on the same local network as this host.";
+      } else if (path == "cgnat") {
+        // Written as 100.64/10: a dotted network address here would be relabelled as a client
+        // address by the export's address pseudonymizer.
+        detail = std::string {"The client reached this host from the shared 100.64/10 range, which usually "
+                              "means Tailscale."} + relay_hint;
+      } else if (path == "tailscale") {
+        detail = std::string {"The client reached this host over Tailscale."} + relay_hint;
+      } else if (path == "public") {
+        detail = "The client reached this host over the internet, so the path between them is outside this "
+                 "network. Latency and packet loss above are the ones to watch.";
+      } else if (path == "link-local") {
+        detail = "The client reached this host by a link-local address, which usually means a direct cable or "
+                 "a network without an address server.";
+      } else if (path == "loopback") {
+        detail = "The client is running on this host.";
+      } else {
+        detail = "The client's address could not be classified.";
+      }
+      append_doctor_evidence(evidence, "client_network_path", "Client network path", path, "", "info", "stream_stats",
+                             last_stream_prefix + detail);
+    }
+    // How the display mode was chosen. A paired client's Display Mode Override replaces whatever the
+    // client asks for without telling it, so "I can't select 1080p" looked like a client problem
+    // while the host had the answer. Watch only when it actually replaced a different request.
+    if (!stats.display_mode_applied.empty()) {
+      const auto &requested = stats.display_mode_requested;
+      const auto &applied = stats.display_mode_applied;
+      const bool pinned = stats.display_mode_pinned_by_host;
+      const bool replaced_request = pinned && !requested.empty() && requested != applied;
+      std::string detail;
+      if (replaced_request) {
+        detail = "This client's pairing has a Display Mode Override of " + applied + ", so Polaris used that "
+                 "instead of the " + requested + " the client asked for. Clear Display Mode Override for this "
+                 "client on the Devices page to let the client choose.";
+      } else if (pinned) {
+        detail = "This client's pairing sets a Display Mode Override of " + applied +
+                 (requested.empty() ? "." : ", which matches what the client asked for.");
+      } else {
+        detail = "Polaris used the display mode the client asked for.";
+      }
+      append_doctor_evidence(evidence, "display_mode_decision", "Display mode", applied, "",
+                             replaced_request ? "watch" : "info", "launch", last_launch_prefix + detail);
+    }
     append_doctor_evidence(evidence, "bitrate", "Live bitrate", live_bitrate_kbps, "kbps", "pass", "stream_stats", stats.adaptive_runtime_update_supported ? "Current live encoder target; Doctor changes it only for confirmed pressure or a verified same-stream restore." : "Applied encoder bitrate; this encoder does not expose live bitrate updates.");
     const bool has_oversized_fec_frames =
       stats.fec_protection.oversized_frames_total > 0;
@@ -2257,6 +2351,7 @@ namespace stream_stats {
     if (active) {
       current_stats.client_name = client_name;
       current_stats.client_ip = client_ip;
+      current_stats.client_network_path = std::string {net::describe_client_network_path(client_ip)};
     } else {
       // Reset all stats when stream ends, but carry the controller-input facts
       // across: they describe the host, not the stream that just ended, and the
@@ -2281,6 +2376,14 @@ namespace stream_stats {
       const auto hdr_policy_reason = current_stats.hdr_policy_reason;
       const auto hdr_policy_hdr = current_stats.hdr_policy_hdr;
       const auto hdr_policy_device = current_stats.hdr_policy_device;
+      // How the client connected and how its display mode was chosen. A support bundle came in
+      // with "can't select 1080p" and "microstutters", exported after the stream had ended, and
+      // both answers (a Display Mode Override pinning 4K, a client on Tailscale) were only in raw
+      // log text. The path is kept as its kind, never as the address.
+      const auto network_path = current_stats.client_network_path;
+      const auto mode_requested = current_stats.display_mode_requested;
+      const auto mode_applied = current_stats.display_mode_applied;
+      const auto mode_pinned = current_stats.display_mode_pinned_by_host;
 
       current_stats = stats_t {};
       clear_capture_profile_buckets();
@@ -2302,7 +2405,19 @@ namespace stream_stats {
       current_stats.hdr_policy_reason = hdr_policy_reason;
       current_stats.hdr_policy_hdr = hdr_policy_hdr;
       current_stats.hdr_policy_device = hdr_policy_device;
+
+      current_stats.client_network_path = network_path;
+      current_stats.display_mode_requested = mode_requested;
+      current_stats.display_mode_applied = mode_applied;
+      current_stats.display_mode_pinned_by_host = mode_pinned;
     }
+  }
+
+  void record_display_mode_decision(const std::string &requested, const std::string &applied, bool pinned_by_host) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.display_mode_requested = requested;
+    current_stats.display_mode_applied = applied;
+    current_stats.display_mode_pinned_by_host = pinned_by_host;
   }
 
   void add_client(const std::string &client_ip,
