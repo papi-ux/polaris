@@ -12,6 +12,7 @@
 #include <src/video.h>
 
 #include <boost/property_tree/ptree.hpp>
+#include <optional>
 #include <gtest/gtest.h>
 
 namespace pt = boost::property_tree;
@@ -164,5 +165,74 @@ TEST(LaunchRefusal, AFailedProbeNamesTheCaptureCauseBeforeTheEncoder) {
   ASSERT_TRUE(taken.has_value());
   EXPECT_EQ(taken->code, "encoder_probe_failed");
   EXPECT_EQ(taken->message.find("private stream compositor"), std::string::npos);
+}
+
+TEST(LaunchRefusal, ACaptureRequestNothingCanServeIsRefusedWithItsReason) {
+  // #739: Mirror Desktop with capture = wlr on KDE. The launch used to succeed, the video thread
+  // found no backend, and Nova showed the dropped connection as "Error code: -1".
+  launch_failure::clear();
+  struct Restore {
+    ~Restore() {
+      platf::set_capture_request_satisfiable_for_tests(std::nullopt);
+      platf::set_capture_sources_missing_for_tests(false);
+      launch_failure::clear();
+    }
+  } restore;
+
+  capture_generation::identity_t generation {};
+  generation.stream_mode = "desktop_display";
+  generation.capture_backend = "wlr";
+
+  platf::set_capture_sources_missing_for_tests(false);
+  platf::set_kms_capture_refused_for_tests(false);
+  platf::set_capture_request_satisfiable_for_tests(false);
+  ASSERT_TRUE(video::refuse_launch_if_capture_unavailable(generation));
+  auto taken = launch_failure::take();
+  ASSERT_TRUE(taken.has_value());
+  EXPECT_EQ(taken->status, 503);
+  EXPECT_EQ(taken->code, "capture_backend_unavailable");
+  EXPECT_NE(taken->message.find("wlr"), std::string::npos);
+  EXPECT_NE(taken->message.find("Mirror Desktop"), std::string::npos) << taken->message;
+  EXPECT_NE(taken->message.find("KDE and GNOME"), std::string::npos);
+  EXPECT_NE(taken->action.find("Autodetect"), std::string::npos);
+
+  generation.capture_backend.clear();
+  ASSERT_TRUE(video::refuse_launch_if_capture_unavailable(generation));
+  taken = launch_failure::take();
+  ASSERT_TRUE(taken.has_value());
+  EXPECT_NE(taken->message.find("asks for auto capture"), std::string::npos) << taken->message;
+  EXPECT_EQ(taken->message.find("KDE and GNOME"), std::string::npos);
+
+  // An evaluation that found nothing at all keeps its own, more specific code.
+  platf::set_capture_sources_missing_for_tests(true);
+  ASSERT_TRUE(video::refuse_launch_if_capture_unavailable(generation));
+  taken = launch_failure::take();
+  ASSERT_TRUE(taken.has_value());
+  EXPECT_EQ(taken->code, "no_capture_backend");
+  platf::set_capture_sources_missing_for_tests(false);
+
+  platf::set_capture_request_satisfiable_for_tests(true);
+  EXPECT_FALSE(video::refuse_launch_if_capture_unavailable(generation));
+  EXPECT_FALSE(launch_failure::take().has_value());
+}
+
+TEST(LaunchRefusal, TheSatisfiabilityCheckReadsTheLastEvaluation) {
+  struct Restore {
+    ~Restore() {
+      platf::set_capture_sources_missing_for_tests(false);
+    }
+  } restore;
+
+  // Before any evaluation there is nothing to refuse on.
+  platf::set_capture_sources_missing_for_tests(false);
+  EXPECT_TRUE(platf::capture_request_satisfiable("wlr", false));
+  EXPECT_TRUE(platf::capture_request_satisfiable("", false));
+
+  // An evaluation that found nothing serves no request, auto included.
+  platf::set_capture_sources_missing_for_tests(true);
+  EXPECT_FALSE(platf::capture_request_satisfiable("wlr", false));
+  EXPECT_FALSE(platf::capture_request_satisfiable("kms", false));
+  EXPECT_FALSE(platf::capture_request_satisfiable("", false));
+  EXPECT_FALSE(platf::capture_request_satisfiable("auto", true));
 }
 #endif

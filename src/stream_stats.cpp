@@ -1002,9 +1002,11 @@ namespace stream_stats {
            "backend (" + substitution + "). Nothing is wrong with the display or the GPU." :
            "The capture backend this host is configured to use cannot capture anything "
            "in the current stream mode, so Polaris substituted another one (" +
-           substitution + "). Capture backends are not interchangeable across "
-           "compositors: wlr needs the wlroots capture protocols, which KDE and GNOME "
-           "do not have, so only the private-compositor modes can use it there."},
+           substitution + "). Streams that capture the host desktop use the substitute; "
+           "a Gamescope session or a virtual output keeps the configured backend. Capture "
+           "backends are not interchangeable across compositors: wlr needs the wlroots "
+           "capture protocols, which KDE and GNOME do not have, so only the "
+           "private-compositor modes can use it there."},
         {"action", kms_for_capability ?
            std::string {"Run "} + enable_kms_command + " after each install or update, then restart Polaris; KMS "
            "capture is what carries HDR, so keep it if HDR is the goal." :

@@ -60,6 +60,7 @@ extern "C" {
   #include "platform/linux/encoder_probe_driver_proof.h"
   #include "platform/linux/vaapi.h"
   #include "platform/linux/kms_connector_selection.h"
+  #include "platform/linux/stream_display_policy.h"
   #ifdef POLARIS_BUILD_VULKAN
     #include "platform/linux/vulkan_encode.h"
   #endif
@@ -1006,8 +1007,14 @@ namespace video {
       std::ostringstream topology;
       const auto output_name = display_device::map_output_name(config::video.output_name);
 
-      topology << "capture=" << config::video.capture
-               << ";encoder=" << config::video.encoder
+#ifdef __linux__
+      // The backend streams will actually ask for, which a private compositor or a
+      // substitution can make different from the saved preference.
+      topology << "capture=" << stream_display_policy::capture_for_current_mode();
+#else
+      topology << "capture=" << config::video.capture;
+#endif
+      topology << ";encoder=" << config::video.encoder
                << ";adapter=" << config::video.adapter_name
                << ";output=" << output_name;
 #ifdef __linux__
@@ -1150,8 +1157,9 @@ namespace video {
       // Only the owned private compositor currently provides a live,
       // generation-bound topology observation. Desktop/portal/unknown routes
       // keep probing until they implement an equally strong identity contract.
+      const auto requested_capture = stream_display_policy::capture_for_current_mode();
       if (!config::video.linux_display.use_cage_compositor || !probe_drivers ||
-          (!config::video.capture.empty() && config::video.capture != "wlr") ||
+          (!requested_capture.empty() && requested_capture != "wlr") ||
           !probe_drivers->has_capture_routes()) return decline("capture route or retained provider proof unavailable");
       // Require actual provider evidence, collected before probe owners died.
       if (backend != "nvenc" || !probe_drivers->contains_provider("libnvidia-encode.so") ||
@@ -2583,7 +2591,11 @@ namespace video {
 #endif
     capture_generation::identity_t generation {
       .requested_output_name = configured_output_name,
+#ifdef __linux__
+      .capture_backend = stream_display_policy::capture_for_current_mode(),
+#else
       .capture_backend = config::video.capture,
+#endif
       .adapter_name = config::video.adapter_name,
     };
 #ifdef __linux__
@@ -5861,6 +5873,10 @@ namespace video {
     last_encoder_probe_supported_yuv444_for_codec = {false, false, false};
   }
 
+  void invalidate_encoder_probe_reuse() {
+    successful_probe.invalidate();
+  }
+
   void reset_encoder_probe_state() {
     successful_probe.invalidate();
     std::unique_lock encoder_state_lock {encoder_state_mutex, std::defer_lock};
@@ -5890,26 +5906,80 @@ namespace video {
     });
   }
 
+#ifdef __linux__
+  static void refuse_for_kms_capability() {
+    launch_failure::refuse(
+      503,
+      "kms_capture_needs_capability",
+      "No video capture could start: this host is configured for KMS capture, but the Polaris "
+      "binary does not hold CAP_SYS_ADMIN, so it cannot read a framebuffer.",
+      "On the host, run sudo -H polaris --setup-host --enable-kms, then restart Polaris. Every Polaris install or update needs this again."
+    );
+  }
+
+  static void refuse_for_missing_capture_sources() {
+    launch_failure::refuse(
+      503,
+      "no_capture_backend",
+      "No video capture backend works in the configured stream mode, so no encoder could be probed.",
+      "Check the capture setting against the stream mode on the host; leaving capture unset lets "
+      "Polaris pick one that works. The host Doctor names the missing protocol."
+    );
+  }
+#endif
+
+  bool refuse_launch_if_capture_unavailable(const capture_generation::identity_t &generation) {
+#ifdef __linux__
+    const bool exact_output_owned = !generation.exact_display_name.empty();
+    if (platf::capture_request_satisfiable(generation.capture_backend, exact_output_owned)) {
+      return false;
+    }
+    const auto requested = generation.capture_backend.empty() ? std::string {"auto"} : generation.capture_backend;
+    // The two capture-side refusals the probe path already names stay the more specific answer.
+    if (platf::kms_capture_refused_for_capability() &&
+        (requested == "kms" || requested == "drm" || requested == "auto")) {
+      refuse_for_kms_capability();
+      return true;
+    }
+    if (platf::capture_sources_missing()) {
+      refuse_for_missing_capture_sources();
+      return true;
+    }
+    const auto mode_label = stream_display_policy::label_for_selection(generation.stream_mode);
+    const auto mode = !mode_label.empty() ? mode_label :
+                      generation.stream_mode.empty() ? std::string {"the configured stream mode"} : generation.stream_mode;
+    const auto found = platf::selected_capture_backend();
+    BOOST_LOG(error) << "Refusing launch: capture ["sv << requested << "] cannot capture anything in stream mode ["sv
+                     << mode << "]; the capture sources found for it are ["sv
+                     << (found.empty() ? std::string {"none"} : found) << ']';
+    std::string message = "No video capture could start: this launch asks for " + requested +
+                          " capture, and " + requested + " cannot capture anything in " + mode + " on this host.";
+    if (requested == "wlr") {
+      message += " wlr needs the wlroots capture protocols, which KDE and GNOME do not have, so there only "
+                 "Private Stream can use it.";
+    }
+    launch_failure::refuse(
+      503,
+      "capture_backend_unavailable",
+      message,
+      "On the host, set Force a Specific Capture Method under Advanced to Autodetect, or pick a stream "
+      "mode this capture method can serve, then launch again. The host Doctor shows what capture it found."
+    );
+    return true;
+#else
+    (void) generation;
+    return false;
+#endif
+  }
+
   void note_launch_refused_by_probe(bool against_private_compositor) {
 #ifdef __linux__
     if (platf::kms_capture_refused_for_capability()) {
-      launch_failure::refuse(
-        503,
-        "kms_capture_needs_capability",
-        "No video capture could start: this host is configured for KMS capture, but the Polaris "
-        "binary does not hold CAP_SYS_ADMIN, so it cannot read a framebuffer.",
-        "On the host, run sudo -H polaris --setup-host --enable-kms, then restart Polaris. Every Polaris install or update needs this again."
-      );
+      refuse_for_kms_capability();
       return;
     }
     if (platf::capture_sources_missing()) {
-      launch_failure::refuse(
-        503,
-        "no_capture_backend",
-        "No video capture backend works in the configured stream mode, so no encoder could be probed.",
-        "Check the capture setting against the stream mode on the host; leaving capture unset lets "
-        "Polaris pick one that works. The host Doctor names the missing protocol."
-      );
+      refuse_for_missing_capture_sources();
       return;
     }
 #endif

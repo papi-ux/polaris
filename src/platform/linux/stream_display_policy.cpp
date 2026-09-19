@@ -10,6 +10,7 @@
 #include "stream_path.h"
 #include "src/config.h"
 #include "src/logging.h"
+#include "src/platform/common.h"
 #include "virtual_display.h"
 
 #include <cctype>
@@ -410,6 +411,35 @@ namespace stream_display_policy {
     }
 
     return std::string {current_capture};
+  }
+
+  std::string capture_for_mode(
+    std::string_view configured_capture,
+    std::string_view stream_mode,
+    bool use_cage_compositor,
+    bool substitution_active,
+    bool exact_output_owned
+  ) {
+    if (use_cage_compositor) {
+      return "wlr";
+    }
+    // A Gamescope session is not the host desktop, and auto would land on a backend that
+    // captures the desktop instead of it; keep the configured one and let it fail visibly.
+    if (substitution_active && !exact_output_owned &&
+        to_lower_copy(stream_mode) != k_gamescope_stream) {
+      return {};
+    }
+    return std::string {configured_capture};
+  }
+
+  std::string capture_for_current_mode(bool exact_output_owned) {
+    return capture_for_mode(
+      config::video.capture,
+      config::video.linux_display.stream_mode,
+      config::video.linux_display.use_cage_compositor,
+      !platf::capture_backend_substitution_note().empty(),
+      exact_output_owned
+    );
   }
 
   void normalize_host_virtual_display_state_for_backend(

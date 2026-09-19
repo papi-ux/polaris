@@ -563,6 +563,13 @@ namespace video {
   void reset_encoder_probe_state();
 
   /**
+   * @brief Retire a successful probe so the next launch cannot reuse it without probing.
+   * @details Keeps the chosen encoder. /serverinfo advertises codecs from it until a launch
+   *          probes again, and reset_encoder_probe_state() would advertise H.264 alone meanwhile.
+   */
+  void invalidate_encoder_probe_reuse();
+
+  /**
    * @brief Encoder backends this binary can accept as an explicit selection.
    * @details "auto" is always first. The remaining names come from the
    *          platform/build encoder registry and still require a live probe
@@ -656,6 +663,15 @@ namespace video {
    *          capability), otherwise the encoder side with the NVENC driver detail when it applies.
    */
   void note_launch_refused_by_probe(bool against_private_compositor);
+
+  /**
+   * @brief Refuse a launch whose capture request cannot land on any capture source.
+   * @param generation The capture generation the launch is about to install.
+   * @return True when the launch was refused; the reason is recorded as capture_backend_unavailable.
+   * @details Without this the launch succeeds, the video thread finds no backend, and the client
+   *          sees the connection drop with a bare "-1" (#739).
+   */
+  bool refuse_launch_if_capture_unavailable(const capture_generation::identity_t &generation);
 
   /**
    * @brief Get the name of the currently selected encoder.

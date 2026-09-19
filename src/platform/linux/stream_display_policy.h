@@ -121,6 +121,34 @@ namespace stream_display_policy {
   );
 
   /**
+   * @brief The capture backend a stream generation asks for.
+   *
+   * The capture setting is a host preference, and two things override it for a
+   * generation. A private labwc session can only be captured through wlroots,
+   * so it always asks for wlr. And when the last capture-source evaluation
+   * found that the configured backend captures nothing in this mode and
+   * substituted another, the generation asks for auto, which lands on that
+   * substitute. Asking for the configured backend by name is what failed every
+   * stream in #739 while the encoder probe, which always asks for auto,
+   * passed. A generation that owns an exact output keeps the configured
+   * backend, because auto cannot address an exact output, and so does a
+   * Gamescope session, where auto would capture the desktop instead.
+   */
+  std::string capture_for_mode(
+    std::string_view configured_capture,
+    std::string_view stream_mode,
+    bool use_cage_compositor,
+    bool substitution_active,
+    bool exact_output_owned
+  );
+
+  /**
+   * @brief capture_for_mode() for the live configuration and the last
+   *        capture-source evaluation.
+   */
+  std::string capture_for_current_mode(bool exact_output_owned = false);
+
+  /**
    * @brief Normalize connector and capture authority for the backend that will
    *        or did create the Host Virtual display.
    *
