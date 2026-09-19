@@ -1929,8 +1929,32 @@ std::string get_local_ip_for_gateway() {
   /// looked for. Doctor asks this on every report, including before startup finishes.
   static bool capture_sources_evaluated = false;
 
+  /// The configuration the last evaluation was built for. The stream mode decides which
+  /// compositor gets enumerated, so a list evaluated for one mode is wrong for another: in #739
+  /// a client changed the host's default mode without a restart and every later launch asked a
+  /// Mirror Desktop list for Private Stream capture. A launch compares this with the live config
+  /// and evaluates again when they differ.
+  static std::string capture_sources_evaluated_for;
+
+  static std::string capture_sources_evaluation_key() {
+    const auto &linux_display = config::video.linux_display;
+    std::string key;
+    key.reserve(64);
+    key += config::video.capture;
+    key += '\n';
+    key += linux_display.stream_mode;
+    key += '\n';
+    key += linux_display.private_runtime;
+    key += '\n';
+    key += linux_display.use_cage_compositor ? "cage" : "host";
+    key += '\n';
+    key += linux_display.headless_mode ? "headless" : "visible";
+    return key;
+  }
+
 #ifdef POLARIS_TESTS
   static std::optional<std::string> selected_capture_backend_override;
+  static std::optional<bool> capture_request_satisfiable_override;
 #endif
 
   const std::string &requested_capture() {
@@ -2031,6 +2055,7 @@ std::string get_local_ip_for_gateway() {
     capture_backend_substitution.clear();
     kms_capability_refused = false;
     capture_sources_evaluated = true;
+    capture_sources_evaluated_for = capture_sources_evaluation_key();
     evaluate_capture_sources();
 
     if (!sources.none()) {
@@ -2065,11 +2090,12 @@ std::string get_local_ip_for_gateway() {
     const auto selected = describe_selected_sources();
     capture_backend_substitution = requested + " -> " + selected;
     BOOST_LOG(warning) << "capture = "sv << requested
-                       << " cannot capture anything in the current stream mode, so Polaris is "sv
-                       << "using "sv << selected << " instead. On a compositor without the "sv
-                       << "wlroots capture protocols, only the private-compositor modes can use "sv
-                       << "wlr; every other mode has to capture the desktop. Set capture = "sv
-                       << selected << " to make this the configured choice."sv;
+                       << " cannot capture anything in the current stream mode, so the encoder "sv
+                       << "probe and streams that capture the host desktop use "sv << selected
+                       << " instead. On a compositor without the wlroots capture protocols, only "sv
+                       << "the private-compositor modes can use wlr; every other mode has to "sv
+                       << "capture the desktop. Set capture = "sv << selected
+                       << " to make this the configured choice."sv;
     verified_action::confirm(
       "video.configured_capture",
       "Capture with the backend this host is configured to use",
@@ -2080,6 +2106,70 @@ std::string get_local_ip_for_gateway() {
 
   std::string capture_backend_substitution_note() {
     return capture_backend_substitution;
+  }
+
+  bool capture_sources_stale() {
+    return !capture_sources_evaluated ||
+           capture_sources_evaluated_for != capture_sources_evaluation_key();
+  }
+
+  bool reevaluate_capture_sources_if_stale() {
+    if (!capture_sources_stale()) {
+      return false;
+    }
+    const auto &linux_display = config::video.linux_display;
+    BOOST_LOG(info) << "Capture sources were evaluated for another stream mode or capture setting; "sv
+                    << "evaluating again for stream mode ["sv
+                    << (linux_display.stream_mode.empty() ? "unset"sv : std::string_view {linux_display.stream_mode})
+                    << "], capture ["sv
+                    << (config::video.capture.empty() ? "auto"sv : std::string_view {config::video.capture})
+                    << ']';
+    reevaluate_capture_sources();
+    return true;
+  }
+
+  bool capture_request_satisfiable(std::string_view requested, bool exact_output_owned) {
+#ifdef POLARIS_TESTS
+    if (capture_request_satisfiable_override) {
+      return *capture_request_satisfiable_override;
+    }
+#endif
+    // Nothing has looked yet, so there is nothing to refuse on; capture reports its own failure.
+    if (!capture_sources_evaluated) {
+      return true;
+    }
+    bool nvfbc_available = false;
+    bool wayland_available = false;
+    bool portal_available = false;
+    bool kms_available = false;
+    bool x11_available = false;
+#ifdef POLARIS_BUILD_CUDA
+    nvfbc_available = sources[source::NVFBC];
+#endif
+#ifdef POLARIS_BUILD_WAYLAND
+    wayland_available = sources[source::WAYLAND];
+#endif
+#ifdef POLARIS_BUILD_PORTAL
+    portal_available = sources[source::PORTAL];
+#endif
+#ifdef POLARIS_BUILD_DRM
+    kms_available = sources[source::KMS];
+#endif
+#ifdef POLARIS_BUILD_X11
+    x11_available = sources[source::X11];
+#endif
+    // CUDA memory is assumed, so an NvFBC request is refused only when NvFBC itself is missing;
+    // the encoder that decides the memory type may not have been probed for this launch yet.
+    return choose_display_backend(
+             requested,
+             exact_output_owned,
+             nvfbc_available,
+             wayland_available,
+             portal_available,
+             kms_available,
+             x11_available,
+             true
+           ) != display_backend_e::none;
   }
 
   std::string thread_priority_unavailable_note() {
@@ -2145,6 +2235,15 @@ std::string get_local_ip_for_gateway() {
 #ifdef POLARIS_TESTS
   void set_capture_backend_substitution_for_tests(const std::string &note) {
     capture_backend_substitution = note;
+  }
+
+  void mark_capture_sources_evaluated_for_current_config_for_tests() {
+    capture_sources_evaluated = true;
+    capture_sources_evaluated_for = capture_sources_evaluation_key();
+  }
+
+  void set_capture_request_satisfiable_for_tests(std::optional<bool> satisfiable) {
+    capture_request_satisfiable_override = satisfiable;
   }
 #endif
 

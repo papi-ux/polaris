@@ -1397,6 +1397,48 @@ namespace nvhttp {
       const std::unordered_map<std::string, std::string> &
     )>;
 
+    /// Told the previous and the new host default after a stream mode change is saved.
+    using host_mode_changed_fn_t = std::function<void(
+      const std::string &previous_mode,
+      const std::string &next_mode
+    )>;
+
+    /**
+     * @brief Re-check capture after the host default stream mode changed without a restart.
+     *
+     * The capture sources were evaluated for the old mode, and the stream mode decides which
+     * compositor they enumerate. Left alone, every later launch asks a list evaluated for the old
+     * mode (#739): Private Stream asked a Mirror Desktop list for wlr and found nothing. Callers
+     * hold the session lifecycle lock and have refused the change while an app runs; a stream
+     * still counted is left alone, and the launch-time staleness check catches it instead.
+     */
+    void recheck_capture_for_host_mode_change(
+      const std::string &previous_mode,
+      const std::string &next_mode
+    ) {
+#ifdef __linux__
+      const bool capture_idle = rtsp_stream::session_count() == 0;
+      BOOST_LOG(info) << "client_settings: host default stream mode ["sv
+                      << (previous_mode.empty() ? "unset"s : previous_mode) << "] -> ["sv
+                      << next_mode << "]; "sv
+                      << (capture_idle ?
+                            "re-evaluating capture sources now"sv :
+                            "a stream is still counted, so capture is re-evaluated at the next launch"sv);
+      // The next launch probes the encoder against the new mode either way: a desktop launch
+      // always probes, and a private compositor launch reprobes against its own socket. Retire
+      // probe reuse only. Dropping the chosen encoder as well would leave /serverinfo advertising
+      // H.264 alone to the client that just made the change, until that launch had run.
+      video::invalidate_encoder_probe_reuse();
+      if (!capture_idle) {
+        return;
+      }
+      platf::reevaluate_capture_sources();
+#else
+      (void) previous_mode;
+      (void) next_mode;
+#endif
+    }
+
     enum class stream_display_mode_apply_result_e {
       success,
       rejected,
@@ -1406,7 +1448,8 @@ namespace nvhttp {
     stream_display_mode_apply_result_e apply_stream_display_mode_selection(
       const std::string &selection,
       std::string &error,
-      const persist_config_values_fn_t &persist = persist_config_values
+      const persist_config_values_fn_t &persist = persist_config_values,
+      const host_mode_changed_fn_t &host_mode_changed = recheck_capture_for_host_mode_change
     ) {
 #ifdef __linux__
       const auto previous_linux_display = config::video.linux_display;
@@ -1467,6 +1510,14 @@ namespace nvhttp {
       // successful switch to Desktop/private mode.
       config::video.capture = previous_capture;
       config::video.output_name = cleared_owned_output_name ? "" : previous_output_name;
+
+      const auto &applied = config::video.linux_display;
+      if (applied.stream_mode != previous_linux_display.stream_mode ||
+          applied.private_runtime != previous_linux_display.private_runtime ||
+          applied.use_cage_compositor != previous_linux_display.use_cage_compositor ||
+          applied.headless_mode != previous_linux_display.headless_mode) {
+        host_mode_changed(previous_linux_display.stream_mode, applied.stream_mode);
+      }
 
       return stream_display_mode_apply_result_e::success;
 #else
@@ -2602,7 +2653,8 @@ namespace nvhttp {
       error,
       [persistence_succeeds](const auto &) {
         return persistence_succeeds;
-      }
+      },
+      [](const auto &, const auto &) {}
     ) == stream_display_mode_apply_result_e::success;
   }
 
@@ -2616,6 +2668,24 @@ namespace nvhttp {
       [&persisted](const auto &values) {
         persisted = values;
         return true;
+      },
+      [](const auto &, const auto &) {}
+    ) == stream_display_mode_apply_result_e::success;
+  }
+
+  bool apply_stream_display_mode_selection_for_tests(
+      const std::string &selection,
+      bool persistence_succeeds,
+      std::vector<std::pair<std::string, std::string>> &host_mode_changes,
+      std::string &error) {
+    return apply_stream_display_mode_selection(
+      selection,
+      error,
+      [persistence_succeeds](const auto &) {
+        return persistence_succeeds;
+      },
+      [&host_mode_changes](const std::string &previous_mode, const std::string &next_mode) {
+        host_mode_changes.emplace_back(previous_mode, next_mode);
       }
     ) == stream_display_mode_apply_result_e::success;
   }

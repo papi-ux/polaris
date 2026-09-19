@@ -7478,6 +7478,12 @@ namespace proc {
 #ifdef __linux__
     if (session_mode_applied) {
       platf::reevaluate_capture_sources();
+    } else if (no_active_sessions_at_launch) {
+      // The host default can change without a launch: a client-settings write changes it live,
+      // and one made while a stream was still counted cannot re-evaluate on the spot. A list
+      // evaluated for another mode enumerates the wrong compositor (#739), so evaluate again
+      // before anything below asks it for capture. Never under a stream that is still capturing.
+      platf::reevaluate_capture_sources_if_stale();
     }
 #endif
 
@@ -8274,12 +8280,19 @@ namespace proc {
       .exact_display_name = exact_output_name,
       .requested_output_name = exact_output_name.empty() ? configured_output_name : exact_output_name,
       .stream_mode = config::video.linux_display.stream_mode,
-      .capture_backend = config::video.capture,
+      .capture_backend = stream_display_policy::capture_for_current_mode(!exact_output_name.empty()),
       .private_runtime = config::video.linux_display.private_runtime,
       .adapter_name = config::video.adapter_name,
       .headless_mode = config::video.linux_display.headless_mode,
       .use_cage_compositor = config::video.linux_display.use_cage_compositor,
     };
+    // A request no capture source can serve used to be admitted: the launch succeeded, the video
+    // thread found no backend and the client saw the connection drop with a bare "-1" (#739).
+    // Refuse it here with the reason instead. A viewer or input-only session captures nothing.
+    if (!launch_session->input_only && !launch_session->watch_only &&
+        video::refuse_launch_if_capture_unavailable(capture_generation)) {
+      return 503;
+    }
 #endif
 
     // Probe encoders again before streaming to ensure our chosen
@@ -8824,6 +8837,10 @@ namespace proc {
       }
 
       if (!reprobe_encoders_for_cage(strict_configured_encoder, save_successful_cache)) {
+        private_runtime->stop();
+        return false;
+      }
+      if (!probe_only && video::refuse_launch_if_capture_unavailable(capture_generation)) {
         private_runtime->stop();
         return false;
       }

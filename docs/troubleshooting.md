@@ -601,6 +601,7 @@ below are stable, so they can be searched for here and in support threads.
 |---|---|---|
 | `encoder_probe_failed` | No video encoder could start; on NVIDIA the message adds the driver detail when the driver is the reason | Check the Doctor's Encoder and Capture rows. Against the private compositor: pick **Private Stream (GPU-native)** or set `linux_prefer_gpu_native_capture = enabled` |
 | `no_capture_backend` | No capture backend works in the configured stream mode, so nothing could be probed | Check `capture` against the stream mode; unset lets Polaris pick. The Doctor names the missing protocol |
+| `capture_backend_unavailable` | The launch asks for a capture backend that cannot capture anything in its stream mode, such as `capture = wlr` in Mirror Desktop on KDE or GNOME | Set **Force a Specific Capture Method** under Advanced to Autodetect, or use a stream mode that backend can serve |
 | `kms_capture_needs_capability` | `capture = kms` without `CAP_SYS_ADMIN` on the binary | `sudo -H polaris --setup-host --enable-kms`, restart |
 | `desktop_capture_not_prepared` | The screen sharing prompt was declined, or desktop capture could not be prepared | Approve the prompt on the host desktop, or use a Private Stream mode |
 | `private_runtime_unavailable` | labwc (or gamescope) is not installed for the chosen mode | Install it, or use Mirror Desktop |
