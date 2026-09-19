@@ -7,6 +7,8 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Spaces work with NVIDIA driver 615.71.09. The NVIDIA runtime bakes in the NVIDIA userspace for one driver version, and 1.4.10 shipped only the 610.57.04 image, so a host that updated its driver was told to download a runtime that did not exist for it. A 615.71.09 runtime is now published, signed and admitted next to the 610.57.04 one, and Host Setup picks the one that matches the driver loaded on your PC.
+
 - Spaces survive a reboot that renumbers the graphics devices. Guided setup saved the card's `/dev/dri/cardN` and `renderDN` paths, and the kernel does not keep those numbers from one boot to the next: an EVDI display or another GPU that starts first takes them, so after an ordinary reboot Spaces stayed off with a log line about the separate input owner that had nothing to do with it. Polaris now finds the card by the PCI address setup saved with it and uses the card and render nodes that address has on this boot, in memory only, so the saved configuration is left as setup wrote it. Only nodes the kernel lists under that exact device are used, the container still gets real `/dev/dri` names, and the NVIDIA device nodes are checked as before and never rewritten. When the card is gone, its driver has not loaded yet, or its nodes no longer match setup, Spaces stay off and the log says which, and turning on `multiseat_moonlight_input` alongside Spaces gets a line of its own.
 
 ## v1.4.10 - 2026-09-18

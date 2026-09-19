@@ -13,9 +13,9 @@ existing Steam setup is supported by the development backend.
 First Space preparation is a persistent background job. It connects the
 verified runtime download to a new private Steam home, with stop and retry
 controls in Spaces. It does not report download progress; the runtime install
-is a Docker pull with no byte count the job can read. The preview catalog is
-carries the two Steam runtimes published on 2026-09-18, so this build can
-download one. Only the NVIDIA runtime has been exercised on real hardware. The next step selects a detected graphics
+is a Docker pull with no byte count the job can read. The preview catalog
+carries the Steam runtimes published on 2026-09-18 and 2026-09-19, so this build
+can download one. Only the NVIDIA runtime has been exercised on real hardware. The next step selects a detected graphics
 card, saves Spaces configuration and offers an explicit restart. The initial
 configuration permits one active Space; simultaneous Spaces need a separately
 reviewed graphics budget, which the host now publishes to clients as
@@ -45,7 +45,9 @@ The current runtime requires the Polaris service account to use UID and GID
 Registry publication completed on 2026-09-18: both Steam runtimes are anonymously
 pullable from the Polaris registry by digest, and a first download, first Space
 creation, real gameplay and clean teardown were exercised on an NVIDIA host from
-the published NVIDIA bytes. A fresh
+the published NVIDIA bytes. A second NVIDIA runtime, for driver 615.71.09, was
+published on 2026-09-19 from source revision ae4760dc through the same signed and
+attested path. A fresh
 NVIDIA graphics installation has not been validated. The
 [September 15 acceptance report](container-multiseat-acceptance-20260915.md)
 records fresh Fedora installation, simultaneous 60 FPS streams, Shield

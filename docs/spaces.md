@@ -33,8 +33,9 @@ Example with sample player and device names.
 Steam, its 32-bit libraries and the gaming userspace live inside the runtime
 image, so the host does not need Steam installed. The host still needs Polaris,
 Docker, its GPU driver and input permissions. An NVIDIA image names the host
-driver version it was built for; the current preview image targets NVIDIA
-610.57.04.
+driver version it was built for; the preview has NVIDIA images for drivers
+610.57.04 and 615.71.09, and Host Setup offers the one that matches the driver
+loaded on your PC.
 
 The native packages ship the setup UI, the controller, the host policy files
 and the `polaris-spaces-setup` helper. There is no supported image that runs
