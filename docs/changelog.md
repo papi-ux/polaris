@@ -7,6 +7,18 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+The encoder settings pages say what this GPU will actually encode. The VA-API and Vulkan tabs gain a read-only **Hardware codec support** panel that reports the result of Polaris's live probe: the active encoder plus H.264, HEVC and AV1 rows with HDR markers where the probe accepted a Main10/P010 configuration. Polaris advertises AV1 to clients whenever this hardware passes AV1 validation and falls back to HEVC when it does not, so `av1_mode` stays on its default and the panel shows what that resolves to; when a codec is off, the panel says why — you switched it off in Settings, or the encoder cannot do it. The panel refreshes after a restart from the console or tray, since changing the encoder changes what Polaris advertises.
+
+The Vulkan tab gains an encode quality select (`vk_quality`). Level 0 is the driver default and always works; higher levels trade encode speed for quality where the driver exposes them, with valid values running 0 through one less than the driver's reported maximum — four on current AMD GPUs, so 0–3. An out-of-range value fails that codec's validation without falling back to another encoder, because an explicit Vulkan selection is strict; with verbose logging enabled Polaris logs the driver's count as `Encoder max quality: N`, and FFmpeg's own guard repeats the off-by-one in its error message, so a value of exactly N slips past it.
+
+The Vulkan rate control Auto option now means what it says. Polaris passed a raw zero to FFmpeg, which selected the driver's default rate control instead of letting FFmpeg resolve one; config value 0 now maps to FFmpeg's Vulkan auto sentinel, and because Polaris always sets a stream bitrate, auto resolves to variable bitrate when the driver advertises VBR and to constant bitrate otherwise. Explicit modes are still passed to the driver as-is and fail validation if unsupported.
+
+The VA-API tab's selects use the same styling as every other settings control; they referenced classes that do not exist in the console, so they rendered unstyled.
+
+Docs: the configuration reference gains a [VA-API Encoder](configuration.md#va-api-encoder) section and documents the Vulkan options (`vk_tune`, `vk_rc_mode`, `vk_quality`), including what auto rate control resolves to on this host and how to read the quality-level range from the log.
+
+Developers: the three Vulkan codec tables share one option set, and the rc-mode-to-FFmpeg mapping is a free function covered by unit tests; the codec support panel reads a response-only `encoder_codec_support` key on `GET /api/config`.
+
 ## v1.4.10 - 2026-09-18
 
 Spaces open up, a paired client can put the host to sleep, and Host Virtual Display on KDE Plasma gets a screen of its own from KWin. This is the first release whose compiled runtime catalog admits published Steam runtimes, so a Space can be created on a released build. Completion estimates, Find Cover, ROM folder emulators and support bundles got attention too. Nova 1.4.10 comes out alongside it, and Sleep Host needs both. Existing configurations and paired devices remain valid.
