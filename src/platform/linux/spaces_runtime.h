@@ -40,6 +40,14 @@ namespace multiseat::spaces {
    * the config digest Docker reports, never the reference it was pulled by.
    */
   [[nodiscard]] bool borrows_host_driver(std::string_view image, const std::vector<runtime_t> &catalog);
+
+  /**
+   * The launcher family of the catalog runtime this image is, or empty when no
+   * entry claims it. A first Space takes its family from here, never from a
+   * name on the wire.
+   */
+  [[nodiscard]] std::string_view runtime_profile_for_image(
+    std::string_view image, const std::vector<runtime_t> &catalog);
   // Docker's classic store addresses configurations; its containerd store
   // addresses manifests. Both identities must belong to the compiled catalog.
   [[nodiscard]] std::optional<std::string> verified_runtime_image(const runtime_t &runtime, std::string_view inspection);

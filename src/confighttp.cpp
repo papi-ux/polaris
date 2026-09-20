@@ -4736,9 +4736,9 @@ namespace confighttp {
     request->content.read(bytes.data(), bytes.size());
     const auto count = request->content.gcount();
     if (count > 4096) { bad_request(response, request, "Creation request is too large"); return; }
-    const auto creation = multiseat::profiles::decode_steam_create_request({bytes.data(), static_cast<std::size_t>(count)});
+    const auto creation = multiseat::profiles::decode_space_create_request({bytes.data(), static_cast<std::size_t>(count)});
     if (!creation) { bad_request(response, request, "Invalid Space creation request"); return; }
-    const auto result = service->create_steam_profile(*creation);
+    const auto result = service->create_space_profile(*creation);
     const nlohmann::json output {{"status", result.prepared()}, {"message", result.message},
       {"profile_id", creation->request_id}};
     SimpleWeb::CaseInsensitiveMultimap headers;

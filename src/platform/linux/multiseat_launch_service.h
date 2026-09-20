@@ -98,7 +98,7 @@ namespace multiseat {
     std::filesystem::path catalog;
     std::function<std::unique_ptr<profile_controller_t>()> reload;
     std::function<profiles::change_result_t(std::string_view, std::string_view)> persist;
-    std::function<profiles::change_result_t(const profiles::steam_create_request_t &)> create;
+    std::function<profiles::change_result_t(const profiles::space_create_request_t &)> create;
     std::function<profiles::change_result_t(const profiles::edit_request_t &)> edit;
     std::function<profiles::change_result_t(std::string_view, std::string_view, bool)> access;
     // Deletes a Space's home through Docker; the stop token ends a long removal at shutdown.
@@ -178,7 +178,7 @@ namespace multiseat {
     [[nodiscard]] profile_client_spaces_t client_spaces(std::string_view client) const;
     [[nodiscard]] profile_launch_result_t select_space(std::string_view client, std::string_view profile,
       std::string_view previous);
-    [[nodiscard]] profile_launch_result_t create_steam_profile(profiles::steam_create_request_t request);
+    [[nodiscard]] profile_launch_result_t create_space_profile(profiles::space_create_request_t request);
     [[nodiscard]] profile_launch_result_t edit_profile(profiles::edit_request_t request);
     // Deletes a Space's games and saves and its record. Refused while that Space
     // or any Space stream is active, when the typed name is not the Space's name,

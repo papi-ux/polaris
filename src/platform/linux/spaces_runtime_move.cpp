@@ -253,7 +253,7 @@ namespace multiseat::spaces {
       const bool runtime = !request.runtime_id.empty() && request.runtime_id.size() <= 64 && request.runtime_id.front() != '-' &&
         request.runtime_id.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-") == std::string::npos;
       // The request identity is a lowercase UUID, as every other Spaces job takes.
-      if (!space || !runtime || !profiles::valid_first_steam_request({request.request_id, "Move"})) return std::nullopt;
+      if (!space || !runtime || !profiles::valid_first_space_request({request.request_id, "Move"})) return std::nullopt;
       return request;
     } catch (...) { return std::nullopt; }
   }

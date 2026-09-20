@@ -67,11 +67,11 @@ namespace multiseat::spaces {
     }
     bool valid_request(const setup_request_t &r) {
       if (r.operation == "activate") return r.runtime_id.empty() && r.name.empty() && valid_gpu(r.gpu_id) &&
-        profiles::valid_first_steam_request({r.request_id, "Activate"});
+        profiles::valid_first_space_request({r.request_id, "Activate"});
       if (!r.gpu_id.empty()) return false;
       if (r.operation == "download") return r.name.empty() && valid_runtime_id(r.runtime_id) &&
-        profiles::valid_first_steam_request({r.request_id, "Download"});
-      if (!profiles::valid_first_steam_request({r.request_id, r.operation == "cancel" ? "Cancel" : r.name})) return false;
+        profiles::valid_first_space_request({r.request_id, "Download"});
+      if (!profiles::valid_first_space_request({r.request_id, r.operation == "cancel" ? "Cancel" : r.name})) return false;
       if (r.operation == "cancel") return r.runtime_id.empty() && r.name.empty();
       return r.operation == "start" && valid_runtime_id(r.runtime_id);
     }
@@ -425,7 +425,12 @@ namespace multiseat::spaces {
         },
         .prepare = [path = directory / "spaces-profiles.json"](const auto &request, std::string_view image, std::stop_token stop) {
           container::local_host_t host(stop);
-          return static_cast<bool>(profiles::create_first_steam(path, request, image, host));
+          // The family is the one the admitted runtime was built for, read from
+          // the compiled catalog rather than taken from the request.
+          const auto &catalog = trusted_runtimes();
+          if (!catalog) return false;
+          return static_cast<bool>(profiles::create_first_space(path, request, image,
+            runtime_profile_for_image(image, *catalog), host));
         },
         .graphics = graphics_choices,
         .activate = [directory](const auto &request, const auto &runtime, auto gpu, auto stop) {

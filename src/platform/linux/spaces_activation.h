@@ -24,7 +24,7 @@ namespace multiseat::spaces {
   // Final native-config replacement is the activation commit point. Earlier
   // private files are inert, immutable on retry, and never start a controller.
   bool configure_first_space(const activation_paths_t &paths,
-    const profiles::first_steam_request_t &request, std::string_view image,
+    const profiles::first_space_request_t &request, std::string_view image,
     const graphics_t &graphics, std::string_view selinux_type,
     container::host_t &host);
   struct managed_controller_t {
@@ -39,7 +39,7 @@ namespace multiseat::spaces {
     const graphics_roots_t &roots = {});
   bool prepare_managed_ipc(const activation_paths_t &paths);
   bool activate_first_space(const std::filesystem::path &directory,
-    const profiles::first_steam_request_t &request, const runtime_t &runtime,
+    const profiles::first_space_request_t &request, const runtime_t &runtime,
     std::string_view gpu_id, std::stop_token stop);
 }
 #endif

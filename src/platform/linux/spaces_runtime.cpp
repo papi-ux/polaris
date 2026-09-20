@@ -158,6 +158,13 @@ namespace multiseat::spaces {
     });
   }
 
+  std::string_view runtime_profile_for_image(std::string_view image, const std::vector<runtime_t> &catalog) {
+    if (image.empty()) return {};
+    const auto entry = std::find_if(catalog.begin(), catalog.end(),
+      [&](const auto &runtime) { return runtime.matches_image_id(image); });
+    return entry == catalog.end() ? std::string_view {} : std::string_view {entry->profile};
+  }
+
   bool matches_runtime_image(const runtime_t &runtime, std::string_view inspection) {
     return verified_runtime_image(runtime, inspection).has_value();
   }
@@ -224,7 +231,8 @@ namespace multiseat::spaces {
           {"code", runtime.code}, {"message", runtime.message}}).dump() << '\n';
         return 1;
       }
-      const auto result = profiles::create_first_steam(argv[1], {argv[3], argv[4]}, runtime.image, host);
+      const auto result = profiles::create_first_space(argv[1], {argv[3], argv[4]}, runtime.image,
+        runtime_profile_for_image(runtime.image, *catalog), host);
       std::cout << json({{"prepared", static_cast<bool>(result)}, {"activated", false},
         {"profile_id", result.profile_key}, {"volume", result.volume_name},
         {"initializer", result.initializer_name}, {"network", result.network_name},

@@ -56,6 +56,30 @@ namespace multiseat::profiles {
       return request_uuid(request_id);
     }
 
+    /**
+     * A launcher family by name, without throwing: a family this build does not
+     * carry reads as unknown and refuses, rather than aborting a transaction.
+     */
+    runtime_profile_e launcher_family(std::string_view value) {
+      if (value == "steam") return runtime_profile_e::steam;
+      if (value == "heroic") return runtime_profile_e::heroic;
+      if (value == "lutris") return runtime_profile_e::lutris;
+      return runtime_profile_e::unknown;
+    }
+
+    /**
+     * The workload a Space opens when it is made: its launcher, never a title.
+     * The target comes from the one grammar that defines a family's sentinel.
+     */
+    workload_plan_t launcher_workload(runtime_profile_e profile) {
+      switch (profile) {
+        case runtime_profile_e::steam: return {workload_kind_e::steam, std::string(container::launcher_sentinel(profile))};
+        case runtime_profile_e::heroic: return {workload_kind_e::heroic, std::string(container::launcher_sentinel(profile))};
+        case runtime_profile_e::lutris: return {workload_kind_e::lutris, std::string(container::launcher_sentinel(profile))};
+        default: return {};
+      }
+    }
+
     std::string family(runtime_profile_e value) {
       switch (value) {
         case runtime_profile_e::gamescope: return "gamescope";
@@ -513,12 +537,12 @@ namespace multiseat::profiles {
     });
   }
 
-  bool valid_steam_create_request(const steam_create_request_t &request) {
+  bool valid_space_create_request(const space_create_request_t &request) {
     return valid_new_steam(request.request_id, request.name) && token(request.source_profile_id) &&
       request.request_id != request.source_profile_id;
   }
 
-  std::optional<steam_create_request_t> decode_steam_create_request(std::string_view payload) {
+  std::optional<space_create_request_t> decode_space_create_request(std::string_view payload) {
     if (payload.empty() || payload.size() > 4096) return std::nullopt;
     try {
       std::set<std::string> names;
@@ -529,31 +553,37 @@ namespace multiseat::profiles {
         return true;
       });
       keys(body, {"request_id", "source_profile_id", "name"});
-      steam_create_request_t request {body.at("request_id").get<std::string>(),
+      space_create_request_t request {body.at("request_id").get<std::string>(),
         body.at("source_profile_id").get<std::string>(), body.at("name").get<std::string>()};
-      return valid_steam_create_request(request) ? std::optional {std::move(request)} : std::nullopt;
+      return valid_space_create_request(request) ? std::optional {std::move(request)} : std::nullopt;
     } catch (...) { return std::nullopt; }
   }
 
-  change_result_t create_steam(const std::filesystem::path &path,
-                             const steam_create_request_t &request, container::host_t &host) {
-    if (!valid_steam_create_request(request)) return {.error = "Invalid Steam profile creation request."};
+  change_result_t create_space(const std::filesystem::path &path,
+                             const space_create_request_t &request, container::host_t &host) {
+    if (!valid_space_create_request(request)) return {.error = "Invalid Space creation request."};
     return change(path, [&](auto &catalog, auto &result) -> std::optional<std::string> {
       if (catalog.owner_uid != host.effective_uid() || catalog.owner_gid != host.effective_gid() ||
           host.effective_uid() != 1000 || host.effective_gid() != 1000) {
-        result.error = "Current Steam runtime images require the catalog and service identity to be 1000:1000.";
+        result.error = "Current Spaces runtime images require the catalog and service identity to be 1000:1000.";
         return std::nullopt;
       }
       const auto source = std::find_if(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &entry) {
         return entry.storage.profile_key == request.source_profile_id;
       });
-      if (source == catalog.profiles.end() || source->storage.runtime_profile != runtime_profile_e::steam ||
+      // A new Space is the same kind of Space as the one it is based on: the
+      // family decides which launcher the image carries and which library is
+      // read, so it is inherited rather than chosen on the wire.
+      const auto workload = source == catalog.profiles.end() ?
+        workload_plan_t {} : launcher_workload(source->storage.runtime_profile);
+      if (source == catalog.profiles.end() || workload.kind == workload_kind_e::unknown ||
           !container::supported_streaming_workload(source->storage.runtime_profile, source->workload)) {
-        result.error = "Select an existing configured Steam profile."; return std::nullopt;
+        result.error = "Select an existing configured Space."; return std::nullopt;
       }
       const entry_t entry {
-        .storage = {request.request_id, "pv-" + request.request_id, runtime_profile_e::steam, source->storage.image_reference},
-        .name = request.name, .workload = {workload_kind_e::steam, "big-picture-v1"}, .client_keys = {},
+        .storage = {request.request_id, "pv-" + request.request_id, source->storage.runtime_profile,
+                    source->storage.image_reference},
+        .name = request.name, .workload = workload, .client_keys = {},
       };
       const auto existing = std::find_if(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &value) {
         return value.storage.profile_key == request.request_id;
@@ -561,7 +591,7 @@ namespace multiseat::profiles {
       if (existing != catalog.profiles.end()) {
         if (existing->name != entry.name || existing->storage.image_reference != entry.storage.image_reference ||
             existing->storage.opaque_volume_name != entry.storage.opaque_volume_name ||
-            existing->storage.runtime_profile != runtime_profile_e::steam || existing->workload != entry.workload) {
+            existing->storage.runtime_profile != entry.storage.runtime_profile || existing->workload != entry.workload) {
           result.error = "This creation request already identifies a different profile."; return std::nullopt;
         }
         result.profile_key = request.request_id;
@@ -575,16 +605,19 @@ namespace multiseat::profiles {
     });
   }
 
-  bool valid_first_steam_request(const first_steam_request_t &request) {
+  bool valid_first_space_request(const first_space_request_t &request) {
     return valid_new_steam(request.request_id, request.name);
   }
 
-  change_result_t create_first_steam(const std::filesystem::path &path,
-    const first_steam_request_t &request, std::string_view image, container::host_t &host) {
-    if (!valid_new_steam(request.request_id, request.name) || !image_id(image))
-      return {.error = "Invalid first-space request or runtime identity."};
+  change_result_t create_first_space(const std::filesystem::path &path,
+    const first_space_request_t &request, std::string_view image, std::string_view profile,
+    container::host_t &host) {
+    const auto workload = launcher_workload(launcher_family(profile));
+    if (!valid_new_steam(request.request_id, request.name) || !image_id(image) ||
+        workload.kind == workload_kind_e::unknown)
+      return {.error = "Invalid first-space request, runtime identity or launcher family."};
     if (host.effective_uid() != 1000 || host.effective_gid() != 1000)
-      return {.error = "The current Steam runtime requires service identity 1000:1000. Do not change your Linux user ID."};
+      return {.error = "The current Spaces runtimes require service identity 1000:1000. Do not change your Linux user ID."};
     change_result_t result;
     try {
       result.status = private_state_file::update_atomic(path, maximum_catalog_bytes,
@@ -596,8 +629,8 @@ namespace multiseat::profiles {
             return std::nullopt;
           }
           const entry_t entry {
-            .storage = {request.request_id, "pv-" + request.request_id, runtime_profile_e::steam, std::string(image)},
-            .name = request.name, .workload = {workload_kind_e::steam, "big-picture-v1"}, .client_keys = {},
+            .storage = {request.request_id, "pv-" + request.request_id, launcher_family(profile), std::string(image)},
+            .name = request.name, .workload = workload, .client_keys = {},
           };
           const auto existing = std::find_if(catalog->profiles.begin(), catalog->profiles.end(), [&](const auto &value) {
             return value.storage.profile_key == request.request_id;

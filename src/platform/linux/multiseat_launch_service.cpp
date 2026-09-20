@@ -307,7 +307,7 @@ namespace multiseat {
     struct admin_request_t {
       std::string profile, client;
       std::optional<bool> access;
-      std::optional<profiles::steam_create_request_t> creation;
+      std::optional<profiles::space_create_request_t> creation;
       std::optional<profiles::edit_request_t> edit;
       std::optional<profiles::runtime_move_t> move;
       std::string kept_volume, kept_network;  // set by the owner thread before the promise
@@ -427,7 +427,7 @@ namespace multiseat {
       if (!admin.create && !admin.catalog.empty())
         admin.create = [path = admin.catalog](const auto &request) {
           container::local_host_t host;
-          return profiles::create_steam(path, request, host);
+          return profiles::create_space(path, request, host);
         };
       if (!admin.edit && !admin.catalog.empty())
         admin.edit = [path = admin.catalog](const auto &request) { return profiles::edit(path, request); };
@@ -1015,8 +1015,8 @@ namespace multiseat {
     return future.get();
   }
 
-  profile_launch_result_t profile_launch_service_t::create_steam_profile(profiles::steam_create_request_t creation) {
-    if (!profiles::valid_steam_create_request(creation)) return {400, "Enter a valid Space name and Steam setup.", "invalid_request"};
+  profile_launch_result_t profile_launch_service_t::create_space_profile(profiles::space_create_request_t creation) {
+    if (!profiles::valid_space_create_request(creation)) return {400, "Enter a valid Space name and Steam setup.", "invalid_request"};
     if (spaces::host_admin_running()) return spaces_host_setup_running_result;
     std::shared_ptr<impl_t::admin_request_t> request;
     {

@@ -89,26 +89,29 @@ namespace multiseat::profiles {
   [[nodiscard]] change_result_t create(const std::filesystem::path &path,
     std::string_view name, std::string_view image, container::host_t &host,
     const workload_plan_t &workload = {workload_kind_e::gamescope, "input-pong-v1"});
-  struct steam_create_request_t {
+  struct space_create_request_t {
     std::string request_id, source_profile_id, name;
-    bool operator==(const steam_create_request_t &) const = default;
+    bool operator==(const space_create_request_t &) const = default;
   };
-  [[nodiscard]] bool valid_steam_create_request(const steam_create_request_t &request);
-  [[nodiscard]] std::optional<steam_create_request_t> decode_steam_create_request(std::string_view payload);
+  [[nodiscard]] bool valid_space_create_request(const space_create_request_t &request);
+  [[nodiscard]] std::optional<space_create_request_t> decode_space_create_request(std::string_view payload);
   // Request identity also names the new profile. Retrying the same request can
   // confirm its existing catalog entry but never copies or adopts another home.
-  [[nodiscard]] change_result_t create_steam(const std::filesystem::path &path,
-    const steam_create_request_t &request, container::host_t &host);
-  struct first_steam_request_t {
+  [[nodiscard]] change_result_t create_space(const std::filesystem::path &path,
+    const space_create_request_t &request, container::host_t &host);
+  struct first_space_request_t {
     std::string request_id, name;
   };
-  [[nodiscard]] bool valid_first_steam_request(const first_steam_request_t &request);
+  [[nodiscard]] bool valid_first_space_request(const first_space_request_t &request);
   // First-space storage transaction. Only a missing or empty private catalog
   // can gain its first entry. Matching retries preserve assignments and homes.
   // The caller must obtain image from the approved runtime installer; this does
   // not select a GPU, assign a device, configure or activate the controller.
-  [[nodiscard]] change_result_t create_first_steam(const std::filesystem::path &path,
-    const first_steam_request_t &request, std::string_view image, container::host_t &host);
+  // `profile` is the launcher family of the admitted runtime that image is, so
+  // a first Heroic Space is made the same way a first Steam one is.
+  [[nodiscard]] change_result_t create_first_space(const std::filesystem::path &path,
+    const first_space_request_t &request, std::string_view image, std::string_view profile,
+    container::host_t &host);
   // remove archives a Space and keeps its home; remove_for_good deletes both.
   enum class edit_operation_e { rename, remove, restore, remove_for_good };
   struct edit_request_t {
