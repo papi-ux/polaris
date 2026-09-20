@@ -3161,4 +3161,134 @@ TEST(MultiseatDockerBackend, FailedLaunchReconcilesOnlyTheMatchingVerifiedWorker
   EXPECT_EQ(backend.launch(spec), worker_command_result_e::already_applied);
 }
 
+namespace {
+  // A host-driver runtime: the image carries no NVIDIA userspace, so profile
+  // alpha borrows this machine's at the paths the loader resolves them by.
+  options_t host_driver_options_for_tests() {
+    auto options = docker_options_for_tests();
+    options.profiles.front().host_driver_libraries = true;
+    options.host_driver = {
+      .driver_version = "615.71.09",
+      .contract = 1,
+      .mounts = {
+        {"/usr/lib/x86_64-linux-gnu/libcuda.so.1", "/usr/lib64/libcuda.so.615.71.09"},
+        {"/usr/lib/i386-linux-gnu/libcuda.so.1", "/usr/lib/libcuda.so.615.71.09"},
+        {"/usr/share/vulkan/icd.d/nvidia_icd.json",
+         "/home/operator/.config/polaris/spaces-graphics/615.71.09/nvidia_icd.json"},
+      },
+    };
+    return options;
+  }
+
+  json host_driver_container_for(const worker_launch_spec_t &spec, const std::string &id) {
+    auto record = docker_container_for(spec, id);
+    for (const auto &mount : host_driver_options_for_tests().host_driver.mounts)
+      record["Mounts"].push_back({{"Type", "bind"}, {"RW", false}, {"Source", mount.host_path.native()},
+        {"Destination", mount.destination}, {"Propagation", "rprivate"}});
+    return record;
+  }
+}
+
+TEST(MultiseatDockerBackend, PublishesBorrowedDriverFilesReadOnlyAtTheirContainerPaths) {
+  fake_host_t host;
+  backend_t backend {host, input_manifests_for_tests(), host_driver_options_for_tests()};
+  host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+  host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+  host.push({.exit_status = 0, .output = std::string {first_id} + "\n"});
+
+  ASSERT_EQ(backend.launch(valid_spec()), worker_command_result_e::applied);
+  const auto &argv = host.calls.back();
+
+  EXPECT_TRUE(has_argument(argv,
+    "--mount=type=bind,src=/usr/lib64/libcuda.so.615.71.09,dst=/usr/lib/x86_64-linux-gnu/libcuda.so.1,ro=true"));
+  EXPECT_TRUE(has_argument(argv,
+    "--mount=type=bind,src=/usr/lib/libcuda.so.615.71.09,dst=/usr/lib/i386-linux-gnu/libcuda.so.1,ro=true"));
+  EXPECT_TRUE(has_argument(argv,
+    "--mount=type=bind,src=/home/operator/.config/polaris/spaces-graphics/615.71.09/nvidia_icd.json,"
+    "dst=/usr/share/vulkan/icd.d/nvidia_icd.json,ro=true"));
+  // A borrowed file is never relabelled: its source is the host's own /usr,
+  // and SELinux policy grants the read instead. Polaris's own directories
+  // still carry ,Z, so only the driver mounts are checked here.
+  for (const auto &argument : argv) {
+    if (argument.find("/usr/lib64/") == std::string::npos &&
+        argument.find("/spaces-graphics/") == std::string::npos &&
+        argument.find("/usr/lib/libcuda") == std::string::npos) continue;
+    EXPECT_EQ(argument.find(",z"), std::string::npos) << argument;
+    EXPECT_EQ(argument.find(",Z"), std::string::npos) << argument;
+  }
+}
+
+TEST(MultiseatDockerBackend, GivesNoBorrowedDriverFilesToARuntimeThatCarriesItsOwn) {
+  auto options = host_driver_options_for_tests();
+  options.profiles.front().host_driver_libraries = false;
+  fake_host_t host;
+  backend_t backend {host, input_manifests_for_tests(), options};
+  host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+  host.push({.exit_status = 0, .output = docker_volume_for_tests().dump()});
+  host.push({.exit_status = 0, .output = std::string {first_id} + "\n"});
+
+  ASSERT_EQ(backend.launch(valid_spec()), worker_command_result_e::applied);
+  const auto &argv = host.calls.back();
+
+  for (const auto &argument : argv)
+    EXPECT_EQ(argument.find("libcuda.so"), std::string::npos) << argument;
+}
+
+TEST(MultiseatDockerBackend, AcceptsAContainerCarryingExactlyTheBorrowedDriverFiles) {
+  fake_host_t host;
+  backend_t backend {host, input_manifests_for_tests(), host_driver_options_for_tests()};
+  queue_docker_inventory(host, {host_driver_container_for(valid_spec(), first_id)});
+
+  EXPECT_NO_THROW(backend.inventory());
+}
+
+TEST(MultiseatDockerBackend, RejectsAnInjectedMissingWritableOrRepointedDriverFile) {
+  const std::vector<std::function<void(json &)>> mutations {
+    // An extra driver-shaped bind nobody asked for.
+    [](auto &r) { r["Mounts"].push_back({{"Type", "bind"}, {"RW", false},
+      {"Source", "/tmp/libnvidia-evil.so.1"}, {"Destination", "/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1"},
+      {"Propagation", "rprivate"}}); },
+    // One of ours missing.
+    [](auto &r) { r["Mounts"].erase(r["Mounts"].size() - 1); },
+    // Ours, but writable.
+    [](auto &r) { r["Mounts"][r["Mounts"].size() - 1]["RW"] = true; },
+    // Ours, pointed at a different file in the container.
+    [](auto &r) { r["Mounts"][r["Mounts"].size() - 3]["Destination"] = "/usr/lib/x86_64-linux-gnu/libc.so.6"; },
+    // Ours, but sourced from somewhere else on the host.
+    [](auto &r) { r["Mounts"][r["Mounts"].size() - 3]["Source"] = "/tmp/libcuda.so.1"; },
+    // Ours, with propagation that would let the host change it underneath.
+    [](auto &r) { r["Mounts"][r["Mounts"].size() - 3]["Propagation"] = "rshared"; },
+  };
+  for (std::size_t index = 0; index < mutations.size(); ++index) {
+    SCOPED_TRACE(index);
+    fake_host_t host;
+    backend_t backend {host, input_manifests_for_tests(), host_driver_options_for_tests()};
+    auto record = host_driver_container_for(valid_spec(), first_id);
+    mutations[index](record);
+    queue_docker_inventory(host, {record});
+    EXPECT_THROW(backend.inventory(), std::runtime_error);
+  }
+}
+
+TEST(MultiseatDockerBackend, RefusesHostDriverOptionsThatEscapeTheLoaderDirectories) {
+  const std::vector<std::function<void(options_t &)>> mutations {
+    [](auto &o) { o.host_driver.mounts.front().destination = "/var/lib/polaris-seat/libcuda.so.1"; },
+    [](auto &o) { o.host_driver.mounts.front().destination = "/mnt/games/library-a"; },
+    [](auto &o) { o.host_driver.mounts.front().destination = "/usr/lib/x86_64-linux-gnu/nested/libcuda.so.1"; },
+    [](auto &o) { o.host_driver.mounts.front().host_path = "usr/lib64/libcuda.so.1"; },
+    [](auto &o) { o.host_driver.mounts.push_back(o.host_driver.mounts.front()); },
+    [](auto &o) { o.host_driver.driver_version.clear(); },
+    [](auto &o) { o.host_driver.contract = 2; },
+    [](auto &o) { o.engine = multiseat::container::engine_e::podman; },
+    [](auto &o) { o.host_driver.mounts.clear(); },
+  };
+  for (std::size_t index = 0; index < mutations.size(); ++index) {
+    SCOPED_TRACE(index);
+    fake_host_t host;
+    auto options = host_driver_options_for_tests();
+    mutations[index](options);
+    EXPECT_THROW((backend_t {host, input_manifests_for_tests(), options}), std::invalid_argument);
+  }
+}
+
 #endif

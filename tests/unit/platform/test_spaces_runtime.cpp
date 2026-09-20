@@ -14,9 +14,10 @@ namespace {
     return {{"id", "steam-test"}, {"profile", "steam"}, {"variant", "default"},
       {"platform", "linux/amd64"}, {"media_contract", 1}, {"uid", 1000}, {"gid", 1000},
       {"source_revision", std::string(40, 'a')}, {"registry_digest", "sha256:" + std::string(64, 'b')},
-      {"config_digest", "sha256:" + std::string(64, 'c')}, {"nvidia_driver", ""}};
+      {"config_digest", "sha256:" + std::string(64, 'c')}, {"nvidia_driver", ""},
+      {"nvidia_minimum_driver", ""}};
   }
-  std::string catalog(json entries) { return json({{"schema", 1}, {"runtimes", entries}}).dump(); }
+  std::string catalog(json entries) { return json({{"schema", 2}, {"runtimes", entries}}).dump(); }
   spaces::runtime_t runtime() { return spaces::decode_runtime_catalog(catalog(json::array({entry()})))->front(); }
   json inspected(const spaces::runtime_t &r) {
     return json::array({{{"Id", r.config_digest}, {"Os", "linux"}, {"Architecture", "amd64"},
@@ -74,19 +75,31 @@ TEST(SpacesRuntime, CatalogIsBoundedAndRejectsIncompatibleOrAmbiguousEntries) {
       {"profile", "heroic"}, {"platform", "linux/arm64"}, {"media_contract", 2}, {"media_contract", true},
       {"uid", 1001}, {"gid", 0}, {"id", "--all"}, {"id", "../steam"}, {"variant", "other"},
       {"source_revision", "main"}, {"registry_digest", "latest"}, {"config_digest", "sha256:no"},
-      {"nvidia_driver", "610.57.04"}, {"url", "https://untrusted.invalid/image"}}) {
+      {"nvidia_driver", "610.57.04"}, {"url", "https://untrusted.invalid/image"},
+      {"nvidia_minimum_driver", "570.00"}}) {
     auto e = entry(); e[key] = value;
     EXPECT_FALSE(spaces::decode_runtime_catalog(catalog(json::array({e})))) << key;
   }
   auto duplicate = catalog(json::array({entry(), entry()}));
   EXPECT_FALSE(spaces::decode_runtime_catalog(duplicate));
   auto text = catalog(json::array({entry()}));
-  text.insert(1, "\"schema\":1,");
+  text.insert(1, "\"schema\":2,");
   EXPECT_FALSE(spaces::decode_runtime_catalog(text));
   EXPECT_FALSE(spaces::decode_runtime_catalog(std::string(65537, ' ')));
-  EXPECT_FALSE(spaces::decode_runtime_catalog(R"({"schema":1.0,"runtimes":[]})"));
+  EXPECT_FALSE(spaces::decode_runtime_catalog(R"({"schema":2.0,"runtimes":[]})"));
+  EXPECT_FALSE(spaces::decode_runtime_catalog(R"({"schema":1,"runtimes":[]})")) << "the old shape is not accepted";
   auto nvidia = entry(); nvidia["variant"] = "nvidia"; nvidia["nvidia_driver"] = "610.57.04";
   ASSERT_TRUE(spaces::decode_runtime_catalog(catalog(json::array({nvidia}))));
+  // A host-driver runtime carries no driver of its own and names its floor.
+  auto host_driver = entry();
+  host_driver["variant"] = "nvidia-host";
+  host_driver["nvidia_minimum_driver"] = "570.00";
+  ASSERT_TRUE(spaces::decode_runtime_catalog(catalog(json::array({host_driver}))));
+  for (const auto &[key, value] : std::vector<std::pair<std::string, json>> {
+      {"nvidia_driver", "615.71.09"}, {"nvidia_minimum_driver", ""}, {"nvidia_minimum_driver", "570"}}) {
+    auto broken = host_driver; broken[key] = value;
+    EXPECT_FALSE(spaces::decode_runtime_catalog(catalog(json::array({broken})))) << key;
+  }
 }
 
 TEST(SpacesRuntime, UnknownOrUntrustedDownloadsCannotReachDocker) {

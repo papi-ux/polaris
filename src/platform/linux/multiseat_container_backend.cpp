@@ -63,6 +63,24 @@ namespace multiseat::container {
     constexpr auto podman_init_destination = "/run/podman-init"sv;
     constexpr auto profile_volume_destination = "/var/lib/polaris-seat"sv;
     constexpr auto shared_game_mount_root = "/mnt/games/"sv;
+    // Where a borrowed driver file may land: the two loader directories and the
+    // vendor descriptions beside them. Nothing else in the image is writable
+    // over, and a Space's own home, sockets and game shares are elsewhere.
+    constexpr auto host_driver_amd64_root = "/usr/lib/x86_64-linux-gnu/"sv;
+    constexpr auto host_driver_i386_root = "/usr/lib/i386-linux-gnu/"sv;
+    constexpr auto host_driver_share_root = "/usr/share/"sv;
+    constexpr std::size_t maximum_host_driver_mounts = 128;
+    /**
+     * A library lands directly in its loader directory; a vendor description
+     * lands under /usr/share in the directory its loader reads.
+     */
+    bool mount_destination_within(
+      const std::filesystem::path &destination, std::string_view prefix, bool allow_subdirectories
+    ) {
+      const auto &text = destination.native();
+      if (!text.starts_with(prefix) || text.size() <= prefix.size()) return false;
+      return allow_subdirectories || text.find('/', prefix.size()) == std::string::npos;
+    }
     constexpr std::size_t maximum_inspected_devices =
       input::maximum_input_allocations + 64;
     constexpr std::size_t maximum_runtime_spec_mounts =
@@ -674,6 +692,33 @@ namespace multiseat::container {
             !mount_paths.emplace(mount.host_path.native()).second) {
           throw std::invalid_argument {"container game mounts are invalid"};
         }
+      }
+
+      const auto &driver = options.host_driver;
+      if (!driver.mounts.empty()) {
+        // Borrowed driver files land in the loader's own directories, and
+        // nowhere a Space keeps its home, its sockets or a game share.
+        if (options.engine != engine_e::docker || driver.driver_version.empty() || driver.contract != 1 ||
+            driver.mounts.size() > maximum_host_driver_mounts) {
+          throw std::invalid_argument {"host driver options are invalid"};
+        }
+        std::unordered_set<std::string> destinations;
+        for (const auto &mount : driver.mounts) {
+          const std::filesystem::path destination {mount.destination};
+          const auto library_of = [&destination](std::string_view prefix) {
+            return mount_destination_within(destination, prefix, false);
+          };
+          if (!safe_path(mount.host_path) || !safe_path(destination) ||
+              !(library_of(host_driver_amd64_root) || library_of(host_driver_i386_root) ||
+                mount_destination_within(destination, host_driver_share_root, true)) ||
+              !destinations.emplace(mount.destination).second ||
+              !mount_paths.emplace(mount.host_path.native()).second) {
+            throw std::invalid_argument {"host driver mounts are invalid"};
+          }
+        }
+      } else if (std::any_of(options.profiles.begin(), options.profiles.end(),
+                   [](const auto &profile) { return profile.host_driver_libraries; })) {
+        throw std::invalid_argument {"host driver runtime has no driver files"};
       }
     }
   }  // namespace
@@ -1620,6 +1665,18 @@ namespace multiseat::container {
         ",dst=" + std::string {shared_game_mount_root} + mount.mount_name + ",ro=true"
       );
     }
+    if (profile.host_driver_libraries) {
+      // A runtime built without driver libraries of its own borrows this
+      // machine's, read only and at the paths the loader resolves them by.
+      // Deliberately unlabelled: relabelling the host's own /usr would damage
+      // the host, so SELinux policy grants the read instead.
+      for (const auto &mount : options_.host_driver.mounts) {
+        argv.push_back(
+          "--mount=type=bind,src=" + mount.host_path.native() +
+          ",dst=" + mount.destination + ",ro=true"
+        );
+      }
+    }
 
     argv.push_back("--entrypoint=" + options_.worker_entrypoint.native());
     argv.push_back(profile.image_reference);
@@ -2123,6 +2180,22 @@ namespace multiseat::container {
                 "ro",
               }
             );
+          }
+          const auto driver_profile = std::find_if(
+            options_.profiles.begin(),
+            options_.profiles.end(),
+            [&volume](const auto &candidate) { return candidate.opaque_volume_name == *volume; }
+          );
+          if (driver_profile != options_.profiles.end() && driver_profile->host_driver_libraries) {
+            // Borrowed driver files are part of the expected set, so the count
+            // check and the one-for-one comparison below keep holding: an
+            // injected or re-pointed driver bind is still a rejected container.
+            for (const auto &mount : options_.host_driver.mounts) {
+              expectations.controller_binds.emplace(
+                mount.host_path.native(),
+                expected_bind_t {mount.destination, "ro"}
+              );
+            }
           }
           std::vector<declared_device_binding_t> declared;
           if (options_.engine == engine_e::docker) {
