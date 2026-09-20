@@ -46,7 +46,10 @@ def materialized_context(revision, profile_id, nvidia):
         context = pathlib.Path(temporary)
         archive_path = context / 'source.tar'
         with archive_path.open('wb') as stream:
-            run(['git', 'archive', revision, 'LICENSE', 'multiseat_worker', 'containers/multiseat'], stdout=stream)
+            # The worker's own tests run inside this build, and one of them
+            # reads the target grammar both languages are pinned to.
+            run(['git', 'archive', revision, 'LICENSE', 'multiseat_worker', 'containers/multiseat',
+                 'tests/fixtures/launcher-targets.json'], stdout=stream)
         with tarfile.open(archive_path) as archive:
             for member in archive.getmembers():
                 name = pathlib.PurePosixPath(member.name)

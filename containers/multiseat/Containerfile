@@ -167,6 +167,10 @@ COPY multiseat_worker/go.mod ./go.mod
 COPY multiseat_worker/*.go ./
 COPY multiseat_worker/internal ./internal
 COPY multiseat_worker/cmd ./cmd
+# The cross-language target grammar, at the path the worker's test reads it by,
+# three levels above the module. Without it the test cannot run here, and this
+# build is where the worker's tests run.
+COPY tests/fixtures/launcher-targets.json /tests/fixtures/launcher-targets.json
 COPY containers/multiseat/Containerfile /containers/multiseat/Containerfile
 COPY containers/multiseat/images.lock.json /containers/multiseat/images.lock.json
 COPY containers/multiseat/locks /containers/multiseat/locks
