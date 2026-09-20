@@ -897,7 +897,7 @@ namespace multiseat::container {
   ) const {
     auto argv = command_prefix(options_);
     std::string network = "none";
-    if (options_.media_enabled && profile.runtime_profile == runtime_profile_e::steam) {
+    if (options_.media_enabled && needs_profile_network(profile.runtime_profile)) {
       const auto id = profile_network_id(host_, profile.profile_key, true);
       if (!id) throw std::runtime_error {"Steam profile network is unavailable or occupied"};
       network = *id;
@@ -931,7 +931,7 @@ namespace multiseat::container {
     if (!options_.selinux_type.empty()) {
       argv.push_back("--security-opt=label=type:" + options_.selinux_type);
     }
-    if (options_.media_enabled && profile.runtime_profile == runtime_profile_e::steam) {
+    if (options_.media_enabled && needs_profile_network(profile.runtime_profile)) {
       argv.push_back("--security-opt=seccomp=" + std::string(steam_seccomp_path));
     }
     for (const auto group : groups) argv.push_back("--group-add=" + std::to_string(group));
@@ -1006,7 +1006,7 @@ namespace multiseat::container {
         profile->image_reference != label_value(labels, label_runtime_image) ||
         runtime_profile_name(profile->runtime_profile) != label_value(labels, label_runtime_profile)) fail();
 
-    if (options_.media_enabled && profile->runtime_profile == runtime_profile_e::steam) {
+    if (options_.media_enabled && needs_profile_network(profile->runtime_profile)) {
       const auto id = profile_network_id(host_, profile->profile_key, false, record.at("Id").get<std::string>());
       if (!id) fail();
       exact(host, "NetworkMode", *id);
@@ -1534,9 +1534,12 @@ namespace multiseat::container {
     return gpu && profile &&
            spec.encoder_sessions <= gpu->max_encoder_sessions &&
            profile->runtime_profile == spec.runtime_profile &&
+           // A title from the Space's own library is admitted without being
+           // listed as a configured workload, but only through its family's
+           // grammar.
            (workload_allowed(spec.workload) ||
-            (profile->steam_library_enabled && profile->runtime_profile == runtime_profile_e::steam &&
-             spec.workload.kind == workload_kind_e::steam && valid_steam_target(spec.workload.target_id)));
+            (profile->library_enabled &&
+             supported_streaming_workload(profile->runtime_profile, spec.workload)));
   }
 
   std::vector<std::string> backend_t::launch_argv(

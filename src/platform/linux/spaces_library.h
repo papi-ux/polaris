@@ -30,6 +30,10 @@ namespace multiseat::spaces {
   // Reads only a validated profile volume using its immutable runtime image.
   // The helper has no network, devices, capabilities, or writable mounts.
   [[nodiscard]] library_t read_steam_library(container::host_t &host, const container::profile_t &profile);
+  /** Read a Space's own library, whichever launcher family it belongs to. */
+  [[nodiscard]] library_t read_profile_library(container::host_t &host, const container::profile_t &profile);
+  /** Families whose library Polaris can read from a Space's home. */
+  [[nodiscard]] bool has_library(runtime_profile_e profile);
   [[nodiscard]] std::string_view steam_library_scanner();
 }
 #endif

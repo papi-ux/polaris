@@ -26,13 +26,13 @@ namespace multiseat::spaces {
     auto cache = std::make_shared<cache_t>();
     return [profiles = std::move(profiles), factory = std::move(factory), cache](std::string_view id) -> library_t {
       const auto profile = std::find_if(profiles.begin(), profiles.end(), [&](const auto &p) { return p.profile_key == id; });
-      if (profile == profiles.end() || profile->runtime_profile != runtime_profile_e::steam) return {};
+      if (profile == profiles.end() || !has_library(profile->runtime_profile)) return {};
       std::lock_guard lock(cache->mutex);
       const auto now = std::chrono::steady_clock::now();
       auto &entry = cache->entries[std::string(id)];
       if (now - entry.first < std::chrono::seconds(15)) return entry.second;
       auto host = factory ? factory() : nullptr;
-      auto result = host ? read_steam_library(*host, *profile) : library_t{};
+      auto result = host ? read_profile_library(*host, *profile) : library_t{};
       entry = {std::chrono::steady_clock::now(), std::move(result)};
       return entry.second;
     };
@@ -165,9 +165,95 @@ print(json.dumps({'schema': 1, 'games': [{'target': k, 'name': v} for k,v in sor
 )PY";
   }
 
+  std::string_view heroic_library_scanner() {
+    return R"PY(import os, re, json, stat, signal
+signal.alarm(8)
+root = os.open('/profile', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+def directory(parts):
+    fd = os.dup(root)
+    try:
+        for part in parts:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+def read_json(fd, name):
+    f = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    try:
+        s = os.fstat(f)
+        if not stat.S_ISREG(s.st_mode) or s.st_size > 4194304: raise ValueError('store size')
+        with os.fdopen(os.dup(f), 'rb') as stream: data = stream.read(4194305)
+        if len(data) > 4194304: raise ValueError('store grew')
+        return json.loads(data.decode('utf-8'))
+    finally: os.close(f)
+name_pattern = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}')
+games = {}
+def remember(runner, app, title):
+    if not isinstance(app, str) or not name_pattern.fullmatch(app): return
+    if not isinstance(title, str) or not title or len(title.encode()) > 512: return
+    if any(ord(c) < 32 or ord(c) == 127 for c in title): return
+    games.setdefault(runner + '.' + app, title)
+# Heroic keeps one installed store per runner under its own configuration.
+# Read only those files: no path from them is followed, and an entry that is
+# not a plain identifier and a plain title is skipped rather than repaired.
+for parts, runner, key in [
+        (('.config','heroic','legendaryConfig','legendary'), 'epic', 'app_name'),
+        (('.config','heroic','gog_store'), 'gog', 'appName'),
+        (('.config','heroic','nile_config','nile'), 'amazon', 'app_name')]:
+    try: fd = directory(parts)
+    except (FileNotFoundError, NotADirectoryError, OSError): continue
+    try:
+        document = read_json(fd, 'installed.json')
+    except (OSError, ValueError, TypeError): 
+        os.close(fd); continue
+    os.close(fd)
+    entries = document.get('installed', document) if isinstance(document, dict) else document
+    if isinstance(entries, dict): entries = list(entries.values())
+    if not isinstance(entries, list): continue
+    if len(entries) > 4096: continue
+    for entry in entries:
+        if not isinstance(entry, dict): continue
+        remember(runner, entry.get(key), entry.get('title') or entry.get('name') or entry.get(key))
+        if len(games) > 4096: break
+try:
+    fd = directory(('.config','heroic','sideload_apps'))
+    try: document = read_json(fd, 'library.json')
+    finally: os.close(fd)
+    entries = document.get('games', []) if isinstance(document, dict) else []
+    if isinstance(entries, list) and len(entries) <= 4096:
+        for entry in entries:
+            if isinstance(entry, dict): remember('sideload', entry.get('app_name'), entry.get('title'))
+except (FileNotFoundError, NotADirectoryError, OSError, ValueError, TypeError): pass
+print(json.dumps({'schema': 1, 'games': [{'target': k, 'name': v} for k,v in sorted(games.items(), key=lambda kv: kv[1].casefold())]}))
+)PY";
+  }
+
+  namespace {
+    /** What a family's own image labels itself. */
+    std::string_view image_family(runtime_profile_e profile) {
+      switch (profile) {
+        case runtime_profile_e::steam: return "steam";
+        case runtime_profile_e::heroic: return "heroic";
+        case runtime_profile_e::lutris: return "lutris";
+        default: return {};
+      }
+    }
+  }  // namespace
+
+  bool has_library(runtime_profile_e profile) {
+    return profile == runtime_profile_e::steam || profile == runtime_profile_e::heroic;
+  }
+
   library_t read_steam_library(container::host_t &host, const container::profile_t &profile) {
+    return read_profile_library(host, profile);
+  }
+
+  library_t read_profile_library(container::host_t &host, const container::profile_t &profile) {
     try {
-      if (profile.runtime_profile != runtime_profile_e::steam || !token(profile.profile_key) ||
+      if (!has_library(profile.runtime_profile) || !token(profile.profile_key) ||
           !token(profile.opaque_volume_name) || !profile.opaque_volume_name.starts_with("pv-") ||
           profile.image_reference.size() != 71 || !profile.image_reference.starts_with("sha256:") ||
           profile.image_reference.substr(7).find_first_not_of("0123456789abcdef") != std::string::npos ||
@@ -194,7 +280,9 @@ print(json.dumps({'schema': 1, 'games': [{'target': k, 'name': v} for k,v in sor
           volume.at("Labels").at("io.polaris.multiseat.profile") != profile.profile_key) return {};
       const auto images = nlohmann::json::parse(run({"image", "inspect", profile.image_reference}));
       if (!images.is_array() || images.size() != 1 || images[0].at("Id") != profile.image_reference ||
-          images[0].at("Os") != "linux" || images[0].at("Config").at("Labels").at("io.polaris.multiseat.profile") != "steam" ||
+          images[0].at("Os") != "linux" ||
+          images[0].at("Config").at("Labels").at("io.polaris.multiseat.profile") !=
+            image_family(profile.runtime_profile) ||
           (images[0].at("Config").contains("Volumes") && !images[0].at("Config").at("Volumes").empty())) return {};
       return decode_library(run({"run", "--rm", "--pull=never", "--runtime=runc", "--network=none",
         "--name=polaris-library-" + uuid_util::uuid_t::generate().string(),
@@ -202,7 +290,9 @@ print(json.dumps({'schema': 1, 'games': [{'target': k, 'name': v} for k,v in sor
         "--userns=host", "--read-only", "--user=1000:1000", "--cap-drop=ALL",
         "--security-opt=no-new-privileges", "--pids-limit=16", "--memory=128m", "--cpus=0.5", "--no-healthcheck",
         "--mount=type=volume,src=" + profile.opaque_volume_name + ",dst=/profile,readonly,volume-nocopy",
-        "--entrypoint=/usr/bin/python3", profile.image_reference, "-I", "-c", std::string(steam_library_scanner())})).value_or(library_t{});
+        "--entrypoint=/usr/bin/python3", profile.image_reference, "-I", "-c",
+        std::string(profile.runtime_profile == runtime_profile_e::heroic ? heroic_library_scanner()
+                                                                        : steam_library_scanner())})).value_or(library_t{});
     } catch (...) { return {}; }
   }
 }

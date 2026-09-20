@@ -59,6 +59,11 @@ namespace multiseat::container {
     }
   }
 
+  bool needs_profile_network(runtime_profile_e profile) {
+    return profile == runtime_profile_e::steam || profile == runtime_profile_e::heroic ||
+      profile == runtime_profile_e::lutris;
+  }
+
   bool valid_launcher_target(runtime_profile_e profile, std::string_view target) {
     if (!target.empty() && target == launcher_sentinel(profile)) return true;
     switch (profile) {

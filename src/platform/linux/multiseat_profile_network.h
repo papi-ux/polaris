@@ -17,6 +17,12 @@ namespace multiseat::container {
   [[nodiscard]] bool valid_launcher_target(runtime_profile_e profile, std::string_view target);
   /** The sentinel that opens a family's launcher rather than a title. */
   [[nodiscard]] std::string_view launcher_sentinel(runtime_profile_e profile);
+  /**
+   * Whether a family needs the private bridge and the launcher sandbox policy.
+   * Every concrete launcher does: they all sign in, download and run games.
+   * Only the image's own test workload does not.
+   */
+  [[nodiscard]] bool needs_profile_network(runtime_profile_e profile);
   [[nodiscard]] bool supported_streaming_workload(runtime_profile_e profile, const workload_plan_t &workload);
   [[nodiscard]] std::string profile_network_name(std::string_view profile_key);
   // Persistent profile bridge with exact local policy and ownership label.
