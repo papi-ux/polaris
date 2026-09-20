@@ -226,7 +226,7 @@ TEST(SpacesNvidiaLibraries, ResolvesBothAbisAtTheirSonamesFromTheLoadedDriverDir
   EXPECT_EQ(soname_of(facts, "i386", "libGLX_nvidia.so.0"), (fixture.root / "usr/lib/libGLX_nvidia.so.615.71.09").string());
   EXPECT_EQ(facts.libraries.size(), 8U);
 
-  const auto mounts = spaces::host_driver_mounts(facts, "/var/lib/polaris/spaces-graphics");
+  const auto mounts = spaces::host_driver_mounts(fixture.contract, facts, "/var/lib/polaris/spaces-graphics");
   ASSERT_FALSE(mounts.empty());
   EXPECT_TRUE(std::any_of(mounts.begin(), mounts.end(), [](const auto &mount) {
     return mount.destination == "/usr/lib/x86_64-linux-gnu/libcuda.so.1";
@@ -325,7 +325,7 @@ TEST(SpacesNvidiaLibraries, RefusesADriverBelowTheContractMinimum) {
   const auto facts = fixture.resolve("560.35.03");
 
   EXPECT_EQ(facts.code, "driver_below_minimum");
-  EXPECT_TRUE(spaces::host_driver_mounts(facts, "/var/lib/polaris/spaces-graphics").empty());
+  EXPECT_TRUE(spaces::host_driver_mounts(fixture.contract, facts, "/var/lib/polaris/spaces-graphics").empty());
 }
 
 /**

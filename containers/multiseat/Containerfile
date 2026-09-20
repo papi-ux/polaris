@@ -72,6 +72,15 @@ RUN mkdir -p /out/steam-input && \
       done; \
     fi
 
+# Proves a borrowed driver loads for both ABIs, once, at worker start.
+RUN mkdir -p /out/graphics-check && \
+    for abi in 64 32; do \
+      suffix=; if test "$abi" = 32; then suffix=-32; fi; \
+      cc -m$abi -std=c11 -O2 -Wall -Wextra -Werror \
+        -ffile-prefix-map=/providers=. -Wl,--build-id=none \
+        /providers/graphics-check.c -o /out/graphics-check/graphics-check$suffix -ldl; \
+    done
+
 RUN mkdir -p /out && cc -std=c11 -O2 -Wall -Wextra -Werror \
       -ffile-prefix-map=/workloads=. -Wl,--build-id=none \
       /workloads/input-pong.c -o /out/input-pong-v1 \
@@ -321,7 +330,42 @@ RUN ldconfig && PYTHONDONTWRITEBYTECODE=1 python3 /check-nvidia-runtime.py --nvi
     rm /check-nvidia-runtime.py /nvidia_runtime.py
 LABEL io.polaris.multiseat.nvidia.driver="615.71.09"
 
+# The same layer without anything the reviewed contract lends from the machine.
+FROM runtime-root-build AS nvidia-userspace-host
+COPY containers/multiseat/locks/nvidia.json /nvidia.lock.json
+COPY containers/multiseat/package-nvidia.py /package-nvidia.py
+COPY containers/multiseat/nvidia_runtime.py /nvidia_runtime.py
+COPY containers/multiseat/nvidia-host-contract.json /nvidia-host-contract.json
+COPY build/runtime-inputs/NVIDIA-Linux-x86_64-615.71.09.run /nvidia.run
+RUN python3 /package-nvidia.py --host
+
+FROM worker-base AS worker-nvidia-host
+COPY --from=nvidia-userspace-host /nvidia-root/ /
+COPY --from=nvcodec-build /nvcodec-root/ /
+COPY --from=workload-build /out/graphics-check/ /usr/libexec/polaris-seat/
+COPY containers/multiseat/check-runtime.py /check-nvidia-runtime.py
+COPY containers/multiseat/nvidia_runtime.py /nvidia_runtime.py
+# The loader cache is rebuilt at start over the files the machine lends, so it
+# lives on a tmpfs the host mounts. Steam's pressure-vessel reads that cache to
+# find the graphics stack, including the libraries it only ever dlopens.
+RUN install -d -m 0755 /etc/polaris-ld /usr/share/glvnd/egl_vendor.d \
+      /usr/share/vulkan/icd.d /usr/share/vulkan/implicit_layer.d && \
+    ldconfig -C /etc/ld.so.cache.image && ln -sf /etc/polaris-ld/ld.so.cache /etc/ld.so.cache && \
+    PYTHONDONTWRITEBYTECODE=1 python3 /check-nvidia-runtime.py --nvidia-host && \
+    rm /check-nvidia-runtime.py /nvidia_runtime.py
+LABEL io.polaris.multiseat.nvidia.source="host" \
+      io.polaris.multiseat.nvidia.contract="1" \
+      io.polaris.multiseat.nvidia.minimum-driver="570.00"
+
 FROM worker-nvidia AS provider-nvidia-test
+RUN install -d -m 1777 /tmp/.X11-unix
+COPY --from=worker-build --chmod=0555 /out/provider-tests /usr/bin/provider-tests
+ENV POLARIS_TEST_REQUIRE_REAL_PROVIDERS=1 \
+    POLARIS_ENCODER_TEST_HELPER=/usr/libexec/polaris-seat/encode-media
+ENTRYPOINT ["/usr/bin/provider-tests"]
+CMD ["-test.v", "-test.run=TestReal|TestTwoReal", "-test.timeout=3m"]
+
+FROM worker-nvidia-host AS provider-nvidia-host-test
 RUN install -d -m 1777 /tmp/.X11-unix
 COPY --from=worker-build --chmod=0555 /out/provider-tests /usr/bin/provider-tests
 ENV POLARIS_TEST_REQUIRE_REAL_PROVIDERS=1 \

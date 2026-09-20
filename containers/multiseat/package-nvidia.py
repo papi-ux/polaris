@@ -6,7 +6,17 @@ import pathlib
 import re
 import shutil
 import subprocess
+import sys
 from nvidia_runtime import ARCHITECTURES, architectures, elf_identity, soname_valid
+
+# A host-driver layer ships only what the machine's own driver package does not
+# provide: the EGL platform libraries and their descriptions. Everything the
+# reviewed contract names is borrowed from the host at run time instead.
+host_driver = '--host' in sys.argv
+contract_prefixes = ()
+if host_driver:
+    contract = json.loads(pathlib.Path('/nvidia-host-contract.json').read_text())
+    contract_prefixes = tuple(contract['library_prefixes'])
 
 lock = json.loads(pathlib.Path('/nvidia.lock.json').read_text())
 archive = pathlib.Path('/nvidia.run')
@@ -56,9 +66,14 @@ for architecture in selected_architectures:
     origin = source if architecture == 'amd64' else source / '32'
     destination = root / 'usr/lib' / ARCHITECTURES[architecture][0]
     selected = [p for p in sorted(origin.iterdir()) if p.name.startswith(prefixes)]
-    for required in ['libcuda.so.', 'libEGL_nvidia.so.', 'libGLX_nvidia.so.', 'libnvidia-encode.so.']:
-        if not any(p.name.startswith(required) for p in selected):
-            raise ValueError('missing NVIDIA library: ' + required)
+    if host_driver:
+        selected = [p for p in selected if not p.name.startswith(contract_prefixes)]
+        if not selected:
+            raise ValueError('a host-driver layer still ships the EGL platform libraries')
+    else:
+        for required in ['libcuda.so.', 'libEGL_nvidia.so.', 'libGLX_nvidia.so.', 'libnvidia-encode.so.']:
+            if not any(p.name.startswith(required) for p in selected):
+                raise ValueError('missing NVIDIA library: ' + required)
     for path in selected:
         elf_identity(path, architecture)
         elf = subprocess.check_output(['readelf', '-d', str(path)], text=True)
@@ -69,6 +84,8 @@ for architecture in selected_architectures:
         if soname[1] != path.name:
             link_file(destination / soname[1], path.name)
     (destination / 'gbm').mkdir()
+    # The allocator is host-mounted in a host-driver layer, so this alias only
+    # resolves once a Space runs. It is recorded either way.
     link_file(destination / 'gbm/nvidia-drm_gbm.so', '../libnvidia-allocator.so.1')
 
 configurations = {
@@ -80,6 +97,11 @@ configurations = {
         '20_nvidia_xcb.json', '20_nvidia_xlib.json',
     ]},
 }
+if host_driver:
+    # The machine's own Vulkan and EGL descriptions are rewritten by Polaris and
+    # mounted, because a distribution may write absolute host paths into them.
+    for name in ['10_nvidia.json', 'nvidia_icd.json', 'nvidia_layers.json']:
+        configurations.pop(name, None)
 for filename, directory in configurations.items():
     copy_file(source / filename, root / 'usr/share' / directory / filename)
 copy_file(source / 'LICENSE', root / 'usr/share/licenses/polaris-nvidia/LICENSE')
@@ -87,5 +109,8 @@ metadata = root / 'usr/share/polaris/build'
 metadata.mkdir(parents=True)
 (metadata / 'nvidia.lock.json').write_text(json.dumps(lock, indent=2) + '\n')
 (metadata / 'nvidia-files.json').write_text(json.dumps({
-    'schema': 1, 'driver_version': lock['version'], 'architectures': selected_architectures,
-    'files': manifest, 'symlinks': symlinks}, indent=2) + '\n')
+    'schema': 1, 'driver_version': '' if host_driver else lock['version'],
+    'architectures': selected_architectures, 'files': manifest, 'symlinks': symlinks,
+    'source': 'host' if host_driver else 'image'}, indent=2) + '\n')
+if host_driver:
+    shutil.copyfile('/nvidia-host-contract.json', metadata / 'nvidia-host-contract.json')

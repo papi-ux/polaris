@@ -70,6 +70,7 @@ namespace multiseat::container {
     constexpr auto host_driver_i386_root = "/usr/lib/i386-linux-gnu/"sv;
     constexpr auto host_driver_share_root = "/usr/share/"sv;
     constexpr std::size_t maximum_host_driver_mounts = 128;
+    constexpr auto host_driver_cache_directory = "/etc/polaris-ld"sv;
     /**
      * A library lands directly in its loader directory; a vendor description
      * lands under /usr/share in the directory its loader reads.
@@ -868,12 +869,19 @@ namespace multiseat::container {
         return "rw,nosuid,nodev,size=" + std::to_string(bytes) +
                ",mode=" + std::string(mode) + owner;
       };
-      return {
+      json entries {
         {"/run", bounded(options.runtime_tmpfs_bytes, "0700")},
         {"/run/polaris", bounded(options.runtime_tmpfs_bytes, "0700")},
         {"/tmp", bounded(options.temporary_tmpfs_bytes, "0700")},
         {"/var/tmp", bounded(options.temporary_tmpfs_bytes, "1777")},
       };
+      // A borrowed driver needs a writable loader cache: the rootfs is read
+      // only, and Steam's pressure-vessel finds the graphics stack by matching
+      // sonames against that cache before it copies them into a game's own
+      // namespace.
+      if (!options.host_driver.mounts.empty())
+        entries[std::string {host_driver_cache_directory}] = bounded(8ULL * 1024ULL * 1024ULL, "0700");
+      return entries;
     }
 
     bool empty_array_or_null(const json &object, std::string_view key) {

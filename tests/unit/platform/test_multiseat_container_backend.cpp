@@ -3174,7 +3174,7 @@ namespace {
         {"/usr/lib/x86_64-linux-gnu/libcuda.so.1", "/usr/lib64/libcuda.so.615.71.09"},
         {"/usr/lib/i386-linux-gnu/libcuda.so.1", "/usr/lib/libcuda.so.615.71.09"},
         {"/usr/share/vulkan/icd.d/nvidia_icd.json",
-         "/home/operator/.config/polaris/spaces-graphics/615.71.09/nvidia_icd.json"},
+         "/srv/polaris-state/spaces-graphics/615.71.09/nvidia_icd.json"},
       },
     };
     return options;
@@ -3185,6 +3185,9 @@ namespace {
     for (const auto &mount : host_driver_options_for_tests().host_driver.mounts)
       record["Mounts"].push_back({{"Type", "bind"}, {"RW", false}, {"Source", mount.host_path.native()},
         {"Destination", mount.destination}, {"Propagation", "rprivate"}});
+    // The loader cache the worker rebuilds over the borrowed files.
+    record["HostConfig"]["Tmpfs"]["/etc/polaris-ld"] =
+      "rw,nosuid,nodev,size=8388608,mode=0700,uid=1000,gid=1000";
     return record;
   }
 }
@@ -3204,7 +3207,7 @@ TEST(MultiseatDockerBackend, PublishesBorrowedDriverFilesReadOnlyAtTheirContaine
   EXPECT_TRUE(has_argument(argv,
     "--mount=type=bind,src=/usr/lib/libcuda.so.615.71.09,dst=/usr/lib/i386-linux-gnu/libcuda.so.1,ro=true"));
   EXPECT_TRUE(has_argument(argv,
-    "--mount=type=bind,src=/home/operator/.config/polaris/spaces-graphics/615.71.09/nvidia_icd.json,"
+    "--mount=type=bind,src=/srv/polaris-state/spaces-graphics/615.71.09/nvidia_icd.json,"
     "dst=/usr/share/vulkan/icd.d/nvidia_icd.json,ro=true"));
   // A borrowed file is never relabelled: its source is the host's own /usr,
   // and SELinux policy grants the read instead. Polaris's own directories

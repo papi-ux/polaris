@@ -347,8 +347,6 @@ namespace multiseat::spaces {
     }
     if (!facts.code.empty()) { facts.libraries.clear(); return facts; }
 
-    if (!facts.code.empty()) return facts;
-
     for (const auto &file : contract.vendor_files) {
       bool published = false;
       for (const auto &source : file.sources) {
@@ -376,15 +374,14 @@ namespace multiseat::spaces {
   }
 
   std::vector<container::host_driver_mount_t> host_driver_mounts(
-    const host_driver_facts_t &facts, const std::filesystem::path &vendor_directory) {
+    const nvidia_contract_t &contract, const host_driver_facts_t &facts,
+    const std::filesystem::path &vendor_directory) {
     std::vector<container::host_driver_mount_t> mounts;
     if (!facts.ready() || !absolute_normal(vendor_directory)) return mounts;
-    const auto contract = trusted_nvidia_contract();
-    if (!contract) return mounts;
     for (const auto &library : facts.libraries) {
-      const auto architecture = std::find_if(contract->architectures.begin(), contract->architectures.end(),
+      const auto architecture = std::find_if(contract.architectures.begin(), contract.architectures.end(),
         [&](const auto &entry) { return entry.name == library.architecture; });
-      if (architecture == contract->architectures.end()) return {};
+      if (architecture == contract.architectures.end()) return {};
       mounts.push_back({(architecture->directory / library.soname).string(), library.host_path});
     }
     for (const auto &file : facts.vendor_files)

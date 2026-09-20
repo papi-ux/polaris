@@ -43,13 +43,14 @@ encoded_audio = pathlib.Path('/usr/libexec/polaris-seat/encoded-audio-check')
 game_status = pathlib.Path('/usr/libexec/polaris-seat/game-status')
 capture_input = pathlib.Path('/usr/libexec/polaris-seat/capture-input')
 workload = pathlib.Path('/usr/libexec/polaris-seat/workloads/input-pong-v1')
-if sys.argv[1:] in (['--worker'], ['--nvidia']):
+host_driver = sys.argv[1:] == ['--nvidia-host']
+if sys.argv[1:] in (['--worker'], ['--nvidia'], ['--nvidia-host']):
     files += [workload, capture_input, game_status, encoded_game, encoded_audio] + [pathlib.Path('/usr/libexec/polaris-seat') / name for name in
                           ['session-bus', 'audio', 'display-capture', 'nested-compositor', 'virtual-input', 'launcher', 'encoder', 'encode-media']]
 elif sys.argv[1:]:
     raise ValueError('unknown dependency check scope')
 steam_libraries = []
-if profile == 'steam' and sys.argv[1:] in (['--worker'], ['--nvidia']):
+if profile == 'steam' and sys.argv[1:] in (['--worker'], ['--nvidia'], ['--nvidia-host']):
     for triplet, elf_class, machine in [('x86_64-linux-gnu', 2, 62), ('i386-linux-gnu', 1, 3)]:
         library = pathlib.Path('/usr/lib') / triplet / 'libpolaris-steam-input.so'
         header = library.read_bytes()[:20]
@@ -59,10 +60,18 @@ if profile == 'steam' and sys.argv[1:] in (['--worker'], ['--nvidia']):
         steam_libraries.append(library)
     files += steam_libraries
 hardware_libraries = []
-if '--nvidia' in sys.argv:
+if '--nvidia' in sys.argv or host_driver:
     hardware_libraries = [pathlib.Path('/usr/lib/x86_64-linux-gnu') / name for name in
                           ['gstreamer-1.0/libgstnvcodec.so', 'libgstcuda-1.0.so.0.2600.0']]
     files += hardware_libraries
+if host_driver:
+    # An image that borrows the machine's driver has to carry the contract it
+    # was built against and the probe that proves the borrowed files load.
+    files += [pathlib.Path('/usr/share/polaris/build/nvidia-host-contract.json')]
+    for probe in ['graphics-check', 'graphics-check-32']:
+        files.append(pathlib.Path('/usr/libexec/polaris-seat') / probe)
+    if pathlib.Path('/etc/ld.so.cache').resolve() != pathlib.Path('/etc/polaris-ld/ld.so.cache'):
+        raise ValueError('the loader cache must be rebuilt over the borrowed driver at start')
 for path in files:
     # A root build can read through an unsearchable COPY-created directory.
     # Seat workers have neither root identity nor DAC override capabilities.
@@ -75,10 +84,16 @@ for path in files:
         raise ValueError('untrusted provider dependency: ' + str(path))
     if (path.parent == pathlib.Path('/usr/bin') or path.is_relative_to('/usr/libexec/polaris-seat')) and not os.access(path, os.X_OK):
         raise ValueError('non-executable provider dependency: ' + str(path))
-for path in [pathlib.Path('/usr/bin/wireplumber'), pathlib.Path('/usr/bin/pw-dump'), pathlib.Path('/usr/bin/gamescope'), pathlib.Path('/usr/bin/Xwayland'), plugin, gl_plugin] + ([workload, capture_input, game_status, encoded_game, encoded_audio, pathlib.Path('/usr/libexec/polaris-seat/encode-media')] if any(arg in sys.argv for arg in ('--worker', '--nvidia')) else []) + hardware_libraries + steam_libraries:
+for path in [pathlib.Path('/usr/bin/wireplumber'), pathlib.Path('/usr/bin/pw-dump'), pathlib.Path('/usr/bin/gamescope'), pathlib.Path('/usr/bin/Xwayland'), plugin, gl_plugin] + ([workload, capture_input, game_status, encoded_game, encoded_audio, pathlib.Path('/usr/libexec/polaris-seat/encode-media')] if any(arg in sys.argv for arg in ('--worker', '--nvidia', '--nvidia-host')) else []) + hardware_libraries + steam_libraries:
     linked = subprocess.check_output(['ldd', '-r', str(path)], text=True, stderr=subprocess.STDOUT)
-    if 'not found' in linked or 'undefined symbol:' in linked:
-        raise ValueError('unresolved ELF dependency: ' + str(path) + '\n' + linked)
+    unresolved = [line for line in linked.splitlines() if 'not found' in line or 'undefined symbol:' in line]
+    if host_driver:
+        # The driver itself arrives at run time, so its sonames are expected to
+        # be missing here. Anything else is still a broken image.
+        borrowed = tuple(json.loads(pathlib.Path('/usr/share/polaris/build/nvidia-host-contract.json').read_text())['library_prefixes'])
+        unresolved = [line for line in unresolved if not line.strip().startswith(borrowed)]
+    if unresolved:
+        raise ValueError('unresolved ELF dependency: ' + str(path) + '\n' + '\n'.join(unresolved))
 for element in ['waylanddisplaysrc', 'unixfdsink', 'unixfdsrc', 'fakesink', 'videoconvert',
                 'audiotestsrc', 'audioconvert', 'audioresample', 'pulsesink', 'pulsesrc',
                 'openh264enc', 'openh264dec', 'h264parse', 'opusenc', 'opusdec', 'appsink',
@@ -86,7 +101,7 @@ for element in ['waylanddisplaysrc', 'unixfdsink', 'unixfdsrc', 'fakesink', 'vid
     subprocess.run(['/usr/bin/gst-inspect-1.0', element], check=True, stdout=subprocess.DEVNULL)
 if hardware_libraries:
     from nvidia_runtime import verify
-    report = verify(pathlib.Path('/'), profile)
+    report = verify(pathlib.Path('/'), profile, source='host' if host_driver else 'image')
     pathlib.Path('/usr/share/polaris/build/nvidia-runtime.json').write_text(json.dumps(report, indent=2) + '\n')
     # Registration can legitimately expose no encoders on a build machine with
     # no GPU devices. Physical codec acceptance must require actual frames.

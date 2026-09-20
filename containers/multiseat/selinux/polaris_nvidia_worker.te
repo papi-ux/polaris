@@ -1,8 +1,11 @@
-policy_module(polaris_nvidia_worker, 1.0.8)
+policy_module(polaris_nvidia_worker, 1.1.0)
 
 gen_require(`
     type container_file_t;
     type bin_t;
+    type lib_t;
+    type textrel_shlib_t;
+    type usr_t;
     type xserver_misc_device_t;
     type polaris_multiseat_input_device_t;
     type unreserved_port_t;
@@ -51,6 +54,16 @@ allow polaris_nvidia_worker_t container_file_t:file execmod;
 allow polaris_nvidia_worker_t xserver_misc_device_t:chr_file { getattr open read write ioctl map };
 allow polaris_nvidia_worker_t polaris_multiseat_input_device_t:chr_file { getattr open read ioctl };
 allowxperm polaris_nvidia_worker_t polaris_multiseat_input_device_t:chr_file ioctl { 0x4501 0x4506 0x4507 };
+
+# A runtime built without driver libraries of its own reads this machine's NVIDIA
+# userspace through read-only binds at the paths the loader resolves them by.
+# Those files keep their own labels: relabelling the host's /usr to a container
+# type would damage the host, so the read is granted here instead. Read and map
+# only, on files Polaris itself enumerated and the mount classifier verified;
+# no write, no relabel, no execution of host programs.
+allow polaris_nvidia_worker_t lib_t:file { getattr open read map execute };
+allow polaris_nvidia_worker_t textrel_shlib_t:file { getattr open read map execute execmod };
+allow polaris_nvidia_worker_t usr_t:file { getattr open read map };
 
 # Podman's --init binds only the mount-classifier-approved host catatonit.
 # Initial entry into this domain also requires entrypoint on that bin_t file.

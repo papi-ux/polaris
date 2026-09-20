@@ -428,13 +428,42 @@ finishes the job. The last Space can be archived but not removed for good,
 because Polaris makes a new Space from an existing one; create another Space
 first.
 
+## NVIDIA driver files
+
+The gaming runtime for NVIDIA graphics borrows this PC's own driver files
+instead of carrying a copy. That is why a driver update no longer strands a
+Space: the same runtime keeps working, because it uses whatever driver the
+kernel has loaded.
+
+Polaris reads those files and passes them to a Space read only, and it checks
+each one first: owned by root, in the directory the driver package puts it in,
+and built for the architecture it claims. Nothing is copied, changed or run.
+
+Host Setup shows **NVIDIA driver files** while an NVIDIA driver is loaded. The
+one case worth acting on is the 32 bit half, which most distributions package
+separately:
+
+| Distribution | Package |
+|---|---|
+| Fedora, Bazzite | `xorg-x11-drv-nvidia-libs.i686` |
+| Arch, CachyOS | `lib32-nvidia-utils` |
+| Ubuntu | the `libnvidia-gl` package for your driver branch, `i386` variant |
+
+Without it a Space still starts, and 32 bit games, which is most games under
+Proton, render nothing. Polaris does not install driver packages.
+
+A gaming runtime still names the oldest driver it works with, because its own
+video encoder is built against a fixed NVIDIA interface. On a driver older than
+that, Host Setup says to update the driver.
+
 ## After an NVIDIA driver update
 
-The NVIDIA gaming runtime carries the NVIDIA userspace for one driver version,
-and a Space keeps the runtime it was made with. After the host moves to another
-NVIDIA driver, that runtime no longer matches the kernel module, so Polaris
-refuses to start the Space before anything runs. Nova shows why and says to
-move the Space; the refusal's code is `space_runtime_driver_mismatch`.
+Older NVIDIA runtimes carry the NVIDIA userspace for one driver version, and a
+Space keeps the runtime it was made with. After the host moves to another NVIDIA
+driver, such a runtime no longer matches the kernel module, so Polaris refuses to
+start the Space before anything runs. Nova shows why and says to move the Space;
+the refusal's code is `space_runtime_driver_mismatch`. A Space on a runtime that
+borrows this PC's driver never sees this.
 
 The Space card says why, for example **Made for NVIDIA driver 610.57.04. This
 PC runs 615.71.09.**, and offers **Move To The Runtime For Driver 615.71.09**

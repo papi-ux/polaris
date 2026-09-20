@@ -237,7 +237,7 @@ namespace multiseat {
       return;
     }
     options.container.host_driver = {facts.driver_version, facts.contract,
-      spaces::host_driver_mounts(facts, directory)};
+      spaces::host_driver_mounts(*contract, facts, directory)};
     BOOST_LOG(info) << "Spaces: NVIDIA driver "sv << facts.driver_version << " supplies "sv
                     << options.container.host_driver.mounts.size() << " files to a host-driver runtime"sv;
   }

@@ -88,7 +88,8 @@ namespace multiseat::spaces {
    * the facts are ready.
    */
   [[nodiscard]] std::vector<container::host_driver_mount_t> host_driver_mounts(
-    const host_driver_facts_t &facts, const std::filesystem::path &vendor_directory);
+    const nvidia_contract_t &contract, const host_driver_facts_t &facts,
+    const std::filesystem::path &vendor_directory);
 
   /**
    * Write the rewritten vendor files under `directory`, which must be private to
