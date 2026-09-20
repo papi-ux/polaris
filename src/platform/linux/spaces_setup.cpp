@@ -72,28 +72,34 @@ namespace multiseat::spaces {
     return nvidia_driver_version(version) ? version : std::string {};
   }
 
-  runtime_choice_t choose_runtime(const std::vector<runtime_t> &catalog, const std::optional<std::string> &nvidia_driver) {
-    if (catalog.empty()) return {std::nullopt, "runtime_not_published"};
+  runtime_choice_t choose_runtime(const std::vector<runtime_t> &catalog,
+      const std::optional<std::string> &nvidia_driver, std::string_view profile) {
+    // Only this family's entries are candidates. A build that carries a Heroic
+    // runtime and no Steam one has published nothing a Steam Space can use.
+    std::vector<const runtime_t *> family;
+    for (const auto &runtime : catalog)
+      if (runtime.profile == profile) family.push_back(&runtime);
+    if (family.empty()) return {std::nullopt, "runtime_not_published"};
     if (nvidia_driver) {
       // A runtime that borrows this machine's driver is preferred, because it
       // keeps working across driver updates. It is skipped only when the
       // loaded driver is older than the one its own encoders were built for.
       bool below_minimum = false;
-      for (const auto &runtime : catalog) {
-        if (runtime.variant != "nvidia-host") continue;
-        if (nvidia_driver->empty() || spaces::driver_at_least(*nvidia_driver, runtime.nvidia_minimum_driver))
-          return {runtime, {}};
+      for (const auto *runtime : family) {
+        if (runtime->variant != "nvidia-host") continue;
+        if (nvidia_driver->empty() || spaces::driver_at_least(*nvidia_driver, runtime->nvidia_minimum_driver))
+          return {*runtime, {}};
         below_minimum = true;
       }
-      for (const auto &runtime : catalog)
-        if (runtime.variant == "nvidia" && runtime.nvidia_driver == *nvidia_driver) return {runtime, {}};
-      if (std::any_of(catalog.begin(), catalog.end(),
-            [](const auto &runtime) { return runtime.variant == "nvidia"; }))
+      for (const auto *runtime : family)
+        if (runtime->variant == "nvidia" && runtime->nvidia_driver == *nvidia_driver) return {*runtime, {}};
+      if (std::any_of(family.begin(), family.end(),
+            [](const auto *runtime) { return runtime->variant == "nvidia"; }))
         return {std::nullopt, "driver_mismatch"};
       return {std::nullopt, below_minimum ? "driver_below_minimum" : "graphics_unsupported"};
     }
-    for (const auto &runtime : catalog)
-      if (runtime.variant == "default") return {runtime, {}};
+    for (const auto *runtime : family)
+      if (runtime->variant == "default") return {*runtime, {}};
     return {std::nullopt, "graphics_unsupported"};
   }
 
@@ -129,15 +135,16 @@ namespace multiseat::spaces {
   }
 
   runtime_facts_t inspect_runtime(container::host_t &host, const std::vector<runtime_t> &catalog,
-    const std::optional<std::string> &nvidia_driver, bool engine_ready, runtime_inspection_cache_t *cache) {
+    const std::optional<std::string> &nvidia_driver, bool engine_ready, runtime_inspection_cache_t *cache,
+    std::string_view profile) {
     runtime_facts_t facts;
     facts.host_nvidia_driver = nvidia_driver;
     for (const auto &runtime : catalog) {
-      if (runtime.variant == "nvidia" &&
+      if (runtime.profile == profile && runtime.variant == "nvidia" &&
           std::find(facts.nvidia_drivers.begin(), facts.nvidia_drivers.end(), runtime.nvidia_driver) == facts.nvidia_drivers.end())
         facts.nvidia_drivers.push_back(runtime.nvidia_driver);
     }
-    auto choice = choose_runtime(catalog, nvidia_driver);
+    auto choice = choose_runtime(catalog, nvidia_driver, profile);
     if (!choice.runtime) {
       facts.status = choice.code == "runtime_not_published" ? "not_published" : "unsupported";
       facts.code = std::move(choice.code);

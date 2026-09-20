@@ -27,8 +27,11 @@ namespace multiseat::spaces {
     const std::filesystem::path &module_version = "/sys/module/nvidia/version");
   // nvidia_driver is empty when no NVIDIA driver is loaded, and an empty
   // string when one is loaded but its version could not be read.
+  // A runtime is built for one launcher family, so the choice is made within
+  // that family: a Heroic image is never offered to a Steam Space, or the
+  // reverse. Host Setup asks about the family a first Space is made from.
   [[nodiscard]] runtime_choice_t choose_runtime(const std::vector<runtime_t> &catalog,
-    const std::optional<std::string> &nvidia_driver);
+    const std::optional<std::string> &nvidia_driver, std::string_view profile = "steam");
 
   // What Docker holds under the approved reference.
   enum class runtime_image_e { absent, verified, mismatch, unverifiable };
@@ -70,7 +73,7 @@ namespace multiseat::spaces {
   // when the engine answered, verified against the compiled catalog entry.
   [[nodiscard]] runtime_facts_t inspect_runtime(container::host_t &host,
     const std::vector<runtime_t> &catalog, const std::optional<std::string> &nvidia_driver,
-    bool engine_ready, runtime_inspection_cache_t *cache = nullptr);
+    bool engine_ready, runtime_inspection_cache_t *cache = nullptr, std::string_view profile = "steam");
 
   struct setup_facts_t {
     std::string distribution;

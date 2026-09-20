@@ -5469,13 +5469,24 @@ namespace nvhttp {
   }
 
   namespace {
-    std::string profile_artwork_cache_id(std::string_view target) {
+    /**
+     * The cache id is a Steam appid padded into a UUID, and only a Steam appid
+     * has one: the artwork providers plan their downloads from an appid, so a
+     * launcher family whose targets are names has no artwork yet. Such a target
+     * is refused here rather than padded, because `12 - target.size()` is
+     * unsigned and a longer target would wrap and throw inside a request.
+     */
+    std::optional<std::string> profile_artwork_cache_id(std::string_view target) {
+      if (target.empty() || target.size() > 10 ||
+          target.find_first_not_of("0123456789") != std::string_view::npos) return std::nullopt;
       return "53504143-4553-4000-8000-" + std::string(12 - target.size(), '0') + std::string(target);
     }
 
     nlohmann::json profile_artwork_manifest(const std::filesystem::path &appdata,
         std::string_view identity, std::string_view target) {
-      auto manifest = game_artwork::current_manifest(appdata / "spaces-library-artwork", profile_artwork_cache_id(target));
+      const auto cache_id = profile_artwork_cache_id(target);
+      if (!cache_id) return {};
+      auto manifest = game_artwork::current_manifest(appdata / "spaces-library-artwork", *cache_id);
       for (auto &[kind, asset] : manifest["assets"].items()) {
         asset["url"] = "/polaris/v1/games/" + std::string(identity) + "/space-artwork/" + kind;
       }
@@ -5491,16 +5502,17 @@ namespace nvhttp {
     if (!target) return reject();
     const auto cache = appdata / "spaces-library-artwork";
     const auto cache_id = profile_artwork_cache_id(*target);
+    if (!cache_id) return reject();
     auto plan = game_artwork::providers::plan_steam_library_assets(*target, transport);
     nlohmann::json requested = nlohmann::json::array();
     std::erase_if(plan, [&](const auto &item) {
-      if (!item.kind || game_artwork::find_cached_asset(cache, cache_id, *item.kind)) return true;
+      if (!item.kind || game_artwork::find_cached_asset(cache, *cache_id, *item.kind)) return true;
       const auto kind = std::string(game_artwork::kind_name(*item.kind));
       if (std::find(requested.begin(), requested.end(), kind) == requested.end()) requested.push_back(kind);
       return false;
     });
     // The existing bounded executor preserves valid bytes on partial provider failures.
-    (void) game_artwork::providers::execute_download_plan(cache, cache_id, plan, transport);
+    (void) game_artwork::providers::execute_download_plan(cache, *cache_id, plan, transport);
     if (profile_artwork_target(candidate, identity) != target) return reject();
     auto manifest = profile_artwork_manifest(appdata, identity, *target);
     nlohmann::json remaining = nlohmann::json::array();
@@ -9001,13 +9013,16 @@ namespace nvhttp {
       // decimal Steam ID is already canonical and bounded to uint32.
       const auto cache = platf::appdata() / "spaces-library-artwork";
       const auto cache_id = profile_artwork_cache_id(*target);
-      auto asset = game_artwork::find_cached_asset(cache, cache_id, *kind);
+      if (!cache_id) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found); return;
+      }
+      auto asset = game_artwork::find_cached_asset(cache, *cache_id, *kind);
       if (!asset) {
         const auto transport = make_artwork_transport("");
         auto plan = game_artwork::providers::plan_steam_library_assets(*target, transport);
         std::erase_if(plan, [&](const auto &item) { return item.kind != kind; });
-        (void) game_artwork::providers::execute_download_plan(cache, cache_id, plan, transport);
-        asset = game_artwork::find_cached_asset(cache, cache_id, *kind);
+        (void) game_artwork::providers::execute_download_plan(cache, *cache_id, plan, transport);
+        asset = game_artwork::find_cached_asset(cache, *cache_id, *kind);
       }
       // Permission can change while downloading. Do not publish stale access.
       if (!asset || profile_artwork_target(client, identity) != target) {

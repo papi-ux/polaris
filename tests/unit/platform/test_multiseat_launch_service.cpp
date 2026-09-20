@@ -1631,7 +1631,9 @@ namespace {
 
   TEST_F(MultiseatProfileHttp, SpaceArtworkRefreshPreservesCachedKindsAndRetriesOnlyFailures) {
     uninstall_profile_launch_service(service); ASSERT_TRUE(service->shutdown(2s));
-    state->library = [](std::string_view) { return spaces::library_t{true, {{"870780", "Control"}}}; };
+    state->library = [](std::string_view) {
+      return spaces::library_t{true, {{"870780", "Control"}, {"epic.AlanWake2", "Alan Wake 2"}}};
+    };
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
       std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, true, false, {}, true}}), 2s);
     ASSERT_TRUE(install_profile_launch_service(service));
@@ -1650,8 +1652,11 @@ namespace {
       if (fail_hero && request.kind == kind_e::hero) return std::nullopt;
       return providers::transport_response_t{200, {0xff, 0xd8, 0xff, 0xe0, 1}, request.url};
     };
+    // A target that is not a Steam appid has no artwork provider, and padding
+    // one into the cache id would wrap `12 - target.size()`, which is unsigned,
+    // and throw inside the request handler.
     for (const auto identity : {"space.profile-b.870780", "space.profile-a.620", "space.profile-a.big-picture-v1",
-        "space.profile-a.870780/../private", "space.profile-a.4294967296"}) {
+        "space.profile-a.870780/../private", "space.profile-a.4294967296", "space.profile-a.epic.AlanWake2"}) {
       EXPECT_EQ(nvhttp::profile_artwork_resolve_request(client, identity, root, transport).status, 404);
     }
     EXPECT_EQ(nvhttp::profile_artwork_resolve_request(nullptr, "space.profile-a.870780", root, transport).status, 404);

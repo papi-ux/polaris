@@ -316,6 +316,34 @@ TEST(SpacesSetup, DescribesABorrowingRuntimeExactlyAsTheConsoleExpectsIt) {
   EXPECT_EQ(runtime_check(ready), expected.at("ready"));
 }
 
+/**
+ * A runtime is built for one launcher family and carries that family's Steam,
+ * Heroic or Lutris install. Offering one family's image to another Space would
+ * hand it a launcher its library was never read from.
+ */
+TEST(SpacesSetup, ChoosesWithinTheSpacesOwnLauncherFamily) {
+  auto heroic = host_driver_runtime("570.00", '9');
+  heroic.id = "heroic-nvidia-host";
+  heroic.profile = "heroic";
+  const std::vector<spaces::runtime_t> catalog {nvidia610, heroic};
+
+  EXPECT_EQ(spaces::choose_runtime(catalog, "610.57.04", "steam").runtime->id, "steam-nvidia-610");
+  EXPECT_EQ(spaces::choose_runtime(catalog, "610.57.04", "heroic").runtime->id, "heroic-nvidia-host");
+  // The default is the family every Space had before there was more than one.
+  EXPECT_EQ(spaces::choose_runtime(catalog, "610.57.04").runtime->id, "steam-nvidia-610");
+
+  // A family with no entry has published nothing, whatever the rest carries.
+  const auto lutris = spaces::choose_runtime(catalog, "610.57.04", "lutris");
+  EXPECT_FALSE(lutris.runtime);
+  EXPECT_EQ(lutris.code, "runtime_not_published");
+
+  // And another family's driver versions are not this family's business: the
+  // Heroic entry borrows the driver, so a Steam Space still reads as a mismatch.
+  const std::vector<spaces::runtime_t> steam_610_only {nvidia610, heroic};
+  EXPECT_EQ(spaces::choose_runtime(steam_610_only, "615.71.09", "steam").code, "driver_mismatch");
+  EXPECT_EQ(spaces::choose_runtime(steam_610_only, "615.71.09", "heroic").runtime->id, "heroic-nvidia-host");
+}
+
 TEST(SpacesSetup, PrefersTheRuntimeThatBorrowsThisPcsDriver) {
   const auto host_driver = host_driver_runtime("570.00", '7');
   const std::vector<spaces::runtime_t> catalog {amd_intel, nvidia610, host_driver};

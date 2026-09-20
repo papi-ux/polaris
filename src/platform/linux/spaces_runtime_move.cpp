@@ -9,6 +9,7 @@
 #include "src/logging.h"
 
 #include <algorithm>
+#include <map>
 #include <set>
 
 namespace multiseat::spaces {
@@ -49,8 +50,9 @@ namespace multiseat::spaces {
     // What Docker holds for the runtime this PC's driver needs, read through the
     // setup page's cache so the two pages ask Docker once between them.
     runtime_image_e target_image(container::host_t &host, const std::vector<runtime_t> &catalog,
-      const std::optional<std::string> &host_driver, runtime_inspection_cache_t *cache) {
-      const auto facts = inspect_runtime(host, catalog, host_driver, true, cache);
+      const std::optional<std::string> &host_driver, runtime_inspection_cache_t *cache,
+      std::string_view profile) {
+      const auto facts = inspect_runtime(host, catalog, host_driver, true, cache, profile);
       if (facts.status == "ready") return runtime_image_e::verified;
       if (facts.code == "not_downloaded") return runtime_image_e::absent;
       if (facts.code == "runtime_identity_mismatch") return runtime_image_e::mismatch;
@@ -166,18 +168,23 @@ namespace multiseat::spaces {
     json result = json::object();
     // Only a host that runs a readable NVIDIA driver can disagree with a runtime.
     const bool nvidia = host_driver && !host_driver->empty();
-    const auto choice = choose_runtime(catalog, host_driver);
-    std::optional<runtime_image_e> target;
+    // Each Space asks within its own launcher family, and one inspection per
+    // family serves every Space that shares it.
+    std::map<std::string, runtime_image_e, std::less<>> targets_seen;
     for (const auto &profile : profiles) {
       image_runtime_t image;
       if (const auto known = catalog_image_runtime(profile.image, catalog)) image = *known;
       else if (nvidia && !profile.image.empty()) image = identify_image(host, profile.image, catalog, images);
       // A Space whose image this build does not list is still identified by its
       // own labels, so an upgrade can be offered rather than a dead card.
+      const auto family = image.profile.empty() ? std::string("steam") : image.profile;
+      const auto choice = choose_runtime(catalog, host_driver, family);
       auto state = runtime_image_e::unverifiable;
       if (choice.runtime && (driver_mismatch(image, host_driver) || offers_host_driver(image, choice))) {
-        if (!target) target = target_image(host, catalog, host_driver, targets);
-        state = *target;
+        const auto seen = targets_seen.find(family);
+        if (seen == targets_seen.end())
+          state = targets_seen.emplace(family, target_image(host, catalog, host_driver, targets, family)).first->second;
+        else state = seen->second;
       }
       result[profile.id] = describe_space_runtime(image, host_driver, choice, state);
     }
@@ -419,12 +426,16 @@ namespace multiseat::spaces {
         }
         facts.host_setup_running = host_admin_running();
         facts.host_driver = loaded_nvidia_driver();
-        facts.choice = choose_runtime(catalog, facts.host_driver);
         container::local_host_t host;
         facts.home_uid = static_cast<std::uint32_t>(host.effective_uid());
         facts.home_gid = static_cast<std::uint32_t>(host.effective_gid());
         if (facts.space) facts.image = identify_image(host, facts.space->image, catalog, &image_runtime_cache());
-        if (facts.choice.runtime) facts.target = target_image(host, catalog, facts.host_driver, &runtime_inspection_cache());
+        // The Space's own family decides which runtimes are candidates, so the
+        // image is read first.
+        const auto family = facts.image.profile.empty() ? std::string("steam") : facts.image.profile;
+        facts.choice = choose_runtime(catalog, facts.host_driver, family);
+        if (facts.choice.runtime)
+          facts.target = target_image(host, catalog, facts.host_driver, &runtime_inspection_cache(), family);
         return facts;
       },
       .install = [catalog](const runtime_t &target, std::stop_token stop) {
