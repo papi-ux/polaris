@@ -4681,7 +4681,9 @@ namespace confighttp {
         &multiseat::spaces::runtime_inspection_cache());
       for (const auto &profile : state.profiles) {
         nlohmann::json entry {{"id", profile.id}, {"name", profile.name}, {"clients", profile.clients},
-          {"steam", profile.steam}, {"archived", profile.archived}, {"access_clients", profile.access_clients}};
+          // `steam` stays beside `family` for a client that predates families.
+          {"family", profile.family}, {"steam", profile.family == "steam"},
+          {"archived", profile.archived}, {"access_clients", profile.access_clients}};
         if (runtimes.contains(profile.id)) entry.update(runtimes.at(profile.id));
         output["profiles"].push_back(std::move(entry));
       }

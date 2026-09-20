@@ -228,7 +228,10 @@ namespace multiseat::spaces {
       return refuse({409, "This Polaris build has no gaming runtime for the NVIDIA driver this PC runs.",
         "space_runtime_not_published", "Update Polaris, or install an NVIDIA driver this build has a runtime for."});
     if (target->id != runtime_id) return refuse(space_runtime_changed_result);
-    if (facts.image.profile != target->profile || !facts.space->steam) return refuse(space_runtime_profile_mismatch_result);
+    // The Space, the image it runs and the runtime it would move to must all be
+    // the same launcher family, or the move would hand it another launcher.
+    if (facts.image.profile != target->profile || facts.space->family != target->profile)
+      return refuse(space_runtime_profile_mismatch_result);
     if (facts.image.media_contract != target->media_contract) return refuse(space_runtime_media_mismatch_result);
     if (facts.home_uid != target->uid || facts.home_gid != target->gid) return refuse(space_runtime_identity_mismatch_result);
     // What is happening right now, which clears on its own.

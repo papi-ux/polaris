@@ -124,7 +124,7 @@ namespace {
 
   class MultiseatAssignments : public MultiseatLaunchService {
   protected:
-    std::vector<profile_summary_t> catalog {{"profile-a", "Alex", {"client-a"}, true}, {"profile-b", "Sam", {"client-b"}}};
+    std::vector<profile_summary_t> catalog {{"profile-a", "Alex", {"client-a"}, "steam"}, {"profile-b", "Sam", {"client-b"}}};
     std::atomic<unsigned> writes {0}, reloads {0}, creates {0}, edits {0}, removals {0}, runtime_moves {0};
     private_state_file::write_status_e write_status = private_state_file::write_status_e::committed;
     profiles::removal_result_t removal_answer {.outcome = profiles::removal_outcome_e::removed};
@@ -158,7 +158,7 @@ namespace {
             EXPECT_GT(state->destroyed.load(), 0U);
             if (before_write) before_write();
             if (write_status != private_state_file::write_status_e::not_committed)
-              catalog.push_back({request.request_id, request.name, {}, true});
+              catalog.push_back({request.request_id, request.name, {}, "steam"});
             return profiles::change_result_t {.status = write_status, .profile_key = request.request_id};
           },
           .edit = [&](const profiles::edit_request_t &request) {
@@ -1018,7 +1018,7 @@ namespace {
     std::atomic<bool> matches {true};
     void SetUp() override {
       service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
-        std::vector<profile_summary_t> {{"profile-a", "Alex", {"client-a"}, true, false, {}, true, image}}), 2s,
+        std::vector<profile_summary_t> {{"profile-a", "Alex", {"client-a"}, "steam", false, {}, true, image}}), 2s,
         profile_admin_options_t {.runtime_matches_host = [this](std::string_view value) {
           std::lock_guard lock(asked_mutex);
           asked.emplace_back(value);
@@ -1382,7 +1382,7 @@ namespace {
     uninstall_profile_launch_service(service);
     ASSERT_TRUE(service->shutdown(2s));
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
-      std::vector<profile_summary_t> {{"12345678-1234-4234-8234-123456789abc", "Primary", {"client-a"}, true, false, {}, true,
+      std::vector<profile_summary_t> {{"12345678-1234-4234-8234-123456789abc", "Primary", {"client-a"}, "steam", false, {}, true,
         "sha256:" + std::string(64, 'a')}}), 2s,
       profile_admin_options_t {.runtime_matches_host = [](std::string_view) { return false; }});
     ASSERT_TRUE(install_profile_launch_service(service));
@@ -1473,7 +1473,7 @@ namespace {
   TEST_F(MultiseatLaunchService, ClientSelectionOnlyUsesGrantedSpacesAndRejectsStaleChoices) {
     ASSERT_TRUE(service->shutdown(2s));
     std::vector<profile_summary_t> catalog {{"profile-a", "Default", {"client-a"}},
-      {"profile-b", "Shared", {"client-b"}, true, false, {"client-a"}},
+      {"profile-b", "Shared", {"client-b"}, "steam", false, {"client-a"}},
       {"private", "Private", {"client-c"}}};
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state, catalog), 2s);
     EXPECT_EQ(service->client_spaces("client-a").spaces.size(), 2U);
@@ -1492,7 +1492,7 @@ namespace {
   TEST_F(MultiseatLaunchService, ChoosingASpaceDoesNotRestartAnotherDevicesController) {
     ASSERT_TRUE(service->shutdown(2s));
     std::vector<profile_summary_t> catalog {{"profile-a", "Default", {"client-a"}},
-      {"profile-b", "Shared", {"client-b"}, true, false, {"client-a"}}};
+      {"profile-b", "Shared", {"client-b"}, "steam", false, {"client-a"}}};
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state, catalog), 2s);
     auto other = launch("client-b"); ASSERT_EQ(service->prepare(other, "profile-b").status, 200);
     const auto shutdowns = state->shutdowns.load();
@@ -1538,7 +1538,7 @@ namespace {
     const std::filesystem::path path = std::filesystem::path(created) / "catalog.json";
     const auto cleanup = util::fail_guard([&] { std::filesystem::remove_all(path.parent_path()); });
     std::vector<profile_summary_t> catalog {{"profile-a", "Default", {"client-a"}},
-      {"profile-b", "Shared", {"client-b"}, true, false, {"client-a"}}};
+      {"profile-b", "Shared", {"client-b"}, "steam", false, {"client-a"}}};
     auto restart = [&] {
       ASSERT_TRUE(service->shutdown(2s));
       service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state, catalog), 2s,
@@ -1559,8 +1559,8 @@ namespace {
     ASSERT_TRUE(service->shutdown(2s));
     state->library = [](std::string_view id) { return spaces::library_t{true,
       {{id == "profile-a" ? "3527290" : "870780", "Installed Game"}}}; };
-    std::vector<profile_summary_t> catalog{{"profile-a", "Alex", {"client-a"}, true, false, {}, true},
-      {"profile-b", "Sam", {"client-b"}, true, false, {"client-a"}, true}};
+    std::vector<profile_summary_t> catalog{{"profile-a", "Alex", {"client-a"}, "steam", false, {}, true},
+      {"profile-b", "Sam", {"client-b"}, "steam", false, {"client-a"}, true}};
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state, catalog), 2s);
     EXPECT_FALSE(service->library_for_client("stranger", "profile-a"));
     EXPECT_FALSE(service->library_for_client("client-a", "missing"));
@@ -1579,7 +1579,7 @@ namespace {
     ASSERT_TRUE(service->shutdown(2s));
     state->library = [](std::string_view) { return spaces::library_t{}; };
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
-      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, true, false, {}, true}}), 2s);
+      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, "steam", false, {}, true}}), 2s);
     EXPECT_EQ(service->prepare(launch(), "profile-a", "3527290").status, 409);
     auto steam = launch();
     EXPECT_EQ(service->prepare(steam, "profile-a", "big-picture-v1").status, 200);
@@ -1591,7 +1591,7 @@ namespace {
   // Desktop Access, then its Default Space, then the first Space it may open, then Desktop.
   TEST_F(MultiseatLaunchService, ADesktopDefaultOpensDesktopFirstAndKeepsTheSpaceOpen) {
     ASSERT_TRUE(service->shutdown(2s));
-    std::vector<profile_summary_t> catalog {{"profile-a", "Alex", {}, true, false, {"client-a"}}};
+    std::vector<profile_summary_t> catalog {{"profile-a", "Alex", {}, "steam", false, {"client-a"}}};
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state, catalog), 2s);
     auto spaces = service->client_spaces("client-a");
     ASSERT_TRUE(spaces.available);
@@ -1635,7 +1635,7 @@ namespace {
       return spaces::library_t{true, {{"870780", "Control"}, {"epic.AlanWake2", "Alan Wake 2"}}};
     };
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
-      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, true, false, {}, true}}), 2s);
+      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, "steam", false, {}, true}}), 2s);
     ASSERT_TRUE(install_profile_launch_service(service));
     char pattern[] = "/tmp/polaris-space-artwork-XXXXXX";
     const auto created = ::mkdtemp(pattern); ASSERT_NE(created, nullptr);
@@ -1692,7 +1692,7 @@ namespace {
     uninstall_profile_launch_service(service); ASSERT_TRUE(service->shutdown(2s));
     state->library = [](std::string_view) { return spaces::library_t{true, {{"870780", "Control"}}}; };
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
-      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, true, false, {}, true}}), 2s);
+      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, "steam", false, {}, true}}), 2s);
     ASSERT_TRUE(install_profile_launch_service(service));
     char pattern[] = "/tmp/polaris-space-artwork-revoke-XXXXXX";
     const auto created = ::mkdtemp(pattern); ASSERT_NE(created, nullptr);
@@ -1717,8 +1717,8 @@ namespace {
     state->library = [](std::string_view id) { return spaces::library_t{true,
       {{id == "profile-a" ? "870780" : "3527290", "Installed Game"}}}; };
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
-      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, true, false, {}, true},
-                                    {"profile-b", "Sam", {"client-b"}, true, false, {}, true}}), 2s);
+      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, "steam", false, {}, true},
+                                    {"profile-b", "Sam", {"client-b"}, "steam", false, {}, true}}), 2s);
     ASSERT_TRUE(install_profile_launch_service(service));
     const auto result = nvhttp::profile_library_request(client, "profile-a");
     ASSERT_EQ(result.status, 200); ASSERT_EQ(result.body.at("games").size(), 2U);

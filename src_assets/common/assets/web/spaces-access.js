@@ -16,6 +16,11 @@ export function validSnapshot(next) {
     if (!profile || typeof profile.id !== 'string' || !profile.id || profiles.has(profile.id) ||
         typeof profile.name !== 'string' || !Array.isArray(profile.clients) ||
         (profile.steam !== undefined && typeof profile.steam !== 'boolean') ||
+        // The launcher family this Space runs. Empty means the host has one it
+        // cannot stream, which is a state to show rather than a reason to
+        // refuse the whole snapshot.
+        (profile.family !== undefined &&
+          !(typeof profile.family === 'string' && ['', 'steam', 'heroic', 'lutris'].includes(profile.family))) ||
         (profile.archived !== undefined && typeof profile.archived !== 'boolean') ||
         (profile.archived && profile.clients.length)) return false
     if (!validRuntime(profile)) return false

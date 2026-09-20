@@ -228,8 +228,9 @@ namespace multiseat {
         entry.storage.host_driver_libraries =
           options.host_driver_image && options.host_driver_image(entry.storage.image_reference);
         catalog_summary.push_back({entry.storage.profile_key, entry.name, entry.client_keys,
-          entry.storage.runtime_profile == runtime_profile_e::steam &&
-            container::supported_streaming_workload(entry.storage.runtime_profile, entry.workload), entry.archived, entry.access_clients, entry.storage.library_enabled,
+          container::supported_streaming_workload(entry.storage.runtime_profile, entry.workload) ?
+            std::string(runtime_profile_name(entry.storage.runtime_profile)) : std::string {},
+          entry.archived, entry.access_clients, entry.storage.library_enabled,
           entry.storage.image_reference});
         if (std::find(options.container.workloads.begin(), options.container.workloads.end(),
               entry.workload) == options.container.workloads.end()) {

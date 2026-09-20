@@ -320,22 +320,6 @@ namespace multiseat::container {
              profile == runtime_profile_e::lutris;
     }
 
-    std::string runtime_profile_name(runtime_profile_e profile) {
-      switch (profile) {
-        case runtime_profile_e::gamescope:
-          return "gamescope";
-        case runtime_profile_e::steam:
-          return "steam";
-        case runtime_profile_e::heroic:
-          return "heroic";
-        case runtime_profile_e::lutris:
-          return "lutris";
-        case runtime_profile_e::unknown:
-          break;
-      }
-      return {};
-    }
-
     std::string workload_kind_name(workload_kind_e kind) {
       switch (kind) {
         case workload_kind_e::gamescope:
@@ -552,7 +536,7 @@ namespace multiseat::container {
         {std::string {label_input}, spec.resources.input_seat},
         {std::string {label_input_manifest}, std::string {input_fingerprint}},
         {std::string {label_render_node}, spec.render_node},
-        {std::string {label_runtime_profile}, runtime_profile_name(spec.runtime_profile)},
+        {std::string {label_runtime_profile}, std::string {runtime_profile_name(spec.runtime_profile)}},
         {std::string {label_workload_kind}, workload_kind_name(spec.workload.kind)},
         {std::string {label_workload_target}, spec.workload.target_id},
         {std::string {label_display_topology}, std::string {display_topology_name}},
@@ -1645,7 +1629,7 @@ namespace multiseat::container {
     add_environment("POLARIS_SEAT_SLOT", std::to_string(spec.identity.seat.slot));
     add_environment("POLARIS_SEAT_GENERATION", std::to_string(spec.identity.seat.generation));
     add_environment("POLARIS_RENDER_NODE", spec.render_node);
-    add_environment("POLARIS_RUNTIME_PROFILE", runtime_profile_name(spec.runtime_profile));
+    add_environment("POLARIS_RUNTIME_PROFILE", std::string {runtime_profile_name(spec.runtime_profile)});
     add_environment("POLARIS_DISPLAY_TOPOLOGY", std::string {display_topology_name});
     add_environment("POLARIS_MEDIA_PIPELINE", std::string {media_pipeline_name});
     add_environment("POLARIS_DISPLAY_WIDTH", std::to_string(spec.display_mode.width));

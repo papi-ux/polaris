@@ -1034,7 +1034,7 @@ namespace multiseat {
           return {409, "Stop every Space stream and wait for cleanup before changing Spaces.", "spaces_streaming", "End the running Space streams, then try again."};
         const auto catalog = impl_->controller->profile_catalog();
         if (std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) {
-              return entry.id == creation.source_profile_id && entry.steam;
+              return entry.id == creation.source_profile_id && !entry.family.empty();
             })) return {404, "Select an existing Steam Space to base the new one on.", "space_source_unknown"};
         request = std::make_shared<impl_t::admin_request_t>();
         request->creation = std::move(creation);
@@ -1116,7 +1116,10 @@ namespace multiseat {
           return {{409, "Stop every Space stream and wait for cleanup before changing Spaces.", "spaces_streaming", "End the running Space streams, then try again."}};
         if (target->name != removal.confirm_name)
           return {{409, "The name you typed is not this Space's name.", "space_name_mismatch", "Type the Space's name exactly as it is shown."}};
-        if (target->steam && std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) { return entry.steam && entry.id != target->id; }))
+        // A new Space copies an existing one of its own family, so the last
+        // Space of a family stays even when another family still has one.
+        if (!target->family.empty() && std::none_of(catalog.begin(), catalog.end(),
+              [&](const auto &entry) { return entry.family == target->family && entry.id != target->id; }))
           return {{409, "This is the only Space, so it can be archived but not removed for good.", "space_last",
             "Create another Space first, or archive this one."}};
         request = std::make_shared<impl_t::admin_request_t>();

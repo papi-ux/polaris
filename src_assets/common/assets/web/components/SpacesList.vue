@@ -141,9 +141,12 @@ const deviceName = device => nameLabels.value.get(device?.uuid) || device?.frien
 // Archive stays selected: deleting games and saves is never the default.
 const offersChoice = computed(() => dialogOperation.value === 'remove' && props.removalAvailable)
 const removingForGood = computed(() => dialogOperation.value === 'delete' || (offersChoice.value && removeMode.value === 'delete'))
-// New Spaces are made from an existing Steam Space, so the host keeps the last one.
-const lastSpace = computed(() => !!dialogSpace.value?.steam &&
-  !props.profiles.some(space => space.id !== dialogSpace.value.id && space.steam))
+// A new Space is made from an existing one of the same launcher family, so the
+// host keeps the last Space of each family rather than the last Space overall.
+const lastSpace = computed(() => {
+  const family = dialogSpace.value?.family
+  return !!family && !props.profiles.some(space => space.id !== dialogSpace.value.id && space.family === family)
+})
 // The typed name has to be the Space's name exactly, as the host checks it.
 const removalReady = computed(() => !!dialogSpace.value && !lastSpace.value && typedName.value === dialogSpace.value.name)
 

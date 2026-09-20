@@ -42,6 +42,18 @@ describe('the runtime shape a host sends', () => {
     expect(validSnapshot(snapshot(wrong))).toBe(false)
   })
 
+  it('accepts the launcher family a host names, and refuses one it does not run', () => {
+    // The host sends the family every Space belongs to. A console that refuses
+    // an unknown one shows "Could not verify Spaces" for the whole page, so the
+    // families it knows are stated here rather than discovered on a card.
+    for (const family of ['steam', 'heroic', 'lutris', '']) {
+      expect(validSnapshot(snapshot({ ...shapes.upgrade, family }))).toBe(true)
+    }
+    for (const family of ['gamescope', 'Steam', 'epic', 3, null]) {
+      expect(validSnapshot(snapshot({ ...shapes.upgrade, family }))).toBe(false)
+    }
+  })
+
   it('still refuses a mismatch target with no driver version', () => {
     const wrong = structuredClone(shapes.mismatch)
     wrong.runtime_move.nvidia_driver = ''

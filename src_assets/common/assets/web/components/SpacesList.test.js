@@ -4,8 +4,10 @@ import SpacesList from './SpacesList.vue'
 import { validSnapshot } from '../spaces-access.js'
 import { spacesGlobal } from './spaces-test-i18n.js'
 let wrapper
-const space = () => ({ id: 'space-a', name: 'Alex', clients: ['handheld'], steam: true, archived: false })
-const second = () => ({ id: 'space-b', name: 'Sam', clients: [], steam: true, archived: false })
+// A host sends both: `family` is what decides behaviour, and `steam` stays for
+// a client that predates launcher families.
+const space = () => ({ id: 'space-a', name: 'Alex', clients: ['handheld'], family: 'steam', steam: true, archived: false })
+const second = () => ({ id: 'space-b', name: 'Sam', clients: [], family: 'steam', steam: true, archived: false })
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u
 async function typeName(value) {
   const input = dialog().querySelector('[data-remove-name]')
@@ -207,6 +209,17 @@ describe('Spaces management', () => {
     expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({ operation: 'delete', profile_id: 'space-a', confirm_name: 'Alex' })
     expect(wrapper.get('[role=status]').text()).toContain('Alex was removed for good.')
     expect(wrapper.get('[role=status]').text()).toContain('Docker may have kept its network pn-space-a')
+  })
+
+  it('keeps the last Space of a family archivable only, even beside another family', async () => {
+    // A new Space copies one of its own family, so the last Heroic Space is
+    // kept even when Steam Spaces remain, and the reverse.
+    vi.stubGlobal('fetch', vi.fn())
+    start({ removalAvailable: true, profiles: [space(), { ...second(), family: 'heroic', steam: false }] })
+    await wrapper.get('[aria-label="Remove Alex"]').trigger('click')
+    await flushPromises()
+    expect(dialog().querySelector('[data-remove-delete]').disabled).toBe(true)
+    expect(dialog().querySelector('#space-remove-last').textContent).toContain('This is the only Space')
   })
 
   it('keeps the last Space archivable only and says why before anything is typed', async () => {

@@ -264,9 +264,9 @@ namespace {
     spaces::runtime_inspection_cache_t targets;
     host.images[lab_image] = labeled(lab_image, nvidia_labels("610.57.04"));
     const std::vector<profile_summary_t> profiles {
-      {"space-a", "Alex", {}, true, false, {}, true, lab_image},
-      {"space-b", "Sam", {}, true, false, {}, true, nvidia610.config_digest},
-      {"space-c", "Kai", {}, true, false, {}, true, nvidia615.config_digest},
+      {"space-a", "Alex", {}, "steam", false, {}, true, lab_image},
+      {"space-b", "Sam", {}, "steam", false, {}, true, nvidia610.config_digest},
+      {"space-c", "Kai", {}, "steam", false, {}, true, nvidia615.config_digest},
     };
     // A PC without an NVIDIA driver cannot mismatch: Docker is not asked.
     const auto amd = spaces::describe_space_runtimes(host, profiles, catalog, std::nullopt, &images, &targets);
@@ -311,7 +311,7 @@ namespace {
   spaces::move_facts_t movable() {
     spaces::move_facts_t facts;
     facts.admin_available = true;
-    facts.space = profile_summary_t {"space-a", "Alex", {"client-a"}, true, false, {}, true, lab_image};
+    facts.space = profile_summary_t {"space-a", "Alex", {"client-a"}, "steam", false, {}, true, lab_image};
     facts.image = {true, "", "steam", "1", "610.57.04"};
     facts.host_driver = "615.71.09";
     facts.choice = spaces::choose_runtime(catalog, facts.host_driver);
@@ -355,7 +355,8 @@ namespace {
         f.host_driver = "620.10.01"; f.choice = spaces::choose_runtime(catalog, f.host_driver); }, 409, "space_runtime_not_published"},
       {"stale page", [](auto &) {}, 409, "space_runtime_changed", "steam-nvidia-610"},
       {"another kind of Space", [](auto &f) { f.image.profile = "gamescope"; }, 409, "space_runtime_profile_mismatch"},
-      {"not a Steam Space", [](auto &f) { f.space->steam = false; }, 409, "space_runtime_profile_mismatch"},
+      {"a Space of another launcher family", [](auto &f) { f.space->family = "heroic"; }, 409, "space_runtime_profile_mismatch"},
+      {"a Space whose workload this build cannot stream", [](auto &f) { f.space->family = ""; }, 409, "space_runtime_profile_mismatch"},
       {"another media contract", [](auto &f) { f.image.media_contract = "2"; }, 409, "space_runtime_media_mismatch"},
       {"another account", [](auto &f) { f.home_uid = 1001; }, 409, "space_runtime_identity_mismatch"},
       {"another group", [](auto &f) { f.home_gid = 1001; }, 409, "space_runtime_identity_mismatch"},
