@@ -638,15 +638,22 @@ namespace multiseat::profiles {
           if (existing != catalog->profiles.end()) {
             if (existing->name != entry.name || existing->storage.image_reference != entry.storage.image_reference ||
                 existing->storage.opaque_volume_name != entry.storage.opaque_volume_name ||
-                existing->storage.runtime_profile != runtime_profile_e::steam || existing->workload != entry.workload) {
+                existing->storage.runtime_profile != entry.storage.runtime_profile ||
+                existing->workload != entry.workload) {
               result.error = "This creation request already identifies a different space.";
               return std::nullopt;
             }
             result.profile_key = request.request_id;
             return encode(*catalog);
           }
-          if (!catalog->profiles.empty()) {
-            result.error = "Spaces is already configured. Add another space from the existing setup.";
+          // The first Space of a launcher family, not the first Space on the
+          // host. A family's runtime carries its own launcher and its own
+          // library, so a host with Steam Spaces still has no Heroic one to
+          // copy, and copying across families would hand it the wrong launcher.
+          if (std::any_of(catalog->profiles.begin(), catalog->profiles.end(), [&](const auto &value) {
+                return value.storage.runtime_profile == entry.storage.runtime_profile;
+              })) {
+            result.error = "Spaces is already configured for this launcher. Add another space from the existing setup.";
             return std::nullopt;
           }
           catalog->profiles.push_back(entry);

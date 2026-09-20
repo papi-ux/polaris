@@ -305,7 +305,12 @@ namespace {
   }
 
   TEST_F(MultiseatProfileCatalog, FirstSpaceCannotReplaceAnExistingUnsafeOrBusyCatalog) {
-    save(sample());
+    // A catalog that already holds a Space of this family, which is the state
+    // the first-Space path exists to refuse.
+    auto configured = sample();
+    configured.profiles.front().storage.runtime_profile = runtime_profile_e::steam;
+    configured.profiles.front().workload = {workload_kind_e::steam, "big-picture-v1"};
+    save(configured);
     const auto before = psf::read_secure(path, profiles::maximum_catalog_bytes).payload;
     provisioning_host_t host; host.image_family = "steam";
     EXPECT_FALSE(profiles::create_first_space(path, first_request, first_image, "steam", host));
@@ -319,6 +324,36 @@ namespace {
     EXPECT_FALSE(profiles::create_first_space(path, first_request, first_image, "steam", host));
     EXPECT_EQ(psf::read_secure(path, profiles::maximum_catalog_bytes).payload, "not a catalog");
     EXPECT_TRUE(host.calls.empty());
+  }
+
+  /**
+   * A launcher family's runtime carries its own launcher and its own library,
+   * so a host full of Steam Spaces still has no Heroic one to copy. The first
+   * Space of each family takes the first-Space path, and only a Space of that
+   * same family closes it.
+   */
+  TEST_F(MultiseatProfileCatalog, AHostWithSteamSpacesCanStillMakeItsFirstHeroicSpace) {
+    auto configured = sample();
+    configured.profiles.front().storage.runtime_profile = runtime_profile_e::steam;
+    configured.profiles.front().workload = {workload_kind_e::steam, "big-picture-v1"};
+    save(configured);
+
+    provisioning_host_t host; host.image_family = "heroic";
+    ASSERT_TRUE(profiles::create_first_space(path, first_request, first_image, "heroic", host));
+    const auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    ASSERT_EQ(loaded->catalog.profiles.size(), 2U);
+    const auto &made = loaded->catalog.profiles.back();
+    EXPECT_EQ(made.storage.runtime_profile, runtime_profile_e::heroic);
+    EXPECT_EQ(made.workload.kind, workload_kind_e::heroic);
+    EXPECT_EQ(made.workload.target_id, "library-v1");
+    EXPECT_EQ(loaded->catalog.profiles.front().storage.runtime_profile, runtime_profile_e::steam)
+      << "the Steam Space it was made beside is untouched";
+
+    // And a second Heroic Space is not made this way: it copies the first.
+    provisioning_host_t again; again.image_family = "heroic";
+    profiles::first_space_request_t second {"22345678-1234-4234-8234-123456789abc", "Another"};
+    EXPECT_FALSE(profiles::create_first_space(path, second, first_image, "heroic", again));
   }
 
   TEST_F(MultiseatProfileCatalog, FirstSpaceFailuresRetainResourcesWithoutPublishingOrAdoptingAHome) {
