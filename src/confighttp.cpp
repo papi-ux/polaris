@@ -5279,7 +5279,10 @@ namespace confighttp {
       client_profiles::client_profile_t profile;
       profile.output_name = body.value("output_name", "");
       if (body.contains("color_range")) profile.color_range = body["color_range"].get<int>();
-      if (body.contains("hdr")) profile.hdr = body["hdr"].get<bool>();
+      // A null clears the override; get<bool>() would throw on it.
+      if (body.contains("hdr") && !body["hdr"].is_null()) {
+        profile.hdr = body["hdr"].get<bool>();
+      }
       profile.mac_address = body.value("mac_address", "");
 
       client_profiles::save_client_profile(name, profile);

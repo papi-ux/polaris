@@ -1716,6 +1716,7 @@
     "remove_stale": "Remove stale",
     "stale_alias_badge": "Stale alias",
     "remove": "Remove",
+    "hdr_auto": "Auto (follow the client)",
     "hdr_on": "On",
     "hdr_off": "Off",
     "recommendation_none": "No recommendation",
