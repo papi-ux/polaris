@@ -29,6 +29,10 @@ on:
         type: boolean
         default: false
         description: Build the locked NVIDIA userspace variant for the physical lane
+      nvidia_host:
+        type: boolean
+        default: false
+        description: Build the variant that borrows the host's NVIDIA driver instead of carrying one
 
 permissions:
   contents: read
@@ -58,31 +62,35 @@ jobs:
         env:
           PROFILE: ${{ matrix.profile }}
           NVIDIA: ${{ inputs.nvidia || 'false' }}
+          NVIDIA_HOST: ${{ inputs.nvidia_host || 'false' }}
         run: |
           set -euo pipefail
           python3 containers/multiseat/runtime_catalog.py validate containers/multiseat/runtime-catalog.json
           python3 -m unittest discover -s containers/multiseat -p 'test_*.py'
           arguments=("$PROFILE")
-          if [ "$NVIDIA" = true ]; then arguments+=(--nvidia); fi
+          if [ "$NVIDIA_HOST" = true ]; then arguments+=(--nvidia-host); elif [ "$NVIDIA" = true ]; then arguments+=(--nvidia); fi
           python3 containers/multiseat/prepare-inputs.py "${arguments[@]}"
       - name: Build offline and validate real providers
         env:
           PROFILE: ${{ matrix.profile }}
           NVIDIA: ${{ inputs.nvidia || 'false' }}
+          NVIDIA_HOST: ${{ inputs.nvidia_host || 'false' }}
         run: |
           set -euo pipefail
           arguments=("$PROFILE")
-          if [ "$NVIDIA" = true ]; then arguments+=(--nvidia); fi
+          if [ "$NVIDIA_HOST" = true ]; then arguments+=(--nvidia-host); elif [ "$NVIDIA" = true ]; then arguments+=(--nvidia); fi
           python3 containers/multiseat/build-image.py "${arguments[@]}"
       - name: Scan the image and declared dependencies
         env:
           PROFILE: ${{ matrix.profile }}
           NVIDIA: ${{ inputs.nvidia || 'false' }}
+          NVIDIA_HOST: ${{ inputs.nvidia_host || 'false' }}
           SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
           variant=default
           if [ "$NVIDIA" = true ]; then variant=nvidia; fi
+          if [ "$NVIDIA_HOST" = true ]; then variant=nvidia-host; fi
           artifact="build/worker-artifacts/$PROFILE/$variant"
           python3 containers/multiseat/audit-runtime.py "$artifact" \
             --source-revision "$SOURCE_REVISION" \

@@ -18,6 +18,7 @@ on:
         options:
           - default
           - nvidia
+          - nvidia-host
       source_revision:
         description: Reviewed master commit the artifact must name (40 hex characters)
         required: true
