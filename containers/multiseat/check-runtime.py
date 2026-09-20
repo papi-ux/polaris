@@ -29,6 +29,23 @@ if launcher:
     files.append(path)
     if profile == 'steam':
         files.append(pathlib.Path('/usr/bin/bash'))
+    if profile == 'heroic':
+        # Heroic never talks to a store itself: it runs that store's own
+        # downloader, legendary for Epic, gogdl for GOG and nile for Amazon,
+        # and the target grammar admits all three. A missing one is a library
+        # that reads empty and a launch that never starts, so they are found
+        # rather than assumed at a path a new Heroic release may move.
+        found = {}
+        for candidate in pathlib.Path('/opt/Heroic').rglob('*'):
+            if candidate.name in ('legendary', 'gogdl', 'nile') and candidate.is_file() \
+                    and os.access(candidate, os.X_OK):
+                found.setdefault(candidate.name, candidate)
+        missing = [name for name in ('legendary', 'gogdl', 'nile') if name not in found]
+        if missing:
+            raise ValueError('Heroic store backends are missing: ' + ', '.join(missing) +
+                             '. Either the package stopped bundling them or the target grammar '
+                             'admits a runner this image cannot serve.')
+        files += [found[name] for name in sorted(found)]
 
 files += [pathlib.Path('/usr/share/pipewire') / name for name in ['pipewire.conf', 'pipewire-pulse.conf']]
 files += [pathlib.Path(path) for path in [
