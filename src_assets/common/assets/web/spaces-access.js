@@ -48,17 +48,27 @@ function validRuntime(profile) {
   if (profile.runtime_mismatch === undefined) return true
   if (typeof profile.runtime_mismatch !== 'boolean' || !nullableDriver(profile.runtime_driver) ||
       !nullableDriver(profile.host_driver)) return false
-  // A mismatch always names both drivers, and only a mismatch offers a move.
+  // A mismatch always names both drivers.
   if (profile.runtime_mismatch && (!driver(profile.runtime_driver) || !driver(profile.host_driver))) return false
   const move = profile.runtime_move
+  // A mismatch always carries a move object, even one that offers nothing.
   if (move === null || move === undefined) return !profile.runtime_mismatch
-  if (!profile.runtime_mismatch || typeof move !== 'object' || typeof move.available !== 'boolean' || !word(move.code)) return false
-  return !move.available || (runtimeId(move.runtime_id) && driver(move.nvidia_driver) && typeof move.installed === 'boolean')
+  // A move is offered to repair a mismatch, or to upgrade a working Space onto
+  // a runtime that borrows this PC's driver. That runtime names no driver of
+  // its own, because it uses whichever one the PC has loaded.
+  const upgrade = move.reason === 'host_driver_available'
+  if (move.reason !== undefined && !word(move.reason)) return false
+  if ((!profile.runtime_mismatch && !upgrade) || typeof move !== 'object' ||
+      typeof move.available !== 'boolean' || !word(move.code)) return false
+  return !move.available || (runtimeId(move.runtime_id) && typeof move.installed === 'boolean' &&
+    (upgrade ? move.nvidia_driver === '' : driver(move.nvidia_driver)))
 }
 function validMoveJob(job) {
   const text = value => typeof value === 'string' && value.length <= 1024
+  // A job that moves a Space onto the runtime that borrows this PC's driver
+  // names no driver version, for the same reason the offer does not.
   return !!job && typeof job === 'object' && typeof job.request_id === 'string' && typeof job.profile_id === 'string' &&
-    !!job.profile_id && runtimeId(job.runtime_id) && driver(job.nvidia_driver) &&
+    !!job.profile_id && runtimeId(job.runtime_id) && nullableDriver(job.nvidia_driver) &&
     ['downloading', 'moving', 'done', 'failed'].includes(job.state) && (job.code === '' || word(job.code)) &&
     text(job.message) && text(job.action)
 }

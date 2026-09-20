@@ -1,0 +1,31 @@
+{
+  "comment": "One Space's runtime fields exactly as the host describes them when a runtime that borrows this PC's NVIDIA driver is available and the Space still works. The C++ side asserts it produces this; the console asserts it accepts it. Both read this file, because a server shape the console rejects reads as 'Could not verify Spaces' with nothing else to go on.",
+  "upgrade": {
+    "runtime_driver": "615.71.09",
+    "runtime_id": "steam-nvidia-615",
+    "host_driver": "615.71.09",
+    "runtime_mismatch": false,
+    "runtime_move": {
+      "available": true,
+      "runtime_id": "steam-nvidia-host",
+      "reason": "host_driver_available",
+      "nvidia_driver": "",
+      "installed": true,
+      "code": "runtime_ready"
+    }
+  },
+  "mismatch": {
+    "runtime_driver": "610.57.04",
+    "runtime_id": "steam-nvidia-610",
+    "host_driver": "615.71.09",
+    "runtime_mismatch": true,
+    "runtime_move": {
+      "available": true,
+      "runtime_id": "steam-nvidia-615",
+      "reason": "driver_mismatch",
+      "nvidia_driver": "615.71.09",
+      "installed": true,
+      "code": "runtime_ready"
+    }
+  }
+}

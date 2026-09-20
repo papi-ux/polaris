@@ -1,21 +1,29 @@
 <template>
   <div v-if="visible" class="mt-3 rounded-xl border p-3 text-sm" :class="done ? 'border-storm/20 bg-deep/40' : 'border-warning/30 bg-warning/10'"
        data-runtime-move :data-state="jobState || (mismatch ? 'mismatch' : '')">
-    <template v-if="mismatch">
-      <p class="font-semibold text-warning-bright">{{ $t('spaces.runtime_mismatch_title') }}</p>
-      <p class="mt-1 text-silver" data-runtime-detail>
-        {{ $t('spaces.runtime_mismatch_detail', { runtime: space.runtime_driver, host: space.host_driver }) }}
-      </p>
-      <p class="mt-1 text-storm">{{ $t('spaces.runtime_mismatch_blocked') }}</p>
+    <template v-if="mismatch || upgrade">
+      <template v-if="mismatch">
+        <p class="font-semibold text-warning-bright">{{ $t('spaces.runtime_mismatch_title') }}</p>
+        <p class="mt-1 text-silver" data-runtime-detail>
+          {{ $t('spaces.runtime_mismatch_detail', { runtime: space.runtime_driver, host: space.host_driver }) }}
+        </p>
+        <p class="mt-1 text-storm">{{ $t('spaces.runtime_mismatch_blocked') }}</p>
+      </template>
+      <template v-else>
+        <p class="font-semibold text-silver">{{ $t('spaces.runtime_upgrade_title') }}</p>
+        <p class="mt-1 text-silver" data-runtime-upgrade-detail>
+          {{ $t('spaces.runtime_upgrade_detail', { runtime: space.runtime_driver }) }}
+        </p>
+      </template>
       <template v-if="target">
         <p class="mt-1 text-storm" data-runtime-keeps>{{ $t('spaces.runtime_move_keeps') }}</p>
         <p v-if="!target.installed && !working && !running" class="mt-1 text-storm" data-runtime-download>
           {{ $t('spaces.runtime_move_download') }}
         </p>
         <Button v-if="available && !running" class="mt-3 h-auto min-h-8 py-1.5" variant="outline" size="sm" :loading="working"
-                :disabled="blocked" :aria-label="$t('spaces.runtime_move_aria', { name: space.name, driver: target.nvidia_driver })"
+                :disabled="blocked" :aria-label="upgrade ? $t('spaces.runtime_upgrade_aria', { name: space.name }) : $t('spaces.runtime_move_aria', { name: space.name, driver: target.nvidia_driver })"
                 :aria-describedby="blockedReasonId" data-runtime-move-button @click="openDialog">
-          {{ $t('spaces.runtime_move_button', { driver: target.nvidia_driver }) }}
+          {{ upgrade ? $t('spaces.runtime_upgrade_button') : $t('spaces.runtime_move_button', { driver: target.nvidia_driver }) }}
         </Button>
         <p v-else-if="!available" class="mt-2 text-storm" data-runtime-move-unavailable>{{ $t('spaces.runtime_move_unavailable') }}</p>
         <p v-if="otherRunning" :id="otherReasonId" class="mt-2 text-xs text-storm" data-runtime-move-other>{{ $t('spaces.runtime_move_other') }}</p>
@@ -63,13 +71,16 @@ const witnessed = ref(false)
 const otherReasonId = `runtime-move-other-${Math.random().toString(36).slice(2)}`
 
 const mismatch = computed(() => props.space.runtime_mismatch === true)
+// Offered without a mismatch: the Space works today, and this runtime keeps it
+// working across the next driver update.
+const upgrade = computed(() => !mismatch.value && props.space.runtime_move?.reason === 'host_driver_available')
 const target = computed(() => props.space.runtime_move?.available ? props.space.runtime_move : null)
 const ownJob = computed(() => props.job?.profile_id === props.space.id ? props.job : null)
 const jobState = computed(() => ownJob.value?.state || '')
 const running = computed(() => ['downloading', 'moving'].includes(jobState.value))
 const otherRunning = computed(() => !!props.job && !ownJob.value && ['downloading', 'moving'].includes(props.job.state))
-const done = computed(() => jobState.value === 'done' && !mismatch.value)
-const visible = computed(() => mismatch.value || running.value || (witnessed.value && !!ownJob.value))
+const done = computed(() => jobState.value === 'done' && !mismatch.value && !upgrade.value)
+const visible = computed(() => mismatch.value || upgrade.value || running.value || (witnessed.value && !!ownJob.value))
 const blocked = computed(() => props.locked || !props.ready || working.value || otherRunning.value)
 const blockedReasonId = computed(() => otherRunning.value ? otherReasonId : props.locked && props.lockReasonId ? props.lockReasonId : undefined)
 const impact = computed(() => [t('spaces.runtime_move_impact_home'), t('spaces.runtime_move_impact_devices'),

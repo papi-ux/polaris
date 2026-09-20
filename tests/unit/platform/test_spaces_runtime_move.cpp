@@ -187,6 +187,44 @@ namespace {
     EXPECT_FALSE(spaces::driver_mismatch({true, "", "steam", "1", ""}, std::string("615.71.09")));
   }
 
+  /**
+   * The console refuses a whole snapshot it cannot verify, and says only
+   * "Could not verify Spaces". So the shape this host sends and the shape that
+   * console accepts are pinned to one file both sides read.
+   */
+  TEST(SpacesRuntimeMove, DescribesAnUpgradeExactlyAsTheConsoleExpectsIt) {
+    const std::filesystem::path source {POLARIS_SOURCE_DIR};
+    std::ifstream file(source / "tests/fixtures/spaces-runtime-upgrade.json");
+    ASSERT_TRUE(file) << "the shared shape must be readable from both languages";
+    const auto expected = json::parse(file);
+
+    std::vector<spaces::runtime_t> both {
+      {"steam-nvidia-615", "nvidia", std::string(40, 'a'), "sha256:" + std::string(64, '1'),
+       "sha256:" + std::string(64, '2'), "615.71.09"},
+    };
+    spaces::runtime_t borrowing {"steam-nvidia-host", "nvidia-host", std::string(40, 'a'),
+      "sha256:" + std::string(64, '3'), "sha256:" + std::string(64, '4'), ""};
+    borrowing.nvidia_minimum_driver = "570.00";
+    both.insert(both.begin(), borrowing);
+
+    // A Space on the runtime built for exactly this driver: nothing is broken,
+    // and the borrowing runtime is still offered.
+    const spaces::image_runtime_t current {true, "steam-nvidia-615", "steam", "1", "615.71.09"};
+    const auto upgrade = spaces::describe_space_runtime(current, std::string("615.71.09"),
+      spaces::choose_runtime(both, std::string("615.71.09")), spaces::runtime_image_e::verified);
+    EXPECT_EQ(upgrade, expected.at("upgrade"));
+
+    // And a Space built for another driver still reads as a repair.
+    const spaces::image_runtime_t older {true, "steam-nvidia-610", "steam", "1", "610.57.04"};
+    std::vector<spaces::runtime_t> baked {
+      {"steam-nvidia-615", "nvidia", std::string(40, 'a'), "sha256:" + std::string(64, '1'),
+       "sha256:" + std::string(64, '2'), "615.71.09"},
+    };
+    const auto repair = spaces::describe_space_runtime(older, std::string("615.71.09"),
+      spaces::choose_runtime(baked, std::string("615.71.09")), spaces::runtime_image_e::verified);
+    EXPECT_EQ(repair, expected.at("mismatch"));
+  }
+
   TEST(SpacesRuntimeMove, TheSpacesPageLearnsWhyAndWhereTheSpaceCanMove) {
     const spaces::image_runtime_t made_for_610 {true, "steam-nvidia-610", "steam", "1", "610.57.04"};
     const auto choice = spaces::choose_runtime(catalog, std::string("615.71.09"));
@@ -196,7 +234,7 @@ namespace {
     EXPECT_EQ(ready["host_driver"], "615.71.09");
     EXPECT_EQ(ready["runtime_mismatch"], true);
     EXPECT_EQ(ready["runtime_move"], (json {{"available", true}, {"runtime_id", "steam-nvidia-615"},
-      {"nvidia_driver", "615.71.09"}, {"installed", true}, {"code", "runtime_ready"}}));
+      {"reason", "driver_mismatch"}, {"nvidia_driver", "615.71.09"}, {"installed", true}, {"code", "runtime_ready"}}));
     const auto absent = spaces::describe_space_runtime(made_for_610, std::string("615.71.09"), choice, spaces::runtime_image_e::absent);
     EXPECT_EQ(absent["runtime_move"]["installed"], false);
     EXPECT_EQ(absent["runtime_move"]["code"], "not_downloaded");

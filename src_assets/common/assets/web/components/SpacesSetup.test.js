@@ -323,6 +323,39 @@ describe('Spaces setup', () => {
     expect(validSetup(bad)).toBe(false)
   })
 
+  it('accepts the NVIDIA driver files check, and still rejects an unknown one', async () => {
+    // A host with an NVIDIA driver loaded sends one more check than a host
+    // without one. Counting rows instead of naming them made the whole
+    // response fail to verify, which reads as "recheck setup" forever.
+    const nvidia = snapshot(true)
+    nvidia.checks.splice(6, 0, {
+      id: 'nvidia_libraries', title: 'NVIDIA driver files', doc_anchor: '#nvidia-driver-files',
+      detail: "This PC's NVIDIA driver files are ready for a space to borrow.", action: '', state: 'ready',
+    })
+    expect(validSetup(nvidia)).toBe(true)
+
+    // It does not decide whether the host is ready, so a host that is missing
+    // the 32 bit half still sets up.
+    const missing = snapshot(true)
+    missing.checks.splice(6, 0, {
+      id: 'nvidia_libraries', title: 'NVIDIA driver files', doc_anchor: '#nvidia-driver-files',
+      detail: 'Install xorg-x11-drv-nvidia-libs.i686.', action: '', state: 'required',
+    })
+    expect(validSetup(missing)).toBe(true)
+    expect(missing.host_prerequisites_ready).toBe(true)
+
+    // A host without an NVIDIA driver sends no such row at all.
+    expect(validSetup(snapshot(true))).toBe(true)
+
+    const unknown = snapshot(true)
+    unknown.checks.push({ id: 'something_else', title: 'x', detail: 'x', action: '', state: 'ready' })
+    expect(validSetup(unknown)).toBe(false)
+
+    const incomplete = snapshot(true)
+    incomplete.checks = incomplete.checks.filter(check => check.id !== 'gpu')
+    expect(validSetup(incomplete)).toBe(false)
+  })
+
   it('copies a step command and says so', async () => {
     const writeText = vi.fn(async () => {})
     vi.stubGlobal('navigator', { clipboard: { writeText } })
