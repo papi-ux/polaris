@@ -4,8 +4,8 @@ import MultiseatProfileCreate from './MultiseatProfileCreate.vue'
 import { spacesGlobal } from './spaces-test-i18n.js'
 
 const id = '12345678-1234-4234-8234-123456789abc'
-const source = { id: 'profile-a', name: 'Alex', steam: true, clients: ['device-a'] }
-const created = { id, name: 'Player 2', steam: true, clients: [] }
+const source = { id: 'profile-a', name: 'Alex', family: 'steam', steam: true, clients: ['device-a'] }
+const created = { id, name: 'Player 2', family: 'steam', steam: true, clients: [] }
 const reply = (body, status = 200) => ({ ok: status < 400, status, json: async () => body })
 const button = text => wrapper.findAll('button').find(item => item.text() === text)
 let wrapper, refresh
@@ -37,7 +37,7 @@ describe('Steam profile creation', () => {
     expect(url).toBe('./api/multiseat/profiles')
     expect(options.method).toBe('POST')
     expect(options.credentials).toBe('include')
-    expect(JSON.parse(options.body)).toEqual({ request_id: id, source_profile_id: 'profile-a', name: 'Player 2' })
+    expect(JSON.parse(options.body)).toEqual({ request_id: id, family: 'steam', name: 'Player 2' })
     expect(wrapper.get('[role=status]').text()).toContain('Player 2 was created')
     expect(wrapper.find('form').exists()).toBe(false)
     expect(wrapper.emitted('busy')).toEqual([[true], [false]])
@@ -127,19 +127,21 @@ describe('Steam profile creation', () => {
     expect(button('Retry creation').element.disabled).toBe(true)
   })
 
-  it('offers only live Steam sources and preserves an explicit selection', async () => {
-    const second = { ...source, id: 'profile-b', name: 'Sam' }
-    await open({ profiles: [source, { id: 'fixture', name: 'Comparison', steam: false }, second,
-      { id: 'gone', name: 'Archived', steam: true, archived: true, clients: [] }] })
-    expect(wrapper.findAll('option').map(item => item.text())).toEqual(['Alex', 'Sam'])
-    await wrapper.get('select').setValue('profile-b')
+  it('offers the launchers this PC already runs a Space for, and sends the chosen one', async () => {
+    // A Space is a launcher plus a home, so the choice is the launcher rather
+    // than which Space to copy: every Space of a family shares its image.
+    await open({ profiles: [source, { id: 'fixture', name: 'Comparison', family: '' },
+      { id: 'heroic-a', name: 'Heroic Space', family: 'heroic', clients: [] },
+      { id: 'gone', name: 'Archived', family: 'lutris', archived: true, clients: [] }] })
+    expect(wrapper.findAll('option').map(item => item.text())).toEqual(['Steam', 'Heroic'])
+    await wrapper.get('select').setValue('heroic')
     await wrapper.get('form').trigger('submit')
     await flushPromises()
-    expect(JSON.parse(fetch.mock.calls[0][1].body).source_profile_id).toBe('profile-b')
+    expect(JSON.parse(fetch.mock.calls[0][1].body).family).toBe('heroic')
   })
 
-  it('points at Host Setup when no Steam source exists', async () => {
-    wrapper = mount(MultiseatProfileCreate, { global: spacesGlobal, props: { profiles: [{ ...source, steam: false }], refresh } })
+  it('points at Host Setup when no launcher is set up yet', async () => {
+    wrapper = mount(MultiseatProfileCreate, { global: spacesGlobal, props: { profiles: [{ ...source, family: '', steam: false }], refresh } })
     expect(button('Create a Space').element.disabled).toBe(true)
     expect(wrapper.text()).toContain('prepared under Host Setup')
     expect(fetch).not.toHaveBeenCalled()
@@ -203,7 +205,7 @@ describe('Steam profile creation', () => {
   })
 
   it('clears a restored request only after finding its exact saved space', async () => {
-    sessionStorage.setItem('polaris:spaces:create-request:v1', JSON.stringify({ request_id: id, source_profile_id: source.id, name: created.name }))
+    sessionStorage.setItem('polaris:spaces:create-request:v1', JSON.stringify({ request_id: id, family: 'steam', name: created.name }))
     wrapper = mount(MultiseatProfileCreate, { global: spacesGlobal, props: { profiles: [source, created], ready: true, refresh } })
     await flushPromises()
     expect(wrapper.text()).toContain('Player 2 was created')
@@ -211,8 +213,19 @@ describe('Steam profile creation', () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
+  it('ignores a request saved before launchers, which named a Space to copy', async () => {
+    // Left by an older console in this browser. It cannot be replayed as it
+    // stands, and guessing a launcher for it would create the wrong Space.
+    sessionStorage.setItem('polaris:spaces:create-request:v1',
+      JSON.stringify({ request_id: id, source_profile_id: source.id, name: created.name }))
+    wrapper = mount(MultiseatProfileCreate, { global: spacesGlobal, props: { profiles: [source], ready: true, refresh } })
+    await flushPromises()
+    expect(wrapper.find('form').exists()).toBe(false)
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it('ignores invalid saved requests and never submits them', async () => {
-    sessionStorage.setItem('polaris:spaces:create-request:v1', JSON.stringify({ request_id: 'invalid', source_profile_id: source.id, name: created.name }))
+    sessionStorage.setItem('polaris:spaces:create-request:v1', JSON.stringify({ request_id: 'invalid', family: 'steam', name: created.name }))
     wrapper = mount(MultiseatProfileCreate, { global: spacesGlobal, props: { profiles: [source], ready: true, refresh } })
     await flushPromises()
     expect(wrapper.find('form').exists()).toBe(false)

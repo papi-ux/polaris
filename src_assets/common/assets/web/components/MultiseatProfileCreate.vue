@@ -2,10 +2,10 @@
   <div class="mt-5 border-t border-storm/20 pt-4">
     <p v-if="message" class="mb-3 break-words text-sm text-silver" role="status">{{ message }}</p>
     <p v-if="error" class="mb-3 break-words text-sm text-warning-bright" role="alert">{{ error }}</p>
-    <Button v-if="!showForm" ref="openButton" variant="outline" size="sm" :disabled="locked || !sources.length" @click="openForm">
+    <Button v-if="!showForm" ref="openButton" variant="outline" size="sm" :disabled="locked || !families.length" @click="openForm">
       {{ $t('spaces.create') }}
     </Button>
-    <p v-if="!sources.length" class="mt-2 text-xs text-storm">{{ $t('spaces.create_first_hint') }}</p>
+    <p v-if="!families.length" class="mt-2 text-xs text-storm">{{ $t('spaces.create_first_hint') }}</p>
     <form v-if="showForm" class="rounded-xl border border-storm/20 bg-deep/40 p-4" @submit.prevent="submit">
       <h3 class="text-sm font-semibold text-silver">{{ $t('spaces.new_space') }}</h3>
       <p class="mt-1 text-sm text-storm">{{ $t('spaces.new_space_copy') }}</p>
@@ -16,22 +16,20 @@
       <p id="new-steam-name-help" class="mt-1 text-xs text-storm">
         {{ name.trim() && !validName ? $t('spaces.name_invalid') : $t('spaces.name_help') }}
       </p>
-      <details v-if="sources.length > 1" class="settings-disclosure mt-4">
-        <summary class="settings-disclosure-summary focus-ring cursor-pointer rounded text-sm text-storm">
-          <span>{{ $t('spaces.advanced') }}</span>
-          <svg class="settings-disclosure-chevron h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
-          </svg>
-        </summary>
-        <label for="new-steam-profile-source" class="mt-4 block text-sm text-silver">{{ $t('spaces.based_on') }}</label>
-        <select id="new-steam-profile-source" v-model="source" :disabled="locked || !!pending" class="settings-input mt-2 min-w-0 text-sm">
-          <option v-for="profile in sources" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
+      <div v-if="families.length > 1" class="mt-4">
+        <label for="new-space-launcher" class="block text-sm text-silver">{{ $t('spaces.launcher') }}</label>
+        <select id="new-space-launcher" v-model="family" :disabled="locked || !!pending" class="settings-input mt-2 min-w-0 text-sm">
+          <option v-for="value in families" :key="value" :value="value">{{ launcherName(value) }}</option>
         </select>
-      </details>
+        <p class="mt-1 text-xs text-storm">{{ $t('spaces.launcher_help') }}</p>
+      </div>
+      <p v-else-if="families.length === 1" class="mt-4 text-sm text-storm">
+        {{ $t('spaces.launcher_only', { launcher: launcherName(families[0]) }) }}
+      </p>
       <p class="mt-3 text-xs text-storm">{{ $t('spaces.create_note') }}</p>
       <div class="mt-4 flex flex-wrap gap-2">
         <Button type="submit" variant="outline" size="sm" :loading="working"
-                :disabled="locked || working || (!pending && (!validName || !validSource))">
+                :disabled="locked || working || (!pending && (!validName || !validFamily))">
           {{ working ? $t('spaces.creating') : pending ? $t('spaces.retry_creation') : $t('spaces.create_submit') }}
         </Button>
         <Button v-if="pending" type="button" variant="ghost" size="sm" class="text-ice" :disabled="working || refreshing" @click="checkStatus">
@@ -61,17 +59,22 @@ const emit = defineEmits(['busy'])
 const i18n = inject('i18n')
 const t = (key, params) => i18n.t(key, params)
 const { toast } = useToast()
-// A new Space copies the runtime setup of a live Steam Space; archived ones are
-// not offered, since their catalog row carries no devices to inherit from.
-const sources = computed(() => props.profiles.filter(profile => profile.steam === true && !profile.archived))
-const name = ref(''), source = ref(''), showForm = ref(false), working = ref(false)
+// A Space is a launcher plus a home. The person picks the launcher, and the
+// host copies the runtime of a live Space that already runs it, so only the
+// launchers this PC is already set up for are offered here. Setting up a
+// launcher for the first time downloads its runtime and happens in Host Setup.
+const launchers = ['steam', 'heroic', 'lutris']
+const families = computed(() => launchers.filter(value =>
+  props.profiles.some(profile => profile.family === value && !profile.archived)))
+const launcherName = value => t('spaces.launcher_' + value)
+const name = ref(''), family = ref(''), showForm = ref(false), working = ref(false)
 const message = ref(''), error = ref(''), pending = ref(null)
 const requestSaved = ref(false)
 const pendingKey = 'polaris:spaces:create-request:v1'
 const nameInput = ref(null), openButton = ref(null)
 const validName = computed(() => !!name.value.trim() && new TextEncoder().encode(name.value.trim()).length <= 128 &&
   !/[\u0000-\u001f\u007f]/u.test(name.value.trim()))
-const validSource = computed(() => sources.value.some(profile => profile.id === source.value))
+const validFamily = computed(() => families.value.includes(family.value))
 
 function savePending() {
   try {
@@ -94,11 +97,11 @@ function restorePending() {
     const saved = JSON.parse(raw)
     if (!saved || typeof saved.request_id !== 'string' ||
         !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u.test(saved.request_id) ||
-        typeof saved.source_profile_id !== 'string' || !saved.source_profile_id || saved.source_profile_id.length > 128 ||
+        typeof saved.family !== 'string' || !launchers.includes(saved.family) ||
         typeof saved.name !== 'string' || !saved.name.trim() ||
         new TextEncoder().encode(saved.name).length > 128 || /[\u0000-\u001f\u007f]/u.test(saved.name)) return
-    pending.value = { request_id: saved.request_id, source_profile_id: saved.source_profile_id, name: saved.name }
-    name.value = saved.name; source.value = saved.source_profile_id
+    pending.value = { request_id: saved.request_id, family: saved.family, name: saved.name }
+    name.value = saved.name; family.value = saved.family
     showForm.value = true; requestSaved.value = true
     message.value = t('spaces.creation_waiting')
     confirmCreation()
@@ -107,7 +110,7 @@ function restorePending() {
 onMounted(restorePending)
 
 async function openForm() {
-  source.value = sources.value[0]?.id || ''
+  family.value = families.value[0] || ''
   showForm.value = true
   message.value = ''; error.value = ''
   await nextTick(); nameInput.value?.focus()
@@ -119,7 +122,7 @@ async function closeForm() {
 function confirmCreation() {
   if (!pending.value || !props.ready) return false
   const found = props.profiles.find(profile => profile.id === pending.value.request_id &&
-    profile.name === pending.value.name && profile.steam === true && !profile.archived)
+    profile.name === pending.value.name && !!profile.family && !profile.archived)
   if (!found) return false
   message.value = t('spaces.created', { name: found.name })
   toast(message.value, 'success')
@@ -128,8 +131,8 @@ function confirmCreation() {
   return true
 }
 watch(() => [props.profiles, props.ready], () => { if (!working.value) confirmCreation() })
-watch(sources, () => {
-  if (!pending.value && !validSource.value) source.value = sources.value[0]?.id || ''
+watch(families, () => {
+  if (!pending.value && !validFamily.value) family.value = families.value[0] || ''
 })
 
 async function refreshProfiles() {
@@ -150,12 +153,12 @@ async function checkStatus() {
 }
 
 async function submit() {
-  if (props.locked || working.value || (!pending.value && (!validName.value || !validSource.value))) return
+  if (props.locked || working.value || (!pending.value && (!validName.value || !validFamily.value))) return
   working.value = true; emit('busy', true)
   message.value = ''; error.value = ''
   try {
     if (!pending.value) {
-      pending.value = { request_id: crypto.randomUUID(), source_profile_id: source.value, name: name.value.trim() }
+      pending.value = { request_id: crypto.randomUUID(), family: family.value, name: name.value.trim() }
       savePending()
     }
     const response = await fetch('./api/multiseat/profiles', {

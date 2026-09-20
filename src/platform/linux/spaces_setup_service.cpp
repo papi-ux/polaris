@@ -191,7 +191,11 @@ namespace multiseat::spaces {
   json setup_service_t::snapshot() const {
     std::lock_guard lock(mutex_);
     json runtimes = json::array();
-    for (const auto &r : catalog_) runtimes.push_back({{"id", r.id}, {"variant", r.variant}, {"nvidia_driver", r.nvidia_driver}});
+    // The launcher a runtime carries, so the picker can name it rather than
+    // calling every runtime Steam.
+    for (const auto &r : catalog_)
+      runtimes.push_back({{"id", r.id}, {"profile", r.profile}, {"variant", r.variant},
+        {"nvidia_driver", r.nvidia_driver}});
     json result {{"version", 1}, {"available", enabled_ && !fault_ && !closing_ && bool(lease_)},
       {"runtimes", runtimes}, {"graphics", json::array()}, {"job", nullptr},
       {"message", !enabled_ ? "Spaces already have local configuration. Manage your existing spaces below." :
