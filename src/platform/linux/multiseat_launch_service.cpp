@@ -427,6 +427,36 @@ namespace multiseat {
       if (!admin.create && !admin.catalog.empty())
         admin.create = [path = admin.catalog](const auto &request) {
           container::local_host_t host;
+          // A launcher this PC already runs a Space for copies that Space's
+          // runtime. The first Space of a launcher has none to copy, so it
+          // takes the image from the admitted catalog entry for that family,
+          // which must already be downloaded: this path never pulls.
+          if (!request.family.empty()) {
+            const auto &catalog = spaces::trusted_runtimes();
+            // Read the catalog and let go of it: the lease this takes is the
+            // same one the write below needs, so holding it here would refuse
+            // every first Space of a launcher.
+            bool have_one = false;
+            {
+              const auto existing = profiles::load(path);
+              have_one = existing && std::any_of(existing->catalog.profiles.begin(),
+                existing->catalog.profiles.end(), [&](const auto &entry) {
+                  return runtime_profile_name(entry.storage.runtime_profile) == request.family && !entry.archived;
+                });
+            }
+            if (!have_one && catalog) {
+              const auto choice = spaces::choose_runtime(*catalog, spaces::loaded_nvidia_driver(), request.family);
+              if (!choice.runtime)
+                return profiles::change_result_t {.error = "This Polaris build has no gaming runtime for that launcher."};
+              const auto facts = spaces::inspect_runtime(host, *catalog, spaces::loaded_nvidia_driver(), true,
+                &spaces::runtime_inspection_cache(), request.family);
+              if (facts.status != "ready")
+                return profiles::change_result_t {
+                  .error = "That launcher's gaming runtime is not downloaded on this PC yet."};
+              return profiles::create_first_space(path, {request.request_id, request.name},
+                choice.runtime->config_digest, request.family, host);
+            }
+          }
           return profiles::create_space(path, request, host);
         };
       if (!admin.edit && !admin.catalog.empty())
@@ -1033,9 +1063,21 @@ namespace multiseat {
             [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
           return {409, "Stop every Space stream and wait for cleanup before changing Spaces.", "spaces_streaming", "End the running Space streams, then try again."};
         const auto catalog = impl_->controller->profile_catalog();
-        if (std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) {
-              return entry.id == creation.source_profile_id && !entry.family.empty();
-            })) return {404, "Select an existing Steam Space to base the new one on.", "space_source_unknown"};
+        // Either a launcher this PC already runs, or the Space to copy.
+        if (creation.family.empty()) {
+          if (std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) {
+                return entry.id == creation.source_profile_id && !entry.family.empty();
+              })) return {404, "Select an existing Space to base the new one on.", "space_source_unknown"};
+        } else if (std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) {
+              return entry.family == creation.family && !entry.archived;
+            })) {
+          // The first Space of a launcher has none to copy, so it needs a
+          // runtime this build publishes for that family. Whether that runtime
+          // is downloaded is answered where the Space is actually made.
+          const auto &runtimes = spaces::trusted_runtimes();
+          if (!runtimes || !spaces::choose_runtime(*runtimes, spaces::loaded_nvidia_driver(), creation.family).runtime)
+            return {404, "This Polaris build has no gaming runtime for that launcher.", "space_family_unpublished"};
+        }
         request = std::make_shared<impl_t::admin_request_t>();
         request->creation = std::move(creation);
         impl_->reconfiguring = true;

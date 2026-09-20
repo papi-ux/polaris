@@ -538,8 +538,10 @@ namespace multiseat::profiles {
   }
 
   bool valid_space_create_request(const space_create_request_t &request) {
-    return valid_new_steam(request.request_id, request.name) && token(request.source_profile_id) &&
-      request.request_id != request.source_profile_id;
+    if (!valid_new_steam(request.request_id, request.name)) return false;
+    if (!request.family.empty())
+      return request.source_profile_id.empty() && launcher_family(request.family) != runtime_profile_e::unknown;
+    return token(request.source_profile_id) && request.request_id != request.source_profile_id;
   }
 
   std::optional<space_create_request_t> decode_space_create_request(std::string_view payload) {
@@ -552,9 +554,15 @@ namespace multiseat::profiles {
           throw std::invalid_argument("duplicate creation field");
         return true;
       });
-      keys(body, {"request_id", "source_profile_id", "name"});
+      // Two shapes: a launcher family the person picked, or the Space to copy,
+      // which is what a client from before families sends.
+      const bool by_family = body.is_object() && body.contains("family");
+      keys(body, by_family ? std::initializer_list<const char *> {"request_id", "family", "name"} :
+                             std::initializer_list<const char *> {"request_id", "source_profile_id", "name"});
       space_create_request_t request {body.at("request_id").get<std::string>(),
-        body.at("source_profile_id").get<std::string>(), body.at("name").get<std::string>()};
+        by_family ? std::string {} : body.at("source_profile_id").get<std::string>(),
+        body.at("name").get<std::string>(),
+        by_family ? body.at("family").get<std::string>() : std::string {}};
       return valid_space_create_request(request) ? std::optional {std::move(request)} : std::nullopt;
     } catch (...) { return std::nullopt; }
   }
@@ -568,8 +576,13 @@ namespace multiseat::profiles {
         result.error = "Current Spaces runtime images require the catalog and service identity to be 1000:1000.";
         return std::nullopt;
       }
+      // A picked family copies any Space that already runs that launcher, since
+      // they all share its image. Naming a Space instead still copies that one.
+      const auto wanted = launcher_family(request.family);
       const auto source = std::find_if(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &entry) {
-        return entry.storage.profile_key == request.source_profile_id;
+        if (request.family.empty()) return entry.storage.profile_key == request.source_profile_id;
+        return entry.storage.runtime_profile == wanted && !entry.archived &&
+          container::supported_streaming_workload(entry.storage.runtime_profile, entry.workload);
       });
       // A new Space is the same kind of Space as the one it is based on: the
       // family decides which launcher the image carries and which library is
@@ -578,7 +591,9 @@ namespace multiseat::profiles {
         workload_plan_t {} : launcher_workload(source->storage.runtime_profile);
       if (source == catalog.profiles.end() || workload.kind == workload_kind_e::unknown ||
           !container::supported_streaming_workload(source->storage.runtime_profile, source->workload)) {
-        result.error = "Select an existing configured Space."; return std::nullopt;
+        result.error = request.family.empty() ? "Select an existing configured Space." :
+          "This PC has no Space for that launcher yet. Set one up first.";
+        return std::nullopt;
       }
       const entry_t entry {
         .storage = {request.request_id, "pv-" + request.request_id, source->storage.runtime_profile,

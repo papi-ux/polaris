@@ -91,6 +91,15 @@ namespace multiseat::profiles {
     const workload_plan_t &workload = {workload_kind_e::gamescope, "input-pong-v1"});
   struct space_create_request_t {
     std::string request_id, source_profile_id, name;
+    /**
+     * The launcher family the new Space runs, when the client picked one rather
+     * than naming a Space to copy. Exactly one of this and source_profile_id is
+     * set: they answer the same question, and a client that sent both
+     * disagreeing would be ambiguous. Either way the new Space copies the image
+     * of an existing Space of that family, so no download can be triggered from
+     * this path.
+     */
+    std::string family;
     bool operator==(const space_create_request_t &) const = default;
   };
   [[nodiscard]] bool valid_space_create_request(const space_create_request_t &request);

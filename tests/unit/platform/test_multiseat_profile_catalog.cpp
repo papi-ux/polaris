@@ -479,6 +479,56 @@ namespace {
     EXPECT_TRUE(host.calls.empty());
   }
 
+  /**
+   * A Space is a launcher plus a home, so the person picks the launcher and the
+   * host copies a Space that already runs it. Naming a Space to copy stays the
+   * shape a client from before launcher families sends.
+   */
+  TEST_F(MultiseatProfileCatalog, CreationByLauncherFamilyCopiesASpaceThatAlreadyRunsIt) {
+    auto configured = sample();
+    configured.profiles.front().storage.runtime_profile = runtime_profile_e::heroic;
+    configured.profiles.front().workload = {workload_kind_e::heroic, "library-v1"};
+    save(configured);
+
+    provisioning_host_t host; host.image_family = "heroic";
+    profiles::space_create_request_t by_family {steam_request.request_id, {}, "Second", "heroic"};
+    ASSERT_TRUE(profiles::create_space(path, by_family, host));
+    const auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    ASSERT_EQ(loaded->catalog.profiles.size(), 2U);
+    const auto &made = loaded->catalog.profiles.back();
+    EXPECT_EQ(made.storage.runtime_profile, runtime_profile_e::heroic);
+    EXPECT_EQ(made.workload.target_id, "library-v1");
+    EXPECT_EQ(made.storage.image_reference, loaded->catalog.profiles.front().storage.image_reference)
+      << "a family's Spaces all share its image, so nothing is downloaded here";
+
+    // A launcher this PC runs no Space for cannot be copied from nothing.
+    provisioning_host_t empty_host; empty_host.image_family = "lutris";
+    profiles::space_create_request_t missing {"32345678-1234-4234-8234-123456789abc", {}, "Third", "lutris"};
+    EXPECT_FALSE(profiles::create_space(path, missing, empty_host));
+    EXPECT_TRUE(empty_host.calls.empty());
+  }
+
+  TEST(MultiseatSteamCreationRequest, AcceptsALauncherFamilyInPlaceOfASourceSpace) {
+    const json by_family {{"request_id", steam_request.request_id}, {"family", "heroic"}, {"name", "Second"}};
+    const auto decoded = profiles::decode_space_create_request(by_family.dump());
+    ASSERT_TRUE(decoded);
+    EXPECT_EQ(decoded->family, "heroic");
+    EXPECT_TRUE(decoded->source_profile_id.empty());
+
+    // The two shapes answer the same question, so one or the other, never both,
+    // and never a family this build carries no launcher for.
+    for (const auto &payload : {
+           json {{"request_id", steam_request.request_id}, {"family", "heroic"},
+                 {"source_profile_id", steam_request.source_profile_id}, {"name", "Second"}},
+           json {{"request_id", steam_request.request_id}, {"family", "gamescope"}, {"name", "Second"}},
+           json {{"request_id", steam_request.request_id}, {"family", ""}, {"name", "Second"}},
+           json {{"request_id", steam_request.request_id}, {"family", "../steam"}, {"name", "Second"}},
+           json {{"request_id", steam_request.request_id}, {"family", 3}, {"name", "Second"}}}) {
+      EXPECT_FALSE(profiles::decode_space_create_request(payload.dump())) << payload;
+    }
+  }
+
   TEST(MultiseatSteamCreationRequest, RejectsUnboundedAmbiguousAndRuntimeAuthorityFields) {
     const json base {{"request_id", steam_request.request_id}, {"source_profile_id", steam_request.source_profile_id},
       {"name", steam_request.name}};
