@@ -218,10 +218,7 @@ namespace multiseat {
     if (!contract || !catalog) return;
     options.host_driver_image = [](std::string_view image) {
       const auto &runtimes = spaces::trusted_runtimes();
-      if (!runtimes) return false;
-      return std::any_of(runtimes->begin(), runtimes->end(), [&](const auto &runtime) {
-        return runtime.variant == "nvidia-host" && runtime.reference() == image;
-      });
+      return runtimes && spaces::borrows_host_driver(image, *runtimes);
     };
     const auto loaded = spaces::loaded_nvidia_driver();
     if (!loaded || loaded->empty()) return;

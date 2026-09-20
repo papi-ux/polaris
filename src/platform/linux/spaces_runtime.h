@@ -26,6 +26,12 @@ namespace multiseat::spaces {
   [[nodiscard]] std::optional<std::vector<runtime_t>> decode_runtime_catalog(std::string_view payload);
   [[nodiscard]] const std::optional<std::vector<runtime_t>> &trusted_runtimes();
   [[nodiscard]] bool matches_runtime_image(const runtime_t &runtime, std::string_view inspection);
+  /**
+   * True when a Space's image is a catalog runtime that carries no driver of
+   * its own. A Space names the image it launches by its own identity, which is
+   * the config digest Docker reports, never the reference it was pulled by.
+   */
+  [[nodiscard]] bool borrows_host_driver(std::string_view image, const std::vector<runtime_t> &catalog);
   // Docker's classic store addresses configurations; its containerd store
   // addresses manifests. Both identities must belong to the compiled catalog.
   [[nodiscard]] std::optional<std::string> verified_runtime_image(const runtime_t &runtime, std::string_view inspection);

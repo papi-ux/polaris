@@ -102,6 +102,31 @@ TEST(SpacesRuntime, CatalogIsBoundedAndRejectsIncompatibleOrAmbiguousEntries) {
   }
 }
 
+TEST(SpacesRuntime, ASpaceIsRecognisedAsBorrowingByTheImageIdentityItStores) {
+  // A Space records the image it launches as the identity Docker reports, the
+  // config digest. Comparing against the reference it was pulled by instead
+  // leaves the Space unmarked, and it then starts with no driver files at all.
+  auto host_driver = entry();
+  host_driver["id"] = "steam-nvidia-host";
+  host_driver["variant"] = "nvidia-host";
+  host_driver["nvidia_minimum_driver"] = "570.00";
+  auto baked = entry();
+  baked["id"] = "steam-nvidia-615";
+  baked["variant"] = "nvidia";
+  baked["nvidia_driver"] = "615.71.09";
+  baked["registry_digest"] = "sha256:" + std::string(64, 'd');
+  baked["config_digest"] = "sha256:" + std::string(64, 'e');
+  const auto runtimes = spaces::decode_runtime_catalog(catalog(json::array({host_driver, baked})));
+  ASSERT_TRUE(runtimes);
+
+  EXPECT_TRUE(spaces::borrows_host_driver("sha256:" + std::string(64, 'c'), *runtimes)) << "its config digest";
+  EXPECT_TRUE(spaces::borrows_host_driver("sha256:" + std::string(64, 'b'), *runtimes)) << "its registry digest";
+  EXPECT_FALSE(spaces::borrows_host_driver("sha256:" + std::string(64, 'e'), *runtimes)) << "a runtime that carries a driver";
+  EXPECT_FALSE(spaces::borrows_host_driver("sha256:" + std::string(64, 'f'), *runtimes)) << "an image this build does not list";
+  EXPECT_FALSE(spaces::borrows_host_driver("", *runtimes));
+  EXPECT_FALSE(spaces::borrows_host_driver("sha256:" + std::string(64, 'c'), {}));
+}
+
 TEST(SpacesRuntime, UnknownOrUntrustedDownloadsCannotReachDocker) {
   download_host_t host;
   EXPECT_EQ(spaces::install_runtime(host, "steam-test", {}).code, "runtime_not_published");

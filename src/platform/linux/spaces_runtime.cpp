@@ -144,6 +144,12 @@ namespace multiseat::spaces {
     } catch (...) { return {}; }
   }
 
+  bool borrows_host_driver(std::string_view image, const std::vector<runtime_t> &catalog) {
+    return !image.empty() && std::any_of(catalog.begin(), catalog.end(), [&](const auto &runtime) {
+      return runtime.variant == "nvidia-host" && runtime.matches_image_id(image);
+    });
+  }
+
   bool matches_runtime_image(const runtime_t &runtime, std::string_view inspection) {
     return verified_runtime_image(runtime, inspection).has_value();
   }
