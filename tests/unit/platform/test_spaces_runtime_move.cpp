@@ -519,4 +519,23 @@ namespace {
     EXPECT_EQ(service->submit({"52345678-1234-4234-8234-123456789abc", "space-a", "steam-nvidia-615"}).code, "spaces_stopping");
   }
 }  // namespace
+
+TEST(SpacesRuntimeMove, ABorrowingImageNeverMismatchesTheLoadedDriver) {
+  spaces::runtime_t borrowing {"steam-nvidia-host", "nvidia-host", std::string(40, 'a'),
+    "sha256:" + std::string(64, '7'), "sha256:" + std::string(64, '8'), ""};
+  borrowing.nvidia_minimum_driver = "570.00";
+  spaces::runtime_t baked {"steam-nvidia-610", "nvidia", std::string(40, 'a'),
+    "sha256:" + std::string(64, '1'), "sha256:" + std::string(64, '2'), "610.57.04"};
+
+  const auto borrowed_identity = spaces::catalog_image_runtime(borrowing.config_digest, {borrowing});
+  ASSERT_TRUE(borrowed_identity);
+  EXPECT_EQ(borrowed_identity->nvidia_source, "host");
+  EXPECT_FALSE(spaces::driver_mismatch(*borrowed_identity, std::string {"615.71.09"}))
+    << "an image with no driver of its own cannot be built for another one";
+
+  const auto baked_identity = spaces::catalog_image_runtime(baked.config_digest, {baked});
+  ASSERT_TRUE(baked_identity);
+  EXPECT_TRUE(spaces::driver_mismatch(*baked_identity, std::string {"615.71.09"}));
+}
+
 #endif

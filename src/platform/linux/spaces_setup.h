@@ -80,6 +80,14 @@ namespace multiseat::spaces {
     bool daemon_linux = false, daemon_rootless = false, daemon_runc = false;
     bool docker_access_pending = false;  ///< the account is in the docker group, but this Polaris started before it was
     bool input_access = false, gpu_access = false;
+    /**
+     * Only for a host with an NVIDIA driver loaded, and only meaningful for a
+     * runtime that borrows it: empty when the machine's driver files resolved,
+     * otherwise the code that says what is missing. The 32 bit case has its own
+     * code, because Proton is 32 bit.
+     */
+    std::string driver_libraries;
+    std::string driver_libraries_package;  ///< what this distribution calls the missing package
     security_status_t security;
     runtime_facts_t runtime;
     bool controller_enabled = false, controller_available = false;

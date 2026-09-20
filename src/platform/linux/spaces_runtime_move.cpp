@@ -65,7 +65,8 @@ namespace multiseat::spaces {
   std::optional<image_runtime_t> catalog_image_runtime(std::string_view image, const std::vector<runtime_t> &catalog) {
     const auto found = std::find_if(catalog.begin(), catalog.end(), [&](const auto &r) { return r.matches_image_id(image); });
     if (found == catalog.end()) return std::nullopt;
-    return image_runtime_t {true, found->id, found->profile, found->media_contract, found->nvidia_driver};
+    return image_runtime_t {true, found->id, found->profile, found->media_contract, found->nvidia_driver,
+      found->variant == "nvidia-host" ? "host" : ""};
   }
 
   std::optional<image_runtime_t> labeled_image_runtime(std::string_view image, std::string_view inspection) {
@@ -77,9 +78,11 @@ namespace multiseat::spaces {
       if (!labels.is_object()) return std::nullopt;
       image_runtime_t result {true, {}, labels.at("io.polaris.multiseat.profile").get<std::string>(),
         labels.at("io.polaris.multiseat.media-contract").get<std::string>(),
-        labels.value("io.polaris.multiseat.nvidia.driver", std::string {})};
+        labels.value("io.polaris.multiseat.nvidia.driver", std::string {}),
+        labels.value("io.polaris.multiseat.nvidia.source", std::string {})};
       // A label that is present but not what Polaris writes is not repeated as a driver or a kind.
       if (!label_word(result.profile) || !contract(result.media_contract) ||
+          (!result.nvidia_source.empty() && result.nvidia_source != "host") ||
           (!result.nvidia_driver.empty() && !nvidia_driver_version(result.nvidia_driver))) return std::nullopt;
       return result;
     } catch (...) { return std::nullopt; }
@@ -122,8 +125,10 @@ namespace multiseat::spaces {
   }
 
   bool driver_mismatch(const image_runtime_t &image, const std::optional<std::string> &host_driver) {
-    return image.known && !image.nvidia_driver.empty() && host_driver && !host_driver->empty() &&
-      image.nvidia_driver != *host_driver;
+    // An image that borrows the machine's driver cannot be built for another
+    // one, so it never mismatches.
+    return image.known && image.nvidia_source != "host" && !image.nvidia_driver.empty() &&
+      host_driver && !host_driver->empty() && image.nvidia_driver != *host_driver;
   }
 
   json describe_space_runtime(const image_runtime_t &image, const std::optional<std::string> &host_driver,

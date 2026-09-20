@@ -5,7 +5,11 @@
 #ifdef __linux__
 #include "multiseat_container_host.h"
 #include "spaces_host_admin.h"
+#include "spaces_nvidia_libraries.h"
+#include "spaces_runtime.h"
 #include "spaces_runtime_move.h"
+#include "spaces_setup.h"
+#include "src/platform/common.h"
 #include "src/logging.h"
 #include "src/private_state_file.h"
 #include "src/rtsp.h"
@@ -202,6 +206,42 @@ namespace multiseat {
     return std::make_unique<production_profile_controller_t>(std::move(runtime));
   }
 
+  /**
+   * Give the controller the machine's NVIDIA userspace, for runtimes built
+   * without driver libraries of their own. A host that cannot supply a
+   * complete set simply gets no mounts: its Spaces then refuse at launch with
+   * a Host Setup pointer rather than starting and rendering black.
+   */
+  void attach_host_driver_libraries(production_controller_options_t &options) {
+    const auto &contract = spaces::trusted_nvidia_contract();
+    const auto &catalog = spaces::trusted_runtimes();
+    if (!contract || !catalog) return;
+    options.host_driver_image = [](std::string_view image) {
+      const auto &runtimes = spaces::trusted_runtimes();
+      if (!runtimes) return false;
+      return std::any_of(runtimes->begin(), runtimes->end(), [&](const auto &runtime) {
+        return runtime.variant == "nvidia-host" && runtime.reference() == image;
+      });
+    };
+    const auto loaded = spaces::loaded_nvidia_driver();
+    if (!loaded || loaded->empty()) return;
+    container::local_host_t host;
+    const auto facts = spaces::resolve_host_driver_libraries(*contract, host, *loaded, contract->minimum_driver);
+    if (!facts.ready()) {
+      BOOST_LOG(warning) << "Spaces: this PC's NVIDIA driver files are not ready ("sv << facts.code << ')';
+      return;
+    }
+    const auto directory = platf::appdata() / "spaces-graphics" / facts.driver_version;
+    if (!spaces::publish_vendor_files(facts, directory)) {
+      BOOST_LOG(warning) << "Spaces: could not write the graphics descriptions under "sv << directory.string();
+      return;
+    }
+    options.container.host_driver = {facts.driver_version, facts.contract,
+      spaces::host_driver_mounts(facts, directory)};
+    BOOST_LOG(info) << "Spaces: NVIDIA driver "sv << facts.driver_version << " supplies "sv
+                    << options.container.host_driver.mounts.size() << " files to a host-driver runtime"sv;
+  }
+
   std::optional<production_controller_options_t> load_controller_options(const std::filesystem::path &path) {
     constexpr std::size_t bound = 64 * 1024;
     if (!path_value(path)) return std::nullopt;
@@ -260,6 +300,7 @@ namespace multiseat {
         if (std::find(entry.devices.begin(), entry.devices.end(), entry.render_node) == entry.devices.end()) return std::nullopt;
         options.gpus.push_back(std::move(entry));
       }
+      attach_host_driver_libraries(options);
       return options;
     } catch (...) { return std::nullopt; }
   }

@@ -30,6 +30,8 @@ namespace multiseat::spaces {
     std::string runtime_id;  ///< the catalog entry that is this image, when one is
     std::string profile, media_contract;
     std::string nvidia_driver;  ///< empty for a runtime without NVIDIA userspace
+    /// "host" for an image that borrows the machine's driver, empty otherwise.
+    std::string nvidia_source;
     bool operator==(const image_runtime_t &) const = default;
   };
   /// The catalog entry whose image this is, without asking Docker.
