@@ -1,0 +1,33 @@
+{
+  "comment": "The Gaming runtime check exactly as the host writes it for a runtime that borrows this PC's NVIDIA driver. The C++ side asserts describe_setup produces these; the console asserts validSetup accepts them. Both read this file, because a check shape the console does not know makes the whole response fail to verify and Host Setup then says only 'The host setup response could not be verified. Recheck setup before continuing.'",
+  "ready": {
+    "id": "runtime",
+    "title": "Gaming runtime",
+    "detail": "The gaming runtime for NVIDIA graphics is downloaded and verified.",
+    "action": "",
+    "state": "ready",
+    "doc_anchor": "#download-the-gaming-runtime",
+    "runtime": {
+      "status": "ready",
+      "code": "runtime_ready",
+      "id": "steam-nvidia-host",
+      "variant": "nvidia-host",
+      "nvidia_driver": ""
+    }
+  },
+  "available": {
+    "id": "runtime",
+    "title": "Gaming runtime",
+    "detail": "This PC needs the gaming runtime for NVIDIA graphics. It is not downloaded yet, and the download is several gigabytes.",
+    "action": "download_runtime",
+    "state": "required",
+    "doc_anchor": "#download-the-gaming-runtime",
+    "runtime": {
+      "status": "available",
+      "code": "not_downloaded",
+      "id": "steam-nvidia-host",
+      "variant": "nvidia-host",
+      "nvidia_driver": ""
+    }
+  }
+}

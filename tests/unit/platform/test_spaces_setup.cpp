@@ -1,6 +1,8 @@
 #include "src/platform/linux/spaces_setup.h"
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
 
 #ifdef __linux__
@@ -289,6 +291,29 @@ namespace {
     runtime.nvidia_minimum_driver = minimum;
     return runtime;
   }
+}
+
+/**
+ * Host Setup refuses a whole response it cannot verify and says only "The host
+ * setup response could not be verified. Recheck setup before continuing." So
+ * the Gaming runtime check this host writes for a borrowing runtime and the
+ * shape that console accepts are pinned to one file both languages read.
+ */
+TEST(SpacesSetup, DescribesABorrowingRuntimeExactlyAsTheConsoleExpectsIt) {
+  const std::filesystem::path source {POLARIS_SOURCE_DIR};
+  std::ifstream file(source / "tests/fixtures/spaces-setup-host-runtime.json");
+  ASSERT_TRUE(file) << "the shared shape must be readable from both languages";
+  const auto expected = json::parse(file);
+
+  // Not downloaded yet, through the real inspection path.
+  const auto host_driver = host_driver_runtime("570.00", '7');
+  runtime_host_t host;
+  EXPECT_EQ(runtime_check(spaces::inspect_runtime(host, {host_driver}, "615.71.09", true)),
+    expected.at("available"));
+
+  // And downloaded, which is the state a working PC sits in.
+  spaces::runtime_facts_t ready {"ready", "runtime_ready", host_driver, std::string("615.71.09"), {}};
+  EXPECT_EQ(runtime_check(ready), expected.at("ready"));
 }
 
 TEST(SpacesSetup, PrefersTheRuntimeThatBorrowsThisPcsDriver) {

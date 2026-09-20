@@ -16,9 +16,14 @@ export function validRuntimeCheck(item) {
       typeof runtime.code !== 'string' || !/^[a-z0-9_]{1,64}$/.test(runtime.code)) return false
   if (item.state !== (runtime.status === 'ready' ? 'ready' : runtime.status === 'not_published' ? 'not_configured' : 'required')) return false
   if (!['available', 'ready', 'failed'].includes(runtime.status)) return runtime.id === undefined
+  // Only a runtime that carries NVIDIA userspace of its own names a driver
+  // version. One that borrows this PC's works with whichever driver is loaded,
+  // so it names none, exactly like the runtime for AMD and Intel graphics.
+  if (!['default', 'nvidia', 'nvidia-host'].includes(runtime.variant)) return false
   return typeof runtime.id === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(runtime.id) &&
-    typeof runtime.nvidia_driver === 'string' && (runtime.variant === 'default' ? runtime.nvidia_driver === '' :
-      runtime.variant === 'nvidia' && runtime.nvidia_driver.length <= 32 && /^[0-9]+(?:\.[0-9]+)+$/.test(runtime.nvidia_driver))
+    typeof runtime.nvidia_driver === 'string' && (runtime.variant === 'nvidia'
+      ? runtime.nvidia_driver.length <= 32 && /^[0-9]+(?:\.[0-9]+)+$/.test(runtime.nvidia_driver)
+      : runtime.nvidia_driver === '')
 }
 
 export function validSetup(value) {

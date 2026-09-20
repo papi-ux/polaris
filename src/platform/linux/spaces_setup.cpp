@@ -15,8 +15,12 @@ namespace multiseat::spaces {
       return text;
     }
     json describe_runtime(const runtime_facts_t &r) {
-      const auto name = !r.runtime ? std::string {} : r.runtime->variant == "nvidia" ?
-        "gaming runtime for NVIDIA driver " + r.runtime->nvidia_driver : std::string {"gaming runtime for AMD and Intel graphics"};
+      // A runtime that borrows this PC's driver is named for the graphics it
+      // needs, never for a driver version: it works with whichever one is loaded.
+      const auto name = !r.runtime ? std::string {} :
+        r.runtime->variant == "nvidia" ? "gaming runtime for NVIDIA driver " + r.runtime->nvidia_driver :
+        r.runtime->variant == "nvidia-host" ? std::string {"gaming runtime for NVIDIA graphics"} :
+        std::string {"gaming runtime for AMD and Intel graphics"};
       std::string detail;
       if (r.status == "not_published") detail = "This Polaris build has no approved gaming runtime yet.";
       else if (r.code == "driver_mismatch")
