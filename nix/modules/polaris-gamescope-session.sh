@@ -1024,6 +1024,15 @@ case "${1:-}" in
       if [ -n "${POLARIS_GAMESCOPE_PREFER_VK:-}" ]; then
         prefer_vk=(--prefer-vk-device "$POLARIS_GAMESCOPE_PREFER_VK")
       fi
+      # Moonlight draws no pointer of its own, so without this the stream has a
+      # working but invisible cursor: gamescope keeps the cursor out of the PipeWire
+      # capture by default, on the grounds that a consumer drawing its own would end
+      # up with two. Set POLARIS_GAMESCOPE_COMPOSITE_CURSOR=0 for such a consumer.
+      cursor_flags=()
+      if [ "${POLARIS_GAMESCOPE_COMPOSITE_CURSOR:-1}" = 1 ]; then
+        cursor_flags=(--pipewire-composite-cursor)
+      fi
+
       hdr_flags=()
       if [ "$want_hdr" = 1 ]; then
         # Nested: --hdr-enabled only (no --hdr-debug-force-*).
@@ -1086,6 +1095,7 @@ case "${1:-}" in
           --xwayland-count 2 \
           "${prefer_vk[@]}" \
           "${hdr_flags[@]}" \
+          "${cursor_flags[@]}" \
           -W "$gs_width" -H "$gs_height" -r "$gs_refresh" \
           -w "$gs_width" -h "$gs_height" \
           -- setpriv --pdeathsig TERM -- \
