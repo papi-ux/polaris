@@ -14,15 +14,20 @@ namespace multiseat::spaces {
       return value.size() == size && value.find_first_not_of("0123456789abcdef") == std::string_view::npos;
     }
     bool digest(std::string_view value) { return value.starts_with("sha256:") && hex(value.substr(7), 64); }
+    bool dotted_version(std::string_view value) {
+      return value.size() >= 3 && value.size() <= 32 && value.front() != '.' && value.back() != '.' &&
+        value.find_first_not_of("0123456789.") == std::string_view::npos &&
+        value.find("..") == std::string_view::npos && value.find('.') != std::string_view::npos;
+    }
     bool valid(const runtime_t &r) {
       return !r.id.empty() && r.id.size() <= 64 && r.id.front() != '-' &&
         r.id.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-") == std::string::npos &&
         hex(r.source_revision, 40) && digest(r.registry_digest) && digest(r.config_digest) &&
-        ((r.variant == "default" && r.nvidia_driver.empty()) ||
-         (r.variant == "nvidia" && r.nvidia_driver.size() >= 3 && r.nvidia_driver.size() <= 32 &&
-          r.nvidia_driver.front() != '.' && r.nvidia_driver.back() != '.' &&
-          r.nvidia_driver.find_first_not_of("0123456789.") == std::string::npos &&
-          r.nvidia_driver.find("..") == std::string::npos && r.nvidia_driver.find('.') != std::string::npos));
+        ((r.variant == "default" && r.nvidia_driver.empty() && r.nvidia_minimum_driver.empty()) ||
+         (r.variant == "nvidia" && dotted_version(r.nvidia_driver) && r.nvidia_minimum_driver.empty()) ||
+         // Carries no driver of its own and borrows this machine's, so it names
+         // the oldest driver its own NVENC and CUDA consumers still work with.
+         (r.variant == "nvidia-host" && r.nvidia_driver.empty() && dotted_version(r.nvidia_minimum_driver)));
     }
     json strict_json(std::string_view text) {
       if (text.empty() || text.size() > 65536) throw std::invalid_argument("invalid metadata size");
@@ -68,18 +73,19 @@ namespace multiseat::spaces {
     try {
       const auto document = strict_json(payload);
       if (!document.is_object() || document.size() != 2 || !document.at("schema").is_number_unsigned() ||
-          document.at("schema") != 1 || !document.at("runtimes").is_array() || document.at("runtimes").size() > 16)
+          document.at("schema") != 2 || !document.at("runtimes").is_array() || document.at("runtimes").size() > 64)
         return std::nullopt;
       std::vector<runtime_t> runtimes;
       std::set<std::string> ids, references;
       for (const auto &entry : document.at("runtimes")) {
-        if (!entry.is_object() || entry.size() != 11 || entry.at("profile") != "steam" ||
+        if (!entry.is_object() || entry.size() != 12 || entry.at("profile") != "steam" ||
             entry.at("platform") != "linux/amd64" || !entry.at("media_contract").is_number_unsigned() ||
             entry.at("media_contract") != 1 || !entry.at("uid").is_number_unsigned() || entry.at("uid") != 1000 ||
             !entry.at("gid").is_number_unsigned() || entry.at("gid") != 1000) return std::nullopt;
         runtime_t r {entry.at("id"), entry.at("variant"), entry.at("source_revision"),
           entry.at("registry_digest"), entry.at("config_digest"), entry.at("nvidia_driver"),
-          entry.at("profile"), std::to_string(entry.at("media_contract").get<unsigned>()),
+          entry.at("nvidia_minimum_driver"), entry.at("profile"),
+          std::to_string(entry.at("media_contract").get<unsigned>()),
           entry.at("uid").get<std::uint32_t>(), entry.at("gid").get<std::uint32_t>()};
         if (!valid(r) || !ids.insert(r.id).second || !references.insert(r.reference()).second) return std::nullopt;
         runtimes.emplace_back(std::move(r));
@@ -122,7 +128,18 @@ namespace multiseat::spaces {
           config.at("Cmd") != json::array({"run"})) return {};
       for (const auto *key : {"Volumes", "ExposedPorts", "OnBuild"})
         if (config.contains(key) && !config.at(key).empty()) return {};
-      if (labels.value("io.polaris.multiseat.nvidia.driver", "") != r.nvidia_driver) return {};
+      if (r.variant == "nvidia-host") {
+        // A host-driver image must carry no driver of its own, and must say
+        // which mount shape it expects. A newer contract than this Polaris
+        // implements is refused rather than guessed at.
+        if (!labels.value("io.polaris.multiseat.nvidia.driver", "").empty() ||
+            labels.value("io.polaris.multiseat.nvidia.source", "") != "host" ||
+            labels.value("io.polaris.multiseat.nvidia.contract", "") != "1" ||
+            labels.value("io.polaris.multiseat.nvidia.minimum-driver", "") != r.nvidia_minimum_driver) return {};
+      } else if (labels.value("io.polaris.multiseat.nvidia.driver", "") != r.nvidia_driver ||
+                 !labels.value("io.polaris.multiseat.nvidia.source", "").empty()) {
+        return {};
+      }
       return image.at("Id").get<std::string>();
     } catch (...) { return {}; }
   }

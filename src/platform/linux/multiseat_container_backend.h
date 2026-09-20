@@ -63,6 +63,16 @@ namespace multiseat::container {
     [[nodiscard]] virtual bool trusted_data_file(
       const std::filesystem::path &path, std::string_view expected
     ) const { return false; }
+    /**
+     * Root-owned regular file under root-owned, non-writable directories, read
+     * only. A host-driver Space borrows the machine's NVIDIA userspace this way,
+     * so the rule that admits /usr/bin/docker admits those libraries too.
+     */
+    [[nodiscard]] virtual bool trusted_system_file(const std::filesystem::path &path) const { return false; }
+    /** Bounded contents of a file that passes trusted_system_file. */
+    [[nodiscard]] virtual std::optional<std::string> read_trusted_system_file(
+      const std::filesystem::path &path, std::size_t max_bytes
+    ) const { return std::nullopt; }
     /** Actual calling process groups; absence means the snapshot failed. */
     [[nodiscard]] virtual std::optional<std::vector<std::uint64_t>> supplementary_groups() const = 0;
     /**
@@ -165,11 +175,29 @@ namespace multiseat::container {
     runtime_profile_e runtime_profile = runtime_profile_e::unknown;
     std::string image_reference;
     bool steam_library_enabled = false;
+    /** Set for a runtime built without driver libraries of its own. */
+    bool host_driver_libraries = false;
   };
 
   struct shared_game_mount_t {
     std::string mount_name;
     std::filesystem::path host_path;
+  };
+
+  /**
+   * One host file a host-driver runtime borrows, published read only at the path
+   * the container resolves it by. Polaris names every one of these, and the
+   * inspected container has to carry exactly this set and nothing else.
+   */
+  struct host_driver_mount_t {
+    std::string destination;
+    std::filesystem::path host_path;
+  };
+
+  struct host_driver_set_t {
+    std::string driver_version;
+    unsigned contract = 0;
+    std::vector<host_driver_mount_t> mounts;
   };
 
   enum class engine_e { docker, podman };
@@ -190,6 +218,7 @@ namespace multiseat::container {
     std::vector<profile_t> profiles;
     std::vector<workload_plan_t> workloads;
     std::vector<shared_game_mount_t> shared_game_mounts;
+    host_driver_set_t host_driver;
     std::chrono::milliseconds command_timeout {5000};
     std::size_t max_command_output_bytes = 1024 * 1024;
     std::size_t max_inventory_workers = 64;

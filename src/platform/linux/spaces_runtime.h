@@ -7,6 +7,12 @@
 namespace multiseat::spaces {
   struct runtime_t {
     std::string id, variant, source_revision, registry_digest, config_digest, nvidia_driver;
+    /**
+     * Set only for the nvidia-host variant, which carries no driver of its own
+     * and borrows the machine's. The floor exists because the image's own NVENC
+     * and CUDA consumers are built against a pinned API.
+     */
+    std::string nvidia_minimum_driver;
     // What the Space's home has to agree with. The catalog admits only steam,
     // contract 1 and 1000:1000 today, so these defaults are what it holds.
     std::string profile = "steam";

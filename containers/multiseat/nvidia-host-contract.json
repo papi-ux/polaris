@@ -1,0 +1,85 @@
+{
+  "schema": 1,
+  "contract": 1,
+  "minimum_driver": "570.00",
+  "library_prefixes": [
+    "libcuda.so.",
+    "libEGL_nvidia.so.",
+    "libGLESv1_CM_nvidia.so.",
+    "libGLESv2_nvidia.so.",
+    "libGLX_nvidia.so.",
+    "libnvcuvid.so.",
+    "libnvidia-allocator.so.",
+    "libnvidia-eglcore.so.",
+    "libnvidia-encode.so.",
+    "libnvidia-fbc.so.",
+    "libnvidia-glcore.so.",
+    "libnvidia-glsi.so.",
+    "libnvidia-glvkspirv.so.",
+    "libnvidia-gpucomp.so.",
+    "libnvidia-ml.so.",
+    "libnvidia-nvvm.so.",
+    "libnvidia-present.so.",
+    "libnvidia-ptxjitcompiler.so.",
+    "libnvidia-rtcore.so.",
+    "libnvidia-sandboxutils.so.",
+    "libnvidia-tls.so.",
+    "libnvidia-wayland-client.so.",
+    "libnvoptix.so."
+  ],
+  "architectures": [
+    {
+      "name": "amd64",
+      "directory": "/usr/lib/x86_64-linux-gnu",
+      "search": [
+        "/usr/lib/x86_64-linux-gnu",
+        "/usr/lib64",
+        "/usr/lib",
+        "/run/opengl-driver/lib"
+      ],
+      "required": [
+        "libcuda.so.1",
+        "libEGL_nvidia.so.0",
+        "libGLX_nvidia.so.0",
+        "libnvidia-encode.so.1",
+        "libnvidia-ml.so.1"
+      ]
+    },
+    {
+      "name": "i386",
+      "directory": "/usr/lib/i386-linux-gnu",
+      "search": [
+        "/usr/lib/i386-linux-gnu",
+        "/usr/lib32",
+        "/usr/lib",
+        "/run/opengl-driver-32/lib"
+      ],
+      "required": [
+        "libcuda.so.1",
+        "libEGL_nvidia.so.0",
+        "libGLX_nvidia.so.0"
+      ]
+    }
+  ],
+  "vendor_files": [
+    {
+      "destination": "/usr/share/glvnd/egl_vendor.d/10_nvidia.json",
+      "sources": [
+        "/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
+      ]
+    },
+    {
+      "destination": "/usr/share/vulkan/icd.d/nvidia_icd.json",
+      "sources": [
+        "/usr/share/vulkan/icd.d/nvidia_icd.json",
+        "/usr/share/vulkan/icd.d/nvidia_icd.x86_64.json"
+      ]
+    },
+    {
+      "destination": "/usr/share/vulkan/implicit_layer.d/nvidia_layers.json",
+      "sources": [
+        "/usr/share/vulkan/implicit_layer.d/nvidia_layers.json"
+      ]
+    }
+  ]
+}

@@ -301,6 +301,7 @@ if (NOT WIN32 AND NOT APPLE)
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_multiseat_launch_service.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_spaces_setup.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_spaces_runtime.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_spaces_nvidia_libraries.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_spaces_runtime_move.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_spaces_setup_service.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_spaces_gpu_nodes.cpp

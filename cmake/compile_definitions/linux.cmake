@@ -68,6 +68,15 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${POLARIS_SPACES
 file(READ "${POLARIS_SPACES_RUNTIME_SOURCE}" POLARIS_SPACES_RUNTIME_CATALOG)
 configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime_catalog.h.in"
                "${CMAKE_BINARY_DIR}/generated/spaces_runtime_catalog.h" @ONLY)
+# The same reviewed-into-the-build rule for the NVIDIA files a host-driver runtime borrows from
+# this machine. A runtime image declares the contract it was built for and Polaris refuses a newer
+# one, so the mount shape can only change with a reviewed release.
+set(POLARIS_SPACES_NVIDIA_CONTRACT_FILE "${CMAKE_SOURCE_DIR}/containers/multiseat/nvidia-host-contract.json" CACHE FILEPATH
+    "NVIDIA host contract compiled into Polaris. Change only for a lab build.")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${POLARIS_SPACES_NVIDIA_CONTRACT_FILE}")
+file(READ "${POLARIS_SPACES_NVIDIA_CONTRACT_FILE}" POLARIS_SPACES_NVIDIA_CONTRACT)
+configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_nvidia_contract.h.in"
+               "${CMAKE_BINARY_DIR}/generated/spaces_nvidia_contract.h" @ONLY)
 include_directories("${CMAKE_BINARY_DIR}/generated")
 
 
@@ -653,6 +662,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_nvidia_libraries.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_nvidia_libraries.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime_move.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime_move.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup_service.h"
