@@ -3,9 +3,11 @@
 #include "spaces_nvidia_contract.h"
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <sys/xattr.h>
 #include <map>
 #include <nlohmann/json.hpp>
 #include <set>
@@ -37,6 +39,28 @@ namespace multiseat::spaces {
 
     bool absolute_normal(const std::filesystem::path &path) {
       return path.is_absolute() && path.lexically_normal() == path;
+    }
+
+    /**
+     * A container reads a host file only when the file's SELinux type says it
+     * may, and a file written under the user's configuration directory inherits
+     * that directory's type, which no container domain can read. Relabel the
+     * copies Polaris writes itself, exactly the way docker's `z` relabels a
+     * volume, changing the type and nothing else. A host without SELinux carries
+     * no label and needs nothing done.
+     */
+    bool label_for_containers(const std::filesystem::path &path) {
+      std::array<char, 512> buffer{};
+      errno = 0;
+      const auto length =
+        ::getxattr(path.c_str(), "security.selinux", buffer.data(), buffer.size() - 1);
+      if (length <= 0) return errno == ENODATA || errno == ENOTSUP;
+      std::string current(buffer.data(), static_cast<std::size_t>(length));
+      while (!current.empty() && current.back() == '\0') current.pop_back();
+      const auto wanted = container_readable_context(current);
+      if (wanted.empty()) return false;
+      if (wanted == current) return true;
+      return ::setxattr(path.c_str(), "security.selinux", wanted.c_str(), wanted.size() + 1, 0) == 0;
     }
 
     bool dotted_version(std::string_view value) {
@@ -390,6 +414,24 @@ namespace multiseat::spaces {
     return mounts;
   }
 
+  std::string container_readable_context(std::string_view current) {
+    constexpr std::string_view container_type = "container_file_t";
+    constexpr std::string_view type_characters = "abcdefghijklmnopqrstuvwxyz0123456789_";
+    if (current.empty() || current.size() > 256) return {};
+    const auto user = current.find(':');
+    if (user == 0 || user == std::string_view::npos) return {};
+    const auto role = current.find(':', user + 1);
+    if (role == user + 1 || role == std::string_view::npos) return {};
+    const auto level = current.find(':', role + 1);
+    const auto type = level == std::string_view::npos ? current.substr(role + 1)
+                                                      : current.substr(role + 1, level - role - 1);
+    if (type.empty() || type.find_first_not_of(type_characters) != std::string_view::npos) return {};
+    std::string wanted(current.substr(0, role + 1));
+    wanted += container_type;
+    if (level != std::string_view::npos) wanted += current.substr(level);
+    return wanted;
+  }
+
   bool publish_vendor_files(const host_driver_facts_t &facts, const std::filesystem::path &directory) {
     if (!facts.ready() || !absolute_normal(directory)) return false;
     std::error_code error;
@@ -410,6 +452,7 @@ namespace multiseat::spaces {
           std::filesystem::perms::group_read | std::filesystem::perms::others_read,
         std::filesystem::perm_options::replace, error);
       if (error) return false;
+      if (!label_for_containers(path)) return false;
     }
     return true;
   }

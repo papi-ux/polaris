@@ -437,7 +437,17 @@ kernel has loaded.
 
 Polaris reads those files and passes them to a Space read only, and it checks
 each one first: owned by root, in the directory the driver package puts it in,
-and built for the architecture it claims. Nothing is copied, changed or run.
+and built for the architecture it claims. No driver library is copied, changed
+or run.
+
+Three small description files are the exception. They tell OpenGL and Vulkan
+which driver to load, and this PC's copies name library paths that do not exist
+inside a Space, so Polaris writes its own corrected copies under
+`spaces-graphics` in its configuration directory and passes those instead. On a
+system with SELinux it also labels those copies for containers, the way Docker
+labels a shared volume, because a file written in a configuration directory is
+one no container may read. Without that label a Space starts, finds no NVIDIA
+driver to load, and falls back to software rendering.
 
 Host Setup shows **NVIDIA driver files** while an NVIDIA driver is loaded. The
 one case worth acting on is the 32 bit half, which most distributions package

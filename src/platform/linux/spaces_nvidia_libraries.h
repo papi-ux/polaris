@@ -4,8 +4,11 @@
  *
  * A host-driver runtime image carries no driver libraries. Polaris resolves them
  * here, proves each one by its ELF header and its SONAME, and hands the backend an
- * exact list of read-only binds. Nothing is copied, relabelled or executed, and a
- * file that cannot be proven is a Host Setup finding rather than a broken launch.
+ * exact list of read-only binds. No driver file is copied, relabelled or executed,
+ * and a file that cannot be proven is a Host Setup finding rather than a broken
+ * launch. The three vendor descriptions are the exception by necessity: the host's
+ * own copies name library paths that do not exist inside a Space, so Polaris writes
+ * rewritten copies of its own and labels those for containers to read.
  */
 #pragma once
 #ifdef __linux__
@@ -13,6 +16,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace multiseat::spaces {
@@ -93,9 +97,19 @@ namespace multiseat::spaces {
 
   /**
    * Write the rewritten vendor files under `directory`, which must be private to
-   * Polaris. Returns false when any write fails; the caller then has no mounts.
+   * Polaris, and label each one so a container may read it. Returns false when a
+   * write or a relabel fails; the caller then has no mounts, which is deliberate:
+   * a Space that cannot read these files falls back to software rendering.
    */
   [[nodiscard]] bool publish_vendor_files(
     const host_driver_facts_t &facts, const std::filesystem::path &directory);
+
+  /**
+   * The SELinux context a published vendor file needs before a container may
+   * read it: `current` with its type replaced by `container_file_t` and the
+   * user, role and level the host assigned left alone. Returns `current` when
+   * it already names that type, and an empty string when it is not a context.
+   */
+  [[nodiscard]] std::string container_readable_context(std::string_view current);
 }
 #endif

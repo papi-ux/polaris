@@ -230,7 +230,8 @@ namespace multiseat {
     }
     const auto directory = platf::appdata() / "spaces-graphics" / facts.driver_version;
     if (!spaces::publish_vendor_files(facts, directory)) {
-      BOOST_LOG(warning) << "Spaces: could not write the graphics descriptions under "sv << directory.string();
+      BOOST_LOG(warning) << "Spaces: could not publish the graphics descriptions under "sv
+                         << directory.string() << "; a Space cannot read them as they are"sv;
       return;
     }
     options.container.host_driver = {facts.driver_version, facts.contract,

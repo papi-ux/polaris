@@ -354,6 +354,34 @@ TEST(SpacesNvidiaLibrariesPhysical, ResolvesThisMachinesDriver) {
   EXPECT_FALSE(facts.libraries.empty());
 }
 
+/**
+ * A vendor description Polaris writes lands under the user's configuration
+ * directory and inherits its SELinux type, which no container may read, so the
+ * published copies are relabelled the way docker's `z` relabels a volume: the
+ * type changes and the user, role and level the host assigned do not.
+ */
+TEST(SpacesNvidiaLibraries, RelabelsAPublishedVendorFileForContainersAndNothingElse) {
+  EXPECT_EQ(spaces::container_readable_context("unconfined_u:object_r:config_home_t:s0"),
+    "unconfined_u:object_r:container_file_t:s0");
+  EXPECT_EQ(spaces::container_readable_context("system_u:object_r:user_home_t:s0:c12,c34"),
+    "system_u:object_r:container_file_t:s0:c12,c34");
+  EXPECT_EQ(spaces::container_readable_context("system_u:object_r:user_home_t"),
+    "system_u:object_r:container_file_t");
+  EXPECT_EQ(spaces::container_readable_context("unconfined_u:object_r:container_file_t:s0"),
+    "unconfined_u:object_r:container_file_t:s0");
+}
+
+TEST(SpacesNvidiaLibraries, RefusesToRelabelWhatIsNotAContext) {
+  EXPECT_EQ(spaces::container_readable_context(""), "");
+  EXPECT_EQ(spaces::container_readable_context("config_home_t"), "");
+  EXPECT_EQ(spaces::container_readable_context("unconfined_u:object_r"), "");
+  EXPECT_EQ(spaces::container_readable_context(":object_r:config_home_t:s0"), "");
+  EXPECT_EQ(spaces::container_readable_context("unconfined_u::config_home_t:s0"), "");
+  EXPECT_EQ(spaces::container_readable_context("unconfined_u:object_r::s0"), "");
+  EXPECT_EQ(spaces::container_readable_context("unconfined_u:object_r:../etc:s0"), "");
+  EXPECT_EQ(spaces::container_readable_context(std::string(300, 'a')), "");
+}
+
 TEST(SpacesNvidiaLibraries, ComparesDriverVersionsByNumberNotText) {
   EXPECT_TRUE(spaces::driver_at_least("615.71.09", "570.00"));
   EXPECT_TRUE(spaces::driver_at_least("570.00", "570.00"));
