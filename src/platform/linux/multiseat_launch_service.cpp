@@ -4,6 +4,7 @@
 #include "multiseat_launch_service.h"
 #ifdef __linux__
 #include "multiseat_container_host.h"
+#include "multiseat_profile_network.h"
 #include "spaces_host_admin.h"
 #include "spaces_nvidia_libraries.h"
 #include "spaces_runtime.h"
@@ -32,6 +33,24 @@
 
 namespace multiseat {
   namespace {
+    /** A launcher family by the name the catalog and the console use for it. */
+    runtime_profile_e family_of(std::string_view name) {
+      for (const auto profile : {runtime_profile_e::steam, runtime_profile_e::heroic, runtime_profile_e::lutris})
+        if (runtime_profile_name(profile) == name) return profile;
+      return runtime_profile_e::unknown;
+    }
+
+    /**
+     * What a library calls the tile that opens the launcher itself. Steam's is
+     * named for the interface it opens, since that is what a player sees.
+     */
+    std::string launcher_display_name(std::string_view family) {
+      if (family == "steam") return "Steam Big Picture";
+      if (family == "heroic") return "Heroic";
+      if (family == "lutris") return "Lutris";
+      return {};
+    }
+
     std::mutex installed_mutex;
     std::shared_ptr<profile_launch_service_t> installed;
     // Worker lifecycle generations cannot be confused with host proc generations.
@@ -796,13 +815,13 @@ namespace multiseat {
     if (!target.empty()) {
       const auto snapshot = library_for_client(launch->unique_id, expected_profile);
       if (!snapshot) return {409, "This Space's library is no longer available.", "space_library_unavailable", "Refresh the library."};
-      if (target == "big-picture-v1") target_name = "Steam Big Picture";
+      if (target == snapshot->launcher_target) target_name = snapshot->launcher_name;
       else {
         const auto game = std::find_if(snapshot->library.games.begin(), snapshot->library.games.end(),
           [&](const auto &item) { return item.target == target; });
         if (!snapshot->library.available || game == snapshot->library.games.end())
           return {409, "This game is no longer installed in the selected Space.", "space_game_missing",
-            "Open Steam Big Picture in that Space, or refresh the library."};
+            "Open " + snapshot->launcher_name + " in that Space, or refresh the library."};
         target_name = game->name;
       }
     }
@@ -875,6 +894,9 @@ namespace multiseat {
       });
       if (entry == catalog.end()) return {};
       result.id = entry->id; result.name = entry->name;
+      result.family = entry->family;
+      result.launcher_target = std::string(container::launcher_sentinel(family_of(entry->family)));
+      result.launcher_name = launcher_display_name(entry->family);
       reader = impl_->controller->library_reader(); epoch = impl_->controller_revision;
     }
     // The reader owns a copy of the immutable storage catalog. No service lock

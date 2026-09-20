@@ -5537,15 +5537,21 @@ namespace nvhttp {
 
   nlohmann::json space_library_game_json(std::string_view profile, const multiseat::profile_library_snapshot_t &snapshot,
                                          std::string_view target, std::string_view name) {
-    const bool steam = target == "big-picture-v1";
+    // The launcher's own tile has no artwork of its own: Polaris draws it.
+    const bool launcher = target == snapshot.launcher_target;
     const auto identity = multiseat::spaces::game_identity(profile, target);
     nlohmann::json entry {{"id", identity}, {"app_id", multiseat::profile_app_id}, {"name", name},
-      {"source", "steam"}, {"steam_appid", steam ? "" : std::string(target)}, {"installed", true}, {"hdr_supported", false},
+      {"source", snapshot.family.empty() ? std::string("steam") : snapshot.family},
+      // Only a Steam title has a Steam app id. A launcher family's target is
+      // that launcher's own identifier, and a client pairs titles across Spaces
+      // by app id, so lending one here would pair a Heroic game with a Steam one.
+      {"steam_appid", launcher || snapshot.family != "steam" ? std::string {} : std::string(target)},
+      {"installed", true}, {"hdr_supported", false},
       {"space", space_ref_json(snapshot.id, snapshot.name, target)},
-      {"cover_url", steam ? "" : "/polaris/v1/games/" + identity + "/space-artwork/poster"},
+      {"cover_url", launcher ? std::string {} : "/polaris/v1/games/" + identity + "/space-artwork/poster"},
       {"launch_mode", space_launch_mode_json(snapshot.name)},
-      {"artwork", steam ? nlohmann::json() : profile_artwork_manifest(platf::appdata(), identity, target)}};
-    if (steam) entry.erase("artwork");
+      {"artwork", launcher ? nlohmann::json() : profile_artwork_manifest(platf::appdata(), identity, target)}};
+    if (launcher) entry.erase("artwork");
     return entry;
   }
 
@@ -5575,7 +5581,10 @@ namespace nvhttp {
     const auto snapshot = service->library_for_client(current->uuid, profile);
     if (!snapshot) return reject(404);
     nlohmann::json games = nlohmann::json::array();
-    games.push_back(space_library_game_json(profile, *snapshot, "big-picture-v1", "Steam Big Picture"));
+    // Every Space offers the tile that opens its own launcher, whatever family
+    // it belongs to, even before anything is installed in it.
+    if (snapshot->launcher_target.empty()) return reject(503);
+    games.push_back(space_library_game_json(profile, *snapshot, snapshot->launcher_target, snapshot->launcher_name));
     if (snapshot->library.available)
       for (const auto &game : snapshot->library.games) games.push_back(space_library_game_json(profile, *snapshot, game.target, game.name));
     // Re-check permission after the potentially slow read, and reject an owner

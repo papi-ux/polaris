@@ -149,6 +149,10 @@ namespace multiseat {
 
   struct profile_library_snapshot_t {
     std::string id, name;
+    /// The launcher family this Space runs, and the tile that opens the
+    /// launcher itself rather than a title: a library always offers that one,
+    /// even when nothing is installed yet.
+    std::string family, launcher_target, launcher_name;
     spaces::library_t library;
   };
   // A removal for good says what it could not delete and where it still is.
