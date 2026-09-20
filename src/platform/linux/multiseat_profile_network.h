@@ -4,6 +4,19 @@
 
 namespace multiseat::container {
   [[nodiscard]] bool valid_steam_target(std::string_view target);
+  /**
+   * What a launcher family accepts as a target. Every family has a sentinel that
+   * opens the launcher itself, and a grammar for one title. The worker rebuilds
+   * the launcher's own URI from a validated token and never receives a URI, a
+   * path or a command.
+   *
+   *   steam   big-picture-v1 | <decimal appid>
+   *   heroic  library-v1     | <runner>.<appName>, runner in epic gog amazon sideload
+   *   lutris  library-v1     | id.<decimal>
+   */
+  [[nodiscard]] bool valid_launcher_target(runtime_profile_e profile, std::string_view target);
+  /** The sentinel that opens a family's launcher rather than a title. */
+  [[nodiscard]] std::string_view launcher_sentinel(runtime_profile_e profile);
   [[nodiscard]] bool supported_streaming_workload(runtime_profile_e profile, const workload_plan_t &workload);
   [[nodiscard]] std::string profile_network_name(std::string_view profile_key);
   // Persistent profile bridge with exact local policy and ownership label.

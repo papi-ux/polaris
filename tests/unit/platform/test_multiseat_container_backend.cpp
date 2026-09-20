@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <deque>
+#include <fstream>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -36,6 +37,9 @@ namespace {
   using multiseat::worker_observed_state_e;
   using multiseat::worker_stop_mode_e;
   using multiseat::container::backend_t;
+  using multiseat::container::launcher_sentinel;
+  using multiseat::container::supported_streaming_workload;
+  using multiseat::container::valid_launcher_target;
   using multiseat::container::character_device_identity_t;
   using multiseat::container::command_result_t;
   using multiseat::container::gpu_device_t;
@@ -2823,6 +2827,44 @@ namespace {
       {"Options", {{"com.docker.network.bridge.enable_icc", "false"}, {"com.docker.network.bridge.enable_ip_masquerade", "true"}}},
       {"IPAM", {{"Driver", "default"}, {"Options", nullptr}}}, {"Containers", members}}});
   }
+}
+
+TEST(MultiseatLauncherFamily, TargetsMatchTheSharedVectorTheWorkerAlsoReads) {
+  // The grammar is written twice, here and in Go. A target one side accepts
+  // alone is a target the host admits and the worker refuses, or worse.
+  const std::filesystem::path source {POLARIS_SOURCE_DIR};
+  std::ifstream file(source / "tests/fixtures/launcher-targets.json");
+  ASSERT_TRUE(file) << "the shared vector must be readable from both languages";
+  const auto cases = nlohmann::json::parse(file);
+  ASSERT_GE(cases.size(), 20U) << "the shared vector is too small to be meaningful";
+  const std::map<std::string, runtime_profile_e> profiles {
+    {"gamescope", runtime_profile_e::gamescope}, {"steam", runtime_profile_e::steam},
+    {"heroic", runtime_profile_e::heroic}, {"lutris", runtime_profile_e::lutris}};
+  const std::map<std::string, workload_kind_e> kinds {
+    {"gamescope", workload_kind_e::gamescope}, {"steam", workload_kind_e::steam},
+    {"heroic", workload_kind_e::heroic}, {"lutris", workload_kind_e::lutris}};
+  for (const auto &entry : cases) {
+    const auto profile = profiles.at(entry.at("profile").template get<std::string>());
+    const auto kind = kinds.at(entry.at("kind").template get<std::string>());
+    const auto target = entry.at("target").template get<std::string>();
+    const bool accepted = supported_streaming_workload(profile, {kind, target});
+    EXPECT_EQ(accepted, entry.at("accepted").template get<bool>())
+      << entry.at("profile").template get<std::string>() << '/' << entry.at("kind").template get<std::string>()
+      << " \"" << target << "\": " << entry.at("why").template get<std::string>();
+  }
+}
+
+TEST(MultiseatLauncherFamily, EveryFamilyHasASentinelAndRefusesAnotherFamilys) {
+  EXPECT_EQ(launcher_sentinel(runtime_profile_e::steam), "big-picture-v1");
+  EXPECT_EQ(launcher_sentinel(runtime_profile_e::heroic), "library-v1");
+  EXPECT_EQ(launcher_sentinel(runtime_profile_e::lutris), "library-v1");
+  EXPECT_EQ(launcher_sentinel(runtime_profile_e::unknown), "");
+
+  EXPECT_TRUE(valid_launcher_target(runtime_profile_e::heroic, "epic.Fortnite"));
+  EXPECT_FALSE(valid_launcher_target(runtime_profile_e::heroic, "440"));
+  EXPECT_FALSE(valid_launcher_target(runtime_profile_e::steam, "epic.Fortnite"));
+  EXPECT_FALSE(valid_launcher_target(runtime_profile_e::lutris, "epic.Fortnite"));
+  EXPECT_FALSE(valid_launcher_target(runtime_profile_e::unknown, "library-v1"));
 }
 
 TEST(MultiseatProfileNetwork, CreatesOnlyAfterAuthoritativeAbsenceAndVerifiesIdentity) {
