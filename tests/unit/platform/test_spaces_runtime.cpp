@@ -72,7 +72,8 @@ TEST(SpacesRuntime, CatalogIsBoundedAndRejectsIncompatibleOrAmbiguousEntries) {
   ASSERT_TRUE(spaces::trusted_runtimes());
   EXPECT_TRUE(spaces::decode_runtime_catalog(catalog(json::array())));
   for (const auto &[key, value] : std::vector<std::pair<std::string, json>> {
-      {"profile", "heroic"}, {"platform", "linux/arm64"}, {"media_contract", 2}, {"media_contract", true},
+      {"profile", "gamescope"}, {"profile", "steam-heroic"}, {"profile", ""}, {"profile", 2},
+      {"platform", "linux/arm64"}, {"media_contract", 2}, {"media_contract", true},
       {"uid", 1001}, {"gid", 0}, {"id", "--all"}, {"id", "../steam"}, {"variant", "other"},
       {"source_revision", "main"}, {"registry_digest", "latest"}, {"config_digest", "sha256:no"},
       {"nvidia_driver", "610.57.04"}, {"url", "https://untrusted.invalid/image"},
@@ -80,6 +81,16 @@ TEST(SpacesRuntime, CatalogIsBoundedAndRejectsIncompatibleOrAmbiguousEntries) {
     auto e = entry(); e[key] = value;
     EXPECT_FALSE(spaces::decode_runtime_catalog(catalog(json::array({e})))) << key;
   }
+  // The launcher families that have an image of their own are admitted, and
+  // each is pulled from its own repository, so two families may share a digest.
+  for (const auto *family : {"steam", "heroic", "lutris"}) {
+    auto e = entry(); e["profile"] = family;
+    const auto decoded = spaces::decode_runtime_catalog(catalog(json::array({e})));
+    ASSERT_TRUE(decoded) << family;
+    EXPECT_EQ(decoded->front().profile, family);
+    EXPECT_NE(decoded->front().reference().find(std::string("-") + family + "@"), std::string::npos) << family;
+  }
+
   auto duplicate = catalog(json::array({entry(), entry()}));
   EXPECT_FALSE(spaces::decode_runtime_catalog(duplicate));
   auto text = catalog(json::array({entry()}));
@@ -251,9 +262,18 @@ TEST(SpacesRuntime, CancelledDownloadDoesNotReachDocker) {
   EXPECT_TRUE(host.calls.empty());
 }
 
-TEST(SpacesRuntime, ReferencePullsFromTheCompiledRepository) {
-  const auto r = runtime();
-  EXPECT_EQ(r.reference(), std::string {multiseat::spaces::runtime_repository} + "@" + r.registry_digest);
+TEST(SpacesRuntime, ReferencePullsFromTheCompiledRepositoryForItsOwnLauncherFamily) {
+  auto r = runtime();
+  EXPECT_EQ(r.profile, "steam");
+  EXPECT_EQ(r.reference(), std::string {multiseat::spaces::runtime_repository} + "-steam@" + r.registry_digest);
+
+  // Each family has its own image, so each has its own repository beside the
+  // prefix. Sharing one would let a Heroic digest be pulled as a Steam runtime.
+  r.profile = "heroic";
+  EXPECT_EQ(r.reference(), std::string {multiseat::spaces::runtime_repository} + "-heroic@" + r.registry_digest);
+  EXPECT_TRUE(multiseat::spaces::admitted_runtime_profile("lutris"));
+  EXPECT_FALSE(multiseat::spaces::admitted_runtime_profile("gamescope"));
+  EXPECT_FALSE(multiseat::spaces::admitted_runtime_profile(""));
 }
 
 TEST(SpacesRuntime, ReleaseBuildsNeverOverrideTheRuntimeRepositoryOrCatalog) {
@@ -265,9 +285,9 @@ TEST(SpacesRuntime, ReleaseBuildsNeverOverrideTheRuntimeRepositoryOrCatalog) {
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   };
   EXPECT_NE(read(source / "cmake/compile_definitions/linux.cmake")
-              .find("set(POLARIS_SPACES_RUNTIME_REPOSITORY \"ghcr.io/papi-ux/polaris-worker-steam\" CACHE STRING"),
+              .find("set(POLARIS_SPACES_RUNTIME_REPOSITORY \"ghcr.io/papi-ux/polaris-worker\" CACHE STRING"),
             std::string::npos);
-  EXPECT_EQ(multiseat::spaces::release_runtime_repository, "ghcr.io/papi-ux/polaris-worker-steam");
+  EXPECT_EQ(multiseat::spaces::release_runtime_repository, "ghcr.io/papi-ux/polaris-worker");
   for (const auto *directory : {".github/workflows", "scripts/ci", "packaging"}) {
     if (!std::filesystem::exists(source / directory)) continue;
     for (const auto &file : std::filesystem::recursive_directory_iterator(source / directory)) {

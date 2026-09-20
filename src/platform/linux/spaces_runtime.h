@@ -13,14 +13,22 @@ namespace multiseat::spaces {
      * and CUDA consumers are built against a pinned API.
      */
     std::string nvidia_minimum_driver;
-    // What the Space's home has to agree with. The catalog admits only steam,
-    // contract 1 and 1000:1000 today, so these defaults are what it holds.
+    // What the Space's home has to agree with. The catalog admits the three
+    // launcher families, contract 1 and 1000:1000, and these defaults are the
+    // family every Space had before there was more than one.
     std::string profile = "steam";
     std::string media_contract = "1";
     std::uint32_t uid = 1000, gid = 1000;
     [[nodiscard]] std::string reference() const;
     [[nodiscard]] bool matches_image_id(std::string_view image) const;
   };
+  /**
+   * The launcher families a runtime may be built for. Each carries its own
+   * launcher in its own image, so a catalog entry names one family and the
+   * image is pulled from that family's repository.
+   */
+  [[nodiscard]] bool admitted_runtime_profile(std::string_view value);
+
   // The production caller only consumes the catalog compiled into Polaris.
   // Parsing is exposed to exercise rejection and compatibility in unit tests.
   [[nodiscard]] std::optional<std::vector<runtime_t>> decode_runtime_catalog(std::string_view payload);

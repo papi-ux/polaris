@@ -20,7 +20,8 @@ namespace multiseat::spaces {
         value.find("..") == std::string_view::npos && value.find('.') != std::string_view::npos;
     }
     bool valid(const runtime_t &r) {
-      return !r.id.empty() && r.id.size() <= 64 && r.id.front() != '-' &&
+      return admitted_runtime_profile(r.profile) &&
+        !r.id.empty() && r.id.size() <= 64 && r.id.front() != '-' &&
         r.id.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789-") == std::string::npos &&
         hex(r.source_revision, 40) && digest(r.registry_digest) && digest(r.config_digest) &&
         ((r.variant == "default" && r.nvidia_driver.empty() && r.nvidia_minimum_driver.empty()) ||
@@ -61,8 +62,14 @@ namespace multiseat::spaces {
     }
   }
 
+  bool admitted_runtime_profile(std::string_view value) {
+    return value == "steam" || value == "heroic" || value == "lutris";
+  }
+
   std::string runtime_t::reference() const {
-    return std::string {runtime_repository} + "@" + registry_digest;
+    // One repository per launcher family, beside the images the build publishes:
+    // polaris-worker-steam, polaris-worker-heroic, polaris-worker-lutris.
+    return std::string {runtime_repository} + "-" + profile + "@" + registry_digest;
   }
 
   bool runtime_t::matches_image_id(std::string_view image) const {
@@ -78,7 +85,8 @@ namespace multiseat::spaces {
       std::vector<runtime_t> runtimes;
       std::set<std::string> ids, references;
       for (const auto &entry : document.at("runtimes")) {
-        if (!entry.is_object() || entry.size() != 12 || entry.at("profile") != "steam" ||
+        if (!entry.is_object() || entry.size() != 12 || !entry.at("profile").is_string() ||
+            !admitted_runtime_profile(entry.at("profile").get<std::string>()) ||
             entry.at("platform") != "linux/amd64" || !entry.at("media_contract").is_number_unsigned() ||
             entry.at("media_contract") != 1 || !entry.at("uid").is_number_unsigned() || entry.at("uid") != 1000 ||
             !entry.at("gid").is_number_unsigned() || entry.at("gid") != 1000) return std::nullopt;
@@ -121,7 +129,7 @@ namespace multiseat::spaces {
       const auto &config = image.at("Config"), &labels = config.at("Labels");
       if (labels.at("org.opencontainers.image.source") != "https://github.com/papi-ux/polaris" ||
           labels.at("org.opencontainers.image.revision") != r.source_revision ||
-          labels.at("io.polaris.multiseat.profile") != "steam" ||
+          labels.at("io.polaris.multiseat.profile") != r.profile ||
           labels.at("io.polaris.multiseat.architecture") != "linux/amd64" ||
           labels.at("io.polaris.multiseat.media-contract") != "1" ||
           config.at("Entrypoint") != json::array({"/usr/bin/polaris-seat-worker"}) ||

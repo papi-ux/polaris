@@ -55,6 +55,9 @@ def validate_catalog(catalog):
             not isinstance(catalog['runtimes'], list) or len(catalog['runtimes']) > 64):
         raise ValueError('unsupported runtime catalog')
     ids, digests = set(), set()
+    # Each launcher family carries its own launcher in its own image, so an
+    # entry names one and Polaris pulls it from that family's repository.
+    families = {'steam', 'heroic', 'lutris'}
     for entry in catalog['runtimes']:
         expected = {'id', 'profile', 'variant', 'platform', 'media_contract', 'uid', 'gid',
                     'source_revision', 'registry_digest', 'config_digest', 'nvidia_driver',
@@ -66,7 +69,7 @@ def validate_catalog(catalog):
             raise ValueError('runtime identity fields must be strings')
         if (not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,63}', entry['id']) or
                 entry['id'] in ids or entry['registry_digest'] in digests or
-                entry['profile'] != 'steam' or entry['platform'] != 'linux/amd64' or
+                entry['profile'] not in families or entry['platform'] != 'linux/amd64' or
                 not re.fullmatch(r'[0-9a-f]{40}', entry['source_revision']) or
                 not is_digest(entry['registry_digest']) or not is_digest(entry['config_digest']) or
                 any(type(entry[key]) is not int or entry[key] != value
@@ -93,7 +96,7 @@ def prepare_candidate(directory, registry_digest, registry_manifest):
     if (any(type(artifact[key]) is not int or artifact[key] != value
             for key, value in [('schema', 1), ('media_contract', 1), ('owner_uid', 1000), ('owner_gid', 1000)]) or
             artifact['development'] is not False or
-            artifact['build_engine'] != 'docker' or artifact['profile'] != 'steam' or
+            artifact['build_engine'] != 'docker' or artifact['profile'] not in ('steam', 'heroic', 'lutris') or
             artifact['platform'] != 'linux/amd64' or artifact['media_contract'] != 1 or
             artifact['owner_uid'] != 1000 or artifact['owner_gid'] != 1000 or
             artifact['validation']['dependencies'] != 'passed' or
@@ -141,7 +144,7 @@ def prepare_candidate(directory, registry_digest, registry_manifest):
     labels = config['config']['Labels']
     if (labels['org.opencontainers.image.source'] != 'https://github.com/papi-ux/polaris' or
             labels['org.opencontainers.image.revision'] != artifact['source_revision'] or
-            labels['io.polaris.multiseat.profile'] != 'steam' or
+            labels['io.polaris.multiseat.profile'] != artifact['profile'] or
             labels['io.polaris.multiseat.architecture'] != 'linux/amd64' or
             labels['io.polaris.multiseat.media-contract'] != '1' or
             config['config']['Entrypoint'] != ['/usr/bin/polaris-seat-worker'] or config['config']['Cmd'] != ['run'] or
@@ -167,8 +170,8 @@ def prepare_candidate(directory, registry_digest, registry_manifest):
         if borrowed and (driver or labels.get('io.polaris.multiseat.nvidia.source') != 'host' or
                          labels.get('io.polaris.multiseat.nvidia.contract') != '1' or not minimum):
             raise ValueError('a host-driver image must carry no driver and name its contract')
-    entry = {'id': 'steam-' + artifact['variant'] + '-' + registry_digest[7:23],
-             'profile': 'steam', 'variant': artifact['variant'], 'platform': 'linux/amd64',
+    entry = {'id': artifact['profile'] + '-' + artifact['variant'] + '-' + registry_digest[7:23],
+             'profile': artifact['profile'], 'variant': artifact['variant'], 'platform': 'linux/amd64',
              'media_contract': 1, 'uid': 1000, 'gid': 1000, 'source_revision': artifact['source_revision'],
              'registry_digest': registry_digest, 'config_digest': config_digest, 'nvidia_driver': driver,
              'nvidia_minimum_driver': minimum}

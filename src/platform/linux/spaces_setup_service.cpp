@@ -149,9 +149,14 @@ namespace multiseat::spaces {
           body.at("reference"), body.at("image"), body.at("state"), body.at("code"), body.at("schema") == 2 ? body.at("gpu_id").get<std::string>() : std::string {}};
         const bool configuring = r.state == "configuring" || r.state == "restart_required" || r.state == "activation_failed";
         if (configuring ? !valid_gpu(r.gpu_id) : !r.gpu_id.empty()) throw std::invalid_argument("setup graphics");
-        const std::string prefix = std::string {runtime_repository} + "@";
+        // <repository prefix>-<launcher family>@<digest>, the only reference a
+        // runtime is ever pulled by.
+        const std::string prefix = std::string {runtime_repository} + "-";
+        const auto at = r.reference.find('@');
         if (!valid_request(r.request) || r.request.operation != "start" ||
-            !r.reference.starts_with(prefix) || !digest(r.reference.substr(prefix.size())) || !digest(r.image) ||
+            !r.reference.starts_with(prefix) || at == std::string::npos || at <= prefix.size() ||
+            !admitted_runtime_profile(std::string_view {r.reference}.substr(prefix.size(), at - prefix.size())) ||
+            !digest(r.reference.substr(at + 1)) || !digest(r.image) ||
             !valid_stage(r.state, r.code))
           throw std::invalid_argument("setup record");
         record_ = std::move(r);

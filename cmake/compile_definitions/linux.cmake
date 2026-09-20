@@ -51,14 +51,16 @@ configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_host_admin_data.h.
 # Only a catalog reviewed into the host build may authorize runtime downloads. A lab build may
 # compile another catalog and pull from another repository to test Spaces end to end without
 # publishing; release workflows never set either, and a unit test fails if one does.
-set(POLARIS_SPACES_RUNTIME_REPOSITORY "ghcr.io/papi-ux/polaris-worker-steam" CACHE STRING
-    "Repository Spaces runtimes are pulled from. Change only for a lab build.")
+# One repository per launcher family sits beside this prefix, so a runtime for the steam family
+# is pulled from <prefix>-steam and a heroic one from <prefix>-heroic.
+set(POLARIS_SPACES_RUNTIME_REPOSITORY "ghcr.io/papi-ux/polaris-worker" CACHE STRING
+    "Repository prefix Spaces runtimes are pulled from, without the launcher family. Change only for a lab build.")
 set(POLARIS_SPACES_RUNTIME_CATALOG_FILE "${CMAKE_SOURCE_DIR}/containers/multiseat/runtime-catalog.json" CACHE FILEPATH
     "Spaces runtime catalog compiled into Polaris. Change only for a lab build.")
 if(NOT POLARIS_SPACES_RUNTIME_REPOSITORY MATCHES "^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$")
-    message(FATAL_ERROR "POLARIS_SPACES_RUNTIME_REPOSITORY must name a registry repository, such as ghcr.io/papi-ux/polaris-worker-steam")
+    message(FATAL_ERROR "POLARIS_SPACES_RUNTIME_REPOSITORY must name a registry repository prefix, such as ghcr.io/papi-ux/polaris-worker")
 endif()
-if(NOT POLARIS_SPACES_RUNTIME_REPOSITORY STREQUAL "ghcr.io/papi-ux/polaris-worker-steam" OR
+if(NOT POLARIS_SPACES_RUNTIME_REPOSITORY STREQUAL "ghcr.io/papi-ux/polaris-worker" OR
    NOT POLARIS_SPACES_RUNTIME_CATALOG_FILE STREQUAL "${CMAKE_SOURCE_DIR}/containers/multiseat/runtime-catalog.json")
     message(WARNING "Lab build: Spaces runtimes come from ${POLARIS_SPACES_RUNTIME_REPOSITORY} with the catalog "
                     "${POLARIS_SPACES_RUNTIME_CATALOG_FILE}. Do not ship this build.")
