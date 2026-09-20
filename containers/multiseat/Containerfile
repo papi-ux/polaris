@@ -72,9 +72,12 @@ RUN mkdir -p /out/steam-input && \
       done; \
     fi
 
-# Proves a borrowed driver loads for both ABIs, once, at worker start.
+# Proves a borrowed driver loads for both ABIs, once, at worker start. Only a
+# profile that carries i386 builds the 32 bit probe, and only such a profile is
+# ever admitted as a Spaces runtime.
 RUN mkdir -p /out/graphics-check && \
-    for abi in 64 32; do \
+    abis=64; if test "$RUNTIME_PROFILE" != gamescope; then abis="64 32"; fi; \
+    for abi in $abis; do \
       suffix=; if test "$abi" = 32; then suffix=-32; fi; \
       cc -m$abi -std=c11 -O2 -Wall -Wextra -Werror \
         -ffile-prefix-map=/providers=. -Wl,--build-id=none \
