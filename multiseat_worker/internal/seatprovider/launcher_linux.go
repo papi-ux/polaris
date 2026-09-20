@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/papi-ux/polaris/multiseat_worker/internal/seatinput"
@@ -24,6 +25,10 @@ type launcherCommand struct {
 	retainDescendants bool
 }
 
+// Where the image puts Heroic. The package the lock pins installs it here, and
+// check-runtime.py asserts it before an image is accepted.
+const heroicExecutable = "/opt/Heroic/heroic"
+
 // Workloads are image-owned executable policy. Controller input selects only
 // this bounded key; paths, argv, shell text and ambient environment never cross.
 func planLauncher(request seatruntime.Request) (launcherCommand, error) {
@@ -33,8 +38,11 @@ func planLauncher(request seatruntime.Request) (launcherCommand, error) {
 	if request.Stage != seatruntime.StageLauncher || !seatruntime.StreamingWorkloadSupported(request.RuntimeProfile, request.WorkloadKind, request.WorkloadID) {
 		return launcherCommand{}, errors.New("workload is not implemented in this image")
 	}
-	if request.WorkloadKind == seatruntime.WorkloadGamescope {
+	switch request.WorkloadKind {
+	case seatruntime.WorkloadGamescope:
 		return launcherCommand{executable: "/usr/libexec/polaris-seat/workloads/input-pong-v1"}, nil
+	case seatruntime.WorkloadHeroic:
+		return planHeroicLauncher(request)
 	}
 	// The immutable package script sets STEAMSCRIPT from $0. Interpreting it
 	// through its canonical path keeps Steam updates/restarts from inheriting
@@ -50,12 +58,34 @@ func planLauncher(request seatruntime.Request) (launcherCommand, error) {
 	return command, nil
 }
 
+// Heroic is an Electron application, and Electron's zygote wants a user
+// namespace this container does not grant, so it runs with its own sandbox off.
+// The deep link is rebuilt here from the validated token: the runner and the
+// store's own identifier are the only two pieces that cross, and neither one
+// reaches a shell.
+func planHeroicLauncher(request seatruntime.Request) (launcherCommand, error) {
+	command := launcherCommand{
+		executable:        heroicExecutable,
+		arguments:         []string{heroicExecutable, "--no-sandbox"},
+		retainDescendants: true,
+	}
+	if request.WorkloadID == seatruntime.LauncherLibrary {
+		return command, nil
+	}
+	runner, name, found := strings.Cut(request.WorkloadID, ".")
+	if !found || runner == "" || name == "" {
+		return launcherCommand{}, errors.New("heroic target is not a runner and an application")
+	}
+	command.arguments = append(command.arguments, "heroic://launch/"+runner+"/"+name)
+	return command, nil
+}
+
 func launcherEnvironment(request seatruntime.Request, session launcherSession) ([]string, error) {
 	environment, err := seatruntime.Environment(request)
 	if err != nil {
 		return nil, err
 	}
-	if request.WorkloadKind == seatruntime.WorkloadSteam {
+	if request.WorkloadKind == seatruntime.WorkloadSteam || request.WorkloadKind == seatruntime.WorkloadHeroic {
 		// Profile streams currently allocate at most one gamepad. SDL's Linux
 		// discovery skips our reserved alias because it is not an eventN name
 		// and this namespace has no host udev database. Select only that exact
