@@ -148,7 +148,10 @@ namespace multiseat::spaces {
     // of the runtime a Space already uses is offered when this build carries
     // one: the same launcher and the same kind of graphics support, under
     // another identity. A change of kind is one of the other two reasons, or a
-    // change of graphics card, and is not called an update here.
+    // change of graphics card, and is not called an update here. The catalog
+    // carries no order, so "newer" means "the one this build carries": after a
+    // downgrade of Polaris the offer points at the older runtime that build was
+    // made with, which is still the one it should run.
     if (!image.known || !choice.runtime || image.profile != choice.runtime->profile ||
         image.runtime_id == choice.runtime->id) return false;
     const auto &variant = choice.runtime->variant;
@@ -191,9 +194,12 @@ namespace multiseat::spaces {
     for (const auto &profile : profiles) {
       image_runtime_t image;
       if (const auto known = catalog_image_runtime(profile.image, catalog)) image = *known;
-      else if (nvidia && !profile.image.empty()) image = identify_image(host, profile.image, catalog, images);
       // A Space whose image this build does not list is still identified by its
-      // own labels, so an upgrade can be offered rather than a dead card.
+      // own labels, on any graphics. A catalog replaces a runtime's entry when
+      // it is rebuilt, so that is exactly the Space a newer build is for, and
+      // reading labels only on NVIDIA left an AMD or Intel Space never offered
+      // one. Docker answers once for each such image and the answer is kept.
+      else if (!profile.image.empty()) image = identify_image(host, profile.image, catalog, images);
       const auto family = image.profile.empty() ? std::string("steam") : image.profile;
       const auto choice = choose_runtime(catalog, host_driver, family);
       auto state = runtime_image_e::unverifiable;

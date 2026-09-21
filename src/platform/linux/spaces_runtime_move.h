@@ -67,9 +67,9 @@ namespace multiseat::spaces {
   /// Docker already holds it verified.
   [[nodiscard]] nlohmann::json describe_space_runtime(const image_runtime_t &image,
     const std::optional<std::string> &host_driver, const runtime_choice_t &choice, runtime_image_e target);
-  /// describe_space_runtime for each Space, keyed by its id. Docker is asked only on a host with
-  /// a readable NVIDIA driver, about images the catalog does not name and, when a Space
-  /// mismatches, about the runtime it would move to.
+  /// describe_space_runtime for each Space, keyed by its id. Docker is asked once about each
+  /// image the catalog does not name, on any graphics, and about the runtime a Space would move
+  /// to only when a move is on offer. Both answers are kept.
   [[nodiscard]] nlohmann::json describe_space_runtimes(container::host_t &host,
     const std::vector<profile_summary_t> &profiles, const std::vector<runtime_t> &catalog,
     const std::optional<std::string> &host_driver, image_runtime_cache_t *images,

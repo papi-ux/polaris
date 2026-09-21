@@ -289,12 +289,34 @@ namespace {
       {"space-b", "Sam", {}, "steam", false, {}, true, nvidia610.config_digest},
       {"space-c", "Kai", {}, "steam", false, {}, true, nvidia615.config_digest},
     };
-    // A PC without an NVIDIA driver cannot mismatch: Docker is not asked.
+    // A PC without an NVIDIA driver cannot mismatch, so no runtime is looked at. The one image
+    // the catalog does not name is still read from its labels, once: that is how a Space on a
+    // runtime this build has since replaced is recognised, on any graphics.
     const auto amd = spaces::describe_space_runtimes(host, profiles, catalog, std::nullopt, &images, &targets);
-    EXPECT_TRUE(host.calls.empty());
-    EXPECT_TRUE(amd["space-a"]["runtime_driver"].is_null());
+    ASSERT_EQ(host.calls.size(), 1U);
+    EXPECT_EQ(host.calls[0], (std::vector<std::string> {"image", "inspect", lab_image}));
+    EXPECT_EQ(amd["space-a"]["runtime_driver"], "610.57.04");
+    EXPECT_EQ(amd["space-a"]["runtime_mismatch"], false);
+    EXPECT_TRUE(amd["space-a"]["runtime_move"].is_null()) << "a runtime for other graphics is no update";
     EXPECT_EQ(amd["space-b"]["runtime_driver"], "610.57.04");
     EXPECT_EQ(amd["space-b"]["runtime_mismatch"], false);
+
+    // A Space without NVIDIA userspace, on a build of the default runtime this catalog no
+    // longer lists, is offered the one it does carry. It never was before, because its image
+    // was only ever read on a host with an NVIDIA driver.
+    {
+      inspect_host_t other;
+      spaces::image_runtime_cache_t other_images;
+      spaces::runtime_inspection_cache_t other_targets;
+      const std::string replaced = "sha256:" + std::string(64, 'd');
+      other.images[replaced] = labeled(replaced, {{"io.polaris.multiseat.profile", "steam"},
+        {"io.polaris.multiseat.media-contract", "1"}, {"io.polaris.multiseat.architecture", "linux/amd64"}});
+      const std::vector<profile_summary_t> older {{"space-d", "Rio", {}, "steam", false, {}, true, replaced}};
+      const auto offered = spaces::describe_space_runtimes(other, older, catalog, std::nullopt, &other_images, &other_targets);
+      ASSERT_TRUE(offered["space-d"]["runtime_move"].is_object());
+      EXPECT_EQ(offered["space-d"]["runtime_move"]["reason"], "runtime_updated");
+      EXPECT_EQ(offered["space-d"]["runtime_move"]["runtime_id"], "steam-default");
+    }
 
     host.runtimes[nvidia615.reference()] = verified(nvidia615);
     const auto nvidia = spaces::describe_space_runtimes(host, profiles, catalog, std::string("615.71.09"), &images, &targets);
