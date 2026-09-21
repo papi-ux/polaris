@@ -4451,6 +4451,38 @@ TEST(ProcessRuntimeConfigTests, ALaunchOnAGameModeHostIsNeverAskedToCloseSteam) 
   }
 }
 
+TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStreamOpened) {
+  // Remembered at launch: a Steam title, on a host in Game Mode, that was not open yet.
+  EXPECT_EQ(proc::game_mode_title_to_remember_for_tests("813230", true, false), "813230");
+  EXPECT_EQ(proc::game_mode_title_to_remember_for_tests("813230", true, true), "")
+    << "a title someone was already playing on the device is theirs, and a stream that joins it leaves it open";
+  EXPECT_EQ(proc::game_mode_title_to_remember_for_tests("813230", false, false), "")
+    << "on a desktop host the Steam cleanup is what closes the title";
+  EXPECT_EQ(proc::game_mode_title_to_remember_for_tests("", true, false), "") << "Desktop and other entries open no title";
+
+  // Acted on at End Session.
+  EXPECT_TRUE(proc::should_close_game_mode_title_for_tests("813230", true, false));
+  EXPECT_FALSE(proc::should_close_game_mode_title_for_tests("", true, false));
+  EXPECT_FALSE(proc::should_close_game_mode_title_for_tests("813230", false, false))
+    << "the host left Game Mode in between, so the title went with the session";
+  EXPECT_FALSE(proc::should_close_game_mode_title_for_tests("813230", true, true))
+    << "a Polaris that is stopping or updating is not someone ending a session";
+
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  const auto terminate = source.substr(source.find("void proc_t::terminate_impl(bool immediate, bool needs_refresh) {"));
+  const auto close_call = terminate.find("platf::steam_title::ask_to_close(_game_mode_launched_appid)");
+  const auto forgotten = terminate.find("_game_mode_launched_appid.clear();");
+  ASSERT_NE(close_call, std::string::npos);
+  ASSERT_NE(forgotten, std::string::npos);
+  EXPECT_LT(close_call, forgotten) << "asked once, then forgotten, so a later stop cannot ask a title that a new launch did not open";
+
+  std::size_t callers = 0;
+  for (auto at = source.find("steam_title::ask_to_close("); at != std::string::npos; at = source.find("steam_title::ask_to_close(", at + 1)) {
+    ++callers;
+  }
+  EXPECT_EQ(callers, 1u) << "the only thing that closes a title in Game Mode is End Session";
+}
+
 TEST(ProcessRuntimeConfigTests, EndingAStreamNeverStopsTheSteamThatIsRunningGameMode) {
   // Every Steam title and the Big Picture entry carry an undo that stops Steam, added as cleanup
   // when the app has none of its own. Under Game Mode that Steam is the session.

@@ -86,9 +86,11 @@ What that stream is made of:
 - **A Steam title** launched from a client is handed to the Steam that is running Game Mode, and
   Game Mode brings it to the front. A host configured for Private Stream does not ask the player
   to close Steam first, because there is no other Steam to close.
-- **Ending the stream** leaves Game Mode alone. On a desktop host, ending a Steam title's stream
-  also closes the Steam that the stream opened. In Game Mode that Steam is the session, so the
-  cleanup is skipped and the title stays open on the device until someone quits it.
+- **Ending the session** closes the title the stream opened and leaves Game Mode alone. On a
+  desktop host, ending a Steam title's stream closes the Steam that the stream opened. In Game Mode
+  that Steam is the session, so only the title is asked to close, and Steam stays as it is. A title
+  that was already open on the device when the stream started is left open, and a disconnect
+  closes nothing.
 
 Known limits:
 
@@ -101,8 +103,8 @@ Known limits:
   for. HDR is not carried.
 
 Proven on a Steam Deck OLED on SteamOS 3.8.16 with gamescope 3.16.23: the Game Mode screen, a Steam
-title launched from the client at 60 fps with audio, keyboard and mouse, and Game Mode still running
-after the stream ended. Controllers in Game Mode, Bazzite, and hosts whose gamescope has no
+title launched from the client at 60 fps with audio, keyboard and mouse, that title closed again when
+the session ended, and Game Mode still running afterwards. Controllers in Game Mode, Bazzite, and hosts whose gamescope has no
 ScreenCast portal still want field results.
 
 ## Reporting Game Mode results

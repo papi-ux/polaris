@@ -88,6 +88,7 @@
   #include "platform/linux/display_topology.h"
   #include "platform/linux/gamescope_process.h"
   #include "platform/linux/game_mode_host.h"
+  #include "platform/linux/steam_title_process.h"
   #include "platform/linux/gamescope_session_helper.h"
   #include "platform/linux/input/inputtino_gamepad_isolation.h"
   #include <dirent.h>
@@ -2500,38 +2501,7 @@ namespace proc {
     }
 
     bool steam_launch_cmdline_matches_appid(std::string_view cmdline, std::string_view appid) {
-      if (appid.empty() || !std::all_of(appid.begin(), appid.end(), [](unsigned char value) {
-            return std::isdigit(value) != 0;
-          })) {
-        return false;
-      }
-
-      const auto expected_appid = "AppId="s + std::string {appid};
-      const auto is_separator = [](unsigned char value) {
-        return value == '\0' || std::isspace(value) != 0;
-      };
-      std::string_view previous;
-      std::size_t cursor = 0;
-      while (cursor < cmdline.size()) {
-        while (cursor < cmdline.size() &&
-               is_separator(static_cast<unsigned char>(cmdline[cursor]))) {
-          ++cursor;
-        }
-        const auto begin = cursor;
-        while (cursor < cmdline.size() &&
-               !is_separator(static_cast<unsigned char>(cmdline[cursor]))) {
-          ++cursor;
-        }
-        if (begin == cursor) {
-          break;
-        }
-        const auto token = cmdline.substr(begin, cursor - begin);
-        if (previous == "SteamLaunch"sv && token == expected_appid) {
-          return true;
-        }
-        previous = token;
-      }
-      return false;
+      return platf::steam_title::launch_cmdline_matches_appid(cmdline, appid);
     }
 
     struct private_steam_app_root_snapshot_t {
@@ -3468,6 +3438,30 @@ namespace proc {
     ) {
       return session_owned_cage &&
              command_requests_steam_shutdown(cmd.undo_cmd);
+    }
+
+    std::string game_mode_title_to_remember(
+      std::string_view appid,
+      bool game_mode_session_live,
+      bool already_running
+    ) {
+      // Only a title this launch opened is this launch's to close. One that was open already belongs
+      // to whoever was playing it on the device, and a stream that joins it leaves it as it found it.
+      if (appid.empty() || !game_mode_session_live || already_running) {
+        return {};
+      }
+      return std::string {appid};
+    }
+
+    bool should_close_game_mode_title(
+      std::string_view launched_appid,
+      bool game_mode_session_live,
+      bool daemon_shutdown
+    ) {
+      // End Session says it closes the host app. On a desktop host that is done by closing the Steam
+      // the stream opened. In Game Mode that Steam is the session, so the title alone is asked to
+      // close. A Polaris that is stopping or updating is not someone ending a session.
+      return !launched_appid.empty() && game_mode_session_live && !daemon_shutdown;
     }
 
     bool should_skip_steam_stop_undo_in_game_mode(
@@ -5608,6 +5602,22 @@ namespace proc {
     bool game_mode_session_live
   ) {
     return should_skip_steam_stop_undo_in_game_mode(cmd, game_mode_session_live);
+  }
+
+  std::string game_mode_title_to_remember_for_tests(
+    std::string_view appid,
+    bool game_mode_session_live,
+    bool already_running
+  ) {
+    return game_mode_title_to_remember(appid, game_mode_session_live, already_running);
+  }
+
+  bool should_close_game_mode_title_for_tests(
+    std::string_view launched_appid,
+    bool game_mode_session_live,
+    bool daemon_shutdown
+  ) {
+    return should_close_game_mode_title(launched_appid, game_mode_session_live, daemon_shutdown);
   }
 
   bool should_forward_steam_shutdown_undo_without_launch_for_tests(
@@ -9337,6 +9347,18 @@ namespace proc {
       // retain pidfd authority for their direct children so stop can reap exact
       // children even if they exit before /proc ownership scanning begins.
       const bool detached_only = !_app.detached.empty() && _app.cmd.empty();
+#ifdef __linux__
+      {
+        const auto appid = steam_appid_for_context(_app);
+        const bool game_mode_live = platf::game_mode_host::session_live();
+        const bool already_running = game_mode_live && !appid.empty() &&
+                                     platf::steam_title::running(platf::steam_title::read_process_table(), appid, getuid());
+        _game_mode_launched_appid = game_mode_title_to_remember(appid, game_mode_live, already_running);
+        if (already_running) {
+          BOOST_LOG(info) << "game_mode: ["sv << _app.name << "] is already open in Game Mode, so ending this stream will leave it open"sv;
+        }
+      }
+#endif
       for (auto &cmd : _app.detached) {
         boost::filesystem::path working_dir = _app.working_dir.empty() ?
                                                 find_working_directory(cmd, _env) :
@@ -10392,6 +10414,17 @@ namespace proc {
         return !cmd.undo_cmd.empty() && command_uses_polaris_gamescope_session(cmd.undo_cmd);
       }
     );
+
+    if (should_close_game_mode_title(_game_mode_launched_appid, platf::game_mode_host::session_live(), daemon_shutdown_requested())) {
+      const auto closed = platf::steam_title::ask_to_close(_game_mode_launched_appid);
+      if (closed.asked > 0) {
+        BOOST_LOG(info) << "game_mode: asked ["sv << _app.name << "] to close, the title this stream opened in Game Mode (processes asked: "sv
+                        << closed.asked << "); Steam stays as it is"sv;
+      } else if (closed.was_running) {
+        BOOST_LOG(warning) << "game_mode: ["sv << _app.name << "] is still open in Game Mode and could not be asked to close; quit it on the device"sv;
+      }
+    }
+    _game_mode_launched_appid.clear();
 #endif
 
     for (; _app_prep_it != _app_prep_begin; --_app_prep_it) {

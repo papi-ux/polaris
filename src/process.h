@@ -326,6 +326,16 @@ namespace proc {
     const config::prep_cmd_t &cmd,
     bool game_mode_session_live
   );
+  std::string game_mode_title_to_remember_for_tests(
+    std::string_view appid,
+    bool game_mode_session_live,
+    bool already_running
+  );
+  bool should_close_game_mode_title_for_tests(
+    std::string_view launched_appid,
+    bool game_mode_session_live,
+    bool daemon_shutdown
+  );
   bool should_forward_steam_shutdown_undo_without_launch_for_tests(
     const struct ctx_t &app,
     const config::prep_cmd_t &cmd,
@@ -1022,6 +1032,9 @@ namespace proc {
     bool _session_used_gamescope_runtime = false;
     bool _exact_generation_cleanup_complete = true;
     std::optional<retained_steam_shutdown_t> _retained_steam_shutdown;
+    /// The Steam title this launch opened in the Steam that runs Game Mode. Empty when there is none,
+    /// or when the title was open before the launch and so is not this session's to close.
+    std::string _game_mode_launched_appid;
 #endif
     std::vector<cmd_t>::const_iterator _app_prep_it;
     std::vector<cmd_t>::const_iterator _app_prep_begin;
