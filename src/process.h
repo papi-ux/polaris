@@ -319,6 +319,10 @@ namespace proc {
     const config::prep_cmd_t &cmd,
     bool use_cage_compositor
   );
+  bool should_skip_steam_stop_undo_in_game_mode_for_tests(
+    const config::prep_cmd_t &cmd,
+    bool game_mode_session_live
+  );
   bool should_forward_steam_shutdown_undo_without_launch_for_tests(
     const struct ctx_t &app,
     const config::prep_cmd_t &cmd,

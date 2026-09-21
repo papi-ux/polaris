@@ -3470,6 +3470,16 @@ namespace proc {
              command_requests_steam_shutdown(cmd.undo_cmd);
     }
 
+    bool should_skip_steam_stop_undo_in_game_mode(
+      const proc::cmd_t &cmd,
+      bool game_mode_session_live
+    ) {
+      // Under Game Mode the running Steam is the session itself. An undo that stops Steam, whether
+      // the app carried it or it was added as cleanup, would end Game Mode for whoever is holding
+      // the device. The title that was launched belongs to that Steam and is left to it.
+      return game_mode_session_live && prep_cmd_undo_stops_steam(cmd);
+    }
+
     bool should_forward_steam_shutdown_undo_without_launch(
       const proc::ctx_t &app,
       const proc::cmd_t &cmd,
@@ -5571,6 +5581,13 @@ namespace proc {
     bool use_cage_compositor
   ) {
     return should_skip_steam_shutdown_undo_after_cage_cleanup(cmd, use_cage_compositor);
+  }
+
+  bool should_skip_steam_stop_undo_in_game_mode_for_tests(
+    const proc::cmd_t &cmd,
+    bool game_mode_session_live
+  ) {
+    return should_skip_steam_stop_undo_in_game_mode(cmd, game_mode_session_live);
   }
 
   bool should_forward_steam_shutdown_undo_without_launch_for_tests(
@@ -9951,6 +9968,14 @@ namespace proc {
       return true;
     }
 
+    // A claim kept from before the host went into Game Mode names a Steam that is gone. The one
+    // listening now is the session, and nothing closes that.
+    if (platf::game_mode_host::session_live()) {
+      BOOST_LOG(info) << "process: dropping a retained Steam shutdown because the running Steam is Steam Game Mode on this host"sv;
+      _retained_steam_shutdown.reset();
+      return true;
+    }
+
     bool dispatch_attempted = false;
     const auto command = _retained_steam_shutdown->command;
     const bool complete = resolve_retained_steam_shutdown_claim(
@@ -10363,6 +10388,12 @@ namespace proc {
       }
 
 #ifdef __linux__
+      if (should_skip_steam_stop_undo_in_game_mode(cmd, platf::game_mode_host::session_live())) {
+        BOOST_LOG(info) << "Skipping Steam stop undo because the running Steam is Steam Game Mode on this host ["sv
+                        << cmd.undo_cmd << ']';
+        continue;
+      }
+
       if (should_skip_steam_shutdown_undo_after_cage_cleanup(
             cmd,
             _session_used_cage_compositor

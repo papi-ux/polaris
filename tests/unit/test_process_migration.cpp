@@ -4420,6 +4420,41 @@ TEST(ProcessRuntimeConfigTests, NothingClosesTheSteamThatIsRunningGameMode) {
   ASSERT_NE(command, std::string::npos);
   EXPECT_LT(refusal, command) << "the refusal comes before anything that could run steam -shutdown, for every caller";
 }
+
+TEST(ProcessRuntimeConfigTests, EndingAStreamNeverStopsTheSteamThatIsRunningGameMode) {
+  // Every Steam title and the Big Picture entry carry an undo that stops Steam, added as cleanup
+  // when the app has none of its own. Under Game Mode that Steam is the session.
+  const proc::cmd_t shutdown {"", "setsid -f steam -shutdown", false};
+  const proc::cmd_t close_big_picture {"", "setsid steam steam://close/bigpicture", false};
+  const proc::cmd_t unrelated {"", "xrandr --output HDMI-1 --auto", false};
+
+  EXPECT_TRUE(proc::should_skip_steam_stop_undo_in_game_mode_for_tests(shutdown, true));
+  EXPECT_TRUE(proc::should_skip_steam_stop_undo_in_game_mode_for_tests(close_big_picture, true));
+  EXPECT_FALSE(proc::should_skip_steam_stop_undo_in_game_mode_for_tests(unrelated, true))
+    << "an undo that has nothing to do with Steam still runs";
+
+  EXPECT_FALSE(proc::should_skip_steam_stop_undo_in_game_mode_for_tests(shutdown, false))
+    << "on a desktop host the cleanup is what closes the Steam a stream opened";
+  EXPECT_FALSE(proc::should_skip_steam_stop_undo_in_game_mode_for_tests(close_big_picture, false));
+
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  const auto undo_loop = source.substr(source.find("for (; _app_prep_it != _app_prep_begin; --_app_prep_it) {"));
+  const auto guard = undo_loop.find("should_skip_steam_stop_undo_in_game_mode(cmd, platf::game_mode_host::session_live())");
+  const auto forwarded = undo_loop.find("should_forward_steam_shutdown_undo_without_launch(");
+  const auto executed = undo_loop.find("Executing Undo Cmd");
+  ASSERT_NE(guard, std::string::npos);
+  ASSERT_NE(forwarded, std::string::npos);
+  ASSERT_NE(executed, std::string::npos);
+  EXPECT_LT(guard, forwarded) << "before the route that forwards a shutdown to the running Steam";
+  EXPECT_LT(guard, executed) << "and before the route that runs the undo as written";
+
+  const auto retry = source.substr(source.find("bool proc_t::retry_retained_steam_shutdown() {"));
+  const auto dropped = retry.find("if (platf::game_mode_host::session_live()) {");
+  const auto resolved = retry.find("resolve_retained_steam_shutdown_claim(");
+  ASSERT_NE(dropped, std::string::npos);
+  ASSERT_NE(resolved, std::string::npos);
+  EXPECT_LT(dropped, resolved) << "a shutdown kept from Desktop Mode is dropped, not retried against the session";
+}
 #endif
 
 class ProcessResumeDisplayTests: public testing::Test {
