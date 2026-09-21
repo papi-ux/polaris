@@ -186,8 +186,6 @@ namespace multiseat::spaces {
     const std::vector<runtime_t> &catalog, const std::optional<std::string> &host_driver,
     image_runtime_cache_t *images, runtime_inspection_cache_t *targets) {
     json result = json::object();
-    // Only a host that runs a readable NVIDIA driver can disagree with a runtime.
-    const bool nvidia = host_driver && !host_driver->empty();
     // Each Space asks within its own launcher family, and one inspection per
     // family serves every Space that shares it.
     std::map<std::string, runtime_image_e, std::less<>> targets_seen;
