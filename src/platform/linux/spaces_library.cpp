@@ -233,6 +233,62 @@ print(json.dumps({'schema': 1, 'games': [{'target': k, 'name': v} for k,v in sor
 )PY";
   }
 
+  std::string_view lutris_library_scanner() {
+    return R"PY(import os, json, stat, signal, sqlite3
+signal.alarm(8)
+root = os.open('/profile', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+def directory(parts):
+    fd = os.dup(root)
+    try:
+        for part in parts:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+# Lutris keeps its whole library in one SQLite database. SQLite opens a file by
+# its name and wants a journal beside it, while this mount is read-only and
+# nothing here trusts a name. So the file is read through a descriptor that
+# followed no link, and the database is opened from that copy in memory. Asking
+# Lutris itself would start the launcher inside a helper with 16 processes.
+limit = 33554432
+games = {}
+try:
+    fd = directory(('.local','share','lutris'))
+    try: f = os.open('pga.db', os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    finally: os.close(fd)
+    try:
+        s = os.fstat(f)
+        if not stat.S_ISREG(s.st_mode) or s.st_size > limit: raise ValueError('database size')
+        with os.fdopen(os.dup(f), 'rb') as stream: data = stream.read(limit + 1)
+        if len(data) > limit: raise ValueError('database grew')
+    finally: os.close(f)
+    # A database left in write-ahead mode will not open from memory. Its main
+    # file is the last checkpointed state, which is all a reader that cannot see
+    # the log would be given anyway, so it is read as a rollback database.
+    if data[:16] == b'SQLite format 3\x00' and data[18:20] == b'\x02\x02':
+        data = data[:18] + b'\x01\x01' + data[20:]
+    connection = sqlite3.connect(':memory:')
+    connection.deserialize(data)
+    del data
+    # Installed, and not in the category Lutris keeps its hidden games in.
+    rows = connection.execute(
+        "SELECT id, name FROM games WHERE installed = 1 AND id NOT IN "
+        "(SELECT g.game_id FROM games_categories g JOIN categories c ON c.id = g.category_id "
+        "WHERE c.name = '.hidden') LIMIT 4097").fetchall()
+    if len(rows) <= 4096:
+        for number, title in rows:
+            if type(number) is not int or not 0 < number <= 4294967295: continue
+            if not isinstance(title, str) or not title or len(title.encode()) > 512: continue
+            if any(ord(c) < 32 or ord(c) == 127 for c in title): continue
+            games['id.' + str(number)] = title
+except (FileNotFoundError, NotADirectoryError, OSError, ValueError, TypeError, sqlite3.Error): pass
+print(json.dumps({'schema': 1, 'games': [{'target': k, 'name': v} for k,v in sorted(games.items(), key=lambda kv: kv[1].casefold())]}))
+)PY";
+  }
+
   namespace {
     /** What a family's own image labels itself. */
     std::string_view image_family(runtime_profile_e profile) {
@@ -246,7 +302,16 @@ print(json.dumps({'schema': 1, 'games': [{'target': k, 'name': v} for k,v in sor
   }  // namespace
 
   bool has_library(runtime_profile_e profile) {
-    return profile == runtime_profile_e::steam || profile == runtime_profile_e::heroic;
+    return !library_scanner(profile).empty();
+  }
+
+  std::string_view library_scanner(runtime_profile_e profile) {
+    switch (profile) {
+      case runtime_profile_e::steam: return steam_library_scanner();
+      case runtime_profile_e::heroic: return heroic_library_scanner();
+      case runtime_profile_e::lutris: return lutris_library_scanner();
+      default: return {};
+    }
   }
 
   library_t read_steam_library(container::host_t &host, const container::profile_t &profile) {
@@ -293,8 +358,7 @@ print(json.dumps({'schema': 1, 'games': [{'target': k, 'name': v} for k,v in sor
         "--security-opt=no-new-privileges", "--pids-limit=16", "--memory=128m", "--cpus=0.5", "--no-healthcheck",
         "--mount=type=volume,src=" + profile.opaque_volume_name + ",dst=/profile,readonly,volume-nocopy",
         "--entrypoint=/usr/bin/python3", profile.image_reference, "-I", "-c",
-        std::string(profile.runtime_profile == runtime_profile_e::heroic ? heroic_library_scanner()
-                                                                        : steam_library_scanner())});
+        std::string(library_scanner(profile.runtime_profile))});
       return decode_library(scanned, profile.runtime_profile).value_or(library_t{});
     } catch (...) { return {}; }
   }

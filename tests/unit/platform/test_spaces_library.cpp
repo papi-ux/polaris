@@ -112,6 +112,152 @@ namespace {
     EXPECT_EQ(result->games[0], (library_game_t{"870780", "Control"}));
   }
 
+  // Runs one Python file the way the library helper does and returns what it printed.
+  std::optional<std::string> run_python(const std::filesystem::path &script, const std::filesystem::path &output) {
+    const auto pid = ::fork();
+    if (pid < 0) return std::nullopt;
+    if (pid == 0) {
+      const int fd = ::open(output.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0600);
+      if (fd < 0 || ::dup2(fd, STDOUT_FILENO) < 0) _exit(126);
+      ::close(fd); ::execl("/usr/bin/python3", "python3", "-I", script.c_str(), nullptr); _exit(127);
+    }
+    int status = 0;
+    if (::waitpid(pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0) return std::nullopt;
+    std::ifstream input(output);
+    return std::string((std::istreambuf_iterator<char>(input)), {});
+  }
+
+  // The tables the reader asks, as Lutris 0.5.22 declares them, made by SQLite itself.
+  constexpr std::string_view lutris_fixture = R"PY(import sqlite3
+c = sqlite3.connect('DATABASE')
+c.execute('PRAGMA journal_mode=JOURNAL')
+c.execute('CREATE TABLE games (id INTEGER PRIMARY KEY, name TEXT, slug TEXT, runner TEXT, installed INTEGER)')
+c.execute('CREATE TABLE categories (id INTEGER PRIMARY KEY, name TEXT UNIQUE)')
+c.execute('CREATE TABLE games_categories (game_id INTEGER, category_id INTEGER)')
+c.executemany('INSERT INTO games VALUES (?,?,?,?,?)', [
+    (3, 'Quake', 'quake', 'linux', 1), (12, 'arx Fatalis', 'arx', 'wine', 1),
+    (4, 'Not Installed', 'ni', 'wine', 0), (5, 'Hidden One', 'h', 'wine', 1),
+    (6, 'Bad' + chr(7) + 'Bell', 'b', 'wine', 1), (7, '', 'e', 'wine', 1), (8, None, 'n', 'wine', 1),
+    (4294967296, 'Too Large', 't', 'wine', 1), (9, 'Favourite', 'f', 'wine', 1)])
+c.executemany('INSERT INTO categories VALUES (?,?)', [(1, 'favorite'), (2, '.hidden')])
+c.executemany('INSERT INTO games_categories VALUES (?,?)', [(5, 2), (9, 1)])
+c.commit()
+c.close()
+)PY";
+
+  struct lutris_home_t {
+    std::filesystem::path root, database;
+    lutris_home_t() {
+      char pattern[] = "/tmp/polaris-lutris-scanner-XXXXXX";
+      if (const auto created = ::mkdtemp(pattern)) {
+        root = created; database = root / ".local/share/lutris/pga.db";
+        std::filesystem::create_directories(database.parent_path());
+      }
+    }
+    ~lutris_home_t() { if (!root.empty()) std::filesystem::remove_all(root); }
+    bool make(const std::string &journal_mode = "DELETE") {
+      auto source = std::string(lutris_fixture);
+      source.replace(source.find("DATABASE"), 8, database.string());
+      source.replace(source.find("JOURNAL"), 7, journal_mode);
+      std::ofstream(root / "make.py") << source;
+      return run_python(root / "make.py", root / "make.out").has_value();
+    }
+    std::optional<library_t> scan() {
+      auto source = std::string(lutris_library_scanner());
+      source.replace(source.find("'/profile'"), 10, "'" + root.string() + "'");
+      std::ofstream(root / "scanner.py") << source;
+      const auto payload = run_python(root / "scanner.py", root / "result.json");
+      if (!payload) return std::nullopt;
+      return decode_library(*payload, multiseat::runtime_profile_e::lutris);
+    }
+  };
+
+  TEST(SpacesLibrary, LutrisScannerListsInstalledVisibleGamesFromItsDatabase) {
+    lutris_home_t home;
+    ASSERT_TRUE(home.make());
+    const auto result = home.scan();
+    ASSERT_TRUE(result);
+    // Sorted the way a player reads them, whatever case Lutris stored. A
+    // favourite is listed, and only the hidden category hides a game. A title
+    // that is empty, missing or carries a control character is skipped rather
+    // than repaired, and so is a number the target grammar cannot carry.
+    const std::vector<library_game_t> expected {{"id.12", "arx Fatalis"}, {"id.9", "Favourite"}, {"id.3", "Quake"}};
+    EXPECT_EQ(result->games, expected);
+  }
+
+  TEST(SpacesLibrary, LutrisScannerReadsADatabaseLeftInWriteAheadMode) {
+    lutris_home_t home;
+    ASSERT_TRUE(home.make("WAL"));
+    std::ifstream header(home.database, std::ios::binary);
+    char bytes[20] {};
+    header.read(bytes, sizeof(bytes));
+    ASSERT_EQ(bytes[18], 2) << "the fixture is not in write-ahead mode, so this proves nothing";
+    const auto result = home.scan();
+    ASSERT_TRUE(result);
+    EXPECT_EQ(result->games.size(), 3U);
+  }
+
+  TEST(SpacesLibrary, LutrisScannerOpensNothingButAPlainDatabaseFile) {
+    // The home is the player's, and the helper that reads it must not be led
+    // out of it or left waiting on it.
+    {
+      lutris_home_t home;
+      ASSERT_TRUE(home.make());
+      const auto elsewhere = home.root / "elsewhere.db";
+      std::filesystem::rename(home.database, elsewhere);
+      std::filesystem::create_symlink(elsewhere, home.database);
+      const auto result = home.scan();
+      ASSERT_TRUE(result) << "a linked database is an empty library, not a failure";
+      EXPECT_TRUE(result->games.empty());
+    }
+    {
+      lutris_home_t home;
+      ASSERT_EQ(::mkfifo(home.database.c_str(), 0600), 0);
+      const auto result = home.scan();
+      ASSERT_TRUE(result) << "a FIFO must not hold the helper open";
+      EXPECT_TRUE(result->games.empty());
+    }
+    {
+      lutris_home_t home;
+      ASSERT_TRUE(home.make());
+      const auto real = home.root / "real-share";
+      std::filesystem::rename(home.root / ".local/share", real);
+      std::filesystem::create_directory_symlink(real, home.root / ".local/share");
+      const auto result = home.scan();
+      ASSERT_TRUE(result);
+      EXPECT_TRUE(result->games.empty()) << "a linked directory on the way was followed";
+    }
+    {
+      lutris_home_t home;  // Lutris has never run here.
+      const auto result = home.scan();
+      ASSERT_TRUE(result);
+      EXPECT_TRUE(result->games.empty());
+    }
+    {
+      lutris_home_t home;
+      std::ofstream(home.database) << "not a database";
+      const auto result = home.scan();
+      ASSERT_TRUE(result);
+      EXPECT_TRUE(result->games.empty());
+    }
+  }
+
+  TEST(SpacesLibrary, EveryLauncherFamilyHasAReaderAndNothingElseDoes) {
+    using multiseat::runtime_profile_e;
+    for (const auto family : {runtime_profile_e::steam, runtime_profile_e::heroic, runtime_profile_e::lutris}) {
+      EXPECT_TRUE(has_library(family));
+      EXPECT_FALSE(library_scanner(family).empty());
+    }
+    EXPECT_FALSE(has_library(runtime_profile_e::gamescope));
+    EXPECT_NE(library_scanner(runtime_profile_e::lutris), library_scanner(runtime_profile_e::heroic));
+    // A Lutris library is read in Lutris's grammar and no other.
+    const auto lutris = decode_library(R"({"schema":1,"games":[{"target":"id.42","name":"Quake"}]})", runtime_profile_e::lutris);
+    ASSERT_TRUE(lutris);
+    EXPECT_EQ(lutris->games[0], (library_game_t{"id.42", "Quake"}));
+    EXPECT_FALSE(decode_library(R"({"schema":1,"games":[{"target":"42","name":"Quake"}]})", runtime_profile_e::lutris));
+    EXPECT_FALSE(decode_library(R"({"schema":1,"games":[{"target":"id.42","name":"Quake"}]})", runtime_profile_e::heroic));
+  }
+
   TEST(SpacesLibraryPhysical, ReadsAnExplicitlySelectedRetainedSteamHomeWithoutStartingAWorker) {
     const auto profile = std::getenv("POLARIS_TEST_LIBRARY_PROFILE");
     const auto volume = std::getenv("POLARIS_TEST_LIBRARY_VOLUME");

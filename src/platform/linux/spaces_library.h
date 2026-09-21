@@ -38,5 +38,9 @@ namespace multiseat::spaces {
   /** Families whose library Polaris can read from a Space's home. */
   [[nodiscard]] bool has_library(runtime_profile_e profile);
   [[nodiscard]] std::string_view steam_library_scanner();
+  [[nodiscard]] std::string_view heroic_library_scanner();
+  [[nodiscard]] std::string_view lutris_library_scanner();
+  /** The reader for one family's home, empty for a family that has none. */
+  [[nodiscard]] std::string_view library_scanner(runtime_profile_e profile);
 }
 #endif
