@@ -483,8 +483,8 @@ namespace multiseat {
               const auto facts = spaces::inspect_runtime(host, *catalog, spaces::loaded_nvidia_driver(), true,
                 &spaces::runtime_inspection_cache(), request.family);
               if (facts.status != "ready")
-                return profiles::change_result_t {
-                  .error = "That launcher's gaming runtime is not downloaded on this PC yet."};
+                return profiles::change_result_t {.error = std::string(profiles::space_runtime_not_downloaded.message),
+                  .refusal = profiles::space_runtime_not_downloaded};
               return profiles::create_first_space(path, {request.request_id, request.name},
                 choice.runtime->config_digest, request.family, host);
             }

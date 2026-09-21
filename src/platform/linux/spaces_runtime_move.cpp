@@ -209,6 +209,29 @@ namespace multiseat::spaces {
     return result;
   }
 
+  json describe_launchers(container::host_t &host, const std::vector<profile_summary_t> &profiles,
+    const std::vector<runtime_t> &catalog, const std::optional<std::string> &host_driver,
+    runtime_inspection_cache_t *targets) {
+    json result = json::array();
+    for (const std::string_view family : {"steam", "heroic", "lutris"}) {
+      const bool running = std::any_of(profiles.begin(), profiles.end(), [&](const auto &profile) {
+        return profile.family == family && !profile.archived;
+      });
+      // A launcher this PC already runs a Space for lends the next one its
+      // image, so nothing is asked of the catalog or of Docker about it.
+      if (running) {
+        result.push_back({{"family", family}, {"has_space", true}, {"installed", true}, {"runtime_id", ""}});
+        continue;
+      }
+      const auto choice = choose_runtime(catalog, host_driver, family);
+      if (!choice.runtime) continue;
+      const auto state = target_image(host, catalog, host_driver, targets, family);
+      result.push_back({{"family", family}, {"has_space", false},
+        {"installed", state == runtime_image_e::verified}, {"runtime_id", choice.runtime->id}});
+    }
+    return result;
+  }
+
   bool runtime_matches_loaded_driver(std::string_view image) {
     const auto host_driver = loaded_nvidia_driver();
     if (!host_driver || host_driver->empty()) return true;
@@ -263,6 +286,25 @@ namespace multiseat::spaces {
     return {{202, "Moving the Space"}, target};
   }
 
+  move_decision_t decide_create(const create_facts_t &facts) {
+    const auto refuse = [](const profile_launch_result_t &result) { return move_decision_t {result, std::nullopt}; };
+    if (!facts.admin_available)
+      return refuse({503, "Space management is unavailable.", "spaces_admin_unavailable",
+        "Refresh Spaces. If this continues, restart Polaris."});
+    // What this build and this PC are, which waiting does not change.
+    if (!facts.choice.runtime)
+      return refuse({404, "This Polaris build has no gaming runtime for that launcher.", "space_family_unpublished",
+        "Update Polaris, or choose a launcher it has a runtime for."});
+    // What is happening right now, which clears on its own. A runtime is a few
+    // gigabytes, so it is never pulled under a stream that needs the same disk and link.
+    if (facts.host_setup_running) return refuse(spaces_host_setup_running_result);
+    if (facts.setup_running)
+      return refuse({409, "Spaces setup is still running.", "spaces_setup_running", "Try again when it finishes."});
+    if (facts.changing) return refuse(spaces_change_running_result);
+    if (facts.streaming) return refuse(spaces_streaming_result);
+    return {{202, "Creating the Space"}, facts.choice.runtime};
+  }
+
   std::optional<move_request_t> decode_move_request(std::string_view payload) {
     if (payload.empty() || payload.size() > 4096) return std::nullopt;
     try {
@@ -306,9 +348,58 @@ namespace multiseat::spaces {
     std::lock_guard lock(mutex_);
     if (!job_) return nullptr;
     const auto &job = *job_;
-    return {{"request_id", job.request.request_id}, {"profile_id", job.request.profile_id},
+    json result {{"kind", job.creation ? "create" : "move"},
+      {"request_id", job.request.request_id}, {"profile_id", job.request.profile_id},
       {"runtime_id", job.target.id}, {"nvidia_driver", job.target.nvidia_driver}, {"state", job.state},
       {"code", job.code}, {"message", job.message}, {"action", job.action}};
+    if (job.creation) {
+      result["family"] = job.creation->family;
+      result["name"] = job.creation->name;
+    }
+    return result;
+  }
+
+  move_answer_t move_service_t::submit_create(const profiles::space_create_request_t &request) {
+    if (request.family.empty() || !profiles::valid_space_create_request(request))
+      return {400, "space_request_invalid", "That is not a request for a launcher's first Space.", "Refresh Spaces and try again."};
+    {
+      std::lock_guard lock(mutex_);
+      if (closing_) return {503, "spaces_stopping", "Spaces are shutting down.", ""};
+      if (job_ && job_->request.request_id == request.request_id) {
+        if (!job_->creation || *job_->creation != request)
+          return {409, "move_request_in_use", "This request was already used for something else.", "Refresh Spaces and try again."};
+        // Running or done answers with its job. One that failed starts again:
+        // the identity names the Space, so the same request is the retry.
+        if (job_->state != "failed") return {job_->status, job_->code, job_->message, job_->action};
+      }
+      if (active_ || deciding_)
+        return {409, "space_move_running", "Polaris is already downloading or changing a gaming runtime.", "Wait for it to finish."};
+      deciding_ = true;
+    }
+    create_facts_t facts;
+    bool read = true;
+    try { facts = operations_.create_facts(request); } catch (...) { read = false; }
+    const auto decision = read ? decide_create(facts) :
+      move_decision_t {{503, "Polaris could not read this PC's gaming runtimes.", "space_runtime_unknown",
+        "Check that Docker is running, then refresh Spaces."}, std::nullopt};
+    std::lock_guard lock(mutex_);
+    deciding_ = false;
+    if (closing_) return {503, "spaces_stopping", "Spaces are shutting down.", ""};
+    if (decision.result.status != 202 || !decision.target) {
+      BOOST_LOG(info) << "The first " << request.family << " Space was not started: " << decision.result.code;
+      return answer(decision.result);
+    }
+    const auto &target = *decision.target;
+    job_t job {{request.request_id, {}, target.id}, target, {}, request};
+    job.state = job.code = facts.target == runtime_image_e::verified ? "creating" : "downloading";
+    job.message = job.state == "creating" ? "Creating the Space." :
+      "Downloading the gaming runtime. You can leave this page and come back.";
+    job_ = std::move(job);
+    active_ = true;
+    BOOST_LOG(info) << "Creating the first " << request.family << " Space on runtime " << target.id << "; the runtime is "
+                    << (facts.target == runtime_image_e::verified ? "already downloaded" : "downloaded first");
+    changed_.notify_all();
+    return {202, "", "Creating the Space", ""};
   }
 
   move_answer_t move_service_t::submit(const move_request_t &request) {
@@ -370,8 +461,13 @@ namespace multiseat::spaces {
     std::unique_lock lock(mutex_);
     for (;;) {
       changed_.wait(lock, stop, [&] { return active_; });
+      // A create job leaves nothing behind when it stops short, and a move leaves the Space as it was.
+      const bool creating = job_ && job_->creation;
+      const std::string untouched = creating ? " The Space was not created." : " The Space was not changed.";
+      const std::string again = creating ? "Create it again after Polaris starts." : "Move it again after Polaris starts.";
+      const std::string stopped = std::string("Polaris stopped before the ") + (creating ? "Space was created." : "move finished.") + untouched;
       if (stop.stop_requested()) {
-        if (active_) finish(503, "failed", "spaces_stopping", "Polaris stopped before the move finished. The Space was not changed.", "Move it again after Polaris starts.");
+        if (active_) finish(503, "failed", "spaces_stopping", stopped, again);
         return;
       }
       const auto job = *job_;
@@ -381,16 +477,46 @@ namespace multiseat::spaces {
       catch (...) { installed = {false, "setup_failed", "The runtime could not be checked. Retry to check again.", {}}; }
       lock.lock();
       if (stop.stop_requested()) {
-        finish(503, "failed", "download_cancelled", "Polaris stopped before the move finished. The Space was not changed.", "Move it again after Polaris starts.");
+        finish(503, "failed", "download_cancelled", stopped, again);
         return;
       }
       // Only an image the compiled catalog approves for this runtime is ever pinned.
       if (!installed.ready || !job.target.matches_image_id(installed.image)) {
         const auto code = installed.ready || installed.code.empty() ? std::string {"runtime_verification_failed"} : installed.code;
         const auto message = installed.ready || installed.message.empty() ?
-          std::string {"The runtime could not be verified, so the Space was not moved."} : installed.message;
-        BOOST_LOG(warning) << "Space " << job.request.profile_id << " was not moved: runtime " << job.target.id << " is not ready (" << code << ')';
-        finish(503, "failed", code, message + " The Space was not changed.", "Try the move again.");
+          std::string {"The runtime could not be verified."} : installed.message;
+        BOOST_LOG(warning) << (creating ? "The Space " + job.creation->name : "Space " + job.request.profile_id)
+                           << " was not " << (creating ? "created" : "moved") << ": runtime " << job.target.id
+                           << " is not ready (" << code << ')';
+        finish(503, "failed", code, message + untouched, creating ? "Create the Space again." : "Try the move again.");
+        continue;
+      }
+      if (creating) {
+        job_->state = job_->code = "creating";
+        job_->message = "Creating the Space.";
+        const auto creation = *job_->creation;
+        lock.unlock();
+        profile_launch_result_t created {503, "Spaces are shutting down.", "spaces_stopping"};
+        for (;;) {
+          try { created = operations_.create(creation); }
+          catch (...) { created = {503, "The Space could not be created.", "spaces_change_not_saved", "Refresh Spaces and try again."}; }
+          if (created.status != 202 || stop.stop_requested()) break;
+          for (auto waited = std::chrono::milliseconds::zero(); waited < retry_delay_ && !stop.stop_requested();
+               waited += std::chrono::milliseconds(10))
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        lock.lock();
+        if (created.status == 200) {
+          BOOST_LOG(info) << "Created the first " << creation.family << " Space on runtime " << job.target.id;
+          finish(200, "done", "space_created", "The Space was created.", "");
+        } else {
+          const std::string code = created.status == 202 ? "spaces_stopping" : std::string(created.code);
+          BOOST_LOG(warning) << "The first " << creation.family << " Space was not created: "
+                             << (code.empty() ? std::string {"no reason given"} : code);
+          finish(created.status == 202 ? 503 : created.status, "failed", code.empty() ? std::string {"spaces_change_not_saved"} : code,
+            std::string(created.message), std::string(created.action));
+        }
+        if (stop.stop_requested()) return;
         continue;
       }
       job_->move.to_image = installed.image;
@@ -471,6 +597,33 @@ namespace multiseat::spaces {
         const auto service = installed_profile_service();
         if (!service) return {503, "Spaces are not running.", "spaces_admin_unavailable", "Restart Polaris."};
         return service->move_space_runtime(move);
+      },
+      .create_facts = [catalog](const profiles::space_create_request_t &request) {
+        create_facts_t facts;
+        const auto service = installed_profile_service();
+        if (!service) return facts;
+        const auto admin = service->admin_snapshot();
+        facts.admin_available = admin.available && admin.creation_available;
+        facts.changing = admin.changing;
+        facts.streaming = !admin.activity.empty();
+        if (const auto setup = installed_setup_service()) {
+          const auto job = setup->snapshot().value("job", json {});
+          const auto state = job.is_object() ? job.value("state", std::string {}) : std::string {};
+          facts.setup_running = state == "downloading" || state == "preparing" || state == "configuring";
+        }
+        facts.host_setup_running = host_admin_running();
+        const auto driver = loaded_nvidia_driver();
+        facts.choice = choose_runtime(catalog, driver, request.family);
+        if (facts.choice.runtime) {
+          container::local_host_t host;
+          facts.target = target_image(host, catalog, driver, &runtime_inspection_cache(), request.family);
+        }
+        return facts;
+      },
+      .create = [](const profiles::space_create_request_t &request) -> profile_launch_result_t {
+        const auto service = installed_profile_service();
+        if (!service) return {503, "Spaces are not running.", "spaces_admin_unavailable", "Restart Polaris."};
+        return service->create_space_profile(request);
       },
     });
   }

@@ -48,6 +48,12 @@ namespace multiseat::profiles {
   inline constexpr refusal_t desktop_access_required {"desktop_access_required",
     "Give this device Desktop Access before making Desktop its Default Space.",
     "Tick it under Desktop Access, then save its Default Space again."};
+  // Making a Space never downloads anything, so the first Space of a launcher
+  // whose runtime is not on this PC is refused here by name. Whoever asked can
+  // run it as a job that downloads first: see spaces::move_service_t.
+  inline constexpr refusal_t space_runtime_not_downloaded {"space_runtime_not_downloaded",
+    "That launcher's gaming runtime is not on this PC yet.",
+    "Create the Space from the Spaces page, which downloads the runtime first."};
   inline constexpr refusal_t space_access_required {"space_access_required",
     "Allow this device under that Space's Device Access before making it the Default Space.",
     "Tick it under the Space's Device Access, then save its Default Space again."};
@@ -95,9 +101,10 @@ namespace multiseat::profiles {
      * The launcher family the new Space runs, when the client picked one rather
      * than naming a Space to copy. Exactly one of this and source_profile_id is
      * set: they answer the same question, and a client that sent both
-     * disagreeing would be ambiguous. Either way the new Space copies the image
-     * of an existing Space of that family, so no download can be triggered from
-     * this path.
+     * disagreeing would be ambiguous. A launcher this PC already runs a Space
+     * for lends the new one its image. The first Space of a launcher takes the
+     * admitted runtime for it, which must already be on this PC: no download
+     * can be triggered from this path.
      */
     std::string family;
     bool operator==(const space_create_request_t &) const = default;

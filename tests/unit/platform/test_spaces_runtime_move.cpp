@@ -314,6 +314,41 @@ namespace {
   // Opt-in and read-only, against the local Docker Engine: POLARIS_TEST_SPACES_RUNTIME_IMAGE names
   // a local runtime image ID and POLARIS_TEST_SPACES_RUNTIME_DRIVER the NVIDIA driver it was built
   // for. Only `docker image inspect` runs.
+  TEST(SpacesRuntimeMove, ThePickerListsTheLaunchersASpaceCanBeMadeForHere) {
+    inspect_host_t host;
+    spaces::runtime_inspection_cache_t targets;
+    auto heroic = catalog_runtime("heroic-default", "default", "", '7');
+    heroic.profile = "heroic";
+    auto families = catalog;
+    families.push_back(heroic);
+    const std::vector<profile_summary_t> profiles {
+      {"space-a", "Alex", {}, "steam", false, {}, true, amd_intel.config_digest},
+      {"space-z", "Gone", {}, "lutris", true, {}, true, lab_image},
+    };
+    // Steam already runs a Space here and lends the next one its image, so
+    // Docker is asked about Heroic alone. Lutris has only an archived Space
+    // and this build has no runtime for it, so it is not offered at all.
+    auto listed = spaces::describe_launchers(host, profiles, families, std::nullopt, &targets);
+    ASSERT_EQ(listed.size(), 2U);
+    EXPECT_EQ(listed[0], (json {{"family", "steam"}, {"has_space", true}, {"installed", true}, {"runtime_id", ""}}));
+    EXPECT_EQ(listed[1], (json {{"family", "heroic"}, {"has_space", false}, {"installed", false}, {"runtime_id", "heroic-default"}}));
+    EXPECT_EQ(host.calls.size(), 1U);
+    // Reading the page again costs Docker nothing, and a pull is seen after it.
+    listed = spaces::describe_launchers(host, profiles, families, std::nullopt, &targets);
+    EXPECT_EQ(host.calls.size(), 1U);
+    auto here = verified(heroic);
+    here[0]["Config"]["Labels"]["io.polaris.multiseat.profile"] = "heroic";
+    here[0]["Config"]["Labels"].erase("io.polaris.multiseat.nvidia.driver");
+    host.runtimes[heroic.reference()] = here;
+    targets.forget();
+    listed = spaces::describe_launchers(host, profiles, families, std::nullopt, &targets);
+    EXPECT_EQ(listed[1]["installed"], true);
+    // A catalog that publishes Steam alone offers Steam alone, and asks nothing.
+    const auto calls = host.calls.size();
+    EXPECT_EQ(spaces::describe_launchers(host, profiles, catalog, std::nullopt, &targets).size(), 1U);
+    EXPECT_EQ(host.calls.size(), calls);
+  }
+
   TEST(SpacesRuntimeMove, PhysicalDockerReadsWhatALocalImageWasBuiltFor) {
     const char *image = std::getenv("POLARIS_TEST_SPACES_RUNTIME_IMAGE");
     const char *driver = std::getenv("POLARIS_TEST_SPACES_RUNTIME_DRIVER");
@@ -552,6 +587,180 @@ namespace {
     EXPECT_EQ(service->submit(request).status, 202);
     EXPECT_EQ(settled()["state"], "done");
     EXPECT_EQ(installs, 1U);
+  }
+
+  // The first Space of a launcher: the same job, with making the Space where a move would be.
+  class SpacesCreateService : public ::testing::Test {
+  protected:
+    spaces::runtime_t heroic = [] {
+      auto runtime = catalog_runtime("heroic-nvidia-host", "nvidia-host", "", '7');
+      runtime.profile = "heroic";
+      runtime.nvidia_minimum_driver = "570.00";  // a borrowing runtime is not valid without its floor
+      return runtime;
+    }();
+    spaces::create_facts_t facts {true, {heroic, {}}, spaces::runtime_image_e::absent};
+    std::atomic<unsigned> fact_reads {0}, installs {0};
+    spaces::runtime_install_result_t install_answer {true, "runtime_ready", "The approved gaming runtime is available.", {}};
+    std::deque<profile_launch_result_t> create_answers;
+    std::vector<profiles::space_create_request_t> created;
+    std::mutex mutex;
+    std::condition_variable_any changed;
+    bool hold_install = false;
+    std::unique_ptr<spaces::move_service_t> service;
+    const profiles::space_create_request_t request {"12345678-1234-4234-8234-123456789abc", "", "Player 2", "heroic"};
+    void SetUp() override {
+      install_answer.image = heroic.config_digest;
+      service = std::make_unique<spaces::move_service_t>(spaces::move_operations_t {
+        .facts = [](const spaces::move_request_t &) { return movable(); },
+        .install = [this](const spaces::runtime_t &target, std::stop_token stop) {
+          ++installs;
+          EXPECT_EQ(target.id, "heroic-nvidia-host");
+          std::unique_lock lock(mutex);
+          changed.wait(lock, stop, [&] { return !hold_install; });
+          if (stop.stop_requested()) return spaces::runtime_install_result_t {false, "download_cancelled", "Setup stopped.", {}};
+          return install_answer;
+        },
+        .move = [](const profiles::runtime_move_t &) -> profile_launch_result_t {
+          ADD_FAILURE() << "a create job never moves a Space";
+          return {500, "unexpected"};
+        },
+        .create_facts = [this](const profiles::space_create_request_t &) { ++fact_reads; return facts; },
+        .create = [this](const profiles::space_create_request_t &creation) -> profile_launch_result_t {
+          std::lock_guard lock(mutex);
+          created.push_back(creation);
+          if (create_answers.empty()) return {200, "Space created"};
+          const auto answer = create_answers.front();
+          create_answers.pop_front();
+          return answer;
+        },
+      }, 1ms);
+    }
+    void TearDown() override {
+      release();
+      service.reset();
+    }
+    void release() {
+      { std::lock_guard lock(mutex); hold_install = false; }
+      changed.notify_all();
+    }
+    json settled() {
+      for (int i = 0; i < 400 && service->active(); ++i) std::this_thread::sleep_for(5ms);
+      EXPECT_FALSE(service->active());
+      return service->snapshot();
+    }
+  };
+
+  TEST_F(SpacesCreateService, DownloadsTheRuntimeThenMakesTheFirstSpaceOfALauncher) {
+    hold_install = true;
+    EXPECT_EQ(service->submit_create(request).status, 202);
+    auto job = service->snapshot();
+    EXPECT_EQ(job["kind"], "create");
+    EXPECT_EQ(job["state"], "downloading");
+    EXPECT_EQ(job["profile_id"], "") << "the Space does not exist yet";
+    EXPECT_EQ(job["family"], "heroic");
+    EXPECT_EQ(job["name"], "Player 2");
+    EXPECT_EQ(job["runtime_id"], "heroic-nvidia-host");
+    EXPECT_EQ(job["nvidia_driver"], "");
+    // The same request joins it, and nothing else starts beside it: one
+    // download at a time, whatever it is for.
+    EXPECT_EQ(service->submit_create(request).status, 202);
+    EXPECT_EQ(service->submit({"22345678-1234-4234-8234-123456789abc", "space-a", "steam-nvidia-615"}).code, "space_move_running");
+    EXPECT_EQ(service->submit_create({"32345678-1234-4234-8234-123456789abc", "", "Player 3", "heroic"}).code, "space_move_running");
+    EXPECT_TRUE(created.empty()) << "no Space is made before its runtime is verified";
+    release();
+    job = settled();
+    EXPECT_EQ(job["state"], "done");
+    EXPECT_EQ(job["code"], "space_created");
+    ASSERT_EQ(created.size(), 1U);
+    EXPECT_EQ(created[0], request);
+    EXPECT_EQ(installs, 1U);
+    EXPECT_EQ(fact_reads, 1U);
+    // Asked again once done, it answers done and makes nothing twice.
+    EXPECT_EQ(service->submit_create(request).status, 200);
+    EXPECT_EQ(created.size(), 1U);
+    EXPECT_EQ(service->submit_create({request.request_id, "", "Someone Else", "heroic"}).code, "move_request_in_use");
+    // A move's snapshot says what it is too.
+    EXPECT_EQ(service->submit({request.request_id, "space-a", "steam-nvidia-615"}).code, "move_request_in_use");
+  }
+
+  TEST_F(SpacesCreateService, ARuntimeAlreadyHereGoesStraightToMakingTheSpace) {
+    facts.target = spaces::runtime_image_e::verified;
+    hold_install = true;
+    ASSERT_EQ(service->submit_create(request).status, 202);
+    EXPECT_EQ(service->snapshot()["state"], "creating");
+    release();
+    EXPECT_EQ(settled()["state"], "done");
+    EXPECT_EQ(installs, 1U) << "the verified image comes from the same check that would download it";
+  }
+
+  TEST_F(SpacesCreateService, AFailedDownloadMakesNoSpaceAndTheSameRequestTriesAgain) {
+    install_answer = {false, "download_incomplete", "The runtime download did not finish. Retry the same runtime to reuse verified layers.", {}};
+    ASSERT_EQ(service->submit_create(request).status, 202);
+    auto job = settled();
+    EXPECT_EQ(job["state"], "failed");
+    EXPECT_EQ(job["code"], "download_incomplete");
+    EXPECT_EQ(job["message"], "The runtime download did not finish. Retry the same runtime to reuse verified layers. The Space was not created.");
+    EXPECT_EQ(job["action"], "Create the Space again.");
+    EXPECT_TRUE(created.empty());
+    // An image the catalog does not approve for this runtime is never made into a Space.
+    install_answer = {true, "runtime_ready", "ok", nvidia615.config_digest};
+    ASSERT_EQ(service->submit_create(request).status, 202) << "the identity names the Space, so the same request is the retry";
+    job = settled();
+    EXPECT_EQ(job["code"], "runtime_verification_failed");
+    EXPECT_TRUE(created.empty());
+    install_answer.image = heroic.config_digest;
+    ASSERT_EQ(service->submit_create(request).status, 202);
+    EXPECT_EQ(settled()["state"], "done");
+    EXPECT_EQ(created.size(), 1U);
+    EXPECT_EQ(installs, 3U);
+  }
+
+  TEST_F(SpacesCreateService, TheSpacesOwnerHasTheLastWord) {
+    // Still saving is asked again; a refusal is the job's failure, in the owner's words.
+    create_answers = {{202, "The Space is still being created.", "spaces_change_pending"},
+      {409, "Stop every Space stream and wait for cleanup before changing Spaces.", "spaces_streaming", "End the running Space streams, then try again."}};
+    ASSERT_EQ(service->submit_create(request).status, 202);
+    const auto job = settled();
+    EXPECT_EQ(job["state"], "failed");
+    EXPECT_EQ(job["code"], "spaces_streaming");
+    EXPECT_EQ(job["action"], "End the running Space streams, then try again.");
+    EXPECT_EQ(created.size(), 2U);
+  }
+
+  TEST_F(SpacesCreateService, ARefusedFirstSpaceStartsNoJobAndNoDownload) {
+    struct case_t {
+      const char *name;
+      std::function<void(spaces::create_facts_t &)> change;
+      int status;
+      std::string_view code;
+    };
+    for (const auto &item : std::vector<case_t> {
+           {"no Spaces owner", [](auto &f) { f.admin_available = false; }, 503, "spaces_admin_unavailable"},
+           {"no runtime for that launcher", [](auto &f) { f.choice = {std::nullopt, "runtime_not_published"}; }, 404, "space_family_unpublished"},
+           {"host setup", [](auto &f) { f.host_setup_running = true; }, 409, "spaces_host_setup_running"},
+           {"first Space setup", [](auto &f) { f.setup_running = true; }, 409, "spaces_setup_running"},
+           {"another change", [](auto &f) { f.changing = true; }, 409, "spaces_change_running"},
+           {"a stream", [](auto &f) { f.streaming = true; }, 409, "spaces_streaming"}}) {
+      auto changed_facts = facts;
+      item.change(changed_facts);
+      const auto decision = spaces::decide_create(changed_facts);
+      EXPECT_EQ(decision.result.status, item.status) << item.name;
+      EXPECT_EQ(decision.result.code, item.code) << item.name;
+      EXPECT_FALSE(decision.result.action.empty()) << item.name;
+      EXPECT_FALSE(decision.target) << item.name;
+    }
+    facts.streaming = true;
+    const auto refused = service->submit_create(request);
+    EXPECT_EQ(refused.status, 409);
+    EXPECT_EQ(refused.code, "spaces_streaming");
+    EXPECT_TRUE(service->snapshot().is_null());
+    EXPECT_EQ(installs, 0U);
+    // A Space to copy is not a launcher's first Space, and neither is no launcher at all.
+    EXPECT_EQ(service->submit_create({request.request_id, "space-a", "Player 2", ""}).status, 400);
+    EXPECT_EQ(service->submit_create({"not-a-uuid", "", "Player 2", "heroic"}).status, 400);
+    facts.streaming = false;
+    EXPECT_EQ(service->submit_create(request).status, 202);
+    EXPECT_EQ(settled()["state"], "done");
   }
 
   TEST_F(SpacesMoveService, AFailedOrUnapprovedDownloadNeverTouchesTheSpace) {

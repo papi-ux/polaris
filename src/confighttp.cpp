@@ -4690,6 +4690,10 @@ namespace confighttp {
       const auto mover = multiseat::spaces::installed_move_service();
       output["runtime_move_available"] = state.runtime_move_available && mover != nullptr;
       output["runtime_move_job"] = mover ? mover->snapshot() : nlohmann::json(nullptr);
+      // Which launchers a new Space can be made for, and whether the first one
+      // of a launcher would download its runtime before it is made.
+      output["launchers"] = multiseat::spaces::describe_launchers(host, state.profiles, catalog ? *catalog : unpublished,
+        multiseat::spaces::loaded_nvidia_driver(), &multiseat::spaces::runtime_inspection_cache());
     }
 #endif
     send_response(response, output);
@@ -4740,9 +4744,28 @@ namespace confighttp {
     if (count > 4096) { bad_request(response, request, "Creation request is too large"); return; }
     const auto creation = multiseat::profiles::decode_space_create_request({bytes.data(), static_cast<std::size_t>(count)});
     if (!creation) { bad_request(response, request, "Invalid Space creation request"); return; }
-    const auto result = service->create_space_profile(*creation);
-    const nlohmann::json output {{"status", result.prepared()}, {"message", result.message},
-      {"profile_id", creation->request_id}};
+    auto result = service->create_space_profile(*creation);
+    nlohmann::json output {{"profile_id", creation->request_id}};
+    // The first Space of a launcher whose runtime is not on this PC. Making a
+    // Space downloads nothing, so it runs as a job that downloads first, and
+    // the page follows it on /api/multiseat/profiles as runtime_move_job.
+    const auto mover = multiseat::spaces::installed_move_service();
+    if (result.code == multiseat::profiles::space_runtime_not_downloaded.code && mover) {
+      const auto answer = mover->submit_create(*creation);
+      output["status"] = answer.status == 200;
+      output["message"] = answer.message;
+      if (!answer.code.empty()) output["code"] = answer.code;
+      if (!answer.action.empty()) output["action"] = answer.action;
+      if (answer.status == 202) output["job"] = mover->snapshot();
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
+      response->write(static_cast<SimpleWeb::StatusCode>(answer.status), output.dump(), headers);
+      return;
+    }
+    output["status"] = result.prepared();
+    output["message"] = result.message;
+    if (!result.code.empty()) output["code"] = result.code;
+    if (!result.action.empty()) output["action"] = result.action;
     SimpleWeb::CaseInsensitiveMultimap headers;
     append_json_security_headers(headers);
     response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);

@@ -37,8 +37,10 @@ namespace multiseat::spaces {
   enum class runtime_image_e { absent, verified, mismatch, unverifiable };
 
   // Reading the setup page must not ask Docker about the runtime every time.
-  // Only definitive answers are kept, briefly; a finished or stopped download
-  // forgets them so the next check asks again.
+  // Only definitive answers are kept, briefly, one for each runtime asked
+  // about: a host with several launchers asks about several in turn, and a
+  // single slot made each one evict the last. A finished or stopped download
+  // forgets them all so the next check asks again.
   class runtime_inspection_cache_t {
   public:
     using now_t = std::function<std::chrono::steady_clock::time_point()>;
@@ -56,7 +58,7 @@ namespace multiseat::spaces {
     std::chrono::steady_clock::duration lifetime_;
     now_t now_;
     std::mutex mutex_;
-    std::optional<entry_t> entry_;
+    std::vector<entry_t> entries_;  ///< bounded by the catalog, which holds at most 64 runtimes
     std::uint64_t generation_ = 0;
   };
   [[nodiscard]] runtime_inspection_cache_t &runtime_inspection_cache();

@@ -511,6 +511,12 @@ TEST(SpacesSetup, RuntimeInspectionIsKeptBrieflyAndForgottenAfterADownload) {
   EXPECT_EQ(status(), "available");
   EXPECT_EQ(status(std::nullopt), "available");
   EXPECT_EQ(host.calls.size(), 6U);
+  // And each keeps its own answer. A host with several launchers asks about
+  // several runtimes in turn, and one slot made each evict the last, so every
+  // read of the Spaces page went back to Docker.
+  EXPECT_EQ(status(), "available");
+  EXPECT_EQ(status(std::nullopt), "available");
+  EXPECT_EQ(host.calls.size(), 6U);
   // A download that finishes while Docker is answering makes that answer stale.
   cache.forget();
   EXPECT_EQ(cache.remember("stale", [&] { cache.forget(); return spaces::runtime_image_e::absent; }), spaces::runtime_image_e::absent);

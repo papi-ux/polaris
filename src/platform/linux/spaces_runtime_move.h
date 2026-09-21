@@ -75,6 +75,14 @@ namespace multiseat::spaces {
     const std::optional<std::string> &host_driver, image_runtime_cache_t *images,
     runtime_inspection_cache_t *targets);
 
+  /// The launchers a Space can be made for on this PC, for the page's picker: family, has_space,
+  /// installed and runtime_id. One this PC already runs a Space for lends the next Space its
+  /// image, so it is listed as installed and Docker is not asked. Any other is listed only when
+  /// this build has a runtime for it here, with whether Docker already holds that runtime.
+  [[nodiscard]] nlohmann::json describe_launchers(container::host_t &host,
+    const std::vector<profile_summary_t> &profiles, const std::vector<runtime_t> &catalog,
+    const std::optional<std::string> &host_driver, runtime_inspection_cache_t *targets);
+
   /// The launch guard: false only when the image is known to be built for an NVIDIA driver
   /// other than the one loaded now. Logs the refusal with both versions.
   [[nodiscard]] bool runtime_matches_loaded_driver(std::string_view image);
@@ -105,12 +113,26 @@ namespace multiseat::spaces {
   };
   [[nodiscard]] std::optional<move_request_t> decode_move_request(std::string_view payload);
 
+  /// Everything the first Space of a launcher is decided on, read just before it is accepted.
+  struct create_facts_t {
+    bool admin_available = false;
+    runtime_choice_t choice;  ///< the catalog runtime for that launcher on this PC
+    runtime_image_e target = runtime_image_e::unverifiable;  ///< what Docker holds for it
+    bool streaming = false, changing = false, setup_running = false, host_setup_running = false;
+  };
+  /// Why the first Space of a launcher cannot be started: what this build publishes, then what
+  /// is happening on the host right now. A download is never begun under a running stream.
+  [[nodiscard]] move_decision_t decide_create(const create_facts_t &facts);
+
   struct move_operations_t {
     std::function<move_facts_t(const move_request_t &)> facts;
     /// Checks Docker for the runtime and downloads it when missing, verified against the catalog.
     std::function<runtime_install_result_t(const runtime_t &, std::stop_token)> install;
     /// Hands the catalog change to the Spaces owner; 202 means it is still running.
     std::function<profile_launch_result_t(const profiles::runtime_move_t &)> move;
+    std::function<create_facts_t(const profiles::space_create_request_t &)> create_facts;
+    /// Makes the Space once its runtime is on this PC; 202 means it is still being made.
+    std::function<profile_launch_result_t(const profiles::space_create_request_t &)> create;
   };
 
   /// A move request's answer. Its words can come from Docker's download, so they are owned here.
@@ -131,8 +153,15 @@ namespace multiseat::spaces {
     /// 202 started or still running, 200 done, otherwise a refusal with its code. The same
     /// request asked again answers with its job, running or finished.
     [[nodiscard]] move_answer_t submit(const move_request_t &request);
-    /// The last job, or null: request_id, profile_id, runtime_id, nvidia_driver, state
-    /// (downloading, moving, done or failed), code, message and action.
+    /// The first Space of a launcher whose runtime is not on this PC: the same job, download
+    /// and verify first, with making the Space where a move would be. Making a Space any other
+    /// way downloads nothing, and a Space cannot be made without its runtime, so this is the one
+    /// road to a second launcher. A request that failed may be asked again: what failed is
+    /// almost always the download, and the request identity names the Space, not the attempt.
+    [[nodiscard]] move_answer_t submit_create(const profiles::space_create_request_t &request);
+    /// The last job, or null: kind (move or create), request_id, profile_id, runtime_id,
+    /// nvidia_driver, state (downloading, moving, creating, done or failed), code, message and
+    /// action. A create job has no profile_id and names its family and the Space's name.
     [[nodiscard]] nlohmann::json snapshot() const;
     /// A job is downloading or moving.
     [[nodiscard]] bool active() const;
@@ -143,6 +172,7 @@ namespace multiseat::spaces {
       move_request_t request;
       runtime_t target;
       profiles::runtime_move_t move;
+      std::optional<profiles::space_create_request_t> creation;  ///< set for the first Space of a launcher
       std::string state, code, message, action;
       int status = 202;
     };

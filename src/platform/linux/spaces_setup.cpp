@@ -110,7 +110,8 @@ namespace multiseat::spaces {
     std::uint64_t generation;
     {
       std::lock_guard lock(mutex_);
-      if (entry_ && entry_->reference == reference && now_() - entry_->checked < lifetime_) return entry_->image;
+      for (const auto &entry : entries_)
+        if (entry.reference == reference && now_() - entry.checked < lifetime_) return entry.image;
       generation = generation_;
     }
     const auto image = inspect();
@@ -118,14 +119,18 @@ namespace multiseat::spaces {
     // that raced a download is dropped too: the download may have changed it.
     if (image != runtime_image_e::unverifiable) {
       std::lock_guard lock(mutex_);
-      if (generation == generation_) entry_ = entry_t {reference, image, now_()};
+      if (generation == generation_) {
+        std::erase_if(entries_, [&](const auto &entry) { return entry.reference == reference; });
+        if (entries_.size() >= 64) entries_.erase(entries_.begin());
+        entries_.push_back({reference, image, now_()});
+      }
     }
     return image;
   }
 
   void runtime_inspection_cache_t::forget() {
     std::lock_guard lock(mutex_);
-    entry_.reset();
+    entries_.clear();
     ++generation_;
   }
 
