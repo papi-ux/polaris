@@ -141,21 +141,38 @@ namespace multiseat::spaces {
       choice.runtime && choice.runtime->variant == "nvidia-host";
   }
 
+  bool offers_newer_runtime(const image_runtime_t &image, const runtime_choice_t &choice) {
+    // A Space that borrows this PC's driver is never forced to move by a driver
+    // update, which is the point of it. A driver update was also the only thing
+    // that ever carried a fixed runtime to an existing Space. So a newer build
+    // of the runtime a Space already uses is offered when this build carries
+    // one: the same launcher and the same kind of graphics support, under
+    // another identity. A change of kind is one of the other two reasons, or a
+    // change of graphics card, and is not called an update here.
+    if (!image.known || !choice.runtime || image.profile != choice.runtime->profile ||
+        image.runtime_id == choice.runtime->id) return false;
+    const auto &variant = choice.runtime->variant;
+    if (image.nvidia_source == "host") return variant == "nvidia-host";
+    if (!image.nvidia_driver.empty()) return variant == "nvidia" && choice.runtime->nvidia_driver == image.nvidia_driver;
+    return variant == "default";
+  }
+
   json describe_space_runtime(const image_runtime_t &image, const std::optional<std::string> &host_driver,
     const runtime_choice_t &choice, runtime_image_e target) {
     const bool mismatch = driver_mismatch(image, host_driver);
     const bool upgrade = !mismatch && offers_host_driver(image, choice);
+    const bool updated = !mismatch && !upgrade && offers_newer_runtime(image, choice);
     json result {{"runtime_driver", image.known ? json(image.nvidia_driver) : json(nullptr)},
       {"runtime_id", image.runtime_id},
       {"host_driver", host_driver && !host_driver->empty() ? json(*host_driver) : json(nullptr)},
       {"runtime_mismatch", mismatch}, {"runtime_move", nullptr}};
-    if (!mismatch && !upgrade) return result;
+    if (!mismatch && !upgrade && !updated) return result;
     if (!choice.runtime) {
       result["runtime_move"] = {{"available", false}, {"code", "runtime_not_published"}};
       return result;
     }
     result["runtime_move"] = {{"available", true}, {"runtime_id", choice.runtime->id},
-      {"reason", upgrade ? "host_driver_available" : "driver_mismatch"},
+      {"reason", mismatch ? "driver_mismatch" : upgrade ? "host_driver_available" : "runtime_updated"},
       {"nvidia_driver", choice.runtime->nvidia_driver}, {"installed", target == runtime_image_e::verified},
       {"code", target == runtime_image_e::verified ? "runtime_ready" : target == runtime_image_e::absent ? "not_downloaded" :
         target == runtime_image_e::mismatch ? "runtime_identity_mismatch" : "inspection_failed"}};
@@ -180,7 +197,8 @@ namespace multiseat::spaces {
       const auto family = image.profile.empty() ? std::string("steam") : image.profile;
       const auto choice = choose_runtime(catalog, host_driver, family);
       auto state = runtime_image_e::unverifiable;
-      if (choice.runtime && (driver_mismatch(image, host_driver) || offers_host_driver(image, choice))) {
+      if (choice.runtime && (driver_mismatch(image, host_driver) || offers_host_driver(image, choice) ||
+                             offers_newer_runtime(image, choice))) {
         const auto seen = targets_seen.find(family);
         if (seen == targets_seen.end())
           state = targets_seen.emplace(family, target_image(host, catalog, host_driver, targets, family)).first->second;
@@ -218,10 +236,11 @@ namespace multiseat::spaces {
     const auto &target = facts.choice.runtime;
     // Asked again after it finished: the Space already launches the runtime for this driver.
     if (target && target->matches_image_id(facts.space->image)) return {{200, "The Space already uses the runtime for this driver"}, target};
-    // A move is either a repair, when the Space was built for another driver,
-    // or an upgrade onto a runtime that borrows this PC's driver and therefore
-    // survives the next update.
-    if (!driver_mismatch(facts.image, facts.host_driver) && !offers_host_driver(facts.image, facts.choice))
+    // A move is a repair, when the Space was built for another driver, an
+    // upgrade onto a runtime that borrows this PC's driver and so survives the
+    // next update, or an update onto the runtime this build now carries.
+    if (!driver_mismatch(facts.image, facts.host_driver) && !offers_host_driver(facts.image, facts.choice) &&
+        !offers_newer_runtime(facts.image, facts.choice))
       return refuse({409, "This Space's gaming runtime already matches the NVIDIA driver on this PC.",
         "space_runtime_current", "Refresh Spaces."});
     if (!target)

@@ -1,7 +1,7 @@
 <template>
   <div v-if="visible" class="mt-3 rounded-xl border p-3 text-sm" :class="done ? 'border-storm/20 bg-deep/40' : 'border-warning/30 bg-warning/10'"
        data-runtime-move :data-state="jobState || (mismatch ? 'mismatch' : '')">
-    <template v-if="mismatch || upgrade">
+    <template v-if="mismatch || upgrade || updated">
       <template v-if="mismatch">
         <p class="font-semibold text-warning-bright">{{ $t('spaces.runtime_mismatch_title') }}</p>
         <p class="mt-1 text-silver" data-runtime-detail>
@@ -9,11 +9,15 @@
         </p>
         <p class="mt-1 text-storm">{{ $t('spaces.runtime_mismatch_blocked') }}</p>
       </template>
-      <template v-else>
+      <template v-else-if="upgrade">
         <p class="font-semibold text-silver">{{ $t('spaces.runtime_upgrade_title') }}</p>
         <p class="mt-1 text-silver" data-runtime-upgrade-detail>
           {{ $t('spaces.runtime_upgrade_detail', { runtime: space.runtime_driver }) }}
         </p>
+      </template>
+      <template v-else>
+        <p class="font-semibold text-silver">{{ $t('spaces.runtime_update_title') }}</p>
+        <p class="mt-1 text-silver" data-runtime-update-detail>{{ $t('spaces.runtime_update_detail') }}</p>
       </template>
       <template v-if="target">
         <p class="mt-1 text-storm" data-runtime-keeps>{{ $t('spaces.runtime_move_keeps') }}</p>
@@ -21,9 +25,9 @@
           {{ $t('spaces.runtime_move_download') }}
         </p>
         <Button v-if="available && !running" class="mt-3 h-auto min-h-8 py-1.5" variant="outline" size="sm" :loading="working"
-                :disabled="blocked" :aria-label="upgrade ? $t('spaces.runtime_upgrade_aria', { name: space.name }) : $t('spaces.runtime_move_aria', { name: space.name, driver: target.nvidia_driver })"
+                :disabled="blocked" :aria-label="copy('aria')"
                 :aria-describedby="blockedReasonId" data-runtime-move-button @click="openDialog">
-          {{ upgrade ? $t('spaces.runtime_upgrade_button') : $t('spaces.runtime_move_button', { driver: target.nvidia_driver }) }}
+          {{ copy('button') }}
         </Button>
         <p v-else-if="!available" class="mt-2 text-storm" data-runtime-move-unavailable>{{ $t('spaces.runtime_move_unavailable') }}</p>
         <p v-if="otherRunning" :id="otherReasonId" class="mt-2 text-xs text-storm" data-runtime-move-other>{{ $t('spaces.runtime_move_other') }}</p>
@@ -34,8 +38,8 @@
     </template>
     <p v-if="progress" class="mt-2 text-silver" role="status" data-runtime-progress>{{ progress }}</p>
     <p v-if="error || jobError" class="mt-2 text-warning-bright" role="alert" data-runtime-error>{{ error || jobError }}</p>
-    <ConfirmActionDialog v-model="dialogOpen" :title="$t('spaces.runtime_move_title', { name: space.name, driver: target?.nvidia_driver })"
-                         :message="$t('spaces.runtime_move_message', { name: space.name, driver: target?.nvidia_driver })"
+    <ConfirmActionDialog v-model="dialogOpen" :title="copy('title')"
+                         :message="copy('message')"
                          :impact-items="impact" :confirm-label="$t('spaces.runtime_move_confirm')" :cancel-label="$t('spaces.cancel')"
                          :pending-label="$t('spaces.runtime_move_pending')" :pending="working"
                          :eyebrow="$t('spaces.kicker')" :impact-label="$t('spaces.dialog_impact')"
@@ -74,13 +78,26 @@ const mismatch = computed(() => props.space.runtime_mismatch === true)
 // Offered without a mismatch: the Space works today, and this runtime keeps it
 // working across the next driver update.
 const upgrade = computed(() => !mismatch.value && props.space.runtime_move?.reason === 'host_driver_available')
+const updated = computed(() => !mismatch.value && props.space.runtime_move?.reason === 'runtime_updated')
+// The words follow what the target is, not why the move is offered: a runtime
+// built for one driver is named by it, the one that borrows this PC's driver
+// names none, and a newer build of the same runtime is simply newer. A repair
+// can land on any of them, so asking the reason here left a blank where the
+// driver version should have been.
+const kind = computed(() => updated.value ? 'update' : target.value?.nvidia_driver ? 'move' : 'upgrade')
+const words = {
+  move: { button: 'runtime_move_button', aria: 'runtime_move_aria', title: 'runtime_move_title', message: 'runtime_move_message' },
+  upgrade: { button: 'runtime_upgrade_button', aria: 'runtime_upgrade_aria', title: 'runtime_upgrade_confirm_title', message: 'runtime_upgrade_confirm_message' },
+  update: { button: 'runtime_update_button', aria: 'runtime_update_aria', title: 'runtime_update_confirm_title', message: 'runtime_update_confirm_message' },
+}
+const copy = part => t('spaces.' + words[kind.value][part], { name: props.space.name, driver: target.value?.nvidia_driver })
 const target = computed(() => props.space.runtime_move?.available ? props.space.runtime_move : null)
 const ownJob = computed(() => props.job?.profile_id === props.space.id ? props.job : null)
 const jobState = computed(() => ownJob.value?.state || '')
 const running = computed(() => ['downloading', 'moving'].includes(jobState.value))
 const otherRunning = computed(() => !!props.job && !ownJob.value && ['downloading', 'moving'].includes(props.job.state))
-const done = computed(() => jobState.value === 'done' && !mismatch.value && !upgrade.value)
-const visible = computed(() => mismatch.value || upgrade.value || running.value || (witnessed.value && !!ownJob.value))
+const done = computed(() => jobState.value === 'done' && !mismatch.value && !upgrade.value && !updated.value)
+const visible = computed(() => mismatch.value || upgrade.value || updated.value || running.value || (witnessed.value && !!ownJob.value))
 const blocked = computed(() => props.locked || !props.ready || working.value || otherRunning.value)
 const blockedReasonId = computed(() => otherRunning.value ? otherReasonId : props.locked && props.lockReasonId ? props.lockReasonId : undefined)
 const impact = computed(() => [t('spaces.runtime_move_impact_home'), t('spaces.runtime_move_impact_devices'),

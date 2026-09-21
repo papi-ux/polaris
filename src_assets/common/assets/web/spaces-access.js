@@ -58,15 +58,22 @@ function validRuntime(profile) {
   const move = profile.runtime_move
   // A mismatch always carries a move object, even one that offers nothing.
   if (move === null || move === undefined) return !profile.runtime_mismatch
-  // A move is offered to repair a mismatch, or to upgrade a working Space onto
-  // a runtime that borrows this PC's driver. That runtime names no driver of
-  // its own, because it uses whichever one the PC has loaded.
-  const upgrade = move.reason === 'host_driver_available'
-  if (move.reason !== undefined && !word(move.reason)) return false
-  if ((!profile.runtime_mismatch && !upgrade) || typeof move !== 'object' ||
-      typeof move.available !== 'boolean' || !word(move.code)) return false
-  return !move.available || (runtimeId(move.runtime_id) && typeof move.installed === 'boolean' &&
-    (upgrade ? move.nvidia_driver === '' : driver(move.nvidia_driver)))
+  // A move is offered for one of three reasons: to repair a mismatch, to take
+  // a working Space onto the runtime that borrows this PC's driver, or to take
+  // it onto a newer build of the runtime it already uses. A host from before
+  // reasons sends none, and only ever offered a repair.
+  if (typeof move !== 'object' || typeof move.available !== 'boolean' || !word(move.code)) return false
+  const reason = move.reason === undefined ? 'driver_mismatch' : move.reason
+  if (!['driver_mismatch', 'host_driver_available', 'runtime_updated'].includes(reason)) return false
+  // Only a repair goes with a mismatch, and a mismatch is only ever repaired.
+  if ((reason === 'driver_mismatch') !== profile.runtime_mismatch) return false
+  if (!move.available) return true
+  // The target names a driver only when it carries one. The runtime that
+  // borrows this PC's driver names none, whatever the reason for moving to it,
+  // and it is by definition the target of the second reason.
+  return runtimeId(move.runtime_id) && typeof move.installed === 'boolean' &&
+    (move.nvidia_driver === '' || driver(move.nvidia_driver)) &&
+    (reason !== 'host_driver_available' || move.nvidia_driver === '')
 }
 function validMoveJob(job) {
   const text = value => typeof value === 'string' && value.length <= 1024

@@ -223,6 +223,27 @@ namespace {
     const auto repair = spaces::describe_space_runtime(older, std::string("615.71.09"),
       spaces::choose_runtime(baked, std::string("615.71.09")), spaces::runtime_image_e::verified);
     EXPECT_EQ(repair, expected.at("mismatch"));
+
+    // A Space on a borrowing image this build no longer lists, read from its
+    // own labels. Nothing is broken and no driver changed, which is exactly
+    // why nothing else would ever carry a fixed runtime to it.
+    const spaces::image_runtime_t older_borrowing {true, "", "steam", "1", "", "host"};
+    const std::vector<spaces::runtime_t> borrowing_only {borrowing};
+    const auto updated = spaces::describe_space_runtime(older_borrowing, std::string("615.71.09"),
+      spaces::choose_runtime(borrowing_only, std::string("615.71.09")), spaces::runtime_image_e::verified);
+    EXPECT_EQ(updated, expected.at("updated"));
+
+    // And a repair whose target borrows this PC's driver names no version:
+    // the reason says why the Space moves, the target says what it moves to.
+    const auto repair_to_host = spaces::describe_space_runtime(older, std::string("615.71.09"),
+      spaces::choose_runtime(both, std::string("615.71.09")), spaces::runtime_image_e::verified);
+    EXPECT_EQ(repair_to_host, expected.at("mismatch_to_host"));
+
+    // A Space already on the runtime this build would choose is offered nothing.
+    const spaces::image_runtime_t current_borrowing {true, "steam-nvidia-host", "steam", "1", "", "host"};
+    EXPECT_TRUE(spaces::describe_space_runtime(current_borrowing, std::string("615.71.09"),
+      spaces::choose_runtime(borrowing_only, std::string("615.71.09")), spaces::runtime_image_e::verified)
+        .at("runtime_move").is_null());
   }
 
   TEST(SpacesRuntimeMove, TheSpacesPageLearnsWhyAndWhereTheSpaceCanMove) {
@@ -335,6 +356,28 @@ namespace {
     EXPECT_TRUE(again.result.code.empty());
   }
 
+  TEST(SpacesRuntimeMove, ANewerBuildOfTheSameKindOfRuntimeIsOfferedAndNothingElseIs) {
+    // The image is read from its labels and is no catalog entry: an older build
+    // of the 615 runtime, which this build's catalog has since replaced.
+    auto older = movable();
+    older.image.nvidia_driver = "615.71.09";
+    const auto decision = spaces::decide_move(older, "steam-nvidia-615");
+    EXPECT_EQ(decision.result.status, 202);
+    ASSERT_TRUE(decision.target);
+    EXPECT_EQ(decision.target->id, "steam-nvidia-615");
+    // Another kind of runtime is never called an update. A Space without NVIDIA
+    // userspace on a PC that now has an NVIDIA card is a change of graphics.
+    auto other_graphics = movable();
+    other_graphics.image.nvidia_driver.clear();
+    EXPECT_EQ(spaces::decide_move(other_graphics, "steam-nvidia-615").result.code, "space_runtime_current");
+    // And the same in the other direction, which is what a PC with no NVIDIA
+    // driver loaded looks like to a Space that carries one.
+    auto no_driver = movable();
+    no_driver.host_driver.reset();
+    no_driver.choice = spaces::choose_runtime(catalog, std::nullopt);
+    EXPECT_EQ(spaces::decide_move(no_driver, "steam-default").result.code, "space_runtime_current");
+  }
+
   TEST(SpacesRuntimeMove, EveryRefusalSaysWhyAndChangesNothing) {
     struct case_t {
       const char *name;
@@ -347,7 +390,8 @@ namespace {
       {"no Spaces owner", [](auto &f) { f.admin_available = false; }, 503, "spaces_admin_unavailable"},
       {"unknown Space", [](auto &f) { f.space.reset(); }, 404, "space_unknown"},
       {"unreadable runtime", [](auto &f) { f.image = {}; }, 503, "space_runtime_unknown"},
-      {"already on this driver", [](auto &f) { f.image.nvidia_driver = "615.71.09"; }, 409, "space_runtime_current"},
+      {"already on this runtime", [](auto &f) { f.image.runtime_id = "steam-nvidia-615"; f.image.nvidia_driver = "615.71.09"; },
+        409, "space_runtime_current"},
       {"no NVIDIA driver", [](auto &f) { f.host_driver.reset(); f.choice = spaces::choose_runtime(catalog, std::nullopt); },
         409, "space_runtime_current"},
       {"AMD and Intel runtime", [](auto &f) { f.image.nvidia_driver.clear(); }, 409, "space_runtime_current"},
