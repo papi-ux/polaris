@@ -340,20 +340,37 @@ namespace {
 
     provisioning_host_t host; host.image_family = "heroic";
     ASSERT_TRUE(profiles::create_first_space(path, first_request, first_image, "heroic", host));
-    const auto loaded = profiles::load(path);
-    ASSERT_TRUE(loaded);
-    ASSERT_EQ(loaded->catalog.profiles.size(), 2U);
-    const auto &made = loaded->catalog.profiles.back();
-    EXPECT_EQ(made.storage.runtime_profile, runtime_profile_e::heroic);
-    EXPECT_EQ(made.workload.kind, workload_kind_e::heroic);
-    EXPECT_EQ(made.workload.target_id, "library-v1");
-    EXPECT_EQ(loaded->catalog.profiles.front().storage.runtime_profile, runtime_profile_e::steam)
-      << "the Steam Space it was made beside is untouched";
+    {
+      // Reading the catalog holds its lease, which the changes below need.
+      const auto loaded = profiles::load(path);
+      ASSERT_TRUE(loaded);
+      ASSERT_EQ(loaded->catalog.profiles.size(), 2U);
+      const auto &made = loaded->catalog.profiles.back();
+      EXPECT_EQ(made.storage.runtime_profile, runtime_profile_e::heroic);
+      EXPECT_EQ(made.workload.kind, workload_kind_e::heroic);
+      EXPECT_EQ(made.workload.target_id, "library-v1");
+      EXPECT_EQ(loaded->catalog.profiles.front().storage.runtime_profile, runtime_profile_e::steam)
+        << "the Steam Space it was made beside is untouched";
+    }
 
     // And a second Heroic Space is not made this way: it copies the first.
     provisioning_host_t again; again.image_family = "heroic";
     profiles::first_space_request_t second {"22345678-1234-4234-8234-123456789abc", "Another"};
     EXPECT_FALSE(profiles::create_first_space(path, second, first_image, "heroic", again));
+
+    // Archive the only Heroic Space and there is no live one to copy. Both
+    // roads were closed then: nothing to copy, and this one refused because a
+    // Heroic Space existed. A launcher left that way starts again from the
+    // admitted runtime, and the archived Space stays as it was.
+    ASSERT_TRUE(profiles::edit(path, {profiles::edit_operation_e::remove, first_request.request_id, ""}));
+    provisioning_host_t afresh; afresh.image_family = "heroic";
+    ASSERT_TRUE(profiles::create_first_space(path, second, first_image, "heroic", afresh));
+    const auto after = profiles::load(path);
+    ASSERT_TRUE(after);
+    ASSERT_EQ(after->catalog.profiles.size(), 3U);
+    EXPECT_TRUE(after->catalog.profiles[1].archived);
+    EXPECT_FALSE(after->catalog.profiles[2].archived);
+    EXPECT_EQ(after->catalog.profiles[2].storage.runtime_profile, runtime_profile_e::heroic);
   }
 
   TEST_F(MultiseatProfileCatalog, FirstSpaceFailuresRetainResourcesWithoutPublishingOrAdoptingAHome) {

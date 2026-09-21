@@ -669,8 +669,12 @@ namespace multiseat::profiles {
           // host. A family's runtime carries its own launcher and its own
           // library, so a host with Steam Spaces still has no Heroic one to
           // copy, and copying across families would hand it the wrong launcher.
+          // Only a live Space closes this path. One that is archived lends
+          // nothing, since a new Space copies a live one, so a launcher whose
+          // only Space was archived starts again from the admitted runtime
+          // rather than being left with no way to make a Space at all.
           if (std::any_of(catalog->profiles.begin(), catalog->profiles.end(), [&](const auto &value) {
-                return value.storage.runtime_profile == entry.storage.runtime_profile;
+                return value.storage.runtime_profile == entry.storage.runtime_profile && !value.archived;
               })) {
             result.error = "Spaces is already configured for this launcher. Add another space from the existing setup.";
             return std::nullopt;
