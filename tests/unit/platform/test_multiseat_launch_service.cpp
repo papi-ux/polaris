@@ -1409,6 +1409,8 @@ namespace {
         "sha256:" + std::string(64, 'a')}}), 2s,
       profile_admin_options_t {.runtime_matches_host = [](std::string_view) { return false; }});
     ASSERT_TRUE(install_profile_launch_service(service));
+    // The same Space also tells the device which launcher it opens.
+    EXPECT_EQ(nvhttp::profile_spaces_request(client).body.at("spaces")[0].at("launcher"), "steam");
     unsigned published = 0;
     const auto result = nvhttp::launch_profile_request(client, args(), false, [&](const auto &) { ++published; return true; });
     ASSERT_TRUE(result);
@@ -1525,6 +1527,8 @@ namespace {
     ASSERT_EQ(visible.spaces.size(), 2U); EXPECT_EQ(visible.spaces[1].state, "in_use");
     EXPECT_FALSE(visible.spaces[1].can_open); EXPECT_EQ(visible.spaces[1].blocked_reason, "in_use");
     EXPECT_TRUE(visible.spaces[0].can_open); EXPECT_TRUE(visible.spaces[0].blocked_reason.empty());
+    // A Space is named by its owner, so the device is told which launcher each one opens.
+    EXPECT_EQ(visible.spaces[1].launcher, "steam"); EXPECT_TRUE(visible.spaces[0].launcher.empty());
     other->cancel();
   }
 
@@ -1536,6 +1540,7 @@ namespace {
     EXPECT_EQ(response.body.at("spaces")[0].at("name"), "Primary");
     EXPECT_EQ(response.body.at("default_space_id"), "12345678-1234-4234-8234-123456789abc");
     EXPECT_TRUE(response.body.at("spaces")[0].at("can_open").is_boolean());
+    EXPECT_FALSE(response.body.at("spaces")[0].contains("launcher")) << "a Space with no launcher must not send an empty one";
     EXPECT_FALSE(response.body.contains("unavailable_reason"));
     EXPECT_EQ(response.body.dump().find("client-b"), std::string::npos);
     EXPECT_EQ(response.body.dump().find("clients"), std::string::npos);

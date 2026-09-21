@@ -134,6 +134,9 @@ namespace multiseat {
     bool library_enabled = false;
     bool can_open = false;  ///< this device could open it right now, the host's capacity included
     std::string blocked_reason;  ///< when not: unavailable | in_use | starting | running | stopping | at_capacity
+    /// The launcher the Space opens: steam | heroic | lutris, empty when it opens none. A Space is
+    /// named by its owner, so without this a device cannot tell "Alex" on Steam from "Alex" on Heroic.
+    std::string launcher;
   };
   // What a device may see, and why what it cannot do is off. Every reason is a
   // stable snake_case word a client can key copy on; the six state words stay.

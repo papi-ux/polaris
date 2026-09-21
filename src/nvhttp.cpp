@@ -5375,6 +5375,8 @@ namespace nvhttp {
     nlohmann::json entry {{"id", space.id}, {"name", space.name}, {"state", space.state}, {"selected", space.selected},
       {"library_enabled", space.library_enabled}, {"can_open", space.can_open}, {"blocked_reason", space.blocked_reason}};
     if (space.can_open) entry.erase("blocked_reason");
+    // Optional like the rest: a Space that opens no launcher says nothing rather than "".
+    if (!space.launcher.empty()) entry["launcher"] = space.launcher;
     return entry;
   }
 

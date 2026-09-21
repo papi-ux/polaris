@@ -1016,6 +1016,7 @@ namespace multiseat {
         state = item.client == client ? item.state : "in_use"; break;
       }
       profile_client_space_t space {profile.id, profile.name, state, selected == profile.id, profile.library_enabled};
+      space.launcher = profile.family;
       if (state != "ready") space.blocked_reason = state;
       else if (at_capacity) space.blocked_reason = "at_capacity";
       else space.can_open = true;
