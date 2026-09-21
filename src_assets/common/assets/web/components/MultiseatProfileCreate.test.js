@@ -210,6 +210,58 @@ describe('Steam profile creation', () => {
       expect(fetch).toHaveBeenCalledTimes(2)
       expect(fetch.mock.calls[1][1].body).toBe(fetch.mock.calls[0][1].body)
       expect(crypto.randomUUID).toHaveBeenCalledTimes(1)
+      // This retry failed at once: the job was failed before it and is failed after it, so
+      // nothing changed for a watcher to see. The host's reason is still what the form says.
+      expect(wrapper.get('[role=alert]').text())
+        .toBe('The runtime download did not finish. The Space was not created. Create the Space again.')
+      expect(wrapper.text()).not.toContain('has not been confirmed')
+    })
+
+    it('lets a failed download be abandoned, but not a Space that may be half made', async () => {
+      fetch.mockResolvedValue(reply({ status: false, profile_id: id, job: job('downloading') }, 202))
+      refresh.mockImplementation(async () => { await wrapper.setProps({ job: job('downloading') }); return true })
+      await open({ launchers: [steam, heroic] })
+      await wrapper.get('select').setValue('heroic')
+      await wrapper.get('form').trigger('submit')
+      await flushPromises()
+      expect(wrapper.find('[data-start-over]').exists()).toBe(false)
+      refresh.mockImplementation(async () => true)
+      // Making the Space itself failed in a way that may have left something behind: the
+      // request is kept, because only the same request can confirm what happened to it.
+      await wrapper.setProps({ job: job('failed', { code: 'spaces_change_not_saved', message: 'The Space was not created.' }) })
+      expect(wrapper.find('[data-start-over]').exists()).toBe(false)
+      expect(wrapper.get('input').element.disabled).toBe(true)
+      // A download that failed made nothing at all.
+      await wrapper.setProps({ job: job('failed', { code: 'download_incomplete', message: 'The runtime download did not finish.' }) })
+      await wrapper.get('[data-start-over]').trigger('click')
+      expect(wrapper.find('[role=alert]').exists()).toBe(false)
+      expect(wrapper.get('input').element.disabled).toBe(false)
+      expect(wrapper.get('select').element.disabled).toBe(false)
+      expect(sessionStorage.getItem('polaris:spaces:create-request:v1')).toBeNull()
+      expect(button('Cancel')).toBeDefined()
+      await wrapper.get('form').trigger('submit')
+      await flushPromises()
+      expect(crypto.randomUUID).toHaveBeenCalledTimes(2)
+    })
+
+    it('never has two reads of the job in flight', async () => {
+      // The page's loader drops a read that is still running when another starts. On a fixed
+      // interval, a host slower than the interval had every read cancelled and the job never moved.
+      vi.useFakeTimers()
+      fetch.mockResolvedValueOnce(reply({ status: false, profile_id: id, job: job('downloading') }, 202))
+      refresh.mockImplementation(async () => { await wrapper.setProps({ job: job('downloading') }); return true })
+      await open({ launchers: [steam, heroic], pollMs: 1000 })
+      await wrapper.get('select').setValue('heroic')
+      await wrapper.get('form').trigger('submit')
+      await flushPromises()
+      let inFlight = 0, most = 0
+      refresh.mockImplementation(() => new Promise(resolve => {
+        most = Math.max(most, ++inFlight)
+        setTimeout(() => { inFlight--; resolve(true) }, 5000)
+      }))
+      await vi.advanceTimersByTimeAsync(20000)
+      expect(most).toBe(1)
+      vi.useRealTimers()
     })
 
     it('ignores a job that belongs to another request', async () => {

@@ -41,6 +41,9 @@
           {{ $t('spaces.check_creation') }}
         </Button>
         <Button v-else-if="!pending" type="button" variant="ghost" size="sm" :disabled="working" @click="closeForm">{{ $t('spaces.cancel') }}</Button>
+        <Button v-if="canStartOver" type="button" variant="ghost" size="sm" :disabled="working" data-start-over @click="startOver">
+          {{ $t('spaces.create_start_over') }}
+        </Button>
       </div>
       <p v-if="pending && !jobRunning" class="mt-3 text-xs text-storm">
         {{ $t('spaces.retry_note') }}
@@ -161,19 +164,41 @@ watch(() => [props.profiles, props.ready], () => { if (!working.value) confirmCr
 // While the host downloads or creates, read the job back sooner than the
 // page's own poll, and say why when it fails. The request is kept: its identity
 // names the Space, so asking again is the retry.
+// Each read waits for the last one. The page's loader drops a read still in
+// flight when another starts, so a fixed interval shorter than a slow answer
+// would cancel every read it made and never see the job move.
 let timer = null
-function stopPolling() { if (timer) { clearInterval(timer); timer = null } }
-watch(jobRunning, running => {
+function stopPolling() { if (timer) { clearTimeout(timer); timer = null } }
+function schedule() {
   stopPolling()
-  if (running) timer = setInterval(() => { if (!working.value) refreshProfiles() }, props.pollMs)
-}, { immediate: true })
+  if (!jobRunning.value) return
+  timer = setTimeout(async () => {
+    timer = null
+    if (!working.value) await refreshProfiles()
+    schedule()
+  }, props.pollMs)
+}
+watch(jobRunning, schedule, { immediate: true })
 onBeforeUnmount(stopPolling)
-watch(ownJob, (job, previous) => {
+const jobFailure = job => [job.message, job.action].filter(Boolean).join(' ') || t('spaces.creation_failed')
+watch(ownJob, job => {
   if (!job) return
   if (jobRunning.value) { message.value = ''; error.value = ''; return }
-  if (job.state === 'failed' && previous?.state !== 'failed')
-    error.value = [job.message, job.action].filter(Boolean).join(' ') || t('spaces.creation_failed')
+  // Said while nothing is being sent. A retry clears it, and says it again
+  // itself once it has read the job back, since a retry that fails at once
+  // leaves the job failed both before and after and changes nothing to watch.
+  if (job.state === 'failed' && !working.value) error.value = jobFailure(job)
 })
+// A failed download made nothing, so the request can be let go and the form
+// used again. A failure while the Space itself was being made may have left
+// resources behind, and that request is kept so the same one can confirm it.
+const uncertain = ['spaces_change_not_saved', 'spaces_change_pending', 'spaces_stopping']
+const canStartOver = computed(() => ownJob.value?.state === 'failed' && !uncertain.includes(ownJob.value.code))
+function startOver() {
+  if (!canStartOver.value || working.value) return
+  clearPending()
+  message.value = ''; error.value = ''
+}
 watch(families, () => {
   if (!pending.value && !validFamily.value) family.value = families.value[0] || ''
 })
@@ -226,8 +251,9 @@ async function submit() {
     const verified = await refreshProfiles()
     await nextTick()
     if (verified && !confirmCreation() && pending.value && props.ready && !error.value) {
-      // A running job says where it is in its own words.
-      message.value = jobRunning.value ? '' : t('spaces.creation_unconfirmed')
+      // A running job says where it is in its own words, and a failed one why.
+      if (ownJob.value?.state === 'failed') error.value = jobFailure(ownJob.value)
+      else message.value = jobRunning.value ? '' : t('spaces.creation_unconfirmed')
     }
     working.value = false; emit('busy', false)
   }

@@ -1810,6 +1810,7 @@
     "create_downloading": "Downloading the {launcher} gaming runtime. You can leave this page and come back.",
     "create_first_hint": "The first Space is prepared under Host Setup. Once it exists, you can create more here.",
     "create_note": "Stop Space streams before creating a Space. Creation can take a little while.",
+    "create_start_over": "Start Over",
     "create_submit": "Create Space",
     "created": "{name} was created. Give a device access, then open Big Picture to sign in.",
     "creating": "Creating…",
