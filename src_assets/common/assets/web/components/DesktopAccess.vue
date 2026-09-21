@@ -29,12 +29,15 @@
         {{ $t('spaces.access_clear_all') }}
       </Button>
     </div>
-    <label v-for="device in eligible" :key="device.uuid" class="mt-3 flex items-center gap-3 text-sm text-silver">
-      <input type="checkbox" class="h-4 w-4 shrink-0 rounded border-storm bg-void text-ice accent-ice"
-             :checked="allowed.includes(device.uuid)" :disabled="locked || working"
-             :aria-label="$t('spaces.desktop_allow_aria', { device: deviceName(device) })" @change="save(device.uuid, $event)">
-      <span>{{ deviceName(device) }}</span>
-    </label>
+    <!-- This section is as wide as the page, so the devices sit in columns rather than one long strip. -->
+    <div class="grid gap-x-6 sm:grid-cols-2 xl:grid-cols-3" data-desktop-devices>
+      <label v-for="device in eligible" :key="device.uuid" class="mt-3 flex min-w-0 items-center gap-3 text-sm text-silver">
+        <input type="checkbox" class="h-4 w-4 shrink-0 rounded border-storm bg-void text-ice accent-ice"
+               :checked="allowed.includes(device.uuid)" :disabled="locked || working"
+               :aria-label="$t('spaces.desktop_allow_aria', { device: deviceName(device) })" @change="save(device.uuid, $event)">
+        <span class="min-w-0 break-words">{{ deviceName(device) }}</span>
+      </label>
+    </div>
     <p v-if="message" class="mt-3 text-sm text-silver" role="status">{{ message }}</p>
     <p v-if="error" class="mt-3 text-sm text-warning-bright" role="alert">{{ error }}</p>
     <ConfirmActionDialog v-model="clearOpen" :title="$t('spaces.desktop_clear_title')"
