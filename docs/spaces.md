@@ -17,7 +17,7 @@ using the Library in Nova; nothing here is required for that, and you do not
 need Docker. [Spaces or regular streaming](spaces-or-regular.md) puts the two
 side by side.
 
-![Spaces with player cards and a default Space for a handheld](images/spaces/spaces-overview.png)
+![The Spaces page: a card for each Space, and one Device Access table of what each device may open](images/spaces/spaces-overview.png)
 
 Example with sample player and device names.
 
@@ -302,9 +302,9 @@ Once the host checks pass and a runtime is offered:
    own budget.
 5. Save any running game, then select **Restart Polaris and finish setup**.
    Restarting disconnects every stream. Reconnect and return to **Spaces**.
-6. Open the new Space's **Device Access** and tick your paired Nova device.
-   With one Space it opens that Space first; **Default Space** changes where
-   each device opens first.
+6. Under **Device Access**, tick your paired Nova device in the new Space's
+   column. With one Space it opens that Space first; **Default Space** changes
+   where each device opens first.
 
 **Steam home prepared** means storage was saved. **Configuration saved** means
 a restart is still required. Neither is a game or controller test yet; that
@@ -348,21 +348,31 @@ inaccessible GPU needs attention; Polaris does not silently choose another.
 
 ## Give a device access
 
-- **Device Access** on a Space card decides which devices may open that
-  Space. Tick a device to allow it. A device with more than one place to play
-  picks between them in Nova with **Change Space**.
-- **Desktop Access** adds **Desktop**, this PC's usual desktop and apps, as one
+**Device Access** is one table. Each row is a handheld, TV or computer paired
+with Polaris, each column is a place it may play, and the last column is where
+it opens first. On a narrow window the same rows show as one card per device.
+
+- Tick a Space's column to let a device open that Space. A device with more
+  than one place to play picks between them in Nova with **Change Space**.
+- The **Desktop** column adds Desktop, this PC's usual desktop and apps, as one
   more choice beside a device's Spaces.
-- **Default Space** lists the handhelds, TVs and computers paired with Polaris
-  and sets where each one opens first: one of the Spaces it may open, or
-  Desktop once it has Desktop Access. Select **Save assignment**. Saving never
-  changes which Spaces or Desktop a device may open. Devices that share a
-  Space share its sign-in and saves and take turns streaming it; give
-  simultaneous players separate Spaces and separate Steam accounts.
-- To take a device out of a Space, untick it under that Space's **Device
-  Access**. If the Space was its Default Space, the device opens the next place
-  it may play. A device that can no longer launch games shows **Remove from
-  Spaces** under Default Space instead.
+- The **Every device** row changes a whole column at once: **All** lets every
+  device in, and **None** asks first, then removes every device. Each is one
+  change, where ticking devices one by one restarts Spaces every time.
+- **Give Desktop Access with a Space** makes a tick in a Space's column give
+  the device Desktop as well. It applies to the ticks you make from then on;
+  devices you have already set up stay as they are.
+- **Default Space** sets where a device opens first: one of the Spaces it may
+  open, or Desktop once it has Desktop Access. Choose it and select **Save**.
+  Saving never changes which Spaces or Desktop a device may open. A device
+  with one place to play has nothing to choose, so the table names that place.
+  Devices that share a Space share its sign-in and saves and take turns
+  streaming it; give simultaneous players separate Spaces and separate Steam
+  accounts.
+- To take a device out of a Space, untick it in that Space's column. If the
+  Space was its Default Space, the device opens the next place it may play. A
+  device that can no longer launch games shows **Remove from Spaces** in its
+  row instead.
 - A device needs permission to launch apps; temporary guests cannot be
   assigned a Space. When two paired devices share a name, for example Nova and
   Nova Debug on one handheld, the Spaces and Devices pages add when each one

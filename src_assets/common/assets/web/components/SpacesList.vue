@@ -39,8 +39,6 @@
             </Button>
           </div>
         </form>
-        <SpaceAccess v-if="accessAvailable" :space="space" :clients="clients" :locked="locked" :lock-reason-id="lockReasonId"
-                     :ready="ready" :refresh="refresh" @busy="emit('busy', $event)" @open-default="emit('open-default')" />
       </article>
     </div>
     <p v-if="!active.length" class="mt-3 text-sm text-storm" data-spaces-empty>
@@ -112,7 +110,6 @@
 import { computed, inject, nextTick, ref, watch } from 'vue'
 import Button from './Button.vue'
 import ConfirmActionDialog from './ConfirmActionDialog.vue'
-import SpaceAccess from './SpaceAccess.vue'
 import SpaceRuntimeMove from './SpaceRuntimeMove.vue'
 import StatusBadge from './StatusBadge.vue'
 import { permissionMapping } from '../composables/useClients.js'
@@ -121,10 +118,10 @@ import { useToast } from '../composables/useToast.js'
 
 const props = defineProps({ profiles: { type: Array, default: () => [] }, clients: { type: Array, default: () => [] },
   activity: { type: Array, default: null }, refreshing: Boolean,
-  accessAvailable: Boolean, creationAvailable: Boolean, manageable: Boolean, removalAvailable: Boolean, locked: Boolean, ready: Boolean,
+  creationAvailable: Boolean, manageable: Boolean, removalAvailable: Boolean, locked: Boolean, ready: Boolean,
   runtimeMoveAvailable: Boolean, runtimeMoveJob: { type: Object, default: null },
   lockReasonId: { type: String, default: '' }, refresh: { type: Function, required: true } })
-const emit = defineEmits(['busy', 'open-default'])
+const emit = defineEmits(['busy'])
 const i18n = inject('i18n')
 const t = (key, params) => i18n.t(key, params)
 const { toast } = useToast()
@@ -153,16 +150,16 @@ const lastSpace = computed(() => {
 // The typed name has to be the Space's name exactly, as the host checks it.
 const removalReady = computed(() => !!dialogSpace.value && !lastSpace.value && typedName.value === dialogSpace.value.name)
 
-// The same filter Device Access uses: a device that lost launch permission
-// is not listed as able to open the Space.
+// A device that lost launch permission is not listed as able to open the Space, unless the Space
+// is still its Default Space.
 function deviceNames(space) {
   return [...new Set([...space.clients, ...(space.access_clients || [])])]
     .map(id => props.clients.find(client => client.uuid === id))
     .filter(device => device && (canLaunch(device) || space.clients.includes(device.uuid)))
     .map(deviceName)
 }
-// Two names and a count. A Space open to a dozen devices used to spell out all twelve here, and
-// then list them again under Device Access; the full list is a hover away and one click below.
+// Two names and a count. A Space open to a dozen devices used to spell out all twelve here; the
+// full list is a hover away, and the Device Access table below has a column for this Space.
 function deviceSummary(space) {
   const names = deviceNames(space)
   if (!names.length) return t('spaces.no_devices')

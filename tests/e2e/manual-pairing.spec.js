@@ -13,8 +13,9 @@ test('profile assignments preserve the confirmed route when an active stream ref
     const path = new URL(route.request().url()).pathname
     if (path === '/api/multiseat/profiles') return route.fulfill({ json: {
       enabled: true, available: true, changing: false, failed: false,
-      profiles: [{ id: 'profile-a', name: 'Alex', clients: ['device-a'] },
-        { id: 'profile-b', name: 'Sam', clients: ['device-b'] }],
+      // Each device may open both Spaces, so each has a Default Space to choose.
+      profiles: [{ id: 'profile-a', name: 'Alex', clients: ['device-a'], access_clients: ['device-b'] },
+        { id: 'profile-b', name: 'Sam', clients: ['device-b'], access_clients: ['device-a'] }],
     } })
     if (path === '/api/multiseat/assign') {
       assignment = route.request().postDataJSON()
@@ -30,13 +31,13 @@ test('profile assignments preserve the confirmed route when an active stream ref
   await page.goto('/#/spaces')
   const panel = page.getByRole('region', { name: 'Your Spaces' })
   await expect(panel).toBeVisible()
-  await panel.locator('summary', { hasText: 'Default Space' }).click()
-  await panel.getByLabel('Living room handheld').selectOption('profile-b')
+  // The device name labels its Default Space dropdown in the Device Access table.
+  await panel.getByLabel('Living room handheld', { exact: true }).selectOption('profile-b')
   await panel.getByRole('button', { name: 'Save assignment for Living room handheld' }).click()
   await expect.poll(() => assignment).toEqual({ client_id: 'device-a', profile_id: 'profile-b' })
   await expect(panel.getByRole('alert')).toContainText('Stop every Space stream')
-  await expect(panel.getByLabel('Living room handheld')).toHaveValue('profile-a')
-  await expect(panel.getByLabel('Bedroom TV')).toHaveValue('profile-b')
+  await expect(panel.getByLabel('Living room handheld', { exact: true })).toHaveValue('profile-a')
+  await expect(panel.getByLabel('Bedroom TV', { exact: true })).toHaveValue('profile-b')
   await panel.screenshot({ path: testInfo.outputPath('profile-assignments-desktop.png') })
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(panel).toBeVisible()
