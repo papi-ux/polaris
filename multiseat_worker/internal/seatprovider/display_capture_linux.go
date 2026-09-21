@@ -823,6 +823,9 @@ func runDisplayCapture(
 		case <-parent.Done():
 			return nil
 		case <-child.done:
+			if stopRequested(parent) {
+				return nil
+			}
 			return child.exitError("runtime display exited unexpectedly")
 		case <-ticker.C:
 			if inputs != nil {
