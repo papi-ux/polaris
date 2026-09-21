@@ -130,6 +130,9 @@ namespace proc {
     std::string forcePrivateStreamLabel;
   };
 
+  /// What a launch on a host in Steam Game Mode is told: nothing to choose, the stream shows that screen.
+  desktop_launch_safety_policy_t game_mode_launch_safety_policy();
+
   desktop_launch_safety_policy_t resolve_desktop_launch_safety_policy(
     bool private_stream_requested,
     bool mirror_desktop_explicit,

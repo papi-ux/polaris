@@ -5148,6 +5148,23 @@ namespace proc {
     );
   }
 
+  desktop_launch_safety_policy_t game_mode_launch_safety_policy() {
+    // A host in Steam Game Mode has one screen and one Steam, and both belong to the session. There
+    // is no private stream to offer and no desktop Steam to close, so there is nothing to ask the
+    // player: the launch goes to that Steam and the stream shows that screen. Reporting the session's
+    // Steam as "desktop Steam" made clients offer to close it.
+    desktop_launch_safety_policy_t policy;
+    policy.desktopSteamActive = false;
+    policy.physicalDisplayRisk = false;
+    policy.canLaunchPrivateStream = false;
+    policy.canMirrorDesktop = true;
+    policy.canForceCloseDesktopSteamForPrivateStream = false;
+    policy.recommendedAction = "mirror_desktop";
+    policy.privateStreamUnavailableReason = "Steam Game Mode is running, so this stream shows the Game Mode screen.";
+    policy.forcePrivateStreamLabel = "Close desktop Steam and start private stream";
+    return policy;
+  }
+
   desktop_launch_safety_policy_t resolve_desktop_launch_safety_policy(
     bool private_stream_requested,
     bool mirror_desktop_explicit,
@@ -5156,6 +5173,9 @@ namespace proc {
     bool desktop_steam_active,
     bool active_desktop_game
   ) {
+    if (platf::game_mode_host::session_live()) {
+      return game_mode_launch_safety_policy();
+    }
     return resolve_desktop_launch_safety_policy_impl(
       private_stream_requested,
       mirror_desktop_explicit,

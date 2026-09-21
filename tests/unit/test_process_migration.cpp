@@ -4421,6 +4421,36 @@ TEST(ProcessRuntimeConfigTests, NothingClosesTheSteamThatIsRunningGameMode) {
   EXPECT_LT(refusal, command) << "the refusal comes before anything that could run steam -shutdown, for every caller";
 }
 
+TEST(ProcessRuntimeConfigTests, ALaunchOnAGameModeHostIsNeverAskedToCloseSteam) {
+  proc::ctx_t steam_title;
+  steam_title.name = "ANIMAL WELL";
+  steam_title.source = "steam";
+  steam_title.steam_appid = "813230";
+  steam_title.detached = {"setsid steam steam://rungameid/813230"};
+
+  // The same launch on a desktop host, with Steam open and a Private Stream configured, is the
+  // case the prompt exists for.
+  const auto desktop = proc::resolve_desktop_launch_safety_policy(true, false, false, steam_title, true, false);
+  EXPECT_TRUE(desktop.desktopSteamActive);
+  EXPECT_TRUE(desktop.canForceCloseDesktopSteamForPrivateStream);
+  EXPECT_EQ(desktop.recommendedAction, "refuse_private_stream");
+
+  platf::game_mode_host::set_session_live_for_tests(true);
+  const auto game_mode = proc::resolve_desktop_launch_safety_policy(true, false, true, steam_title, true, false);
+  const auto after_shutdown = proc::resolve_desktop_launch_safety_policy_after_shutdown(steam_title, false);
+  platf::game_mode_host::set_session_live_for_tests(std::nullopt);
+
+  for (const auto &policy : {game_mode, after_shutdown}) {
+    EXPECT_FALSE(policy.desktopSteamActive) << "the Steam that is running is the session, not a desktop Steam";
+    EXPECT_FALSE(policy.physicalDisplayRisk) << "a client shows its prompt when either of these is set";
+    EXPECT_FALSE(policy.canForceCloseDesktopSteamForPrivateStream);
+    EXPECT_FALSE(policy.canLaunchPrivateStream);
+    EXPECT_TRUE(policy.canMirrorDesktop);
+    EXPECT_EQ(policy.recommendedAction, "mirror_desktop");
+    EXPECT_NE(policy.privateStreamUnavailableReason.find("Game Mode"), std::string::npos);
+  }
+}
+
 TEST(ProcessRuntimeConfigTests, EndingAStreamNeverStopsTheSteamThatIsRunningGameMode) {
   // Every Steam title and the Big Picture entry carry an undo that stops Steam, added as cleanup
   // when the app has none of its own. Under Game Mode that Steam is the session.
