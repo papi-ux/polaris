@@ -217,11 +217,20 @@ namespace multiseat::media {
       request_side.finish(report);
       return report;
     };
+    // Whether the host asked this stream to end. The request side only looks once a tick, and a
+    // client that disconnects stops the session and cancels its worker in the same breath, so the
+    // worker can close its end inside that tick. Asking the host here as well keeps a transport
+    // that closed because the session ended from being logged as a worker failure: the same clean
+    // disconnect read "the session ended the stream" or "Worker media failed" depending only on
+    // which thread had looked first.
+    const auto stopping = [&] {
+      return request_side.stopped() || (requests.stop_requested && requests.stop_requested());
+    };
 
     worker_ipc::encoded_media_packet_t packet;
     if (connection.receive_media(packet) != transport_status_e::applied) {
-      return finish(request_side.stopped() ? pump_status_e::ended_on_shutdown :
-                                             pump_status_e::announced_nothing);
+      return finish(stopping() ? pump_status_e::ended_on_shutdown :
+                                  pump_status_e::announced_nothing);
     }
     if (packet.message != message_e::media_config) {
       report.detail = "first media message was " + std::to_string(static_cast<int>(packet.message));
@@ -256,8 +265,8 @@ namespace multiseat::media {
     while (true) {
       const auto received = connection.receive_media(packet);
       if (received != transport_status_e::applied) {
-        return finish(request_side.stopped() ? pump_status_e::ended_on_shutdown :
-                                               pump_status_e::transport_lost);
+        return finish(stopping() ? pump_status_e::ended_on_shutdown :
+                                    pump_status_e::transport_lost);
       }
       switch (packet.message) {
         case message_e::video:
