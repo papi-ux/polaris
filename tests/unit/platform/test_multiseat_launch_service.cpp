@@ -1792,6 +1792,17 @@ namespace {
     // It is still a title this device may play, and one nothing is ever looked up for.
     EXPECT_EQ(nvhttp::profile_artwork_target(client, "space.profile-a.id.2"), "id.2");
     EXPECT_FALSE(nvhttp::profile_launcher_poster(client, "space.profile-a.id.2"));
+
+    // A library that could not be read still lists the launcher, so the launcher's poster is
+    // decided the same way then as ever, and no title is vouched for out of a library nobody read.
+    const auto listed = nvhttp::profile_launcher_poster(client, "space.profile-a.library-v1");
+    state->library = [](std::string_view) { return spaces::library_t{}; };
+    uninstall_profile_launch_service(service); ASSERT_TRUE(service->shutdown(2s));
+    service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
+      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, "lutris", false, {}, true}}), 2s);
+    ASSERT_TRUE(install_profile_launch_service(service));
+    EXPECT_EQ(nvhttp::profile_launcher_poster(client, "space.profile-a.library-v1"), listed);
+    EXPECT_FALSE(nvhttp::profile_artwork_target(client, "space.profile-a.id.2"));
   }
 
   // While an administrator approves a change to this PC's setup, nothing starts or changes a Space.

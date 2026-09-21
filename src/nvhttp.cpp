@@ -5477,10 +5477,14 @@ namespace nvhttp {
           !(current->perm & PERM::launch) || current->temporary_authorization) return std::nullopt;
       const auto service = multiseat::installed_profile_service();
       const auto snapshot = service ? service->library_for_client(current->uuid, game->profile) : std::nullopt;
-      if (!snapshot || !snapshot->library.available) return std::nullopt;
+      if (!snapshot) return std::nullopt;
+      // The launcher's own entry is listed whether or not the library could be
+      // read, so its poster has to answer then too. A title exists only in a
+      // library that was read.
       const bool launcher = !snapshot->launcher_target.empty() && game->target == snapshot->launcher_target;
-      if (!launcher && std::none_of(snapshot->library.games.begin(), snapshot->library.games.end(),
-            [&](const auto &entry) { return entry.target == game->target; })) return std::nullopt;
+      if (!launcher && (!snapshot->library.available ||
+            std::none_of(snapshot->library.games.begin(), snapshot->library.games.end(),
+              [&](const auto &entry) { return entry.target == game->target; }))) return std::nullopt;
       if (resolve_authorized_client(current) != current || multiseat::installed_profile_service() != service) return std::nullopt;
       const auto access = service->client_spaces(current->uuid);
       if (std::none_of(access.spaces.begin(), access.spaces.end(),
