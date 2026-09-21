@@ -206,6 +206,25 @@ func stopRequested(parent context.Context) bool {
 	}
 }
 
+// exitedAsAsked reports whether a child that has exited went the way a stop makes it go: with
+// status 0, or on the SIGTERM or SIGKILL a stop sends. A child that crashed in the same moment it
+// was asked to stop is still a crash, and the stop must not hide it.
+func (child *managedChild) exitedAsAsked() bool {
+	if child == nil || child.command == nil || !child.exited() {
+		return false
+	}
+	state := child.command.ProcessState
+	if state == nil {
+		return false
+	}
+	if state.Success() {
+		return true
+	}
+	status, ok := state.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled() &&
+		(status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL)
+}
+
 func (child *managedChild) exitError(message string) error {
 	if child == nil || child.command == nil || child.done == nil || !child.exited() {
 		return errors.New(message)

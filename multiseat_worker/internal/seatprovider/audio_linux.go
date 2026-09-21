@@ -506,17 +506,17 @@ func runAudio(
 	case <-parent.Done():
 		return nil
 	case <-pipeWire.done:
-		if stopRequested(parent) {
+		if stopRequested(parent) && pipeWire.exitedAsAsked() {
 			return nil
 		}
 		return pipeWire.exitError("runtime PipeWire core exited unexpectedly")
 	case <-pulse.done:
-		if stopRequested(parent) {
+		if stopRequested(parent) && pulse.exitedAsAsked() {
 			return nil
 		}
 		return pulse.exitError("runtime Pulse service exited unexpectedly")
 	case <-policy.done:
-		if stopRequested(parent) {
+		if stopRequested(parent) && policy.exitedAsAsked() {
 			return nil
 		}
 		return policy.exitError("runtime audio policy exited unexpectedly")

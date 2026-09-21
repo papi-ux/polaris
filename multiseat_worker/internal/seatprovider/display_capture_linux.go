@@ -823,7 +823,7 @@ func runDisplayCapture(
 		case <-parent.Done():
 			return nil
 		case <-child.done:
-			if stopRequested(parent) {
+			if stopRequested(parent) && child.exitedAsAsked() {
 				return nil
 			}
 			return child.exitError("runtime display exited unexpectedly")

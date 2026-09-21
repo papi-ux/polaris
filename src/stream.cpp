@@ -2827,16 +2827,18 @@ namespace stream {
     void stop(session_t &session) {
       while_starting_do_nothing(session.state);
       session.packet_owner.close();
+      auto expected = state_e::RUNNING;
+      const auto already_stopping = !session.state.compare_exchange_strong(expected, state_e::STOPPING);
+      // Raised before the Space's input and its worker connection are let go. Letting go closes the
+      // worker's transport, and the media pump that sees its transport close asks whether the stream
+      // was told to end. With the order the other way round the answer was still no, and a player
+      // leaving a Space was logged as "Worker media failed: the worker transport ended".
+      if (!already_stopping) {
+        session.shutdown_event->raise(true);
+      }
 #ifdef __linux__
       close_multiseat_input(session);
 #endif
-      auto expected = state_e::RUNNING;
-      auto already_stopping = !session.state.compare_exchange_strong(expected, state_e::STOPPING);
-      if (already_stopping) {
-        return;
-      }
-
-      session.shutdown_event->raise(true);
     }
 
     void graceful_stop(session_t &session) {

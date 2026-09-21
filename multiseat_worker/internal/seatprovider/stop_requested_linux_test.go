@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -51,6 +52,33 @@ func TestAChildThatDiesOnItsOwnIsStillUnexpected(t *testing.T) {
 	withStopNoticeGrace(t, 30*time.Millisecond)
 	if stopRequested(context.Background()) {
 		t.Fatal("nobody asked for a stop, so the exit has to be reported")
+	}
+}
+
+func exitedChildForTest(t *testing.T, script string) *managedChild {
+	t.Helper()
+	command := exec.Command("/bin/sh", "-c", script)
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = command.Wait()
+	done := make(chan struct{})
+	close(done)
+	return &managedChild{command: command, done: done}
+}
+
+func TestAChildThatCrashesWhileStoppingIsStillACrash(t *testing.T) {
+	if !exitedChildForTest(t, "exit 0").exitedAsAsked() {
+		t.Error("a child that left with status 0 went as it was asked to")
+	}
+	if !exitedChildForTest(t, "kill -TERM $$").exitedAsAsked() {
+		t.Error("SIGTERM is what a stop sends")
+	}
+	if exitedChildForTest(t, "kill -SEGV $$").exitedAsAsked() {
+		t.Error("a crash in the moment of a stop was taken for a clean exit")
+	}
+	if exitedChildForTest(t, "exit 3").exitedAsAsked() {
+		t.Error("a failing exit status was taken for a clean exit")
 	}
 }
 

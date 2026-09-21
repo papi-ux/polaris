@@ -250,13 +250,15 @@ namespace multiseat::media {
     }
     const auto bitrate = expected.bitrate_kbps == 0 ? contract->bitrate_ceiling_kbps :
       std::min(expected.bitrate_kbps, contract->bitrate_ceiling_kbps);
+    // A player can leave while the contract is still being agreed, and the closed transport then
+    // fails these calls. That is the stream ending, not the worker refusing anything.
     if (expected.bitrate_kbps != 0 &&
         connection.select_media_bitrate(bitrate) != transport_status_e::applied) {
-      return finish(pump_status_e::bitrate_refused);
+      return finish(stopping() ? pump_status_e::ended_on_shutdown : pump_status_e::bitrate_refused);
     }
     report.selected_bitrate_kbps = bitrate;
     if (connection.acknowledge_media_config() != transport_status_e::applied) {
-      return finish(pump_status_e::acknowledgement_refused);
+      return finish(stopping() ? pump_status_e::ended_on_shutdown : pump_status_e::acknowledgement_refused);
     }
     request_side.enable_media_controls();
 
