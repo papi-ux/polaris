@@ -223,11 +223,17 @@ namespace {
   TEST_F(MultiseatAssignments, AnAccessChangeCarriesThePairedDevicesToTheCatalogWrite) {
     // The catalog can only be edited while its controller is stopped, which is here and nowhere
     // else, so this is the write that drops the ids of devices the host has since forgotten.
-    EXPECT_EQ(service->set_access("profile-b", "client-a", true, {"client-a", "client-b"}).status, 200);
+    const auto granted = service->set_access("profile-b", "client-a", true, {"client-a", "client-b"});
+    EXPECT_EQ(granted.status, 200);
+    EXPECT_EQ(std::string(granted.message), "Space access saved") << "an access change is not a Default Space";
     EXPECT_EQ(writes.load(), 1U);
     EXPECT_EQ(paired_at_access_change, (std::vector<std::string> {"client-a", "client-b"}));
     EXPECT_EQ(service->set_access("profile-b", "client-a", false).status, 200);
     EXPECT_TRUE(paired_at_access_change.empty()) << "a caller with no list must not inherit the last one";
+    write_status = private_state_file::write_status_e::not_committed;
+    const auto refused = service->set_access("profile-b", "client-a", true);
+    EXPECT_EQ(refused.status, 409);
+    EXPECT_EQ(std::string(refused.message), "The Space access change was not saved. Refresh before retrying.");
   }
 
   TEST_F(MultiseatAssignments, RemovalClearsOnlyItsRoutesAndRestorationRequiresNewAssignment) {

@@ -680,9 +680,10 @@ namespace multiseat {
                   }
                 } else if (!persisted && persisted.refusal) {
                   result = {409, persisted.refusal->message, persisted.refusal->code, persisted.refusal->action};
-                } else result = persisted ? profile_launch_result_t {200, request->edit ? "Space change saved" : request->creation ? "Space created" : "Default Space saved"} :
+                } else result = persisted ? profile_launch_result_t {200, request->edit ? "Space change saved" : request->creation ? "Space created" : request->access ? "Space access saved" : "Default Space saved"} :
                   profile_launch_result_t {409, request->edit ? "The Space change was not saved. Refresh before retrying." : request->creation ?
                     "The Space was not created. Refresh before retrying; retained resources may need administrator review." :
+                    request->access ? "The Space access change was not saved. Refresh before retrying." :
                     "The Default Space was not saved. Refresh before retrying.", "spaces_change_not_saved", "Refresh Spaces and try again."};
               }
             }
