@@ -135,6 +135,93 @@ namespace vk {
     return -1;
   }
 
+  int query_vulkan_quality_levels(AVBufferRef *hw_device_buf, std::array<int, 3> &out) {
+    out = {-1, -1, -1};
+    if (!hw_device_buf || !hw_device_buf->data) {
+      return -1;
+    }
+
+    auto *dev_ctx = (AVHWDeviceContext *) hw_device_buf->data;
+    if (!dev_ctx || dev_ctx->type != AV_HWDEVICE_TYPE_VULKAN || !dev_ctx->hwctx) {
+      return -1;
+    }
+
+    auto *vk_ctx = (AVVulkanDeviceContext *) dev_ctx->hwctx;
+    if (!vk_ctx->inst || !vk_ctx->phys_dev) {
+      return -1;
+    }
+
+    // Resolve the query entry point exactly like FFmpeg's ff_vk_load_functions does:
+    // through the device context's own loader function on its own instance. If FFmpeg
+    // can open a Vulkan encode session against this device, that pointer is present.
+    const auto get_proc_addr = vk_ctx->get_proc_addr ? vk_ctx->get_proc_addr : &vkGetInstanceProcAddr;
+    auto query_caps = (PFN_vkGetPhysicalDeviceVideoCapabilitiesKHR) get_proc_addr(vk_ctx->inst, "vkGetPhysicalDeviceVideoCapabilitiesKHR");
+    if (!query_caps) {
+      BOOST_LOG(debug) << "Vulkan Video: vkGetPhysicalDeviceVideoCapabilitiesKHR is unavailable; quality levels stay unknown"sv;
+      return -1;
+    }
+
+    const auto query_codec = [&](VkVideoProfileInfoKHR &profile) -> int {
+      VkVideoEncodeCapabilitiesKHR encode_caps {VK_STRUCTURE_TYPE_VIDEO_ENCODE_CAPABILITIES_KHR};
+      VkVideoCapabilitiesKHR caps {VK_STRUCTURE_TYPE_VIDEO_CAPABILITIES_KHR, &encode_caps};
+      const auto result = query_caps(vk_ctx->phys_dev, &profile, &caps);
+      if (result == VK_SUCCESS) {
+        return encode_caps.maxQualityLevels;
+      }
+      if (result != VK_ERROR_VIDEO_PROFILE_OPERATION_NOT_SUPPORTED_KHR && result != VK_ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR) {
+        BOOST_LOG(warning) << "Vulkan Video: capability query failed with VkResult ["sv << (int) result << "]"sv;
+      } else {
+        BOOST_LOG(debug) << "Vulkan Video: driver does not report quality levels for this profile"sv;
+      }
+      return -1;
+    };
+
+    // Query each codec with the most basic profile FFmpeg can encode (Main, 8-bit).
+    // Polaris Vulkan streams are SDR NV12/P010, so this matches what the encoder will
+    // actually use; a driver that rejects even this profile cannot encode that codec
+    // here anyway and reports -1 (no constraint). The per-codec profile struct rides in
+    // the pNext chain of the generic VkVideoProfileInfoKHR, so maxQualityLevels is a
+    // pure function of codec + std profile + format.
+    int h264_levels = -1;
+    {
+      VkVideoEncodeH264ProfileInfoKHR profile_info {VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_PROFILE_INFO_KHR};
+      profile_info.stdProfileIdc = STD_VIDEO_H264_PROFILE_IDC_MAIN;
+      VkVideoProfileInfoKHR profile {VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR, &profile_info};
+      profile.videoCodecOperation = VK_VIDEO_CODEC_OPERATION_ENCODE_H264_BIT_KHR;
+      profile.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR;
+      profile.lumaBitDepth = 8;
+      profile.chromaBitDepth = 8;
+      h264_levels = query_codec(profile);
+    }
+
+    int hevc_levels = -1;
+    {
+      VkVideoEncodeH265ProfileInfoKHR profile_info {VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_PROFILE_INFO_KHR};
+      profile_info.stdProfileIdc = STD_VIDEO_H265_PROFILE_IDC_MAIN;
+      VkVideoProfileInfoKHR profile {VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR, &profile_info};
+      profile.videoCodecOperation = VK_VIDEO_CODEC_OPERATION_ENCODE_H265_BIT_KHR;
+      profile.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR;
+      profile.lumaBitDepth = 8;
+      profile.chromaBitDepth = 8;
+      hevc_levels = query_codec(profile);
+    }
+
+    int av1_levels = -1;
+    {
+      VkVideoEncodeAV1ProfileInfoKHR profile_info {VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_PROFILE_INFO_KHR};
+      profile_info.stdProfile = STD_VIDEO_AV1_PROFILE_MAIN;
+      VkVideoProfileInfoKHR profile {VK_STRUCTURE_TYPE_VIDEO_PROFILE_INFO_KHR, &profile_info};
+      profile.videoCodecOperation = VK_VIDEO_CODEC_OPERATION_ENCODE_AV1_BIT_KHR;
+      profile.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR;
+      profile.lumaBitDepth = 8;
+      profile.chromaBitDepth = 8;
+      av1_levels = query_codec(profile);
+    }
+
+    out = {h264_levels, hevc_levels, av1_levels};
+    return (h264_levels >= 0 || hevc_levels >= 0 || av1_levels >= 0) ? 0 : -1;
+  }
+
   /**
    * @brief Vulkan shader constants used by the conversion pass.
    */

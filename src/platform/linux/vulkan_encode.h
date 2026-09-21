@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <array>
 #include <string>
 
 #include "src/platform/common.h"
@@ -51,6 +52,23 @@ namespace vk {
     int offset_y,
     std::string render_device
   );
+
+  /**
+   * @brief Query the driver's reported maxQualityLevels for each Vulkan Video codec.
+   * @details Reads the encode capabilities of the exact physical device backing
+   *          the given FFmpeg hardware device context, resolving the query entry
+   *          point exactly like FFmpeg does (same instance, same loader function),
+   *          so the result matches what FFmpeg will see when it opens a session.
+   *          Each codec is queried with its most basic profile (Main, 8-bit, low
+   *          level), which is also what Polaris streams use. A codec whose query
+   *          fails or is unsupported reports -1 and simply does not constrain the
+   *          quality level; this never aborts an encode session.
+   * @param hw_device_buf FFmpeg Vulkan hardware device buffer.
+   * @param out Per-codec maxQualityLevels counts (0 - H.264, 1 - HEVC, 2 - AV1);
+   *        each entry is the driver's count or -1 when unknown.
+   * @return 0 when at least one codec count was read, negative otherwise (all entries are -1).
+   */
+  int query_vulkan_quality_levels(AVBufferRef *hw_device_buf, std::array<int, 3> &out);
 
   /**
    * @brief Check if FFmpeg Vulkan Video encoding is available.

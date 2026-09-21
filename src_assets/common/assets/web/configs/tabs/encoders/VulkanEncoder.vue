@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import CodecSupportPanel from "./CodecSupportPanel.vue";
 
 const props = defineProps([
@@ -8,6 +8,14 @@ const props = defineProps([
 ])
 
 const config = ref(props.config)
+
+// Highest quality level the probed driver exposes (maxQualityLevels-1), served in
+// encoder_codec_support. Null or absent means no live probe has reported a count yet,
+// so only level 0 is offered; Polaris clamps out-of-range saved values on its side.
+const vkQualityMax = computed(() => {
+  const max = props.config?.encoder_codec_support?.vk_quality_max
+  return Number.isInteger(max) && max >= 0 ? max : 0
+})
 </script>
 
 <template>
@@ -53,8 +61,8 @@ const config = ref(props.config)
         <label for="vk_quality" class="block text-sm font-medium text-storm mb-1">{{ $t('config.vk_quality') }}</label>
         <select id="vk_quality" class="settings-input" v-model="config.vk_quality">
           <option value="0">{{ $t('config.vk_quality_default') }}</option>
-          <!-- Levels run 0..maxQualityLevels-1; current AMD GPUs report four, so offer 0-3. -->
-          <option v-for="level in 3" :key="level" :value="String(level)">{{ $t('config.vk_quality_level', { level }) }}</option>
+          <!-- Levels run 0..maxQualityLevels-1; the probed driver's reported count decides how many are offered. -->
+          <option v-for="level in vkQualityMax" :key="level" :value="String(level)">{{ $t('config.vk_quality_level', { level }) }}</option>
         </select>
         <div class="text-sm text-storm mt-1">{{ $t('config.vk_quality_desc') }}</div>
       </div>

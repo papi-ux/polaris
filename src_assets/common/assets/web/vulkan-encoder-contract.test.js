@@ -28,19 +28,31 @@ describe('Vulkan Video settings contract', () => {
     expect(encoder).toContain('id="vk_quality" class="settings-input"')
   })
 
-  it('caps the vk_quality select at the levels drivers expose (0 through max-1)', () => {
+  it('offers only the vk_quality levels the probed driver exposes (0 through max-1)', () => {
     const encoder = webSource('configs/tabs/encoders/VulkanEncoder.vue')
     const locale = JSON.parse(webSource('public/assets/locale/en.json')).config
 
     expect(locale.vk_quality_default).toBe('Level 0 (default)')
     expect(locale.vk_quality_desc).toContain("one less than the driver's reported maximum")
+    // The description must explain that Polaris clamps out-of-range saved values.
+    expect(locale.vk_quality_desc).toContain('clamped to that maximum when the session starts, with a warning logged')
 
-    // Vulkan requires qualityLevel < maxQualityLevels; current AMD GPUs report four,
-    // so the select may offer 0-3 and nothing at or above the reported count.
+    // Vulkan requires qualityLevel < maxQualityLevels; the probed driver's count decides
+    // how many levels are offered (vk_quality_max = maxQualityLevels-1), and level 0 is always present.
+    expect(encoder).toMatch(/const vkQualityMax = computed\(\(\) => \{[\s\S]*?encoder_codec_support\?\.vk_quality_max[\s\S]*?\}\)/)
     const qualitySelect = encoder.match(/<select id="vk_quality"[\s\S]*?<\/select>/)?.[0] ?? ''
     expect(qualitySelect).toContain('<option value="0">')
-    expect(qualitySelect).toMatch(/v-for="level in 3"/)
-    expect(qualitySelect).not.toMatch(/value="[4-9]"/)
+    expect(qualitySelect).toMatch(/v-for="level in vkQualityMax"/)
+    expect(qualitySelect).not.toMatch(/value="[1-9]"/)
+  })
+
+  it('serves the probed Vulkan quality maximum from encoder_codec_support', () => {
+    const videoHeader = source('src/video.h')
+    const configHttp = source('src/confighttp.cpp')
+
+    expect(videoHeader).toContain('int advertised_vulkan_quality_max();')
+    expect(configHttp).toMatch(/const int vk_quality_max = video::advertised_vulkan_quality_max\(\);/)
+    expect(configHttp).toContain('{"vk_quality_max", vk_quality_max >= 0 ? nlohmann::json(vk_quality_max) : nlohmann::json(nullptr)},')
   })
 
   it('registers low-latency CBR defaults and renders the encoder panel', () => {

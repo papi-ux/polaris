@@ -5426,6 +5426,9 @@ namespace confighttp {
     {
       const auto codec_state = video::advertised_codec_capability_state();
       const bool ready = video::advertised_codec_capability_state_ready();
+      // Highest Vulkan quality level the probed driver exposes for every usable
+      // codec (maxQualityLevels-1), or null when not on a live-probed Vulkan encoder.
+      const int vk_quality_max = video::advertised_vulkan_quality_max();
       const auto off_reason = [ready](int configured_mode, int effective_mode) -> nlohmann::json {
         if (effective_mode >= 2) {
           return nlohmann::json {};
@@ -5447,6 +5450,7 @@ namespace confighttp {
         {"av1_hdr", codec_state.av1_mode == 3},
         {"hevc_reason", off_reason(config::video.hevc_mode, codec_state.hevc_mode)},
         {"av1_reason", off_reason(config::video.av1_mode, codec_state.av1_mode)},
+        {"vk_quality_max", vk_quality_max >= 0 ? nlohmann::json(vk_quality_max) : nlohmann::json(nullptr)},
       };
     }
 #ifdef _WIN32

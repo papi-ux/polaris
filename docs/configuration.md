@@ -574,12 +574,12 @@ selects variable bitrate.
 
 Selects the Vulkan Video quality level passed to FFmpeg. `0` selects quality level 0 and always
 works; higher levels trade encode speed for quality where the driver exposes them. The allowed range
-is `0..maxQualityLevels − 1`, which varies by driver and codec, so check before raising it: with verbose
-logging enabled, Polaris logs the driver's count as `Encoder max quality: N`. FFmpeg's own guard repeats
-the off-by-one in its error message (`Invalid quality level <n>: allowed range is 0 to <N>`), so a value
-of exactly N slips past that check and fails the Vulkan query instead. Because an explicit Vulkan
-selection is strict, Polaris does not fall back to another encoder; lower the value or switch back to
-`vaapi`.
+is `0..maxQualityLevels − 1`, which varies by driver, chip, and codec (current AMD GPUs report four
+levels, Intel ANV reports one). Polaris reads each codec's count from the probed device during encoder
+probing: the web UI offers only levels the probed driver supports, and a saved value above that maximum
+is clamped to it when the session starts, with a warning logged. FFmpeg's own guard has an off-by-one
+that lets a value of exactly N through, so Polaris clamps on its side instead. Because an explicit
+Vulkan selection is strict, Polaris does not fall back to another encoder for an unsupported level.
 
 On an RX 7900 XTX (RADV, navi31) the driver reports four quality levels for both H.264 and HEVC
 (`Encoder max quality: 4`), so valid values are 0–3.

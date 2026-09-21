@@ -818,7 +818,7 @@
     "virtual_sink_placeholder": "Steam Streaming Speakers",
     "vk_quality": "Vulkan Encode Quality",
     "vk_quality_default": "Level 0 (default)",
-    "vk_quality_desc": "Quality level for Vulkan Video encoding; valid levels run 0 through one less than the driver's reported maximum (4 on current AMD GPUs, so 0-3). A higher value fails that codec's validation without falling back.",
+    "vk_quality_desc": "Quality level for Vulkan Video encoding. Valid levels run 0 through one less than the driver's reported maximum; Polaris reads it during encoder probing and offers only levels the probed driver supports (level 0 until a live probe reports them). A saved value above the driver's maximum is clamped to that maximum when the session starts, with a warning logged.",
     "vk_quality_level": "Quality level {level}",
     "vk_rc_cbr": "CBR (Constant Bitrate) (default)",
     "vk_rc_cqp": "CQP (Constant QP)",

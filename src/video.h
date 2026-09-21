@@ -363,6 +363,17 @@ namespace video {
    */
   std::string vulkan_rc_mode_option(int rc_mode);
 
+  /**
+   * @brief Clamp a configured Vulkan quality level to the driver-reported range.
+   * @details Valid levels run 0..max_quality_levels-1. FFmpeg's own guard has an
+   *          off-by-one that lets a level equal to the reported count through, so
+   *          Polaris clamps on its side and logs when it does. A negative value is
+   *          floored at 0 (level 0 always works). When no live probe has reported
+   *          a count (-1), non-negative values pass through unchanged for FFmpeg to
+   *          validate at session open.
+   */
+  int vulkan_quality_clamp(int configured, int max_quality_levels);
+
   bool wait_for_capture_display_release(
     const std::shared_ptr<platf::display_t> &display,
     const std::function<bool()> &running,
@@ -571,6 +582,15 @@ namespace video {
 
   codec_capability_state_t advertised_codec_capability_state();
   bool advertised_codec_capability_state_ready();
+
+  /**
+   * @brief Highest Vulkan quality level the probed driver exposes for every usable codec.
+   * @details Returns maxQualityLevels-1, taken over the codecs whose count a live probe
+   *          reported (-1 entries are skipped), or -1 when no encoder is selected, the
+   *          active encoder is not Vulkan, or probing has not reported any count yet.
+   */
+  int advertised_vulkan_quality_max();
+
   void reset_encoder_probe_state();
 
   /**
