@@ -130,6 +130,7 @@ namespace {
     profiles::removal_result_t removal_answer {.outcome = profiles::removal_outcome_e::removed};
     profiles::runtime_move_result_t move_answer {.outcome = profiles::runtime_move_outcome_e::moved};
     std::optional<profiles::refusal_t> persist_refusal;
+    std::vector<std::string> paired_at_access_change;
     bool reload_fails = false;
     std::function<void()> before_write;
     void SetUp() override {
@@ -173,6 +174,12 @@ namespace {
             }
             return profiles::change_result_t {.status = write_status};
           },
+          .access = [&](std::string_view, std::string_view, bool, const std::vector<std::string> &paired) {
+            state->called(); ++writes;
+            EXPECT_GT(state->destroyed.load(), 0U);
+            paired_at_access_change = paired;
+            return profiles::change_result_t {.status = write_status};
+          },
           .remove_for_good = [&](const profiles::edit_request_t &request, std::stop_token) {
             state->called(); ++removals;
             EXPECT_GT(state->destroyed.load(), 0U);
@@ -212,6 +219,16 @@ namespace {
   };
 
   const profiles::edit_request_t remove_request {profiles::edit_operation_e::remove, "profile-a", ""};
+
+  TEST_F(MultiseatAssignments, AnAccessChangeCarriesThePairedDevicesToTheCatalogWrite) {
+    // The catalog can only be edited while its controller is stopped, which is here and nowhere
+    // else, so this is the write that drops the ids of devices the host has since forgotten.
+    EXPECT_EQ(service->set_access("profile-b", "client-a", true, {"client-a", "client-b"}).status, 200);
+    EXPECT_EQ(writes.load(), 1U);
+    EXPECT_EQ(paired_at_access_change, (std::vector<std::string> {"client-a", "client-b"}));
+    EXPECT_EQ(service->set_access("profile-b", "client-a", false).status, 200);
+    EXPECT_TRUE(paired_at_access_change.empty()) << "a caller with no list must not inherit the last one";
+  }
 
   TEST_F(MultiseatAssignments, RemovalClearsOnlyItsRoutesAndRestorationRequiresNewAssignment) {
     EXPECT_TRUE(service->admin_snapshot().management_available);

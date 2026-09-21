@@ -4883,7 +4883,13 @@ namespace confighttp {
         bad_request(response, request, "Select a permanently paired device with launch permission");
         return;
       }
-      const auto result = service->set_access(profile, client, body.at("allowed").get<bool>());
+      // Every paired device goes along, so the ids of devices unpaired since the last change leave
+      // the Spaces lists in this same write. A device in the middle of a temporary authorization is
+      // paired too; leaving it out would let a change made meanwhile forget it.
+      std::vector<std::string> paired;
+      paired.reserve(devices.size());
+      for (const auto &item : devices) paired.emplace_back(item.at("uuid").template get<std::string>());
+      const auto result = service->set_access(profile, client, body.at("allowed").get<bool>(), std::move(paired));
       const nlohmann::json output {{"status", result.status == 200}, {"message", result.message}};
       SimpleWeb::CaseInsensitiveMultimap headers;
       append_json_security_headers(headers);

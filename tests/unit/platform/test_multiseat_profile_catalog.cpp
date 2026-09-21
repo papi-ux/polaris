@@ -859,6 +859,71 @@ namespace {
     EXPECT_TRUE(loaded->catalog.profiles[1].access_clients.empty());
   }
 
+  // A forgotten device keeps its ids in these lists: the catalog belongs to a controller that has to
+  // stop before it can be edited, so an unpair cannot reach in. The next access change clears them.
+  class MultiseatProfileCatalogForgottenDevices: public MultiseatProfileCatalog {
+  protected:
+    void SetUp() override {
+      MultiseatProfileCatalog::SetUp();
+      auto catalog = sample();
+      catalog.profiles[0].access_clients = {"client-a", "client-gone"};
+      auto extra = catalog.profiles.front();
+      extra.storage.profile_key = "profile-b"; extra.storage.opaque_volume_name = "pv-profile-b";
+      extra.client_keys = {"client-gone"}; extra.access_clients = {"client-gone"};
+      catalog.profiles.push_back(extra);
+      catalog.desktop_clients = {"client-lost", "client-a"};
+      catalog.desktop_default_clients = {"client-lost"};
+      save(catalog);
+    }
+    // The change itself lands; every id that was already there stays.
+    void expect_nobody_forgotten() {
+      auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+      const auto holds = [](const std::vector<std::string> &list, std::string_view client) {
+        return std::find(list.begin(), list.end(), client) != list.end();
+      };
+      EXPECT_TRUE(holds(loaded->catalog.profiles[0].access_clients, "client-gone"));
+      EXPECT_EQ(loaded->catalog.profiles[1].client_keys, std::vector<std::string>{"client-gone"});
+      EXPECT_TRUE(holds(loaded->catalog.profiles[1].access_clients, "client-gone"));
+      EXPECT_TRUE(holds(loaded->catalog.profiles[1].access_clients, "client-new"));
+      EXPECT_TRUE(holds(loaded->catalog.desktop_clients, "client-lost"));
+      EXPECT_EQ(loaded->catalog.desktop_default_clients, std::vector<std::string>{"client-lost"});
+    }
+  };
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, AnAccessChangeDropsEveryDeviceThatIsNoLongerPaired) {
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-new", true, {"client-a", "client-new"}));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.profiles[0].client_keys, std::vector<std::string>{"client-a"});
+    EXPECT_EQ(loaded->catalog.profiles[0].access_clients, std::vector<std::string>{"client-a"});
+    EXPECT_TRUE(loaded->catalog.profiles[1].client_keys.empty()) << "a forgotten device kept its Default Space";
+    EXPECT_EQ(loaded->catalog.profiles[1].access_clients, std::vector<std::string>{"client-new"});
+    EXPECT_EQ(loaded->catalog.desktop_clients, std::vector<std::string>{"client-a"});
+    EXPECT_TRUE(loaded->catalog.desktop_default_clients.empty());
+  }
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, ADesktopAccessChangeDropsThemToo) {
+    ASSERT_TRUE(profiles::set_desktop_access(path, "client-a", false, {"client-a"}));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_TRUE(loaded->catalog.desktop_clients.empty());
+    EXPECT_TRUE(loaded->catalog.desktop_default_clients.empty());
+    EXPECT_TRUE(loaded->catalog.profiles[1].access_clients.empty());
+    EXPECT_EQ(loaded->catalog.profiles[0].client_keys, std::vector<std::string>{"client-a"});
+  }
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, NoListOfPairedDevicesForgetsNobody) {
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-new", true));
+    expect_nobody_forgotten();
+  }
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, AListWithoutTheDeviceBeingChangedIsNotBelieved) {
+    // Whatever produced this list, it is not the host's paired devices: the caller checked that
+    // client-new is paired before asking. Believing it would wipe every device off every Space.
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-new", true, {"somebody-else"}));
+    expect_nobody_forgotten();
+    ASSERT_TRUE(profiles::set_desktop_access(path, "client-new", true, {"somebody-else"}));
+    expect_nobody_forgotten();
+  }
+
   TEST_F(MultiseatProfileCatalog, DuplicateAccessAndAccessToRemovedSpacesAreRejected) {
     auto catalog = sample(); catalog.profiles[0].access_clients = {"client-b", "client-b"};
     EXPECT_THROW((void)profiles::encode(catalog), std::invalid_argument);

@@ -435,13 +435,31 @@ namespace multiseat::profiles {
     });
   }
 
-  change_result_t set_desktop_access(const std::filesystem::path &path, std::string_view client_key, bool allowed) {
+  namespace {
+    // Drops the ids of devices the host no longer has paired; the header says when the list counts.
+    void forget_unpaired(catalog_t &catalog, std::string_view client_key, const std::vector<std::string> &paired_clients) {
+      if (std::find(paired_clients.begin(), paired_clients.end(), client_key) == paired_clients.end()) return;
+      const auto unpaired = [&](const std::string &client) {
+        return std::find(paired_clients.begin(), paired_clients.end(), client) == paired_clients.end();
+      };
+      for (auto &entry : catalog.profiles) {
+        std::erase_if(entry.client_keys, unpaired);
+        std::erase_if(entry.access_clients, unpaired);
+      }
+      std::erase_if(catalog.desktop_clients, unpaired);
+      std::erase_if(catalog.desktop_default_clients, unpaired);
+    }
+  }  // namespace
+
+  change_result_t set_desktop_access(const std::filesystem::path &path, std::string_view client_key, bool allowed,
+                                     const std::vector<std::string> &paired_clients) {
     return change(path, [&](auto &catalog, auto &result) -> std::optional<std::string> {
       if (!token(client_key)) { result.error = "Invalid paired device identifier."; return std::nullopt; }
       std::erase(catalog.desktop_clients, client_key);
       if (allowed) catalog.desktop_clients.emplace_back(client_key);
       // A Default Space is a place the device may play, so Desktop stops being one with its access.
       else std::erase(catalog.desktop_default_clients, client_key);
+      forget_unpaired(catalog, client_key, paired_clients);
       return encode(catalog);
     });
   }
@@ -498,7 +516,8 @@ namespace multiseat::profiles {
   }
 
   change_result_t set_access(const std::filesystem::path &path,
-    std::string_view profile_key, std::string_view client_key, bool allowed) {
+    std::string_view profile_key, std::string_view client_key, bool allowed,
+    const std::vector<std::string> &paired_clients) {
     if (!token(profile_key) || !token(client_key)) return {.error = "Invalid space or paired device."};
     return change(path, [&](catalog_t &catalog, change_result_t &result) -> std::optional<std::string> {
       auto target = std::find_if(catalog.profiles.begin(), catalog.profiles.end(),
@@ -508,6 +527,7 @@ namespace multiseat::profiles {
       if (allowed) target->access_clients.emplace_back(client_key);
       // Unticking a Space is how a device leaves it, so it stops being that device's Default Space too.
       else std::erase(target->client_keys, client_key);
+      forget_unpaired(catalog, client_key, paired_clients);
       return encode(catalog);
     });
   }

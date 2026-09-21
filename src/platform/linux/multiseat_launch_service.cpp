@@ -339,6 +339,7 @@ namespace multiseat {
     struct admin_request_t {
       std::string profile, client;
       std::optional<bool> access;
+      std::vector<std::string> paired_clients;
       std::optional<profiles::space_create_request_t> creation;
       std::optional<profiles::edit_request_t> edit;
       std::optional<profiles::runtime_move_t> move;
@@ -494,7 +495,7 @@ namespace multiseat {
       if (!admin.edit && !admin.catalog.empty())
         admin.edit = [path = admin.catalog](const auto &request) { return profiles::edit(path, request); };
       if (!admin.access && !admin.catalog.empty())
-        admin.access = [path = admin.catalog](auto profile, auto client, bool allowed) { return profile == "desktop" ? profiles::set_desktop_access(path, client, allowed) : profiles::set_access(path, profile, client, allowed); };
+        admin.access = [path = admin.catalog](auto profile, auto client, bool allowed, const auto &paired) { return profile == "desktop" ? profiles::set_desktop_access(path, client, allowed, paired) : profiles::set_access(path, profile, client, allowed, paired); };
       if (!admin.remove_for_good && !admin.catalog.empty())
         admin.remove_for_good = [path = admin.catalog](const auto &request, std::stop_token stop) {
           container::local_host_t host(stop);
@@ -650,7 +651,7 @@ namespace multiseat {
                   << " network=" << (removed.kept_network.empty() ? "none" : removed.kept_network);
               }
             } else {
-              persisted = request->access ? admin.access(request->profile, request->client, *request->access) :
+              persisted = request->access ? admin.access(request->profile, request->client, *request->access, request->paired_clients) :
                 request->edit ? admin.edit(*request->edit) : request->creation ? admin.create(*request->creation) :
                 admin.persist(request->profile, request->client);
             }
@@ -1054,10 +1055,12 @@ namespace multiseat {
     return {200, "Space selected"};
   }
 
-  profile_launch_result_t profile_launch_service_t::set_access(std::string profile, std::string client, bool allowed) {
+  profile_launch_result_t profile_launch_service_t::set_access(std::string profile, std::string client, bool allowed,
+                                                               std::vector<std::string> paired_clients) {
     if (spaces::host_admin_running()) return spaces_host_setup_running_result;
     auto request = std::make_shared<impl_t::admin_request_t>();
     request->profile = std::move(profile); request->client = std::move(client); request->access = allowed;
+    request->paired_clients = std::move(paired_clients);
     const auto future = request->future;
     {
       std::lock_guard lock(impl_->mutex);

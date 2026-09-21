@@ -84,12 +84,20 @@ namespace multiseat::profiles {
   [[nodiscard]] change_result_t set_assignment(const std::filesystem::path &path,
     std::string_view profile_key, std::string_view client_key);
   // Allowing Desktop does not change a Default Space. Removing Desktop Access also ends a Desktop default.
+  // paired_clients: see set_access.
   [[nodiscard]] change_result_t set_desktop_access(const std::filesystem::path &path,
-    std::string_view client_key, bool allowed);
+    std::string_view client_key, bool allowed, const std::vector<std::string> &paired_clients = {});
   // Allowing a device does not change its Default Space. Disallowing it removes the Space from the
   // device entirely, a Default Space included.
+  //
+  // paired_clients is every device the host has paired right now. A host forgets a device when it
+  // is unpaired, but this catalog belongs to a controller that has to stop before it can be edited,
+  // so the ids of forgotten devices are dropped here, in the same write as the next access change.
+  // The list is believed only when it holds client_key, which the caller has just checked is
+  // paired: an empty list, or one from somewhere else, must never read as "nobody is paired".
   [[nodiscard]] change_result_t set_access(const std::filesystem::path &path,
-    std::string_view profile_key, std::string_view client_key, bool allowed);
+    std::string_view profile_key, std::string_view client_key, bool allowed,
+    const std::vector<std::string> &paired_clients = {});
   // Supported Gamescope or Steam workloads only. Immutable local images, fresh
   // private storage, and an owned bridge for Steam. No pulls or host binds.
   [[nodiscard]] change_result_t create(const std::filesystem::path &path,
