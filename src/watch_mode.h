@@ -46,6 +46,18 @@ namespace watch_mode {
   }
 
   /**
+   * @brief Whether the display mode saved for a device replaces the mode it asked for.
+   * @details The saved mode is for streams the device starts. A watcher joins a stream that is
+   *          already running, at the mode its owner chose, so its request is left as it came. On
+   *          a host with a saved 1920x1080x120 for a handheld, that handheld asked to watch a
+   *          1920x1080@60 stream, had its request rewritten to 120, and was refused for asking for
+   *          the wrong mode. A profile the host resolved for the client was never rewritten either.
+   */
+  inline bool device_display_mode_applies(bool device_has_display_mode, bool resolved_profile_from_client, bool watch_only) {
+    return device_has_display_mode && !resolved_profile_from_client && !watch_only;
+  }
+
+  /**
    * @brief Put the mode on a response as flat elements: <prefix>width, height, fpsx1000, bitdepth, codec.
    * @details Flat and numeric on purpose. Clients read these responses one named element at a
    *          time, and a rate such as 59.94 does not survive being written as a whole number.

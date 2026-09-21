@@ -4811,12 +4811,19 @@ namespace nvhttp {
     }
 
     std::stringstream mode;
-    if (launch_session->resolved_profile_from_client || named_cert_p->display_mode.empty()) {
+    const bool watch_request = watch_requested(args);
+    if (!watch_mode::device_display_mode_applies(
+          !named_cert_p->display_mode.empty(),
+          launch_session->resolved_profile_from_client,
+          watch_request
+        )) {
       auto mode_str = get_arg(args, "mode", config::video.fallback_mode.c_str());
       mode = std::stringstream(mode_str);
       BOOST_LOG(info) << "Display mode for client ["sv << named_cert_p->name << "] requested to ["sv << mode_str
                       << "] source="sv
-                      << (launch_session->resolved_profile_from_client ? "resolved_launch_profile"sv : "client_request"sv);
+                      << (launch_session->resolved_profile_from_client ? "resolved_launch_profile"sv :
+                          watch_request                                ? "watch_request"sv :
+                                                                         "client_request"sv);
       launch_session->display_mode_requested = mode_str;
       launch_session->display_mode_applied = mode_str;
       launch_session->display_mode_pinned_by_host = false;

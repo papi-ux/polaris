@@ -53,6 +53,31 @@ TEST(WatchMode, OnlyARequestForTheStreamAsItIsCounts) {
   EXPECT_FALSE(watch_mode::asked_for(hdr, 3840, 2160, 60000, true)) << "59.94 is not 60";
 }
 
+TEST(WatchMode, AWatchersRequestIsNotRewrittenByTheDisplayModeSavedForItsDevice) {
+  // Seen live: a handheld with a saved 1920x1080x120 asked to watch a 1920x1080@60 stream, the host
+  // rewrote the request to 120 and then refused it for not matching the stream.
+  EXPECT_TRUE(watch_mode::device_display_mode_applies(true, false, false)) << "a stream the device starts";
+  EXPECT_FALSE(watch_mode::device_display_mode_applies(true, false, true)) << "a watcher takes the owner's mode";
+  EXPECT_FALSE(watch_mode::device_display_mode_applies(true, true, false)) << "a profile the host resolved is exact";
+  EXPECT_FALSE(watch_mode::device_display_mode_applies(false, false, false)) << "nothing saved, nothing to apply";
+
+  const auto nvhttp = source("src/nvhttp.cpp");
+  const auto decided = nvhttp.find("watch_mode::device_display_mode_applies(");
+  const auto overridden = nvhttp.find("] overriden to [");
+  ASSERT_NE(decided, std::string::npos);
+  ASSERT_NE(overridden, std::string::npos);
+  EXPECT_LT(decided, overridden) << "the launch asks before it replaces the mode";
+
+  // The mode the watcher asked for has to survive, because the check that follows compares it
+  // with the stream: rewriting first would make the rightful request the refused one.
+  watch_mode::mode_t stream;
+  stream.width = 1920;
+  stream.height = 1080;
+  stream.fps_x1000 = 60000;
+  EXPECT_TRUE(watch_mode::asked_for(stream, 1920, 1080, 60000, false));
+  EXPECT_FALSE(watch_mode::asked_for(stream, 1920, 1080, 120000, false)) << "what the rewritten request looked like";
+}
+
 TEST(WatchMode, TheModeIsWrittenAsFlatElementsAClientReadsByName) {
   pt::ptree tree;
   watch_mode::put_elements(tree, "root.currentgamewatch", {3840, 2160, 59940, 10, "av1"});
