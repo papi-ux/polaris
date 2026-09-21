@@ -238,7 +238,10 @@ nothing otherwise. This guide made that copy during every install until Polaris
 capture. A copy under `/usr/local` is outside the deployment and does not change
 with an RPM update or rollback: skip the refresh and `rpm -q polaris` reports the
 new version while the service, and so the console, keeps running the old one.
-A copy made before 1.4.8 cannot report this itself.
+A copy made before 1.4.8 cannot report this itself. From 1.4.12,
+`sudo -H polaris --setup-host` makes the same refresh whenever the copy differs
+from the packaged binary; the explicit lines cover older packages and change
+nothing after it.
 
 `sudo -H polaris --setup-host` says so when the service points at a copy, and
 says which command to run when the copy is gone but its drop-in is not;

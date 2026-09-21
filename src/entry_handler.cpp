@@ -592,6 +592,7 @@ namespace args {
     // silent when a bare root login cannot name one.
     std::string game_mode_advice;
     std::string service_override_advice;
+    bool runtime_copy_stale = false;
     if (const auto *target_pw = setup_target_user.empty() || setup_target_user == "root" ? nullptr : getpwnam(setup_target_user.c_str());
         target_pw && target_pw->pw_dir && target_pw->pw_dir[0] != '\0') {
       const auto game_mode = platf::game_mode_host::detect(platf::game_mode_host::default_probe(target_pw->pw_uid));
@@ -611,15 +612,29 @@ namespace args {
       // running the old version; both are invisible until someone reads
       // `systemctl --user cat polaris`. Say it here, where the person fixing
       // the host is reading.
-      service_override_advice = platf::user_unit::setup_host_advice(
-        platf::user_unit::effective_exec_override(fs::path(target_pw->pw_dir) / ".config/systemd/user/polaris.service.d"),
-        setup_target_user,
-        *exe_path
-      );
+      const auto service_override = platf::user_unit::effective_exec_override(fs::path(target_pw->pw_dir) / ".config/systemd/user/polaris.service.d");
+      // The guide's own copy is refreshed rather than described: until 1.4.5
+      // every Bazzite install made one, and a build that old cannot report
+      // itself stale, so its console says the old version after every update
+      // while rpm says the new one. Only the packaged binary refreshes it; a
+      // build tree running --setup-host has no business replacing it.
+      const bool setup_runs_packaged_binary =
+        platf::user_unit::describe_running_binary(*exe_path, POLARIS_EXECUTABLE_PATH).matches_package.value_or(false);
+      if (setup_runs_packaged_binary) {
+        runtime_copy_stale = platf::user_unit::guide_runtime_copy_state(service_override, *exe_path) == platf::user_unit::runtime_copy_e::stale;
+      }
+      if (!runtime_copy_stale) {
+        service_override_advice = platf::user_unit::setup_host_advice(
+          service_override,
+          setup_target_user,
+          *exe_path,
+          setup_runs_packaged_binary ? fs::path {platf::user_unit::guide_runtime_copy} : fs::path {}
+        );
+      }
     }
 
     const bool headless_boot_requested = enable_headless_boot || disable_headless_boot;
-    if (!enable_kms && !headless_boot_requested && udev_from_package && modules_from_package && etc_copies_absent && input_nodes_ready) {
+    if (!enable_kms && !headless_boot_requested && !runtime_copy_stale && udev_from_package && modules_from_package && etc_copies_absent && input_nodes_ready) {
       if (game_mode_advice.empty()) {
         std::cout
           << "Linux host setup: nothing to do."sv << std::endl
@@ -646,6 +661,13 @@ namespace args {
     }
 
     if (geteuid() != 0) {
+      if (runtime_copy_stale) {
+        std::cout
+          << "The polaris user service for ["sv << setup_target_user << "] runs "sv << platf::user_unit::guide_runtime_copy
+          << ", a copy that no longer matches"sv << std::endl
+          << "the installed package, so the service is still running an older Polaris. Host setup refreshes it."sv << std::endl
+          << std::endl;
+      }
       std::cout
         << "Polaris host setup requires root because it loads kernel modules, reloads udev"sv << std::endl
         << "and, on installs the package manager does not own, writes /etc."sv << std::endl
@@ -740,6 +762,14 @@ namespace args {
       BOOST_LOG(info) << "Linux host setup: skipping cap_sys_admin. Re-run with --enable-kms only if you need DRM/KMS capture."sv;
     }
 
+    if (runtime_copy_stale) {
+      // install(1) unlinks the old copy first, so a service still running it
+      // keeps its image and the write cannot fail with ETXTBSY.
+      const auto copy = std::string {platf::user_unit::guide_runtime_copy};
+      ok &= run_host_command("refresh the DRM/KMS runtime copy", std::format(R"(install -D -m 0755 "{}" "{}")", exe_path->string(), copy)) &&
+            run_host_command("restore the runtime copy's DRM/KMS capability", std::format(R"(setcap cap_sys_admin+ep "{}")", copy));
+    }
+
     if (headless_boot_requested) {
       const auto account = resolve_headless_boot_account();
       if (!account) {
@@ -778,6 +808,13 @@ namespace args {
     } else {
       std::cout
         << "For a host that boots with no monitor or desktop login (Game Mode consoles, dedicated streaming boxes), re-run with --enable-headless-boot."sv << std::endl;
+    }
+    if (runtime_copy_stale) {
+      std::cout << std::endl
+                << "Refreshed "sv << platf::user_unit::guide_runtime_copy << ", the copy the polaris user service for ["sv << setup_target_user << "] runs, from "sv << exe_path->string() << '.' << std::endl
+                << "It held another build, so that service was still running an older Polaris than the package. Restart it as "sv << setup_target_user << ':' << std::endl
+                << "  systemctl --user restart polaris"sv << std::endl
+                << "Package updates do not change the copy; run --setup-host again after each one."sv << std::endl;
     }
     if (!service_override_advice.empty()) {
       std::cout << std::endl
