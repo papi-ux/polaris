@@ -207,4 +207,91 @@ TEST(UserUnitOverrideTests, SetupHostStaysQuietWhenTheServiceRunsThePackagedBina
   EXPECT_TRUE(uu::setup_host_advice(uu::effective_exec_override(scratch.drop_ins()), "deck", packaged).empty());
 }
 
+TEST(UserUnitOverrideTests, TheGuideCopyLeftBehindByAPackageUpdateIsStale) {
+  // The field report: rpm says 1.4.11, the console says the version the copy
+  // was made from, because the drop-in still runs that copy.
+  scratch_t scratch;
+  const auto packaged = scratch.file("usr/bin/polaris", "polaris 1.4.11", true);
+  const auto copy = scratch.file("usr/local/bin/polaris-kms", "polaris 1.4.1", true);
+  scratch.file(".config/systemd/user/polaris.service.d/10-bazzite-kms.conf", "[Service]\nExecStart=\nExecStart=" + copy.string() + "\n");
+  const auto override = uu::effective_exec_override(scratch.drop_ins());
+
+  EXPECT_EQ(uu::guide_runtime_copy_state(override, packaged, copy), uu::runtime_copy_e::stale);
+
+  // The same length is not the same build.
+  scratch.file("usr/local/bin/polaris-kms", "polaris 1.4.10", true);
+  EXPECT_EQ(uu::guide_runtime_copy_state(override, packaged, copy), uu::runtime_copy_e::stale);
+
+  // Refreshed, it is current again.
+  scratch.file("usr/local/bin/polaris-kms", "polaris 1.4.11", true);
+  EXPECT_EQ(uu::guide_runtime_copy_state(override, packaged, copy), uu::runtime_copy_e::current);
+}
+
+TEST(UserUnitOverrideTests, ADifferenceInTheLastBlockOfALargeBinaryIsStillStale) {
+  scratch_t scratch;
+  std::string build(3 * (1 << 16) + 17, 'p');
+  const auto packaged = scratch.file("usr/bin/polaris", build, true);
+  build.back() = 'q';
+  const auto copy = scratch.file("usr/local/bin/polaris-kms", build, true);
+  scratch.file(".config/systemd/user/polaris.service.d/10-bazzite-kms.conf", "[Service]\nExecStart=\nExecStart=" + copy.string() + "\n");
+  const auto override = uu::effective_exec_override(scratch.drop_ins());
+
+  EXPECT_EQ(uu::guide_runtime_copy_state(override, packaged, copy), uu::runtime_copy_e::stale);
+  build.back() = 'p';
+  scratch.file("usr/local/bin/polaris-kms", build, true);
+  EXPECT_EQ(uu::guide_runtime_copy_state(override, packaged, copy), uu::runtime_copy_e::current);
+}
+
+TEST(UserUnitOverrideTests, OnlyTheGuidesOwnPathIsEverACopyToReplace) {
+  // The drop-in belongs to the account and --setup-host runs as root, so a
+  // path the drop-in names is never a path to write, however stale it is.
+  scratch_t scratch;
+  const auto packaged = scratch.file("usr/bin/polaris", "polaris 1.4.11", true);
+  const auto guide_copy = scratch.file("usr/local/bin/polaris-kms", "polaris 1.4.1", true);
+  const auto elsewhere = scratch.file("home/deck/bin/polaris", "polaris 1.4.1", true);
+  scratch.file(".config/systemd/user/polaris.service.d/10-custom.conf", "[Service]\nExecStart=\nExecStart=" + elsewhere.string() + "\n");
+
+  EXPECT_EQ(uu::guide_runtime_copy_state(uu::effective_exec_override(scratch.drop_ins()), packaged, guide_copy), uu::runtime_copy_e::none);
+  // Nor is the default, which is the real /usr/local/bin/polaris-kms.
+  EXPECT_EQ(uu::guide_runtime_copy_state(uu::effective_exec_override(scratch.drop_ins()), packaged), uu::runtime_copy_e::none);
+  // No override at all.
+  EXPECT_EQ(uu::guide_runtime_copy_state(uu::exec_override_t {}, packaged, guide_copy), uu::runtime_copy_e::none);
+}
+
+TEST(UserUnitOverrideTests, AGuidePathThatIsNotAPlainFileIsLeftAlone) {
+  scratch_t scratch;
+  const auto packaged = scratch.file("usr/bin/polaris", "polaris 1.4.11", true);
+  const auto target = scratch.file("opt/other/polaris", "polaris 1.4.1", true);
+  const auto guide_copy = scratch.root / "usr/local/bin/polaris-kms";
+  fs::create_directories(guide_copy.parent_path());
+  fs::create_symlink(target, guide_copy);
+  scratch.file(".config/systemd/user/polaris.service.d/10-bazzite-kms.conf", "[Service]\nExecStart=\nExecStart=" + guide_copy.string() + "\n");
+
+  EXPECT_EQ(uu::guide_runtime_copy_state(uu::effective_exec_override(scratch.drop_ins()), packaged, guide_copy), uu::runtime_copy_e::none);
+
+  // A copy removed without its drop-in is the missing-copy advice's case, not a refresh.
+  fs::remove(guide_copy);
+  EXPECT_EQ(uu::guide_runtime_copy_state(uu::effective_exec_override(scratch.drop_ins()), packaged, guide_copy), uu::runtime_copy_e::none);
+}
+
+TEST(UserUnitOverrideTests, SetupHostAdviceForTheGuideCopyNamesTheCommandThatRefreshesIt) {
+  scratch_t scratch;
+  const auto packaged = scratch.file("usr/bin/polaris", "polaris 1.4.11", true);
+  const auto copy = scratch.file("usr/local/bin/polaris-kms", "polaris 1.4.11", true);
+  scratch.file(".config/systemd/user/polaris.service.d/10-bazzite-kms.conf", "[Service]\nExecStart=\nExecStart=" + copy.string() + "\n");
+  const auto override = uu::effective_exec_override(scratch.drop_ins());
+
+  const auto advice = uu::setup_host_advice(override, "deck", packaged, copy);
+  EXPECT_NE(advice.find("Package updates do not change it"), std::string::npos);
+  // By name, not by the versioned path the package installs: that path changes with the next update.
+  EXPECT_NE(advice.find("sudo -H polaris --setup-host"), std::string::npos);
+  EXPECT_EQ(advice.find(packaged.string()), std::string::npos);
+  EXPECT_EQ(advice.find("sudo install"), std::string::npos);
+
+  // A build that will not refresh it still hands over the commands.
+  const auto by_hand = uu::setup_host_advice(override, "deck", packaged, fs::path {});
+  EXPECT_NE(by_hand.find("sudo install -D -m 0755 " + packaged.string() + " " + copy.string()), std::string::npos);
+  EXPECT_EQ(by_hand.find("--setup-host"), std::string::npos);
+}
+
 #endif

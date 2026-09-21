@@ -1,5 +1,10 @@
 import PolarisVersion from './polaris_version'
 
+/* global __POLARIS_CONSOLE_VERSION__ */
+// The release this console was built with, set by the build; empty under test
+// and in a console built by hand, which switches the comparison off.
+const BUILT_CONSOLE_VERSION = typeof __POLARIS_CONSOLE_VERSION__ === 'string' ? __POLARIS_CONSOLE_VERSION__ : ''
+
 const PACKAGE_LABELS = {
   arch: 'Arch/CachyOS package',
   steamos: 'SteamOS 3.8 package',
@@ -269,6 +274,23 @@ function isVersionGreater(version, release) {
   }
 }
 
+// Every build serves the web files the package installed, so the console is
+// the one part of a host that always comes from the new package. A process
+// older than its console is running a binary the package no longer installs:
+// an update nobody restarted after, or the Bazzite KMS runtime copy, which no
+// update touches. Hosts before 1.4.3 report no installed package version and
+// hosts before 1.4.8 no running binary, so for them this is the only signal.
+// Release numbers only: a development build's commit suffix says nothing here.
+function describeHostBehindConsole(consoleVersion, runningVersion) {
+  if (!isInstalledNewerThanRunning(consoleVersion, runningVersion)) return null
+  const consoleRelease = new PolarisVersion(null, consoleVersion).versionParts.slice(0, 3).join('.')
+  return {
+    status: 'restart_required',
+    statusLabel: 'Console is newer than the host',
+    summary: `This console came with Polaris ${consoleRelease}, but the host process answering it is ${runningVersion}. The package was updated and the service still runs an older binary. Restart Polaris. If it still shows ${runningVersion}, the service runs a copy outside the package, on Bazzite /usr/local/bin/polaris-kms: run sudo -H polaris --setup-host, then restart again.`,
+  }
+}
+
 export function chooseCandidateRelease({ latestRelease, prereleaseRelease, includePrereleases = false, currentVersion = '' } = {}) {
   if (includePrereleases && prereleaseRelease && isReleaseGreater(prereleaseRelease, latestRelease ? versionFromRelease(latestRelease) : currentVersion, true)) {
     return prereleaseRelease
@@ -276,7 +298,7 @@ export function chooseCandidateRelease({ latestRelease, prereleaseRelease, inclu
   return latestRelease || null
 }
 
-export function buildUpdateCenterState({ currentVersion = '', latestRelease = null, prereleaseRelease = null, includePrereleases = false, host = {}, disabled = false } = {}) {
+export function buildUpdateCenterState({ currentVersion = '', latestRelease = null, prereleaseRelease = null, includePrereleases = false, host = {}, disabled = false, consoleVersion = BUILT_CONSOLE_VERSION } = {}) {
   if (disabled) {
     const action = buildActionMetadata('disabled', null, '', '')
     return {
@@ -294,6 +316,22 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
   }
 
   const candidateRelease = chooseCandidateRelease({ latestRelease, prereleaseRelease, includePrereleases, currentVersion })
+  const hostBehindConsole = describeHostBehindConsole(consoleVersion, currentVersion)
+  if (hostBehindConsole && !candidateRelease) {
+    // Nothing here needs GitHub, and a host this old is the one that must not
+    // be left reading "could not check".
+    return {
+      ...hostBehindConsole,
+      currentVersion,
+      latestVersion: '',
+      releaseUrl: '',
+      asset: null,
+      packageLabel: '',
+      installCommand: '',
+      canCopyInstallCommand: false,
+      ...buildActionMetadata(hostBehindConsole.status, null, '', ''),
+    }
+  }
   if (!currentVersion || !candidateRelease) {
     const releaseUrl = candidateRelease?.html_url || ''
     const action = buildActionMetadata('unavailable', null, '', releaseUrl)
@@ -341,6 +379,9 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
     summary = runningOutsidePackage
       ? `Polaris ${installedVersion} is installed but this host is running ${currentVersion} from ${runningBinaryPath}, a copy outside the package. Refresh that copy from the package or remove the service drop-in, then restart Polaris.`
       : `Polaris ${installedVersion} is installed but this host is still running ${currentVersion}. Restart Polaris to use it.`
+  }
+  if (status !== 'restart_required' && hostBehindConsole) {
+    ({ status, statusLabel, summary } = hostBehindConsole)
   }
 
   const asset = selectReleaseAsset(candidateRelease, host)
