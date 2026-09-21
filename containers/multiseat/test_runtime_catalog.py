@@ -141,7 +141,8 @@ class RuntimeCatalog(unittest.TestCase):
 
     def test_catalog_rejects_unknown_sources_versions_identities_and_driver_variants(self):
         original = self.candidate()
-        for key, value in [('profile', 'heroic'), ('platform', 'linux/arm64'), ('media_contract', 2),
+        # gamescope is a real runtime profile and never a Space's launcher.
+        for key, value in [('profile', 'gamescope'), ('profile', 'epic'), ('platform', 'linux/arm64'), ('media_contract', 2),
                            ('media_contract', True), ('uid', 1001), ('gid', '1000'), ('id', '../steam'),
                            ('source_revision', 'master'), ('registry_digest', 'latest'),
                            ('config_digest', 'sha256:no'), ('variant', 'other'), ('nvidia_driver', '610.57.04'),
@@ -155,6 +156,14 @@ class RuntimeCatalog(unittest.TestCase):
         duplicate['runtimes'] *= 2
         with self.assertRaises(ValueError):
             validate_catalog(duplicate)
+
+    def test_catalog_admits_every_launcher_family(self):
+        original = self.candidate()
+        for family in ['steam', 'heroic', 'lutris']:
+            with self.subTest(family=family):
+                catalog = copy.deepcopy(original)
+                catalog['runtimes'][0]['profile'] = family
+                validate_catalog(catalog)
 
     def test_nvidia_candidate_requires_matching_driver_receipts(self):
         self.config['config']['Labels']['io.polaris.multiseat.nvidia.driver'] = '610.57.04'
