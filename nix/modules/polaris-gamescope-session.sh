@@ -1037,10 +1037,14 @@ case "${1:-}" in
       if [ "$want_hdr" = 1 ]; then
         # Nested: --hdr-enabled only (no --hdr-debug-force-*).
         # WSI can still create HDR10 swapchains; PW spa 81 may need force later.
+        # The idle instance reads these from the environment; the nested one
+        # renders what the client actually sees, so hardcoding them here meant
+        # services.polaris.sdrContentNits was plumbed all the way through and
+        # then ignored by the session that matters.
         hdr_flags=(
           --hdr-enabled
-          --sdr-gamut-wideness 0.000000
-          --hdr-sdr-content-nits 203
+          --sdr-gamut-wideness "${POLARIS_SDR_GAMUT_WIDENESS:-0.000000}"
+          --hdr-sdr-content-nits "${POLARIS_SDR_CONTENT_NITS:-203}"
         )
         echo "polaris-gamescope-session: nested HDR (enabled, no debug-force-*)" >&2
       fi
