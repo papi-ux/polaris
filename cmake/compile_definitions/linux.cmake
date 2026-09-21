@@ -532,6 +532,26 @@ file(GLOB_RECURSE INPUTTINO_SOURCES
         ${CMAKE_SOURCE_DIR}/src/platform/linux/input/inputtino*.cpp)
 list(APPEND PLATFORM_TARGET_FILES ${INPUTTINO_SOURCES})
 
+# gamescope_stream has no labwc socket to inject into, and a headless
+# gamescope has no libinput seat to read host uinput with. gamescope does
+# run an EIS server for emulated input, which is the same path its XWayland
+# XTEST support takes. The route speaks libei over a socket and uses nothing
+# from the Wayland client libraries, so it is found here rather than inside
+# the Wayland branch: a build without Wayland headers keeps it.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+    pkg_check_modules(LIBEI libei-1.0)
+endif()
+if(LIBEI_FOUND)
+    add_compile_definitions(POLARIS_BUILD_EI_VIRTUAL_INPUT)
+    include_directories(SYSTEM ${LIBEI_INCLUDE_DIRS})
+    link_directories(${LIBEI_LIBRARY_DIRS})
+    list(APPEND PLATFORM_LIBRARIES ${LIBEI_LIBRARIES})
+    message(STATUS "libei ${LIBEI_VERSION} found; gamescope-local virtual input enabled")
+else()
+    message(STATUS "libei not found; gamescope-local virtual input disabled")
+endif()
+
 # build libevdev before the libinputtino target
 if(EXTERNAL_PROJECT_LIBEVDEV_USED)
     add_dependencies(libinputtino libevdev)

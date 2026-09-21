@@ -786,7 +786,7 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain('HOST_BINARIES=("$RECEIPT_ROOT"/usr/bin/polaris-[0-9]*)')
     expect(commonTargets).toContain('-buildmode=pie')
     expect(commonTargets).toContain('-ldflags=-linkmode=external -extldflags=-Wl,-z,relro,-z,now')
-    for (const dependency of ['gcc-libs', 'glib2', 'glibc', 'gtk3', 'hicolor-icon-theme', 'libpipewire', 'libxkbcommon']) {
+    for (const dependency of ['gcc-libs', 'glib2', 'glibc', 'gtk3', 'hicolor-icon-theme', 'libei', 'libpipewire', 'libxkbcommon']) {
       expect(pkgbuild).toContain(`'${dependency}'`)
     }
     expect(buildScript).toContain('PATH=/usr/bin:/bin namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt"')

@@ -19,7 +19,8 @@ using namespace std::literals;
 
 namespace platf::pen {
   void update(client_input_raw_t *raw, const touch_port_t &touch_port, const pen_input_t &pen) {
-    if (raw->global->wayland_input.should_block_host_fallback()) {
+    if (raw->global->wayland_input.should_block_host_fallback() ||
+        raw->global->ei_input.should_block_host_fallback()) {
       return;
     }
 

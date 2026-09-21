@@ -110,4 +110,6 @@ Integrate by filling the reserved registry slots and implementing runtime/captur
 
 Non-NixOS helper install: [`scripts/install/README.md`](../scripts/install/README.md). Optional private ScreenCast bus is host/packaging-specific.
 
+**Input:** gamescope's wlserver creates no virtual-pointer or virtual-keyboard manager, so the Wayland route that serves labwc has nothing to bind and host uinput cannot reach a headless compositor. Mouse, keyboard and Unicode text go to gamescope's own EIS server (`ei_virtual_input_t`, built when `libei-1.0` is present), which is the same road XWayland's XTEST support already takes. Gamepads are unaffected: Steam reads those from `/dev/input` itself. Touch and pen have no EIS equivalent — gamescope's `InputEmulation.cpp` answers `EIS_EVENT_TOUCH_*` with "No touch support yet" — so under `gamescope_stream` they are dropped rather than forwarded to the host desktop. When libei is missing, or when the EIS socket cannot be reached because the compositor never started, every route falls back to host uinput exactly as before.
+
 **Still residual (not path-registry work):** clean stop under load, idle preview without a live stream, and multimode conf helpers that must preserve `browser_streaming`.

@@ -104,6 +104,7 @@ See [`scripts/install/README.md`](../scripts/install/README.md) for steps, PREFI
 | Boost | Core libraries |
 | OpenSSL | TLS and pairing |
 | libevdev | Virtual input |
+| libei | Mouse and keyboard under `gamescope_stream`; found at configure time, and the build carries on without that route when it is missing |
 | PipeWire | Audio capture |
 | Wayland client libs | Linux compositor integration |
 | Node.js 18+ | Web UI build |
@@ -130,7 +131,7 @@ sudo dnf install grim labwc wlr-randr xorg-x11-server-Xwayland xdpyinfo
 
 ```bash
 sudo pacman -S --needed base-devel git cmake ninja appstream appstream-glib \
-  desktop-file-utils boost boost-libs curl openssl libevdev pipewire wayland \
+  desktop-file-utils boost boost-libs curl openssl libevdev libei pipewire wayland \
   wayland-protocols libdrm libcap libnotify libayatana-appindicator \
   libpulse libva libx11 libxcb libxfixes libxi libxrandr libxtst \
   miniupnpc nlohmann-json numactl avahi opus libmfx mesa which nodejs npm \

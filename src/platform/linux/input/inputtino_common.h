@@ -17,6 +17,7 @@
 // local includes
 #include "input_seat_isolation.h"
 #include "inputtino_wayland_virtual_input.h"
+#include "inputtino_ei_virtual_input.h"
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
@@ -110,6 +111,9 @@ namespace platf {
     }
 
     wayland_virtual_input_t wayland_input;
+    // gamescope_stream has no labwc socket to inject into; libei reaches the
+    // Polaris-owned gamescope instead. Exactly one of the two is ever active.
+    ei_virtual_input_t ei_input;
 
     // All devices are wrapped in Result because it might be that we aren't able to create them (ex: udev permission denied)
     std::optional<inputtino::Result<inputtino::Mouse>> mouse;
