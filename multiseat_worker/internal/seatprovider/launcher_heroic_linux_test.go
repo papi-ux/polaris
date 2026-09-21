@@ -30,7 +30,9 @@ func TestHeroicLibraryOpensTheLauncherItself(t *testing.T) {
 	if command.executable != heroicExecutable {
 		t.Errorf("executable = %q, want the image's own Heroic", command.executable)
 	}
-	want := []string{heroicExecutable, "--no-sandbox"}
+	// The executable is argv[0] already. Naming it again handed Heroic its own
+	// path as the first thing to open.
+	want := []string{"--no-sandbox"}
 	if len(command.arguments) != len(want) {
 		t.Fatalf("arguments = %v, want exactly %v", command.arguments, want)
 	}

@@ -29,6 +29,16 @@ type launcherCommand struct {
 // check-runtime.py asserts it before an image is accepted.
 const heroicExecutable = "/opt/Heroic/heroic"
 
+// Lutris is a Python program. The worker starts a trusted file and follows no
+// link to find one, and /usr/bin/python3 is a link, so this names the
+// interpreter the image really carries. check-runtime.py refuses an image where
+// python3 resolves anywhere else, which is what keeps the two in step when the
+// base moves to another Python.
+const (
+	lutrisInterpreter = "/usr/bin/python3.14"
+	lutrisScript      = "/usr/games/lutris"
+)
+
 // Workloads are image-owned executable policy. Controller input selects only
 // this bounded key; paths, argv, shell text and ambient environment never cross.
 func planLauncher(request seatruntime.Request) (launcherCommand, error) {
@@ -43,6 +53,8 @@ func planLauncher(request seatruntime.Request) (launcherCommand, error) {
 		return launcherCommand{executable: "/usr/libexec/polaris-seat/workloads/input-pong-v1"}, nil
 	case seatruntime.WorkloadHeroic:
 		return planHeroicLauncher(request)
+	case seatruntime.WorkloadLutris:
+		return planLutrisLauncher(request)
 	}
 	// The immutable package script sets STEAMSCRIPT from $0. Interpreting it
 	// through its canonical path keeps Steam updates/restarts from inheriting
@@ -64,9 +76,11 @@ func planLauncher(request seatruntime.Request) (launcherCommand, error) {
 // store's own identifier are the only two pieces that cross, and neither one
 // reaches a shell.
 func planHeroicLauncher(request seatruntime.Request) (launcherCommand, error) {
+	// The executable is argv[0] already. Steam's list begins with a path only
+	// because that path is the script its interpreter runs.
 	command := launcherCommand{
 		executable:        heroicExecutable,
-		arguments:         []string{heroicExecutable, "--no-sandbox"},
+		arguments:         []string{"--no-sandbox"},
 		retainDescendants: true,
 	}
 	if request.WorkloadID == seatruntime.LauncherLibrary {
@@ -80,12 +94,34 @@ func planHeroicLauncher(request seatruntime.Request) (launcherCommand, error) {
 	return command, nil
 }
 
+// Lutris numbers a game in its own database, and lutris:rungameid/<id> is the
+// address it gives that game itself, in the desktop shortcuts it writes. The
+// number is rebuilt from the validated token, so nothing else can ride in on it.
+// The package script is run through its interpreter the way Steam's is, for the
+// same reason: both files are checked as trusted image executables first.
+func planLutrisLauncher(request seatruntime.Request) (launcherCommand, error) {
+	command := launcherCommand{
+		executable: lutrisInterpreter, packageScript: lutrisScript,
+		arguments: []string{lutrisScript}, retainDescendants: true,
+	}
+	if request.WorkloadID == seatruntime.LauncherLibrary {
+		return command, nil
+	}
+	game, found := strings.CutPrefix(request.WorkloadID, "id.")
+	if !found || game == "" {
+		return launcherCommand{}, errors.New("lutris target is not a game number")
+	}
+	command.arguments = append(command.arguments, "lutris:rungameid/"+game)
+	return command, nil
+}
+
 func launcherEnvironment(request seatruntime.Request, session launcherSession) ([]string, error) {
 	environment, err := seatruntime.Environment(request)
 	if err != nil {
 		return nil, err
 	}
-	if request.WorkloadKind == seatruntime.WorkloadSteam || request.WorkloadKind == seatruntime.WorkloadHeroic {
+	if request.WorkloadKind == seatruntime.WorkloadSteam || request.WorkloadKind == seatruntime.WorkloadHeroic ||
+		request.WorkloadKind == seatruntime.WorkloadLutris {
 		// Profile streams currently allocate at most one gamepad. SDL's Linux
 		// discovery skips our reserved alias because it is not an eventN name
 		// and this namespace has no host udev database. Select only that exact

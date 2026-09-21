@@ -47,6 +47,22 @@ if launcher:
                              'admits a runner this image cannot serve.')
         files += [found[name] for name in sorted(found)]
 
+    if profile == 'lutris':
+        # The worker starts Lutris through its interpreter, as a trusted file it
+        # follows no link to reach, and /usr/bin/python3 is a link. It names
+        # the file this base carries; when the base moves to another Python the
+        # image stops building here instead of a Space failing to start.
+        interpreter = pathlib.Path('/usr/bin/python3.14')
+        if pathlib.Path('/usr/bin/python3').resolve() != interpreter or interpreter.is_symlink():
+            raise ValueError('python3 is not ' + str(interpreter) + ': update lutrisInterpreter in '
+                             'multiseat_worker/internal/seatprovider/launcher_linux.go and this check together')
+        files.append(interpreter)
+        # A Space's library is read out of Lutris's own database, from a copy
+        # held in memory so nothing is opened for writing on a read-only mount.
+        import sqlite3
+        if not hasattr(sqlite3.Connection, 'deserialize'):
+            raise ValueError('this Python cannot read a database held in memory, which the Lutris library reader needs')
+
 files += [pathlib.Path('/usr/share/pipewire') / name for name in ['pipewire.conf', 'pipewire-pulse.conf']]
 files += [pathlib.Path(path) for path in [
     '/usr/share/wireplumber/wireplumber.conf',
