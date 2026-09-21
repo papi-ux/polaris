@@ -642,6 +642,67 @@ TEST(StreamDisplayPolicyTests, ApplySelectionSyncsModeAndLegacyBooleans) {
   EXPECT_FALSE(config::video.linux_display.use_cage_compositor);
 }
 
+// polaris#626. A Deck probe configured for Private Stream never reached a launch: every serverinfo poll
+// tried to start a private compositor to probe encoders, and said "labwc not found" six times in a row.
+// A host in Steam Game Mode has one screen, so while the session is live its mode is a mirror of it.
+TEST(StreamDisplayPolicyTests, AGameModeSessionHoldsTheConfiguredModeAndGivesItBack) {
+  using stream_display_policy::game_mode_reconcile_e;
+  ScopedPrivateRuntimePath runtime_path;
+  LinuxDisplayPolicyGuard guard;
+  std::string error;
+  ASSERT_TRUE(stream_display_policy::apply_selection("headless_stream", error)) << error;
+  config::video.capture = "wlr";
+
+  EXPECT_EQ(stream_display_policy::reconcile_game_mode(true, true), game_mode_reconcile_e::unchanged)
+    << "nothing moves under a stream that is already up";
+  EXPECT_EQ(stream_display_policy::configured_selection(), "headless_stream");
+
+  EXPECT_EQ(stream_display_policy::reconcile_game_mode(true, false), game_mode_reconcile_e::entered);
+  EXPECT_EQ(stream_display_policy::configured_selection(), "desktop_display");
+  EXPECT_FALSE(config::video.linux_display.use_cage_compositor) << "so no poll starts a private compositor to probe with";
+  EXPECT_FALSE(config::video.linux_display.headless_mode);
+  EXPECT_NE(config::video.capture, "wlr") << "there is no wlroots compositor to capture from";
+  EXPECT_EQ(stream_display_policy::game_mode_held_selection(), "headless_stream");
+  EXPECT_EQ(stream_display_policy::reconcile_game_mode(true, false), game_mode_reconcile_e::unchanged)
+    << "asked again, it is already there";
+
+  EXPECT_EQ(stream_display_policy::reconcile_game_mode(false, true), game_mode_reconcile_e::unchanged)
+    << "the session ended under a live stream: wait for the stream";
+  EXPECT_EQ(stream_display_policy::reconcile_game_mode(false, false), game_mode_reconcile_e::left);
+  EXPECT_EQ(stream_display_policy::configured_selection(), "headless_stream");
+  EXPECT_TRUE(config::video.linux_display.use_cage_compositor);
+  EXPECT_EQ(config::video.linux_display.private_runtime, "labwc");
+  EXPECT_EQ(config::video.capture, "wlr");
+  EXPECT_TRUE(stream_display_policy::game_mode_held_selection().empty());
+  EXPECT_EQ(stream_display_policy::reconcile_game_mode(false, false), game_mode_reconcile_e::unchanged);
+}
+
+TEST(StreamDisplayPolicyTests, AGameModeSessionLeavesAMirrorHostAndAReloadedConfigAlone) {
+  using stream_display_policy::game_mode_reconcile_e;
+  ScopedPrivateRuntimePath runtime_path;
+  LinuxDisplayPolicyGuard guard;
+  std::string error;
+
+  ASSERT_TRUE(stream_display_policy::apply_selection("desktop_display", error)) << error;
+  EXPECT_EQ(stream_display_policy::reconcile_game_mode(true, false), game_mode_reconcile_e::unchanged)
+    << "a host already set to Mirror Desktop has nothing to hold";
+  EXPECT_EQ(stream_display_policy::reconcile_game_mode(false, false), game_mode_reconcile_e::unchanged);
+
+  // Held, and then the console saves a new mode, which reloads the config over the held state.
+  ASSERT_TRUE(stream_display_policy::apply_selection("headless_stream", error)) << error;
+  ASSERT_EQ(stream_display_policy::reconcile_game_mode(true, false), game_mode_reconcile_e::entered);
+  ASSERT_TRUE(stream_display_policy::apply_selection("windowed_stream", error)) << error;
+  EXPECT_EQ(stream_display_policy::reconcile_game_mode(true, false), game_mode_reconcile_e::entered)
+    << "the session is still live, so the reloaded mode is held in turn";
+  EXPECT_EQ(stream_display_policy::game_mode_held_selection(), "windowed_stream");
+
+  // The same reload after the hold was taken, with the session gone by the next call.
+  ASSERT_TRUE(stream_display_policy::apply_selection("headless_stream", error)) << error;
+  EXPECT_EQ(stream_display_policy::reconcile_game_mode(false, false), game_mode_reconcile_e::left);
+  EXPECT_EQ(stream_display_policy::configured_selection(), "headless_stream")
+    << "what was reloaded is newer than what was held, and it stays";
+}
+
 TEST(StreamDisplayPolicyTests, ReapplyingHeadlessSelectionClearsStaleCompanionState) {
   ScopedPrivateRuntimePath runtime_path;
   LinuxDisplayPolicyGuard guard;

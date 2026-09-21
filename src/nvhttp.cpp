@@ -109,6 +109,7 @@
 #ifdef __linux__
   #include "platform/linux/stream_runtime.h"
   #include "platform/linux/session_manager.h"
+  #include "platform/linux/game_mode_host.h"
   #include "platform/linux/stream_display_policy.h"
   #include "platform/linux/virtual_display.h"
 #endif
@@ -2802,10 +2803,36 @@ namespace nvhttp {
   }  // namespace
 #endif
 
+  /**
+   * @brief Bring the host's mode in line with whether it is in Steam Game Mode right now.
+   *
+   * Called where a client first learns about the host, where it asks for a stream, and before
+   * the host decides whether to start a private compositor just to probe its encoders, which is
+   * what a library poll reaches without ever asking for serverinfo. It costs a cached check.
+   */
+  void reconcile_game_mode_host() {
+#ifdef __linux__
+    const bool stream_active = rtsp_stream::session_count() > 0 || proc::proc.running() > 0;
+    switch (stream_display_policy::reconcile_game_mode(platf::game_mode_host::session_live(), stream_active)) {
+      case stream_display_policy::game_mode_reconcile_e::entered:
+        BOOST_LOG(info) << "game_mode: Steam Game Mode is running, so this host streams the Game Mode screen; ["sv
+                        << stream_display_policy::game_mode_held_selection() << "] comes back when the session ends"sv;
+        break;
+      case stream_display_policy::game_mode_reconcile_e::left:
+        BOOST_LOG(info) << "game_mode: the Game Mode session ended; the configured stream mode ["sv
+                        << stream_display_policy::configured_selection() << "] is back"sv;
+        break;
+      case stream_display_policy::game_mode_reconcile_e::unchanged:
+        break;
+    }
+#endif
+  }
+
   namespace {
     video::codec_capability_state_t advertised_codec_support_for_http(bool allow_deferred_headless_prime = false) {
 #ifdef __linux__
       if (allow_deferred_headless_prime) {
+        reconcile_game_mode_host();
         (void) prime_deferred_headless_codec_capabilities();
       }
 #endif
@@ -6362,6 +6389,7 @@ namespace nvhttp {
   template<class T>
   void serverinfo(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
     print_req<T>(request);
+    reconcile_game_mode_host();
 
     auto local_endpoint = request->local_endpoint();
     crypto::p_named_cert_t named_cert_p;
@@ -6792,6 +6820,7 @@ namespace nvhttp {
   void launch(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
     launch_failure::clear();
+    reconcile_game_mode_host();
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -7248,6 +7277,7 @@ namespace nvhttp {
   void resume(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
     launch_failure::clear();
+    reconcile_game_mode_host();
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {

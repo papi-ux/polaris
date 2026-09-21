@@ -514,6 +514,66 @@ namespace stream_display_policy {
     };
   }
 
+  namespace {
+    struct game_mode_hold_t {
+      legacy_booleans_t booleans;
+      std::string stream_mode;
+      std::string private_runtime;
+      std::string capture;
+      std::string selection;
+    };
+
+    std::mutex game_mode_mutex;
+    std::optional<game_mode_hold_t> game_mode_hold;
+  }  // namespace
+
+  game_mode_reconcile_e reconcile_game_mode(bool session_live, bool stream_active) {
+    const std::lock_guard<std::mutex> guard {game_mode_mutex};
+    auto &linux_display = config::video.linux_display;
+    const auto configured = configured_selection();
+
+    if (session_live) {
+      if (configured == k_desktop_display || stream_active) {
+        return game_mode_reconcile_e::unchanged;
+      }
+      game_mode_hold_t hold {
+        live_booleans(),
+        linux_display.stream_mode,
+        linux_display.private_runtime,
+        config::video.capture,
+        configured,
+      };
+      std::string error;
+      if (!apply_selection(k_desktop_display, error)) {
+        return game_mode_reconcile_e::unchanged;
+      }
+      config::video.capture = capture_for_session_transition(configured, k_desktop_display, hold.capture);
+      game_mode_hold = std::move(hold);
+      return game_mode_reconcile_e::entered;
+    }
+
+    if (!game_mode_hold || stream_active) {
+      return game_mode_reconcile_e::unchanged;
+    }
+    // Anything but the mirror here means the config was reloaded while the mode was held, and
+    // the reloaded values are newer than the ones kept.
+    if (configured == k_desktop_display) {
+      linux_display.stream_mode = game_mode_hold->stream_mode;
+      linux_display.headless_mode = game_mode_hold->booleans.headless_mode;
+      linux_display.use_cage_compositor = game_mode_hold->booleans.use_cage_compositor;
+      linux_display.prefer_gpu_native_capture = game_mode_hold->booleans.prefer_gpu_native_capture;
+      linux_display.private_runtime = game_mode_hold->private_runtime;
+      config::video.capture = game_mode_hold->capture;
+    }
+    game_mode_hold.reset();
+    return game_mode_reconcile_e::left;
+  }
+
+  std::string game_mode_held_selection() {
+    const std::lock_guard<std::mutex> guard {game_mode_mutex};
+    return game_mode_hold ? game_mode_hold->selection : std::string {};
+  }
+
   void forget_host_default() {
     const std::lock_guard<std::mutex> guard {host_default_mutex};
     held_host_default.reset();
