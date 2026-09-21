@@ -84,6 +84,9 @@ namespace multiseat::spaces {
 
   std::string_view steam_library_scanner() {
     return R"PY(import os, re, json, stat, signal
+# This runs as PID 1 of its helper container, where a signal left at its default
+# disposition is dropped, so an alarm with no handler never fires at all.
+signal.signal(signal.SIGALRM, lambda *_: os._exit(3))
 signal.alarm(8)
 root = os.open('/profile', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 def directory(parts):
@@ -169,6 +172,9 @@ print(json.dumps({'schema': 1, 'games': [{'target': k, 'name': v} for k,v in sor
 
   std::string_view heroic_library_scanner() {
     return R"PY(import os, re, json, stat, signal
+# This runs as PID 1 of its helper container, where a signal left at its default
+# disposition is dropped, so an alarm with no handler never fires at all.
+signal.signal(signal.SIGALRM, lambda *_: os._exit(3))
 signal.alarm(8)
 root = os.open('/profile', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 def directory(parts):
@@ -234,7 +240,10 @@ print(json.dumps({'schema': 1, 'games': [{'target': k, 'name': v} for k,v in sor
   }
 
   std::string_view lutris_library_scanner() {
-    return R"PY(import os, json, stat, signal, sqlite3
+    return R"PY(import os, json, stat, signal, sqlite3, time
+# This runs as PID 1 of its helper container, where a signal left at its default
+# disposition is dropped, so an alarm with no handler never fires at all.
+signal.signal(signal.SIGALRM, lambda *_: os._exit(3))
 signal.alarm(8)
 root = os.open('/profile', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
 def directory(parts):
@@ -273,18 +282,36 @@ try:
     connection = sqlite3.connect(':memory:')
     connection.deserialize(data)
     del data
-    # Installed, and not in the category Lutris keeps its hidden games in.
-    rows = connection.execute(
-        "SELECT id, name FROM games WHERE installed = 1 AND id NOT IN "
-        "(SELECT g.game_id FROM games_categories g JOIN categories c ON c.id = g.category_id "
-        "WHERE c.name = '.hidden') LIMIT 4097").fetchall()
+    # The home is the player's and so is this database. SQLite runs the query
+    # in C, where the alarm's handler cannot interrupt it, so the query carries
+    # a deadline of its own. Text comes back as bytes: one title that is not
+    # UTF-8 must cost that title, not the library.
+    deadline = time.monotonic() + 4
+    connection.set_progress_handler(lambda: time.monotonic() > deadline, 20000)
+    connection.text_factory = bytes
+    # A view called games can be any query at all, an endless one included.
+    # Only plain tables are read.
+    kinds = dict(connection.execute(
+        "SELECT name, type FROM sqlite_master WHERE name IN ('games','categories','games_categories')").fetchall())
+    if kinds.get(b'games') != b'table': raise ValueError('schema')
+    categories = [kinds.get(b'categories'), kinds.get(b'games_categories')]
+    if any(kind not in (None, b'table') for kind in categories): raise ValueError('schema')
+    # Installed, and not in the category Lutris keeps its hidden games in. NOT
+    # EXISTS rather than NOT IN: one NULL game_id would make NOT IN hide them all.
+    hidden = (" AND NOT EXISTS (SELECT 1 FROM games_categories g JOIN categories c ON c.id = g.category_id "
+              "WHERE g.game_id = games.id AND c.name = '.hidden')") if all(categories) else ""
+    rows = connection.execute("SELECT id, name FROM games WHERE installed = 1" + hidden + " LIMIT 4097").fetchall()
     if len(rows) <= 4096:
         for number, title in rows:
             if type(number) is not int or not 0 < number <= 4294967295: continue
-            if not isinstance(title, str) or not title or len(title.encode()) > 512: continue
+            if not isinstance(title, bytes) or not title or len(title) > 512: continue
+            try: title = title.decode('utf-8')
+            except UnicodeDecodeError: continue
             if any(ord(c) < 32 or ord(c) == 127 for c in title): continue
             games['id.' + str(number)] = title
-except (FileNotFoundError, NotADirectoryError, OSError, ValueError, TypeError, sqlite3.Error): pass
+# Whatever this database does, the answer is a library, empty if need be. An
+# empty file alone raises MemoryError from deserialize.
+except Exception: pass
 print(json.dumps({'schema': 1, 'games': [{'target': k, 'name': v} for k,v in sorted(games.items(), key=lambda kv: kv[1].casefold())]}))
 )PY";
   }

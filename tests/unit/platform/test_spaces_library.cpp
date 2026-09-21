@@ -162,6 +162,12 @@ c.close()
       std::ofstream(root / "make.py") << source;
       return run_python(root / "make.py", root / "make.out").has_value();
     }
+    // Runs a few lines of Python with `c` connected to the database, then commits.
+    bool change(const std::string &lines) {
+      std::ofstream(root / "change.py") << "import sqlite3\nc = sqlite3.connect('" << database.string() << "')\n"
+                                        << lines << "\nc.commit()\nc.close()\n";
+      return run_python(root / "change.py", root / "change.out").has_value();
+    }
     std::optional<library_t> scan() {
       auto source = std::string(lutris_library_scanner());
       source.replace(source.find("'/profile'"), 10, "'" + root.string() + "'");
@@ -239,6 +245,73 @@ c.close()
       const auto result = home.scan();
       ASSERT_TRUE(result);
       EXPECT_TRUE(result->games.empty());
+    }
+  }
+
+  TEST(SpacesLibrary, LutrisScannerAnswersWithALibraryWhateverTheDatabaseDoes) {
+    const std::vector<library_game_t> everything {{"id.12", "arx Fatalis"}, {"id.9", "Favourite"}, {"id.3", "Quake"}};
+    {
+      // A view called games can be any query at all. This one never ends, and
+      // SQLite would run it in C where no Python signal handler can reach it.
+      lutris_home_t home;
+      ASSERT_TRUE(home.make());
+      ASSERT_TRUE(home.change("c.execute('DROP TABLE games')\n"
+        "c.execute('CREATE VIEW games AS WITH RECURSIVE r(id, name, installed) AS "
+        "(SELECT 1, \"x\", 1 UNION ALL SELECT id + 1, name, installed FROM r) SELECT * FROM r')"));
+      const auto started = std::chrono::steady_clock::now();
+      const auto result = home.scan();
+      ASSERT_TRUE(result) << "an endless view is an empty library, not a helper that never exits";
+      EXPECT_TRUE(result->games.empty());
+      EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(3)) << "refused by its schema, not waited out";
+    }
+    {
+      // One NULL in the hidden category made NOT IN hide every game there is.
+      lutris_home_t home;
+      ASSERT_TRUE(home.make());
+      ASSERT_TRUE(home.change("c.execute('INSERT INTO games_categories VALUES (NULL, 2)')"));
+      const auto result = home.scan();
+      ASSERT_TRUE(result);
+      EXPECT_EQ(result->games, everything);
+    }
+    {
+      // One title that is not UTF-8 costs that title, not the library.
+      lutris_home_t home;
+      ASSERT_TRUE(home.make());
+      ASSERT_TRUE(home.change("c.execute(\"INSERT INTO games VALUES (20, CAST(X'fffe41' AS TEXT), 'bad', 'wine', 1)\")"));
+      const auto result = home.scan();
+      ASSERT_TRUE(result);
+      EXPECT_EQ(result->games, everything);
+    }
+    {
+      // A Lutris from before categories hides nothing, and its library still reads.
+      lutris_home_t home;
+      ASSERT_TRUE(home.make());
+      ASSERT_TRUE(home.change("c.execute('DROP TABLE games_categories')\nc.execute('DROP TABLE categories')"));
+      const auto result = home.scan();
+      ASSERT_TRUE(result);
+      EXPECT_EQ(result->games.size(), 4U) << "with no hidden category the hidden game shows";
+    }
+    {
+      // Lutris killed before its first commit leaves an empty file.
+      lutris_home_t home;
+      std::ofstream {home.database};
+      const auto result = home.scan();
+      ASSERT_TRUE(result) << "an empty database is an empty library";
+      EXPECT_TRUE(result->games.empty());
+    }
+  }
+
+  TEST(SpacesLibrary, EveryScannersAlarmCanActuallyFire) {
+    // The helper container runs the scanner as PID 1, and the kernel drops a
+    // signal whose disposition is the default for that process. An alarm with no
+    // handler therefore never fired, in any of them, since the first one shipped.
+    for (const auto family : {multiseat::runtime_profile_e::steam, multiseat::runtime_profile_e::heroic, multiseat::runtime_profile_e::lutris}) {
+      const auto source = library_scanner(family);
+      const auto handler = source.find("signal.signal(signal.SIGALRM, lambda *_: os._exit(3))");
+      const auto alarm = source.find("signal.alarm(8)");
+      ASSERT_NE(handler, std::string_view::npos);
+      ASSERT_NE(alarm, std::string_view::npos);
+      EXPECT_LT(handler, alarm) << "the handler is installed before the alarm is set";
     }
   }
 
