@@ -87,6 +87,7 @@
   #include "platform/linux/session_launch_linux.h"
   #include "platform/linux/display_topology.h"
   #include "platform/linux/gamescope_process.h"
+  #include "platform/linux/game_mode_host.h"
   #include "platform/linux/gamescope_session_helper.h"
   #include "platform/linux/input/inputtino_gamepad_isolation.h"
   #include <dirent.h>
@@ -5079,6 +5080,19 @@ namespace proc {
     const proc::ctx_t &app,
     rtsp_stream::launch_session_t &launch_session
   ) {
+    // A host in Steam Game Mode has one screen, and it is the Game Mode screen. There is no
+    // desktop to build a private display beside, and the Steam that is running IS the session:
+    // a Private Stream would first have to close it, which ends Game Mode for whoever is
+    // holding the device. So every stream from a Game Mode host is a stream of that screen,
+    // whatever mode was asked for, and a launch is handed to the Steam that is already there.
+    if (platf::game_mode_host::session_live()) {
+      if (!launch_session.mirror_desktop) {
+        BOOST_LOG(info) << "game_mode: the host is in Steam Game Mode, so this stream shows the Game Mode screen"sv;
+      }
+      launch_session.mirror_desktop = true;
+      launch_session.virtual_display = false;
+      return;
+    }
     if (!app_desktop_mirror_applies(app, launch_session)) {
       return;
     }
@@ -5184,6 +5198,13 @@ namespace proc {
   }
 
   bool request_desktop_steam_shutdown_for_private_stream() {
+    // Under Game Mode the running Steam is the session itself. Closing it ends Game Mode for
+    // whoever is holding the device, so nothing that reaches this function may do it there:
+    // not a forced Private Stream, not a per-app setting, not Doctor.
+    if (platf::game_mode_host::session_live()) {
+      BOOST_LOG(warning) << "process: refusing to close Steam because it is running Steam Game Mode on this host";
+      return false;
+    }
     const auto pipe_path = steam_instance_pipe_path();
     if (!pipe_path) {
       BOOST_LOG(warning) << "process: cannot determine Steam singleton path; refusing Steam shutdown handoff";

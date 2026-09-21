@@ -20,6 +20,8 @@
 #include <src/process.h>
 #ifdef __linux__
   #include <src/platform/linux/cage_display_router.h>
+  #include <src/platform/linux/game_mode_host.h>
+  #include <src/platform/linux/stream_display_policy.h>
 #endif
 #include <src/stream_stats.h>
 
@@ -4366,6 +4368,59 @@ TEST(ProcessRuntimeConfigTests, DesktopMirrorAppOverridesPairedVirtualDisplayPre
   EXPECT_TRUE(launch_session.user_locked_virtual_display)
     << "the semantic overrides this launch without mutating paired settings";
 }
+
+#ifdef __linux__
+// polaris#626. A host in Steam Game Mode has one screen and one Steam, and that Steam is the
+// session. Whatever a client asks for, the stream is that screen, and nothing closes that Steam.
+TEST(ProcessRuntimeConfigTests, EveryLaunchOnAGameModeHostIsAStreamOfTheGameModeScreen) {
+  proc::ctx_t game;
+  game.name = "A Steam Game";
+  game.desktop_mirror = false;
+
+  // A launch session holds atomics and cannot be copied, so each case asks for the same thing afresh.
+  const auto ask_for_private = [](rtsp_stream::launch_session_t &session) {
+    session.mirror_desktop = false;
+    session.virtual_display = true;
+    session.stream_mode = "headless_stream";
+  };
+
+  platf::game_mode_host::set_session_live_for_tests(false);
+  rtsp_stream::launch_session_t on_the_desktop;
+  ask_for_private(on_the_desktop);
+  proc::apply_app_display_semantics(game, on_the_desktop);
+  EXPECT_FALSE(on_the_desktop.mirror_desktop) << "the same host in Desktop Mode keeps the mode that was asked for";
+  EXPECT_TRUE(on_the_desktop.virtual_display);
+
+  platf::game_mode_host::set_session_live_for_tests(true);
+  rtsp_stream::launch_session_t in_game_mode;
+  ask_for_private(in_game_mode);
+  proc::apply_app_display_semantics(game, in_game_mode);
+  platf::game_mode_host::set_session_live_for_tests(std::nullopt);
+  EXPECT_TRUE(in_game_mode.mirror_desktop);
+  EXPECT_FALSE(in_game_mode.virtual_display);
+  EXPECT_EQ(
+    stream_display_policy::effective_session_selection_for_launch(
+      in_game_mode.stream_mode, in_game_mode.mirror_desktop, in_game_mode.virtual_display, false, false, false, true
+    ),
+    "desktop_display"
+  ) << "which is the mode the capture and input gates recognise";
+}
+
+TEST(ProcessRuntimeConfigTests, NothingClosesTheSteamThatIsRunningGameMode) {
+  platf::game_mode_host::set_session_live_for_tests(true);
+  const bool closed = proc::request_desktop_steam_shutdown_for_private_stream();
+  platf::game_mode_host::set_session_live_for_tests(std::nullopt);
+  EXPECT_FALSE(closed);
+
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  const auto shutdown = source.substr(source.find("bool request_desktop_steam_shutdown_for_private_stream()"));
+  const auto refusal = shutdown.find("if (platf::game_mode_host::session_live()) {");
+  const auto command = shutdown.find("canonical_steam_shutdown_command");
+  ASSERT_NE(refusal, std::string::npos);
+  ASSERT_NE(command, std::string::npos);
+  EXPECT_LT(refusal, command) << "the refusal comes before anything that could run steam -shutdown, for every caller";
+}
+#endif
 
 class ProcessResumeDisplayTests: public testing::Test {
 protected:

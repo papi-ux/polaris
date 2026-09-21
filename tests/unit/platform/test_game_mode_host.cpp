@@ -272,6 +272,32 @@ TEST(GameModeHostTests, BootReadinessGuidanceNamesGameModeOnlyWhenTheHostHasOne)
   EXPECT_NE(bound_plain.action.find("sudo -H polaris --setup-host --enable-headless-boot"), std::string::npos);
 }
 
+// polaris#626. Two people in two weeks had a Game Mode host Polaris could be reached on and could
+// not stream from: every mode failed, each for its own reason. A Game Mode host has one screen, so a
+// stream from it is a stream of that screen, captured from the session's own gamescope.
+TEST(GameModeHostTests, OnlyAMirrorOfALiveSessionIsAStreamOfTheGameModeScreen) {
+  EXPECT_TRUE(gm::streams_session_screen("desktop_display", false, false, true));
+  EXPECT_FALSE(gm::streams_session_screen("desktop_display", false, false, false))
+    << "the same host in Desktop Mode mirrors a real desktop";
+  EXPECT_FALSE(gm::streams_session_screen("gamescope_stream", false, false, true))
+    << "Polaris's own gamescope is a different compositor with its own rules";
+  EXPECT_FALSE(gm::streams_session_screen("headless_stream", true, false, true));
+  EXPECT_FALSE(gm::streams_session_screen("desktop_display", true, false, true))
+    << "a private compositor is never the session's screen";
+  EXPECT_FALSE(gm::streams_session_screen("desktop_display", false, true, true));
+  EXPECT_FALSE(gm::streams_session_screen("", false, false, true));
+}
+
+TEST(GameModeHostTests, TheLiveSessionAnswerCanBePinnedAndReleased) {
+  gm::set_session_live_for_tests(true);
+  EXPECT_TRUE(gm::session_live());
+  gm::set_session_live_for_tests(false);
+  EXPECT_FALSE(gm::session_live());
+  gm::set_session_live_for_tests(std::nullopt);
+  // Released, it is the real scan again, and asking twice gives one answer.
+  EXPECT_EQ(gm::session_live(), gm::session_live());
+}
+
 TEST(GameModeHostTests, DisplaySessionGuidanceFollowsTheHostKind) {
   gm::detection_t plain;
   gm::detection_t installed;

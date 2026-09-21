@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
@@ -365,6 +366,48 @@ namespace platf::game_mode_host {
     live.uid = ::getuid();
     scan_processes(live, detection);
     return detection;
+  }
+
+  namespace {
+    constexpr auto session_live_ttl = std::chrono::seconds {2};
+
+    std::mutex session_live_mutex;
+    std::optional<bool> session_live_override;
+    std::optional<bool> session_live_answer;
+    std::chrono::steady_clock::time_point session_live_read_at;
+  }  // namespace
+
+  bool session_live() {
+    std::lock_guard lock {session_live_mutex};
+    if (session_live_override) {
+      return *session_live_override;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (!session_live_answer || now - session_live_read_at >= session_live_ttl) {
+      detection_t detection;
+      probe_t live;
+      live.proc_root = "/proc";
+      live.uid = ::getuid();
+      scan_processes(live, detection);
+      session_live_answer = detection.session_active;
+      session_live_read_at = now;
+    }
+    return *session_live_answer;
+  }
+
+  bool streams_session_screen(
+    std::string_view stream_mode,
+    bool use_private_compositor,
+    bool has_private_socket,
+    bool session_is_live
+  ) {
+    return session_is_live && stream_mode == "desktop_display" && !use_private_compositor && !has_private_socket;
+  }
+
+  void set_session_live_for_tests(std::optional<bool> live) {
+    std::lock_guard lock {session_live_mutex};
+    session_live_override = live;
+    session_live_answer.reset();
   }
 
   std::string headline_evidence(const detection_t &detection) {

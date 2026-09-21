@@ -7,6 +7,7 @@
 #ifdef __linux__
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <sys/types.h>
@@ -58,6 +59,34 @@ namespace platf::game_mode_host {
    * scanned once per process; only the live-session scan repeats.
    */
   detection_t detect_cached();
+
+  /**
+   * @brief Whether a gamescope Steam session is running for this account right now.
+   *
+   * detect_cached() walks /proc on every call. That suits a stats request. A launch asks several
+   * times in a row and the input path asks per event, so the answer is kept for a moment. A
+   * session that starts or ends is noticed within that moment, which is far shorter than the
+   * time it takes to switch between Game Mode and the desktop.
+   */
+  bool session_live();
+
+  /**
+   * @brief Whether a stream is a stream of the Game Mode screen itself.
+   *
+   * That is a mirror of "the desktop" on a host whose one screen belongs to the session's
+   * gamescope: no private runtime, no compositor of ours, and a live session. Such a stream is
+   * captured from gamescope's own PipeWire node, and its keyboard and mouse go in through the
+   * session's libei socket, because nothing else reaches a compositor Polaris did not start.
+   */
+  bool streams_session_screen(
+    std::string_view stream_mode,
+    bool use_private_compositor,
+    bool has_private_socket,
+    bool session_is_live
+  );
+
+  /// Tests pin the answer; nullopt returns to the real scan.
+  void set_session_live_for_tests(std::optional<bool> live);
 
   /// The first signal plus a count of the rest, for one line of terminal output.
   std::string headline_evidence(const detection_t &detection);

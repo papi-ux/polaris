@@ -32,6 +32,7 @@
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/platform/linux/game_mode_host.h"
 #include "src/platform/linux/graphics.h"
 #include "src/platform/linux/misc.h"
 #include "src/video.h"
@@ -289,6 +290,15 @@ namespace portal {
   }
 
   // Local-graph PW capture (gamescopegrab / kwingrab): remote_fd=-1, no portal session.
+  static bool game_mode_screen_generation(const capture_generation::identity_t &generation) {
+    return platf::game_mode_host::streams_session_screen(
+      generation.stream_mode,
+      generation.use_cage_compositor,
+      !generation.private_wayland_socket.empty(),
+      platf::game_mode_host::session_live()
+    );
+  }
+
   static std::shared_ptr<pipewire_capture::capture_t> start_local_pw_capture(
     std::uint32_t node_id,
     std::uint64_t node_serial,
@@ -604,9 +614,15 @@ namespace portal {
       // W3/W5 gamescopegrab: prefer session-graph Video/Source (media.name=gamescope)
       // without private portal ScreenCast when linux_stream_mode=gamescope_stream.
       // Falls through to portal if the node is missing (idle unit not exporting yet).
+      //
+      // The same node is what a host in Steam Game Mode shows on its one screen. There the
+      // session's own gamescope exports it, Polaris owns nothing, and a mirror of "the desktop"
+      // means that picture. The lookup never asked who owns the compositor, so nothing else
+      // changes: the stream attaches to the node and leaves the session alone.
       if ((!g_media.capture || !g_media.capture->running()) &&
-          (generation.stream_mode == "gamescope_stream" || generation.stream_mode.empty()) &&
-          generation.private_runtime == "gamescope") {
+          (((generation.stream_mode == "gamescope_stream" || generation.stream_mode.empty()) &&
+            generation.private_runtime == "gamescope") ||
+           game_mode_screen_generation(generation))) {
         if (auto gs = pipewire_capture::find_gamescope_video_source()) {
           if (auto local = start_local_pw_capture(
                 gs->node_id, gs->object_serial, width, height, mem_type, client_dynamic_range, generation, requested_rate)) {
@@ -1312,6 +1328,15 @@ namespace platf {
   std::vector<std::string>
   portal_display_names() {
     std::vector<std::string> names;
+
+    // A Game Mode host may run no ScreenCast portal at all: SteamOS ships one for gamescope,
+    // other gamescope-session distributions need not. The session's picture is still there as
+    // gamescope's own PipeWire node, and this backend is the one that attaches to it.
+    if (game_mode_host::session_live() && pipewire_capture::find_gamescope_video_source()) {
+      BOOST_LOG(info) << "Portal: Steam Game Mode screen available as a PipeWire source"sv;
+      names.emplace_back("0");
+      return names;
+    }
 
     if (!portal::is_portal_available()) {
       BOOST_LOG(debug) << "Portal: ScreenCast interface not available"sv;

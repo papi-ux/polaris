@@ -7,6 +7,7 @@
 
 #include "src/config.h"
 #include "src/logging.h"
+#include "src/platform/linux/game_mode_host.h"
 
 #ifdef POLARIS_BUILD_EI_VIRTUAL_INPUT
   // standard includes
@@ -235,8 +236,19 @@ namespace platf {
      * the Wayland route or wants host uinput.
      */
     bool gamescope_runtime_active() const {
-      return config::video.linux_display.stream_mode == "gamescope_stream"sv ||
-             config::video.linux_display.private_runtime == "gamescope"sv;
+      if (config::video.linux_display.stream_mode == "gamescope_stream"sv ||
+          config::video.linux_display.private_runtime == "gamescope"sv) {
+        return true;
+      }
+      // A stream of the Game Mode screen is a stream of a gamescope too, one the session
+      // started. Its libei socket is found by name like any other, and it is the only way a
+      // key or a pointer reaches a compositor that reads no host input devices of ours.
+      return game_mode_host::streams_session_screen(
+        config::video.linux_display.stream_mode,
+        config::video.linux_display.use_cage_compositor,
+        false,
+        game_mode_host::session_live()
+      );
     }
 
     /**
