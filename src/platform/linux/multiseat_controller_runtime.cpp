@@ -452,9 +452,13 @@ namespace multiseat {
     }
     auto workload = route->workload;
     if (!launch->worker_library_target.empty()) {
-      if (!route->library_enabled || route->runtime_profile != runtime_profile_e::steam ||
-          !container::valid_steam_target(launch->worker_library_target)) return {.status = status_e::invalid_launch};
-      workload = {workload_kind_e::steam, launch->worker_library_target};
+      // The Space's own family decides which targets it may be asked for: a
+      // Heroic title is not a target a Steam Space can run, or the reverse.
+      // The workload keeps the Space's kind and takes the requested target.
+      if (!route->library_enabled ||
+          !container::valid_launcher_target(route->runtime_profile, launch->worker_library_target))
+        return {.status = status_e::invalid_launch};
+      workload = {route->workload.kind, launch->worker_library_target};
     }
     const seat_request_t request {
       .client_key = launch->unique_id,

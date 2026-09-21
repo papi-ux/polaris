@@ -5801,7 +5801,9 @@ namespace nvhttp {
     if (args.count("workerTarget") > 1 || args.count("workerProfile") > 1)
       return profile_launch_response_t {400, "The Space launch identity was sent twice.", {}, "space_identity_duplicate"};
     const auto target = get_arg(args, "workerTarget", "");
-    if (args.contains("workerTarget") && (!multiseat::container::valid_steam_target(target) || !args.contains("workerProfile")))
+    // Any launcher family's grammar passes here; the controller holds the
+    // Space's family and refuses a target that family cannot run.
+    if (args.contains("workerTarget") && (!multiseat::container::any_launcher_target(target) || !args.contains("workerProfile")))
       return profile_launch_response_t {400, "Select the Space for this title.", {}, "space_target_missing"};
     auto prepared = service->prepare(launch, get_arg(args, "workerProfile", ""), target);
     if (!prepared.prepared()) {
