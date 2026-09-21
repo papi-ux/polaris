@@ -113,13 +113,16 @@ function refusal(result) {
   return host || t('spaces.runtime_move_failed')
 }
 
+// A runtime that borrows this PC's driver names none, and neither does a newer
+// build of one, so their progress is worded without a driver rather than with
+// a blank where the version would be.
+const stage = (job, state) => t(`spaces.runtime_move_${state}${job.nvidia_driver ? '' : '_plain'}`,
+  { name: props.space.name, driver: job.nvidia_driver })
 const progress = computed(() => {
   const job = ownJob.value
   if (!job) return ''
-  const params = { name: props.space.name, driver: job.nvidia_driver }
-  if (job.state === 'downloading') return t('spaces.runtime_move_downloading', params)
-  if (job.state === 'moving') return t('spaces.runtime_move_moving', params)
-  if (job.state === 'done' && witnessed.value) return t('spaces.runtime_move_done', params)
+  if (job.state === 'downloading' || job.state === 'moving') return stage(job, job.state)
+  if (job.state === 'done' && witnessed.value) return stage(job, 'done')
   return ''
 })
 
@@ -131,7 +134,7 @@ watch(ownJob, (job, previous) => {
   if (running.value) witnessed.value = true
   if (job.state === 'done' && ['downloading', 'moving'].includes(previous?.state)) {
     error.value = ''
-    toast(t('spaces.runtime_move_done', { name: props.space.name, driver: job.nvidia_driver }), 'success')
+    toast(stage(job, 'done'), 'success')
   }
 }, { immediate: true })
 

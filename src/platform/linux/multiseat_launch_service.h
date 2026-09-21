@@ -36,7 +36,7 @@ namespace multiseat {
   inline constexpr profile_launch_result_t space_runtime_driver_mismatch_result {
     409, "This Space's gaming runtime was made for a different NVIDIA driver than the host now runs.",
     "space_runtime_driver_mismatch",
-    "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its Steam sign-in and games stay."};
+    "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its games, sign-in and saves stay."};
   // Moving a Space to another runtime refuses in these words, whether the decision is made before
   // the move starts or again inside the catalog transaction.
   inline constexpr profile_launch_result_t space_open_for_move_result {

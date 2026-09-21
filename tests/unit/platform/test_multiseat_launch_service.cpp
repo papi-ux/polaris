@@ -1035,7 +1035,7 @@ namespace {
     EXPECT_EQ(refused.code, "space_runtime_driver_mismatch");
     EXPECT_EQ(std::string(refused.message), "This Space's gaming runtime was made for a different NVIDIA driver than the host now runs.");
     EXPECT_EQ(std::string(refused.action),
-      "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its Steam sign-in and games stay.");
+      "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its games, sign-in and saves stay.");
     EXPECT_EQ(state->begins.load(), 0U);
     {
       std::lock_guard lock(asked_mutex);
@@ -1396,10 +1396,10 @@ namespace {
     EXPECT_EQ(tree.get<int>("root.<xmlattr>.status_code"), 409);
     EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.error_code"), "space_runtime_driver_mismatch");
     EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.error_action"),
-      "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its Steam sign-in and games stay.");
+      "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its games, sign-in and saves stay.");
     EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.status_message"),
       "This Space's gaming runtime was made for a different NVIDIA driver than the host now runs. "
-      "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its Steam sign-in and games stay.");
+      "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its games, sign-in and saves stay.");
     EXPECT_EQ(published, 0U);
     EXPECT_EQ(state->begins.load(), 0U);
   }

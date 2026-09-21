@@ -346,7 +346,7 @@ namespace multiseat::spaces {
       {}, target.media_contract, profile_kind(target.profile), target.uid, target.gid}};
     job.state = job.code = facts.target == runtime_image_e::verified ? "moving" : "downloading";
     job.message = job.state == "moving" ? "Moving the Space to the new gaming runtime." :
-      "Downloading the gaming runtime for this driver. You can leave this page and come back.";
+      "Downloading the gaming runtime. You can leave this page and come back.";
     job_ = std::move(job);
     active_ = true;
     BOOST_LOG(info) << "Moving Space " << request.profile_id << " from runtime image " << facts.space->image
@@ -413,7 +413,7 @@ namespace multiseat::spaces {
         BOOST_LOG(info) << "Space " << move.profile_id << " moved to runtime " << job.target.id << " (image " << move.to_image
                         << ") for NVIDIA driver " << job.target.nvidia_driver;
         finish(200, "done", "space_runtime_moved",
-          "The Space now uses the gaming runtime for this driver. Its Steam sign-in and games are unchanged.", "");
+          "The Space now uses its new gaming runtime. Its games, sign-in and saves are unchanged.", "");
       } else {
         const std::string code = moved.status == 202 ? "spaces_stopping" : std::string(moved.code);
         BOOST_LOG(warning) << "Space " << move.profile_id << " was not moved to runtime " << job.target.id << ": "

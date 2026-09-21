@@ -33,7 +33,7 @@ describe('Moving a Space to the runtime for this driver', () => {
     expect(wrapper.get('[data-runtime-detail]').text()).toBe('Made for NVIDIA driver 610.57.04. This PC runs 615.71.09.')
     expect(wrapper.text()).toContain('Made For Another NVIDIA Driver')
     expect(wrapper.text()).toContain('Devices cannot open this Space until it moves')
-    expect(wrapper.get('[data-runtime-keeps]').text()).toBe('Moving keeps its Steam sign-in, installed games and saves.')
+    expect(wrapper.get('[data-runtime-keeps]').text()).toBe('Moving keeps its sign-in, installed games and saves.')
     expect(wrapper.get('[data-runtime-download]').text()).toContain('The download is several gigabytes.')
     expect(button().text()).toBe('Move To The Runtime For Driver 615.71.09')
     expect(button().attributes('aria-label')).toBe('Move Alex to the runtime for NVIDIA driver 615.71.09')
@@ -57,7 +57,7 @@ describe('Moving a Space to the runtime for this driver', () => {
     await flushPromises()
     expect(fetch).not.toHaveBeenCalled()
     expect(dialog().textContent).toContain('Move Alex to the runtime for driver 615.71.09?')
-    expect(dialog().textContent).toContain('The Steam sign-in, installed games and saves stay')
+    expect(dialog().textContent).toContain('The sign-in, installed games and saves stay')
     expect(dialog().textContent).toContain('Its name, devices and Default Space settings stay')
     expect(dialog().textContent).toContain('Polaris downloads the runtime first, several gigabytes')
     expect(dialog().textContent).toContain('Stop Space streams before making this change')
@@ -82,9 +82,32 @@ describe('Moving a Space to the runtime for this driver', () => {
       .toBe('Moving Alex to the runtime for driver 615.71.09. Keep Space streams stopped until it finishes.')
     await wrapper.setProps({ job: job('done', { code: 'space_runtime_moved' }), space: current() })
     expect(wrapper.get('[data-runtime-progress]').text())
-      .toBe('Alex now uses the runtime for driver 615.71.09. Its Steam sign-in and games are unchanged.')
+      .toBe('Alex now uses the runtime for driver 615.71.09. Its games, sign-in and saves are unchanged.')
     expect(wrapper.find('[data-runtime-detail]').exists()).toBe(false)
     expect(wrapper.find('[role=alert]').exists()).toBe(false)
+  })
+
+  it('words the progress of a move to a runtime that names no driver without a blank', async () => {
+    // The runtime that borrows this PC's driver carries none of its own, and a
+    // newer build of one does not either. The job for both arrives with an
+    // empty driver, which used to read "the runtime for driver ." at every step.
+    const borrowed = { ...job('downloading'), runtime_id: 'heroic-nvidia-host-4bc6227842d99336', nvidia_driver: '' }
+    const updatable = { ...current(), runtime_driver: '', runtime_id: '', runtime_move: { available: true,
+      runtime_id: borrowed.runtime_id, reason: 'runtime_updated', nvidia_driver: '', installed: false, code: 'not_downloaded' } }
+    // The page takes the whole snapshot or none of it, so the job has to pass as it arrives.
+    expect(validSnapshot({ enabled: true, available: true, changing: false, failed: false, profiles: [updatable],
+      runtime_move_job: borrowed })).toBe(true)
+    start({ space: updatable, job: borrowed })
+    expect(wrapper.get('[data-runtime-progress]').text())
+      .toBe('Downloading the gaming runtime. You can leave this page and come back.')
+    await wrapper.setProps({ job: { ...borrowed, state: 'moving', code: 'moving' } })
+    expect(wrapper.get('[data-runtime-progress]').text())
+      .toBe('Moving Alex to its new gaming runtime. Keep Space streams stopped until it finishes.')
+    await wrapper.setProps({ job: { ...borrowed, state: 'done', code: 'space_runtime_moved' },
+      space: { ...updatable, runtime_id: borrowed.runtime_id, runtime_move: null } })
+    expect(wrapper.get('[data-runtime-progress]').text())
+      .toBe('Alex now uses its new gaming runtime. Its games, sign-in and saves are unchanged.')
+    expect(wrapper.text()).not.toMatch(/driver\s*\./u)
   })
 
   it('reads the job back sooner while it runs and stops once it ends', async () => {
