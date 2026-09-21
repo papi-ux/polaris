@@ -125,8 +125,8 @@ def sbom(packages, profile, revision, context):
         components.append({'type': 'file', 'name': 'polaris-input-provider/' + name,
                            'version': revision, 'bom-ref': 'polaris-input-provider/' + name,
                            'hashes': [{'alg': 'SHA-256', 'content': digest(here / 'providers' / name)}]})
-    if profile == 'steam':
-        name = 'steam-input.c'
+    # What Polaris itself puts into one family's image and no other's.
+    for name in {'steam': ['steam-input.c'], 'heroic': ['bwrap-in-a-space.sh'], 'lutris': ['bwrap-in-a-space.sh']}.get(profile, []):
         components.append({'type': 'file', 'name': 'polaris-input-provider/' + name,
                            'version': revision, 'bom-ref': 'polaris-input-provider/' + name,
                            'hashes': [{'alg': 'SHA-256', 'content': digest(here / 'providers' / name)}]})

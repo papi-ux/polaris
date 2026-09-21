@@ -55,19 +55,33 @@ if launcher:
         # launcher that aborts before its first window or a Proton that cannot
         # build its container.
         wrapper, packaged = pathlib.Path('/usr/bin/bwrap'), pathlib.Path('/usr/bin/bwrap.real')
-        if not packaged.is_file() or packaged.is_symlink() or not wrapper.read_text().startswith('#!/bin/sh\n'):
+        if not packaged.is_file() or packaged.is_symlink() or not wrapper.is_file() or \
+                wrapper.read_bytes()[:10] != b'#!/bin/sh\n':
             raise ValueError('bwrap is not wrapped for a Space')
-        refused = subprocess.run([str(wrapper), '--unshare-all', '--ro-bind', '/', '/', '/usr/bin/true'],
+        refused = subprocess.run([str(wrapper), '--unshare-all', '--die-with-parent', '--ro-bind', '/', '/', '/usr/bin/true'],
                                  capture_output=True, text=True)
-        # The sentences glycin 2.1.1 reads as an unavailable sandbox.
-        known = ('Creating new namespace failed', 'No permissions to create a new namespace',
-                 'No permissions to creating new namespace', 'No permissions to create new namespace',
-                 'bwrap: setting up uid map: Permission denied')
-        if refused.returncode != 1 or not any(sentence in refused.stderr for sentence in known):
-            raise ValueError('the bwrap wrapper no longer refuses in words glycin understands')
-        passed = subprocess.run([str(wrapper), '--version'], capture_output=True, text=True)
-        if passed.returncode != 0 or not passed.stdout.startswith('bubblewrap '):
-            raise ValueError('the bwrap wrapper no longer reaches the packaged bwrap')
+        if refused.returncode != 1:
+            raise ValueError('the bwrap wrapper no longer refuses the sandbox a Space cannot give')
+        # The refusal only works while the glycin in this image reads it as "no
+        # sandbox here". That is decided by sentences compiled into glycin, so
+        # the one the wrapper says is looked for in the library itself: a lock
+        # refresh that brings a glycin with other words stops the build here,
+        # instead of shipping a launcher that aborts before its first window.
+        libraries = sorted(pathlib.Path('/usr/lib/x86_64-linux-gnu').glob('libglycin-*.so*'))
+        if not libraries:
+            raise ValueError('no glycin library in this image: if GTK no longer loads images through it, '
+                             'the bwrap wrapper has nothing left to do and should go')
+        known = [sentence for sentence in (b'Creating new namespace failed', b'No permissions to create a new namespace',
+                                           b'No permissions to creating new namespace', b'No permissions to create new namespace',
+                                           b'bwrap: setting up uid map: Permission denied')
+                 if any(sentence in library.read_bytes() for library in libraries if library.is_file())]
+        if not any(sentence.decode() in refused.stderr for sentence in known):
+            raise ValueError('the glycin in this image does not read the bwrap wrapper\'s refusal as an unavailable sandbox')
+        # A value or a program argument that spells the request is not the request.
+        for argv in (['--version'], ['--setenv', 'POLARIS_CHECK', '--unshare-net', '--version']):
+            passed = subprocess.run([str(wrapper)] + argv, capture_output=True, text=True)
+            if passed.returncode != 0 or not passed.stdout.startswith('bubblewrap '):
+                raise ValueError('the bwrap wrapper no longer reaches the packaged bwrap')
         files += [wrapper, packaged]
     if profile == 'lutris':
         # The worker starts Lutris through its interpreter, as a trusted file it
@@ -75,7 +89,7 @@ if launcher:
         # the file this base carries; when the base moves to another Python the
         # image stops building here instead of a Space failing to start.
         interpreter = pathlib.Path('/usr/bin/python3.14')
-        if pathlib.Path('/usr/bin/python3').resolve() != interpreter or interpreter.is_symlink():
+        if pathlib.Path('/usr/bin/python3').resolve() != interpreter:
             raise ValueError('python3 is not ' + str(interpreter) + ': update lutrisInterpreter in '
                              'multiseat_worker/internal/seatprovider/launcher_linux.go and this check together')
         files.append(interpreter)
