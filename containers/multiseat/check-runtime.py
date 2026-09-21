@@ -47,6 +47,28 @@ if launcher:
                              'admits a runner this image cannot serve.')
         files += [found[name] for name in sorted(found)]
 
+    if profile in ('heroic', 'lutris'):
+        # These launchers draw with GTK, whose image loader sandboxes itself in
+        # a way a Space refuses. /usr/bin/bwrap answers that one request in
+        # words the loader takes as "no sandbox here" and passes the rest on.
+        # Both halves are run, because a wrapper that lost either one is a
+        # launcher that aborts before its first window or a Proton that cannot
+        # build its container.
+        wrapper, packaged = pathlib.Path('/usr/bin/bwrap'), pathlib.Path('/usr/bin/bwrap.real')
+        if not packaged.is_file() or packaged.is_symlink() or not wrapper.read_text().startswith('#!/bin/sh\n'):
+            raise ValueError('bwrap is not wrapped for a Space')
+        refused = subprocess.run([str(wrapper), '--unshare-all', '--ro-bind', '/', '/', '/usr/bin/true'],
+                                 capture_output=True, text=True)
+        # The sentences glycin 2.1.1 reads as an unavailable sandbox.
+        known = ('Creating new namespace failed', 'No permissions to create a new namespace',
+                 'No permissions to creating new namespace', 'No permissions to create new namespace',
+                 'bwrap: setting up uid map: Permission denied')
+        if refused.returncode != 1 or not any(sentence in refused.stderr for sentence in known):
+            raise ValueError('the bwrap wrapper no longer refuses in words glycin understands')
+        passed = subprocess.run([str(wrapper), '--version'], capture_output=True, text=True)
+        if passed.returncode != 0 or not passed.stdout.startswith('bubblewrap '):
+            raise ValueError('the bwrap wrapper no longer reaches the packaged bwrap')
+        files += [wrapper, packaged]
     if profile == 'lutris':
         # The worker starts Lutris through its interpreter, as a trusted file it
         # follows no link to reach, and /usr/bin/python3 is a link. It names

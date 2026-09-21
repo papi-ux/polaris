@@ -234,6 +234,13 @@ RUN sh /install-packages.sh runtime && \
     rm -rf /inputs /locks /verify-inputs.py /verify-offline.sh /install-packages.sh /tmp/polaris-Xwayland
 COPY containers/multiseat/initialize-root.py /initialize-root.py
 RUN python3 /initialize-root.py && rm /initialize-root.py
+# The launchers that draw with GTK cannot start without this: see the script.
+# Steam's image draws nothing with GTK and is left exactly as it was published.
+COPY --chmod=0755 containers/multiseat/providers/bwrap-in-a-space.sh /tmp/polaris-bwrap
+RUN if test "$RUNTIME_PROFILE" = heroic || test "$RUNTIME_PROFILE" = lutris; then \
+      dpkg-divert --local --rename --divert /usr/bin/bwrap.real --add /usr/bin/bwrap && \
+      install -m 0755 /tmp/polaris-bwrap /usr/bin/bwrap; \
+    fi && rm /tmp/polaris-bwrap
 COPY --from=runtime-root-build --chmod=0644 /src/target/release/libgstwaylanddisplaysrc.so /usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstwaylanddisplaysrc.so
 COPY --from=runtime-root-build --chmod=0755 /gamescope-root/usr/bin/gamescope /usr/bin/gamescope
 COPY --from=runtime-root-build /gamescope-root/usr/share/gamescope /usr/share/gamescope
