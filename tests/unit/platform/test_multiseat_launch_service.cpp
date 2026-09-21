@@ -1729,6 +1729,22 @@ namespace {
     EXPECT_FALSE(nvhttp::profile_artwork_target(client, "space.profile-b.3527290"));
     EXPECT_FALSE(nvhttp::profile_artwork_target(client, "space.profile-a.3527290"));
     EXPECT_FALSE(nvhttp::profile_artwork_target(nullptr, "space.profile-a.870780"));
+    // The entry that opens the launcher is no title: nothing is ever looked up
+    // for it. It wears the poster Polaris ships for that launcher, under the
+    // same access a title's artwork needs, and a title never gets that poster.
+    EXPECT_FALSE(nvhttp::profile_artwork_target(client, "space.profile-a.big-picture-v1"));
+    EXPECT_FALSE(nvhttp::profile_launcher_poster(client, "space.profile-a.870780"));
+    EXPECT_FALSE(nvhttp::profile_launcher_poster(client, "space.profile-b.big-picture-v1"));
+    EXPECT_FALSE(nvhttp::profile_launcher_poster(nullptr, "space.profile-a.big-picture-v1"));
+    EXPECT_FALSE(nvhttp::profile_launcher_poster(client, "space.profile-a.library-v1")) << "another family's launcher entry";
+    // Whether the bundled images are beside this test binary is the build's
+    // business. Either there is no poster here, or it is Steam's and never the
+    // generic box, and the library says so in the same breath.
+    const auto poster = nvhttp::profile_launcher_poster(client, "space.profile-a.big-picture-v1");
+    if (poster) EXPECT_TRUE(poster->ends_with("steam.png")) << *poster;
+    EXPECT_EQ(result.body["games"][0]["cover_url"].get<std::string>(),
+      poster ? "/polaris/v1/games/space.profile-a.big-picture-v1/space-artwork/poster" : "");
+    EXPECT_EQ(result.body["games"][1]["cover_url"], "/polaris/v1/games/space.profile-a.870780/space-artwork/poster");
     const auto resolved = nvhttp::resolve_profile_request(client, {{"game", "space.profile-a.870780"},
       {"width", "1920"}, {"height", "1080"}, {"fps", "120"}, {"client_max_fps", "120"}});
     ASSERT_TRUE(resolved); ASSERT_EQ(resolved->status, 200);

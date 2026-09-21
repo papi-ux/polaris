@@ -157,6 +157,8 @@ namespace nvhttp {
   profile_api_response_t profile_spaces_request(const crypto::p_named_cert_t &candidate,
     std::optional<std::string_view> selection = std::nullopt);
   std::optional<std::string> profile_artwork_target(const crypto::p_named_cert_t &candidate, std::string_view identity);
+  /** The bundled poster for the entry that opens a Space's launcher, for a client that may see that Space. */
+  std::optional<std::string> profile_launcher_poster(const crypto::p_named_cert_t &candidate, std::string_view identity);
   profile_api_response_t profile_artwork_resolve_request(const crypto::p_named_cert_t &candidate,
     std::string_view identity, const std::filesystem::path &appdata,
     const game_artwork::providers::transport_t &transport);

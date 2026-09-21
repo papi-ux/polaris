@@ -5451,21 +5451,56 @@ namespace nvhttp {
     return response;
   }
 
+  namespace {
+    /**
+     * The poster Polaris ships for a launcher, the one its desktop entry already
+     * wears. A family with none answers with nothing rather than with the
+     * generic box, which would stand in a library as if it were artwork.
+     */
+    std::optional<std::string> launcher_poster_path(std::string_view family) {
+      if (family.empty()) return std::nullopt;
+      const auto poster = proc::validate_app_image_path(std::string(family) + ".png");
+      if (poster == proc::validate_app_image_path({})) return std::nullopt;
+      return poster;
+    }
+
+    struct space_entry_t {
+      std::string target;
+      std::string launcher;  ///< the Space's family, when the entry is the one that opens its launcher
+    };
+
+    /** One entry of a Space's library, for a client that may see that Space now. */
+    std::optional<space_entry_t> authorized_space_entry(const crypto::p_named_cert_t &candidate, std::string_view identity) {
+      const auto game = multiseat::spaces::parse_game_identity(identity);
+      const auto current = resolve_authorized_client(candidate);
+      if (!game || !current ||
+          !(current->perm & PERM::launch) || current->temporary_authorization) return std::nullopt;
+      const auto service = multiseat::installed_profile_service();
+      const auto snapshot = service ? service->library_for_client(current->uuid, game->profile) : std::nullopt;
+      if (!snapshot || !snapshot->library.available) return std::nullopt;
+      const bool launcher = !snapshot->launcher_target.empty() && game->target == snapshot->launcher_target;
+      if (!launcher && std::none_of(snapshot->library.games.begin(), snapshot->library.games.end(),
+            [&](const auto &entry) { return entry.target == game->target; })) return std::nullopt;
+      if (resolve_authorized_client(current) != current || multiseat::installed_profile_service() != service) return std::nullopt;
+      const auto access = service->client_spaces(current->uuid);
+      if (std::none_of(access.spaces.begin(), access.spaces.end(),
+          [&](const auto &space) { return space.id == game->profile; })) return std::nullopt;
+      return space_entry_t {game->target, launcher ? snapshot->family : std::string {}};
+    }
+  }  // namespace
+
+  // A title's artwork is looked up by what the title is. The entry that opens
+  // the launcher itself is no title and is never looked up.
   std::optional<std::string> profile_artwork_target(const crypto::p_named_cert_t &candidate, std::string_view identity) {
-    const auto game = multiseat::spaces::parse_game_identity(identity);
-    const auto current = resolve_authorized_client(candidate);
-    if (!game || !current ||
-        !(current->perm & PERM::launch) || current->temporary_authorization) return std::nullopt;
-    const auto service = multiseat::installed_profile_service();
-    const auto snapshot = service ? service->library_for_client(current->uuid, game->profile) : std::nullopt;
-    if (!snapshot || !snapshot->library.available ||
-        std::none_of(snapshot->library.games.begin(), snapshot->library.games.end(),
-          [&](const auto &entry) { return entry.target == game->target; })) return std::nullopt;
-    if (resolve_authorized_client(current) != current || multiseat::installed_profile_service() != service) return std::nullopt;
-    const auto access = service->client_spaces(current->uuid);
-    if (std::none_of(access.spaces.begin(), access.spaces.end(),
-        [&](const auto &space) { return space.id == game->profile; })) return std::nullopt;
-    return game->target;
+    const auto entry = authorized_space_entry(candidate, identity);
+    if (!entry || !entry->launcher.empty()) return std::nullopt;
+    return entry->target;
+  }
+
+  std::optional<std::string> profile_launcher_poster(const crypto::p_named_cert_t &candidate, std::string_view identity) {
+    const auto entry = authorized_space_entry(candidate, identity);
+    if (!entry || entry->launcher.empty()) return std::nullopt;
+    return launcher_poster_path(entry->launcher);
   }
 
   namespace {
@@ -5537,9 +5572,11 @@ namespace nvhttp {
 
   nlohmann::json space_library_game_json(std::string_view profile, const multiseat::profile_library_snapshot_t &snapshot,
                                          std::string_view target, std::string_view name) {
-    // The launcher's own tile has no artwork of its own: Polaris draws it.
+    // The launcher's own tile has no artwork to look up. It wears the poster
+    // Polaris ships for that launcher, served from the same place a title's is.
     const bool launcher = target == snapshot.launcher_target;
     const auto identity = multiseat::spaces::game_identity(profile, target);
+    const bool poster = !launcher || launcher_poster_path(snapshot.family);
     nlohmann::json entry {{"id", identity}, {"app_id", multiseat::profile_app_id}, {"name", name},
       {"source", snapshot.family.empty() ? std::string("steam") : snapshot.family},
       // Only a Steam title has a Steam app id. A launcher family's target is
@@ -5548,7 +5585,7 @@ namespace nvhttp {
       {"steam_appid", launcher || snapshot.family != "steam" ? std::string {} : std::string(target)},
       {"installed", true}, {"hdr_supported", false},
       {"space", space_ref_json(snapshot.id, snapshot.name, target)},
-      {"cover_url", launcher ? std::string {} : "/polaris/v1/games/" + identity + "/space-artwork/poster"},
+      {"cover_url", poster ? "/polaris/v1/games/" + identity + "/space-artwork/poster" : std::string {}},
       {"launch_mode", space_launch_mode_json(snapshot.name)},
       {"artwork", launcher ? nlohmann::json() : profile_artwork_manifest(platf::appdata(), identity, target)}};
     if (launcher) entry.erase("artwork");
@@ -9018,6 +9055,20 @@ namespace nvhttp {
       }
       const auto identity = request->path.substr(prefix.size(), split - prefix.size());
       const auto kind = game_artwork::parse_kind(request->path.substr(split + 15));
+      // The launcher's own tile wears the poster Polaris ships for it. Nothing
+      // is fetched for it and nothing about it is cached beside a title's art.
+      if (kind == game_artwork::kind_e::poster) {
+        if (const auto poster = profile_launcher_poster(client, identity)) {
+          std::ifstream input(*poster, std::ios::binary);
+          if (!input.is_open()) { response->write(SimpleWeb::StatusCode::client_error_not_found); return; }
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "image/png");
+          headers.emplace("X-Content-Type-Options", "nosniff");
+          headers.emplace("Cache-Control", "private, max-age=86400");
+          response->write(SimpleWeb::StatusCode::success_ok, input, headers);
+          return;
+        }
+      }
       const auto target = profile_artwork_target(client, identity);
       if (!kind || !target) {
         response->write(SimpleWeb::StatusCode::client_error_not_found); return;
