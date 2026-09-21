@@ -14,6 +14,7 @@ from oci_archive import verify_archive
 
 REQUIRED_PROVIDER_TESTS = {
     'TestRealSessionBusAuthenticatesAndCleansUp',
+    'TestRealSessionBusGroupStopIsClean',
     'TestRealEncoderBridgeKeepsTwoSeatsIndependent',
     'TestRealPrivateAudioGraphRoutesExactlyAndCleansUp',
     'TestRealAudioReadinessFailureCleansPartialArtifacts',

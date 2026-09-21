@@ -129,7 +129,7 @@ does.
    `steam_only=true` to validate one Steam variant. `nvidia=true` adds the locked
    NVIDIA userspace variant. This workflow exports artifacts and never publishes.
 2. Retain the Docker archive, OCI archive, package manifest, SBOM and all provider
-   receipts. Every file in `artifact.json` has a size and SHA-256. All nine real,
+   receipts. Every file in `artifact.json` has a size and SHA-256. All ten real,
    device-free provider tests must pass for the exact worker configuration.
 3. After publication is authorized, publish that exact image to the Polaris
    registry using a separate reviewed release operation. Do not rebuild under
