@@ -3647,6 +3647,14 @@
       "url": "https://snapshot.ubuntu.com/ubuntu/20260918T000000Z/pool/main/x/xwayland/xwayland_24.1.10-1_amd64.deb"
     },
     {
+      "name": "xz-utils",
+      "version": "5.8.3-1",
+      "architecture": "amd64",
+      "filename": "xz-utils_5.8.3-1_amd64.deb",
+      "sha256": "5a8cddf80d9f5aeee1f39315158cfcc0f3e2c7573f9d6236fc6b85537400a937",
+      "url": "https://snapshot.ubuntu.com/ubuntu/20260918T000000Z/pool/main/x/xz-utils/xz-utils_5.8.3-1_amd64.deb"
+    },
+    {
       "name": "zlib1g",
       "version": "1:1.3.dfsg+really1.3.1-1ubuntu3.1",
       "architecture": "i386",
