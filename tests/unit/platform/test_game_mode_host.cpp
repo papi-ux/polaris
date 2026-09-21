@@ -310,8 +310,10 @@ TEST(GameModeHostTests, DisplaySessionGuidanceFollowsTheHostKind) {
   // WAYLAND_DISPLAY from before the mode switch.
   const auto running = gm::display_session_guidance(live, true, true, false);
   EXPECT_EQ(running.status, "game_mode_session");
-  EXPECT_NE(running.summary.find("not supported yet"), std::string::npos);
-  EXPECT_NE(running.action.find("Switch to Desktop Mode"), std::string::npos);
+  EXPECT_NE(running.summary.find("shows the Game Mode screen"), std::string::npos);
+  EXPECT_EQ(running.summary.find("not supported"), std::string::npos) << "a Game Mode host streams now";
+  EXPECT_NE(running.action.find("No action needed"), std::string::npos);
+  EXPECT_NE(running.action.find("comes back in Desktop Mode"), std::string::npos);
 
   const auto wayland = gm::display_session_guidance(installed, false, true, false);
   EXPECT_EQ(wayland.status, "healthy");
@@ -347,11 +349,13 @@ TEST(GameModeHostTests, SetupHostAdviceIsSilentOffGameModeHostsAndFollowsWhatThe
   const auto needs_flag = gm::setup_host_advice(game_mode, state_t::needs_headless_boot, "/usr/bin/polaris");
   EXPECT_NE(needs_flag.find("Steam Game Mode session detected: steamos-session-select on PATH (/usr/bin/steamos-session-select)."), std::string::npos);
   EXPECT_NE(needs_flag.find("Make it start at boot instead:\n  sudo -H /usr/bin/polaris --setup-host --enable-headless-boot"), std::string::npos);
-  EXPECT_EQ(needs_flag.find("not supported yet"), std::string::npos);
+  EXPECT_EQ(needs_flag.find("shows the Game Mode screen"), std::string::npos)
+    << "a host that is about to go offline is told how to stay up, nothing else";
 
   const auto just_enabled = gm::setup_host_advice(game_mode, state_t::headless_boot_enabled_now, "/usr/bin/polaris");
   EXPECT_NE(just_enabled.find("With headless boot on"), std::string::npos);
-  EXPECT_NE(just_enabled.find("not supported yet"), std::string::npos);
+  EXPECT_NE(just_enabled.find("every stream shows the Game Mode screen"), std::string::npos);
+  EXPECT_EQ(just_enabled.find("not supported"), std::string::npos);
   EXPECT_EQ(just_enabled.find("--enable-headless-boot"), std::string::npos);
 
   const auto already = gm::setup_host_advice(game_mode, state_t::already_independent, "/usr/bin/polaris");

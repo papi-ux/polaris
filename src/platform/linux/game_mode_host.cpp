@@ -475,8 +475,8 @@ namespace platf::game_mode_host {
     if (detection.session_active) {
       return guidance_t {
         "game_mode_session",
-        "Steam Game Mode is running. Streaming from inside Game Mode is not supported yet.",
-        "Switch to Desktop Mode to stream. The handhelds guide lists what works today.",
+        "Steam Game Mode is running. Every stream from this host shows the Game Mode screen, whatever stream mode is configured.",
+        "No action needed. The configured stream mode comes back in Desktop Mode.",
       };
     }
     if (has_wayland_display || has_x11_display) {
@@ -512,7 +512,7 @@ namespace platf::game_mode_host {
       return {};
     }
     const std::string enable_command = "sudo -H " + std::string(exe_path) + " --setup-host --enable-headless-boot";
-    const std::string not_yet = "Streaming from inside Game Mode is not supported yet; Desktop Mode streams work. See docs/handhelds.md.\n";
+    const std::string in_game_mode = "While Game Mode is running, every stream shows the Game Mode screen, and the configured stream mode comes back in Desktop Mode. See docs/handhelds.md.\n";
     std::string advice = "Steam Game Mode session detected: " + headline_evidence(detection) + ".\n";
     switch (state) {
       case setup_host_state_t::needs_headless_boot:
@@ -521,10 +521,10 @@ namespace platf::game_mode_host {
         return advice;
       case setup_host_state_t::already_independent:
         advice += "Polaris already starts at boot, so switching between Desktop Mode and Game Mode does not take it offline.\n";
-        return advice + not_yet;
+        return advice + in_game_mode;
       case setup_host_state_t::headless_boot_enabled_now:
         advice += "With headless boot on, switching between Desktop Mode and Game Mode no longer takes Polaris offline.\n";
-        return advice + not_yet;
+        return advice + in_game_mode;
       case setup_host_state_t::headless_boot_disabled_now:
         advice += "With headless boot off, Polaris goes offline when the host returns to Game Mode and comes back after a Desktop Mode login.\n";
         advice += "Turn it back on with:\n  " + enable_command + "\n";

@@ -34,8 +34,8 @@ describe('System telemetry display-session guidance', () => {
 
   it('names a running Game Mode session instead of asking for a desktop restart', () => {
     // A handheld that switched to Game Mode still has Polaris up when it boots
-    // independently, but nothing inside that session can be streamed yet. The
-    // console must say so rather than repeat the desktop-restart advice.
+    // independently, and what it streams is the Game Mode screen. The console
+    // says so, as a plain notice, rather than repeat the desktop-restart advice.
     const home = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/views/HomeView.vue'), 'utf8')
     const composable = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/composables/useSystemStats.js'), 'utf8')
     const confighttp = readFileSync(join(process.cwd(), 'src/confighttp.cpp'), 'utf8')
@@ -46,7 +46,7 @@ describe('System telemetry display-session guidance', () => {
     expect(home).toContain('gameModeHost?.session_active')
     expect(home).toContain("$t('index.session_game_mode')")
     expect(home.indexOf('gameModeHost?.session_active')).toBeLessThan(home.indexOf("displaySession?.status === 'missing_display_environment'"))
-    expect(readFileSync(join(process.cwd(), 'src_assets/common/assets/web/public/assets/locale/en.json'), 'utf8')).toContain('Streaming from inside Game Mode is not supported yet')
+    expect(readFileSync(join(process.cwd(), 'src_assets/common/assets/web/public/assets/locale/en.json'), 'utf8')).toContain('Streams from this host show the Game Mode screen')
     expect(confighttp).toContain('output["game_mode_host"]')
     expect(gameModeHost).toContain('"game_mode_session"')
   })

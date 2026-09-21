@@ -139,7 +139,8 @@ namespace platf::game_mode_host {
    *
    * `game_mode_session` while a gamescope session runs, whatever the
    * environment still says (a long-lived Polaris keeps the desktop's
-   * WAYLAND_DISPLAY after the desktop is gone); `healthy` with a display
+   * WAYLAND_DISPLAY after the desktop is gone), and it says what such a host
+   * streams rather than asking for anything; `healthy` with a display
    * environment; otherwise `missing_display_environment` with advice that
    * fits the host: a headless-boot host is told nothing is wrong, a Game Mode
    * host is pointed at headless boot, and a plain desktop host is told to
