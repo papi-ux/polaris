@@ -87,6 +87,19 @@ func createRoutedTestWorker(
 	plane workerDataPlane,
 ) (testWorker, *fakeRuntimeSet) {
 	t.Helper()
+	return createRoutedTestWorkerWith(t, name, generation, slot, plane, nil)
+}
+
+// prepare may change the runtime's adapters before anything is started.
+func createRoutedTestWorkerWith(
+	t *testing.T,
+	name string,
+	generation uint64,
+	slot uint32,
+	plane workerDataPlane,
+	prepare func(*fakeRuntimeSet),
+) (testWorker, *fakeRuntimeSet) {
+	t.Helper()
 	root, err := os.MkdirTemp("", "psw-")
 	if err != nil {
 		t.Fatal(err)
@@ -112,6 +125,9 @@ func createRoutedTestWorker(
 	}
 	config := runtimeTestConfig(name, generation, slot)
 	runtimeSet := newFakeRuntimeSet()
+	if prepare != nil {
+		prepare(runtimeSet)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {

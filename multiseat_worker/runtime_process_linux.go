@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -33,6 +34,7 @@ type osRuntimeProcessLease struct {
 	command      *exec.Cmd
 	pidFD        *os.File
 	done         chan error
+	finished     atomic.Bool // the helper returned status 0 by itself; set before done closes
 	stopOnce     sync.Once
 	stopComplete chan struct{}
 	stopError    error
@@ -179,7 +181,7 @@ func (host osRuntimeProcessHost) Start(
 		return lease, errors.New("runtime process lifetime unavailable")
 	}
 	lease.pidFD = os.NewFile(uintptr(pidFD), "runtime-process-lifetime")
-	go observeRuntimeProcessExit(pidFD, lease.done)
+	go observeRuntimeProcessExit(pidFD, lease.done, lease.finished.Store)
 	readiness := make(chan error, 1)
 	go func() {
 		defer readyReader.Close()
@@ -203,6 +205,12 @@ func (lease *osRuntimeProcessLease) Done() <-chan error {
 		return nil
 	}
 	return lease.done
+}
+
+// Finished reports that the helper ended by returning status 0. It is
+// meaningful once Done has closed.
+func (lease *osRuntimeProcessLease) Finished() bool {
+	return lease != nil && lease.finished.Load()
 }
 
 func signalRuntimeProcessGroup(process *os.Process, signal syscall.Signal) error {

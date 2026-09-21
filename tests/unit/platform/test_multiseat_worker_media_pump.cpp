@@ -358,6 +358,31 @@ TEST(MultiseatWorkerMediaPump, AWorkerThatGoesWithTheSessionIsNotAFailure) {
 }
 
 // Nobody asked for a stop, so a worker that goes on its own is still a failure.
+// A title the player quit from inside the game: nobody on the host asked for a stop, and the
+// worker says the stream is over before it goes. That is an ending, and the session log must not
+// call it a failure.
+TEST(MultiseatWorkerMediaPump, AWorkerThatSaysTheStreamIsOverIsNotAFailure) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), deterministic_capability(0x49)};
+  auto authority = create_authority(store, identity_for(), "generation-pump-over");
+  fake_worker_t worker {authority, fake_behavior_e::media_contract_then_end};
+  controller_client_t client;
+  ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
+  ASSERT_EQ(client.attach_data_plane(), transport_status_e::applied);
+
+  delivered_t delivered;
+  const auto report = run(client.lease_connection(), matching_expectation(), delivered.sinks(), quiet_host());
+
+  EXPECT_EQ(report.status, pump_status_e::ended_on_end_of_stream) << describe(report.status);
+  EXPECT_TRUE(ended_cleanly(report.status));
+  // What came before the ending was delivered, not dropped with it.
+  EXPECT_EQ(report.video_frames, 1U);
+  EXPECT_EQ(report.audio_frames, 1U);
+
+  worker.stop();
+  EXPECT_EQ(store.remove(authority), authority_status_e::applied);
+}
+
 TEST(MultiseatWorkerMediaPump, AWorkerThatGoesOnItsOwnIsStillAFailure) {
   temporary_root_t root;
   authority_store_t store {root.path(), deterministic_capability(0x48)};
