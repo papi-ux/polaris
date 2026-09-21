@@ -146,6 +146,13 @@ func runLauncher(parent context.Context, request seatruntime.Request, ready io.W
 		return errors.New("launcher profile must be a private owned directory")
 	}
 	defer home.close()
+	if request.WorkloadKind == seatruntime.WorkloadHeroic {
+		// The one exception, and only for a home Heroic has never started in:
+		// see seedHeroicSettings. A home it cannot write to the way it expects,
+		// a linked .config for one, is the player's arrangement and not a
+		// reason to refuse the launch, so the result is deliberately dropped.
+		_ = seedHeroicSettings(home)
+	}
 	inputs, err := seatinput.Open(seatinput.Directory, request.InputSeat)
 	if err != nil {
 		return err
