@@ -5454,7 +5454,7 @@ namespace nvhttp {
   std::optional<std::string> profile_artwork_target(const crypto::p_named_cert_t &candidate, std::string_view identity) {
     const auto game = multiseat::spaces::parse_game_identity(identity);
     const auto current = resolve_authorized_client(candidate);
-    if (!game || game->target == "big-picture-v1" || !current ||
+    if (!game || !current ||
         !(current->perm & PERM::launch) || current->temporary_authorization) return std::nullopt;
     const auto service = multiseat::installed_profile_service();
     const auto snapshot = service ? service->library_for_client(current->uuid, game->profile) : std::nullopt;
@@ -5682,10 +5682,12 @@ namespace nvhttp {
       if (identity) {
         if (identity->profile != *profile) return reject(409, "The selected Space changed. Refresh the library.");
         const auto library = service->library_for_client(current->uuid, *profile);
-        if (!library || (identity->target != "big-picture-v1" &&
+        // The launcher's own tile is always offered; anything else has to be
+        // a title this Space's library actually lists.
+        if (!library || (identity->target != library->launcher_target &&
             (!library->library.available || std::none_of(library->library.games.begin(), library->library.games.end(),
               [&](const auto &item) { return item.target == identity->target; }))))
-          return reject(409, "This title is unavailable in the selected Space. Open Steam Big Picture or refresh the library.");
+          return reject(409, "This title is unavailable in the selected Space. Open the launcher there or refresh the library.");
       } else if (game != multiseat::profile_app_uuid && game != std::to_string(multiseat::profile_app_id))
         return reject(400, "Select a title from this Space library");
       if (get_arg(args, "encoder", "auto") != "auto" ||

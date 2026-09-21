@@ -37,6 +37,28 @@ namespace {
     for (const auto *target : {"store.Thing", "epic.", "id.", "library-v2", "epic.bad name"})
       EXPECT_TRUE(game_identity("Alex_1", target).empty()) << target;
   }
+  /**
+   * A scanner lists titles in its own family's grammar. Decoding every library
+   * against Steam's would have emptied a Heroic one the moment a game was
+   * installed in it.
+   */
+  TEST(SpacesLibrary, DecodesALibraryInItsOwnFamilysGrammar) {
+    using multiseat::runtime_profile_e;
+    const auto heroic = decode_library(
+      R"({"schema":1,"games":[{"target":"epic.AlanWake2","name":"Alan Wake 2"},{"target":"gog.1207658924","name":"Witcher"}]})",
+      runtime_profile_e::heroic);
+    ASSERT_TRUE(heroic);
+    ASSERT_EQ(heroic->games.size(), 2U);
+    EXPECT_EQ(heroic->games[0], (library_game_t{"epic.AlanWake2", "Alan Wake 2"}));
+
+    // The same payload is not a Steam library, and a Steam one is not Heroic's.
+    EXPECT_FALSE(decode_library(R"({"schema":1,"games":[{"target":"epic.AlanWake2","name":"Alan Wake 2"}]})"));
+    EXPECT_FALSE(decode_library(R"({"schema":1,"games":[{"target":"3527290","name":"PEAK"}]})", runtime_profile_e::heroic));
+    // No scanner lists the tile that opens the launcher itself.
+    EXPECT_FALSE(decode_library(R"({"schema":1,"games":[{"target":"library-v1","name":"Heroic"}]})", runtime_profile_e::heroic));
+    EXPECT_FALSE(decode_library(R"({"schema":1,"games":[{"target":"big-picture-v1","name":"Steam"}]})"));
+  }
+
   TEST(SpacesLibrary, CatalogRequiresUniqueInstalledTitleIdentities) {
     const auto catalog = decode_library(R"({"schema":1,"games":[{"target":"3527290","name":"PEAK"}]})");
     ASSERT_TRUE(catalog);

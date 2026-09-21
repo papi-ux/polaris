@@ -26,7 +26,10 @@ namespace multiseat::spaces {
   };
   [[nodiscard]] std::string game_identity(std::string_view profile, std::string_view target);
   [[nodiscard]] std::optional<game_identity_t> parse_game_identity(std::string_view identity);
-  [[nodiscard]] std::optional<library_t> decode_library(std::string_view payload);
+  // A scanner lists titles in its own family's grammar, so the family decides
+  // which targets are a title. The default is the one every Space had before.
+  [[nodiscard]] std::optional<library_t> decode_library(std::string_view payload,
+    runtime_profile_e family = runtime_profile_e::steam);
   // Reads only a validated profile volume using its immutable runtime image.
   // The helper has no network, devices, capabilities, or writable mounts.
   [[nodiscard]] library_t read_steam_library(container::host_t &host, const container::profile_t &profile);

@@ -50,7 +50,7 @@ namespace multiseat::spaces {
     if (!token(profile) || !container::any_launcher_target(target)) return std::nullopt;
     return game_identity_t{std::string(profile), std::string(target)};
   }
-  std::optional<library_t> decode_library(std::string_view payload) {
+  std::optional<library_t> decode_library(std::string_view payload, runtime_profile_e family) {
     try {
       if (payload.size() > bound) return std::nullopt;
       std::vector<std::set<std::string>> keys;
@@ -70,7 +70,9 @@ namespace multiseat::spaces {
       for (const auto &game : value.at("games")) {
         if (!game.is_object() || game.size() != 2) return std::nullopt;
         const auto target = game.at("target").get<std::string>(), name = game.at("name").get<std::string>();
-        if (!container::valid_steam_target(target) || target == "big-picture-v1" ||
+        // A title in this family's own grammar. The tile that opens the
+        // launcher is offered by the host, never listed by a scanner.
+        if (!container::valid_launcher_target(family, target) || target == container::launcher_sentinel(family) ||
             name.empty() || name.size() > 512 ||
             std::any_of(name.begin(), name.end(), [](unsigned char c) { return c < 32 || c == 127; }) ||
             !ids.insert(target).second) return std::nullopt;
@@ -284,7 +286,7 @@ print(json.dumps({'schema': 1, 'games': [{'target': k, 'name': v} for k,v in sor
           images[0].at("Config").at("Labels").at("io.polaris.multiseat.profile") !=
             image_family(profile.runtime_profile) ||
           (images[0].at("Config").contains("Volumes") && !images[0].at("Config").at("Volumes").empty())) return {};
-      return decode_library(run({"run", "--rm", "--pull=never", "--runtime=runc", "--network=none",
+      const auto scanned = run({"run", "--rm", "--pull=never", "--runtime=runc", "--network=none",
         "--name=polaris-library-" + uuid_util::uuid_t::generate().string(),
         "--label=io.polaris.spaces.library=" + profile.profile_key,
         "--userns=host", "--read-only", "--user=1000:1000", "--cap-drop=ALL",
@@ -292,7 +294,8 @@ print(json.dumps({'schema': 1, 'games': [{'target': k, 'name': v} for k,v in sor
         "--mount=type=volume,src=" + profile.opaque_volume_name + ",dst=/profile,readonly,volume-nocopy",
         "--entrypoint=/usr/bin/python3", profile.image_reference, "-I", "-c",
         std::string(profile.runtime_profile == runtime_profile_e::heroic ? heroic_library_scanner()
-                                                                        : steam_library_scanner())})).value_or(library_t{});
+                                                                        : steam_library_scanner())});
+      return decode_library(scanned, profile.runtime_profile).value_or(library_t{});
     } catch (...) { return {}; }
   }
 }
