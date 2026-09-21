@@ -75,6 +75,7 @@
 #include "globals.h"
 #include "httpcommon.h"
 #include "launch_failure.h"
+#include "watch_mode.h"
 #include "logging.h"
 #include "network.h"
 #include "nvhttp.h"
@@ -2906,25 +2907,47 @@ namespace nvhttp {
       return stream::session::profile(*owner_session);
     }
 
-    std::optional<std::pair<int, std::string>> pin_watch_session_to_active_profile(rtsp_stream::launch_session_t &launch_session) {
+    watch_mode::mode_t watch_mode_of(const stream::session_profile_t &profile) {
+      return watch_mode::mode_t {
+        .width = profile.width,
+        .height = profile.height,
+        .fps_x1000 = profile.session_target_fps,
+        .bit_depth = profile.dynamic_range > 0 ? 10 : 8,
+        .codec = std::string {codec_name_for_video_format(profile.video_format)},
+      };
+    }
+
+    struct watch_refusal_t {
+      int status = 0;
+      std::string message;
+      std::optional<watch_mode::mode_t> mode;  ///< what to ask for instead, when asking again is the fix
+    };
+
+    std::optional<watch_refusal_t> pin_watch_session_to_active_profile(rtsp_stream::launch_session_t &launch_session) {
       if (!launch_session.watch_only) {
         return std::nullopt;
       }
 
       const auto owner_profile = active_owner_watch_profile();
       if (!owner_profile) {
-        return std::make_pair(409, "No active owner stream is available to watch"s);
+        return watch_refusal_t {409, "No active owner stream is available to watch"s, std::nullopt};
       }
 
-      const int requested_dynamic_range = launch_session.enable_hdr ? 1 : 0;
-      if (launch_session.requested_width != owner_profile->width ||
-          launch_session.requested_height != owner_profile->height ||
-          launch_session.requested_fps != owner_profile->session_target_fps ||
-          requested_dynamic_range != owner_profile->dynamic_range) {
-        return std::make_pair(
+      const auto owner_mode = watch_mode_of(*owner_profile);
+      if (!watch_mode::asked_for(
+            owner_mode,
+            launch_session.requested_width,
+            launch_session.requested_height,
+            launch_session.requested_fps,
+            launch_session.enable_hdr
+          )) {
+        // The sentence is what released clients read; the mode beside it is what a client
+        // should read, so it never has to take a resolution out of prose.
+        return watch_refusal_t {
           412,
-          std::format("Watch mode must match the active stream profile ({})", format_watch_profile(*owner_profile))
-        );
+          std::format("Watch mode must match the active stream profile ({})", format_watch_profile(*owner_profile)),
+          owner_mode,
+        };
       }
 
       launch_session.requested_width = owner_profile->width;
@@ -2943,6 +2966,15 @@ namespace nvhttp {
                       << format_watch_profile(*owner_profile);
 
       return std::nullopt;
+    }
+
+    void put_watch_refusal(pt::ptree &tree, const watch_refusal_t &refusal) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", refusal.status);
+      tree.put("root.<xmlattr>.status_message", refusal.message);
+      if (refusal.mode) {
+        watch_mode::put_attributes(tree, *refusal.mode);
+      }
     }
 
     /**
@@ -3563,6 +3595,18 @@ namespace nvhttp {
         "root.currentgameowned",
         has_current_owner && named_cert_p && proc::proc.is_session_owner(named_cert_p->uuid) ? 1 : 0
       );
+
+      // Whose game it is, and whether there is a stream of it to join. A game can be open with
+      // nobody attached: its owner left it running, or its launch never reached a picture. That
+      // and a game someone is streaming both read as busy, and only one of them can be watched.
+      // The mode is here so a watcher asks for it the first time instead of being refused for
+      // asking for its own.
+      tree.put("root.currentgameownername", has_current_owner ? proc::proc.get_session_owner_device_name() : ""s);
+      const auto owner_profile = active_owner_watch_profile();
+      tree.put("root.currentgamewatchable", owner_profile ? 1 : 0);
+      if (owner_profile) {
+        watch_mode::put_elements(tree, "root.currentgamewatch", watch_mode_of(*owner_profile));
+      }
     }
   }  // namespace
 
@@ -6900,10 +6944,8 @@ namespace nvhttp {
       return;
     }
 
-    if (const auto watch_error = pin_watch_session_to_active_profile(*launch_session)) {
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", watch_error->first);
-      tree.put("root.<xmlattr>.status_message", watch_error->second);
+    if (const auto watch_refusal = pin_watch_session_to_active_profile(*launch_session)) {
+      put_watch_refusal(tree, *watch_refusal);
 
       return;
     }
@@ -7290,10 +7332,8 @@ namespace nvhttp {
       return;
     }
 
-    if (const auto watch_error = pin_watch_session_to_active_profile(*launch_session)) {
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", watch_error->first);
-      tree.put("root.<xmlattr>.status_message", watch_error->second);
+    if (const auto watch_refusal = pin_watch_session_to_active_profile(*launch_session)) {
+      put_watch_refusal(tree, *watch_refusal);
 
       return;
     }
