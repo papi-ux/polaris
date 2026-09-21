@@ -19,7 +19,7 @@ it('shows eligible devices, marks the Default Space with a way to change it, and
   expect(wrapper.findAll('input')[0].element.disabled).toBe(false)
   expect(wrapper.text()).toContain('Default Space'); expect(wrapper.text()).not.toContain('Guest')
   expect(wrapper.get('.control-chip').text()).toBe('1')
-  await wrapper.get('button').trigger('click')
+  await wrapper.get('[data-default-change]').trigger('click')
   expect(wrapper.emitted('open-default')).toHaveLength(1)
   // Unticking is how a device leaves a Space; the host drops it as the Default Space too.
   await wrapper.findAll('input')[0].setValue(false); await flushPromises()
@@ -59,4 +59,51 @@ it('allows shared access across Spaces but rejects duplicate or archived grants'
   expect(validSnapshot(snapshot)).toBe(true)
   expect(validSnapshot({ ...snapshot, profiles: [{ ...space, access_clients: ['rp6', 'rp6'] }] })).toBe(false)
   expect(validSnapshot({ ...snapshot, profiles: [{ ...space, archived: true, clients: [], access_clients: ['rp6'] }] })).toBe(false)
+})
+
+// Select all and clear all: one host change, where ticking thirteen devices was thirteen saves and
+// thirteen restarts of Spaces.
+const reply = (body, status = 200) => ({ ok: status < 300, status, json: async () => body })
+const dialog = () => document.body.querySelector('[role="dialog"]')
+function startAttached(refresh, props = {}) {
+  wrapper = mount(SpaceAccess, { attachTo: document.body, global: spacesGlobal, props: { space, clients: devices, ready: true, refresh, ...props } })
+}
+it('lets every device in with one request, and says so only once the host shows it', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => reply({ status: true })))
+  startAttached(async () => { await wrapper.setProps({ space: { ...space, access_clients: ['rp6'] } }); return true })
+  await wrapper.get('[data-access-select-all]').trigger('click'); await flushPromises()
+  expect(fetch).toHaveBeenCalledTimes(1)
+  expect(fetch.mock.calls[0][0]).toBe('./api/multiseat/access/all')
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ profile_id: 'a', allowed: true })
+  expect(wrapper.text()).toContain('All 2 devices can open Alex.')
+  expect(wrapper.get('[data-access-select-all]').element.disabled).toBe(true)
+})
+it('asks before it removes every device, and says what else goes with them', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => reply({ status: true })))
+  startAttached(async () => { await wrapper.setProps({ space: { ...space, clients: [], access_clients: [] } }); return true })
+  await wrapper.get('[data-access-clear-all]').trigger('click'); await flushPromises()
+  expect(fetch).not.toHaveBeenCalled()
+  expect(dialog().textContent).toContain('Remove every device from Alex?')
+  expect(dialog().textContent).toContain('A device that opens this Space first goes back to opening another place first.')
+  dialog().querySelector('[data-confirm-confirm]').click(); await flushPromises()
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ profile_id: 'a', allowed: false })
+  expect(wrapper.text()).toContain('No device can open Alex now.')
+  expect(wrapper.get('[data-access-clear-all]').element.disabled).toBe(true)
+})
+it('does not claim a change the host did not show, and names a host too old to make one', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => reply({ status: true })))
+  startAttached(async () => true)
+  await wrapper.get('[data-access-select-all]').trigger('click'); await flushPromises()
+  expect(wrapper.text()).toContain('The change has not been confirmed.')
+  vi.stubGlobal('fetch', vi.fn(async () => reply({}, 404)))
+  await wrapper.get('[data-access-select-all]').trigger('click'); await flushPromises()
+  expect(wrapper.get('[role="alert"]').text()).toContain('cannot change every device at once')
+})
+it('offers neither while a Space streams, and leaves a lone device without them', async () => {
+  startAttached(async () => true, { locked: true, lockReasonId: 'spaces-stream-lock' })
+  expect(wrapper.get('[data-access-select-all]').element.disabled).toBe(true)
+  expect(wrapper.get('[data-access-clear-all]').attributes('aria-describedby')).toBe('spaces-stream-lock')
+  wrapper.unmount()
+  startAttached(async () => true, { clients: [devices[1]] })
+  expect(wrapper.find('[data-access-bulk]').exists()).toBe(false)
 })

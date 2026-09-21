@@ -8,10 +8,13 @@
           <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-ice/10 font-semibold text-ice" aria-hidden="true">{{ initials(space.name) }}</span>
           <div class="min-w-0 flex-1">
             <h3 class="break-words font-semibold text-silver">{{ space.name }}</h3>
-            <StatusBadge class="mt-1" :status="statusTone(space)" :label="activitySummary(space)" role="status" />
+            <div class="mt-1 flex flex-wrap items-center gap-2">
+              <StatusBadge :status="statusTone(space)" :label="activitySummary(space)" role="status" />
+              <span v-if="launcherName(space)" class="control-chip" data-space-launcher>{{ launcherName(space) }}</span>
+            </div>
           </div>
         </div>
-        <p class="mt-3 break-words text-sm text-storm">{{ deviceSummary(space) }}</p>
+        <p class="mt-3 break-words text-sm text-storm" :title="deviceNames(space).join(', ')" data-space-devices>{{ deviceSummary(space) }}</p>
         <SpaceRuntimeMove :space="space" :job="runtimeMoveJob" :available="runtimeMoveAvailable" :locked="locked"
                           :lock-reason-id="lockReasonId" :ready="ready" :refresh="refresh" @busy="emit('busy', $event)" />
         <div v-if="manageable" class="mt-4 flex flex-wrap gap-2">
@@ -152,13 +155,23 @@ const removalReady = computed(() => !!dialogSpace.value && !lastSpace.value && t
 
 // The same filter Device Access uses: a device that lost launch permission
 // is not listed as able to open the Space.
-function deviceSummary(space) {
-  const allowed = [...new Set([...space.clients, ...(space.access_clients || [])])]
+function deviceNames(space) {
+  return [...new Set([...space.clients, ...(space.access_clients || [])])]
     .map(id => props.clients.find(client => client.uuid === id))
     .filter(device => device && (canLaunch(device) || space.clients.includes(device.uuid)))
-  if (!allowed.length) return t('spaces.no_devices')
-  return t('spaces.available_to', { devices: allowed.map(deviceName).join(', ') })
+    .map(deviceName)
 }
+// Two names and a count. A Space open to a dozen devices used to spell out all twelve here, and
+// then list them again under Device Access; the full list is a hover away and one click below.
+function deviceSummary(space) {
+  const names = deviceNames(space)
+  if (!names.length) return t('spaces.no_devices')
+  if (names.length <= 2) return t('spaces.available_to', { devices: names.join(', ') })
+  return t('spaces.available_to_more', { devices: names.slice(0, 2).join(', '), count: names.length - 2 })
+}
+// Product names, so they are not translated. A family this console does not know says nothing.
+const launcherNames = { steam: 'Steam', heroic: 'Heroic', lutris: 'Lutris' }
+function launcherName(space) { return launcherNames[space.family] || '' }
 function initials(value) { return value.trim().split(/\s+/u).slice(0, 2).map(word => [...word][0] || '').join('').toLocaleUpperCase() }
 function spaceActivity(space) { return (props.activity || []).filter(item => item.profile_id === space.id) }
 function activitySummary(space) {

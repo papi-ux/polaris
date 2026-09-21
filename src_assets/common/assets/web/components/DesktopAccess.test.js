@@ -55,3 +55,52 @@ it('rejects ambiguous desktop grants in the refreshed snapshot', () => {
   for (const desktop_clients of [['rp6', 'rp6'], [''], 'rp6', [true]])
     expect(validSnapshot({ ...base, desktop_clients })).toBe(false)
 })
+
+const bulkReply = (body, status = 200) => ({ ok: status < 300, status, json: async () => body })
+const dialog = () => document.body.querySelector('[role="dialog"]')
+const two = [{ uuid: 'rp6', friendly_name: 'Retroid', perm: 0x04000000 }, { uuid: 'tv', name: 'TV', perm: 0x04000000 }]
+function startAttached(refresh, props = {}) {
+  wrapper = mount(DesktopAccess, { attachTo: document.body, global: spacesGlobal, props: { clients: two, allowed: [], refresh, ...props } })
+}
+it('gives every device Desktop with one request', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => bulkReply({ status: true })))
+  startAttached(async () => { await wrapper.setProps({ allowed: ['rp6', 'tv'] }); return true })
+  await wrapper.get('[data-access-select-all]').trigger('click'); await flushPromises()
+  expect(fetch).toHaveBeenCalledTimes(1)
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ profile_id: 'desktop', allowed: true })
+  expect(wrapper.text()).toContain('All 2 devices can open Desktop.')
+})
+it('asks before it takes Desktop from every device', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => bulkReply({ status: true })))
+  startAttached(async () => { await wrapper.setProps({ allowed: [] }); return true }, { allowed: ['rp6'] })
+  await wrapper.get('[data-access-clear-all]').trigger('click'); await flushPromises()
+  expect(fetch).not.toHaveBeenCalled()
+  expect(dialog().textContent).toContain('Remove Desktop Access from every device?')
+  dialog().querySelector('[data-confirm-confirm]').click(); await flushPromises()
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ profile_id: 'desktop', allowed: false })
+  expect(wrapper.text()).toContain('No device with a Space can open Desktop now.')
+})
+it('turns on Desktop with a Space, and keeps the switch as the host has it until the host says otherwise', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => bulkReply({ status: true })))
+  startAttached(async () => { await wrapper.setProps({ byDefault: true }); return true }, { byDefault: false })
+  const toggle = wrapper.get('[data-desktop-by-default]')
+  expect(toggle.element.checked).toBe(false)
+  await toggle.setValue(true); await flushPromises()
+  expect(fetch.mock.calls[0][0]).toBe('./api/multiseat/settings')
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ desktop_by_default: true })
+  expect(wrapper.get('[data-desktop-by-default]').element.checked).toBe(true)
+  expect(wrapper.text()).toContain('A device you let into a Space now gets Desktop with it.')
+})
+it('leaves the switch as it was when the host refuses, and says why', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => bulkReply({ status: false, message: 'The Desktop Access setting was not saved.' }, 503)))
+  startAttached(async () => true, { byDefault: false })
+  await wrapper.get('[data-desktop-by-default]').setValue(true); await flushPromises()
+  expect(wrapper.get('[data-desktop-by-default]').element.checked).toBe(false)
+  expect(wrapper.get('[role="alert"]').text()).toContain('was not saved')
+})
+it('shows no switch on a host that has no such setting', () => {
+  startAttached(async () => true)
+  expect(wrapper.find('[data-desktop-by-default]').exists()).toBe(false)
+  expect(validSnapshot({ enabled: true, available: true, changing: false, failed: false, profiles: [], desktop_by_default: true })).toBe(true)
+  expect(validSnapshot({ enabled: true, available: true, changing: false, failed: false, profiles: [], desktop_by_default: 'yes' })).toBe(false)
+})

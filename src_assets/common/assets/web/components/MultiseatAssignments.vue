@@ -32,6 +32,7 @@
                             :launchers="state.launchers || []" :job="state.runtime_move_job || null"
                            :locked="locked" :ready="ready" :refreshing="loading" :refresh="loadProfiles" @busy="creating = $event" />
     <DesktopAccess v-if="Array.isArray(state.desktop_clients)" :clients="clients" :allowed="state.desktop_clients"
+                   :by-default="typeof state.desktop_by_default === 'boolean' ? state.desktop_by_default : undefined"
                    :locked="locked" :refresh="loadProfiles" @busy="managing = $event" />
     <details v-if="state.enabled && devices.length" id="spaces-default" ref="defaultSection"
              class="settings-disclosure mt-5 border-t border-storm/20 pt-3" :open="defaultOpen" @toggle="defaultOpen = $event.target.open">
@@ -45,46 +46,51 @@
         </span>
       </summary>
       <p class="mt-2 text-sm text-storm">{{ $t('spaces.default_space_copy') }}</p>
-      <div class="mt-4 grid gap-3">
-        <div v-for="client in devices" :key="client.uuid" class="min-w-0 rounded-xl border border-storm/20 bg-deep/40 p-4">
-          <div class="flex flex-wrap items-start justify-between gap-2">
-            <label v-if="eligible(client)" :for="'gaming-profile-' + client.uuid" class="min-w-0 break-words text-sm font-semibold text-silver">
-              {{ deviceName(client) }}
-            </label>
-            <p v-else class="min-w-0 break-words text-sm font-semibold text-silver">{{ deviceName(client) }}</p>
-            <span v-if="eligible(client) && dirty(client.uuid)" class="text-xs text-warning-bright">{{ $t('spaces.unsaved') }}</span>
+      <!-- One row per device. Each used to be a card of its own with a line of help under it, which
+           made thirteen devices three screens tall; the help now shows where there is something to act on. -->
+      <div class="mt-4 divide-y divide-storm/15 rounded-xl border border-storm/20 bg-deep/40" data-default-rows>
+        <div v-for="client in devices" :key="client.uuid" :data-default-row="client.uuid"
+             class="min-w-0 px-4 py-3 sm:grid sm:grid-cols-[minmax(0,1fr)_minmax(11rem,17rem)_auto] sm:items-center sm:gap-x-3">
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-baseline gap-x-2">
+              <label v-if="eligible(client)" :for="'gaming-profile-' + client.uuid" class="min-w-0 break-words text-sm font-semibold text-silver">
+                {{ deviceName(client) }}
+              </label>
+              <p v-else class="min-w-0 break-words text-sm font-semibold text-silver">{{ deviceName(client) }}</p>
+              <span v-if="eligible(client) && dirty(client.uuid)" class="text-xs text-warning-bright">{{ $t('spaces.unsaved') }}</span>
+            </div>
+            <p :id="'gaming-profile-current-' + client.uuid" class="break-words text-xs text-storm">
+              {{ $t('spaces.default_current', { space: profileName(current(client.uuid)) }) }}
+            </p>
           </div>
-          <p :id="'gaming-profile-current-' + client.uuid" class="mt-1 break-words text-xs text-storm">
-            {{ $t('spaces.default_current', { space: profileName(current(client.uuid)) }) }}
-          </p>
-          <div v-if="eligible(client)" class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
-            <select :id="'gaming-profile-' + client.uuid" v-model="choices[client.uuid]"
-                    class="settings-input min-w-0 text-sm sm:flex-1"
-                    :aria-describedby="describedBy(client.uuid)"
-                    :disabled="locked" @change="clearFeedback">
-              <option v-if="offersDesktop(client.uuid)" value="desktop">{{ $t('spaces.desktop_option') }}</option>
-              <option v-for="profile in spacesFor(client.uuid)" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
-            </select>
-            <Button variant="outline" size="sm" class="shrink-0" :loading="saving === client.uuid"
-                    :aria-label="$t('spaces.save_assignment_aria', { device: deviceName(client) })"
-                    :aria-describedby="streamLock ? lockReasonId : undefined"
-                    :disabled="locked || !dirty(client.uuid)" @click="save(client.uuid)">
-              {{ saving === client.uuid ? $t('spaces.saving') : $t('spaces.save_assignment') }}
-            </Button>
-          </div>
-          <div v-else class="mt-3">
-            <Button variant="outline" size="sm" :loading="saving === client.uuid"
-                    :aria-label="$t('spaces.remove_from_spaces_aria', { device: deviceName(client) })"
-                    :aria-describedby="describedBy(client.uuid)"
-                    :disabled="locked" data-remove-from-spaces @click="save(client.uuid, '')">
-              {{ saving === client.uuid ? $t('spaces.saving') : $t('spaces.remove_from_spaces') }}
-            </Button>
-          </div>
-          <p :id="'gaming-profile-help-' + client.uuid" class="mt-2 break-words text-xs text-storm">
+          <select v-if="eligible(client)" :id="'gaming-profile-' + client.uuid" v-model="choices[client.uuid]"
+                  class="settings-input mt-2 min-w-0 text-sm sm:mt-0"
+                  :aria-describedby="describedBy(client.uuid)"
+                  :disabled="locked" @change="clearFeedback">
+            <option v-if="offersDesktop(client.uuid)" value="desktop">{{ $t('spaces.desktop_option') }}</option>
+            <option v-for="profile in spacesFor(client.uuid)" :key="profile.id" :value="profile.id">{{ profile.name }}</option>
+          </select>
+          <span v-else aria-hidden="true"></span>
+          <Button v-if="eligible(client)" variant="outline" size="sm" class="mt-2 shrink-0 sm:mt-0" :loading="saving === client.uuid"
+                  :aria-label="$t('spaces.save_assignment_aria', { device: deviceName(client) })"
+                  :aria-describedby="streamLock ? lockReasonId : undefined"
+                  :disabled="locked || !dirty(client.uuid)" @click="save(client.uuid)">
+            {{ saving === client.uuid ? $t('spaces.saving') : $t('spaces.save_assignment') }}
+          </Button>
+          <Button v-else variant="outline" size="sm" class="mt-2 sm:mt-0" :loading="saving === client.uuid"
+                  :aria-label="$t('spaces.remove_from_spaces_aria', { device: deviceName(client) })"
+                  :aria-describedby="describedBy(client.uuid)"
+                  :disabled="locked" data-remove-from-spaces @click="save(client.uuid, '')">
+            {{ saving === client.uuid ? $t('spaces.saving') : $t('spaces.remove_from_spaces') }}
+          </Button>
+          <!-- Always in the page, because the controls are described by it; shown once it says
+               something to act on: an unsaved choice, a device with no Space, one that lost access. -->
+          <p :id="'gaming-profile-help-' + client.uuid" class="break-words text-xs text-storm sm:col-span-3"
+             :class="helpShown(client) ? 'mt-1' : 'sr-only'">
             {{ selectionHelp(client) }}
           </p>
           <p v-if="eligible(client) && spacesFor(client.uuid).length && !offersDesktop(client.uuid)"
-             class="mt-1 break-words text-xs text-storm" data-desktop-needs-access>
+             class="mt-1 break-words text-xs text-storm sm:col-span-3" data-desktop-needs-access>
             {{ $t('spaces.help_desktop_needs_access') }}
           </p>
         </div>
@@ -167,6 +173,8 @@ const locked = computed(() => !!saving.value || creating.value || managing.value
 const describedBy = uuid => ['gaming-profile-current-' + uuid, 'gaming-profile-help-' + uuid, streamLock.value ? lockReasonId : ''].filter(Boolean).join(' ')
 
 function clearFeedback() { message.value = ''; actionError.value = '' }
+// A row's help is worth its height when the row has something to act on.
+const helpShown = client => !eligible(client) || !spacesFor(client.uuid).length || dirty(client.uuid)
 
 function selectionHelp(client) {
   if (!eligible(client)) return t('spaces.help_lost_access')

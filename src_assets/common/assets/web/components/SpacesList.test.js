@@ -34,6 +34,25 @@ async function confirm() {
 }
 afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals() })
 describe('Spaces management', () => {
+  it('names the launcher on the card, and says nothing for one this console does not know', () => {
+    start({ profiles: [space(), { ...second(), family: 'heroic', steam: false }, { id: 'space-c', name: 'Odd', clients: [], family: '', archived: false }] })
+    const chips = wrapper.findAll('[data-space-launcher]').map(chip => chip.text())
+    expect(chips).toEqual(['Steam', 'Heroic'])
+  })
+
+  it('sums up who can open a Space instead of spelling out a dozen names', () => {
+    const many = ['Retroid Pocket 6', 'Pixel 10 Pro', 'Google TV', 'Nova Deck', 'Shield'].map((name, index) =>
+      ({ uuid: `device-${index}`, friendly_name: name, perm: 0x04000000 }))
+    start({ clients: many, profiles: [{ ...space(), clients: [], access_clients: many.map(device => device.uuid) }] })
+    const summary = wrapper.get('[data-space-devices]')
+    expect(summary.text()).toBe('Available to Retroid Pocket 6, Pixel 10 Pro and 3 more')
+    // The whole list is still one hover away, and one click below under Device Access.
+    expect(summary.attributes('title')).toBe('Retroid Pocket 6, Pixel 10 Pro, Google TV, Nova Deck, Shield')
+    wrapper.unmount()
+    start({ clients: many.slice(0, 2), profiles: [{ ...space(), clients: [], access_clients: ['device-0', 'device-1'] }] })
+    expect(wrapper.get('[data-space-devices]').text()).toBe('Available to Retroid Pocket 6, Pixel 10 Pro')
+  })
+
   it('separates current activity from device access and never guesses a Steam user', async () => {
     start({ activity: [{ profile_id: 'space-a', client_id: 'handheld', state: 'running' }] })
     expect(wrapper.text()).toContain('Playing on Retroid Pocket 6')

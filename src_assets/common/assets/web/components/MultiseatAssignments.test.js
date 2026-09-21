@@ -18,6 +18,33 @@ let wrapper
 afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
 describe('profile assignments', () => {
+  it('keeps each device to one row, and shows its help once there is something to act on', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => reply({ ...defaultAlex(), profiles: [...defaultAlex().profiles,
+      { id: 'profile-b', name: 'Sam', clients: [], access_clients: ['device-a'] }] })))
+    wrapper = start({ clients: [client] })
+    await flushPromises()
+    expect(wrapper.findAll('[data-default-row]')).toHaveLength(1)
+    const help = wrapper.get('#gaming-profile-help-device-a')
+    // Still in the page, because the dropdown is described by it, but it takes no room.
+    expect(help.classes()).toContain('sr-only')
+    expect(wrapper.get('#gaming-profile-device-a').attributes('aria-describedby')).toContain('gaming-profile-help-device-a')
+    await wrapper.get('#gaming-profile-device-a').setValue('profile-b')
+    expect(wrapper.get('#gaming-profile-help-device-a').classes()).not.toContain('sr-only')
+    expect(wrapper.text()).toContain('Unsaved')
+  })
+
+  it('hands the owner\'s Desktop setting to Desktop Access, and leaves it out for a host that has none', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => reply({ ...withAccess(), desktop_by_default: true })))
+    wrapper = start({ clients: [client] })
+    await flushPromises()
+    expect(wrapper.get('[data-desktop-by-default]').element.checked).toBe(true)
+    wrapper.unmount()
+    vi.stubGlobal('fetch', vi.fn(async () => reply(withAccess())))
+    wrapper = start({ clients: [client] })
+    await flushPromises()
+    expect(wrapper.find('[data-desktop-by-default]').exists()).toBe(false)
+  })
+
   it('does not mistake a failed device lookup for an unpaired host', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => reply(snapshot())))
     wrapper = start({ clients: [], clientsReady: false })
