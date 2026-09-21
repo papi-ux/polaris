@@ -224,18 +224,29 @@ After reboot:
 ```bash
 rpm -q polaris
 sudo -H polaris --setup-host
+if [ -e /usr/local/bin/polaris-kms ]; then
+  sudo install -D -m 0755 "$(readlink -f "$(command -v polaris)")" /usr/local/bin/polaris-kms &&
+  sudo setcap cap_sys_admin+ep /usr/local/bin/polaris-kms
+fi
 systemctl --user restart polaris
 systemctl --user is-active polaris
 ```
 
-If you previously installed a KMS runtime copy, refresh it using the next section
-before restarting. A copy under `/usr/local` is outside the deployment and does
-not change automatically with an RPM update or rollback. `sudo -H polaris --setup-host`
-says so when the service points at a copy, and says which command to run when the
-copy is gone but its drop-in is not; `systemctl --user cat polaris` shows the same
-drop-in. The Update Center names the copy when the package is newer than the
-running binary, and the Doctor's `running_binary` row names the binary that
-produced the report.
+The middle lines refresh the KMS runtime copy when the host has one, and do
+nothing otherwise. This guide made that copy during every install until Polaris
+1.4.5, so a host set up before then has one whether or not it uses DRM/KMS
+capture. A copy under `/usr/local` is outside the deployment and does not change
+with an RPM update or rollback: skip the refresh and `rpm -q polaris` reports the
+new version while the service, and so the console, keeps running the old one.
+A copy made before 1.4.8 cannot report this itself.
+
+`sudo -H polaris --setup-host` says so when the service points at a copy, and
+says which command to run when the copy is gone but its drop-in is not;
+`systemctl --user cat polaris` shows the same drop-in. From 1.4.8 the Update
+Center names the copy when the package is newer than the running binary, and the
+Doctor's `running_binary` row names the binary that produced the report. If you
+do not use DRM/KMS capture, remove the copy instead, as the end of the next
+section shows.
 
 ## Optional DRM/KMS capture
 
@@ -359,8 +370,13 @@ GPU do not certify every released package, GPU, or Steam launch path. See [Compa
 - **Host disappears after reboot or leaving Desktop Mode:** verify the user
   service and [headless boot setup](#headless-boot-and-deck-images), then check
   whether the computer suspended or the network disconnected.
-- **Old version after update:** check the booted deployment, then the service's
-  `ExecStart` and any `/usr/local` copy. Do not repeat first-run signup.
+- **Old version after update:** check the booted deployment with
+  `rpm-ostree status`. If `rpm -q polaris` reports the new version and the
+  console still shows an older one, the service is running a KMS runtime copy
+  from an earlier install: `systemctl --user cat polaris | grep ExecStart` shows
+  `/usr/local/bin/polaris-kms`. Refresh it with the [Update](#update) commands,
+  or remove it as [Optional DRM/KMS capture](#optional-drmkms-capture)
+  describes. Do not repeat first-run signup.
 - **Black screen or unexpected Mirror Desktop:** inspect the active launch mode
   and capture decision. A physical connector name alone does not diagnose an
   app-routing failure; use the session's actual backend and compositor records.
