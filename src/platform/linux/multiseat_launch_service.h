@@ -100,8 +100,12 @@ namespace multiseat {
     std::function<profiles::change_result_t(std::string_view, std::string_view)> persist;
     std::function<profiles::change_result_t(const profiles::space_create_request_t &)> create;
     std::function<profiles::change_result_t(const profiles::edit_request_t &)> edit;
-    // The last argument is every paired device; profiles::set_access says what it is used for.
-    std::function<profiles::change_result_t(std::string_view, std::string_view, bool, const std::vector<std::string> &)> access;
+    // One device's access. The list is every paired device and the flag is the owner's "a device
+    // with a Space also gets Desktop" setting; profiles::set_access says what each is used for.
+    std::function<profiles::change_result_t(std::string_view, std::string_view, bool, const std::vector<std::string> &, bool)> access;
+    // Select all and clear all for one Space or for Desktop, as a single write.
+    std::function<profiles::change_result_t(std::string_view, const std::vector<std::string> &, bool,
+      const std::vector<std::string> &, bool)> access_for_all;
     // Deletes a Space's home through Docker; the stop token ends a long removal at shutdown.
     std::function<profiles::removal_result_t(const profiles::edit_request_t &, std::stop_token)> remove_for_good;
     // Points one Space at another runtime image; runs on the owner thread once the controller closed.
@@ -120,6 +124,7 @@ namespace multiseat {
     bool removal_available = false;  ///< a Space can be removed for good, not only archived
     std::vector<std::string> desktop_default_clients;  ///< devices whose Default Space is Desktop
     bool runtime_move_available = false;  ///< a Space can be moved to another gaming runtime
+    bool desktop_by_default = false;  ///< allowing a device into a Space also gives it Desktop Access
   };
   struct profile_session_snapshot_t {
     bool active = false;
@@ -184,8 +189,18 @@ namespace multiseat {
     [[nodiscard]] profile_launch_result_t set_assignment(std::string profile, std::string client);
     // paired_clients: every device the host has paired, so the same write can drop the ids of the
     // ones it has since forgotten. Empty leaves every id alone.
+    // While desktop_by_default() is on, allowing a device into a Space gives it Desktop Access too.
     [[nodiscard]] profile_launch_result_t set_access(std::string profile, std::string client, bool allowed,
       std::vector<std::string> paired_clients = {});
+    // Select all (allowed, with the devices to add) or clear all (not allowed) for one Space or for
+    // "desktop", as one change and one restart of the Spaces controller instead of one per device.
+    [[nodiscard]] profile_launch_result_t set_access_for_all(std::string profile, std::vector<std::string> clients,
+      bool allowed, std::vector<std::string> paired_clients = {});
+    // The owner's setting: a device that is allowed into a Space is given Desktop Access with it.
+    // Off until the owner turns it on, since Desktop is the owner's whole account, which a Space
+    // exists to keep apart. It only changes what later access changes do, never the lists as they are.
+    [[nodiscard]] bool desktop_by_default() const;
+    [[nodiscard]] profile_launch_result_t set_desktop_by_default(bool enabled);
     [[nodiscard]] profile_client_spaces_t client_spaces(std::string_view client) const;
     [[nodiscard]] profile_launch_result_t select_space(std::string_view client, std::string_view profile,
       std::string_view previous);

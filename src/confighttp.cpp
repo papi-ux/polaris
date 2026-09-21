@@ -4667,6 +4667,7 @@ namespace confighttp {
       output["removal_available"] = state.removal_available;
       output["desktop_clients"] = state.desktop_clients;
       output["desktop_default_clients"] = state.desktop_default_clients;
+      output["desktop_by_default"] = state.desktop_by_default;
       if (state.capacity)
         output["capacity"] = {{"concurrent_limit", state.capacity->max_seats}, {"concurrent_active", state.capacity->active_seats}};
       for (const auto &activity : state.activity)
@@ -4852,6 +4853,107 @@ namespace confighttp {
 #endif
   }
 
+#ifdef __linux__
+  // Every paired device, for a Spaces access change to forget the ones unpaired since the last one
+  // in the same write. A device in the middle of a temporary authorization is paired too; leaving
+  // it out would let a change made meanwhile forget it. Nothing is handed over when this run never
+  // loaded its paired clients (a refused state file, none yet, or a fresh-state start): the list is
+  // then short for a reason that says nothing about who is paired, and believing it would erase
+  // every other device's access on disk.
+  std::vector<std::string> paired_device_ids(const nlohmann::json &devices) {
+    std::vector<std::string> paired;
+    if (!nvhttp::paired_clients_authoritative()) return paired;
+    paired.reserve(devices.size());
+    for (const auto &item : devices) paired.emplace_back(item.at("uuid").get<std::string>());
+    return paired;
+  }
+#endif
+
+  /**
+   * @brief Select all or clear all for one Space, or for Desktop, as a single change.
+   *
+   * @code{.json}
+   * {"profile_id": "<space id or desktop>", "allowed": true}
+   * @endcode
+   *
+   * Allowing adds every permanently paired device with launch permission, which is who the page
+   * lists. Removing empties the list outright. The host picks the devices, so a page that is out of
+   * date cannot add one that was unpaired a moment ago.
+   */
+  void setMultiseatAccessAll(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
+#ifdef __linux__
+    const auto service = multiseat::installed_profile_service();
+    if (!service) { bad_request(response, request, "Spaces are not configured"); return; }
+    try {
+      std::array<char, 4097> bytes;
+      request->content.read(bytes.data(), bytes.size());
+      const auto count = request->content.gcount();
+      if (count > 4096) { bad_request(response, request, "Access request is too large"); return; }
+      std::set<std::string> keys;
+      const auto body = nlohmann::json::parse(bytes.data(), bytes.data() + count,
+        [&](int depth, nlohmann::json::parse_event_t event, nlohmann::json &value) {
+          if (depth > 2) throw std::invalid_argument("access nesting");
+          if (event == nlohmann::json::parse_event_t::key && !keys.insert(value.get<std::string>()).second)
+            throw std::invalid_argument("duplicate field");
+          return true;
+        });
+      if (!body.is_object() || body.size() != 2 || !body.contains("profile_id") || !body.at("profile_id").is_string() ||
+          !body.contains("allowed") || !body.at("allowed").is_boolean())
+        throw std::invalid_argument("access fields");
+      const auto devices = nvhttp::get_all_clients();
+      std::vector<std::string> eligible;
+      for (const auto &item : devices)
+        if (!item.at("temporary_authorization").get<bool>() &&
+            (item.at("perm").get<std::uint32_t>() & static_cast<std::uint32_t>(crypto::PERM::launch)))
+          eligible.emplace_back(item.at("uuid").get<std::string>());
+      const auto result = service->set_access_for_all(body.at("profile_id").get<std::string>(), std::move(eligible),
+        body.at("allowed").get<bool>(), paired_device_ids(devices));
+      const nlohmann::json output {{"status", result.status == 200}, {"message", result.message}};
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
+      response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);
+    } catch (const std::exception &) {
+      bad_request(response, request, "Invalid access request");
+    }
+#else
+    not_found(response, request);
+#endif
+  }
+
+  /**
+   * @brief The owner's Spaces settings.
+   *
+   * @code{.json}
+   * {"desktop_by_default": true}
+   * @endcode
+   */
+  void setMultiseatSettings(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
+#ifdef __linux__
+    const auto service = multiseat::installed_profile_service();
+    if (!service) { bad_request(response, request, "Spaces are not configured"); return; }
+    try {
+      std::array<char, 1025> bytes;
+      request->content.read(bytes.data(), bytes.size());
+      const auto count = request->content.gcount();
+      if (count > 1024) { bad_request(response, request, "Settings request is too large"); return; }
+      const auto body = nlohmann::json::parse(bytes.data(), bytes.data() + count);
+      if (!body.is_object() || body.size() != 1 || !body.contains("desktop_by_default") || !body.at("desktop_by_default").is_boolean())
+        throw std::invalid_argument("settings fields");
+      const auto result = service->set_desktop_by_default(body.at("desktop_by_default").get<bool>());
+      const nlohmann::json output {{"status", result.status == 200}, {"message", result.message}};
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
+      response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);
+    } catch (const std::exception &) {
+      bad_request(response, request, "Invalid settings request");
+    }
+#else
+    not_found(response, request);
+#endif
+  }
+
   void setMultiseatAccess(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
 #ifdef __linux__
@@ -4883,13 +4985,7 @@ namespace confighttp {
         bad_request(response, request, "Select a permanently paired device with launch permission");
         return;
       }
-      // Every paired device goes along, so the ids of devices unpaired since the last change leave
-      // the Spaces lists in this same write. A device in the middle of a temporary authorization is
-      // paired too; leaving it out would let a change made meanwhile forget it.
-      std::vector<std::string> paired;
-      paired.reserve(devices.size());
-      for (const auto &item : devices) paired.emplace_back(item.at("uuid").template get<std::string>());
-      const auto result = service->set_access(profile, client, body.at("allowed").get<bool>(), std::move(paired));
+      const auto result = service->set_access(profile, client, body.at("allowed").get<bool>(), paired_device_ids(devices));
       const nlohmann::json output {{"status", result.status == 200}, {"message", result.message}};
       SimpleWeb::CaseInsensitiveMultimap headers;
       append_json_security_headers(headers);
@@ -9440,6 +9536,8 @@ namespace confighttp {
     server.resource["^/api/multiseat/profiles/runtime$"]["POST"] = withCsrf(moveMultiseatProfileRuntime);
     server.resource["^/api/multiseat/assign$"]["POST"] = withCsrf(setMultiseatAssignment);
     server.resource["^/api/multiseat/access$"]["POST"] = withCsrf(setMultiseatAccess);
+    server.resource["^/api/multiseat/access/all$"]["POST"] = withCsrf(setMultiseatAccessAll);
+    server.resource["^/api/multiseat/settings$"]["POST"] = withCsrf(setMultiseatSettings);
     server.resource["^/api/clients/profiles/update$"]["POST"] = withCsrf(updateClientProfile);
     server.resource["^/api/clients/profiles/delete$"]["POST"] = withCsrf(deleteClientProfile);
     server.resource["^/api/covers/upload$"]["POST"] = withCsrf(uploadCover);

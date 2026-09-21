@@ -4357,6 +4357,15 @@ namespace nvhttp {
     }
   }
 
+  // True once this process has read its paired clients from the state file. It stays false for a
+  // run that refused the file, found none, or was started with a fresh state, and in each of those
+  // the list of paired clients is short for a reason that says nothing about who is paired.
+  std::atomic<bool> paired_clients_loaded {false};
+
+  bool paired_clients_authoritative() {
+    return paired_clients_loaded.load();
+  }
+
   bool load_state() {
     std::lock_guard lock(client_state_mutex);
     const std::filesystem::path state_path {config::nvhttp.file_state};
@@ -7770,7 +7779,7 @@ namespace nvhttp {
     bool clean_slate = config::sunshine.flags[config::flag::FRESH_STATE];
 
     if (!clean_slate) {
-      load_state();
+      paired_clients_loaded.store(load_state());
     }
 
     auto pkey = file_handler::read_file(config::nvhttp.pkey.c_str());

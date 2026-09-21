@@ -130,7 +130,9 @@ namespace {
     profiles::removal_result_t removal_answer {.outcome = profiles::removal_outcome_e::removed};
     profiles::runtime_move_result_t move_answer {.outcome = profiles::runtime_move_outcome_e::moved};
     std::optional<profiles::refusal_t> persist_refusal;
-    std::vector<std::string> paired_at_access_change;
+    std::vector<std::string> paired_at_access_change, devices_at_access_change;
+    bool with_desktop_at_access_change = false;
+    std::string space_at_access_change;
     bool reload_fails = false;
     std::function<void()> before_write;
     void SetUp() override {
@@ -174,10 +176,18 @@ namespace {
             }
             return profiles::change_result_t {.status = write_status};
           },
-          .access = [&](std::string_view, std::string_view, bool, const std::vector<std::string> &paired) {
+          .access = [&](std::string_view, std::string_view, bool, const std::vector<std::string> &paired, bool with_desktop) {
             state->called(); ++writes;
             EXPECT_GT(state->destroyed.load(), 0U);
-            paired_at_access_change = paired;
+            paired_at_access_change = paired; with_desktop_at_access_change = with_desktop;
+            return profiles::change_result_t {.status = write_status};
+          },
+          .access_for_all = [&](std::string_view space, const std::vector<std::string> &devices, bool,
+                                const std::vector<std::string> &paired, bool with_desktop) {
+            state->called(); ++writes;
+            EXPECT_GT(state->destroyed.load(), 0U) << "the catalog was edited while its controller still ran";
+            space_at_access_change = space; devices_at_access_change = devices;
+            paired_at_access_change = paired; with_desktop_at_access_change = with_desktop;
             return profiles::change_result_t {.status = write_status};
           },
           .remove_for_good = [&](const profiles::edit_request_t &request, std::stop_token) {
@@ -234,6 +244,53 @@ namespace {
     const auto refused = service->set_access("profile-b", "client-a", true);
     EXPECT_EQ(refused.status, 409);
     EXPECT_EQ(std::string(refused.message), "The Space access change was not saved. Refresh before retrying.");
+  }
+
+  TEST_F(MultiseatAssignments, SelectAllIsOneChangeForEveryDevice) {
+    const auto saved = service->set_access_for_all("profile-b", {"client-a", "client-b", "client-c"}, true, {"client-a", "client-b", "client-c"});
+    EXPECT_EQ(saved.status, 200);
+    EXPECT_EQ(std::string(saved.message), "Space access saved");
+    EXPECT_EQ(writes.load(), 1U) << "thirteen devices used to be thirteen restarts of the Spaces controller";
+    EXPECT_EQ(space_at_access_change, "profile-b");
+    EXPECT_EQ(devices_at_access_change, (std::vector<std::string> {"client-a", "client-b", "client-c"}));
+    EXPECT_EQ(paired_at_access_change.size(), 3U);
+    EXPECT_EQ(service->set_access_for_all("desktop", {}, false).status, 200) << "clear all names no device, and Desktop is not a Space";
+    EXPECT_EQ(space_at_access_change, "desktop");
+    EXPECT_EQ(service->set_access_for_all("profile-missing", {"client-a"}, true).status, 404);
+    EXPECT_EQ(service->set_access_for_all("profile-b", {""}, true).status, 400);
+    EXPECT_EQ(writes.load(), 2U);
+  }
+
+  TEST_F(MultiseatAssignments, SelectAllWaitsForSpaceStreamsLikeAnyOtherChange) {
+    const auto active = launch("client-a");
+    ASSERT_EQ(service->prepare(active, "profile-a").status, 200);
+    const auto refused = service->set_access_for_all("profile-b", {"client-b"}, true);
+    EXPECT_EQ(refused.status, 409);
+    EXPECT_EQ(refused.code, "spaces_streaming");
+    EXPECT_EQ(writes.load(), 0U);
+    active->cancel();
+  }
+
+  TEST_F(MultiseatAssignments, TheDesktopSettingRidesOnLaterAccessChangesOnly) {
+    EXPECT_FALSE(service->desktop_by_default());
+    EXPECT_FALSE(service->admin_snapshot().desktop_by_default);
+    EXPECT_EQ(service->set_access("profile-b", "client-a", true).status, 200);
+    EXPECT_FALSE(with_desktop_at_access_change);
+
+    EXPECT_EQ(service->set_desktop_by_default(true).status, 200);
+    EXPECT_TRUE(service->desktop_by_default());
+    EXPECT_TRUE(service->admin_snapshot().desktop_by_default);
+    EXPECT_EQ(writes.load(), 1U) << "turning the setting on is not an access change and restarts nothing";
+
+    EXPECT_EQ(service->set_access("profile-b", "client-a", true).status, 200);
+    EXPECT_TRUE(with_desktop_at_access_change);
+    with_desktop_at_access_change = false;
+    EXPECT_EQ(service->set_access_for_all("profile-b", {"client-a"}, true).status, 200);
+    EXPECT_TRUE(with_desktop_at_access_change);
+
+    EXPECT_EQ(service->set_desktop_by_default(false).status, 200);
+    EXPECT_EQ(service->set_access("profile-b", "client-a", true).status, 200);
+    EXPECT_FALSE(with_desktop_at_access_change);
   }
 
   TEST_F(MultiseatAssignments, RemovalClearsOnlyItsRoutesAndRestorationRequiresNewAssignment) {

@@ -41,6 +41,8 @@ export function validSnapshot(next) {
         typeof item.client_id !== 'string' || !item.client_id ||
         !['starting', 'running', 'stopping'].includes(item.state)))) return false
   if (next.runtime_move_available !== undefined && typeof next.runtime_move_available !== 'boolean') return false
+  // Since 1.4.12: allowing a device into a Space also gives it Desktop Access. Older hosts send nothing.
+  if (next.desktop_by_default !== undefined && typeof next.desktop_by_default !== 'boolean') return false
   if (next.launchers !== undefined && !validLaunchers(next.launchers)) return false
   return next.runtime_move_job === undefined || next.runtime_move_job === null || validMoveJob(next.runtime_move_job)
 }

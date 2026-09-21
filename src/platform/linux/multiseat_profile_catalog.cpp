@@ -437,8 +437,12 @@ namespace multiseat::profiles {
 
   namespace {
     // Drops the ids of devices the host no longer has paired; the header says when the list counts.
+    bool holds(const std::vector<std::string> &list, std::string_view client) {
+      return std::find(list.begin(), list.end(), client) != list.end();
+    }
+
     void forget_unpaired(catalog_t &catalog, std::string_view client_key, const std::vector<std::string> &paired_clients) {
-      if (std::find(paired_clients.begin(), paired_clients.end(), client_key) == paired_clients.end()) return;
+      if (!holds(paired_clients, client_key)) return;
       const auto unpaired = [&](const std::string &client) {
         return std::find(paired_clients.begin(), paired_clients.end(), client) == paired_clients.end();
       };
@@ -517,7 +521,7 @@ namespace multiseat::profiles {
 
   change_result_t set_access(const std::filesystem::path &path,
     std::string_view profile_key, std::string_view client_key, bool allowed,
-    const std::vector<std::string> &paired_clients) {
+    const std::vector<std::string> &paired_clients, bool with_desktop) {
     if (!token(profile_key) || !token(client_key)) return {.error = "Invalid space or paired device."};
     return change(path, [&](catalog_t &catalog, change_result_t &result) -> std::optional<std::string> {
       auto target = std::find_if(catalog.profiles.begin(), catalog.profiles.end(),
@@ -527,7 +531,39 @@ namespace multiseat::profiles {
       if (allowed) target->access_clients.emplace_back(client_key);
       // Unticking a Space is how a device leaves it, so it stops being that device's Default Space too.
       else std::erase(target->client_keys, client_key);
+      if (allowed && with_desktop && !holds(catalog.desktop_clients, client_key)) catalog.desktop_clients.emplace_back(client_key);
       forget_unpaired(catalog, client_key, paired_clients);
+      return encode(catalog);
+    });
+  }
+
+  change_result_t set_access_for_all(const std::filesystem::path &path,
+    std::string_view profile_key, const std::vector<std::string> &clients, bool allowed,
+    const std::vector<std::string> &paired_clients, bool with_desktop) {
+    const bool desktop = profile_key == desktop_profile_key;
+    if ((!desktop && !token(profile_key)) || clients.size() > 4096 ||
+        !std::all_of(clients.begin(), clients.end(), [](const auto &client) { return token(client); }))
+      return {.error = "Invalid space or paired device."};
+    return change(path, [&](catalog_t &catalog, change_result_t &result) -> std::optional<std::string> {
+      const auto add = [&](std::vector<std::string> &list) {
+        for (const auto &client : clients) if (!holds(list, client)) list.emplace_back(client);
+      };
+      if (desktop) {
+        if (allowed) add(catalog.desktop_clients);
+        // Desktop stops being anyone's Default Space with its access, as it does for one device.
+        else { catalog.desktop_clients.clear(); catalog.desktop_default_clients.clear(); }
+      } else {
+        auto target = std::find_if(catalog.profiles.begin(), catalog.profiles.end(),
+          [&](const auto &entry) { return entry.storage.profile_key == profile_key && !entry.archived; });
+        if (target == catalog.profiles.end()) { result.error = "Unknown or removed space."; return std::nullopt; }
+        if (allowed) {
+          add(target->access_clients);
+          if (with_desktop) add(catalog.desktop_clients);
+        } else { target->access_clients.clear(); target->client_keys.clear(); }
+      }
+      // Believed on the same terms as for one device, asked of every device in the change.
+      if (!clients.empty() && std::all_of(clients.begin(), clients.end(), [&](const auto &client) { return holds(paired_clients, client); }))
+        forget_unpaired(catalog, clients.front(), paired_clients);
       return encode(catalog);
     });
   }

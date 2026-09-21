@@ -95,9 +95,22 @@ namespace multiseat::profiles {
   // so the ids of forgotten devices are dropped here, in the same write as the next access change.
   // The list is believed only when it holds client_key, which the caller has just checked is
   // paired: an empty list, or one from somewhere else, must never read as "nobody is paired".
+  //
+  // with_desktop also gives the device Desktop Access when it is allowed into a Space. It is the
+  // owner's "a device with a Space also gets Desktop" setting, and it only ever adds: removing a
+  // device from a Space leaves its Desktop Access alone.
   [[nodiscard]] change_result_t set_access(const std::filesystem::path &path,
     std::string_view profile_key, std::string_view client_key, bool allowed,
-    const std::vector<std::string> &paired_clients = {});
+    const std::vector<std::string> &paired_clients = {}, bool with_desktop = false);
+  // Select all and clear all, as one write and so one restart of the Spaces controller rather than
+  // one per device. profile_key is a Space or desktop_profile_key. Allowing adds every device in
+  // clients that is not on the list yet. Removing empties the list outright, ids of devices that
+  // are no longer paired included, and with it every Default Space, or Desktop default, that
+  // pointed here. paired_clients and with_desktop are as in set_access, and the list is believed
+  // only when it is not empty and holds every device in clients.
+  [[nodiscard]] change_result_t set_access_for_all(const std::filesystem::path &path,
+    std::string_view profile_key, const std::vector<std::string> &clients, bool allowed,
+    const std::vector<std::string> &paired_clients = {}, bool with_desktop = false);
   // Supported Gamescope or Steam workloads only. Immutable local images, fresh
   // private storage, and an owned bridge for Steam. No pulls or host binds.
   [[nodiscard]] change_result_t create(const std::filesystem::path &path,

@@ -340,6 +340,8 @@ namespace multiseat {
       std::string profile, client;
       std::optional<bool> access;
       std::vector<std::string> paired_clients;
+      bool with_desktop = false;
+      std::optional<std::vector<std::string>> all_clients;  // set for select all and clear all
       std::optional<profiles::space_create_request_t> creation;
       std::optional<profiles::edit_request_t> edit;
       std::optional<profiles::runtime_move_t> move;
@@ -439,6 +441,28 @@ namespace multiseat {
       selections = std::move(next);
       return true;
     }
+    // The owner's "a device with a Space also gets Desktop" setting. It sits beside the catalog, as
+    // the selections do, and not in it: the catalog's keys are read strictly, by an older Polaris
+    // on the same host as well, and one more key there would cost that build every Space.
+    bool desktop_by_default = false;
+    std::filesystem::path settings_path;
+    static bool decode_settings(std::string_view payload) {
+      const auto value = nlohmann::json::parse(payload);
+      exact_keys(value, {"schema", "desktop_by_default"});
+      if (!value.at("schema").is_number_unsigned() || value.at("schema") != 1 || !value.at("desktop_by_default").is_boolean())
+        throw std::invalid_argument("spaces settings schema");
+      return value.at("desktop_by_default").get<bool>();
+    }
+    bool save_desktop_by_default(bool enabled) {
+      if (!settings_path.empty()) {
+        const auto payload = nlohmann::json{{"schema", 1}, {"desktop_by_default", enabled}}.dump();
+        const auto result = private_state_file::update_atomic(settings_path, profiles::maximum_catalog_bytes,
+          [&](const auto &) -> std::optional<std::string> { return payload; });
+        if (result.status != private_state_file::write_status_e::committed) return false;
+      }
+      desktop_by_default = enabled;
+      return true;
+    }
     std::vector<profile_summary_t> fallback_catalog;
     std::set<std::string> blocked_clients;
     const std::chrono::milliseconds timeout;
@@ -495,7 +519,11 @@ namespace multiseat {
       if (!admin.edit && !admin.catalog.empty())
         admin.edit = [path = admin.catalog](const auto &request) { return profiles::edit(path, request); };
       if (!admin.access && !admin.catalog.empty())
-        admin.access = [path = admin.catalog](auto profile, auto client, bool allowed, const auto &paired) { return profile == "desktop" ? profiles::set_desktop_access(path, client, allowed, paired) : profiles::set_access(path, profile, client, allowed, paired); };
+        admin.access = [path = admin.catalog](auto profile, auto client, bool allowed, const auto &paired, bool with_desktop) { return profile == "desktop" ? profiles::set_desktop_access(path, client, allowed, paired) : profiles::set_access(path, profile, client, allowed, paired, with_desktop); };
+      if (!admin.access_for_all && !admin.catalog.empty())
+        admin.access_for_all = [path = admin.catalog](auto profile, const auto &clients, bool allowed, const auto &paired, bool with_desktop) {
+          return profiles::set_access_for_all(path, profile, clients, allowed, paired, with_desktop);
+        };
       if (!admin.remove_for_good && !admin.catalog.empty())
         admin.remove_for_good = [path = admin.catalog](const auto &request, std::stop_token stop) {
           container::local_host_t host(stop);
@@ -514,6 +542,12 @@ namespace multiseat {
           const auto saved = private_state_file::read_secure(selection_path, profiles::maximum_catalog_bytes, false, false);
           if (!saved) throw std::invalid_argument("unsafe space selections");
           selections = decode_selections(saved.payload);
+        }
+        settings_path = admin.catalog; settings_path += ".settings";
+        if (std::filesystem::exists(settings_path)) {
+          const auto saved = private_state_file::read_secure(settings_path, profiles::maximum_catalog_bytes, false, false);
+          if (!saved) throw std::invalid_argument("unsafe spaces settings");
+          desktop_by_default = decode_settings(saved.payload);
         }
       }
       thread = std::jthread([this](std::stop_token stop) { run(stop); });
@@ -615,6 +649,7 @@ namespace multiseat {
             std::lock_guard lock(mutex);
             fallback_catalog = controller->profile_catalog();
             if (!request->client.empty()) blocked_clients.insert(request->client);
+            if (request->all_clients) blocked_clients.insert(request->all_clients->begin(), request->all_clients->end());
           }
           if (!controller->shutdown()) {
             BOOST_LOG(error) << "A Space change could not close the Spaces controller, so Space changes stay unavailable until Polaris restarts";
@@ -651,7 +686,8 @@ namespace multiseat {
                   << " network=" << (removed.kept_network.empty() ? "none" : removed.kept_network);
               }
             } else {
-              persisted = request->access ? admin.access(request->profile, request->client, *request->access, request->paired_clients) :
+              persisted = request->all_clients ? admin.access_for_all(request->profile, *request->all_clients, *request->access, request->paired_clients, request->with_desktop) :
+                request->access ? admin.access(request->profile, request->client, *request->access, request->paired_clients, request->with_desktop) :
                 request->edit ? admin.edit(*request->edit) : request->creation ? admin.create(*request->creation) :
                 admin.persist(request->profile, request->client);
             }
@@ -945,7 +981,21 @@ namespace multiseat {
       impl_->controller ? impl_->controller->capacity() : std::optional<gpu_usage_t>{},
       static_cast<bool>(impl_->admin.reload && impl_->admin.remove_for_good),
       impl_->controller ? impl_->controller->desktop_default_clients() : std::vector<std::string>{},
-      static_cast<bool>(impl_->admin.reload && impl_->admin.move_runtime)};
+      static_cast<bool>(impl_->admin.reload && impl_->admin.move_runtime), impl_->desktop_by_default};
+  }
+
+  bool profile_launch_service_t::desktop_by_default() const {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->desktop_by_default;
+  }
+
+  profile_launch_result_t profile_launch_service_t::set_desktop_by_default(bool enabled) {
+    std::lock_guard lock(impl_->mutex);
+    try {
+      if (!impl_->save_desktop_by_default(enabled))
+        return {503, "The Desktop Access setting was not saved.", "spaces_setting_not_saved", "Refresh Spaces and try again."};
+    } catch (...) { return {503, "The Desktop Access setting was not saved.", "spaces_setting_not_saved", "Refresh Spaces and try again."}; }
+    return {200, "Desktop Access setting saved"};
   }
 
   profile_launch_result_t profile_launch_service_t::set_assignment(std::string profile, std::string client) {
@@ -1066,6 +1116,7 @@ namespace multiseat {
     const auto future = request->future;
     {
       std::lock_guard lock(impl_->mutex);
+      request->with_desktop = impl_->desktop_by_default;
       if (!impl_->admin.reload || !impl_->admin.access || !impl_->controller || impl_->admin_failed || impl_->stopping)
         return {503, "Space access changes are unavailable right now.", "spaces_admin_unavailable", "Refresh Spaces. If this continues, restart Polaris."};
       if (request->client.empty() || request->client.size() > 128 || request->profile.empty() || request->profile.size() > 128)
@@ -1077,6 +1128,37 @@ namespace multiseat {
         [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
         return {409, "Stop every Space stream and wait for cleanup before changing Spaces.", "spaces_streaming", "End the running Space streams, then try again."};
       impl_->reconfiguring = true; impl_->blocked_clients.insert(request->client);
+      impl_->queued_admin = request; impl_->active_admin = request;
+    }
+    impl_->wake.notify_all();
+    if (future.wait_for(std::chrono::seconds(25)) != std::future_status::ready)
+      return {202, "Space access is still being saved. Refresh before retrying.", "spaces_change_pending"};
+    return future.get();
+  }
+
+  profile_launch_result_t profile_launch_service_t::set_access_for_all(std::string profile, std::vector<std::string> clients,
+    bool allowed, std::vector<std::string> paired_clients) {
+    if (spaces::host_admin_running()) return spaces_host_setup_running_result;
+    auto request = std::make_shared<impl_t::admin_request_t>();
+    request->profile = std::move(profile); request->all_clients = std::move(clients); request->access = allowed;
+    request->paired_clients = std::move(paired_clients);
+    const auto future = request->future;
+    {
+      std::lock_guard lock(impl_->mutex);
+      request->with_desktop = impl_->desktop_by_default;
+      if (!impl_->admin.reload || !impl_->admin.access_for_all || !impl_->controller || impl_->admin_failed || impl_->stopping)
+        return {503, "Space access changes are unavailable right now.", "spaces_admin_unavailable", "Refresh Spaces. If this continues, restart Polaris."};
+      if (request->profile.empty() || request->profile.size() > 128 || request->all_clients->size() > 4096 ||
+          std::any_of(request->all_clients->begin(), request->all_clients->end(), [](const auto &client) { return client.empty() || client.size() > 128; }))
+        return {400, "Invalid Space or paired device.", "invalid_request"};
+      const auto catalog = impl_->controller->profile_catalog();
+      if (request->profile != "desktop" && std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) { return entry.id == request->profile && !entry.archived; }))
+        return {404, "Unknown Space.", "space_unknown", "Refresh Spaces."};
+      if (impl_->reconfiguring || !impl_->queued.empty() || std::any_of(impl_->tracked.begin(), impl_->tracked.end(),
+        [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
+        return {409, "Stop every Space stream and wait for cleanup before changing Spaces.", "spaces_streaming", "End the running Space streams, then try again."};
+      impl_->reconfiguring = true;
+      impl_->blocked_clients.insert(request->all_clients->begin(), request->all_clients->end());
       impl_->queued_admin = request; impl_->active_admin = request;
     }
     impl_->wake.notify_all();

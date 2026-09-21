@@ -924,6 +924,86 @@ namespace {
     expect_nobody_forgotten();
   }
 
+  // Select all and clear all: one write, and so one restart of the Spaces controller, where the
+  // page used to make one per device.
+  TEST_F(MultiseatProfileCatalogForgottenDevices, SelectAllAddsWhoIsMissingAndKeepsWhoIsThere) {
+    ASSERT_TRUE(profiles::set_access_for_all(path, "profile-b", {"client-a", "client-new"}, true));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.profiles[1].access_clients, (std::vector<std::string> {"client-gone", "client-a", "client-new"}));
+    EXPECT_EQ(loaded->catalog.profiles[1].client_keys, std::vector<std::string>{"client-gone"}) << "select all must not move a Default Space";
+    EXPECT_EQ(loaded->catalog.profiles[0].access_clients, (std::vector<std::string> {"client-a", "client-gone"}));
+    loaded.reset();
+    // Asked twice, it changes nothing the second time.
+    ASSERT_TRUE(profiles::set_access_for_all(path, "profile-b", {"client-a", "client-new"}, true));
+    loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.profiles[1].access_clients.size(), 3U);
+  }
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, ClearAllEmptiesTheSpaceAndItsDefaultsAndNothingElse) {
+    ASSERT_TRUE(profiles::set_access_for_all(path, "profile-b", {"client-a"}, false));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_TRUE(loaded->catalog.profiles[1].access_clients.empty()) << "clear all left a device that is no longer paired";
+    EXPECT_TRUE(loaded->catalog.profiles[1].client_keys.empty()) << "a device cannot keep a Default Space it may not open";
+    EXPECT_EQ(loaded->catalog.profiles[0].client_keys, std::vector<std::string>{"client-a"});
+    EXPECT_EQ(loaded->catalog.desktop_clients, (std::vector<std::string> {"client-lost", "client-a"}));
+  }
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, SelectAllAndClearAllWorkForDesktop) {
+    ASSERT_TRUE(profiles::set_access_for_all(path, "desktop", {"client-a", "client-new"}, true));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.desktop_clients, (std::vector<std::string> {"client-lost", "client-a", "client-new"}));
+    loaded.reset();
+    ASSERT_TRUE(profiles::set_access_for_all(path, "desktop", {}, false));
+    loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_TRUE(loaded->catalog.desktop_clients.empty());
+    EXPECT_TRUE(loaded->catalog.desktop_default_clients.empty()) << "Desktop stayed a Default Space for a device that may not open it";
+    EXPECT_EQ(loaded->catalog.profiles[1].access_clients, std::vector<std::string>{"client-gone"});
+  }
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, SelectAllForgetsUnpairedDevicesOnTheSameTermsAsOneDevice) {
+    ASSERT_TRUE(profiles::set_access_for_all(path, "profile-b", {"client-a", "client-new"}, true, {"client-a", "client-new"}));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.profiles[1].access_clients, (std::vector<std::string> {"client-a", "client-new"}));
+    EXPECT_EQ(loaded->catalog.desktop_clients, std::vector<std::string>{"client-a"});
+    loaded.reset();
+    // A list that does not hold every device being changed is not the host's paired devices.
+    save(sample());
+    ASSERT_TRUE(profiles::set_access(path, "profile-a", "client-keep", true));
+    ASSERT_TRUE(profiles::set_access_for_all(path, "profile-a", {"client-a", "client-new"}, true, {"client-a"}));
+    loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.profiles[0].access_clients, (std::vector<std::string> {"client-keep", "client-a", "client-new"}));
+  }
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, SelectAllRefusesASpaceThatIsGoneAndIdsThatAreNotIds) {
+    EXPECT_FALSE(profiles::set_access_for_all(path, "profile-missing", {"client-a"}, true));
+    EXPECT_FALSE(profiles::set_access_for_all(path, "profile-b", {"client a"}, true));
+    EXPECT_FALSE(profiles::set_access_for_all(path, "", {"client-a"}, true));
+  }
+
+  // The owner's "a device with a Space also gets Desktop" setting.
+  TEST_F(MultiseatProfileCatalogForgottenDevices, WithDesktopADeviceThatGetsASpaceGetsDesktopToo) {
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-new", true, {}, true));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.desktop_clients, (std::vector<std::string> {"client-lost", "client-a", "client-new"}));
+    loaded.reset();
+    // It only ever adds: leaving the Space leaves Desktop alone, and so does a second grant.
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-new", false, {}, true));
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-a", true, {}, true));
+    loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.desktop_clients, (std::vector<std::string> {"client-lost", "client-a", "client-new"}));
+    loaded.reset();
+    ASSERT_TRUE(profiles::set_access_for_all(path, "profile-a", {"client-b", "client-c"}, true, {}, true));
+    loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.desktop_clients, (std::vector<std::string> {"client-lost", "client-a", "client-new", "client-b", "client-c"}));
+  }
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, WithoutTheSettingASpaceNeverTouchesDesktop) {
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-new", true));
+    ASSERT_TRUE(profiles::set_access_for_all(path, "profile-a", {"client-b"}, true));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.desktop_clients, (std::vector<std::string> {"client-lost", "client-a"}));
+  }
+
   TEST_F(MultiseatProfileCatalog, DuplicateAccessAndAccessToRemovedSpacesAreRejected) {
     auto catalog = sample(); catalog.profiles[0].access_clients = {"client-b", "client-b"};
     EXPECT_THROW((void)profiles::encode(catalog), std::invalid_argument);

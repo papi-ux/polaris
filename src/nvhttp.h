@@ -451,6 +451,15 @@ namespace nvhttp {
   nlohmann::json get_all_clients();
 
   /**
+   * @brief Whether get_all_clients() is the whole truth about who is paired.
+   *
+   * False for a run that refused its state file, found none, or was started with a fresh state:
+   * the list is then short for a reason that says nothing about the devices paired before, and
+   * nothing may be forgotten on the strength of it.
+   */
+  bool paired_clients_authoritative();
+
+  /**
    * @brief Remove all paired clients.
    * @examples
    * nvhttp::erase_all_clients();
