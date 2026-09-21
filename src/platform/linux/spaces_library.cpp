@@ -38,7 +38,7 @@ namespace multiseat::spaces {
     };
   }
   std::string game_identity(std::string_view profile, std::string_view target) {
-    return token(profile) && container::valid_steam_target(target) ?
+    return token(profile) && container::any_launcher_target(target) ?
       "space." + std::string(profile) + "." + std::string(target) : "";
   }
   std::optional<game_identity_t> parse_game_identity(std::string_view identity) {
@@ -47,7 +47,7 @@ namespace multiseat::spaces {
     const auto split = identity.find('.');
     if (split == std::string_view::npos) return std::nullopt;
     const auto profile = identity.substr(0, split), target = identity.substr(split + 1);
-    if (!token(profile) || !container::valid_steam_target(target)) return std::nullopt;
+    if (!token(profile) || !container::any_launcher_target(target)) return std::nullopt;
     return game_identity_t{std::string(profile), std::string(target)};
   }
   std::optional<library_t> decode_library(std::string_view payload) {

@@ -21,6 +21,22 @@ namespace {
       EXPECT_FALSE(parse_game_identity(value)) << value;
     EXPECT_TRUE(game_identity("other/home", "10").empty());
   }
+  /**
+   * An identity carries the Space and its target, and a target belongs to a
+   * launcher family. Encoding one against Steam's grammar alone made every
+   * Heroic and Lutris entry come out empty, which a client reads as a library
+   * it cannot verify at all.
+   */
+  TEST(SpacesLibrary, IdentityCarriesEveryLauncherFamilysTarget) {
+    for (const auto *target : {"library-v1", "epic.AlanWake2", "gog.1207658924", "amazon.Larch", "id.42"}) {
+      const auto id = game_identity("Alex_1", target);
+      EXPECT_EQ(id, std::string("space.Alex_1.") + target) << target;
+      EXPECT_EQ(parse_game_identity(id), (game_identity_t{"Alex_1", target})) << target;
+    }
+    // A target no launcher would accept still has no identity.
+    for (const auto *target : {"store.Thing", "epic.", "id.", "library-v2", "epic.bad name"})
+      EXPECT_TRUE(game_identity("Alex_1", target).empty()) << target;
+  }
   TEST(SpacesLibrary, CatalogRequiresUniqueInstalledTitleIdentities) {
     const auto catalog = decode_library(R"({"schema":1,"games":[{"target":"3527290","name":"PEAK"}]})");
     ASSERT_TRUE(catalog);

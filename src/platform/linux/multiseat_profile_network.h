@@ -18,6 +18,13 @@ namespace multiseat::container {
   /** The sentinel that opens a family's launcher rather than a title. */
   [[nodiscard]] std::string_view launcher_sentinel(runtime_profile_e profile);
   /**
+   * Whether any launcher family would accept this target. A game identity
+   * carries the Space but not its family, so encoding and parsing one asks
+   * this; which family may use which grammar is settled where a Space is
+   * launched, against the Space's own family.
+   */
+  [[nodiscard]] bool any_launcher_target(std::string_view target);
+  /**
    * Whether a family needs the private bridge and the launcher sandbox policy.
    * Every concrete launcher does: they all sign in, download and run games.
    * Only the image's own test workload does not.

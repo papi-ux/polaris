@@ -74,6 +74,12 @@ namespace multiseat::container {
     }
   }
 
+  bool any_launcher_target(std::string_view target) {
+    for (const auto profile : {runtime_profile_e::steam, runtime_profile_e::heroic, runtime_profile_e::lutris})
+      if (valid_launcher_target(profile, target)) return true;
+    return false;
+  }
+
   bool supported_streaming_workload(runtime_profile_e profile, const workload_plan_t &workload) {
     return workload_matches_runtime_profile(workload, profile) &&
       valid_launcher_target(profile, workload.target_id);
