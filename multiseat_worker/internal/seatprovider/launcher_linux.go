@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -129,6 +130,16 @@ func launcherEnvironment(request seatruntime.Request, session launcherSession) (
 		// this hint neither creates a device nor grants access to another seat.
 		environment = append(environment, "SDL_JOYSTICK_DEVICE=/dev/input/polaris-gamepad-0")
 	}
+	// The launcher and every title under it draw through X11. gamescope exposes a
+	// Wayland socket for this worker's own input, and a title that finds
+	// WAYLAND_DISPLAY takes it: vkcube does, and so does anything built on SDL3.
+	// With no Steam to name the game, gamescope ranks such a window below every
+	// X11 window, so a Heroic title ran at full speed hidden behind the launcher
+	// that started it. A Steam Deck hands its games no Wayland socket either.
+	// GAMESCOPE_WAYLAND_DISPLAY stays, because only gamescope's own tools read it.
+	environment = slices.DeleteFunc(environment, func(entry string) bool {
+		return strings.HasPrefix(entry, "WAYLAND_DISPLAY=")
+	})
 	return append(environment,
 		"PATH=/usr/bin", "LC_ALL=C",
 		"DISPLAY="+session.display, "STEAM_GAME_DISPLAY_0="+session.display,

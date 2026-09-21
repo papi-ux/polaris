@@ -70,6 +70,36 @@ func TestALauncherIsNeverStartedAsAnotherFamilys(t *testing.T) {
 	}
 }
 
+// Found by running a sideloaded Heroic title: vkcube chose the Wayland socket, Heroic
+// showed it as Playing, and the stream went on showing Heroic. The same program started
+// over X11 in the same Space took the screen at once.
+func TestNoLauncherTreeIsHandedTheCompositorsWaylandSocket(t *testing.T) {
+	steam := seatruntime.Request{Stage: seatruntime.StageLauncher, RuntimeNamespace: "steam-test", RuntimeProfile: "steam", WorkloadKind: seatruntime.WorkloadSteam, WorkloadID: seatruntime.SteamBigPicture, WaylandSocket: "polaris-wayland-test", AudioSink: "audio-test", InputSeat: "input-test"}
+	for _, request := range []seatruntime.Request{steam, lutrisRequest(seatruntime.LauncherLibrary), heroicRequest(seatruntime.LauncherLibrary)} {
+		stage, err := seatruntime.Environment(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(stage, "WAYLAND_DISPLAY="+request.WaylandSocket) {
+			t.Fatalf("%s: the launcher stage itself still needs the socket", request.WorkloadKind)
+		}
+		environment, err := launcherEnvironment(request, launcherSession{display: ":0", width: 1920, height: 1080, refresh: 60000})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range environment {
+			if strings.HasPrefix(entry, "WAYLAND_DISPLAY=") {
+				t.Errorf("%s: a title that finds %s draws where gamescope hides it behind the launcher", request.WorkloadKind, entry)
+			}
+		}
+		for _, kept := range []string{"DISPLAY=:0", "GAMESCOPE_WAYLAND_DISPLAY=" + request.WaylandSocket} {
+			if !slices.Contains(environment, kept) {
+				t.Errorf("%s: lost %s", request.WorkloadKind, kept)
+			}
+		}
+	}
+}
+
 func TestEveryWineFamilySeesTheSeatsGamepad(t *testing.T) {
 	for _, request := range []seatruntime.Request{lutrisRequest(seatruntime.LauncherLibrary), heroicRequest(seatruntime.LauncherLibrary)} {
 		environment, err := launcherEnvironment(request, launcherSession{display: ":0", width: 1920, height: 1080, refresh: 60000})
