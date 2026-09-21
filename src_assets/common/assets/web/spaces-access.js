@@ -41,6 +41,7 @@ export function validSnapshot(next) {
         typeof item.client_id !== 'string' || !item.client_id ||
         !['starting', 'running', 'stopping'].includes(item.state)))) return false
   if (next.runtime_move_available !== undefined && typeof next.runtime_move_available !== 'boolean') return false
+  if (next.launchers !== undefined && !validLaunchers(next.launchers)) return false
   return next.runtime_move_job === undefined || next.runtime_move_job === null || validMoveJob(next.runtime_move_job)
 }
 
@@ -75,12 +76,37 @@ function validRuntime(profile) {
     (move.nvidia_driver === '' || driver(move.nvidia_driver)) &&
     (reason !== 'host_driver_available' || move.nvidia_driver === '')
 }
+const families = ['steam', 'heroic', 'lutris']
+
+// The launchers a Space can be made for on this PC, since 1.4.12. One this PC
+// already runs a Space for lends the next Space its image and names no runtime.
+// Any other names the runtime its first Space would use, and whether that
+// runtime is here already or would be downloaded first.
+function validLaunchers(launchers) {
+  if (!Array.isArray(launchers) || launchers.length > families.length) return false
+  const seen = new Set()
+  for (const item of launchers) {
+    if (!item || typeof item !== 'object' || !families.includes(item.family) || seen.has(item.family) ||
+        typeof item.has_space !== 'boolean' || typeof item.installed !== 'boolean') return false
+    if (item.has_space ? item.runtime_id !== '' || !item.installed : !runtimeId(item.runtime_id)) return false
+    seen.add(item.family)
+  }
+  return true
+}
+
 function validMoveJob(job) {
   const text = value => typeof value === 'string' && value.length <= 1024
+  if (!job || typeof job !== 'object' || typeof job.request_id !== 'string' || typeof job.profile_id !== 'string' ||
+      !runtimeId(job.runtime_id) || !nullableDriver(job.nvidia_driver) || !(job.code === '' || word(job.code)) ||
+      !text(job.message) || !text(job.action)) return false
+  // The first Space of a launcher is the same job with making the Space where
+  // a move would be. It has no Space to name yet, so it names the launcher and
+  // what the Space will be called.
+  if (job.kind === 'create')
+    return job.profile_id === '' && families.includes(job.family) && typeof job.name === 'string' && !!job.name &&
+      job.name.length <= 512 && ['downloading', 'creating', 'done', 'failed'].includes(job.state)
   // A job that moves a Space onto the runtime that borrows this PC's driver
   // names no driver version, for the same reason the offer does not.
-  return !!job && typeof job === 'object' && typeof job.request_id === 'string' && typeof job.profile_id === 'string' &&
-    !!job.profile_id && runtimeId(job.runtime_id) && nullableDriver(job.nvidia_driver) &&
-    ['downloading', 'moving', 'done', 'failed'].includes(job.state) && (job.code === '' || word(job.code)) &&
-    text(job.message) && text(job.action)
+  return (job.kind === undefined || job.kind === 'move') && !!job.profile_id && job.family === undefined &&
+    job.name === undefined && ['downloading', 'moving', 'done', 'failed'].includes(job.state)
 }

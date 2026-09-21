@@ -140,6 +140,85 @@ describe('Steam profile creation', () => {
     expect(JSON.parse(fetch.mock.calls[0][1].body).family).toBe('heroic')
   })
 
+  describe('the first Space of a launcher', () => {
+    const steam = { family: 'steam', has_space: true, installed: true, runtime_id: '' }
+    const heroic = { family: 'heroic', has_space: false, installed: false, runtime_id: 'heroic-nvidia-host' }
+    const job = (state, extra = {}) => ({ kind: 'create', request_id: id, profile_id: '', runtime_id: heroic.runtime_id,
+      nvidia_driver: '', state, code: state, message: '', action: '', family: 'heroic', name: 'Player 2', ...extra })
+    const heroicSpace = { id, name: 'Player 2', family: 'heroic', steam: false, clients: [] }
+
+    it('offers a launcher this PC has no Space for yet, and says what creating one will do', async () => {
+      await open({ launchers: [steam, heroic] })
+      expect(wrapper.findAll('option').map(item => item.text())).toEqual(['Steam', 'Heroic'])
+      expect(wrapper.find('[data-first-of-launcher]').exists()).toBe(false)
+      await wrapper.get('select').setValue('heroic')
+      expect(wrapper.get('[data-first-of-launcher]').text()).toBe('This will be the first Heroic Space on this PC. ' +
+        'Polaris downloads the Heroic gaming runtime first, a few gigabytes, and then creates the Space.')
+      await wrapper.setProps({ launchers: [steam, { ...heroic, installed: true }] })
+      expect(wrapper.get('[data-first-of-launcher]').text()).toBe('This will be the first Heroic Space on this PC. ' +
+        'Its gaming runtime is already downloaded.')
+    })
+
+    it('follows the host through the download and the creation, then confirms from the saved catalog', async () => {
+      vi.useFakeTimers()
+      fetch.mockResolvedValueOnce(reply({ status: false, profile_id: id, code: '', message: 'Creating the Space', job: job('downloading') }, 202))
+      refresh.mockImplementation(async () => { await wrapper.setProps({ job: job('downloading') }); return true })
+      await open({ launchers: [steam, heroic], pollMs: 1000 })
+      await wrapper.get('select').setValue('heroic')
+      await wrapper.get('form').trigger('submit')
+      await flushPromises()
+      expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ request_id: id, family: 'heroic', name: 'Player 2' })
+      expect(wrapper.get('[data-create-progress]').text())
+        .toBe('Downloading the Heroic gaming runtime. You can leave this page and come back.')
+      // Nothing to press while the host works: no retry, no status check, no half-true "still creating".
+      expect(wrapper.text()).not.toContain('still creating')
+      expect(button('Check creation status')).toBeUndefined()
+      expect(wrapper.get('button[type=submit]').element.disabled).toBe(true)
+      // It reads the job back on its own, sooner than the page would.
+      const before = refresh.mock.calls.length
+      await vi.advanceTimersByTimeAsync(2100)
+      expect(refresh.mock.calls.length).toBe(before + 2)
+      await wrapper.setProps({ job: job('creating') })
+      expect(wrapper.get('[data-create-progress]').text()).toBe('Creating Player 2.')
+      await wrapper.setProps({ job: job('done', { code: 'space_created' }), profiles: [source, heroicSpace] })
+      await flushPromises()
+      expect(wrapper.text()).toContain('Player 2 was created')
+      expect(wrapper.find('form').exists()).toBe(false)
+      expect(fetch).toHaveBeenCalledTimes(1)
+      const after = refresh.mock.calls.length
+      await vi.advanceTimersByTimeAsync(3000)
+      expect(refresh.mock.calls.length).toBe(after)
+      vi.useRealTimers()
+    })
+
+    it('says why a download failed and retries with the same request', async () => {
+      fetch.mockResolvedValue(reply({ status: false, profile_id: id, job: job('downloading') }, 202))
+      refresh.mockImplementation(async () => { await wrapper.setProps({ job: job('downloading') }); return true })
+      await open({ launchers: [steam, heroic] })
+      await wrapper.get('select').setValue('heroic')
+      await wrapper.get('form').trigger('submit')
+      await flushPromises()
+      refresh.mockImplementation(async () => true)
+      await wrapper.setProps({ job: job('failed', { code: 'download_incomplete',
+        message: 'The runtime download did not finish. The Space was not created.', action: 'Create the Space again.' }) })
+      expect(wrapper.get('[role=alert]').text())
+        .toBe('The runtime download did not finish. The Space was not created. Create the Space again.')
+      expect(wrapper.find('[data-create-progress]').exists()).toBe(false)
+      expect(button('Retry creation').element.disabled).toBe(false)
+      await wrapper.get('form').trigger('submit')
+      await flushPromises()
+      expect(fetch).toHaveBeenCalledTimes(2)
+      expect(fetch.mock.calls[1][1].body).toBe(fetch.mock.calls[0][1].body)
+      expect(crypto.randomUUID).toHaveBeenCalledTimes(1)
+    })
+
+    it('ignores a job that belongs to another request', async () => {
+      await open({ launchers: [steam, heroic], job: job('downloading', { request_id: '99999999-1234-4234-8234-123456789abc' }) })
+      expect(wrapper.find('[data-create-progress]').exists()).toBe(false)
+      expect(wrapper.get('button[type=submit]').element.disabled).toBe(false)
+    })
+  })
+
   it('points at Host Setup when no launcher is set up yet', async () => {
     wrapper = mount(MultiseatProfileCreate, { global: spacesGlobal, props: { profiles: [{ ...source, family: '', steam: false }], refresh } })
     expect(button('Create a Space').element.disabled).toBe(true)

@@ -95,7 +95,8 @@ const target = computed(() => props.space.runtime_move?.available ? props.space.
 const ownJob = computed(() => props.job?.profile_id === props.space.id ? props.job : null)
 const jobState = computed(() => ownJob.value?.state || '')
 const running = computed(() => ['downloading', 'moving'].includes(jobState.value))
-const otherRunning = computed(() => !!props.job && !ownJob.value && ['downloading', 'moving'].includes(props.job.state))
+// Another Space's move, or the first Space of a launcher being made: one runtime job at a time.
+const otherRunning = computed(() => !!props.job && !ownJob.value && ['downloading', 'moving', 'creating'].includes(props.job.state))
 const done = computed(() => jobState.value === 'done' && !mismatch.value && !upgrade.value && !updated.value)
 const visible = computed(() => mismatch.value || upgrade.value || updated.value || running.value || (witnessed.value && !!ownJob.value))
 const blocked = computed(() => props.locked || !props.ready || working.value || otherRunning.value)

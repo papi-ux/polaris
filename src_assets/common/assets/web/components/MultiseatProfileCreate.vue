@@ -26,18 +26,23 @@
       <p v-else-if="families.length === 1" class="mt-4 text-sm text-storm">
         {{ $t('spaces.launcher_only', { launcher: launcherName(families[0]) }) }}
       </p>
+      <p v-if="firstOfLauncher && !pending" class="mt-3 text-sm text-silver" data-first-of-launcher>
+        {{ $t(firstOfLauncher.installed ? 'spaces.launcher_first_ready' : 'spaces.launcher_first_download',
+              { launcher: launcherName(family) }) }}
+      </p>
+      <p v-if="progress" class="mt-3 text-sm text-silver" role="status" data-create-progress>{{ progress }}</p>
       <p class="mt-3 text-xs text-storm">{{ $t('spaces.create_note') }}</p>
       <div class="mt-4 flex flex-wrap gap-2">
-        <Button type="submit" variant="outline" size="sm" :loading="working"
-                :disabled="locked || working || (!pending && (!validName || !validFamily))">
+        <Button type="submit" variant="outline" size="sm" :loading="working || jobRunning"
+                :disabled="locked || working || jobRunning || (!pending && (!validName || !validFamily))">
           {{ working ? $t('spaces.creating') : pending ? $t('spaces.retry_creation') : $t('spaces.create_submit') }}
         </Button>
-        <Button v-if="pending" type="button" variant="ghost" size="sm" class="text-ice" :disabled="working || refreshing" @click="checkStatus">
+        <Button v-if="pending && !jobRunning" type="button" variant="ghost" size="sm" class="text-ice" :disabled="working || refreshing" @click="checkStatus">
           {{ $t('spaces.check_creation') }}
         </Button>
-        <Button v-else type="button" variant="ghost" size="sm" :disabled="working" @click="closeForm">{{ $t('spaces.cancel') }}</Button>
+        <Button v-else-if="!pending" type="button" variant="ghost" size="sm" :disabled="working" @click="closeForm">{{ $t('spaces.cancel') }}</Button>
       </div>
-      <p v-if="pending" class="mt-3 text-xs text-storm">
+      <p v-if="pending && !jobRunning" class="mt-3 text-xs text-storm">
         {{ $t('spaces.retry_note') }}
         {{ requestSaved ? $t('spaces.retry_saved') : $t('spaces.retry_unsaved') }}
       </p>
@@ -46,26 +51,38 @@
 </template>
 
 <script setup>
-import { computed, inject, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Button from './Button.vue'
 import { useToast } from '../composables/useToast.js'
 
 const props = defineProps({
   profiles: { type: Array, default: () => [] },
+  // The launchers a Space can be made for here, and the host's one runtime job.
+  // A host from before 1.4.12 sends neither.
+  launchers: { type: Array, default: () => [] },
+  job: { type: Object, default: null },
   locked: Boolean, ready: Boolean, refreshing: Boolean,
   refresh: { type: Function, required: true },
+  pollMs: { type: Number, default: 2000 },
 })
 const emit = defineEmits(['busy'])
 const i18n = inject('i18n')
 const t = (key, params) => i18n.t(key, params)
 const { toast } = useToast()
-// A Space is a launcher plus a home. The person picks the launcher, and the
-// host copies the runtime of a live Space that already runs it, so only the
-// launchers this PC is already set up for are offered here. Setting up a
-// launcher for the first time downloads its runtime and happens in Host Setup.
+// A Space is a launcher plus a home. The person picks the launcher. One this
+// PC already runs a Space for lends the new Space its runtime. The first Space
+// of any other launcher this build has a runtime for is made by the same
+// request: the host downloads that runtime first, as a job this form follows.
 const launchers = ['steam', 'heroic', 'lutris']
 const families = computed(() => launchers.filter(value =>
-  props.profiles.some(profile => profile.family === value && !profile.archived)))
+  props.profiles.some(profile => profile.family === value && !profile.archived) ||
+  props.launchers.some(item => item.family === value)))
+// Set when the chosen launcher has no Space here yet, so the form can say what
+// creating one will do before it is asked to.
+const firstOfLauncher = computed(() => {
+  const entry = props.launchers.find(item => item.family === family.value)
+  return entry && !entry.has_space ? entry : null
+})
 const launcherName = value => t('spaces.launcher_' + value)
 const name = ref(''), family = ref(''), showForm = ref(false), working = ref(false)
 const message = ref(''), error = ref(''), pending = ref(null)
@@ -75,6 +92,16 @@ const nameInput = ref(null), openButton = ref(null)
 const validName = computed(() => !!name.value.trim() && new TextEncoder().encode(name.value.trim()).length <= 128 &&
   !/[\u0000-\u001f\u007f]/u.test(name.value.trim()))
 const validFamily = computed(() => families.value.includes(family.value))
+// The host's job for this form's own request, and nobody else's.
+const ownJob = computed(() => props.job?.kind === 'create' && !!pending.value &&
+  props.job.request_id === pending.value.request_id ? props.job : null)
+const jobRunning = computed(() => ['downloading', 'creating'].includes(ownJob.value?.state))
+const progress = computed(() => {
+  if (!jobRunning.value) return ''
+  return ownJob.value.state === 'downloading' ?
+    t('spaces.create_downloading', { launcher: launcherName(ownJob.value.family) }) :
+    t('spaces.create_creating', { name: ownJob.value.name })
+})
 
 function savePending() {
   try {
@@ -131,6 +158,22 @@ function confirmCreation() {
   return true
 }
 watch(() => [props.profiles, props.ready], () => { if (!working.value) confirmCreation() })
+// While the host downloads or creates, read the job back sooner than the
+// page's own poll, and say why when it fails. The request is kept: its identity
+// names the Space, so asking again is the retry.
+let timer = null
+function stopPolling() { if (timer) { clearInterval(timer); timer = null } }
+watch(jobRunning, running => {
+  stopPolling()
+  if (running) timer = setInterval(() => { if (!working.value) refreshProfiles() }, props.pollMs)
+}, { immediate: true })
+onBeforeUnmount(stopPolling)
+watch(ownJob, (job, previous) => {
+  if (!job) return
+  if (jobRunning.value) { message.value = ''; error.value = ''; return }
+  if (job.state === 'failed' && previous?.state !== 'failed')
+    error.value = [job.message, job.action].filter(Boolean).join(' ') || t('spaces.creation_failed')
+})
 watch(families, () => {
   if (!pending.value && !validFamily.value) family.value = families.value[0] || ''
 })
@@ -183,7 +226,8 @@ async function submit() {
     const verified = await refreshProfiles()
     await nextTick()
     if (verified && !confirmCreation() && pending.value && props.ready && !error.value) {
-      message.value = t('spaces.creation_unconfirmed')
+      // A running job says where it is in its own words.
+      message.value = jobRunning.value ? '' : t('spaces.creation_unconfirmed')
     }
     working.value = false; emit('busy', false)
   }

@@ -329,6 +329,10 @@ namespace {
     // Docker is asked about Heroic alone. Lutris has only an archived Space
     // and this build has no runtime for it, so it is not offered at all.
     auto listed = spaces::describe_launchers(host, profiles, families, std::nullopt, &targets);
+    // The console reads this same file and has to accept it.
+    std::ifstream shared(std::filesystem::path {POLARIS_SOURCE_DIR} / "tests/fixtures/spaces-launchers.json");
+    ASSERT_TRUE(shared) << "the shared shape must be readable from both languages";
+    EXPECT_EQ(listed, json::parse(shared).at("launchers"));
     ASSERT_EQ(listed.size(), 2U);
     EXPECT_EQ(listed[0], (json {{"family", "steam"}, {"has_space", true}, {"installed", true}, {"runtime_id", ""}}));
     EXPECT_EQ(listed[1], (json {{"family", "heroic"}, {"has_space", false}, {"installed", false}, {"runtime_id", "heroic-default"}}));
@@ -654,6 +658,9 @@ namespace {
     hold_install = true;
     EXPECT_EQ(service->submit_create(request).status, 202);
     auto job = service->snapshot();
+    std::ifstream shared(std::filesystem::path {POLARIS_SOURCE_DIR} / "tests/fixtures/spaces-launchers.json");
+    ASSERT_TRUE(shared) << "the shared shape must be readable from both languages";
+    EXPECT_EQ(job, json::parse(shared).at("create_job")) << "the console reads this same file and has to accept it";
     EXPECT_EQ(job["kind"], "create");
     EXPECT_EQ(job["state"], "downloading");
     EXPECT_EQ(job["profile_id"], "") << "the Space does not exist yet";

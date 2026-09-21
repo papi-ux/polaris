@@ -21,6 +21,44 @@ const snapshot = runtime => ({
   }],
 })
 
+const launcherShapes = JSON.parse(readFileSync(join(here, '../../../../tests/fixtures/spaces-launchers.json'), 'utf8'))
+
+describe('what a host says about making a Space for a launcher', () => {
+  const told = extra => ({ ...snapshot({}), ...extra })
+
+  it('accepts the launchers and the job for a launcher\'s first Space exactly as the host sends them', () => {
+    expect(validSnapshot(told({ launchers: launcherShapes.launchers }))).toBe(true)
+    expect(validSnapshot(told({ launchers: launcherShapes.launchers, runtime_move_job: launcherShapes.create_job }))).toBe(true)
+    for (const state of ['creating', 'done', 'failed'])
+      expect(validSnapshot(told({ runtime_move_job: { ...launcherShapes.create_job, state, code: state } }))).toBe(true)
+    // A host from before launchers sends neither, and a move still says nothing of a kind.
+    expect(validSnapshot(told({}))).toBe(true)
+  })
+
+  it('refuses a launcher list it cannot rely on', () => {
+    const [steam, heroic] = launcherShapes.launchers
+    for (const launchers of [
+      'steam', [{ ...heroic, family: 'epic' }], [steam, steam], [{ ...heroic, runtime_id: '' }],
+      [{ ...heroic, runtime_id: '../heroic' }], [{ ...steam, runtime_id: 'steam-default' }],
+      [{ ...steam, installed: false }], [{ ...heroic, installed: 'yes' }], [{ family: 'heroic' }], [null],
+    ]) expect(validSnapshot(told({ launchers })), JSON.stringify(launchers)).toBe(false)
+  })
+
+  it('keeps a create job and a move job apart', () => {
+    const job = launcherShapes.create_job
+    for (const wrong of [
+      { ...job, profile_id: 'space-a' }, { ...job, family: 'epic' }, { ...job, name: '' }, { ...job, state: 'moving' },
+      { ...job, kind: 'delete' }, { ...job, kind: 'move' }, { ...job, runtime_id: '' },
+    ]) expect(validSnapshot(told({ runtime_move_job: wrong })), JSON.stringify(wrong)).toBe(false)
+    const move = { request_id: job.request_id, profile_id: '15ab1141-72db-4e28-a138-463a0dd1d98a', runtime_id: 'steam-nvidia-host',
+      nvidia_driver: '', state: 'moving', code: 'moving', message: '', action: '' }
+    expect(validSnapshot(told({ runtime_move_job: move }))).toBe(true)
+    expect(validSnapshot(told({ runtime_move_job: { ...move, kind: 'move' } }))).toBe(true)
+    expect(validSnapshot(told({ runtime_move_job: { ...move, state: 'creating' } }))).toBe(false)
+    expect(validSnapshot(told({ runtime_move_job: { ...move, family: 'steam' } }))).toBe(false)
+  })
+})
+
 describe('the runtime shape a host sends', () => {
   it('accepts a move offered as an upgrade, which names no driver of its own', () => {
     expect(validSnapshot(snapshot(shapes.upgrade))).toBe(true)

@@ -29,6 +29,7 @@
                 :locked="locked" :lock-reason-id="streamLock ? lockReasonId : ''" :ready="ready" :refresh="loadProfiles"
                 @busy="managing = $event" @open-default="openDefault" />
     <MultiseatProfileCreate v-if="state.enabled && state.creation_available" :profiles="state.profiles"
+                            :launchers="state.launchers || []" :job="state.runtime_move_job || null"
                            :locked="locked" :ready="ready" :refreshing="loading" :refresh="loadProfiles" @busy="creating = $event" />
     <DesktopAccess v-if="Array.isArray(state.desktop_clients)" :clients="clients" :allowed="state.desktop_clients"
                    :locked="locked" :refresh="loadProfiles" @busy="managing = $event" />
