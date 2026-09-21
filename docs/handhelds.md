@@ -85,7 +85,8 @@ What that stream is made of:
   points back when it ends.
 - **A Steam title** launched from a client is handed to the Steam that is running Game Mode, and
   Game Mode brings it to the front. A host configured for Private Stream does not ask the player
-  to close Steam first, because there is no other Steam to close.
+  to close Steam first, because there is no other Steam to close. A title that is already open on
+  the device is joined as it is and not launched a second time.
 - **Ending the session** closes the title the stream opened and leaves Game Mode alone. On a
   desktop host, ending a Steam title's stream closes the Steam that the stream opened. In Game Mode
   that Steam is the session, so only the title is asked to close, and Steam stays as it is. A title

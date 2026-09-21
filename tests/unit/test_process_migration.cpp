@@ -4495,6 +4495,15 @@ TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStream
     << "on a desktop host the Steam cleanup is what closes the title";
   EXPECT_EQ(proc::game_mode_title_to_remember_for_tests("", true, false), "") << "Desktop and other entries open no title";
 
+  // A title that is open is joined, not launched again: Game Mode's Steam answers a second launch
+  // with "Game already running", drawn over the game.
+  EXPECT_TRUE(proc::should_skip_launch_of_open_game_mode_title_for_tests("setsid steam steam://rungameid/813230", true));
+  EXPECT_TRUE(proc::should_skip_launch_of_open_game_mode_title_for_tests("setsid steam -applaunch 813230", true));
+  EXPECT_TRUE(proc::should_skip_launch_of_open_game_mode_title_for_tests("setsid steam -gamepadui", true));
+  EXPECT_FALSE(proc::should_skip_launch_of_open_game_mode_title_for_tests("setsid steam steam://rungameid/813230", false));
+  EXPECT_FALSE(proc::should_skip_launch_of_open_game_mode_title_for_tests("setsid mangohud-config --reset", true))
+    << "whatever else the app runs beside Steam still runs";
+
   // Acted on at End Session.
   EXPECT_TRUE(proc::should_close_game_mode_title_for_tests("813230", true, false));
   EXPECT_FALSE(proc::should_close_game_mode_title_for_tests("", true, false));

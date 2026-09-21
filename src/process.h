@@ -331,6 +331,7 @@ namespace proc {
     bool game_mode_session_live,
     bool already_running
   );
+  bool should_skip_launch_of_open_game_mode_title_for_tests(const std::string &cmd, bool title_already_open);
   bool should_close_game_mode_title_for_tests(
     std::string_view launched_appid,
     bool game_mode_session_live,

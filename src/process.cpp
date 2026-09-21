@@ -3453,6 +3453,13 @@ namespace proc {
       return std::string {appid};
     }
 
+    bool should_skip_launch_of_open_game_mode_title(const std::string &cmd, bool title_already_open) {
+      // Game Mode's Steam answers a second launch of a title that is open with "An error occurred
+      // while launching this game: Game already running", drawn over the game. The title is on the
+      // screen already, so the stream joins it and the launch is not sent.
+      return title_already_open && command_is_steam_library_launch_component(cmd);
+    }
+
     bool should_close_game_mode_title(
       std::string_view launched_appid,
       bool game_mode_session_live,
@@ -5610,6 +5617,10 @@ namespace proc {
     bool already_running
   ) {
     return game_mode_title_to_remember(appid, game_mode_session_live, already_running);
+  }
+
+  bool should_skip_launch_of_open_game_mode_title_for_tests(const std::string &cmd, bool title_already_open) {
+    return should_skip_launch_of_open_game_mode_title(cmd, title_already_open);
   }
 
   bool should_close_game_mode_title_for_tests(
@@ -9347,19 +9358,25 @@ namespace proc {
       // retain pidfd authority for their direct children so stop can reap exact
       // children even if they exit before /proc ownership scanning begins.
       const bool detached_only = !_app.detached.empty() && _app.cmd.empty();
+      [[maybe_unused]] bool game_mode_title_already_open = false;
 #ifdef __linux__
       {
         const auto appid = steam_appid_for_context(_app);
         const bool game_mode_live = platf::game_mode_host::session_live();
-        const bool already_running = game_mode_live && !appid.empty() &&
-                                     platf::steam_title::running(platf::steam_title::read_process_table(), appid, getuid());
-        _game_mode_launched_appid = game_mode_title_to_remember(appid, game_mode_live, already_running);
-        if (already_running) {
-          BOOST_LOG(info) << "game_mode: ["sv << _app.name << "] is already open in Game Mode, so ending this stream will leave it open"sv;
+        game_mode_title_already_open = game_mode_live && !appid.empty() &&
+                                       platf::steam_title::running(platf::steam_title::read_process_table(), appid, getuid());
+        _game_mode_launched_appid = game_mode_title_to_remember(appid, game_mode_live, game_mode_title_already_open);
+        if (game_mode_title_already_open) {
+          BOOST_LOG(info) << "game_mode: ["sv << _app.name << "] is already open in Game Mode, so this stream joins it: it is not launched again, and ending the stream will leave it open"sv;
         }
       }
 #endif
       for (auto &cmd : _app.detached) {
+#ifdef __linux__
+        if (should_skip_launch_of_open_game_mode_title(cmd, game_mode_title_already_open)) {
+          continue;
+        }
+#endif
         boost::filesystem::path working_dir = _app.working_dir.empty() ?
                                                 find_working_directory(cmd, _env) :
                                                 boost::filesystem::path(_app.working_dir);
