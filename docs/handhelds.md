@@ -79,8 +79,11 @@ What that stream is made of:
   not, Polaris attaches to the node directly.
 - **Keyboard and mouse** go in through the session's libei socket, the same way Steam's own
   streaming reaches it.
-- **Controllers and touch** use the same virtual devices as on any host, so they need the input
-  setup from your distro guide (`sudo -H polaris --setup-host`).
+- **Controllers** arrive as the same virtual pad as on any host, and Game Mode's Steam picks it up
+  the way it picks up a pad that was just plugged in, toast included. On SteamOS the account at the
+  screen may already create one, so an Xbox style pad works with no setup at all. An emulated
+  DualSense needs the input setup from your distro guide (`sudo -H polaris --setup-host`), and so
+  may touch.
 - **Audio** follows the default sink, which Polaris points at its own while a stream is up and
   points back when it ends.
 - **A Steam title** launched from a client is handed to the Steam that is running Game Mode, and
@@ -104,9 +107,9 @@ Known limits:
   for. HDR is not carried.
 
 Proven on a Steam Deck OLED on SteamOS 3.8.16 with gamescope 3.16.23: the Game Mode screen, a Steam
-title launched from the client at 60 fps with audio, keyboard and mouse, that title closed again when
-the session ended, and Game Mode still running afterwards. Controllers in Game Mode, Bazzite, and hosts whose gamescope has no
-ScreenCast portal still want field results.
+title launched from the client at 60 fps with audio, keyboard, mouse and a controller, that title
+closed again when the session ended, and Game Mode still running afterwards. Touch, an emulated
+DualSense, Bazzite, and hosts whose gamescope has no ScreenCast portal still want field results.
 
 ## Reporting Game Mode results
 
