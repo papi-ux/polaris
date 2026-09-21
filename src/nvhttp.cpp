@@ -11265,6 +11265,11 @@ namespace nvhttp {
         return;
       }
 
+      // A client asks for its profile before it asks for anything else, so this can be the first
+      // request a host in Game Mode sees. The profile has to be resolved against the mode the
+      // launch will run in, or the launch refuses the very profile it was handed.
+      reconcile_game_mode_host();
+
 #ifdef __linux__
       if (const auto result = resolve_profile_request(named_cert_p, request->parse_query_string())) {
         SimpleWeb::CaseInsensitiveMultimap headers;
@@ -11355,7 +11360,10 @@ namespace nvhttp {
         named_cert_p->always_use_virtual_display && !topology_locked;
       std::string requested_selection = paired_virtual_lock ?
         std::string {stream_display_policy::k_host_virtual_display} : requested_topology;
-      const bool mirror_desktop = mirror_desktop_requested ||
+      // A host in Steam Game Mode streams one thing, the Game Mode screen, whatever was asked for.
+      // The launch makes every session a mirror there, and the profile has to name the same topology.
+      const bool game_mode_screen = platf::game_mode_host::session_live();
+      const bool mirror_desktop = game_mode_screen || mirror_desktop_requested ||
         (optimization_app && app_desktop_mirror_applies_for_mode(
           *optimization_app,
           mirror_desktop_requested,
@@ -11417,7 +11425,10 @@ namespace nvhttp {
       resolved_topology = effective_selection;
       launch_owned_display =
         stream_display_policy::selection_owns_launch_refresh_rate(effective_selection);
-      if (mirror_desktop) {
+      if (game_mode_screen) {
+        topology_source = "host_capability";
+        topology_reason_code = "steam_game_mode_session";
+      } else if (mirror_desktop) {
         topology_source = mirror_desktop_requested ?
           "client_launch_request" : "app_configuration";
         topology_reason_code = mirror_desktop_requested ?

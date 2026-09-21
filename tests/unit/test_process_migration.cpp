@@ -4451,6 +4451,41 @@ TEST(ProcessRuntimeConfigTests, ALaunchOnAGameModeHostIsNeverAskedToCloseSteam) 
   }
 }
 
+TEST(ProcessRuntimeConfigTests, TheProfileAGameModeHostResolvesIsTheOneItsLaunchAccepts) {
+  // A launch refuses an exact profile whose topology is not the one it ends up with. On a Steam Deck
+  // the first request after a host start was the profile request, it resolved against the
+  // configured Private Stream, and the launch, which is always a mirror in Game Mode, answered 409.
+  const auto nvhttp = read_source_file_for_contract("src/nvhttp.cpp");
+  const auto optimize = nvhttp.substr(nvhttp.find("auto polarisOptimize = [](resp_https_t response, req_https_t request) {"));
+  const auto authorised = optimize.find("get_verified_cert(request)");
+  const auto reconciled = optimize.find("reconcile_game_mode_host();");
+  const auto resolved = optimize.find("stream_display_policy::effective_session_selection_for_launch(");
+  ASSERT_NE(authorised, std::string::npos);
+  ASSERT_NE(reconciled, std::string::npos);
+  ASSERT_NE(resolved, std::string::npos);
+  EXPECT_LT(authorised, reconciled);
+  EXPECT_LT(reconciled, resolved) << "the held mode is in place before anything is resolved against it";
+
+  const auto live = optimize.find("const bool game_mode_screen = platf::game_mode_host::session_live();");
+  const auto mirror = optimize.find("const bool mirror_desktop = game_mode_screen || mirror_desktop_requested ||");
+  ASSERT_NE(live, std::string::npos);
+  ASSERT_NE(mirror, std::string::npos);
+  EXPECT_LT(mirror, resolved) << "a client that asks for another mode is still told the one the launch will use";
+
+  // Clients check the source against a fixed list, so the reason is new and the source is not.
+  EXPECT_NE(optimize.find("topology_source = \"host_capability\";\n        topology_reason_code = \"steam_game_mode_session\";"), std::string::npos);
+
+  // And that is the topology the launch ends up with.
+  EXPECT_EQ(
+    stream_display_policy::effective_session_selection_for_launch("gamescope_stream", true, false, false, false, false, true),
+    "desktop_display"
+  );
+  EXPECT_EQ(
+    stream_display_policy::effective_session_selection_for_launch("", true, false, false, false, false, true),
+    "desktop_display"
+  );
+}
+
 TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStreamOpened) {
   // Remembered at launch: a Steam title, on a host in Game Mode, that was not open yet.
   EXPECT_EQ(proc::game_mode_title_to_remember_for_tests("813230", true, false), "813230");
