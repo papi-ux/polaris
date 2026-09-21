@@ -183,8 +183,21 @@ namespace multiseat {
           .steam_input = admitted.admission.seat->runtime_profile == runtime_profile_e::steam &&
             (launch->perm & crypto::PERM::input_controller) != crypto::PERM::_no,
         };
-        if (runtime_->bind_runtime(handle, compositor_e::gamescope, "profile-owned launch") != mutation_result_e::applied ||
-            !runtime_->start_seat(handle, plan).started()) return {};
+        // Either refusal used to leave nothing anywhere: the client got the
+        // default words and the log got none. Say which step, and with what.
+        const auto bound = runtime_->bind_runtime(handle, compositor_e::gamescope, "profile-owned launch");
+        if (bound != mutation_result_e::applied) {
+          BOOST_LOG(warning) << "Space worker was not started: the runtime could not be bound (result "
+                             << static_cast<int>(bound) << ')';
+          return {};
+        }
+        const auto started = runtime_->start_seat(handle, plan);
+        if (!started.started()) {
+          BOOST_LOG(warning) << "Space worker was not started: seat start status "
+                             << static_cast<int>(started.status) << ", worker result "
+                             << (started.worker ? std::to_string(static_cast<int>(*started.worker)) : std::string("none"));
+          return {};
+        }
         return {{200, "Space worker is starting"}, handle};
       }
       profile_poll_e poll(const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
