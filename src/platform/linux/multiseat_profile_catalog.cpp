@@ -237,10 +237,14 @@ namespace multiseat::profiles {
         "--mount=type=volume,src=" + volume + ",dst=/profile,volume-nocopy",
         "--entrypoint=/usr/bin/python3", entry.storage.image_reference, "-I", "-c", initialize_code}, false);
       inspect_volume();
-      if (entry.storage.runtime_profile == runtime_profile_e::steam) {
+      // Every launcher signs in, downloads and runs games, so every one of
+      // them gets the private bridge a Space is launched onto. Making it only
+      // for Steam left any other Space with nothing to attach to, and its
+      // worker was then refused at launch with no container ever created.
+      if (container::needs_profile_network(entry.storage.runtime_profile)) {
         result.network_name = container::profile_network_name(entry.storage.profile_key);
         if (!container::create_profile_network(host, entry.storage.profile_key))
-          throw std::runtime_error("Steam profile network could not be provisioned authoritatively");
+          throw std::runtime_error("Space network could not be provisioned authoritatively");
       }
     }
 
@@ -755,7 +759,7 @@ namespace multiseat::profiles {
     removal_result_t result;
     if (request.operation != edit_operation_e::remove_for_good || !valid_edit_request(request)) return result;
     std::string volume, profile_key;
-    bool steam = false, home_present = false;
+    bool networked = false, home_present = false;
     // Every refusal that changes nothing is decided inside the transaction that
     // archives the Space, so the decision and the archive read the same catalog.
     const auto fenced = change(path, [&](catalog_t &catalog, change_result_t &) -> std::optional<std::string> {
@@ -763,10 +767,12 @@ namespace multiseat::profiles {
         [&](const auto &value) { return value.storage.profile_key == request.profile_id; });
       if (entry == catalog.profiles.end()) { result.outcome = outcome_e::not_found; return std::nullopt; }
       if (entry->name != request.confirm_name) { result.outcome = outcome_e::name_mismatch; return std::nullopt; }
-      steam = entry->storage.runtime_profile == runtime_profile_e::steam;
-      // New Steam Spaces copy an existing one's runtime, so the last one stays.
-      if (steam && std::none_of(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &other) {
-            return &other != &*entry && other.storage.runtime_profile == runtime_profile_e::steam;
+      const auto family = entry->storage.runtime_profile;
+      networked = container::needs_profile_network(family);
+      // A new Space copies an existing one of its own launcher family, so the
+      // last Space of each family stays, whatever the other families hold.
+      if (networked && std::none_of(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &other) {
+            return &other != &*entry && other.storage.runtime_profile == family;
           })) { result.outcome = outcome_e::last_space; return std::nullopt; }
       volume = entry->storage.opaque_volume_name;
       profile_key = entry->storage.profile_key;
@@ -817,7 +823,7 @@ namespace multiseat::profiles {
         return result;
       }
     }
-    if (steam) {
+    if (networked) {
       // The network holds no player data. One Docker will not remove is named,
       // and a network whose identity is not the one Polaris made is left alone.
       const auto network = container::profile_network_name(profile_key);

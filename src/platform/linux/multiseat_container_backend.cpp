@@ -882,8 +882,18 @@ namespace multiseat::container {
     auto argv = command_prefix(options_);
     std::string network = "none";
     if (options_.media_enabled && needs_profile_network(profile.runtime_profile)) {
-      const auto id = profile_network_id(host_, profile.profile_key, true);
-      if (!id) throw std::runtime_error {"Steam profile network is unavailable or occupied"};
+      auto id = profile_network_id(host_, profile.profile_key, true);
+      // A Space's network is unused whenever the Space is not running, so a
+      // plain `docker network prune` takes it, and the Space then refuses to
+      // start with nothing to say why. It holds no player data and only
+      // Polaris makes one, so an absent network is made again, on this path
+      // alone so a healthy launch asks Docker nothing extra. A network that
+      // exists under that name with any other identity is never adopted:
+      // creation refuses a name already taken, and launch still demands
+      // Polaris's exact network again before anything is run.
+      if (!id && create_profile_network(host_, profile.profile_key))
+        id = profile_network_id(host_, profile.profile_key, true);
+      if (!id) throw std::runtime_error {"Space network is unavailable or occupied"};
       network = *id;
     }
     const std::vector<std::string> arguments {
@@ -964,7 +974,13 @@ namespace multiseat::container {
     exact(host, "CapDrop", json::array({"ALL"}));
     auto security = json::array({"no-new-privileges"});
     if (!options_.selinux_type.empty()) security.push_back("label=type:" + options_.selinux_type);
-    if (options_.media_enabled && label_value(labels, label_runtime_profile) == "steam") {
+    // The same rule the launch applies, asked the same way. Expecting the
+    // policy for Steam alone while launching it for every launcher made
+    // Polaris reject its own healthy worker: the record carried an option the
+    // validator said could not be there, the inventory stopped being
+    // authoritative, and the Space timed out with a container that was fine.
+    if (options_.media_enabled &&
+        needs_profile_network(runtime_profile_from_name(label_value(labels, label_runtime_profile).value_or("")))) {
       security.push_back("seccomp=" + json::parse(steam_seccomp_data).dump());
     }
     exact(host, "SecurityOpt", security);
@@ -1737,7 +1753,7 @@ namespace multiseat::container {
     try {
       // A missing or changed policy is a definite refusal before Docker run.
       // Do not quarantine this as an uncertain container creation outcome.
-      if (options_.media_enabled && profile->runtime_profile == runtime_profile_e::steam &&
+      if (options_.media_enabled && needs_profile_network(profile->runtime_profile) &&
           !host_.trusted_data_file(std::filesystem::path(steam_seccomp_path), steam_seccomp_data)) {
         return worker_command_result_e::rejected;
       }
@@ -1754,7 +1770,7 @@ namespace multiseat::container {
           !gpu_catalog_current() || !input_allocation_current(*input_allocation)) {
         return worker_command_result_e::rejected;
       }
-      if (options_.media_enabled && profile->runtime_profile == runtime_profile_e::steam) {
+      if (options_.media_enabled && needs_profile_network(profile->runtime_profile)) {
         const auto network = profile_network_id(host_, profile->profile_key, true);
         if (!network || std::find(argv.begin(), argv.end(), "--network=" + *network) == argv.end())
           return worker_command_result_e::rejected;
