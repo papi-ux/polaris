@@ -5576,7 +5576,13 @@ namespace nvhttp {
     // Polaris ships for that launcher, served from the same place a title's is.
     const bool launcher = target == snapshot.launcher_target;
     const auto identity = multiseat::spaces::game_identity(profile, target);
-    const bool poster = !launcher || launcher_poster_path(snapshot.family);
+    // A cover is advertised only where one can exist: the launcher's bundled
+    // poster, or a title the artwork providers can look up, which today means a
+    // Steam app id. A Heroic or Lutris title has none yet. Naming a route that
+    // will always answer 404 left a client unable to tell "no artwork exists"
+    // from "not loaded yet", so it drew every such title as the same blank tile.
+    const bool poster = launcher ? launcher_poster_path(snapshot.family).has_value() :
+                                   profile_artwork_cache_id(target).has_value();
     nlohmann::json entry {{"id", identity}, {"app_id", multiseat::profile_app_id}, {"name", name},
       {"source", snapshot.family.empty() ? std::string("steam") : snapshot.family},
       // Only a Steam title has a Steam app id. A launcher family's target is

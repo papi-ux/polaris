@@ -1770,6 +1770,30 @@ namespace {
     EXPECT_EQ(state->begins.load(), began);
   }
 
+  // A cover is named only where one can exist. The artwork providers look a title up by its
+  // Steam app id, so a Lutris or Heroic title has none yet, and a route that can only answer 404
+  // left a client drawing every such title as the same blank tile with no way to know why.
+  TEST_F(MultiseatProfileHttp, ATitleWithNoArtworkSourceIsListedWithoutACover) {
+    uninstall_profile_launch_service(service); ASSERT_TRUE(service->shutdown(2s));
+    state->library = [](std::string_view) { return spaces::library_t{true, {{"id.2", "GL Gears"}}}; };
+    service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
+      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, "lutris", false, {}, true}}), 2s);
+    ASSERT_TRUE(install_profile_launch_service(service));
+    const auto result = nvhttp::profile_library_request(client, "profile-a");
+    ASSERT_EQ(result.status, 200); ASSERT_EQ(result.body.at("games").size(), 2U);
+    EXPECT_EQ(result.body["games"][0]["name"], "Lutris");
+    const auto &title = result.body["games"][1];
+    EXPECT_EQ(title["id"], "space.profile-a.id.2");
+    EXPECT_EQ(title["name"], "GL Gears");
+    EXPECT_EQ(title["source"], "lutris");
+    EXPECT_EQ(title["steam_appid"], "");
+    EXPECT_EQ(title["cover_url"], "");
+    EXPECT_TRUE(title["artwork"].is_null());
+    // It is still a title this device may play, and one nothing is ever looked up for.
+    EXPECT_EQ(nvhttp::profile_artwork_target(client, "space.profile-a.id.2"), "id.2");
+    EXPECT_FALSE(nvhttp::profile_launcher_poster(client, "space.profile-a.id.2"));
+  }
+
   // While an administrator approves a change to this PC's setup, nothing starts or changes a Space.
   TEST_F(MultiseatAssignments, HostSetupInProgressHoldsLaunchesAndSpacesChangesUntilItFinishes) {
     std::mutex mutex;
