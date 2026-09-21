@@ -8,6 +8,8 @@ starts at `v1.0.0`.
 ## Unreleased
 
 - `sudo -H polaris --setup-host` refreshes the Bazzite KMS runtime copy when it has fallen behind the package. The Bazzite guide made `/usr/local/bin/polaris-kms` during every install until 1.4.5, and no package update touches a file under `/usr/local`, so those hosts kept running the build they first installed: `rpm -q polaris` reported the new version while the console reported the old one, and a copy older than 1.4.8 could not say why. Setup now compares the copy with the packaged binary, replaces it and restores its DRM/KMS capability when they differ, and says to restart the service. Only that one path is ever replaced, and only by the packaged binary.
+- The Update Center says when the host process is older than the console it serves. Every build serves the web files the package installed, so after an update the console is new even when the process behind it is not. A host older than 1.4.3 reports no installed package version and one older than 1.4.8 no running binary, so until now such a host only ever read "Update available" for a package that was already installed. It now reads "Console is newer than the host", with the restart and the `--setup-host` refresh to try, and it needs no release check to say so.
+
 ## v1.4.11 - 2026-09-19
 
 Host Virtual Display on KDE Plasma gets the game, the controller and the touch it was missing, Spaces keep working across an NVIDIA driver update and a reboot, Mirror Desktop streams again when the capture setting does not fit the desktop, and couch co-op gets clearer. Nova 1.4.11 comes out alongside it. Existing configurations and paired devices remain valid.

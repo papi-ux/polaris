@@ -294,6 +294,63 @@ describe('Update Center release awareness', () => {
     }
   })
 
+  it('says when the host process is older than the console it serves', () => {
+    // The field report: rpm at 1.4.11, the service still on the copy made at
+    // 1.4.1. That host reports no installed package version and no running
+    // binary, so the console's own release is all there is to go on.
+    const state = buildUpdateCenterState({
+      currentVersion: '1.4.1',
+      consoleVersion: '1.4.12',
+      latestRelease: { ...release, tag_name: 'v1.4.12', name: 'v1.4.12' },
+      host: { platform: 'linux', distro: { id: 'bazzite', version_id: '44' } },
+    })
+
+    expect(state.status).toBe('restart_required')
+    expect(state.statusLabel).toBe('Console is newer than the host')
+    expect(state.summary).toContain('This console came with Polaris 1.4.12, but the host process answering it is 1.4.1')
+    expect(state.summary).toContain('/usr/local/bin/polaris-kms')
+    expect(state.summary).toContain('sudo -H polaris --setup-host')
+    expect(state.statusTone).toBe('restart')
+
+    // It needs no release metadata, and must not read as "could not check".
+    const offline = buildUpdateCenterState({ currentVersion: '1.4.1', consoleVersion: '1.4.12', latestRelease: null })
+    expect(offline.status).toBe('restart_required')
+    expect(offline.statusLabel).toBe('Console is newer than the host')
+    expect(offline.currentVersion).toBe('1.4.1')
+
+    // 1.4.11 is newer than 1.4.2 and 1.4.9; compared as text it is not.
+    for (const running of ['1.4.2', '1.4.9']) {
+      expect(buildUpdateCenterState({ currentVersion: running, consoleVersion: '1.4.11', latestRelease: null }).status).toBe('restart_required')
+    }
+  })
+
+  it('keeps quiet about the console when it has nothing to say', () => {
+    const latestRelease = { ...release, tag_name: 'v1.4.12', name: 'v1.4.12' }
+    const host = { platform: 'linux', distro: { id: 'fedora', version_id: '44' } }
+
+    // The same release, and a development build whose suffix differs.
+    expect(buildUpdateCenterState({ currentVersion: '1.4.12', consoleVersion: '1.4.12', latestRelease, host }).status).toBe('current')
+    expect(buildUpdateCenterState({ currentVersion: '1.4.12.0a1b2c3', consoleVersion: '1.4.12.9f8e7d6.dirty', latestRelease, host }).status).toBe('current')
+    // A binary deployed ahead of its web files is a development host, not this fault.
+    expect(buildUpdateCenterState({ currentVersion: '1.4.13', consoleVersion: '1.4.12', latestRelease, host }).status).toBe('ahead')
+    // A console built by hand carries no release.
+    expect(buildUpdateCenterState({ currentVersion: '1.4.1', consoleVersion: '', latestRelease, host }).status).toBe('update_available')
+    expect(buildUpdateCenterState({ currentVersion: '1.4.1', latestRelease, host }).status).toBe('update_available')
+
+    // A host that names its own package and copy keeps the more exact advice.
+    const named = buildUpdateCenterState({
+      currentVersion: '1.4.9',
+      consoleVersion: '1.4.12',
+      latestRelease,
+      host: {
+        ...host,
+        installed_package_version: '1.4.12',
+        running_binary: { path: '/usr/local/bin/polaris-kms', packaged_path: '/usr/bin/polaris', matches_package: false },
+      },
+    })
+    expect(named.statusLabel).toBe('Installed, running a copy')
+  })
+
   it('detects a stable update and selects the Arch/CachyOS package', () => {
     const state = buildUpdateCenterState({
       currentVersion: '1.2.1',
