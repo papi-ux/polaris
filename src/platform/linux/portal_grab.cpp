@@ -33,6 +33,7 @@
 #include "src/logging.h"
 #include "src/platform/common.h"
 #include "src/platform/linux/game_mode_host.h"
+#include "src/platform/linux/game_mode_repaint.h"
 #include "src/platform/linux/graphics.h"
 #include "src/platform/linux/misc.h"
 #include "src/video.h"
@@ -1141,6 +1142,14 @@ namespace portal {
       }
 
 
+      // gamescope sends a frame only when the focused window commits, so a Game Mode screen that is
+      // standing still gives a new capture nothing to show. Past the private compositor branch above,
+      // a capture on a host in Game Mode is a capture of that screen, by either route.
+      platf::game_mode_host::first_frame_t first_frame {platf::game_mode_host::session_live()};
+      if (first_frame.ask()) {
+        platf::game_mode_host::request_focused_window_repaint_async();
+      }
+
       bool capture_transport_logged = false;
       while (cap) {
         const auto capture_start = std::chrono::steady_clock::now();
@@ -1150,6 +1159,9 @@ namespace portal {
 
         switch (wait_result) {
           case pipewire_capture::wait_result_e::timeout: {
+            if (first_frame.ask()) {
+              platf::game_mode_host::request_focused_window_repaint_async();
+            }
             std::shared_ptr<platf::img_t> dummy;
             if (!push_captured_image_cb(std::move(dummy), false)) {
               return platf::capture_e::ok;
@@ -1161,6 +1173,7 @@ namespace portal {
           case pipewire_capture::wait_result_e::error:
             return platf::capture_e::error;
           case pipewire_capture::wait_result_e::frame:
+            first_frame.frame_arrived();
             break;
         }
 
