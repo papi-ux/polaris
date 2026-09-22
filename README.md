@@ -7,10 +7,11 @@
 
 **Linux game streaming that answers to you.**
 
-Polaris turns a Linux gaming PC into a modern, self-hosted streaming home for
-Nova, Moonlight, and other compatible clients. Choose whether a session uses a
-private compositor, virtual display, or your desktop, then see the active
-capture, encoder, client, and runtime path in one web console.
+Polaris turns a Linux gaming PC or a Steam Deck into a modern, self-hosted
+streaming home for Nova, Moonlight, and other compatible clients. Choose whether
+a session uses a private compositor, a virtual display, your desktop, or the
+Steam Game Mode screen, then see the active capture, encoder, client, and
+runtime path in one web console.
 
 [![Stars](https://img.shields.io/github/stars/papi-ux/polaris?style=for-the-badge&color=7c73ff&labelColor=1f1d31)](https://github.com/papi-ux/polaris/stargazers)
 [![Matrix](https://img.shields.io/badge/Matrix-Join_chat-0dbd8b?style=for-the-badge&logo=matrix&logoColor=white&labelColor=1f1d31)](https://matrix.to/#/#papi-ux:papi-ux.com)
@@ -43,13 +44,25 @@ explicit:
   Virtual Display, Headless Dongle, and Mirror Desktop are described by their
   display and privacy impact, unavailable modes fail closed, and the displays
   Polaris creates for a stream go up to 240 FPS.
-- **Spaces, an early preview.** Each player gets their own Steam sign-in,
-  library and saves on one PC, chosen from Nova with the same words on every
-  surface and a reason whenever a Space cannot start. Configured hosts only,
-  one active Space, and no public runtime download yet; the
+- **Streams straight from Steam Game Mode.** A Steam Deck, or any PC running a
+  gamescope Steam session, streams its Game Mode screen. A Steam title launched
+  from Nova opens in Game Mode, a controller arrives as a DualSense, touch lands
+  where you aim it, and End Session closes only the title the stream opened.
+  Proven on a Steam Deck OLED; the
+  [handhelds guide](https://papi-ux.com/docs/handhelds/) keeps Polaris running
+  across a switch between Desktop Mode and Game Mode.
+- **Spaces, an early preview.** Each player gets their own sign-in, library and
+  saves on one PC, in Steam, in Heroic Games Launcher with their Epic, GOG and
+  Amazon games, or in Lutris. A Space is chosen from Nova with the same words on
+  every surface and a reason whenever it cannot start, its runtime downloads
+  from Host Setup, and on NVIDIA it borrows this PC's own driver, so a driver
+  update no longer strands it. One active Space at a time; the
   [Spaces guide](https://papi-ux.com/docs/spaces/) and
   [Spaces or regular streaming](https://papi-ux.com/docs/spaces-or-regular/)
   say what that means for you.
+- **Anyone can watch.** A second device can watch the stream that is running at
+  whatever resolution it has. The host says up front what there is to watch, so
+  a watcher is never refused for asking for the wrong mode.
 - **A library that fills from a folder of ROMs.** Import a ROM folder once and
   rescan for new games. Eden, Dolphin, Cemu, DuckStation, PCSX2, PPSSPP and
   mGBA are presets, covers come from your folders, ES-DE or RetroArch, and the
@@ -143,16 +156,20 @@ account. **Upgrade or reinstall:** open `https://localhost:47990/#/login` and
 use the existing account; package operations intentionally preserve credentials,
 pairing keys, settings, and the library under `~/.config/polaris`. The
 [quick-start guide](https://papi-ux.com/docs/quickstart/) contains the current
-Fedora, Arch, SteamOS, Ubuntu, Bazzite, openSUSE, and source paths. Only use
+Fedora, Arch, SteamOS, Ubuntu, Bazzite, openSUSE, and source paths, and on a
+Steam Deck the [SteamOS guide](https://papi-ux.com/docs/steamos/) also keeps
+Polaris running in Game Mode. Only use
 `polaris --setup-host --enable-kms` when the guide says your DRM/KMS capture path
 needs it.
 
 ## Clients and compatibility
 
-[Nova](https://papi-ux.com/nova/) is the enhanced Android client. It adds a
-host-backed Library, the Space chooser, Play Setup, Private Stream choices,
-Command Center, NovaHUD, session ownership, and tuning provenance. Install it from the [latest
-Nova release](https://github.com/papi-ux/nova/releases/latest).
+[Nova](https://papi-ux.com/nova/) is the enhanced client for Android, and now
+for Steam Deck as an Alpha. It adds a host-backed Library, the Space chooser,
+Play Setup, Private Stream choices, Command Center, NovaHUD, session ownership,
+and tuning provenance. Install it from the [latest Nova
+release](https://github.com/papi-ux/nova/releases/latest), where the Steam Deck
+Alpha is a Flatpak bundle beside the Android APKs.
 
 Standard Moonlight-compatible clients remain supported for pairing, browsing,
 launching, input, and streaming. Features that depend on Polaris-specific host
