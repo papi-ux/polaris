@@ -4372,6 +4372,22 @@ TEST(ProcessRuntimeConfigTests, DesktopMirrorAppOverridesPairedVirtualDisplayPre
 #ifdef __linux__
 // polaris#626. A host in Steam Game Mode has one screen and one Steam, and that Steam is the
 // session. Whatever a client asks for, the stream is that screen, and nothing closes that Steam.
+namespace {
+  /// Pins session_live() for one scope. An ASSERT that stops a test halfway still lets it go.
+  struct game_mode_session_pin_t {
+    explicit game_mode_session_pin_t(bool live) {
+      platf::game_mode_host::set_session_live_for_tests(live);
+    }
+
+    game_mode_session_pin_t(const game_mode_session_pin_t &) = delete;
+    game_mode_session_pin_t &operator=(const game_mode_session_pin_t &) = delete;
+
+    ~game_mode_session_pin_t() {
+      platf::game_mode_host::set_session_live_for_tests(std::nullopt);
+    }
+  };
+}  // namespace
+
 TEST(ProcessRuntimeConfigTests, EveryLaunchOnAGameModeHostIsAStreamOfTheGameModeScreen) {
   proc::ctx_t game;
   game.name = "A Steam Game";
@@ -4384,18 +4400,21 @@ TEST(ProcessRuntimeConfigTests, EveryLaunchOnAGameModeHostIsAStreamOfTheGameMode
     session.stream_mode = "headless_stream";
   };
 
-  platf::game_mode_host::set_session_live_for_tests(false);
   rtsp_stream::launch_session_t on_the_desktop;
-  ask_for_private(on_the_desktop);
-  proc::apply_app_display_semantics(game, on_the_desktop);
+  {
+    const game_mode_session_pin_t desktop {false};
+    ask_for_private(on_the_desktop);
+    proc::apply_app_display_semantics(game, on_the_desktop);
+  }
   EXPECT_FALSE(on_the_desktop.mirror_desktop) << "the same host in Desktop Mode keeps the mode that was asked for";
   EXPECT_TRUE(on_the_desktop.virtual_display);
 
-  platf::game_mode_host::set_session_live_for_tests(true);
   rtsp_stream::launch_session_t in_game_mode;
-  ask_for_private(in_game_mode);
-  proc::apply_app_display_semantics(game, in_game_mode);
-  platf::game_mode_host::set_session_live_for_tests(std::nullopt);
+  {
+    const game_mode_session_pin_t game_mode {true};
+    ask_for_private(in_game_mode);
+    proc::apply_app_display_semantics(game, in_game_mode);
+  }
   EXPECT_TRUE(in_game_mode.mirror_desktop);
   EXPECT_FALSE(in_game_mode.virtual_display);
   EXPECT_EQ(
@@ -4404,12 +4423,26 @@ TEST(ProcessRuntimeConfigTests, EveryLaunchOnAGameModeHostIsAStreamOfTheGameMode
     ),
     "desktop_display"
   ) << "which is the mode the capture and input gates recognise";
+
+  // Every launch reaches that rule, not only the ones through nvhttp: the console and the browser
+  // stream start the app in execute_impl directly, before any client may have asked the host.
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  const auto execute = source.substr(source.find("int proc_t::execute_impl("));
+  const auto mirror_only = execute.find("if (app_desktop_mirror_applies(app, *launch_session)) {");
+  const auto applied = execute.find("apply_app_display_semantics(app, *launch_session);");
+  ASSERT_NE(mirror_only, std::string::npos);
+  ASSERT_NE(applied, std::string::npos);
+  const auto mirror_only_end = execute.find("\n    }\n", mirror_only);
+  ASSERT_NE(mirror_only_end, std::string::npos);
+  EXPECT_GT(applied, mirror_only_end) << "applied after that branch closes, for every app, not inside it";
 }
 
 TEST(ProcessRuntimeConfigTests, NothingClosesTheSteamThatIsRunningGameMode) {
-  platf::game_mode_host::set_session_live_for_tests(true);
-  const bool closed = proc::request_desktop_steam_shutdown_for_private_stream();
-  platf::game_mode_host::set_session_live_for_tests(std::nullopt);
+  bool closed = true;
+  {
+    const game_mode_session_pin_t game_mode {true};
+    closed = proc::request_desktop_steam_shutdown_for_private_stream();
+  }
   EXPECT_FALSE(closed);
 
   const auto source = read_source_file_for_contract("src/process.cpp");
@@ -4429,16 +4462,23 @@ TEST(ProcessRuntimeConfigTests, ALaunchOnAGameModeHostIsNeverAskedToCloseSteam) 
   steam_title.detached = {"setsid steam steam://rungameid/813230"};
 
   // The same launch on a desktop host, with Steam open and a Private Stream configured, is the
-  // case the prompt exists for.
-  const auto desktop = proc::resolve_desktop_launch_safety_policy(true, false, false, steam_title, true, false);
+  // case the prompt exists for. Pinned, so the test says the same on a machine that is in Game Mode.
+  proc::desktop_launch_safety_policy_t desktop;
+  {
+    const game_mode_session_pin_t on_the_desktop {false};
+    desktop = proc::resolve_desktop_launch_safety_policy(true, false, false, steam_title, true, false);
+  }
   EXPECT_TRUE(desktop.desktopSteamActive);
   EXPECT_TRUE(desktop.canForceCloseDesktopSteamForPrivateStream);
   EXPECT_EQ(desktop.recommendedAction, "refuse_private_stream");
 
-  platf::game_mode_host::set_session_live_for_tests(true);
-  const auto game_mode = proc::resolve_desktop_launch_safety_policy(true, false, true, steam_title, true, false);
-  const auto after_shutdown = proc::resolve_desktop_launch_safety_policy_after_shutdown(steam_title, false);
-  platf::game_mode_host::set_session_live_for_tests(std::nullopt);
+  proc::desktop_launch_safety_policy_t game_mode;
+  proc::desktop_launch_safety_policy_t after_shutdown;
+  {
+    const game_mode_session_pin_t in_game_mode {true};
+    game_mode = proc::resolve_desktop_launch_safety_policy(true, false, true, steam_title, true, false);
+    after_shutdown = proc::resolve_desktop_launch_safety_policy_after_shutdown(steam_title, false);
+  }
 
   for (const auto &policy : {game_mode, after_shutdown}) {
     EXPECT_FALSE(policy.desktopSteamActive) << "the Steam that is running is the session, not a desktop Steam";
@@ -4448,6 +4488,7 @@ TEST(ProcessRuntimeConfigTests, ALaunchOnAGameModeHostIsNeverAskedToCloseSteam) 
     EXPECT_TRUE(policy.canMirrorDesktop);
     EXPECT_EQ(policy.recommendedAction, "mirror_desktop");
     EXPECT_NE(policy.privateStreamUnavailableReason.find("Game Mode"), std::string::npos);
+    EXPECT_TRUE(policy.forcePrivateStreamLabel.empty()) << "there is nothing to force-close, so nothing to label";
   }
 }
 
@@ -4473,7 +4514,14 @@ TEST(ProcessRuntimeConfigTests, TheProfileAGameModeHostResolvesIsTheOneItsLaunch
   EXPECT_LT(mirror, resolved) << "a client that asks for another mode is still told the one the launch will use";
 
   // Clients check the source against a fixed list, so the reason is new and the source is not.
-  EXPECT_NE(optimize.find("topology_source = \"host_capability\";\n        topology_reason_code = \"steam_game_mode_session\";"), std::string::npos);
+  const auto game_mode_branch = optimize.find("if (game_mode_screen) {");
+  ASSERT_NE(game_mode_branch, std::string::npos);
+  const auto branch_source = optimize.find("topology_source = \"host_capability\";", game_mode_branch);
+  const auto branch_reason = optimize.find("topology_reason_code = \"steam_game_mode_session\";", game_mode_branch);
+  const auto next_branch = optimize.find("} else if (mirror_desktop) {", game_mode_branch);
+  ASSERT_NE(next_branch, std::string::npos);
+  EXPECT_LT(branch_source, next_branch);
+  EXPECT_LT(branch_reason, next_branch);
 
   // And that is the topology the launch ends up with.
   EXPECT_EQ(
@@ -4495,22 +4543,13 @@ TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStream
     << "on a desktop host the Steam cleanup is what closes the title";
   EXPECT_EQ(proc::game_mode_title_to_remember_for_tests("", true, false), "") << "Desktop and other entries open no title";
 
-  // A title that is open is joined, not launched again: Game Mode's Steam answers a second launch
-  // with "Game already running", drawn over the game.
-  EXPECT_TRUE(proc::should_skip_launch_of_open_game_mode_title_for_tests("setsid steam steam://rungameid/813230", true));
-  EXPECT_TRUE(proc::should_skip_launch_of_open_game_mode_title_for_tests("setsid steam -applaunch 813230", true));
-  EXPECT_TRUE(proc::should_skip_launch_of_open_game_mode_title_for_tests("setsid steam -gamepadui", true));
-  EXPECT_FALSE(proc::should_skip_launch_of_open_game_mode_title_for_tests("setsid steam steam://rungameid/813230", false));
-  EXPECT_FALSE(proc::should_skip_launch_of_open_game_mode_title_for_tests("setsid mangohud-config --reset", true))
-    << "whatever else the app runs beside Steam still runs";
-
-  // Acted on at End Session.
-  EXPECT_TRUE(proc::should_close_game_mode_title_for_tests("813230", true, false));
-  EXPECT_FALSE(proc::should_close_game_mode_title_for_tests("", true, false));
-  EXPECT_FALSE(proc::should_close_game_mode_title_for_tests("813230", false, false))
+  // Acted on only when someone ends the session on purpose.
+  EXPECT_TRUE(proc::should_close_game_mode_title_for_tests("813230", true, true));
+  EXPECT_FALSE(proc::should_close_game_mode_title_for_tests("813230", true, false))
+    << "a paused session timing out, a client dropping, an unpair or a restart leaves the game where it was";
+  EXPECT_FALSE(proc::should_close_game_mode_title_for_tests("", true, true));
+  EXPECT_FALSE(proc::should_close_game_mode_title_for_tests("813230", false, true))
     << "the host left Game Mode in between, so the title went with the session";
-  EXPECT_FALSE(proc::should_close_game_mode_title_for_tests("813230", true, true))
-    << "a Polaris that is stopping or updating is not someone ending a session";
 
   const auto source = read_source_file_for_contract("src/process.cpp");
   const auto terminate = source.substr(source.find("void proc_t::terminate_impl(bool immediate, bool needs_refresh) {"));
@@ -4525,6 +4564,46 @@ TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStream
     ++callers;
   }
   EXPECT_EQ(callers, 1u) << "the only thing that closes a title in Game Mode is End Session";
+
+  // What counts as ending on purpose: a stop through request_session_shutdown (End Session from a
+  // client, the Polaris session stop, the console's Disconnect), the terminate app, and end_session
+  // (the console's Close App). Each marks only the stop it runs, and the paused-session timeout
+  // and a drop of the last client go through terminate_if and terminate, which mark nothing.
+  const auto shutdown = source.substr(source.find("session_stop_result_t proc_t::request_session_shutdown("));
+  const auto marked = shutdown.find("const session_end_request_scope_t ending {sync.stop_ends_session};");
+  const auto stopped = shutdown.find("terminate_impl(false, true);");
+  ASSERT_NE(marked, std::string::npos);
+  ASSERT_NE(stopped, std::string::npos);
+  EXPECT_LT(marked, stopped);
+  EXPECT_NE(source.find("void proc_t::end_session() {\n    const session_end_request_scope_t ending"), std::string::npos);
+  const auto timeout = source.substr(source.find("bool proc_t::terminate_if("), 600);
+  EXPECT_EQ(timeout.find("stop_ends_session"), std::string::npos) << "the resume timeout is not someone ending the session";
+  const auto confighttp = read_source_file_for_contract("src/confighttp.cpp");
+  const auto close_app = confighttp.substr(confighttp.find("void closeApp(resp_https_t response, req_https_t request)"), 700);
+  EXPECT_NE(close_app.find("proc::proc.end_session();"), std::string::npos);
+}
+
+TEST(ProcessRuntimeConfigTests, ASteamTitleIsOneDirectLaunchInGameMode) {
+  // The Big Picture launch mode opens Big Picture, then launches the title and launches it again
+  // four seconds later. Game Mode is Big Picture already, and its Steam draws "Game already running"
+  // over the game for the second launch.
+  const std::vector<std::string> big_picture {
+    "setsid steam -gamepadui",
+    "setsid bash -lc \"sleep 6; steam steam://rungameid/813230 >/dev/null 2>&1 || true; sleep 4; exec steam -applaunch 813230 >/dev/null 2>&1 || true\"",
+    "setsid obs --startreplaybuffer",
+  };
+  const auto launched = proc::game_mode_detached_commands_for_tests(big_picture, "813230", false);
+  ASSERT_EQ(launched.size(), 2u);
+  EXPECT_NE(launched[0].find("steam steam://rungameid/813230"), std::string::npos);
+  EXPECT_EQ(launched[0].find("-applaunch"), std::string::npos);
+  EXPECT_EQ(launched[1], "setsid obs --startreplaybuffer") << "what else the app runs beside Steam still runs";
+
+  const auto joined = proc::game_mode_detached_commands_for_tests(big_picture, "813230", true);
+  EXPECT_EQ(joined, (std::vector<std::string> {"setsid obs --startreplaybuffer"}))
+    << "a title that is open already is joined, and nothing is sent to Steam";
+
+  const std::vector<std::string> direct {"setsid steam steam://rungameid/813230"};
+  EXPECT_EQ(proc::game_mode_detached_commands_for_tests(direct, "813230", false), direct);
 }
 
 TEST(ProcessRuntimeConfigTests, EndingAStreamNeverStopsTheSteamThatIsRunningGameMode) {
@@ -4545,7 +4624,7 @@ TEST(ProcessRuntimeConfigTests, EndingAStreamNeverStopsTheSteamThatIsRunningGame
 
   const auto source = read_source_file_for_contract("src/process.cpp");
   const auto undo_loop = source.substr(source.find("for (; _app_prep_it != _app_prep_begin; --_app_prep_it) {"));
-  const auto guard = undo_loop.find("should_skip_steam_stop_undo_in_game_mode(cmd, platf::game_mode_host::session_live())");
+  const auto guard = undo_loop.find("should_skip_steam_stop_undo_in_game_mode(cmd, steam_is_not_this_streams)");
   const auto forwarded = undo_loop.find("should_forward_steam_shutdown_undo_without_launch(");
   const auto executed = undo_loop.find("Executing Undo Cmd");
   ASSERT_NE(guard, std::string::npos);
@@ -4553,6 +4632,11 @@ TEST(ProcessRuntimeConfigTests, EndingAStreamNeverStopsTheSteamThatIsRunningGame
   ASSERT_NE(executed, std::string::npos);
   EXPECT_LT(guard, forwarded) << "before the route that forwards a shutdown to the running Steam";
   EXPECT_LT(guard, executed) << "and before the route that runs the undo as written";
+
+  // A stream that started in Game Mode opened no Steam of its own, so its cleanup does not stop the
+  // desktop Steam if the host has gone back to the desktop by the time the stream ends.
+  const auto terminate = source.substr(source.find("void proc_t::terminate_impl(bool immediate, bool needs_refresh) {"));
+  EXPECT_NE(terminate.find("const bool steam_is_not_this_streams = game_mode_live || _session_started_in_game_mode;"), std::string::npos);
 
   const auto retry = source.substr(source.find("bool proc_t::retry_retained_steam_shutdown() {"));
   const auto dropped = retry.find("if (platf::game_mode_host::session_live()) {");

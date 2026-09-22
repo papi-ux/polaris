@@ -236,19 +236,30 @@ namespace platf {
      * the Wayland route or wants host uinput.
      */
     bool gamescope_runtime_active() const {
-      if (config::video.linux_display.stream_mode == "gamescope_stream"sv ||
-          config::video.linux_display.private_runtime == "gamescope"sv) {
-        return true;
-      }
-      // A stream of the Game Mode screen is a stream of a gamescope too, one the session
-      // started. Its libei socket is found by name like any other, and it is the only way a
-      // key or a pointer reaches a compositor that reads no host input devices of ours.
+      return polaris_gamescope_active() || game_mode_screen_active();
+    }
+
+    /// A gamescope Polaris started for the stream, which no host input device reaches.
+    bool polaris_gamescope_active() const {
+      return config::video.linux_display.stream_mode == "gamescope_stream"sv ||
+             config::video.linux_display.private_runtime == "gamescope"sv;
+    }
+
+    /**
+     * @brief Whether this is a stream of the Game Mode screen.
+     *
+     * That is a gamescope too, one the session started. Its libei socket is found by name like
+     * any other, and it is how a key or a pointer reaches it. The mode is read first, because this
+     * runs for every pointer event and only a mirror host can be streaming Game Mode.
+     */
+    bool game_mode_screen_active() const {
       return game_mode_host::streams_session_screen(
-        config::video.linux_display.stream_mode,
-        config::video.linux_display.use_cage_compositor,
-        false,
-        game_mode_host::session_live()
-      );
+               config::video.linux_display.stream_mode,
+               config::video.linux_display.use_cage_compositor,
+               false,
+               true
+             ) &&
+             game_mode_host::session_live();
     }
 
     /**
@@ -262,6 +273,18 @@ namespace platf {
      */
     bool owns_input() const {
       return gamescope_runtime_active() && !connect_failed;
+    }
+
+    /**
+     * @brief Whether touch and pen must stay off host uinput.
+     *
+     * libei carries a pointer and a keyboard, nothing else. A gamescope Polaris started reads no
+     * host devices, so a uinput touchscreen there would drive the desktop behind it. Game Mode's
+     * gamescope is the session on the one screen and reads the host's devices like the built-in
+     * panel, so touch and pen go the usual way.
+     */
+    bool owns_touch() const {
+      return polaris_gamescope_active() && !connect_failed;
     }
 
     /**
@@ -528,6 +551,15 @@ namespace platf {
     // Host uinput cannot reach a headless gamescope, and letting it through
     // would drive the host session instead.
     return impl->owns_input();
+#else
+    return false;
+#endif
+  }
+
+  bool ei_virtual_input_t::should_block_host_touch() {
+#ifdef POLARIS_BUILD_EI_VIRTUAL_INPUT
+    std::scoped_lock lock(impl->mutex);
+    return impl->owns_touch();
 #else
     return false;
 #endif

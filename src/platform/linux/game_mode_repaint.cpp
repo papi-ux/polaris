@@ -13,7 +13,9 @@
   #include <charconv>
   #include <cstdlib>
   #include <cstring>
+  #include <mutex>
   #include <string_view>
+  #include <system_error>
   #include <thread>
 
   #ifdef POLARIS_BUILD_X11_XCB
@@ -248,7 +250,7 @@ namespace platf::game_mode_host {
       return;
     }
 
-    std::thread([]() {
+    const auto ask = []() {
       const auto result = request_focused_window_repaint();
       switch (result) {
         case repaint_result_e::sent:
@@ -261,11 +263,25 @@ namespace platf::game_mode_host {
           BOOST_LOG(debug) << "game_mode: the session's gamescope names no window to ask for a first frame"sv;
           break;
         case repaint_result_e::unavailable:
-          BOOST_LOG(debug) << "game_mode: this build has no X client, so a still Game Mode screen stays black until it moves"sv;
+          {
+            // Said once where it is seen: without it a still screen is simply black.
+            static std::once_flag said;
+            std::call_once(said, []() {
+              BOOST_LOG(info) << "game_mode: this build has no X client, so a Game Mode screen that is standing still stays black until something on it moves"sv;
+            });
+          }
           break;
       }
       in_flight.clear();
-    }).detach();
+    };
+
+    try {
+      std::thread(ask).detach();
+    } catch (const std::system_error &error) {
+      // No thread to be had. The flag is let go so a later capture can ask again.
+      BOOST_LOG(warning) << "game_mode: could not start the thread that asks a still Game Mode screen to draw: "sv << error.what();
+      in_flight.clear();
+    }
   }
 
 }  // namespace platf::game_mode_host

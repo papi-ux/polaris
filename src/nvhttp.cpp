@@ -1521,6 +1521,8 @@ namespace nvhttp {
         host_mode_changed(previous_linux_display.stream_mode, applied.stream_mode);
       }
 
+      // Chosen on purpose, so it is what the host runs after Game Mode too.
+      stream_display_policy::forget_game_mode_hold();
       return stream_display_mode_apply_result_e::success;
 #else
       error = "stream display mode selection is only supported on Linux";

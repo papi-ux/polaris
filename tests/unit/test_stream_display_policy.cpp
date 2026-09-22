@@ -85,6 +85,8 @@ namespace {
     }
 
     ~LinuxDisplayPolicyGuard() {
+      // A hold is process state too, and an ASSERT that stops a test halfway must not hand it on.
+      stream_display_policy::forget_game_mode_hold();
       config::video.linux_display.headless_mode = headless_mode;
       config::video.linux_display.use_cage_compositor = use_cage_compositor;
       config::video.linux_display.prefer_gpu_native_capture = prefer_gpu_native_capture;
@@ -701,6 +703,64 @@ TEST(StreamDisplayPolicyTests, AGameModeSessionLeavesAMirrorHostAndAReloadedConf
   EXPECT_EQ(stream_display_policy::reconcile_game_mode(false, false), game_mode_reconcile_e::left);
   EXPECT_EQ(stream_display_policy::configured_selection(), "headless_stream")
     << "what was reloaded is newer than what was held, and it stays";
+}
+
+TEST(StreamDisplayPolicyTests, AGameModeSessionGivesBackTheConnectorsTheMirrorCleared) {
+  // The switch to the mirror clears display management, the swap mode and the connector pair, and
+  // the output name when it named the streaming connector. A dongle host came back from Game Mode
+  // without them and re-detected connectors on the next launch.
+  using stream_display_policy::game_mode_reconcile_e;
+  ScopedPrivateRuntimePath runtime_path;
+  LinuxDisplayPolicyGuard guard;
+  std::string error;
+  ASSERT_TRUE(stream_display_policy::apply_selection("headless_stream", error)) << error;
+  auto &linux_display = config::video.linux_display;
+  linux_display.auto_manage_displays = true;
+  linux_display.headless_swap_mode = "privacy";
+  linux_display.streaming_output = "HDMI-A-1";
+  linux_display.primary_output = "DP-2";
+  config::video.output_name = "HDMI-A-1";
+
+  ASSERT_EQ(stream_display_policy::reconcile_game_mode(true, false), game_mode_reconcile_e::entered);
+  ASSERT_FALSE(linux_display.auto_manage_displays) << "the mirror did clear them, which is what has to be given back";
+  ASSERT_TRUE(linux_display.streaming_output.empty());
+
+  ASSERT_EQ(stream_display_policy::reconcile_game_mode(false, false), game_mode_reconcile_e::left);
+  EXPECT_TRUE(linux_display.auto_manage_displays);
+  EXPECT_EQ(linux_display.headless_swap_mode, "privacy");
+  EXPECT_EQ(linux_display.streaming_output, "HDMI-A-1");
+  EXPECT_EQ(linux_display.primary_output, "DP-2");
+  EXPECT_EQ(config::video.output_name, "HDMI-A-1");
+}
+
+TEST(StreamDisplayPolicyTests, AModeChosenDuringGameModeIsTheOneThatStays) {
+  // Chosen through the same writer the console and clients use, which also saves it.
+  using stream_display_policy::game_mode_reconcile_e;
+  ScopedPrivateRuntimePath runtime_path;
+  LinuxDisplayPolicyGuard guard;
+  std::string error;
+  ASSERT_TRUE(stream_display_policy::apply_selection("headless_stream", error)) << error;
+  ASSERT_EQ(stream_display_policy::reconcile_game_mode(true, false), game_mode_reconcile_e::entered);
+
+  ASSERT_TRUE(nvhttp::apply_stream_display_mode_selection_for_tests("desktop_display", true, error)) << error;
+  EXPECT_TRUE(stream_display_policy::game_mode_held_selection().empty())
+    << "a mode chosen on purpose is newer than the one held";
+  EXPECT_EQ(stream_display_policy::reconcile_game_mode(false, false), game_mode_reconcile_e::unchanged);
+  EXPECT_EQ(stream_display_policy::configured_selection(), "desktop_display")
+    << "the file says Mirror Desktop, so the process runs Mirror Desktop";
+
+  // A Private Stream chosen during Game Mode is held in its turn and comes back after it.
+  ASSERT_TRUE(stream_display_policy::apply_selection("desktop_display", error)) << error;
+  ASSERT_TRUE(nvhttp::apply_stream_display_mode_selection_for_tests("windowed_stream", true, error)) << error;
+  EXPECT_EQ(stream_display_policy::reconcile_game_mode(true, false), game_mode_reconcile_e::entered);
+  EXPECT_EQ(stream_display_policy::game_mode_held_selection(), "windowed_stream");
+  EXPECT_EQ(stream_display_policy::reconcile_game_mode(false, false), game_mode_reconcile_e::left);
+  EXPECT_EQ(stream_display_policy::configured_selection(), "windowed_stream");
+
+  // A config reload is the same: what was loaded is what the host is configured for now.
+  ASSERT_EQ(stream_display_policy::reconcile_game_mode(true, false), game_mode_reconcile_e::entered);
+  stream_display_policy::normalize_config_from_load();
+  EXPECT_TRUE(stream_display_policy::game_mode_held_selection().empty());
 }
 
 TEST(StreamDisplayPolicyTests, ReapplyingHeadlessSelectionClearsStaleCompanionState) {

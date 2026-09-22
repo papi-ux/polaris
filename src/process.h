@@ -331,11 +331,15 @@ namespace proc {
     bool game_mode_session_live,
     bool already_running
   );
-  bool should_skip_launch_of_open_game_mode_title_for_tests(const std::string &cmd, bool title_already_open);
+  std::vector<std::string> game_mode_detached_commands_for_tests(
+    const std::vector<std::string> &detached,
+    const std::string &appid,
+    bool title_already_open
+  );
   bool should_close_game_mode_title_for_tests(
     std::string_view launched_appid,
     bool game_mode_session_live,
-    bool daemon_shutdown
+    bool session_ended_on_request
   );
   bool should_forward_steam_shutdown_undo_without_launch_for_tests(
     const struct ctx_t &app,
@@ -916,6 +920,13 @@ namespace proc {
     void resume();
     void pause();
     void terminate(bool immediate = false, bool needs_refresh = true);
+    /**
+     * @brief terminate() for someone ending the session on purpose, such as the console's Close App.
+     *
+     * The difference is Game Mode: there the title the stream opened is asked to close as well,
+     * which no other stop does.
+     */
+    void end_session();
     bool terminate_if(const std::function<bool()> &condition,
                       const std::function<void()> &before_terminate);
     bool terminate_abandoned_desktop_takeover(std::string_view session_token);
@@ -964,6 +975,8 @@ namespace proc {
       // Protected by mutex; binds the launch metadata to its admission identity.
       std::shared_ptr<const char> metadata_capture_owner {capture_owner.load()};
       std::weak_ptr<rtsp_stream::launch_session_t> capture_launch;
+      /// Set while a stop runs because someone ended the session on purpose.
+      std::atomic<bool> stop_ends_session {false};
     };
 
     void launch_input_only_impl(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
@@ -1036,6 +1049,8 @@ namespace proc {
     /// The Steam title this launch opened in the Steam that runs Game Mode. Empty when there is none,
     /// or when the title was open before the launch and so is not this session's to close.
     std::string _game_mode_launched_appid;
+    /// Whether this session started with the host in Game Mode, so its Steam cleanup is not its own.
+    bool _session_started_in_game_mode = false;
 #endif
     std::vector<cmd_t>::const_iterator _app_prep_it;
     std::vector<cmd_t>::const_iterator _app_prep_begin;

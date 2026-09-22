@@ -2472,7 +2472,8 @@ namespace confighttp {
 
     print_req(request);
 
-    proc::proc.terminate();
+    // Close App ends the session on purpose, so on a host in Game Mode it closes the title too.
+    proc::proc.end_session();
     nlohmann::json output_tree;
     output_tree["status"] = true;
     send_response(response, output_tree);

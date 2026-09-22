@@ -3453,22 +3453,44 @@ namespace proc {
       return std::string {appid};
     }
 
-    bool should_skip_launch_of_open_game_mode_title(const std::string &cmd, bool title_already_open) {
-      // Game Mode's Steam answers a second launch of a title that is open with "An error occurred
-      // while launching this game: Game already running", drawn over the game. The title is on the
-      // screen already, so the stream joins it and the launch is not sent.
-      return title_already_open && command_is_steam_library_launch_component(cmd);
+    std::vector<std::string> game_mode_detached_commands(
+      const std::vector<std::string> &detached,
+      const std::string &appid,
+      bool title_already_open
+    ) {
+      // Game Mode's Steam answers a second launch of a title with "An error occurred while
+      // launching this game: Game already running", drawn over the game. So a Steam title gets one
+      // direct launch there, whatever launch mode the app keeps for the desktop: the Big Picture
+      // mode's pair opens Big Picture, which Game Mode already is, and launches the title twice. A
+      // title that is open already gets none, and the stream joins it. What else the app runs
+      // beside Steam still runs.
+      std::vector<std::string> commands;
+      if (!title_already_open && !appid.empty()) {
+        const auto reference = detached.empty() ? std::string {"steam"} : detached.front();
+        for (auto &command : canonical_steam_library_launch_commands(reference, appid)) {
+          commands.emplace_back(std::move(command));
+        }
+      }
+      for (const auto &command : detached) {
+        if (!command_is_steam_library_launch_component(command)) {
+          commands.emplace_back(command);
+        }
+      }
+      return commands;
     }
 
     bool should_close_game_mode_title(
       std::string_view launched_appid,
       bool game_mode_session_live,
-      bool daemon_shutdown
+      bool session_ended_on_request
     ) {
       // End Session says it closes the host app. On a desktop host that is done by closing the Steam
       // the stream opened. In Game Mode that Steam is the session, so the title alone is asked to
-      // close. A Polaris that is stopping or updating is not someone ending a session.
-      return !launched_appid.empty() && game_mode_session_live && !daemon_shutdown;
+      // close, and only when someone ended the session on purpose: End Session from a client, the
+      // console's Close App or Disconnect, the terminate app. A paused session that times out, a
+      // client that drops, an unpair, or a Polaris that is stopping or updating leaves the game
+      // where the player left it.
+      return !launched_appid.empty() && game_mode_session_live && session_ended_on_request;
     }
 
     bool should_skip_steam_stop_undo_in_game_mode(
@@ -5162,7 +5184,6 @@ namespace proc {
     policy.canForceCloseDesktopSteamForPrivateStream = false;
     policy.recommendedAction = "mirror_desktop";
     policy.privateStreamUnavailableReason = "Steam Game Mode is running, so this stream shows the Game Mode screen.";
-    policy.forcePrivateStreamLabel = "Close desktop Steam and start private stream";
     return policy;
   }
 
@@ -5619,16 +5640,20 @@ namespace proc {
     return game_mode_title_to_remember(appid, game_mode_session_live, already_running);
   }
 
-  bool should_skip_launch_of_open_game_mode_title_for_tests(const std::string &cmd, bool title_already_open) {
-    return should_skip_launch_of_open_game_mode_title(cmd, title_already_open);
+  std::vector<std::string> game_mode_detached_commands_for_tests(
+    const std::vector<std::string> &detached,
+    const std::string &appid,
+    bool title_already_open
+  ) {
+    return game_mode_detached_commands(detached, appid, title_already_open);
   }
 
   bool should_close_game_mode_title_for_tests(
     std::string_view launched_appid,
     bool game_mode_session_live,
-    bool daemon_shutdown
+    bool session_ended_on_request
   ) {
-    return should_close_game_mode_title(launched_appid, game_mode_session_live, daemon_shutdown);
+    return should_close_game_mode_title(launched_appid, game_mode_session_live, session_ended_on_request);
   }
 
   bool should_forward_steam_shutdown_undo_without_launch_for_tests(
@@ -7356,8 +7381,12 @@ namespace proc {
         BOOST_LOG(info) << "process: app launch semantic selects desktop mirroring for ["sv
                         << app.name << "]; ignoring virtual-display preference for this session"sv;
       }
-      apply_app_display_semantics(app, *launch_session);
     }
+    // Every launch, whichever door it came in by: the console and the browser stream start the
+    // app here without passing nvhttp, and on a host in Game Mode a launch has to be a mirror of
+    // that screen even when no client has asked the host anything yet.
+    apply_app_display_semantics(app, *launch_session);
+    _session_started_in_game_mode = platf::game_mode_host::session_live();
 
     // Resolve and apply the exact topology before installing a new process
     // generation. Availability is allowed to change after /optimize and HTTP
@@ -9358,25 +9387,23 @@ namespace proc {
       // retain pidfd authority for their direct children so stop can reap exact
       // children even if they exit before /proc ownership scanning begins.
       const bool detached_only = !_app.detached.empty() && _app.cmd.empty();
-      [[maybe_unused]] bool game_mode_title_already_open = false;
+      std::vector<std::string> detached_to_spawn = _app.detached;
 #ifdef __linux__
       {
         const auto appid = steam_appid_for_context(_app);
         const bool game_mode_live = platf::game_mode_host::session_live();
-        game_mode_title_already_open = game_mode_live && !appid.empty() &&
-                                       platf::steam_title::running(platf::steam_title::read_process_table(), appid, getuid());
-        _game_mode_launched_appid = game_mode_title_to_remember(appid, game_mode_live, game_mode_title_already_open);
-        if (game_mode_title_already_open) {
+        const bool title_already_open = game_mode_live && !appid.empty() &&
+                                        platf::steam_title::running(platf::steam_title::read_process_table(), appid, getuid());
+        if (game_mode_live && !appid.empty()) {
+          detached_to_spawn = game_mode_detached_commands(_app.detached, appid, title_already_open);
+        }
+        _game_mode_launched_appid = game_mode_title_to_remember(appid, game_mode_live, title_already_open);
+        if (title_already_open) {
           BOOST_LOG(info) << "game_mode: ["sv << _app.name << "] is already open in Game Mode, so this stream joins it: it is not launched again, and ending the stream will leave it open"sv;
         }
       }
 #endif
-      for (auto &cmd : _app.detached) {
-#ifdef __linux__
-        if (should_skip_launch_of_open_game_mode_title(cmd, game_mode_title_already_open)) {
-          continue;
-        }
-#endif
+      for (auto &cmd : detached_to_spawn) {
         boost::filesystem::path working_dir = _app.working_dir.empty() ?
                                                 find_working_directory(cmd, _env) :
                                                 boost::filesystem::path(_app.working_dir);
@@ -9928,6 +9955,25 @@ namespace proc {
 #endif
   }
 
+  namespace {
+    /// Marks a stop as someone ending the session on purpose, for as long as the stop runs.
+    struct session_end_request_scope_t {
+      explicit session_end_request_scope_t(std::atomic<bool> &flag):
+          flag {flag} {
+        flag.store(true);
+      }
+
+      session_end_request_scope_t(const session_end_request_scope_t &) = delete;
+      session_end_request_scope_t &operator=(const session_end_request_scope_t &) = delete;
+
+      ~session_end_request_scope_t() {
+        flag.store(false);
+      }
+
+      std::atomic<bool> &flag;
+    };
+  }  // namespace
+
   void proc_t::terminate(bool immediate, bool needs_refresh) {
 #ifdef __linux__
     std::shared_ptr<const char> capture_owner;
@@ -10018,7 +10064,14 @@ namespace proc {
     auto release_stop = util::fail_guard([this]() {
       _session_lifecycle_gate->finish_stop();
     });
+    // The terminate app is a client quitting what it started.
+    const session_end_request_scope_t ending {session_lifecycle_sync().stop_ends_session};
     terminate_impl(false, true);
+  }
+
+  void proc_t::end_session() {
+    const session_end_request_scope_t ending {session_lifecycle_sync().stop_ends_session};
+    terminate();
   }
 
 #ifdef __linux__
@@ -10432,7 +10485,16 @@ namespace proc {
       }
     );
 
-    if (should_close_game_mode_title(_game_mode_launched_appid, platf::game_mode_host::session_live(), daemon_shutdown_requested())) {
+    // One reading for the whole teardown, so its decisions agree with each other.
+    const bool game_mode_live = platf::game_mode_host::session_live();
+    // A stream that started in Game Mode handed its title to the session's Steam and opened none of
+    // its own. If the host has gone back to the desktop since, the Steam there is not this
+    // stream's to stop either.
+    const bool steam_is_not_this_streams = game_mode_live || _session_started_in_game_mode;
+    const bool session_ended_on_request =
+      session_lifecycle_sync().stop_ends_session.load() && !daemon_shutdown_requested();
+
+    if (should_close_game_mode_title(_game_mode_launched_appid, game_mode_live, session_ended_on_request)) {
       const auto closed = platf::steam_title::ask_to_close(_game_mode_launched_appid);
       if (closed.asked > 0) {
         BOOST_LOG(info) << "game_mode: asked ["sv << _app.name << "] to close, the title this stream opened in Game Mode (processes asked: "sv
@@ -10442,6 +10504,7 @@ namespace proc {
       }
     }
     _game_mode_launched_appid.clear();
+    _session_started_in_game_mode = false;
 #endif
 
     for (; _app_prep_it != _app_prep_begin; --_app_prep_it) {
@@ -10458,8 +10521,8 @@ namespace proc {
       }
 
 #ifdef __linux__
-      if (should_skip_steam_stop_undo_in_game_mode(cmd, platf::game_mode_host::session_live())) {
-        BOOST_LOG(info) << "Skipping Steam stop undo because the running Steam is Steam Game Mode on this host ["sv
+      if (should_skip_steam_stop_undo_in_game_mode(cmd, steam_is_not_this_streams)) {
+        BOOST_LOG(info) << "Skipping Steam stop undo because this stream ran in Steam Game Mode, whose Steam is the session and opened for no stream ["sv
                         << cmd.undo_cmd << ']';
         continue;
       }
@@ -11151,6 +11214,7 @@ namespace proc {
         return result;
       }
       if (result.snapshot.had_running_app && running() > 0) {
+        const session_end_request_scope_t ending {sync.stop_ends_session};
         terminate_impl(false, true);
       }
       display_device::revert_configuration();

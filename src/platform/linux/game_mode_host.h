@@ -64,9 +64,10 @@ namespace platf::game_mode_host {
    * @brief Whether a gamescope Steam session is running for this account right now.
    *
    * detect_cached() walks /proc on every call. That suits a stats request. A launch asks several
-   * times in a row and the input path asks per event, so the answer is kept for a moment. A
-   * session that starts or ends is noticed within that moment, which is far shorter than the
-   * time it takes to switch between Game Mode and the desktop.
+   * times in a row and the input path asks per event, so the answer is kept for two seconds and
+   * then refreshed on a thread of its own, the caller getting the kept answer meanwhile. Only the
+   * first question in the process waits for a walk. A session that starts or ends is noticed
+   * within a few seconds, far shorter than switching between Game Mode and the desktop takes.
    */
   bool session_live();
 

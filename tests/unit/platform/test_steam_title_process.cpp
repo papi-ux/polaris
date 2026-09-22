@@ -158,6 +158,24 @@ TEST(SteamTitleProcess, TheLaunchWrapperAboveTheReaperIsOneRootNotTwo) {
   EXPECT_EQ(pids(st::processes_to_ask(table, "813230", k_player)), (std::vector<pid_t> {702}));
 }
 
+TEST(SteamTitleProcess, AShellThatOnlyMentionsTheLaunchIsNotTheTitle) {
+  // A pgrep for the title, or a shell script that names it, has the same words in its command line.
+  auto table = deck_table();
+  table.push_back(process(18000, 1, "bash", argv_bytes({"bash", "-c", "pgrep -f 'SteamLaunch AppId=813230'"})));
+  table.push_back(process(18001, 18000, "pgrep", argv_bytes({"pgrep", "-f", "SteamLaunch AppId=813230"})));
+
+  EXPECT_EQ(pids(st::processes_to_ask(table, "813230", k_player)), (std::vector<pid_t> {16106, 16241, 16300}))
+    << "the title is still found, and the shell is not a second launch that would make it ambiguous";
+
+  std::vector<st::process_t> only_the_shell {
+    process(18000, 1, "bash", argv_bytes({"bash", "-c", "echo SteamLaunch AppId=367520"})),
+    process(18001, 18000, "sleep", argv_bytes({"sleep", "60"})),
+  };
+  EXPECT_FALSE(st::running(only_the_shell, "367520", k_player));
+  EXPECT_TRUE(st::processes_to_ask(only_the_shell, "367520", k_player).empty())
+    << "and nothing under it is ever asked to close";
+}
+
 TEST(SteamTitleProcess, NothingIsAskedWhenItIsNotClearWhichLaunchIsMeant) {
   auto table = deck_table();
   EXPECT_TRUE(st::processes_to_ask(table, "367520", k_player).empty()) << "not running";

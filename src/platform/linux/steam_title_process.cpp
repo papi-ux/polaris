@@ -34,8 +34,19 @@ namespace platf::steam_title {
     /// starttime is the 22nd field of stat, the 20th after the command name.
     constexpr int k_start_time_field = 19;
 
+    /// The processes Steam starts a title through, and so the only ones whose command line counts.
+    constexpr std::array k_launchers {"reaper"sv, "steam-launch-wr"sv};
+
     bool is_wrapper(std::string_view comm) {
       return std::find(k_wrappers.begin(), k_wrappers.end(), comm) != k_wrappers.end();
+    }
+
+    /// Steam starting this title: one of its launch processes, this account's, with the words in
+    /// its command line. A shell or a search whose command line only mentions them is none of that.
+    bool launches(const process_t &process, std::string_view appid, uid_t uid) {
+      return process.uid == uid &&
+             std::find(k_launchers.begin(), k_launchers.end(), std::string_view {process.comm}) != k_launchers.end() &&
+             launch_cmdline_matches_appid(process.cmdline, appid);
     }
 
     bool numeric(std::string_view text) {
@@ -99,7 +110,7 @@ namespace platf::steam_title {
     std::optional<process_t> title_root(const std::vector<process_t> &table, std::string_view appid, uid_t uid) {
       std::map<pid_t, const process_t *> matching;
       for (const auto &process : table) {
-        if (process.uid == uid && launch_cmdline_matches_appid(process.cmdline, appid)) {
+        if (launches(process, appid, uid)) {
           matching.emplace(process.pid, &process);
         }
       }
@@ -152,7 +163,7 @@ namespace platf::steam_title {
 
   bool running(const std::vector<process_t> &table, std::string_view appid, uid_t uid) {
     return std::any_of(table.begin(), table.end(), [&](const process_t &process) {
-      return process.uid == uid && launch_cmdline_matches_appid(process.cmdline, appid);
+      return launches(process, appid, uid);
     });
   }
 

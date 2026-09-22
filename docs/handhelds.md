@@ -74,16 +74,18 @@ lasts.
 
 What that stream is made of:
 
-- **Video** comes from the PipeWire node gamescope exports for its own screen. Where the image
-  ships a ScreenCast portal for gamescope, as SteamOS does, Polaris goes through it. Where it does
-  not, Polaris attaches to the node directly.
+- **Video** comes from the PipeWire node gamescope exports for its own screen. Polaris attaches to
+  that node directly, and falls back to the ScreenCast portal for gamescope, which SteamOS ships,
+  if the direct attach fails. Leave `capture` unset: a host still set to `capture = kms` from the
+  earlier Game Mode probe takes the picture another way, and the limits below do not describe it.
 - **Keyboard and mouse** go in through the session's libei socket, the same way Steam's own
   streaming reaches it.
 - **Controllers** arrive as the same virtual pad as on any host, and Game Mode's Steam picks it up
   the way it picks up a pad that was just plugged in, toast included. On SteamOS the account at the
   screen may already create one, so an Xbox style pad works with no setup at all. An emulated
   DualSense needs the input setup from your distro guide (`sudo -H polaris --setup-host`), and so
-  may touch.
+  may touch. Touch and pen go to the host the usual way, since the session's gamescope reads the
+  host's devices like the built-in panel.
 - **Audio** follows the default sink, which Polaris points at its own while a stream is up and
   points back when it ends.
 - **A Steam title** launched from a client is handed to the Steam that is running Game Mode, and
@@ -92,9 +94,11 @@ What that stream is made of:
   the device is joined as it is and not launched a second time.
 - **Ending the session** closes the title the stream opened and leaves Game Mode alone. On a
   desktop host, ending a Steam title's stream closes the Steam that the stream opened. In Game Mode
-  that Steam is the session, so only the title is asked to close, and Steam stays as it is. A title
-  that was already open on the device when the stream started is left open, and a disconnect
-  closes nothing.
+  that Steam is the session, so only the title is asked to close, and Steam stays as it is. That
+  happens only when someone ends the session on purpose: End Session on the client, or Close App or
+  Disconnect in the console. A title that was already open on the device when the stream started
+  is left open. A client that drops, a paused session that times out, or a Polaris that restarts
+  closes nothing, so the game is where the player left it.
 
 Known limits:
 

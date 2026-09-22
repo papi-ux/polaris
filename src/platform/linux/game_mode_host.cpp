@@ -18,6 +18,7 @@
 #include <optional>
 #include <sstream>
 #include <sys/stat.h>
+#include <thread>
 #include <system_error>
 #include <unistd.h>
 
@@ -375,22 +376,60 @@ namespace platf::game_mode_host {
     std::optional<bool> session_live_override;
     std::optional<bool> session_live_answer;
     std::chrono::steady_clock::time_point session_live_read_at;
-  }  // namespace
+    bool session_live_refreshing {false};  ///< a scan is out; guarded by session_live_mutex
 
-  bool session_live() {
-    std::lock_guard lock {session_live_mutex};
-    if (session_live_override) {
-      return *session_live_override;
-    }
-    const auto now = std::chrono::steady_clock::now();
-    if (!session_live_answer || now - session_live_read_at >= session_live_ttl) {
+    bool scan_session_live() {
       detection_t detection;
       probe_t live;
       live.proc_root = "/proc";
       live.uid = ::getuid();
       scan_processes(live, detection);
-      session_live_answer = detection.session_active;
-      session_live_read_at = now;
+      return detection.session_active;
+    }
+  }  // namespace
+
+  bool session_live() {
+    std::unique_lock lock {session_live_mutex};
+    if (session_live_override) {
+      return *session_live_override;
+    }
+
+    if (!session_live_answer) {
+      // The first question in this process has no answer to fall back on, so it waits for one.
+      lock.unlock();
+      const bool live = scan_session_live();
+      lock.lock();
+      if (!session_live_answer) {
+        session_live_answer = live;
+        session_live_read_at = std::chrono::steady_clock::now();
+      }
+      return session_live_override.value_or(*session_live_answer);
+    }
+
+    // After that the answer is refreshed off the caller's thread. Some callers ask per input
+    // event, and a walk of /proc is not something a pointer move should wait for. An answer
+    // one scan old is fine for something that changes when a person switches modes.
+    if (std::chrono::steady_clock::now() - session_live_read_at >= session_live_ttl && !session_live_refreshing) {
+      session_live_refreshing = true;
+      try {
+        std::thread([]() {
+          bool live = false;
+          bool scanned = false;
+          try {
+            live = scan_session_live();
+            scanned = true;
+          } catch (...) {
+          }
+          std::lock_guard guard {session_live_mutex};
+          if (scanned && !session_live_override) {
+            session_live_answer = live;
+          }
+          session_live_read_at = std::chrono::steady_clock::now();
+          session_live_refreshing = false;
+        }).detach();
+      } catch (...) {
+        session_live_refreshing = false;  // no thread to be had; the old answer stands until the next ask
+      }
     }
     return *session_live_answer;
   }

@@ -38,6 +38,9 @@ namespace platf::steam_title {
 
   /**
    * @brief Whether Steam is running this title for this account.
+   *
+   * Only Steam's own launch processes count, the reaper and the launch wrapper, so a shell or a
+   * process search whose command line happens to hold the same words is not taken for the title.
    */
   bool running(const std::vector<process_t> &table, std::string_view appid, uid_t uid);
 
