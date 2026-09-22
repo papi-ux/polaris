@@ -189,9 +189,15 @@ namespace multiseat {
     std::vector<worker_observation_t> inventory;
     try {
       inventory = backend_.inventory();
+    } catch (const std::exception &error) {
+      admission_ready_ = false;
+      report.backend_observation_failed = true;
+      report.backend_observation_error = error.what();
+      return report;
     } catch (...) {
       admission_ready_ = false;
       report.backend_observation_failed = true;
+      report.backend_observation_error = "unknown error";
       return report;
     }
 

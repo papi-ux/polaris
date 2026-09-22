@@ -699,6 +699,8 @@ TEST(MultiseatWorkerBroker, InventoryFailureClosesAdmissionWithoutMutation) {
 
   const auto report = broker.reconcile();
   EXPECT_TRUE(report.backend_observation_failed);
+  // The reconcile log line closed admission with no reason at all.
+  EXPECT_EQ(report.backend_observation_error, "fake inventory failure");
   EXPECT_FALSE(report.inventory_authoritative);
   EXPECT_TRUE(report.active_workers.empty());
   EXPECT_FALSE(report.admission_ready);

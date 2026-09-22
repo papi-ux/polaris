@@ -28,6 +28,13 @@ namespace multiseat::container {
     using json = nlohmann::json;
     using namespace std::literals;
 
+    // Which way a bounded engine command failed, for the words of the error it raises.
+    std::string describe_command_failure(const command_result_t &result) {
+      if (result.timed_out) return "timed out";
+      if (result.output_truncated) return "returned more output than Polaris reads";
+      return "exited with status " + std::to_string(result.exit_status);
+    }
+
     constexpr auto label_protocol = "io.polaris.multiseat.protocol"sv;
     constexpr auto label_deployment = "io.polaris.multiseat.deployment"sv;
     constexpr auto label_controller = "io.polaris.multiseat.controller"sv;
@@ -1937,7 +1944,7 @@ namespace multiseat::container {
       options_.max_command_output_bytes
     );
     if (listed.timed_out || listed.output_truncated || listed.exit_status != 0) {
-      throw std::runtime_error {"container inventory listing failed"};
+      throw std::runtime_error {"container inventory listing " + describe_command_failure(listed)};
     }
     const auto ids = parse_container_ids(listed.output, options_.max_inventory_workers);
     if (ids.empty()) {
@@ -1954,7 +1961,8 @@ namespace multiseat::container {
       options_.max_command_output_bytes
     );
     if (inspected.timed_out || inspected.output_truncated || inspected.exit_status != 0) {
-      throw std::runtime_error {"container inventory inspection failed"};
+      // A worker that exits between the listing and this call is the usual one.
+      throw std::runtime_error {"container inventory inspection " + describe_command_failure(inspected)};
     }
 
     try {

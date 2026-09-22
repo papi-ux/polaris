@@ -82,7 +82,10 @@ namespace multiseat {
           << " endpoint_shutdown_failures=" << worker.endpoint_shutdown_failures
           << " broker{admission_ready=" << broker.admission_ready
           << " inventory_authoritative=" << broker.inventory_authoritative
-          << " backend_observation_failed=" << broker.backend_observation_failed
+          << " backend_observation_failed=" << broker.backend_observation_failed;
+      // Admission closes for the pass, and without this nothing said why.
+      if (broker.backend_observation_failed) out << " backend_observation_error=[" << broker.backend_observation_error << ']';
+      out
           << " current=" << broker.current_workers << " orphans=" << broker.orphan_workers
           << " missing=" << broker.missing_workers << " stuck=" << broker.stuck_workers
           << " protocol_errors=" << broker.protocol_errors
