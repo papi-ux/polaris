@@ -60,9 +60,9 @@ explicit:
   [Spaces guide](https://papi-ux.com/docs/spaces/) and
   [Spaces or regular streaming](https://papi-ux.com/docs/spaces-or-regular/)
   say what that means for you.
-- **Anyone can watch.** A second device can watch the stream that is running at
-  whatever resolution it has. The host says up front what there is to watch, so
-  a watcher is never refused for asking for the wrong mode.
+- **Anyone can watch.** A second device can watch the stream that is running,
+  whatever its own resolution. The host says up front what there is to watch, so
+  Nova asks for exactly that stream; Moonlight still asks for the stream's mode.
 - **A library that fills from a folder of ROMs.** Import a ROM folder once and
   rescan for new games. Eden, Dolphin, Cemu, DuckStation, PCSX2, PPSSPP and
   mGBA are presets, covers come from your folders, ES-DE or RetroArch, and the
