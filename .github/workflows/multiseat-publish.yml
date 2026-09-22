@@ -88,9 +88,9 @@ jobs:
         id: artifact
         run: |
           set -euo pipefail
-          directory=$(find runtime-artifact -type d -path "*/steam/${{ inputs.variant }}" -print -quit)
+          directory=$(find runtime-artifact -type d -path "*/${{ inputs.profile }}/${{ inputs.variant }}" -print -quit)
           [ -n "$directory" ] && [ -f "$directory/worker.oci.tar" ] || {
-            echo "run ${{ inputs.run_id }} carries no steam/${{ inputs.variant }} archive"; exit 1; }
+            echo "run ${{ inputs.run_id }} carries no ${{ inputs.profile }}/${{ inputs.variant }} archive"; exit 1; }
           echo "directory=$directory" >> "$GITHUB_OUTPUT"
 
       - name: Verify build provenance before any registry write
@@ -127,7 +127,7 @@ jobs:
           DIRECTORY: ${{ steps.artifact.outputs.directory }}
         run: |
           set -euo pipefail
-          tag="steam-${{ inputs.variant }}-${REVISION:0:12}"
+          tag="${{ inputs.profile }}-${{ inputs.variant }}-${REVISION:0:12}"
           echo "${{ github.token }}" | skopeo login ghcr.io --username ${{ github.actor }} --password-stdin
           # Unpack first: reading oci-archive: directly makes skopeo chown into a temp
           # directory, which fails for an unprivileged runner. tar as a normal user does
@@ -175,7 +175,7 @@ jobs:
           TAG: ${{ steps.copy.outputs.tag }}
         run: |
           {
-            echo "### steam/${{ inputs.variant }} published"
+            echo "### ${{ inputs.profile }}/${{ inputs.variant }} published"
             echo
             echo "- registry: \`$REGISTRY:$TAG\`"
             echo "- digest: \`$DIGEST\`"
@@ -187,7 +187,7 @@ jobs:
 
       - uses: actions/upload-artifact@v6
         with:
-          name: runtime-candidate-steam-${{ inputs.variant }}-${{ inputs.source_revision }}
+          name: runtime-candidate-${{ inputs.profile }}-${{ inputs.variant }}-${{ inputs.source_revision }}
           path: |
             runtime-candidate.json
             registry-manifest.json
