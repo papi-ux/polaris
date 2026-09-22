@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 #include <src/adaptive_bitrate.h>
 #include <src/ai_optimizer.h>
 #include <src/file_handler.h>
@@ -1171,6 +1172,55 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureLauncherIsTheEntryThatOpensBigPic
   proc::ctx_t desktop {};
   desktop.name = "Desktop";
   EXPECT_FALSE(proc::is_steam_big_picture_launcher(desktop));
+}
+
+TEST(ProcessRuntimeConfigTests, TheLowResDesktopSampleIsRecognisedOnlyWhileUnchanged) {
+  proc::ctx_t sample {};
+  sample.name = "Low Res Desktop";
+  sample.image_path = "desktop.png";
+  sample.desktop_mirror = true;
+  sample.prep_cmds = {{"xrandr --output HDMI-1 --mode 1920x1080", "xrandr --output HDMI-1 --mode 1920x1200", false}};
+  EXPECT_TRUE(proc::is_stock_low_res_desktop(sample));
+
+  // An upgraded host's copy has no desktop-mirror flag and is still the same sample.
+  auto upgraded = sample;
+  upgraded.desktop_mirror = false;
+  EXPECT_TRUE(proc::is_stock_low_res_desktop(upgraded));
+
+  auto renamed = sample;
+  renamed.name = "Couch Desktop";
+  EXPECT_FALSE(proc::is_stock_low_res_desktop(renamed)) << "a renamed entry is the player's";
+
+  auto own_output = sample;
+  own_output.prep_cmds = {{"xrandr --output DP-2 --mode 1920x1080", "xrandr --output DP-2 --mode 2560x1440", false}};
+  EXPECT_FALSE(proc::is_stock_low_res_desktop(own_output)) << "a prep command of their own makes it theirs";
+
+  auto more_steps = sample;
+  more_steps.prep_cmds.push_back({"notify-send streaming", "", false});
+  EXPECT_FALSE(proc::is_stock_low_res_desktop(more_steps));
+
+  auto launches = sample;
+  launches.cmd = "/usr/bin/a-game";
+  EXPECT_FALSE(proc::is_stock_low_res_desktop(launches));
+}
+
+TEST(ProcessRuntimeConfigTests, TheLibraryDesktopTileIsDesktopNotTheLowResSample) {
+  // Nova's desktop tile opened Low Res Desktop on every host that had both: the library left out
+  // the entry named Desktop, and the sample's HDMI-1 xrandr prep command failed on each launch.
+  const auto nvhttp = read_source_file_for_contract("src/nvhttp.cpp");
+  const auto games = nvhttp.substr(nvhttp.find("auto polarisGames = [](resp_https_t response, req_https_t request) {"));
+  const auto listing = games.substr(0, games.find("\n    auto polaris"));
+  EXPECT_EQ(listing.find("if (app.name == \"Desktop\") continue;"), std::string::npos) << "Desktop is the desktop tile";
+  EXPECT_NE(listing.find("if (has_desktop && proc::is_stock_low_res_desktop(app)) continue;"), std::string::npos)
+    << "the sample is left out only beside a Desktop entry, so a host without one keeps a desktop tile";
+
+  const auto defaults = nlohmann::json::parse(read_source_file_for_contract("src_assets/linux/assets/apps.json"));
+  std::vector<std::string> names;
+  for (const auto &app : defaults.at("apps")) {
+    names.push_back(app.at("name").get<std::string>());
+  }
+  EXPECT_NE(std::find(names.begin(), names.end(), "Desktop"), names.end());
+  EXPECT_EQ(std::find(names.begin(), names.end(), "Low Res Desktop"), names.end()) << "new installs no longer get the sample";
 }
 
 TEST(ProcessRuntimeConfigTests, AnEntryThatLaunchesNothingStreamsTheDesktop) {

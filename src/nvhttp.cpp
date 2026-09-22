@@ -9048,10 +9048,16 @@ namespace nvhttp {
       auto apps = proc::proc.get_apps();
       nlohmann::json games = nlohmann::json::array();
 
+      // The library's desktop tile is the entry named Desktop. The Low Res Desktop sample that
+      // installs before 1.4.12 got beside it stands in for nothing once Desktop is there, and
+      // its xrandr prep command fails on nearly every host, so the unchanged sample is left out.
+      const bool has_desktop = std::any_of(apps.begin(), apps.end(), [](const auto &app) {
+        return app.name == "Desktop";
+      });
+
       int idx = 0;
       for (auto &app : apps) {
-        // Skip non-game entries (Desktop, Lutris launcher)
-        if (app.name == "Desktop") continue;
+        if (has_desktop && proc::is_stock_low_res_desktop(app)) continue;
 
         // Search filter
         if (!search_query.empty()) {

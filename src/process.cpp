@@ -4572,6 +4572,12 @@ namespace proc {
       (blank(app.source) || boost::iequals(boost::trim_copy(app.source), "manual"));
   }
 
+  bool is_stock_low_res_desktop(const ctx_t &app) {
+    return app.name == "Low Res Desktop" && launches_nothing(app) && app.prep_cmds.size() == 1 &&
+      app.prep_cmds.front().do_cmd == "xrandr --output HDMI-1 --mode 1920x1080" &&
+      app.prep_cmds.front().undo_cmd == "xrandr --output HDMI-1 --mode 1920x1200";
+  }
+
   bool is_one_game(const ctx_t &app) {
     const auto present = [](const std::string &value) {
       return !boost::trim_copy(value).empty();

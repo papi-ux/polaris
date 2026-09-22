@@ -687,6 +687,16 @@ namespace proc {
   bool launches_nothing(const ctx_t &app);
 
   /**
+   * @brief Whether an entry is the Low Res Desktop sample as Polaris used to ship it, unchanged.
+   *
+   * New installs got it beside Desktop until 1.4.12. Its prep command sets an X11 output named
+   * HDMI-1 to 1920x1080 with xrandr, which fails on nearly every host, and the library showed it as
+   * the desktop tile because the entry named Desktop was left out. Only the untouched sample
+   * counts: an entry someone renamed or gave commands of their own is theirs.
+   */
+  bool is_stock_low_res_desktop(const ctx_t &app);
+
+  /**
    * @brief Whether an entry is one particular game rather than a launcher, an emulator or the desktop.
    *
    * A Steam app id, a ROM file, or the id a Heroic or Lutris import carries for its game says which
