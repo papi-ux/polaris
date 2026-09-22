@@ -3493,6 +3493,20 @@ namespace proc {
       return !launched_appid.empty() && game_mode_session_live && session_ended_on_request;
     }
 
+#ifdef __linux__
+    bool game_mode_replaced_paused_topology(
+      bool game_mode_session_live,
+      std::string_view requested_topology,
+      std::string_view paused_topology
+    ) {
+      // In Game Mode every launch streams the Game Mode screen, so a resume resolves to the
+      // mirror of it. A stream that paused as anything else, a Private Stream most often, cannot
+      // come back as it was, and the player is owed that reason instead of a bare 409.
+      return game_mode_session_live && requested_topology == stream_display_policy::k_desktop_display &&
+             paused_topology != requested_topology;
+    }
+#endif
+
     bool should_skip_steam_stop_undo_in_game_mode(
       const proc::cmd_t &cmd,
       bool game_mode_session_live
@@ -5656,6 +5670,16 @@ namespace proc {
     return should_close_game_mode_title(launched_appid, game_mode_session_live, session_ended_on_request);
   }
 
+#ifdef __linux__
+  bool game_mode_replaced_paused_topology_for_tests(
+    bool game_mode_session_live,
+    std::string_view requested_topology,
+    std::string_view paused_topology
+  ) {
+    return game_mode_replaced_paused_topology(game_mode_session_live, requested_topology, paused_topology);
+  }
+#endif
+
   bool should_forward_steam_shutdown_undo_without_launch_for_tests(
     const proc::ctx_t &app,
     const proc::cmd_t &cmd,
@@ -6893,6 +6917,25 @@ namespace proc {
     return execute_impl(app, std::move(launch_session), no_active_sessions_at_launch);
   }
 
+  namespace {
+    /// Marks a stop as someone ending the session on purpose, for as long as the stop runs.
+    struct session_end_request_scope_t {
+      explicit session_end_request_scope_t(std::atomic<bool> &flag):
+          flag {flag} {
+        flag.store(true);
+      }
+
+      session_end_request_scope_t(const session_end_request_scope_t &) = delete;
+      session_end_request_scope_t &operator=(const session_end_request_scope_t &) = delete;
+
+      ~session_end_request_scope_t() {
+        flag.store(false);
+      }
+
+      std::atomic<bool> &flag;
+    };
+  }  // namespace
+
   int proc_t::execute_and_raise(
     const ctx_t& app,
     std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
@@ -6907,6 +6950,9 @@ namespace proc {
       const auto publish_error = prepare_error ? prepare_error : publish();
       if (publish_error) {
         launch_session->cancel();
+        // The launch never reached the client, so what it opened goes with it,
+        // a title it opened in Game Mode included.
+        const session_end_request_scope_t ending {session_lifecycle_sync().stop_ends_session};
         terminate_impl(false, true);
         return publish_error;
       }
@@ -6987,6 +7033,14 @@ namespace proc {
       const auto requested_topology = effective_topology(launch_session);
       const auto active_topology = _launch_session->expected_stream_mode.empty() ?
         effective_topology(_launch_session) : _launch_session->expected_stream_mode;
+      if (!launch_session->watch_only &&
+          game_mode_replaced_paused_topology(platf::game_mode_host::session_live(), requested_topology, active_topology)) {
+        BOOST_LOG(info) << "process: refusing to resume a stream that paused as ["sv << active_topology
+                        << "] because the host has gone into Steam Game Mode since"sv;
+        return launch_failure::refuse(409, "game_mode_started_since_pause",
+          "The host went into Steam Game Mode after this stream paused, so it cannot come back as it was.",
+          "End the session, then start the game again. It streams the Game Mode screen.");
+      }
       if (launch_session->expected_stream_mode.empty() ||
           requested_topology != launch_session->expected_stream_mode ||
           active_topology != launch_session->expected_stream_mode) {
@@ -9957,25 +10011,6 @@ namespace proc {
     system_tray::update_tray_pausing(proc::proc.get_last_run_app_name());
 #endif
   }
-
-  namespace {
-    /// Marks a stop as someone ending the session on purpose, for as long as the stop runs.
-    struct session_end_request_scope_t {
-      explicit session_end_request_scope_t(std::atomic<bool> &flag):
-          flag {flag} {
-        flag.store(true);
-      }
-
-      session_end_request_scope_t(const session_end_request_scope_t &) = delete;
-      session_end_request_scope_t &operator=(const session_end_request_scope_t &) = delete;
-
-      ~session_end_request_scope_t() {
-        flag.store(false);
-      }
-
-      std::atomic<bool> &flag;
-    };
-  }  // namespace
 
   void proc_t::terminate(bool immediate, bool needs_refresh) {
     stop(immediate, needs_refresh, false);

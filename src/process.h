@@ -341,6 +341,13 @@ namespace proc {
     bool game_mode_session_live,
     bool session_ended_on_request
   );
+#ifdef __linux__
+  bool game_mode_replaced_paused_topology_for_tests(
+    bool game_mode_session_live,
+    std::string_view requested_topology,
+    std::string_view paused_topology
+  );
+#endif
   bool should_forward_steam_shutdown_undo_without_launch_for_tests(
     const struct ctx_t &app,
     const config::prep_cmd_t &cmd,

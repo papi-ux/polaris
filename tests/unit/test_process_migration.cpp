@@ -4545,6 +4545,15 @@ TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStream
 
   // Acted on only when someone ends the session on purpose.
   EXPECT_TRUE(proc::should_close_game_mode_title_for_tests("813230", true, true));
+#ifdef __linux__
+  // A Private Stream paused, then the host went into Game Mode: the resume says why it cannot come back.
+  EXPECT_TRUE(proc::game_mode_replaced_paused_topology_for_tests(true, "desktop_display", "headless_stream"));
+  EXPECT_FALSE(proc::game_mode_replaced_paused_topology_for_tests(true, "desktop_display", "desktop_display"))
+    << "a stream that paused on the Game Mode screen comes back to it";
+  EXPECT_FALSE(proc::game_mode_replaced_paused_topology_for_tests(false, "desktop_display", "headless_stream"))
+    << "outside Game Mode a changed topology is the ordinary mismatch";
+  EXPECT_FALSE(proc::game_mode_replaced_paused_topology_for_tests(true, "headless_stream", "windowed_stream"));
+#endif
   EXPECT_FALSE(proc::should_close_game_mode_title_for_tests("813230", true, false))
     << "a paused session timing out, a client dropping, an unpair or a restart leaves the game where it was";
   EXPECT_FALSE(proc::should_close_game_mode_title_for_tests("", true, true));
@@ -4569,6 +4578,14 @@ TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStream
   // client, the Polaris session stop, the console's Disconnect), the terminate app, and end_session
   // (the console's Close App). Each marks only the stop it runs, and the paused-session timeout
   // and a drop of the last client go through terminate_if and terminate, which mark nothing.
+  const auto raise = source.substr(source.find("int proc_t::execute_and_raise("));
+  const auto rolled_back = raise.find("const session_end_request_scope_t ending {session_lifecycle_sync().stop_ends_session};");
+  const auto rollback_teardown = raise.find("terminate_impl(false, true);");
+  ASSERT_NE(rolled_back, std::string::npos)
+    << "a launch whose publish fails ends what it opened, or a Game Mode title stays open with no stream";
+  ASSERT_NE(rollback_teardown, std::string::npos);
+  EXPECT_LT(rolled_back, rollback_teardown);
+
   const auto shutdown = source.substr(source.find("session_stop_result_t proc_t::request_session_shutdown("));
   const auto marked = shutdown.find("const session_end_request_scope_t ending {sync.stop_ends_session};");
   const auto stopped = shutdown.find("terminate_impl(false, true);");
