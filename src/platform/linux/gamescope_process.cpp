@@ -927,4 +927,37 @@ namespace stream_runtime::gamescope_process {
     return std::nullopt;
   }
 
+  std::optional<std::string> display_polaris_restarts(
+    std::string_view display,
+    std::string_view current_desktop,
+    bool gamescope_mode,
+    const fs::path &marker_path,
+    const lookup_paths_t &paths
+  ) {
+    if (display.empty()) {
+      return std::nullopt;
+    }
+    // ":0", ":0.0" and "unix:0" name the same server.
+    auto server = display;
+    if (server.starts_with("unix:")) {
+      server.remove_prefix(4);
+    }
+    if (const auto colon = server.rfind(':'); colon != std::string_view::npos) {
+      if (const auto dot = server.find('.', colon); dot != std::string_view::npos) {
+        server = server.substr(0, dot);
+      }
+    }
+    if (const auto marker = validated_marker(marker_path, {}, paths)) {
+      if (const auto owned = discover_owned_x11_display(*marker, paths); owned && *owned == server) {
+        return "DISPLAY " + std::string {display} + " is the Xwayland of the " + marker->role + " gamescope Polaris started";
+      }
+    }
+    // The units that run Polaris for a gamescope session point DISPLAY at that
+    // gamescope and say so, and Polaris can start before the compositor is up.
+    if (gamescope_mode && current_desktop == "gamescope") {
+      return "DISPLAY " + std::string {display} + " belongs to the gamescope session this host streams";
+    }
+    return std::nullopt;
+  }
+
 }  // namespace stream_runtime::gamescope_process

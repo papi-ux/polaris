@@ -115,4 +115,27 @@ namespace stream_runtime::gamescope_process {
     const lookup_paths_t &paths = {}
   );
 
+  /**
+   * @brief Why a client that has to outlive a gamescope restart stays off @p display.
+   *
+   * Polaris stops and restarts its own gamescope when HDR changes, when a nested
+   * session starts and when the idle compositor needs recovering, and every X
+   * client of that gamescope's Xwayland loses its connection with it. Xlib ends
+   * the process on that, so the system tray, which lives as long as Polaris,
+   * must never connect there (#744).
+   *
+   * @param display DISPLAY as the process has it.
+   * @param current_desktop XDG_CURRENT_DESKTOP as the process has it.
+   * @param gamescope_mode Polaris is set to stream a gamescope session.
+   * @param marker_path The marker Polaris writes for the gamescope it started.
+   * @return Why to stay off, or nothing when Polaris never restarts that display.
+   */
+  std::optional<std::string> display_polaris_restarts(
+    std::string_view display,
+    std::string_view current_desktop,
+    bool gamescope_mode,
+    const std::filesystem::path &marker_path,
+    const lookup_paths_t &paths = {}
+  );
+
 }  // namespace stream_runtime::gamescope_process
