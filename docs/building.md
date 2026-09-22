@@ -73,7 +73,7 @@ those less-turnkey paths.
 | Fedora 44 | Published RPM asset | Most validated package path. |
 | Arch Linux | Published `pkg.tar.zst` asset | Recommended rolling-release path. |
 | CachyOS / Arch derivatives | Start with the Arch package | Pacman-compatible derivatives should work from the Arch asset first; use source/local package fallback if dependency names or runtime helpers drift. |
-| SteamOS 3.8 x86_64 | Dedicated published `pkg.tar.zst` asset | Experimental Desktop Mode package and startup validation only; not a rolling Arch package or physical Steam Deck gameplay certification. |
+| SteamOS 3.8 x86_64 | Dedicated published `pkg.tar.zst` asset | Proven in Desktop Mode and in Game Mode on a Steam Deck OLED; not a rolling Arch package. |
 | Bazzite 44 | Fedora 44 RPM layered with `rpm-ostree` | Experimental; Desktop Mode has NVIDIA Headless Stream coverage and growing AMD/Mesa VAAPI validation, Steam/Game Mode needs more reports. |
 | Ubuntu 24.04 | Published DEB asset | Experimental tester package; broader desktop/GPU coverage needed. |
 | openSUSE Tumbleweed | Source build | Dedicated guide and CI build coverage; no published release asset yet. |

@@ -14,7 +14,7 @@ handheld edition, and any host that installs a gamescope Steam session next to i
 |---|---|
 | Streaming from Desktop Mode | Works as the distro guide describes: [SteamOS](steamos.md), [Bazzite](bazzite.md), [Arch and CachyOS](arch.md). |
 | Polaris staying reachable after switching to Game Mode | Works once Polaris starts at boot. See below. |
-| Streaming what Game Mode shows | Works, with keyboard and mouse. See [Streaming from Game Mode](#streaming-from-game-mode). |
+| Streaming what Game Mode shows | Works, with keyboard, mouse, a controller and touch. See [Streaming from Game Mode](#streaming-from-game-mode). |
 | Launching a Steam title into Game Mode from a client | Works. The launch goes to the Steam that is running Game Mode. |
 | A Private Stream while Game Mode is running | Not possible. Game Mode owns the one screen and the one Steam. The configured mode comes back in Desktop Mode. |
 
@@ -110,10 +110,11 @@ Known limits:
 - The stream is the session's resolution, 1280x800 on a Steam Deck, scaled to what the client asked
   for. HDR is not carried.
 
-Proven on a Steam Deck OLED on SteamOS 3.8.16 with gamescope 3.16.23: the Game Mode screen, a Steam
-title launched from the client at 60 fps with audio, keyboard, mouse and a controller, that title
-closed again when the session ended, and Game Mode still running afterwards. Touch, an emulated
-DualSense, Bazzite, and hosts whose gamescope has no ScreenCast portal still want field results.
+Proven on a Steam Deck OLED on SteamOS 3.8.16 with gamescope 3.16.23, on the packaged install with
+headless boot enabled: the Game Mode screen, a Steam title launched from the client at 60 fps with
+audio, keyboard, mouse, a controller emulated as a DualSense, and touch, that title closed again
+when the session ended, and Game Mode still running afterwards. Bazzite, other handhelds, and hosts
+whose gamescope has no ScreenCast portal still want field results.
 
 ## Reporting Game Mode results
 

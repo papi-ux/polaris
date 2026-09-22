@@ -15,7 +15,7 @@ Polaris is Linux-only by design. Windows and macOS host ports are not planned.
 | Fedora 44 | Recommended | Official RPM asset and most validated release path. See the [Fedora guide](fedora.md). |
 | Arch Linux | Recommended | Official package asset. See the [Arch guide](arch.md). |
 | CachyOS / Arch derivatives | Expected via Arch package | Pacman-compatible derivatives should start there; report derivative-specific dependency or runtime gaps. |
-| SteamOS 3.8 x86_64 | Experimental Desktop Mode package | Dedicated package; physical Steam Deck gameplay, Game Mode, suspend, and update persistence are not yet certified. See the [SteamOS guide](steamos.md). |
+| SteamOS 3.8 x86_64 | Supported on Steam Deck OLED | Dedicated package, proven in Desktop Mode and in Game Mode on a Steam Deck OLED. The Deck LCD, suspend, and update persistence are not yet certified. See the [SteamOS guide](steamos.md). |
 | Bazzite 44 | Supported installation | Layer the Fedora 44 RPM with `rpm-ostree`; NVIDIA Desktop Mode has streaming evidence. Game Mode and driver-specific game flows need more coverage. The standalone system extension remains withdrawn. See the [Bazzite guide](bazzite.md). |
 | Ubuntu 24.04 | Experimental tester path | The DEB asset exists but this path needs broader real-hardware validation. See the [Ubuntu guide](ubuntu.md). |
 | openSUSE Tumbleweed | Source-build supported | Dedicated dependency and build guide plus CI build coverage; no published package asset yet. See the [openSUSE guide](openSUSE.md). |
