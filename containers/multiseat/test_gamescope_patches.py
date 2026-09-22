@@ -30,6 +30,12 @@ class GamescopePatches(unittest.TestCase):
         patch = (HERE / 'patches/gamescope-force-windows-fullscreen-desktop.patch').read_text()
         self.assertIn('-\tif ( w->sizeHintsSpecified && !window_is_fullscreen( w ) )', patch)
         self.assertIn('+\tif ( w->sizeHintsSpecified && !(window_is_fullscreen( w ) || ctx->force_windows_fullscreen) )', patch)
+        # Without Steam mode gamescope gives every window a game id, its own window id, so a
+        # launcher's window never reaches that desktop-window check. The focus path sized it
+        # instead, and upstream added the flag there too. With only the first hunk the Lutris
+        # window stayed at 810x656 in a Space.
+        self.assertIn('-\t\tif ( window_is_fullscreen( ctx->focus.focusWindow ) )', patch)
+        self.assertIn('+\t\tif ( window_is_fullscreen( ctx->focus.focusWindow ) || ctx->force_windows_fullscreen )', patch)
         self.assertIn('--force-windows-fullscreen', (HERE.parent.parent / 'multiseat_worker/internal/seatprovider/nested_compositor_linux.go').read_text(),
                       'the patch only matters while the worker starts gamescope with the flag')
 
