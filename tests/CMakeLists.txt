@@ -317,6 +317,7 @@ endif()
 set(TEST_VIDEO_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_lifecycle_hardware.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_cbs.cpp
 )
 
 # Copy files needed for config consistency tests to build directory

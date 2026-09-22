@@ -3197,18 +3197,23 @@ namespace video {
           sps = std::move(hevc.sps);
           vps = std::move(hevc.vps);
 
-          session.replacements->emplace_back(
-            std::string_view((char *) std::begin(vps.old), vps.old.size()),
-            std::string_view((char *) std::begin(vps._new), vps._new.size())
-          );
+          if (vps.old.size()) {
+            session.replacements->emplace_back(
+              std::string_view((char *) std::begin(vps.old), vps.old.size()),
+              std::string_view((char *) std::begin(vps._new), vps._new.size())
+            );
+          }
         }
 
         session.inject = 0;
 
-        session.replacements->emplace_back(
-          std::string_view((char *) std::begin(sps.old), sps.old.size()),
-          std::string_view((char *) std::begin(sps._new), sps._new.size())
-        );
+        // A parameter set that could not be read has nothing to replace.
+        if (sps.old.size()) {
+          session.replacements->emplace_back(
+            std::string_view((char *) std::begin(sps.old), sps.old.size()),
+            std::string_view((char *) std::begin(sps._new), sps._new.size())
+          );
+        }
       }
 
       if (av_packet && av_packet->pts == frame_nr) {
