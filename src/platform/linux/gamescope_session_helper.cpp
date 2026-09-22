@@ -124,7 +124,11 @@ namespace platf::gamescope_session_helper {
     resolution_t resolution;
 
     if (!explicit_session.empty()) {
-      if (linux_util::is_executable_file(explicit_session.string())) {
+      // The launcher is joined into the session's start, wait and stop commands, which split on
+      // whitespace, and a relative name would mean whatever the working directory makes of it.
+      const auto named = explicit_session.string();
+      if (explicit_session.is_absolute() && named.find_first_of(" \t\n'\"\\") == std::string::npos &&
+          linux_util::is_executable_file(named)) {
         resolution.helper = explicit_session;
         resolution.from_override = true;
       } else {
@@ -211,7 +215,7 @@ namespace platf::gamescope_session_helper {
     if (!resolution.override_ignored.empty()) {
       lines.push_back(
         "gamescope_stream: POLARIS_GAMESCOPE_SESSION names [" + resolution.override_ignored.string() +
-        "], which is not an executable file, so Polaris runs [" +
+        "], which is not an absolute path to an executable file with no spaces or quotes, so Polaris runs [" +
         (resolution.helper.empty() ? std::string {"no launcher"} : resolution.helper.string()) + "] instead."
       );
     }

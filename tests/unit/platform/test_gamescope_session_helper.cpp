@@ -104,7 +104,12 @@ TEST(GamescopeSessionHelperTests, ANamedLauncherThatCannotRunIsReportedAndNotUse
   const auto not_executable = scratch.file("opt/polaris/polaris-gamescope-session", module_body, false);
   const auto missing = scratch.root / "nowhere/polaris-gamescope-session";
 
-  for (const auto &named : {not_executable, missing}) {
+  // Joined into the session's commands, a name with a space splits, and a relative one depends on
+  // the working directory.
+  const auto spaced = scratch.file("opt/my polaris/polaris-gamescope-session", module_body, true);
+  const fs::path relative {"polaris-gamescope-session"};
+
+  for (const auto &named : {not_executable, missing, spaced, relative}) {
     const auto resolution = helper::resolve(beside.parent_path(), {}, {}, {}, named);
     EXPECT_EQ(resolution.helper, beside);
     EXPECT_FALSE(resolution.from_override);
