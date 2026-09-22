@@ -67,9 +67,12 @@ __attribute__((destructor)) static void bounded_result(void) {
   gint64 elapsed=g_get_monotonic_time()-first_frame;
   const char *scenario=getenv("POLARIS_CAPTURE_TEST");
   if (!first_frame) _Exit(91);
+  /* The lower bound is the claim: the deadline must not fire before its time. The upper bound
+   * only catches a run that never ends, so it is generous. A four-core CI runner building the
+   * borrowed-driver layer beside this test overshot the old bounds and exited here silently. */
   if (scenario && !strcmp(scenario,"recover")) {
-    if (!recovered || elapsed<2300000 || elapsed>4000000) _Exit(92);
+    if (!recovered || elapsed<2300000 || elapsed>9000000) _Exit(92);
   } else if (scenario && !strcmp(scenario,"retire")) {
-    if (!retired || elapsed<2000000 || elapsed>3500000) _Exit(93);
-  } else if (elapsed<4900000 || elapsed>7000000) _Exit(94);
+    if (!retired || elapsed<2000000 || elapsed>8000000) _Exit(93);
+  } else if (elapsed<4900000 || elapsed>15000000) _Exit(94);
 }
