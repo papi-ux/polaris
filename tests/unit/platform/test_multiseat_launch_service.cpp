@@ -1845,7 +1845,12 @@ namespace {
     started->launch->cancel();
     const auto began = state->begins.load();
     start.erase("workerTarget"); start.emplace("workerTarget", "3527290");
-    EXPECT_EQ(nvhttp::launch_profile_request(client, start, false, [](const auto &) { return true; })->status, 409);
+    const auto missing = nvhttp::launch_profile_request(client, start, false, [](const auto &) { return true; });
+    ASSERT_TRUE(missing);
+    EXPECT_EQ(missing->status, 409);
+    EXPECT_EQ(missing->code, "space_game_missing");
+    // The sentence outlives the refusal that built it; the sanitizer caught a read of a freed one.
+    EXPECT_EQ(missing->action, "Open Steam Big Picture in that Space, or refresh the library.");
     EXPECT_EQ(state->begins.load(), began);
     auto replacement = std::make_shared<crypto::named_cert_t>();
     replacement->uuid = client->uuid; replacement->name = client->name; replacement->cert = client->cert;

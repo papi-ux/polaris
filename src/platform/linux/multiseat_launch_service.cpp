@@ -51,6 +51,15 @@ namespace multiseat {
       return {};
     }
 
+    // A refusal's words are views, so they are literals: a sentence built for the refusal would be
+    // gone by the time the launch response copies it.
+    std::string_view missing_game_action(std::string_view family) {
+      if (family == "steam") return "Open Steam Big Picture in that Space, or refresh the library.";
+      if (family == "heroic") return "Open Heroic in that Space, or refresh the library.";
+      if (family == "lutris") return "Open Lutris in that Space, or refresh the library.";
+      return "Open the Space's launcher, or refresh the library.";
+    }
+
     std::mutex installed_mutex;
     std::shared_ptr<profile_launch_service_t> installed;
     // Worker lifecycle generations cannot be confused with host proc generations.
@@ -877,7 +886,7 @@ namespace multiseat {
           [&](const auto &item) { return item.target == target; });
         if (!snapshot->library.available || game == snapshot->library.games.end())
           return {409, "This game is no longer installed in the selected Space.", "space_game_missing",
-            "Open " + snapshot->launcher_name + " in that Space, or refresh the library."};
+            missing_game_action(snapshot->family)};
         target_name = game->name;
       }
     }
