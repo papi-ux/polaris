@@ -4,6 +4,8 @@
  * @note Adapted from https://www.avahi.org/doxygen/html/client-publish-service_8c-example.html
  */
 // standard includes
+#include <algorithm>
+#include <array>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -344,8 +346,12 @@ namespace platf::publish {
         continue;
       }
       const std::string_view interface_name {entry->ifa_name ? entry->ifa_name : ""};
-      if (interface_name.starts_with("docker"sv) || interface_name.starts_with("veth"sv) ||
-          interface_name.starts_with("br-"sv) || interface_name.starts_with("virbr"sv)) {
+      // Container and VPN interfaces are not where a player on this network reaches the host; a
+      // Spaces host has a podman bridge.
+      constexpr std::array skipped {"docker"sv, "veth"sv, "br-"sv, "virbr"sv, "podman"sv, "cni-"sv, "lxcbr"sv, "tailscale"sv};
+      if (std::any_of(skipped.begin(), skipped.end(), [&](std::string_view prefix) {
+            return interface_name.starts_with(prefix);
+          })) {
         continue;
       }
       char text[INET_ADDRSTRLEN] {};
@@ -361,6 +367,14 @@ namespace platf::publish {
     return joined;
   }
 
+  /// avahi refuses a host that may not announce itself. Nothing is broken, so say what a player does instead.
+  static void warn_announcements_off() {
+    const auto addresses = lan_ipv4_addresses();
+    BOOST_LOG(warning) << "This host does not allow network announcements (avahi publishing is off, as SteamOS "sv
+                       << "ships it), so Nova and Moonlight will not find it on their own. Add it by its address"sv
+                       << (addresses.empty() ? std::string {"."} : ": " + addresses);
+  }
+
   void create_services(avahi::Client *c) {
     int ret;
 
@@ -372,12 +386,9 @@ namespace platf::publish {
       if (!(group = avahi::entry_group_new(c, entry_group_callback, nullptr))) {
         const auto failure = avahi::client_errno(c);
         if (failure == avahi::ERR_NOT_PERMITTED) {
-          // SteamOS ships avahi-daemon.conf with disable-publishing=yes. Nothing is broken; the
-          // host simply cannot announce itself, so say what a player does instead.
-          const auto addresses = lan_ipv4_addresses();
-          BOOST_LOG(warning) << "This host does not allow network announcements (avahi publishing is off, as SteamOS "sv
-                             << "ships it), so Nova and Moonlight will not find it on their own. Add it by its address"sv
-                             << (addresses.empty() ? std::string {"."} : ": " + addresses);
+          // disable-user-service-publishing=yes refuses the group itself. SteamOS ships
+          // avahi-daemon.conf with it and disable-publishing=yes both.
+          warn_announcements_off();
         } else {
           BOOST_LOG(error) << "avahi::entry_group_new() failed: "sv << avahi::strerror(failure);
         }
@@ -412,6 +423,12 @@ namespace platf::publish {
           create_services(c);
 
           fg.disable();
+          return;
+        }
+
+        if (ret == avahi::ERR_NOT_PERMITTED) {
+          // disable-publishing=yes on its own lets the group be made and refuses the service.
+          warn_announcements_off();
           return;
         }
 

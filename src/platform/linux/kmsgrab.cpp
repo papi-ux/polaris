@@ -47,6 +47,18 @@ namespace platf {
 
   namespace kms {
 
+    /// Whether this binary may raise CAP_SYS_ADMIN at all, which is what --enable-kms grants it.
+    static bool sys_admin_permitted() {
+      cap_t caps = cap_get_proc();
+      if (!caps) {
+        return false;
+      }
+      cap_flag_value_t permitted = CAP_CLEAR;
+      const bool held = !cap_get_flag(caps, CAP_SYS_ADMIN, CAP_PERMITTED, &permitted) && permitted == CAP_SET;
+      cap_free(caps);
+      return held;
+    }
+
     class cap_sys_admin {
     public:
       cap_sys_admin() {
@@ -1843,6 +1855,16 @@ namespace platf {
         }
 
         if (!fb->handles[0]) {
+          if (kms::sys_admin_permitted()) {
+            // The binary holds the capability and DRM still gave no handle, so the capability is
+            // not the cause and --enable-kms would change nothing.
+            static std::once_flag held;
+            std::call_once(held, [fb_id = plane->fb_id]() {
+              BOOST_LOG(warning) << "This Polaris binary holds CAP_SYS_ADMIN, but DRM gave no handle for framebuffer ["sv
+                                 << fb_id << "], so KMS capture cannot read this screen"sv;
+            });
+            break;
+          }
           // The probe, not the capture loop: this is the evaluation the Doctor reports on.
           note_kms_capture_refused_for_capability();
           if (config::video.capture == "kms") {

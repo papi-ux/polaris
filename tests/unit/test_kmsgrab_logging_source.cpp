@@ -39,6 +39,11 @@ TEST(KmsgrabLoggingSource, AutoProbeSetcapGuidanceIsNotFatalOnWayland) {
   EXPECT_NE(source.find("KMS display capture requires CAP_SYS_ADMIN"), std::string::npos);
   // A binary that holds no CAP_SYS_ADMIN is not asked to raise it, so that is not an error either.
   EXPECT_NE(source.find("cap_get_flag(caps, CAP_SYS_ADMIN, CAP_PERMITTED, &permitted)"), std::string::npos);
+  // A binary that does hold it is not told to run --enable-kms, and is not recorded as refused for it.
+  const auto held = source.find("if (kms::sys_admin_permitted()) {");
+  ASSERT_NE(held, std::string::npos);
+  EXPECT_LT(held, probe);
+  EXPECT_LT(probe - held, 700u);
 }
 
 TEST(KmsgrabLoggingSource, VirtualDisplayCardsDoNotWarnAboutRenderNodesOrNvenc) {
