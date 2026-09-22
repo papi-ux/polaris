@@ -35,10 +35,13 @@ let
 
   # Host WAYLAND_DISPLAY must not be passed: polaris binds probes to KWin and
   # gamescope lacks xdg-output for wlgrab. Capture uses GAMESCOPE_WAYLAND_DISPLAY.
+  # POLARIS_GAMESCOPE_SESSION names the launcher Polaris runs (#745). The copy inside the Polaris
+  # package would otherwise win, and only this wrapper exports POLARIS_GAMESCOPE_BIN and the tool PATH.
   polarisServiceEnvironment = baseEnvironment // {
     GAMESCOPE_WAYLAND_DISPLAY = "gamescope-0";
     XDG_CURRENT_DESKTOP = "gamescope";
     DISPLAY = ":0";
+    POLARIS_GAMESCOPE_SESSION = lib.getExe sessionBin;
   };
 
   envToUnitLines =

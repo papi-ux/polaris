@@ -37,6 +37,13 @@ launcher or its runtime library was installed from a different checkout than the
 which is the state that makes already-fixed session bugs reappear. Reinstall the helpers from this
 Polaris version, or install the distro package, and the card turns green.
 
+Polaris runs the launcher beside its own binary before one on PATH, which keeps a stale copy from an
+old install out of the way. A packaging that ships its own wrapper, one that exports the gamescope
+build and tools the session should use, names it with `POLARIS_GAMESCOPE_SESSION` in the Polaris
+service's environment, and that launcher runs whenever it is an executable file. The Nix module sets
+it to its wrapper. A name that is not an executable file is logged as a warning when the session
+starts, and the usual launcher runs.
+
 ## Pick the offered action
 
 Doctor uses a small action vocabulary so the button says what will happen:
