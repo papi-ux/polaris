@@ -778,7 +778,7 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain("sed -n 's/^pkgname = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
     expect(buildScript).toContain("sed -n 's/^pkgver = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
     expect(buildScript).toContain("sed -n 's/^arch = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
-    expect(buildScript).toContain("'polaris|1.4.10-1|x86_64'")
+    expect(buildScript).toContain("'polaris|1.4.11-1|x86_64'")
     expect(buildScript).toContain('PACKAGE_PATHS=(polaris-[0-9]*-x86_64.pkg.tar.zst)')
     expect(buildScript).toContain('CLONE_URL=https://github.com/papi-ux/polaris.git')
     expect(buildScript).toContain("sed -n 's/^depend = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
@@ -786,7 +786,7 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain('HOST_BINARIES=("$RECEIPT_ROOT"/usr/bin/polaris-[0-9]*)')
     expect(commonTargets).toContain('-buildmode=pie')
     expect(commonTargets).toContain('-ldflags=-linkmode=external -extldflags=-Wl,-z,relro,-z,now')
-    for (const dependency of ['gcc-libs', 'glib2', 'glibc', 'gtk3', 'hicolor-icon-theme', 'libpipewire', 'libxkbcommon']) {
+    for (const dependency of ['gcc-libs', 'glib2', 'glibc', 'gtk3', 'hicolor-icon-theme', 'libei', 'libpipewire', 'libxkbcommon']) {
       expect(pkgbuild).toContain(`'${dependency}'`)
     }
     expect(buildScript).toContain('PATH=/usr/bin:/bin namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt"')

@@ -19,6 +19,7 @@
   libevdev,
   libpulseaudio,
   libxtst,
+  libei,
   libxrandr,
   libxi,
   libxfixes,
@@ -230,6 +231,7 @@ stdenv'.mkDerivation (finalAttrs: {
     libxfixes
     libxrandr
     libxtst
+    libei
     libxi
     libdrm
     wayland

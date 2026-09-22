@@ -100,6 +100,8 @@ namespace stream {
     std::uint64_t generation(const session_t &session);
     bool uuid_match(const session_t& session, const std::string_view& uuid);
     bool is_watch_only(const session_t& session);
+    /** @brief Whether the session may send controller input, and so holds pads of its own. */
+    bool has_controllers(const session_t& session);
     bool update_device_info(session_t& session, const std::string& name, const crypto::PERM& newPerm);
 #ifdef __linux__
     enum class multiseat_input_bind_status_e {

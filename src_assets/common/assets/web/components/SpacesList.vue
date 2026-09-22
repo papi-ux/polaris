@@ -12,6 +12,8 @@
           </div>
         </div>
         <p class="mt-3 break-words text-sm text-storm">{{ deviceSummary(space) }}</p>
+        <SpaceRuntimeMove :space="space" :job="runtimeMoveJob" :available="runtimeMoveAvailable" :locked="locked"
+                          :lock-reason-id="lockReasonId" :ready="ready" :refresh="refresh" @busy="emit('busy', $event)" />
         <div v-if="manageable" class="mt-4 flex flex-wrap gap-2">
           <Button variant="outline" size="sm" :disabled="locked" :aria-label="$t('spaces.rename_aria', { name: space.name })"
                   :aria-describedby="lockReasonId || undefined" @click="openRename(space)">{{ $t('spaces.rename') }}</Button>
@@ -108,6 +110,7 @@ import { computed, inject, nextTick, ref, watch } from 'vue'
 import Button from './Button.vue'
 import ConfirmActionDialog from './ConfirmActionDialog.vue'
 import SpaceAccess from './SpaceAccess.vue'
+import SpaceRuntimeMove from './SpaceRuntimeMove.vue'
 import StatusBadge from './StatusBadge.vue'
 import { permissionMapping } from '../composables/useClients.js'
 import { deviceNameLabels } from '../device-names.js'
@@ -116,6 +119,7 @@ import { useToast } from '../composables/useToast.js'
 const props = defineProps({ profiles: { type: Array, default: () => [] }, clients: { type: Array, default: () => [] },
   activity: { type: Array, default: null }, refreshing: Boolean,
   accessAvailable: Boolean, creationAvailable: Boolean, manageable: Boolean, removalAvailable: Boolean, locked: Boolean, ready: Boolean,
+  runtimeMoveAvailable: Boolean, runtimeMoveJob: { type: Object, default: null },
   lockReasonId: { type: String, default: '' }, refresh: { type: Function, required: true } })
 const emit = defineEmits(['busy', 'open-default'])
 const i18n = inject('i18n')
@@ -157,7 +161,8 @@ function spaceActivity(space) { return (props.activity || []).filter(item => ite
 function activitySummary(space) {
   if (!props.activity) return props.refreshing ? t('spaces.status_checking') : t('spaces.status_unknown')
   const activity = spaceActivity(space)
-  if (!activity.length) return props.ready ? t('spaces.status_ready') : t('spaces.status_attention')
+  // A Space made for another NVIDIA driver cannot start until it moves.
+  if (!activity.length) return props.ready && !space.runtime_mismatch ? t('spaces.status_ready') : t('spaces.status_attention')
   return activity.map(item => {
     const device = deviceName(props.clients.find(client => client.uuid === item.client_id))
     return t(item.state === 'running' ? 'spaces.status_playing' : item.state === 'starting' ? 'spaces.status_starting' : 'spaces.status_stopping', { device })
@@ -166,7 +171,7 @@ function activitySummary(space) {
 function statusTone(space) {
   if (!props.activity) return 'warning'
   const activity = spaceActivity(space)
-  if (!activity.length) return props.ready ? 'pass' : 'warning'
+  if (!activity.length) return props.ready && !space.runtime_mismatch ? 'pass' : 'warning'
   return activity.every(item => item.state === 'running') ? 'pass' : 'warning'
 }
 

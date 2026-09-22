@@ -62,6 +62,10 @@ case "$DISTRO" in
       maybe_sudo dnf install -y steam \
         || warn "Steam is optional and may require RPM Fusion/non-free repositories"
     fi
+    # The build finds libei on its own and carries on without it, so this is
+    # its own call and a warning rather than one more name in the list above.
+    maybe_sudo dnf install -y libei-devel \
+      || warn "libei-devel is unavailable; mouse and keyboard under gamescope_stream need it at build time"
     ;;
   arch)
     maybe_sudo pacman -S --needed --noconfirm \
@@ -85,6 +89,10 @@ case "$DISTRO" in
       maybe_sudo pacman -S --needed --noconfirm steam \
         || warn "Steam is optional and requires the Arch multilib repository"
     fi
+    # The build finds libei on its own and carries on without it, so this is
+    # its own call and a warning rather than one more name in the list above.
+    maybe_sudo pacman -S --needed --noconfirm libei \
+      || warn "libei is unavailable; mouse and keyboard under gamescope_stream need it at build time"
     ;;
   debian)
     maybe_sudo apt-get update
@@ -113,6 +121,10 @@ case "$DISTRO" in
       maybe_sudo apt-get install -y steam-installer \
         || warn "Steam is optional and may require non-free/multiverse repositories"
     fi
+    # Its own call: releases before Ubuntu 24.04 and Debian 13 have no libei,
+    # and one missing name would fail the whole list above.
+    maybe_sudo apt-get install -y libei-dev \
+      || warn "libei-dev is unavailable; mouse and keyboard under gamescope_stream need it at build time"
     ;;
   suse)
     maybe_sudo zypper install -y \
@@ -136,6 +148,10 @@ case "$DISTRO" in
       maybe_sudo zypper install -y gamescope \
         || warn "gamescope is unavailable from enabled openSUSE repositories"
     fi
+    # The build finds libei on its own and carries on without it, so this is
+    # its own call and a warning rather than one more name in the list above.
+    maybe_sudo zypper install -y libei-devel \
+      || warn "libei-devel is unavailable; mouse and keyboard under gamescope_stream need it at build time"
     ;;
   *)
     die "unsupported distro family '$DISTRO' — install deps manually (see docs/building.md)"

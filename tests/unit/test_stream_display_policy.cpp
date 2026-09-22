@@ -8,6 +8,7 @@
 #include <src/platform/linux/display_topology.h>
 #include <src/config.h>
 #include <src/nvhttp.h>
+#include <src/platform/common.h>
 
 #include <algorithm>
 #include <cstdlib>
@@ -481,6 +482,146 @@ TEST(StreamDisplayPolicyTests, SessionTransitionUsesACaptureBackendThatCanAddres
     capture_for_session_transition("headless_stream", "headless_stream", "wlr"),
     "wlr"
   ) << "no session transition means no capture override";
+}
+
+TEST(StreamDisplayPolicyTests, GenerationCaptureFollowsThePrivateRuntimeAndTheSubstitution) {
+  using stream_display_policy::capture_for_mode;
+
+  // A private labwc session can only be captured through wlroots, whatever the preference says.
+  EXPECT_EQ(capture_for_mode("kms", "headless_stream", true, false, false), "wlr");
+  EXPECT_EQ(capture_for_mode("", "windowed_stream", true, true, false), "wlr");
+  EXPECT_EQ(capture_for_mode("portal", "headless_stream", true, false, true), "wlr");
+
+  // #739: Mirror Desktop with capture = wlr on KDE. The evaluation substituted kms, the encoder
+  // probe asked for auto and passed, and every stream asked for wlr by name and found nothing.
+  EXPECT_EQ(capture_for_mode("wlr", "desktop_display", false, true, false), "")
+    << "a substituted backend must be what the stream asks for, through auto";
+  EXPECT_EQ(capture_for_mode("portal", "headless_dongle", false, true, false), "");
+
+  // Without a substitution the preference stands, including wlr on a wlroots desktop.
+  EXPECT_EQ(capture_for_mode("wlr", "desktop_display", false, false, false), "wlr");
+  EXPECT_EQ(capture_for_mode("kms", "desktop_display", false, false, false), "kms");
+  EXPECT_EQ(capture_for_mode("", "desktop_display", false, false, false), "");
+
+  // Auto cannot address an exact output, and on Gamescope it would capture the desktop instead.
+  EXPECT_EQ(capture_for_mode("portal", "host_virtual_display", false, true, true), "portal");
+  EXPECT_EQ(capture_for_mode("portal", "gamescope_stream", false, true, false), "portal");
+  EXPECT_EQ(capture_for_mode("portal", "GAMESCOPE_STREAM", false, true, false), "portal");
+}
+
+TEST(StreamDisplayPolicyTests, CurrentModeCaptureReadsTheLiveConfigAndTheLastEvaluation) {
+  LinuxDisplayPolicyGuard guard;
+  struct SubstitutionGuard {
+    ~SubstitutionGuard() {
+      platf::set_capture_backend_substitution_for_tests("");
+    }
+  } substitution_guard;
+  auto &d = config::video.linux_display;
+  d.stream_mode = "desktop_display";
+  d.headless_mode = false;
+  d.use_cage_compositor = false;
+  d.private_runtime.clear();
+  config::video.capture = "wlr";
+
+  platf::set_capture_backend_substitution_for_tests("");
+  EXPECT_EQ(stream_display_policy::capture_for_current_mode(), "wlr");
+
+  platf::set_capture_backend_substitution_for_tests("wlr -> kms");
+  EXPECT_EQ(stream_display_policy::capture_for_current_mode(), "");
+  EXPECT_EQ(stream_display_policy::capture_for_current_mode(true), "wlr");
+
+  d.stream_mode = "headless_stream";
+  d.headless_mode = true;
+  d.use_cage_compositor = true;
+  d.private_runtime = "labwc";
+  config::video.capture = "kms";
+  EXPECT_EQ(stream_display_policy::capture_for_current_mode(), "wlr");
+}
+
+TEST(StreamDisplayPolicyTests, AHostDefaultModeChangeIsReportedSoCaptureIsReevaluated) {
+  // #739: a client moved the host default from Mirror Desktop to Private Stream without a
+  // restart, the capture sources stayed as evaluated for Mirror Desktop, and every Private
+  // Stream launch asked that list for wlr and found nothing.
+  ScopedPrivateRuntimePath runtime_path;
+  LinuxDisplayPolicyGuard guard;
+  auto &d = config::video.linux_display;
+  d.stream_mode = "desktop_display";
+  d.headless_mode = false;
+  d.use_cage_compositor = false;
+  d.prefer_gpu_native_capture = false;
+  d.private_runtime.clear();
+  d.auto_manage_displays = false;
+  d.headless_swap_mode.clear();
+  d.streaming_output.clear();
+  d.primary_output.clear();
+  config::video.capture = "wlr";
+  config::video.output_name.clear();
+
+  std::vector<std::pair<std::string, std::string>> changes;
+  std::string error;
+  ASSERT_TRUE(nvhttp::apply_stream_display_mode_selection_for_tests("headless_stream", true, changes, error)) << error;
+  ASSERT_EQ(changes.size(), 1u);
+  EXPECT_EQ(changes[0].first, "desktop_display");
+  EXPECT_EQ(changes[0].second, "headless_stream");
+  EXPECT_EQ(config::video.capture, "wlr") << "the mode change still leaves the capture preference alone";
+
+  // Saving the mode the host already has changes nothing, so nothing needs re-evaluating.
+  ASSERT_TRUE(nvhttp::apply_stream_display_mode_selection_for_tests("headless_stream", true, changes, error)) << error;
+  EXPECT_EQ(changes.size(), 1u);
+
+  // A change that could not be saved is rolled back and reports nothing either.
+  EXPECT_FALSE(nvhttp::apply_stream_display_mode_selection_for_tests("desktop_display", false, changes, error));
+  EXPECT_EQ(changes.size(), 1u);
+  EXPECT_EQ(d.stream_mode, "headless_stream");
+
+  ASSERT_TRUE(nvhttp::apply_stream_display_mode_selection_for_tests("desktop_display", true, changes, error)) << error;
+  ASSERT_EQ(changes.size(), 2u);
+  EXPECT_EQ(changes[1].first, "headless_stream");
+  EXPECT_EQ(changes[1].second, "desktop_display");
+}
+
+TEST(StreamDisplayPolicyTests, CaptureSourcesGoStaleOnceTheModeOrCaptureSettingMoves) {
+  auto &d = config::video.linux_display;
+  const auto saved_display = d;
+  const auto saved_capture = config::video.capture;
+  struct Restore {
+    config::video_t::linux_display_t &display;
+    const config::video_t::linux_display_t &saved_display;
+    const std::string &saved_capture;
+    ~Restore() {
+      display = saved_display;
+      config::video.capture = saved_capture;
+      // Leave the evaluation state as a test binary finds it: nothing evaluated.
+      platf::set_capture_sources_missing_for_tests(false);
+    }
+  } restore {d, saved_display, saved_capture};
+
+  d.stream_mode = "desktop_display";
+  d.use_cage_compositor = false;
+  d.headless_mode = false;
+  d.private_runtime.clear();
+  config::video.capture = "wlr";
+
+  platf::set_capture_sources_missing_for_tests(false);
+  EXPECT_TRUE(platf::capture_sources_stale()) << "nothing has been evaluated yet";
+
+  platf::mark_capture_sources_evaluated_for_current_config_for_tests();
+  EXPECT_FALSE(platf::capture_sources_stale());
+
+  d.stream_mode = "headless_stream";
+  d.use_cage_compositor = true;
+  d.headless_mode = true;
+  d.private_runtime = "labwc";
+  EXPECT_TRUE(platf::capture_sources_stale()) << "a Mirror Desktop list serving Private Stream is #739";
+
+  d.stream_mode = "desktop_display";
+  d.use_cage_compositor = false;
+  d.headless_mode = false;
+  d.private_runtime.clear();
+  EXPECT_FALSE(platf::capture_sources_stale());
+
+  config::video.capture = "kms";
+  EXPECT_TRUE(platf::capture_sources_stale());
 }
 
 TEST(StreamDisplayPolicyTests, ApplySelectionSyncsModeAndLegacyBooleans) {

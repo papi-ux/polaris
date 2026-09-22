@@ -219,7 +219,7 @@ jobs:
             libboost-all-dev libssl-dev libevdev-dev \
             libpulse-dev libopus-dev \
             "libcurl4t64=$curl_snapshot_version" "libcurl4-openssl-dev=$curl_snapshot_version" \
-            libdrm-dev libgbm-dev libcap-dev libwayland-dev \
+            libdrm-dev libgbm-dev libcap-dev libwayland-dev libei-dev \
             libpipewire-0.3-dev pipewire-bin libx11-dev libxrandr-dev \
             libxfixes-dev libxi-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev \
             libva-dev libminiupnpc-dev libnotify-dev nlohmann-json3-dev \
@@ -345,7 +345,7 @@ jobs:
           pacman -Syu --noconfirm --needed \
             appstream appstream-glib avahi base-devel boost boost-libs ccache cmake curl \
             desktop-file-utils ffmpeg gtk3 libayatana-appindicator libcap \
-            gcc go libdrm libevdev libmfx libnotify libpulse libva libx11 libxcb \
+            gcc go libdrm libei libevdev libmfx libnotify libpulse libva libx11 libxcb \
             libxfixes libxi libxrandr libxtst mesa miniupnpc ninja nodejs \
             nlohmann-json npm numactl openssl opus pipewire python shaderc vulkan-headers vulkan-icd-loader \
             util-linux wayland wayland-protocols which
@@ -567,6 +567,13 @@ jobs:
           fi
 
           readelf -d "$binary" | tee arch-pkgbuild/package-needed.txt
+          # libei is found at configure time and quietly left out when it is
+          # missing, so a package can lose gamescope's input route without any
+          # step failing. Ask the binary.
+          if ! grep -Eq 'NEEDED.*\[libei\.so\.1\]' arch-pkgbuild/package-needed.txt; then
+            echo "Arch package was built without libei; gamescope_stream would have no mouse or keyboard" >&2
+            exit 1
+          fi
           boost_sonames="$(awk -F '[][]' '/NEEDED.*libboost/ { print $2 }' arch-pkgbuild/package-needed.txt)"
           if [ -z "$boost_sonames" ]; then
             echo "No dynamic Boost sonames were found in the Arch package" >&2
@@ -1006,7 +1013,7 @@ jobs:
             libboost-all-dev libssl-dev libevdev-dev \
             libpulse-dev libopus-dev \
             "libcurl4t64=$curl_snapshot_version" "libcurl4-openssl-dev=$curl_snapshot_version" \
-            libdrm-dev libgbm-dev libcap-dev libwayland-dev \
+            libdrm-dev libgbm-dev libcap-dev libwayland-dev libei-dev \
             libpipewire-0.3-dev pipewire-bin libx11-dev libxrandr-dev \
             libxfixes-dev libxi-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev \
             libva-dev libminiupnpc-dev libnotify-dev nlohmann-json3-dev \
@@ -1189,6 +1196,13 @@ jobs:
           ldd "$binary" | tee build/cpack_artifacts/package-ldd.txt
           if grep -Fq "not found" build/cpack_artifacts/package-ldd.txt; then
             echo "Installed Ubuntu DEB has unresolved shared-library dependencies" >&2
+            exit 1
+          fi
+          # libei is found at configure time and quietly left out when it is
+          # missing, so a package can lose gamescope's input route without any
+          # step failing. Ask the binary.
+          if ! grep -Eq 'NEEDED.*\[libei\.so\.1\]' build/cpack_artifacts/package-needed.txt; then
+            echo "Installed Ubuntu DEB was built without libei; gamescope_stream would have no mouse or keyboard" >&2
             exit 1
           fi
           bash scripts/check-packaged-binary-paths.sh \
@@ -1528,6 +1542,13 @@ jobs:
           ldd "$binary" | tee build/cpack_artifacts/package-ldd.txt
           if grep -Fq "not found" build/cpack_artifacts/package-ldd.txt; then
             echo "Installed Fedora RPM has unresolved shared-library dependencies" >&2
+            exit 1
+          fi
+          # libei is found at configure time and quietly left out when it is
+          # missing, so a package can lose gamescope's input route without any
+          # step failing. Ask the binary.
+          if ! grep -Eq 'NEEDED.*\[libei\.so\.1\]' build/cpack_artifacts/package-needed.txt; then
+            echo "Installed Fedora RPM was built without libei; gamescope_stream would have no mouse or keyboard" >&2
             exit 1
           fi
           bash scripts/check-packaged-binary-paths.sh \

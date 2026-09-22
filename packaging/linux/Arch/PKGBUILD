@@ -37,6 +37,7 @@ depends=(
   'libboost_thread.so'
   'libcap'
   'libdrm'
+  'libei'
   'libevdev'
   'libmfx'
   'libnotify'

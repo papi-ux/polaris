@@ -114,6 +114,15 @@ else
   echo "polaris-gamescope-idle: SDR mode" >&2
 fi
 
+# Moonlight draws no pointer of its own, so without this the stream has a
+# working but invisible cursor: gamescope keeps the cursor out of the PipeWire
+# capture by default, on the grounds that a consumer drawing its own would end
+# up with two. Set POLARIS_GAMESCOPE_COMPOSITE_CURSOR=0 for such a consumer.
+cursor_flags=()
+if [ "${POLARIS_GAMESCOPE_COMPOSITE_CURSOR:-1}" = 1 ]; then
+  cursor_flags=(--pipewire-composite-cursor)
+fi
+
 setsid "$gs" \
   --backend headless \
   --expose-wayland \
@@ -121,6 +130,7 @@ setsid "$gs" \
   --xwayland-count 2 \
   "${prefer_vk[@]}" \
   "${hdr_flags[@]}" \
+  "${cursor_flags[@]}" \
   -W "$width" -H "$height" -r "$refresh" \
   -w "$width" -h "$height" \
   -- sleep infinity &

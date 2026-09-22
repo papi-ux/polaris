@@ -101,6 +101,7 @@ set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             libcurl4, \
             libdrm2, \
             libgbm1, \
+            libei1, \
             libevdev2, \
             libnuma1, \
             libopus0, \
@@ -123,6 +124,7 @@ set(CPACK_RPM_PACKAGE_REQUIRES "\
             libcap >= 2.22, \
             libcurl >= 7.0, \
             libdrm >= 2.4.97, \
+            libei >= 1.0, \
             libevdev >= 1.5.6, \
             libopusenc >= 0.2.1, \
             libva >= 2.14.0, \

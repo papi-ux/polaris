@@ -24,7 +24,7 @@ sudo zypper install \
   Mesa-libGL-devel libgbm-devel \
   libminiupnpc-devel nlohmann_json-devel libnuma-devel libpulse-devel \
   libopus-devel libopusenc-devel \
-  wayland-devel wayland-protocols-devel pipewire-devel \
+  wayland-devel wayland-protocols-devel pipewire-devel libei-devel \
   libayatana-appindicator3-devel desktop-file-utils appstream-glib \
   shaderc vulkan-devel \
   labwc grim wlr-randr xdpyinfo xwayland

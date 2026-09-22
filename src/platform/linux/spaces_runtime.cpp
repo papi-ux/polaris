@@ -78,7 +78,9 @@ namespace multiseat::spaces {
             entry.at("media_contract") != 1 || !entry.at("uid").is_number_unsigned() || entry.at("uid") != 1000 ||
             !entry.at("gid").is_number_unsigned() || entry.at("gid") != 1000) return std::nullopt;
         runtime_t r {entry.at("id"), entry.at("variant"), entry.at("source_revision"),
-          entry.at("registry_digest"), entry.at("config_digest"), entry.at("nvidia_driver")};
+          entry.at("registry_digest"), entry.at("config_digest"), entry.at("nvidia_driver"),
+          entry.at("profile"), std::to_string(entry.at("media_contract").get<unsigned>()),
+          entry.at("uid").get<std::uint32_t>(), entry.at("gid").get<std::uint32_t>()};
         if (!valid(r) || !ids.insert(r.id).second || !references.insert(r.reference()).second) return std::nullopt;
         runtimes.emplace_back(std::move(r));
       }

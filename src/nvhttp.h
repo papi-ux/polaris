@@ -13,6 +13,8 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 // lib includes
 #include <boost/property_tree/ptree.hpp>
@@ -597,6 +599,16 @@ namespace nvhttp {
   bool apply_stream_display_mode_selection_for_tests(
     const std::string &selection,
     std::unordered_map<std::string, std::string> &persisted,
+    std::string &error
+  );
+  /**
+   * @brief Same as the first overload, recording every host default change it reports as
+   *        (previous mode, new mode) instead of re-evaluating capture on this machine.
+   */
+  bool apply_stream_display_mode_selection_for_tests(
+    const std::string &selection,
+    bool persistence_succeeds,
+    std::vector<std::pair<std::string, std::string>> &host_mode_changes,
     std::string &error
   );
   proc::desktop_launch_safety_policy_t resolve_streaming_launch_safety_policy_for_tests(

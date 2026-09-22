@@ -533,7 +533,10 @@ will not, so read the ones after the session starts.
 
 On KDE Plasma 6, Host Virtual Display gets a new screen from KWin (see
 [Launch modes and capture paths](launch-modes.md)). The Virtual Display panel on the Audio/Video
-tab names the backend in use and, when it cannot run, why.
+tab names the backend in use and, when it cannot run, why. The Doctor names three problems here
+on its own: `hvd_kwin_screen_unused` when Plasma got another backend, and why;
+`hvd_screen_scaled` when the stream screen runs at a scale other than 100%; and
+`hvd_input_not_mapped` when touch or pen could not be put on the stream screen.
 
 - **KWin does not offer its screencast protocol to Polaris.** KWin only offers it to a program a
   desktop entry names. Polaris writes one to `~/.local/share/applications` the first time and
@@ -547,15 +550,39 @@ tab names the backend in use and, when it cannot run, why.
   instead.** KWin offers a screen only to a program it can match to its permission entry, and it
   cannot match one that holds file capabilities, such as the `cap_sys_admin` that `--enable-kms`
   grants for KMS capture. On the automatic order such a Polaris skips the KWin screen and falls back
-  to kscreen-doctor. Set Backend to KWin (`linux_virtual_display_backend = kwin`), leave `capture`
+  to EVDI when it can create a display, otherwise to kscreen-doctor. Set Backend to KWin (`linux_virtual_display_backend = kwin`), leave `capture`
   on `auto` or `portal`, and restart Polaris: it then drops the capability at start. KMS capture
   and a KWin screen do not go together.
 - **kscreen-doctor is not installed.** It comes with Plasma. Polaris needs it to place the screen
   beside your monitors at scale 1; without it KWin can put a new screen on top of your monitor.
-- **A game opened on my monitor instead of the stream.** Polaris moves windows onto the stream
+- **A game opened on my monitor instead of the stream.** Check the log for the backend: with
+  `using backend: EVDI` on Plasma, Backend is set to `evdi` or the KWin screen could not start, and
+  an EVDI screen is a monitor like any other, so games open on your primary one; set Backend back
+  to Automatic or to KWin. On the KWin screen, Polaris moves windows onto the stream
   screen with a small KWin script it loads for the stream. The log says `new windows will not be
   moved` when KWin refused to load it or dropped it; the stream then shows an empty screen while
   the game runs on your monitor. With two Polaris screens at once, the newer one gets new windows.
+  A window the script moves also gets the focus, so the controller drives the game from the first
+  press.
+- **A tap from the client landed on another monitor, or the game ignored it.** KWin spreads a touch
+  screen and a pen over every monitor unless each is tied to one, so Polaris ties the client's to
+  the stream screen while it exists (the log says `lands on`) and unties them when it goes. KWin
+  remembers the tie in `~/.config/kcminputrc` under each device's name, so at the start of every
+  stream on Plasma Polaris also undoes a tie to one of its own screens that a crash left behind; a
+  tie you made yourself in System Settings is kept. The Doctor's `hvd_input_not_mapped` carries
+  KWin's answer when the tie failed; the usual cause is a Polaris started outside the Plasma
+  session, which cannot reach KWin on that session's bus. A mouse in absolute mode is not tied:
+  KWin places it over the whole desktop whatever it is told, so use touch, or relative mouse mode,
+  on a desk with more than one monitor.
+- **My monitors moved when the stream started.** KWin keeps a layout for each set of screens and
+  applies it when the set changes, and the one it kept for "your monitors plus the stream screen"
+  can have your monitors somewhere else. Polaris puts every monitor back where it was in the same
+  step that places the stream screen, and the log says `did not go back where they were` when KWin
+  would not. When the stream ends KWin applies the layout it kept for your monitors alone.
+- **The stream screen is at 135% (or another scale).** An EVDI screen on Plasma gets the scale KWin
+  stored for it, and the Doctor says `hvd_screen_scaled`. While a stream runs, set that screen to
+  100% under System Settings, Display & Monitor; KWin keeps it for next time. Polaris's own KWin
+  screen is always put at 100%.
 - **A window I opened at the desk jumped to the stream.** While a stream runs, every new
   application window is moved onto its screen. Drag it back, or use Meta+Shift+Left. The
   desktop's own prompts stay on your monitor: polkit password prompts, ksshaskpass, KWallet and
@@ -601,6 +628,7 @@ below are stable, so they can be searched for here and in support threads.
 |---|---|---|
 | `encoder_probe_failed` | No video encoder could start; on NVIDIA the message adds the driver detail when the driver is the reason | Check the Doctor's Encoder and Capture rows. Against the private compositor: pick **Private Stream (GPU-native)** or set `linux_prefer_gpu_native_capture = enabled` |
 | `no_capture_backend` | No capture backend works in the configured stream mode, so nothing could be probed | Check `capture` against the stream mode; unset lets Polaris pick. The Doctor names the missing protocol |
+| `capture_backend_unavailable` | The launch asks for a capture backend that cannot capture anything in its stream mode, such as `capture = wlr` in Mirror Desktop on KDE or GNOME | Set **Force a Specific Capture Method** under Advanced to Autodetect, or use a stream mode that backend can serve |
 | `kms_capture_needs_capability` | `capture = kms` without `CAP_SYS_ADMIN` on the binary | `sudo -H polaris --setup-host --enable-kms`, restart |
 | `desktop_capture_not_prepared` | The screen sharing prompt was declined, or desktop capture could not be prepared | Approve the prompt on the host desktop, or use a Private Stream mode |
 | `private_runtime_unavailable` | labwc (or gamescope) is not installed for the chosen mode | Install it, or use Mirror Desktop |

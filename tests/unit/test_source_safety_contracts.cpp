@@ -1216,6 +1216,42 @@ TEST(SourceSafetyContracts, VirtualDisplayTeardownKeepsRecoveryUntilExactReadbac
   EXPECT_LT(process_destroy, process_reset);
 }
 
+TEST(SourceSafetyContracts, AWatcherHoldsNoControllerOfItsOwn) {
+  const auto root = fs::path {POLARIS_SOURCE_DIR};
+  std::ifstream stream_in(root / "src/stream.cpp");
+  std::ifstream input_in(root / "src/input.cpp");
+  ASSERT_TRUE(stream_in.is_open());
+  ASSERT_TRUE(input_in.is_open());
+  std::ostringstream stream_out, input_out;
+  stream_out << stream_in.rdbuf();
+  input_out << input_in.rdbuf();
+  const auto stream = stream_out.str();
+  const auto input = input_out.str();
+
+  // A watch-only session used to create controller 0 like the player's, so the host had a
+  // second pad nobody held, and a couch co-op game counted it as player 2.
+  const auto rule = stream.find("bool has_controllers(const session_t &session) {");
+  ASSERT_NE(rule, std::string::npos);
+  EXPECT_NE(
+    stream.find("return !session.watch_only && !!(session.permission & crypto::PERM::input_controller);", rule),
+    std::string::npos
+  );
+  std::size_t allocs = 0;
+  for (auto at = stream.find("input::alloc("); at != std::string::npos; at = stream.find("input::alloc(", at + 1)) {
+    ++allocs;
+    EXPECT_EQ(stream.compare(at, 52, "input::alloc(session.mail, has_controllers(session))"), 0);
+  }
+  EXPECT_EQ(allocs, 2U);
+
+  const auto alloc = input.find("std::shared_ptr<input_t> alloc(safe::mail_t mail, bool controllers) {");
+  ASSERT_NE(alloc, std::string::npos);
+  const auto guard = input.find("if (controllers) {\n      task_pool.push([input, adopted_preallocated_gamepad]()", alloc);
+  const auto startup_pad = input.find("ensure_gamepad_allocated(input, 0, {}, \"session startup\")", alloc);
+  ASSERT_NE(guard, std::string::npos);
+  ASSERT_NE(startup_pad, std::string::npos);
+  EXPECT_LT(guard, startup_pad);
+}
+
 TEST(SourceSafetyContracts, KwinVirtualScreenIsProvenPlacedAndHeldSafely) {
   const auto root = fs::path {POLARIS_SOURCE_DIR};
   std::ifstream backend_in(root / "src/platform/linux/virtual_display.cpp");
@@ -1288,6 +1324,30 @@ TEST(SourceSafetyContracts, KwinVirtualScreenIsProvenPlacedAndHeldSafely) {
   const auto stop_following = body.find("kwin_virtual_output::stop_following_windows(display.output_name);\n      if (!kwin_virtual_output::release(", destroy_body);
   ASSERT_NE(destroy_body, std::string::npos);
   EXPECT_NE(stop_following, std::string::npos);
+
+  // The other screens go back where they were before KWin applied its stored
+  // layout, in the same kscreen-doctor call that places the new one, and the new
+  // one is measured against them as they were: pc-papi's DP-2 moved to 1024,0
+  // on every stream when x came from the layout read after KWin had moved it.
+  const auto keep_positions = body.find("kwin_keep_positions_args(name, layout_before)", place_body);
+  const auto placement = body.find("kwin_placement_args(name, x)", place_body);
+  ASSERT_NE(keep_positions, std::string::npos);
+  ASSERT_NE(placement, std::string::npos);
+  EXPECT_LT(custom_mode, keep_positions);
+  EXPECT_LT(keep_positions, placement);
+  EXPECT_LT(placement, rank_last);
+  EXPECT_NE(body.find("const int x = kscreen_right_edge(layout_before, name);", place_body), std::string::npos);
+  EXPECT_NE(body.find("kwin_positions_match(*placed, layout_before, name)", place_body), std::string::npos);
+
+  // Touch, pen and the absolute mouse follow the screen once it exists, and stop
+  // before it is released, like the windows.
+  const auto input_follows = body.find("input_routing::screen_added(output_name);", create);
+  ASSERT_NE(input_follows, std::string::npos);
+  EXPECT_LT(follow, input_follows);
+  EXPECT_NE(
+    body.find("input_routing::screen_removed(display.output_name);\n      kwin_virtual_output::stop_following_windows(display.output_name);\n      if (!kwin_virtual_output::release(", destroy_body),
+    std::string::npos
+  );
 
   // A name match alone could be someone else's output: the output must also be a new global.
   const auto proof = wayland.find("!globals_before.contains(output->global)");

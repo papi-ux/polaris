@@ -37,7 +37,7 @@ namespace virtual_display {
    * @brief Which backend Host Virtual Display uses, from linux_virtual_display_backend.
    */
   enum class backend_preference_e {
-    AUTO,  ///< EVDI, then a KWin virtual output, then Hyprland, then kscreen-doctor
+    AUTO,  ///< A KWin virtual output on Plasma, then EVDI, then Hyprland, then kscreen-doctor
     EVDI,
     KWIN,
     WLR,
@@ -233,6 +233,23 @@ namespace virtual_display {
   std::vector<std::string> kwin_placement_args(std::string_view output, int x);
 
   /**
+   * @brief kscreen-doctor arguments that put every other enabled screen back where it was.
+   *
+   * KWin stores a layout for each set of outputs and applies it the moment a
+   * new one appears. On the test host the one stored for "the monitors plus a
+   * Polaris screen" had DP-2 at 1024,0 rather than 0,0, so the monitors moved
+   * every time a stream started.
+   */
+  std::vector<std::string> kwin_keep_positions_args(std::string_view output, const std::vector<kscreen_output_layout_t> &layout_before);
+
+  /** @brief Every enabled screen in `layout_before` other than `output` is still where it was. */
+  bool kwin_positions_match(
+    const std::vector<kscreen_output_layout_t> &layout,
+    const std::vector<kscreen_output_layout_t> &layout_before,
+    std::string_view output
+  );
+
+  /**
    * @brief kscreen-doctor arguments that rank every screen as before, with the new one last.
    *
    * Plasma gives each rank its own desktop, icons and panel, so whichever screen
@@ -275,6 +292,70 @@ namespace virtual_display {
    * @return Empty when the process is dumpable, so the cause is elsewhere.
    */
   std::string kwin_unidentifiable_process_reason(int dumpable, bool holds_capabilities);
+
+  /**
+   * @brief Whether Polaris points this input device at the stream screen.
+   *
+   * The client's touch screen and pen, the devices KWin maps onto one output.
+   * KWin places an absolute pointer over the whole workspace whatever it is
+   * told, a relative pointer moves the cursor wherever it is, and a keyboard
+   * follows the focus.
+   * @param kwin_device_name The name KWin lists the device under.
+   */
+  bool routes_to_stream_screen(std::string_view kwin_device_name);
+
+  /** @brief The kernel event name (`eventN`) of a device node, or empty when it is not one. */
+  std::string input_event_name(std::string_view node);
+
+  /**
+   * @brief Point Polaris's touch and pen devices at the stream screen on KDE Plasma.
+   *
+   * KWin spreads a touch screen and a tablet over every monitor unless told
+   * otherwise, so a tap on the client landed wherever that point fell on the
+   * whole desk while the game ran on the KWin screen. While a KWin screen exists
+   * these devices are pointed at the newest one. Without one, a tie to a Polaris
+   * screen that KWin saved before a crash is undone, and a tie the owner made to
+   * any other screen is left alone. The work runs on a thread of its own: KWin lists a new
+   * device a moment after the kernel creates it. Nothing happens off Plasma or
+   * under seat isolation, where KWin does not see the devices.
+   * @param nodes The device's `/dev/input/eventN` nodes. Nodes that turn out not
+   *        to be absolute devices are dropped once KWin names them.
+   */
+  void route_stream_screen_input(const std::vector<std::string> &nodes);
+
+  /** @brief Stop routing devices that are about to be destroyed. */
+  void forget_stream_screen_input(const std::vector<std::string> &nodes);
+
+  /** @brief How one routed device was last pointed. */
+  struct input_route_t {
+    std::string device;  ///< KWin's name for it; empty until KWin lists it
+    std::string output;  ///< The screen it was pointed at; empty for none
+    bool routed = false;  ///< Whether KWin took the mapping
+    std::string error;  ///< Why not, when it did not
+  };
+
+  /** @brief Every device routed now, for the Doctor. */
+  std::vector<input_route_t> input_routes();
+
+  /** @brief What the Doctor reports about Host Virtual Display on KDE Plasma. */
+  struct doctor_notes_t {
+    bool plasma = false;  ///< A Plasma Wayland session
+    /// The backend of the last screen this process created, when it created one
+    std::optional<backend_e> last_backend;
+    std::string preference;  ///< The configured backend; "auto" when unset
+    std::string kwin_reason;  ///< Why a KWin screen cannot be created, from the last probe
+    std::string scaled_screen;  ///< A live stream screen KWin runs at a scale other than 1
+    double scaled_screen_scale = 1.0;
+    std::vector<input_route_t> input_routes;
+  };
+
+  /** @brief The Doctor's facts. Never probes a backend: it reads what detection last found. */
+  doctor_notes_t doctor_notes();
+
+#ifdef POLARIS_TESTS
+  /** @brief Pin the Doctor's facts; nullopt restores the live ones. */
+  void set_doctor_notes_for_tests(std::optional<doctor_notes_t> notes);
+#endif
 
   /** @brief The KWin script plugin name for one Polaris screen. */
   std::string kwin_window_follow_plugin_name(std::string_view output_name);

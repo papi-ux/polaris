@@ -17,10 +17,12 @@
 // local includes
 #include "input_seat_isolation.h"
 #include "inputtino_wayland_virtual_input.h"
+#include "inputtino_ei_virtual_input.h"
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
 #include "src/platform/gamepad_feedback_router.h"
+#include "src/platform/linux/virtual_display.h"
 #include "src/utility.h"
 
 using namespace std::literals;
@@ -109,6 +111,9 @@ namespace platf {
     }
 
     wayland_virtual_input_t wayland_input;
+    // gamescope_stream has no labwc socket to inject into; libei reaches the
+    // Polaris-owned gamescope instead. Exactly one of the two is ever active.
+    ei_virtual_input_t ei_input;
 
     // All devices are wrapped in Result because it might be that we aren't able to create them (ex: udev permission denied)
     std::optional<inputtino::Result<inputtino::Mouse>> mouse;
@@ -152,6 +157,23 @@ namespace platf {
         BOOST_LOG(warning) << "Unable to create virtual pen tablet: " << pen.getErrorMessage();
       }
       warn_if_seat_isolation_inert(pen, "pen tablet");
+      // A tap or a pen stroke lands on a point of the screen, so on Plasma both
+      // follow the stream screen instead of spanning every monitor.
+      if (touch) {
+        virtual_display::route_stream_screen_input((*touch).get_nodes());
+      }
+      if (pen) {
+        virtual_display::route_stream_screen_input((*pen).get_nodes());
+      }
+    }
+
+    ~client_input_raw_t() override {
+      if (touch) {
+        virtual_display::forget_stream_screen_input((*touch).get_nodes());
+      }
+      if (pen) {
+        virtual_display::forget_stream_screen_input((*pen).get_nodes());
+      }
     }
 
     input_raw_t *global;

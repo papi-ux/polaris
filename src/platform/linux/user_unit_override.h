@@ -156,11 +156,72 @@ namespace platf::user_unit {
     return out;
   }
 
+  /// The one path the Bazzite guide ever wrote a runtime copy to, and so the only one --setup-host replaces.
+  inline constexpr std::string_view guide_runtime_copy = "/usr/local/bin/polaris-kms";
+
+  enum class runtime_copy_e {
+    none,  ///< the service does not run the guide's copy, or that path is not a plain file
+    current,  ///< the copy holds the same bytes as the binary it is refreshed from
+    stale,  ///< the copy holds another build, so the service still runs that one
+  };
+
+  /// Whether two files hold the same bytes. A file that cannot be read matches nothing.
+  inline bool same_contents(const std::filesystem::path &lhs, const std::filesystem::path &rhs) {
+    std::error_code ec;
+    const auto lhs_size = std::filesystem::file_size(lhs, ec);
+    if (ec) {
+      return false;
+    }
+    const auto rhs_size = std::filesystem::file_size(rhs, ec);
+    if (ec || lhs_size != rhs_size) {
+      return false;
+    }
+    std::ifstream left(lhs, std::ios::binary);
+    std::ifstream right(rhs, std::ios::binary);
+    if (!left || !right) {
+      return false;
+    }
+    std::vector<char> left_block(1 << 16);
+    std::vector<char> right_block(1 << 16);
+    while (left && right) {
+      left.read(left_block.data(), static_cast<std::streamsize>(left_block.size()));
+      right.read(right_block.data(), static_cast<std::streamsize>(right_block.size()));
+      if (left.gcount() != right.gcount() || !std::equal(left_block.begin(), left_block.begin() + left.gcount(), right_block.begin())) {
+        return false;
+      }
+    }
+    return left.eof() && right.eof();
+  }
+
+  /**
+   * @brief Whether the service runs the guide's runtime copy, and whether that copy fell behind.
+   *
+   * Until 1.4.5 the Bazzite guide made this copy during every install, so hosts
+   * set up then run it whether or not they use DRM/KMS capture. It lives
+   * outside the deployment and no package update touches it: rpm reports the
+   * new version while the service keeps running the build the copy was made
+   * from. Only the guide's own path counts. The drop-in belongs to the account,
+   * and --setup-host runs as root, so a path read from it is never one to write.
+   *
+   * @param packaged_exe The binary the copy is refreshed from.
+   */
+  inline runtime_copy_e guide_runtime_copy_state(const exec_override_t &override, const std::filesystem::path &packaged_exe, const std::filesystem::path &guide_copy = std::filesystem::path {guide_runtime_copy}) {
+    if (!override.active() || override.binary != guide_copy) {
+      return runtime_copy_e::none;
+    }
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(std::filesystem::symlink_status(guide_copy, ec)) || ec) {
+      return runtime_copy_e::none;
+    }
+    return same_contents(packaged_exe, guide_copy) ? runtime_copy_e::current : runtime_copy_e::stale;
+  }
+
   /**
    * @brief What --setup-host should say about the account's service override, or nothing.
    * @param packaged_exe The binary running --setup-host, which is the one a copy should be refreshed from.
+   * @param guide_copy The copy this --setup-host refreshes by itself; empty when it is not the packaged binary and will not.
    */
-  inline std::string setup_host_advice(const exec_override_t &override, std::string_view user, const std::filesystem::path &packaged_exe) {
+  inline std::string setup_host_advice(const exec_override_t &override, std::string_view user, const std::filesystem::path &packaged_exe, const std::filesystem::path &guide_copy = std::filesystem::path {guide_runtime_copy}) {
     if (!override.active() || override.binary.empty()) {
       return {};
     }
@@ -187,6 +248,12 @@ namespace platf::user_unit {
     const auto packaged = std::filesystem::canonical(packaged_exe, ec);
     if (ec || override_target == packaged) {
       return {};
+    }
+    if (override.binary == guide_copy) {
+      return "The polaris user service for [" + account + "] runs " + binary + " through " + drop_in +
+             ", a copy outside the package. Package updates do not change it: after every update, run\n"
+             "  sudo -H polaris --setup-host\n"
+             "which refreshes the copy and its DRM/KMS capability, or remove the drop-in to run the packaged binary again.\n";
     }
     return "The polaris user service for [" + account + "] runs " + binary + " through " + drop_in +
            ", a copy outside the package. Package updates do not change it: after every update, refresh the copy\n"

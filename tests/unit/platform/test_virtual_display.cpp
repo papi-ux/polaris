@@ -416,7 +416,11 @@ TEST(VirtualDisplayKwinTests, AutomaticPrefersANewScreenOverABorrowedConnector) 
   using virtual_display::select_backend;
   constexpr auto automatic = backend_preference_e::AUTO;
 
-  EXPECT_EQ(select_backend(automatic, {.evdi = true, .kwin = true, .wlr = true, .kscreen = true}), backend_e::EVDI);
+  // On Plasma the KWin screen wins even with EVDI loaded: an EVDI screen there kept
+  // a stored 1.35 scale and the game opened on the primary monitor, not the stream.
+  EXPECT_EQ(select_backend(automatic, {.evdi = true, .kwin = true, .wlr = true, .kscreen = true}), backend_e::KWIN_VIRTUAL_OUTPUT);
+  // Off Plasma (GNOME, a wlroots desktop) the KWin probe is false and EVDI leads.
+  EXPECT_EQ(select_backend(automatic, {.evdi = true, .kwin = false, .wlr = true, .kscreen = true}), backend_e::EVDI);
   EXPECT_EQ(select_backend(automatic, {.evdi = false, .kwin = true, .wlr = true, .kscreen = true}), backend_e::KWIN_VIRTUAL_OUTPUT);
   EXPECT_EQ(select_backend(automatic, {.evdi = false, .kwin = false, .wlr = true, .kscreen = true}), backend_e::WAYLAND_WLR);
   // pollux78's host in #633: KDE, no EVDI, only real monitors to borrow.
@@ -658,6 +662,78 @@ TEST(VirtualDisplayKwinTests, RankingCheckCatchesAStreamScreenAboveAMonitor) {
   ));
 }
 
+namespace {
+  virtual_display::kscreen_output_layout_t placed_screen(std::string name, int x, int y, int width, bool enabled = true) {
+    virtual_display::kscreen_output_layout_t output;
+    output.name = std::move(name);
+    output.enabled = enabled;
+    output.x = x;
+    output.y = y;
+    output.mode_width = width;
+    output.mode_height = 2160;
+    return output;
+  }
+}  // namespace
+
+TEST(VirtualDisplayKwinTests, OtherScreensGoBackWhereTheyWere) {
+  using args_t = std::vector<std::string>;
+  // pc-papi: DP-2 at 0,0 before the stream. KWin then applied the layout it had
+  // stored for "DP-2 plus a Polaris screen", which put DP-2 at 1024,0 and the
+  // screen at 8704,0, and the monitor stayed moved for the whole stream.
+  const std::vector<virtual_display::kscreen_output_layout_t> before {
+    placed_screen("DP-2", 0, 0, 7680),
+    placed_screen("HDMI-A-1", 7680, -200, 1920),
+    placed_screen("DP-3", 9000, 0, 1920, false),
+  };
+  EXPECT_EQ(
+    virtual_display::kwin_keep_positions_args("Virtual-polaris-0", before),
+    (args_t {"output.DP-2.position.0,0", "output.HDMI-A-1.position.7680,-200"})
+  );
+  // The new screen goes past them as they were, not as KWin's stored layout had them.
+  EXPECT_EQ(virtual_display::kscreen_right_edge(before, "Virtual-polaris-0"), 9600);
+
+  const std::vector<virtual_display::kscreen_output_layout_t> shifted {
+    placed_screen("DP-2", 1024, 0, 7680),
+    placed_screen("HDMI-A-1", 7680, -200, 1920),
+    placed_screen("Virtual-polaris-0", 8704, 0, 1920),
+  };
+  EXPECT_FALSE(virtual_display::kwin_positions_match(shifted, before, "Virtual-polaris-0"));
+  const std::vector<virtual_display::kscreen_output_layout_t> restored {
+    placed_screen("DP-2", 0, 0, 7680),
+    placed_screen("HDMI-A-1", 7680, -200, 1920),
+    placed_screen("Virtual-polaris-0", 9600, 0, 1920),
+  };
+  EXPECT_TRUE(virtual_display::kwin_positions_match(restored, before, "Virtual-polaris-0"));
+  // A monitor that went missing or dark is not where it was.
+  EXPECT_FALSE(virtual_display::kwin_positions_match({restored[0], restored[2]}, before, "Virtual-polaris-0"));
+  // A screen listed before under the stream screen's own name is left to the placement.
+  EXPECT_TRUE(virtual_display::kwin_keep_positions_args("DP-2", {placed_screen("DP-2", 0, 0, 7680)}).empty());
+}
+
+TEST(VirtualDisplayKwinTests, OnlyTouchAndPenFollowTheStreamScreen) {
+  // A tap and a pen stroke land on a point of the screen, and KWin spread both over
+  // every monitor until they were tied to the stream screen.
+  EXPECT_TRUE(virtual_display::routes_to_stream_screen("Touch passthrough"));
+  EXPECT_TRUE(virtual_display::routes_to_stream_screen("Pen passthrough"));
+  // KWin places an absolute pointer over the whole workspace whatever its outputName
+  // says, so tying it would change nothing and report a tie that does not hold.
+  EXPECT_FALSE(virtual_display::routes_to_stream_screen("Polaris Mouse passthrough (absolute)"));
+  // The relative mouse moves the cursor wherever it is, and a keyboard follows the focus.
+  EXPECT_FALSE(virtual_display::routes_to_stream_screen("Polaris Mouse passthrough"));
+  EXPECT_FALSE(virtual_display::routes_to_stream_screen("Polaris Keyboard passthrough"));
+  EXPECT_FALSE(virtual_display::routes_to_stream_screen("Logitech USB Receiver Mouse"));
+  EXPECT_FALSE(virtual_display::routes_to_stream_screen(""));
+
+  EXPECT_EQ(virtual_display::input_event_name("/dev/input/event31"), "event31");
+  EXPECT_EQ(virtual_display::input_event_name("event7"), "event7");
+  // Anything else never becomes part of a KWin object path.
+  EXPECT_EQ(virtual_display::input_event_name("/dev/input/js0"), "");
+  EXPECT_EQ(virtual_display::input_event_name("/dev/input/event"), "");
+  EXPECT_EQ(virtual_display::input_event_name("/dev/input/event3/../../x"), "");
+  EXPECT_EQ(virtual_display::input_event_name("/dev/input/event3x"), "");
+  EXPECT_EQ(virtual_display::input_event_name(""), "");
+}
+
 TEST(VirtualDisplayKwinTests, ModeAndPlacementReadback) {
   virtual_display::kscreen_output_layout_t screen;
   screen.name = "Virtual-polaris-0";
@@ -690,6 +766,9 @@ TEST(VirtualDisplayKwinTests, WindowScriptMovesApplicationWindowsOntoTheScreen) 
   //    desktop, panels, notifications or popups.
   //  - The desktop's own prompts stay with whoever sits at the host.
   //  - A window already on another Polaris screen stays there.
+  //  - An application window or dialog on the stream screen takes the focus:
+  //    KWin kept it at the desk, and Control on pc-papi then ignored the
+  //    Retroid's controller and taps until it was activated by hand.
   EXPECT_EQ(virtual_display::kwin_window_follow_script("Virtual-polaris-0"), R"JS(// Polaris: moves windows onto its Host Virtual Display screen while that screen exists.
 const target = "Virtual-polaris-0";
 // The desktop's own prompts are for whoever sits at the host.
@@ -709,9 +788,14 @@ workspace.windowAdded.connect(function (window) {
   if (!window || !(window.normalWindow || window.dialog || window.splash)) return;
   if (isHostPrompt(window)) return;
   const screen = outputNamed(target);
-  if (!screen || window.output === screen) return;
-  if (window.output && window.output.name.indexOf("Virtual-polaris-") === 0) return;
-  workspace.sendClientToScreen(window, screen);
+  if (!screen) return;
+  if (window.output !== screen) {
+    if (window.output && window.output.name.indexOf("Virtual-polaris-") === 0) return;
+    workspace.sendClientToScreen(window, screen);
+  }
+  // The player is at the stream, so the window they started takes the focus too. KWin
+  // otherwise leaves it at the desk, and an unfocused game ignores its controller and taps.
+  if (window.normalWindow || window.dialog) workspace.activeWindow = window;
 });
 )JS");
   EXPECT_EQ(virtual_display::kwin_window_follow_plugin_name("Virtual-polaris-0"), "polaris-follow-Virtual-polaris-0");

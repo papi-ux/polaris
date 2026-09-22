@@ -73,7 +73,7 @@ jobs:
             build-essential cmake ninja-build \
             libboost-all-dev libssl-dev libevdev-dev \
             libpulse-dev libopus-dev libcurl4-openssl-dev \
-            libdrm-dev libgbm-dev libcap-dev libwayland-dev \
+            libdrm-dev libgbm-dev libcap-dev libwayland-dev libei-dev \
             libpipewire-0.3-dev libx11-dev libxrandr-dev \
             libxfixes-dev libxi-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev \
             libva-dev libminiupnpc-dev libnotify-dev \

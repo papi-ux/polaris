@@ -33,7 +33,30 @@ namespace input {
    *        so the only way to get the right pad is to remember the last one.
    */
   void preallocate_gamepad(int client_controller_type = 0);
-  std::shared_ptr<input_t> alloc(safe::mail_t mail);
+
+  /** @brief Where a controller touch lands on the emulated pad's one touchpad. */
+  struct controller_touch_point_t {
+    float x;  ///< 0 to 1 across the emulated touchpad
+    std::uint32_t finger;  ///< The emulated touchpad's finger slot
+  };
+
+  /**
+   * @brief Map a client controller touch onto the emulated DualSense's touchpad.
+   *
+   * A pad with two touchpads (LI_CCAP_DUAL_TOUCHPAD, a Steam Controller) sends which one a
+   * touch is on. The DualSense has one touchpad with two finger slots, so the left pad takes
+   * the left half and the first slot, the right pad the right half and the second, and a game
+   * sees both at once. A pad with one touchpad keeps the whole width and its own pointer ids.
+   */
+  controller_touch_point_t controller_touch_point(float x, std::uint32_t pointer_id, std::uint8_t touchpad_index, bool dual_touchpad);
+
+  /**
+   * @brief The input state for one session.
+   * @param controllers Whether the session may send controller input. A watch-only session
+   *        cannot, and creating controller 0 for it put a second pad on the host that nobody
+   *        held, which a couch co-op game counted as a player.
+   */
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, bool controllers = true);
 
 #ifdef POLARIS_TESTS
   bool is_valid_input_packet_for_tests(std::span<const std::uint8_t> packet);

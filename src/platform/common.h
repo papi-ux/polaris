@@ -31,6 +31,16 @@
 
 extern "C" {
 #include <moonlight-common-c/src/Limelight.h>
+
+// The Steam Controller (2026) came to moonlight-common-c after the copy Polaris pins
+// (upstream master, August 2026). These are the protocol's values, so a client that
+// sends them is understood before the pinned copy moves.
+#ifndef LI_CTYPE_STEAM
+  #define LI_CTYPE_STEAM 0x04
+#endif
+#ifndef LI_CCAP_DUAL_TOUCHPAD
+  #define LI_CCAP_DUAL_TOUCHPAD 0x100
+#endif
 }
 
 using namespace std::literals;
@@ -800,6 +810,26 @@ namespace platf {
   std::string capture_backend_substitution_note();
 
   /**
+   * @brief Whether the last capture-source evaluation was built for a different stream mode
+   *        or capture setting than the live configuration holds, or none has run.
+   */
+  bool capture_sources_stale();
+
+  /**
+   * @brief Evaluate capture sources again when capture_sources_stale() says so.
+   * @return True when an evaluation ran.
+   */
+  bool reevaluate_capture_sources_if_stale();
+
+  /**
+   * @brief Whether a capture request can land on any capture source the last evaluation found.
+   * @param requested The backend a generation asks for; empty or "auto" for auto-selection.
+   * @param exact_output_owned True when the generation owns an exact output name.
+   * @return True when capture could start, and also before any evaluation has run.
+   */
+  bool capture_request_satisfiable(std::string_view requested, bool exact_output_owned);
+
+  /**
    * @brief The resource limits that stopped Polaris raising its capture, encode
    * and audio thread priority, such as "RLIMIT_RTPRIO=0, RLIMIT_NICE=0".
    * @return Empty unless a worker thread has actually been refused elevation, so
@@ -842,6 +872,10 @@ namespace platf {
   #ifdef POLARIS_TESTS
   /// Set the substitution note directly, so the reporting can be tested without a compositor.
   void set_capture_backend_substitution_for_tests(const std::string &note);
+  /// Record the live configuration as the one the capture sources were evaluated for.
+  void mark_capture_sources_evaluated_for_current_config_for_tests();
+  /// Pin capture_request_satisfiable(); nullopt restores the real check.
+  void set_capture_request_satisfiable_for_tests(std::optional<bool> satisfiable);
   #endif
 #endif
 

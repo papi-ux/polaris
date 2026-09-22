@@ -62,7 +62,7 @@ Two client-facing notes: Moonlight-protocol clients can request the mirror for a
 | `linux_stream_mode` | `headless_stream` (new installs) | Stream path id for Linux sessions: `headless_stream`, `windowed_stream`, `gamescope_stream`, `host_virtual_display`, `desktop_takeover`, `desktop_display`, or `headless_dongle`. Empty derives the path from the legacy booleans above. See [Launch modes and capture paths](launch-modes.md) for choosing, [stream paths](stream-paths.md) for the contract |
 | `linux_private_runtime` | `labwc` | Private compositor used by paths that host the session themselves: `labwc` or `gamescope`. Ignored on host paths |
 | `headless_swap_mode` | `privacy` | Headless Dongle path only: `privacy` makes the dongle primary and blanks the panel after one-time portal approval is saved (the approval session keeps it on); `off` extends onto the dongle and leaves the panel primary |
-| `linux_virtual_display_backend` | `auto` | What creates the screen for Host Virtual Display: `auto` (EVDI, then a new KWin screen on KDE Plasma, then Hyprland, then kscreen-doctor borrowing `linux_streaming_output`), or `evdi`, `kwin`, `wlr` or `kscreen` to use only that one. A chosen backend that cannot run refuses the launch with its reason instead of falling back |
+| `linux_virtual_display_backend` | `auto` | What creates the screen for Host Virtual Display: `auto` (a new KWin screen on KDE Plasma, then EVDI, then Hyprland, then kscreen-doctor borrowing `linux_streaming_output`), or `evdi`, `kwin`, `wlr` or `kscreen` to use only that one. A chosen backend that cannot run refuses the launch with its reason instead of falling back |
 | `fallback_mode` | `1920x1080x60` | Display mode used when the client-requested mode is unsupported, as `WxHxFPS`. The web UI's Display Planner presets write this same key, so Moonlight compatibility stays standard; Nova and per-game overrides can layer on top where client-settings support exists |
 | `display_plan` | `balanced` | Display Planner preset id persisted alongside `fallback_mode`: `native`, `balanced`, `sharp`, or `performance`. Empty means the mode was set manually; hand-editing `fallback_mode` clears the id so a stale pairing never lights up in the UI |
 | `trusted_subnets` | CIDR list | Enable Trusted Pair on known local networks |
@@ -344,7 +344,7 @@ events), and extras (an input-only app entry for TV workflows, rumble forwarding
 | Field | What it does |
 | --- | --- |
 | **Enable Gamepad Input** (`controller`) | Allows guests to control the host system with a gamepad / controller |
-| **Emulated Gamepad Type** (`gamepad`) | Choose which type of gamepad to emulate on the host |
+| **Emulated Gamepad Type** (`gamepad`) | Choose which type of gamepad to emulate on the host. Automatic follows the client's controller: an Xbox, PlayStation or Nintendo pad gets its own kind, a Steam Controller gets a DualSense (its gyro and both touchpads fit there), and anything else gets a DualSense when it reports motion or a touchpad and an Xbox One pad otherwise. |
 | **Emulate a DS4 gamepad if the client gamepad reports motion sensors are present** (`motion_as_ds4`) | If disabled, motion sensors will not be taken into account during gamepad type selection. |
 | **Emulate a DS4 gamepad if the client gamepad reports a touchpad is present** (`touchpad_as_ds4`) | If disabled, touchpad presence will not be taken into account during gamepad type selection. |
 | **Map Back/Select to Touchpad Click** (`ds4_back_as_touchpad_click`) | When forcing DS4 emulation, map Back/Select to Touchpad Click |

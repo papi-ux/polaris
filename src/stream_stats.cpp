@@ -40,6 +40,7 @@ namespace video {
   #include "platform/linux/user_unit_override.h"
   #include "platform/linux/wayland.h"
   #include "platform/linux/stream_display_policy.h"
+  #include "platform/linux/virtual_display.h"
 #endif
 
 namespace stream_stats {
@@ -647,7 +648,16 @@ namespace stream_stats {
     j["invalidate_ref_frames_requests_total"] = invalidate_ref_frames_requests_total;
     j["headless_mode"] = config::video.linux_display.headless_mode;
     j["ai_enabled"] = config::video.ai_optimizer.enabled;
+    auto by_creation = input_virtual_pads;
+    std::sort(by_creation.begin(), by_creation.end(), [](const virtual_pad_t &a, const virtual_pad_t &b) {
+      return a.created < b.created;
+    });
+    nlohmann::json pads = nlohmann::json::array();
+    for (std::size_t i = 0; i < by_creation.size(); ++i) {
+      pads.push_back({{"player", static_cast<int>(i) + 1}, {"kind", by_creation[i].kind}});
+    }
     j["controller_input"] = {
+      {"pads", std::move(pads)},
       {"virtual_controller_created", input_virtual_controller_created},
       {"virtual_controller_number", input_virtual_controller_number},
       {"virtual_controller_kind", input_virtual_controller_kind},
@@ -906,6 +916,98 @@ namespace stream_stats {
     };
   }
 
+#ifdef __linux__
+  namespace {
+    std::string backend_setting_label(std::string_view preference) {
+      if (preference == "evdi") {
+        return "EVDI";
+      }
+      if (preference == "kwin") {
+        return "KWin";
+      }
+      if (preference == "wlr") {
+        return "Hyprland";
+      }
+      if (preference == "kscreen") {
+        return "kscreen-doctor";
+      }
+      return "Automatic";
+    }
+
+    /**
+     * Host Virtual Display on KDE Plasma: the three ways a stream screen there went wrong in
+     * testing, each silent until now. The game opened on the desk's monitor because the screen
+     * came from EVDI, a tap landed on the wrong monitor because KWin spread the touch screen
+     * over all of them, and an EVDI screen kept a 1.35 scale KWin had stored for it.
+     */
+    void append_host_virtual_display_warnings(nlohmann::json &warnings, const virtual_display::doctor_notes_t &notes) {
+      if (!notes.plasma) {
+        return;
+      }
+
+      for (const auto &route : notes.input_routes) {
+        if (route.routed || route.output.empty()) {
+          continue;
+        }
+        const auto device = route.device.empty() ? std::string {"an input device"} : route.device;
+        warnings.push_back({
+          {"id", "hvd_input_not_mapped"},
+          {"severity", "warning"},
+          {"message", "Polaris could not point " + device + " at the stream screen [" + route.output +
+                        "], so a tap or a pen stroke from the client can land on another monitor. KWin said: " +
+                        route.error},
+          {"action", "Run Polaris inside the Plasma session it streams, as the packaged polaris.service does, "
+                     "so it can reach KWin on that session's bus. A support bundle from one stream carries the "
+                     "whole KWin answer."}
+        });
+        break;  // One is enough: the cause is the same for every device.
+      }
+
+      if (!notes.scaled_screen.empty()) {
+        const auto percent = std::to_string(static_cast<int>(notes.scaled_screen_scale * 100.0 + 0.5));
+        warnings.push_back({
+          {"id", "hvd_screen_scaled"},
+          {"severity", "warning"},
+          {"message", "KWin runs the stream screen [" + notes.scaled_screen + "] at " + percent +
+                        "% scale, from a layout it stored for that screen. Everything on it is drawn larger, and "
+                        "its desktop is smaller than the stream's resolution."},
+          {"action", "While a stream is running, set that screen to 100% in System Settings, under Display & "
+                     "Monitor; KWin keeps the choice for next time. Or set Host Virtual Display Backend to "
+                     "Automatic, so Plasma gets Polaris's own KWin screen, which Polaris always puts at 100%."}
+        });
+      }
+
+      if (notes.last_backend &&
+          *notes.last_backend != virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT) {
+        const auto used = std::string {virtual_display::backend_name(*notes.last_backend)};
+        const bool chosen = notes.preference != "auto" && notes.preference != "kwin";
+        std::string message;
+        std::string action;
+        if (chosen) {
+          message = "Host Virtual Display used " + used + " because Host Virtual Display Backend is set to " +
+                    backend_setting_label(notes.preference) +
+                    ". On Plasma that screen is a monitor like any other, so a game opens on your primary one "
+                    "rather than on the stream.";
+          action = "Set Host Virtual Display Backend to Automatic, unless you chose " +
+                   backend_setting_label(notes.preference) + " for a reason.";
+        } else {
+          message = "Host Virtual Display used " + used + " because Polaris could not create a KWin screen: " +
+                    (notes.kwin_reason.empty() ? std::string {"no reason was recorded."} : notes.kwin_reason) +
+                    " A game may open on your primary monitor rather than on the stream.";
+          action = "Fix what the reason names and restart Polaris. Troubleshooting, under Host Virtual Display "
+                   "on KDE, covers each one.";
+        }
+        warnings.push_back({
+          {"id", "hvd_kwin_screen_unused"},
+          {"severity", "info"},
+          {"message", std::move(message)},
+          {"action", std::move(action)}
+        });
+      }
+    }
+  }  // namespace
+#endif
+
   nlohmann::json linux_gpu_profile_json(const stats_t &stats) {
     const auto &linux_display = config::video.linux_display;
     const bool gpu_native_requested =
@@ -1002,9 +1104,11 @@ namespace stream_stats {
            "backend (" + substitution + "). Nothing is wrong with the display or the GPU." :
            "The capture backend this host is configured to use cannot capture anything "
            "in the current stream mode, so Polaris substituted another one (" +
-           substitution + "). Capture backends are not interchangeable across "
-           "compositors: wlr needs the wlroots capture protocols, which KDE and GNOME "
-           "do not have, so only the private-compositor modes can use it there."},
+           substitution + "). Streams that capture the host desktop use the substitute; "
+           "a Gamescope session or a virtual output keeps the configured backend. Capture "
+           "backends are not interchangeable across compositors: wlr needs the wlroots "
+           "capture protocols, which KDE and GNOME do not have, so only the "
+           "private-compositor modes can use it there."},
         {"action", kms_for_capability ?
            std::string {"Run "} + enable_kms_command + " after each install or update, then restart Polaris; KMS "
            "capture is what carries HDR, so keep it if HDR is the goal." :
@@ -1235,6 +1339,8 @@ namespace stream_stats {
                    "which limit applies."}
       });
     }
+
+    append_host_virtual_display_warnings(configuration_warnings, virtual_display::doctor_notes());
 #endif
 
     nlohmann::json profile = {
@@ -3198,6 +3304,26 @@ namespace stream_stats {
     current_stats.input_host_controller_isolation_detail = host_controller_isolation_detail;
     current_stats.input_haptics_supported = haptics_supported;
     current_stats.input_haptics_detail = haptics_detail;
+  }
+
+  void note_virtual_pad(int global_index, int controller_number, const std::string &kind) {
+    // Players are numbered by when their pad appeared, the order a game enumerates them in.
+    // Controller numbers restart at 0 in every session, so two clients with a pad each both
+    // held controller 0 and both read as player 1.
+    static std::uint64_t pads_created = 0;
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    auto &pads = current_stats.input_virtual_pads;
+    std::erase_if(pads, [&](const virtual_pad_t &pad) {
+      return pad.global_index == global_index;
+    });
+    pads.push_back({global_index, controller_number, kind, ++pads_created});
+  }
+
+  void forget_virtual_pad(int global_index) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    std::erase_if(current_stats.input_virtual_pads, [&](const virtual_pad_t &pad) {
+      return pad.global_index == global_index;
+    });
   }
 
   void update_steam_input_state(const std::string &status,

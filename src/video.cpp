@@ -60,6 +60,7 @@ extern "C" {
   #include "platform/linux/encoder_probe_driver_proof.h"
   #include "platform/linux/vaapi.h"
   #include "platform/linux/kms_connector_selection.h"
+  #include "platform/linux/stream_display_policy.h"
   #ifdef POLARIS_BUILD_VULKAN
     #include "platform/linux/vulkan_encode.h"
   #endif
@@ -1006,8 +1007,14 @@ namespace video {
       std::ostringstream topology;
       const auto output_name = display_device::map_output_name(config::video.output_name);
 
-      topology << "capture=" << config::video.capture
-               << ";encoder=" << config::video.encoder
+#ifdef __linux__
+      // The backend streams will actually ask for, which a private compositor or a
+      // substitution can make different from the saved preference.
+      topology << "capture=" << stream_display_policy::capture_for_current_mode();
+#else
+      topology << "capture=" << config::video.capture;
+#endif
+      topology << ";encoder=" << config::video.encoder
                << ";adapter=" << config::video.adapter_name
                << ";output=" << output_name;
 #ifdef __linux__
@@ -1150,8 +1157,9 @@ namespace video {
       // Only the owned private compositor currently provides a live,
       // generation-bound topology observation. Desktop/portal/unknown routes
       // keep probing until they implement an equally strong identity contract.
+      const auto requested_capture = stream_display_policy::capture_for_current_mode();
       if (!config::video.linux_display.use_cage_compositor || !probe_drivers ||
-          (!config::video.capture.empty() && config::video.capture != "wlr") ||
+          (!requested_capture.empty() && requested_capture != "wlr") ||
           !probe_drivers->has_capture_routes()) return decline("capture route or retained provider proof unavailable");
       // Require actual provider evidence, collected before probe owners died.
       if (backend != "nvenc" || !probe_drivers->contains_provider("libnvidia-encode.so") ||
@@ -2592,7 +2600,11 @@ namespace video {
 #endif
     capture_generation::identity_t generation {
       .requested_output_name = configured_output_name,
+#ifdef __linux__
+      .capture_backend = stream_display_policy::capture_for_current_mode(),
+#else
       .capture_backend = config::video.capture,
+#endif
       .adapter_name = config::video.adapter_name,
     };
 #ifdef __linux__
@@ -5415,19 +5427,59 @@ namespace video {
     reset_encoder_probe_state_unlocked(false);
     encoder_selection_info = selection_plan;
 
+    // The portal capture does not connect to its PipeWire source while probing;
+    // it encodes a dummy image instead ("portal: Probe mode — using dummy").
+    // With no stream there is no DMA-BUF, so make_avcodec_encode_device falls
+    // back to the SHM->CUDA converter, which only accepts NV12. Main10 then
+    // fails on the capture device, before the encoder is ever asked, and the
+    // failure says nothing about the live path: that one negotiates a 10-bit
+    // DMA-BUF (xBGR_210LE from gamescope in HDR mode) and feeds P010 through
+    // cuda_dmabuf_t. Zeroing the mode here drops the Main10 bits from
+    // ServerCodecModeSupport, so clients refuse to start an HDR stream at all
+    // and the host never gets the chance to prove itself.
+    const bool main10_probe_is_authoritative = [] {
+#ifdef __linux__
+      return !(config::video.capture == "portal" &&
+               config::video.linux_display.stream_mode == "gamescope_stream");
+#else
+      return true;
+#endif
+    }();
+
     auto adjust_encoder_constraints = [&](encoder_t *encoder) {
       // If we can't satisfy both the encoder and codec requirement, prefer the encoder over codec support
       if (active_hevc_mode == 3 && !encoder->hevc[encoder_t::DYNAMIC_RANGE]) {
-        BOOST_LOG(warning) << "Encoder ["sv << encoder->name << "] does not support HEVC Main10 on this system"sv;
-        active_hevc_mode = 0;
+        // The dummy source is NV12, so an 8-bit failure is authoritative: an
+        // encoder that could not pass at all has nothing to say about 10-bit.
+        // Overriding there would advertise Main10 on a host with no HEVC and
+        // fail at stream start, where it falls back to H.264 cleanly today.
+        if (main10_probe_is_authoritative || !encoder->hevc[encoder_t::PASSED]) {
+          BOOST_LOG(warning) << "Encoder ["sv << encoder->name << "] does not support HEVC Main10 on this system"sv;
+          active_hevc_mode = 0;
+        } else {
+          BOOST_LOG(info) << "Encoder ["sv << encoder->name
+                          << "] failed the HEVC Main10 probe against the portal's dummy source; keeping the configured mode because that probe cannot reach the live 10-bit DMA-BUF path"sv;
+          // make_encode_session() gates the live stream on this same flag, so
+          // clearing the mode alone would still refuse HDR at launch with
+          // "dynamic range not supported". The probe could not judge it either
+          // way; let the live path try and fail loudly if the capture really
+          // cannot deliver 10 bits.
+          encoder->hevc[encoder_t::DYNAMIC_RANGE] = 1;
+        }
       } else if (active_hevc_mode == 2 && !encoder->hevc[encoder_t::PASSED]) {
         BOOST_LOG(warning) << "Encoder ["sv << encoder->name << "] does not support HEVC on this system"sv;
         active_hevc_mode = 0;
       }
 
       if (active_av1_mode == 3 && !encoder->av1[encoder_t::DYNAMIC_RANGE]) {
-        BOOST_LOG(warning) << "Encoder ["sv << encoder->name << "] does not support AV1 Main10 on this system"sv;
-        active_av1_mode = 0;
+        if (main10_probe_is_authoritative || !encoder->av1[encoder_t::PASSED]) {
+          BOOST_LOG(warning) << "Encoder ["sv << encoder->name << "] does not support AV1 Main10 on this system"sv;
+          active_av1_mode = 0;
+        } else {
+          BOOST_LOG(info) << "Encoder ["sv << encoder->name
+                          << "] failed the AV1 Main10 probe against the portal's dummy source; keeping the configured mode because that probe cannot reach the live 10-bit DMA-BUF path"sv;
+          encoder->av1[encoder_t::DYNAMIC_RANGE] = 1;
+        }
       } else if (active_av1_mode == 2 && !encoder->av1[encoder_t::PASSED]) {
         BOOST_LOG(warning) << "Encoder ["sv << encoder->name << "] does not support AV1 on this system"sv;
         active_av1_mode = 0;
@@ -5908,6 +5960,10 @@ namespace video {
     last_encoder_probe_vulkan_quality_levels_for_codec = {-1, -1, -1};
   }
 
+  void invalidate_encoder_probe_reuse() {
+    successful_probe.invalidate();
+  }
+
   void reset_encoder_probe_state() {
     successful_probe.invalidate();
     std::unique_lock encoder_state_lock {encoder_state_mutex, std::defer_lock};
@@ -5937,26 +5993,80 @@ namespace video {
     });
   }
 
+#ifdef __linux__
+  static void refuse_for_kms_capability() {
+    launch_failure::refuse(
+      503,
+      "kms_capture_needs_capability",
+      "No video capture could start: this host is configured for KMS capture, but the Polaris "
+      "binary does not hold CAP_SYS_ADMIN, so it cannot read a framebuffer.",
+      "On the host, run sudo -H polaris --setup-host --enable-kms, then restart Polaris. Every Polaris install or update needs this again."
+    );
+  }
+
+  static void refuse_for_missing_capture_sources() {
+    launch_failure::refuse(
+      503,
+      "no_capture_backend",
+      "No video capture backend works in the configured stream mode, so no encoder could be probed.",
+      "Check the capture setting against the stream mode on the host; leaving capture unset lets "
+      "Polaris pick one that works. The host Doctor names the missing protocol."
+    );
+  }
+#endif
+
+  bool refuse_launch_if_capture_unavailable(const capture_generation::identity_t &generation) {
+#ifdef __linux__
+    const bool exact_output_owned = !generation.exact_display_name.empty();
+    if (platf::capture_request_satisfiable(generation.capture_backend, exact_output_owned)) {
+      return false;
+    }
+    const auto requested = generation.capture_backend.empty() ? std::string {"auto"} : generation.capture_backend;
+    // The two capture-side refusals the probe path already names stay the more specific answer.
+    if (platf::kms_capture_refused_for_capability() &&
+        (requested == "kms" || requested == "drm" || requested == "auto")) {
+      refuse_for_kms_capability();
+      return true;
+    }
+    if (platf::capture_sources_missing()) {
+      refuse_for_missing_capture_sources();
+      return true;
+    }
+    const auto mode_label = stream_display_policy::label_for_selection(generation.stream_mode);
+    const auto mode = !mode_label.empty() ? mode_label :
+                      generation.stream_mode.empty() ? std::string {"the configured stream mode"} : generation.stream_mode;
+    const auto found = platf::selected_capture_backend();
+    BOOST_LOG(error) << "Refusing launch: capture ["sv << requested << "] cannot capture anything in stream mode ["sv
+                     << mode << "]; the capture sources found for it are ["sv
+                     << (found.empty() ? std::string {"none"} : found) << ']';
+    std::string message = "No video capture could start: this launch asks for " + requested +
+                          " capture, and " + requested + " cannot capture anything in " + mode + " on this host.";
+    if (requested == "wlr") {
+      message += " wlr needs the wlroots capture protocols, which KDE and GNOME do not have, so there only "
+                 "Private Stream can use it.";
+    }
+    launch_failure::refuse(
+      503,
+      "capture_backend_unavailable",
+      message,
+      "On the host, set Force a Specific Capture Method under Advanced to Autodetect, or pick a stream "
+      "mode this capture method can serve, then launch again. The host Doctor shows what capture it found."
+    );
+    return true;
+#else
+    (void) generation;
+    return false;
+#endif
+  }
+
   void note_launch_refused_by_probe(bool against_private_compositor) {
 #ifdef __linux__
     if (platf::kms_capture_refused_for_capability()) {
-      launch_failure::refuse(
-        503,
-        "kms_capture_needs_capability",
-        "No video capture could start: this host is configured for KMS capture, but the Polaris "
-        "binary does not hold CAP_SYS_ADMIN, so it cannot read a framebuffer.",
-        "On the host, run sudo -H polaris --setup-host --enable-kms, then restart Polaris. Every Polaris install or update needs this again."
-      );
+      refuse_for_kms_capability();
       return;
     }
     if (platf::capture_sources_missing()) {
-      launch_failure::refuse(
-        503,
-        "no_capture_backend",
-        "No video capture backend works in the configured stream mode, so no encoder could be probed.",
-        "Check the capture setting against the stream mode on the host; leaving capture unset lets "
-        "Polaris pick one that works. The host Doctor names the missing protocol."
-      );
+      refuse_for_missing_capture_sources();
       return;
     }
 #endif

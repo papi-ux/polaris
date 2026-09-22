@@ -15,17 +15,21 @@
 // standard includes
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <errno.h>
 #include <filesystem>
 #include <fstream>
 #include <fcntl.h>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -676,13 +680,17 @@ namespace virtual_display {
       default:
         break;
     }
-    // A real new screen before a borrowed monitor: EVDI and KWin create one,
-    // kscreen-doctor can only take over an output the user already has.
-    if (probe.evdi) {
-      return backend_e::EVDI;
-    }
+    // A real new screen before a borrowed monitor: KWin and EVDI create one,
+    // kscreen-doctor can only take over an output the user already has. On a
+    // Plasma session KWin's own screen comes first: Polaris places it at scale 1,
+    // ranks it last and moves new windows onto it, while an EVDI screen there
+    // kept whatever layout KWin had stored for it (a 1.35 scale on the test
+    // host) and the game opened on the primary monitor instead of the stream.
     if (probe.kwin) {
       return backend_e::KWIN_VIRTUAL_OUTPUT;
+    }
+    if (probe.evdi) {
+      return backend_e::EVDI;
     }
     if (probe.wlr) {
       return backend_e::WAYLAND_WLR;
@@ -819,6 +827,59 @@ namespace virtual_display {
     return {prefix + ".scale.1", prefix + ".position." + std::to_string(x) + ",0"};
   }
 
+  std::vector<std::string> kwin_keep_positions_args(std::string_view output, const std::vector<kscreen_output_layout_t> &layout_before) {
+    std::vector<std::string> args;
+    for (const auto &screen : layout_before) {
+      if (!screen.enabled || screen.name == output) {
+        continue;
+      }
+      args.push_back("output."s + screen.name + ".position." + std::to_string(screen.x) + "," + std::to_string(screen.y));
+    }
+    return args;
+  }
+
+  bool kwin_positions_match(
+    const std::vector<kscreen_output_layout_t> &layout,
+    const std::vector<kscreen_output_layout_t> &layout_before,
+    std::string_view output
+  ) {
+    for (const auto &before : layout_before) {
+      if (!before.enabled || before.name == output) {
+        continue;
+      }
+      const auto now = std::find_if(layout.begin(), layout.end(), [&](const auto &screen) {
+        return screen.name == before.name;
+      });
+      if (now == layout.end() || !now->enabled || now->x != before.x || now->y != before.y) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool routes_to_stream_screen(std::string_view kwin_device_name) {
+    // The names inputtino_common.h gives the devices. The absolute mouse is left
+    // out: KWin places an absolute pointer over the whole workspace whatever its
+    // outputName says, so pointing it at the stream screen changes nothing.
+    return kwin_device_name == "Touch passthrough"sv ||
+           kwin_device_name == "Pen passthrough"sv;
+  }
+
+  std::string input_event_name(std::string_view node) {
+    const auto slash = node.find_last_of('/');
+    const auto name = slash == std::string_view::npos ? node : node.substr(slash + 1);
+    constexpr auto prefix = "event"sv;
+    if (!name.starts_with(prefix) || name.size() == prefix.size()) {
+      return {};
+    }
+    for (const char digit : name.substr(prefix.size())) {
+      if (!std::isdigit(static_cast<unsigned char>(digit))) {
+        return {};
+      }
+    }
+    return std::string {name};
+  }
+
   namespace {
     /**
      * Enabled screens in rank order; `except` is left out. KWin reports a
@@ -912,9 +973,14 @@ namespace virtual_display {
            "  if (!window || !(window.normalWindow || window.dialog || window.splash)) return;\n"
            "  if (isHostPrompt(window)) return;\n"
            "  const screen = outputNamed(target);\n"
-           "  if (!screen || window.output === screen) return;\n"
-           "  if (window.output && window.output.name.indexOf(\"Virtual-polaris-\") === 0) return;\n"
-           "  workspace.sendClientToScreen(window, screen);\n"
+           "  if (!screen) return;\n"
+           "  if (window.output !== screen) {\n"
+           "    if (window.output && window.output.name.indexOf(\"Virtual-polaris-\") === 0) return;\n"
+           "    workspace.sendClientToScreen(window, screen);\n"
+           "  }\n"
+           "  // The player is at the stream, so the window they started takes the focus too. KWin\n"
+           "  // otherwise leaves it at the desk, and an unfocused game ignores its controller and taps.\n"
+           "  if (window.normalWindow || window.dialog) workspace.activeWindow = window;\n"
            "});\n";
   }
 
@@ -2078,6 +2144,204 @@ namespace virtual_display {
   }  // namespace kscreen
 
   // ---------------------------------------------------------------------------
+  // Touch and pen on the stream screen (KDE Plasma)
+  // ---------------------------------------------------------------------------
+  namespace input_routing {
+
+    // How long KWin gets to list a device Polaris just created.
+    constexpr int device_wait_attempts = 20;
+    constexpr auto device_wait_step = 100ms;
+
+    struct state_t {
+      std::mutex mutex;
+      std::condition_variable wake;
+      std::deque<std::string> pending;  ///< eventN names to point again, oldest first
+      std::map<std::string, input_route_t> devices;  ///< eventN -> how it was last pointed
+      std::vector<std::string> screens;  ///< KWin screens that exist, oldest first; the newest takes input
+      bool stopping = false;
+      std::thread worker;
+
+      ~state_t() {
+        {
+          std::lock_guard lock {mutex};
+          stopping = true;
+        }
+        wake.notify_all();
+        if (worker.joinable()) {
+          worker.join();
+        }
+      }
+    };
+
+    static state_t &state() {
+      static state_t instance;
+      return instance;
+    }
+
+#ifdef POLARIS_HAS_KWIN_VIRTUAL_OUTPUT
+    static std::string target_unlocked(const state_t &s) {
+      return s.screens.empty() ? std::string {} : s.screens.back();
+    }
+
+    /** Queue a device once; the caller holds the lock. */
+    static void queue_unlocked(state_t &s, const std::string &sys_name) {
+      if (std::find(s.pending.begin(), s.pending.end(), sys_name) == s.pending.end()) {
+        s.pending.push_back(sys_name);
+      }
+    }
+
+    static void requeue_all_unlocked(state_t &s) {
+      for (const auto &[sys_name, route] : s.devices) {
+        queue_unlocked(s, sys_name);
+      }
+    }
+
+    /** Point one device at the newest KWin screen, or at none. Runs on the worker. */
+    static void point(state_t &s, const std::string &sys_name) {
+      // KWin lists a device a moment after the kernel creates it.
+      std::string error;
+      std::optional<std::string> name;
+      for (int attempt = 0; attempt < device_wait_attempts; ++attempt) {
+        {
+          std::unique_lock lock {s.mutex};
+          if (s.stopping || !s.devices.contains(sys_name)) {
+            return;  // Forgotten meanwhile: the device is on its way out.
+          }
+          if (attempt > 0 && s.wake.wait_for(lock, device_wait_step, [&] {
+                return s.stopping;
+              })) {
+            return;
+          }
+        }
+        name = kwin_virtual_output::input_device_name(sys_name, error);
+        if (name) {
+          break;
+        }
+      }
+
+      std::string target;
+      {
+        std::lock_guard lock {s.mutex};
+        const auto it = s.devices.find(sys_name);
+        if (it == s.devices.end()) {
+          return;
+        }
+        if (!name) {
+          it->second.output = target_unlocked(s);
+          it->second.routed = false;
+          it->second.error = "KWin does not list " + sys_name + ": " + error;
+          BOOST_LOG(warning) << "Input: "sv << it->second.error;
+          return;
+        }
+        if (!routes_to_stream_screen(*name)) {
+          s.devices.erase(it);  // A relative pointer or a keyboard: nothing to point.
+          return;
+        }
+        it->second.device = *name;
+        target = target_unlocked(s);
+      }
+
+      // Without a Polaris screen there is only a leftover of ours to undo. A tie to
+      // any other screen is the owner's choice in System Settings, kept as it is.
+      if (target.empty()) {
+        std::string ignored;
+        const auto current = kwin_virtual_output::input_device_output(sys_name, ignored);
+        if (!current || !current->starts_with("Virtual-polaris-"sv)) {
+          std::lock_guard lock {s.mutex};
+          if (const auto it = s.devices.find(sys_name); it != s.devices.end()) {
+            it->second.output.clear();
+            it->second.routed = true;
+            it->second.error.clear();
+          }
+          return;
+        }
+      }
+
+      const bool routed = kwin_virtual_output::set_input_device_output(sys_name, target, error);
+      std::lock_guard lock {s.mutex};
+      const auto it = s.devices.find(sys_name);
+      if (it == s.devices.end()) {
+        return;
+      }
+      it->second.output = target;
+      it->second.routed = routed;
+      it->second.error = routed ? std::string {} : error;
+      if (!routed) {
+        BOOST_LOG(warning) << "Input: ["sv << it->second.device << "] could not be pointed at "sv
+                           << (target.empty() ? "no screen"s : "["s + target + "]"s) << ": "sv << error;
+      } else if (target.empty()) {
+        BOOST_LOG(info) << "Input: ["sv << it->second.device << "] spans the desktop again"sv;
+      } else {
+        BOOST_LOG(info) << "Input: ["sv << it->second.device << "] lands on ["sv << target << ']';
+      }
+    }
+
+    static void run(state_t &s) {
+      std::unique_lock lock {s.mutex};
+      while (true) {
+        s.wake.wait(lock, [&] {
+          return s.stopping || !s.pending.empty();
+        });
+        if (s.stopping) {
+          return;
+        }
+        const auto sys_name = s.pending.front();
+        s.pending.pop_front();
+        lock.unlock();
+        point(s, sys_name);
+        lock.lock();
+      }
+    }
+
+    /** Start the worker the first time there is something to point; the caller holds the lock. */
+    static void wake_unlocked(state_t &s) {
+      if (s.pending.empty()) {
+        return;
+      }
+      if (!s.worker.joinable()) {
+        s.worker = std::thread([&s] {
+          run(s);
+        });
+      }
+      s.wake.notify_all();
+    }
+
+    /**
+     * KWin is the one to ask, and it can see the devices: a Plasma session, and
+     * no seat isolation, which hides them from the desktop on purpose.
+     */
+    static bool applies() {
+      static const bool plasma = wayland_wlr::detect_compositor() == "kwin";
+      return plasma && !config::input.client_keyboard_mouse_seat_isolation;
+    }
+#endif
+
+    /** A Polaris screen exists now and takes the absolute input. */
+    static void screen_added(const std::string &output_name) {
+#ifdef POLARIS_HAS_KWIN_VIRTUAL_OUTPUT
+      auto &s = state();
+      std::lock_guard lock {s.mutex};
+      std::erase(s.screens, output_name);
+      s.screens.push_back(output_name);
+      requeue_all_unlocked(s);
+      wake_unlocked(s);
+#endif
+    }
+
+    /** A Polaris screen is on its way out; the one before it, or none, takes the input. */
+    static void screen_removed(const std::string &output_name) {
+#ifdef POLARIS_HAS_KWIN_VIRTUAL_OUTPUT
+      auto &s = state();
+      std::lock_guard lock {s.mutex};
+      std::erase(s.screens, output_name);
+      requeue_all_unlocked(s);
+      wake_unlocked(s);
+#endif
+    }
+
+  }  // namespace input_routing
+
+  // ---------------------------------------------------------------------------
   // KWin virtual output — a new screen KWin creates for a screencast stream
   // ---------------------------------------------------------------------------
   namespace kwin_vo {
@@ -2209,10 +2473,13 @@ namespace virtual_display {
       }
 
       // Placement and the ranking again last: adding a custom mode can reorder
-      // priorities. A failed read falls back to the layout from before, never
-      // to 0,0 on top of a real monitor.
-      const int x = kscreen_right_edge(layout ? *layout : layout_before, name);
-      auto args = kwin_placement_args(name, x);
+      // priorities. The other screens go back where they were before KWin
+      // applied the layout it stored for this set of outputs, and the new one
+      // goes just past them, measured on that same layout.
+      const int x = kscreen_right_edge(layout_before, name);
+      auto args = kwin_keep_positions_args(name, layout_before);
+      const auto placement = kwin_placement_args(name, x);
+      args.insert(args.end(), placement.begin(), placement.end());
       args.insert(args.end(), ranking.begin(), ranking.end());
       const int rc = run_kscreen(std::move(args));
       const auto placed = kscreen_layout_from_json(layout_json());
@@ -2222,6 +2489,10 @@ namespace virtual_display {
                            << rc << ')';
       } else {
         BOOST_LOG(info) << "Virtual display: ["sv << name << "] placed at "sv << x << ",0, scale 1, ranked last"sv;
+      }
+      if (placed && !kwin_positions_match(*placed, layout_before, name)) {
+        BOOST_LOG(warning) << "Virtual display: the other screens did not go back where they were with ["sv << name
+                           << "] beside them"sv;
       }
       if (placed && !kwin_ranking_matches(*placed, layout_before, name)) {
         BOOST_LOG(warning) << "Virtual display: the screens are not ranked as they were with ["sv << name
@@ -2293,6 +2564,9 @@ namespace virtual_display {
         BOOST_LOG(warning) << "Virtual display: new windows will not be moved onto ["sv << output_name
                            << "]; a game may open on another screen: "sv << follow_error;
       }
+      // Touch, pen and the absolute mouse would otherwise span every monitor, so
+      // a tap on the client landed wherever that point fell on the whole desk.
+      input_routing::screen_added(output_name);
       BOOST_LOG(info) << "Virtual display: KWin screen created ["sv << output_name << "] "sv
                       << width << "x"sv << height << "@"sv << fps << "Hz"sv;
       return display;
@@ -2318,13 +2592,16 @@ namespace virtual_display {
         BOOST_LOG(info) << "Virtual display: KWin screen ["sv << display.output_name
                         << "] is not held by this process; nothing to remove"sv;
         // Its window script may still be loaded if that process crashed.
+        input_routing::screen_removed(display.output_name);
         kwin_virtual_output::stop_following_windows(display.output_name);
         release_name(display.output_name);
         display.active = false;
         return true;
       }
 
-      // Stop moving windows first, so none is sent to a screen on its way out.
+      // Stop moving windows and input onto it first, so neither is sent to a
+      // screen on its way out.
+      input_routing::screen_removed(display.output_name);
       kwin_virtual_output::stop_following_windows(display.output_name);
       if (!kwin_virtual_output::release(display.output_name, release_budget)) {
         BOOST_LOG(error) << "Virtual display: KWin screen ["sv << display.output_name
@@ -2349,6 +2626,145 @@ namespace virtual_display {
   // ---------------------------------------------------------------------------
   // Public API
   // ---------------------------------------------------------------------------
+
+  namespace {
+    // What the Doctor reads about the screens this process created.
+    std::mutex doctor_mutex;
+    std::optional<backend_e> last_created_backend;
+    std::map<std::string, double> scaled_screens;  ///< Live stream screens KWin runs at another scale
+#ifdef POLARIS_TESTS
+    std::optional<doctor_notes_t> doctor_notes_override;
+#endif
+
+    bool plasma_session() {
+      static const bool plasma = wayland_wlr::detect_compositor() == "kwin";
+      return plasma;
+    }
+
+    /**
+     * Note the scale KWin gave a new stream screen. KWin applies the layout it
+     * stored for a screen, and an EVDI screen on the test host came back at
+     * 1.35, which draws everything on it larger than the stream asked for.
+     */
+    void note_stream_screen(const vdisplay_t &display) {
+      {
+        std::lock_guard lock {doctor_mutex};
+        last_created_backend = display.backend;
+      }
+      // A borrowed kscreen connector is the owner's own monitor, at the scale they chose.
+      if (display.backend == backend_e::KSCREEN_DOCTOR || !plasma_session() || !kscreen::is_installed() ||
+          display.output_name.empty()) {
+        return;
+      }
+      // kscreen can list the output a moment after it appears.
+      std::optional<kscreen_output_layout_t> output;
+      for (int attempt = 0; attempt < 10; ++attempt) {
+        if (attempt > 0) {
+          std::this_thread::sleep_for(100ms);
+        }
+        output = kwin_vo::find_output(kscreen_layout_from_json(kwin_vo::layout_json()), display.output_name);
+        if (output) {
+          break;
+        }
+      }
+      if (!output) {
+        return;
+      }
+      std::lock_guard lock {doctor_mutex};
+      if (std::abs(output->scale - 1.0) >= 0.01) {
+        scaled_screens[display.output_name] = output->scale;
+        BOOST_LOG(warning) << "Virtual display: KWin runs ["sv << display.output_name << "] at scale "sv << output->scale
+                           << ", from a layout it stored for that screen"sv;
+      } else {
+        scaled_screens.erase(display.output_name);
+      }
+    }
+
+    void forget_stream_screen(const vdisplay_t &display) {
+      std::lock_guard lock {doctor_mutex};
+      scaled_screens.erase(display.output_name);
+    }
+  }  // namespace
+
+  doctor_notes_t doctor_notes() {
+#ifdef POLARIS_TESTS
+    {
+      std::lock_guard lock {doctor_mutex};
+      if (doctor_notes_override) {
+        return *doctor_notes_override;
+      }
+    }
+#endif
+    doctor_notes_t notes;
+    notes.plasma = plasma_session();
+    notes.preference = backend_preference_value();
+    {
+      // The Doctor and the stats stream read this; a probe in progress (a KWin round
+      // trip, loading EVDI) must not stall them, and its reason is being rewritten anyway.
+      std::unique_lock lock {backend_detection_mutex, std::try_to_lock};
+      if (lock.owns_lock()) {
+        notes.kwin_reason = kwin_vo::last_probe_reason;
+      }
+    }
+    {
+      std::lock_guard lock {doctor_mutex};
+      notes.last_backend = last_created_backend;
+      if (!scaled_screens.empty()) {
+        notes.scaled_screen = scaled_screens.begin()->first;
+        notes.scaled_screen_scale = scaled_screens.begin()->second;
+      }
+    }
+    notes.input_routes = input_routes();
+    return notes;
+  }
+
+#ifdef POLARIS_TESTS
+  void set_doctor_notes_for_tests(std::optional<doctor_notes_t> notes) {
+    std::lock_guard lock {doctor_mutex};
+    doctor_notes_override = std::move(notes);
+  }
+#endif
+
+  void route_stream_screen_input(const std::vector<std::string> &nodes) {
+#ifdef POLARIS_HAS_KWIN_VIRTUAL_OUTPUT
+    if (!input_routing::applies()) {
+      return;
+    }
+    auto &s = input_routing::state();
+    std::lock_guard lock {s.mutex};
+    for (const auto &node : nodes) {
+      auto sys_name = input_event_name(node);
+      if (sys_name.empty()) {
+        continue;
+      }
+      s.devices.try_emplace(sys_name);
+      input_routing::queue_unlocked(s, sys_name);
+    }
+    input_routing::wake_unlocked(s);
+#endif
+  }
+
+  void forget_stream_screen_input(const std::vector<std::string> &nodes) {
+    auto &s = input_routing::state();
+    std::lock_guard lock {s.mutex};
+    for (const auto &node : nodes) {
+      const auto sys_name = input_event_name(node);
+      s.devices.erase(sys_name);
+      std::erase(s.pending, sys_name);
+    }
+  }
+
+  std::vector<input_route_t> input_routes() {
+    auto &s = input_routing::state();
+    std::lock_guard lock {s.mutex};
+    std::vector<input_route_t> routes;
+    for (const auto &[sys_name, route] : s.devices) {
+      if (!route.device.empty() || !route.error.empty()) {
+        routes.push_back(route);
+      }
+    }
+    return routes;
+  }
 
   const char *backend_name(backend_e backend) {
     switch (backend) {
@@ -2427,21 +2843,24 @@ namespace virtual_display {
       bool evdi_module_ready = false;
       bool evdi_library_ready = false;
 
-      // EVDI first — it creates true virtual connectors. Module + library
-      // presence alone is not enough to advertise it: creation must actually be
-      // possible, or the mode is offered and then silently fails at launch. A
-      // host set to another backend never has the module loaded on its behalf.
-      if (wanted(backend_preference_e::EVDI)) {
+      // KWin first: its probe answers at once off a Plasma session, and on one
+      // its screen is the one games land on (see select_backend). A Plasma host
+      // that gets the KWin screen never has the EVDI module loaded for it.
+      kwin_vo::last_probe_reason.clear();
+      if (wanted(backend_preference_e::KWIN)) {
+        probe.kwin = kwin_vo::probe(kwin_vo::last_probe_reason);
+      }
+      // EVDI next: it creates true virtual connectors. Module + library presence
+      // alone is not enough to advertise it: creation must actually be possible,
+      // or the mode is offered and then silently fails at launch. A host set to
+      // another backend never has the module loaded on its behalf.
+      // Probe lower-priority candidates only when no earlier backend is ready.
+      if (wanted(backend_preference_e::EVDI) && !(automatic && probe.kwin)) {
         evdi_module_ready = evdi::is_module_loaded() || evdi::load_module();
         if (evdi_module_ready) {
           evdi_library_ready = evdi::load_library();
           probe.evdi = evdi_library_ready && evdi::can_create();
         }
-      }
-      // Probe lower-priority candidates only when no earlier backend is ready.
-      kwin_vo::last_probe_reason.clear();
-      if (wanted(backend_preference_e::KWIN) && !(automatic && probe.evdi)) {
-        probe.kwin = kwin_vo::probe(kwin_vo::last_probe_reason);
       }
       if (wanted(backend_preference_e::WLR) && !(automatic && (probe.evdi || probe.kwin))) {
         probe.wlr = wayland_wlr::is_available();
@@ -2658,9 +3077,11 @@ namespace virtual_display {
         // Nothing for recovery to do: KWin removes the screen with this
         // process's connection. An older Polaris would also refuse the whole
         // state file over a backend it does not know.
+        note_stream_screen(*display);
         return display;
       }
       if (record_persisted_display(*display)) {
+        note_stream_screen(*display);
         return display;
       }
       BOOST_LOG(error) << "Virtual display: live output could not be bound to durable recovery authority; tearing it down"sv;
@@ -2697,6 +3118,7 @@ namespace virtual_display {
 
     BOOST_LOG(info) << "Virtual display: destroying ["sv << display.output_name
                     << "] via "sv << backend_name(display.backend);
+    forget_stream_screen(display);
 
     bool destroyed = false;
     switch (display.backend) {

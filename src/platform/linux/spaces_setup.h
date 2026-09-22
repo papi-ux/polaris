@@ -5,6 +5,7 @@
 #include "spaces_runtime.h"
 #include "spaces_security.h"
 #include <chrono>
+#include <filesystem>
 #include <functional>
 #include <mutex>
 #include <nlohmann/json.hpp>
@@ -18,6 +19,12 @@ namespace multiseat::spaces {
     // Why no entry fits: runtime_not_published, driver_mismatch or graphics_unsupported.
     std::string code;
   };
+  /// A plain dotted version such as 615.71.09, the only form ever repeated to a reader.
+  [[nodiscard]] bool nvidia_driver_version(std::string_view value);
+  /// The loaded NVIDIA kernel module's version: nullopt when none is loaded, and
+  /// an empty string when one is loaded but its version could not be read.
+  [[nodiscard]] std::optional<std::string> loaded_nvidia_driver(
+    const std::filesystem::path &module_version = "/sys/module/nvidia/version");
   // nvidia_driver is empty when no NVIDIA driver is loaded, and an empty
   // string when one is loaded but its version could not be read.
   [[nodiscard]] runtime_choice_t choose_runtime(const std::vector<runtime_t> &catalog,

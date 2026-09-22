@@ -220,9 +220,15 @@ for boost_library in (
     )
 for package in ("shaderc", "vulkan-headers"):
     require_package(shell_array(arch, "makedepends"), package, "Arch build dependencies")
+# libei is found at configure time and left out without a word when it is
+# missing, and gamescope_stream then has no mouse or keyboard. Every recipe
+# names it, and every package job asks the binary it built.
+require_package(shell_array(arch, "depends"), "libei", "Arch runtime dependencies")
+steamos = read("packaging/linux/SteamOS/PKGBUILD")
+require_package(shell_array(steamos, "depends"), "libei", "SteamOS runtime dependencies")
 
 fedora = read("packaging/linux/fedora/Polaris.spec")
-for package in ("glslc", "pipewire-devel", "vulkan-loader-devel"):
+for package in ("glslc", "libei-devel", "pipewire-devel", "vulkan-loader-devel"):
     if not re.search(rf"(?m)^BuildRequires:\s+{re.escape(package)}\s*$", fedora):
         raise AssertionError(f"Fedora build dependencies must explicitly include {package}")
 fedora_build_match = re.search(r"(?ms)^%build\n(?P<body>.*?)(?=^%check\n)", fedora)
@@ -683,7 +689,7 @@ arch_install = re.search(
 if not arch_install:
     raise AssertionError("missing Arch Install dependencies workflow step")
 arch_install_tokens = workflow_run_tokens(arch_install.group("body"))
-for package in ("shaderc", "vulkan-headers", "vulkan-icd-loader"):
+for package in ("libei", "shaderc", "vulkan-headers", "vulkan-icd-loader"):
     if package not in arch_install_tokens:
         raise AssertionError(f"Arch CI dependencies must explicitly install {package}")
 
@@ -768,5 +774,28 @@ for current_contract in (
 
 if release_job.count("      - arch-current-compatibility\n") != 1:
     raise AssertionError("release publication must wait for current Arch compatibility")
+
+libei_needed = "NEEDED.*\\[libei\\.so\\.1\\]"
+for job_name, job in (("Arch", arch_job), ("Ubuntu DEB", ubuntu_job), ("Fedora RPM", fedora_job)):
+    if job.count(libei_needed) != 1:
+        raise AssertionError(f"{job_name} CI must check that the packaged binary links libei")
+steamos_package_script = read("scripts/ci/build-steamos-package.sh")
+if steamos_package_script.count("NEEDED +libei[.]so[.]1") != 1:
+    raise AssertionError("SteamOS packaging must check that the packaged binary links libei")
+steamos_pacstrap = re.search(r"(?m)^pacstrap (?:.*\\\n)*.*$", read("scripts/ci/run-steamos-build.sh"))
+if not steamos_pacstrap or "libei" not in steamos_pacstrap.group(0).replace("\\\n", " ").split():
+    raise AssertionError("SteamOS build root must install libei")
+for apt_job, apt_job_name in (
+    (ubuntu_job, "Ubuntu DEB"),
+    (workflow_job(workflow, "cpp-sanitizer-tests"), "C++ sanitizer"),
+):
+    if len(re.findall(r"(?m)^ +lib[^\n]* libei-dev \\$", apt_job)) != 1:
+        raise AssertionError(f"{apt_job_name} CI must install libei-dev")
+packaging_cmake = read("cmake/packaging/linux.cmake")
+for cpack_dependency in ("libei1, \\\n", "libei >= 1.0, \\\n"):
+    if packaging_cmake.count(cpack_dependency) != 1:
+        raise AssertionError(f"CPack runtime dependencies must name {cpack_dependency.split(',')[0]}")
+if not re.search(r"(?m)^Requires:\s+libei >= 1\.0\s*$", fedora):
+    raise AssertionError("Fedora runtime dependencies must explicitly include libei")
 
 print("Release package dependency contracts look correct.")

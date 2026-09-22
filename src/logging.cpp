@@ -468,9 +468,15 @@ namespace logging {
       << "    --help                    | print help"sv << std::endl
       << "    --creds username password | set Web UI credentials; restart Polaris afterwards"sv << std::endl
 #ifdef __linux__
-      << "    --setup-host [--enable-kms] [--enable-headless-boot] | apply Linux udev/modules setup explicitly; optionally start at boot with no desktop login"sv << std::endl
+      << "    --setup-host [options]    | apply Linux host setup (udev rules, uinput/uhid); run it with sudo -H"sv << std::endl
+      << "      --enable-kms            | also grant this binary cap_sys_admin, which only capture = kms needs;"sv << std::endl
+      << "                              | every install or update removes it again, and it does not change the"sv << std::endl
+      << "                              | capture setting. Remove it with sudo setcap -r on the same binary"sv << std::endl
+      << "      --enable-headless-boot  | start Polaris at boot with no monitor or desktop login"sv << std::endl
+      << "      --disable-headless-boot | remove that boot start again"sv << std::endl
+      << "                              | polaris --setup-host --help describes every step"sv << std::endl
 #endif
-      << "    --version                 | print the version of sunshine"sv << std::endl
+      << "    --version                 | print the version of Polaris"sv << std::endl
       << std::endl
       << "    flags"sv << std::endl
       << "        -0 | Read PIN from stdin"sv << std::endl

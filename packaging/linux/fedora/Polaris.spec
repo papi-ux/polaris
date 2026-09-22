@@ -24,6 +24,7 @@ BuildRequires: libayatana-appindicator3-devel
 BuildRequires: libcap-devel
 BuildRequires: libcurl-devel
 BuildRequires: libdrm-devel
+BuildRequires: libei-devel
 BuildRequires: libevdev-devel
 BuildRequires: libgudev
 BuildRequires: libnotify-devel
@@ -106,6 +107,7 @@ Requires: libayatana-appindicator3 >= 0.5.3
 Requires: libcap >= 2.22
 Requires: libcurl >= 7.0
 Requires: libdrm > 2.4.97
+Requires: libei >= 1.0
 Requires: libevdev >= 1.5.6
 Requires: libopusenc >= 0.2.1
 Requires: libva >= 2.14.0

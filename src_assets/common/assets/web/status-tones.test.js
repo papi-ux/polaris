@@ -26,6 +26,14 @@ describe('status tones', () => {
     })
   })
 
+  it('maps info to a quiet tone, so a note does not read as a problem', () => {
+    expect(statusTone('info')).toEqual({
+      card: 'border-ice/20',
+      badge: 'border border-ice/30 bg-ice/10 text-ice',
+      label: 'Note',
+    })
+  })
+
   it('falls back to the warning tone for unknown or missing statuses', () => {
     // Port probes can grade as 'hint' and future grades must stay visible,
     // matching the historical else-branch of the view-local helpers.

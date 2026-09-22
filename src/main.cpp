@@ -43,6 +43,7 @@
   #include "platform/linux/multiseat_moonlight_runtime.h"
   #include "platform/linux/multiseat_profile_catalog.h"
   #include "platform/linux/spaces_runtime.h"
+  #include "platform/linux/spaces_runtime_move.h"
   #include "platform/linux/spaces_setup_service.h"
   #include "platform/linux/spaces_activation.h"
   #include "platform/linux/spaces_host_admin.h"
@@ -570,6 +571,8 @@ int main(int argc, char *argv[]) {
       return state == "downloading" || state == "preparing" || state == "configuring";
     },
     .spaces_active = [] {
+      // A Space moving to another runtime is downloading it or changing the catalog.
+      if (const auto mover = multiseat::spaces::installed_move_service(); mover && mover->active()) return true;
       const auto service = multiseat::installed_profile_service();
       if (!service) return false;
       const auto admin = service->admin_snapshot();
@@ -593,16 +596,42 @@ int main(int argc, char *argv[]) {
       multiseat::uninstall_profile_launch_service(profile_service);
     }
   });
+  // Declared after the profile service so it stops first: a move hands its catalog change to it.
+  std::shared_ptr<multiseat::spaces::move_service_t> runtime_move;
+  auto runtime_move_guard = util::fail_guard([&] {
+    if (runtime_move) {
+      runtime_move->shutdown();
+      multiseat::spaces::uninstall_move_service(runtime_move);
+    }
+  });
   if (config::multiseat.enabled) {
     const auto managed_paths = multiseat::spaces::activation_paths(platf::appdata(), config::sunshine.config_file);
     const bool managed = config::multiseat.config_file == managed_paths.controller;
-    const bool ipc_ready = !managed || (multiseat::spaces::managed_graphics_current(managed_paths) &&
-      multiseat::spaces::prepare_managed_ipc(managed_paths));
-    const auto options = ipc_ready ? multiseat::load_controller_options(config::multiseat.config_file) : std::nullopt;
-    if (!options || config::input.multiseat_moonlight_input) {
-      BOOST_LOG(error) << "Multiseat configuration is invalid or conflicts with the separate input owner"sv;
-      if (!managed) return 1;
+    std::optional<multiseat::production_controller_options_t> options;
+    if (managed) {
+      // Guided setup's controller: its GPU is found again by PCI address, since DRM numbers move across boots.
+      multiseat::container::local_host_t host;
+      auto loaded = multiseat::spaces::load_managed_controller(managed_paths, host);
+      for (const auto &[saved, current] : loaded.moved) {
+        BOOST_LOG(info) << "Spaces graphics node "sv << saved.string() << " is "sv << current.string()
+                        << " after this boot; using it for this run"sv;
+      }
+      if (!loaded.options) {
+        BOOST_LOG(error) << "Spaces are off for this run: "sv << loaded.problem;
+      } else if (!multiseat::spaces::prepare_managed_ipc(managed_paths)) {
+        BOOST_LOG(error) << "Spaces are off for this run: their private directory "sv << managed_paths.ipc.string()
+                         << " could not be prepared"sv;
+      } else {
+        options = std::move(loaded.options);
+      }
+    } else {
+      options = multiseat::load_controller_options(config::multiseat.config_file);
+      if (!options) BOOST_LOG(error) << "Multiseat configuration "sv << config::multiseat.config_file << " is invalid"sv;
     }
+    if (config::input.multiseat_moonlight_input) {
+      BOOST_LOG(error) << "Multiseat cannot start while multiseat_moonlight_input, the separate input owner, is on"sv;
+    }
+    if ((!options || config::input.multiseat_moonlight_input) && !managed) return 1;
     if (options && !config::input.multiseat_moonlight_input) {
       auto created = multiseat::create_production_controller_runtime(*options);
       if (created.status == multiseat::controller_runtime_create_status_e::ready_enabled && created.runtime) {
@@ -621,6 +650,8 @@ int main(int argc, char *argv[]) {
             }
           });
         if (!multiseat::install_profile_launch_service(profile_service)) return 1;
+        runtime_move = multiseat::spaces::make_move_service();
+        if (!multiseat::spaces::install_move_service(runtime_move)) return 1;
         BOOST_LOG(info) << "Multiseat profile controller started"sv;
       } else if (created.status != multiseat::controller_runtime_create_status_e::ready_disabled) {
         BOOST_LOG(error) << "Multiseat controller could not establish its configured authority"sv;

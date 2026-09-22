@@ -23,7 +23,11 @@ namespace platf::mouse {
     if (raw->wayland_input.move(deltaX, deltaY)) {
       return;
     }
-    if (raw->wayland_input.should_block_host_fallback()) {
+    if (raw->ei_input.move(deltaX, deltaY)) {
+      return;
+    }
+    if (raw->wayland_input.should_block_host_fallback() ||
+        raw->ei_input.should_block_host_fallback()) {
       return;
     }
 
@@ -37,7 +41,11 @@ namespace platf::mouse {
     if (raw->wayland_input.move_abs(touch_port, x, y)) {
       return;
     }
-    if (raw->wayland_input.should_block_host_fallback()) {
+    if (raw->ei_input.move_abs(touch_port, x, y)) {
+      return;
+    }
+    if (raw->wayland_input.should_block_host_fallback() ||
+        raw->ei_input.should_block_host_fallback()) {
       return;
     }
 
@@ -51,7 +59,11 @@ namespace platf::mouse {
     if (raw->wayland_input.button(button, release)) {
       return;
     }
-    if (raw->wayland_input.should_block_host_fallback()) {
+    if (raw->ei_input.button(button, release)) {
+      return;
+    }
+    if (raw->wayland_input.should_block_host_fallback() ||
+        raw->ei_input.should_block_host_fallback()) {
       return;
     }
 
@@ -90,7 +102,11 @@ namespace platf::mouse {
     if (raw->wayland_input.scroll(high_res_distance)) {
       return;
     }
-    if (raw->wayland_input.should_block_host_fallback()) {
+    if (raw->ei_input.scroll(high_res_distance)) {
+      return;
+    }
+    if (raw->wayland_input.should_block_host_fallback() ||
+        raw->ei_input.should_block_host_fallback()) {
       return;
     }
 
@@ -104,7 +120,11 @@ namespace platf::mouse {
     if (raw->wayland_input.hscroll(high_res_distance)) {
       return;
     }
-    if (raw->wayland_input.should_block_host_fallback()) {
+    if (raw->ei_input.hscroll(high_res_distance)) {
+      return;
+    }
+    if (raw->wayland_input.should_block_host_fallback() ||
+        raw->ei_input.should_block_host_fallback()) {
       return;
     }
 

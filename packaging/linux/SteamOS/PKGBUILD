@@ -32,6 +32,7 @@ depends=(
   'libayatana-appindicator'
   'libcap'
   'libdrm'
+  'libei'
   'libevdev'
   'libmfx'
   'libnotify'

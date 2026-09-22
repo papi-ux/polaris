@@ -132,7 +132,15 @@ namespace client_profiles {
       nlohmann::json entry;
       entry["output_name"] = profile.output_name;
       entry["color_range"] = profile.color_range.has_value() ? profile.color_range.value() : 0;
-      entry["hdr"] = profile.hdr.has_value() ? profile.hdr.value() : false;
+      // Unset means "no override, follow what the client asks for". Sending
+      // false instead would be read back as an explicit force-off the next
+      // time the profile was saved, so the state could never survive a round
+      // trip through the UI.
+      if (profile.hdr.has_value()) {
+        entry["hdr"] = profile.hdr.value();
+      } else {
+        entry["hdr"] = nullptr;
+      }
       entry["mac_address"] = profile.mac_address;
       root[name] = entry;
     }

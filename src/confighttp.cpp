@@ -96,6 +96,7 @@
 #include "platform/linux/spaces_setup.h"
 #include "platform/linux/spaces_setup_service.h"
   #include "platform/linux/spaces_host_admin.h"
+  #include "platform/linux/spaces_runtime_move.h"
   #include <pwd.h>
   #include <sys/stat.h>
   #include <unistd.h>
@@ -4670,12 +4671,60 @@ namespace confighttp {
         output["capacity"] = {{"concurrent_limit", state.capacity->max_seats}, {"concurrent_active", state.capacity->active_seats}};
       for (const auto &activity : state.activity)
         output["activity"].push_back({{"profile_id", activity.profile}, {"client_id", activity.client}, {"state", activity.state}});
-      for (const auto &profile : state.profiles)
-        output["profiles"].push_back({{"id", profile.id}, {"name", profile.name}, {"clients", profile.clients},
-          {"steam", profile.steam}, {"archived", profile.archived}, {"access_clients", profile.access_clients}});
+      // What each Space's runtime was built for against the NVIDIA driver loaded now, and the
+      // runtime a mismatched Space can move to. Docker is asked only when a driver is loaded.
+      static const std::vector<multiseat::spaces::runtime_t> unpublished;
+      const auto &catalog = multiseat::spaces::trusted_runtimes();
+      multiseat::container::local_host_t host;
+      const auto runtimes = multiseat::spaces::describe_space_runtimes(host, state.profiles, catalog ? *catalog : unpublished,
+        multiseat::spaces::loaded_nvidia_driver(), &multiseat::spaces::image_runtime_cache(),
+        &multiseat::spaces::runtime_inspection_cache());
+      for (const auto &profile : state.profiles) {
+        nlohmann::json entry {{"id", profile.id}, {"name", profile.name}, {"clients", profile.clients},
+          {"steam", profile.steam}, {"archived", profile.archived}, {"access_clients", profile.access_clients}};
+        if (runtimes.contains(profile.id)) entry.update(runtimes.at(profile.id));
+        output["profiles"].push_back(std::move(entry));
+      }
+      const auto mover = multiseat::spaces::installed_move_service();
+      output["runtime_move_available"] = state.runtime_move_available && mover != nullptr;
+      output["runtime_move_job"] = mover ? mover->snapshot() : nlohmann::json(nullptr);
     }
 #endif
     send_response(response, output);
+  }
+
+  /**
+   * @brief Move one Space to the gaming runtime for the NVIDIA driver this PC runs.
+   *
+   * @code{.json}
+   * {"request_id": "<uuid>", "profile_id": "<space id>", "runtime_id": "<catalog runtime id>"}
+   * @endcode
+   * 202 while the runtime downloads or the Space moves, 200 when it already uses that runtime,
+   * otherwise a refusal with code, message and action. The job reads back on /api/multiseat/profiles
+   * as runtime_move_job.
+   */
+  void moveMultiseatProfileRuntime(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
+#ifdef __linux__
+    const auto mover = multiseat::spaces::installed_move_service();
+    if (!mover || !multiseat::installed_profile_service()) { bad_request(response, request, "Spaces are not configured"); return; }
+    std::array<char, 4097> bytes;
+    request->content.read(bytes.data(), bytes.size());
+    const auto count = request->content.gcount();
+    if (count > 4096) { bad_request(response, request, "Move request is too large"); return; }
+    const auto move = multiseat::spaces::decode_move_request({bytes.data(), static_cast<std::size_t>(count)});
+    if (!move) { bad_request(response, request, "Invalid Space move request"); return; }
+    const auto result = mover->submit(*move);
+    nlohmann::json output {{"status", result.status == 200 || result.status == 202}, {"message", result.message},
+      {"profile_id", move->profile_id}, {"job", mover->snapshot()}};
+    if (!result.code.empty()) output["code"] = result.code;
+    if (!result.action.empty()) output["action"] = result.action;
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
+    response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);
+#else
+    not_found(response, request);
+#endif
   }
 
   void createMultiseatProfile(resp_https_t response, req_https_t request) {
@@ -5230,7 +5279,10 @@ namespace confighttp {
       client_profiles::client_profile_t profile;
       profile.output_name = body.value("output_name", "");
       if (body.contains("color_range")) profile.color_range = body["color_range"].get<int>();
-      if (body.contains("hdr")) profile.hdr = body["hdr"].get<bool>();
+      // A null clears the override; get<bool>() would throw on it.
+      if (body.contains("hdr") && !body["hdr"].is_null()) {
+        profile.hdr = body["hdr"].get<bool>();
+      }
       profile.mac_address = body.value("mac_address", "");
 
       client_profiles::save_client_profile(name, profile);
@@ -7815,6 +7867,11 @@ namespace confighttp {
     output_tree["backend_detected"] = backend_detected;
     output_tree["configuration_ready"] = available;
     output_tree["unavailable_reason"] = available ? "" : virtual_display::unavailable_reason();
+    // On Plasma, why the screen is not Polaris's own KWin one: a game opens on the
+    // primary monitor with any other backend there.
+    const auto notes = virtual_display::doctor_notes();
+    output_tree["kwin_reason"] =
+      notes.plasma && cached_backend != virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT ? notes.kwin_reason : "";
     output_tree["configured_adapter"] = config::video.adapter_name;
     output_tree["policy_mode"] = display_policy.selection;
     output_tree["policy_label"] = display_policy.label;
@@ -9385,6 +9442,7 @@ namespace confighttp {
     server.resource["^/api/multiseat/profiles$"]["GET"] = getMultiseatProfiles;
     server.resource["^/api/multiseat/profiles$"]["POST"] = withCsrf(createMultiseatProfile);
     server.resource["^/api/multiseat/profiles/manage$"]["POST"] = withCsrf(editMultiseatProfile);
+    server.resource["^/api/multiseat/profiles/runtime$"]["POST"] = withCsrf(moveMultiseatProfileRuntime);
     server.resource["^/api/multiseat/assign$"]["POST"] = withCsrf(setMultiseatAssignment);
     server.resource["^/api/multiseat/access$"]["POST"] = withCsrf(setMultiseatAccess);
     server.resource["^/api/clients/profiles/update$"]["POST"] = withCsrf(updateClientProfile);

@@ -713,9 +713,13 @@
                         placeholder="AA:BB:CC:DD:EE:FF"
                       />
                     </div>
-                    <div class="flex items-center gap-2 pt-5">
-                      <input v-model="client.editProfile.hdr" type="checkbox" class="h-4 w-4 rounded border-storm bg-void text-ice accent-ice" />
-                      <label class="text-sm text-silver">{{ $t('pin.enable_hdr') }}</label>
+                    <div>
+                      <label class="mb-1 block text-xs font-medium uppercase tracking-eyebrow text-storm">{{ $t('pin.enable_hdr') }}</label>
+                      <select v-model="client.editProfile.hdr" class="settings-input text-sm">
+                        <option :value="null">{{ $t('pin.hdr_auto') }}</option>
+                        <option :value="true">{{ $t('pin.hdr_on') }}</option>
+                        <option :value="false">{{ $t('pin.hdr_off') }}</option>
+                      </select>
                     </div>
                   </div>
                 </section>
@@ -1620,7 +1624,7 @@ function editClient(client) {
   client.editProfile = {
     output_name: profile.output_name || '',
     color_range: profile.color_range || 0,
-    hdr: profile.hdr || false,
+    hdr: profile.hdr ?? null,
     mac_address: profile.mac_address || ''
   }
   currentEditingClient = client

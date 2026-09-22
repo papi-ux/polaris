@@ -57,7 +57,7 @@ PACKAGE_NAME="$(sed -n 's/^pkgname = //p' "$RECEIPT_ROOT/.PKGINFO")"
 PACKAGE_VERSION="$(sed -n 's/^pkgver = //p' "$RECEIPT_ROOT/.PKGINFO")"
 PACKAGE_ARCH="$(sed -n 's/^arch = //p' "$RECEIPT_ROOT/.PKGINFO")"
 PACKAGE_IDENTITY="$PACKAGE_NAME|$PACKAGE_VERSION|$PACKAGE_ARCH"
-if [ "$PACKAGE_IDENTITY" != 'polaris|1.4.10-1|x86_64' ]; then
+if [ "$PACKAGE_IDENTITY" != 'polaris|1.4.11-1|x86_64' ]; then
   printf 'unexpected SteamOS package identity: %s\n' "$PACKAGE_IDENTITY" >&2
   exit 1
 fi
@@ -110,6 +110,12 @@ if grep -q 'not found' "$OUTPUT_ROOT/steamos3.8-binary-needed.txt"; then
 fi
 readelf --version-info "$BINARY_PATH" > "$OUTPUT_ROOT/steamos3.8-binary-version-info.txt"
 objdump -p "$BINARY_PATH" >> "$OUTPUT_ROOT/steamos3.8-binary-needed.txt"
+# SteamOS is where gamescope_stream lives, and libei is found at configure time
+# and quietly left out when it is missing. Ask the binary.
+if ! grep -Eq 'NEEDED +libei[.]so[.]1' "$OUTPUT_ROOT/steamos3.8-binary-needed.txt"; then
+  printf '%s\n' 'packaged Polaris binary was built without libei; gamescope_stream would have no mouse or keyboard' >&2
+  exit 1
+fi
 "$SOURCE_ROOT/scripts/check-packaged-binary-paths.sh" \
   "$BINARY_PATH" "$OUTPUT_ROOT/steamos3.8-package-strings.txt"
 # The Valve toolchain does not emit CET SHSTK notes for every C++/Go object,

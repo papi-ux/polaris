@@ -107,6 +107,11 @@ export default defineConfig({
         }),
     ],
     root: resolve(assetsSrcPath),
+    define: {
+        // The release this console was built with. A host process older than its own
+        // console is running a binary the package no longer installs; see update-center.js.
+        __POLARIS_CONSOLE_VERSION__: JSON.stringify(process.env.POLARIS_CONSOLE_VERSION || ''),
+    },
     build: {
         target: 'es2020',
         outDir: resolve(assetsDstPath),

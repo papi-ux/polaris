@@ -2685,6 +2685,11 @@ namespace stream {
       return session.watch_only;
     }
 
+    bool has_controllers(const session_t &session) {
+      // A watcher sees the stream and sends nothing, so it holds no pad of its own.
+      return !session.watch_only && !!(session.permission & crypto::PERM::input_controller);
+    }
+
     bool update_device_info(session_t& session, const std::string& name, const crypto::PERM& newPerm) {
 #ifdef __linux__
       const auto previous_inputs = static_cast<std::uint32_t>(
@@ -3044,14 +3049,14 @@ namespace stream {
 #endif
         session.multiseat_input_selection_closed = true;
         if (!session.multiseat_input) {
-          session.input = input::alloc(session.mail);
+          session.input = input::alloc(session.mail, has_controllers(session));
         }
       }
 #else
 #ifdef POLARIS_TESTS
       if (abort_host_start_for_tests()) return -1;
 #endif
-      session.input = input::alloc(session.mail);
+      session.input = input::alloc(session.mail, has_controllers(session));
 #endif
 
       session.broadcast_ref = broadcast.ref();

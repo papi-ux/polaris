@@ -226,7 +226,8 @@ namespace multiseat {
         entry.storage.steam_library_enabled = !entry.archived && entry.storage.runtime_profile == runtime_profile_e::steam;
         catalog_summary.push_back({entry.storage.profile_key, entry.name, entry.client_keys,
           entry.storage.runtime_profile == runtime_profile_e::steam &&
-            container::supported_streaming_workload(entry.storage.runtime_profile, entry.workload), entry.archived, entry.access_clients, entry.storage.steam_library_enabled});
+            container::supported_streaming_workload(entry.storage.runtime_profile, entry.workload), entry.archived, entry.access_clients, entry.storage.steam_library_enabled,
+          entry.storage.image_reference});
         if (std::find(options.container.workloads.begin(), options.container.workloads.end(),
               entry.workload) == options.container.workloads.end()) {
           options.container.workloads.push_back(entry.workload);

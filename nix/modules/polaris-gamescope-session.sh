@@ -1024,14 +1024,27 @@ case "${1:-}" in
       if [ -n "${POLARIS_GAMESCOPE_PREFER_VK:-}" ]; then
         prefer_vk=(--prefer-vk-device "$POLARIS_GAMESCOPE_PREFER_VK")
       fi
+      # Moonlight draws no pointer of its own, so without this the stream has a
+      # working but invisible cursor: gamescope keeps the cursor out of the PipeWire
+      # capture by default, on the grounds that a consumer drawing its own would end
+      # up with two. Set POLARIS_GAMESCOPE_COMPOSITE_CURSOR=0 for such a consumer.
+      cursor_flags=()
+      if [ "${POLARIS_GAMESCOPE_COMPOSITE_CURSOR:-1}" = 1 ]; then
+        cursor_flags=(--pipewire-composite-cursor)
+      fi
+
       hdr_flags=()
       if [ "$want_hdr" = 1 ]; then
         # Nested: --hdr-enabled only (no --hdr-debug-force-*).
         # WSI can still create HDR10 swapchains; PW spa 81 may need force later.
+        # The idle instance reads these from the environment; the nested one
+        # renders what the client actually sees, so hardcoding them here meant
+        # services.polaris.sdrContentNits was plumbed all the way through and
+        # then ignored by the session that matters.
         hdr_flags=(
           --hdr-enabled
-          --sdr-gamut-wideness 0.000000
-          --hdr-sdr-content-nits 203
+          --sdr-gamut-wideness "${POLARIS_SDR_GAMUT_WIDENESS:-0.000000}"
+          --hdr-sdr-content-nits "${POLARIS_SDR_CONTENT_NITS:-203}"
         )
         echo "polaris-gamescope-session: nested HDR (enabled, no debug-force-*)" >&2
       fi
@@ -1086,6 +1099,7 @@ case "${1:-}" in
           --xwayland-count 2 \
           "${prefer_vk[@]}" \
           "${hdr_flags[@]}" \
+          "${cursor_flags[@]}" \
           -W "$gs_width" -H "$gs_height" -r "$gs_refresh" \
           -w "$gs_width" -h "$gs_height" \
           -- setpriv --pdeathsig TERM -- \

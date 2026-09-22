@@ -665,7 +665,7 @@ contributing = strip_html_comments(
 readme = strip_html_comments(Path("README.md").read_text(encoding="utf-8"))
 changelog = strip_html_comments(Path("docs/changelog.md").read_text(encoding="utf-8"))
 release_notes = strip_html_comments(
-    Path("docs/release-notes/v1.4.10.md").read_text(encoding="utf-8")
+    Path("docs/release-notes/v1.4.11.md").read_text(encoding="utf-8")
 )
 
 
@@ -1296,22 +1296,22 @@ for dependency in ("vulkan-headers", "vulkan-icd-loader"):
 
 current_release = markdown_section(
     changelog,
+    "## v1.4.11 - 2026-09-19",
     "## v1.4.10 - 2026-09-18",
-    "## v1.4.9 - 2026-09-16",
 )
 current_release_prose = rendered_markdown(current_release)
 required_release_facts = (
-    "A Space can be created on a released Polaris",
-    "gets a screen of its own from KWin",
-    "before it starts any thread",
-    "A paired client can put the host to sleep",
-    "Host sleep reports whether the host actually slept",
-    "Before you turn it on",
-    "no longer carry network addresses",
-    "Find Cover in the app editor works again",
-    "Completion estimates resolve again",
-    "shows on the Apps and Dashboard pages at once",
-    "can be installed from the ROM folders panel",
+    "uses KWin's own screen by default, even with EVDI loaded",
+    "gives the game the focus on the stream screen",
+    "Touch and pen from the client land on the KWin stream screen",
+    "Your monitors stay where they are",
+    "The Doctor names three Host Virtual Display problems",
+    "Spaces work with NVIDIA driver 615.71.09",
+    "Spaces survive a reboot that renumbers the graphics devices",
+    "A desktop stream uses the capture backend Polaris found",
+    "capture_backend_unavailable",
+    "no longer adds a controller to the host",
+    "The Steam Controller (2026) gets an emulated DualSense",
     "Polaris-arch-x86_64.pkg.tar.zst",
     "Polaris-fedora44-x86_64.rpm",
     "Polaris-steamos3.8-x86_64.pkg.tar.zst",
@@ -1319,7 +1319,7 @@ required_release_facts = (
 )
 for fact in required_release_facts:
     if fact not in current_release_prose:
-        print(f"v1.4.10 changelog is missing final release fact: {fact}", file=sys.stderr)
+        print(f"v1.4.11 changelog is missing final release fact: {fact}", file=sys.stderr)
         sys.exit(1)
 
 asset_phrase = (
@@ -1328,7 +1328,7 @@ asset_phrase = (
     "`Polaris-steamos3.8-x86_64.pkg.tar.zst`, and "
     "`Polaris-ubuntu24.04-x86_64.deb`"
 )
-for label, section in (("v1.4.10 changelog", current_release_prose),):
+for label, section in (("v1.4.11 changelog", current_release_prose),):
     if section.count(asset_phrase) != 1:
         print(f"{label} must contain the exact visible four-asset phrase", file=sys.stderr)
         sys.exit(1)
@@ -1348,7 +1348,7 @@ building_packaging_prose = rendered_markdown(building_packaging)
 asset_pattern = re.compile(r"Polaris-[A-Za-z0-9][A-Za-z0-9._+-]*")
 for label, section, expected_section_assets in (
     ("docs/building.md Packaging", building_packaging_prose, expected_assets),
-    ("v1.4.10 changelog", current_release_prose, expected_changelog_assets),
+    ("v1.4.11 changelog", current_release_prose, expected_changelog_assets),
 ):
     actual_assets = Counter(asset_pattern.findall(section))
     if actual_assets != expected_section_assets:
@@ -1362,31 +1362,28 @@ for label, section, expected_section_assets in (
 # Release notes are the short, user-facing list; the changelog carries the
 # detail. Pin phrases a player would read, never internal identifiers.
 release_notes_facts = (
-    "Spaces open up, the couch can put your host to sleep",
-    "This is the first Polaris that can create a Space",
-    "Nova 1.4.10 comes out alongside it",
-    "Create a Space on a released Polaris for the first time",
-    "nobody has run it on that hardware yet",
-    "Allow Clients To Sleep This Host",
-    "Host Virtual Display on KDE Plasma 6 gets a brand new screen for each stream",
-    "Find Cover works again",
-    "Completion estimates are back",
-    "no longer include network addresses",
+    "Host Virtual Display on KDE Plasma gets the game, the controller and the touch it was missing",
+    "Polaris 1.4.11 is matched with Nova 1.4.11",
+    "Plasma uses KWin's own screen by default, even with EVDI loaded",
+    "the controller works from the first press",
+    "Your monitors stay where they are when a stream starts",
+    "NVIDIA driver 615.71.09 gets its own Spaces runtime",
+    "Mirror Desktop streams again on KDE and GNOME",
+    "no longer adds a controller of its own",
+    "The Steam Controller (2026) gets an emulated DualSense",
     "removes the KMS capture permission",
     "sudo -H polaris --setup-host --enable-kms",
-    "driver 610.57.04",
     "Bazzite",
     "rpm-ostree",
     "system extension stays withdrawn",
     "SteamOS",
-    "sudo -H polaris --setup-host --enable-kms",
-    "wget --output-document=./Polaris-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/download/v1.4.10/Polaris-fedora44-x86_64.rpm &&",
+    "wget --output-document=./Polaris-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/download/v1.4.11/Polaris-fedora44-x86_64.rpm &&",
     "sudo dnf install \"./Polaris-fedora44-x86_64.rpm\" &&",
-    "wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/download/v1.4.10/Polaris-arch-x86_64.pkg.tar.zst &&",
+    "wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/download/v1.4.11/Polaris-arch-x86_64.pkg.tar.zst &&",
     "sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst &&",
-    "wget --output-document=./Polaris-ubuntu24.04-x86_64.deb https://github.com/papi-ux/polaris/releases/download/v1.4.10/Polaris-ubuntu24.04-x86_64.deb &&",
+    "wget --output-document=./Polaris-ubuntu24.04-x86_64.deb https://github.com/papi-ux/polaris/releases/download/v1.4.11/Polaris-ubuntu24.04-x86_64.deb &&",
     "sudo apt install ./Polaris-ubuntu24.04-x86_64.deb &&",
-    "wget --output-document=./Polaris-steamos3.8-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/download/v1.4.10/Polaris-steamos3.8-x86_64.pkg.tar.zst &&",
+    "wget --output-document=./Polaris-steamos3.8-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/download/v1.4.11/Polaris-steamos3.8-x86_64.pkg.tar.zst &&",
     "trap 'sudo steamos-readonly enable' EXIT",
     "sudo pacman-key --init || exit $?",
     "sudo pacman-key --populate || exit $?",
@@ -1394,25 +1391,25 @@ release_notes_facts = (
 )
 for fact in release_notes_facts:
     if fact not in release_notes:
-        print(f"v1.4.10 release notes are missing release fact: {fact}", file=sys.stderr)
+        print(f"v1.4.11 release notes are missing release fact: {fact}", file=sys.stderr)
         sys.exit(1)
 release_asset_lines = [
     line for line in release_notes.splitlines() if line.startswith("**Assets:**")
 ]
 if len(release_asset_lines) != 1:
-    print("v1.4.10 release notes must contain exactly one Assets line", file=sys.stderr)
+    print("v1.4.11 release notes must contain exactly one Assets line", file=sys.stderr)
     sys.exit(1)
 release_note_assets = Counter(asset_pattern.findall(release_asset_lines[0]))
 if release_note_assets != expected_assets:
     print(
-        "v1.4.10 release-note Assets line must contain only the four supported packages; "
+        "v1.4.11 release-note Assets line must contain only the four supported packages; "
         f"expected={dict(expected_assets)}, actual={dict(release_note_assets)}",
         file=sys.stderr,
     )
     sys.exit(1)
 if release_notes.count(withdrawn_sysext_asset) != 0:
     print(
-        "v1.4.10 release notes must not name the withdrawn system extension file; that warning lives in v1.4.3",
+        "v1.4.11 release notes must not name the withdrawn system extension file; that warning lives in v1.4.3",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -1423,19 +1420,19 @@ for forbidden in (
     "AI Auto Quality Preference",
 ):
     if forbidden in current_release_prose or forbidden in release_notes:
-        print(f"v1.4.10 public release scope must exclude: {forbidden}", file=sys.stderr)
+        print(f"v1.4.11 public release scope must exclude: {forbidden}", file=sys.stderr)
         sys.exit(1)
 if release_notes.count("sudo -H polaris --setup-host &&") != 3:
-    print("v1.4.10 release notes must chain setup-host in all three mutable package commands", file=sys.stderr)
+    print("v1.4.11 release notes must chain setup-host in all three mutable package commands", file=sys.stderr)
     sys.exit(1)
 if release_notes.count("sudo -H polaris --setup-host || exit $?") != 1:
-    print("v1.4.10 release notes must chain setup-host in the SteamOS command", file=sys.stderr)
+    print("v1.4.11 release notes must chain setup-host in the SteamOS command", file=sys.stderr)
     sys.exit(1)
 if release_notes.count("systemctl --user restart polaris") != 3:
-    print("v1.4.10 release notes must restart Polaris in all three mutable package commands", file=sys.stderr)
+    print("v1.4.11 release notes must restart Polaris in all three mutable package commands", file=sys.stderr)
     sys.exit(1)
 if release_notes.count("systemctl --user enable --now polaris") != 1:
-    print("v1.4.10 release notes must start Polaris once after SteamOS read-only restoration", file=sys.stderr)
+    print("v1.4.11 release notes must start Polaris once after SteamOS read-only restoration", file=sys.stderr)
     sys.exit(1)
 
 release_workflow = Path(".github/workflows/build.yml").read_text(encoding="utf-8")

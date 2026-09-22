@@ -23,8 +23,10 @@ retry confirms the same home and preserves later device assignments. It never
 adopts an orphaned volume after an uncertain failure. Controller configuration,
 GPU selection and restart-based configuration are now a separate guided step;
 device assignment uses the existing authenticated controller API after restart.
-The shipped catalog carries the two Steam runtimes published on
-2026-09-18 from source revision d89ac2e0, one NVIDIA and one default. An
+The shipped catalog carries three Steam runtimes: the two published on
+2026-09-18 from source revision d89ac2e0, one NVIDIA for driver 610.57.04 and one
+default, and an NVIDIA runtime for driver 615.71.09 published on 2026-09-19 from
+source revision ae4760dc. An
 unknown runtime fails before any Docker command. Do not fill the catalog with a guessed digest,
 mutable tag, local image ID, or CI artifact download URL.
 
