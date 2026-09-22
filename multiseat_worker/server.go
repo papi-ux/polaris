@@ -43,6 +43,42 @@ type workerServer struct {
 	connections      map[*net.UnixConn]struct{}
 	attached         map[channel]*net.UnixConn
 	closing          bool
+	// completed closes when the workload finished by itself; nil without a
+	// managed runtime. mediaEnded closes once the controller has been told.
+	completed      <-chan struct{}
+	mediaEnded     chan struct{}
+	mediaEndedOnce sync.Once
+}
+
+// endOfStreamGrace bounds how long a finished worker waits to tell its
+// controller before it closes. The message is one empty frame on a local socket.
+const endOfStreamGrace = time.Second
+
+func (server *workerServer) workloadFinished() bool {
+	select {
+	case <-server.completed:
+		return true
+	default:
+		return false
+	}
+}
+
+// awaitMediaEnded waits for the media channel to carry the end of the stream.
+// With no media channel attached nobody is reading, and there is nothing to wait for.
+func (server *workerServer) awaitMediaEnded(grace time.Duration) {
+	server.connectionsMutex.Lock()
+	attached := server.attached[channelMedia] != nil
+	server.connectionsMutex.Unlock()
+	if !attached {
+		return
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	select {
+	case <-server.mediaEnded:
+	case <-server.context.Done():
+	case <-timer.C:
+	}
 }
 
 type connectionFrameWriter struct {
@@ -117,15 +153,39 @@ func (server *workerServer) pumpDataPlane(
 	connection *net.UnixConn,
 	writer *connectionFrameWriter,
 ) {
+	// Media stops being produced the moment the workload has finished, so the
+	// end of the stream is the last thing this channel carries.
+	produce := connectionContext
+	if writer.channel == channelMedia && server.completed != nil {
+		var release context.CancelFunc
+		produce, release = context.WithCancel(connectionContext)
+		defer release()
+		go func() {
+			select {
+			case <-server.completed:
+				release()
+			case <-produce.Done():
+			}
+		}()
+	}
 	for {
 		var output routedOutput
 		var err error
 		if writer.channel == channelControl {
 			output, err = server.dataPlane.NextFeedback(connectionContext)
 		} else {
-			output, err = server.dataPlane.NextMedia(connectionContext)
+			output, err = server.dataPlane.NextMedia(produce)
 		}
 		if err != nil {
+			if writer.channel == channelMedia && server.completed != nil && server.workloadFinished() &&
+				connectionContext.Err() == nil {
+				// The title ended by itself. Without this the controller sees only a
+				// socket that went away, which it can read no other way than as a fault.
+				if writer.send(messageEndOfStream, nil) == nil {
+					server.mediaEndedOnce.Do(func() { close(server.mediaEnded) })
+				}
+				return
+			}
 			if connectionContext.Err() == nil && server.context.Err() == nil {
 				server.failDataPlane(writer.channel.String())
 			}
@@ -602,6 +662,7 @@ func newWorkerServerWithDataPlane(
 		failures:    make(chan error, 1),
 		connections: make(map[*net.UnixConn]struct{}),
 		attached:    make(map[channel]*net.UnixConn),
+		mediaEnded:  make(chan struct{}),
 	}
 	server.control, server.controlID, err = listenPrivateUnix(
 		filepath.Join(paths.IPC, controlSocketName),
@@ -707,14 +768,21 @@ func runWorkerWithRuntimeAndDataPlane(
 		return err
 	}
 	defer server.close()
-	serverErrors := make(chan error, 2)
-	go server.acceptLoop(workerContext, server.control, channelControl, serverErrors)
-	go server.acceptLoop(workerContext, server.media, channelMedia, serverErrors)
 	var runtimeFailures <-chan error
 	if managedRuntime != nil {
 		runtimeFailures = managedRuntime.Failures()
+		server.completed = managedRuntime.Completed()
 	}
+	serverErrors := make(chan error, 2)
+	go server.acceptLoop(workerContext, server.control, channelControl, serverErrors)
+	go server.acceptLoop(workerContext, server.media, channelMedia, serverErrors)
 	select {
+	case <-server.completed:
+		// The title the seat was started for has ended by itself: the seat's work
+		// is done. The controller is told before the connections close, and the
+		// worker leaves with status 0 rather than reporting a runtime failure.
+		server.awaitMediaEnded(endOfStreamGrace)
+		return nil
 	case <-workerContext.Done():
 		select {
 		case err := <-server.failures:

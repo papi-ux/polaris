@@ -222,6 +222,9 @@ namespace multiseat_test {
     stall,
     media_contract,
     media_contract_variable_audio,
+    // The contract, a frame of each kind, then the worker says the stream is over:
+    // what a worker does when the title it was started for ends by itself.
+    media_contract_then_end,
   };
 
   inline media_config_t fake_media_config() {
@@ -442,7 +445,8 @@ namespace multiseat_test {
               ++output_identity.generation;
             }
             const bool has_contract = behavior_ == fake_behavior_e::media_contract ||
-                                      behavior_ == fake_behavior_e::media_contract_variable_audio;
+                                      behavior_ == fake_behavior_e::media_contract_variable_audio ||
+                                      behavior_ == fake_behavior_e::media_contract_then_end;
             if (has_contract) {
               std::this_thread::sleep_for(contract_delay_);
             }
@@ -495,6 +499,16 @@ namespace multiseat_test {
                                                .generation = output_identity.generation,
                                                .sequence = outgoing++,
                                                .payload = media_payload("longer audio", 2, false),
+                                             })) {
+              break;
+            }
+            if (behavior_ == fake_behavior_e::media_contract_then_end &&
+                !send_test_frame(connection, {
+                                               .channel = channel,
+                                               .message = message_e::end_of_stream,
+                                               .slot = output_identity.slot,
+                                               .generation = output_identity.generation,
+                                               .sequence = outgoing++,
                                              })) {
               break;
             }

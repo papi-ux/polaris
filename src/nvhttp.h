@@ -157,6 +157,8 @@ namespace nvhttp {
   profile_api_response_t profile_spaces_request(const crypto::p_named_cert_t &candidate,
     std::optional<std::string_view> selection = std::nullopt);
   std::optional<std::string> profile_artwork_target(const crypto::p_named_cert_t &candidate, std::string_view identity);
+  /** The bundled poster for the entry that opens a Space's launcher, for a client that may see that Space. */
+  std::optional<std::string> profile_launcher_poster(const crypto::p_named_cert_t &candidate, std::string_view identity);
   profile_api_response_t profile_artwork_resolve_request(const crypto::p_named_cert_t &candidate,
     std::string_view identity, const std::filesystem::path &appdata,
     const game_artwork::providers::transport_t &transport);
@@ -232,6 +234,14 @@ namespace nvhttp {
    */
   std::shared_ptr<rtsp_stream::launch_session_t>
   make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker = false);
+
+  /**
+   * @brief Bring the host's mode in line with whether it is in Steam Game Mode right now.
+   *
+   * nvhttp calls it wherever a client asks; the console and Browser Stream call it before they
+   * launch, because they reach proc::execute without passing through nvhttp.
+   */
+  void reconcile_game_mode_host();
 
   /**
    * @brief Setup the nvhttp server.
@@ -447,6 +457,15 @@ namespace nvhttp {
    * @examples_end
    */
   nlohmann::json get_all_clients();
+
+  /**
+   * @brief Whether get_all_clients() is the whole truth about who is paired.
+   *
+   * False for a run that refused its state file, found none, or was started with a fresh state:
+   * the list is then short for a reason that says nothing about the devices paired before, and
+   * nothing may be forgotten on the strength of it.
+   */
+  bool paired_clients_authoritative();
 
   /**
    * @brief Remove all paired clients.

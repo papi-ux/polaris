@@ -71,6 +71,11 @@ class ArtifactIntegrity(unittest.TestCase):
             (here / 'locks').mkdir(parents=True)
             (root / 'multiseat_worker').mkdir()
             (root / 'LICENSE').write_text('reviewed license\n')
+            # The worker's tests read the launcher target grammar the host's do,
+            # so the context carries that one file from outside its own trees.
+            grammar = root / 'tests/fixtures/launcher-targets.json'
+            grammar.parent.mkdir(parents=True)
+            grammar.write_text('[]\n')
             (root / '.gitignore').write_text('*sync-conflict*\nbuild/\n')
             original = 'package main\n'
             source = root / 'multiseat_worker/main.go'
@@ -104,6 +109,7 @@ class ArtifactIntegrity(unittest.TestCase):
                                  checksum + '  packages/pkg.deb\n')
                 self.assertFalse((context / 'multiseat_worker/extra.sync-conflict-local.go').exists())
                 self.assertEqual((context / 'multiseat_worker/main.go').read_text(), original)
+                self.assertEqual((context / 'tests/fixtures/launcher-targets.json').read_text(), '[]\n')
                 self.assertEqual(json.loads((context / 'containers/multiseat/locks/plugin.json').read_text())['sha256'], checksum)
                 (root / 'build/runtime-inputs/plugin.tar').write_bytes(b'changed cache')
                 self.assertEqual((context / 'build/runtime-inputs/plugin.tar').read_bytes(), b'locked')

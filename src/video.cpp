@@ -3206,18 +3206,23 @@ namespace video {
           sps = std::move(hevc.sps);
           vps = std::move(hevc.vps);
 
-          session.replacements->emplace_back(
-            std::string_view((char *) std::begin(vps.old), vps.old.size()),
-            std::string_view((char *) std::begin(vps._new), vps._new.size())
-          );
+          if (vps.old.size()) {
+            session.replacements->emplace_back(
+              std::string_view((char *) std::begin(vps.old), vps.old.size()),
+              std::string_view((char *) std::begin(vps._new), vps._new.size())
+            );
+          }
         }
 
         session.inject = 0;
 
-        session.replacements->emplace_back(
-          std::string_view((char *) std::begin(sps.old), sps.old.size()),
-          std::string_view((char *) std::begin(sps._new), sps._new.size())
-        );
+        // A parameter set that could not be read has nothing to replace.
+        if (sps.old.size()) {
+          session.replacements->emplace_back(
+            std::string_view((char *) std::begin(sps.old), sps.old.size()),
+            std::string_view((char *) std::begin(sps._new), sps._new.size())
+          );
+        }
       }
 
       if (av_packet && av_packet->pts == frame_nr) {
@@ -3572,7 +3577,8 @@ namespace video {
 
           continue;
         } else {
-          BOOST_LOG(error)
+          // A probe asks every format, and a GPU without one simply answers no.
+          BOOST_LOG(encoder_probe_in_progress ? info : error)
             << "Could not open codec ["sv
             << video_format.name << "]: "sv
             << av_make_error_string(err_str, AV_ERROR_MAX_STRING_SIZE, status);
@@ -4162,18 +4168,30 @@ namespace video {
   }
 
   input::touch_port_t make_port(platf::display_t *display, const config_t &config) {
-    return input::make_touch_port(
-      platf::touch_port_t {
-        display->offset_x,
-        display->offset_y,
-        display->width,
-        display->height,
-      },
-      display->env_width,
-      display->env_height,
-      config.width,
-      config.height
-    );
+    auto port = display->scaled_screen_width > 0 && display->scaled_screen_height > 0 ?
+                  // The screen is fitted into the frame, and the frame into the stream.
+                  input::make_touch_port_in_frame(
+                    display->scaled_screen_width,
+                    display->scaled_screen_height,
+                    display->width,
+                    display->height,
+                    config.width,
+                    config.height
+                  ) :
+                  input::make_touch_port(
+                    platf::touch_port_t {
+                      display->offset_x,
+                      display->offset_y,
+                      display->width,
+                      display->height,
+                    },
+                    display->env_width,
+                    display->env_height,
+                    config.width,
+                    config.height
+                  );
+    port.compositor_touch_turn = display->compositor_touch_turn;
+    return port;
   }
 
   std::unique_ptr<platf::encode_device_t> make_encode_device(platf::display_t &disp, const encoder_t &encoder, const config_t &config) {
@@ -4905,6 +4923,8 @@ namespace video {
     auto probe_state_guard = util::fail_guard([previous_probe_state]() {
       encoder_probe_in_progress = previous_probe_state;
     });
+    // The probe asks for what the GPU may not have; FFmpeg's refusals are answers here, not faults.
+    const logging::ffmpeg_errors_expected_t probe_refusals_expected;
 #ifdef POLARIS_TESTS
     if (probe_test_hooks) return probe_test_hooks->validate(encoder, expect_failure);
 #endif

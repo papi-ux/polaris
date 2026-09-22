@@ -15,6 +15,7 @@
  * inside cage instead of on a separate physical display.
  */
 
+#include "game_mode_host.h"
 #include "process_environment.h"
 
 #include "session_manager.h"
@@ -479,14 +480,21 @@ namespace session_manager {
     const bool gamescope_stream_host =
       config::video.linux_display.stream_mode == "gamescope_stream" ||
       (gamescope_wl && gamescope_wl[0] != '\0');
-    const bool wayland_optional = private_headless_runtime || gamescope_stream_host;
+    // A host in Steam Game Mode streams the session's screen through gamescope's own PipeWire node
+    // and libei socket. There is no desktop to name, and the held mode no longer says headless.
+    const bool game_mode_screen = !private_headless_runtime && !gamescope_stream_host &&
+                                  platf::game_mode_host::session_live();
+    const bool wayland_optional = private_headless_runtime || gamescope_stream_host || game_mode_screen;
 
     const char *vars[] = {"WAYLAND_DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"};
     for (auto var : vars) {
       const char *val = getenv(var);
       if (!val || val[0] == '\0') {
         if (std::string_view {var} == "WAYLAND_DISPLAY"sv && wayland_optional) {
-          if (gamescope_stream_host) {
+          if (game_mode_screen) {
+            BOOST_LOG(info) << "session_manager: WAYLAND_DISPLAY is not set, as expected while Steam Game Mode runs; "
+                            << "Polaris streams the Game Mode screen through gamescope"sv;
+          } else if (gamescope_stream_host) {
             BOOST_LOG(info) << "session_manager: WAYLAND_DISPLAY unset (expected for gamescope_stream); "
                             << "using GAMESCOPE_WAYLAND_DISPLAY="sv
                             << (gamescope_wl && gamescope_wl[0] ? gamescope_wl : "gamescope-0") << ""sv;

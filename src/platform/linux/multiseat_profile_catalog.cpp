@@ -56,6 +56,30 @@ namespace multiseat::profiles {
       return request_uuid(request_id);
     }
 
+    /**
+     * A launcher family by name, without throwing: a family this build does not
+     * carry reads as unknown and refuses, rather than aborting a transaction.
+     */
+    runtime_profile_e launcher_family(std::string_view value) {
+      if (value == "steam") return runtime_profile_e::steam;
+      if (value == "heroic") return runtime_profile_e::heroic;
+      if (value == "lutris") return runtime_profile_e::lutris;
+      return runtime_profile_e::unknown;
+    }
+
+    /**
+     * The workload a Space opens when it is made: its launcher, never a title.
+     * The target comes from the one grammar that defines a family's sentinel.
+     */
+    workload_plan_t launcher_workload(runtime_profile_e profile) {
+      switch (profile) {
+        case runtime_profile_e::steam: return {workload_kind_e::steam, std::string(container::launcher_sentinel(profile))};
+        case runtime_profile_e::heroic: return {workload_kind_e::heroic, std::string(container::launcher_sentinel(profile))};
+        case runtime_profile_e::lutris: return {workload_kind_e::lutris, std::string(container::launcher_sentinel(profile))};
+        default: return {};
+      }
+    }
+
     std::string family(runtime_profile_e value) {
       switch (value) {
         case runtime_profile_e::gamescope: return "gamescope";
@@ -213,10 +237,14 @@ namespace multiseat::profiles {
         "--mount=type=volume,src=" + volume + ",dst=/profile,volume-nocopy",
         "--entrypoint=/usr/bin/python3", entry.storage.image_reference, "-I", "-c", initialize_code}, false);
       inspect_volume();
-      if (entry.storage.runtime_profile == runtime_profile_e::steam) {
+      // Every launcher signs in, downloads and runs games, so every one of
+      // them gets the private bridge a Space is launched onto. Making it only
+      // for Steam left any other Space with nothing to attach to, and its
+      // worker was then refused at launch with no container ever created.
+      if (container::needs_profile_network(entry.storage.runtime_profile)) {
         result.network_name = container::profile_network_name(entry.storage.profile_key);
         if (!container::create_profile_network(host, entry.storage.profile_key))
-          throw std::runtime_error("Steam profile network could not be provisioned authoritatively");
+          throw std::runtime_error("Space network could not be provisioned authoritatively");
       }
     }
 
@@ -407,13 +435,35 @@ namespace multiseat::profiles {
     });
   }
 
-  change_result_t set_desktop_access(const std::filesystem::path &path, std::string_view client_key, bool allowed) {
+  namespace {
+    // Drops the ids of devices the host no longer has paired; the header says when the list counts.
+    bool holds(const std::vector<std::string> &list, std::string_view client) {
+      return std::find(list.begin(), list.end(), client) != list.end();
+    }
+
+    void forget_unpaired(catalog_t &catalog, std::string_view client_key, const std::vector<std::string> &paired_clients) {
+      if (!holds(paired_clients, client_key)) return;
+      const auto unpaired = [&](const std::string &client) {
+        return std::find(paired_clients.begin(), paired_clients.end(), client) == paired_clients.end();
+      };
+      for (auto &entry : catalog.profiles) {
+        std::erase_if(entry.client_keys, unpaired);
+        std::erase_if(entry.access_clients, unpaired);
+      }
+      std::erase_if(catalog.desktop_clients, unpaired);
+      std::erase_if(catalog.desktop_default_clients, unpaired);
+    }
+  }  // namespace
+
+  change_result_t set_desktop_access(const std::filesystem::path &path, std::string_view client_key, bool allowed,
+                                     const std::vector<std::string> &paired_clients) {
     return change(path, [&](auto &catalog, auto &result) -> std::optional<std::string> {
       if (!token(client_key)) { result.error = "Invalid paired device identifier."; return std::nullopt; }
       std::erase(catalog.desktop_clients, client_key);
       if (allowed) catalog.desktop_clients.emplace_back(client_key);
       // A Default Space is a place the device may play, so Desktop stops being one with its access.
       else std::erase(catalog.desktop_default_clients, client_key);
+      forget_unpaired(catalog, client_key, paired_clients);
       return encode(catalog);
     });
   }
@@ -470,7 +520,8 @@ namespace multiseat::profiles {
   }
 
   change_result_t set_access(const std::filesystem::path &path,
-    std::string_view profile_key, std::string_view client_key, bool allowed) {
+    std::string_view profile_key, std::string_view client_key, bool allowed,
+    const std::vector<std::string> &paired_clients, bool with_desktop) {
     if (!token(profile_key) || !token(client_key)) return {.error = "Invalid space or paired device."};
     return change(path, [&](catalog_t &catalog, change_result_t &result) -> std::optional<std::string> {
       auto target = std::find_if(catalog.profiles.begin(), catalog.profiles.end(),
@@ -480,6 +531,39 @@ namespace multiseat::profiles {
       if (allowed) target->access_clients.emplace_back(client_key);
       // Unticking a Space is how a device leaves it, so it stops being that device's Default Space too.
       else std::erase(target->client_keys, client_key);
+      if (allowed && with_desktop && !holds(catalog.desktop_clients, client_key)) catalog.desktop_clients.emplace_back(client_key);
+      forget_unpaired(catalog, client_key, paired_clients);
+      return encode(catalog);
+    });
+  }
+
+  change_result_t set_access_for_all(const std::filesystem::path &path,
+    std::string_view profile_key, const std::vector<std::string> &clients, bool allowed,
+    const std::vector<std::string> &paired_clients, bool with_desktop) {
+    const bool desktop = profile_key == desktop_profile_key;
+    if ((!desktop && !token(profile_key)) || clients.size() > 4096 ||
+        !std::all_of(clients.begin(), clients.end(), [](const auto &client) { return token(client); }))
+      return {.error = "Invalid space or paired device."};
+    return change(path, [&](catalog_t &catalog, change_result_t &result) -> std::optional<std::string> {
+      const auto add = [&](std::vector<std::string> &list) {
+        for (const auto &client : clients) if (!holds(list, client)) list.emplace_back(client);
+      };
+      if (desktop) {
+        if (allowed) add(catalog.desktop_clients);
+        // Desktop stops being anyone's Default Space with its access, as it does for one device.
+        else { catalog.desktop_clients.clear(); catalog.desktop_default_clients.clear(); }
+      } else {
+        auto target = std::find_if(catalog.profiles.begin(), catalog.profiles.end(),
+          [&](const auto &entry) { return entry.storage.profile_key == profile_key && !entry.archived; });
+        if (target == catalog.profiles.end()) { result.error = "Unknown or removed space."; return std::nullopt; }
+        if (allowed) {
+          add(target->access_clients);
+          if (with_desktop) add(catalog.desktop_clients);
+        } else { target->access_clients.clear(); target->client_keys.clear(); }
+      }
+      // Believed on the same terms as for one device, asked of every device in the change.
+      if (!clients.empty() && std::all_of(clients.begin(), clients.end(), [&](const auto &client) { return holds(paired_clients, client); }))
+        forget_unpaired(catalog, clients.front(), paired_clients);
       return encode(catalog);
     });
   }
@@ -513,12 +597,14 @@ namespace multiseat::profiles {
     });
   }
 
-  bool valid_steam_create_request(const steam_create_request_t &request) {
-    return valid_new_steam(request.request_id, request.name) && token(request.source_profile_id) &&
-      request.request_id != request.source_profile_id;
+  bool valid_space_create_request(const space_create_request_t &request) {
+    if (!valid_new_steam(request.request_id, request.name)) return false;
+    if (!request.family.empty())
+      return request.source_profile_id.empty() && launcher_family(request.family) != runtime_profile_e::unknown;
+    return token(request.source_profile_id) && request.request_id != request.source_profile_id;
   }
 
-  std::optional<steam_create_request_t> decode_steam_create_request(std::string_view payload) {
+  std::optional<space_create_request_t> decode_space_create_request(std::string_view payload) {
     if (payload.empty() || payload.size() > 4096) return std::nullopt;
     try {
       std::set<std::string> names;
@@ -528,32 +614,51 @@ namespace multiseat::profiles {
           throw std::invalid_argument("duplicate creation field");
         return true;
       });
-      keys(body, {"request_id", "source_profile_id", "name"});
-      steam_create_request_t request {body.at("request_id").get<std::string>(),
-        body.at("source_profile_id").get<std::string>(), body.at("name").get<std::string>()};
-      return valid_steam_create_request(request) ? std::optional {std::move(request)} : std::nullopt;
+      // Two shapes: a launcher family the person picked, or the Space to copy,
+      // which is what a client from before families sends.
+      const bool by_family = body.is_object() && body.contains("family");
+      keys(body, by_family ? std::initializer_list<const char *> {"request_id", "family", "name"} :
+                             std::initializer_list<const char *> {"request_id", "source_profile_id", "name"});
+      space_create_request_t request {body.at("request_id").get<std::string>(),
+        by_family ? std::string {} : body.at("source_profile_id").get<std::string>(),
+        body.at("name").get<std::string>(),
+        by_family ? body.at("family").get<std::string>() : std::string {}};
+      return valid_space_create_request(request) ? std::optional {std::move(request)} : std::nullopt;
     } catch (...) { return std::nullopt; }
   }
 
-  change_result_t create_steam(const std::filesystem::path &path,
-                             const steam_create_request_t &request, container::host_t &host) {
-    if (!valid_steam_create_request(request)) return {.error = "Invalid Steam profile creation request."};
+  change_result_t create_space(const std::filesystem::path &path,
+                             const space_create_request_t &request, container::host_t &host) {
+    if (!valid_space_create_request(request)) return {.error = "Invalid Space creation request."};
     return change(path, [&](auto &catalog, auto &result) -> std::optional<std::string> {
       if (catalog.owner_uid != host.effective_uid() || catalog.owner_gid != host.effective_gid() ||
           host.effective_uid() != 1000 || host.effective_gid() != 1000) {
-        result.error = "Current Steam runtime images require the catalog and service identity to be 1000:1000.";
+        result.error = "Current Spaces runtime images require the catalog and service identity to be 1000:1000.";
         return std::nullopt;
       }
+      // A picked family copies any Space that already runs that launcher, since
+      // they all share its image. Naming a Space instead still copies that one.
+      const auto wanted = launcher_family(request.family);
       const auto source = std::find_if(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &entry) {
-        return entry.storage.profile_key == request.source_profile_id;
+        if (request.family.empty()) return entry.storage.profile_key == request.source_profile_id;
+        return entry.storage.runtime_profile == wanted && !entry.archived &&
+          container::supported_streaming_workload(entry.storage.runtime_profile, entry.workload);
       });
-      if (source == catalog.profiles.end() || source->storage.runtime_profile != runtime_profile_e::steam ||
+      // A new Space is the same kind of Space as the one it is based on: the
+      // family decides which launcher the image carries and which library is
+      // read, so it is inherited rather than chosen on the wire.
+      const auto workload = source == catalog.profiles.end() ?
+        workload_plan_t {} : launcher_workload(source->storage.runtime_profile);
+      if (source == catalog.profiles.end() || workload.kind == workload_kind_e::unknown ||
           !container::supported_streaming_workload(source->storage.runtime_profile, source->workload)) {
-        result.error = "Select an existing configured Steam profile."; return std::nullopt;
+        result.error = request.family.empty() ? "Select an existing configured Space." :
+          "This PC has no Space for that launcher yet. Set one up first.";
+        return std::nullopt;
       }
       const entry_t entry {
-        .storage = {request.request_id, "pv-" + request.request_id, runtime_profile_e::steam, source->storage.image_reference},
-        .name = request.name, .workload = {workload_kind_e::steam, "big-picture-v1"}, .client_keys = {},
+        .storage = {request.request_id, "pv-" + request.request_id, source->storage.runtime_profile,
+                    source->storage.image_reference},
+        .name = request.name, .workload = workload, .client_keys = {},
       };
       const auto existing = std::find_if(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &value) {
         return value.storage.profile_key == request.request_id;
@@ -561,7 +666,7 @@ namespace multiseat::profiles {
       if (existing != catalog.profiles.end()) {
         if (existing->name != entry.name || existing->storage.image_reference != entry.storage.image_reference ||
             existing->storage.opaque_volume_name != entry.storage.opaque_volume_name ||
-            existing->storage.runtime_profile != runtime_profile_e::steam || existing->workload != entry.workload) {
+            existing->storage.runtime_profile != entry.storage.runtime_profile || existing->workload != entry.workload) {
           result.error = "This creation request already identifies a different profile."; return std::nullopt;
         }
         result.profile_key = request.request_id;
@@ -575,16 +680,19 @@ namespace multiseat::profiles {
     });
   }
 
-  bool valid_first_steam_request(const first_steam_request_t &request) {
+  bool valid_first_space_request(const first_space_request_t &request) {
     return valid_new_steam(request.request_id, request.name);
   }
 
-  change_result_t create_first_steam(const std::filesystem::path &path,
-    const first_steam_request_t &request, std::string_view image, container::host_t &host) {
-    if (!valid_new_steam(request.request_id, request.name) || !image_id(image))
-      return {.error = "Invalid first-space request or runtime identity."};
+  change_result_t create_first_space(const std::filesystem::path &path,
+    const first_space_request_t &request, std::string_view image, std::string_view profile,
+    container::host_t &host) {
+    const auto workload = launcher_workload(launcher_family(profile));
+    if (!valid_new_steam(request.request_id, request.name) || !image_id(image) ||
+        workload.kind == workload_kind_e::unknown)
+      return {.error = "Invalid first-space request, runtime identity or launcher family."};
     if (host.effective_uid() != 1000 || host.effective_gid() != 1000)
-      return {.error = "The current Steam runtime requires service identity 1000:1000. Do not change your Linux user ID."};
+      return {.error = "The current Spaces runtimes require service identity 1000:1000. Do not change your Linux user ID."};
     change_result_t result;
     try {
       result.status = private_state_file::update_atomic(path, maximum_catalog_bytes,
@@ -596,8 +704,8 @@ namespace multiseat::profiles {
             return std::nullopt;
           }
           const entry_t entry {
-            .storage = {request.request_id, "pv-" + request.request_id, runtime_profile_e::steam, std::string(image)},
-            .name = request.name, .workload = {workload_kind_e::steam, "big-picture-v1"}, .client_keys = {},
+            .storage = {request.request_id, "pv-" + request.request_id, launcher_family(profile), std::string(image)},
+            .name = request.name, .workload = workload, .client_keys = {},
           };
           const auto existing = std::find_if(catalog->profiles.begin(), catalog->profiles.end(), [&](const auto &value) {
             return value.storage.profile_key == request.request_id;
@@ -605,15 +713,26 @@ namespace multiseat::profiles {
           if (existing != catalog->profiles.end()) {
             if (existing->name != entry.name || existing->storage.image_reference != entry.storage.image_reference ||
                 existing->storage.opaque_volume_name != entry.storage.opaque_volume_name ||
-                existing->storage.runtime_profile != runtime_profile_e::steam || existing->workload != entry.workload) {
+                existing->storage.runtime_profile != entry.storage.runtime_profile ||
+                existing->workload != entry.workload) {
               result.error = "This creation request already identifies a different space.";
               return std::nullopt;
             }
             result.profile_key = request.request_id;
             return encode(*catalog);
           }
-          if (!catalog->profiles.empty()) {
-            result.error = "Spaces is already configured. Add another space from the existing setup.";
+          // The first Space of a launcher family, not the first Space on the
+          // host. A family's runtime carries its own launcher and its own
+          // library, so a host with Steam Spaces still has no Heroic one to
+          // copy, and copying across families would hand it the wrong launcher.
+          // Only a live Space closes this path. One that is archived lends
+          // nothing, since a new Space copies a live one, so a launcher whose
+          // only Space was archived starts again from the admitted runtime
+          // rather than being left with no way to make a Space at all.
+          if (std::any_of(catalog->profiles.begin(), catalog->profiles.end(), [&](const auto &value) {
+                return value.storage.runtime_profile == entry.storage.runtime_profile && !value.archived;
+              })) {
+            result.error = "Spaces is already configured for this launcher. Add another space from the existing setup.";
             return std::nullopt;
           }
           catalog->profiles.push_back(entry);
@@ -700,7 +819,7 @@ namespace multiseat::profiles {
     removal_result_t result;
     if (request.operation != edit_operation_e::remove_for_good || !valid_edit_request(request)) return result;
     std::string volume, profile_key;
-    bool steam = false, home_present = false;
+    bool networked = false, home_present = false;
     // Every refusal that changes nothing is decided inside the transaction that
     // archives the Space, so the decision and the archive read the same catalog.
     const auto fenced = change(path, [&](catalog_t &catalog, change_result_t &) -> std::optional<std::string> {
@@ -708,10 +827,12 @@ namespace multiseat::profiles {
         [&](const auto &value) { return value.storage.profile_key == request.profile_id; });
       if (entry == catalog.profiles.end()) { result.outcome = outcome_e::not_found; return std::nullopt; }
       if (entry->name != request.confirm_name) { result.outcome = outcome_e::name_mismatch; return std::nullopt; }
-      steam = entry->storage.runtime_profile == runtime_profile_e::steam;
-      // New Steam Spaces copy an existing one's runtime, so the last one stays.
-      if (steam && std::none_of(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &other) {
-            return &other != &*entry && other.storage.runtime_profile == runtime_profile_e::steam;
+      const auto family = entry->storage.runtime_profile;
+      networked = container::needs_profile_network(family);
+      // A new Space copies an existing one of its own launcher family, so the
+      // last Space of each family stays, whatever the other families hold.
+      if (networked && std::none_of(catalog.profiles.begin(), catalog.profiles.end(), [&](const auto &other) {
+            return &other != &*entry && other.storage.runtime_profile == family;
           })) { result.outcome = outcome_e::last_space; return std::nullopt; }
       volume = entry->storage.opaque_volume_name;
       profile_key = entry->storage.profile_key;
@@ -762,7 +883,7 @@ namespace multiseat::profiles {
         return result;
       }
     }
-    if (steam) {
+    if (networked) {
       // The network holds no player data. One Docker will not remove is named,
       // and a network whose identity is not the one Polaris made is left alone.
       const auto network = container::profile_network_name(profile_key);

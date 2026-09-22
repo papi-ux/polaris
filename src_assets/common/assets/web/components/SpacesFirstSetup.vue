@@ -120,8 +120,14 @@ try {
   if (validSetupStart(saved)) pending.value = saved
 } catch { /* The host remains the authority if browser storage is unavailable. */ }
 let request, poll, disposed = false, failures = 0
-const runtimeLabel = runtime => runtime?.variant === 'nvidia'
-  ? t('spaces.runtime_nvidia', { driver: runtime.nvidia_driver }) : t('spaces.runtime_default')
+// A runtime is named by the launcher it carries and the graphics it needs. A
+// host from before launcher families names none, and those runtimes were Steam.
+const runtimeLabel = runtime => {
+  const launcher = t('spaces.launcher_' + (runtime?.profile || 'steam'))
+  if (runtime?.variant === 'nvidia') return t('spaces.runtime_nvidia', { launcher, driver: runtime.nvidia_driver })
+  if (runtime?.variant === 'nvidia-host') return t('spaces.runtime_host', { launcher })
+  return t('spaces.runtime_default', { launcher })
+}
 
 const unavailableReasons = ['already_configured', 'runtime_not_published', 'journal_fault', 'journal_locked', 'closing']
 const unavailableCopy = computed(() => {

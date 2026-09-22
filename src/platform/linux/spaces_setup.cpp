@@ -1,4 +1,5 @@
 #include "spaces_setup.h"
+#include "spaces_nvidia_libraries.h"
 #ifdef __linux__
 #include <algorithm>
 #include <filesystem>
@@ -14,8 +15,12 @@ namespace multiseat::spaces {
       return text;
     }
     json describe_runtime(const runtime_facts_t &r) {
-      const auto name = !r.runtime ? std::string {} : r.runtime->variant == "nvidia" ?
-        "gaming runtime for NVIDIA driver " + r.runtime->nvidia_driver : std::string {"gaming runtime for AMD and Intel graphics"};
+      // A runtime that borrows this PC's driver is named for the graphics it
+      // needs, never for a driver version: it works with whichever one is loaded.
+      const auto name = !r.runtime ? std::string {} :
+        r.runtime->variant == "nvidia" ? "gaming runtime for NVIDIA driver " + r.runtime->nvidia_driver :
+        r.runtime->variant == "nvidia-host" ? std::string {"gaming runtime for NVIDIA graphics"} :
+        std::string {"gaming runtime for AMD and Intel graphics"};
       std::string detail;
       if (r.status == "not_published") detail = "This Polaris build has no approved gaming runtime yet.";
       else if (r.code == "driver_mismatch")
@@ -67,15 +72,35 @@ namespace multiseat::spaces {
     return nvidia_driver_version(version) ? version : std::string {};
   }
 
-  runtime_choice_t choose_runtime(const std::vector<runtime_t> &catalog, const std::optional<std::string> &nvidia_driver) {
-    if (catalog.empty()) return {std::nullopt, "runtime_not_published"};
-    const std::string_view variant = nvidia_driver ? "nvidia" : "default";
-    for (const auto &runtime : catalog) {
-      if (runtime.variant == variant && (!nvidia_driver || runtime.nvidia_driver == *nvidia_driver)) return {runtime, {}};
+  runtime_choice_t choose_runtime(const std::vector<runtime_t> &catalog,
+      const std::optional<std::string> &nvidia_driver, std::string_view profile) {
+    // Only this family's entries are candidates. A build that carries a Heroic
+    // runtime and no Steam one has published nothing a Steam Space can use.
+    std::vector<const runtime_t *> family;
+    for (const auto &runtime : catalog)
+      if (runtime.profile == profile) family.push_back(&runtime);
+    if (family.empty()) return {std::nullopt, "runtime_not_published"};
+    if (nvidia_driver) {
+      // A runtime that borrows this machine's driver is preferred, because it
+      // keeps working across driver updates. It is skipped only when the
+      // loaded driver is older than the one its own encoders were built for.
+      bool below_minimum = false;
+      for (const auto *runtime : family) {
+        if (runtime->variant != "nvidia-host") continue;
+        if (nvidia_driver->empty() || spaces::driver_at_least(*nvidia_driver, runtime->nvidia_minimum_driver))
+          return {*runtime, {}};
+        below_minimum = true;
+      }
+      for (const auto *runtime : family)
+        if (runtime->variant == "nvidia" && runtime->nvidia_driver == *nvidia_driver) return {*runtime, {}};
+      if (std::any_of(family.begin(), family.end(),
+            [](const auto *runtime) { return runtime->variant == "nvidia"; }))
+        return {std::nullopt, "driver_mismatch"};
+      return {std::nullopt, below_minimum ? "driver_below_minimum" : "graphics_unsupported"};
     }
-    const bool other_driver = nvidia_driver &&
-      std::any_of(catalog.begin(), catalog.end(), [](const auto &runtime) { return runtime.variant == "nvidia"; });
-    return {std::nullopt, other_driver ? "driver_mismatch" : "graphics_unsupported"};
+    for (const auto *runtime : family)
+      if (runtime->variant == "default") return {*runtime, {}};
+    return {std::nullopt, "graphics_unsupported"};
   }
 
   runtime_inspection_cache_t::runtime_inspection_cache_t(std::chrono::steady_clock::duration lifetime, now_t now) :
@@ -85,7 +110,8 @@ namespace multiseat::spaces {
     std::uint64_t generation;
     {
       std::lock_guard lock(mutex_);
-      if (entry_ && entry_->reference == reference && now_() - entry_->checked < lifetime_) return entry_->image;
+      for (const auto &entry : entries_)
+        if (entry.reference == reference && now_() - entry.checked < lifetime_) return entry.image;
       generation = generation_;
     }
     const auto image = inspect();
@@ -93,14 +119,18 @@ namespace multiseat::spaces {
     // that raced a download is dropped too: the download may have changed it.
     if (image != runtime_image_e::unverifiable) {
       std::lock_guard lock(mutex_);
-      if (generation == generation_) entry_ = entry_t {reference, image, now_()};
+      if (generation == generation_) {
+        std::erase_if(entries_, [&](const auto &entry) { return entry.reference == reference; });
+        if (entries_.size() >= 64) entries_.erase(entries_.begin());
+        entries_.push_back({reference, image, now_()});
+      }
     }
     return image;
   }
 
   void runtime_inspection_cache_t::forget() {
     std::lock_guard lock(mutex_);
-    entry_.reset();
+    entries_.clear();
     ++generation_;
   }
 
@@ -110,15 +140,16 @@ namespace multiseat::spaces {
   }
 
   runtime_facts_t inspect_runtime(container::host_t &host, const std::vector<runtime_t> &catalog,
-    const std::optional<std::string> &nvidia_driver, bool engine_ready, runtime_inspection_cache_t *cache) {
+    const std::optional<std::string> &nvidia_driver, bool engine_ready, runtime_inspection_cache_t *cache,
+    std::string_view profile) {
     runtime_facts_t facts;
     facts.host_nvidia_driver = nvidia_driver;
     for (const auto &runtime : catalog) {
-      if (runtime.variant == "nvidia" &&
+      if (runtime.profile == profile && runtime.variant == "nvidia" &&
           std::find(facts.nvidia_drivers.begin(), facts.nvidia_drivers.end(), runtime.nvidia_driver) == facts.nvidia_drivers.end())
         facts.nvidia_drivers.push_back(runtime.nvidia_driver);
     }
-    auto choice = choose_runtime(catalog, nvidia_driver);
+    auto choice = choose_runtime(catalog, nvidia_driver, profile);
     if (!choice.runtime) {
       facts.status = choice.code == "runtime_not_published" ? "not_published" : "unsupported";
       facts.code = std::move(choice.code);
@@ -160,6 +191,16 @@ namespace multiseat::spaces {
       std::find(groups->begin(), groups->end(), docker->gid) == groups->end();
   }
 
+  namespace {
+    /** What this distribution calls the 32 bit half of the NVIDIA driver. */
+    std::string thirty_two_bit_driver_package(std::string_view distribution) {
+      if (distribution == "fedora" || distribution == "bazzite") return "xorg-x11-drv-nvidia-libs.i686";
+      if (distribution == "arch" || distribution == "cachyos") return "lib32-nvidia-utils";
+      if (distribution == "ubuntu") return "the libnvidia-gl package for your driver branch, i386 variant";
+      return {};
+    }
+  }  // namespace
+
   nlohmann::json describe_setup(const setup_facts_t &f) {
     using json = nlohmann::json;
     json checks = json::array();
@@ -195,6 +236,23 @@ namespace multiseat::spaces {
     add("gpu", "Graphics device access", f.gpu_access,
       f.gpu_access ? "A graphics device is accessible. Hardware encoding is checked when the space starts." :
       "Polaris cannot access a graphics device. Check the driver and host permissions.", "host_setup", "#graphics-access");
+    if (f.runtime.host_nvidia_driver && !f.runtime.host_nvidia_driver->empty()) {
+      const bool ready = f.driver_libraries.empty();
+      const auto package = f.driver_libraries_package.empty() ?
+        std::string {"this distribution's 32 bit NVIDIA driver package"} : f.driver_libraries_package;
+      const std::string detail =
+        ready ? "This PC's NVIDIA driver files are ready for a space to borrow." :
+        f.driver_libraries == "driver_libraries_32bit_missing" ?
+          "Install " + package + ". A space can still start, but 32 bit games, which is most games under Proton, render nothing." :
+        f.driver_libraries == "driver_below_minimum" ?
+          std::string {"This PC's NVIDIA driver is older than the gaming runtime supports. Update the driver."} :
+        f.driver_libraries == "driver_libraries_untrusted" ?
+          std::string {"Some NVIDIA driver files on this PC are not owned by root, so Polaris will not pass them to a space."} :
+        f.driver_libraries == "driver_configuration_missing" ?
+          std::string {"This PC's Vulkan or EGL description for NVIDIA could not be read."} :
+          std::string {"This PC's NVIDIA driver files are not where the driver package puts them."};
+      add("nvidia_libraries", "NVIDIA driver files", ready, detail.c_str(), "", "#nvidia-driver-files");
+    }
     add("security", "Spaces security support", f.security.ready, f.security.detail.c_str(), f.security.code.c_str(),
       "#prepare-spaces-security-support");
     // The packaged helper installs or updates the policies; a host that is not enforcing, or whose
@@ -271,9 +329,19 @@ namespace multiseat::spaces {
     }
     static const std::vector<runtime_t> unpublished;
     const auto &catalog = trusted_runtimes();
-    f.runtime = inspect_runtime(host, catalog ? *catalog : unpublished, loaded_nvidia_driver(),
+    const auto loaded = loaded_nvidia_driver();
+    f.runtime = inspect_runtime(host, catalog ? *catalog : unpublished, loaded,
       f.docker_cli && f.runc && f.daemon_replied && f.daemon_linux && !f.daemon_rootless && f.daemon_runc,
       &runtime_inspection_cache());
+    // Only relevant with an NVIDIA driver loaded: whether this PC can lend its
+    // own driver files to a space. Reading files, never running anything.
+    if (loaded && !loaded->empty()) {
+      if (const auto &contract = trusted_nvidia_contract()) {
+        const auto facts = resolve_host_driver_libraries(*contract, host, *loaded, contract->minimum_driver);
+        f.driver_libraries = facts.code;
+        f.driver_libraries_package = thirty_two_bit_driver_package(f.distribution);
+      }
+    }
     return describe_setup(f);
   }
 }

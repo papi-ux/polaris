@@ -82,7 +82,18 @@ def linked_library(path):
         raise ValueError('unresolved NVIDIA runtime dependency: ' + str(path) + '\n' + result.stdout)
 
 
-def verify(root, profile, owner_uid=0, link_check=linked_library):
+def verify(root, profile, owner_uid=0, link_check=linked_library, source='image'):
+    """Check a packaged NVIDIA layer.
+
+    With source='host' the image carries no driver of its own: the contract's
+    libraries must be absent, so that nothing in the image can shadow a file the
+    machine lends a Space, and the loader descriptions the host rewrites are
+    absent too.
+    """
+    if source not in ('image', 'host'):
+        raise ValueError('unknown NVIDIA userspace source')
+    # Held separately because `source` is rebound to a file handle below.
+    from_host = source == 'host'
     root = pathlib.Path(root).resolve(strict=True)
     metadata = pathlib.Path('usr/share/polaris/build')
     manifest_path = trusted_file(root, metadata / 'nvidia-files.json', owner_uid)
@@ -90,8 +101,15 @@ def verify(root, profile, owner_uid=0, link_check=linked_library):
     manifest = json.loads(manifest_path.read_text())
     lock = json.loads(lock_path.read_text())
     expected_architectures = architectures(profile)
-    if (set(manifest) != {'schema', 'driver_version', 'architectures', 'files', 'symlinks'} or
-            manifest['schema'] != 1 or manifest['driver_version'] != lock['version'] or
+    borrowed = ()
+    if from_host:
+        if not (root / metadata / 'nvidia-host-contract.json').is_file():
+            raise ValueError('a host-driver layer must carry the reviewed contract')
+        contract = json.loads(trusted_file(root, metadata / 'nvidia-host-contract.json', owner_uid).read_text())
+        borrowed = tuple(contract['library_prefixes'])
+    if (set(manifest) != {'schema', 'driver_version', 'architectures', 'files', 'symlinks', 'source'} or
+            manifest['schema'] != 1 or manifest['source'] != ('host' if from_host else 'image') or
+            manifest['driver_version'] != ('' if from_host else lock['version']) or
             manifest['architectures'] != expected_architectures or
             not isinstance(manifest['files'], list) or not 1 <= len(manifest['files']) <= 256 or
             not isinstance(manifest['symlinks'], list) or len(manifest['symlinks']) > 256):
@@ -121,9 +139,14 @@ def verify(root, profile, owner_uid=0, link_check=linked_library):
         else:
             configurations.add(str(relative.relative_to('usr/share')))
         records[entry['path']] = entry
-    if configurations != set(CONFIGURATIONS) | {'licenses/polaris-nvidia/LICENSE'}:
+    expected_configurations = {
+        name for name in CONFIGURATIONS
+        if not from_host or name.startswith('egl/egl_external_platform.d/')}
+    if configurations != expected_configurations | {'licenses/polaris-nvidia/LICENSE'}:
         raise ValueError('NVIDIA configuration or license files are incomplete')
     for name, soname in CONFIGURATIONS.items():
+        if name not in expected_configurations:
+            continue
         config = json.loads((root / 'usr/share' / name).read_text())
         if soname and (config.get('ICD', {}).get('library_path') != soname or
                        any((architecture, soname) not in libraries for architecture in expected_architectures)):
@@ -138,6 +161,11 @@ def verify(root, profile, owner_uid=0, link_check=linked_library):
                 not isinstance(target, str) or pathlib.PurePosixPath(target).is_absolute() or
                 not stat.S_ISLNK(status.st_mode) or status.st_uid != owner_uid or str(path.readlink()) != target):
             raise ValueError('NVIDIA SONAME link differs from its manifest')
+        if from_host and pathlib.PurePosixPath(target).name.startswith(borrowed):
+            # The file this points at is lent by the machine, so it only exists
+            # once a Space runs. The target name is still checked.
+            aliases[entry['path']] = None
+            continue
         resolved = path.resolve(strict=True)
         if not resolved.is_relative_to(root) or '/' + str(resolved.relative_to(root)) not in records:
             raise ValueError('NVIDIA link escapes its packaged files')
@@ -145,9 +173,16 @@ def verify(root, profile, owner_uid=0, link_check=linked_library):
     counts = {}
     for architecture in expected_architectures:
         directory = pathlib.Path('usr/lib') / ARCHITECTURES[architecture][0]
-        for name in REQUIRED_VENDOR:
-            if (architecture, name) not in libraries:
-                raise ValueError('missing required NVIDIA vendor library: ' + name)
+        if from_host:
+            # Nothing the machine lends may also live in the image, or the image
+            # copy would win and pair a Space with the wrong driver.
+            for (abi, soname) in libraries:
+                if abi == architecture and soname.startswith(borrowed):
+                    raise ValueError('a host-driver layer still ships ' + soname)
+        else:
+            for name in REQUIRED_VENDOR:
+                if (architecture, name) not in libraries:
+                    raise ValueError('missing required NVIDIA vendor library: ' + name)
         for (abi, soname), path in libraries.items():
             if abi != architecture:
                 continue
@@ -157,7 +192,10 @@ def verify(root, profile, owner_uid=0, link_check=linked_library):
             link_check(path)
         gbm = '/' + str(directory / 'gbm/nvidia-drm_gbm.so')
         allocator = libraries.get((architecture, 'libnvidia-allocator.so.1'))
-        if allocator is None or aliases.get(gbm) != allocator:
+        if from_host:
+            if gbm not in aliases or allocator is not None:
+                raise ValueError('a host-driver layer must point GBM at the borrowed allocator')
+        elif allocator is None or aliases.get(gbm) != allocator:
             raise ValueError('missing NVIDIA GBM backend alias')
         for name in FRONTENDS:
             resolved = (root / directory / name).resolve(strict=True)
@@ -167,7 +205,8 @@ def verify(root, profile, owner_uid=0, link_check=linked_library):
             elf_identity(path, architecture)
             link_check(path)
         counts[architecture] = sum(abi == architecture for abi, _ in libraries)
-    return {'schema': 1, 'result': 'passed', 'driver_version': lock['version'],
+    return {'schema': 1, 'result': 'passed', 'source': 'host' if from_host else 'image',
+            'driver_version': '' if from_host else lock['version'],
             'architectures': expected_architectures, 'vendor_library_counts': counts,
             'manifest_sha256': hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
             'scope': 'ELF identity, package hashes, SONAME links and dynamic dependencies; no GPU or game execution'}

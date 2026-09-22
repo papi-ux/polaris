@@ -5,6 +5,12 @@ import SpacesFirstSetup from './SpacesFirstSetup.vue'
 import { dockerAccessCommand, fedoraSecurityPackages, installGuide, installSpacesSecurity, setupSteps, startDocker, validSetup } from '../spaces-setup.js'
 import { spacesGlobal } from './spaces-test-i18n.js'
 import { validHostActionSnapshot } from '../spaces-job.js'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+
+const hostRuntimeShapes = JSON.parse(readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '../../../../../tests/fixtures/spaces-setup-host-runtime.json'), 'utf8'))
 
 const runtimeCodes = { not_published: 'runtime_not_published', unsupported: 'driver_mismatch', available: 'not_downloaded', ready: 'runtime_ready', failed: 'inspection_failed' }
 const runtimeDetails = {
@@ -321,6 +327,62 @@ describe('Spaces setup', () => {
     expect(wrapper.get('[data-setup-check=security] a').attributes('href')).toBe('https://papi-ux.com/docs/spaces/#security-support')
     const bad = snapshot(); bad.checks[0].doc_anchor = 'javascript:alert(1)'
     expect(validSetup(bad)).toBe(false)
+  })
+
+  it('accepts the Gaming runtime check for a runtime that borrows this PC driver', () => {
+    // The host writes this check; this console refuses a whole response it
+    // cannot verify and says only to recheck setup. Both sides read the file,
+    // so a variant one knows and the other does not fails here, not on a page.
+    for (const shape of [hostRuntimeShapes.ready, hostRuntimeShapes.available]) {
+      const borrowed = snapshot(true)
+      borrowed.checks.splice(6, 1, shape)
+      expect(validSetup(borrowed)).toBe(true)
+    }
+
+    // It borrows whichever driver is loaded, so naming one is not its shape.
+    const claims = snapshot(true)
+    claims.checks.splice(6, 1, structuredClone(hostRuntimeShapes.ready))
+    claims.checks[6].runtime.nvidia_driver = '615.71.09'
+    expect(validSetup(claims)).toBe(false)
+
+    // And a variant this console does not know is still refused outright.
+    const invented = snapshot(true)
+    invented.checks.splice(6, 1, structuredClone(hostRuntimeShapes.ready))
+    invented.checks[6].runtime.variant = 'nvidia-future'
+    expect(validSetup(invented)).toBe(false)
+  })
+
+  it('accepts the NVIDIA driver files check, and still rejects an unknown one', async () => {
+    // A host with an NVIDIA driver loaded sends one more check than a host
+    // without one. Counting rows instead of naming them made the whole
+    // response fail to verify, which reads as "recheck setup" forever.
+    const nvidia = snapshot(true)
+    nvidia.checks.splice(6, 0, {
+      id: 'nvidia_libraries', title: 'NVIDIA driver files', doc_anchor: '#nvidia-driver-files',
+      detail: "This PC's NVIDIA driver files are ready for a space to borrow.", action: '', state: 'ready',
+    })
+    expect(validSetup(nvidia)).toBe(true)
+
+    // It does not decide whether the host is ready, so a host that is missing
+    // the 32 bit half still sets up.
+    const missing = snapshot(true)
+    missing.checks.splice(6, 0, {
+      id: 'nvidia_libraries', title: 'NVIDIA driver files', doc_anchor: '#nvidia-driver-files',
+      detail: 'Install xorg-x11-drv-nvidia-libs.i686.', action: '', state: 'required',
+    })
+    expect(validSetup(missing)).toBe(true)
+    expect(missing.host_prerequisites_ready).toBe(true)
+
+    // A host without an NVIDIA driver sends no such row at all.
+    expect(validSetup(snapshot(true))).toBe(true)
+
+    const unknown = snapshot(true)
+    unknown.checks.push({ id: 'something_else', title: 'x', detail: 'x', action: '', state: 'ready' })
+    expect(validSetup(unknown)).toBe(false)
+
+    const incomplete = snapshot(true)
+    incomplete.checks = incomplete.checks.filter(check => check.id !== 'gpu')
+    expect(validSetup(incomplete)).toBe(false)
   })
 
   it('copies a step command and says so', async () => {

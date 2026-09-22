@@ -16,6 +16,7 @@
 #include <random>
 #include <regex>
 #include <sstream>
+#include <thread>
 #include <src/bounded_log_file.h>
 #include <src/logging.h>
 
@@ -348,4 +349,26 @@ TEST(LoggingTests, LibavErrorsSurviveEveryVerbosity) {
     EXPECT_GE(logging::av_log_level_for(verbosity), AV_LOG_ERROR)
       << "verbosity " << verbosity << " discards libav errors";
   }
+}
+
+// An encoder probe asks for formats the GPU may not have, and FFmpeg calls each refusal an error.
+// Its errors are answers only on the probing thread, and only while the probe runs.
+TEST(LoggingFfmpegErrors, AreExpectedOnlyWhileAScopeIsOpenOnThisThread) {
+  EXPECT_FALSE(logging::ffmpeg_errors_expected());
+  {
+    const logging::ffmpeg_errors_expected_t probe;
+    EXPECT_TRUE(logging::ffmpeg_errors_expected());
+    {
+      const logging::ffmpeg_errors_expected_t nested;
+      EXPECT_TRUE(logging::ffmpeg_errors_expected());
+    }
+    EXPECT_TRUE(logging::ffmpeg_errors_expected()) << "a nested scope ends without ending the probe";
+
+    bool other_thread_expected = true;
+    std::thread([&other_thread_expected]() {
+      other_thread_expected = logging::ffmpeg_errors_expected();
+    }).join();
+    EXPECT_FALSE(other_thread_expected) << "a stream encoding on another thread still reports its errors";
+  }
+  EXPECT_FALSE(logging::ffmpeg_errors_expected());
 }

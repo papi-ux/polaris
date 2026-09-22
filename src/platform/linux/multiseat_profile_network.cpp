@@ -1,4 +1,5 @@
 #include "multiseat_profile_network.h"
+#include <cctype>
 #ifdef __linux__
 #include <charconv>
 #include <nlohmann/json.hpp>
@@ -28,10 +29,60 @@ namespace multiseat::container {
     return error == std::errc {} && end == target.data() + target.size() && value != 0 &&
       std::to_string(value) == target;
   }
+  namespace {
+    /** `<runner>.<appName>`, the shape Heroic's own stores use. */
+    bool valid_heroic_target(std::string_view target) {
+      const auto dot = target.find('.');
+      if (dot == std::string_view::npos) return false;
+      const auto runner = target.substr(0, dot), name = target.substr(dot + 1);
+      if (runner != "epic" && runner != "gog" && runner != "amazon" && runner != "sideload") return false;
+      if (name.empty() || name.size() > 64) return false;
+      if (!std::isalnum(static_cast<unsigned char>(name.front()))) return false;
+      return name.find_first_not_of(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-") == std::string_view::npos;
+    }
+
+    /** `id.<decimal>`, which is how Lutris numbers a game in its own database. */
+    bool valid_lutris_target(std::string_view target) {
+      if (!target.starts_with("id.")) return false;
+      return valid_steam_target(target.substr(3));
+    }
+  }  // namespace
+
+  std::string_view launcher_sentinel(runtime_profile_e profile) {
+    switch (profile) {
+      case runtime_profile_e::gamescope: return "input-pong-v1";
+      case runtime_profile_e::steam: return "big-picture-v1";
+      case runtime_profile_e::heroic:
+      case runtime_profile_e::lutris: return "library-v1";
+      default: return {};
+    }
+  }
+
+  bool needs_profile_network(runtime_profile_e profile) {
+    return profile == runtime_profile_e::steam || profile == runtime_profile_e::heroic ||
+      profile == runtime_profile_e::lutris;
+  }
+
+  bool valid_launcher_target(runtime_profile_e profile, std::string_view target) {
+    if (!target.empty() && target == launcher_sentinel(profile)) return true;
+    switch (profile) {
+      case runtime_profile_e::steam: return valid_steam_target(target);
+      case runtime_profile_e::heroic: return valid_heroic_target(target);
+      case runtime_profile_e::lutris: return valid_lutris_target(target);
+      default: return false;
+    }
+  }
+
+  bool any_launcher_target(std::string_view target) {
+    for (const auto profile : {runtime_profile_e::steam, runtime_profile_e::heroic, runtime_profile_e::lutris})
+      if (valid_launcher_target(profile, target)) return true;
+    return false;
+  }
+
   bool supported_streaming_workload(runtime_profile_e profile, const workload_plan_t &workload) {
-    return (profile == runtime_profile_e::gamescope && workload.kind == workload_kind_e::gamescope &&
-            workload.target_id == "input-pong-v1") ||
-      (profile == runtime_profile_e::steam && workload.kind == workload_kind_e::steam && valid_steam_target(workload.target_id));
+    return workload_matches_runtime_profile(workload, profile) &&
+      valid_launcher_target(profile, workload.target_id);
   }
   std::string profile_network_name(std::string_view profile_key) {
     if (profile_key.empty() || profile_key.size() > 128 ||

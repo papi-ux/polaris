@@ -573,3 +573,53 @@ TEST(GamescopeProcessNestingTests, ReportsNothingWithoutASocketOrProcTree) {
   missing.proc_root = tree.root / "missing-proc";
   EXPECT_FALSE(gp::nested_gamescope_client("wayland-1", missing).has_value());
 }
+
+TEST(GamescopeProcessTrayDisplayTests, TheTrayStaysOffTheXwaylandOfTheGamescopePolarisStarted) {
+  fake_proc_tree_t tree;
+  const auto owned_x4 = tree.x11 / "X4";
+  tree.add_unix_socket(604, owned_x4);
+  tree.flush_unix_sockets();
+  tree.add_process(410, 1, 9001, {"/usr/bin/gamescope", "--backend", "headless"}, {});
+  tree.add_process(411, 410, 9002, {"/usr/bin/Xwayland", ":4"}, {604});
+  const auto marker_path = tree.runtime / "polaris-gamescope.pid";
+  ASSERT_TRUE(gp::write_marker(marker_path, {
+    .pid = 410, .start_time = 9001, .role = "idle", .executable = "/usr/bin/gamescope"
+  }));
+
+  // #744: stopping that gamescope took DISPLAY with it and Xlib ended Polaris from the tray's loop.
+  for (const auto *display : {":4", ":4.0", "unix:4"}) {
+    const auto reason = gp::display_polaris_restarts(display, "KDE", false, marker_path, paths_for(tree));
+    ASSERT_TRUE(reason.has_value()) << display;
+    EXPECT_NE(reason->find("idle gamescope Polaris started"), std::string::npos) << *reason;
+  }
+}
+
+TEST(GamescopeProcessTrayDisplayTests, AGamescopeHostKeepsTheTrayOffBeforeItsCompositorIsUp) {
+  fake_proc_tree_t tree;
+  const auto marker_path = tree.runtime / "polaris-gamescope.pid";
+
+  EXPECT_TRUE(gp::display_polaris_restarts(":0", "gamescope", true, marker_path, paths_for(tree)).has_value());
+  // The same desktop name without the gamescope setting is somebody else's gamescope.
+  EXPECT_FALSE(gp::display_polaris_restarts(":0", "gamescope", false, marker_path, paths_for(tree)).has_value());
+}
+
+TEST(GamescopeProcessTrayDisplayTests, AnyOtherDisplayKeepsItsTray) {
+  fake_proc_tree_t tree;
+  const auto owned_x4 = tree.x11 / "X4";
+  const auto host_x0 = tree.x11 / "X0";
+  tree.add_unix_socket(604, owned_x4);
+  tree.add_unix_socket(600, host_x0);
+  tree.flush_unix_sockets();
+  tree.add_process(410, 1, 9001, {"/usr/bin/gamescope", "--backend", "headless"}, {});
+  tree.add_process(411, 410, 9002, {"/usr/bin/Xwayland", ":4"}, {604});
+  tree.add_process(99, 1, 100, {"/usr/bin/Xwayland", ":0"}, {600});
+  const auto marker_path = tree.runtime / "polaris-gamescope.pid";
+  ASSERT_TRUE(gp::write_marker(marker_path, {
+    .pid = 410, .start_time = 9001, .role = "idle", .executable = "/usr/bin/gamescope"
+  }));
+
+  // A desktop's own Xwayland, a gamescope mode pointed at the desktop, and no DISPLAY at all.
+  EXPECT_FALSE(gp::display_polaris_restarts(":0", "KDE", false, marker_path, paths_for(tree)).has_value());
+  EXPECT_FALSE(gp::display_polaris_restarts(":0", "KDE", true, marker_path, paths_for(tree)).has_value());
+  EXPECT_FALSE(gp::display_polaris_restarts("", "gamescope", true, marker_path, paths_for(tree)).has_value());
+}

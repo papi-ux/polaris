@@ -4,7 +4,11 @@
  */
 // standard includes
 #ifdef __linux__
+  #include "platform/linux/gamescope_process.h"
   #include "platform/linux/labwc_supervisor.h"
+
+  #include <filesystem>
+  #include <unistd.h>
 #endif
 
 #include <clocale>
@@ -779,7 +783,26 @@ int main(int argc, char *argv[]) {
   }
 #endif
 
-  if (tray_is_enabled && config::sunshine.system_tray) {
+  bool start_tray = tray_is_enabled && config::sunshine.system_tray;
+#ifdef __linux__
+  if (start_tray) {
+    const char *runtime = std::getenv("XDG_RUNTIME_DIR");
+    const auto runtime_dir = (runtime && *runtime) ? std::filesystem::path(runtime) :
+                                                     std::filesystem::path("/run/user") / std::to_string(getuid());
+    const char *display = std::getenv("DISPLAY");
+    const char *desktop = std::getenv("XDG_CURRENT_DESKTOP");
+    const bool gamescope_mode = config::video.linux_display.stream_mode == "gamescope_stream" ||
+                                config::video.linux_display.private_runtime == "gamescope";
+    if (const auto reason = stream_runtime::gamescope_process::display_polaris_restarts(
+          display ? display : "", desktop ? desktop : "", gamescope_mode, runtime_dir / "polaris-gamescope.pid"
+        )) {
+      BOOST_LOG(info) << "Not starting the system tray: "sv << *reason
+                      << ", and Polaris restarts that gamescope during streams, which would end the tray and Polaris with it"sv;
+      start_tray = false;
+    }
+  }
+#endif
+  if (start_tray) {
     BOOST_LOG(info) << "Starting system tray"sv;
 #ifdef _WIN32
     // TODO: Windows has a weird bug where when running as a service and on the first Windows boot,

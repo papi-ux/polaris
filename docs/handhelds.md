@@ -2,8 +2,8 @@
 
 A Steam Deck, ROG Ally, Legion Go or similar device runs two kinds of session. Desktop Mode is a
 normal KDE Plasma desktop. Game Mode is gamescope running Steam full screen, with no desktop
-underneath it. Polaris treats the two very differently today, and this page says exactly what
-works so you do not have to find out from a client that reports the host offline.
+underneath it. Polaris treats the two differently, and this page says exactly what works in each
+so you do not have to find out from a client that reports the host offline.
 
 This applies to SteamOS, Bazzite deck images, CachyOS handheld edition, ChimeraOS, Nobara's
 handheld edition, and any host that installs a gamescope Steam session next to its desktop.
@@ -14,7 +14,9 @@ handheld edition, and any host that installs a gamescope Steam session next to i
 |---|---|
 | Streaming from Desktop Mode | Works as the distro guide describes: [SteamOS](steamos.md), [Bazzite](bazzite.md), [Arch and CachyOS](arch.md). |
 | Polaris staying reachable after switching to Game Mode | Works once Polaris starts at boot. See below. |
-| Streaming what Game Mode shows, or launching games into it | Not supported yet. Tracked in [#626](https://github.com/papi-ux/polaris/issues/626). |
+| Streaming what Game Mode shows | Works, with keyboard, mouse, a controller and touch. See [Streaming from Game Mode](#streaming-from-game-mode). |
+| Launching a Steam title into Game Mode from a client | Works. The launch goes to the Steam that is running Game Mode. |
+| A Private Stream while Game Mode is running | Not possible. Game Mode owns the one screen and the one Steam. The configured mode comes back in Desktop Mode. |
 
 ## Why Polaris disappears in Game Mode
 
@@ -61,71 +63,72 @@ systemd-run --user --on-active=90 --collect \
 With that in place, streaming from Desktop Mode works exactly as before, and the host no longer
 drops off the client list when it returns to Game Mode.
 
-## What Game Mode itself needs
+## Streaming from Game Mode
 
-Streaming from inside Game Mode is a separate piece of work, and none of the current stream paths
-do it:
+While Game Mode is running the host has one screen, and it belongs to the session's gamescope.
+There is no desktop to build a private display beside, and the Steam that is running is the
+session itself. So every stream from the host shows the Game Mode screen, whatever stream mode is
+configured. There is nothing to set: Polaris notices the session, holds the configured mode, and
+gives it back when the host returns to Desktop Mode. The console and `--setup-host` say so while it
+lasts.
 
-- Mirror Desktop looks for a desktop compositor to capture, and a gamescope session has none.
-- Private Stream and Gamescope Stream start their own session and their own Steam, and refuse to
-  fight the Steam that Game Mode already has open.
+What that stream is made of:
 
-Two capture routes already exist in Polaris that a Game Mode session could use: the PipeWire node
-gamescope exports on its own, and DRM/KMS capture of whatever is on screen. Which one holds up across real hardware is still being validated. Progress lives in [#626](https://github.com/papi-ux/polaris/issues/626).
+- **Video** comes from the PipeWire node gamescope exports for its own screen. Polaris attaches to
+  that node directly, and falls back to the ScreenCast portal for gamescope, which SteamOS ships,
+  if the direct attach fails. Leave `capture` unset: a host still set to `capture = kms` from the
+  earlier Game Mode probe takes the picture another way, and the limits below do not describe it.
+- **Keyboard and mouse** go in through the session's libei socket, the same way Steam's own
+  streaming reaches it.
+- **Controllers** arrive as the same virtual pad as on any host, and Game Mode's Steam picks it up
+  the way it picks up a pad that was just plugged in, toast included. On SteamOS the account at the
+  screen may already create one, so an Xbox style pad works with no setup at all. An emulated
+  DualSense needs the input setup from your distro guide (`sudo -H polaris --setup-host`), and so
+  may touch. Touch and pen go to the host the usual way, since the session's gamescope reads the
+  host's devices like the built-in panel.
+- **Audio** follows the default sink, which Polaris points at its own while a stream is up and
+  points back when it ends.
+- **A Steam title** launched from a client is handed to the Steam that is running Game Mode, and
+  Game Mode brings it to the front. A host configured for Private Stream does not ask the player
+  to close Steam first, because there is no other Steam to close. A title that is already open on
+  the device is joined as it is and not launched a second time.
+- **Ending the session** closes the title the stream opened and leaves Game Mode alone. On a
+  desktop host, ending a Steam title's stream closes the Steam that the stream opened. In Game Mode
+  that Steam is the session, so only the title is asked to close, and Steam stays as it is. That
+  happens only when someone ends the session on purpose: End Session on the client, or Close App or
+  Disconnect in the console. A title that was already open on the device when the stream started
+  is left open. A client that drops, a paused session that times out, or a Polaris that restarts
+  closes nothing, so the game is where the player left it.
 
-## Help validate Game Mode streaming
+Known limits:
 
-If you have a Game Mode host and ten minutes, this probe answers the open question without any new
-code. It uses KMS capture, which is how Sunshine streams a Steam Deck in Game Mode, and it needs
-the `cap_sys_admin` capability on the Polaris binary, which `--enable-kms` grants and
-`sudo setcap -r "$(readlink -f "$(command -v polaris)")"` removes again.
+- The picture has no mouse pointer. gamescope draws its pointer on the device's own screen and
+  does not put it in the stream it exports.
+- gamescope sends a frame only when the window in front draws. When a stream starts on a screen
+  that is standing still, Polaris asks that window to draw once so the first frame arrives. The
+  Steam overlay opened over a still app can lag until the app draws again.
+- The stream is the session's resolution, 1280x800 on a Steam Deck, scaled to what the client asked
+  for. HDR is not carried.
 
-1. From Desktop Mode, make Polaris boot independent and allow KMS capture. On Bazzite, follow
-   [headless boot setup](bazzite.md#headless-boot-and-deck-images) and the
-   [optional KMS runtime copy](bazzite.md#optional-drmkms-capture) instead of applying a capability
-   directly to the read-only packaged binary. On a host with a writable packaged binary:
+Proven on a Steam Deck OLED on SteamOS 3.8.16 with gamescope 3.16.23, on the packaged install with
+headless boot enabled: the Game Mode screen, a Steam title launched from the client at 60 fps with
+audio, keyboard, mouse, a controller emulated as a DualSense, and touch, that title closed again
+when the session ended, and Game Mode still running afterwards. Bazzite, other handhelds, and hosts
+whose gamescope has no ScreenCast portal still want field results.
 
-   ```bash
-   sudo -H polaris --setup-host --enable-headless-boot --enable-kms
-   ```
+## Reporting Game Mode results
 
-2. In `~/.config/polaris/polaris.conf`, set the capture backend and the Mirror Desktop path, then
-   restart the service:
+If you have a Game Mode host, connect a client to the **Desktop** entry while Game Mode is running,
+then launch a Steam title from the client. Afterwards collect the lines that say what happened:
 
-   ```ini
-   capture = kms
-   linux_stream_mode = desktop_display
-   ```
+```bash
+journalctl --user -u polaris --since "20 minutes ago" --no-pager \
+  | grep -iE 'game_mode|portal|gamescope|EI virtual|encoder|error|warn' > ~/game-mode-journal.txt
+```
 
-   ```bash
-   systemctl --user restart polaris
-   ```
-
-3. Schedule the evidence dump, which fires while Game Mode is active:
-
-   ```bash
-   systemd-run --user --on-active=120 --collect bash -c '
-     pw-cli ls Node > ~/game-mode-nodes.txt 2>&1
-     systemctl --user status polaris --no-pager -l > ~/game-mode-polaris.txt 2>&1'
-   ```
-
-4. Switch to Game Mode. Within two minutes, connect a client to the **Desktop** entry and keep
-   trying for a minute, whether or not video appears.
-
-5. Switch back to Desktop Mode and collect the results:
-
-   ```bash
-   journalctl --user -u polaris --since "20 minutes ago" --no-pager \
-     | grep -iE 'kms|capture|encoder|portal|display|session|error|warn' > ~/game-mode-journal.txt
-   ```
-
-6. Post `~/game-mode-nodes.txt`, `~/game-mode-polaris.txt` and `~/game-mode-journal.txt` on
-   [#626](https://github.com/papi-ux/polaris/issues/626) with the device, distro and image, GPU,
-   client, and Polaris version. Say whether the client got video, audio, and input.
-
-The node list tells us whether Game Mode's gamescope exports its PipeWire stream on your host,
-which decides the capture route. The journal tells us whether KMS capture and the encoder came up
-at all.
+Post that file on [#626](https://github.com/papi-ux/polaris/issues/626) with the device, distro and
+image, GPU, client, and Polaris version. Say whether the client got video, audio, keyboard and
+mouse, and a controller, and whether Game Mode was still running after the stream ended.
 
 ## Reporting handheld results
 

@@ -2210,11 +2210,15 @@ std::string get_local_ip_for_gateway() {
     // startup log says so once and scrolls away, so keep it where the Doctor
     // can read it for as long as this evaluation stands (#686 follow-up).
     kms_capability_refused = true;
-    verified_action::confirm(
-      "video.kms_capability",
-      "Read a DRM framebuffer handle for KMS capture",
-      false
-    );
+    // A silent failure is an action that was asked for and did not land. Only a host set to KMS
+    // capture asked; on any other the probe simply found KMS off, which the probe itself says.
+    if (config::video.capture == "kms") {
+      verified_action::confirm(
+        "video.kms_capability",
+        "Read a DRM framebuffer handle for KMS capture",
+        false
+      );
+    }
   }
 
 #ifdef POLARIS_TESTS

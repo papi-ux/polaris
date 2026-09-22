@@ -150,6 +150,8 @@ namespace multiseat {
     std::size_t readiness_rejections = 0;
     std::vector<worker_identity_t> active_workers;
     bool backend_observation_failed = false;
+    /** What the failed inventory said, for the reconcile log line. */
+    std::string backend_observation_error;
     bool inventory_authoritative = false;
     bool admission_ready = false;
   };

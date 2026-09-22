@@ -16,7 +16,9 @@ import (
 
 // This observes exit without reaping. The original zombie keeps its PID/PGID
 // reserved until the one cleanup owner has finished every group signal.
-func observeRuntimeProcessExit(pidFD int, done chan error) {
+// finished is told whether the helper returned status 0 by itself, before done
+// closes, so whoever wakes on done can already ask.
+func observeRuntimeProcessExit(pidFD int, done chan error, finished func(bool)) {
 	defer close(done)
 	poll := struct {
 		fd              int32
@@ -27,8 +29,42 @@ func observeRuntimeProcessExit(pidFD int, done chan error) {
 		if errno == syscall.EINTR {
 			continue
 		}
-		return
+		break
 	}
+	if finished != nil {
+		finished(runtimeProcessReturnedSuccess(pidFD))
+	}
+}
+
+// runtimeProcessReturnedSuccess looks at an exited helper's status and leaves
+// it waitable: WNOWAIT, for the same reason the observer does not reap. Any
+// doubt, a signal, a nonzero status or a status that cannot be read, is not
+// success. The pidfd is still open here, because stop closes it only after it
+// has seen done closed.
+func runtimeProcessReturnedSuccess(pidFD int) bool {
+	const (
+		idTypePidFD = 3                                    // P_PIDFD
+		waitOptions = 0x00000004 | 0x00000001 | 0x01000000 // WEXITED|WNOHANG|WNOWAIT
+		codeExited  = 1                                    // CLD_EXITED
+	)
+	// siginfo_t for SIGCHLD: si_code at 8, si_pid at 16, si_status at 24.
+	var information [128]byte
+	for {
+		_, _, errno := syscall.Syscall6(syscall.SYS_WAITID, idTypePidFD, uintptr(pidFD),
+			uintptr(unsafe.Pointer(&information[0])), waitOptions, 0, 0)
+		if errno == syscall.EINTR {
+			continue
+		}
+		if errno != 0 {
+			return false
+		}
+		break
+	}
+	word := func(offset int) int32 {
+		return *(*int32)(unsafe.Pointer(&information[offset]))
+	}
+	// WNOHANG answers with a zero si_pid when nothing has exited yet.
+	return word(16) != 0 && word(8) == codeExited && word(24) == 0
 }
 
 func runtimeProcessGroupStopped(group int) (bool, error) {

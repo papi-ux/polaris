@@ -19,6 +19,7 @@
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <source_location>
 #include <string_view>
 #include <unordered_set>
 #include <utility>
@@ -27,6 +28,13 @@ namespace multiseat::container {
   namespace {
     using json = nlohmann::json;
     using namespace std::literals;
+
+    // Which way a bounded engine command failed, for the words of the error it raises.
+    std::string describe_command_failure(const command_result_t &result) {
+      if (result.timed_out) return "timed out";
+      if (result.output_truncated) return "returned more output than Polaris reads";
+      return "exited with status " + std::to_string(result.exit_status);
+    }
 
     constexpr auto label_protocol = "io.polaris.multiseat.protocol"sv;
     constexpr auto label_deployment = "io.polaris.multiseat.deployment"sv;
@@ -63,6 +71,25 @@ namespace multiseat::container {
     constexpr auto podman_init_destination = "/run/podman-init"sv;
     constexpr auto profile_volume_destination = "/var/lib/polaris-seat"sv;
     constexpr auto shared_game_mount_root = "/mnt/games/"sv;
+    // Where a borrowed driver file may land: the two loader directories and the
+    // vendor descriptions beside them. Nothing else in the image is writable
+    // over, and a Space's own home, sockets and game shares are elsewhere.
+    constexpr auto host_driver_amd64_root = "/usr/lib/x86_64-linux-gnu/"sv;
+    constexpr auto host_driver_i386_root = "/usr/lib/i386-linux-gnu/"sv;
+    constexpr auto host_driver_share_root = "/usr/share/"sv;
+    constexpr std::size_t maximum_host_driver_mounts = 128;
+    constexpr auto host_driver_cache_directory = "/etc/polaris-ld"sv;
+    /**
+     * A library lands directly in its loader directory; a vendor description
+     * lands under /usr/share in the directory its loader reads.
+     */
+    bool mount_destination_within(
+      const std::filesystem::path &destination, std::string_view prefix, bool allow_subdirectories
+    ) {
+      const auto &text = destination.native();
+      if (!text.starts_with(prefix) || text.size() <= prefix.size()) return false;
+      return allow_subdirectories || text.find('/', prefix.size()) == std::string::npos;
+    }
     constexpr std::size_t maximum_inspected_devices =
       input::maximum_input_allocations + 64;
     constexpr std::size_t maximum_runtime_spec_mounts =
@@ -301,22 +328,6 @@ namespace multiseat::container {
              profile == runtime_profile_e::lutris;
     }
 
-    std::string runtime_profile_name(runtime_profile_e profile) {
-      switch (profile) {
-        case runtime_profile_e::gamescope:
-          return "gamescope";
-        case runtime_profile_e::steam:
-          return "steam";
-        case runtime_profile_e::heroic:
-          return "heroic";
-        case runtime_profile_e::lutris:
-          return "lutris";
-        case runtime_profile_e::unknown:
-          break;
-      }
-      return {};
-    }
-
     std::string workload_kind_name(workload_kind_e kind) {
       switch (kind) {
         case workload_kind_e::gamescope:
@@ -533,7 +544,7 @@ namespace multiseat::container {
         {std::string {label_input}, spec.resources.input_seat},
         {std::string {label_input_manifest}, std::string {input_fingerprint}},
         {std::string {label_render_node}, spec.render_node},
-        {std::string {label_runtime_profile}, runtime_profile_name(spec.runtime_profile)},
+        {std::string {label_runtime_profile}, std::string {runtime_profile_name(spec.runtime_profile)}},
         {std::string {label_workload_kind}, workload_kind_name(spec.workload.kind)},
         {std::string {label_workload_target}, spec.workload.target_id},
         {std::string {label_display_topology}, std::string {display_topology_name}},
@@ -674,6 +685,33 @@ namespace multiseat::container {
             !mount_paths.emplace(mount.host_path.native()).second) {
           throw std::invalid_argument {"container game mounts are invalid"};
         }
+      }
+
+      const auto &driver = options.host_driver;
+      if (!driver.mounts.empty()) {
+        // Borrowed driver files land in the loader's own directories, and
+        // nowhere a Space keeps its home, its sockets or a game share.
+        if (options.engine != engine_e::docker || driver.driver_version.empty() || driver.contract != 1 ||
+            driver.mounts.size() > maximum_host_driver_mounts) {
+          throw std::invalid_argument {"host driver options are invalid"};
+        }
+        std::unordered_set<std::string> destinations;
+        for (const auto &mount : driver.mounts) {
+          const std::filesystem::path destination {mount.destination};
+          const auto library_of = [&destination](std::string_view prefix) {
+            return mount_destination_within(destination, prefix, false);
+          };
+          if (!safe_path(mount.host_path) || !safe_path(destination) ||
+              !(library_of(host_driver_amd64_root) || library_of(host_driver_i386_root) ||
+                mount_destination_within(destination, host_driver_share_root, true)) ||
+              !destinations.emplace(mount.destination).second ||
+              !mount_paths.emplace(mount.host_path.native()).second) {
+            throw std::invalid_argument {"host driver mounts are invalid"};
+          }
+        }
+      } else if (std::any_of(options.profiles.begin(), options.profiles.end(),
+                   [](const auto &profile) { return profile.host_driver_libraries; })) {
+        throw std::invalid_argument {"host driver runtime has no driver files"};
       }
     }
   }  // namespace
@@ -823,12 +861,19 @@ namespace multiseat::container {
         return "rw,nosuid,nodev,size=" + std::to_string(bytes) +
                ",mode=" + std::string(mode) + owner;
       };
-      return {
+      json entries {
         {"/run", bounded(options.runtime_tmpfs_bytes, "0700")},
         {"/run/polaris", bounded(options.runtime_tmpfs_bytes, "0700")},
         {"/tmp", bounded(options.temporary_tmpfs_bytes, "0700")},
         {"/var/tmp", bounded(options.temporary_tmpfs_bytes, "1777")},
       };
+      // A borrowed driver needs a writable loader cache: the rootfs is read
+      // only, and Steam's pressure-vessel finds the graphics stack by matching
+      // sonames against that cache before it copies them into a game's own
+      // namespace.
+      if (!options.host_driver.mounts.empty())
+        entries[std::string {host_driver_cache_directory}] = bounded(8ULL * 1024ULL * 1024ULL, "0700");
+      return entries;
     }
 
     bool empty_array_or_null(const json &object, std::string_view key) {
@@ -844,9 +889,19 @@ namespace multiseat::container {
   ) const {
     auto argv = command_prefix(options_);
     std::string network = "none";
-    if (options_.media_enabled && profile.runtime_profile == runtime_profile_e::steam) {
-      const auto id = profile_network_id(host_, profile.profile_key, true);
-      if (!id) throw std::runtime_error {"Steam profile network is unavailable or occupied"};
+    if (options_.media_enabled && needs_profile_network(profile.runtime_profile)) {
+      auto id = profile_network_id(host_, profile.profile_key, true);
+      // A Space's network is unused whenever the Space is not running, so a
+      // plain `docker network prune` takes it, and the Space then refuses to
+      // start with nothing to say why. It holds no player data and only
+      // Polaris makes one, so an absent network is made again, on this path
+      // alone so a healthy launch asks Docker nothing extra. A network that
+      // exists under that name with any other identity is never adopted:
+      // creation refuses a name already taken, and launch still demands
+      // Polaris's exact network again before anything is run.
+      if (!id && create_profile_network(host_, profile.profile_key))
+        id = profile_network_id(host_, profile.profile_key, true);
+      if (!id) throw std::runtime_error {"Space network is unavailable or occupied"};
       network = *id;
     }
     const std::vector<std::string> arguments {
@@ -878,7 +933,7 @@ namespace multiseat::container {
     if (!options_.selinux_type.empty()) {
       argv.push_back("--security-opt=label=type:" + options_.selinux_type);
     }
-    if (options_.media_enabled && profile.runtime_profile == runtime_profile_e::steam) {
+    if (options_.media_enabled && needs_profile_network(profile.runtime_profile)) {
       argv.push_back("--security-opt=seccomp=" + std::string(steam_seccomp_path));
     }
     for (const auto group : groups) argv.push_back("--group-add=" + std::to_string(group));
@@ -896,10 +951,15 @@ namespace multiseat::container {
   ) const {
     const auto &config = record.at("Config");
     const auto &host = record.at("HostConfig");
-    const auto fail = []() { throw std::runtime_error {"Docker worker isolation or launch configuration changed"}; };
+    // Say which part differs. A worker rejected here is stopped, and the Space only reported that
+    // its runtime did not start, so a check that names nothing left no way to tell what changed.
+    const auto fail = [](std::string_view what = {}, std::source_location where = std::source_location::current()) {
+      throw std::runtime_error {"Docker worker isolation or launch configuration changed (" +
+        (what.empty() ? "check at line " + std::to_string(where.line()) : std::string {what}) + ")"};
+    };
     const auto exact = [&fail](const json &object, std::string_view key, const json &expected) {
       const auto *value = object_member(object, key);
-      if (!value || *value != expected) fail();
+      if (!value || *value != expected) fail(key);
     };
     exact(config, "User", std::to_string(host_.effective_uid()) + ":" + std::to_string(host_.effective_gid()));
     exact(config, "Image", label_value(labels, label_runtime_image).value());
@@ -927,7 +987,13 @@ namespace multiseat::container {
     exact(host, "CapDrop", json::array({"ALL"}));
     auto security = json::array({"no-new-privileges"});
     if (!options_.selinux_type.empty()) security.push_back("label=type:" + options_.selinux_type);
-    if (options_.media_enabled && label_value(labels, label_runtime_profile) == "steam") {
+    // The same rule the launch applies, asked the same way. Expecting the
+    // policy for Steam alone while launching it for every launcher made
+    // Polaris reject its own healthy worker: the record carried an option the
+    // validator said could not be there, the inventory stopped being
+    // authoritative, and the Space timed out with a container that was fine.
+    if (options_.media_enabled &&
+        needs_profile_network(runtime_profile_from_name(label_value(labels, label_runtime_profile).value_or("")))) {
       security.push_back("seccomp=" + json::parse(steam_seccomp_data).dump());
     }
     exact(host, "SecurityOpt", security);
@@ -953,7 +1019,7 @@ namespace multiseat::container {
         profile->image_reference != label_value(labels, label_runtime_image) ||
         runtime_profile_name(profile->runtime_profile) != label_value(labels, label_runtime_profile)) fail();
 
-    if (options_.media_enabled && profile->runtime_profile == runtime_profile_e::steam) {
+    if (options_.media_enabled && needs_profile_network(profile->runtime_profile)) {
       const auto id = profile_network_id(host_, profile->profile_key, false, record.at("Id").get<std::string>());
       if (!id) fail();
       exact(host, "NetworkMode", *id);
@@ -1481,9 +1547,12 @@ namespace multiseat::container {
     return gpu && profile &&
            spec.encoder_sessions <= gpu->max_encoder_sessions &&
            profile->runtime_profile == spec.runtime_profile &&
+           // A title from the Space's own library is admitted without being
+           // listed as a configured workload, but only through its family's
+           // grammar.
            (workload_allowed(spec.workload) ||
-            (profile->steam_library_enabled && profile->runtime_profile == runtime_profile_e::steam &&
-             spec.workload.kind == workload_kind_e::steam && valid_steam_target(spec.workload.target_id)));
+            (profile->library_enabled &&
+             supported_streaming_workload(profile->runtime_profile, spec.workload)));
   }
 
   std::vector<std::string> backend_t::launch_argv(
@@ -1589,7 +1658,7 @@ namespace multiseat::container {
     add_environment("POLARIS_SEAT_SLOT", std::to_string(spec.identity.seat.slot));
     add_environment("POLARIS_SEAT_GENERATION", std::to_string(spec.identity.seat.generation));
     add_environment("POLARIS_RENDER_NODE", spec.render_node);
-    add_environment("POLARIS_RUNTIME_PROFILE", runtime_profile_name(spec.runtime_profile));
+    add_environment("POLARIS_RUNTIME_PROFILE", std::string {runtime_profile_name(spec.runtime_profile)});
     add_environment("POLARIS_DISPLAY_TOPOLOGY", std::string {display_topology_name});
     add_environment("POLARIS_MEDIA_PIPELINE", std::string {media_pipeline_name});
     add_environment("POLARIS_DISPLAY_WIDTH", std::to_string(spec.display_mode.width));
@@ -1619,6 +1688,18 @@ namespace multiseat::container {
         "--mount=type=bind,src=" + mount.host_path.native() +
         ",dst=" + std::string {shared_game_mount_root} + mount.mount_name + ",ro=true"
       );
+    }
+    if (profile.host_driver_libraries) {
+      // A runtime built without driver libraries of its own borrows this
+      // machine's, read only and at the paths the loader resolves them by.
+      // Deliberately unlabelled: relabelling the host's own /usr would damage
+      // the host, so SELinux policy grants the read instead.
+      for (const auto &mount : options_.host_driver.mounts) {
+        argv.push_back(
+          "--mount=type=bind,src=" + mount.host_path.native() +
+          ",dst=" + mount.destination + ",ro=true"
+        );
+      }
     }
 
     argv.push_back("--entrypoint=" + options_.worker_entrypoint.native());
@@ -1685,7 +1766,7 @@ namespace multiseat::container {
     try {
       // A missing or changed policy is a definite refusal before Docker run.
       // Do not quarantine this as an uncertain container creation outcome.
-      if (options_.media_enabled && profile->runtime_profile == runtime_profile_e::steam &&
+      if (options_.media_enabled && needs_profile_network(profile->runtime_profile) &&
           !host_.trusted_data_file(std::filesystem::path(steam_seccomp_path), steam_seccomp_data)) {
         return worker_command_result_e::rejected;
       }
@@ -1702,7 +1783,7 @@ namespace multiseat::container {
           !gpu_catalog_current() || !input_allocation_current(*input_allocation)) {
         return worker_command_result_e::rejected;
       }
-      if (options_.media_enabled && profile->runtime_profile == runtime_profile_e::steam) {
+      if (options_.media_enabled && needs_profile_network(profile->runtime_profile)) {
         const auto network = profile_network_id(host_, profile->profile_key, true);
         if (!network || std::find(argv.begin(), argv.end(), "--network=" + *network) == argv.end())
           return worker_command_result_e::rejected;
@@ -1869,7 +1950,7 @@ namespace multiseat::container {
       options_.max_command_output_bytes
     );
     if (listed.timed_out || listed.output_truncated || listed.exit_status != 0) {
-      throw std::runtime_error {"container inventory listing failed"};
+      throw std::runtime_error {"container inventory listing " + describe_command_failure(listed)};
     }
     const auto ids = parse_container_ids(listed.output, options_.max_inventory_workers);
     if (ids.empty()) {
@@ -1886,7 +1967,8 @@ namespace multiseat::container {
       options_.max_command_output_bytes
     );
     if (inspected.timed_out || inspected.output_truncated || inspected.exit_status != 0) {
-      throw std::runtime_error {"container inventory inspection failed"};
+      // A worker that exits between the listing and this call is the usual one.
+      throw std::runtime_error {"container inventory inspection " + describe_command_failure(inspected)};
     }
 
     try {
@@ -2123,6 +2205,22 @@ namespace multiseat::container {
                 "ro",
               }
             );
+          }
+          const auto driver_profile = std::find_if(
+            options_.profiles.begin(),
+            options_.profiles.end(),
+            [&volume](const auto &candidate) { return candidate.opaque_volume_name == *volume; }
+          );
+          if (driver_profile != options_.profiles.end() && driver_profile->host_driver_libraries) {
+            // Borrowed driver files are part of the expected set, so the count
+            // check and the one-for-one comparison below keep holding: an
+            // injected or re-pointed driver bind is still a rejected container.
+            for (const auto &mount : options_.host_driver.mounts) {
+              expectations.controller_binds.emplace(
+                mount.host_path.native(),
+                expected_bind_t {mount.destination, "ro"}
+              );
+            }
           }
           std::vector<declared_device_binding_t> declared;
           if (options_.engine == engine_e::docker) {

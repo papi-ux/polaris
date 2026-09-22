@@ -13,13 +13,19 @@ export function validSetupStart(value) {
 export function validJobSnapshot(value) {
   if (!value || value.version !== 1 || typeof value.available !== 'boolean' || !text(value.message) ||
       (value.unavailable_reason !== undefined && !word(value.unavailable_reason)) ||
-      !Array.isArray(value.runtimes) || value.runtimes.length > 16) return false
+      !Array.isArray(value.runtimes) || value.runtimes.length > 64) return false
   const ids = new Set()
   for (const runtime of value.runtimes) {
     if (!runtime || !runtimeId.test(runtime.id) || ids.has(runtime.id) ||
-        !['default', 'nvidia'].includes(runtime.variant) || typeof runtime.nvidia_driver !== 'string') return false
-    if (runtime.variant === 'default' ? runtime.nvidia_driver !== '' :
-        runtime.nvidia_driver.length > 32 || !/^[0-9]+(?:\.[0-9]+)+$/.test(runtime.nvidia_driver)) return false
+        !['default', 'nvidia', 'nvidia-host'].includes(runtime.variant) ||
+        typeof runtime.nvidia_driver !== 'string') return false
+    // Only a runtime carrying NVIDIA userspace of its own names a driver. One
+    // that borrows this PC's names none, like the AMD and Intel runtime.
+    if (runtime.variant === 'nvidia' ?
+        runtime.nvidia_driver.length > 32 || !/^[0-9]+(?:\.[0-9]+)+$/.test(runtime.nvidia_driver) :
+        runtime.nvidia_driver !== '') return false
+    // The launcher it carries. A host from before launcher families sends none.
+    if (runtime.profile !== undefined && !['steam', 'heroic', 'lutris'].includes(runtime.profile)) return false
     ids.add(runtime.id)
   }
   if (value.available && !ids.size) return false

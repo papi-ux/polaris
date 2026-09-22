@@ -46,7 +46,10 @@ def materialized_context(revision, profile_id, nvidia):
         context = pathlib.Path(temporary)
         archive_path = context / 'source.tar'
         with archive_path.open('wb') as stream:
-            run(['git', 'archive', revision, 'LICENSE', 'multiseat_worker', 'containers/multiseat'], stdout=stream)
+            # The worker's own tests run inside this build, and one of them
+            # reads the target grammar both languages are pinned to.
+            run(['git', 'archive', revision, 'LICENSE', 'multiseat_worker', 'containers/multiseat',
+                 'tests/fixtures/launcher-targets.json'], stdout=stream)
         with tarfile.open(archive_path) as archive:
             for member in archive.getmembers():
                 name = pathlib.PurePosixPath(member.name)
@@ -122,8 +125,8 @@ def sbom(packages, profile, revision, context):
         components.append({'type': 'file', 'name': 'polaris-input-provider/' + name,
                            'version': revision, 'bom-ref': 'polaris-input-provider/' + name,
                            'hashes': [{'alg': 'SHA-256', 'content': digest(here / 'providers' / name)}]})
-    if profile == 'steam':
-        name = 'steam-input.c'
+    # What Polaris itself puts into one family's image and no other's.
+    for name in {'steam': ['steam-input.c'], 'heroic': ['bwrap-in-a-space.sh'], 'lutris': ['bwrap-in-a-space.sh']}.get(profile, []):
         components.append({'type': 'file', 'name': 'polaris-input-provider/' + name,
                            'version': revision, 'bom-ref': 'polaris-input-provider/' + name,
                            'hashes': [{'alg': 'SHA-256', 'content': digest(here / 'providers' / name)}]})
@@ -171,13 +174,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('profile', choices=['gamescope', 'steam', 'heroic', 'lutris'])
     parser.add_argument('--nvidia', action='store_true')
+    # A host-driver image carries no driver of its own and borrows the machine's.
+    parser.add_argument('--nvidia-host', dest='nvidia_host', action='store_true')
     parser.add_argument('--engine', choices=['docker', 'podman'], default='docker')
     args = parser.parse_args()
     revision = output(['git', 'rev-parse', 'HEAD']).strip()
     if output(['git', 'status', '--porcelain']):
         parser.error('commit the reviewed source before producing acceptance artifacts')
     epoch = output(['git', 'show', '-s', '--format=%ct', revision]).strip()
-    with materialized_context(revision, args.profile, args.nvidia) as context:
+    with materialized_context(revision, args.profile, args.nvidia or args.nvidia_host) as context:
         build_artifact(args, revision, epoch, context)
 
 
@@ -188,7 +193,7 @@ def build_artifact(args, revision, epoch, context):
     packages = json.loads((here / profile['dependency_lock']).read_text())
     if images['schema'] != 2 or images['platform'] != 'linux/amd64' or packages['source_root'] != profile['reference']:
         raise ValueError('source root, dependency lock and architecture must agree')
-    variant = 'nvidia' if args.nvidia else 'default'
+    variant = 'nvidia-host' if args.nvidia_host else 'nvidia' if args.nvidia else 'default'
     artifact = REPO / 'build/worker-artifacts' / args.profile / variant
     artifact.mkdir(parents=True, exist_ok=True)
     image = 'localhost/polaris-worker-' + args.profile + '-' + variant + ':' + revision[:12]
@@ -208,7 +213,8 @@ def build_artifact(args, revision, epoch, context):
                '--build-arg', 'RUNTIME_IMAGE=' + profile['reference'],
                '--build-arg', 'GO_BUILDER_IMAGE=' + images['builder']['reference'],
                '--build-arg', 'POLARIS_REVISION=' + revision]
-    run(command + ['--target', 'worker-nvidia' if args.nvidia else 'worker', '-t', image, str(context)])
+    worker_target = 'worker-nvidia-host' if args.nvidia_host else 'worker-nvidia' if args.nvidia else 'worker'
+    run(command + ['--target', worker_target, '-t', image, str(context)])
     inspected = json.loads(output(engine + ['image', 'inspect', image]))[0]
     labels = inspected['Config']['Labels'] if args.engine == 'docker' else inspected['Labels']
     if inspected['Architecture'] != 'amd64' or inspected['Os'] != 'linux' or labels.get('org.opencontainers.image.revision') != revision or labels.get('io.polaris.multiseat.profile') != args.profile:
@@ -221,7 +227,9 @@ def build_artifact(args, revision, epoch, context):
     # CI covers all device-free real providers and their independent teardown.
     # Gamescope hardware acceptance is a separate required physical receipt.
     provider_image = image + '-providers'
-    run(command + ['--target', 'provider-nvidia-test' if args.nvidia else 'provider-test', '-t', provider_image, str(context)])
+    provider_target = ('provider-nvidia-host-test' if args.nvidia_host else
+                       'provider-nvidia-test' if args.nvidia else 'provider-test')
+    run(command + ['--target', provider_target, '-t', provider_image, str(context)])
     provider_inspected = json.loads(output(engine + ['image', 'inspect', provider_image]))[0]
     provider_config = 'sha256:' + provider_inspected['Id'].removeprefix('sha256:')
     if args.engine == 'docker':
@@ -252,7 +260,7 @@ def build_artifact(args, revision, epoch, context):
     (artifact / 'packages.tsv').write_text(package_manifest)
     bill = sbom(package_manifest, args.profile, revision, context)
     extra_files = []
-    if args.nvidia:
+    if args.nvidia or args.nvidia_host:
         codec = json.loads((here / 'locks/nvcodec.json').read_text())
         bill['components'].append({'type': 'library', 'name': 'gstreamer-nvcodec',
                                    'version': codec['version'], 'bom-ref': 'gstreamer-nvcodec',
@@ -270,12 +278,17 @@ def build_artifact(args, revision, epoch, context):
             records[filename] = json.loads(content)
             extra_files.append(filename)
         report = records['nvidia-runtime.json']
-        if (report['result'] != 'passed' or report['driver_version'] != nvidia['version'] or
+        # A host-driver image carries no driver of its own, so its receipt names
+        # none: the version it runs against is whatever the machine has loaded.
+        expected_version = '' if args.nvidia_host else nvidia['version']
+        if (report['result'] != 'passed' or report['driver_version'] != expected_version or
+                report.get('source', 'image') != ('host' if args.nvidia_host else 'image') or
                 report['architectures'] != architectures(args.profile) or
                 records['nvidia-files.json']['architectures'] != report['architectures'] or
                 report['manifest_sha256'] != digest(artifact / 'nvidia-files.json')):
             raise ValueError('NVIDIA runtime receipt does not match the produced image')
-        bill['components'].append({'type': 'library', 'name': 'nvidia-graphics-userspace',
+        bill['components'].append({'type': 'library',
+                                   'name': 'nvidia-egl-platform-userspace' if args.nvidia_host else 'nvidia-graphics-userspace',
                                    'version': nvidia['version'], 'bom-ref': 'nvidia-userspace',
                                    'properties': [{'name': 'polaris:source-archive-sha256', 'value': nvidia['sha256']},
                                                   {'name': 'polaris:architectures', 'value': ','.join(report['architectures'])},

@@ -11,12 +11,14 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
 #include <optional>
 #include <sstream>
 #include <sys/stat.h>
+#include <thread>
 #include <system_error>
 #include <unistd.h>
 
@@ -367,6 +369,93 @@ namespace platf::game_mode_host {
     return detection;
   }
 
+  namespace {
+    constexpr auto session_live_ttl = std::chrono::seconds {2};
+    /// The oldest answer that may be handed out while a newer one is fetched. Past it the caller
+    /// waits for a scan: a teardown or a launch after a quiet spell must not act on a mode switch
+    /// that happened while nobody was asking.
+    constexpr auto session_live_stale_limit = std::chrono::seconds {10};
+
+    std::mutex session_live_mutex;
+    std::optional<bool> session_live_override;
+    std::optional<bool> session_live_answer;
+    std::chrono::steady_clock::time_point session_live_read_at;
+    bool session_live_refreshing {false};  ///< a scan is out; guarded by session_live_mutex
+
+    bool scan_session_live() {
+      detection_t detection;
+      probe_t live;
+      live.proc_root = "/proc";
+      live.uid = ::getuid();
+      scan_processes(live, detection);
+      return detection.session_active;
+    }
+  }  // namespace
+
+  bool session_live() {
+    std::unique_lock lock {session_live_mutex};
+    if (session_live_override) {
+      return *session_live_override;
+    }
+
+    const auto age = std::chrono::steady_clock::now() - session_live_read_at;
+    if (!session_live_answer || age >= session_live_stale_limit) {
+      // No answer yet, or one too old to act on: this caller waits for a scan.
+      lock.unlock();
+      const bool live = scan_session_live();
+      lock.lock();
+      if (session_live_override) {
+        return *session_live_override;
+      }
+      session_live_answer = live;
+      session_live_read_at = std::chrono::steady_clock::now();
+      return live;
+    }
+
+    // A young answer is refreshed off the caller's thread. Some callers ask per input event, and
+    // a walk of /proc is not something a pointer move should wait for. An answer a few seconds
+    // old is fine for something that changes when a person switches modes.
+    if (age >= session_live_ttl && !session_live_refreshing) {
+      session_live_refreshing = true;
+      try {
+        std::thread([]() {
+          bool live = false;
+          bool scanned = false;
+          try {
+            live = scan_session_live();
+            scanned = true;
+          } catch (...) {
+          }
+          std::lock_guard guard {session_live_mutex};
+          if (scanned && !session_live_override) {
+            // Only a scan that happened makes the answer young again.
+            session_live_answer = live;
+            session_live_read_at = std::chrono::steady_clock::now();
+          }
+          session_live_refreshing = false;
+        }).detach();
+      } catch (...) {
+        session_live_refreshing = false;  // no thread to be had; the old answer stands until it is too old
+      }
+    }
+    return *session_live_answer;
+  }
+
+  bool streams_session_screen(
+    std::string_view stream_mode,
+    bool use_private_compositor,
+    bool has_private_socket,
+    bool session_is_live
+  ) {
+    return session_is_live && stream_mode == "desktop_display" && !use_private_compositor && !has_private_socket;
+  }
+
+  void set_session_live_for_tests(std::optional<bool> live) {
+    std::lock_guard lock {session_live_mutex};
+    session_live_override = live;
+    session_live_answer.reset();
+  }
+
   std::string headline_evidence(const detection_t &detection) {
     if (detection.evidence.empty()) {
       return "no evidence recorded";
@@ -432,8 +521,8 @@ namespace platf::game_mode_host {
     if (detection.session_active) {
       return guidance_t {
         "game_mode_session",
-        "Steam Game Mode is running. Streaming from inside Game Mode is not supported yet.",
-        "Switch to Desktop Mode to stream. The handhelds guide lists what works today.",
+        "Steam Game Mode is running. Every stream from this host shows the Game Mode screen, whatever stream mode is configured.",
+        "No action needed. The configured stream mode comes back in Desktop Mode.",
       };
     }
     if (has_wayland_display || has_x11_display) {
@@ -469,7 +558,7 @@ namespace platf::game_mode_host {
       return {};
     }
     const std::string enable_command = "sudo -H " + std::string(exe_path) + " --setup-host --enable-headless-boot";
-    const std::string not_yet = "Streaming from inside Game Mode is not supported yet; Desktop Mode streams work. See docs/handhelds.md.\n";
+    const std::string in_game_mode = "While Game Mode is running, every stream shows the Game Mode screen, and the configured stream mode comes back in Desktop Mode. See docs/handhelds.md.\n";
     std::string advice = "Steam Game Mode session detected: " + headline_evidence(detection) + ".\n";
     switch (state) {
       case setup_host_state_t::needs_headless_boot:
@@ -478,10 +567,10 @@ namespace platf::game_mode_host {
         return advice;
       case setup_host_state_t::already_independent:
         advice += "Polaris already starts at boot, so switching between Desktop Mode and Game Mode does not take it offline.\n";
-        return advice + not_yet;
+        return advice + in_game_mode;
       case setup_host_state_t::headless_boot_enabled_now:
         advice += "With headless boot on, switching between Desktop Mode and Game Mode no longer takes Polaris offline.\n";
-        return advice + not_yet;
+        return advice + in_game_mode;
       case setup_host_state_t::headless_boot_disabled_now:
         advice += "With headless boot off, Polaris goes offline when the host returns to Game Mode and comes back after a Desktop Mode login.\n";
         advice += "Turn it back on with:\n  " + enable_command + "\n";

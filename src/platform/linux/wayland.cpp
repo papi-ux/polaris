@@ -26,6 +26,7 @@
 
 // local includes
 #include "graphics.h"
+#include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
 #include "src/round_robin.h"
@@ -207,7 +208,10 @@ namespace wl {
     }
 
     if (!display_name) {
-      BOOST_LOG(error) << "Environment variable WAYLAND_DISPLAY has not been defined"sv;
+      // Every capture evaluation asks, and a host with no desktop session, such as one in Steam Game
+      // Mode or started at boot, has no WAYLAND_DISPLAY by design. It is only a fault when wlr capture
+      // was chosen by name.
+      BOOST_LOG(config::video.capture == "wlr" ? error : debug) << "Environment variable WAYLAND_DISPLAY has not been defined"sv;
       return -1;
     }
 

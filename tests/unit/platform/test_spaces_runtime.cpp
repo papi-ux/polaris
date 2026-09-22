@@ -14,9 +14,10 @@ namespace {
     return {{"id", "steam-test"}, {"profile", "steam"}, {"variant", "default"},
       {"platform", "linux/amd64"}, {"media_contract", 1}, {"uid", 1000}, {"gid", 1000},
       {"source_revision", std::string(40, 'a')}, {"registry_digest", "sha256:" + std::string(64, 'b')},
-      {"config_digest", "sha256:" + std::string(64, 'c')}, {"nvidia_driver", ""}};
+      {"config_digest", "sha256:" + std::string(64, 'c')}, {"nvidia_driver", ""},
+      {"nvidia_minimum_driver", ""}};
   }
-  std::string catalog(json entries) { return json({{"schema", 1}, {"runtimes", entries}}).dump(); }
+  std::string catalog(json entries) { return json({{"schema", 2}, {"runtimes", entries}}).dump(); }
   spaces::runtime_t runtime() { return spaces::decode_runtime_catalog(catalog(json::array({entry()})))->front(); }
   json inspected(const spaces::runtime_t &r) {
     return json::array({{{"Id", r.config_digest}, {"Os", "linux"}, {"Architecture", "amd64"},
@@ -71,22 +72,70 @@ TEST(SpacesRuntime, CatalogIsBoundedAndRejectsIncompatibleOrAmbiguousEntries) {
   ASSERT_TRUE(spaces::trusted_runtimes());
   EXPECT_TRUE(spaces::decode_runtime_catalog(catalog(json::array())));
   for (const auto &[key, value] : std::vector<std::pair<std::string, json>> {
-      {"profile", "heroic"}, {"platform", "linux/arm64"}, {"media_contract", 2}, {"media_contract", true},
+      {"profile", "gamescope"}, {"profile", "steam-heroic"}, {"profile", ""}, {"profile", 2},
+      {"platform", "linux/arm64"}, {"media_contract", 2}, {"media_contract", true},
       {"uid", 1001}, {"gid", 0}, {"id", "--all"}, {"id", "../steam"}, {"variant", "other"},
       {"source_revision", "main"}, {"registry_digest", "latest"}, {"config_digest", "sha256:no"},
-      {"nvidia_driver", "610.57.04"}, {"url", "https://untrusted.invalid/image"}}) {
+      {"nvidia_driver", "610.57.04"}, {"url", "https://untrusted.invalid/image"},
+      {"nvidia_minimum_driver", "570.00"}}) {
     auto e = entry(); e[key] = value;
     EXPECT_FALSE(spaces::decode_runtime_catalog(catalog(json::array({e})))) << key;
   }
+  // The launcher families that have an image of their own are admitted, and
+  // each is pulled from its own repository, so two families may share a digest.
+  for (const auto *family : {"steam", "heroic", "lutris"}) {
+    auto e = entry(); e["profile"] = family;
+    const auto decoded = spaces::decode_runtime_catalog(catalog(json::array({e})));
+    ASSERT_TRUE(decoded) << family;
+    EXPECT_EQ(decoded->front().profile, family);
+    EXPECT_NE(decoded->front().reference().find(std::string("-") + family + "@"), std::string::npos) << family;
+  }
+
   auto duplicate = catalog(json::array({entry(), entry()}));
   EXPECT_FALSE(spaces::decode_runtime_catalog(duplicate));
   auto text = catalog(json::array({entry()}));
-  text.insert(1, "\"schema\":1,");
+  text.insert(1, "\"schema\":2,");
   EXPECT_FALSE(spaces::decode_runtime_catalog(text));
   EXPECT_FALSE(spaces::decode_runtime_catalog(std::string(65537, ' ')));
-  EXPECT_FALSE(spaces::decode_runtime_catalog(R"({"schema":1.0,"runtimes":[]})"));
+  EXPECT_FALSE(spaces::decode_runtime_catalog(R"({"schema":2.0,"runtimes":[]})"));
+  EXPECT_FALSE(spaces::decode_runtime_catalog(R"({"schema":1,"runtimes":[]})")) << "the old shape is not accepted";
   auto nvidia = entry(); nvidia["variant"] = "nvidia"; nvidia["nvidia_driver"] = "610.57.04";
   ASSERT_TRUE(spaces::decode_runtime_catalog(catalog(json::array({nvidia}))));
+  // A host-driver runtime carries no driver of its own and names its floor.
+  auto host_driver = entry();
+  host_driver["variant"] = "nvidia-host";
+  host_driver["nvidia_minimum_driver"] = "570.00";
+  ASSERT_TRUE(spaces::decode_runtime_catalog(catalog(json::array({host_driver}))));
+  for (const auto &[key, value] : std::vector<std::pair<std::string, json>> {
+      {"nvidia_driver", "615.71.09"}, {"nvidia_minimum_driver", ""}, {"nvidia_minimum_driver", "570"}}) {
+    auto broken = host_driver; broken[key] = value;
+    EXPECT_FALSE(spaces::decode_runtime_catalog(catalog(json::array({broken})))) << key;
+  }
+}
+
+TEST(SpacesRuntime, ASpaceIsRecognisedAsBorrowingByTheImageIdentityItStores) {
+  // A Space records the image it launches as the identity Docker reports, the
+  // config digest. Comparing against the reference it was pulled by instead
+  // leaves the Space unmarked, and it then starts with no driver files at all.
+  auto host_driver = entry();
+  host_driver["id"] = "steam-nvidia-host";
+  host_driver["variant"] = "nvidia-host";
+  host_driver["nvidia_minimum_driver"] = "570.00";
+  auto baked = entry();
+  baked["id"] = "steam-nvidia-615";
+  baked["variant"] = "nvidia";
+  baked["nvidia_driver"] = "615.71.09";
+  baked["registry_digest"] = "sha256:" + std::string(64, 'd');
+  baked["config_digest"] = "sha256:" + std::string(64, 'e');
+  const auto runtimes = spaces::decode_runtime_catalog(catalog(json::array({host_driver, baked})));
+  ASSERT_TRUE(runtimes);
+
+  EXPECT_TRUE(spaces::borrows_host_driver("sha256:" + std::string(64, 'c'), *runtimes)) << "its config digest";
+  EXPECT_TRUE(spaces::borrows_host_driver("sha256:" + std::string(64, 'b'), *runtimes)) << "its registry digest";
+  EXPECT_FALSE(spaces::borrows_host_driver("sha256:" + std::string(64, 'e'), *runtimes)) << "a runtime that carries a driver";
+  EXPECT_FALSE(spaces::borrows_host_driver("sha256:" + std::string(64, 'f'), *runtimes)) << "an image this build does not list";
+  EXPECT_FALSE(spaces::borrows_host_driver("", *runtimes));
+  EXPECT_FALSE(spaces::borrows_host_driver("sha256:" + std::string(64, 'c'), {}));
 }
 
 TEST(SpacesRuntime, UnknownOrUntrustedDownloadsCannotReachDocker) {
@@ -213,9 +262,18 @@ TEST(SpacesRuntime, CancelledDownloadDoesNotReachDocker) {
   EXPECT_TRUE(host.calls.empty());
 }
 
-TEST(SpacesRuntime, ReferencePullsFromTheCompiledRepository) {
-  const auto r = runtime();
-  EXPECT_EQ(r.reference(), std::string {multiseat::spaces::runtime_repository} + "@" + r.registry_digest);
+TEST(SpacesRuntime, ReferencePullsFromTheCompiledRepositoryForItsOwnLauncherFamily) {
+  auto r = runtime();
+  EXPECT_EQ(r.profile, "steam");
+  EXPECT_EQ(r.reference(), std::string {multiseat::spaces::runtime_repository} + "-steam@" + r.registry_digest);
+
+  // Each family has its own image, so each has its own repository beside the
+  // prefix. Sharing one would let a Heroic digest be pulled as a Steam runtime.
+  r.profile = "heroic";
+  EXPECT_EQ(r.reference(), std::string {multiseat::spaces::runtime_repository} + "-heroic@" + r.registry_digest);
+  EXPECT_TRUE(multiseat::spaces::admitted_runtime_profile("lutris"));
+  EXPECT_FALSE(multiseat::spaces::admitted_runtime_profile("gamescope"));
+  EXPECT_FALSE(multiseat::spaces::admitted_runtime_profile(""));
 }
 
 TEST(SpacesRuntime, ReleaseBuildsNeverOverrideTheRuntimeRepositoryOrCatalog) {
@@ -227,9 +285,9 @@ TEST(SpacesRuntime, ReleaseBuildsNeverOverrideTheRuntimeRepositoryOrCatalog) {
     return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
   };
   EXPECT_NE(read(source / "cmake/compile_definitions/linux.cmake")
-              .find("set(POLARIS_SPACES_RUNTIME_REPOSITORY \"ghcr.io/papi-ux/polaris-worker-steam\" CACHE STRING"),
+              .find("set(POLARIS_SPACES_RUNTIME_REPOSITORY \"ghcr.io/papi-ux/polaris-worker\" CACHE STRING"),
             std::string::npos);
-  EXPECT_EQ(multiseat::spaces::release_runtime_repository, "ghcr.io/papi-ux/polaris-worker-steam");
+  EXPECT_EQ(multiseat::spaces::release_runtime_repository, "ghcr.io/papi-ux/polaris-worker");
   for (const auto *directory : {".github/workflows", "scripts/ci", "packaging"}) {
     if (!std::filesystem::exists(source / directory)) continue;
     for (const auto &file : std::filesystem::recursive_directory_iterator(source / directory)) {

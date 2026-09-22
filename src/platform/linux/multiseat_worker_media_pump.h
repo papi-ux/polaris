@@ -89,6 +89,8 @@ namespace multiseat::media {
     worker_ipc::media_config_t contract {};
     std::uint32_t selected_bitrate_kbps = 0;
     std::uint64_t video_frames = 0;
+    /** Video frames the worker marked as IDR, so a periodic keyframe shows in the summary. */
+    std::uint64_t keyframes = 0;
     std::uint64_t audio_frames = 0;
     std::uint64_t discontinuities = 0;
     std::uint64_t idr_requests = 0;

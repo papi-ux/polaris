@@ -1,0 +1,20 @@
+{
+  "comment": "What the Spaces page is told about making a Space for a launcher, exactly as the host sends it. The C++ side asserts it produces this; the console asserts it accepts it. Both read this file, because a server shape the console rejects reads as 'Could not verify Spaces' with nothing else to go on.",
+  "launchers": [
+    { "family": "steam", "has_space": true, "installed": true, "runtime_id": "" },
+    { "family": "heroic", "has_space": false, "installed": false, "runtime_id": "heroic-default" }
+  ],
+  "create_job": {
+    "kind": "create",
+    "request_id": "12345678-1234-4234-8234-123456789abc",
+    "profile_id": "",
+    "runtime_id": "heroic-nvidia-host",
+    "nvidia_driver": "",
+    "state": "downloading",
+    "code": "downloading",
+    "message": "Downloading the gaming runtime. You can leave this page and come back.",
+    "action": "",
+    "family": "heroic",
+    "name": "Player 2"
+  }
+}

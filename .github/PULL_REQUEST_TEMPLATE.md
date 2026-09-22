@@ -1,3 +1,5 @@
+<!-- Outside pull requests are squashed into one commit on merge. You stay the author, and AI tool attribution lines are left out of the final message. See CONTRIBUTING.md. -->
+
 ## Summary
 
 What changed, and why?

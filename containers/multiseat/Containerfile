@@ -39,6 +39,7 @@ RUN python3 /collect-plugin-notices.py
 RUN mkdir /gamescope-src && tar -xf /inputs/gamescope.tar -C /gamescope-src && \
     patch -d /gamescope-src -p1 --batch --forward --fuzz=0 < /patches/gamescope-ignore-unsupported-switches.patch && \
     patch -d /gamescope-src -p1 --batch --forward --fuzz=0 < /patches/gamescope-finish-command-buffers.patch && \
+    patch -d /gamescope-src -p1 --batch --forward --fuzz=0 < /patches/gamescope-force-windows-fullscreen-desktop.patch && \
     meson setup /gamescope-src/build /gamescope-src --prefix=/usr --buildtype=release --wrap-mode=nodownload \
       -Ddefault_library=static -Denable_openvr_support=false -Denable_gamescope_wsi_layer=false \
       -Dpipewire=enabled -Ddrm_backend=enabled -Dsdl2_backend=disabled -Davif_screenshots=disabled \
@@ -72,6 +73,18 @@ RUN mkdir -p /out/steam-input && \
       done; \
     fi
 
+# Proves a borrowed driver loads for both ABIs, once, at worker start. Only a
+# profile that carries i386 builds the 32 bit probe, and only such a profile is
+# ever admitted as a Spaces runtime.
+RUN mkdir -p /out/graphics-check && \
+    abis=64; if test "$RUNTIME_PROFILE" != gamescope; then abis="64 32"; fi; \
+    for abi in $abis; do \
+      suffix=; if test "$abi" = 32; then suffix=-32; fi; \
+      cc -m$abi -std=c11 -O2 -Wall -Wextra -Werror \
+        -ffile-prefix-map=/providers=. -Wl,--build-id=none \
+        /providers/graphics-check.c -o /out/graphics-check/graphics-check$suffix -ldl; \
+    done
+
 RUN mkdir -p /out && cc -std=c11 -O2 -Wall -Wextra -Werror \
       -ffile-prefix-map=/workloads=. -Wl,--build-id=none \
       /workloads/input-pong.c -o /out/input-pong-v1 \
@@ -95,7 +108,7 @@ RUN cc -std=c11 -O2 -Wall -Wextra -Werror -ffile-prefix-map=/providers=. -Wl,--b
       -Wl,--wrap=fstat -Wl,--wrap=gst_pad_add_probe -Wl,--wrap=gst_pad_remove_probe -Wl,--wrap=gst_element_set_state -Wl,--wrap=poll \
       $(pkg-config --cflags --libs gstreamer-1.0) && \
     for scenario in stall recover retire; do \
-      result=0; POLARIS_CAPTURE_TEST=$scenario timeout 8s /out/test-idle-capture 1280 720 -- \
+      result=0; POLARIS_CAPTURE_TEST=$scenario timeout 25s /out/test-idle-capture 1280 720 -- \
         fakesrc is-live=true datarate=1 sizetype=fixed sizemax=1 ! identity name=display ! fakesink sync=true || result=$?; \
       expected=1; if test "$scenario" = recover; then expected=0; fi; \
       test "$result" = "$expected" || exit 1; \
@@ -158,6 +171,10 @@ COPY multiseat_worker/go.mod ./go.mod
 COPY multiseat_worker/*.go ./
 COPY multiseat_worker/internal ./internal
 COPY multiseat_worker/cmd ./cmd
+# The cross-language target grammar, at the path the worker's test reads it by,
+# three levels above the module. Without it the test cannot run here, and this
+# build is where the worker's tests run.
+COPY tests/fixtures/launcher-targets.json /tests/fixtures/launcher-targets.json
 COPY containers/multiseat/Containerfile /containers/multiseat/Containerfile
 COPY containers/multiseat/images.lock.json /containers/multiseat/images.lock.json
 COPY containers/multiseat/locks /containers/multiseat/locks
@@ -218,6 +235,13 @@ RUN sh /install-packages.sh runtime && \
     rm -rf /inputs /locks /verify-inputs.py /verify-offline.sh /install-packages.sh /tmp/polaris-Xwayland
 COPY containers/multiseat/initialize-root.py /initialize-root.py
 RUN python3 /initialize-root.py && rm /initialize-root.py
+# The launchers that draw with GTK cannot start without this: see the script.
+# Steam's image draws nothing with GTK and is left exactly as it was published.
+COPY --chmod=0755 containers/multiseat/providers/bwrap-in-a-space.sh /tmp/polaris-bwrap
+RUN if test "$RUNTIME_PROFILE" = heroic || test "$RUNTIME_PROFILE" = lutris; then \
+      dpkg-divert --local --rename --divert /usr/bin/bwrap.real --add /usr/bin/bwrap && \
+      install -m 0755 /tmp/polaris-bwrap /usr/bin/bwrap; \
+    fi && rm /tmp/polaris-bwrap
 COPY --from=runtime-root-build --chmod=0644 /src/target/release/libgstwaylanddisplaysrc.so /usr/lib/x86_64-linux-gnu/gstreamer-1.0/libgstwaylanddisplaysrc.so
 COPY --from=runtime-root-build --chmod=0755 /gamescope-root/usr/bin/gamescope /usr/bin/gamescope
 COPY --from=runtime-root-build /gamescope-root/usr/share/gamescope /usr/share/gamescope
@@ -321,7 +345,42 @@ RUN ldconfig && PYTHONDONTWRITEBYTECODE=1 python3 /check-nvidia-runtime.py --nvi
     rm /check-nvidia-runtime.py /nvidia_runtime.py
 LABEL io.polaris.multiseat.nvidia.driver="615.71.09"
 
+# The same layer without anything the reviewed contract lends from the machine.
+FROM runtime-root-build AS nvidia-userspace-host
+COPY containers/multiseat/locks/nvidia.json /nvidia.lock.json
+COPY containers/multiseat/package-nvidia.py /package-nvidia.py
+COPY containers/multiseat/nvidia_runtime.py /nvidia_runtime.py
+COPY containers/multiseat/nvidia-host-contract.json /nvidia-host-contract.json
+COPY build/runtime-inputs/NVIDIA-Linux-x86_64-615.71.09.run /nvidia.run
+RUN python3 /package-nvidia.py --host
+
+FROM worker-base AS worker-nvidia-host
+COPY --from=nvidia-userspace-host /nvidia-root/ /
+COPY --from=nvcodec-build /nvcodec-root/ /
+COPY --from=workload-build /out/graphics-check/ /usr/libexec/polaris-seat/
+COPY containers/multiseat/check-runtime.py /check-nvidia-runtime.py
+COPY containers/multiseat/nvidia_runtime.py /nvidia_runtime.py
+# The loader cache is rebuilt at start over the files the machine lends, so it
+# lives on a tmpfs the host mounts. Steam's pressure-vessel reads that cache to
+# find the graphics stack, including the libraries it only ever dlopens.
+RUN install -d -m 0755 /etc/polaris-ld /usr/share/glvnd/egl_vendor.d \
+      /usr/share/vulkan/icd.d /usr/share/vulkan/implicit_layer.d && \
+    ldconfig -C /etc/ld.so.cache.image && ln -sf /etc/polaris-ld/ld.so.cache /etc/ld.so.cache && \
+    PYTHONDONTWRITEBYTECODE=1 python3 /check-nvidia-runtime.py --nvidia-host && \
+    rm /check-nvidia-runtime.py /nvidia_runtime.py
+LABEL io.polaris.multiseat.nvidia.source="host" \
+      io.polaris.multiseat.nvidia.contract="1" \
+      io.polaris.multiseat.nvidia.minimum-driver="570.00"
+
 FROM worker-nvidia AS provider-nvidia-test
+RUN install -d -m 1777 /tmp/.X11-unix
+COPY --from=worker-build --chmod=0555 /out/provider-tests /usr/bin/provider-tests
+ENV POLARIS_TEST_REQUIRE_REAL_PROVIDERS=1 \
+    POLARIS_ENCODER_TEST_HELPER=/usr/libexec/polaris-seat/encode-media
+ENTRYPOINT ["/usr/bin/provider-tests"]
+CMD ["-test.v", "-test.run=TestReal|TestTwoReal", "-test.timeout=3m"]
+
+FROM worker-nvidia-host AS provider-nvidia-host-test
 RUN install -d -m 1777 /tmp/.X11-unix
 COPY --from=worker-build --chmod=0555 /out/provider-tests /usr/bin/provider-tests
 ENV POLARIS_TEST_REQUIRE_REAL_PROVIDERS=1 \

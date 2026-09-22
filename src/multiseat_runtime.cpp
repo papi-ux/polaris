@@ -111,6 +111,17 @@ namespace multiseat {
            opaque_name_token(plan.target_id);
   }
 
+  std::string_view runtime_profile_name(runtime_profile_e profile) {
+    switch (profile) {
+      case runtime_profile_e::gamescope: return "gamescope";
+      case runtime_profile_e::steam: return "steam";
+      case runtime_profile_e::heroic: return "heroic";
+      case runtime_profile_e::lutris: return "lutris";
+      case runtime_profile_e::unknown: return {};
+    }
+    return {};
+  }
+
   bool workload_matches_runtime_profile(
     const workload_plan_t &plan,
     runtime_profile_e profile

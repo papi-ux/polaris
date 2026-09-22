@@ -1,7 +1,8 @@
 print_steamos_setup_hint() {
   printf '%s\n' \
-    'Polaris for SteamOS 3.8 is supported in Desktop Mode.' \
-    'Steam Game Mode host operation is not yet certified.' \
+    'Polaris for SteamOS 3.8 runs in Desktop Mode and streams the Game Mode screen.' \
+    'To keep it running across a switch to Game Mode, start it at boot once:' \
+    '  sudo -H polaris --setup-host --enable-headless-boot' \
     'SteamOS updates can remove packages installed on the root filesystem.' \
     '' \
     'The udev rules and modules-load configuration are package files:' \

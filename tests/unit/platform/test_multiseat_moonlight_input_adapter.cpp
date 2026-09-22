@@ -263,6 +263,38 @@ namespace {
         .payload = mouse_scroll_event_t {.horizontal = 240},
       })
     );
+    // What a client really sends. Nova, Moonlight for Android and Moonlight Qt all put 0x80 in
+    // the high byte of a key, and an Android soft keyboard's keys carry the layout hint because
+    // their device has no QWERTY mapping. papi, 2026-09-21, trying to sign in to Heroic in a
+    // Space from a Retroid: "the keyboard in command center doesnt seem to work". Nothing typed
+    // had ever reached a Space; only the bare quick keys such as Escape did.
+    for (const auto &typed : {
+           keyboard_packet(0x8041, false),
+           keyboard_packet(0x8041, false, SS_KBE_FLAG_NON_NORMALIZED),
+           keyboard_packet(0x0041, false, SS_KBE_FLAG_NON_NORMALIZED, MODIFIER_SHIFT),
+         }) {
+      EXPECT_EQ(
+        decoded(typed),
+        (decoded_moonlight_packet_t {
+          .input_class = moonlight_input_class_e::keyboard,
+          .event = input_event_t {
+            .payload = keyboard_key_event_t {
+              .key_code = 0x41,
+              .state = button_state_e::pressed,
+            },
+          },
+        })
+      );
+    }
+    EXPECT_EQ(
+      decoded(keyboard_packet(0x800D, true)).event,
+      (input_event_t {
+        .payload = keyboard_key_event_t {
+          .key_code = 0x0D,
+          .state = button_state_e::released,
+        },
+      })
+    );
     EXPECT_EQ(
       decoded(keyboard_packet(0x41, false, 0, MODIFIER_SHIFT)),
       (decoded_moonlight_packet_t {
@@ -466,6 +498,21 @@ namespace {
       decode_moonlight_input_packet(keyboard_packet(0x18, false)).status,
       moonlight_packet_status_e::invalid
     );
+    // The prefix is 0x80 or nothing. Any other high byte is not a key, and a key this seat
+    // does not know stays unknown with the prefix on it.
+    EXPECT_EQ(
+      decode_moonlight_input_packet(keyboard_packet(0x4041, false)).status,
+      moonlight_packet_status_e::invalid
+    );
+    EXPECT_EQ(
+      decode_moonlight_input_packet(keyboard_packet(0x8018, false)).status,
+      moonlight_packet_status_e::invalid
+    );
+    // Only the layout hint is a known flag.
+    EXPECT_EQ(
+      decode_moonlight_input_packet(keyboard_packet(0x8041, false, 0x02)).status,
+      moonlight_packet_status_e::unsupported
+    );
     EXPECT_EQ(
       decode_moonlight_input_packet(touch_packet(
                                       LI_TOUCH_EVENT_DOWN,
@@ -546,15 +593,6 @@ namespace {
     EXPECT_EQ(
       decode_moonlight_input_packet(vertical_scroll_packet(0)).status,
       moonlight_packet_status_e::ignored
-    );
-    EXPECT_EQ(
-      decode_moonlight_input_packet(keyboard_packet(
-                                      0x41,
-                                      false,
-                                      SS_KBE_FLAG_NON_NORMALIZED
-                                    ))
-        .status,
-      moonlight_packet_status_e::unsupported
     );
     EXPECT_EQ(
       decode_moonlight_input_packet(touch_packet(
@@ -731,10 +769,13 @@ namespace {
     result = adapter.route(malformed);
     EXPECT_EQ(result.status, moonlight_route_status_e::invalid_packet);
     EXPECT_EQ(adapter.next_sequence(), 1U);
+    // A flag nobody has defined is still unsupported and still consumes no sequence. The
+    // layout hint used to stand here, and it is what every soft keyboard's keys carry.
+    constexpr std::uint8_t undefined_keyboard_flag = 0x02;
     result = adapter.route(keyboard_packet(
       0x41,
       false,
-      SS_KBE_FLAG_NON_NORMALIZED
+      undefined_keyboard_flag
     ));
     EXPECT_EQ(result.status, moonlight_route_status_e::unsupported_packet);
     EXPECT_EQ(adapter.next_sequence(), 1U);

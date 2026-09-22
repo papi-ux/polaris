@@ -5,9 +5,9 @@ difference is what a session owns.
 
 Regular streaming plays the games installed on your PC, signed in as you, and
 Polaris picks where the session runs: your desktop, a private compositor, or a
-display it creates for the stream. A Space is a separate Steam sign-in, game
-library and set of saves on the same PC, kept in its own container, chosen per
-device. Spaces are a preview; the limits in the table are the ones that shape
+display it creates for the stream. A Space is a separate sign-in to Steam,
+Heroic or Lutris, with its own game library and saves, on the same PC, kept in
+its own container, chosen per device. Spaces are a preview; the limits in the table are the ones that shape
 the choice today.
 
 | Area | Regular streaming | Spaces (preview) |

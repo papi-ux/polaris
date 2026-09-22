@@ -11,6 +11,15 @@ on:
         description: Multiseat runtime images run that built and signed the artifact
         required: true
         type: string
+      profile:
+        description: Launcher family that run built, which decides the repository
+        required: true
+        type: choice
+        default: steam
+        options:
+          - steam
+          - heroic
+          - lutris
       variant:
         description: Runtime variant that run built
         required: true
@@ -18,6 +27,7 @@ on:
         options:
           - default
           - nvidia
+          - nvidia-host
       source_revision:
         description: Reviewed master commit the artifact must name (40 hex characters)
         required: true
@@ -32,7 +42,7 @@ concurrency:
 
 jobs:
   publish:
-    name: Publish steam/${{ inputs.variant }} to the Polaris registry
+    name: Publish ${{ inputs.profile }}/${{ inputs.variant }} to the Polaris registry
     if: ${{ github.ref == 'refs/heads/master' && github.repository == 'papi-ux/polaris' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -42,7 +52,7 @@ jobs:
       actions: read
       packages: write
     env:
-      REGISTRY: ghcr.io/papi-ux/polaris-worker-steam
+      REGISTRY: ghcr.io/papi-ux/polaris-worker-${{ inputs.profile }}
       REVISION: ${{ inputs.source_revision }}
     steps:
       - name: Reject a revision that is not reviewed master
@@ -63,13 +73,13 @@ jobs:
       - name: Download the signed artifact and its bundle
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: polaris-worker-steam-${{ inputs.source_revision }}
+          name: polaris-worker-${{ inputs.profile }}-${{ inputs.source_revision }}
           path: runtime-artifact
           run-id: ${{ inputs.run_id }}
           github-token: ${{ github.token }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: polaris-worker-steam-${{ inputs.source_revision }}-signature
+          name: polaris-worker-${{ inputs.profile }}-${{ inputs.source_revision }}-signature
           path: runtime-signature
           run-id: ${{ inputs.run_id }}
           github-token: ${{ github.token }}
@@ -78,9 +88,9 @@ jobs:
         id: artifact
         run: |
           set -euo pipefail
-          directory=$(find runtime-artifact -type d -path "*/steam/${{ inputs.variant }}" -print -quit)
+          directory=$(find runtime-artifact -type d -path "*/${{ inputs.profile }}/${{ inputs.variant }}" -print -quit)
           [ -n "$directory" ] && [ -f "$directory/worker.oci.tar" ] || {
-            echo "run ${{ inputs.run_id }} carries no steam/${{ inputs.variant }} archive"; exit 1; }
+            echo "run ${{ inputs.run_id }} carries no ${{ inputs.profile }}/${{ inputs.variant }} archive"; exit 1; }
           echo "directory=$directory" >> "$GITHUB_OUTPUT"
 
       - name: Verify build provenance before any registry write
@@ -117,7 +127,7 @@ jobs:
           DIRECTORY: ${{ steps.artifact.outputs.directory }}
         run: |
           set -euo pipefail
-          tag="steam-${{ inputs.variant }}-${REVISION:0:12}"
+          tag="${{ inputs.profile }}-${{ inputs.variant }}-${REVISION:0:12}"
           echo "${{ github.token }}" | skopeo login ghcr.io --username ${{ github.actor }} --password-stdin
           # Unpack first: reading oci-archive: directly makes skopeo chown into a temp
           # directory, which fails for an unprivileged runner. tar as a normal user does
@@ -165,7 +175,7 @@ jobs:
           TAG: ${{ steps.copy.outputs.tag }}
         run: |
           {
-            echo "### steam/${{ inputs.variant }} published"
+            echo "### ${{ inputs.profile }}/${{ inputs.variant }} published"
             echo
             echo "- registry: \`$REGISTRY:$TAG\`"
             echo "- digest: \`$DIGEST\`"
@@ -177,7 +187,7 @@ jobs:
 
       - uses: actions/upload-artifact@v6
         with:
-          name: runtime-candidate-steam-${{ inputs.variant }}-${{ inputs.source_revision }}
+          name: runtime-candidate-${{ inputs.profile }}-${{ inputs.variant }}-${{ inputs.source_revision }}
           path: |
             runtime-candidate.json
             registry-manifest.json

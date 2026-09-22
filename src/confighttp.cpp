@@ -2472,7 +2472,8 @@ namespace confighttp {
 
     print_req(request);
 
-    proc::proc.terminate();
+    // Close App ends the session on purpose, so on a host in Game Mode it closes the title too.
+    proc::proc.end_session();
     nlohmann::json output_tree;
     output_tree["status"] = true;
     send_response(response, output_tree);
@@ -4667,6 +4668,7 @@ namespace confighttp {
       output["removal_available"] = state.removal_available;
       output["desktop_clients"] = state.desktop_clients;
       output["desktop_default_clients"] = state.desktop_default_clients;
+      output["desktop_by_default"] = state.desktop_by_default;
       if (state.capacity)
         output["capacity"] = {{"concurrent_limit", state.capacity->max_seats}, {"concurrent_active", state.capacity->active_seats}};
       for (const auto &activity : state.activity)
@@ -4681,13 +4683,19 @@ namespace confighttp {
         &multiseat::spaces::runtime_inspection_cache());
       for (const auto &profile : state.profiles) {
         nlohmann::json entry {{"id", profile.id}, {"name", profile.name}, {"clients", profile.clients},
-          {"steam", profile.steam}, {"archived", profile.archived}, {"access_clients", profile.access_clients}};
+          // `steam` stays beside `family` for a client that predates families.
+          {"family", profile.family}, {"steam", profile.family == "steam"},
+          {"archived", profile.archived}, {"access_clients", profile.access_clients}};
         if (runtimes.contains(profile.id)) entry.update(runtimes.at(profile.id));
         output["profiles"].push_back(std::move(entry));
       }
       const auto mover = multiseat::spaces::installed_move_service();
       output["runtime_move_available"] = state.runtime_move_available && mover != nullptr;
       output["runtime_move_job"] = mover ? mover->snapshot() : nlohmann::json(nullptr);
+      // Which launchers a new Space can be made for, and whether the first one
+      // of a launcher would download its runtime before it is made.
+      output["launchers"] = multiseat::spaces::describe_launchers(host, state.profiles, catalog ? *catalog : unpublished,
+        multiseat::spaces::loaded_nvidia_driver(), &multiseat::spaces::runtime_inspection_cache());
     }
 #endif
     send_response(response, output);
@@ -4736,11 +4744,30 @@ namespace confighttp {
     request->content.read(bytes.data(), bytes.size());
     const auto count = request->content.gcount();
     if (count > 4096) { bad_request(response, request, "Creation request is too large"); return; }
-    const auto creation = multiseat::profiles::decode_steam_create_request({bytes.data(), static_cast<std::size_t>(count)});
+    const auto creation = multiseat::profiles::decode_space_create_request({bytes.data(), static_cast<std::size_t>(count)});
     if (!creation) { bad_request(response, request, "Invalid Space creation request"); return; }
-    const auto result = service->create_steam_profile(*creation);
-    const nlohmann::json output {{"status", result.prepared()}, {"message", result.message},
-      {"profile_id", creation->request_id}};
+    auto result = service->create_space_profile(*creation);
+    nlohmann::json output {{"profile_id", creation->request_id}};
+    // The first Space of a launcher whose runtime is not on this PC. Making a
+    // Space downloads nothing, so it runs as a job that downloads first, and
+    // the page follows it on /api/multiseat/profiles as runtime_move_job.
+    const auto mover = multiseat::spaces::installed_move_service();
+    if (result.code == multiseat::profiles::space_runtime_not_downloaded.code && mover) {
+      const auto answer = mover->submit_create(*creation);
+      output["status"] = answer.status == 200;
+      output["message"] = answer.message;
+      if (!answer.code.empty()) output["code"] = answer.code;
+      if (!answer.action.empty()) output["action"] = answer.action;
+      if (answer.status == 202) output["job"] = mover->snapshot();
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
+      response->write(static_cast<SimpleWeb::StatusCode>(answer.status), output.dump(), headers);
+      return;
+    }
+    output["status"] = result.prepared();
+    output["message"] = result.message;
+    if (!result.code.empty()) output["code"] = result.code;
+    if (!result.action.empty()) output["action"] = result.action;
     SimpleWeb::CaseInsensitiveMultimap headers;
     append_json_security_headers(headers);
     response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);
@@ -4827,6 +4854,107 @@ namespace confighttp {
 #endif
   }
 
+#ifdef __linux__
+  // Every paired device, for a Spaces access change to forget the ones unpaired since the last one
+  // in the same write. A device in the middle of a temporary authorization is paired too; leaving
+  // it out would let a change made meanwhile forget it. Nothing is handed over when this run never
+  // loaded its paired clients (a refused state file, none yet, or a fresh-state start): the list is
+  // then short for a reason that says nothing about who is paired, and believing it would erase
+  // every other device's access on disk.
+  std::vector<std::string> paired_device_ids(const nlohmann::json &devices) {
+    std::vector<std::string> paired;
+    if (!nvhttp::paired_clients_authoritative()) return paired;
+    paired.reserve(devices.size());
+    for (const auto &item : devices) paired.emplace_back(item.at("uuid").get<std::string>());
+    return paired;
+  }
+#endif
+
+  /**
+   * @brief Select all or clear all for one Space, or for Desktop, as a single change.
+   *
+   * @code{.json}
+   * {"profile_id": "<space id or desktop>", "allowed": true}
+   * @endcode
+   *
+   * Allowing adds every permanently paired device with launch permission, which is who the page
+   * lists. Removing empties the list outright. The host picks the devices, so a page that is out of
+   * date cannot add one that was unpaired a moment ago.
+   */
+  void setMultiseatAccessAll(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
+#ifdef __linux__
+    const auto service = multiseat::installed_profile_service();
+    if (!service) { bad_request(response, request, "Spaces are not configured"); return; }
+    try {
+      std::array<char, 4097> bytes;
+      request->content.read(bytes.data(), bytes.size());
+      const auto count = request->content.gcount();
+      if (count > 4096) { bad_request(response, request, "Access request is too large"); return; }
+      std::set<std::string> keys;
+      const auto body = nlohmann::json::parse(bytes.data(), bytes.data() + count,
+        [&](int depth, nlohmann::json::parse_event_t event, nlohmann::json &value) {
+          if (depth > 2) throw std::invalid_argument("access nesting");
+          if (event == nlohmann::json::parse_event_t::key && !keys.insert(value.get<std::string>()).second)
+            throw std::invalid_argument("duplicate field");
+          return true;
+        });
+      if (!body.is_object() || body.size() != 2 || !body.contains("profile_id") || !body.at("profile_id").is_string() ||
+          !body.contains("allowed") || !body.at("allowed").is_boolean())
+        throw std::invalid_argument("access fields");
+      const auto devices = nvhttp::get_all_clients();
+      std::vector<std::string> eligible;
+      for (const auto &item : devices)
+        if (!item.at("temporary_authorization").get<bool>() &&
+            (item.at("perm").get<std::uint32_t>() & static_cast<std::uint32_t>(crypto::PERM::launch)))
+          eligible.emplace_back(item.at("uuid").get<std::string>());
+      const auto result = service->set_access_for_all(body.at("profile_id").get<std::string>(), std::move(eligible),
+        body.at("allowed").get<bool>(), paired_device_ids(devices));
+      const nlohmann::json output {{"status", result.status == 200}, {"message", result.message}};
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
+      response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);
+    } catch (const std::exception &) {
+      bad_request(response, request, "Invalid access request");
+    }
+#else
+    not_found(response, request);
+#endif
+  }
+
+  /**
+   * @brief The owner's Spaces settings.
+   *
+   * @code{.json}
+   * {"desktop_by_default": true}
+   * @endcode
+   */
+  void setMultiseatSettings(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
+#ifdef __linux__
+    const auto service = multiseat::installed_profile_service();
+    if (!service) { bad_request(response, request, "Spaces are not configured"); return; }
+    try {
+      std::array<char, 1025> bytes;
+      request->content.read(bytes.data(), bytes.size());
+      const auto count = request->content.gcount();
+      if (count > 1024) { bad_request(response, request, "Settings request is too large"); return; }
+      const auto body = nlohmann::json::parse(bytes.data(), bytes.data() + count);
+      if (!body.is_object() || body.size() != 1 || !body.contains("desktop_by_default") || !body.at("desktop_by_default").is_boolean())
+        throw std::invalid_argument("settings fields");
+      const auto result = service->set_desktop_by_default(body.at("desktop_by_default").get<bool>());
+      const nlohmann::json output {{"status", result.status == 200}, {"message", result.message}};
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
+      response->write(static_cast<SimpleWeb::StatusCode>(result.status), output.dump(), headers);
+    } catch (const std::exception &) {
+      bad_request(response, request, "Invalid settings request");
+    }
+#else
+    not_found(response, request);
+#endif
+  }
+
   void setMultiseatAccess(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request) || !validateContentType(response, request, "application/json")) return;
 #ifdef __linux__
@@ -4858,7 +4986,7 @@ namespace confighttp {
         bad_request(response, request, "Select a permanently paired device with launch permission");
         return;
       }
-      const auto result = service->set_access(profile, client, body.at("allowed").get<bool>());
+      const auto result = service->set_access(profile, client, body.at("allowed").get<bool>(), paired_device_ids(devices));
       const nlohmann::json output {{"status", result.status == 200}, {"message", result.message}};
       SimpleWeb::CaseInsensitiveMultimap headers;
       append_json_security_headers(headers);
@@ -5322,6 +5450,36 @@ namespace confighttp {
     send_response(response, output_tree);
   }
 
+#ifdef __linux__
+  namespace {
+    struct polaris_account_t {
+      std::string name;
+      fs::path home;
+    };
+
+    /// The account Polaris runs as, with its passwd home rather than wherever XDG_CONFIG_HOME
+    /// points in this process.
+    polaris_account_t polaris_account() {
+      polaris_account_t account;
+      const auto *pw = getpwuid(geteuid());
+      if (pw && pw->pw_name && pw->pw_name[0] != '\0') {
+        account.name = pw->pw_name;
+      }
+      if (pw && pw->pw_dir && pw->pw_dir[0] != '\0') {
+        account.home = pw->pw_dir;
+      } else if (const char *home = std::getenv("HOME"); home && *home) {
+        account.home = home;
+      }
+      return account;
+    }
+
+    /// Boot readiness, read where --enable-headless-boot writes it: under the account's home.
+    platf::game_mode_host::boot_readiness_t account_boot_readiness(const polaris_account_t &account) {
+      return platf::game_mode_host::boot_readiness(platf::game_mode_host::default_boot_paths(account.name, account.home));
+    }
+  }  // namespace
+#endif
+
   /**
    * @brief Get update awareness metadata for the web Update Center.
    * @param response The HTTP response object.
@@ -5335,7 +5493,13 @@ namespace confighttp {
     }
 
     print_req(request);
-    send_response(response, update_status::host_update_status());
+    auto status = update_status::host_update_status();
+#ifdef __linux__
+    // The SteamOS update line keeps boot start as it is: it names --enable-headless-boot only
+    // when that is already on, so an update never turns it back on for someone who took it off.
+    status["boot_start_enabled"] = account_boot_readiness(polaris_account()).independent();
+#endif
+    send_response(response, status);
   }
 
   /**
@@ -7345,6 +7509,9 @@ namespace confighttp {
             return;
           }
 #endif
+          // A console launch may be the first thing a host in Game Mode is asked, with no client
+          // having brought the mode in line yet.
+          nvhttp::reconcile_game_mode_host();
           auto launch_session = nvhttp::make_launch_session(true, false, launch_args, &named_cert);
           if (!launch_session) {
             bad_request(response, request, "Failed to build a launch session");
@@ -7424,7 +7591,7 @@ namespace confighttp {
               BOOST_LOG(info) << "WebUI disconnect: force-stop after outcome="
                               << static_cast<int>(shutdown.snapshot.outcome);
               rtsp_stream::terminate_sessions();
-              proc::proc.terminate();
+              proc::proc.end_session();
             }
             nvhttp::find_and_stop_session(uuid, true);
           }
@@ -7441,7 +7608,7 @@ namespace confighttp {
               BOOST_LOG(info) << "WebUI disconnect: force-stop active session(s)"sv;
               rtsp_stream::terminate_sessions();
               if (proc::proc.running() > 0) {
-                proc::proc.terminate();
+                proc::proc.end_session();
               }
             }
           }
@@ -7981,7 +8148,7 @@ namespace confighttp {
         session_media::prepare_for_stop();
         if (owns_app) {
           BOOST_LOG(info) << "BrowserStreamStop: async terminate owned app"sv;
-          proc::proc.terminate(false, false);
+          proc::proc.end_session(false, false);
         }
       } catch (const std::exception &e) {
         BOOST_LOG(warning) << "BrowserStreamStop: async teardown failed: "sv << e.what();
@@ -8691,18 +8858,9 @@ namespace confighttp {
     // enough, so both are reported. A host with a Steam Game Mode session is
     // named as such, because there the missing boot start is the whole reason
     // clients lose the host after Desktop Mode.
-    // Read the want link where --enable-headless-boot writes it: under the
-    // account's passwd home, not wherever XDG_CONFIG_HOME points in this
-    // process.
-    const auto *pw = getpwuid(geteuid());
-    const std::string account_name = pw && pw->pw_name && pw->pw_name[0] != '\0' ? pw->pw_name : std::string();
-    fs::path account_home;
-    if (pw && pw->pw_dir && pw->pw_dir[0] != '\0') {
-      account_home = pw->pw_dir;
-    } else if (const char *home = std::getenv("HOME"); home && *home) {
-      account_home = home;
-    }
-    const auto boot = platf::game_mode_host::boot_readiness(platf::game_mode_host::default_boot_paths(account_name, account_home));
+    const auto account = polaris_account();
+    const auto &account_home = account.home;
+    const auto boot = account_boot_readiness(account);
     const bool boot_independent = boot.independent();
     const auto game_mode = platf::game_mode_host::detect_cached();
     output["game_mode_host"]["installed"] = game_mode.installed;
@@ -9445,6 +9603,8 @@ namespace confighttp {
     server.resource["^/api/multiseat/profiles/runtime$"]["POST"] = withCsrf(moveMultiseatProfileRuntime);
     server.resource["^/api/multiseat/assign$"]["POST"] = withCsrf(setMultiseatAssignment);
     server.resource["^/api/multiseat/access$"]["POST"] = withCsrf(setMultiseatAccess);
+    server.resource["^/api/multiseat/access/all$"]["POST"] = withCsrf(setMultiseatAccessAll);
+    server.resource["^/api/multiseat/settings$"]["POST"] = withCsrf(setMultiseatSettings);
     server.resource["^/api/clients/profiles/update$"]["POST"] = withCsrf(updateClientProfile);
     server.resource["^/api/clients/profiles/delete$"]["POST"] = withCsrf(deleteClientProfile);
     server.resource["^/api/covers/upload$"]["POST"] = withCsrf(uploadCover);

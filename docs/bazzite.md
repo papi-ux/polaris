@@ -153,10 +153,12 @@ journalctl --user -u polaris --since "10 minutes ago" --no-pager
 ```
 
 Service availability and capture availability are separate. Mirror Desktop
-needs a graphical session. Steam already running in the host's Game Mode can
-also affect Private Stream or Gamescope Stream launch ownership; boot setup
-does not resolve those conflicts. Follow
-[Handhelds and Game Mode](handhelds.md) for the current capture limits.
+needs a graphical session. While Game Mode is running, every stream shows the
+Game Mode screen instead, and Private Stream or Gamescope Stream wait for
+Desktop Mode, because Game Mode owns the one screen and the one Steam. That
+path is proven on SteamOS and still wants Bazzite results. Follow
+[Handhelds and Game Mode](handhelds.md#streaming-from-game-mode) for what it
+covers and its limits.
 
 If you use the machine as an always-available streaming host, review automatic
 suspend in Plasma's power settings. Lingering keeps the user service alive; it

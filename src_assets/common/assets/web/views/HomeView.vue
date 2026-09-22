@@ -124,7 +124,7 @@
             <div
               v-if="gameModeHost?.session_active"
               data-display-session-health
-              class="system-session-health border-warning/30 bg-warning/10 text-warning-bright"
+              class="system-session-health border-storm/30 bg-storm/10 text-silver"
             >
               {{ $t('index.session_game_mode') }}
             </div>

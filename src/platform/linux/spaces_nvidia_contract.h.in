@@ -1,0 +1,9 @@
+#pragma once
+#include <string_view>
+
+namespace multiseat::spaces {
+  // Reviewed with the host package, exactly like the runtime catalog. It names
+  // which NVIDIA userspace files a host-driver runtime takes from this machine,
+  // so the image and the host agree by construction rather than by version.
+  inline constexpr std::string_view nvidia_host_contract_json = R"contract(@POLARIS_SPACES_NVIDIA_CONTRACT@)contract";
+}

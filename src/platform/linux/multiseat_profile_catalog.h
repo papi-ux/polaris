@@ -48,6 +48,12 @@ namespace multiseat::profiles {
   inline constexpr refusal_t desktop_access_required {"desktop_access_required",
     "Give this device Desktop Access before making Desktop its Default Space.",
     "Tick it under Desktop Access, then save its Default Space again."};
+  // Making a Space never downloads anything, so the first Space of a launcher
+  // whose runtime is not on this PC is refused here by name. Whoever asked can
+  // run it as a job that downloads first: see spaces::move_service_t.
+  inline constexpr refusal_t space_runtime_not_downloaded {"space_runtime_not_downloaded",
+    "That launcher's gaming runtime is not on this PC yet.",
+    "Create the Space from the Spaces page, which downloads the runtime first."};
   inline constexpr refusal_t space_access_required {"space_access_required",
     "Allow this device under that Space's Device Access before making it the Default Space.",
     "Tick it under the Space's Device Access, then save its Default Space again."};
@@ -78,37 +84,71 @@ namespace multiseat::profiles {
   [[nodiscard]] change_result_t set_assignment(const std::filesystem::path &path,
     std::string_view profile_key, std::string_view client_key);
   // Allowing Desktop does not change a Default Space. Removing Desktop Access also ends a Desktop default.
+  // paired_clients: see set_access.
   [[nodiscard]] change_result_t set_desktop_access(const std::filesystem::path &path,
-    std::string_view client_key, bool allowed);
+    std::string_view client_key, bool allowed, const std::vector<std::string> &paired_clients = {});
   // Allowing a device does not change its Default Space. Disallowing it removes the Space from the
   // device entirely, a Default Space included.
+  //
+  // paired_clients is every device the host has paired right now. A host forgets a device when it
+  // is unpaired, but this catalog belongs to a controller that has to stop before it can be edited,
+  // so the ids of forgotten devices are dropped here, in the same write as the next access change.
+  // The list is believed only when it holds client_key, which the caller has just checked is
+  // paired: an empty list, or one from somewhere else, must never read as "nobody is paired".
+  //
+  // with_desktop also gives the device Desktop Access when it is allowed into a Space. It is the
+  // owner's "a device with a Space also gets Desktop" setting, and it only ever adds: removing a
+  // device from a Space leaves its Desktop Access alone.
   [[nodiscard]] change_result_t set_access(const std::filesystem::path &path,
-    std::string_view profile_key, std::string_view client_key, bool allowed);
+    std::string_view profile_key, std::string_view client_key, bool allowed,
+    const std::vector<std::string> &paired_clients = {}, bool with_desktop = false);
+  // Select all and clear all, as one write and so one restart of the Spaces controller rather than
+  // one per device. profile_key is a Space or desktop_profile_key. Allowing adds every device in
+  // clients that is not on the list yet. Removing empties the list outright, ids of devices that
+  // are no longer paired included, and with it every Default Space, or Desktop default, that
+  // pointed here. paired_clients and with_desktop are as in set_access, and the list is believed
+  // only when it is not empty and holds every device in clients.
+  [[nodiscard]] change_result_t set_access_for_all(const std::filesystem::path &path,
+    std::string_view profile_key, const std::vector<std::string> &clients, bool allowed,
+    const std::vector<std::string> &paired_clients = {}, bool with_desktop = false);
   // Supported Gamescope or Steam workloads only. Immutable local images, fresh
   // private storage, and an owned bridge for Steam. No pulls or host binds.
   [[nodiscard]] change_result_t create(const std::filesystem::path &path,
     std::string_view name, std::string_view image, container::host_t &host,
     const workload_plan_t &workload = {workload_kind_e::gamescope, "input-pong-v1"});
-  struct steam_create_request_t {
+  struct space_create_request_t {
     std::string request_id, source_profile_id, name;
-    bool operator==(const steam_create_request_t &) const = default;
+    /**
+     * The launcher family the new Space runs, when the client picked one rather
+     * than naming a Space to copy. Exactly one of this and source_profile_id is
+     * set: they answer the same question, and a client that sent both
+     * disagreeing would be ambiguous. A launcher this PC already runs a Space
+     * for lends the new one its image. The first Space of a launcher takes the
+     * admitted runtime for it, which must already be on this PC: no download
+     * can be triggered from this path.
+     */
+    std::string family;
+    bool operator==(const space_create_request_t &) const = default;
   };
-  [[nodiscard]] bool valid_steam_create_request(const steam_create_request_t &request);
-  [[nodiscard]] std::optional<steam_create_request_t> decode_steam_create_request(std::string_view payload);
+  [[nodiscard]] bool valid_space_create_request(const space_create_request_t &request);
+  [[nodiscard]] std::optional<space_create_request_t> decode_space_create_request(std::string_view payload);
   // Request identity also names the new profile. Retrying the same request can
   // confirm its existing catalog entry but never copies or adopts another home.
-  [[nodiscard]] change_result_t create_steam(const std::filesystem::path &path,
-    const steam_create_request_t &request, container::host_t &host);
-  struct first_steam_request_t {
+  [[nodiscard]] change_result_t create_space(const std::filesystem::path &path,
+    const space_create_request_t &request, container::host_t &host);
+  struct first_space_request_t {
     std::string request_id, name;
   };
-  [[nodiscard]] bool valid_first_steam_request(const first_steam_request_t &request);
+  [[nodiscard]] bool valid_first_space_request(const first_space_request_t &request);
   // First-space storage transaction. Only a missing or empty private catalog
   // can gain its first entry. Matching retries preserve assignments and homes.
   // The caller must obtain image from the approved runtime installer; this does
   // not select a GPU, assign a device, configure or activate the controller.
-  [[nodiscard]] change_result_t create_first_steam(const std::filesystem::path &path,
-    const first_steam_request_t &request, std::string_view image, container::host_t &host);
+  // `profile` is the launcher family of the admitted runtime that image is, so
+  // a first Heroic Space is made the same way a first Steam one is.
+  [[nodiscard]] change_result_t create_first_space(const std::filesystem::path &path,
+    const first_space_request_t &request, std::string_view image, std::string_view profile,
+    container::host_t &host);
   // remove archives a Space and keeps its home; remove_for_good deletes both.
   enum class edit_operation_e { rename, remove, restore, remove_for_good };
   struct edit_request_t {

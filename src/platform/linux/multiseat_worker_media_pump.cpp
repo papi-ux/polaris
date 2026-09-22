@@ -217,11 +217,20 @@ namespace multiseat::media {
       request_side.finish(report);
       return report;
     };
+    // Whether the host asked this stream to end. The request side only looks once a tick, and a
+    // client that disconnects stops the session and cancels its worker in the same breath, so the
+    // worker can close its end inside that tick. Asking the host here as well keeps a transport
+    // that closed because the session ended from being logged as a worker failure: the same clean
+    // disconnect read "the session ended the stream" or "Worker media failed" depending only on
+    // which thread had looked first.
+    const auto stopping = [&] {
+      return request_side.stopped() || (requests.stop_requested && requests.stop_requested());
+    };
 
     worker_ipc::encoded_media_packet_t packet;
     if (connection.receive_media(packet) != transport_status_e::applied) {
-      return finish(request_side.stopped() ? pump_status_e::ended_on_shutdown :
-                                             pump_status_e::announced_nothing);
+      return finish(stopping() ? pump_status_e::ended_on_shutdown :
+                                  pump_status_e::announced_nothing);
     }
     if (packet.message != message_e::media_config) {
       report.detail = "first media message was " + std::to_string(static_cast<int>(packet.message));
@@ -241,13 +250,15 @@ namespace multiseat::media {
     }
     const auto bitrate = expected.bitrate_kbps == 0 ? contract->bitrate_ceiling_kbps :
       std::min(expected.bitrate_kbps, contract->bitrate_ceiling_kbps);
+    // A player can leave while the contract is still being agreed, and the closed transport then
+    // fails these calls. That is the stream ending, not the worker refusing anything.
     if (expected.bitrate_kbps != 0 &&
         connection.select_media_bitrate(bitrate) != transport_status_e::applied) {
-      return finish(pump_status_e::bitrate_refused);
+      return finish(stopping() ? pump_status_e::ended_on_shutdown : pump_status_e::bitrate_refused);
     }
     report.selected_bitrate_kbps = bitrate;
     if (connection.acknowledge_media_config() != transport_status_e::applied) {
-      return finish(pump_status_e::acknowledgement_refused);
+      return finish(stopping() ? pump_status_e::ended_on_shutdown : pump_status_e::acknowledgement_refused);
     }
     request_side.enable_media_controls();
 
@@ -256,8 +267,8 @@ namespace multiseat::media {
     while (true) {
       const auto received = connection.receive_media(packet);
       if (received != transport_status_e::applied) {
-        return finish(request_side.stopped() ? pump_status_e::ended_on_shutdown :
-                                               pump_status_e::transport_lost);
+        return finish(stopping() ? pump_status_e::ended_on_shutdown :
+                                    pump_status_e::transport_lost);
       }
       switch (packet.message) {
         case message_e::video:
@@ -269,6 +280,7 @@ namespace multiseat::media {
           report.last_frame_index = frame.frame_index;
           if (packet.message == message_e::video) {
             ++report.video_frames;
+            if (frame.idr) ++report.keyframes;
             sinks.video(std::move(bytes), static_cast<std::int64_t>(frame.frame_index), frame.idr);
           } else {
             // Moonlight audio FEC requires equal shard sizes. Refuse a legacy

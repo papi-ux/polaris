@@ -272,6 +272,32 @@ TEST(GameModeHostTests, BootReadinessGuidanceNamesGameModeOnlyWhenTheHostHasOne)
   EXPECT_NE(bound_plain.action.find("sudo -H polaris --setup-host --enable-headless-boot"), std::string::npos);
 }
 
+// polaris#626. Two people in two weeks had a Game Mode host Polaris could be reached on and could
+// not stream from: every mode failed, each for its own reason. A Game Mode host has one screen, so a
+// stream from it is a stream of that screen, captured from the session's own gamescope.
+TEST(GameModeHostTests, OnlyAMirrorOfALiveSessionIsAStreamOfTheGameModeScreen) {
+  EXPECT_TRUE(gm::streams_session_screen("desktop_display", false, false, true));
+  EXPECT_FALSE(gm::streams_session_screen("desktop_display", false, false, false))
+    << "the same host in Desktop Mode mirrors a real desktop";
+  EXPECT_FALSE(gm::streams_session_screen("gamescope_stream", false, false, true))
+    << "Polaris's own gamescope is a different compositor with its own rules";
+  EXPECT_FALSE(gm::streams_session_screen("headless_stream", true, false, true));
+  EXPECT_FALSE(gm::streams_session_screen("desktop_display", true, false, true))
+    << "a private compositor is never the session's screen";
+  EXPECT_FALSE(gm::streams_session_screen("desktop_display", false, true, true));
+  EXPECT_FALSE(gm::streams_session_screen("", false, false, true));
+}
+
+TEST(GameModeHostTests, TheLiveSessionAnswerCanBePinnedAndReleased) {
+  gm::set_session_live_for_tests(true);
+  EXPECT_TRUE(gm::session_live());
+  gm::set_session_live_for_tests(false);
+  EXPECT_FALSE(gm::session_live());
+  gm::set_session_live_for_tests(std::nullopt);
+  // Released, it is the real scan again, and asking twice gives one answer.
+  EXPECT_EQ(gm::session_live(), gm::session_live());
+}
+
 TEST(GameModeHostTests, DisplaySessionGuidanceFollowsTheHostKind) {
   gm::detection_t plain;
   gm::detection_t installed;
@@ -284,8 +310,10 @@ TEST(GameModeHostTests, DisplaySessionGuidanceFollowsTheHostKind) {
   // WAYLAND_DISPLAY from before the mode switch.
   const auto running = gm::display_session_guidance(live, true, true, false);
   EXPECT_EQ(running.status, "game_mode_session");
-  EXPECT_NE(running.summary.find("not supported yet"), std::string::npos);
-  EXPECT_NE(running.action.find("Switch to Desktop Mode"), std::string::npos);
+  EXPECT_NE(running.summary.find("shows the Game Mode screen"), std::string::npos);
+  EXPECT_EQ(running.summary.find("not supported"), std::string::npos) << "a Game Mode host streams now";
+  EXPECT_NE(running.action.find("No action needed"), std::string::npos);
+  EXPECT_NE(running.action.find("comes back in Desktop Mode"), std::string::npos);
 
   const auto wayland = gm::display_session_guidance(installed, false, true, false);
   EXPECT_EQ(wayland.status, "healthy");
@@ -321,11 +349,13 @@ TEST(GameModeHostTests, SetupHostAdviceIsSilentOffGameModeHostsAndFollowsWhatThe
   const auto needs_flag = gm::setup_host_advice(game_mode, state_t::needs_headless_boot, "/usr/bin/polaris");
   EXPECT_NE(needs_flag.find("Steam Game Mode session detected: steamos-session-select on PATH (/usr/bin/steamos-session-select)."), std::string::npos);
   EXPECT_NE(needs_flag.find("Make it start at boot instead:\n  sudo -H /usr/bin/polaris --setup-host --enable-headless-boot"), std::string::npos);
-  EXPECT_EQ(needs_flag.find("not supported yet"), std::string::npos);
+  EXPECT_EQ(needs_flag.find("shows the Game Mode screen"), std::string::npos)
+    << "a host that is about to go offline is told how to stay up, nothing else";
 
   const auto just_enabled = gm::setup_host_advice(game_mode, state_t::headless_boot_enabled_now, "/usr/bin/polaris");
   EXPECT_NE(just_enabled.find("With headless boot on"), std::string::npos);
-  EXPECT_NE(just_enabled.find("not supported yet"), std::string::npos);
+  EXPECT_NE(just_enabled.find("every stream shows the Game Mode screen"), std::string::npos);
+  EXPECT_EQ(just_enabled.find("not supported"), std::string::npos);
   EXPECT_EQ(just_enabled.find("--enable-headless-boot"), std::string::npos);
 
   const auto already = gm::setup_host_advice(game_mode, state_t::already_independent, "/usr/bin/polaris");

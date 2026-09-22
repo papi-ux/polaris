@@ -124,12 +124,15 @@ namespace {
 
   class MultiseatAssignments : public MultiseatLaunchService {
   protected:
-    std::vector<profile_summary_t> catalog {{"profile-a", "Alex", {"client-a"}, true}, {"profile-b", "Sam", {"client-b"}}};
+    std::vector<profile_summary_t> catalog {{"profile-a", "Alex", {"client-a"}, "steam"}, {"profile-b", "Sam", {"client-b"}}};
     std::atomic<unsigned> writes {0}, reloads {0}, creates {0}, edits {0}, removals {0}, runtime_moves {0};
     private_state_file::write_status_e write_status = private_state_file::write_status_e::committed;
     profiles::removal_result_t removal_answer {.outcome = profiles::removal_outcome_e::removed};
     profiles::runtime_move_result_t move_answer {.outcome = profiles::runtime_move_outcome_e::moved};
     std::optional<profiles::refusal_t> persist_refusal;
+    std::vector<std::string> paired_at_access_change, devices_at_access_change;
+    bool with_desktop_at_access_change = false;
+    std::string space_at_access_change;
     bool reload_fails = false;
     std::function<void()> before_write;
     void SetUp() override {
@@ -152,13 +155,13 @@ namespace {
             }
             return profiles::change_result_t {.status = write_status};
           },
-          .create = [&](const profiles::steam_create_request_t &request) {
+          .create = [&](const profiles::space_create_request_t &request) {
             state->called();
             ++creates;
             EXPECT_GT(state->destroyed.load(), 0U);
             if (before_write) before_write();
             if (write_status != private_state_file::write_status_e::not_committed)
-              catalog.push_back({request.request_id, request.name, {}, true});
+              catalog.push_back({request.request_id, request.name, {}, "steam"});
             return profiles::change_result_t {.status = write_status, .profile_key = request.request_id};
           },
           .edit = [&](const profiles::edit_request_t &request) {
@@ -171,6 +174,20 @@ namespace {
                 else { entry.archived = request.operation == profiles::edit_operation_e::remove; if (entry.archived) entry.clients.clear(); }
               }
             }
+            return profiles::change_result_t {.status = write_status};
+          },
+          .access = [&](std::string_view, std::string_view, bool, const std::vector<std::string> &paired, bool with_desktop) {
+            state->called(); ++writes;
+            EXPECT_GT(state->destroyed.load(), 0U);
+            paired_at_access_change = paired; with_desktop_at_access_change = with_desktop;
+            return profiles::change_result_t {.status = write_status};
+          },
+          .access_for_all = [&](std::string_view space, const std::vector<std::string> &devices, bool,
+                                const std::vector<std::string> &paired, bool with_desktop) {
+            state->called(); ++writes;
+            EXPECT_GT(state->destroyed.load(), 0U) << "the catalog was edited while its controller still ran";
+            space_at_access_change = space; devices_at_access_change = devices;
+            paired_at_access_change = paired; with_desktop_at_access_change = with_desktop;
             return profiles::change_result_t {.status = write_status};
           },
           .remove_for_good = [&](const profiles::edit_request_t &request, std::stop_token) {
@@ -207,11 +224,74 @@ namespace {
     }
   };
 
-  const profiles::steam_create_request_t create_request {
+  const profiles::space_create_request_t create_request {
     "12345678-1234-4234-8234-123456789abc", "profile-a", "Second player"
   };
 
   const profiles::edit_request_t remove_request {profiles::edit_operation_e::remove, "profile-a", ""};
+
+  TEST_F(MultiseatAssignments, AnAccessChangeCarriesThePairedDevicesToTheCatalogWrite) {
+    // The catalog can only be edited while its controller is stopped, which is here and nowhere
+    // else, so this is the write that drops the ids of devices the host has since forgotten.
+    const auto granted = service->set_access("profile-b", "client-a", true, {"client-a", "client-b"});
+    EXPECT_EQ(granted.status, 200);
+    EXPECT_EQ(std::string(granted.message), "Space access saved") << "an access change is not a Default Space";
+    EXPECT_EQ(writes.load(), 1U);
+    EXPECT_EQ(paired_at_access_change, (std::vector<std::string> {"client-a", "client-b"}));
+    EXPECT_EQ(service->set_access("profile-b", "client-a", false).status, 200);
+    EXPECT_TRUE(paired_at_access_change.empty()) << "a caller with no list must not inherit the last one";
+    write_status = private_state_file::write_status_e::not_committed;
+    const auto refused = service->set_access("profile-b", "client-a", true);
+    EXPECT_EQ(refused.status, 409);
+    EXPECT_EQ(std::string(refused.message), "The Space access change was not saved. Refresh before retrying.");
+  }
+
+  TEST_F(MultiseatAssignments, SelectAllIsOneChangeForEveryDevice) {
+    const auto saved = service->set_access_for_all("profile-b", {"client-a", "client-b", "client-c"}, true, {"client-a", "client-b", "client-c"});
+    EXPECT_EQ(saved.status, 200);
+    EXPECT_EQ(std::string(saved.message), "Space access saved");
+    EXPECT_EQ(writes.load(), 1U) << "thirteen devices used to be thirteen restarts of the Spaces controller";
+    EXPECT_EQ(space_at_access_change, "profile-b");
+    EXPECT_EQ(devices_at_access_change, (std::vector<std::string> {"client-a", "client-b", "client-c"}));
+    EXPECT_EQ(paired_at_access_change.size(), 3U);
+    EXPECT_EQ(service->set_access_for_all("desktop", {}, false).status, 200) << "clear all names no device, and Desktop is not a Space";
+    EXPECT_EQ(space_at_access_change, "desktop");
+    EXPECT_EQ(service->set_access_for_all("profile-missing", {"client-a"}, true).status, 404);
+    EXPECT_EQ(service->set_access_for_all("profile-b", {""}, true).status, 400);
+    EXPECT_EQ(writes.load(), 2U);
+  }
+
+  TEST_F(MultiseatAssignments, SelectAllWaitsForSpaceStreamsLikeAnyOtherChange) {
+    const auto active = launch("client-a");
+    ASSERT_EQ(service->prepare(active, "profile-a").status, 200);
+    const auto refused = service->set_access_for_all("profile-b", {"client-b"}, true);
+    EXPECT_EQ(refused.status, 409);
+    EXPECT_EQ(refused.code, "spaces_streaming");
+    EXPECT_EQ(writes.load(), 0U);
+    active->cancel();
+  }
+
+  TEST_F(MultiseatAssignments, TheDesktopSettingRidesOnLaterAccessChangesOnly) {
+    EXPECT_FALSE(service->desktop_by_default());
+    EXPECT_FALSE(service->admin_snapshot().desktop_by_default);
+    EXPECT_EQ(service->set_access("profile-b", "client-a", true).status, 200);
+    EXPECT_FALSE(with_desktop_at_access_change);
+
+    EXPECT_EQ(service->set_desktop_by_default(true).status, 200);
+    EXPECT_TRUE(service->desktop_by_default());
+    EXPECT_TRUE(service->admin_snapshot().desktop_by_default);
+    EXPECT_EQ(writes.load(), 1U) << "turning the setting on is not an access change and restarts nothing";
+
+    EXPECT_EQ(service->set_access("profile-b", "client-a", true).status, 200);
+    EXPECT_TRUE(with_desktop_at_access_change);
+    with_desktop_at_access_change = false;
+    EXPECT_EQ(service->set_access_for_all("profile-b", {"client-a"}, true).status, 200);
+    EXPECT_TRUE(with_desktop_at_access_change);
+
+    EXPECT_EQ(service->set_desktop_by_default(false).status, 200);
+    EXPECT_EQ(service->set_access("profile-b", "client-a", true).status, 200);
+    EXPECT_FALSE(with_desktop_at_access_change);
+  }
 
   TEST_F(MultiseatAssignments, RemovalClearsOnlyItsRoutesAndRestorationRequiresNewAssignment) {
     EXPECT_TRUE(service->admin_snapshot().management_available);
@@ -499,7 +579,7 @@ namespace {
 
   TEST_F(MultiseatAssignments, CreatesAnUnassignedSteamProfileUnderTheControllerOwner) {
     EXPECT_TRUE(service->admin_snapshot().creation_available);
-    ASSERT_EQ(service->create_steam_profile(create_request).status, 200);
+    ASSERT_EQ(service->create_space_profile(create_request).status, 200);
     const auto snapshot = service->admin_snapshot();
     ASSERT_EQ(snapshot.profiles.size(), 3U);
     EXPECT_EQ(snapshot.profiles.back().id, create_request.request_id);
@@ -519,22 +599,22 @@ namespace {
   TEST_F(MultiseatAssignments, CreationCannotCancelActiveStreamsOrSkipCleanup) {
     const auto active = launch();
     ASSERT_EQ(service->prepare(active, "profile-a").status, 200);
-    EXPECT_EQ(service->create_steam_profile(create_request).status, 409);
+    EXPECT_EQ(service->create_space_profile(create_request).status, 409);
     EXPECT_FALSE(active->is_cancelled());
     active->cancel();
     state->idle = false;
-    EXPECT_EQ(service->create_steam_profile(create_request).status, 409);
+    EXPECT_EQ(service->create_space_profile(create_request).status, 409);
     EXPECT_EQ(creates, 0U);
     EXPECT_EQ(state->shutdowns, 0U);
   }
 
   TEST_F(MultiseatAssignments, CreationRejectsInvalidAndUnsupportedSourcesBeforeShutdown) {
     auto request = create_request; request.source_profile_id = "profile-b";
-    EXPECT_EQ(service->create_steam_profile(request).status, 404);
+    EXPECT_EQ(service->create_space_profile(request).status, 404);
     request.source_profile_id = "unknown";
-    EXPECT_EQ(service->create_steam_profile(request).status, 404);
+    EXPECT_EQ(service->create_space_profile(request).status, 404);
     request = create_request; request.name = "\n";
-    EXPECT_EQ(service->create_steam_profile(request).status, 400);
+    EXPECT_EQ(service->create_space_profile(request).status, 400);
     EXPECT_EQ(creates, 0U);
     EXPECT_EQ(state->shutdowns, 0U);
   }
@@ -543,16 +623,16 @@ namespace {
     std::promise<void> entered, release;
     auto released = release.get_future().share();
     before_write = [&] { entered.set_value(); released.wait(); };
-    auto first = std::async(std::launch::async, [&] { return service->create_steam_profile(create_request); });
+    auto first = std::async(std::launch::async, [&] { return service->create_space_profile(create_request); });
     EXPECT_EQ(entered.get_future().wait_for(2s), std::future_status::ready);
     EXPECT_TRUE(service->admin_snapshot().changing);
     EXPECT_TRUE(service->routes_client("client-a"));
     EXPECT_EQ(service->prepare(launch(), "profile-a").status, 503);
     EXPECT_NE(service->set_assignment("profile-a", "new-client").status, 200);
     auto changed = create_request; changed.name = "Different player";
-    EXPECT_EQ(service->create_steam_profile(changed).status, 409);
+    EXPECT_EQ(service->create_space_profile(changed).status, 409);
     // Let a retry reach its bounded response while the original remains owned.
-    EXPECT_EQ(service->create_steam_profile(create_request).status, 202);
+    EXPECT_EQ(service->create_space_profile(create_request).status, 202);
     EXPECT_EQ(creates, 1U);
     release.set_value();
     const auto status = first.get().status;
@@ -567,7 +647,7 @@ namespace {
 
   TEST_F(MultiseatAssignments, FailedCreationRestoresExistingAssignmentsWithoutPublishingAProfile) {
     write_status = private_state_file::write_status_e::not_committed;
-    EXPECT_EQ(service->create_steam_profile(create_request).status, 409);
+    EXPECT_EQ(service->create_space_profile(create_request).status, 409);
     EXPECT_FALSE(service->admin_snapshot().failed);
     EXPECT_EQ(service->admin_snapshot().profiles.size(), 2U);
     EXPECT_EQ(service->profile_for_client("client-a"), "profile-a");
@@ -575,18 +655,18 @@ namespace {
 
   TEST_F(MultiseatAssignments, UncertainCreationDurabilityKeepsExistingRoutesUnavailable) {
     write_status = private_state_file::write_status_e::durability_uncertain;
-    EXPECT_EQ(service->create_steam_profile(create_request).status, 503);
+    EXPECT_EQ(service->create_space_profile(create_request).status, 503);
     EXPECT_TRUE(service->admin_snapshot().failed);
     EXPECT_TRUE(service->routes_client("client-a"));
     EXPECT_EQ(service->prepare(launch(), "profile-a").status, 503);
     EXPECT_EQ(reloads, 0U);
-    EXPECT_EQ(service->create_steam_profile(create_request).status, 503);
+    EXPECT_EQ(service->create_space_profile(create_request).status, 503);
     EXPECT_EQ(creates, 1U);
   }
 
   TEST_F(MultiseatAssignments, CreationCannotProceedAfterUnprovenShutdownOrFailedReload) {
     state->close = false;
-    EXPECT_EQ(service->create_steam_profile(create_request).status, 503);
+    EXPECT_EQ(service->create_space_profile(create_request).status, 503);
     EXPECT_EQ(creates, 0U);
     EXPECT_TRUE(service->routes_client("client-a"));
     EXPECT_TRUE(service->admin_snapshot().failed);
@@ -594,10 +674,10 @@ namespace {
 
   TEST_F(MultiseatAssignments, CreatedProfileWithFailedReloadIsNotReportedReady) {
     reload_fails = true;
-    EXPECT_EQ(service->create_steam_profile(create_request).status, 503);
+    EXPECT_EQ(service->create_space_profile(create_request).status, 503);
     EXPECT_TRUE(service->admin_snapshot().failed);
     EXPECT_TRUE(service->routes_client("client-a"));
-    EXPECT_EQ(service->create_steam_profile(create_request).status, 503);
+    EXPECT_EQ(service->create_space_profile(create_request).status, 503);
     EXPECT_EQ(creates, 1U);
   }
 
@@ -1018,7 +1098,7 @@ namespace {
     std::atomic<bool> matches {true};
     void SetUp() override {
       service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
-        std::vector<profile_summary_t> {{"profile-a", "Alex", {"client-a"}, true, false, {}, true, image}}), 2s,
+        std::vector<profile_summary_t> {{"profile-a", "Alex", {"client-a"}, "steam", false, {}, true, image}}), 2s,
         profile_admin_options_t {.runtime_matches_host = [this](std::string_view value) {
           std::lock_guard lock(asked_mutex);
           asked.emplace_back(value);
@@ -1035,7 +1115,7 @@ namespace {
     EXPECT_EQ(refused.code, "space_runtime_driver_mismatch");
     EXPECT_EQ(std::string(refused.message), "This Space's gaming runtime was made for a different NVIDIA driver than the host now runs.");
     EXPECT_EQ(std::string(refused.action),
-      "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its Steam sign-in and games stay.");
+      "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its games, sign-in and saves stay.");
     EXPECT_EQ(state->begins.load(), 0U);
     {
       std::lock_guard lock(asked_mutex);
@@ -1382,10 +1462,12 @@ namespace {
     uninstall_profile_launch_service(service);
     ASSERT_TRUE(service->shutdown(2s));
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
-      std::vector<profile_summary_t> {{"12345678-1234-4234-8234-123456789abc", "Primary", {"client-a"}, true, false, {}, true,
+      std::vector<profile_summary_t> {{"12345678-1234-4234-8234-123456789abc", "Primary", {"client-a"}, "steam", false, {}, true,
         "sha256:" + std::string(64, 'a')}}), 2s,
       profile_admin_options_t {.runtime_matches_host = [](std::string_view) { return false; }});
     ASSERT_TRUE(install_profile_launch_service(service));
+    // The same Space also tells the device which launcher it opens.
+    EXPECT_EQ(nvhttp::profile_spaces_request(client).body.at("spaces")[0].at("launcher"), "steam");
     unsigned published = 0;
     const auto result = nvhttp::launch_profile_request(client, args(), false, [&](const auto &) { ++published; return true; });
     ASSERT_TRUE(result);
@@ -1396,10 +1478,10 @@ namespace {
     EXPECT_EQ(tree.get<int>("root.<xmlattr>.status_code"), 409);
     EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.error_code"), "space_runtime_driver_mismatch");
     EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.error_action"),
-      "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its Steam sign-in and games stay.");
+      "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its games, sign-in and saves stay.");
     EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.status_message"),
       "This Space's gaming runtime was made for a different NVIDIA driver than the host now runs. "
-      "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its Steam sign-in and games stay.");
+      "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its games, sign-in and saves stay.");
     EXPECT_EQ(published, 0U);
     EXPECT_EQ(state->begins.load(), 0U);
   }
@@ -1473,7 +1555,7 @@ namespace {
   TEST_F(MultiseatLaunchService, ClientSelectionOnlyUsesGrantedSpacesAndRejectsStaleChoices) {
     ASSERT_TRUE(service->shutdown(2s));
     std::vector<profile_summary_t> catalog {{"profile-a", "Default", {"client-a"}},
-      {"profile-b", "Shared", {"client-b"}, true, false, {"client-a"}},
+      {"profile-b", "Shared", {"client-b"}, "steam", false, {"client-a"}},
       {"private", "Private", {"client-c"}}};
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state, catalog), 2s);
     EXPECT_EQ(service->client_spaces("client-a").spaces.size(), 2U);
@@ -1492,7 +1574,7 @@ namespace {
   TEST_F(MultiseatLaunchService, ChoosingASpaceDoesNotRestartAnotherDevicesController) {
     ASSERT_TRUE(service->shutdown(2s));
     std::vector<profile_summary_t> catalog {{"profile-a", "Default", {"client-a"}},
-      {"profile-b", "Shared", {"client-b"}, true, false, {"client-a"}}};
+      {"profile-b", "Shared", {"client-b"}, "steam", false, {"client-a"}}};
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state, catalog), 2s);
     auto other = launch("client-b"); ASSERT_EQ(service->prepare(other, "profile-b").status, 200);
     const auto shutdowns = state->shutdowns.load();
@@ -1502,6 +1584,8 @@ namespace {
     ASSERT_EQ(visible.spaces.size(), 2U); EXPECT_EQ(visible.spaces[1].state, "in_use");
     EXPECT_FALSE(visible.spaces[1].can_open); EXPECT_EQ(visible.spaces[1].blocked_reason, "in_use");
     EXPECT_TRUE(visible.spaces[0].can_open); EXPECT_TRUE(visible.spaces[0].blocked_reason.empty());
+    // A Space is named by its owner, so the device is told which launcher each one opens.
+    EXPECT_EQ(visible.spaces[1].launcher, "steam"); EXPECT_TRUE(visible.spaces[0].launcher.empty());
     other->cancel();
   }
 
@@ -1513,6 +1597,7 @@ namespace {
     EXPECT_EQ(response.body.at("spaces")[0].at("name"), "Primary");
     EXPECT_EQ(response.body.at("default_space_id"), "12345678-1234-4234-8234-123456789abc");
     EXPECT_TRUE(response.body.at("spaces")[0].at("can_open").is_boolean());
+    EXPECT_FALSE(response.body.at("spaces")[0].contains("launcher")) << "a Space with no launcher must not send an empty one";
     EXPECT_FALSE(response.body.contains("unavailable_reason"));
     EXPECT_EQ(response.body.dump().find("client-b"), std::string::npos);
     EXPECT_EQ(response.body.dump().find("clients"), std::string::npos);
@@ -1538,7 +1623,7 @@ namespace {
     const std::filesystem::path path = std::filesystem::path(created) / "catalog.json";
     const auto cleanup = util::fail_guard([&] { std::filesystem::remove_all(path.parent_path()); });
     std::vector<profile_summary_t> catalog {{"profile-a", "Default", {"client-a"}},
-      {"profile-b", "Shared", {"client-b"}, true, false, {"client-a"}}};
+      {"profile-b", "Shared", {"client-b"}, "steam", false, {"client-a"}}};
     auto restart = [&] {
       ASSERT_TRUE(service->shutdown(2s));
       service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state, catalog), 2s,
@@ -1559,8 +1644,8 @@ namespace {
     ASSERT_TRUE(service->shutdown(2s));
     state->library = [](std::string_view id) { return spaces::library_t{true,
       {{id == "profile-a" ? "3527290" : "870780", "Installed Game"}}}; };
-    std::vector<profile_summary_t> catalog{{"profile-a", "Alex", {"client-a"}, true, false, {}, true},
-      {"profile-b", "Sam", {"client-b"}, true, false, {"client-a"}, true}};
+    std::vector<profile_summary_t> catalog{{"profile-a", "Alex", {"client-a"}, "steam", false, {}, true},
+      {"profile-b", "Sam", {"client-b"}, "steam", false, {"client-a"}, true}};
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state, catalog), 2s);
     EXPECT_FALSE(service->library_for_client("stranger", "profile-a"));
     EXPECT_FALSE(service->library_for_client("client-a", "missing"));
@@ -1579,7 +1664,7 @@ namespace {
     ASSERT_TRUE(service->shutdown(2s));
     state->library = [](std::string_view) { return spaces::library_t{}; };
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
-      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, true, false, {}, true}}), 2s);
+      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, "steam", false, {}, true}}), 2s);
     EXPECT_EQ(service->prepare(launch(), "profile-a", "3527290").status, 409);
     auto steam = launch();
     EXPECT_EQ(service->prepare(steam, "profile-a", "big-picture-v1").status, 200);
@@ -1591,7 +1676,7 @@ namespace {
   // Desktop Access, then its Default Space, then the first Space it may open, then Desktop.
   TEST_F(MultiseatLaunchService, ADesktopDefaultOpensDesktopFirstAndKeepsTheSpaceOpen) {
     ASSERT_TRUE(service->shutdown(2s));
-    std::vector<profile_summary_t> catalog {{"profile-a", "Alex", {}, true, false, {"client-a"}}};
+    std::vector<profile_summary_t> catalog {{"profile-a", "Alex", {}, "steam", false, {"client-a"}}};
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state, catalog), 2s);
     auto spaces = service->client_spaces("client-a");
     ASSERT_TRUE(spaces.available);
@@ -1631,9 +1716,11 @@ namespace {
 
   TEST_F(MultiseatProfileHttp, SpaceArtworkRefreshPreservesCachedKindsAndRetriesOnlyFailures) {
     uninstall_profile_launch_service(service); ASSERT_TRUE(service->shutdown(2s));
-    state->library = [](std::string_view) { return spaces::library_t{true, {{"870780", "Control"}}}; };
+    state->library = [](std::string_view) {
+      return spaces::library_t{true, {{"870780", "Control"}, {"epic.AlanWake2", "Alan Wake 2"}}};
+    };
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
-      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, true, false, {}, true}}), 2s);
+      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, "steam", false, {}, true}}), 2s);
     ASSERT_TRUE(install_profile_launch_service(service));
     char pattern[] = "/tmp/polaris-space-artwork-XXXXXX";
     const auto created = ::mkdtemp(pattern); ASSERT_NE(created, nullptr);
@@ -1650,8 +1737,11 @@ namespace {
       if (fail_hero && request.kind == kind_e::hero) return std::nullopt;
       return providers::transport_response_t{200, {0xff, 0xd8, 0xff, 0xe0, 1}, request.url};
     };
+    // A target that is not a Steam appid has no artwork provider, and padding
+    // one into the cache id would wrap `12 - target.size()`, which is unsigned,
+    // and throw inside the request handler.
     for (const auto identity : {"space.profile-b.870780", "space.profile-a.620", "space.profile-a.big-picture-v1",
-        "space.profile-a.870780/../private", "space.profile-a.4294967296"}) {
+        "space.profile-a.870780/../private", "space.profile-a.4294967296", "space.profile-a.epic.AlanWake2"}) {
       EXPECT_EQ(nvhttp::profile_artwork_resolve_request(client, identity, root, transport).status, 404);
     }
     EXPECT_EQ(nvhttp::profile_artwork_resolve_request(nullptr, "space.profile-a.870780", root, transport).status, 404);
@@ -1687,7 +1777,7 @@ namespace {
     uninstall_profile_launch_service(service); ASSERT_TRUE(service->shutdown(2s));
     state->library = [](std::string_view) { return spaces::library_t{true, {{"870780", "Control"}}}; };
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
-      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, true, false, {}, true}}), 2s);
+      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, "steam", false, {}, true}}), 2s);
     ASSERT_TRUE(install_profile_launch_service(service));
     char pattern[] = "/tmp/polaris-space-artwork-revoke-XXXXXX";
     const auto created = ::mkdtemp(pattern); ASSERT_NE(created, nullptr);
@@ -1712,8 +1802,8 @@ namespace {
     state->library = [](std::string_view id) { return spaces::library_t{true,
       {{id == "profile-a" ? "870780" : "3527290", "Installed Game"}}}; };
     service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
-      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, true, false, {}, true},
-                                    {"profile-b", "Sam", {"client-b"}, true, false, {}, true}}), 2s);
+      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, "steam", false, {}, true},
+                                    {"profile-b", "Sam", {"client-b"}, "steam", false, {}, true}}), 2s);
     ASSERT_TRUE(install_profile_launch_service(service));
     const auto result = nvhttp::profile_library_request(client, "profile-a");
     ASSERT_EQ(result.status, 200); ASSERT_EQ(result.body.at("games").size(), 2U);
@@ -1724,6 +1814,22 @@ namespace {
     EXPECT_FALSE(nvhttp::profile_artwork_target(client, "space.profile-b.3527290"));
     EXPECT_FALSE(nvhttp::profile_artwork_target(client, "space.profile-a.3527290"));
     EXPECT_FALSE(nvhttp::profile_artwork_target(nullptr, "space.profile-a.870780"));
+    // The entry that opens the launcher is no title: nothing is ever looked up
+    // for it. It wears the poster Polaris ships for that launcher, under the
+    // same access a title's artwork needs, and a title never gets that poster.
+    EXPECT_FALSE(nvhttp::profile_artwork_target(client, "space.profile-a.big-picture-v1"));
+    EXPECT_FALSE(nvhttp::profile_launcher_poster(client, "space.profile-a.870780"));
+    EXPECT_FALSE(nvhttp::profile_launcher_poster(client, "space.profile-b.big-picture-v1"));
+    EXPECT_FALSE(nvhttp::profile_launcher_poster(nullptr, "space.profile-a.big-picture-v1"));
+    EXPECT_FALSE(nvhttp::profile_launcher_poster(client, "space.profile-a.library-v1")) << "another family's launcher entry";
+    // Whether the bundled images are beside this test binary is the build's
+    // business. Either there is no poster here, or it is Steam's and never the
+    // generic box, and the library says so in the same breath.
+    const auto poster = nvhttp::profile_launcher_poster(client, "space.profile-a.big-picture-v1");
+    if (poster) EXPECT_TRUE(poster->ends_with("steam.png")) << *poster;
+    EXPECT_EQ(result.body["games"][0]["cover_url"].get<std::string>(),
+      poster ? "/polaris/v1/games/space.profile-a.big-picture-v1/space-artwork/poster" : "");
+    EXPECT_EQ(result.body["games"][1]["cover_url"], "/polaris/v1/games/space.profile-a.870780/space-artwork/poster");
     const auto resolved = nvhttp::resolve_profile_request(client, {{"game", "space.profile-a.870780"},
       {"width", "1920"}, {"height", "1080"}, {"fps", "120"}, {"client_max_fps", "120"}});
     ASSERT_TRUE(resolved); ASSERT_EQ(resolved->status, 200);
@@ -1739,7 +1845,12 @@ namespace {
     started->launch->cancel();
     const auto began = state->begins.load();
     start.erase("workerTarget"); start.emplace("workerTarget", "3527290");
-    EXPECT_EQ(nvhttp::launch_profile_request(client, start, false, [](const auto &) { return true; })->status, 409);
+    const auto missing = nvhttp::launch_profile_request(client, start, false, [](const auto &) { return true; });
+    ASSERT_TRUE(missing);
+    EXPECT_EQ(missing->status, 409);
+    EXPECT_EQ(missing->code, "space_game_missing");
+    // The sentence outlives the refusal that built it; the sanitizer caught a read of a freed one.
+    EXPECT_EQ(missing->action, "Open Steam Big Picture in that Space, or refresh the library.");
     EXPECT_EQ(state->begins.load(), began);
     auto replacement = std::make_shared<crypto::named_cert_t>();
     replacement->uuid = client->uuid; replacement->name = client->name; replacement->cert = client->cert;
@@ -1747,6 +1858,41 @@ namespace {
     EXPECT_EQ(nvhttp::profile_library_request(client, "profile-a").status, 403);
     EXPECT_FALSE(nvhttp::profile_artwork_target(client, "space.profile-a.870780"));
     EXPECT_EQ(state->begins.load(), began);
+  }
+
+  // A cover is named only where one can exist. The artwork providers look a title up by its
+  // Steam app id, so a Lutris or Heroic title has none yet, and a route that can only answer 404
+  // left a client drawing every such title as the same blank tile with no way to know why.
+  TEST_F(MultiseatProfileHttp, ATitleWithNoArtworkSourceIsListedWithoutACover) {
+    uninstall_profile_launch_service(service); ASSERT_TRUE(service->shutdown(2s));
+    state->library = [](std::string_view) { return spaces::library_t{true, {{"id.2", "GL Gears"}}}; };
+    service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
+      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, "lutris", false, {}, true}}), 2s);
+    ASSERT_TRUE(install_profile_launch_service(service));
+    const auto result = nvhttp::profile_library_request(client, "profile-a");
+    ASSERT_EQ(result.status, 200); ASSERT_EQ(result.body.at("games").size(), 2U);
+    EXPECT_EQ(result.body["games"][0]["name"], "Lutris");
+    const auto &title = result.body["games"][1];
+    EXPECT_EQ(title["id"], "space.profile-a.id.2");
+    EXPECT_EQ(title["name"], "GL Gears");
+    EXPECT_EQ(title["source"], "lutris");
+    EXPECT_EQ(title["steam_appid"], "");
+    EXPECT_EQ(title["cover_url"], "");
+    EXPECT_TRUE(title["artwork"].is_null());
+    // It is still a title this device may play, and one nothing is ever looked up for.
+    EXPECT_EQ(nvhttp::profile_artwork_target(client, "space.profile-a.id.2"), "id.2");
+    EXPECT_FALSE(nvhttp::profile_launcher_poster(client, "space.profile-a.id.2"));
+
+    // A library that could not be read still lists the launcher, so the launcher's poster is
+    // decided the same way then as ever, and no title is vouched for out of a library nobody read.
+    const auto listed = nvhttp::profile_launcher_poster(client, "space.profile-a.library-v1");
+    state->library = [](std::string_view) { return spaces::library_t{}; };
+    uninstall_profile_launch_service(service); ASSERT_TRUE(service->shutdown(2s));
+    service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
+      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, "lutris", false, {}, true}}), 2s);
+    ASSERT_TRUE(install_profile_launch_service(service));
+    EXPECT_EQ(nvhttp::profile_launcher_poster(client, "space.profile-a.library-v1"), listed);
+    EXPECT_FALSE(nvhttp::profile_artwork_target(client, "space.profile-a.id.2"));
   }
 
   // While an administrator approves a change to this PC's setup, nothing starts or changes a Space.
@@ -1785,7 +1931,7 @@ namespace {
     held(service->prepare(launch(), "profile-a"));
     held(service->set_assignment("profile-b", "client-a"));
     held(service->set_access("profile-a", "client-b", true));
-    held(service->create_steam_profile(create_request));
+    held(service->create_space_profile(create_request));
     held(service->edit_profile(remove_request));
     held(service->remove_space_for_good(removal()).result);
     held(service->select_space("client-a", "profile-b", "profile-a"));

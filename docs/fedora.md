@@ -73,7 +73,15 @@ Then start a game and read the active runtime, capture path, and encoder in Miss
 
 ## Upgrade
 
-Install the newer RPM the same way. `dnf` replaces the package in place, and your configuration,
+With the [package repository](repositories.md) added once, an upgrade is one command:
+
+```bash
+sudo dnf upgrade polaris &&
+sudo -H polaris --setup-host &&
+systemctl --user restart polaris
+```
+
+Without the repository, install the newer RPM the same way. `dnf` replaces the package in place, and your configuration,
 pairing keys, and library stay in `~/.config/polaris`.
 
 ```bash

@@ -55,6 +55,12 @@ namespace multiseat {
     worker_coordinator_options_t worker;
     /** Image family and GPU order are derived from the container/GPU catalogs. */
     std::vector<production_controller_profile_route_t> profile_routes;
+    /**
+     * True for an image built without driver libraries of its own, which is
+     * what decides whether a Space gets the host's. Supplied by the launch
+     * service from the compiled catalog, never persisted with a Space.
+     */
+    std::function<bool(std::string_view)> host_driver_image;
   };
 
   using production_controller_epoch_factory_t =

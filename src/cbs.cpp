@@ -2,6 +2,9 @@
  * @file src/cbs.cpp
  * @brief Definitions for FFmpeg Coded Bitstream API.
  */
+// standard includes
+#include <iterator>
+
 extern "C" {
 // lib includes
 #include <libavcodec/avcodec.h>
@@ -86,11 +89,56 @@ namespace cbs {
     return write(cbs_ctx, nal, uh, codec_id);
   }
 
+  namespace {
+    // What reading a frame needs decomposed: its parameter sets, and its slice headers, which is where
+    // FFmpeg records the SPS that is active. Every other unit is kept as it came. A VA-API encoder at
+    // CBR pads frames with filler data FFmpeg cannot decompose, and one unit it could not read failed
+    // the whole packet, so the SPS went unread and the encoder was taken to have no VUI.
+    const CodedBitstreamUnitType h264_units_read[] = {
+      H264_NAL_SLICE,
+      H264_NAL_IDR_SLICE,
+      H264_NAL_SPS,
+      H264_NAL_PPS,
+    };
+    const CodedBitstreamUnitType hevc_units_read[] = {
+      HEVC_NAL_TRAIL_N,
+      HEVC_NAL_TRAIL_R,
+      HEVC_NAL_TSA_N,
+      HEVC_NAL_TSA_R,
+      HEVC_NAL_STSA_N,
+      HEVC_NAL_STSA_R,
+      HEVC_NAL_RADL_N,
+      HEVC_NAL_RADL_R,
+      HEVC_NAL_RASL_N,
+      HEVC_NAL_RASL_R,
+      HEVC_NAL_BLA_W_LP,
+      HEVC_NAL_BLA_W_RADL,
+      HEVC_NAL_BLA_N_LP,
+      HEVC_NAL_IDR_W_RADL,
+      HEVC_NAL_IDR_N_LP,
+      HEVC_NAL_CRA_NUT,
+      HEVC_NAL_VPS,
+      HEVC_NAL_SPS,
+      HEVC_NAL_PPS,
+    };
+
+    void read_parameter_sets_and_slices(CodedBitstreamContext *ctx, AVCodecID codec_id) {
+      if (codec_id == AV_CODEC_ID_H264) {
+        ctx->decompose_unit_types = h264_units_read;
+        ctx->nb_decompose_unit_types = static_cast<int>(std::size(h264_units_read));
+      } else if (codec_id == AV_CODEC_ID_H265) {
+        ctx->decompose_unit_types = hevc_units_read;
+        ctx->nb_decompose_unit_types = static_cast<int>(std::size(hevc_units_read));
+      }
+    }
+  }  // namespace
+
   h264_t make_sps_h264(const AVCodecContext *avctx, const AVPacket *packet) {
     cbs::ctx_t ctx;
     if (ff_cbs_init(&ctx, AV_CODEC_ID_H264, nullptr)) {
       return {};
     }
+    read_parameter_sets_and_slices(ctx.get(), AV_CODEC_ID_H264);
 
     cbs::frag_t frag;
 
@@ -103,6 +151,11 @@ namespace cbs {
     }
 
     auto sps_p = ((CodedBitstreamH264Context *) ctx->priv_data)->active_sps;
+    if (!sps_p) {
+      // Only a slice makes an SPS active, and a packet can arrive without one.
+      BOOST_LOG(warning) << "No active H.264 SPS in the packet"sv;
+      return {};
+    }
 
     // This is a very large struct that cannot safely be stored on the stack
     auto sps = std::make_unique<H264RawSPS>(*sps_p);
@@ -147,6 +200,7 @@ namespace cbs {
     if (ff_cbs_init(&ctx, AV_CODEC_ID_H265, nullptr)) {
       return {};
     }
+    read_parameter_sets_and_slices(ctx.get(), AV_CODEC_ID_H265);
 
     cbs::frag_t frag;
 
@@ -160,6 +214,11 @@ namespace cbs {
 
     auto vps_p = ((CodedBitstreamH265Context *) ctx->priv_data)->active_vps;
     auto sps_p = ((CodedBitstreamH265Context *) ctx->priv_data)->active_sps;
+    if (!vps_p || !sps_p) {
+      // Only a slice makes a parameter set active, and a packet can arrive without one.
+      BOOST_LOG(warning) << "No active HEVC VPS and SPS in the packet"sv;
+      return {};
+    }
 
     // These are very large structs that cannot safely be stored on the stack
     auto sps = std::make_unique<H265RawSPS>(*sps_p);
@@ -224,6 +283,7 @@ namespace cbs {
     if (ff_cbs_init(&ctx, (AVCodecID) codec_id, nullptr)) {
       return false;
     }
+    read_parameter_sets_and_slices(ctx.get(), (AVCodecID) codec_id);
 
     cbs::frag_t frag;
 
@@ -236,15 +296,11 @@ namespace cbs {
     }
 
     if (codec_id == AV_CODEC_ID_H264) {
-      auto h264 = (CodedBitstreamH264Context *) ctx->priv_data;
-
-      if (!h264->active_sps->vui_parameters_present_flag) {
-        return false;
-      }
-
-      return true;
+      const auto *sps = ((CodedBitstreamH264Context *) ctx->priv_data)->active_sps;
+      return sps && sps->vui_parameters_present_flag;
     }
 
-    return ((CodedBitstreamH265Context *) ctx->priv_data)->active_sps->vui_parameters_present_flag;
+    const auto *sps = ((CodedBitstreamH265Context *) ctx->priv_data)->active_sps;
+    return sps && sps->vui_parameters_present_flag;
   }
 }  // namespace cbs

@@ -295,6 +295,40 @@ namespace stream_display_policy {
    */
   std::string host_default_selection();
 
+  /// What reconcile_game_mode() did on this call.
+  enum class game_mode_reconcile_e {
+    unchanged,
+    entered,  ///< a Game Mode session is live: the host now mirrors that screen
+    left,  ///< the session ended: the configured mode is back
+  };
+
+  /**
+   * @brief Keep the host's mode honest while it is in Steam Game Mode.
+   *
+   * A host in Game Mode has one screen and no desktop to build a private display beside, so the
+   * only mode it can run is a mirror of that screen. Left configured for Private Stream it fails
+   * before any launch: every serverinfo poll starts a private compositor to probe encoders, and
+   * a launch is refused because the Steam that is running is the session itself. So while a
+   * session is live the mode is Mirror Desktop, in memory only. polaris.conf is never written,
+   * and what was configured comes back when the session ends, which is what switching to
+   * Desktop Mode looks like to a Polaris that was started at boot.
+   *
+   * Nothing moves while a stream is up. A config reload or a mode chosen on purpose drops the
+   * hold (forget_game_mode_hold), and the next call holds the new values if they still need it.
+   */
+  game_mode_reconcile_e reconcile_game_mode(bool session_live, bool stream_active);
+
+  /// The mode that is waiting for the Game Mode session to end; empty when none is held.
+  std::string game_mode_held_selection();
+
+  /**
+   * @brief Drop the held mode, because the host's mode was just set on purpose.
+   *
+   * A mode chosen while Game Mode is running is newer than the held one. Kept, the hold would put
+   * the old mode back when the session ends: the file would say one mode and the process run another.
+   */
+  void forget_game_mode_hold();
+
   /**
    * @brief Whether a mode creates/owns the stream output refresh rate.
    */

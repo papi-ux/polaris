@@ -1,0 +1,254 @@
+[
+  {
+    "profile": "steam",
+    "kind": "steam",
+    "target": "big-picture-v1",
+    "accepted": true,
+    "why": "the sentinel opens Steam itself"
+  },
+  {
+    "profile": "steam",
+    "kind": "steam",
+    "target": "440",
+    "accepted": true,
+    "why": "a canonical decimal appid"
+  },
+  {
+    "profile": "steam",
+    "kind": "steam",
+    "target": "4294967295",
+    "accepted": true,
+    "why": "the largest appid that fits"
+  },
+  {
+    "profile": "steam",
+    "kind": "steam",
+    "target": "0440",
+    "accepted": false,
+    "why": "leading zero is an alternate spelling"
+  },
+  {
+    "profile": "steam",
+    "kind": "steam",
+    "target": "0",
+    "accepted": false,
+    "why": "zero is not an appid"
+  },
+  {
+    "profile": "steam",
+    "kind": "steam",
+    "target": "",
+    "accepted": false,
+    "why": "empty is not a target"
+  },
+  {
+    "profile": "steam",
+    "kind": "steam",
+    "target": "12345678901",
+    "accepted": false,
+    "why": "longer than any appid"
+  },
+  {
+    "profile": "steam",
+    "kind": "steam",
+    "target": "library-v1",
+    "accepted": false,
+    "why": "another family's sentinel"
+  },
+  {
+    "profile": "steam",
+    "kind": "steam",
+    "target": "epic.Fortnite",
+    "accepted": false,
+    "why": "another family's grammar"
+  },
+  {
+    "profile": "steam",
+    "kind": "heroic",
+    "target": "440",
+    "accepted": false,
+    "why": "the kind must match the family"
+  },
+  {
+    "profile": "heroic",
+    "kind": "heroic",
+    "target": "library-v1",
+    "accepted": true,
+    "why": "the sentinel opens Heroic itself"
+  },
+  {
+    "profile": "heroic",
+    "kind": "heroic",
+    "target": "epic.Fortnite",
+    "accepted": true,
+    "why": "store and that store's own identifier"
+  },
+  {
+    "profile": "heroic",
+    "kind": "heroic",
+    "target": "gog.1207658924",
+    "accepted": true,
+    "why": "a GOG numeric identifier"
+  },
+  {
+    "profile": "heroic",
+    "kind": "heroic",
+    "target": "amazon.amzn1_ADG_PRODUCT",
+    "accepted": true,
+    "why": "underscores occur in Amazon ids"
+  },
+  {
+    "profile": "heroic",
+    "kind": "heroic",
+    "target": "sideload.my-game",
+    "accepted": true,
+    "why": "a sideloaded title"
+  },
+  {
+    "profile": "heroic",
+    "kind": "heroic",
+    "target": "steam.440",
+    "accepted": false,
+    "why": "steam is not a Heroic runner"
+  },
+  {
+    "profile": "heroic",
+    "kind": "heroic",
+    "target": "epic.",
+    "accepted": false,
+    "why": "a runner with no title"
+  },
+  {
+    "profile": "heroic",
+    "kind": "heroic",
+    "target": ".Fortnite",
+    "accepted": false,
+    "why": "a title with no runner"
+  },
+  {
+    "profile": "heroic",
+    "kind": "heroic",
+    "target": "epic./etc/passwd",
+    "accepted": false,
+    "why": "a path is not an identifier"
+  },
+  {
+    "profile": "heroic",
+    "kind": "heroic",
+    "target": "epic.heroic://launch",
+    "accepted": false,
+    "why": "a URI is never a target"
+  },
+  {
+    "profile": "heroic",
+    "kind": "heroic",
+    "target": "epic.-leading",
+    "accepted": false,
+    "why": "must start alphanumeric"
+  },
+  {
+    "profile": "heroic",
+    "kind": "heroic",
+    "target": "epic.a b",
+    "accepted": false,
+    "why": "no spaces"
+  },
+  {
+    "profile": "heroic",
+    "kind": "heroic",
+    "target": "big-picture-v1",
+    "accepted": false,
+    "why": "another family's sentinel"
+  },
+  {
+    "profile": "heroic",
+    "kind": "heroic",
+    "target": "440",
+    "accepted": false,
+    "why": "another family's grammar"
+  },
+  {
+    "profile": "lutris",
+    "kind": "lutris",
+    "target": "library-v1",
+    "accepted": true,
+    "why": "the sentinel opens Lutris itself"
+  },
+  {
+    "profile": "lutris",
+    "kind": "lutris",
+    "target": "id.1",
+    "accepted": true,
+    "why": "the database numbers each game"
+  },
+  {
+    "profile": "lutris",
+    "kind": "lutris",
+    "target": "id.4294967295",
+    "accepted": true,
+    "why": "the largest identifier that fits"
+  },
+  {
+    "profile": "lutris",
+    "kind": "lutris",
+    "target": "id.0",
+    "accepted": false,
+    "why": "zero is not an identifier"
+  },
+  {
+    "profile": "lutris",
+    "kind": "lutris",
+    "target": "id.01",
+    "accepted": false,
+    "why": "leading zero is an alternate spelling"
+  },
+  {
+    "profile": "lutris",
+    "kind": "lutris",
+    "target": "id.",
+    "accepted": false,
+    "why": "a prefix with no number"
+  },
+  {
+    "profile": "lutris",
+    "kind": "lutris",
+    "target": "1",
+    "accepted": false,
+    "why": "the prefix is part of the grammar"
+  },
+  {
+    "profile": "lutris",
+    "kind": "lutris",
+    "target": "slug.hades",
+    "accepted": false,
+    "why": "slugs are not admitted"
+  },
+  {
+    "profile": "lutris",
+    "kind": "lutris",
+    "target": "epic.Fortnite",
+    "accepted": false,
+    "why": "another family's grammar"
+  },
+  {
+    "profile": "gamescope",
+    "kind": "gamescope",
+    "target": "input-pong-v1",
+    "accepted": true,
+    "why": "the image's own workload"
+  },
+  {
+    "profile": "gamescope",
+    "kind": "gamescope",
+    "target": "440",
+    "accepted": false,
+    "why": "gamescope runs nothing else"
+  },
+  {
+    "profile": "gamescope",
+    "kind": "gamescope",
+    "target": "library-v1",
+    "accepted": false,
+    "why": "gamescope has no library"
+  }
+]

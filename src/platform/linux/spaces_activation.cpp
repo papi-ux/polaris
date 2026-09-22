@@ -214,10 +214,10 @@ namespace multiseat::spaces {
   }
 
   bool configure_first_space(const activation_paths_t &paths,
-    const profiles::first_steam_request_t &request, std::string_view image,
+    const profiles::first_space_request_t &request, std::string_view image,
     const graphics_t &graphics, std::string_view selinux_type, container::host_t &host) {
     std::lock_guard lock(configuration_store::mutex());
-    if (!profiles::valid_first_steam_request(request) || !host.private_read_write_directory(paths.ipc.parent_path())) return false;
+    if (!profiles::valid_first_space_request(request) || !host.private_read_write_directory(paths.ipc.parent_path())) return false;
     const auto current = configuration_store::read(paths.native.string());
     if (!current) return false;
     const auto values = config::parse_config(current->contents);
@@ -254,7 +254,7 @@ namespace multiseat::spaces {
       configuration_store::result::committed;
   }
 
-  bool activate_first_space(const fs::path &directory, const profiles::first_steam_request_t &request,
+  bool activate_first_space(const fs::path &directory, const profiles::first_space_request_t &request,
     const runtime_t &runtime, std::string_view gpu_id, std::stop_token stop) {
     if (stop.stop_requested() || config::multiseat.enabled || config::input.multiseat_moonlight_input ||
         !config::multiseat.config_file.empty()) return false;

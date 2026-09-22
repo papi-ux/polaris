@@ -36,7 +36,7 @@ namespace multiseat {
   inline constexpr profile_launch_result_t space_runtime_driver_mismatch_result {
     409, "This Space's gaming runtime was made for a different NVIDIA driver than the host now runs.",
     "space_runtime_driver_mismatch",
-    "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its Steam sign-in and games stay."};
+    "Open Spaces in Polaris on the host and move the Space to the runtime for this driver. Its games, sign-in and saves stay."};
   // Moving a Space to another runtime refuses in these words, whether the decision is made before
   // the move starts or again inside the catalog transaction.
   inline constexpr profile_launch_result_t space_open_for_move_result {
@@ -98,9 +98,14 @@ namespace multiseat {
     std::filesystem::path catalog;
     std::function<std::unique_ptr<profile_controller_t>()> reload;
     std::function<profiles::change_result_t(std::string_view, std::string_view)> persist;
-    std::function<profiles::change_result_t(const profiles::steam_create_request_t &)> create;
+    std::function<profiles::change_result_t(const profiles::space_create_request_t &)> create;
     std::function<profiles::change_result_t(const profiles::edit_request_t &)> edit;
-    std::function<profiles::change_result_t(std::string_view, std::string_view, bool)> access;
+    // One device's access. The list is every paired device and the flag is the owner's "a device
+    // with a Space also gets Desktop" setting; profiles::set_access says what each is used for.
+    std::function<profiles::change_result_t(std::string_view, std::string_view, bool, const std::vector<std::string> &, bool)> access;
+    // Select all and clear all for one Space or for Desktop, as a single write.
+    std::function<profiles::change_result_t(std::string_view, const std::vector<std::string> &, bool,
+      const std::vector<std::string> &, bool)> access_for_all;
     // Deletes a Space's home through Docker; the stop token ends a long removal at shutdown.
     std::function<profiles::removal_result_t(const profiles::edit_request_t &, std::stop_token)> remove_for_good;
     // Points one Space at another runtime image; runs on the owner thread once the controller closed.
@@ -119,6 +124,7 @@ namespace multiseat {
     bool removal_available = false;  ///< a Space can be removed for good, not only archived
     std::vector<std::string> desktop_default_clients;  ///< devices whose Default Space is Desktop
     bool runtime_move_available = false;  ///< a Space can be moved to another gaming runtime
+    bool desktop_by_default = false;  ///< allowing a device into a Space also gives it Desktop Access
   };
   struct profile_session_snapshot_t {
     bool active = false;
@@ -133,6 +139,9 @@ namespace multiseat {
     bool library_enabled = false;
     bool can_open = false;  ///< this device could open it right now, the host's capacity included
     std::string blocked_reason;  ///< when not: unavailable | in_use | starting | running | stopping | at_capacity
+    /// The launcher the Space opens: steam | heroic | lutris, empty when it opens none. A Space is
+    /// named by its owner, so without this a device cannot tell "Alex" on Steam from "Alex" on Heroic.
+    std::string launcher;
   };
   // What a device may see, and why what it cannot do is off. Every reason is a
   // stable snake_case word a client can key copy on; the six state words stay.
@@ -149,6 +158,10 @@ namespace multiseat {
 
   struct profile_library_snapshot_t {
     std::string id, name;
+    /// The launcher family this Space runs, and the tile that opens the
+    /// launcher itself rather than a title: a library always offers that one,
+    /// even when nothing is installed yet.
+    std::string family, launcher_target, launcher_name;
     spaces::library_t library;
   };
   // A removal for good says what it could not delete and where it still is.
@@ -174,11 +187,24 @@ namespace multiseat {
       std::string_view client, std::string_view profile) const;
     [[nodiscard]] profile_admin_snapshot_t admin_snapshot() const;
     [[nodiscard]] profile_launch_result_t set_assignment(std::string profile, std::string client);
-    [[nodiscard]] profile_launch_result_t set_access(std::string profile, std::string client, bool allowed);
+    // paired_clients: every device the host has paired, so the same write can drop the ids of the
+    // ones it has since forgotten. Empty leaves every id alone.
+    // While desktop_by_default() is on, allowing a device into a Space gives it Desktop Access too.
+    [[nodiscard]] profile_launch_result_t set_access(std::string profile, std::string client, bool allowed,
+      std::vector<std::string> paired_clients = {});
+    // Select all (allowed, with the devices to add) or clear all (not allowed) for one Space or for
+    // "desktop", as one change and one restart of the Spaces controller instead of one per device.
+    [[nodiscard]] profile_launch_result_t set_access_for_all(std::string profile, std::vector<std::string> clients,
+      bool allowed, std::vector<std::string> paired_clients = {});
+    // The owner's setting: a device that is allowed into a Space is given Desktop Access with it.
+    // Off until the owner turns it on, since Desktop is the owner's whole account, which a Space
+    // exists to keep apart. It only changes what later access changes do, never the lists as they are.
+    [[nodiscard]] bool desktop_by_default() const;
+    [[nodiscard]] profile_launch_result_t set_desktop_by_default(bool enabled);
     [[nodiscard]] profile_client_spaces_t client_spaces(std::string_view client) const;
     [[nodiscard]] profile_launch_result_t select_space(std::string_view client, std::string_view profile,
       std::string_view previous);
-    [[nodiscard]] profile_launch_result_t create_steam_profile(profiles::steam_create_request_t request);
+    [[nodiscard]] profile_launch_result_t create_space_profile(profiles::space_create_request_t request);
     [[nodiscard]] profile_launch_result_t edit_profile(profiles::edit_request_t request);
     // Deletes a Space's games and saves and its record. Refused while that Space
     // or any Space stream is active, when the typed name is not the Space's name,

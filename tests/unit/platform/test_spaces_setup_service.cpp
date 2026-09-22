@@ -56,7 +56,7 @@ namespace {
           ++installs; EXPECT_EQ(id, request.runtime_id);
           return spaces::runtime_install_result_t {true, "runtime_ready", {}, runtime().config_digest};
         },
-        .prepare = [this](const profiles::first_steam_request_t &r, std::string_view image, std::stop_token) {
+        .prepare = [this](const profiles::first_space_request_t &r, std::string_view image, std::stop_token) {
           ++homes; EXPECT_EQ(r.request_id, request.request_id); EXPECT_EQ(r.name, request.name);
           EXPECT_EQ(image, runtime().config_digest);
           return true;

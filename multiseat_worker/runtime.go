@@ -81,6 +81,13 @@ type runtimeLease interface {
 	Stop(context.Context) error
 }
 
+// finishingLease is a lease that can tell a resource that finished from one
+// that failed. Only the launcher is ever expected to finish: a title the player
+// quit returns status 0, and that is the seat's work done, not a fault.
+type finishingLease interface {
+	Finished() bool
+}
+
 // runtimeAdapter must return only after its resource is ready. Start must honor
 // the shared startup context; it may return a lease with an error when partial
 // allocation needs cleanup.
@@ -119,11 +126,13 @@ type workerRuntime struct {
 	options    runtimeOptions
 	components []*runtimeComponent
 	failures   chan error
+	completed  chan struct{}
 
-	stateMutex sync.Mutex
-	stopping   bool
-	stopOnce   sync.Once
-	stopErr    error
+	stateMutex   sync.Mutex
+	stopping     bool
+	stopOnce     sync.Once
+	stopErr      error
+	completeOnce sync.Once
 }
 
 type runtimeStartResult struct {
@@ -376,12 +385,30 @@ func (runtime *workerRuntime) reportFailure(stage runtimeStage) {
 	}
 }
 
+// reportCompletion says the workload finished by itself. Like a failure it is
+// not reported once a stop is under way, where every stage is expected to end.
+func (runtime *workerRuntime) reportCompletion() {
+	runtime.stateMutex.Lock()
+	defer runtime.stateMutex.Unlock()
+	if runtime.stopping {
+		return
+	}
+	runtime.completeOnce.Do(func() { close(runtime.completed) })
+}
+
 func (runtime *workerRuntime) watch(
 	component *runtimeComponent,
 	done <-chan error,
 ) {
 	<-done
 	close(component.exited)
+	// Every other stage serves the workload for as long as it runs, so for them
+	// ending is failing whatever the status was.
+	if lease, ok := component.lease.(finishingLease); ok &&
+		component.stage == runtimeStageLauncherProcessTree && lease.Finished() {
+		runtime.reportCompletion()
+		return
+	}
 	runtime.reportFailure(component.stage)
 }
 
@@ -447,6 +474,11 @@ func (runtime *workerRuntime) Failures() <-chan error {
 	return runtime.failures
 }
 
+// Completed closes when the workload has finished by itself.
+func (runtime *workerRuntime) Completed() <-chan struct{} {
+	return runtime.completed
+}
+
 func startWorkerRuntime(
 	parent context.Context,
 	config workerConfig,
@@ -474,6 +506,7 @@ func startWorkerRuntime(
 		options:    options,
 		components: make([]*runtimeComponent, 0, runtimeComponentCount),
 		failures:   make(chan error, 1),
+		completed:  make(chan struct{}),
 	}
 	startupContext, cancel := context.WithTimeout(parent, options.StartupTimeout)
 	defer cancel()

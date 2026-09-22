@@ -156,14 +156,21 @@ static gchar *encoder_description(const struct encoder_choice *choice, unsigned 
    * FFmpeg. This is an explicit quality/compatibility tradeoff. */
   /* The locked worker nvcodec patch also fixes DPB and prediction to one
    * reference. Moonlight clients without reference invalidation require it. */
+  /* No periodic keyframe. A client asks for one when it loses a frame, and
+   * encode-media.c answers with force-key-unit, as the host encoder does. A
+   * fixed 60-frame GOP sent an IDR twice a second at 120 fps: a bitrate spike,
+   * a quality pulse and a fresh SPS every half second on an 8 Mbps stream. The
+   * VA and OpenH264 values below are their own ways to say the same thing:
+   * VA reads 0 as "work one out", so it gets its largest interval, and
+   * OpenH264 reads an intra period of 0 as none. */
   if (choice->kind == ENCODER_NVENC)
     return g_strdup_printf("%s name=encoder bitrate=%u max-bitrate=%u rc-mode=cbr "
-      "gop-size=60 bframes=0 rc-lookahead=0 zerolatency=true preset=p1 tune=ultra-low-latency "
+      "gop-size=-1 bframes=0 rc-lookahead=0 zerolatency=true preset=p1 tune=ultra-low-latency "
       "cabac=false qp-min-i=10 qp-min-p=10 repeat-sequence-header=true vbv-buffer-size=%u", choice->factory, bitrate, bitrate, buffer);
   if (choice->kind == ENCODER_VA)
-    return g_strdup_printf("%s name=encoder bitrate=%u rate-control=cbr key-int-max=60 "
+    return g_strdup_printf("%s name=encoder bitrate=%u rate-control=cbr key-int-max=1024 "
       "b-frames=0 ref-frames=1 cabac=false dct8x8=false aud=true cpb-size=%u", choice->factory, bitrate, buffer);
   return g_strdup_printf("openh264enc name=encoder bitrate=%u max-bitrate=%u "
-    "rate-control=bitrate gop-size=60 usage-type=screen complexity=low", bitrate * 1000, bitrate * 1000);
+    "rate-control=bitrate gop-size=0 usage-type=screen complexity=low", bitrate * 1000, bitrate * 1000);
 }
 #endif

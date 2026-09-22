@@ -45,6 +45,12 @@ func runProductionSeatWorker(parent context.Context, config workerConfig, paths 
 	if _, err := readCapability(filepath.Join(paths.Auth, capabilityFileName), uid); err != nil {
 		return err
 	}
+	// A runtime that borrows the host's NVIDIA userspace proves it here, in the
+	// worker's own diagnostics, rather than inside gamescope where the failure
+	// reads as a black screen.
+	if err := prepareHostGraphics(parent, os.Stderr); err != nil {
+		return err
+	}
 	adapters, err := newProcessRuntimeAdapters(osRuntimeProcessHost{diagnostics: os.Stderr}, processRuntimeAdapterOptions{CompositorInput: true})
 	if err != nil {
 		return err

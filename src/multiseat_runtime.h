@@ -181,6 +181,12 @@ namespace multiseat {
   };
 
   [[nodiscard]] bool valid_workload_plan(const workload_plan_t &plan);
+  /**
+   * The launcher family's name, as the catalog stores it and the console reads
+   * it. Empty for an unknown profile, which never names anything.
+   */
+  [[nodiscard]] std::string_view runtime_profile_name(runtime_profile_e profile);
+
   [[nodiscard]] bool workload_matches_runtime_profile(
     const workload_plan_t &plan,
     runtime_profile_e profile

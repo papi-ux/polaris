@@ -4,7 +4,7 @@ Polaris provides a dedicated x86_64 package for SteamOS 3.8, `Polaris-steamos3.8
 
 ## Validation Status
 
-Initial support covers package installation and Polaris startup in SteamOS Desktop Mode only. It does not certify physical Steam Deck gameplay, Game Mode, OLED 90 Hz behavior, suspend and resume, or persistence across SteamOS updates. Those claims require separate hardware evidence. [Handhelds and Game Mode](handhelds.md) explains what a Deck can and cannot do today and how to keep Polaris reachable when it returns to Game Mode.
+This package is proven on a Steam Deck OLED on SteamOS 3.8.16, in Desktop Mode and in Game Mode. In Game Mode the host streams the Game Mode screen: a Steam title launched from a client opens there, a controller reaches it as a virtual DualSense, touch lands where it is aimed, and ending the session closes only the title the stream opened. The Steam Deck LCD, OLED 90 Hz behavior, suspend and resume, and persistence across SteamOS updates are not certified yet; those claims need their own hardware evidence. [Handhelds and Game Mode](handhelds.md) explains what a Deck can do in each mode and how to keep Polaris reachable when it returns to Game Mode.
 
 Continuous integration builds and validates this package inside a clean SteamOS 3.8 root bootstrapped from Valve's repositories. A clean root has none of the packages a shipped SteamOS image already carries, so that gate proves the package builds and its libraries resolve. It does not prove the install transaction is conflict-free on a device, and it did not catch the `libdisplay-info` conflict described under Stream Paths on SteamOS.
 
@@ -24,7 +24,7 @@ sudo pacman-key --init || exit $?
 sudo pacman-key --populate || exit $?
 sudo pacman -Sy || exit $?
 sudo pacman -U ./Polaris-steamos3.8-x86_64.pkg.tar.zst || exit $?
-sudo -H polaris --setup-host || exit $?
+sudo -H polaris --setup-host --enable-headless-boot || exit $?
 sudo steamos-readonly enable || exit $?
 trap - EXIT
 ) &&
@@ -32,6 +32,8 @@ systemctl --user enable --now polaris
 ```
 
 The `EXIT` trap attempts to restore read-only mode if disabling the root, package installation, host setup, or explicit restoration fails. The user service starts only after the package and setup steps succeed and read-only mode is restored.
+
+`--enable-headless-boot` starts Polaris at boot, before anyone signs in, so it keeps running when the Deck switches between Desktop Mode and Game Mode. Without it a Deck that boots into Game Mode has no Polaris until someone opens Desktop Mode. `sudo -H polaris --setup-host --disable-headless-boot` turns it off again. [Handhelds and Game Mode](handhelds.md#keep-polaris-reachable-across-mode-switches) explains what it changes.
 
 SteamOS ships without an initialized pacman keyring, so the first `pacman` transaction that has to download anything fails signature verification. `pacman-key --init` creates `/etc/pacman.d/gnupg`, and `pacman-key --populate` imports every keyring already on the image, which on SteamOS means the Arch and Holo keyrings. Both steps are one-time and idempotent, and both write to the root filesystem, so they run after `steamos-readonly disable`.
 
@@ -42,6 +44,14 @@ Installing v1.3.9 or earlier additionally needs `--assume-installed labwc=0.9.0`
 **Fresh install:** open `https://localhost:47990/#/welcome`, create the web UI account, and pair Nova, Moonlight, or another GameStream-compatible client.
 
 **Upgrade or reinstall:** open `https://localhost:47990/#/login` and use the existing account. Pacman package operations preserve credentials, pairing keys, settings, and the library under `~/.config/polaris`; reinstalling after a SteamOS update does not reset the web account. If needed, follow the [credential reset](troubleshooting.md#web-ui-credentials) instead of returning to Welcome.
+
+## Connect a Client
+
+Nova and Moonlight will not find a Steam Deck on their own. SteamOS ships its network announcement
+service, avahi, with publishing turned off, so the Deck never says it is there. Add it by its address
+instead: in Nova open **Servers**, select **Add Server**, and enter the Deck's address. Polaris writes
+the address to its log when it starts, in a line that begins "This host does not allow network
+announcements", and **Settings > Internet** on the Deck shows it too. Then pair as usual.
 
 ## Stream Paths on SteamOS
 
@@ -61,9 +71,10 @@ After Polaris restarts, return to `https://localhost:47990/#/login` with the exi
 
 ## Remove and Roll Back
 
-Stop the service, remove the package while the root is writable, and restore read-only mode even if removal fails:
+Turn off boot start, stop the service, remove the package while the root is writable, and restore read-only mode even if removal fails:
 
 ```bash
+sudo -H polaris --setup-host --disable-headless-boot
 systemctl --user disable --now polaris
 (
 set -e

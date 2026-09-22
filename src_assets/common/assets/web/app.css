@@ -1009,6 +1009,149 @@ textarea {
     @apply mt-4;
   }
 
+  /* The Spaces device table. It is a table once its container has room for the columns, and one
+     card per device when it does not: the same rows either way. The markup sets the table roles,
+     because changing display drops them in some browsers. */
+  .devices-wrap {
+    container-type: inline-size;
+    overflow-x: auto;
+  }
+
+  .devices-table {
+    @apply block w-full text-sm;
+  }
+
+  /* The Every device row has no Default Space, and its empty cell only keeps the table's columns. */
+  .devices-table thead,
+  .devices-table td.devices-blank {
+    display: none;
+  }
+
+  .devices-table tbody {
+    @apply grid gap-3;
+  }
+
+  /* A card: the name across the top, the places two to a line, the Default Space across the bottom. */
+  .devices-table tr {
+    @apply grid min-w-0 grid-cols-2 gap-x-4 rounded-xl border border-storm/20 bg-deep/40 p-3;
+  }
+
+  .devices-table th,
+  .devices-table td {
+    @apply flex min-w-0 items-center justify-between gap-3 py-1 text-left font-normal text-silver;
+  }
+
+  .devices-table .devices-name {
+    @apply col-span-2 block pb-1 font-semibold;
+  }
+
+  .devices-table .devices-default {
+    @apply col-span-2 block;
+  }
+
+  .devices-table .devices-bulk td {
+    @apply col-span-2;
+  }
+
+  .devices-cell-label {
+    @apply min-w-0 break-words text-storm;
+  }
+
+  .devices-default > .devices-cell-label {
+    @apply mb-1 block;
+  }
+
+  /* The box first, then the place it stands for. */
+  .devices-tick-label {
+    @apply flex min-h-8 w-full min-w-0 flex-row-reverse items-center justify-end gap-2;
+  }
+
+  @container (min-width: 36rem) {
+    .devices-table tbody {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .devices-table .devices-bulk {
+      grid-column: 1 / -1;
+    }
+
+    .devices-table .devices-bulk td {
+      grid-column: auto;
+    }
+  }
+
+  @container (min-width: 52rem) {
+    .devices-table {
+      display: table;
+      border: 1px solid var(--edge-raised);
+      border-radius: 0.75rem;
+      /* Preflight collapses table borders, and a collapsed table has no corners to round. */
+      border-collapse: separate;
+      border-spacing: 0;
+      background: color-mix(in srgb, var(--color-deep) 40%, transparent);
+    }
+
+    .devices-table thead {
+      display: table-header-group;
+    }
+
+    .devices-table tbody {
+      display: table-row-group;
+    }
+
+    .devices-table tr {
+      display: table-row;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      padding: 0;
+    }
+
+    .devices-table th,
+    .devices-table td,
+    .devices-table .devices-name,
+    .devices-table .devices-default,
+    .devices-table td.devices-blank {
+      display: table-cell;
+      padding: 0.5rem 0.75rem;
+      vertical-align: middle;
+    }
+
+    .devices-table tbody th,
+    .devices-table tbody td {
+      border-top: 1px solid var(--edge-raised);
+    }
+
+    .devices-table thead th {
+      @apply text-xs font-medium text-storm;
+      vertical-align: bottom;
+    }
+
+    .devices-table .devices-name {
+      min-width: 12rem;
+    }
+
+    .devices-table .devices-tick {
+      min-width: 5.5rem;
+      text-align: center;
+    }
+
+    .devices-table .devices-default {
+      min-width: 14rem;
+      width: 18rem;
+    }
+
+    .devices-cell-label,
+    .devices-default > .devices-cell-label {
+      display: none;
+    }
+
+    .devices-tick-label {
+      flex-direction: row;
+      justify-content: center;
+    }
+  }
+
   .settings-summary-copy {
     @apply mt-1 text-sm leading-relaxed text-storm;
   }

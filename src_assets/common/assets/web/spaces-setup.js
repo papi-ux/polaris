@@ -1,6 +1,10 @@
 // Commands are fixed application text, never shell instructions returned by an API.
 export const hostChecks = ['docker', 'docker_access', 'identity', 'input', 'gpu', 'security']
-const checkIds = [...hostChecks, 'runtime', 'spaces']
+// A host sends these only when they apply: the runtime check arrived in 1.4.9,
+// and the NVIDIA driver files check exists only while an NVIDIA driver is
+// loaded. Neither one decides host_prerequisites_ready.
+const optionalCheckIds = ['runtime', 'nvidia_libraries']
+const checkIds = [...hostChecks, ...optionalCheckIds, 'spaces']
 const runtimeStatuses = ['not_published', 'unsupported', 'available', 'ready', 'failed']
 
 // The gaming runtime check, since Polaris 1.4.9. Its status picks the row; its
@@ -12,9 +16,14 @@ export function validRuntimeCheck(item) {
       typeof runtime.code !== 'string' || !/^[a-z0-9_]{1,64}$/.test(runtime.code)) return false
   if (item.state !== (runtime.status === 'ready' ? 'ready' : runtime.status === 'not_published' ? 'not_configured' : 'required')) return false
   if (!['available', 'ready', 'failed'].includes(runtime.status)) return runtime.id === undefined
+  // Only a runtime that carries NVIDIA userspace of its own names a driver
+  // version. One that borrows this PC's works with whichever driver is loaded,
+  // so it names none, exactly like the runtime for AMD and Intel graphics.
+  if (!['default', 'nvidia', 'nvidia-host'].includes(runtime.variant)) return false
   return typeof runtime.id === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(runtime.id) &&
-    typeof runtime.nvidia_driver === 'string' && (runtime.variant === 'default' ? runtime.nvidia_driver === '' :
-      runtime.variant === 'nvidia' && runtime.nvidia_driver.length <= 32 && /^[0-9]+(?:\.[0-9]+)+$/.test(runtime.nvidia_driver))
+    typeof runtime.nvidia_driver === 'string' && (runtime.variant === 'nvidia'
+      ? runtime.nvidia_driver.length <= 32 && /^[0-9]+(?:\.[0-9]+)+$/.test(runtime.nvidia_driver)
+      : runtime.nvidia_driver === '')
 }
 
 export function validSetup(value) {
@@ -23,9 +32,8 @@ export function validSetup(value) {
       !Number.isSafeInteger(value.service_uid) || value.service_uid < 0 ||
       !['host_prerequisites_ready', 'configured', 'available'].every(key => typeof value[key] === 'boolean') ||
       !Array.isArray(value.checks)) return false
-  // Hosts from before the runtime check send the other seven.
-  const withRuntime = value.checks.some(item => item?.id === 'runtime')
-  if (value.checks.length !== checkIds.length - (withRuntime ? 0 : 1)) return false
+  // Every check a host does send must be one this console knows, and every
+  // check that always applies must be there.
   const seen = new Set()
   for (const item of value.checks) {
     if (!item || !checkIds.includes(item.id) || seen.has(item.id) ||
@@ -36,6 +44,8 @@ export function validSetup(value) {
     if (item.id === 'runtime' && !validRuntimeCheck(item)) return false
     seen.add(item.id)
   }
+  if (!checkIds.every(id => optionalCheckIds.includes(id) || seen.has(id))) return false
+  if (!seen.has('spaces')) return false
   return value.host_prerequisites_ready === hostChecks.every(id => value.checks.find(item => item.id === id).state === 'ready') &&
     (!value.available || value.configured) &&
     (value.checks.find(item => item.id === 'spaces').state === 'ready') === value.available

@@ -51,14 +51,16 @@ configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_host_admin_data.h.
 # Only a catalog reviewed into the host build may authorize runtime downloads. A lab build may
 # compile another catalog and pull from another repository to test Spaces end to end without
 # publishing; release workflows never set either, and a unit test fails if one does.
-set(POLARIS_SPACES_RUNTIME_REPOSITORY "ghcr.io/papi-ux/polaris-worker-steam" CACHE STRING
-    "Repository Spaces runtimes are pulled from. Change only for a lab build.")
+# One repository per launcher family sits beside this prefix, so a runtime for the steam family
+# is pulled from <prefix>-steam and a heroic one from <prefix>-heroic.
+set(POLARIS_SPACES_RUNTIME_REPOSITORY "ghcr.io/papi-ux/polaris-worker" CACHE STRING
+    "Repository prefix Spaces runtimes are pulled from, without the launcher family. Change only for a lab build.")
 set(POLARIS_SPACES_RUNTIME_CATALOG_FILE "${CMAKE_SOURCE_DIR}/containers/multiseat/runtime-catalog.json" CACHE FILEPATH
     "Spaces runtime catalog compiled into Polaris. Change only for a lab build.")
 if(NOT POLARIS_SPACES_RUNTIME_REPOSITORY MATCHES "^[a-z0-9.-]+(:[0-9]+)?(/[a-z0-9._-]+)+$")
-    message(FATAL_ERROR "POLARIS_SPACES_RUNTIME_REPOSITORY must name a registry repository, such as ghcr.io/papi-ux/polaris-worker-steam")
+    message(FATAL_ERROR "POLARIS_SPACES_RUNTIME_REPOSITORY must name a registry repository prefix, such as ghcr.io/papi-ux/polaris-worker")
 endif()
-if(NOT POLARIS_SPACES_RUNTIME_REPOSITORY STREQUAL "ghcr.io/papi-ux/polaris-worker-steam" OR
+if(NOT POLARIS_SPACES_RUNTIME_REPOSITORY STREQUAL "ghcr.io/papi-ux/polaris-worker" OR
    NOT POLARIS_SPACES_RUNTIME_CATALOG_FILE STREQUAL "${CMAKE_SOURCE_DIR}/containers/multiseat/runtime-catalog.json")
     message(WARNING "Lab build: Spaces runtimes come from ${POLARIS_SPACES_RUNTIME_REPOSITORY} with the catalog "
                     "${POLARIS_SPACES_RUNTIME_CATALOG_FILE}. Do not ship this build.")
@@ -68,6 +70,15 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${POLARIS_SPACES
 file(READ "${POLARIS_SPACES_RUNTIME_SOURCE}" POLARIS_SPACES_RUNTIME_CATALOG)
 configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime_catalog.h.in"
                "${CMAKE_BINARY_DIR}/generated/spaces_runtime_catalog.h" @ONLY)
+# The same reviewed-into-the-build rule for the NVIDIA files a host-driver runtime borrows from
+# this machine. A runtime image declares the contract it was built for and Polaris refuses a newer
+# one, so the mount shape can only change with a reviewed release.
+set(POLARIS_SPACES_NVIDIA_CONTRACT_FILE "${CMAKE_SOURCE_DIR}/containers/multiseat/nvidia-host-contract.json" CACHE FILEPATH
+    "NVIDIA host contract compiled into Polaris. Change only for a lab build.")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${POLARIS_SPACES_NVIDIA_CONTRACT_FILE}")
+file(READ "${POLARIS_SPACES_NVIDIA_CONTRACT_FILE}" POLARIS_SPACES_NVIDIA_CONTRACT)
+configure_file("${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_nvidia_contract.h.in"
+               "${CMAKE_BINARY_DIR}/generated/spaces_nvidia_contract.h" @ONLY)
 include_directories("${CMAKE_BINARY_DIR}/generated")
 
 
@@ -590,6 +601,10 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/gamescope_session_helper.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/game_mode_host.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/game_mode_host.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/game_mode_repaint.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/game_mode_repaint.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/steam_title_process.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/steam_title_process.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/user_unit_override.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/display_topology.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/display_topology.cpp"
@@ -653,6 +668,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_nvidia_libraries.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_nvidia_libraries.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime_move.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_runtime_move.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/spaces_setup_service.h"

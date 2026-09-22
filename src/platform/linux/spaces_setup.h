@@ -27,15 +27,20 @@ namespace multiseat::spaces {
     const std::filesystem::path &module_version = "/sys/module/nvidia/version");
   // nvidia_driver is empty when no NVIDIA driver is loaded, and an empty
   // string when one is loaded but its version could not be read.
+  // A runtime is built for one launcher family, so the choice is made within
+  // that family: a Heroic image is never offered to a Steam Space, or the
+  // reverse. Host Setup asks about the family a first Space is made from.
   [[nodiscard]] runtime_choice_t choose_runtime(const std::vector<runtime_t> &catalog,
-    const std::optional<std::string> &nvidia_driver);
+    const std::optional<std::string> &nvidia_driver, std::string_view profile = "steam");
 
   // What Docker holds under the approved reference.
   enum class runtime_image_e { absent, verified, mismatch, unverifiable };
 
   // Reading the setup page must not ask Docker about the runtime every time.
-  // Only definitive answers are kept, briefly; a finished or stopped download
-  // forgets them so the next check asks again.
+  // Only definitive answers are kept, briefly, one for each runtime asked
+  // about: a host with several launchers asks about several in turn, and a
+  // single slot made each one evict the last. A finished or stopped download
+  // forgets them all so the next check asks again.
   class runtime_inspection_cache_t {
   public:
     using now_t = std::function<std::chrono::steady_clock::time_point()>;
@@ -53,7 +58,7 @@ namespace multiseat::spaces {
     std::chrono::steady_clock::duration lifetime_;
     now_t now_;
     std::mutex mutex_;
-    std::optional<entry_t> entry_;
+    std::vector<entry_t> entries_;  ///< bounded by the catalog, which holds at most 64 runtimes
     std::uint64_t generation_ = 0;
   };
   [[nodiscard]] runtime_inspection_cache_t &runtime_inspection_cache();
@@ -70,7 +75,7 @@ namespace multiseat::spaces {
   // when the engine answered, verified against the compiled catalog entry.
   [[nodiscard]] runtime_facts_t inspect_runtime(container::host_t &host,
     const std::vector<runtime_t> &catalog, const std::optional<std::string> &nvidia_driver,
-    bool engine_ready, runtime_inspection_cache_t *cache = nullptr);
+    bool engine_ready, runtime_inspection_cache_t *cache = nullptr, std::string_view profile = "steam");
 
   struct setup_facts_t {
     std::string distribution;
@@ -80,6 +85,14 @@ namespace multiseat::spaces {
     bool daemon_linux = false, daemon_rootless = false, daemon_runc = false;
     bool docker_access_pending = false;  ///< the account is in the docker group, but this Polaris started before it was
     bool input_access = false, gpu_access = false;
+    /**
+     * Only for a host with an NVIDIA driver loaded, and only meaningful for a
+     * runtime that borrows it: empty when the machine's driver files resolved,
+     * otherwise the code that says what is missing. The 32 bit case has its own
+     * code, because Proton is 32 bit.
+     */
+    std::string driver_libraries;
+    std::string driver_libraries_package;  ///< what this distribution calls the missing package
     security_status_t security;
     runtime_facts_t runtime;
     bool controller_enabled = false, controller_available = false;
