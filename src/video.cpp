@@ -4160,11 +4160,12 @@ namespace video {
 
   input::touch_port_t make_port(platf::display_t *display, const config_t &config) {
     auto port = display->scaled_screen_width > 0 && display->scaled_screen_height > 0 ?
-                  // The frame is that screen fitted into the stream, so the letterbox is computed from it.
-                  input::make_touch_port(
-                    platf::touch_port_t {0, 0, display->scaled_screen_width, display->scaled_screen_height},
+                  // The screen is fitted into the frame, and the frame into the stream.
+                  input::make_touch_port_in_frame(
                     display->scaled_screen_width,
                     display->scaled_screen_height,
+                    display->width,
+                    display->height,
                     config.width,
                     config.height
                   ) :

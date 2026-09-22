@@ -614,6 +614,28 @@ namespace input {
     };
   }
 
+  touch_port_t make_touch_port_in_frame(
+    int screen_width,
+    int screen_height,
+    int frame_width,
+    int frame_height,
+    int stream_width,
+    int stream_height
+  ) {
+    auto port = make_touch_port(platf::touch_port_t {0, 0, screen_width, screen_height}, screen_width, screen_height, stream_width, stream_height);
+    if (screen_width <= 0 || screen_height <= 0 || frame_width <= 0 || frame_height <= 0) {
+      return port;
+    }
+    const auto screen_in_frame = std::fminf(static_cast<float>(frame_width) / screen_width, static_cast<float>(frame_height) / screen_height);
+    const auto frame_in_stream = std::fminf(static_cast<float>(stream_width) / frame_width, static_cast<float>(stream_height) / frame_height);
+    const auto scalar = screen_in_frame * frame_in_stream;
+    // Both fits centre, so the screen is centred in the stream at the two scales together.
+    port.client_offsetX = (stream_width - scalar * screen_width) * 0.5f;
+    port.client_offsetY = (stream_height - scalar * screen_height) * 0.5f;
+    port.scalar_inv = 1.0f / scalar;
+    return port;
+  }
+
   std::pair<float, float> turn_back_touch(int compositor_touch_turn, float x, float y) {
     // gamescope's apply_touchscreen_orientation, undone: it takes a touch at (x, y) to (1 - y, x)
     // for 90, (1 - x, 1 - y) for 180 and (y, 1 - x) for 270.

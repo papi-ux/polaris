@@ -36,6 +36,7 @@
     #include <xf86drmMode.h>
   #endif
 
+  #include "gamescope_process.h"
   #include "src/logging.h"
 
 using namespace std::literals;
@@ -509,7 +510,19 @@ namespace platf::game_mode_host {
 
   std::optional<session_screen_t> session_screen() {
   #ifdef POLARIS_BUILD_X11_XCB
+    // The idle compositor of a gamescope stream is Polaris's own gamescope, never the session's,
+    // even when its Xwayland took the lower display number.
+    std::optional<std::string> polaris_display;
+    if (const char *runtime = std::getenv("XDG_RUNTIME_DIR"); runtime && *runtime) {
+      namespace gp = stream_runtime::gamescope_process;
+      if (const auto marker = gp::validated_marker(std::filesystem::path {runtime} / "polaris-gamescope.pid")) {
+        polaris_display = gp::discover_owned_x11_display(*marker);
+      }
+    }
     for (const auto &display : local_x_displays()) {
+      if (polaris_display && display == *polaris_display) {
+        continue;
+      }
       const connection_t x {display};
       // The server a gamescope started first carries its focus properties, and its root is the
       // screen gamescope composites and exports.
@@ -537,19 +550,38 @@ namespace platf::game_mode_host {
   }
 
   std::optional<session_screen_t> session_screen_within(std::chrono::milliseconds limit) {
+    // A reading stuck on an Xwayland that stopped answering keeps its thread, so one is enough.
+    static std::atomic_bool in_flight {false};
+    if (in_flight.exchange(true)) {
+      BOOST_LOG(warning) << "game_mode: the last reading of the Game Mode screen has not come back, so touch is placed across the whole frame"sv;
+      return std::nullopt;
+    }
     auto answer = std::make_shared<std::promise<std::optional<session_screen_t>>>();
     auto future = answer->get_future();
     try {
       std::thread([answer]() {
-        answer->set_value(session_screen());
+        try {
+          answer->set_value(session_screen());
+        } catch (...) {
+          answer->set_exception(std::current_exception());
+        }
+        in_flight = false;
       }).detach();
     } catch (const std::exception &) {
+      in_flight = false;
       return std::nullopt;
     }
     if (future.wait_for(limit) != std::future_status::ready) {
+      BOOST_LOG(warning) << "game_mode: the Game Mode screen did not answer within "sv << limit.count()
+                         << " ms, so touch is placed across the whole frame and not turned"sv;
       return std::nullopt;
     }
-    return future.get();
+    try {
+      return future.get();
+    } catch (const std::exception &e) {
+      BOOST_LOG(warning) << "game_mode: reading the Game Mode screen failed: "sv << e.what();
+      return std::nullopt;
+    }
   }
 
   void request_focused_window_repaint_async() {

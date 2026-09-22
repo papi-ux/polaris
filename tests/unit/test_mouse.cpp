@@ -100,6 +100,30 @@ TEST(InputTouchPortMapping, AGameModeScreenFittedIntoTheFrameMapsEdgeToEdge) {
   EXPECT_NEAR(tab->second, 176.0f, 1.0f);
 }
 
+// The same screen in a frame of a third shape: gamescope fits 1280x800 into a 1920x1080 frame as
+// 1728x1080, and that frame goes into a 1280x800 stream as 1280x720 with bars above and below. The
+// screen is 1152x720 in the stream, not the 1280x800 a single fit of screen into stream says.
+TEST(InputTouchPortMapping, AScreenInAFrameOfAnotherShapeTakesBothFits) {
+  const auto port = input::make_touch_port_in_frame(1280, 800, 1920, 1080, 1280, 800);
+
+  EXPECT_NEAR(port.client_offsetX, 64.0f, 0.5f);
+  EXPECT_NEAR(port.client_offsetY, 40.0f, 0.5f);
+  const auto left = input::map_client_to_touchport(port, {64.0f, 400.0f}, {1280.0f, 800.0f});
+  const auto bottom_right = input::map_client_to_touchport(port, {1216.0f, 760.0f}, {1280.0f, 800.0f});
+  ASSERT_TRUE(left && bottom_right);
+  EXPECT_NEAR(left->first, 0.0f, 1.0f);
+  EXPECT_NEAR(left->second, 400.0f, 1.0f);
+  EXPECT_NEAR(bottom_right->first, 1280.0f, 1.0f);
+  EXPECT_NEAR(bottom_right->second, 800.0f, 1.0f);
+
+  // A frame the stream's shape is one fit, as the Deck's 1920x1080 frame in a 1920x1080 stream is.
+  const auto same_shape = input::make_touch_port_in_frame(1280, 800, 1920, 1080, 1920, 1080);
+  const auto direct = input::make_touch_port(platf::touch_port_t {0, 0, 1280, 800}, 1280, 800, 1920, 1080);
+  EXPECT_NEAR(same_shape.client_offsetX, direct.client_offsetX, 0.01f);
+  EXPECT_NEAR(same_shape.client_offsetY, direct.client_offsetY, 0.01f);
+  EXPECT_NEAR(same_shape.scalar_inv, direct.scalar_inv, 0.0001f);
+}
+
 namespace {
   // gamescope's apply_touchscreen_orientation, as 3.16.23 writes it.
   std::pair<float, float> gamescope_turns(int degrees, float x, float y) {

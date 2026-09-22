@@ -112,6 +112,29 @@ namespace input {
   );
 
   /**
+   * @brief Build the touchport for a screen its compositor fitted into the captured frame.
+   *
+   * The screen sits inside the frame by one fit and the frame inside the stream by another, so
+   * its place in the stream is both. That is one fit only when the frame and the stream have the
+   * same shape.
+   * @param screen_width The screen's width, inside the frame.
+   * @param screen_height The screen's height, inside the frame.
+   * @param frame_width The captured frame's width.
+   * @param frame_height The captured frame's height.
+   * @param stream_width The width the client is streaming at.
+   * @param stream_height The height the client is streaming at.
+   * @return The touchport for this session.
+   */
+  touch_port_t make_touch_port_in_frame(
+    int screen_width,
+    int screen_height,
+    int frame_width,
+    int frame_height,
+    int stream_width,
+    int stream_height
+  );
+
+  /**
    * @brief Why a client coordinate could not be mapped onto the touchport.
    *
    * One warning covering every one of these told a reporter on nova#302 only
