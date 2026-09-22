@@ -19,6 +19,7 @@
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <source_location>
 #include <string_view>
 #include <unordered_set>
 #include <utility>
@@ -950,10 +951,15 @@ namespace multiseat::container {
   ) const {
     const auto &config = record.at("Config");
     const auto &host = record.at("HostConfig");
-    const auto fail = []() { throw std::runtime_error {"Docker worker isolation or launch configuration changed"}; };
+    // Say which part differs. A worker rejected here is stopped, and the Space only reported that
+    // its runtime did not start, so a check that names nothing left no way to tell what changed.
+    const auto fail = [](std::string_view what = {}, std::source_location where = std::source_location::current()) {
+      throw std::runtime_error {"Docker worker isolation or launch configuration changed (" +
+        (what.empty() ? "check at line " + std::to_string(where.line()) : std::string {what}) + ")"};
+    };
     const auto exact = [&fail](const json &object, std::string_view key, const json &expected) {
       const auto *value = object_member(object, key);
-      if (!value || *value != expected) fail();
+      if (!value || *value != expected) fail(key);
     };
     exact(config, "User", std::to_string(host_.effective_uid()) + ":" + std::to_string(host_.effective_gid()));
     exact(config, "Image", label_value(labels, label_runtime_image).value());
