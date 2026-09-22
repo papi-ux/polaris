@@ -69,6 +69,18 @@ int main(int argc, char **argv) {
   choice.kind = ENCODER_NVENC; choice.factory = g_strdup("nvh264device1enc");
   gchar *description = encoder_description(&choice, 8000, 60000);
   g_assert_nonnull(strstr(description, "vbv-buffer-size=134"));
+  /* Keyframes come when a client asks for one, never on a timer. */
+  g_assert_nonnull(strstr(description, "gop-size=-1 "));
+  g_free(description);
+  choice.kind = ENCODER_VA;
+  description = encoder_description(&choice, 8000, 60000);
+  g_assert_nonnull(strstr(description, "key-int-max=1024 "));
+  g_free(description);
+  choice.kind = ENCODER_SOFTWARE;
+  description = encoder_description(&choice, 8000, 60000);
+  g_assert_nonnull(strstr(description, "openh264enc "));
+  g_assert_nonnull(strstr(description, "gop-size=0 "));
+  g_assert_null(strstr(description, "gop-size=60"));
   g_free(description); g_free(choice.factory);
   gst_deinit();
   puts("allocated PCI/CUDA identity, per-device factories and VA device identity checks passed");
