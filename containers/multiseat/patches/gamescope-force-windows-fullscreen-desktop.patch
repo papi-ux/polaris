@@ -1,0 +1,11 @@
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -4549,7 +4549,7 @@
+ 
+ 	xwayland_ctx_t *ctx = w->xwayland().ctx;
+ 
+-	if ( w->sizeHintsSpecified && !window_is_fullscreen( w ) )
++	if ( w->sizeHintsSpecified && !(window_is_fullscreen( w ) || ctx->force_windows_fullscreen) )
+ 	{
+ 		if ((unsigned)w->GetGeometry().nWidth != w->requestedWidth || (unsigned)w->GetGeometry().nHeight != w->requestedHeight)
+ 		{
