@@ -137,7 +137,10 @@ if host_driver:
     # An image that borrows the machine's driver has to carry the contract it
     # was built against and the probe that proves the borrowed files load.
     files += [pathlib.Path('/usr/share/polaris/build/nvidia-host-contract.json')]
-    for probe in ['graphics-check', 'graphics-check-32']:
+    # The 32-bit probe is built wherever a 32-bit game can run, which is every launcher family
+    # but gamescope. Asking every image for it failed the gamescope build of this variant.
+    probes = ['graphics-check'] if profile == 'gamescope' else ['graphics-check', 'graphics-check-32']
+    for probe in probes:
         files.append(pathlib.Path('/usr/libexec/polaris-seat') / probe)
     if pathlib.Path('/etc/ld.so.cache').resolve() != pathlib.Path('/etc/polaris-ld/ld.so.cache'):
         raise ValueError('the loader cache must be rebuilt over the borrowed driver at start')
