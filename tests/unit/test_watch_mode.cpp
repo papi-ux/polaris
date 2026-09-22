@@ -9,6 +9,8 @@
  * and every other device offered "Watch Stream" for it, because serverinfo said busy either way.
  */
 
+#include <src/rtsp.h>
+#include <src/stream.h>
 #include <src/watch_mode.h>
 
 #include <boost/property_tree/ptree.hpp>
@@ -137,4 +139,38 @@ TEST(WatchMode, ServerinfoSaysWhetherThereIsAStreamAndWhoseGameItIs) {
   EXPECT_NE(fields.find("watch_mode::put_elements(tree, \"root.currentgamewatch\", watch_mode_of(*owner_profile));"), std::string::npos);
   EXPECT_NE(fields.find("proc::proc.get_session_owner_device_name()"), std::string::npos)
     << "a card can say whose game is open instead of \"another device\"";
+}
+
+TEST(WatchMode, AWatcherIsHeldToTheStreamsModeButNotToItsOwnBitrate) {
+  // Seen live 2026-09-22: a Retroid set to its own bitrate was refused a 1920x1080@60 HEVC stream
+  // at 16988 kbps with "Watch profile mismatch (dynamic range, bitrate)", after the host had pinned
+  // it to exactly that stream. A watcher is sent the owner's encoded stream and cannot know the
+  // number its own request would have to reach.
+  rtsp_stream::launch_session_t pinned {};
+  pinned.watch_only = true;
+  pinned.width = 1920;
+  pinned.height = 1080;
+  pinned.fps = 60000;
+  pinned.enable_hdr = false;
+  pinned.preferred_codec = "hevc";
+  pinned.target_bitrate_kbps = 16988;
+  stream::config_t watcher {};
+  watcher.monitor.width = 1920;
+  watcher.monitor.height = 1080;
+  watcher.monitor.encodingFramerate = 60000;
+  watcher.monitor.dynamicRange = 0;
+  watcher.monitor.videoFormat = 1;
+  watcher.monitor.bitrate = 6507;
+  EXPECT_FALSE(rtsp_stream::watch_profile_mismatch_for_tests(pinned, watcher));
+
+  // What the watcher's decoder is set up for still has to be the stream's.
+  watcher.monitor.dynamicRange = 1;
+  const auto depth = rtsp_stream::watch_profile_mismatch_for_tests(pinned, watcher);
+  ASSERT_TRUE(depth);
+  EXPECT_NE(depth->find("dynamic range"), std::string::npos) << *depth;
+  watcher.monitor.dynamicRange = 0;
+  watcher.monitor.videoFormat = 2;
+  const auto codec = rtsp_stream::watch_profile_mismatch_for_tests(pinned, watcher);
+  ASSERT_TRUE(codec);
+  EXPECT_NE(codec->find("codec"), std::string::npos) << *codec;
 }
