@@ -20,10 +20,25 @@ std::string read_kmsgrab_source() {
 TEST(KmsgrabLoggingSource, AutoProbeSetcapGuidanceIsNotFatalOnWayland) {
   const auto source = read_kmsgrab_source();
 
-  EXPECT_NE(source.find("config::video.capture == \"kms\" ? fatal"), std::string::npos);
+  // Only a host set to KMS capture is failing when the probe finds no CAP_SYS_ADMIN. Every other
+  // host never enabled KMS, and the probe runs at each capture evaluation, so it says so once, as info.
+  const auto probe = source.find("note_kms_capture_refused_for_capability();");
+  ASSERT_NE(probe, std::string::npos);
+  const auto chosen = source.find("if (config::video.capture == \"kms\") {", probe);
+  const auto fatal_line = source.find("BOOST_LOG(fatal)", probe);
+  const auto once = source.find("std::call_once(said,", probe);
+  const auto quiet = source.find("BOOST_LOG(info) << \"KMS capture is off on this host, so Polaris captures another way.", probe);
+  ASSERT_NE(chosen, std::string::npos);
+  ASSERT_NE(fatal_line, std::string::npos);
+  ASSERT_NE(once, std::string::npos);
+  ASSERT_NE(quiet, std::string::npos);
+  EXPECT_LT(chosen, fatal_line);
+  EXPECT_LT(fatal_line, once);
+  EXPECT_LT(once, quiet);
   EXPECT_EQ(source.find("window_system != window_system_e::X11 || config::video.capture == \"kms\""), std::string::npos);
   EXPECT_NE(source.find("KMS display capture requires CAP_SYS_ADMIN"), std::string::npos);
-  EXPECT_NE(source.find("KMS probe could not access DRM framebuffer handles; continuing with non-KMS capture backends"), std::string::npos);
+  // A binary that holds no CAP_SYS_ADMIN is not asked to raise it, so that is not an error either.
+  EXPECT_NE(source.find("cap_get_flag(caps, CAP_SYS_ADMIN, CAP_PERMITTED, &permitted)"), std::string::npos);
 }
 
 TEST(KmsgrabLoggingSource, VirtualDisplayCardsDoNotWarnAboutRenderNodesOrNvenc) {

@@ -3563,7 +3563,8 @@ namespace video {
 
           continue;
         } else {
-          BOOST_LOG(error)
+          // A probe asks every format, and a GPU without one simply answers no.
+          BOOST_LOG(encoder_probe_in_progress ? info : error)
             << "Could not open codec ["sv
             << video_format.name << "]: "sv
             << av_make_error_string(err_str, AV_ERROR_MAX_STRING_SIZE, status);
@@ -4907,6 +4908,8 @@ namespace video {
     auto probe_state_guard = util::fail_guard([previous_probe_state]() {
       encoder_probe_in_progress = previous_probe_state;
     });
+    // The probe asks for what the GPU may not have; FFmpeg's refusals are answers here, not faults.
+    const logging::ffmpeg_errors_expected_t probe_refusals_expected;
 #ifdef POLARIS_TESTS
     if (probe_test_hooks) return probe_test_hooks->validate(encoder, expect_failure);
 #endif

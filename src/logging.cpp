@@ -373,6 +373,22 @@ namespace logging {
     return AV_LOG_DEBUG;
   }
 
+  namespace {
+    thread_local int ffmpeg_errors_expected_depth = 0;
+  }  // namespace
+
+  ffmpeg_errors_expected_t::ffmpeg_errors_expected_t() {
+    ++ffmpeg_errors_expected_depth;
+  }
+
+  ffmpeg_errors_expected_t::~ffmpeg_errors_expected_t() {
+    --ffmpeg_errors_expected_depth;
+  }
+
+  bool ffmpeg_errors_expected() {
+    return ffmpeg_errors_expected_depth > 0;
+  }
+
   void setup_av_logging(int min_log_level) {
     av_log_set_level(av_log_level_for(min_log_level));
     av_log_set_callback([](void *ptr, int level, const char *fmt, va_list vl) {
@@ -383,7 +399,7 @@ namespace logging {
       if (level <= AV_LOG_ERROR) {
         // We print AV_LOG_FATAL at the error level. FFmpeg prints things as fatal that
         // are expected in some cases, such as lack of codec support or similar things.
-        BOOST_LOG(error) << buffer;
+        BOOST_LOG(ffmpeg_errors_expected() ? info : error) << buffer;
       } else if (level <= AV_LOG_WARNING) {
         BOOST_LOG(warning) << buffer;
       } else if (level <= AV_LOG_INFO) {

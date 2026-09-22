@@ -4,7 +4,15 @@
  * @note Adapted from https://www.avahi.org/doxygen/html/client-publish-service_8c-example.html
  */
 // standard includes
+#include <string>
+#include <string_view>
 #include <thread>
+
+// platform includes
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <netinet/in.h>
 
 // local includes
 #include "misc.h"
@@ -322,6 +330,37 @@ namespace platf::publish {
     }
   }
 
+  /// This host's IPv4 addresses on its real interfaces, for a player to type into a client.
+  static std::string lan_ipv4_addresses() {
+    std::string joined;
+    ifaddrs *raw {nullptr};
+    if (getifaddrs(&raw) != 0) {
+      return joined;
+    }
+    const util::safe_ptr<ifaddrs, freeifaddrs> list {raw};
+    for (auto *entry = list.get(); entry; entry = entry->ifa_next) {
+      if (!entry->ifa_addr || entry->ifa_addr->sa_family != AF_INET || !(entry->ifa_flags & IFF_UP) ||
+          (entry->ifa_flags & IFF_LOOPBACK)) {
+        continue;
+      }
+      const std::string_view interface_name {entry->ifa_name ? entry->ifa_name : ""};
+      if (interface_name.starts_with("docker"sv) || interface_name.starts_with("veth"sv) ||
+          interface_name.starts_with("br-"sv) || interface_name.starts_with("virbr"sv)) {
+        continue;
+      }
+      char text[INET_ADDRSTRLEN] {};
+      const auto *address = reinterpret_cast<const sockaddr_in *>(entry->ifa_addr);
+      if (!inet_ntop(AF_INET, &address->sin_addr, text, sizeof(text))) {
+        continue;
+      }
+      if (!joined.empty()) {
+        joined += ", ";
+      }
+      joined += text;
+    }
+    return joined;
+  }
+
   void create_services(avahi::Client *c) {
     int ret;
 
@@ -331,7 +370,17 @@ namespace platf::publish {
 
     if (!group) {
       if (!(group = avahi::entry_group_new(c, entry_group_callback, nullptr))) {
-        BOOST_LOG(error) << "avahi::entry_group_new() failed: "sv << avahi::strerror(avahi::client_errno(c));
+        const auto failure = avahi::client_errno(c);
+        if (failure == avahi::ERR_NOT_PERMITTED) {
+          // SteamOS ships avahi-daemon.conf with disable-publishing=yes. Nothing is broken; the
+          // host simply cannot announce itself, so say what a player does instead.
+          const auto addresses = lan_ipv4_addresses();
+          BOOST_LOG(warning) << "This host does not allow network announcements (avahi publishing is off, as SteamOS "sv
+                             << "ships it), so Nova and Moonlight will not find it on their own. Add it by its address"sv
+                             << (addresses.empty() ? std::string {"."} : ": " + addresses);
+        } else {
+          BOOST_LOG(error) << "avahi::entry_group_new() failed: "sv << avahi::strerror(failure);
+        }
         return;
       }
     }
