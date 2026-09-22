@@ -91,6 +91,16 @@ Then start a game and read the active runtime, capture path, and encoder in Miss
 
 ## Upgrade
 
+With the [package repository](repositories.md) added once, an upgrade is one command:
+
+```bash
+sudo pacman -Syu &&
+sudo -H polaris --setup-host &&
+systemctl --user restart polaris
+```
+
+Without the repository, install the newer package the same way:
+
 ```bash
 wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst &&
 sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst &&

@@ -1428,8 +1428,8 @@ for forbidden in (
 if release_notes.count("sudo -H polaris --setup-host &&") != 3:
     print("v1.4.12 release notes must chain setup-host in all three mutable package commands", file=sys.stderr)
     sys.exit(1)
-if release_notes.count("sudo -H polaris --setup-host || exit $?") != 1:
-    print("v1.4.12 release notes must chain setup-host in the SteamOS command", file=sys.stderr)
+if release_notes.count("sudo -H polaris --setup-host --enable-headless-boot || exit $?") != 1:
+    print("v1.4.12 release notes must chain setup-host with headless boot in the SteamOS command", file=sys.stderr)
     sys.exit(1)
 if release_notes.count("systemctl --user restart polaris") != 3:
     print("v1.4.12 release notes must restart Polaris in all three mutable package commands", file=sys.stderr)

@@ -82,7 +82,7 @@ const runWithFakeInstallCommands = (command, failSudo) => {
       /^wget --output-document=\.\/Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst https:\/\/example\.test\/Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst &&$/,
       /^sudo steamos-readonly disable(?: \|\| exit \$\?)?$/,
       /^sudo pacman -U \.\/Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst \|\| exit \$\?$/,
-      /^sudo -H polaris --setup-host \|\| exit \$\?$/,
+      /^sudo -H polaris --setup-host --enable-headless-boot \|\| exit \$\?$/,
       /^sudo steamos-readonly enable(?: \|\| exit \$\?)?$/,
       /^systemctl --user enable --now polaris$/,
     ]
@@ -387,7 +387,7 @@ describe('Update Center release awareness', () => {
       "trap 'sudo steamos-readonly enable' EXIT",
       'sudo steamos-readonly disable || exit $?',
       'sudo pacman -U ./Polaris-steamos3.8-x86_64.pkg.tar.zst || exit $?',
-      'sudo -H polaris --setup-host || exit $?',
+      'sudo -H polaris --setup-host --enable-headless-boot || exit $?',
       'sudo steamos-readonly enable || exit $?',
       'trap - EXIT',
       ') &&',
@@ -399,7 +399,7 @@ describe('Update Center release awareness', () => {
     const disableReadOnly = commandLines.indexOf('sudo steamos-readonly disable || exit $?')
     const restoreTrap = commandLines.indexOf("trap 'sudo steamos-readonly enable' EXIT")
     const installPackage = commandLines.indexOf('sudo pacman -U ./Polaris-steamos3.8-x86_64.pkg.tar.zst || exit $?')
-    const setupHost = commandLines.indexOf('sudo -H polaris --setup-host || exit $?')
+    const setupHost = commandLines.indexOf('sudo -H polaris --setup-host --enable-headless-boot || exit $?')
     const restoreReadOnly = commandLines.indexOf('sudo steamos-readonly enable || exit $?')
     const clearRestoreTrap = commandLines.indexOf('trap - EXIT')
     const subshellEnd = commandLines.indexOf(') &&')
@@ -453,13 +453,13 @@ describe('Update Center release awareness', () => {
     expect(commands).toContain('sudo steamos-readonly disable')
     expect(commands).toContain('sudo steamos-readonly enable')
     expect(commands).not.toContain('sudo pacman -U ./Polaris-steamos3.8-x86_64.pkg.tar.zst')
-    expect(commands).not.toContain('sudo -H polaris --setup-host')
+    expect(commands).not.toContain('sudo -H polaris --setup-host --enable-headless-boot')
     expect(commands).not.toContain('systemctl --user enable --now polaris')
     expect(result.status).not.toBe(0)
   })
 
   it('restores SteamOS read-only mode and skips service startup when host setup fails', () => {
-    expectFailureSafeSteamOsCommand('setup-host', 'sudo -H polaris --setup-host')
+    expectFailureSafeSteamOsCommand('setup-host', 'sudo -H polaris --setup-host --enable-headless-boot')
   })
 
   it('retries SteamOS read-only restoration and skips service startup when restoration fails', () => {

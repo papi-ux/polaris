@@ -33,7 +33,7 @@ set -e
 trap 'sudo steamos-readonly enable' EXIT
 sudo steamos-readonly disable || exit $?
 sudo pacman -U ./Polaris-steamos3.8-x86_64.pkg.tar.zst || exit $?
-sudo -H polaris --setup-host || exit $?
+sudo -H polaris --setup-host --enable-headless-boot || exit $?
 sudo steamos-readonly enable || exit $?
 trap - EXIT
 ) &&

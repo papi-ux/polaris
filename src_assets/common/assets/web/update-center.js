@@ -135,7 +135,8 @@ export function buildManualInstallCommand(asset, host = {}) {
     lines.push("trap 'sudo steamos-readonly enable' EXIT")
     lines.push('sudo steamos-readonly disable || exit $?')
     lines.push(`sudo pacman -U ./${fileName} || exit $?`)
-    lines.push('sudo -H polaris --setup-host || exit $?')
+    // A Game Mode host is only reachable once Polaris starts at boot, and enabling it again is a no-op.
+    lines.push('sudo -H polaris --setup-host --enable-headless-boot || exit $?')
     lines.push('sudo steamos-readonly enable || exit $?')
     lines.push('trap - EXIT')
     lines.push(') &&')
