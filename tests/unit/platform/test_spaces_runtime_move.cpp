@@ -158,6 +158,27 @@ namespace {
     EXPECT_FALSE(spaces::labeled_image_runtime("latest", labeled("latest", nvidia_labels("610.57.04")).dump()));
   }
 
+  TEST(SpacesRuntimeMove, AnOlderBuildOfABorrowingRuntimeStillGetsTheDriverFiles) {
+    // Seen on the lab 2026-09-21: once the catalog listed a newer build, a Space still on the older
+    // one started with no driver files and its worker stopped with "libcuda.so.1 did not arrive".
+    const json borrowing = {{"io.polaris.multiseat.profile", "lutris"}, {"io.polaris.multiseat.media-contract", "1"},
+      {"io.polaris.multiseat.architecture", "linux/amd64"}, {"io.polaris.multiseat.nvidia.source", "host"},
+      {"io.polaris.multiseat.nvidia.contract", "1"}, {"io.polaris.multiseat.nvidia.minimum-driver", "570.00"}};
+    inspect_host_t host;
+    host.images[lab_image] = labeled(lab_image, borrowing);
+    spaces::image_runtime_cache_t cache;
+    EXPECT_TRUE(spaces::image_borrows_host_driver(host, lab_image, catalog, &cache));
+
+    host.images[lab_image] = labeled(lab_image, nvidia_labels("610.57.04"));
+    spaces::image_runtime_cache_t baked;
+    EXPECT_FALSE(spaces::image_borrows_host_driver(host, lab_image, catalog, &baked)) << "a runtime that carries its own driver";
+
+    host.images.clear();
+    spaces::image_runtime_cache_t missing;
+    EXPECT_FALSE(spaces::image_borrows_host_driver(host, lab_image, catalog, &missing)) << "an image Docker does not have";
+    EXPECT_FALSE(spaces::image_borrows_host_driver(host, "ubuntu:latest", catalog, &missing)) << "never a tag";
+  }
+
   TEST(SpacesRuntimeMove, DockerIsAskedOncePerImageAndOnlyAnswersAreKept) {
     inspect_host_t host;
     spaces::image_runtime_cache_t cache;

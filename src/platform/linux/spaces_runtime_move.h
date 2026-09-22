@@ -58,6 +58,10 @@ namespace multiseat::spaces {
   /// The compiled catalog first, then the cache, then one bounded `docker image inspect`.
   [[nodiscard]] image_runtime_t identify_image(container::host_t &host, std::string_view image,
     const std::vector<runtime_t> &catalog, image_runtime_cache_t *cache = nullptr);
+  /// Whether a Space launching this image needs this machine's driver files: a runtime this build
+  /// lists as borrowing them, or an older build of one, known by the labels it was built with.
+  [[nodiscard]] bool image_borrows_host_driver(container::host_t &host, std::string_view image,
+    const std::vector<runtime_t> &catalog, image_runtime_cache_t *cache = nullptr);
 
   /// The image names an NVIDIA driver and the loaded driver is a different, readable version.
   [[nodiscard]] bool driver_mismatch(const image_runtime_t &image, const std::optional<std::string> &host_driver);

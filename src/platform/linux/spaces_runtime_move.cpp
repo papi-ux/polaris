@@ -126,6 +126,17 @@ namespace multiseat::spaces {
     return *labeled;
   }
 
+  bool image_borrows_host_driver(container::host_t &host, std::string_view image,
+    const std::vector<runtime_t> &catalog, image_runtime_cache_t *cache) {
+    if (borrows_host_driver(image, catalog)) return true;
+    // A Space stays on the build of its runtime it was made with after this build lists a newer
+    // one. An older build of a borrowing runtime carries no driver of its own, so without the
+    // machine's files its worker stopped at once ("libcuda.so.1 did not arrive") and the Space
+    // only said that its runtime did not start.
+    const auto identity = identify_image(host, image, catalog, cache);
+    return identity.known && identity.nvidia_source == "host";
+  }
+
   bool driver_mismatch(const image_runtime_t &image, const std::optional<std::string> &host_driver) {
     // An image that borrows the machine's driver cannot be built for another
     // one, so it never mismatches.
