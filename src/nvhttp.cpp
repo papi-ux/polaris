@@ -8500,6 +8500,8 @@ namespace nvhttp {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
+      // The policy describes the stream mode as well, so the same holds here.
+      reconcile_game_mode_host();
 
       try {
         auto query = request->parse_query_string();
@@ -8614,6 +8616,11 @@ namespace nvhttp {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
+
+      // A client can read the host's modes here before it ever asks for serverinfo, which is what a
+      // library refresh after a restart does. A host in Game Mode has to answer with the mode it will
+      // run, or the client plans a launch around a mode that is already gone.
+      reconcile_game_mode_host();
 
       auto write_json = [&](const nlohmann::json &body,
                             SimpleWeb::StatusCode status = SimpleWeb::StatusCode::success_ok) {
@@ -8962,6 +8969,8 @@ namespace nvhttp {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
+      // Each game's launch contract names the modes it can run in, so the same holds here.
+      reconcile_game_mode_host();
 #ifdef __linux__
       const auto environment_query = request->parse_query_string();
       const bool desktop_catalog = get_arg(environment_query, "environment", "") == "desktop";

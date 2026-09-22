@@ -4492,6 +4492,29 @@ TEST(ProcessRuntimeConfigTests, ALaunchOnAGameModeHostIsNeverAskedToCloseSteam) 
   }
 }
 
+TEST(ProcessRuntimeConfigTests, AClientReadingAGameModeHostsModesIsToldTheMirrorItWillRun) {
+  // Found on a Steam Deck: after Polaris restarted, Nova's library refresh read the client settings
+  // and the game list before anything asked for serverinfo. Both still named the configured Private
+  // Stream, which a Deck cannot run, so Nova planned Gamescope Stream, locked it, and refused the
+  // mirror the host answered with. The Desktop tile could not open until something else had asked.
+  const auto nvhttp = read_source_file_for_contract("src/nvhttp.cpp");
+  for (const std::string handler : {"polarisClientSettings", "polarisGames", "polarisStreamPolicy"}) {
+    const auto start = nvhttp.find("auto " + handler + " = [](resp_https_t response, req_https_t request) {");
+    ASSERT_NE(start, std::string::npos) << handler;
+    const auto next = nvhttp.find("\n    auto polaris", start + 1);
+    const auto body = nvhttp.substr(start, next == std::string::npos ? std::string::npos : next - start);
+    const auto authorised = body.find("get_verified_cert(request)");
+    const auto reconciled = body.find("reconcile_game_mode_host();");
+    ASSERT_NE(authorised, std::string::npos) << handler;
+    ASSERT_NE(reconciled, std::string::npos) << handler << " describes the host's modes, so it has to hold the Game Mode mirror first";
+    EXPECT_LT(authorised, reconciled) << handler << " asks nothing of an unpaired client";
+    const auto described = body.find("build_client_settings_json(");
+    if (described != std::string::npos) {
+      EXPECT_LT(reconciled, described) << handler << " holds the mirror before it describes the modes";
+    }
+  }
+}
+
 TEST(ProcessRuntimeConfigTests, TheProfileAGameModeHostResolvesIsTheOneItsLaunchAccepts) {
   // A launch refuses an exact profile whose topology is not the one it ends up with. On a Steam Deck
   // the first request after a host start was the profile request, it resolved against the
