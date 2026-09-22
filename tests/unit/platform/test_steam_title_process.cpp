@@ -110,6 +110,20 @@ TEST(SteamTitleProcess, ATitleIsRecognisedByTheWaySteamStartsIt) {
   EXPECT_FALSE(st::launch_cmdline_matches_appid(argv_bytes({"game", "--note=SteamLaunch AppId=813230x"}), "813230"));
 }
 
+TEST(SteamTitleProcess, AShortcutIsFoundByTheIdTheReaperCarries) {
+  // A non-Steam shortcut launches as steam://rungameid/<64-bit game id>, and the reaper names the
+  // shortcut's 32-bit id. The Deck's shortcut to the Nova app is AppId=3127633177.
+  const std::uint64_t shortcut = 3127633177ull;
+  const auto game_id = std::to_string((shortcut << 32) | 0x02000000ull);
+  EXPECT_EQ(st::launch_appid(game_id), "3127633177");
+  EXPECT_TRUE(st::running(deck_table(), st::launch_appid(game_id), k_player));
+
+  EXPECT_EQ(st::launch_appid("813230"), "813230") << "a Steam game's id is its appid";
+  EXPECT_EQ(st::launch_appid("4294967295"), "4294967295") << "the largest 32-bit id is still an appid";
+  EXPECT_EQ(st::launch_appid("abc"), "abc");
+  EXPECT_EQ(st::launch_appid("99999999999999999999999"), "99999999999999999999999") << "too long for 64 bits";
+}
+
 TEST(SteamTitleProcess, RunningMeansThisAccountsSteamStartedThisTitle) {
   const auto table = deck_table();
   EXPECT_TRUE(st::running(table, "813230", k_player));

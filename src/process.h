@@ -921,12 +921,13 @@ namespace proc {
     void pause();
     void terminate(bool immediate = false, bool needs_refresh = true);
     /**
-     * @brief terminate() for someone ending the session on purpose, such as the console's Close App.
+     * @brief terminate() for someone ending the session on purpose: the console's Close App and
+     *        Disconnect, and Browser Stream's Stop.
      *
      * The difference is Game Mode: there the title the stream opened is asked to close as well,
      * which no other stop does.
      */
-    void end_session();
+    void end_session(bool immediate = false, bool needs_refresh = true);
     bool terminate_if(const std::function<bool()> &condition,
                       const std::function<void()> &before_terminate);
     bool terminate_abandoned_desktop_takeover(std::string_view session_token);
@@ -986,6 +987,8 @@ namespace proc {
       bool no_active_sessions_at_launch
     );
     void terminate_impl(bool immediate, bool needs_refresh);
+    /// terminate() and end_session(): take the lifecycle gate, then tear down.
+    void stop(bool immediate, bool needs_refresh, bool ends_session);
 #ifdef __linux__
     bool request_session_owned_steam_graceful_shutdown_before_cage_stop();
     bool terminate_session_owned_steam_before_cage_stop();

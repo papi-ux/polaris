@@ -37,6 +37,16 @@ namespace platf::steam_title {
   bool launch_cmdline_matches_appid(std::string_view cmdline, std::string_view appid);
 
   /**
+   * @brief The id Steam's reaper carries for a title launched with this game id.
+   *
+   * A Steam game's id is its appid. A shortcut to a non-Steam game is launched with a 64-bit game
+   * id, the shortcut's 32-bit id shifted up with a type in the low half, while the reaper names the
+   * 32-bit id: a Steam Deck runs its shortcut to the Nova app as `AppId=3127633177`. Anything that is
+   * not a decimal number comes back as it was, and matches nothing.
+   */
+  std::string launch_appid(std::string_view steam_game_id);
+
+  /**
    * @brief Whether Steam is running this title for this account.
    *
    * Only Steam's own launch processes count, the reaper and the launch wrapper, so a shell or a

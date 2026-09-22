@@ -65,9 +65,9 @@ namespace platf::game_mode_host {
    *
    * detect_cached() walks /proc on every call. That suits a stats request. A launch asks several
    * times in a row and the input path asks per event, so the answer is kept for two seconds and
-   * then refreshed on a thread of its own, the caller getting the kept answer meanwhile. Only the
-   * first question in the process waits for a walk. A session that starts or ends is noticed
-   * within a few seconds, far shorter than switching between Game Mode and the desktop takes.
+   * then refreshed on a thread of its own, the caller getting the kept answer meanwhile. An answer
+   * more than ten seconds old is never handed out: that caller waits for a walk, so a teardown or
+   * a launch after a quiet spell acts on the mode the host is in now.
    */
   bool session_live();
 

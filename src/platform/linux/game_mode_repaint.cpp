@@ -277,7 +277,7 @@ namespace platf::game_mode_host {
 
     try {
       std::thread(ask).detach();
-    } catch (const std::system_error &error) {
+    } catch (const std::exception &error) {
       // No thread to be had. The flag is let go so a later capture can ask again.
       BOOST_LOG(warning) << "game_mode: could not start the thread that asks a still Game Mode screen to draw: "sv << error.what();
       in_flight.clear();

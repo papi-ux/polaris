@@ -4575,12 +4575,39 @@ TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStream
   ASSERT_NE(marked, std::string::npos);
   ASSERT_NE(stopped, std::string::npos);
   EXPECT_LT(marked, stopped);
-  EXPECT_NE(source.find("void proc_t::end_session() {\n    const session_end_request_scope_t ending"), std::string::npos);
+  // end_session() marks its stop only once that stop owns the gate: a request that loses the race
+  // to another stop must neither mark it nor clear the mark that stop set.
+  const auto stop_body = source.substr(source.find("void proc_t::stop(bool immediate, bool needs_refresh, bool ends_session) {"));
+  const auto gate = stop_body.find("_session_lifecycle_gate->begin_stop(");
+  const auto lost = stop_body.find("return;", gate);
+  const auto mark = stop_body.find("ending.emplace(session_lifecycle_sync().stop_ends_session);");
+  const auto teardown = stop_body.find("terminate_impl(immediate, needs_refresh);");
+  ASSERT_NE(gate, std::string::npos);
+  ASSERT_NE(mark, std::string::npos);
+  ASSERT_NE(teardown, std::string::npos);
+  EXPECT_LT(lost, mark);
+  EXPECT_LT(mark, teardown);
+  EXPECT_NE(source.find("void proc_t::end_session(bool immediate, bool needs_refresh) {\n    stop(immediate, needs_refresh, true);"), std::string::npos);
+  EXPECT_NE(source.find("void proc_t::terminate(bool immediate, bool needs_refresh) {\n    stop(immediate, needs_refresh, false);"), std::string::npos);
   const auto timeout = source.substr(source.find("bool proc_t::terminate_if("), 600);
   EXPECT_EQ(timeout.find("stop_ends_session"), std::string::npos) << "the resume timeout is not someone ending the session";
   const auto confighttp = read_source_file_for_contract("src/confighttp.cpp");
   const auto close_app = confighttp.substr(confighttp.find("void closeApp(resp_https_t response, req_https_t request)"), 700);
   EXPECT_NE(close_app.find("proc::proc.end_session();"), std::string::npos);
+  // The console's Disconnect force-stops when the owner's shutdown does not stop, and Browser
+  // Stream's Stop ends the app it owns: both are someone ending the session on purpose.
+  EXPECT_NE(confighttp.find("WebUI disconnect: force-stop after outcome="), std::string::npos);
+  const auto force_stop = confighttp.substr(confighttp.find("WebUI disconnect: force-stop after outcome="), 400);
+  EXPECT_NE(force_stop.find("proc::proc.end_session();"), std::string::npos);
+  const auto browser_stop = confighttp.substr(confighttp.find("BrowserStreamStop: async terminate owned app"), 200);
+  EXPECT_NE(browser_stop.find("proc::proc.end_session(false, false);"), std::string::npos);
+
+  // And both reach proc::execute without nvhttp, so they bring the Game Mode hold in line first.
+  const auto console_launch = confighttp.substr(confighttp.find("nvhttp::reconcile_game_mode_host();"), 300);
+  EXPECT_NE(console_launch.find("nvhttp::make_launch_session(true, false, launch_args, &named_cert);"), std::string::npos);
+  const auto browser = read_source_file_for_contract("src/browser_stream.cpp");
+  const auto browser_launch = browser.substr(browser.find("nvhttp::reconcile_game_mode_host();"), 200);
+  EXPECT_NE(browser_launch.find("browser_launch_session();"), std::string::npos);
 }
 
 TEST(ProcessRuntimeConfigTests, ASteamTitleIsOneDirectLaunchInGameMode) {

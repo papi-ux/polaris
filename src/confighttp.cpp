@@ -7437,6 +7437,9 @@ namespace confighttp {
             return;
           }
 #endif
+          // A console launch may be the first thing a host in Game Mode is asked, with no client
+          // having brought the mode in line yet.
+          nvhttp::reconcile_game_mode_host();
           auto launch_session = nvhttp::make_launch_session(true, false, launch_args, &named_cert);
           if (!launch_session) {
             bad_request(response, request, "Failed to build a launch session");
@@ -7516,7 +7519,7 @@ namespace confighttp {
               BOOST_LOG(info) << "WebUI disconnect: force-stop after outcome="
                               << static_cast<int>(shutdown.snapshot.outcome);
               rtsp_stream::terminate_sessions();
-              proc::proc.terminate();
+              proc::proc.end_session();
             }
             nvhttp::find_and_stop_session(uuid, true);
           }
@@ -7533,7 +7536,7 @@ namespace confighttp {
               BOOST_LOG(info) << "WebUI disconnect: force-stop active session(s)"sv;
               rtsp_stream::terminate_sessions();
               if (proc::proc.running() > 0) {
-                proc::proc.terminate();
+                proc::proc.end_session();
               }
             }
           }
@@ -8073,7 +8076,7 @@ namespace confighttp {
         session_media::prepare_for_stop();
         if (owns_app) {
           BOOST_LOG(info) << "BrowserStreamStop: async terminate owned app"sv;
-          proc::proc.terminate(false, false);
+          proc::proc.end_session(false, false);
         }
       } catch (const std::exception &e) {
         BOOST_LOG(warning) << "BrowserStreamStop: async teardown failed: "sv << e.what();

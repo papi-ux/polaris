@@ -10,6 +10,7 @@
   #include <algorithm>
   #include <array>
   #include <cctype>
+  #include <charconv>
   #include <csignal>
   #include <cstdlib>
   #include <fstream>
@@ -159,6 +160,21 @@ namespace platf::steam_title {
       previous = token;
     }
     return false;
+  }
+
+  std::string launch_appid(std::string_view steam_game_id) {
+    if (!numeric(steam_game_id) || steam_game_id.size() > 20) {
+      return std::string {steam_game_id};
+    }
+    std::uint64_t id = 0;
+    const auto [end, error] = std::from_chars(steam_game_id.data(), steam_game_id.data() + steam_game_id.size(), id);
+    if (error != std::errc {} || end != steam_game_id.data() + steam_game_id.size()) {
+      return std::string {steam_game_id};
+    }
+    if (id > 0xFFFFFFFFull) {
+      return std::to_string(id >> 32);
+    }
+    return std::string {steam_game_id};
   }
 
   bool running(const std::vector<process_t> &table, std::string_view appid, uid_t uid) {

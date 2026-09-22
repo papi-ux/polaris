@@ -371,6 +371,10 @@ namespace platf::game_mode_host {
 
   namespace {
     constexpr auto session_live_ttl = std::chrono::seconds {2};
+    /// The oldest answer that may be handed out while a newer one is fetched. Past it the caller
+    /// waits for a scan: a teardown or a launch after a quiet spell must not act on a mode switch
+    /// that happened while nobody was asking.
+    constexpr auto session_live_stale_limit = std::chrono::seconds {10};
 
     std::mutex session_live_mutex;
     std::optional<bool> session_live_override;
@@ -394,22 +398,24 @@ namespace platf::game_mode_host {
       return *session_live_override;
     }
 
-    if (!session_live_answer) {
-      // The first question in this process has no answer to fall back on, so it waits for one.
+    const auto age = std::chrono::steady_clock::now() - session_live_read_at;
+    if (!session_live_answer || age >= session_live_stale_limit) {
+      // No answer yet, or one too old to act on: this caller waits for a scan.
       lock.unlock();
       const bool live = scan_session_live();
       lock.lock();
-      if (!session_live_answer) {
-        session_live_answer = live;
-        session_live_read_at = std::chrono::steady_clock::now();
+      if (session_live_override) {
+        return *session_live_override;
       }
-      return session_live_override.value_or(*session_live_answer);
+      session_live_answer = live;
+      session_live_read_at = std::chrono::steady_clock::now();
+      return live;
     }
 
-    // After that the answer is refreshed off the caller's thread. Some callers ask per input
-    // event, and a walk of /proc is not something a pointer move should wait for. An answer
-    // one scan old is fine for something that changes when a person switches modes.
-    if (std::chrono::steady_clock::now() - session_live_read_at >= session_live_ttl && !session_live_refreshing) {
+    // A young answer is refreshed off the caller's thread. Some callers ask per input event, and
+    // a walk of /proc is not something a pointer move should wait for. An answer a few seconds
+    // old is fine for something that changes when a person switches modes.
+    if (age >= session_live_ttl && !session_live_refreshing) {
       session_live_refreshing = true;
       try {
         std::thread([]() {
@@ -422,13 +428,14 @@ namespace platf::game_mode_host {
           }
           std::lock_guard guard {session_live_mutex};
           if (scanned && !session_live_override) {
+            // Only a scan that happened makes the answer young again.
             session_live_answer = live;
+            session_live_read_at = std::chrono::steady_clock::now();
           }
-          session_live_read_at = std::chrono::steady_clock::now();
           session_live_refreshing = false;
         }).detach();
       } catch (...) {
-        session_live_refreshing = false;  // no thread to be had; the old answer stands until the next ask
+        session_live_refreshing = false;  // no thread to be had; the old answer stands until it is too old
       }
     }
     return *session_live_answer;

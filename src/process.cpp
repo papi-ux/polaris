@@ -9391,13 +9391,16 @@ namespace proc {
 #ifdef __linux__
       {
         const auto appid = steam_appid_for_context(_app);
+        // Steam is asked by game id, and a title is found by the id its reaper carries: the same
+        // for a Steam game, the upper half of the id for a shortcut to a non-Steam game.
+        const auto reaper_appid = platf::steam_title::launch_appid(appid);
         const bool game_mode_live = platf::game_mode_host::session_live();
         const bool title_already_open = game_mode_live && !appid.empty() &&
-                                        platf::steam_title::running(platf::steam_title::read_process_table(), appid, getuid());
+                                        platf::steam_title::running(platf::steam_title::read_process_table(), reaper_appid, getuid());
         if (game_mode_live && !appid.empty()) {
           detached_to_spawn = game_mode_detached_commands(_app.detached, appid, title_already_open);
         }
-        _game_mode_launched_appid = game_mode_title_to_remember(appid, game_mode_live, title_already_open);
+        _game_mode_launched_appid = game_mode_title_to_remember(reaper_appid, game_mode_live, title_already_open);
         if (title_already_open) {
           BOOST_LOG(info) << "game_mode: ["sv << _app.name << "] is already open in Game Mode, so this stream joins it: it is not launched again, and ending the stream will leave it open"sv;
         }
@@ -9975,6 +9978,14 @@ namespace proc {
   }  // namespace
 
   void proc_t::terminate(bool immediate, bool needs_refresh) {
+    stop(immediate, needs_refresh, false);
+  }
+
+  void proc_t::end_session(bool immediate, bool needs_refresh) {
+    stop(immediate, needs_refresh, true);
+  }
+
+  void proc_t::stop(bool immediate, bool needs_refresh, bool ends_session) {
 #ifdef __linux__
     std::shared_ptr<const char> capture_owner;
     session_media::pending_start_cancel_owner_t pending_cancel;
@@ -9996,6 +10007,12 @@ namespace proc {
 #endif
       _session_lifecycle_gate->finish_stop();
     });
+    // Marked only once this stop owns the gate. A request that lost the race to another stop
+    // returned above, and neither marks nor clears that other stop.
+    std::optional<session_end_request_scope_t> ending;
+    if (ends_session) {
+      ending.emplace(session_lifecycle_sync().stop_ends_session);
+    }
     terminate_impl(immediate, needs_refresh);
   }
 
@@ -10067,11 +10084,6 @@ namespace proc {
     // The terminate app is a client quitting what it started.
     const session_end_request_scope_t ending {session_lifecycle_sync().stop_ends_session};
     terminate_impl(false, true);
-  }
-
-  void proc_t::end_session() {
-    const session_end_request_scope_t ending {session_lifecycle_sync().stop_ends_session};
-    terminate();
   }
 
 #ifdef __linux__

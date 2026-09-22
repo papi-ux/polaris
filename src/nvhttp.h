@@ -236,6 +236,14 @@ namespace nvhttp {
   make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker = false);
 
   /**
+   * @brief Bring the host's mode in line with whether it is in Steam Game Mode right now.
+   *
+   * nvhttp calls it wherever a client asks; the console and Browser Stream call it before they
+   * launch, because they reach proc::execute without passing through nvhttp.
+   */
+  void reconcile_game_mode_host();
+
+  /**
    * @brief Setup the nvhttp server.
    * @param pkey
    * @param cert
