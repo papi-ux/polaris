@@ -55,10 +55,10 @@ namespace {
   /// The tree a Proton title has on a Steam Deck in Game Mode, as read there, beside the Steam that
   /// runs the session and another title of the same player.
   std::vector<st::process_t> deck_table() {
-    const auto reaper = argv_bytes({"/home/deck/.local/share/Steam/ubuntu12_32/reaper", "SteamLaunch", "AppId=813230", "--", "/steam/steam-launch-wrapper", "--", "Animal Well.exe"});
+    const auto reaper = argv_bytes({"~/.local/share/Steam/ubuntu12_32/reaper", "SteamLaunch", "AppId=813230", "--", "/steam/steam-launch-wrapper", "--", "Animal Well.exe"});
     return {
       process(1625, 1355, "bash", argv_bytes({"bash", "/usr/bin/steam-jupiter"})),
-      process(1792, 1625, "steam", argv_bytes({"/home/deck/.local/share/Steam/ubuntu12_32/steam", "-gamepadui"})),
+      process(1792, 1625, "steam", argv_bytes({"~/.local/share/Steam/ubuntu12_32/steam", "-gamepadui"})),
       process(2074, 1792, "steam-runtime-l", argv_bytes({"steam-runtime-launcher-service"})),
       process(2894, 1792, "reaper", argv_bytes({"/steam/reaper", "SteamLaunch", "AppId=3127633177", "--", "nova-deck"})),
       process(2895, 2894, "bwrap", argv_bytes({"bwrap", "--args", "27"})),
