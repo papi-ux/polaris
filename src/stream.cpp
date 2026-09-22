@@ -2491,6 +2491,7 @@ namespace stream {
              (report.detail.empty() ? std::string {} : " ("s + report.detail + ")"s) +
              ": "s + std::to_string(report.selected_bitrate_kbps) + " kbps video target, "s +
              std::to_string(report.video_frames) + " video frames, "s +
+             std::to_string(report.keyframes) + " keyframes, "s +
              std::to_string(report.audio_frames) + " audio frames, "s +
              std::to_string(report.discontinuities) + " discontinuities, "s +
              std::to_string(report.idr_requests) + " keyframe requests"s +

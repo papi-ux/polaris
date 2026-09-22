@@ -187,6 +187,7 @@ TEST(MultiseatWorkerMediaPump, DeliversAnAcknowledgedContractsFramesToTheStream)
   std::scoped_lock lock {delivered.mutex};
   ASSERT_EQ(delivered.video.size(), 1U);
   EXPECT_EQ(std::string(delivered.video[0].bytes.begin(), delivered.video[0].bytes.end()), "video");
+  EXPECT_EQ(report.keyframes, delivered.video[0].idr ? 1U : 0U) << "the summary counts the keyframes the stream was sent";
   ASSERT_EQ(delivered.audio.size(), 1U);
   EXPECT_EQ(std::string(delivered.audio[0].begin(), delivered.audio[0].end()), "audio");
 

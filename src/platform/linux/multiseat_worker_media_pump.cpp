@@ -280,6 +280,7 @@ namespace multiseat::media {
           report.last_frame_index = frame.frame_index;
           if (packet.message == message_e::video) {
             ++report.video_frames;
+            if (frame.idr) ++report.keyframes;
             sinks.video(std::move(bytes), static_cast<std::int64_t>(frame.frame_index), frame.idr);
           } else {
             // Moonlight audio FEC requires equal shard sizes. Refuse a legacy
