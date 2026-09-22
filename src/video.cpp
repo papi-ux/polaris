@@ -4153,18 +4153,29 @@ namespace video {
   }
 
   input::touch_port_t make_port(platf::display_t *display, const config_t &config) {
-    return input::make_touch_port(
-      platf::touch_port_t {
-        display->offset_x,
-        display->offset_y,
-        display->width,
-        display->height,
-      },
-      display->env_width,
-      display->env_height,
-      config.width,
-      config.height
-    );
+    auto port = display->scaled_screen_width > 0 && display->scaled_screen_height > 0 ?
+                  // The frame is that screen fitted into the stream, so the letterbox is computed from it.
+                  input::make_touch_port(
+                    platf::touch_port_t {0, 0, display->scaled_screen_width, display->scaled_screen_height},
+                    display->scaled_screen_width,
+                    display->scaled_screen_height,
+                    config.width,
+                    config.height
+                  ) :
+                  input::make_touch_port(
+                    platf::touch_port_t {
+                      display->offset_x,
+                      display->offset_y,
+                      display->width,
+                      display->height,
+                    },
+                    display->env_width,
+                    display->env_height,
+                    config.width,
+                    config.height
+                  );
+    port.compositor_touch_turn = display->compositor_touch_turn;
+    return port;
   }
 
   std::unique_ptr<platf::encode_device_t> make_encode_device(platf::display_t &disp, const encoder_t &encoder, const config_t &config) {

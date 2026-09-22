@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -127,6 +128,55 @@ TEST(GameModeRepaint, ACaptureOutsideGameModeNeverAsks) {
   gm::first_frame_t first_frame {false};
   EXPECT_FALSE(first_frame.ask());
   EXPECT_FALSE(first_frame.ask());
+}
+
+TEST(GameModeTouchTurn, ReadsAForcedOrientationTheWayGamescopeDoes) {
+  EXPECT_EQ(gm::forced_orientation_from_args({"gamescope", "--force-orientation", "right"}), 270);
+  EXPECT_EQ(gm::forced_orientation_from_args({"/usr/bin/gamescope", "--force-orientation=left"}), 90);
+  EXPECT_EQ(gm::forced_orientation_from_args({"gamescope", "--force-orientation", "upsidedown"}), 180);
+  EXPECT_EQ(gm::forced_orientation_from_args({"gamescope", "--force-orientation", "normal"}), 0);
+  // The last one given wins, as it does for getopt.
+  EXPECT_EQ(gm::forced_orientation_from_args({"gamescope", "--force-orientation", "left", "--force-orientation", "right"}), 270);
+
+  EXPECT_EQ(gm::forced_orientation_from_args({"gamescope", "-w", "1280", "-h", "800", "-e"}), std::nullopt);
+  EXPECT_EQ(gm::forced_orientation_from_args({"gamescope", "--force-orientation", "sideways"}), std::nullopt);
+  EXPECT_EQ(gm::forced_orientation_from_args({"gamescope", "--force-orientation"}), std::nullopt);
+  // After -- it is the game's command line, not gamescope's.
+  EXPECT_EQ(gm::forced_orientation_from_args({"gamescope", "--", "game", "--force-orientation", "left"}), std::nullopt);
+}
+
+// A Steam Deck OLED on SteamOS 3.8.16: eDP-1 is 800x1280 and the kernel says right side up.
+TEST(GameModeTouchTurn, ASteamDeckPanelTurnsTouch270Degrees) {
+  const gm::internal_panel_t deck {3, 800, 1280};
+  EXPECT_EQ(gm::touch_turn_for(false, std::nullopt, deck).degrees, 270);
+  // gamescope said nothing yet about which screen it shows: the internal one is the one there is.
+  EXPECT_EQ(gm::touch_turn_for(std::nullopt, std::nullopt, deck).degrees, 270);
+  // Without the kernel's word, a portrait panel is still taken as turned 270 degrees.
+  EXPECT_EQ(gm::touch_turn_for(false, std::nullopt, gm::internal_panel_t {std::nullopt, 800, 1280}).degrees, 270);
+}
+
+TEST(GameModeTouchTurn, FollowsGamescopesOrderOfAuthority) {
+  const gm::internal_panel_t deck {3, 800, 1280};
+  // A forced orientation outranks the panel.
+  EXPECT_EQ(gm::touch_turn_for(false, 90, deck).degrees, 90);
+  // Each of the kernel's orientations, in its own numbering.
+  EXPECT_EQ(gm::touch_turn_for(false, std::nullopt, gm::internal_panel_t {0, 800, 1280}).degrees, 0);
+  EXPECT_EQ(gm::touch_turn_for(false, std::nullopt, gm::internal_panel_t {1, 1920, 1080}).degrees, 180);
+  EXPECT_EQ(gm::touch_turn_for(false, std::nullopt, gm::internal_panel_t {2, 1600, 2560}).degrees, 90);
+  // A value the kernel may add later falls through to the shape of the panel.
+  EXPECT_EQ(gm::touch_turn_for(false, std::nullopt, gm::internal_panel_t {7, 800, 1280}).degrees, 270);
+  EXPECT_EQ(gm::touch_turn_for(false, std::nullopt, gm::internal_panel_t {std::nullopt, 1920, 1080}).degrees, 0);
+}
+
+TEST(GameModeTouchTurn, AnExternalScreenOrNoPanelIsNotTurned) {
+  const gm::internal_panel_t deck {3, 800, 1280};
+  // A docked Deck shows the external screen, and gamescope turns nothing for it, forced or not.
+  EXPECT_EQ(gm::touch_turn_for(true, std::nullopt, deck).degrees, 0);
+  EXPECT_EQ(gm::touch_turn_for(true, 270, deck).degrees, 0);
+  // A desktop in Game Mode has no internal panel to turn for.
+  EXPECT_EQ(gm::touch_turn_for(std::nullopt, std::nullopt, std::nullopt).degrees, 0);
+  EXPECT_EQ(gm::touch_turn_for(std::nullopt, 270, std::nullopt).degrees, 0);
+  EXPECT_FALSE(gm::touch_turn_for(true, std::nullopt, deck).source.empty());
 }
 
 #endif

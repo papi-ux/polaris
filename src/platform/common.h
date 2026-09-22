@@ -678,6 +678,15 @@ namespace platf {
 
     int width, height;
 
+    // A capture whose source fits a screen of another shape into the frame itself, bars and all,
+    // names that screen here, so absolute input is placed inside the picture rather than across
+    // the bars. Zero when the frame is the screen, which is every capture but Game Mode's.
+    int scaled_screen_width = 0, scaled_screen_height = 0;
+
+    // Degrees the compositor turns a touch before delivering it, which input turns back: a Steam
+    // Deck's gamescope turns touches by its portrait panel's orientation. Zero everywhere else.
+    int compositor_touch_turn = 0;
+
   protected:
     // collect capture timing data (at loglevel debug)
     logging::time_delta_periodic_logger sleep_overshoot_logger = {debug, "Frame capture sleep overshoot"};

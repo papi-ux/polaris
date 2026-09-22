@@ -73,10 +73,26 @@ namespace input {
 
     float scalar_inv;
 
+    // Degrees the compositor turns a touch before it delivers one: 0, 90, 180 or 270. A Steam
+    // Deck's gamescope turns every touch from a device it cannot place on a screen by the internal
+    // panel's orientation, so a virtual touchscreen's taps land a quarter turn away. A touch is
+    // turned back by as much before it is sent.
+    int compositor_touch_turn = 0;
+
     explicit operator bool() const {
       return width != 0 && height != 0 && env_width != 0 && env_height != 0;
     }
   };
+
+  /**
+   * @brief Turn a normalized touch back by the compositor's turn, so the turn lands it where it was aimed.
+   * @param compositor_touch_turn Degrees the compositor turns a touch: 0, 90, 180 or 270. Anything
+   *        else is taken as no turn.
+   * @param x The touch across the screen, 0 to 1.
+   * @param y The touch down the screen, 0 to 1.
+   * @return The touch to send.
+   */
+  std::pair<float, float> turn_back_touch(int compositor_touch_turn, float x, float y);
 
   /**
    * @brief Build the mapping from a client's stream onto the captured desktop.

@@ -6,11 +6,14 @@
 
 #ifdef __linux__
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace platf::game_mode_host {
@@ -97,6 +100,76 @@ namespace platf::game_mode_host {
    * is dropped.
    */
   void request_focused_window_repaint_async();
+
+  /**
+   * @brief How far a gamescope turns a touch before it delivers it, and what settled that.
+   */
+  struct touch_turn_t {
+    int degrees = 0;  ///< 0, 90, 180 or 270
+    std::string_view source;  ///< what settled it, for the log
+  };
+
+  /**
+   * @brief A connected internal panel, as the kernel describes it.
+   */
+  struct internal_panel_t {
+    std::optional<std::uint64_t> drm_orientation;  ///< the connector's "panel orientation", when it has one
+    int native_width = 0;
+    int native_height = 0;
+  };
+
+  /**
+   * @brief The orientation a gamescope was told to give the internal screen, from its arguments.
+   *
+   * `--force-orientation` takes normal, left, right or upsidedown, which gamescope turns into 0, 90,
+   * 270 and 180 degrees. Nothing when it was not given or names none of those.
+   */
+  std::optional<int> forced_orientation_from_args(const std::vector<std::string> &argv);
+
+  /**
+   * @brief How far a gamescope turns a touch from a device it cannot place on a screen.
+   *
+   * gamescope ties a touchscreen on I2C to the internal screen and one on USB to an external one.
+   * Any other, which is every virtual touchscreen, takes the orientation of the screen gamescope is
+   * showing. An external screen is not turned. The internal one takes a forced orientation first,
+   * then the panel's own from the kernel, and failing both a portrait panel counts as turned 270
+   * degrees: gamescope's UpdateEffectiveOrientation. A Steam Deck's panel, 800x1280 and right side
+   * up, comes to 270 degrees by either of the last two.
+   *
+   * @param external Whether gamescope says it is showing an external screen; nothing when it has not said.
+   * @param forced The orientation from `--force-orientation`, when it was given.
+   * @param panel The connected internal panel, when there is one.
+   */
+  touch_turn_t touch_turn_for(std::optional<bool> external, std::optional<int> forced, const std::optional<internal_panel_t> &panel);
+
+  /**
+   * @brief The screen the session's gamescope shows.
+   */
+  struct session_screen_t {
+    int width = 0;
+    int height = 0;
+    touch_turn_t touch_turn;
+  };
+
+  /**
+   * @brief The screen the session's gamescope shows, from the root of the X server it started
+   * first, or nothing when there is none to ask.
+   *
+   * gamescope fits that screen into the PipeWire frame it exports, bars and all: a Steam Deck's
+   * 1280x800 can arrive as a 1920x1080 frame with a bar down each side. Absolute input has to be
+   * placed against the screen, not the frame, or a tap drifts toward the edges. And gamescope turns
+   * each touch by the screen's orientation before delivering it, so a touch has to be turned back
+   * first or it lands a quarter turn away.
+   */
+  std::optional<session_screen_t> session_screen();
+
+  /**
+   * @brief session_screen() off the calling thread, waited for at most @p limit.
+   *
+   * A capture asks while it sets up, and must not hang there if the session's Xwayland has stopped
+   * answering, so a slow answer is no answer.
+   */
+  std::optional<session_screen_t> session_screen_within(std::chrono::milliseconds limit);
 
 }  // namespace platf::game_mode_host
 

@@ -13,13 +13,27 @@
   #include <charconv>
   #include <cstdlib>
   #include <cstring>
+  #include <future>
+  #include <memory>
   #include <mutex>
   #include <string_view>
   #include <system_error>
   #include <thread>
 
+  #include <fcntl.h>
+  #include <fstream>
+  #include <sys/stat.h>
+  #include <unistd.h>
+
   #ifdef POLARIS_BUILD_X11_XCB
     #include <xcb/xcb.h>
+  #endif
+
+  // libdrm comes with every capture that can show a Game Mode screen.
+  #if defined(POLARIS_BUILD_DRM) || defined(POLARIS_BUILD_PORTAL)
+    #define POLARIS_GAME_MODE_READS_DRM 1
+    #include <xf86drm.h>
+    #include <xf86drmMode.h>
   #endif
 
   #include "src/logging.h"
@@ -50,11 +64,201 @@ namespace platf::game_mode_host {
       return number;
     }
 
+    /// gamescope's degrees for each of the kernel's panel orientations, which are numbered normal,
+    /// bottom up, left side up and right side up.
+    std::optional<int> turn_for_drm_panel_orientation(std::uint64_t value) {
+      switch (value) {
+        case 0:
+          return 0;
+        case 1:
+          return 180;
+        case 2:
+          return 90;
+        case 3:
+          return 270;
+        default:
+          return std::nullopt;
+      }
+    }
+
+    bool is_internal_connector_name(std::string_view type) {
+      return type == "eDP"sv || type == "LVDS"sv || type == "DSI"sv;
+    }
+
+    std::optional<std::pair<int, int>> mode_size(std::string_view text) {
+      const auto x = text.find('x');
+      if (x == std::string_view::npos) {
+        return std::nullopt;
+      }
+      int width = 0;
+      int height = 0;
+      const auto [width_end, width_error] = std::from_chars(text.data(), text.data() + x, width);
+      const auto [height_end, height_error] = std::from_chars(text.data() + x + 1, text.data() + text.size(), height);
+      if (width_error != std::errc {} || height_error != std::errc {} || width_end != text.data() + x ||
+          height_end != text.data() + text.size() || width <= 0 || height <= 0) {
+        return std::nullopt;
+      }
+      return std::pair {width, height};
+    }
+
+    /// The first connected internal connector, from sysfs, which needs no device access but says
+    /// nothing of the panel's orientation.
+    std::optional<internal_panel_t> internal_panel_from_sysfs() {
+      std::error_code ec;
+      std::vector<std::filesystem::path> connectors;
+      for (std::filesystem::directory_iterator it {"/sys/class/drm", ec}, last; !ec && it != last; it.increment(ec)) {
+        // card<N>-<type>-<M>, such as card0-eDP-1
+        const auto name = it->path().filename().string();
+        const auto first = name.find('-');
+        const auto second = name.rfind('-');
+        if (!name.starts_with("card"sv) || first == std::string::npos || second == first ||
+            !is_internal_connector_name(std::string_view {name}.substr(first + 1, second - first - 1))) {
+          continue;
+        }
+        connectors.push_back(it->path());
+      }
+      std::sort(connectors.begin(), connectors.end());
+      for (const auto &connector : connectors) {
+        std::ifstream status_file {connector / "status"};
+        std::string status;
+        if (!std::getline(status_file, status) || status != "connected"sv) {
+          continue;
+        }
+        std::ifstream modes_file {connector / "modes"};
+        std::string mode;
+        internal_panel_t panel;
+        if (std::getline(modes_file, mode)) {
+          if (const auto size = mode_size(mode)) {
+            panel.native_width = size->first;
+            panel.native_height = size->second;
+          }
+        }
+        return panel;
+      }
+      return std::nullopt;
+    }
+
+    /// The first connected internal panel, with the orientation the kernel gives it.
+    [[maybe_unused]] std::optional<internal_panel_t> connected_internal_panel() {
+  #ifdef POLARIS_GAME_MODE_READS_DRM
+      std::error_code ec;
+      std::vector<std::filesystem::path> cards;
+      for (std::filesystem::directory_iterator it {"/dev/dri", ec}, last; !ec && it != last; it.increment(ec)) {
+        const auto name = it->path().filename().string();
+        if (name.size() > 4 && name.starts_with("card"sv) &&
+            std::all_of(name.begin() + 4, name.end(), [](char c) {
+              return c >= '0' && c <= '9';
+            })) {
+          cards.push_back(it->path());
+        }
+      }
+      std::sort(cards.begin(), cards.end());
+      for (const auto &card : cards) {
+        const int fd = ::open(card.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+          continue;
+        }
+        std::optional<internal_panel_t> found;
+        if (auto *resources = drmModeGetResources(fd)) {
+          for (int i = 0; !found && i < resources->count_connectors; ++i) {
+            // The current state, so asking never makes the kernel probe the connector again.
+            auto *connector = drmModeGetConnectorCurrent(fd, resources->connectors[i]);
+            if (!connector) {
+              continue;
+            }
+            const bool internal = connector->connector_type == DRM_MODE_CONNECTOR_eDP ||
+                                  connector->connector_type == DRM_MODE_CONNECTOR_LVDS ||
+                                  connector->connector_type == DRM_MODE_CONNECTOR_DSI;
+            if (internal && connector->connection == DRM_MODE_CONNECTED) {
+              internal_panel_t panel;
+              const drmModeModeInfo *mode = nullptr;
+              for (int m = 0; m < connector->count_modes && !mode; ++m) {
+                if (connector->modes[m].type & DRM_MODE_TYPE_PREFERRED) {
+                  mode = &connector->modes[m];
+                }
+              }
+              if (!mode && connector->count_modes > 0) {
+                mode = &connector->modes[0];
+              }
+              if (mode) {
+                panel.native_width = mode->hdisplay;
+                panel.native_height = mode->vdisplay;
+              }
+              for (int p = 0; p < connector->count_props; ++p) {
+                if (auto *property = drmModeGetProperty(fd, connector->props[p])) {
+                  if (std::string_view {property->name} == "panel orientation"sv) {
+                    panel.drm_orientation = connector->prop_values[p];
+                  }
+                  drmModeFreeProperty(property);
+                }
+              }
+              found = panel;
+            }
+            drmModeFreeConnector(connector);
+          }
+          drmModeFreeResources(resources);
+        }
+        ::close(fd);
+        if (found) {
+          return found;
+        }
+      }
+  #endif
+      return internal_panel_from_sysfs();
+    }
+
+    std::vector<std::string> split_nul(const std::string &text) {
+      std::vector<std::string> parts;
+      std::size_t start = 0;
+      while (start < text.size()) {
+        const auto end = text.find('\0', start);
+        parts.emplace_back(text.substr(start, end == std::string::npos ? std::string::npos : end - start));
+        if (end == std::string::npos) {
+          break;
+        }
+        start = end + 1;
+      }
+      return parts;
+    }
+
+    /// A forced orientation from any gamescope this account runs.
+    [[maybe_unused]] std::optional<int> session_forced_orientation() {
+      constexpr std::size_t k_max_cmdline = 64 * 1024;
+      const auto uid = ::getuid();
+      std::error_code ec;
+      for (std::filesystem::directory_iterator it {"/proc", ec}, last; !ec && it != last; it.increment(ec)) {
+        const auto name = it->path().filename().string();
+        if (name.empty() || !std::all_of(name.begin(), name.end(), [](char c) {
+              return c >= '0' && c <= '9';
+            })) {
+          continue;
+        }
+        struct stat info {};
+        if (::stat(it->path().c_str(), &info) != 0 || info.st_uid != uid) {
+          continue;
+        }
+        std::ifstream file {it->path() / "cmdline", std::ios::binary};
+        std::string cmdline(k_max_cmdline, '\0');
+        file.read(cmdline.data(), static_cast<std::streamsize>(cmdline.size()));
+        cmdline.resize(static_cast<std::size_t>(std::max<std::streamsize>(file.gcount(), 0)));
+        const auto argv = split_nul(cmdline);
+        if (argv.empty() || std::filesystem::path {argv.front()}.filename() != "gamescope") {
+          continue;
+        }
+        if (const auto forced = forced_orientation_from_args(argv)) {
+          return forced;
+        }
+      }
+      return std::nullopt;
+    }
+
   #ifdef POLARIS_BUILD_X11_XCB
 
     struct connection_t {
       xcb_connection_t *conn {nullptr};
       xcb_window_t root {XCB_WINDOW_NONE};
+      int width = 0;
+      int height = 0;
 
       explicit connection_t(const std::string &display) {
         conn = xcb_connect(display.c_str(), nullptr);
@@ -68,6 +272,8 @@ namespace platf::game_mode_host {
           return;
         }
         root = screen.data->root;
+        width = screen.data->width_in_pixels;
+        height = screen.data->height_in_pixels;
       }
 
       connection_t(const connection_t &) = delete;
@@ -242,6 +448,108 @@ namespace platf::game_mode_host {
   #else
     return repaint_result_e::unavailable;
   #endif
+  }
+
+  std::optional<int> forced_orientation_from_args(const std::vector<std::string> &argv) {
+    constexpr auto flag = "--force-orientation"sv;
+    std::optional<std::string_view> value;
+    for (std::size_t i = 1; i < argv.size(); ++i) {
+      const std::string_view arg {argv[i]};
+      if (arg == "--"sv) {
+        // What follows is the command gamescope runs, not its own options.
+        break;
+      }
+      if (arg == flag) {
+        if (i + 1 < argv.size()) {
+          value = argv[++i];
+        }
+      } else if (arg.starts_with(flag) && arg.size() > flag.size() && arg[flag.size()] == '=') {
+        value = arg.substr(flag.size() + 1);
+      }
+    }
+    if (!value) {
+      return std::nullopt;
+    }
+    if (*value == "normal"sv) {
+      return 0;
+    }
+    if (*value == "left"sv) {
+      return 90;
+    }
+    if (*value == "upsidedown"sv) {
+      return 180;
+    }
+    if (*value == "right"sv) {
+      return 270;
+    }
+    return std::nullopt;
+  }
+
+  touch_turn_t touch_turn_for(std::optional<bool> external, std::optional<int> forced, const std::optional<internal_panel_t> &panel) {
+    if (external.value_or(false)) {
+      return {0, "an external screen"sv};
+    }
+    // A forced orientation is for the internal screen, so it counts only once that is the one shown.
+    if (forced && (external.has_value() || panel)) {
+      return {*forced, "gamescope --force-orientation"sv};
+    }
+    if (!panel) {
+      return {0, "a host with no internal panel"sv};
+    }
+    if (panel->drm_orientation) {
+      if (const auto turn = turn_for_drm_panel_orientation(*panel->drm_orientation)) {
+        return {*turn, "the internal panel's orientation"sv};
+      }
+    }
+    if (panel->native_width > 0 && panel->native_width < panel->native_height) {
+      return {270, "a portrait internal panel"sv};
+    }
+    return {0, "a landscape internal panel"sv};
+  }
+
+  std::optional<session_screen_t> session_screen() {
+  #ifdef POLARIS_BUILD_X11_XCB
+    for (const auto &display : local_x_displays()) {
+      const connection_t x {display};
+      // The server a gamescope started first carries its focus properties, and its root is the
+      // screen gamescope composites and exports.
+      if (!x || !x.belongs_to_gamescope() || !x.root_property("GAMESCOPE_FOCUSED_WINDOW"sv)) {
+        continue;
+      }
+      if (x.width <= 0 || x.height <= 0) {
+        continue;
+      }
+      // gamescope says here whether the screen it shows is an external one.
+      std::optional<bool> external;
+      if (const auto value = x.root_property("GAMESCOPE_DISPLAY_IS_EXTERNAL"sv); value && value->size() >= sizeof(std::uint32_t)) {
+        std::uint32_t word = 0;
+        std::memcpy(&word, value->data(), sizeof(word));
+        external = word != 0;
+      }
+      session_screen_t screen {x.width, x.height};
+      screen.touch_turn = external.value_or(false) ?
+                            touch_turn_for(external, std::nullopt, std::nullopt) :
+                            touch_turn_for(external, session_forced_orientation(), connected_internal_panel());
+      return screen;
+    }
+  #endif
+    return std::nullopt;
+  }
+
+  std::optional<session_screen_t> session_screen_within(std::chrono::milliseconds limit) {
+    auto answer = std::make_shared<std::promise<std::optional<session_screen_t>>>();
+    auto future = answer->get_future();
+    try {
+      std::thread([answer]() {
+        answer->set_value(session_screen());
+      }).detach();
+    } catch (const std::exception &) {
+      return std::nullopt;
+    }
+    if (future.wait_for(limit) != std::future_status::ready) {
+      return std::nullopt;
+    }
+    return future.get();
   }
 
   void request_focused_window_repaint_async() {

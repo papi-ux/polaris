@@ -4,7 +4,9 @@
  */
 #include "../tests_common.h"
 
+#include <array>
 #include <optional>
+#include <utility>
 
 #include <src/input.h>
 
@@ -75,6 +77,70 @@ TEST(InputTouchPortMapping, LetterboxesAnAspectMismatch) {
   EXPECT_EQ(reason, input::touchport_reject_e::none);
   EXPECT_NEAR(mapped->first, 640.0f, 1.0f);
   EXPECT_NEAR(mapped->second, 512.0f, 1.0f);
+}
+
+// A Steam Deck in Game Mode: gamescope fits its 1280x800 screen into the 1920x1080 frame it
+// exports, with a 96 pixel bar down each side. Mapped across the whole frame, as it was before the
+// capture named the screen, a tap on the Nova Deck library's Recent tab at x=355 landed at 237 on
+// the Deck instead of 192, and missed the tab.
+TEST(InputTouchPortMapping, AGameModeScreenFittedIntoTheFrameMapsEdgeToEdge) {
+  const auto port = input::make_touch_port(platf::touch_port_t {0, 0, 1280, 800}, 1280, 800, 1920, 1080);
+
+  EXPECT_NEAR(port.client_offsetX, 96.0f, 0.5f);
+  EXPECT_FLOAT_EQ(port.client_offsetY, 0.0f);
+
+  const auto left = input::map_client_to_touchport(port, {96.0f, 540.0f}, {1920.0f, 1080.0f});
+  const auto right = input::map_client_to_touchport(port, {1824.0f, 540.0f}, {1920.0f, 1080.0f});
+  const auto tab = input::map_client_to_touchport(port, {355.0f, 237.0f}, {1920.0f, 1080.0f});
+  ASSERT_TRUE(left && right && tab);
+  EXPECT_NEAR(left->first, 0.0f, 1.0f);
+  EXPECT_NEAR(left->second, 400.0f, 1.0f);
+  EXPECT_NEAR(right->first, 1280.0f, 1.0f);
+  EXPECT_NEAR(tab->first, 192.0f, 1.0f);
+  EXPECT_NEAR(tab->second, 176.0f, 1.0f);
+}
+
+namespace {
+  // gamescope's apply_touchscreen_orientation, as 3.16.23 writes it.
+  std::pair<float, float> gamescope_turns(int degrees, float x, float y) {
+    switch (degrees) {
+      case 90:
+        return {1.0f - y, x};
+      case 180:
+        return {1.0f - x, 1.0f - y};
+      case 270:
+        return {y, 1.0f - x};
+      default:
+        return {x, y};
+    }
+  }
+}  // namespace
+
+// gamescope turns a touch from a virtual touchscreen by the internal panel's orientation. Turned
+// back first, every touch lands where it was aimed, whichever way the panel is mounted.
+TEST(InputTouchPortMapping, ATouchTurnedBackLandsWhereItWasAimedAfterGamescopeTurnsIt) {
+  const std::array<std::pair<float, float>, 5> aims {{{0.0f, 0.0f}, {1.0f, 0.0f}, {0.15f, 0.22f}, {0.5f, 0.5f}, {0.9f, 1.0f}}};
+  for (const int degrees : {0, 90, 180, 270}) {
+    for (const auto &[x, y] : aims) {
+      const auto sent = input::turn_back_touch(degrees, x, y);
+      const auto landed = gamescope_turns(degrees, sent.first, sent.second);
+      EXPECT_NEAR(landed.first, x, 1e-6f) << degrees << " degrees";
+      EXPECT_NEAR(landed.second, y, 1e-6f) << degrees << " degrees";
+    }
+  }
+}
+
+// Found on a Steam Deck: its panel is right side up, so gamescope turns touch 270 degrees, and a
+// tap on the Nova app's Recent tab near the top left had to be sent from the top right to land.
+TEST(InputTouchPortMapping, ASteamDeckTapIsSentFromWhereGamescopeTurnsItOntoTheTarget) {
+  const auto sent = input::turn_back_touch(270, 0.15f, 0.22f);
+  EXPECT_NEAR(sent.first, 0.78f, 1e-6f);
+  EXPECT_NEAR(sent.second, 0.15f, 1e-6f);
+
+  // A turn gamescope has no name for is not guessed at.
+  const auto unturned = input::turn_back_touch(45, 0.15f, 0.22f);
+  EXPECT_FLOAT_EQ(unturned.first, 0.15f);
+  EXPECT_FLOAT_EQ(unturned.second, 0.22f);
 }
 
 // The refusals have to be told apart, because one warning covering all of them is

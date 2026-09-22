@@ -1033,6 +1033,30 @@ namespace portal {
       this->width = cfg_width;
       this->height = cfg_height;
 
+      // In Game Mode the session's gamescope can fit its own screen into the frame, bars and all,
+      // and it turns every touch from our virtual touchscreen by the internal panel's orientation.
+      // The screen is named so input maps inside it, and the turn so a touch is turned back first.
+      this->scaled_screen_width = 0;
+      this->scaled_screen_height = 0;
+      this->compositor_touch_turn = 0;
+      if (!probe_only && game_mode_screen_generation(generation_)) {
+        if (const auto screen = platf::game_mode_host::session_screen_within(std::chrono::milliseconds {500})) {
+          this->scaled_screen_width = screen->width;
+          this->scaled_screen_height = screen->height;
+          this->compositor_touch_turn = screen->touch_turn.degrees;
+          if (screen->touch_turn.degrees != 0) {
+            BOOST_LOG(info) << "portal: Game Mode screen is "sv << screen->width << 'x' << screen->height
+                            << ", fitted into the "sv << cfg_width << 'x' << cfg_height << " frame; gamescope turns a touch "sv
+                            << screen->touch_turn.degrees << " degrees for "sv << screen->touch_turn.source
+                            << ", so each touch is turned back before it is sent"sv;
+          } else {
+            BOOST_LOG(info) << "portal: Game Mode screen is "sv << screen->width << 'x' << screen->height
+                            << ", fitted into the "sv << cfg_width << 'x' << cfg_height << " frame; touch is not turned, for "sv
+                            << screen->touch_turn.source;
+          }
+        }
+      }
+
       BOOST_LOG(info) << "portal: Capture ready — "sv << cfg_width << "x"sv << cfg_height
                       << " env="sv << this->env_width << "x"sv << this->env_height;
       return 0;

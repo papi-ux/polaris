@@ -614,6 +614,21 @@ namespace input {
     };
   }
 
+  std::pair<float, float> turn_back_touch(int compositor_touch_turn, float x, float y) {
+    // gamescope's apply_touchscreen_orientation, undone: it takes a touch at (x, y) to (1 - y, x)
+    // for 90, (1 - x, 1 - y) for 180 and (y, 1 - x) for 270.
+    switch (compositor_touch_turn) {
+      case 90:
+        return {y, 1.0f - x};
+      case 180:
+        return {1.0f - x, 1.0f - y};
+      case 270:
+        return {1.0f - y, x};
+      default:
+        return {x, y};
+    }
+  }
+
   std::optional<std::pair<float, float>> map_client_to_touchport(
     const touch_port_t &touch_port,
     const std::pair<float, float> &val,
@@ -1122,6 +1137,7 @@ namespace input {
     // Renormalize the coordinates
     coords->first /= abs_port.width;
     coords->second /= abs_port.height;
+    *coords = turn_back_touch(touch_port.compositor_touch_turn, coords->first, coords->second);
 
     // Normalize rotation value to 0-359 degree range
     auto rotation = util::endian::little(packet->rotation);
