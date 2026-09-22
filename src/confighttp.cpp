@@ -5450,6 +5450,36 @@ namespace confighttp {
     send_response(response, output_tree);
   }
 
+#ifdef __linux__
+  namespace {
+    struct polaris_account_t {
+      std::string name;
+      fs::path home;
+    };
+
+    /// The account Polaris runs as, with its passwd home rather than wherever XDG_CONFIG_HOME
+    /// points in this process.
+    polaris_account_t polaris_account() {
+      polaris_account_t account;
+      const auto *pw = getpwuid(geteuid());
+      if (pw && pw->pw_name && pw->pw_name[0] != '\0') {
+        account.name = pw->pw_name;
+      }
+      if (pw && pw->pw_dir && pw->pw_dir[0] != '\0') {
+        account.home = pw->pw_dir;
+      } else if (const char *home = std::getenv("HOME"); home && *home) {
+        account.home = home;
+      }
+      return account;
+    }
+
+    /// Boot readiness, read where --enable-headless-boot writes it: under the account's home.
+    platf::game_mode_host::boot_readiness_t account_boot_readiness(const polaris_account_t &account) {
+      return platf::game_mode_host::boot_readiness(platf::game_mode_host::default_boot_paths(account.name, account.home));
+    }
+  }  // namespace
+#endif
+
   /**
    * @brief Get update awareness metadata for the web Update Center.
    * @param response The HTTP response object.
@@ -5463,7 +5493,13 @@ namespace confighttp {
     }
 
     print_req(request);
-    send_response(response, update_status::host_update_status());
+    auto status = update_status::host_update_status();
+#ifdef __linux__
+    // The SteamOS update line keeps boot start as it is: it names --enable-headless-boot only
+    // when that is already on, so an update never turns it back on for someone who took it off.
+    status["boot_start_enabled"] = account_boot_readiness(polaris_account()).independent();
+#endif
+    send_response(response, status);
   }
 
   /**
@@ -8786,18 +8822,9 @@ namespace confighttp {
     // enough, so both are reported. A host with a Steam Game Mode session is
     // named as such, because there the missing boot start is the whole reason
     // clients lose the host after Desktop Mode.
-    // Read the want link where --enable-headless-boot writes it: under the
-    // account's passwd home, not wherever XDG_CONFIG_HOME points in this
-    // process.
-    const auto *pw = getpwuid(geteuid());
-    const std::string account_name = pw && pw->pw_name && pw->pw_name[0] != '\0' ? pw->pw_name : std::string();
-    fs::path account_home;
-    if (pw && pw->pw_dir && pw->pw_dir[0] != '\0') {
-      account_home = pw->pw_dir;
-    } else if (const char *home = std::getenv("HOME"); home && *home) {
-      account_home = home;
-    }
-    const auto boot = platf::game_mode_host::boot_readiness(platf::game_mode_host::default_boot_paths(account_name, account_home));
+    const auto account = polaris_account();
+    const auto &account_home = account.home;
+    const auto boot = account_boot_readiness(account);
     const bool boot_independent = boot.independent();
     const auto game_mode = platf::game_mode_host::detect_cached();
     output["game_mode_host"]["installed"] = game_mode.installed;

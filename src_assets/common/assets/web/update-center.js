@@ -135,8 +135,12 @@ export function buildManualInstallCommand(asset, host = {}) {
     lines.push("trap 'sudo steamos-readonly enable' EXIT")
     lines.push('sudo steamos-readonly disable || exit $?')
     lines.push(`sudo pacman -U ./${fileName} || exit $?`)
-    // A Game Mode host is only reachable once Polaris starts at boot, and enabling it again is a no-op.
-    lines.push('sudo -H polaris --setup-host --enable-headless-boot || exit $?')
+    // Boot start stays as the host has it. Naming the flag again when it is on is a no-op, and
+    // leaving it out when it is off means an update never turns it back on for someone who
+    // ran --disable-headless-boot; Troubleshooting offers it to a Game Mode host without it.
+    lines.push(host.boot_start_enabled === true
+      ? 'sudo -H polaris --setup-host --enable-headless-boot || exit $?'
+      : 'sudo -H polaris --setup-host || exit $?')
     lines.push('sudo steamos-readonly enable || exit $?')
     lines.push('trap - EXIT')
     lines.push(') &&')
