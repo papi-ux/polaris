@@ -17,6 +17,22 @@ def elf(architecture):
     return b'\x7fELF' + bytes([elf_class, 1, 1]) + bytes(9) + struct.pack('<HH', 3, machine)
 
 
+class PrepareInputs(unittest.TestCase):
+    """The inputs a runtime that borrows the machine's driver needs before it can be built."""
+
+    def test_a_host_driver_build_asks_for_the_same_nvidia_inputs(self):
+        # The images workflow passes --nvidia-host to prepare-inputs and to build-image. Only
+        # build-image knew the flag, so every host-driver build died at "unrecognized arguments"
+        # before it fetched anything.
+        script = (pathlib.Path(__file__).parent / 'prepare-inputs.py').read_text()
+        self.assertIn("parser.add_argument('--nvidia-host', dest='nvidia_host', action='store_true')", script)
+        self.assertIn("if args.nvidia or args.nvidia_host:", script)
+        result = subprocess.run(
+            ['python3', str(pathlib.Path(__file__).parent / 'prepare-inputs.py'), '--help'],
+            capture_output=True, text=True, check=True)
+        self.assertIn('--nvidia-host', result.stdout)
+
+
 class NvidiaRuntime(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

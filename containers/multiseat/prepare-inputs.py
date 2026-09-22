@@ -129,6 +129,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('profile', choices=['gamescope', 'steam', 'heroic', 'lutris'])
     parser.add_argument('--nvidia', action='store_true')
+    # A runtime that borrows the machine's driver is built from the same locked NVIDIA payload:
+    # it takes the EGL platform userspace from it and leaves the driver libraries behind.
+    parser.add_argument('--nvidia-host', dest='nvidia_host', action='store_true')
     parser.add_argument('--engine', choices=['docker', 'podman'], default='docker')
     args = parser.parse_args()
     if platform.system() != 'Linux' or platform.machine() not in ('x86_64', 'amd64'):
@@ -144,7 +147,7 @@ def main():
             downloads.append((package, INPUTS / args.profile / role / filename))
     rust = json.loads((HERE / 'locks/rust.json').read_text())
     downloads.append((rust, INPUTS / 'toolchains' / pathlib.PurePosixPath(rust['url']).name))
-    if args.nvidia:
+    if args.nvidia or args.nvidia_host:
         for name in ['nvidia', 'nvcodec']:
             entry = json.loads((HERE / 'locks' / (name + '.json')).read_text())
             downloads.append((entry, INPUTS / pathlib.PurePosixPath(entry['url']).name))

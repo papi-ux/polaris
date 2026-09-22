@@ -1266,4 +1266,17 @@ describe('Linux desktop entry and tray icons', () => {
     const linux = readSource('cmake/packaging/linux.cmake')
     for (const state of states) expect(linux).toContain(`common/assets/web/public/images/polaris-${state}.svg"`)
   })
+
+  it('publishes the runtime of the launcher family it was asked for', () => {
+    // The publish operation was written when Steam was the only runtime, and it looked for
+    // */steam/<variant> in the artifact whatever family it was told to publish. A Heroic run
+    // failed closed on a missing directory rather than publishing Steam's bytes to the Heroic
+    // repository, but no launcher but Steam could be published at all.
+    const workflow = readSource('.github/workflows/multiseat-publish.yml')
+    const steps = workflow.slice(workflow.indexOf('    steps:'))
+    expect(steps).toContain('-path "*/${{ inputs.profile }}/${{ inputs.variant }}"')
+    expect(steps).toContain('tag="${{ inputs.profile }}-${{ inputs.variant }}-${REVISION:0:12}"')
+    expect(steps).toContain('name: runtime-candidate-${{ inputs.profile }}-${{ inputs.variant }}-${{ inputs.source_revision }}')
+    expect(steps, 'no step may name one launcher family').not.toMatch(/\b(steam|heroic|lutris|gamescope)[-/]/)
+  })
 })
