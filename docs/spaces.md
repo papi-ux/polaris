@@ -1,7 +1,9 @@
 # Spaces
 
-A Space is a separate Steam sign-in, game library and set of saves on one Linux
-gaming PC. Two players can use their own Spaces at the same time, one person
+A Space is a separate launcher sign-in, game library and set of saves on one
+Linux gaming PC. Each Space runs Steam, Heroic Games Launcher or Lutris, so one
+player can keep a Steam account in theirs while another plays their Epic and GOG
+games through Heroic. Two players can use their own Spaces at the same time, one person
 can keep a Space on a server without a monitor, or a handheld and a TV can share
 one Space at different times.
 
@@ -17,7 +19,7 @@ using the Library in Nova; nothing here is required for that, and you do not
 need Docker. [Spaces or regular streaming](spaces-or-regular.md) puts the two
 side by side.
 
-![Spaces with player cards and a default Space for a handheld](images/spaces/spaces-overview.png)
+![The Spaces page: a card for each Space, and one Device Access table of what each device may open](images/spaces/spaces-overview.png)
 
 Example with sample player and device names.
 
@@ -27,15 +29,16 @@ Example with sample player and device names.
 | --- | --- |
 | Polaris RPM, Arch package or DEB | Runs the host, pairing, settings and streaming |
 | Docker Engine on that host | Runs the isolated gaming environments |
-| Polaris gaming runtime image | Steam and the software that runs inside each Space, downloaded by Docker from GitHub Container Registry |
+| Polaris gaming runtime image | The launcher and the software that runs inside each Space, one image per launcher, downloaded by Docker from GitHub Container Registry |
 | Nova on your device | Opens the stream and sends your controls |
 
-Steam, its 32-bit libraries and the gaming userspace live inside the runtime
-image, so the host does not need Steam installed. The host still needs Polaris,
-Docker, its GPU driver and input permissions. An NVIDIA image names the host
-driver version it was built for; the preview has NVIDIA images for drivers
-610.57.04 and 615.71.09, and Host Setup offers the one that matches the driver
-loaded on your PC.
+The launcher, its 32-bit libraries and the gaming userspace live inside the
+runtime image, so the host does not need Steam, Heroic or Lutris installed. The
+host still needs Polaris, Docker, its GPU driver and input permissions. The
+NVIDIA runtime borrows this PC's own driver files, so it works with whichever
+NVIDIA driver is loaded; [NVIDIA driver files](#nvidia-driver-files) explains
+what it reads. Older NVIDIA runtimes, built for drivers 610.57.04 and
+615.71.09, keep running the Spaces made on them.
 
 The native packages ship the setup UI, the controller, the host policy files
 and the `polaris-spaces-setup` helper. There is no supported image that runs
@@ -252,8 +255,8 @@ not supported by the helper in the preview.
 ## Download the gaming runtime
 
 The **Gaming runtime** check picks the runtime this PC needs from the ones this
-Polaris build approves: the NVIDIA runtime built for the NVIDIA driver loaded on
-this PC, otherwise the runtime for AMD and Intel graphics. It asks Docker for
+Polaris build approves: the NVIDIA runtime, which borrows this PC's driver, when
+an NVIDIA driver is loaded, otherwise the runtime for AMD and Intel graphics. It asks Docker for
 that exact image and verifies it against the build. Downloading it here is
 optional; preparing your first Space downloads it too.
 
@@ -288,7 +291,7 @@ Once the host checks pass and a runtime is offered:
 
 1. Under **Set up your first space**, enter a name such as **Living room**.
    If more than one runtime is offered, choose the variant for your graphics
-   hardware; an NVIDIA variant names the host driver it needs.
+   hardware; an older NVIDIA variant names the driver it was built for.
 2. Select **Download and prepare**. If the **Gaming runtime** check shows
    **Checked**, preparation starts without a download. Otherwise the download
    is several gigabytes. You can leave Spaces and come back; the host keeps the
@@ -302,9 +305,9 @@ Once the host checks pass and a runtime is offered:
    own budget.
 5. Save any running game, then select **Restart Polaris and finish setup**.
    Restarting disconnects every stream. Reconnect and return to **Spaces**.
-6. Open the new Space's **Device Access** and tick your paired Nova device.
-   With one Space it opens that Space first; **Default Space** changes where
-   each device opens first.
+6. Under **Device Access**, tick your paired Nova device in the new Space's
+   column. With one Space it opens that Space first; **Default Space** changes
+   where each device opens first.
 
 **Steam home prepared** means storage was saved. **Configuration saved** means
 a restart is still required. Neither is a game or controller test yet; that
@@ -315,7 +318,7 @@ comes in [Play in a Space](#play-in-a-space).
 - **Reconnect to setup** re-reads the job without changing it. Use it first
   after a dropped connection.
 - **Retry setup** checks the original request and its saved home. It never
-  creates a second home or copies another player's Steam sign-in.
+  creates a second home or copies another player's sign-in.
 - If Polaris restarts, the job does not resume on its own. Return to Spaces
   and retry it.
 - If the runtime you started with is no longer offered by this build, the job
@@ -336,10 +339,14 @@ inaccessible GPU needs attention; Polaris does not silently choose another.
 1. Stop every Space stream. Creating, renaming, removing or restoring a Space
    and changing any device's access all reload the host's Space catalog, so
    they wait for the streams to end.
-2. Select **Create a space** and give it a recognisable name, a player or a
-   room.
-3. If asked, choose an existing Steam setup. The new Space reuses its runtime
-   configuration and gets its own storage and no copied sign-in.
+2. Select **Create a Space**, give it a recognisable name, a player or a
+   room, and choose its **Launcher**: Steam, Heroic or Lutris. The list shows
+   the launchers this PC can make a Space for.
+3. The first Space of a launcher downloads that launcher's gaming runtime, a
+   few gigabytes, and the page says so before you create it and follows the
+   download. Later Spaces of the same launcher copy the runtime of one you
+   already have and download nothing. Every new Space starts with its own
+   sign-in, saves and settings; nothing is copied from another player.
 4. Wait for the creation to be confirmed. After a dropped connection use
    **Check creation status** or **Retry creation**; both check the same
    request. Returning to Spaces in the same browser tab restores an unfinished
@@ -348,21 +355,31 @@ inaccessible GPU needs attention; Polaris does not silently choose another.
 
 ## Give a device access
 
-- **Device Access** on a Space card decides which devices may open that
-  Space. Tick a device to allow it. A device with more than one place to play
-  picks between them in Nova with **Change Space**.
-- **Desktop Access** adds **Desktop**, this PC's usual desktop and apps, as one
+**Device Access** is one table. Each row is a handheld, TV or computer paired
+with Polaris, each column is a place it may play, and the last column is where
+it opens first. On a narrow window the same rows show as one card per device.
+
+- Tick a Space's column to let a device open that Space. A device with more
+  than one place to play picks between them in Nova with **Change Space**.
+- The **Desktop** column adds Desktop, this PC's usual desktop and apps, as one
   more choice beside a device's Spaces.
-- **Default Space** lists the handhelds, TVs and computers paired with Polaris
-  and sets where each one opens first: one of the Spaces it may open, or
-  Desktop once it has Desktop Access. Select **Save assignment**. Saving never
-  changes which Spaces or Desktop a device may open. Devices that share a
-  Space share its sign-in and saves and take turns streaming it; give
-  simultaneous players separate Spaces and separate Steam accounts.
-- To take a device out of a Space, untick it under that Space's **Device
-  Access**. If the Space was its Default Space, the device opens the next place
-  it may play. A device that can no longer launch games shows **Remove from
-  Spaces** under Default Space instead.
+- The **Every device** row changes a whole column at once: **All** lets every
+  device in, and **None** asks first, then removes every device. Each is one
+  change, where ticking devices one by one restarts Spaces every time.
+- **Give Desktop Access with a Space** makes a tick in a Space's column give
+  the device Desktop as well. It applies to the ticks you make from then on;
+  devices you have already set up stay as they are.
+- **Default Space** sets where a device opens first: one of the Spaces it may
+  open, or Desktop once it has Desktop Access. Choose it and select **Save**.
+  Saving never changes which Spaces or Desktop a device may open. A device
+  with one place to play has nothing to choose, so the table names that place.
+  Devices that share a Space share its sign-in and saves and take turns
+  streaming it; give simultaneous players separate Spaces and separate
+  accounts.
+- To take a device out of a Space, untick it in that Space's column. If the
+  Space was its Default Space, the device opens the next place it may play. A
+  device that can no longer launch games shows **Remove from Spaces** in its
+  row instead.
 - A device needs permission to launch apps; temporary guests cannot be
   assigned a Space. When two paired devices share a name, for example Nova and
   Nova Debug on one handheld, the Spaces and Devices pages add when each one
@@ -377,9 +394,10 @@ Spaces do not change
    Space; **Change Space** lists the others this device may use. With one
    permitted Space the library opens straight into it, and the host remembers
    each device's last choice.
-2. Select **Steam Big Picture**, sign in and install a game. A Space's name is
-   a label, not proof of which Steam account is signed in; check or switch the
-   account inside Steam.
+2. Select the launcher's own tile, first in the library: **Steam Big
+   Picture**, Heroic or Lutris. Sign in and install a game there. A Space's name
+   is a label, not proof of which account is signed in; check or switch the
+   account inside the launcher.
 3. Return to the library and refresh it; a newly installed title can take up
    to 15 seconds to appear. Choose a game and press **Play**. Start at 60 FPS,
    check picture, sound and both sticks, then raise the target.
@@ -391,7 +409,7 @@ you press, and a refused launch tells you what to change.
 
 **Save before you leave.** In this preview, disconnecting ends the Space's
 running game. **Leave Space** asks you to confirm and keeps saves, installed
-games and the Steam sign-in; a dropped connection ends the session the same
+games and the launcher's sign-in; a dropped connection ends the session the same
 way. **Resume** is offered only for a session this device owns and does not
 promise a disconnected game kept running. Other Spaces keep running.
 
@@ -400,6 +418,23 @@ next Space launch. Nova offers up to 240 FPS where the display supports it; a
 selected rate is a target the host must sustain with every intended Space
 running, so start at 60 and raise it. Switching a streaming preset never
 switches accounts or Spaces.
+
+## Heroic and Lutris
+
+A Heroic Space reads the games installed through Heroic's Epic, GOG and Amazon
+backends, and a Lutris Space reads the Lutris library. Both show in Nova's
+library behind the launcher's own tile, a title starts from Nova like a Steam
+one, and it runs on Proton or Wine inside the Space.
+
+- Sign in inside the launcher. Heroic keeps its own Epic, GOG and Amazon
+  sign-ins and Lutris its own accounts, separate from every other Space.
+- A controller reaches the games. Heroic's own menus do not see a controller
+  yet, so use touch or a mouse in them until the game starts.
+- Heroic starts with its update check off. A Space gets a newer Heroic by moving
+  to a newer runtime from its card, not through a package manager it does not
+  have.
+- A launcher window fills the stream, and a title started from the launcher
+  shows on the stream in front of it.
 
 ## Rename, remove and restore
 
@@ -410,7 +445,7 @@ files; refresh the library in Nova afterwards.
 stay available either way.
 
 - **Archive** is already selected. Devices lose access, and installed games,
-  saves, settings and the Steam sign-in stay on the host, so archiving frees no
+  saves, settings and the launcher's sign-in stay on the host, so archiving frees no
   disk space. **Restore** under **Archived Spaces** brings the Space back
   without its device access; assign devices again.
 - **Remove for good** deletes the Space with its installed games, saves,
@@ -428,18 +463,57 @@ finishes the job. The last Space can be archived but not removed for good,
 because Polaris makes a new Space from an existing one; create another Space
 first.
 
+## NVIDIA driver files
+
+The gaming runtime for NVIDIA graphics borrows this PC's own driver files
+instead of carrying a copy. That is why a driver update no longer strands a
+Space: the same runtime keeps working, because it uses whatever driver the
+kernel has loaded.
+
+Polaris reads those files and passes them to a Space read only, and it checks
+each one first: owned by root, in the directory the driver package puts it in,
+and built for the architecture it claims. No driver library is copied, changed
+or run.
+
+Three small description files are the exception. They tell OpenGL and Vulkan
+which driver to load, and this PC's copies name library paths that do not exist
+inside a Space, so Polaris writes its own corrected copies under
+`spaces-graphics` in its configuration directory and passes those instead. On a
+system with SELinux it also labels those copies for containers, the way Docker
+labels a shared volume, because a file written in a configuration directory is
+one no container may read. Without that label a Space starts, finds no NVIDIA
+driver to load, and falls back to software rendering.
+
+Host Setup shows **NVIDIA driver files** while an NVIDIA driver is loaded. The
+one case worth acting on is the 32 bit half, which most distributions package
+separately:
+
+| Distribution | Package |
+|---|---|
+| Fedora, Bazzite | `xorg-x11-drv-nvidia-libs.i686` |
+| Arch, CachyOS | `lib32-nvidia-utils` |
+| Ubuntu | the `libnvidia-gl` package for your driver branch, `i386` variant |
+
+Without it a Space still starts, and 32 bit games, which is most games under
+Proton, render nothing. Polaris does not install driver packages.
+
+A gaming runtime still names the oldest driver it works with, because its own
+video encoder is built against a fixed NVIDIA interface. On a driver older than
+that, Host Setup says to update the driver.
+
 ## After an NVIDIA driver update
 
-The NVIDIA gaming runtime carries the NVIDIA userspace for one driver version,
-and a Space keeps the runtime it was made with. After the host moves to another
-NVIDIA driver, that runtime no longer matches the kernel module, so Polaris
-refuses to start the Space before anything runs. Nova shows why and says to
-move the Space; the refusal's code is `space_runtime_driver_mismatch`.
+Older NVIDIA runtimes carry the NVIDIA userspace for one driver version, and a
+Space keeps the runtime it was made with. After the host moves to another NVIDIA
+driver, such a runtime no longer matches the kernel module, so Polaris refuses to
+start the Space before anything runs. Nova shows why and says to move the Space;
+the refusal's code is `space_runtime_driver_mismatch`. A Space on a runtime that
+borrows this PC's driver never sees this.
 
 The Space card says why, for example **Made for NVIDIA driver 610.57.04. This
 PC runs 615.71.09.**, and offers **Move To The Runtime For Driver 615.71.09**
 when this Polaris build has a runtime for the new driver. Moving points the
-Space at that runtime and changes nothing else: its Steam sign-in, installed
+Space at that runtime and changes nothing else: its launcher's sign-in, installed
 games and saves, name, devices and Default Space stay. The Steam home is not
 prepared again; both runtimes run as the same account and use it as it is.
 
@@ -486,8 +560,8 @@ for **Doctor & Support**.
 
 ## Preview limits
 
-One Space at a time, no runtime download until an image is published, handheld
-audio still under investigation, NVIDIA exercised and AMD not yet, Docker on
-system images not automated. The measured results and the exact boundaries are
+One Space at a time, handheld audio still under investigation, NVIDIA exercised
+and AMD not yet, Heroic's own menus without a controller, Docker on system
+images not automated. The measured results and the exact boundaries are
 in the [preview status report](research/container-multiseat-preview-status.md),
 which links the acceptance and audio reports it summarises.

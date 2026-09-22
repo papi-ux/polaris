@@ -67,11 +67,11 @@ namespace multiseat::spaces {
     }
     bool valid_request(const setup_request_t &r) {
       if (r.operation == "activate") return r.runtime_id.empty() && r.name.empty() && valid_gpu(r.gpu_id) &&
-        profiles::valid_first_steam_request({r.request_id, "Activate"});
+        profiles::valid_first_space_request({r.request_id, "Activate"});
       if (!r.gpu_id.empty()) return false;
       if (r.operation == "download") return r.name.empty() && valid_runtime_id(r.runtime_id) &&
-        profiles::valid_first_steam_request({r.request_id, "Download"});
-      if (!profiles::valid_first_steam_request({r.request_id, r.operation == "cancel" ? "Cancel" : r.name})) return false;
+        profiles::valid_first_space_request({r.request_id, "Download"});
+      if (!profiles::valid_first_space_request({r.request_id, r.operation == "cancel" ? "Cancel" : r.name})) return false;
       if (r.operation == "cancel") return r.runtime_id.empty() && r.name.empty();
       return r.operation == "start" && valid_runtime_id(r.runtime_id);
     }
@@ -149,9 +149,14 @@ namespace multiseat::spaces {
           body.at("reference"), body.at("image"), body.at("state"), body.at("code"), body.at("schema") == 2 ? body.at("gpu_id").get<std::string>() : std::string {}};
         const bool configuring = r.state == "configuring" || r.state == "restart_required" || r.state == "activation_failed";
         if (configuring ? !valid_gpu(r.gpu_id) : !r.gpu_id.empty()) throw std::invalid_argument("setup graphics");
-        const std::string prefix = std::string {runtime_repository} + "@";
+        // <repository prefix>-<launcher family>@<digest>, the only reference a
+        // runtime is ever pulled by.
+        const std::string prefix = std::string {runtime_repository} + "-";
+        const auto at = r.reference.find('@');
         if (!valid_request(r.request) || r.request.operation != "start" ||
-            !r.reference.starts_with(prefix) || !digest(r.reference.substr(prefix.size())) || !digest(r.image) ||
+            !r.reference.starts_with(prefix) || at == std::string::npos || at <= prefix.size() ||
+            !admitted_runtime_profile(std::string_view {r.reference}.substr(prefix.size(), at - prefix.size())) ||
+            !digest(r.reference.substr(at + 1)) || !digest(r.image) ||
             !valid_stage(r.state, r.code))
           throw std::invalid_argument("setup record");
         record_ = std::move(r);
@@ -186,7 +191,11 @@ namespace multiseat::spaces {
   json setup_service_t::snapshot() const {
     std::lock_guard lock(mutex_);
     json runtimes = json::array();
-    for (const auto &r : catalog_) runtimes.push_back({{"id", r.id}, {"variant", r.variant}, {"nvidia_driver", r.nvidia_driver}});
+    // The launcher a runtime carries, so the picker can name it rather than
+    // calling every runtime Steam.
+    for (const auto &r : catalog_)
+      runtimes.push_back({{"id", r.id}, {"profile", r.profile}, {"variant", r.variant},
+        {"nvidia_driver", r.nvidia_driver}});
     json result {{"version", 1}, {"available", enabled_ && !fault_ && !closing_ && bool(lease_)},
       {"runtimes", runtimes}, {"graphics", json::array()}, {"job", nullptr},
       {"message", !enabled_ ? "Spaces already have local configuration. Manage your existing spaces below." :
@@ -420,7 +429,12 @@ namespace multiseat::spaces {
         },
         .prepare = [path = directory / "spaces-profiles.json"](const auto &request, std::string_view image, std::stop_token stop) {
           container::local_host_t host(stop);
-          return static_cast<bool>(profiles::create_first_steam(path, request, image, host));
+          // The family is the one the admitted runtime was built for, read from
+          // the compiled catalog rather than taken from the request.
+          const auto &catalog = trusted_runtimes();
+          if (!catalog) return false;
+          return static_cast<bool>(profiles::create_first_space(path, request, image,
+            runtime_profile_for_image(image, *catalog), host));
         },
         .graphics = graphics_choices,
         .activate = [directory](const auto &request, const auto &runtime, auto gpu, auto stop) {

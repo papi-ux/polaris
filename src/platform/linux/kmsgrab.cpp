@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <filesystem>
+#include <mutex>
 #include <thread>
 #include <unistd.h>
 
@@ -46,26 +47,53 @@ namespace platf {
 
   namespace kms {
 
+    /// Whether this binary may raise CAP_SYS_ADMIN at all, which is what --enable-kms grants it.
+    static bool sys_admin_permitted() {
+      cap_t caps = cap_get_proc();
+      if (!caps) {
+        return false;
+      }
+      cap_flag_value_t permitted = CAP_CLEAR;
+      const bool held = !cap_get_flag(caps, CAP_SYS_ADMIN, CAP_PERMITTED, &permitted) && permitted == CAP_SET;
+      cap_free(caps);
+      return held;
+    }
+
     class cap_sys_admin {
     public:
       cap_sys_admin() {
         caps = cap_get_proc();
 
+        // A binary set up without --enable-kms holds no CAP_SYS_ADMIN to raise, which is how most
+        // hosts run; what that means for capture is said once, where the probe finds out.
+        cap_flag_value_t permitted = CAP_CLEAR;
+        if (!caps || cap_get_flag(caps, CAP_SYS_ADMIN, CAP_PERMITTED, &permitted) || permitted != CAP_SET) {
+          BOOST_LOG(debug) << "CAP_SYS_ADMIN is not permitted to this Polaris binary"sv;
+          return;
+        }
+
         cap_value_t sys_admin = CAP_SYS_ADMIN;
         if (cap_set_flag(caps, CAP_EFFECTIVE, 1, &sys_admin, CAP_SET) || cap_set_proc(caps)) {
           BOOST_LOG(error) << "Failed to gain CAP_SYS_ADMIN";
+          return;
         }
+        raised = true;
       }
 
       ~cap_sys_admin() {
-        cap_value_t sys_admin = CAP_SYS_ADMIN;
-        if (cap_set_flag(caps, CAP_EFFECTIVE, 1, &sys_admin, CAP_CLEAR) || cap_set_proc(caps)) {
-          BOOST_LOG(error) << "Failed to drop CAP_SYS_ADMIN";
+        if (raised) {
+          cap_value_t sys_admin = CAP_SYS_ADMIN;
+          if (cap_set_flag(caps, CAP_EFFECTIVE, 1, &sys_admin, CAP_CLEAR) || cap_set_proc(caps)) {
+            BOOST_LOG(error) << "Failed to drop CAP_SYS_ADMIN";
+          }
         }
-        cap_free(caps);
+        if (caps) {
+          cap_free(caps);
+        }
       }
 
       cap_t caps;
+      bool raised = false;
     };
 
     class wrapper_fb {
@@ -1827,16 +1855,32 @@ namespace platf {
         }
 
         if (!fb->handles[0]) {
-          BOOST_LOG(error) << "Couldn't get handle for DRM Framebuffer ["sv << plane->fb_id << "]: Probably not permitted"sv;
+          if (kms::sys_admin_permitted()) {
+            // The binary holds the capability and DRM still gave no handle, so the capability is
+            // not the cause and --enable-kms would change nothing.
+            static std::once_flag held;
+            std::call_once(held, [fb_id = plane->fb_id]() {
+              BOOST_LOG(warning) << "This Polaris binary holds CAP_SYS_ADMIN, but DRM gave no handle for framebuffer ["sv
+                                 << fb_id << "], so KMS capture cannot read this screen"sv;
+            });
+            break;
+          }
           // The probe, not the capture loop: this is the evaluation the Doctor reports on.
           note_kms_capture_refused_for_capability();
-          BOOST_LOG(config::video.capture == "kms" ? fatal : warning)
-            << "KMS display capture requires CAP_SYS_ADMIN, which this Polaris binary does not hold. "sv
-            << "Installing or updating the package replaces the binary without it; when using KMS capture, run "sv
-            << "[sudo -H polaris --setup-host --enable-kms] after each install or update, then restart Polaris.\n"sv
-            << "KMS probe could not access DRM framebuffer handles; continuing with non-KMS capture backends when available.\n"sv
-            << "Refer to the Polaris Linux build and troubleshooting docs for the supported setup path:\n"sv
-            << "https://github.com/papi-ux/polaris/blob/master/docs/troubleshooting.md"sv;
+          if (config::video.capture == "kms") {
+            BOOST_LOG(fatal)
+              << "KMS display capture requires CAP_SYS_ADMIN, which this Polaris binary does not hold, and capture is "sv
+              << "set to KMS. Installing or updating the package replaces the binary without it; run "sv
+              << "[sudo -H polaris --setup-host --enable-kms] after each install or update, then restart Polaris.\n"sv
+              << "https://github.com/papi-ux/polaris/blob/master/docs/troubleshooting.md"sv;
+          } else {
+            // Most hosts never enable KMS capture, and the probe runs at every capture evaluation.
+            static std::once_flag said;
+            std::call_once(said, []() {
+              BOOST_LOG(info) << "KMS capture is off on this host, so Polaris captures another way. It needs "sv
+                              << "[sudo -H polaris --setup-host --enable-kms] only if you want it."sv;
+            });
+          }
           break;
         }
 

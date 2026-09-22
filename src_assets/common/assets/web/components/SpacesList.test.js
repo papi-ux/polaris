@@ -4,8 +4,10 @@ import SpacesList from './SpacesList.vue'
 import { validSnapshot } from '../spaces-access.js'
 import { spacesGlobal } from './spaces-test-i18n.js'
 let wrapper
-const space = () => ({ id: 'space-a', name: 'Alex', clients: ['handheld'], steam: true, archived: false })
-const second = () => ({ id: 'space-b', name: 'Sam', clients: [], steam: true, archived: false })
+// A host sends both: `family` is what decides behaviour, and `steam` stays for
+// a client that predates launcher families.
+const space = () => ({ id: 'space-a', name: 'Alex', clients: ['handheld'], family: 'steam', steam: true, archived: false })
+const second = () => ({ id: 'space-b', name: 'Sam', clients: [], family: 'steam', steam: true, archived: false })
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u
 async function typeName(value) {
   const input = dialog().querySelector('[data-remove-name]')
@@ -32,6 +34,25 @@ async function confirm() {
 }
 afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals() })
 describe('Spaces management', () => {
+  it('names the launcher on the card, and says nothing for one this console does not know', () => {
+    start({ profiles: [space(), { ...second(), family: 'heroic', steam: false }, { id: 'space-c', name: 'Odd', clients: [], family: '', archived: false }] })
+    const chips = wrapper.findAll('[data-space-launcher]').map(chip => chip.text())
+    expect(chips).toEqual(['Steam', 'Heroic'])
+  })
+
+  it('sums up who can open a Space instead of spelling out a dozen names', () => {
+    const many = ['Retroid Pocket 6', 'Pixel 10 Pro', 'Google TV', 'Nova Deck', 'Shield'].map((name, index) =>
+      ({ uuid: `device-${index}`, friendly_name: name, perm: 0x04000000 }))
+    start({ clients: many, profiles: [{ ...space(), clients: [], access_clients: many.map(device => device.uuid) }] })
+    const summary = wrapper.get('[data-space-devices]')
+    expect(summary.text()).toBe('Available to Retroid Pocket 6, Pixel 10 Pro and 3 more')
+    // The whole list is still one hover away, and one click below under Device Access.
+    expect(summary.attributes('title')).toBe('Retroid Pocket 6, Pixel 10 Pro, Google TV, Nova Deck, Shield')
+    wrapper.unmount()
+    start({ clients: many.slice(0, 2), profiles: [{ ...space(), clients: [], access_clients: ['device-0', 'device-1'] }] })
+    expect(wrapper.get('[data-space-devices]').text()).toBe('Available to Retroid Pocket 6, Pixel 10 Pro')
+  })
+
   it('separates current activity from device access and never guesses a Steam user', async () => {
     start({ activity: [{ profile_id: 'space-a', client_id: 'handheld', state: 'running' }] })
     expect(wrapper.text()).toContain('Playing on Retroid Pocket 6')
@@ -69,7 +90,7 @@ describe('Spaces management', () => {
     await flushPromises()
     expect(dialog().textContent).toContain('Remove Alex?')
     expect(dialog().textContent).toContain('This does not free disk space')
-    expect(dialog().textContent).toContain('Installed games, saves and the Steam sign-in stay')
+    expect(dialog().textContent).toContain('Installed games, saves and the sign-in stay')
     expect(dialog().textContent).toContain('Stop Space streams before making this change')
     expect(fetch).not.toHaveBeenCalled()
     dialog().querySelector('[data-confirm-cancel]').click()
@@ -122,11 +143,11 @@ describe('Spaces management', () => {
     start({ removalAvailable: true, profiles: [space(), second()] })
     await wrapper.get('[aria-label="Remove Alex"]').trigger('click')
     await flushPromises()
-    expect(dialog().querySelector('[data-remove-choice]').textContent).toContain('Keeps its games, saves and Steam sign-in')
+    expect(dialog().querySelector('[data-remove-choice]').textContent).toContain('Keeps its games, saves and sign-in')
     expect(dialog().textContent).toContain('This does not free disk space')
     await chooseRemoveForGood()
     expect(dialog().textContent).toContain('Remove Alex for good?')
-    expect(dialog().textContent).toContain('Installed games, saves and the Steam sign-in are deleted from this PC')
+    expect(dialog().textContent).toContain('Installed games, saves and the sign-in are deleted from this PC')
     expect(dialog().textContent).toContain('This cannot be undone')
     expect(dialog().textContent).toContain('Devices lose access to it')
     expect(dialog().textContent).not.toContain('This does not free disk space')
@@ -207,6 +228,17 @@ describe('Spaces management', () => {
     expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({ operation: 'delete', profile_id: 'space-a', confirm_name: 'Alex' })
     expect(wrapper.get('[role=status]').text()).toContain('Alex was removed for good.')
     expect(wrapper.get('[role=status]').text()).toContain('Docker may have kept its network pn-space-a')
+  })
+
+  it('keeps the last Space of a family archivable only, even beside another family', async () => {
+    // A new Space copies one of its own family, so the last Heroic Space is
+    // kept even when Steam Spaces remain, and the reverse.
+    vi.stubGlobal('fetch', vi.fn())
+    start({ removalAvailable: true, profiles: [space(), { ...second(), family: 'heroic', steam: false }] })
+    await wrapper.get('[aria-label="Remove Alex"]').trigger('click')
+    await flushPromises()
+    expect(dialog().querySelector('[data-remove-delete]').disabled).toBe(true)
+    expect(dialog().querySelector('#space-remove-last').textContent).toContain('This is the only Space')
   })
 
   it('keeps the last Space archivable only and says why before anything is typed', async () => {

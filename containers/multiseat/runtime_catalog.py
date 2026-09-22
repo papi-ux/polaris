@@ -14,6 +14,7 @@ from oci_archive import verify_archive
 
 REQUIRED_PROVIDER_TESTS = {
     'TestRealSessionBusAuthenticatesAndCleansUp',
+    'TestRealSessionBusGroupStopIsClean',
     'TestRealEncoderBridgeKeepsTwoSeatsIndependent',
     'TestRealPrivateAudioGraphRoutesExactlyAndCleansUp',
     'TestRealAudioReadinessFailureCleansPartialArtifacts',
@@ -51,13 +52,17 @@ def is_digest(value):
 
 def validate_catalog(catalog):
     if (not isinstance(catalog, dict) or set(catalog) != {'schema', 'runtimes'} or
-            type(catalog['schema']) is not int or catalog['schema'] != 1 or
-            not isinstance(catalog['runtimes'], list) or len(catalog['runtimes']) > 16):
+            type(catalog['schema']) is not int or catalog['schema'] != 2 or
+            not isinstance(catalog['runtimes'], list) or len(catalog['runtimes']) > 64):
         raise ValueError('unsupported runtime catalog')
     ids, digests = set(), set()
+    # Each launcher family carries its own launcher in its own image, so an
+    # entry names one and Polaris pulls it from that family's repository.
+    families = {'steam', 'heroic', 'lutris'}
     for entry in catalog['runtimes']:
         expected = {'id', 'profile', 'variant', 'platform', 'media_contract', 'uid', 'gid',
-                    'source_revision', 'registry_digest', 'config_digest', 'nvidia_driver'}
+                    'source_revision', 'registry_digest', 'config_digest', 'nvidia_driver',
+                    'nvidia_minimum_driver'}
         if not isinstance(entry, dict) or set(entry) != expected:
             raise ValueError('unexpected runtime fields')
         strings = expected - {'media_contract', 'uid', 'gid'}
@@ -65,16 +70,21 @@ def validate_catalog(catalog):
             raise ValueError('runtime identity fields must be strings')
         if (not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,63}', entry['id']) or
                 entry['id'] in ids or entry['registry_digest'] in digests or
-                entry['profile'] != 'steam' or entry['platform'] != 'linux/amd64' or
+                entry['profile'] not in families or entry['platform'] != 'linux/amd64' or
                 not re.fullmatch(r'[0-9a-f]{40}', entry['source_revision']) or
                 not is_digest(entry['registry_digest']) or not is_digest(entry['config_digest']) or
                 any(type(entry[key]) is not int or entry[key] != value
                     for key, value in [('media_contract', 1), ('uid', 1000), ('gid', 1000)])):
             raise ValueError('incompatible or ambiguous runtime identity')
-        driver = entry['nvidia_driver']
-        if not ((entry['variant'] == 'default' and not driver) or
-                (entry['variant'] == 'nvidia' and 3 <= len(driver) <= 32 and
-                 re.fullmatch(r'[0-9]+(?:\.[0-9]+)+', driver))):
+        driver, minimum = entry['nvidia_driver'], entry['nvidia_minimum_driver']
+        dotted = r'[0-9]+(?:\.[0-9]+)+'
+        if not ((entry['variant'] == 'default' and not driver and not minimum) or
+                (entry['variant'] == 'nvidia' and not minimum and 3 <= len(driver) <= 32 and
+                 re.fullmatch(dotted, driver)) or
+                # Carries no driver of its own and borrows the machine's, so it
+                # names the oldest driver its own encoders still work with.
+                (entry['variant'] == 'nvidia-host' and not driver and 3 <= len(minimum) <= 32 and
+                 re.fullmatch(dotted, minimum))):
             raise ValueError('unsupported runtime driver variant')
         ids.add(entry['id'])
         digests.add(entry['registry_digest'])
@@ -87,14 +97,14 @@ def prepare_candidate(directory, registry_digest, registry_manifest):
     if (any(type(artifact[key]) is not int or artifact[key] != value
             for key, value in [('schema', 1), ('media_contract', 1), ('owner_uid', 1000), ('owner_gid', 1000)]) or
             artifact['development'] is not False or
-            artifact['build_engine'] != 'docker' or artifact['profile'] != 'steam' or
+            artifact['build_engine'] != 'docker' or artifact['profile'] not in ('steam', 'heroic', 'lutris') or
             artifact['platform'] != 'linux/amd64' or artifact['media_contract'] != 1 or
             artifact['owner_uid'] != 1000 or artifact['owner_gid'] != 1000 or
             artifact['validation']['dependencies'] != 'passed' or
             artifact['validation']['session_bus_audio_display'] != 'passed'):
         raise ValueError('artifact is not a compatible validated Docker Steam runtime')
     required = {'worker.oci.tar', 'worker.docker.tar', 'providers.json', 'packages.tsv', 'sbom.cdx.json'}
-    if artifact['variant'] == 'nvidia':
+    if artifact['variant'] in ('nvidia', 'nvidia-host'):
         required.update({'nvidia-files.json', 'nvidia-runtime.json'})
     if not required <= artifact['files'].keys():
         raise ValueError('artifact is missing required evidence')
@@ -135,7 +145,7 @@ def prepare_candidate(directory, registry_digest, registry_manifest):
     labels = config['config']['Labels']
     if (labels['org.opencontainers.image.source'] != 'https://github.com/papi-ux/polaris' or
             labels['org.opencontainers.image.revision'] != artifact['source_revision'] or
-            labels['io.polaris.multiseat.profile'] != 'steam' or
+            labels['io.polaris.multiseat.profile'] != artifact['profile'] or
             labels['io.polaris.multiseat.architecture'] != 'linux/amd64' or
             labels['io.polaris.multiseat.media-contract'] != '1' or
             config['config']['Entrypoint'] != ['/usr/bin/polaris-seat-worker'] or config['config']['Cmd'] != ['run'] or
@@ -150,16 +160,23 @@ def prepare_candidate(directory, registry_digest, registry_manifest):
                 for layer in layers)):
         raise ValueError('registry layer descriptors are incompatible')
     driver = labels.get('io.polaris.multiseat.nvidia.driver', '')
-    if artifact['variant'] == 'nvidia':
+    minimum = labels.get('io.polaris.multiseat.nvidia.minimum-driver', '')
+    if artifact['variant'] in ('nvidia', 'nvidia-host'):
         report = metadata(directory / 'nvidia-runtime.json')
+        borrowed = artifact['variant'] == 'nvidia-host'
         if (report['result'] != 'passed' or report['driver_version'] != driver or
+                report.get('source', 'image') != ('host' if borrowed else 'image') or
                 report['manifest_sha256'] != checksum(directory / 'nvidia-files.json')):
             raise ValueError('NVIDIA evidence differs from the worker driver')
-    entry = {'id': 'steam-' + artifact['variant'] + '-' + registry_digest[7:23],
-             'profile': 'steam', 'variant': artifact['variant'], 'platform': 'linux/amd64',
+        if borrowed and (driver or labels.get('io.polaris.multiseat.nvidia.source') != 'host' or
+                         labels.get('io.polaris.multiseat.nvidia.contract') != '1' or not minimum):
+            raise ValueError('a host-driver image must carry no driver and name its contract')
+    entry = {'id': artifact['profile'] + '-' + artifact['variant'] + '-' + registry_digest[7:23],
+             'profile': artifact['profile'], 'variant': artifact['variant'], 'platform': 'linux/amd64',
              'media_contract': 1, 'uid': 1000, 'gid': 1000, 'source_revision': artifact['source_revision'],
-             'registry_digest': registry_digest, 'config_digest': config_digest, 'nvidia_driver': driver}
-    return validate_catalog({'schema': 1, 'runtimes': [entry]})
+             'registry_digest': registry_digest, 'config_digest': config_digest, 'nvidia_driver': driver,
+             'nvidia_minimum_driver': minimum}
+    return validate_catalog({'schema': 2, 'runtimes': [entry]})
 
 
 def main():

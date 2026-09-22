@@ -23,7 +23,7 @@ class NvidiaRuntime(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = pathlib.Path(self.temporary.name)
         self.root.chmod(0o755)
-        self.manifest = {'schema': 1, 'driver_version': '610.57.04',
+        self.manifest = {'schema': 1, 'driver_version': '610.57.04', 'source': 'image',
                          'architectures': ['amd64', 'i386'], 'files': [], 'symlinks': []}
         for architecture in self.manifest['architectures']:
             directory = pathlib.Path('usr/lib') / runtime.ARCHITECTURES[architecture][0]
@@ -68,6 +68,64 @@ class NvidiaRuntime(unittest.TestCase):
 
     def verify(self, **kwargs):
         return runtime.verify(self.root, 'steam', owner_uid=os.getuid(), **kwargs)
+
+    def host_layer(self):
+        """Rebuild the fixture as a layer that borrows the machine's driver."""
+        contract = {'schema': 1, 'contract': 1, 'minimum_driver': '570.00',
+                    'library_prefixes': ['libcuda.so.', 'libEGL_nvidia.so.', 'libGLX_nvidia.so.',
+                                         'libnvidia-encode.so.', 'libnvidia-allocator.so.'],
+                    'architectures': [], 'vendor_files': []}
+        # Written beside the lock, not recorded as a packaged file, exactly as
+        # the packaging script leaves it.
+        self.write('usr/share/polaris/build/nvidia-host-contract.json', json.dumps(contract).encode())
+        borrowed = tuple(contract['library_prefixes'])
+        self.manifest['source'] = 'host'
+        self.manifest['driver_version'] = ''
+        self.manifest['files'] = [entry for entry in self.manifest['files']
+                                  if not pathlib.PurePosixPath(entry['path']).name.startswith(borrowed)
+                                  and 'glvnd/egl_vendor.d' not in entry['path']
+                                  and 'vulkan/' not in entry['path']]
+        self.manifest['symlinks'] = [entry for entry in self.manifest['symlinks']
+                                     if not pathlib.PurePosixPath(entry['path']).name.startswith(borrowed)]
+        for entry in list(self.manifest['files']):
+            path = self.root / entry['path'].lstrip('/')
+            if not path.exists():
+                self.manifest['files'].remove(entry)
+        for name in ['libcuda.so.1', 'libEGL_nvidia.so.0', 'libGLX_nvidia.so.0',
+                     'libnvidia-encode.so.1', 'libnvidia-allocator.so.1']:
+            for architecture in self.manifest['architectures']:
+                directory = self.root / 'usr/lib' / runtime.ARCHITECTURES[architecture][0]
+                (directory / name).unlink(missing_ok=True)
+                (directory / (name + '.610.57.04')).unlink(missing_ok=True)
+        for name in ['glvnd/egl_vendor.d/10_nvidia.json', 'vulkan/icd.d/nvidia_icd.json',
+                     'vulkan/implicit_layer.d/nvidia_layers.json']:
+            (self.root / 'usr/share' / name).unlink(missing_ok=True)
+        self.save()
+        return contract
+
+    def test_a_host_driver_layer_ships_no_borrowed_library(self):
+        self.host_layer()
+
+        report = self.verify(link_check=lambda _: None, source='host')
+
+        self.assertEqual(report['source'], 'host')
+        self.assertEqual(report['driver_version'], '')
+
+    def test_a_host_driver_layer_that_still_ships_the_driver_is_rejected(self):
+        self.host_layer()
+        # Put one borrowed library back, which would shadow the machine's copy.
+        directory = pathlib.Path('usr/lib') / runtime.ARCHITECTURES['amd64'][0]
+        relative = directory / 'libcuda.so.1'
+        self.write(relative, elf('amd64'))
+        self.record(relative, architecture='amd64', soname='libcuda.so.1')
+        self.save()
+
+        with self.assertRaisesRegex(ValueError, 'still ships libcuda.so.1'):
+            self.verify(link_check=lambda _: None, source='host')
+
+    def test_an_image_layer_is_not_accepted_as_a_host_driver_layer(self):
+        with self.assertRaises(ValueError):
+            self.verify(link_check=lambda _: None, source='host')
 
     def test_both_abis_and_every_vendor_and_frontend_reach_link_check(self):
         calls = []

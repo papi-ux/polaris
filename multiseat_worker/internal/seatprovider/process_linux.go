@@ -4,6 +4,7 @@ package seatprovider
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -174,6 +175,54 @@ func (child *managedChild) exited() bool {
 	default:
 		return false
 	}
+}
+
+// stopNoticeGrace is how long a helper waits for its own stop signal before it
+// calls a child's exit unexpected. A variable so a test need not sit through it.
+var stopNoticeGrace = 250 * time.Millisecond
+
+// stopRequested reports whether a child that has just exited went down with
+// its helper rather than on its own.
+//
+// The worker stops a helper by signalling the helper's whole process group, so
+// the child gets the same SIGTERM in the same instant, and a small daemon acts
+// on it sooner than this process hears of it: the runtime has to hand the
+// signal to a goroutine before the context is cancelled. Without this wait the
+// session bus reported "exited unexpectedly (exit status 0)" on every clean
+// disconnect, the worker logged a failed stop, and a real failure had nothing
+// to tell it apart from the noise around it. A child that dies on its own is
+// still reported, a quarter of a second later.
+func stopRequested(parent context.Context) bool {
+	if parent.Err() != nil {
+		return true
+	}
+	timer := time.NewTimer(stopNoticeGrace)
+	defer timer.Stop()
+	select {
+	case <-parent.Done():
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// exitedAsAsked reports whether a child that has exited went the way a stop makes it go: with
+// status 0, or on the SIGTERM or SIGKILL a stop sends. A child that crashed in the same moment it
+// was asked to stop is still a crash, and the stop must not hide it.
+func (child *managedChild) exitedAsAsked() bool {
+	if child == nil || child.command == nil || !child.exited() {
+		return false
+	}
+	state := child.command.ProcessState
+	if state == nil {
+		return false
+	}
+	if state.Success() {
+		return true
+	}
+	status, ok := state.Sys().(syscall.WaitStatus)
+	return ok && status.Signaled() &&
+		(status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL)
 }
 
 func (child *managedChild) exitError(message string) error {

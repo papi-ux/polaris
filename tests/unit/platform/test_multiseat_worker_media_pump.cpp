@@ -187,6 +187,7 @@ TEST(MultiseatWorkerMediaPump, DeliversAnAcknowledgedContractsFramesToTheStream)
   std::scoped_lock lock {delivered.mutex};
   ASSERT_EQ(delivered.video.size(), 1U);
   EXPECT_EQ(std::string(delivered.video[0].bytes.begin(), delivered.video[0].bytes.end()), "video");
+  EXPECT_EQ(report.keyframes, delivered.video[0].idr ? 1U : 0U) << "the summary counts the keyframes the stream was sent";
   ASSERT_EQ(delivered.audio.size(), 1U);
   EXPECT_EQ(std::string(delivered.audio[0].begin(), delivered.audio[0].end()), "audio");
 
@@ -320,6 +321,89 @@ TEST(MultiseatWorkerMediaPump, AStoppingSessionEndsTheStreamAndClosesItsTranspor
   EXPECT_FALSE(lease.connected()) << "a stopping session must not leave its transport open";
 
   worker.stop();
+  EXPECT_EQ(store.remove(authority), authority_status_e::applied);
+}
+
+// A client that disconnects stops the session and cancels its worker in the same breath. The
+// worker can close its end before the request side next looks, a tick later, and that used to be
+// logged as "Worker media failed: the worker transport ended" for a stream the player had left.
+TEST(MultiseatWorkerMediaPump, AWorkerThatGoesWithTheSessionIsNotAFailure) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), deterministic_capability(0x47)};
+  auto authority = create_authority(store, identity_for(), "generation-pump-together");
+  fake_worker_t worker {authority, fake_behavior_e::media_contract};
+  controller_client_t client;
+  ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
+  ASSERT_EQ(client.attach_data_plane(), transport_status_e::applied);
+
+  std::atomic<bool> stopping {false};
+  // The stop is real, but the request side's thread has not looked yet: only the thread that
+  // carries the media, this one, is told. That is the inside of the tick, held still.
+  const auto carrying_thread = std::this_thread::get_id();
+  auto host = quiet_host();
+  host.stop_requested = [&] { return stopping.load() && std::this_thread::get_id() == carrying_thread; };
+  delivered_t delivered;
+  auto lease = client.lease_connection();
+
+  std::thread stopper {[&] {
+    std::this_thread::sleep_for(150ms);
+    stopping.store(true);
+    worker.stop();
+  }};
+  const auto report = run(lease, matching_expectation(), delivered.sinks(), host);
+  stopper.join();
+
+  EXPECT_EQ(report.status, pump_status_e::ended_on_shutdown) << describe(report.status);
+  EXPECT_TRUE(ended_cleanly(report.status));
+  EXPECT_EQ(store.remove(authority), authority_status_e::applied);
+}
+
+// Nobody asked for a stop, so a worker that goes on its own is still a failure.
+// A title the player quit from inside the game: nobody on the host asked for a stop, and the
+// worker says the stream is over before it goes. That is an ending, and the session log must not
+// call it a failure.
+TEST(MultiseatWorkerMediaPump, AWorkerThatSaysTheStreamIsOverIsNotAFailure) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), deterministic_capability(0x49)};
+  auto authority = create_authority(store, identity_for(), "generation-pump-over");
+  fake_worker_t worker {authority, fake_behavior_e::media_contract_then_end};
+  controller_client_t client;
+  ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
+  ASSERT_EQ(client.attach_data_plane(), transport_status_e::applied);
+
+  delivered_t delivered;
+  const auto report = run(client.lease_connection(), matching_expectation(), delivered.sinks(), quiet_host());
+
+  EXPECT_EQ(report.status, pump_status_e::ended_on_end_of_stream) << describe(report.status);
+  EXPECT_TRUE(ended_cleanly(report.status));
+  // What came before the ending was delivered, not dropped with it.
+  EXPECT_EQ(report.video_frames, 1U);
+  EXPECT_EQ(report.audio_frames, 1U);
+
+  worker.stop();
+  EXPECT_EQ(store.remove(authority), authority_status_e::applied);
+}
+
+TEST(MultiseatWorkerMediaPump, AWorkerThatGoesOnItsOwnIsStillAFailure) {
+  temporary_root_t root;
+  authority_store_t store {root.path(), deterministic_capability(0x48)};
+  auto authority = create_authority(store, identity_for(), "generation-pump-alone");
+  fake_worker_t worker {authority, fake_behavior_e::media_contract};
+  controller_client_t client;
+  ASSERT_EQ(client.connect(authority, short_options()), transport_status_e::applied);
+  ASSERT_EQ(client.attach_data_plane(), transport_status_e::applied);
+
+  delivered_t delivered;
+  auto lease = client.lease_connection();
+  std::thread stopper {[&] {
+    std::this_thread::sleep_for(150ms);
+    worker.stop();
+  }};
+  const auto report = run(lease, matching_expectation(), delivered.sinks(), quiet_host());
+  stopper.join();
+
+  EXPECT_EQ(report.status, pump_status_e::transport_lost) << describe(report.status);
+  EXPECT_FALSE(ended_cleanly(report.status));
   EXPECT_EQ(store.remove(authority), authority_status_e::applied);
 }
 

@@ -24,7 +24,9 @@ namespace multiseat {
     std::string id;
     std::string name;
     std::vector<std::string> clients;
-    bool steam = false;
+    /// The launcher family this Space runs, empty when its workload is not one
+    /// this build can stream: "steam", "heroic" or "lutris".
+    std::string family;
     bool archived = false;
     std::vector<std::string> access_clients;
     bool library_enabled = false;

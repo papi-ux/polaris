@@ -16,7 +16,7 @@
     </section>
 
     <div class="flex flex-wrap items-center justify-between gap-2 text-sm text-storm">
-      <span>Separate Steam sign-ins and saves are managed in Spaces.</span>
+      <span>Separate sign-ins and saves are managed in Spaces.</span>
       <router-link to="/spaces" class="focus-ring rounded px-1 py-2 text-ice hover:underline">Open Spaces</router-link>
     </div>
 

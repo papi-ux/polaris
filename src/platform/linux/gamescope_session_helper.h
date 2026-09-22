@@ -22,6 +22,8 @@ namespace platf::gamescope_session_helper {
   struct resolution_t {
     std::filesystem::path helper;  ///< launcher to run; empty when none is installed
     std::filesystem::path shadowed;  ///< a different copy PATH would have picked; empty when none
+    std::filesystem::path override_ignored;  ///< POLARIS_GAMESCOPE_SESSION named this, and it is not an executable file
+    bool from_override {false};  ///< helper is the launcher POLARIS_GAMESCOPE_SESSION names
     std::filesystem::path bundled;  ///< module copy shipped with this build; empty when absent
     std::filesystem::path runtime_lib;  ///< sibling runtime library that was compared; empty when absent
     bool bundled_fallback {false};  ///< helper is the reference copy itself: nothing was installed beside the binary or on PATH
@@ -32,7 +34,9 @@ namespace platf::gamescope_session_helper {
   /**
    * @brief Pick the launcher for this Polaris binary.
    *
-   * The copy beside the running executable wins over PATH. A distribution
+   * A launcher named by POLARIS_GAMESCOPE_SESSION wins over both, when it is an executable file: it is
+   * how a packager whose wrapper exports the session environment, such as the Nix module's, says
+   * which one to run (#745). Otherwise the copy beside the running executable wins over PATH. A distribution
    * package ships the binary and the launcher together, so they cannot drift
    * apart, while a copy under ~/.local/bin or /usr/local/bin left by an earlier
    * scripts/install run is never updated by the package manager and would
@@ -44,15 +48,17 @@ namespace platf::gamescope_session_helper {
    * @param path_candidate What a PATH lookup found, or empty.
    * @param bundled_session The module copy this build ships, or empty.
    * @param bundled_runtime_lib The runtime library copy this build ships, or empty.
+   * @param explicit_session What POLARIS_GAMESCOPE_SESSION names, or empty.
    */
   resolution_t resolve(
     const std::optional<std::filesystem::path> &executable_dir,
     const std::filesystem::path &path_candidate,
     const std::filesystem::path &bundled_session,
-    const std::filesystem::path &bundled_runtime_lib
+    const std::filesystem::path &bundled_runtime_lib,
+    const std::filesystem::path &explicit_session = {}
   );
 
-  /// Resolve using /proc/self/exe, PATH, and the bundled assets of this build.
+  /// Resolve using POLARIS_GAMESCOPE_SESSION, /proc/self/exe, PATH, and the bundled assets of this build.
   resolution_t resolve_default();
 
   bundle_match_t compare_with_bundle(std::string_view installed, std::string_view bundled);

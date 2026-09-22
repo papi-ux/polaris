@@ -130,6 +130,9 @@ namespace proc {
     std::string forcePrivateStreamLabel;
   };
 
+  /// What a launch on a host in Steam Game Mode is told: nothing to choose, the stream shows that screen.
+  desktop_launch_safety_policy_t game_mode_launch_safety_policy();
+
   desktop_launch_safety_policy_t resolve_desktop_launch_safety_policy(
     bool private_stream_requested,
     bool mirror_desktop_explicit,
@@ -319,6 +322,32 @@ namespace proc {
     const config::prep_cmd_t &cmd,
     bool use_cage_compositor
   );
+  bool should_skip_steam_stop_undo_in_game_mode_for_tests(
+    const config::prep_cmd_t &cmd,
+    bool game_mode_session_live
+  );
+  std::string game_mode_title_to_remember_for_tests(
+    std::string_view appid,
+    bool game_mode_session_live,
+    bool already_running
+  );
+  std::vector<std::string> game_mode_detached_commands_for_tests(
+    const std::vector<std::string> &detached,
+    const std::string &appid,
+    bool title_already_open
+  );
+  bool should_close_game_mode_title_for_tests(
+    std::string_view launched_appid,
+    bool game_mode_session_live,
+    bool session_ended_on_request
+  );
+#ifdef __linux__
+  bool game_mode_replaced_paused_topology_for_tests(
+    bool game_mode_session_live,
+    std::string_view requested_topology,
+    std::string_view paused_topology
+  );
+#endif
   bool should_forward_steam_shutdown_undo_without_launch_for_tests(
     const struct ctx_t &app,
     const config::prep_cmd_t &cmd,
@@ -552,6 +581,8 @@ namespace proc {
    */
   struct ctx_t {
     std::vector<cmd_t> prep_cmds;
+    /// How many of prep_cmds came from the global list, which parsing puts ahead of the app's own.
+    std::size_t global_prep_cmd_count = 0;
     std::vector<cmd_t> state_cmds;
 
     /**
@@ -656,6 +687,16 @@ namespace proc {
    * such an entry without matching its name.
    */
   bool launches_nothing(const ctx_t &app);
+
+  /**
+   * @brief Whether an entry is the Low Res Desktop sample as Polaris used to ship it, unchanged.
+   *
+   * New installs got it beside Desktop until 1.4.12. Its prep command sets an X11 output named
+   * HDMI-1 to 1920x1080 with xrandr, which fails on nearly every host, and the library showed it as
+   * the desktop tile because the entry named Desktop was left out. Only the untouched sample
+   * counts: an entry someone renamed or gave commands of their own is theirs.
+   */
+  bool is_stock_low_res_desktop(const ctx_t &app);
 
   /**
    * @brief Whether an entry is one particular game rather than a launcher, an emulator or the desktop.
@@ -898,6 +939,14 @@ namespace proc {
     void resume();
     void pause();
     void terminate(bool immediate = false, bool needs_refresh = true);
+    /**
+     * @brief terminate() for someone ending the session on purpose: the console's Close App and
+     *        Disconnect, and Browser Stream's Stop.
+     *
+     * The difference is Game Mode: there the title the stream opened is asked to close as well,
+     * which no other stop does.
+     */
+    void end_session(bool immediate = false, bool needs_refresh = true);
     bool terminate_if(const std::function<bool()> &condition,
                       const std::function<void()> &before_terminate);
     bool terminate_abandoned_desktop_takeover(std::string_view session_token);
@@ -946,6 +995,8 @@ namespace proc {
       // Protected by mutex; binds the launch metadata to its admission identity.
       std::shared_ptr<const char> metadata_capture_owner {capture_owner.load()};
       std::weak_ptr<rtsp_stream::launch_session_t> capture_launch;
+      /// Set while a stop runs because someone ended the session on purpose.
+      std::atomic<bool> stop_ends_session {false};
     };
 
     void launch_input_only_impl(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
@@ -955,6 +1006,8 @@ namespace proc {
       bool no_active_sessions_at_launch
     );
     void terminate_impl(bool immediate, bool needs_refresh);
+    /// terminate() and end_session(): take the lifecycle gate, then tear down.
+    void stop(bool immediate, bool needs_refresh, bool ends_session);
 #ifdef __linux__
     bool request_session_owned_steam_graceful_shutdown_before_cage_stop();
     bool terminate_session_owned_steam_before_cage_stop();
@@ -1015,6 +1068,11 @@ namespace proc {
     bool _session_used_gamescope_runtime = false;
     bool _exact_generation_cleanup_complete = true;
     std::optional<retained_steam_shutdown_t> _retained_steam_shutdown;
+    /// The Steam title this launch opened in the Steam that runs Game Mode. Empty when there is none,
+    /// or when the title was open before the launch and so is not this session's to close.
+    std::string _game_mode_launched_appid;
+    /// Whether this session started with the host in Game Mode, so its Steam cleanup is not its own.
+    bool _session_started_in_game_mode = false;
 #endif
     std::vector<cmd_t>::const_iterator _app_prep_it;
     std::vector<cmd_t>::const_iterator _app_prep_begin;

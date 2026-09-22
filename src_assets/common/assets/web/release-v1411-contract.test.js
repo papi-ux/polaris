@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 const read = (path) => readFileSync(join(process.cwd(), path), 'utf8')
 
-const currentRelease = () => {
+const historicalRelease = () => {
   const changelog = read('docs/changelog.md')
   const start = changelog.indexOf('## v1.4.11 - 2026-09-19')
   const end = changelog.indexOf('## v1.4.10 - 2026-09-18')
@@ -13,7 +13,7 @@ const currentRelease = () => {
   return changelog.slice(start, end)
 }
 
-const currentNotes = () => read('docs/release-notes/v1.4.11.md')
+const historicalNotes = () => read('docs/release-notes/v1.4.11.md')
 
 const expectedAssets = [
   'Polaris-arch-x86_64.pkg.tar.zst',
@@ -23,18 +23,9 @@ const expectedAssets = [
 ].sort()
 const withdrawnSysextAsset = 'Polaris-sysext-x86_64.raw'
 
-describe('v1.4.11 release contract', () => {
-  it('pins the version every packaging surface agrees on', () => {
-    expect(read('CMakeLists.txt')).toContain('project(Polaris VERSION 1.4.11')
-    expect(read('docs/benchmark-control-openapi.json')).toContain('"collector_version": "1.4.11"')
-    expect(read('packaging/linux/SteamOS/namcap-reviewed-warnings.txt')).toContain(
-      'usr/bin/polaris-1.4.11',
-    )
-    expect(read('scripts/ci/build-steamos-package.sh')).toContain("'polaris|1.4.11-1|x86_64'")
-  })
-
+describe('historical v1.4.11 release contract', () => {
   it('leads with the KWin screen, Spaces and couch co-op, and says which Nova goes with it', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     const intro = notes.split('\n')[2]
     expect(intro).toMatch(/^Host Virtual Display on KDE Plasma gets the game, the controller and the touch it was missing/)
     expect(intro).toContain('Polaris 1.4.11 is matched with Nova 1.4.11')
@@ -66,7 +57,7 @@ describe('v1.4.11 release contract', () => {
   })
 
   it('names every change in the changelog section', () => {
-    const section = currentRelease()
+    const section = historicalRelease()
     for (const fact of [
       "uses KWin's own screen by default, even with EVDI loaded",
       'gives the game the focus on the stream screen',
@@ -88,7 +79,7 @@ describe('v1.4.11 release contract', () => {
   })
 
   it('keeps the heads up honest about driver updates, the Steam Controller, KMS and packaging', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     const headsUp = notes.slice(notes.indexOf('**Heads up**'))
     for (const fact of [
       'move each Space to the runtime for the new driver',
@@ -104,7 +95,7 @@ describe('v1.4.11 release contract', () => {
   })
 
   it('ships exactly the four supported packages and installs them from this tag', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     const blocks = [...notes.matchAll(/```bash\n([\s\S]*?)\n```/g)]
       .map((match) => match[1])
       .filter((block) => block.includes('wget --output-document='))
@@ -123,7 +114,7 @@ describe('v1.4.11 release contract', () => {
   })
 
   it('closes the changelog section with the exact four-asset sentence and no stray blank line', () => {
-    const lines = currentRelease().trimEnd().split('\n')
+    const lines = historicalRelease().trimEnd().split('\n')
     const bullets = lines.filter((line) => line.startsWith('- '))
     expect(bullets.at(-1)).toContain(
       'Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, ' +

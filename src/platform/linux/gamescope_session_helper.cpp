@@ -8,6 +8,7 @@
 #ifdef __linux__
 
 #include <array>
+#include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <system_error>
@@ -117,11 +118,25 @@ namespace platf::gamescope_session_helper {
     const std::optional<fs::path> &executable_dir,
     const fs::path &path_candidate,
     const fs::path &bundled_session,
-    const fs::path &bundled_runtime_lib
+    const fs::path &bundled_runtime_lib,
+    const fs::path &explicit_session
   ) {
     resolution_t resolution;
 
-    if (executable_dir) {
+    if (!explicit_session.empty()) {
+      // The launcher is joined into the session's start, wait and stop commands, which split on
+      // whitespace, and a relative name would mean whatever the working directory makes of it.
+      const auto named = explicit_session.string();
+      if (explicit_session.is_absolute() && named.find_first_of(" \t\n'\"\\") == std::string::npos &&
+          linux_util::is_executable_file(named)) {
+        resolution.helper = explicit_session;
+        resolution.from_override = true;
+      } else {
+        resolution.override_ignored = explicit_session;
+      }
+    }
+
+    if (!resolution.from_override && executable_dir) {
       const auto beside = *executable_dir / launcher_name;
       if (linux_util::is_executable_file(beside.string())) {
         resolution.helper = beside;
@@ -131,7 +146,8 @@ namespace platf::gamescope_session_helper {
     if (!path_candidate.empty() && linux_util::is_executable_file(path_candidate.string())) {
       if (resolution.helper.empty()) {
         resolution.helper = path_candidate;
-      } else if (!same_file(resolution.helper, path_candidate)) {
+      } else if (!resolution.from_override && !same_file(resolution.helper, path_candidate)) {
+        // A launcher named on purpose shadows nothing; the advisory is about stale installs.
         resolution.shadowed = path_candidate;
       }
     }
@@ -166,11 +182,13 @@ namespace platf::gamescope_session_helper {
       executable_dir = exe->parent_path();
     }
     const fs::path path_candidate = linux_util::find_executable_in_path(launcher_name);
+    const char *explicit_session = std::getenv("POLARIS_GAMESCOPE_SESSION");
     return resolve(
       executable_dir,
       path_candidate,
       bundled_asset(executable_dir, "polaris-gamescope-session.sh"),
-      bundled_asset(executable_dir, runtime_lib_name)
+      bundled_asset(executable_dir, runtime_lib_name),
+      explicit_session && *explicit_session ? fs::path {explicit_session} : fs::path {}
     );
   }
 
@@ -182,7 +200,8 @@ namespace platf::gamescope_session_helper {
       return "gamescope_stream: no polaris-gamescope-session beside this binary or on PATH; running the reference copy shipped with this build [" +
              resolution.helper.string() + "]";
     }
-    std::string line = "gamescope_stream: polaris-gamescope-session [" + resolution.helper.string() + "] is " +
+    std::string line = "gamescope_stream: polaris-gamescope-session [" + resolution.helper.string() + "]" +
+                       (resolution.from_override ? " (named by POLARIS_GAMESCOPE_SESSION)" : "") + " is " +
                        std::string(describe(resolution.session_match));
     if (!resolution.runtime_lib.empty()) {
       line += "; runtime library [" + resolution.runtime_lib.string() + "] is " +
@@ -193,6 +212,13 @@ namespace platf::gamescope_session_helper {
 
   std::vector<std::string> advisories(const resolution_t &resolution) {
     std::vector<std::string> lines;
+    if (!resolution.override_ignored.empty()) {
+      lines.push_back(
+        "gamescope_stream: POLARIS_GAMESCOPE_SESSION names [" + resolution.override_ignored.string() +
+        "], which is not an absolute path to an executable file with no spaces or quotes, so Polaris runs [" +
+        (resolution.helper.empty() ? std::string {"no launcher"} : resolution.helper.string()) + "] instead."
+      );
+    }
     if (!resolution.shadowed.empty()) {
       lines.push_back(
         "gamescope_stream: using polaris-gamescope-session shipped beside this binary [" +

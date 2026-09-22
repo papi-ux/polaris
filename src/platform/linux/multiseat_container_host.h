@@ -21,6 +21,10 @@ namespace multiseat::container {
     [[nodiscard]] bool trusted_data_file(
       const std::filesystem::path &path, std::string_view expected
     ) const override;
+    [[nodiscard]] bool trusted_system_file(const std::filesystem::path &path) const override;
+    [[nodiscard]] std::optional<std::string> read_trusted_system_file(
+      const std::filesystem::path &path, std::size_t max_bytes
+    ) const override;
     [[nodiscard]] std::optional<std::vector<std::uint64_t>> supplementary_groups() const override;
     [[nodiscard]] std::optional<group_membership_t> group_membership(std::string_view group) const override;
     [[nodiscard]] bool readable_directory(const std::filesystem::path &path) const override;

@@ -137,11 +137,11 @@ namespace {
     }
   };
 
-  const profiles::steam_create_request_t steam_request {
+  const profiles::space_create_request_t steam_request {
     "12345678-1234-4234-8234-123456789abc", "profile-a", "Second player"
   };
 
-  const profiles::first_steam_request_t first_request {steam_request.request_id, "First player"};
+  const profiles::first_space_request_t first_request {steam_request.request_id, "First player"};
   const std::string first_image = "sha256:" + std::string(64, 'b');
 
   TEST_F(MultiseatProfileCatalog, RemoveAndRestorePreserveTheHomeButNeverRestoreDeviceAccess) {
@@ -263,7 +263,7 @@ namespace {
 
   TEST_F(MultiseatProfileCatalog, FirstSpaceCreatesAPrivateCatalogAndFreshHomeWithoutASource) {
     provisioning_host_t host; host.image_family = "steam";
-    const auto result = profiles::create_first_steam(path, first_request, first_image, host);
+    const auto result = profiles::create_first_space(path, first_request, first_image, "steam", host);
     ASSERT_TRUE(result) << result.error;
     ASSERT_EQ(host.calls.size(), 10U);
     auto loaded = profiles::load(path);
@@ -281,19 +281,23 @@ namespace {
   TEST_F(MultiseatProfileCatalog, FirstSpaceSupportsAnEmptyInitializedCatalog) {
     ASSERT_TRUE(profiles::initialize(path, 1000, 1000));
     provisioning_host_t host; host.image_family = "steam";
-    EXPECT_TRUE(profiles::create_first_steam(path, first_request, first_image, host));
+    EXPECT_TRUE(profiles::create_first_space(path, first_request, first_image, "steam", host));
     EXPECT_EQ(host.calls.size(), 10U);
   }
 
   TEST_F(MultiseatProfileCatalog, FirstSpaceRetryPreservesItsHomeAndLaterPlayerAssignments) {
     provisioning_host_t host; host.image_family = "steam";
-    ASSERT_TRUE(profiles::create_first_steam(path, first_request, first_image, host));
+    ASSERT_TRUE(profiles::create_first_space(path, first_request, first_image, "steam", host));
     ASSERT_TRUE(profiles::assign(path, first_request.request_id, "paired-client"));
-    ASSERT_TRUE(profiles::create_first_steam(path, first_request, first_image, host));
+    ASSERT_TRUE(profiles::create_first_space(path, first_request, first_image, "steam", host));
     EXPECT_EQ(host.calls.size(), 10U);
     auto changed = first_request; changed.name = "Someone else";
-    EXPECT_FALSE(profiles::create_first_steam(path, changed, first_image, host));
-    EXPECT_FALSE(profiles::create_first_steam(path, first_request, "sha256:" + std::string(64, 'c'), host));
+    EXPECT_FALSE(profiles::create_first_space(path, changed, first_image, "steam", host));
+    EXPECT_FALSE(profiles::create_first_space(path, first_request, "sha256:" + std::string(64, 'c'), "steam", host));
+    // A family this build does not carry cannot make the first Space, because
+    // the workload it would open is not one any image holds a launcher for.
+    EXPECT_FALSE(profiles::create_first_space(path, first_request, first_image, "", host));
+    EXPECT_FALSE(profiles::create_first_space(path, first_request, first_image, "gamescope", host));
     EXPECT_EQ(host.calls.size(), 10U);
     const auto loaded = profiles::load(path);
     ASSERT_TRUE(loaded);
@@ -301,27 +305,79 @@ namespace {
   }
 
   TEST_F(MultiseatProfileCatalog, FirstSpaceCannotReplaceAnExistingUnsafeOrBusyCatalog) {
-    save(sample());
+    // A catalog that already holds a Space of this family, which is the state
+    // the first-Space path exists to refuse.
+    auto configured = sample();
+    configured.profiles.front().storage.runtime_profile = runtime_profile_e::steam;
+    configured.profiles.front().workload = {workload_kind_e::steam, "big-picture-v1"};
+    save(configured);
     const auto before = psf::read_secure(path, profiles::maximum_catalog_bytes).payload;
     provisioning_host_t host; host.image_family = "steam";
-    EXPECT_FALSE(profiles::create_first_steam(path, first_request, first_image, host));
+    EXPECT_FALSE(profiles::create_first_space(path, first_request, first_image, "steam", host));
     EXPECT_EQ(psf::read_secure(path, profiles::maximum_catalog_bytes).payload, before);
     {
       auto lease = profiles::load(path);
       ASSERT_TRUE(lease);
-      EXPECT_FALSE(profiles::create_first_steam(path, first_request, first_image, host));
+      EXPECT_FALSE(profiles::create_first_space(path, first_request, first_image, "steam", host));
     }
     ASSERT_TRUE(psf::write_atomic(path, "not a catalog"));
-    EXPECT_FALSE(profiles::create_first_steam(path, first_request, first_image, host));
+    EXPECT_FALSE(profiles::create_first_space(path, first_request, first_image, "steam", host));
     EXPECT_EQ(psf::read_secure(path, profiles::maximum_catalog_bytes).payload, "not a catalog");
     EXPECT_TRUE(host.calls.empty());
+  }
+
+  /**
+   * A launcher family's runtime carries its own launcher and its own library,
+   * so a host full of Steam Spaces still has no Heroic one to copy. The first
+   * Space of each family takes the first-Space path, and only a Space of that
+   * same family closes it.
+   */
+  TEST_F(MultiseatProfileCatalog, AHostWithSteamSpacesCanStillMakeItsFirstHeroicSpace) {
+    auto configured = sample();
+    configured.profiles.front().storage.runtime_profile = runtime_profile_e::steam;
+    configured.profiles.front().workload = {workload_kind_e::steam, "big-picture-v1"};
+    save(configured);
+
+    provisioning_host_t host; host.image_family = "heroic";
+    ASSERT_TRUE(profiles::create_first_space(path, first_request, first_image, "heroic", host));
+    {
+      // Reading the catalog holds its lease, which the changes below need.
+      const auto loaded = profiles::load(path);
+      ASSERT_TRUE(loaded);
+      ASSERT_EQ(loaded->catalog.profiles.size(), 2U);
+      const auto &made = loaded->catalog.profiles.back();
+      EXPECT_EQ(made.storage.runtime_profile, runtime_profile_e::heroic);
+      EXPECT_EQ(made.workload.kind, workload_kind_e::heroic);
+      EXPECT_EQ(made.workload.target_id, "library-v1");
+      EXPECT_EQ(loaded->catalog.profiles.front().storage.runtime_profile, runtime_profile_e::steam)
+        << "the Steam Space it was made beside is untouched";
+    }
+
+    // And a second Heroic Space is not made this way: it copies the first.
+    provisioning_host_t again; again.image_family = "heroic";
+    profiles::first_space_request_t second {"22345678-1234-4234-8234-123456789abc", "Another"};
+    EXPECT_FALSE(profiles::create_first_space(path, second, first_image, "heroic", again));
+
+    // Archive the only Heroic Space and there is no live one to copy. Both
+    // roads were closed then: nothing to copy, and this one refused because a
+    // Heroic Space existed. A launcher left that way starts again from the
+    // admitted runtime, and the archived Space stays as it was.
+    ASSERT_TRUE(profiles::edit(path, {profiles::edit_operation_e::remove, first_request.request_id, ""}));
+    provisioning_host_t afresh; afresh.image_family = "heroic";
+    ASSERT_TRUE(profiles::create_first_space(path, second, first_image, "heroic", afresh));
+    const auto after = profiles::load(path);
+    ASSERT_TRUE(after);
+    ASSERT_EQ(after->catalog.profiles.size(), 3U);
+    EXPECT_TRUE(after->catalog.profiles[1].archived);
+    EXPECT_FALSE(after->catalog.profiles[2].archived);
+    EXPECT_EQ(after->catalog.profiles[2].storage.runtime_profile, runtime_profile_e::heroic);
   }
 
   TEST_F(MultiseatProfileCatalog, FirstSpaceFailuresRetainResourcesWithoutPublishingOrAdoptingAHome) {
     for (std::size_t failure = 1; failure <= 10; ++failure) {
       const auto target = root / ("failed-" + std::to_string(failure) + ".json");
       provisioning_host_t host; host.image_family = "steam"; host.fail_call = failure;
-      const auto result = profiles::create_first_steam(target, first_request, first_image, host);
+      const auto result = profiles::create_first_space(target, first_request, first_image, "steam", host);
       EXPECT_FALSE(result) << failure;
       EXPECT_EQ(host.calls.size(), failure);
       EXPECT_EQ(psf::read_secure(target, profiles::maximum_catalog_bytes).status, psf::read_status_e::missing);
@@ -329,7 +385,7 @@ namespace {
       if (!host.volume.empty()) {
         EXPECT_EQ(result.volume_name, "pv-" + first_request.request_id);
         host.retain_volume_in_inventory = true;
-        EXPECT_FALSE(profiles::create_first_steam(target, first_request, first_image, host));
+        EXPECT_FALSE(profiles::create_first_space(target, first_request, first_image, "steam", host));
         EXPECT_EQ(host.calls.size(), failure + 2);
       }
     }
@@ -338,22 +394,22 @@ namespace {
   TEST_F(MultiseatProfileCatalog, FirstSpaceUncertainCommitIsConfirmedWithoutProvisioningAgain) {
     provisioning_host_t host; host.image_family = "steam";
     psf::set_write_fault_for_tests(psf::write_fault_e::post_rename_durability);
-    EXPECT_EQ(profiles::create_first_steam(path, first_request, first_image, host).status,
+    EXPECT_EQ(profiles::create_first_space(path, first_request, first_image, "steam", host).status,
       psf::write_status_e::durability_uncertain);
     psf::set_write_fault_for_tests(psf::write_fault_e::none);
-    EXPECT_TRUE(profiles::create_first_steam(path, first_request, first_image, host));
+    EXPECT_TRUE(profiles::create_first_space(path, first_request, first_image, "steam", host));
     EXPECT_EQ(host.calls.size(), 10U);
   }
 
   TEST_F(MultiseatProfileCatalog, FirstSpaceRejectsInvalidIdentityBeforeStorageOrDocker) {
     provisioning_host_t host; host.image_family = "steam";
     auto invalid = first_request; invalid.request_id = "../other";
-    EXPECT_FALSE(profiles::create_first_steam(path, invalid, first_image, host));
+    EXPECT_FALSE(profiles::create_first_space(path, invalid, first_image, "steam", host));
     invalid = first_request; invalid.name = " Hidden";
-    EXPECT_FALSE(profiles::create_first_steam(path, invalid, first_image, host));
-    EXPECT_FALSE(profiles::create_first_steam(path, first_request, "mutable:latest", host));
+    EXPECT_FALSE(profiles::create_first_space(path, invalid, first_image, "steam", host));
+    EXPECT_FALSE(profiles::create_first_space(path, first_request, "mutable:latest", "steam", host));
     host.uid = 1001;
-    EXPECT_FALSE(profiles::create_first_steam(path, first_request, first_image, host));
+    EXPECT_FALSE(profiles::create_first_space(path, first_request, first_image, "steam", host));
     EXPECT_TRUE(host.calls.empty());
     EXPECT_EQ(psf::read_secure(path, profiles::maximum_catalog_bytes).status, psf::read_status_e::missing);
   }
@@ -364,7 +420,7 @@ namespace {
     catalog.profiles[0].workload = {workload_kind_e::steam, "870780"};
     save(catalog);
     provisioning_host_t host; host.image_family = "steam";
-    const auto result = profiles::create_steam(path, steam_request, host);
+    const auto result = profiles::create_space(path, steam_request, host);
     ASSERT_TRUE(result) << result.error;
     EXPECT_EQ(result.profile_key, steam_request.request_id);
     EXPECT_EQ(host.calls.size(), 10U);
@@ -386,12 +442,12 @@ namespace {
     catalog.profiles[0].workload = {workload_kind_e::steam, "big-picture-v1"};
     save(catalog);
     provisioning_host_t host; host.image_family = "steam";
-    ASSERT_TRUE(profiles::create_steam(path, steam_request, host));
+    ASSERT_TRUE(profiles::create_space(path, steam_request, host));
     ASSERT_TRUE(profiles::assign(path, steam_request.request_id, "client-b"));
-    ASSERT_TRUE(profiles::create_steam(path, steam_request, host));
+    ASSERT_TRUE(profiles::create_space(path, steam_request, host));
     EXPECT_EQ(host.calls.size(), 10U);
     auto changed = steam_request; changed.name = "Different player";
-    EXPECT_FALSE(profiles::create_steam(path, changed, host));
+    EXPECT_FALSE(profiles::create_space(path, changed, host));
     EXPECT_EQ(host.calls.size(), 10U);
     auto loaded = profiles::load(path);
     ASSERT_TRUE(loaded);
@@ -407,11 +463,11 @@ namespace {
     save(catalog);
     provisioning_host_t host; host.image_family = "steam";
     host.fail_call = 5; host.retain_volume_in_inventory = true;
-    const auto failed = profiles::create_steam(path, steam_request, host);
+    const auto failed = profiles::create_space(path, steam_request, host);
     EXPECT_FALSE(failed);
     EXPECT_EQ(failed.volume_name, "pv-" + steam_request.request_id);
     EXPECT_EQ(host.calls.size(), 5U);
-    EXPECT_FALSE(profiles::create_steam(path, steam_request, host));
+    EXPECT_FALSE(profiles::create_space(path, steam_request, host));
     EXPECT_EQ(host.calls.size(), 7U); // Only engine admission and absence inventory on retry.
     auto loaded = profiles::load(path);
     ASSERT_TRUE(loaded);
@@ -425,25 +481,75 @@ namespace {
     save(catalog);
     provisioning_host_t host; host.image_family = "steam";
     psf::set_write_fault_for_tests(psf::write_fault_e::post_rename_durability);
-    EXPECT_EQ(profiles::create_steam(path, steam_request, host).status, psf::write_status_e::durability_uncertain);
+    EXPECT_EQ(profiles::create_space(path, steam_request, host).status, psf::write_status_e::durability_uncertain);
     psf::set_write_fault_for_tests(psf::write_fault_e::none);
-    ASSERT_TRUE(profiles::create_steam(path, steam_request, host));
+    ASSERT_TRUE(profiles::create_space(path, steam_request, host));
     EXPECT_EQ(host.calls.size(), 10U);
   }
 
   TEST_F(MultiseatProfileCatalog, CreationRejectsUnconfiguredOrNonSteamSourcesBeforeDocker) {
     save(sample());
     provisioning_host_t host;
-    EXPECT_FALSE(profiles::create_steam(path, steam_request, host));
+    EXPECT_FALSE(profiles::create_space(path, steam_request, host));
     auto request = steam_request; request.source_profile_id = "missing";
-    EXPECT_FALSE(profiles::create_steam(path, request, host));
+    EXPECT_FALSE(profiles::create_space(path, request, host));
     EXPECT_TRUE(host.calls.empty());
+  }
+
+  /**
+   * A Space is a launcher plus a home, so the person picks the launcher and the
+   * host copies a Space that already runs it. Naming a Space to copy stays the
+   * shape a client from before launcher families sends.
+   */
+  TEST_F(MultiseatProfileCatalog, CreationByLauncherFamilyCopiesASpaceThatAlreadyRunsIt) {
+    auto configured = sample();
+    configured.profiles.front().storage.runtime_profile = runtime_profile_e::heroic;
+    configured.profiles.front().workload = {workload_kind_e::heroic, "library-v1"};
+    save(configured);
+
+    provisioning_host_t host; host.image_family = "heroic";
+    profiles::space_create_request_t by_family {steam_request.request_id, {}, "Second", "heroic"};
+    ASSERT_TRUE(profiles::create_space(path, by_family, host));
+    const auto loaded = profiles::load(path);
+    ASSERT_TRUE(loaded);
+    ASSERT_EQ(loaded->catalog.profiles.size(), 2U);
+    const auto &made = loaded->catalog.profiles.back();
+    EXPECT_EQ(made.storage.runtime_profile, runtime_profile_e::heroic);
+    EXPECT_EQ(made.workload.target_id, "library-v1");
+    EXPECT_EQ(made.storage.image_reference, loaded->catalog.profiles.front().storage.image_reference)
+      << "a family's Spaces all share its image, so nothing is downloaded here";
+
+    // A launcher this PC runs no Space for cannot be copied from nothing.
+    provisioning_host_t empty_host; empty_host.image_family = "lutris";
+    profiles::space_create_request_t missing {"32345678-1234-4234-8234-123456789abc", {}, "Third", "lutris"};
+    EXPECT_FALSE(profiles::create_space(path, missing, empty_host));
+    EXPECT_TRUE(empty_host.calls.empty());
+  }
+
+  TEST(MultiseatSteamCreationRequest, AcceptsALauncherFamilyInPlaceOfASourceSpace) {
+    const json by_family {{"request_id", steam_request.request_id}, {"family", "heroic"}, {"name", "Second"}};
+    const auto decoded = profiles::decode_space_create_request(by_family.dump());
+    ASSERT_TRUE(decoded);
+    EXPECT_EQ(decoded->family, "heroic");
+    EXPECT_TRUE(decoded->source_profile_id.empty());
+
+    // The two shapes answer the same question, so one or the other, never both,
+    // and never a family this build carries no launcher for.
+    for (const auto &payload : {
+           json {{"request_id", steam_request.request_id}, {"family", "heroic"},
+                 {"source_profile_id", steam_request.source_profile_id}, {"name", "Second"}},
+           json {{"request_id", steam_request.request_id}, {"family", "gamescope"}, {"name", "Second"}},
+           json {{"request_id", steam_request.request_id}, {"family", ""}, {"name", "Second"}},
+           json {{"request_id", steam_request.request_id}, {"family", "../steam"}, {"name", "Second"}},
+           json {{"request_id", steam_request.request_id}, {"family", 3}, {"name", "Second"}}}) {
+      EXPECT_FALSE(profiles::decode_space_create_request(payload.dump())) << payload;
+    }
   }
 
   TEST(MultiseatSteamCreationRequest, RejectsUnboundedAmbiguousAndRuntimeAuthorityFields) {
     const json base {{"request_id", steam_request.request_id}, {"source_profile_id", steam_request.source_profile_id},
       {"name", steam_request.name}};
-    ASSERT_TRUE(profiles::decode_steam_create_request(base.dump()));
+    ASSERT_TRUE(profiles::decode_space_create_request(base.dump()));
     const std::vector<std::function<void(json &)>> mutations {
       [](auto &v) { v["image"] = "sha256:" + std::string(64, 'a'); },
       [](auto &v) { v["volume"] = "existing-home"; },
@@ -461,13 +567,13 @@ namespace {
     };
     for (const auto &mutate : mutations) {
       auto payload = base; mutate(payload);
-      EXPECT_FALSE(profiles::decode_steam_create_request(payload.dump())) << payload;
+      EXPECT_FALSE(profiles::decode_space_create_request(payload.dump())) << payload;
     }
     auto duplicate = base.dump(); duplicate.insert(1, "\"name\":\"Other\",");
-    EXPECT_FALSE(profiles::decode_steam_create_request(duplicate));
-    EXPECT_FALSE(profiles::decode_steam_create_request(std::string(4097, ' ')));
-    EXPECT_FALSE(profiles::decode_steam_create_request("null"));
-    EXPECT_FALSE(profiles::decode_steam_create_request("[]"));
+    EXPECT_FALSE(profiles::decode_space_create_request(duplicate));
+    EXPECT_FALSE(profiles::decode_space_create_request(std::string(4097, ' ')));
+    EXPECT_FALSE(profiles::decode_space_create_request("null"));
+    EXPECT_FALSE(profiles::decode_space_create_request("[]"));
   }
 
   TEST_F(MultiseatProfileCatalog, AtomicAssignmentMovesPreserveOtherDevicesAndRejectUnknownTargets) {
@@ -751,6 +857,151 @@ namespace {
     ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-a", false));
     loaded = profiles::load(path); ASSERT_TRUE(loaded);
     EXPECT_TRUE(loaded->catalog.profiles[1].access_clients.empty());
+  }
+
+  // A forgotten device keeps its ids in these lists: the catalog belongs to a controller that has to
+  // stop before it can be edited, so an unpair cannot reach in. The next access change clears them.
+  class MultiseatProfileCatalogForgottenDevices: public MultiseatProfileCatalog {
+  protected:
+    void SetUp() override {
+      MultiseatProfileCatalog::SetUp();
+      auto catalog = sample();
+      catalog.profiles[0].access_clients = {"client-a", "client-gone"};
+      auto extra = catalog.profiles.front();
+      extra.storage.profile_key = "profile-b"; extra.storage.opaque_volume_name = "pv-profile-b";
+      extra.client_keys = {"client-gone"}; extra.access_clients = {"client-gone"};
+      catalog.profiles.push_back(extra);
+      catalog.desktop_clients = {"client-lost", "client-a"};
+      catalog.desktop_default_clients = {"client-lost"};
+      save(catalog);
+    }
+    // The change itself lands; every id that was already there stays.
+    void expect_nobody_forgotten() {
+      auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+      const auto holds = [](const std::vector<std::string> &list, std::string_view client) {
+        return std::find(list.begin(), list.end(), client) != list.end();
+      };
+      EXPECT_TRUE(holds(loaded->catalog.profiles[0].access_clients, "client-gone"));
+      EXPECT_EQ(loaded->catalog.profiles[1].client_keys, std::vector<std::string>{"client-gone"});
+      EXPECT_TRUE(holds(loaded->catalog.profiles[1].access_clients, "client-gone"));
+      EXPECT_TRUE(holds(loaded->catalog.profiles[1].access_clients, "client-new"));
+      EXPECT_TRUE(holds(loaded->catalog.desktop_clients, "client-lost"));
+      EXPECT_EQ(loaded->catalog.desktop_default_clients, std::vector<std::string>{"client-lost"});
+    }
+  };
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, AnAccessChangeDropsEveryDeviceThatIsNoLongerPaired) {
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-new", true, {"client-a", "client-new"}));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.profiles[0].client_keys, std::vector<std::string>{"client-a"});
+    EXPECT_EQ(loaded->catalog.profiles[0].access_clients, std::vector<std::string>{"client-a"});
+    EXPECT_TRUE(loaded->catalog.profiles[1].client_keys.empty()) << "a forgotten device kept its Default Space";
+    EXPECT_EQ(loaded->catalog.profiles[1].access_clients, std::vector<std::string>{"client-new"});
+    EXPECT_EQ(loaded->catalog.desktop_clients, std::vector<std::string>{"client-a"});
+    EXPECT_TRUE(loaded->catalog.desktop_default_clients.empty());
+  }
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, ADesktopAccessChangeDropsThemToo) {
+    ASSERT_TRUE(profiles::set_desktop_access(path, "client-a", false, {"client-a"}));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_TRUE(loaded->catalog.desktop_clients.empty());
+    EXPECT_TRUE(loaded->catalog.desktop_default_clients.empty());
+    EXPECT_TRUE(loaded->catalog.profiles[1].access_clients.empty());
+    EXPECT_EQ(loaded->catalog.profiles[0].client_keys, std::vector<std::string>{"client-a"});
+  }
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, NoListOfPairedDevicesForgetsNobody) {
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-new", true));
+    expect_nobody_forgotten();
+  }
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, AListWithoutTheDeviceBeingChangedIsNotBelieved) {
+    // Whatever produced this list, it is not the host's paired devices: the caller checked that
+    // client-new is paired before asking. Believing it would wipe every device off every Space.
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-new", true, {"somebody-else"}));
+    expect_nobody_forgotten();
+    ASSERT_TRUE(profiles::set_desktop_access(path, "client-new", true, {"somebody-else"}));
+    expect_nobody_forgotten();
+  }
+
+  // Select all and clear all: one write, and so one restart of the Spaces controller, where the
+  // page used to make one per device.
+  TEST_F(MultiseatProfileCatalogForgottenDevices, SelectAllAddsWhoIsMissingAndKeepsWhoIsThere) {
+    ASSERT_TRUE(profiles::set_access_for_all(path, "profile-b", {"client-a", "client-new"}, true));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.profiles[1].access_clients, (std::vector<std::string> {"client-gone", "client-a", "client-new"}));
+    EXPECT_EQ(loaded->catalog.profiles[1].client_keys, std::vector<std::string>{"client-gone"}) << "select all must not move a Default Space";
+    EXPECT_EQ(loaded->catalog.profiles[0].access_clients, (std::vector<std::string> {"client-a", "client-gone"}));
+    loaded.reset();
+    // Asked twice, it changes nothing the second time.
+    ASSERT_TRUE(profiles::set_access_for_all(path, "profile-b", {"client-a", "client-new"}, true));
+    loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.profiles[1].access_clients.size(), 3U);
+  }
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, ClearAllEmptiesTheSpaceAndItsDefaultsAndNothingElse) {
+    ASSERT_TRUE(profiles::set_access_for_all(path, "profile-b", {"client-a"}, false));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_TRUE(loaded->catalog.profiles[1].access_clients.empty()) << "clear all left a device that is no longer paired";
+    EXPECT_TRUE(loaded->catalog.profiles[1].client_keys.empty()) << "a device cannot keep a Default Space it may not open";
+    EXPECT_EQ(loaded->catalog.profiles[0].client_keys, std::vector<std::string>{"client-a"});
+    EXPECT_EQ(loaded->catalog.desktop_clients, (std::vector<std::string> {"client-lost", "client-a"}));
+  }
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, SelectAllAndClearAllWorkForDesktop) {
+    ASSERT_TRUE(profiles::set_access_for_all(path, "desktop", {"client-a", "client-new"}, true));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.desktop_clients, (std::vector<std::string> {"client-lost", "client-a", "client-new"}));
+    loaded.reset();
+    ASSERT_TRUE(profiles::set_access_for_all(path, "desktop", {}, false));
+    loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_TRUE(loaded->catalog.desktop_clients.empty());
+    EXPECT_TRUE(loaded->catalog.desktop_default_clients.empty()) << "Desktop stayed a Default Space for a device that may not open it";
+    EXPECT_EQ(loaded->catalog.profiles[1].access_clients, std::vector<std::string>{"client-gone"});
+  }
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, SelectAllForgetsUnpairedDevicesOnTheSameTermsAsOneDevice) {
+    ASSERT_TRUE(profiles::set_access_for_all(path, "profile-b", {"client-a", "client-new"}, true, {"client-a", "client-new"}));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.profiles[1].access_clients, (std::vector<std::string> {"client-a", "client-new"}));
+    EXPECT_EQ(loaded->catalog.desktop_clients, std::vector<std::string>{"client-a"});
+    loaded.reset();
+    // A list that does not hold every device being changed is not the host's paired devices.
+    save(sample());
+    ASSERT_TRUE(profiles::set_access(path, "profile-a", "client-keep", true));
+    ASSERT_TRUE(profiles::set_access_for_all(path, "profile-a", {"client-a", "client-new"}, true, {"client-a"}));
+    loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.profiles[0].access_clients, (std::vector<std::string> {"client-keep", "client-a", "client-new"}));
+  }
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, SelectAllRefusesASpaceThatIsGoneAndIdsThatAreNotIds) {
+    EXPECT_FALSE(profiles::set_access_for_all(path, "profile-missing", {"client-a"}, true));
+    EXPECT_FALSE(profiles::set_access_for_all(path, "profile-b", {"client a"}, true));
+    EXPECT_FALSE(profiles::set_access_for_all(path, "", {"client-a"}, true));
+  }
+
+  // The owner's "a device with a Space also gets Desktop" setting.
+  TEST_F(MultiseatProfileCatalogForgottenDevices, WithDesktopADeviceThatGetsASpaceGetsDesktopToo) {
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-new", true, {}, true));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.desktop_clients, (std::vector<std::string> {"client-lost", "client-a", "client-new"}));
+    loaded.reset();
+    // It only ever adds: leaving the Space leaves Desktop alone, and so does a second grant.
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-new", false, {}, true));
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-a", true, {}, true));
+    loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.desktop_clients, (std::vector<std::string> {"client-lost", "client-a", "client-new"}));
+    loaded.reset();
+    ASSERT_TRUE(profiles::set_access_for_all(path, "profile-a", {"client-b", "client-c"}, true, {}, true));
+    loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.desktop_clients, (std::vector<std::string> {"client-lost", "client-a", "client-new", "client-b", "client-c"}));
+  }
+
+  TEST_F(MultiseatProfileCatalogForgottenDevices, WithoutTheSettingASpaceNeverTouchesDesktop) {
+    ASSERT_TRUE(profiles::set_access(path, "profile-b", "client-new", true));
+    ASSERT_TRUE(profiles::set_access_for_all(path, "profile-a", {"client-b"}, true));
+    auto loaded = profiles::load(path); ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->catalog.desktop_clients, (std::vector<std::string> {"client-lost", "client-a"}));
   }
 
   TEST_F(MultiseatProfileCatalog, DuplicateAccessAndAccessToRemovedSpacesAreRejected) {

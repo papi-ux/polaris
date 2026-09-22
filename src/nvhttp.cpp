@@ -75,6 +75,7 @@
 #include "globals.h"
 #include "httpcommon.h"
 #include "launch_failure.h"
+#include "watch_mode.h"
 #include "logging.h"
 #include "network.h"
 #include "nvhttp.h"
@@ -108,6 +109,7 @@
 #ifdef __linux__
   #include "platform/linux/stream_runtime.h"
   #include "platform/linux/session_manager.h"
+  #include "platform/linux/game_mode_host.h"
   #include "platform/linux/stream_display_policy.h"
   #include "platform/linux/virtual_display.h"
 #endif
@@ -1519,6 +1521,8 @@ namespace nvhttp {
         host_mode_changed(previous_linux_display.stream_mode, applied.stream_mode);
       }
 
+      // Chosen on purpose, so it is what the host runs after Game Mode too.
+      stream_display_policy::forget_game_mode_hold();
       return stream_display_mode_apply_result_e::success;
 #else
       error = "stream display mode selection is only supported on Linux";
@@ -2801,10 +2805,36 @@ namespace nvhttp {
   }  // namespace
 #endif
 
+  /**
+   * @brief Bring the host's mode in line with whether it is in Steam Game Mode right now.
+   *
+   * Called where a client first learns about the host, where it asks for a stream, and before
+   * the host decides whether to start a private compositor just to probe its encoders, which is
+   * what a library poll reaches without ever asking for serverinfo. It costs a cached check.
+   */
+  void reconcile_game_mode_host() {
+#ifdef __linux__
+    const bool stream_active = rtsp_stream::session_count() > 0 || proc::proc.running() > 0;
+    switch (stream_display_policy::reconcile_game_mode(platf::game_mode_host::session_live(), stream_active)) {
+      case stream_display_policy::game_mode_reconcile_e::entered:
+        BOOST_LOG(info) << "game_mode: Steam Game Mode is running, so this host streams the Game Mode screen; ["sv
+                        << stream_display_policy::game_mode_held_selection() << "] comes back when the session ends"sv;
+        break;
+      case stream_display_policy::game_mode_reconcile_e::left:
+        BOOST_LOG(info) << "game_mode: the Game Mode session ended; the configured stream mode ["sv
+                        << stream_display_policy::configured_selection() << "] is back"sv;
+        break;
+      case stream_display_policy::game_mode_reconcile_e::unchanged:
+        break;
+    }
+#endif
+  }
+
   namespace {
     video::codec_capability_state_t advertised_codec_support_for_http(bool allow_deferred_headless_prime = false) {
 #ifdef __linux__
       if (allow_deferred_headless_prime) {
+        reconcile_game_mode_host();
         (void) prime_deferred_headless_codec_capabilities();
       }
 #endif
@@ -2906,25 +2936,47 @@ namespace nvhttp {
       return stream::session::profile(*owner_session);
     }
 
-    std::optional<std::pair<int, std::string>> pin_watch_session_to_active_profile(rtsp_stream::launch_session_t &launch_session) {
+    watch_mode::mode_t watch_mode_of(const stream::session_profile_t &profile) {
+      return watch_mode::mode_t {
+        .width = profile.width,
+        .height = profile.height,
+        .fps_x1000 = profile.session_target_fps,
+        .bit_depth = profile.dynamic_range > 0 ? 10 : 8,
+        .codec = std::string {codec_name_for_video_format(profile.video_format)},
+      };
+    }
+
+    struct watch_refusal_t {
+      int status = 0;
+      std::string message;
+      std::optional<watch_mode::mode_t> mode;  ///< what to ask for instead, when asking again is the fix
+    };
+
+    std::optional<watch_refusal_t> pin_watch_session_to_active_profile(rtsp_stream::launch_session_t &launch_session) {
       if (!launch_session.watch_only) {
         return std::nullopt;
       }
 
       const auto owner_profile = active_owner_watch_profile();
       if (!owner_profile) {
-        return std::make_pair(409, "No active owner stream is available to watch"s);
+        return watch_refusal_t {409, "No active owner stream is available to watch"s, std::nullopt};
       }
 
-      const int requested_dynamic_range = launch_session.enable_hdr ? 1 : 0;
-      if (launch_session.requested_width != owner_profile->width ||
-          launch_session.requested_height != owner_profile->height ||
-          launch_session.requested_fps != owner_profile->session_target_fps ||
-          requested_dynamic_range != owner_profile->dynamic_range) {
-        return std::make_pair(
+      const auto owner_mode = watch_mode_of(*owner_profile);
+      if (!watch_mode::asked_for(
+            owner_mode,
+            launch_session.requested_width,
+            launch_session.requested_height,
+            launch_session.requested_fps,
+            launch_session.enable_hdr
+          )) {
+        // The sentence is what released clients read; the mode beside it is what a client
+        // should read, so it never has to take a resolution out of prose.
+        return watch_refusal_t {
           412,
-          std::format("Watch mode must match the active stream profile ({})", format_watch_profile(*owner_profile))
-        );
+          std::format("Watch mode must match the active stream profile ({})", format_watch_profile(*owner_profile)),
+          owner_mode,
+        };
       }
 
       launch_session.requested_width = owner_profile->width;
@@ -2943,6 +2995,15 @@ namespace nvhttp {
                       << format_watch_profile(*owner_profile);
 
       return std::nullopt;
+    }
+
+    void put_watch_refusal(pt::ptree &tree, const watch_refusal_t &refusal) {
+      tree.put("root.resume", 0);
+      tree.put("root.<xmlattr>.status_code", refusal.status);
+      tree.put("root.<xmlattr>.status_message", refusal.message);
+      if (refusal.mode) {
+        watch_mode::put_attributes(tree, *refusal.mode);
+      }
     }
 
     /**
@@ -3563,6 +3624,18 @@ namespace nvhttp {
         "root.currentgameowned",
         has_current_owner && named_cert_p && proc::proc.is_session_owner(named_cert_p->uuid) ? 1 : 0
       );
+
+      // Whose game it is, and whether there is a stream of it to join. A game can be open with
+      // nobody attached: its owner left it running, or its launch never reached a picture. That
+      // and a game someone is streaming both read as busy, and only one of them can be watched.
+      // The mode is here so a watcher asks for it the first time instead of being refused for
+      // asking for its own.
+      tree.put("root.currentgameownername", has_current_owner ? proc::proc.get_session_owner_device_name() : ""s);
+      const auto owner_profile = active_owner_watch_profile();
+      tree.put("root.currentgamewatchable", owner_profile ? 1 : 0);
+      if (owner_profile) {
+        watch_mode::put_elements(tree, "root.currentgamewatch", watch_mode_of(*owner_profile));
+      }
     }
   }  // namespace
 
@@ -4357,6 +4430,15 @@ namespace nvhttp {
     }
   }
 
+  // True once this process has read its paired clients from the state file. It stays false for a
+  // run that refused the file, found none, or was started with a fresh state, and in each of those
+  // the list of paired clients is short for a reason that says nothing about who is paired.
+  std::atomic<bool> paired_clients_loaded {false};
+
+  bool paired_clients_authoritative() {
+    return paired_clients_loaded.load();
+  }
+
   bool load_state() {
     std::lock_guard lock(client_state_mutex);
     const std::filesystem::path state_path {config::nvhttp.file_state};
@@ -4758,12 +4840,19 @@ namespace nvhttp {
     }
 
     std::stringstream mode;
-    if (launch_session->resolved_profile_from_client || named_cert_p->display_mode.empty()) {
+    const bool watch_request = watch_requested(args);
+    if (!watch_mode::device_display_mode_applies(
+          !named_cert_p->display_mode.empty(),
+          launch_session->resolved_profile_from_client,
+          watch_request
+        )) {
       auto mode_str = get_arg(args, "mode", config::video.fallback_mode.c_str());
       mode = std::stringstream(mode_str);
       BOOST_LOG(info) << "Display mode for client ["sv << named_cert_p->name << "] requested to ["sv << mode_str
                       << "] source="sv
-                      << (launch_session->resolved_profile_from_client ? "resolved_launch_profile"sv : "client_request"sv);
+                      << (launch_session->resolved_profile_from_client ? "resolved_launch_profile"sv :
+                          watch_request                                ? "watch_request"sv :
+                                                                         "client_request"sv);
       launch_session->display_mode_requested = mode_str;
       launch_session->display_mode_applied = mode_str;
       launch_session->display_mode_pinned_by_host = false;
@@ -5375,6 +5464,8 @@ namespace nvhttp {
     nlohmann::json entry {{"id", space.id}, {"name", space.name}, {"state", space.state}, {"selected", space.selected},
       {"library_enabled", space.library_enabled}, {"can_open", space.can_open}, {"blocked_reason", space.blocked_reason}};
     if (space.can_open) entry.erase("blocked_reason");
+    // Optional like the rest: a Space that opens no launcher says nothing rather than "".
+    if (!space.launcher.empty()) entry["launcher"] = space.launcher;
     return entry;
   }
 
@@ -5451,31 +5542,81 @@ namespace nvhttp {
     return response;
   }
 
+  namespace {
+    /**
+     * The poster Polaris ships for a launcher, the one its desktop entry already
+     * wears. A family with none answers with nothing rather than with the
+     * generic box, which would stand in a library as if it were artwork.
+     */
+    std::optional<std::string> launcher_poster_path(std::string_view family) {
+      if (family.empty()) return std::nullopt;
+      const auto poster = proc::validate_app_image_path(std::string(family) + ".png");
+      if (poster == proc::validate_app_image_path({})) return std::nullopt;
+      return poster;
+    }
+
+    struct space_entry_t {
+      std::string target;
+      std::string launcher;  ///< the Space's family, when the entry is the one that opens its launcher
+    };
+
+    /** One entry of a Space's library, for a client that may see that Space now. */
+    std::optional<space_entry_t> authorized_space_entry(const crypto::p_named_cert_t &candidate, std::string_view identity) {
+      const auto game = multiseat::spaces::parse_game_identity(identity);
+      const auto current = resolve_authorized_client(candidate);
+      if (!game || !current ||
+          !(current->perm & PERM::launch) || current->temporary_authorization) return std::nullopt;
+      const auto service = multiseat::installed_profile_service();
+      const auto snapshot = service ? service->library_for_client(current->uuid, game->profile) : std::nullopt;
+      if (!snapshot) return std::nullopt;
+      // The launcher's own entry is listed whether or not the library could be
+      // read, so its poster has to answer then too. A title exists only in a
+      // library that was read.
+      const bool launcher = !snapshot->launcher_target.empty() && game->target == snapshot->launcher_target;
+      if (!launcher && (!snapshot->library.available ||
+            std::none_of(snapshot->library.games.begin(), snapshot->library.games.end(),
+              [&](const auto &entry) { return entry.target == game->target; }))) return std::nullopt;
+      if (resolve_authorized_client(current) != current || multiseat::installed_profile_service() != service) return std::nullopt;
+      const auto access = service->client_spaces(current->uuid);
+      if (std::none_of(access.spaces.begin(), access.spaces.end(),
+          [&](const auto &space) { return space.id == game->profile; })) return std::nullopt;
+      return space_entry_t {game->target, launcher ? snapshot->family : std::string {}};
+    }
+  }  // namespace
+
+  // A title's artwork is looked up by what the title is. The entry that opens
+  // the launcher itself is no title and is never looked up.
   std::optional<std::string> profile_artwork_target(const crypto::p_named_cert_t &candidate, std::string_view identity) {
-    const auto game = multiseat::spaces::parse_game_identity(identity);
-    const auto current = resolve_authorized_client(candidate);
-    if (!game || game->target == "big-picture-v1" || !current ||
-        !(current->perm & PERM::launch) || current->temporary_authorization) return std::nullopt;
-    const auto service = multiseat::installed_profile_service();
-    const auto snapshot = service ? service->library_for_client(current->uuid, game->profile) : std::nullopt;
-    if (!snapshot || !snapshot->library.available ||
-        std::none_of(snapshot->library.games.begin(), snapshot->library.games.end(),
-          [&](const auto &entry) { return entry.target == game->target; })) return std::nullopt;
-    if (resolve_authorized_client(current) != current || multiseat::installed_profile_service() != service) return std::nullopt;
-    const auto access = service->client_spaces(current->uuid);
-    if (std::none_of(access.spaces.begin(), access.spaces.end(),
-        [&](const auto &space) { return space.id == game->profile; })) return std::nullopt;
-    return game->target;
+    const auto entry = authorized_space_entry(candidate, identity);
+    if (!entry || !entry->launcher.empty()) return std::nullopt;
+    return entry->target;
+  }
+
+  std::optional<std::string> profile_launcher_poster(const crypto::p_named_cert_t &candidate, std::string_view identity) {
+    const auto entry = authorized_space_entry(candidate, identity);
+    if (!entry || entry->launcher.empty()) return std::nullopt;
+    return launcher_poster_path(entry->launcher);
   }
 
   namespace {
-    std::string profile_artwork_cache_id(std::string_view target) {
+    /**
+     * The cache id is a Steam appid padded into a UUID, and only a Steam appid
+     * has one: the artwork providers plan their downloads from an appid, so a
+     * launcher family whose targets are names has no artwork yet. Such a target
+     * is refused here rather than padded, because `12 - target.size()` is
+     * unsigned and a longer target would wrap and throw inside a request.
+     */
+    std::optional<std::string> profile_artwork_cache_id(std::string_view target) {
+      if (target.empty() || target.size() > 10 ||
+          target.find_first_not_of("0123456789") != std::string_view::npos) return std::nullopt;
       return "53504143-4553-4000-8000-" + std::string(12 - target.size(), '0') + std::string(target);
     }
 
     nlohmann::json profile_artwork_manifest(const std::filesystem::path &appdata,
         std::string_view identity, std::string_view target) {
-      auto manifest = game_artwork::current_manifest(appdata / "spaces-library-artwork", profile_artwork_cache_id(target));
+      const auto cache_id = profile_artwork_cache_id(target);
+      if (!cache_id) return {};
+      auto manifest = game_artwork::current_manifest(appdata / "spaces-library-artwork", *cache_id);
       for (auto &[kind, asset] : manifest["assets"].items()) {
         asset["url"] = "/polaris/v1/games/" + std::string(identity) + "/space-artwork/" + kind;
       }
@@ -5491,16 +5632,17 @@ namespace nvhttp {
     if (!target) return reject();
     const auto cache = appdata / "spaces-library-artwork";
     const auto cache_id = profile_artwork_cache_id(*target);
+    if (!cache_id) return reject();
     auto plan = game_artwork::providers::plan_steam_library_assets(*target, transport);
     nlohmann::json requested = nlohmann::json::array();
     std::erase_if(plan, [&](const auto &item) {
-      if (!item.kind || game_artwork::find_cached_asset(cache, cache_id, *item.kind)) return true;
+      if (!item.kind || game_artwork::find_cached_asset(cache, *cache_id, *item.kind)) return true;
       const auto kind = std::string(game_artwork::kind_name(*item.kind));
       if (std::find(requested.begin(), requested.end(), kind) == requested.end()) requested.push_back(kind);
       return false;
     });
     // The existing bounded executor preserves valid bytes on partial provider failures.
-    (void) game_artwork::providers::execute_download_plan(cache, cache_id, plan, transport);
+    (void) game_artwork::providers::execute_download_plan(cache, *cache_id, plan, transport);
     if (profile_artwork_target(candidate, identity) != target) return reject();
     auto manifest = profile_artwork_manifest(appdata, identity, *target);
     nlohmann::json remaining = nlohmann::json::array();
@@ -5525,15 +5667,29 @@ namespace nvhttp {
 
   nlohmann::json space_library_game_json(std::string_view profile, const multiseat::profile_library_snapshot_t &snapshot,
                                          std::string_view target, std::string_view name) {
-    const bool steam = target == "big-picture-v1";
+    // The launcher's own tile has no artwork to look up. It wears the poster
+    // Polaris ships for that launcher, served from the same place a title's is.
+    const bool launcher = target == snapshot.launcher_target;
     const auto identity = multiseat::spaces::game_identity(profile, target);
+    // A cover is advertised only where one can exist: the launcher's bundled
+    // poster, or a title the artwork providers can look up, which today means a
+    // Steam app id. A Heroic or Lutris title has none yet. Naming a route that
+    // will always answer 404 left a client unable to tell "no artwork exists"
+    // from "not loaded yet", so it drew every such title as the same blank tile.
+    const bool poster = launcher ? launcher_poster_path(snapshot.family).has_value() :
+                                   profile_artwork_cache_id(target).has_value();
     nlohmann::json entry {{"id", identity}, {"app_id", multiseat::profile_app_id}, {"name", name},
-      {"source", "steam"}, {"steam_appid", steam ? "" : std::string(target)}, {"installed", true}, {"hdr_supported", false},
+      {"source", snapshot.family.empty() ? std::string("steam") : snapshot.family},
+      // Only a Steam title has a Steam app id. A launcher family's target is
+      // that launcher's own identifier, and a client pairs titles across Spaces
+      // by app id, so lending one here would pair a Heroic game with a Steam one.
+      {"steam_appid", launcher || snapshot.family != "steam" ? std::string {} : std::string(target)},
+      {"installed", true}, {"hdr_supported", false},
       {"space", space_ref_json(snapshot.id, snapshot.name, target)},
-      {"cover_url", steam ? "" : "/polaris/v1/games/" + identity + "/space-artwork/poster"},
+      {"cover_url", poster ? "/polaris/v1/games/" + identity + "/space-artwork/poster" : std::string {}},
       {"launch_mode", space_launch_mode_json(snapshot.name)},
-      {"artwork", steam ? nlohmann::json() : profile_artwork_manifest(platf::appdata(), identity, target)}};
-    if (steam) entry.erase("artwork");
+      {"artwork", launcher ? nlohmann::json() : profile_artwork_manifest(platf::appdata(), identity, target)}};
+    if (launcher) entry.erase("artwork");
     return entry;
   }
 
@@ -5563,7 +5719,10 @@ namespace nvhttp {
     const auto snapshot = service->library_for_client(current->uuid, profile);
     if (!snapshot) return reject(404);
     nlohmann::json games = nlohmann::json::array();
-    games.push_back(space_library_game_json(profile, *snapshot, "big-picture-v1", "Steam Big Picture"));
+    // Every Space offers the tile that opens its own launcher, whatever family
+    // it belongs to, even before anything is installed in it.
+    if (snapshot->launcher_target.empty()) return reject(503);
+    games.push_back(space_library_game_json(profile, *snapshot, snapshot->launcher_target, snapshot->launcher_name));
     if (snapshot->library.available)
       for (const auto &game : snapshot->library.games) games.push_back(space_library_game_json(profile, *snapshot, game.target, game.name));
     // Re-check permission after the potentially slow read, and reject an owner
@@ -5661,10 +5820,12 @@ namespace nvhttp {
       if (identity) {
         if (identity->profile != *profile) return reject(409, "The selected Space changed. Refresh the library.");
         const auto library = service->library_for_client(current->uuid, *profile);
-        if (!library || (identity->target != "big-picture-v1" &&
+        // The launcher's own tile is always offered; anything else has to be
+        // a title this Space's library actually lists.
+        if (!library || (identity->target != library->launcher_target &&
             (!library->library.available || std::none_of(library->library.games.begin(), library->library.games.end(),
               [&](const auto &item) { return item.target == identity->target; }))))
-          return reject(409, "This title is unavailable in the selected Space. Open Steam Big Picture or refresh the library.");
+          return reject(409, "This title is unavailable in the selected Space. Open the launcher there or refresh the library.");
       } else if (game != multiseat::profile_app_uuid && game != std::to_string(multiseat::profile_app_id))
         return reject(400, "Select a title from this Space library");
       if (get_arg(args, "encoder", "auto") != "auto" ||
@@ -5778,7 +5939,9 @@ namespace nvhttp {
     if (args.count("workerTarget") > 1 || args.count("workerProfile") > 1)
       return profile_launch_response_t {400, "The Space launch identity was sent twice.", {}, "space_identity_duplicate"};
     const auto target = get_arg(args, "workerTarget", "");
-    if (args.contains("workerTarget") && (!multiseat::container::valid_steam_target(target) || !args.contains("workerProfile")))
+    // Any launcher family's grammar passes here; the controller holds the
+    // Space's family and refuses a target that family cannot run.
+    if (args.contains("workerTarget") && (!multiseat::container::any_launcher_target(target) || !args.contains("workerProfile")))
       return profile_launch_response_t {400, "Select the Space for this title.", {}, "space_target_missing"};
     auto prepared = service->prepare(launch, get_arg(args, "workerProfile", ""), target);
     if (!prepared.prepared()) {
@@ -6228,6 +6391,7 @@ namespace nvhttp {
   template<class T>
   void serverinfo(std::shared_ptr<typename SimpleWeb::ServerBase<T>::Response> response, std::shared_ptr<typename SimpleWeb::ServerBase<T>::Request> request) {
     print_req<T>(request);
+    reconcile_game_mode_host();
 
     auto local_endpoint = request->local_endpoint();
     crypto::p_named_cert_t named_cert_p;
@@ -6658,6 +6822,7 @@ namespace nvhttp {
   void launch(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
     launch_failure::clear();
+    reconcile_game_mode_host();
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -6817,10 +6982,8 @@ namespace nvhttp {
       return;
     }
 
-    if (const auto watch_error = pin_watch_session_to_active_profile(*launch_session)) {
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", watch_error->first);
-      tree.put("root.<xmlattr>.status_message", watch_error->second);
+    if (const auto watch_refusal = pin_watch_session_to_active_profile(*launch_session)) {
+      put_watch_refusal(tree, *watch_refusal);
 
       return;
     }
@@ -7116,6 +7279,7 @@ namespace nvhttp {
   void resume(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
     launch_failure::clear();
+    reconcile_game_mode_host();
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -7207,10 +7371,8 @@ namespace nvhttp {
       return;
     }
 
-    if (const auto watch_error = pin_watch_session_to_active_profile(*launch_session)) {
-      tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", watch_error->first);
-      tree.put("root.<xmlattr>.status_message", watch_error->second);
+    if (const auto watch_refusal = pin_watch_session_to_active_profile(*launch_session)) {
+      put_watch_refusal(tree, *watch_refusal);
 
       return;
     }
@@ -7696,7 +7858,7 @@ namespace nvhttp {
     bool clean_slate = config::sunshine.flags[config::flag::FRESH_STATE];
 
     if (!clean_slate) {
-      load_state();
+      paired_clients_loaded.store(load_state());
     }
 
     auto pkey = file_handler::read_file(config::nvhttp.pkey.c_str());
@@ -8338,6 +8500,8 @@ namespace nvhttp {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
+      // The policy describes the stream mode as well, so the same holds here.
+      reconcile_game_mode_host();
 
       try {
         auto query = request->parse_query_string();
@@ -8452,6 +8616,11 @@ namespace nvhttp {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
+
+      // A client can read the host's modes here before it ever asks for serverinfo, which is what a
+      // library refresh after a restart does. A host in Game Mode has to answer with the mode it will
+      // run, or the client plans a launch around a mode that is already gone.
+      reconcile_game_mode_host();
 
       auto write_json = [&](const nlohmann::json &body,
                             SimpleWeb::StatusCode status = SimpleWeb::StatusCode::success_ok) {
@@ -8800,6 +8969,8 @@ namespace nvhttp {
         response->write(SimpleWeb::StatusCode::client_error_unauthorized);
         return;
       }
+      // Each game's launch contract names the modes it can run in, so the same holds here.
+      reconcile_game_mode_host();
 #ifdef __linux__
       const auto environment_query = request->parse_query_string();
       const bool desktop_catalog = get_arg(environment_query, "environment", "") == "desktop";
@@ -8877,10 +9048,16 @@ namespace nvhttp {
       auto apps = proc::proc.get_apps();
       nlohmann::json games = nlohmann::json::array();
 
+      // The library's desktop tile is the entry named Desktop. The Low Res Desktop sample that
+      // installs before 1.4.12 got beside it stands in for nothing once Desktop is there, and
+      // its xrandr prep command fails on nearly every host, so the unchanged sample is left out.
+      const bool has_desktop = std::any_of(apps.begin(), apps.end(), [](const auto &app) {
+        return app.name == "Desktop";
+      });
+
       int idx = 0;
       for (auto &app : apps) {
-        // Skip non-game entries (Desktop, Lutris launcher)
-        if (app.name == "Desktop") continue;
+        if (has_desktop && proc::is_stock_low_res_desktop(app)) continue;
 
         // Search filter
         if (!search_query.empty()) {
@@ -8993,6 +9170,20 @@ namespace nvhttp {
       }
       const auto identity = request->path.substr(prefix.size(), split - prefix.size());
       const auto kind = game_artwork::parse_kind(request->path.substr(split + 15));
+      // The launcher's own tile wears the poster Polaris ships for it. Nothing
+      // is fetched for it and nothing about it is cached beside a title's art.
+      if (kind == game_artwork::kind_e::poster) {
+        if (const auto poster = profile_launcher_poster(client, identity)) {
+          std::ifstream input(*poster, std::ios::binary);
+          if (!input.is_open()) { response->write(SimpleWeb::StatusCode::client_error_not_found); return; }
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "image/png");
+          headers.emplace("X-Content-Type-Options", "nosniff");
+          headers.emplace("Cache-Control", "private, max-age=86400");
+          response->write(SimpleWeb::StatusCode::success_ok, input, headers);
+          return;
+        }
+      }
       const auto target = profile_artwork_target(client, identity);
       if (!kind || !target) {
         response->write(SimpleWeb::StatusCode::client_error_not_found); return;
@@ -9001,13 +9192,16 @@ namespace nvhttp {
       // decimal Steam ID is already canonical and bounded to uint32.
       const auto cache = platf::appdata() / "spaces-library-artwork";
       const auto cache_id = profile_artwork_cache_id(*target);
-      auto asset = game_artwork::find_cached_asset(cache, cache_id, *kind);
+      if (!cache_id) {
+        response->write(SimpleWeb::StatusCode::client_error_not_found); return;
+      }
+      auto asset = game_artwork::find_cached_asset(cache, *cache_id, *kind);
       if (!asset) {
         const auto transport = make_artwork_transport("");
         auto plan = game_artwork::providers::plan_steam_library_assets(*target, transport);
         std::erase_if(plan, [&](const auto &item) { return item.kind != kind; });
-        (void) game_artwork::providers::execute_download_plan(cache, cache_id, plan, transport);
-        asset = game_artwork::find_cached_asset(cache, cache_id, *kind);
+        (void) game_artwork::providers::execute_download_plan(cache, *cache_id, plan, transport);
+        asset = game_artwork::find_cached_asset(cache, *cache_id, *kind);
       }
       // Permission can change while downloading. Do not publish stale access.
       if (!asset || profile_artwork_target(client, identity) != target) {
@@ -11088,6 +11282,11 @@ namespace nvhttp {
         return;
       }
 
+      // A client asks for its profile before it asks for anything else, so this can be the first
+      // request a host in Game Mode sees. The profile has to be resolved against the mode the
+      // launch will run in, or the launch refuses the very profile it was handed.
+      reconcile_game_mode_host();
+
 #ifdef __linux__
       if (const auto result = resolve_profile_request(named_cert_p, request->parse_query_string())) {
         SimpleWeb::CaseInsensitiveMultimap headers;
@@ -11178,7 +11377,10 @@ namespace nvhttp {
         named_cert_p->always_use_virtual_display && !topology_locked;
       std::string requested_selection = paired_virtual_lock ?
         std::string {stream_display_policy::k_host_virtual_display} : requested_topology;
-      const bool mirror_desktop = mirror_desktop_requested ||
+      // A host in Steam Game Mode streams one thing, the Game Mode screen, whatever was asked for.
+      // The launch makes every session a mirror there, and the profile has to name the same topology.
+      const bool game_mode_screen = platf::game_mode_host::session_live();
+      const bool mirror_desktop = game_mode_screen || mirror_desktop_requested ||
         (optimization_app && app_desktop_mirror_applies_for_mode(
           *optimization_app,
           mirror_desktop_requested,
@@ -11240,7 +11442,10 @@ namespace nvhttp {
       resolved_topology = effective_selection;
       launch_owned_display =
         stream_display_policy::selection_owns_launch_refresh_rate(effective_selection);
-      if (mirror_desktop) {
+      if (game_mode_screen) {
+        topology_source = "host_capability";
+        topology_reason_code = "steam_game_mode_session";
+      } else if (mirror_desktop) {
         topology_source = mirror_desktop_requested ?
           "client_launch_request" : "app_configuration";
         topology_reason_code = mirror_desktop_requested ?

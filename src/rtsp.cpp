@@ -155,9 +155,9 @@ namespace rtsp_stream {
       if (config.monitor.dynamicRange != (session.enable_hdr ? 1 : 0)) {
         mismatches.emplace_back("dynamic range");
       }
-      if (session.target_bitrate_kbps && config.monitor.bitrate != *session.target_bitrate_kbps) {
-        mismatches.emplace_back("bitrate");
-      }
+      // No bitrate: a watcher is sent the owner's encoded stream and takes its bitrate (see the
+      // ANNOUNCE handler). Its own request comes from its own settings after the FEC, audio and
+      // overhead adjustments, so it matched the owner's only when both devices were set alike.
       if (session.preferred_codec) {
         const auto requested_codec = codec_name_for_video_format(config.monitor.videoFormat);
         if (requested_codec != *session.preferred_codec) {
@@ -553,6 +553,10 @@ namespace rtsp_stream {
   };
 
 #ifdef POLARIS_TESTS
+  std::optional<std::string> watch_profile_mismatch_for_tests(const launch_session_t &session, const stream::config_t &config) {
+    return watch_profile_mismatch(session, config);
+  }
+
   bool worker_media_matches_launch_for_tests(const launch_session_t &launch, const stream::config_t &config) {
     return worker_media_matches_launch(launch, config);
   }
@@ -1659,7 +1663,8 @@ namespace rtsp_stream {
       config.monitor.chromaSamplingType = util::from_view(args.at("x-ss-video[0].chromaSamplingType"sv));
       config.monitor.enableIntraRefresh = util::from_view(args.at("x-ss-video[0].intraRefresh"sv));
 
-      if (session.preferred_codec) {
+      // A watcher decodes the owner's stream as it is, so its codec stays pinned for the check below.
+      if (session.preferred_codec && !session.watch_only) {
         const auto client_requested_codec = codec_name_for_video_format(config.monitor.videoFormat);
         if (client_requested_codec != *session.preferred_codec) {
           BOOST_LOG(info) << "Session codec preference ["sv << *session.preferred_codec
@@ -1798,6 +1803,9 @@ namespace rtsp_stream {
       return;
     }
 
+    if (session.watch_only && session.target_bitrate_kbps) {
+      config.monitor.bitrate = *session.target_bitrate_kbps;
+    }
     if (const auto mismatch = watch_profile_mismatch(session, config)) {
       BOOST_LOG(warning) << *mismatch;
       respond(sock, session, &option, 412, "Precondition Failed", req->sequenceNumber, {});

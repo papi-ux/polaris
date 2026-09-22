@@ -1,6 +1,8 @@
 #include "src/platform/linux/spaces_setup.h"
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <stdexcept>
 
 #ifdef __linux__
@@ -282,6 +284,109 @@ TEST(SpacesSetup, RuntimeCheckFollowsSecurityAndIsNotAHostPrerequisite) {
   EXPECT_EQ(spaces::describe_setup(f)["host_prerequisites_ready"], true);
 }
 
+namespace {
+  spaces::runtime_t host_driver_runtime(const char *minimum, char digest) {
+    spaces::runtime_t runtime {"steam-nvidia-host", "nvidia-host", std::string(40, 'a'),
+      "sha256:" + std::string(64, digest), "sha256:" + std::string(64, static_cast<char>(digest + 1)), ""};
+    runtime.nvidia_minimum_driver = minimum;
+    return runtime;
+  }
+}
+
+/**
+ * Host Setup refuses a whole response it cannot verify and says only "The host
+ * setup response could not be verified. Recheck setup before continuing." So
+ * the Gaming runtime check this host writes for a borrowing runtime and the
+ * shape that console accepts are pinned to one file both languages read.
+ */
+TEST(SpacesSetup, DescribesABorrowingRuntimeExactlyAsTheConsoleExpectsIt) {
+  const std::filesystem::path source {POLARIS_SOURCE_DIR};
+  std::ifstream file(source / "tests/fixtures/spaces-setup-host-runtime.json");
+  ASSERT_TRUE(file) << "the shared shape must be readable from both languages";
+  const auto expected = json::parse(file);
+
+  // Not downloaded yet, through the real inspection path.
+  const auto host_driver = host_driver_runtime("570.00", '7');
+  runtime_host_t host;
+  EXPECT_EQ(runtime_check(spaces::inspect_runtime(host, {host_driver}, "615.71.09", true)),
+    expected.at("available"));
+
+  // And downloaded, which is the state a working PC sits in.
+  spaces::runtime_facts_t ready {"ready", "runtime_ready", host_driver, std::string("615.71.09"), {}};
+  EXPECT_EQ(runtime_check(ready), expected.at("ready"));
+}
+
+/**
+ * A runtime is built for one launcher family and carries that family's Steam,
+ * Heroic or Lutris install. Offering one family's image to another Space would
+ * hand it a launcher its library was never read from.
+ */
+TEST(SpacesSetup, ChoosesWithinTheSpacesOwnLauncherFamily) {
+  auto heroic = host_driver_runtime("570.00", '9');
+  heroic.id = "heroic-nvidia-host";
+  heroic.profile = "heroic";
+  const std::vector<spaces::runtime_t> catalog {nvidia610, heroic};
+
+  EXPECT_EQ(spaces::choose_runtime(catalog, "610.57.04", "steam").runtime->id, "steam-nvidia-610");
+  EXPECT_EQ(spaces::choose_runtime(catalog, "610.57.04", "heroic").runtime->id, "heroic-nvidia-host");
+  // The default is the family every Space had before there was more than one.
+  EXPECT_EQ(spaces::choose_runtime(catalog, "610.57.04").runtime->id, "steam-nvidia-610");
+
+  // A family with no entry has published nothing, whatever the rest carries.
+  const auto lutris = spaces::choose_runtime(catalog, "610.57.04", "lutris");
+  EXPECT_FALSE(lutris.runtime);
+  EXPECT_EQ(lutris.code, "runtime_not_published");
+
+  // And another family's driver versions are not this family's business: the
+  // Heroic entry borrows the driver, so a Steam Space still reads as a mismatch.
+  const std::vector<spaces::runtime_t> steam_610_only {nvidia610, heroic};
+  EXPECT_EQ(spaces::choose_runtime(steam_610_only, "615.71.09", "steam").code, "driver_mismatch");
+  EXPECT_EQ(spaces::choose_runtime(steam_610_only, "615.71.09", "heroic").runtime->id, "heroic-nvidia-host");
+}
+
+TEST(SpacesSetup, PrefersTheRuntimeThatBorrowsThisPcsDriver) {
+  const auto host_driver = host_driver_runtime("570.00", '7');
+  const std::vector<spaces::runtime_t> catalog {amd_intel, nvidia610, host_driver};
+
+  // Any NVIDIA driver at or above the floor takes the borrowing runtime, even
+  // one an older baked image was built for.
+  EXPECT_EQ(spaces::choose_runtime(catalog, "610.57.04").runtime->id, "steam-nvidia-host");
+  EXPECT_EQ(spaces::choose_runtime(catalog, "615.71.09").runtime->id, "steam-nvidia-host");
+  // AMD and Intel are unaffected.
+  EXPECT_EQ(spaces::choose_runtime(catalog, std::nullopt).runtime->id, "steam-default");
+
+  // Below the floor it falls back to a baked runtime for that exact driver,
+  // and says so plainly when there is none.
+  EXPECT_EQ(spaces::choose_runtime({amd_intel, nvidia610, host_driver_runtime("620.00", '7')}, "610.57.04").runtime->id,
+    "steam-nvidia-610");
+  EXPECT_EQ(spaces::choose_runtime({amd_intel, host_driver_runtime("620.00", '7')}, "610.57.04").code,
+    "driver_below_minimum");
+}
+
+TEST(SpacesSetup, NamesTheMissingThirtyTwoBitDriverPackageForThisDistribution) {
+  spaces::setup_facts_t facts;
+  facts.runtime.host_nvidia_driver = "615.71.09";
+  facts.driver_libraries = "driver_libraries_32bit_missing";
+  facts.driver_libraries_package = "xorg-x11-drv-nvidia-libs.i686";
+
+  const auto described = spaces::describe_setup(facts);
+  const auto row = check(described, "nvidia_libraries");
+
+  EXPECT_EQ(row["state"], "required");
+  EXPECT_EQ(row["doc_anchor"], "#nvidia-driver-files");
+  EXPECT_NE(row["detail"].get<std::string>().find("xorg-x11-drv-nvidia-libs.i686"), std::string::npos);
+  EXPECT_NE(row["detail"].get<std::string>().find("32 bit games"), std::string::npos);
+  // Never a host action: Polaris does not install driver packages.
+  EXPECT_FALSE(row.contains("host_action"));
+
+  facts.driver_libraries.clear();
+  EXPECT_EQ(check(spaces::describe_setup(facts), "nvidia_libraries")["state"], "ready");
+
+  // A host with no NVIDIA driver loaded never sees the row at all.
+  facts.runtime.host_nvidia_driver.reset();
+  EXPECT_THROW(check(spaces::describe_setup(facts), "nvidia_libraries"), std::runtime_error);
+}
+
 TEST(SpacesSetup, RuntimeVariantFollowsTheLoadedNvidiaDriver) {
   const std::vector<spaces::runtime_t> catalog {amd_intel, nvidia610, nvidia615};
   EXPECT_EQ(spaces::choose_runtime(catalog, std::nullopt).runtime->id, "steam-default");
@@ -403,6 +508,12 @@ TEST(SpacesSetup, RuntimeInspectionIsKeptBrieflyAndForgottenAfterADownload) {
   EXPECT_EQ(host.calls.size(), 4U);
   // Another runtime is another question.
   host.reply = {.exit_status = 1, .output = "[]"};
+  EXPECT_EQ(status(), "available");
+  EXPECT_EQ(status(std::nullopt), "available");
+  EXPECT_EQ(host.calls.size(), 6U);
+  // And each keeps its own answer. A host with several launchers asks about
+  // several runtimes in turn, and one slot made each evict the last, so every
+  // read of the Spaces page went back to Docker.
   EXPECT_EQ(status(), "available");
   EXPECT_EQ(status(std::nullopt), "available");
   EXPECT_EQ(host.calls.size(), 6U);

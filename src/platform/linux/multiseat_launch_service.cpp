@@ -4,8 +4,13 @@
 #include "multiseat_launch_service.h"
 #ifdef __linux__
 #include "multiseat_container_host.h"
+#include "multiseat_profile_network.h"
 #include "spaces_host_admin.h"
+#include "spaces_nvidia_libraries.h"
+#include "spaces_runtime.h"
 #include "spaces_runtime_move.h"
+#include "spaces_setup.h"
+#include "src/platform/common.h"
 #include "src/logging.h"
 #include "src/private_state_file.h"
 #include "src/rtsp.h"
@@ -28,6 +33,33 @@
 
 namespace multiseat {
   namespace {
+    /** A launcher family by the name the catalog and the console use for it. */
+    runtime_profile_e family_of(std::string_view name) {
+      for (const auto profile : {runtime_profile_e::steam, runtime_profile_e::heroic, runtime_profile_e::lutris})
+        if (runtime_profile_name(profile) == name) return profile;
+      return runtime_profile_e::unknown;
+    }
+
+    /**
+     * What a library calls the tile that opens the launcher itself. Steam's is
+     * named for the interface it opens, since that is what a player sees.
+     */
+    std::string launcher_display_name(std::string_view family) {
+      if (family == "steam") return "Steam Big Picture";
+      if (family == "heroic") return "Heroic";
+      if (family == "lutris") return "Lutris";
+      return {};
+    }
+
+    // A refusal's words are views, so they are literals: a sentence built for the refusal would be
+    // gone by the time the launch response copies it.
+    std::string_view missing_game_action(std::string_view family) {
+      if (family == "steam") return "Open Steam Big Picture in that Space, or refresh the library.";
+      if (family == "heroic") return "Open Heroic in that Space, or refresh the library.";
+      if (family == "lutris") return "Open Lutris in that Space, or refresh the library.";
+      return "Open the Space's launcher, or refresh the library.";
+    }
+
     std::mutex installed_mutex;
     std::shared_ptr<profile_launch_service_t> installed;
     // Worker lifecycle generations cannot be confused with host proc generations.
@@ -59,7 +91,10 @@ namespace multiseat {
           << " endpoint_shutdown_failures=" << worker.endpoint_shutdown_failures
           << " broker{admission_ready=" << broker.admission_ready
           << " inventory_authoritative=" << broker.inventory_authoritative
-          << " backend_observation_failed=" << broker.backend_observation_failed
+          << " backend_observation_failed=" << broker.backend_observation_failed;
+      // Admission closes for the pass, and without this nothing said why.
+      if (broker.backend_observation_failed) out << " backend_observation_error=[" << broker.backend_observation_error << ']';
+      out
           << " current=" << broker.current_workers << " orphans=" << broker.orphan_workers
           << " missing=" << broker.missing_workers << " stuck=" << broker.stuck_workers
           << " protocol_errors=" << broker.protocol_errors
@@ -160,8 +195,21 @@ namespace multiseat {
           .steam_input = admitted.admission.seat->runtime_profile == runtime_profile_e::steam &&
             (launch->perm & crypto::PERM::input_controller) != crypto::PERM::_no,
         };
-        if (runtime_->bind_runtime(handle, compositor_e::gamescope, "profile-owned launch") != mutation_result_e::applied ||
-            !runtime_->start_seat(handle, plan).started()) return {};
+        // Either refusal used to leave nothing anywhere: the client got the
+        // default words and the log got none. Say which step, and with what.
+        const auto bound = runtime_->bind_runtime(handle, compositor_e::gamescope, "profile-owned launch");
+        if (bound != mutation_result_e::applied) {
+          BOOST_LOG(warning) << "Space worker was not started: the runtime could not be bound (result "
+                             << static_cast<int>(bound) << ')';
+          return {};
+        }
+        const auto started = runtime_->start_seat(handle, plan);
+        if (!started.started()) {
+          BOOST_LOG(warning) << "Space worker was not started: seat start status "
+                             << static_cast<int>(started.status) << ", worker result "
+                             << (started.worker ? std::to_string(static_cast<int>(*started.worker)) : std::string("none"));
+          return {};
+        }
         return {{200, "Space worker is starting"}, handle};
       }
       profile_poll_e poll(const std::shared_ptr<rtsp_stream::launch_session_t> &launch,
@@ -200,6 +248,42 @@ namespace multiseat {
   std::unique_ptr<profile_controller_t> make_profile_controller(std::unique_ptr<controller_runtime_t> runtime) {
     if (!runtime) return {};
     return std::make_unique<production_profile_controller_t>(std::move(runtime));
+  }
+
+  /**
+   * Give the controller the machine's NVIDIA userspace, for runtimes built
+   * without driver libraries of their own. A host that cannot supply a
+   * complete set simply gets no mounts: its Spaces then refuse at launch with
+   * a Host Setup pointer rather than starting and rendering black.
+   */
+  void attach_host_driver_libraries(production_controller_options_t &options) {
+    const auto &contract = spaces::trusted_nvidia_contract();
+    const auto &catalog = spaces::trusted_runtimes();
+    if (!contract || !catalog) return;
+    options.host_driver_image = [](std::string_view image) {
+      const auto &runtimes = spaces::trusted_runtimes();
+      if (!runtimes) return false;
+      container::local_host_t host;
+      return spaces::image_borrows_host_driver(host, image, *runtimes, &spaces::image_runtime_cache());
+    };
+    const auto loaded = spaces::loaded_nvidia_driver();
+    if (!loaded || loaded->empty()) return;
+    container::local_host_t host;
+    const auto facts = spaces::resolve_host_driver_libraries(*contract, host, *loaded, contract->minimum_driver);
+    if (!facts.ready()) {
+      BOOST_LOG(warning) << "Spaces: this PC's NVIDIA driver files are not ready ("sv << facts.code << ')';
+      return;
+    }
+    const auto directory = platf::appdata() / "spaces-graphics" / facts.driver_version;
+    if (!spaces::publish_vendor_files(facts, directory)) {
+      BOOST_LOG(warning) << "Spaces: could not publish the graphics descriptions under "sv
+                         << directory.string() << "; a Space cannot read them as they are"sv;
+      return;
+    }
+    options.container.host_driver = {facts.driver_version, facts.contract,
+      spaces::host_driver_mounts(*contract, facts, directory)};
+    BOOST_LOG(info) << "Spaces: NVIDIA driver "sv << facts.driver_version << " supplies "sv
+                    << options.container.host_driver.mounts.size() << " files to a host-driver runtime"sv;
   }
 
   std::optional<production_controller_options_t> load_controller_options(const std::filesystem::path &path) {
@@ -260,6 +344,7 @@ namespace multiseat {
         if (std::find(entry.devices.begin(), entry.devices.end(), entry.render_node) == entry.devices.end()) return std::nullopt;
         options.gpus.push_back(std::move(entry));
       }
+      attach_host_driver_libraries(options);
       return options;
     } catch (...) { return std::nullopt; }
   }
@@ -268,7 +353,10 @@ namespace multiseat {
     struct admin_request_t {
       std::string profile, client;
       std::optional<bool> access;
-      std::optional<profiles::steam_create_request_t> creation;
+      std::vector<std::string> paired_clients;
+      bool with_desktop = false;
+      std::optional<std::vector<std::string>> all_clients;  // set for select all and clear all
+      std::optional<profiles::space_create_request_t> creation;
       std::optional<profiles::edit_request_t> edit;
       std::optional<profiles::runtime_move_t> move;
       std::string kept_volume, kept_network;  // set by the owner thread before the promise
@@ -367,6 +455,28 @@ namespace multiseat {
       selections = std::move(next);
       return true;
     }
+    // The owner's "a device with a Space also gets Desktop" setting. It sits beside the catalog, as
+    // the selections do, and not in it: the catalog's keys are read strictly, by an older Polaris
+    // on the same host as well, and one more key there would cost that build every Space.
+    bool desktop_by_default = false;
+    std::filesystem::path settings_path;
+    static bool decode_settings(std::string_view payload) {
+      const auto value = nlohmann::json::parse(payload);
+      exact_keys(value, {"schema", "desktop_by_default"});
+      if (!value.at("schema").is_number_unsigned() || value.at("schema") != 1 || !value.at("desktop_by_default").is_boolean())
+        throw std::invalid_argument("spaces settings schema");
+      return value.at("desktop_by_default").get<bool>();
+    }
+    bool save_desktop_by_default(bool enabled) {
+      if (!settings_path.empty()) {
+        const auto payload = nlohmann::json{{"schema", 1}, {"desktop_by_default", enabled}}.dump();
+        const auto result = private_state_file::update_atomic(settings_path, profiles::maximum_catalog_bytes,
+          [&](const auto &) -> std::optional<std::string> { return payload; });
+        if (result.status != private_state_file::write_status_e::committed) return false;
+      }
+      desktop_by_default = enabled;
+      return true;
+    }
     std::vector<profile_summary_t> fallback_catalog;
     std::set<std::string> blocked_clients;
     const std::chrono::milliseconds timeout;
@@ -388,12 +498,46 @@ namespace multiseat {
       if (!admin.create && !admin.catalog.empty())
         admin.create = [path = admin.catalog](const auto &request) {
           container::local_host_t host;
-          return profiles::create_steam(path, request, host);
+          // A launcher this PC already runs a Space for copies that Space's
+          // runtime. The first Space of a launcher has none to copy, so it
+          // takes the image from the admitted catalog entry for that family,
+          // which must already be downloaded: this path never pulls.
+          if (!request.family.empty()) {
+            const auto &catalog = spaces::trusted_runtimes();
+            // Read the catalog and let go of it: the lease this takes is the
+            // same one the write below needs, so holding it here would refuse
+            // every first Space of a launcher.
+            bool have_one = false;
+            {
+              const auto existing = profiles::load(path);
+              have_one = existing && std::any_of(existing->catalog.profiles.begin(),
+                existing->catalog.profiles.end(), [&](const auto &entry) {
+                  return runtime_profile_name(entry.storage.runtime_profile) == request.family && !entry.archived;
+                });
+            }
+            if (!have_one && catalog) {
+              const auto choice = spaces::choose_runtime(*catalog, spaces::loaded_nvidia_driver(), request.family);
+              if (!choice.runtime)
+                return profiles::change_result_t {.error = "This Polaris build has no gaming runtime for that launcher."};
+              const auto facts = spaces::inspect_runtime(host, *catalog, spaces::loaded_nvidia_driver(), true,
+                &spaces::runtime_inspection_cache(), request.family);
+              if (facts.status != "ready")
+                return profiles::change_result_t {.error = std::string(profiles::space_runtime_not_downloaded.message),
+                  .refusal = profiles::space_runtime_not_downloaded};
+              return profiles::create_first_space(path, {request.request_id, request.name},
+                choice.runtime->config_digest, request.family, host);
+            }
+          }
+          return profiles::create_space(path, request, host);
         };
       if (!admin.edit && !admin.catalog.empty())
         admin.edit = [path = admin.catalog](const auto &request) { return profiles::edit(path, request); };
       if (!admin.access && !admin.catalog.empty())
-        admin.access = [path = admin.catalog](auto profile, auto client, bool allowed) { return profile == "desktop" ? profiles::set_desktop_access(path, client, allowed) : profiles::set_access(path, profile, client, allowed); };
+        admin.access = [path = admin.catalog](auto profile, auto client, bool allowed, const auto &paired, bool with_desktop) { return profile == "desktop" ? profiles::set_desktop_access(path, client, allowed, paired) : profiles::set_access(path, profile, client, allowed, paired, with_desktop); };
+      if (!admin.access_for_all && !admin.catalog.empty())
+        admin.access_for_all = [path = admin.catalog](auto profile, const auto &clients, bool allowed, const auto &paired, bool with_desktop) {
+          return profiles::set_access_for_all(path, profile, clients, allowed, paired, with_desktop);
+        };
       if (!admin.remove_for_good && !admin.catalog.empty())
         admin.remove_for_good = [path = admin.catalog](const auto &request, std::stop_token stop) {
           container::local_host_t host(stop);
@@ -412,6 +556,12 @@ namespace multiseat {
           const auto saved = private_state_file::read_secure(selection_path, profiles::maximum_catalog_bytes, false, false);
           if (!saved) throw std::invalid_argument("unsafe space selections");
           selections = decode_selections(saved.payload);
+        }
+        settings_path = admin.catalog; settings_path += ".settings";
+        if (std::filesystem::exists(settings_path)) {
+          const auto saved = private_state_file::read_secure(settings_path, profiles::maximum_catalog_bytes, false, false);
+          if (!saved) throw std::invalid_argument("unsafe spaces settings");
+          desktop_by_default = decode_settings(saved.payload);
         }
       }
       thread = std::jthread([this](std::stop_token stop) { run(stop); });
@@ -513,6 +663,7 @@ namespace multiseat {
             std::lock_guard lock(mutex);
             fallback_catalog = controller->profile_catalog();
             if (!request->client.empty()) blocked_clients.insert(request->client);
+            if (request->all_clients) blocked_clients.insert(request->all_clients->begin(), request->all_clients->end());
           }
           if (!controller->shutdown()) {
             BOOST_LOG(error) << "A Space change could not close the Spaces controller, so Space changes stay unavailable until Polaris restarts";
@@ -549,7 +700,8 @@ namespace multiseat {
                   << " network=" << (removed.kept_network.empty() ? "none" : removed.kept_network);
               }
             } else {
-              persisted = request->access ? admin.access(request->profile, request->client, *request->access) :
+              persisted = request->all_clients ? admin.access_for_all(request->profile, *request->all_clients, *request->access, request->paired_clients, request->with_desktop) :
+                request->access ? admin.access(request->profile, request->client, *request->access, request->paired_clients, request->with_desktop) :
                 request->edit ? admin.edit(*request->edit) : request->creation ? admin.create(*request->creation) :
                 admin.persist(request->profile, request->client);
             }
@@ -578,9 +730,10 @@ namespace multiseat {
                   }
                 } else if (!persisted && persisted.refusal) {
                   result = {409, persisted.refusal->message, persisted.refusal->code, persisted.refusal->action};
-                } else result = persisted ? profile_launch_result_t {200, request->edit ? "Space change saved" : request->creation ? "Space created" : "Default Space saved"} :
+                } else result = persisted ? profile_launch_result_t {200, request->edit ? "Space change saved" : request->creation ? "Space created" : request->access ? "Space access saved" : "Default Space saved"} :
                   profile_launch_result_t {409, request->edit ? "The Space change was not saved. Refresh before retrying." : request->creation ?
                     "The Space was not created. Refresh before retrying; retained resources may need administrator review." :
+                    request->access ? "The Space access change was not saved. Refresh before retrying." :
                     "The Default Space was not saved. Refresh before retrying.", "spaces_change_not_saved", "Refresh Spaces and try again."};
               }
             }
@@ -727,13 +880,13 @@ namespace multiseat {
     if (!target.empty()) {
       const auto snapshot = library_for_client(launch->unique_id, expected_profile);
       if (!snapshot) return {409, "This Space's library is no longer available.", "space_library_unavailable", "Refresh the library."};
-      if (target == "big-picture-v1") target_name = "Steam Big Picture";
+      if (target == snapshot->launcher_target) target_name = snapshot->launcher_name;
       else {
         const auto game = std::find_if(snapshot->library.games.begin(), snapshot->library.games.end(),
           [&](const auto &item) { return item.target == target; });
         if (!snapshot->library.available || game == snapshot->library.games.end())
           return {409, "This game is no longer installed in the selected Space.", "space_game_missing",
-            "Open Steam Big Picture in that Space, or refresh the library."};
+            missing_game_action(snapshot->family)};
         target_name = game->name;
       }
     }
@@ -806,6 +959,9 @@ namespace multiseat {
       });
       if (entry == catalog.end()) return {};
       result.id = entry->id; result.name = entry->name;
+      result.family = entry->family;
+      result.launcher_target = std::string(container::launcher_sentinel(family_of(entry->family)));
+      result.launcher_name = launcher_display_name(entry->family);
       reader = impl_->controller->library_reader(); epoch = impl_->controller_revision;
     }
     // The reader owns a copy of the immutable storage catalog. No service lock
@@ -839,7 +995,21 @@ namespace multiseat {
       impl_->controller ? impl_->controller->capacity() : std::optional<gpu_usage_t>{},
       static_cast<bool>(impl_->admin.reload && impl_->admin.remove_for_good),
       impl_->controller ? impl_->controller->desktop_default_clients() : std::vector<std::string>{},
-      static_cast<bool>(impl_->admin.reload && impl_->admin.move_runtime)};
+      static_cast<bool>(impl_->admin.reload && impl_->admin.move_runtime), impl_->desktop_by_default};
+  }
+
+  bool profile_launch_service_t::desktop_by_default() const {
+    std::lock_guard lock(impl_->mutex);
+    return impl_->desktop_by_default;
+  }
+
+  profile_launch_result_t profile_launch_service_t::set_desktop_by_default(bool enabled) {
+    std::lock_guard lock(impl_->mutex);
+    try {
+      if (!impl_->save_desktop_by_default(enabled))
+        return {503, "The Desktop Access setting was not saved.", "spaces_setting_not_saved", "Refresh Spaces and try again."};
+    } catch (...) { return {503, "The Desktop Access setting was not saved.", "spaces_setting_not_saved", "Refresh Spaces and try again."}; }
+    return {200, "Desktop Access setting saved"};
   }
 
   profile_launch_result_t profile_launch_service_t::set_assignment(std::string profile, std::string client) {
@@ -910,6 +1080,7 @@ namespace multiseat {
         state = item.client == client ? item.state : "in_use"; break;
       }
       profile_client_space_t space {profile.id, profile.name, state, selected == profile.id, profile.library_enabled};
+      space.launcher = profile.family;
       if (state != "ready") space.blocked_reason = state;
       else if (at_capacity) space.blocked_reason = "at_capacity";
       else space.can_open = true;
@@ -950,13 +1121,16 @@ namespace multiseat {
     return {200, "Space selected"};
   }
 
-  profile_launch_result_t profile_launch_service_t::set_access(std::string profile, std::string client, bool allowed) {
+  profile_launch_result_t profile_launch_service_t::set_access(std::string profile, std::string client, bool allowed,
+                                                               std::vector<std::string> paired_clients) {
     if (spaces::host_admin_running()) return spaces_host_setup_running_result;
     auto request = std::make_shared<impl_t::admin_request_t>();
     request->profile = std::move(profile); request->client = std::move(client); request->access = allowed;
+    request->paired_clients = std::move(paired_clients);
     const auto future = request->future;
     {
       std::lock_guard lock(impl_->mutex);
+      request->with_desktop = impl_->desktop_by_default;
       if (!impl_->admin.reload || !impl_->admin.access || !impl_->controller || impl_->admin_failed || impl_->stopping)
         return {503, "Space access changes are unavailable right now.", "spaces_admin_unavailable", "Refresh Spaces. If this continues, restart Polaris."};
       if (request->client.empty() || request->client.size() > 128 || request->profile.empty() || request->profile.size() > 128)
@@ -976,8 +1150,39 @@ namespace multiseat {
     return future.get();
   }
 
-  profile_launch_result_t profile_launch_service_t::create_steam_profile(profiles::steam_create_request_t creation) {
-    if (!profiles::valid_steam_create_request(creation)) return {400, "Enter a valid Space name and Steam setup.", "invalid_request"};
+  profile_launch_result_t profile_launch_service_t::set_access_for_all(std::string profile, std::vector<std::string> clients,
+    bool allowed, std::vector<std::string> paired_clients) {
+    if (spaces::host_admin_running()) return spaces_host_setup_running_result;
+    auto request = std::make_shared<impl_t::admin_request_t>();
+    request->profile = std::move(profile); request->all_clients = std::move(clients); request->access = allowed;
+    request->paired_clients = std::move(paired_clients);
+    const auto future = request->future;
+    {
+      std::lock_guard lock(impl_->mutex);
+      request->with_desktop = impl_->desktop_by_default;
+      if (!impl_->admin.reload || !impl_->admin.access_for_all || !impl_->controller || impl_->admin_failed || impl_->stopping)
+        return {503, "Space access changes are unavailable right now.", "spaces_admin_unavailable", "Refresh Spaces. If this continues, restart Polaris."};
+      if (request->profile.empty() || request->profile.size() > 128 || request->all_clients->size() > 4096 ||
+          std::any_of(request->all_clients->begin(), request->all_clients->end(), [](const auto &client) { return client.empty() || client.size() > 128; }))
+        return {400, "Invalid Space or paired device.", "invalid_request"};
+      const auto catalog = impl_->controller->profile_catalog();
+      if (request->profile != "desktop" && std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) { return entry.id == request->profile && !entry.archived; }))
+        return {404, "Unknown Space.", "space_unknown", "Refresh Spaces."};
+      if (impl_->reconfiguring || !impl_->queued.empty() || std::any_of(impl_->tracked.begin(), impl_->tracked.end(),
+        [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
+        return {409, "Stop every Space stream and wait for cleanup before changing Spaces.", "spaces_streaming", "End the running Space streams, then try again."};
+      impl_->reconfiguring = true;
+      impl_->blocked_clients.insert(request->all_clients->begin(), request->all_clients->end());
+      impl_->queued_admin = request; impl_->active_admin = request;
+    }
+    impl_->wake.notify_all();
+    if (future.wait_for(std::chrono::seconds(25)) != std::future_status::ready)
+      return {202, "Space access is still being saved. Refresh before retrying.", "spaces_change_pending"};
+    return future.get();
+  }
+
+  profile_launch_result_t profile_launch_service_t::create_space_profile(profiles::space_create_request_t creation) {
+    if (!profiles::valid_space_create_request(creation)) return {400, "Enter a valid Space name and Steam setup.", "invalid_request"};
     if (spaces::host_admin_running()) return spaces_host_setup_running_result;
     std::shared_ptr<impl_t::admin_request_t> request;
     {
@@ -994,9 +1199,21 @@ namespace multiseat {
             [](const auto &weak) { const auto launch = weak.lock(); return launch && !launch->is_cancelled(); }))
           return {409, "Stop every Space stream and wait for cleanup before changing Spaces.", "spaces_streaming", "End the running Space streams, then try again."};
         const auto catalog = impl_->controller->profile_catalog();
-        if (std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) {
-              return entry.id == creation.source_profile_id && entry.steam;
-            })) return {404, "Select an existing Steam Space to base the new one on.", "space_source_unknown"};
+        // Either a launcher this PC already runs, or the Space to copy.
+        if (creation.family.empty()) {
+          if (std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) {
+                return entry.id == creation.source_profile_id && !entry.family.empty();
+              })) return {404, "Select an existing Space to base the new one on.", "space_source_unknown"};
+        } else if (std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) {
+              return entry.family == creation.family && !entry.archived;
+            })) {
+          // The first Space of a launcher has none to copy, so it needs a
+          // runtime this build publishes for that family. Whether that runtime
+          // is downloaded is answered where the Space is actually made.
+          const auto &runtimes = spaces::trusted_runtimes();
+          if (!runtimes || !spaces::choose_runtime(*runtimes, spaces::loaded_nvidia_driver(), creation.family).runtime)
+            return {404, "This Polaris build has no gaming runtime for that launcher.", "space_family_unpublished"};
+        }
         request = std::make_shared<impl_t::admin_request_t>();
         request->creation = std::move(creation);
         impl_->reconfiguring = true;
@@ -1077,7 +1294,10 @@ namespace multiseat {
           return {{409, "Stop every Space stream and wait for cleanup before changing Spaces.", "spaces_streaming", "End the running Space streams, then try again."}};
         if (target->name != removal.confirm_name)
           return {{409, "The name you typed is not this Space's name.", "space_name_mismatch", "Type the Space's name exactly as it is shown."}};
-        if (target->steam && std::none_of(catalog.begin(), catalog.end(), [&](const auto &entry) { return entry.steam && entry.id != target->id; }))
+        // A new Space copies an existing one of its own family, so the last
+        // Space of a family stays even when another family still has one.
+        if (!target->family.empty() && std::none_of(catalog.begin(), catalog.end(),
+              [&](const auto &entry) { return entry.family == target->family && entry.id != target->id; }))
           return {{409, "This is the only Space, so it can be archived but not removed for good.", "space_last",
             "Create another Space first, or archive this one."}};
         request = std::make_shared<impl_t::admin_request_t>();

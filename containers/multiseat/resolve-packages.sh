@@ -22,8 +22,14 @@ runtime='python3 ca-certificates passwd util-linux procps locales tzdata fontcon
 build='pkg-config build-essential clang libclang-dev libudev-dev libinput-dev libxkbcommon-dev libwayland-dev libegl-dev libgbm-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev meson ninja-build cmake glslang-tools libpipewire-0.3-dev libx11-dev libxdamage-dev libxcomposite-dev libxcursor-dev libxrender-dev libxext-dev libxfixes-dev libxxf86vm-dev libxtst-dev libxres-dev libxmu-dev libxi-dev libdrm-dev libvulkan-dev wayland-protocols libpixman-1-dev libdecor-0-dev libluajit-5.1-dev libseat-dev libxcb-composite0-dev libxcb-icccm4-dev libxcb-res0-dev libxcb-ewmh-dev hwdata git'
 case "$profile" in
   steam) runtime="$runtime steam-installer steam-libs:amd64 steam-libs:i386 mesa-vulkan-drivers:i386 libgl1-mesa-dri:i386"; build="$build gcc-multilib libc6-dev-i386" ;;
-  heroic) runtime="$runtime /launchers/heroic.deb mesa-vulkan-drivers:i386 libgl1-mesa-dri:i386" ;;
-  lutris) runtime="$runtime lutris wine winetricks mesa-vulkan-drivers:i386 libgl1-mesa-dri:i386" ;;
+  # Every launcher family runs Proton or Wine, so each needs the 32 bit toolchain
+  # the borrowed-driver probe is built with, the same one Steam already had.
+  # xz-utils: both launchers download their Wine, Proton, DXVK and vkd3d builds
+  # as .tar.xz and unpack them with the system tar, which execs xz. Steam gets
+  # it through its installer's dependencies; these two never did, and without
+  # it no Windows game can be set up inside the Space.
+  heroic) runtime="$runtime /launchers/heroic.deb xz-utils mesa-vulkan-drivers:i386 libgl1-mesa-dri:i386"; build="$build gcc-multilib libc6-dev-i386" ;;
+  lutris) runtime="$runtime lutris wine winetricks xz-utils mesa-vulkan-drivers:i386 libgl1-mesa-dri:i386"; build="$build gcc-multilib libc6-dev-i386" ;;
 esac
 runtime="$runtime libgles2"
 if [ "$profile" != gamescope ]; then

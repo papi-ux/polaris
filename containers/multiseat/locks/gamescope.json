@@ -32,6 +32,7 @@
   },
   "patches": [
     "patches/gamescope-ignore-unsupported-switches.patch",
-    "patches/gamescope-finish-command-buffers.patch"
+    "patches/gamescope-finish-command-buffers.patch",
+    "patches/gamescope-force-windows-fullscreen-desktop.patch"
   ]
 }

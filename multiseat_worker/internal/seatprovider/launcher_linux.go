@@ -8,7 +8,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/papi-ux/polaris/multiseat_worker/internal/seatinput"
@@ -24,6 +26,20 @@ type launcherCommand struct {
 	retainDescendants bool
 }
 
+// Where the image puts Heroic. The package the lock pins installs it here, and
+// check-runtime.py asserts it before an image is accepted.
+const heroicExecutable = "/opt/Heroic/heroic"
+
+// Lutris is a Python program. The worker starts a trusted file and follows no
+// link to find one, and /usr/bin/python3 is a link, so this names the
+// interpreter the image really carries. check-runtime.py refuses an image where
+// python3 resolves anywhere else, which is what keeps the two in step when the
+// base moves to another Python.
+const (
+	lutrisInterpreter = "/usr/bin/python3.14"
+	lutrisScript      = "/usr/games/lutris"
+)
+
 // Workloads are image-owned executable policy. Controller input selects only
 // this bounded key; paths, argv, shell text and ambient environment never cross.
 func planLauncher(request seatruntime.Request) (launcherCommand, error) {
@@ -33,8 +49,13 @@ func planLauncher(request seatruntime.Request) (launcherCommand, error) {
 	if request.Stage != seatruntime.StageLauncher || !seatruntime.StreamingWorkloadSupported(request.RuntimeProfile, request.WorkloadKind, request.WorkloadID) {
 		return launcherCommand{}, errors.New("workload is not implemented in this image")
 	}
-	if request.WorkloadKind == seatruntime.WorkloadGamescope {
+	switch request.WorkloadKind {
+	case seatruntime.WorkloadGamescope:
 		return launcherCommand{executable: "/usr/libexec/polaris-seat/workloads/input-pong-v1"}, nil
+	case seatruntime.WorkloadHeroic:
+		return planHeroicLauncher(request)
+	case seatruntime.WorkloadLutris:
+		return planLutrisLauncher(request)
 	}
 	// The immutable package script sets STEAMSCRIPT from $0. Interpreting it
 	// through its canonical path keeps Steam updates/restarts from inheriting
@@ -50,12 +71,58 @@ func planLauncher(request seatruntime.Request) (launcherCommand, error) {
 	return command, nil
 }
 
+// Heroic is an Electron application, and Electron's zygote wants a user
+// namespace this container does not grant, so it runs with its own sandbox off.
+// The deep link is rebuilt here from the validated token: the runner and the
+// store's own identifier are the only two pieces that cross, and neither one
+// reaches a shell.
+func planHeroicLauncher(request seatruntime.Request) (launcherCommand, error) {
+	// The executable is argv[0] already. Steam's list begins with a path only
+	// because that path is the script its interpreter runs.
+	command := launcherCommand{
+		executable:        heroicExecutable,
+		arguments:         []string{"--no-sandbox"},
+		retainDescendants: true,
+	}
+	if request.WorkloadID == seatruntime.LauncherLibrary {
+		return command, nil
+	}
+	runner, name, found := strings.Cut(request.WorkloadID, ".")
+	if !found || runner == "" || name == "" {
+		return launcherCommand{}, errors.New("heroic target is not a runner and an application")
+	}
+	command.arguments = append(command.arguments, "heroic://launch/"+runner+"/"+name)
+	return command, nil
+}
+
+// Lutris numbers a game in its own database, and lutris:rungameid/<id> is the
+// address it gives that game itself, in the desktop shortcuts it writes. The
+// number is rebuilt from the validated token, so nothing else can ride in on it.
+// The package script is run through its interpreter the way Steam's is, for the
+// same reason: both files are checked as trusted image executables first.
+func planLutrisLauncher(request seatruntime.Request) (launcherCommand, error) {
+	command := launcherCommand{
+		executable: lutrisInterpreter, packageScript: lutrisScript,
+		arguments: []string{lutrisScript}, retainDescendants: true,
+	}
+	if request.WorkloadID == seatruntime.LauncherLibrary {
+		return command, nil
+	}
+	game, found := strings.CutPrefix(request.WorkloadID, "id.")
+	if !found || game == "" {
+		return launcherCommand{}, errors.New("lutris target is not a game number")
+	}
+	command.arguments = append(command.arguments, "lutris:rungameid/"+game)
+	return command, nil
+}
+
 func launcherEnvironment(request seatruntime.Request, session launcherSession) ([]string, error) {
 	environment, err := seatruntime.Environment(request)
 	if err != nil {
 		return nil, err
 	}
-	if request.WorkloadKind == seatruntime.WorkloadSteam {
+	if request.WorkloadKind == seatruntime.WorkloadSteam || request.WorkloadKind == seatruntime.WorkloadHeroic ||
+		request.WorkloadKind == seatruntime.WorkloadLutris {
 		// Profile streams currently allocate at most one gamepad. SDL's Linux
 		// discovery skips our reserved alias because it is not an eventN name
 		// and this namespace has no host udev database. Select only that exact
@@ -63,6 +130,16 @@ func launcherEnvironment(request seatruntime.Request, session launcherSession) (
 		// this hint neither creates a device nor grants access to another seat.
 		environment = append(environment, "SDL_JOYSTICK_DEVICE=/dev/input/polaris-gamepad-0")
 	}
+	// The launcher and every title under it draw through X11. gamescope exposes a
+	// Wayland socket for this worker's own input, and a title that finds
+	// WAYLAND_DISPLAY takes it: vkcube does, and so does anything built on SDL3.
+	// With no Steam to name the game, gamescope ranks such a window below every
+	// X11 window, so a Heroic title ran at full speed hidden behind the launcher
+	// that started it. A Steam Deck hands its games no Wayland socket either.
+	// GAMESCOPE_WAYLAND_DISPLAY stays, because only gamescope's own tools read it.
+	environment = slices.DeleteFunc(environment, func(entry string) bool {
+		return strings.HasPrefix(entry, "WAYLAND_DISPLAY=")
+	})
 	return append(environment,
 		"PATH=/usr/bin", "LC_ALL=C",
 		"DISPLAY="+session.display, "STEAM_GAME_DISPLAY_0="+session.display,
@@ -116,6 +193,13 @@ func runLauncher(parent context.Context, request seatruntime.Request, ready io.W
 		return errors.New("launcher profile must be a private owned directory")
 	}
 	defer home.close()
+	if request.WorkloadKind == seatruntime.WorkloadHeroic {
+		// The one exception, and only for a home Heroic has never started in:
+		// see seedHeroicSettings. A home it cannot write to the way it expects,
+		// a linked .config for one, is the player's arrangement and not a
+		// reason to refuse the launch, so the result is deliberately dropped.
+		_ = seedHeroicSettings(home)
+	}
 	inputs, err := seatinput.Open(seatinput.Directory, request.InputSeat)
 	if err != nil {
 		return err

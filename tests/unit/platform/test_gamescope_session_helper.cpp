@@ -68,6 +68,60 @@ TEST(GamescopeSessionHelperTests, PrefersLauncherBesideBinaryOverPath) {
   EXPECT_EQ(resolution.session_match, helper::bundle_match_t::unknown);
 }
 
+// #745: a packager whose wrapper exports the session environment names it, and it runs, where the
+// copy beside the binary used to win and the wrapper never ran.
+TEST(GamescopeSessionHelperTests, ALauncherNamedByTheEnvironmentWinsOverBothCopies) {
+  scratch_t scratch;
+  const auto beside = scratch.file("store/polaris/bin/polaris-gamescope-session", module_body, true);
+  const auto wrapper = scratch.file("store/session/bin/polaris-gamescope-session", "#!/bin/bash\nexport POLARIS_GAMESCOPE_BIN=/store/gamescope\n" + module_body, true);
+  const auto bundled = scratch.file("assets/gamescope/polaris-gamescope-session.sh", module_body, false);
+
+  const auto resolution = helper::resolve(beside.parent_path(), wrapper, bundled, {}, wrapper);
+
+  EXPECT_EQ(resolution.helper, wrapper);
+  EXPECT_TRUE(resolution.from_override);
+  EXPECT_TRUE(resolution.shadowed.empty()) << "the launcher on PATH is the one named, so nothing is shadowed";
+  EXPECT_EQ(resolution.session_match, helper::bundle_match_t::wrapped) << "the wrapper embeds the shipped module";
+  EXPECT_TRUE(helper::advisories(resolution).empty());
+  EXPECT_NE(helper::summary(resolution).find("POLARIS_GAMESCOPE_SESSION"), std::string::npos);
+}
+
+TEST(GamescopeSessionHelperTests, ANamedLauncherShadowsNothingElseOnPath) {
+  scratch_t scratch;
+  const auto beside = scratch.file("usr/bin/polaris-gamescope-session", module_body, true);
+  const auto named = scratch.file("opt/polaris/polaris-gamescope-session", module_body, true);
+  const auto on_path = scratch.file("home/.local/bin/polaris-gamescope-session", "old\n", true);
+
+  const auto resolution = helper::resolve(beside.parent_path(), on_path, {}, {}, named);
+
+  EXPECT_EQ(resolution.helper, named);
+  EXPECT_TRUE(resolution.shadowed.empty()) << "the shadowed advisory is about a stale copy ahead of the packaged one";
+}
+
+TEST(GamescopeSessionHelperTests, ANamedLauncherThatCannotRunIsReportedAndNotUsed) {
+  scratch_t scratch;
+  const auto beside = scratch.file("usr/bin/polaris-gamescope-session", module_body, true);
+  const auto not_executable = scratch.file("opt/polaris/polaris-gamescope-session", module_body, false);
+  const auto missing = scratch.root / "nowhere/polaris-gamescope-session";
+
+  // Joined into the session's commands, a name with a space splits, and a relative one depends on
+  // the working directory.
+  const auto spaced = scratch.file("opt/my polaris/polaris-gamescope-session", module_body, true);
+  const fs::path relative {"polaris-gamescope-session"};
+
+  for (const auto &named : {not_executable, missing, spaced, relative}) {
+    const auto resolution = helper::resolve(beside.parent_path(), {}, {}, {}, named);
+    EXPECT_EQ(resolution.helper, beside);
+    EXPECT_FALSE(resolution.from_override);
+    EXPECT_EQ(resolution.override_ignored, named);
+    const auto advisories = helper::advisories(resolution);
+    ASSERT_EQ(advisories.size(), 1u);
+    EXPECT_NE(advisories[0].find("POLARIS_GAMESCOPE_SESSION"), std::string::npos);
+    EXPECT_NE(advisories[0].find(named.string()), std::string::npos);
+    EXPECT_NE(advisories[0].find(beside.string()), std::string::npos);
+  }
+}
+
 TEST(GamescopeSessionHelperTests, FallsBackToPathWhenNothingIsBeside) {
   scratch_t scratch;
   fs::create_directories(scratch.root / "usr/bin");

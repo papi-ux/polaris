@@ -12,6 +12,8 @@ Thanks for taking the time to improve Polaris. Small, well-explained pull reques
 
 AI-assisted drafting and refactoring are allowed. Please treat generated code like code you wrote yourself: understand it, review it, test it, and make sure the licensing is clear.
 
+Pull requests from outside the project are squashed into one commit when they merge. You stay the author of that commit, and I write its message from your description. Attribution lines for a tool, such as a `Co-Authored-By` trailer naming an AI assistant or a link to an assistant session, are left out of that message, so there is no need to strip them from your branch first. The pull request keeps every commit you pushed, so the review history stays inspectable after the squash.
+
 ## Security-Sensitive Changes
 
 Call out changes to authentication, pairing, trusted subnets, client commands, certificates, dependencies, release packaging, or privilege boundaries in the PR description. Those areas deserve a slower review pass.

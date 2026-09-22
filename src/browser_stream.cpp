@@ -585,6 +585,9 @@ namespace browser_stream {
 
       BOOST_LOG(info) << "Launching Browser Stream app session ["sv << app.name
                       << "] runtime=" << private_runtime_backend();
+      // Browser Stream reaches the app without passing nvhttp, so it brings a Game Mode host's
+      // mode in line itself.
+      nvhttp::reconcile_game_mode_host();
       auto launch_session = browser_launch_session();
       if (!launch_session) {
         error_out = "Browser Stream could not build a launch session";

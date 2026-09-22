@@ -8,10 +8,13 @@
           <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-ice/10 font-semibold text-ice" aria-hidden="true">{{ initials(space.name) }}</span>
           <div class="min-w-0 flex-1">
             <h3 class="break-words font-semibold text-silver">{{ space.name }}</h3>
-            <StatusBadge class="mt-1" :status="statusTone(space)" :label="activitySummary(space)" role="status" />
+            <div class="mt-1 flex flex-wrap items-center gap-2">
+              <StatusBadge :status="statusTone(space)" :label="activitySummary(space)" role="status" />
+              <span v-if="launcherName(space)" class="control-chip" data-space-launcher>{{ launcherName(space) }}</span>
+            </div>
           </div>
         </div>
-        <p class="mt-3 break-words text-sm text-storm">{{ deviceSummary(space) }}</p>
+        <p class="mt-3 break-words text-sm text-storm" :title="deviceNames(space).join(', ')" data-space-devices>{{ deviceSummary(space) }}</p>
         <SpaceRuntimeMove :space="space" :job="runtimeMoveJob" :available="runtimeMoveAvailable" :locked="locked"
                           :lock-reason-id="lockReasonId" :ready="ready" :refresh="refresh" @busy="emit('busy', $event)" />
         <div v-if="manageable" class="mt-4 flex flex-wrap gap-2">
@@ -36,8 +39,6 @@
             </Button>
           </div>
         </form>
-        <SpaceAccess v-if="accessAvailable" :space="space" :clients="clients" :locked="locked" :lock-reason-id="lockReasonId"
-                     :ready="ready" :refresh="refresh" @busy="emit('busy', $event)" @open-default="emit('open-default')" />
       </article>
     </div>
     <p v-if="!active.length" class="mt-3 text-sm text-storm" data-spaces-empty>
@@ -109,7 +110,6 @@
 import { computed, inject, nextTick, ref, watch } from 'vue'
 import Button from './Button.vue'
 import ConfirmActionDialog from './ConfirmActionDialog.vue'
-import SpaceAccess from './SpaceAccess.vue'
 import SpaceRuntimeMove from './SpaceRuntimeMove.vue'
 import StatusBadge from './StatusBadge.vue'
 import { permissionMapping } from '../composables/useClients.js'
@@ -118,10 +118,10 @@ import { useToast } from '../composables/useToast.js'
 
 const props = defineProps({ profiles: { type: Array, default: () => [] }, clients: { type: Array, default: () => [] },
   activity: { type: Array, default: null }, refreshing: Boolean,
-  accessAvailable: Boolean, creationAvailable: Boolean, manageable: Boolean, removalAvailable: Boolean, locked: Boolean, ready: Boolean,
+  creationAvailable: Boolean, manageable: Boolean, removalAvailable: Boolean, locked: Boolean, ready: Boolean,
   runtimeMoveAvailable: Boolean, runtimeMoveJob: { type: Object, default: null },
   lockReasonId: { type: String, default: '' }, refresh: { type: Function, required: true } })
-const emit = defineEmits(['busy', 'open-default'])
+const emit = defineEmits(['busy'])
 const i18n = inject('i18n')
 const t = (key, params) => i18n.t(key, params)
 const { toast } = useToast()
@@ -141,21 +141,34 @@ const deviceName = device => nameLabels.value.get(device?.uuid) || device?.frien
 // Archive stays selected: deleting games and saves is never the default.
 const offersChoice = computed(() => dialogOperation.value === 'remove' && props.removalAvailable)
 const removingForGood = computed(() => dialogOperation.value === 'delete' || (offersChoice.value && removeMode.value === 'delete'))
-// New Spaces are made from an existing Steam Space, so the host keeps the last one.
-const lastSpace = computed(() => !!dialogSpace.value?.steam &&
-  !props.profiles.some(space => space.id !== dialogSpace.value.id && space.steam))
+// A new Space is made from an existing one of the same launcher family, so the
+// host keeps the last Space of each family rather than the last Space overall.
+const lastSpace = computed(() => {
+  const family = dialogSpace.value?.family
+  return !!family && !props.profiles.some(space => space.id !== dialogSpace.value.id && space.family === family)
+})
 // The typed name has to be the Space's name exactly, as the host checks it.
 const removalReady = computed(() => !!dialogSpace.value && !lastSpace.value && typedName.value === dialogSpace.value.name)
 
-// The same filter Device Access uses: a device that lost launch permission
-// is not listed as able to open the Space.
-function deviceSummary(space) {
-  const allowed = [...new Set([...space.clients, ...(space.access_clients || [])])]
+// A device that lost launch permission is not listed as able to open the Space, unless the Space
+// is still its Default Space.
+function deviceNames(space) {
+  return [...new Set([...space.clients, ...(space.access_clients || [])])]
     .map(id => props.clients.find(client => client.uuid === id))
     .filter(device => device && (canLaunch(device) || space.clients.includes(device.uuid)))
-  if (!allowed.length) return t('spaces.no_devices')
-  return t('spaces.available_to', { devices: allowed.map(deviceName).join(', ') })
+    .map(deviceName)
 }
+// Two names and a count. A Space open to a dozen devices used to spell out all twelve here; the
+// full list is a hover away, and the Device Access table below has a column for this Space.
+function deviceSummary(space) {
+  const names = deviceNames(space)
+  if (!names.length) return t('spaces.no_devices')
+  if (names.length <= 2) return t('spaces.available_to', { devices: names.join(', ') })
+  return t('spaces.available_to_more', { devices: names.slice(0, 2).join(', '), count: names.length - 2 })
+}
+// Product names, so they are not translated. A family this console does not know says nothing.
+const launcherNames = { steam: 'Steam', heroic: 'Heroic', lutris: 'Lutris' }
+function launcherName(space) { return launcherNames[space.family] || '' }
 function initials(value) { return value.trim().split(/\s+/u).slice(0, 2).map(word => [...word][0] || '').join('').toLocaleUpperCase() }
 function spaceActivity(space) { return (props.activity || []).filter(item => item.profile_id === space.id) }
 function activitySummary(space) {

@@ -16,9 +16,9 @@ namespace multiseat::spaces {
 
   struct setup_operations_t {
     std::function<runtime_install_result_t(std::string_view, std::stop_token)> install;
-    std::function<bool(const profiles::first_steam_request_t &, std::string_view, std::stop_token)> prepare;
+    std::function<bool(const profiles::first_space_request_t &, std::string_view, std::stop_token)> prepare;
     std::function<nlohmann::json(const runtime_t &)> graphics;
-    std::function<bool(const profiles::first_steam_request_t &, const runtime_t &, std::string_view, std::stop_token)> activate;
+    std::function<bool(const profiles::first_space_request_t &, const runtime_t &, std::string_view, std::stop_token)> activate;
   };
 
   class setup_service_t {

@@ -48,6 +48,8 @@ namespace platf {
     bool keyboard_update(std::uint16_t modcode, bool release);
     bool unicode(std::string_view hex_unicode);
     bool should_block_host_fallback();
+    /// Touch and pen have no libei route, so they are blocked only where host uinput cannot reach.
+    bool should_block_host_touch();
     void reset();
 
   private:

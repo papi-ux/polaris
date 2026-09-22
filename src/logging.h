@@ -83,6 +83,24 @@ namespace logging {
   void setup_av_logging(int min_log_level);
 
   /**
+   * @brief While one is alive on a thread, FFmpeg's errors on that thread are logged as info.
+   *
+   * An encoder probe asks for formats and settings the GPU may not have, and FFmpeg calls each
+   * refusal an error, so a host whose GPU has no AV1 encoder read as failing at every start. The
+   * probe says what it found in its own words.
+   */
+  class ffmpeg_errors_expected_t {
+  public:
+    ffmpeg_errors_expected_t();
+    ~ffmpeg_errors_expected_t();
+    ffmpeg_errors_expected_t(const ffmpeg_errors_expected_t &) = delete;
+    ffmpeg_errors_expected_t &operator=(const ffmpeg_errors_expected_t &) = delete;
+  };
+
+  /// Whether FFmpeg's errors on this thread are expected right now.
+  bool ffmpeg_errors_expected();
+
+  /**
    * @brief Setup logging for libdisplaydevice.
    * @param min_log_level The log level.
    */

@@ -74,6 +74,45 @@ namespace multiseat::container {
     return true;
   }
 
+  bool local_host_t::trusted_system_file(const std::filesystem::path &path) const {
+    if (!path.is_absolute() || path.lexically_normal() != path) return false;
+    struct stat metadata {};
+    if (lstat(path.c_str(), &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
+        metadata.st_uid != 0 || (metadata.st_mode & (S_IWGRP | S_IWOTH | S_ISUID | S_ISGID)) != 0 ||
+        faccessat(AT_FDCWD, path.c_str(), R_OK, AT_EACCESS) != 0) return false;
+    for (auto directory = path.parent_path();; directory = directory.parent_path()) {
+      if (lstat(directory.c_str(), &metadata) != 0 || !S_ISDIR(metadata.st_mode) ||
+          metadata.st_uid != 0 || (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) return false;
+      if (directory == directory.root_path()) break;
+    }
+    return true;
+  }
+
+  std::optional<std::string> local_host_t::read_trusted_system_file(
+    const std::filesystem::path &path,
+    std::size_t max_bytes
+  ) const {
+    if (!trusted_system_file(path)) return std::nullopt;
+    const auto descriptor = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY | O_NONBLOCK);
+    if (descriptor < 0) return std::nullopt;
+    std::optional<std::string> content;
+    struct stat metadata {};
+    if (fstat(descriptor, &metadata) == 0 && S_ISREG(metadata.st_mode) && metadata.st_uid == 0 &&
+        metadata.st_size >= 0 && static_cast<std::uint64_t>(metadata.st_size) <= max_bytes) {
+      std::string buffer;
+      std::array<char, 65536> chunk {};
+      while (true) {
+        const auto count = read(descriptor, chunk.data(), chunk.size());
+        if (count < 0) { buffer.clear(); break; }
+        if (count == 0) { content = std::move(buffer); break; }
+        if (buffer.size() + static_cast<std::size_t>(count) > max_bytes) { buffer.clear(); break; }
+        buffer.append(chunk.data(), static_cast<std::size_t>(count));
+      }
+    }
+    close(descriptor);
+    return content;
+  }
+
   bool local_host_t::trusted_data_file(
     const std::filesystem::path &path, std::string_view expected
   ) const {

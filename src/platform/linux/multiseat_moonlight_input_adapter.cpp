@@ -36,6 +36,9 @@ namespace multiseat::input {
     constexpr std::uint8_t known_modifier_mask =
       MODIFIER_SHIFT | MODIFIER_CTRL | MODIFIER_ALT | MODIFIER_META;
 
+    /// The high byte every Moonlight client puts on a virtual key code.
+    constexpr std::uint8_t moonlight_key_prefix = 0x80;
+
     std::uint16_t read_u16_be(std::span<const std::uint8_t> bytes) {
       return static_cast<std::uint16_t>(
         (static_cast<std::uint16_t>(bytes[0]) << 8U) |
@@ -302,17 +305,31 @@ namespace multiseat::input {
           !all_zero(packet.subspan(12, 2))) {
         return {.status = moonlight_packet_status_e::invalid};
       }
-      if (packet[8] != 0) {
+      // The one flag there is asks a Windows host to map the key through its own layout.
+      // There is nothing to normalise here, and the Desktop path ignores it on Linux too. A
+      // client sets it for any key whose device has no QWERTY mapping, which is every key
+      // typed on an Android soft keyboard, so refusing it refused those keys outright.
+      if ((packet[8] & ~SS_KBE_FLAG_NON_NORMALIZED) != 0) {
         return {.status = moonlight_packet_status_e::unsupported};
       }
       if ((packet[11] & ~known_modifier_mask) != 0) {
+        return {.status = moonlight_packet_status_e::invalid};
+      }
+      // A key goes on the wire as 0x80xx. Nova, Moonlight for Android and Moonlight Qt all set
+      // that high byte, and the Desktop path takes the low one (input.cpp, keyCode & 0x00FF).
+      // This adapter read all sixteen bits, found no key it knew at 0x8041, and dropped every
+      // key anybody typed into a Space: nobody could sign in to a launcher from a handheld.
+      // The quick keys a client sends bare, such as Escape, were the only ones that arrived.
+      const auto wire_code = read_u16_le(packet.subspan(9, 2));
+      const auto prefix = static_cast<std::uint8_t>(wire_code >> 8);
+      if (prefix != 0x00 && prefix != moonlight_key_prefix) {
         return {.status = moonlight_packet_status_e::invalid};
       }
       return converted(
         moonlight_input_class_e::keyboard,
         input_event_t {
           .payload = keyboard_key_event_t {
-            .key_code = read_u16_le(packet.subspan(9, 2)),
+            .key_code = static_cast<std::uint16_t>(wire_code & 0x00FFU),
             .state = state,
           },
         }

@@ -18,6 +18,33 @@ let wrapper
 afterEach(() => { wrapper?.unmount(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
 describe('profile assignments', () => {
+  it('keeps each device to one row, and shows its help once there is something to act on', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => reply({ ...defaultAlex(), profiles: [...defaultAlex().profiles,
+      { id: 'profile-b', name: 'Sam', clients: [], access_clients: ['device-a'] }] })))
+    wrapper = start({ clients: [client] })
+    await flushPromises()
+    expect(wrapper.findAll('[data-device-row]')).toHaveLength(1)
+    const help = wrapper.get('#gaming-profile-help-device-a')
+    // Still in the page, because the dropdown is described by it, but it takes no room.
+    expect(help.classes()).toContain('sr-only')
+    expect(wrapper.get('#gaming-profile-device-a').attributes('aria-describedby')).toContain('gaming-profile-help-device-a')
+    await wrapper.get('#gaming-profile-device-a').setValue('profile-b')
+    expect(wrapper.get('#gaming-profile-help-device-a').classes()).not.toContain('sr-only')
+    expect(wrapper.text()).toContain('Unsaved')
+  })
+
+  it('hands the owner\'s Desktop setting to the device table, and leaves it out for a host that has none', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => reply({ ...withAccess(), desktop_by_default: true })))
+    wrapper = start({ clients: [client] })
+    await flushPromises()
+    expect(wrapper.get('[data-desktop-by-default]').element.checked).toBe(true)
+    wrapper.unmount()
+    vi.stubGlobal('fetch', vi.fn(async () => reply(withAccess())))
+    wrapper = start({ clients: [client] })
+    await flushPromises()
+    expect(wrapper.find('[data-desktop-by-default]').exists()).toBe(false)
+  })
+
   it('does not mistake a failed device lookup for an unpaired host', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => reply(snapshot())))
     wrapper = start({ clients: [], clientsReady: false })
@@ -52,7 +79,8 @@ describe('profile assignments', () => {
     await flushPromises()
     expect(wrapper.get('select').element.value).toBe('profile-a')
     expect(wrapper.text()).toContain('Saved. Living room opens Alex first. What it may open did not change.')
-    expect(wrapper.get('button[aria-label="Save assignment for Living room"]').attributes('disabled')).toBeDefined()
+    // Save is offered for a choice that has not been saved, and goes with it.
+    expect(wrapper.find('button[aria-label="Save assignment for Living room"]').exists()).toBe(false)
   })
 
   it('retains the confirmed assignment when an active seat rejects a change', async () => {
@@ -186,7 +214,8 @@ describe('profile assignments', () => {
     await flushPromises()
     expect(wrapper.get('#gaming-profile-device-b').element.value).toBe('profile-a')
     expect(wrapper.get('#gaming-profile-current-device-b').text()).toContain('Desktop')
-    expect(wrapper.get('#gaming-profile-device-c').element.value).toBe('desktop')
+    // The new device has one place to play, so it is told rather than asked.
+    expect(wrapper.get('[data-device-row="device-c"] [data-default-only]').text()).toBe('Desktop')
     expect(wrapper.text()).toContain('Unsaved change')
   })
 
@@ -199,7 +228,8 @@ describe('profile assignments', () => {
     await wrapper.get('select').setValue('profile-a')
     await wrapper.get('[data-spaces-refresh]').trigger('click')
     await flushPromises()
-    expect(wrapper.get('select').element.value).toBe('desktop')
+    expect(wrapper.find('select').exists()).toBe(false)
+    expect(wrapper.get('[data-default-only]').text()).toBe('Desktop')
     expect(wrapper.text()).toContain('No Spaces yet')
     expect(wrapper.text()).not.toContain('Unsaved change')
   })
@@ -214,10 +244,11 @@ describe('profile assignments', () => {
     ['device with two Default Spaces', value => { value.profiles[0].clients = ['device-a']; value.desktop_default_clients = ['device-a'] }],
     ['repeated Desktop default', value => { value.desktop_default_clients = ['device-a', 'device-a'] }],
   ])('rejects %s without enabling changes from a stale snapshot', async (_, mutate) => {
-    const invalid = snapshot()
+    // A device with a choice to make, so there is a control to find locked.
+    const invalid = withAccess()
     mutate(invalid)
     vi.stubGlobal('fetch', vi.fn()
-      .mockResolvedValueOnce(reply(snapshot()))
+      .mockResolvedValueOnce(reply(withAccess()))
       .mockResolvedValueOnce(reply(invalid)))
     wrapper = start({ clients: [client] })
     await flushPromises()
@@ -277,15 +308,13 @@ describe('profile assignments', () => {
     wrapper = start({ clients: [client] })
     await flushPromises()
     const values = () => wrapper.findAll('#gaming-profile-device-a option').map(option => option.element.value)
-    // Without Desktop Access the device opens its only Space, and Sam is not offered.
-    expect(values()).toEqual(['profile-a'])
-    expect(wrapper.get('#gaming-profile-current-device-a').text()).toContain('Alex')
-    expect(wrapper.get('[data-desktop-needs-access]').text()).toContain('give this device Desktop Access')
+    // Without Desktop Access the device opens its only Space: nothing to choose, and Sam is not offered.
+    expect(wrapper.find('select').exists()).toBe(false)
+    expect(wrapper.get('[data-default-only]').text()).toBe('Alex')
     current = { ...current, desktop_clients: ['device-a'] }
     await wrapper.get('[data-spaces-refresh]').trigger('click')
     await flushPromises()
     expect(values()).toEqual(['desktop', 'profile-a'])
-    expect(wrapper.find('[data-desktop-needs-access]').exists()).toBe(false)
     await wrapper.get('#gaming-profile-device-a').setValue('desktop')
     expect(wrapper.get('#gaming-profile-help-device-a').text()).toContain('Its Spaces stay open to it')
     await wrapper.get('button[aria-label="Save assignment for Living room"]').trigger('click')
@@ -301,9 +330,9 @@ describe('profile assignments', () => {
     vi.stubGlobal('fetch', vi.fn(async () => reply(snapshot())))
     wrapper = start({ clients: [client] })
     await flushPromises()
-    expect(wrapper.findAll('#gaming-profile-device-a option').map(option => option.element.value)).toEqual(['desktop'])
-    expect(wrapper.get('#gaming-profile-help-device-a').text()).toContain('This device plays on Desktop')
-    expect(wrapper.get('button[aria-label="Save assignment for Living room"]').element.disabled).toBe(true)
+    expect(wrapper.find('select').exists()).toBe(false)
+    expect(wrapper.get('[data-default-only]').text()).toBe('Desktop')
+    expect(wrapper.find('button[aria-label="Save assignment for Living room"]').exists()).toBe(false)
   })
 
   it('tells devices with the same name apart by when they paired', async () => {
@@ -311,7 +340,7 @@ describe('profile assignments', () => {
     const twin = { ...client, uuid: 'device-b', paired_at: 1789600000 }
     wrapper = start({ clients: [{ ...client, paired_at: 1789593894 }, twin] })
     await flushPromises()
-    const labels = wrapper.findAll('label[for^="gaming-profile-"]').map(label => label.text())
+    const labels = wrapper.findAll('[data-device-name]').map(label => label.text())
     expect(labels).toHaveLength(2)
     expect(labels[0]).toMatch(/^Living room \(paired .+\)$/)
     expect(labels[1]).toMatch(/^Living room \(paired .+\)$/)
@@ -327,7 +356,7 @@ describe('profile assignments', () => {
   })
 
   it('locks every change while a Space streams and names the device to stop', async () => {
-    const current = { ...snapshot(), management_available: true, access_available: true,
+    const current = { ...withAccess(), management_available: true, access_available: true,
       activity: [{ profile_id: 'profile-a', client_id: 'device-a', state: 'running' }] }
     vi.stubGlobal('fetch', vi.fn(async () => reply(current)))
     wrapper = start({ clients: [client] })
@@ -335,6 +364,9 @@ describe('profile assignments', () => {
     const lock = wrapper.get('[data-stream-lock]')
     expect(lock.text()).toContain('Stop the stream on Living room first')
     expect(wrapper.get('select').element.disabled).toBe(true)
+    const tick = wrapper.get('input[aria-label="Allow Living room to use Alex"]')
+    expect(tick.element.disabled).toBe(true)
+    expect(tick.attributes('aria-describedby')).toBe(lock.attributes('id'))
     expect(wrapper.get('button[aria-label="Rename Alex"]').element.disabled).toBe(true)
     expect(wrapper.get('button[aria-label="Rename Alex"]').attributes('aria-describedby')).toBe(lock.attributes('id'))
     expect(wrapper.get('[data-spaces-refresh]').element.disabled).toBe(false)
@@ -395,7 +427,7 @@ describe('profile assignments', () => {
 
   it('refreshes on its own while visible and pauses while the tab is hidden', async () => {
     vi.useFakeTimers()
-    vi.stubGlobal('fetch', vi.fn(async () => reply(snapshot())))
+    vi.stubGlobal('fetch', vi.fn(async () => reply(withAccess())))
     wrapper = start({ clients: [client] })
     await vi.advanceTimersByTimeAsync(0)
     expect(fetch).toHaveBeenCalledTimes(1)

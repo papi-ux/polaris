@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 #include <src/adaptive_bitrate.h>
 #include <src/ai_optimizer.h>
 #include <src/file_handler.h>
@@ -20,6 +21,8 @@
 #include <src/process.h>
 #ifdef __linux__
   #include <src/platform/linux/cage_display_router.h>
+  #include <src/platform/linux/game_mode_host.h>
+  #include <src/platform/linux/stream_display_policy.h>
 #endif
 #include <src/stream_stats.h>
 
@@ -1169,6 +1172,102 @@ TEST(ProcessRuntimeConfigTests, SteamBigPictureLauncherIsTheEntryThatOpensBigPic
   proc::ctx_t desktop {};
   desktop.name = "Desktop";
   EXPECT_FALSE(proc::is_steam_big_picture_launcher(desktop));
+}
+
+TEST(ProcessRuntimeConfigTests, TheLowResDesktopSampleIsRecognisedOnlyWhileUnchanged) {
+  proc::ctx_t sample {};
+  sample.name = "Low Res Desktop";
+  sample.image_path = "desktop.png";
+  sample.desktop_mirror = true;
+  sample.prep_cmds = {{"xrandr --output HDMI-1 --mode 1920x1080", "xrandr --output HDMI-1 --mode 1920x1200", false}};
+  EXPECT_TRUE(proc::is_stock_low_res_desktop(sample));
+
+  // An upgraded host's copy has no desktop-mirror flag and is still the same sample.
+  auto upgraded = sample;
+  upgraded.desktop_mirror = false;
+  EXPECT_TRUE(proc::is_stock_low_res_desktop(upgraded));
+
+  auto renamed = sample;
+  renamed.name = "Couch Desktop";
+  EXPECT_FALSE(proc::is_stock_low_res_desktop(renamed)) << "a renamed entry is the player's";
+
+  auto own_output = sample;
+  own_output.prep_cmds = {{"xrandr --output DP-2 --mode 1920x1080", "xrandr --output DP-2 --mode 2560x1440", false}};
+  EXPECT_FALSE(proc::is_stock_low_res_desktop(own_output)) << "a prep command of their own makes it theirs";
+
+  auto more_steps = sample;
+  more_steps.prep_cmds.push_back({"notify-send streaming", "", false});
+  EXPECT_FALSE(proc::is_stock_low_res_desktop(more_steps));
+
+  auto launches = sample;
+  launches.cmd = "/usr/bin/a-game";
+  EXPECT_FALSE(proc::is_stock_low_res_desktop(launches));
+}
+
+TEST(ProcessRuntimeConfigTests, TheLowResDesktopSampleIsRecognisedBehindGlobalPrepCommands) {
+  // Parsing puts the host's global prep commands ahead of the app's own, so a host with any of
+  // them kept the sample in its library when the check read the first entry.
+  const auto file_path = test_paths::root() / "low_res_desktop_global_prep.json";
+  const nlohmann::json apps_file = {
+    {"version", 14},
+    {"apps", {
+      {
+        {"name", "Low Res Desktop"},
+        {"uuid", "66666666-6666-4666-8666-666666666666"},
+        {"image-path", "desktop.png"},
+        {"prep-cmd", {{{"do", "xrandr --output HDMI-1 --mode 1920x1080"}, {"undo", "xrandr --output HDMI-1 --mode 1920x1200"}}}}
+      },
+      {
+        {"name", "Low Res Desktop"},
+        {"uuid", "77777777-7777-4777-8777-777777777777"},
+        {"image-path", "desktop.png"},
+        {"exclude-global-prep-cmd", true},
+        {"prep-cmd", {{{"do", "xrandr --output HDMI-1 --mode 1920x1080"}, {"undo", "xrandr --output HDMI-1 --mode 1920x1200"}}}}
+      }
+    }}
+  };
+
+  const auto saved = config::sunshine.prep_cmds;
+  config::sunshine.prep_cmds.clear();
+  config::sunshine.prep_cmds.emplace_back(std::string {"notify-send streaming"}, std::string {""}, false);
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps_file.dump(2)), 0);
+  auto parsed_proc = proc::parse(file_path.string());
+  config::sunshine.prep_cmds = saved;
+  std::filesystem::remove(file_path);
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  std::size_t recognised = 0;
+  for (const auto &app : parsed_proc->get_apps()) {
+    if (app.uuid == "66666666-6666-4666-8666-666666666666") {
+      EXPECT_EQ(app.prep_cmds.size(), 2u) << "the global command runs ahead of the sample's own";
+      EXPECT_TRUE(proc::is_stock_low_res_desktop(app));
+      ++recognised;
+    } else if (app.uuid == "77777777-7777-4777-8777-777777777777") {
+      EXPECT_EQ(app.prep_cmds.size(), 1u);
+      EXPECT_TRUE(proc::is_stock_low_res_desktop(app)) << "a sample that opts out of the global list is still the sample";
+      ++recognised;
+    }
+  }
+  EXPECT_EQ(recognised, 2u);
+}
+
+TEST(ProcessRuntimeConfigTests, TheLibraryDesktopTileIsDesktopNotTheLowResSample) {
+  // Nova's desktop tile opened Low Res Desktop on every host that had both: the library left out
+  // the entry named Desktop, and the sample's HDMI-1 xrandr prep command failed on each launch.
+  const auto nvhttp = read_source_file_for_contract("src/nvhttp.cpp");
+  const auto games = nvhttp.substr(nvhttp.find("auto polarisGames = [](resp_https_t response, req_https_t request) {"));
+  const auto listing = games.substr(0, games.find("\n    auto polaris"));
+  EXPECT_EQ(listing.find("if (app.name == \"Desktop\") continue;"), std::string::npos) << "Desktop is the desktop tile";
+  EXPECT_NE(listing.find("if (has_desktop && proc::is_stock_low_res_desktop(app)) continue;"), std::string::npos)
+    << "the sample is left out only beside a Desktop entry, so a host without one keeps a desktop tile";
+
+  const auto defaults = nlohmann::json::parse(read_source_file_for_contract("src_assets/linux/assets/apps.json"));
+  std::vector<std::string> names;
+  for (const auto &app : defaults.at("apps")) {
+    names.push_back(app.at("name").get<std::string>());
+  }
+  EXPECT_NE(std::find(names.begin(), names.end(), "Desktop"), names.end());
+  EXPECT_EQ(std::find(names.begin(), names.end(), "Low Res Desktop"), names.end()) << "new installs no longer get the sample";
 }
 
 TEST(ProcessRuntimeConfigTests, AnEntryThatLaunchesNothingStreamsTheDesktop) {
@@ -4366,6 +4465,351 @@ TEST(ProcessRuntimeConfigTests, DesktopMirrorAppOverridesPairedVirtualDisplayPre
   EXPECT_TRUE(launch_session.user_locked_virtual_display)
     << "the semantic overrides this launch without mutating paired settings";
 }
+
+#ifdef __linux__
+// polaris#626. A host in Steam Game Mode has one screen and one Steam, and that Steam is the
+// session. Whatever a client asks for, the stream is that screen, and nothing closes that Steam.
+namespace {
+  /// Pins session_live() for one scope. An ASSERT that stops a test halfway still lets it go.
+  struct game_mode_session_pin_t {
+    explicit game_mode_session_pin_t(bool live) {
+      platf::game_mode_host::set_session_live_for_tests(live);
+    }
+
+    game_mode_session_pin_t(const game_mode_session_pin_t &) = delete;
+    game_mode_session_pin_t &operator=(const game_mode_session_pin_t &) = delete;
+
+    ~game_mode_session_pin_t() {
+      platf::game_mode_host::set_session_live_for_tests(std::nullopt);
+    }
+  };
+}  // namespace
+
+TEST(ProcessRuntimeConfigTests, EveryLaunchOnAGameModeHostIsAStreamOfTheGameModeScreen) {
+  proc::ctx_t game;
+  game.name = "A Steam Game";
+  game.desktop_mirror = false;
+
+  // A launch session holds atomics and cannot be copied, so each case asks for the same thing afresh.
+  const auto ask_for_private = [](rtsp_stream::launch_session_t &session) {
+    session.mirror_desktop = false;
+    session.virtual_display = true;
+    session.stream_mode = "headless_stream";
+  };
+
+  rtsp_stream::launch_session_t on_the_desktop;
+  {
+    const game_mode_session_pin_t desktop {false};
+    ask_for_private(on_the_desktop);
+    proc::apply_app_display_semantics(game, on_the_desktop);
+  }
+  EXPECT_FALSE(on_the_desktop.mirror_desktop) << "the same host in Desktop Mode keeps the mode that was asked for";
+  EXPECT_TRUE(on_the_desktop.virtual_display);
+
+  rtsp_stream::launch_session_t in_game_mode;
+  {
+    const game_mode_session_pin_t game_mode {true};
+    ask_for_private(in_game_mode);
+    proc::apply_app_display_semantics(game, in_game_mode);
+  }
+  EXPECT_TRUE(in_game_mode.mirror_desktop);
+  EXPECT_FALSE(in_game_mode.virtual_display);
+  EXPECT_EQ(
+    stream_display_policy::effective_session_selection_for_launch(
+      in_game_mode.stream_mode, in_game_mode.mirror_desktop, in_game_mode.virtual_display, false, false, false, true
+    ),
+    "desktop_display"
+  ) << "which is the mode the capture and input gates recognise";
+
+  // Every launch reaches that rule, not only the ones through nvhttp: the console and the browser
+  // stream start the app in execute_impl directly, before any client may have asked the host.
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  const auto execute = source.substr(source.find("int proc_t::execute_impl("));
+  const auto mirror_only = execute.find("if (app_desktop_mirror_applies(app, *launch_session)) {");
+  const auto applied = execute.find("apply_app_display_semantics(app, *launch_session);");
+  ASSERT_NE(mirror_only, std::string::npos);
+  ASSERT_NE(applied, std::string::npos);
+  const auto mirror_only_end = execute.find("\n    }\n", mirror_only);
+  ASSERT_NE(mirror_only_end, std::string::npos);
+  EXPECT_GT(applied, mirror_only_end) << "applied after that branch closes, for every app, not inside it";
+}
+
+TEST(ProcessRuntimeConfigTests, NothingClosesTheSteamThatIsRunningGameMode) {
+  bool closed = true;
+  {
+    const game_mode_session_pin_t game_mode {true};
+    closed = proc::request_desktop_steam_shutdown_for_private_stream();
+  }
+  EXPECT_FALSE(closed);
+
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  const auto shutdown = source.substr(source.find("bool request_desktop_steam_shutdown_for_private_stream()"));
+  const auto refusal = shutdown.find("if (platf::game_mode_host::session_live()) {");
+  const auto command = shutdown.find("canonical_steam_shutdown_command");
+  ASSERT_NE(refusal, std::string::npos);
+  ASSERT_NE(command, std::string::npos);
+  EXPECT_LT(refusal, command) << "the refusal comes before anything that could run steam -shutdown, for every caller";
+}
+
+TEST(ProcessRuntimeConfigTests, ALaunchOnAGameModeHostIsNeverAskedToCloseSteam) {
+  proc::ctx_t steam_title;
+  steam_title.name = "ANIMAL WELL";
+  steam_title.source = "steam";
+  steam_title.steam_appid = "813230";
+  steam_title.detached = {"setsid steam steam://rungameid/813230"};
+
+  // The same launch on a desktop host, with Steam open and a Private Stream configured, is the
+  // case the prompt exists for. Pinned, so the test says the same on a machine that is in Game Mode.
+  proc::desktop_launch_safety_policy_t desktop;
+  {
+    const game_mode_session_pin_t on_the_desktop {false};
+    desktop = proc::resolve_desktop_launch_safety_policy(true, false, false, steam_title, true, false);
+  }
+  EXPECT_TRUE(desktop.desktopSteamActive);
+  EXPECT_TRUE(desktop.canForceCloseDesktopSteamForPrivateStream);
+  EXPECT_EQ(desktop.recommendedAction, "refuse_private_stream");
+
+  proc::desktop_launch_safety_policy_t game_mode;
+  proc::desktop_launch_safety_policy_t after_shutdown;
+  {
+    const game_mode_session_pin_t in_game_mode {true};
+    game_mode = proc::resolve_desktop_launch_safety_policy(true, false, true, steam_title, true, false);
+    after_shutdown = proc::resolve_desktop_launch_safety_policy_after_shutdown(steam_title, false);
+  }
+
+  for (const auto &policy : {game_mode, after_shutdown}) {
+    EXPECT_FALSE(policy.desktopSteamActive) << "the Steam that is running is the session, not a desktop Steam";
+    EXPECT_FALSE(policy.physicalDisplayRisk) << "a client shows its prompt when either of these is set";
+    EXPECT_FALSE(policy.canForceCloseDesktopSteamForPrivateStream);
+    EXPECT_FALSE(policy.canLaunchPrivateStream);
+    EXPECT_TRUE(policy.canMirrorDesktop);
+    EXPECT_EQ(policy.recommendedAction, "mirror_desktop");
+    EXPECT_NE(policy.privateStreamUnavailableReason.find("Game Mode"), std::string::npos);
+    EXPECT_TRUE(policy.forcePrivateStreamLabel.empty()) << "there is nothing to force-close, so nothing to label";
+  }
+}
+
+TEST(ProcessRuntimeConfigTests, AClientReadingAGameModeHostsModesIsToldTheMirrorItWillRun) {
+  // Found on a Steam Deck: after Polaris restarted, Nova's library refresh read the client settings
+  // and the game list before anything asked for serverinfo. Both still named the configured Private
+  // Stream, which a Deck cannot run, so Nova planned Gamescope Stream, locked it, and refused the
+  // mirror the host answered with. The Desktop tile could not open until something else had asked.
+  const auto nvhttp = read_source_file_for_contract("src/nvhttp.cpp");
+  for (const std::string handler : {"polarisClientSettings", "polarisGames", "polarisStreamPolicy"}) {
+    const auto start = nvhttp.find("auto " + handler + " = [](resp_https_t response, req_https_t request) {");
+    ASSERT_NE(start, std::string::npos) << handler;
+    const auto next = nvhttp.find("\n    auto polaris", start + 1);
+    const auto body = nvhttp.substr(start, next == std::string::npos ? std::string::npos : next - start);
+    const auto authorised = body.find("get_verified_cert(request)");
+    const auto reconciled = body.find("reconcile_game_mode_host();");
+    ASSERT_NE(authorised, std::string::npos) << handler;
+    ASSERT_NE(reconciled, std::string::npos) << handler << " describes the host's modes, so it has to hold the Game Mode mirror first";
+    EXPECT_LT(authorised, reconciled) << handler << " asks nothing of an unpaired client";
+    const auto described = body.find("build_client_settings_json(");
+    if (described != std::string::npos) {
+      EXPECT_LT(reconciled, described) << handler << " holds the mirror before it describes the modes";
+    }
+  }
+}
+
+TEST(ProcessRuntimeConfigTests, TheProfileAGameModeHostResolvesIsTheOneItsLaunchAccepts) {
+  // A launch refuses an exact profile whose topology is not the one it ends up with. On a Steam Deck
+  // the first request after a host start was the profile request, it resolved against the
+  // configured Private Stream, and the launch, which is always a mirror in Game Mode, answered 409.
+  const auto nvhttp = read_source_file_for_contract("src/nvhttp.cpp");
+  const auto optimize = nvhttp.substr(nvhttp.find("auto polarisOptimize = [](resp_https_t response, req_https_t request) {"));
+  const auto authorised = optimize.find("get_verified_cert(request)");
+  const auto reconciled = optimize.find("reconcile_game_mode_host();");
+  const auto resolved = optimize.find("stream_display_policy::effective_session_selection_for_launch(");
+  ASSERT_NE(authorised, std::string::npos);
+  ASSERT_NE(reconciled, std::string::npos);
+  ASSERT_NE(resolved, std::string::npos);
+  EXPECT_LT(authorised, reconciled);
+  EXPECT_LT(reconciled, resolved) << "the held mode is in place before anything is resolved against it";
+
+  const auto live = optimize.find("const bool game_mode_screen = platf::game_mode_host::session_live();");
+  const auto mirror = optimize.find("const bool mirror_desktop = game_mode_screen || mirror_desktop_requested ||");
+  ASSERT_NE(live, std::string::npos);
+  ASSERT_NE(mirror, std::string::npos);
+  EXPECT_LT(mirror, resolved) << "a client that asks for another mode is still told the one the launch will use";
+
+  // Clients check the source against a fixed list, so the reason is new and the source is not.
+  const auto game_mode_branch = optimize.find("if (game_mode_screen) {");
+  ASSERT_NE(game_mode_branch, std::string::npos);
+  const auto branch_source = optimize.find("topology_source = \"host_capability\";", game_mode_branch);
+  const auto branch_reason = optimize.find("topology_reason_code = \"steam_game_mode_session\";", game_mode_branch);
+  const auto next_branch = optimize.find("} else if (mirror_desktop) {", game_mode_branch);
+  ASSERT_NE(next_branch, std::string::npos);
+  EXPECT_LT(branch_source, next_branch);
+  EXPECT_LT(branch_reason, next_branch);
+
+  // And that is the topology the launch ends up with.
+  EXPECT_EQ(
+    stream_display_policy::effective_session_selection_for_launch("gamescope_stream", true, false, false, false, false, true),
+    "desktop_display"
+  );
+  EXPECT_EQ(
+    stream_display_policy::effective_session_selection_for_launch("", true, false, false, false, false, true),
+    "desktop_display"
+  );
+}
+
+TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStreamOpened) {
+  // Remembered at launch: a Steam title, on a host in Game Mode, that was not open yet.
+  EXPECT_EQ(proc::game_mode_title_to_remember_for_tests("813230", true, false), "813230");
+  EXPECT_EQ(proc::game_mode_title_to_remember_for_tests("813230", true, true), "")
+    << "a title someone was already playing on the device is theirs, and a stream that joins it leaves it open";
+  EXPECT_EQ(proc::game_mode_title_to_remember_for_tests("813230", false, false), "")
+    << "on a desktop host the Steam cleanup is what closes the title";
+  EXPECT_EQ(proc::game_mode_title_to_remember_for_tests("", true, false), "") << "Desktop and other entries open no title";
+
+  // Acted on only when someone ends the session on purpose.
+  EXPECT_TRUE(proc::should_close_game_mode_title_for_tests("813230", true, true));
+#ifdef __linux__
+  // A Private Stream paused, then the host went into Game Mode: the resume says why it cannot come back.
+  EXPECT_TRUE(proc::game_mode_replaced_paused_topology_for_tests(true, "desktop_display", "headless_stream"));
+  EXPECT_FALSE(proc::game_mode_replaced_paused_topology_for_tests(true, "desktop_display", "desktop_display"))
+    << "a stream that paused on the Game Mode screen comes back to it";
+  EXPECT_FALSE(proc::game_mode_replaced_paused_topology_for_tests(false, "desktop_display", "headless_stream"))
+    << "outside Game Mode a changed topology is the ordinary mismatch";
+  EXPECT_FALSE(proc::game_mode_replaced_paused_topology_for_tests(true, "headless_stream", "windowed_stream"));
+#endif
+  EXPECT_FALSE(proc::should_close_game_mode_title_for_tests("813230", true, false))
+    << "a paused session timing out, a client dropping, an unpair or a restart leaves the game where it was";
+  EXPECT_FALSE(proc::should_close_game_mode_title_for_tests("", true, true));
+  EXPECT_FALSE(proc::should_close_game_mode_title_for_tests("813230", false, true))
+    << "the host left Game Mode in between, so the title went with the session";
+
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  const auto terminate = source.substr(source.find("void proc_t::terminate_impl(bool immediate, bool needs_refresh) {"));
+  const auto close_call = terminate.find("platf::steam_title::ask_to_close(_game_mode_launched_appid)");
+  const auto forgotten = terminate.find("_game_mode_launched_appid.clear();");
+  ASSERT_NE(close_call, std::string::npos);
+  ASSERT_NE(forgotten, std::string::npos);
+  EXPECT_LT(close_call, forgotten) << "asked once, then forgotten, so a later stop cannot ask a title that a new launch did not open";
+
+  std::size_t callers = 0;
+  for (auto at = source.find("steam_title::ask_to_close("); at != std::string::npos; at = source.find("steam_title::ask_to_close(", at + 1)) {
+    ++callers;
+  }
+  EXPECT_EQ(callers, 1u) << "the only thing that closes a title in Game Mode is End Session";
+
+  // What counts as ending on purpose: a stop through request_session_shutdown (End Session from a
+  // client, the Polaris session stop, the console's Disconnect), the terminate app, and end_session
+  // (the console's Close App). Each marks only the stop it runs, and the paused-session timeout
+  // and a drop of the last client go through terminate_if and terminate, which mark nothing.
+  const auto raise = source.substr(source.find("int proc_t::execute_and_raise("));
+  const auto rolled_back = raise.find("const session_end_request_scope_t ending {session_lifecycle_sync().stop_ends_session};");
+  const auto rollback_teardown = raise.find("terminate_impl(false, true);");
+  ASSERT_NE(rolled_back, std::string::npos)
+    << "a launch whose publish fails ends what it opened, or a Game Mode title stays open with no stream";
+  ASSERT_NE(rollback_teardown, std::string::npos);
+  EXPECT_LT(rolled_back, rollback_teardown);
+
+  const auto shutdown = source.substr(source.find("session_stop_result_t proc_t::request_session_shutdown("));
+  const auto marked = shutdown.find("const session_end_request_scope_t ending {sync.stop_ends_session};");
+  const auto stopped = shutdown.find("terminate_impl(false, true);");
+  ASSERT_NE(marked, std::string::npos);
+  ASSERT_NE(stopped, std::string::npos);
+  EXPECT_LT(marked, stopped);
+  // end_session() marks its stop only once that stop owns the gate: a request that loses the race
+  // to another stop must neither mark it nor clear the mark that stop set.
+  const auto stop_body = source.substr(source.find("void proc_t::stop(bool immediate, bool needs_refresh, bool ends_session) {"));
+  const auto gate = stop_body.find("_session_lifecycle_gate->begin_stop(");
+  const auto lost = stop_body.find("return;", gate);
+  const auto mark = stop_body.find("ending.emplace(session_lifecycle_sync().stop_ends_session);");
+  const auto teardown = stop_body.find("terminate_impl(immediate, needs_refresh);");
+  ASSERT_NE(gate, std::string::npos);
+  ASSERT_NE(mark, std::string::npos);
+  ASSERT_NE(teardown, std::string::npos);
+  EXPECT_LT(lost, mark);
+  EXPECT_LT(mark, teardown);
+  EXPECT_NE(source.find("void proc_t::end_session(bool immediate, bool needs_refresh) {\n    stop(immediate, needs_refresh, true);"), std::string::npos);
+  EXPECT_NE(source.find("void proc_t::terminate(bool immediate, bool needs_refresh) {\n    stop(immediate, needs_refresh, false);"), std::string::npos);
+  const auto timeout = source.substr(source.find("bool proc_t::terminate_if("), 600);
+  EXPECT_EQ(timeout.find("stop_ends_session"), std::string::npos) << "the resume timeout is not someone ending the session";
+  const auto confighttp = read_source_file_for_contract("src/confighttp.cpp");
+  const auto close_app = confighttp.substr(confighttp.find("void closeApp(resp_https_t response, req_https_t request)"), 700);
+  EXPECT_NE(close_app.find("proc::proc.end_session();"), std::string::npos);
+  // The console's Disconnect force-stops when the owner's shutdown does not stop, and Browser
+  // Stream's Stop ends the app it owns: both are someone ending the session on purpose.
+  EXPECT_NE(confighttp.find("WebUI disconnect: force-stop after outcome="), std::string::npos);
+  const auto force_stop = confighttp.substr(confighttp.find("WebUI disconnect: force-stop after outcome="), 400);
+  EXPECT_NE(force_stop.find("proc::proc.end_session();"), std::string::npos);
+  const auto browser_stop = confighttp.substr(confighttp.find("BrowserStreamStop: async terminate owned app"), 200);
+  EXPECT_NE(browser_stop.find("proc::proc.end_session(false, false);"), std::string::npos);
+
+  // And both reach proc::execute without nvhttp, so they bring the Game Mode hold in line first.
+  const auto console_launch = confighttp.substr(confighttp.find("nvhttp::reconcile_game_mode_host();"), 300);
+  EXPECT_NE(console_launch.find("nvhttp::make_launch_session(true, false, launch_args, &named_cert);"), std::string::npos);
+  const auto browser = read_source_file_for_contract("src/browser_stream.cpp");
+  const auto browser_launch = browser.substr(browser.find("nvhttp::reconcile_game_mode_host();"), 200);
+  EXPECT_NE(browser_launch.find("browser_launch_session();"), std::string::npos);
+}
+
+TEST(ProcessRuntimeConfigTests, ASteamTitleIsOneDirectLaunchInGameMode) {
+  // The Big Picture launch mode opens Big Picture, then launches the title and launches it again
+  // four seconds later. Game Mode is Big Picture already, and its Steam draws "Game already running"
+  // over the game for the second launch.
+  const std::vector<std::string> big_picture {
+    "setsid steam -gamepadui",
+    "setsid bash -lc \"sleep 6; steam steam://rungameid/813230 >/dev/null 2>&1 || true; sleep 4; exec steam -applaunch 813230 >/dev/null 2>&1 || true\"",
+    "setsid obs --startreplaybuffer",
+  };
+  const auto launched = proc::game_mode_detached_commands_for_tests(big_picture, "813230", false);
+  ASSERT_EQ(launched.size(), 2u);
+  EXPECT_NE(launched[0].find("steam steam://rungameid/813230"), std::string::npos);
+  EXPECT_EQ(launched[0].find("-applaunch"), std::string::npos);
+  EXPECT_EQ(launched[1], "setsid obs --startreplaybuffer") << "what else the app runs beside Steam still runs";
+
+  const auto joined = proc::game_mode_detached_commands_for_tests(big_picture, "813230", true);
+  EXPECT_EQ(joined, (std::vector<std::string> {"setsid obs --startreplaybuffer"}))
+    << "a title that is open already is joined, and nothing is sent to Steam";
+
+  const std::vector<std::string> direct {"setsid steam steam://rungameid/813230"};
+  EXPECT_EQ(proc::game_mode_detached_commands_for_tests(direct, "813230", false), direct);
+}
+
+TEST(ProcessRuntimeConfigTests, EndingAStreamNeverStopsTheSteamThatIsRunningGameMode) {
+  // Every Steam title and the Big Picture entry carry an undo that stops Steam, added as cleanup
+  // when the app has none of its own. Under Game Mode that Steam is the session.
+  const proc::cmd_t shutdown {"", "setsid -f steam -shutdown", false};
+  const proc::cmd_t close_big_picture {"", "setsid steam steam://close/bigpicture", false};
+  const proc::cmd_t unrelated {"", "xrandr --output HDMI-1 --auto", false};
+
+  EXPECT_TRUE(proc::should_skip_steam_stop_undo_in_game_mode_for_tests(shutdown, true));
+  EXPECT_TRUE(proc::should_skip_steam_stop_undo_in_game_mode_for_tests(close_big_picture, true));
+  EXPECT_FALSE(proc::should_skip_steam_stop_undo_in_game_mode_for_tests(unrelated, true))
+    << "an undo that has nothing to do with Steam still runs";
+
+  EXPECT_FALSE(proc::should_skip_steam_stop_undo_in_game_mode_for_tests(shutdown, false))
+    << "on a desktop host the cleanup is what closes the Steam a stream opened";
+  EXPECT_FALSE(proc::should_skip_steam_stop_undo_in_game_mode_for_tests(close_big_picture, false));
+
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  const auto undo_loop = source.substr(source.find("for (; _app_prep_it != _app_prep_begin; --_app_prep_it) {"));
+  const auto guard = undo_loop.find("should_skip_steam_stop_undo_in_game_mode(cmd, steam_is_not_this_streams)");
+  const auto forwarded = undo_loop.find("should_forward_steam_shutdown_undo_without_launch(");
+  const auto executed = undo_loop.find("Executing Undo Cmd");
+  ASSERT_NE(guard, std::string::npos);
+  ASSERT_NE(forwarded, std::string::npos);
+  ASSERT_NE(executed, std::string::npos);
+  EXPECT_LT(guard, forwarded) << "before the route that forwards a shutdown to the running Steam";
+  EXPECT_LT(guard, executed) << "and before the route that runs the undo as written";
+
+  // A stream that started in Game Mode opened no Steam of its own, so its cleanup does not stop the
+  // desktop Steam if the host has gone back to the desktop by the time the stream ends.
+  const auto terminate = source.substr(source.find("void proc_t::terminate_impl(bool immediate, bool needs_refresh) {"));
+  EXPECT_NE(terminate.find("const bool steam_is_not_this_streams = game_mode_live || _session_started_in_game_mode;"), std::string::npos);
+
+  const auto retry = source.substr(source.find("bool proc_t::retry_retained_steam_shutdown() {"));
+  const auto dropped = retry.find("if (platf::game_mode_host::session_live()) {");
+  const auto resolved = retry.find("resolve_retained_steam_shutdown_claim(");
+  ASSERT_NE(dropped, std::string::npos);
+  ASSERT_NE(resolved, std::string::npos);
+  EXPECT_LT(dropped, resolved) << "a shutdown kept from Desktop Mode is dropped, not retried against the session";
+}
+#endif
 
 class ProcessResumeDisplayTests: public testing::Test {
 protected:

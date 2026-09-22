@@ -3,6 +3,7 @@
  * @brief Default-off production dependency factory for multiseat control.
  */
 #include "multiseat_controller_production.h"
+#include "spaces_library.h"
 
 #ifdef __linux__
 
@@ -223,10 +224,13 @@ namespace multiseat {
       desktop_default_clients = loaded->catalog.desktop_default_clients;
       catalog_owner = {loaded->catalog.owner_uid, loaded->catalog.owner_gid};
       for (auto &entry : loaded->catalog.profiles) {
-        entry.storage.steam_library_enabled = !entry.archived && entry.storage.runtime_profile == runtime_profile_e::steam;
+        entry.storage.library_enabled = !entry.archived && spaces::has_library(entry.storage.runtime_profile);
+        entry.storage.host_driver_libraries =
+          options.host_driver_image && options.host_driver_image(entry.storage.image_reference);
         catalog_summary.push_back({entry.storage.profile_key, entry.name, entry.client_keys,
-          entry.storage.runtime_profile == runtime_profile_e::steam &&
-            container::supported_streaming_workload(entry.storage.runtime_profile, entry.workload), entry.archived, entry.access_clients, entry.storage.steam_library_enabled,
+          container::supported_streaming_workload(entry.storage.runtime_profile, entry.workload) ?
+            std::string(runtime_profile_name(entry.storage.runtime_profile)) : std::string {},
+          entry.archived, entry.access_clients, entry.storage.library_enabled,
           entry.storage.image_reference});
         if (std::find(options.container.workloads.begin(), options.container.workloads.end(),
               entry.workload) == options.container.workloads.end()) {
@@ -274,7 +278,7 @@ namespace multiseat {
         .runtime_profile = profile->runtime_profile,
         .workload = route.workload,
         .access_clients = route.access_clients,
-        .library_enabled = profile->steam_library_enabled,
+        .library_enabled = profile->library_enabled,
       };
       for (const auto &gpu : options.gpus) {
         resolved.logical_gpu_ids.push_back(gpu.logical_gpu_id);

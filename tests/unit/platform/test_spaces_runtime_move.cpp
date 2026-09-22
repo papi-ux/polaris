@@ -158,6 +158,27 @@ namespace {
     EXPECT_FALSE(spaces::labeled_image_runtime("latest", labeled("latest", nvidia_labels("610.57.04")).dump()));
   }
 
+  TEST(SpacesRuntimeMove, AnOlderBuildOfABorrowingRuntimeStillGetsTheDriverFiles) {
+    // Seen on the lab 2026-09-21: once the catalog listed a newer build, a Space still on the older
+    // one started with no driver files and its worker stopped with "libcuda.so.1 did not arrive".
+    const json borrowing = {{"io.polaris.multiseat.profile", "lutris"}, {"io.polaris.multiseat.media-contract", "1"},
+      {"io.polaris.multiseat.architecture", "linux/amd64"}, {"io.polaris.multiseat.nvidia.source", "host"},
+      {"io.polaris.multiseat.nvidia.contract", "1"}, {"io.polaris.multiseat.nvidia.minimum-driver", "570.00"}};
+    inspect_host_t host;
+    host.images[lab_image] = labeled(lab_image, borrowing);
+    spaces::image_runtime_cache_t cache;
+    EXPECT_TRUE(spaces::image_borrows_host_driver(host, lab_image, catalog, &cache));
+
+    host.images[lab_image] = labeled(lab_image, nvidia_labels("610.57.04"));
+    spaces::image_runtime_cache_t baked;
+    EXPECT_FALSE(spaces::image_borrows_host_driver(host, lab_image, catalog, &baked)) << "a runtime that carries its own driver";
+
+    host.images.clear();
+    spaces::image_runtime_cache_t missing;
+    EXPECT_FALSE(spaces::image_borrows_host_driver(host, lab_image, catalog, &missing)) << "an image Docker does not have";
+    EXPECT_FALSE(spaces::image_borrows_host_driver(host, "ubuntu:latest", catalog, &missing)) << "never a tag";
+  }
+
   TEST(SpacesRuntimeMove, DockerIsAskedOncePerImageAndOnlyAnswersAreKept) {
     inspect_host_t host;
     spaces::image_runtime_cache_t cache;
@@ -187,6 +208,65 @@ namespace {
     EXPECT_FALSE(spaces::driver_mismatch({true, "", "steam", "1", ""}, std::string("615.71.09")));
   }
 
+  /**
+   * The console refuses a whole snapshot it cannot verify, and says only
+   * "Could not verify Spaces". So the shape this host sends and the shape that
+   * console accepts are pinned to one file both sides read.
+   */
+  TEST(SpacesRuntimeMove, DescribesAnUpgradeExactlyAsTheConsoleExpectsIt) {
+    const std::filesystem::path source {POLARIS_SOURCE_DIR};
+    std::ifstream file(source / "tests/fixtures/spaces-runtime-upgrade.json");
+    ASSERT_TRUE(file) << "the shared shape must be readable from both languages";
+    const auto expected = json::parse(file);
+
+    std::vector<spaces::runtime_t> both {
+      {"steam-nvidia-615", "nvidia", std::string(40, 'a'), "sha256:" + std::string(64, '1'),
+       "sha256:" + std::string(64, '2'), "615.71.09"},
+    };
+    spaces::runtime_t borrowing {"steam-nvidia-host", "nvidia-host", std::string(40, 'a'),
+      "sha256:" + std::string(64, '3'), "sha256:" + std::string(64, '4'), ""};
+    borrowing.nvidia_minimum_driver = "570.00";
+    both.insert(both.begin(), borrowing);
+
+    // A Space on the runtime built for exactly this driver: nothing is broken,
+    // and the borrowing runtime is still offered.
+    const spaces::image_runtime_t current {true, "steam-nvidia-615", "steam", "1", "615.71.09"};
+    const auto upgrade = spaces::describe_space_runtime(current, std::string("615.71.09"),
+      spaces::choose_runtime(both, std::string("615.71.09")), spaces::runtime_image_e::verified);
+    EXPECT_EQ(upgrade, expected.at("upgrade"));
+
+    // And a Space built for another driver still reads as a repair.
+    const spaces::image_runtime_t older {true, "steam-nvidia-610", "steam", "1", "610.57.04"};
+    std::vector<spaces::runtime_t> baked {
+      {"steam-nvidia-615", "nvidia", std::string(40, 'a'), "sha256:" + std::string(64, '1'),
+       "sha256:" + std::string(64, '2'), "615.71.09"},
+    };
+    const auto repair = spaces::describe_space_runtime(older, std::string("615.71.09"),
+      spaces::choose_runtime(baked, std::string("615.71.09")), spaces::runtime_image_e::verified);
+    EXPECT_EQ(repair, expected.at("mismatch"));
+
+    // A Space on a borrowing image this build no longer lists, read from its
+    // own labels. Nothing is broken and no driver changed, which is exactly
+    // why nothing else would ever carry a fixed runtime to it.
+    const spaces::image_runtime_t older_borrowing {true, "", "steam", "1", "", "host"};
+    const std::vector<spaces::runtime_t> borrowing_only {borrowing};
+    const auto updated = spaces::describe_space_runtime(older_borrowing, std::string("615.71.09"),
+      spaces::choose_runtime(borrowing_only, std::string("615.71.09")), spaces::runtime_image_e::verified);
+    EXPECT_EQ(updated, expected.at("updated"));
+
+    // And a repair whose target borrows this PC's driver names no version:
+    // the reason says why the Space moves, the target says what it moves to.
+    const auto repair_to_host = spaces::describe_space_runtime(older, std::string("615.71.09"),
+      spaces::choose_runtime(both, std::string("615.71.09")), spaces::runtime_image_e::verified);
+    EXPECT_EQ(repair_to_host, expected.at("mismatch_to_host"));
+
+    // A Space already on the runtime this build would choose is offered nothing.
+    const spaces::image_runtime_t current_borrowing {true, "steam-nvidia-host", "steam", "1", "", "host"};
+    EXPECT_TRUE(spaces::describe_space_runtime(current_borrowing, std::string("615.71.09"),
+      spaces::choose_runtime(borrowing_only, std::string("615.71.09")), spaces::runtime_image_e::verified)
+        .at("runtime_move").is_null());
+  }
+
   TEST(SpacesRuntimeMove, TheSpacesPageLearnsWhyAndWhereTheSpaceCanMove) {
     const spaces::image_runtime_t made_for_610 {true, "steam-nvidia-610", "steam", "1", "610.57.04"};
     const auto choice = spaces::choose_runtime(catalog, std::string("615.71.09"));
@@ -196,7 +276,7 @@ namespace {
     EXPECT_EQ(ready["host_driver"], "615.71.09");
     EXPECT_EQ(ready["runtime_mismatch"], true);
     EXPECT_EQ(ready["runtime_move"], (json {{"available", true}, {"runtime_id", "steam-nvidia-615"},
-      {"nvidia_driver", "615.71.09"}, {"installed", true}, {"code", "runtime_ready"}}));
+      {"reason", "driver_mismatch"}, {"nvidia_driver", "615.71.09"}, {"installed", true}, {"code", "runtime_ready"}}));
     const auto absent = spaces::describe_space_runtime(made_for_610, std::string("615.71.09"), choice, spaces::runtime_image_e::absent);
     EXPECT_EQ(absent["runtime_move"]["installed"], false);
     EXPECT_EQ(absent["runtime_move"]["code"], "not_downloaded");
@@ -226,16 +306,38 @@ namespace {
     spaces::runtime_inspection_cache_t targets;
     host.images[lab_image] = labeled(lab_image, nvidia_labels("610.57.04"));
     const std::vector<profile_summary_t> profiles {
-      {"space-a", "Alex", {}, true, false, {}, true, lab_image},
-      {"space-b", "Sam", {}, true, false, {}, true, nvidia610.config_digest},
-      {"space-c", "Kai", {}, true, false, {}, true, nvidia615.config_digest},
+      {"space-a", "Alex", {}, "steam", false, {}, true, lab_image},
+      {"space-b", "Sam", {}, "steam", false, {}, true, nvidia610.config_digest},
+      {"space-c", "Kai", {}, "steam", false, {}, true, nvidia615.config_digest},
     };
-    // A PC without an NVIDIA driver cannot mismatch: Docker is not asked.
+    // A PC without an NVIDIA driver cannot mismatch, so no runtime is looked at. The one image
+    // the catalog does not name is still read from its labels, once: that is how a Space on a
+    // runtime this build has since replaced is recognised, on any graphics.
     const auto amd = spaces::describe_space_runtimes(host, profiles, catalog, std::nullopt, &images, &targets);
-    EXPECT_TRUE(host.calls.empty());
-    EXPECT_TRUE(amd["space-a"]["runtime_driver"].is_null());
+    ASSERT_EQ(host.calls.size(), 1U);
+    EXPECT_EQ(host.calls[0], (std::vector<std::string> {"image", "inspect", lab_image}));
+    EXPECT_EQ(amd["space-a"]["runtime_driver"], "610.57.04");
+    EXPECT_EQ(amd["space-a"]["runtime_mismatch"], false);
+    EXPECT_TRUE(amd["space-a"]["runtime_move"].is_null()) << "a runtime for other graphics is no update";
     EXPECT_EQ(amd["space-b"]["runtime_driver"], "610.57.04");
     EXPECT_EQ(amd["space-b"]["runtime_mismatch"], false);
+
+    // A Space without NVIDIA userspace, on a build of the default runtime this catalog no
+    // longer lists, is offered the one it does carry. It never was before, because its image
+    // was only ever read on a host with an NVIDIA driver.
+    {
+      inspect_host_t other;
+      spaces::image_runtime_cache_t other_images;
+      spaces::runtime_inspection_cache_t other_targets;
+      const std::string replaced = "sha256:" + std::string(64, 'd');
+      other.images[replaced] = labeled(replaced, {{"io.polaris.multiseat.profile", "steam"},
+        {"io.polaris.multiseat.media-contract", "1"}, {"io.polaris.multiseat.architecture", "linux/amd64"}});
+      const std::vector<profile_summary_t> older {{"space-d", "Rio", {}, "steam", false, {}, true, replaced}};
+      const auto offered = spaces::describe_space_runtimes(other, older, catalog, std::nullopt, &other_images, &other_targets);
+      ASSERT_TRUE(offered["space-d"]["runtime_move"].is_object());
+      EXPECT_EQ(offered["space-d"]["runtime_move"]["reason"], "runtime_updated");
+      EXPECT_EQ(offered["space-d"]["runtime_move"]["runtime_id"], "steam-default");
+    }
 
     host.runtimes[nvidia615.reference()] = verified(nvidia615);
     const auto nvidia = spaces::describe_space_runtimes(host, profiles, catalog, std::string("615.71.09"), &images, &targets);
@@ -255,6 +357,45 @@ namespace {
   // Opt-in and read-only, against the local Docker Engine: POLARIS_TEST_SPACES_RUNTIME_IMAGE names
   // a local runtime image ID and POLARIS_TEST_SPACES_RUNTIME_DRIVER the NVIDIA driver it was built
   // for. Only `docker image inspect` runs.
+  TEST(SpacesRuntimeMove, ThePickerListsTheLaunchersASpaceCanBeMadeForHere) {
+    inspect_host_t host;
+    spaces::runtime_inspection_cache_t targets;
+    auto heroic = catalog_runtime("heroic-default", "default", "", '7');
+    heroic.profile = "heroic";
+    auto families = catalog;
+    families.push_back(heroic);
+    const std::vector<profile_summary_t> profiles {
+      {"space-a", "Alex", {}, "steam", false, {}, true, amd_intel.config_digest},
+      {"space-z", "Gone", {}, "lutris", true, {}, true, lab_image},
+    };
+    // Steam already runs a Space here and lends the next one its image, so
+    // Docker is asked about Heroic alone. Lutris has only an archived Space
+    // and this build has no runtime for it, so it is not offered at all.
+    auto listed = spaces::describe_launchers(host, profiles, families, std::nullopt, &targets);
+    // The console reads this same file and has to accept it.
+    std::ifstream shared(std::filesystem::path {POLARIS_SOURCE_DIR} / "tests/fixtures/spaces-launchers.json");
+    ASSERT_TRUE(shared) << "the shared shape must be readable from both languages";
+    EXPECT_EQ(listed, json::parse(shared).at("launchers"));
+    ASSERT_EQ(listed.size(), 2U);
+    EXPECT_EQ(listed[0], (json {{"family", "steam"}, {"has_space", true}, {"installed", true}, {"runtime_id", ""}}));
+    EXPECT_EQ(listed[1], (json {{"family", "heroic"}, {"has_space", false}, {"installed", false}, {"runtime_id", "heroic-default"}}));
+    EXPECT_EQ(host.calls.size(), 1U);
+    // Reading the page again costs Docker nothing, and a pull is seen after it.
+    listed = spaces::describe_launchers(host, profiles, families, std::nullopt, &targets);
+    EXPECT_EQ(host.calls.size(), 1U);
+    auto here = verified(heroic);
+    here[0]["Config"]["Labels"]["io.polaris.multiseat.profile"] = "heroic";
+    here[0]["Config"]["Labels"].erase("io.polaris.multiseat.nvidia.driver");
+    host.runtimes[heroic.reference()] = here;
+    targets.forget();
+    listed = spaces::describe_launchers(host, profiles, families, std::nullopt, &targets);
+    EXPECT_EQ(listed[1]["installed"], true);
+    // A catalog that publishes Steam alone offers Steam alone, and asks nothing.
+    const auto calls = host.calls.size();
+    EXPECT_EQ(spaces::describe_launchers(host, profiles, catalog, std::nullopt, &targets).size(), 1U);
+    EXPECT_EQ(host.calls.size(), calls);
+  }
+
   TEST(SpacesRuntimeMove, PhysicalDockerReadsWhatALocalImageWasBuiltFor) {
     const char *image = std::getenv("POLARIS_TEST_SPACES_RUNTIME_IMAGE");
     const char *driver = std::getenv("POLARIS_TEST_SPACES_RUNTIME_DRIVER");
@@ -273,7 +414,7 @@ namespace {
   spaces::move_facts_t movable() {
     spaces::move_facts_t facts;
     facts.admin_available = true;
-    facts.space = profile_summary_t {"space-a", "Alex", {"client-a"}, true, false, {}, true, lab_image};
+    facts.space = profile_summary_t {"space-a", "Alex", {"client-a"}, "steam", false, {}, true, lab_image};
     facts.image = {true, "", "steam", "1", "610.57.04"};
     facts.host_driver = "615.71.09";
     facts.choice = spaces::choose_runtime(catalog, facts.host_driver);
@@ -297,6 +438,28 @@ namespace {
     EXPECT_TRUE(again.result.code.empty());
   }
 
+  TEST(SpacesRuntimeMove, ANewerBuildOfTheSameKindOfRuntimeIsOfferedAndNothingElseIs) {
+    // The image is read from its labels and is no catalog entry: an older build
+    // of the 615 runtime, which this build's catalog has since replaced.
+    auto older = movable();
+    older.image.nvidia_driver = "615.71.09";
+    const auto decision = spaces::decide_move(older, "steam-nvidia-615");
+    EXPECT_EQ(decision.result.status, 202);
+    ASSERT_TRUE(decision.target);
+    EXPECT_EQ(decision.target->id, "steam-nvidia-615");
+    // Another kind of runtime is never called an update. A Space without NVIDIA
+    // userspace on a PC that now has an NVIDIA card is a change of graphics.
+    auto other_graphics = movable();
+    other_graphics.image.nvidia_driver.clear();
+    EXPECT_EQ(spaces::decide_move(other_graphics, "steam-nvidia-615").result.code, "space_runtime_current");
+    // And the same in the other direction, which is what a PC with no NVIDIA
+    // driver loaded looks like to a Space that carries one.
+    auto no_driver = movable();
+    no_driver.host_driver.reset();
+    no_driver.choice = spaces::choose_runtime(catalog, std::nullopt);
+    EXPECT_EQ(spaces::decide_move(no_driver, "steam-default").result.code, "space_runtime_current");
+  }
+
   TEST(SpacesRuntimeMove, EveryRefusalSaysWhyAndChangesNothing) {
     struct case_t {
       const char *name;
@@ -309,7 +472,8 @@ namespace {
       {"no Spaces owner", [](auto &f) { f.admin_available = false; }, 503, "spaces_admin_unavailable"},
       {"unknown Space", [](auto &f) { f.space.reset(); }, 404, "space_unknown"},
       {"unreadable runtime", [](auto &f) { f.image = {}; }, 503, "space_runtime_unknown"},
-      {"already on this driver", [](auto &f) { f.image.nvidia_driver = "615.71.09"; }, 409, "space_runtime_current"},
+      {"already on this runtime", [](auto &f) { f.image.runtime_id = "steam-nvidia-615"; f.image.nvidia_driver = "615.71.09"; },
+        409, "space_runtime_current"},
       {"no NVIDIA driver", [](auto &f) { f.host_driver.reset(); f.choice = spaces::choose_runtime(catalog, std::nullopt); },
         409, "space_runtime_current"},
       {"AMD and Intel runtime", [](auto &f) { f.image.nvidia_driver.clear(); }, 409, "space_runtime_current"},
@@ -317,7 +481,8 @@ namespace {
         f.host_driver = "620.10.01"; f.choice = spaces::choose_runtime(catalog, f.host_driver); }, 409, "space_runtime_not_published"},
       {"stale page", [](auto &) {}, 409, "space_runtime_changed", "steam-nvidia-610"},
       {"another kind of Space", [](auto &f) { f.image.profile = "gamescope"; }, 409, "space_runtime_profile_mismatch"},
-      {"not a Steam Space", [](auto &f) { f.space->steam = false; }, 409, "space_runtime_profile_mismatch"},
+      {"a Space of another launcher family", [](auto &f) { f.space->family = "heroic"; }, 409, "space_runtime_profile_mismatch"},
+      {"a Space whose workload this build cannot stream", [](auto &f) { f.space->family = ""; }, 409, "space_runtime_profile_mismatch"},
       {"another media contract", [](auto &f) { f.image.media_contract = "2"; }, 409, "space_runtime_media_mismatch"},
       {"another account", [](auto &f) { f.home_uid = 1001; }, 409, "space_runtime_identity_mismatch"},
       {"another group", [](auto &f) { f.home_gid = 1001; }, 409, "space_runtime_identity_mismatch"},
@@ -471,6 +636,183 @@ namespace {
     EXPECT_EQ(installs, 1U);
   }
 
+  // The first Space of a launcher: the same job, with making the Space where a move would be.
+  class SpacesCreateService : public ::testing::Test {
+  protected:
+    spaces::runtime_t heroic = [] {
+      auto runtime = catalog_runtime("heroic-nvidia-host", "nvidia-host", "", '7');
+      runtime.profile = "heroic";
+      runtime.nvidia_minimum_driver = "570.00";  // a borrowing runtime is not valid without its floor
+      return runtime;
+    }();
+    spaces::create_facts_t facts {true, {heroic, {}}, spaces::runtime_image_e::absent};
+    std::atomic<unsigned> fact_reads {0}, installs {0};
+    spaces::runtime_install_result_t install_answer {true, "runtime_ready", "The approved gaming runtime is available.", {}};
+    std::deque<profile_launch_result_t> create_answers;
+    std::vector<profiles::space_create_request_t> created;
+    std::mutex mutex;
+    std::condition_variable_any changed;
+    bool hold_install = false;
+    std::unique_ptr<spaces::move_service_t> service;
+    const profiles::space_create_request_t request {"12345678-1234-4234-8234-123456789abc", "", "Player 2", "heroic"};
+    void SetUp() override {
+      install_answer.image = heroic.config_digest;
+      service = std::make_unique<spaces::move_service_t>(spaces::move_operations_t {
+        .facts = [](const spaces::move_request_t &) { return movable(); },
+        .install = [this](const spaces::runtime_t &target, std::stop_token stop) {
+          ++installs;
+          EXPECT_EQ(target.id, "heroic-nvidia-host");
+          std::unique_lock lock(mutex);
+          changed.wait(lock, stop, [&] { return !hold_install; });
+          if (stop.stop_requested()) return spaces::runtime_install_result_t {false, "download_cancelled", "Setup stopped.", {}};
+          return install_answer;
+        },
+        .move = [](const profiles::runtime_move_t &) -> profile_launch_result_t {
+          ADD_FAILURE() << "a create job never moves a Space";
+          return {500, "unexpected"};
+        },
+        .create_facts = [this](const profiles::space_create_request_t &) { ++fact_reads; return facts; },
+        .create = [this](const profiles::space_create_request_t &creation) -> profile_launch_result_t {
+          std::lock_guard lock(mutex);
+          created.push_back(creation);
+          if (create_answers.empty()) return {200, "Space created"};
+          const auto answer = create_answers.front();
+          create_answers.pop_front();
+          return answer;
+        },
+      }, 1ms);
+    }
+    void TearDown() override {
+      release();
+      service.reset();
+    }
+    void release() {
+      { std::lock_guard lock(mutex); hold_install = false; }
+      changed.notify_all();
+    }
+    json settled() {
+      for (int i = 0; i < 400 && service->active(); ++i) std::this_thread::sleep_for(5ms);
+      EXPECT_FALSE(service->active());
+      return service->snapshot();
+    }
+  };
+
+  TEST_F(SpacesCreateService, DownloadsTheRuntimeThenMakesTheFirstSpaceOfALauncher) {
+    hold_install = true;
+    EXPECT_EQ(service->submit_create(request).status, 202);
+    auto job = service->snapshot();
+    std::ifstream shared(std::filesystem::path {POLARIS_SOURCE_DIR} / "tests/fixtures/spaces-launchers.json");
+    ASSERT_TRUE(shared) << "the shared shape must be readable from both languages";
+    EXPECT_EQ(job, json::parse(shared).at("create_job")) << "the console reads this same file and has to accept it";
+    EXPECT_EQ(job["kind"], "create");
+    EXPECT_EQ(job["state"], "downloading");
+    EXPECT_EQ(job["profile_id"], "") << "the Space does not exist yet";
+    EXPECT_EQ(job["family"], "heroic");
+    EXPECT_EQ(job["name"], "Player 2");
+    EXPECT_EQ(job["runtime_id"], "heroic-nvidia-host");
+    EXPECT_EQ(job["nvidia_driver"], "");
+    // The same request joins it, and nothing else starts beside it: one
+    // download at a time, whatever it is for.
+    EXPECT_EQ(service->submit_create(request).status, 202);
+    EXPECT_EQ(service->submit({"22345678-1234-4234-8234-123456789abc", "space-a", "steam-nvidia-615"}).code, "space_move_running");
+    EXPECT_EQ(service->submit_create({"32345678-1234-4234-8234-123456789abc", "", "Player 3", "heroic"}).code, "space_move_running");
+    EXPECT_TRUE(created.empty()) << "no Space is made before its runtime is verified";
+    release();
+    job = settled();
+    EXPECT_EQ(job["state"], "done");
+    EXPECT_EQ(job["code"], "space_created");
+    ASSERT_EQ(created.size(), 1U);
+    EXPECT_EQ(created[0], request);
+    EXPECT_EQ(installs, 1U);
+    EXPECT_EQ(fact_reads, 1U);
+    // Asked again once done, it answers done and makes nothing twice.
+    EXPECT_EQ(service->submit_create(request).status, 200);
+    EXPECT_EQ(created.size(), 1U);
+    EXPECT_EQ(service->submit_create({request.request_id, "", "Someone Else", "heroic"}).code, "move_request_in_use");
+    // A move's snapshot says what it is too.
+    EXPECT_EQ(service->submit({request.request_id, "space-a", "steam-nvidia-615"}).code, "move_request_in_use");
+  }
+
+  TEST_F(SpacesCreateService, ARuntimeAlreadyHereGoesStraightToMakingTheSpace) {
+    facts.target = spaces::runtime_image_e::verified;
+    hold_install = true;
+    ASSERT_EQ(service->submit_create(request).status, 202);
+    EXPECT_EQ(service->snapshot()["state"], "creating");
+    release();
+    EXPECT_EQ(settled()["state"], "done");
+    EXPECT_EQ(installs, 1U) << "the verified image comes from the same check that would download it";
+  }
+
+  TEST_F(SpacesCreateService, AFailedDownloadMakesNoSpaceAndTheSameRequestTriesAgain) {
+    install_answer = {false, "download_incomplete", "The runtime download did not finish. Retry the same runtime to reuse verified layers.", {}};
+    ASSERT_EQ(service->submit_create(request).status, 202);
+    auto job = settled();
+    EXPECT_EQ(job["state"], "failed");
+    EXPECT_EQ(job["code"], "download_incomplete");
+    EXPECT_EQ(job["message"], "The runtime download did not finish. Retry the same runtime to reuse verified layers. The Space was not created.");
+    EXPECT_EQ(job["action"], "Create the Space again.");
+    EXPECT_TRUE(created.empty());
+    // An image the catalog does not approve for this runtime is never made into a Space.
+    install_answer = {true, "runtime_ready", "ok", nvidia615.config_digest};
+    ASSERT_EQ(service->submit_create(request).status, 202) << "the identity names the Space, so the same request is the retry";
+    job = settled();
+    EXPECT_EQ(job["code"], "runtime_verification_failed");
+    EXPECT_TRUE(created.empty());
+    install_answer.image = heroic.config_digest;
+    ASSERT_EQ(service->submit_create(request).status, 202);
+    EXPECT_EQ(settled()["state"], "done");
+    EXPECT_EQ(created.size(), 1U);
+    EXPECT_EQ(installs, 3U);
+  }
+
+  TEST_F(SpacesCreateService, TheSpacesOwnerHasTheLastWord) {
+    // Still saving is asked again; a refusal is the job's failure, in the owner's words.
+    create_answers = {{202, "The Space is still being created.", "spaces_change_pending"},
+      {409, "Stop every Space stream and wait for cleanup before changing Spaces.", "spaces_streaming", "End the running Space streams, then try again."}};
+    ASSERT_EQ(service->submit_create(request).status, 202);
+    const auto job = settled();
+    EXPECT_EQ(job["state"], "failed");
+    EXPECT_EQ(job["code"], "spaces_streaming");
+    EXPECT_EQ(job["action"], "End the running Space streams, then try again.");
+    EXPECT_EQ(created.size(), 2U);
+  }
+
+  TEST_F(SpacesCreateService, ARefusedFirstSpaceStartsNoJobAndNoDownload) {
+    struct case_t {
+      const char *name;
+      std::function<void(spaces::create_facts_t &)> change;
+      int status;
+      std::string_view code;
+    };
+    for (const auto &item : std::vector<case_t> {
+           {"no Spaces owner", [](auto &f) { f.admin_available = false; }, 503, "spaces_admin_unavailable"},
+           {"no runtime for that launcher", [](auto &f) { f.choice = {std::nullopt, "runtime_not_published"}; }, 404, "space_family_unpublished"},
+           {"host setup", [](auto &f) { f.host_setup_running = true; }, 409, "spaces_host_setup_running"},
+           {"first Space setup", [](auto &f) { f.setup_running = true; }, 409, "spaces_setup_running"},
+           {"another change", [](auto &f) { f.changing = true; }, 409, "spaces_change_running"},
+           {"a stream", [](auto &f) { f.streaming = true; }, 409, "spaces_streaming"}}) {
+      auto changed_facts = facts;
+      item.change(changed_facts);
+      const auto decision = spaces::decide_create(changed_facts);
+      EXPECT_EQ(decision.result.status, item.status) << item.name;
+      EXPECT_EQ(decision.result.code, item.code) << item.name;
+      EXPECT_FALSE(decision.result.action.empty()) << item.name;
+      EXPECT_FALSE(decision.target) << item.name;
+    }
+    facts.streaming = true;
+    const auto refused = service->submit_create(request);
+    EXPECT_EQ(refused.status, 409);
+    EXPECT_EQ(refused.code, "spaces_streaming");
+    EXPECT_TRUE(service->snapshot().is_null());
+    EXPECT_EQ(installs, 0U);
+    // A Space to copy is not a launcher's first Space, and neither is no launcher at all.
+    EXPECT_EQ(service->submit_create({request.request_id, "space-a", "Player 2", ""}).status, 400);
+    EXPECT_EQ(service->submit_create({"not-a-uuid", "", "Player 2", "heroic"}).status, 400);
+    facts.streaming = false;
+    EXPECT_EQ(service->submit_create(request).status, 202);
+    EXPECT_EQ(settled()["state"], "done");
+  }
+
   TEST_F(SpacesMoveService, AFailedOrUnapprovedDownloadNeverTouchesTheSpace) {
     install_answer = {false, "download_incomplete", "The runtime download did not finish. Retry the same runtime to reuse verified layers.", {}};
     ASSERT_EQ(service->submit(request).status, 202);
@@ -519,4 +861,23 @@ namespace {
     EXPECT_EQ(service->submit({"52345678-1234-4234-8234-123456789abc", "space-a", "steam-nvidia-615"}).code, "spaces_stopping");
   }
 }  // namespace
+
+TEST(SpacesRuntimeMove, ABorrowingImageNeverMismatchesTheLoadedDriver) {
+  spaces::runtime_t borrowing {"steam-nvidia-host", "nvidia-host", std::string(40, 'a'),
+    "sha256:" + std::string(64, '7'), "sha256:" + std::string(64, '8'), ""};
+  borrowing.nvidia_minimum_driver = "570.00";
+  spaces::runtime_t baked {"steam-nvidia-610", "nvidia", std::string(40, 'a'),
+    "sha256:" + std::string(64, '1'), "sha256:" + std::string(64, '2'), "610.57.04"};
+
+  const auto borrowed_identity = spaces::catalog_image_runtime(borrowing.config_digest, {borrowing});
+  ASSERT_TRUE(borrowed_identity);
+  EXPECT_EQ(borrowed_identity->nvidia_source, "host");
+  EXPECT_FALSE(spaces::driver_mismatch(*borrowed_identity, std::string {"615.71.09"}))
+    << "an image with no driver of its own cannot be built for another one";
+
+  const auto baked_identity = spaces::catalog_image_runtime(baked.config_digest, {baked});
+  ASSERT_TRUE(baked_identity);
+  EXPECT_TRUE(spaces::driver_mismatch(*baked_identity, std::string {"615.71.09"}));
+}
+
 #endif
