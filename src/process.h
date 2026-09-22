@@ -581,6 +581,8 @@ namespace proc {
    */
   struct ctx_t {
     std::vector<cmd_t> prep_cmds;
+    /// How many of prep_cmds came from the global list, which parsing puts ahead of the app's own.
+    std::size_t global_prep_cmd_count = 0;
     std::vector<cmd_t> state_cmds;
 
     /**

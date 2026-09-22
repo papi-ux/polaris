@@ -1204,6 +1204,53 @@ TEST(ProcessRuntimeConfigTests, TheLowResDesktopSampleIsRecognisedOnlyWhileUncha
   EXPECT_FALSE(proc::is_stock_low_res_desktop(launches));
 }
 
+TEST(ProcessRuntimeConfigTests, TheLowResDesktopSampleIsRecognisedBehindGlobalPrepCommands) {
+  // Parsing puts the host's global prep commands ahead of the app's own, so a host with any of
+  // them kept the sample in its library when the check read the first entry.
+  const auto file_path = test_paths::root() / "low_res_desktop_global_prep.json";
+  const nlohmann::json apps_file = {
+    {"version", 14},
+    {"apps", {
+      {
+        {"name", "Low Res Desktop"},
+        {"uuid", "66666666-6666-4666-8666-666666666666"},
+        {"image-path", "desktop.png"},
+        {"prep-cmd", {{{"do", "xrandr --output HDMI-1 --mode 1920x1080"}, {"undo", "xrandr --output HDMI-1 --mode 1920x1200"}}}}
+      },
+      {
+        {"name", "Low Res Desktop"},
+        {"uuid", "77777777-7777-4777-8777-777777777777"},
+        {"image-path", "desktop.png"},
+        {"exclude-global-prep-cmd", true},
+        {"prep-cmd", {{{"do", "xrandr --output HDMI-1 --mode 1920x1080"}, {"undo", "xrandr --output HDMI-1 --mode 1920x1200"}}}}
+      }
+    }}
+  };
+
+  const auto saved = config::sunshine.prep_cmds;
+  config::sunshine.prep_cmds.clear();
+  config::sunshine.prep_cmds.emplace_back(std::string {"notify-send streaming"}, std::string {""}, false);
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps_file.dump(2)), 0);
+  auto parsed_proc = proc::parse(file_path.string());
+  config::sunshine.prep_cmds = saved;
+  std::filesystem::remove(file_path);
+  ASSERT_TRUE(parsed_proc.has_value());
+
+  std::size_t recognised = 0;
+  for (const auto &app : parsed_proc->get_apps()) {
+    if (app.uuid == "66666666-6666-4666-8666-666666666666") {
+      EXPECT_EQ(app.prep_cmds.size(), 2u) << "the global command runs ahead of the sample's own";
+      EXPECT_TRUE(proc::is_stock_low_res_desktop(app));
+      ++recognised;
+    } else if (app.uuid == "77777777-7777-4777-8777-777777777777") {
+      EXPECT_EQ(app.prep_cmds.size(), 1u);
+      EXPECT_TRUE(proc::is_stock_low_res_desktop(app)) << "a sample that opts out of the global list is still the sample";
+      ++recognised;
+    }
+  }
+  EXPECT_EQ(recognised, 2u);
+}
+
 TEST(ProcessRuntimeConfigTests, TheLibraryDesktopTileIsDesktopNotTheLowResSample) {
   // Nova's desktop tile opened Low Res Desktop on every host that had both: the library left out
   // the entry named Desktop, and the sample's HDMI-1 xrandr prep command failed on each launch.
