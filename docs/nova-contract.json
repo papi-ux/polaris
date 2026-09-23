@@ -271,6 +271,7 @@
       "$comment": "Nested under game, built by build_launch_mode_contract. Aligned in both directions. An earlier revision recorded drift here because the field list was extracted from the thin launch_mode_contract_for_app wrapper, and the range ran on into steam_launch_contract_for_app and reported that object's fields instead.",
       "fields": [
         "allowed_modes",
+        "follows_host_default",
         "mode_reason",
         "preferred_mode",
         "recommended_mode"

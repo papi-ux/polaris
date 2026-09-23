@@ -1069,6 +1069,11 @@ namespace nvhttp {
         launch_mode["recommended_mode"] = recommended_mode;
         launch_mode["allowed_modes"] = std::move(allowed_modes);
         launch_mode["mode_reason"] = mode_reason;
+        // This entry is the desktop, so mirroring it is its own answer rather than a preference
+        // inherited from however this host prefers to run games. A client that took the host's
+        // default here would open the desktop on a screen the host made for games, which is a
+        // reasonable thing to ask for and a surprising thing to be given without asking.
+        launch_mode["follows_host_default"] = false;
         return launch_mode;
       }
 #else
@@ -1159,6 +1164,8 @@ namespace nvhttp {
       launch_mode["recommended_mode"] = recommended_mode;
       launch_mode["allowed_modes"] = std::move(allowed_modes);
       launch_mode["mode_reason"] = mode_reason;
+      // Everything else takes the host's configured display unless the player chose otherwise.
+      launch_mode["follows_host_default"] = true;
       return launch_mode;
     }
 

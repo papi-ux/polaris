@@ -149,6 +149,15 @@ TEST(LaunchModeContractTests, ADesktopMirrorEntryOffersOnlyWhatItCanActuallyRunI
   const auto reason = contract.at("mode_reason").get<std::string>();
   EXPECT_NE(reason.find("streams the desktop itself"), std::string::npos);
   EXPECT_EQ(reason.find("not launch-ready"), std::string::npos);
+
+  // Mirroring is this entry's own answer, not a preference borrowed from how the host runs games.
+  // A client that took the host default here would open the desktop on a screen made for games.
+  EXPECT_FALSE(contract.at("follows_host_default").get<bool>());
+
+  // Every other entry does take the host's configured display, which is the whole reason a player
+  // sets one. The desktop is the exception, so say so rather than making clients guess the rule.
+  const auto game = nvhttp::build_launch_mode_contract_for_tests(false, "Game", true, true, false);
+  EXPECT_TRUE(game.at("follows_host_default").get<bool>());
 }
 
 TEST(LaunchModeContractTests, ADesktopMirrorEntryStillOffersAScreenOfItsOwnWhenTheHostHasOne) {
