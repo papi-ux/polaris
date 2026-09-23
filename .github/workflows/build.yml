@@ -1656,13 +1656,15 @@ jobs:
           mkdir -p release-assets/staged release-assets/final
           shopt -s nullglob
           steamos_packages=(release-assets/raw/steamos3.8/*.pkg.tar.zst)
-          if [ "${#steamos_packages[@]}" -ne 1 ]; then
+          if [ "${#steamos_packages[@]}" -ne 2 ]; then
             exit 1
           fi
           cp "release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst" "release-assets/staged/Polaris-steamos3.8-x86_64.pkg.tar.zst"
           cp "release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst" "release-assets/final/Polaris-steamos3.8-x86_64.pkg.tar.zst"
+          cp "release-assets/raw/steamos3.8/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst" "release-assets/final/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst"
 
           arch_packages=()
+          arch_kms_packages=()
           arch_sources=()
           arch_signatures=()
           for arch_path in release-assets/raw/arch/*; do
@@ -1671,6 +1673,9 @@ jobs:
                 arch_signatures+=("$arch_path")
                 ;;
               *debug*.pkg.tar.*)
+                ;;
+              */polaris-kms-*.pkg.tar.*)
+                arch_kms_packages+=("$arch_path")
                 ;;
               *.pkg.tar.*)
                 arch_packages+=("$arch_path")
@@ -1685,10 +1690,17 @@ jobs:
             echo "No Arch package outputs were produced by the Arch packaging job" >&2
             exit 1
           fi
+          if [ "${#arch_kms_packages[@]}" -ne 1 ]; then
+            echo "Expected exactly one Arch polaris-kms package, found ${#arch_kms_packages[@]}" >&2
+            exit 1
+          fi
 
           arch_package_name="$(basename "${arch_packages[0]}")"
           arch_package_suffix="${arch_package_name#*.pkg.tar}"
           cp "${arch_packages[0]}" "release-assets/final/Polaris-arch-x86_64.pkg.tar${arch_package_suffix}"
+          arch_kms_name="$(basename "${arch_kms_packages[0]}")"
+          arch_kms_suffix="${arch_kms_name#*.pkg.tar}"
+          cp "${arch_kms_packages[0]}" "release-assets/final/Polaris-kms-arch-x86_64.pkg.tar${arch_kms_suffix}"
 
           if [ "${#arch_signatures[@]}" -gt 0 ]; then
             cp "${arch_signatures[0]}" "release-assets/final/Polaris-arch-x86_64.pkg.tar${arch_package_suffix}.sig"
@@ -1704,23 +1716,32 @@ jobs:
             local fedora_version="$1"
             local raw_dir="$2"
             local binary_rpms=()
+            local kms_rpms=()
             local source_rpms=()
             local rpm_path
 
+            # By name, never by position: CPack names the component packages Polaris.rpm and
+            # Polaris-kms.rpm, and Polaris-kms sorts first, so an index would publish the DRM/KMS
+            # helper as if it were Polaris.
             for rpm_path in "${raw_dir}"/*.rpm; do
-              if [[ "$rpm_path" == *.src.rpm ]]; then
-                source_rpms+=("$rpm_path")
-              else
-                binary_rpms+=("$rpm_path")
-              fi
+              case "$rpm_path" in
+                *.src.rpm) source_rpms+=("$rpm_path") ;;
+                */Polaris-kms.rpm) kms_rpms+=("$rpm_path") ;;
+                *) binary_rpms+=("$rpm_path") ;;
+              esac
             done
 
             if [ "${#binary_rpms[@]}" -eq 0 ]; then
               echo "No binary RPMs were produced for Fedora ${fedora_version}" >&2
               exit 1
             fi
+            if [ "${#kms_rpms[@]}" -ne 1 ]; then
+              echo "Expected one polaris-kms RPM for Fedora ${fedora_version}, found ${#kms_rpms[@]}" >&2
+              exit 1
+            fi
 
             cp "${binary_rpms[0]}" "release-assets/final/Polaris-fedora${fedora_version}-x86_64.rpm"
+            cp "${kms_rpms[0]}" "release-assets/final/Polaris-kms-fedora${fedora_version}-x86_64.rpm"
 
             if [ "${#source_rpms[@]}" -gt 0 ]; then
               cp "${source_rpms[0]}" "release-assets/final/Polaris-fedora${fedora_version}-src.rpm"
@@ -1730,16 +1751,25 @@ jobs:
           copy_fedora_rpms 44 release-assets/raw/fedora44
 
           ubuntu_debs=()
+          ubuntu_kms_debs=()
           for deb_path in release-assets/raw/ubuntu24.04/*.deb; do
-            ubuntu_debs+=("$deb_path")
+            case "$deb_path" in
+              */Polaris-kms.deb) ubuntu_kms_debs+=("$deb_path") ;;
+              *) ubuntu_debs+=("$deb_path") ;;
+            esac
           done
 
           if [ "${#ubuntu_debs[@]}" -eq 0 ]; then
             echo "No binary DEBs were produced for Ubuntu 24.04" >&2
             exit 1
           fi
+          if [ "${#ubuntu_kms_debs[@]}" -ne 1 ]; then
+            echo "Expected one polaris-kms DEB for Ubuntu 24.04, found ${#ubuntu_kms_debs[@]}" >&2
+            exit 1
+          fi
 
           cp "${ubuntu_debs[0]}" "release-assets/final/Polaris-ubuntu24.04-x86_64.deb"
+          cp "${ubuntu_kms_debs[0]}" "release-assets/final/Polaris-kms-ubuntu24.04-x86_64.deb"
           ls -la release-assets/staged release-assets/final
 
       - name: Revalidate release tag against packaged source
@@ -1856,6 +1886,10 @@ jobs:
             Polaris-fedora44-x86_64.rpm
             Polaris-steamos3.8-x86_64.pkg.tar.zst
             Polaris-ubuntu24.04-x86_64.deb
+            Polaris-kms-arch-x86_64.pkg.tar.zst
+            Polaris-kms-fedora44-x86_64.rpm
+            Polaris-kms-steamos3.8-x86_64.pkg.tar.zst
+            Polaris-kms-ubuntu24.04-x86_64.deb
           )
           for required_asset in "${required_binary_assets[@]}"; do
             if [[ ! " ${expected_assets[*]} " =~ " ${required_asset} " ]]; then

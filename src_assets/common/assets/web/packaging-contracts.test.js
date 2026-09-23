@@ -910,7 +910,10 @@ describe('Linux packaging contracts', () => {
     const assemblyCommands = normalizedShellCommands(assembly)
     const nullglobCommand = 'shopt -s nullglob'
     const packageArrayCommand = 'steamos_packages=(release-assets/raw/steamos3.8/*.pkg.tar.zst)'
-    const cardinalityGuard = 'if [ "${#steamos_packages[@]}" -ne 1 ]; then'
+    // Two since the DRM/KMS capture helper became its own package: Polaris and polaris-kms. The
+    // guard still exists to catch a job that produced something unexpected, and the copies below
+    // still name each file exactly, so neither can be picked by position.
+    const cardinalityGuard = 'if [ "${#steamos_packages[@]}" -ne 2 ]; then'
     const exactCopy = 'cp "release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst" "release-assets/staged/Polaris-steamos3.8-x86_64.pkg.tar.zst"'
     const stagedDestination = 'release-assets/staged/Polaris-steamos3.8-x86_64.pkg.tar.zst'
     const stagedDirectory = 'release-assets/staged'
