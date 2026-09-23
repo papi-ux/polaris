@@ -816,6 +816,9 @@ namespace args {
     std::string game_mode_advice;
     std::string service_override_advice;
     bool runtime_copy_stale = false;
+    // Whether the service runs the copy at all, stale or not. A current copy is still a copy no
+    // package owns, so the next update is still the one that silently puts it a version behind.
+    bool runtime_copy_in_use = false;
     if (const auto *target_pw = setup_target_user.empty() || setup_target_user == "root" ? nullptr : getpwnam(setup_target_user.c_str());
         target_pw && target_pw->pw_dir && target_pw->pw_dir[0] != '\0') {
       const auto game_mode = platf::game_mode_host::detect(platf::game_mode_host::default_probe(target_pw->pw_uid));
@@ -844,7 +847,9 @@ namespace args {
       const bool setup_runs_packaged_binary =
         platf::user_unit::describe_running_binary(*exe_path, POLARIS_EXECUTABLE_PATH).matches_package.value_or(false);
       if (setup_runs_packaged_binary) {
-        runtime_copy_stale = platf::user_unit::guide_runtime_copy_state(service_override, *exe_path) == platf::user_unit::runtime_copy_e::stale;
+        const auto copy_state = platf::user_unit::guide_runtime_copy_state(service_override, *exe_path);
+        runtime_copy_stale = copy_state == platf::user_unit::runtime_copy_e::stale;
+        runtime_copy_in_use = copy_state != platf::user_unit::runtime_copy_e::none;
       }
       if (!runtime_copy_stale) {
         service_override_advice = platf::user_unit::setup_host_advice(
@@ -857,7 +862,7 @@ namespace args {
     }
 
     const bool headless_boot_requested = enable_headless_boot || disable_headless_boot;
-    if (!enable_kms && !disable_kms && !headless_boot_requested && !runtime_copy_stale && udev_from_package && modules_from_package && etc_copies_absent && input_nodes_ready) {
+    if (!enable_kms && !disable_kms && !headless_boot_requested && !runtime_copy_in_use && udev_from_package && modules_from_package && etc_copies_absent && input_nodes_ready) {
       if (game_mode_advice.empty()) {
         std::cout
           << "Linux host setup: nothing to do."sv << std::endl
@@ -884,11 +889,12 @@ namespace args {
     }
 
     if (geteuid() != 0) {
-      if (runtime_copy_stale) {
+      if (runtime_copy_in_use) {
         std::cout
           << "The polaris user service for ["sv << setup_target_user << "] runs "sv << platf::user_unit::guide_runtime_copy
-          << ", a copy that no longer matches"sv << std::endl
-          << "the installed package, so the service is still running an older Polaris. Host setup refreshes it."sv << std::endl
+          << ", a copy of the binary that"sv << std::endl
+          << "no package owns"sv << (runtime_copy_stale ? ", and it no longer matches the installed package, so that service is"
+                                                          "\nrunning an older Polaris" : "") << ". Host setup moves it onto the packaged capture helper."sv << std::endl
           << std::endl;
       }
       std::cout
@@ -991,13 +997,43 @@ namespace args {
       BOOST_LOG(info) << "Linux host setup: skipping cap_sys_admin. Re-run with --enable-kms only if you need DRM/KMS capture."sv;
     }
 
-    // Refreshing the copy would put back what --disable-kms was asked to take away.
-    if (runtime_copy_stale && !disable_kms) {
-      // install(1) unlinks the old copy first, so a service still running it
-      // keeps its image and the write cannot fail with ETXTBSY.
-      const auto copy = std::string {platf::user_unit::guide_runtime_copy};
-      ok &= run_host_command("refresh the DRM/KMS runtime copy", std::format(R"(install -D -m 0755 "{}" "{}")", exe_path->string(), copy)) &&
-            run_host_command("restore the runtime copy's DRM/KMS capability", std::format(R"(setcap cap_sys_admin+ep "{}")", copy));
+    // A host that followed the old DRM/KMS recipe runs a copy of the binary that no package owns,
+    // which is why an update could leave the console running an older Polaris than rpm reported.
+    // Move it onto the packaged helper rather than refreshing the copy again, because refreshing it
+    // is what made that bug permanent. Refreshing the copy would also put back what --disable-kms
+    // was asked to take away.
+    std::string kms_migration_summary;
+    bool migrated_to_packaged_helper = false;
+    if (runtime_copy_in_use && !disable_kms && !enable_kms) {
+      const auto helper = fs::path {platf::user_unit::packaged_kms_helper};
+      std::error_code migrate_ec;
+      const bool helper_ready = fs::is_regular_file(fs::symlink_status(helper, migrate_ec)) &&
+                                !migrate_ec && file_holds_capability(helper);
+      if (helper_ready) {
+        if (enable_kms_capture(setup_target_user, kms_migration_summary)) {
+          migrated_to_packaged_helper = true;
+          const auto copy = fs::path {platf::user_unit::guide_runtime_copy};
+          if (fs::remove(copy, migrate_ec) && !migrate_ec) {
+            kms_migration_summary += "Removed " + copy.string() + ", the copy no package owned.\n";
+          }
+          if (file_holds_capability(*exe_path)) {
+            ok &= run_host_command(
+              "remove the DRM/KMS capability from the packaged binary",
+              std::format(R"(setcap -r "{}")", exe_path->string())
+            );
+          }
+        } else {
+          ok = false;
+        }
+      } else if (runtime_copy_stale) {
+        // No helper to move to yet, and this host is already running an old copy. Refresh it rather
+        // than leave it behind: a working host that cannot migrate today is not a host to break.
+        // install(1) unlinks the old copy first, so a service still running it keeps its image and
+        // the write cannot fail with ETXTBSY.
+        const auto copy = std::string {platf::user_unit::guide_runtime_copy};
+        ok &= run_host_command("refresh the DRM/KMS runtime copy", std::format(R"(install -D -m 0755 "{}" "{}")", exe_path->string(), copy)) &&
+              run_host_command("restore the runtime copy's DRM/KMS capability", std::format(R"(setcap cap_sys_admin+ep "{}")", copy));
+      }
     }
 
     if (headless_boot_requested) {
@@ -1043,12 +1079,18 @@ namespace args {
       std::cout << std::endl
                 << kms_removal_summary;
     }
-    if (runtime_copy_stale && !disable_kms) {
+    if (migrated_to_packaged_helper) {
+      std::cout << std::endl
+                << "Moved DRM/KMS capture off "sv << platf::user_unit::guide_runtime_copy << ", the copy no package owned."sv << std::endl
+                << kms_migration_summary
+                << "Updates leave this alone from now on; there is nothing to re-run after one."sv << std::endl;
+    } else if (runtime_copy_stale && !disable_kms) {
       std::cout << std::endl
                 << "Refreshed "sv << platf::user_unit::guide_runtime_copy << ", the copy the polaris user service for ["sv << setup_target_user << "] runs, from "sv << exe_path->string() << '.' << std::endl
                 << "It held another build, so that service was still running an older Polaris than the package. Restart it as "sv << setup_target_user << ':' << std::endl
                 << "  systemctl --user restart polaris"sv << std::endl
-                << "Package updates do not change the copy; run --setup-host again after each one."sv << std::endl;
+                << "Install the polaris-kms package and run this again to stop needing that: the capability"sv << std::endl
+                << "moves into a file the package manager owns, and updates stop taking it away."sv << std::endl;
     }
     if (!service_override_advice.empty()) {
       std::cout << std::endl
