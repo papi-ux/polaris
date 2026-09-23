@@ -348,8 +348,9 @@ namespace virtual_display {
     std::optional<backend_e> last_backend;
     std::string preference;  ///< The configured backend; "auto" when unset
     std::string kwin_reason;  ///< Why a KWin screen cannot be created, from the last probe
-    std::string scaled_screen;  ///< A live stream screen KWin runs at a scale other than 1
-    double scaled_screen_scale = 1.0;
+    std::string scaled_screen;  ///< A live stream screen KWin runs at a scale nobody asked for
+    double scaled_screen_scale = 1.0;  ///< What KWin runs it at
+    double scaled_screen_expected = 1.0;  ///< What this device asked for, which is 1 unless it said
     std::vector<input_route_t> input_routes;
   };
 
