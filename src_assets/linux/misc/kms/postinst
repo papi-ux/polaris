@@ -31,6 +31,10 @@ if ! getent group "$GROUP" >/dev/null 2>&1; then
     exit 0
 fi
 
+# Ownership before the capability, and never the other way round: the kernel drops
+# security.capability from a file when it is chowned, so a setcap that runs first is silently
+# undone by the chgrp that follows, and the helper ends up installed, group-owned, and unable to
+# capture anything. Nothing reports that; capture just fails at launch.
 chgrp "$GROUP" "$HELPER"
 chmod 0750 "$HELPER"
 
