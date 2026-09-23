@@ -716,6 +716,30 @@ describe('repository upgrades', () => {
     expect(state.installCommand).not.toContain('wget')
   })
 
+  it('sends a prerelease down the download path, never the repository', () => {
+    // The repository serves stable only, by rule and by its publisher refusing a prerelease. A
+    // tester who ran `dnf upgrade polaris` for a beta offer would be told there is nothing to do.
+    const state = buildUpdateCenterState({
+      currentVersion: '1.3.6',
+      latestRelease: { tag_name: 'v1.3.6', html_url: 'https://example.invalid/release', assets: [] },
+      prereleaseRelease: {
+        tag_name: 'v1.3.7-beta.1',
+        prerelease: true,
+        html_url: 'https://example.invalid/prerelease',
+        assets: [{
+          name: 'Polaris-fedora44-x86_64.rpm',
+          browser_download_url: 'https://example.invalid/Polaris-fedora44-x86_64.rpm',
+        }],
+      },
+      includePrereleases: true,
+      host: repositoryHost,
+    })
+
+    expect(state.statusLabel).toBe('Prerelease available')
+    expect(state.installCommand).not.toContain('dnf upgrade polaris')
+    expect(state.installCommand).toContain('wget --output-document=')
+  })
+
   it('still serves the download command to a host without the repository', () => {
     const state = buildUpdateCenterState({
       currentVersion: '1.3.6',
