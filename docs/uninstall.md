@@ -113,7 +113,14 @@ The package takes its binaries with it, including `polaris-spaces-setup`, plus t
 unit, the udev rules and modules-load configuration under `/usr/lib`, the desktop entries, the
 polkit policy the Spaces page asks for administrator approval with
 (`/usr/share/polkit-1/actions/dev.polaris-stream.app.Polaris.policy`) and `/usr/share/polaris`. The `uinput` and `uhid` kernel modules stay loaded until the next reboot,
-which is harmless. The KMS capture capability lives on the binary and leaves with it.
+which is harmless.
+
+If this host captures through DRM/KMS it also has the `polaris-kms` package, which carries the
+privileged capture helper. Remove it the same way and in the same command, or it is left depending
+on a Polaris that is no longer there. Run `sudo -H polaris --setup-host --disable-kms` first, while
+Polaris is still installed: that points the user service back at the packaged binary before the
+helper it names goes away, and a service pointed at a binary that no longer exists cannot start at
+all (systemd reports `status=203/EXEC`).
 
 ## 4. What the package does not take with it
 
@@ -176,10 +183,13 @@ Check each of these. On a host that only ever ran the packaged Polaris, most of 
   Settings, Controller, if you want it;
   [Steam Input and virtual controllers](configuration.md#steam-input-and-virtual-controllers)
   explains what it does.
-- **Bazzite's optional KMS copy.** If you made the writable copy of the binary for KMS capture,
-  `sudo -H polaris --setup-host --disable-kms` removes that copy, its unit drop-in and the
-  capability together, before you remove the package. The [Bazzite guide](bazzite.md#uninstall)
-  also shows the three steps by hand.
+- **An older host's KMS copy.** Polaris releases before 1.4.13 had you copy the binary to
+  `/usr/local/bin/polaris-kms` by hand for DRM/KMS capture. `sudo -H polaris --setup-host
+  --disable-kms` removes that copy, its unit drop-in and the capability together, before you remove
+  the package. The [Bazzite guide](bazzite.md#uninstall) also shows the steps by hand.
+- **The `polaris-kms` group.** Removing the package leaves the group behind, with whoever was added
+  to it still a member. It grants nothing once the helper is gone, so it is harmless to keep, and
+  `sudo groupdel polaris-kms` removes it if you would rather it were not there.
 
 ## 5. Your data
 
@@ -230,9 +240,11 @@ Follow the [quickstart](quickstart.md) or your distribution's page. Two things t
 - With `~/.config/polaris` gone, the console opens on the welcome page and asks for a new account.
   With the folder kept, it opens on the login page and your devices are still paired.
   [Web UI credentials](troubleshooting.md#web-ui-credentials) covers both.
-- KMS capture needs its capability again after every install or upgrade. Doctor says so once
-  KMS capture is configured; the fix is one command:
+- DRM/KMS capture needs the `polaris-kms` package installed alongside Polaris, and then one
+  command:
   ```bash
   sudo -H polaris --setup-host --enable-kms
   ```
-  then restart Polaris.
+  Log out and back in afterwards the first time, because a session picks up its groups at login.
+  After that it stays working: the capability belongs to the package, so an upgrade no longer
+  takes it away and there is nothing to re-run.

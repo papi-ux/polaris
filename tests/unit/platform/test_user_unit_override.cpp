@@ -207,6 +207,29 @@ TEST(UserUnitOverrideTests, SetupHostStaysQuietWhenTheServiceRunsThePackagedBina
   EXPECT_TRUE(uu::setup_host_advice(uu::effective_exec_override(scratch.drop_ins()), "deck", packaged).empty());
 }
 
+TEST(UserUnitOverrideTests, AMissingCaptureHelperIsAMissingPackageRatherThanACopyToRebuild) {
+  // The likeliest way to reach this is removing polaris-kms while a service still points at its
+  // helper. The generic advice would say to install -D a copy and setcap it by hand, which rebuilds
+  // the exact arrangement this release removed and does not work on an image-based host at all.
+  scratch_t scratch;
+  const auto packaged = scratch.file("usr/bin/polaris", "polaris 1.4.13", true);
+  scratch.file(
+    std::string {".config/systemd/user/polaris.service.d/"} + std::string {uu::kms_drop_in_name},
+    std::string {"[Service]\nExecStart=\nExecStart="} + std::string {uu::packaged_kms_helper} + "\n"
+  );
+  const auto override = uu::effective_exec_override(scratch.drop_ins());
+  ASSERT_TRUE(override.active());
+  ASSERT_TRUE(override.binary_missing);
+
+  const auto advice = uu::setup_host_advice(override, "papi", packaged);
+  EXPECT_NE(advice.find("polaris-kms"), std::string::npos);
+  EXPECT_NE(advice.find("--disable-kms"), std::string::npos);
+  EXPECT_NE(advice.find("203/EXEC"), std::string::npos);
+  // Never these: they are what the old recipe said, and following them here rebuilds it.
+  EXPECT_EQ(advice.find("install -D"), std::string::npos);
+  EXPECT_EQ(advice.find("setcap"), std::string::npos);
+}
+
 TEST(UserUnitOverrideTests, TeardownClaimsTheDropInThatPointsAtThePackagedHelper) {
   // --enable-kms points the service at the packaged helper instead of marking the binary it is
   // running, so --disable-kms has to recognise its own drop-in as well as the one the old recipe

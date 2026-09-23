@@ -290,8 +290,20 @@ namespace platf::user_unit {
     const auto binary = override.binary.string();
     const auto account = std::string {user};
     if (override.binary_missing) {
-      return "The polaris user service for [" + account + "] is overridden by " + drop_in + " to run " + binary +
-             ", which does not exist, so the service cannot start (systemd reports status=203/EXEC).\n"
+      const auto opening = "The polaris user service for [" + account + "] is overridden by " + drop_in +
+                           " to run " + binary +
+                           ", which does not exist, so the service cannot start (systemd reports status=203/EXEC).\n";
+      // The likeliest way to arrive here now is uninstalling polaris-kms while a service still
+      // points at its helper. Telling someone to hand-make a copy with setcap would rebuild the
+      // very arrangement this release removed, and on an image-based host it would not work anyway.
+      if (override.binary == std::filesystem::path {packaged_kms_helper}) {
+        return opening +
+               "That is the DRM/KMS capture helper, which belongs to the polaris-kms package. Either install it again,\n"
+               "or stop using it:\n"
+               "  sudo -H polaris --setup-host --disable-kms\n"
+               "which removes this drop-in and puts the service back on the packaged binary.\n";
+      }
+      return opening +
              "Either run the packaged binary again:\n"
              "  rm " + drop_in + "\n"
              "  systemctl --user daemon-reload\n"
@@ -315,6 +327,11 @@ namespace platf::user_unit {
              ", a copy outside the package. Package updates do not change it: after every update, run\n"
              "  sudo -H polaris --setup-host\n"
              "which refreshes the copy and its DRM/KMS capability, or remove the drop-in to run the packaged binary again.\n";
+    }
+    if (override.binary == std::filesystem::path {packaged_kms_helper}) {
+      // Nothing to warn about: this is the arrangement --enable-kms makes, and the package keeps
+      // the helper and its capability current through every update.
+      return {};
     }
     return "The polaris user service for [" + account + "] runs " + binary + " through " + drop_in +
            ", a copy outside the package. Package updates do not change it: after every update, refresh the copy\n"
