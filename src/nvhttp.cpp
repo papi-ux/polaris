@@ -9150,10 +9150,19 @@ namespace nvhttp {
       const bool has_desktop = std::any_of(apps.begin(), apps.end(), [](const auto &app) {
         return app.name == "Desktop";
       });
+      // The Virtual Display entry exists to be the one thing Desktop could not be: a screen of your
+      // own rather than the one on the desk. Desktop can be either now, and this catalog serves a
+      // client with a picker, so a second tile for the same answer is a choice made twice. It stays
+      // in /applist, which is the only route a client without a picker has to a virtual screen, and
+      // it stays here when the host cannot add a screen, so nobody loses the tile and the choice at
+      // once.
+      const bool desktop_offers_its_own_screen =
+        has_desktop && settings_metadata::host_virtual_display_available();
 
       int idx = 0;
       for (auto &app : apps) {
         if (has_desktop && proc::is_stock_low_res_desktop(app)) continue;
+        if (desktop_offers_its_own_screen && app.uuid == VIRTUAL_DISPLAY_UUID) continue;
 
         // Search filter
         if (!search_query.empty()) {
