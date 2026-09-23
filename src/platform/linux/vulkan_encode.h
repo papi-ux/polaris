@@ -59,8 +59,9 @@ namespace vk {
    *          the given FFmpeg hardware device context, resolving the query entry
    *          point exactly like FFmpeg does (same instance, same loader function),
    *          so the result matches what FFmpeg will see when it opens a session.
-   *          Each codec is queried with its most basic profile (Main, 8-bit, low
-   *          level), which is also what Polaris streams use. A codec whose query
+   *          Each codec is queried with its most basic profile (Main, 8-bit) and carries
+   *          that codec's own capabilities struct in the pNext chain exactly like FFmpeg
+   *          does - the spec requires it and RADV dereferences it unconditionally. A codec whose query
    *          fails or is unsupported reports -1 and simply does not constrain the
    *          quality level; this never aborts an encode session.
    * @param hw_device_buf FFmpeg Vulkan hardware device buffer.

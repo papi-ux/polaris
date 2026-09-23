@@ -16,6 +16,14 @@ const vkQualityMax = computed(() => {
   const max = props.config?.encoder_codec_support?.vk_quality_max
   return Number.isInteger(max) && max >= 0 ? max : 0
 })
+
+// A saved level above what the probed driver offers (or saved before any probe ran) has no
+// matching option; keep it as its own option so the select doesn't read blank. Polaris
+// clamps it to a real level when the session starts.
+const vkQualitySaved = computed(() => {
+  const value = Number(config.value.vk_quality)
+  return Number.isInteger(value) && value >= 0 && value > vkQualityMax.value ? value : null
+})
 </script>
 
 <template>
@@ -63,6 +71,8 @@ const vkQualityMax = computed(() => {
           <option value="0">{{ $t('config.vk_quality_default') }}</option>
           <!-- Levels run 0..maxQualityLevels-1; the probed driver's reported count decides how many are offered. -->
           <option v-for="level in vkQualityMax" :key="level" :value="String(level)">{{ $t('config.vk_quality_level', { level }) }}</option>
+          <!-- A saved level above the probed maximum keeps its own option so the select doesn't read blank; Polaris clamps it at session start. -->
+          <option v-if="vkQualitySaved" :key="'saved'" :value="String(vkQualitySaved)">{{ $t('config.vk_quality_unsupported', { level: vkQualitySaved }) }}</option>
         </select>
         <div class="text-sm text-storm mt-1">{{ $t('config.vk_quality_desc') }}</div>
       </div>

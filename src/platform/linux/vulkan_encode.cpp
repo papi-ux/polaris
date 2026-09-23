@@ -161,8 +161,13 @@ namespace vk {
       return -1;
     }
 
-    const auto query_codec = [&](VkVideoProfileInfoKHR &profile) -> int {
-      VkVideoEncodeCapabilitiesKHR encode_caps {VK_STRUCTURE_TYPE_VIDEO_ENCODE_CAPABILITIES_KHR};
+    // The spec requires an H.264/H.265/AV1 encode query to carry that codec's own
+    // capabilities struct in the chain (VUID-vkGetPhysicalDeviceVideoCapabilitiesKHR-
+    // pVideoProfile-07187, -07188 and -10263). RADV writes into it without checking for
+    // presence, so a query that omits it segfaults. FFmpeg chains it the same way
+    // (vulkan_encode.c: ctx->enc_caps.pNext = codec_caps), which is what this mirrors.
+    const auto query_codec = [&](VkVideoProfileInfoKHR &profile, void *codec_caps) -> int {
+      VkVideoEncodeCapabilitiesKHR encode_caps {VK_STRUCTURE_TYPE_VIDEO_ENCODE_CAPABILITIES_KHR, codec_caps};
       VkVideoCapabilitiesKHR caps {VK_STRUCTURE_TYPE_VIDEO_CAPABILITIES_KHR, &encode_caps};
       const auto result = query_caps(vk_ctx->phys_dev, &profile, &caps);
       if (result == VK_SUCCESS) {
@@ -180,8 +185,9 @@ namespace vk {
     // Polaris Vulkan streams are SDR NV12/P010, so this matches what the encoder will
     // actually use; a driver that rejects even this profile cannot encode that codec
     // here anyway and reports -1 (no constraint). The per-codec profile struct rides in
-    // the pNext chain of the generic VkVideoProfileInfoKHR, so maxQualityLevels is a
-    // pure function of codec + std profile + format.
+    // the pNext chain of the generic VkVideoProfileInfoKHR and the codec capabilities
+    // struct chains after the generic encode caps, so maxQualityLevels is a pure
+    // function of codec + std profile + format.
     int h264_levels = -1;
     {
       VkVideoEncodeH264ProfileInfoKHR profile_info {VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_PROFILE_INFO_KHR};
@@ -191,7 +197,8 @@ namespace vk {
       profile.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR;
       profile.lumaBitDepth = 8;
       profile.chromaBitDepth = 8;
-      h264_levels = query_codec(profile);
+      VkVideoEncodeH264CapabilitiesKHR codec_caps {VK_STRUCTURE_TYPE_VIDEO_ENCODE_H264_CAPABILITIES_KHR};
+      h264_levels = query_codec(profile, &codec_caps);
     }
 
     int hevc_levels = -1;
@@ -203,10 +210,15 @@ namespace vk {
       profile.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR;
       profile.lumaBitDepth = 8;
       profile.chromaBitDepth = 8;
-      hevc_levels = query_codec(profile);
+      VkVideoEncodeH265CapabilitiesKHR codec_caps {VK_STRUCTURE_TYPE_VIDEO_ENCODE_H265_CAPABILITIES_KHR};
+      hevc_levels = query_codec(profile, &codec_caps);
     }
 
     int av1_levels = -1;
+#ifdef VK_KHR_video_encode_av1
+    // The AV1 encode types only exist in Vulkan headers 1.3.302 and newer (Ubuntu
+    // 24.04 ships 1.3.275), so the query is compiled out where they are absent; AV1 on
+    // Vulkan is fail-closed anyway, and -1 simply leaves it unconstrained.
     {
       VkVideoEncodeAV1ProfileInfoKHR profile_info {VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_PROFILE_INFO_KHR};
       profile_info.stdProfile = STD_VIDEO_AV1_PROFILE_MAIN;
@@ -215,8 +227,10 @@ namespace vk {
       profile.chromaSubsampling = VK_VIDEO_CHROMA_SUBSAMPLING_420_BIT_KHR;
       profile.lumaBitDepth = 8;
       profile.chromaBitDepth = 8;
-      av1_levels = query_codec(profile);
+      VkVideoEncodeAV1CapabilitiesKHR codec_caps {VK_STRUCTURE_TYPE_VIDEO_ENCODE_AV1_CAPABILITIES_KHR};
+      av1_levels = query_codec(profile, &codec_caps);
     }
+#endif
 
     out = {h264_levels, hevc_levels, av1_levels};
     return (h264_levels >= 0 || hevc_levels >= 0 || av1_levels >= 0) ? 0 : -1;

@@ -581,8 +581,8 @@ is clamped to it when the session starts, with a warning logged. FFmpeg's own gu
 that lets a value of exactly N through, so Polaris clamps on its side instead. Because an explicit
 Vulkan selection is strict, Polaris does not fall back to another encoder for an unsupported level.
 
-On an RX 7900 XTX (RADV, navi31) the driver reports four quality levels for both H.264 and HEVC
-(`Encoder max quality: 4`), so valid values are 0–3.
+On an RX 7900 XTX (RADV, navi31) the driver reports four quality levels for both H.264 and HEVC,
+so valid values are 0–3; on a Steam Deck (VanGogh) it reports two, so only 0 and 1 are real there.
 
 ## AI provider settings
 

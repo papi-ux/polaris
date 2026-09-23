@@ -820,6 +820,7 @@
     "vk_quality_default": "Level 0 (default)",
     "vk_quality_desc": "Quality level for Vulkan Video encoding. Valid levels run 0 through one less than the driver's reported maximum; Polaris reads it during encoder probing and offers only levels the probed driver supports (level 0 until a live probe reports them). A saved value above the driver's maximum is clamped to that maximum when the session starts, with a warning logged.",
     "vk_quality_level": "Quality level {level}",
+    "vk_quality_unsupported": "Quality level {level} (not offered by this driver)",
     "vk_rc_cbr": "CBR (Constant Bitrate) (default)",
     "vk_rc_cqp": "CQP (Constant QP)",
     "vk_rc_mode": "Vulkan Rate Control",

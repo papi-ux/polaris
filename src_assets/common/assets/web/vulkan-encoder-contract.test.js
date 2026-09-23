@@ -44,6 +44,12 @@ describe('Vulkan Video settings contract', () => {
     expect(qualitySelect).toContain('<option value="0">')
     expect(qualitySelect).toMatch(/v-for="level in vkQualityMax"/)
     expect(qualitySelect).not.toMatch(/value="[1-9]"/)
+
+    // A saved level above the probed maximum (or saved before any probe ran) keeps its own
+    // option so the select doesn't read blank; Polaris clamps it when the session starts.
+    expect(locale.vk_quality_unsupported).toContain('{level}')
+    expect(encoder).toMatch(/const vkQualitySaved = computed\(\(\) => \{[\s\S]*?vkQualityMax\.value[\s\S]*?\}\)/)
+    expect(qualitySelect).toContain('v-if="vkQualitySaved"')
   })
 
   it('serves the probed Vulkan quality maximum from encoder_codec_support', () => {
