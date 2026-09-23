@@ -92,7 +92,7 @@ namespace video {
       std::function<bool(encoder_t &, bool)> validate;
     };
     thread_local const probe_test_hooks_t *probe_test_hooks = nullptr;
-    thread_local const std::function<bool(const config_t &, std::shared_ptr<void> &)> *capture_prepare_test_hook = nullptr;
+    thread_local const std::function<capture_preparation_e(const config_t &, std::shared_ptr<void> &)> *capture_prepare_test_hook = nullptr;
 #endif
 
 #ifdef __linux__
@@ -4738,7 +4738,7 @@ namespace video {
     }
   }
 
-  bool prepare_capture_for_launch(const config_t &config, std::shared_ptr<void> &preparation) {
+  capture_preparation_e prepare_capture_for_launch(const config_t &config, std::shared_ptr<void> &preparation) {
 #ifdef POLARIS_TESTS
     if (capture_prepare_test_hook) return (*capture_prepare_test_hook)(config, preparation);
 #endif
@@ -4747,23 +4747,28 @@ namespace video {
     if (config.input_only || generation.stream_mode != "desktop_display" ||
         generation.use_cage_compositor || generation.headless_mode ||
         !generation.exact_display_name.empty()) {
-      return true;
+      return capture_preparation_e::ready;
     }
     // Match capture's encoder lease and backend dispatch. Do not run a probe or
     // select a different source to obtain screen-sharing permission.
     std::shared_lock encoder_state_lock {encoder_state_mutex};
     if (!chosen_encoder) {
-      return false;
+      // Said here because the caller cannot tell this apart from a declined prompt, and because an
+      // explicit encoder that failed its probe leaves no other trace at launch time.
+      BOOST_LOG(warning) << "Capture preparation refused because no encoder is selected"sv;
+      return capture_preparation_e::no_encoder;
     }
-    return platf::prepare_desktop_capture(chosen_encoder->platform_formats->dev_type, config, preparation);
+    return platf::prepare_desktop_capture(chosen_encoder->platform_formats->dev_type, config, preparation) ?
+             capture_preparation_e::ready :
+             capture_preparation_e::not_prepared;
 #else
-    return true;
+    return capture_preparation_e::ready;
 #endif
   }
 
 #ifdef POLARIS_TESTS
   void with_capture_preparation_for_tests(
-      const std::function<bool(const config_t &, std::shared_ptr<void> &)> &prepare,
+      const std::function<capture_preparation_e(const config_t &, std::shared_ptr<void> &)> &prepare,
       const std::function<void()> &body) {
     const auto previous = capture_prepare_test_hook;
     capture_prepare_test_hook = &prepare;

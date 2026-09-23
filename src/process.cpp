@@ -7128,9 +7128,19 @@ namespace proc {
     capture_config.stream_rate = video::rate::from_millihertz(launch_session->fps);
     capture_config.framerate = static_cast<int>(std::lround(launch_session->fps / 1000.0));
     std::shared_ptr<void> preparation;
-    if (!video::prepare_capture_for_launch(capture_config, preparation)) {
-      BOOST_LOG(warning) << "process: Desktop capture preparation failed or screen sharing was cancelled"sv;
-      return launch_failure::refuse(503, "desktop_capture_not_prepared", "Desktop capture could not be prepared, or the screen sharing prompt on the host was declined.", "Approve the screen sharing prompt on the host desktop, or pick a Private Stream mode, which needs no prompt.");
+    switch (video::prepare_capture_for_launch(capture_config, preparation)) {
+      case video::capture_preparation_e::ready:
+        break;
+      case video::capture_preparation_e::no_encoder:
+        // The same refusal a failed probe raises, because that is what happened: an explicit
+        // encoder choice is strict, so a host whose encoder never validated has none selected.
+        // Blaming the screen sharing prompt here sends someone to a dialog that never appeared.
+        BOOST_LOG(warning) << "process: capture preparation refused because no encoder is selected"sv;
+        video::note_launch_refused_by_probe(false);
+        return 503;
+      case video::capture_preparation_e::not_prepared:
+        BOOST_LOG(warning) << "process: Desktop capture preparation failed or screen sharing was cancelled"sv;
+        return launch_failure::refuse(503, "desktop_capture_not_prepared", "Desktop capture could not be prepared, or the screen sharing prompt on the host was declined.", "Approve the screen sharing prompt on the host desktop, or pick a Private Stream mode, which needs no prompt.");
     }
     if (session_media::pending_start_cancelled(capture_owner.get())) {
       return launch_failure::refuse(503, "launch_cancelled", "The launch was cancelled on the host before capture started.", "Launch again.");
