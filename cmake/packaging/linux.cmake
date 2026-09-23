@@ -84,12 +84,73 @@ else()
     endif()
 endif()
 
+# The DRM/KMS capture helper.
+#
+# Capture through DRM/KMS needs CAP_SYS_ADMIN. Applying it to /usr/bin/polaris meant every install
+# and every update replaced the binary that held it, so KMS capture stopped until someone ran
+# --enable-kms again, and on an image-based host setcap on /usr is refused outright. So the
+# capability belongs to a file the package manager owns, in a package of its own that nobody
+# downloads unless they want it: the binary is 31 MiB, and most hosts never capture this way.
+#
+# 0750 root:polaris-kms rather than 0755, because a capability on a world-executable file hands
+# CAP_SYS_ADMIN to every local account. The cost is that a session picks up its groups at login, so
+# --enable-kms has to say that KMS capture starts working after a logout.
+if(NOT ${POLARIS_BUILD_APPIMAGE})
+    install(PROGRAMS "$<TARGET_FILE:polaris>"
+            DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/polaris"
+            RENAME "polaris-kms"
+            COMPONENT kms)
+    install(FILES "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/polaris-kms.sysusers"
+            DESTINATION "lib/sysusers.d"
+            RENAME "polaris-kms.conf"
+            COMPONENT kms)
+endif()
+
 # Post install
 set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/postinst")
 set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/postinst")
 
+# Two packages out of one build. The names are pinned per component because CPack otherwise
+# derives them from the component, and because the release picks assets by name.
+set(CPACK_COMPONENTS_ALL polaris kms)
+set(CPACK_COMPONENTS_GROUPING IGNORE)
+
+set(CPACK_RPM_COMPONENT_INSTALL ON)
+# The main package keeps the file name it has always had, and the helper gets one of its own.
+# Without this CPack appends the component, so the release would have to guess from a sorted
+# listing, where Polaris-kms sorts ahead of Polaris and the helper would ship as if it were Polaris.
+set(CPACK_RPM_POLARIS_FILE_NAME "Polaris.rpm")
+set(CPACK_RPM_KMS_FILE_NAME "Polaris-kms.rpm")
+set(CPACK_RPM_POLARIS_PACKAGE_NAME "polaris")
+set(CPACK_RPM_KMS_PACKAGE_NAME "polaris-kms")
+set(CPACK_RPM_KMS_PACKAGE_SUMMARY "DRM/KMS capture helper for Polaris")
+set(CPACK_RPM_KMS_PACKAGE_DESCRIPTION
+        "The privileged helper Polaris runs to capture through DRM/KMS. Install it only if you \
+capture that way; every other capture path works without it.")
+# Exactly this version of Polaris, so the two can never disagree about what the helper is.
+set(CPACK_RPM_KMS_PACKAGE_REQUIRES "polaris = ${CPACK_PACKAGE_VERSION}")
+# rpm carries file capabilities in package metadata, which is the whole point: they land on disk on
+# every install and every update, including where a runtime setcap would be refused.
+set(CPACK_RPM_KMS_USER_FILELIST
+        "%caps(cap_sys_admin=ep) %attr(0750,root,polaris-kms) ${CMAKE_INSTALL_FULL_LIBEXECDIR}/polaris/polaris-kms")
+
 # Dependencies
 set(CPACK_DEB_COMPONENT_INSTALL ON)
+set(CPACK_DEBIAN_POLARIS_FILE_NAME "Polaris.deb")
+set(CPACK_DEBIAN_KMS_FILE_NAME "Polaris-kms.deb")
+set(CPACK_DEBIAN_POLARIS_PACKAGE_NAME "polaris")
+set(CPACK_DEBIAN_KMS_PACKAGE_NAME "polaris-kms")
+set(CPACK_DEBIAN_KMS_PACKAGE_SHLIBDEPS OFF)
+# Only Polaris. Without this the helper inherits every runtime dependency of the main package,
+# which it does not use and already has through that dependency anyway.
+set(CPACK_DEBIAN_KMS_PACKAGE_DEPENDS "polaris (= ${CPACK_PACKAGE_VERSION})")
+# Its own scriptlet: the main one talks about --setup-host, and this one has real work to do.
+# dpkg runs a maintainer script only under its exact name, and CONTROL_EXTRA keeps the basename,
+# so this one lives in a directory of its own rather than being called postinst-kms and never running.
+set(CPACK_DEBIAN_KMS_PACKAGE_CONTROL_EXTRA
+        "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/kms/postinst")
+set(CPACK_DEBIAN_KMS_DESCRIPTION
+        "DRM/KMS capture helper for Polaris")
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             ${CPACK_DEB_PLATFORM_PACKAGE_DEPENDS} \
             bash, \

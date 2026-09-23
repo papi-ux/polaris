@@ -1,0 +1,46 @@
+#!/bin/sh
+# The DRM/KMS capture helper, on a deb.
+#
+# rpm carries the group, the mode and the capability in package metadata, so on Fedora this script
+# does not exist and none of the below runs. dpkg has no metadata for any of the three, so the deb
+# applies them here, on every install and every upgrade, which is the whole point: the capability
+# has to survive an update without anybody re-running a command.
+#
+# It fails closed. cap_sys_admin on a world-executable file hands CAP_SYS_ADMIN to every local
+# account, which is worse than not having KMS capture, so the capability goes on only after the
+# group exists and the helper is 0750.
+set -e
+
+HELPER=/usr/libexec/polaris/polaris-kms
+GROUP=polaris-kms
+
+[ -f "$HELPER" ] || exit 0
+
+if command -v systemd-sysusers >/dev/null 2>&1; then
+    systemd-sysusers /usr/lib/sysusers.d/polaris-kms.conf >/dev/null 2>&1 || true
+fi
+
+if ! getent group "$GROUP" >/dev/null 2>&1; then
+    addgroup --system "$GROUP" >/dev/null 2>&1 ||
+        groupadd --system "$GROUP" >/dev/null 2>&1 || true
+fi
+
+if ! getent group "$GROUP" >/dev/null 2>&1; then
+    echo "polaris-kms: could not create the $GROUP group, so the capture helper was left without" >&2
+    echo "polaris-kms: its capability. DRM/KMS capture will not work; every other capture path will." >&2
+    exit 0
+fi
+
+chgrp "$GROUP" "$HELPER"
+chmod 0750 "$HELPER"
+
+if ! setcap cap_sys_admin+ep "$HELPER" 2>/dev/null; then
+    echo "polaris-kms: could not set cap_sys_admin on $HELPER, which some filesystems refuse." >&2
+    echo "polaris-kms: DRM/KMS capture will not work; every other capture path will." >&2
+    exit 0
+fi
+
+echo "Polaris can capture through DRM/KMS once you turn it on:"
+echo "  sudo -H polaris --setup-host --enable-kms"
+
+exit 0
