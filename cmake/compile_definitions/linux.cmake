@@ -396,6 +396,14 @@ if(${POLARIS_ENABLE_VULKAN})
     list(APPEND POLARIS_TARGET_DEPENDENCIES vulkan_shaders)
 endif()
 
+if(${POLARIS_ENABLE_PYROWAVE})
+    list(APPEND POLARIS_DEFINITIONS POLARIS_BUILD_PYROWAVE=1)
+    list(APPEND POLARIS_EXTERNAL_LIBRARIES polaris_pyrowave)
+    list(APPEND PLATFORM_TARGET_FILES
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_encode.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_encode.cpp")
+endif()
+
 # wayland
 if(${POLARIS_ENABLE_WAYLAND})
     find_package(Wayland REQUIRED)

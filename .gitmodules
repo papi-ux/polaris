@@ -50,3 +50,10 @@
 	path = third-party/moonlight-common-c
 	url = https://github.com/ClassicOldSong/moonlight-common-c
 	branch = master
+[submodule "third-party/Granite"]
+	path = third-party/Granite
+	url = https://github.com/Themaister/Granite
+	branch = master
+[submodule "third-party/pyrowave"]
+	path = third-party/pyrowave
+	url = https://github.com/Themaister/pyrowave

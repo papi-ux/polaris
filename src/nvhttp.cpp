@@ -82,6 +82,9 @@
 #include "beat_times.h"
 #include "game_library_scanner.h"
 #include "platform/common.h"
+#ifdef POLARIS_BUILD_PYROWAVE
+  #include "platform/linux/pyrowave_encode.h"
+#endif
 #include "process.h"
 #include "private_state_file.h"
 #include "rtsp.h"
@@ -1182,6 +1185,21 @@ namespace nvhttp {
       return true;
 #else
       return false;
+#endif
+    }
+
+    /**
+     * @brief The PyroWave version this build carries, or empty when it carries none.
+     *
+     * Asked of the library rather than of the build system, because the two can disagree: a
+     * submodule moves, a packager links a different copy, and a codec whose own ABI is unstable
+     * before 1.0 is exactly the one to read the version out of rather than assume.
+     */
+    std::string build_pyrowave_version() {
+#ifdef POLARIS_BUILD_PYROWAVE
+      return pyrowave_encode::api_version();
+#else
+      return {};
 #endif
     }
 
@@ -8021,6 +8039,7 @@ namespace nvhttp {
       auto &build = output["build"];
       build["cuda"] = build_has_cuda();
       build["vulkan"] = build_has_vulkan();
+      build["pyrowave"] = build_pyrowave_version();
 
       // Feature flags
       auto &features = output["features"];
@@ -8240,6 +8259,7 @@ namespace nvhttp {
       auto &build = output["build"];
       build["cuda"] = build_has_cuda();
       build["vulkan"] = build_has_vulkan();
+      build["pyrowave"] = build_pyrowave_version();
 #ifdef __linux__
       output["cage_pid"] = stream_runtime::labwc::pid();
       output["screen_locked"] = session_manager::is_screen_locked();
