@@ -121,6 +121,25 @@ curl -fsS https://repo.papi-ux.com/PUBLISHED_TAG
 
 ---
 
+## Beta releases
+
+A release is sometimes published early as a beta, tagged `v1.4.13-beta.1` and
+marked as a prerelease on GitHub. A beta is the same release told early: it
+carries the version it will ship as, and it reuses that release's notes.
+
+A beta never reaches anyone who has not asked for it. GitHub keeps prereleases
+out of `releases/latest`, the repositories above never serve one, and Polaris
+mentions one only when **PreRelease Notifications** is turned on in the console's
+General tab.
+
+To try one, turn that setting on and let the Update Center offer it, or take the
+package straight from the
+[releases page](https://github.com/papi-ux/polaris/releases) and install it the
+way its release notes describe. Going back to stable means installing the stable
+package over it.
+
+---
+
 ## Where this is published from
 
 The repositories are built and served by
