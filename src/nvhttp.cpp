@@ -527,14 +527,24 @@ namespace nvhttp {
     bool app_desktop_mirror_applies_for_mode(
         const proc::ctx_t &app,
         bool explicit_mirror,
-        std::string_view requested_mode) {
+        std::string_view requested_mode,
+        bool client_selected_topology) {
       if (!app.desktop_mirror || explicit_mirror) {
         return app.desktop_mirror;
       }
       const auto effective_mode = requested_mode.empty() ?
         stream_display_policy::configured_selection() :
         lower_copy(std::string {requested_mode});
-      return effective_mode != stream_display_policy::k_desktop_takeover;
+      // Takeover has always won here, whether the client named it or the host defaults to it.
+      if (effective_mode == stream_display_policy::k_desktop_takeover) {
+        return false;
+      }
+      // A host virtual display yields only to a client that named it for this launch. A client that
+      // named nothing keeps the mirror it has always had, even on a host whose own default is a
+      // virtual display, which is what a stock Moonlight sends; so does the lower-precedence paired
+      // always-virtual preference, which is folded into the selection above rather than chosen here.
+      return !(client_selected_topology &&
+               stream_display_policy::desktop_mirror_yields_to_selection(effective_mode));
     }
 
   #if defined(__linux__)
@@ -592,7 +602,8 @@ namespace nvhttp {
         app_desktop_mirror_applies_for_mode(
           app,
           explicit_mirror,
-          session_stream_mode_requested(args)
+          session_stream_mode_requested(args),
+          !session_stream_mode_requested(args).empty()
         );
       bool private_stream_requested =
         proc::streaming_launch_requests_private_family(
@@ -635,7 +646,8 @@ namespace nvhttp {
         app_desktop_mirror_applies_for_mode(
           app,
           explicit_mirror,
-          session_stream_mode_requested(body)
+          session_stream_mode_requested(body),
+          !session_stream_mode_requested(body).empty()
         );
       bool private_stream_requested =
         proc::streaming_launch_requests_private_family(
@@ -997,7 +1009,8 @@ namespace nvhttp {
     nlohmann::json build_launch_mode_contract(bool app_prefers_virtual_display,
                                               std::string_view app_name,
                                               bool virtual_display_available,
-                                              bool prefers_headless) {
+                                              bool prefers_headless,
+                                              bool app_mirrors_desktop) {
       // preferred_mode reflects the per-game stored preference; recommended_mode reflects
       // the Polaris-supported launch mode clients should choose for this host right now.
       std::string preferred_mode;
@@ -1025,6 +1038,42 @@ namespace nvhttp {
       recommended_mode = preferred_mode;
 
       const bool steam_big_picture = boost::iequals(boost::trim_copy(std::string {app_name}), "Steam Big Picture");
+
+#ifdef __linux__
+      // An entry whose semantics are the desktop can only run where a desktop is. Private Stream,
+      // GPU-native and Gamescope all resolve back to a mirror, so advertising them asks someone to
+      // choose something that cannot happen and then quietly does something else. The honest set is
+      // the mirror, plus the two topologies that still show the real desktop when the host offers
+      // them. Answered here so the client's picker and the resolver agree before anyone presses Play.
+      if (app_mirrors_desktop) {
+        auto honest_modes = nlohmann::json::array();
+        honest_modes.push_back(std::string {stream_display_policy::k_desktop_display});
+        for (const auto &mode : allowed_modes) {
+          if (!mode.is_string()) {
+            continue;
+          }
+          const auto &value = mode.get_ref<const std::string &>();
+          if (value != stream_display_policy::k_desktop_display &&
+              stream_display_policy::desktop_mirror_yields_to_selection(value)) {
+            honest_modes.push_back(value);
+          }
+        }
+        allowed_modes = std::move(honest_modes);
+        preferred_mode = std::string {stream_display_policy::k_desktop_display};
+        recommended_mode = preferred_mode;
+        mode_reason =
+          "This entry streams the desktop itself, so it mirrors the host screen. Pick Host Virtual "
+          "Display to be given a screen of your own instead, when this host can add one.";
+        nlohmann::json launch_mode;
+        launch_mode["preferred_mode"] = preferred_mode;
+        launch_mode["recommended_mode"] = recommended_mode;
+        launch_mode["allowed_modes"] = std::move(allowed_modes);
+        launch_mode["mode_reason"] = mode_reason;
+        return launch_mode;
+      }
+#else
+      (void) app_mirrors_desktop;
+#endif
 
 #ifdef __linux__
       if (prefers_headless) {
@@ -2638,12 +2687,14 @@ namespace nvhttp {
   nlohmann::json build_launch_mode_contract_for_tests(bool app_prefers_virtual_display,
                                                       const std::string &app_name,
                                                       bool host_virtual_display_available,
-                                                      bool host_prefers_headless) {
+                                                      bool host_prefers_headless,
+                                                      bool app_mirrors_desktop) {
     return build_launch_mode_contract(
       app_prefers_virtual_display,
       app_name,
       host_virtual_display_available,
-      host_prefers_headless
+      host_prefers_headless,
+      app_mirrors_desktop
     );
   }
 
@@ -3105,7 +3156,8 @@ namespace nvhttp {
         app.virtual_display,
         app.name,
         settings_metadata::host_virtual_display_available(),
-        host_prefers_headless()
+        host_prefers_headless(),
+        app.desktop_mirror
       );
     }
 
@@ -5012,6 +5064,7 @@ namespace nvhttp {
           requested_mode : accepted_session_stream_mode(requested_mode, reject_reason);
         if (!accepted.empty()) {
           launch_session->stream_mode = accepted;
+          launch_session->client_selected_topology = true;
           BOOST_LOG(info) << "Session stream mode override requested: ["sv << accepted << ']';
         } else if (launch_session->resolved_profile_from_client) {
           BOOST_LOG(warning) << "Rejecting exact resolved launch streamMode ["sv
@@ -11427,7 +11480,8 @@ namespace nvhttp {
         (optimization_app && app_desktop_mirror_applies_for_mode(
           *optimization_app,
           mirror_desktop_requested,
-          requested_selection
+          requested_selection,
+          !requested_topology.empty()
         ));
       auto effective_selection = stream_display_policy::effective_session_selection_for_launch(
         requested_selection,

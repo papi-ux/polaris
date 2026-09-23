@@ -60,6 +60,15 @@ namespace rtsp_stream {
      *        stream size, which is what every release before this one used.
      */
     std::string virtual_display_mode;
+    /**
+     * @brief Whether this client named a topology for this launch and the host accepted it.
+     *
+     * Not the same as stream_mode being set: a paired always-virtual preference is normalised into
+     * stream_mode for clients that did not lock their display mode, and that is a host-side default
+     * rather than a choice. Only a client that asked can move an app off its desktop-mirror
+     * semantics, so a stock Moonlight keeps the behaviour it has always had.
+     */
+    bool client_selected_topology = false;
     /// Controller type this client declared last time it streamed, so the pad created
     /// before the app starts can match. Zero when nothing has been observed yet.
     int controller_type = 0;

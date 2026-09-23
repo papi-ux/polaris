@@ -234,6 +234,10 @@ namespace stream_display_policy {
     );
   }
 
+  bool desktop_mirror_yields_to_selection(std::string_view selection) {
+    return selection == k_desktop_takeover || selection == k_host_virtual_display;
+  }
+
   bool selection_session_overridable(std::string_view selection) {
     if (const auto *path = stream_path::find(selection)) {
       // Swapping the host's primary output rearranges the machine itself, so it

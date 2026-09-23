@@ -5118,11 +5118,18 @@ namespace proc {
     if (launch_session.mirror_desktop) {
       return false;
     }
-    if (!launch_session.stream_mode.empty()) {
-      return launch_session.stream_mode == stream_display_policy::k_desktop_takeover;
+    const auto selection = launch_session.stream_mode.empty() ?
+      std::string {stream_display_policy::configured_selection()} :
+      launch_session.stream_mode;
+    // Takeover has always won here, whether the client named it or the host defaults to it.
+    if (selection == stream_display_policy::k_desktop_takeover) {
+      return true;
     }
-    return stream_display_policy::configured_selection() ==
-           stream_display_policy::k_desktop_takeover;
+    // A host virtual display yields only to a client that named it. This has to answer exactly as
+    // app_desktop_mirror_applies_for_mode does on the HTTP side: the two disagreeing is how a launch
+    // comes to promise one topology and then deliver another.
+    return launch_session.client_selected_topology &&
+           stream_display_policy::desktop_mirror_yields_to_selection(selection);
   }
 
   bool app_desktop_mirror_applies(
@@ -8351,13 +8358,19 @@ namespace proc {
           double mode_fps = 0.0;
           bool mode_usable = false;
           if (second != std::string::npos) {
-            try {
-              mode_width = std::stoi(mode.substr(0, first));
-              mode_height = std::stoi(mode.substr(first + 1, second - first - 1));
-              mode_fps = std::stod(mode.substr(second + 1));
-              mode_usable = mode_width > 0 && mode_height > 0;
-            } catch (const std::exception &) {
-              mode_usable = false;
+            // parse_decimal rather than std::stod: the latter reads the process locale, so a mode
+            // carrying a fractional rate would parse differently for a host started under a locale
+            // whose decimal separator is a comma. A source contract forbids it for that reason.
+            const auto parsed_fps = util::parse_decimal<double>(mode.substr(second + 1));
+            if (parsed_fps) {
+              try {
+                mode_width = std::stoi(mode.substr(0, first));
+                mode_height = std::stoi(mode.substr(first + 1, second - first - 1));
+                mode_fps = *parsed_fps;
+                mode_usable = mode_width > 0 && mode_height > 0;
+              } catch (const std::exception &) {
+                mode_usable = false;
+              }
             }
           }
           if (mode_usable) {
