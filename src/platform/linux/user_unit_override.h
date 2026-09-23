@@ -217,6 +217,45 @@ namespace platf::user_unit {
   }
 
   /**
+   * @brief What has to go for a host to stop having DRM/KMS capture.
+   *
+   * Three things each keep it alive on their own: the capability on the packaged binary, the guide's
+   * copy of the binary, which carries a capability of its own, and the drop-in that points the user
+   * service at that copy. The order matters in one direction only. A copy removed while its drop-in
+   * survives leaves a service that cannot exec, which systemd reports as status=203/EXEC and nothing
+   * else explains, so the drop-in goes first.
+   *
+   * The plan is separate from carrying it out because carrying it out needs root, a child process
+   * and somebody's home directory, and this is the part worth testing.
+   */
+  struct kms_teardown_t {
+    std::filesystem::path drop_in;  ///< the drop-in to remove because it points the service at the copy; empty when none does
+    bool remove_guide_copy = false;  ///< the guide's copy is there to remove, and its capability leaves with it
+    bool clear_binary_capability = false;  ///< the packaged binary carries cap_sys_admin
+
+    bool empty() const {
+      return drop_in.empty() && !remove_guide_copy && !clear_binary_capability;
+    }
+  };
+
+  inline kms_teardown_t kms_teardown_plan(
+    const exec_override_t &override,
+    bool binary_holds_capability,
+    bool guide_copy_exists,
+    const std::filesystem::path &guide_copy = std::filesystem::path {guide_runtime_copy}
+  ) {
+    kms_teardown_t plan;
+    plan.clear_binary_capability = binary_holds_capability;
+    plan.remove_guide_copy = guide_copy_exists;
+    // Only a drop-in that points at the copy is this feature's to remove. Someone who pointed the
+    // service at a build tree of their own is not running the KMS recipe, and their drop-in stays.
+    if (override.active() && override.binary == guide_copy) {
+      plan.drop_in = override.drop_in;
+    }
+    return plan;
+  }
+
+  /**
    * @brief What --setup-host should say about the account's service override, or nothing.
    * @param packaged_exe The binary running --setup-host, which is the one a copy should be refreshed from.
    * @param guide_copy The copy this --setup-host refreshes by itself; empty when it is not the packaged binary and will not.
