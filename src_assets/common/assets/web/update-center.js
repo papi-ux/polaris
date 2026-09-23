@@ -395,7 +395,10 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
   // same package with one line and no exact filename to get wrong. The download
   // path stays for hosts without the repository, which is still every host that
   // has not opted in.
-  const repositoryCommand = buildRepositoryUpgradeCommand(host)
+  // A repository never carries a prerelease: the publisher refuses to assemble one, so
+  // `dnf upgrade polaris` on a beta offer answers "nothing to do" and reads like the beta failed
+  // to install. A prerelease is always the download path.
+  const repositoryCommand = candidateRelease.prerelease ? '' : buildRepositoryUpgradeCommand(host)
   const installCommand = repositoryCommand ||
     (asset ? buildManualInstallCommand(asset, { ...host, packageFamily }) : '')
   const releaseUrl = candidateRelease.html_url || ''
