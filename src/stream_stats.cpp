@@ -965,15 +965,17 @@ namespace stream_stats {
 
       if (!notes.scaled_screen.empty()) {
         const auto percent = std::to_string(static_cast<int>(notes.scaled_screen_scale * 100.0 + 0.5));
+        const auto asked = std::to_string(static_cast<int>(notes.scaled_screen_expected * 100.0 + 0.5));
         warnings.push_back({
           {"id", "hvd_screen_scaled"},
           {"severity", "warning"},
           {"message", "KWin runs the stream screen [" + notes.scaled_screen + "] at " + percent +
-                        "% scale, from a layout it stored for that screen. Everything on it is drawn larger, and "
-                        "its desktop is smaller than the stream's resolution."},
-          {"action", "While a stream is running, set that screen to 100% in System Settings, under Display & "
-                     "Monitor; KWin keeps the choice for next time. Or set Host Virtual Display Backend to "
-                     "Automatic, so Plasma gets Polaris's own KWin screen, which Polaris always puts at 100%."}
+                        "% scale rather than the " + asked + "% this device asked for, from a layout it stored "
+                        "for that screen. Its desktop is not the size the client expects, so everything on it is "
+                        "drawn at the wrong size."},
+          {"action", "While a stream is running, set that screen to " + asked + "% in System Settings, under "
+                     "Display & Monitor; KWin keeps the choice for next time. Or set Host Virtual Display Backend "
+                     "to Automatic, so Plasma gets Polaris's own KWin screen, which Polaris scales itself."}
         });
       }
 

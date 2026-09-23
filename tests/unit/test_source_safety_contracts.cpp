@@ -1103,7 +1103,9 @@ TEST(SourceSafetyContracts, VirtualDisplayCreateSerializesCleanupCreationAndPers
   const auto cleanup_end = source.find("#ifdef POLARIS_TESTS", cleanup_entry);
   const auto cleanup_body = source.substr(cleanup_entry, cleanup_end - cleanup_entry);
   const auto cleanup_lock = cleanup_body.find("std::lock_guard creation_lock {creation_mutex}");
-  const auto create = source.find("std::optional<vdisplay_t> create(int width, int height, int fps)", cleanup_entry);
+  // The scale joined the signature when a created screen stopped assuming it was 1. The order this
+  // test guards is what matters: lock, then cleanup, then choose a backend, then persist.
+  const auto create = source.find("std::optional<vdisplay_t> create(int width, int height, int fps, double scale)", cleanup_entry);
   const auto create_end = source.find("bool destroy(vdisplay_t &display)", create);
   const auto destroy_lock = source.find("std::lock_guard creation_lock {creation_mutex}", create_end);
   ASSERT_NE(mutex, std::string::npos);
@@ -1330,7 +1332,7 @@ TEST(SourceSafetyContracts, KwinVirtualScreenIsProvenPlacedAndHeldSafely) {
   // one is measured against them as they were: pc-papi's DP-2 moved to 1024,0
   // on every stream when x came from the layout read after KWin had moved it.
   const auto keep_positions = body.find("kwin_keep_positions_args(name, layout_before)", place_body);
-  const auto placement = body.find("kwin_placement_args(name, x)", place_body);
+  const auto placement = body.find("kwin_placement_args(name, x, display.scale)", place_body);
   ASSERT_NE(keep_positions, std::string::npos);
   ASSERT_NE(placement, std::string::npos);
   EXPECT_LT(custom_mode, keep_positions);

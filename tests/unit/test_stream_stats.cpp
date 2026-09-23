@@ -1004,7 +1004,20 @@ TEST(StreamStatsDoctorTests, NamesTheHostVirtualDisplayProblemsFoundOnPlasma) {
   const auto *scaled = warning_with_id(warnings, "hvd_screen_scaled");
   ASSERT_NE(scaled, nullptr);
   EXPECT_NE(scaled->at("message").get<std::string>().find("[DVI-I-1] at 135%"), std::string::npos);
+  // Against what was asked for, so the advice sends someone to the number they chose rather than
+  // to 100% on a screen they deliberately made readable at 200%.
+  EXPECT_NE(scaled->at("message").get<std::string>().find("rather than the 100%"), std::string::npos);
   EXPECT_NE(scaled->at("action").get<std::string>().find("100%"), std::string::npos);
+
+  notes.scaled_screen_expected = 2.0;
+  virtual_display::set_doctor_notes_for_tests(notes);
+  const auto asked_two = host_virtual_display_warnings();
+  const auto *scaled_two = warning_with_id(asked_two, "hvd_screen_scaled");
+  ASSERT_NE(scaled_two, nullptr);
+  EXPECT_NE(scaled_two->at("message").get<std::string>().find("rather than the 200%"), std::string::npos);
+  EXPECT_NE(scaled_two->at("action").get<std::string>().find("200%"), std::string::npos);
+  notes.scaled_screen_expected = 1.0;
+  virtual_display::set_doctor_notes_for_tests(notes);
 
   const auto *unused = warning_with_id(warnings, "hvd_kwin_screen_unused");
   ASSERT_NE(unused, nullptr);

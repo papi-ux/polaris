@@ -48,11 +48,15 @@ namespace kwin_virtual_output {
   /**
    * @brief Ask KWin for a new output and hold its anchor stream.
    * @param request_name The name to ask for; KWin publishes `Virtual-<request_name>`.
+   * @param scale How many pixels the screen puts in a point, so a phone-sized
+   *        panel gets a desktop it can be read at. KWin takes width and height
+   *        as the pixel mode, so the scale divides the logical size rather than
+   *        multiplying the mode: 2560x1600 at 2 is a 1280x800 desktop, sharp.
    * @param error Set to the reason when this returns nullopt.
    * @return nullopt when KWin refused, or the output did not appear as a new
    *         output with exactly the expected name. Nothing is held then.
    */
-  std::optional<created_t> create(const std::string &request_name, int width, int height, std::string &error);
+  std::optional<created_t> create(const std::string &request_name, int width, int height, double scale, std::string &error);
 
   /** @brief Whether this process image holds the anchor for an output. */
   bool anchored(const std::string &output_name);

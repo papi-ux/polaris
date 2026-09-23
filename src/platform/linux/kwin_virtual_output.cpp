@@ -463,7 +463,7 @@ namespace kwin_virtual_output {
     return connection.names();
   }
 
-  std::optional<created_t> create(const std::string &request_name, int width, int height, std::string &error) {
+  std::optional<created_t> create(const std::string &request_name, int width, int height, double scale, std::string &error) {
     const auto permission = kwingrab::ensure_screencast_permission();
     auto anchor = std::make_unique<anchor_t>();
     anchor->connection = connect(true, permission == kwingrab::permission_e::written);
@@ -496,7 +496,10 @@ namespace kwin_virtual_output {
       output_description,
       width,
       height,
-      wl_fixed_from_double(1.0),
+      // Asked for here as well as set through kscreen afterwards, so the screen is born the size
+      // it will stay. Polaris still verifies the pixel mode after placement and corrects it, which
+      // is what catches a KWin that reads these two as a logical size instead.
+      wl_fixed_from_double(scale > 0.0 ? scale : 1.0),
       ZKDE_SCREENCAST_UNSTABLE_V1_POINTER_HIDDEN
     );
     zkde_screencast_stream_unstable_v1_add_listener(anchor->stream, &anchor_t::stream_listener, anchor.get());
