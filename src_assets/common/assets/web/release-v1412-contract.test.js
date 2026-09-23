@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 const read = (path) => readFileSync(join(process.cwd(), path), 'utf8')
 
-const currentRelease = () => {
+const historicalRelease = () => {
   const changelog = read('docs/changelog.md')
   const start = changelog.indexOf('## v1.4.12 - 2026-09-22')
   const end = changelog.indexOf('## v1.4.11 - 2026-09-19')
@@ -13,7 +13,7 @@ const currentRelease = () => {
   return changelog.slice(start, end)
 }
 
-const currentNotes = () => read('docs/release-notes/v1.4.12.md')
+const historicalNotes = () => read('docs/release-notes/v1.4.12.md')
 
 const expectedAssets = [
   'Polaris-arch-x86_64.pkg.tar.zst',
@@ -23,18 +23,9 @@ const expectedAssets = [
 ].sort()
 const withdrawnSysextAsset = 'Polaris-sysext-x86_64.raw'
 
-describe('v1.4.12 release contract', () => {
-  it('pins the version every packaging surface agrees on', () => {
-    expect(read('CMakeLists.txt')).toContain('project(Polaris VERSION 1.4.12')
-    expect(read('docs/benchmark-control-openapi.json')).toContain('"collector_version": "1.4.12"')
-    expect(read('packaging/linux/SteamOS/namcap-reviewed-warnings.txt')).toContain(
-      'usr/bin/polaris-1.4.12',
-    )
-    expect(read('scripts/ci/build-steamos-package.sh')).toContain("'polaris|1.4.12-1|x86_64'")
-  })
-
+describe('historical v1.4.12 release contract', () => {
   it('leads with the Steam Deck, launcher Spaces and Watch, and says which Nova goes with it', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     const intro = notes.split('\n')[2]
     expect(intro).toMatch(/^Your Steam Deck is a streaming host now, Game Mode and all/)
     expect(intro).toContain('Polaris 1.4.12 is matched with Nova 1.4.12')
@@ -70,7 +61,7 @@ describe('v1.4.12 release contract', () => {
   })
 
   it('names every change in the changelog section', () => {
-    const section = currentRelease()
+    const section = historicalRelease()
     for (const fact of [
       'A host in Steam Game Mode streams the Game Mode screen',
       'A Steam title launched from a client on a Game Mode host opens in Game Mode',
@@ -90,7 +81,7 @@ describe('v1.4.12 release contract', () => {
   })
 
   it('keeps the heads up honest about runtimes, Heroic, SteamOS, KMS and packaging', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     const headsUp = notes.slice(notes.indexOf('**Heads up**'))
     for (const fact of [
       'A Space keeps its runtime until you move it',
@@ -108,7 +99,7 @@ describe('v1.4.12 release contract', () => {
   })
 
   it('ships exactly the four supported packages and installs them from this tag', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     const blocks = [...notes.matchAll(/```bash\n([\s\S]*?)\n```/g)]
       .map((match) => match[1])
       .filter((block) => block.includes('wget --output-document='))
@@ -127,7 +118,7 @@ describe('v1.4.12 release contract', () => {
   })
 
   it('closes the changelog section with the exact four-asset sentence and no stray blank line', () => {
-    const lines = currentRelease().trimEnd().split('\n')
+    const lines = historicalRelease().trimEnd().split('\n')
     const bullets = lines.filter((line) => line.startsWith('- '))
     expect(bullets.at(-1)).toContain(
       'Keeps exactly `Polaris-arch-x86_64.pkg.tar.zst`, `Polaris-fedora44-x86_64.rpm`, ' +
