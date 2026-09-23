@@ -14,7 +14,13 @@
 
 #include "pyrowave.h"
 
+extern "C" {
+#include <libavutil/pixfmt.h>
+#include <libswscale/swscale.h>
+}
+
 // standard includes
+#include <array>
 #include <mutex>
 
 // local includes
@@ -57,9 +63,46 @@ namespace pyrowave_encode {
           height {height} {}
 
       ~pyrowave_session_t() override {
+        if (scaler) {
+          sws_freeContext(scaler);
+        }
         if (encoder) {
           pyrowave_encoder_destroy(encoder);
         }
+      }
+
+      bool encode_bgra(const uint8_t *bgra, int stride, std::size_t max_bytes) override {
+        if (!bgra || stride <= 0) {
+          return false;
+        }
+
+        // Kept between frames: a stream is thousands of identically shaped frames, and building
+        // the scaler for each one would dominate a codec that encodes in a tenth of a millisecond.
+        if (!scaler) {
+          scaler = sws_getContext(width, height, AV_PIX_FMT_BGRA,
+                                  width, height, AV_PIX_FMT_YUV420P,
+                                  SWS_POINT, nullptr, nullptr, nullptr);
+          if (!scaler) {
+            BOOST_LOG(error) << "PyroWave: could not make a "sv << width << 'x' << height
+                             << " colour converter"sv;
+            return false;
+          }
+          planes[0].resize(static_cast<std::size_t>(width) * height);
+          planes[1].resize(static_cast<std::size_t>(width / 2) * (height / 2));
+          planes[2].resize(static_cast<std::size_t>(width / 2) * (height / 2));
+        }
+
+        const uint8_t *src[4] = {bgra, nullptr, nullptr, nullptr};
+        const int src_stride[4] = {stride, 0, 0, 0};
+        uint8_t *dst[4] = {planes[0].data(), planes[1].data(), planes[2].data(), nullptr};
+        const int dst_stride[4] = {width, width / 2, width / 2, 0};
+
+        if (sws_scale(scaler, src, src_stride, 0, height, dst, dst_stride) != height) {
+          BOOST_LOG(warning) << "PyroWave: colour conversion did not fill the frame"sv;
+          return false;
+        }
+
+        return encode(planes[0].data(), planes[1].data(), planes[2].data(), max_bytes);
       }
 
       bool encode(const uint8_t *y, const uint8_t *u, const uint8_t *v, std::size_t max_bytes) override {
@@ -128,6 +171,8 @@ namespace pyrowave_encode {
       pyrowave_encoder encoder = nullptr;
       int width = 0;
       int height = 0;
+      SwsContext *scaler = nullptr;
+      std::array<std::vector<uint8_t>, 3> planes;
     };
 
   }  // namespace

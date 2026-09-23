@@ -57,6 +57,19 @@ namespace pyrowave_encode {
     virtual bool encode(const uint8_t *y, const uint8_t *u, const uint8_t *v, std::size_t max_bytes) = 0;
 
     /**
+     * @brief Encode one frame from packed BGRA in host memory.
+     *
+     * What capture actually hands over. The conversion to planar YUV happens here, on the CPU,
+     * which is the bring-up path: it works against every capture backend without importing a
+     * buffer, and it is the wrong way to do it once a dmabuf can reach the GPU directly.
+     * @param bgra First byte of the top left pixel.
+     * @param stride Bytes per row, which capture rarely makes equal to width times four.
+     * @param max_bytes The most this frame may occupy.
+     * @return false when the frame could not be converted or encoded.
+     */
+    virtual bool encode_bgra(const uint8_t *bgra, int stride, std::size_t max_bytes) = 0;
+
+    /**
      * @brief The encoded frame, split at a boundary the network can carry.
      *
      * Every packet is independent: PyroWave codes 64x64 blocks of coefficients in isolation, so a
