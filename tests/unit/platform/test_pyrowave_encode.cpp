@@ -142,6 +142,54 @@ TEST(PyroWaveEncodeTests, ThePacketBoundaryIsASplitTargetAndNotACap) {
   }
 }
 
+TEST(PyroWaveEncodeTests, EncodesTheBgraFrameCaptureActuallyHandsOver) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  auto session = pyrowave_encode::make_session(width, height);
+  ASSERT_NE(session, nullptr);
+
+  // A padded stride, because capture rarely hands over rows packed to exactly four bytes a pixel
+  // and a converter that assumes it produces a sheared picture rather than an error.
+  constexpr int stride = (width + 37) * 4;
+  std::vector<uint8_t> bgra(static_cast<std::size_t>(stride) * height, 0);
+  for (int row = 0; row < height; ++row) {
+    for (int col = 0; col < width; ++col) {
+      auto *pixel = &bgra[static_cast<std::size_t>(row) * stride + static_cast<std::size_t>(col) * 4];
+      pixel[0] = static_cast<uint8_t>(3 * col);
+      pixel[1] = static_cast<uint8_t>(5 * row);
+      pixel[2] = static_cast<uint8_t>(col + row);
+      pixel[3] = 0xff;
+    }
+  }
+
+  ASSERT_TRUE(session->encode_bgra(bgra.data(), stride, 256 * 1024));
+  const auto packets = session->packets(1024);
+  ASSERT_FALSE(packets.empty());
+
+  // The converter is built once and kept, so the second frame has to work as well as the first.
+  ASSERT_TRUE(session->encode_bgra(bgra.data(), stride, 256 * 1024));
+  EXPECT_FALSE(session->packets(1024).empty());
+}
+
+TEST(PyroWaveEncodeTests, ARefusedFrameIsRefusedRatherThanGuessed) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  auto session = pyrowave_encode::make_session(320, 240);
+  ASSERT_NE(session, nullptr);
+
+  std::vector<uint8_t> bgra(static_cast<std::size_t>(320) * 240 * 4, 0x40);
+  EXPECT_FALSE(session->encode_bgra(nullptr, 320 * 4, 64 * 1024));
+  EXPECT_FALSE(session->encode_bgra(bgra.data(), 0, 64 * 1024));
+  EXPECT_FALSE(session->encode_bgra(bgra.data(), -1, 64 * 1024));
+  EXPECT_FALSE(session->encode(nullptr, nullptr, nullptr, 64 * 1024));
+}
+
 TEST(PyroWaveEncodeTests, EveryFrameStandsAlone) {
   if (!pyrowave_encode::available()) {
     GTEST_SKIP() << "no Vulkan device this codec can use";
