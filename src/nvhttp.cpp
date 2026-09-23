@@ -2101,6 +2101,11 @@ namespace nvhttp {
       desired["stream_display_mode_label"] = settings_metadata::stream_display_mode_label_for_selection(configured_mode);
       desired["stream_display_mode_reason"] = settings_metadata::stream_display_mode_reason_for_selection(configured_mode);
       desired["display_mode"] = client.display_mode;
+      // The screen this host adds for the client, which is not the mode it streams. Reported so a
+      // client can show what it set rather than guess, and blank when the stream size decides.
+      desired["virtual_display_mode"] = client_profiles::get_client_profile(client.name)
+                                          .transform([](const auto &profile) { return profile.virtual_display_mode; })
+                                          .value_or(std::string {});
       desired["target_bitrate_kbps"] = client.target_bitrate_kbps;
       desired["ai_auto_quality_enabled"] = false;
       desired["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();

@@ -8397,8 +8397,8 @@ namespace proc {
           this->capture_generation.exact_display_name = this->display_name;
 
           BOOST_LOG(info) << "Virtual Display created: "sv << linux_vdisplay->output_name
-                          << " ("sv << render_width << "x"sv << render_height
-                          << "@"sv << target_fps << "Hz) via "sv
+                          << " ("sv << created_width << "x"sv << created_height
+                          << "@"sv << created_fps << "Hz) via "sv
                           << virtual_display::backend_name(linux_vdisplay->backend);
           // A KWin virtual screen carries no HDR. Record why, so an HDR request
           // that comes out SDR has an answer in the Doctor.
