@@ -27,6 +27,8 @@ elseif(UNIX)
     if(${POLARIS_CONFIGURE_PKGBUILD})
         configure_file(packaging/linux/Arch/PKGBUILD PKGBUILD @ONLY)
         configure_file(packaging/linux/Arch/polaris.install polaris.install @ONLY)
+        # The split package names this one, and makepkg reads it from beside the PKGBUILD.
+        configure_file(packaging/linux/Arch/polaris-kms.install polaris-kms.install @ONLY)
     endif()
 
     # configure the dedicated SteamOS package files
@@ -39,6 +41,10 @@ elseif(UNIX)
         configure_file(
                 packaging/linux/SteamOS/polaris.install
                 ${CMAKE_BINARY_DIR}/packaging/linux/SteamOS/polaris.install
+                @ONLY)
+        configure_file(
+                packaging/linux/SteamOS/polaris-kms.install
+                ${CMAKE_BINARY_DIR}/packaging/linux/SteamOS/polaris-kms.install
                 @ONLY)
     endif()
 endif()

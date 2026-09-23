@@ -8,14 +8,17 @@
 
 : "${_commit:=@GITHUB_COMMIT@}"
 
-pkgname='polaris'
+# polaris-kms is the DRM/KMS capture helper: a second copy of the binary carrying cap_sys_admin,
+# split out because it is 31 MiB and most hosts never capture that way. 'polaris' stays first,
+# because a bare $pkgname below is the array's first element and the sources are named after it.
+pkgbase='polaris'
+pkgname=('polaris' 'polaris-kms')
 pkgver=@PROJECT_VERSION@@POLARIS_SUB_VERSION@
 pkgrel=1
 pkgdesc="@PROJECT_DESCRIPTION@"
 arch=('x86_64' 'aarch64')
 url=@PROJECT_HOMEPAGE_URL@
 license=('GPL-3.0-only')
-install=polaris.install
 
 # 'debug' splits a polaris-debug package carrying the detached debuginfo and the
 # matching sources. Crash reports from released builds are otherwise unusable:
@@ -262,8 +265,9 @@ check() {
     fi
 }
 
-package() {
-    DESTDIR="$pkgdir" cmake --install build
+package_polaris() {
+    install=polaris.install
+    DESTDIR="$pkgdir" cmake --install build --component polaris
     python "$srcdir/$pkgname/scripts/spaces/verify_package.py" "$pkgdir"
 
     # Host integration files have to be package-owned. When they regress back to
@@ -275,4 +279,21 @@ package() {
     test -x "$pkgdir/usr/bin/polaris-gamescope-runtime-lib.sh"
     bash -n "$pkgdir/usr/bin/polaris-gamescope-session"
     bash -n "$pkgdir/usr/bin/polaris-gamescope-runtime-lib.sh"
+
+    # The helper belongs to polaris-kms alone. Shipping it here would put 31 MiB and a capability
+    # on every host, which is the thing the split exists to avoid.
+    test ! -e "$pkgdir/usr/libexec/polaris/polaris-kms"
+}
+
+package_polaris-kms() {
+    pkgdesc="DRM/KMS capture helper for Polaris"
+    depends=("polaris=$pkgver-$pkgrel")
+    install=polaris-kms.install
+
+    DESTDIR="$pkgdir" cmake --install build --component kms
+
+    # Exactly two files, or the split has leaked.
+    test -f "$pkgdir/usr/libexec/polaris/polaris-kms"
+    test -f "$pkgdir/usr/lib/sysusers.d/polaris-kms.conf"
+    test ! -e "$pkgdir/usr/bin/polaris"
 }
