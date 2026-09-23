@@ -294,4 +294,55 @@ TEST(UserUnitOverrideTests, SetupHostAdviceForTheGuideCopyNamesTheCommandThatRef
   EXPECT_EQ(by_hand.find("--setup-host"), std::string::npos);
 }
 
+TEST(UserUnitOverrideTests, KmsTeardownTakesEveryPieceThatKeepsTheCapability) {
+  scratch_t scratch;
+  const auto copy = scratch.file("usr/local/bin/polaris-kms", "polaris 1.4.12", true);
+  const auto drop_in = scratch.file(".config/systemd/user/polaris.service.d/10-bazzite-kms.conf", "[Service]\nExecStart=\nExecStart=" + copy.string() + "\n");
+  const auto override = uu::effective_exec_override(scratch.drop_ins());
+
+  const auto plan = uu::kms_teardown_plan(override, true, true, copy);
+  EXPECT_FALSE(plan.empty());
+  EXPECT_EQ(plan.drop_in, drop_in);
+  EXPECT_TRUE(plan.remove_guide_copy);
+  EXPECT_TRUE(plan.clear_binary_capability);
+}
+
+TEST(UserUnitOverrideTests, KmsTeardownIsEmptyOnAHostThatNeverEnabledIt) {
+  scratch_t scratch;
+  const auto copy = scratch.root / "usr/local/bin/polaris-kms";
+
+  const auto plan = uu::kms_teardown_plan(uu::effective_exec_override(scratch.drop_ins()), false, false, copy);
+  EXPECT_TRUE(plan.empty());
+  EXPECT_TRUE(plan.drop_in.empty());
+  EXPECT_FALSE(plan.remove_guide_copy);
+  EXPECT_FALSE(plan.clear_binary_capability);
+}
+
+TEST(UserUnitOverrideTests, KmsTeardownLeavesSomeoneElsesDropInAlone) {
+  scratch_t scratch;
+  const auto copy = scratch.file("usr/local/bin/polaris-kms", "polaris 1.4.12", true);
+  const auto mine = scratch.file("home/papi/build/polaris", "a build of my own", true);
+  scratch.file(".config/systemd/user/polaris.service.d/50-my-build.conf", "[Service]\nExecStart=\nExecStart=" + mine.string() + "\n");
+  const auto override = uu::effective_exec_override(scratch.drop_ins());
+
+  // Pointing the service at a build tree is not the KMS recipe. Removing that drop-in would stop
+  // the service running what its owner chose, which --disable-kms was never asked to do.
+  const auto plan = uu::kms_teardown_plan(override, true, true, copy);
+  EXPECT_TRUE(plan.drop_in.empty());
+  EXPECT_TRUE(plan.remove_guide_copy);
+  EXPECT_TRUE(plan.clear_binary_capability);
+}
+
+TEST(UserUnitOverrideTests, KmsTeardownStillClearsTheBinaryWhenOnlyItHoldsTheCapability) {
+  scratch_t scratch;
+  const auto copy = scratch.root / "usr/local/bin/polaris-kms";
+
+  // The ordinary case: someone ran --enable-kms on a host that never followed the copy recipe.
+  const auto plan = uu::kms_teardown_plan(uu::effective_exec_override(scratch.drop_ins()), true, false, copy);
+  EXPECT_FALSE(plan.empty());
+  EXPECT_TRUE(plan.drop_in.empty());
+  EXPECT_FALSE(plan.remove_guide_copy);
+  EXPECT_TRUE(plan.clear_binary_capability);
+}
+
 #endif

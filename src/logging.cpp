@@ -487,7 +487,9 @@ namespace logging {
       << "    --setup-host [options]    | apply Linux host setup (udev rules, uinput/uhid); run it with sudo -H"sv << std::endl
       << "      --enable-kms            | also grant this binary cap_sys_admin, which only capture = kms needs;"sv << std::endl
       << "                              | every install or update removes it again, and it does not change the"sv << std::endl
-      << "                              | capture setting. Remove it with sudo setcap -r on the same binary"sv << std::endl
+      << "                              | capture setting"sv << std::endl
+      << "      --disable-kms           | take that capability off again, with the copy of the binary and the"sv << std::endl
+      << "                              | service drop-in the DRM/KMS recipe may have left behind"sv << std::endl
       << "      --enable-headless-boot  | start Polaris at boot with no monitor or desktop login"sv << std::endl
       << "      --disable-headless-boot | remove that boot start again"sv << std::endl
       << "                              | polaris --setup-host --help describes every step"sv << std::endl

@@ -282,8 +282,17 @@ Repeat the copy and capability steps after every package update or rollback.
 rpm-ostree deployments. The capability grants access needed by KMS; it does not
 select a capture backend or validate Game Mode streaming.
 
-To return to the packaged executable, stop Polaris, remove only the
-`10-bazzite-kms.conf` drop-in you created, reload the user manager, and restart:
+To return to the packaged executable, ask Polaris to take the whole recipe back out. It removes the
+drop-in, the copy and the capability on the packaged binary, in the order that never leaves the
+service pointing at a binary that is gone:
+
+```bash
+sudo -H polaris --setup-host --disable-kms
+systemctl --user daemon-reload
+systemctl --user restart polaris
+```
+
+By hand it is the same three pieces:
 
 ```bash
 systemctl --user stop polaris

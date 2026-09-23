@@ -7,6 +7,12 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Turning DRM/KMS capture back off is one command. `sudo -H polaris --setup-host --disable-kms`
+  removes the capability from the binary, the copy of the binary the Bazzite recipe may have left in
+  `/usr/local/bin/polaris-kms`, and the service drop-in that pointed at that copy, in the order that
+  never leaves the service pointing at a binary that is gone. It reports what it removed, and says
+  so plainly when there was nothing to remove.
+
 ## v1.4.12 - 2026-09-22
 
 - A host in Steam Game Mode streams the Game Mode screen. A Steam Deck, or any host running a gamescope Steam session, has one screen and one Steam while Game Mode is up, and both belong to the session, so until now a client could only reach such a host from Desktop Mode. Every stream from a host in Game Mode now shows that screen, whatever stream mode is configured: the configured mode is held while the session lasts and comes back in Desktop Mode. Video comes from the PipeWire node gamescope exports, attached directly with the gamescope ScreenCast portal as the fallback, keyboard and mouse go in through the session's libei socket, and a controller arrives as a virtual pad that Game Mode's Steam picks up like one that was plugged in. Proven on a Steam Deck OLED on SteamOS 3.8.16. See [Handhelds and Game Mode](handhelds.md#streaming-from-game-mode).

@@ -100,7 +100,8 @@ Enable the user service if you want Polaris to start in the background:
 systemctl --user enable --now polaris
 ```
 
-Only enable DRM/KMS capture if you specifically need it:
+Only enable DRM/KMS capture if you specifically need it, and take it off again with
+`sudo -H polaris --setup-host --disable-kms`:
 
 ```bash
 sudo -H polaris --setup-host --enable-kms

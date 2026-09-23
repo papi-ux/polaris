@@ -35,6 +35,7 @@
 extern "C" {
 #ifdef __linux__
   #include <pwd.h>
+  #include <sys/xattr.h>
   #include <unistd.h>
 #endif
 #ifdef _WIN32
@@ -174,6 +175,18 @@ namespace {
 
     BOOST_LOG(info) << "Linux host setup: installed "sv << label << " at ["sv << target << ']';
     return true;
+  }
+
+  /**
+   * @brief Whether a file carries a capability set.
+   *
+   * setcap stores it as the security.capability extended attribute, so the kernel answers directly.
+   * libcap would too, but it is only linked into builds with DRM support, and `setcap -r` cannot
+   * answer it: on a binary that never had one it exits 1 with "has no capability to remove", which
+   * in a summary of what was undone reads as a failure rather than as nothing to undo.
+   */
+  bool file_holds_capability(const fs::path &path) {
+    return getxattr(path.c_str(), "security.capability", nullptr, 0) >= 0;
   }
 
   bool run_host_command(const std::string &description, const std::string &cmd, bool required = true) {
@@ -391,9 +404,76 @@ namespace {
     return true;
   }
 
+  /**
+   * @brief Take DRM/KMS capture off this host, including the parts the Bazzite guide adds by hand.
+   *
+   * The inverse of --enable-kms, and of the copy recipe, because a host that keeps any one piece
+   * keeps the capability. Until now removal was three commands to find in the docs and type by
+   * hand, and the middle one is the one people miss: the capability on a copy of the binary that no
+   * package owns and no update touches.
+   *
+   * @param summary Filled with what was undone, for the summary the caller prints at the end.
+   */
+  bool remove_kms_capture(const fs::path &exe_path, const std::string &target_user, std::string &summary) {
+    const auto guide_copy = fs::path {platf::user_unit::guide_runtime_copy};
+    std::error_code ec;
+    const bool guide_copy_exists = fs::is_regular_file(fs::symlink_status(guide_copy, ec)) && !ec;
+
+    platf::user_unit::exec_override_t service_override;
+    if (const auto *target_pw = target_user.empty() || target_user == "root" ? nullptr : getpwnam(target_user.c_str());
+        target_pw && target_pw->pw_dir && target_pw->pw_dir[0] != '\0') {
+      service_override = platf::user_unit::effective_exec_override(fs::path(target_pw->pw_dir) / ".config/systemd/user/polaris.service.d");
+    }
+
+    const auto plan = platf::user_unit::kms_teardown_plan(service_override, file_holds_capability(exe_path), guide_copy_exists);
+    if (plan.empty()) {
+      summary = "DRM/KMS capture was not enabled here: no capability on " + exe_path.string() + ", no " +
+                guide_copy.string() + ", and no service drop-in pointing at one. Nothing to remove.\n";
+      return true;
+    }
+
+    bool ok = true;
+    if (!plan.drop_in.empty()) {
+      if (fs::remove(plan.drop_in, ec) && !ec) {
+        summary += "Removed " + plan.drop_in.string() + ", so the service runs the packaged binary again.\n";
+      } else {
+        BOOST_LOG(error) << "Linux host setup could not remove the DRM/KMS service drop-in ["sv << plan.drop_in.string() << "]: "sv << ec.message();
+        ok = false;
+      }
+    }
+    // Only after the drop-in, and only if that succeeded: a service still pointed at a copy that is
+    // gone cannot start at all, which is worse than one still holding a capability it does not need.
+    if (ok && plan.remove_guide_copy) {
+      if (fs::remove(guide_copy, ec) && !ec) {
+        summary += "Removed " + guide_copy.string() + ", the copy that carried its own capability.\n";
+      } else {
+        BOOST_LOG(error) << "Linux host setup could not remove the DRM/KMS runtime copy ["sv << guide_copy.string() << "]: "sv << ec.message();
+        ok = false;
+      }
+    }
+    if (ok && plan.clear_binary_capability) {
+      if (run_host_command("remove the DRM/KMS capability", std::format(R"(setcap -r "{}")", exe_path.string()))) {
+        summary += "Removed cap_sys_admin from " + exe_path.string() + ".\n";
+      } else {
+        ok = false;
+      }
+    }
+    if (!ok) {
+      return false;
+    }
+
+    if (!plan.drop_in.empty()) {
+      summary += "The service still runs the old command until it is reloaded. As " + target_user + ":\n"
+                 "  systemctl --user daemon-reload\n"
+                 "  systemctl --user restart polaris\n";
+    }
+    summary += "DRM/KMS capture is off. Polaris keeps capturing through its other paths; --enable-kms puts it back.\n";
+    return true;
+  }
+
   void print_setup_host_help(const char *name) {
     std::cout
-      << "Usage: "sv << name << " --setup-host [--enable-kms] [--enable-headless-boot | --disable-headless-boot]"sv << std::endl
+      << "Usage: "sv << name << " --setup-host [--enable-kms | --disable-kms] [--enable-headless-boot | --disable-headless-boot]"sv << std::endl
       << std::endl
       << "  Applies Linux host integration explicitly instead of relying on package scripts."sv << std::endl
       << "  Steps:"sv << std::endl
@@ -414,7 +494,10 @@ namespace {
       << "                            Only KMS capture (capture = kms) needs it. It grants a"sv << std::endl
       << "                            permission and does not change the capture setting."sv << std::endl
       << "                            Every install or update replaces the binary without it."sv << std::endl
-      << "                            Remove it with: sudo setcap -r <the Polaris binary>"sv << std::endl
+      << "                            Remove it again with --disable-kms"sv << std::endl
+      << "    --disable-kms           Take the capability off the binary, remove the copy of it at"sv << std::endl
+      << "                            "sv << platf::user_unit::guide_runtime_copy << " if the DRM/KMS recipe made one, and"sv << std::endl
+      << "                            remove the service drop-in that pointed at that copy"sv << std::endl
       << "    --enable-headless-boot  Enable lingering for the invoking account and hook the"sv << std::endl
       << "                            Polaris user service into default.target, so it starts at"sv << std::endl
       << "                            boot before anyone logs in"sv << std::endl
@@ -523,6 +606,7 @@ namespace args {
 #ifdef __linux__
   int setup_host(const char *name, int argc, char *argv[]) {
     bool enable_kms = false;
+    bool disable_kms = false;
     bool enable_headless_boot = false;
     bool disable_headless_boot = false;
 
@@ -536,6 +620,10 @@ namespace args {
         enable_kms = true;
         continue;
       }
+      if (arg == "--disable-kms"sv || arg == "disable-kms"sv) {
+        disable_kms = true;
+        continue;
+      }
       if (arg == "--enable-headless-boot"sv || arg == "enable-headless-boot"sv) {
         enable_headless_boot = true;
         continue;
@@ -546,6 +634,12 @@ namespace args {
       }
 
       BOOST_LOG(error) << "Unknown --setup-host option: "sv << arg;
+      print_setup_host_help(name);
+      return 1;
+    }
+
+    if (enable_kms && disable_kms) {
+      BOOST_LOG(error) << "--enable-kms and --disable-kms are mutually exclusive"sv;
       print_setup_host_help(name);
       return 1;
     }
@@ -634,7 +728,7 @@ namespace args {
     }
 
     const bool headless_boot_requested = enable_headless_boot || disable_headless_boot;
-    if (!enable_kms && !headless_boot_requested && !runtime_copy_stale && udev_from_package && modules_from_package && etc_copies_absent && input_nodes_ready) {
+    if (!enable_kms && !disable_kms && !headless_boot_requested && !runtime_copy_stale && udev_from_package && modules_from_package && etc_copies_absent && input_nodes_ready) {
       if (game_mode_advice.empty()) {
         std::cout
           << "Linux host setup: nothing to do."sv << std::endl
@@ -675,6 +769,9 @@ namespace args {
         << "  sudo -H "sv << exe_path->string() << " --setup-host"sv;
       if (enable_kms) {
         std::cout << " --enable-kms"sv;
+      }
+      if (disable_kms) {
+        std::cout << " --disable-kms"sv;
       }
       if (enable_headless_boot) {
         std::cout << " --enable-headless-boot"sv;
@@ -756,13 +853,17 @@ namespace args {
     ok &= run_host_command("load uinput", "modprobe uinput", false);
     ok &= run_host_command("load uhid", "modprobe uhid", false);
 
+    std::string kms_removal_summary;
     if (enable_kms) {
       ok &= run_host_command("enable DRM/KMS capability", std::format(R"(setcap cap_sys_admin+ep "{}")", exe_path->string()));
+    } else if (disable_kms) {
+      ok &= remove_kms_capture(*exe_path, setup_target_user, kms_removal_summary);
     } else {
       BOOST_LOG(info) << "Linux host setup: skipping cap_sys_admin. Re-run with --enable-kms only if you need DRM/KMS capture."sv;
     }
 
-    if (runtime_copy_stale) {
+    // Refreshing the copy would put back what --disable-kms was asked to take away.
+    if (runtime_copy_stale && !disable_kms) {
       // install(1) unlinks the old copy first, so a service still running it
       // keeps its image and the write cannot fail with ETXTBSY.
       const auto copy = std::string {platf::user_unit::guide_runtime_copy};
@@ -809,7 +910,11 @@ namespace args {
       std::cout
         << "For a host that boots with no monitor or desktop login (Game Mode consoles, dedicated streaming boxes), re-run with --enable-headless-boot."sv << std::endl;
     }
-    if (runtime_copy_stale) {
+    if (!kms_removal_summary.empty()) {
+      std::cout << std::endl
+                << kms_removal_summary;
+    }
+    if (runtime_copy_stale && !disable_kms) {
       std::cout << std::endl
                 << "Refreshed "sv << platf::user_unit::guide_runtime_copy << ", the copy the polaris user service for ["sv << setup_target_user << "] runs, from "sv << exe_path->string() << '.' << std::endl
                 << "It held another build, so that service was still running an older Polaris than the package. Restart it as "sv << setup_target_user << ':' << std::endl

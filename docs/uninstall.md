@@ -177,7 +177,9 @@ Check each of these. On a host that only ever ran the packaged Polaris, most of 
   [Steam Input and virtual controllers](configuration.md#steam-input-and-virtual-controllers)
   explains what it does.
 - **Bazzite's optional KMS copy.** If you made the writable copy of the binary for KMS capture,
-  remove that copy and its unit drop-in as the [Bazzite guide](bazzite.md#uninstall) describes.
+  `sudo -H polaris --setup-host --disable-kms` removes that copy, its unit drop-in and the
+  capability together, before you remove the package. The [Bazzite guide](bazzite.md#uninstall)
+  also shows the three steps by hand.
 
 ## 5. Your data
 
