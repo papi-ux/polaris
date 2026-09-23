@@ -178,6 +178,27 @@ describe('diagnostics export network addresses', () => {
     '[2026-09-17 22:02:52.694]: Info: Session started for [Steamdeck] from 100.109.196.18 [active sessions: 1]',
   ].join('\n')
 
+  it('exports each run log as lines, so the file opens in an editor', () => {
+    // One run's log is a hundred and sixty thousand characters. As a single JSON string it lands in
+    // the file as one line, and a tester's editor wrapped it and went read-only on the one file we
+    // ask people to send us. kernel_gpu_messages already exported its `lines`.
+    const bundle = buildAnonymizedDiagnosticsBundle({
+      logs: 'Info: first\nInfo: second\n',
+      previous_run_logs: 'Info: earlier\r\nInfo: later',
+      older_run_logs: '',
+    })
+
+    expect(bundle.logs).toEqual(['Info: first', 'Info: second'])
+    // A trailing newline must not become an empty last line, and CRLF must not leave a stray return.
+    expect(bundle.previous_run_logs).toEqual(['Info: earlier', 'Info: later'])
+    // An empty log is no lines rather than one empty line.
+    expect(bundle.older_run_logs).toEqual([])
+    for (const field of ['logs', 'previous_run_logs', 'older_run_logs']) {
+      expect(Array.isArray(bundle[field])).toBe(true)
+    }
+    expect(JSON.stringify(bundle, null, 2).split('\n').every((line) => line.length < 10000)).toBe(true)
+  })
+
   it('exports no address verbatim, anywhere in the bundle', () => {
     const bundle = buildAnonymizedDiagnosticsBundle({
       logs: sessionLogs,
@@ -188,9 +209,10 @@ describe('diagnostics export network addresses', () => {
 
     expect(exported).not.toContain('192.168.1.192')
     expect(exported).not.toContain('100.109.196.18')
-    // The kind survives, which is what made the original bundle diagnosable.
-    expect(bundle.logs).toContain('from [lan-')
-    expect(bundle.logs).toContain('from [cgnat-')
+    // The kind survives, which is what made the original bundle diagnosable. The logs export as
+    // lines now, so this reads them the way the file holds them.
+    expect(bundle.logs.join('\n')).toContain('from [lan-')
+    expect(bundle.logs.join('\n')).toContain('from [cgnat-')
   })
 
   it('gives one address the same label in the logs, the fields and the issue draft', () => {
@@ -1423,7 +1445,7 @@ describe('silent failure reporting', () => {
     })
 
     // 5 since network addresses became labels.
-    expect(bundle.support_bundle_version).toBe(5)
+    expect(bundle.support_bundle_version).toBe(6)
     expect(bundle.crash.outcome).toBe('crashed')
     expect(bundle.silent_failures).toHaveLength(1)
     expect(bundle.issue_draft).toContain('SIGSEGV')

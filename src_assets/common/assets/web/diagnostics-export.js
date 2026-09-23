@@ -1358,10 +1358,34 @@ export function createExportAddressBook(input) {
   return addresses
 }
 
+/**
+ * The log fields, as lines rather than as one string per run.
+ *
+ * A run's log is one JSON string of a hundred and sixty thousand characters, which lands in the file
+ * as a single line that editors refuse to open normally: a tester's editor wrapped it and went
+ * read-only, on the one file we ask people to send us. The bundle already writes the kernel's GPU
+ * messages as `lines`, so this is the shape it had chosen everywhere else.
+ *
+ * Splitting happens on the way out, after redaction, so the passes that walk raw text for
+ * credentials and network addresses still see exactly what they saw before.
+ */
+const LOG_TEXT_FIELDS = ['logs', 'previous_run_logs', 'older_run_logs']
+
+function logTextAsLines(bundle) {
+  const out = { ...bundle }
+  for (const field of LOG_TEXT_FIELDS) {
+    const value = out[field]
+    if (typeof value !== 'string') continue
+    // An empty log stays an empty list rather than becoming a list holding one empty line.
+    out[field] = value.length === 0 ? [] : value.replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n')
+  }
+  return out
+}
+
 export function buildAnonymizedDiagnosticsBundle(input = {}, { addresses = createExportAddressBook(input) } = {}) {
   const streamEvidence = input.stream_evidence || buildStreamEvidence(input, { addresses })
   const issueDraft = input.issue_draft || buildGithubIssueDraft({ ...input, stream_evidence: streamEvidence }, { addresses })
-  return sanitizeDiagnosticsValue({
+  return logTextAsLines(sanitizeDiagnosticsValue({
     generated_at: input.generated_at || new Date().toISOString(),
     export_kind: 'polaris-anonymized-diagnostics',
     // The user-facing promise, and the thing someone reads before posting a
@@ -1384,9 +1408,10 @@ export function buildAnonymizedDiagnosticsBundle(input = {}, { addresses = creat
     ].join(' '),
     // 4: older_run_logs and kernel_gpu_messages ride along.
     // 5: network addresses are replaced with labels.
-    support_bundle_version: 5,
+    // 6: the log fields are lines, like kernel_gpu_messages already was.
+    support_bundle_version: 6,
     ...input,
     stream_evidence: streamEvidence,
     issue_draft: issueDraft,
-  }, new WeakSet(), addresses)
+  }, new WeakSet(), addresses))
 }
