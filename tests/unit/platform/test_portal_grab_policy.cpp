@@ -436,15 +436,15 @@ TEST(PortalGrabPolicyTests, LaunchPreparationSkipsPrivateExactAndInputOnlyCaptur
   video::config_t config {};
   for (const auto mode : {"headless_stream", "windowed_stream", "gamescope_stream", "host_virtual_display", "desktop_takeover"}) {
     config.capture_generation.stream_mode = mode;
-    EXPECT_TRUE(video::prepare_capture_for_launch(config, preparation));
+    EXPECT_EQ(video::prepare_capture_for_launch(config, preparation), video::capture_preparation_e::ready);
     EXPECT_FALSE(preparation);
   }
   config.capture_generation.stream_mode = "desktop_display";
   config.input_only = true;
-  EXPECT_TRUE(video::prepare_capture_for_launch(config, preparation));
+  EXPECT_EQ(video::prepare_capture_for_launch(config, preparation), video::capture_preparation_e::ready);
   config.input_only = false;
   config.capture_generation.exact_display_name = "generation-owned-output";
-  EXPECT_TRUE(video::prepare_capture_for_launch(config, preparation));
+  EXPECT_EQ(video::prepare_capture_for_launch(config, preparation), video::capture_preparation_e::ready);
   EXPECT_FALSE(preparation);
 }
 

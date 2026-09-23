@@ -102,8 +102,22 @@ namespace video {
 
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);
 
+  /**
+   * @brief Why interactive capture setup could not be completed, when it could not.
+   *
+   * Two very different things stop a Mirror Desktop launch here, and only one of them is about the
+   * screen sharing prompt. An explicit encoder choice is strict and never falls back, so a host
+   * whose encoder failed its probe has none selected at all, and answering that with "approve the
+   * prompt" sends someone to a dialog that was never shown.
+   */
+  enum class capture_preparation_e {
+    ready,  ///< nothing to prepare, or the prompt was answered
+    no_encoder,  ///< no encoder is selected, so there is nothing to prepare capture for
+    not_prepared,  ///< the backend could not prepare capture; the prompt is the usual reason
+  };
+
   // Complete interactive Mirror Desktop capture setup before RTSP admission.
-  bool prepare_capture_for_launch(const config_t &config, std::shared_ptr<void> &preparation);
+  capture_preparation_e prepare_capture_for_launch(const config_t &config, std::shared_ptr<void> &preparation);
   platf::pix_fmt_e map_pix_fmt(AVPixelFormat fmt);
 
   void free_ctx(AVCodecContext *ctx);
@@ -717,7 +731,7 @@ namespace video {
 
 #ifdef POLARIS_TESTS
   void with_capture_preparation_for_tests(
-    const std::function<bool(const config_t &, std::shared_ptr<void> &)> &prepare,
+    const std::function<capture_preparation_e(const config_t &, std::shared_ptr<void> &)> &prepare,
     const std::function<void()> &body
   );
   /** Own the supplied codec/converter through real frame submission and teardown. */

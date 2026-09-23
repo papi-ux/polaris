@@ -6,6 +6,7 @@
 #include <src/nvhttp.h>
 #include <src/process.h>
 #include <src/rtsp.h>
+#include <src/launch_failure.h>
 #include <src/video.h>
 #include <src/platform/linux/stream_runtime.h>
 
@@ -1759,7 +1760,7 @@ TEST(SessionStopContractTests, CapturePreparationUsesProvisionalLaunchRateUntilA
         prepared = config;
         preparation = token;
         ++calls;
-        return true;
+        return video::capture_preparation_e::ready;
       },
       [&] { EXPECT_EQ(subject.prepare_capture_for_admitted_launch(launch), 0); });
     ASSERT_EQ(calls, 1);
@@ -1791,6 +1792,40 @@ TEST(SessionStopContractTests, CapturePreparationUsesProvisionalLaunchRateUntilA
     EXPECT_EQ(announced.framerate, 240);  // Warp budget remains intact.
     EXPECT_FALSE(video::configure_announced_rates(announced, 0, 6000, launch_rate, false));
   }
+}
+
+
+TEST(SessionStopContractTests, CapturePreparationSaysWhichFailureRefusedTheLaunch) {
+  // Two different things stop a Mirror Desktop launch here, and a host that has no encoder must not
+  // be told to approve a screen sharing prompt: an explicit encoder choice is strict, so a probe
+  // that failed leaves none selected, and the prompt was never part of it. Reported by a tester on
+  // AMD running an explicit Vulkan encoder, who was sent to look for a dialog that never appeared.
+  proc::proc_t subject {};
+  auto launch = std::make_shared<rtsp_stream::launch_session_t>();
+  launch->width = 1920;
+  launch->height = 1080;
+  launch->fps = 60000;
+  subject.set_active_launch_for_tests(proc::ctx_t {}, launch);
+
+  launch_failure::pending.reset();
+  video::with_capture_preparation_for_tests(
+    [](const video::config_t &, std::shared_ptr<void> &) {
+      return video::capture_preparation_e::no_encoder;
+    },
+    [&] { EXPECT_EQ(subject.prepare_capture_for_admitted_launch(launch), 503); });
+  ASSERT_TRUE(launch_failure::pending.has_value());
+  EXPECT_EQ(launch_failure::pending->code, "encoder_probe_failed");
+  EXPECT_EQ(launch_failure::pending->message.find("screen sharing"), std::string::npos);
+
+  launch_failure::pending.reset();
+  video::with_capture_preparation_for_tests(
+    [](const video::config_t &, std::shared_ptr<void> &) {
+      return video::capture_preparation_e::not_prepared;
+    },
+    [&] { EXPECT_EQ(subject.prepare_capture_for_admitted_launch(launch), 503); });
+  ASSERT_TRUE(launch_failure::pending.has_value());
+  EXPECT_EQ(launch_failure::pending->code, "desktop_capture_not_prepared");
+  EXPECT_NE(launch_failure::pending->message.find("screen sharing"), std::string::npos);
 }
 
 TEST(SessionLifecycleGateTests, ConditionalStopYieldsToACommittedLaunchCancellation) {
