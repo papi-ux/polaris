@@ -207,6 +207,39 @@ TEST(UserUnitOverrideTests, SetupHostStaysQuietWhenTheServiceRunsThePackagedBina
   EXPECT_TRUE(uu::setup_host_advice(uu::effective_exec_override(scratch.drop_ins()), "deck", packaged).empty());
 }
 
+TEST(UserUnitOverrideTests, TeardownClaimsTheDropInThatPointsAtThePackagedHelper) {
+  // --enable-kms points the service at the packaged helper instead of marking the binary it is
+  // running, so --disable-kms has to recognise its own drop-in as well as the one the old recipe
+  // had people write by hand. A host that keeps either one keeps running the helper.
+  scratch_t scratch;
+  scratch.file(
+    std::string {".config/systemd/user/polaris.service.d/"} + std::string {uu::kms_drop_in_name},
+    std::string {"[Service]\nExecStart=\nExecStart="} + std::string {uu::packaged_kms_helper} + "\n"
+  );
+  const auto override = uu::effective_exec_override(scratch.drop_ins());
+
+  const auto plan = uu::kms_teardown_plan(override, false, false);
+  EXPECT_EQ(plan.drop_in.filename(), std::filesystem::path {uu::kms_drop_in_name});
+  EXPECT_FALSE(plan.empty());
+  // Nothing else is claimed: the packaged helper is the package's to remove, never this command's.
+  EXPECT_FALSE(plan.remove_guide_copy);
+  EXPECT_FALSE(plan.clear_binary_capability);
+}
+
+TEST(UserUnitOverrideTests, TeardownLeavesADropInThatPointsSomewhereElseAlone) {
+  // Someone running their own build through a drop-in is not running DRM/KMS capture, and
+  // --disable-kms taking their override away would stop their service dead.
+  scratch_t scratch;
+  const auto mine = scratch.file("home/papi/src/polaris/build/polaris", "a build of my own", true);
+  scratch.file(
+    std::string {".config/systemd/user/polaris.service.d/"} + std::string {uu::kms_drop_in_name},
+    "[Service]\nExecStart=\nExecStart=" + mine.string() + "\n"
+  );
+  const auto override = uu::effective_exec_override(scratch.drop_ins());
+
+  EXPECT_TRUE(uu::kms_teardown_plan(override, false, false).drop_in.empty());
+}
+
 TEST(UserUnitOverrideTests, TheGuideCopyLeftBehindByAPackageUpdateIsStale) {
   // The field report: rpm says 1.4.11, the console says the version the copy
   // was made from, because the drop-in still runs that copy.

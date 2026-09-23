@@ -159,6 +159,26 @@ namespace platf::user_unit {
   /// The one path the Bazzite guide ever wrote a runtime copy to, and so the only one --setup-host replaces.
   inline constexpr std::string_view guide_runtime_copy = "/usr/local/bin/polaris-kms";
 
+  /**
+   * @brief The DRM/KMS capture helper the polaris-kms package installs.
+   *
+   * A second copy of the binary, owned by the package manager, carrying cap_sys_admin in package
+   * metadata. It exists because a capability applied to the binary this process is running does not
+   * survive that binary being replaced, which every install and every update does.
+   */
+  inline constexpr std::string_view packaged_kms_helper = POLARIS_KMS_HELPER_PATH;
+
+  /**
+   * @brief The drop-in --enable-kms writes, and the only one it will remove.
+   *
+   * Numbered so it wins over the 10-bazzite-kms.conf the old recipe told people to write by hand,
+   * which --setup-host retires rather than fights.
+   */
+  inline constexpr std::string_view kms_drop_in_name = "20-polaris-kms.conf";
+
+  /** @brief The group allowed to execute the helper, per the package's sysusers.d file. */
+  inline constexpr std::string_view kms_group = "polaris-kms";
+
   enum class runtime_copy_e {
     none,  ///< the service does not run the guide's copy, or that path is not a plain file
     current,  ///< the copy holds the same bytes as the binary it is refreshed from
@@ -247,9 +267,11 @@ namespace platf::user_unit {
     kms_teardown_t plan;
     plan.clear_binary_capability = binary_holds_capability;
     plan.remove_guide_copy = guide_copy_exists;
-    // Only a drop-in that points at the copy is this feature's to remove. Someone who pointed the
-    // service at a build tree of their own is not running the KMS recipe, and their drop-in stays.
-    if (override.active() && override.binary == guide_copy) {
+    // Only a drop-in that points at a binary this feature put there is this feature's to remove:
+    // the packaged helper, or the copy the old recipe had people make. Someone who pointed the
+    // service at a build tree of their own is not running DRM/KMS capture, and their drop-in stays.
+    if (override.active() &&
+        (override.binary == guide_copy || override.binary == std::filesystem::path {packaged_kms_helper})) {
       plan.drop_in = override.drop_in;
     }
     return plan;
