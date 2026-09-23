@@ -112,7 +112,10 @@ namespace client_profiles {
 
     nlohmann::json root = nlohmann::json::object();
     for (const auto &[name, profile] : profiles) {
-      nlohmann::json entry;
+      // An object, not a default-constructed value: a profile with every field empty would
+      // otherwise be written as null, and the loader skips a non-object entry with a warning. That
+      // is what clearing the last remaining override on a client used to leave behind.
+      nlohmann::json entry = nlohmann::json::object();
       if (!profile.output_name.empty()) entry["output_name"] = profile.output_name;
       if (!profile.virtual_display_mode.empty()) entry["virtual_display_mode"] = profile.virtual_display_mode;
       if (profile.color_range.has_value()) entry["color_range"] = profile.color_range.value();
