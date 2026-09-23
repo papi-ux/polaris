@@ -55,6 +55,11 @@ namespace rtsp_stream {
 
     std::string device_name;
     std::string unique_id;
+    /**
+     * @brief The size of display to create for this device, as WIDTHxHEIGHTxFPS; empty for the
+     *        stream size, which is what every release before this one used.
+     */
+    std::string virtual_display_mode;
     /// Controller type this client declared last time it streamed, so the pad created
     /// before the app starts can match. Zero when nothing has been observed yet.
     int controller_type = 0;

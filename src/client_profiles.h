@@ -22,7 +22,16 @@ namespace client_profiles {
    * overrides the corresponding global config setting for that client's session.
    */
   struct client_profile_t {
-    std::string output_name;            ///< Which display output to use (e.g. "HDMI-A-1")
+    std::string output_name;  ///< Which display output to use (e.g. "HDMI-A-1")
+    /**
+     * @brief How big a display to create for this device, as WIDTHxHEIGHTxFPS; empty for the default.
+     *
+     * Not the mode this device streams at. A virtual display was always created at the stream size,
+     * so a tablet asking for a 1920x1080 stream to save bandwidth was given a 16:9 screen to put its
+     * 16:10 desktop on. The screen a host adds should be the shape of the device looking at it; what
+     * is then encoded and sent is a separate question, and stays the client's to ask.
+     */
+    std::string virtual_display_mode;            ///< Which display output to use (e.g. "HDMI-A-1")
     std::optional<int> color_range;     ///< Override color_range: 0 = client, 1 = limited, 2 = full
     std::optional<bool> hdr;            ///< Override HDR enable/disable for this client
     std::string mac_address;            ///< MAC address for Wake-on-LAN (e.g. "AA:BB:CC:DD:EE:FF")

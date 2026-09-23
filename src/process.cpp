@@ -7732,6 +7732,15 @@ namespace proc {
         config::video.output_name = client_profile->output_name;
       }
 
+      if (!client_profile->virtual_display_mode.empty()) {
+        // Only the display this launch may create, never the stream. They were the same number
+        // until now, which is why a device streaming 1920x1080 to save bandwidth was handed a
+        // 16:9 screen to put a 16:10 desktop on.
+        launch_session->virtual_display_mode = client_profile->virtual_display_mode;
+        BOOST_LOG(info) << "Client profile: virtual displays for this client are "sv
+                        << client_profile->virtual_display_mode;
+      }
+
       if (client_profile->color_range.has_value()) {
         optimization_locks.color_range = true;
         resolved_optimization.color_range = client_profile->color_range;
@@ -8323,7 +8332,53 @@ namespace proc {
           target_fps *= 2;
         }
 
-        auto vdisplay = virtual_display::create(render_width, render_height, target_fps);
+        // The screen this host adds is the device's to shape; the stream stays the device's to ask
+        // for. They were the same number until now, which is why a tablet that streams 1920x1080 to
+        // save bandwidth was handed a 16:9 screen to put a 16:10 desktop on, and why a host with one
+        // wide monitor had no way to be given a screen shaped like the thing looking at it.
+        //
+        // An unusable value is ignored rather than fatal: the stream size is always an answer, and
+        // refusing the launch over a display preference would be worse than the wrong shape.
+        int created_width = render_width;
+        int created_height = render_height;
+        int created_fps = target_fps;
+        if (!launch_session->virtual_display_mode.empty()) {
+          const auto &mode = launch_session->virtual_display_mode;
+          const auto first = mode.find('x');
+          const auto second = first == std::string::npos ? std::string::npos : mode.find('x', first + 1);
+          int mode_width = 0;
+          int mode_height = 0;
+          double mode_fps = 0.0;
+          bool mode_usable = false;
+          if (second != std::string::npos) {
+            try {
+              mode_width = std::stoi(mode.substr(0, first));
+              mode_height = std::stoi(mode.substr(first + 1, second - first - 1));
+              mode_fps = std::stod(mode.substr(second + 1));
+              mode_usable = mode_width > 0 && mode_height > 0;
+            } catch (const std::exception &) {
+              mode_usable = false;
+            }
+          }
+          if (mode_usable) {
+            created_width = mode_width;
+            created_height = mode_height;
+            if (mode_fps > 0.0) {
+              created_fps = static_cast<int>(mode_fps + 0.5);
+              if (config::video.double_refreshrate) {
+                created_fps *= 2;
+              }
+            }
+            BOOST_LOG(info) << "Virtual display: creating "sv << created_width << 'x' << created_height
+                            << '@' << created_fps << "Hz for this client; the stream stays "sv
+                            << render_width << 'x' << render_height;
+          } else {
+            BOOST_LOG(warning) << "Virtual display: ignoring unusable client display size ["sv
+                               << mode << "]; using the stream size"sv;
+          }
+        }
+
+        auto vdisplay = virtual_display::create(created_width, created_height, created_fps);
 
         if (vdisplay.has_value()) {
           linux_vdisplay = std::move(vdisplay);

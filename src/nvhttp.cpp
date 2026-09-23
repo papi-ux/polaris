@@ -8755,6 +8755,35 @@ namespace nvhttp {
             display_mode = body["display_mode"].get<std::string>();
           }
 
+          // The screen to add, which is not the mode to stream. A device whose panel is 2560x1600
+          // wants a desktop that shape even when it streams 1920x1080 to save bandwidth, and tying
+          // the two together is what produced a wrongly shaped screen in the first place.
+          std::string virtual_display_mode =
+            client_profiles::get_client_profile(named_cert_p->name)
+              .transform([](const auto &profile) { return profile.virtual_display_mode; })
+              .value_or(std::string {});
+          if (body.value("clear_virtual_display_mode", false)) {
+            virtual_display_mode.clear();
+          } else if (body.contains("virtual_display_mode")) {
+            if (!body["virtual_display_mode"].is_string()) {
+              write_json({{"error", "virtual_display_mode must be a string"}}, SimpleWeb::StatusCode::client_error_bad_request);
+              return;
+            }
+            virtual_display_mode = body["virtual_display_mode"].get<std::string>();
+          }
+          if (!virtual_display_mode.empty()) {
+            int virtual_width = 0;
+            int virtual_height = 0;
+            double virtual_fps = 0.0;
+            if (!parse_stream_policy_display_mode(virtual_display_mode, virtual_width, virtual_height, virtual_fps)) {
+              write_json(
+                {{"error", "virtual_display_mode must use WIDTHxHEIGHTxFPS, for example 2560x1600x60"}},
+                SimpleWeb::StatusCode::client_error_bad_request
+              );
+              return;
+            }
+          }
+
           int width = 0;
           int height = 0;
           double fps = 0.0;
@@ -8910,6 +8939,15 @@ namespace nvhttp {
               return;
             }
             paired_device_updated = true;
+          }
+          // Kept in the per-device display profile rather than the pairing record, beside the
+          // output name, because it answers the same kind of question: what this device wants to
+          // look at, not who it is.
+          if (body.contains("virtual_display_mode") || body.value("clear_virtual_display_mode", false)) {
+            auto profile = client_profiles::get_client_profile(named_cert_p->name)
+                             .value_or(client_profiles::client_profile_t {});
+            profile.virtual_display_mode = virtual_display_mode;
+            client_profiles::save_client_profile(named_cert_p->name, profile);
           }
           if (body.contains("target_bitrate_kbps") && target_bitrate_kbps > 0) {
             // A paired client setting is an explicit newer operator choice.
