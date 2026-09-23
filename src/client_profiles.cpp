@@ -65,6 +65,10 @@ namespace client_profiles {
         profile.virtual_display_mode = value["virtual_display_mode"].get<std::string>();
       }
 
+      if (value.contains("virtual_display_scale") && value["virtual_display_scale"].is_number()) {
+        profile.virtual_display_scale = value["virtual_display_scale"].get<double>();
+      }
+
       if (value.contains("color_range") && value["color_range"].is_number_integer()) {
         profile.color_range = value["color_range"].get<int>();
       }
@@ -118,6 +122,7 @@ namespace client_profiles {
       nlohmann::json entry = nlohmann::json::object();
       if (!profile.output_name.empty()) entry["output_name"] = profile.output_name;
       if (!profile.virtual_display_mode.empty()) entry["virtual_display_mode"] = profile.virtual_display_mode;
+      if (profile.virtual_display_scale > 0.0) entry["virtual_display_scale"] = profile.virtual_display_scale;
       if (profile.color_range.has_value()) entry["color_range"] = profile.color_range.value();
       if (profile.hdr.has_value()) entry["hdr"] = profile.hdr.value();
       if (!profile.mac_address.empty()) entry["mac_address"] = profile.mac_address;
@@ -140,6 +145,7 @@ namespace client_profiles {
       nlohmann::json entry;
       entry["output_name"] = profile.output_name;
       entry["virtual_display_mode"] = profile.virtual_display_mode;
+      entry["virtual_display_scale"] = profile.virtual_display_scale;
       entry["color_range"] = profile.color_range.has_value() ? profile.color_range.value() : 0;
       // Unset means "no override, follow what the client asks for". Sending
       // false instead would be read back as an explicit force-off the next

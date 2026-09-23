@@ -61,6 +61,13 @@ namespace rtsp_stream {
      */
     std::string virtual_display_mode;
     /**
+     * @brief How many pixels that created screen puts in a point; 0 means the host decides.
+     *
+     * A desktop is read at arm's length rather than watched, so a screen made at the pixel count of
+     * a ten inch panel is unusable at scale 1. Only the device knows how big its glass is.
+     */
+    double virtual_display_scale = 0.0;
+    /**
      * @brief Whether this client named a topology for this launch and the host accepted it.
      *
      * Not the same as stream_mode being set: a paired always-virtual preference is normalised into

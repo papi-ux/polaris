@@ -2162,6 +2162,12 @@ namespace nvhttp {
       desired["virtual_display_mode"] = client_profiles::get_client_profile(client.name)
                                           .transform([](const auto &profile) { return profile.virtual_display_mode; })
                                           .value_or(std::string {});
+      // How many pixels that screen puts in a point. A 2560x1600 desktop at scale 1 is unreadable
+      // on a ten inch panel, and the client is the only thing that knows how big its glass is.
+      // Zero means nobody said, and the host makes it at scale 1 as it always has.
+      desired["virtual_display_scale"] = client_profiles::get_client_profile(client.name)
+                                           .transform([](const auto &profile) { return profile.virtual_display_scale; })
+                                           .value_or(0.0);
       desired["target_bitrate_kbps"] = client.target_bitrate_kbps;
       desired["ai_auto_quality_enabled"] = false;
       desired["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();
@@ -8849,6 +8855,30 @@ namespace nvhttp {
             }
           }
 
+          // The scale for that screen. Bounded because this ends up as a compositor argument: below
+          // 1 it would make a desktop larger than the screen it is on, and past 4 it would be a few
+          // enormous points. Both are ways to hand someone a screen they cannot use.
+          double virtual_display_scale =
+            client_profiles::get_client_profile(named_cert_p->name)
+              .transform([](const auto &profile) { return profile.virtual_display_scale; })
+              .value_or(0.0);
+          if (body.value("clear_virtual_display_scale", false)) {
+            virtual_display_scale = 0.0;
+          } else if (body.contains("virtual_display_scale")) {
+            if (!body["virtual_display_scale"].is_number()) {
+              write_json({{"error", "virtual_display_scale must be a number"}}, SimpleWeb::StatusCode::client_error_bad_request);
+              return;
+            }
+            virtual_display_scale = body["virtual_display_scale"].get<double>();
+            if (virtual_display_scale != 0.0 && (virtual_display_scale < 1.0 || virtual_display_scale > 4.0)) {
+              write_json(
+                {{"error", "virtual_display_scale must be between 1 and 4, or 0 to let the host decide"}},
+                SimpleWeb::StatusCode::client_error_bad_request
+              );
+              return;
+            }
+          }
+
           int width = 0;
           int height = 0;
           double fps = 0.0;
@@ -9008,10 +9038,12 @@ namespace nvhttp {
           // Kept in the per-device display profile rather than the pairing record, beside the
           // output name, because it answers the same kind of question: what this device wants to
           // look at, not who it is.
-          if (body.contains("virtual_display_mode") || body.value("clear_virtual_display_mode", false)) {
+          if (body.contains("virtual_display_mode") || body.value("clear_virtual_display_mode", false) ||
+              body.contains("virtual_display_scale") || body.value("clear_virtual_display_scale", false)) {
             auto profile = client_profiles::get_client_profile(named_cert_p->name)
                              .value_or(client_profiles::client_profile_t {});
             profile.virtual_display_mode = virtual_display_mode;
+            profile.virtual_display_scale = virtual_display_scale;
             client_profiles::save_client_profile(named_cert_p->name, profile);
           }
           if (body.contains("target_bitrate_kbps") && target_bitrate_kbps > 0) {

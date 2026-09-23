@@ -7748,6 +7748,12 @@ namespace proc {
                         << client_profile->virtual_display_mode;
       }
 
+      if (client_profile->virtual_display_scale > 0.0) {
+        launch_session->virtual_display_scale = client_profile->virtual_display_scale;
+        BOOST_LOG(info) << "Client profile: virtual displays for this client are made at scale "sv
+                        << client_profile->virtual_display_scale;
+      }
+
       if (client_profile->color_range.has_value()) {
         optimization_locks.color_range = true;
         resolved_optimization.color_range = client_profile->color_range;
@@ -8391,7 +8397,12 @@ namespace proc {
           }
         }
 
-        auto vdisplay = virtual_display::create(created_width, created_height, created_fps);
+        // The scale is the other half of the size question and the one that decides whether the
+        // desktop can be read. A panel's pixel count alone says nothing about how big it is.
+        const double created_scale = launch_session->virtual_display_scale > 0.0 ?
+                                       launch_session->virtual_display_scale :
+                                       1.0;
+        auto vdisplay = virtual_display::create(created_width, created_height, created_fps, created_scale);
 
         if (vdisplay.has_value()) {
           linux_vdisplay = std::move(vdisplay);

@@ -31,7 +31,8 @@ namespace client_profiles {
      * 16:10 desktop on. The screen a host adds should be the shape of the device looking at it; what
      * is then encoded and sent is a separate question, and stays the client's to ask.
      */
-    std::string virtual_display_mode;            ///< Which display output to use (e.g. "HDMI-A-1")
+    std::string virtual_display_mode;            ///< The screen to add for this device, WIDTHxHEIGHTxFPS
+    double virtual_display_scale = 0.0;          ///< Pixels per point on that screen; 0 means the host decides
     std::optional<int> color_range;     ///< Override color_range: 0 = client, 1 = limited, 2 = full
     std::optional<bool> hdr;            ///< Override HDR enable/disable for this client
     std::string mac_address;            ///< MAC address for Wake-on-LAN (e.g. "AA:BB:CC:DD:EE:FF")
