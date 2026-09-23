@@ -561,11 +561,17 @@ namespace platf::game_mode_host {
     try {
       std::thread([answer]() {
         try {
-          answer->set_value(session_screen());
+          auto reading = session_screen();
+          // Cleared before the value is published, not after. The caller can return the instant
+          // set_value lands, so a flag cleared afterwards leaves a window where the next reading
+          // is told the last one has not come back and places touch across the whole frame,
+          // complaining about a reading that had in fact already answered.
+          in_flight = false;
+          answer->set_value(std::move(reading));
         } catch (...) {
+          in_flight = false;
           answer->set_exception(std::current_exception());
         }
-        in_flight = false;
       }).detach();
     } catch (const std::exception &) {
       in_flight = false;
