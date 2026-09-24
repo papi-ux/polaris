@@ -1887,25 +1887,31 @@ namespace video {
         // Getting this wrong is not subtle. Returning a failure tears the session down and the host
         // builds another, which it did forty thousand times in ten seconds before this existed.
         if (!session->encode_blank(max_frame_bytes)) {
-          return -1;
+          // A ten bit session that cannot make its own black frame cannot make any frame, and the
+          // session built to replace it would fail here identically.
+          return convert_session_is_over;
         }
         converted_since_last_packet = true;
         return session->bitstream().empty() ? -1 : 0;
       }
 
-      // The frame Polaris primes an encoder with, on a backend that hands over host memory. It has a
-      // buffer and it has pixels, so the emptier test above lets it through, and nothing has said what
-      // is in it: it never came from capture, so no backend published metadata for it and the format
-      // is nobody's claim rather than a claim of eight bit.
+      // A frame nobody described. Two different things produce one, and they need opposite answers.
       //
-      // Reading it as packed ten bit because this session is ten bit would be reading a dummy's bytes
-      // as a format they are not in. It stands for a picture nobody has captured yet, which is what
-      // encode_blank is for, and which is how the same frame is already handled where it arrives with
-      // no buffer at all.
+      // One is the dummy image Polaris primes an encoder with: it never came from capture, so nothing
+      // published metadata for it. The other is a backend that fills metadata in for nothing it
+      // captures. X11 is one of those, and it says nothing about any frame, real or dummy.
       //
-      // This refused every HDR session on its first frame, and a refusal on the first frame is a
-      // session the host rebuilds, so it refused the next one identically.
-      if (frame.metadata.format == platf::frame_format_e::unknown) {
+      // Which this is can be decided from the session rather than the frame. A ten bit session can
+      // only exist where the captured display is in HDR, which is refused outright otherwise, and
+      // every backend that can capture such a display publishes a format. So in a ten bit session an
+      // unclaimed frame is the primer, and it is encoded black.
+      //
+      // In an eight bit session it is read as BGRA, as it always was, because that is what it is: on
+      // X11 it is the real picture, and the primer is a cleared buffer either way, which is black
+      // whichever path it takes. Blanking those instead would be a stream that runs at full rate and
+      // is black forever with nothing in any log, which is what this did for one hour today.
+      if (frame.metadata.format == platf::frame_format_e::unknown &&
+          range == pyrowave_encode::dynamic_range_e::hdr10) {
         if (!session->encode_blank(max_frame_bytes)) {
           return -1;
         }
@@ -1931,10 +1937,11 @@ namespace video {
       const auto format = frame.metadata.format;
       const bool ten_bit_frame = format == platf::frame_format_e::p010;
       const bool wants_ten_bit = range == pyrowave_encode::dynamic_range_e::hdr10;
-      // Nothing unclaimed reaches here any more, so a format that does not match is a real
-      // disagreement between what capture produced and what this session reads.
+      // Unclaimed is still acceptable here, and only in an eight bit session: a backend that fills
+      // nothing in is not contradicting anything, and four bytes a pixel of it is BGRA.
       const bool readable = ten_bit_frame == wants_ten_bit &&
-                            (ten_bit_frame || format == platf::frame_format_e::bgra8);
+                            (ten_bit_frame || format == platf::frame_format_e::bgra8 ||
+                             format == platf::frame_format_e::unknown);
       // A backend that never filled the pitch in is not making a claim, so it is not contradicted.
       const bool four_bytes_a_pixel = frame.pixel_pitch == 0 || frame.pixel_pitch == 4;
       if (!readable || !four_bytes_a_pixel) {
@@ -3075,9 +3082,18 @@ namespace video {
    * always on the parallel one and the synchronous thread never sees it.
    */
   platf::mem_type_e capture_device_type(const encoder_t &bound, const config_t &config) {
-    const auto &session_encoder = encoder_for_session(config);
-    return session_encoder.platform_formats ? session_encoder.platform_formats->dev_type
-                                            : bound.platform_formats->dev_type;
+#ifdef POLARIS_BUILD_PYROWAVE
+    if (config.videoFormat == VIDEO_FORMAT_PYROWAVE && pyrowave.platform_formats) {
+      return pyrowave.platform_formats->dev_type;
+    }
+#endif
+    // The encoder this thread was handed, and not the host's current choice. They are the same
+    // encoder for every session that is not the one above, and they are not the same pointer: a
+    // reprobe sets the host's choice to null for as long as it runs, and it can run while this
+    // thread is alive, from an HTTP handler or from another launch, with no lock between them.
+    // Reading it here would be a null dereference in the capture thread on a good day and a session
+    // quietly reopened on the wrong device type on a bad one.
+    return bound.platform_formats->dev_type;
   }
 
   void captureThread(

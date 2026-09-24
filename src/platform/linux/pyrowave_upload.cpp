@@ -528,6 +528,12 @@ namespace pyrowave_encode {
 
   void upload_t::release_import(import_t &entry) {
     if (!owner || owner->device == VK_NULL_HANDLE) {
+      // Nothing can be given back without a device, but the slot must stop describing a buffer all
+      // the same, or it stays matchable against a key whose handles can never be freed.
+      if (current_import == &entry) {
+        current_import = nullptr;
+      }
+      entry = {};
       return;
     }
     if (entry.image != VK_NULL_HANDLE) {
