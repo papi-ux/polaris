@@ -4,6 +4,7 @@
 #include "private_state_file.h"
 #include "utility.h"
 #include "logging.h"
+#include <filesystem>
 #include <unordered_map>
 
 namespace configuration_store {
@@ -47,7 +48,17 @@ namespace configuration_store {
         return next;
       }, true);
     if (conflict) return result::conflict;
-    if (written.status == private_state_file::write_status_e::not_committed) return result::failed;
+    if (written.status == private_state_file::write_status_e::not_committed) {
+      namespace fs = std::filesystem;
+      std::error_code ec;
+      const auto permissions = fs::symlink_status(path, ec).permissions();
+      if (!ec && (permissions & (fs::perms::group_write | fs::perms::others_write)) != fs::perms::none) {
+        BOOST_LOG(warning) << "Settings were not saved: [" << path
+                           << "] is writable by group or other, which the settings store refuses. "
+                              "Restrict it with \"chmod go-w " << path << "\".";
+      }
+      return result::failed;
+    }
     if (written.status == private_state_file::write_status_e::durability_uncertain) {
       BOOST_LOG(warning) << "Configuration committed with uncertain directory durability";
     }

@@ -42,6 +42,12 @@
 #ifdef _WIN32
   #include <shellapi.h>
   #include "platform/windows/utils.h"
+#else
+  #include <cerrno>
+  #include <cstring>
+  #include <fcntl.h>
+  #include <sys/stat.h>
+  #include <unistd.h>
 #endif
 
 #if !defined(__ANDROID__) && !defined(__APPLE__)
@@ -1357,6 +1363,52 @@ namespace config {
     return settings;
   }
 
+  bool restrict_config_file_mode(const std::filesystem::path &path) {
+#ifdef _WIN32
+    (void) path;
+    return true;
+#else
+    int flags = O_RDONLY | O_NONBLOCK | O_CLOEXEC;
+  #ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+  #endif
+    const int descriptor = ::open(path.c_str(), flags);
+    if (descriptor < 0) {
+      // A missing file has nothing to restrict, and a symlink is not followed.
+      if (errno == ENOENT || errno == ELOOP) {
+        return true;
+      }
+      BOOST_LOG(warning) << "Could not check the mode of ["sv << path.string() << "]: "sv << std::strerror(errno);
+      return false;
+    }
+    struct stat metadata {};
+    bool restricted = false;
+    bool failed = false;
+    if (::fstat(descriptor, &metadata) != 0) {
+      failed = true;
+    } else if (S_ISREG(metadata.st_mode) && metadata.st_uid == ::geteuid() &&
+               (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0) {
+      // Only write access is taken away: the settings store reads a configuration file that
+      // others can read, and refuses one that others can write.
+      failed = ::fchmod(descriptor, metadata.st_mode & 07777 & ~(S_IWGRP | S_IWOTH)) != 0;
+      restricted = !failed;
+    }
+    const auto error = errno;
+    ::close(descriptor);
+    if (failed) {
+      BOOST_LOG(warning) << "Could not remove group and other write access from ["sv << path.string()
+                         << "]: "sv << std::strerror(error) << ". Saving settings will fail until it is restricted."sv;
+      return false;
+    }
+    if (restricted) {
+      BOOST_LOG(info) << "Removed group and other write access from ["sv << path.string() << "] (it was mode 0"sv
+                      << std::oct << (metadata.st_mode & 07777) << std::dec
+                      << "), which the settings store refuses to save into"sv;
+    }
+    return true;
+#endif
+  }
+
   std::string new_install_config(bool private_stream_available) {
     return private_stream_available ? "linux_stream_mode = headless_stream\n" : std::string {};
   }
@@ -1879,7 +1931,7 @@ namespace config {
       }
 
       // Create the config file if it does not exist, which only happens on a new
-      // install: an existing host has a file, even an empty one, and keeps its mode.
+      // install: an existing host has a file, even an empty one.
       if (!fs::exists(sunshine.config_file)) {
         auto cfg_file = std::ofstream {sunshine.config_file};
       #ifdef _WIN32
@@ -1898,6 +1950,13 @@ namespace config {
                               "New install: labwc or wlr-randr is not on the PATH, so streams start in Mirror Desktop"sv);
       #endif
       }
+
+      // Every settings save goes through the settings store, which refuses a file that
+      // group or other can write. The file above is created through the umask, so on a
+      // host with umask 002 it came out 0664 and every save failed (#769); a host that
+      // was set up that way still has such a file. Take the write bits away on the way
+      // in, like the directory above.
+      restrict_config_file_mode(sunshine.config_file);
 
       // Read config file
       auto vars = parse_config(file_handler::read_file(sunshine.config_file.c_str()));
