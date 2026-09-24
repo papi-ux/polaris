@@ -84,19 +84,35 @@ namespace pyrowave_encode {
     std::string gpu_name;
 
     /**
-     * @brief Held around anything that touches the whole device rather than one session.
+     * @brief The queue lock, and nothing else. A leaf: never held across a call into the codec.
      *
-     * Two things do. A VkQueue may only be submitted to from one thread at a time, and the command
-     * buffer a session lends the codec is set on the device rather than on the encoder, so two
-     * sessions encoding at once would each set their own and record into the other's. Two clients
-     * streaming from one host is an ordinary thing, so neither is hypothetical.
-     *
+     * A VkQueue may only be submitted to from one thread at a time, and two sessions share this one.
      * The codec takes a pointer to this in its create info and locks it around its own submissions,
-     * which covers the path where it submits for itself. Recursive because that callback can fire
-     * while a session already holds this for a command buffer it is lending, and a plain mutex would
-     * stop the frame rather than protect it.
+     * so the same lock covers both its queue work and Polaris's.
+     *
+     * **It must not be held across a codec entry point.** The codec calls this back from deep inside
+     * Granite, which is already holding its own device mutex by then: every path to
+     * `submit_batches` goes through `LOCK()` or `DRAIN_FRAME_LOCK()` first. So the codec's order is
+     * its mutex and then this one. A caller that took this one and then entered the codec would be
+     * asking for them in the other order, and two sessions doing both at once deadlock: one waiting
+     * for Granite's mutex while holding this, the other waiting for this while holding Granite's.
+     * Tearing a session down is enough to be the second thread, because destroying an encoder submits.
+     *
+     * Recursive because the callback can fire twice on one thread inside Granite, and because
+     * Polaris's own queue work can sit inside a frame that already took it.
      */
     mutable std::recursive_mutex device_lock;
+
+    /**
+     * @brief Held for the length of a frame that lends the codec a command buffer.
+     *
+     * The command buffer is set on the device rather than on the encoder, so two sessions encoding at
+     * once would each set their own and record into the other's. This is the outer lock: taken before
+     * entering the codec and released after the frame is gathered, so the order is always this one,
+     * then Granite's, then the queue lock. Nothing inside the codec asks for this one, which is what
+     * keeps that order from inverting.
+     */
+    mutable std::mutex command_buffer_lock;
 
   private:
     VkApplicationInfo application_info = {};

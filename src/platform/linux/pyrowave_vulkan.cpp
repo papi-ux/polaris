@@ -272,7 +272,13 @@ namespace pyrowave_encode {
       return false;
     }
     std::vector<VkPhysicalDevice> candidates(count);
-    loader.enumerate_physical_devices(instance, &count, candidates.data());
+    if (loader.enumerate_physical_devices(instance, &count, candidates.data()) != VK_SUCCESS) {
+      // Not checking this would walk the null handles the vector was filled with.
+      BOOST_LOG(warning) << "PyroWave: the Vulkan loader would not list its devices"sv;
+      destroy();
+      return false;
+    }
+    candidates.resize(count);
 
     // The best of what is here rather than the first of it. A host with a discrete GPU and an
     // integrated one enumerates both, in whatever order the loader feels like, and the frames are on

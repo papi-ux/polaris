@@ -1839,9 +1839,15 @@ namespace video {
 
       // What this session was built to read, checked rather than assumed. Every backend that reaches
       // here hands over four bytes a pixel in BGRA order, and the one interesting way that changes is
-      // a ten bit capture, which arrives at the same four bytes a pixel with the samples packed
-      // differently and is marked as a ten bit frame. Read as BGRA it is not a wrong colour, it is
-      // noise, so a frame that is not what was expected is refused and says so once.
+      // a ten bit capture: same four bytes a pixel, samples packed differently, and read as BGRA it is
+      // not a wrong colour, it is noise.
+      //
+      // What this catches, exactly: the portal backend is the only one that negotiates ten bit, from
+      // the client's dynamic range, and it is also the only one that reports what it captured, as
+      // p010 standing in for a ten bit source because the enum has no packed ten bit RGB. The wlroots,
+      // KMS and cage backends report bgra8 whatever they took, so this would not catch a ten bit frame
+      // from them. That is survivable only because none of them asks for one. If one starts, this
+      // check has to move to something it actually fills in.
       const auto format = frame.metadata.format;
       const bool readable = format == platf::frame_format_e::bgra8 ||
                             format == platf::frame_format_e::unknown;

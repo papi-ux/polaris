@@ -425,10 +425,11 @@ namespace pyrowave_encode {
         budget = max_bytes;
         const pyrowave_rate_control rate_control = {max_bytes};
 
-        // Held until the frame is gathered. The command buffer below is device state rather than
-        // session state, the submit inside end() goes to the queue every session shares, and
-        // packetizing reads what that submit wrote.
-        const std::lock_guard<std::recursive_mutex> lock {owner->device_lock};
+        // Held until the frame is gathered, because the command buffer below is device state rather
+        // than session state and packetizing reads what its submission wrote. Not the queue lock:
+        // that one is a leaf the codec takes for itself from inside Granite, and holding it across a
+        // codec call is how two sessions deadlock. pyrowave_vulkan.h has the order.
+        const std::lock_guard<std::mutex> lock {owner->command_buffer_lock};
 
         pyrowave_device_set_command_buffer(owner->codec, staging->command_buffer());
         const auto result = pyrowave_encoder_encode_gpu_scaled_synchronous(encoder, nullptr, nullptr,

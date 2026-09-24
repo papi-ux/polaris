@@ -6,6 +6,7 @@
 
 // standard includes
 #include <cstring>
+#include <mutex>
 
 // local includes
 #include "src/logging.h"
@@ -155,7 +156,15 @@ namespace pyrowave_encode {
 
   upload_t::~upload_t() {
     if (owner && owner->device != VK_NULL_HANDLE && api.device_wait_idle) {
-      api.device_wait_idle(owner->device);
+      // Under the queue lock, because vkDeviceWaitIdle wants every queue on the device synchronised
+      // against host access, and another session is very likely submitting on this one right now:
+      // a session being destroyed while another streams is the ordinary case, not the exotic one.
+      const std::lock_guard<std::recursive_mutex> lock {owner->device_lock};
+      const auto waited = api.device_wait_idle(owner->device);
+      if (waited != VK_SUCCESS) {
+        BOOST_LOG(warning) << "PyroWave: the device did not drain before teardown (result "sv
+                           << static_cast<int>(waited) << ')';
+      }
     }
     release_frame_resources();
     if (fence != VK_NULL_HANDLE) {
@@ -226,8 +235,20 @@ namespace pyrowave_encode {
       return true;
     }
 
-    // Capture changed shape under us, which happens when a monitor mode changes mid session.
-    api.device_wait_idle(owner->device);
+    // Capture changed shape under us, which happens when a monitor mode changes mid session. The
+    // old image and buffer may still be in a submission, so the device has to drain before they go,
+    // and the drain takes the queue lock for the same reason the one in the destructor does.
+    {
+      const std::lock_guard<std::recursive_mutex> lock {owner->device_lock};
+      const auto waited = api.device_wait_idle(owner->device);
+      if (waited != VK_SUCCESS) {
+        // Freeing an image a submission is still reading is worse than refusing the frame.
+        BOOST_LOG(error) << "PyroWave: the device would not drain before resizing (result "sv
+                         << static_cast<int>(waited) << ')';
+        wedged = true;
+        return false;
+      }
+    }
     release_frame_resources();
 
     VkPhysicalDeviceMemoryProperties memory = {};
@@ -337,7 +358,7 @@ namespace pyrowave_encode {
 
   bool upload_t::begin(const uint8_t *pixels, int width, int height, int stride, VkFormat format,
                        const placement_t &where) {
-    if (recording || !pixels || stride <= 0) {
+    if (wedged || recording || !pixels || stride <= 0) {
       return false;
     }
     // Four bytes a pixel, so a row of pixels is a whole number of texels wide however capture padded
@@ -431,7 +452,7 @@ namespace pyrowave_encode {
   }
 
   bool upload_t::begin_retained() {
-    if (recording || image == VK_NULL_HANDLE ||
+    if (wedged || recording || image == VK_NULL_HANDLE ||
         image_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
       return false;
     }
@@ -485,7 +506,16 @@ namespace pyrowave_encode {
     submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &cmd;
-    if (api.queue_submit(owner->queue, 1, &submit, fence) != VK_SUCCESS) {
+
+    // The queue lock covers the submit and nothing more. Waiting on the fence below touches no queue,
+    // and holding a shared lock across a wait would stall every other session for as long as this
+    // frame takes.
+    VkResult submitted = VK_SUCCESS;
+    {
+      const std::lock_guard<std::recursive_mutex> lock {owner->device_lock};
+      submitted = api.queue_submit(owner->queue, 1, &submit, fence);
+    }
+    if (submitted != VK_SUCCESS) {
       BOOST_LOG(warning) << "PyroWave: the queue refused a frame"sv;
       forget_gpu_state();
       return false;
@@ -498,9 +528,11 @@ namespace pyrowave_encode {
     if (waited != VK_SUCCESS) {
       BOOST_LOG(error) << "PyroWave: the GPU did not finish a frame within a second (result "sv
                        << static_cast<int>(waited) << ')';
-      // Whatever that submission is doing, it is not finished, so nothing about the image can be
-      // relied on. A frame that times out has already lost the session; this is about not compounding
-      // it if the caller tries again.
+      // That submission is still executing and there is no telling when it stops. Reusing anything
+      // here would overwrite the staging buffer it is reading, reset the pool its command buffer is
+      // pending in, and resubmit a one time command buffer. So the path is done: the session fails
+      // and the stream tears down, which is what a lost GPU means anyway.
+      wedged = true;
       forget_gpu_state();
       return false;
     }

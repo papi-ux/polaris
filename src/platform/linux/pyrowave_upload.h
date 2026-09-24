@@ -111,6 +111,19 @@ namespace pyrowave_encode {
       return image != VK_NULL_HANDLE;
     }
 
+    /**
+     * @brief Whether this path has given up, which it does when a submission never finished.
+     *
+     * A frame that does not complete inside a second is a lost GPU, not a slow one, and its
+     * submission is still executing with no way to know when it stops. Everything this object would
+     * do next touches something that submission is reading: the staging buffer, the command pool, the
+     * fence. So it stops, the session it belongs to fails, and the stream tears down, which is the
+     * outcome anyway once a device is lost.
+     */
+    bool is_wedged() const {
+      return wedged;
+    }
+
   private:
     upload_t() = default;
 
@@ -159,6 +172,9 @@ namespace pyrowave_encode {
     uint32_t image_stride = 0;
 
     bool recording = false;
+
+    /// Set once, never cleared. See is_wedged().
+    bool wedged = false;
 
     /// Resolved through the device rather than linked, for the reason pyrowave_vulkan.h gives.
     struct api_t {
