@@ -667,14 +667,21 @@ for exact_verify_tokens in (
         exact_verify_tokens,
         "release verification must compare the exact local and remote asset sets",
     )
+# Four Polaris packages and, for each, the DRM/KMS capture helper that goes with it. The helper is
+# a release asset rather than a repository-only package because SteamOS and Ubuntu have no
+# repository, so leaving one out takes DRM/KMS capture away from those hosts with nothing said.
 expected_required_binaries = [
     "Polaris-arch-x86_64.pkg.tar.zst",
     "Polaris-fedora44-x86_64.rpm",
     "Polaris-steamos3.8-x86_64.pkg.tar.zst",
     "Polaris-ubuntu24.04-x86_64.deb",
+    "Polaris-kms-arch-x86_64.pkg.tar.zst",
+    "Polaris-kms-fedora44-x86_64.rpm",
+    "Polaris-kms-steamos3.8-x86_64.pkg.tar.zst",
+    "Polaris-kms-ubuntu24.04-x86_64.deb",
 ]
 if executable_array(release_verify_tokens, "required_binary_assets") != expected_required_binaries:
-    raise AssertionError("release verification must require the exact four binary assets")
+    raise AssertionError("release verification must require the exact eight binary assets")
 for partial_check in ("supported_count", "legacy_count"):
     if any(partial_check in token for token in release_verify_tokens):
         raise AssertionError("release verification must not accept a partial asset subset")

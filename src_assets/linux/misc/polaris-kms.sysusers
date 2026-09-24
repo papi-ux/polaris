@@ -1,0 +1,6 @@
+# The group allowed to run the DRM/KMS capture helper.
+#
+# The helper holds CAP_SYS_ADMIN, so it is 0750 root:polaris-kms rather than readable by every
+# local account. rpm generates a Requires: group(polaris-kms) for a file owned by this group and a
+# matching Provides from this file, so the package satisfies its own dependency.
+g polaris-kms -

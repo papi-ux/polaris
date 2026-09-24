@@ -159,6 +159,26 @@ namespace platf::user_unit {
   /// The one path the Bazzite guide ever wrote a runtime copy to, and so the only one --setup-host replaces.
   inline constexpr std::string_view guide_runtime_copy = "/usr/local/bin/polaris-kms";
 
+  /**
+   * @brief The DRM/KMS capture helper the polaris-kms package installs.
+   *
+   * A second copy of the binary, owned by the package manager, carrying cap_sys_admin in package
+   * metadata. It exists because a capability applied to the binary this process is running does not
+   * survive that binary being replaced, which every install and every update does.
+   */
+  inline constexpr std::string_view packaged_kms_helper = POLARIS_KMS_HELPER_PATH;
+
+  /**
+   * @brief The drop-in --enable-kms writes, and the only one it will remove.
+   *
+   * Numbered so it wins over the 10-bazzite-kms.conf the old recipe told people to write by hand,
+   * which --setup-host retires rather than fights.
+   */
+  inline constexpr std::string_view kms_drop_in_name = "20-polaris-kms.conf";
+
+  /** @brief The group allowed to execute the helper, per the package's sysusers.d file. */
+  inline constexpr std::string_view kms_group = "polaris-kms";
+
   enum class runtime_copy_e {
     none,  ///< the service does not run the guide's copy, or that path is not a plain file
     current,  ///< the copy holds the same bytes as the binary it is refreshed from
@@ -247,9 +267,11 @@ namespace platf::user_unit {
     kms_teardown_t plan;
     plan.clear_binary_capability = binary_holds_capability;
     plan.remove_guide_copy = guide_copy_exists;
-    // Only a drop-in that points at the copy is this feature's to remove. Someone who pointed the
-    // service at a build tree of their own is not running the KMS recipe, and their drop-in stays.
-    if (override.active() && override.binary == guide_copy) {
+    // Only a drop-in that points at a binary this feature put there is this feature's to remove:
+    // the packaged helper, or the copy the old recipe had people make. Someone who pointed the
+    // service at a build tree of their own is not running DRM/KMS capture, and their drop-in stays.
+    if (override.active() &&
+        (override.binary == guide_copy || override.binary == std::filesystem::path {packaged_kms_helper})) {
       plan.drop_in = override.drop_in;
     }
     return plan;
@@ -268,8 +290,20 @@ namespace platf::user_unit {
     const auto binary = override.binary.string();
     const auto account = std::string {user};
     if (override.binary_missing) {
-      return "The polaris user service for [" + account + "] is overridden by " + drop_in + " to run " + binary +
-             ", which does not exist, so the service cannot start (systemd reports status=203/EXEC).\n"
+      const auto opening = "The polaris user service for [" + account + "] is overridden by " + drop_in +
+                           " to run " + binary +
+                           ", which does not exist, so the service cannot start (systemd reports status=203/EXEC).\n";
+      // The likeliest way to arrive here now is uninstalling polaris-kms while a service still
+      // points at its helper. Telling someone to hand-make a copy with setcap would rebuild the
+      // very arrangement this release removed, and on an image-based host it would not work anyway.
+      if (override.binary == std::filesystem::path {packaged_kms_helper}) {
+        return opening +
+               "That is the DRM/KMS capture helper, which belongs to the polaris-kms package. Either install it again,\n"
+               "or stop using it:\n"
+               "  sudo -H polaris --setup-host --disable-kms\n"
+               "which removes this drop-in and puts the service back on the packaged binary.\n";
+      }
+      return opening +
              "Either run the packaged binary again:\n"
              "  rm " + drop_in + "\n"
              "  systemctl --user daemon-reload\n"
@@ -293,6 +327,11 @@ namespace platf::user_unit {
              ", a copy outside the package. Package updates do not change it: after every update, run\n"
              "  sudo -H polaris --setup-host\n"
              "which refreshes the copy and its DRM/KMS capability, or remove the drop-in to run the packaged binary again.\n";
+    }
+    if (override.binary == std::filesystem::path {packaged_kms_helper}) {
+      // Nothing to warn about: this is the arrangement --enable-kms makes, and the package keeps
+      // the helper and its capability current through every update.
+      return {};
     }
     return "The polaris user service for [" + account + "] runs " + binary + " through " + drop_in +
            ", a copy outside the package. Package updates do not change it: after every update, refresh the copy\n"

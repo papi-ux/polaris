@@ -439,7 +439,7 @@ namespace video {
           return hevc;
         case 2:
           return av1;
-        case 3:
+        case VIDEO_FORMAT_PYROWAVE:
           // PyroWave, which has no profiles, so the encoder that carries it holds the same codec in
           // all three slots and any of them is the right answer. Only that encoder is ever asked:
           // ANNOUNCE refuses the format on a host that cannot run it, so this is a deliberate answer

@@ -25,6 +25,7 @@
 #include "src/globals.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/stream_stats.h"
 #include "src/video.h"
 #include "vaapi.h"
 #include "x11grab.h"
@@ -552,12 +553,18 @@ namespace platf {
       img->data = (uint8_t *) x_img->data;
       img->row_pitch = x_img->bytes_per_line;
       img->pixel_pitch = x_img->bits_per_pixel / 8;
+      img->frame_metadata = {
+        .transport = platf::frame_transport_e::internal,
+        .residency = platf::frame_residency_e::cpu,
+        .format = platf::frame_format_e::bgra8,
+      };
       img->img.reset(x_img);
 
       if (cursor) {
         blend_cursor(xdisplay.get(), *img, offset_x, offset_y);
       }
 
+      stream_stats::update_capture_metadata(img->frame_metadata);
       return capture_e::ok;
     }
 
@@ -696,6 +703,7 @@ namespace platf {
           blend_cursor(shm_xdisplay.get(), *img_out, offset_x, offset_y);
         }
 
+        stream_stats::update_capture_metadata(img_out->frame_metadata);
         return capture_e::ok;
       }
     }
@@ -706,7 +714,12 @@ namespace platf {
       img->height = height;
       img->pixel_pitch = 4;
       img->row_pitch = img->pixel_pitch * width;
-      img->data = new std::uint8_t[shm_frame_size];
+      img->data = new std::uint8_t[shm_frame_size]();
+      img->frame_metadata = {
+        .transport = platf::frame_transport_e::shm,
+        .residency = platf::frame_residency_e::cpu,
+        .format = platf::frame_format_e::bgra8,
+      };
 
       return img;
     }

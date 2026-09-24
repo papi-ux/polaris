@@ -4585,7 +4585,8 @@ namespace video {
               duplicate_frame_ratio,
               frame_jitter_ms,
               encode_duration,
-              avg_frame_age_ms
+              avg_frame_age_ms,
+              target_fps
             );
           }
 
@@ -4643,7 +4644,8 @@ namespace video {
             current_fps,
             effective_bitrate,
             encode_duration,
-            config.videoFormat == 2 ? "av1" :
+            config.videoFormat == VIDEO_FORMAT_PYROWAVE ? "pyrowave" :
+              config.videoFormat == 2 ? "av1" :
               config.videoFormat == 1 ? "hevc" : "h264",
             config.width,
             config.height

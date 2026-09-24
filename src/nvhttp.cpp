@@ -2312,7 +2312,20 @@ namespace nvhttp {
       return std::clamp(safe_kbps, 6000, std::max(6000, baseline_kbps > 0 ? baseline_kbps : safe_kbps));
     }
 
-    nlohmann::json encoder_selection_json() {
+    std::string session_encoder_name(const stream_stats::stats_t &stats) {
+      return stats.streaming && stats.codec == "pyrowave" ? "pyrowave" : video::active_encoder_name();
+    }
+
+    nlohmann::json encoder_selection_json(const stream_stats::stats_t &stats) {
+      if (stats.streaming && stats.codec == "pyrowave") {
+        // Conventional encoder probing does not select the codec's own Vulkan
+        // device. Do not label this stream software/NVENC or infer its GPU from
+        // the capture adapter. Explicit PyroWave selection has no codec fallback.
+        return {{"mode", "explicit"}, {"gpu_driver", "unknown"}, {"policy", "explicit_codec"},
+          {"preferred_encoder", "pyrowave"}, {"fallback_encoder", ""}, {"selected_encoder", "pyrowave"},
+          {"exact_live_probe_required", false}, {"fallback_used", false},
+          {"reason", "PyroWave is encoding with Vulkan after CPU color conversion."}};
+      }
       const auto selection = video::active_encoder_selection_info();
       return {
         {"mode", selection.mode},
@@ -2362,7 +2375,7 @@ namespace nvhttp {
         stream_stats::capture_path_uses_cpu_copy(stats);
       const auto capture_path = stream_stats::capture_path_summary(stats);
       const auto capture_reason = stream_stats::capture_path_reason(stats);
-      const auto active_encoder_name = video::active_encoder_name();
+      const auto active_encoder_name = session_encoder_name(stats);
       const bool nvenc_cuda_disabled_path =
         active_encoder_name == "nvenc" &&
         !build_has_cuda() &&
@@ -2582,7 +2595,7 @@ namespace nvhttp {
       health["capture_pressure"] = capture_pressure;
       health["capture_gpu_native"] = stream_stats::capture_path_is_gpu_native(stats);
       health["active_encoder"] = active_encoder_name.empty() ? "unknown" : active_encoder_name;
-      health["encoder_selection"] = encoder_selection_json();
+      health["encoder_selection"] = encoder_selection_json(stats);
       health["cuda_build"] = build_has_cuda();
       health["vulkan_build"] = build_has_vulkan();
       health["relaunch_recommended"] = hdr_source_missing || hdr_risk || decoder_risk || virtual_display_risk ||
@@ -8167,7 +8180,9 @@ namespace nvhttp {
       capture["compositor"] = "none";
 #endif
       capture["max_resolution"] = "3840x2160";
-      capture["max_fps"] = 120;
+      // Nova's Linux planner reads this route, while other clients read
+      // ServerMaxLaunchRefreshRate. Both must reflect launch admission.
+      capture["max_fps"] = advertised_max_launch_refresh_rate_for_http();
 
       auto &codecs = capture["codecs"];
       codecs = nlohmann::json::array({"h264"});
@@ -8403,18 +8418,21 @@ namespace nvhttp {
 
       // Encoder info
       auto &encoder = output["encoder"];
-      encoder["active_backend"] = video::active_encoder_name().empty() ? "unknown" : video::active_encoder_name();
+      const auto active_backend = session_encoder_name(stats);
+      const bool pyrowave_stream = stats.streaming && stats.codec == "pyrowave";
+      encoder["active_backend"] = active_backend.empty() ? "unknown" : active_backend;
       encoder["requested_backend"] = status_snapshot.requested_encoder_backend;
-      encoder["effective_backend"] = status_snapshot.effective_encoder_backend.empty() ?
-        (video::active_encoder_name().empty() ? "unknown" : video::active_encoder_name()) :
+      encoder["effective_backend"] = pyrowave_stream ? "pyrowave" : status_snapshot.effective_encoder_backend.empty() ?
+        (active_backend.empty() ? "unknown" : active_backend) :
         status_snapshot.effective_encoder_backend;
       encoder["session_override"] = status_snapshot.encoder_backend_explicit;
-      encoder["fallback_allowed"] = encoder_backend_fallback_allowed(
+      encoder["fallback_allowed"] = !pyrowave_stream && encoder_backend_fallback_allowed(
         status_snapshot.requested_encoder_backend,
         status_snapshot.encoder_backend_explicit
       );
-      encoder["selection"] = encoder_selection_json();
+      encoder["selection"] = encoder_selection_json(stats);
       encoder["codec"] = stats.codec;
+      encoder["encode_time_ms"] = stats.encode_time_ms;
       encoder["bitrate_kbps"] = stats.bitrate_kbps;
       encoder["fps"] = stats.fps;
       encoder["requested_client_fps"] = stats.requested_client_fps;

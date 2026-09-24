@@ -2,7 +2,10 @@
 : "${_run_unit_tests:=true}"
 : "${_commit:=@GITHUB_COMMIT@}"
 
-pkgname=polaris
+# See the Arch PKGBUILD for why the DRM/KMS helper is its own package. 'polaris' stays first: a
+# bare $pkgname is the array's first element, and the sources are named after it.
+pkgbase=polaris
+pkgname=('polaris' 'polaris-kms')
 pkgver=@PROJECT_VERSION@@POLARIS_SUB_VERSION@
 pkgrel=1
 pkgdesc="@PROJECT_DESCRIPTION@"
@@ -164,9 +167,10 @@ check() {
   fi
 }
 
-package() {
+package_polaris() {
+  install=polaris.install
   cd "$srcdir"
-  DESTDIR="$pkgdir" cmake --install build
+  DESTDIR="$pkgdir" cmake --install build --component polaris
   python "$srcdir/$pkgname/scripts/spaces/verify_package.py" "$pkgdir"
   test -x "$pkgdir/usr/bin/polaris-$pkgver"
   test "$(readlink "$pkgdir/usr/bin/polaris")" = "polaris-$pkgver"
@@ -176,4 +180,18 @@ package() {
   test -x "$pkgdir/usr/bin/polaris-gamescope-runtime-lib.sh"
   bash -n "$pkgdir/usr/bin/polaris-gamescope-session"
   bash -n "$pkgdir/usr/bin/polaris-gamescope-runtime-lib.sh"
+  test ! -e "$pkgdir/usr/libexec/polaris/polaris-kms"
+}
+
+package_polaris-kms() {
+  pkgdesc="DRM/KMS capture helper for Polaris"
+  depends=("polaris=$pkgver-$pkgrel")
+  install=polaris-kms.install
+
+  cd "$srcdir"
+  DESTDIR="$pkgdir" cmake --install build --component kms
+
+  test -f "$pkgdir/usr/libexec/polaris/polaris-kms"
+  test -f "$pkgdir/usr/lib/sysusers.d/polaris-kms.conf"
+  test ! -e "$pkgdir/usr/bin/polaris"
 }

@@ -134,14 +134,17 @@ namespace adaptive_bitrate {
   bool doctor_policy_blocks_quality_restore();
 
   /**
-   * @brief Feed local stream health so bitrate can react to host pacing pressure.
+   * @brief Feed local stream health so bitrate can react to encoder pressure.
+   * High-refresh overruns additionally require a measured delivery shortfall;
+   * pacing alone never lowers quality. An unknown target retains the legacy threshold.
    */
   void update_stream_health(double fps_ratio,
                             double dropped_frame_ratio,
                             double duplicate_frame_ratio,
                             double frame_jitter_ms,
                             double encode_time_ms,
-                            double avg_frame_age_ms);
+                            double avg_frame_age_ms,
+                            double target_fps = 0.0);
 
   /**
    * @brief Get the current recommended bitrate.

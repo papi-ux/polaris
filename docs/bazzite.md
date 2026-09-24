@@ -226,18 +226,14 @@ After reboot:
 ```bash
 rpm -q polaris
 sudo -H polaris --setup-host
-if [ -e /usr/local/bin/polaris-kms ]; then
-  sudo install -D -m 0755 "$(readlink -f "$(command -v polaris)")" /usr/local/bin/polaris-kms &&
-  sudo setcap cap_sys_admin+ep /usr/local/bin/polaris-kms
-fi
 systemctl --user restart polaris
 systemctl --user is-active polaris
 ```
 
-The middle lines refresh the KMS runtime copy when the host has one, and do
-nothing otherwise. This guide made that copy during every install until Polaris
-1.4.5, so a host set up before then has one whether or not it uses DRM/KMS
-capture. A copy under `/usr/local` is outside the deployment and does not change
+`--setup-host` reports and retires a KMS runtime copy when the host has one, and
+does nothing otherwise. This guide made that copy during every install until
+Polaris 1.4.5, so a host set up before then has one whether or not it uses
+DRM/KMS capture. A copy under `/usr/local` is outside the deployment and does not change
 with an RPM update or rollback: skip the refresh and `rpm -q polaris` reports the
 new version while the service, and so the console, keeps running the old one.
 A copy made before 1.4.8 cannot report this itself. From 1.4.12,
@@ -256,31 +252,41 @@ section shows.
 ## Optional DRM/KMS capture
 
 Use this section only for explicit DRM/KMS capture, including a controlled Game
-Mode capture test. On composefs-backed Bazzite deployments, adding a capability
-to the packaged binary under `/usr` can fail even as root. Use a writable runtime
-copy for that backend:
+Mode capture test.
+
+Capture through DRM/KMS needs a privileged helper, and on composefs-backed
+Bazzite deployments adding a capability to the packaged binary under `/usr` can
+fail even as root. The `polaris-kms` package solves both: it ships the helper
+with the capability already recorded in package metadata, which rpm-ostree lays
+down like any other file, so nothing has to be made writable and nothing has to
+be repeated.
 
 ```bash
-systemctl --user stop polaris
-polaris_binary="$(readlink -f "$(command -v polaris)")"
-sudo install -D -m 0755 "$polaris_binary" /usr/local/bin/polaris-kms &&
-sudo setcap cap_sys_admin+ep /usr/local/bin/polaris-kms &&
-getcap /usr/local/bin/polaris-kms
+sudo rpm-ostree install polaris-kms
+systemctl reboot
 ```
 
-Continue only if the copy succeeded and `getcap` reports `cap_sys_admin=ep`:
+After the reboot, once:
 
 ```bash
-printf '[Service]\nExecStart=\nExecStart=/usr/local/bin/polaris-kms\n' \
-  | systemctl --user edit --stdin --drop-in=10-bazzite-kms.conf polaris
-systemctl --user daemon-reload
-systemctl --user start polaris
+sudo -H polaris --setup-host --enable-kms
 ```
 
-Repeat the copy and capability steps after every package update or rollback.
-`/usr/local` maps into writable `/var/usrlocal`, which is shared across
-rpm-ostree deployments. The capability grants access needed by KMS; it does not
-select a capture backend or validate Game Mode streaming.
+Then log out and back in. The helper is readable only by the `polaris-kms`
+group, `--enable-kms` adds you to it, and a session picks up its groups when it
+starts, so this first login is what makes capture work.
+
+That is the whole recipe now. Updates and rollbacks leave it alone, because the
+package owns the file that carries the capability.
+
+If this host followed the older recipe, which copied the binary to
+`/usr/local/bin/polaris-kms` by hand, `--setup-host` moves it across: it points
+the service at the packaged helper, removes the copy, and takes the capability
+off `/usr/bin/polaris`. That copy is why a Bazzite host could report one version
+through `rpm` while the console ran another, since no update ever touched it.
+
+The capability grants the access KMS needs; it does not select a capture backend
+or validate Game Mode streaming.
 
 To return to the packaged executable, ask Polaris to take the whole recipe back out. It removes the
 drop-in, the copy and the capability on the packaged binary, in the order that never leaves the
@@ -388,9 +394,10 @@ GPU do not certify every released package, GPU, or Steam launch path. See [Compa
   `rpm-ostree status`. If `rpm -q polaris` reports the new version and the
   console still shows an older one, the service is running a KMS runtime copy
   from an earlier install: `systemctl --user cat polaris | grep ExecStart` shows
-  `/usr/local/bin/polaris-kms`. Refresh it with the [Update](#update) commands,
-  or remove it as [Optional DRM/KMS capture](#optional-drmkms-capture)
-  describes. Do not repeat first-run signup.
+  `/usr/local/bin/polaris-kms`. That copy is outside the deployment, so no update
+  ever touches it. `sudo -H polaris --setup-host` moves the host onto the
+  packaged helper and removes it, which is what stops this happening again.
+  Do not repeat first-run signup.
 - **Black screen or unexpected Mirror Desktop:** inspect the active launch mode
   and capture decision. A physical connector name alone does not diagnose an
   app-routing failure; use the session's actual backend and compositor records.

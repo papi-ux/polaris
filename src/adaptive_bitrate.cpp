@@ -12,6 +12,7 @@
 
 // local includes
 #include "adaptive_bitrate.h"
+#include <cmath>
 #include "config.h"
 #include "logging.h"
 
@@ -335,7 +336,8 @@ namespace adaptive_bitrate {
                             double duplicate_frame_ratio,
                             double frame_jitter_ms,
                             double encode_time_ms,
-                            double avg_frame_age_ms) {
+                            double avg_frame_age_ms,
+                            double target_fps) {
     if (!enabled.load(std::memory_order_relaxed) ||
         !runtime_update_supported.load(std::memory_order_relaxed)) {
       return;
@@ -353,7 +355,16 @@ namespace adaptive_bitrate {
       initialized = true;
     }
 
-    const bool encoder_pressure = encode_time_ms >= 11.0;
+    // Preserve the existing low-refresh/unknown-target policy. At high refresh,
+    // an encoder can miss every deadline well below 11 ms (240 Hz = 4.17 ms).
+    // Require measured delivery loss as well as an over-budget encode sample
+    // before using that lower threshold; an isolated slow frame in an otherwise
+    // healthy stream is not enough evidence to reduce picture quality.
+    const double frame_budget_ms = std::isfinite(target_fps) && target_fps > 0.0 ?
+      1000.0 / target_fps : 11.0;
+    const bool delivery_shortfall = std::isfinite(fps_ratio) && fps_ratio > 0.0 && fps_ratio < 0.95;
+    const bool encoder_pressure = std::isfinite(encode_time_ms) &&
+      (encode_time_ms >= 11.0 || (delivery_shortfall && encode_time_ms >= frame_budget_ms));
     const bool pacing_pressure =
       (fps_ratio > 0.0 && fps_ratio < 0.88) ||
       dropped_frame_ratio >= 0.04 ||
@@ -390,6 +401,8 @@ namespace adaptive_bitrate {
                        << ", duplicate=" << duplicate_frame_ratio
                        << ", jitter=" << frame_jitter_ms
                        << "ms, encode=" << encode_time_ms
+                       << "ms, target_fps=" << target_fps
+                       << ", frame_budget=" << frame_budget_ms
                        << "ms, age=" << avg_frame_age_ms << "ms)";
       target_bitrate_kbps.store(new_target, std::memory_order_relaxed);
       ++action_authority_revision;

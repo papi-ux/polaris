@@ -94,6 +94,13 @@ endif()
 # it is that one. The default "polaris" (init.cmake) marks a non-packaged build.
 list(APPEND POLARIS_DEFINITIONS POLARIS_EXECUTABLE_PATH="${POLARIS_EXECUTABLE_PATH}")
 
+# Where the polaris-kms package installs the DRM/KMS capture helper. --enable-kms points the user
+# service at this path rather than applying a capability to the binary it is running, so an update
+# cannot take the capability away. It is derived from the same install variables the package uses,
+# so the two cannot drift.
+list(APPEND POLARIS_DEFINITIONS
+        POLARIS_KMS_HELPER_PATH="${CMAKE_INSTALL_FULL_LIBEXECDIR}/polaris/polaris-kms")
+
 # AppImage
 if(${POLARIS_BUILD_APPIMAGE})
     # use relative assets path for AppImage
