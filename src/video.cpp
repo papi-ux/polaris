@@ -1860,6 +1860,11 @@ namespace video {
         pyrowave_encode::dmabuf_t buffer;
         if (pyrowave_encode::dmabuf_from_frame(*frame.compat_img(), buffer)) {
           if (!session->encode_imported(buffer, max_frame_bytes)) {
+            if (!complained_about_import) {
+              complained_about_import = true;
+              BOOST_LOG(error) << "PyroWave: a captured frame on the GPU could not be encoded; the "sv
+                               << "reason is above this line"sv;
+            }
             return -1;
           }
           converted_since_last_packet = true;

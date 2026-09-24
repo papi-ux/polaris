@@ -359,11 +359,13 @@ namespace pyrowave_encode {
       bool encode_imported(const dmabuf_t &buffer, std::size_t max_bytes) override {
         frame.clear();
         if (!encoder || max_bytes == 0 || gpu == gpu_e::no) {
+          BOOST_LOG(error) << "PyroWave: a frame arrived on the GPU and this session cannot take it"sv;
           return false;
         }
         if (!staging) {
           staging = upload_t::make(*owner);
           if (!staging) {
+            BOOST_LOG(error) << "PyroWave: could not make the path a captured frame arrives through"sv;
             gpu = gpu_e::no;
             return false;
           }
@@ -762,6 +764,17 @@ namespace pyrowave_encode {
 
   bool hdr_available() {
     return available() && gpu_input_allowed();
+  }
+
+  std::vector<std::uint64_t> importable_dmabuf_modifiers(std::uint32_t fourcc) {
+    if (!gpu_input_allowed()) {
+      return {};
+    }
+    auto *owner = shared_vulkan();
+    if (!owner) {
+      return {};
+    }
+    return importable_modifiers(*owner, fourcc);
   }
 
   bool dmabuf_import_available() {

@@ -95,6 +95,93 @@ namespace pyrowave_encode {
 
   }  // namespace
 
+  std::vector<std::uint64_t> importable_modifiers(const vk_device_t &owner, std::uint32_t fourcc) {
+    std::vector<std::uint64_t> usable;
+
+    const auto format = format_for_fourcc(fourcc);
+    if (format == VK_FORMAT_UNDEFINED || !owner.can_import_dmabuf ||
+        owner.physical_device == VK_NULL_HANDLE) {
+      return usable;
+    }
+
+    const auto list_formats = reinterpret_cast<PFN_vkGetPhysicalDeviceFormatProperties2>(
+      owner.instance_fn("vkGetPhysicalDeviceFormatProperties2"));
+    const auto describe_image = reinterpret_cast<PFN_vkGetPhysicalDeviceImageFormatProperties2>(
+      owner.instance_fn("vkGetPhysicalDeviceImageFormatProperties2"));
+    if (!list_formats || !describe_image) {
+      return usable;
+    }
+
+    // Two calls, which is how Vulkan hands over a list: once for the count, once for the contents.
+    VkDrmFormatModifierPropertiesListEXT modifiers = {};
+    modifiers.sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT;
+
+    VkFormatProperties2 properties = {};
+    properties.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+    properties.pNext = &modifiers;
+    list_formats(owner.physical_device, format, &properties);
+    if (modifiers.drmFormatModifierCount == 0) {
+      return usable;
+    }
+
+    std::vector<VkDrmFormatModifierPropertiesEXT> described(modifiers.drmFormatModifierCount);
+    modifiers.pDrmFormatModifierProperties = described.data();
+    list_formats(owner.physical_device, format, &properties);
+
+    for (const auto &candidate : described) {
+      // One memory plane, because that is what the import binds. A layout that spreads a packed RGB
+      // image across several planes, as some compression schemes do, would have the rest read from
+      // inside the first one's allocation.
+      if (candidate.drmFormatModifierPlaneCount != 1) {
+        continue;
+      }
+      constexpr VkFormatFeatureFlags needed =
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT;
+      if ((candidate.drmFormatModifierTilingFeatures & needed) != needed) {
+        continue;
+      }
+
+      // And then the exact image, because a format that supports something in general may not support
+      // it for an image created this way. This is the same create info the import uses.
+      VkPhysicalDeviceExternalImageFormatInfo external = {};
+      external.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO;
+      external.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+
+      VkPhysicalDeviceImageDrmFormatModifierInfoEXT layout = {};
+      layout.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT;
+      layout.drmFormatModifier = candidate.drmFormatModifier;
+      layout.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+      layout.pNext = &external;
+
+      VkPhysicalDeviceImageFormatInfo2 wanted = {};
+      wanted.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
+      wanted.format = format;
+      wanted.type = VK_IMAGE_TYPE_2D;
+      wanted.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+      wanted.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+      wanted.pNext = &layout;
+
+      VkExternalImageFormatProperties external_properties = {};
+      external_properties.sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES;
+
+      VkImageFormatProperties2 answer = {};
+      answer.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
+      answer.pNext = &external_properties;
+
+      if (describe_image(owner.physical_device, &wanted, &answer) != VK_SUCCESS) {
+        continue;
+      }
+      const auto features = external_properties.externalMemoryProperties.externalMemoryFeatures;
+      if ((features & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) == 0) {
+        continue;
+      }
+
+      usable.push_back(candidate.drmFormatModifier);
+    }
+
+    return usable;
+  }
+
   std::unique_ptr<upload_t> upload_t::make(const vk_device_t &owner) {
     if (owner.device == VK_NULL_HANDLE || owner.queue == VK_NULL_HANDLE) {
       return nullptr;
@@ -467,7 +554,13 @@ namespace pyrowave_encode {
   bool upload_t::import_dmabuf(const dmabuf_t &buffer, bool ten_bit) {
     release_import();
 
-    if (!can_import() || buffer.fds[0] < 0 || buffer.width <= 0 || buffer.height <= 0) {
+    if (!can_import()) {
+      BOOST_LOG(error) << "PyroWave: asked to import a frame on a device that cannot"sv;
+      return false;
+    }
+    if (buffer.fds[0] < 0 || buffer.width <= 0 || buffer.height <= 0) {
+      BOOST_LOG(error) << "PyroWave: capture described a "sv << buffer.width << 'x' << buffer.height
+                       << " dmabuf with descriptor "sv << buffer.fds[0];
       return false;
     }
 
@@ -601,6 +694,7 @@ namespace pyrowave_encode {
       }
     }
     if (chosen == UINT32_MAX) {
+      BOOST_LOG(error) << "PyroWave: no memory type suits the captured frame"sv;
       ::close(fd);
       release_import();
       return false;
@@ -632,6 +726,7 @@ namespace pyrowave_encode {
       return false;
     }
     if (api.bind_image_memory(owner->device, imported_image, imported_memory, 0) != VK_SUCCESS) {
+      BOOST_LOG(error) << "PyroWave: the imported memory would not bind to the image"sv;
       release_import();
       return false;
     }
@@ -644,6 +739,8 @@ namespace pyrowave_encode {
 
   bool upload_t::begin_imported(const dmabuf_t &buffer, const placement_t &where, bool ten_bit) {
     if (wedged || recording) {
+      BOOST_LOG(error) << "PyroWave: asked for a frame while "sv
+                       << (wedged ? "this path has given up"sv : "one is already open"sv);
       return false;
     }
     if (!import_dmabuf(buffer, ten_bit)) {

@@ -11,6 +11,7 @@
 // standard includes
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 namespace pyrowave_encode {
 
@@ -42,6 +43,24 @@ namespace pyrowave_encode {
       return offset_x != 0 || offset_y != 0;
     }
   };
+
+  /**
+   * @brief The layouts this device can import a captured frame in, for one DRM format.
+   *
+   * Asked of Vulkan rather than assumed, and asked about the exact image the import creates rather
+   * than about the format in the abstract: the modifier has to be one the driver will accept for a
+   * sampled, transfer-source image built from an imported dmabuf, with one memory plane.
+   *
+   * It matters more here than it would elsewhere. A frame that arrives as a dmabuf has no copy in
+   * host memory behind it, so a layout that turns out not to import is a lost frame rather than a
+   * slow one. Offering only what has been checked is what keeps that from being possible.
+   *
+   * @param owner The device that will import.
+   * @param fourcc What capture would be asked to produce.
+   * @return The modifiers to offer, best left in the order the driver gave them. Empty when this
+   *   format cannot be imported at all, which is the honest answer for a format the codec cannot read.
+   */
+  std::vector<std::uint64_t> importable_modifiers(const vk_device_t &owner, std::uint32_t fourcc);
 
   /**
    * @brief One frame's journey from the pointer capture handed over to an image the codec can read.

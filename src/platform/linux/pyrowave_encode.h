@@ -10,6 +10,7 @@
 // standard includes
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 #include <memory>
 #include <string>
 #include <vector>
@@ -75,6 +76,15 @@ namespace pyrowave_encode {
    * offer, because offering a dmabuf to a host that cannot import one is a stream with no picture.
    */
   bool dmabuf_import_available();
+
+  /**
+   * @brief Which layouts capture may hand this host a frame in, for one DRM format.
+   *
+   * Empty when this host cannot import that format at all, which is also the answer that keeps
+   * capture on the copying path. See the note on importable_modifiers for why this is asked rather
+   * than assumed.
+   */
+  std::vector<std::uint64_t> importable_dmabuf_modifiers(std::uint32_t fourcc);
 
   /**
    * @brief What a client has to recognise before this host will stream the codec to it.
