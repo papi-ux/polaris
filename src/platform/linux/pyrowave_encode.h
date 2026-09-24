@@ -29,6 +29,18 @@ namespace pyrowave_encode {
   };
 
   /**
+   * @brief What the samples in a stream mean.
+   *
+   * Not a quality setting. It decides how many bits a captured pixel arrives in, which transfer
+   * function those bits carry, and which primaries the colour matrix is built from, and the two ends
+   * have to agree on all three or the picture is merely wrong rather than broken.
+   */
+  enum class dynamic_range_e {
+    sdr,  ///< Full range Rec. 709, eight bits a sample, which is what clients ask for today.
+    hdr10,  ///< Full range BT.2020 with the PQ transfer function, ten bits a sample in.
+  };
+
+  /**
    * @brief How far to shift a luma extent to get a chroma one. Zero for 4:4:4, one for 4:2:0.
    */
   inline int chroma_shift(chroma_e chroma) {
@@ -58,6 +70,22 @@ namespace pyrowave_encode {
    * exists to catch, so it cannot catch it for itself.
    */
   inline constexpr const char *profile_token = "pyrowave-186f0393-sdr420-v1";
+
+  /**
+   * @brief The same agreement for an HDR10 stream, which is a different one about the same bytes.
+   *
+   * Its own token rather than a flag beside the other one, for the reason the other one exists: the
+   * bitstream says nothing about primaries or transfer function, so a client that decodes PQ BT.2020
+   * as if it were Rec. 709 gets a washed out, wrongly hued picture and no error. Nothing advertises
+   * this yet. The encoder can produce it and no client can read it, so the negotiation is the next
+   * piece rather than a missing one.
+   */
+  inline constexpr const char *hdr_profile_token = "pyrowave-186f0393-hdr2020pq420-v1";
+
+  /// The token a stream of this kind has to agree on.
+  inline constexpr const char *profile_token_for(dynamic_range_e range) {
+    return range == dynamic_range_e::hdr10 ? hdr_profile_token : profile_token;
+  }
 
   /**
    * @brief The PyroWave version this binary is linked against, as MAJOR.MINOR.PATCH.
@@ -101,7 +129,7 @@ namespace pyrowave_encode {
     virtual bool encode(const uint8_t *y, const uint8_t *u, const uint8_t *v, std::size_t max_bytes) = 0;
 
     /**
-     * @brief Encode one frame from packed BGRA in host memory, scaled to the session's size.
+     * @brief Encode one frame of packed pixels in host memory, scaled to the session's size.
      *
      * What capture actually hands over, and rarely at the size the client asked for: a 7680x2160
      * monitor feeding a 1280x800 tablet is the ordinary case. The session's size is the stream's,
@@ -113,15 +141,17 @@ namespace pyrowave_encode {
      * left black. The conversion happens here on the CPU, which is the bring-up path: it works
      * against every capture backend without importing a buffer, and it is the wrong way to do it
      * once a dmabuf can reach the GPU directly.
-     * @param bgra First byte of the top left pixel.
+     * @param pixels First byte of the top left pixel. Eight bit BGRA for an SDR session and
+     *   ten bit packed xBGR for an HDR one, which are the two things Polaris's capture hands over,
+     *   both at four bytes a pixel.
      * @param src_width Width of what capture handed over, not of the stream.
      * @param src_height Height of the same.
      * @param stride Bytes per row, which capture rarely makes equal to width times four.
      * @param max_bytes The most this frame may occupy.
      * @return false when the frame could not be converted or encoded.
      */
-    virtual bool encode_bgra(const uint8_t *bgra, int src_width, int src_height, int stride,
-                             std::size_t max_bytes) = 0;
+    virtual bool encode_packed(const uint8_t *pixels, int src_width, int src_height, int stride,
+                               std::size_t max_bytes) = 0;
 
     /**
      * @brief Encode the last converted picture again, as a new frame.
@@ -171,6 +201,7 @@ namespace pyrowave_encode {
    * @param width Frame width; rounded down to even, because 4:2:0 has no half chroma sample.
    * @param height Frame height, likewise.
    */
-  std::unique_ptr<session_t> make_session(int width, int height, chroma_e chroma);
+  std::unique_ptr<session_t> make_session(int width, int height, chroma_e chroma,
+                                         dynamic_range_e range = dynamic_range_e::sdr);
 
 }  // namespace pyrowave_encode

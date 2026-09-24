@@ -1841,14 +1841,17 @@ namespace rtsp_stream {
         return;
       }
 
-      // The profile token says SDR, and this encoder has no other mode. Accepting an HDR request
-      // would encode full range Rec. 709 and leave the client to display it as BT.2020 PQ, which is
-      // a picture that is merely wrong: washed out, with the darks wrong, and nothing anywhere
-      // saying why. The bitstream reserves fields for transfer function and primaries that nothing
-      // upstream writes, so there is no way to carry the difference even if it were encoded.
+      // The encoder can carry HDR10, on the path that hands it a picture on the GPU, and no client
+      // can read it: the only token this host offers says SDR, and the bitstream reserves fields for
+      // transfer function and primaries that nothing upstream writes. So accepting an HDR request
+      // would send PQ BT.2020 to a client that agreed to display Rec. 709, which is a picture that is
+      // merely wrong, washed out with the darks crushed, and nothing anywhere saying why.
+      //
+      // What is missing is the negotiation, not the encoding: an SDP that offers both tokens and a
+      // client that asks for the HDR one. Until then this stays a refusal.
       if (config.monitor.dynamicRange != 0) {
-        BOOST_LOG(warning) << "PyroWave is SDR only, yet the client asked for dynamic range "sv
-                           << config.monitor.dynamicRange;
+        BOOST_LOG(warning) << "PyroWave cannot agree HDR with a client yet, and this one asked for "sv
+                           << "dynamic range "sv << config.monitor.dynamicRange;
 
         respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
         return;

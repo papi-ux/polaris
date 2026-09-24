@@ -151,21 +151,92 @@ namespace {
     pyrowave_decoder decoder = nullptr;
   };
 
-  /// Full range Rec. 709 with centred chroma, which is what profile_token promises a client.
+  /// Which primaries a stream's colour matrix is built from, which its profile token names.
+  enum class primaries_e {
+    bt709,
+    bt2020,
+  };
+
+  /**
+   * Full range YCbCr with centred chroma, which is what a profile token promises a client.
+   *
+   * The matrix is applied to the samples as they arrive rather than to linear light, for both
+   * primaries, which is what every video codec does and what the codec's own shader does. So an
+   * expectation computed from the code values is the right expectation whether those code values
+   * carry sRGB gamma or PQ.
+   */
   struct expected_ycbcr_t {
-    expected_ycbcr_t(int r, int g, int b) {
-      const double luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      y = luma;
-      u = (b - luma) / 1.8556 + 128.0;
-      v = (r - luma) / 1.5748 + 128.0;
-      y = std::clamp(y, 0.0, 255.0);
-      u = std::clamp(u, 0.0, 255.0);
-      v = std::clamp(v, 0.0, 255.0);
+    expected_ycbcr_t(double r, double g, double b, primaries_e primaries = primaries_e::bt709) {
+      const bool wide = primaries == primaries_e::bt2020;
+      const double kr = wide ? 0.2627 : 0.2126;
+      const double kg = wide ? 0.6780 : 0.7152;
+      const double kb = wide ? 0.0593 : 0.0722;
+      const double cb_span = wide ? 1.8814 : 1.8556;
+      const double cr_span = wide ? 1.4746 : 1.5748;
+
+      const double luma = kr * r + kg * g + kb * b;
+      y = std::clamp(luma, 0.0, 255.0);
+      u = std::clamp((b - luma) / cb_span + 128.0, 0.0, 255.0);
+      v = std::clamp((r - luma) / cr_span + 128.0, 0.0, 255.0);
     }
 
     double y;
     double u;
     double v;
+  };
+
+  /**
+   * Four solid quadrants packed the way ten bit capture hands them over.
+   *
+   * Two bits unused and ten each for blue, green and red from the top of the word down, which is
+   * XBGR2101010 to DRM and A2B10G10R10 to Vulkan. Getting this order wrong swaps red and blue, and
+   * the test that reads the quadrants back is what would catch it.
+   */
+  struct quadrant_frame_10bit_t {
+    quadrant_frame_10bit_t(int width, int height, int stride):
+        width {width},
+        height {height},
+        stride {stride},
+        pixels(static_cast<std::size_t>(stride) * height, 0) {
+      for (int row = 0; row < height; ++row) {
+        for (int col = 0; col < width; ++col) {
+          const auto which = (row < height / 2 ? 0 : 2) + (col < width / 2 ? 0 : 1);
+          const uint32_t r = static_cast<uint32_t>(codes[which][0]);
+          const uint32_t g = static_cast<uint32_t>(codes[which][1]);
+          const uint32_t b = static_cast<uint32_t>(codes[which][2]);
+          const uint32_t word = (3u << 30) | (b << 20) | (g << 10) | r;
+          std::memcpy(&pixels[static_cast<std::size_t>(row) * stride +
+                              static_cast<std::size_t>(col) * 4],
+                      &word, sizeof(word));
+        }
+      }
+    }
+
+    std::pair<int, int> centre_of(int which) const {
+      const int col = (which % 2 == 0 ? width / 4 : width - width / 4);
+      const int row = (which < 2 ? height / 4 : height - height / 4);
+      return {col, row};
+    }
+
+    /// The same sample as an eight bit expectation wants, which is where the two can be compared.
+    double as_eight_bit(int which, int channel) const {
+      return codes[which][channel] * 255.0 / 1023.0;
+    }
+
+    // Ten bit code values. The primaries are saturated because a wrong matrix hides on grey, and the
+    // grey quadrant sits well below the top of the range because PQ spends most of its code space
+    // down there and a bug that clipped would still pass at full scale.
+    static constexpr int codes[4][3] = {
+      {1023, 0, 0},
+      {0, 1023, 0},
+      {0, 0, 1023},
+      {520, 520, 520},
+    };
+
+    int width;
+    int height;
+    int stride;
+    std::vector<uint8_t> pixels;
   };
 
   /// Four solid quadrants, so a sample from the middle of each says what the colour became.
@@ -360,7 +431,7 @@ TEST(PyroWaveEncodeTests, EncodesTheBgraFrameCaptureActuallyHandsOver) {
     }
   }
 
-  ASSERT_TRUE(session->encode_bgra(bgra.data(), width, height, stride, 256 * 1024));
+  ASSERT_TRUE(session->encode_packed(bgra.data(), width, height, stride, 256 * 1024));
   ASSERT_FALSE(session->bitstream().empty());
   const sequence_header_t header {session->bitstream()};
   ASSERT_TRUE(header.present);
@@ -368,7 +439,7 @@ TEST(PyroWaveEncodeTests, EncodesTheBgraFrameCaptureActuallyHandsOver) {
   EXPECT_EQ(header.height, height);
 
   // The converter is built once and kept, so the second frame has to work as well as the first.
-  ASSERT_TRUE(session->encode_bgra(bgra.data(), width, height, stride, 256 * 1024));
+  ASSERT_TRUE(session->encode_packed(bgra.data(), width, height, stride, 256 * 1024));
   EXPECT_FALSE(session->bitstream().empty());
 }
 
@@ -383,14 +454,14 @@ TEST(PyroWaveEncodeTests, ARefusedFrameLeavesNothingToRead) {
   ASSERT_NE(session, nullptr);
 
   std::vector<uint8_t> bgra(static_cast<std::size_t>(width) * height * 4, 0x40);
-  EXPECT_FALSE(session->encode_bgra(nullptr, width, height, width * 4, 64 * 1024));
-  EXPECT_FALSE(session->encode_bgra(bgra.data(), width, height, 0, 64 * 1024));
-  EXPECT_FALSE(session->encode_bgra(bgra.data(), width, height, -1, 64 * 1024));
-  EXPECT_FALSE(session->encode_bgra(bgra.data(), 0, height, width * 4, 64 * 1024));
-  EXPECT_FALSE(session->encode_bgra(bgra.data(), width, 0, width * 4, 64 * 1024));
+  EXPECT_FALSE(session->encode_packed(nullptr, width, height, width * 4, 64 * 1024));
+  EXPECT_FALSE(session->encode_packed(bgra.data(), width, height, 0, 64 * 1024));
+  EXPECT_FALSE(session->encode_packed(bgra.data(), width, height, -1, 64 * 1024));
+  EXPECT_FALSE(session->encode_packed(bgra.data(), 0, height, width * 4, 64 * 1024));
+  EXPECT_FALSE(session->encode_packed(bgra.data(), width, 0, width * 4, 64 * 1024));
   // A stride that cannot hold the row it claims to. Reading it would run off the end of the buffer
   // capture handed over, which is the one argument here that is not merely wrong but unsafe.
-  EXPECT_FALSE(session->encode_bgra(bgra.data(), width, height, width * 4 - 1, 64 * 1024));
+  EXPECT_FALSE(session->encode_packed(bgra.data(), width, height, width * 4 - 1, 64 * 1024));
   EXPECT_FALSE(session->encode(nullptr, nullptr, nullptr, 64 * 1024));
 
   // A refusal has to leave the frame empty and not the previous picture. The caller checks the
@@ -441,7 +512,7 @@ TEST(PyroWaveEncodeTests, TheStreamKeepsItsOwnSizeWhateverCaptureHandsOver) {
       }
     }
 
-    ASSERT_TRUE(session->encode_bgra(bgra.data(), source.width, source.height, stride, 256 * 1024))
+    ASSERT_TRUE(session->encode_packed(bgra.data(), source.width, source.height, stride, 256 * 1024))
       << source.what;
     const sequence_header_t header {session->bitstream()};
     ASSERT_TRUE(header.present) << source.what;
@@ -564,7 +635,7 @@ TEST(PyroWaveEncodeTests, TheFrameCaptureHandsOverIsEncodedOnTheGpu) {
   // A padded stride, because that is what capture hands over and the upload has to be told how wide
   // a row really is rather than assuming.
   const quadrant_frame_t source {width, height, (width + 37) * 4};
-  ASSERT_TRUE(session->encode_bgra(source.bgra.data(), width, height, source.stride, 512 * 1024));
+  ASSERT_TRUE(session->encode_packed(source.bgra.data(), width, height, source.stride, 512 * 1024));
   EXPECT_TRUE(session->uses_gpu_input())
     << "the stream is the shape capture handed over, so nothing needed converting on the CPU";
 
@@ -589,7 +660,7 @@ TEST(PyroWaveEncodeTests, AWiderSourceGetsBarsAboveAndBelowWithoutStretching) {
   // a client asks for sixteen by nine. The codec's scaler fills its output with its input and has no
   // letterbox in it, so this only comes out right if the picture it is given was padded first.
   const quadrant_frame_t source {1280, 360, 1280 * 4};
-  ASSERT_TRUE(session->encode_bgra(source.bgra.data(), source.width, source.height, source.stride,
+  ASSERT_TRUE(session->encode_packed(source.bgra.data(), source.width, source.height, source.stride,
                                    512 * 1024));
   ASSERT_TRUE(session->uses_gpu_input());
 
@@ -634,7 +705,7 @@ TEST(PyroWaveEncodeTests, ATallerSourceGetsBarsEitherSide) {
 
   // Four by three into sixteen by nine, which is every emulator and every older game.
   const quadrant_frame_t source {640, 480, 640 * 4};
-  ASSERT_TRUE(session->encode_bgra(source.bgra.data(), source.width, source.height, source.stride,
+  ASSERT_TRUE(session->encode_packed(source.bgra.data(), source.width, source.height, source.stride,
                                    512 * 1024));
   ASSERT_TRUE(session->uses_gpu_input());
 
@@ -673,7 +744,7 @@ TEST(PyroWaveEncodeTests, ThePictureThatArrivesIsFullRangeRec709) {
   ASSERT_NE(session, nullptr);
 
   const quadrant_frame_t source {width, height, (width + 8) * 4};
-  ASSERT_TRUE(session->encode_bgra(source.bgra.data(), width, height, source.stride, 512 * 1024));
+  ASSERT_TRUE(session->encode_packed(source.bgra.data(), width, height, source.stride, 512 * 1024));
   ASSERT_TRUE(session->uses_gpu_input());
 
   const decoded_frame_t decoded {session->bitstream(), width, height, false};
@@ -699,8 +770,8 @@ TEST(PyroWaveEncodeTests, BothPathsProduceTheSamePicture) {
   ASSERT_NE(on_cpu, nullptr);
   ASSERT_NE(on_gpu, nullptr);
 
-  ASSERT_TRUE(on_cpu->encode_bgra(source.bgra.data(), width, height, source.stride, 512 * 1024));
-  ASSERT_TRUE(on_gpu->encode_bgra(source.bgra.data(), width, height, source.stride, 512 * 1024));
+  ASSERT_TRUE(on_cpu->encode_packed(source.bgra.data(), width, height, source.stride, 512 * 1024));
+  ASSERT_TRUE(on_gpu->encode_packed(source.bgra.data(), width, height, source.stride, 512 * 1024));
   ASSERT_FALSE(on_cpu->uses_gpu_input());
   ASSERT_TRUE(on_gpu->uses_gpu_input());
 
@@ -742,7 +813,7 @@ TEST(PyroWaveEncodeTests, FourFourFourGoesThroughTheGpuPathToo) {
   // rather than one and two quarters, and the only thing that says so is the enum it was created
   // with. A path that quietly produced 4:2:0 here would decode as a frame the wrong shape.
   const quadrant_frame_t source {width, height, (width + 12) * 4};
-  ASSERT_TRUE(session->encode_bgra(source.bgra.data(), width, height, source.stride, 512 * 1024));
+  ASSERT_TRUE(session->encode_packed(source.bgra.data(), width, height, source.stride, 512 * 1024));
   ASSERT_TRUE(session->uses_gpu_input());
 
   const decoded_frame_t decoded {session->bitstream(), width, height, true};
@@ -770,7 +841,7 @@ TEST(PyroWaveEncodeTests, ARepeatedFrameOnTheGpuIsTheSamePictureAgain) {
   ASSERT_NE(session, nullptr);
 
   const quadrant_frame_t source {width, height, width * 4};
-  ASSERT_TRUE(session->encode_bgra(source.bgra.data(), width, height, source.stride, 512 * 1024));
+  ASSERT_TRUE(session->encode_packed(source.bgra.data(), width, height, source.stride, 512 * 1024));
   ASSERT_TRUE(session->uses_gpu_input());
   const sequence_header_t first {session->bitstream()};
   ASSERT_TRUE(first.present);
@@ -794,6 +865,77 @@ TEST(PyroWaveEncodeTests, ARepeatedFrameOnTheGpuIsTheSamePictureAgain) {
   const decoded_frame_t twice {session->bitstream(), width, height, false};
   ASSERT_TRUE(twice.ok);
   expect_full_range_rec709(twice, source, "repeated twice on the GPU");
+}
+
+TEST(PyroWaveEncodeTests, AnHdrStreamCarriesBt2020AndPq) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  auto session = pyrowave_encode::make_session(width, height, pyrowave_encode::chroma_e::yuv420,
+                                              pyrowave_encode::dynamic_range_e::hdr10);
+  ASSERT_NE(session, nullptr);
+
+  // A padded stride again, and ten bit samples packed the way capture packs them.
+  const quadrant_frame_10bit_t source {width, height, (width + 16) * 4};
+  ASSERT_TRUE(session->encode_packed(source.pixels.data(), width, height, source.stride, 768 * 1024));
+  ASSERT_TRUE(session->uses_gpu_input()) << "HDR has no other path to take";
+
+  const decoded_frame_t decoded {session->bitstream(), width, height, false};
+  ASSERT_TRUE(decoded.ok) << "the HDR frame this host produced would not decode";
+
+  // BT.2020 rather than Rec. 709, and the PQ transfer function applied once rather than twice. Both
+  // are invisible from this side of the encoder and both ruin the picture: the wrong primaries shift
+  // every saturated hue, and a transfer function applied twice crushes everything dark.
+  for (int which = 0; which < 4; ++which) {
+    const auto [col, row] = source.centre_of(which);
+    const expected_ycbcr_t want {source.as_eight_bit(which, 0), source.as_eight_bit(which, 1),
+                                 source.as_eight_bit(which, 2), primaries_e::bt2020};
+
+    EXPECT_NEAR(decoded.luma_at(col, row), want.y, 6.0) << "quadrant " << which << " luma";
+    EXPECT_NEAR(decoded.chroma_u_at(col, row), want.u, 8.0) << "quadrant " << which << " Cb";
+    EXPECT_NEAR(decoded.chroma_v_at(col, row), want.v, 8.0) << "quadrant " << which << " Cr";
+  }
+
+  // And it is not the same numbers Rec. 709 would have produced, or this test would pass either way.
+  const auto [col, row] = source.centre_of(0);
+  const expected_ycbcr_t as_709 {source.as_eight_bit(0, 0), source.as_eight_bit(0, 1),
+                                 source.as_eight_bit(0, 2), primaries_e::bt709};
+  const expected_ycbcr_t as_2020 {source.as_eight_bit(0, 0), source.as_eight_bit(0, 1),
+                                  source.as_eight_bit(0, 2), primaries_e::bt2020};
+  ASSERT_GT(std::abs(as_709.y - as_2020.y), 12.0) << "the two matrices are too close to tell apart";
+  EXPECT_GT(std::abs(decoded.luma_at(col, row) - as_709.y), 6.0)
+    << "the picture came out as Rec. 709 on a stream that promised BT.2020";
+}
+
+TEST(PyroWaveEncodeTests, AnHdrSessionRefusesToBeMadeWithoutTheGpuPath) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  // The codec's system memory entry point takes eight bit planes and nothing else, so an HDR session
+  // with the GPU path switched off has no way to carry what it promises. Refused when it is asked
+  // for, rather than at the first frame, because by then a client has been told it is streaming.
+  setenv("POLARIS_PYROWAVE_GPU_INPUT", "off", 1);
+  auto refused = pyrowave_encode::make_session(1280, 720, pyrowave_encode::chroma_e::yuv420,
+                                               pyrowave_encode::dynamic_range_e::hdr10);
+  auto allowed = pyrowave_encode::make_session(1280, 720, pyrowave_encode::chroma_e::yuv420);
+  unsetenv("POLARIS_PYROWAVE_GPU_INPUT");
+
+  EXPECT_EQ(refused, nullptr);
+  EXPECT_NE(allowed, nullptr) << "an SDR session still has the CPU converter to fall back on";
+}
+
+TEST(PyroWaveEncodeTests, EachDynamicRangeHasItsOwnProfileToken) {
+  // A client agrees to one of these before a frame is sent, and the two describe different bytes.
+  // Sharing a token would mean a client that agreed to Rec. 709 accepting PQ BT.2020 without
+  // knowing, which is a plausible looking wrong picture and no error anywhere.
+  EXPECT_STRNE(pyrowave_encode::profile_token_for(pyrowave_encode::dynamic_range_e::sdr),
+               pyrowave_encode::profile_token_for(pyrowave_encode::dynamic_range_e::hdr10));
+  EXPECT_STREQ(pyrowave_encode::profile_token_for(pyrowave_encode::dynamic_range_e::sdr),
+               pyrowave_encode::profile_token);
 }
 
 #endif  // POLARIS_BUILD_PYROWAVE

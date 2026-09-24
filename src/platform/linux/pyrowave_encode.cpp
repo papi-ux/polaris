@@ -97,14 +97,15 @@ namespace pyrowave_encode {
     class pyrowave_session_t: public session_t {
     public:
       pyrowave_session_t(const vk_device_t &owner, pyrowave_encoder encoder, int width, int height,
-                         chroma_e chroma):
+                         chroma_e chroma, dynamic_range_e range):
           owner {&owner},
           gpu {gpu_input_allowed() ? gpu_e::unknown : gpu_e::no},
           encoder {encoder},
           width {width},
           height {height},
           chroma {chroma},
-          shift {chroma_shift(chroma)} {}
+          shift {chroma_shift(chroma)},
+          range {range} {}
 
       ~pyrowave_session_t() override {
         if (scaler) {
@@ -115,7 +116,7 @@ namespace pyrowave_encode {
         }
       }
 
-      bool encode_bgra(const uint8_t *bgra, int src_width, int src_height, int stride,
+      bool encode_packed(const uint8_t *bgra, int src_width, int src_height, int stride,
                        std::size_t max_bytes) override {
         // Before the arguments are even looked at, so that every way out of here leaves nothing to
         // read. A caller that missed the return value would otherwise send the previous picture
@@ -140,6 +141,14 @@ namespace pyrowave_encode {
             return true;
           }
           if (gpu == gpu_e::no) {
+            // Except for HDR, which the CPU path cannot carry: the codec's system memory entry point
+            // takes eight bit planes and nothing else, so falling back would mean encoding an SDR
+            // picture and calling it HDR. A session that cannot use the GPU path is over.
+            if (range == dynamic_range_e::hdr10) {
+              BOOST_LOG(error) << "PyroWave: an HDR stream cannot fall back to the CPU converter, "sv
+                               << "which is eight bit"sv;
+              return false;
+            }
             BOOST_LOG(info) << "PyroWave: falling back to converting frames on the CPU"sv;
           } else {
             // The path works and this frame did not. Saying so beats quietly producing a picture
@@ -331,7 +340,23 @@ namespace pyrowave_encode {
        * replaces is the codec's own, full range with BT.709 coefficients and centred chroma, which is
        * the same thing profile_token promises and the same thing swscale was told to produce.
        */
-      bool encode_on_gpu(const uint8_t *bgra, int src_width, int src_height, int stride,
+      /**
+       * How capture's bytes are laid out, which is the one thing the dynamic range changes on the way
+       * in.
+       *
+       * Ten bit capture arrives packed into the same four bytes a pixel, two bits unused and ten each
+       * for blue, green and red from the top of the word down, which is what DRM calls XBGR2101010
+       * and Vulkan calls A2B10G10R10. That is the format Polaris's portal capture offers first and
+       * the one KWin picks. A compositor that insisted on the other order would hand over red and
+       * blue swapped, and there is no way to tell from here, which is another reason this codec
+       * refuses to stream to a client that has not agreed a profile token.
+       */
+      VkFormat source_format() const {
+        return range == dynamic_range_e::hdr10 ? VK_FORMAT_A2B10G10R10_UNORM_PACK32
+                                               : VK_FORMAT_B8G8R8A8_UNORM;
+      }
+
+      bool encode_on_gpu(const uint8_t *pixels, int src_width, int src_height, int stride,
                          std::size_t max_bytes) {
         if (!staging) {
           staging = upload_t::make(*owner);
@@ -343,7 +368,7 @@ namespace pyrowave_encode {
 
         const auto where = placement_for(src_width, src_height);
         const auto copy_started = std::chrono::steady_clock::now();
-        if (!staging->begin(bgra, src_width, src_height, stride, VK_FORMAT_B8G8R8A8_UNORM, where)) {
+        if (!staging->begin(pixels, src_width, src_height, stride, source_format(), where)) {
           // Nothing was recorded, so there is a working path left to take on the first frame and
           // nothing to unwind on a later one.
           if (gpu == gpu_e::unknown) {
@@ -382,15 +407,19 @@ namespace pyrowave_encode {
        * caller, and it is why nothing here waits twice.
        */
       bool encode_recorded(std::size_t max_bytes) {
+        const bool hdr = range == dynamic_range_e::hdr10;
+
         pyrowave_scaled_encode_info info = {};
         info.view = staging->view();
-        // Both ends sRGB, which asks for the scale to happen in linear light and the matrix in gamma
-        // space, and skips a primary conversion nothing here needs.
-        info.input_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-        info.output_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-        // Eight bits an intermediate sample, dithered, for an eight bit stream. Sixteen is what HDR
-        // will want and it costs bandwidth this path does not need to spend yet.
-        info.intermediate_plane_format = VK_FORMAT_R8_UNORM;
+        // The same space at both ends, which asks for the scale to happen in linear light and the
+        // colour matrix in the space the samples arrived in, and skips a conversion between primaries
+        // that nothing here needs. HDR10 brings BT.2020 primaries and the PQ transfer function with
+        // it; SDR is sRGB, which for the matrix means Rec. 709.
+        info.input_color_space = hdr ? VK_COLOR_SPACE_HDR10_ST2084_EXT : VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+        info.output_color_space = info.input_color_space;
+        // Sixteen bits an intermediate sample for HDR, because PQ spends most of its range on the
+        // dark end and eight bits of it band visibly. Eight, dithered, for an eight bit stream.
+        info.intermediate_plane_format = hdr ? VK_FORMAT_R16_UNORM : VK_FORMAT_R8_UNORM;
         info.ycbcr_chroma_midpoint = 0.5f;
 
         budget = max_bytes;
@@ -670,6 +699,7 @@ namespace pyrowave_encode {
       int offset_y = 0;
       chroma_e chroma = chroma_e::yuv420;
       int shift = 1;
+      dynamic_range_e range = dynamic_range_e::sdr;
       SwsContext *scaler = nullptr;
       double convert_ms_total = 0.0;
       double encode_ms_total = 0.0;
@@ -696,12 +726,21 @@ namespace pyrowave_encode {
     return shared_device() != nullptr;
   }
 
-  std::unique_ptr<session_t> make_session(int width, int height, chroma_e chroma) {
+  std::unique_ptr<session_t> make_session(int width, int height, chroma_e chroma,
+                                         dynamic_range_e range) {
     auto *owner = shared_vulkan();
     if (!owner) {
       return nullptr;
     }
     auto device = owner->codec;
+
+    // Refused here rather than at the first frame. HDR exists only on the path that hands the codec a
+    // picture on the GPU, so a host that has been told not to use that path cannot serve HDR at all,
+    // and finding that out before a client is promised a stream is the whole point.
+    if (range == dynamic_range_e::hdr10 && !gpu_input_allowed()) {
+      BOOST_LOG(error) << "PyroWave: HDR needs the GPU input path, which is switched off"sv;
+      return nullptr;
+    }
 
     // Only 4:2:0 has half a chroma sample to lose, and the library refuses an odd extent rather
     // than rounding one for us. 4:4:4 has a chroma sample per pixel and does not care.
@@ -728,7 +767,7 @@ namespace pyrowave_encode {
       return nullptr;
     }
 
-    return std::make_unique<pyrowave_session_t>(*owner, encoder, width, height, chroma);
+    return std::make_unique<pyrowave_session_t>(*owner, encoder, width, height, chroma, range);
   }
 
 }  // namespace pyrowave_encode

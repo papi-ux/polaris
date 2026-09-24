@@ -1857,7 +1857,7 @@ namespace video {
         return -1;
       }
 
-      if (!session->encode_bgra(frame.cpu_data, frame.width, frame.height, frame.row_pitch,
+      if (!session->encode_packed(frame.cpu_data, frame.width, frame.height, frame.row_pitch,
                                 max_frame_bytes)) {
         return -1;
       }
