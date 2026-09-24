@@ -161,11 +161,10 @@ TEST(PyroWaveEncodeTests, ThePacketBoundaryIsASplitTargetAndNotACap) {
   // that would overflow the boundary, then appends that block whole. So a single block larger than
   // the boundary produces a packet larger than the boundary, and no boundary can prevent it.
   //
-  // It matters because Polaris sends these over UDP. A packet past the path MTU fragments, and a
-  // fragmented packet loses the one property this codec is chosen for: that every packet decodes on
-  // its own. The stream path has to size the boundary from the MTU, reserve its own header through
-  // the padding argument, and treat an oversized packet as a rate control problem to report rather
-  // than something to quietly split.
+  // These are coefficient chunks, not network datagrams. Polaris concatenates
+  // them into one GameStream frame, and the transport shards that frame to its
+  // negotiated packet size. The coefficient split target must not be mistaken
+  // for a network MTU or an allocation bound.
   constexpr int width = 1280;
   constexpr int height = 720;
   auto session = pyrowave_encode::make_session(width, height);

@@ -1502,7 +1502,7 @@ namespace stream_stats {
       return "Private Stream is using the conservative SHM/system-memory path; the stream can be healthy, but capable high-FPS hosts should use a GPU-native path when available.";
     }
     if (reason == "encoder_upload_cpu") {
-      return "Capture is GPU-resident, but encoder upload/conversion crosses system memory.";
+      return "Encoder upload/conversion uses CPU-resident frames.";
     }
     if (reason == "cpu_capture" || reason == "shm_capture") {
       return "The active capture path is CPU-resident.";

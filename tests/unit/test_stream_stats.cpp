@@ -628,6 +628,20 @@ TEST(StreamStatsCapturePathTests, DetectsCpuEncodeUpload) {
   EXPECT_FALSE(stream_stats::capture_path_is_gpu_native(stats));
 }
 
+TEST(StreamStatsCapturePathTests, CpuEncoderInputDoesNotInventGpuCapture) {
+  stream_stats::stats_t stats {};
+  stats.encode_target_residency = platf::frame_residency_e::cpu;
+  const auto reason = stream_stats::capture_path_reason(stats);
+  EXPECT_EQ(reason, "encoder_upload_cpu");
+  EXPECT_EQ(stream_stats::capture_path_reason_message(reason).find("GPU-resident"), std::string::npos);
+  EXPECT_FALSE(stream_stats::capture_path_is_gpu_native(stats));
+
+  stats.capture_transport = platf::frame_transport_e::internal;
+  stats.capture_residency = platf::frame_residency_e::cpu;
+  stats.capture_format = platf::frame_format_e::bgra8;
+  EXPECT_EQ(stream_stats::capture_path_reason(stats), "cpu_capture");
+}
+
 TEST(StreamStatsCapturePathTests, CaptureFallbackTransitionsInvalidateAuthorityWithoutBlockingHealthyRestore) {
   stream_stats::update_stream_active(false);
   adaptive_bitrate::reset();

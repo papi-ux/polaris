@@ -25,6 +25,7 @@
 #include "src/globals.h"
 #include "src/logging.h"
 #include "src/platform/common.h"
+#include "src/stream_stats.h"
 #include "src/video.h"
 #include "vaapi.h"
 #include "x11grab.h"
@@ -563,6 +564,7 @@ namespace platf {
         blend_cursor(xdisplay.get(), *img, offset_x, offset_y);
       }
 
+      stream_stats::update_capture_metadata(img->frame_metadata);
       return capture_e::ok;
     }
 
@@ -701,6 +703,7 @@ namespace platf {
           blend_cursor(shm_xdisplay.get(), *img_out, offset_x, offset_y);
         }
 
+        stream_stats::update_capture_metadata(img_out->frame_metadata);
         return capture_e::ok;
       }
     }
