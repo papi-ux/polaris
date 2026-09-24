@@ -358,24 +358,54 @@ namespace pyrowave_encode {
 
       bool encode_blank(std::size_t max_bytes) override {
         frame.clear();
-        if (!encoder || max_bytes == 0 || gpu == gpu_e::no) {
-          // Nothing on the GPU to make black, so the planes stand in: they are already zero for luma
-          // and mid grey for chroma, which is the same picture.
-          if (planes[0].empty()) {
-            prepare_scaler(width, height);
-          }
-          if (planes[0].empty()) {
-            return false;
-          }
-          std::fill(planes[0].begin(), planes[0].end(), 0);
-          std::fill(planes[1].begin(), planes[1].end(), 128);
-          std::fill(planes[2].begin(), planes[2].end(), 128);
-          return encode(planes[0].data(), planes[1].data(), planes[2].data(), max_bytes);
+        if (!encoder || max_bytes == 0) {
+          return false;
         }
 
+        // The GPU first whenever there is one, because the image cleared there is the one the real
+        // frames will be read from, and because it is the only path with ten bits in it.
+        //
+        // What this must not do is decide anything. A frame with no picture in it says nothing about
+        // how the real ones will arrive, and it says nothing about the host copy the staged path
+        // needs, because clearing an image does not use it. A session promoted to the GPU here can
+        // never fall back to the converter afterwards, so the first staged frame that failed would
+        // end the session instead of being carried slowly, which is the loop this frame exists to
+        // prevent wearing a different hat.
+        if (gpu != gpu_e::no && blank_on_gpu(max_bytes)) {
+          return true;
+        }
+
+        if (range == dynamic_range_e::hdr10) {
+          // The same reason encode_packed will not fall back: the planes below are eight bit, so
+          // standing in for an HDR frame with them means encoding SDR and calling it HDR.
+          BOOST_LOG(error) << "PyroWave: an HDR session could not make its first frame on the GPU, "sv
+                           << "and the CPU converter is eight bit"sv;
+          return false;
+        }
+
+        // Nothing on the GPU to make black, so the planes stand in: they are already zero for luma
+        // and mid grey for chroma, which is the same picture.
+        if (planes[0].empty()) {
+          prepare_scaler(width, height);
+        }
+        if (planes[0].empty()) {
+          return false;
+        }
+        std::fill(planes[0].begin(), planes[0].end(), 0);
+        std::fill(planes[1].begin(), planes[1].end(), 128);
+        std::fill(planes[2].begin(), planes[2].end(), 128);
+        return encode(planes[0].data(), planes[1].data(), planes[2].data(), max_bytes);
+      }
+
+      /**
+       * The blank frame, on the GPU, leaving the session's idea of its own path untouched.
+       */
+      bool blank_on_gpu(std::size_t max_bytes) {
         if (!staging) {
           staging = upload_t::make(*owner);
           if (!staging) {
+            // This one is not about the picture: there is no device to make a path out of, so the
+            // session has none, and saying so now is the same answer any later frame would get.
             gpu = gpu_e::no;
             return false;
           }
@@ -383,13 +413,7 @@ namespace pyrowave_encode {
         if (!staging->begin_blank(width, height, source_format())) {
           return false;
         }
-        if (!encode_recorded(max_bytes)) {
-          return false;
-        }
-        if (gpu == gpu_e::unknown) {
-          gpu = gpu_e::yes;
-        }
-        return true;
+        return encode_recorded(max_bytes);
       }
 
       bool encode_imported(const dmabuf_t &buffer, std::size_t max_bytes) override {

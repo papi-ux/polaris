@@ -1162,6 +1162,72 @@ TEST(PyroWaveEncodeTests, ARepeatedFrameWorksAfterAnImportedOne) {
 }
 
 /**
+ * The frame Polaris primes an encoder with, before capture has produced one.
+ *
+ * On the path where frames arrive as a dmabuf that frame carries no pixels at all, so the picture it
+ * stands for is made rather than read. Getting it wrong is not subtle: a failure here tears the
+ * session down, the host builds another, and it did that forty thousand times in ten seconds.
+ */
+TEST(PyroWaveEncodeTests, TheFrameWithNoPictureInItIsBlack) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  auto session = make_session_420(width, height);
+  ASSERT_NE(session, nullptr);
+
+  ASSERT_TRUE(session->encode_blank(512 * 1024))
+    << "a session cannot make the frame it is primed with, so it ends and is built again";
+  ASSERT_FALSE(session->bitstream().empty());
+
+  const decoded_frame_t decoded {session->bitstream(), width, height, false};
+  ASSERT_TRUE(decoded.ok) << "the frame this host produced would not decode";
+
+  // Black, full range: no luma anywhere and neutral chroma. Wavelet ringing is why these are ranges
+  // rather than equalities, and a picture that was not black would miss them by a hundred.
+  const auto luma = *std::max_element(decoded.y.begin(), decoded.y.end());
+  EXPECT_LE(luma, 4) << "the brightest sample of a black frame is " << static_cast<int>(luma);
+  const auto blue = *std::max_element(decoded.u.begin(), decoded.u.end());
+  const auto red = *std::max_element(decoded.v.begin(), decoded.v.end());
+  EXPECT_NEAR(blue, 128, 4);
+  EXPECT_NEAR(red, 128, 4);
+}
+
+/**
+ * And it decides nothing, which is the part that bit.
+ *
+ * Clearing an image does not use the host copy the staged path needs and says nothing about how the
+ * real frames will arrive, so a session promoted to the GPU by this frame is claiming something it
+ * has not tested. It can no longer fall back to the converter afterwards, so the first real frame
+ * that cannot be staged ends the session instead of being carried slowly.
+ */
+TEST(PyroWaveEncodeTests, TheFrameWithNoPictureInItLeavesThePathUndecided) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  auto session = make_session_420(width, height);
+  ASSERT_NE(session, nullptr);
+
+  ASSERT_TRUE(session->encode_blank(512 * 1024));
+  EXPECT_FALSE(session->uses_gpu_input())
+    << "the primer frame claimed the GPU path works, and now nothing can fall back to the converter";
+
+  // The first frame with a picture in it is still the one that decides, and still gets it right.
+  const quadrant_frame_t source {width, height, width * 4};
+  ASSERT_TRUE(session->encode_packed(source.bgra.data(), width, height, source.stride, 512 * 1024));
+  EXPECT_TRUE(session->uses_gpu_input());
+
+  const decoded_frame_t decoded {session->bitstream(), width, height, false};
+  ASSERT_TRUE(decoded.ok);
+  expect_full_range_rec709(decoded, source, "after a blank frame");
+}
+
+/**
  * Every Linux display factory has to recognise this encoder's device type.
  *
  * The encoder asks for one of its own so the portal will offer it a dmabuf, and a factory that does
