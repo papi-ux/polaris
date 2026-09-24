@@ -30,6 +30,9 @@ extern "C" {
 }
 
 // local includes
+#ifdef POLARIS_BUILD_PYROWAVE
+  #include "src/platform/linux/pyrowave_encode.h"
+#endif
 #include "adaptive_bitrate.h"
 #include "process.h"
 #include "cbs.h"
@@ -1770,6 +1773,67 @@ namespace video {
     bool runtime_bitrate_supported = false;
   };
 
+#ifdef POLARIS_BUILD_PYROWAVE
+  /**
+   * @brief A session that hands captured frames to the compute codec.
+   *
+   * The frame is encoded in convert(), not in encode(), because convert() is the call that is given
+   * one. That is the same split NVENC uses, where convert() fills the encoder's input surface and
+   * encode_frame() collects the result.
+   *
+   * There is nothing to invalidate and no IDR to request: every frame is a keyframe, so a client
+   * asking for one is asking for what it is already getting, and a reference frame it could report
+   * as lost does not exist.
+   */
+  class pyrowave_encode_session_t: public encode_session_t {
+  public:
+    pyrowave_encode_session_t(std::unique_ptr<pyrowave_encode::session_t> session, std::size_t max_frame_bytes):
+        session {std::move(session)},
+        max_frame_bytes {max_frame_bytes} {
+    }
+
+    int convert(frame_t &frame) override {
+      encoded.clear();
+      if (!session || !frame.cpu_data || frame.row_pitch <= 0) {
+        return -1;
+      }
+      if (!session->encode_bgra(frame.cpu_data, frame.row_pitch, max_frame_bytes)) {
+        return -1;
+      }
+      // One MTU's worth, minus the room Polaris's own headers take on the wire. PyroWave splits
+      // between coefficient blocks and never inside one, so a block bigger than this still comes
+      // back as one oversized packet; the sender has to notice rather than assume.
+      encoded = session->packets(payload_boundary);
+      return encoded.empty() ? -1 : 0;
+    }
+
+    void request_idr_frame() override {
+      // Every frame already is one.
+    }
+
+    void request_normal_frame() override {
+      // There is no other kind.
+    }
+
+    void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
+      // Intra-only: nothing references anything, so a lost frame costs exactly itself.
+      (void) first_frame;
+      (void) last_frame;
+    }
+
+    const std::vector<std::vector<uint8_t>> &packets() const {
+      return encoded;
+    }
+
+  private:
+    static constexpr std::size_t payload_boundary = 1200;
+
+    std::unique_ptr<pyrowave_encode::session_t> session;
+    std::size_t max_frame_bytes = 0;
+    std::vector<std::vector<uint8_t>> encoded;
+  };
+#endif
+
   class nvenc_encode_session_t: public encode_session_t {
   public:
     nvenc_encode_session_t(
@@ -3232,6 +3296,34 @@ namespace video {
     return 0;
   }
 
+#ifdef POLARIS_BUILD_PYROWAVE
+  /**
+   * @brief Hand over the packets convert() produced.
+   *
+   * The work happened in convert(), which is the call that is given a frame. Every packet is marked
+   * a keyframe because every one of them is part of one: PyroWave is intra-only, so there is no
+   * delta frame for the flag to distinguish it from, and a receiver that treats them all as
+   * recoverable is right.
+   */
+  int encode_pyrowave(int64_t frame_nr, pyrowave_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+    const auto &encoded = session.packets();
+    if (encoded.empty()) {
+      return -1;
+    }
+
+    const auto done = std::chrono::steady_clock::now();
+    for (const auto &payload : encoded) {
+      auto packet = std::make_unique<packet_raw_generic>(std::vector<uint8_t> {payload}, frame_nr, true);
+      packet->channel_data = channel_data;
+      packet->frame_timestamp = frame_timestamp;
+      packet->encode_done_timestamp = done;
+      packets->raise(std::move(packet));
+    }
+
+    return 0;
+  }
+#endif
+
   int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     auto encoded_frame = session.encode_frame(frame_nr);
     auto encode_done_timestamp = std::chrono::steady_clock::now();
@@ -3256,6 +3348,15 @@ namespace video {
 
   int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     int result = -1;
+#ifdef POLARIS_BUILD_PYROWAVE
+    if (auto pyrowave_session = dynamic_cast<pyrowave_encode_session_t *>(&session)) {
+      result = encode_pyrowave(frame_nr, *pyrowave_session, packets, channel_data, frame_timestamp);
+      if (result != 0) {
+        invalidate_live_probe_reuse();
+      }
+      return result;
+    }
+#endif
     if (auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(&session)) {
       result = encode_avcodec(frame_nr, *avcodec_session, packets, channel_data, frame_timestamp);
     } else if (auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(&session)) {
@@ -3768,6 +3869,28 @@ namespace video {
 
   std::unique_ptr<encode_session_t> make_encode_session(const std::shared_ptr<platf::display_t> &disp, const encoder_t &encoder, const config_t &config, int width, int height, std::unique_ptr<platf::encode_device_t> encode_device) {
     std::unique_ptr<encode_session_t> session;
+#ifdef POLARIS_BUILD_PYROWAVE
+    if (dynamic_cast<platf::pyrowave_encode_device_t *>(encode_device.get())) {
+      auto pyrowave_session = pyrowave_encode::make_session(width, height);
+      if (!pyrowave_session) {
+        invalidate_live_probe_reuse();
+        return nullptr;
+      }
+
+      // The budget for one frame, from the bitrate the session negotiated. PyroWave's rate control
+      // is exact rather than approximate, so this is a ceiling it meets rather than aims at, and a
+      // frame is the only unit it has: there is no group of pictures to spend across.
+      const auto fps = config.framerate > 0 ? config.framerate : 60;
+      const auto bits_per_frame = static_cast<std::size_t>(std::max(config.bitrate, 1)) * 1000 / static_cast<std::size_t>(fps);
+      const auto max_frame_bytes = std::max<std::size_t>(bits_per_frame / 8, 4096);
+
+      BOOST_LOG(info) << "PyroWave: "sv << width << 'x' << height << " at "sv << fps
+                      << " fps, up to "sv << max_frame_bytes << " bytes a frame"sv;
+      session = std::make_unique<pyrowave_encode_session_t>(std::move(pyrowave_session), max_frame_bytes);
+      session->capture_display_owner = disp;
+      return session;
+    }
+#endif
     if (dynamic_cast<platf::avcodec_encode_device_t *>(encode_device.get())) {
       auto avcodec_encode_device = boost::dynamic_pointer_cast<platf::avcodec_encode_device_t>(std::move(encode_device));
       session = make_avcodec_encode_session(disp.get(), encoder, config, width, height, std::move(avcodec_encode_device));
@@ -4214,6 +4337,16 @@ namespace video {
 
     }
 
+#ifdef POLARIS_BUILD_PYROWAVE
+    if (dynamic_cast<const encoder_platform_formats_pyrowave *>(encoder.platform_formats.get())) {
+      // Not asked of the display. PyroWave reads packed BGRA out of host memory, which every
+      // capture backend already produces, so there is no backend specific device to make and
+      // nothing for one to hold. That changes when a dmabuf can reach the codec's own device.
+      auto device = std::make_unique<platf::pyrowave_encode_device_t>();
+      device->colorspace = colorspace;
+      return device;
+    }
+#endif
     if (dynamic_cast<const encoder_platform_formats_avcodec *>(encoder.platform_formats.get())) {
       result = disp.make_avcodec_encode_device(*pix_fmt);
       // Portal SHM CUDA is NV12-only: prefer GPU 8-bit over software 10-bit.

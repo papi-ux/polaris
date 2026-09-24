@@ -285,6 +285,26 @@ namespace video {
     }
   };
 
+  /**
+   * @brief PyroWave's formats, which are almost none of them.
+   *
+   * The codec takes packed BGRA from host memory and decides its own chroma at encoder creation,
+   * so there is no eight bit versus ten bit choice to advertise and no hardware device type to
+   * match. Present so the dispatch has something to recognise.
+   */
+  struct encoder_platform_formats_pyrowave: encoder_platform_formats_t {
+    encoder_platform_formats_pyrowave() {
+      encoder_platform_formats_t::dev_type = platf::mem_type_e::system;
+      encoder_platform_formats_t::pix_fmt_8bit = platf::pix_fmt_e::yuv420p;
+      encoder_platform_formats_t::pix_fmt_10bit = platf::pix_fmt_e::yuv420p;
+      // 4:4:4 is a create time choice inside the codec, not a pixel format Polaris hands it, and
+      // this path only ever converts to 4:2:0 today. Naming the 4:2:0 format in all four slots
+      // keeps the honest answer in one place rather than advertising a format nothing produces.
+      encoder_platform_formats_t::pix_fmt_yuv444_8bit = platf::pix_fmt_e::yuv420p;
+      encoder_platform_formats_t::pix_fmt_yuv444_10bit = platf::pix_fmt_e::yuv420p;
+    }
+  };
+
   struct encoder_t {
     std::string_view name;
 
