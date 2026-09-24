@@ -131,7 +131,11 @@ namespace pyrowave_encode {
         };
         convert_ms_total += to_ms(conversion_started, encode_started);
         encode_ms_total += to_ms(encode_started, finished);
-        if (++timed_frames % 300 == 0) {
+        // Once early, so a session says what it costs, then rarely, so a long one can show drift
+        // without filling the log. Five seconds in and every five minutes after, at sixty frames a
+        // second.
+        ++timed_frames;
+        if (timed_frames == 300 || timed_frames % 18000 == 0) {
           BOOST_LOG(info) << "PyroWave: over "sv << timed_frames << " frames, colour conversion "sv
                           << (convert_ms_total / timed_frames) << " ms and encode "sv
                           << (encode_ms_total / timed_frames) << " ms a frame"sv;
