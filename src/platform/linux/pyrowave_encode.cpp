@@ -356,6 +356,42 @@ namespace pyrowave_encode {
                                                : VK_FORMAT_B8G8R8A8_UNORM;
       }
 
+      bool encode_blank(std::size_t max_bytes) override {
+        frame.clear();
+        if (!encoder || max_bytes == 0 || gpu == gpu_e::no) {
+          // Nothing on the GPU to make black, so the planes stand in: they are already zero for luma
+          // and mid grey for chroma, which is the same picture.
+          if (planes[0].empty()) {
+            prepare_scaler(width, height);
+          }
+          if (planes[0].empty()) {
+            return false;
+          }
+          std::fill(planes[0].begin(), planes[0].end(), 0);
+          std::fill(planes[1].begin(), planes[1].end(), 128);
+          std::fill(planes[2].begin(), planes[2].end(), 128);
+          return encode(planes[0].data(), planes[1].data(), planes[2].data(), max_bytes);
+        }
+
+        if (!staging) {
+          staging = upload_t::make(*owner);
+          if (!staging) {
+            gpu = gpu_e::no;
+            return false;
+          }
+        }
+        if (!staging->begin_blank(width, height, source_format())) {
+          return false;
+        }
+        if (!encode_recorded(max_bytes)) {
+          return false;
+        }
+        if (gpu == gpu_e::unknown) {
+          gpu = gpu_e::yes;
+        }
+        return true;
+      }
+
       bool encode_imported(const dmabuf_t &buffer, std::size_t max_bytes) override {
         frame.clear();
         if (!encoder || max_bytes == 0 || gpu == gpu_e::no) {

@@ -217,6 +217,18 @@ namespace pyrowave_encode {
     virtual bool encode_imported(const dmabuf_t &buffer, std::size_t max_bytes) = 0;
 
     /**
+     * @brief Encode a black frame, for when there is no picture to send yet.
+     *
+     * Polaris primes an encoder by converting a dummy image before the first real frame arrives, and
+     * on the path where frames live on the GPU that image carries no pixels for this to read. The
+     * picture it stands for is made rather than read.
+     *
+     * @param max_bytes The most this frame may occupy.
+     * @return false when the frame could not be encoded.
+     */
+    virtual bool encode_blank(std::size_t max_bytes) = 0;
+
+    /**
      * @brief Encode the last converted picture again, as a new frame.
      *
      * For the frames a host repeats when capture has nothing new. Every frame this codec produces

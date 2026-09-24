@@ -1878,7 +1878,19 @@ namespace video {
       }
 
       if (!frame.cpu_data || frame.row_pitch <= 0) {
-        return -1;
+        // The frame Polaris primes an encoder with, before capture has produced one. On the path
+        // where frames arrive as a dmabuf it carries no pixels at all: no host buffer, because the
+        // frames that follow will live on the GPU, and no descriptors, because capture has not filled
+        // one in yet. There is nothing here to read and nothing wrong, so the picture it stands for
+        // is made rather than read.
+        //
+        // Getting this wrong is not subtle. Returning a failure tears the session down and the host
+        // builds another, which it did forty thousand times in ten seconds before this existed.
+        if (!session->encode_blank(max_frame_bytes)) {
+          return -1;
+        }
+        converted_since_last_packet = true;
+        return session->bitstream().empty() ? -1 : 0;
       }
 
       // What this session was built to read, checked rather than assumed. Both ranges arrive at four

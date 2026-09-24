@@ -941,6 +941,64 @@ namespace pyrowave_encode {
     return true;
   }
 
+  bool upload_t::begin_blank(int width, int height, VkFormat format) {
+    if (wedged || recording || width <= 0 || height <= 0) {
+      return false;
+    }
+
+    // The whole image is the picture, so there are no bars, and the clear below covers all of it.
+    const placement_t whole {width, height, 0, 0};
+    if (!prepare_image(width, height, format, whole)) {
+      return false;
+    }
+
+    if (api.reset_command_pool(owner->device, pool, 0) != VK_SUCCESS) {
+      return false;
+    }
+
+    VkCommandBufferBeginInfo begin_info = {};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (api.begin_command_buffer(cmd, &begin_info) != VK_SUCCESS) {
+      return false;
+    }
+    recording = true;
+
+    VkImageMemoryBarrier to_transfer = {};
+    to_transfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_transfer.oldLayout = image_layout;
+    to_transfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_transfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_transfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_transfer.image = image;
+    to_transfer.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    to_transfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    const bool first = image_layout == VK_IMAGE_LAYOUT_UNDEFINED;
+    to_transfer.srcAccessMask = first ? 0 : VK_ACCESS_SHADER_READ_BIT;
+    api.cmd_pipeline_barrier(
+      cmd, first ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &to_transfer);
+
+    const VkClearColorValue black = {{0.0f, 0.0f, 0.0f, 1.0f}};
+    const VkImageSubresourceRange whole_image = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    api.cmd_clear_color_image(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1,
+                              &whole_image);
+    // The whole image was just written, so whatever the bars were is gone with it.
+    needs_clearing = false;
+
+    VkImageMemoryBarrier to_read = to_transfer;
+    to_read.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    to_read.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    to_read.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    api.cmd_pipeline_barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                             &to_read);
+
+    image_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    return true;
+  }
+
   bool upload_t::begin_retained() {
     if (wedged || recording || image == VK_NULL_HANDLE ||
         image_layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {

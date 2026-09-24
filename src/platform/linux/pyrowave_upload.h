@@ -129,6 +129,22 @@ namespace pyrowave_encode {
     bool can_import() const;
 
     /**
+     * @brief Open a frame that is nothing but black, for when there is no picture to send yet.
+     *
+     * Polaris primes an encoder by converting a dummy image before the first real frame arrives, so
+     * that a session which times out waiting still has something to encode. On this path that image
+     * carries no pixels at all: capture hands over a descriptor with no file descriptors and no host
+     * buffer, because the frames that follow it will live on the GPU.
+     *
+     * So the picture it stands for is made here instead of read from it.
+     *
+     * @param width The stream's width, since there is no source to take one from.
+     * @param height The stream's height.
+     * @param format What the frames that follow will be, so the image does not have to be remade.
+     */
+    bool begin_blank(int width, int height, VkFormat format);
+
+    /**
      * @brief Open a command buffer over the picture already on the GPU, copying nothing.
      *
      * For the frames a host repeats when capture has nothing new. The image is already where the
