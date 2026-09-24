@@ -1700,11 +1700,7 @@ namespace platf {
   }  // namespace kms
 
   std::shared_ptr<display_t> kms_display(mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
-    // The compute codec joins the direct capture path rather than the copying one. It reads a
-    // dmabuf itself, and the copying path's readback is eight bit BGRA whatever the scanout held, so
-    // it is also the only way an HDR stream off this backend can carry ten bits at all.
-    if (hwdevice_type == mem_type_e::vaapi || hwdevice_type == mem_type_e::cuda ||
-        hwdevice_type == mem_type_e::vulkan || hwdevice_type == mem_type_e::vulkan_pyrowave) {
+    if (hwdevice_type == mem_type_e::vaapi || hwdevice_type == mem_type_e::cuda || hwdevice_type == mem_type_e::vulkan) {
       auto disp = std::make_shared<kms::display_vram_t>(hwdevice_type);
 
       if (!disp->init(display_name, config)) {
