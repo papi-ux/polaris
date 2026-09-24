@@ -219,6 +219,27 @@ namespace pipewire_capture {
     return result;
   }
 
+  void offer_hdr_linear_ten_bit(
+    std::vector<dmabuf_format_modifier_t> &formats,
+    bool every_layout_validated
+  ) {
+    if (every_layout_validated) {
+      return;
+    }
+    const bool already_there = std::any_of(formats.begin(), formats.end(), [](const auto &format) {
+      return format.spa_format == SPA_VIDEO_FORMAT_xBGR_210LE &&
+             format.modifier == DRM_FORMAT_MOD_LINEAR;
+    });
+    if (already_there) {
+      return;
+    }
+    formats.insert(formats.begin(), {
+      .spa_format = SPA_VIDEO_FORMAT_xBGR_210LE,
+      .drm_fourcc = DRM_FORMAT_XBGR2101010,
+      .modifier = DRM_FORMAT_MOD_LINEAR,
+    });
+  }
+
   std::vector<dmabuf_format_modifier_t> filter_importable_dmabuf_formats(
     const std::vector<dmabuf_format_modifier_t> &portal_formats,
     const std::vector<egl_dmabuf_format_t> &egl_formats

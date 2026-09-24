@@ -381,16 +381,10 @@ namespace portal {
       }
       // Ensure 10-bit LINEAR is present for HDR streams even if EGL skipped it.
       if (!prefer_sdr) {
-        const bool has_xb30 = std::any_of(dmabuf_formats.begin(), dmabuf_formats.end(), [](const auto &f) {
-          return f.spa_format == SPA_VIDEO_FORMAT_xBGR_210LE && f.modifier == DRM_FORMAT_MOD_LINEAR;
-        });
-        if (!has_xb30) {
-          dmabuf_formats.insert(dmabuf_formats.begin(), {
-            .spa_format = SPA_VIDEO_FORMAT_xBGR_210LE,
-            .drm_fourcc = DRM_FORMAT_XBGR2101010,
-            .modifier = DRM_FORMAT_MOD_LINEAR,
-          });
-        }
+        pipewire_capture::offer_hdr_linear_ten_bit(
+          dmabuf_formats,
+          mem_type == platf::mem_type_e::vulkan_pyrowave
+        );
       }
       if (prefer_hdr) {
         std::erase_if(dmabuf_formats, [](const auto &format) {
@@ -855,16 +849,10 @@ namespace portal {
           // gamescope HDR offers xBGR_210LE LINEAR; EGL/list filters may omit it.
           // Ensure LINEAR 10-bit for HDR streams so force-HDR can negotiate spa 81.
           if (!want_prefer_sdr) {
-            const bool has_xb30_linear = std::any_of(dmabuf_formats.begin(), dmabuf_formats.end(), [](const auto &f) {
-              return f.spa_format == SPA_VIDEO_FORMAT_xBGR_210LE && f.modifier == DRM_FORMAT_MOD_LINEAR;
-            });
-            if (!has_xb30_linear) {
-              dmabuf_formats.insert(dmabuf_formats.begin(), {
-                .spa_format = SPA_VIDEO_FORMAT_xBGR_210LE,
-                .drm_fourcc = DRM_FORMAT_XBGR2101010,
-                .modifier = DRM_FORMAT_MOD_LINEAR,
-              });
-            }
+            pipewire_capture::offer_hdr_linear_ten_bit(
+              dmabuf_formats,
+              mem_type == platf::mem_type_e::vulkan_pyrowave
+            );
           }
           if (want_prefer_hdr) {
             std::erase_if(dmabuf_formats, [](const auto &format) {
