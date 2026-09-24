@@ -8162,7 +8162,9 @@ namespace nvhttp {
       capture["compositor"] = "none";
 #endif
       capture["max_resolution"] = "3840x2160";
-      capture["max_fps"] = 120;
+      // Nova's Linux planner reads this route, while other clients read
+      // ServerMaxLaunchRefreshRate. Both must reflect launch admission.
+      capture["max_fps"] = advertised_max_launch_refresh_rate_for_http();
 
       auto &codecs = capture["codecs"];
       codecs = nlohmann::json::array({"h264"});
