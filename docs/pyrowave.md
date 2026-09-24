@@ -1,8 +1,8 @@
 # Experimental PyroWave host support
 
 PyroWave is an optional Vulkan compute encoder for compatible Nova clients on a
-fast local network. It uses GameStream transport. It does not serve Punktfunk's
-QUIC protocol, and ordinary Moonlight clients cannot select this codec.
+fast local network. It uses GameStream transport. Ordinary Moonlight clients
+cannot select this codec.
 
 ## Build and selection
 
