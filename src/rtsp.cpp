@@ -1449,7 +1449,7 @@ namespace rtsp_stream {
     }
     if (!worker_owned && video::pyrowave_enabled()) {
       ss << "a=rtpmap:99 PYROWAVE/90000\r\n";
-      ss << "a=x-polaris-pyrowave:" << video::PYROWAVE_BITSTREAM << "\r\n";
+      ss << "a=fmtp:99 " << video::PYROWAVE_BITSTREAM << "\r\n";
     }
 
     if (!session.surround_params.empty()) {
@@ -1671,7 +1671,7 @@ namespace rtsp_stream {
 
       if (config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE &&
           (!video::pyrowave_enabled() || session.worker_connection_requirement()->load() ||
-           !args.contains("x-polaris-pyrowave"sv) || args.at("x-polaris-pyrowave"sv) != video::PYROWAVE_BITSTREAM ||
+           (args.contains("x-polaris-pyrowave"sv) && args.at("x-polaris-pyrowave"sv) != video::PYROWAVE_BITSTREAM) ||
            config.monitor.dynamicRange != 0 || config.monitor.chromaSamplingType != 0 ||
            config.monitor.encoderCscMode != 3 || config.packetsize < 992 ||
            config.monitor.width < 16 || config.monitor.height < 16 ||
