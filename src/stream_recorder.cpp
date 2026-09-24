@@ -105,6 +105,9 @@ namespace stream_recorder {
    */
   static std::string codec_extension() {
     const int fmt = active_video_format.load(std::memory_order_relaxed);
+    if (fmt == 3) {
+      return ".pyrowave";
+    }
     if (fmt == 2) {
       return ".av1";
     }
@@ -126,7 +129,7 @@ namespace stream_recorder {
   }
 
   void set_active_video_format(int video_format) {
-    if (video_format < 0 || video_format > 2) {
+    if (video_format < 0 || video_format > 3) {
       return;
     }
     active_video_format.store(video_format, std::memory_order_relaxed);
@@ -275,7 +278,7 @@ namespace stream_recorder {
       return;
     }
 
-    if (video_format >= 0 && video_format <= 2) {
+    if (video_format >= 0 && video_format <= 3) {
       active_video_format.store(video_format, std::memory_order_relaxed);
     }
 

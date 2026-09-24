@@ -94,6 +94,13 @@ endif()
 # it is that one. The default "polaris" (init.cmake) marks a non-packaged build.
 list(APPEND POLARIS_DEFINITIONS POLARIS_EXECUTABLE_PATH="${POLARIS_EXECUTABLE_PATH}")
 
+# Where the polaris-kms package installs the DRM/KMS capture helper. --enable-kms points the user
+# service at this path rather than applying a capability to the binary it is running, so an update
+# cannot take the capability away. It is derived from the same install variables the package uses,
+# so the two cannot drift.
+list(APPEND POLARIS_DEFINITIONS
+        POLARIS_KMS_HELPER_PATH="${CMAKE_INSTALL_FULL_LIBEXECDIR}/polaris/polaris-kms")
+
 # AppImage
 if(${POLARIS_BUILD_APPIMAGE})
     # use relative assets path for AppImage
@@ -394,6 +401,14 @@ if(${POLARIS_ENABLE_VULKAN})
             DEPENDS "${VULKAN_SHADER_DATA}"
             COMMENT "Vulkan shader compilation")
     list(APPEND POLARIS_TARGET_DEPENDENCIES vulkan_shaders)
+endif()
+
+if(${POLARIS_ENABLE_PYROWAVE})
+    list(APPEND POLARIS_DEFINITIONS POLARIS_BUILD_PYROWAVE=1)
+    list(APPEND POLARIS_EXTERNAL_LIBRARIES polaris_pyrowave)
+    list(APPEND PLATFORM_TARGET_FILES
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_encode.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_encode.cpp")
 endif()
 
 # wayland

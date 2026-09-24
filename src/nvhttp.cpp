@@ -82,6 +82,9 @@
 #include "beat_times.h"
 #include "game_library_scanner.h"
 #include "platform/common.h"
+#ifdef POLARIS_BUILD_PYROWAVE
+  #include "platform/linux/pyrowave_encode.h"
+#endif
 #include "process.h"
 #include "private_state_file.h"
 #include "rtsp.h"
@@ -1182,6 +1185,21 @@ namespace nvhttp {
       return true;
 #else
       return false;
+#endif
+    }
+
+    /**
+     * @brief The PyroWave version this build carries, or empty when it carries none.
+     *
+     * Asked of the library rather than of the build system, because the two can disagree: a
+     * submodule moves, a packager links a different copy, and a codec whose own ABI is unstable
+     * before 1.0 is exactly the one to read the version out of rather than assume.
+     */
+    std::string build_pyrowave_version() {
+#ifdef POLARIS_BUILD_PYROWAVE
+      return pyrowave_encode::api_version();
+#else
+      return {};
 #endif
     }
 
@@ -2294,7 +2312,20 @@ namespace nvhttp {
       return std::clamp(safe_kbps, 6000, std::max(6000, baseline_kbps > 0 ? baseline_kbps : safe_kbps));
     }
 
-    nlohmann::json encoder_selection_json() {
+    std::string session_encoder_name(const stream_stats::stats_t &stats) {
+      return stats.streaming && stats.codec == "pyrowave" ? "pyrowave" : video::active_encoder_name();
+    }
+
+    nlohmann::json encoder_selection_json(const stream_stats::stats_t &stats) {
+      if (stats.streaming && stats.codec == "pyrowave") {
+        // Conventional encoder probing does not select the codec's own Vulkan
+        // device. Do not label this stream software/NVENC or infer its GPU from
+        // the capture adapter. Explicit PyroWave selection has no codec fallback.
+        return {{"mode", "explicit"}, {"gpu_driver", "unknown"}, {"policy", "explicit_codec"},
+          {"preferred_encoder", "pyrowave"}, {"fallback_encoder", ""}, {"selected_encoder", "pyrowave"},
+          {"exact_live_probe_required", false}, {"fallback_used", false},
+          {"reason", "PyroWave is encoding with Vulkan after CPU color conversion."}};
+      }
       const auto selection = video::active_encoder_selection_info();
       return {
         {"mode", selection.mode},
@@ -2344,7 +2375,7 @@ namespace nvhttp {
         stream_stats::capture_path_uses_cpu_copy(stats);
       const auto capture_path = stream_stats::capture_path_summary(stats);
       const auto capture_reason = stream_stats::capture_path_reason(stats);
-      const auto active_encoder_name = video::active_encoder_name();
+      const auto active_encoder_name = session_encoder_name(stats);
       const bool nvenc_cuda_disabled_path =
         active_encoder_name == "nvenc" &&
         !build_has_cuda() &&
@@ -2564,7 +2595,7 @@ namespace nvhttp {
       health["capture_pressure"] = capture_pressure;
       health["capture_gpu_native"] = stream_stats::capture_path_is_gpu_native(stats);
       health["active_encoder"] = active_encoder_name.empty() ? "unknown" : active_encoder_name;
-      health["encoder_selection"] = encoder_selection_json();
+      health["encoder_selection"] = encoder_selection_json(stats);
       health["cuda_build"] = build_has_cuda();
       health["vulkan_build"] = build_has_vulkan();
       health["relaunch_recommended"] = hdr_source_missing || hdr_risk || decoder_risk || virtual_display_risk ||
@@ -2962,6 +2993,8 @@ namespace nvhttp {
 
     std::string_view codec_name_for_video_format(int video_format) {
       switch (video_format) {
+        case 3:
+          return "pyrowave"sv;
         case 1:
           return "hevc"sv;
         case 2:
@@ -6579,6 +6612,14 @@ namespace nvhttp {
         codec_mode_flags |= SCM_AV1_HIGH10_444;
       }
     }
+#ifdef POLARIS_BUILD_PYROWAVE
+    // A bit above every one Sunshine's extensions claim. A Moonlight client reads the mask, finds a
+    // bit it has no name for and ignores it, so it can never ask for a codec it cannot decode.
+    if (video::pyrowave_enabled()) {
+      codec_mode_flags |= video::SCM_PYROWAVE;
+      tree.put("root.PolarisPyrowaveBitstream", video::PYROWAVE_BITSTREAM);
+    }
+#endif
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);
     tree.put("root.ServerMaxLaunchRefreshRate", profile_client ? 240 : advertised_max_launch_refresh_rate_for_http());
 
@@ -8021,6 +8062,7 @@ namespace nvhttp {
       auto &build = output["build"];
       build["cuda"] = build_has_cuda();
       build["vulkan"] = build_has_vulkan();
+      build["pyrowave"] = build_pyrowave_version();
 
       // Feature flags
       auto &features = output["features"];
@@ -8133,12 +8175,23 @@ namespace nvhttp {
       capture["compositor"] = "none";
 #endif
       capture["max_resolution"] = "3840x2160";
-      capture["max_fps"] = 120;
+      // Nova's Linux planner reads this route, while other clients read
+      // ServerMaxLaunchRefreshRate. Both must reflect launch admission.
+      capture["max_fps"] = advertised_max_launch_refresh_rate_for_http();
 
       auto &codecs = capture["codecs"];
       codecs = nlohmann::json::array({"h264"});
       if (config::video.hevc_mode > 1) codecs.push_back("hevc");
       if (config::video.av1_mode > 1) codecs.push_back("av1");
+#ifdef POLARIS_BUILD_PYROWAVE
+      // Only when a device on this host can actually run the compute shaders, because unlike the
+      // others there is no software fallback to quietly take over.
+      if (video::pyrowave_enabled()) {
+        codecs.push_back("pyrowave");
+        capture["pyrowave_bitstream"] = video::PYROWAVE_BITSTREAM;
+        capture["pyrowave_capture"] = "cpu-sdr";
+      }
+#endif
 
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");
@@ -8240,6 +8293,7 @@ namespace nvhttp {
       auto &build = output["build"];
       build["cuda"] = build_has_cuda();
       build["vulkan"] = build_has_vulkan();
+      build["pyrowave"] = build_pyrowave_version();
 #ifdef __linux__
       output["cage_pid"] = stream_runtime::labwc::pid();
       output["screen_locked"] = session_manager::is_screen_locked();
@@ -8363,18 +8417,21 @@ namespace nvhttp {
 
       // Encoder info
       auto &encoder = output["encoder"];
-      encoder["active_backend"] = video::active_encoder_name().empty() ? "unknown" : video::active_encoder_name();
+      const auto active_backend = session_encoder_name(stats);
+      const bool pyrowave_stream = stats.streaming && stats.codec == "pyrowave";
+      encoder["active_backend"] = active_backend.empty() ? "unknown" : active_backend;
       encoder["requested_backend"] = status_snapshot.requested_encoder_backend;
-      encoder["effective_backend"] = status_snapshot.effective_encoder_backend.empty() ?
-        (video::active_encoder_name().empty() ? "unknown" : video::active_encoder_name()) :
+      encoder["effective_backend"] = pyrowave_stream ? "pyrowave" : status_snapshot.effective_encoder_backend.empty() ?
+        (active_backend.empty() ? "unknown" : active_backend) :
         status_snapshot.effective_encoder_backend;
       encoder["session_override"] = status_snapshot.encoder_backend_explicit;
-      encoder["fallback_allowed"] = encoder_backend_fallback_allowed(
+      encoder["fallback_allowed"] = !pyrowave_stream && encoder_backend_fallback_allowed(
         status_snapshot.requested_encoder_backend,
         status_snapshot.encoder_backend_explicit
       );
-      encoder["selection"] = encoder_selection_json();
+      encoder["selection"] = encoder_selection_json(stats);
       encoder["codec"] = stats.codec;
+      encoder["encode_time_ms"] = stats.encode_time_ms;
       encoder["bitrate_kbps"] = stats.bitrate_kbps;
       encoder["fps"] = stats.fps;
       encoder["requested_client_fps"] = stats.requested_client_fps;

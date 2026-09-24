@@ -30,6 +30,9 @@ pkg_check_modules(CURL REQUIRED libcurl)
 pkg_check_modules(MINIUPNP miniupnpc REQUIRED)
 include_directories(SYSTEM ${MINIUPNP_INCLUDE_DIRS})
 
+# pyrowave, an optional compute codec
+include("${CMAKE_MODULE_PATH}/dependencies/pyrowave.cmake")
+
 # ffmpeg pre-compiled binaries
 include("${CMAKE_MODULE_PATH}/dependencies/prepared_ffmpeg.cmake")
 

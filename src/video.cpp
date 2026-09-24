@@ -30,6 +30,9 @@ extern "C" {
 }
 
 // local includes
+#ifdef POLARIS_BUILD_PYROWAVE
+  #include "src/platform/linux/pyrowave_encode.h"
+#endif
 #include "adaptive_bitrate.h"
 #include "process.h"
 #include "cbs.h"
@@ -1770,6 +1773,85 @@ namespace video {
     bool runtime_bitrate_supported = false;
   };
 
+#ifdef POLARIS_BUILD_PYROWAVE
+  /**
+   * @brief A session that hands captured frames to the compute codec.
+   *
+   * convert() retains converted CPU planes; encode_frame() uploads and encodes
+   * them inside the normal encode timing scope. A static image can be encoded
+   * again with a new budget without borrowing an expired capture buffer.
+   *
+   * There is nothing to invalidate and no IDR to request: every frame is a keyframe, so a client
+   * asking for one is asking for what it is already getting, and a reference frame it could report
+   * as lost does not exist.
+   */
+  class pyrowave_encode_session_t: public encode_session_t {
+  public:
+    pyrowave_encode_session_t(std::unique_ptr<pyrowave_encode::session_t> session, std::size_t max_frame_bytes, int width, int height, int source_width, int source_height, int fps_num, int fps_den):
+        width {width}, height {height}, session {std::move(session)},
+        max_frame_bytes {max_frame_bytes}, source_width {source_width}, source_height {source_height}, fps_num {fps_num}, fps_den {fps_den} {
+    }
+
+    bool supports_runtime_bitrate_update() const override { return true; }
+
+    bitrate_update_e update_bitrate(int bitrate_kbps) override {
+      const auto budget = pyrowave_encode::frame_budget(bitrate_kbps, fps_num, fps_den);
+      if (!budget) return bitrate_update_e::rejected;
+      // Called on the encoding thread. Each following encode_frame() uses this
+      // ceiling without replacing the encoder or changing stream dimensions.
+      max_frame_bytes = *budget;
+      BOOST_LOG(debug) << "PyroWave: applied " << bitrate_kbps << " kbps, up to " << *budget << " bytes per frame";
+      return bitrate_update_e::applied;
+    }
+
+    int convert(frame_t &frame) override {
+      encoded.clear();
+      prepared = false;
+      if (!session || !frame.cpu_data || frame.row_pitch <= 0 || frame.pixel_pitch != 4 ||
+          frame.width != source_width || frame.height != source_height ||
+          frame.metadata.residency != platf::frame_residency_e::cpu || frame.metadata.format != platf::frame_format_e::bgra8) {
+        return -1;
+      }
+      prepared = session->prepare_bgra(frame.cpu_data, frame.row_pitch);
+      return prepared ? 0 : -1;
+    }
+
+    bool encode_frame() {
+      encoded.clear();
+      if (!prepared || !session->encode_prepared(max_frame_bytes)) return false;
+      encoded = session->packets(pyrowave_encode::packet_bytes);
+      return !encoded.empty();
+    }
+
+    void request_idr_frame() override {
+      // Every frame already is one.
+    }
+
+    void request_normal_frame() override {
+      // There is no other kind.
+    }
+
+    void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) override {
+      // Intra-only: nothing references anything, so a lost frame costs exactly itself.
+      (void) first_frame;
+      (void) last_frame;
+    }
+
+    const std::vector<std::vector<uint8_t>> &packets() const {
+      return encoded;
+    }
+
+    int width = 0, height = 0;
+  private:
+    std::unique_ptr<pyrowave_encode::session_t> session;
+    std::size_t max_frame_bytes = 0;
+    int source_width = 0, source_height = 0;
+    int fps_num = 0, fps_den = 1;
+    bool prepared = false;
+    std::vector<std::vector<uint8_t>> encoded;
+  };
+#endif
+
   class nvenc_encode_session_t: public encode_session_t {
   public:
     nvenc_encode_session_t(
@@ -2530,6 +2612,54 @@ namespace video {
   };
 #endif
 
+  static encoder_t *chosen_encoder;
+
+#ifdef POLARIS_BUILD_PYROWAVE
+  /**
+   * @brief PyroWave, which is not one of the probed encoders and never will be.
+   *
+   * Kept out of the list below on purpose. probe_encoders picks one encoder for the whole host by
+   * asking FFmpeg for H.264, HEVC and AV1 by name; this codec has no FFmpeg name and is chosen per
+   * session by the client, so it answers a different question and would only corrupt that one.
+   *
+   * All three codec slots hold the same thing. They exist because encoder_t has three, and their
+   * names are read only by make_avcodec_encode_session, which this path never reaches.
+   */
+  encoder_t pyrowave {
+    "pyrowave"sv,
+    std::make_unique<encoder_platform_formats_pyrowave>(),
+    {{}, {}, {}, {}, {}, {}, "pyrowave"s},
+    {{}, {}, {}, {}, {}, {}, "pyrowave"s},
+    {{}, {}, {}, {}, {}, {}, "pyrowave"s},
+    PARALLEL_ENCODING  // A per session codec needs a per session encode thread, which is what this asks for.
+  };
+#endif
+
+  /**
+   * @brief The encoder this session runs on.
+   *
+   * Almost always the one the probe picked. A session that negotiated the compute codec is the
+   * exception, and it is an exception rather than a second probed candidate because the choice is
+   * the client's and lasts one session, while chosen_encoder is the host's and lasts until the next
+   * probe.
+   */
+  const encoder_t &encoder_for_session(const config_t &config) {
+#ifdef POLARIS_BUILD_PYROWAVE
+    if (config.videoFormat == VIDEO_FORMAT_PYROWAVE) {
+      return pyrowave;
+    }
+#endif
+    return *chosen_encoder;
+  }
+
+  bool pyrowave_enabled() {
+#ifdef POLARIS_BUILD_PYROWAVE
+    return pyrowave_encode::api_version() == "0.6.0" && pyrowave_encode::available();
+#else
+    return false;
+#endif
+  }
+
   static const std::vector<encoder_t *> encoders {
 #ifndef __APPLE__
     &nvenc,
@@ -2550,7 +2680,7 @@ namespace video {
     &software
   };
 
-  static encoder_t *chosen_encoder;
+
   static encoder_selection_info_t encoder_selection_info;
   static std::shared_timed_mutex encoder_state_mutex;
   static thread_local bool encoder_probe_in_progress = false;
@@ -3241,6 +3371,32 @@ namespace video {
     return 0;
   }
 
+#ifdef POLARIS_BUILD_PYROWAVE
+  /**
+   * @brief Encode the prepared image and hand over one complete frame.
+   *
+   * GPU encoding runs here so its duration reaches host telemetry and adaptive
+   * health checks. All coefficient packets belong to the same GameStream IDR.
+   */
+  int encode_pyrowave(int64_t frame_nr, pyrowave_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+    if (!session.encode_frame()) return -1;
+    const auto &encoded = session.packets();
+    if (encoded.empty()) {
+      return -1;
+    }
+
+    auto payload = pyrowave_encode::pack_frame(encoded, session.width, session.height);
+    if (payload.empty()) return -1;
+    auto packet = std::make_unique<packet_raw_generic>(std::move(payload), frame_nr, true);
+    packet->channel_data = channel_data;
+    packet->frame_timestamp = frame_timestamp;
+    packet->encode_done_timestamp = std::chrono::steady_clock::now();
+    packets->raise(std::move(packet));
+
+    return 0;
+  }
+#endif
+
   int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     auto encoded_frame = session.encode_frame(frame_nr);
     auto encode_done_timestamp = std::chrono::steady_clock::now();
@@ -3265,6 +3421,15 @@ namespace video {
 
   int encode(int64_t frame_nr, encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     int result = -1;
+#ifdef POLARIS_BUILD_PYROWAVE
+    if (auto pyrowave_session = dynamic_cast<pyrowave_encode_session_t *>(&session)) {
+      result = encode_pyrowave(frame_nr, *pyrowave_session, packets, channel_data, frame_timestamp);
+      if (result != 0) {
+        invalidate_live_probe_reuse();
+      }
+      return result;
+    }
+#endif
     if (auto avcodec_session = dynamic_cast<avcodec_encode_session_t *>(&session)) {
       result = encode_avcodec(frame_nr, *avcodec_session, packets, channel_data, frame_timestamp);
     } else if (auto nvenc_session = dynamic_cast<nvenc_encode_session_t *>(&session)) {
@@ -3777,6 +3942,32 @@ namespace video {
 
   std::unique_ptr<encode_session_t> make_encode_session(const std::shared_ptr<platf::display_t> &disp, const encoder_t &encoder, const config_t &config, int width, int height, std::unique_ptr<platf::encode_device_t> encode_device) {
     std::unique_ptr<encode_session_t> session;
+#ifdef POLARIS_BUILD_PYROWAVE
+    if (dynamic_cast<platf::pyrowave_encode_device_t *>(encode_device.get())) {
+      auto pyrowave_session = pyrowave_encode::make_session(config.width, config.height, width, height);
+      if (!pyrowave_session) {
+        invalidate_live_probe_reuse();
+        return nullptr;
+      }
+
+      // The budget for one frame, from the bitrate the session negotiated. PyroWave's rate control
+      // is exact rather than approximate, so this is a ceiling it meets rather than aims at, and a
+      // frame is the only unit it has: there is no group of pictures to spend across.
+      const auto rate = encoding_framerate_to_rational(config);
+      const auto max_frame_bytes = pyrowave_encode::frame_budget(config.bitrate, rate.num, rate.den);
+      if (!max_frame_bytes) return nullptr;
+      const auto fps = double(rate.num) / rate.den;
+
+      BOOST_LOG(info) << "PyroWave: "sv << config.width << 'x' << config.height << " at "sv << fps
+                      << " fps, up to "sv << *max_frame_bytes << " bytes a frame"sv;
+      session = std::make_unique<pyrowave_encode_session_t>(std::move(pyrowave_session), *max_frame_bytes, config.width, config.height, width, height, rate.num, rate.den);
+      session->capture_display_owner = disp;
+      // The input is CPU YUV420; encoding then uploads it to Vulkan. Do not
+      // inherit the conversion metadata left behind by conventional probing.
+      stream_stats::update_encode_path_metadata("system", platf::frame_residency_e::cpu, platf::frame_format_e::yuv420p);
+      return session;
+    }
+#endif
     if (dynamic_cast<platf::avcodec_encode_device_t *>(encode_device.get())) {
       auto avcodec_encode_device = boost::dynamic_pointer_cast<platf::avcodec_encode_device_t>(std::move(encode_device));
       session = make_avcodec_encode_session(disp.get(), encoder, config, width, height, std::move(avcodec_encode_device));
@@ -4096,7 +4287,8 @@ namespace video {
               duplicate_frame_ratio,
               frame_jitter_ms,
               encode_duration,
-              avg_frame_age_ms
+              avg_frame_age_ms,
+              target_fps
             );
           }
 
@@ -4154,7 +4346,8 @@ namespace video {
             current_fps,
             effective_bitrate,
             encode_duration,
-            config.videoFormat == 2 ? "av1" :
+            config.videoFormat == VIDEO_FORMAT_PYROWAVE ? "pyrowave" :
+              config.videoFormat == 2 ? "av1" :
               config.videoFormat == 1 ? "hevc" : "h264",
             config.width,
             config.height
@@ -4223,6 +4416,16 @@ namespace video {
 
     }
 
+#ifdef POLARIS_BUILD_PYROWAVE
+    if (dynamic_cast<const encoder_platform_formats_pyrowave *>(encoder.platform_formats.get())) {
+      // Not asked of the display. PyroWave reads packed BGRA out of host memory, which every
+      // capture backend already produces, so there is no backend specific device to make and
+      // nothing for one to hold. That changes when a dmabuf can reach the codec's own device.
+      auto device = std::make_unique<platf::pyrowave_encode_device_t>();
+      device->colorspace = colorspace;
+      return device;
+    }
+#endif
     if (dynamic_cast<const encoder_platform_formats_avcodec *>(encoder.platform_formats.get())) {
       result = disp.make_avcodec_encode_device(*pix_fmt);
       // Portal SHM CUDA is NV12-only: prefer GPU 8-bit over software 10-bit.
@@ -4377,6 +4580,8 @@ namespace video {
     std::vector<std::string> &display_names,
     int &display_p
   ) {
+    // The host wide answer, deliberately: this path serves several sessions from one encoder, and a
+    // codec chosen per session asks for parallel encoding instead so it gets a thread of its own.
     const auto &encoder = *chosen_encoder;
 
     std::shared_ptr<platf::display_t> disp;
@@ -4710,7 +4915,7 @@ namespace video {
         display = ref->display_wp->lock();
       }
 
-      auto &encoder = *chosen_encoder;
+      auto &encoder = encoder_for_session(config);
 
       // A rollback or newer paired target can arrive while an FFmpeg NVENC
       // session is being torn down. Build the replacement directly at the
@@ -4818,7 +5023,7 @@ namespace video {
     if (config.capture_generation.empty()) {
       config.capture_generation = current_capture_generation_identity();
     }
-    if (chosen_encoder->flags & PARALLEL_ENCODING) {
+    if (encoder_for_session(config).flags & PARALLEL_ENCODING) {
       capture_async(
         std::move(mail),
         config,

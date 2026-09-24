@@ -244,11 +244,12 @@ namespace stream_stats {
     std::atomic<uint64_t> hot_idr_requests_total {0};
     std::atomic<uint64_t> hot_invalidate_ref_frames_requests_total {0};
 
-    // codec is a 3-value string in practice (h264/hevc/av1); storing it as
+    // Store the codec (h264/hevc/av1/pyrowave) as
     // the same small int id callers already derive it from (see
     // stream_recorder.cpp's identical convention) keeps the hot write path
     // lock-free without inventing a new scheme.
     int codec_to_id(const std::string &codec) {
+      if (codec == "pyrowave") return 3;
       if (codec == "av1") return 2;
       if (codec == "hevc") return 1;
       if (codec == "h264") return 0;
@@ -257,6 +258,7 @@ namespace stream_stats {
 
     std::string codec_from_id(int id) {
       switch (id) {
+        case 3: return "pyrowave";
         case 0: return "h264";
         case 1: return "hevc";
         case 2: return "av1";
@@ -1500,7 +1502,7 @@ namespace stream_stats {
       return "Private Stream is using the conservative SHM/system-memory path; the stream can be healthy, but capable high-FPS hosts should use a GPU-native path when available.";
     }
     if (reason == "encoder_upload_cpu") {
-      return "Capture is GPU-resident, but encoder upload/conversion crosses system memory.";
+      return "Encoder upload/conversion uses CPU-resident frames.";
     }
     if (reason == "cpu_capture" || reason == "shm_capture") {
       return "The active capture path is CPU-resident.";

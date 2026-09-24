@@ -115,6 +115,8 @@ namespace rtsp_stream {
           return "hevc"sv;
         case 2:
           return "av1"sv;
+        case video::VIDEO_FORMAT_PYROWAVE:
+          return "pyrowave"sv;
         default:
           return "h264"sv;
       }
@@ -1445,6 +1447,10 @@ namespace rtsp_stream {
     if (!worker_owned && video::active_av1_mode != 1) {
       ss << "a=rtpmap:98 AV1/90000"sv << std::endl;
     }
+    if (!worker_owned && video::pyrowave_enabled()) {
+      ss << "a=rtpmap:99 PYROWAVE/90000\r\n";
+      ss << "a=fmtp:99 " << video::PYROWAVE_BITSTREAM << "\r\n";
+    }
 
     if (!session.surround_params.empty()) {
       // If we have our own surround parameters, advertise them twice first
@@ -1662,6 +1668,22 @@ namespace rtsp_stream {
       config.monitor.dynamicRange = util::from_view(args.at("x-nv-video[0].dynamicRangeMode"sv));
       config.monitor.chromaSamplingType = util::from_view(args.at("x-ss-video[0].chromaSamplingType"sv));
       config.monitor.enableIntraRefresh = util::from_view(args.at("x-ss-video[0].intraRefresh"sv));
+
+      if (config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE &&
+          (!video::pyrowave_enabled() || session.worker_connection_requirement()->load() ||
+           (args.contains("x-polaris-pyrowave"sv) && args.at("x-polaris-pyrowave"sv) != video::PYROWAVE_BITSTREAM) ||
+           config.monitor.dynamicRange != 0 || config.monitor.chromaSamplingType != 0 ||
+           config.monitor.encoderCscMode != 3 || config.packetsize < 992 ||
+           config.monitor.width < 16 || config.monitor.height < 16 ||
+           config.monitor.width > 4096 || config.monitor.height > 4096 ||
+           config.monitor.width % 2 || config.monitor.height % 2)) {
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+      }
+      if (config.monitor.videoFormat < 0 || config.monitor.videoFormat > video::VIDEO_FORMAT_PYROWAVE) {
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+      }
 
       // A watcher decodes the owner's stream as it is, so its codec stays pinned for the check below.
       if (session.preferred_codec && !session.watch_only) {

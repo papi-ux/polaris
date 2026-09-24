@@ -11,6 +11,7 @@
 #include <chrono>
 #include <thread>
 #include <future>
+#include <limits>
 
 using namespace std::chrono_literals;
 
@@ -259,6 +260,51 @@ TEST(AdaptiveBitrateController, ReducesTargetOnEncoderPressure) {
   EXPECT_TRUE(state.enabled);
   EXPECT_LT(state.target_bitrate_kbps, state.base_bitrate_kbps);
   EXPECT_EQ("encoder_pressure", state.state);
+}
+
+TEST(AdaptiveBitrateController, HighRefreshEncoderPressureRequiresAnOverrunAndDeliveryShortfall) {
+  struct sample_t { double fps, ratio, encode_ms; bool reduce; };
+  const double unknown = std::numeric_limits<double>::quiet_NaN();
+  const double infinity = std::numeric_limits<double>::infinity();
+  const sample_t samples[] = {
+    {60.0, 0.80, 9.0, false},       // Existing low-refresh behavior.
+    {60.0, 1.00, 11.0, true},
+    {120.0, 0.90, 9.0, true},
+    {165.0, 0.90, 6.1, true},
+    {240.0, 0.80, 4.2, true},       // Old fixed threshold missed this overrun.
+    {240.0, 1.00, 6.0, false},      // Isolated slow encode, healthy delivery.
+    {240.0, 0.95, 6.0, false},
+    {240.0, 0.50, 3.0, false},      // Pacing/capture shortage, encoder within budget.
+    {240.0, 0.00, 6.0, false},      // No measured delivery yet.
+    {240.0, unknown, 6.0, false},
+    {0.0, 0.80, 6.0, false},
+    {-240.0, 0.80, 6.0, false},
+    {unknown, 0.80, 6.0, false},
+    {infinity, 0.80, 6.0, false},
+    {240.0, 0.80, unknown, false},
+    {240.0, 0.80, infinity, false},
+    {120000.0 / 1001.0, 0.80, 8.335, false}, // Do not round fractional targets.
+    {120000.0 / 1001.0, 0.80, 8.345, true},
+  };
+  for (const auto &sample : samples) {
+    SCOPED_TRACE(::testing::Message() << sample.fps << " fps, ratio=" << sample.ratio << ", work=" << sample.encode_ms);
+    enable_controller();
+    adaptive_bitrate::update_network_stats(0.0, 8.0);
+    std::this_thread::sleep_for(1100ms);
+    const auto before = adaptive_bitrate::get_doctor_state();
+    adaptive_bitrate::update_stream_health(sample.ratio, 0.0, 0.0, 0.0, sample.encode_ms, 0.0, sample.fps);
+    const auto state = adaptive_bitrate::get_state();
+    if (sample.reduce) {
+      EXPECT_EQ(state.target_bitrate_kbps, 17600);
+      EXPECT_EQ(state.state, "encoder_pressure");
+      EXPECT_EQ(state.reason, "encode_load");
+      EXPECT_GT(adaptive_bitrate::get_doctor_state().revision, before.revision);
+    } else {
+      EXPECT_EQ(state.target_bitrate_kbps, state.base_bitrate_kbps);
+      EXPECT_EQ(adaptive_bitrate::get_doctor_state().revision, before.revision);
+    }
+  }
+  adaptive_bitrate::reset();
 }
 
 TEST(AdaptiveBitrateController, EncoderPressureMovementAdvancesControllerRevision) {

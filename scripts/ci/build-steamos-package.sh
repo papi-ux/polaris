@@ -63,6 +63,51 @@ if [ "$PACKAGE_IDENTITY" != 'polaris|1.4.13-1|x86_64' ]; then
 fi
 cp "$PACKAGE_PATH" "$OUTPUT_ROOT/Polaris-steamos3.8-x86_64.pkg.tar.zst"
 
+# The DRM/KMS capture helper is its own package. The glob above ends in a digit, so it never picks
+# this one up, and this one is checked on its own terms: what it contains is the whole point of
+# splitting it, and a leak here would put 31 MiB and a capability on every Deck.
+KMS_PACKAGE_PATHS=(polaris-kms-[0-9]*-x86_64.pkg.tar.zst)
+if [ "${#KMS_PACKAGE_PATHS[@]}" -ne 1 ]; then
+  printf 'expected exactly one SteamOS polaris-kms package, found %s\n' "${#KMS_PACKAGE_PATHS[@]}" >&2
+  exit 1
+fi
+KMS_PACKAGE_PATH="${KMS_PACKAGE_PATHS[0]}"
+KMS_RECEIPT_ROOT="$BUILD_ROOT/kms-package-receipt"
+rm -rf -- "$KMS_RECEIPT_ROOT"
+install -d -m 0755 -- "$KMS_RECEIPT_ROOT"
+bsdtar -xf "$KMS_PACKAGE_PATH" -C "$KMS_RECEIPT_ROOT"
+test -f "$KMS_RECEIPT_ROOT/.PKGINFO"
+KMS_PACKAGE_NAME="$(sed -n 's/^pkgname = //p' "$KMS_RECEIPT_ROOT/.PKGINFO")"
+KMS_PACKAGE_VERSION="$(sed -n 's/^pkgver = //p' "$KMS_RECEIPT_ROOT/.PKGINFO")"
+KMS_PACKAGE_ARCH="$(sed -n 's/^arch = //p' "$KMS_RECEIPT_ROOT/.PKGINFO")"
+KMS_IDENTITY="$KMS_PACKAGE_NAME|$KMS_PACKAGE_VERSION|$KMS_PACKAGE_ARCH"
+if [ "$KMS_IDENTITY" != 'polaris-kms|1.4.13-1|x86_64' ]; then
+  printf 'unexpected SteamOS polaris-kms package identity: %s\n' "$KMS_IDENTITY" >&2
+  exit 1
+fi
+# Exactly this version of Polaris, so the helper and the binary can never disagree.
+if ! grep -qx 'depend = polaris=1.4.13-1' "$KMS_RECEIPT_ROOT/.PKGINFO"; then
+  printf '%s\n' 'polaris-kms must depend on the exact Polaris it was built with' >&2
+  sed -n 's/^depend = /  depends: /p' "$KMS_RECEIPT_ROOT/.PKGINFO" >&2
+  exit 1
+fi
+test -f "$KMS_RECEIPT_ROOT/usr/libexec/polaris/polaris-kms"
+test -f "$KMS_RECEIPT_ROOT/usr/lib/sysusers.d/polaris-kms.conf"
+test ! -e "$KMS_RECEIPT_ROOT/usr/bin/polaris"
+pacman -Qlp "$KMS_PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-kms-package-files.txt"
+# Directory entries end in a slash. Matched with awk rather than a grep end-of-line pattern,
+# because the packaging analyzer forbids a dollar immediately followed by a quote anywhere in
+# the script, including inside a comment like this one.
+KMS_PAYLOAD_COUNT="$(awk '!/[/]$/' "$OUTPUT_ROOT/steamos3.8-kms-package-files.txt" | wc -l)"
+if [ "$KMS_PAYLOAD_COUNT" -ne 2 ]; then
+  printf 'polaris-kms should carry exactly two files, found %s\n' "$KMS_PAYLOAD_COUNT" >&2
+  awk '!/[/]$/' "$OUTPUT_ROOT/steamos3.8-kms-package-files.txt" >&2
+  exit 1
+fi
+cp "$KMS_PACKAGE_PATH" "$OUTPUT_ROOT/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst"
+sha256sum "$OUTPUT_ROOT/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst" \
+  > "$OUTPUT_ROOT/steamos3.8-kms-package-sha256.txt"
+
 FINAL_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
 FINAL_TREE="$(git -C "$SOURCE_ROOT" rev-parse 'HEAD^{tree}')"
 FINAL_STATUS="$(git -C "$SOURCE_ROOT" status --porcelain=v1 --untracked-files=all --ignore-submodules=none)"
@@ -133,6 +178,10 @@ NAMCAP_MISSING="$BUILD_ROOT/namcap-reviewed-missing.txt"
 # dependency" warnings for valid Bash scripts. Use the canonical user binary
 # paths so interpreter ownership remains deterministic and reviewable.
 PATH=/usr/bin:/bin namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt"
+# Recorded rather than gated: the reviewed list is an exact pin for the main package, and the
+# helper's own findings have not been reviewed yet. What actually matters about that package, its
+# identity, its dependency and its two files, is asserted above and does not need namcap to say so.
+PATH=/usr/bin:/bin namcap "$KMS_PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-kms-namcap-all.txt" || true
 LC_ALL=C sort -u "$OUTPUT_ROOT/steamos3.8-namcap-all.txt" > "$NAMCAP_ACTUAL"
 LC_ALL=C sort -u "$SOURCE_ROOT/packaging/linux/SteamOS/namcap-reviewed-warnings.txt" > "$NAMCAP_ALLOWED"
 comm -23 "$NAMCAP_ACTUAL" "$NAMCAP_ALLOWED" > "$OUTPUT_ROOT/steamos3.8-namcap.txt"

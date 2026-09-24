@@ -256,11 +256,11 @@ namespace nvhttp {
         SimpleWeb::HTTPS(io_context, ctx) {
     }
 
-    virtual ~PolarisHTTPS() {
-      // Gracefully shutdown the TLS connection
-      SimpleWeb::error_code ec;
-      shutdown(ec);
-    }
+    // Destruction can run on the only HTTPS event-loop thread. Synchronous TLS
+    // shutdown waits for the peer's close_notify and can indefinitely block all
+    // subsequent requests. Let Asio reclaim the transport without waiting for
+    // the peer; HTTP response completion remains owned by the server writer.
+    virtual ~PolarisHTTPS() = default;
   };
 
   enum class PAIR_PHASE {

@@ -63,11 +63,15 @@ TEST(VideoHdrProbeGuardSource, HdrCapabilityProbeCannotFailTheEncoder) {
     << "HEVC profile selection must follow the actual encoder input depth";
 }
 
+// The landmark moved when a session negotiating the compute codec started choosing its own
+// encoder. What these two guard is unchanged: capture refuses before anything dereferences a
+// null chosen_encoder, and it holds the shared lease while it does. encoder_for_session falls
+// back to *chosen_encoder, so the guard still stands between the two.
 TEST(VideoCaptureGuardSource, MissingEncoderStopsBeforeCaptureDereference) {
   const auto source = read_video_source();
   ASSERT_FALSE(source.empty()) << "could not read src/video.cpp via POLARIS_SOURCE_DIR";
 
-  const auto dereference_pos = source.find("if (chosen_encoder->flags & PARALLEL_ENCODING)");
+  const auto dereference_pos = source.find("if (encoder_for_session(config).flags & PARALLEL_ENCODING)");
   ASSERT_NE(dereference_pos, std::string::npos) << "capture encoder dereference not found";
 
   const auto capture_pos = source.rfind("void capture(", dereference_pos);
@@ -98,7 +102,7 @@ TEST(VideoCaptureGuardSource, EncoderProbeCannotMutateStateDuringCapture) {
   EXPECT_NE(probe_prefix.find("encoder_state_lock.try_lock_for(2s)"), std::string::npos)
     << "encoder probing must fail closed instead of waiting indefinitely for capture";
 
-  const auto dereference_pos = source.find("if (chosen_encoder->flags & PARALLEL_ENCODING)");
+  const auto dereference_pos = source.find("if (encoder_for_session(config).flags & PARALLEL_ENCODING)");
   ASSERT_NE(dereference_pos, std::string::npos) << "capture encoder dereference not found";
   const auto capture_pos = source.rfind("void capture(", dereference_pos);
   ASSERT_NE(capture_pos, std::string::npos) << "capture overload not found";

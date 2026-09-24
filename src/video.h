@@ -50,7 +50,7 @@ namespace video {
        SDR encoding colorspace (encoderCscMode >> 1) : 0 - BT.601, 1 - BT.709, 2 - BT.2020 */
     int encoderCscMode;
 
-    int videoFormat;  // 0 - H.264, 1 - HEVC, 2 - AV1
+    int videoFormat;  // 0 - H.264, 1 - HEVC, 2 - AV1, 3 - PyroWave
 
     /* Encoding color depth (bit depth): 0 - 8-bit, 1 - 10-bit
        HDR encoding activates when color depth is higher than 8-bit and the display which is being captured is operating in HDR mode */
@@ -226,6 +226,26 @@ namespace video {
     virtual int convert(frame_t &frame, const conversion_request_t &request) = 0;
   };
 
+  /**
+   * @brief The bitStreamFormat a client asks for to get the compute codec.
+   *
+   * Three, after H.264, HEVC and AV1. Defined here rather than in moonlight-common-c because
+   * Polaris only ever writes these numbers: the client sends a string, Polaris parses it to an int,
+   * and nothing in the streaming library needs to know the name of a codec it will never decode.
+   */
+  inline constexpr int VIDEO_FORMAT_PYROWAVE = 3;
+
+  /**
+   * @brief The bit that says this host can encode it, in ServerCodecModeSupport.
+   *
+   * Above every bit Sunshine's extensions already claim, so it cannot be mistaken for one. A
+   * Moonlight client reads the mask, finds a bit it has no name for, and ignores it, which is the
+   * whole of the compatibility story: it can never ask for a codec it does not know exists.
+   */
+  inline constexpr std::uint32_t SCM_PYROWAVE = 0x00800000;
+  inline constexpr auto PYROWAVE_BITSTREAM = "pyrowave-186f0393-sdr420-v1";
+  bool pyrowave_enabled();
+
   struct encoder_platform_formats_t {
     virtual ~encoder_platform_formats_t() = default;
     platf::mem_type_e dev_type;
@@ -282,6 +302,26 @@ namespace video {
       encoder_platform_formats_t::pix_fmt_10bit = pix_fmt_10bit;
       encoder_platform_formats_t::pix_fmt_yuv444_8bit = pix_fmt_yuv444_8bit;
       encoder_platform_formats_t::pix_fmt_yuv444_10bit = pix_fmt_yuv444_10bit;
+    }
+  };
+
+  /**
+   * @brief PyroWave's formats, which are almost none of them.
+   *
+   * The codec takes packed BGRA from host memory and decides its own chroma at encoder creation,
+   * so there is no eight bit versus ten bit choice to advertise and no hardware device type to
+   * match. Present so the dispatch has something to recognise.
+   */
+  struct encoder_platform_formats_pyrowave: encoder_platform_formats_t {
+    encoder_platform_formats_pyrowave() {
+      encoder_platform_formats_t::dev_type = platf::mem_type_e::system;
+      encoder_platform_formats_t::pix_fmt_8bit = platf::pix_fmt_e::yuv420p;
+      encoder_platform_formats_t::pix_fmt_10bit = platf::pix_fmt_e::yuv420p;
+      // 4:4:4 is a create time choice inside the codec, not a pixel format Polaris hands it, and
+      // this path only ever converts to 4:2:0 today. Naming the 4:2:0 format in all four slots
+      // keeps the honest answer in one place rather than advertising a format nothing produces.
+      encoder_platform_formats_t::pix_fmt_yuv444_8bit = platf::pix_fmt_e::yuv420p;
+      encoder_platform_formats_t::pix_fmt_yuv444_10bit = platf::pix_fmt_e::yuv420p;
     }
   };
 
@@ -355,6 +395,9 @@ namespace video {
           BOOST_LOG(error) << "Unknown video format " << config.videoFormat << ", falling back to H.264";
           // fallthrough
         case 0:
+          return h264;
+        case VIDEO_FORMAT_PYROWAVE:
+          // The dedicated PyroWave encoder uses one SDR configuration slot.
           return h264;
         case 1:
           return hevc;

@@ -1,0 +1,53 @@
+# The DRM/KMS capture helper, on pacman.
+#
+# pacman does carry file capabilities in a package payload, but that is not enough on its own here:
+# the kernel drops security.capability from a file the moment it is chowned, so the chgrp to
+# polaris-kms below would wipe a capability that arrived with the package. Ownership first, then the
+# mode, then the capability, every time, and never the other way round.
+#
+# It fails closed. cap_sys_admin on a world-executable file hands CAP_SYS_ADMIN to every local
+# account, which is worse than not having DRM/KMS capture at all.
+
+_polaris_kms_apply() {
+  local helper=/usr/libexec/polaris/polaris-kms
+  local group=polaris-kms
+
+  [ -f "$helper" ] || return 0
+
+  if command -v systemd-sysusers >/dev/null 2>&1; then
+    systemd-sysusers /usr/lib/sysusers.d/polaris-kms.conf >/dev/null 2>&1 || true
+  fi
+  if ! getent group "$group" >/dev/null 2>&1; then
+    groupadd --system "$group" >/dev/null 2>&1 || true
+  fi
+  if ! getent group "$group" >/dev/null 2>&1; then
+    printf '%s\n' \
+      "polaris-kms: could not create the $group group, so the capture helper was left without its" \
+      "polaris-kms: capability. DRM/KMS capture will not work; every other capture path will." >&2
+    return 0
+  fi
+
+  if ! chgrp "$group" "$helper" || ! chmod 0750 "$helper"; then
+    setcap -r "$helper" 2>/dev/null || true
+    printf '%s\n' 'polaris-kms: could not restrict helper access; refusing the capability.' >&2
+    return 1
+  fi
+  if ! setcap cap_sys_admin+ep "$helper" 2>/dev/null; then
+    printf '%s\n' \
+      "polaris-kms: could not set cap_sys_admin on $helper, which some filesystems refuse." \
+      "polaris-kms: DRM/KMS capture will not work; every other capture path will." >&2
+    return 0
+  fi
+
+  printf '%s\n' \
+    "Polaris can capture through DRM/KMS once you turn it on:" \
+    "  sudo -H polaris --setup-host --enable-kms"
+}
+
+post_install() {
+  _polaris_kms_apply
+}
+
+post_upgrade() {
+  _polaris_kms_apply
+}
