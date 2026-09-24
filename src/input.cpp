@@ -111,7 +111,9 @@ namespace input {
 
   static task_pool_util::TaskPool::task_id_t key_press_repeat_id {};
   static std::unordered_map<key_press_id_t, bool> key_press {};
-  static std::array<std::uint8_t, 5> mouse_press {};
+  // Indexed by the Moonlight button number, so it has to reach BUTTON_X2, which is 5. It was five
+  // entries, which covers 0 through 4, so a held X2 was not recorded and never released.
+  static std::array<std::uint8_t, BUTTON_X2 + 1> mouse_press {};
 
   static platf::input_t platf_input;
   static std::bitset<platf::MAX_GAMEPADS> gamepadMask {};
@@ -1990,10 +1992,29 @@ namespace input {
 
   void reset(std::shared_ptr<input_t> &input) {
     task_pool.cancel(key_press_repeat_id);
+
+    // The left button's release is held back ten milliseconds so that a right click can overtake it,
+    // and the bookkeeping is written when the client asks rather than when the button actually comes
+    // up. Between those two moments mouse_press says left is up while the host still holds it down,
+    // and cancelling that timer strands it exactly there: the loop below releases what the
+    // bookkeeping says is held, and the bookkeeping already agrees the button is up.
+    //
+    // A left button left down on a desktop is a selection rectangle that follows the pointer around
+    // and cannot be dismissed. Only on the absolute coordinate path, which is to say only on the
+    // desktop, which is where it was found.
+    const bool left_release_pending =
+      input->mouse_left_button_timeout != nullptr &&
+      input->mouse_left_button_timeout != DISABLE_LEFT_BUTTON_DELAY;
     task_pool.cancel(input->mouse_left_button_timeout);
+    input->mouse_left_button_timeout = ENABLE_LEFT_BUTTON_DELAY;
 
     // Ensure input is synchronous, by using the task_pool
-    task_pool.push([]() {
+    task_pool.push([left_release_pending]() {
+      if (left_release_pending) {
+        platf::button_mouse(platf_input, BUTTON_LEFT, true);
+        mouse_press[BUTTON_LEFT] = false;
+      }
+
       for (int x = 0; x < mouse_press.size(); ++x) {
         if (mouse_press[x]) {
           platf::button_mouse(platf_input, x, true);
@@ -2006,7 +2027,14 @@ namespace input {
           // already released
           continue;
         }
-        platf::keyboard_update(platf_input, vk_from_kpid(kp.first) & 0x00FF, true, flags_from_kpid(kp.first));
+        // Through the same mapping the press went through. Releasing the key the client named, when
+        // a keybinding sent a different one to the host, leaves the one actually held down held.
+        platf::keyboard_update(
+          platf_input,
+          map_keycode(vk_from_kpid(kp.first) & 0x00FF),
+          true,
+          flags_from_kpid(kp.first)
+        );
         key_press[kp.first] = false;
       }
     });

@@ -11,8 +11,11 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -285,4 +288,66 @@ TEST(ControllerTouchPoint, ASteamControllersTwoTouchpadsTakeAHalfEach) {
   EXPECT_EQ(single.finger, 1U);
   // An older client leaves the byte at zero, which reads as the one touchpad it has.
   EXPECT_FLOAT_EQ(input::controller_touch_point(0.3f, 0, 0, false).x, 0.3f);
+}
+
+namespace {
+  std::string input_source_for_contract() {
+    const auto path = std::filesystem::path(POLARIS_SOURCE_DIR) / "src/input.cpp";
+    std::ifstream in(path);
+    if (!in) {
+      return {};
+    }
+    std::ostringstream out;
+    out << in.rdbuf();
+    return out.str();
+  }
+
+  std::string between_markers(const std::string &text, const std::string &begin, const std::string &end) {
+    const auto from = text.find(begin);
+    if (from == std::string::npos) {
+      return {};
+    }
+    const auto to = text.find(end, from);
+    return text.substr(from, to == std::string::npos ? std::string::npos : to - from);
+  }
+}  // namespace
+
+/**
+ * A session that ends must not leave anything held down on the host.
+ *
+ * All three of these were true at once, and the first one is what a user sees: a selection rectangle
+ * on the desktop that follows the pointer and cannot be dismissed, after a stream ends.
+ *
+ * Read as source because releasing input needs a real input device to observe, and the thing that was
+ * wrong is which lines run rather than what any one of them computes.
+ */
+TEST(InputResetContract, TheDeferredLeftButtonReleaseIsFlushedRatherThanCancelled) {
+  const auto source = input_source_for_contract();
+  ASSERT_FALSE(source.empty());
+  const auto reset = between_markers(source, "void reset(std::shared_ptr<input_t> &input)", "class deinit_t");
+  ASSERT_FALSE(reset.empty());
+
+  EXPECT_NE(reset.find("left_release_pending"), std::string::npos)
+    << "the ten millisecond left button release is cancelled without being sent, and the bookkeeping "
+       "already says the button is up, so nothing releases it";
+  EXPECT_NE(reset.find("platf::button_mouse(platf_input, BUTTON_LEFT, true)"), std::string::npos);
+}
+
+TEST(InputResetContract, EveryButtonTheProtocolCarriesIsTracked) {
+  const auto source = input_source_for_contract();
+  ASSERT_FALSE(source.empty());
+  EXPECT_NE(source.find("std::array<std::uint8_t, BUTTON_X2 + 1> mouse_press"), std::string::npos)
+    << "a button above the end of the array is never recorded as held, so it is never released";
+  // The reason the size is written as a name rather than a number.
+  EXPECT_EQ(BUTTON_X2, 0x05);
+}
+
+TEST(InputResetContract, KeysAreReleasedThroughTheSameMappingTheyWerePressedThrough) {
+  const auto source = input_source_for_contract();
+  ASSERT_FALSE(source.empty());
+  const auto reset = between_markers(source, "void reset(std::shared_ptr<input_t> &input)", "class deinit_t");
+  ASSERT_FALSE(reset.empty());
+
+  EXPECT_NE(reset.find("map_keycode(vk_from_kpid(kp.first) & 0x00FF)"), std::string::npos)
+    << "a keybinding sends one key to the host and this releases another, leaving the mapped key held";
 }
