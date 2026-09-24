@@ -137,6 +137,15 @@ namespace pyrowave_encode {
     virtual bool encode_retained(std::size_t max_bytes) = 0;
 
     /**
+     * @brief Whether frames reach the codec as a picture on the GPU rather than as planes.
+     *
+     * Decided by trying it, on the first frame a session is asked to encode, so it says nothing
+     * before then. Worth asking afterwards: the two routes cost very different amounts of host CPU,
+     * and which one a session took is the first thing to know when a host cannot keep up.
+     */
+    virtual bool uses_gpu_input() const = 0;
+
+    /**
      * @brief The encoded frame, as one contiguous bitstream. Valid until the next encode.
      *
      * One blob rather than the packet list the codec will also hand out, because the bitstream

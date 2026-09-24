@@ -13,6 +13,7 @@
 
 // standard includes
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 namespace pyrowave_encode {
@@ -81,6 +82,21 @@ namespace pyrowave_encode {
 
     /// What the driver calls the GPU this landed on, for the log line that says which one it was.
     std::string gpu_name;
+
+    /**
+     * @brief Held around anything that touches the whole device rather than one session.
+     *
+     * Two things do. A VkQueue may only be submitted to from one thread at a time, and the command
+     * buffer a session lends the codec is set on the device rather than on the encoder, so two
+     * sessions encoding at once would each set their own and record into the other's. Two clients
+     * streaming from one host is an ordinary thing, so neither is hypothetical.
+     *
+     * The codec takes a pointer to this in its create info and locks it around its own submissions,
+     * which covers the path where it submits for itself. Recursive because that callback can fire
+     * while a session already holds this for a command buffer it is lending, and a plain mutex would
+     * stop the frame rather than protect it.
+     */
+    mutable std::recursive_mutex device_lock;
 
   private:
     VkApplicationInfo application_info = {};

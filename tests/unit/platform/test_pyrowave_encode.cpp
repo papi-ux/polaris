@@ -10,7 +10,15 @@
   // local includes
   #include "src/platform/linux/pyrowave_encode.h"
 
+  // The codec itself, for the other half of the round trip. Its header wants the Vulkan API declared
+  // before it and says so with an #error.
+  #include <vulkan/vulkan.h>
+
+  #include "pyrowave.h"
+
   #include <algorithm>
+  #include <cmath>
+  #include <cstdlib>
   #include <cstring>
   #include <memory>
 
@@ -47,6 +55,183 @@ namespace {
     std::vector<uint8_t> u;
     std::vector<uint8_t> v;
   };
+
+  /**
+   * A frame decoded back to planar YUV, the way a client decodes it.
+   *
+   * On its own device, created the way any other application would create one, because the point is
+   * to read what a decoder somewhere else reads rather than to ask the encoder what it meant. Nothing
+   * else in this file can tell a full range Rec. 709 frame from a limited range BT.601 one, and that
+   * is the mistake that looks plausible on a desktop and wrong on anything saturated.
+   */
+  struct decoded_frame_t {
+    decoded_frame_t(const std::vector<uint8_t> &frame, int width, int height, bool chroma_444):
+        width {width},
+        height {height},
+        shift {chroma_444 ? 0 : 1} {
+      if (pyrowave_create_default_device(&device) != PYROWAVE_SUCCESS || !device) {
+        return;
+      }
+
+      pyrowave_decoder_create_info info = {};
+      info.device = device;
+      info.width = width;
+      info.height = height;
+      info.chroma = chroma_444 ? PYROWAVE_CHROMA_SUBSAMPLING_444 : PYROWAVE_CHROMA_SUBSAMPLING_420;
+      if (pyrowave_decoder_create(&info, &decoder) != PYROWAVE_SUCCESS || !decoder) {
+        return;
+      }
+
+      // One push for the whole frame. The bitstream delimits itself, so this is byte for byte the
+      // same work as pushing every packet in turn, and it is what Nova's renderer does.
+      if (pyrowave_decoder_push_packet(decoder, frame.data(), frame.size()) != PYROWAVE_SUCCESS) {
+        return;
+      }
+      if (!pyrowave_decoder_decode_is_ready(decoder, false)) {
+        return;
+      }
+
+      y.assign(static_cast<std::size_t>(width) * height, 0);
+      u.assign(static_cast<std::size_t>(width >> shift) * (height >> shift), 0);
+      v.assign(u.size(), 0);
+
+      pyrowave_cpu_buffer buffer = {};
+      buffer.format = chroma_444 ? PYROWAVE_CPU_BUFFER_FORMAT_YUV444P
+                                 : PYROWAVE_CPU_BUFFER_FORMAT_YUV420P;
+      buffer.width = width;
+      buffer.height = height;
+      buffer.data[0] = y.data();
+      buffer.data[1] = u.data();
+      buffer.data[2] = v.data();
+      buffer.row_stride_in_bytes[0] = static_cast<std::size_t>(width);
+      buffer.row_stride_in_bytes[1] = static_cast<std::size_t>(width >> shift);
+      buffer.row_stride_in_bytes[2] = static_cast<std::size_t>(width >> shift);
+      buffer.plane_size_in_bytes[0] = y.size();
+      buffer.plane_size_in_bytes[1] = u.size();
+      buffer.plane_size_in_bytes[2] = v.size();
+
+      ok = pyrowave_decoder_decode_cpu_buffer_synchronous(decoder, &buffer) == PYROWAVE_SUCCESS;
+    }
+
+    ~decoded_frame_t() {
+      if (decoder) {
+        pyrowave_decoder_destroy(decoder);
+      }
+      if (device) {
+        pyrowave_device_destroy(device);
+      }
+    }
+
+    decoded_frame_t(const decoded_frame_t &) = delete;
+    decoded_frame_t &operator=(const decoded_frame_t &) = delete;
+
+    /// The luma sample at a point, which is where the picture is rather than where its edges are.
+    int luma_at(int col, int row) const {
+      return y[static_cast<std::size_t>(row) * width + col];
+    }
+
+    int chroma_u_at(int col, int row) const {
+      return u[static_cast<std::size_t>(row >> shift) * (width >> shift) + (col >> shift)];
+    }
+
+    int chroma_v_at(int col, int row) const {
+      return v[static_cast<std::size_t>(row >> shift) * (width >> shift) + (col >> shift)];
+    }
+
+    bool ok = false;
+    int width;
+    int height;
+    int shift;
+    std::vector<uint8_t> y;
+    std::vector<uint8_t> u;
+    std::vector<uint8_t> v;
+
+  private:
+    pyrowave_device device = nullptr;
+    pyrowave_decoder decoder = nullptr;
+  };
+
+  /// Full range Rec. 709 with centred chroma, which is what profile_token promises a client.
+  struct expected_ycbcr_t {
+    expected_ycbcr_t(int r, int g, int b) {
+      const double luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+      y = luma;
+      u = (b - luma) / 1.8556 + 128.0;
+      v = (r - luma) / 1.5748 + 128.0;
+      y = std::clamp(y, 0.0, 255.0);
+      u = std::clamp(u, 0.0, 255.0);
+      v = std::clamp(v, 0.0, 255.0);
+    }
+
+    double y;
+    double u;
+    double v;
+  };
+
+  /// Four solid quadrants, so a sample from the middle of each says what the colour became.
+  struct quadrant_frame_t {
+    quadrant_frame_t(int width, int height, int stride):
+        width {width},
+        height {height},
+        stride {stride},
+        bgra(static_cast<std::size_t>(stride) * height, 0) {
+      for (int row = 0; row < height; ++row) {
+        for (int col = 0; col < width; ++col) {
+          const auto which = (row < height / 2 ? 0 : 2) + (col < width / 2 ? 0 : 1);
+          auto *pixel = &bgra[static_cast<std::size_t>(row) * stride + static_cast<std::size_t>(col) * 4];
+          pixel[0] = static_cast<uint8_t>(colours[which][2]);
+          pixel[1] = static_cast<uint8_t>(colours[which][1]);
+          pixel[2] = static_cast<uint8_t>(colours[which][0]);
+          pixel[3] = 0xff;
+        }
+      }
+    }
+
+    /// The middle of a quadrant, far enough from every edge that no ringing reaches it.
+    std::pair<int, int> centre_of(int which) const {
+      const int col = (which % 2 == 0 ? width / 4 : width - width / 4);
+      const int row = (which < 2 ? height / 4 : height - height / 4);
+      return {col, row};
+    }
+
+    // Saturated primaries, because a wrong matrix or a wrong range is nearly invisible on grey and
+    // impossible to miss on these.
+    static constexpr int colours[4][3] = {
+      {255, 0, 0},
+      {0, 255, 0},
+      {0, 0, 255},
+      {128, 128, 128},
+    };
+
+    int width;
+    int height;
+    int stride;
+    std::vector<uint8_t> bgra;
+  };
+
+  /**
+   * Hold a decoded frame to what profile_token promises a client: full range Rec. 709.
+   *
+   * The colourimetry is the one thing about this stream that is written down in a token rather than
+   * in the bitstream, because upstream reserves the fields and writes none of them. So this is the
+   * only place the promise is checked, and it is checked on every path a frame can take, because a
+   * client that reads these frames as limited range or as BT.601 sees something plausible on a
+   * desktop and wrong on anything saturated, with nothing in any log to say why.
+   */
+  void expect_full_range_rec709(const decoded_frame_t &decoded, const quadrant_frame_t &source,
+                                const char *path) {
+    for (int which = 0; which < 4; ++which) {
+      const auto [col, row] = source.centre_of(which);
+      const expected_ycbcr_t want {source.colours[which][0], source.colours[which][1],
+                                   source.colours[which][2]};
+
+      EXPECT_NEAR(decoded.luma_at(col, row), want.y, 6.0)
+        << path << ", quadrant " << which << " luma. Limited range would land sixteen high on black "
+        << "and twenty low on white";
+      EXPECT_NEAR(decoded.chroma_u_at(col, row), want.u, 8.0) << path << ", quadrant " << which << " Cb";
+      EXPECT_NEAR(decoded.chroma_v_at(col, row), want.v, 8.0) << path << ", quadrant " << which << " Cr";
+    }
+  }
 
   /**
    * The start of frame header a PyroWave bitstream opens with, read from the bytes.
@@ -360,6 +545,119 @@ TEST(PyroWaveEncodeTests, ChromaIsCarriedIntoTheBitstreamAndCostsWhatItShould) {
   // frame that came back smaller would mean the extra chroma went nowhere.
   EXPECT_GT(full->bitstream().size(), narrow->bitstream().size())
     << "4:4:4 carried no more than 4:2:0, so the extra chroma was not encoded";
+}
+
+TEST(PyroWaveEncodeTests, TheFrameCaptureHandsOverIsEncodedOnTheGpu) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  auto session = make_session_420(width, height);
+  ASSERT_NE(session, nullptr);
+
+  // Nothing has been offered yet, so there is nothing to have decided.
+  EXPECT_FALSE(session->uses_gpu_input());
+
+  // A padded stride, because that is what capture hands over and the upload has to be told how wide
+  // a row really is rather than assuming.
+  const quadrant_frame_t source {width, height, (width + 37) * 4};
+  ASSERT_TRUE(session->encode_bgra(source.bgra.data(), width, height, source.stride, 512 * 1024));
+  EXPECT_TRUE(session->uses_gpu_input())
+    << "the stream is the shape capture handed over, so nothing needed converting on the CPU";
+
+  // And the frame is a frame, not just a path that returned true.
+  const sequence_header_t header {session->bitstream()};
+  ASSERT_TRUE(header.present);
+  EXPECT_EQ(header.width, width);
+  EXPECT_EQ(header.height, height);
+}
+
+TEST(PyroWaveEncodeTests, AShapeThatNeedsBarsIsConvertedOnTheCpu) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  auto session = make_session_420(width, height);
+  ASSERT_NE(session, nullptr);
+
+  // Twice as wide for its height as the stream is. The codec's scaler fills the output with the
+  // input and has no letterbox in it, so a frame this shape has to take the other path or arrive
+  // stretched.
+  const quadrant_frame_t source {1280, 360, 1280 * 4};
+  ASSERT_TRUE(session->encode_bgra(source.bgra.data(), source.width, source.height, source.stride,
+                                   512 * 1024));
+  EXPECT_FALSE(session->uses_gpu_input());
+  EXPECT_FALSE(session->bitstream().empty());
+}
+
+TEST(PyroWaveEncodeTests, ThePictureThatArrivesIsFullRangeRec709) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  auto session = make_session_420(width, height);
+  ASSERT_NE(session, nullptr);
+
+  const quadrant_frame_t source {width, height, (width + 8) * 4};
+  ASSERT_TRUE(session->encode_bgra(source.bgra.data(), width, height, source.stride, 512 * 1024));
+  ASSERT_TRUE(session->uses_gpu_input());
+
+  const decoded_frame_t decoded {session->bitstream(), width, height, false};
+  ASSERT_TRUE(decoded.ok) << "the frame this host produced would not decode";
+  expect_full_range_rec709(decoded, source, "on the GPU");
+}
+
+TEST(PyroWaveEncodeTests, BothPathsProduceTheSamePicture) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  const quadrant_frame_t source {width, height, width * 4};
+
+  // The same picture, the same size at both ends, so neither path scales and the only difference
+  // between them is where the colour conversion happened.
+  setenv("POLARIS_PYROWAVE_GPU_INPUT", "off", 1);
+  auto on_cpu = make_session_420(width, height);
+  unsetenv("POLARIS_PYROWAVE_GPU_INPUT");
+  auto on_gpu = make_session_420(width, height);
+  ASSERT_NE(on_cpu, nullptr);
+  ASSERT_NE(on_gpu, nullptr);
+
+  ASSERT_TRUE(on_cpu->encode_bgra(source.bgra.data(), width, height, source.stride, 512 * 1024));
+  ASSERT_TRUE(on_gpu->encode_bgra(source.bgra.data(), width, height, source.stride, 512 * 1024));
+  ASSERT_FALSE(on_cpu->uses_gpu_input());
+  ASSERT_TRUE(on_gpu->uses_gpu_input());
+
+  const decoded_frame_t from_cpu {on_cpu->bitstream(), width, height, false};
+  const decoded_frame_t from_gpu {on_gpu->bitstream(), width, height, false};
+  ASSERT_TRUE(from_cpu.ok);
+  ASSERT_TRUE(from_gpu.ok);
+
+  // Held to the promise one at a time before they are held to each other, so a failure says which
+  // path broke it rather than only that they differ.
+  expect_full_range_rec709(from_cpu, source, "converted on the CPU");
+  expect_full_range_rec709(from_gpu, source, "converted on the GPU");
+
+  // Not identical: two converters, one in fixed point on the CPU and one in floating point with
+  // dithering on the GPU, will not agree to the last bit and do not need to. Agreeing on average is
+  // the claim, because that is what makes swapping one for the other invisible.
+  double total = 0.0;
+  int worst = 0;
+  for (std::size_t at = 0; at < from_cpu.y.size(); ++at) {
+    const int difference = std::abs(static_cast<int>(from_cpu.y[at]) - from_gpu.y[at]);
+    total += difference;
+    worst = std::max(worst, difference);
+  }
+  const double average = total / from_cpu.y.size();
+  EXPECT_LT(average, 3.0) << "the two paths disagree by " << average << " on average, worst " << worst;
 }
 
 #endif  // POLARIS_BUILD_PYROWAVE

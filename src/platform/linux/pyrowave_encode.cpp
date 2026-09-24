@@ -24,13 +24,16 @@ extern "C" {
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string_view>
 
 // local includes
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/linux/pyrowave_encode.h"
+#include "src/platform/linux/pyrowave_upload.h"
 #include "src/platform/linux/pyrowave_vulkan.h"
 
 using namespace std::literals;
@@ -69,9 +72,34 @@ namespace pyrowave_encode {
       return owned ? owned->codec : nullptr;
     }
 
+    /**
+     * Whether this host will hand the codec pictures on the GPU at all.
+     *
+     * On unless something says otherwise, in the shape Polaris already uses for the portal's dmabuf
+     * override. A driver that mishandles an upload should be recoverable without a rebuild, and
+     * having both paths reachable at will is what lets a test put the same picture through each and
+     * compare what comes out.
+     */
+    bool gpu_input_allowed() {
+      const char *setting = std::getenv("POLARIS_PYROWAVE_GPU_INPUT");
+      if (!setting || !*setting) {
+        return true;
+      }
+      const std::string_view value {setting};
+      if (value == "0" || value == "off" || value == "no" || value == "false") {
+        BOOST_LOG(info) << "PyroWave: POLARIS_PYROWAVE_GPU_INPUT is off, so frames are converted "sv
+                        << "on the CPU"sv;
+        return false;
+      }
+      return true;
+    }
+
     class pyrowave_session_t: public session_t {
     public:
-      pyrowave_session_t(pyrowave_encoder encoder, int width, int height, chroma_e chroma):
+      pyrowave_session_t(const vk_device_t &owner, pyrowave_encoder encoder, int width, int height,
+                         chroma_e chroma):
+          owner {&owner},
+          gpu {gpu_input_allowed() ? gpu_e::unknown : gpu_e::no},
           encoder {encoder},
           width {width},
           height {height},
@@ -106,6 +134,23 @@ namespace pyrowave_encode {
           return false;
         }
 
+        // The picture as it is, straight to the GPU, whenever the stream is the shape capture
+        // hands over. That covers every client asking for a resolution the host made an output at,
+        // and every one asking for a fraction of a monitor's own shape, which between them is most
+        // of what a host streams.
+        if (gpu != gpu_e::no && suits_the_gpu_path(src_width, src_height)) {
+          if (encode_on_gpu(bgra, src_width, src_height, stride, max_bytes)) {
+            return true;
+          }
+          if (gpu == gpu_e::no) {
+            BOOST_LOG(info) << "PyroWave: falling back to converting frames on the CPU"sv;
+          } else {
+            // The path works and this frame did not. Saying so beats quietly producing a picture
+            // through the other path and leaving nobody to notice the first one broke.
+            return false;
+          }
+        }
+
         if (!prepare_scaler(src_width, src_height)) {
           return false;
         }
@@ -130,29 +175,7 @@ namespace pyrowave_encode {
         const auto encode_started = std::chrono::steady_clock::now();
 
         const auto encoded = encode(planes[0].data(), planes[1].data(), planes[2].data(), max_bytes);
-
-        // Where the host's time actually goes, once every few hundred frames.
-        //
-        // The conversion is a full frame of BGRA turned into planar YUV on one CPU core, and it sits
-        // in front of a codec that does its own work on the GPU in a fraction of a millisecond. It
-        // was always the bring-up shortcut rather than a design, and this says how much removing it
-        // would be worth before anyone spends a week on importing a dmabuf.
-        const auto finished = std::chrono::steady_clock::now();
-        const auto to_ms = [](auto from, auto to) {
-          return std::chrono::duration<double, std::milli>(to - from).count();
-        };
-        convert_ms_total += to_ms(conversion_started, encode_started);
-        encode_ms_total += to_ms(encode_started, finished);
-        // Once early, so a session says what it costs, then rarely, so a long one can show drift
-        // without filling the log. Five seconds in and every five minutes after, at sixty frames a
-        // second.
-        ++timed_frames;
-        if (timed_frames == 300 || timed_frames % 18000 == 0) {
-          BOOST_LOG(info) << "PyroWave: over "sv << timed_frames << " frames, colour conversion "sv
-                          << (convert_ms_total / timed_frames) << " ms and encode "sv
-                          << (encode_ms_total / timed_frames) << " ms a frame"sv;
-        }
-
+        report_timing(conversion_started, encode_started);
         return encoded;
       }
 
@@ -211,6 +234,11 @@ namespace pyrowave_encode {
                         chroma == chroma_e::yuv420 ? AV_PIX_FMT_YUV420P : AV_PIX_FMT_YUV444P, 0);
         av_dict_set_int(&options, "sws_flags", SWS_BILINEAR, 0);
         av_dict_set_int(&options, "threads", threads, 0);
+        // The range as an option rather than only as a call, because sws_init_context builds its
+        // conversion tables from these and would overwrite anything set beforehand. Both ends full,
+        // since the source is full range RGB and the stream is full range YCbCr.
+        av_dict_set_int(&options, "src_range", 1, 0);
+        av_dict_set_int(&options, "dst_range", 1, 0);
 
         const auto applied = av_opt_set_dict(scaler, &options);
         av_dict_free(&options);
@@ -221,27 +249,30 @@ namespace pyrowave_encode {
           return false;
         }
 
-        // Said out loud, because the default is neither of the things anyone would assume. swscale
-        // converts RGB to YUV as limited range BT.601 unless told otherwise, and a decoder reading
-        // these frames as Rec. 709 gets the hue wrong on anything saturated while looking entirely
-        // plausible on a desktop. The bitstream has fields for this and upstream does not write
-        // them, so the only agreement available is the one in profile_token, and this is the end of
-        // it that has to be true.
-        //
-        // Set before init rather than after, which is what sws_setColorspaceDetails on an
-        // initialised context would have been doing.
-        const int *coefficients = sws_getCoefficients(SWS_CS_ITU709);
-        if (sws_setColorspaceDetails(scaler, coefficients, 1, coefficients, 1,
-                                     0, 1 << 16, 1 << 16) < 0) {
-          BOOST_LOG(error) << "PyroWave: this converter will not do full range Rec. 709"sv;
+        if (sws_init_context(scaler, nullptr, nullptr) < 0) {
+          BOOST_LOG(error) << "PyroWave: could not initialise a "sv << src_width << 'x' << src_height
+                           << " to "sv << fit_width << 'x' << fit_height << " colour converter"sv;
           sws_freeContext(scaler);
           scaler = nullptr;
           return false;
         }
 
-        if (sws_init_context(scaler, nullptr, nullptr) < 0) {
-          BOOST_LOG(error) << "PyroWave: could not initialise a "sv << src_width << 'x' << src_height
-                           << " to "sv << fit_width << 'x' << fit_height << " colour converter"sv;
+        // Said out loud, because the default is neither of the things anyone would assume. swscale
+        // converts RGB to YUV as limited range BT.601 unless told otherwise, and a decoder reading
+        // these frames as full range Rec. 709 shows raised blacks, flattened whites and the wrong
+        // hue on anything saturated, while looking entirely plausible on a desktop. The bitstream
+        // has fields for this and upstream writes none of them, so the only agreement available is
+        // the one in profile_token, and this is the end of it that has to be true.
+        //
+        // After init, not before. Everything here is built through sws_alloc_context so that the
+        // converter can be given threads, and sws_init_context computes its range tables from the
+        // options it was handed: a call before it is one it overwrites. This was set before init and
+        // silently did nothing, which is a mistake with no symptom on this side at all. What caught
+        // it was decoding a frame in a test and looking at the colours.
+        const int *coefficients = sws_getCoefficients(SWS_CS_ITU709);
+        if (sws_setColorspaceDetails(scaler, coefficients, 1, coefficients, 1,
+                                     0, 1 << 16, 1 << 16) < 0) {
+          BOOST_LOG(error) << "PyroWave: this converter will not do full range Rec. 709"sv;
           sws_freeContext(scaler);
           scaler = nullptr;
           return false;
@@ -261,6 +292,140 @@ namespace pyrowave_encode {
                           << " at "sv << offset_x << ',' << offset_y;
         }
         return true;
+      }
+
+      /**
+       * Whether the codec's own scaler can be handed this frame without stretching it.
+       *
+       * It fills the output with the input, so whatever it scales it also stretches: there is no
+       * letterbox in it and no way to ask for one. An exact match of shapes is therefore the whole
+       * test, and it is the ordinary case, because a client either asks for a size the host made an
+       * output at or asks for a fraction of the monitor it is mirroring. Anything else wants bars,
+       * and bars are what the CPU path already draws.
+       */
+      bool suits_the_gpu_path(int src_width, int src_height) const {
+        return static_cast<long long>(src_width) * height ==
+               static_cast<long long>(src_height) * width;
+      }
+
+      /**
+       * Put the frame on the GPU and encode it there.
+       *
+       * The colour conversion goes with it. What was a full frame of BGRA turned into planar YUV on
+       * the CPU becomes part of the same compute pass that runs the wavelet transform, and what the
+       * host still does per frame is one copy into memory the GPU can read. The conversion it
+       * replaces is the codec's own, full range with BT.709 coefficients and centred chroma, which is
+       * the same thing profile_token promises and the same thing swscale was told to produce.
+       */
+      bool encode_on_gpu(const uint8_t *bgra, int src_width, int src_height, int stride,
+                         std::size_t max_bytes) {
+        if (!staging) {
+          staging = upload_t::make(*owner);
+          if (!staging) {
+            gpu = gpu_e::no;
+            return false;
+          }
+        }
+
+        const auto copy_started = std::chrono::steady_clock::now();
+        if (!staging->begin(bgra, src_width, src_height, stride, VK_FORMAT_B8G8R8A8_UNORM)) {
+          // Nothing was recorded, so there is a working path left to take on the first frame and
+          // nothing to unwind on a later one.
+          if (gpu == gpu_e::unknown) {
+            gpu = gpu_e::no;
+          }
+          return false;
+        }
+        const auto encode_started = std::chrono::steady_clock::now();
+
+        if (!encode_recorded(max_bytes)) {
+          if (gpu == gpu_e::unknown) {
+            gpu = gpu_e::no;
+          }
+          return false;
+        }
+
+        if (gpu == gpu_e::unknown) {
+          gpu = gpu_e::yes;
+          BOOST_LOG(info) << "PyroWave: encoding straight from a "sv << src_width << 'x' << src_height
+                          << " picture on "sv << owner->gpu_name;
+        }
+        report_timing(copy_started, encode_started);
+        return true;
+      }
+
+      /**
+       * Add the encode to the command buffer the staging path left open, then run the lot.
+       *
+       * One submission and one fence for the copy, the colour conversion, the wavelet transform and
+       * the entropy coding. That is what the codec asks for when the command buffer belongs to the
+       * caller, and it is why nothing here waits twice.
+       */
+      bool encode_recorded(std::size_t max_bytes) {
+        pyrowave_scaled_encode_info info = {};
+        info.view = staging->view();
+        // Both ends sRGB, which asks for the scale to happen in linear light and the matrix in gamma
+        // space, and skips a primary conversion nothing here needs.
+        info.input_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+        info.output_color_space = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+        // Eight bits an intermediate sample, dithered, for an eight bit stream. Sixteen is what HDR
+        // will want and it costs bandwidth this path does not need to spend yet.
+        info.intermediate_plane_format = VK_FORMAT_R8_UNORM;
+        info.ycbcr_chroma_midpoint = 0.5f;
+
+        budget = max_bytes;
+        const pyrowave_rate_control rate_control = {max_bytes};
+
+        // Held until the frame is gathered. The command buffer below is device state rather than
+        // session state, the submit inside end() goes to the queue every session shares, and
+        // packetizing reads what that submit wrote.
+        const std::lock_guard<std::recursive_mutex> lock {owner->device_lock};
+
+        pyrowave_device_set_command_buffer(owner->codec, staging->command_buffer());
+        const auto result = pyrowave_encoder_encode_gpu_scaled_synchronous(encoder, nullptr, nullptr,
+                                                                          &info, &rate_control);
+        // Cleared whatever happened. Leaving a command buffer set on the device would have the next
+        // call record into one that is closed, or freed.
+        pyrowave_device_set_command_buffer(owner->codec, VK_NULL_HANDLE);
+
+        if (result != PYROWAVE_SUCCESS) {
+          BOOST_LOG(warning) << "PyroWave: encode on the GPU failed (result "sv
+                             << static_cast<int>(result) << ')';
+          staging->abandon();
+          return false;
+        }
+        if (!staging->end()) {
+          return false;
+        }
+        return collect_frame();
+      }
+
+      /**
+       * Where the host's time actually goes, once every few hundred frames.
+       *
+       * Kept in the same two numbers whichever path produced the frame, because comparing them is
+       * the point: the first is what the host spends getting the picture into a form the codec can
+       * read, and the second is the codec.
+       */
+      void report_timing(std::chrono::steady_clock::time_point convert_started,
+                         std::chrono::steady_clock::time_point encode_started) {
+        const auto finished = std::chrono::steady_clock::now();
+        const auto to_ms = [](auto from, auto to) {
+          return std::chrono::duration<double, std::milli>(to - from).count();
+        };
+        convert_ms_total += to_ms(convert_started, encode_started);
+        encode_ms_total += to_ms(encode_started, finished);
+
+        // Once early, so a session says what it costs, then rarely, so a long one can show drift
+        // without filling the log. Five seconds in and every five minutes after, at sixty frames a
+        // second.
+        ++timed_frames;
+        if (timed_frames == 300 || timed_frames % 18000 == 0) {
+          BOOST_LOG(info) << "PyroWave: over "sv << timed_frames << " frames, "sv
+                          << (gpu == gpu_e::yes ? "the copy to the GPU "sv : "colour conversion "sv)
+                          << (convert_ms_total / timed_frames) << " ms and encode "sv
+                          << (encode_ms_total / timed_frames) << " ms a frame"sv;
+        }
       }
 
       bool encode(const uint8_t *y, const uint8_t *u, const uint8_t *v, std::size_t max_bytes) override {
@@ -429,10 +594,31 @@ namespace pyrowave_encode {
 
       bool encode_retained(std::size_t max_bytes) override {
         frame.clear();
+
+        // On the GPU the picture is already where the codec reads from and already in the layout it
+        // reads in, so a repeat records the encode and nothing else. There is no falling back to the
+        // planes here: on this path they were never filled, and encoding them would send a black
+        // frame rather than the picture again.
+        if (gpu == gpu_e::yes) {
+          if (!staging || !staging->has_picture() || !staging->begin_retained()) {
+            return false;
+          }
+          const auto started = std::chrono::steady_clock::now();
+          if (!encode_recorded(max_bytes)) {
+            return false;
+          }
+          report_timing(started, started);
+          return true;
+        }
+
         if (planes[0].empty() || planes[1].empty() || planes[2].empty()) {
           return false;
         }
         return encode(planes[0].data(), planes[1].data(), planes[2].data(), max_bytes);
+      }
+
+      bool uses_gpu_input() const override {
+        return gpu == gpu_e::yes;
       }
 
       const std::vector<uint8_t> &bitstream() const override {
@@ -443,6 +629,16 @@ namespace pyrowave_encode {
       /// Above the 16380 bytes a single coded block can reach, so every packet fits inside it.
       static constexpr std::size_t reference_boundary = 16384;
 
+      /// Which path this session settled on, decided by trying rather than by guessing.
+      enum class gpu_e {
+        unknown,
+        yes,
+        no,
+      };
+
+      const vk_device_t *owner = nullptr;
+      std::unique_ptr<upload_t> staging;
+      gpu_e gpu = gpu_e::no;
       pyrowave_encoder encoder = nullptr;
       int width = 0;
       int height = 0;
@@ -481,10 +677,11 @@ namespace pyrowave_encode {
   }
 
   std::unique_ptr<session_t> make_session(int width, int height, chroma_e chroma) {
-    auto device = shared_device();
-    if (!device) {
+    auto *owner = shared_vulkan();
+    if (!owner) {
       return nullptr;
     }
+    auto device = owner->codec;
 
     // Only 4:2:0 has half a chroma sample to lose, and the library refuses an odd extent rather
     // than rounding one for us. 4:4:4 has a chroma sample per pixel and does not care.
@@ -511,7 +708,7 @@ namespace pyrowave_encode {
       return nullptr;
     }
 
-    return std::make_unique<pyrowave_session_t>(encoder, width, height, chroma);
+    return std::make_unique<pyrowave_session_t>(*owner, encoder, width, height, chroma);
   }
 
 }  // namespace pyrowave_encode

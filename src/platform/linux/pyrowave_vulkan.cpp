@@ -186,6 +186,15 @@ namespace pyrowave_encode {
       return VK_QUEUE_FAMILY_IGNORED;
     }
 
+    /// What the codec calls before it submits for itself, and after.
+    void lock_device(void *userdata) {
+      static_cast<vk_device_t *>(userdata)->device_lock.lock();
+    }
+
+    void unlock_device(void *userdata) {
+      static_cast<vk_device_t *>(userdata)->device_lock.unlock();
+    }
+
   }  // namespace
 
   PFN_vkVoidFunction vk_device_t::instance_fn(const char *name) const {
@@ -366,9 +375,13 @@ namespace pyrowave_encode {
     codec_info.queue_info = &lent_queue;
     codec_info.queue_info_count = 1;
 
-    // No locking callbacks. The codec's own header offers a third way out of queue synchronisation,
-    // which is that it only submits inside its own entry points, and Polaris calls those from one
-    // thread per session with its own queue.
+    // The queue is the one thing here that two sessions share, and Vulkan says a queue is
+    // submitted to from one thread at a time. The codec offers to call these around its own
+    // submissions, so it gets the same lock the upload path takes.
+    codec_info.queue_lock_callback = lock_device;
+    codec_info.queue_unlock_callback = unlock_device;
+    codec_info.userdata = this;
+
     const auto codec_result = pyrowave_create_device(&codec_info, &codec);
     if (codec_result != PYROWAVE_SUCCESS || !codec) {
       BOOST_LOG(warning) << "PyroWave: the codec refused a borrowed device (result "sv
