@@ -11,6 +11,10 @@
 
 #include <filesystem>
 #include <fstream>
+#ifndef _WIN32
+  #include <sys/stat.h>
+  #include <unistd.h>
+#endif
 #include <iterator>
 #include <string>
 #include <unordered_map>
@@ -316,3 +320,72 @@ TEST(ConfigNewInstallTests, OnlyTheFileCreationWritesTheNewInstallDefault) {
   const std::string_view call = "cfg_file << new_install_config(";
   EXPECT_EQ(source.find("new_install_config(", use + call.size()), std::string::npos);
 }
+
+#ifndef _WIN32
+namespace {
+  // A configuration file in a directory of its own, removed with the directory.
+  struct config_file_mode_fixture_t {
+    std::filesystem::path directory;
+    std::filesystem::path file;
+
+    explicit config_file_mode_fixture_t(mode_t mode) {
+      auto pattern = (std::filesystem::temp_directory_path() / "polaris-config-mode-XXXXXX").string();
+      directory = ::mkdtemp(pattern.data());
+      file = directory / "polaris.conf";
+      std::ofstream {file} << "encoder = vaapi\n";
+      std::filesystem::permissions(file, static_cast<std::filesystem::perms>(mode));
+    }
+
+    ~config_file_mode_fixture_t() {
+      std::error_code ignored;
+      std::filesystem::remove_all(directory, ignored);
+    }
+
+    mode_t mode() const {
+      struct stat metadata {};
+      ::lstat(file.c_str(), &metadata);
+      return metadata.st_mode & 07777;
+    }
+  };
+}  // namespace
+
+TEST(ConfigFileModeTests, GroupWritableFileLosesOnlyItsWriteBitsAndBecomesSavable) {
+  // umask 002 creates the file 0664 (#769); the settings store refuses it until then.
+  config_file_mode_fixture_t fixture {0664};
+  EXPECT_EQ(private_state_file::read_secure(fixture.file, 4096, true, false).status,
+            private_state_file::read_status_e::rejected);
+
+  EXPECT_TRUE(config::restrict_config_file_mode(fixture.file));
+
+  EXPECT_EQ(fixture.mode(), 0644u);
+  const auto read = private_state_file::read_secure(fixture.file, 4096, true, false);
+  EXPECT_EQ(read.status, private_state_file::read_status_e::ok);
+  EXPECT_EQ(read.payload, "encoder = vaapi\n");
+}
+
+TEST(ConfigFileModeTests, OtherWritableFileLosesBothWriteBits) {
+  config_file_mode_fixture_t fixture {0666};
+  EXPECT_TRUE(config::restrict_config_file_mode(fixture.file));
+  EXPECT_EQ(fixture.mode(), 0644u);
+}
+
+TEST(ConfigFileModeTests, PrivateFileIsLeftAlone) {
+  config_file_mode_fixture_t fixture {0600};
+  EXPECT_TRUE(config::restrict_config_file_mode(fixture.file));
+  EXPECT_EQ(fixture.mode(), 0600u);
+}
+
+TEST(ConfigFileModeTests, MissingFileIsNotAFailure) {
+  config_file_mode_fixture_t fixture {0600};
+  EXPECT_TRUE(config::restrict_config_file_mode(fixture.directory / "absent.conf"));
+}
+
+TEST(ConfigFileModeTests, SymlinkIsNotFollowed) {
+  config_file_mode_fixture_t fixture {0664};
+  const auto link = fixture.directory / "linked.conf";
+  std::filesystem::create_symlink(fixture.file, link);
+
+  EXPECT_TRUE(config::restrict_config_file_mode(link));
+  EXPECT_EQ(fixture.mode(), 0664u);
+}
+#endif

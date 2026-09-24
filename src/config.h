@@ -8,6 +8,7 @@
 // standard includes
 #include <bitset>
 #include <chrono>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -506,6 +507,16 @@ namespace config {
    * @param vars Parsed variables; the AI keys are consumed, as apply_config consumes them.
    */
   video_t::ai_optimizer_t ai_optimizer_settings(std::unordered_map<std::string, std::string> &vars);
+
+  /**
+   * @brief Take group and other write access away from the configuration file, which the
+   *        settings store refuses to save into.
+   * @details Only a regular file this process owns is changed, and only its write bits; a
+   *          symlink, another user's file or a missing file is left as it is.
+   * @param path The configuration file.
+   * @return False when the file needed restricting and could not be, which is logged.
+   */
+  bool restrict_config_file_mode(const std::filesystem::path &path);
 
   /**
    * @brief The contents a new install's configuration file starts with.
