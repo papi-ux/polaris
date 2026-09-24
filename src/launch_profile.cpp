@@ -558,7 +558,13 @@ namespace launch_profile {
       // The curated record says the device cannot do HDR and the device itself says it can.
       // hdr_capable defaults to false and stays there until somebody edits the file by hand,
       // while the client measured its own panel, so the client wins.
-      add_field(result.fields, "hdr", result.hdr, "client_reported_capability",
+      //
+      // The source is the same word the refusals beside it use, because a client checks that field
+      // against a list of sources it knows and throws away the whole profile over one it does not.
+      // This branch had never run, so no client had ever seen a name of its own for it, and the first
+      // time it did run every one of them stopped being able to launch anything. What happened here
+      // rather than what category it falls in is the reason code's job, and that is unchanged.
+      add_field(result.fields, "hdr", result.hdr, "capability_validation",
                 "paired_device_hdr_reported_by_client", resolved_hdr_locked, false);
     } else if (hdr_from_explicit_lock) {
       add_field(result.fields, "hdr", result.hdr,

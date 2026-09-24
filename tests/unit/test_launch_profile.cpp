@@ -242,7 +242,10 @@ TEST(LaunchProfileTests, AClientReportingHdr10OutranksAnUncorrectedDeviceRecord)
 
   EXPECT_TRUE(resolved.hdr);
   const auto &field = resolved.fields.at("hdr");
-  EXPECT_EQ(field.at("source"), "client_reported_capability");
+  // A source name a client already knows. It reads this field against a list of the sources it
+  // understands and discards the entire profile over one it does not, so a new name here is a client
+  // that can no longer launch anything. The reason code carries what actually happened.
+  EXPECT_EQ(field.at("source"), "capability_validation");
   EXPECT_EQ(field.at("reason_code"), "paired_device_hdr_reported_by_client");
   // Not a normalization: nothing was taken away from what the client asked for.
   EXPECT_FALSE(field.at("normalized").get<bool>());
