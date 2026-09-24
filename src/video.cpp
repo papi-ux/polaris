@@ -1787,9 +1787,49 @@ namespace video {
    */
   class pyrowave_encode_session_t: public encode_session_t {
   public:
-    pyrowave_encode_session_t(std::unique_ptr<pyrowave_encode::session_t> session, std::size_t max_frame_bytes):
+    pyrowave_encode_session_t(std::unique_ptr<pyrowave_encode::session_t> session, int framerate, int bitrate_kbps):
         session {std::move(session)},
-        max_frame_bytes {max_frame_bytes} {
+        framerate {framerate > 0 ? framerate : 60},
+        max_frame_bytes {frame_budget(bitrate_kbps, framerate > 0 ? framerate : 60)} {
+    }
+
+    /**
+     * The bytes one frame may occupy at a bitrate, which is the whole of this codec's rate control.
+     *
+     * Every frame stands alone, so there is no group of pictures to spend a budget across and no
+     * averaging window to catch up in: a frame gets what it gets.
+     */
+    static std::size_t frame_budget(int bitrate_kbps, int framerate) {
+      const auto bits_per_frame = static_cast<std::size_t>(std::max(bitrate_kbps, 1)) * 1000 / static_cast<std::size_t>(framerate);
+      return std::max<std::size_t>(bits_per_frame / 8, 4096);
+    }
+
+    /**
+     * Yes, and more cheaply than any other encoder here.
+     *
+     * Changing an inter-frame encoder's bitrate mid-stream means reopening it or waiting out a
+     * group of pictures, because the frames already sent are what the next ones are predicted from.
+     * This codec predicts nothing. The budget is read fresh for each frame, so a new one takes
+     * effect on the very next frame with no keyframe to request and nothing to rebuild.
+     */
+    bool supports_runtime_bitrate_update() const override {
+      return true;
+    }
+
+    bitrate_update_e update_bitrate(int new_bitrate_kbps) override {
+      if (new_bitrate_kbps <= 0) {
+        return bitrate_update_e::rejected;
+      }
+
+      const auto budget = frame_budget(new_bitrate_kbps, framerate);
+      if (budget == max_frame_bytes) {
+        return bitrate_update_e::applied;
+      }
+
+      BOOST_LOG(debug) << "PyroWave: "sv << new_bitrate_kbps << " kbps is "sv << budget
+                       << " bytes a frame, from "sv << max_frame_bytes;
+      max_frame_bytes = budget;
+      return bitrate_update_e::applied;
     }
 
     int convert(frame_t &frame) override {
@@ -1823,6 +1863,7 @@ namespace video {
 
   private:
     std::unique_ptr<pyrowave_encode::session_t> session;
+    int framerate = 60;
     std::size_t max_frame_bytes = 0;
   };
 #endif
@@ -3930,16 +3971,14 @@ namespace video {
         return nullptr;
       }
 
-      // The budget for one frame, from the bitrate the session negotiated. PyroWave's rate control
-      // is exact rather than approximate, so this is a ceiling it meets rather than aims at, and a
-      // frame is the only unit it has: there is no group of pictures to spend across.
+      // The session works out its own per frame budget, because it has to do it again every time
+      // adaptive bitrate moves the target.
       const auto fps = config.framerate > 0 ? config.framerate : 60;
-      const auto bits_per_frame = static_cast<std::size_t>(std::max(config.bitrate, 1)) * 1000 / static_cast<std::size_t>(fps);
-      const auto max_frame_bytes = std::max<std::size_t>(bits_per_frame / 8, 4096);
-
       BOOST_LOG(info) << "PyroWave: "sv << config.width << 'x' << config.height << " at "sv << fps
-                      << " fps, up to "sv << max_frame_bytes << " bytes a frame"sv;
-      session = std::make_unique<pyrowave_encode_session_t>(std::move(pyrowave_session), max_frame_bytes);
+                      << " fps, up to "sv
+                      << pyrowave_encode_session_t::frame_budget(config.bitrate, fps)
+                      << " bytes a frame"sv;
+      session = std::make_unique<pyrowave_encode_session_t>(std::move(pyrowave_session), fps, config.bitrate);
       session->capture_display_owner = disp;
       return session;
     }

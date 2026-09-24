@@ -2984,6 +2984,8 @@ namespace nvhttp {
           return "hevc"sv;
         case 2:
           return "av1"sv;
+        case 3:
+          return "pyrowave"sv;
         default:
           return "h264"sv;
       }
