@@ -5633,6 +5633,42 @@ namespace confighttp {
       }
       output_tree["config_response_only_keys"] = std::move(response_only_keys);
     }
+    // Read-only codec capability snapshot for the web UI encoder tabs. Mirrors
+    // what Nova is advertised: post-probe modes are 2 (SDR) or 3 (HDR), so a
+    // mode >= 2 means the codec passed validation on this host. When a codec is
+    // not supported, *_reason tells the panel why: "disabled_in_config" when the
+    // user switched it off, "not_available_on_encoder" once the probe found the
+    // encoder cannot do it, or null while probing has not finished yet.
+    {
+      const auto codec_state = video::advertised_codec_capability_state();
+      const bool ready = video::advertised_codec_capability_state_ready();
+      // Highest Vulkan quality level the probed driver exposes for every usable
+      // codec (maxQualityLevels-1), or null when not on a live-probed Vulkan encoder.
+      const int vk_quality_max = video::advertised_vulkan_quality_max();
+      const auto off_reason = [ready](int configured_mode, int effective_mode) -> nlohmann::json {
+        if (effective_mode >= 2) {
+          return nlohmann::json {};
+        }
+        if (configured_mode == 1) {
+          return "disabled_in_config"s;
+        }
+        if (!ready) {
+          return nlohmann::json {};
+        }
+        return "not_available_on_encoder"s;
+      };
+      output_tree["encoder_codec_support"] = nlohmann::json {
+        {"ready", ready},
+        {"encoder", video::active_encoder_name()},
+        {"hevc_supported", codec_state.hevc_mode >= 2},
+        {"av1_supported", codec_state.av1_mode >= 2},
+        {"hevc_hdr", codec_state.hevc_mode == 3},
+        {"av1_hdr", codec_state.av1_mode == 3},
+        {"hevc_reason", off_reason(config::video.hevc_mode, codec_state.hevc_mode)},
+        {"av1_reason", off_reason(config::video.av1_mode, codec_state.av1_mode)},
+        {"vk_quality_max", vk_quality_max >= 0 ? nlohmann::json(vk_quality_max) : nlohmann::json(nullptr)},
+      };
+    }
 #ifdef _WIN32
     output_tree["vdisplayStatus"] = (int)proc::vDisplayDriverStatus;
 #endif
@@ -8195,7 +8231,7 @@ namespace confighttp {
   /**
    * @brief Create a virtual display from the web UI.
    *
-   * Accepts JSON body: { "width": 1920, "height": 1080, "fps": 60 }
+   * Accepts JSON body: { "width": 1920, "height": 1080, "fps": 60, "scale": 1 }
    * Returns the created display info or error.
    */
   void createVDisplay(resp_https_t response, req_https_t request) {
@@ -8215,6 +8251,9 @@ namespace confighttp {
 
     // Parse request body
     int width = 1920, height = 1080, fps = 60;
+    // Pixels per point, so this hook can make the same screen a device would ask for rather than
+    // only the one shape the UI used to be able to test.
+    double scale = 1.0;
     try {
       std::string body;
       auto ss = std::make_shared<std::stringstream>();
@@ -8225,12 +8264,16 @@ namespace confighttp {
         if (j.contains("width")) width = j["width"].get<int>();
         if (j.contains("height")) height = j["height"].get<int>();
         if (j.contains("fps")) fps = j["fps"].get<int>();
+        if (j.contains("scale") && j["scale"].is_number()) scale = j["scale"].get<double>();
       }
     } catch (...) {
       // Use defaults
     }
 
-    auto result = virtual_display::create(width, height, fps);
+    if (scale < 1.0 || scale > 4.0) {
+      scale = 1.0;
+    }
+    auto result = virtual_display::create(width, height, fps, scale);
     if (result.has_value()) {
       ui_vdisplay = result;
       output_tree["status"] = true;
@@ -8238,6 +8281,7 @@ namespace confighttp {
       output_tree["width"] = result->width;
       output_tree["height"] = result->height;
       output_tree["fps"] = result->fps;
+      output_tree["scale"] = result->scale;
       output_tree["backend"] = virtual_display::backend_name(result->backend);
     } else {
       output_tree["status"] = false;

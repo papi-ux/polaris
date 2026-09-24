@@ -5118,11 +5118,18 @@ namespace proc {
     if (launch_session.mirror_desktop) {
       return false;
     }
-    if (!launch_session.stream_mode.empty()) {
-      return launch_session.stream_mode == stream_display_policy::k_desktop_takeover;
+    const auto selection = launch_session.stream_mode.empty() ?
+      std::string {stream_display_policy::configured_selection()} :
+      launch_session.stream_mode;
+    // Takeover has always won here, whether the client named it or the host defaults to it.
+    if (selection == stream_display_policy::k_desktop_takeover) {
+      return true;
     }
-    return stream_display_policy::configured_selection() ==
-           stream_display_policy::k_desktop_takeover;
+    // A host virtual display yields only to a client that named it. This has to answer exactly as
+    // app_desktop_mirror_applies_for_mode does on the HTTP side: the two disagreeing is how a launch
+    // comes to promise one topology and then deliver another.
+    return launch_session.client_selected_topology &&
+           stream_display_policy::desktop_mirror_yields_to_selection(selection);
   }
 
   bool app_desktop_mirror_applies(
@@ -7732,6 +7739,21 @@ namespace proc {
         config::video.output_name = client_profile->output_name;
       }
 
+      if (!client_profile->virtual_display_mode.empty()) {
+        // Only the display this launch may create, never the stream. They were the same number
+        // until now, which is why a device streaming 1920x1080 to save bandwidth was handed a
+        // 16:9 screen to put a 16:10 desktop on.
+        launch_session->virtual_display_mode = client_profile->virtual_display_mode;
+        BOOST_LOG(info) << "Client profile: virtual displays for this client are "sv
+                        << client_profile->virtual_display_mode;
+      }
+
+      if (client_profile->virtual_display_scale > 0.0) {
+        launch_session->virtual_display_scale = client_profile->virtual_display_scale;
+        BOOST_LOG(info) << "Client profile: virtual displays for this client are made at scale "sv
+                        << client_profile->virtual_display_scale;
+      }
+
       if (client_profile->color_range.has_value()) {
         optimization_locks.color_range = true;
         resolved_optimization.color_range = client_profile->color_range;
@@ -8323,7 +8345,64 @@ namespace proc {
           target_fps *= 2;
         }
 
-        auto vdisplay = virtual_display::create(render_width, render_height, target_fps);
+        // The screen this host adds is the device's to shape; the stream stays the device's to ask
+        // for. They were the same number until now, which is why a tablet that streams 1920x1080 to
+        // save bandwidth was handed a 16:9 screen to put a 16:10 desktop on, and why a host with one
+        // wide monitor had no way to be given a screen shaped like the thing looking at it.
+        //
+        // An unusable value is ignored rather than fatal: the stream size is always an answer, and
+        // refusing the launch over a display preference would be worse than the wrong shape.
+        int created_width = render_width;
+        int created_height = render_height;
+        int created_fps = target_fps;
+        if (!launch_session->virtual_display_mode.empty()) {
+          const auto &mode = launch_session->virtual_display_mode;
+          const auto first = mode.find('x');
+          const auto second = first == std::string::npos ? std::string::npos : mode.find('x', first + 1);
+          int mode_width = 0;
+          int mode_height = 0;
+          double mode_fps = 0.0;
+          bool mode_usable = false;
+          if (second != std::string::npos) {
+            // parse_decimal rather than std::stod: the latter reads the process locale, so a mode
+            // carrying a fractional rate would parse differently for a host started under a locale
+            // whose decimal separator is a comma. A source contract forbids it for that reason.
+            const auto parsed_fps = util::parse_decimal<double>(mode.substr(second + 1));
+            if (parsed_fps) {
+              try {
+                mode_width = std::stoi(mode.substr(0, first));
+                mode_height = std::stoi(mode.substr(first + 1, second - first - 1));
+                mode_fps = *parsed_fps;
+                mode_usable = mode_width > 0 && mode_height > 0;
+              } catch (const std::exception &) {
+                mode_usable = false;
+              }
+            }
+          }
+          if (mode_usable) {
+            created_width = mode_width;
+            created_height = mode_height;
+            if (mode_fps > 0.0) {
+              created_fps = static_cast<int>(mode_fps + 0.5);
+              if (config::video.double_refreshrate) {
+                created_fps *= 2;
+              }
+            }
+            BOOST_LOG(info) << "Virtual display: creating "sv << created_width << 'x' << created_height
+                            << '@' << created_fps << "Hz for this client; the stream stays "sv
+                            << render_width << 'x' << render_height;
+          } else {
+            BOOST_LOG(warning) << "Virtual display: ignoring unusable client display size ["sv
+                               << mode << "]; using the stream size"sv;
+          }
+        }
+
+        // The scale is the other half of the size question and the one that decides whether the
+        // desktop can be read. A panel's pixel count alone says nothing about how big it is.
+        const double created_scale = launch_session->virtual_display_scale > 0.0 ?
+                                       launch_session->virtual_display_scale :
+                                       1.0;
+        auto vdisplay = virtual_display::create(created_width, created_height, created_fps, created_scale);
 
         if (vdisplay.has_value()) {
           linux_vdisplay = std::move(vdisplay);
@@ -8342,8 +8421,8 @@ namespace proc {
           this->capture_generation.exact_display_name = this->display_name;
 
           BOOST_LOG(info) << "Virtual Display created: "sv << linux_vdisplay->output_name
-                          << " ("sv << render_width << "x"sv << render_height
-                          << "@"sv << target_fps << "Hz) via "sv
+                          << " ("sv << created_width << "x"sv << created_height
+                          << "@"sv << created_fps << "Hz) via "sv
                           << virtual_display::backend_name(linux_vdisplay->backend);
           // A KWin virtual screen carries no HDR. Record why, so an HDR request
           // that comes out SDR has an answer in the Doctor.

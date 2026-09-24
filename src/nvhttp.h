@@ -606,7 +606,8 @@ namespace nvhttp {
   nlohmann::json build_launch_mode_contract_for_tests(bool app_prefers_virtual_display,
                                                       const std::string &app_name,
                                                       bool host_virtual_display_available,
-                                                      bool host_prefers_headless);
+                                                      bool host_prefers_headless,
+                                                      bool app_mirrors_desktop = false);
 #if defined(__linux__)
   std::string accepted_session_stream_mode_for_tests(const std::string &requested);
   bool apply_stream_display_mode_selection_for_tests(

@@ -527,14 +527,24 @@ namespace nvhttp {
     bool app_desktop_mirror_applies_for_mode(
         const proc::ctx_t &app,
         bool explicit_mirror,
-        std::string_view requested_mode) {
+        std::string_view requested_mode,
+        bool client_selected_topology) {
       if (!app.desktop_mirror || explicit_mirror) {
         return app.desktop_mirror;
       }
       const auto effective_mode = requested_mode.empty() ?
         stream_display_policy::configured_selection() :
         lower_copy(std::string {requested_mode});
-      return effective_mode != stream_display_policy::k_desktop_takeover;
+      // Takeover has always won here, whether the client named it or the host defaults to it.
+      if (effective_mode == stream_display_policy::k_desktop_takeover) {
+        return false;
+      }
+      // A host virtual display yields only to a client that named it for this launch. A client that
+      // named nothing keeps the mirror it has always had, even on a host whose own default is a
+      // virtual display, which is what a stock Moonlight sends; so does the lower-precedence paired
+      // always-virtual preference, which is folded into the selection above rather than chosen here.
+      return !(client_selected_topology &&
+               stream_display_policy::desktop_mirror_yields_to_selection(effective_mode));
     }
 
   #if defined(__linux__)
@@ -592,7 +602,8 @@ namespace nvhttp {
         app_desktop_mirror_applies_for_mode(
           app,
           explicit_mirror,
-          session_stream_mode_requested(args)
+          session_stream_mode_requested(args),
+          !session_stream_mode_requested(args).empty()
         );
       bool private_stream_requested =
         proc::streaming_launch_requests_private_family(
@@ -635,7 +646,8 @@ namespace nvhttp {
         app_desktop_mirror_applies_for_mode(
           app,
           explicit_mirror,
-          session_stream_mode_requested(body)
+          session_stream_mode_requested(body),
+          !session_stream_mode_requested(body).empty()
         );
       bool private_stream_requested =
         proc::streaming_launch_requests_private_family(
@@ -997,7 +1009,8 @@ namespace nvhttp {
     nlohmann::json build_launch_mode_contract(bool app_prefers_virtual_display,
                                               std::string_view app_name,
                                               bool virtual_display_available,
-                                              bool prefers_headless) {
+                                              bool prefers_headless,
+                                              bool app_mirrors_desktop) {
       // preferred_mode reflects the per-game stored preference; recommended_mode reflects
       // the Polaris-supported launch mode clients should choose for this host right now.
       std::string preferred_mode;
@@ -1025,6 +1038,47 @@ namespace nvhttp {
       recommended_mode = preferred_mode;
 
       const bool steam_big_picture = boost::iequals(boost::trim_copy(std::string {app_name}), "Steam Big Picture");
+
+#ifdef __linux__
+      // An entry whose semantics are the desktop can only run where a desktop is. Private Stream,
+      // GPU-native and Gamescope all resolve back to a mirror, so advertising them asks someone to
+      // choose something that cannot happen and then quietly does something else. The honest set is
+      // the mirror, plus the two topologies that still show the real desktop when the host offers
+      // them. Answered here so the client's picker and the resolver agree before anyone presses Play.
+      if (app_mirrors_desktop) {
+        auto honest_modes = nlohmann::json::array();
+        honest_modes.push_back(std::string {stream_display_policy::k_desktop_display});
+        for (const auto &mode : allowed_modes) {
+          if (!mode.is_string()) {
+            continue;
+          }
+          const auto &value = mode.get_ref<const std::string &>();
+          if (value != stream_display_policy::k_desktop_display &&
+              stream_display_policy::desktop_mirror_yields_to_selection(value)) {
+            honest_modes.push_back(value);
+          }
+        }
+        allowed_modes = std::move(honest_modes);
+        preferred_mode = std::string {stream_display_policy::k_desktop_display};
+        recommended_mode = preferred_mode;
+        mode_reason =
+          "This entry streams the desktop itself, so it mirrors the host screen. Pick Host Virtual "
+          "Display to be given a screen of your own instead, when this host can add one.";
+        nlohmann::json launch_mode;
+        launch_mode["preferred_mode"] = preferred_mode;
+        launch_mode["recommended_mode"] = recommended_mode;
+        launch_mode["allowed_modes"] = std::move(allowed_modes);
+        launch_mode["mode_reason"] = mode_reason;
+        // This entry is the desktop, so mirroring it is its own answer rather than a preference
+        // inherited from however this host prefers to run games. A client that took the host's
+        // default here would open the desktop on a screen the host made for games, which is a
+        // reasonable thing to ask for and a surprising thing to be given without asking.
+        launch_mode["follows_host_default"] = false;
+        return launch_mode;
+      }
+#else
+      (void) app_mirrors_desktop;
+#endif
 
 #ifdef __linux__
       if (prefers_headless) {
@@ -1110,6 +1164,8 @@ namespace nvhttp {
       launch_mode["recommended_mode"] = recommended_mode;
       launch_mode["allowed_modes"] = std::move(allowed_modes);
       launch_mode["mode_reason"] = mode_reason;
+      // Everything else takes the host's configured display unless the player chose otherwise.
+      launch_mode["follows_host_default"] = true;
       return launch_mode;
     }
 
@@ -2101,6 +2157,17 @@ namespace nvhttp {
       desired["stream_display_mode_label"] = settings_metadata::stream_display_mode_label_for_selection(configured_mode);
       desired["stream_display_mode_reason"] = settings_metadata::stream_display_mode_reason_for_selection(configured_mode);
       desired["display_mode"] = client.display_mode;
+      // The screen this host adds for the client, which is not the mode it streams. Reported so a
+      // client can show what it set rather than guess, and blank when the stream size decides.
+      desired["virtual_display_mode"] = client_profiles::get_client_profile(client.name)
+                                          .transform([](const auto &profile) { return profile.virtual_display_mode; })
+                                          .value_or(std::string {});
+      // How many pixels that screen puts in a point. A 2560x1600 desktop at scale 1 is unreadable
+      // on a ten inch panel, and the client is the only thing that knows how big its glass is.
+      // Zero means nobody said, and the host makes it at scale 1 as it always has.
+      desired["virtual_display_scale"] = client_profiles::get_client_profile(client.name)
+                                           .transform([](const auto &profile) { return profile.virtual_display_scale; })
+                                           .value_or(0.0);
       desired["target_bitrate_kbps"] = client.target_bitrate_kbps;
       desired["ai_auto_quality_enabled"] = false;
       desired["adaptive_bitrate_enabled"] = adaptive_bitrate::is_enabled();
@@ -2633,12 +2700,14 @@ namespace nvhttp {
   nlohmann::json build_launch_mode_contract_for_tests(bool app_prefers_virtual_display,
                                                       const std::string &app_name,
                                                       bool host_virtual_display_available,
-                                                      bool host_prefers_headless) {
+                                                      bool host_prefers_headless,
+                                                      bool app_mirrors_desktop) {
     return build_launch_mode_contract(
       app_prefers_virtual_display,
       app_name,
       host_virtual_display_available,
-      host_prefers_headless
+      host_prefers_headless,
+      app_mirrors_desktop
     );
   }
 
@@ -3100,7 +3169,8 @@ namespace nvhttp {
         app.virtual_display,
         app.name,
         settings_metadata::host_virtual_display_available(),
-        host_prefers_headless()
+        host_prefers_headless(),
+        app.desktop_mirror
       );
     }
 
@@ -5007,6 +5077,7 @@ namespace nvhttp {
           requested_mode : accepted_session_stream_mode(requested_mode, reject_reason);
         if (!accepted.empty()) {
           launch_session->stream_mode = accepted;
+          launch_session->client_selected_topology = true;
           BOOST_LOG(info) << "Session stream mode override requested: ["sv << accepted << ']';
         } else if (launch_session->resolved_profile_from_client) {
           BOOST_LOG(warning) << "Rejecting exact resolved launch streamMode ["sv
@@ -8755,6 +8826,59 @@ namespace nvhttp {
             display_mode = body["display_mode"].get<std::string>();
           }
 
+          // The screen to add, which is not the mode to stream. A device whose panel is 2560x1600
+          // wants a desktop that shape even when it streams 1920x1080 to save bandwidth, and tying
+          // the two together is what produced a wrongly shaped screen in the first place.
+          std::string virtual_display_mode =
+            client_profiles::get_client_profile(named_cert_p->name)
+              .transform([](const auto &profile) { return profile.virtual_display_mode; })
+              .value_or(std::string {});
+          if (body.value("clear_virtual_display_mode", false)) {
+            virtual_display_mode.clear();
+          } else if (body.contains("virtual_display_mode")) {
+            if (!body["virtual_display_mode"].is_string()) {
+              write_json({{"error", "virtual_display_mode must be a string"}}, SimpleWeb::StatusCode::client_error_bad_request);
+              return;
+            }
+            virtual_display_mode = body["virtual_display_mode"].get<std::string>();
+          }
+          if (!virtual_display_mode.empty()) {
+            int virtual_width = 0;
+            int virtual_height = 0;
+            double virtual_fps = 0.0;
+            if (!parse_stream_policy_display_mode(virtual_display_mode, virtual_width, virtual_height, virtual_fps)) {
+              write_json(
+                {{"error", "virtual_display_mode must use WIDTHxHEIGHTxFPS, for example 2560x1600x60"}},
+                SimpleWeb::StatusCode::client_error_bad_request
+              );
+              return;
+            }
+          }
+
+          // The scale for that screen. Bounded because this ends up as a compositor argument: below
+          // 1 it would make a desktop larger than the screen it is on, and past 4 it would be a few
+          // enormous points. Both are ways to hand someone a screen they cannot use.
+          double virtual_display_scale =
+            client_profiles::get_client_profile(named_cert_p->name)
+              .transform([](const auto &profile) { return profile.virtual_display_scale; })
+              .value_or(0.0);
+          if (body.value("clear_virtual_display_scale", false)) {
+            virtual_display_scale = 0.0;
+          } else if (body.contains("virtual_display_scale")) {
+            if (!body["virtual_display_scale"].is_number()) {
+              write_json({{"error", "virtual_display_scale must be a number"}}, SimpleWeb::StatusCode::client_error_bad_request);
+              return;
+            }
+            virtual_display_scale = body["virtual_display_scale"].get<double>();
+            if (virtual_display_scale != 0.0 && (virtual_display_scale < 1.0 || virtual_display_scale > 4.0)) {
+              write_json(
+                {{"error", "virtual_display_scale must be between 1 and 4, or 0 to let the host decide"}},
+                SimpleWeb::StatusCode::client_error_bad_request
+              );
+              return;
+            }
+          }
+
           int width = 0;
           int height = 0;
           double fps = 0.0;
@@ -8911,6 +9035,17 @@ namespace nvhttp {
             }
             paired_device_updated = true;
           }
+          // Kept in the per-device display profile rather than the pairing record, beside the
+          // output name, because it answers the same kind of question: what this device wants to
+          // look at, not who it is.
+          if (body.contains("virtual_display_mode") || body.value("clear_virtual_display_mode", false) ||
+              body.contains("virtual_display_scale") || body.value("clear_virtual_display_scale", false)) {
+            auto profile = client_profiles::get_client_profile(named_cert_p->name)
+                             .value_or(client_profiles::client_profile_t {});
+            profile.virtual_display_mode = virtual_display_mode;
+            profile.virtual_display_scale = virtual_display_scale;
+            client_profiles::save_client_profile(named_cert_p->name, profile);
+          }
           if (body.contains("target_bitrate_kbps") && target_bitrate_kbps > 0) {
             // A paired client setting is an explicit newer operator choice.
             // Apply it exactly to the live target instead of preserving an
@@ -9054,10 +9189,19 @@ namespace nvhttp {
       const bool has_desktop = std::any_of(apps.begin(), apps.end(), [](const auto &app) {
         return app.name == "Desktop";
       });
+      // The Virtual Display entry exists to be the one thing Desktop could not be: a screen of your
+      // own rather than the one on the desk. Desktop can be either now, and this catalog serves a
+      // client with a picker, so a second tile for the same answer is a choice made twice. It stays
+      // in /applist, which is the only route a client without a picker has to a virtual screen, and
+      // it stays here when the host cannot add a screen, so nobody loses the tile and the choice at
+      // once.
+      const bool desktop_offers_its_own_screen =
+        has_desktop && settings_metadata::host_virtual_display_available();
 
       int idx = 0;
       for (auto &app : apps) {
         if (has_desktop && proc::is_stock_low_res_desktop(app)) continue;
+        if (desktop_offers_its_own_screen && app.uuid == VIRTUAL_DISPLAY_UUID) continue;
 
         // Search filter
         if (!search_query.empty()) {
@@ -11384,7 +11528,8 @@ namespace nvhttp {
         (optimization_app && app_desktop_mirror_applies_for_mode(
           *optimization_app,
           mirror_desktop_requested,
-          requested_selection
+          requested_selection,
+          !requested_topology.empty()
         ));
       auto effective_selection = stream_display_policy::effective_session_selection_for_launch(
         requested_selection,

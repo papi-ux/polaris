@@ -1046,3 +1046,34 @@ TEST(VideoDisplaySelectionTests, ActualRefreshWrapperDoesNotTurnMissingOrAmbiguo
   EXPECT_EQ(video::refresh_display_selection_for_tests(before, 0, "", {before[1], before[0]}), 1);
 #endif
 }
+
+TEST(VideoVulkanRcModeOptionTests, AutoMapsToNamedConstant) {
+  // FFmpeg's Vulkan auto sentinel is FF_VK_RC_MODE_AUTO (0xFFFFFFFF), which does not fit in an int option;
+  // a raw zero would select the driver's default rate control instead.
+  EXPECT_EQ(video::vulkan_rc_mode_option(0), "auto");
+}
+
+TEST(VideoVulkanRcModeOptionTests, ExplicitModesPassThroughAsDriverFlags) {
+  EXPECT_EQ(video::vulkan_rc_mode_option(1), "1");
+  EXPECT_EQ(video::vulkan_rc_mode_option(2), "2");
+  EXPECT_EQ(video::vulkan_rc_mode_option(4), "4");
+}
+
+TEST(VideoVulkanQualityClampTests, UnknownDriverCountPassesThroughUnchanged) {
+  // -1 means no live probe has reported a count yet; FFmpeg validates the level at session open.
+  EXPECT_EQ(video::vulkan_quality_clamp(0, -1), 0);
+  EXPECT_EQ(video::vulkan_quality_clamp(3, -1), 3);
+}
+
+TEST(VideoVulkanQualityClampTests, ClampsToDriverReportedMaximum) {
+  // Valid levels run 0..count-1; FFmpeg's own guard lets level == count through.
+  EXPECT_EQ(video::vulkan_quality_clamp(2, 4), 2);
+  EXPECT_EQ(video::vulkan_quality_clamp(3, 4), 3);
+  EXPECT_EQ(video::vulkan_quality_clamp(4, 4), 3);
+  EXPECT_EQ(video::vulkan_quality_clamp(9, 1), 0);
+}
+
+TEST(VideoVulkanQualityClampTests, NegativeConfiguredValueFloorsAtZero) {
+  EXPECT_EQ(video::vulkan_quality_clamp(-1, 4), 0);
+  EXPECT_EQ(video::vulkan_quality_clamp(-5, -1), 0);
+}

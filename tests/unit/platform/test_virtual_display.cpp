@@ -565,9 +565,21 @@ TEST(VirtualDisplayKwinTests, KscreenArgumentsForModeAndPlacement) {
     (args_t {"output.Virtual-polaris-0.mode.2560x1440@120"})
   );
   EXPECT_EQ(
-    virtual_display::kwin_placement_args("Virtual-polaris-0", 7680),
+    virtual_display::kwin_placement_args("Virtual-polaris-0", 7680, 1.0),
     (args_t {"output.Virtual-polaris-0.scale.1", "output.Virtual-polaris-0.position.7680,0"})
   );
+  // The whole point of the scale: 2560x1600 of pixels laid out as 1280x800 of desktop, which is
+  // what a ten inch panel needs before the thing on it can be read at arm's length.
+  EXPECT_EQ(
+    virtual_display::kwin_placement_args("Virtual-polaris-0", 7680, 2.0),
+    (args_t {"output.Virtual-polaris-0.scale.2", "output.Virtual-polaris-0.position.7680,0"})
+  );
+  // A fractional scale keeps its point and never a comma: kscreen-doctor rejects 1,5, and a host
+  // started under a locale that writes decimals that way would otherwise fail only there.
+  EXPECT_EQ(virtual_display::kwin_scale_value(1.5), "1.5");
+  EXPECT_EQ(virtual_display::kwin_scale_value(2.0), "2");
+  // Nobody said, so the screen is made the way every earlier release made it.
+  EXPECT_EQ(virtual_display::kwin_scale_value(0.0), "1");
 }
 
 namespace {
@@ -751,10 +763,17 @@ TEST(VirtualDisplayKwinTests, ModeAndPlacementReadback) {
   screen.x = 7680;
   screen.y = 0;
   screen.priority = 2;
-  EXPECT_TRUE(virtual_display::kwin_placement_matches(screen, 7680));
-  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 0));
+  EXPECT_TRUE(virtual_display::kwin_placement_matches(screen, 7680, 1.0));
+  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 0, 1.0));
   screen.scale = 0.5;
-  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 7680));
+  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 7680, 1.0));
+
+  // The check is against the scale that was asked for, not against 1. Verifying a scaled screen
+  // by the old rule would report every one of them as a failed placement.
+  screen.scale = 2.0;
+  EXPECT_TRUE(virtual_display::kwin_placement_matches(screen, 7680, 2.0));
+  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 7680, 1.0));
+  EXPECT_FALSE(virtual_display::kwin_placement_matches(screen, 7680, 1.5));
 }
 
 TEST(VirtualDisplayKwinTests, WindowScriptMovesApplicationWindowsOntoTheScreen) {

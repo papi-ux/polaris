@@ -55,6 +55,27 @@ namespace rtsp_stream {
 
     std::string device_name;
     std::string unique_id;
+    /**
+     * @brief The size of display to create for this device, as WIDTHxHEIGHTxFPS; empty for the
+     *        stream size, which is what every release before this one used.
+     */
+    std::string virtual_display_mode;
+    /**
+     * @brief How many pixels that created screen puts in a point; 0 means the host decides.
+     *
+     * A desktop is read at arm's length rather than watched, so a screen made at the pixel count of
+     * a ten inch panel is unusable at scale 1. Only the device knows how big its glass is.
+     */
+    double virtual_display_scale = 0.0;
+    /**
+     * @brief Whether this client named a topology for this launch and the host accepted it.
+     *
+     * Not the same as stream_mode being set: a paired always-virtual preference is normalised into
+     * stream_mode for clients that did not lock their display mode, and that is a host-side default
+     * rather than a choice. Only a client that asked can move an app off its desktop-mirror
+     * semantics, so a stock Moonlight keeps the behaviour it has always had.
+     */
+    bool client_selected_topology = false;
     /// Controller type this client declared last time it streamed, so the pad created
     /// before the app starts can match. Zero when nothing has been observed yet.
     int controller_type = 0;

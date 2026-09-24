@@ -106,6 +106,7 @@ namespace virtual_display {
     int width = 0;               ///< Horizontal resolution
     int height = 0;              ///< Vertical resolution
     int fps = 0;                 ///< Refresh rate (Hz)
+    double scale = 1.0;          ///< Pixels per point, so a small panel gets a readable desktop
     bool active = false;         ///< Whether the display is currently active
     backend_e backend = backend_e::NONE;  ///< Which backend created this display
 
@@ -229,8 +230,11 @@ namespace virtual_display {
   /** @brief kscreen-doctor arguments that select a mode by name. */
   std::vector<std::string> kwin_mode_args(std::string_view output, int width, int height, int hz);
 
-  /** @brief kscreen-doctor arguments that put a new KWin screen at scale 1 at (x, 0). */
-  std::vector<std::string> kwin_placement_args(std::string_view output, int x);
+  /** @brief The scale as kscreen-doctor spells it: 1, 1.5, 2, and never a comma. */
+  std::string kwin_scale_value(double scale);
+
+  /** @brief kscreen-doctor arguments that put a new KWin screen at [scale] at (x, 0). */
+  std::vector<std::string> kwin_placement_args(std::string_view output, int x, double scale);
 
   /**
    * @brief kscreen-doctor arguments that put every other enabled screen back where it was.
@@ -344,8 +348,9 @@ namespace virtual_display {
     std::optional<backend_e> last_backend;
     std::string preference;  ///< The configured backend; "auto" when unset
     std::string kwin_reason;  ///< Why a KWin screen cannot be created, from the last probe
-    std::string scaled_screen;  ///< A live stream screen KWin runs at a scale other than 1
-    double scaled_screen_scale = 1.0;
+    std::string scaled_screen;  ///< A live stream screen KWin runs at a scale nobody asked for
+    double scaled_screen_scale = 1.0;  ///< What KWin runs it at
+    double scaled_screen_expected = 1.0;  ///< What this device asked for, which is 1 unless it said
     std::vector<input_route_t> input_routes;
   };
 
@@ -363,8 +368,8 @@ namespace virtual_display {
   /** @brief The output runs the requested size, within half a hertz of the requested rate. */
   bool kwin_mode_matches(const kscreen_output_layout_t &output, int width, int height, int hz);
 
-  /** @brief The output is at scale 1 and at (x, 0). */
-  bool kwin_placement_matches(const kscreen_output_layout_t &output, int x);
+  /** @brief The output is at [scale] and at (x, 0). */
+  bool kwin_placement_matches(const kscreen_output_layout_t &output, int x, double scale);
 
   /**
    * @brief Return whether a detected backend has the configuration it needs to create a display.
@@ -523,7 +528,7 @@ namespace virtual_display {
    * connector. For Wayland, asks the compositor to create a headless output.
    * For kscreen-doctor, enables/configures an existing output.
    */
-  std::optional<vdisplay_t> create(int width, int height, int fps);
+  std::optional<vdisplay_t> create(int width, int height, int fps, double scale = 1.0);
 
 #ifdef POLARIS_TESTS
   /** @brief Execute a callback under the production virtual-display creation mutex. */
