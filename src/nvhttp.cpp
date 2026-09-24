@@ -11692,6 +11692,14 @@ namespace nvhttp {
       const auto host_codecs = advertised_codec_support_for_http(true);
       preset_request.host_hdr_capable =
         host_codecs.hevc_mode >= 3 || host_codecs.av1_mode >= 3;
+      // What this client said about its own panel, which is the only thing that can outrank a
+      // device_db record whose hdr_capable has been false since the day it was written.
+      //
+      // The launch path has always passed this. This one did not, so the two disagreed and the
+      // stricter one won every time: a client asks the preview whether HDR is safe, is told no
+      // because of the uncorrected record, and launches SDR of its own accord. The launch code that
+      // would have said yes never runs, because nothing ever asks it.
+      preset_request.client_reports_hdr10_display = named_cert_p->client_reports_hdr10_display;
       if (config::video.max_bitrate > 0) {
         preset_request.configured_bitrate_kbps = config::video.max_bitrate;
       }
