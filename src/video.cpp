@@ -1922,9 +1922,14 @@ namespace video {
           BOOST_LOG(error) << "PyroWave: capture is handing over "sv
                            << platf::from_frame_format(format) << " at "sv << frame.pixel_pitch
                            << " bytes a pixel, and this session reads "sv
-                           << (wants_ten_bit ? "packed ten bit"sv : "eight bit BGRA"sv);
+                           << (wants_ten_bit ? "packed ten bit"sv : "eight bit BGRA"sv)
+                           << "; ending the stream, because another session would read the same "sv
+                           << "frames the same way"sv;
         }
-        return -1;
+        // Not this frame's fault and not fixable by trying again. What capture produces is decided
+        // before the first frame and does not change while a session lasts, so a rebuilt session
+        // meets the identical frame and refuses it identically.
+        return convert_session_is_over;
       }
 
       if (!session->encode_packed(frame.cpu_data, frame.width, frame.height, frame.row_pitch,
@@ -4408,7 +4413,7 @@ namespace video {
           }
 #endif
 
-          if (session->convert(frame)) {
+          if (const auto converted = session->convert(frame); converted) {
             invalidate_live_probe_reuse();
             BOOST_LOG(error) << "Could not convert image"sv;
 #ifdef __linux__
@@ -4416,6 +4421,13 @@ namespace video {
               reinit_request_event.raise(true);
             }
 #endif
+            if (converted == convert_session_is_over) {
+              // Breaking out of this loop is what the host answers by building the session again,
+              // which is right for a frame that arrived wrong and wrong for a session that cannot
+              // read any frame capture will produce. End the stream instead, after the route
+              // handler above has had its say, so a retired GPU-native route is still retired.
+              shutdown_event->raise(true);
+            }
             break;
           }
 

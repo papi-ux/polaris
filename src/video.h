@@ -480,6 +480,21 @@ namespace video {
     const std::function<void()> &drain_images
   );
 
+  /**
+   * @brief What convert() returns when nothing about this session will ever make the next frame work.
+   *
+   * Any non-zero answer from convert() fails that frame, and the capture thread treats failing a
+   * frame as a reason to build the session again. That is right for a frame that arrived wrong and
+   * wrong for a session that cannot read what capture produces: the new session is identical to the
+   * old one, so it fails the same way, at whatever rate frames arrive. Measured at a thousand
+   * sessions in two minutes, all of them logging the same sentence.
+   *
+   * A session that answers with this is saying the stream is over. The caller stops rather than
+   * starting another, and the client is told, which is the difference between an error someone can
+   * act on and a log nobody can read.
+   */
+  constexpr int convert_session_is_over = -2;
+
   struct encode_session_t {
     enum class bitrate_update_e {
       rejected,
@@ -492,6 +507,10 @@ namespace video {
     // Base members are destroyed after derived codec and converter resources.
     std::shared_ptr<platf::display_t> capture_display_owner;
 
+    /**
+     * @return 0 when the frame was converted, convert_session_is_over when this session can never
+     *         convert another, and any other non-zero value to fail this frame alone.
+     */
     virtual int convert(frame_t &frame) = 0;
 
     virtual void request_idr_frame() = 0;

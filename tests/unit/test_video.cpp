@@ -8,6 +8,9 @@
 #include <src/encoder_probe_reuse.h>
 #include <thread>
 #include <future>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #ifdef __linux__
 #include <src/platform/linux/encoder_probe_driver_proof.h>
 #endif
@@ -1178,6 +1181,45 @@ TEST(PyroWaveAnnounceTests, AnOddExtentIsRefused) {
     ASSERT_TRUE(refusal.has_value()) << width << 'x' << height << " was accepted";
     EXPECT_NE(refusal->find("even stream size"), std::string::npos) << *refusal;
   }
+}
+
+namespace {
+  std::string video_source_for_contract(const char *relative) {
+    const auto path = std::filesystem::path(POLARIS_SOURCE_DIR) / relative;
+    std::ifstream in(path);
+    if (!in) {
+      return {};
+    }
+    std::ostringstream out;
+    out << in.rdbuf();
+    return out.str();
+  }
+}  // namespace
+
+/**
+ * A session that cannot read what capture produces has to end the stream, not fail a frame.
+ *
+ * Any non-zero answer from convert() fails one frame, and the capture thread answers a failed frame
+ * by building the session again. For a frame that arrived wrong that is right. For a session whose
+ * codec reads ten bit while capture produces eight, the new session is identical and refuses the
+ * identical frame: a thousand sessions in two minutes, each logging the same sentence, with the
+ * client seeing a stream that never starts and no reason anywhere it can show.
+ */
+TEST(PyroWaveAnnounceTests, AFormatThisSessionCanNeverReadEndsTheStream) {
+  const auto video = video_source_for_contract("src/video.cpp");
+  ASSERT_FALSE(video.empty());
+  EXPECT_NE(video.find("return convert_session_is_over;"), std::string::npos)
+    << "the unreadable format refuses one frame at a time, so the host rebuilds the session forever";
+
+  EXPECT_NE(video.find("if (converted == convert_session_is_over)"), std::string::npos)
+    << "the parallel capture thread rebuilds a session that already said it cannot continue";
+  // The synchronous path already ends the stream after the route handler, and no session on this
+  // codec runs there anyway, so it is left exactly as it was.
+}
+
+TEST(PyroWaveAnnounceTests, TheEndOfStreamAnswerIsNotSomethingAFrameCanMean) {
+  EXPECT_LT(video::convert_session_is_over, 0);
+  EXPECT_NE(video::convert_session_is_over, -1);
 }
 
 TEST(PyroWaveAnnounceTests, ADynamicRangeThisCodecDoesNotKnowIsRefused) {
