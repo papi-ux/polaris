@@ -31,6 +31,7 @@ extern "C" {
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/platform/linux/pyrowave_encode.h"
+#include "src/platform/linux/pyrowave_vulkan.h"
 
 using namespace std::literals;
 
@@ -41,23 +42,31 @@ namespace pyrowave_encode {
     /**
      * The device, made once and kept.
      *
-     * PyroWave makes its own Vulkan device here rather than borrowing the one FFmpeg built for the
-     * Vulkan encoder. That costs a second device on a host that runs both, and buys a bring-up path
-     * with no interop to get wrong. Borrowing is what the zero copy work will need, and it can take
-     * the handles this device already knows how to report.
+     * Polaris creates the Vulkan device and lends it, rather than letting PyroWave create one. The
+     * codec's own device works for as long as the only thing handed to it is planes in system
+     * memory: it reports its instance, physical device and device and nothing else, with no queue and
+     * no family index, so there is nothing to record an upload or a barrier against. Owning it is
+     * what any path that keeps the picture on the GPU needs, and it costs nothing on the path that
+     * does not.
+     *
+     * Never destroyed, deliberately. It outlives every session by design, a static destructor would
+     * run it after the threads that might still be encoding, and the process is about to end anyway.
      */
-    pyrowave_device shared_device() {
+    vk_device_t *shared_vulkan() {
       static std::once_flag once;
-      static pyrowave_device device = nullptr;
+      static vk_device_t *owned = nullptr;
       std::call_once(once, [] {
-        const auto result = pyrowave_create_default_device(&device);
-        if (result != PYROWAVE_SUCCESS) {
-          BOOST_LOG(info) << "PyroWave: no usable Vulkan device on this host (result "sv
-                          << static_cast<int>(result) << ')';
-          device = nullptr;
+        auto device = std::make_unique<vk_device_t>();
+        if (device->create()) {
+          owned = device.release();
         }
       });
-      return device;
+      return owned;
+    }
+
+    pyrowave_device shared_device() {
+      auto *owned = shared_vulkan();
+      return owned ? owned->codec : nullptr;
     }
 
     class pyrowave_session_t: public session_t {

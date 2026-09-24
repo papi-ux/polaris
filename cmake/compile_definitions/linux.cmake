@@ -401,7 +401,9 @@ if(${POLARIS_ENABLE_PYROWAVE})
     list(APPEND POLARIS_EXTERNAL_LIBRARIES polaris_pyrowave)
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_encode.h"
-            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_encode.cpp")
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_encode.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_vulkan.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_vulkan.cpp")
 endif()
 
 # wayland
