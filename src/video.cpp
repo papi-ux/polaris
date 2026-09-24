@@ -1893,6 +1893,26 @@ namespace video {
         return session->bitstream().empty() ? -1 : 0;
       }
 
+      // The frame Polaris primes an encoder with, on a backend that hands over host memory. It has a
+      // buffer and it has pixels, so the emptier test above lets it through, and nothing has said what
+      // is in it: it never came from capture, so no backend published metadata for it and the format
+      // is nobody's claim rather than a claim of eight bit.
+      //
+      // Reading it as packed ten bit because this session is ten bit would be reading a dummy's bytes
+      // as a format they are not in. It stands for a picture nobody has captured yet, which is what
+      // encode_blank is for, and which is how the same frame is already handled where it arrives with
+      // no buffer at all.
+      //
+      // This refused every HDR session on its first frame, and a refusal on the first frame is a
+      // session the host rebuilds, so it refused the next one identically.
+      if (frame.metadata.format == platf::frame_format_e::unknown) {
+        if (!session->encode_blank(max_frame_bytes)) {
+          return -1;
+        }
+        converted_since_last_packet = true;
+        return session->bitstream().empty() ? -1 : 0;
+      }
+
       // What this session was built to read, checked rather than assumed. Both ranges arrive at four
       // bytes a pixel, eight bit BGRA for SDR and packed ten bit for HDR, and each read as the other
       // is not a wrong colour, it is noise.
@@ -1911,9 +1931,10 @@ namespace video {
       const auto format = frame.metadata.format;
       const bool ten_bit_frame = format == platf::frame_format_e::p010;
       const bool wants_ten_bit = range == pyrowave_encode::dynamic_range_e::hdr10;
+      // Nothing unclaimed reaches here any more, so a format that does not match is a real
+      // disagreement between what capture produced and what this session reads.
       const bool readable = ten_bit_frame == wants_ten_bit &&
-                            (ten_bit_frame || format == platf::frame_format_e::bgra8 ||
-                             format == platf::frame_format_e::unknown);
+                            (ten_bit_frame || format == platf::frame_format_e::bgra8);
       // A backend that never filled the pitch in is not making a claim, so it is not contradicted.
       const bool four_bytes_a_pixel = frame.pixel_pitch == 0 || frame.pixel_pitch == 4;
       if (!readable || !four_bytes_a_pixel) {
