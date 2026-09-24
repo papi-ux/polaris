@@ -50,7 +50,7 @@ namespace video {
        SDR encoding colorspace (encoderCscMode >> 1) : 0 - BT.601, 1 - BT.709, 2 - BT.2020 */
     int encoderCscMode;
 
-    int videoFormat;  // 0 - H.264, 1 - HEVC, 2 - AV1
+    int videoFormat;  // 0 - H.264, 1 - HEVC, 2 - AV1, 3 - PyroWave
 
     /* Encoding color depth (bit depth): 0 - 8-bit, 1 - 10-bit
        HDR encoding activates when color depth is higher than 8-bit and the display which is being captured is operating in HDR mode */
@@ -225,6 +225,24 @@ namespace video {
     virtual bool supports(const frame_t &src, const conversion_request_t &request) const = 0;
     virtual int convert(frame_t &frame, const conversion_request_t &request) = 0;
   };
+
+  /**
+   * @brief The bitStreamFormat a client asks for to get the compute codec.
+   *
+   * Three, after H.264, HEVC and AV1. Defined here rather than in moonlight-common-c because
+   * Polaris only ever writes these numbers: the client sends a string, Polaris parses it to an int,
+   * and nothing in the streaming library needs to know the name of a codec it will never decode.
+   */
+  inline constexpr int VIDEO_FORMAT_PYROWAVE = 3;
+
+  /**
+   * @brief The bit that says this host can encode it, in ServerCodecModeSupport.
+   *
+   * Above every bit Sunshine's extensions already claim, so it cannot be mistaken for one. A
+   * Moonlight client reads the mask, finds a bit it has no name for, and ignores it, which is the
+   * whole of the compatibility story: it can never ask for a codec it does not know exists.
+   */
+  inline constexpr std::uint32_t SCM_PYROWAVE = 0x00800000;
 
   struct encoder_platform_formats_t {
     virtual ~encoder_platform_formats_t() = default;
