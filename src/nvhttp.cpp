@@ -6604,6 +6604,8 @@ namespace nvhttp {
     // bit it has no name for and ignores it, so it can never ask for a codec it cannot decode.
     if (pyrowave_encode::available()) {
       codec_mode_flags |= video::SCM_PYROWAVE;
+      // Same encoder, same device, one enum apart, so a host that can do one can do the other.
+      codec_mode_flags |= video::SCM_PYROWAVE_444;
     }
 #endif
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);

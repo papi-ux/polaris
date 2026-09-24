@@ -3993,8 +3993,12 @@ namespace video {
       // frame's sequence header, and a decoder handed a size it did not expect drops the frame with
       // a line about the dimensions and nothing about the picture. Capture gets scaled to fit inside
       // it instead, which is what every other encoder here does through its converter.
-      auto pyrowave_session = pyrowave_encode::make_session(config.width, config.height,
-                                                           pyrowave_encode::chroma_e::yuv420);
+      // chromaSamplingType is the attribute Moonlight already sends and Polaris already parses,
+      // so 4:4:4 needs no mechanism of its own: the client sets it because it asked for the 4:4:4
+      // format, and this reads it.
+      const auto chroma = config.chromaSamplingType == 1 ? pyrowave_encode::chroma_e::yuv444
+                                                         : pyrowave_encode::chroma_e::yuv420;
+      auto pyrowave_session = pyrowave_encode::make_session(config.width, config.height, chroma);
       if (!pyrowave_session) {
         invalidate_live_probe_reuse();
         return nullptr;
@@ -4003,8 +4007,9 @@ namespace video {
       // The session works out its own per frame budget, because it has to do it again every time
       // adaptive bitrate moves the target.
       const auto fps = config.framerate > 0 ? config.framerate : 60;
-      BOOST_LOG(info) << "PyroWave: "sv << config.width << 'x' << config.height << " at "sv << fps
-                      << " fps, up to "sv
+      BOOST_LOG(info) << "PyroWave: "sv << config.width << 'x' << config.height << ' '
+                      << (chroma == pyrowave_encode::chroma_e::yuv444 ? "4:4:4"sv : "4:2:0"sv)
+                      << " at "sv << fps << " fps, up to "sv
                       << pyrowave_encode_session_t::frame_budget(config.bitrate, fps)
                       << " bytes a frame"sv;
       session = std::make_unique<pyrowave_encode_session_t>(std::move(pyrowave_session), fps, config.bitrate);

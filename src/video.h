@@ -244,6 +244,16 @@ namespace video {
    */
   inline constexpr std::uint32_t SCM_PYROWAVE = 0x00800000;
 
+  /**
+   * @brief This host can carry PyroWave with a chroma sample per pixel rather than per four.
+   *
+   * Its own bit rather than something inferred from the first, because a client whose decoder is
+   * built for 4:4:4 against a host that only sends 4:2:0 refuses every frame: the chroma travels in
+   * each frame's sequence header and a decoder made for the other one will not take it. Better to
+   * be told than to find out a frame at a time.
+   */
+  inline constexpr std::uint32_t SCM_PYROWAVE_444 = 0x01000000;
+
   struct encoder_platform_formats_t {
     virtual ~encoder_platform_formats_t() = default;
     platf::mem_type_e dev_type;
