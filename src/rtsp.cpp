@@ -1841,6 +1841,19 @@ namespace rtsp_stream {
         return;
       }
 
+      // The profile token says SDR, and this encoder has no other mode. Accepting an HDR request
+      // would encode full range Rec. 709 and leave the client to display it as BT.2020 PQ, which is
+      // a picture that is merely wrong: washed out, with the darks wrong, and nothing anywhere
+      // saying why. The bitstream reserves fields for transfer function and primaries that nothing
+      // upstream writes, so there is no way to carry the difference even if it were encoded.
+      if (config.monitor.dynamicRange != 0) {
+        BOOST_LOG(warning) << "PyroWave is SDR only, yet the client asked for dynamic range "sv
+                           << config.monitor.dynamicRange;
+
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+      }
+
       // 4:2:0 has no half chroma sample, and an odd extent would make the encoder round to even
       // while the client's decoder kept the size it asked for. The two then disagree about every
       // frame's sequence header, and the decoder drops the lot with a line about the dimensions.
