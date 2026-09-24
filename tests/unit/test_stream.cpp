@@ -445,3 +445,18 @@ TEST(ControlPacketBounds, InputCipherLengthRejectsNegativeAndOverlongClaims) {
   EXPECT_FALSE(stream::input_control_cipher_fits(1024, std::numeric_limits<std::int32_t>::min()));
   EXPECT_FALSE(stream::input_control_cipher_fits(1024, std::numeric_limits<std::int32_t>::max()));
 }
+
+
+TEST(NvhttpSessionHealthTests, PyrowaveReportsItsSessionEncoderWithoutNvencWarnings) {
+  auto stats = stable_cpu_copy_stats(90.0, 90.0);
+  stats.codec = "pyrowave";
+  stats.encoder_backend = "pyrowave";
+  stats.encode_time_ms = 3.0;
+  stats.avg_frame_age_ms = 6.0;
+  const auto health = nvhttp::build_session_health_json_for_tests(stats, false, "Nova Client", "Control");
+  EXPECT_EQ(health.at("active_encoder"), "pyrowave");
+  EXPECT_EQ(health.at("primary_issue"), "steady");
+  EXPECT_EQ(health.at("encoder_selection").at("selected_encoder"), "pyrowave");
+  EXPECT_EQ(health.at("encoder_selection").at("preferred_encoder"), "pyrowave");
+  EXPECT_FALSE(health.at("encoder_selection").at("fallback_used").get<bool>());
+}

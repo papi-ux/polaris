@@ -2313,11 +2313,11 @@ namespace nvhttp {
     }
 
     std::string session_encoder_name(const stream_stats::stats_t &stats) {
-      return stats.streaming && stats.codec == "pyrowave" ? "pyrowave" : video::active_encoder_name();
+      return stats.encoder_backend.empty() ? video::active_encoder_name() : stats.encoder_backend;
     }
 
     nlohmann::json encoder_selection_json(const stream_stats::stats_t &stats) {
-      if (stats.streaming && stats.codec == "pyrowave") {
+      if (stats.streaming && session_encoder_name(stats) == "pyrowave") {
         // Conventional encoder probing does not select the codec's own Vulkan
         // device. Do not label this stream software/NVENC or infer its GPU from
         // the capture adapter. Explicit PyroWave selection has no codec fallback.
@@ -8419,12 +8419,12 @@ namespace nvhttp {
       // Encoder info
       auto &encoder = output["encoder"];
       const auto active_backend = session_encoder_name(stats);
-      const bool pyrowave_stream = stats.streaming && stats.codec == "pyrowave";
+      const bool pyrowave_stream = stats.streaming && active_backend == "pyrowave";
       encoder["active_backend"] = active_backend.empty() ? "unknown" : active_backend;
       encoder["requested_backend"] = status_snapshot.requested_encoder_backend;
-      encoder["effective_backend"] = pyrowave_stream ? "pyrowave" : status_snapshot.effective_encoder_backend.empty() ?
-        (active_backend.empty() ? "unknown" : active_backend) :
-        status_snapshot.effective_encoder_backend;
+      encoder["effective_backend"] = !stats.encoder_backend.empty() ? stats.encoder_backend :
+        !status_snapshot.effective_encoder_backend.empty() ? status_snapshot.effective_encoder_backend :
+        active_backend.empty() ? "unknown" : active_backend;
       encoder["session_override"] = status_snapshot.encoder_backend_explicit;
       encoder["fallback_allowed"] = !pyrowave_stream && encoder_backend_fallback_allowed(
         status_snapshot.requested_encoder_backend,
