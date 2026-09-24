@@ -7,6 +7,9 @@
 // standard includes
 #include <dlfcn.h>
 
+#include <algorithm>
+#include <array>
+#include <cstring>
 #include <vector>
 
 // local includes
@@ -36,7 +39,8 @@ namespace pyrowave_encode {
   X(create_device, CreateDevice)                              \
   X(destroy_device, DestroyDevice)                            \
   X(get_device_queue, GetDeviceQueue)                         \
-  X(get_device_proc_addr, GetDeviceProcAddr)
+  X(get_device_proc_addr, GetDeviceProcAddr)                   \
+  X(enumerate_device_extensions, EnumerateDeviceExtensionProperties)
 
     /** The handful of entry points needed to stand a device up. Resolved, never linked. */
     struct loader_t {
@@ -90,7 +94,8 @@ namespace pyrowave_encode {
       bool instance_complete() const {
         return destroy_instance && enumerate_physical_devices && get_physical_device_properties &&
                get_physical_device_features2 && get_queue_family_properties && create_device &&
-               destroy_device && get_device_queue && get_device_proc_addr;
+               destroy_device && get_device_queue && get_device_proc_addr &&
+               enumerate_device_extensions;
       }
     };
 
@@ -162,6 +167,38 @@ namespace pyrowave_encode {
       return features.features.shaderInt16 && v11.storageBuffer16BitAccess &&
              v12.storageBuffer8BitAccess && v12.timelineSemaphore && v13.subgroupSizeControl &&
              v13.computeFullSubgroups;
+    }
+
+    /// Every device extension a dmabuf import needs, all or nothing.
+    constexpr std::array<const char *, 4> dmabuf_extensions = {
+      VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
+      VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
+      VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
+      VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,
+    };
+
+    /// Whether a GPU offers all of them, asked before any is enabled.
+    bool offers_dmabuf_import(VkPhysicalDevice candidate) {
+      uint32_t count = 0;
+      if (loader.enumerate_device_extensions(candidate, nullptr, &count, nullptr) != VK_SUCCESS ||
+          count == 0) {
+        return false;
+      }
+      std::vector<VkExtensionProperties> available(count);
+      if (loader.enumerate_device_extensions(candidate, nullptr, &count, available.data()) !=
+          VK_SUCCESS) {
+        return false;
+      }
+
+      for (const auto *wanted : dmabuf_extensions) {
+        const auto found = std::any_of(available.begin(), available.end(), [wanted](const auto &has) {
+          return std::strcmp(has.extensionName, wanted) == 0;
+        });
+        if (!found) {
+          return false;
+        }
+      }
+      return true;
     }
 
     /**
@@ -351,10 +388,25 @@ namespace pyrowave_encode {
     vulkan12.bufferDeviceAddressMultiDevice = VK_FALSE;
     vulkan13.privateData = VK_FALSE;
 
+    // Asked for only where they are all present, and the answer is remembered: a caller that wants
+    // to hand over a dmabuf has to know before it tries, because the alternative to importing is a
+    // copy it has to arrange instead.
+    can_import_dmabuf = offers_dmabuf_import(physical_device);
+    device_extensions.clear();
+    if (can_import_dmabuf) {
+      device_extensions.assign(dmabuf_extensions.begin(), dmabuf_extensions.end());
+    } else {
+      BOOST_LOG(info) << "PyroWave: "sv << gpu_name
+                      << " cannot import a dmabuf, so frames will be copied"sv;
+    }
+
     device_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     device_info.pNext = &features;
     device_info.queueCreateInfoCount = 1;
     device_info.pQueueCreateInfos = &queue_info;
+    device_info.enabledExtensionCount = static_cast<uint32_t>(device_extensions.size());
+    device_info.ppEnabledExtensionNames = device_extensions.empty() ? nullptr
+                                                                    : device_extensions.data();
 
     const auto device_result = loader.create_device(physical_device, &device_info, nullptr, &device);
     if (device_result != VK_SUCCESS) {
@@ -397,7 +449,8 @@ namespace pyrowave_encode {
       return false;
     }
 
-    BOOST_LOG(info) << "PyroWave: encoding on "sv << gpu_name << ", queue family "sv << queue_family;
+    BOOST_LOG(info) << "PyroWave: encoding on "sv << gpu_name << ", queue family "sv << queue_family
+                    << (can_import_dmabuf ? ", can import a dmabuf"sv : ""sv);
     return true;
   }
 

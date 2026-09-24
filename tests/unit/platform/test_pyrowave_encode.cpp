@@ -16,6 +16,15 @@
 
   #include "pyrowave.h"
 
+  // A real dmabuf, because the only way to test importing one is to have one. gbm is what every
+  // capture backend on this platform allocates through, so a buffer from here is the same kind of
+  // object the portal hands over.
+  #include <fcntl.h>
+  #include <unistd.h>
+
+  #include <drm_fourcc.h>
+  #include <gbm.h>
+
   #include <algorithm>
   #include <cmath>
   #include <cstdlib>
@@ -303,6 +312,92 @@ namespace {
       EXPECT_NEAR(decoded.chroma_v_at(col, row), want.v, 8.0) << path << ", quadrant " << which << " Cr";
     }
   }
+
+  /**
+   * A buffer the GPU owns, filled with a known picture, described the way capture describes one.
+   *
+   * Linear on purpose: it is what Polaris asks the portal for, and it is the only layout a test can
+   * write into by hand. A buffer with a real tiling modifier would need the GPU to fill it, which
+   * proves the driver's tiling rather than this code's import.
+   */
+  struct test_dmabuf_t {
+    test_dmabuf_t(int width, int height, const quadrant_frame_t &picture):
+        width {width},
+        height {height} {
+      node = ::open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+      if (node < 0) {
+        return;
+      }
+      device = gbm_create_device(node);
+      if (!device) {
+        return;
+      }
+
+      // XRGB8888 is BGRA in memory, which is what capture hands over and what the codec reads, and
+      // an explicit linear modifier is what Polaris asks the portal for. Asked for by modifier rather
+      // than by use flags because the combination that says the same thing in flags is refused by at
+      // least one driver here, and because this is the shape the real buffer arrives in: a modifier
+      // the importer has to honour rather than a tiling it may assume.
+      const uint64_t linear = DRM_FORMAT_MOD_LINEAR;
+      bo = gbm_bo_create_with_modifiers(device, static_cast<uint32_t>(width),
+                                        static_cast<uint32_t>(height), GBM_FORMAT_XRGB8888, &linear, 1);
+      if (!bo) {
+        return;
+      }
+
+      void *map_data = nullptr;
+      uint32_t map_stride = 0;
+      auto *mapped = static_cast<uint8_t *>(
+        gbm_bo_map(bo, 0, 0, static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+                   GBM_BO_TRANSFER_WRITE, &map_stride, &map_data));
+      if (!mapped) {
+        return;
+      }
+      for (int row = 0; row < height; ++row) {
+        std::memcpy(mapped + static_cast<std::size_t>(row) * map_stride,
+                    picture.bgra.data() + static_cast<std::size_t>(row) * picture.stride,
+                    static_cast<std::size_t>(width) * 4);
+      }
+      gbm_bo_unmap(bo, map_data);
+
+      buffer.fds[0] = gbm_bo_get_fd(bo);
+      buffer.fourcc = DRM_FORMAT_XRGB8888;
+      buffer.modifier = gbm_bo_get_modifier(bo);
+      buffer.pitches[0] = gbm_bo_get_stride(bo);
+      buffer.offsets[0] = gbm_bo_get_offset(bo, 0);
+      buffer.width = width;
+      buffer.height = height;
+      ok = buffer.fds[0] >= 0;
+    }
+
+    ~test_dmabuf_t() {
+      if (buffer.fds[0] >= 0) {
+        ::close(buffer.fds[0]);
+      }
+      if (bo) {
+        gbm_bo_destroy(bo);
+      }
+      if (device) {
+        gbm_device_destroy(device);
+      }
+      if (node >= 0) {
+        ::close(node);
+      }
+    }
+
+    test_dmabuf_t(const test_dmabuf_t &) = delete;
+    test_dmabuf_t &operator=(const test_dmabuf_t &) = delete;
+
+    bool ok = false;
+    int width;
+    int height;
+    pyrowave_encode::dmabuf_t buffer;
+
+  private:
+    int node = -1;
+    gbm_device *device = nullptr;
+    gbm_bo *bo = nullptr;
+  };
 
   /**
    * The start of frame header a PyroWave bitstream opens with, read from the bytes.
@@ -936,6 +1031,77 @@ TEST(PyroWaveEncodeTests, EachDynamicRangeHasItsOwnProfileToken) {
                pyrowave_encode::profile_token_for(pyrowave_encode::dynamic_range_e::hdr10));
   EXPECT_STREQ(pyrowave_encode::profile_token_for(pyrowave_encode::dynamic_range_e::sdr),
                pyrowave_encode::profile_token);
+}
+
+TEST(PyroWaveEncodeTests, AFrameAlreadyOnTheGpuIsEncodedWhereItLies) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+  if (!pyrowave_encode::dmabuf_import_available()) {
+    GTEST_SKIP() << "this GPU cannot import a dmabuf";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  const quadrant_frame_t picture {width, height, width * 4};
+  const test_dmabuf_t captured {width, height, picture};
+  if (!captured.ok) {
+    GTEST_SKIP() << "could not allocate a dmabuf on this machine";
+  }
+
+  auto session = make_session_420(width, height);
+  ASSERT_NE(session, nullptr);
+  ASSERT_TRUE(session->encode_imported(captured.buffer, 512 * 1024));
+  EXPECT_TRUE(session->uses_gpu_input());
+
+  // The whole point is that no copy happened, and the only way to see that from here is that the
+  // picture came out right anyway: the codec read the memory capture wrote, in the layout the
+  // modifier described, from the queue family it was acquired from.
+  const decoded_frame_t decoded {session->bitstream(), width, height, false};
+  ASSERT_TRUE(decoded.ok) << "the frame encoded from an imported dmabuf would not decode";
+  expect_full_range_rec709(decoded, picture, "imported from a dmabuf");
+}
+
+TEST(PyroWaveEncodeTests, AnImportedFrameThatNeedsBarsGetsThemOnTheGpu) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+  if (!pyrowave_encode::dmabuf_import_available()) {
+    GTEST_SKIP() << "this GPU cannot import a dmabuf";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+
+  // Twice as wide for its height as the stream, so the imported frame cannot be read directly: it is
+  // copied into the middle of an image shaped like the stream, on the GPU, and the bars are cleared.
+  const quadrant_frame_t picture {1280, 360, 1280 * 4};
+  const test_dmabuf_t captured {1280, 360, picture};
+  if (!captured.ok) {
+    GTEST_SKIP() << "could not allocate a dmabuf on this machine";
+  }
+
+  auto session = make_session_420(width, height);
+  ASSERT_NE(session, nullptr);
+  ASSERT_TRUE(session->encode_imported(captured.buffer, 512 * 1024));
+
+  const decoded_frame_t decoded {session->bitstream(), width, height, false};
+  ASSERT_TRUE(decoded.ok);
+
+  const int padded_height = picture.width * height / width;
+  const int top_bar = (padded_height - picture.height) / 2;
+  EXPECT_LT(decoded.luma_at(width / 2, 8), 8) << "the bar above the picture is not black";
+  EXPECT_LT(decoded.luma_at(width / 2, height - 8), 8) << "the bar below it is not black";
+
+  for (int which = 0; which < 4; ++which) {
+    const auto [col, row] = picture.centre_of(which);
+    const int out_col = col * width / picture.width;
+    const int out_row = (row + top_bar) * height / padded_height;
+    const expected_ycbcr_t want {picture.colours[which][0], picture.colours[which][1],
+                                 picture.colours[which][2]};
+    EXPECT_NEAR(decoded.luma_at(out_col, out_row), want.y, 8.0)
+      << "quadrant " << which << " should be at " << out_col << ',' << out_row;
+  }
 }
 
 #endif  // POLARIS_BUILD_PYROWAVE

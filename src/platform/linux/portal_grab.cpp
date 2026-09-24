@@ -45,6 +45,9 @@
   #include "src/platform/linux/kwingrab.h"
 #endif
 #include "src/platform/linux/pipewire_capture.h"
+#ifdef POLARIS_BUILD_PYROWAVE
+  #include "src/platform/linux/pyrowave_encode.h"
+#endif
 #include "src/platform/linux/portal_session.h"
 #include "src/platform/linux/session_media.h"
 
@@ -236,6 +239,14 @@ namespace portal {
       case platf::mem_type_e::vaapi:
 #ifdef POLARIS_BUILD_VAAPI
         return true;
+#else
+        return false;
+#endif
+      case platf::mem_type_e::vulkan_pyrowave:
+#ifdef POLARIS_BUILD_PYROWAVE
+        // Asked of the device rather than of the build, because the extensions this needs are a
+        // driver's to offer and a host whose GPU lacks them copies its frames instead.
+        return pyrowave_encode::dmabuf_import_available();
 #else
         return false;
 #endif
@@ -749,12 +760,17 @@ namespace portal {
         } else if (!encoder_import_supported) {
           BOOST_LOG(info) << "portal: DMA-BUF disabled because this build lacks the encoder-specific import path"sv;
         } else if (mem_type != platf::mem_type_e::cuda &&
+                   mem_type != platf::mem_type_e::vulkan_pyrowave &&
                    !(allow_vaapi && mem_type == platf::mem_type_e::vaapi)) {
           BOOST_LOG(info) << "portal: DMA-BUF disabled because encoder memory type is neither CUDA nor explicitly enabled VAAPI"sv;
         } else {
-          if (mem_type == platf::mem_type_e::cuda) {
+          if (mem_type == platf::mem_type_e::cuda ||
+              mem_type == platf::mem_type_e::vulkan_pyrowave) {
             // LINEAR one-plane packed RGB: 8-bit BGRx/BGRA + 10-bit xBGR_210LE (HDR).
             // Keep vulkan_cuda fast path; do not drop XB30 (regression vs prefer-10-bit).
+            //
+            // The compute codec wants the same set and for the same reasons: its scaled encode entry
+            // takes packed RGB, and linear is the one layout every importer agrees on.
             dmabuf_formats = pipewire_capture::task1_packed_dmabuf_formats({DRM_FORMAT_MOD_LINEAR});
             std::erase_if(dmabuf_formats, [](const auto &format) {
               return format.spa_format != SPA_VIDEO_FORMAT_BGRx &&

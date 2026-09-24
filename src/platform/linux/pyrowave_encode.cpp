@@ -356,6 +356,39 @@ namespace pyrowave_encode {
                                                : VK_FORMAT_B8G8R8A8_UNORM;
       }
 
+      bool encode_imported(const dmabuf_t &buffer, std::size_t max_bytes) override {
+        frame.clear();
+        if (!encoder || max_bytes == 0 || gpu == gpu_e::no) {
+          return false;
+        }
+        if (!staging) {
+          staging = upload_t::make(*owner);
+          if (!staging) {
+            gpu = gpu_e::no;
+            return false;
+          }
+        }
+
+        const auto where = placement_for(buffer.width, buffer.height);
+        const auto started = std::chrono::steady_clock::now();
+        if (!staging->begin_imported(buffer, where)) {
+          return false;
+        }
+        if (!encode_recorded(max_bytes)) {
+          return false;
+        }
+
+        if (gpu == gpu_e::unknown) {
+          gpu = gpu_e::yes;
+          BOOST_LOG(info) << "PyroWave: encoding a "sv << buffer.width << 'x' << buffer.height
+                          << " frame where capture left it, on "sv << owner->gpu_name
+                          << (where.has_bars() ? ", letterboxed"sv : ""sv);
+        }
+        // No copy to time, so the whole frame is the encode.
+        report_timing(started, started);
+        return true;
+      }
+
       bool encode_on_gpu(const uint8_t *pixels, int src_width, int src_height, int stride,
                          std::size_t max_bytes) {
         if (!staging) {
@@ -729,6 +762,14 @@ namespace pyrowave_encode {
 
   bool hdr_available() {
     return available() && gpu_input_allowed();
+  }
+
+  bool dmabuf_import_available() {
+    if (!gpu_input_allowed()) {
+      return false;
+    }
+    auto *owner = shared_vulkan();
+    return owner != nullptr && owner->can_import_dmabuf;
   }
 
   std::unique_ptr<session_t> make_session(int width, int height, chroma_e chroma,

@@ -5,6 +5,10 @@
 #include "src/platform/linux/pyrowave_upload.h"
 
 // standard includes
+#include <unistd.h>
+
+#include <drm_fourcc.h>
+
 #include <cstring>
 #include <mutex>
 
@@ -61,6 +65,32 @@ namespace pyrowave_encode {
         }
       }
       return UINT32_MAX;
+    }
+
+    /**
+     * What a DRM fourcc means to Vulkan, for the handful this codec can read.
+     *
+     * Packed RGB only, which is what the portal is asked for and all the codec's scaled entry point
+     * takes. Anything else is refused by name rather than guessed at, because a wrong guess here is
+     * not a wrong colour, it is noise.
+     */
+    VkFormat format_for_fourcc(uint32_t fourcc) {
+      switch (fourcc) {
+        case DRM_FORMAT_XRGB8888:
+        case DRM_FORMAT_ARGB8888:
+          return VK_FORMAT_B8G8R8A8_UNORM;
+        case DRM_FORMAT_XBGR8888:
+        case DRM_FORMAT_ABGR8888:
+          return VK_FORMAT_R8G8B8A8_UNORM;
+        case DRM_FORMAT_XBGR2101010:
+        case DRM_FORMAT_ABGR2101010:
+          return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+        case DRM_FORMAT_XRGB2101010:
+        case DRM_FORMAT_ARGB2101010:
+          return VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+        default:
+          return VK_FORMAT_UNDEFINED;
+      }
     }
 
   }  // namespace
@@ -141,7 +171,13 @@ namespace pyrowave_encode {
     POLARIS_VK_RESOLVE(cmd_pipeline_barrier, CmdPipelineBarrier)
     POLARIS_VK_RESOLVE(cmd_copy_buffer_to_image, CmdCopyBufferToImage)
     POLARIS_VK_RESOLVE(cmd_clear_color_image, CmdClearColorImage)
+    POLARIS_VK_RESOLVE(cmd_copy_image, CmdCopyImage)
 #undef POLARIS_VK_RESOLVE
+
+    // Optional, because a device without the dmabuf extensions does not have it and still works:
+    // that host copies its frames instead.
+    api.get_memory_fd_properties = reinterpret_cast<PFN_vkGetMemoryFdPropertiesKHR>(
+      from.device_fn("vkGetMemoryFdPropertiesKHR"));
 
     // The only one that belongs to the instance rather than to the device.
     api.get_memory_properties = reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
@@ -166,6 +202,7 @@ namespace pyrowave_encode {
                            << static_cast<int>(waited) << ')';
       }
     }
+    release_import();
     release_frame_resources();
     if (fence != VK_NULL_HANDLE) {
       api.destroy_fence(owner->device, fence, nullptr);
@@ -356,6 +393,290 @@ namespace pyrowave_encode {
     return true;
   }
 
+  bool upload_t::can_import() const {
+    return owner && owner->can_import_dmabuf && api.get_memory_fd_properties != nullptr;
+  }
+
+  void upload_t::release_import() {
+    if (!owner || owner->device == VK_NULL_HANDLE) {
+      return;
+    }
+    if (imported_image != VK_NULL_HANDLE) {
+      api.destroy_image(owner->device, imported_image, nullptr);
+      imported_image = VK_NULL_HANDLE;
+    }
+    if (imported_memory != VK_NULL_HANDLE) {
+      api.free_memory(owner->device, imported_memory, nullptr);
+      imported_memory = VK_NULL_HANDLE;
+    }
+    imported_format = VK_FORMAT_UNDEFINED;
+    imported_width = 0;
+    imported_height = 0;
+  }
+
+  /**
+   * Describe a dmabuf to Vulkan and bind its memory, once per frame.
+   *
+   * Per frame rather than cached by buffer, which capture would let us do: the pool it cycles is
+   * small and the same descriptors come back. Measured first, cached only if it shows up, because a
+   * cache keyed on a file descriptor the other side may have closed and reopened is a subtle thing to
+   * get wrong and an image creation is not obviously expensive.
+   */
+  bool upload_t::import_dmabuf(const dmabuf_t &buffer) {
+    release_import();
+
+    if (!can_import() || buffer.fds[0] < 0 || buffer.width <= 0 || buffer.height <= 0) {
+      return false;
+    }
+
+    const auto format = format_for_fourcc(buffer.fourcc);
+    if (format == VK_FORMAT_UNDEFINED) {
+      BOOST_LOG(warning) << "PyroWave: capture handed over a dmabuf in a format this codec cannot "sv
+                         << "read (fourcc "sv << buffer.fourcc << ')';
+      return false;
+    }
+
+    // Duplicated, because Vulkan takes ownership of the descriptor it is given and capture closes the
+    // one it kept. Two owners of one descriptor is a double close, which is somebody else's bug.
+    const int fd = ::dup(buffer.fds[0]);
+    if (fd < 0) {
+      BOOST_LOG(warning) << "PyroWave: could not duplicate the captured frame's descriptor"sv;
+      return false;
+    }
+
+    VkMemoryFdPropertiesKHR fd_properties = {};
+    fd_properties.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR;
+    if (api.get_memory_fd_properties(owner->device, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+                                     fd, &fd_properties) != VK_SUCCESS ||
+        fd_properties.memoryTypeBits == 0) {
+      BOOST_LOG(warning) << "PyroWave: this driver will not describe the captured frame's memory"sv;
+      ::close(fd);
+      return false;
+    }
+
+    VkExternalMemoryImageCreateInfo external = {};
+    external.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+    external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+
+    // The modifier says how the pixels are arranged, which for anything but a linear buffer is the
+    // only way to read it at all. Polaris asks the portal for linear, so this is usually that, but a
+    // buffer that arrives with a real modifier is described rather than assumed.
+    std::array<VkSubresourceLayout, 4> layouts = {};
+    VkImageDrmFormatModifierExplicitCreateInfoEXT modifier_info = {};
+    modifier_info.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT;
+    VkImageTiling tiling = VK_IMAGE_TILING_LINEAR;
+
+    if (buffer.modifier != DRM_FORMAT_MOD_INVALID) {
+      uint32_t planes = 0;
+      for (int i = 0; i < 4 && buffer.fds[i] >= 0; i++) {
+        layouts[i].offset = buffer.offsets[i];
+        layouts[i].rowPitch = buffer.pitches[i];
+        planes++;
+      }
+      modifier_info.drmFormatModifier = buffer.modifier;
+      modifier_info.drmFormatModifierPlaneCount = planes;
+      modifier_info.pPlaneLayouts = layouts.data();
+      external.pNext = &modifier_info;
+      tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+    }
+
+    VkImageCreateInfo info = {};
+    info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    info.pNext = &external;
+    info.imageType = VK_IMAGE_TYPE_2D;
+    info.format = format;
+    info.extent = {static_cast<uint32_t>(buffer.width), static_cast<uint32_t>(buffer.height), 1};
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+    info.samples = VK_SAMPLE_COUNT_1_BIT;
+    info.tiling = tiling;
+    // Sampled for the codec to read, and a transfer source for the letterbox copy, which is the only
+    // other thing that ever touches it.
+    info.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (api.create_image(owner->device, &info, nullptr, &imported_image) != VK_SUCCESS) {
+      BOOST_LOG(warning) << "PyroWave: this driver will not make an image for a "sv << buffer.width
+                         << 'x' << buffer.height << " dmabuf with modifier "sv << buffer.modifier;
+      imported_image = VK_NULL_HANDLE;
+      ::close(fd);
+      return false;
+    }
+
+    VkMemoryRequirements needs = {};
+    api.get_image_memory_requirements(owner->device, imported_image, &needs);
+    const auto usable = needs.memoryTypeBits & fd_properties.memoryTypeBits;
+    if (usable == 0) {
+      BOOST_LOG(warning) << "PyroWave: the captured frame's memory suits no type this image can use"sv;
+      ::close(fd);
+      release_import();
+      return false;
+    }
+
+    uint32_t chosen = UINT32_MAX;
+    VkPhysicalDeviceMemoryProperties memory = {};
+    api.get_memory_properties(owner->physical_device, &memory);
+    for (uint32_t i = 0; i < memory.memoryTypeCount; i++) {
+      if ((usable & (1u << i)) == 0) {
+        continue;
+      }
+      chosen = i;
+      if ((memory.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0) {
+        break;
+      }
+    }
+    if (chosen == UINT32_MAX) {
+      ::close(fd);
+      release_import();
+      return false;
+    }
+
+    // The descriptor goes with this structure: a successful import takes it, and a failed one leaves
+    // it to be closed here.
+    VkImportMemoryFdInfoKHR import = {};
+    import.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR;
+    import.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    import.fd = fd;
+
+    VkMemoryDedicatedAllocateInfo dedicated = {};
+    dedicated.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
+    dedicated.image = imported_image;
+    import.pNext = &dedicated;
+
+    VkMemoryAllocateInfo allocation = {};
+    allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation.pNext = &import;
+    allocation.allocationSize = needs.size;
+    allocation.memoryTypeIndex = chosen;
+
+    if (api.allocate_memory(owner->device, &allocation, nullptr, &imported_memory) != VK_SUCCESS) {
+      BOOST_LOG(warning) << "PyroWave: the captured frame's memory could not be imported"sv;
+      imported_memory = VK_NULL_HANDLE;
+      ::close(fd);
+      release_import();
+      return false;
+    }
+    if (api.bind_image_memory(owner->device, imported_image, imported_memory, 0) != VK_SUCCESS) {
+      release_import();
+      return false;
+    }
+
+    imported_format = format;
+    imported_width = static_cast<uint32_t>(buffer.width);
+    imported_height = static_cast<uint32_t>(buffer.height);
+    return true;
+  }
+
+  bool upload_t::begin_imported(const dmabuf_t &buffer, const placement_t &where) {
+    if (wedged || recording) {
+      return false;
+    }
+    if (!import_dmabuf(buffer)) {
+      return false;
+    }
+
+    // Bars mean the codec has to read an image shaped like the stream, and the imported frame is
+    // shaped like the display. So the picture is copied into the middle of one, on the GPU, which is
+    // a tenth of the price of the copy this path exists to avoid and never touches the host.
+    const bool needs_a_frame_of_its_own = where.has_bars();
+    if (needs_a_frame_of_its_own &&
+        !prepare(buffer.width, buffer.height, buffer.width * 4, imported_format, where)) {
+      release_import();
+      return false;
+    }
+    reading_import = !needs_a_frame_of_its_own;
+
+    if (api.reset_command_pool(owner->device, pool, 0) != VK_SUCCESS) {
+      release_import();
+      return false;
+    }
+
+    VkCommandBufferBeginInfo begin_info = {};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (api.begin_command_buffer(cmd, &begin_info) != VK_SUCCESS) {
+      release_import();
+      return false;
+    }
+    recording = true;
+
+    // Taken off the queue family that filled it. A buffer another API wrote is owned by a family
+    // Vulkan calls foreign, and reading it without acquiring it first is undefined: the contents are
+    // whatever the driver felt like leaving visible.
+    VkImageMemoryBarrier acquire = {};
+    acquire.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    acquire.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    acquire.newLayout = needs_a_frame_of_its_own ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
+                                                 : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    acquire.srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
+    acquire.dstQueueFamilyIndex = owner->queue_family;
+    acquire.image = imported_image;
+    acquire.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    acquire.srcAccessMask = 0;
+    acquire.dstAccessMask = needs_a_frame_of_its_own ? VK_ACCESS_TRANSFER_READ_BIT
+                                                     : VK_ACCESS_SHADER_READ_BIT;
+    api.cmd_pipeline_barrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             needs_a_frame_of_its_own ? VK_PIPELINE_STAGE_TRANSFER_BIT
+                                                      : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &acquire);
+
+    if (!needs_a_frame_of_its_own) {
+      return true;
+    }
+
+    VkImageMemoryBarrier to_transfer = {};
+    to_transfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    to_transfer.oldLayout = image_layout;
+    to_transfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_transfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_transfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    to_transfer.image = image;
+    to_transfer.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    to_transfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    const bool first = image_layout == VK_IMAGE_LAYOUT_UNDEFINED;
+    to_transfer.srcAccessMask = first ? 0 : VK_ACCESS_SHADER_READ_BIT;
+    api.cmd_pipeline_barrier(
+      cmd, first ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+      VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &to_transfer);
+
+    if (needs_clearing) {
+      const VkClearColorValue black = {{0.0f, 0.0f, 0.0f, 1.0f}};
+      const VkImageSubresourceRange whole = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+      api.cmd_clear_color_image(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &whole);
+
+      VkImageMemoryBarrier cleared = to_transfer;
+      cleared.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+      cleared.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+      cleared.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      cleared.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      api.cmd_pipeline_barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                               0, nullptr, 0, nullptr, 1, &cleared);
+      needs_clearing = false;
+    }
+
+    VkImageCopy region = {};
+    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.srcOffset = {0, 0, 0};
+    region.dstOffset = {placement.offset_x, placement.offset_y, 0};
+    region.extent = {imported_width, imported_height, 1};
+    api.cmd_copy_image(cmd, imported_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    VkImageMemoryBarrier to_read = to_transfer;
+    to_read.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_read.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    to_read.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    to_read.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    api.cmd_pipeline_barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                             &to_read);
+
+    image_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    return true;
+  }
+
   bool upload_t::begin(const uint8_t *pixels, int width, int height, int stride, VkFormat format,
                        const placement_t &where) {
     if (wedged || recording || !pixels || stride <= 0) {
@@ -391,6 +712,7 @@ namespace pyrowave_encode {
       return false;
     }
     recording = true;
+    reading_import = false;
 
     VkImageMemoryBarrier to_transfer = {};
     to_transfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -474,11 +796,13 @@ namespace pyrowave_encode {
 
   pyrowave_image_view upload_t::view() const {
     pyrowave_image_view view = {};
-    view.image = image;
-    view.width = image_width;
-    view.height = image_height;
-    view.image_format = image_format;
-    view.view_format = image_format;
+    // The imported frame itself when nothing had to be drawn around it, and the image it was copied
+    // into when it did.
+    view.image = reading_import ? imported_image : image;
+    view.width = reading_import ? imported_width : image_width;
+    view.height = reading_import ? imported_height : image_height;
+    view.image_format = reading_import ? imported_format : image_format;
+    view.view_format = view.image_format;
     view.mip_level = 0;
     view.layer = 0;
     view.aspect = VK_IMAGE_ASPECT_COLOR_BIT;

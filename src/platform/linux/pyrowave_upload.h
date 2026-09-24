@@ -5,6 +5,7 @@
 #pragma once
 
 // local includes
+#include "src/platform/linux/pyrowave_encode.h"
 #include "src/platform/linux/pyrowave_vulkan.h"
 
 // standard includes
@@ -84,6 +85,26 @@ namespace pyrowave_encode {
                const placement_t &where);
 
     /**
+     * @brief Take a frame that is already on the GPU, copying nothing across the bus at all.
+     *
+     * The whole cost of the other path is the copy into memory the GPU can read, and a capture
+     * backend that can hand over a dmabuf has already put the frame there. What is left is to
+     * describe it to Vulkan and to take it off the queue family that filled it.
+     *
+     * A stream that needs bars still costs one copy, but a copy between two images on the GPU rather
+     * than one across the bus, which is roughly a tenth of the price and does not touch the host.
+     *
+     * @param buffer What capture handed over. The descriptors stay the caller's: this duplicates the
+     *   one it uses and never closes theirs.
+     * @param where Where the picture sits in what the codec reads, exactly as for the copying path.
+     * @return false when this frame cannot be imported, which is a frame lost rather than a session.
+     */
+    bool begin_imported(const dmabuf_t &buffer, const placement_t &where);
+
+    /// Whether this path can import at all, which is a property of the device rather than the frame.
+    bool can_import() const;
+
+    /**
      * @brief Open a command buffer over the picture already on the GPU, copying nothing.
      *
      * For the frames a host repeats when capture has nothing new. The image is already where the
@@ -128,6 +149,8 @@ namespace pyrowave_encode {
     upload_t() = default;
 
     bool resolve(const vk_device_t &owner);
+    bool import_dmabuf(const dmabuf_t &buffer);
+    void release_import();
     bool prepare(int width, int height, int stride, VkFormat format, const placement_t &where);
     void release_frame_resources();
 
@@ -168,6 +191,16 @@ namespace pyrowave_encode {
     /// Set when the image is new, so the bars are painted once rather than every frame.
     bool needs_clearing = false;
 
+    /// The frame capture lent us, imported for as long as this frame lasts.
+    VkImage imported_image = VK_NULL_HANDLE;
+    VkDeviceMemory imported_memory = VK_NULL_HANDLE;
+    VkFormat imported_format = VK_FORMAT_UNDEFINED;
+    uint32_t imported_width = 0;
+    uint32_t imported_height = 0;
+
+    /// Whether the codec should read the imported image itself rather than the one copied into.
+    bool reading_import = false;
+
     /// What capture's rows measured last time, which is what the staging buffer was sized for.
     uint32_t image_stride = 0;
 
@@ -206,6 +239,8 @@ namespace pyrowave_encode {
       PFN_vkCmdPipelineBarrier cmd_pipeline_barrier = nullptr;
       PFN_vkCmdCopyBufferToImage cmd_copy_buffer_to_image = nullptr;
       PFN_vkCmdClearColorImage cmd_clear_color_image = nullptr;
+      PFN_vkCmdCopyImage cmd_copy_image = nullptr;
+      PFN_vkGetMemoryFdPropertiesKHR get_memory_fd_properties = nullptr;
     } api;
   };
 

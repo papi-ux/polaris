@@ -31,6 +31,7 @@ extern "C" {
 
 // local includes
 #ifdef POLARIS_BUILD_PYROWAVE
+  #include "src/platform/linux/pyrowave_capture_frame.h"
   #include "src/platform/linux/pyrowave_encode.h"
 #endif
 #include "adaptive_bitrate.h"
@@ -522,6 +523,7 @@ namespace video {
         case platf::mem_type_e::dxgi:
         case platf::mem_type_e::cuda:
         case platf::mem_type_e::vulkan:
+        case platf::mem_type_e::vulkan_pyrowave:
         case platf::mem_type_e::videotoolbox:
           return platf::frame_residency_e::gpu;
         default:
@@ -541,6 +543,8 @@ namespace video {
           return "cuda"sv;
         case platf::mem_type_e::vulkan:
           return "vulkan"sv;
+        case platf::mem_type_e::vulkan_pyrowave:
+          return "vulkan_pyrowave"sv;
         case platf::mem_type_e::videotoolbox:
           return "videotoolbox"sv;
         default:
@@ -1835,7 +1839,30 @@ namespace video {
     }
 
     int convert(frame_t &frame) override {
-      if (!session || !frame.cpu_data || frame.row_pitch <= 0) {
+      if (!session) {
+        return -1;
+      }
+
+      // Where capture left it, whenever capture can leave it on the GPU. This is the whole cost of
+      // the other path: a full frame copied into memory the GPU can read, sixty times a second,
+      // which at a mirrored ultrawide is four milliseconds of every frame's budget.
+      if (frame.transport() == platf::frame_transport_e::dmabuf && frame.compat_img()) {
+        pyrowave_encode::dmabuf_t buffer;
+        if (pyrowave_encode::dmabuf_from_frame(*frame.compat_img(), buffer)) {
+          if (!session->encode_imported(buffer, max_frame_bytes)) {
+            return -1;
+          }
+          converted_since_last_packet = true;
+          return session->bitstream().empty() ? -1 : 0;
+        }
+        if (!complained_about_format) {
+          complained_about_format = true;
+          BOOST_LOG(error) << "PyroWave: capture says this frame is a dmabuf and does not describe one"sv;
+        }
+        return -1;
+      }
+
+      if (!frame.cpu_data || frame.row_pitch <= 0) {
         return -1;
       }
 

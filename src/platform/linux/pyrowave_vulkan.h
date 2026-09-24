@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <vector>
 
 namespace pyrowave_encode {
 
@@ -84,6 +85,16 @@ namespace pyrowave_encode {
     std::string gpu_name;
 
     /**
+     * @brief Whether this device can take a captured frame as a dmabuf rather than as a copy.
+     *
+     * Four extensions have to be there: the fd import itself, the dmabuf handle type, the DRM format
+     * modifier that says how the pixels are laid out, and the foreign queue family a buffer another
+     * API filled has to be acquired from. A driver missing any of them is not a driver that can do
+     * three quarters of it, so this is one answer rather than four.
+     */
+    bool can_import_dmabuf = false;
+
+    /**
      * @brief The queue lock, and nothing else. A leaf: never held across a call into the codec.
      *
      * A VkQueue may only be submitted to from one thread at a time, and two sessions share this one.
@@ -123,6 +134,7 @@ namespace pyrowave_encode {
     VkPhysicalDeviceVulkan11Features vulkan11 = {};
     VkPhysicalDeviceVulkan12Features vulkan12 = {};
     VkPhysicalDeviceVulkan13Features vulkan13 = {};
+    std::vector<const char *> device_extensions;
     float queue_priority = 1.0f;
   };
 

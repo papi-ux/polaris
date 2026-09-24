@@ -345,13 +345,15 @@ namespace video {
   /**
    * @brief PyroWave's formats, which are almost none of them.
    *
-   * The codec takes packed BGRA from host memory and decides its own chroma at encoder creation,
-   * so there is no eight bit versus ten bit choice to advertise and no hardware device type to
-   * match. Present so the dispatch has something to recognise.
+   * The codec takes packed pixels and decides its own chroma at encoder creation, so there is no
+   * eight bit versus ten bit choice to advertise. The device type is not a formality: it is what the
+   * capture backends read to decide what to offer this session, and this codec owns a Vulkan device
+   * that can import a dmabuf, which is a different answer from both system memory and from the
+   * Vulkan device FFmpeg builds.
    */
   struct encoder_platform_formats_pyrowave: encoder_platform_formats_t {
     encoder_platform_formats_pyrowave() {
-      encoder_platform_formats_t::dev_type = platf::mem_type_e::system;
+      encoder_platform_formats_t::dev_type = platf::mem_type_e::vulkan_pyrowave;
       encoder_platform_formats_t::pix_fmt_8bit = platf::pix_fmt_e::yuv420p;
       encoder_platform_formats_t::pix_fmt_10bit = platf::pix_fmt_e::yuv420p;
       // 4:4:4 is a create time choice inside the codec, not a pixel format Polaris hands it, and

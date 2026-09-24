@@ -8,6 +8,7 @@
 #pragma once
 
 // standard includes
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -46,6 +47,34 @@ namespace pyrowave_encode {
   inline int chroma_shift(chroma_e chroma) {
     return chroma == chroma_e::yuv420 ? 1 : 0;
   }
+
+  /**
+   * @brief A captured frame that already lives on the GPU, described the way DRM describes it.
+   *
+   * The fields a dmabuf always carries: which descriptors hold the memory, what the pixels are, how
+   * they are laid out and where each plane starts. Plain integers on purpose, so that handing one of
+   * these over needs no Vulkan header and no capture backend header either.
+   *
+   * The descriptors stay the caller's. Importing duplicates the one it uses.
+   */
+  struct dmabuf_t {
+    int fds[4] = {-1, -1, -1, -1};
+    std::uint32_t fourcc = 0;
+    std::uint64_t modifier = 0;
+    std::uint32_t pitches[4] = {};
+    std::uint32_t offsets[4] = {};
+    int width = 0;
+    int height = 0;
+  };
+
+  /**
+   * @brief Whether this host can take a captured frame as a dmabuf rather than as a copy.
+   *
+   * A property of the GPU and its driver, not of any one frame: the device has to have the external
+   * memory extensions, and a host without them copies instead. Asked before capture is told what to
+   * offer, because offering a dmabuf to a host that cannot import one is a stream with no picture.
+   */
+  bool dmabuf_import_available();
 
   /**
    * @brief What a client has to recognise before this host will stream the codec to it.
@@ -162,6 +191,20 @@ namespace pyrowave_encode {
      */
     virtual bool encode_packed(const uint8_t *pixels, int src_width, int src_height, int stride,
                                std::size_t max_bytes) = 0;
+
+    /**
+     * @brief Encode a captured frame that is already on the GPU, copying nothing across the bus.
+     *
+     * What encode_packed does without the copy that is most of its cost. The frame is described,
+     * taken off the queue family that filled it, and read where it lies; a stream that needs bars
+     * costs one copy between two images on the GPU, which is a tenth of the price of one across it.
+     *
+     * @param buffer What capture handed over.
+     * @param max_bytes The most this frame may occupy.
+     * @return false when this frame could not be imported or encoded. One frame, not the session:
+     *   the caller may hand over the next one.
+     */
+    virtual bool encode_imported(const dmabuf_t &buffer, std::size_t max_bytes) = 0;
 
     /**
      * @brief Encode the last converted picture again, as a new frame.

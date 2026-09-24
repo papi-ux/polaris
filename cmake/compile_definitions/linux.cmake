@@ -405,7 +405,9 @@ if(${POLARIS_ENABLE_PYROWAVE})
             "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_vulkan.h"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_vulkan.cpp"
             "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_upload.h"
-            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_upload.cpp")
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_upload.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_capture_frame.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_capture_frame.cpp")
 endif()
 
 # wayland
