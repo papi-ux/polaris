@@ -14,6 +14,12 @@
 #include <vector>
 
 namespace pyrowave_encode {
+  inline constexpr auto bitstream_id = "pyrowave-186f0393-sdr420-v1";
+  inline constexpr std::size_t max_frame_bytes = 8 * 1024 * 1024;
+  inline constexpr std::size_t packet_bytes = 60 * 1024;
+  // One GameStream decode unit contains the complete frame, not one unit for
+  // each coefficient packet. The upstream bitstream is self-delimiting.
+  std::vector<uint8_t> pack_frame(const std::vector<std::vector<uint8_t>>& packets, int width, int height);
 
   /**
    * @brief The PyroWave version this binary is linked against, as MAJOR.MINOR.PATCH.
@@ -74,16 +80,16 @@ namespace pyrowave_encode {
      *
      * Every packet is independent: PyroWave codes 64x64 blocks of coefficients in isolation, so a
      * frame that loses one still decodes. Valid until the next encode.
-     * @param packet_boundary The largest packet the caller will send.
+     * @param packet_boundary Split target; an individual coefficient block may exceed it.
      */
     virtual std::vector<std::vector<uint8_t>> packets(std::size_t packet_boundary) = 0;
   };
 
   /**
    * @brief Make an encoder for a frame size, or nullptr when this machine cannot.
-   * @param width Frame width; rounded down to even, because 4:2:0 has no half chroma sample.
-   * @param height Frame height, likewise.
+   * @param width Even output frame width, between 16 and 4096.
+   * @param height Even output frame height, between 16 and 4096.
    */
-  std::unique_ptr<session_t> make_session(int width, int height);
+  std::unique_ptr<session_t> make_session(int width, int height, int source_width = 0, int source_height = 0);
 
 }  // namespace pyrowave_encode

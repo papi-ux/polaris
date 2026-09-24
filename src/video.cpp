@@ -1787,23 +1787,22 @@ namespace video {
    */
   class pyrowave_encode_session_t: public encode_session_t {
   public:
-    pyrowave_encode_session_t(std::unique_ptr<pyrowave_encode::session_t> session, std::size_t max_frame_bytes):
-        session {std::move(session)},
-        max_frame_bytes {max_frame_bytes} {
+    pyrowave_encode_session_t(std::unique_ptr<pyrowave_encode::session_t> session, std::size_t max_frame_bytes, int width, int height, int source_width, int source_height):
+        width {width}, height {height}, session {std::move(session)},
+        max_frame_bytes {max_frame_bytes}, source_width {source_width}, source_height {source_height} {
     }
 
     int convert(frame_t &frame) override {
       encoded.clear();
-      if (!session || !frame.cpu_data || frame.row_pitch <= 0) {
+      if (!session || !frame.cpu_data || frame.row_pitch <= 0 || frame.pixel_pitch != 4 ||
+          frame.width != source_width || frame.height != source_height ||
+          frame.metadata.residency != platf::frame_residency_e::cpu || frame.metadata.format != platf::frame_format_e::bgra8) {
         return -1;
       }
       if (!session->encode_bgra(frame.cpu_data, frame.row_pitch, max_frame_bytes)) {
         return -1;
       }
-      // One MTU's worth, minus the room Polaris's own headers take on the wire. PyroWave splits
-      // between coefficient blocks and never inside one, so a block bigger than this still comes
-      // back as one oversized packet; the sender has to notice rather than assume.
-      encoded = session->packets(payload_boundary);
+      encoded = session->packets(pyrowave_encode::packet_bytes);
       return encoded.empty() ? -1 : 0;
     }
 
@@ -1825,11 +1824,11 @@ namespace video {
       return encoded;
     }
 
+    int width = 0, height = 0;
   private:
-    static constexpr std::size_t payload_boundary = 1200;
-
     std::unique_ptr<pyrowave_encode::session_t> session;
     std::size_t max_frame_bytes = 0;
+    int source_width = 0, source_height = 0;
     std::vector<std::vector<uint8_t>> encoded;
   };
 #endif
@@ -2624,6 +2623,14 @@ namespace video {
     return *chosen_encoder;
   }
 
+  bool pyrowave_enabled() {
+#ifdef POLARIS_BUILD_PYROWAVE
+    return pyrowave_encode::api_version() == "0.6.0" && pyrowave_encode::available();
+#else
+    return false;
+#endif
+  }
+
   static const std::vector<encoder_t *> encoders {
 #ifndef __APPLE__
     &nvenc,
@@ -3340,10 +3347,8 @@ namespace video {
   /**
    * @brief Hand over the packets convert() produced.
    *
-   * The work happened in convert(), which is the call that is given a frame. Every packet is marked
-   * a keyframe because every one of them is part of one: PyroWave is intra-only, so there is no
-   * delta frame for the flag to distinguish it from, and a receiver that treats them all as
-   * recoverable is right.
+   * The work happened in convert(). One complete upstream bitstream becomes
+   * one GameStream frame; all coefficient packets belong to that same IDR.
    */
   int encode_pyrowave(int64_t frame_nr, pyrowave_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
     const auto &encoded = session.packets();
@@ -3351,14 +3356,13 @@ namespace video {
       return -1;
     }
 
-    const auto done = std::chrono::steady_clock::now();
-    for (const auto &payload : encoded) {
-      auto packet = std::make_unique<packet_raw_generic>(std::vector<uint8_t> {payload}, frame_nr, true);
-      packet->channel_data = channel_data;
-      packet->frame_timestamp = frame_timestamp;
-      packet->encode_done_timestamp = done;
-      packets->raise(std::move(packet));
-    }
+    auto payload = pyrowave_encode::pack_frame(encoded, session.width, session.height);
+    if (payload.empty()) return -1;
+    auto packet = std::make_unique<packet_raw_generic>(std::move(payload), frame_nr, true);
+    packet->channel_data = channel_data;
+    packet->frame_timestamp = frame_timestamp;
+    packet->encode_done_timestamp = std::chrono::steady_clock::now();
+    packets->raise(std::move(packet));
 
     return 0;
   }
@@ -3911,7 +3915,7 @@ namespace video {
     std::unique_ptr<encode_session_t> session;
 #ifdef POLARIS_BUILD_PYROWAVE
     if (dynamic_cast<platf::pyrowave_encode_device_t *>(encode_device.get())) {
-      auto pyrowave_session = pyrowave_encode::make_session(width, height);
+      auto pyrowave_session = pyrowave_encode::make_session(config.width, config.height, width, height);
       if (!pyrowave_session) {
         invalidate_live_probe_reuse();
         return nullptr;
@@ -3920,13 +3924,17 @@ namespace video {
       // The budget for one frame, from the bitrate the session negotiated. PyroWave's rate control
       // is exact rather than approximate, so this is a ceiling it meets rather than aims at, and a
       // frame is the only unit it has: there is no group of pictures to spend across.
-      const auto fps = config.framerate > 0 ? config.framerate : 60;
-      const auto bits_per_frame = static_cast<std::size_t>(std::max(config.bitrate, 1)) * 1000 / static_cast<std::size_t>(fps);
-      const auto max_frame_bytes = std::max<std::size_t>(bits_per_frame / 8, 4096);
+      const auto rate = encoding_framerate_to_rational(config);
+      if (rate.num <= 0 || rate.den <= 0 || config.bitrate <= 0) return nullptr;
+      const auto fps = double(rate.num) / rate.den;
+      const auto max_frame_bytes = std::uint64_t(config.bitrate) * 1000 * rate.den / (8 * std::uint64_t(rate.num));
+      // Leave headroom under GameStream's four 10-bit shard-count fields.
+      // Admission allows 992-byte payloads after the 32-byte encryption prefix.
+      if (max_frame_bytes < 1024 || max_frame_bytes > 3 * 1024 * 1024) return nullptr;
 
       BOOST_LOG(info) << "PyroWave: "sv << width << 'x' << height << " at "sv << fps
                       << " fps, up to "sv << max_frame_bytes << " bytes a frame"sv;
-      session = std::make_unique<pyrowave_encode_session_t>(std::move(pyrowave_session), max_frame_bytes);
+      session = std::make_unique<pyrowave_encode_session_t>(std::move(pyrowave_session), max_frame_bytes, config.width, config.height, width, height);
       session->capture_display_owner = disp;
       return session;
     }
@@ -4308,7 +4316,8 @@ namespace video {
             current_fps,
             effective_bitrate,
             encode_duration,
-            config.videoFormat == 2 ? "av1" :
+            config.videoFormat == VIDEO_FORMAT_PYROWAVE ? "pyrowave" :
+              config.videoFormat == 2 ? "av1" :
               config.videoFormat == 1 ? "hevc" : "h264",
             config.width,
             config.height

@@ -243,6 +243,8 @@ namespace video {
    * whole of the compatibility story: it can never ask for a codec it does not know exists.
    */
   inline constexpr std::uint32_t SCM_PYROWAVE = 0x00800000;
+  inline constexpr auto PYROWAVE_BITSTREAM = "pyrowave-186f0393-sdr420-v1";
+  bool pyrowave_enabled();
 
   struct encoder_platform_formats_t {
     virtual ~encoder_platform_formats_t() = default;
@@ -393,6 +395,9 @@ namespace video {
           BOOST_LOG(error) << "Unknown video format " << config.videoFormat << ", falling back to H.264";
           // fallthrough
         case 0:
+          return h264;
+        case VIDEO_FORMAT_PYROWAVE:
+          // The dedicated PyroWave encoder uses one SDR configuration slot.
           return h264;
         case 1:
           return hevc;

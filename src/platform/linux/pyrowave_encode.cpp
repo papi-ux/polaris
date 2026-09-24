@@ -21,7 +21,7 @@ extern "C" {
 
 // standard includes
 #include <array>
-#include <mutex>
+#include <algorithm>
 
 // local includes
 #include "src/logging.h"
@@ -33,34 +33,20 @@ namespace pyrowave_encode {
 
   namespace {
 
-    /**
-     * The device, made once and kept.
-     *
-     * PyroWave makes its own Vulkan device here rather than borrowing the one FFmpeg built for the
-     * Vulkan encoder. That costs a second device on a host that runs both, and buys a bring-up path
-     * with no interop to get wrong. Borrowing is what the zero copy work will need, and it can take
-     * the handles this device already knows how to report.
-     */
-    pyrowave_device shared_device() {
-      static std::once_flag once;
-      static pyrowave_device device = nullptr;
-      std::call_once(once, [] {
-        const auto result = pyrowave_create_default_device(&device);
-        if (result != PYROWAVE_SUCCESS) {
-          BOOST_LOG(info) << "PyroWave: no usable Vulkan device on this host (result "sv
-                          << static_cast<int>(result) << ')';
-          device = nullptr;
-        }
-      });
-      return device;
-    }
+    // Devices are owned by sessions and released after their encoders.
+    struct device_t {
+      pyrowave_device value = nullptr;
+      device_t() { pyrowave_create_default_device(&value); }
+      ~device_t() { if (value) pyrowave_device_destroy(value); }
+    };
 
     class pyrowave_session_t: public session_t {
     public:
-      pyrowave_session_t(pyrowave_encoder encoder, int width, int height):
+      pyrowave_session_t(std::unique_ptr<device_t> device, pyrowave_encoder encoder, int width, int height, int source_width, int source_height):
+          device {std::move(device)},
           encoder {encoder},
           width {width},
-          height {height} {}
+          height {height}, source_width {source_width}, source_height {source_height} {}
 
       ~pyrowave_session_t() override {
         if (scaler) {
@@ -72,32 +58,46 @@ namespace pyrowave_encode {
       }
 
       bool encode_bgra(const uint8_t *bgra, int stride, std::size_t max_bytes) override {
-        if (!bgra || stride <= 0) {
+        encoded_budget = 0;
+        if (!bgra || stride < source_width * 4) {
           return false;
         }
 
         // Kept between frames: a stream is thousands of identically shaped frames, and building
         // the scaler for each one would dominate a codec that encodes in a tenth of a millisecond.
         if (!scaler) {
-          scaler = sws_getContext(width, height, AV_PIX_FMT_BGRA,
-                                  width, height, AV_PIX_FMT_YUV420P,
-                                  SWS_POINT, nullptr, nullptr, nullptr);
+          const auto scale = std::min(double(width) / source_width, double(height) / source_height);
+          scaled_width = std::max(2, int(source_width * scale) & ~1);
+          scaled_height = std::max(2, int(source_height * scale) & ~1);
+          offset_x = ((width - scaled_width) / 2) & ~1;
+          offset_y = ((height - scaled_height) / 2) & ~1;
+          scaler = sws_getContext(source_width, source_height, AV_PIX_FMT_BGRA,
+                                  scaled_width, scaled_height, AV_PIX_FMT_YUV420P,
+                                  SWS_BILINEAR, nullptr, nullptr, nullptr);
           if (!scaler) {
             BOOST_LOG(error) << "PyroWave: could not make a "sv << width << 'x' << height
                              << " colour converter"sv;
             return false;
           }
-          planes[0].resize(static_cast<std::size_t>(width) * height);
-          planes[1].resize(static_cast<std::size_t>(width / 2) * (height / 2));
-          planes[2].resize(static_cast<std::size_t>(width / 2) * (height / 2));
+          const auto* coefficients = sws_getCoefficients(SWS_CS_ITU709);
+          if (sws_setColorspaceDetails(scaler, coefficients, 1, coefficients, 1, 0, 1 << 16, 1 << 16) < 0) {
+            sws_freeContext(scaler);
+            scaler = nullptr;
+            return false;
+          }
+          planes[0].resize(static_cast<std::size_t>(width) * height, 0);
+          planes[1].resize(static_cast<std::size_t>(width / 2) * (height / 2), 128);
+          planes[2].resize(static_cast<std::size_t>(width / 2) * (height / 2), 128);
         }
 
         const uint8_t *src[4] = {bgra, nullptr, nullptr, nullptr};
         const int src_stride[4] = {stride, 0, 0, 0};
-        uint8_t *dst[4] = {planes[0].data(), planes[1].data(), planes[2].data(), nullptr};
+        uint8_t *dst[4] = {planes[0].data() + offset_y * width + offset_x,
+          planes[1].data() + (offset_y / 2) * (width / 2) + offset_x / 2,
+          planes[2].data() + (offset_y / 2) * (width / 2) + offset_x / 2, nullptr};
         const int dst_stride[4] = {width, width / 2, width / 2, 0};
 
-        if (sws_scale(scaler, src, src_stride, 0, height, dst, dst_stride) != height) {
+        if (sws_scale(scaler, src, src_stride, 0, source_height, dst, dst_stride) != scaled_height) {
           BOOST_LOG(warning) << "PyroWave: colour conversion did not fill the frame"sv;
           return false;
         }
@@ -106,7 +106,8 @@ namespace pyrowave_encode {
       }
 
       bool encode(const uint8_t *y, const uint8_t *u, const uint8_t *v, std::size_t max_bytes) override {
-        if (!encoder || !y || !u || !v || max_bytes == 0) {
+        encoded_budget = 0;
+        if (!encoder || !y || !u || !v || max_bytes < 1024 || max_bytes > max_frame_bytes / 2) {
           return false;
         }
 
@@ -130,32 +131,36 @@ namespace pyrowave_encode {
           BOOST_LOG(warning) << "PyroWave: encode failed (result "sv << static_cast<int>(result) << ')';
           return false;
         }
+        encoded_budget = max_bytes;
         return true;
       }
 
       std::vector<std::vector<uint8_t>> packets(std::size_t packet_boundary) override {
         std::vector<std::vector<uint8_t>> out;
-        if (!encoder || packet_boundary == 0) {
+        if (!encoder || !encoded_budget || packet_boundary < 8 || packet_boundary > 64 * 1024) {
           return out;
         }
 
         std::size_t count = 0;
-        if (pyrowave_encoder_compute_num_packets(encoder, packet_boundary, &count) != PYROWAVE_SUCCESS || count == 0) {
+        if (pyrowave_encoder_compute_num_packets(encoder, packet_boundary, &count) != PYROWAVE_SUCCESS || count == 0 || count > max_frame_bytes / packet_boundary) {
           return out;
         }
 
         std::vector<pyrowave_packet> descriptors(count);
-        std::vector<uint8_t> bitstream(count * packet_boundary);
+        // A coefficient block can exceed a small split target. Reserve the
+        // encoded frame budget as well as the packet-count estimate.
+        std::vector<uint8_t> bitstream(std::max(count * packet_boundary, encoded_budget + 16));
         std::size_t written = 0;
         if (pyrowave_encoder_packetize(encoder, descriptors.data(), packet_boundary, &written,
-                                       bitstream.data(), bitstream.size()) != PYROWAVE_SUCCESS) {
+                                       bitstream.data(), bitstream.size()) != PYROWAVE_SUCCESS || written > count) {
           return out;
         }
 
         out.reserve(written);
         for (std::size_t i = 0; i < written; ++i) {
           const auto &descriptor = descriptors[i];
-          if (descriptor.offset + descriptor.size > bitstream.size()) {
+          if (descriptor.offset > bitstream.size() || descriptor.size > bitstream.size() - descriptor.offset ||
+              descriptor.size > std::max<std::size_t>(packet_boundary, 16380) || descriptor.size < 8 || descriptor.size % 4) {
             // A packet that runs past the buffer means the library and this caller disagree about
             // the bitstream layout, which is not something to paper over one packet at a time.
             BOOST_LOG(error) << "PyroWave: packet "sv << i << " runs past the bitstream"sv;
@@ -168,9 +173,15 @@ namespace pyrowave_encode {
       }
 
     private:
+      // Each session owns its queue and allocator; concurrent streams must not
+      // mutate a single upstream device's frame/command-buffer state.
+      std::unique_ptr<device_t> device;
       pyrowave_encoder encoder = nullptr;
       int width = 0;
       int height = 0;
+      std::size_t encoded_budget = 0;
+      int source_width = 0, source_height = 0;
+      int scaled_width = 0, scaled_height = 0, offset_x = 0, offset_y = 0;
       SwsContext *scaler = nullptr;
       std::array<std::vector<uint8_t>, 3> planes;
     };
@@ -186,25 +197,45 @@ namespace pyrowave_encode {
   }
 
   bool available() {
-    return shared_device() != nullptr;
+    static const bool supported = [] { return device_t{}.value != nullptr; }();
+    return supported;
   }
 
-  std::unique_ptr<session_t> make_session(int width, int height) {
-    auto device = shared_device();
-    if (!device) {
-      return nullptr;
+  std::vector<uint8_t> pack_frame(const std::vector<std::vector<uint8_t>>& packets, int width, int height) {
+    if (width < 16 || height < 16 || width > 4096 || height > 4096 || width % 2 || height % 2 ||
+        packets.empty() || packets.size() > max_frame_bytes / 12) return {};
+    std::size_t total = 0;
+    for (const auto& packet : packets) {
+      if (packet.size() < 8 || packet.size() > packet_bytes || packet.size() % 4 ||
+          packet.size() > max_frame_bytes - total) return {};
+      total += packet.size();
     }
+    const auto& first = packets.front();
+    const auto header = std::uint32_t(first[0]) | (std::uint32_t(first[1]) << 8) |
+                        (std::uint32_t(first[2]) << 16) | (std::uint32_t(first[3]) << 24);
+    if (!(header & 0x80000000u) || (header & 0x3fff) + 1 != unsigned(width) ||
+        ((header >> 14) & 0x3fff) + 1 != unsigned(height)) return {};
+    std::vector<uint8_t> out;
+    out.reserve(total);
+    for (const auto& packet : packets) out.insert(out.end(), packet.begin(), packet.end());
+    return out;
+  }
 
+  std::unique_ptr<session_t> make_session(int width, int height, int source_width, int source_height) {
     // 4:2:0 has no half chroma sample, and the library refuses an odd extent rather than rounding
     // one for us.
-    width &= ~1;
-    height &= ~1;
-    if (width <= 0 || height <= 0) {
+    if (!source_width) source_width = width;
+    if (!source_height) source_height = height;
+    if (width < 16 || height < 16 || width > 4096 || height > 4096 || width % 2 || height % 2 ||
+        source_width <= 0 || source_height <= 0 || source_width > 16384 || source_height > 16384) {
       return nullptr;
     }
 
+    auto device = std::make_unique<device_t>();
+    if (!device->value) return nullptr;
+
     pyrowave_encoder_create_info info = {};
-    info.device = device;
+    info.device = device->value;
     info.width = width;
     info.height = height;
     info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_420;
@@ -217,7 +248,7 @@ namespace pyrowave_encode {
       return nullptr;
     }
 
-    return std::make_unique<pyrowave_session_t>(encoder, width, height);
+    return std::make_unique<pyrowave_session_t>(std::move(device), encoder, width, height, source_width, source_height);
   }
 
 }  // namespace pyrowave_encode

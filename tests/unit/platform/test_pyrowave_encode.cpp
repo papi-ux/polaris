@@ -12,6 +12,10 @@
 
   #include <algorithm>
   #include <numeric>
+  #include <fstream>
+  #include <cstdlib>
+  #include <vulkan/vulkan.h>
+  #include "pyrowave.h"
 
 namespace {
 
@@ -65,6 +69,8 @@ TEST(PyroWaveEncodeTests, AnOddExtentIsRefusedRatherThanRounded) {
   EXPECT_EQ(pyrowave_encode::make_session(0, 720), nullptr);
   EXPECT_EQ(pyrowave_encode::make_session(1280, 0), nullptr);
   EXPECT_EQ(pyrowave_encode::make_session(-2, -2), nullptr);
+  EXPECT_EQ(pyrowave_encode::make_session(1279, 720), nullptr);
+  EXPECT_EQ(pyrowave_encode::make_session(4098, 720), nullptr);
 }
 
 TEST(PyroWaveEncodeTests, EncodesAFrameIntoPacketsTheNetworkCanCarry) {
@@ -212,6 +218,84 @@ TEST(PyroWaveEncodeTests, EveryFrameStandsAlone) {
   const auto second = session->packets(1024);
   ASSERT_FALSE(second.empty());
   EXPECT_EQ(first.size(), second.size());
+}
+
+
+TEST(PyroWaveEncodeTests, InvalidInputCannotReplayPreviousFrame) {
+  if (!pyrowave_encode::available()) GTEST_SKIP();
+  auto session = pyrowave_encode::make_session(128, 96);
+  ASSERT_NE(session, nullptr);
+  test_frame_t frame(128, 96);
+  EXPECT_TRUE(session->packets(1024).empty());
+  ASSERT_TRUE(session->encode(frame.y.data(), frame.u.data(), frame.v.data(), 64000));
+  EXPECT_FALSE(session->packets(1024).empty());
+  EXPECT_FALSE(session->encode(nullptr, frame.u.data(), frame.v.data(), 64000));
+  EXPECT_TRUE(session->packets(1024).empty());
+  ASSERT_TRUE(session->encode(frame.y.data(), frame.u.data(), frame.v.data(), 64000));
+  EXPECT_FALSE(session->encode_bgra(frame.y.data(), 128 * 4 - 1, 64000));
+  EXPECT_TRUE(session->packets(1024).empty());
+}
+
+TEST(PyroWaveEncodeTests, FramePackingRejectsInvalidLengthsAndExtents) {
+  EXPECT_TRUE(pyrowave_encode::pack_frame({}, 128, 96).empty());
+  EXPECT_TRUE(pyrowave_encode::pack_frame({std::vector<uint8_t>(7)}, 128, 96).empty());
+  EXPECT_TRUE(pyrowave_encode::pack_frame({std::vector<uint8_t>(12)}, 127, 96).empty());
+  EXPECT_TRUE(pyrowave_encode::pack_frame({std::vector<uint8_t>(65536)}, 128, 96).empty());
+  std::vector<std::vector<uint8_t>> oversized(140, std::vector<uint8_t>(61440));
+  EXPECT_TRUE(pyrowave_encode::pack_frame(oversized, 128, 96).empty());
+}
+
+TEST(PyroWaveEncodeTests, CaptureScalesToRequestedExtentWithFullRangeRec709AndLetterboxing) {
+  if (!pyrowave_encode::available()) GTEST_SKIP();
+  constexpr int width = 128, height = 96, source_width = 192, source_height = 108;
+  auto session = pyrowave_encode::make_session(width, height, source_width, source_height);
+  ASSERT_NE(session, nullptr);
+  constexpr int stride = source_width * 4 + 32;
+  std::vector<uint8_t> bgra(stride * source_height);
+  for (int y = 0; y < source_height; ++y) for (int x = 0; x < source_width; ++x) {
+    auto* p = bgra.data() + y * stride + x * 4;
+    p[0] = 58; p[1] = 120; p[2] = 179; p[3] = 255;
+  }
+  ASSERT_TRUE(session->encode_bgra(bgra.data(), stride, 64000));
+  const auto packets = session->packets(pyrowave_encode::packet_bytes);
+  ASSERT_FALSE(packets.empty());
+  const auto frame = pyrowave_encode::pack_frame(packets, width, height);
+  ASSERT_GT(frame.size(), 32U);
+  EXPECT_EQ(frame[0], width - 1);
+  EXPECT_NE(frame[3] & 0x80, 0); // upstream extended sequence header
+  // An explicit path lets the matched Nova presenter consume the actual host
+  // output during interoperability validation. Ordinary unit tests write nothing.
+  if (const char* path = std::getenv("POLARIS_PYROWAVE_TEST_FRAME")) {
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(frame.data()), frame.size());
+    ASSERT_TRUE(out.good());
+  }
+  struct Decoder {
+    pyrowave_device device = nullptr;
+    pyrowave_decoder decoder = nullptr;
+    ~Decoder() { if (decoder) pyrowave_decoder_destroy(decoder); if (device) pyrowave_device_destroy(device); }
+  } decoder;
+  ASSERT_EQ(pyrowave_create_default_device(&decoder.device), PYROWAVE_SUCCESS);
+  pyrowave_decoder_create_info info{};
+  info.device = decoder.device; info.width = width; info.height = height; info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_420;
+  ASSERT_EQ(pyrowave_decoder_create(&info, &decoder.decoder), PYROWAVE_SUCCESS);
+  for (const auto& packet : packets)
+    ASSERT_EQ(pyrowave_decoder_push_packet(decoder.decoder, packet.data(), packet.size()), PYROWAVE_SUCCESS);
+  ASSERT_TRUE(pyrowave_decoder_decode_is_ready(decoder.decoder, false));
+  test_frame_t output(width, height);
+  pyrowave_cpu_buffer buffer{};
+  buffer.format = PYROWAVE_CPU_BUFFER_FORMAT_YUV420P; buffer.width = width; buffer.height = height;
+  buffer.data[0] = output.y.data(); buffer.data[1] = output.u.data(); buffer.data[2] = output.v.data();
+  for (int i = 0; i < 3; ++i) {
+    buffer.row_stride_in_bytes[i] = i ? width / 2 : width;
+    buffer.plane_size_in_bytes[i] = i ? width * height / 4 : width * height;
+  }
+  ASSERT_EQ(pyrowave_decoder_decode_cpu_buffer_synchronous(decoder.decoder, &buffer), PYROWAVE_SUCCESS);
+  EXPECT_NEAR(output.y[height / 2 * width + width / 2], 128, 4);
+  EXPECT_NEAR(output.u[height / 4 * (width / 2) + width / 4], 90, 4);
+  EXPECT_NEAR(output.v[height / 4 * (width / 2) + width / 4], 160, 4);
+  EXPECT_NEAR(output.y[4 * width + width / 2], 0, 4);
+  EXPECT_NEAR(output.y[(height - 5) * width + width / 2], 0, 4);
 }
 
 #endif  // POLARIS_BUILD_PYROWAVE

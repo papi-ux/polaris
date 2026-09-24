@@ -6600,8 +6600,9 @@ namespace nvhttp {
 #ifdef POLARIS_BUILD_PYROWAVE
     // A bit above every one Sunshine's extensions claim. A Moonlight client reads the mask, finds a
     // bit it has no name for and ignores it, so it can never ask for a codec it cannot decode.
-    if (pyrowave_encode::available()) {
+    if (video::pyrowave_enabled()) {
       codec_mode_flags |= video::SCM_PYROWAVE;
+      tree.put("root.PolarisPyrowaveBitstream", video::PYROWAVE_BITSTREAM);
     }
 #endif
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);
@@ -8168,7 +8169,11 @@ namespace nvhttp {
 #ifdef POLARIS_BUILD_PYROWAVE
       // Only when a device on this host can actually run the compute shaders, because unlike the
       // others there is no software fallback to quietly take over.
-      if (pyrowave_encode::available()) codecs.push_back("pyrowave");
+      if (video::pyrowave_enabled()) {
+        codecs.push_back("pyrowave");
+        capture["pyrowave_bitstream"] = video::PYROWAVE_BITSTREAM;
+        capture["pyrowave_capture"] = "cpu-sdr";
+      }
 #endif
 
       SimpleWeb::CaseInsensitiveMultimap headers;
