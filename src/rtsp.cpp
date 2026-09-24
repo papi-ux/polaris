@@ -115,6 +115,8 @@ namespace rtsp_stream {
           return "hevc"sv;
         case 2:
           return "av1"sv;
+        case video::VIDEO_FORMAT_PYROWAVE:
+          return "pyrowave"sv;
         default:
           return "h264"sv;
       }

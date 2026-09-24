@@ -2594,6 +2594,46 @@ namespace video {
   };
 #endif
 
+  static encoder_t *chosen_encoder;
+
+#ifdef POLARIS_BUILD_PYROWAVE
+  /**
+   * @brief PyroWave, which is not one of the probed encoders and never will be.
+   *
+   * Kept out of the list below on purpose. probe_encoders picks one encoder for the whole host by
+   * asking FFmpeg for H.264, HEVC and AV1 by name; this codec has no FFmpeg name and is chosen per
+   * session by the client, so it answers a different question and would only corrupt that one.
+   *
+   * All three codec slots hold the same thing. They exist because encoder_t has three, and their
+   * names are read only by make_avcodec_encode_session, which this path never reaches.
+   */
+  encoder_t pyrowave {
+    "pyrowave"sv,
+    std::make_unique<encoder_platform_formats_pyrowave>(),
+    {{}, {}, {}, {}, {}, {}, "pyrowave"s},
+    {{}, {}, {}, {}, {}, {}, "pyrowave"s},
+    {{}, {}, {}, {}, {}, {}, "pyrowave"s},
+    PARALLEL_ENCODING  // A per session codec needs a per session encode thread, which is what this asks for.
+  };
+#endif
+
+  /**
+   * @brief The encoder this session runs on.
+   *
+   * Almost always the one the probe picked. A session that negotiated the compute codec is the
+   * exception, and it is an exception rather than a second probed candidate because the choice is
+   * the client's and lasts one session, while chosen_encoder is the host's and lasts until the next
+   * probe.
+   */
+  const encoder_t &encoder_for_session(const config_t &config) {
+#ifdef POLARIS_BUILD_PYROWAVE
+    if (config.videoFormat == VIDEO_FORMAT_PYROWAVE) {
+      return pyrowave;
+    }
+#endif
+    return *chosen_encoder;
+  }
+
   static const std::vector<encoder_t *> encoders {
 #ifndef __APPLE__
     &nvenc,
@@ -2614,7 +2654,7 @@ namespace video {
     &software
   };
 
-  static encoder_t *chosen_encoder;
+
   static encoder_selection_info_t encoder_selection_info;
   static std::shared_timed_mutex encoder_state_mutex;
   static thread_local bool encoder_probe_in_progress = false;
@@ -4510,6 +4550,8 @@ namespace video {
     std::vector<std::string> &display_names,
     int &display_p
   ) {
+    // The host wide answer, deliberately: this path serves several sessions from one encoder, and a
+    // codec chosen per session asks for parallel encoding instead so it gets a thread of its own.
     const auto &encoder = *chosen_encoder;
 
     std::shared_ptr<platf::display_t> disp;
@@ -4843,7 +4885,7 @@ namespace video {
         display = ref->display_wp->lock();
       }
 
-      auto &encoder = *chosen_encoder;
+      auto &encoder = encoder_for_session(config);
 
       // A rollback or newer paired target can arrive while an FFmpeg NVENC
       // session is being torn down. Build the replacement directly at the
@@ -4951,7 +4993,7 @@ namespace video {
     if (config.capture_generation.empty()) {
       config.capture_generation = current_capture_generation_identity();
     }
-    if (chosen_encoder->flags & PARALLEL_ENCODING) {
+    if (encoder_for_session(config).flags & PARALLEL_ENCODING) {
       capture_async(
         std::move(mail),
         config,
