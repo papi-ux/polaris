@@ -16,6 +16,30 @@
 namespace pyrowave_encode {
 
   /**
+   * @brief What a client has to recognise before this host will stream the codec to it.
+   *
+   * Three things a decoder cannot work out for itself, in one string. The codec revision, because
+   * its bitstream and its C API are both unstable before 1.0, so an encoder and a decoder built a
+   * few commits apart can agree on every byte of the protocol and still produce noise. The
+   * colourimetry, because the bitstream reserves fields for primaries, transfer function and range
+   * and nothing upstream writes them yet, so they arrive as zero and mean nothing: these frames are
+   * full range Rec. 709 SDR 4:2:0 and the only place that is written down is here. And a version,
+   * for when one of those changes.
+   *
+   * It is deliberately brittle. Streaming a wrong guess produces a picture that is merely wrong,
+   * washed out or off hue or noise, with nothing in any log to say why; refusing to stream produces
+   * a sentence. While the codec is behind a build flag and both ends ship together that trade is
+   * free, and it is the reason a Polaris and a Nova from different releases will not pair on this
+   * codec. Before it could be anyone's default this has to become a negotiation of capabilities
+   * rather than a single token, or upstream has to start writing the colourimetry it already has
+   * room for.
+   *
+   * Moves with the third-party/pyrowave submodule pin. The two disagreeing is the failure this
+   * exists to catch, so it cannot catch it for itself.
+   */
+  inline constexpr const char *profile_token = "pyrowave-186f0393-sdr420-v1";
+
+  /**
    * @brief The PyroWave version this binary is linked against, as MAJOR.MINOR.PATCH.
    *
    * Read from the library rather than from the build system. The two can disagree, and a codec

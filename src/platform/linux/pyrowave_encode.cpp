@@ -91,6 +91,21 @@ namespace pyrowave_encode {
                              << " colour converter"sv;
             return false;
           }
+
+          // Said out loud, because the default is neither of the things anyone would assume. swscale
+          // converts RGB to YUV as limited range BT.601 unless told otherwise, and a decoder reading
+          // these frames as Rec. 709 gets the hue wrong on anything saturated while looking entirely
+          // plausible on a desktop. The bitstream has fields for this and upstream does not write
+          // them, so the only agreement available is the one in profile_token, and this is the end of
+          // it that has to be true.
+          const int *coefficients = sws_getCoefficients(SWS_CS_ITU709);
+          if (sws_setColorspaceDetails(scaler, coefficients, 1, coefficients, 1,
+                                       0, 1 << 16, 1 << 16) < 0) {
+            BOOST_LOG(error) << "PyroWave: this converter will not do full range Rec. 709"sv;
+            sws_freeContext(scaler);
+            scaler = nullptr;
+            return false;
+          }
           planes[0].resize(static_cast<std::size_t>(width) * height);
           planes[1].resize(static_cast<std::size_t>(width / 2) * (height / 2));
           planes[2].resize(static_cast<std::size_t>(width / 2) * (height / 2));

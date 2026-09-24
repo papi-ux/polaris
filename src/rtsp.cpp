@@ -1461,6 +1461,9 @@ namespace rtsp_stream {
     // one that degrades.
     if (!worker_owned && pyrowave_encode::available()) {
       ss << "a=rtpmap:99 PYROWAVE/90000"sv << std::endl;
+      // The codec revision and the colourimetry, which a decoder cannot infer and must match. A
+      // client that does not know this exact string is expected not to ask for the codec at all.
+      ss << "a=fmtp:99 "sv << pyrowave_encode::profile_token << std::endl;
     }
 #endif
 
