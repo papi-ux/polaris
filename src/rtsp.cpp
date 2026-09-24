@@ -39,6 +39,9 @@ extern "C" {
 #include "stream.h"
 #include "sync.h"
 #include "video.h"
+#ifdef POLARIS_BUILD_PYROWAVE
+  #include "src/platform/linux/pyrowave_encode.h"
+#endif
 
 #ifdef __linux__
   #include "platform/linux/multiseat_moonlight_runtime.h"
@@ -1448,6 +1451,19 @@ namespace rtsp_stream {
       ss << "a=rtpmap:98 AV1/90000"sv << std::endl;
     }
 
+#ifdef POLARIS_BUILD_PYROWAVE
+    // The line a client sniffs for to learn this host can do it, in the same shape as AV1's. A
+    // Moonlight client reads an rtpmap it has no name for and ignores it, so advertising costs
+    // nothing, and a client that does know the name still has to ask before it gets it.
+    //
+    // Only when a device here can actually run the compute shaders: there is no software fallback
+    // for this codec, so a host that offers it and then cannot is a stream that fails rather than
+    // one that degrades.
+    if (!worker_owned && pyrowave_encode::available()) {
+      ss << "a=rtpmap:99 PYROWAVE/90000"sv << std::endl;
+    }
+#endif
+
     if (!session.surround_params.empty()) {
       // If we have our own surround parameters, advertise them twice first
       ss << "a=fmtp:97 surround-params="sv << session.surround_params << std::endl;
@@ -1796,6 +1812,19 @@ namespace rtsp_stream {
 
       respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
       return;
+    }
+
+    if (config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE) {
+      bool can_pyrowave = false;
+#ifdef POLARIS_BUILD_PYROWAVE
+      can_pyrowave = pyrowave_encode::available();
+#endif
+      if (!can_pyrowave) {
+        BOOST_LOG(warning) << "The client requested PyroWave, which this host cannot run"sv;
+
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+      }
     }
 
     if (config.monitor.videoFormat == 2 && video::active_av1_mode == 1) {
