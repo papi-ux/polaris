@@ -89,6 +89,7 @@ namespace config {
     struct {
       int tune;
       int rc_mode;
+      int quality;  ///< FFmpeg Vulkan Video encode quality level: 0 = driver default
     } vk;
 
     std::string capture;

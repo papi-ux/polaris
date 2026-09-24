@@ -1,5 +1,6 @@
 <script setup>
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
+import CodecSupportPanel from "./CodecSupportPanel.vue";
 
 const props = defineProps([
   'platform',
@@ -7,6 +8,22 @@ const props = defineProps([
 ])
 
 const config = ref(props.config)
+
+// Highest quality level the probed driver exposes (maxQualityLevels-1), served in
+// encoder_codec_support. Null or absent means no live probe has reported a count yet,
+// so only level 0 is offered; Polaris clamps out-of-range saved values on its side.
+const vkQualityMax = computed(() => {
+  const max = props.config?.encoder_codec_support?.vk_quality_max
+  return Number.isInteger(max) && max >= 0 ? max : 0
+})
+
+// A saved level above what the probed driver offers (or saved before any probe ran) has no
+// matching option; keep it as its own option so the select doesn't read blank. Polaris
+// clamps it to a real level when the session starts.
+const vkQualitySaved = computed(() => {
+  const value = Number(config.value.vk_quality)
+  return Number.isInteger(value) && value >= 0 && value > vkQualityMax.value ? value : null
+})
 </script>
 
 <template>
@@ -17,6 +34,8 @@ const config = ref(props.config)
         <h3 class="settings-section-title">Vulkan Video behavior</h3>
         <p class="settings-section-copy">Tune Polaris's experimental Vulkan Video path for low-latency hardware encoding.</p>
       </div>
+
+      <CodecSupportPanel :config="config" />
 
       <div class="surface-subtle mb-4 p-4 text-sm leading-relaxed text-storm">
         Auto can prefer Vulkan Video on a compatible AMD private-stream route after Polaris verifies the exact live GPU-native frame path. NVIDIA's proprietary driver remains on NVENC, Nouveau uses capability probing, and Intel remains on VA-API by default.
@@ -44,6 +63,18 @@ const config = ref(props.config)
           <option value="4">{{ $t('config.vk_rc_vbr') }}</option>
         </select>
         <div class="text-sm text-storm mt-1">{{ $t('config.vk_rc_mode_desc') }}</div>
+      </div>
+
+      <div class="mb-0">
+        <label for="vk_quality" class="block text-sm font-medium text-storm mb-1">{{ $t('config.vk_quality') }}</label>
+        <select id="vk_quality" class="settings-input" v-model="config.vk_quality">
+          <option value="0">{{ $t('config.vk_quality_default') }}</option>
+          <!-- Levels run 0..maxQualityLevels-1; the probed driver's reported count decides how many are offered. -->
+          <option v-for="level in vkQualityMax" :key="level" :value="String(level)">{{ $t('config.vk_quality_level', { level }) }}</option>
+          <!-- A saved level above the probed maximum keeps its own option so the select doesn't read blank; Polaris clamps it at session start. -->
+          <option v-if="vkQualitySaved" :key="'saved'" :value="String(vkQualitySaved)">{{ $t('config.vk_quality_unsupported', { level: vkQualitySaved }) }}</option>
+        </select>
+        <div class="text-sm text-storm mt-1">{{ $t('config.vk_quality_desc') }}</div>
       </div>
     </section>
   </div>
