@@ -25,6 +25,16 @@ project(Polaris VERSION 1.4.13
         DESCRIPTION "Self-hosted game stream host for Moonlight"
         HOMEPAGE_URL "https://github.com/papi-ux/polaris")
 
+# Everything installs into the main package unless it says otherwise. Only the Linux DRM/KMS
+# capture helper says otherwise, and it is packaged separately.
+#
+# This has to come before the first install() in the project, not next to the packaging code that
+# reads it: CMake resolves the default at the moment each install rule is declared, so a later
+# setting leaves everything declared before it in Unspecified, and a component-aware CPack then
+# drops those files from every package it builds. That is 89 of the 125 files, including the whole
+# web console, in a package that still installs cleanly and looks right.
+set(CMAKE_INSTALL_DEFAULT_COMPONENT_NAME "polaris")
+
 include(CTest)
 
 set(PROJECT_LICENSE "GPL-3.0-only")

@@ -34,6 +34,7 @@
 
 extern "C" {
 #ifdef __linux__
+  #include <grp.h>
   #include <pwd.h>
   #include <sys/xattr.h>
   #include <unistd.h>
@@ -471,6 +472,132 @@ namespace {
     return true;
   }
 
+  /**
+   * @brief Whether this account is already in a group.
+   */
+  bool user_in_group(const std::string &user, const char *group_name) {
+    const auto *gr = getgrnam(group_name);
+    if (!gr) {
+      return false;
+    }
+    if (const auto *pw = getpwnam(user.c_str()); pw && pw->pw_gid == gr->gr_gid) {
+      return true;
+    }
+    for (char **member = gr->gr_mem; member && *member; ++member) {
+      if (user == *member) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * @brief Turn DRM/KMS capture on by pointing the user service at the packaged helper.
+   *
+   * It used to mean setcap on the binary this process is running, which every install and every
+   * update then replaced, so capture stopped and nothing said why. On an image-based host setcap on
+   * /usr is refused outright, so the guide had people copy the binary somewhere writable, and that
+   * copy then outlived every update: rpm said one version, the console ran another.
+   *
+   * So the capability belongs to a file the package manager owns, and this only points the service
+   * at it. Nothing here is undone by an update.
+   *
+   * @param summary Filled with what was done, for the summary the caller prints at the end.
+   */
+  bool enable_kms_capture(const std::string &target_user, std::string &summary) {
+    const auto helper = fs::path {platf::user_unit::packaged_kms_helper};
+    const std::string group {platf::user_unit::kms_group};
+
+    std::error_code ec;
+    if (!fs::is_regular_file(fs::symlink_status(helper, ec)) || ec) {
+      BOOST_LOG(error) << "DRM/KMS capture needs the polaris-kms package, which is not installed"sv;
+      std::cout
+        << "DRM/KMS capture needs the polaris-kms package, which provides"sv << std::endl
+        << "  "sv << helper.string() << std::endl
+        << "It is separate because it is a second copy of the binary, and most hosts never capture"sv << std::endl
+        << "this way. Install it with one of:"sv << std::endl
+        << "  sudo dnf install polaris-kms"sv << std::endl
+        << "  sudo rpm-ostree install polaris-kms"sv << std::endl
+        << "  sudo pacman -S polaris-kms"sv << std::endl
+        << "  sudo apt install polaris-kms"sv << std::endl
+        << "then run this command again."sv << std::endl;
+      return false;
+    }
+
+    // The package applies the capability; this only checks it arrived. A filesystem mounted nosuid
+    // drops file capabilities silently, and so does a deb whose postinst could not create the group.
+    if (!file_holds_capability(helper)) {
+      BOOST_LOG(error) << "The packaged DRM/KMS helper carries no capability"sv;
+      std::cout
+        << helper.string() << " is installed but carries no cap_sys_admin, so it cannot capture"sv << std::endl
+        << "through DRM/KMS. That happens when its filesystem is mounted nosuid, or when the package's"sv << std::endl
+        << "install step could not finish. Reinstalling polaris-kms is the first thing to try."sv << std::endl;
+      return false;
+    }
+
+    const auto *target_pw = target_user.empty() || target_user == "root" ? nullptr : getpwnam(target_user.c_str());
+    if (!target_pw || !target_pw->pw_dir || target_pw->pw_dir[0] == '\0') {
+      BOOST_LOG(error) << "Cannot resolve the account the polaris user service runs as"sv;
+      return false;
+    }
+
+    bool ok = true;
+    const bool was_member = user_in_group(target_user, group.c_str());
+    if (!was_member) {
+      // Only members may execute the helper, so a capability here is not a capability for every
+      // local account, which is what marking /usr/bin/polaris used to mean.
+      ok &= run_host_command(
+        "add " + target_user + " to the " + group + " group",
+        std::format(R"(usermod -aG "{}" "{}")", group, target_user)
+      );
+      if (ok) {
+        summary += "Added " + target_user + " to the " + group + " group.\n";
+      }
+    }
+    if (!ok) {
+      return false;
+    }
+
+    const auto drop_in_dir = fs::path(target_pw->pw_dir) / ".config/systemd/user/polaris.service.d";
+    const auto drop_in = drop_in_dir / std::string {platf::user_unit::kms_drop_in_name};
+    fs::create_directories(drop_in_dir, ec);
+    if (ec) {
+      BOOST_LOG(error) << "Could not create ["sv << drop_in_dir.string() << "]: "sv << ec.message();
+      return false;
+    }
+    {
+      std::ofstream out {drop_in, std::ios::trunc};
+      if (!out) {
+        BOOST_LOG(error) << "Could not write ["sv << drop_in.string() << ']';
+        return false;
+      }
+      out << "# Written by polaris --setup-host --enable-kms. Remove it with --disable-kms.\n"
+             "[Service]\n"
+             "ExecStart=\n"
+             "ExecStart="
+          << helper.string() << '\n';
+    }
+    // Written as root into somebody else's home, so it has to end up theirs.
+    for (const auto &path : {drop_in_dir, drop_in}) {
+      if (::chown(path.c_str(), target_pw->pw_uid, target_pw->pw_gid) != 0) {
+        BOOST_LOG(warning) << "Could not hand ["sv << path.string() << "] back to "sv << target_user;
+      }
+    }
+    summary += "Pointed the polaris user service at " + helper.string() + " (" + drop_in.string() + ").\n";
+
+    summary += "The service still runs the old command until it is reloaded. As " + target_user + ":\n"
+               "  systemctl --user daemon-reload\n"
+               "  systemctl --user restart polaris\n";
+    if (!was_member) {
+      // The papercut worth stating plainly: a user service inherits its groups from the login
+      // session, so the restart above is not enough on its own the first time.
+      summary += "Log out and back in first. A session picks up its groups at login, so until then the\n"
+                 "service cannot execute the helper whatever it is restarted with.\n";
+    }
+    summary += "DRM/KMS capture is on, and an update cannot take it away again.\n";
+    return true;
+  }
+
   void print_setup_host_help(const char *name) {
     std::cout
       << "Usage: "sv << name << " --setup-host [--enable-kms | --disable-kms] [--enable-headless-boot | --disable-headless-boot]"sv << std::endl
@@ -485,19 +612,21 @@ namespace {
       << "    - reload udev and trigger /dev/uinput and /dev/uhid"sv << std::endl
       << "    - load uinput and uhid now via modprobe"sv << std::endl
       << "    - report whether the calling account is in the input group, which seat isolation needs"sv << std::endl
-      << "    - optionally apply cap_sys_admin for DRM/KMS capture"sv << std::endl
+      << "    - optionally turn on DRM/KMS capture through the packaged helper"sv << std::endl
       << "    - optionally make the invoking account's Polaris user service start at boot,"sv << std::endl
       << "      with no monitor, desktop login, or Game Mode session required"sv << std::endl
       << std::endl
       << "  Options:"sv << std::endl
-      << "    --enable-kms            Also run setcap cap_sys_admin+ep on the Polaris binary."sv << std::endl
-      << "                            Only KMS capture (capture = kms) needs it. It grants a"sv << std::endl
-      << "                            permission and does not change the capture setting."sv << std::endl
-      << "                            Every install or update replaces the binary without it."sv << std::endl
+      << "    --enable-kms            Point the user service at the DRM/KMS capture helper from the"sv << std::endl
+      << "                            polaris-kms package, and add this account to the polaris-kms"sv << std::endl
+      << "                            group. The package carries the capability, so an update cannot"sv << std::endl
+      << "                            take it away. A session picks up its groups at login, so the"sv << std::endl
+      << "                            first time this needs a logout before capture works."sv << std::endl
       << "                            Remove it again with --disable-kms"sv << std::endl
-      << "    --disable-kms           Take the capability off the binary, remove the copy of it at"sv << std::endl
-      << "                            "sv << platf::user_unit::guide_runtime_copy << " if the DRM/KMS recipe made one, and"sv << std::endl
-      << "                            remove the service drop-in that pointed at that copy"sv << std::endl
+      << "    --disable-kms           Stop running the helper, and undo what older releases did by"sv << std::endl
+      << "                            hand: take the capability off the binary, remove the copy of it"sv << std::endl
+      << "                            at "sv << platf::user_unit::guide_runtime_copy << " if the old recipe made one,"sv << std::endl
+      << "                            and remove the service drop-in that pointed at either"sv << std::endl
       << "    --enable-headless-boot  Enable lingering for the invoking account and hook the"sv << std::endl
       << "                            Polaris user service into default.target, so it starts at"sv << std::endl
       << "                            boot before anyone logs in"sv << std::endl
@@ -687,6 +816,9 @@ namespace args {
     std::string game_mode_advice;
     std::string service_override_advice;
     bool runtime_copy_stale = false;
+    // Whether the service runs the copy at all, stale or not. A current copy is still a copy no
+    // package owns, so the next update is still the one that silently puts it a version behind.
+    bool runtime_copy_in_use = false;
     if (const auto *target_pw = setup_target_user.empty() || setup_target_user == "root" ? nullptr : getpwnam(setup_target_user.c_str());
         target_pw && target_pw->pw_dir && target_pw->pw_dir[0] != '\0') {
       const auto game_mode = platf::game_mode_host::detect(platf::game_mode_host::default_probe(target_pw->pw_uid));
@@ -715,7 +847,9 @@ namespace args {
       const bool setup_runs_packaged_binary =
         platf::user_unit::describe_running_binary(*exe_path, POLARIS_EXECUTABLE_PATH).matches_package.value_or(false);
       if (setup_runs_packaged_binary) {
-        runtime_copy_stale = platf::user_unit::guide_runtime_copy_state(service_override, *exe_path) == platf::user_unit::runtime_copy_e::stale;
+        const auto copy_state = platf::user_unit::guide_runtime_copy_state(service_override, *exe_path);
+        runtime_copy_stale = copy_state == platf::user_unit::runtime_copy_e::stale;
+        runtime_copy_in_use = copy_state != platf::user_unit::runtime_copy_e::none;
       }
       if (!runtime_copy_stale) {
         service_override_advice = platf::user_unit::setup_host_advice(
@@ -728,7 +862,7 @@ namespace args {
     }
 
     const bool headless_boot_requested = enable_headless_boot || disable_headless_boot;
-    if (!enable_kms && !disable_kms && !headless_boot_requested && !runtime_copy_stale && udev_from_package && modules_from_package && etc_copies_absent && input_nodes_ready) {
+    if (!enable_kms && !disable_kms && !headless_boot_requested && !runtime_copy_in_use && udev_from_package && modules_from_package && etc_copies_absent && input_nodes_ready) {
       if (game_mode_advice.empty()) {
         std::cout
           << "Linux host setup: nothing to do."sv << std::endl
@@ -755,11 +889,12 @@ namespace args {
     }
 
     if (geteuid() != 0) {
-      if (runtime_copy_stale) {
+      if (runtime_copy_in_use) {
         std::cout
           << "The polaris user service for ["sv << setup_target_user << "] runs "sv << platf::user_unit::guide_runtime_copy
-          << ", a copy that no longer matches"sv << std::endl
-          << "the installed package, so the service is still running an older Polaris. Host setup refreshes it."sv << std::endl
+          << ", a copy of the binary that"sv << std::endl
+          << "no package owns"sv << (runtime_copy_stale ? ", and it no longer matches the installed package, so that service is"
+                                                          "\nrunning an older Polaris" : "") << ". Host setup moves it onto the packaged capture helper."sv << std::endl
           << std::endl;
       }
       std::cout
@@ -855,20 +990,50 @@ namespace args {
 
     std::string kms_removal_summary;
     if (enable_kms) {
-      ok &= run_host_command("enable DRM/KMS capability", std::format(R"(setcap cap_sys_admin+ep "{}")", exe_path->string()));
+      ok &= enable_kms_capture(setup_target_user, kms_removal_summary);
     } else if (disable_kms) {
       ok &= remove_kms_capture(*exe_path, setup_target_user, kms_removal_summary);
     } else {
       BOOST_LOG(info) << "Linux host setup: skipping cap_sys_admin. Re-run with --enable-kms only if you need DRM/KMS capture."sv;
     }
 
-    // Refreshing the copy would put back what --disable-kms was asked to take away.
-    if (runtime_copy_stale && !disable_kms) {
-      // install(1) unlinks the old copy first, so a service still running it
-      // keeps its image and the write cannot fail with ETXTBSY.
-      const auto copy = std::string {platf::user_unit::guide_runtime_copy};
-      ok &= run_host_command("refresh the DRM/KMS runtime copy", std::format(R"(install -D -m 0755 "{}" "{}")", exe_path->string(), copy)) &&
-            run_host_command("restore the runtime copy's DRM/KMS capability", std::format(R"(setcap cap_sys_admin+ep "{}")", copy));
+    // A host that followed the old DRM/KMS recipe runs a copy of the binary that no package owns,
+    // which is why an update could leave the console running an older Polaris than rpm reported.
+    // Move it onto the packaged helper rather than refreshing the copy again, because refreshing it
+    // is what made that bug permanent. Refreshing the copy would also put back what --disable-kms
+    // was asked to take away.
+    std::string kms_migration_summary;
+    bool migrated_to_packaged_helper = false;
+    if (runtime_copy_in_use && !disable_kms && !enable_kms) {
+      const auto helper = fs::path {platf::user_unit::packaged_kms_helper};
+      std::error_code migrate_ec;
+      const bool helper_ready = fs::is_regular_file(fs::symlink_status(helper, migrate_ec)) &&
+                                !migrate_ec && file_holds_capability(helper);
+      if (helper_ready) {
+        if (enable_kms_capture(setup_target_user, kms_migration_summary)) {
+          migrated_to_packaged_helper = true;
+          const auto copy = fs::path {platf::user_unit::guide_runtime_copy};
+          if (fs::remove(copy, migrate_ec) && !migrate_ec) {
+            kms_migration_summary += "Removed " + copy.string() + ", the copy no package owned.\n";
+          }
+          if (file_holds_capability(*exe_path)) {
+            ok &= run_host_command(
+              "remove the DRM/KMS capability from the packaged binary",
+              std::format(R"(setcap -r "{}")", exe_path->string())
+            );
+          }
+        } else {
+          ok = false;
+        }
+      } else if (runtime_copy_stale) {
+        // No helper to move to yet, and this host is already running an old copy. Refresh it rather
+        // than leave it behind: a working host that cannot migrate today is not a host to break.
+        // install(1) unlinks the old copy first, so a service still running it keeps its image and
+        // the write cannot fail with ETXTBSY.
+        const auto copy = std::string {platf::user_unit::guide_runtime_copy};
+        ok &= run_host_command("refresh the DRM/KMS runtime copy", std::format(R"(install -D -m 0755 "{}" "{}")", exe_path->string(), copy)) &&
+              run_host_command("restore the runtime copy's DRM/KMS capability", std::format(R"(setcap cap_sys_admin+ep "{}")", copy));
+      }
     }
 
     if (headless_boot_requested) {
@@ -914,12 +1079,18 @@ namespace args {
       std::cout << std::endl
                 << kms_removal_summary;
     }
-    if (runtime_copy_stale && !disable_kms) {
+    if (migrated_to_packaged_helper) {
+      std::cout << std::endl
+                << "Moved DRM/KMS capture off "sv << platf::user_unit::guide_runtime_copy << ", the copy no package owned."sv << std::endl
+                << kms_migration_summary
+                << "Updates leave this alone from now on; there is nothing to re-run after one."sv << std::endl;
+    } else if (runtime_copy_stale && !disable_kms) {
       std::cout << std::endl
                 << "Refreshed "sv << platf::user_unit::guide_runtime_copy << ", the copy the polaris user service for ["sv << setup_target_user << "] runs, from "sv << exe_path->string() << '.' << std::endl
                 << "It held another build, so that service was still running an older Polaris than the package. Restart it as "sv << setup_target_user << ':' << std::endl
                 << "  systemctl --user restart polaris"sv << std::endl
-                << "Package updates do not change the copy; run --setup-host again after each one."sv << std::endl;
+                << "Install the polaris-kms package and run this again to stop needing that: the capability"sv << std::endl
+                << "moves into a file the package manager owns, and updates stop taking it away."sv << std::endl;
     }
     if (!service_override_advice.empty()) {
       std::cout << std::endl

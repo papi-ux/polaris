@@ -57,8 +57,24 @@ describe('v1.4.13 release contract', () => {
     )
   })
 
-  it('keeps the install heads up about the KMS capture permission', () => {
-    expect(currentNotes()).toContain('removes the KMS capture permission')
-    expect(currentNotes()).toContain('sudo -H polaris --setup-host --enable-kms')
+  it('stops warning that an update takes the KMS capture permission away', () => {
+    // Every release from 1.4.9 to 1.4.12 told people that installing or updating removes the KMS
+    // capture permission, because it did. A package owns it now, so repeating that warning would
+    // send someone to re-run a command they no longer need, and would hide the one thing this
+    // release actually asks of them: install polaris-kms, and log out once.
+    const notes = currentNotes()
+    expect(notes).not.toContain('removes the KMS capture permission')
+    expect(notes).toContain('polaris-kms')
+    expect(notes).toContain('sudo -H polaris --setup-host --enable-kms')
+    expect(notes).toContain('log out')
+  })
+
+  it('offers the capture helper for every distro it ships Polaris for', () => {
+    // A release asset is the only way to install the helper on SteamOS and Ubuntu, which have no
+    // package repository, so leaving one out silently removes DRM/KMS capture from those hosts.
+    const notes = currentNotes()
+    for (const asset of expectedAssets) {
+      expect(notes).toContain(asset.replace('Polaris-', 'Polaris-kms-'))
+    }
   })
 })
