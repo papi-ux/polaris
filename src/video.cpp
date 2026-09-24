@@ -1787,9 +1787,21 @@ namespace video {
    */
   class pyrowave_encode_session_t: public encode_session_t {
   public:
-    pyrowave_encode_session_t(std::unique_ptr<pyrowave_encode::session_t> session, std::size_t max_frame_bytes, int width, int height, int source_width, int source_height):
+    pyrowave_encode_session_t(std::unique_ptr<pyrowave_encode::session_t> session, std::size_t max_frame_bytes, int width, int height, int source_width, int source_height, int fps_num, int fps_den):
         width {width}, height {height}, session {std::move(session)},
-        max_frame_bytes {max_frame_bytes}, source_width {source_width}, source_height {source_height} {
+        max_frame_bytes {max_frame_bytes}, source_width {source_width}, source_height {source_height}, fps_num {fps_num}, fps_den {fps_den} {
+    }
+
+    bool supports_runtime_bitrate_update() const override { return true; }
+
+    bitrate_update_e update_bitrate(int bitrate_kbps) override {
+      const auto budget = pyrowave_encode::frame_budget(bitrate_kbps, fps_num, fps_den);
+      if (!budget) return bitrate_update_e::rejected;
+      // Called on the encoding thread. Each following convert() uses this
+      // ceiling without replacing the encoder or changing stream dimensions.
+      max_frame_bytes = *budget;
+      BOOST_LOG(debug) << "PyroWave: applied " << bitrate_kbps << " kbps, up to " << *budget << " bytes per frame";
+      return bitrate_update_e::applied;
     }
 
     int convert(frame_t &frame) override {
@@ -1829,6 +1841,7 @@ namespace video {
     std::unique_ptr<pyrowave_encode::session_t> session;
     std::size_t max_frame_bytes = 0;
     int source_width = 0, source_height = 0;
+    int fps_num = 0, fps_den = 1;
     std::vector<std::vector<uint8_t>> encoded;
   };
 #endif
@@ -3925,16 +3938,13 @@ namespace video {
       // is exact rather than approximate, so this is a ceiling it meets rather than aims at, and a
       // frame is the only unit it has: there is no group of pictures to spend across.
       const auto rate = encoding_framerate_to_rational(config);
-      if (rate.num <= 0 || rate.den <= 0 || config.bitrate <= 0) return nullptr;
+      const auto max_frame_bytes = pyrowave_encode::frame_budget(config.bitrate, rate.num, rate.den);
+      if (!max_frame_bytes) return nullptr;
       const auto fps = double(rate.num) / rate.den;
-      const auto max_frame_bytes = std::uint64_t(config.bitrate) * 1000 * rate.den / (8 * std::uint64_t(rate.num));
-      // Leave headroom under GameStream's four 10-bit shard-count fields.
-      // Admission allows 992-byte payloads after the 32-byte encryption prefix.
-      if (max_frame_bytes < 1024 || max_frame_bytes > 3 * 1024 * 1024) return nullptr;
 
-      BOOST_LOG(info) << "PyroWave: "sv << width << 'x' << height << " at "sv << fps
-                      << " fps, up to "sv << max_frame_bytes << " bytes a frame"sv;
-      session = std::make_unique<pyrowave_encode_session_t>(std::move(pyrowave_session), max_frame_bytes, config.width, config.height, width, height);
+      BOOST_LOG(info) << "PyroWave: "sv << config.width << 'x' << config.height << " at "sv << fps
+                      << " fps, up to "sv << *max_frame_bytes << " bytes a frame"sv;
+      session = std::make_unique<pyrowave_encode_session_t>(std::move(pyrowave_session), *max_frame_bytes, config.width, config.height, width, height, rate.num, rate.den);
       session->capture_display_owner = disp;
       return session;
     }

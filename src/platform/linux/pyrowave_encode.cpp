@@ -22,6 +22,7 @@ extern "C" {
 // standard includes
 #include <array>
 #include <algorithm>
+#include <limits>
 
 // local includes
 #include "src/logging.h"
@@ -30,6 +31,17 @@ extern "C" {
 using namespace std::literals;
 
 namespace pyrowave_encode {
+
+  std::optional<std::size_t> frame_budget(int bitrate_kbps, int fps_num, int fps_den) {
+    if (bitrate_kbps <= 0 || fps_num <= 0 || fps_den <= 0) return std::nullopt;
+    const auto bits_per_second = std::uint64_t(bitrate_kbps) * 1000;
+    if (std::uint64_t(fps_den) > std::numeric_limits<std::uint64_t>::max() / bits_per_second) return std::nullopt;
+    const auto bytes = bits_per_second * fps_den / (8 * std::uint64_t(fps_num));
+    // Four 10-bit shard-count fields, with at least 992 payload bytes after
+    // encryption. Reject unsupported requests instead of acknowledging a cap.
+    if (bytes < 1024 || bytes > 3 * 1024 * 1024) return std::nullopt;
+    return static_cast<std::size_t>(bytes);
+  }
 
   namespace {
 

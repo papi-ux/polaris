@@ -10,6 +10,7 @@
 // standard includes
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -17,6 +18,9 @@ namespace pyrowave_encode {
   inline constexpr auto bitstream_id = "pyrowave-186f0393-sdr420-v1";
   inline constexpr std::size_t max_frame_bytes = 8 * 1024 * 1024;
   inline constexpr std::size_t packet_bytes = 60 * 1024;
+  // Preserve the negotiated rational frame rate and GameStream shard limits
+  // for initial configuration and every subsequent live bitrate update.
+  std::optional<std::size_t> frame_budget(int bitrate_kbps, int fps_num, int fps_den);
   // One GameStream decode unit contains the complete frame, not one unit for
   // each coefficient packet. The upstream bitstream is self-delimiting.
   std::vector<uint8_t> pack_frame(const std::vector<std::vector<uint8_t>>& packets, int width, int height);

@@ -12,6 +12,7 @@
 
   #include <algorithm>
   #include <numeric>
+  #include <limits>
   #include <fstream>
   #include <cstdlib>
   #include <vulkan/vulkan.h>
@@ -59,6 +60,21 @@ TEST(PyroWaveEncodeTests, TheLinkedLibraryAnswersForItself) {
   const auto version = pyrowave_encode::api_version();
   EXPECT_FALSE(version.empty());
   EXPECT_NE(version.find('.'), std::string::npos);
+}
+
+TEST(PyroWaveEncodeTests, LiveBudgetsPreserveFractionalRatesAndTransportBounds) {
+  EXPECT_EQ(pyrowave_encode::frame_budget(100000, 120, 1), 104166U);
+  EXPECT_EQ(pyrowave_encode::frame_budget(150000, 120, 1), 156250U);
+  EXPECT_EQ(pyrowave_encode::frame_budget(200000, 120, 1), 208333U);
+  EXPECT_EQ(pyrowave_encode::frame_budget(100000, 60000, 1001), 208541U);
+  EXPECT_EQ(pyrowave_encode::frame_budget(100000, 60, 1), pyrowave_encode::frame_budget(200000, 120, 1));
+  EXPECT_FALSE(pyrowave_encode::frame_budget(0, 120, 1));
+  EXPECT_FALSE(pyrowave_encode::frame_budget(-1, 120, 1));
+  EXPECT_FALSE(pyrowave_encode::frame_budget(100000, 0, 1));
+  EXPECT_FALSE(pyrowave_encode::frame_budget(100000, 120, 0));
+  EXPECT_FALSE(pyrowave_encode::frame_budget(1, 240, 1));
+  EXPECT_FALSE(pyrowave_encode::frame_budget(300000, 1, 1));
+  EXPECT_FALSE(pyrowave_encode::frame_budget(std::numeric_limits<int>::max(), 1, std::numeric_limits<int>::max()));
 }
 
 TEST(PyroWaveEncodeTests, AnOddExtentIsRefusedRatherThanRounded) {

@@ -2980,6 +2980,8 @@ namespace nvhttp {
 
     std::string_view codec_name_for_video_format(int video_format) {
       switch (video_format) {
+        case 3:
+          return "pyrowave"sv;
         case 1:
           return "hevc"sv;
         case 2:
