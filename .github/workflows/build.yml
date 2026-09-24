@@ -1142,9 +1142,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          deb_path="$(find build/cpack_artifacts -maxdepth 1 -type f -name '*.deb' | sort | head -n 1)"
-          if [ -z "$deb_path" ]; then
-            echo "No binary DEB was produced" >&2
+          deb_path="build/cpack_artifacts/Polaris.deb"
+          kms_deb_path="build/cpack_artifacts/Polaris-kms.deb"
+          if [ ! -f "$deb_path" ] || [ ! -f "$kms_deb_path" ]; then
+            echo "Both Polaris and its KMS helper DEBs must be produced" >&2
             exit 1
           fi
 
@@ -1184,6 +1185,21 @@ jobs:
             -o Acquire::https::Timeout=30
           )
           sudo apt-get "${apt_options[@]}" install -y "./$deb_path"
+          kms_identity="$(dpkg-deb --field "$kms_deb_path" Package)|$(dpkg-deb --field "$kms_deb_path" Version)|$(dpkg-deb --field "$kms_deb_path" Architecture)"
+          test "$kms_identity" = "polaris-kms|${BUILD_VERSION}|amd64"
+          test "$(dpkg-deb --field "$kms_deb_path" Depends)" = "polaris (= ${BUILD_VERSION})"
+          sudo apt-get "${apt_options[@]}" install -y "./$kms_deb_path"
+          helper=/usr/libexec/polaris/polaris-kms
+          test "$(stat -c '%a %U %G' "$helper")" = '750 root polaris-kms'
+          test "$(getcap "$helper")" = "$helper cap_sys_admin=ep"
+          test -z "$(getcap /usr/bin/polaris)"
+          # Reinstall exercises the same scriptlet used by an upgrade.
+          sudo dpkg -i "$kms_deb_path"
+          test "$(stat -c '%a %U %G' "$helper")" = '750 root polaris-kms'
+          test "$(getcap "$helper")" = "$helper cap_sys_admin=ep"
+          sudo apt-get "${apt_options[@]}" remove -y polaris-kms
+          test ! -e "$helper"
+          test -x /usr/bin/polaris
           package_name="$(dpkg-deb --field "$deb_path" Package)"
           binary="$(dpkg -L "$package_name" | awk '$0 == "/usr/bin/polaris" || /\/usr\/bin\/polaris-[0-9][^/]*$/ { print; exit }')"
           if [ -z "$binary" ]; then
@@ -1503,9 +1519,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          rpm_path="$(find build/cpack_artifacts -maxdepth 1 -type f -name '*.rpm' ! -name '*.src.rpm' | sort | head -n 1)"
-          if [ -z "$rpm_path" ]; then
-            echo "No binary RPM was produced" >&2
+          rpm_path="build/cpack_artifacts/Polaris.rpm"
+          kms_rpm_path="build/cpack_artifacts/Polaris-kms.rpm"
+          if [ ! -f "$rpm_path" ] || [ ! -f "$kms_rpm_path" ]; then
+            echo "Both Polaris and its KMS helper RPMs must be produced" >&2
             exit 1
           fi
 
@@ -1529,6 +1546,20 @@ jobs:
           fi
 
           dnf install -y "$rpm_path"
+          kms_identity="$(rpm -qp --qf '%{NAME}|%{VERSION}|%{RELEASE}|%{ARCH}' "$kms_rpm_path")"
+          test "$kms_identity" = "polaris-kms|${BUILD_VERSION}|1|x86_64"
+          rpm -qpR "$kms_rpm_path" | grep -Fx "polaris = ${BUILD_VERSION}"
+          dnf install -y "$kms_rpm_path"
+          helper=/usr/libexec/polaris/polaris-kms
+          test "$(stat -c '%a %U %G' "$helper")" = '750 root polaris-kms'
+          test "$(getcap "$helper")" = "$helper cap_sys_admin=ep"
+          test -z "$(getcap /usr/bin/polaris)"
+          rpm -U --replacepkgs "$kms_rpm_path"
+          test "$(stat -c '%a %U %G' "$helper")" = '750 root polaris-kms'
+          test "$(getcap "$helper")" = "$helper cap_sys_admin=ep"
+          rpm -e polaris-kms
+          test ! -e "$helper"
+          test -x /usr/bin/polaris
           rpm -ql polaris | tee build/cpack_artifacts/package-files.txt
           python3 scripts/spaces/verify_package.py /
           binary="$(awk '$0 == "/usr/bin/polaris" || /\/usr\/bin\/polaris-[0-9][^/]*$/ { print; exit }' build/cpack_artifacts/package-files.txt)"
