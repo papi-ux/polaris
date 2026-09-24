@@ -4278,7 +4278,8 @@ namespace video {
               duplicate_frame_ratio,
               frame_jitter_ms,
               encode_duration,
-              avg_frame_age_ms
+              avg_frame_age_ms,
+              target_fps
             );
           }
 
