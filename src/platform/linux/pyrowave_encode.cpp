@@ -855,6 +855,10 @@ namespace pyrowave_encode {
     return importable_modifiers(*owner, fourcc);
   }
 
+  bool can_read_dmabuf_format(std::uint32_t fourcc) {
+    return readable_dmabuf_format(fourcc);
+  }
+
   bool dmabuf_import_available() {
     if (!gpu_input_allowed()) {
       return false;

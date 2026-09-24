@@ -1859,6 +1859,20 @@ namespace video {
       if (lives_on_the_gpu) {
         pyrowave_encode::dmabuf_t buffer;
         if (pyrowave_encode::dmabuf_from_frame(*frame.compat_img(), buffer)) {
+          // A format with no reading in this codec is not a frame that went wrong. Capture produces
+          // one format for as long as the display keeps its mode, and a frame on the GPU has no host
+          // copy to fall back to, so every later frame and every rebuilt session meets the same
+          // answer. KDE composites HDR into sixteen bit float, which is the one that arrives here.
+          if (!pyrowave_encode::can_read_dmabuf_format(buffer.fourcc)) {
+            if (!complained_about_import) {
+              complained_about_import = true;
+              BOOST_LOG(error) << "PyroWave: capture is handing over a dmabuf in a format this codec "sv
+                               << "cannot read (fourcc "sv << buffer.fourcc
+                               << "); ending the stream, because that does not change while the "sv
+                               << "display keeps its mode"sv;
+            }
+            return convert_session_is_over;
+          }
           if (!session->encode_imported(buffer, max_frame_bytes)) {
             if (!complained_about_import) {
               complained_about_import = true;

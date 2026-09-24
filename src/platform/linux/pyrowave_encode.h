@@ -100,6 +100,19 @@ namespace pyrowave_encode {
   std::vector<std::uint64_t> importable_dmabuf_modifiers(std::uint32_t fourcc);
 
   /**
+   * @brief Whether this codec can read pixels in a DRM format at all.
+   *
+   * A property of the format alone, asked without a device and without a frame. Separate from
+   * whether a particular buffer can be imported, which also depends on the driver and the layout:
+   * this one answers whether there is any point trying, and a no does not change for as long as a
+   * capture is producing that format.
+   *
+   * KDE composites HDR into ABGR16161616F, sixteen bits of float a channel, which is the answer this
+   * is usually asked about.
+   */
+  bool can_read_dmabuf_format(std::uint32_t fourcc);
+
+  /**
    * @brief What a client has to recognise before this host will stream the codec to it.
    *
    * Three things a decoder cannot work out for itself, in one string. The codec revision, because

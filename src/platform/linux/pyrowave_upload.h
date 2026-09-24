@@ -63,6 +63,9 @@ namespace pyrowave_encode {
    */
   std::vector<std::uint64_t> importable_modifiers(const vk_device_t &owner, std::uint32_t fourcc);
 
+  /// Whether this codec has any reading for pixels in a DRM format. See can_read_dmabuf_format.
+  bool readable_dmabuf_format(std::uint32_t fourcc);
+
   /**
    * @brief One frame's journey from the pointer capture handed over to an image the codec can read.
    *

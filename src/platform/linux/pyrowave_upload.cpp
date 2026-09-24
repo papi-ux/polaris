@@ -95,6 +95,10 @@ namespace pyrowave_encode {
 
   }  // namespace
 
+  bool readable_dmabuf_format(std::uint32_t fourcc) {
+    return format_for_fourcc(fourcc) != VK_FORMAT_UNDEFINED;
+  }
+
   std::vector<std::uint64_t> importable_modifiers(const vk_device_t &owner, std::uint32_t fourcc) {
     std::vector<std::uint64_t> usable;
 
