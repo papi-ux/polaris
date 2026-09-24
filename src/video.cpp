@@ -5292,7 +5292,7 @@ namespace video {
         std::move(encode_device),
         ref->reinit_event,
         ref->reinit_request_event,
-        *ref->encoder_p,
+        encoder,
         channel_data,
         packets
       );
