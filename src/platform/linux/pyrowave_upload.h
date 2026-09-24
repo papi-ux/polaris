@@ -97,9 +97,14 @@ namespace pyrowave_encode {
      * @param buffer What capture handed over. The descriptors stay the caller's: this duplicates the
      *   one it uses and never closes theirs.
      * @param where Where the picture sits in what the codec reads, exactly as for the copying path.
+     * @param ten_bit What this stream carries, which the frame has to agree with. Nothing downstream
+     *   would notice if it did not: the colour space is decided by the stream and the samples are
+     *   read as whatever the format says, so an eight bit frame in a ten bit stream is Rec. 709
+     *   values sent as BT.2020 PQ, which is the dark oversaturated picture people report as broken.
+     *   Channel order is not checked, because a described order is honoured and either is correct.
      * @return false when this frame cannot be imported, which is a frame lost rather than a session.
      */
-    bool begin_imported(const dmabuf_t &buffer, const placement_t &where);
+    bool begin_imported(const dmabuf_t &buffer, const placement_t &where, bool ten_bit);
 
     /// Whether this path can import at all, which is a property of the device rather than the frame.
     bool can_import() const;
@@ -149,9 +154,33 @@ namespace pyrowave_encode {
     upload_t() = default;
 
     bool resolve(const vk_device_t &owner);
-    bool import_dmabuf(const dmabuf_t &buffer);
+    bool import_dmabuf(const dmabuf_t &buffer, bool ten_bit);
     void release_import();
-    bool prepare(int width, int height, int stride, VkFormat format, const placement_t &where);
+
+    /**
+     * @brief Make the image the codec reads, sized and shaped for this stream.
+     *
+     * Both paths need it. The copying path writes into it from the staging buffer and the importing
+     * path copies into it on the GPU, and either way it is what the codec is handed: an image of the
+     * stream's shape, holding the picture where the placement says, and holding black wherever the
+     * picture does not reach.
+     */
+    bool prepare_image(int width, int height, VkFormat format, const placement_t &where);
+
+    /**
+     * @brief Make the host visible buffer a frame is copied through, which only one path needs.
+     *
+     * Sized from capture's stride rather than from the picture, so a padded frame goes in with one
+     * call. An imported frame never touches this, which is the point of importing it.
+     */
+    bool prepare_staging(int width, int height, int stride);
+
+    /// Free what each half owns, separately, because the two paths need different halves.
+    void release_staging_resources();
+    void release_image_resources();
+
+    /// Wait for the GPU to finish everything before freeing what it might be reading.
+    bool drain();
     void release_frame_resources();
 
     /**
@@ -191,15 +220,20 @@ namespace pyrowave_encode {
     /// Set when the image is new, so the bars are painted once rather than every frame.
     bool needs_clearing = false;
 
-    /// The frame capture lent us, imported for as long as this frame lasts.
+    /**
+     * @brief The frame capture lent us, imported for exactly as long as this frame lasts.
+     *
+     * Never read by the codec directly, and never read again after this frame. Capture takes the
+     * buffer back as soon as the frame is released and the compositor may be drawing into it by the
+     * time the next one is asked for, so what the codec reads is always the copy made from it while
+     * it was ours. That copy is between two images on the GPU, which costs a fraction of a
+     * millisecond and none of the host's time, and it is what makes repeating a frame possible at all.
+     */
     VkImage imported_image = VK_NULL_HANDLE;
     VkDeviceMemory imported_memory = VK_NULL_HANDLE;
     VkFormat imported_format = VK_FORMAT_UNDEFINED;
     uint32_t imported_width = 0;
     uint32_t imported_height = 0;
-
-    /// Whether the codec should read the imported image itself rather than the one copied into.
-    bool reading_import = false;
 
     /// What capture's rows measured last time, which is what the staging buffer was sized for.
     uint32_t image_stride = 0;

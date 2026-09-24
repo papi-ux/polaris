@@ -371,7 +371,7 @@ namespace pyrowave_encode {
 
         const auto where = placement_for(buffer.width, buffer.height);
         const auto started = std::chrono::steady_clock::now();
-        if (!staging->begin_imported(buffer, where)) {
+        if (!staging->begin_imported(buffer, where, range == dynamic_range_e::hdr10)) {
           return false;
         }
         if (!encode_recorded(max_bytes)) {

@@ -1846,7 +1846,17 @@ namespace video {
       // Where capture left it, whenever capture can leave it on the GPU. This is the whole cost of
       // the other path: a full frame copied into memory the GPU can read, sixty times a second,
       // which at a mirrored ultrawide is four milliseconds of every frame's budget.
-      if (frame.transport() == platf::frame_transport_e::dmabuf && frame.compat_img()) {
+      //
+      // Both halves of the test matter. Two backends here say a frame is a dmabuf while its residency
+      // says it is in host memory, because they read it back with the GPU and hand over the copy;
+      // asking transport alone would have sent those frames down this path, found no descriptor to
+      // read, and failed the session on its first frame. And a frame that claims both and still has
+      // no descriptor is a backend disagreeing with itself, so it goes down the copying path rather
+      // than ending the stream.
+      const bool lives_on_the_gpu = frame.transport() == platf::frame_transport_e::dmabuf &&
+                                    frame.residency() == platf::frame_residency_e::gpu &&
+                                    frame.compat_img();
+      if (lives_on_the_gpu) {
         pyrowave_encode::dmabuf_t buffer;
         if (pyrowave_encode::dmabuf_from_frame(*frame.compat_img(), buffer)) {
           if (!session->encode_imported(buffer, max_frame_bytes)) {
@@ -1855,11 +1865,11 @@ namespace video {
           converted_since_last_packet = true;
           return session->bitstream().empty() ? -1 : 0;
         }
-        if (!complained_about_format) {
-          complained_about_format = true;
-          BOOST_LOG(error) << "PyroWave: capture says this frame is a dmabuf and does not describe one"sv;
+        if (!complained_about_import) {
+          complained_about_import = true;
+          BOOST_LOG(warning) << "PyroWave: capture says this frame is on the GPU and does not describe "sv
+                             << "how, so it is being copied instead"sv;
         }
-        return -1;
       }
 
       if (!frame.cpu_data || frame.row_pitch <= 0) {
@@ -1956,8 +1966,9 @@ namespace video {
     /// What the session was built to read, which decides what a frame has to be.
     pyrowave_encode::dynamic_range_e range = pyrowave_encode::dynamic_range_e::sdr;
 
-    /// Said once. A capture backend that hands over the wrong thing hands it over sixty times a second.
+    /// Said once each. A capture backend that hands over the wrong thing does it sixty times a second.
     bool complained_about_format = false;
+    bool complained_about_import = false;
   };
 #endif
 
@@ -4077,6 +4088,21 @@ namespace video {
       const auto range = colorspace_is_hdr(encode_device->colorspace)
                            ? pyrowave_encode::dynamic_range_e::hdr10
                            : pyrowave_encode::dynamic_range_e::sdr;
+
+      // And a client that negotiated HDR and cannot be given it is told so, rather than served SDR
+      // under an HDR agreement. This codec's colourimetry is agreed by a profile token before a frame
+      // is sent, and the client builds its whole presentation from that: a ten bit PQ swapchain,
+      // sixteen bit planes, the BT.2020 matrix. Handing it full range Rec. 709 through all of that is
+      // a dark, oversaturated picture with nothing anywhere to say why.
+      //
+      // Reached when the display is not in HDR, or its metadata could not be read, which the ANNOUNCE
+      // gate cannot know: it deliberately does not open a display. So this is where it is caught, and
+      // failing here fails the session with a line rather than streaming something wrong.
+      if (config.dynamicRange != 0 && range != pyrowave_encode::dynamic_range_e::hdr10) {
+        BOOST_LOG(error) << "PyroWave: this client negotiated HDR and the captured display is not in "sv
+                         << "HDR, so there is no honest stream to give it"sv;
+        return nullptr;
+      }
 
       auto pyrowave_session = pyrowave_encode::make_session(config.width, config.height, chroma, range);
       if (!pyrowave_session) {

@@ -1104,4 +1104,42 @@ TEST(PyroWaveEncodeTests, AnImportedFrameThatNeedsBarsGetsThemOnTheGpu) {
   }
 }
 
+TEST(PyroWaveEncodeTests, ARepeatedFrameWorksAfterAnImportedOne) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+  if (!pyrowave_encode::dmabuf_import_available()) {
+    GTEST_SKIP() << "this GPU cannot import a dmabuf";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  const quadrant_frame_t picture {width, height, width * 4};
+  const test_dmabuf_t captured {width, height, picture};
+  if (!captured.ok) {
+    GTEST_SKIP() << "could not allocate a dmabuf on this machine";
+  }
+
+  auto session = make_session_420(width, height);
+  ASSERT_NE(session, nullptr);
+  ASSERT_TRUE(session->encode_imported(captured.buffer, 512 * 1024));
+  const sequence_header_t first {session->bitstream()};
+  ASSERT_TRUE(first.present);
+
+  // The host repeats a frame when capture has nothing new, and on this path that means encoding a
+  // picture whose buffer capture has already taken back. So the frame has to have been copied
+  // somewhere this session still owns, and this is the test that says it was: a repeat that refuses
+  // would take the session down with it, which is what a host does with a still screen.
+  ASSERT_TRUE(session->encode_retained(512 * 1024))
+    << "a frame that arrived as a dmabuf cannot be repeated, so a still screen ends the session";
+
+  const sequence_header_t again {session->bitstream()};
+  ASSERT_TRUE(again.present);
+  EXPECT_NE(again.sequence, first.sequence);
+
+  const decoded_frame_t decoded {session->bitstream(), width, height, false};
+  ASSERT_TRUE(decoded.ok);
+  expect_full_range_rec709(decoded, picture, "repeated after an import");
+}
+
 #endif  // POLARIS_BUILD_PYROWAVE

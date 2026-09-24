@@ -213,7 +213,7 @@ namespace pyrowave_encode {
     }
   }
 
-  void upload_t::release_frame_resources() {
+  void upload_t::release_staging_resources() {
     if (!owner || owner->device == VK_NULL_HANDLE) {
       return;
     }
@@ -229,6 +229,14 @@ namespace pyrowave_encode {
       api.free_memory(owner->device, staging_memory, nullptr);
       staging_memory = VK_NULL_HANDLE;
     }
+    staging_size = 0;
+    image_stride = 0;
+  }
+
+  void upload_t::release_image_resources() {
+    if (!owner || owner->device == VK_NULL_HANDLE) {
+      return;
+    }
     if (image != VK_NULL_HANDLE) {
       api.destroy_image(owner->device, image, nullptr);
       image = VK_NULL_HANDLE;
@@ -237,16 +245,19 @@ namespace pyrowave_encode {
       api.free_memory(owner->device, image_memory, nullptr);
       image_memory = VK_NULL_HANDLE;
     }
-    staging_size = 0;
-    image_stride = 0;
-    picture_width = 0;
-    picture_height = 0;
-    placement = {};
-    needs_clearing = false;
     image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     image_format = VK_FORMAT_UNDEFINED;
     image_width = 0;
     image_height = 0;
+    picture_width = 0;
+    picture_height = 0;
+    placement = {};
+    needs_clearing = false;
+  }
+
+  void upload_t::release_frame_resources() {
+    release_staging_resources();
+    release_image_resources();
   }
 
   void upload_t::forget_gpu_state() {
@@ -254,9 +265,27 @@ namespace pyrowave_encode {
     needs_clearing = placement.has_bars();
   }
 
-  bool upload_t::prepare(int width, int height, int stride, VkFormat format,
-                         const placement_t &where) {
-    if (width <= 0 || height <= 0 || stride < width * 4) {
+  /**
+   * Wait for everything in flight, because what is about to be freed may be in it.
+   *
+   * Under the queue lock, for the reason the destructor's drain is: another session is very likely
+   * submitting on this queue right now.
+   */
+  bool upload_t::drain() {
+    const std::lock_guard<std::recursive_mutex> lock {owner->device_lock};
+    const auto waited = api.device_wait_idle(owner->device);
+    if (waited != VK_SUCCESS) {
+      // Freeing an image a submission is still reading is worse than refusing the frame.
+      BOOST_LOG(error) << "PyroWave: the device would not drain (result "sv
+                       << static_cast<int>(waited) << ')';
+      wedged = true;
+      return false;
+    }
+    return true;
+  }
+
+  bool upload_t::prepare_image(int width, int height, VkFormat format, const placement_t &where) {
+    if (width <= 0 || height <= 0) {
       return false;
     }
     if (where.image_width < width + where.offset_x || where.image_height < height + where.offset_y ||
@@ -268,75 +297,15 @@ namespace pyrowave_encode {
     }
     if (image != VK_NULL_HANDLE && picture_width == static_cast<uint32_t>(width) &&
         picture_height == static_cast<uint32_t>(height) && image_format == format &&
-        image_stride == static_cast<uint32_t>(stride) && placement == where) {
+        placement == where) {
       return true;
     }
 
-    // Capture changed shape under us, which happens when a monitor mode changes mid session. The
-    // old image and buffer may still be in a submission, so the device has to drain before they go,
-    // and the drain takes the queue lock for the same reason the one in the destructor does.
-    {
-      const std::lock_guard<std::recursive_mutex> lock {owner->device_lock};
-      const auto waited = api.device_wait_idle(owner->device);
-      if (waited != VK_SUCCESS) {
-        // Freeing an image a submission is still reading is worse than refusing the frame.
-        BOOST_LOG(error) << "PyroWave: the device would not drain before resizing (result "sv
-                         << static_cast<int>(waited) << ')';
-        wedged = true;
-        return false;
-      }
-    }
-    release_frame_resources();
-
-    VkPhysicalDeviceMemoryProperties memory = {};
-    api.get_memory_properties(owner->physical_device, &memory);
-
-    // Sized for capture's rows rather than for tight ones, so the frame goes in with one call and
-    // the copy below is told how wide a row really is. Four bytes a pixel for every format this path
-    // accepts, packed 10 bit included.
-    const VkDeviceSize wanted_bytes = static_cast<VkDeviceSize>(stride) * height;
-
-    VkBufferCreateInfo buffer_info = {};
-    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    buffer_info.size = wanted_bytes;
-    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    if (api.create_buffer(owner->device, &buffer_info, nullptr, &staging) != VK_SUCCESS) {
-      BOOST_LOG(warning) << "PyroWave: could not make a "sv << wanted_bytes << " byte staging buffer"sv;
-      release_frame_resources();
+    // Capture changed shape under us, which happens when a monitor mode changes mid session.
+    if (!drain()) {
       return false;
     }
-
-    VkMemoryRequirements buffer_needs = {};
-    api.get_buffer_memory_requirements(owner->device, staging, &buffer_needs);
-    const auto staging_type = staging_memory_type(memory, buffer_needs.memoryTypeBits);
-    if (staging_type == UINT32_MAX) {
-      BOOST_LOG(warning) << "PyroWave: this GPU has no memory the host can write and it can read"sv;
-      release_frame_resources();
-      return false;
-    }
-
-    VkMemoryAllocateInfo allocation = {};
-    allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    allocation.allocationSize = buffer_needs.size;
-    allocation.memoryTypeIndex = staging_type;
-    if (api.allocate_memory(owner->device, &allocation, nullptr, &staging_memory) != VK_SUCCESS ||
-        api.bind_buffer_memory(owner->device, staging, staging_memory, 0) != VK_SUCCESS) {
-      BOOST_LOG(warning) << "PyroWave: could not allocate "sv << buffer_needs.size
-                         << " bytes to stage frames through"sv;
-      release_frame_resources();
-      return false;
-    }
-
-    void *mapped = nullptr;
-    if (api.map_memory(owner->device, staging_memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
-      BOOST_LOG(warning) << "PyroWave: could not map the staging buffer"sv;
-      release_frame_resources();
-      return false;
-    }
-    // Mapped once and left mapped. Unmapping between frames buys nothing and costs a round trip.
-    staging_mapped = static_cast<uint8_t *>(mapped);
-    staging_size = wanted_bytes;
+    release_image_resources();
 
     VkImageCreateInfo image_info = {};
     image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -348,34 +317,40 @@ namespace pyrowave_encode {
     image_info.arrayLayers = 1;
     image_info.samples = VK_SAMPLE_COUNT_1_BIT;
     image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    // Sampled because the codec's scaler reads it through a sampler, and nothing else: it makes its
-    // own intermediate planes and never writes back here.
+    // Sampled because the codec's scaler reads it through a sampler, and a transfer destination
+    // because both paths write into it: one from a host buffer, one from the imported frame.
     image_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (api.create_image(owner->device, &image_info, nullptr, &image) != VK_SUCCESS) {
       BOOST_LOG(warning) << "PyroWave: this GPU will not make a "sv << where.image_width << 'x'
                          << where.image_height << " image in format "sv << static_cast<int>(format);
-      release_frame_resources();
+      image = VK_NULL_HANDLE;
+      release_image_resources();
       return false;
     }
+
+    VkPhysicalDeviceMemoryProperties memory = {};
+    api.get_memory_properties(owner->physical_device, &memory);
 
     VkMemoryRequirements image_needs = {};
     api.get_image_memory_requirements(owner->device, image, &image_needs);
     const auto image_type = image_memory_type(memory, image_needs.memoryTypeBits);
     if (image_type == UINT32_MAX) {
       BOOST_LOG(warning) << "PyroWave: this GPU reports no device local memory"sv;
-      release_frame_resources();
+      release_image_resources();
       return false;
     }
 
+    VkMemoryAllocateInfo allocation = {};
+    allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocation.allocationSize = image_needs.size;
     allocation.memoryTypeIndex = image_type;
     if (api.allocate_memory(owner->device, &allocation, nullptr, &image_memory) != VK_SUCCESS ||
         api.bind_image_memory(owner->device, image, image_memory, 0) != VK_SUCCESS) {
       BOOST_LOG(warning) << "PyroWave: could not allocate "sv << image_needs.size
                          << " bytes for the captured frame"sv;
-      release_frame_resources();
+      release_image_resources();
       return false;
     }
 
@@ -385,13 +360,80 @@ namespace pyrowave_encode {
     image_height = static_cast<uint32_t>(where.image_height);
     picture_width = static_cast<uint32_t>(width);
     picture_height = static_cast<uint32_t>(height);
-    image_stride = static_cast<uint32_t>(stride);
     placement = where;
     // Only when something is left uncovered. A picture that fills the image is written over in full
     // every frame, and clearing it first would be work with no effect.
     needs_clearing = where.has_bars();
     return true;
   }
+
+  bool upload_t::prepare_staging(int width, int height, int stride) {
+    if (width <= 0 || height <= 0 || stride < width * 4) {
+      return false;
+    }
+    if (staging != VK_NULL_HANDLE && image_stride == static_cast<uint32_t>(stride) &&
+        staging_size == static_cast<VkDeviceSize>(stride) * height) {
+      return true;
+    }
+
+    if (!drain()) {
+      return false;
+    }
+    release_staging_resources();
+
+    VkPhysicalDeviceMemoryProperties memory = {};
+    api.get_memory_properties(owner->physical_device, &memory);
+
+    // Sized for capture's rows rather than for tight ones, so the frame goes in with one call and
+    // the copy is told how wide a row really is. Four bytes a pixel for every format this path
+    // accepts, packed ten bit included.
+    const VkDeviceSize wanted_bytes = static_cast<VkDeviceSize>(stride) * height;
+
+    VkBufferCreateInfo buffer_info = {};
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = wanted_bytes;
+    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (api.create_buffer(owner->device, &buffer_info, nullptr, &staging) != VK_SUCCESS) {
+      BOOST_LOG(warning) << "PyroWave: could not make a "sv << wanted_bytes << " byte staging buffer"sv;
+      release_staging_resources();
+      return false;
+    }
+
+    VkMemoryRequirements buffer_needs = {};
+    api.get_buffer_memory_requirements(owner->device, staging, &buffer_needs);
+    const auto staging_type = staging_memory_type(memory, buffer_needs.memoryTypeBits);
+    if (staging_type == UINT32_MAX) {
+      BOOST_LOG(warning) << "PyroWave: this GPU has no memory the host can write and it can read"sv;
+      release_staging_resources();
+      return false;
+    }
+
+    VkMemoryAllocateInfo allocation = {};
+    allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocation.allocationSize = buffer_needs.size;
+    allocation.memoryTypeIndex = staging_type;
+    if (api.allocate_memory(owner->device, &allocation, nullptr, &staging_memory) != VK_SUCCESS ||
+        api.bind_buffer_memory(owner->device, staging, staging_memory, 0) != VK_SUCCESS) {
+      BOOST_LOG(warning) << "PyroWave: could not allocate "sv << buffer_needs.size
+                         << " bytes to stage frames through"sv;
+      release_staging_resources();
+      return false;
+    }
+
+    void *mapped = nullptr;
+    if (api.map_memory(owner->device, staging_memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
+      BOOST_LOG(warning) << "PyroWave: could not map the staging buffer"sv;
+      release_staging_resources();
+      return false;
+    }
+    // Mapped once and left mapped. Unmapping between frames buys nothing and costs a round trip.
+    staging_mapped = static_cast<uint8_t *>(mapped);
+    staging_size = wanted_bytes;
+    image_stride = static_cast<uint32_t>(stride);
+    return true;
+  }
+
 
   bool upload_t::can_import() const {
     return owner && owner->can_import_dmabuf && api.get_memory_fd_properties != nullptr;
@@ -422,7 +464,7 @@ namespace pyrowave_encode {
    * cache keyed on a file descriptor the other side may have closed and reopened is a subtle thing to
    * get wrong and an image creation is not obviously expensive.
    */
-  bool upload_t::import_dmabuf(const dmabuf_t &buffer) {
+  bool upload_t::import_dmabuf(const dmabuf_t &buffer, bool ten_bit) {
     release_import();
 
     if (!can_import() || buffer.fds[0] < 0 || buffer.width <= 0 || buffer.height <= 0) {
@@ -433,6 +475,18 @@ namespace pyrowave_encode {
     if (format == VK_FORMAT_UNDEFINED) {
       BOOST_LOG(warning) << "PyroWave: capture handed over a dmabuf in a format this codec cannot "sv
                          << "read (fourcc "sv << buffer.fourcc << ')';
+      return false;
+    }
+
+    // The depth this stream carries, checked here because nothing after this point would notice. The
+    // portal offers eight and ten bit formats in one list and lets the compositor choose, so a stream
+    // can be told it is getting one and handed the other.
+    const bool frame_is_ten_bit = format == VK_FORMAT_A2B10G10R10_UNORM_PACK32 ||
+                                  format == VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+    if (frame_is_ten_bit != ten_bit) {
+      BOOST_LOG(error) << "PyroWave: capture handed over "sv
+                       << (frame_is_ten_bit ? "ten"sv : "eight"sv) << " bit pixels and this stream is "sv
+                       << (ten_bit ? "ten"sv : "eight"sv) << " bit"sv;
       return false;
     }
 
@@ -458,27 +512,47 @@ namespace pyrowave_encode {
     external.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
     external.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
 
-    // The modifier says how the pixels are arranged, which for anything but a linear buffer is the
-    // only way to read it at all. Polaris asks the portal for linear, so this is usually that, but a
-    // buffer that arrives with a real modifier is described rather than assumed.
+    // One plane, and a modifier that says how it is laid out. Both are refused rather than guessed
+    // at, and the refusal is the honest part:
+    //
+    // Only the first descriptor is imported, so a buffer whose modifier yields more than one memory
+    // plane would have the rest read from inside the first one's allocation. AMD's DCC and Intel's
+    // CCS do exactly that on packed RGB.
+    //
+    // And an invalid modifier means nobody said how the pixels are arranged. Assuming linear reads a
+    // tiled buffer as noise, and even when it is linear, Vulkan then picks its own row pitch and a
+    // padded capture pitch shears the picture.
+    //
+    // Neither happens today: Polaris asks the portal for one plane of linear, and PipeWire rewrites
+    // an invalid modifier to linear before it gets here. They are refused because that is a sentence
+    // in a log rather than a picture nobody can explain.
+    uint32_t planes = 0;
+    for (int i = 0; i < 4 && buffer.fds[i] >= 0; i++) {
+      planes++;
+    }
+    if (planes != 1) {
+      BOOST_LOG(warning) << "PyroWave: capture handed over a "sv << planes
+                         << " plane dmabuf, and this path imports one"sv;
+      ::close(fd);
+      return false;
+    }
+    if (buffer.modifier == DRM_FORMAT_MOD_INVALID) {
+      BOOST_LOG(warning) << "PyroWave: capture handed over a dmabuf with no layout modifier"sv;
+      ::close(fd);
+      return false;
+    }
+
     std::array<VkSubresourceLayout, 4> layouts = {};
+    layouts[0].offset = buffer.offsets[0];
+    layouts[0].rowPitch = buffer.pitches[0];
+
     VkImageDrmFormatModifierExplicitCreateInfoEXT modifier_info = {};
     modifier_info.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT;
-    VkImageTiling tiling = VK_IMAGE_TILING_LINEAR;
-
-    if (buffer.modifier != DRM_FORMAT_MOD_INVALID) {
-      uint32_t planes = 0;
-      for (int i = 0; i < 4 && buffer.fds[i] >= 0; i++) {
-        layouts[i].offset = buffer.offsets[i];
-        layouts[i].rowPitch = buffer.pitches[i];
-        planes++;
-      }
-      modifier_info.drmFormatModifier = buffer.modifier;
-      modifier_info.drmFormatModifierPlaneCount = planes;
-      modifier_info.pPlaneLayouts = layouts.data();
-      external.pNext = &modifier_info;
-      tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
-    }
+    modifier_info.drmFormatModifier = buffer.modifier;
+    modifier_info.drmFormatModifierPlaneCount = 1;
+    modifier_info.pPlaneLayouts = layouts.data();
+    external.pNext = &modifier_info;
+    const VkImageTiling tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
 
     VkImageCreateInfo info = {};
     info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -568,24 +642,30 @@ namespace pyrowave_encode {
     return true;
   }
 
-  bool upload_t::begin_imported(const dmabuf_t &buffer, const placement_t &where) {
+  bool upload_t::begin_imported(const dmabuf_t &buffer, const placement_t &where, bool ten_bit) {
     if (wedged || recording) {
       return false;
     }
-    if (!import_dmabuf(buffer)) {
+    if (!import_dmabuf(buffer, ten_bit)) {
       return false;
     }
 
-    // Bars mean the codec has to read an image shaped like the stream, and the imported frame is
-    // shaped like the display. So the picture is copied into the middle of one, on the GPU, which is
-    // a tenth of the price of the copy this path exists to avoid and never touches the host.
-    const bool needs_a_frame_of_its_own = where.has_bars();
-    if (needs_a_frame_of_its_own &&
-        !prepare(buffer.width, buffer.height, buffer.width * 4, imported_format, where)) {
+    // Into an image this path owns, always, even when the shapes match and the codec could have read
+    // the imported frame directly. Two reasons, and the second is the one that decides it:
+    //
+    // Capture takes the buffer back as soon as this frame is released, and the compositor may be
+    // drawing into it by the time anything wants to read it again. Reading it later is reading
+    // whatever is in it now.
+    //
+    // And a host repeats a frame when capture has nothing new, which means encoding the last picture
+    // again with no frame in hand. That is only possible from an image that is still ours.
+    //
+    // The copy is between two images on the GPU: about a tenth of a millisecond at 4K against the
+    // four this path exists to remove, and none of it the host's.
+    if (!prepare_image(buffer.width, buffer.height, imported_format, where)) {
       release_import();
       return false;
     }
-    reading_import = !needs_a_frame_of_its_own;
 
     if (api.reset_command_pool(owner->device, pool, 0) != VK_SUCCESS) {
       release_import();
@@ -607,23 +687,15 @@ namespace pyrowave_encode {
     VkImageMemoryBarrier acquire = {};
     acquire.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     acquire.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    acquire.newLayout = needs_a_frame_of_its_own ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL
-                                                 : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    acquire.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     acquire.srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
     acquire.dstQueueFamilyIndex = owner->queue_family;
     acquire.image = imported_image;
     acquire.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     acquire.srcAccessMask = 0;
-    acquire.dstAccessMask = needs_a_frame_of_its_own ? VK_ACCESS_TRANSFER_READ_BIT
-                                                     : VK_ACCESS_SHADER_READ_BIT;
+    acquire.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     api.cmd_pipeline_barrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                             needs_a_frame_of_its_own ? VK_PIPELINE_STAGE_TRANSFER_BIT
-                                                      : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             0, 0, nullptr, 0, nullptr, 1, &acquire);
-
-    if (!needs_a_frame_of_its_own) {
-      return true;
-    }
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &acquire);
 
     VkImageMemoryBarrier to_transfer = {};
     to_transfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -689,7 +761,7 @@ namespace pyrowave_encode {
       BOOST_LOG(warning) << "PyroWave: a "sv << stride << " byte row is not a whole number of pixels"sv;
       return false;
     }
-    if (!prepare(width, height, stride, format, where)) {
+    if (!prepare_image(width, height, format, where) || !prepare_staging(width, height, stride)) {
       return false;
     }
 
@@ -712,7 +784,6 @@ namespace pyrowave_encode {
       return false;
     }
     recording = true;
-    reading_import = false;
 
     VkImageMemoryBarrier to_transfer = {};
     to_transfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -796,13 +867,14 @@ namespace pyrowave_encode {
 
   pyrowave_image_view upload_t::view() const {
     pyrowave_image_view view = {};
-    // The imported frame itself when nothing had to be drawn around it, and the image it was copied
-    // into when it did.
-    view.image = reading_import ? imported_image : image;
-    view.width = reading_import ? imported_width : image_width;
-    view.height = reading_import ? imported_height : image_height;
-    view.image_format = reading_import ? imported_format : image_format;
-    view.view_format = view.image_format;
+    // Always the image this path owns. An imported frame is copied into it while capture still has
+    // it lent to us, and a repeat encodes what is in it, so this is the one thing that is still true
+    // after capture has taken its buffer back.
+    view.image = image;
+    view.width = image_width;
+    view.height = image_height;
+    view.image_format = image_format;
+    view.view_format = image_format;
     view.mip_level = 0;
     view.layer = 0;
     view.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
