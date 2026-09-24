@@ -1076,6 +1076,8 @@ TEST(VideoVulkanQualityClampTests, ClampsToDriverReportedMaximum) {
 TEST(VideoVulkanQualityClampTests, NegativeConfiguredValueFloorsAtZero) {
   EXPECT_EQ(video::vulkan_quality_clamp(-1, 4), 0);
   EXPECT_EQ(video::vulkan_quality_clamp(-5, -1), 0);
+}
+
 namespace {
 
   /// What a client that has read the SDP and the codec mode bits would send for SDR.
