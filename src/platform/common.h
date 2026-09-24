@@ -580,6 +580,24 @@ namespace platf {
     };
   };
 
+  /**
+   * @brief Marks a session as PyroWave's, and carries the frame the codec will read.
+   *
+   * There is no hardware context to hold and no display backend involved: PyroWave takes packed
+   * BGRA from host memory, which every capture backend already produces, so this exists to be the
+   * type the dispatch recognises rather than to do work. The GPU path will give it something to
+   * hold.
+   */
+  struct pyrowave_encode_device_t: encode_device_t {
+    int convert(platf::img_t &img) override {
+      // Nothing to convert here: the session reads the frame directly, because frame_t already
+      // carries the pointer, the stride and the extent, and copying it once more to satisfy an
+      // interface would be a copy per frame for nothing.
+      (void) img;
+      return 0;
+    }
+  };
+
   struct nvenc_encode_device_t: encode_device_t {
     virtual bool init_encoder(const video::config_t &client_config, const video::sunshine_colorspace_t &colorspace) = 0;
 
