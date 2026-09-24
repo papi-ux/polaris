@@ -254,6 +254,35 @@ namespace video {
    */
   inline constexpr std::uint32_t SCM_PYROWAVE_444 = 0x01000000;
 
+  /**
+   * @brief This host can carry PyroWave as HDR10, full range BT.2020 with the PQ transfer function.
+   *
+   * Its own bit because the dynamic range is asked for at launch, over HTTP, before any of the RTSP
+   * negotiation happens: by the time a client could read the SDP it has already committed. So this is
+   * the only place a client can learn it before it has to decide.
+   *
+   * Narrower than SCM_PYROWAVE, and deliberately: HDR exists only on the path that hands the codec a
+   * picture on the GPU, so a host that has the codec does not necessarily have this.
+   */
+  inline constexpr std::uint32_t SCM_PYROWAVE_HDR10 = 0x02000000;
+
+  /**
+   * @brief Why this host will not stream PyroWave to a client that asked for this, or nothing.
+   *
+   * Everything about a PyroWave request that can be judged without touching a display, in one place
+   * and with no side effects, because the alternative is four conditions spread through an RTSP
+   * handler that only a live client can reach. What cannot be judged here is left to the capture
+   * path, which fails closed.
+   *
+   * @param config What the client asked for in its ANNOUNCE.
+   * @param can_encode Whether this host has a device that can run the codec at all.
+   * @param can_hdr Whether it can carry HDR10, which is the narrower question: that needs the path
+   *   that hands the codec a picture on the GPU.
+   * @return A sentence naming what is wrong, ready to log, or nothing when the request is servable.
+   */
+  std::optional<std::string> pyrowave_announce_refusal(const config_t &config, bool can_encode,
+                                                       bool can_hdr);
+
   struct encoder_platform_formats_t {
     virtual ~encoder_platform_formats_t() = default;
     platf::mem_type_e dev_type;

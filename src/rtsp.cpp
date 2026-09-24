@@ -1462,8 +1462,17 @@ namespace rtsp_stream {
     if (!worker_owned && pyrowave_encode::available()) {
       ss << "a=rtpmap:99 PYROWAVE/90000"sv << std::endl;
       // The codec revision and the colourimetry, which a decoder cannot infer and must match. A
-      // client that does not know this exact string is expected not to ask for the codec at all.
-      ss << "a=fmtp:99 "sv << pyrowave_encode::profile_token << std::endl;
+      // client that does not know one of these strings is expected not to ask for the codec at all.
+      //
+      // A list, space separated, because there is one token per colourimetry and a host that can do
+      // both offers both. A client looks for its own token as a whole element: a substring search
+      // would let a "-v1" client accept a "-v10" host, and matching the whole value would make
+      // offering a second token break every client that only knows the first.
+      ss << "a=fmtp:99 "sv << pyrowave_encode::profile_token;
+      if (pyrowave_encode::hdr_available()) {
+        ss << ' ' << pyrowave_encode::hdr_profile_token;
+      }
+      ss << std::endl;
     }
 #endif
 
@@ -1819,51 +1828,16 @@ namespace rtsp_stream {
 
     if (config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE) {
       bool can_pyrowave = false;
+      bool can_pyrowave_hdr = false;
 #ifdef POLARIS_BUILD_PYROWAVE
       can_pyrowave = pyrowave_encode::available();
+      can_pyrowave_hdr = pyrowave_encode::hdr_available();
 #endif
-      if (!can_pyrowave) {
-        BOOST_LOG(warning) << "The client requested PyroWave, which this host cannot run"sv;
-
-        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
-        return;
-      }
-
-      // Full range Rec. 709, which is bit 0 set for full and colourspace 1 for Rec. 709, so 3.
-      // The profile token promises exactly this and nothing else, so a client that matched the
-      // token and then asked for something else has disagreed with itself, and encoding its
-      // request would produce a picture its decoder reads with the wrong maths.
-      if (config.monitor.encoderCscMode != 3) {
-        BOOST_LOG(warning) << "PyroWave carries full range Rec. 709, yet the client asked for colour mode "sv
-                           << config.monitor.encoderCscMode;
-
-        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
-        return;
-      }
-
-      // The encoder can carry HDR10, on the path that hands it a picture on the GPU, and no client
-      // can read it: the only token this host offers says SDR, and the bitstream reserves fields for
-      // transfer function and primaries that nothing upstream writes. So accepting an HDR request
-      // would send PQ BT.2020 to a client that agreed to display Rec. 709, which is a picture that is
-      // merely wrong, washed out with the darks crushed, and nothing anywhere saying why.
-      //
-      // What is missing is the negotiation, not the encoding: an SDP that offers both tokens and a
-      // client that asks for the HDR one. Until then this stays a refusal.
-      if (config.monitor.dynamicRange != 0) {
-        BOOST_LOG(warning) << "PyroWave cannot agree HDR with a client yet, and this one asked for "sv
-                           << "dynamic range "sv << config.monitor.dynamicRange;
-
-        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
-        return;
-      }
-
-      // 4:2:0 has no half chroma sample, and an odd extent would make the encoder round to even
-      // while the client's decoder kept the size it asked for. The two then disagree about every
-      // frame's sequence header, and the decoder drops the lot with a line about the dimensions.
-      if (config.monitor.width <= 0 || config.monitor.height <= 0 ||
-          (config.monitor.width & 1) || (config.monitor.height & 1)) {
-        BOOST_LOG(warning) << "PyroWave needs an even stream size, yet the client asked for "sv
-                           << config.monitor.width << 'x' << config.monitor.height;
+      // Every judgement this request needs that does not touch a display, in one pure function so it
+      // can be tested without a client. See the note above about not probing the runtime from here.
+      if (const auto refusal = video::pyrowave_announce_refusal(config.monitor, can_pyrowave,
+                                                               can_pyrowave_hdr)) {
+        BOOST_LOG(warning) << *refusal;
 
         respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
         return;

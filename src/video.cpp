@@ -1787,10 +1787,12 @@ namespace video {
    */
   class pyrowave_encode_session_t: public encode_session_t {
   public:
-    pyrowave_encode_session_t(std::unique_ptr<pyrowave_encode::session_t> session, int framerate, int bitrate_kbps):
+    pyrowave_encode_session_t(std::unique_ptr<pyrowave_encode::session_t> session, int framerate,
+                              int bitrate_kbps, pyrowave_encode::dynamic_range_e range):
         session {std::move(session)},
         framerate {framerate > 0 ? framerate : 60},
-        max_frame_bytes {frame_budget(bitrate_kbps, framerate > 0 ? framerate : 60)} {
+        max_frame_bytes {frame_budget(bitrate_kbps, framerate > 0 ? framerate : 60)},
+        range {range} {
     }
 
     /**
@@ -1837,20 +1839,27 @@ namespace video {
         return -1;
       }
 
-      // What this session was built to read, checked rather than assumed. Every backend that reaches
-      // here hands over four bytes a pixel in BGRA order, and the one interesting way that changes is
-      // a ten bit capture: same four bytes a pixel, samples packed differently, and read as BGRA it is
-      // not a wrong colour, it is noise.
+      // What this session was built to read, checked rather than assumed. Both ranges arrive at four
+      // bytes a pixel, eight bit BGRA for SDR and packed ten bit for HDR, and each read as the other
+      // is not a wrong colour, it is noise.
       //
       // What this catches, exactly: the portal backend is the only one that negotiates ten bit, from
       // the client's dynamic range, and it is also the only one that reports what it captured, as
       // p010 standing in for a ten bit source because the enum has no packed ten bit RGB. The wlroots,
-      // KMS and cage backends report bgra8 whatever they took, so this would not catch a ten bit frame
-      // from them. That is survivable only because none of them asks for one. If one starts, this
-      // check has to move to something it actually fills in.
+      // KMS and cage backends report bgra8 whatever they took, so a ten bit frame from them would get
+      // through. That is survivable only because none of them asks for one. If one starts, this check
+      // has to move to something it actually fills in.
+      //
+      // The mismatch worth expecting is an HDR stream whose capture came back eight bit, which happens
+      // when a display leaves HDR mid session. Refusing says so; encoding it would send SDR pixels
+      // under BT.2020 PQ metadata, which is the dark, oversaturated picture people report as "HDR is
+      // broken".
       const auto format = frame.metadata.format;
-      const bool readable = format == platf::frame_format_e::bgra8 ||
-                            format == platf::frame_format_e::unknown;
+      const bool ten_bit_frame = format == platf::frame_format_e::p010;
+      const bool wants_ten_bit = range == pyrowave_encode::dynamic_range_e::hdr10;
+      const bool readable = ten_bit_frame == wants_ten_bit &&
+                            (ten_bit_frame || format == platf::frame_format_e::bgra8 ||
+                             format == platf::frame_format_e::unknown);
       // A backend that never filled the pitch in is not making a claim, so it is not contradicted.
       const bool four_bytes_a_pixel = frame.pixel_pitch == 0 || frame.pixel_pitch == 4;
       if (!readable || !four_bytes_a_pixel) {
@@ -1858,7 +1867,8 @@ namespace video {
           complained_about_format = true;
           BOOST_LOG(error) << "PyroWave: capture is handing over "sv
                            << platf::from_frame_format(format) << " at "sv << frame.pixel_pitch
-                           << " bytes a pixel, and this session reads eight bit BGRA"sv;
+                           << " bytes a pixel, and this session reads "sv
+                           << (wants_ten_bit ? "packed ten bit"sv : "eight bit BGRA"sv);
         }
         return -1;
       }
@@ -1915,6 +1925,9 @@ namespace video {
     int framerate = 60;
     std::size_t max_frame_bytes = 0;
     bool converted_since_last_packet = false;
+
+    /// What the session was built to read, which decides what a frame has to be.
+    pyrowave_encode::dynamic_range_e range = pyrowave_encode::dynamic_range_e::sdr;
 
     /// Said once. A capture backend that hands over the wrong thing hands it over sixty times a second.
     bool complained_about_format = false;
@@ -4028,7 +4041,17 @@ namespace video {
       // format, and this reads it.
       const auto chroma = config.chromaSamplingType == 1 ? pyrowave_encode::chroma_e::yuv444
                                                          : pyrowave_encode::chroma_e::yuv420;
-      auto pyrowave_session = pyrowave_encode::make_session(config.width, config.height, chroma);
+
+      // The range the stream actually has, which is not the same as the range the client asked for.
+      // colorspace_from_client_config has already weighed the request against whether this display is
+      // in HDR and whether its metadata could be read, and the answer it reached is the one the client
+      // was told through the HDR metadata on the control stream. Encoding anything else would mean the
+      // picture and its description disagree.
+      const auto range = colorspace_is_hdr(encode_device->colorspace)
+                           ? pyrowave_encode::dynamic_range_e::hdr10
+                           : pyrowave_encode::dynamic_range_e::sdr;
+
+      auto pyrowave_session = pyrowave_encode::make_session(config.width, config.height, chroma, range);
       if (!pyrowave_session) {
         invalidate_live_probe_reuse();
         return nullptr;
@@ -4039,10 +4062,12 @@ namespace video {
       const auto fps = config.framerate > 0 ? config.framerate : 60;
       BOOST_LOG(info) << "PyroWave: "sv << config.width << 'x' << config.height << ' '
                       << (chroma == pyrowave_encode::chroma_e::yuv444 ? "4:4:4"sv : "4:2:0"sv)
+                      << (range == pyrowave_encode::dynamic_range_e::hdr10 ? " HDR10"sv : " SDR"sv)
                       << " at "sv << fps << " fps, up to "sv
                       << pyrowave_encode_session_t::frame_budget(config.bitrate, fps)
                       << " bytes a frame"sv;
-      session = std::make_unique<pyrowave_encode_session_t>(std::move(pyrowave_session), fps, config.bitrate);
+      session = std::make_unique<pyrowave_encode_session_t>(std::move(pyrowave_session), fps,
+                                                           config.bitrate, range);
       session->capture_display_owner = disp;
       return session;
     }
@@ -4462,6 +4487,54 @@ namespace video {
                   );
     port.compositor_touch_turn = display->compositor_touch_turn;
     return port;
+  }
+
+  std::optional<std::string> pyrowave_announce_refusal(const config_t &config, bool can_encode,
+                                                      bool can_hdr) {
+    if (!can_encode) {
+      return "The client requested PyroWave, which this host cannot run"s;
+    }
+
+    // One dynamic range or the other, and only HDR10 where this host can carry it. The bit in
+    // ServerCodecModeSupport is what a client reads to know, because the range is asked for at launch
+    // over HTTP, before any of this. A client that asks for HDR anyway either ignored that bit or lost
+    // a race with a host that stopped offering it, and both want an answer rather than an SDR picture
+    // with HDR metadata bolted on.
+    if (config.dynamicRange != 0 && config.dynamicRange != 1) {
+      return "PyroWave knows two dynamic ranges, yet the client asked for "s +
+             std::to_string(config.dynamicRange);
+    }
+    if (config.dynamicRange == 1 && !can_hdr) {
+      return "The client asked for PyroWave in HDR, which needs the GPU input path this host does not have"s;
+    }
+
+    // Full range either way, because that is what the codec's own colour conversion produces and there
+    // is no setting for it. Bit 0 of the colour mode is the range.
+    //
+    // The colourspace bits above it only matter for SDR, where they have to say Rec. 709, which with
+    // the range bit makes 3. For HDR they are ignored on purpose: Polaris derives BT.2020 PQ from the
+    // dynamic range rather than from this field, so a client sending either 709 or 2020 alongside an
+    // HDR request gets the same stream, and refusing one of them would be refusing over a field
+    // nothing reads.
+    const bool full_range = (config.encoderCscMode & 0x1) != 0;
+    const auto requested_colourspace = config.encoderCscMode >> 1;
+    const bool colourspace_ok = config.dynamicRange == 1
+                                  ? (requested_colourspace == 1 || requested_colourspace == 2)
+                                  : requested_colourspace == 1;
+    if (!full_range || !colourspace_ok) {
+      return "PyroWave carries full range "s + (config.dynamicRange == 1 ? "BT.2020 PQ"s : "Rec. 709"s) +
+             ", yet the client asked for colour mode "s + std::to_string(config.encoderCscMode);
+    }
+
+    // 4:2:0 has no half chroma sample, and an odd extent would make the encoder round to even while
+    // the client's decoder kept the size it asked for. The two then disagree about every frame's
+    // sequence header, and the decoder drops the lot with a line about the dimensions.
+    if (config.width <= 0 || config.height <= 0 || (config.width & 1) || (config.height & 1)) {
+      return "PyroWave needs an even stream size, yet the client asked for "s +
+             std::to_string(config.width) + 'x' + std::to_string(config.height);
+    }
+
+    return std::nullopt;
   }
 
   std::unique_ptr<platf::encode_device_t> make_encode_device(platf::display_t &disp, const encoder_t &encoder, const config_t &config) {

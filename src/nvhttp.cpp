@@ -6606,6 +6606,10 @@ namespace nvhttp {
       codec_mode_flags |= video::SCM_PYROWAVE;
       // Same encoder, same device, one enum apart, so a host that can do one can do the other.
       codec_mode_flags |= video::SCM_PYROWAVE_444;
+      // Not the same: HDR needs the GPU input path, and a host can have the codec without it.
+      if (pyrowave_encode::hdr_available()) {
+        codec_mode_flags |= video::SCM_PYROWAVE_HDR10;
+      }
     }
 #endif
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);

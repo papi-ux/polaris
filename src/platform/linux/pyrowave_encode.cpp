@@ -727,6 +727,10 @@ namespace pyrowave_encode {
     return shared_device() != nullptr;
   }
 
+  bool hdr_available() {
+    return available() && gpu_input_allowed();
+  }
+
   std::unique_ptr<session_t> make_session(int width, int height, chroma_e chroma,
                                          dynamic_range_e range) {
     auto *owner = shared_vulkan();

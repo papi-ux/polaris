@@ -105,6 +105,16 @@ namespace pyrowave_encode {
   bool available();
 
   /**
+   * @brief Whether this host can carry HDR10, which is a narrower question than whether it can encode.
+   *
+   * HDR exists only on the path that hands the codec a picture on the GPU, because its system memory
+   * entry point is eight bit. So a host with the codec but without that path can stream SDR and must
+   * not offer HDR, and this is the difference. Asked before a client is told what is available, and
+   * again before one is believed.
+   */
+  bool hdr_available();
+
+  /**
    * @brief One encoder, sized at construction, producing one frame at a time.
    *
    * Intra-only, so there is no reference chain to hold and nothing to invalidate: every frame
