@@ -203,6 +203,11 @@ namespace pyrowave_encode {
     image_height = 0;
   }
 
+  void upload_t::forget_gpu_state() {
+    image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    needs_clearing = placement.has_bars();
+  }
+
   bool upload_t::prepare(int width, int height, int stride, VkFormat format,
                          const placement_t &where) {
     if (width <= 0 || height <= 0 || stride < width * 4) {
@@ -468,9 +473,11 @@ namespace pyrowave_encode {
     recording = false;
 
     if (api.end_command_buffer(cmd) != VK_SUCCESS) {
+      forget_gpu_state();
       return false;
     }
     if (api.reset_fences(owner->device, 1, &fence) != VK_SUCCESS) {
+      forget_gpu_state();
       return false;
     }
 
@@ -480,8 +487,7 @@ namespace pyrowave_encode {
     submit.pCommandBuffers = &cmd;
     if (api.queue_submit(owner->queue, 1, &submit, fence) != VK_SUCCESS) {
       BOOST_LOG(warning) << "PyroWave: the queue refused a frame"sv;
-      // Nothing ran, so the transitions this command buffer described did not happen either.
-      image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+      forget_gpu_state();
       return false;
     }
 
@@ -492,7 +498,10 @@ namespace pyrowave_encode {
     if (waited != VK_SUCCESS) {
       BOOST_LOG(error) << "PyroWave: the GPU did not finish a frame within a second (result "sv
                        << static_cast<int>(waited) << ')';
-      image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+      // Whatever that submission is doing, it is not finished, so nothing about the image can be
+      // relied on. A frame that times out has already lost the session; this is about not compounding
+      // it if the caller tries again.
+      forget_gpu_state();
       return false;
     }
     return true;
@@ -504,10 +513,9 @@ namespace pyrowave_encode {
     }
     recording = false;
     api.end_command_buffer(cmd);
-    // Not submitted, so the picture never reached the image and the layout it claims is a lie. Say
-    // so, and the next frame will transition from undefined rather than from a layout it is not in.
+    // Not submitted, so the picture never reached the image and the layout it claims is a lie.
     api.reset_command_pool(owner->device, pool, 0);
-    image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    forget_gpu_state();
   }
 
 }  // namespace pyrowave_encode

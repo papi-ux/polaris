@@ -118,6 +118,17 @@ namespace pyrowave_encode {
     bool prepare(int width, int height, int stride, VkFormat format, const placement_t &where);
     void release_frame_resources();
 
+    /**
+     * @brief Forget what the image was going to be, for a frame that never reached the GPU.
+     *
+     * begin() records the transitions and says what the image will be in once they run. When the
+     * submission does not happen, none of it did: the image is in whatever layout it was already in,
+     * and the bars this frame was going to paint are not painted. Claiming otherwise transitions from
+     * a layout the image is not in, which leaves its contents undefined, and the bars of a letterboxed
+     * stream would then be whatever was in that memory, for the life of the session.
+     */
+    void forget_gpu_state();
+
     const vk_device_t *owner = nullptr;
 
     VkCommandPool pool = VK_NULL_HANDLE;
