@@ -1793,18 +1793,13 @@ namespace video {
     }
 
     int convert(frame_t &frame) override {
-      encoded.clear();
       if (!session || !frame.cpu_data || frame.row_pitch <= 0) {
         return -1;
       }
       if (!session->encode_bgra(frame.cpu_data, frame.row_pitch, max_frame_bytes)) {
         return -1;
       }
-      // One MTU's worth, minus the room Polaris's own headers take on the wire. PyroWave splits
-      // between coefficient blocks and never inside one, so a block bigger than this still comes
-      // back as one oversized packet; the sender has to notice rather than assume.
-      encoded = session->packets(payload_boundary);
-      return encoded.empty() ? -1 : 0;
+      return session->bitstream().empty() ? -1 : 0;
     }
 
     void request_idr_frame() override {
@@ -1821,16 +1816,13 @@ namespace video {
       (void) last_frame;
     }
 
-    const std::vector<std::vector<uint8_t>> &packets() const {
-      return encoded;
+    const std::vector<uint8_t> &bitstream() const {
+      return session->bitstream();
     }
 
   private:
-    static constexpr std::size_t payload_boundary = 1200;
-
     std::unique_ptr<pyrowave_encode::session_t> session;
     std::size_t max_frame_bytes = 0;
-    std::vector<std::vector<uint8_t>> encoded;
   };
 #endif
 
@@ -3355,19 +3347,25 @@ namespace video {
    * recoverable is right.
    */
   int encode_pyrowave(int64_t frame_nr, pyrowave_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
-    const auto &encoded = session.packets();
+    const auto &encoded = session.bitstream();
     if (encoded.empty()) {
       return -1;
     }
 
-    const auto done = std::chrono::steady_clock::now();
-    for (const auto &payload : encoded) {
-      auto packet = std::make_unique<packet_raw_generic>(std::vector<uint8_t> {payload}, frame_nr, true);
-      packet->channel_data = channel_data;
-      packet->frame_timestamp = frame_timestamp;
-      packet->encode_done_timestamp = done;
-      packets->raise(std::move(packet));
-    }
+    // One frame, one packet. The codec will also hand over a packet table, and raising a packet_t
+    // for each entry is the mistake that looks right: every packet_t downstream becomes its own
+    // frame on the wire, carrying its own frame header and this same frame number, so the client
+    // would see a run of frames all claiming to be frame N, keep the first and discard the rest as
+    // duplicates. The picture would be a fraction of itself with nothing logged anywhere.
+    //
+    // Nothing is lost by sending it whole: the bitstream delimits itself, so the decoder takes the
+    // frame in one push, and the packet split only ever bought the chance to lose one packet and
+    // still decode, which this transport does not offer anyway.
+    auto packet = std::make_unique<packet_raw_generic>(std::vector<uint8_t> {encoded}, frame_nr, true);
+    packet->channel_data = channel_data;
+    packet->frame_timestamp = frame_timestamp;
+    packet->encode_done_timestamp = std::chrono::steady_clock::now();
+    packets->raise(std::move(packet));
 
     return 0;
   }

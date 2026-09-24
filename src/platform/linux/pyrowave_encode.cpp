@@ -72,6 +72,10 @@ namespace pyrowave_encode {
       }
 
       bool encode_bgra(const uint8_t *bgra, int stride, std::size_t max_bytes) override {
+        // Before the arguments are even looked at, so that every way out of here leaves nothing to
+        // read. A caller that missed the return value would otherwise send the previous picture
+        // again under a new frame number, which the decoder accepts: a freeze rather than an error.
+        frame.clear();
         if (!bgra || stride <= 0) {
           return false;
         }
@@ -106,6 +110,10 @@ namespace pyrowave_encode {
       }
 
       bool encode(const uint8_t *y, const uint8_t *u, const uint8_t *v, std::size_t max_bytes) override {
+        // Before the arguments are even looked at, so that every way out of here leaves nothing to
+        // read. A caller that missed the return value would otherwise send the previous picture
+        // again under a new frame number, which the decoder accepts: a freeze rather than an error.
+        frame.clear();
         if (!encoder || !y || !u || !v || max_bytes == 0) {
           return false;
         }
@@ -130,49 +138,82 @@ namespace pyrowave_encode {
           BOOST_LOG(warning) << "PyroWave: encode failed (result "sv << static_cast<int>(result) << ')';
           return false;
         }
-        return true;
+        return collect_frame();
       }
 
-      std::vector<std::vector<uint8_t>> packets(std::size_t packet_boundary) override {
-        std::vector<std::vector<uint8_t>> out;
-        if (!encoder || packet_boundary == 0) {
-          return out;
-        }
+      /**
+       * Gather the encoded frame into one buffer, or leave it empty and say why.
+       *
+       * The boundary handed to the codec is a reference, not a promise to the network: it decides
+       * where the codec draws its packet table, and the bytes it writes are the same either way.
+       * It is chosen above the largest a single block can be, because the split test runs before a
+       * block is added rather than after, so a block that does not fit in an empty packet still
+       * goes in and overflows it. One block is at most 4095 words, since that is the width of the
+       * payload length field in its header, so a boundary above 16380 bytes cannot overflow and
+       * count times boundary is a real bound on the output rather than a hopeful one. That matters:
+       * the codec only checks the buffer it was given with an assert, so a build with asserts off
+       * would write past a buffer that was merely probably big enough.
+       */
+      bool collect_frame() {
+        frame.clear();
 
         std::size_t count = 0;
-        if (pyrowave_encoder_compute_num_packets(encoder, packet_boundary, &count) != PYROWAVE_SUCCESS || count == 0) {
-          return out;
+        if (pyrowave_encoder_compute_num_packets(encoder, reference_boundary, &count) != PYROWAVE_SUCCESS || count == 0) {
+          BOOST_LOG(error) << "PyroWave: the encoded frame reports no packets"sv;
+          return false;
         }
 
         std::vector<pyrowave_packet> descriptors(count);
-        std::vector<uint8_t> bitstream(count * packet_boundary);
+        frame.resize(count * reference_boundary);
         std::size_t written = 0;
-        if (pyrowave_encoder_packetize(encoder, descriptors.data(), packet_boundary, &written,
-                                       bitstream.data(), bitstream.size()) != PYROWAVE_SUCCESS) {
-          return out;
+        if (pyrowave_encoder_packetize(encoder, descriptors.data(), reference_boundary, &written,
+                                       frame.data(), frame.size()) != PYROWAVE_SUCCESS || written == 0) {
+          BOOST_LOG(error) << "PyroWave: the encoded frame could not be packetized"sv;
+          frame.clear();
+          return false;
         }
 
-        out.reserve(written);
+        // Checked rather than trusted. Reading the frame as one blob is only correct while the
+        // packets tile the buffer from the start with no gaps, which is how the codec writes them
+        // today; if that ever changes, a silently reordered or gapped bitstream is a corrupt
+        // picture with no error anywhere, so find out here instead.
+        std::size_t expected_offset = 0;
         for (std::size_t i = 0; i < written; ++i) {
-          const auto &descriptor = descriptors[i];
-          if (descriptor.offset + descriptor.size > bitstream.size()) {
-            // A packet that runs past the buffer means the library and this caller disagree about
-            // the bitstream layout, which is not something to paper over one packet at a time.
-            BOOST_LOG(error) << "PyroWave: packet "sv << i << " runs past the bitstream"sv;
-            return {};
+          if (descriptors[i].offset != expected_offset) {
+            BOOST_LOG(error) << "PyroWave: packet "sv << i << " starts at "sv << descriptors[i].offset
+                             << " instead of "sv << expected_offset
+                             << "; the bitstream is no longer one contiguous run"sv;
+            frame.clear();
+            return false;
           }
-          out.emplace_back(bitstream.begin() + static_cast<std::ptrdiff_t>(descriptor.offset),
-                           bitstream.begin() + static_cast<std::ptrdiff_t>(descriptor.offset + descriptor.size));
+          expected_offset += descriptors[i].size;
         }
-        return out;
+
+        if (expected_offset > frame.size()) {
+          BOOST_LOG(error) << "PyroWave: the frame runs "sv << expected_offset << " bytes past its "sv
+                           << frame.size() << " byte buffer"sv;
+          frame.clear();
+          return false;
+        }
+
+        frame.resize(expected_offset);
+        return true;
+      }
+
+      const std::vector<uint8_t> &bitstream() const override {
+        return frame;
       }
 
     private:
+      /// Above the 16380 bytes a single coded block can reach, so every packet fits inside it.
+      static constexpr std::size_t reference_boundary = 16384;
+
       pyrowave_encoder encoder = nullptr;
       int width = 0;
       int height = 0;
       SwsContext *scaler = nullptr;
       std::array<std::vector<uint8_t>, 3> planes;
+      std::vector<uint8_t> frame;
     };
 
   }  // namespace

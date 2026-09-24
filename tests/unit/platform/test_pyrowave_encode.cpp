@@ -11,7 +11,7 @@
   #include "src/platform/linux/pyrowave_encode.h"
 
   #include <algorithm>
-  #include <numeric>
+  #include <cstring>
 
 namespace {
 
@@ -47,6 +47,44 @@ namespace {
     std::vector<uint8_t> v;
   };
 
+  /**
+   * The start of frame header a PyroWave bitstream opens with, read from the bytes.
+   *
+   * Mirrors the codec's own two words rather than including its private header, which is the point:
+   * these are the bytes Polaris puts on the wire and Nova's decoder reads back, so reading them the
+   * way a decoder would is what proves the frame begins where a decoder expects it to. If the codec
+   * ever moves a field, this is a test that fails rather than a stream that decodes to noise.
+   */
+  struct sequence_header_t {
+    explicit sequence_header_t(const std::vector<uint8_t> &frame) {
+      if (frame.size() < 8) {
+        return;
+      }
+      uint32_t first = 0;
+      uint32_t second = 0;
+      std::memcpy(&first, frame.data(), sizeof(first));
+      std::memcpy(&second, frame.data() + 4, sizeof(second));
+      present = true;
+      width = static_cast<int>(first & 0x3fff) + 1;
+      height = static_cast<int>((first >> 14) & 0x3fff) + 1;
+      extended = (first >> 31) & 0x1;
+      total_blocks = second & 0xffffff;
+      code = (second >> 24) & 0x3;
+      chroma_resolution = (second >> 26) & 0x1;
+    }
+
+    bool present = false;
+    int width = 0;
+    int height = 0;
+    uint32_t extended = 0;
+    uint32_t total_blocks = 0;
+    uint32_t code = 0;
+    uint32_t chroma_resolution = 0;
+  };
+
+  constexpr uint32_t start_of_frame = 0;
+  constexpr uint32_t chroma_420 = 0;
+
 }  // namespace
 
 TEST(PyroWaveEncodeTests, TheLinkedLibraryAnswersForItself) {
@@ -67,7 +105,7 @@ TEST(PyroWaveEncodeTests, AnOddExtentIsRefusedRatherThanRounded) {
   EXPECT_EQ(pyrowave_encode::make_session(-2, -2), nullptr);
 }
 
-TEST(PyroWaveEncodeTests, EncodesAFrameIntoPacketsTheNetworkCanCarry) {
+TEST(PyroWaveEncodeTests, AFrameArrivesAsOneBitstreamADecoderCanOpen) {
   if (!pyrowave_encode::available()) {
     GTEST_SKIP() << "no Vulkan device this codec can use";
   }
@@ -83,63 +121,22 @@ TEST(PyroWaveEncodeTests, EncodesAFrameIntoPacketsTheNetworkCanCarry) {
   constexpr std::size_t max_bytes = 512 * 1024;
   ASSERT_TRUE(session->encode(frame.y.data(), frame.u.data(), frame.v.data(), max_bytes));
 
-  // A boundary a real stream would use, near the usual MTU.
-  constexpr std::size_t packet_boundary = 1024;
-  const auto packets = session->packets(packet_boundary);
-  ASSERT_FALSE(packets.empty());
+  const auto &encoded = session->bitstream();
+  ASSERT_FALSE(encoded.empty());
+  EXPECT_LE(encoded.size(), max_bytes) << "rate control is supposed to be exact, not approximate";
 
-  const auto total = std::accumulate(packets.begin(), packets.end(), std::size_t {0},
-                                     [](std::size_t sum, const auto &packet) { return sum + packet.size(); });
-  EXPECT_GT(total, 0U);
-  EXPECT_LE(total, max_bytes) << "rate control is supposed to be exact, not approximate";
-
-  for (const auto &packet : packets) {
-    EXPECT_FALSE(packet.empty());
-  }
-}
-
-TEST(PyroWaveEncodeTests, ThePacketBoundaryIsASplitTargetAndNotACap) {
-  if (!pyrowave_encode::available()) {
-    GTEST_SKIP() << "no Vulkan device this codec can use";
-  }
-
-  // This is the contract, and it is not what the parameter name suggests. PyroWave splits between
-  // coefficient blocks and never inside one: it closes the current packet before appending a block
-  // that would overflow the boundary, then appends that block whole. So a single block larger than
-  // the boundary produces a packet larger than the boundary, and no boundary can prevent it.
-  //
-  // It matters because Polaris sends these over UDP. A packet past the path MTU fragments, and a
-  // fragmented packet loses the one property this codec is chosen for: that every packet decodes on
-  // its own. The stream path has to size the boundary from the MTU, reserve its own header through
-  // the padding argument, and treat an oversized packet as a rate control problem to report rather
-  // than something to quietly split.
-  constexpr int width = 1280;
-  constexpr int height = 720;
-  auto session = pyrowave_encode::make_session(width, height);
-  ASSERT_NE(session, nullptr);
-
-  const test_frame_t frame {width, height};
-  ASSERT_TRUE(session->encode(frame.y.data(), frame.u.data(), frame.v.data(), 512 * 1024));
-
-  constexpr std::size_t packet_boundary = 1024;
-  const auto packets = session->packets(packet_boundary);
-  ASSERT_FALSE(packets.empty());
-
-  std::size_t largest = 0;
-  for (const auto &packet : packets) {
-    largest = std::max(largest, packet.size());
-  }
-  // Left as a live observation rather than a pinned number: what it is depends on the rate control
-  // budget and the picture. The point of the test is that it can exceed the boundary at all.
-  EXPECT_GT(largest, 0U);
-
-  // Ask for a boundary no block can exceed and every packet fits, which is the same rule seen from
-  // the other side.
-  const auto roomy = session->packets(64 * 1024);
-  ASSERT_FALSE(roomy.empty());
-  for (const auto &packet : roomy) {
-    EXPECT_LE(packet.size(), 64U * 1024U);
-  }
+  // The frame has to begin at its beginning. Polaris sends this blob as one frame and Nova pushes
+  // it to the decoder in one call, so a buffer that started one packet in would decode to nothing
+  // with no error to read: the decoder would look for a sequence header, find a block header, and
+  // drop the frame.
+  const sequence_header_t header {encoded};
+  ASSERT_TRUE(header.present);
+  EXPECT_EQ(header.extended, 1U) << "the first header is not an extended one, so not a sequence header";
+  EXPECT_EQ(header.code, start_of_frame);
+  EXPECT_EQ(header.width, width);
+  EXPECT_EQ(header.height, height);
+  EXPECT_EQ(header.chroma_resolution, chroma_420);
+  EXPECT_GT(header.total_blocks, 0U);
 }
 
 TEST(PyroWaveEncodeTests, EncodesTheBgraFrameCaptureActuallyHandsOver) {
@@ -167,27 +164,41 @@ TEST(PyroWaveEncodeTests, EncodesTheBgraFrameCaptureActuallyHandsOver) {
   }
 
   ASSERT_TRUE(session->encode_bgra(bgra.data(), stride, 256 * 1024));
-  const auto packets = session->packets(1024);
-  ASSERT_FALSE(packets.empty());
+  ASSERT_FALSE(session->bitstream().empty());
+  const sequence_header_t header {session->bitstream()};
+  ASSERT_TRUE(header.present);
+  EXPECT_EQ(header.width, width);
+  EXPECT_EQ(header.height, height);
 
   // The converter is built once and kept, so the second frame has to work as well as the first.
   ASSERT_TRUE(session->encode_bgra(bgra.data(), stride, 256 * 1024));
-  EXPECT_FALSE(session->packets(1024).empty());
+  EXPECT_FALSE(session->bitstream().empty());
 }
 
-TEST(PyroWaveEncodeTests, ARefusedFrameIsRefusedRatherThanGuessed) {
+TEST(PyroWaveEncodeTests, ARefusedFrameLeavesNothingToRead) {
   if (!pyrowave_encode::available()) {
     GTEST_SKIP() << "no Vulkan device this codec can use";
   }
 
-  auto session = pyrowave_encode::make_session(320, 240);
+  constexpr int width = 320;
+  constexpr int height = 240;
+  auto session = pyrowave_encode::make_session(width, height);
   ASSERT_NE(session, nullptr);
 
-  std::vector<uint8_t> bgra(static_cast<std::size_t>(320) * 240 * 4, 0x40);
-  EXPECT_FALSE(session->encode_bgra(nullptr, 320 * 4, 64 * 1024));
+  std::vector<uint8_t> bgra(static_cast<std::size_t>(width) * height * 4, 0x40);
+  EXPECT_FALSE(session->encode_bgra(nullptr, width * 4, 64 * 1024));
   EXPECT_FALSE(session->encode_bgra(bgra.data(), 0, 64 * 1024));
   EXPECT_FALSE(session->encode_bgra(bgra.data(), -1, 64 * 1024));
   EXPECT_FALSE(session->encode(nullptr, nullptr, nullptr, 64 * 1024));
+
+  // A refusal has to leave the frame empty and not the previous picture. The caller checks the
+  // return value, but the whole point of holding the frame in the session is that a missed check
+  // sends nothing rather than sending the last good frame again under a new frame number.
+  const test_frame_t frame {width, height};
+  ASSERT_TRUE(session->encode(frame.y.data(), frame.u.data(), frame.v.data(), 64 * 1024));
+  ASSERT_FALSE(session->bitstream().empty());
+  EXPECT_FALSE(session->encode(nullptr, nullptr, nullptr, 64 * 1024));
+  EXPECT_TRUE(session->bitstream().empty()) << "a refused frame left the previous one readable";
 }
 
 TEST(PyroWaveEncodeTests, EveryFrameStandsAlone) {
@@ -201,17 +212,48 @@ TEST(PyroWaveEncodeTests, EveryFrameStandsAlone) {
   ASSERT_NE(session, nullptr);
 
   // Intra-only means the second frame owes nothing to the first, so encoding the same input twice
-  // through one session has to produce a usable frame both times. A codec with a reference chain
-  // would quietly produce a much smaller second frame here.
+  // through one session has to produce a frame of much the same size both times. A codec with a
+  // reference chain would quietly produce a far smaller second frame here.
   const test_frame_t frame {width, height};
   ASSERT_TRUE(session->encode(frame.y.data(), frame.u.data(), frame.v.data(), 256 * 1024));
-  const auto first = session->packets(1024);
-  ASSERT_FALSE(first.empty());
+  const auto first = session->bitstream().size();
+  ASSERT_GT(first, 0U);
 
   ASSERT_TRUE(session->encode(frame.y.data(), frame.u.data(), frame.v.data(), 256 * 1024));
-  const auto second = session->packets(1024);
-  ASSERT_FALSE(second.empty());
-  EXPECT_EQ(first.size(), second.size());
+  const auto second = session->bitstream().size();
+  ASSERT_GT(second, 0U);
+
+  const auto larger = std::max(first, second);
+  const auto smaller = std::min(first, second);
+  EXPECT_GT(smaller * 2, larger) << "the second frame leaned on the first";
+}
+
+TEST(PyroWaveEncodeTests, TheSequenceNumberMovesSoADecoderKnowsTheFrameChanged) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  constexpr int width = 320;
+  constexpr int height = 240;
+  auto session = pyrowave_encode::make_session(width, height);
+  ASSERT_NE(session, nullptr);
+
+  // The decoder decides a new frame has begun by the sequence field in the header moving, and it
+  // silently drops a frame whose number it has already seen. A session that never advanced it would
+  // encode happily and stream one picture forever.
+  const test_frame_t frame {width, height};
+  std::vector<uint32_t> sequences;
+  for (int i = 0; i < 3; ++i) {
+    ASSERT_TRUE(session->encode(frame.y.data(), frame.u.data(), frame.v.data(), 64 * 1024));
+    const auto &encoded = session->bitstream();
+    ASSERT_GE(encoded.size(), 8U);
+    uint32_t first = 0;
+    std::memcpy(&first, encoded.data(), sizeof(first));
+    sequences.push_back((first >> 28) & 0x7);
+  }
+
+  EXPECT_NE(sequences[0], sequences[1]);
+  EXPECT_NE(sequences[1], sequences[2]);
 }
 
 #endif  // POLARIS_BUILD_PYROWAVE

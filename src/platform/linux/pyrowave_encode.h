@@ -70,13 +70,24 @@ namespace pyrowave_encode {
     virtual bool encode_bgra(const uint8_t *bgra, int stride, std::size_t max_bytes) = 0;
 
     /**
-     * @brief The encoded frame, split at a boundary the network can carry.
+     * @brief The encoded frame, as one contiguous bitstream. Valid until the next encode.
      *
-     * Every packet is independent: PyroWave codes 64x64 blocks of coefficients in isolation, so a
-     * frame that loses one still decodes. Valid until the next encode.
-     * @param packet_boundary The largest packet the caller will send.
+     * One blob rather than the packet list the codec will also hand out, because the bitstream
+     * delimits itself: a sequence header, then coded blocks each carrying its own length, and the
+     * decoder's push entry point walks them until the buffer runs out. Handing it the whole frame
+     * at once is byte for byte the same work as handing it every packet in turn, and the bytes the
+     * codec writes do not depend on where the packet boundaries were drawn, only the boundary
+     * table does.
+     *
+     * So the split buys nothing here. It exists to let a lossy link drop one packet and still
+     * decode the frame, and this transport does not offer that: it protects a whole frame with FEC
+     * and reassembles it or loses it. Sending the packets separately would need each to be its own
+     * frame on the wire, which every frame paced, counted and FEC protected stream around it
+     * assumes means one picture. That is a different transport, not an addition to this one.
+     *
+     * Empty when the last encode failed.
      */
-    virtual std::vector<std::vector<uint8_t>> packets(std::size_t packet_boundary) = 0;
+    virtual const std::vector<uint8_t> &bitstream() const = 0;
   };
 
   /**
