@@ -45,6 +45,46 @@ const normalizedShellCommands = (source) => {
   return commands
 }
 
+describe('KMS package capability admission', () => {
+  for (const distro of ['Arch', 'SteamOS']) {
+    for (const failure of ['', 'chgrp', 'chmod']) {
+      it(`${distro} grants capability only after ownership and mode succeed (${failure || 'success'})`, () => {
+        const fixture = mkdtempSync(join(tmpdir(), 'polaris-kms-admission-'))
+        try {
+          const helper = join(fixture, 'helper')
+          const log = join(fixture, 'commands')
+          const script = join(fixture, 'package.install')
+          writeFileSync(helper, 'fixture')
+          writeFileSync(script, readSource(`packaging/linux/${distro}/polaris-kms.install`)
+            .replace('local helper=/usr/libexec/polaris/polaris-kms', 'local helper="$KMS_TEST_HELPER"'))
+          for (const command of ['getent', 'systemd-sysusers', 'chgrp', 'chmod', 'setcap']) {
+            const path = join(fixture, command)
+            writeFileSync(path, `#!/bin/sh\nprintf '%s %s\\n' '${command}' "$*" >> "$KMS_TEST_LOG"\nif [ "$KMS_TEST_FAILURE" = '${command}' ]; then exit 1; fi\n`)
+            chmodSync(path, 0o755)
+          }
+          const result = spawnSync('bash', ['-c', '. "$1"; post_upgrade', 'kms-test', script], {
+            encoding: 'utf8',
+            env: { ...process.env, PATH: `${fixture}:${process.env.PATH}`, KMS_TEST_HELPER: helper,
+              KMS_TEST_LOG: log, KMS_TEST_FAILURE: failure },
+          })
+          const commands = readFileSync(log, 'utf8').trim().split('\n')
+          if (failure) {
+            expect(result.status).toBe(1)
+            expect(result.stderr).toContain('refusing the capability')
+            // Only the revocation is attempted after a permission failure.
+            expect(commands.filter((command) => command.startsWith('setcap '))).toEqual([`setcap -r ${helper}`])
+          } else {
+            expect(result.status, result.stderr).toBe(0)
+            expect(commands.slice(-3)).toEqual([`chgrp polaris-kms ${helper}`, `chmod 0750 ${helper}`, `setcap cap_sys_admin+ep ${helper}`])
+          }
+        } finally {
+          rmSync(fixture, { force: true, recursive: true })
+        }
+      })
+    }
+  }
+})
+
 const shellExecutableOccurrences = (commands, executable) => {
   const pattern = new RegExp(`(?:^|[;&|(){}]\\s*)(?:(?:if|while|until|elif|then|else|do)\\s+)?(?:!\\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|(){}]+\\s+)*(?:sudo\\s+)?(?:[^\\s;&|(){}]+/)?${executable}(?=\\s|$)`, 'g')
   return commands.flatMap((command, index) => (

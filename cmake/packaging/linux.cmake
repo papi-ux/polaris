@@ -141,9 +141,9 @@ set(CPACK_DEBIAN_KMS_FILE_NAME "Polaris-kms.deb")
 set(CPACK_DEBIAN_POLARIS_PACKAGE_NAME "polaris")
 set(CPACK_DEBIAN_KMS_PACKAGE_NAME "polaris-kms")
 set(CPACK_DEBIAN_KMS_PACKAGE_SHLIBDEPS OFF)
-# Only Polaris. Without this the helper inherits every runtime dependency of the main package,
-# which it does not use and already has through that dependency anyway.
-set(CPACK_DEBIAN_KMS_PACKAGE_DEPENDS "polaris (= ${CPACK_PACKAGE_VERSION})")
+# Keep the main runtime dependencies on Polaris. The helper's maintainer script
+# additionally needs setcap and groupadd even on a minimal installation.
+set(CPACK_DEBIAN_KMS_PACKAGE_DEPENDS "polaris (= ${CPACK_PACKAGE_VERSION}), libcap2-bin, passwd")
 # Its own scriptlet: the main one talks about --setup-host, and this one has real work to do.
 # dpkg runs a maintainer script only under its exact name, and CONTROL_EXTRA keeps the basename,
 # so this one lives in a directory of its own rather than being called postinst-kms and never running.

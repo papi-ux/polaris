@@ -1187,7 +1187,7 @@ jobs:
           sudo apt-get "${apt_options[@]}" install -y "./$deb_path"
           kms_identity="$(dpkg-deb --field "$kms_deb_path" Package)|$(dpkg-deb --field "$kms_deb_path" Version)|$(dpkg-deb --field "$kms_deb_path" Architecture)"
           test "$kms_identity" = "polaris-kms|${BUILD_VERSION}|amd64"
-          test "$(dpkg-deb --field "$kms_deb_path" Depends)" = "polaris (= ${BUILD_VERSION})"
+          test "$(dpkg-deb --field "$kms_deb_path" Depends)" = "polaris (= ${BUILD_VERSION}), libcap2-bin, passwd"
           sudo apt-get "${apt_options[@]}" install -y "./$kms_deb_path"
           helper=/usr/libexec/polaris/polaris-kms
           test "$(stat -c '%a %U %G' "$helper")" = '750 root polaris-kms'

@@ -27,8 +27,11 @@ _polaris_kms_apply() {
     return 0
   fi
 
-  chgrp "$group" "$helper"
-  chmod 0750 "$helper"
+  if ! chgrp "$group" "$helper" || ! chmod 0750 "$helper"; then
+    setcap -r "$helper" 2>/dev/null || true
+    printf '%s\n' 'polaris-kms: could not restrict helper access; refusing the capability.' >&2
+    return 1
+  fi
   if ! setcap cap_sys_admin+ep "$helper" 2>/dev/null; then
     printf '%s\n' \
       "polaris-kms: could not set cap_sys_admin on $helper, which some filesystems refuse." \
