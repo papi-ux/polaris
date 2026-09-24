@@ -2365,3 +2365,48 @@ TEST_F(PairingAccessPresetTest, PairingStateThatIsNotAnObjectSaysSo) {
   EXPECT_NE(logged.find("Refusing authorization state"), std::string::npos) << logged;
   EXPECT_EQ(logged.find("root must be an object"), std::string::npos) << logged;
 }
+
+TEST(HttpsConnectionLifecycleTest, DestructionDoesNotWaitForPeerCloseNotify) {
+  namespace asio = boost::asio;
+  using tcp = asio::ip::tcp;
+  asio::io_context io;
+  asio::ssl::context server_context(asio::ssl::context::tls_server);
+  server_context.use_certificate_chain(asio::buffer(PUBLIC_CERT));
+  server_context.use_private_key(asio::buffer(PRIVATE_KEY), asio::ssl::context::pem);
+  asio::ssl::context client_context(asio::ssl::context::tls_client);
+  client_context.set_verify_mode(asio::ssl::verify_none);
+  tcp::acceptor acceptor(io, {asio::ip::address_v4::loopback(), 0});
+  auto server = std::make_unique<PolarisHTTPS>(io, server_context);
+  asio::ssl::stream<tcp::socket> peer(io, client_context);
+  peer.lowest_layer().connect(acceptor.local_endpoint());
+  acceptor.accept(server->lowest_layer());
+  boost::system::error_code server_error, client_error;
+  server->async_handshake(asio::ssl::stream_base::server, [&](auto ec) { server_error = ec; });
+  peer.async_handshake(asio::ssl::stream_base::client, [&](auto ec) { client_error = ec; });
+  io.run();
+  ASSERT_FALSE(server_error);
+  ASSERT_FALSE(client_error);
+
+  // A complete, length-delimited HTTP response does not require the client to
+  // close its TLS connection. Reclaiming it on the server's only HTTPS thread
+  // must not wait for a cooperative peer and starve the next request.
+  const std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+  asio::write(*server, asio::buffer(response));
+  std::string received(response.size(), '\0');
+  asio::read(peer, asio::buffer(received));
+  EXPECT_EQ(received, response);
+
+  // Bound the old bug so a failing regression cannot hang the test process.
+  io.restart();
+  asio::steady_timer watchdog(io, 1s);
+  watchdog.async_wait([&](auto ec) {
+    if (!ec) { boost::system::error_code ignored; peer.lowest_layer().close(ignored); }
+  });
+  std::thread watchdog_thread([&] { io.run(); });
+  const auto started = std::chrono::steady_clock::now();
+  server.reset();
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  io.stop();
+  watchdog_thread.join();
+  EXPECT_LT(elapsed, 500ms);
+}
