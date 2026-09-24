@@ -24,6 +24,7 @@ extern "C" {
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <mutex>
 
 // local includes
@@ -273,6 +274,7 @@ namespace pyrowave_encode {
         buffer.plane_size_in_bytes[1] = buffer.row_stride_in_bytes[1] * static_cast<std::size_t>(height / 2);
         buffer.plane_size_in_bytes[2] = buffer.row_stride_in_bytes[2] * static_cast<std::size_t>(height / 2);
 
+        budget = max_bytes;
         const pyrowave_rate_control rate_control = {max_bytes};
         const auto result = pyrowave_encoder_encode_cpu_synchronous(encoder, &buffer, &rate_control);
         if (result != PYROWAVE_SUCCESS) {
@@ -338,7 +340,86 @@ namespace pyrowave_encode {
         }
 
         frame.resize(expected_offset);
+        validate_frame();
         return true;
+      }
+
+      /**
+       * Count the blocks in the frame and compare with what its own header claims.
+       *
+       * A frame arriving at the client with fewer blocks than its sequence header promises is
+       * undecodable, and that is reproducibly what happens to frames sitting at the rate control
+       * ceiling. This says which end is responsible: if the count is already short here, the
+       * encoder produced an inconsistent frame and nothing in transit is to blame.
+       *
+       * Walks it exactly as the decoder's push entry point does, because the point is to see what
+       * it will see. Silent when the frame is whole, which is almost always.
+       */
+      void validate_frame() {
+        if (frame.size() < 8) {
+          return;
+        }
+
+        uint32_t second = 0;
+        std::memcpy(&second, frame.data() + 4, sizeof(second));
+        const uint32_t claimed = second & 0xffffff;
+
+        std::size_t offset = 8;  // past the sequence header
+        uint32_t counted = 0;
+        bool ran_off_the_end = false;
+
+        while (offset + 8 <= frame.size()) {
+          uint16_t descriptor = 0;
+          std::memcpy(&descriptor, frame.data() + offset + 2, sizeof(descriptor));
+          const bool extended = (descriptor >> 15) & 0x1;
+          if (extended) {
+            offset += 8;
+            continue;
+          }
+
+          const std::size_t block_bytes = static_cast<std::size_t>(descriptor & 0x0fff) * 4;
+          if (block_bytes == 0 || offset + block_bytes > frame.size()) {
+            ran_off_the_end = true;
+            break;
+          }
+          counted++;
+          offset += block_bytes;
+        }
+
+        const bool whole = !ran_off_the_end && counted == claimed && offset == frame.size();
+        if (whole) {
+          ++whole_frames;
+          // The frames the client cannot decode are the ones at the ceiling, so say what leaves here
+          // for exactly those. If this size and the size the client reports are the same, the frame
+          // survived the wire intact and the fault is further in; if they differ, something between
+          // trims it.
+          if (budget > 0 && frame.size() * 100 >= budget * 99) {
+            ++ceiling_frames;
+            if (ceiling_frames <= 4 || ceiling_frames % 100 == 0) {
+              BOOST_LOG(info) << "PyroWave: ceiling frame "sv << ceiling_frames << " leaves at "sv
+                              << frame.size() << " bytes of a "sv << budget << " budget, "sv
+                              << claimed << " blocks, whole"sv;
+            }
+          }
+          return;
+        }
+
+        ++short_frames;
+        if (short_frames <= 3 || short_frames % 25 == 0) {
+          BOOST_LOG(warning) << "PyroWave: frame "sv << short_frames << " of "sv
+                             << (short_frames + whole_frames) << " is short before it leaves: "sv
+                             << counted << " blocks of "sv << claimed << " claimed, "sv
+                             << offset << " bytes walked of "sv << frame.size()
+                             << (ran_off_the_end ? ", and a block ran past the end"sv : ""sv);
+        }
+      }
+
+      bool encode_retained(std::size_t max_bytes) override {
+        frame.clear();
+        if (planes[0].empty() || planes[1].empty() || planes[2].empty()) {
+          return false;
+        }
+        return encode(planes[0].data(), planes[1].data(), planes[2].data(), max_bytes);
       }
 
       const std::vector<uint8_t> &bitstream() const override {
@@ -362,6 +443,10 @@ namespace pyrowave_encode {
       double convert_ms_total = 0.0;
       double encode_ms_total = 0.0;
       uint64_t timed_frames = 0;
+      uint64_t whole_frames = 0;
+      uint64_t short_frames = 0;
+      uint64_t ceiling_frames = 0;
+      std::size_t budget = 0;
       std::array<std::vector<uint8_t>, 3> planes;
       std::vector<uint8_t> frame;
     };

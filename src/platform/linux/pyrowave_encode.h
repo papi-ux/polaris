@@ -104,6 +104,19 @@ namespace pyrowave_encode {
                              std::size_t max_bytes) = 0;
 
     /**
+     * @brief Encode the last converted picture again, as a new frame.
+     *
+     * For the frames a host repeats when capture has nothing new. Every frame this codec produces
+     * carries a sequence number, and a decoder drops one it has already decoded, so the same
+     * bitstream sent twice is a frame thrown away at the other end. Encoding again costs about a
+     * millisecond and skips the colour conversion, which is the expensive half.
+     *
+     * @param max_bytes The most this frame may occupy.
+     * @return false when there is no converted picture to encode, or the encode failed.
+     */
+    virtual bool encode_retained(std::size_t max_bytes) = 0;
+
+    /**
      * @brief The encoded frame, as one contiguous bitstream. Valid until the next encode.
      *
      * One blob rather than the packet list the codec will also hand out, because the bitstream

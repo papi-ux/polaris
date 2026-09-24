@@ -1840,7 +1840,29 @@ namespace video {
                                 max_frame_bytes)) {
         return -1;
       }
+      converted_since_last_packet = true;
       return session->bitstream().empty() ? -1 : 0;
+    }
+
+    /**
+     * Make sure the next packet carries a new frame.
+     *
+     * The host repeats a frame when capture has nothing new, by calling encode again without a
+     * convert in between. Every other encoder here answers that with a fresh packet, because asking
+     * an encoder to encode is what produces one. This one held a buffer, so it handed back the frame
+     * it had already sent, and a decoder drops a sequence number it has already decoded: the frame
+     * arrived whole and was thrown away. Measured as a run of dropped frames at the start of every
+     * session, while a game was still loading and capture had nothing new to give.
+     *
+     * Encoding the retained picture again costs about a millisecond and skips the colour conversion,
+     * which is the expensive half.
+     */
+    bool prepare_packet() {
+      if (converted_since_last_packet) {
+        converted_since_last_packet = false;
+        return true;
+      }
+      return session->encode_retained(max_frame_bytes);
     }
 
     void request_idr_frame() override {
@@ -1865,6 +1887,7 @@ namespace video {
     std::unique_ptr<pyrowave_encode::session_t> session;
     int framerate = 60;
     std::size_t max_frame_bytes = 0;
+    bool converted_since_last_packet = false;
   };
 #endif
 
@@ -3389,6 +3412,11 @@ namespace video {
    * recoverable is right.
    */
   int encode_pyrowave(int64_t frame_nr, pyrowave_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+    if (!session.prepare_packet()) {
+      BOOST_LOG(error) << "PyroWave: nothing to send for this frame"sv;
+      return -1;
+    }
+
     const auto &encoded = session.bitstream();
     if (encoded.empty()) {
       return -1;
