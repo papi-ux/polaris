@@ -29,9 +29,28 @@
   #include <cmath>
   #include <cstdlib>
   #include <cstring>
+  #include <filesystem>
+  #include <fstream>
   #include <memory>
+  #include <sstream>
+  #include <string>
 
 namespace {
+
+  /**
+   * A source file, for the contracts that are about what the code says rather than what it does.
+   */
+  std::string read_source_for_contract(const char *relative_path) {
+    const auto path = std::filesystem::path(POLARIS_SOURCE_DIR) / relative_path;
+    std::ifstream in(path);
+    if (!in) {
+      return {};
+    }
+
+    std::ostringstream out;
+    out << in.rdbuf();
+    return out.str();
+  }
 
   /**
    * A frame with structure in it. A flat colour compresses to almost nothing and would pass a
@@ -1140,6 +1159,30 @@ TEST(PyroWaveEncodeTests, ARepeatedFrameWorksAfterAnImportedOne) {
   const decoded_frame_t decoded {session->bitstream(), width, height, false};
   ASSERT_TRUE(decoded.ok);
   expect_full_range_rec709(decoded, picture, "repeated after an import");
+}
+
+/**
+ * Every Linux display factory has to recognise this encoder's device type.
+ *
+ * The encoder asks for one of its own so the portal will offer it a dmabuf, and a factory that does
+ * not know the type returns nothing. A capture thread with no display exits, while the codec is still
+ * advertised to the client, so the session is negotiated and then dies with no picture and nothing in
+ * any log to connect the two.
+ *
+ * That is what wlgrab and x11grab did the day this encoder was given its own type: every wlroots and
+ * X11 host stopped being able to stream a codec that had worked on them the day before. The type is
+ * read here rather than a behaviour, because opening either display needs a compositor.
+ *
+ * kmsgrab is not in this list on purpose. Its factory has no reject list: an unrecognised type falls
+ * through to the RAM path, which is the right answer for this one.
+ */
+TEST(PyroWaveCaptureBackendTests, EveryDisplayFactoryAdmitsThisEncodersDeviceType) {
+  for (const char *file : {"src/platform/linux/wlgrab.cpp", "src/platform/linux/x11grab.cpp"}) {
+    const auto source = read_source_for_contract(file);
+    ASSERT_FALSE(source.empty()) << file << " could not be read";
+    EXPECT_NE(source.find("mem_type_e::vulkan_pyrowave"), std::string::npos)
+      << file << " opens no display for this encoder, so no host on that backend can stream it";
+  }
 }
 
 #endif  // POLARIS_BUILD_PYROWAVE
