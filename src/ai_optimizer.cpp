@@ -1280,7 +1280,7 @@ namespace ai_optimizer {
     if (!session.last_safe_hdr.has_value()) {
       if (hdr_risk) {
         session.last_safe_hdr = false;
-      } else if (device_profile && device_profile->hdr_capable && !degraded_history) {
+      } else if (device_profile && device_profile->hdr_capable.value_or(false) && !degraded_history) {
         session.last_safe_hdr = true;
       }
     }

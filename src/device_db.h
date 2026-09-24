@@ -25,7 +25,17 @@ namespace device_db {
     std::string preferred_codec;   ///< "hevc", "av1", "h264"
     int ideal_bitrate_kbps = 0;    ///< Recommended bitrate
     int color_range = 0;           ///< 0=client, 1=limited, 2=full
-    bool hdr_capable = false;      ///< Device supports HDR
+    /**
+     * @brief Whether this device's display can show HDR, when anybody has said.
+     *
+     * Three states on purpose. It was a plain bool defaulting to false, which made "nobody has filled
+     * this in" and "this device cannot show HDR" the same answer, and the second one refuses HDR for
+     * the whole device. Half the shipped records carried that false without anyone ever having
+     * checked the panel.
+     *
+     * Unset now means no opinion and refuses nothing. Only a value somebody wrote is evidence.
+     */
+    std::optional<bool> hdr_capable;
     bool virtual_display = true;   ///< Should use virtual display
     int nvenc_tune = 3;            ///< 1=quality, 2=low-latency, 3=ultra-low-latency
     std::string notes;             ///< Human-readable description

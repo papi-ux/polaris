@@ -34,7 +34,11 @@ namespace device_db {
       entry["preferred_codec"] = dev.preferred_codec;
       entry["ideal_bitrate_kbps"] = dev.ideal_bitrate_kbps;
       entry["color_range"] = dev.color_range;
-      entry["hdr_capable"] = dev.hdr_capable;
+      // Only when somebody has an opinion. Writing false for a record nobody filled in is how the
+      // placeholder used to spread into files that outlive it.
+      if (dev.hdr_capable.has_value()) {
+        entry["hdr_capable"] = *dev.hdr_capable;
+      }
       entry["virtual_display"] = dev.virtual_display;
       entry["nvenc_tune"] = dev.nvenc_tune;
       entry["notes"] = dev.notes;
@@ -77,7 +81,7 @@ namespace device_db {
   static void load_defaults() {
     // --- Handhelds ---
     devices["RetroidPocket6"] = {
-      "handheld", "1920x1080x60", "hevc", 15000, 2, false, true, 3,
+      "handheld", "1920x1080x60", "hevc", 15000, 2, std::nullopt, true, 3,
       "Retroid Pocket 6 — Android handheld, 1080p landscape, WiFi 6"
     };
     devices["RP6"] = devices["RetroidPocket6"];
@@ -90,7 +94,7 @@ namespace device_db {
     register_friendly_alias("Retroid Pocket 6", "Retroid Pocket 6");
 
     devices["RetroidPocketFlip2"] = {
-      "handheld", "1920x1080x60", "hevc", 15000, 2, false, true, 3,
+      "handheld", "1920x1080x60", "hevc", 15000, 2, std::nullopt, true, 3,
       "Retroid Pocket Flip 2 — Android clamshell handheld, 5.5-inch 1080p, WiFi 6"
     };
     devices["Retroid Pocket Flip 2"] = devices["RetroidPocketFlip2"];
@@ -100,12 +104,12 @@ namespace device_db {
     register_friendly_alias("Retroid Pocket Flip 2", "Retroid Pocket Flip 2");
 
     devices["RP5"] = {
-      "handheld", "1280x720x60", "hevc", 10000, 2, false, true, 3,
+      "handheld", "1280x720x60", "hevc", 10000, 2, std::nullopt, true, 3,
       "Retroid Pocket 5 — Android handheld, 720p, WiFi 5"
     };
 
     devices["Steam Deck"] = {
-      "handheld", "1280x800x60", "hevc", 20000, 2, false, true, 2,
+      "handheld", "1280x800x60", "hevc", 20000, 2, std::nullopt, true, 2,
       "Valve Steam Deck LCD — 1280x800, WiFi 5, HEVC decode"
     };
     register_friendly_alias("Steam Deck", "Steam Deck");
@@ -192,7 +196,7 @@ namespace device_db {
       "iPad Pro — 2732x2048, 120Hz ProMotion, HEVC, WiFi 6E"
     };
     devices["iPad Air"] = {
-      "tablet", "2360x1640x60", "hevc", 30000, 2, false, true, 2,
+      "tablet", "2360x1640x60", "hevc", 30000, 2, std::nullopt, true, 2,
       "iPad Air — 2360x1640, 60Hz, HEVC, WiFi 6"
     };
     devices["Galaxy Tab S9"] = {
@@ -202,7 +206,7 @@ namespace device_db {
 
     // --- VR and high-throughput Android clients ---
     devices["Meta Quest 3"] = {
-      "vr", "3840x2160x90", "av1", 60000, 2, false, false, 2,
+      "vr", "3840x2160x90", "av1", 60000, 2, std::nullopt, false, 2,
       "Meta Quest 3 — VR headset used as a high-throughput Moonlight/Nova client"
     };
     devices["Quest 3"] = devices["Meta Quest 3"];
@@ -215,7 +219,7 @@ namespace device_db {
     register_friendly_alias("Oculus Quest 3", "Meta Quest 3");
 
     devices["Meta Quest 3S"] = {
-      "vr", "3840x2160x90", "av1", 55000, 2, false, false, 2,
+      "vr", "3840x2160x90", "av1", 55000, 2, std::nullopt, false, 2,
       "Meta Quest 3S — VR headset used as a high-throughput Moonlight/Nova client"
     };
     devices["Quest 3S"] = devices["Meta Quest 3S"];
@@ -267,7 +271,9 @@ namespace device_db {
         dev.preferred_codec = val.value("preferred_codec", "hevc");
         dev.ideal_bitrate_kbps = val.value("ideal_bitrate_kbps", 0);
         dev.color_range = val.value("color_range", 0);
-        dev.hdr_capable = val.value("hdr_capable", false);
+        if (val.contains("hdr_capable") && val["hdr_capable"].is_boolean()) {
+          dev.hdr_capable = val["hdr_capable"].get<bool>();
+        }
         dev.virtual_display = val.value("virtual_display", true);
         dev.nvenc_tune = val.value("nvenc_tune", 3);
         dev.notes = val.value("notes", "");
@@ -377,6 +383,8 @@ namespace device_db {
       opt.display_mode = dev->display_mode;
     if (dev->color_range > 0)
       opt.color_range = dev->color_range;
+    // Passed through as it is, including having no opinion, which the resolver reads as
+    // "this record says nothing" rather than as a no.
     opt.hdr = dev->hdr_capable;
     opt.virtual_display = dev->virtual_display;
     if (dev->ideal_bitrate_kbps > 0)

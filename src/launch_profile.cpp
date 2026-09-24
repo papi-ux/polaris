@@ -548,11 +548,13 @@ namespace launch_profile {
       result.hdr = false;
       add_field(result.fields, "hdr", false, "capability_validation",
                 "host_encoder_hdr_unsupported", resolved_hdr_locked, true);
-    } else if (result.hdr && device && !device->hdr_capable && !request.client_reports_hdr10_display) {
+    } else if (result.hdr && device && device->hdr_capable == false &&
+               !request.client_reports_hdr10_display) {
+      // An opinion somebody wrote, and no word from the client to set against it.
       result.hdr = false;
       add_field(result.fields, "hdr", false, "capability_validation",
                 "paired_device_hdr_unsupported", resolved_hdr_locked, true);
-    } else if (result.hdr && device && !device->hdr_capable) {
+    } else if (result.hdr && device && device->hdr_capable == false) {
       // The curated record says the device cannot do HDR and the device itself says it can.
       // hdr_capable defaults to false and stays there until somebody edits the file by hand,
       // while the client measured its own panel, so the client wins.
