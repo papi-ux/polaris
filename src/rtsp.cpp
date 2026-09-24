@@ -1828,6 +1828,30 @@ namespace rtsp_stream {
         respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
         return;
       }
+
+      // Full range Rec. 709, which is bit 0 set for full and colourspace 1 for Rec. 709, so 3.
+      // The profile token promises exactly this and nothing else, so a client that matched the
+      // token and then asked for something else has disagreed with itself, and encoding its
+      // request would produce a picture its decoder reads with the wrong maths.
+      if (config.monitor.encoderCscMode != 3) {
+        BOOST_LOG(warning) << "PyroWave carries full range Rec. 709, yet the client asked for colour mode "sv
+                           << config.monitor.encoderCscMode;
+
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+      }
+
+      // 4:2:0 has no half chroma sample, and an odd extent would make the encoder round to even
+      // while the client's decoder kept the size it asked for. The two then disagree about every
+      // frame's sequence header, and the decoder drops the lot with a line about the dimensions.
+      if (config.monitor.width <= 0 || config.monitor.height <= 0 ||
+          (config.monitor.width & 1) || (config.monitor.height & 1)) {
+        BOOST_LOG(warning) << "PyroWave needs an even stream size, yet the client asked for "sv
+                           << config.monitor.width << 'x' << config.monitor.height;
+
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+      }
     }
 
     if (config.monitor.videoFormat == 2 && video::active_av1_mode == 1) {

@@ -20,6 +20,7 @@ extern "C" {
 }
 
 // standard includes
+#include <algorithm>
 #include <array>
 #include <mutex>
 
@@ -71,57 +72,116 @@ namespace pyrowave_encode {
         }
       }
 
-      bool encode_bgra(const uint8_t *bgra, int stride, std::size_t max_bytes) override {
+      bool encode_bgra(const uint8_t *bgra, int src_width, int src_height, int stride,
+                       std::size_t max_bytes) override {
         // Before the arguments are even looked at, so that every way out of here leaves nothing to
         // read. A caller that missed the return value would otherwise send the previous picture
         // again under a new frame number, which the decoder accepts: a freeze rather than an error.
         frame.clear();
-        if (!bgra || stride <= 0) {
+        if (!bgra || src_width <= 0 || src_height <= 0) {
           return false;
         }
 
-        // Kept between frames: a stream is thousands of identically shaped frames, and building
-        // the scaler for each one would dominate a codec that encodes in a tenth of a millisecond.
-        if (!scaler) {
-          scaler = sws_getContext(width, height, AV_PIX_FMT_BGRA,
-                                  width, height, AV_PIX_FMT_YUV420P,
-                                  SWS_POINT, nullptr, nullptr, nullptr);
-          if (!scaler) {
-            BOOST_LOG(error) << "PyroWave: could not make a "sv << width << 'x' << height
-                             << " colour converter"sv;
-            return false;
-          }
-
-          // Said out loud, because the default is neither of the things anyone would assume. swscale
-          // converts RGB to YUV as limited range BT.601 unless told otherwise, and a decoder reading
-          // these frames as Rec. 709 gets the hue wrong on anything saturated while looking entirely
-          // plausible on a desktop. The bitstream has fields for this and upstream does not write
-          // them, so the only agreement available is the one in profile_token, and this is the end of
-          // it that has to be true.
-          const int *coefficients = sws_getCoefficients(SWS_CS_ITU709);
-          if (sws_setColorspaceDetails(scaler, coefficients, 1, coefficients, 1,
-                                       0, 1 << 16, 1 << 16) < 0) {
-            BOOST_LOG(error) << "PyroWave: this converter will not do full range Rec. 709"sv;
-            sws_freeContext(scaler);
-            scaler = nullptr;
-            return false;
-          }
-          planes[0].resize(static_cast<std::size_t>(width) * height);
-          planes[1].resize(static_cast<std::size_t>(width / 2) * (height / 2));
-          planes[2].resize(static_cast<std::size_t>(width / 2) * (height / 2));
+        // The one thing that has to hold for the reads below to stay inside the buffer capture gave
+        // us. Checked against the geometry rather than against metadata, because a backend that
+        // fills in neither pixel_pitch nor a format still has to hand over rows this long.
+        if (stride < src_width * 4) {
+          BOOST_LOG(error) << "PyroWave: a "sv << src_width << " pixel row cannot fit in "sv
+                           << stride << " bytes"sv;
+          return false;
         }
 
+        if (!prepare_scaler(src_width, src_height)) {
+          return false;
+        }
+
+        // Into the middle of the destination, leaving the bars as prepare_scaler painted them. The
+        // offsets are even so that a chroma sample lands on a chroma sample; an odd one shifts the
+        // colour half a pixel off the luma it belongs to.
         const uint8_t *src[4] = {bgra, nullptr, nullptr, nullptr};
         const int src_stride[4] = {stride, 0, 0, 0};
-        uint8_t *dst[4] = {planes[0].data(), planes[1].data(), planes[2].data(), nullptr};
+        uint8_t *dst[4] = {
+          planes[0].data() + static_cast<std::size_t>(offset_y) * width + offset_x,
+          planes[1].data() + static_cast<std::size_t>(offset_y / 2) * (width / 2) + offset_x / 2,
+          planes[2].data() + static_cast<std::size_t>(offset_y / 2) * (width / 2) + offset_x / 2,
+          nullptr};
         const int dst_stride[4] = {width, width / 2, width / 2, 0};
 
-        if (sws_scale(scaler, src, src_stride, 0, height, dst, dst_stride) != height) {
+        if (sws_scale(scaler, src, src_stride, 0, src_height, dst, dst_stride) != fit_height) {
           BOOST_LOG(warning) << "PyroWave: colour conversion did not fill the frame"sv;
           return false;
         }
 
         return encode(planes[0].data(), planes[1].data(), planes[2].data(), max_bytes);
+      }
+
+      /**
+       * Make a converter for this source geometry, or keep the one already made.
+       *
+       * Kept between frames: a stream is thousands of identically shaped frames, and building the
+       * scaler for each would dominate a codec that encodes in a tenth of a millisecond. Rebuilt
+       * when the source changes size, which happens when the captured display does.
+       */
+      bool prepare_scaler(int src_width, int src_height) {
+        if (scaler && src_width == source_width && src_height == source_height) {
+          return true;
+        }
+
+        if (scaler) {
+          sws_freeContext(scaler);
+          scaler = nullptr;
+        }
+
+        // The same fit Polaris's software encode path uses, rounded to even here because this code
+        // addresses the chroma planes itself rather than leaving the arithmetic to a pixel format
+        // descriptor.
+        const auto scale = std::min(static_cast<double>(width) / src_width,
+                                    static_cast<double>(height) / src_height);
+        fit_width = std::max(2, static_cast<int>(src_width * scale) & ~1);
+        fit_height = std::max(2, static_cast<int>(src_height * scale) & ~1);
+        offset_x = ((width - fit_width) / 2) & ~1;
+        offset_y = ((height - fit_height) / 2) & ~1;
+
+        // Bilinear rather than nearest, because this scales a desktop down far more often than it
+        // leaves it alone, and nearest turns small text into noise that a wavelet codec then spends
+        // its whole bitrate on.
+        scaler = sws_getContext(src_width, src_height, AV_PIX_FMT_BGRA,
+                                fit_width, fit_height, AV_PIX_FMT_YUV420P,
+                                SWS_BILINEAR, nullptr, nullptr, nullptr);
+        if (!scaler) {
+          BOOST_LOG(error) << "PyroWave: could not make a "sv << src_width << 'x' << src_height
+                           << " to "sv << fit_width << 'x' << fit_height << " colour converter"sv;
+          return false;
+        }
+
+        // Said out loud, because the default is neither of the things anyone would assume. swscale
+        // converts RGB to YUV as limited range BT.601 unless told otherwise, and a decoder reading
+        // these frames as Rec. 709 gets the hue wrong on anything saturated while looking entirely
+        // plausible on a desktop. The bitstream has fields for this and upstream does not write
+        // them, so the only agreement available is the one in profile_token, and this is the end of
+        // it that has to be true.
+        const int *coefficients = sws_getCoefficients(SWS_CS_ITU709);
+        if (sws_setColorspaceDetails(scaler, coefficients, 1, coefficients, 1,
+                                     0, 1 << 16, 1 << 16) < 0) {
+          BOOST_LOG(error) << "PyroWave: this converter will not do full range Rec. 709"sv;
+          sws_freeContext(scaler);
+          scaler = nullptr;
+          return false;
+        }
+
+        planes[0].assign(static_cast<std::size_t>(width) * height, 0);
+        planes[1].assign(static_cast<std::size_t>(width / 2) * (height / 2), 128);
+        planes[2].assign(static_cast<std::size_t>(width / 2) * (height / 2), 128);
+
+        source_width = src_width;
+        source_height = src_height;
+
+        if (fit_width != width || fit_height != height) {
+          BOOST_LOG(info) << "PyroWave: fitting "sv << src_width << 'x' << src_height << " into "sv
+                          << width << 'x' << height << " as "sv << fit_width << 'x' << fit_height
+                          << " at "sv << offset_x << ',' << offset_y;
+        }
+        return true;
       }
 
       bool encode(const uint8_t *y, const uint8_t *u, const uint8_t *v, std::size_t max_bytes) override {
@@ -226,6 +286,12 @@ namespace pyrowave_encode {
       pyrowave_encoder encoder = nullptr;
       int width = 0;
       int height = 0;
+      int source_width = 0;
+      int source_height = 0;
+      int fit_width = 0;
+      int fit_height = 0;
+      int offset_x = 0;
+      int offset_y = 0;
       SwsContext *scaler = nullptr;
       std::array<std::vector<uint8_t>, 3> planes;
       std::vector<uint8_t> frame;

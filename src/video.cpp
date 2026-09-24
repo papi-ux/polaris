@@ -1796,7 +1796,8 @@ namespace video {
       if (!session || !frame.cpu_data || frame.row_pitch <= 0) {
         return -1;
       }
-      if (!session->encode_bgra(frame.cpu_data, frame.row_pitch, max_frame_bytes)) {
+      if (!session->encode_bgra(frame.cpu_data, frame.width, frame.height, frame.row_pitch,
+                                max_frame_bytes)) {
         return -1;
       }
       return session->bitstream().empty() ? -1 : 0;
@@ -3918,7 +3919,12 @@ namespace video {
     std::unique_ptr<encode_session_t> session;
 #ifdef POLARIS_BUILD_PYROWAVE
     if (dynamic_cast<platf::pyrowave_encode_device_t *>(encode_device.get())) {
-      auto pyrowave_session = pyrowave_encode::make_session(width, height);
+      // The stream's size, not the captured display's, which is what width and height are here. It
+      // is the size the client created its decoder with and the size this codec writes into every
+      // frame's sequence header, and a decoder handed a size it did not expect drops the frame with
+      // a line about the dimensions and nothing about the picture. Capture gets scaled to fit inside
+      // it instead, which is what every other encoder here does through its converter.
+      auto pyrowave_session = pyrowave_encode::make_session(config.width, config.height);
       if (!pyrowave_session) {
         invalidate_live_probe_reuse();
         return nullptr;
@@ -3931,7 +3937,7 @@ namespace video {
       const auto bits_per_frame = static_cast<std::size_t>(std::max(config.bitrate, 1)) * 1000 / static_cast<std::size_t>(fps);
       const auto max_frame_bytes = std::max<std::size_t>(bits_per_frame / 8, 4096);
 
-      BOOST_LOG(info) << "PyroWave: "sv << width << 'x' << height << " at "sv << fps
+      BOOST_LOG(info) << "PyroWave: "sv << config.width << 'x' << config.height << " at "sv << fps
                       << " fps, up to "sv << max_frame_bytes << " bytes a frame"sv;
       session = std::make_unique<pyrowave_encode_session_t>(std::move(pyrowave_session), max_frame_bytes);
       session->capture_display_owner = disp;

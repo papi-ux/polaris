@@ -81,17 +81,27 @@ namespace pyrowave_encode {
     virtual bool encode(const uint8_t *y, const uint8_t *u, const uint8_t *v, std::size_t max_bytes) = 0;
 
     /**
-     * @brief Encode one frame from packed BGRA in host memory.
+     * @brief Encode one frame from packed BGRA in host memory, scaled to the session's size.
      *
-     * What capture actually hands over. The conversion to planar YUV happens here, on the CPU,
-     * which is the bring-up path: it works against every capture backend without importing a
-     * buffer, and it is the wrong way to do it once a dmabuf can reach the GPU directly.
+     * What capture actually hands over, and rarely at the size the client asked for: a 7680x2160
+     * monitor feeding a 1280x800 tablet is the ordinary case. The session's size is the stream's,
+     * because it is the size the decoder at the other end was created with and the size written
+     * into every frame's sequence header, and a decoder that reads a size it did not expect drops
+     * the frame and says so about nothing else.
+     *
+     * So the source is scaled to fit inside it with its aspect ratio kept, centred, and the bars
+     * left black. The conversion happens here on the CPU, which is the bring-up path: it works
+     * against every capture backend without importing a buffer, and it is the wrong way to do it
+     * once a dmabuf can reach the GPU directly.
      * @param bgra First byte of the top left pixel.
+     * @param src_width Width of what capture handed over, not of the stream.
+     * @param src_height Height of the same.
      * @param stride Bytes per row, which capture rarely makes equal to width times four.
      * @param max_bytes The most this frame may occupy.
      * @return false when the frame could not be converted or encoded.
      */
-    virtual bool encode_bgra(const uint8_t *bgra, int stride, std::size_t max_bytes) = 0;
+    virtual bool encode_bgra(const uint8_t *bgra, int src_width, int src_height, int stride,
+                             std::size_t max_bytes) = 0;
 
     /**
      * @brief The encoded frame, as one contiguous bitstream. Valid until the next encode.

@@ -398,6 +398,13 @@ namespace video {
           return hevc;
         case 2:
           return av1;
+        case 3:
+          // PyroWave, which has no profiles, so the encoder that carries it holds the same codec in
+          // all three slots and any of them is the right answer. Only that encoder is ever asked:
+          // ANNOUNCE refuses the format on a host that cannot run it, so this is a deliberate answer
+          // rather than the guess the default arm makes. Without it the guess was reached, and every
+          // session logged an unknown format and called itself H.264.
+          return h264;
       }
     }
 

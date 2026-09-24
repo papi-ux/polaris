@@ -3100,7 +3100,8 @@ namespace stream {
 
       session.state.store(state_e::RUNNING, std::memory_order_relaxed);
 
-      auto codec_name = session.config.monitor.videoFormat == 2 ? "av1" :
+      auto codec_name = session.config.monitor.videoFormat == 3 ? "pyrowave" :
+                         session.config.monitor.videoFormat == 2 ? "av1" :
                          session.config.monitor.videoFormat == 1 ? "hevc" : "h264";
       stream_recorder::set_active_video_format(session.config.monitor.videoFormat);
 

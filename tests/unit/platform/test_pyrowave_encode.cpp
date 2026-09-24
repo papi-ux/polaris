@@ -163,7 +163,7 @@ TEST(PyroWaveEncodeTests, EncodesTheBgraFrameCaptureActuallyHandsOver) {
     }
   }
 
-  ASSERT_TRUE(session->encode_bgra(bgra.data(), stride, 256 * 1024));
+  ASSERT_TRUE(session->encode_bgra(bgra.data(), width, height, stride, 256 * 1024));
   ASSERT_FALSE(session->bitstream().empty());
   const sequence_header_t header {session->bitstream()};
   ASSERT_TRUE(header.present);
@@ -171,7 +171,7 @@ TEST(PyroWaveEncodeTests, EncodesTheBgraFrameCaptureActuallyHandsOver) {
   EXPECT_EQ(header.height, height);
 
   // The converter is built once and kept, so the second frame has to work as well as the first.
-  ASSERT_TRUE(session->encode_bgra(bgra.data(), stride, 256 * 1024));
+  ASSERT_TRUE(session->encode_bgra(bgra.data(), width, height, stride, 256 * 1024));
   EXPECT_FALSE(session->bitstream().empty());
 }
 
@@ -186,9 +186,14 @@ TEST(PyroWaveEncodeTests, ARefusedFrameLeavesNothingToRead) {
   ASSERT_NE(session, nullptr);
 
   std::vector<uint8_t> bgra(static_cast<std::size_t>(width) * height * 4, 0x40);
-  EXPECT_FALSE(session->encode_bgra(nullptr, width * 4, 64 * 1024));
-  EXPECT_FALSE(session->encode_bgra(bgra.data(), 0, 64 * 1024));
-  EXPECT_FALSE(session->encode_bgra(bgra.data(), -1, 64 * 1024));
+  EXPECT_FALSE(session->encode_bgra(nullptr, width, height, width * 4, 64 * 1024));
+  EXPECT_FALSE(session->encode_bgra(bgra.data(), width, height, 0, 64 * 1024));
+  EXPECT_FALSE(session->encode_bgra(bgra.data(), width, height, -1, 64 * 1024));
+  EXPECT_FALSE(session->encode_bgra(bgra.data(), 0, height, width * 4, 64 * 1024));
+  EXPECT_FALSE(session->encode_bgra(bgra.data(), width, 0, width * 4, 64 * 1024));
+  // A stride that cannot hold the row it claims to. Reading it would run off the end of the buffer
+  // capture handed over, which is the one argument here that is not merely wrong but unsafe.
+  EXPECT_FALSE(session->encode_bgra(bgra.data(), width, height, width * 4 - 1, 64 * 1024));
   EXPECT_FALSE(session->encode(nullptr, nullptr, nullptr, 64 * 1024));
 
   // A refusal has to leave the frame empty and not the previous picture. The caller checks the
@@ -199,6 +204,53 @@ TEST(PyroWaveEncodeTests, ARefusedFrameLeavesNothingToRead) {
   ASSERT_FALSE(session->bitstream().empty());
   EXPECT_FALSE(session->encode(nullptr, nullptr, nullptr, 64 * 1024));
   EXPECT_TRUE(session->bitstream().empty()) << "a refused frame left the previous one readable";
+}
+
+TEST(PyroWaveEncodeTests, TheStreamKeepsItsOwnSizeWhateverCaptureHandsOver) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  // The size in the sequence header is the one the client created its decoder with, and a decoder
+  // handed anything else drops the frame with a line about the dimensions and nothing about the
+  // picture. So it has to be the session's size no matter what capture is: an ultrawide monitor
+  // feeding a tablet is the ordinary case, not the exception.
+  constexpr int stream_width = 1280;
+  constexpr int stream_height = 800;
+  auto session = pyrowave_encode::make_session(stream_width, stream_height);
+  ASSERT_NE(session, nullptr);
+
+  struct {
+    int width;
+    int height;
+    const char *what;
+  } sources[] = {
+    {7680, 2160, "an ultrawide, far wider than the stream"},
+    {1280, 800, "exactly the stream's size"},
+    {640, 480, "smaller than the stream, and a different shape"},
+    {1920, 1080, "the same shape at a different size"},
+  };
+
+  for (const auto &source : sources) {
+    const int stride = source.width * 4 + 64;
+    std::vector<uint8_t> bgra(static_cast<std::size_t>(stride) * source.height, 0x30);
+    for (int row = 0; row < source.height; ++row) {
+      for (int col = 0; col < source.width; ++col) {
+        auto *pixel = &bgra[static_cast<std::size_t>(row) * stride + static_cast<std::size_t>(col) * 4];
+        pixel[0] = static_cast<uint8_t>(col);
+        pixel[1] = static_cast<uint8_t>(row);
+        pixel[2] = static_cast<uint8_t>(col + row);
+        pixel[3] = 0xff;
+      }
+    }
+
+    ASSERT_TRUE(session->encode_bgra(bgra.data(), source.width, source.height, stride, 256 * 1024))
+      << source.what;
+    const sequence_header_t header {session->bitstream()};
+    ASSERT_TRUE(header.present) << source.what;
+    EXPECT_EQ(header.width, stream_width) << source.what;
+    EXPECT_EQ(header.height, stream_height) << source.what;
+  }
 }
 
 TEST(PyroWaveEncodeTests, EveryFrameStandsAlone) {
