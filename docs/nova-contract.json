@@ -493,6 +493,7 @@
         "codec",
         "effective_backend",
         "encode_target_fps",
+        "encode_time_ms",
         "fallback_allowed",
         "fps",
         "optimization_cache_status",
