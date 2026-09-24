@@ -304,11 +304,16 @@ namespace pyrowave_encode {
     };
 
     /**
-     * Four, because capture's pool is smaller than that on every backend here and a fifth buffer
-     * would only cost the import it saves. A key that is not in these is built into the next slot in
-     * turn, so a pool that grows or is rebuilt cycles the old ones out rather than growing this.
+     * Eight, because that is the largest pool a producer may choose: this host asks PipeWire for four
+     * and accepts two to eight, and the producer picks. Four was wrong for exactly the backend this
+     * cache exists for. A round robin table smaller than the pool does not degrade, it inverts: every
+     * key is evicted four frames before it comes round again, so the hit rate is zero and each frame
+     * pays an eviction on top of the import it was meant to save.
+     *
+     * A slot costs one duplicated descriptor and one VkImage while it holds a buffer, so the table is
+     * sized for the worst pool rather than the usual one.
      */
-    std::array<import_t, 4> imports {};
+    std::array<import_t, 8> imports {};
     std::size_t next_import = 0;
 
     /// The slot this frame reads, owned by imports above. Null between frames.

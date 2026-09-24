@@ -109,7 +109,7 @@ namespace device_db {
     };
 
     devices["Steam Deck"] = {
-      "handheld", "1280x800x60", "hevc", 20000, 2, std::nullopt, true, 2,
+      "handheld", "1280x800x60", "hevc", 20000, 2, false, true, 2,
       "Valve Steam Deck LCD — 1280x800, WiFi 5, HEVC decode"
     };
     register_friendly_alias("Steam Deck", "Steam Deck");
@@ -206,7 +206,7 @@ namespace device_db {
 
     // --- VR and high-throughput Android clients ---
     devices["Meta Quest 3"] = {
-      "vr", "3840x2160x90", "av1", 60000, 2, std::nullopt, false, 2,
+      "vr", "3840x2160x90", "av1", 60000, 2, false, false, 2,
       "Meta Quest 3 — VR headset used as a high-throughput Moonlight/Nova client"
     };
     devices["Quest 3"] = devices["Meta Quest 3"];
@@ -219,7 +219,7 @@ namespace device_db {
     register_friendly_alias("Oculus Quest 3", "Meta Quest 3");
 
     devices["Meta Quest 3S"] = {
-      "vr", "3840x2160x90", "av1", 55000, 2, std::nullopt, false, 2,
+      "vr", "3840x2160x90", "av1", 55000, 2, false, false, 2,
       "Meta Quest 3S — VR headset used as a high-throughput Moonlight/Nova client"
     };
     devices["Quest 3S"] = devices["Meta Quest 3S"];
