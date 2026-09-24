@@ -3014,6 +3014,25 @@ namespace video {
     return running();
   }
 
+  /**
+   * @brief The device type to open the capture display with, for the session it is being opened for.
+   *
+   * This thread is bound to the host's chosen encoder when it starts, which is before any client has
+   * said what it wants to decode. That is right for everything the encoder decides, and wrong for
+   * this one thing: the device type is what the capture backends read to decide what to offer, and a
+   * codec chosen per session wants a different answer. The compute codec owns a Vulkan device that
+   * imports a dmabuf; the probed encoder does not, and asking on its behalf gets a frame copied
+   * through host memory for no reason.
+   *
+   * The front context decides, which is the convention this thread already follows for the display
+   * name and the config. For every other codec it returns exactly what the binding would have.
+   */
+  platf::mem_type_e capture_device_type(const encoder_t &bound, const config_t &config) {
+    const auto &session_encoder = encoder_for_session(config);
+    return session_encoder.platform_formats ? session_encoder.platform_formats->dev_type
+                                            : bound.platform_formats->dev_type;
+  }
+
   void captureThread(
     std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue,
     sync_util::sync_t<std::weak_ptr<platf::display_t>> &display_wp,
@@ -3057,7 +3076,8 @@ namespace video {
     };
 #endif
     if (!exact_display_name.empty()) {
-      disp = platf::display(encoder.platform_formats->dev_type, exact_display_name, capture_ctxs.front().config);
+      disp = platf::display(capture_device_type(encoder, capture_ctxs.front().config),
+                            exact_display_name, capture_ctxs.front().config);
     }
     if (!disp && !capture_fallback_allowed(exact_display_name)) {
       BOOST_LOG(error) << "Requested display ["sv << exact_display_name
@@ -3077,7 +3097,8 @@ namespace video {
         BOOST_LOG(error) << "Requested display is unavailable for initial capture setup"sv;
         return;
       }
-      disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+      disp = platf::display(capture_device_type(encoder, capture_ctxs.front().config),
+                            display_names[display_p], capture_ctxs.front().config);
       if (disp) {
         proc::proc.display_name = display_names[display_p];
       } else {
@@ -3319,7 +3340,7 @@ namespace video {
 #endif
                   reset_display(
                     disp,
-                    encoder.platform_formats->dev_type,
+                    capture_device_type(encoder, capture_ctxs.front().config),
                     exact_display_name,
                     capture_ctxs.front().config
                   );

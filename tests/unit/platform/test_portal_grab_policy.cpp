@@ -904,6 +904,23 @@ TEST(PipeWireCapturePolicyTests, DmaBufEligibilityRequiresSupportedEncoderAndExp
   mismatched.encoder_render_node = "/dev/dri/renderD129";
   EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(mismatched));
 
+  // The compute codec, beside CUDA rather than behind the VAAPI opt-in, because it imports into a
+  // device Polaris owns rather than through a shared FFmpeg one. Everything else still applies to it:
+  // the same render node, the driver saying it can import, and an operator able to force it off.
+  auto pyrowave = eligible;
+  pyrowave.mem_type = platf::mem_type_e::vulkan_pyrowave;
+  EXPECT_TRUE(pipewire_capture::may_offer_dmabuf(pyrowave));
+  EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(pyrowave, pipewire_capture::dmabuf_override_e::force_cpu));
+
+  auto pyrowave_without_import = pyrowave;
+  pyrowave_without_import.encoder_import_supported = false;
+  EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(pyrowave_without_import))
+    << "a GPU whose driver cannot import a dmabuf must not be offered one";
+
+  auto pyrowave_mismatched = pyrowave;
+  pyrowave_mismatched.encoder_render_node = "/dev/dri/renderD129";
+  EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(pyrowave_mismatched));
+
   auto system_memory = eligible;
   system_memory.mem_type = platf::mem_type_e::system;
   EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(system_memory));

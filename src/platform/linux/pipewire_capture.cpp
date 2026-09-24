@@ -161,7 +161,18 @@ namespace pipewire_capture {
     // every unproven VAAPI PipeWire route on SHM by default. CUDA remains the
     // validated GPU-native path; VAAPI is available only as an explicit field-
     // testing opt-in on hosts where the operator has already proved it works.
+    //
+    // The compute codec is admitted beside CUDA rather than behind an opt-in, and the difference from
+    // VAAPI is what that paragraph is about: this is not a shared FFmpeg import whose lifetime rules
+    // are the driver's. It imports into a Vulkan device Polaris owns, acquires the buffer from the
+    // foreign queue family, waits on its own fence before it touches anything, and is tested against
+    // a real dmabuf. It asks for the same linear packed RGB formats CUDA does, so what arrives is the
+    // same kind of buffer down the same negotiated path.
+    //
+    // encoder_import_supported still has the last word, and for this encoder that is asked of the
+    // driver rather than of the build: a GPU without the external memory extensions says no here.
     const bool supported_encoder = eligibility.mem_type == platf::mem_type_e::cuda ||
+                                   eligibility.mem_type == platf::mem_type_e::vulkan_pyrowave ||
                                    (override == dmabuf_override_e::allow_vaapi && eligibility.mem_type == platf::mem_type_e::vaapi);
     if (override == dmabuf_override_e::force_cpu ||
         !supported_encoder ||
