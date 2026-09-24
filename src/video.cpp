@@ -1836,6 +1836,27 @@ namespace video {
       if (!session || !frame.cpu_data || frame.row_pitch <= 0) {
         return -1;
       }
+
+      // What this session was built to read, checked rather than assumed. Every backend that reaches
+      // here hands over four bytes a pixel in BGRA order, and the one interesting way that changes is
+      // a ten bit capture, which arrives at the same four bytes a pixel with the samples packed
+      // differently and is marked as a ten bit frame. Read as BGRA it is not a wrong colour, it is
+      // noise, so a frame that is not what was expected is refused and says so once.
+      const auto format = frame.metadata.format;
+      const bool readable = format == platf::frame_format_e::bgra8 ||
+                            format == platf::frame_format_e::unknown;
+      // A backend that never filled the pitch in is not making a claim, so it is not contradicted.
+      const bool four_bytes_a_pixel = frame.pixel_pitch == 0 || frame.pixel_pitch == 4;
+      if (!readable || !four_bytes_a_pixel) {
+        if (!complained_about_format) {
+          complained_about_format = true;
+          BOOST_LOG(error) << "PyroWave: capture is handing over "sv
+                           << platf::from_frame_format(format) << " at "sv << frame.pixel_pitch
+                           << " bytes a pixel, and this session reads eight bit BGRA"sv;
+        }
+        return -1;
+      }
+
       if (!session->encode_bgra(frame.cpu_data, frame.width, frame.height, frame.row_pitch,
                                 max_frame_bytes)) {
         return -1;
@@ -1888,6 +1909,9 @@ namespace video {
     int framerate = 60;
     std::size_t max_frame_bytes = 0;
     bool converted_since_last_packet = false;
+
+    /// Said once. A capture backend that hands over the wrong thing hands it over sixty times a second.
+    bool complained_about_format = false;
   };
 #endif
 

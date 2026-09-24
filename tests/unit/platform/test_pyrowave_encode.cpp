@@ -257,6 +257,8 @@ namespace {
       total_blocks = second & 0xffffff;
       code = (second >> 24) & 0x3;
       chroma_resolution = (second >> 26) & 0x1;
+      // Three bits, which is all a decoder needs to tell this frame from the last one.
+      sequence = (first >> 28) & 0x7;
     }
 
     bool present = false;
@@ -266,6 +268,7 @@ namespace {
     uint32_t total_blocks = 0;
     uint32_t code = 0;
     uint32_t chroma_resolution = 0;
+    uint32_t sequence = 0;
   };
 
   constexpr uint32_t start_of_frame = 0;
@@ -491,11 +494,9 @@ TEST(PyroWaveEncodeTests, TheSequenceNumberMovesSoADecoderKnowsTheFrameChanged) 
   std::vector<uint32_t> sequences;
   for (int i = 0; i < 3; ++i) {
     ASSERT_TRUE(session->encode(frame.y.data(), frame.u.data(), frame.v.data(), 64 * 1024));
-    const auto &encoded = session->bitstream();
-    ASSERT_GE(encoded.size(), 8U);
-    uint32_t first = 0;
-    std::memcpy(&first, encoded.data(), sizeof(first));
-    sequences.push_back((first >> 28) & 0x7);
+    const sequence_header_t header {session->bitstream()};
+    ASSERT_TRUE(header.present);
+    sequences.push_back(header.sequence);
   }
 
   EXPECT_NE(sequences[0], sequences[1]);
@@ -725,6 +726,74 @@ TEST(PyroWaveEncodeTests, BothPathsProduceTheSamePicture) {
   }
   const double average = total / from_cpu.y.size();
   EXPECT_LT(average, 3.0) << "the two paths disagree by " << average << " on average, worst " << worst;
+}
+
+TEST(PyroWaveEncodeTests, FourFourFourGoesThroughTheGpuPathToo) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  auto session = pyrowave_encode::make_session(width, height, pyrowave_encode::chroma_e::yuv444);
+  ASSERT_NE(session, nullptr);
+
+  // The chroma a session carries changes what the codec's scaler writes, three full sized planes
+  // rather than one and two quarters, and the only thing that says so is the enum it was created
+  // with. A path that quietly produced 4:2:0 here would decode as a frame the wrong shape.
+  const quadrant_frame_t source {width, height, (width + 12) * 4};
+  ASSERT_TRUE(session->encode_bgra(source.bgra.data(), width, height, source.stride, 512 * 1024));
+  ASSERT_TRUE(session->uses_gpu_input());
+
+  const decoded_frame_t decoded {session->bitstream(), width, height, true};
+  ASSERT_TRUE(decoded.ok) << "a 4:4:4 frame from the GPU path would not decode as 4:4:4";
+  expect_full_range_rec709(decoded, source, "4:4:4 on the GPU");
+
+  // And the chroma really is per pixel. With a sample of its own on every pixel, the boundary
+  // between two quadrants is one pixel wide; at 4:2:0 the two either side share one and the colour
+  // bleeds across it.
+  const int boundary = width / 2;
+  const expected_ycbcr_t red {255, 0, 0};
+  const expected_ycbcr_t green {0, 255, 0};
+  EXPECT_NEAR(decoded.chroma_v_at(boundary - 2, height / 4), red.v, 12.0) << "just left of the seam";
+  EXPECT_NEAR(decoded.chroma_v_at(boundary + 2, height / 4), green.v, 12.0) << "just right of it";
+}
+
+TEST(PyroWaveEncodeTests, ARepeatedFrameOnTheGpuIsTheSamePictureAgain) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  auto session = make_session_420(width, height);
+  ASSERT_NE(session, nullptr);
+
+  const quadrant_frame_t source {width, height, width * 4};
+  ASSERT_TRUE(session->encode_bgra(source.bgra.data(), width, height, source.stride, 512 * 1024));
+  ASSERT_TRUE(session->uses_gpu_input());
+  const sequence_header_t first {session->bitstream()};
+  ASSERT_TRUE(first.present);
+
+  // A host repeats a frame when capture has nothing new. On this path the picture is already on the
+  // GPU in the layout the codec reads, so a repeat records the encode and copies nothing, and the
+  // thing that has to come out of it is the same picture under a new sequence number: the same
+  // bitstream twice is a frame the decoder throws away, which is what this used to do.
+  ASSERT_TRUE(session->encode_retained(512 * 1024));
+  const sequence_header_t again {session->bitstream()};
+  ASSERT_TRUE(again.present);
+  EXPECT_NE(again.sequence, first.sequence) << "a repeat has to be a new frame to the decoder";
+
+  const decoded_frame_t decoded {session->bitstream(), width, height, false};
+  ASSERT_TRUE(decoded.ok) << "the repeated frame would not decode";
+  expect_full_range_rec709(decoded, source, "repeated on the GPU");
+
+  // And again, because the interesting failure is the second repeat: a layout tracked wrongly shows
+  // up when the image is read twice with no write in between.
+  ASSERT_TRUE(session->encode_retained(512 * 1024));
+  const decoded_frame_t twice {session->bitstream(), width, height, false};
+  ASSERT_TRUE(twice.ok);
+  expect_full_range_rec709(twice, source, "repeated twice on the GPU");
 }
 
 #endif  // POLARIS_BUILD_PYROWAVE
