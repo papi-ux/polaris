@@ -4150,7 +4150,13 @@ namespace video {
     return std::make_unique<nvenc_encode_session_t>(std::move(converter), *conversion_request);
   }
 
-  std::unique_ptr<encode_session_t> make_encode_session(const std::shared_ptr<platf::display_t> &disp, const encoder_t &encoder, const config_t &config, int width, int height, std::unique_ptr<platf::encode_device_t> encode_device) {
+  /**
+   * @param refused_for_good Set when the session could not be built for a reason that will still be
+   *        true the next time it is tried with this client and this display. A caller that rebuilds
+   *        on failure has to stop instead, because every rebuild refuses identically and the client
+   *        sees a stream that never starts with nothing to say why.
+   */
+  std::unique_ptr<encode_session_t> make_encode_session(const std::shared_ptr<platf::display_t> &disp, const encoder_t &encoder, const config_t &config, int width, int height, std::unique_ptr<platf::encode_device_t> encode_device, bool *refused_for_good = nullptr) {
     std::unique_ptr<encode_session_t> session;
 #ifdef POLARIS_BUILD_PYROWAVE
     if (dynamic_cast<platf::pyrowave_encode_device_t *>(encode_device.get())) {
@@ -4186,6 +4192,12 @@ namespace video {
       if (config.dynamicRange != 0 && range != pyrowave_encode::dynamic_range_e::hdr10) {
         BOOST_LOG(error) << "PyroWave: this client negotiated HDR and the captured display is not in "sv
                          << "HDR, so there is no honest stream to give it"sv;
+        // The client agreed its colourimetry before the stream began and the display is not in HDR.
+        // Neither changes by trying again, so this ends the stream rather than being refused once a
+        // frame for as long as the client keeps reconnecting.
+        if (refused_for_good) {
+          *refused_for_good = true;
+        }
         return nullptr;
       }
 
@@ -4240,12 +4252,19 @@ namespace video {
     if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
       config.bitrate = request->target_bitrate_kbps;
     }
-    auto session = make_encode_session(disp, encoder, config, disp->width, disp->height, std::move(encode_device));
+    bool refused_for_good = false;
+    auto session = make_encode_session(disp, encoder, config, disp->width, disp->height,
+                                       std::move(encode_device), &refused_for_good);
     if (!session) {
       adaptive_bitrate::set_runtime_update_supported(
         false,
         "encoder_session_init_failed"
       );
+      if (refused_for_good) {
+        // Returning alone leaves the host to build this session again, which is right for a failure
+        // that might not repeat and wrong for one that cannot do anything else.
+        mail->event<bool>(mail::shutdown)->raise(true);
+      }
       return;
     }
 
