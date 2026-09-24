@@ -114,6 +114,22 @@ TEST(NvhttpSessionHealthTests, HighRefreshNearTargetDeliveryRemainsSteady) {
   EXPECT_FALSE(health.at("host_render_limited").get<bool>());
 }
 
+TEST(NvhttpSessionHealthTests, PyrowaveReportsItsActualEncoderAndCpuConversion) {
+  auto stats = stable_cpu_copy_stats(120.0, 120.0);
+  stats.codec = "pyrowave";
+  stats.encode_target_device = "system";
+  stats.encode_target_residency = platf::frame_residency_e::cpu;
+  stats.encode_target_format = platf::frame_format_e::yuv420p;
+  const auto health = nvhttp::build_session_health_json_for_tests(stats, false, "Nova Client", "Test");
+  EXPECT_EQ(health.at("active_encoder"), "pyrowave");
+  const auto &selection = health.at("encoder_selection");
+  EXPECT_EQ(selection.at("selected_encoder"), "pyrowave");
+  EXPECT_EQ(selection.at("gpu_driver"), "unknown");
+  EXPECT_FALSE(selection.at("fallback_used").get<bool>());
+  EXPECT_TRUE(health.at("capture_cpu_copy").get<bool>());
+  EXPECT_FALSE(health.at("capture_gpu_native").get<bool>());
+}
+
 TEST(NvhttpSessionHealthTests, HealthyShmFallbackRemainsInformational) {
   auto stats = stable_cpu_copy_stats(120.0, 120.0);
   stats.encode_time_ms = 4.0;

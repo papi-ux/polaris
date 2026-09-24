@@ -89,6 +89,37 @@ TEST(PyroWaveEncodeTests, AnOddExtentIsRefusedRatherThanRounded) {
   EXPECT_EQ(pyrowave_encode::make_session(4098, 720), nullptr);
 }
 
+TEST(PyroWaveEncodeTests, PreparedStaticImageUsesEachNewBudgetAndOwnsItsPixels) {
+  if (!pyrowave_encode::available()) GTEST_SKIP() << "no compatible Vulkan device";
+  constexpr int width = 640, height = 360;
+  auto session = pyrowave_encode::make_session(width, height);
+  ASSERT_NE(session, nullptr);
+  EXPECT_FALSE(session->encode_prepared(20000));
+  std::vector<uint8_t> bgra(width * height * 4);
+  unsigned random = 42;
+  for (auto &byte : bgra) { random ^= random << 13; random ^= random >> 17; random ^= random << 5; byte = random; }
+  ASSERT_TRUE(session->prepare_bgra(bgra.data(), width * 4));
+  EXPECT_TRUE(session->packets(pyrowave_encode::packet_bytes).empty());
+  // The caller may release its capture allocation before the GPU is asked to encode.
+  bgra.clear(); bgra.shrink_to_fit();
+  const auto encode_size = [&](std::size_t budget) {
+    if (!session->encode_prepared(budget)) return std::size_t(0);
+    const auto packets = session->packets(pyrowave_encode::packet_bytes);
+    return std::accumulate(packets.begin(), packets.end(), std::size_t(0),
+      [](auto size, const auto &packet) { return size + packet.size(); });
+  };
+  const auto low = encode_size(20000);
+  const auto high = encode_size(80000);
+  const auto restored = encode_size(20000);
+  EXPECT_GT(low, 0U); EXPECT_LE(low, 20000U);
+  EXPECT_GT(high, low * 2); EXPECT_LE(high, 80000U);
+  EXPECT_GT(restored, 0U); EXPECT_LE(restored, 20000U);
+  EXPECT_FALSE(session->prepare_bgra(nullptr, width * 4));
+  EXPECT_TRUE(session->packets(pyrowave_encode::packet_bytes).empty());
+  EXPECT_FALSE(session->encode_prepared(80000));
+  EXPECT_TRUE(session->packets(pyrowave_encode::packet_bytes).empty());
+}
+
 TEST(PyroWaveEncodeTests, EncodesAFrameIntoPacketsTheNetworkCanCarry) {
   if (!pyrowave_encode::available()) {
     GTEST_SKIP() << "no Vulkan device this codec can use";

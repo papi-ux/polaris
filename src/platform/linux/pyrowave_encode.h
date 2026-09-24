@@ -79,11 +79,18 @@ namespace pyrowave_encode {
      */
     virtual bool encode_bgra(const uint8_t *bgra, int stride, std::size_t max_bytes) = 0;
 
+    // Retain a converted CPU image independently of the capture buffer. Encoding
+    // it later keeps GPU work inside the host's encode timer and lets a static
+    // image be re-encoded with a newly applied bitrate.
+    virtual bool prepare_bgra(const uint8_t *bgra, int stride) = 0;
+    virtual bool encode_prepared(std::size_t max_bytes) = 0;
+
     /**
      * @brief The encoded frame, split at a boundary the network can carry.
      *
-     * Every packet is independent: PyroWave codes 64x64 blocks of coefficients in isolation, so a
-     * frame that loses one still decodes. Valid until the next encode.
+     * These are coefficient-packet boundaries inside the upstream bitstream.
+     * This transport gathers every packet into one GameStream frame; the Nova
+     * decoder requires that complete frame. Valid until the next encode.
      * @param packet_boundary Split target; an individual coefficient block may exceed it.
      */
     virtual std::vector<std::vector<uint8_t>> packets(std::size_t packet_boundary) = 0;

@@ -1777,9 +1777,9 @@ namespace video {
   /**
    * @brief A session that hands captured frames to the compute codec.
    *
-   * The frame is encoded in convert(), not in encode(), because convert() is the call that is given
-   * one. That is the same split NVENC uses, where convert() fills the encoder's input surface and
-   * encode_frame() collects the result.
+   * convert() retains converted CPU planes; encode_frame() uploads and encodes
+   * them inside the normal encode timing scope. A static image can be encoded
+   * again with a new budget without borrowing an expired capture buffer.
    *
    * There is nothing to invalidate and no IDR to request: every frame is a keyframe, so a client
    * asking for one is asking for what it is already getting, and a reference frame it could report
@@ -1797,7 +1797,7 @@ namespace video {
     bitrate_update_e update_bitrate(int bitrate_kbps) override {
       const auto budget = pyrowave_encode::frame_budget(bitrate_kbps, fps_num, fps_den);
       if (!budget) return bitrate_update_e::rejected;
-      // Called on the encoding thread. Each following convert() uses this
+      // Called on the encoding thread. Each following encode_frame() uses this
       // ceiling without replacing the encoder or changing stream dimensions.
       max_frame_bytes = *budget;
       BOOST_LOG(debug) << "PyroWave: applied " << bitrate_kbps << " kbps, up to " << *budget << " bytes per frame";
@@ -1806,16 +1806,21 @@ namespace video {
 
     int convert(frame_t &frame) override {
       encoded.clear();
+      prepared = false;
       if (!session || !frame.cpu_data || frame.row_pitch <= 0 || frame.pixel_pitch != 4 ||
           frame.width != source_width || frame.height != source_height ||
           frame.metadata.residency != platf::frame_residency_e::cpu || frame.metadata.format != platf::frame_format_e::bgra8) {
         return -1;
       }
-      if (!session->encode_bgra(frame.cpu_data, frame.row_pitch, max_frame_bytes)) {
-        return -1;
-      }
+      prepared = session->prepare_bgra(frame.cpu_data, frame.row_pitch);
+      return prepared ? 0 : -1;
+    }
+
+    bool encode_frame() {
+      encoded.clear();
+      if (!prepared || !session->encode_prepared(max_frame_bytes)) return false;
       encoded = session->packets(pyrowave_encode::packet_bytes);
-      return encoded.empty() ? -1 : 0;
+      return !encoded.empty();
     }
 
     void request_idr_frame() override {
@@ -1842,6 +1847,7 @@ namespace video {
     std::size_t max_frame_bytes = 0;
     int source_width = 0, source_height = 0;
     int fps_num = 0, fps_den = 1;
+    bool prepared = false;
     std::vector<std::vector<uint8_t>> encoded;
   };
 #endif
@@ -3358,12 +3364,13 @@ namespace video {
 
 #ifdef POLARIS_BUILD_PYROWAVE
   /**
-   * @brief Hand over the packets convert() produced.
+   * @brief Encode the prepared image and hand over one complete frame.
    *
-   * The work happened in convert(). One complete upstream bitstream becomes
-   * one GameStream frame; all coefficient packets belong to that same IDR.
+   * GPU encoding runs here so its duration reaches host telemetry and adaptive
+   * health checks. All coefficient packets belong to the same GameStream IDR.
    */
   int encode_pyrowave(int64_t frame_nr, pyrowave_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
+    if (!session.encode_frame()) return -1;
     const auto &encoded = session.packets();
     if (encoded.empty()) {
       return -1;
@@ -3946,6 +3953,9 @@ namespace video {
                       << " fps, up to "sv << *max_frame_bytes << " bytes a frame"sv;
       session = std::make_unique<pyrowave_encode_session_t>(std::move(pyrowave_session), *max_frame_bytes, config.width, config.height, width, height, rate.num, rate.den);
       session->capture_display_owner = disp;
+      // The input is CPU YUV420; encoding then uploads it to Vulkan. Do not
+      // inherit the conversion metadata left behind by conventional probing.
+      stream_stats::update_encode_path_metadata("system", platf::frame_residency_e::cpu, platf::frame_format_e::yuv420p);
       return session;
     }
 #endif

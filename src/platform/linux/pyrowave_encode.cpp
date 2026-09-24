@@ -70,13 +70,18 @@ namespace pyrowave_encode {
       }
 
       bool encode_bgra(const uint8_t *bgra, int stride, std::size_t max_bytes) override {
+        return prepare_bgra(bgra, stride) && encode_prepared(max_bytes);
+      }
+
+      bool prepare_bgra(const uint8_t *bgra, int stride) override {
         encoded_budget = 0;
+        prepared = false;
         if (!bgra || stride < source_width * 4) {
           return false;
         }
 
-        // Kept between frames: a stream is thousands of identically shaped frames, and building
-        // the scaler for each one would dominate a codec that encodes in a tenth of a millisecond.
+        // Keep the scaler between identically shaped frames to avoid rebuilding
+        // conversion state on every capture.
         if (!scaler) {
           const auto scale = std::min(double(width) / source_width, double(height) / source_height);
           scaled_width = std::max(2, int(source_width * scale) & ~1);
@@ -114,7 +119,13 @@ namespace pyrowave_encode {
           return false;
         }
 
-        return encode(planes[0].data(), planes[1].data(), planes[2].data(), max_bytes);
+        prepared = true;
+        return true;
+      }
+
+      bool encode_prepared(std::size_t max_bytes) override {
+        encoded_budget = 0;
+        return prepared && encode(planes[0].data(), planes[1].data(), planes[2].data(), max_bytes);
       }
 
       bool encode(const uint8_t *y, const uint8_t *u, const uint8_t *v, std::size_t max_bytes) override {
@@ -192,6 +203,7 @@ namespace pyrowave_encode {
       int width = 0;
       int height = 0;
       std::size_t encoded_budget = 0;
+      bool prepared = false;
       int source_width = 0, source_height = 0;
       int scaled_width = 0, scaled_height = 0, offset_x = 0, offset_y = 0;
       SwsContext *scaler = nullptr;
