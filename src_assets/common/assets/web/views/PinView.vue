@@ -974,7 +974,7 @@
 </template>
 
 <script setup>
-import { computed, inject, nextTick, ref, watch } from 'vue'
+import { computed, inject, nextTick, onUnmounted, ref, watch } from 'vue'
 import { validSnapshot } from '../spaces-access.js'
 import { useRoute, useRouter } from 'vue-router'
 import Checkbox from '../Checkbox.vue'
@@ -1779,9 +1779,45 @@ async function refreshSpaceSummary() {
     spacesSummary.value = response.ok && validSnapshot(next) ? next : null
   } catch { spacesSummary.value = null }
 }
+/**
+ * Connected or Offline is liveness, and it was asked once when the page opened and never again.
+ * A device that started streaming after that read Offline until someone reloaded, which is exactly
+ * how it is read: as a claim about now.
+ *
+ * Not while a device is being edited. The list is rebuilt wholesale from the response with editing
+ * false, so refreshing under an open panel would close it and throw away everything typed into it,
+ * which is a worse bug than the one this fixes.
+ *
+ * Not while the tab is hidden either, because nobody is reading a badge they cannot see.
+ */
+const LIVENESS_POLL_MS = 5000
+let livenessTimer = null
+
+function livenessPollIsWelcome() {
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return false
+  return !clients.value.some(client => client.editing)
+}
+
+function stopLivenessPoll() {
+  if (livenessTimer !== null) {
+    clearInterval(livenessTimer)
+    livenessTimer = null
+  }
+}
+
+function startLivenessPoll() {
+  stopLivenessPoll()
+  livenessTimer = setInterval(() => {
+    if (livenessPollIsWelcome()) refreshClients()
+  }, LIVENESS_POLL_MS)
+}
+
+onUnmounted(stopLivenessPoll)
+
 refreshSpaceSummary()
 refreshClients()
 refreshProfiles()
+startLivenessPoll()
 
 fetch('./api/config', { credentials: 'include' })
   .then(r => r.json())
