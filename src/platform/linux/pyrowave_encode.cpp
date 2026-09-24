@@ -134,11 +134,8 @@ namespace pyrowave_encode {
           return false;
         }
 
-        // The picture as it is, straight to the GPU, whenever the stream is the shape capture
-        // hands over. That covers every client asking for a resolution the host made an output at,
-        // and every one asking for a fraction of a monitor's own shape, which between them is most
-        // of what a host streams.
-        if (gpu != gpu_e::no && suits_the_gpu_path(src_width, src_height)) {
+        // The picture as it is, straight to the GPU, whatever shape it arrives in.
+        if (gpu != gpu_e::no) {
           if (encode_on_gpu(bgra, src_width, src_height, stride, max_bytes)) {
             return true;
           }
@@ -295,17 +292,34 @@ namespace pyrowave_encode {
       }
 
       /**
-       * Whether the codec's own scaler can be handed this frame without stretching it.
+       * Where this frame sits in the image the codec reads, which is how the bars get drawn.
        *
-       * It fills the output with the input, so whatever it scales it also stretches: there is no
-       * letterbox in it and no way to ask for one. An exact match of shapes is therefore the whole
-       * test, and it is the ordinary case, because a client either asks for a size the host made an
-       * output at or asks for a fraction of the monitor it is mirroring. Anything else wants bars,
-       * and bars are what the CPU path already draws.
+       * The codec's scaler fills its output with its input, so whatever it scales it also stretches
+       * and there is no letterbox in it. Padding what it is given is the letterbox: an image with the
+       * stream's shape, the picture centred in it and black around the edges, which the scaler then
+       * maps whole to whole. Costs the GPU some sampling over the bars and costs the host nothing,
+       * because the copy is still only the picture and the bars are cleared once.
        */
-      bool suits_the_gpu_path(int src_width, int src_height) const {
-        return static_cast<long long>(src_width) * height ==
-               static_cast<long long>(src_height) * width;
+      placement_t placement_for(int src_width, int src_height) const {
+        placement_t where = {};
+        const auto source_is_wider =
+          static_cast<long long>(src_width) * height > static_cast<long long>(src_height) * width;
+
+        if (source_is_wider) {
+          where.image_width = src_width;
+          where.image_height = static_cast<int>(static_cast<long long>(src_width) * height / width);
+          where.offset_y = ((where.image_height - src_height) / 2) & ~1;
+        } else {
+          where.image_height = src_height;
+          where.image_width = static_cast<int>(static_cast<long long>(src_height) * width / height);
+          where.offset_x = ((where.image_width - src_width) / 2) & ~1;
+        }
+
+        // Rounding down above can leave the image a pixel short of the picture plus its offset, and
+        // an image the picture does not fit in is refused rather than silently cropped.
+        where.image_width = std::max(where.image_width, src_width + where.offset_x);
+        where.image_height = std::max(where.image_height, src_height + where.offset_y);
+        return where;
       }
 
       /**
@@ -327,8 +341,9 @@ namespace pyrowave_encode {
           }
         }
 
+        const auto where = placement_for(src_width, src_height);
         const auto copy_started = std::chrono::steady_clock::now();
-        if (!staging->begin(bgra, src_width, src_height, stride, VK_FORMAT_B8G8R8A8_UNORM)) {
+        if (!staging->begin(bgra, src_width, src_height, stride, VK_FORMAT_B8G8R8A8_UNORM, where)) {
           // Nothing was recorded, so there is a working path left to take on the first frame and
           // nothing to unwind on a later one.
           if (gpu == gpu_e::unknown) {
@@ -349,6 +364,11 @@ namespace pyrowave_encode {
           gpu = gpu_e::yes;
           BOOST_LOG(info) << "PyroWave: encoding straight from a "sv << src_width << 'x' << src_height
                           << " picture on "sv << owner->gpu_name;
+          if (where.has_bars()) {
+            BOOST_LOG(info) << "PyroWave: letterboxed into "sv << where.image_width << 'x'
+                            << where.image_height << " at "sv << where.offset_x << ','
+                            << where.offset_y;
+          }
         }
         report_timing(copy_started, encode_started);
         return true;

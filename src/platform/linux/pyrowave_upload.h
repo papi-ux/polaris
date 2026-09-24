@@ -14,6 +14,35 @@
 namespace pyrowave_encode {
 
   /**
+   * @brief Where a captured picture sits inside the image the codec reads.
+   *
+   * The codec's scaler fills its output with its input, so the only way to letterbox a stream is to
+   * letterbox what the scaler is given: an image shaped like the stream, with the picture in the
+   * middle of it and black around the edges. The bars are cleared once when the image is made, and
+   * every frame after that copies into the same rectangle, so they cost one clear and nothing per
+   * frame.
+   */
+  struct placement_t {
+    /// The image to make, which has the stream's shape rather than capture's.
+    int image_width = 0;
+    int image_height = 0;
+
+    /// Where the top left of the captured picture goes inside it.
+    int offset_x = 0;
+    int offset_y = 0;
+
+    bool operator==(const placement_t &other) const {
+      return image_width == other.image_width && image_height == other.image_height &&
+             offset_x == other.offset_x && offset_y == other.offset_y;
+    }
+
+    /// Whether anything is left uncovered, which is the only case that needs clearing.
+    bool has_bars() const {
+      return offset_x != 0 || offset_y != 0;
+    }
+  };
+
+  /**
    * @brief One frame's journey from the pointer capture handed over to an image the codec can read.
    *
    * A staging buffer, an image, a command buffer and a fence, all made once and reused, because the
@@ -47,9 +76,12 @@ namespace pyrowave_encode {
      * @param height Height of the same.
      * @param stride Bytes per row, which capture rarely makes equal to width times four.
      * @param format What those bytes mean. The image is remade when it changes.
+     * @param where The image to copy into and the offset to copy to, for a stream whose shape is not
+     *   capture's. Zero offsets into an image the size of the picture mean no bars.
      * @return false when the frame could not be staged; nothing is left open.
      */
-    bool begin(const uint8_t *pixels, int width, int height, int stride, VkFormat format);
+    bool begin(const uint8_t *pixels, int width, int height, int stride, VkFormat format,
+               const placement_t &where);
 
     /**
      * @brief Open a command buffer over the picture already on the GPU, copying nothing.
@@ -83,7 +115,7 @@ namespace pyrowave_encode {
     upload_t() = default;
 
     bool resolve(const vk_device_t &owner);
-    bool prepare(int width, int height, int stride, VkFormat format);
+    bool prepare(int width, int height, int stride, VkFormat format, const placement_t &where);
     void release_frame_resources();
 
     const vk_device_t *owner = nullptr;
@@ -103,6 +135,14 @@ namespace pyrowave_encode {
     VkFormat image_format = VK_FORMAT_UNDEFINED;
     uint32_t image_width = 0;
     uint32_t image_height = 0;
+
+    /// What capture hands over, which is the part of the image that gets copied into.
+    uint32_t picture_width = 0;
+    uint32_t picture_height = 0;
+    placement_t placement;
+
+    /// Set when the image is new, so the bars are painted once rather than every frame.
+    bool needs_clearing = false;
 
     /// What capture's rows measured last time, which is what the staging buffer was sized for.
     uint32_t image_stride = 0;
@@ -138,6 +178,7 @@ namespace pyrowave_encode {
       PFN_vkUnmapMemory unmap_memory = nullptr;
       PFN_vkCmdPipelineBarrier cmd_pipeline_barrier = nullptr;
       PFN_vkCmdCopyBufferToImage cmd_copy_buffer_to_image = nullptr;
+      PFN_vkCmdClearColorImage cmd_clear_color_image = nullptr;
     } api;
   };
 

@@ -139,6 +139,7 @@ namespace pyrowave_encode {
     POLARIS_VK_RESOLVE(unmap_memory, UnmapMemory)
     POLARIS_VK_RESOLVE(cmd_pipeline_barrier, CmdPipelineBarrier)
     POLARIS_VK_RESOLVE(cmd_copy_buffer_to_image, CmdCopyBufferToImage)
+    POLARIS_VK_RESOLVE(cmd_clear_color_image, CmdClearColorImage)
 #undef POLARIS_VK_RESOLVE
 
     // The only one that belongs to the instance rather than to the device.
@@ -192,19 +193,31 @@ namespace pyrowave_encode {
     }
     staging_size = 0;
     image_stride = 0;
+    picture_width = 0;
+    picture_height = 0;
+    placement = {};
+    needs_clearing = false;
     image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     image_format = VK_FORMAT_UNDEFINED;
     image_width = 0;
     image_height = 0;
   }
 
-  bool upload_t::prepare(int width, int height, int stride, VkFormat format) {
+  bool upload_t::prepare(int width, int height, int stride, VkFormat format,
+                         const placement_t &where) {
     if (width <= 0 || height <= 0 || stride < width * 4) {
       return false;
     }
-    if (image != VK_NULL_HANDLE && image_width == static_cast<uint32_t>(width) &&
-        image_height == static_cast<uint32_t>(height) && image_format == format &&
-        image_stride == static_cast<uint32_t>(stride)) {
+    if (where.image_width < width + where.offset_x || where.image_height < height + where.offset_y ||
+        where.offset_x < 0 || where.offset_y < 0) {
+      BOOST_LOG(error) << "PyroWave: a "sv << width << 'x' << height << " picture does not fit at "sv
+                       << where.offset_x << ',' << where.offset_y << " of a "sv << where.image_width
+                       << 'x' << where.image_height << " image"sv;
+      return false;
+    }
+    if (image != VK_NULL_HANDLE && picture_width == static_cast<uint32_t>(width) &&
+        picture_height == static_cast<uint32_t>(height) && image_format == format &&
+        image_stride == static_cast<uint32_t>(stride) && placement == where) {
       return true;
     }
 
@@ -266,7 +279,8 @@ namespace pyrowave_encode {
     image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     image_info.imageType = VK_IMAGE_TYPE_2D;
     image_info.format = format;
-    image_info.extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+    image_info.extent = {static_cast<uint32_t>(where.image_width),
+                         static_cast<uint32_t>(where.image_height), 1};
     image_info.mipLevels = 1;
     image_info.arrayLayers = 1;
     image_info.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -277,8 +291,8 @@ namespace pyrowave_encode {
     image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (api.create_image(owner->device, &image_info, nullptr, &image) != VK_SUCCESS) {
-      BOOST_LOG(warning) << "PyroWave: this GPU will not make a "sv << width << 'x' << height
-                         << " image in format "sv << static_cast<int>(format);
+      BOOST_LOG(warning) << "PyroWave: this GPU will not make a "sv << where.image_width << 'x'
+                         << where.image_height << " image in format "sv << static_cast<int>(format);
       release_frame_resources();
       return false;
     }
@@ -304,13 +318,20 @@ namespace pyrowave_encode {
 
     image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
     image_format = format;
-    image_width = static_cast<uint32_t>(width);
-    image_height = static_cast<uint32_t>(height);
+    image_width = static_cast<uint32_t>(where.image_width);
+    image_height = static_cast<uint32_t>(where.image_height);
+    picture_width = static_cast<uint32_t>(width);
+    picture_height = static_cast<uint32_t>(height);
     image_stride = static_cast<uint32_t>(stride);
+    placement = where;
+    // Only when something is left uncovered. A picture that fills the image is written over in full
+    // every frame, and clearing it first would be work with no effect.
+    needs_clearing = where.has_bars();
     return true;
   }
 
-  bool upload_t::begin(const uint8_t *pixels, int width, int height, int stride, VkFormat format) {
+  bool upload_t::begin(const uint8_t *pixels, int width, int height, int stride, VkFormat format,
+                       const placement_t &where) {
     if (recording || !pixels || stride <= 0) {
       return false;
     }
@@ -321,7 +342,7 @@ namespace pyrowave_encode {
       BOOST_LOG(warning) << "PyroWave: a "sv << stride << " byte row is not a whole number of pixels"sv;
       return false;
     }
-    if (!prepare(width, height, stride, format)) {
+    if (!prepare(width, height, stride, format, where)) {
       return false;
     }
 
@@ -362,12 +383,32 @@ namespace pyrowave_encode {
       cmd, first ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
       VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &to_transfer);
 
+    if (needs_clearing) {
+      // Black, once, and the bars stay black for the life of the image because every frame after
+      // this copies into the same rectangle and never touches the rest.
+      const VkClearColorValue black = {{0.0f, 0.0f, 0.0f, 1.0f}};
+      const VkImageSubresourceRange whole = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+      api.cmd_clear_color_image(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &whole);
+
+      // The clear covers the whole image and the copy below covers part of it, so one has to finish
+      // before the other starts.
+      VkImageMemoryBarrier cleared = to_transfer;
+      cleared.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+      cleared.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+      cleared.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      cleared.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+      api.cmd_pipeline_barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                               0, nullptr, 0, nullptr, 1, &cleared);
+      needs_clearing = false;
+    }
+
     VkBufferImageCopy region = {};
     region.bufferOffset = 0;
     region.bufferRowLength = static_cast<uint32_t>(stride / 4);
     region.bufferImageHeight = 0;
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageExtent = {image_width, image_height, 1};
+    region.imageOffset = {placement.offset_x, placement.offset_y, 0};
+    region.imageExtent = {picture_width, picture_height, 1};
     api.cmd_copy_buffer_to_image(cmd, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                                  &region);
 

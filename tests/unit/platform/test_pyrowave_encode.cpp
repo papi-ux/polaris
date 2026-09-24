@@ -574,7 +574,7 @@ TEST(PyroWaveEncodeTests, TheFrameCaptureHandsOverIsEncodedOnTheGpu) {
   EXPECT_EQ(header.height, height);
 }
 
-TEST(PyroWaveEncodeTests, AShapeThatNeedsBarsIsConvertedOnTheCpu) {
+TEST(PyroWaveEncodeTests, AWiderSourceGetsBarsAboveAndBelowWithoutStretching) {
   if (!pyrowave_encode::available()) {
     GTEST_SKIP() << "no Vulkan device this codec can use";
   }
@@ -584,14 +584,81 @@ TEST(PyroWaveEncodeTests, AShapeThatNeedsBarsIsConvertedOnTheCpu) {
   auto session = make_session_420(width, height);
   ASSERT_NE(session, nullptr);
 
-  // Twice as wide for its height as the stream is. The codec's scaler fills the output with the
-  // input and has no letterbox in it, so a frame this shape has to take the other path or arrive
-  // stretched.
+  // Twice as wide for its height as the stream is, which is the shape an ultrawide monitor has when
+  // a client asks for sixteen by nine. The codec's scaler fills its output with its input and has no
+  // letterbox in it, so this only comes out right if the picture it is given was padded first.
   const quadrant_frame_t source {1280, 360, 1280 * 4};
   ASSERT_TRUE(session->encode_bgra(source.bgra.data(), source.width, source.height, source.stride,
                                    512 * 1024));
-  EXPECT_FALSE(session->uses_gpu_input());
-  EXPECT_FALSE(session->bitstream().empty());
+  ASSERT_TRUE(session->uses_gpu_input());
+
+  const decoded_frame_t decoded {session->bitstream(), width, height, false};
+  ASSERT_TRUE(decoded.ok);
+
+  // Worked out from the shapes here rather than read back from the code that did it, so this is a
+  // second opinion and not an echo.
+  const int padded_height = source.width * height / width;
+  const int top_bar = (padded_height - source.height) / 2;
+  const auto to_output = [&](int col, int row) {
+    return std::pair<int, int> {col * width / source.width,
+                                (row + top_bar) * height / padded_height};
+  };
+
+  EXPECT_LT(decoded.luma_at(width / 2, 8), 8) << "the bar above the picture is not black";
+  EXPECT_LT(decoded.luma_at(width / 2, height - 8), 8) << "the bar below it is not black";
+
+  // The colours landing where the geometry says they should is what proves nothing was stretched: a
+  // stretched picture would put the quadrant boundary in the wrong place and these samples would
+  // read the neighbouring colour.
+  for (int which = 0; which < 4; ++which) {
+    const auto [col, row] = source.centre_of(which);
+    const auto [out_col, out_row] = to_output(col, row);
+    const expected_ycbcr_t want {source.colours[which][0], source.colours[which][1],
+                                 source.colours[which][2]};
+    EXPECT_NEAR(decoded.luma_at(out_col, out_row), want.y, 8.0)
+      << "quadrant " << which << " should be at " << out_col << ',' << out_row;
+    EXPECT_NEAR(decoded.chroma_v_at(out_col, out_row), want.v, 10.0) << "quadrant " << which << " Cr";
+  }
+}
+
+TEST(PyroWaveEncodeTests, ATallerSourceGetsBarsEitherSide) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  auto session = make_session_420(width, height);
+  ASSERT_NE(session, nullptr);
+
+  // Four by three into sixteen by nine, which is every emulator and every older game.
+  const quadrant_frame_t source {640, 480, 640 * 4};
+  ASSERT_TRUE(session->encode_bgra(source.bgra.data(), source.width, source.height, source.stride,
+                                   512 * 1024));
+  ASSERT_TRUE(session->uses_gpu_input());
+
+  const decoded_frame_t decoded {session->bitstream(), width, height, false};
+  ASSERT_TRUE(decoded.ok);
+
+  EXPECT_LT(decoded.luma_at(8, height / 2), 8) << "the bar to the left of the picture is not black";
+  EXPECT_LT(decoded.luma_at(width - 8, height / 2), 8) << "the bar to its right is not black";
+
+  // The picture keeps its own shape in the middle, so its centre row is still four colours across.
+  const int padded_width = source.height * width / height;
+  const int left_bar = (padded_width - source.width) / 2;
+  const auto to_output = [&](int col, int row) {
+    return std::pair<int, int> {(col + left_bar) * width / padded_width,
+                                row * height / source.height};
+  };
+
+  for (int which = 0; which < 4; ++which) {
+    const auto [col, row] = source.centre_of(which);
+    const auto [out_col, out_row] = to_output(col, row);
+    const expected_ycbcr_t want {source.colours[which][0], source.colours[which][1],
+                                 source.colours[which][2]};
+    EXPECT_NEAR(decoded.luma_at(out_col, out_row), want.y, 8.0)
+      << "quadrant " << which << " should be at " << out_col << ',' << out_row;
+  }
 }
 
 TEST(PyroWaveEncodeTests, ThePictureThatArrivesIsFullRangeRec709) {
