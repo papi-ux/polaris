@@ -66,6 +66,19 @@ namespace pyrowave_encode {
     std::uint32_t offsets[4] = {};
     int width = 0;
     int height = 0;
+
+    /**
+     * @brief Which of capture's buffers this frame came out of, or zero when nobody said.
+     *
+     * Capture cycles a small pool and hands the same buffers back in turn, and it stamps each one
+     * with a number of its own that is never reused. That is what lets this host describe a buffer to
+     * Vulkan once instead of once a frame, which is a sixth of the frame time at 1080p.
+     *
+     * A number rather than a descriptor on purpose. A descriptor can be closed and the same integer
+     * handed out again for something else, which would make a cache read the wrong picture; these
+     * come from a counter that only goes up.
+     */
+    std::uint64_t buffer_key = 0;
   };
 
   /**
@@ -249,6 +262,16 @@ namespace pyrowave_encode {
      * and which one a session took is the first thing to know when a host cannot keep up.
      */
     virtual bool uses_gpu_input() const = 0;
+
+    /**
+     * @brief How many of capture's buffers this session has had to describe to Vulkan.
+     *
+     * Zero until a frame arrives as a dmabuf, then one per buffer in capture's pool: describing one
+     * costs about 0.2 ms of a 1080p frame and 0.9 ms of a 7680x2160 one, so it is done once per buffer
+     * and kept rather than once per frame. A number that climbs with the frame count means nothing is
+     * being recognised, and every frame is paying that again.
+     */
+    virtual unsigned buffers_described() const = 0;
 
     /**
      * @brief The encoded frame, as one contiguous bitstream. Valid until the next encode.

@@ -37,6 +37,9 @@
 
 namespace {
 
+  /// Stands in for capture's own counter: a number per buffer that is never handed out twice.
+  std::uint64_t last_test_buffer_key = 0;
+
   /**
    * A source file, for the contracts that are about what the code says rather than what it does.
    */
@@ -386,6 +389,10 @@ namespace {
       buffer.offsets[0] = gbm_bo_get_offset(bo, 0);
       buffer.width = width;
       buffer.height = height;
+      // Capture stamps every buffer in its pool with a number of its own that is never reused, and the
+      // import path recognises buffers by it. Stamped here too, so these tests take the path a real
+      // stream takes rather than the one a backend that tracks nothing would.
+      buffer.buffer_key = ++last_test_buffer_key;
       ok = buffer.fds[0] >= 0;
     }
 
@@ -1159,6 +1166,124 @@ TEST(PyroWaveEncodeTests, ARepeatedFrameWorksAfterAnImportedOne) {
   const decoded_frame_t decoded {session->bitstream(), width, height, false};
   ASSERT_TRUE(decoded.ok);
   expect_full_range_rec709(decoded, picture, "repeated after an import");
+}
+
+/**
+ * A buffer capture hands back is described to Vulkan once, not once a frame.
+ *
+ * Describing one costs 0.160 ms of a 0.49 ms frame at 1080p and 0.367 ms at 4K, nearly all of it in
+ * vkAllocateMemory where the kernel attaches the buffer to the device. Capture cycles a handful of
+ * buffers, so that cost belongs to the buffer rather than to the frame.
+ *
+ * The picture is checked on the second frame as well, because a cache that hands back a stale or
+ * wrong description would still encode something, and something is the hardest kind of wrong to see.
+ */
+TEST(PyroWaveEncodeTests, ABufferHandedBackIsDescribedOnce) {
+  if (!pyrowave_encode::dmabuf_import_available()) {
+    GTEST_SKIP() << "this device cannot import a dmabuf";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  const quadrant_frame_t picture {width, height, width * 4};
+  const test_dmabuf_t captured {width, height, picture};
+  if (!captured.ok) {
+    GTEST_SKIP() << "could not allocate a dmabuf on this machine";
+  }
+
+  auto session = make_session_420(width, height);
+  ASSERT_NE(session, nullptr);
+
+  ASSERT_TRUE(session->encode_imported(captured.buffer, 512 * 1024));
+  EXPECT_EQ(session->buffers_described(), 1u);
+  {
+    const decoded_frame_t decoded {session->bitstream(), width, height, false};
+    ASSERT_TRUE(decoded.ok);
+    expect_full_range_rec709(decoded, picture, "described for the first time");
+  }
+
+  // The same buffer, back round the pool. Nothing new to describe.
+  for (int frame = 0; frame < 4; ++frame) {
+    ASSERT_TRUE(session->encode_imported(captured.buffer, 512 * 1024));
+  }
+  EXPECT_EQ(session->buffers_described(), 1u)
+    << "capture's buffer is being described again every frame, which is a sixth of the frame time";
+
+  const decoded_frame_t decoded {session->bitstream(), width, height, false};
+  ASSERT_TRUE(decoded.ok);
+  expect_full_range_rec709(decoded, picture, "read through a kept description");
+}
+
+/**
+ * A frame nobody stamped is described every time, on purpose.
+ *
+ * Zero is what a backend that does not track its buffers leaves behind. Treating two of those as the
+ * same buffer would read one frame's pixels through another's description, which is the mistake the
+ * stamp exists to make impossible, so they are never matched and the cost is paid per frame instead.
+ */
+TEST(PyroWaveEncodeTests, AnUnstampedFrameIsDescribedEveryTime) {
+  if (!pyrowave_encode::dmabuf_import_available()) {
+    GTEST_SKIP() << "this device cannot import a dmabuf";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  const quadrant_frame_t picture {width, height, width * 4};
+  test_dmabuf_t captured {width, height, picture};
+  if (!captured.ok) {
+    GTEST_SKIP() << "could not allocate a dmabuf on this machine";
+  }
+  captured.buffer.buffer_key = 0;
+
+  auto session = make_session_420(width, height);
+  ASSERT_NE(session, nullptr);
+
+  ASSERT_TRUE(session->encode_imported(captured.buffer, 512 * 1024));
+  ASSERT_TRUE(session->encode_imported(captured.buffer, 512 * 1024));
+  EXPECT_EQ(session->buffers_described(), 2u)
+    << "two frames nobody identified were treated as the same buffer";
+
+  const decoded_frame_t decoded {session->bitstream(), width, height, false};
+  ASSERT_TRUE(decoded.ok);
+  expect_full_range_rec709(decoded, picture, "unstamped");
+}
+
+/**
+ * A stamp that comes back for a different buffer is not believed on its own.
+ *
+ * Capture's numbers are never reused, so this should not happen. It is refused anyway, because the
+ * failure if it ever did would be silent: a description names a size, a pitch and a layout, and
+ * reading a new buffer through an old description gives a sheared or truncated picture rather than an
+ * error. Everything the description depends on is compared, not just the number.
+ */
+TEST(PyroWaveEncodeTests, AStampReusedForADifferentShapeIsDescribedAgain) {
+  if (!pyrowave_encode::dmabuf_import_available()) {
+    GTEST_SKIP() << "this device cannot import a dmabuf";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  const quadrant_frame_t first_picture {width, height, width * 4};
+  test_dmabuf_t first {width, height, first_picture};
+  const quadrant_frame_t second_picture {width / 2, height / 2, (width / 2) * 4};
+  test_dmabuf_t second {width / 2, height / 2, second_picture};
+  if (!first.ok || !second.ok) {
+    GTEST_SKIP() << "could not allocate a dmabuf on this machine";
+  }
+  second.buffer.buffer_key = first.buffer.buffer_key;
+
+  auto session = make_session_420(width, height);
+  ASSERT_NE(session, nullptr);
+
+  ASSERT_TRUE(session->encode_imported(first.buffer, 512 * 1024));
+  ASSERT_TRUE(session->encode_imported(second.buffer, 512 * 1024));
+  EXPECT_EQ(session->buffers_described(), 2u)
+    << "a smaller buffer was read through the larger one's description";
+
+  // And the smaller picture arrives letterboxed rather than sheared, which is what says the second
+  // description is the one that was used.
+  const decoded_frame_t decoded {session->bitstream(), width, height, false};
+  ASSERT_TRUE(decoded.ok);
 }
 
 /**

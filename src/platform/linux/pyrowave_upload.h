@@ -9,6 +9,7 @@
 #include "src/platform/linux/pyrowave_vulkan.h"
 
 // standard includes
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -129,6 +130,17 @@ namespace pyrowave_encode {
     bool can_import() const;
 
     /**
+     * @brief How many of capture's buffers this path has had to describe to Vulkan.
+     *
+     * One per buffer in capture's pool once a stream is running, because a description is kept and
+     * reused. A count that keeps climbing with the frame count means the buffers are not being
+     * recognised, and every frame is paying for an image and an allocation it did not need to.
+     */
+    unsigned buffers_described() const {
+      return described_buffers;
+    }
+
+    /**
      * @brief Open a frame that is nothing but black, for when there is no picture to send yet.
      *
      * Polaris primes an encoder by converting a dummy image before the first real frame arrives, so
@@ -186,11 +198,20 @@ namespace pyrowave_encode {
     }
 
   private:
+    /// Defined below, beside the slots it describes.
+    struct import_t;
+
     upload_t() = default;
 
     bool resolve(const vk_device_t &owner);
-    bool import_dmabuf(const dmabuf_t &buffer, bool ten_bit);
-    void release_import();
+    /**
+     * @brief The slot holding this buffer's import, made on first sight and kept.
+     *
+     * @return nullptr when this frame cannot be imported, which is a frame lost rather than a session.
+     */
+    import_t *import_for(const dmabuf_t &buffer, bool ten_bit);
+    void release_import(import_t &entry);
+    void release_imports();
 
     /**
      * @brief Make the image the codec reads, sized and shaped for this stream.
@@ -256,19 +277,45 @@ namespace pyrowave_encode {
     bool needs_clearing = false;
 
     /**
-     * @brief The frame capture lent us, imported for exactly as long as this frame lasts.
+     * @brief One of capture's buffers, described to Vulkan.
      *
-     * Never read by the codec directly, and never read again after this frame. Capture takes the
-     * buffer back as soon as the frame is released and the compositor may be drawing into it by the
-     * time the next one is asked for, so what the codec reads is always the copy made from it while
-     * it was ours. That copy is between two images on the GPU, which costs a fraction of a
+     * Never read by the codec directly, and never read outside the frame it arrived for. Capture
+     * takes the buffer back as soon as the frame is released and the compositor may be drawing into
+     * it by the time the next one is asked for, so what the codec reads is always the copy made from
+     * it while it was ours. That copy is between two images on the GPU, which costs a fraction of a
      * millisecond and none of the host's time, and it is what makes repeating a frame possible at all.
+     *
+     * The description outlives the frame even though the pixels do not. Nothing here reads the
+     * buffer's contents: an image and an imported allocation say where the pixels are and how they
+     * are arranged, and that stays true every time capture hands the same buffer back.
      */
-    VkImage imported_image = VK_NULL_HANDLE;
-    VkDeviceMemory imported_memory = VK_NULL_HANDLE;
-    VkFormat imported_format = VK_FORMAT_UNDEFINED;
-    uint32_t imported_width = 0;
-    uint32_t imported_height = 0;
+    struct import_t {
+      /// Zero means no slot, which is also what an unstamped frame gets: it is never matched.
+      std::uint64_t buffer_key = 0;
+      VkImage image = VK_NULL_HANDLE;
+      VkDeviceMemory memory = VK_NULL_HANDLE;
+      VkFormat format = VK_FORMAT_UNDEFINED;
+      uint32_t width = 0;
+      uint32_t height = 0;
+      /// Kept so a buffer reused under a new shape is rebuilt rather than read through a stale one.
+      std::uint64_t modifier = 0;
+      uint32_t pitch = 0;
+      uint32_t offset = 0;
+    };
+
+    /**
+     * Four, because capture's pool is smaller than that on every backend here and a fifth buffer
+     * would only cost the import it saves. A key that is not in these is built into the next slot in
+     * turn, so a pool that grows or is rebuilt cycles the old ones out rather than growing this.
+     */
+    std::array<import_t, 4> imports {};
+    std::size_t next_import = 0;
+
+    /// The slot this frame reads, owned by imports above. Null between frames.
+    import_t *current_import = nullptr;
+
+    /// How many buffers have had to be described, which is the cost this cache exists to pay once.
+    unsigned described_buffers = 0;
 
     /// What capture's rows measured last time, which is what the staging buffer was sized for.
     uint32_t image_stride = 0;

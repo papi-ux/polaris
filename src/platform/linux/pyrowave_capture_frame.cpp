@@ -25,6 +25,9 @@ namespace pyrowave_encode {
     out.modifier = sd.modifier;
     out.width = sd.width;
     out.height = sd.height;
+    // Which of capture's buffers this came out of. Zero from a backend that does not track them,
+    // which costs a description per frame rather than being wrong about which buffer it holds.
+    out.buffer_key = descriptor->dmabuf_buffer_key;
     return out.width > 0 && out.height > 0;
   }
 

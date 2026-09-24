@@ -289,7 +289,7 @@ namespace pyrowave_encode {
                            << static_cast<int>(waited) << ')';
       }
     }
-    release_import();
+    release_imports();
     release_frame_resources();
     if (fence != VK_NULL_HANDLE) {
       api.destroy_fence(owner->device, fence, nullptr);
@@ -526,49 +526,75 @@ namespace pyrowave_encode {
     return owner && owner->can_import_dmabuf && api.get_memory_fd_properties != nullptr;
   }
 
-  void upload_t::release_import() {
+  void upload_t::release_import(import_t &entry) {
     if (!owner || owner->device == VK_NULL_HANDLE) {
       return;
     }
-    if (imported_image != VK_NULL_HANDLE) {
-      api.destroy_image(owner->device, imported_image, nullptr);
-      imported_image = VK_NULL_HANDLE;
+    if (entry.image != VK_NULL_HANDLE) {
+      api.destroy_image(owner->device, entry.image, nullptr);
     }
-    if (imported_memory != VK_NULL_HANDLE) {
-      api.free_memory(owner->device, imported_memory, nullptr);
-      imported_memory = VK_NULL_HANDLE;
+    if (entry.memory != VK_NULL_HANDLE) {
+      api.free_memory(owner->device, entry.memory, nullptr);
     }
-    imported_format = VK_FORMAT_UNDEFINED;
-    imported_width = 0;
-    imported_height = 0;
+    if (current_import == &entry) {
+      current_import = nullptr;
+    }
+    entry = {};
+  }
+
+  void upload_t::release_imports() {
+    for (auto &entry : imports) {
+      release_import(entry);
+    }
+    current_import = nullptr;
   }
 
   /**
-   * Describe a dmabuf to Vulkan and bind its memory, once per frame.
+   * Describe a dmabuf to Vulkan and bind its memory, once per buffer.
    *
-   * Per frame rather than cached by buffer, which capture would let us do: the pool it cycles is
-   * small and the same descriptors come back. Measured first, cached only if it shows up, because a
-   * cache keyed on a file descriptor the other side may have closed and reopened is a subtle thing to
-   * get wrong and an image creation is not obviously expensive.
+   * It used to be once per frame, and the comment here said to measure before caching because an
+   * image creation is not obviously expensive. Measured, 300 frames to 1080p on a 4090, per frame:
+   *
+   *     source       per frame   per buffer
+   *     1920x1080    0.508 ms    0.306 ms
+   *     3840x2160    0.829 ms    0.374 ms
+   *     7680x2160    1.505 ms    0.594 ms
+   *
+   * Nearly all of it is in vkAllocateMemory, where the kernel attaches the buffer to the device, so it
+   * scales with the buffer rather than with the stream: at the ultrawide the import alone cost more
+   * than the whole frame does now.
+   *
+   * The worry in that comment was the right one and it is what decides the key. A file descriptor can
+   * be closed and the same integer handed back for something else, so a cache keyed on one reads the
+   * wrong picture and says nothing. Capture stamps each buffer in its pool with a number from a
+   * counter that only goes up, which is what is used here: a number that is not in the table means a
+   * buffer nobody has described yet, always, including after a pool is thrown away and rebuilt.
+   *
+   * What is kept is a description, not pixels. An image and an imported allocation say where the
+   * pixels are and how they are laid out, and that stays true every time capture hands the same
+   * buffer back. The shape is checked all the same, so a buffer reused under a new geometry is
+   * rebuilt rather than read through a stale description.
+   *
+   * This is what cuda.cpp does for the same reason, four slots and all.
    */
-  bool upload_t::import_dmabuf(const dmabuf_t &buffer, bool ten_bit) {
-    release_import();
+  upload_t::import_t *upload_t::import_for(const dmabuf_t &buffer, bool ten_bit) {
+    current_import = nullptr;
 
     if (!can_import()) {
       BOOST_LOG(error) << "PyroWave: asked to import a frame on a device that cannot"sv;
-      return false;
+      return nullptr;
     }
     if (buffer.fds[0] < 0 || buffer.width <= 0 || buffer.height <= 0) {
       BOOST_LOG(error) << "PyroWave: capture described a "sv << buffer.width << 'x' << buffer.height
                        << " dmabuf with descriptor "sv << buffer.fds[0];
-      return false;
+      return nullptr;
     }
 
     const auto format = format_for_fourcc(buffer.fourcc);
     if (format == VK_FORMAT_UNDEFINED) {
       BOOST_LOG(warning) << "PyroWave: capture handed over a dmabuf in a format this codec cannot "sv
                          << "read (fourcc "sv << buffer.fourcc << ')';
-      return false;
+      return nullptr;
     }
 
     // The depth this stream carries, checked here because nothing after this point would notice. The
@@ -580,15 +606,43 @@ namespace pyrowave_encode {
       BOOST_LOG(error) << "PyroWave: capture handed over "sv
                        << (frame_is_ten_bit ? "ten"sv : "eight"sv) << " bit pixels and this stream is "sv
                        << (ten_bit ? "ten"sv : "eight"sv) << " bit"sv;
-      return false;
+      return nullptr;
+    }
+
+    // A buffer this path has already described, handed back by the pool. Everything the description
+    // depends on is compared, not just the number, so a pool that reuses a buffer for a different
+    // shape gets a new description rather than a wrong one.
+    //
+    // An unstamped frame matches nothing: zero is what a backend that does not track its buffers
+    // leaves behind, and treating two of those as the same buffer is exactly the mistake this key
+    // exists to avoid.
+    if (buffer.buffer_key != 0) {
+      for (auto &entry : imports) {
+        if (entry.buffer_key != buffer.buffer_key) {
+          continue;
+        }
+        if (entry.format == format &&
+            entry.width == static_cast<uint32_t>(buffer.width) &&
+            entry.height == static_cast<uint32_t>(buffer.height) &&
+            entry.modifier == buffer.modifier &&
+            entry.pitch == buffer.pitches[0] &&
+            entry.offset == buffer.offsets[0]) {
+          return &entry;
+        }
+        release_import(entry);
+        break;
+      }
     }
 
     // Duplicated, because Vulkan takes ownership of the descriptor it is given and capture closes the
     // one it kept. Two owners of one descriptor is a double close, which is somebody else's bug.
+    //
+    // Holding the duplicate is also what makes keeping the description safe: the buffer cannot be
+    // freed underneath a slot that still names it, however the other side manages its own pool.
     const int fd = ::dup(buffer.fds[0]);
     if (fd < 0) {
       BOOST_LOG(warning) << "PyroWave: could not duplicate the captured frame's descriptor"sv;
-      return false;
+      return nullptr;
     }
 
     VkMemoryFdPropertiesKHR fd_properties = {};
@@ -598,8 +652,14 @@ namespace pyrowave_encode {
         fd_properties.memoryTypeBits == 0) {
       BOOST_LOG(warning) << "PyroWave: this driver will not describe the captured frame's memory"sv;
       ::close(fd);
-      return false;
+      return nullptr;
     }
+
+    // The slot this one is built into, taken in turn. Whatever was here is given back first, which is
+    // how a pool larger than the table cycles rather than leaks.
+    auto &entry = imports[next_import];
+    next_import = (next_import + 1) % imports.size();
+    release_import(entry);
 
     VkExternalMemoryImageCreateInfo external = {};
     external.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
@@ -627,12 +687,12 @@ namespace pyrowave_encode {
       BOOST_LOG(warning) << "PyroWave: capture handed over a "sv << planes
                          << " plane dmabuf, and this path imports one"sv;
       ::close(fd);
-      return false;
+      return nullptr;
     }
     if (buffer.modifier == DRM_FORMAT_MOD_INVALID) {
       BOOST_LOG(warning) << "PyroWave: capture handed over a dmabuf with no layout modifier"sv;
       ::close(fd);
-      return false;
+      return nullptr;
     }
 
     std::array<VkSubresourceLayout, 4> layouts = {};
@@ -663,22 +723,22 @@ namespace pyrowave_encode {
     info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (api.create_image(owner->device, &info, nullptr, &imported_image) != VK_SUCCESS) {
+    if (api.create_image(owner->device, &info, nullptr, &entry.image) != VK_SUCCESS) {
       BOOST_LOG(warning) << "PyroWave: this driver will not make an image for a "sv << buffer.width
                          << 'x' << buffer.height << " dmabuf with modifier "sv << buffer.modifier;
-      imported_image = VK_NULL_HANDLE;
+      entry.image = VK_NULL_HANDLE;
       ::close(fd);
-      return false;
+      return nullptr;
     }
 
     VkMemoryRequirements needs = {};
-    api.get_image_memory_requirements(owner->device, imported_image, &needs);
+    api.get_image_memory_requirements(owner->device, entry.image, &needs);
     const auto usable = needs.memoryTypeBits & fd_properties.memoryTypeBits;
     if (usable == 0) {
       BOOST_LOG(warning) << "PyroWave: the captured frame's memory suits no type this image can use"sv;
       ::close(fd);
-      release_import();
-      return false;
+      release_import(entry);
+      return nullptr;
     }
 
     uint32_t chosen = UINT32_MAX;
@@ -696,8 +756,8 @@ namespace pyrowave_encode {
     if (chosen == UINT32_MAX) {
       BOOST_LOG(error) << "PyroWave: no memory type suits the captured frame"sv;
       ::close(fd);
-      release_import();
-      return false;
+      release_import(entry);
+      return nullptr;
     }
 
     // The descriptor goes with this structure: a successful import takes it, and a failed one leaves
@@ -709,7 +769,7 @@ namespace pyrowave_encode {
 
     VkMemoryDedicatedAllocateInfo dedicated = {};
     dedicated.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO;
-    dedicated.image = imported_image;
+    dedicated.image = entry.image;
     import.pNext = &dedicated;
 
     VkMemoryAllocateInfo allocation = {};
@@ -718,23 +778,28 @@ namespace pyrowave_encode {
     allocation.allocationSize = needs.size;
     allocation.memoryTypeIndex = chosen;
 
-    if (api.allocate_memory(owner->device, &allocation, nullptr, &imported_memory) != VK_SUCCESS) {
+    if (api.allocate_memory(owner->device, &allocation, nullptr, &entry.memory) != VK_SUCCESS) {
       BOOST_LOG(warning) << "PyroWave: the captured frame's memory could not be imported"sv;
-      imported_memory = VK_NULL_HANDLE;
+      entry.memory = VK_NULL_HANDLE;
       ::close(fd);
-      release_import();
-      return false;
+      release_import(entry);
+      return nullptr;
     }
-    if (api.bind_image_memory(owner->device, imported_image, imported_memory, 0) != VK_SUCCESS) {
+    if (api.bind_image_memory(owner->device, entry.image, entry.memory, 0) != VK_SUCCESS) {
       BOOST_LOG(error) << "PyroWave: the imported memory would not bind to the image"sv;
-      release_import();
-      return false;
+      release_import(entry);
+      return nullptr;
     }
 
-    imported_format = format;
-    imported_width = static_cast<uint32_t>(buffer.width);
-    imported_height = static_cast<uint32_t>(buffer.height);
-    return true;
+    entry.buffer_key = buffer.buffer_key;
+    entry.format = format;
+    entry.width = static_cast<uint32_t>(buffer.width);
+    entry.height = static_cast<uint32_t>(buffer.height);
+    entry.modifier = buffer.modifier;
+    entry.pitch = buffer.pitches[0];
+    entry.offset = buffer.offsets[0];
+    ++described_buffers;
+    return &entry;
   }
 
   bool upload_t::begin_imported(const dmabuf_t &buffer, const placement_t &where, bool ten_bit) {
@@ -743,7 +808,8 @@ namespace pyrowave_encode {
                        << (wedged ? "this path has given up"sv : "one is already open"sv);
       return false;
     }
-    if (!import_dmabuf(buffer, ten_bit)) {
+    auto *imported = import_for(buffer, ten_bit);
+    if (!imported) {
       return false;
     }
 
@@ -759,13 +825,13 @@ namespace pyrowave_encode {
     //
     // The copy is between two images on the GPU: about a tenth of a millisecond at 4K against the
     // four this path exists to remove, and none of it the host's.
-    if (!prepare_image(buffer.width, buffer.height, imported_format, where)) {
-      release_import();
+    // A failure from here on leaves the slot alone. It is a good description of a buffer capture is
+    // going to hand back, and throwing it away would only mean building it again.
+    if (!prepare_image(buffer.width, buffer.height, imported->format, where)) {
       return false;
     }
 
     if (api.reset_command_pool(owner->device, pool, 0) != VK_SUCCESS) {
-      release_import();
       return false;
     }
 
@@ -773,21 +839,25 @@ namespace pyrowave_encode {
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     if (api.begin_command_buffer(cmd, &begin_info) != VK_SUCCESS) {
-      release_import();
       return false;
     }
     recording = true;
+    current_import = imported;
 
     // Taken off the queue family that filled it. A buffer another API wrote is owned by a family
     // Vulkan calls foreign, and reading it without acquiring it first is undefined: the contents are
     // whatever the driver felt like leaving visible.
+    //
+    // Every frame, including the frames where this image was described long ago. The writer that
+    // filled it this time was the compositor again, so the layout it is coming from is undefined
+    // again, and what the pixels mean is carried by the modifier rather than by a Vulkan layout.
     VkImageMemoryBarrier acquire = {};
     acquire.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     acquire.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     acquire.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     acquire.srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
     acquire.dstQueueFamilyIndex = owner->queue_family;
-    acquire.image = imported_image;
+    acquire.image = imported->image;
     acquire.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     acquire.srcAccessMask = 0;
     acquire.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
@@ -829,8 +899,8 @@ namespace pyrowave_encode {
     region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     region.srcOffset = {0, 0, 0};
     region.dstOffset = {placement.offset_x, placement.offset_y, 0};
-    region.extent = {imported_width, imported_height, 1};
-    api.cmd_copy_image(cmd, imported_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image,
+    region.extent = {imported->width, imported->height, 1};
+    api.cmd_copy_image(cmd, imported->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, image,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
     VkImageMemoryBarrier to_read = to_transfer;

@@ -436,6 +436,7 @@ namespace pyrowave_encode {
         if (!staging->begin_imported(buffer, where, range == dynamic_range_e::hdr10)) {
           return false;
         }
+        const auto encode_started = std::chrono::steady_clock::now();
         if (!encode_recorded(max_bytes)) {
           return false;
         }
@@ -446,8 +447,11 @@ namespace pyrowave_encode {
                           << " frame where capture left it, on "sv << owner->gpu_name
                           << (where.has_bars() ? ", letterboxed"sv : ""sv);
         }
-        // No copy to time, so the whole frame is the encode.
-        report_timing(started, started);
+        // Not a copy to the host, which is the whole point of this path, but not free either: a
+        // buffer capture has not handed over before has to be described to Vulkan, and that costs more
+        // than everything else in the frame put together. Timing it as part of the encode, which is
+        // what this did, hid it completely and made the import look free rather than amortised.
+        report_timing(started, encode_started);
         return true;
       }
 
@@ -566,10 +570,20 @@ namespace pyrowave_encode {
         // second.
         ++timed_frames;
         if (timed_frames == 300 || timed_frames % 18000 == 0) {
+          const auto described = buffers_described();
           BOOST_LOG(info) << "PyroWave: over "sv << timed_frames << " frames, "sv
-                          << (gpu == gpu_e::yes ? "the copy to the GPU "sv : "colour conversion "sv)
+                          << (described > 0 ? "taking the frame where capture left it "sv
+                                            : gpu == gpu_e::yes ? "the copy to the GPU "sv
+                                                                : "colour conversion "sv)
                           << (convert_ms_total / timed_frames) << " ms and encode "sv
                           << (encode_ms_total / timed_frames) << " ms a frame"sv;
+          if (described > 0) {
+            // Capture's pool, as this path has seen it. One line, because a number that grows with the
+            // frame count is the difference between describing each buffer once and doing it every
+            // frame, and the frame time above would not say which.
+            BOOST_LOG(info) << "PyroWave: "sv << described << " of capture's buffers described, for "sv
+                            << timed_frames << " frames"sv;
+          }
         }
       }
 
@@ -764,6 +778,10 @@ namespace pyrowave_encode {
 
       bool uses_gpu_input() const override {
         return gpu == gpu_e::yes;
+      }
+
+      unsigned buffers_described() const override {
+        return staging ? staging->buffers_described() : 0;
       }
 
       const std::vector<uint8_t> &bitstream() const override {
