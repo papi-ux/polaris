@@ -13,8 +13,26 @@ import (
 	"time"
 )
 
+// healthSocketPath is a socket path short enough to bind.
+//
+// An AF_UNIX address holds 108 bytes, and t.TempDir() puts the test's own name in the directory it
+// makes, so the two longest-named tests here go over the cap on a host whose TMPDIR is not /tmp.
+// bind() then fails with EINVAL, which reads as a broken health check rather than as a path this
+// test built too long. The directory is made without the name and removed with the test.
+func healthSocketPath(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "polaris-health-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		os.RemoveAll(dir)
+	})
+	return filepath.Join(dir, "health.sock")
+}
+
 func TestWorkerHealthCancellationStopsChallengeRead(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "health.sock")
+	path := healthSocketPath(t)
 	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -47,7 +65,7 @@ func TestWorkerHealthCancellationStopsChallengeRead(t *testing.T) {
 }
 
 func TestWorkerHealthDeadlineIncludesFullConnectBacklog(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "health.sock")
+	path := healthSocketPath(t)
 	listener, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		t.Fatal(err)

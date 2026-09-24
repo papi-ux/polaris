@@ -9,6 +9,7 @@
 #include <fstream>
 #include <future>
 #include <mutex>
+#include <set>
 #include <unistd.h>
 
 #ifdef __linux__
@@ -85,16 +86,26 @@ namespace {
     const auto decoded = spaces::trusted_runtimes();
     ASSERT_TRUE(decoded);
     ASSERT_FALSE(decoded->empty());
+    // Every launcher family this build ships a runtime for, and each one runs as the same
+    // unprivileged account under the same media contract.
+    std::set<std::string> families;
     for (const auto &runtime : *decoded) {
-      EXPECT_EQ(runtime.profile, "steam") << runtime.id;
+      families.insert(runtime.profile);
       EXPECT_EQ(runtime.media_contract, "1") << runtime.id;
       EXPECT_EQ(runtime.uid, 1000U) << runtime.id;
       EXPECT_EQ(runtime.gid, 1000U) << runtime.id;
     }
-    // The maintainer's host: a Space made on 610.57.04 after the driver moved to 615.71.09.
-    const auto choice = spaces::choose_runtime(*decoded, std::string("615.71.09"));
-    ASSERT_TRUE(choice.runtime);
-    EXPECT_EQ(choice.runtime->nvidia_driver, "615.71.09");
+    EXPECT_EQ(families, (std::set<std::string> {"heroic", "lutris", "steam"}));
+    // The maintainer's host: a Space made on 610.57.04 after the driver moved to 615.71.09. Each
+    // family answers with the runtime that borrows this machine's driver, which is the one that
+    // survives the next driver update; the runtimes baked for one driver are the fallback below
+    // the borrowed one's minimum.
+    for (const auto &family : families) {
+      const auto choice = spaces::choose_runtime(*decoded, std::string("615.71.09"), family);
+      ASSERT_TRUE(choice.runtime) << family;
+      EXPECT_EQ(choice.runtime->variant, "nvidia-host") << family;
+      EXPECT_EQ(choice.runtime->profile, family);
+    }
     const auto made_for_610 = std::find_if(decoded->begin(), decoded->end(), [](const auto &r) { return r.nvidia_driver == "610.57.04"; });
     ASSERT_NE(made_for_610, decoded->end());
     const auto identity = spaces::catalog_image_runtime(made_for_610->config_digest, *decoded);

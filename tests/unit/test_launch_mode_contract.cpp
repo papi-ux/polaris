@@ -3,6 +3,7 @@
  * @brief Tests for the Polaris v1 game launch-mode recommendation contract.
  */
 
+#include <set>
 #include <src/config.h>
 #include <src/crypto.h>
 #include <src/launch_profile.h>
@@ -115,6 +116,73 @@ namespace {
   };
 }
 #endif
+
+TEST(LaunchModeContractTests, ADesktopMirrorEntryOffersOnlyWhatItCanActuallyRunIn) {
+#ifdef __linux__
+  ScopedPrivateRuntimePath runtime_path;
+#endif
+  // The Desktop entry resolves Private Stream, GPU-native and Gamescope all back to a mirror, so
+  // offering them asks someone to choose something that cannot happen and then quietly does
+  // something else. papi hit exactly that: he picked Private Stream for Desktop and got Mirror.
+  // Note the host here is configured for Private Stream, which is what used to drive the answer.
+  const auto contract = nvhttp::build_launch_mode_contract_for_tests(
+    false,
+    "Desktop",
+    true,
+    true,
+    true
+  );
+
+  EXPECT_EQ(contract.at("preferred_mode"), "desktop_display");
+  EXPECT_EQ(contract.at("recommended_mode"), "desktop_display");
+
+  std::set<std::string> allowed;
+  for (const auto &mode : contract.at("allowed_modes")) {
+    allowed.insert(mode.get<std::string>());
+  }
+  EXPECT_TRUE(allowed.count("desktop_display"));
+  // Never these: the host would override every one of them back to the mirror.
+  EXPECT_FALSE(allowed.count("headless_stream"));
+  EXPECT_FALSE(allowed.count("windowed_stream"));
+  EXPECT_FALSE(allowed.count("gamescope_stream"));
+  // And the reason says what the entry is, rather than blaming the host for a mode being unready.
+  const auto reason = contract.at("mode_reason").get<std::string>();
+  EXPECT_NE(reason.find("streams the desktop itself"), std::string::npos);
+  EXPECT_EQ(reason.find("not launch-ready"), std::string::npos);
+
+  // Mirroring is this entry's own answer, not a preference borrowed from how the host runs games.
+  // A client that took the host default here would open the desktop on a screen made for games.
+  EXPECT_FALSE(contract.at("follows_host_default").get<bool>());
+
+  // Every other entry does take the host's configured display, which is the whole reason a player
+  // sets one. The desktop is the exception, so say so rather than making clients guess the rule.
+  const auto game = nvhttp::build_launch_mode_contract_for_tests(false, "Game", true, true, false);
+  EXPECT_TRUE(game.at("follows_host_default").get<bool>());
+}
+
+TEST(LaunchModeContractTests, ADesktopMirrorEntryStillOffersAScreenOfItsOwnWhenTheHostHasOne) {
+#ifdef __linux__
+  ScopedPrivateRuntimePath runtime_path;
+#endif
+  // The point of the merge: one Desktop entry that can either mirror the monitor or be given a
+  // screen. Host Virtual Display survives the filter precisely because it still shows a desktop.
+  const auto with_backend = nvhttp::build_launch_mode_contract_for_tests(false, "Desktop", true, false, true);
+  std::set<std::string> allowed;
+  for (const auto &mode : with_backend.at("allowed_modes")) {
+    allowed.insert(mode.get<std::string>());
+  }
+  EXPECT_TRUE(allowed.count("host_virtual_display"));
+
+  // And a host with no way to add a screen offers only the mirror, rather than a choice that would
+  // fail at launch.
+  const auto without_backend = nvhttp::build_launch_mode_contract_for_tests(false, "Desktop", false, false, true);
+  std::set<std::string> without;
+  for (const auto &mode : without_backend.at("allowed_modes")) {
+    without.insert(mode.get<std::string>());
+  }
+  EXPECT_FALSE(without.count("host_virtual_display"));
+  EXPECT_TRUE(without.count("desktop_display"));
+}
 
 TEST(LaunchModeContractTests, HostHeadlessConfigurationWinsOverPerGameVirtualDisplayPreference) {
 #ifdef __linux__

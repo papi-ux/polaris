@@ -33,6 +33,7 @@ jobs:
       commit: ${{ steps.source.outputs.commit }}
       native_required: ${{ steps.source.outputs.native_required }}
       version: ${{ steps.source.outputs.version }}
+      prerelease: ${{ steps.source.outputs.prerelease }}
 
     steps:
       - uses: actions/checkout@v7
@@ -64,16 +65,24 @@ jobs:
             git fetch --no-tags --depth=1 origin "$BASE_COMMIT"
             native_required="$(git diff --name-only --no-renames -z "$BASE_COMMIT" "$source_commit" | scripts/ci/classify-native-build.sh)"
           fi
+          prerelease=false
 
           if [ "$IS_RELEASE" = "true" ]; then
             release_tag="${POLARIS_PACKAGE_REF_NAME}"
-            if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              echo "Release tag must match vMAJOR.MINOR.PATCH: $release_tag" >&2
+            # A beta carries the version it is a beta of, with the channel on the tag alone: the
+            # packages, the catalog and every version pin stay at vMAJOR.MINOR.PATCH.
+            if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.[0-9]+)?$ ]]; then
+              echo "Release tag must match vMAJOR.MINOR.PATCH, optionally -beta.N or -rc.N: $release_tag" >&2
+              exit 1
+            fi
+            release_version="${release_tag#v}"
+            release_version="${release_version%%-*}"
+            if [ "$release_version" != "$build_version" ]; then
+              echo "Release tag $release_tag does not match source version v${build_version}" >&2
               exit 1
             fi
             if [ "$release_tag" != "v${build_version}" ]; then
-              echo "Release tag $release_tag does not match source version v${build_version}" >&2
-              exit 1
+              prerelease=true
             fi
 
             git tag -d "$release_tag" >/dev/null 2>&1 || true
@@ -89,6 +98,7 @@ jobs:
           echo "commit=$source_commit" >> "$GITHUB_OUTPUT"
           echo "native_required=$native_required" >> "$GITHUB_OUTPUT"
           echo "version=$build_version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
 
   web-checks:
     name: Web checks
@@ -1758,19 +1768,29 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          IS_PRERELEASE: ${{ needs.resolve-source.outputs.prerelease }}
         run: |
           set -euo pipefail
 
-          release_notes="docs/release-notes/${POLARIS_PACKAGE_REF_NAME}.md"
+          # A beta reads the notes of the release it precedes, which are written as that release is
+          # built: v1.4.13-beta.2 and v1.4.13 both describe 1.4.13.
+          notes_tag="${POLARIS_PACKAGE_REF_NAME%%-*}"
+          release_notes="docs/release-notes/${notes_tag}.md"
           if [ ! -s "$release_notes" ]; then
             echo "Missing curated release notes: $release_notes" >&2
             exit 1
+          fi
+
+          channel=()
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            channel=(--prerelease)
           fi
 
           if ! gh release view "${POLARIS_PACKAGE_REF_NAME}" >/dev/null 2>&1; then
             gh release create "${POLARIS_PACKAGE_REF_NAME}" \
               --draft \
               --verify-tag \
+              "${channel[@]}" \
               --title "${POLARIS_PACKAGE_REF_NAME}" \
               --notes-file "$release_notes"
             echo "publish_draft=true" >> "$GITHUB_OUTPUT"
@@ -1778,6 +1798,7 @@ jobs:
             gh release edit "${POLARIS_PACKAGE_REF_NAME}" \
               --verify-tag \
               --draft=true \
+              "${channel[@]}" \
               --title "${POLARIS_PACKAGE_REF_NAME}" \
               --notes-file "$release_notes"
             echo "publish_draft=true" >> "$GITHUB_OUTPUT"
@@ -1857,4 +1878,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release edit "${POLARIS_PACKAGE_REF_NAME}" --verify-tag --draft=false
+          IS_PRERELEASE: ${{ needs.resolve-source.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          # A beta is published without becoming the latest release, so every stable install and
+          # every download link that resolves "latest" keeps answering the last stable version.
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            gh release edit "${POLARIS_PACKAGE_REF_NAME}" --verify-tag --draft=false --prerelease --latest=false
+          else
+            gh release edit "${POLARIS_PACKAGE_REF_NAME}" --verify-tag --draft=false
+          fi

@@ -285,15 +285,26 @@ for required_source_command in (
     ["build_version=$(grep -Pom1 '^project\\(Polaris VERSION \\K[^ ]+' CMakeLists.txt)"],
     ["git", "fetch", "--no-tags", "--force", "origin", "refs/tags/${release_tag}:refs/tags/${release_tag}"],
     ["tag_commit=$(git rev-parse refs/tags/${release_tag}^{commit})"],
+    # A beta or rc tag is accepted, and only the numeric part of it has to equal the built version:
+    # the channel lives on the tag alone, so every package and pin stays at vMAJOR.MINOR.PATCH.
     [
-        "if", "[[", "!", "$release_tag", "=~", "^v[0-9]+.[0-9]+.[0-9]+$", "]]", ";", "then", ";",
-        "echo", "Release tag must match vMAJOR.MINOR.PATCH: $release_tag", ">", "&", "2", ";",
+        "if", "[[", "!", "$release_tag", "=~", "^v[0-9]+.[0-9]+.[0-9]+(-(beta", "|", "rc).[0-9]+)?$", "]]", ";", "then", ";",
+        "echo", "Release tag must match vMAJOR.MINOR.PATCH, optionally -beta.N or -rc.N: $release_tag", ">", "&", "2", ";",
         "exit", "1", ";", "fi",
     ],
+    ["release_version=${release_tag#v}"],
+    ["release_version=${release_version%%-*}"],
     [
-        "if", "[", "$release_tag", "!=", "v${build_version}", "]", ";", "then", ";",
+        "if", "[", "$release_version", "!=", "$build_version", "]", ";", "then", ";",
         "echo", "Release tag $release_tag does not match source version v${build_version}", ">", "&", "2", ";",
         "exit", "1", ";", "fi",
+    ],
+    # Anything carrying a channel suffix is a prerelease, decided once here and carried downstream,
+    # so the staging and publishing steps cannot disagree about what they are publishing.
+    ["prerelease=false"],
+    [
+        "if", "[", "$release_tag", "!=", "v${build_version}", "]", ";", "then", ";",
+        "prerelease=true", ";", "fi",
     ],
     [
         "if", "[", "$tag_commit", "!=", "$source_commit", "]", ";", "then", ";",
@@ -302,6 +313,7 @@ for required_source_command in (
     ],
     ["echo", "commit=$source_commit", ">>", "$GITHUB_OUTPUT"],
     ["echo", "version=$build_version", ">>", "$GITHUB_OUTPUT"],
+    ["echo", "prerelease=$prerelease", ">>", "$GITHUB_OUTPUT"],
 ):
     require_command(resolve_tokens, required_source_command, "exact-source resolver")
 
@@ -509,8 +521,14 @@ for forbidden_stage_mutation in ("upload", "delete-asset"):
 if not re.search(r"(?m)^        id: stage-release\s*$", release_stage):
     raise AssertionError("curated release staging must export draft publication state")
 for required_stage_tokens in (
-    ["release_notes=docs/release-notes/${POLARIS_PACKAGE_REF_NAME}.md"],
+    # A beta reads the notes of the release it precedes, so the channel suffix is stripped first.
+    ["notes_tag=${POLARIS_PACKAGE_REF_NAME%%-*}"],
+    ["release_notes=docs/release-notes/${notes_tag}.md"],
     ["set", "-euo", "pipefail"],
+    # The channel is carried into both release paths below. A rerun that finds the release already
+    # staged takes the edit path, and a beta that lost its flag there would publish as stable.
+    ["channel=()"],
+    ["channel=(--prerelease)"],
     [
         "if", "[", "!", "-s", "$release_notes", "]", ";", "then", ";",
         "echo", "Missing curated release notes: $release_notes", ">", "&", "2", ";",
@@ -518,12 +536,12 @@ for required_stage_tokens in (
     ],
     [
         "gh", "release", "create", "${POLARIS_PACKAGE_REF_NAME}",
-        "--draft", "--verify-tag", "--title", "${POLARIS_PACKAGE_REF_NAME}",
+        "--draft", "--verify-tag", "${channel[@]}", "--title", "${POLARIS_PACKAGE_REF_NAME}",
         "--notes-file", "$release_notes",
     ],
     [
         "gh", "release", "edit", "${POLARIS_PACKAGE_REF_NAME}",
-        "--verify-tag", "--draft=true", "--title", "${POLARIS_PACKAGE_REF_NAME}",
+        "--verify-tag", "--draft=true", "${channel[@]}", "--title", "${POLARIS_PACKAGE_REF_NAME}",
         "--notes-file", "$release_notes",
     ],
     ["published_notes=$(gh release view ${POLARIS_PACKAGE_REF_NAME} --json body --jq .body)"],
@@ -548,12 +566,12 @@ stage_release_mutations = [
 expected_stage_release_mutations = [
     [
         "release", "create", "${POLARIS_PACKAGE_REF_NAME}", "--draft",
-        "--verify-tag", "--title", "${POLARIS_PACKAGE_REF_NAME}",
+        "--verify-tag", "${channel[@]}", "--title", "${POLARIS_PACKAGE_REF_NAME}",
         "--notes-file", "$release_notes",
     ],
     [
         "release", "edit", "${POLARIS_PACKAGE_REF_NAME}", "--verify-tag",
-        "--draft=true", "--title", "${POLARIS_PACKAGE_REF_NAME}",
+        "--draft=true", "${channel[@]}", "--title", "${POLARIS_PACKAGE_REF_NAME}",
         "--notes-file", "$release_notes",
     ],
 ]
@@ -661,12 +679,24 @@ for partial_check in ("supported_count", "legacy_count"):
     if any(partial_check in token for token in release_verify_tokens):
         raise AssertionError("release verification must not accept a partial asset subset")
 release_publish = workflow_step(release_job, "Publish verified draft release")
+# A beta publishes without becoming the latest release, so a stable install and every download link
+# that resolves "latest" keep answering the last stable version. Both branches stay pinned here,
+# because a prerelease published as latest is the one mistake this whole channel exists to prevent.
 expected_release_publish = (
     "        if: steps.stage-release.outputs.publish_draft == 'true'\n"
     "        env:\n"
     "          GH_TOKEN: ${{ github.token }}\n"
     "          GH_REPO: ${{ github.repository }}\n"
-    '        run: gh release edit "${POLARIS_PACKAGE_REF_NAME}" --verify-tag --draft=false\n'
+    "          IS_PRERELEASE: ${{ needs.resolve-source.outputs.prerelease }}\n"
+    "        run: |\n"
+    "          set -euo pipefail\n"
+    "          # A beta is published without becoming the latest release, so every stable install and\n"
+    '          # every download link that resolves "latest" keeps answering the last stable version.\n'
+    '          if [ "$IS_PRERELEASE" = "true" ]; then\n'
+    '            gh release edit "${POLARIS_PACKAGE_REF_NAME}" --verify-tag --draft=false --prerelease --latest=false\n'
+    "          else\n"
+    '            gh release edit "${POLARIS_PACKAGE_REF_NAME}" --verify-tag --draft=false\n'
+    "          fi\n"
 )
 if release_publish.strip() != expected_release_publish.strip():
     raise AssertionError(

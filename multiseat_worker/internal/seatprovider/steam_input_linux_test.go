@@ -90,9 +90,28 @@ func steamConnect(t *testing.T, path string) *net.UnixConn {
 	t.Cleanup(func() { _ = c.Close() })
 	return c
 }
+
+// steamSocketDir is a directory for a broker socket, short enough for the broker to accept.
+//
+// An AF_UNIX address holds 108 bytes, and t.TempDir() names its directory after the test, so the
+// long-named tests here hand the broker a path it rejects as invalid configuration. That reads as a
+// broken broker rather than as a path the test built too long, and it is how this suite came to be
+// treated as a known local failure. The directory carries no test name and goes with the test.
+func steamSocketDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "polaris-steam-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		os.RemoveAll(dir)
+	})
+	return dir
+}
+
 func TestSteamInputIndependentSeatsNeutralizeOnDisconnectAndCancel(t *testing.T) {
 	var a, b steamTestSink
-	dir := t.TempDir()
+	dir := steamSocketDir(t)
 	first, err := startSteamInputBroker(context.Background(), filepath.Join(dir, "a"), uint32(os.Getuid()), a.put)
 	if err != nil {
 		t.Fatal(err)
@@ -136,7 +155,7 @@ func TestSteamInputIndependentSeatsNeutralizeOnDisconnectAndCancel(t *testing.T)
 func TestSteamInputBadPeerCannotLeaveHeldControls(t *testing.T) {
 	for _, oversized := range []bool{false, true} {
 		var sink steamTestSink
-		broker, err := startSteamInputBroker(context.Background(), filepath.Join(t.TempDir(), "s"), uint32(os.Getuid()), sink.put)
+		broker, err := startSteamInputBroker(context.Background(), filepath.Join(steamSocketDir(t), "s"), uint32(os.Getuid()), sink.put)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -162,7 +181,7 @@ func TestSteamInputBadPeerCannotLeaveHeldControls(t *testing.T) {
 	}
 }
 func TestSteamInputDoesNotRemoveReplacementSocket(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "s")
+	path := filepath.Join(steamSocketDir(t), "s")
 	broker, err := startSteamInputBroker(context.Background(), path, uint32(os.Getuid()), func(steamInputState) error { return nil })
 	if err != nil {
 		t.Fatal(err)
@@ -190,7 +209,7 @@ func TestSteamInputRejectsWrongUIDAndCompetingController(t *testing.T) {
 			if wrongUID {
 				uid++
 			}
-			broker, err := startSteamInputBroker(context.Background(), filepath.Join(t.TempDir(), "s"), uid, sink.put)
+			broker, err := startSteamInputBroker(context.Background(), filepath.Join(steamSocketDir(t), "s"), uid, sink.put)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -230,7 +249,7 @@ func TestSteamInputRejectsWrongUIDAndCompetingController(t *testing.T) {
 func TestSteamInputOutputFailureRetiresBrokerAndAttemptsNeutral(t *testing.T) {
 	var sink steamTestSink
 	failure := errors.New("device retired")
-	broker, err := startSteamInputBroker(context.Background(), filepath.Join(t.TempDir(), "s"), uint32(os.Getuid()),
+	broker, err := startSteamInputBroker(context.Background(), filepath.Join(steamSocketDir(t), "s"), uint32(os.Getuid()),
 		func(state steamInputState) error {
 			_ = sink.put(state)
 			if state.buttons != 0 {

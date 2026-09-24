@@ -35,7 +35,7 @@ anything it could not complete. It does not silently take privileges you did not
 > [!WARNING]
 > Only add `--enable-kms` when you actually need DRM/KMS capture:
 > `sudo -H polaris --setup-host --enable-kms` grants `cap_sys_admin`. Polaris works without it on the
-> default compositor and Headless Stream paths.
+> default compositor and Headless Stream paths. `--disable-kms` takes it back off.
 
 If you ran `--setup-host` on a version before v1.3.5, a copy of the udev rules may still sit in
 `/etc/udev/rules.d/60-polaris.rules` and override the packaged file. Host setup keeps it and warns

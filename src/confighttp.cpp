@@ -8231,7 +8231,7 @@ namespace confighttp {
   /**
    * @brief Create a virtual display from the web UI.
    *
-   * Accepts JSON body: { "width": 1920, "height": 1080, "fps": 60 }
+   * Accepts JSON body: { "width": 1920, "height": 1080, "fps": 60, "scale": 1 }
    * Returns the created display info or error.
    */
   void createVDisplay(resp_https_t response, req_https_t request) {
@@ -8251,6 +8251,9 @@ namespace confighttp {
 
     // Parse request body
     int width = 1920, height = 1080, fps = 60;
+    // Pixels per point, so this hook can make the same screen a device would ask for rather than
+    // only the one shape the UI used to be able to test.
+    double scale = 1.0;
     try {
       std::string body;
       auto ss = std::make_shared<std::stringstream>();
@@ -8261,12 +8264,16 @@ namespace confighttp {
         if (j.contains("width")) width = j["width"].get<int>();
         if (j.contains("height")) height = j["height"].get<int>();
         if (j.contains("fps")) fps = j["fps"].get<int>();
+        if (j.contains("scale") && j["scale"].is_number()) scale = j["scale"].get<double>();
       }
     } catch (...) {
       // Use defaults
     }
 
-    auto result = virtual_display::create(width, height, fps);
+    if (scale < 1.0 || scale > 4.0) {
+      scale = 1.0;
+    }
+    auto result = virtual_display::create(width, height, fps, scale);
     if (result.has_value()) {
       ui_vdisplay = result;
       output_tree["status"] = true;
@@ -8274,6 +8281,7 @@ namespace confighttp {
       output_tree["width"] = result->width;
       output_tree["height"] = result->height;
       output_tree["fps"] = result->fps;
+      output_tree["scale"] = result->scale;
       output_tree["backend"] = virtual_display::backend_name(result->backend);
     } else {
       output_tree["status"] = false;

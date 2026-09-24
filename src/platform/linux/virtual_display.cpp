@@ -18,6 +18,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <format>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
@@ -822,9 +823,19 @@ namespace virtual_display {
     return {"output."s + std::string {output} + ".mode." + kwin_mode_name(width, height, hz)};
   }
 
-  std::vector<std::string> kwin_placement_args(std::string_view output, int x) {
+  std::string kwin_scale_value(double scale) {
+    // std::format rather than a stream or to_string: both of those read the process locale, and a
+    // host started under one that writes 1,5 would hand kscreen-doctor an argument it rejects, on
+    // the one path that decides whether a desktop is readable.
+    const double usable = scale > 0.0 ? scale : 1.0;
+    return std::format("{:g}", usable);
+  }
+
+  std::vector<std::string> kwin_placement_args(std::string_view output, int x, double scale) {
     const auto prefix = "output."s + std::string {output};
-    return {prefix + ".scale.1", prefix + ".position." + std::to_string(x) + ",0"};
+    // Still set rather than inherited. KWin restores a stored layout for a recycled output, so a
+    // screen that says nothing about its scale can come back wearing the last one's.
+    return {prefix + ".scale." + kwin_scale_value(scale), prefix + ".position." + std::to_string(x) + ",0"};
   }
 
   std::vector<std::string> kwin_keep_positions_args(std::string_view output, const std::vector<kscreen_output_layout_t> &layout_before) {
@@ -989,8 +1000,9 @@ namespace virtual_display {
            output.refresh_hz > 0.0 && std::abs(output.refresh_hz - hz) <= 0.5;
   }
 
-  bool kwin_placement_matches(const kscreen_output_layout_t &output, int x) {
-    return output.enabled && std::abs(output.scale - 1.0) < 0.01 && output.x == x && output.y == 0;
+  bool kwin_placement_matches(const kscreen_output_layout_t &output, int x, double scale) {
+    const double expected = scale > 0.0 ? scale : 1.0;
+    return output.enabled && std::abs(output.scale - expected) < 0.01 && output.x == x && output.y == 0;
   }
 
   namespace {
@@ -2478,17 +2490,19 @@ namespace virtual_display {
       // goes just past them, measured on that same layout.
       const int x = kscreen_right_edge(layout_before, name);
       auto args = kwin_keep_positions_args(name, layout_before);
-      const auto placement = kwin_placement_args(name, x);
+      const auto placement = kwin_placement_args(name, x, display.scale);
       args.insert(args.end(), placement.begin(), placement.end());
       args.insert(args.end(), ranking.begin(), ranking.end());
       const int rc = run_kscreen(std::move(args));
       const auto placed = kscreen_layout_from_json(layout_json());
       output = find_output(placed, name);
-      if (rc != 0 || !output || !kwin_placement_matches(*output, x)) {
-        BOOST_LOG(warning) << "Virtual display: ["sv << name << "] could not be placed at scale 1 beside the other screens (rc="sv
-                           << rc << ')';
+      const auto scale_text = kwin_scale_value(display.scale);
+      if (rc != 0 || !output || !kwin_placement_matches(*output, x, display.scale)) {
+        BOOST_LOG(warning) << "Virtual display: ["sv << name << "] could not be placed at scale "sv << scale_text
+                           << " beside the other screens (rc="sv << rc << ')';
       } else {
-        BOOST_LOG(info) << "Virtual display: ["sv << name << "] placed at "sv << x << ",0, scale 1, ranked last"sv;
+        BOOST_LOG(info) << "Virtual display: ["sv << name << "] placed at "sv << x << ",0, scale "sv << scale_text
+                        << ", ranked last"sv;
       }
       if (placed && !kwin_positions_match(*placed, layout_before, name)) {
         BOOST_LOG(warning) << "Virtual display: the other screens did not go back where they were with ["sv << name
@@ -2500,7 +2514,7 @@ namespace virtual_display {
       }
     }
 
-    static std::optional<vdisplay_t> create(int width, int height, int fps) {
+    static std::optional<vdisplay_t> create(int width, int height, int fps, double scale) {
 #ifdef POLARIS_HAS_KWIN_VIRTUAL_OUTPUT
       // Read the layout before asking KWin: it can apply a stored layout that
       // ranks the new output first the moment it exists.
@@ -2542,6 +2556,7 @@ namespace virtual_display {
       display.width = width;
       display.height = height;
       display.fps = fps;
+      display.scale = scale > 0.0 ? scale : 1.0;
       display.active = true;
       display.backend = backend_e::KWIN_VIRTUAL_OUTPUT;
       // No recovery record, unlike the other backends: KWin removes the screen
@@ -2549,7 +2564,7 @@ namespace virtual_display {
       // clean up, and a record would only outlive the screen it describes.
 
       std::string error;
-      const auto created = kwin_virtual_output::create(request_name, width, height, error);
+      const auto created = kwin_virtual_output::create(request_name, width, height, display.scale, error);
       if (!created) {
         BOOST_LOG(warning) << "Virtual display: KWin screen ["sv << output_name << "] was not created: "sv << error;
         release_name(output_name);
@@ -2568,9 +2583,11 @@ namespace virtual_display {
       // a tap on the client landed wherever that point fell on the whole desk.
       input_routing::screen_added(output_name);
       BOOST_LOG(info) << "Virtual display: KWin screen created ["sv << output_name << "] "sv
-                      << width << "x"sv << height << "@"sv << fps << "Hz"sv;
+                      << width << "x"sv << height << "@"sv << fps << "Hz at scale "sv
+                      << kwin_scale_value(display.scale);
       return display;
 #else
+      (void) scale;
       BOOST_LOG(warning) << "Virtual display: this Polaris was built without KWin screencast support"sv;
       return std::nullopt;
 #endif
@@ -2631,7 +2648,8 @@ namespace virtual_display {
     // What the Doctor reads about the screens this process created.
     std::mutex doctor_mutex;
     std::optional<backend_e> last_created_backend;
-    std::map<std::string, double> scaled_screens;  ///< Live stream screens KWin runs at another scale
+    /// Live stream screens KWin runs at a scale nobody chose, as {name, {observed, asked for}}
+    std::map<std::string, std::pair<double, double>> scaled_screens;
 #ifdef POLARIS_TESTS
     std::optional<doctor_notes_t> doctor_notes_override;
 #endif
@@ -2670,14 +2688,80 @@ namespace virtual_display {
       if (!output) {
         return;
       }
+      const double asked = display.scale > 0.0 ? display.scale : 1.0;
       std::lock_guard lock {doctor_mutex};
-      if (std::abs(output->scale - 1.0) >= 0.01) {
-        scaled_screens[display.output_name] = output->scale;
+      // Against what this device asked for, not against 1. A screen deliberately made at scale 2 is
+      // the feature working, and reporting it as a fault would send someone to fix what they chose.
+      if (std::abs(output->scale - asked) >= 0.01) {
+        scaled_screens[display.output_name] = {output->scale, asked};
         BOOST_LOG(warning) << "Virtual display: KWin runs ["sv << display.output_name << "] at scale "sv << output->scale
-                           << ", from a layout it stored for that screen"sv;
+                           << " rather than the "sv << kwin_scale_value(asked) << " asked for"sv;
       } else {
         scaled_screens.erase(display.output_name);
       }
+    }
+
+    /**
+     * Give a screen the scale it was asked for, when another backend made it.
+     *
+     * A KWin screen takes its scale when Polaris places it. An EVDI screen is a DRM connector that
+     * KWin then adopts, and it adopts it at whatever its stored layout says: on the test host that
+     * was 1.35, which nobody chose and which is the difference between a desktop that can be read
+     * and one that cannot. Set on this host's terms through kscreen, the same tool that already
+     * places and ranks every screen Polaris makes.
+     */
+    void apply_stream_screen_scale(const vdisplay_t &display) {
+      if (display.scale <= 0.0 || display.backend == backend_e::KWIN_VIRTUAL_OUTPUT ||
+          display.output_name.empty()) {
+        return;  // Nothing asked for, or a screen that took its scale when it was placed.
+      }
+      if (display.backend == backend_e::KSCREEN_DOCTOR) {
+        // A borrowed connector is the owner's own monitor. Their scale is not ours to change, and
+        // Polaris puts every other setting on it back at teardown precisely because it is theirs.
+        BOOST_LOG(info) << "Virtual display: ["sv << display.output_name
+                        << "] is a borrowed screen, so it keeps the scale its owner set"sv;
+        return;
+      }
+      if (std::abs(display.scale - 1.0) < 0.01) {
+        return;  // Scale 1 is what a screen gets by saying nothing, which is every earlier release.
+      }
+      if (!plasma_session() || !kscreen::is_installed()) {
+        BOOST_LOG(warning) << "Virtual display: this session cannot set a screen's scale, so ["sv
+                           << display.output_name << "] is made at whatever the compositor chooses"sv;
+        return;
+      }
+
+      // kscreen can list a new connector a moment after it appears, as it can a new KWin output.
+      std::optional<kscreen_output_layout_t> output;
+      for (int attempt = 0; attempt < 10; ++attempt) {
+        if (attempt > 0) {
+          std::this_thread::sleep_for(100ms);
+        }
+        output = kwin_vo::find_output(kscreen_layout_from_json(kwin_vo::layout_json()), display.output_name);
+        if (output) {
+          break;
+        }
+      }
+      if (!output) {
+        BOOST_LOG(warning) << "Virtual display: kscreen-doctor does not list ["sv << display.output_name
+                           << "], so it keeps the scale KWin gave it"sv;
+        return;
+      }
+      if (std::abs(output->scale - display.scale) < 0.01) {
+        return;
+      }
+
+      const auto value = kwin_scale_value(display.scale);
+      const int rc = kwin_vo::run_kscreen({"output."s + display.output_name + ".scale." + value});
+      const auto after = kwin_vo::find_output(kscreen_layout_from_json(kwin_vo::layout_json()), display.output_name);
+      if (rc != 0 || !after || std::abs(after->scale - display.scale) >= 0.01) {
+        BOOST_LOG(warning) << "Virtual display: ["sv << display.output_name << "] did not take scale "sv << value
+                           << "; it runs at "sv << (after ? after->scale : output->scale) << " (rc="sv << rc << ')';
+        return;
+      }
+      BOOST_LOG(info) << "Virtual display: ["sv << display.output_name << "] set to scale "sv << value
+                      << ", so its desktop is "sv << static_cast<int>(display.width / display.scale + 0.5) << 'x'
+                      << static_cast<int>(display.height / display.scale + 0.5);
     }
 
     void forget_stream_screen(const vdisplay_t &display) {
@@ -2711,7 +2795,8 @@ namespace virtual_display {
       notes.last_backend = last_created_backend;
       if (!scaled_screens.empty()) {
         notes.scaled_screen = scaled_screens.begin()->first;
-        notes.scaled_screen_scale = scaled_screens.begin()->second;
+        notes.scaled_screen_scale = scaled_screens.begin()->second.first;
+        notes.scaled_screen_expected = scaled_screens.begin()->second.second;
       }
     }
     notes.input_routes = input_routes();
@@ -3056,7 +3141,7 @@ namespace virtual_display {
   }
 #endif
 
-  std::optional<vdisplay_t> create(int width, int height, int fps) {
+  std::optional<vdisplay_t> create(int width, int height, int fps, double scale) {
     std::lock_guard creation_lock {creation_mutex};
     const auto cleanup = cleanup_stale_unlocked();
     if (!cleanup.succeeded) {
@@ -3073,6 +3158,10 @@ namespace virtual_display {
       if (!display) {
         return std::nullopt;
       }
+      // The scale belongs to the screen that was asked for, not to the backend that happened to
+      // make it. A KWin screen took it at placement; the rest take it here.
+      display->scale = scale > 0.0 ? scale : 1.0;
+      apply_stream_screen_scale(*display);
       if (display->backend == backend_e::KWIN_VIRTUAL_OUTPUT) {
         // Nothing for recovery to do: KWin removes the screen with this
         // process's connection. An older Polaris would also refuse the whole
@@ -3102,7 +3191,7 @@ namespace virtual_display {
         return publish(kscreen::create(width, height, fps));
 
       case backend_e::KWIN_VIRTUAL_OUTPUT:
-        return publish(kwin_vo::create(width, height, fps));
+        return publish(kwin_vo::create(width, height, fps, scale));
 
       case backend_e::NONE:
       default:

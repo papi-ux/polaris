@@ -1440,7 +1440,11 @@ if release_notes.count("systemctl --user enable --now polaris") != 1:
 
 release_workflow = Path(".github/workflows/build.yml").read_text(encoding="utf-8")
 release_publication_facts = (
-    'release_notes="docs/release-notes/${POLARIS_PACKAGE_REF_NAME}.md"',
+    # A beta reuses the notes of the release it precedes, so the suffix is stripped before the lookup.
+    'notes_tag="${POLARIS_PACKAGE_REF_NAME%%-*}"',
+    'release_notes="docs/release-notes/${notes_tag}.md"',
+    'channel=(--prerelease)',
+    '--draft=false --prerelease --latest=false',
     'ref: ${{ needs.resolve-source.outputs.commit }}',
     'Revalidate release tag against packaged source',
     'Stage curated GitHub release',

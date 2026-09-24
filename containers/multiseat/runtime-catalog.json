@@ -2,16 +2,72 @@
   "schema": 2,
   "runtimes": [
     {
-      "id": "steam-default-75a164f68586e602",
+      "id": "heroic-default-a43e5b31fe721b9e",
+      "profile": "heroic",
+      "variant": "default",
+      "platform": "linux/amd64",
+      "media_contract": 1,
+      "uid": 1000,
+      "gid": 1000,
+      "source_revision": "05dd33732cd2f3adf56e55f34a78f4d8293ac791",
+      "registry_digest": "sha256:a43e5b31fe721b9e57241e6398fad20ec1d5bbf081035d1452fe7d63eca45b14",
+      "config_digest": "sha256:abf2d91772a6f96f43a9bbe61faeca84db04077ef10a67b8e4dff980da649b53",
+      "nvidia_driver": "",
+      "nvidia_minimum_driver": ""
+    },
+    {
+      "id": "heroic-nvidia-host-b391df9c571f772c",
+      "profile": "heroic",
+      "variant": "nvidia-host",
+      "platform": "linux/amd64",
+      "media_contract": 1,
+      "uid": 1000,
+      "gid": 1000,
+      "source_revision": "7c9147efa4e72811921d0196b1a366bdbb6a0a30",
+      "registry_digest": "sha256:b391df9c571f772cf1aa3cdb9c031655068d350c860908cf88b149afe01e9bd2",
+      "config_digest": "sha256:fff39992adfacabae8ad039fabbc7f5570014c667dd2bd91b685a321fa03c388",
+      "nvidia_driver": "",
+      "nvidia_minimum_driver": "570.00"
+    },
+    {
+      "id": "lutris-default-82814acba1163176",
+      "profile": "lutris",
+      "variant": "default",
+      "platform": "linux/amd64",
+      "media_contract": 1,
+      "uid": 1000,
+      "gid": 1000,
+      "source_revision": "05dd33732cd2f3adf56e55f34a78f4d8293ac791",
+      "registry_digest": "sha256:82814acba1163176fee6a317e6f9e5035dc62541132a8d4729c3f97f6436d92c",
+      "config_digest": "sha256:0174fae31f4695a7f7ffec1d2c038064d8c83337bfecbfb88ad468d409648246",
+      "nvidia_driver": "",
+      "nvidia_minimum_driver": ""
+    },
+    {
+      "id": "lutris-nvidia-host-f367d00ea36f123c",
+      "profile": "lutris",
+      "variant": "nvidia-host",
+      "platform": "linux/amd64",
+      "media_contract": 1,
+      "uid": 1000,
+      "gid": 1000,
+      "source_revision": "7c9147efa4e72811921d0196b1a366bdbb6a0a30",
+      "registry_digest": "sha256:f367d00ea36f123c67ebddee91a1859552f596589a80870e7e4d3fbe50ee6ee3",
+      "config_digest": "sha256:3aab5257bc1cfa54fa48b8b7a915ebd2353eb2ab71a3b38bdfce2936f8969a6d",
+      "nvidia_driver": "",
+      "nvidia_minimum_driver": "570.00"
+    },
+    {
+      "id": "steam-default-4be6fb6cb8076908",
       "profile": "steam",
       "variant": "default",
       "platform": "linux/amd64",
       "media_contract": 1,
       "uid": 1000,
       "gid": 1000,
-      "source_revision": "d89ac2e0bcd3e6bf9042081f8d04eada49faccff",
-      "registry_digest": "sha256:75a164f68586e602a960678200a57b2c834234820e3597826738872f89637b8d",
-      "config_digest": "sha256:9502180c1fc2ac9fbcb31d69097ef7a4b91087201a7ef399c5ea623111e75bff",
+      "source_revision": "05dd33732cd2f3adf56e55f34a78f4d8293ac791",
+      "registry_digest": "sha256:4be6fb6cb8076908bfe52c22b16b4b9e0658e07f3d49a7da9202dcbf50f37773",
+      "config_digest": "sha256:58e77b104351112986c1c0df4e60259a42411a5951d611ead26dd1520c217a91",
       "nvidia_driver": "",
       "nvidia_minimum_driver": ""
     },
@@ -42,6 +98,20 @@
       "config_digest": "sha256:5c57f0954f6df84825deeee9bd501580dc4dfa5fbfa7fcc5dcb4c753c97b6693",
       "nvidia_driver": "615.71.09",
       "nvidia_minimum_driver": ""
+    },
+    {
+      "id": "steam-nvidia-host-bad3c96492c6412c",
+      "profile": "steam",
+      "variant": "nvidia-host",
+      "platform": "linux/amd64",
+      "media_contract": 1,
+      "uid": 1000,
+      "gid": 1000,
+      "source_revision": "7c9147efa4e72811921d0196b1a366bdbb6a0a30",
+      "registry_digest": "sha256:bad3c96492c6412c222cd8ebfe1821368c98f91051824c72194245d21fd62611",
+      "config_digest": "sha256:8b2b330fc3480a261b82699fdbeee63efd3abc225f4783639a50c5a3af64af86",
+      "nvidia_driver": "",
+      "nvidia_minimum_driver": "570.00"
     }
   ]
 }

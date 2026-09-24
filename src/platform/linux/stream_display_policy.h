@@ -222,6 +222,21 @@ namespace stream_display_policy {
    */
   bool selection_session_overridable(std::string_view selection);
 
+  /**
+   * @brief Whether an app that mirrors the desktop should step aside for this selection.
+   *
+   * An entry with desktop-mirror semantics exists so that "Desktop" shows the real desktop rather
+   * than an empty private compositor, which is what a Private Stream, a GPU-native stream or a
+   * gamescope session with nothing launched into it would be. Two selections are not that: a host
+   * virtual display extends the live session onto a new screen, and a desktop takeover moves the
+   * live session onto one. Both still show the desktop, so both are worth honouring.
+   *
+   * Pure, and deliberately without probes or config reads: the same answer has to be reachable from
+   * the HTTP policy and from the launch resolver, and those two disagreeing is how a launch comes to
+   * promise one topology and deliver another.
+   */
+  bool desktop_mirror_yields_to_selection(std::string_view selection);
+
   std::string selection_unavailable_reason(std::string_view selection);
 
   /**
