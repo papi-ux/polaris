@@ -3043,6 +3043,10 @@ namespace video {
    *
    * The front context decides, which is the convention this thread already follows for the display
    * name and the config. For every other codec it returns exactly what the binding would have.
+   *
+   * The synchronous capture thread reads the bound encoder directly and is right to: the choice
+   * between the two threads is made by encoder_for_session as well, so a session on this codec is
+   * always on the parallel one and the synchronous thread never sees it.
    */
   platf::mem_type_e capture_device_type(const encoder_t &bound, const config_t &config) {
     const auto &session_encoder = encoder_for_session(config);
@@ -3058,6 +3062,19 @@ namespace video {
     const encoder_t &encoder
   ) {
     std::vector<capture_ctx_t> capture_ctxs;
+
+    // Every display this thread opens asks this, because a session that negotiated the compute codec
+    // needs a device type the bound encoder would never ask for. It is a call rather than a value
+    // because the front context outlives none of this: sessions arrive and leave, and a reinit asks
+    // again on behalf of whoever is at the front then.
+    //
+    // Six openings in here and all of them have to agree. One that reads the bound encoder instead
+    // hands back a display with no dmabuf offer behind it, and the frames go back to being copied
+    // through host memory for the rest of the session with nothing to say they are. That is what the
+    // two on the reinit path did until this was one name.
+    const auto session_device_type = [&]() {
+      return capture_device_type(encoder, capture_ctxs.front().config);
+    };
 
     auto fg = util::fail_guard([&]() {
       capture_ctx_queue->stop();
@@ -3093,8 +3110,7 @@ namespace video {
     };
 #endif
     if (!exact_display_name.empty()) {
-      disp = platf::display(capture_device_type(encoder, capture_ctxs.front().config),
-                            exact_display_name, capture_ctxs.front().config);
+      disp = platf::display(session_device_type(), exact_display_name, capture_ctxs.front().config);
     }
     if (!disp && !capture_fallback_allowed(exact_display_name)) {
       BOOST_LOG(error) << "Requested display ["sv << exact_display_name
@@ -3105,7 +3121,7 @@ namespace video {
       // Get all the monitor names now, rather than at boot, to
       // get the most up-to-date list available monitors
       refresh_displays(
-        encoder.platform_formats->dev_type,
+        session_device_type(),
         display_names,
         display_p,
         &capture_ctxs.front().config
@@ -3114,8 +3130,8 @@ namespace video {
         BOOST_LOG(error) << "Requested display is unavailable for initial capture setup"sv;
         return;
       }
-      disp = platf::display(capture_device_type(encoder, capture_ctxs.front().config),
-                            display_names[display_p], capture_ctxs.front().config);
+      disp = platf::display(session_device_type(), display_names[display_p],
+                            capture_ctxs.front().config);
       if (disp) {
         proc::proc.display_name = display_names[display_p];
       } else {
@@ -3357,7 +3373,7 @@ namespace video {
 #endif
                   reset_display(
                     disp,
-                    capture_device_type(encoder, capture_ctxs.front().config),
+                    session_device_type(),
                     exact_display_name,
                     capture_ctxs.front().config
                   );
@@ -3372,7 +3388,7 @@ namespace video {
 
               // Only an explicit switch or an unnamed legacy session may enumerate.
               refresh_displays(
-                encoder.platform_formats->dev_type,
+                session_device_type(),
                 display_names,
                 display_p,
                 &capture_ctxs.front().config
@@ -3401,7 +3417,12 @@ namespace video {
                   capture_ctxs.front().channel_data.capture_owner_tag()
                 };
 #endif
-                reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+                reset_display(
+                  disp,
+                  session_device_type(),
+                  display_names[display_p],
+                  capture_ctxs.front().config
+                );
               }
               if (disp) {
                 proc::proc.display_name = display_names[display_p];
