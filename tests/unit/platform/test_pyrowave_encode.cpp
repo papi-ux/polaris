@@ -12,6 +12,7 @@
 
   #include <algorithm>
   #include <cstring>
+  #include <memory>
 
 namespace {
 
@@ -84,6 +85,12 @@ namespace {
 
   constexpr uint32_t start_of_frame = 0;
   constexpr uint32_t chroma_420 = 0;
+  constexpr uint32_t chroma_444 = 1;
+
+  /// The shape every test but the chroma one wants, so they say what they are about instead.
+  std::unique_ptr<pyrowave_encode::session_t> make_session_420(int width, int height) {
+    return pyrowave_encode::make_session(width, height, pyrowave_encode::chroma_e::yuv420);
+  }
 
 }  // namespace
 
@@ -99,10 +106,12 @@ TEST(PyroWaveEncodeTests, AnOddExtentIsRefusedRatherThanRounded) {
   if (!pyrowave_encode::available()) {
     GTEST_SKIP() << "no Vulkan device this codec can use";
   }
-  // 4:2:0 has no half chroma sample. Zero and negative are the same question asked louder.
-  EXPECT_EQ(pyrowave_encode::make_session(0, 720), nullptr);
-  EXPECT_EQ(pyrowave_encode::make_session(1280, 0), nullptr);
-  EXPECT_EQ(pyrowave_encode::make_session(-2, -2), nullptr);
+  // Zero and negative are the same question asked louder, whichever chroma is asked for.
+  EXPECT_EQ(make_session_420(0, 720), nullptr);
+  EXPECT_EQ(make_session_420(1280, 0), nullptr);
+  EXPECT_EQ(make_session_420(-2, -2), nullptr);
+  EXPECT_EQ(pyrowave_encode::make_session(0, 720, pyrowave_encode::chroma_e::yuv444), nullptr);
+  EXPECT_EQ(pyrowave_encode::make_session(1280, 0, pyrowave_encode::chroma_e::yuv444), nullptr);
 }
 
 TEST(PyroWaveEncodeTests, AFrameArrivesAsOneBitstreamADecoderCanOpen) {
@@ -112,7 +121,7 @@ TEST(PyroWaveEncodeTests, AFrameArrivesAsOneBitstreamADecoderCanOpen) {
 
   constexpr int width = 1280;
   constexpr int height = 720;
-  auto session = pyrowave_encode::make_session(width, height);
+  auto session = make_session_420(width, height);
   ASSERT_NE(session, nullptr);
 
   const test_frame_t frame {width, height};
@@ -146,7 +155,7 @@ TEST(PyroWaveEncodeTests, EncodesTheBgraFrameCaptureActuallyHandsOver) {
 
   constexpr int width = 640;
   constexpr int height = 360;
-  auto session = pyrowave_encode::make_session(width, height);
+  auto session = make_session_420(width, height);
   ASSERT_NE(session, nullptr);
 
   // A padded stride, because capture rarely hands over rows packed to exactly four bytes a pixel
@@ -182,7 +191,7 @@ TEST(PyroWaveEncodeTests, ARefusedFrameLeavesNothingToRead) {
 
   constexpr int width = 320;
   constexpr int height = 240;
-  auto session = pyrowave_encode::make_session(width, height);
+  auto session = make_session_420(width, height);
   ASSERT_NE(session, nullptr);
 
   std::vector<uint8_t> bgra(static_cast<std::size_t>(width) * height * 4, 0x40);
@@ -217,7 +226,7 @@ TEST(PyroWaveEncodeTests, TheStreamKeepsItsOwnSizeWhateverCaptureHandsOver) {
   // feeding a tablet is the ordinary case, not the exception.
   constexpr int stream_width = 1280;
   constexpr int stream_height = 800;
-  auto session = pyrowave_encode::make_session(stream_width, stream_height);
+  auto session = make_session_420(stream_width, stream_height);
   ASSERT_NE(session, nullptr);
 
   struct {
@@ -260,7 +269,7 @@ TEST(PyroWaveEncodeTests, EveryFrameStandsAlone) {
 
   constexpr int width = 640;
   constexpr int height = 360;
-  auto session = pyrowave_encode::make_session(width, height);
+  auto session = make_session_420(width, height);
   ASSERT_NE(session, nullptr);
 
   // Intra-only means the second frame owes nothing to the first, so encoding the same input twice
@@ -287,7 +296,7 @@ TEST(PyroWaveEncodeTests, TheSequenceNumberMovesSoADecoderKnowsTheFrameChanged) 
 
   constexpr int width = 320;
   constexpr int height = 240;
-  auto session = pyrowave_encode::make_session(width, height);
+  auto session = make_session_420(width, height);
   ASSERT_NE(session, nullptr);
 
   // The decoder decides a new frame has begun by the sequence field in the header moving, and it
@@ -306,6 +315,51 @@ TEST(PyroWaveEncodeTests, TheSequenceNumberMovesSoADecoderKnowsTheFrameChanged) 
 
   EXPECT_NE(sequences[0], sequences[1]);
   EXPECT_NE(sequences[1], sequences[2]);
+}
+
+TEST(PyroWaveEncodeTests, ChromaIsCarriedIntoTheBitstreamAndCostsWhatItShould) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  // The decoder refuses a frame whose chroma does not match the one it was created with, and it
+  // reads that from the sequence header rather than being told, so what the encoder writes there is
+  // the whole of the agreement.
+  constexpr int width = 640;
+  constexpr int height = 360;
+  const test_frame_t frame {width, height};
+
+  auto narrow = pyrowave_encode::make_session(width, height, pyrowave_encode::chroma_e::yuv420);
+  ASSERT_NE(narrow, nullptr);
+  ASSERT_TRUE(narrow->encode(frame.y.data(), frame.u.data(), frame.v.data(), 512 * 1024));
+  const sequence_header_t narrow_header {narrow->bitstream()};
+  ASSERT_TRUE(narrow_header.present);
+  EXPECT_EQ(narrow_header.chroma_resolution, chroma_420);
+
+  // 4:4:4 wants a chroma plane per pixel rather than a quarter of one, so the caller has to hand
+  // over full sized planes. A test that passed the 4:2:0 frame would be reading past the end of it.
+  std::vector<uint8_t> u(static_cast<std::size_t>(width) * height);
+  std::vector<uint8_t> v(u.size());
+  for (int row = 0; row < height; ++row) {
+    for (int col = 0; col < width; ++col) {
+      const auto at = static_cast<std::size_t>(row) * width + col;
+      u[at] = static_cast<uint8_t>(7 * col + 3 * row);
+      v[at] = static_cast<uint8_t>(3 * col + 5 * row);
+    }
+  }
+
+  auto full = pyrowave_encode::make_session(width, height, pyrowave_encode::chroma_e::yuv444);
+  ASSERT_NE(full, nullptr);
+  ASSERT_TRUE(full->encode(frame.y.data(), u.data(), v.data(), 512 * 1024));
+  const sequence_header_t full_header {full->bitstream()};
+  ASSERT_TRUE(full_header.present);
+  EXPECT_EQ(full_header.chroma_resolution, chroma_444);
+
+  // And it carries three times the samples rather than one and a half, so at the same generous
+  // ceiling it has more to say. Not a fixed ratio, because that is rate control's business, but a
+  // frame that came back smaller would mean the extra chroma went nowhere.
+  EXPECT_GT(full->bitstream().size(), narrow->bitstream().size())
+    << "4:4:4 carried no more than 4:2:0, so the extra chroma was not encoded";
 }
 
 #endif  // POLARIS_BUILD_PYROWAVE

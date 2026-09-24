@@ -3993,7 +3993,8 @@ namespace video {
       // frame's sequence header, and a decoder handed a size it did not expect drops the frame with
       // a line about the dimensions and nothing about the picture. Capture gets scaled to fit inside
       // it instead, which is what every other encoder here does through its converter.
-      auto pyrowave_session = pyrowave_encode::make_session(config.width, config.height);
+      auto pyrowave_session = pyrowave_encode::make_session(config.width, config.height,
+                                                           pyrowave_encode::chroma_e::yuv420);
       if (!pyrowave_session) {
         invalidate_live_probe_reuse();
         return nullptr;

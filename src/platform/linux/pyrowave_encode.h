@@ -16,6 +16,26 @@
 namespace pyrowave_encode {
 
   /**
+   * @brief How much chroma a session carries.
+   *
+   * 4:2:0 halves it in both directions, which is what every hardware video codec does and what the
+   * eye notices least. 4:4:4 keeps all of it, which costs roughly twice the bitrate for the same
+   * quantiser and is the thing people actually ask this codec for: text, thin UI lines and
+   * saturated edges stop smearing.
+   */
+  enum class chroma_e {
+    yuv420,
+    yuv444,
+  };
+
+  /**
+   * @brief How far to shift a luma extent to get a chroma one. Zero for 4:4:4, one for 4:2:0.
+   */
+  inline int chroma_shift(chroma_e chroma) {
+    return chroma == chroma_e::yuv420 ? 1 : 0;
+  }
+
+  /**
    * @brief What a client has to recognise before this host will stream the codec to it.
    *
    * Three things a decoder cannot work out for itself, in one string. The codec revision, because
@@ -142,6 +162,6 @@ namespace pyrowave_encode {
    * @param width Frame width; rounded down to even, because 4:2:0 has no half chroma sample.
    * @param height Frame height, likewise.
    */
-  std::unique_ptr<session_t> make_session(int width, int height);
+  std::unique_ptr<session_t> make_session(int width, int height, chroma_e chroma);
 
 }  // namespace pyrowave_encode

@@ -62,10 +62,12 @@ namespace pyrowave_encode {
 
     class pyrowave_session_t: public session_t {
     public:
-      pyrowave_session_t(pyrowave_encoder encoder, int width, int height):
+      pyrowave_session_t(pyrowave_encoder encoder, int width, int height, chroma_e chroma):
           encoder {encoder},
           width {width},
-          height {height} {}
+          height {height},
+          chroma {chroma},
+          shift {chroma_shift(chroma)} {}
 
       ~pyrowave_session_t() override {
         if (scaler) {
@@ -106,10 +108,10 @@ namespace pyrowave_encode {
         const int src_stride[4] = {stride, 0, 0, 0};
         uint8_t *dst[4] = {
           planes[0].data() + static_cast<std::size_t>(offset_y) * width + offset_x,
-          planes[1].data() + static_cast<std::size_t>(offset_y / 2) * (width / 2) + offset_x / 2,
-          planes[2].data() + static_cast<std::size_t>(offset_y / 2) * (width / 2) + offset_x / 2,
+          planes[1].data() + static_cast<std::size_t>(offset_y >> shift) * (width >> shift) + (offset_x >> shift),
+          planes[2].data() + static_cast<std::size_t>(offset_y >> shift) * (width >> shift) + (offset_x >> shift),
           nullptr};
-        const int dst_stride[4] = {width, width / 2, width / 2, 0};
+        const int dst_stride[4] = {width, width >> shift, width >> shift, 0};
 
         const auto conversion_started = std::chrono::steady_clock::now();
         if (sws_scale(scaler, src, src_stride, 0, src_height, dst, dst_stride) != fit_height) {
@@ -196,7 +198,8 @@ namespace pyrowave_encode {
         av_dict_set_int(&options, "src_format", AV_PIX_FMT_BGRA, 0);
         av_dict_set_int(&options, "dstw", fit_width, 0);
         av_dict_set_int(&options, "dsth", fit_height, 0);
-        av_dict_set_int(&options, "dst_format", AV_PIX_FMT_YUV420P, 0);
+        av_dict_set_int(&options, "dst_format",
+                        chroma == chroma_e::yuv420 ? AV_PIX_FMT_YUV420P : AV_PIX_FMT_YUV444P, 0);
         av_dict_set_int(&options, "sws_flags", SWS_BILINEAR, 0);
         av_dict_set_int(&options, "threads", threads, 0);
 
@@ -237,8 +240,8 @@ namespace pyrowave_encode {
         BOOST_LOG(info) << "PyroWave: converting on "sv << threads << " threads"sv;
 
         planes[0].assign(static_cast<std::size_t>(width) * height, 0);
-        planes[1].assign(static_cast<std::size_t>(width / 2) * (height / 2), 128);
-        planes[2].assign(static_cast<std::size_t>(width / 2) * (height / 2), 128);
+        planes[1].assign(static_cast<std::size_t>(width >> shift) * (height >> shift), 128);
+        planes[2].assign(static_cast<std::size_t>(width >> shift) * (height >> shift), 128);
 
         source_width = src_width;
         source_height = src_height;
@@ -261,18 +264,19 @@ namespace pyrowave_encode {
         }
 
         pyrowave_cpu_buffer buffer = {};
-        buffer.format = PYROWAVE_CPU_BUFFER_FORMAT_YUV420P;
+        buffer.format = chroma == chroma_e::yuv420 ? PYROWAVE_CPU_BUFFER_FORMAT_YUV420P
+                                                   : PYROWAVE_CPU_BUFFER_FORMAT_YUV444P;
         buffer.width = width;
         buffer.height = height;
         buffer.data[0] = const_cast<uint8_t *>(y);
         buffer.data[1] = const_cast<uint8_t *>(u);
         buffer.data[2] = const_cast<uint8_t *>(v);
         buffer.row_stride_in_bytes[0] = static_cast<std::size_t>(width);
-        buffer.row_stride_in_bytes[1] = static_cast<std::size_t>(width / 2);
-        buffer.row_stride_in_bytes[2] = static_cast<std::size_t>(width / 2);
+        buffer.row_stride_in_bytes[1] = static_cast<std::size_t>(width >> shift);
+        buffer.row_stride_in_bytes[2] = static_cast<std::size_t>(width >> shift);
         buffer.plane_size_in_bytes[0] = buffer.row_stride_in_bytes[0] * static_cast<std::size_t>(height);
-        buffer.plane_size_in_bytes[1] = buffer.row_stride_in_bytes[1] * static_cast<std::size_t>(height / 2);
-        buffer.plane_size_in_bytes[2] = buffer.row_stride_in_bytes[2] * static_cast<std::size_t>(height / 2);
+        buffer.plane_size_in_bytes[1] = buffer.row_stride_in_bytes[1] * static_cast<std::size_t>(height >> shift);
+        buffer.plane_size_in_bytes[2] = buffer.row_stride_in_bytes[2] * static_cast<std::size_t>(height >> shift);
 
         budget = max_bytes;
         const pyrowave_rate_control rate_control = {max_bytes};
@@ -439,6 +443,8 @@ namespace pyrowave_encode {
       int fit_height = 0;
       int offset_x = 0;
       int offset_y = 0;
+      chroma_e chroma = chroma_e::yuv420;
+      int shift = 1;
       SwsContext *scaler = nullptr;
       double convert_ms_total = 0.0;
       double encode_ms_total = 0.0;
@@ -465,16 +471,18 @@ namespace pyrowave_encode {
     return shared_device() != nullptr;
   }
 
-  std::unique_ptr<session_t> make_session(int width, int height) {
+  std::unique_ptr<session_t> make_session(int width, int height, chroma_e chroma) {
     auto device = shared_device();
     if (!device) {
       return nullptr;
     }
 
-    // 4:2:0 has no half chroma sample, and the library refuses an odd extent rather than rounding
-    // one for us.
-    width &= ~1;
-    height &= ~1;
+    // Only 4:2:0 has half a chroma sample to lose, and the library refuses an odd extent rather
+    // than rounding one for us. 4:4:4 has a chroma sample per pixel and does not care.
+    if (chroma == chroma_e::yuv420) {
+      width &= ~1;
+      height &= ~1;
+    }
     if (width <= 0 || height <= 0) {
       return nullptr;
     }
@@ -483,7 +491,8 @@ namespace pyrowave_encode {
     info.device = device;
     info.width = width;
     info.height = height;
-    info.chroma = PYROWAVE_CHROMA_SUBSAMPLING_420;
+    info.chroma = chroma == chroma_e::yuv420 ? PYROWAVE_CHROMA_SUBSAMPLING_420
+                                             : PYROWAVE_CHROMA_SUBSAMPLING_444;
 
     pyrowave_encoder encoder = nullptr;
     const auto result = pyrowave_encoder_create(&info, &encoder);
@@ -493,7 +502,7 @@ namespace pyrowave_encode {
       return nullptr;
     }
 
-    return std::make_unique<pyrowave_session_t>(encoder, width, height);
+    return std::make_unique<pyrowave_session_t>(encoder, width, height, chroma);
   }
 
 }  // namespace pyrowave_encode
