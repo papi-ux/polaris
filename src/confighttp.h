@@ -18,6 +18,8 @@
 #include <nlohmann/json.hpp>
 
 // local includes
+#include "artwork_sweep.h"
+#include "process.h"
 #include "thread_safe.h"
 
 namespace stream_stats {
@@ -112,6 +114,23 @@ namespace confighttp {
    * including a body over 1024 bytes, is refused.
    */
   std::optional<std::string> decode_app_artwork_request(std::string_view body);
+
+  /**
+   * @brief The games a cover sweep should ask a provider about.
+   *
+   * An entry qualifies when it has no cover, is not one of the entries Polaris ships artwork for, and
+   * has not had automatic artwork lookup turned off. That last one is a choice somebody made with
+   * Remove artwork, and a sweep that quietly undid it would be worse than no sweep.
+   *
+   * "No cover" means validation answers with the generic box art, which is what it does both for an
+   * empty path and for a path it cannot use. `hydrated` is the app list as the console reads it, so a
+   * Lutris entry whose image is filled in at read time counts as having one.
+   */
+  std::vector<artwork_sweep::candidate_t> games_without_a_cover(
+    const std::filesystem::path &appdata,
+    const nlohmann::json &hydrated,
+    const std::vector<proc::ctx_t> &apps
+  );
 
   /**
    * @brief Store a cover picked from a search's preview as `<uuid>.<ext>` under coverdir.

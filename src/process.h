@@ -701,6 +701,18 @@ namespace proc {
   bool is_stock_low_res_desktop(const ctx_t &app);
 
   /**
+   * @brief Whether an entry has no artwork to look up, and uses what Polaris ships instead.
+   *
+   * The four entries Polaris generates, anything that mirrors the desktop, and anything that launches
+   * nothing. No provider has artwork for any of them, and looking one up by its title finds a
+   * coincidental game rather than nothing: a search for Low Res Desktop finds Low Magic Age.
+   *
+   * The desktop-mirror flag alone misses upgraded hosts, whose apps.json predates it, so an entry that
+   * launches nothing counts as well.
+   */
+  bool uses_bundled_utility_artwork(const ctx_t &app);
+
+  /**
    * @brief Whether an entry is one particular game rather than a launcher, an emulator or the desktop.
    *
    * A Steam app id, a ROM file, or the id a Heroic or Lutris import carries for its game says which

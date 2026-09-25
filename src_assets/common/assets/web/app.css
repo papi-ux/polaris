@@ -1442,6 +1442,7 @@ textarea {
     max-width: none;
   }
 
+  .operator-console .library-cover-sweep-summary,
   .operator-console .library-import-staged-summary,
   .settings-command-bar.sticky {
     position: static;
@@ -1643,6 +1644,7 @@ textarea {
   @apply text-base font-semibold text-silver;
 }
 
+.operator-console .library-cover-sweep-summary,
 .operator-console .library-import-staged-summary {
   @apply sticky top-4 z-20 flex flex-col gap-4 rounded-xl border border-ice/25 bg-deep/95 px-4 py-4 shadow-[0_18px_50px_rgba(0,0,0,0.28)] backdrop-blur lg:flex-row lg:items-center lg:justify-between;
 }
@@ -1664,14 +1666,17 @@ textarea {
   @apply lg:mt-0 lg:justify-end;
 }
 
+.operator-console .library-cover-sweep-drawer,
 .operator-console .library-import-review-drawer {
   @apply rounded-xl border border-storm/20 bg-deep/45 p-4;
 }
 
+.operator-console .library-cover-sweep-list,
 .operator-console .library-import-review-list {
   @apply mt-4 grid gap-2;
 }
 
+.operator-console .library-cover-sweep-row,
 .operator-console .library-import-review-row {
   @apply flex min-w-0 flex-col gap-3 rounded-lg border border-storm/15 bg-void/35 px-3 py-3 sm:flex-row sm:items-center sm:justify-between;
 }
