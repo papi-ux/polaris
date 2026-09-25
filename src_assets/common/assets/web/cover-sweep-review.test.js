@@ -149,7 +149,7 @@ describe('useCoverSweep', () => {
     await sweep.load()
 
     const saved = []
-    await sweep.apply((uuid, path) => {
+    await sweep.apply((uuid) => {
       saved.push(uuid)
       return true
     })
