@@ -15,6 +15,19 @@ like any change to the published list, makes Polaris rebuild it, which can inter
 session. Open an entry to edit it or to export its `.art` launcher file for front ends that want a
 direct launch.
 
+**Find covers** looks up every published game that has no cover, in one pass, and proposes a match
+for each. It proposes and stores nothing: **Review proposals** lists what it found, one row per game,
+with the title the provider matched and how close that is to the entry's own name. Open a row to see
+that game's posters and pick a different one. Untick anything that looks wrong, then **Apply** stores
+only what is left ticked.
+
+A title search is right most of the time rather than always, which is why the review exists: three
+hundred imported ROMs would otherwise become three hundred guesses to undo by hand. Games Polaris ships
+artwork for are never looked up, because a search for one of those finds a coincidental game rather than
+nothing, and a game you used **Remove artwork** on is left alone until you use **Find artwork again**.
+The run needs the SteamGridDB API key from Settings, General, and says so when the key is missing. It
+paces itself and waits out a provider that asks it to slow down, so a large library takes a few minutes.
+
 **Import games** scans Steam, Lutris, Heroic and the ROM folders you register for installed
 titles, keeps entries that are already published visible so you can spot what is new, and lets you stage several candidates
 before one import pass. Imported Steam titles keep their app id and take the Linux launch mode
