@@ -267,6 +267,7 @@ set(TEST_HTTP_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_setup_reports.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_app_artwork_routes.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_artwork_sweep.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_sweep_predicate.cpp
 )
 
 set(TEST_NETWORK_SOURCES

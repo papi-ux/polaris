@@ -6590,50 +6590,61 @@ namespace confighttp {
       return answer;
     }
 
-    /**
-     * @brief The games a run should ask about.
-     *
-     * No cover, not an entry Polaris ships artwork for, and automatic lookup not turned off. That
-     * last one matters: Remove artwork is a choice a player made, and a sweep that undid it would be
-     * worse than no sweep.
-     */
-    std::vector<artwork_sweep::candidate_t> games_without_a_cover(
-      const std::filesystem::path &appdata,
-      const nlohmann::json &hydrated
-    ) {
-      // image-path as the console sees it, because a Lutris entry's is filled in when the list is
-      // read and that entry does have art to show.
-      std::map<std::string, std::string, std::less<>> configured;
-      if (hydrated.is_object() && hydrated.contains("apps") && hydrated["apps"].is_array()) {
-        for (const auto &app : hydrated["apps"]) {
-          if (!app.is_object()) continue;
-          auto uuid = app.value("uuid", std::string {});
-          if (uuid.empty()) continue;
-          configured.insert_or_assign(std::move(uuid), app.value("image-path", std::string {}));
-        }
-      }
+  }  // namespace
 
-      // Validation answers with the generic box art for a path it cannot use, so that answer is what
-      // "this entry has no cover" looks like from out here.
-      const auto placeholder = proc::validate_app_image_path({});
-      std::vector<artwork_sweep::candidate_t> games;
-      for (const auto &app : proc::proc.get_apps()) {
-        if (!game_artwork::is_valid_uuid(app.uuid)) continue;
-        if (proc::uses_bundled_utility_artwork(app)) continue;
-        if (!game_artwork::automatic_artwork_lookup_enabled(appdata, app.uuid)) continue;
-        if (boost::trim_copy(app.name).empty()) continue;
-        const auto found = configured.find(app.uuid);
-        const auto image = found == configured.end() ? app.image_path : found->second;
-        if (!image.empty() && proc::validate_app_image_path(image) != placeholder) continue;
-        games.push_back(artwork_sweep::candidate_t {app.uuid, app.name});
+  std::vector<artwork_sweep::candidate_t> games_without_a_cover(
+    const std::filesystem::path &appdata,
+    const nlohmann::json &hydrated,
+    const std::vector<proc::ctx_t> &apps
+  ) {
+    // image-path as the console sees it, because a Lutris entry's is filled in when the list is read
+    // and that entry does have art to show.
+    std::map<std::string, std::string, std::less<>> configured;
+    if (hydrated.is_object() && hydrated.contains("apps") && hydrated["apps"].is_array()) {
+      for (const auto &app : hydrated["apps"]) {
+        if (!app.is_object()) continue;
+        auto uuid = app.value("uuid", std::string {});
+        if (uuid.empty()) continue;
+        configured.insert_or_assign(std::move(uuid), app.value("image-path", std::string {}));
       }
-      return games;
     }
+
+    // Validation answers with the generic box art for a path it cannot use, so that answer is what
+    // "this entry has no cover" looks like from out here.
+    const auto placeholder = proc::validate_app_image_path({});
+    std::vector<artwork_sweep::candidate_t> games;
+    for (const auto &app : apps) {
+      if (!game_artwork::is_valid_uuid(app.uuid)) continue;
+      if (proc::uses_bundled_utility_artwork(app)) continue;
+      if (!game_artwork::automatic_artwork_lookup_enabled(appdata, app.uuid)) continue;
+      if (boost::trim_copy(app.name).empty()) continue;
+      const auto found = configured.find(app.uuid);
+      const auto image = found == configured.end() ? app.image_path : found->second;
+      if (!image.empty() && proc::validate_app_image_path(image) != placeholder) continue;
+      games.push_back(artwork_sweep::candidate_t {app.uuid, app.name});
+    }
+    return games;
+  }
+
+  namespace {
+
+#ifdef POLARIS_TESTS
+    /// Set by a test to answer without a network. Empty in a real host.
+    artwork_sweep::lookup_fn_t &cover_sweep_lookup_override() {
+      static artwork_sweep::lookup_fn_t lookup;
+      return lookup;
+    }
+#endif
 
     /// The one run this host has at a time.
     artwork_sweep::sweeper_t &cover_sweeper() {
       static artwork_sweep::sweeper_t sweeper {
         [](const artwork_sweep::candidate_t &game) {
+#ifdef POLARIS_TESTS
+          if (const auto &injected = cover_sweep_lookup_override(); injected) {
+            return injected(game);
+          }
+#endif
           // The key is read per game, so one added while a run is going starts working.
           return look_a_game_up(game, nvhttp::artwork_transport(config::steamgriddb_api_key()));
         },
@@ -6703,7 +6714,7 @@ namespace confighttp {
       return;
     }
 
-    auto games = games_without_a_cover(platf::appdata(), hydrated);
+    auto games = games_without_a_cover(platf::appdata(), hydrated, proc::proc.get_apps());
     const auto waiting = games.size();
     switch (cover_sweeper().start(std::move(games))) {
       case artwork_sweep::start_e::already_running:
@@ -10034,6 +10045,20 @@ namespace confighttp {
     std::string_view request_path
   ) {
     return getVerifiedClientCert(candidate, request_path) != nullptr;
+  }
+
+  void set_cover_sweep_lookup_for_tests(artwork_sweep::lookup_fn_t lookup) {
+    cover_sweep_lookup_override() = std::move(lookup);
+  }
+
+  bool wait_for_cover_sweep_for_tests(std::chrono::milliseconds timeout) {
+    return cover_sweeper().wait_for_idle(timeout);
+  }
+
+  void forget_cover_sweep_for_tests() {
+    cover_sweeper().cancel();
+    cover_sweeper().wait_for_idle(std::chrono::seconds {30});
+    cover_sweeper().clear();
   }
 #endif
 
