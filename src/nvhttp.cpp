@@ -2320,6 +2320,17 @@ namespace nvhttp {
       return stats.streaming && stats.codec == "pyrowave" ? "pyrowave" : video::active_encoder_name();
     }
 
+    std::string effective_session_encoder_name(const stream_stats::stats_t &stats,
+                                               const std::string &launch_encoder) {
+      if (!stats.encoder_backend.empty()) return stats.encoder_backend;
+      // Negotiating PyroWave supersedes the conventional startup encoder even
+      // before its first statistics sample arrives.
+      if (stats.streaming && stats.codec == "pyrowave") return "pyrowave";
+      if (!launch_encoder.empty()) return launch_encoder;
+      const auto active = session_encoder_name(stats);
+      return active.empty() ? "unknown" : active;
+    }
+
     nlohmann::json encoder_selection_json(const stream_stats::stats_t &stats) {
       if (stats.streaming && session_encoder_name(stats) == "pyrowave") {
         // Conventional encoder probing does not select the codec's own Vulkan
@@ -2724,6 +2735,11 @@ namespace nvhttp {
     return build_stream_policy_json(client, stats, health);
   }
 
+
+  std::string effective_session_encoder_name_for_tests(const stream_stats::stats_t &stats,
+                                                       const std::string &launch_encoder) {
+    return effective_session_encoder_name(stats, launch_encoder);
+  }
 
   nlohmann::json build_session_health_json_for_tests(const stream_stats::stats_t &stats,
                                                    bool current_virtual_display,
@@ -8426,9 +8442,8 @@ namespace nvhttp {
       const bool pyrowave_stream = stats.streaming && active_backend == "pyrowave";
       encoder["active_backend"] = active_backend.empty() ? "unknown" : active_backend;
       encoder["requested_backend"] = status_snapshot.requested_encoder_backend;
-      encoder["effective_backend"] = !stats.encoder_backend.empty() ? stats.encoder_backend :
-        !status_snapshot.effective_encoder_backend.empty() ? status_snapshot.effective_encoder_backend :
-        active_backend.empty() ? "unknown" : active_backend;
+      encoder["effective_backend"] = effective_session_encoder_name(
+        stats, status_snapshot.effective_encoder_backend);
       encoder["session_override"] = status_snapshot.encoder_backend_explicit;
       encoder["fallback_allowed"] = !pyrowave_stream && encoder_backend_fallback_allowed(
         status_snapshot.requested_encoder_backend,

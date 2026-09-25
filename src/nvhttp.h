@@ -601,6 +601,8 @@ namespace nvhttp {
   nlohmann::json build_stream_policy_json_for_tests(const crypto::named_cert_t &client,
                                                     const stream_stats::stats_t &stats,
                                                     const nlohmann::json &health);
+  std::string effective_session_encoder_name_for_tests(const stream_stats::stats_t &stats,
+                                                       const std::string &launch_encoder);
   nlohmann::json build_session_health_json_for_tests(const stream_stats::stats_t &stats,
                                                    bool current_virtual_display,
                                                    const std::string &device_name,

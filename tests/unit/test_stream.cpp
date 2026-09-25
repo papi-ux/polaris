@@ -23,6 +23,8 @@ namespace stream {
 }
 
 namespace nvhttp {
+  std::string effective_session_encoder_name_for_tests(const stream_stats::stats_t &stats,
+                                                       const std::string &launch_encoder);
   nlohmann::json build_session_health_json_for_tests(
     const stream_stats::stats_t &stats,
     bool current_virtual_display,
@@ -459,4 +461,21 @@ TEST(NvhttpSessionHealthTests, PyrowaveReportsItsSessionEncoderWithoutNvencWarni
   EXPECT_EQ(health.at("encoder_selection").at("selected_encoder"), "pyrowave");
   EXPECT_EQ(health.at("encoder_selection").at("preferred_encoder"), "pyrowave");
   EXPECT_FALSE(health.at("encoder_selection").at("fallback_used").get<bool>());
+}
+
+TEST(NvhttpSessionHealthTests, EffectiveEncoderUsesNegotiatedPyrowaveBeforeFirstSample) {
+  auto stats = stable_cpu_copy_stats(90.0, 90.0);
+  stats.codec = "pyrowave";
+  stats.encoder_backend.clear();
+  EXPECT_EQ(nvhttp::effective_session_encoder_name_for_tests(stats, "nvenc"), "pyrowave");
+  stats.encoder_backend = "pyrowave";
+  EXPECT_EQ(nvhttp::effective_session_encoder_name_for_tests(stats, "nvenc"), "pyrowave");
+  stats.codec = "hevc";
+  stats.encoder_backend = "vaapi";
+  EXPECT_EQ(nvhttp::effective_session_encoder_name_for_tests(stats, "nvenc"), "vaapi");
+  stats.encoder_backend.clear();
+  EXPECT_EQ(nvhttp::effective_session_encoder_name_for_tests(stats, "nvenc"), "nvenc");
+  stats.codec = "pyrowave";
+  stats.streaming = false;
+  EXPECT_EQ(nvhttp::effective_session_encoder_name_for_tests(stats, "nvenc"), "nvenc");
 }
