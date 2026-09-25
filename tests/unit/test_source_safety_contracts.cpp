@@ -1241,11 +1241,11 @@ TEST(SourceSafetyContracts, AWatcherHoldsNoControllerOfItsOwn) {
   std::size_t allocs = 0;
   for (auto at = stream.find("input::alloc("); at != std::string::npos; at = stream.find("input::alloc(", at + 1)) {
     ++allocs;
-    EXPECT_EQ(stream.compare(at, 52, "input::alloc(session.mail, has_controllers(session))"), 0);
+    EXPECT_EQ(stream.compare(at, 52, "input::alloc(session.mail, has_controllers(session),"), 0);
   }
   EXPECT_EQ(allocs, 2U);
 
-  const auto alloc = input.find("std::shared_ptr<input_t> alloc(safe::mail_t mail, bool controllers) {");
+  const auto alloc = input.find("std::shared_ptr<input_t> alloc(safe::mail_t mail, bool controllers,");
   ASSERT_NE(alloc, std::string::npos);
   const auto guard = input.find("if (controllers) {\n      task_pool.push([input, adopted_preallocated_gamepad]()", alloc);
   const auto startup_pad = input.find("ensure_gamepad_allocated(input, 0, {}, \"session startup\")", alloc);

@@ -59,6 +59,8 @@
 #define REMOTE_INPUT_UUID "8CB5C136-DA67-4F99-B4A1-F9CD35005CF4"
 #define TERMINATE_APP_UUID "E16CBE1B-295D-4632-9A76-EC4180C857D3"
 
+namespace input { class retained_gamepad_t; }
+
 namespace proc {
   using file_t = util::safe_ptr_v2<FILE, int, fclose>;
 
@@ -915,6 +917,7 @@ namespace proc {
     std::string get_running_app_uuid();
     std::string get_session_token();
     std::string get_session_owner_unique_id();
+    std::shared_ptr<input::retained_gamepad_t> retained_gamepad_for_owner(const std::string &unique_id);
     std::string get_session_owner_device_name();
     bool is_session_owner(const std::string &unique_id);
     bool session_uses_virtual_display();
@@ -1077,6 +1080,7 @@ namespace proc {
     std::vector<cmd_t>::const_iterator _app_prep_it;
     std::vector<cmd_t>::const_iterator _app_prep_begin;
     std::shared_ptr<session_lifecycle_gate_t> _session_lifecycle_gate {std::make_shared<session_lifecycle_gate_t>()};
+    std::shared_ptr<input::retained_gamepad_t> _retained_gamepad;
     std::shared_ptr<session_lifecycle_sync_t> _session_lifecycle_sync {std::make_shared<session_lifecycle_sync_t>()};
     std::uint64_t _session_generation = 0;
     bool _client_session_report_recorded = false;

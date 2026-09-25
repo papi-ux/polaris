@@ -16,6 +16,7 @@
 
 namespace input {
   struct input_t;
+  class retained_gamepad_t;
 
   void print(void *input);
   void reset(std::shared_ptr<input_t> &input);
@@ -32,7 +33,8 @@ namespace input {
    *        game sees it at startup, which is earlier than the client's own arrival packet,
    *        so the only way to get the right pad is to remember the last one.
    */
-  void preallocate_gamepad(int client_controller_type = 0);
+  std::shared_ptr<retained_gamepad_t> preallocate_gamepad(
+    int client_controller_type = 0, const std::string &retained_owner = {});
 
   /** @brief Where a controller touch lands on the emulated pad's one touchpad. */
   struct controller_touch_point_t {
@@ -56,7 +58,8 @@ namespace input {
    *        cannot, and creating controller 0 for it put a second pad on the host that nobody
    *        held, which a couch co-op game counted as a player.
    */
-  std::shared_ptr<input_t> alloc(safe::mail_t mail, bool controllers = true);
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, bool controllers = true,
+    std::shared_ptr<retained_gamepad_t> retained = {}, const std::string &owner = {});
 
 #ifdef POLARIS_TESTS
   bool is_valid_input_packet_for_tests(std::span<const std::uint8_t> packet);

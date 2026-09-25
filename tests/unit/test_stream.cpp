@@ -34,7 +34,7 @@ namespace nvhttp {
 }
 
 namespace proc {
-  bool should_publish_stream_ended_after_terminate_for_tests(bool had_running_app, int active_sessions, std::string_view session_state);
+  bool should_publish_stream_ended_after_terminate_for_tests(bool had_running_app, int active_sessions, std::string_view session_state, bool cleanup_complete = true);
 
   nlohmann::json classify_host_pause_session_for_tests(
     const stream_stats::stats_t &stats,
@@ -390,6 +390,19 @@ TEST(ProcHostPauseClassificationTests, DroppedFramesAtTargetRemainHostRenderLimi
 
 TEST(ProcSessionLifecycleTests, TerminatedPausedAppPublishesStreamEndedWhenNoSessionsRemain) {
   EXPECT_TRUE(proc::should_publish_stream_ended_after_terminate_for_tests(true, 0, "paused"));
+}
+
+TEST(ProcSessionLifecycleTests, OwnerCancelPublishesOnlyAfterCleanupAndAllStreamsFinish) {
+  EXPECT_TRUE(proc::should_publish_stream_ended_after_terminate_for_tests(true, 0, "tearing_down"));
+  EXPECT_FALSE(proc::should_publish_stream_ended_after_terminate_for_tests(true, 1, "tearing_down"));
+  EXPECT_FALSE(proc::should_publish_stream_ended_after_terminate_for_tests(true, 0, "tearing_down", false));
+  EXPECT_FALSE(proc::should_publish_stream_ended_after_terminate_for_tests(true, 0, "paused", false));
+}
+
+TEST(ProcSessionLifecycleTests, RetriedCleanupCanFinishWithoutTheAppRecord) {
+  EXPECT_TRUE(proc::should_publish_stream_ended_after_terminate_for_tests(false, 0, "tearing_down"));
+  EXPECT_FALSE(proc::should_publish_stream_ended_after_terminate_for_tests(false, 0, "tearing_down", false));
+  EXPECT_FALSE(proc::should_publish_stream_ended_after_terminate_for_tests(false, 0, "paused"));
 }
 
 TEST(ProcSessionLifecycleTests, TerminatedAppDoesNotPublishStreamEndedWhileClientIsConnected) {
