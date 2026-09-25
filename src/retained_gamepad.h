@@ -21,7 +21,7 @@ namespace input {
         destroy_(std::move(destroy)) {}
 
     ~retained_gamepad_t() {
-      destroy_(id_);
+      if (!retired_) destroy_(id_);
     }
 
     retained_gamepad_t(const retained_gamepad_t &) = delete;
@@ -68,6 +68,9 @@ namespace input {
         retired_ = true;
         neutralize_(id_);
         active_ = 0;
+        // The lock has drained admitted native work. Stale tasks can keep the
+        // lease object, but cannot keep an inert player slot in the next app.
+        destroy_(id_);
       }
     }
 

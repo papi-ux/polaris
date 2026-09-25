@@ -32,6 +32,8 @@ namespace input {
    *        or 0 when nothing is known. The pad has to exist before the app starts so the
    *        game sees it at startup, which is earlier than the client's own arrival packet,
    *        so the only way to get the right pad is to remember the last one.
+   * @param retained_owner Authenticated app owner for an isolated private launch.
+   * @return An app-owned device lease when retained_owner is set and allocation succeeds.
    */
   std::shared_ptr<retained_gamepad_t> preallocate_gamepad(
     int client_controller_type = 0, const std::string &retained_owner = {});
@@ -57,6 +59,9 @@ namespace input {
    * @param controllers Whether the session may send controller input. A watch-only session
    *        cannot, and creating controller 0 for it put a second pad on the host that nobody
    *        held, which a couch co-op game counted as a player.
+   * @param retained Optional app-owned controller to reuse across reconnects.
+   * @param owner Authenticated connection identity, checked before claiming that controller.
+   * @return Input context, or null when an existing private controller lease cannot be claimed.
    */
   std::shared_ptr<input_t> alloc(safe::mail_t mail, bool controllers = true,
     std::shared_ptr<retained_gamepad_t> retained = {}, const std::string &owner = {});

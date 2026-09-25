@@ -386,7 +386,7 @@ TEST(RetainedGamepadTest, ResumeKeepsDeviceButRejectsWrongOwnerAndOverlappingCon
   EXPECT_EQ(destroyed, 1);
 }
 
-TEST(RetainedGamepadTest, AppTeardownRevokesAllInputBeforeLastQueuedTaskReleasesDevice) {
+TEST(RetainedGamepadTest, AppTeardownDrainsAndDestroysDeviceWhileStaleTasksRemainFenced) {
   int destroyed = 0, neutralized = 0;
   auto app = std::make_shared<input::retained_gamepad_t>(3, "owner",
     [&](int) { ++neutralized; }, [&](int) { ++destroyed; });
@@ -397,8 +397,10 @@ TEST(RetainedGamepadTest, AppTeardownRevokesAllInputBeforeLastQueuedTaskReleases
   EXPECT_EQ(neutralized, 1);
   EXPECT_FALSE(static_cast<bool>(old_task->access(lease)));
   EXPECT_EQ(old_task->acquire("owner"), 0U);
+  // Stale queued input must not strand an inert controller in the next launch.
+  EXPECT_EQ(destroyed, 1);
   app.reset();
-  EXPECT_EQ(destroyed, 0);
+  EXPECT_EQ(destroyed, 1);
   old_task->release(lease);
   old_task.reset();
   EXPECT_EQ(neutralized, 1);
@@ -406,35 +408,38 @@ TEST(RetainedGamepadTest, AppTeardownRevokesAllInputBeforeLastQueuedTaskReleases
 }
 
 TEST(RetainedGamepadTest, RevocationDrainsAdmittedInputBeforeAnotherLeaseCanWrite) {
-  std::atomic<bool> neutralized {false};
-  auto pad = std::make_shared<input::retained_gamepad_t>(1, "owner",
-    [&](int) { neutralized = true; }, [](int) {});
-  const auto lease = pad->acquire("owner");
-  std::promise<void> entered, finish;
-  auto finish_future = finish.get_future();
-  auto writer = std::async(std::launch::async, [&] {
-    auto access = pad->access(lease);
-    EXPECT_TRUE(static_cast<bool>(access));
-    entered.set_value();
-    finish_future.wait();
-    EXPECT_FALSE(neutralized.load());
-  });
-  entered.get_future().wait();
-  std::promise<void> revoke_entered;
-  auto revoker = std::async(std::launch::async, [&] {
-    revoke_entered.set_value();
-    pad->release(lease);
-  });
-  revoke_entered.get_future().wait();
-  EXPECT_EQ(revoker.wait_for(std::chrono::milliseconds(30)), std::future_status::timeout);
-  finish.set_value();
-  writer.get();
-  revoker.get();
-  EXPECT_TRUE(neutralized.load());
-  EXPECT_FALSE(static_cast<bool>(pad->access(lease)));
-  const auto resumed = pad->acquire("owner");
-  EXPECT_NE(resumed, 0U);
-  EXPECT_TRUE(static_cast<bool>(pad->access(resumed)));
+  for (bool app_ended : {false, true}) {
+    std::atomic<bool> neutralized {false};
+    auto pad = std::make_shared<input::retained_gamepad_t>(1, "owner",
+      [&](int) { neutralized = true; }, [](int) {});
+    const auto lease = pad->acquire("owner");
+    std::promise<void> entered, finish;
+    auto finish_future = finish.get_future();
+    auto writer = std::async(std::launch::async, [&] {
+      auto access = pad->access(lease);
+      EXPECT_TRUE(static_cast<bool>(access));
+      entered.set_value();
+      finish_future.wait();
+      EXPECT_FALSE(neutralized.load());
+    });
+    entered.get_future().wait();
+    std::promise<void> revoke_entered;
+    auto revoker = std::async(std::launch::async, [&] {
+      revoke_entered.set_value();
+      if (app_ended) pad->retire();
+      else pad->release(lease);
+    });
+    revoke_entered.get_future().wait();
+    EXPECT_EQ(revoker.wait_for(std::chrono::milliseconds(30)), std::future_status::timeout);
+    finish.set_value();
+    writer.get();
+    revoker.get();
+    EXPECT_TRUE(neutralized.load());
+    EXPECT_FALSE(static_cast<bool>(pad->access(lease)));
+    const auto resumed = pad->acquire("owner");
+    EXPECT_EQ(resumed != 0, !app_ended);
+    EXPECT_EQ(static_cast<bool>(pad->access(resumed)), !app_ended);
+  }
 }
 
 TEST(RetainedGamepadTest, RetiredAppCannotBeClaimedEvenWithoutAnActiveStream) {

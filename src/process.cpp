@@ -9416,7 +9416,9 @@ namespace proc {
     if (has_launch_commands) {
       _retained_gamepad = input::preallocate_gamepad(
         launch_session ? launch_session->controller_type : 0,
-        should_apply_headless_gamepad_isolation() && launch_session ?
+        // A failed windowed probe may still fall back to an isolated headless
+        // launch, so retain the pad before either runtime is started.
+        use_cage_compositor_for_session && requested_headless_for_session && launch_session ?
           launch_session->unique_id : std::string {});
     }
 
