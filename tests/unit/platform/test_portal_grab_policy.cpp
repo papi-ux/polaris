@@ -904,6 +904,23 @@ TEST(PipeWireCapturePolicyTests, DmaBufEligibilityRequiresSupportedEncoderAndExp
   mismatched.encoder_render_node = "/dev/dri/renderD129";
   EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(mismatched));
 
+  // The compute codec, beside CUDA rather than behind the VAAPI opt-in, because it imports into a
+  // device Polaris owns rather than through a shared FFmpeg one. Everything else still applies to it:
+  // the same render node, the driver saying it can import, and an operator able to force it off.
+  auto pyrowave = eligible;
+  pyrowave.mem_type = platf::mem_type_e::vulkan_pyrowave;
+  EXPECT_TRUE(pipewire_capture::may_offer_dmabuf(pyrowave));
+  EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(pyrowave, pipewire_capture::dmabuf_override_e::force_cpu));
+
+  auto pyrowave_without_import = pyrowave;
+  pyrowave_without_import.encoder_import_supported = false;
+  EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(pyrowave_without_import))
+    << "a GPU whose driver cannot import a dmabuf must not be offered one";
+
+  auto pyrowave_mismatched = pyrowave;
+  pyrowave_mismatched.encoder_render_node = "/dev/dri/renderD129";
+  EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(pyrowave_mismatched));
+
   auto system_memory = eligible;
   system_memory.mem_type = platf::mem_type_e::system;
   EXPECT_FALSE(pipewire_capture::may_offer_dmabuf(system_memory));
@@ -1399,4 +1416,70 @@ TEST(PipeWireLiveProducerTests, NegotiatesAndPacesAnIsolatedSyntheticProducer) {
   capture->stop();
   EXPECT_EQ(capture->wait_for_frame(std::chrono::seconds(1)), pipewire_capture::wait_result_e::reinit);
   capture->shutdown();
+}
+
+/**
+ * The top up exists for a guess and has to stay out of an answer.
+ *
+ * Most encoders get this list from an EGL query that can leave the ten bit format out, and gamescope
+ * only ever allocates linear, so an HDR stream needs linear xBGR_210LE on offer or it negotiates
+ * eight bit. Offering a layout a producer cannot make costs nothing, because an offer is not a
+ * promise and the producer picks.
+ *
+ * The compute codec's list is different in kind: it asked its own device which modifiers it can
+ * import. There, an unasked layout at the head of the list is the one the producer takes first, and
+ * every frame then fails to import with no host copy to fall back on, which ends the session and
+ * starts another that fails the same way.
+ */
+TEST(PortalDmabufOfferTests, HdrTopUpFillsAGuessedList) {
+  std::vector<pipewire_capture::dmabuf_format_modifier_t> formats {
+    {.spa_format = SPA_VIDEO_FORMAT_BGRx, .drm_fourcc = DRM_FORMAT_XRGB8888, .modifier = DRM_FORMAT_MOD_LINEAR},
+  };
+
+  pipewire_capture::offer_hdr_linear_ten_bit(formats, false);
+
+  ASSERT_EQ(formats.size(), 2u);
+  EXPECT_EQ(formats.front().spa_format, static_cast<std::uint32_t>(SPA_VIDEO_FORMAT_xBGR_210LE))
+    << "an HDR stream has nothing ten bit to negotiate";
+  EXPECT_EQ(formats.front().modifier, DRM_FORMAT_MOD_LINEAR);
+  EXPECT_EQ(formats.front().drm_fourcc, static_cast<std::uint32_t>(DRM_FORMAT_XBGR2101010));
+}
+
+TEST(PortalDmabufOfferTests, HdrTopUpDoesNotDuplicateWhatIsAlreadyOffered) {
+  std::vector<pipewire_capture::dmabuf_format_modifier_t> formats {
+    {.spa_format = SPA_VIDEO_FORMAT_xBGR_210LE, .drm_fourcc = DRM_FORMAT_XBGR2101010, .modifier = DRM_FORMAT_MOD_LINEAR},
+  };
+
+  pipewire_capture::offer_hdr_linear_ten_bit(formats, false);
+
+  EXPECT_EQ(formats.size(), 1u);
+}
+
+TEST(PortalDmabufOfferTests, HdrTopUpLeavesAValidatedListAlone) {
+  // What the query answers on a device that can import ten bit, but not laid out linearly.
+  const std::vector<pipewire_capture::dmabuf_format_modifier_t> asked {
+    {.spa_format = SPA_VIDEO_FORMAT_xBGR_210LE, .drm_fourcc = DRM_FORMAT_XBGR2101010, .modifier = 0x0300000000625a02ULL},
+  };
+  auto formats = asked;
+
+  pipewire_capture::offer_hdr_linear_ten_bit(formats, true);
+
+  ASSERT_EQ(formats.size(), asked.size())
+    << "a layout the device was never asked about went to the head of the offer, and every frame "
+       "taking it fails to import";
+  EXPECT_EQ(formats.front().modifier, asked.front().modifier);
+}
+
+TEST(PortalDmabufOfferTests, HdrTopUpAddsNothingToAValidatedListThatRefusedTenBitEntirely) {
+  // A device that can import eight bit and nothing else. The right answer is an empty ten bit offer,
+  // which sends the stream down the shared memory path, and not a linear entry that would be taken
+  // and then fail.
+  std::vector<pipewire_capture::dmabuf_format_modifier_t> formats {
+    {.spa_format = SPA_VIDEO_FORMAT_BGRx, .drm_fourcc = DRM_FORMAT_XRGB8888, .modifier = DRM_FORMAT_MOD_LINEAR},
+  };
+
+  pipewire_capture::offer_hdr_linear_ten_bit(formats, true);
+
+  ASSERT_EQ(formats.size(), 1u);
+  EXPECT_EQ(formats.front().spa_format, static_cast<std::uint32_t>(SPA_VIDEO_FORMAT_BGRx));
 }

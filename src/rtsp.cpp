@@ -39,6 +39,9 @@ extern "C" {
 #include "stream.h"
 #include "sync.h"
 #include "video.h"
+#ifdef POLARIS_BUILD_PYROWAVE
+  #include "src/platform/linux/pyrowave_encode.h"
+#endif
 
 #ifdef __linux__
   #include "platform/linux/multiseat_moonlight_runtime.h"
@@ -1447,10 +1450,31 @@ namespace rtsp_stream {
     if (!worker_owned && video::active_av1_mode != 1) {
       ss << "a=rtpmap:98 AV1/90000"sv << std::endl;
     }
-    if (!worker_owned && video::pyrowave_enabled()) {
-      ss << "a=rtpmap:99 PYROWAVE/90000\r\n";
-      ss << "a=fmtp:99 " << video::PYROWAVE_BITSTREAM << "\r\n";
+
+#ifdef POLARIS_BUILD_PYROWAVE
+    // The line a client sniffs for to learn this host can do it, in the same shape as AV1's. A
+    // Moonlight client reads an rtpmap it has no name for and ignores it, so advertising costs
+    // nothing, and a client that does know the name still has to ask before it gets it.
+    //
+    // Only when a device here can actually run the compute shaders: there is no software fallback
+    // for this codec, so a host that offers it and then cannot is a stream that fails rather than
+    // one that degrades.
+    if (!worker_owned && pyrowave_encode::available()) {
+      ss << "a=rtpmap:99 PYROWAVE/90000"sv << std::endl;
+      // The codec revision and the colourimetry, which a decoder cannot infer and must match. A
+      // client that does not know one of these strings is expected not to ask for the codec at all.
+      //
+      // A list, space separated, because there is one token per colourimetry and a host that can do
+      // both offers both. A client looks for its own token as a whole element: a substring search
+      // would let a "-v1" client accept a "-v10" host, and matching the whole value would make
+      // offering a second token break every client that only knows the first.
+      ss << "a=fmtp:99 "sv << pyrowave_encode::profile_token;
+      if (pyrowave_encode::hdr_available()) {
+        ss << ' ' << pyrowave_encode::hdr_profile_token;
+      }
+      ss << std::endl;
     }
+#endif
 
     if (!session.surround_params.empty()) {
       // If we have our own surround parameters, advertise them twice first
@@ -1669,22 +1693,6 @@ namespace rtsp_stream {
       config.monitor.chromaSamplingType = util::from_view(args.at("x-ss-video[0].chromaSamplingType"sv));
       config.monitor.enableIntraRefresh = util::from_view(args.at("x-ss-video[0].intraRefresh"sv));
 
-      if (config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE &&
-          (!video::pyrowave_enabled() || session.worker_connection_requirement()->load() ||
-           (args.contains("x-polaris-pyrowave"sv) && args.at("x-polaris-pyrowave"sv) != video::PYROWAVE_BITSTREAM) ||
-           config.monitor.dynamicRange != 0 || config.monitor.chromaSamplingType != 0 ||
-           config.monitor.encoderCscMode != 3 || config.packetsize < 992 ||
-           config.monitor.width < 16 || config.monitor.height < 16 ||
-           config.monitor.width > 4096 || config.monitor.height > 4096 ||
-           config.monitor.width % 2 || config.monitor.height % 2)) {
-        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
-        return;
-      }
-      if (config.monitor.videoFormat < 0 || config.monitor.videoFormat > video::VIDEO_FORMAT_PYROWAVE) {
-        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
-        return;
-      }
-
       // A watcher decodes the owner's stream as it is, so its codec stays pinned for the check below.
       if (session.preferred_codec && !session.watch_only) {
         const auto client_requested_codec = codec_name_for_video_format(config.monitor.videoFormat);
@@ -1816,6 +1824,24 @@ namespace rtsp_stream {
 
       respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
       return;
+    }
+
+    if (config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE) {
+      bool can_pyrowave = false;
+      bool can_pyrowave_hdr = false;
+#ifdef POLARIS_BUILD_PYROWAVE
+      can_pyrowave = pyrowave_encode::available();
+      can_pyrowave_hdr = pyrowave_encode::hdr_available();
+#endif
+      // Every judgement this request needs that does not touch a display, in one pure function so it
+      // can be tested without a client. See the note above about not probing the runtime from here.
+      if (const auto refusal = video::pyrowave_announce_refusal(config.monitor, can_pyrowave,
+                                                               can_pyrowave_hdr)) {
+        BOOST_LOG(warning) << *refusal;
+
+        respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+        return;
+      }
     }
 
     if (config.monitor.videoFormat == 2 && video::active_av1_mode == 1) {

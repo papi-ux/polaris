@@ -135,6 +135,27 @@ namespace pipewire_capture {
     dmabuf_override_e override = dmabuf_override_e::default_safe
   );
   std::vector<dmabuf_format_modifier_t> task1_packed_dmabuf_formats(std::vector<std::uint64_t> modifiers);
+  /**
+   * @brief Give an HDR stream a ten bit layout to agree on, without inventing one.
+   *
+   * gamescope only ever allocates linear buffers on its PipeWire node, and the EGL query that builds
+   * this list for most encoders can leave the ten bit format out of it, so an HDR stream would find
+   * nothing to negotiate and be served eight bit. Putting linear xBGR_210LE at the head covers that,
+   * and costs nothing when the producer cannot make one: an offer is not a promise.
+   *
+   * @param formats The layouts on offer, in preference order. The head is what a producer takes first.
+   * @param every_layout_validated Whether this list is an answer rather than a guess. The compute
+   *        codec's is: it asked its own Vulkan device which modifiers it can import, for the exact
+   *        image the import creates. Adding an unasked layout to that list, at the head of it, turns
+   *        a slow stream into a broken one, because a frame that arrives as a dmabuf has no host copy
+   *        behind it: every frame fails to import, every failure ends the session, and the host
+   *        rebuilds it and fails again. So for that list this does nothing, and linear is already in
+   *        it whenever the driver said it can import linear.
+   */
+  void offer_hdr_linear_ten_bit(
+    std::vector<dmabuf_format_modifier_t> &formats,
+    bool every_layout_validated
+  );
   std::vector<dmabuf_format_modifier_t> filter_importable_dmabuf_formats(
     const std::vector<dmabuf_format_modifier_t> &portal_formats,
     const std::vector<egl_dmabuf_format_t> &egl_formats

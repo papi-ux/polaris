@@ -1259,7 +1259,16 @@ namespace platf {
       }
 
       void publish_capture_metadata(platf::img_t &img, bool gpu_resident) {
-        img.frame_metadata = kms_capture::frame_metadata(gpu_resident, card.render_node);
+        // Only a frame still on the GPU is in the format the scanout was in. The other path reads
+        // back through GL as eight bit BGRA whatever the source held, so the ten bits are already
+        // gone by the time anybody asks, and saying otherwise would be a lie that costs a picture.
+        auto format = platf::frame_format_e::bgra8;
+        if (gpu_resident) {
+          if (const auto *descriptor = dynamic_cast<const egl::img_descriptor_t *>(&img)) {
+            format = kms_capture::frame_format_for_fourcc(descriptor->sd.fourcc);
+          }
+        }
+        img.frame_metadata = kms_capture::frame_metadata(gpu_resident, card.render_node, format);
         stream_stats::update_capture_metadata(img.frame_metadata);
 
         if (capture_metadata_logged) {
@@ -1691,7 +1700,15 @@ namespace platf {
   }  // namespace kms
 
   std::shared_ptr<display_t> kms_display(mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
-    if (hwdevice_type == mem_type_e::vaapi || hwdevice_type == mem_type_e::cuda || hwdevice_type == mem_type_e::vulkan) {
+    // The compute codec joins the direct capture path rather than the copying one. It reads a dmabuf
+    // itself, and the copying path's readback is eight bit BGRA whatever the scanout held, so this is
+    // also the only way an HDR stream off this backend can carry ten bits at all.
+    //
+    // This cannot decide which backend serves a session. That is settled before anything here runs,
+    // by selected_display_backend, which reads the memory type only to ask whether it is CUDA. A
+    // session that moved from this backend to another one moved for a reason logged above, not here.
+    if (hwdevice_type == mem_type_e::vaapi || hwdevice_type == mem_type_e::cuda ||
+        hwdevice_type == mem_type_e::vulkan || hwdevice_type == mem_type_e::vulkan_pyrowave) {
       auto disp = std::make_shared<kms::display_vram_t>(hwdevice_type);
 
       if (!disp->init(display_name, config)) {

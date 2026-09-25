@@ -39,7 +39,7 @@ TEST(PreallocatedGamepadSource, PreallocationDoesNotPassAnEmptyArrival) {
   const auto source = read_input_source();
   ASSERT_FALSE(source.empty()) << "could not read src/input.cpp via POLARIS_SOURCE_DIR";
 
-  const auto preallocate = source.find("void preallocate_gamepad(");
+  const auto preallocate = source.find("preallocate_gamepad(");
   ASSERT_NE(preallocate, std::string::npos);
   const auto body_end = source.find("\n  }", preallocate);
   ASSERT_NE(body_end, std::string::npos);

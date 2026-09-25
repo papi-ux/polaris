@@ -23,7 +23,16 @@ license=('GPL-3.0-only')
 # 'debug' splits a polaris-debug package carrying the detached debuginfo and the
 # matching sources. Crash reports from released builds are otherwise unusable:
 # the stripped binary gives gdb and coredumpctl no symbols to work with.
-options=('debug' 'strip')
+# '!lto' because the compute codec brings Granite in, and Granite vendors volk, which declares
+# Vulkan's entry points as function pointer variables. Polaris's own translation units take the real
+# prototypes from vulkan_core.h. Those coexist in separate objects and cannot coexist in one, so
+# link time optimization merging them fails with "variable 'vkDestroyInstance' redeclared as
+# function" and nothing after it builds. makepkg turns LTO on by default, which is why this has to
+# say no explicitly.
+#
+# The alternative is defining VK_NO_PROTOTYPES across Polaris and routing every Vulkan call through
+# volk's loader, including the FFmpeg Vulkan encoder's. That is the better fix and a much larger one.
+options=('debug' 'strip' '!lto')
 
 depends=(
   'avahi'

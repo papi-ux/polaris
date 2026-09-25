@@ -408,7 +408,13 @@ if(${POLARIS_ENABLE_PYROWAVE})
     list(APPEND POLARIS_EXTERNAL_LIBRARIES polaris_pyrowave)
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_encode.h"
-            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_encode.cpp")
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_encode.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_vulkan.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_vulkan.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_upload.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_upload.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_capture_frame.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/pyrowave_capture_frame.cpp")
 endif()
 
 # wayland

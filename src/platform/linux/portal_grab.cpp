@@ -45,6 +45,9 @@
   #include "src/platform/linux/kwingrab.h"
 #endif
 #include "src/platform/linux/pipewire_capture.h"
+#ifdef POLARIS_BUILD_PYROWAVE
+  #include "src/platform/linux/pyrowave_encode.h"
+#endif
 #include "src/platform/linux/portal_session.h"
 #include "src/platform/linux/session_media.h"
 
@@ -239,6 +242,14 @@ namespace portal {
 #else
         return false;
 #endif
+      case platf::mem_type_e::vulkan_pyrowave:
+#ifdef POLARIS_BUILD_PYROWAVE
+        // Asked of the device rather than of the build, because the extensions this needs are a
+        // driver's to offer and a host whose GPU lacks them copies its frames instead.
+        return pyrowave_encode::dmabuf_import_available();
+#else
+        return false;
+#endif
       default:
         return false;
     }
@@ -332,20 +343,48 @@ namespace portal {
       BOOST_LOG(info) << "portal: DMA-BUF disabled because this build lacks the encoder-specific import path"sv;
     }
     if (may_use_dmabuf) {
-      // LINEAR always for gamescope (only allocates LINEAR on PW node).
-      dmabuf_formats = pipewire_capture::task1_packed_dmabuf_formats({DRM_FORMAT_MOD_LINEAR});
+#ifdef POLARIS_BUILD_PYROWAVE
+      if (mem_type == platf::mem_type_e::vulkan_pyrowave) {
+        // The layouts this encoder's device says it can import, asked of Vulkan rather than assumed.
+        //
+        // Linear alone, which is what the other arm offers and what this one used to borrow, is
+        // refused by KWin for a virtual output on at least one driver here: it does not allocate
+        // linear, so capture fell back to shared memory with the fast path sitting there unused.
+        // Linear is still in this list when the driver can import it, so a producer that only makes
+        // linear buffers, which is the gamescope case the line below is about, still matches.
+        //
+        // Asking is what makes offering more than linear safe. A frame that arrives as a dmabuf has
+        // no host copy behind it, so a layout that turns out not to import is a lost frame rather
+        // than a slow one, and every modifier here was checked against the exact image the import
+        // creates.
+        for (const auto spa_format : {SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA,
+                                      SPA_VIDEO_FORMAT_xBGR_210LE, SPA_VIDEO_FORMAT_xRGB_210LE}) {
+          const auto drm_format = pipewire_capture::drm_format_for_spa(spa_format);
+          if (!drm_format) {
+            continue;
+          }
+          for (const auto modifier : pyrowave_encode::importable_dmabuf_modifiers(*drm_format)) {
+            dmabuf_formats.push_back({
+              .spa_format = static_cast<std::uint32_t>(spa_format),
+              .drm_fourcc = *drm_format,
+              .modifier = modifier,
+            });
+          }
+        }
+        BOOST_LOG(info) << "portal: offering "sv << dmabuf_formats.size()
+                        << " dmabuf layouts the compute codec can import"sv;
+      } else
+#endif
+      {
+        // LINEAR always for gamescope (only allocates LINEAR on PW node).
+        dmabuf_formats = pipewire_capture::task1_packed_dmabuf_formats({DRM_FORMAT_MOD_LINEAR});
+      }
       // Ensure 10-bit LINEAR is present for HDR streams even if EGL skipped it.
       if (!prefer_sdr) {
-        const bool has_xb30 = std::any_of(dmabuf_formats.begin(), dmabuf_formats.end(), [](const auto &f) {
-          return f.spa_format == SPA_VIDEO_FORMAT_xBGR_210LE && f.modifier == DRM_FORMAT_MOD_LINEAR;
-        });
-        if (!has_xb30) {
-          dmabuf_formats.insert(dmabuf_formats.begin(), {
-            .spa_format = SPA_VIDEO_FORMAT_xBGR_210LE,
-            .drm_fourcc = DRM_FORMAT_XBGR2101010,
-            .modifier = DRM_FORMAT_MOD_LINEAR,
-          });
-        }
+        pipewire_capture::offer_hdr_linear_ten_bit(
+          dmabuf_formats,
+          mem_type == platf::mem_type_e::vulkan_pyrowave
+        );
       }
       if (prefer_hdr) {
         std::erase_if(dmabuf_formats, [](const auto &format) {
@@ -749,10 +788,42 @@ namespace portal {
         } else if (!encoder_import_supported) {
           BOOST_LOG(info) << "portal: DMA-BUF disabled because this build lacks the encoder-specific import path"sv;
         } else if (mem_type != platf::mem_type_e::cuda &&
+                   mem_type != platf::mem_type_e::vulkan_pyrowave &&
                    !(allow_vaapi && mem_type == platf::mem_type_e::vaapi)) {
           BOOST_LOG(info) << "portal: DMA-BUF disabled because encoder memory type is neither CUDA nor explicitly enabled VAAPI"sv;
         } else {
-          if (mem_type == platf::mem_type_e::cuda) {
+          if (mem_type == platf::mem_type_e::vulkan_pyrowave) {
+#ifdef POLARIS_BUILD_PYROWAVE
+            // The same packed RGB formats CUDA asks for, and for each of them the layouts this
+            // encoder's device says it can import, asked of Vulkan rather than assumed.
+            //
+            // Offering linear alone, which is what the line below does and what this arm used to
+            // borrow, is why the offer was refused on the host this was written on: KWin does not
+            // hand out a linear buffer for a virtual output on that driver, so capture fell back to
+            // shared memory with the fast path sitting there unused.
+            //
+            // Asking is what makes offering more than linear safe. A frame that arrives as a dmabuf
+            // has no host copy behind it, so a layout that turns out not to import is a lost frame
+            // rather than a slow one, and every modifier here has been checked against the exact
+            // image the import creates.
+            for (const auto spa_format : {SPA_VIDEO_FORMAT_BGRx, SPA_VIDEO_FORMAT_BGRA,
+                                          SPA_VIDEO_FORMAT_xBGR_210LE, SPA_VIDEO_FORMAT_xRGB_210LE}) {
+              const auto drm_format = pipewire_capture::drm_format_for_spa(spa_format);
+              if (!drm_format) {
+                continue;
+              }
+              for (const auto modifier : pyrowave_encode::importable_dmabuf_modifiers(*drm_format)) {
+                dmabuf_formats.push_back({
+                  .spa_format = static_cast<std::uint32_t>(spa_format),
+                  .drm_fourcc = *drm_format,
+                  .modifier = modifier,
+                });
+              }
+            }
+            BOOST_LOG(info) << "portal: offering "sv << dmabuf_formats.size()
+                            << " dmabuf layouts the compute codec can import"sv;
+#endif
+          } else if (mem_type == platf::mem_type_e::cuda) {
             // LINEAR one-plane packed RGB: 8-bit BGRx/BGRA + 10-bit xBGR_210LE (HDR).
             // Keep vulkan_cuda fast path; do not drop XB30 (regression vs prefer-10-bit).
             dmabuf_formats = pipewire_capture::task1_packed_dmabuf_formats({DRM_FORMAT_MOD_LINEAR});
@@ -778,16 +849,10 @@ namespace portal {
           // gamescope HDR offers xBGR_210LE LINEAR; EGL/list filters may omit it.
           // Ensure LINEAR 10-bit for HDR streams so force-HDR can negotiate spa 81.
           if (!want_prefer_sdr) {
-            const bool has_xb30_linear = std::any_of(dmabuf_formats.begin(), dmabuf_formats.end(), [](const auto &f) {
-              return f.spa_format == SPA_VIDEO_FORMAT_xBGR_210LE && f.modifier == DRM_FORMAT_MOD_LINEAR;
-            });
-            if (!has_xb30_linear) {
-              dmabuf_formats.insert(dmabuf_formats.begin(), {
-                .spa_format = SPA_VIDEO_FORMAT_xBGR_210LE,
-                .drm_fourcc = DRM_FORMAT_XBGR2101010,
-                .modifier = DRM_FORMAT_MOD_LINEAR,
-              });
-            }
+            pipewire_capture::offer_hdr_linear_ten_bit(
+              dmabuf_formats,
+              mem_type == platf::mem_type_e::vulkan_pyrowave
+            );
           }
           if (want_prefer_hdr) {
             std::erase_if(dmabuf_formats, [](const auto &format) {

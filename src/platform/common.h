@@ -246,6 +246,15 @@ namespace platf {
     dxgi,  ///< DXGI
     cuda,  ///< CUDA
     vulkan,  ///< Vulkan
+    /**
+     * @brief Vulkan, on the device the compute codec owns rather than the one FFmpeg built.
+     *
+     * Its own value rather than sharing vulkan, because this is what the capture backends read to
+     * decide what to offer a session, and the two devices want different things: this one imports a
+     * dmabuf directly and has no FFmpeg frames context behind it. Sharing the value would have meant
+     * changing what every FFmpeg Vulkan session is offered in order to change this one.
+     */
+    vulkan_pyrowave,
     videotoolbox,  ///< VideoToolbox
     unknown  ///< Unknown
   };

@@ -2313,11 +2313,26 @@ namespace nvhttp {
     }
 
     std::string session_encoder_name(const stream_stats::stats_t &stats) {
+      if (!stats.encoder_backend.empty()) {
+        return stats.encoder_backend;
+      }
+      // Preserve the negotiated-codec fallback until the first encoder sample.
       return stats.streaming && stats.codec == "pyrowave" ? "pyrowave" : video::active_encoder_name();
     }
 
+    std::string effective_session_encoder_name(const stream_stats::stats_t &stats,
+                                               const std::string &launch_encoder) {
+      if (!stats.encoder_backend.empty()) return stats.encoder_backend;
+      // Negotiating PyroWave supersedes the conventional startup encoder even
+      // before its first statistics sample arrives.
+      if (stats.streaming && stats.codec == "pyrowave") return "pyrowave";
+      if (!launch_encoder.empty()) return launch_encoder;
+      const auto active = session_encoder_name(stats);
+      return active.empty() ? "unknown" : active;
+    }
+
     nlohmann::json encoder_selection_json(const stream_stats::stats_t &stats) {
-      if (stats.streaming && stats.codec == "pyrowave") {
+      if (stats.streaming && session_encoder_name(stats) == "pyrowave") {
         // Conventional encoder probing does not select the codec's own Vulkan
         // device. Do not label this stream software/NVENC or infer its GPU from
         // the capture adapter. Explicit PyroWave selection has no codec fallback.
@@ -2721,6 +2736,11 @@ namespace nvhttp {
   }
 
 
+  std::string effective_session_encoder_name_for_tests(const stream_stats::stats_t &stats,
+                                                       const std::string &launch_encoder) {
+    return effective_session_encoder_name(stats, launch_encoder);
+  }
+
   nlohmann::json build_session_health_json_for_tests(const stream_stats::stats_t &stats,
                                                    bool current_virtual_display,
                                                    const std::string &device_name,
@@ -2993,12 +3013,12 @@ namespace nvhttp {
 
     std::string_view codec_name_for_video_format(int video_format) {
       switch (video_format) {
-        case 3:
-          return "pyrowave"sv;
         case 1:
           return "hevc"sv;
         case 2:
           return "av1"sv;
+        case 3:
+          return "pyrowave"sv;
         default:
           return "h264"sv;
       }
@@ -6615,9 +6635,14 @@ namespace nvhttp {
 #ifdef POLARIS_BUILD_PYROWAVE
     // A bit above every one Sunshine's extensions claim. A Moonlight client reads the mask, finds a
     // bit it has no name for and ignores it, so it can never ask for a codec it cannot decode.
-    if (video::pyrowave_enabled()) {
+    if (pyrowave_encode::available()) {
       codec_mode_flags |= video::SCM_PYROWAVE;
-      tree.put("root.PolarisPyrowaveBitstream", video::PYROWAVE_BITSTREAM);
+      // Same encoder, same device, one enum apart, so a host that can do one can do the other.
+      codec_mode_flags |= video::SCM_PYROWAVE_444;
+      // Not the same: HDR needs the GPU input path, and a host can have the codec without it.
+      if (pyrowave_encode::hdr_available()) {
+        codec_mode_flags |= video::SCM_PYROWAVE_HDR10;
+      }
     }
 #endif
     tree.put("root.ServerCodecModeSupport", codec_mode_flags);
@@ -8186,11 +8211,7 @@ namespace nvhttp {
 #ifdef POLARIS_BUILD_PYROWAVE
       // Only when a device on this host can actually run the compute shaders, because unlike the
       // others there is no software fallback to quietly take over.
-      if (video::pyrowave_enabled()) {
-        codecs.push_back("pyrowave");
-        capture["pyrowave_bitstream"] = video::PYROWAVE_BITSTREAM;
-        capture["pyrowave_capture"] = "cpu-sdr";
-      }
+      if (pyrowave_encode::available()) codecs.push_back("pyrowave");
 #endif
 
       SimpleWeb::CaseInsensitiveMultimap headers;
@@ -8418,12 +8439,11 @@ namespace nvhttp {
       // Encoder info
       auto &encoder = output["encoder"];
       const auto active_backend = session_encoder_name(stats);
-      const bool pyrowave_stream = stats.streaming && stats.codec == "pyrowave";
+      const bool pyrowave_stream = stats.streaming && active_backend == "pyrowave";
       encoder["active_backend"] = active_backend.empty() ? "unknown" : active_backend;
       encoder["requested_backend"] = status_snapshot.requested_encoder_backend;
-      encoder["effective_backend"] = pyrowave_stream ? "pyrowave" : status_snapshot.effective_encoder_backend.empty() ?
-        (active_backend.empty() ? "unknown" : active_backend) :
-        status_snapshot.effective_encoder_backend;
+      encoder["effective_backend"] = effective_session_encoder_name(
+        stats, status_snapshot.effective_encoder_backend);
       encoder["session_override"] = status_snapshot.encoder_backend_explicit;
       encoder["fallback_allowed"] = !pyrowave_stream && encoder_backend_fallback_allowed(
         status_snapshot.requested_encoder_backend,
@@ -11709,6 +11729,14 @@ namespace nvhttp {
       const auto host_codecs = advertised_codec_support_for_http(true);
       preset_request.host_hdr_capable =
         host_codecs.hevc_mode >= 3 || host_codecs.av1_mode >= 3;
+      // What this client said about its own panel, which is the only thing that can outrank a
+      // device_db record whose hdr_capable has been false since the day it was written.
+      //
+      // The launch path has always passed this. This one did not, so the two disagreed and the
+      // stricter one won every time: a client asks the preview whether HDR is safe, is told no
+      // because of the uncorrected record, and launches SDR of its own accord. The launch code that
+      // would have said yes never runs, because nothing ever asks it.
+      preset_request.client_reports_hdr10_display = named_cert_p->client_reports_hdr10_display;
       if (config::video.max_bitrate > 0) {
         preset_request.configured_bitrate_kbps = config::video.max_bitrate;
       }

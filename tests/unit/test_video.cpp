@@ -8,6 +8,9 @@
 #include <src/encoder_probe_reuse.h>
 #include <thread>
 #include <future>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #ifdef __linux__
 #include <src/platform/linux/encoder_probe_driver_proof.h>
 #endif
@@ -1076,4 +1079,154 @@ TEST(VideoVulkanQualityClampTests, ClampsToDriverReportedMaximum) {
 TEST(VideoVulkanQualityClampTests, NegativeConfiguredValueFloorsAtZero) {
   EXPECT_EQ(video::vulkan_quality_clamp(-1, 4), 0);
   EXPECT_EQ(video::vulkan_quality_clamp(-5, -1), 0);
+}
+
+namespace {
+
+  /// What a client that has read the SDP and the codec mode bits would send for SDR.
+  video::config_t pyrowave_request() {
+    video::config_t config {};
+    config.width = 1920;
+    config.height = 1080;
+    config.framerate = 60;
+    config.bitrate = 100000;
+    config.videoFormat = video::VIDEO_FORMAT_PYROWAVE;
+    // Full range Rec. 709: bit 0 for full, colourspace 1 above it.
+    config.encoderCscMode = 3;
+    config.dynamicRange = 0;
+    config.chromaSamplingType = 0;
+    return config;
+  }
+
+}  // namespace
+
+TEST(PyroWaveAnnounceTests, AServableRequestIsNotRefused) {
+  const auto config = pyrowave_request();
+  EXPECT_FALSE(video::pyrowave_announce_refusal(config, true, true).has_value());
+  EXPECT_FALSE(video::pyrowave_announce_refusal(config, true, false).has_value())
+    << "an SDR request does not need the host to be able to do HDR";
+}
+
+TEST(PyroWaveAnnounceTests, AHostWithoutTheCodecRefusesEverything) {
+  const auto refusal = video::pyrowave_announce_refusal(pyrowave_request(), false, false);
+  ASSERT_TRUE(refusal.has_value());
+  EXPECT_NE(refusal->find("cannot run"), std::string::npos) << *refusal;
+}
+
+TEST(PyroWaveAnnounceTests, HdrNeedsTheHostToHaveIt) {
+  auto config = pyrowave_request();
+  config.dynamicRange = 1;
+  config.encoderCscMode = 5;  // full range BT.2020
+
+  EXPECT_FALSE(video::pyrowave_announce_refusal(config, true, true).has_value());
+
+  // The bit in ServerCodecModeSupport is the only warning a client gets, and it reads that before it
+  // launches. A host that can encode but cannot carry HDR has to say no rather than send Rec. 709
+  // under BT.2020 PQ metadata, which is the dark oversaturated picture people report as broken HDR.
+  const auto refusal = video::pyrowave_announce_refusal(config, true, false);
+  ASSERT_TRUE(refusal.has_value());
+  EXPECT_NE(refusal->find("HDR"), std::string::npos) << *refusal;
+}
+
+TEST(PyroWaveAnnounceTests, AnHdrRequestMayNameEither709Or2020) {
+  auto config = pyrowave_request();
+  config.dynamicRange = 1;
+
+  // Polaris derives BT.2020 PQ from the dynamic range rather than from this field, so both of these
+  // produce the same stream and refusing one would be refusing over a field nothing reads.
+  config.encoderCscMode = 3;  // full range, colourspace says 709
+  EXPECT_FALSE(video::pyrowave_announce_refusal(config, true, true).has_value());
+  config.encoderCscMode = 5;  // full range, colourspace says 2020
+  EXPECT_FALSE(video::pyrowave_announce_refusal(config, true, true).has_value());
+
+  // 601 is not one of the two.
+  config.encoderCscMode = 1;
+  EXPECT_TRUE(video::pyrowave_announce_refusal(config, true, true).has_value());
+}
+
+TEST(PyroWaveAnnounceTests, LimitedRangeIsRefusedInBothRanges) {
+  // The codec's colour conversion is full range and has no setting for it, so a client asking for
+  // limited range would decode every frame with the wrong maths: raised blacks, flattened whites, and
+  // nothing in any log to say why. This is the check that a stream cannot silently be that.
+  for (const int dynamic_range : {0, 1}) {
+    auto config = pyrowave_request();
+    config.dynamicRange = dynamic_range;
+    config.encoderCscMode = dynamic_range == 1 ? 4 : 2;  // colourspace right, range bit clear
+
+    const auto refusal = video::pyrowave_announce_refusal(config, true, true);
+    ASSERT_TRUE(refusal.has_value()) << "limited range accepted at dynamic range " << dynamic_range;
+    EXPECT_NE(refusal->find("full range"), std::string::npos) << *refusal;
+  }
+}
+
+TEST(PyroWaveAnnounceTests, SdrMustBeRec709) {
+  auto config = pyrowave_request();
+  config.encoderCscMode = 5;  // full range, but BT.2020 on an eight bit stream
+
+  // Without the dynamic range to derive BT.2020 PQ from, this field is the only thing that says which
+  // matrix the client will invert, and the encoder only makes one of them.
+  const auto refusal = video::pyrowave_announce_refusal(config, true, true);
+  ASSERT_TRUE(refusal.has_value());
+  EXPECT_NE(refusal->find("Rec. 709"), std::string::npos) << *refusal;
+}
+
+TEST(PyroWaveAnnounceTests, AnOddExtentIsRefused) {
+  for (const auto [width, height] : {std::pair {1921, 1080}, std::pair {1920, 1081},
+                                     std::pair {0, 1080}, std::pair {1920, -2}}) {
+    auto config = pyrowave_request();
+    config.width = width;
+    config.height = height;
+
+    const auto refusal = video::pyrowave_announce_refusal(config, true, true);
+    ASSERT_TRUE(refusal.has_value()) << width << 'x' << height << " was accepted";
+    EXPECT_NE(refusal->find("even stream size"), std::string::npos) << *refusal;
+  }
+}
+
+namespace {
+  std::string video_source_for_contract(const char *relative) {
+    const auto path = std::filesystem::path(POLARIS_SOURCE_DIR) / relative;
+    std::ifstream in(path);
+    if (!in) {
+      return {};
+    }
+    std::ostringstream out;
+    out << in.rdbuf();
+    return out.str();
+  }
+}  // namespace
+
+/**
+ * A session that cannot read what capture produces has to end the stream, not fail a frame.
+ *
+ * Any non-zero answer from convert() fails one frame, and the capture thread answers a failed frame
+ * by building the session again. For a frame that arrived wrong that is right. For a session whose
+ * codec reads ten bit while capture produces eight, the new session is identical and refuses the
+ * identical frame: a thousand sessions in two minutes, each logging the same sentence, with the
+ * client seeing a stream that never starts and no reason anywhere it can show.
+ */
+TEST(PyroWaveAnnounceTests, AFormatThisSessionCanNeverReadEndsTheStream) {
+  const auto video = video_source_for_contract("src/video.cpp");
+  ASSERT_FALSE(video.empty());
+  EXPECT_NE(video.find("return convert_session_is_over;"), std::string::npos)
+    << "the unreadable format refuses one frame at a time, so the host rebuilds the session forever";
+
+  EXPECT_NE(video.find("if (converted == convert_session_is_over)"), std::string::npos)
+    << "the parallel capture thread rebuilds a session that already said it cannot continue";
+  // The synchronous path already ends the stream after the route handler, and no session on this
+  // codec runs there anyway, so it is left exactly as it was.
+}
+
+TEST(PyroWaveAnnounceTests, TheEndOfStreamAnswerIsNotSomethingAFrameCanMean) {
+  EXPECT_LT(video::convert_session_is_over, 0);
+  EXPECT_NE(video::convert_session_is_over, -1);
+}
+
+TEST(PyroWaveAnnounceTests, ADynamicRangeThisCodecDoesNotKnowIsRefused) {
+  auto config = pyrowave_request();
+  config.dynamicRange = 2;
+
+  const auto refusal = video::pyrowave_announce_refusal(config, true, true);
+  ASSERT_TRUE(refusal.has_value());
+  EXPECT_NE(refusal->find("two dynamic ranges"), std::string::npos) << *refusal;
 }

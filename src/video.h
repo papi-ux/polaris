@@ -243,8 +243,45 @@ namespace video {
    * whole of the compatibility story: it can never ask for a codec it does not know exists.
    */
   inline constexpr std::uint32_t SCM_PYROWAVE = 0x00800000;
-  inline constexpr auto PYROWAVE_BITSTREAM = "pyrowave-186f0393-sdr420-v1";
-  bool pyrowave_enabled();
+
+  /**
+   * @brief This host can carry PyroWave with a chroma sample per pixel rather than per four.
+   *
+   * Its own bit rather than something inferred from the first, because a client whose decoder is
+   * built for 4:4:4 against a host that only sends 4:2:0 refuses every frame: the chroma travels in
+   * each frame's sequence header and a decoder made for the other one will not take it. Better to
+   * be told than to find out a frame at a time.
+   */
+  inline constexpr std::uint32_t SCM_PYROWAVE_444 = 0x01000000;
+
+  /**
+   * @brief This host can carry PyroWave as HDR10, full range BT.2020 with the PQ transfer function.
+   *
+   * Its own bit because the dynamic range is asked for at launch, over HTTP, before any of the RTSP
+   * negotiation happens: by the time a client could read the SDP it has already committed. So this is
+   * the only place a client can learn it before it has to decide.
+   *
+   * Narrower than SCM_PYROWAVE, and deliberately: HDR exists only on the path that hands the codec a
+   * picture on the GPU, so a host that has the codec does not necessarily have this.
+   */
+  inline constexpr std::uint32_t SCM_PYROWAVE_HDR10 = 0x02000000;
+
+  /**
+   * @brief Why this host will not stream PyroWave to a client that asked for this, or nothing.
+   *
+   * Everything about a PyroWave request that can be judged without touching a display, in one place
+   * and with no side effects, because the alternative is four conditions spread through an RTSP
+   * handler that only a live client can reach. What cannot be judged here is left to the capture
+   * path, which fails closed.
+   *
+   * @param config What the client asked for in its ANNOUNCE.
+   * @param can_encode Whether this host has a device that can run the codec at all.
+   * @param can_hdr Whether it can carry HDR10, which is the narrower question: that needs the path
+   *   that hands the codec a picture on the GPU.
+   * @return A sentence naming what is wrong, ready to log, or nothing when the request is servable.
+   */
+  std::optional<std::string> pyrowave_announce_refusal(const config_t &config, bool can_encode,
+                                                       bool can_hdr);
 
   struct encoder_platform_formats_t {
     virtual ~encoder_platform_formats_t() = default;
@@ -308,13 +345,15 @@ namespace video {
   /**
    * @brief PyroWave's formats, which are almost none of them.
    *
-   * The codec takes packed BGRA from host memory and decides its own chroma at encoder creation,
-   * so there is no eight bit versus ten bit choice to advertise and no hardware device type to
-   * match. Present so the dispatch has something to recognise.
+   * The codec takes packed pixels and decides its own chroma at encoder creation, so there is no
+   * eight bit versus ten bit choice to advertise. The device type is not a formality: it is what the
+   * capture backends read to decide what to offer this session, and this codec owns a Vulkan device
+   * that can import a dmabuf, which is a different answer from both system memory and from the
+   * Vulkan device FFmpeg builds.
    */
   struct encoder_platform_formats_pyrowave: encoder_platform_formats_t {
     encoder_platform_formats_pyrowave() {
-      encoder_platform_formats_t::dev_type = platf::mem_type_e::system;
+      encoder_platform_formats_t::dev_type = platf::mem_type_e::vulkan_pyrowave;
       encoder_platform_formats_t::pix_fmt_8bit = platf::pix_fmt_e::yuv420p;
       encoder_platform_formats_t::pix_fmt_10bit = platf::pix_fmt_e::yuv420p;
       // 4:4:4 is a create time choice inside the codec, not a pixel format Polaris hands it, and
@@ -396,13 +435,17 @@ namespace video {
           // fallthrough
         case 0:
           return h264;
-        case VIDEO_FORMAT_PYROWAVE:
-          // The dedicated PyroWave encoder uses one SDR configuration slot.
-          return h264;
         case 1:
           return hevc;
         case 2:
           return av1;
+        case VIDEO_FORMAT_PYROWAVE:
+          // PyroWave, which has no profiles, so the encoder that carries it holds the same codec in
+          // all three slots and any of them is the right answer. Only that encoder is ever asked:
+          // ANNOUNCE refuses the format on a host that cannot run it, so this is a deliberate answer
+          // rather than the guess the default arm makes. Without it the guess was reached, and every
+          // session logged an unknown format and called itself H.264.
+          return h264;
       }
     }
 
@@ -437,6 +480,21 @@ namespace video {
     const std::function<void()> &drain_images
   );
 
+  /**
+   * @brief What convert() returns when nothing about this session will ever make the next frame work.
+   *
+   * Any non-zero answer from convert() fails that frame, and the capture thread treats failing a
+   * frame as a reason to build the session again. That is right for a frame that arrived wrong and
+   * wrong for a session that cannot read what capture produces: the new session is identical to the
+   * old one, so it fails the same way, at whatever rate frames arrive. Measured at a thousand
+   * sessions in two minutes, all of them logging the same sentence.
+   *
+   * A session that answers with this is saying the stream is over. The caller stops rather than
+   * starting another, and the client is told, which is the difference between an error someone can
+   * act on and a log nobody can read.
+   */
+  constexpr int convert_session_is_over = -2;
+
   struct encode_session_t {
     enum class bitrate_update_e {
       rejected,
@@ -449,6 +507,10 @@ namespace video {
     // Base members are destroyed after derived codec and converter resources.
     std::shared_ptr<platf::display_t> capture_display_owner;
 
+    /**
+     * @return 0 when the frame was converted, convert_session_is_over when this session can never
+     *         convert another, and any other non-zero value to fail this frame alone.
+     */
     virtual int convert(frame_t &frame) = 0;
 
     virtual void request_idr_frame() = 0;
