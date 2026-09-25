@@ -836,9 +836,13 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain('namcap emitted unreviewed warnings or a reviewed warning disappeared')
     expect(buildScript).not.toContain('namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt" || true')
     const reviewedWarnings = reviewedNamcap.trim().split('\n')
-    // 18 with the reviewed libvulkan warning: PyroWave uses volk to resolve
-    // Vulkan entry points at runtime, so the loader remains a real dependency.
-    // Previously 17 since the Vulkan Video encoder used vulkan-icd-loader directly:
+    // 18 since the compute codec brought volk in. volk resolves every Vulkan entry point with dlopen
+    // at runtime, so no object in the binary makes a direct call to libvulkan and namcap reports it as
+    // an unused shared library. The dependency is real and stays declared: dropping it to quiet the
+    // linter would move the failure on a host without Vulkan from install time into the middle of a
+    // stream. The exact inverse of the line below, which retired when the Vulkan Video encoder started
+    // calling the loader for real.
+    // It was 17 since the Vulkan Video encoder started using vulkan-icd-loader for real:
     // namcap stopped calling that dependency possibly unneeded, and a reviewed warning
     // that no longer appears fails the gate exactly like an unreviewed one, so its line
     // retired with it.
