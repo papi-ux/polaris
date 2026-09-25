@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <fstream>
 #include <filesystem>
 #include <string>
 #include <thread>
@@ -55,6 +56,18 @@ namespace {
          {{"uuid", two}, {"name", "Blank Two"}, {"cmd", "/usr/bin/true"}, {"image-path", ""}},
        })},
     };
+  }
+
+  /// A one pixel PNG. Validation reads the bytes, so only a real file satisfies it.
+  void write_png(const fs::path &path) {
+    static constexpr unsigned char png[] = {
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+      0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+      0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+      0x42, 0x60, 0x82};
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char *>(png), sizeof(png));
   }
 
 }  // namespace
@@ -261,9 +274,13 @@ TEST(CoverSweepRoutes, NothingToLookUpForgetsTheRunBeforeIt) {
     ASSERT_EQ(std::stoi(first->status_code.substr(0, 3)), 202);
     ASSERT_TRUE(confighttp::wait_for_cover_sweep_for_tests(30s));
 
-    // Now give that game a cover, so there is nothing left to look up.
+    // Now give that game a cover, so there is nothing left to look up. A real file rather than one of
+    // the images Polaris ships: a bare name resolves against the installed asset directory, which a
+    // build tree on a runner does not have, so the game would still read as having no cover.
+    const auto cover = directory / "cover.png";
+    write_png(cover);
     nlohmann::json covered = one;
-    covered["apps"][0]["image-path"] = "lutris.png";  // a name Polaris ships, so validation accepts it
+    covered["apps"][0]["image-path"] = cover.string();
     private_state_file::write_atomic(config::stream.file_apps, covered.dump(2));
     proc::refresh(config::stream.file_apps, false);
 
