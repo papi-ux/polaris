@@ -189,6 +189,36 @@ TEST(ArtworkSweep, EachWaitIsLongerThanTheLastAndTheRunGivesUpInTheEnd) {
   EXPECT_GT(harness.waits.back(), harness.waits.front());
 }
 
+TEST(ArtworkSweep, StoppingDuringABackoffSaysStoppedRatherThanRateLimited) {
+  harness_t harness;
+  artwork_sweep::sweeper_t *handle = nullptr;
+  artwork_sweep::sweeper_t sweeper {[&](const artwork_sweep::candidate_t &) {
+                                     artwork_sweep::lookup_t answer;
+                                     answer.rate_limited = true;
+                                     // Pressed Stop while the run was waiting out the provider.
+                                     if (handle) {
+                                       handle->cancel();
+                                     }
+                                     return answer;
+                                   },
+                                   harness.recorder(), harness_t::frozen_clock()};
+  handle = &sweeper;
+
+  ASSERT_EQ(sweeper.start(games(4)), artwork_sweep::start_e::started);
+  ASSERT_TRUE(sweeper.wait_for_idle(5s));
+
+  const auto job = sweeper.job();
+  EXPECT_EQ(job.state, artwork_sweep::state_e::failed);
+  EXPECT_NE(job.message.find("4 of the games"), std::string::npos)
+    << "a run the player stopped said: " << job.message;
+  EXPECT_EQ(job.message.find("rate limiting"), std::string::npos)
+    << "the player pressed Stop and was told the provider refused them";
+
+  // It waited once before noticing, and did not spend the whole budget.
+  std::lock_guard lock(harness.waits_mutex);
+  EXPECT_EQ(harness.waits.size(), 1u);
+}
+
 TEST(ArtworkSweep, OneRunAtATimeAndAFinishedOneCanBeForgotten) {
   harness_t harness;
   std::mutex gate_mutex;

@@ -256,11 +256,14 @@ namespace artwork_sweep {
       std::string stopped_because;
       int waits = 0;
       std::size_t index = 0;
+      const auto stopped_here = [&games](std::size_t at) {
+        return "Stopped before " + std::to_string(games.size() - at) + " of the games were looked up.";
+      };
       for (; index < games.size(); ++index) {
         {
           std::lock_guard lock(mutex_);
           if (cancelled_) {
-            stopped_because = "Stopped before " + std::to_string(games.size() - index) + " of the games were looked up.";
+            stopped_because = stopped_here(index);
             break;
           }
         }
@@ -277,20 +280,27 @@ namespace artwork_sweep {
         // Nothing else in this codebase waits out a rate limit, because nothing else makes hundreds
         // of requests in a row. A run does, so the first refusal would otherwise cost every game
         // after it.
+        bool stopped_waiting = false;
         while (answer.rate_limited && waits < maximum_rate_limit_waits) {
           pause(first_rate_limit_wait_milliseconds << waits);
           ++waits;
-          bool stop = false;
           {
             std::lock_guard lock(mutex_);
-            stop = cancelled_;
+            stopped_waiting = cancelled_;
           }
-          if (stop) {
+          if (stopped_waiting) {
             break;
           }
           answer = lookup ? lookup(games[index]) : lookup_t {};
         }
 
+        // Asked to stop while waiting out a rate limit. The answer in hand still says rate limited,
+        // so without this the run would tell the player the provider refused them when what actually
+        // happened is that they pressed Stop.
+        if (stopped_waiting) {
+          stopped_because = stopped_here(index);
+          break;
+        }
         if (answer.rate_limited) {
           stopped_because = "The artwork provider is rate limiting this host. Try the rest in a few minutes.";
           break;
