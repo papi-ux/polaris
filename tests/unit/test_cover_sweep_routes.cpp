@@ -1,0 +1,280 @@
+/**
+ * @file tests/unit/test_cover_sweep_routes.cpp
+ * @brief The three cover sweep routes, driven without a network.
+ *
+ * The review that found this file missing found two defects it would have caught: a run with nothing
+ * to look up answered with the previous run's proposals, so applying them a second time could write
+ * over a cover somebody had picked by hand; and there was no coverage of what the routes answer at all.
+ */
+#include <gtest/gtest.h>
+
+#include <chrono>
+#include <filesystem>
+#include <string>
+#include <thread>
+
+#include <nlohmann/json.hpp>
+
+#include "src/artwork_sweep.h"
+#include "src/config.h"
+#include "src/crypto.h"
+#include "src/file_handler.h"
+#include "src/private_state_file.h"
+#include "src/process.h"
+#include "../tests_common.h"
+
+#include <Simple-Web-Server/client_https.hpp>
+#include <Simple-Web-Server/server_https.hpp>
+
+namespace fs = std::filesystem;
+using namespace std::chrono_literals;
+
+// Declared here rather than in a header, the way the ROM folder route tests declare theirs.
+namespace confighttp {
+  using resp_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Response>;
+  using req_https_t = std::shared_ptr<typename SimpleWeb::ServerBase<SimpleWeb::HTTPS>::Request>;
+
+  void startCoverSweep(resp_https_t, req_https_t);
+  void getCoverSweep(resp_https_t, req_https_t);
+  void clearCoverSweep(resp_https_t, req_https_t);
+
+  void set_cover_sweep_lookup_for_tests(artwork_sweep::lookup_fn_t lookup);
+  bool wait_for_cover_sweep_for_tests(std::chrono::milliseconds timeout);
+  void forget_cover_sweep_for_tests();
+  void with_web_session_for_tests(const fs::path &path, const std::string &csrf,
+                                  const std::function<void(const std::string &)> &run);
+}  // namespace confighttp
+
+namespace {
+
+  nlohmann::json two_games(const std::string &one, const std::string &two) {
+    return {
+      {"apps",
+       nlohmann::json::array({
+         {{"uuid", one}, {"name", "Blank One"}, {"cmd", "/usr/bin/true"}, {"image-path", ""}},
+         {{"uuid", two}, {"name", "Blank Two"}, {"cmd", "/usr/bin/true"}, {"image-path", ""}},
+       })},
+    };
+  }
+
+}  // namespace
+
+TEST(CoverSweepRoutes, ARunIsStartedWatchedAndForgotten) {
+  constexpr auto kOne = "11111111-1111-4111-8111-111111111111";
+  constexpr auto kTwo = "22222222-2222-4222-8222-222222222222";
+
+  const auto directory = fs::temp_directory_path() /
+    ("cover-sweep-routes-" + std::to_string(::getpid()));
+  fs::create_directories(directory);
+
+  const auto old_config = config::sunshine;
+  const auto old_file_apps = config::stream.file_apps;
+  const auto old_key = config::steamgriddb_api_key();
+
+  auto restore = util::fail_guard([&] {
+    confighttp::forget_cover_sweep_for_tests();
+    confighttp::set_cover_sweep_lookup_for_tests({});
+    config::set_steamgriddb_api_key(old_key);
+    config::sunshine = old_config;
+    config::stream.file_apps = old_file_apps;
+    std::error_code ignored;
+    fs::remove_all(directory, ignored);
+  });
+
+  // Without a username the handlers redirect to the welcome page rather than authenticating.
+  config::sunshine.username = "test-admin";
+  config::sunshine.api_key = "isolated-test-api-key";
+  config::sunshine.config_file = (directory / "polaris.conf").string();
+  config::stream.file_apps = (directory / "apps.json").string();
+  private_state_file::write_atomic(config::stream.file_apps, two_games(kOne, kTwo).dump(2));
+  proc::refresh(config::stream.file_apps, false);
+
+  // Every lookup answers a match, with no network anywhere near it.
+  confighttp::set_cover_sweep_lookup_for_tests([](const artwork_sweep::candidate_t &game) {
+    artwork_sweep::lookup_t answer;
+    artwork_sweep::match_t match;
+    match.provider_game_id = "2254";
+    match.title = game.name + " (matched)";
+    match.confidence = 90;
+    answer.match = match;
+    return answer;
+  });
+
+  auto [certificate, key] = crypto::gen_creds("localhost", 2048);
+  private_state_file::write_atomic((directory / "cert.pem").string(), certificate);
+  private_state_file::write_atomic((directory / "key.pem").string(), key);
+
+  confighttp::with_web_session_for_tests(directory / "sessions.json", "test-csrf", [&](const std::string &cookie) {
+    SimpleWeb::Server<SimpleWeb::HTTPS> server((directory / "cert.pem").string(), (directory / "key.pem").string());
+    server.config.address = "127.0.0.1";
+    server.config.port = 0;
+    server.config.timeout_request = 5;
+    server.config.timeout_content = 5;
+    server.resource["^/api/covers/sweep$"]["POST"] = confighttp::startCoverSweep;
+    server.resource["^/api/covers/sweep$"]["GET"] = confighttp::getCoverSweep;
+    server.resource["^/api/covers/sweep$"]["DELETE"] = confighttp::clearCoverSweep;
+
+    std::atomic<unsigned short> port {0};
+    std::jthread worker([&] { server.start([&](unsigned short assigned) { port = assigned; }); });
+    auto stop = util::fail_guard([&] { server.stop(); worker.join(); });
+    for (int attempt = 0; attempt < 200 && port == 0; ++attempt) std::this_thread::sleep_for(10ms);
+    ASSERT_NE(port, 0);
+
+    SimpleWeb::Client<SimpleWeb::HTTPS> client("127.0.0.1:" + std::to_string(port.load()), false);
+    client.config.timeout = 5;
+    const auto request = [&](const std::string &method, const std::string &body, bool authenticated = true) {
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      if (authenticated) headers.emplace("Cookie", "auth=" + cookie);
+      return client.request(method, "/api/covers/sweep", body, headers);
+    };
+    const auto code = [](const auto &response) {
+      return std::stoi(response->status_code.substr(0, 3));
+    };
+    const auto body = [](const auto &response) {
+      return nlohmann::json::parse(response->content.string(), nullptr, false);
+    };
+
+    // Unauthenticated, all three.
+    EXPECT_EQ(code(request("POST", "{}", false)), 401);
+    EXPECT_EQ(code(request("GET", "", false)), 401);
+    EXPECT_EQ(code(request("DELETE", "", false)), 401);
+
+    // Without a key there is nothing to ask, and the answer says so rather than starting a run.
+    config::set_steamgriddb_api_key("");
+    {
+      const auto answer = request("POST", "{}");
+      EXPECT_EQ(code(answer), 503);
+      const auto out = body(answer);
+      ASSERT_FALSE(out.is_discarded());
+      EXPECT_EQ(out.value("status", true), false);
+      EXPECT_EQ(out.value("code", std::string {}), "steamgriddb_key_missing");
+    }
+
+    config::set_steamgriddb_api_key("a-key-that-is-never-used");
+
+    // Started.
+    {
+      const auto answer = request("POST", "{}");
+      EXPECT_EQ(code(answer), 202);
+      const auto out = body(answer);
+      ASSERT_FALSE(out.is_discarded());
+      EXPECT_TRUE(out.value("status", false));
+      EXPECT_EQ(out["sweep"].value("total", 0), 2);
+    }
+
+    ASSERT_TRUE(confighttp::wait_for_cover_sweep_for_tests(30s));
+
+    // Watched.
+    {
+      const auto out = body(request("GET", ""));
+      ASSERT_FALSE(out.is_discarded());
+      const auto &sweep = out["sweep"];
+      EXPECT_EQ(sweep.value("state", std::string {}), "ready");
+      EXPECT_EQ(sweep.value("looked_at", 0), 2);
+      EXPECT_EQ(sweep.value("proposed", 0), 2);
+      ASSERT_EQ(sweep["proposals"].size(), 2u);
+      EXPECT_EQ(sweep["proposals"][0].value("outcome", std::string {}), "proposed");
+      EXPECT_EQ(sweep["proposals"][0].value("title", std::string {}), "Blank One (matched)");
+      EXPECT_EQ(sweep["proposals"][0].value("provider_game_id", std::string {}), "2254");
+      EXPECT_EQ(sweep["proposals"][0].value("confidence", 0), 90);
+    }
+
+    // Forgotten.
+    {
+      const auto out = body(request("DELETE", ""));
+      ASSERT_FALSE(out.is_discarded());
+      EXPECT_TRUE(out.value("forgotten", false));
+      EXPECT_EQ(out["sweep"].value("total", -1), 0);
+      EXPECT_TRUE(out["sweep"]["proposals"].empty());
+    }
+  });
+}
+
+TEST(CoverSweepRoutes, NothingToLookUpForgetsTheRunBeforeIt) {
+  constexpr auto kOne = "33333333-3333-4333-8333-333333333333";
+
+  const auto directory = fs::temp_directory_path() /
+    ("cover-sweep-nothing-" + std::to_string(::getpid()));
+  fs::create_directories(directory);
+
+  const auto old_config = config::sunshine;
+  const auto old_file_apps = config::stream.file_apps;
+  const auto old_key = config::steamgriddb_api_key();
+
+  auto restore = util::fail_guard([&] {
+    confighttp::forget_cover_sweep_for_tests();
+    confighttp::set_cover_sweep_lookup_for_tests({});
+    config::set_steamgriddb_api_key(old_key);
+    config::sunshine = old_config;
+    config::stream.file_apps = old_file_apps;
+    std::error_code ignored;
+    fs::remove_all(directory, ignored);
+  });
+
+  config::sunshine.username = "test-admin";
+  config::sunshine.api_key = "isolated-test-api-key";
+  config::sunshine.config_file = (directory / "polaris.conf").string();
+  config::stream.file_apps = (directory / "apps.json").string();
+  config::set_steamgriddb_api_key("a-key-that-is-never-used");
+
+  // One game with no cover: a run that proposes something.
+  nlohmann::json one {
+    {"apps", nlohmann::json::array({{{"uuid", kOne}, {"name", "Blank"}, {"cmd", "/usr/bin/true"}, {"image-path", ""}}})}};
+  private_state_file::write_atomic(config::stream.file_apps, one.dump(2));
+  proc::refresh(config::stream.file_apps, false);
+
+  confighttp::set_cover_sweep_lookup_for_tests([](const artwork_sweep::candidate_t &) {
+    artwork_sweep::lookup_t answer;
+    artwork_sweep::match_t match;
+    match.provider_game_id = "2254";
+    match.title = "Something";
+    answer.match = match;
+    return answer;
+  });
+
+  auto [certificate, key] = crypto::gen_creds("localhost", 2048);
+  private_state_file::write_atomic((directory / "cert.pem").string(), certificate);
+  private_state_file::write_atomic((directory / "key.pem").string(), key);
+
+  confighttp::with_web_session_for_tests(directory / "sessions.json", "test-csrf", [&](const std::string &cookie) {
+    SimpleWeb::Server<SimpleWeb::HTTPS> server((directory / "cert.pem").string(), (directory / "key.pem").string());
+    server.config.address = "127.0.0.1";
+    server.config.port = 0;
+    server.config.timeout_request = 5;
+    server.config.timeout_content = 5;
+    server.resource["^/api/covers/sweep$"]["POST"] = confighttp::startCoverSweep;
+
+    std::atomic<unsigned short> port {0};
+    std::jthread worker([&] { server.start([&](unsigned short assigned) { port = assigned; }); });
+    auto stop = util::fail_guard([&] { server.stop(); worker.join(); });
+    for (int attempt = 0; attempt < 200 && port == 0; ++attempt) std::this_thread::sleep_for(10ms);
+    ASSERT_NE(port, 0);
+
+    SimpleWeb::Client<SimpleWeb::HTTPS> client("127.0.0.1:" + std::to_string(port.load()), false);
+    client.config.timeout = 5;
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    headers.emplace("Cookie", "auth=" + cookie);
+
+    auto first = client.request("POST", "/api/covers/sweep", "{}", headers);
+    ASSERT_EQ(std::stoi(first->status_code.substr(0, 3)), 202);
+    ASSERT_TRUE(confighttp::wait_for_cover_sweep_for_tests(30s));
+
+    // Now give that game a cover, so there is nothing left to look up.
+    nlohmann::json covered = one;
+    covered["apps"][0]["image-path"] = "lutris.png";  // a name Polaris ships, so validation accepts it
+    private_state_file::write_atomic(config::stream.file_apps, covered.dump(2));
+    proc::refresh(config::stream.file_apps, false);
+
+    auto second = client.request("POST", "/api/covers/sweep", "{}", headers);
+    EXPECT_EQ(std::stoi(second->status_code.substr(0, 3)), 200);
+    const auto out = nlohmann::json::parse(second->content.string(), nullptr, false);
+    ASSERT_FALSE(out.is_discarded());
+    EXPECT_TRUE(out.value("nothing_to_do", false));
+    // The previous run's proposals are about a game that now has a cover. Answering with them would
+    // let the console offer to store one over it.
+    EXPECT_EQ(out["sweep"].value("total", -1), 0);
+    EXPECT_TRUE(out["sweep"]["proposals"].empty());
+  });
+}
