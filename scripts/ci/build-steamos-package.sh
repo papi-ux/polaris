@@ -167,6 +167,11 @@ fi
 # cgo links libresolv through runtime-selected resolver paths, and namcap cannot
 # see command/runtime-discovered dependencies. Every exception remains exact;
 # additions, removals, or wording changes fail the candidate gate.
+#
+# libvulkan is the same class. The compute codec brings volk in, which resolves every Vulkan entry
+# point with dlopen at runtime, so no object makes a direct call and namcap reports the library as
+# unused. The dependency is real and stays declared on purpose: dropping it would move the failure on
+# a host without Vulkan from install time to the middle of a stream.
 NAMCAP_ACTUAL="$BUILD_ROOT/namcap-actual.sorted"
 NAMCAP_ALLOWED="$BUILD_ROOT/namcap-allowed.sorted"
 NAMCAP_MISSING="$BUILD_ROOT/namcap-reviewed-missing.txt"
