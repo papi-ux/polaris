@@ -33,9 +33,20 @@ It installs the udev rules and modules-load configuration that make virtual inpu
 anything it could not complete. It does not silently take privileges you did not ask for.
 
 > [!WARNING]
-> Only add `--enable-kms` when you actually need DRM/KMS capture:
-> `sudo -H polaris --setup-host --enable-kms` grants `cap_sys_admin`. Polaris works without it on the
-> default compositor and Headless Stream paths. `--disable-kms` takes it back off.
+> Only turn on DRM/KMS capture when you actually need it. Polaris works without it on the default
+> compositor and Headless Stream paths. It takes two steps, and the first one is a package:
+>
+> ```bash
+> sudo dnf install polaris-kms
+> sudo -H polaris --setup-host --enable-kms
+> ```
+>
+> The capability lives in that package's own metadata rather than on the Polaris binary, so an
+> update no longer takes it away. `--enable-kms` only points the user service at the packaged
+> helper, and refuses if the package is not installed. `--disable-kms` points it back.
+>
+> An upgrade has to move both packages together, because `polaris-kms` requires the exact version of
+> `polaris` beside it: `sudo dnf upgrade polaris polaris-kms`.
 
 If you ran `--setup-host` on a version before v1.3.5, a copy of the udev rules may still sit in
 `/etc/udev/rules.d/60-polaris.rules` and override the packaged file. Host setup keeps it and warns
