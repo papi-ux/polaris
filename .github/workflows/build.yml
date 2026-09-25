@@ -40,6 +40,9 @@ jobs:
         with:
           ref: ${{ env.POLARIS_CHECKOUT_REF }}
 
+      - name: Verify bounded Arch CUDA download
+        run: python3 -m unittest discover -s tests/scripts -p 'test_download_arch_cuda.py'
+
       - name: Verify build scope classifier
         run: tests/scripts/test_classify_native_build.sh
 
@@ -378,6 +381,12 @@ jobs:
           printf '%s  %s\n' "$ARCH_BOOST_SHA256" "$boost_package" | sha256sum --check --strict
           printf '%s  %s\n' "$ARCH_BOOST_LIBS_SHA256" "$boost_libraries_package" | sha256sum --check --strict
           pacman -U --noconfirm "$boost_package" "$boost_libraries_package"
+
+      # Fail download setup before the expensive compile. This only fills the
+      # package cache; CUDA is installed later for the makepkg validation.
+      - name: Download Arch CUDA packages
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
+        run: bash scripts/ci/download-arch-cuda.sh
 
       - name: Configure
         if: ${{ !(startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') }}
