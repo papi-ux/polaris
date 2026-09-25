@@ -644,6 +644,15 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_platform
         ${TEST_PLATFORM_SOURCES}
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND POLARIS_ENABLE_PYROWAVE)
+        target_sources(test_polaris_platform PRIVATE
+            ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_pyrowave_session_serialization.cpp)
+        target_link_options(test_polaris_platform PRIVATE
+            -Wl,--wrap=pyrowave_encoder_encode_gpu_scaled_synchronous
+            -Wl,--wrap=pyrowave_encoder_encode_cpu_synchronous
+            -Wl,--wrap=pyrowave_encoder_create
+            -Wl,--wrap=pyrowave_encoder_destroy)
+    endif()
     if(CUDA_FOUND)
         target_include_directories(test_polaris_platform SYSTEM PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
     endif()

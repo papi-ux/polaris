@@ -108,12 +108,18 @@ namespace pyrowave_encode {
           range {range} {}
 
       ~pyrowave_session_t() override {
+        // Destroying an encoder advances the shared codec's frame context. Keep it and the
+        // upload resources alive until any peer's borrowed command buffer has completed.
+        const std::lock_guard<std::mutex> lock {owner->command_buffer_lock};
         if (scaler) {
           sws_freeContext(scaler);
         }
         if (encoder) {
           pyrowave_encoder_destroy(encoder);
+          encoder = nullptr;
         }
+        // Release under the same guard; automatic member destruction runs after local guards.
+        staging.reset();
       }
 
       bool encode_packed(const uint8_t *bgra, int src_width, int src_height, int stride,
@@ -613,6 +619,9 @@ namespace pyrowave_encode {
 
         budget = max_bytes;
         const pyrowave_rate_control rate_control = {max_bytes};
+        // The CPU-input entry point also uses the device's command-buffer override and advances
+        // its frame context. It must not borrow a different session's unfinished GPU commands.
+        const std::lock_guard<std::mutex> lock {owner->command_buffer_lock};
         const auto result = pyrowave_encoder_encode_cpu_synchronous(encoder, &buffer, &rate_control);
         if (result != PYROWAVE_SUCCESS) {
           BOOST_LOG(warning) << "PyroWave: encode failed (result "sv << static_cast<int>(result) << ')';
@@ -901,6 +910,7 @@ namespace pyrowave_encode {
                                              : PYROWAVE_CHROMA_SUBSAMPLING_444;
 
     pyrowave_encoder encoder = nullptr;
+    const std::lock_guard<std::mutex> lock {owner->command_buffer_lock};
     const auto result = pyrowave_encoder_create(&info, &encoder);
     if (result != PYROWAVE_SUCCESS) {
       BOOST_LOG(warning) << "PyroWave: could not make a "sv << width << 'x' << height
