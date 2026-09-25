@@ -690,7 +690,7 @@ namespace {
     const auto selection_closed = start.find(
       "multiseat_input_selection_closed = true"
     );
-    const auto singleton_alloc = start.find("input::alloc(session.mail, has_controllers(session))");
+    const auto singleton_alloc = start.find("input::alloc(session.mail, has_controllers(session),");
     ASSERT_NE(activate, std::string::npos);
     ASSERT_NE(selection_closed, std::string::npos);
     ASSERT_NE(singleton_alloc, std::string::npos);

@@ -2978,7 +2978,9 @@ namespace stream {
         if (paused_for_resume) {
           confighttp::set_session_state(confighttp::session_state_e::paused);
           confighttp::emit_session_event("stream_paused", "Session paused; reconnect to resume");
-        } else {
+        } else if (!uses_host_process(session) || !proc::proc.session_shutdown_requested()) {
+          // An owner stop still has process/display cleanup to finish. Its
+          // transaction publishes idle after those resources have drained.
           if (uses_host_process(session)) session::cancel_disconnect_resume_timeout();
           confighttp::set_session_state(confighttp::session_state_e::idle);
           confighttp::emit_session_event("stream_ended", "All sessions ended");
@@ -2996,6 +2998,9 @@ namespace stream {
         close_multiseat_input(session);
       });
 #endif
+
+      const auto retained_gamepad = has_controllers(session) ?
+        proc::proc.retained_gamepad_for_owner(session.device_uuid) : nullptr;
 
       // Enforce max_sessions limit
       auto max_sessions = config::stream.max_sessions;
@@ -3052,15 +3057,23 @@ namespace stream {
 #endif
         session.multiseat_input_selection_closed = true;
         if (!session.multiseat_input) {
-          session.input = input::alloc(session.mail, has_controllers(session));
+          session.input = input::alloc(session.mail, has_controllers(session),
+            retained_gamepad, session.device_uuid);
         }
       }
 #else
 #ifdef POLARIS_TESTS
       if (abort_host_start_for_tests()) return -1;
 #endif
-      session.input = input::alloc(session.mail, has_controllers(session));
+      session.input = input::alloc(session.mail, has_controllers(session),
+            retained_gamepad, session.device_uuid);
 #endif
+
+      if (!session.input
+#ifdef __linux__
+          && !session.multiseat_input
+#endif
+      ) return -1;
 
       session.broadcast_ref = broadcast.ref();
       if (!session.broadcast_ref) {

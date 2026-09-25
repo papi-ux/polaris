@@ -852,6 +852,9 @@ describe('Linux packaging contracts', () => {
     // after the attach guard started linking libxcb for real, which retired that
     // dependency's line the same way (#415).
     expect(reviewedWarnings).toHaveLength(18)
+    expect(reviewedWarnings).toContain(
+      "polaris W: Unused shared library '/usr/lib/libvulkan.so.1' by file ('usr/bin/polaris-1.4.13')",
+    )
     expect(new Set(reviewedWarnings).size).toBe(reviewedWarnings.length)
     expect(reviewedWarnings.every((warning) => warning.startsWith('polaris W: '))).toBe(true)
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/bin/polaris-browser-stream-helper"')

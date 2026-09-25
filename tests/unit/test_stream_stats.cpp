@@ -6386,3 +6386,24 @@ TEST(StreamStatsLinuxGpuProfileTests, AConfiguredAdapterKeepsTheOriginalMismatch
   EXPECT_NE(mismatch->at("message").get<std::string>().find("The configured encoder adapter"), std::string::npos);
 }
 #endif
+
+
+TEST(StreamStatsHotFieldTests, EncoderSamplesFollowCodecChangesAndResetAtStreamEnd) {
+  stream_stats::update_stream_active(false);
+  stream_stats::update_stream_active(true);
+  stream_stats::add_client("127.0.0.1", "fixture");
+  stream_stats::update_video_stats(90.0, 180000, 3.0, "pyrowave", 1280, 800, "pyrowave");
+  auto stats = stream_stats::get_current();
+  EXPECT_EQ(stats.codec, "pyrowave");
+  EXPECT_EQ(stats.encoder_backend, "pyrowave");
+  ASSERT_EQ(stats.clients.size(), 1u);
+  EXPECT_EQ(stats.clients.front().encoder_backend, "pyrowave");
+  stream_stats::update_video_stats("127.0.0.1", 90.0, 40000, 2.0, "h264", 1280, 800, "nvenc");
+  stats = stream_stats::get_current();
+  EXPECT_EQ(stats.codec, "h264");
+  EXPECT_EQ(stats.encoder_backend, "nvenc");
+  EXPECT_EQ(stats.clients.front().encoder_backend, "nvenc");
+  stream_stats::update_stream_active(false);
+  EXPECT_TRUE(stream_stats::get_current().encoder_backend.empty());
+  EXPECT_TRUE(stream_stats::get_current().codec.empty());
+}

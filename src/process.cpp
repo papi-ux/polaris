@@ -60,6 +60,7 @@
 #include "process.h"
 #include "httpcommon.h"
 #include "input.h"
+#include "retained_gamepad.h"
 #include "system_tray.h"
 #include "stream.h"
 #include "utility.h"
@@ -508,10 +509,11 @@ namespace proc {
   }
 
   namespace {
-    bool should_publish_stream_ended_after_terminate(bool had_running_app, int active_sessions, std::string_view session_state) {
-      return had_running_app &&
+    bool should_publish_stream_ended_after_terminate(bool had_running_app, int active_sessions, std::string_view session_state, bool cleanup_complete) {
+      return cleanup_complete &&
+             (had_running_app || session_state == "tearing_down"sv) &&
              active_sessions == 0 &&
-             session_state == "paused"sv;
+             (session_state == "paused"sv || session_state == "tearing_down"sv);
     }
 
     struct host_pause_session_classification_t {
@@ -609,8 +611,8 @@ namespace proc {
       return classification;
     }
 
-    void publish_stream_ended_after_terminate_if_needed(bool had_running_app) {
-      if (!should_publish_stream_ended_after_terminate(had_running_app, stream::session::active_count(), confighttp::get_session_state())) {
+    void publish_stream_ended_after_terminate_if_needed(bool had_running_app, bool cleanup_complete) {
+      if (!should_publish_stream_ended_after_terminate(had_running_app, stream::session::active_count(), confighttp::get_session_state(), cleanup_complete)) {
         return;
       }
 
@@ -5090,8 +5092,8 @@ namespace proc {
   }
 #endif
 
-  bool should_publish_stream_ended_after_terminate_for_tests(bool had_running_app, int active_sessions, std::string_view session_state) {
-    return should_publish_stream_ended_after_terminate(had_running_app, active_sessions, session_state);
+  bool should_publish_stream_ended_after_terminate_for_tests(bool had_running_app, int active_sessions, std::string_view session_state, bool cleanup_complete) {
+    return should_publish_stream_ended_after_terminate(had_running_app, active_sessions, session_state, cleanup_complete);
   }
 
   nlohmann::json classify_host_pause_session_for_tests(
@@ -9412,7 +9414,12 @@ namespace proc {
     start_steam_big_picture_input_guard(_env, steam_guard_snapshot);
 
     if (has_launch_commands) {
-      input::preallocate_gamepad(launch_session ? launch_session->controller_type : 0);
+      _retained_gamepad = input::preallocate_gamepad(
+        launch_session ? launch_session->controller_type : 0,
+        // A failed windowed probe may still fall back to an isolated headless
+        // launch, so retain the pad before either runtime is started.
+        use_cage_compositor_for_session && requested_headless_for_session && launch_session ?
+          launch_session->unique_id : std::string {});
     }
 
     // Start private runtime, then launch detached app commands into it.
@@ -10523,6 +10530,7 @@ namespace proc {
       pending_launch->cancel_for_timeout();
     }
     sync.capture_launch.reset();
+    if (_retained_gamepad) _retained_gamepad->retire();
     std::error_code ec;
     placebo = false;
 
@@ -10945,6 +10953,7 @@ namespace proc {
     initial_linux_display_saved = false;
     mode_changed_display.clear();
     _launch_session.reset();
+    _retained_gamepad.reset();
     sync.metadata_capture_owner = sync.capture_owner.load();
     virtual_display = false;
     allow_client_commands = false;
@@ -10956,7 +10965,14 @@ namespace proc {
 
     cursor::set_visible(config::input.mouse_cursor_visible);
 
-    publish_stream_ended_after_terminate_if_needed(has_run);
+    // Publish completion only after every retained cleanup authority is gone.
+    bool cleanup_complete = true;
+#ifdef __linux__
+    cleanup_complete = _session_instance_id.empty() && _detached_child_pidfds.empty() &&
+      !_retained_steam_shutdown && !linux_vdisplay &&
+      (!linux_desktop_takeover || !linux_desktop_takeover->active);
+#endif
+    publish_stream_ended_after_terminate_if_needed(has_run, cleanup_complete);
 
     if (needs_refresh) {
       reload_configuration_from_file(config::stream.file_apps);
@@ -11055,6 +11071,13 @@ namespace proc {
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     return _launch_session ? _launch_session->unique_id : std::string {};
+  }
+
+  std::shared_ptr<input::retained_gamepad_t> proc_t::retained_gamepad_for_owner(const std::string &unique_id) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    return _launch_session && !unique_id.empty() &&
+      boost::iequals(_launch_session->unique_id, unique_id) ? _retained_gamepad : nullptr;
   }
 
   std::string proc_t::get_session_owner_device_name() {

@@ -8,6 +8,8 @@
 
 // standard includes
 #include <algorithm>
+#include <atomic>
+#include <future>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -27,6 +29,7 @@ extern "C" {
 // local includes
 #include "src/config.h"
 #include "src/input.h"
+#include "src/retained_gamepad.h"
 #include "src/utility.h"
 
 namespace {
@@ -350,4 +353,100 @@ TEST(InputResetContract, KeysAreReleasedThroughTheSameMappingTheyWerePressedThro
 
   EXPECT_NE(reset.find("map_keycode(vk_from_kpid(kp.first) & 0x00FF)"), std::string::npos)
     << "a keybinding sends one key to the host and this releases another, leaving the mapped key held";
+}
+
+// A mounted device belongs to the app, while permission to write it belongs to
+// one authenticated connection. Old input tasks may outlive that connection.
+TEST(RetainedGamepadTest, ResumeKeepsDeviceButRejectsWrongOwnerAndOverlappingConnections) {
+  int destroyed = 0, neutralized = 0;
+  auto pad = std::make_shared<input::retained_gamepad_t>(7, "owner",
+    [&](int id) { EXPECT_EQ(id, 7); ++neutralized; },
+    [&](int id) { EXPECT_EQ(id, 7); ++destroyed; });
+  EXPECT_EQ(pad->acquire(""), 0U);
+  EXPECT_EQ(pad->acquire("other"), 0U);
+  const auto first = pad->acquire("owner");
+  ASSERT_NE(first, 0U);
+  EXPECT_EQ(pad->acquire("owner"), 0U);
+  pad->release(first);
+  EXPECT_EQ(neutralized, 1);
+  EXPECT_EQ(destroyed, 0);
+  const auto resumed = pad->acquire("owner");
+  ASSERT_NE(resumed, 0U);
+  EXPECT_NE(resumed, first);
+  EXPECT_EQ(pad->id(), 7);
+  EXPECT_FALSE(static_cast<bool>(pad->access(first)));
+  EXPECT_TRUE(static_cast<bool>(pad->access(resumed)));
+  // A delayed destructor from the old connection cannot neutralize the new one.
+  pad->release(first);
+  EXPECT_EQ(neutralized, 1);
+  EXPECT_TRUE(static_cast<bool>(pad->access(resumed)));
+  pad->release(resumed);
+  pad.reset();
+  EXPECT_EQ(neutralized, 2);
+  EXPECT_EQ(destroyed, 1);
+}
+
+TEST(RetainedGamepadTest, AppTeardownDrainsAndDestroysDeviceWhileStaleTasksRemainFenced) {
+  int destroyed = 0, neutralized = 0;
+  auto app = std::make_shared<input::retained_gamepad_t>(3, "owner",
+    [&](int) { ++neutralized; }, [&](int) { ++destroyed; });
+  auto old_task = app;
+  const auto lease = app->acquire("owner");
+  app->retire();
+  app->retire();
+  EXPECT_EQ(neutralized, 1);
+  EXPECT_FALSE(static_cast<bool>(old_task->access(lease)));
+  EXPECT_EQ(old_task->acquire("owner"), 0U);
+  // Stale queued input must not strand an inert controller in the next launch.
+  EXPECT_EQ(destroyed, 1);
+  app.reset();
+  EXPECT_EQ(destroyed, 1);
+  old_task->release(lease);
+  old_task.reset();
+  EXPECT_EQ(neutralized, 1);
+  EXPECT_EQ(destroyed, 1);
+}
+
+TEST(RetainedGamepadTest, RevocationDrainsAdmittedInputBeforeAnotherLeaseCanWrite) {
+  for (bool app_ended : {false, true}) {
+    std::atomic<bool> neutralized {false};
+    auto pad = std::make_shared<input::retained_gamepad_t>(1, "owner",
+      [&](int) { neutralized = true; }, [](int) {});
+    const auto lease = pad->acquire("owner");
+    std::promise<void> entered, finish;
+    auto finish_future = finish.get_future();
+    auto writer = std::async(std::launch::async, [&] {
+      auto access = pad->access(lease);
+      EXPECT_TRUE(static_cast<bool>(access));
+      entered.set_value();
+      finish_future.wait();
+      EXPECT_FALSE(neutralized.load());
+    });
+    entered.get_future().wait();
+    std::promise<void> revoke_entered;
+    auto revoker = std::async(std::launch::async, [&] {
+      revoke_entered.set_value();
+      if (app_ended) pad->retire();
+      else pad->release(lease);
+    });
+    revoke_entered.get_future().wait();
+    EXPECT_EQ(revoker.wait_for(std::chrono::milliseconds(30)), std::future_status::timeout);
+    finish.set_value();
+    writer.get();
+    revoker.get();
+    EXPECT_TRUE(neutralized.load());
+    EXPECT_FALSE(static_cast<bool>(pad->access(lease)));
+    const auto resumed = pad->acquire("owner");
+    EXPECT_EQ(resumed != 0, !app_ended);
+    EXPECT_EQ(static_cast<bool>(pad->access(resumed)), !app_ended);
+  }
+}
+
+TEST(RetainedGamepadTest, RetiredAppCannotBeClaimedEvenWithoutAnActiveStream) {
+  int neutralized = 0;
+  input::retained_gamepad_t pad(0, "owner", [&](int) { ++neutralized; }, [](int) {});
+  pad.retire();
+  EXPECT_EQ(pad.acquire("owner"), 0U);
+  EXPECT_FALSE(static_cast<bool>(pad.access(0)));
+  EXPECT_EQ(neutralized, 1);
 }

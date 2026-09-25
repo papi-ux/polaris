@@ -4648,7 +4648,8 @@ namespace video {
               config.videoFormat == 2 ? "av1" :
               config.videoFormat == 1 ? "hevc" : "h264",
             config.width,
-            config.height
+            config.height,
+            encoder.name
           );
         }
         } // end fps tracking scope
@@ -5291,7 +5292,7 @@ namespace video {
         std::move(encode_device),
         ref->reinit_event,
         ref->reinit_request_event,
-        *ref->encoder_p,
+        encoder,
         channel_data,
         packets
       );
