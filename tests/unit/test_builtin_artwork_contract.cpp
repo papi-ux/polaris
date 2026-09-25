@@ -6,24 +6,42 @@
 #include <filesystem>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
 #include <string>
 
 #include <gtest/gtest.h>
 
 namespace {
-  std::string read_nvhttp_source() {
-    std::ifstream input(std::filesystem::path {POLARIS_SOURCE_DIR} / "src/nvhttp.cpp");
-    EXPECT_TRUE(input.good());
+  std::string read_source(const std::string &relative) {
+    std::ifstream input(std::filesystem::path {POLARIS_SOURCE_DIR} / relative);
+    EXPECT_TRUE(input.good()) << relative;
     std::ostringstream contents;
     contents << input.rdbuf();
     return contents.str();
+  }
+
+  std::string read_nvhttp_source() {
+    return read_source("src/nvhttp.cpp");
+  }
+
+  /**
+   * The rule itself lives beside the uuids it names, in process.cpp, and nvhttp asks it. It used to
+   * be a copy of its own inside nvhttp.cpp, which the console's cover sweep would have had to copy
+   * again to know which entries have no artwork to look for. Two copies of this rule drifting apart
+   * is how Low Res Desktop got Low Magic Age's poster in the first place.
+   */
+  std::string read_process_source() {
+    return read_source("src/process.cpp");
   }
 
   std::string function_body(const std::string &source, const std::string &signature) {
     const auto start = source.find(signature);
     EXPECT_NE(start, std::string::npos) << signature;
     if (start == std::string::npos) return {};
-    const auto next = source.find("\n    }\n", start);
+    // Whichever closing brace comes first: nvhttp nests these two levels deep, process.cpp one.
+    const auto nested = source.find("\n    }\n", start);
+    const auto plain = source.find("\n  }\n", start);
+    const auto next = std::min(nested, plain);
     EXPECT_NE(next, std::string::npos) << signature;
     return next == std::string::npos ? std::string {} : source.substr(start, next - start);
   }
@@ -31,7 +49,7 @@ namespace {
 
 TEST(BuiltinArtworkContract, ResolvesThePackagedPosterAndRetiresOnlyAutomaticMatches) {
   const auto source = read_nvhttp_source();
-  const auto policy = function_body(source, "bool uses_bundled_utility_artwork(");
+  const auto policy = function_body(read_process_source(), "bool uses_bundled_utility_artwork(");
   const auto configured = function_body(source, "fs::path configured_artwork_image(");
   const auto promotion = function_body(source, "void promote_local_artwork_poster(");
   ASSERT_FALSE(policy.empty());
@@ -42,11 +60,12 @@ TEST(BuiltinArtworkContract, ResolvesThePackagedPosterAndRetiresOnlyAutomaticMat
   // Desktop entries are not games either (Low Res Desktop once took Low Magic Age's artwork).
   EXPECT_NE(policy.find("app.desktop_mirror"), std::string::npos);
   // An upgraded host's apps.json predates the flag, so an entry that launches nothing counts too.
-  EXPECT_NE(policy.find("proc::launches_nothing(app)"), std::string::npos);
+  // Unqualified: the rule and launches_nothing are both proc's now.
+  EXPECT_NE(policy.find("launches_nothing(app)"), std::string::npos);
   EXPECT_NE(configured.find("proc::validate_app_image_path"), std::string::npos);
   // Launchers name bundled images too (lutris.png, heroic.png), so a relative name resolves for
   // every entry, but only a utility entry may take the generic box art validation falls back to.
-  EXPECT_EQ(configured.find("!uses_bundled_utility_artwork(app) ||"), std::string::npos);
+  EXPECT_EQ(configured.find("!proc::uses_bundled_utility_artwork(app) ||"), std::string::npos);
   EXPECT_NE(configured.find("validated == proc::validate_app_image_path({}) ? configured"), std::string::npos);
   // A replaced or retargeted image refreshes its copy; a cleared one retires it.
   EXPECT_NE(promotion.find("game_artwork::local_poster_needs_copy(appdata, app.uuid, candidates.front())"), std::string::npos);
@@ -85,7 +104,7 @@ TEST(BuiltinArtworkContract, UtilityEntriesNeverAdvertiseOrServeAnAutomaticMatch
   const auto source = read_nvhttp_source();
   const auto manifest = function_body(source, "nlohmann::json artwork_manifest_for(");
   ASSERT_FALSE(manifest.empty());
-  EXPECT_NE(manifest.find("uses_bundled_utility_artwork(app)"), std::string::npos);
+  EXPECT_NE(manifest.find("proc::uses_bundled_utility_artwork(app)"), std::string::npos);
   EXPECT_NE(manifest.find("asset.source == game_artwork::source_e::steamgriddb"), std::string::npos);
   EXPECT_NE(source.find("game[\"artwork\"] = artwork_manifest_for(platf::appdata(), app);"), std::string::npos);
 
@@ -94,7 +113,7 @@ TEST(BuiltinArtworkContract, UtilityEntriesNeverAdvertiseOrServeAnAutomaticMatch
   const auto next_handler = source.find("auto polarisResolveGameArtwork =", handler);
   ASSERT_NE(next_handler, std::string::npos);
   const auto asset_route = source.substr(handler, next_handler - handler);
-  EXPECT_NE(asset_route.find("asset->source == game_artwork::source_e::steamgriddb && uses_bundled_utility_artwork(*app)"),
+  EXPECT_NE(asset_route.find("asset->source == game_artwork::source_e::steamgriddb && proc::uses_bundled_utility_artwork(*app)"),
             std::string::npos);
 }
 
@@ -102,7 +121,7 @@ TEST(BuiltinArtworkContract, OnlyOneParticularGameIsGivenACompletionTime) {
   // A launcher's title found a game that shares its name: the Heroic entry was served the
   // completion time of a game called Heroic Dungeon, and asked the lookup again for it.
   const auto source = read_nvhttp_source();
-  const auto guard = source.find("if (!uses_bundled_utility_artwork(app) && proc::is_one_game(app)) {");
+  const auto guard = source.find("if (!proc::uses_bundled_utility_artwork(app) && proc::is_one_game(app)) {");
   ASSERT_NE(guard, std::string::npos);
   const auto call = source.find("beat_time_for_app(app, game[\"artwork\"])");
   ASSERT_NE(call, std::string::npos);
