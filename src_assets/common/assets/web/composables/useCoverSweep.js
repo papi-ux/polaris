@@ -27,7 +27,11 @@ function rowFor(proposal) {
     posters: [],
     postersLoading: false,
     postersError: '',
-    chosen: null,
+    // The position of the poster this row will store, not its token. A token belongs to the host's
+    // preview cache, which holds sixty four of them across every row, so opening thirteen rows
+    // evicts the first one's. The provider returns a game's posters in the same order every time, so
+    // a position survives being read again and a token does not.
+    chosenIndex: 0,
     applied: false,
     applyError: '',
   }
@@ -49,12 +53,16 @@ function rowFor(proposal) {
 export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) {
   const sweep = ref(null)
   const rows = ref([])
+  // The last start found nothing to look up, which is an answer rather than a failure.
+  const nothingToDo = ref(false)
   const loading = ref(false)
   const starting = ref(false)
   const applying = ref(false)
   const applied = ref(0)
   const error = ref('')
 
+  // The poster read in flight for each row, so a second caller awaits it rather than skipping it.
+  const inFlight = new Map()
   let pollTimer = null
   let loadSequence = 0
   let appliedSequence = 0
@@ -75,6 +83,10 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
    */
   function absorb(next) {
     sweep.value = next
+    // An apply is walking rows.value right now. Rebuilding it would hand that loop orphaned objects:
+    // every row it marked applied after this point would be marked on something nothing renders, the
+    // count would disagree with the rows, and pressing Apply again would store those covers twice.
+    if (applying.value) return
     const previous = new Map(rows.value.map((row) => [row.uuid, row]))
     rows.value = (next?.proposals || []).map((proposal) => {
       const before = previous.get(proposal.uuid)
@@ -86,7 +98,8 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
         ...row,
         keep: before.outcome === row.outcome ? before.keep : row.keep,
         posters: before.posters,
-        chosen: before.chosen,
+        chosenIndex: before.chosenIndex,
+        postersLoading: before.postersLoading,
         postersError: before.postersError,
         applied: before.applied,
         applyError: before.applyError,
@@ -122,6 +135,7 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
     starting.value = true
     error.value = ''
     applied.value = 0
+    nothingToDo.value = false
     try {
       const res = await fetch('./api/covers/sweep', {
         credentials: 'include',
@@ -132,6 +146,7 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
       const data = await readJson(res)
       if (disposed) return
       if (res.ok && data?.status) {
+        nothingToDo.value = Boolean(data.nothing_to_do)
         absorb(data.sweep || null)
         stopPolling()
         if (searching()) pollTimer = setTimeout(load, pollIntervalMs)
@@ -139,6 +154,9 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
         // The host's own sentence, which names the fix for a missing or refused key.
         error.value = data?.error || 'Could not start the cover search'
         if (data?.sweep) absorb(data.sweep)
+        // Refused because one is already going: follow that one rather than leaving it frozen.
+        stopPolling()
+        if (searching()) pollTimer = setTimeout(load, pollIntervalMs)
       }
     } catch (e) {
       error.value = 'Could not start the cover search'
@@ -166,11 +184,21 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
     }
   }
 
-  /** Read one row's posters, the way the Find Cover panel reads a candidate's. */
-  async function loadPosters(row) {
-    if (!row?.providerGameId || row.postersLoading || row.posters.length) return
+  /**
+   * Read one row's posters, the way the Find Cover panel reads a candidate's.
+   *
+   * @param force Read them again even if this row already has some, because the tokens they carry
+   *              expire and get evicted. An apply always forces, so it stores with a fresh one.
+   */
+  async function loadPosters(row, { force = false } = {}) {
+    if (!row?.providerGameId) return
+    // Already on its way. Awaiting the same promise is what stops an apply, which forces, from
+    // deciding there is no poster while the first read is still in flight.
+    if (row.postersLoading) return inFlight.get(row.uuid)
+    if (row.posters.length && !force) return
     row.postersLoading = true
     row.postersError = ''
+    const read = (async () => {
     try {
       const res = await fetch('./api/covers/choices', {
         credentials: 'include',
@@ -186,7 +214,8 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
       if (disposed) return
       if (res.ok && data?.status) {
         row.posters = (data.choices || []).filter((choice) => choice?.token && choice?.preview)
-        row.chosen = row.posters[0]?.token || null
+        // A read again keeps the position the reviewer picked, unless there are fewer posters now.
+        if (row.chosenIndex >= row.posters.length) row.chosenIndex = 0
         if (!row.posters.length) row.postersError = 'No poster came back for this match.'
       } else {
         row.postersError = data?.error || 'Could not read this game’s posters'
@@ -195,7 +224,11 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
       row.postersError = 'Could not read this game’s posters'
     } finally {
       row.postersLoading = false
+      inFlight.delete(row.uuid)
     }
+    })()
+    inFlight.set(row.uuid, read)
+    return read
   }
 
   /**
@@ -212,8 +245,12 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
       for (const row of rows.value) {
         if (!row.keep || row.applied || row.outcome !== 'proposed') continue
         row.applyError = ''
-        await loadPosters(row)
-        if (!row.chosen) {
+        // Read the posters again, always. A token the reviewer's browser is still showing may already
+        // have been evicted from the host's cache by the rows they opened after it, and select refuses
+        // an evicted token.
+        await loadPosters(row, { force: true })
+        const token = row.posters[row.chosenIndex]?.token
+        if (!token) {
           row.applyError = row.postersError || 'No poster to store for this game.'
           continue
         }
@@ -222,7 +259,7 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
             credentials: 'include',
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uuid: row.uuid, token: row.chosen }),
+            body: JSON.stringify({ uuid: row.uuid, token }),
           })
           const data = await readJson(res)
           if (disposed) return
@@ -256,6 +293,7 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
   return {
     sweep,
     rows,
+    nothingToDo,
     loading,
     starting,
     applying,

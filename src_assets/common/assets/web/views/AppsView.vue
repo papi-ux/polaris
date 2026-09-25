@@ -71,6 +71,124 @@
       </div>
     </section>
 
+    <section v-if="!showEditForm" class="section-card">
+    <section class="library-cover-sweep-summary">
+      <div class="min-w-0" role="status" aria-live="polite" aria-atomic="true">
+        <div class="section-kicker">Covers</div>
+        <div class="library-import-staged-title">{{ sweepTitle }}</div>
+        <div class="library-import-staged-copy">{{ sweepCopy }}</div>
+        <div v-if="coverSweep.error.value" class="mt-1 text-xs text-rose" data-sweep-error>
+          {{ coverSweep.error.value }}
+        </div>
+      </div>
+      <div class="library-import-staged-actions">
+        <Button
+          v-if="sweepSearching"
+          variant="outline"
+          data-sweep-stop
+          @click="coverSweep.stop()"
+        >
+          Stop
+        </Button>
+        <Button
+          v-else
+          variant="outline"
+          :loading="coverSweep.starting.value"
+          :disabled="coverSweep.starting.value || coverSweep.applying.value"
+          data-sweep-start
+          @click="coverSweep.start()"
+        >
+          Find covers
+        </Button>
+        <Button
+          variant="outline"
+          :disabled="sweepRows.length === 0"
+          data-sweep-review-open
+          @click="showSweepReview = !showSweepReview"
+        >
+          {{ showSweepReview ? 'Hide review' : 'Review proposals' }}
+        </Button>
+        <Button
+          variant="primary"
+          :loading="coverSweep.applying.value"
+          :disabled="coverSweep.applying.value || sweepKeptCount === 0"
+          data-sweep-apply
+          @click="applySweep"
+        >
+          {{ sweepApplyLabel }}
+        </Button>
+      </div>
+    </section>
+
+    <section v-if="showSweepReview && sweepRows.length" class="library-cover-sweep-drawer">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <div class="section-kicker">Proposed covers</div>
+          <h3 class="text-base font-semibold text-silver">Keep the matches that are right</h3>
+          <p class="mt-1 text-sm text-storm">
+            A title search is right most of the time rather than always, so nothing is stored until you
+            apply. Open a row to see its poster.
+          </p>
+        </div>
+        <span class="meta-pill">{{ sweepKeptCount }} of {{ sweepRows.length }} kept</span>
+      </div>
+      <div class="library-cover-sweep-list">
+        <article
+          v-for="row in sweepRows"
+          :key="row.uuid"
+          class="library-cover-sweep-row"
+          :data-sweep-row="row.uuid"
+        >
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="truncate text-sm font-semibold text-silver">{{ row.name }}</span>
+              <span class="control-chip">{{ sweepOutcomeLabel(row) }}</span>
+              <span v-if="row.confidence !== null" class="control-chip">{{ row.confidence }}% match</span>
+            </div>
+            <div class="mt-1 text-xs text-storm">{{ sweepRowCopy(row) }}</div>
+            <div v-if="row.postersError" class="mt-1 text-xs text-rose">{{ row.postersError }}</div>
+            <div v-if="row.applyError" class="mt-1 text-xs text-rose">{{ row.applyError }}</div>
+            <div v-if="row.posters.length" class="mt-2 flex flex-wrap gap-2">
+              <button
+                v-for="(poster, at) in row.posters"
+                :key="poster.token"
+                type="button"
+                class="rounded border p-0.5"
+                :class="row.chosenIndex === at ? 'border-aurora' : 'border-transparent'"
+                :data-sweep-poster="at"
+                @click="row.chosenIndex = at"
+              >
+                <img :src="poster.preview" :alt="row.title" class="h-24 w-16 rounded object-cover" />
+              </button>
+            </div>
+          </div>
+          <div class="flex shrink-0 items-center gap-2">
+            <Button
+              v-if="row.outcome === 'proposed' && !row.posters.length"
+              variant="ghost"
+              size="sm"
+              :loading="row.postersLoading"
+              :data-sweep-row-open="row.uuid"
+              @click="coverSweep.loadPosters(row)"
+            >
+              Show posters
+            </Button>
+            <label v-if="row.outcome === 'proposed'" class="flex items-center gap-1 text-xs text-storm">
+              <input
+                type="checkbox"
+                v-model="row.keep"
+                :disabled="row.applied"
+                :data-sweep-keep="row.uuid"
+              />
+              Keep
+            </label>
+            <span v-if="row.applied" class="control-chip" :data-sweep-applied="row.uuid">Applied</span>
+          </div>
+        </article>
+      </div>
+    </section>
+    </section>
+
     <section v-if="!showEditForm && showImport" class="section-card library-import-console">
       <div class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div>
@@ -218,122 +336,6 @@
         </div>
       </section>
 
-
-      <section class="library-import-staged-summary">
-        <div class="min-w-0" role="status" aria-live="polite" aria-atomic="true">
-          <div class="section-kicker">Covers</div>
-          <div class="library-import-staged-title">{{ sweepTitle }}</div>
-          <div class="library-import-staged-copy">{{ sweepCopy }}</div>
-          <div v-if="coverSweep.error.value" class="mt-1 text-xs text-rose" data-sweep-error>
-            {{ coverSweep.error.value }}
-          </div>
-        </div>
-        <div class="library-import-staged-actions">
-          <Button
-            v-if="sweepSearching"
-            variant="outline"
-            data-sweep-stop
-            @click="coverSweep.stop()"
-          >
-            Stop
-          </Button>
-          <Button
-            v-else
-            variant="outline"
-            :loading="coverSweep.starting.value"
-            :disabled="coverSweep.starting.value || coverSweep.applying.value"
-            data-sweep-start
-            @click="coverSweep.start()"
-          >
-            Find covers
-          </Button>
-          <Button
-            variant="outline"
-            :disabled="sweepRows.length === 0"
-            data-sweep-review-open
-            @click="showSweepReview = !showSweepReview"
-          >
-            {{ showSweepReview ? 'Hide review' : 'Review proposals' }}
-          </Button>
-          <Button
-            variant="primary"
-            :loading="coverSweep.applying.value"
-            :disabled="coverSweep.applying.value || sweepKeptCount === 0"
-            data-sweep-apply
-            @click="applySweep"
-          >
-            {{ sweepApplyLabel }}
-          </Button>
-        </div>
-      </section>
-
-      <section v-if="showSweepReview && sweepRows.length" class="library-import-review-drawer">
-        <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <div class="section-kicker">Proposed covers</div>
-            <h3 class="text-base font-semibold text-silver">Keep the matches that are right</h3>
-            <p class="mt-1 text-sm text-storm">
-              A title search is right most of the time rather than always, so nothing is stored until you
-              apply. Open a row to see its poster.
-            </p>
-          </div>
-          <span class="meta-pill">{{ sweepKeptCount }} of {{ sweepRows.length }} kept</span>
-        </div>
-        <div class="library-import-review-list">
-          <article
-            v-for="row in sweepRows"
-            :key="row.uuid"
-            class="library-import-review-row"
-            :data-sweep-row="row.uuid"
-          >
-            <div class="min-w-0">
-              <div class="flex flex-wrap items-center gap-2">
-                <span class="truncate text-sm font-semibold text-silver">{{ row.name }}</span>
-                <span class="control-chip">{{ sweepOutcomeLabel(row) }}</span>
-                <span v-if="row.confidence !== null" class="control-chip">{{ row.confidence }}% match</span>
-              </div>
-              <div class="mt-1 text-xs text-storm">{{ sweepRowCopy(row) }}</div>
-              <div v-if="row.postersError" class="mt-1 text-xs text-rose">{{ row.postersError }}</div>
-              <div v-if="row.applyError" class="mt-1 text-xs text-rose">{{ row.applyError }}</div>
-              <div v-if="row.posters.length" class="mt-2 flex flex-wrap gap-2">
-                <button
-                  v-for="poster in row.posters"
-                  :key="poster.token"
-                  type="button"
-                  class="rounded border p-0.5"
-                  :class="row.chosen === poster.token ? 'border-aurora' : 'border-transparent'"
-                  :data-sweep-poster="poster.token"
-                  @click="row.chosen = poster.token"
-                >
-                  <img :src="poster.preview" :alt="row.title" class="h-24 w-16 rounded object-cover" />
-                </button>
-              </div>
-            </div>
-            <div class="flex shrink-0 items-center gap-2">
-              <Button
-                v-if="row.outcome === 'proposed' && !row.posters.length"
-                variant="ghost"
-                size="sm"
-                :loading="row.postersLoading"
-                :data-sweep-row-open="row.uuid"
-                @click="coverSweep.loadPosters(row)"
-              >
-                Show posters
-              </Button>
-              <label v-if="row.outcome === 'proposed'" class="flex items-center gap-1 text-xs text-storm">
-                <input
-                  type="checkbox"
-                  v-model="row.keep"
-                  :disabled="row.applied"
-                  :data-sweep-keep="row.uuid"
-                />
-                Keep
-              </label>
-              <span v-if="row.applied" class="control-chip" :data-sweep-applied="row.uuid">Applied</span>
-            </div>
-          </article>
-        </div>
-      </section>
 
       <section v-if="hasImportSources && showImportReview" class="library-import-review-drawer">
         <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -1314,7 +1316,7 @@
 </template>
 
 <script setup>
-import { computed, ref, inject, watch } from 'vue'
+import { computed, ref, inject, onMounted, watch } from 'vue'
 import Checkbox from '../Checkbox.vue'
 import Button from '../components/Button.vue'
 import AppArtworkControls from '../components/AppArtworkControls.vue'
@@ -2144,6 +2146,7 @@ const sweepKeptCount = computed(
 
 const sweepTitle = computed(() => {
   const sweep = coverSweep.sweep.value
+  if (coverSweep.nothingToDo.value) return 'Every game already has a cover'
   if (!sweep || !sweep.total) return 'Find covers for games without one'
   if (sweep.state === 'searching') return `Looking up ${sweep.total} games`
   return sweep.message || 'Cover search finished'
@@ -2152,6 +2155,9 @@ const sweepTitle = computed(() => {
 const sweepCopy = computed(() => {
   const sweep = coverSweep.sweep.value
   if (coverSweep.applying.value) return `Storing covers, ${coverSweep.applied.value} so far.`
+  if (coverSweep.nothingToDo.value) {
+    return 'Nothing to look up. Every published game has a cover, or has had artwork lookup turned off.'
+  }
   if (!sweep || !sweep.total) {
     return 'One pass over every game with no cover. Nothing is stored until you apply it.'
   }
@@ -2207,6 +2213,12 @@ async function saveSweepCover(uuid, path) {
     return false
   }
 }
+
+// A run started before this page loaded, or in another tab, is still going. Read it once so the
+// panel shows it and starts polling rather than offering to start a second one and being refused.
+onMounted(() => {
+  coverSweep.load()
+})
 
 async function applySweep() {
   showSweepReview.value = true

@@ -10,8 +10,11 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 #include <nlohmann/json.hpp>
 
@@ -61,6 +64,18 @@ namespace {
   constexpr auto kTwo = "22222222-2222-4222-8222-222222222222";
   constexpr auto kThree = "33333333-3333-4333-8333-333333333333";
 
+  /// A one pixel PNG, because validation checks the bytes rather than the name.
+  void write_png(const fs::path &path) {
+    static constexpr unsigned char png[] = {
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+      0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+      0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+      0x42, 0x60, 0x82};
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char *>(png), sizeof(png));
+  }
+
   /// An appdata directory of its own, so the host's real artwork state cannot change an answer.
   struct scoped_appdata_t {
     fs::path path;
@@ -91,17 +106,7 @@ TEST(CoverSweepPredicate, AGameWithNoCoverIsAskedAboutAndOneWithACoverIsNot) {
 
   // Give the second a real image and it drops out.
   const auto cover = appdata.path / "covered.png";
-  {
-    // A one pixel PNG, because validation checks the bytes rather than the name.
-    static constexpr unsigned char png[] = {
-      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
-      0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
-      0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
-      0x42, 0x60, 0x82};
-    std::ofstream out(cover, std::ios::binary);
-    out.write(reinterpret_cast<const char *>(png), sizeof(png));
-  }
+  write_png(cover);
   games = confighttp::games_without_a_cover(
     appdata.path, list_with({{kOne, ""}, {kTwo, cover.string()}}), apps);
   EXPECT_EQ(names_of(games), (std::vector<std::string> {"Blank Game"}));
@@ -162,22 +167,12 @@ TEST(CoverSweepPredicate, AnEntryWithoutAUsableNameOrUuidIsSkipped) {
   EXPECT_EQ(names_of(games), (std::vector<std::string> {"Fine"}));
 }
 
-TEST(CoverSweepPredicate, TheHydratedListWinsOverTheEntryItself) {
+TEST(CoverSweepPredicate, TheConsoleListFillsAGapRatherThanOverridingTheEntry) {
   scoped_appdata_t appdata;
   // A Lutris entry carries no image of its own; the console's list gets one filled in when it is
-  // read. The sweep reads that list, so the entry counts as having a cover.
+  // read. So an empty entry takes the list's answer and counts as having a cover.
   const auto cover = appdata.path / "lutris.png";
-  {
-    static constexpr unsigned char png[] = {
-      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
-      0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
-      0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
-      0x42, 0x60, 0x82};
-    std::ofstream out(cover, std::ios::binary);
-    out.write(reinterpret_cast<const char *>(png), sizeof(png));
-  }
-
+  write_png(cover);
   auto lutris = game(kOne, "A Lutris Game");
   lutris.image_path.clear();
   const std::vector<proc::ctx_t> apps {lutris};
@@ -185,4 +180,23 @@ TEST(CoverSweepPredicate, TheHydratedListWinsOverTheEntryItself) {
   EXPECT_TRUE(confighttp::games_without_a_cover(appdata.path, list_with({{kOne, ""}}), apps).size() == 1);
   EXPECT_TRUE(
     confighttp::games_without_a_cover(appdata.path, list_with({{kOne, cover.string()}}), apps).empty());
+}
+
+TEST(CoverSweepPredicate, AnImageNamedThroughAVariableStillCounts) {
+  scoped_appdata_t appdata;
+  const auto cover = appdata.path / "expanded.png";
+  write_png(cover);
+
+  // apps.json holds the text somebody typed, and the entry holds it with its variables expanded.
+  // Reading the file's copy would find no such path, answer with the generic box art, and offer a new
+  // cover for a game whose tile visibly has one. Applying that would then write the expansion back
+  // over the variable.
+  auto app = game(kOne, "Variable Game");
+  app.image_path = cover.string();
+  const std::vector<proc::ctx_t> apps {app};
+
+  EXPECT_TRUE(
+    confighttp::games_without_a_cover(appdata.path, list_with({{kOne, "$HOME/covers/expanded.png"}}), apps)
+      .empty())
+    << "an entry whose image is named through a variable was offered a cover it already has";
 }

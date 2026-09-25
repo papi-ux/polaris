@@ -15,6 +15,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -35,6 +36,15 @@ namespace artwork_sweep {
 
   /// How long the first wait after a rate limit lasts. Each further one doubles it.
   inline constexpr std::int64_t first_rate_limit_wait_milliseconds = 2'000;
+
+  /**
+   * @brief The longest a wait goes without looking at whether it has been cancelled.
+   *
+   * A rate limit wait reaches half a minute, and a run that only checked between waits would take
+   * that long to stop. Nothing would be wrong with the answer, but the host would sit in a static
+   * destructor at shutdown for as long as the wait had left to run.
+   */
+  inline constexpr std::int64_t cancel_check_interval_milliseconds = 250;
 
   /// How many times a run waits out a rate limit before it gives up on the rest.
   inline constexpr int maximum_rate_limit_waits = 5;
@@ -161,17 +171,24 @@ namespace artwork_sweep {
 
     ~sweeper_t() {
       cancel();
-      wait_for_idle(std::chrono::seconds {30});
+      // Long enough for the lookup in flight to time out and the thread to leave. A wait that gave
+      // up early would let a detached thread lock this mutex after it had been destroyed.
+      wait_for_idle(std::chrono::seconds {90});
     }
 
     /// Begin a run over these games. At most `maximum_games_per_run` of them are looked up.
     start_e start(std::vector<candidate_t> games) {
-      if (games.empty()) {
-        return start_e::nothing_to_do;
-      }
       std::unique_lock lock(mutex_);
       if (job_.state == state_e::searching) {
         return start_e::already_running;
+      }
+
+      // Nothing to look up forgets the run before it, rather than leaving its proposals on screen.
+      // Those proposals are about games that now have covers, and applying them a second time would
+      // write over what is already there, including a cover somebody picked by hand.
+      if (games.empty()) {
+        job_ = job_t {};
+        return start_e::nothing_to_do;
       }
 
       const bool clipped = games.size() > maximum_games_per_run;
@@ -241,15 +258,30 @@ namespace artwork_sweep {
     }
 
     void run(const std::vector<candidate_t> &games, const lookup_fn_t &lookup, const sleep_fn_t &sleep) {
-      const auto pause = [&sleep](std::int64_t milliseconds) {
+      const auto cancelled = [this] {
+        std::lock_guard lock(mutex_);
+        return cancelled_;
+      };
+
+      // Waits in slices, so being asked to stop is noticed within a quarter of a second however long
+      // the wait is. An injected sleep is called once with the whole amount: a test has no thread to
+      // stop and wants to see what was asked for.
+      const auto pause = [&sleep, &cancelled](std::int64_t milliseconds) {
         if (milliseconds <= 0) {
           return;
         }
         if (sleep) {
           sleep(milliseconds);
+          return;
         }
-        else {
-          std::this_thread::sleep_for(std::chrono::milliseconds {milliseconds});
+        std::int64_t left = milliseconds;
+        while (left > 0) {
+          const auto slice = std::min(left, cancel_check_interval_milliseconds);
+          std::this_thread::sleep_for(std::chrono::milliseconds {slice});
+          left -= slice;
+          if (cancelled()) {
+            return;
+          }
         }
       };
 
@@ -260,12 +292,9 @@ namespace artwork_sweep {
         return "Stopped before " + std::to_string(games.size() - at) + " of the games were looked up.";
       };
       for (; index < games.size(); ++index) {
-        {
-          std::lock_guard lock(mutex_);
-          if (cancelled_) {
-            stopped_because = stopped_here(index);
-            break;
-          }
+        if (cancelled()) {
+          stopped_because = stopped_here(index);
+          break;
         }
         if (index > 0) {
           pause(between_games_milliseconds);
@@ -284,10 +313,7 @@ namespace artwork_sweep {
         while (answer.rate_limited && waits < maximum_rate_limit_waits) {
           pause(first_rate_limit_wait_milliseconds << waits);
           ++waits;
-          {
-            std::lock_guard lock(mutex_);
-            stopped_waiting = cancelled_;
-          }
+          stopped_waiting = cancelled();
           if (stopped_waiting) {
             break;
           }

@@ -238,7 +238,8 @@ TEST(AppsFile, EveryChangeTakesOneLock) {
   // saveApp, reorderApps, deleteApp, importGames, the install job's own rewrite, downloadCover,
   // and the cover sweep reading the list it is about to look games up from.
   EXPECT_EQ(locks, 7u);
-  for (const auto *signature : {"void saveApp(", "void reorderApps(", "void deleteApp(", "void importGames("}) {
+  for (const auto *signature : {"void saveApp(", "void reorderApps(", "void deleteApp(", "void importGames(",
+                                "void downloadCover(", "void startCoverSweep("}) {
     const auto body = handler_body(source, signature);
     const auto lock = body.find("std::scoped_lock apps_lock(apps_file_mutex());");
     const auto read = body.find("read_file(config::stream.file_apps.c_str())");

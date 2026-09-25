@@ -6613,14 +6613,24 @@ namespace confighttp {
     // "this entry has no cover" looks like from out here.
     const auto placeholder = proc::validate_app_image_path({});
     std::vector<artwork_sweep::candidate_t> games;
+    std::set<std::string, std::less<>> asked_about;
     for (const auto &app : apps) {
       if (!game_artwork::is_valid_uuid(app.uuid)) continue;
       if (proc::uses_bundled_utility_artwork(app)) continue;
       if (!game_artwork::automatic_artwork_lookup_enabled(appdata, app.uuid)) continue;
       if (boost::trim_copy(app.name).empty()) continue;
+      // The entry's own image first, because that one has had its environment variables expanded;
+      // the raw text from the file has not, so "$HOME/covers/x.png" would read as a path that is not
+      // there and the game would be offered a cover it already has. The console's list only fills a
+      // gap: a Lutris entry carries no image of its own until that list is read.
       const auto found = configured.find(app.uuid);
-      const auto image = found == configured.end() ? app.image_path : found->second;
+      auto image = app.image_path;
+      if (image.empty() && found != configured.end()) image = found->second;
       if (!image.empty() && proc::validate_app_image_path(image) != placeholder) continue;
+      // Nothing stops two entries carrying one uuid. Two rows for one entry would store its cover
+      // twice, and only the first of them would ever be saved, so the second would be proposed again
+      // on every run.
+      if (!asked_about.insert(app.uuid).second) continue;
       games.push_back(artwork_sweep::candidate_t {app.uuid, app.name});
     }
     return games;

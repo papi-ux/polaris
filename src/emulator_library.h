@@ -413,6 +413,10 @@ namespace emulator_library {
    * "007 - GoldenEye" is a name, and stripping either leaves a different game's title behind. So an
    * index has to be padded with a leading zero, which a year never is, and four or five digits long,
    * which the Bond number is not. Sets pad to four.
+   *
+   * The leading zero is what costs something: a set with more than 999 entries keeps the index on
+   * everything from 1000 on, so those names are searched for with a catalogue number in them. Fixing
+   * that means telling 1000 the index from 1943 the year, which nothing in a filename can do.
    */
   inline std::string strip_set_number(std::string_view name) {
     if (name.empty() || name.front() != '0') {
