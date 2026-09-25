@@ -2308,8 +2308,37 @@ namespace video {
   // yet or the query was unavailable, in which case quality levels are not clamped
   // and only level 0 is offered in the web UI. Declared here (rather than with the
   // other encoder probe state below) because the Vulkan codec option tables that
-  // follow reference it during static initialization.
-  std::array<int, 3> last_encoder_probe_vulkan_quality_levels_for_codec = {-1, -1, -1};
+  // follow reference it during static initialization. Each count is atomic: a
+  // stream session writes it when it opens its Vulkan device while holding only
+  // the capture thread's shared lease, the same lease other sessions and the
+  // web UI read it under.
+  std::array<std::atomic<int>, 3> last_encoder_probe_vulkan_quality_levels_for_codec = {-1, -1, -1};
+
+  std::array<int, 3> load_vulkan_quality_levels() {
+    std::array<int, 3> levels;
+    for (std::size_t i = 0; i < levels.size(); ++i) {
+      levels[i] = last_encoder_probe_vulkan_quality_levels_for_codec[i].load(std::memory_order_relaxed);
+    }
+    return levels;
+  }
+
+  void store_vulkan_quality_levels(const std::array<int, 3> &levels) {
+    for (std::size_t i = 0; i < levels.size(); ++i) {
+      last_encoder_probe_vulkan_quality_levels_for_codec[i].store(levels[i], std::memory_order_relaxed);
+    }
+  }
+
+  int vulkan_quality_max(const std::array<int, 3> &levels, bool include_av1) {
+    int max_level = -1;
+    for (std::size_t i = 0; i < levels.size(); ++i) {
+      if (levels[i] <= 0 || (i == 2 && !include_av1)) {
+        continue;
+      }
+      const auto level_max = levels[i] - 1;
+      max_level = (max_level < 0) ? level_max : std::min(max_level, level_max);
+    }
+    return max_level;
+  }
 
   int vulkan_quality_clamp(int configured, int max_quality_levels) {
     if (configured < 0) {
@@ -2345,7 +2374,7 @@ namespace video {
   // of the shared options plus that codec's clamp.
   const auto vulkan_options_for_codec = [](int codec_index) {
     std::vector<encoder_t::option_t> options(vulkan_common_options);
-    options.push_back({"quality"s, [codec_index]() { return vulkan_quality_clamp(config::video.vk.quality, last_encoder_probe_vulkan_quality_levels_for_codec[codec_index]); }});
+    options.push_back({"quality"s, [codec_index]() { return vulkan_quality_clamp(config::video.vk.quality, last_encoder_probe_vulkan_quality_levels_for_codec[codec_index].load(std::memory_order_relaxed)); }});
     return options;
   };
 
@@ -2368,9 +2397,13 @@ namespace video {
     { vulkan_av1_options, {}, {}, {}, {}, {}, "av1_vulkan"s },
     { vulkan_hevc_options, {}, {}, {}, {}, {}, "hevc_vulkan"s },
     { vulkan_h264_options, {}, {}, {}, {}, {}, "h264_vulkan"s },
-    // The bundled FFmpeg AV1 Vulkan path currently violates Vulkan AV1 encode
-    // valid-usage requirements under CBR. Keep H.264/HEVC available while AV1
-    // remains fail-closed until the dependency is fixed and revalidated.
+    // The bundled FFmpeg 8.1.2 AV1 Vulkan path violates Vulkan AV1 encode
+    // valid usage under both CBR and VBR on RADV: it asks for two active
+    // references where the session allows one (08216), sets constantQIndex
+    // outside CQP (10320), passes segmentation RADV does not support (10350),
+    // names a primary reference with no slot (10291) and binds reference slots
+    // no reference name points to (10335). H.264 and HEVC report none of
+    // these. Keep AV1 fail-closed until FFmpeg is fixed and revalidated.
     LIMITED_GOP_SIZE | PARALLEL_ENCODING | NO_AV1
   };
 #endif
@@ -5991,14 +6024,14 @@ namespace video {
     const auto previous_av1_mode = active_av1_mode;
     const auto previous_ref_frames_invalidation = last_encoder_probe_supported_ref_frames_invalidation;
     const auto previous_yuv444_for_codec = last_encoder_probe_supported_yuv444_for_codec;
-    const auto previous_vulkan_quality_levels = last_encoder_probe_vulkan_quality_levels_for_codec;
+    const auto previous_vulkan_quality_levels = load_vulkan_quality_levels();
     auto restore_previous_probe_state = [&]() {
       chosen_encoder = previous_encoder;
       active_hevc_mode = previous_hevc_mode;
       active_av1_mode = previous_av1_mode;
       last_encoder_probe_supported_ref_frames_invalidation = previous_ref_frames_invalidation;
       last_encoder_probe_supported_yuv444_for_codec = previous_yuv444_for_codec;
-      last_encoder_probe_vulkan_quality_levels_for_codec = previous_vulkan_quality_levels;
+      store_vulkan_quality_levels(previous_vulkan_quality_levels);
       encoder_selection_info = previous_encoder_selection_info;
     };
     reset_encoder_probe_state_unlocked(false);
@@ -6321,7 +6354,7 @@ namespace video {
     // Record the driver's reported quality levels for each codec so the configured level can be clamped to a value the driver actually supports and the web UI offers only real levels. A failure here must not abort session creation: unknown counts simply pass through (FFmpeg validates them at open).
     std::array<int, 3> quality_levels;
     if (vk::query_vulkan_quality_levels(hw_device_buf.get(), quality_levels) == 0) {
-      last_encoder_probe_vulkan_quality_levels_for_codec = quality_levels;
+      store_vulkan_quality_levels(quality_levels);
       const auto level_or_unknown = [](int levels) -> std::string { return levels >= 0 ? std::to_string(levels) : "unknown"; };
       BOOST_LOG(info)
         << "Vulkan Video driver reports maxQualityLevels: H.264 ["sv
@@ -6510,15 +6543,8 @@ namespace video {
     }
 #endif
 
-    int max_level = -1;
-    for (const auto count : last_encoder_probe_vulkan_quality_levels_for_codec) {
-      if (count <= 0) {
-        continue;
-      }
-      const auto level_max = count - 1;
-      max_level = (max_level < 0) ? level_max : std::min(max_level, level_max);
-    }
-    return max_level;
+    const bool include_av1 = chosen_encoder && !(chosen_encoder->flags & NO_AV1);
+    return vulkan_quality_max(load_vulkan_quality_levels(), include_av1);
   }
 
   static void reset_encoder_probe_state_unlocked(bool invalidate_reuse) {
@@ -6534,7 +6560,7 @@ namespace video {
     active_av1_mode = config::video.av1_mode;
     last_encoder_probe_supported_ref_frames_invalidation = false;
     last_encoder_probe_supported_yuv444_for_codec = {false, false, false};
-    last_encoder_probe_vulkan_quality_levels_for_codec = {-1, -1, -1};
+    store_vulkan_quality_levels({-1, -1, -1});
   }
 
   void invalidate_encoder_probe_reuse() {

@@ -1076,6 +1076,17 @@ TEST(VideoVulkanQualityClampTests, ClampsToDriverReportedMaximum) {
   EXPECT_EQ(video::vulkan_quality_clamp(9, 1), 0);
 }
 
+TEST(VideoVulkanQualityClampTests, AdvertisedMaximumIgnoresAv1WhileTheEncoderKeepsItOff) {
+  // Counts are indexed H.264, HEVC, AV1. A lower AV1 count must not cap H.264 and HEVC
+  // on the Vulkan encoder, which keeps AV1 fail-closed.
+  EXPECT_EQ(video::vulkan_quality_max({4, 4, 2}, false), 3);
+  EXPECT_EQ(video::vulkan_quality_max({4, 4, 2}, true), 1);
+  EXPECT_EQ(video::vulkan_quality_max({4, 3, 4}, false), 2);
+  EXPECT_EQ(video::vulkan_quality_max({-1, 4, -1}, false), 3);
+  EXPECT_EQ(video::vulkan_quality_max({-1, -1, 4}, false), -1);
+  EXPECT_EQ(video::vulkan_quality_max({-1, -1, -1}, true), -1);
+}
+
 TEST(VideoVulkanQualityClampTests, NegativeConfiguredValueFloorsAtZero) {
   EXPECT_EQ(video::vulkan_quality_clamp(-1, 4), 0);
   EXPECT_EQ(video::vulkan_quality_clamp(-5, -1), 0);

@@ -13,6 +13,33 @@ starts at `v1.0.0`.
   never leaves the service pointing at a binary that is gone. It reports what it removed, and says
   so plainly when there was nothing to remove.
 
+- On AMD, the VA-API encoding quality presets are sent as the bit fields radeonsi reads, not as a
+  point on the range it reports. Read as a scale, Balanced landed on the speed preset with VBAQ.
+  Polaris now sends the speed preset for Prefer speed, the balanced preset with VBAQ for Balanced,
+  and the balanced preset with pre-encoding and VBAQ for Prefer quality, which is what the driver
+  already ran for it. The driver's quality and high-quality presets stay unused: on an RX 7900 XTX
+  they took AV1 at 4K from 4.6 ms to 17 and 32 ms a frame, too slow for 60 fps. The startup log
+  says `quality_mapping=radeonsi`. Other drivers keep the range mapping.
+
+- On AMD, automatic VA-API rate control uses CBR wherever it applies the single-frame buffer: for
+  AV1, and for H.264 and HEVC with the strict frame bitrate limit on. radeonsi keeps to that buffer
+  only in CBR. On an RX 7900 XTX the largest frame after a scene change was two to three times the
+  average frame in CBR and twelve to fifteen times it in VBR, where Polaris used to put it, for
+  0.05 dB of PSNR or less. Intel keeps VBR, and an explicit `vaapi_rc = vbr` is still honoured.
+
+- The Vulkan encode quality select offers every level H.264 and HEVC support. The highest level
+  was taken across AV1 as well, which the Vulkan encoder never uses, so a driver reporting fewer
+  AV1 levels would have hidden levels the other codecs have.
+
+- The encoder tabs say what a quality choice costs in latency. VA-API presets and Vulkan quality
+  levels note which choices spend more encode time on every frame. The Vulkan tuning select
+  no longer calls the driver default "let ffmpeg decide (default)": on AMD it turns the encoder's
+  low-latency mode off, and ultra-low latency behaves exactly like low latency there.
+
+- A Vulkan session and the settings page no longer race on the per-codec quality level counts.
+  They were plain integers written when a session opened its device, under a lock that other
+  readers also held shared, and are now atomic.
+
 - Settings save on a host whose umask is 002, which is the default for a user account on Ubuntu
   (#769). Polaris created `polaris.conf` through the umask, so it came out writable by the group,
   and the settings store refuses a file anyone else can write: every save failed, from the
@@ -22,7 +49,7 @@ starts at `v1.0.0`.
 
 The encoder settings pages say what this GPU will actually encode. The VA-API and Vulkan tabs gain a read-only **Hardware codec support** panel that reports the result of Polaris's live probe: the active encoder plus H.264, HEVC and AV1 rows with HDR markers where the probe accepted a Main10/P010 configuration. Polaris advertises AV1 to clients whenever this hardware passes AV1 validation and falls back to HEVC when it does not, so `av1_mode` stays on its default and the panel shows what that resolves to; when a codec is off, the panel says why — you switched it off in Settings, or the encoder cannot do it. The panel refreshes after a restart from the console or tray, since changing the encoder changes what Polaris advertises.
 
-The Vulkan tab gains an encode quality select (`vk_quality`). Level 0 is the driver default and always works; higher levels trade encode speed for quality where the driver exposes them, with valid values running 0 through one less than the driver's reported maximum — four on current AMD GPUs (so 0–3), two on a Steam Deck. Polaris reads each codec's count from the probed device during encoder probing and serves it in `encoder_codec_support` as `vk_quality_max`, so the select only offers levels the driver actually exposes, level 0 until a live probe reports them. A saved value above that maximum is clamped to it when the session starts, with a warning logged; FFmpeg's own guard has an off-by-one that lets a value of exactly N through, and an explicit Vulkan selection stays strict rather than falling back to another encoder.
+The Vulkan tab gains an encode quality select (`vk_quality`). Level 0 is the driver default and always works; higher levels trade encode speed for quality where the driver exposes them, with valid values running 0 through one less than the driver's reported maximum — four on AMD GPUs with VCN 4 or newer (so 0–3), three on older ones such as the Steam Deck (0–2). Polaris reads each codec's count from the probed device during encoder probing and serves it in `encoder_codec_support` as `vk_quality_max`, so the select only offers levels the driver actually exposes, level 0 until a live probe reports them. A saved value above that maximum is clamped to it when the session starts, with a warning logged; FFmpeg's own guard has an off-by-one that lets a value of exactly N through, and an explicit Vulkan selection stays strict rather than falling back to another encoder.
 
 The Vulkan rate control Auto option now means what it says. Polaris passed a raw zero to FFmpeg, which selected the driver's default rate control instead of letting FFmpeg resolve one; config value 0 now maps to FFmpeg's Vulkan auto sentinel, and because Polaris always sets a stream bitrate, auto resolves to variable bitrate when the driver advertises VBR and to constant bitrate otherwise. Explicit modes are still passed to the driver as-is and fail validation if unsupported.
 

@@ -561,7 +561,11 @@ the encoder back to `vaapi` or `nvenc`; Polaris does not silently replace an exp
 ### vk_tune
 
 Selects FFmpeg's Vulkan Video latency/quality target. `2` (low latency) is the streaming default;
-`0` lets FFmpeg decide, `1` favors quality, and `3` requests ultra-low latency.
+`0` passes the driver's default tuning, `1` favors quality, and `3` requests ultra-low latency.
+
+On AMD (RADV) the choice only turns the encoder's low-latency mode on or off: `2` and `3` turn it on
+and behave identically, while `0` and `1` leave it off. Setting `0` on an AMD host therefore gives up
+low-latency encoding rather than choosing a middle ground.
 
 ### vk_rc_mode
 
@@ -573,7 +577,8 @@ selects variable bitrate.
 ### vk_quality
 
 Selects the Vulkan Video quality level passed to FFmpeg. `0` selects quality level 0 and always
-works; higher levels trade encode speed for quality where the driver exposes them. The allowed range
+works; higher levels trade encode speed for quality where the driver exposes them. Every level above
+`0` spends more time encoding each frame, and that time is added to stream latency. The allowed range
 is `0..maxQualityLevels − 1`, which varies by driver, chip, and codec (current AMD GPUs report four
 levels, Intel ANV reports one). Polaris reads each codec's count from the probed device during encoder
 probing: the web UI offers only levels the probed driver supports, and a saved value above that maximum
@@ -581,8 +586,11 @@ is clamped to it when the session starts, with a warning logged. FFmpeg's own gu
 that lets a value of exactly N through, so Polaris clamps on its side instead. Because an explicit
 Vulkan selection is strict, Polaris does not fall back to another encoder for an unsupported level.
 
-On an RX 7900 XTX (RADV, navi31) the driver reports four quality levels for both H.264 and HEVC,
-so valid values are 0–3; on a Steam Deck (VanGogh) it reports two, so only 0 and 1 are real there.
+RADV reports four quality levels on VCN 4 and newer (RX 7000 series onward) and three on older VCN,
+including the Steam Deck (VanGogh, VCN 3), for H.264, HEVC and AV1 alike. On an RX 7900 XTX valid
+values are therefore 0–3, and on a Steam Deck 0–2. RADV maps the levels onto the encoder's presets:
+`0` speed, `1` balanced, `2` quality and `3` high quality, except that before VCN 5 RADV runs HEVC
+at level `0` on the balanced preset.
 
 ## AI provider settings
 
@@ -777,13 +785,35 @@ Automatic quality and block bitrate control leave the codec's existing defaults
 untouched. Automatic rate control preserves Polaris's current policy: Intel,
 AV1, and explicit strict-buffer requests prefer VBR with a single-frame buffer,
 then CBR, then CQP. Other paths prefer CBR, then VBR, then CQP with the existing
-buffer size. No new AMD or Intel default is promoted by these controls.
+buffer size. On AMD's radeonsi driver the single-frame buffer is paired with CBR
+instead, for the reason given below; Intel's policy is unchanged.
 
 Quality presets use the selected driver profile and encoding entrypoint's
 reported range: quality selects level 1, speed selects the highest level, and
 balanced selects half the range, rounded down with a minimum of 1. Unknown or
 unsupported ranges retain the driver default. This adjusts encoding effort;
-it is separate from the `qp` setting.
+it is separate from the `qp` setting. Each step toward quality spends more time
+encoding every frame, and that time is added to stream latency.
+
+AMD's radeonsi driver does not read the value as a range. It reports a range of
+32 and decodes the number as bit fields that pick the encoder preset and turn
+pre-encoding and VBAQ (variance-based adaptive quantization) on or off. When the
+driver identifies itself as radeonsi, Polaris sends those bits directly:
+
+| Preset | Level | Encoder preset | Pre-encoding | VBAQ |
+|---|---|---|---|---|
+| `speed` | 0 | speed | off | off |
+| `balanced` | 19 | balanced | off | on |
+| `quality` | 27 | balanced | on | on |
+
+`quality` is what the driver itself selects for level 1. The driver's quality
+and high-quality presets are never selected. On an RX 7900 XTX with Mesa 26.2.3,
+they took AV1 at 3840x2160 from 4.6 ms to 17 and 32 ms per frame, too slow for
+60 fps, and gained less than 0.05 dB of PSNR at 1080p. In the same test, VBAQ
+cost no encode time, and pre-encoding added under 1 ms per 1080p frame and 1 to
+3 ms per 4K frame. The startup log reports `quality_mapping=radeonsi` when this
+applies, `range` for the range mapping, and `none` when the driver default is
+kept.
 
 A manual rate-control choice must be supported by both the driver and codec.
 Unsupported choices use automatic policy and produce a warning. A supported
@@ -792,12 +822,26 @@ still requests a single-frame buffer. CQP, ICQ, and QVBR use `qp` for their
 quality value. CQP and ICQ do not enforce a bitrate target; FFmpeg may ignore
 buffer settings in modes that do not use a hypothetical reference decoder.
 
+On AMD, radeonsi holds frames to the single-frame buffer only in CBR. In VBR it
+accepts the buffer and does not keep to it, so a scene change still arrives as
+one large frame. On an RX 7900 XTX with Mesa 26.2.3, at 20 Mbps and 60 fps, the
+largest frame after a scene change was two to three times the average frame in
+CBR and twelve to fifteen times it in VBR, for H.264, HEVC and AV1 alike, while
+PSNR differed by 0.05 dB or less. Automatic rate control therefore uses CBR
+whenever it applies the single-frame buffer on radeonsi: for AV1, and for H.264
+and HEVC with `vaapi_strict_rc_buffer = enabled`. Choosing `vaapi_rc = vbr`
+explicitly still gets VBR. In CBR the driver pads H.264 and HEVC with filler
+data up to the target bitrate, so a still screen uses the full bitrate; this was
+already true of automatic rate control on AMD without the strict buffer, and
+FFmpeg offers no option to turn it off. AV1 is not padded.
+
 Block bitrate control requires the driver's `VA_RC_MB` capability and a mode
 other than CQP. An unsupported enable request is reported and disabled when
 the codec exposes the option. Startup logs report the selected rate control,
-selection policy, buffer choice, compression level, quality range, and block
-bitrate control. Controls are queried for every encoder initialization, using
-the selected profile and entrypoint. Existing DMA-BUF containment is preserved.
+selection policy, buffer choice, compression level, quality range, quality
+mapping, and block bitrate control. Controls are queried for every encoder
+initialization, using the selected profile and entrypoint. Existing DMA-BUF
+containment is preserved.
 
 Example of an opt-in configuration:
 
