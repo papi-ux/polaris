@@ -115,13 +115,15 @@ namespace pyrowave_encode {
     mutable std::recursive_mutex device_lock;
 
     /**
-     * @brief Held for the length of a frame that lends the codec a command buffer.
+     * @brief Serializes complete codec frames and encoder creation/destruction on this device.
      *
-     * The command buffer is set on the device rather than on the encoder, so two sessions encoding at
-     * once would each set their own and record into the other's. This is the outer lock: taken before
-     * entering the codec and released after the frame is gathered, so the order is always this one,
-     * then Granite's, then the queue lock. Nothing inside the codec asks for this one, which is what
-     * keeps that order from inverting.
+     * The command buffer is device state, and both GPU-input and CPU-input encoding use it.
+     * Encoding and destruction also advance the shared frame context, so a peer must not enter
+     * either path before a borrowed frame has been submitted, completed, and gathered. Session
+     * teardown keeps this guard through upload-resource destruction too.
+     *
+     * This is the outer lock: taken before entering the codec, then Granite's mutex, then the
+     * queue lock. Nothing inside the codec asks for this one, so that order cannot invert.
      */
     mutable std::mutex command_buffer_lock;
 
