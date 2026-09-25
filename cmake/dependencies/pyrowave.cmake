@@ -1,8 +1,13 @@
 # PyroWave, an intra-only wavelet codec that runs as plain Vulkan compute.
 #
-# Off by default, and deliberately. No Moonlight client can decode it, it wants a wired link at a
-# couple of hundred megabits, and it brings Granite in behind it. A host that does not ask for it
-# builds exactly as it did before this file existed.
+# On by default, so a host can serve it to a client that asks. Nothing else changes for a host that
+# never gets asked: only a client carrying this codec's payload number can negotiate it, no Moonlight
+# client does, and the host refuses it where it cannot run.
+#
+# The cost of being on is real and worth naming. It brings Granite in behind it, which is a large
+# dependency tree to fetch and compile, and it wants a wired link at a couple of hundred megabits to
+# be worth choosing. Turning it off with -DPOLARIS_ENABLE_PYROWAVE=OFF builds exactly as this tree
+# did before the codec existed.
 
 if(NOT POLARIS_ENABLE_PYROWAVE)
     return()
