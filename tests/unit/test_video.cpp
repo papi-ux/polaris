@@ -44,6 +44,11 @@ INSTANTIATE_TEST_SUITE_P(
 #ifdef __linux__
     &video::vaapi,
 #endif
+#ifdef POLARIS_BUILD_VULKAN
+    // Exercises the Vulkan Video device and a real probe encode in a binary that also links the
+    // compute codec's volk, whose globals share the Vulkan entry points' names.
+    &video::vulkan,
+#endif
 #ifdef __APPLE__
     &video::videotoolbox,
 #endif

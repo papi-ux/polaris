@@ -203,6 +203,8 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_session_manager.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_pyrowave_encode.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_virtual_display.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_vulkan_encode_capture.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_vulkan_loader.cpp
 )
 
 if (NOT WIN32 AND NOT APPLE)

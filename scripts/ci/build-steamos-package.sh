@@ -168,10 +168,11 @@ fi
 # see command/runtime-discovered dependencies. Every exception remains exact;
 # additions, removals, or wording changes fail the candidate gate.
 #
-# libvulkan is the same class. The compute codec brings volk in, which resolves every Vulkan entry
-# point with dlopen at runtime, so no object makes a direct call and namcap reports the library as
-# unused. The dependency is real and stays declared on purpose: dropping it would move the failure on
-# a host without Vulkan from install time to the middle of a stream.
+# libvulkan is the same class. Polaris resolves every Vulkan entry point it calls from the loader by
+# name at runtime (src/platform/linux/vulkan_loader.cpp), and the compute codec's volk does the same,
+# so no object makes a direct call and namcap reports the library as unused. The dependency is real
+# and stays declared on purpose: dropping it would move the failure on a host without Vulkan from
+# install time to the middle of a stream.
 NAMCAP_ACTUAL="$BUILD_ROOT/namcap-actual.sorted"
 NAMCAP_ALLOWED="$BUILD_ROOT/namcap-allowed.sorted"
 NAMCAP_MISSING="$BUILD_ROOT/namcap-reviewed-missing.txt"
