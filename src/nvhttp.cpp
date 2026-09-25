@@ -2313,7 +2313,11 @@ namespace nvhttp {
     }
 
     std::string session_encoder_name(const stream_stats::stats_t &stats) {
-      return stats.encoder_backend.empty() ? video::active_encoder_name() : stats.encoder_backend;
+      if (!stats.encoder_backend.empty()) {
+        return stats.encoder_backend;
+      }
+      // Preserve the negotiated-codec fallback until the first encoder sample.
+      return stats.streaming && stats.codec == "pyrowave" ? "pyrowave" : video::active_encoder_name();
     }
 
     nlohmann::json encoder_selection_json(const stream_stats::stats_t &stats) {
