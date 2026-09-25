@@ -836,7 +836,9 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain('namcap emitted unreviewed warnings or a reviewed warning disappeared')
     expect(buildScript).not.toContain('namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt" || true')
     const reviewedWarnings = reviewedNamcap.trim().split('\n')
-    // 17 since the Vulkan Video encoder started using vulkan-icd-loader for real:
+    // 18 with the reviewed libvulkan warning: PyroWave uses volk to resolve
+    // Vulkan entry points at runtime, so the loader remains a real dependency.
+    // Previously 17 since the Vulkan Video encoder used vulkan-icd-loader directly:
     // namcap stopped calling that dependency possibly unneeded, and a reviewed warning
     // that no longer appears fails the gate exactly like an unreviewed one, so its line
     // retired with it.
@@ -845,7 +847,10 @@ describe('Linux packaging contracts', () => {
     // runs KWin, Mesa, and Vulkan on, so no install could succeed (#442). It was 19
     // after the attach guard started linking libxcb for real, which retired that
     // dependency's line the same way (#415).
-    expect(reviewedWarnings).toHaveLength(17)
+    expect(reviewedWarnings).toHaveLength(18)
+    expect(reviewedWarnings).toContain(
+      "polaris W: Unused shared library '/usr/lib/libvulkan.so.1' by file ('usr/bin/polaris-1.4.13')",
+    )
     expect(new Set(reviewedWarnings).size).toBe(reviewedWarnings.length)
     expect(reviewedWarnings.every((warning) => warning.startsWith('polaris W: '))).toBe(true)
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/bin/polaris-browser-stream-helper"')
