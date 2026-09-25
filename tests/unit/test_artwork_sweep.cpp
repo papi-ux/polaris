@@ -44,7 +44,6 @@ namespace {
     match.provider_game_id = "2254";
     match.title = std::move(title);
     match.confidence = confidence;
-    match.thumbnail = "/covers/.sweep/one.jpg";
     return match;
   }
 

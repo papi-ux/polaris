@@ -52,6 +52,7 @@
 #include "display_device.h"
 #include "entry_handler.h"
 #include "file_handler.h"
+#include "artwork_sweep.h"
 #include "game_artwork.h"
 #include "game_artwork_manual.h"
 #include "game_artwork_override.h"
@@ -6503,6 +6504,254 @@ namespace confighttp {
     }
   }
 
+  namespace {
+    /**
+     * @brief Look one game up, on the sweep's own thread.
+     *
+     * Two requests: the search, then the poster list for the best match, which is how a game the
+     * provider knows but has no poster for is told apart from one it does not know. Reading the
+     * posters themselves is left to the review, one row at a time, because the preview cache holds
+     * sixty four entries and a sweep of three hundred games would evict the early rows before anyone
+     * looked at them.
+     */
+    artwork_sweep::lookup_t look_a_game_up(
+      const artwork_sweep::candidate_t &game,
+      const game_artwork::providers::transport_t &transport
+    ) {
+      namespace providers = game_artwork::providers;
+      namespace manual = game_artwork::manual;
+      artwork_sweep::lookup_t answer;
+
+      const auto refuse = [&answer](std::optional<long> status) -> artwork_sweep::lookup_t & {
+        answer.refused = true;
+        answer.note = manual::classify_search_failure(true, status).message;
+        return answer;
+      };
+
+      const auto search = providers::plan_steamgriddb_search(game.name);
+      if (!search) {
+        answer.refused = true;
+        answer.note = "This entry's name cannot be searched for.";
+        return answer;
+      }
+      const auto found = transport ? transport(*search, manual::maximum_match_body_bytes) : std::nullopt;
+      if (!found) return refuse(std::nullopt);
+      if (found->status_code == 429) {
+        answer.rate_limited = true;
+        return answer;
+      }
+      if (found->status_code != 200) return refuse(static_cast<long>(found->status_code));
+
+      const std::string body(found->body.begin(), found->body.end());
+      const auto candidates = providers::parse_steamgriddb_match_candidates(game.name, body, 1);
+      if (candidates.empty()) {
+        return answer;
+      }
+      const auto &best = candidates.front();
+
+      std::uint64_t id = 0;
+      try {
+        id = std::stoull(best.provider_game_id);
+      } catch (const std::exception &) {
+        return answer;
+      }
+
+      // Only the poster is asked about. The other three kinds are a Nova concern, and each one is
+      // another request against a provider that publishes no rate limit at all.
+      bool asked = false;
+      for (const auto &request : providers::plan_steamgriddb_assets(id)) {
+        if (!request.kind || *request.kind != game_artwork::kind_e::poster) continue;
+        asked = true;
+        const auto listed = transport ? transport(request, manual::maximum_listing_bytes) : std::nullopt;
+        if (!listed) return refuse(std::nullopt);
+        if (listed->status_code == 429) {
+          answer.rate_limited = true;
+          return answer;
+        }
+        if (listed->status_code != 200) return refuse(static_cast<long>(listed->status_code));
+        const std::string listing(listed->body.begin(), listed->body.end());
+        if (providers::parse_steamgriddb_choices(game_artwork::kind_e::poster, listing, 1).empty()) {
+          answer.has_match_without_poster = true;
+          return answer;
+        }
+        break;
+      }
+      if (!asked) {
+        answer.has_match_without_poster = true;
+        return answer;
+      }
+
+      artwork_sweep::match_t match;
+      match.provider_game_id = best.provider_game_id;
+      match.title = best.title;
+      match.confidence = std::clamp(static_cast<int>(std::lround(best.confidence * 100.0)), 0, 100);
+      if (best.release_year) match.release_year = static_cast<int>(*best.release_year);
+      answer.match = std::move(match);
+      return answer;
+    }
+
+    /**
+     * @brief The games a run should ask about.
+     *
+     * No cover, not an entry Polaris ships artwork for, and automatic lookup not turned off. That
+     * last one matters: Remove artwork is a choice a player made, and a sweep that undid it would be
+     * worse than no sweep.
+     */
+    std::vector<artwork_sweep::candidate_t> games_without_a_cover(
+      const std::filesystem::path &appdata,
+      const nlohmann::json &hydrated
+    ) {
+      // image-path as the console sees it, because a Lutris entry's is filled in when the list is
+      // read and that entry does have art to show.
+      std::map<std::string, std::string, std::less<>> configured;
+      if (hydrated.is_object() && hydrated.contains("apps") && hydrated["apps"].is_array()) {
+        for (const auto &app : hydrated["apps"]) {
+          if (!app.is_object()) continue;
+          auto uuid = app.value("uuid", std::string {});
+          if (uuid.empty()) continue;
+          configured.insert_or_assign(std::move(uuid), app.value("image-path", std::string {}));
+        }
+      }
+
+      // Validation answers with the generic box art for a path it cannot use, so that answer is what
+      // "this entry has no cover" looks like from out here.
+      const auto placeholder = proc::validate_app_image_path({});
+      std::vector<artwork_sweep::candidate_t> games;
+      for (const auto &app : proc::proc.get_apps()) {
+        if (!game_artwork::is_valid_uuid(app.uuid)) continue;
+        if (proc::uses_bundled_utility_artwork(app)) continue;
+        if (!game_artwork::automatic_artwork_lookup_enabled(appdata, app.uuid)) continue;
+        if (boost::trim_copy(app.name).empty()) continue;
+        const auto found = configured.find(app.uuid);
+        const auto image = found == configured.end() ? app.image_path : found->second;
+        if (!image.empty() && proc::validate_app_image_path(image) != placeholder) continue;
+        games.push_back(artwork_sweep::candidate_t {app.uuid, app.name});
+      }
+      return games;
+    }
+
+    /// The one run this host has at a time.
+    artwork_sweep::sweeper_t &cover_sweeper() {
+      static artwork_sweep::sweeper_t sweeper {
+        [](const artwork_sweep::candidate_t &game) {
+          // The key is read per game, so one added while a run is going starts working.
+          return look_a_game_up(game, nvhttp::artwork_transport(config::steamgriddb_api_key()));
+        },
+        {},
+        [] { return nvhttp::artwork_clock_milliseconds() / 1000; }
+      };
+      return sweeper;
+    }
+
+    nlohmann::json sweep_job_json() {
+      const auto job = cover_sweeper().job();
+      auto proposals = nlohmann::json::array();
+      for (const auto &proposal : job.proposals) {
+        nlohmann::json entry {
+          {"uuid", proposal.uuid},
+          {"name", proposal.name},
+          {"outcome", std::string(artwork_sweep::outcome_name(proposal.outcome))},
+        };
+        if (proposal.match) {
+          entry["provider_game_id"] = proposal.match->provider_game_id;
+          entry["title"] = proposal.match->title;
+          entry["confidence"] = proposal.match->confidence;
+          if (proposal.match->release_year) entry["release_year"] = *proposal.match->release_year;
+        }
+        if (!proposal.note.empty()) entry["note"] = proposal.note;
+        proposals.push_back(std::move(entry));
+      }
+      return {
+        {"state", std::string(artwork_sweep::state_name(job.state))},
+        {"total", job.total},
+        {"looked_at", job.looked_at},
+        {"proposed", job.proposed},
+        {"message", job.message},
+        {"started_at", job.started_at},
+        {"finished_at", job.finished_at},
+        {"proposals", std::move(proposals)},
+      };
+    }
+  }  // namespace
+
+  /**
+   * @brief Start one pass over every game with no cover, proposing a match for each.
+   *
+   * Answers 202 and the run's first state. It writes nothing: a separate apply stores the proposals a
+   * player kept. A run already going answers 409, and a library with nothing to look up answers 200
+   * with a run that says so.
+   *
+   * @api_examples{/api/covers/sweep| POST| {}}
+   */
+  void startCoverSweep(resp_https_t response, req_https_t request) {
+    if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) return;
+    print_req(request);
+
+    const auto api_key = config::steamgriddb_api_key();
+    if (!steamgriddb_key_present(api_key)) {
+      send_cover_failure(response, game_artwork::manual::classify_search_failure(false, std::nullopt));
+      return;
+    }
+
+    nlohmann::json hydrated;
+    try {
+      std::scoped_lock apps_lock(apps_file_mutex());
+      hydrated = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()));
+      hydrate_lutris_app_images(hydrated);
+    } catch (const std::exception &e) {
+      bad_request(response, request, e.what());
+      return;
+    }
+
+    auto games = games_without_a_cover(platf::appdata(), hydrated);
+    const auto waiting = games.size();
+    switch (cover_sweeper().start(std::move(games))) {
+      case artwork_sweep::start_e::already_running:
+        send_response(response, SimpleWeb::StatusCode::client_error_conflict,
+                      {{"status", false},
+                       {"error", "A cover search is already running."},
+                       {"sweep", sweep_job_json()}});
+        return;
+      case artwork_sweep::start_e::nothing_to_do:
+        send_response(response, {{"status", true},
+                                 {"nothing_to_do", true},
+                                 {"sweep", sweep_job_json()}});
+        return;
+      case artwork_sweep::start_e::started:
+        break;
+    }
+    BOOST_LOG(info) << "Looking up covers for "sv << waiting << " game"sv << (waiting == 1 ? "" : "s")
+                    << " without one."sv;
+    send_response(response, SimpleWeb::StatusCode::success_accepted,
+                  {{"status", true}, {"sweep", sweep_job_json()}});
+  }
+
+  /**
+   * @brief How the cover search is going, and what it has proposed so far.
+   *
+   * @api_examples{/api/covers/sweep| GET| null}
+   */
+  void getCoverSweep(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+    print_req(request);
+    send_response(response, {{"status", true}, {"sweep", sweep_job_json()}});
+  }
+
+  /**
+   * @brief Stop a running cover search, or forget a finished one.
+   *
+   * @api_examples{/api/covers/sweep| DELETE| null}
+   */
+  void clearCoverSweep(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+    print_req(request);
+    cover_sweeper().cancel();
+    // A run that is still on a game finishes that one, so its state is forgotten by the next call
+    // rather than by this one.
+    const bool forgotten = cover_sweeper().clear();
+    send_response(response, {{"status", true}, {"forgotten", forgotten}, {"sweep", sweep_job_json()}});
+  }
+
   /**
    * @brief List the posters of a game a cover search found, the alternatives Nova's Artwork Studio offers.
    *
@@ -6735,6 +6984,12 @@ namespace confighttp {
       }
 
       // Update the app's image-path in apps.json
+      //
+      // Under the lock, like every other change to this file. This handler read, changed and wrote it
+      // without one, which was safe only because every other writer shared the one server thread. The
+      // emulator install job already did not, and the cover sweep does not either, so a download
+      // finishing at the same moment as a job would have lost one side's change.
+      std::scoped_lock apps_lock(apps_file_mutex());
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       auto file_tree = nlohmann::json::parse(content);
       if (file_tree.contains("apps") && file_tree["apps"].is_array()) {
@@ -9623,6 +9878,9 @@ namespace confighttp {
     server.resource["^/api/covers/select$"]["POST"] = withCsrf(selectCover);
     server.resource["^/api/covers/key/check$"]["POST"] = withCsrf(checkCoversKey);
     server.resource["^/api/covers/download$"]["POST"] = withCsrf(downloadCover);
+    server.resource["^/api/covers/sweep$"]["POST"] = withCsrf(startCoverSweep);
+    server.resource["^/api/covers/sweep$"]["GET"] = getCoverSweep;
+    server.resource["^/api/covers/sweep$"]["DELETE"] = withCsrf(clearCoverSweep);
     server.resource["^/api/stats/system$"]["GET"] = getSystemStats;
     server.resource["^/api/setup/hardware$"]["GET"] = getSetupHardware;
     server.resource["^/api/setup/networks$"]["GET"] = getSetupNetworks;

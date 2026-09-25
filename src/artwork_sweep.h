@@ -73,7 +73,6 @@ namespace artwork_sweep {
     std::string title;
     int confidence = 0;  ///< how close the provider's title is to the one searched, 0 to 100
     std::optional<int> release_year;
-    std::string thumbnail;  ///< where the run left a small copy of the poster, empty when it has none
   };
 
   /// What a run decided about one game.

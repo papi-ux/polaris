@@ -235,8 +235,9 @@ TEST(AppsFile, EveryChangeTakesOneLock) {
   for (auto at = source.find(taken); at != std::string::npos; at = source.find(taken, at + 1)) {
     ++locks;
   }
-  // saveApp, reorderApps, deleteApp, importGames and the install job's own rewrite.
-  EXPECT_EQ(locks, 5u);
+  // saveApp, reorderApps, deleteApp, importGames, the install job's own rewrite, downloadCover,
+  // and the cover sweep reading the list it is about to look games up from.
+  EXPECT_EQ(locks, 7u);
   for (const auto *signature : {"void saveApp(", "void reorderApps(", "void deleteApp(", "void importGames("}) {
     const auto body = handler_body(source, signature);
     const auto lock = body.find("std::scoped_lock apps_lock(apps_file_mutex());");
