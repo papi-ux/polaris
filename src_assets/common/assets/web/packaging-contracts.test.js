@@ -836,7 +836,13 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain('namcap emitted unreviewed warnings or a reviewed warning disappeared')
     expect(buildScript).not.toContain('namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt" || true')
     const reviewedWarnings = reviewedNamcap.trim().split('\n')
-    // 17 since the Vulkan Video encoder started using vulkan-icd-loader for real:
+    // 18 since the compute codec brought volk in. volk resolves every Vulkan entry point with dlopen
+    // at runtime, so no object in the binary makes a direct call to libvulkan and namcap reports it as
+    // an unused shared library. The dependency is real and stays declared: dropping it to quiet the
+    // linter would move the failure on a host without Vulkan from install time into the middle of a
+    // stream. The exact inverse of the line below, which retired when the Vulkan Video encoder started
+    // calling the loader for real.
+    // It was 17 since the Vulkan Video encoder started using vulkan-icd-loader for real:
     // namcap stopped calling that dependency possibly unneeded, and a reviewed warning
     // that no longer appears fails the gate exactly like an unreviewed one, so its line
     // retired with it.
@@ -845,7 +851,7 @@ describe('Linux packaging contracts', () => {
     // runs KWin, Mesa, and Vulkan on, so no install could succeed (#442). It was 19
     // after the attach guard started linking libxcb for real, which retired that
     // dependency's line the same way (#415).
-    expect(reviewedWarnings).toHaveLength(17)
+    expect(reviewedWarnings).toHaveLength(18)
     expect(new Set(reviewedWarnings).size).toBe(reviewedWarnings.length)
     expect(reviewedWarnings.every((warning) => warning.startsWith('polaris W: '))).toBe(true)
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/bin/polaris-browser-stream-helper"')
