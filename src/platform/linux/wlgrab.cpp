@@ -857,10 +857,18 @@ namespace wl {
 
 namespace platf {
   std::shared_ptr<display_t> wl_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
+    // The compute codec is in this list because it asks for a device type of its own, which is what
+    // makes the portal offer it a dmabuf. This backend has no dmabuf handoff for it, and that is fine:
+    // supports_gpu_native_capture says no, so it lands on the RAM ladder below and its frames arrive in
+    // host memory for its own converter to read, which is where it ran before it had a type of its own.
+    //
+    // Leaving it out is not a slower stream. It is no stream: the display never opens, the capture
+    // thread exits, and a wlroots host that streamed this codec yesterday stops streaming it at all.
     if (hwdevice_type != platf::mem_type_e::system &&
         hwdevice_type != platf::mem_type_e::vaapi &&
         hwdevice_type != platf::mem_type_e::cuda &&
-        hwdevice_type != platf::mem_type_e::vulkan) {
+        hwdevice_type != platf::mem_type_e::vulkan &&
+        hwdevice_type != platf::mem_type_e::vulkan_pyrowave) {
       BOOST_LOG(error) << "Could not initialize display with the given hw device type."sv;
       return nullptr;
     }

@@ -256,10 +256,12 @@ namespace nvhttp {
         SimpleWeb::HTTPS(io_context, ctx) {
     }
 
-    // Destruction can run on the only HTTPS event-loop thread. Synchronous TLS
-    // shutdown waits for the peer's close_notify and can indefinitely block all
-    // subsequent requests. Let Asio reclaim the transport without waiting for
-    // the peer; HTTP response completion remains owned by the server writer.
+    // A synchronous TLS shutdown waits for the peer's close_notify. Destruction
+    // runs on the HTTPS executor, so an idle peer would block every subsequent
+    // handshake and prevent the executor's own timeout from firing. Let the
+    // socket destructor close the transport, as SimpleWeb::HTTPS does; completed
+    // HTTP responses already carry their length. Graceful TLS shutdown would
+    // need an asynchronous owner that keeps the stream alive until it finishes.
     virtual ~PolarisHTTPS() = default;
   };
 
@@ -599,6 +601,8 @@ namespace nvhttp {
   nlohmann::json build_stream_policy_json_for_tests(const crypto::named_cert_t &client,
                                                     const stream_stats::stats_t &stats,
                                                     const nlohmann::json &health);
+  std::string effective_session_encoder_name_for_tests(const stream_stats::stats_t &stats,
+                                                       const std::string &launch_encoder);
   nlohmann::json build_session_health_json_for_tests(const stream_stats::stats_t &stats,
                                                    bool current_virtual_display,
                                                    const std::string &device_name,

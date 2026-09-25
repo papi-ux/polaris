@@ -242,7 +242,10 @@ TEST(LaunchProfileTests, AClientReportingHdr10OutranksAnUncorrectedDeviceRecord)
 
   EXPECT_TRUE(resolved.hdr);
   const auto &field = resolved.fields.at("hdr");
-  EXPECT_EQ(field.at("source"), "client_reported_capability");
+  // A source name a client already knows. It reads this field against a list of the sources it
+  // understands and discards the entire profile over one it does not, so a new name here is a client
+  // that can no longer launch anything. The reason code carries what actually happened.
+  EXPECT_EQ(field.at("source"), "capability_validation");
   EXPECT_EQ(field.at("reason_code"), "paired_device_hdr_reported_by_client");
   // Not a normalization: nothing was taken away from what the client asked for.
   EXPECT_FALSE(field.at("normalized").get<bool>());
@@ -273,6 +276,37 @@ TEST(LaunchProfileTests, ADeviceRecordStillRefusesHdrWhenTheClientHasNotReported
 
   EXPECT_FALSE(resolved.hdr);
   EXPECT_EQ(resolved.fields.at("hdr").at("reason_code"), "paired_device_hdr_unsupported");
+}
+
+TEST(LaunchProfileTests, ARecordWithNoOpinionAboutHdrRefusesNothing) {
+  // hdr_capable used to be a plain bool, so "nobody has filled this in" and "this device cannot show
+  // HDR" were the same value, and the second one refuses HDR for the whole device however the client
+  // is set. Seven of the shipped records carried that false with no evidence behind it.
+  //
+  // An unset record is not evidence. Only a value somebody wrote is.
+  launch_profile::request_t request;
+  request.device_name = "RetroidPocket6";
+  auto shipped_record = device_db::get_device("RetroidPocket6");
+  ASSERT_TRUE(shipped_record.has_value());
+  shipped_record->hdr_capable = std::nullopt;
+  const auto previous_record = device_db::set_device_for_tests("RetroidPocket6", *shipped_record);
+  const auto restore_record = util::fail_guard([&]() {
+    device_db::restore_device_for_tests("RetroidPocket6", previous_record);
+  });
+  request.preset = "quality";
+  request.requested_width = 1920;
+  request.requested_height = 1080;
+  request.requested_fps = 120000;
+  request.hdr_requested = true;
+  request.hdr_locked = true;
+  // Deliberately silent, which is the case that used to be refused.
+  request.client_reports_hdr10_display = false;
+
+  const auto resolved = launch_profile::resolve(request);
+
+  EXPECT_TRUE(resolved.hdr)
+    << "a device record nobody filled in is refusing HDR as though somebody had checked";
+  EXPECT_EQ(resolved.fields.at("hdr").at("reason_code"), "requested_hdr_lock");
 }
 
 TEST(LaunchProfileTests, MeteredBitrateLockWinsOverStabilityPreset) {

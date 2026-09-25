@@ -23,6 +23,8 @@ namespace stream {
 }
 
 namespace nvhttp {
+  std::string effective_session_encoder_name_for_tests(const stream_stats::stats_t &stats,
+                                                       const std::string &launch_encoder);
   nlohmann::json build_session_health_json_for_tests(
     const stream_stats::stats_t &stats,
     bool current_virtual_display,
@@ -32,7 +34,7 @@ namespace nvhttp {
 }
 
 namespace proc {
-  bool should_publish_stream_ended_after_terminate_for_tests(bool had_running_app, int active_sessions, std::string_view session_state);
+  bool should_publish_stream_ended_after_terminate_for_tests(bool had_running_app, int active_sessions, std::string_view session_state, bool cleanup_complete = true);
 
   nlohmann::json classify_host_pause_session_for_tests(
     const stream_stats::stats_t &stats,
@@ -390,6 +392,19 @@ TEST(ProcSessionLifecycleTests, TerminatedPausedAppPublishesStreamEndedWhenNoSes
   EXPECT_TRUE(proc::should_publish_stream_ended_after_terminate_for_tests(true, 0, "paused"));
 }
 
+TEST(ProcSessionLifecycleTests, OwnerCancelPublishesOnlyAfterCleanupAndAllStreamsFinish) {
+  EXPECT_TRUE(proc::should_publish_stream_ended_after_terminate_for_tests(true, 0, "tearing_down"));
+  EXPECT_FALSE(proc::should_publish_stream_ended_after_terminate_for_tests(true, 1, "tearing_down"));
+  EXPECT_FALSE(proc::should_publish_stream_ended_after_terminate_for_tests(true, 0, "tearing_down", false));
+  EXPECT_FALSE(proc::should_publish_stream_ended_after_terminate_for_tests(true, 0, "paused", false));
+}
+
+TEST(ProcSessionLifecycleTests, RetriedCleanupCanFinishWithoutTheAppRecord) {
+  EXPECT_TRUE(proc::should_publish_stream_ended_after_terminate_for_tests(false, 0, "tearing_down"));
+  EXPECT_FALSE(proc::should_publish_stream_ended_after_terminate_for_tests(false, 0, "tearing_down", false));
+  EXPECT_FALSE(proc::should_publish_stream_ended_after_terminate_for_tests(false, 0, "paused"));
+}
+
 TEST(ProcSessionLifecycleTests, TerminatedAppDoesNotPublishStreamEndedWhileClientIsConnected) {
   EXPECT_FALSE(proc::should_publish_stream_ended_after_terminate_for_tests(true, 1, "streaming"));
 }
@@ -444,4 +459,36 @@ TEST(ControlPacketBounds, InputCipherLengthRejectsNegativeAndOverlongClaims) {
   EXPECT_FALSE(stream::input_control_cipher_fits(1024, -1));
   EXPECT_FALSE(stream::input_control_cipher_fits(1024, std::numeric_limits<std::int32_t>::min()));
   EXPECT_FALSE(stream::input_control_cipher_fits(1024, std::numeric_limits<std::int32_t>::max()));
+}
+
+
+TEST(NvhttpSessionHealthTests, PyrowaveReportsItsSessionEncoderWithoutNvencWarnings) {
+  auto stats = stable_cpu_copy_stats(90.0, 90.0);
+  stats.codec = "pyrowave";
+  stats.encoder_backend = "pyrowave";
+  stats.encode_time_ms = 3.0;
+  stats.avg_frame_age_ms = 6.0;
+  const auto health = nvhttp::build_session_health_json_for_tests(stats, false, "Nova Client", "Control");
+  EXPECT_EQ(health.at("active_encoder"), "pyrowave");
+  EXPECT_EQ(health.at("primary_issue"), "steady");
+  EXPECT_EQ(health.at("encoder_selection").at("selected_encoder"), "pyrowave");
+  EXPECT_EQ(health.at("encoder_selection").at("preferred_encoder"), "pyrowave");
+  EXPECT_FALSE(health.at("encoder_selection").at("fallback_used").get<bool>());
+}
+
+TEST(NvhttpSessionHealthTests, EffectiveEncoderUsesNegotiatedPyrowaveBeforeFirstSample) {
+  auto stats = stable_cpu_copy_stats(90.0, 90.0);
+  stats.codec = "pyrowave";
+  stats.encoder_backend.clear();
+  EXPECT_EQ(nvhttp::effective_session_encoder_name_for_tests(stats, "nvenc"), "pyrowave");
+  stats.encoder_backend = "pyrowave";
+  EXPECT_EQ(nvhttp::effective_session_encoder_name_for_tests(stats, "nvenc"), "pyrowave");
+  stats.codec = "hevc";
+  stats.encoder_backend = "vaapi";
+  EXPECT_EQ(nvhttp::effective_session_encoder_name_for_tests(stats, "nvenc"), "vaapi");
+  stats.encoder_backend.clear();
+  EXPECT_EQ(nvhttp::effective_session_encoder_name_for_tests(stats, "nvenc"), "nvenc");
+  stats.codec = "pyrowave";
+  stats.streaming = false;
+  EXPECT_EQ(nvhttp::effective_session_encoder_name_for_tests(stats, "nvenc"), "nvenc");
 }

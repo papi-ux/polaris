@@ -541,6 +541,38 @@ TEST(DoctorResetContract, FinalResolverRevalidatesPostProfileRefreshAndHdrCaps) 
   EXPECT_NE(process.find("preset_request.host_hdr_capable = launch_session->host_hdr_capable"), std::string::npos);
 }
 
+/**
+ * The preview and the launch have to be told the same thing about the client's own panel.
+ *
+ * A device_db record's hdr_capable is false until somebody edits the file by hand, so the resolver
+ * lets a client that measured its own panel outrank it. That rule is tested, and it worked, and it
+ * was still unreachable: only the launch passed client_reports_hdr10_display, so the preview refused
+ * HDR for those devices, the client believed the preview and launched SDR by its own choice, and the
+ * launch code that would have allowed it never ran.
+ *
+ * A disagreement between two callers of one pure function is invisible to that function's tests,
+ * which is why this is pinned as text beside the other one.
+ */
+TEST(DoctorResetContract, ThePreviewAndTheLaunchAgreeAboutTheClientsOwnPanel) {
+  const auto preview = between(
+    source("src/nvhttp.cpp"),
+    "launch_profile::request_t preset_request;",
+    "const auto resolved = launch_profile::resolve(preset_request);"
+  );
+  EXPECT_NE(
+    preview.find("preset_request.client_reports_hdr10_display = named_cert_p->client_reports_hdr10_display"),
+    std::string::npos
+  ) << "the optimize preview does not know what the client said about its panel, so an uncorrected "
+       "device record refuses HDR before the launch can allow it";
+
+  const auto launch = between(
+    source("src/process.cpp"),
+    "launch_profile::request_t preset_request;",
+    "const auto preset_resolution = launch_profile::resolve(preset_request);"
+  );
+  EXPECT_NE(launch.find("preset_request.client_reports_hdr10_display"), std::string::npos);
+}
+
 TEST(DoctorResetContract, ResolvedLaunchFailsClosedWhenHostCapsChanged) {
   const auto final_capability_gate = between(
     source("src/process.cpp"),

@@ -788,7 +788,17 @@ namespace platf {
   };
 
   std::shared_ptr<display_t> x11_display(platf::mem_type_e hwdevice_type, const std::string &display_name, const ::video::config_t &config) {
-    if (hwdevice_type != platf::mem_type_e::system && hwdevice_type != platf::mem_type_e::vaapi && hwdevice_type != platf::mem_type_e::cuda) {
+    // The compute codec asks for a device type of its own so that the portal will offer it a dmabuf.
+    // Nothing here hands one over, and nothing here needs to: it falls past every branch in
+    // make_avcodec_encode_device to the plain device, the shared memory path copies frames into host
+    // memory, and its own converter reads them there. That is what it did before it had its own type.
+    //
+    // The cost of leaving it out is the whole stream rather than its speed, because a display that
+    // refuses to open ends the capture thread.
+    if (hwdevice_type != platf::mem_type_e::system &&
+        hwdevice_type != platf::mem_type_e::vaapi &&
+        hwdevice_type != platf::mem_type_e::cuda &&
+        hwdevice_type != platf::mem_type_e::vulkan_pyrowave) {
       BOOST_LOG(error) << "Could not initialize x11 display with the given hw device type"sv;
       return nullptr;
     }

@@ -31,6 +31,7 @@ extern "C" {
 
 // local includes
 #ifdef POLARIS_BUILD_PYROWAVE
+  #include "src/platform/linux/pyrowave_capture_frame.h"
   #include "src/platform/linux/pyrowave_encode.h"
 #endif
 #include "adaptive_bitrate.h"
@@ -522,6 +523,7 @@ namespace video {
         case platf::mem_type_e::dxgi:
         case platf::mem_type_e::cuda:
         case platf::mem_type_e::vulkan:
+        case platf::mem_type_e::vulkan_pyrowave:
         case platf::mem_type_e::videotoolbox:
           return platf::frame_residency_e::gpu;
         default:
@@ -541,6 +543,8 @@ namespace video {
           return "cuda"sv;
         case platf::mem_type_e::vulkan:
           return "vulkan"sv;
+        case platf::mem_type_e::vulkan_pyrowave:
+          return "vulkan_pyrowave"sv;
         case platf::mem_type_e::videotoolbox:
           return "videotoolbox"sv;
         default:
@@ -1777,9 +1781,9 @@ namespace video {
   /**
    * @brief A session that hands captured frames to the compute codec.
    *
-   * convert() retains converted CPU planes; encode_frame() uploads and encodes
-   * them inside the normal encode timing scope. A static image can be encoded
-   * again with a new budget without borrowing an expired capture buffer.
+   * The frame is encoded in convert(), not in encode(), because convert() is the call that is given
+   * one. That is the same split NVENC uses, where convert() fills the encoder's input surface and
+   * encode_frame() collects the result.
    *
    * There is nothing to invalidate and no IDR to request: every frame is a keyframe, so a client
    * asking for one is asking for what it is already getting, and a reference frame it could report
@@ -1787,40 +1791,216 @@ namespace video {
    */
   class pyrowave_encode_session_t: public encode_session_t {
   public:
-    pyrowave_encode_session_t(std::unique_ptr<pyrowave_encode::session_t> session, std::size_t max_frame_bytes, int width, int height, int source_width, int source_height, int fps_num, int fps_den):
-        width {width}, height {height}, session {std::move(session)},
-        max_frame_bytes {max_frame_bytes}, source_width {source_width}, source_height {source_height}, fps_num {fps_num}, fps_den {fps_den} {
+    pyrowave_encode_session_t(std::unique_ptr<pyrowave_encode::session_t> session, int framerate,
+                              int bitrate_kbps, pyrowave_encode::dynamic_range_e range):
+        session {std::move(session)},
+        framerate {framerate > 0 ? framerate : 60},
+        max_frame_bytes {frame_budget(bitrate_kbps, framerate > 0 ? framerate : 60)},
+        range {range} {
     }
 
-    bool supports_runtime_bitrate_update() const override { return true; }
+    /**
+     * The bytes one frame may occupy at a bitrate, which is the whole of this codec's rate control.
+     *
+     * Every frame stands alone, so there is no group of pictures to spend a budget across and no
+     * averaging window to catch up in: a frame gets what it gets.
+     */
+    static std::size_t frame_budget(int bitrate_kbps, int framerate) {
+      const auto bits_per_frame = static_cast<std::size_t>(std::max(bitrate_kbps, 1)) * 1000 / static_cast<std::size_t>(framerate);
+      return std::max<std::size_t>(bits_per_frame / 8, 4096);
+    }
 
-    bitrate_update_e update_bitrate(int bitrate_kbps) override {
-      const auto budget = pyrowave_encode::frame_budget(bitrate_kbps, fps_num, fps_den);
-      if (!budget) return bitrate_update_e::rejected;
-      // Called on the encoding thread. Each following encode_frame() uses this
-      // ceiling without replacing the encoder or changing stream dimensions.
-      max_frame_bytes = *budget;
-      BOOST_LOG(debug) << "PyroWave: applied " << bitrate_kbps << " kbps, up to " << *budget << " bytes per frame";
+    /**
+     * Yes, and more cheaply than any other encoder here.
+     *
+     * Changing an inter-frame encoder's bitrate mid-stream means reopening it or waiting out a
+     * group of pictures, because the frames already sent are what the next ones are predicted from.
+     * This codec predicts nothing. The budget is read fresh for each frame, so a new one takes
+     * effect on the very next frame with no keyframe to request and nothing to rebuild.
+     */
+    bool supports_runtime_bitrate_update() const override {
+      return true;
+    }
+
+    bitrate_update_e update_bitrate(int new_bitrate_kbps) override {
+      if (new_bitrate_kbps <= 0) {
+        return bitrate_update_e::rejected;
+      }
+
+      const auto budget = frame_budget(new_bitrate_kbps, framerate);
+      if (budget == max_frame_bytes) {
+        return bitrate_update_e::applied;
+      }
+
+      BOOST_LOG(debug) << "PyroWave: "sv << new_bitrate_kbps << " kbps is "sv << budget
+                       << " bytes a frame, from "sv << max_frame_bytes;
+      max_frame_bytes = budget;
       return bitrate_update_e::applied;
     }
 
     int convert(frame_t &frame) override {
-      encoded.clear();
-      prepared = false;
-      if (!session || !frame.cpu_data || frame.row_pitch <= 0 || frame.pixel_pitch != 4 ||
-          frame.width != source_width || frame.height != source_height ||
-          frame.metadata.residency != platf::frame_residency_e::cpu || frame.metadata.format != platf::frame_format_e::bgra8) {
+      if (!session) {
         return -1;
       }
-      prepared = session->prepare_bgra(frame.cpu_data, frame.row_pitch);
-      return prepared ? 0 : -1;
+
+      // Where capture left it, whenever capture can leave it on the GPU. This is the whole cost of
+      // the other path: a full frame copied into memory the GPU can read, sixty times a second,
+      // which at a mirrored ultrawide is four milliseconds of every frame's budget.
+      //
+      // Both halves of the test matter. Two backends here say a frame is a dmabuf while its residency
+      // says it is in host memory, because they read it back with the GPU and hand over the copy;
+      // asking transport alone would have sent those frames down this path, found no descriptor to
+      // read, and failed the session on its first frame. And a frame that claims both and still has
+      // no descriptor is a backend disagreeing with itself, so it goes down the copying path rather
+      // than ending the stream.
+      const bool lives_on_the_gpu = frame.transport() == platf::frame_transport_e::dmabuf &&
+                                    frame.residency() == platf::frame_residency_e::gpu &&
+                                    frame.compat_img();
+      if (lives_on_the_gpu) {
+        pyrowave_encode::dmabuf_t buffer;
+        if (pyrowave_encode::dmabuf_from_frame(*frame.compat_img(), buffer)) {
+          // A format with no reading in this codec is not a frame that went wrong. Capture produces
+          // one format for as long as the display keeps its mode, and a frame on the GPU has no host
+          // copy to fall back to, so every later frame and every rebuilt session meets the same
+          // answer. KDE composites HDR into sixteen bit float, which is the one that arrives here.
+          if (!pyrowave_encode::can_read_dmabuf_format(buffer.fourcc)) {
+            if (!complained_about_import) {
+              complained_about_import = true;
+              BOOST_LOG(error) << "PyroWave: capture is handing over a dmabuf in a format this codec "sv
+                               << "cannot read (fourcc "sv << buffer.fourcc
+                               << "); ending the stream, because that does not change while the "sv
+                               << "display keeps its mode"sv;
+            }
+            return convert_session_is_over;
+          }
+          if (!session->encode_imported(buffer, max_frame_bytes)) {
+            if (!complained_about_import) {
+              complained_about_import = true;
+              BOOST_LOG(error) << "PyroWave: a captured frame on the GPU could not be encoded; the "sv
+                               << "reason is above this line"sv;
+            }
+            return -1;
+          }
+          converted_since_last_packet = true;
+          return session->bitstream().empty() ? -1 : 0;
+        }
+        if (!complained_about_import) {
+          complained_about_import = true;
+          BOOST_LOG(warning) << "PyroWave: capture says this frame is on the GPU and does not describe "sv
+                             << "how, so it is being copied instead"sv;
+        }
+      }
+
+      if (!frame.cpu_data || frame.row_pitch <= 0) {
+        // The frame Polaris primes an encoder with, before capture has produced one. On the path
+        // where frames arrive as a dmabuf it carries no pixels at all: no host buffer, because the
+        // frames that follow will live on the GPU, and no descriptors, because capture has not filled
+        // one in yet. There is nothing here to read and nothing wrong, so the picture it stands for
+        // is made rather than read.
+        //
+        // Getting this wrong is not subtle. Returning a failure tears the session down and the host
+        // builds another, which it did forty thousand times in ten seconds before this existed.
+        if (!session->encode_blank(max_frame_bytes)) {
+          // A ten bit session that cannot make its own black frame cannot make any frame, and the
+          // session built to replace it would fail here identically.
+          return convert_session_is_over;
+        }
+        converted_since_last_packet = true;
+        return session->bitstream().empty() ? -1 : 0;
+      }
+
+      // A frame nobody described. Two different things produce one, and they need opposite answers.
+      //
+      // One is the dummy image Polaris primes an encoder with: it never came from capture, so nothing
+      // published metadata for it. The other is a backend that fills metadata in for nothing it
+      // captures. X11 is one of those, and it says nothing about any frame, real or dummy.
+      //
+      // Which this is can be decided from the session rather than the frame. A ten bit session can
+      // only exist where the captured display is in HDR, which is refused outright otherwise, and
+      // every backend that can capture such a display publishes a format. So in a ten bit session an
+      // unclaimed frame is the primer, and it is encoded black.
+      //
+      // In an eight bit session it is read as BGRA, as it always was, because that is what it is: on
+      // X11 it is the real picture, and the primer is a cleared buffer either way, which is black
+      // whichever path it takes. Blanking those instead would be a stream that runs at full rate and
+      // is black forever with nothing in any log, which is what this did for one hour today.
+      if (frame.metadata.format == platf::frame_format_e::unknown &&
+          range == pyrowave_encode::dynamic_range_e::hdr10) {
+        if (!session->encode_blank(max_frame_bytes)) {
+          return -1;
+        }
+        converted_since_last_packet = true;
+        return session->bitstream().empty() ? -1 : 0;
+      }
+
+      // What this session was built to read, checked rather than assumed. Both ranges arrive at four
+      // bytes a pixel, eight bit BGRA for SDR and packed ten bit for HDR, and each read as the other
+      // is not a wrong colour, it is noise.
+      //
+      // What this catches, exactly: the portal backend is the only one that negotiates ten bit, from
+      // the client's dynamic range, and it is also the only one that reports what it captured, as
+      // p010 standing in for a ten bit source because the enum has no packed ten bit RGB. The wlroots,
+      // KMS and cage backends report bgra8 whatever they took, so a ten bit frame from them would get
+      // through. That is survivable only because none of them asks for one. If one starts, this check
+      // has to move to something it actually fills in.
+      //
+      // The mismatch worth expecting is an HDR stream whose capture came back eight bit, which happens
+      // when a display leaves HDR mid session. Refusing says so; encoding it would send SDR pixels
+      // under BT.2020 PQ metadata, which is the dark, oversaturated picture people report as "HDR is
+      // broken".
+      const auto format = frame.metadata.format;
+      const bool ten_bit_frame = format == platf::frame_format_e::p010;
+      const bool wants_ten_bit = range == pyrowave_encode::dynamic_range_e::hdr10;
+      // Unclaimed is still acceptable here, and only in an eight bit session: a backend that fills
+      // nothing in is not contradicting anything, and four bytes a pixel of it is BGRA.
+      const bool readable = ten_bit_frame == wants_ten_bit &&
+                            (ten_bit_frame || format == platf::frame_format_e::bgra8 ||
+                             format == platf::frame_format_e::unknown);
+      // A backend that never filled the pitch in is not making a claim, so it is not contradicted.
+      const bool four_bytes_a_pixel = frame.pixel_pitch == 0 || frame.pixel_pitch == 4;
+      if (!readable || !four_bytes_a_pixel) {
+        if (!complained_about_format) {
+          complained_about_format = true;
+          BOOST_LOG(error) << "PyroWave: capture is handing over "sv
+                           << platf::from_frame_format(format) << " at "sv << frame.pixel_pitch
+                           << " bytes a pixel, and this session reads "sv
+                           << (wants_ten_bit ? "packed ten bit"sv : "eight bit BGRA"sv)
+                           << "; ending the stream, because another session would read the same "sv
+                           << "frames the same way"sv;
+        }
+        // Not this frame's fault and not fixable by trying again. What capture produces is decided
+        // before the first frame and does not change while a session lasts, so a rebuilt session
+        // meets the identical frame and refuses it identically.
+        return convert_session_is_over;
+      }
+
+      if (!session->encode_packed(frame.cpu_data, frame.width, frame.height, frame.row_pitch,
+                                max_frame_bytes)) {
+        return -1;
+      }
+      converted_since_last_packet = true;
+      return session->bitstream().empty() ? -1 : 0;
     }
 
-    bool encode_frame() {
-      encoded.clear();
-      if (!prepared || !session->encode_prepared(max_frame_bytes)) return false;
-      encoded = session->packets(pyrowave_encode::packet_bytes);
-      return !encoded.empty();
+    /**
+     * Make sure the next packet carries a new frame.
+     *
+     * The host repeats a frame when capture has nothing new, by calling encode again without a
+     * convert in between. Every other encoder here answers that with a fresh packet, because asking
+     * an encoder to encode is what produces one. This one held a buffer, so it handed back the frame
+     * it had already sent, and a decoder drops a sequence number it has already decoded: the frame
+     * arrived whole and was thrown away. Measured as a run of dropped frames at the start of every
+     * session, while a game was still loading and capture had nothing new to give.
+     *
+     * Encoding the retained picture again costs about a millisecond and skips the colour conversion,
+     * which is the expensive half.
+     */
+    bool prepare_packet() {
+      if (converted_since_last_packet) {
+        converted_since_last_packet = false;
+        return true;
+      }
+      return session->encode_retained(max_frame_bytes);
     }
 
     void request_idr_frame() override {
@@ -1837,18 +2017,22 @@ namespace video {
       (void) last_frame;
     }
 
-    const std::vector<std::vector<uint8_t>> &packets() const {
-      return encoded;
+    const std::vector<uint8_t> &bitstream() const {
+      return session->bitstream();
     }
 
-    int width = 0, height = 0;
   private:
     std::unique_ptr<pyrowave_encode::session_t> session;
+    int framerate = 60;
     std::size_t max_frame_bytes = 0;
-    int source_width = 0, source_height = 0;
-    int fps_num = 0, fps_den = 1;
-    bool prepared = false;
-    std::vector<std::vector<uint8_t>> encoded;
+    bool converted_since_last_packet = false;
+
+    /// What the session was built to read, which decides what a frame has to be.
+    pyrowave_encode::dynamic_range_e range = pyrowave_encode::dynamic_range_e::sdr;
+
+    /// Said once each. A capture backend that hands over the wrong thing does it sixty times a second.
+    bool complained_about_format = false;
+    bool complained_about_import = false;
   };
 #endif
 
@@ -2652,14 +2836,6 @@ namespace video {
     return *chosen_encoder;
   }
 
-  bool pyrowave_enabled() {
-#ifdef POLARIS_BUILD_PYROWAVE
-    return pyrowave_encode::api_version() == "0.6.0" && pyrowave_encode::available();
-#else
-    return false;
-#endif
-  }
-
   static const std::vector<encoder_t *> encoders {
 #ifndef __APPLE__
     &nvenc,
@@ -2902,6 +3078,38 @@ namespace video {
     return running();
   }
 
+  /**
+   * @brief The device type to open the capture display with, for the session it is being opened for.
+   *
+   * This thread is bound to the host's chosen encoder when it starts, which is before any client has
+   * said what it wants to decode. That is right for everything the encoder decides, and wrong for
+   * this one thing: the device type is what the capture backends read to decide what to offer, and a
+   * codec chosen per session wants a different answer. The compute codec owns a Vulkan device that
+   * imports a dmabuf; the probed encoder does not, and asking on its behalf gets a frame copied
+   * through host memory for no reason.
+   *
+   * The front context decides, which is the convention this thread already follows for the display
+   * name and the config. For every other codec it returns exactly what the binding would have.
+   *
+   * The synchronous capture thread reads the bound encoder directly and is right to: the choice
+   * between the two threads is made by encoder_for_session as well, so a session on this codec is
+   * always on the parallel one and the synchronous thread never sees it.
+   */
+  platf::mem_type_e capture_device_type(const encoder_t &bound, const config_t &config) {
+#ifdef POLARIS_BUILD_PYROWAVE
+    if (config.videoFormat == VIDEO_FORMAT_PYROWAVE && pyrowave.platform_formats) {
+      return pyrowave.platform_formats->dev_type;
+    }
+#endif
+    // The encoder this thread was handed, and not the host's current choice. They are the same
+    // encoder for every session that is not the one above, and they are not the same pointer: a
+    // reprobe sets the host's choice to null for as long as it runs, and it can run while this
+    // thread is alive, from an HTTP handler or from another launch, with no lock between them.
+    // Reading it here would be a null dereference in the capture thread on a good day and a session
+    // quietly reopened on the wrong device type on a bad one.
+    return bound.platform_formats->dev_type;
+  }
+
   void captureThread(
     std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue,
     sync_util::sync_t<std::weak_ptr<platf::display_t>> &display_wp,
@@ -2910,6 +3118,19 @@ namespace video {
     const encoder_t &encoder
   ) {
     std::vector<capture_ctx_t> capture_ctxs;
+
+    // Every display this thread opens asks this, because a session that negotiated the compute codec
+    // needs a device type the bound encoder would never ask for. It is a call rather than a value
+    // because the front context outlives none of this: sessions arrive and leave, and a reinit asks
+    // again on behalf of whoever is at the front then.
+    //
+    // Six openings in here and all of them have to agree. One that reads the bound encoder instead
+    // hands back a display with no dmabuf offer behind it, and the frames go back to being copied
+    // through host memory for the rest of the session with nothing to say they are. That is what the
+    // two on the reinit path did until this was one name.
+    const auto session_device_type = [&]() {
+      return capture_device_type(encoder, capture_ctxs.front().config);
+    };
 
     auto fg = util::fail_guard([&]() {
       capture_ctx_queue->stop();
@@ -2945,7 +3166,7 @@ namespace video {
     };
 #endif
     if (!exact_display_name.empty()) {
-      disp = platf::display(encoder.platform_formats->dev_type, exact_display_name, capture_ctxs.front().config);
+      disp = platf::display(session_device_type(), exact_display_name, capture_ctxs.front().config);
     }
     if (!disp && !capture_fallback_allowed(exact_display_name)) {
       BOOST_LOG(error) << "Requested display ["sv << exact_display_name
@@ -2956,7 +3177,7 @@ namespace video {
       // Get all the monitor names now, rather than at boot, to
       // get the most up-to-date list available monitors
       refresh_displays(
-        encoder.platform_formats->dev_type,
+        session_device_type(),
         display_names,
         display_p,
         &capture_ctxs.front().config
@@ -2965,7 +3186,8 @@ namespace video {
         BOOST_LOG(error) << "Requested display is unavailable for initial capture setup"sv;
         return;
       }
-      disp = platf::display(encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+      disp = platf::display(session_device_type(), display_names[display_p],
+                            capture_ctxs.front().config);
       if (disp) {
         proc::proc.display_name = display_names[display_p];
       } else {
@@ -3207,7 +3429,7 @@ namespace video {
 #endif
                   reset_display(
                     disp,
-                    encoder.platform_formats->dev_type,
+                    session_device_type(),
                     exact_display_name,
                     capture_ctxs.front().config
                   );
@@ -3222,7 +3444,7 @@ namespace video {
 
               // Only an explicit switch or an unnamed legacy session may enumerate.
               refresh_displays(
-                encoder.platform_formats->dev_type,
+                session_device_type(),
                 display_names,
                 display_p,
                 &capture_ctxs.front().config
@@ -3251,7 +3473,12 @@ namespace video {
                   capture_ctxs.front().channel_data.capture_owner_tag()
                 };
 #endif
-                reset_display(disp, encoder.platform_formats->dev_type, display_names[display_p], capture_ctxs.front().config);
+                reset_display(
+                  disp,
+                  session_device_type(),
+                  display_names[display_p],
+                  capture_ctxs.front().config
+                );
               }
               if (disp) {
                 proc::proc.display_name = display_names[display_p];
@@ -3373,21 +3600,34 @@ namespace video {
 
 #ifdef POLARIS_BUILD_PYROWAVE
   /**
-   * @brief Encode the prepared image and hand over one complete frame.
+   * @brief Hand over the packets convert() produced.
    *
-   * GPU encoding runs here so its duration reaches host telemetry and adaptive
-   * health checks. All coefficient packets belong to the same GameStream IDR.
+   * The work happened in convert(), which is the call that is given a frame. Every packet is marked
+   * a keyframe because every one of them is part of one: PyroWave is intra-only, so there is no
+   * delta frame for the flag to distinguish it from, and a receiver that treats them all as
+   * recoverable is right.
    */
   int encode_pyrowave(int64_t frame_nr, pyrowave_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, stream_packets::destination_t channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
-    if (!session.encode_frame()) return -1;
-    const auto &encoded = session.packets();
+    if (!session.prepare_packet()) {
+      BOOST_LOG(error) << "PyroWave: nothing to send for this frame"sv;
+      return -1;
+    }
+
+    const auto &encoded = session.bitstream();
     if (encoded.empty()) {
       return -1;
     }
 
-    auto payload = pyrowave_encode::pack_frame(encoded, session.width, session.height);
-    if (payload.empty()) return -1;
-    auto packet = std::make_unique<packet_raw_generic>(std::move(payload), frame_nr, true);
+    // One frame, one packet. The codec will also hand over a packet table, and raising a packet_t
+    // for each entry is the mistake that looks right: every packet_t downstream becomes its own
+    // frame on the wire, carrying its own frame header and this same frame number, so the client
+    // would see a run of frames all claiming to be frame N, keep the first and discard the rest as
+    // duplicates. The picture would be a fraction of itself with nothing logged anywhere.
+    //
+    // Nothing is lost by sending it whole: the bitstream delimits itself, so the decoder takes the
+    // frame in one push, and the packet split only ever bought the chance to lose one packet and
+    // still decode, which this transport does not offer anyway.
+    auto packet = std::make_unique<packet_raw_generic>(std::vector<uint8_t> {encoded}, frame_nr, true);
     packet->channel_data = channel_data;
     packet->frame_timestamp = frame_timestamp;
     packet->encode_done_timestamp = std::chrono::steady_clock::now();
@@ -3940,31 +4180,75 @@ namespace video {
     return std::make_unique<nvenc_encode_session_t>(std::move(converter), *conversion_request);
   }
 
-  std::unique_ptr<encode_session_t> make_encode_session(const std::shared_ptr<platf::display_t> &disp, const encoder_t &encoder, const config_t &config, int width, int height, std::unique_ptr<platf::encode_device_t> encode_device) {
+  /**
+   * @param refused_for_good Set when the session could not be built for a reason that will still be
+   *        true the next time it is tried with this client and this display. A caller that rebuilds
+   *        on failure has to stop instead, because every rebuild refuses identically and the client
+   *        sees a stream that never starts with nothing to say why.
+   */
+  std::unique_ptr<encode_session_t> make_encode_session(const std::shared_ptr<platf::display_t> &disp, const encoder_t &encoder, const config_t &config, int width, int height, std::unique_ptr<platf::encode_device_t> encode_device, bool *refused_for_good = nullptr) {
     std::unique_ptr<encode_session_t> session;
 #ifdef POLARIS_BUILD_PYROWAVE
     if (dynamic_cast<platf::pyrowave_encode_device_t *>(encode_device.get())) {
-      auto pyrowave_session = pyrowave_encode::make_session(config.width, config.height, width, height);
+      // The stream's size, not the captured display's, which is what width and height are here. It
+      // is the size the client created its decoder with and the size this codec writes into every
+      // frame's sequence header, and a decoder handed a size it did not expect drops the frame with
+      // a line about the dimensions and nothing about the picture. Capture gets scaled to fit inside
+      // it instead, which is what every other encoder here does through its converter.
+      // chromaSamplingType is the attribute Moonlight already sends and Polaris already parses,
+      // so 4:4:4 needs no mechanism of its own: the client sets it because it asked for the 4:4:4
+      // format, and this reads it.
+      const auto chroma = config.chromaSamplingType == 1 ? pyrowave_encode::chroma_e::yuv444
+                                                         : pyrowave_encode::chroma_e::yuv420;
+
+      // The range the stream actually has, which is not the same as the range the client asked for.
+      // colorspace_from_client_config has already weighed the request against whether this display is
+      // in HDR and whether its metadata could be read, and the answer it reached is the one the client
+      // was told through the HDR metadata on the control stream. Encoding anything else would mean the
+      // picture and its description disagree.
+      const auto range = colorspace_is_hdr(encode_device->colorspace)
+                           ? pyrowave_encode::dynamic_range_e::hdr10
+                           : pyrowave_encode::dynamic_range_e::sdr;
+
+      // And a client that negotiated HDR and cannot be given it is told so, rather than served SDR
+      // under an HDR agreement. This codec's colourimetry is agreed by a profile token before a frame
+      // is sent, and the client builds its whole presentation from that: a ten bit PQ swapchain,
+      // sixteen bit planes, the BT.2020 matrix. Handing it full range Rec. 709 through all of that is
+      // a dark, oversaturated picture with nothing anywhere to say why.
+      //
+      // Reached when the display is not in HDR, or its metadata could not be read, which the ANNOUNCE
+      // gate cannot know: it deliberately does not open a display. So this is where it is caught, and
+      // failing here fails the session with a line rather than streaming something wrong.
+      if (config.dynamicRange != 0 && range != pyrowave_encode::dynamic_range_e::hdr10) {
+        BOOST_LOG(error) << "PyroWave: this client negotiated HDR and the captured display is not in "sv
+                         << "HDR, so there is no honest stream to give it"sv;
+        // The client agreed its colourimetry before the stream began and the display is not in HDR.
+        // Neither changes by trying again, so this ends the stream rather than being refused once a
+        // frame for as long as the client keeps reconnecting.
+        if (refused_for_good) {
+          *refused_for_good = true;
+        }
+        return nullptr;
+      }
+
+      auto pyrowave_session = pyrowave_encode::make_session(config.width, config.height, chroma, range);
       if (!pyrowave_session) {
         invalidate_live_probe_reuse();
         return nullptr;
       }
 
-      // The budget for one frame, from the bitrate the session negotiated. PyroWave's rate control
-      // is exact rather than approximate, so this is a ceiling it meets rather than aims at, and a
-      // frame is the only unit it has: there is no group of pictures to spend across.
-      const auto rate = encoding_framerate_to_rational(config);
-      const auto max_frame_bytes = pyrowave_encode::frame_budget(config.bitrate, rate.num, rate.den);
-      if (!max_frame_bytes) return nullptr;
-      const auto fps = double(rate.num) / rate.den;
-
-      BOOST_LOG(info) << "PyroWave: "sv << config.width << 'x' << config.height << " at "sv << fps
-                      << " fps, up to "sv << *max_frame_bytes << " bytes a frame"sv;
-      session = std::make_unique<pyrowave_encode_session_t>(std::move(pyrowave_session), *max_frame_bytes, config.width, config.height, width, height, rate.num, rate.den);
+      // The session works out its own per frame budget, because it has to do it again every time
+      // adaptive bitrate moves the target.
+      const auto fps = config.framerate > 0 ? config.framerate : 60;
+      BOOST_LOG(info) << "PyroWave: "sv << config.width << 'x' << config.height << ' '
+                      << (chroma == pyrowave_encode::chroma_e::yuv444 ? "4:4:4"sv : "4:2:0"sv)
+                      << (range == pyrowave_encode::dynamic_range_e::hdr10 ? " HDR10"sv : " SDR"sv)
+                      << " at "sv << fps << " fps, up to "sv
+                      << pyrowave_encode_session_t::frame_budget(config.bitrate, fps)
+                      << " bytes a frame"sv;
+      session = std::make_unique<pyrowave_encode_session_t>(std::move(pyrowave_session), fps,
+                                                           config.bitrate, range);
       session->capture_display_owner = disp;
-      // The input is CPU YUV420; encoding then uploads it to Vulkan. Do not
-      // inherit the conversion metadata left behind by conventional probing.
-      stream_stats::update_encode_path_metadata("system", platf::frame_residency_e::cpu, platf::frame_format_e::yuv420p);
       return session;
     }
 #endif
@@ -3998,12 +4282,19 @@ namespace video {
     if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
       config.bitrate = request->target_bitrate_kbps;
     }
-    auto session = make_encode_session(disp, encoder, config, disp->width, disp->height, std::move(encode_device));
+    bool refused_for_good = false;
+    auto session = make_encode_session(disp, encoder, config, disp->width, disp->height,
+                                       std::move(encode_device), &refused_for_good);
     if (!session) {
       adaptive_bitrate::set_runtime_update_supported(
         false,
         "encoder_session_init_failed"
       );
+      if (refused_for_good) {
+        // Returning alone leaves the host to build this session again, which is right for a failure
+        // that might not repeat and wrong for one that cannot do anything else.
+        mail->event<bool>(mail::shutdown)->raise(true);
+      }
       return;
     }
 
@@ -4192,7 +4483,7 @@ namespace video {
           }
 #endif
 
-          if (session->convert(frame)) {
+          if (const auto converted = session->convert(frame); converted) {
             invalidate_live_probe_reuse();
             BOOST_LOG(error) << "Could not convert image"sv;
 #ifdef __linux__
@@ -4200,6 +4491,13 @@ namespace video {
               reinit_request_event.raise(true);
             }
 #endif
+            if (converted == convert_session_is_over) {
+              // Breaking out of this loop is what the host answers by building the session again,
+              // which is right for a frame that arrived wrong and wrong for a session that cannot
+              // read any frame capture will produce. End the stream instead, after the route
+              // handler above has had its say, so a retired GPU-native route is still retired.
+              shutdown_event->raise(true);
+            }
             break;
           }
 
@@ -4350,7 +4648,8 @@ namespace video {
               config.videoFormat == 2 ? "av1" :
               config.videoFormat == 1 ? "hevc" : "h264",
             config.width,
-            config.height
+            config.height,
+            encoder.name
           );
         }
         } // end fps tracking scope
@@ -4385,6 +4684,54 @@ namespace video {
                   );
     port.compositor_touch_turn = display->compositor_touch_turn;
     return port;
+  }
+
+  std::optional<std::string> pyrowave_announce_refusal(const config_t &config, bool can_encode,
+                                                      bool can_hdr) {
+    if (!can_encode) {
+      return "The client requested PyroWave, which this host cannot run"s;
+    }
+
+    // One dynamic range or the other, and only HDR10 where this host can carry it. The bit in
+    // ServerCodecModeSupport is what a client reads to know, because the range is asked for at launch
+    // over HTTP, before any of this. A client that asks for HDR anyway either ignored that bit or lost
+    // a race with a host that stopped offering it, and both want an answer rather than an SDR picture
+    // with HDR metadata bolted on.
+    if (config.dynamicRange != 0 && config.dynamicRange != 1) {
+      return "PyroWave knows two dynamic ranges, yet the client asked for "s +
+             std::to_string(config.dynamicRange);
+    }
+    if (config.dynamicRange == 1 && !can_hdr) {
+      return "The client asked for PyroWave in HDR, which needs the GPU input path this host does not have"s;
+    }
+
+    // Full range either way, because that is what the codec's own colour conversion produces and there
+    // is no setting for it. Bit 0 of the colour mode is the range.
+    //
+    // The colourspace bits above it only matter for SDR, where they have to say Rec. 709, which with
+    // the range bit makes 3. For HDR they are ignored on purpose: Polaris derives BT.2020 PQ from the
+    // dynamic range rather than from this field, so a client sending either 709 or 2020 alongside an
+    // HDR request gets the same stream, and refusing one of them would be refusing over a field
+    // nothing reads.
+    const bool full_range = (config.encoderCscMode & 0x1) != 0;
+    const auto requested_colourspace = config.encoderCscMode >> 1;
+    const bool colourspace_ok = config.dynamicRange == 1
+                                  ? (requested_colourspace == 1 || requested_colourspace == 2)
+                                  : requested_colourspace == 1;
+    if (!full_range || !colourspace_ok) {
+      return "PyroWave carries full range "s + (config.dynamicRange == 1 ? "BT.2020 PQ"s : "Rec. 709"s) +
+             ", yet the client asked for colour mode "s + std::to_string(config.encoderCscMode);
+    }
+
+    // 4:2:0 has no half chroma sample, and an odd extent would make the encoder round to even while
+    // the client's decoder kept the size it asked for. The two then disagree about every frame's
+    // sequence header, and the decoder drops the lot with a line about the dimensions.
+    if (config.width <= 0 || config.height <= 0 || (config.width & 1) || (config.height & 1)) {
+      return "PyroWave needs an even stream size, yet the client asked for "s +
+             std::to_string(config.width) + 'x' + std::to_string(config.height);
+    }
+
+    return std::nullopt;
   }
 
   std::unique_ptr<platf::encode_device_t> make_encode_device(platf::display_t &disp, const encoder_t &encoder, const config_t &config) {
@@ -4945,7 +5292,7 @@ namespace video {
         std::move(encode_device),
         ref->reinit_event,
         ref->reinit_request_event,
-        *ref->encoder_p,
+        encoder,
         channel_data,
         packets
       );

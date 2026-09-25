@@ -72,7 +72,7 @@ elseif(UNIX)  # Linux
     option(POLARIS_ENABLE_VULKAN
             "Enable Vulkan Video encoding through FFmpeg." ON)
     option(POLARIS_ENABLE_PYROWAVE
-            "Build the PyroWave compute codec. Polaris and Nova only, wired links." OFF)
+            "Build the PyroWave compute codec. Polaris and Nova only, wired links." ON)
     option(POLARIS_ENABLE_WAYLAND
             "Enable building wayland specific code." ON)
     option(POLARIS_ENABLE_X11

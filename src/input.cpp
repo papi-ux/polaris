@@ -18,11 +18,13 @@ extern "C" {
 
 // lib includes
 #include <boost/endian/buffers.hpp>
+#include <boost/algorithm/string.hpp>
 
 // local includes
 #include "config.h"
 #include "globals.h"
 #include "input.h"
+#include "retained_gamepad.h"
 #include "logging.h"
 #include "platform/common.h"
 #include "stream_stats.h"
@@ -111,7 +113,9 @@ namespace input {
 
   static task_pool_util::TaskPool::task_id_t key_press_repeat_id {};
   static std::unordered_map<key_press_id_t, bool> key_press {};
-  static std::array<std::uint8_t, 5> mouse_press {};
+  // Indexed by the Moonlight button number, so it has to reach BUTTON_X2, which is 5. It was five
+  // entries, which covers 0 through 4, so a held X2 was not recorded and never released.
+  static std::array<std::uint8_t, BUTTON_X2 + 1> mouse_press {};
 
   static platf::input_t platf_input;
   static std::bitset<platf::MAX_GAMEPADS> gamepadMask {};
@@ -152,11 +156,21 @@ namespace input {
     }
 
     ~gamepad_t() {
-      if (id >= 0) {
+      if (retained) {
+        retained->release(lease_generation);
+      } else if (id >= 0) {
         task_pool.push([id = this->id]() {
           free_gamepad(platf_input, id);
         });
       }
+    }
+
+    // The app pins the device; each connection receives a fenced input lease.
+    std::shared_ptr<retained_gamepad_t> retained;
+    std::uint64_t lease_generation = 0;
+
+    retained_gamepad_t::access_t access() {
+      return retained ? retained->access(lease_generation) : retained_gamepad_t::access_t {};
     }
 
     platf::gamepad_state_t gamepad_state;
@@ -260,19 +274,19 @@ namespace input {
     return true;
   }
 
-  void preallocate_gamepad(int client_controller_type) {
+  std::shared_ptr<retained_gamepad_t> preallocate_gamepad(int client_controller_type, const std::string &retained_owner) {
     if (!config::input.controller) {
-      return;
+      return {};
     }
 
     std::scoped_lock lock {preallocated_gamepad_mutex};
     if (preallocated_gamepad_id >= 0 || gamepadMask.any()) {
-      return;
+      return {};
     }
 
     auto id = alloc_id(gamepadMask);
     if (id < 0) {
-      return;
+      return {};
     }
 
     if (!preallocated_gamepad_mail) {
@@ -290,7 +304,7 @@ namespace input {
       free_id(gamepadMask, id);
       update_controller_diagnostics(false, controller_number, "ControllerNumber [0] could not be preallocated before app launch.");
       BOOST_LOG(warning) << "ControllerNumber [0] could not be preallocated before app launch"sv;
-      return;
+      return {};
     }
 
     preallocated_controller_number = controller_number;
@@ -298,6 +312,18 @@ namespace input {
     update_controller_diagnostics(true, controller_number);
     platf::gamepad_update(platf_input, id, {});
     BOOST_LOG(info) << "ControllerNumber [0] preallocated before app launch"sv;
+    if (!retained_owner.empty()) {
+      auto retained = std::make_shared<retained_gamepad_t>(
+        id, boost::to_lower_copy(retained_owner),
+        [](int pad) { platf::gamepad_update(platf_input, pad, {}); },
+        [](int pad) { task_pool.push([pad]() { free_gamepad(platf_input, pad); }); });
+      preallocated_controller_number = -1;
+      preallocated_gamepad_id = -1;
+      preallocated_gamepad_mail.reset();
+      preallocated_gamepad_feedback_queue.reset();
+      return retained;
+    }
+    return {};
   }
 
   /**
@@ -1112,6 +1138,9 @@ namespace input {
       return;
     }
 
+    auto access = input->gamepads[packet->controllerNumber].access();
+    if (!access) return;
+
     if (input->gamepads[packet->controllerNumber].id >= 0) {
       // The pad was preallocated before the app launched, which is the only way a game sees a
       // controller at startup, so this arrival is too late to change it. Remember what the
@@ -1263,6 +1292,8 @@ namespace input {
     }
 
     auto &gamepad = input->gamepads[packet->controllerNumber];
+    auto access = gamepad.access();
+    if (!access) return;
     if (gamepad.id < 0) {
       BOOST_LOG(warning) << "ControllerNumber ["sv << packet->controllerNumber << "] not allocated"sv;
       return;
@@ -1304,6 +1335,8 @@ namespace input {
     }
 
     auto &gamepad = input->gamepads[packet->controllerNumber];
+    auto access = gamepad.access();
+    if (!access) return;
     if (gamepad.id < 0) {
       BOOST_LOG(warning) << "ControllerNumber ["sv << packet->controllerNumber << "] not allocated"sv;
       return;
@@ -1336,6 +1369,8 @@ namespace input {
     }
 
     auto &gamepad = input->gamepads[packet->controllerNumber];
+    auto access = gamepad.access();
+    if (!access) return;
     if (gamepad.id < 0) {
       BOOST_LOG(warning) << "ControllerNumber ["sv << packet->controllerNumber << "] not allocated"sv;
       return;
@@ -1362,6 +1397,8 @@ namespace input {
     }
 
     auto &gamepad = input->gamepads[packet->controllerNumber];
+    auto access = gamepad.access();
+    if (!access) return;
 
     // If this is an event for a new gamepad, create the gamepad now. Ideally, the client would
     // send a controller arrival instead of this but it's still supported for legacy clients.
@@ -1370,9 +1407,18 @@ namespace input {
         return;
       }
     } else if (!(packet->activeGamepadMask & (1 << packet->controllerNumber)) && gamepad.id >= 0) {
-      // If this is the final event for a gamepad being removed, free the gamepad and return.
-      free_gamepad(platf_input, gamepad.id);
-      gamepad.id = -1;
+      // A private game's mount namespace keeps this exact device node. A client
+      // removal (including startup's empty mask) releases buttons, not the device.
+      task_pool.cancel(gamepad.back_timeout_id);
+      gamepad.back_timeout_id = nullptr;
+      gamepad.gamepad_state = {};
+      gamepad.back_button_state = button_state_e::NONE;
+      if (gamepad.retained) {
+        platf::gamepad_update(platf_input, gamepad.id, {});
+      } else {
+        free_gamepad(platf_input, gamepad.id);
+        gamepad.id = -1;
+      }
       return;
     }
 
@@ -1422,6 +1468,8 @@ namespace input {
         if (config::input.back_button_timeout >= 0ms) {
           auto f = [input, controller = packet->controllerNumber]() {
             auto &gamepad = input->gamepads[controller];
+            auto access = gamepad.access();
+            if (!access || gamepad.id < 0) return;
 
             auto &state = gamepad.gamepad_state;
 
@@ -1989,11 +2037,35 @@ namespace input {
   }
 
   void reset(std::shared_ptr<input_t> &input) {
+    // Revoke synchronously: queued packets and delayed Home callbacks from this
+    // connection must not drive a pad after another connection resumes the game.
+    for (auto &gamepad : input->gamepads) {
+      if (gamepad.retained) gamepad.retained->release(gamepad.lease_generation);
+    }
     task_pool.cancel(key_press_repeat_id);
+
+    // The left button's release is held back ten milliseconds so that a right click can overtake it,
+    // and the bookkeeping is written when the client asks rather than when the button actually comes
+    // up. Between those two moments mouse_press says left is up while the host still holds it down,
+    // and cancelling that timer strands it exactly there: the loop below releases what the
+    // bookkeeping says is held, and the bookkeeping already agrees the button is up.
+    //
+    // A left button left down on a desktop is a selection rectangle that follows the pointer around
+    // and cannot be dismissed. Only on the absolute coordinate path, which is to say only on the
+    // desktop, which is where it was found.
+    const bool left_release_pending =
+      input->mouse_left_button_timeout != nullptr &&
+      input->mouse_left_button_timeout != DISABLE_LEFT_BUTTON_DELAY;
     task_pool.cancel(input->mouse_left_button_timeout);
+    input->mouse_left_button_timeout = ENABLE_LEFT_BUTTON_DELAY;
 
     // Ensure input is synchronous, by using the task_pool
-    task_pool.push([]() {
+    task_pool.push([left_release_pending]() {
+      if (left_release_pending) {
+        platf::button_mouse(platf_input, BUTTON_LEFT, true);
+        mouse_press[BUTTON_LEFT] = false;
+      }
+
       for (int x = 0; x < mouse_press.size(); ++x) {
         if (mouse_press[x]) {
           platf::button_mouse(platf_input, x, true);
@@ -2006,7 +2078,14 @@ namespace input {
           // already released
           continue;
         }
-        platf::keyboard_update(platf_input, vk_from_kpid(kp.first) & 0x00FF, true, flags_from_kpid(kp.first));
+        // Through the same mapping the press went through. Releasing the key the client named, when
+        // a keybinding sent a different one to the host, leaves the one actually held down held.
+        platf::keyboard_update(
+          platf_input,
+          map_keycode(vk_from_kpid(kp.first) & 0x00FF),
+          true,
+          flags_from_kpid(kp.first)
+        );
         key_press[kp.first] = false;
       }
     });
@@ -2044,7 +2123,8 @@ namespace input {
     return {(x + static_cast<float>(pad)) / 2.0f, pad};
   }
 
-  std::shared_ptr<input_t> alloc(safe::mail_t mail, bool controllers) {
+  std::shared_ptr<input_t> alloc(safe::mail_t mail, bool controllers,
+      std::shared_ptr<retained_gamepad_t> retained, const std::string &owner) {
     auto input = std::make_shared<input_t>(
       mail->event<input::touch_port_t>(mail::touch_port),
       mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback),
@@ -2052,7 +2132,21 @@ namespace input {
     );
 
     bool adopted_preallocated_gamepad = false;
-    if (controllers) {
+    if (controllers && retained) {
+      auto &gamepad = input->gamepads[0];
+      gamepad.retained = std::move(retained);
+      gamepad.lease_generation = gamepad.retained->acquire(boost::to_lower_copy(owner));
+      if (!gamepad.lease_generation) {
+        BOOST_LOG(warning) << "Private controller is already leased or retired"sv;
+        return nullptr;
+      }
+      auto access = gamepad.access();
+      if (!access) return nullptr;
+      gamepad.id = gamepad.retained->id();
+      platf::rebind_gamepad_feedback(platf_input, gamepad.id, input->feedback_queue);
+      adopted_preallocated_gamepad = true;
+      BOOST_LOG(info) << "ControllerNumber [0] leased existing private gamepad"sv;
+    } else if (controllers) {
       std::scoped_lock lock {preallocated_gamepad_mutex};
       if (preallocated_controller_number == 0 && preallocated_gamepad_id >= 0) {
         input->gamepads[0].id = preallocated_gamepad_id;
@@ -2070,6 +2164,8 @@ namespace input {
     // another session, and a pad here would be a second player nobody plays.
     if (controllers) {
       task_pool.push([input, adopted_preallocated_gamepad]() {
+        auto access = input->gamepads[0].access();
+        if (!access) return;
         if (adopted_preallocated_gamepad || ensure_gamepad_allocated(input, 0, {}, "session startup")) {
           platf::gamepad_update(platf_input, input->gamepads[0].id, {});
         }

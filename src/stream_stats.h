@@ -82,6 +82,8 @@ namespace stream_stats {
     int bitrate_kbps = 0;
     double encode_time_ms = 0;
     std::string codec;
+    // The encoder instance producing these samples, not the startup probe.
+    std::string encoder_backend;
     int width = 0;
     int height = 0;
 
@@ -197,6 +199,8 @@ namespace stream_stats {
     double capture_source_fps = 0;
     std::string capture_pacing;
     std::string codec;
+    // The encoder instance producing these samples, not the startup probe.
+    std::string encoder_backend;
     std::string pacing_policy;
     std::string optimization_source;
     std::string optimization_confidence;
@@ -454,7 +458,7 @@ namespace stream_stats {
    * @param width Current video width.
    * @param height Current video height.
    */
-  void update_video_stats(double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height);
+  void update_video_stats(double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height, std::string_view encoder_backend = {});
 
   /**
    * @brief Update video statistics for a specific client.
@@ -466,7 +470,7 @@ namespace stream_stats {
    * @param width Current video width.
    * @param height Current video height.
    */
-  void update_video_stats(const std::string &client_ip, double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height);
+  void update_video_stats(const std::string &client_ip, double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height, std::string_view encoder_backend = {});
 
   /**
    * @brief Update static session targets for pacing and optimization telemetry.

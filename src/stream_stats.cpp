@@ -107,7 +107,7 @@ namespace stream_stats {
     std::atomic<double> hot_fps {0.0};
     std::atomic<int> hot_bitrate_kbps {0};
     std::atomic<double> hot_encode_time_ms {0.0};
-    std::atomic<int> hot_codec_id {-1};  // -1=unset, 0=h264, 1=hevc, 2=av1
+    std::atomic<int> hot_codec_id {-1};  // -1=unset, 0=h264, 1=hevc, 2=av1, 3=pyrowave
     std::atomic<int> hot_width {0};
     std::atomic<int> hot_height {0};
     std::atomic<double> hot_duplicate_frame_ratio {0.0};
@@ -258,10 +258,10 @@ namespace stream_stats {
 
     std::string codec_from_id(int id) {
       switch (id) {
-        case 3: return "pyrowave";
         case 0: return "h264";
         case 1: return "hevc";
         case 2: return "av1";
+        case 3: return "pyrowave";
         default: return {};
       }
     }
@@ -1160,7 +1160,7 @@ namespace stream_stats {
     // exactly when a first-time host gives up. The forecast reads configuration, the build and
     // the last capture-source evaluation, and stays silent until the host has looked.
     {
-      std::string encoder = config::video.encoder;
+      std::string encoder = stats.encoder_backend.empty() ? config::video.encoder : stats.encoder_backend;
       if (encoder.empty() || encoder == "auto") {
         encoder = video::active_encoder_name();
       }
@@ -2598,7 +2598,7 @@ namespace stream_stats {
     }
   }
 
-  void update_video_stats(double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height) {
+  void update_video_stats(double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height, std::string_view encoder_backend) {
     hot_bitrate_kbps.store(bitrate_kbps, std::memory_order_relaxed);
     hot_codec_id.store(codec_to_id(codec), std::memory_order_relaxed);
     hot_width.store(width, std::memory_order_relaxed);
@@ -2616,18 +2616,20 @@ namespace stream_stats {
     // Multi-client mirror: bounded by active client count (typically 1),
     // and the only reason this call still needs stats_mutex at all.
     std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.encoder_backend = encoder_backend;
     if (!current_stats.clients.empty()) {
       auto &c = current_stats.clients.front();
       c.fps = fps;
       c.bitrate_kbps = bitrate_kbps;
       c.encode_time_ms = encode_time_ms;
       c.codec = codec;
+      c.encoder_backend = encoder_backend;
       c.width = width;
       c.height = height;
     }
   }
 
-  void update_video_stats(const std::string &client_ip, double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height) {
+  void update_video_stats(const std::string &client_ip, double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height, std::string_view encoder_backend) {
     std::lock_guard<std::mutex> lock(stats_mutex);
 
     auto it = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
@@ -2638,12 +2640,14 @@ namespace stream_stats {
       it->bitrate_kbps = bitrate_kbps;
       it->encode_time_ms = encode_time_ms;
       it->codec = codec;
+      it->encoder_backend = encoder_backend;
       it->width = width;
       it->height = height;
     }
 
     // Also update top-level stats (use first client for backward compat)
     if (!current_stats.clients.empty() && current_stats.clients.front().ip == client_ip) {
+      current_stats.encoder_backend = encoder_backend;
       hot_bitrate_kbps.store(bitrate_kbps, std::memory_order_relaxed);
       hot_codec_id.store(codec_to_id(codec), std::memory_order_relaxed);
       hot_width.store(width, std::memory_order_relaxed);

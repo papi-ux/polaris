@@ -1828,9 +1828,15 @@ std::string get_local_ip_for_gateway() {
     return true;
   }
 
+  void log_display_backend_choice(
+    display_backend_e backend,
+    const video::config_t &config
+  );
+
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
     const auto requested_backend = config.capture_generation.capture_backend;
     const auto backend = selected_display_backend(hwdevice_type, config);
+    log_display_backend_choice(backend, config);
     switch (backend) {
       case display_backend_e::nvfbc:
 #ifdef POLARIS_BUILD_CUDA
@@ -1959,6 +1965,73 @@ std::string get_local_ip_for_gateway() {
 
   const std::string &requested_capture() {
     return capture_backend_override ? *capture_backend_override : config::video.capture;
+  }
+
+  std::string_view display_backend_name(display_backend_e backend) {
+    switch (backend) {
+      case display_backend_e::nvfbc: return "nvfbc";
+      case display_backend_e::wayland: return "wlr";
+      case display_backend_e::portal: return "portal";
+      case display_backend_e::kms: return "kms";
+      case display_backend_e::x11: return "x11";
+      default: return "none";
+    }
+  }
+
+  /**
+   * Every flag that was set, not just the first one. The chooser takes the first match, so the ones
+   * it passed over are what say whether a different answer was ever possible.
+   */
+  std::string describe_available_sources() {
+    std::string out;
+    const auto add = [&out](std::string_view name) {
+      if (!out.empty()) {
+        out += ',';
+      }
+      out += name;
+    };
+#ifdef POLARIS_BUILD_CUDA
+    if (sources[source::NVFBC]) add("nvfbc");
+#endif
+#ifdef POLARIS_BUILD_WAYLAND
+    if (sources[source::WAYLAND]) add("wlr");
+#endif
+#ifdef POLARIS_BUILD_PORTAL
+    if (sources[source::PORTAL]) add("portal");
+#endif
+#ifdef POLARIS_BUILD_DRM
+    if (sources[source::KMS]) add("kms");
+#endif
+#ifdef POLARIS_BUILD_X11
+    if (sources[source::X11]) add("x11");
+#endif
+    return out.empty() ? std::string {"none"} : out;
+  }
+
+  /**
+   * @brief Every input that decided which backend opens, in one line.
+   *
+   * Which backend serves a session is settled before any backend's own code runs, by a first match
+   * over a set of availability flags that is rebuilt around each launch. So a session that came up on
+   * one backend yesterday and another today leaves no trace of why, and the only evidence is which
+   * backend's messages appear afterwards. Reading that backwards is how an innocent change in one
+   * backend was blamed for a choice made before it was reached.
+   *
+   * Cheap: once per display open, which is once per session and per reinit, not per frame.
+   */
+  void log_display_backend_choice(display_backend_e backend, const video::config_t &config) {
+    const auto &generation = config.capture_generation;
+    BOOST_LOG(info) << "capture_backend: chose ["sv << display_backend_name(backend)
+                    << "] requested=["sv
+                    << (generation.capture_backend.empty() ? "auto"sv
+                                                           : std::string_view {generation.capture_backend})
+                    << "] exact_output=["sv
+                    << (generation.exact_display_name.empty() ? "none"sv
+                                                              : std::string_view {generation.exact_display_name})
+                    << "] available=["sv << describe_available_sources()
+                    << "] virtual_display_needs_portal=["sv
+                    << (host_virtual_display_needs_portal() ? "yes"sv : "no"sv)
+                    << "] cage="sv << (config::video.linux_display.use_cage_compositor ? "on"sv : "off"sv);
   }
 
   std::string describe_selected_sources() {
