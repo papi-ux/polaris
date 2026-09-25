@@ -4572,6 +4572,15 @@ namespace proc {
       (blank(app.source) || boost::iequals(boost::trim_copy(app.source), "manual"));
   }
 
+  bool uses_bundled_utility_artwork(const ctx_t &app) {
+    return app.uuid == VIRTUAL_DISPLAY_UUID ||
+      app.uuid == FALLBACK_DESKTOP_UUID ||
+      app.uuid == REMOTE_INPUT_UUID ||
+      app.uuid == TERMINATE_APP_UUID ||
+      app.desktop_mirror ||
+      launches_nothing(app);
+  }
+
   bool is_stock_low_res_desktop(const ctx_t &app) {
     // Only the sample's own prep command counts: a host's global commands run ahead of it.
     const auto own = app.global_prep_cmd_count;

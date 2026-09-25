@@ -404,6 +404,48 @@ namespace emulator_library {
   }
 
   /**
+   * @brief A numbered set's catalogue index, dropped: "0001 - Super Mario 64 DS" is that game.
+   *
+   * Some ROM sets prefix every file with its number in the set. The number says nothing about the
+   * game and it sorts a library by an order nobody chose.
+   *
+   * Two real titles decide how careful this has to be. "1943 - The Battle of Midway" is a year, and
+   * "007 - GoldenEye" is a name, and stripping either leaves a different game's title behind. So an
+   * index has to be padded with a leading zero, which a year never is, and four or five digits long,
+   * which the Bond number is not. Sets pad to four.
+   */
+  inline std::string strip_set_number(std::string_view name) {
+    if (name.empty() || name.front() != '0') {
+      return std::string(name);
+    }
+    std::size_t digits = 0;
+    while (digits < name.size() && std::isdigit(static_cast<unsigned char>(name[digits]))) {
+      ++digits;
+    }
+    if (digits < 4 || digits > 5) {
+      return std::string(name);
+    }
+    auto rest = name.substr(digits);
+    if (rest.rfind(" - ", 0) == 0) {
+      rest.remove_prefix(3);
+    }
+    else if (rest.rfind("- ", 0) == 0 || rest.rfind(". ", 0) == 0) {
+      rest.remove_prefix(2);
+    }
+    else if (rest.rfind("-", 0) == 0) {
+      rest.remove_prefix(1);
+    }
+    else {
+      // A number that runs straight into the title is part of it.
+      return std::string(name);
+    }
+    while (!rest.empty() && rest.front() == ' ') {
+      rest.remove_prefix(1);
+    }
+    return rest.empty() ? std::string(name) : std::string(rest);
+  }
+
+  /**
    * @brief "Legend of Zelda, The - Breath of the Wild" reads as "The Legend of Zelda - Breath of the Wild".
    *
    * Sorted ROM sets move the article behind a comma; a launcher grid wants it in front.
@@ -431,7 +473,7 @@ namespace emulator_library {
   /// The entry name a ROM file gets: tags gone, underscores gone, the article back in front.
   inline std::string display_name(const std::filesystem::path &rom) {
     const auto stem = rom.stem().string();
-    auto name = tidy_name(strip_bracket_groups(stem));
+    auto name = strip_set_number(tidy_name(strip_bracket_groups(stem)));
     if (name.empty()) {
       name = tidy_name(stem);
     }

@@ -3380,19 +3380,6 @@ namespace nvhttp {
       return (configured_parent.empty() ? platf::appdata() : configured_parent) / "covers";
     }
 
-    bool uses_bundled_utility_artwork(const proc::ctx_t &app) {
-      // An entry that streams the desktop is not a game either. No provider has artwork for it,
-      // and a title search only finds a coincidental game (Low Res Desktop -> Low Magic Age).
-      // The flag alone misses upgraded hosts, whose apps.json predates it, so an entry that
-      // launches nothing counts as well.
-      return app.uuid == VIRTUAL_DISPLAY_UUID ||
-             app.uuid == FALLBACK_DESKTOP_UUID ||
-             app.uuid == REMOTE_INPUT_UUID ||
-             app.uuid == TERMINATE_APP_UUID ||
-             app.desktop_mirror ||
-             proc::launches_nothing(app);
-    }
-
     fs::path configured_artwork_image(const proc::ctx_t &app) {
       const fs::path configured = app.image_path;
       if (configured.empty() || configured.is_absolute()) {
@@ -3405,7 +3392,7 @@ namespace nvhttp {
       // launcher had no poster in Nova and a title such as "Virtual Display" fell through to a
       // coincidental SteamGridDB game match.
       const auto validated = proc::validate_app_image_path(app.image_path);
-      if (uses_bundled_utility_artwork(app)) {
+      if (proc::uses_bundled_utility_artwork(app)) {
         return validated;
       }
       // Validation answers with the generic box art for a name it cannot find. For anything but
@@ -3429,7 +3416,7 @@ namespace nvhttp {
     void promote_local_artwork_poster(const proc::ctx_t &app) {
       const auto appdata = platf::appdata();
       const auto candidates = local_artwork_candidates(app);
-      const bool bundled_utility = uses_bundled_utility_artwork(app);
+      const bool bundled_utility = proc::uses_bundled_utility_artwork(app);
       // An entry whose image was cleared stops showing the copy of the old one.
       (void) game_artwork::retire_orphaned_local_poster(appdata, app.uuid, candidates);
       bool candidate_already_cached = false;
@@ -3462,7 +3449,7 @@ namespace nvhttp {
     // automatic SteamGridDB match, even one whose file outlived its removal, so a stale file
     // cannot stand in for the entry's own image.
     nlohmann::json artwork_manifest_for(const std::filesystem::path &appdata, const proc::ctx_t &app) {
-      if (!uses_bundled_utility_artwork(app)) return current_artwork_manifest(appdata, app.uuid);
+      if (!proc::uses_bundled_utility_artwork(app)) return current_artwork_manifest(appdata, app.uuid);
       if (!game_artwork::recover_interrupted_artwork_override(appdata, app.uuid)) return nullptr;
       auto lock = game_artwork::acquire_artwork_override_read_lock();
       auto assets = game_artwork::scan_cached_assets(appdata, app.uuid);
@@ -9331,7 +9318,7 @@ namespace nvhttp {
         // Only one particular game has a completion time. A launcher's or an emulator's title is
         // an ordinary word, and the lookup finds a game that shares it: Heroic was given the hours
         // of a game called Heroic Dungeon. Skipping here also keeps it from asking at all.
-        if (!uses_bundled_utility_artwork(app) && proc::is_one_game(app)) {
+        if (!proc::uses_bundled_utility_artwork(app) && proc::is_one_game(app)) {
           if (const auto beat_time = beat_time_for_app(app, game["artwork"])) {
             game["beat_time"] = *beat_time;
           }
@@ -9524,7 +9511,7 @@ namespace nvhttp {
       const auto asset = game_artwork::find_cached_asset(appdata, app->uuid, asset_request->kind);
       // A utility or desktop entry never serves an automatic SteamGridDB match, even one whose
       // file outlived its removal.
-      if (!asset || (asset->source == game_artwork::source_e::steamgriddb && uses_bundled_utility_artwork(*app))) {
+      if (!asset || (asset->source == game_artwork::source_e::steamgriddb && proc::uses_bundled_utility_artwork(*app))) {
         response->write(SimpleWeb::StatusCode::client_error_not_found);
         return;
       }
@@ -9595,7 +9582,7 @@ namespace nvhttp {
         game_artwork::kind_e::logo,
         game_artwork::kind_e::icon,
       };
-      const bool bundled_utility = uses_bundled_utility_artwork(*app);
+      const bool bundled_utility = proc::uses_bundled_utility_artwork(*app);
       // Whatever is still missing once local promotion and the free Steam assets have run is
       // exactly the set this request goes on to ask a remote provider for, so it is also what
       // the response reports as requested.

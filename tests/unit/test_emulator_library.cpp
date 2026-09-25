@@ -145,6 +145,22 @@ TEST(EmulatorLibraryNames, FilenamesBecomeGridNames) {
   EXPECT_EQ(display_name("/roms/Legend of Zelda, The: Link's Awakening.nsp"), "The Legend of Zelda: Link's Awakening");
   EXPECT_EQ(display_name("/roms/Game, Then.iso"), "Game, Then");
   EXPECT_EQ(display_name("/roms/Title -  Subtitle -.chd"), "Title - Subtitle");
+  // A numbered set's index goes, because it is about the set.
+  EXPECT_EQ(display_name("/roms/0001 - Super Mario 64 DS (USA).nds"), "Super Mario 64 DS");
+  EXPECT_EQ(display_name("/roms/0549 - Legend of Zelda, The - Phantom Hourglass (USA).nds"),
+            "The Legend of Zelda - Phantom Hourglass");
+  EXPECT_EQ(display_name("/roms/01234 - Wide Set Game (USA).nds"), "Wide Set Game");
+  EXPECT_EQ(display_name("/roms/0001. Dotted Set Game.nds"), "Dotted Set Game");
+  EXPECT_EQ(display_name("/roms/0001-Tight Set Game.nds"), "Tight Set Game");
+  // And these are titles. A year is never padded, the Bond number is three digits, and a number
+  // that runs into the title is part of it.
+  EXPECT_EQ(display_name("/roms/1943 - The Battle of Midway (USA).nes"), "1943 - The Battle of Midway");
+  EXPECT_EQ(display_name("/roms/007 - GoldenEye (USA).n64"), "007 - GoldenEye");
+  EXPECT_EQ(display_name("/roms/0079 Gundam War (Japan).gba"), "0079 Gundam War");
+  EXPECT_EQ(display_name("/roms/720 Degrees (USA).nes"), "720 Degrees");
+  // An index with nothing after it is not an index. The separator is gone by then, so all that is
+  // left to call the entry is the number itself.
+  EXPECT_EQ(display_name("/roms/0001 - (USA).nds"), "0001");
   // Nothing left once the tags go: keep the stem rather than an empty name.
   EXPECT_EQ(display_name("/roms/[0100000000010000].nsp"), "[0100000000010000]");
   EXPECT_EQ(display_name("/roms/Game.v1.2.nsp"), "Game.v1.2");
