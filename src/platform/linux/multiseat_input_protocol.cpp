@@ -121,7 +121,8 @@ namespace multiseat::input {
       [](const auto &payload) {
         using value_t = std::remove_cvref_t<decltype(payload)>;
         if constexpr (std::is_same_v<value_t, keyboard_key_event_t>) {
-          return input_event_kind_e::keyboard_key;
+          return payload.modifiers == 0 ? input_event_kind_e::keyboard_key :
+                                          input_event_kind_e::keyboard_key_with_modifiers;
         } else if constexpr (std::is_same_v<value_t, mouse_relative_event_t>) {
           return input_event_kind_e::mouse_relative;
         } else if constexpr (std::is_same_v<value_t, mouse_absolute_event_t>) {
@@ -168,7 +169,9 @@ namespace multiseat::input {
         using value_t = std::remove_cvref_t<decltype(payload)>;
         if constexpr (std::is_same_v<value_t, keyboard_key_event_t>) {
           return event.slot == 0 && supported_keyboard_code(payload.key_code) &&
-                 valid_button_state(payload.state);
+                 valid_button_state(payload.state) &&
+                 (payload.modifiers & ~supported_keyboard_modifiers) == 0 &&
+                 (payload.state == button_state_e::pressed || payload.modifiers == 0);
         } else if constexpr (std::is_same_v<value_t, mouse_relative_event_t>) {
           return event.slot == 0 &&
                  bounded_signed(payload.delta_x, maximum_relative_pointer_delta) &&
@@ -235,7 +238,7 @@ namespace multiseat::input {
         if constexpr (std::is_same_v<value_t, keyboard_key_event_t>) {
           append_u16(encoded, payload.key_code);
           encoded.push_back(static_cast<std::uint8_t>(payload.state));
-          encoded.push_back(0);
+          encoded.push_back(payload.modifiers);
         } else if constexpr (std::is_same_v<value_t, mouse_relative_event_t>) {
           append_i32(encoded, payload.delta_x);
           append_i32(encoded, payload.delta_y);
@@ -305,6 +308,16 @@ namespace multiseat::input {
         event.payload = keyboard_key_event_t {
           .key_code = read_u16(encoded.subspan(8, 2)),
           .state = static_cast<button_state_e>(encoded[10]),
+        };
+        break;
+      case input_event_kind_e::keyboard_key_with_modifiers:
+        if (encoded.size() != 12 || encoded[11] == 0) {
+          return std::nullopt;
+        }
+        event.payload = keyboard_key_event_t {
+          .key_code = read_u16(encoded.subspan(8, 2)),
+          .state = static_cast<button_state_e>(encoded[10]),
+          .modifiers = encoded[11],
         };
         break;
       case input_event_kind_e::mouse_relative:
