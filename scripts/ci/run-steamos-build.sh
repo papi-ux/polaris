@@ -22,7 +22,14 @@ if [ "$POLARIS_LOCAL_CANDIDATE_BUILD" != 0 ] && [ "$POLARIS_LOCAL_CANDIDATE_BUIL
 fi
 export POLARIS_LOCAL_CANDIDATE_BUILD
 
+# The whole SteamOS package build is one workflow step wrapping one docker run, so its half hour
+# arrives as a single undifferentiated log and nothing says where the time went. Report phases.
+. /workspace/scripts/ci/phase-timings.sh
+phase_timings_init /output/steamos3.8-phase-timings.txt
+
 cleanup() {
+  # Before the unmounts, because the timings file lives on the /output mount.
+  phase_timings_finish
   umount "$STEAMOS_ROOT/etc/resolv.conf" 2>/dev/null || true
   umount -R "$STEAMOS_ROOT/opt" 2>/dev/null || true
   umount -R "$STEAMOS_ROOT/mnt" 2>/dev/null || true
@@ -34,9 +41,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
+phase container-prereqs
 pacman -Sy --noconfirm arch-install-scripts curl git
 pacman-key --init
 
+phase steamos-keyring
 curl --fail --location --proto '=https' --tlsv1.2 \
   --output /tmp/holo-keyring-20250801-1-any.pkg.tar.zst \
   https://steamdeck-packages.steamos.cloud/archlinux-mirror/holo-3.8.1x/os/x86_64/holo-keyring-20250801-1-any.pkg.tar.zst
@@ -51,6 +60,7 @@ LocalFileSigLevel = Never' > /tmp/steamos-keyring-bootstrap.conf
 pacman --config /tmp/steamos-keyring-bootstrap.conf --noconfirm -U \
   /tmp/holo-keyring-20250801-1-any.pkg.tar.zst
 
+phase mirror-sync
 # Pacman expands the literal repository placeholders when it reads this file.
 # shellcheck disable=SC2016
 printf '%s\n' '[options]
@@ -83,6 +93,7 @@ if [ "$CHECKOUT_COMMIT" != "$POLARIS_BUILD_COMMIT" ]; then
   exit 1
 fi
 
+phase pacstrap
 rm -rf -- "$STEAMOS_ROOT"
 install -d -m 0755 -- "$STEAMOS_ROOT"
 mount --bind "$STEAMOS_ROOT" "$STEAMOS_ROOT"
@@ -93,6 +104,7 @@ pacstrap -G -M -C /tmp/steamos-3.8.1x.conf "$STEAMOS_ROOT" \
   miniupnpc namcap ninja nlohmann-json nodejs npm numactl openssl opus pipewire shellcheck \
   shaderc sudo systemd vulkan-headers vulkan-icd-loader wayland which wlr-randr xorg-xdpyinfo xorg-xwayland
 
+phase chroot-mounts
 mount --bind /workspace "$STEAMOS_ROOT/mnt"
 mount --bind /output "$STEAMOS_ROOT/opt"
 mount --bind /etc/resolv.conf "$STEAMOS_ROOT/etc/resolv.conf"
@@ -108,8 +120,10 @@ mount --rbind /run "$STEAMOS_ROOT/run"
 mount --make-rslave "$STEAMOS_ROOT/run"
 chroot "$STEAMOS_ROOT" useradd --create-home --uid 1000 builder
 chroot "$STEAMOS_ROOT" chown -R builder:builder /home/builder /opt
+phase polaris-build
 chroot "$STEAMOS_ROOT" runuser --user builder -- \
   /mnt/scripts/ci/build-steamos-package.sh
+phase package-validate
 chroot "$STEAMOS_ROOT" pacman --noconfirm -U \
   /opt/Polaris-steamos3.8-x86_64.pkg.tar.zst
 PACKAGE_DEPENDENCIES=()
