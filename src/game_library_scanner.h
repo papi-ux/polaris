@@ -211,14 +211,14 @@ namespace game_library {
     launcher_install_t install
   );
 
-  /** @brief Parse Legendary's installed store-cache entries into validated launchable entries. */
+  /** @brief Parse installed Legendary, Nile, or sideload cache entries into validated launchable entries. */
   std::vector<heroic_game_t> parse_heroic_cache_json(
     std::string_view json_payload,
     const std::string &store,
     launcher_install_t install
   );
 
-  /** @brief Resolve one exact installed Epic title's official artwork from Heroic's local cache. */
+  /** @brief Resolve one exact installed Epic, Amazon, or sideload title from Heroic's local cache. */
   std::optional<heroic_game_t> find_heroic_cached_game(
     const std::vector<std::filesystem::path> &home_roots,
     const std::string &app_name,
