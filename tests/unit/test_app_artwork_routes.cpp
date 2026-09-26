@@ -82,6 +82,7 @@ TEST(AppArtworkRoutes, RoutesNeedTheConsoleSessionCsrfAndJson) {
             std::string::npos);
   EXPECT_NE(source.find(R"(server.resource["^/api/apps/artwork/find$"]["POST"] = withCsrf(findAppArtwork);)"),
             std::string::npos);
+  EXPECT_NE(source.find(R"(server.resource["^/api/covers/apply-missing$"]["POST"] = withCsrf(applyMissingCover);)"), std::string::npos);
   for (const auto *signature : {"void removeAppArtwork(", "void findAppArtwork("}) {
     const auto body = handler_body(source, signature);
     const auto guard = body.find("validateContentType(response, request, \"application/json\") || !authenticate(response, request)");
@@ -236,10 +237,10 @@ TEST(AppsFile, EveryChangeTakesOneLock) {
     ++locks;
   }
   // saveApp, reorderApps, deleteApp, importGames, the install job's own rewrite, downloadCover,
-  // and the cover sweep reading the list it is about to look games up from.
-  EXPECT_EQ(locks, 7u);
+  // the cover sweep reading its scope, and conditional cover publication.
+  EXPECT_EQ(locks, 8u);
   for (const auto *signature : {"void saveApp(", "void reorderApps(", "void deleteApp(", "void importGames(",
-                                "void downloadCover(", "void startCoverSweep("}) {
+                                "void downloadCover(", "void startCoverSweep(", "void applyMissingCover("}) {
     const auto body = handler_body(source, signature);
     const auto lock = body.find("std::scoped_lock apps_lock(apps_file_mutex());");
     const auto read = body.find("read_file(config::stream.file_apps.c_str())");

@@ -410,3 +410,28 @@ TEST(ArtworkSweepDeathTest, ALookupExceptionFailsTheJobWithoutTerminatingTheHost
     std::_Exit(0);
   }()), testing::ExitedWithCode(0), "");
 }
+
+TEST(ArtworkSweep, CancelRetiresTheRunIdentityBeforeThePendingLookupReturns) {
+  std::promise<void> entered;
+  std::promise<void> release;
+  auto released = release.get_future();
+  artwork_sweep::sweeper_t sweeper {
+    [&](const auto &) {
+      entered.set_value();
+      released.wait_for(5s);
+      artwork_sweep::lookup_t answer;
+      answer.match = a_match("Held game");
+      return answer;
+    }, {}, harness_t::frozen_clock()};
+  ASSERT_EQ(sweeper.start(games(1), "import-run"), artwork_sweep::start_e::started);
+  ASSERT_EQ(entered.get_future().wait_for(5s), std::future_status::ready);
+  EXPECT_EQ(sweeper.job().id, "import-run");
+  sweeper.cancel();
+  EXPECT_TRUE(sweeper.job().id.empty());
+  EXPECT_FALSE(sweeper.clear());
+  release.set_value();
+  ASSERT_TRUE(sweeper.wait_for_idle(5s));
+  // A retained proposal remains available for manual review without reviving automatic approval.
+  EXPECT_EQ(sweeper.job().proposed, 1u);
+  EXPECT_TRUE(sweeper.job().id.empty());
+}

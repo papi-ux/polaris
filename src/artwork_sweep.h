@@ -139,6 +139,7 @@ namespace artwork_sweep {
 
   /// A snapshot of a run, safe to read while it is going.
   struct job_t {
+    std::string id;  ///< opaque identity; a replacement run must not inherit an apply
     state_e state = state_e::ready;
     std::size_t total = 0;  ///< how many games the run was given
     std::size_t looked_at = 0;  ///< how many it has answered for
@@ -177,7 +178,7 @@ namespace artwork_sweep {
     }
 
     /// Begin a run over these games. At most `maximum_games_per_run` of them are looked up.
-    start_e start(std::vector<candidate_t> games) {
+    start_e start(std::vector<candidate_t> games, std::string id = {}) {
       std::unique_lock lock(mutex_);
       if (running_) {
         return start_e::already_running;
@@ -199,6 +200,7 @@ namespace artwork_sweep {
       const auto lookup = lookup_;
       const auto sleep = sleep_;
       job_t next;
+      next.id = std::move(id);
       next.state = state_e::searching;
       next.total = games.size();
       next.started_at = now_seconds();
@@ -242,6 +244,9 @@ namespace artwork_sweep {
     void cancel() {
       std::lock_guard lock(mutex_);
       cancelled_ = true;
+      // Observers in other browser tabs must retire automatic approval immediately,
+      // even if an in-flight lookup later leaves a proposal for manual review.
+      job_.id.clear();
     }
 
     /**
