@@ -46,7 +46,7 @@ const vkQualitySaved = computed(() => {
       <div class="mb-3">
         <label for="vk_tune" class="block text-sm font-medium text-storm mb-1">{{ $t('config.vk_tune') }}</label>
         <select id="vk_tune" class="settings-input" v-model="config.vk_tune">
-          <option value="0">{{ $t('config.ffmpeg_auto') }}</option>
+          <option value="0">{{ $t('config.vk_tune_default') }}</option>
           <option value="1">{{ $t('config.vk_tune_hq') }}</option>
           <option value="2">{{ $t('config.vk_tune_ll') }}</option>
           <option value="3">{{ $t('config.vk_tune_ull') }}</option>
