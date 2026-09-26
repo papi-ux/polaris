@@ -9,13 +9,20 @@ to find your path before following the steps here.
 ### Fedora 44
 
 ```bash
-wget --output-document=./Polaris-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora44-x86_64.rpm &&
-sudo dnf install ./Polaris-fedora44-x86_64.rpm &&
+sudo curl --location --output /etc/yum.repos.d/polaris.repo https://repo.papi-ux.com/fedora/polaris.repo &&
+sudo dnf install polaris &&
 sudo -H polaris --setup-host &&
 polaris
 ```
 
-The longer walkthrough, including upgrades and uninstall, is in the [Fedora guide](fedora.md).
+Same four commands as downloading the RPM by hand, and `sudo dnf upgrade` carries Polaris from then on
+instead of another download at an exact filename. `dnf install` asks you to accept the signing key;
+the fingerprint to check it against is on the [repositories page](repositories.md#fedora).
+
+The repository serves the latest stable release, and publishing runs on a schedule, so for a few hours
+after a release it still serves the previous one. If you want a brand new release the moment it lands,
+or a prerelease, install the RPM directly as the [Fedora guide](fedora.md) describes. That guide is also
+the longer walkthrough, including upgrades and uninstall.
 
 ### Arch Linux / CachyOS
 
@@ -25,6 +32,11 @@ sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst &&
 sudo -H polaris --setup-host &&
 polaris
 ```
+
+There is a pacman repository too, and it is worth adding for the same reason: `sudo pacman -Syu` then
+carries Polaris. It is not the default here only because it is longer to set up rather than shorter.
+pacman has no equivalent of dnf's `gpgkey=`, so the key has to be added and locally signed first. See
+[Package repositories](repositories.md#arch-and-cachyos).
 
 CachyOS and most pacman-compatible Arch derivatives should start with the Arch package path. See the
 [Arch guide](arch.md) for details, and fall back to the source flow in
