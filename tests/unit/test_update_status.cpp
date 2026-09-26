@@ -87,16 +87,33 @@ TEST(UpdateStatusTests, RepositoryUpgradeCommandFollowsTheHostShape) {
   const auto arch = update_status::parse_os_release_for_tests("ID=arch\n");
   const auto ubuntu = update_status::parse_os_release_for_tests("ID=ubuntu\nVERSION_ID=\"24.04\"\n");
 
-  EXPECT_EQ(update_status::repository_upgrade_command_for_tests(fedora, false), "sudo dnf upgrade polaris");
-  EXPECT_EQ(update_status::repository_upgrade_command_for_tests(arch, false), "sudo pacman -Syu polaris");
+  EXPECT_EQ(update_status::repository_upgrade_command_for_tests(fedora, false, false), "sudo dnf upgrade polaris");
+  EXPECT_EQ(update_status::repository_upgrade_command_for_tests(arch, false, false), "sudo pacman -Syu polaris");
 
   // On an ostree host dnf does not change the system. Serving `dnf upgrade`
   // there is the same class of unusable advice as the `usermod -aG input` that
   // v1.3.6 had to correct.
-  EXPECT_EQ(update_status::repository_upgrade_command_for_tests(fedora, true), "rpm-ostree upgrade");
+  EXPECT_EQ(update_status::repository_upgrade_command_for_tests(fedora, true, false), "rpm-ostree upgrade");
 
   // No repository is served for Ubuntu, so there is no command to offer.
-  EXPECT_EQ(update_status::repository_upgrade_command_for_tests(ubuntu, false), "");
+  EXPECT_EQ(update_status::repository_upgrade_command_for_tests(ubuntu, false, false), "");
+}
+
+// polaris-kms carries `Requires: polaris = %{version}-%{release}` on RPM and
+// `depends=("polaris=$pkgver-$pkgrel")` on pacman, so a command that names only polaris is not an
+// upgrade of this host: dnf has to solve around a dependency it was not asked about, and what the
+// user sees is either a refusal or a helper left pointing at a version that no longer exists. That
+// is the upgrade 1.4.13 told every DRM/KMS host to take.
+TEST(UpdateStatusTests, RepositoryUpgradeCommandMovesTheKmsHelperWithItsBase) {
+  const auto fedora = update_status::parse_os_release_for_tests("ID=fedora\nVERSION_ID=44\n");
+  const auto arch = update_status::parse_os_release_for_tests("ID=arch\n");
+
+  EXPECT_EQ(update_status::repository_upgrade_command_for_tests(fedora, false, true), "sudo dnf upgrade polaris polaris-kms");
+  EXPECT_EQ(update_status::repository_upgrade_command_for_tests(arch, false, true), "sudo pacman -Syu polaris polaris-kms");
+
+  // rpm-ostree takes the whole image, so naming packages there would be noise at best. It is also
+  // the one path where naming a package the host does not have is an error rather than a warning.
+  EXPECT_EQ(update_status::repository_upgrade_command_for_tests(fedora, true, true), "rpm-ostree upgrade");
 }
 
 TEST(UpdateStatusTests, ParsesInstalledPackageVersionsAcrossPackageFamilies) {

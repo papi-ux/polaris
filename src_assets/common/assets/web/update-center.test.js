@@ -7,6 +7,7 @@ import {
   buildManualInstallCommand,
   buildRepositoryUpgradeCommand,
   buildUpdateCenterState,
+  selectKmsReleaseAsset,
   selectReleaseAsset,
   updateStatusLightClass,
 } from './update-center.js'
@@ -666,6 +667,123 @@ describe('Update Center release awareness', () => {
     expect(state.asset).toBeNull()
     expect(state.installCommand).toBe('')
     expect(state.canCopyInstallCommand).toBe(false)
+  })
+})
+
+describe('the DRM/KMS helper on the download path', () => {
+  // polaris-kms carries `Requires: polaris = %{version}-%{release}` on RPM and
+  // `depends=("polaris=$pkgver-$pkgrel")` on pacman. Installing the base package on its own is
+  // therefore not an upgrade of a host that has the helper: it is a broken dependency, on exactly
+  // the hosts 1.4.13 told to install it.
+  const kmsRelease = (names) => ({
+    tag_name: 'v9.9.9',
+    name: 'Polaris v9.9.9',
+    html_url: 'https://github.com/papi-ux/polaris/releases/tag/v9.9.9',
+    prerelease: false,
+    assets: names.map((name) => ({ name, browser_download_url: `https://example.test/${name}` })),
+  })
+
+  const kmsCases = [
+    {
+      family: 'fedora',
+      base: 'Polaris-fedora44-x86_64.rpm',
+      kms: 'Polaris-kms-fedora44-x86_64.rpm',
+      installLine: 'sudo dnf install "./Polaris-fedora44-x86_64.rpm" "./Polaris-kms-fedora44-x86_64.rpm"',
+    },
+    {
+      family: 'arch',
+      base: 'Polaris-arch-x86_64.pkg.tar.zst',
+      kms: 'Polaris-kms-arch-x86_64.pkg.tar.zst',
+      installLine: 'sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst ./Polaris-kms-arch-x86_64.pkg.tar.zst',
+    },
+    {
+      family: 'ubuntu',
+      base: 'Polaris-ubuntu24.04-x86_64.deb',
+      kms: 'Polaris-kms-ubuntu24.04-x86_64.deb',
+      installLine: 'sudo apt install ./Polaris-ubuntu24.04-x86_64.deb ./Polaris-kms-ubuntu24.04-x86_64.deb',
+    },
+  ]
+
+  it.each(kmsCases)('installs both packages in one $family transaction', ({ family, base, kms, installLine }) => {
+    const release = kmsRelease([base, kms])
+    const host = { packageFamily: family, kms_helper_installed: true }
+    const baseAsset = release.assets[0]
+    const kmsAsset = selectKmsReleaseAsset(release, host, baseAsset)
+
+    expect(kmsAsset?.name).toBe(kms)
+
+    const command = buildManualInstallCommand(baseAsset, host, kmsAsset)
+
+    // Both files are fetched before either is installed, so a failed second download cannot leave
+    // the host with a base package its helper no longer matches.
+    const downloads = command.split('\n').filter((line) => line.startsWith('wget '))
+    expect(downloads).toHaveLength(2)
+    expect(command.indexOf(`./${kms} https://example.test/${kms}`)).toBeLessThan(command.indexOf(installLine))
+    expect(command).toContain(installLine)
+  })
+
+  it('keeps the SteamOS read-only dance around both packages', () => {
+    const base = 'Polaris-steamos3.8-x86_64.pkg.tar.zst'
+    const kms = 'Polaris-kms-steamos3.8-x86_64.pkg.tar.zst'
+    const release = kmsRelease([base, kms])
+    const host = { packageFamily: 'steamos', kms_helper_installed: true }
+    const command = buildManualInstallCommand(release.assets[0], host, selectKmsReleaseAsset(release, host, release.assets[0]))
+
+    expect(command).toContain(`sudo pacman -U ./${base} ./${kms} || exit $?`)
+    expect(command).toContain('sudo steamos-readonly disable')
+    expect(command).toContain("trap 'sudo steamos-readonly enable' EXIT")
+  })
+
+  it('offers no command at all when the release carries no matching helper', () => {
+    // A prerelease before 1.4.13 has no Polaris-kms asset. There is no command that leaves such a
+    // host working, so saying nothing beats handing over one that breaks it.
+    const release = kmsRelease(['Polaris-fedora44-x86_64.rpm'])
+    const host = { packageFamily: 'fedora', kms_helper_installed: true }
+
+    expect(selectKmsReleaseAsset(release, host, release.assets[0])).toBeNull()
+    expect(buildManualInstallCommand(release.assets[0], host, null)).toBe('')
+  })
+
+  it('holds the helper to the same name and URL check as the base package', () => {
+    const release = kmsRelease(['Polaris-fedora44-x86_64.rpm'])
+    const host = { packageFamily: 'fedora', kms_helper_installed: true }
+    const hostile = { name: 'Polaris-kms-fedora44-x86_64.rpm', browser_download_url: 'https://example.test/x?a=b' }
+    const mismatched = { name: 'Polaris-kms-fedora44-x86_64.rpm', browser_download_url: 'http://example.test/Polaris-kms-fedora44-x86_64.rpm' }
+
+    expect(buildManualInstallCommand(release.assets[0], host, hostile)).toBe('')
+    expect(buildManualInstallCommand(release.assets[0], host, mismatched)).toBe('')
+  })
+
+  it('says why it has no command, rather than blaming the package match', () => {
+    // Finding no package for this host and finding the package but not the helper it is pinned to
+    // are different problems, and the second one is not something the reader should go hunting for.
+    const state = buildUpdateCenterState({
+      currentVersion: '1.0.0',
+      latestRelease: kmsRelease(['Polaris-fedora44-x86_64.rpm']),
+      host: {
+        platform: 'linux',
+        distro: { id: 'fedora', version_id: '44' },
+        kms_helper_installed: true,
+      },
+    })
+
+    expect(state.status).toBe('update_available')
+    expect(state.installCommand).toBe('')
+    expect(state.primaryActionSummary).toContain('no polaris-kms package')
+    expect(state.primaryActionSummary).not.toContain('could not match a local package')
+  })
+
+  it('leaves a host without the helper exactly as it was', () => {
+    const release = kmsRelease(['Polaris-fedora44-x86_64.rpm', 'Polaris-kms-fedora44-x86_64.rpm'])
+    const host = { packageFamily: 'fedora' }
+
+    // Naming a package the host does not have is an error on dnf5, so the helper is only ever
+    // added to a host that already has it.
+    expect(selectKmsReleaseAsset(release, host, release.assets[0])).toBeNull()
+    const command = buildManualInstallCommand(release.assets[0], host, release.assets[1])
+    expect(command).toContain('sudo dnf install "./Polaris-fedora44-x86_64.rpm" &&')
+    expect(command).not.toContain('polaris-kms')
+    expect(command).not.toContain('Polaris-kms')
   })
 })
 
