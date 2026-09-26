@@ -394,6 +394,10 @@ pair without a PIN, so only trust networks you control.
 | **WAN Encryption Mode** (`wan_encryption_mode`) | This determines when encryption will be used when streaming over the Internet. Encryption can reduce streaming performance, particularly on less powerful hosts and clients. |
 | **Ping Timeout** (`ping_timeout`) | How long to wait in milliseconds for data from moonlight before shutting down the stream |
 
+Peers in shared IPv4 space (`100.64.0.0/10`, also used by VPNs) follow WAN origin
+and encryption policy. A configured trusted-pairing subnet does not override
+those gates. See [Network trust and shared address space](network-trust.md).
+
 ### Audio and video tab
 
 Everything the stream is made of: the launch mode and its runtime, host audio capture and the

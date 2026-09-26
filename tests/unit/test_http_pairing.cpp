@@ -33,6 +33,7 @@
 #include <src/config.h>
 #include <src/httpcommon.h>
 #include <src/nvhttp.h>
+#include <src/network.h>
 #include <src/rtsp.h>
 
 using namespace nvhttp;
@@ -66,6 +67,21 @@ TEST_F(TrustedSubnetTest, PreservesBareCidrsAndRejectsNonMatchingOrMalformedEntr
   EXPECT_TRUE(matches({"192.168.18.0/24"}));
   EXPECT_FALSE(matches({"192.168.19.0/24"}));
   EXPECT_FALSE(matches({R"("not-a-subnet")"}));
+}
+
+TEST_F(TrustedSubnetTest, SharedSpacePairingNeedsAnExplicitMatchingNetwork) {
+  for (const auto *address : {"100.64.0.1", "::ffff:100.64.0.1"}) {
+    const auto peer = boost::asio::ip::make_address(address);
+    config::set_trusted_network({}, true);
+    EXPECT_FALSE(is_in_trusted_subnet_for_tests(peer));
+    config::set_trusted_network({"192.168.0.0/16"}, true);
+    EXPECT_FALSE(is_in_trusted_subnet_for_tests(peer));
+    config::set_trusted_network({"100.64.0.0/24"}, true);
+    EXPECT_TRUE(is_in_trusted_subnet_for_tests(peer));
+    EXPECT_EQ(net::from_address(address), net::WAN) << "pairing opt-in must not promote origin/encryption policy";
+    config::set_trusted_network({"100.65.0.0/24"}, true);
+    EXPECT_FALSE(is_in_trusted_subnet_for_tests(peer));
+  }
 }
 
 TEST(PairingRequestValidationTest, RejectsOnlyEmptyUniqueIdsAtThisBoundary) {

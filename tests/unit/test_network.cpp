@@ -2,9 +2,10 @@
  * @file tests/unit/test_network.cpp
  * @brief Test src/network.*
  */
-#include "../tests_common.h"
+#include <gtest/gtest.h>
 
 #include <src/network.h>
+#include <src/config.h>
 
 struct MdnsInstanceNameTest: testing::TestWithParam<std::tuple<std::string, std::string>> {};
 
@@ -58,18 +59,54 @@ INSTANTIATE_TEST_SUITE_P(
   )
 );
 
-TEST(ClientNetworkPath, LeavesAccessDecisionsTreatingTheSharedRangeAsLan) {
-  // The diagnostic split must not leak into access control. from_address decides
-  // what a nearby client may do, and it counts the Tailscale range as LAN on
-  // purpose; only the explanation of a stream tells the two apart.
-  EXPECT_EQ(net::from_address("100.109.196.18"), net::LAN);
-  EXPECT_EQ(net::describe_client_network_path("100.109.196.18"), "cgnat");
+TEST(ClientNetworkPath, SharedAddressSpaceDoesNotProveLocalTrust) {
+  for (const auto *address : {"100.64.0.0", "100.64.0.1", "100.100.100.100",
+                             "100.127.255.254", "100.127.255.255",
+                             "::ffff:100.64.0.0", "::ffff:100.100.100.100", "::ffff:100.127.255.255"}) {
+    SCOPED_TRACE(address);
+    EXPECT_EQ(net::from_address(address), net::WAN);
+    EXPECT_GT(net::from_address(address), net::LAN); // LAN-only origin gates reject it.
+    EXPECT_EQ(net::describe_client_network_path(address), "cgnat");
+  }
+  for (const auto *address : {"100.63.255.255", "100.128.0.0", "::ffff:100.63.255.255", "::ffff:100.128.0.0"}) {
+    EXPECT_EQ(net::from_address(address), net::WAN);
+    EXPECT_EQ(net::describe_client_network_path(address), "public");
+  }
+}
+
+TEST(NetworkAccessPolicy, PreservesPrivateLanAndLoopback) {
+  for (const auto *address : {"10.1.2.3", "172.16.1.2", "192.168.1.2",
+                             "169.254.1.2", "fd00::1", "fe80::1",
+                             "::ffff:192.168.1.2"}) {
+    SCOPED_TRACE(address);
+    EXPECT_EQ(net::from_address(address), net::LAN);
+  }
+  EXPECT_EQ(net::from_address("127.0.0.1"), net::PC);
+  EXPECT_EQ(net::from_address("::1"), net::PC);
+}
+
+TEST(NetworkAccessPolicy, SharedSpaceUsesWanEncryptionPolicy) {
+  const auto old_lan = config::stream.lan_encryption_mode;
+  const auto old_wan = config::stream.wan_encryption_mode;
+  auto restore = util::fail_guard([&] {
+    config::stream.lan_encryption_mode = old_lan;
+    config::stream.wan_encryption_mode = old_wan;
+  });
+  config::stream.lan_encryption_mode = config::ENCRYPTION_MODE_NEVER;
+  config::stream.wan_encryption_mode = config::ENCRYPTION_MODE_MANDATORY;
+  EXPECT_EQ(net::encryption_mode_for_address(boost::asio::ip::make_address("100.100.100.100")),
+            config::ENCRYPTION_MODE_MANDATORY);
+  EXPECT_EQ(net::encryption_mode_for_address(boost::asio::ip::make_address("::ffff:100.100.100.100")),
+            config::ENCRYPTION_MODE_MANDATORY);
+  EXPECT_EQ(net::encryption_mode_for_address(boost::asio::ip::make_address("192.168.1.2")),
+            config::ENCRYPTION_MODE_NEVER);
 }
 
 TEST(NetworkPathProbe, ClassifiesNativeProbeHostsWithoutTouchingTheNetwork) {
   EXPECT_EQ(net::network_path_probe_classification("127.0.0.1"), "pc");
   EXPECT_EQ(net::network_path_probe_classification("192.168.50.25"), "lan");
   EXPECT_EQ(net::network_path_probe_classification("fd7a:115c:a1e0::1"), "lan");
+  EXPECT_EQ(net::network_path_probe_classification("100.100.100.100"), "wan");
   EXPECT_EQ(net::network_path_probe_classification("203.0.113.40"), "wan");
   EXPECT_EQ(net::network_path_probe_classification("polaris-host.local"), "lan");
   EXPECT_EQ(net::network_path_probe_classification("tailscale-host.ts.net"), "vpn");
