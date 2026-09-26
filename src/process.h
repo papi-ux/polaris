@@ -45,6 +45,7 @@
 #include "capture_generation.h"
 #include "config.h"
 #include "emulator_library.h"
+#include "game_library_scanner.h"
 #include "audio.h"
 #include "platform/common.h"
 #include "rtsp.h"
@@ -619,6 +620,9 @@ namespace proc {
     std::string rom_path;       // ROM folder imports: the game file the entry launches, or ""
     std::string rom_folder;     // ROM folder imports: the library_sources.json id of the folder it came from, or ""
     std::string heroic_app_name;  // Heroic imports: Heroic's id for the game, or "" on the entry that opens Heroic
+    std::string heroic_store;
+    std::string heroic_runner;
+    std::string heroic_install;
     std::string lutris_slug;      // Lutris imports: the game's slug, or "" on the entry that opens Lutris
     std::vector<std::string> genres;
     std::map<std::string, std::string> env_vars;  // per-app environment variables
@@ -669,6 +673,9 @@ namespace proc {
   };
 
   emulator_identity_t launcher_identity_from_emulator(const std::string &emulator);
+
+  /** @brief Optional platform/runtime fields served by the library API. */
+  nlohmann::json launcher_metadata_for_app(const ctx_t &app, const game_library::heroic_runtime_snapshot_t &heroic);
 
   /**
    * @brief Whether an app opens Steam Big Picture itself rather than one game.

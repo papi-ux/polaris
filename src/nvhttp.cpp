@@ -9245,6 +9245,13 @@ namespace nvhttp {
       }
 
       auto apps = proc::proc.get_apps();
+      // Read once for the whole listing; the snapshot refreshes current Heroic settings
+      // without rewriting apps.json or requiring existing imports to be imported again.
+      const auto has_heroic_games = std::any_of(apps.begin(), apps.end(), [](const auto &app) {
+        return boost::iequals(app.source, "heroic") && !app.heroic_app_name.empty();
+      });
+      const auto heroic_runtimes = has_heroic_games ? game_library::heroic_runtime_snapshot() :
+                                                    game_library::heroic_runtime_snapshot_t {};
       nlohmann::json games = nlohmann::json::array();
 
       // The library's desktop tile is the entry named Desktop. The Low Res Desktop sample that
@@ -9304,34 +9311,7 @@ namespace nvhttp {
         promote_local_artwork_poster(app);
         game["artwork"] = artwork_manifest_for(platf::appdata(), app);
         game["last_launched"] = app.last_launched;
-        // Platform and runtime only where the stored Lutris runner determines
-        // them; Nova renders nothing for a missing value, and no badge beats a
-        // wrong one for Steam or manual entries whose runtime is not recorded.
-        if (const auto identity = proc::launcher_identity_from_lutris_runner(app.lutris_runner);
-            !identity.runtime.empty()) {
-          if (!identity.platform.empty()) {
-            game["platform"] = identity.platform;
-          }
-          game["runtime"] = identity.runtime;
-        }
-        // A ROM folder entry names its console and its emulator; the labels let Nova render
-        // "Nintendo Switch · Eden" without knowing either id.
-        if (boost::iequals(app.source, "emulator")) {
-          const auto identity = proc::launcher_identity_from_emulator(app.emulator);
-          if (!identity.platform.empty()) {
-            game["platform"] = identity.platform;
-          }
-          if (!identity.platform_label.empty()) {
-            game["platform_label"] = identity.platform_label;
-          }
-          if (!identity.runtime.empty()) {
-            game["runtime"] = identity.runtime;
-          }
-          if (!identity.runtime_label.empty()) {
-            game["runtime_label"] = identity.runtime_label;
-          }
-          game["emulator"] = app.emulator;
-        }
+        game.update(proc::launcher_metadata_for_app(app, heroic_runtimes));
         if (const auto play_time = play_time_for_app(app)) {
           game["play_time"] = *play_time;
         }
