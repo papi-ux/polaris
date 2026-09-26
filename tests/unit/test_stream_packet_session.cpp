@@ -4,6 +4,7 @@
  */
 #include "src/rtsp.h"
 #include "src/stream.h"
+#include "src/config.h"
 
 #include <gtest/gtest.h>
 
@@ -22,6 +23,17 @@ namespace {
     launch.unique_id = "packet-owner-client";
     return stream::session::alloc(config, launch);
   }
+}
+
+TEST(StreamPacketSessionTests, PublishedControlSessionAlreadyHasItsFullPingDeadline) {
+  auto session = make_session();
+  const auto before = std::chrono::steady_clock::now();
+  const auto deadline = stream::session::register_control_session_for_tests(*session);
+  const auto after = std::chrono::steady_clock::now();
+
+  // A freshly published session must not look expired before its first ping.
+  EXPECT_GE(deadline, before + config::stream.ping_timeout);
+  EXPECT_LE(deadline, after + config::stream.ping_timeout);
 }
 
 TEST(StreamPacketSessionTests, StopRejectsQueuedAudioAndVideoBeforeSessionDestruction) {
