@@ -343,8 +343,12 @@ function describeHostBehindConsole(consoleVersion, runningVersion) {
   }
 }
 
+export function isPrereleaseOptIn(value) {
+  return value === true || value === 'enabled'
+}
+
 export function chooseCandidateRelease({ latestRelease, prereleaseRelease, includePrereleases = false, currentVersion = '' } = {}) {
-  if (includePrereleases && prereleaseRelease && isReleaseGreater(prereleaseRelease, latestRelease ? versionFromRelease(latestRelease) : currentVersion, true)) {
+  if (isPrereleaseOptIn(includePrereleases) && prereleaseRelease && !prereleaseRelease.draft && isReleaseGreater(prereleaseRelease, latestRelease ? versionFromRelease(latestRelease) : currentVersion, true)) {
     return prereleaseRelease
   }
   return latestRelease || null

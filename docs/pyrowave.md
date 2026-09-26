@@ -4,9 +4,31 @@ PyroWave is an optional Vulkan compute encoder for compatible Nova clients on a
 fast local network. It uses GameStream transport. Ordinary Moonlight clients
 cannot select this codec.
 
+## Test the beta
+
+Polaris **v1.4.13-beta.3** includes the host encoder. There is no PyroWave toggle
+in the Polaris console: the compatible client selects the codec for its stream.
+Leave the host's normal encoder selection unchanged.
+
+- **Nova Android beta:** select **Play Setup → Video codec → PyroWave
+  (experimental)**. Auto does not select it.
+- **Nova Linux:** use a build made with the separate
+  `com.papi_ux.Nova.pyrowave.json` Flatpak manifest. The ordinary Linux Alpha
+  bundle published with **Nova v1.4.13-beta.3** uses the standard manifest and
+  does **not** include PyroWave. A beta release label alone is not sufficient.
+- **Moonlight:** standard clients do not contain the PyroWave decoder. A
+  host-side setting cannot add it; use a compatible Nova build to test this
+  codec. Moonlight continues to use its supported H.264, HEVC and AV1 paths.
+
+Use a fast wired local link for the initial test. Confirm that the stream
+diagnostics report **PyroWave** after connecting. Nova Linux's shared profile is
+SDR 4:2:0; do not treat a successful SDR stream as HDR validation. See the
+[Polaris beta update guide](updates.md) and
+[Nova beta update guide](https://papi-ux.com/docs/nova/updates/).
+
 ## Build and selection
 
-`POLARIS_ENABLE_PYROWAVE` defaults to `OFF`. To build the experimental encoder,
+`POLARIS_ENABLE_PYROWAVE` defaults to `ON` in the current Linux source. To build the experimental encoder,
 initialize the pinned dependencies and add `-DPOLARIS_ENABLE_PYROWAVE=ON` to the
 normal Linux CMake configuration:
 
@@ -19,12 +41,13 @@ select PyroWave; its Auto choice does not select it. Standard release packages
 must not be assumed to include the encoder merely because their version is a
 beta. Verify the build option for the package being tested.
 
-The initial path converts CPU BGRA capture to full-range Rec.709 YUV420 and then
-encodes on Vulkan. It supports SDR 8-bit 4:2:0 with even output dimensions from
-16 through 4096 per axis. It scales capture to the requested dimensions with
-aspect ratio preserved and even letterboxing. HDR, 4:4:4 and Spaces are outside
-this route. Accepted frame rates and dimensions do not guarantee sustained
-performance on a particular GPU or network.
+The shared Linux-client profile uses SDR 8-bit 4:2:0. The current host also has
+GPU capture conversion and additional colour paths for compatible clients;
+those do not add HDR or 4:4:4 selection to the Linux client. The host's HDR path
+requires supported capture input; the beta.3 release notes describe the portal
+path and its KMS limitation. Spaces remain outside this route. Accepted frame
+rates and dimensions do not guarantee sustained performance on a particular
+GPU or network.
 
 ## Transport compatibility
 

@@ -727,6 +727,8 @@ namespace confighttp::validation {
   }
 
   bool is_live_applied_config_key(std::string_view key) {
+    // Update Center reads this preference from GET /api/config on each check.
+    if (key == "notify_pre_releases") return true;
     return is_ai_config_key(key) || key == "steamgriddb_api_key" || key == "adaptive_bitrate_enabled" ||
            key == "trusted_subnets" || key == "trusted_subnet_auto_pairing" ||
            key == "linux_virtual_display_backend";

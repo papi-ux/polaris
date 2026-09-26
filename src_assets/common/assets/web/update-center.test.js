@@ -598,6 +598,20 @@ describe('Update Center release awareness', () => {
     expect(state.installCommand).toContain('sudo apt install ./Polaris-ubuntu24.04-x86_64.deb')
   })
 
+  it.each([undefined, false, 'disabled', 'false', '0', 'unexpected'])('keeps prereleases out for stored opt-out value %s', includePrereleases => {
+    const prerelease = { ...release, tag_name: 'v1.3.0-beta.1', prerelease: true }
+    const state = buildUpdateCenterState({ currentVersion: '1.2.2', latestRelease: release, prereleaseRelease: prerelease, includePrereleases })
+    expect(state.latestVersion).toBe(release.tag_name)
+    expect(state.status).toBe('current')
+  })
+
+  it('honors the enabled config string and ignores draft prereleases', () => {
+    const prerelease = { ...release, tag_name: 'v1.3.0-beta.1', prerelease: true }
+    const input = { currentVersion: '1.2.2', latestRelease: release, prereleaseRelease: prerelease, includePrereleases: 'enabled' }
+    expect(buildUpdateCenterState(input).status).toBe('update_available')
+    expect(buildUpdateCenterState({ ...input, prereleaseRelease: { ...prerelease, draft: true } }).status).toBe('current')
+  })
+
   it('does not offer a prerelease unless the user opted into prerelease notifications', () => {
     const prerelease = { ...release, tag_name: 'v1.3.0-beta.1', prerelease: true }
 
