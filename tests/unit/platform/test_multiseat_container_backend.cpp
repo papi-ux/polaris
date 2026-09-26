@@ -3098,6 +3098,89 @@ TEST(MultiseatDockerBackend, RejectsUnsupportedDaemonAndUnpreparedOrRedirectedVo
   }
 }
 
+TEST(MultiseatDockerBackend, InventoryRelistsWhenAWorkerDisappearsBeforeInspect) {
+  for (const bool docker : {false, true}) {
+    SCOPED_TRACE(docker ? "Docker" : "Podman");
+    fake_host_t host;
+    fake_input_manifest_source_t inputs;
+    backend_t backend {host, inputs, docker ? docker_options_for_tests() : options_for_tests()};
+    if (docker) host.push({.exit_status = 0, .output = docker_info_for_tests().dump()});
+    host.push({.exit_status = 0, .output = std::string {first_id} + "\n"});
+    // Engine output on failure is partial and cannot establish which workers remain.
+    host.push({.exit_status = 1, .output = "[]"});
+    const auto replacement = valid_spec(1, 2, "polaris-worker-controller-a1b2-2", "profile beta", "heroic-game");
+    queue_inventory(host, {docker ? docker_container_for(replacement, second_id) :
+      container_for(replacement, second_id, "running", "healthy")});
+
+    const auto records = backend.inventory();
+
+    ASSERT_EQ(records.size(), 1U);
+    EXPECT_EQ(records.front().identity, replacement.identity);
+    EXPECT_EQ(records.front().state, worker_observed_state_e::ready);
+    EXPECT_TRUE(has_argument(host.calls.back(), second_id));
+    EXPECT_FALSE(has_argument(host.calls.back(), first_id));
+    EXPECT_TRUE(host.results.empty());
+  }
+}
+
+TEST(MultiseatPodmanBackend, InventoryAcceptsAConfirmedEmptyRelisting) {
+  fake_host_t host;
+  backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
+  host.push({.exit_status = 0, .output = std::string {first_id} + "\n"});
+  host.push({.exit_status = 1});
+  queue_inventory(host, {});
+
+  EXPECT_TRUE(backend.inventory().empty());
+  EXPECT_EQ(host.calls.size(), 3U);
+}
+
+TEST(MultiseatPodmanBackend, InventoryDoesNotRetryAnUnboundedOrRepeatedInspectionFailure) {
+  for (const int failure : {0, 1, 2}) {
+    SCOPED_TRACE(failure);
+    fake_host_t host;
+    backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
+    host.push({.exit_status = 0, .output = std::string {first_id} + "\n"});
+    host.push({.exit_status = 1, .timed_out = failure == 0, .output_truncated = failure == 1});
+    if (failure == 2) {
+      host.push({.exit_status = 0, .output = std::string {first_id} + "\n"});
+      host.push({.exit_status = 125});
+    }
+
+    std::string reason;
+    try { (void) backend.inventory(); }
+    catch (const std::runtime_error &error) { reason = error.what(); }
+    const auto expected = failure == 0 ? "timed out" :
+      failure == 1 ? "returned more output" : "exited with status 125";
+    EXPECT_NE(reason.find(expected), std::string::npos);
+    EXPECT_EQ(host.calls.size(), failure == 2 ? 4U : 2U);
+  }
+}
+
+TEST(MultiseatPodmanBackend, InventoryRelistingStillRequiresACompleteAuthenticatedResult) {
+  for (const int failure : {0, 1, 2, 3}) {
+    SCOPED_TRACE(failure);
+    fake_host_t host;
+    backend_t backend {host, input_manifests_for_tests(), options_for_tests()};
+    host.push({.exit_status = 0, .output = std::string {first_id} + "\n"});
+    host.push({.exit_status = 1});
+    if (failure == 0) {
+      host.push({.exit_status = 125});
+    } else if (failure == 1) {
+      host.push({.exit_status = 0, .output = std::string {first_id} + "\n"});
+      host.push({.exit_status = 0, .output = "[]"});
+    } else {
+      auto record = container_for(valid_spec(), first_id, "running", "healthy");
+      if (failure == 2) record["Config"]["Labels"]["io.polaris.multiseat.input-manifest"] = std::string(64, '0');
+      else record["Id"] = second_id;
+      host.push({.exit_status = 0, .output = std::string {first_id} + "\n"});
+      host.push({.exit_status = 0, .output = json::array({record}).dump()});
+    }
+
+    EXPECT_THROW(backend.inventory(), std::runtime_error);
+    EXPECT_TRUE(host.results.empty());
+  }
+}
+
 TEST(MultiseatDockerBackend, InventoryAuthenticatesTwoSeatsWithoutPodmanOciFiles) {
   fake_host_t host;
   fake_input_manifest_source_t inputs;
