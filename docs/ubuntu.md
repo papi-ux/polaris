@@ -100,12 +100,19 @@ Enable the user service if you want Polaris to start in the background:
 systemctl --user enable --now polaris
 ```
 
-Only enable DRM/KMS capture if you specifically need it, and take it off again with
-`sudo -H polaris --setup-host --disable-kms`:
+Only enable DRM/KMS capture if you specifically need it. It takes two steps, and the first one is a
+package: the capability lives in that package's own metadata rather than on the Polaris binary, and
+`--enable-kms` refuses without it.
 
 ```bash
+sudo apt install ./Polaris-kms-ubuntu24.04-x86_64.deb
 sudo -H polaris --setup-host --enable-kms
 ```
+
+Download `Polaris-kms-ubuntu24.04-x86_64.deb` from the same release as the Polaris `.deb` beside it:
+the two carry the same version, and the helper requires the exact version of `polaris` it was built
+with, so they have to be installed and updated as a pair. `--disable-kms` points the user service
+back at the ordinary binary.
 
 The default compositor and portal paths do not require granting KMS capability.
 The experimental Vulkan Video encoder does require this KMS setup and an explicit `capture = kms` selection.
