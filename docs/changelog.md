@@ -47,6 +47,12 @@ starts at `v1.0.0`.
   also repairs a host that was set up this way, and a save refused for this reason says so in the
   log with the command that fixes it.
 
+- The Vulkan encoder no longer crashes Polaris the moment it starts, which on an AMD GPU is the
+  encoder Auto tries first for Private Stream. The PyroWave codec links volk, whose global
+  variables share the names of the Vulkan functions Polaris calls, and those calls bound to the
+  variables at link time. Polaris now builds with `VK_NO_PROTOTYPES` and resolves every Vulkan
+  function it calls from the loader by name, which also covers the CUDA DMA-BUF import path.
+
 The encoder settings pages say what this GPU will actually encode. The VA-API and Vulkan tabs gain a read-only **Hardware codec support** panel that reports the result of Polaris's live probe: the active encoder plus H.264, HEVC and AV1 rows with HDR markers where the probe accepted a Main10/P010 configuration. Polaris advertises AV1 to clients whenever this hardware passes AV1 validation and falls back to HEVC when it does not, so `av1_mode` stays on its default and the panel shows what that resolves to; when a codec is off, the panel says why — you switched it off in Settings, or the encoder cannot do it. The panel refreshes after a restart from the console or tray, since changing the encoder changes what Polaris advertises.
 
 The Vulkan tab gains an encode quality select (`vk_quality`). Level 0 is the driver default and always works; higher levels trade encode speed for quality where the driver exposes them, with valid values running 0 through one less than the driver's reported maximum — four on AMD GPUs with VCN 4 or newer (so 0–3), three on older ones such as the Steam Deck (0–2). Polaris reads each codec's count from the probed device during encoder probing and serves it in `encoder_codec_support` as `vk_quality_max`, so the select only offers levels the driver actually exposes, level 0 until a live probe reports them. A saved value above that maximum is clamped to it when the session starts, with a warning logged; FFmpeg's own guard has an off-by-one that lets a value of exactly N through, and an explicit Vulkan selection stays strict rather than falling back to another encoder.
