@@ -7,7 +7,7 @@ let wrapper
 const calls = () => global.fetch.mock.calls
 const coverStarts = () => calls().filter(([url, options]) => url.endsWith('/covers/sweep') && options?.method === 'POST')
 async function mountImport({ receipts = [{ uuid: 'new-game', name: 'Imported' }] } = {}) {
-  vi.stubGlobal('fetch', vi.fn(async (url, options = {}) => {
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
     let body = { status: true }
     if (url.endsWith('/apps')) body = { apps: [], host_name: 'Test host' }
     if (url.endsWith('/config')) body = { platform: 'linux' }
