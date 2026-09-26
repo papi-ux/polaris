@@ -28,7 +28,6 @@ namespace net {
     ip::make_network_v4("192.168.0.0/16"sv),
     ip::make_network_v4("172.16.0.0/12"sv),
     ip::make_network_v4("10.0.0.0/8"sv),
-    ip::make_network_v4("100.64.0.0/10"sv),
     ip::make_network_v4("169.254.0.0/16"sv),
   };
 
@@ -84,11 +83,8 @@ namespace net {
   }
 
   std::string_view describe_client_network_path(const std::string_view &address) {
-    // Deliberately separate from from_address, which decides access and counts the
-    // shared 100.64.0.0/10 range and link-local as LAN. That is right for deciding
-    // what a nearby client may do and wrong for explaining a stream: a support
-    // bundle's microstutter came down to one client having moved from the LAN to
-    // Tailscale, which from_address reports as LAN either way.
+    // Diagnostic names never grant access. Shared IPv4 space identifies neither a
+    // private LAN nor a trusted VPN: from_address applies WAN policy to it.
     static const auto cgnat = ip::make_network_v4("100.64.0.0/10"sv);
     static const auto link_local_v4 = ip::make_network_v4("169.254.0.0/16"sv);
     static const std::vector<ip::network_v4> private_v4 {
@@ -115,7 +111,7 @@ namespace net {
       const auto within = [&v4](const ip::network_v4 &range) {
         return range.hosts().find(v4) != range.hosts().end();
       };
-      if (within(cgnat)) {
+      if ((v4.to_uint() & cgnat.netmask().to_uint()) == cgnat.network().to_uint()) {
         return "cgnat";
       }
       if (within(link_local_v4)) {
