@@ -91,3 +91,26 @@ interval, move ownership, and duplicate press calls. These tests open no input
 device. The patch applies to both Desktop and Spaces keyboards. It does not add
 synthetic modifier or UTF-8 packet support; those require their own input
 semantics and launcher acceptance.
+
+## Spaces synthetic modifiers (#88)
+
+The fifth patch adds a keyboard press overload with Shift, Control, Alt, and
+Meta intent. It emits missing modifiers around the key press and each repeat
+under the keyboard mutex. Transient modifiers never enter held-key storage.
+Generic, left, and right physical modifier keys suppress synthesis for their
+family, and pressing a modifier key itself never synthesizes another modifier.
+Releasing a modifier that was physically held when the key went down keeps its
+normal meaning; the repeat does not turn that physical hold into synthetic intent.
+
+The Spaces adapter preserves the requested mask in one canonical key event.
+Nonzero masks use the new bounded wire kind 9; kind 1 retains its existing
+reserved byte, so an older decoder rejects the extension. Key up uses kind 1
+with no mask. One authority sequence covers the complete operation against the
+assigned keyboard; no host-global keyboard or worker shell action is involved.
+
+Seven actual-library fixtures cover chord ordering, every physical modifier
+spelling, modifier keys, keyboard separation, repeat ownership transitions,
+and attempted cleanup after a simulated write error. Kernel event writes retain
+the library's existing best-effort contract; these tests do not prove actual
+launcher delivery. UTF-8 text packets remain unsupported. The ordinary Desktop
+press API remains available and supplies zero synthetic intent.
