@@ -611,8 +611,15 @@ describe('Linux packaging contracts', () => {
     expect(upload).toContain('uses: actions/upload-artifact@')
     expect(upload).toMatch(/^\s+name: Polaris-steamos3\.8-package\s*$/m)
 
-    // The host, KMS helper and matching symbols must all survive artifact collection.
-    // Keep exact filenames so unrelated outputs cannot enter the release by a glob.
+    // All three, because the release job refuses a short list and polaris-kms is published from
+    // this artifact. The first tag build after the polaris-kms split failed with an empty log
+    // because this upload named only the base package while the script wrote both. The debug
+    // symbols were added to the same list afterwards, so the host, the helper and the matching
+    // symbols all survive artifact collection.
+    //
+    // Still exact filenames and never a glob: an artifact assembled by pattern is one that can
+    // quietly gain a file. That is what this assertion has always been for, and naming each path
+    // keeps it rather than relaxing it.
     const uploadPaths = upload.match(/^\s+path:\s*\|\s*$([\s\S]*?)(?=^\s+[a-z-]+:)/m)
     expect(uploadPaths, 'the SteamOS upload must list its paths as a block scalar').not.toBeNull()
     const listedPaths = uploadPaths[1]
@@ -912,8 +919,10 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).not.toContain('namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt" || true')
     const reviewedWarnings = reviewedNamcap.trim().split('\n')
     // 18 since the compute codec brought volk in. volk resolves every Vulkan entry point with dlopen
-    // at runtime, so no object in the binary makes a direct call to libvulkan and namcap reports it as
-    // an unused shared library. The dependency is real and stays declared: dropping it to quiet the
+    // at runtime, and so does Polaris itself (src/platform/linux/vulkan_loader.cpp), because volk's
+    // global variables share the entry points' names and would otherwise capture Polaris's direct
+    // calls at link time. No object in the binary makes a direct call to libvulkan, so namcap reports
+    // it as an unused shared library. The dependency is real and stays declared: dropping it to quiet the
     // linter would move the failure on a host without Vulkan from install time into the middle of a
     // stream. The exact inverse of the line below, which retired when the Vulkan Video encoder started
     // calling the loader for real.

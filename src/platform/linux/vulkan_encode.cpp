@@ -30,6 +30,7 @@ extern "C" {
 #include "src/logging.h"
 #include "src/video_colorspace.h"
 #include "vulkan_encode.h"
+#include "vulkan_loader.h"
 
 // SPIR-V data generated at build time
 static const std::vector<uint32_t> rgb2yuv_comp_spv_data
@@ -38,6 +39,7 @@ static const std::vector<uint32_t> rgb2yuv_comp_spv_data
 static const size_t rgb2yuv_comp_spv_size = rgb2yuv_comp_spv_data.size() * sizeof(uint32_t);
 
 using namespace std::literals;
+using namespace platf::vulkan_loader;
 
 namespace vk {
 
@@ -100,6 +102,13 @@ namespace vk {
   }
 
   static int create_vulkan_hwdevice(AVBufferRef **hw_device_buf, std::string_view capture_render_path = {}) {
+    // Every Vulkan call this encoder makes goes through the loader pointers, so a loader that lacks
+    // one refuses the device here instead of failing in the middle of a stream.
+    if (const auto missing = missing_entry_point(); !missing.empty()) {
+      BOOST_LOG(error) << "Vulkan Video: the Vulkan loader does not provide ["sv << missing << ']';
+      return -1;
+    }
+
     // KMS passes the capture card's exact render node. Using a different physical
     // device can make DMA-BUF import fail or silently add a cross-GPU copy.
     const bool require_exact_device = !capture_render_path.empty() || !config::video.adapter_name.empty();
@@ -154,7 +163,10 @@ namespace vk {
     // Resolve the query entry point exactly like FFmpeg's ff_vk_load_functions does:
     // through the device context's own loader function on its own instance. If FFmpeg
     // can open a Vulkan encode session against this device, that pointer is present.
-    const auto get_proc_addr = vk_ctx->get_proc_addr ? vk_ctx->get_proc_addr : &vkGetInstanceProcAddr;
+    const auto get_proc_addr = vk_ctx->get_proc_addr ? vk_ctx->get_proc_addr : vkGetInstanceProcAddr;
+    if (!get_proc_addr) {
+      return -1;
+    }
     auto query_caps = (PFN_vkGetPhysicalDeviceVideoCapabilitiesKHR) get_proc_addr(vk_ctx->inst, "vkGetPhysicalDeviceVideoCapabilitiesKHR");
     if (!query_caps) {
       BOOST_LOG(debug) << "Vulkan Video: vkGetPhysicalDeviceVideoCapabilitiesKHR is unavailable; quality levels stay unknown"sv;

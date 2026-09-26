@@ -129,12 +129,6 @@ Ultimate Edition leads this representative Aurora capture.
 
 ![Polaris Aurora Library with Control Ultimate Edition and other ready games](docs/screenshots/polaris-library-control-v1.3.8.webp)
 
-<p align="center">
-  <a href="https://papi-ux.com/polaris/#themes"><img src="docs/screenshots/theme-cycle.webp" width="720" alt="Mission Control cycling through the Portable Chrome, Console OLED, Miami Nebula, and High Contrast themes"></a><br>
-  <a href="https://papi-ux.com/polaris/#themes"><img src="docs/screenshots/theme-dots.svg" height="14" alt="Theme accent colors"></a><br>
-  <sub><a href="https://papi-ux.com/polaris/#themes">Compare every theme in the website gallery</a></sub>
-</p>
-
 Every capture above and across [papi-ux.com](https://papi-ux.com/polaris/) comes from the tagged public release; the [pixel-level provenance manifest](https://papi-ux.com/images/products/showcase-v1.3.8-v1.3.6-provenance.json) ships with the site.
 
 <img src="docs/screenshots/divider-aurora.svg" width="100%" height="3" alt="">
@@ -170,6 +164,11 @@ Play Setup, Private Stream choices, Command Center, NovaHUD, session ownership,
 and tuning provenance. Install it from the [latest Nova
 release](https://github.com/papi-ux/nova/releases/latest), where the Steam Deck
 Alpha is a Flatpak bundle beside the Android APKs.
+
+A game page in Nova gives the artwork the whole screen, and says what this launch
+actually resolved to before you start it.
+
+![Nova's game page for Control Resonant: full-bleed artwork, the resolved 1920x1080 at 120 FPS line, and Launch, Play Setup and Reset Game Profile](docs/screenshots/nova-game-page-v1.4.13.webp)
 
 Standard Moonlight-compatible clients remain supported for pairing, browsing,
 launching, input, and streaming. Features that depend on Polaris-specific host

@@ -34,6 +34,7 @@ extern "C" {
 #include "src/stream_stats.h"
 #include "src/utility.h"
 #include "src/video.h"
+#include "vulkan_loader.h"
 #include "wayland.h"
 
 #define POLARIS_STRINGVIEW_HELPER(x) x##sv
@@ -49,6 +50,7 @@ extern "C" {
 namespace fs = std::filesystem;
 
 using namespace std::literals;
+using namespace platf::vulkan_loader;
 
 namespace cuda {
   constexpr auto cudaDevAttrMaxThreadsPerBlock = (CUdevice_attribute) 1;
@@ -967,6 +969,11 @@ namespace cuda {
           ((cdf->cuDeviceGetUuid_v2 && cdf->cuDeviceGetUuid_v2(&cuda_uuid, cuda_device) != CUDA_SUCCESS) ||
            (!cdf->cuDeviceGetUuid_v2 && cdf->cuDeviceGetUuid(&cuda_uuid, cuda_device) != CUDA_SUCCESS))) {
         BOOST_LOG(error) << "CUDA DMABUF Vulkan: couldn't query selected CUDA context UUID"sv;
+        return false;
+      }
+
+      if (const auto missing = missing_entry_point(); !missing.empty()) {
+        BOOST_LOG(error) << "CUDA DMABUF Vulkan: the Vulkan loader does not provide ["sv << missing << ']';
         return false;
       }
 
