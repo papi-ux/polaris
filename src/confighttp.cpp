@@ -47,6 +47,7 @@
 #include "confighttp.h"
 #include "confighttp_benchmark_auth.h"
 #include "confighttp_validation.h"
+#include "cover_lookup_workers.h"
 #include "crash_report.h"
 #include "crypto.h"
 #include "display_device.h"
@@ -6407,14 +6408,27 @@ namespace confighttp {
     }
 
     // A cover route's failure, with the status and code Nova gets, and an empty list when the route answers with one.
-    void send_cover_failure(resp_https_t response, const game_artwork::manual::search_failure_t &failure, const std::string &list = {}) {
+    void send_cover_failure(resp_https_t response, const game_artwork::manual::search_failure_t &failure,
+                            const std::string &list, const SimpleWeb::CaseInsensitiveMultimap &headers) {
       nlohmann::json output {
         {"status", false},
         {"code", failure.code},
         {"error", failure.message},
       };
       if (!list.empty()) output[list] = nlohmann::json::array();
-      send_response(response, static_cast<SimpleWeb::StatusCode>(failure.http_status), output);
+      response->write(static_cast<SimpleWeb::StatusCode>(failure.http_status), output.dump(), headers);
+    }
+
+    void send_cover_failure(resp_https_t response, const game_artwork::manual::search_failure_t &failure, const std::string &list = {}) {
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
+      send_cover_failure(response, failure, list, headers);
+    }
+
+    void refuse_cover_lookup(resp_https_t response, cover_lookup::admission_e admission, const std::string &list) {
+      const bool stopping = admission == cover_lookup::admission_e::stopping;
+      send_cover_failure(response, {stopping ? "cover_lookup_stopping" : "cover_lookup_busy",
+        stopping ? "The host is shutting down. Try again after it restarts." : "Two cover lookups are already running. Try again shortly.", 503}, list);
     }
   }  // namespace
 
@@ -6433,12 +6447,16 @@ namespace confighttp {
    *
    * @api_examples{/api/covers/search| GET| ?name=Heroic&uuid=F727EEEE-A124-040A-6D03-33DF1E45E189}
    */
-  void searchCovers(resp_https_t response, req_https_t request) {
+  void searchCovers(resp_https_t response, req_https_t request,
+                    cover_lookup::workers_t &workers,
+                    game_artwork::providers::transport_t transport_override) {
     if (!authenticate(response, request)) return;
     print_req(request);
 
-    const auto answer_failure = [&](const game_artwork::manual::search_failure_t &failure) {
-      send_cover_failure(response, failure, "candidates");
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
+    const auto answer_failure = [response, headers](const game_artwork::manual::search_failure_t &failure) {
+      send_cover_failure(response, failure, "candidates", headers);
     };
     const auto api_key = config::steamgriddb_api_key();
     if (!steamgriddb_key_present(api_key)) {
@@ -6456,49 +6474,58 @@ namespace confighttp {
       return;
     }
 
+    const auto transport = transport_override ? std::move(transport_override) : nvhttp::artwork_transport(api_key);
+    auto lookup = [response, headers, answer_failure, uuid, query = *query, transport] {
+      try {
+        const auto search = game_artwork::manual::search_match_candidates(
+          nvhttp::artwork_candidate_previews(),
+          uuid,
+          query,
+          transport,
+          nvhttp::artwork_clock_milliseconds(),
+          game_artwork::manual::candidate_listing_e::matches_with_posters,
+          // Keep each admitted lookup bounded even though the HTTP thread remains available.
+          game_artwork::manual::search_budget_t {&nvhttp::artwork_clock_milliseconds, cover_search_budget_milliseconds}
+        );
+        if (search.invalid_query) {
+          response->write(SimpleWeb::StatusCode::client_error_bad_request,
+            nlohmann::json {{"status_code", 400}, {"status", false}, {"error", "A cover search needs a name and a uuid"}}.dump(), headers);
+          return;
+        }
+        if (search.failure) {
+          answer_failure(*search.failure);
+          return;
+        }
+        auto candidates = nlohmann::json::array();
+        for (const auto &found : search.candidates) {
+          if (!found.poster_token) {
+            continue;
+          }
+          nlohmann::json candidate {
+            {"title", found.candidate.title},
+            {"provider_game_id", found.candidate.provider_game_id},
+            {"confidence", found.candidate.confidence},
+            {"token", *found.poster_token},
+            {"preview", "./api/covers/preview/" + *found.poster_token + "?uuid=" + uuid},
+            {"expires_at", found.preview_expires_at},
+          };
+          if (found.candidate.release_year) {
+            candidate["release_year"] = *found.candidate.release_year;
+          }
+          if (found.candidate.steam_appid) {
+            candidate["steam_appid"] = *found.candidate.steam_appid;
+          }
+          candidates.push_back(std::move(candidate));
+        }
+        nlohmann::json output {{"status", true}, {"query", query}, {"candidates", std::move(candidates)}};
+        response->write(output.dump(), headers);
+      } catch (...) {
+        answer_failure(game_artwork::manual::classify_search_failure(true, std::nullopt));
+      }
+    };
     try {
-      const auto search = game_artwork::manual::search_match_candidates(
-        nvhttp::artwork_candidate_previews(),
-        uuid,
-        *query,
-        nvhttp::artwork_transport(api_key),
-        nvhttp::artwork_clock_milliseconds(),
-        game_artwork::manual::candidate_listing_e::matches_with_posters,
-        // The console's routes share one thread, so a slow SteamGridDB stops the read instead
-        // of holding every page for as long as ten matches can take.
-        game_artwork::manual::search_budget_t {&nvhttp::artwork_clock_milliseconds, cover_search_budget_milliseconds}
-      );
-      if (search.invalid_query) {
-        bad_request(response, request, "A cover search needs a name and a uuid");
-        return;
-      }
-      if (search.failure) {
-        answer_failure(*search.failure);
-        return;
-      }
-      auto candidates = nlohmann::json::array();
-      for (const auto &found : search.candidates) {
-        if (!found.poster_token) {
-          continue;
-        }
-        nlohmann::json candidate {
-          {"title", found.candidate.title},
-          {"provider_game_id", found.candidate.provider_game_id},
-          {"confidence", found.candidate.confidence},
-          {"token", *found.poster_token},
-          {"preview", "./api/covers/preview/" + *found.poster_token + "?uuid=" + uuid},
-          {"expires_at", found.preview_expires_at},
-        };
-        if (found.candidate.release_year) {
-          candidate["release_year"] = *found.candidate.release_year;
-        }
-        if (found.candidate.steam_appid) {
-          candidate["steam_appid"] = *found.candidate.steam_appid;
-        }
-        candidates.push_back(std::move(candidate));
-      }
-      nlohmann::json output {{"status", true}, {"query", *query}, {"candidates", std::move(candidates)}};
-      send_response(response, output);
+      const auto admission = workers.submit(std::move(lookup));
+      if (admission != cover_lookup::admission_e::accepted) refuse_cover_lookup(response, admission, "candidates");
     } catch (...) {
       answer_failure(game_artwork::manual::classify_search_failure(true, std::nullopt));
     }
@@ -6783,7 +6810,9 @@ namespace confighttp {
    *
    * @api_examples{/api/covers/choices| POST| {"uuid":"F727EEEE-A124-040A-6D03-33DF1E45E189","provider_game_id":"5321091","title":"Heroic Games Launcher"}}
    */
-  void listCoverChoices(resp_https_t response, req_https_t request) {
+  void listCoverChoices(resp_https_t response, req_https_t request,
+                        cover_lookup::workers_t &workers,
+                        game_artwork::providers::transport_t transport_override) {
     if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) return;
     print_req(request);
 
@@ -6819,31 +6848,54 @@ namespace confighttp {
       return;
     }
 
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
+    const auto transport = transport_override ? std::move(transport_override) : nvhttp::artwork_transport(api_key);
+    auto lookup = [response, headers, uuid, game = *game, transport] {
+      try {
+        const auto listing = game_artwork::manual::list_artwork_choices(
+          nvhttp::artwork_candidate_previews(),
+          uuid,
+          game_artwork::kind_e::poster,
+          game,
+          transport,
+          nvhttp::artwork_clock_milliseconds()
+        );
+        if (listing.failure) {
+          send_cover_failure(response, *listing.failure, "choices", headers);
+          return;
+        }
+        auto choices = nlohmann::json::array();
+        for (const auto &choice : listing.choices) {
+          choices.push_back({
+            {"token", choice.token},
+            {"preview", "./api/covers/preview/" + choice.token + "?uuid=" + uuid},
+            {"expires_at", choice.expires_at},
+          });
+        }
+        response->write(nlohmann::json {{"status", true}, {"choices", std::move(choices)}}.dump(), headers);
+      } catch (...) {
+        send_cover_failure(response, game_artwork::manual::classify_search_failure(true, std::nullopt), "choices", headers);
+      }
+    };
     try {
-      const auto listing = game_artwork::manual::list_artwork_choices(
-        nvhttp::artwork_candidate_previews(),
-        uuid,
-        game_artwork::kind_e::poster,
-        *game,
-        nvhttp::artwork_transport(api_key),
-        nvhttp::artwork_clock_milliseconds()
-      );
-      if (listing.failure) {
-        send_cover_failure(response, *listing.failure, "choices");
-        return;
-      }
-      auto choices = nlohmann::json::array();
-      for (const auto &choice : listing.choices) {
-        choices.push_back({
-          {"token", choice.token},
-          {"preview", "./api/covers/preview/" + choice.token + "?uuid=" + uuid},
-          {"expires_at", choice.expires_at},
-        });
-      }
-      send_response(response, nlohmann::json {{"status", true}, {"choices", std::move(choices)}});
+      const auto admission = workers.submit(std::move(lookup));
+      if (admission != cover_lookup::admission_e::accepted) refuse_cover_lookup(response, admission, "choices");
     } catch (...) {
-      send_cover_failure(response, game_artwork::manual::classify_search_failure(true, std::nullopt), "choices");
+      send_cover_failure(response, game_artwork::manual::classify_search_failure(true, std::nullopt), "choices", headers);
     }
+  }
+
+  // The owner lives until server shutdown has joined every accepted lookup.
+  // Supplying a transport lets the HTTPS route contract run against a mock provider.
+  void registerCoverLookups(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &server, cover_lookup::workers_t &workers,
+                            game_artwork::providers::transport_t transport_override = {}) {
+    server.resource["^/api/covers/search$"]["GET"] = [&workers, transport_override](resp_https_t response, req_https_t request) {
+      searchCovers(response, request, workers, transport_override);
+    };
+    server.resource["^/api/covers/choices$"]["POST"] = withCsrf([&workers, transport_override](resp_https_t response, req_https_t request) {
+      listCoverChoices(response, request, workers, transport_override);
+    });
   }
 
   /**
@@ -9642,6 +9694,7 @@ namespace confighttp {
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
     auto port_https = net::map_port(PORT_HTTPS);
     auto address_family = net::af_from_enum_string(config::sunshine.address_family);
+    cover_lookup::workers_t cover_lookups;
     https_server_t server { config::nvhttp.cert, config::nvhttp.pkey };
 
     server.verify = [](req_https_t request, SSL *ssl) {
@@ -9893,8 +9946,7 @@ namespace confighttp {
     server.resource["^/api/clients/profiles/delete$"]["POST"] = withCsrf(deleteClientProfile);
     server.resource["^/api/covers/upload$"]["POST"] = withCsrf(uploadCover);
     server.resource["^/api/covers/image$"]["GET"] = getCoverImage;
-    server.resource["^/api/covers/search$"]["GET"] = searchCovers;
-    server.resource["^/api/covers/choices$"]["POST"] = withCsrf(listCoverChoices);
+    registerCoverLookups(server, cover_lookups);
     server.resource["^/api/covers/preview/([0-9a-f]{32})$"]["GET"] = previewCover;
     server.resource["^/api/covers/select$"]["POST"] = withCsrf(selectCover);
     server.resource["^/api/covers/key/check$"]["POST"] = withCsrf(checkCoversKey);
@@ -10005,10 +10057,12 @@ namespace confighttp {
     // Wait for any event
     shutdown_event->view();
 
+    cover_lookups.stop_accepting();
     server.stop();
     wait_for_background_tasks();
 
     tcp.join();
+    cover_lookups.shutdown();
   }
   static std::atomic<session_state_e> s_session_state{session_state_e::idle};
 
