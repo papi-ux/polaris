@@ -1,7 +1,32 @@
 # Mission Control
 
 **Mission Control** is the host's cockpit: what is streaming, how well, and the one safe thing to
-do about it. It has two layouts, one while a stream is live and one while the host is idle.
+do about it. It shows Space sessions first when Spaces is enabled, followed by the host's
+live stream or idle view.
+
+## Space sessions
+
+On Linux, the Spaces card lists reported sessions by Space, launcher, device, and state:
+**Starting**, **Running**, or **Stopping**. Device names come from the paired device list;
+an unknown device is labeled without exposing its identifier. Assigning a device to a Space
+does not make it an active session. A running session is a host report, not confirmation that
+video, sound, or input works on that device.
+
+The attention badge points to controller problems, runtime driver mismatches, unsupported
+launchers, failed runtime changes, or an unsuccessful refresh. **Open Spaces** takes you to
+the existing controls. Mission Control does not repair, stop, move, or create a Space.
+
+Activity refreshes about every ten seconds while the page is visible, with backoff on errors.
+An unsuccessful refresh leaves the last report visibly marked out of date. Older hosts that
+omit activity show it as unknown. Disabled Spaces has no card or continuing activity poll.
+The list shows up to 100 sessions and a count for any others.
+
+Desktop Preview is paused when a Space is starting, running, or stopping, or when its activity
+cannot be verified. An already open preview closes when the next report detects a Space.
+Opening a Linux preview first rechecks activity; it does not resume automatically when a Space
+ends. The preview endpoint captures the host display, so it cannot represent a Space's video.
+Any separate host stream telemetry remains labeled as such; Space video and input must be
+checked on the connected device.
 
 ## While a stream is live
 
@@ -28,7 +53,7 @@ missed their target interval. Live charts under the tiles pause when reduced mot
 recommendation, and at most one safe action with a confirmation. What the verdicts and actions
 mean is in [Fix a bad stream with Doctor](doctor.md).
 
-**Display Preview** shows a low-rate view of what the client is receiving, inside the browser.
+**Display Preview** shows a low-rate view of the host capture display, inside the browser.
 Expand it to inspect a frame; hide it to save host work. The preview is diagnostic only and does
 not change the stream.
 
@@ -51,6 +76,7 @@ read. **Clear history** empties both after a confirmation that names what goes a
 
 ## Where the numbers come from
 
-Everything on the page is host telemetry published once per second. The same evidence feeds
+Stream metrics are host telemetry published once per second; Space activity has the separate
+refresh interval described above. The same stream evidence feeds
 Doctor & Support, so if the two disagree, reload the page before suspecting the host. Session
 Snapshot on Doctor & Support shows the same session in more detail, field by field.
