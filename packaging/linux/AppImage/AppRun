@@ -31,7 +31,7 @@ echo "
                    # Install input rules polaris.service files. Restart required.
 
          $ARGV0  --remove, -r
-                   # Remove input rules polaris.service files.
+                   # Remove input rules, service files and binary capabilities.
 
          $ARGV0  --appimage-help
                    # Show available AppImage options
@@ -64,6 +64,24 @@ function install() {
 }
 
 function remove() {
+  # --install grants KMS access to this resolved binary. Revoke it before removing the
+  # support files, and report a failure rather than leaving a privileged binary behind.
+  local binary capabilities
+  binary="$(readlink -f "$POLARIS_BIN_HERE")" || return 1
+  if [ -f "$binary" ]; then
+    capabilities="$(getcap "$binary")" || {
+      echo "Could not inspect Polaris binary capabilities; removal stopped." >&2
+      return 1
+    }
+    # setcap -r fails when no capability exists, so a repeated removal skips it.
+    if [ -n "$capabilities" ]; then
+      sudo setcap -r "$binary" || {
+        echo "Could not remove Polaris binary capabilities; removal stopped." >&2
+        return 1
+      }
+    fi
+  fi
+
   # remove input rules
   sudo rm -f /etc/udev/rules.d/60-polaris.rules
 
