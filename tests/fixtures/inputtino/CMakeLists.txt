@@ -50,3 +50,16 @@ target_compile_options(test_inputtino_phys PRIVATE -include "${CMAKE_CURRENT_SOU
 target_link_libraries(test_inputtino_phys PRIVATE PkgConfig::INPUTTINO_TEST_EVDEV Threads::Threads)
 add_test(NAME test_inputtino_phys COMMAND test_inputtino_phys)
 set_tests_properties(test_inputtino_phys PROPERTIES TIMEOUT 30)
+
+add_executable(test_inputtino_keyboard keyboard_lifetime.cpp)
+target_compile_features(test_inputtino_keyboard PRIVATE cxx_std_20)
+target_include_directories(test_inputtino_keyboard PRIVATE
+    "${POLARIS_INPUTTINO_SOURCE_DIR}/include"
+    "${POLARIS_INPUTTINO_SOURCE_DIR}/src/uinput/include")
+target_compile_definitions(test_inputtino_keyboard PRIVATE
+    POLARIS_TEST_KEYBOARD_SOURCE="${POLARIS_INPUTTINO_SOURCE_DIR}/src/uinput/keyboard.cpp")
+target_link_libraries(test_inputtino_keyboard PRIVATE PkgConfig::INPUTTINO_TEST_EVDEV Threads::Threads)
+foreach(scenario release teardown idle move duplicate)
+    add_test(NAME test_inputtino_keyboard_${scenario} COMMAND test_inputtino_keyboard ${scenario})
+    set_tests_properties(test_inputtino_keyboard_${scenario} PROPERTIES TIMEOUT 10)
+endforeach()
