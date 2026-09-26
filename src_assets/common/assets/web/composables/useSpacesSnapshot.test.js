@@ -22,6 +22,41 @@ function host(options = {}) {
 }
 
 describe('useSpacesSnapshot', () => {
+  it('does not start polling from a visibility event before start is called', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('fetch', vi.fn(async () => reply(snapshot())))
+    wrapper = mount(defineComponent({ setup: () => useSpacesSnapshot(), template: '<div />' }))
+    document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(fetch).not.toHaveBeenCalled()
+  })
+  it('can stop polling for disabled Spaces and resume on an explicit refresh', async () => {
+    vi.useFakeTimers()
+    let enabled = false
+    vi.stubGlobal('fetch', vi.fn(async () => reply(snapshot({ enabled }))))
+    host({ shouldPoll: () => enabled })
+    await vi.advanceTimersByTimeAsync(30000)
+    document.dispatchEvent(new Event('visibilitychange'))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    enabled = true
+    await wrapper.vm.start()
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(fetch).toHaveBeenCalledTimes(3)
+  })
+  it('stop retires an in-flight read even if the transport completes after abort', async () => {
+    vi.useFakeTimers()
+    let resolve, signal
+    vi.stubGlobal('fetch', vi.fn((_url, options) => { signal = options.signal; return new Promise(done => { resolve = done }) }))
+    host()
+    wrapper.vm.stop()
+    expect(signal.aborted).toBe(true)
+    resolve(reply(snapshot()))
+    await vi.advanceTimersByTimeAsync(30000)
+    expect(wrapper.vm.loaded).toBe(false)
+    expect(wrapper.vm.loading).toBe(false)
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
   it('loads once, then polls on a completion-driven interval', async () => {
     vi.useFakeTimers()
     vi.stubGlobal('fetch', vi.fn(async () => reply(snapshot())))
