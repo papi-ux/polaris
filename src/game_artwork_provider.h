@@ -78,6 +78,8 @@ namespace game_artwork::providers {
    * deterministic cache, while failed/invalid/oversized responses leave no
    * partial file and do not remove valid cached artwork. The returned vector is
    * the complete valid cache state, including assets that existed beforehand.
+   * Automatic Steam/SteamGridDB assets honor Remove artwork before download and
+   * again at publication, including when force_replace is set. Explicit overrides do not.
    */
   [[nodiscard]] std::vector<asset_t> execute_download_plan(
     const std::filesystem::path &appdata,
