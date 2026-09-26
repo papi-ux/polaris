@@ -672,7 +672,7 @@
     "mouse_cursor_visible_desc": "Composites the host cursor into the stream; needed for DRM/KMS, off if you see two pointers.",
     "native_pen_touch": "Native Pen/Touch Support",
     "native_pen_touch_desc": "Passes native pen and touch events through; turn it off for apps without native support.",
-    "notify_pre_releases": "PreRelease Notifications",
+    "notify_pre_releases": "Include beta releases",
     "notify_pre_releases_desc": "Whether to be notified of new pre-release versions of Polaris",
     "nvenc_h264_cavlc": "Prefer CAVLC over CABAC in H.264",
     "nvenc_h264_cavlc_desc": "Simpler form of entropy coding. CAVLC needs around 10% more bitrate for same quality. Only relevant for really old decoding devices.",
@@ -1249,7 +1249,7 @@
     "software": "Software",
     "update_center": "Update Center",
     "never_auto_installs": "Polaris never auto-installs updates from this page.",
-    "updates_docs_link": "How releases are published",
+    "updates_docs_link": "Update and beta guide",
     "check_again": "Check again",
     "checking": "Checking…",
     "update_details": "Update details",
@@ -1269,7 +1269,14 @@
     "system_shortcuts": "System shortcuts",
     "quick_applications_title": "Applications",
     "product_resources": "Product & resources",
-    "product_resources_copy": "Nova client support, documentation, community, and project information."
+    "product_resources_copy": "Nova client support, documentation, community, and project information.",
+    "include_beta_releases": "Include beta releases",
+    "beta_updates_help": "Show newer beta releases alongside stable updates. Installation remains your choice. Turning this off keeps your installed version and checks for stable updates.",
+    "saving_update_channel": "Saving update preference…",
+    "stable_and_beta": "Checking stable and beta releases",
+    "stable_only": "Checking stable releases only",
+    "update_channel_changed": "Settings changed elsewhere. Check again before saving your update preference.",
+    "update_channel_failed": "Could not confirm the update preference. Check again before retrying."
   },
   "navbar": {
     "applications": "Applications",
