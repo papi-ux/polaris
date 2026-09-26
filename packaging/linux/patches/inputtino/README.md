@@ -74,3 +74,20 @@ caught as a patch failure rather than as a named review prompt.
 
 `report_order.cpp` asserts the resting report directly: it creates a pad,
 submits nothing, and reads the first report the periodic sender emits.
+
+## Keyboard repeat ownership (Spaces #88 prerequisite)
+
+The fourth patch serializes keyboard presses, releases, and repeat writes with
+the same mutex. The repeat thread remains owned and joinable. Teardown sets its
+stop state under the lock, wakes the timed wait, and joins before releasing the
+virtual device. A long repeat interval therefore cannot delay keyboard cleanup.
+Repeated press calls still emit input but retain only one repeat owner per key;
+held-key storage is allocated before emitting a new press.
+
+`keyboard_lifetime.cpp` compiles the actual patched keyboard implementation with
+in-memory uinput creation and event writes. A held repeat write proves that a
+release and teardown cannot overtake it. Separate cases cover a long idle repeat
+interval, move ownership, and duplicate press calls. These tests open no input
+device. The patch applies to both Desktop and Spaces keyboards. It does not add
+synthetic modifier or UTF-8 packet support; those require their own input
+semantics and launcher acceptance.
