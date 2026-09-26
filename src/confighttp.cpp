@@ -4590,7 +4590,8 @@ namespace confighttp {
     const auto action = multiseat::spaces::decode_setup_request({bytes.data(), static_cast<std::size_t>(count)});
     if (!action) { bad_request(response, request, "Invalid Spaces setup request"); return; }
     // A change to this PC's setup that an administrator is approving finishes first.
-    const bool host_setup_running = action->operation != "cancel" && multiseat::spaces::host_admin_running();
+    const auto host_activity = action->operation == "cancel" ? std::nullopt : multiseat::spaces::try_begin_host_activity();
+    const bool host_setup_running = action->operation != "cancel" && !host_activity;
     const auto status = host_setup_running ? 409 : service->submit(*action);
     auto output = service->snapshot();
     output["accepted"] = status == 200 || status == 202;
