@@ -408,7 +408,7 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
   let status = 'current'
   let statusLabel = 'Current release'
   let summary = 'This host is on the latest public release.'
-  if (isReleaseGreater(candidateRelease, currentVersion, includePrereleases)) {
+  if (isReleaseGreater(candidateRelease, currentVersion, true)) {
     status = 'update_available'
     statusLabel = candidateRelease.prerelease ? 'Prerelease available' : 'Update available'
     summary = 'A newer Polaris package is available. Copy the manual install command when you are ready.'

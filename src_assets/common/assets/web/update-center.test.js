@@ -621,6 +621,19 @@ describe('Update Center release awareness', () => {
       .toBe('update_available')
   })
 
+  it('offers rc after beta and stable after rc, including after opting out', () => {
+    const stable = { ...release, tag_name: 'v1.4.12', prerelease: false }
+    const rc = { ...release, tag_name: 'v1.4.13-rc.1', prerelease: true }
+    const input = { currentVersion: '1.4.13-beta.3', latestRelease: stable, prereleaseRelease: rc, includePrereleases: true }
+    expect(buildUpdateCenterState(input)).toMatchObject({ status: 'update_available', latestVersion: rc.tag_name })
+    expect(buildUpdateCenterState({ ...input, currentVersion: '1.4.13-rc.2' }).status).not.toBe('update_available')
+    expect(buildUpdateCenterState({ ...input, currentVersion: '1.4.13' }).status).not.toBe('update_available')
+    for (const includePrereleases of [true, false]) {
+      expect(buildUpdateCenterState({ ...input, currentVersion: '1.4.13-rc.1', latestRelease: { ...stable, tag_name: 'v1.4.13' }, includePrereleases }))
+        .toMatchObject({ status: 'update_available', latestVersion: 'v1.4.13' })
+    }
+  })
+
 
 
   it('surfaces a front-page update CTA and status light metadata', () => {
