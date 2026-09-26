@@ -31,13 +31,15 @@ SDR 4:2:0; do not treat a successful SDR stream as HDR validation. See the
 
 ## Build and selection
 
-`POLARIS_ENABLE_PYROWAVE` defaults to `ON` in the current Linux source. To build the experimental encoder,
-initialize the pinned dependencies and add `-DPOLARIS_ENABLE_PYROWAVE=ON` to the
-normal Linux CMake configuration:
+`POLARIS_ENABLE_PYROWAVE` defaults to `ON`, so a normal Linux configuration already
+builds the encoder and there is no flag to add. What it needs is the pinned
+dependencies, which a plain clone does not fetch:
 
 ```sh
 git submodule update --init --recursive third-party/pyrowave third-party/Granite
 ```
+
+Pass `-DPOLARIS_ENABLE_PYROWAVE=OFF` to leave the encoder out.
 
 An enabled host advertises the codec to compatible clients. Nova must explicitly
 select PyroWave; its Auto choice does not select it. Standard release packages
