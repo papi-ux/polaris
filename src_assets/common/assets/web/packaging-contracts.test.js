@@ -549,22 +549,18 @@ describe('Linux packaging contracts', () => {
     expect(upload).toContain('uses: actions/upload-artifact@')
     expect(upload).toMatch(/^\s+name: Polaris-steamos3\.8-package\s*$/m)
 
-    // Both packages, because the release job refuses anything but two and polaris-kms is published
-    // from this artifact. The first tag build after the polaris-kms split failed with an empty log
-    // because this upload named only the base package while the script wrote both.
-    //
-    // Still exact filenames and never a glob: an artifact assembled by pattern is one that can
-    // quietly gain a file. That is what this assertion has always been for, and two named paths keep
-    // it rather than relax it.
+    // The host, KMS helper and matching symbols must all survive artifact collection.
+    // Keep exact filenames so unrelated outputs cannot enter the release by a glob.
     const uploadPaths = upload.match(/^\s+path:\s*\|\s*$([\s\S]*?)(?=^\s+[a-z-]+:)/m)
     expect(uploadPaths, 'the SteamOS upload must list its paths as a block scalar').not.toBeNull()
     const listedPaths = uploadPaths[1]
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => line.length > 0 && !line.startsWith('#'))
-    expect(listedPaths).toHaveLength(2)
+    expect(listedPaths).toHaveLength(3)
     expect(listedPaths.some((line) => line.endsWith('/Polaris-steamos3.8-x86_64.pkg.tar.zst'))).toBe(true)
     expect(listedPaths.some((line) => line.endsWith('/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst'))).toBe(true)
+    expect(listedPaths.some((line) => line.endsWith('/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst'))).toBe(true)
     for (const line of listedPaths) {
       expect(line, 'every uploaded SteamOS path must be an exact filename').not.toMatch(/[*?\[]/)
     }
@@ -976,10 +972,8 @@ describe('Linux packaging contracts', () => {
     const assemblyCommands = normalizedShellCommands(assembly)
     const nullglobCommand = 'shopt -s nullglob'
     const packageArrayCommand = 'steamos_packages=(release-assets/raw/steamos3.8/*.pkg.tar.zst)'
-    // Two since the DRM/KMS capture helper became its own package: Polaris and polaris-kms. The
-    // guard still exists to catch a job that produced something unexpected, and the copies below
-    // still name each file exactly, so neither can be picked by position.
-    const cardinalityGuard = 'if [ "${#steamos_packages[@]}" -ne 2 ]; then'
+    // All three packages are required; staging still names each archive explicitly.
+    const cardinalityGuard = 'if [ "${#steamos_packages[@]}" -ne 3 ]; then'
     const exactCopy = 'cp "release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst" "release-assets/staged/Polaris-steamos3.8-x86_64.pkg.tar.zst"'
     const stagedDestination = 'release-assets/staged/Polaris-steamos3.8-x86_64.pkg.tar.zst'
     const stagedDirectory = 'release-assets/staged'

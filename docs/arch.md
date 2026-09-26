@@ -137,5 +137,15 @@ For a clean slate, or to remove what the package leaves behind, see
 
 ## Debug package
 
-Arch and SteamOS also publish a `polaris-debug` package. Install it when you need
-`coredumpctl info polaris` to produce a real backtrace for a crash report.
+Arch and SteamOS builds produce a separate `polaris-debug` package with detached
+symbols. Release assembly checks that its version, architecture and ELF build ID
+match the host and KMS helper before including it in the release.
+
+Download `Polaris-debug-arch-x86_64.pkg.tar.zst` or
+`Polaris-debug-steamos3.8-x86_64.pkg.tar.zst` from the same release as the installed
+host, then install that file with `sudo pacman -U`. Older releases may not include
+a debug asset; matching symbols then need to be built from that release's source.
+
+Use `coredumpctl list` to find the Polaris crash, then `coredumpctl debug PID` with
+that crash's PID to open the debugger with the installed symbols. `coredumpctl info`
+shows the recorded report; installing symbols does not rewrite that earlier report.
