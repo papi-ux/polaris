@@ -854,8 +854,10 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).not.toContain('namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt" || true')
     const reviewedWarnings = reviewedNamcap.trim().split('\n')
     // 18 since the compute codec brought volk in. volk resolves every Vulkan entry point with dlopen
-    // at runtime, so no object in the binary makes a direct call to libvulkan and namcap reports it as
-    // an unused shared library. The dependency is real and stays declared: dropping it to quiet the
+    // at runtime, and so does Polaris itself (src/platform/linux/vulkan_loader.cpp), because volk's
+    // global variables share the entry points' names and would otherwise capture Polaris's direct
+    // calls at link time. No object in the binary makes a direct call to libvulkan, so namcap reports
+    // it as an unused shared library. The dependency is real and stays declared: dropping it to quiet the
     // linter would move the failure on a host without Vulkan from install time into the middle of a
     // stream. The exact inverse of the line below, which retired when the Vulkan Video encoder started
     // calling the loader for real.

@@ -553,6 +553,10 @@ namespace video {
   extern encoder_t vaapi;
 #endif
 
+#ifdef POLARIS_BUILD_VULKAN
+  extern encoder_t vulkan;
+#endif
+
 #ifdef __APPLE__
   extern encoder_t videotoolbox;
 #endif
