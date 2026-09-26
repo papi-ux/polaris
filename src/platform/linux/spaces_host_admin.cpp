@@ -99,6 +99,7 @@ namespace multiseat::spaces {
 
     std::mutex installed_mutex;
     std::shared_ptr<host_admin_service_t> installed;
+    constexpr std::string_view activity_message = "Wait for the current Space launch or change to finish, then try again.";
   }  // namespace
 
   std::optional<host_action_e> parse_host_action(std::string_view name) {
@@ -350,8 +351,9 @@ namespace multiseat::spaces {
       if (pending_ && pending_->request_id == request.request_id)
         return {pending_->action == request.action ? 202 : 409, {}};
       if (running_) return {409, host_action_refusal_t {"host_setup_running", std::string(running_message)}};
-      // The gate closes before Polaris reads what it is doing, so a Space launch or Spaces change
-      // that starts now waits, and one that started a moment ago shows up in the facts below.
+      if (activities_ != 0) return {409, host_action_refusal_t {"spaces_active", std::string(activity_message)}};
+      // Reservations and running_ share this mutex: an admitted launch/change cannot be
+      // overtaken while it is still doing preflight and invisible to the facts below.
       running_ = true;
       pending_ = request;
       previous = std::move(worker_);
@@ -420,16 +422,18 @@ namespace multiseat::spaces {
 
   json host_admin_service_t::snapshot() const {
     std::optional<job_t> job;
-    bool busy = false, closing = false;
+    bool busy = false, closing = false, activity = false;
     {
       std::lock_guard lock(mutex_);
       job = job_;
       busy = running_;
       closing = closing_;
+      activity = activities_ != 0;
     }
     std::optional<host_action_refusal_t> refusal;
     if (closing) refusal = host_action_refusal_t {"closing", std::string(closing_message)};
     else if (busy) refusal = host_action_refusal_t {"host_setup_running", std::string(running_message)};
+    else if (activity) refusal = host_action_refusal_t {"spaces_active", std::string(activity_message)};
     else {
       try {
         refusal = host_action_refusal(options_.facts ? options_.facts() : host_admin_facts_t {});
@@ -526,6 +530,31 @@ namespace multiseat::spaces {
   bool host_admin_running() {
     const auto service = installed_host_admin_service();
     return service && service->running();
+  }
+
+  bool host_admin_service_t::begin_activity() {
+    std::lock_guard lock(mutex_);
+    if (closing_ || running_) return false;
+    ++activities_;
+    return true;
+  }
+
+  void host_admin_service_t::finish_activity() {
+    std::lock_guard lock(mutex_);
+    --activities_;
+  }
+
+  host_activity_guard_t::host_activity_guard_t(std::shared_ptr<host_admin_service_t> service):
+      service_(std::move(service)) {}
+
+  host_activity_guard_t::~host_activity_guard_t() {
+    if (service_) service_->finish_activity();
+  }
+
+  std::optional<host_activity_guard_t> try_begin_host_activity() {
+    auto service = installed_host_admin_service();
+    if (service && !service->begin_activity()) return std::nullopt;
+    return host_activity_guard_t(std::move(service));
   }
 }  // namespace multiseat::spaces
 #endif

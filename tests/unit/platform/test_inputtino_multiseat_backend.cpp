@@ -862,6 +862,7 @@ namespace {
         .payload = keyboard_key_event_t {
           .key_code = 0x41,
           .state = button_state_e::pressed,
+          .modifiers = keyboard_modifier_shift | keyboard_modifier_control,
         },
       },
       {

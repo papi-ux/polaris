@@ -73,6 +73,9 @@ namespace game_artwork {
   /** Shared gate for manifest/asset readers while an override transaction commits. */
   std::shared_lock<std::shared_mutex> acquire_artwork_override_read_lock();
 
+  /** Serialize cache publication with override commits and Remove artwork. Never hold during network I/O. */
+  std::unique_lock<std::shared_mutex> acquire_artwork_cache_write_lock();
+
   /**
    * Atomically expose validated override files from a separate staging appdata
    * root and their metadata. On any failure, restore the complete prior state.

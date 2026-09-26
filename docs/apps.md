@@ -33,6 +33,18 @@ titles, keeps entries that are already published visible so you can spot what is
 before one import pass. Imported Steam titles keep their app id and take the Linux launch mode
 you have selected when they start.
 
+Before importing, you can enable **Automatically add matching covers**. It is off by default.
+With a SteamGridDB key, Polaris then looks up only the games that import actually added and applies
+the first suggested match and poster to entries with an empty cover path. Large imports continue
+in batches of 500. Keep the Library page open until it finishes; **Stop** prevents further automatic
+applications, although a save already in progress may finish. Search matches can need correction;
+use the app editor's **Find Cover** to choose another.
+
+Existing covers, Artwork Studio selections and **Remove artwork** choices are preserved. An entry
+renamed or removed during its lookup is skipped, and other edits survive. Cover-only saves refresh
+the library without ending a running game. A missing key or failed lookup leaves the imported games
+available for the normal **Find covers** review.
+
 Importing a Lutris or Heroic title also publishes an entry for the launcher itself, once, using the command that exists on this host. Those imports launch straight into a game, so without it there is no way to reach the launcher from a stream to install something or fix a login. An entry you added by hand is recognised and not duplicated.
 
 ### ROM folders

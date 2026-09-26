@@ -15,6 +15,7 @@ function staged(list = []) {
 export function useGameScanner() {
   const scanning = ref(false)
   const importing = ref(false)
+  const importedGames = ref([])
   const steamGames = ref([])
   const lutrisGames = ref([])
   const heroicGames = ref([])
@@ -52,6 +53,7 @@ export function useGameScanner() {
   }
 
   async function importSelected() {
+    importedGames.value = []
     const selected = allGames().filter(g => g.selected && !g.already_imported)
     if (selected.length === 0) return 0
 
@@ -83,7 +85,8 @@ export function useGameScanner() {
         })
       })
       const data = await res.json()
-      if (data.status) {
+      if (res.ok && data.status) {
+        importedGames.value = Array.isArray(data.imported_games) ? data.imported_games : []
         selected.forEach(g => { g.already_imported = true; g.selected = false })
         return data.imported || 0
       } else {
@@ -109,6 +112,6 @@ export function useGameScanner() {
 
   return {
     scanning, importing, steamGames, lutrisGames, heroicGames, emulatorGames, librarySources,
-    error, scan, importSelected, toggleAll
+    error, importedGames, scan, importSelected, toggleAll
   }
 }

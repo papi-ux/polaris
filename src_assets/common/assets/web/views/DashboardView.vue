@@ -14,10 +14,12 @@
       <div class="page-meta" role="status" aria-live="polite" aria-atomic="true">
         <span v-if="stats?.streaming" class="pulse-dot"></span>
         <span class="meta-pill" :class="stats?.streaming ? 'border-success/30 bg-success/10 text-success' : ''">
-          {{ stats?.streaming ? $t('dashboard.live') : $t('dashboard.standby') }}
+          {{ dashboardSpaces.hasActivity ? $t('dashboard_spaces.active_title') : stats?.streaming ? $t('dashboard.live') : $t('dashboard.standby') }}
         </span>
       </div>
     </section>
+
+    <DashboardSpaces v-if="hostPlatform === 'linux' && dashboardSpaces.visible" :model="dashboardSpaces" :loading="spacesLoading" @refresh="refreshSpaces" />
 
     <!-- Loading skeleton state -->
     <template v-if="!statsLoaded">
@@ -30,7 +32,7 @@
       <section class="section-card gradient-border-top gradient-border-top-accent dashboard-live-shell" :class="{ 'is-preview-expanded': showPreview && previewExpanded }">
         <div class="dashboard-live-header">
           <div class="dashboard-live-header-copy">
-            <div class="section-kicker">{{ $t('dashboard.live_session') }}</div>
+            <div class="section-kicker">{{ dashboardSpaces.hasActivity ? $t('dashboard_spaces.host_telemetry') : $t('dashboard.live_session') }}</div>
             <div class="section-title-row">
               <h2 class="section-title">{{ liveSessionTitle }}</h2>
             </div>
@@ -157,7 +159,7 @@
                   <div class="eyebrow-label">{{ $t('dashboard.display_preview') }}</div>
                 </div>
                 <div class="dashboard-preview-actions">
-                  <button v-if="!showPreview" @click="startPreview" class="focus-ring dashboard-action-button dashboard-action-button-primary">
+                  <button v-if="!showPreview" :disabled="spacesPreviewBlocked || previewStarting" data-start-preview @click="startPreview" class="focus-ring dashboard-action-button dashboard-action-button-primary disabled:cursor-not-allowed disabled:opacity-50">
                     {{ $t('dashboard.show_display') }}
                   </button>
                   <template v-else>
@@ -211,7 +213,7 @@
                 </div>
               </template>
               <div v-else class="flex items-center justify-between gap-3 py-1">
-                <span class="text-xs text-storm">{{ $t('dashboard.preview_hidden_title') }}</span>
+                <span class="text-xs text-storm">{{ spacesPreviewBlocked ? $t('dashboard_spaces.no_preview') : $t('dashboard.preview_hidden_title') }}</span>
                 <div class="dashboard-preview-meta">
                   <span class="data-pill">{{ viewerCountLabel }}</span>
                   <span class="data-pill">{{ qualitySummaryLabel }}</span>
@@ -296,7 +298,7 @@
     </template>
 
     <!-- ═══ IDLE LAYOUT ═══ -->
-    <template v-else>
+    <template v-else-if="!dashboardSpaces.hasActivity">
       <!-- Status hero: one band answering "can I stream right now, and if
            not, what fixes it" (absorbs the old strip, triptych, and quad). -->
       <section class="section-card gradient-border-top gradient-border-top-accent" data-dashboard-idle-hero>
@@ -557,6 +559,9 @@ import { useSessionHistory, formatDuration } from '../composables/useSessionHist
 import { useAiOptimizer } from '../composables/useAiOptimizer'
 import { useFavicon } from '../composables/useFavicon'
 import Skeleton from '../components/Skeleton.vue'
+import DashboardSpaces from '../components/DashboardSpaces.vue'
+import { useSpacesSnapshot } from '../composables/useSpacesSnapshot.js'
+import { summarizeDashboardSpaces } from '../dashboard-spaces.js'
 import GaugeArc from '../components/GaugeArc.vue'
 import { onThemeTokensChange, readThemeTokens, withAlpha } from '../theme-bridge.js'
 import QuickControls from '../components/QuickControls.vue'
@@ -643,10 +648,26 @@ const pairingEnabled = ref(false)
 const clientSettingsSync = ref(resolveClientSettingsSync({}))
 const { t } = useI18n()
 const { toast: showToast } = useToast()
+const hostPlatform = ref('')
+const { state: spacesState, loaded: spacesLoaded, loading: spacesLoading, loadError: spacesError,
+  load: loadSpaces, start: refreshSpaces, stop: stopSpaces } = useSpacesSnapshot({
+  shouldPoll: () => hostPlatform.value === 'linux' && (!spacesLoaded.value || spacesState.enabled),
+})
+const dashboardSpaces = computed(() => summarizeDashboardSpaces(spacesState, {
+  loaded: spacesLoaded.value, error: spacesError.value, clients: pairedClientList.value,
+}))
+const spacesPreviewBlocked = computed(() => !hostPlatform.value ||
+  (hostPlatform.value === 'linux' && dashboardSpaces.value.previewBlocked))
+watch(hostPlatform, platform => {
+  if (platform === 'linux') refreshSpaces()
+  else stopSpaces()
+})
+
 
 const autoQuality = computed(() => resolveAutoQualityState(stats.value || {}, clientSettingsSync.value || {}))
 
 const actionSummary = computed(() => {
+  if (dashboardSpaces.value.hasActivity) return t('dashboard_spaces.summary', { count: dashboardSpaces.value.total })
   if (!statsLoaded.value) return t('dashboard.loading_summary')
   if (stats.value?.streaming) return t('dashboard.streaming_summary')
   return t('dashboard.idle_summary', { count: pairedClients.value })
@@ -762,6 +783,7 @@ function handleQuickControlChange({ key, enabled }) {
 
 function refreshClientSettingsSync(configPayload) {
   clientSettingsSync.value = resolveClientSettingsSync(configPayload || {})
+  hostPlatform.value = configPayload?.platform || ''
 }
 
 const connectedClients = computed(() => {
@@ -1019,8 +1041,22 @@ const previewBackoffMs = ref(PREVIEW_REFRESH_MS)
 // under reduced motion where a self-animating stream is unwanted.
 const previewMode = ref('mjpeg')
 let previewTimer = null
+let previewAttempt = 0
+const previewStarting = ref(false)
 
-function startPreview() {
+// Snapshot fields reset and merge together; observe the completed update.
+watch(spacesPreviewBlocked, blocked => { if (blocked) stopPreview() })
+
+async function startPreview() {
+  if (previewStarting.value || spacesPreviewBlocked.value) return
+  const attempt = ++previewAttempt
+  previewStarting.value = true
+  // Recheck immediately before opening a Linux desktop image. The periodic
+  // snapshot also retires an existing preview when a Space becomes active.
+  const verified = hostPlatform.value !== 'linux' || await loadSpaces()
+  if (attempt !== previewAttempt) return
+  previewStarting.value = false
+  if (!verified || spacesPreviewBlocked.value) return
   previewLoaded.value = false
   previewError.value = false
   previewBackoffMs.value = PREVIEW_REFRESH_MS
@@ -1034,11 +1070,12 @@ function schedulePreviewRefresh(delayMs) {
     clearTimeout(previewTimer)
     previewTimer = null
   }
-  if (!showPreview.value) return
+  if (!showPreview.value || spacesPreviewBlocked.value) return
   previewTimer = setTimeout(refreshPreview, delayMs)
 }
 
 function refreshPreview() {
+  if (!showPreview.value || spacesPreviewBlocked.value || document.hidden) return
   if (previewTimer) {
     clearTimeout(previewTimer)
     previewTimer = null
@@ -1065,6 +1102,7 @@ function refreshPreview() {
 }
 
 function handlePreviewLoad() {
+  if (!showPreview.value || spacesPreviewBlocked.value || document.hidden) return
   previewLoaded.value = true
   previewError.value = false
   previewBackoffMs.value = PREVIEW_REFRESH_MS
@@ -1075,6 +1113,7 @@ function handlePreviewLoad() {
 }
 
 function handlePreviewError() {
+  if (!showPreview.value || spacesPreviewBlocked.value || document.hidden) return
   previewLoaded.value = false
   if (previewMode.value === 'mjpeg') {
     // Host without the stream endpoint (or a dropped stream): fall back to
@@ -1118,6 +1157,9 @@ function togglePreviewExpanded() {
 }
 
 function stopPreview() {
+  ++previewAttempt
+  previewStarting.value = false
+  previewUrl.value = ''
   showPreview.value = false
   previewExpanded.value = false
   previewLoaded.value = false

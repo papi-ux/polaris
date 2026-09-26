@@ -486,6 +486,41 @@ namespace proc {
     };
   }
 
+  nlohmann::json launcher_metadata_for_app(const ctx_t &app, const game_library::heroic_runtime_snapshot_t &heroic) {
+    auto metadata = nlohmann::json::object();
+    if (boost::iequals(app.source, "heroic")) {
+      const auto game = game_library::heroic_game_from_metadata(
+        app.heroic_app_name, app.heroic_store, app.heroic_runner, app.heroic_install);
+      if (!game) return metadata;
+      const auto found = heroic.find({game->install, game->store, game->app_name});
+      if (found == heroic.end()) return metadata;
+      const auto &identity = found->second;
+      if (!identity.platform.empty()) {
+        // Nova's shared contract calls the platform macos; Heroic records mac.
+        metadata["platform"] = identity.platform == "mac" ? "macos" : identity.platform;
+      }
+      if (!identity.runtime.empty()) {
+        metadata["runtime"] = identity.runtime;
+        if (!identity.runtime_name.empty()) metadata["runtime_label"] = identity.runtime_name;
+      }
+      return metadata;
+    }
+
+    if (const auto identity = launcher_identity_from_lutris_runner(app.lutris_runner); !identity.runtime.empty()) {
+      if (!identity.platform.empty()) metadata["platform"] = identity.platform;
+      metadata["runtime"] = identity.runtime;
+    }
+    if (boost::iequals(app.source, "emulator")) {
+      const auto identity = launcher_identity_from_emulator(app.emulator);
+      if (!identity.platform.empty()) metadata["platform"] = identity.platform;
+      if (!identity.platform_label.empty()) metadata["platform_label"] = identity.platform_label;
+      if (!identity.runtime.empty()) metadata["runtime"] = identity.runtime;
+      if (!identity.runtime_label.empty()) metadata["runtime_label"] = identity.runtime_label;
+      metadata["emulator"] = app.emulator;
+    }
+    return metadata;
+  }
+
   std::string normalize_steam_launch_mode(std::string mode) {
     boost::trim(mode);
     boost::to_lower(mode);
@@ -12522,6 +12557,9 @@ namespace proc {
           ctx.rom_path = app_node.value("rom-path", "");
           ctx.rom_folder = app_node.value("rom-folder", "");
           ctx.heroic_app_name = app_node.value("heroic-app-name", "");
+          ctx.heroic_store = json_string_member_or(app_node, "heroic-store");
+          ctx.heroic_runner = json_string_member_or(app_node, "heroic-runner");
+          ctx.heroic_install = json_string_member_or(app_node, "heroic-install");
           ctx.lutris_slug = app_node.value("lutris-slug", "");
           ctx.last_launched = app_node.value("last-launched", (int64_t)0);
           if (app_node.contains("genres") && app_node["genres"].is_array()) {

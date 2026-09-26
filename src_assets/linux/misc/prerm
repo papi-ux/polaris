@@ -1,0 +1,39 @@
+#!/bin/sh
+
+# Removal, for every format that has a removal hook.
+#
+# One thing here cannot be done at any other time. polaris-spaces-setup installs SELinux policies
+# and an input rule, and that helper is the only thing that knows how to remove them. It ships
+# inside this package, so once the package is gone the policies it installed cannot be removed by
+# anything at all. Doing it here, while the helper is still on disk, is the only moment that works.
+#
+# $1 says whether this is a removal or an upgrade, and the two package managers spell it
+# differently: dpkg passes remove, purge or upgrade, and rpm passes the number of versions that will
+# remain, so 0 is the last one going away. An upgrade must not touch the security setup, because the
+# replacement package is about to put the same helper back.
+case "$1" in
+    remove|purge|0) ;;
+    *) exit 0 ;;
+esac
+
+spaces_setup=/usr/bin/polaris-spaces-setup
+
+if [ -x "$spaces_setup" ]; then
+    echo "Removing the Spaces security setup while its helper is still installed."
+    if "$spaces_setup" remove; then
+        echo "Spaces security setup removed."
+    else
+        echo "The Spaces helper refused to remove its security setup, and nothing else can remove it"
+        echo "once this package is gone. Reinstall Polaris, run the helper, then remove again:"
+        echo "  sudo -H /usr/bin/polaris-spaces-setup remove"
+        echo "Prepare Spaces security support in the Spaces guide explains each refusal."
+    fi
+fi
+
+# Said once, plainly, instead of leaving it to be discovered. These are the things no package
+# manager knows about, so removing the package cannot take them.
+echo "Polaris settings, paired devices and library stay in ~/.config/polaris, untouched."
+echo "A source build under /usr/local, Docker volumes holding each Space's games, and the"
+echo "polaris-kms group are also left behind. The uninstall guide lists all of them."
+
+exit 0

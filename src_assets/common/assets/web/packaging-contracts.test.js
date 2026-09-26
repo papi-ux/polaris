@@ -1,10 +1,72 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 
 const readSource = (path) => readFileSync(join(process.cwd(), path), 'utf8')
+
+describe('AppImage capability removal', () => {
+  for (const scenario of ['capability present', 'already removed', 'getcap fails', 'setcap fails']) {
+    it(`revokes the resolved binary capability before removing support files (${scenario})`, () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'polaris appimage removal '))
+      try {
+        const appdir = join(fixture, 'AppDir')
+        const commands = join(fixture, 'commands')
+        const binary = join(fixture, 'real polaris binary')
+        const capState = join(fixture, 'capability')
+        const log = join(fixture, 'commands.log')
+        mkdirSync(join(appdir, 'usr/bin'), { recursive: true })
+        mkdirSync(commands)
+        writeFileSync(binary, 'fixture')
+        symlinkSync(binary, join(appdir, 'usr/bin/polaris'))
+        const apprun = join(appdir, 'AppRun')
+        writeFileSync(apprun, readSource('packaging/linux/AppImage/AppRun'))
+        writeFileSync(log, '')
+        if (scenario !== 'already removed') writeFileSync(capState, 'cap_sys_admin=ep')
+        writeFileSync(join(commands, 'getcap'), `#!/bin/bash
+printf 'getcap|%s\\n' "$1" >> "$APPIMAGE_TEST_LOG"
+if [ "$APPIMAGE_TEST_FAILURE" = getcap ]; then exit 9; fi
+if [ -f "$APPIMAGE_TEST_CAP_STATE" ]; then printf '%s cap_sys_admin=ep\\n' "$1"; fi
+`)
+        // No privileged command reaches the host. Only the synthetic capability marker changes.
+        writeFileSync(join(commands, 'sudo'), `#!/bin/bash
+printf 'sudo' >> "$APPIMAGE_TEST_LOG"
+printf '|%s' "$@" >> "$APPIMAGE_TEST_LOG"
+printf '\\n' >> "$APPIMAGE_TEST_LOG"
+if [ "$1" = setcap ]; then
+  if [ "$APPIMAGE_TEST_FAILURE" = setcap ]; then exit 9; fi
+  /bin/rm -f "$APPIMAGE_TEST_CAP_STATE"
+fi
+`)
+        chmodSync(join(commands, 'getcap'), 0o755)
+        chmodSync(join(commands, 'sudo'), 0o755)
+        const run = (alias) => spawnSync('bash', [apprun, alias], {
+          encoding: 'utf8',
+          env: { ...process.env, PATH: `${commands}:${process.env.PATH}`,
+            APPIMAGE_TEST_LOG: log, APPIMAGE_TEST_CAP_STATE: capState,
+            APPIMAGE_TEST_FAILURE: scenario.split(' ')[1] === 'fails' ? scenario.split(' ')[0] : '' },
+        })
+        const result = run('--remove')
+        const calls = () => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean)
+        if (scenario.endsWith('fails')) {
+          expect(result.status).not.toBe(0)
+          expect(calls().some((call) => call.startsWith('sudo|rm|'))).toBe(false)
+        } else {
+          expect(result.status, result.stderr).toBe(0)
+          expect(calls()[0]).toBe(`getcap|${binary}`)
+          if (scenario === 'capability present') expect(calls()[1]).toBe(`sudo|setcap|-r|${binary}`)
+          expect(run('-r').status).toBe(0)
+          expect(run('remove').status).toBe(0)
+          expect(calls().filter((call) => call.startsWith('sudo|setcap|')))
+            .toHaveLength(scenario === 'capability present' ? 1 : 0)
+        }
+      } finally {
+        rmSync(fixture, { force: true, recursive: true })
+      }
+    })
+  }
+})
 
 const section = (source, start, end) => {
   const startIndex = source.indexOf(start)
@@ -83,6 +145,116 @@ describe('KMS package capability admission', () => {
       })
     }
   }
+})
+
+describe('removal hooks clean up what only they can', () => {
+  // polaris-spaces-setup is the only thing that can remove the SELinux policies it installed, and it
+  // ships inside the package, so after removal those policies cannot be removed at all. Every case
+  // below is about that one fact: it has to run on a removal, it must not run on an upgrade, and a
+  // refusal must not abort the removal, because a half removed package is worse than a stale policy.
+  const stubHelper = (fixture, refuse) => {
+    const helper = join(fixture, 'polaris-spaces-setup')
+    writeFileSync(helper, `#!/bin/sh\nprintf '%s\\n' "spaces-setup $*" >> "$REMOVE_TEST_LOG"\n`
+      + (refuse ? 'exit 1\n' : 'exit 0\n'))
+    chmodSync(helper, 0o755)
+    return helper
+  }
+
+  const runHook = (fixture, script, invocation, helper) => {
+    const log = join(fixture, 'commands')
+    writeFileSync(log, '')
+    const result = spawnSync('bash', ['-c', invocation, 'remove-test', script], {
+      encoding: 'utf8',
+      env: { ...process.env, REMOVE_TEST_LOG: log, REMOVE_TEST_HELPER: helper },
+    })
+    return { result, calls: readFileSync(log, 'utf8').trim() }
+  }
+
+  // dpkg passes remove, purge or upgrade; rpm passes how many versions will remain, so 0 is the last
+  // one going away and 1 is an upgrade. One script reads both.
+  for (const [argument, shouldRemove] of [['remove', true], ['purge', true], ['0', true],
+                                          ['upgrade', false], ['1', false]]) {
+    it(`the DEB and RPM hook ${shouldRemove ? 'removes' : 'leaves'} the Spaces setup on "${argument}"`, () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'polaris-removal-'))
+      try {
+        const helper = stubHelper(fixture, false)
+        const script = join(fixture, 'prerm')
+        writeFileSync(script, readSource('src_assets/linux/misc/prerm')
+          .replace('spaces_setup=/usr/bin/polaris-spaces-setup', 'spaces_setup="$REMOVE_TEST_HELPER"'))
+        const { result, calls } = runHook(fixture, script, `sh "$1" ${argument}`, helper)
+        expect(result.status, result.stderr).toBe(0)
+        expect(calls).toBe(shouldRemove ? 'spaces-setup remove' : '')
+      } finally {
+        rmSync(fixture, { force: true, recursive: true })
+      }
+    })
+  }
+
+  it('the DEB and RPM hook survives a helper that refuses, and says how to recover', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'polaris-removal-'))
+    try {
+      const helper = stubHelper(fixture, true)
+      const script = join(fixture, 'prerm')
+      writeFileSync(script, readSource('src_assets/linux/misc/prerm')
+        .replace('spaces_setup=/usr/bin/polaris-spaces-setup', 'spaces_setup="$REMOVE_TEST_HELPER"'))
+      const { result, calls } = runHook(fixture, script, 'sh "$1" remove', helper)
+      // A refusal must never abort the removal: dpkg would leave the package half configured.
+      expect(result.status, result.stderr).toBe(0)
+      expect(calls).toBe('spaces-setup remove')
+      expect(result.stdout).toContain('/usr/bin/polaris-spaces-setup remove')
+    } finally {
+      rmSync(fixture, { force: true, recursive: true })
+    }
+  })
+
+  it('the DEB and RPM hook does nothing when the helper was never installed', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'polaris-removal-'))
+    try {
+      const script = join(fixture, 'prerm')
+      writeFileSync(script, readSource('src_assets/linux/misc/prerm')
+        .replace('spaces_setup=/usr/bin/polaris-spaces-setup', 'spaces_setup="$REMOVE_TEST_HELPER"'))
+      const { result, calls } = runHook(fixture, script, 'sh "$1" remove', join(fixture, 'absent'))
+      expect(result.status, result.stderr).toBe(0)
+      expect(calls).toBe('')
+    } finally {
+      rmSync(fixture, { force: true, recursive: true })
+    }
+  })
+
+  for (const distro of ['Arch', 'SteamOS']) {
+    it(`${distro} pre_remove removes the Spaces setup and names what is left behind`, () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'polaris-removal-'))
+      try {
+        const helper = stubHelper(fixture, false)
+        const script = join(fixture, 'package.install')
+        writeFileSync(script, readSource(`packaging/linux/${distro}/polaris.install`)
+          .replace('local spaces_setup=/usr/bin/polaris-spaces-setup',
+            'local spaces_setup="$REMOVE_TEST_HELPER"'))
+        const { result, calls } = runHook(fixture, script, '. "$1"; pre_remove', helper)
+        expect(result.status, result.stderr).toBe(0)
+        expect(calls).toBe('spaces-setup remove')
+        // The data nobody else will mention, said at the one moment the user is looking.
+        expect(result.stdout).toContain('~/.config/polaris')
+      } finally {
+        rmSync(fixture, { force: true, recursive: true })
+      }
+    })
+
+    it(`${distro} declares pre_remove, because pacman runs it only on removal`, () => {
+      // An upgrade must not reach it: the replacement package puts the same helper back.
+      const source = readSource(`packaging/linux/${distro}/polaris.install`)
+      expect(source).toContain('pre_remove() {')
+      expect(source).not.toContain('pre_upgrade() {')
+    })
+  }
+
+  it('both package formats are wired to the same removal script', () => {
+    const cmake = readSource('cmake/packaging/linux.cmake')
+    expect(cmake).toContain('list(APPEND CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA '
+      + '"${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/prerm")')
+    expect(cmake).toContain('set(CPACK_RPM_PRE_UNINSTALL_SCRIPT_FILE '
+      + '"${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/prerm")')
+  })
 })
 
 const shellExecutableOccurrences = (commands, executable) => {
@@ -549,22 +721,25 @@ describe('Linux packaging contracts', () => {
     expect(upload).toContain('uses: actions/upload-artifact@')
     expect(upload).toMatch(/^\s+name: Polaris-steamos3\.8-package\s*$/m)
 
-    // Both packages, because the release job refuses anything but two and polaris-kms is published
-    // from this artifact. The first tag build after the polaris-kms split failed with an empty log
-    // because this upload named only the base package while the script wrote both.
+    // All three, because the release job refuses a short list and polaris-kms is published from
+    // this artifact. The first tag build after the polaris-kms split failed with an empty log
+    // because this upload named only the base package while the script wrote both. The debug
+    // symbols were added to the same list afterwards, so the host, the helper and the matching
+    // symbols all survive artifact collection.
     //
     // Still exact filenames and never a glob: an artifact assembled by pattern is one that can
-    // quietly gain a file. That is what this assertion has always been for, and two named paths keep
-    // it rather than relax it.
+    // quietly gain a file. That is what this assertion has always been for, and naming each path
+    // keeps it rather than relaxing it.
     const uploadPaths = upload.match(/^\s+path:\s*\|\s*$([\s\S]*?)(?=^\s+[a-z-]+:)/m)
     expect(uploadPaths, 'the SteamOS upload must list its paths as a block scalar').not.toBeNull()
     const listedPaths = uploadPaths[1]
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => line.length > 0 && !line.startsWith('#'))
-    expect(listedPaths).toHaveLength(2)
+    expect(listedPaths).toHaveLength(3)
     expect(listedPaths.some((line) => line.endsWith('/Polaris-steamos3.8-x86_64.pkg.tar.zst'))).toBe(true)
     expect(listedPaths.some((line) => line.endsWith('/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst'))).toBe(true)
+    expect(listedPaths.some((line) => line.endsWith('/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst'))).toBe(true)
     for (const line of listedPaths) {
       expect(line, 'every uploaded SteamOS path must be an exact filename').not.toMatch(/[*?\[]/)
     }
@@ -978,10 +1153,8 @@ describe('Linux packaging contracts', () => {
     const assemblyCommands = normalizedShellCommands(assembly)
     const nullglobCommand = 'shopt -s nullglob'
     const packageArrayCommand = 'steamos_packages=(release-assets/raw/steamos3.8/*.pkg.tar.zst)'
-    // Two since the DRM/KMS capture helper became its own package: Polaris and polaris-kms. The
-    // guard still exists to catch a job that produced something unexpected, and the copies below
-    // still name each file exactly, so neither can be picked by position.
-    const cardinalityGuard = 'if [ "${#steamos_packages[@]}" -ne 2 ]; then'
+    // All three packages are required; staging still names each archive explicitly.
+    const cardinalityGuard = 'if [ "${#steamos_packages[@]}" -ne 3 ]; then'
     const exactCopy = 'cp "release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst" "release-assets/staged/Polaris-steamos3.8-x86_64.pkg.tar.zst"'
     const stagedDestination = 'release-assets/staged/Polaris-steamos3.8-x86_64.pkg.tar.zst'
     const stagedDirectory = 'release-assets/staged'

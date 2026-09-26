@@ -1823,6 +1823,15 @@ namespace platf {
     std::vector<kms::card_descriptor_t> cds;
     std::vector<kms_selection::output_t> outputs;
 
+    // Counted so that finding nothing can say what it looked at. Without this the only trace of an
+    // empty result is the absence of a "KMS display:" line, which reads as nothing having happened
+    // rather than as a failure. See the diagnosis in polaris#150.
+    int cards_opened = 0;
+    int planes_seen = 0;
+    int planes_without_framebuffer = 0;
+    int cursor_planes = 0;
+    int connected_monitors = 0;
+
     fs::path card_dir {"/dev/dri"sv};
     for (auto &entry : fs::directory_iterator {card_dir}) {
       auto file = entry.path().filename();
@@ -1836,6 +1845,7 @@ namespace platf {
       if (card.init(entry.path().c_str())) {
         continue;
       }
+      ++cards_opened;
 
       // Skip non-Nvidia cards if we're looking for CUDA devices
       // unless NVENC is selected manually by the user
@@ -1856,12 +1866,16 @@ namespace platf {
 
       auto end = std::end(card);
       for (auto plane = std::begin(card); plane != end; ++plane) {
+        ++planes_seen;
+
         // Skip unused planes
         if (!plane->fb_id) {
+          ++planes_without_framebuffer;
           continue;
         }
 
         if (card.is_cursor(plane->plane_id)) {
+          ++cursor_planes;
           continue;
         }
 
@@ -1931,6 +1945,12 @@ namespace platf {
         ++count;
       }
 
+      for (const auto &[_, monitor_descriptor] : crtc_to_monitor) {
+        if (monitor_descriptor.connected) {
+          ++connected_monitors;
+        }
+      }
+
       cds.emplace_back(kms::card_descriptor_t {
         std::move(file),
         std::move(crtc_to_monitor),
@@ -1961,6 +1981,23 @@ namespace platf {
     kms::card_descriptors = std::move(cds);
 
     const auto names = kms_selection::display_names(outputs);
+    if (names.empty()) {
+      // Wayland names the output on the line above this one, so silence here reads as KMS having
+      // lost a monitor that is plainly present. Say which of the two it actually is.
+      // Built as a string rather than streamed, because BOOST_LOG is a statement and cannot be
+      // held in a variable to append to conditionally.
+      auto message = std::format(
+        "KMS found no capturable display. Opened {} card(s) and examined {} plane(s): {} had no "
+        "framebuffer, {} were cursor planes. DRM reported {} connected monitor(s).",
+        cards_opened, planes_seen, planes_without_framebuffer, cursor_planes, connected_monitors);
+      if (connected_monitors > 0 && planes_seen > 0 && planes_without_framebuffer == planes_seen) {
+        message += " A monitor is attached but nothing is scanning out to it, which is what a blanked"
+                   " or powered-down display looks like to KMS. Wake the screen and try again.";
+      } else if (connected_monitors == 0) {
+        message += " DRM reports no connected monitor on any card, so KMS capture has nothing to read.";
+      }
+      BOOST_LOG(warning) << message;
+    }
     for (std::size_t i = 0; i < names.size(); ++i) {
       BOOST_LOG(info) << "KMS display: " << names[i] << " (legacy id: " << i << ')';
     }

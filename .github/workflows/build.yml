@@ -43,6 +43,9 @@ jobs:
       - name: Verify bounded Arch CUDA download
         run: python3 -m unittest discover -s tests/scripts -p 'test_download_arch_cuda.py'
 
+      - name: Verify matching debug package assets
+        run: python3 -m unittest discover -s tests/scripts -p 'test_debug_package_assets.py'
+
       - name: Verify build scope classifier
         run: tests/scripts/test_classify_native_build.sh
 
@@ -153,6 +156,7 @@ jobs:
     env:
       ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:strict_string_checks=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      CCACHE_DIR: ~/.cache/ccache
 
     steps:
       - uses: actions/checkout@v7
@@ -179,6 +183,14 @@ jobs:
           key: polaris-ubuntu-apt-${{ env.UBUNTU_APT_SNAPSHOT }}-sanitizer-${{ hashFiles('.github/workflows/build.yml') }}
           restore-keys: |
             polaris-ubuntu-apt-${{ env.UBUNTU_APT_SNAPSHOT }}-sanitizer-
+
+      - name: Cache sanitizer ccache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ccache
+          key: polaris-sanitizer-ccache-${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'src/**/*', 'tests/**/*') }}
+          restore-keys: |
+            polaris-sanitizer-ccache-
 
       - name: Install dependencies
         # This suite installs the larger dependency set; the pinned snapshot
@@ -228,7 +240,7 @@ jobs:
             exit 1
           fi
           sudo apt-get "${apt_options[@]}" install -y --allow-downgrades \
-            build-essential cmake ninja-build \
+            build-essential ccache cmake ninja-build \
             libboost-all-dev libssl-dev libevdev-dev \
             libpulse-dev libopus-dev \
             "libcurl4t64=$curl_snapshot_version" "libcurl4-openssl-dev=$curl_snapshot_version" \
@@ -254,7 +266,9 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined' \
             -DPOLARIS_ENABLE_CUDA=OFF \
             -DPOLARIS_ENABLE_BROWSER_STREAM=OFF \
-            -DCUDA_FAIL_ON_MISSING=OFF
+            -DCUDA_FAIL_ON_MISSING=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build sanitizer unit tests
         run: |
@@ -263,6 +277,10 @@ jobs:
             test_polaris_http test_polaris_input test_polaris_network test_polaris_pairing \
             test_polaris_platform test_polaris_steam_shutdown test_polaris_stream test_polaris_video \
             -j"$(nproc)"
+
+      - name: Report ccache effectiveness
+        if: always()
+        run: ccache --show-stats --verbose | head -20
 
       - name: Run sanitizer and gamescope ownership tests
         # Coverage here grew one target at a time, each fix adding only what it
@@ -913,12 +931,15 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: Polaris-steamos3.8-package
-          # Both packages, or the release job has nothing to publish the helper from. Naming one file
-          # here is what broke the first tag build after the polaris-kms split: the script below
-          # builds the helper, asserts it carries exactly two files, and the upload dropped it.
+          # All three, or the release job has nothing to publish from. Naming one file here is
+          # what broke the first tag build after the polaris-kms split: the script builds the helper,
+          # asserts it carries exactly two files, and the upload dropped it. The debug symbols joined
+          # the same list for the same reason, so the host, the KMS helper and the matching symbols
+          # travel through release assembly together.
           path: |
             ${{ runner.temp }}/polaris-steamos-output/Polaris-steamos3.8-x86_64.pkg.tar.zst
             ${{ runner.temp }}/polaris-steamos-output/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst
+            ${{ runner.temp }}/polaris-steamos-output/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst
           if-no-files-found: error
 
       - name: Upload SteamOS 3.8 validation receipts
@@ -1699,25 +1720,30 @@ jobs:
       - name: Prepare release asset names
         run: |
           mkdir -p release-assets/staged release-assets/final
+          python3 scripts/ci/validate-pacman-debug.py \
+            --main release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst \
+            --kms release-assets/raw/steamos3.8/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst \
+            --debug release-assets/raw/steamos3.8/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst
           shopt -s nullglob
           steamos_packages=(release-assets/raw/steamos3.8/*.pkg.tar.zst)
-          if [ "${#steamos_packages[@]}" -ne 2 ]; then
+          if [ "${#steamos_packages[@]}" -ne 3 ]; then
             exit 1
           fi
           cp "release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst" "release-assets/staged/Polaris-steamos3.8-x86_64.pkg.tar.zst"
           cp "release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst" "release-assets/final/Polaris-steamos3.8-x86_64.pkg.tar.zst"
           cp "release-assets/raw/steamos3.8/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst" "release-assets/final/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst"
+          cp "release-assets/raw/steamos3.8/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst" "release-assets/final/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst"
 
           arch_packages=()
           arch_kms_packages=()
           arch_sources=()
-          arch_signatures=()
+          arch_debug_packages=()
           for arch_path in release-assets/raw/arch/*; do
             case "$arch_path" in
               *.pkg.tar.*.sig)
-                arch_signatures+=("$arch_path")
                 ;;
-              *debug*.pkg.tar.*)
+              */polaris-debug-*.pkg.tar.*)
+                arch_debug_packages+=("$arch_path")
                 ;;
               */polaris-kms-*.pkg.tar.*)
                 arch_kms_packages+=("$arch_path")
@@ -1731,14 +1757,21 @@ jobs:
             esac
           done
 
-          if [ "${#arch_packages[@]}" -eq 0 ]; then
-            echo "No Arch package outputs were produced by the Arch packaging job" >&2
+          if [ "${#arch_packages[@]}" -ne 1 ]; then
+            echo "Expected exactly one Arch polaris package, found ${#arch_packages[@]}" >&2
             exit 1
           fi
           if [ "${#arch_kms_packages[@]}" -ne 1 ]; then
             echo "Expected exactly one Arch polaris-kms package, found ${#arch_kms_packages[@]}" >&2
             exit 1
           fi
+
+          if [ "${#arch_debug_packages[@]}" -ne 1 ]; then
+            echo "Expected exactly one Arch polaris-debug package, found ${#arch_debug_packages[@]}" >&2
+            exit 1
+          fi
+          python3 scripts/ci/validate-pacman-debug.py \
+            --main "${arch_packages[0]}" --kms "${arch_kms_packages[0]}" --debug "${arch_debug_packages[0]}"
 
           arch_package_name="$(basename "${arch_packages[0]}")"
           arch_package_suffix="${arch_package_name#*.pkg.tar}"
@@ -1747,8 +1780,18 @@ jobs:
           arch_kms_suffix="${arch_kms_name#*.pkg.tar}"
           cp "${arch_kms_packages[0]}" "release-assets/final/Polaris-kms-arch-x86_64.pkg.tar${arch_kms_suffix}"
 
-          if [ "${#arch_signatures[@]}" -gt 0 ]; then
-            cp "${arch_signatures[0]}" "release-assets/final/Polaris-arch-x86_64.pkg.tar${arch_package_suffix}.sig"
+          arch_debug_name="$(basename "${arch_debug_packages[0]}")"
+          arch_debug_suffix="${arch_debug_name#*.pkg.tar}"
+          cp "${arch_debug_packages[0]}" "release-assets/final/Polaris-debug-arch-x86_64.pkg.tar${arch_debug_suffix}"
+
+          if [ -f "${arch_packages[0]}.sig" ]; then
+            cp "${arch_packages[0]}.sig" "release-assets/final/Polaris-arch-x86_64.pkg.tar${arch_package_suffix}.sig"
+          fi
+          if [ -f "${arch_kms_packages[0]}.sig" ]; then
+            cp "${arch_kms_packages[0]}.sig" "release-assets/final/Polaris-kms-arch-x86_64.pkg.tar${arch_kms_suffix}.sig"
+          fi
+          if [ -f "${arch_debug_packages[0]}.sig" ]; then
+            cp "${arch_debug_packages[0]}.sig" "release-assets/final/Polaris-debug-arch-x86_64.pkg.tar${arch_debug_suffix}.sig"
           fi
 
           if [ "${#arch_sources[@]}" -gt 0 ]; then
@@ -1935,6 +1978,8 @@ jobs:
             Polaris-kms-fedora44-x86_64.rpm
             Polaris-kms-steamos3.8-x86_64.pkg.tar.zst
             Polaris-kms-ubuntu24.04-x86_64.deb
+            Polaris-debug-arch-x86_64.pkg.tar.zst
+            Polaris-debug-steamos3.8-x86_64.pkg.tar.zst
           )
           for required_asset in "${required_binary_assets[@]}"; do
             if [[ ! " ${expected_assets[*]} " =~ " ${required_asset} " ]]; then

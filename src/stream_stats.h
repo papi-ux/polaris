@@ -66,6 +66,17 @@ namespace stream_stats {
     std::string largest_frame_type;
   };
 
+  struct capture_source_t {
+    int width = 0;
+    int height = 0;
+    int stream_width = 0;
+    int stream_height = 0;
+    platf::frame_transport_e transport = platf::frame_transport_e::unknown;
+    platf::frame_residency_e residency = platf::frame_residency_e::unknown;
+
+    bool operator==(const capture_source_t &) const = default;
+  };
+
   /**
    * @brief Per-client statistics for multi-session tracking.
    */
@@ -86,6 +97,8 @@ namespace stream_stats {
     std::string encoder_backend;
     int width = 0;
     int height = 0;
+    // Last real source frame accepted by this client's encoder, before scaling.
+    capture_source_t capture_source;
 
     // Network
     double latency_ms = 0;
@@ -511,6 +524,12 @@ namespace stream_stats {
                              double dropped_frame_ratio,
                              double avg_frame_age_ms,
                              double frame_jitter_ms);
+
+  /** Record source dimensions only for a live, nonzero session generation.
+   * Invalid sizes and retired generations are ignored. Call on source changes,
+   * after real-frame conversion, rather than on encoder-probe/dummy images.
+   */
+  bool record_capture_source(std::uint64_t session_generation, const capture_source_t &source);
 
   /**
    * @brief Record one frame that exceeded the video FEC protection envelope.

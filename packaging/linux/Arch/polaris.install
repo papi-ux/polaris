@@ -15,8 +15,11 @@ Only DRM/KMS capture still needs an explicit privileged step, repeated after eve
 update because an update replaces the binary that held the capability:
   sudo -H polaris --setup-host --enable-kms
 
-If Polaris crashes, install polaris-debug and report the backtrace:
-  coredumpctl info polaris
+For crash debugging, install polaris-debug from the same release as Polaris.
+Find the crash, then open its matching symbols in a debugger:
+  coredumpctl list
+  coredumpctl debug PID
+Replace PID with the Polaris crash's process ID from the list.
 
 Optional background autostart:
   systemctl --user enable --now polaris
@@ -34,6 +37,38 @@ EOF
   fi
 }
 
+# The Spaces helper is the only thing that can remove the SELinux policies it installed, and it
+# ships inside this package, so once the package is gone those policies cannot be removed by
+# anything. pacman calls this only on removal, never on an upgrade, which is exactly right: an
+# upgrade is about to put the same helper back.
+remove_spaces_security() {
+  local spaces_setup=/usr/bin/polaris-spaces-setup
+
+  if [ ! -x "$spaces_setup" ]; then
+    return 0
+  fi
+
+  echo "Removing the Spaces security setup while its helper is still installed."
+  if "$spaces_setup" remove; then
+    echo "Spaces security setup removed."
+  else
+    cat <<'EOF'
+The Spaces helper refused to remove its security setup, and nothing else can remove it once this
+package is gone. Reinstall Polaris, run the helper, then remove again:
+  sudo -H /usr/bin/polaris-spaces-setup remove
+Prepare Spaces security support in the Spaces guide explains each refusal.
+EOF
+  fi
+}
+
+print_removal_leftovers() {
+  cat <<'EOF'
+Polaris settings, paired devices and library stay in ~/.config/polaris, untouched.
+A source build under /usr/local, Docker volumes holding each Space's games, and the
+polaris-kms group are also left behind. The uninstall guide lists all of them.
+EOF
+}
+
 post_install() {
   print_host_setup_hint
 }
@@ -41,4 +76,9 @@ post_install() {
 post_upgrade() {
   print_host_setup_hint
   print_upgrade_hint
+}
+
+pre_remove() {
+  remove_spaces_security
+  print_removal_leftovers
 }

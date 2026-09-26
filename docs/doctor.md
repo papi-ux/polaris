@@ -30,6 +30,19 @@ capture latency, and encoder time remain inside the active stream's real FPS bud
 when those measurements show pressure; it does not lower a healthy 120 FPS stream merely because
 its compatibility path is CPU-backed.
 
+**Capture source size** compares a delivered frame with the size encoded for that stream. For
+example, a 3840 × 2160 source feeding a 1920 × 1080 stream has four times as many pixels before
+scaling. On a CPU capture path, Doctor notes sources with at least twice the stream's pixel count
+and suggests checking the active output mode and the adapter's supported modes. Lowering the client
+resolution alone may leave the capture source unchanged. This is context for investigation: it
+does not prove a frame-rate bottleneck or authorize an automatic change.
+
+Source sizes appear after a real frame reaches the encoder and belong to that stream generation;
+probe images and late updates from retired connections do not supply them. Diagnostics include
+`capture_source` for each client and for the primary client at the top level, or `null` when no
+source has been observed. Doctor shows the size comparison while one client is active, so it does
+not present several clients' capture paths as a single diagnosis.
+
 On a Linux host configured for `gamescope_stream`, Doctor & Support also shows a **Gamescope Session
 Helper** card. It names the `polaris-gamescope-session` launcher this Polaris will run, warns when a
 stale copy under `~/.local/bin` or `/usr/local/bin` sits ahead of it on PATH, and fails when the
@@ -44,6 +57,20 @@ service's environment, and that launcher runs whenever it is an absolute path to
 with no spaces or quotes. The Nix module sets it to its wrapper, unless its `environment` option
 names another. Any other name is logged as a warning when the session starts, and the usual
 launcher runs.
+
+## Check Spaces
+
+On Linux, expand **Spaces checks** in **Doctor & Support** to read the host's container setup,
+gaming runtime checks and reported Space activity. The section starts collapsed and checks only
+when opened or when you select **Recheck**. It shows when that snapshot was read.
+
+Missing or invalid evidence is shown as unavailable. Runtime driver mismatches, unsupported Space
+launchers and failed runtime changes point back to **Spaces**, where you can inspect or change the
+setup. Disabled Spaces remains informational for a host that uses normal desktop streaming.
+A reported running session does not verify its video or input.
+
+These checks read diagnostics without changing host setup or the stream's Doctor verdict and Auto
+Fix action. Opening **Spaces** is the next step when a setup finding needs attention.
 
 ## Pick the offered action
 

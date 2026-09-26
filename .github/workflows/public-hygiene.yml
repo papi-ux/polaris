@@ -8,6 +8,23 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Its own job because it is the one gate here that needs history. The others are happy
+  # with the shallow checkout, and making them pay for a full clone to serve this would be
+  # the wrong trade.
+  commit-subjects:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check the gate itself
+        run: bash scripts/test_check_commit_subjects.sh scripts/check-commit-subjects.sh
+
+      - name: Check the commit subjects this change adds
+        run: bash scripts/check-commit-subjects.sh
+
   public-hygiene:
     runs-on: ubuntu-latest
 

@@ -421,6 +421,10 @@ switches accounts or Spaces.
 
 ## Heroic and Lutris
 
+Follow [Heroic in a Space](spaces-heroic.md) or
+[Lutris in a Space](spaces-lutris.md) for creation, sign-in, installing games
+and finding them in Nova.
+
 A Heroic Space reads the games installed through Heroic's Epic, GOG and Amazon
 backends, and a Lutris Space reads the Lutris library. Both show in Nova's
 library behind the launcher's own tile, a title starts from Nova like a Steam
@@ -462,6 +466,31 @@ that may still hold its games and saves, and **Remove for good** again
 finishes the job. The last Space can be archived but not removed for good,
 because Polaris makes a new Space from an existing one; create another Space
 first.
+
+## Runtime updates
+
+A Space keeps the gaming runtime it was created with until you move it. When
+this Polaris build offers a newer compatible runtime for the same launcher,
+the Space card shows **A Newer Gaming Runtime** and
+**Move To The Newer Runtime**.
+
+1. Save your games and end every Space stream.
+2. Select **Move To The Newer Runtime** on the Space's card, review what it
+   keeps and confirm **Move Space**.
+3. Wait for the download and move to finish. An uncached runtime is several
+   gigabytes; you can leave the page and return to its progress.
+4. Open the Space again. Its name, device access, sign-ins, installed games
+   and saves remain in place.
+
+Move one Space at a time. Polaris refuses a move while a Space stream or
+another setup/change job is active, or when the runtime does not match the
+Space's launcher and player data. Read a reported failure before retrying;
+recreating the Space is not required to update its runtime.
+
+The button only appears when this Polaris build offers a suitable newer
+runtime. Updating the launcher inside the container is not the update path.
+A move after an NVIDIA driver change may use different button text, described
+under [After an NVIDIA driver update](#after-an-nvidia-driver-update).
 
 ## NVIDIA driver files
 

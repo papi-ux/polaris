@@ -205,6 +205,10 @@ trust boundaries, and release quality.
 
 ## Contributing
 
+Before starting an imported objective, check the
+[current product work and review queue](docs/product-objective-status.md) for
+existing implementation, open PRs and remaining acceptance.
+
 Contributions are welcome, especially focused fixes, docs, translations, packaging improvements, real-hardware testing, and careful feature work. Polaris is still a small maintainer-led project, so the easiest pull requests to review are the ones that explain the problem clearly, keep the change scoped, and say what was tested on Linux. See [CONTRIBUTING](.github/CONTRIBUTING.md) for the full workflow.
 
 ## License

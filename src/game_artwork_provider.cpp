@@ -1,4 +1,5 @@
 #include "game_artwork_provider.h"
+#include "game_artwork_override.h"
 
 #include <nlohmann/json.hpp>
 
@@ -223,6 +224,10 @@ namespace game_artwork::providers {
       return {};
     }
 
+    bool automatic_source(source_e source) {
+      return source == source_e::steam || source == source_e::steamgriddb;
+    }
+
     struct temporary_file_t {
       std::filesystem::path path;
 
@@ -243,6 +248,14 @@ namespace game_artwork::providers {
       namespace fs = std::filesystem;
       if (!request.kind || body.empty() || body.size() > maximum_asset_bytes) return std::nullopt;
       const auto destination_source = options.destination_source.value_or(source_for_provider(request.provider));
+
+      // Remove artwork may have completed while the response was in flight. Check its marker
+      // under the same gate as removal, then keep that gate through publication. An explicit
+      // override remains a deliberate pick even when automatic lookup is disabled.
+      auto publication_lock = acquire_artwork_cache_write_lock();
+      if (automatic_source(destination_source) && !automatic_artwork_lookup_enabled(appdata, uuid)) {
+        return std::nullopt;
+      }
 
       const auto directory = cache_root(appdata) / std::string(uuid);
       std::error_code error;
@@ -313,6 +326,7 @@ namespace game_artwork::providers {
       if (request.operation != operation_e::download || !request.kind ||
           published_kinds.contains(*request.kind) ||
           !is_allowed_provider_url(request.provider, request.url) ||
+          (automatic_source(output_source) && !automatic_artwork_lookup_enabled(appdata, uuid)) ||
           (!options.force_replace && !needs_source_upgrade(appdata, uuid, *request.kind, output_source))) {
         continue;
       }

@@ -2123,7 +2123,21 @@ namespace video {
   struct sync_session_t {
     sync_session_ctx_t *ctx;
     std::unique_ptr<encode_session_t> session;
+    std::optional<stream_stats::capture_source_t> reported_source;
   };
+
+  void record_capture_source(const config_t &config, const frame_t &frame,
+                             std::optional<stream_stats::capture_source_t> &reported) {
+    if (config.session_generation == 0 || !frame.valid()) return;
+    const stream_stats::capture_source_t source {
+      frame.width, frame.height, config.width, config.height,
+      frame.source_metadata.transport, frame.source_metadata.residency
+    };
+    // Dimensions normally stay fixed. Avoid another per-frame stats lock while
+    // still publishing a renegotiated size or a changed capture path.
+    if (reported == source) return;
+    if (stream_stats::record_capture_source(config.session_generation, source)) reported = source;
+  }
 
   using encode_session_ctx_queue_t = safe::queue_t<sync_session_ctx_t>;
   using encode_e = platf::capture_e;
@@ -4425,6 +4439,7 @@ namespace video {
     }
 
     bool missing_frame_timestamp_warning_logged = false;
+    std::optional<stream_stats::capture_source_t> reported_source;
     auto fps_window_start = std::chrono::steady_clock::now();
     int fps_window_frames = 0;
     double measured_fps = 0.0;
@@ -4534,6 +4549,7 @@ namespace video {
             break;
           }
 
+          record_capture_source(config, frame, reported_source);
           *frame_timestamp = pacing_decision.timestamp;
         } else if (!images->running()) {
           break;
@@ -5161,6 +5177,7 @@ namespace video {
             ec = platf::capture_e::reinit;
             return false;
           }
+          if (frame_captured) record_capture_source(ctx->config, frame, pos->reported_source);
           if (encode(ctx->frame_nr++, *pos->session, ctx->packets, ctx->channel_data, frame_timestamp)) {
             BOOST_LOG(error) << "Could not encode video packet"sv;
             ctx->shutdown_event->raise(true);

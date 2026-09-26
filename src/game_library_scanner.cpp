@@ -423,6 +423,8 @@ namespace game_library {
     for (const auto &root : heroic_config_roots(home_roots)) {
       files.push_back(heroic_library_file_t {root.path / "store_cache" / "gog_library.json", "gog", root.install});
       files.push_back(heroic_library_file_t {root.path / "store_cache" / "legendary_library.json", "epic", root.install});
+      files.push_back(heroic_library_file_t {root.path / "store_cache" / "nile_library.json", "amazon", root.install});
+      files.push_back(heroic_library_file_t {root.path / "sideload_apps" / "library.json", "sideload", root.install});
     }
 
     return files;
@@ -556,6 +558,12 @@ namespace game_library {
     if (store == "epic") {
       return "legendary";
     }
+    if (store == "amazon") {
+      return "nile";
+    }
+    if (store == "sideload") {
+      return "sideload";
+    }
     return {};
   }
 
@@ -639,6 +647,10 @@ namespace game_library {
     }
     commands.push_back(std::move(command));
 
+    // Older Polaris versions never emitted launch commands for these stores. Do not treat
+    // a user-written legacy-looking command as an import to migrate or deduplicate.
+    if (store != "gog" && store != "epic") return commands;
+
     if (install == launcher_install_t::flatpak) {
       const auto runner = heroic_runner_for_store(store);
       const auto query_uri = "'heroic://launch?appName=" + app_name + "&runner=" + runner + "'";
@@ -708,6 +720,7 @@ namespace game_library {
 
     const std::string store {command.substr(0, separator)};
     const std::string app_name {command.substr(separator + 1)};
+    if (store != "gog" && store != "epic") return std::nullopt;
     const auto runner = heroic_runner_for_store(store);
     if (runner.empty() || !is_heroic_app_name_safe(app_name)) {
       return std::nullopt;
@@ -819,6 +832,33 @@ namespace game_library {
         std::move(runtime)
       );
     }
+
+    std::optional<heroic_game_t> parse_additional_heroic_cache_entry(
+      const nlohmann::json &entry,
+      const std::string &store,
+      launcher_install_t install
+    ) {
+      if (!entry.is_object() || !entry.contains("is_installed") ||
+          !entry["is_installed"].is_boolean() || !entry["is_installed"].get<bool>() ||
+          !entry.contains("install") || !entry["install"].is_object()) {
+        return std::nullopt;
+      }
+      const auto text = [](const nlohmann::json &value, const char *key) -> std::string {
+        const auto field = value.find(key);
+        return field != value.end() && field->is_string() ? field->get<std::string>() : std::string {};
+      };
+      if (text(entry, "runner") != heroic_runner_for_store(store)) return std::nullopt;
+      const auto &details = entry["install"];
+      // Nile's cache omits is_dlc; sideloaded entries explicitly set it false. A positive or
+      // malformed DLC marker in either location cannot turn into a launchable library entry.
+      for (const auto *value : {&entry, &details}) {
+        const auto dlc = value->find("is_dlc");
+        if (dlc != value->end() && (!dlc->is_boolean() || dlc->get<bool>())) return std::nullopt;
+      }
+      const auto platform = normalize_heroic_platform(text(details, "platform"), false);
+      return make_heroic_game(text(entry, "app_name"), text(entry, "title"), store, install,
+        text(entry, "art_square"), text(entry, "art_cover"), heroic_runtime_from_config({}, {}, platform));
+    }
   }  // namespace
 
   std::vector<heroic_game_t> parse_heroic_installed_json(
@@ -861,7 +901,7 @@ namespace game_library {
         return games;
       }
 
-      std::set<std::string> installed_app_names;
+      std::map<std::string, std::string> installed_platforms;
       for (const auto &entry : installed_data["installed"]) {
         if (!entry.is_object() || !entry.contains("appName") || !entry["appName"].is_string() ||
             !entry.contains("is_dlc") || !entry["is_dlc"].is_boolean() || entry["is_dlc"].get<bool>()) {
@@ -870,7 +910,9 @@ namespace game_library {
 
         auto app_name = entry["appName"].get<std::string>();
         if (is_heroic_app_name_safe(app_name)) {
-          installed_app_names.insert(std::move(app_name));
+          const auto platform = entry.find("platform");
+          installed_platforms.emplace(std::move(app_name), normalize_heroic_platform(
+            platform != entry.end() && platform->is_string() ? platform->get<std::string>() : "", false));
         }
       }
 
@@ -890,7 +932,7 @@ namespace game_library {
         }
 
         const auto app_name = entry["app_name"].get<std::string>();
-        if (installed_app_names.count(app_name) == 0 || !emitted_app_names.insert(app_name).second) {
+        if (installed_platforms.count(app_name) == 0 || !emitted_app_names.insert(app_name).second) {
           continue;
         }
 
@@ -900,7 +942,8 @@ namespace game_library {
               "gog",
               install,
               entry.value("art_square", ""),
-              entry.value("art_cover", "")
+              entry.value("art_cover", ""),
+              heroic_runtime_from_config({}, {}, installed_platforms.at(app_name))
             )) {
           games.push_back(std::move(*game));
         }
@@ -917,18 +960,20 @@ namespace game_library {
     launcher_install_t install
   ) {
     std::vector<heroic_game_t> games;
-    if (store != "epic") {
+    if (store != "epic" && store != "amazon" && store != "sideload") {
       return games;
     }
 
     try {
       const auto data = nlohmann::json::parse(json_payload);
-      if (!data.is_object() || !data.contains("library") || !data["library"].is_array()) {
+      const auto key = store == "sideload" ? "games" : "library";
+      if (!data.is_object() || !data.contains(key) || !data[key].is_array()) {
         return games;
       }
 
-      for (const auto &entry : data["library"]) {
-        if (auto game = parse_legendary_entry(entry, "", install, true)) {
+      for (const auto &entry : data[key]) {
+        if (auto game = store == "epic" ? parse_legendary_entry(entry, "", install, true) :
+                                         parse_additional_heroic_cache_entry(entry, store, install)) {
           games.push_back(std::move(*game));
         }
       }
@@ -944,7 +989,7 @@ namespace game_library {
     const std::string &store,
     launcher_install_t install
   ) {
-    if (store != "epic" || !is_heroic_app_name_safe(app_name)) {
+    if ((store != "epic" && store != "amazon" && store != "sideload") || !is_heroic_app_name_safe(app_name)) {
       return std::nullopt;
     }
 
@@ -967,6 +1012,72 @@ namespace game_library {
     }
 
     return std::nullopt;
+  }
+
+  heroic_runtime_snapshot_t read_heroic_runtime_snapshot(const std::vector<std::filesystem::path> &home_roots) {
+    heroic_runtime_snapshot_t snapshot;
+    const auto read = [](const std::filesystem::path &path) -> std::string {
+      std::error_code ec;
+      if (!std::filesystem::is_regular_file(path, ec) || ec) return {};
+      std::ifstream file(path);
+      if (!file) return {};
+      try {
+        return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+      } catch (const std::ios_base::failure &) {
+        return {};
+      }
+    };
+
+    // Join within one home and one installation before collapsing duplicate identities.
+    // An installed manifest in a different home must not borrow this home's platform.
+    for (const auto &home : home_roots) {
+      for (const auto &root : heroic_config_roots({home})) {
+        std::map<std::pair<std::string, std::string>, heroic_game_t> entries;
+        for (const auto &library : heroic_cache_files({home})) {
+          if (library.install != root.install || library.store == "gog") continue;
+          for (auto &game : parse_heroic_cache_json(read(library.path), library.store, root.install)) {
+            const auto key = std::make_pair(game.store, game.app_name);
+            entries.emplace(key, std::move(game));
+          }
+        }
+        for (const auto &library : heroic_installed_files({home})) {
+          if (library.install != root.install) continue;
+          const auto payload = read(library.path);
+          auto installed = library.store == "gog" ?
+            parse_heroic_gog_library_json(payload, read(root.path / "store_cache" / "gog_library.json"), root.install) :
+            parse_heroic_installed_json(payload, library.store, root.install);
+          for (auto &game : installed) {
+            const auto key = std::make_pair(game.store, game.app_name);
+            // Legendary's manifest may omit the platform its cache knows. A recorded
+            // installed platform wins over a stale cache (for example after reinstall).
+            if (game.platform.empty()) {
+              if (const auto cached = entries.find(key); cached != entries.end()) {
+                game.platform = cached->second.platform;
+              }
+            }
+            entries.insert_or_assign(key, std::move(game));
+          }
+        }
+        for (const auto &[key, game] : entries) {
+          snapshot.emplace(std::make_tuple(root.install, game.store, game.app_name),
+            heroic_runtime_for_app(root.path, game.app_name, game.platform));
+        }
+      }
+    }
+    return snapshot;
+  }
+
+  heroic_runtime_snapshot_t heroic_runtime_snapshot() {
+    static std::mutex guard;
+    static heroic_runtime_snapshot_t cached;
+    static std::chrono::steady_clock::time_point read_at {};
+    const std::lock_guard lock {guard};
+    const auto now = std::chrono::steady_clock::now();
+    if (read_at == std::chrono::steady_clock::time_point {} || now - read_at >= std::chrono::seconds(30)) {
+      cached = read_heroic_runtime_snapshot(library_home_roots());
+      read_at = now;
+    }
+    return cached;
   }
 
   std::string find_lutris_image_path(const std::string &slug, const std::vector<std::filesystem::path> &lutris_roots) {

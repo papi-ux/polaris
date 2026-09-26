@@ -403,6 +403,8 @@ namespace stream {
     // If none of those are found, return nullptr
     session_t *get_session(const net::peer_t peer, uint32_t connect_data);
 
+    void register_session(session_t &session);
+
     // Circular dependency:
     //   iterate refers to session
     //   session refers to broadcast_ctx_t
@@ -782,6 +784,15 @@ namespace stream {
   void end_broadcast(broadcast_ctx_t &ctx);
 
   static auto broadcast = safe::make_shared<broadcast_ctx_t>(start_broadcast, end_broadcast);
+
+  void control_server_t::register_session(session_t &session) {
+    auto lock = _sessions.lock();
+    // The control thread may inspect this session as soon as it is published.
+    // Give it a live deadline before insertion, and let that thread own all
+    // subsequent ping updates instead of racing a later startup assignment.
+    session.pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
+    _sessions->push_back(&session);
+  }
 
   session_t *control_server_t::get_session(const net::peer_t peer, uint32_t connect_data) {
     {
@@ -2631,6 +2642,15 @@ namespace stream {
       return session.controlEnd.peek();
     }
 
+    std::chrono::steady_clock::time_point register_control_session_for_tests(session_t &session) {
+      control_server_t server {};
+      server.register_session(session);
+      // Observe the same published list used by the control thread, without
+      // starting sockets, media threads or the singleton host runtime.
+      auto lock = server._sessions.lock();
+      return server._sessions->front()->pingTimeout;
+    }
+
     void set_state_for_tests(session_t &session, state_e state) {
       session.state.store(state, std::memory_order_relaxed);
     }
@@ -3084,10 +3104,7 @@ namespace stream {
       BOOST_LOG(debug) << "Expecting incoming session connections from "sv << addr_string;
 
       // Insert this session into the session list
-      {
-        auto lg = session.broadcast_ref->control_server._sessions.lock();
-        session.broadcast_ref->control_server._sessions->push_back(&session);
-      }
+      session.broadcast_ref->control_server.register_session(session);
 
       auto addr = boost::asio::ip::make_address(addr_string);
       session.video.peer.address(addr);
@@ -3095,8 +3112,6 @@ namespace stream {
 
       session.audio.peer.address(addr);
       session.audio.peer.port(0);
-
-      session.pingTimeout = std::chrono::steady_clock::now() + config::stream.ping_timeout;
 
       // Initialize controller state before the encoder thread publishes its
       // runtime-update capability. Resetting after the thread starts can erase
@@ -3248,6 +3263,7 @@ namespace stream {
       session->undo_cmds = std::move(launch_session.client_undo_cmds);
 
       session->config = config;
+      session->config.monitor.session_generation = session->session_generation;
 
       session->control.connect_data = launch_session.control_connect_data;
       session->control.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);
