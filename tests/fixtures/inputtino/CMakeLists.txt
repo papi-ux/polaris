@@ -31,6 +31,7 @@ foreach(target test_inputtino_reports test_inputtino_device)
     set_tests_properties(${target} PROPERTIES TIMEOUT 30)
 endforeach()
 
+
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(INPUTTINO_TEST_EVDEV REQUIRED IMPORTED_TARGET libevdev)
 add_executable(test_inputtino_phys physical_identity.cpp)
@@ -62,4 +63,17 @@ target_link_libraries(test_inputtino_keyboard PRIVATE PkgConfig::INPUTTINO_TEST_
 foreach(scenario release teardown idle move duplicate)
     add_test(NAME test_inputtino_keyboard_${scenario} COMMAND test_inputtino_keyboard ${scenario})
     set_tests_properties(test_inputtino_keyboard_${scenario} PROPERTIES TIMEOUT 10)
+endforeach()
+
+add_executable(test_inputtino_modifiers keyboard_modifiers.cpp)
+target_compile_features(test_inputtino_modifiers PRIVATE cxx_std_20)
+target_include_directories(test_inputtino_modifiers PRIVATE
+    "${POLARIS_INPUTTINO_SOURCE_DIR}/include"
+    "${POLARIS_INPUTTINO_SOURCE_DIR}/src/uinput/include")
+target_compile_definitions(test_inputtino_modifiers PRIVATE
+    POLARIS_TEST_KEYBOARD_SOURCE="${POLARIS_INPUTTINO_SOURCE_DIR}/src/uinput/keyboard.cpp")
+target_link_libraries(test_inputtino_modifiers PRIVATE PkgConfig::INPUTTINO_TEST_EVDEV Threads::Threads)
+foreach(scenario chord held modifier-key isolation repeat physical-release write-error)
+    add_test(NAME test_inputtino_modifiers_${scenario} COMMAND test_inputtino_modifiers ${scenario})
+    set_tests_properties(test_inputtino_modifiers_${scenario} PROPERTIES TIMEOUT 10)
 endforeach()

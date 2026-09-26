@@ -121,6 +121,32 @@ namespace {
     );
   }
 
+  TEST(MultiseatInputProtocol, ModifierKeysUseADistinctBoundedCanonicalKind) {
+    for (std::uint8_t mask = 1; mask <= supported_keyboard_modifiers; ++mask) {
+      const input_event_t event {
+        .payload = keyboard_key_event_t {.key_code = 0x41, .modifiers = mask},
+      };
+      const auto encoded = encode_input_event(event);
+      EXPECT_EQ(encoded.size(), 12U);
+      EXPECT_EQ(encoded[4], 9U);
+      EXPECT_EQ(encoded[11], mask);
+      EXPECT_EQ(decode_input_event(encoded), event);
+
+      auto malformed = encoded;
+      malformed[4] = 1;
+      EXPECT_FALSE(decode_input_event(malformed));  // Preserve the old reserved byte.
+      malformed = encoded;
+      malformed[11] = 0;
+      EXPECT_FALSE(decode_input_event(malformed));  // Zero intent has only kind 1.
+      malformed = encoded;
+      malformed[11] = 0x10;
+      EXPECT_FALSE(decode_input_event(malformed));
+      malformed = encoded;
+      malformed[10] = 2;
+      EXPECT_FALSE(decode_input_event(malformed));  // Key up must not synthesize.
+    }
+  }
+
   TEST(MultiseatInputProtocol, DecoderRejectsMalleableOrMalformedFrames) {
     auto encoded = encode_input_event(canonical_events().front());
     for (std::size_t size = 0; size < encoded.size(); ++size) {
