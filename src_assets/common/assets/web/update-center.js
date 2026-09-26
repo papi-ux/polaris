@@ -56,6 +56,32 @@ export function inferPackageFamily(host = {}) {
   return ''
 }
 
+// The release names the DRM/KMS helper after its base package, so one rule covers both and there
+// is no second place for a Fedora version to be got wrong.
+const packageNamePatterns = {
+  steamos: {
+    base: /^Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst$/,
+    kms: /^Polaris-kms-steamos3\.8-x86_64\.pkg\.tar\.zst$/,
+  },
+  arch: {
+    base: /^Polaris-arch-x86_64\.pkg\.tar\.zst$/,
+    kms: /^Polaris-kms-arch-x86_64\.pkg\.tar\.zst$/,
+  },
+  fedora: {
+    base: /^Polaris-fedora\d+-x86_64\.rpm$/,
+    kms: /^Polaris-kms-fedora\d+-x86_64\.rpm$/,
+  },
+  ubuntu: {
+    base: /^Polaris-ubuntu24\.04-x86_64\.deb$/,
+    kms: /^Polaris-kms-ubuntu24\.04-x86_64\.deb$/,
+  },
+}
+
+function kmsNameForBase(baseName) {
+  const name = String(baseName || '')
+  return name.startsWith('Polaris-') ? name.replace('Polaris-', 'Polaris-kms-') : ''
+}
+
 function preferredAssetName(host = {}) {
   const family = inferPackageFamily(host)
   const versionId = String(host.distro?.version_id || '').trim()
@@ -83,27 +109,29 @@ export function selectReleaseAsset(release, host = {}) {
     if (exact) return exact
   }
 
-  const fallback = assets.find((asset) => {
-    if (family === 'arch') return /Polaris-arch-x86_64\.pkg\.tar\.zst$/.test(asset.name)
-    if (family === 'fedora') return /Polaris-fedora\d+-x86_64\.rpm$/.test(asset.name)
-    if (family === 'ubuntu') return /Polaris-ubuntu24\.04-x86_64\.deb$/.test(asset.name)
-    return false
-  })
+  const fallback = assets.find((asset) => packageNamePatterns[family]?.base.test(asset.name))
   return fallback || null
 }
 
-function isSafeAssetForFamily(asset, family) {
+/**
+ * The DRM/KMS helper package that belongs beside a chosen base asset, or null.
+ *
+ * Only for a host that has the helper installed. polaris-kms requires the exact version of polaris
+ * beside it, so installing the base package on its own is not an upgrade of such a host: it is a
+ * broken dependency. Named after the base asset, because that is how the release names it.
+ */
+export function selectKmsReleaseAsset(release, host = {}, baseAsset = null) {
+  if (host.kms_helper_installed !== true) return null
+  if (!release || !Array.isArray(release.assets) || !baseAsset?.name) return null
+  const wanted = kmsNameForBase(baseAsset.name)
+  if (!wanted) return null
+  return release.assets.find((asset) => asset.name === wanted) || null
+}
+
+function isSafeAssetForFamily(asset, family, kind = 'base') {
   const fileName = String(asset?.name || '')
   const rawUrl = String(asset?.browser_download_url || '')
-  const expectedName = family === 'steamos'
-    ? /^Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst$/
-    : family === 'arch'
-      ? /^Polaris-arch-x86_64\.pkg\.tar\.zst$/
-      : family === 'fedora'
-        ? /^Polaris-fedora\d+-x86_64\.rpm$/
-        : family === 'ubuntu'
-          ? /^Polaris-ubuntu24\.04-x86_64\.deb$/
-          : null
+  const expectedName = packageNamePatterns[family]?.[kind] || null
   if (!expectedName?.test(fileName)) return false
   if (!/^https:\/\/[A-Za-z0-9.-]+(?::[0-9]+)?\/[A-Za-z0-9._~%+/-]+$/.test(rawUrl)) return false
 
@@ -120,21 +148,35 @@ function isSafeAssetForFamily(asset, family) {
   }
 }
 
-export function buildManualInstallCommand(asset, host = {}) {
+export function buildManualInstallCommand(asset, host = {}, kmsAsset = null) {
   if (!asset?.name || !asset?.browser_download_url) return ''
 
   const family = normalizeToken(asset.packageFamily || host.packageFamily || inferPackageFamily(host))
   if (!isSafeAssetForFamily(asset, family)) return ''
+
+  // A host with the helper installed cannot take the base package alone: polaris-kms requires the
+  // exact version beside it. If this release does not carry a matching helper, and a prerelease
+  // before 1.4.13 does not, then there is no command that leaves this host working, so offer none
+  // rather than one that breaks it.
+  const needsKms = host.kms_helper_installed === true
+  const kmsUsable = Boolean(kmsAsset?.name) && Boolean(kmsAsset?.browser_download_url)
+    && isSafeAssetForFamily(kmsAsset, family, 'kms')
+  if (needsKms && !kmsUsable) return ''
+
   const fileName = asset.name
   const downloadUrl = asset.browser_download_url
   const lines = [`wget --output-document=./${fileName} ${downloadUrl} &&`]
+  // Both files are fetched before either is installed, so a failed second download cannot leave the
+  // host with a base package its helper no longer matches.
+  const packageFiles = needsKms ? [fileName, kmsAsset.name] : [fileName]
+  if (needsKms) lines.push(`wget --output-document=./${kmsAsset.name} ${kmsAsset.browser_download_url} &&`)
 
   if (family === 'steamos') {
     lines.push('(')
     lines.push('set -e')
     lines.push("trap 'sudo steamos-readonly enable' EXIT")
     lines.push('sudo steamos-readonly disable || exit $?')
-    lines.push(`sudo pacman -U ./${fileName} || exit $?`)
+    lines.push(`sudo pacman -U ${packageFiles.map((name) => `./${name}`).join(' ')} || exit $?`)
     // Boot start stays as the host has it. Naming the flag again when it is on is a no-op, and
     // leaving it out when it is off means an update never turns it back on for someone who
     // ran --disable-headless-boot; Troubleshooting offers it to a Game Mode host without it.
@@ -149,11 +191,11 @@ export function buildManualInstallCommand(asset, host = {}) {
   }
 
   if (family === 'arch') {
-    lines.push(`sudo pacman -U ./${fileName} &&`)
+    lines.push(`sudo pacman -U ${packageFiles.map((name) => `./${name}`).join(' ')} &&`)
   } else if (family === 'fedora') {
-    lines.push(`sudo dnf install "./${fileName}" &&`)
+    lines.push(`sudo dnf install ${packageFiles.map((name) => `"./${name}"`).join(' ')} &&`)
   } else if (family === 'ubuntu') {
-    lines.push(`sudo apt install ./${fileName} &&`)
+    lines.push(`sudo apt install ${packageFiles.map((name) => `./${name}`).join(' ')} &&`)
   } else {
     return ''
   }
@@ -178,7 +220,7 @@ export function buildRepositoryUpgradeCommand(host = {}) {
 }
 
 
-function buildActionMetadata(status, asset, installCommand, releaseUrl) {
+function buildActionMetadata(status, asset, installCommand, releaseUrl, kmsHelperMissingFromRelease = false) {
   if (status === 'update_available') {
     if (installCommand) {
       return {
@@ -195,7 +237,12 @@ function buildActionMetadata(status, asset, installCommand, releaseUrl) {
       statusLightLabel: 'Update available',
       primaryActionLabel: releaseUrl ? 'Open release' : 'Update details',
       primaryActionKind: releaseUrl ? 'open_release' : 'scroll_to_update_center',
-      primaryActionSummary: 'A newer release is available, but Polaris could not match a local package for this host.',
+      // There is a difference between finding no package for this host and finding the package but
+      // not the DRM/KMS helper it is pinned to, and saying the first when the second is true sends
+      // someone looking for a package that is right there.
+      primaryActionSummary: kmsHelperMissingFromRelease
+        ? 'A newer release is available, but it carries no polaris-kms package. This host captures through DRM/KMS, and installing Polaris without the matching helper would break it.'
+        : 'A newer release is available, but Polaris could not match a local package for this host.',
     }
   }
 
@@ -399,10 +446,12 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
   // `dnf upgrade polaris` on a beta offer answers "nothing to do" and reads like the beta failed
   // to install. A prerelease is always the download path.
   const repositoryCommand = candidateRelease.prerelease ? '' : buildRepositoryUpgradeCommand(host)
+  const kmsAsset = selectKmsReleaseAsset(candidateRelease, host, asset)
   const installCommand = repositoryCommand ||
-    (asset ? buildManualInstallCommand(asset, { ...host, packageFamily }) : '')
+    (asset ? buildManualInstallCommand(asset, { ...host, packageFamily }, kmsAsset) : '')
   const releaseUrl = candidateRelease.html_url || ''
-  const action = buildActionMetadata(status, asset, installCommand, releaseUrl)
+  const kmsHelperMissingFromRelease = host.kms_helper_installed === true && Boolean(asset) && !kmsAsset
+  const action = buildActionMetadata(status, asset, installCommand, releaseUrl, kmsHelperMissingFromRelease)
 
   return {
     status,

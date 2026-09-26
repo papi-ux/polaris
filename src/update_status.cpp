@@ -203,17 +203,39 @@ namespace update_status {
 #endif
   }
 
-  std::string repository_upgrade_command(const distro_info_t &distro, bool ostree_host) {
+  /**
+   * @brief Whether the polaris-kms package's DRM/KMS helper is on this host.
+   *
+   * The same file --enable-kms refuses without. A stat is enough: the helper is 0750 root:polaris-kms
+   * and this process need not be in that group to see that it is there.
+   */
+  bool kms_helper_installed() {
+#ifdef __linux__
+    std::error_code ec;
+    const auto helper = std::filesystem::path {platf::user_unit::packaged_kms_helper};
+    return std::filesystem::is_regular_file(std::filesystem::symlink_status(helper, ec)) && !ec;
+#else
+    return false;
+#endif
+  }
+
+  std::string repository_upgrade_command(const distro_info_t &distro, bool ostree_host, bool kms_helper) {
     const auto family = package_family(distro);
+    // polaris-kms pins its base package to an exact version, so a command that names only polaris
+    // either refuses to run or leaves the helper behind pointing at a version that is gone. Name
+    // both, and only when the helper is actually here: dnf5 fails outright on a package the host
+    // does not have installed.
+    const std::string packages = kms_helper ? " polaris polaris-kms" : " polaris";
     if (family == "fedora") {
       // On an ostree host dnf is not the thing that changes the system, and
       // telling a Bazzite user to run `dnf upgrade` is the same shape of wrong
-      // answer as telling them to run `usermod -aG input`.
-      return ostree_host ? "rpm-ostree upgrade" : "sudo dnf upgrade polaris";
+      // answer as telling them to run `usermod -aG input`. It also takes the
+      // whole image, so it needs no package named at all.
+      return ostree_host ? "rpm-ostree upgrade" : "sudo dnf upgrade" + packages;
     }
 
     if (family == "arch") {
-      return "sudo pacman -Syu polaris";
+      return "sudo pacman -Syu" + packages;
     }
 
     return {};
@@ -331,7 +353,8 @@ namespace update_status {
     std::error_code ec;
     const bool ostree_host = std::filesystem::exists("/run/ostree-booted", ec);
     const bool repository = host_repository_configured(distro);
-    const auto upgrade_command = repository ? repository_upgrade_command(distro, ostree_host) : std::string {};
+    const bool kms_helper = kms_helper_installed();
+    const auto upgrade_command = repository ? repository_upgrade_command(distro, ostree_host, kms_helper) : std::string {};
 
     return {
       {"status", true},
@@ -346,6 +369,9 @@ namespace update_status {
       {"manual_install_only", !repository},
       {"repository_configured", repository},
       {"repository_upgrade_command", upgrade_command},
+      // The console needs this to say what an upgrade will move, and Troubleshooting needs it to
+      // stop telling a host that already has the helper to install it.
+      {"kms_helper_installed", kms_helper},
       {"auto_install_supported", false},
       {"auto_install_enabled", false},
       {"distro", distro_json(distro)},

@@ -34,7 +34,17 @@ namespace update_status {
    */
   bool repository_section_enabled(std::string_view ini_contents);
   bool host_repository_configured(const distro_info_t &distro);
-  std::string repository_upgrade_command(const distro_info_t &distro, bool ostree_host);
+  /**
+   * @brief The command the Update Center prints for a host with the repository configured.
+   *
+   * Takes whether the polaris-kms helper is installed rather than looking, so a test can ask for
+   * both answers on one machine. polaris-kms pins its base package to an exact version, so leaving
+   * it out of the command is what broke the upgrade 1.4.13 told DRM/KMS hosts to take.
+   */
+  std::string repository_upgrade_command(const distro_info_t &distro, bool ostree_host, bool kms_helper);
+
+  /** Whether the polaris-kms package's DRM/KMS capture helper is installed on this host. */
+  bool kms_helper_installed();
   nlohmann::json distro_json(const distro_info_t &distro);
   nlohmann::json host_update_status();
 
@@ -64,8 +74,8 @@ namespace update_status {
     return repository_section_enabled(ini_contents);
   }
 
-  inline std::string repository_upgrade_command_for_tests(const distro_info_t &distro, bool ostree_host) {
-    return repository_upgrade_command(distro, ostree_host);
+  inline std::string repository_upgrade_command_for_tests(const distro_info_t &distro, bool ostree_host, bool kms_helper) {
+    return repository_upgrade_command(distro, ostree_host, kms_helper);
   }
 #endif
 
