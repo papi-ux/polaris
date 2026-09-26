@@ -7,7 +7,11 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
+#include <future>
+#include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -306,4 +310,103 @@ TEST(ArtworkSweep, StateNamesAreTheOnesTheConsoleReads) {
   EXPECT_EQ(artwork_sweep::outcome_name(artwork_sweep::outcome_e::no_poster), "no_poster");
   EXPECT_EQ(artwork_sweep::outcome_name(artwork_sweep::outcome_e::refused), "refused");
   EXPECT_EQ(artwork_sweep::outcome_name(artwork_sweep::outcome_e::skipped), "skipped");
+}
+
+TEST(ArtworkSweep, CancellationDuringTheBetweenGamesPauseStartsNoFurtherLookup) {
+  artwork_sweep::sweeper_t *handle = nullptr;
+  std::atomic<int> asks {0};
+  artwork_sweep::sweeper_t sweeper {
+    [&](const artwork_sweep::candidate_t &) {
+      ++asks;
+      return artwork_sweep::lookup_t {};
+    },
+    [&](std::int64_t) { handle->cancel(); },
+    harness_t::frozen_clock()};
+  handle = &sweeper;
+  ASSERT_EQ(sweeper.start(games(3)), artwork_sweep::start_e::started);
+  ASSERT_TRUE(sweeper.wait_for_idle(5s));
+  EXPECT_EQ(asks.load(), 1);
+  EXPECT_EQ(sweeper.job().looked_at, 1u);
+  EXPECT_EQ(sweeper.job().state, artwork_sweep::state_e::failed);
+}
+
+TEST(ArtworkSweep, FailedPreparationDoesNotReserveARunThatCanNeverFinish) {
+  bool fail_clock = true;
+  artwork_sweep::sweeper_t sweeper {
+    [](const artwork_sweep::candidate_t &) { return artwork_sweep::lookup_t {}; },
+    [](std::int64_t) {},
+    [&] {
+      if (fail_clock) throw std::runtime_error("clock unavailable");
+      return std::int64_t {1'700'000'000};
+    }};
+  EXPECT_THROW(sweeper.start(games(1)), std::runtime_error);
+  EXPECT_TRUE(sweeper.wait_for_idle(100ms));
+  EXPECT_EQ(sweeper.job().state, artwork_sweep::state_e::ready);
+  fail_clock = false;
+  ASSERT_EQ(sweeper.start(games(1)), artwork_sweep::start_e::started);
+  ASSERT_TRUE(sweeper.wait_for_idle(5s));
+  EXPECT_EQ(sweeper.job().looked_at, 1u);
+}
+
+TEST(ArtworkSweep, DestructionWaitsForTheWorkerThreadToExit) {
+  struct exit_gate_t {
+    std::promise<void> entered;
+    std::promise<void> release;
+    std::shared_future<void> released = release.get_future().share();
+  };
+  struct thread_cleanup_t {
+    std::shared_ptr<exit_gate_t> gate;
+    ~thread_cleanup_t() {
+      gate->entered.set_value();
+      gate->released.wait_for(5s);
+    }
+  };
+  auto gate = std::make_shared<exit_gate_t>();
+  auto entered = gate->entered.get_future();
+  auto sweeper = std::make_unique<artwork_sweep::sweeper_t>(
+    [gate](const artwork_sweep::candidate_t &) {
+      thread_local thread_cleanup_t cleanup {gate};
+      return artwork_sweep::lookup_t {};
+    },
+    artwork_sweep::sleep_fn_t {}, harness_t::frozen_clock());
+  ASSERT_EQ(sweeper->start(games(1)), artwork_sweep::start_e::started);
+  if (entered.wait_for(5s) != std::future_status::ready) {
+    gate->release.set_value();
+    FAIL() << "cover worker did not reach thread teardown";
+  }
+  // The job is finished, but thread-owned resources are still being released.
+  ASSERT_TRUE(sweeper->wait_for_idle(5s));
+  std::promise<void> destroying;
+  auto started = destroying.get_future();
+  auto destroyed = std::async(std::launch::async, [&] {
+    destroying.set_value();
+    sweeper.reset();
+  });
+  started.wait();
+  const auto while_thread_alive = destroyed.wait_for(100ms);
+  gate->release.set_value();
+  EXPECT_EQ(while_thread_alive, std::future_status::timeout);
+  EXPECT_EQ(destroyed.wait_for(5s), std::future_status::ready);
+}
+
+TEST(ArtworkSweepDeathTest, ALookupExceptionFailsTheJobWithoutTerminatingTheHost) {
+  GTEST_FLAG_SET(death_test_style, "threadsafe");
+  EXPECT_EXIT(([] {
+    int asks = 0;
+    artwork_sweep::sweeper_t sweeper {
+      [&](const artwork_sweep::candidate_t &) {
+        if (++asks == 2) throw std::runtime_error("private lookup detail");
+        artwork_sweep::lookup_t result;
+        result.match = a_match("Kept result");
+        return result;
+      },
+      [](std::int64_t) {}, harness_t::frozen_clock()};
+    if (sweeper.start(games(3)) != artwork_sweep::start_e::started || !sweeper.wait_for_idle(5s)) std::_Exit(1);
+    const auto job = sweeper.job();
+    if (job.state != artwork_sweep::state_e::failed || job.looked_at != 1 || job.proposed != 1 ||
+        job.message.empty() || job.message.find("private lookup detail") != std::string::npos) std::_Exit(2);
+    if (sweeper.start(games(1)) != artwork_sweep::start_e::started || !sweeper.wait_for_idle(5s) ||
+        sweeper.job().state != artwork_sweep::state_e::ready) std::_Exit(3);
+    std::_Exit(0);
+  }()), testing::ExitedWithCode(0), "");
 }
