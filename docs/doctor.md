@@ -45,6 +45,20 @@ with no spaces or quotes. The Nix module sets it to its wrapper, unless its `env
 names another. Any other name is logged as a warning when the session starts, and the usual
 launcher runs.
 
+## Check Spaces
+
+On Linux, expand **Spaces checks** in **Doctor & Support** to read the host's container setup,
+gaming runtime checks and reported Space activity. The section starts collapsed and checks only
+when opened or when you select **Recheck**. It shows when that snapshot was read.
+
+Missing or invalid evidence is shown as unavailable. Runtime driver mismatches, unsupported Space
+launchers and failed runtime changes point back to **Spaces**, where you can inspect or change the
+setup. Disabled Spaces remains informational for a host that uses normal desktop streaming.
+A reported running session does not verify its video or input.
+
+These checks read diagnostics without changing host setup or the stream's Doctor verdict and Auto
+Fix action. Opening **Spaces** is the next step when a setup finding needs attention.
+
 ## Pick the offered action
 
 Doctor uses a small action vocabulary so the button says what will happen:
