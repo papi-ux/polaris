@@ -913,7 +913,12 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: Polaris-steamos3.8-package
-          path: "${{ runner.temp }}/polaris-steamos-output/Polaris-steamos3.8-x86_64.pkg.tar.zst"
+          # Both packages, or the release job has nothing to publish the helper from. Naming one file
+          # here is what broke the first tag build after the polaris-kms split: the script below
+          # builds the helper, asserts it carries exactly two files, and the upload dropped it.
+          path: |
+            ${{ runner.temp }}/polaris-steamos-output/Polaris-steamos3.8-x86_64.pkg.tar.zst
+            ${{ runner.temp }}/polaris-steamos-output/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst
           if-no-files-found: error
 
       - name: Upload SteamOS 3.8 validation receipts

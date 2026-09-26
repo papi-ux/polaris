@@ -548,9 +548,26 @@ describe('Linux packaging contracts', () => {
     const upload = yamlStepContaining(steamOs, 'name: Polaris-steamos3.8-package')
     expect(upload).toContain('uses: actions/upload-artifact@')
     expect(upload).toMatch(/^\s+name: Polaris-steamos3\.8-package\s*$/m)
-    expect(upload).toMatch(
-      /^\s+path:\s+(?:"[^"\n]*Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst"|'[^'\n]*Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst'|[^\s#\n]*Polaris-steamos3\.8-x86_64\.pkg\.tar\.zst)\s*$/m,
-    )
+
+    // Both packages, because the release job refuses anything but two and polaris-kms is published
+    // from this artifact. The first tag build after the polaris-kms split failed with an empty log
+    // because this upload named only the base package while the script wrote both.
+    //
+    // Still exact filenames and never a glob: an artifact assembled by pattern is one that can
+    // quietly gain a file. That is what this assertion has always been for, and two named paths keep
+    // it rather than relax it.
+    const uploadPaths = upload.match(/^\s+path:\s*\|\s*$([\s\S]*?)(?=^\s+[a-z-]+:)/m)
+    expect(uploadPaths, 'the SteamOS upload must list its paths as a block scalar').not.toBeNull()
+    const listedPaths = uploadPaths[1]
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith('#'))
+    expect(listedPaths).toHaveLength(2)
+    expect(listedPaths.some((line) => line.endsWith('/Polaris-steamos3.8-x86_64.pkg.tar.zst'))).toBe(true)
+    expect(listedPaths.some((line) => line.endsWith('/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst'))).toBe(true)
+    for (const line of listedPaths) {
+      expect(line, 'every uploaded SteamOS path must be an exact filename').not.toMatch(/[*?\[]/)
+    }
   })
 
   it('requires signed SteamOS 3.8.1x package sources with a pinned Valve keyring', () => {
