@@ -160,7 +160,7 @@ namespace {
     return keys;
   }
 
-  std::set<std::string> emitted_fields(const nlohmann::json &emitter) {
+  std::set<std::string> emitted_fields_from_one(const nlohmann::json &emitter) {
     const auto source = read_source_file(emitter.at("file").get<std::string>());
     const auto scope = emitter.contains("function") ?
                          function_body(source, emitter.at("function").get<std::string>()) :
@@ -174,6 +174,23 @@ namespace {
     }
 
     return subscript_keys(scope, emitter.at("variable").get<std::string>());
+  }
+
+  /// An object may be assembled in more than one place. `game` is: nvhttp.cpp writes most of it by
+  /// subscript and then merges in the launcher metadata process.cpp builds. A list of emitters keeps
+  /// every field checked against the source that serves it rather than hand-listing the merged ones,
+  /// which is what the whole test exists to prevent.
+  std::set<std::string> emitted_fields(const nlohmann::json &emitter) {
+    if (!emitter.is_array()) {
+      return emitted_fields_from_one(emitter);
+    }
+
+    std::set<std::string> all;
+    for (const auto &one : emitter) {
+      const auto some = emitted_fields_from_one(one);
+      all.insert(some.begin(), some.end());
+    }
+    return all;
   }
 
   nlohmann::json manifest() {
@@ -193,6 +210,14 @@ TEST(NovaContractTests, EveryManifestObjectMatchesWhatPolarisActuallyServes) {
     const auto emitted = emitted_fields(object["polaris_emitter"]);
     ASSERT_FALSE(emitted.empty())
       << "derived no fields for [" << name << "]; the extractor is broken, not the contract";
+    for (const auto &one : object["polaris_emitter"].is_array() ?
+                             object["polaris_emitter"] : nlohmann::json::array({object["polaris_emitter"]})) {
+      // A listed emitter that derives nothing is a silent hole: the union still looks healthy while
+      // one of its halves has stopped matching the source it names.
+      ASSERT_FALSE(emitted_fields_from_one(one).empty())
+        << "emitter " << one.dump() << " for [" << name << "] derives no fields, so it no longer "
+        << "describes the source that serves them";
+    }
 
     std::set<std::string> declared;
     for (const auto &field : object["fields"]) {
