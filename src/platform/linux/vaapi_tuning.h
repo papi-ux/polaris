@@ -20,6 +20,34 @@ namespace va {
     std::optional<uint32_t> quality_range;
   };
 
+  // radeonsi reads the VA quality level as bit fields, not as a scale (Mesa's
+  // vlVaQualityBits): bits 1-2 pick the VCN preset (0 speed, 1 balanced,
+  // 2 quality, 3 high quality), bit 3 enables pre-encoding and bit 4 VBAQ.
+  // Read as a scale, the middle of its range of 32 is the speed preset with
+  // VBAQ. Every choice here stays on the speed or balanced preset: on an
+  // RX 7900 XTX the quality and high-quality presets took AV1 from 4.6 ms to
+  // 17 and 32 ms per 4K frame, too slow to hold 60 fps, and gained under
+  // 0.05 dB of PSNR at 1080p. VBAQ cost no encode time there, and pre-encoding
+  // up to about 3 ms per 4K frame. Quality is what the driver itself selects
+  // for level 1, spelled out as bits.
+  namespace radeonsi {
+    inline constexpr int custom = 1;
+    inline constexpr int balanced_preset = 1 << 1;
+    inline constexpr int pre_encode = 1 << 3;
+    inline constexpr int vbaq = 1 << 4;
+    inline constexpr int speed = 0;
+    inline constexpr int balanced = custom | balanced_preset | vbaq;
+    inline constexpr int quality = custom | balanced_preset | pre_encode | vbaq;
+
+    inline bool is_driver(std::string_view vendor) {
+      return vendor.find("radeonsi") != std::string_view::npos;
+    }
+
+    inline bool uses_quality_bits(std::string_view vendor, uint32_t range) {
+      return is_driver(vendor) && range >= static_cast<uint32_t>(quality);
+    }
+  }  // namespace radeonsi
+
   inline std::optional<uint32_t> supported_attribute(VAStatus status, uint32_t value) {
     if (status != VA_STATUS_SUCCESS || value == VA_ATTRIB_NOT_SUPPORTED) return std::nullopt;
     return value;
@@ -47,6 +75,7 @@ namespace va {
     bool single_frame_buffer {false};
     bool quality_fallback {false};
     bool blbrc_fallback {false};
+    bool radeonsi_quality_bits {false};
     std::optional<bool> blbrc;
   };
 
@@ -77,8 +106,14 @@ namespace va {
     // of the Intel/AV1 preference, but still respects the user's buffer setting.
     result.single_frame_buffer = settings.strict_rc_buffer ||
       (!selected && (vendor.find("Intel") != std::string_view::npos || ctx->codec_id == AV_CODEC_ID_AV1));
+    // radeonsi accepts a single-frame buffer in VBR but does not keep to it:
+    // on an RX 7900 XTX the largest frame after a scene change was 12-14 times
+    // the average frame in VBR and 2-2.6 times in CBR, for 0.02-0.05 dB of PSNR.
+    // So the single-frame buffer goes with CBR there. AV1 CBR is not padded;
+    // H.264 and HEVC CBR are, as automatic already was without the buffer.
+    const bool single_frame_prefers_vbr = !(radeonsi::is_driver(vendor) && (mask & VA_RC_CBR));
     if (!selected) {
-      const auto automatic = result.single_frame_buffer && (mask & VA_RC_VBR) ? config::vaapi::rc_e::vbr :
+      const auto automatic = result.single_frame_buffer && single_frame_prefers_vbr && (mask & VA_RC_VBR) ? config::vaapi::rc_e::vbr :
         (mask & VA_RC_CBR) ? config::vaapi::rc_e::cbr :
         (mask & VA_RC_VBR) ? config::vaapi::rc_e::vbr : config::vaapi::rc_e::cqp;
       for (const auto &mode : rc_modes) {
@@ -108,7 +143,15 @@ namespace va {
 
     if (settings.quality != config::vaapi::quality_e::automatic) {
       const auto maximum = caps.quality_range.value_or(0);
-      if (maximum > 0 && maximum <= INT_MAX) {
+      if (maximum > 0 && maximum <= INT_MAX && radeonsi::uses_quality_bits(vendor, maximum)) {
+        result.radeonsi_quality_bits = true;
+        switch (settings.quality) {
+          case config::vaapi::quality_e::speed: ctx->compression_level = radeonsi::speed; break;
+          case config::vaapi::quality_e::balanced: ctx->compression_level = radeonsi::balanced; break;
+          case config::vaapi::quality_e::quality: ctx->compression_level = radeonsi::quality; break;
+          default: break;
+        }
+      } else if (maximum > 0 && maximum <= INT_MAX) {
         switch (settings.quality) {
           case config::vaapi::quality_e::speed: ctx->compression_level = maximum; break;
           case config::vaapi::quality_e::balanced: ctx->compression_level = std::max(1u, maximum / 2); break;

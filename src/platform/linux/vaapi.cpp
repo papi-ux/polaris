@@ -330,6 +330,8 @@ namespace va {
         << " vbv="sv << (effective.single_frame_buffer ? "single frame" : "standard")
         << " compression_level="sv << ctx->compression_level
         << " quality_range="sv << caps.quality_range.value_or(0)
+        << " quality_mapping="sv << (effective.radeonsi_quality_bits ? "radeonsi" :
+                                     requested.quality == config::vaapi::quality_e::automatic || effective.quality_fallback ? "none" : "range")
         << " blbrc="sv << (effective.blbrc ? (*effective.blbrc ? "enabled" : "disabled") : "codec default");
 
     }

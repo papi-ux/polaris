@@ -77,6 +77,38 @@ TEST(VaapiTuningTests, ExplicitSupportedModesUseRealCodecOptionsAndRespectExplic
   }
 }
 
+TEST(VaapiTuningTests, RadeonsiKeepsTheSingleFrameBufferInCbrUnderAutomaticRateControl) {
+  // radeonsi lets frames exceed a single-frame buffer in VBR and keeps to it in
+  // CBR, so automatic pairs the buffer with CBR there. Explicit modes and other
+  // drivers are covered above and keep their behavior.
+  constexpr std::string_view radeonsi_vendor =
+    "Mesa Gallium driver 26.2.3-arch3.1 for AMD Radeon RX 7900 XTX (radeonsi, navi31, ACO, DRM 3.64, 7.2.6-1-cachyos)";
+  for (const auto *name : {"h264_vaapi", "hevc_vaapi", "av1_vaapi"}) {
+    for (const bool strict : {false, true}) {
+      for (const uint32_t mask : std::array<uint32_t, 3> {VA_RC_CBR, VA_RC_VBR, VA_RC_CBR | VA_RC_VBR}) {
+        codec_options_t codec(name);
+        ASSERT_NE(codec.ctx->codec, nullptr) << name;
+        const auto effective = va::apply_tuning(codec.ctx, &codec.options, {.strict_rc_buffer = strict},
+          {.rate_control = mask}, radeonsi_vendor, 24);
+        const bool single = strict || std::string_view(name) == "av1_vaapi";
+        // Only a driver without CBR still falls back to VBR.
+        const auto expected = (mask & VA_RC_CBR) ? "CBR" : "VBR";
+        EXPECT_EQ(std::string_view(effective.rate_control), expected) << name << " strict=" << strict << " mask=" << mask;
+        EXPECT_EQ(codec.option("rc_mode"), expected) << name;
+        EXPECT_EQ(effective.single_frame_buffer, single) << name;
+        EXPECT_EQ(codec.ctx->rc_buffer_size, single ? 200200 : 12000000) << name;
+      }
+    }
+  }
+
+  // An explicit VBR choice is still honoured on radeonsi.
+  codec_options_t explicit_vbr;
+  const auto effective = va::apply_tuning(explicit_vbr.ctx, &explicit_vbr.options,
+    {.strict_rc_buffer = true, .rc = config::vaapi::rc_e::vbr}, {.rate_control = VA_RC_CBR | VA_RC_VBR}, radeonsi_vendor, 24);
+  EXPECT_TRUE(effective.explicit_rate_control);
+  EXPECT_EQ(explicit_vbr.option("rc_mode"), "VBR");
+}
+
 TEST(VaapiTuningTests, UnsupportedModesAndFailedAttributesFallBackWithoutTreatingSentinelAsCapabilities) {
   EXPECT_FALSE(va::supported_attribute(VA_STATUS_ERROR_OPERATION_FAILED, VA_RC_CBR));
   EXPECT_FALSE(va::supported_attribute(VA_STATUS_SUCCESS, VA_ATTRIB_NOT_SUPPORTED));
@@ -111,6 +143,64 @@ TEST(VaapiTuningTests, QualityPresetsStayInTheReportedRangeAndUnknownSupportPres
       EXPECT_EQ(effective.quality_fallback, quality != config::vaapi::quality_e::automatic && unavailable);
     }
   }
+}
+
+TEST(VaapiTuningTests, RadeonsiQualityPresetsAreSentAsTheBitFieldsMesaDecodes) {
+  // vaQueryVendorString on an RX 7900 XTX with Mesa 26.2.3; radeonsi reports a range of 32.
+  constexpr std::string_view radeonsi_vendor =
+    "Mesa Gallium driver 26.2.3-arch3.1 for AMD Radeon RX 7900 XTX (radeonsi, navi31, ACO, DRM 3.64, 7.2.6-1-cachyos)";
+  // Mesa's vlVaQualityBits: bits 1-2 are the preset (0 speed, 1 balance,
+  // 2 quality, 3 high quality), bit 3 pre-encoding and bit 4 VBAQ. A value of
+  // 1 alone is the driver's own balanced + pre-encoding + VBAQ suggestion.
+  struct expected_t {
+    config::vaapi::quality_e quality;
+    int level;
+    unsigned pre_encode;
+    unsigned vbaq;
+  };
+  for (const auto *name : {"h264_vaapi", "hevc_vaapi", "av1_vaapi"}) {
+    for (const auto &[quality, level, pre_encode, vbaq] : {
+           expected_t {config::vaapi::quality_e::speed, 0, 0, 0},
+           expected_t {config::vaapi::quality_e::balanced, 19, 0, 1},
+           expected_t {config::vaapi::quality_e::quality, 27, 1, 1},
+         }) {
+      codec_options_t codec(name);
+      ASSERT_NE(codec.ctx->codec, nullptr) << name;
+      const auto effective = va::apply_tuning(codec.ctx, &codec.options, {.quality = quality},
+        {.quality_range = 32}, radeonsi_vendor, 24);
+      EXPECT_TRUE(effective.radeonsi_quality_bits);
+      EXPECT_FALSE(effective.quality_fallback);
+      EXPECT_EQ(codec.ctx->compression_level, level) << name;
+      const auto value = static_cast<unsigned>(codec.ctx->compression_level);
+      // Speed is the speed preset; the others are the balanced preset. Neither
+      // the quality nor the high-quality preset is ever selected.
+      EXPECT_EQ((value >> 1) & 3u, value ? 1u : 0u);
+      EXPECT_EQ((value >> 3) & 1u, pre_encode);
+      EXPECT_EQ((value >> 4) & 1u, vbaq);
+      EXPECT_LE(codec.ctx->compression_level, 32);
+    }
+  }
+
+  // Automatic still leaves the codec default alone, and no reported range still falls back.
+  codec_options_t automatic;
+  const auto original = automatic.ctx->compression_level;
+  EXPECT_FALSE(va::apply_tuning(automatic.ctx, &automatic.options, {}, {.quality_range = 32}, radeonsi_vendor, 24).radeonsi_quality_bits);
+  EXPECT_EQ(automatic.ctx->compression_level, original);
+  codec_options_t unreported;
+  const auto fallback = va::apply_tuning(unreported.ctx, &unreported.options, {.quality = config::vaapi::quality_e::quality},
+    {.quality_range = va::supported_attribute(VA_STATUS_SUCCESS, VA_ATTRIB_NOT_SUPPORTED)}, radeonsi_vendor, 24);
+  EXPECT_TRUE(fallback.quality_fallback);
+  EXPECT_EQ(unreported.ctx->compression_level, original);
+
+  // Other drivers keep the scale: Intel iHD's range of 7 runs from 1 (best) to 7 (fastest).
+  for (const auto *vendor : {"Intel iHD driver for Intel(R) Gen Graphics - 25.2.0", "Mesa AMD"}) {
+    codec_options_t scale;
+    const auto effective = va::apply_tuning(scale.ctx, &scale.options, {.quality = config::vaapi::quality_e::balanced},
+      {.quality_range = 7}, vendor, 24);
+    EXPECT_FALSE(effective.radeonsi_quality_bits) << vendor;
+    EXPECT_EQ(scale.ctx->compression_level, 3) << vendor;
+  }
+  EXPECT_FALSE(va::radeonsi::uses_quality_bits(radeonsi_vendor, 4));
 }
 
 TEST(VaapiTuningTests, BlockBitrateControlRequiresDriverAndCodecSupportAndNonCqpMode) {
