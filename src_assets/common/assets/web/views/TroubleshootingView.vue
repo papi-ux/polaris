@@ -128,6 +128,8 @@
       </div>
     </section>
 
+    <SpacesDiagnostics v-if="platform === 'linux'" />
+
     <section class="section-card space-y-4" data-support-self-tests>
       <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
@@ -528,6 +530,7 @@ import {
   redactSensitiveText,
   sanitizeDiagnosticsValue,
 } from '../diagnostics-export.js'
+import SpacesDiagnostics from '../components/SpacesDiagnostics.vue'
 import { AI_DOCTOR_EXPLANATION_CATEGORIES, explainDoctorWithAi } from '../ai-doctor-explanation.js'
 import { aiReadinessCopy, describeAiReadiness } from '../doctor-ai-readiness.js'
 import { describePreviousRunBanner } from '../previous-run-banner.js'
