@@ -1,10 +1,72 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 
 const readSource = (path) => readFileSync(join(process.cwd(), path), 'utf8')
+
+describe('AppImage capability removal', () => {
+  for (const scenario of ['capability present', 'already removed', 'getcap fails', 'setcap fails']) {
+    it(`revokes the resolved binary capability before removing support files (${scenario})`, () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'polaris appimage removal '))
+      try {
+        const appdir = join(fixture, 'AppDir')
+        const commands = join(fixture, 'commands')
+        const binary = join(fixture, 'real polaris binary')
+        const capState = join(fixture, 'capability')
+        const log = join(fixture, 'commands.log')
+        mkdirSync(join(appdir, 'usr/bin'), { recursive: true })
+        mkdirSync(commands)
+        writeFileSync(binary, 'fixture')
+        symlinkSync(binary, join(appdir, 'usr/bin/polaris'))
+        const apprun = join(appdir, 'AppRun')
+        writeFileSync(apprun, readSource('packaging/linux/AppImage/AppRun'))
+        writeFileSync(log, '')
+        if (scenario !== 'already removed') writeFileSync(capState, 'cap_sys_admin=ep')
+        writeFileSync(join(commands, 'getcap'), `#!/bin/bash
+printf 'getcap|%s\\n' "$1" >> "$APPIMAGE_TEST_LOG"
+if [ "$APPIMAGE_TEST_FAILURE" = getcap ]; then exit 9; fi
+if [ -f "$APPIMAGE_TEST_CAP_STATE" ]; then printf '%s cap_sys_admin=ep\\n' "$1"; fi
+`)
+        // No privileged command reaches the host. Only the synthetic capability marker changes.
+        writeFileSync(join(commands, 'sudo'), `#!/bin/bash
+printf 'sudo' >> "$APPIMAGE_TEST_LOG"
+printf '|%s' "$@" >> "$APPIMAGE_TEST_LOG"
+printf '\\n' >> "$APPIMAGE_TEST_LOG"
+if [ "$1" = setcap ]; then
+  if [ "$APPIMAGE_TEST_FAILURE" = setcap ]; then exit 9; fi
+  /bin/rm -f "$APPIMAGE_TEST_CAP_STATE"
+fi
+`)
+        chmodSync(join(commands, 'getcap'), 0o755)
+        chmodSync(join(commands, 'sudo'), 0o755)
+        const run = (alias) => spawnSync('bash', [apprun, alias], {
+          encoding: 'utf8',
+          env: { ...process.env, PATH: `${commands}:${process.env.PATH}`,
+            APPIMAGE_TEST_LOG: log, APPIMAGE_TEST_CAP_STATE: capState,
+            APPIMAGE_TEST_FAILURE: scenario.split(' ')[1] === 'fails' ? scenario.split(' ')[0] : '' },
+        })
+        const result = run('--remove')
+        const calls = () => readFileSync(log, 'utf8').trim().split('\n').filter(Boolean)
+        if (scenario.endsWith('fails')) {
+          expect(result.status).not.toBe(0)
+          expect(calls().some((call) => call.startsWith('sudo|rm|'))).toBe(false)
+        } else {
+          expect(result.status, result.stderr).toBe(0)
+          expect(calls()[0]).toBe(`getcap|${binary}`)
+          if (scenario === 'capability present') expect(calls()[1]).toBe(`sudo|setcap|-r|${binary}`)
+          expect(run('-r').status).toBe(0)
+          expect(run('remove').status).toBe(0)
+          expect(calls().filter((call) => call.startsWith('sudo|setcap|')))
+            .toHaveLength(scenario === 'capability present' ? 1 : 0)
+        }
+      } finally {
+        rmSync(fixture, { force: true, recursive: true })
+      }
+    })
+  }
+})
 
 const section = (source, start, end) => {
   const startIndex = source.indexOf(start)
