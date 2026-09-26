@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 namespace game_library {
@@ -225,6 +226,16 @@ namespace game_library {
     const std::string &store,
     launcher_install_t install
   );
+
+  // The same app id can belong to two stores or two Heroic installations.
+  using heroic_runtime_snapshot_t = std::map<
+    std::tuple<launcher_install_t, std::string, std::string>, heroic_runtime_t>;
+
+  /** @brief Read installed games and their current runtime settings from explicit home roots. */
+  heroic_runtime_snapshot_t read_heroic_runtime_snapshot(const std::vector<std::filesystem::path> &home_roots);
+
+  /** @brief Current Heroic runtime metadata, cached for 30 seconds like Steam playtime. */
+  heroic_runtime_snapshot_t heroic_runtime_snapshot();
 
   /**
    * @brief Steam app id to playtime, read from one localconfig.vdf payload.

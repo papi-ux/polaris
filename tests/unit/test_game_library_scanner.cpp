@@ -988,3 +988,103 @@ TEST(HeroicLauncherCommandTests, MatchesTheInstallTheLibraryEntriesCameFrom) {
     std::string::npos
   );
 }
+
+TEST(HeroicRuntimeSnapshotTests, KeepsNativeAndFlatpakSettingsSeparate) {
+  const auto home = lutris_test_root("heroic_runtime_installs");
+  const auto native = home / ".config/heroic";
+  const auto flatpak = home / ".var/app/com.heroicgameslauncher.hgl/config/heroic";
+  for (const auto &root : {native, flatpak}) {
+    std::filesystem::create_directories(root / "legendaryConfig/legendary");
+    std::filesystem::create_directories(root / "GamesConfig");
+    write_text(root / "legendaryConfig/legendary/installed.json", R"({"SameId":{
+      "app_name":"SameId","title":"Game","is_dlc":false,"platform":"Windows"}})");
+  }
+  write_text(native / "GamesConfig/SameId.json", R"({"SameId":{"wineVersion":{"type":"wine","name":"Wine-GE"}}})");
+  write_text(flatpak / "GamesConfig/SameId.json", R"({"SameId":{"wineVersion":{"type":"proton","name":"GE-Proton"}}})");
+  const auto snapshot = game_library::read_heroic_runtime_snapshot({home});
+  ASSERT_EQ(snapshot.size(), 2u);
+  const auto &native_runtime = snapshot.at({game_library::launcher_install_t::native, "epic", "SameId"});
+  const auto &flatpak_runtime = snapshot.at({game_library::launcher_install_t::flatpak, "epic", "SameId"});
+  EXPECT_EQ(native_runtime.platform, "windows");
+  EXPECT_EQ(native_runtime.runtime, "wine");
+  EXPECT_EQ(native_runtime.runtime_name, "Wine-GE");
+  EXPECT_EQ(flatpak_runtime.platform, "windows");
+  EXPECT_EQ(flatpak_runtime.runtime, "proton");
+  EXPECT_EQ(flatpak_runtime.runtime_name, "GE-Proton");
+}
+
+TEST(HeroicRuntimeSnapshotTests, InstalledPlatformWinsOverStaleCacheWithoutNeedingGamesConfig) {
+  const auto home = lutris_test_root("heroic_runtime_platform");
+  const auto root = home / ".config/heroic";
+  std::filesystem::create_directories(root / "legendaryConfig/legendary");
+  std::filesystem::create_directories(root / "store_cache");
+  write_text(root / "legendaryConfig/legendary/installed.json", R"({"SameId":{
+    "app_name":"SameId","title":"Game","is_dlc":false,"platform":"Linux"}})");
+  write_text(root / "store_cache/legendary_library.json", R"({"library":[{
+    "app_name":"SameId","title":"Game","is_installed":true,"install":{"is_dlc":false,"platform":"Windows"}}]})");
+  const auto snapshot = game_library::read_heroic_runtime_snapshot({home});
+  ASSERT_EQ(snapshot.size(), 1u);
+  EXPECT_EQ(snapshot.begin()->second.platform, "linux");
+  EXPECT_EQ(snapshot.begin()->second.runtime, "native");
+}
+
+TEST(HeroicRuntimeSnapshotTests, GogUsesInstalledPlatformInsteadOfUninstalledCacheMetadata) {
+  const auto home = lutris_test_root("heroic_runtime_gog");
+  const auto root = home / ".config/heroic";
+  std::filesystem::create_directories(root / "gog_store");
+  std::filesystem::create_directories(root / "store_cache");
+  write_text(root / "gog_store/installed.json", R"({"installed":[
+    {"appName":"123","is_dlc":false,"platform":"linux"}]})");
+  write_text(root / "store_cache/gog_library.json", R"({"games":[
+    {"app_name":"123","title":"Native Game","install":{"is_dlc":false,"platform":"Windows"}},
+    {"app_name":"456","title":"Not Installed","install":{"is_dlc":false,"platform":"Windows"}}]})");
+  const auto snapshot = game_library::read_heroic_runtime_snapshot({home});
+  ASSERT_EQ(snapshot.size(), 1u);
+  EXPECT_EQ(std::get<1>(snapshot.begin()->first), "gog");
+  EXPECT_EQ(std::get<2>(snapshot.begin()->first), "123");
+  EXPECT_EQ(snapshot.begin()->second.platform, "linux");
+  EXPECT_EQ(snapshot.begin()->second.runtime, "native");
+}
+
+TEST(HeroicRuntimeSnapshotTests, RefreshesSettingsAndLeavesUnreadableOrMissingRuntimeUnknown) {
+  const auto home = lutris_test_root("heroic_runtime_refresh");
+  const auto root = home / ".config/heroic";
+  std::filesystem::create_directories(root / "store_cache");
+  std::filesystem::create_directories(root / "GamesConfig");
+  write_text(root / "store_cache/legendary_library.json", R"({"library":[{
+    "app_name":"SameId","title":"Game","is_installed":true,"install":{"is_dlc":false,"platform":"Windows"}}]})");
+  for (const auto &payload : {std::string {}, std::string {"broken"}, std::string {R"({"SameId":{"wineVersion":{"type":"new-runner","name":"Unknown"}}})"}}) {
+    write_text(root / "GamesConfig/SameId.json", payload);
+    const auto snapshot = game_library::read_heroic_runtime_snapshot({home});
+    ASSERT_EQ(snapshot.size(), 1u);
+    EXPECT_EQ(snapshot.begin()->second.platform, "windows");
+    EXPECT_TRUE(snapshot.begin()->second.runtime.empty());
+    EXPECT_TRUE(snapshot.begin()->second.runtime_name.empty());
+  }
+  write_text(root / "GamesConfig/SameId.json", R"({"SameId":{"wineVersion":{"type":"proton","name":"Updated Proton"}}})");
+  const auto refreshed = game_library::read_heroic_runtime_snapshot({home});
+  EXPECT_EQ(refreshed.begin()->second.runtime_name, "Updated Proton");
+  std::filesystem::remove(root / "GamesConfig/SameId.json");
+  const auto missing = game_library::read_heroic_runtime_snapshot({home});
+  EXPECT_TRUE(missing.begin()->second.runtime.empty());
+  std::filesystem::remove(root / "store_cache/legendary_library.json");
+  std::filesystem::create_directory(root / "store_cache/legendary_library.json");
+  EXPECT_TRUE(game_library::read_heroic_runtime_snapshot({home}).empty());
+}
+
+TEST(HeroicRuntimeSnapshotTests, DoesNotBorrowRuntimeFromAnotherHomeOrImportUninstalledEntries) {
+  const auto first = lutris_test_root("heroic_runtime_home1");
+  const auto second = lutris_test_root("heroic_runtime_home2");
+  std::filesystem::create_directories(first / ".config/heroic/store_cache");
+  std::filesystem::create_directories(second / ".config/heroic/GamesConfig");
+  write_text(first / ".config/heroic/store_cache/legendary_library.json", R"({"library":[
+    {"app_name":"SameId","title":"Game","is_installed":true,"install":{"is_dlc":false,"platform":"Windows"}},
+    {"app_name":"NotInstalled","title":"Other","is_installed":false,"install":{"is_dlc":false,"platform":"Linux"}},
+    {"app_name":"../escape","title":"Unsafe","is_installed":true,"install":{"is_dlc":false,"platform":"Linux"}}]})");
+  write_text(second / ".config/heroic/GamesConfig/SameId.json", R"({"SameId":{"wineVersion":{"type":"wine","name":"Unrelated"}}})");
+  const auto snapshot = game_library::read_heroic_runtime_snapshot({first, second});
+  ASSERT_EQ(snapshot.size(), 1u);
+  EXPECT_EQ(std::get<2>(snapshot.begin()->first), "SameId");
+  EXPECT_EQ(snapshot.begin()->second.platform, "windows");
+  EXPECT_TRUE(snapshot.begin()->second.runtime.empty());
+}

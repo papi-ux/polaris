@@ -901,7 +901,7 @@ namespace game_library {
         return games;
       }
 
-      std::set<std::string> installed_app_names;
+      std::map<std::string, std::string> installed_platforms;
       for (const auto &entry : installed_data["installed"]) {
         if (!entry.is_object() || !entry.contains("appName") || !entry["appName"].is_string() ||
             !entry.contains("is_dlc") || !entry["is_dlc"].is_boolean() || entry["is_dlc"].get<bool>()) {
@@ -910,7 +910,9 @@ namespace game_library {
 
         auto app_name = entry["appName"].get<std::string>();
         if (is_heroic_app_name_safe(app_name)) {
-          installed_app_names.insert(std::move(app_name));
+          const auto platform = entry.find("platform");
+          installed_platforms.emplace(std::move(app_name), normalize_heroic_platform(
+            platform != entry.end() && platform->is_string() ? platform->get<std::string>() : "", false));
         }
       }
 
@@ -930,7 +932,7 @@ namespace game_library {
         }
 
         const auto app_name = entry["app_name"].get<std::string>();
-        if (installed_app_names.count(app_name) == 0 || !emitted_app_names.insert(app_name).second) {
+        if (installed_platforms.count(app_name) == 0 || !emitted_app_names.insert(app_name).second) {
           continue;
         }
 
@@ -940,7 +942,8 @@ namespace game_library {
               "gog",
               install,
               entry.value("art_square", ""),
-              entry.value("art_cover", "")
+              entry.value("art_cover", ""),
+              heroic_runtime_from_config({}, {}, installed_platforms.at(app_name))
             )) {
           games.push_back(std::move(*game));
         }
@@ -1009,6 +1012,72 @@ namespace game_library {
     }
 
     return std::nullopt;
+  }
+
+  heroic_runtime_snapshot_t read_heroic_runtime_snapshot(const std::vector<std::filesystem::path> &home_roots) {
+    heroic_runtime_snapshot_t snapshot;
+    const auto read = [](const std::filesystem::path &path) -> std::string {
+      std::error_code ec;
+      if (!std::filesystem::is_regular_file(path, ec) || ec) return {};
+      std::ifstream file(path);
+      if (!file) return {};
+      try {
+        return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+      } catch (const std::ios_base::failure &) {
+        return {};
+      }
+    };
+
+    // Join within one home and one installation before collapsing duplicate identities.
+    // An installed manifest in a different home must not borrow this home's platform.
+    for (const auto &home : home_roots) {
+      for (const auto &root : heroic_config_roots({home})) {
+        std::map<std::pair<std::string, std::string>, heroic_game_t> entries;
+        for (const auto &library : heroic_cache_files({home})) {
+          if (library.install != root.install || library.store == "gog") continue;
+          for (auto &game : parse_heroic_cache_json(read(library.path), library.store, root.install)) {
+            const auto key = std::make_pair(game.store, game.app_name);
+            entries.emplace(key, std::move(game));
+          }
+        }
+        for (const auto &library : heroic_installed_files({home})) {
+          if (library.install != root.install) continue;
+          const auto payload = read(library.path);
+          auto installed = library.store == "gog" ?
+            parse_heroic_gog_library_json(payload, read(root.path / "store_cache" / "gog_library.json"), root.install) :
+            parse_heroic_installed_json(payload, library.store, root.install);
+          for (auto &game : installed) {
+            const auto key = std::make_pair(game.store, game.app_name);
+            // Legendary's manifest may omit the platform its cache knows. A recorded
+            // installed platform wins over a stale cache (for example after reinstall).
+            if (game.platform.empty()) {
+              if (const auto cached = entries.find(key); cached != entries.end()) {
+                game.platform = cached->second.platform;
+              }
+            }
+            entries.insert_or_assign(key, std::move(game));
+          }
+        }
+        for (const auto &[key, game] : entries) {
+          snapshot.emplace(std::make_tuple(root.install, game.store, game.app_name),
+            heroic_runtime_for_app(root.path, game.app_name, game.platform));
+        }
+      }
+    }
+    return snapshot;
+  }
+
+  heroic_runtime_snapshot_t heroic_runtime_snapshot() {
+    static std::mutex guard;
+    static heroic_runtime_snapshot_t cached;
+    static std::chrono::steady_clock::time_point read_at {};
+    const std::lock_guard lock {guard};
+    const auto now = std::chrono::steady_clock::now();
+    if (read_at == std::chrono::steady_clock::time_point {} || now - read_at >= std::chrono::seconds(30)) {
+      cached = read_heroic_runtime_snapshot(library_home_roots());
+      read_at = now;
+    }
+    return cached;
   }
 
   std::string find_lutris_image_path(const std::string &slug, const std::vector<std::filesystem::path> &lutris_roots) {
