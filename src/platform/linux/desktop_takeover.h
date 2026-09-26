@@ -64,6 +64,13 @@ namespace desktop_takeover {
   /** Stable Hyprland selector for a regular or named special workspace. */
   std::optional<std::string> workspace_selector(const workspace_state_t &workspace);
 
+  /**
+   * Translate a classic `hyprctl dispatch` argument vector into the hl.dsp.*
+   * dispatcher object expression Hyprland 0.56+ evaluates, or nullopt when
+   * takeover issues no such dispatch.
+   */
+  std::optional<std::string> lua_dispatcher(const std::vector<std::string> &arguments);
+
   /** True when every recorded workspace is on the takeover target. */
   bool takeover_layout_matches(
     const state_t &state,
