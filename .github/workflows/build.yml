@@ -153,6 +153,7 @@ jobs:
     env:
       ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:strict_string_checks=1
       UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+      CCACHE_DIR: ~/.cache/ccache
 
     steps:
       - uses: actions/checkout@v7
@@ -179,6 +180,14 @@ jobs:
           key: polaris-ubuntu-apt-${{ env.UBUNTU_APT_SNAPSHOT }}-sanitizer-${{ hashFiles('.github/workflows/build.yml') }}
           restore-keys: |
             polaris-ubuntu-apt-${{ env.UBUNTU_APT_SNAPSHOT }}-sanitizer-
+
+      - name: Cache sanitizer ccache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ccache
+          key: polaris-sanitizer-ccache-${{ hashFiles('CMakeLists.txt', 'cmake/**/*.cmake', 'src/**/*', 'tests/**/*') }}
+          restore-keys: |
+            polaris-sanitizer-ccache-
 
       - name: Install dependencies
         # This suite installs the larger dependency set; the pinned snapshot
@@ -228,7 +237,7 @@ jobs:
             exit 1
           fi
           sudo apt-get "${apt_options[@]}" install -y --allow-downgrades \
-            build-essential cmake ninja-build \
+            build-essential ccache cmake ninja-build \
             libboost-all-dev libssl-dev libevdev-dev \
             libpulse-dev libopus-dev \
             "libcurl4t64=$curl_snapshot_version" "libcurl4-openssl-dev=$curl_snapshot_version" \
@@ -254,7 +263,9 @@ jobs:
             -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined' \
             -DPOLARIS_ENABLE_CUDA=OFF \
             -DPOLARIS_ENABLE_BROWSER_STREAM=OFF \
-            -DCUDA_FAIL_ON_MISSING=OFF
+            -DCUDA_FAIL_ON_MISSING=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build sanitizer unit tests
         run: |
@@ -263,6 +274,10 @@ jobs:
             test_polaris_http test_polaris_input test_polaris_network test_polaris_pairing \
             test_polaris_platform test_polaris_steam_shutdown test_polaris_stream test_polaris_video \
             -j"$(nproc)"
+
+      - name: Report ccache effectiveness
+        if: always()
+        run: ccache --show-stats --verbose | head -20
 
       - name: Run sanitizer and gamescope ownership tests
         # Coverage here grew one target at a time, each fix adding only what it
