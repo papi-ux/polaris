@@ -16,6 +16,7 @@
 #include "video_colorspace.h"
 #include "video_rate.h"
 
+#include <array>
 #include <cstddef>
 #include <cmath>
 #include <optional>
@@ -474,6 +475,15 @@ namespace video {
    */
   int vulkan_quality_clamp(int configured, int max_quality_levels);
 
+  /**
+   * @brief Highest Vulkan quality level offered across the codecs an encoder can use.
+   * @param levels maxQualityLevels per codec, indexed H.264, HEVC, AV1; -1 when unknown.
+   * @param include_av1 Whether the encoder uses AV1. The Vulkan encoder keeps AV1
+   *        fail-closed, so its AV1 count must not lower the level offered for H.264 and HEVC.
+   * @return The smallest count-1 among the included codecs with a known count, or -1.
+   */
+  int vulkan_quality_max(const std::array<int, 3> &levels, bool include_av1);
+
   bool wait_for_capture_display_release(
     const std::shared_ptr<platf::display_t> &display,
     const std::function<bool()> &running,
@@ -708,9 +718,10 @@ namespace video {
 
   /**
    * @brief Highest Vulkan quality level the probed driver exposes for every usable codec.
-   * @details Returns maxQualityLevels-1, taken over the codecs whose count a live probe
-   *          reported (-1 entries are skipped), or -1 when no encoder is selected, the
-   *          active encoder is not Vulkan, or probing has not reported any count yet.
+   * @details Returns maxQualityLevels-1, taken over the codecs the encoder uses whose count
+   *          a live probe reported (-1 entries are skipped, and AV1 is skipped while the
+   *          encoder keeps it off), or -1 when no encoder is selected, the active encoder is
+   *          not Vulkan, or probing has not reported any count yet.
    */
   int advertised_vulkan_quality_max();
 
