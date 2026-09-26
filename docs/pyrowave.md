@@ -75,6 +75,25 @@ promise of recovery from every packet loss. Keep client and host dependency pins
 and the profile token in agreement; the C API version alone does not establish
 bitstream compatibility.
 
+## Capture formats the codec cannot read
+
+PyroWave reads eight bit BGRA and RGBA and the four ten bit packed formats,
+`XBGR2101010`, `ABGR2101010`, `XRGB2101010` and `ARGB2101010`. It cannot read the
+sixteen bit float formats.
+
+That matters on one configuration in particular. **KWin composites HDR as
+`ABGR16161616F`**, so on a KDE host with `capture = kms` and the display in HDR
+mode, the scanout PyroWave is handed is sixteen bit float and it has to refuse.
+The stream ends with `capture is handing over a dmabuf in a format this codec
+cannot read`, and the refusal is correct: it does not change while the display
+keeps its mode.
+
+Today that refusal arrives after the client has already negotiated the codec and
+built a decoder, so the symptom is a session that starts and moves zero video
+bytes rather than a codec that is never offered. Turning HDR off on the host
+display, or capturing by another route, is what makes PyroWave available there.
+A host scanning out ten bit packed HDR is unaffected.
+
 ## Live tuning and diagnostics
 
 The encoder accepts runtime bitrate updates without restarting a stream. Its
