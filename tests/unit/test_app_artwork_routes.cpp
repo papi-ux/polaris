@@ -215,7 +215,7 @@ TEST(AppCoverSearch, TheConsoleSearchIsNovasSearchAndNeverLoadsImagesFromOutside
   EXPECT_NE(choices.find("game_artwork::manual::list_artwork_choices("), std::string::npos);
   EXPECT_NE(choices.find("game_artwork::kind_e::poster"), std::string::npos);
   EXPECT_NE(choices.find("./api/covers/preview/"), std::string::npos);
-  EXPECT_NE(source.find(R"(server.resource["^/api/covers/choices$"]["POST"] = withCsrf(listCoverChoices);)"), std::string::npos);
+  EXPECT_NE(source.find(R"(server.resource["^/api/covers/choices$"]["POST"] = withCsrf([&workers, transport_override])"), std::string::npos);
 
   EXPECT_NE(source.find(R"(server.resource["^/api/covers/preview/([0-9a-f]{32})$"]["GET"] = previewCover;)"), std::string::npos);
   EXPECT_NE(source.find(R"(server.resource["^/api/covers/select$"]["POST"] = withCsrf(selectCover);)"), std::string::npos);
