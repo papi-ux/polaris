@@ -3929,7 +3929,7 @@ namespace confighttp {
       }
     }
 
-    // Scan Heroic Games Launcher (GOG + Epic via Legendary), native and Flatpak installs
+    // Scan Heroic Games Launcher (GOG, Epic, Amazon and sideloaded apps), native and Flatpak installs
     nlohmann::json heroic_games = nlohmann::json::array();
     std::set<std::string> seen_heroic_keys;
     const auto heroic_cache_key = [](game_library::launcher_install_t install,
