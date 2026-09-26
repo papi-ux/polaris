@@ -66,6 +66,7 @@ namespace video {
     // Appended fields preserve positional initializers used by existing clients.
     AVRational stream_rate {0, 1};  // RTSP stream request, before integer budget rounding
     AVRational encode_rate {0, 1};  // Host limiter: launch rate when enabled, stream rate otherwise
+    std::uint64_t session_generation = 0;  // Host-owned identity for source-frame diagnostics
 
   };
 

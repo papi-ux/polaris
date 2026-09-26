@@ -809,6 +809,127 @@ TEST(StreamStatsCapturePathTests, LabelsWindowedDmabufOverridePath) {
 }
 
 
+TEST(StreamStatsCaptureSourceTests, KeepsReconnectAndIndependentClientEvidenceSeparate) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  const stream_stats::capture_source_t large {3840, 2160, 1920, 1080,
+    platf::frame_transport_e::shm, platf::frame_residency_e::cpu};
+  const stream_stats::capture_source_t small {1280, 800, 1280, 800,
+    platf::frame_transport_e::dmabuf, platf::frame_residency_e::gpu};
+  EXPECT_FALSE(stream_stats::record_capture_source(0, large));
+  EXPECT_FALSE(stream_stats::record_capture_source(101, large));
+  stream_stats::add_client("same-client", "First", 101);
+  stream_stats::add_client("same-client", "Replacement", 102);
+  ASSERT_TRUE(stream_stats::record_capture_source(101, large));
+  ASSERT_TRUE(stream_stats::record_capture_source(102, small));
+  auto json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  EXPECT_EQ(json["capture_source"]["width"], 3840);
+  EXPECT_EQ(json["clients"][1]["capture_source"]["width"], 1280);
+
+  stream_stats::remove_client("same-client", 101);
+  EXPECT_FALSE(stream_stats::record_capture_source(101, large));
+  json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  EXPECT_EQ(json["capture_source"]["width"], 1280);
+  EXPECT_EQ(json["capture_source"]["pixel_ratio"], 1.0);
+  stream_stats::remove_client("same-client", 102);
+  stream_stats::add_client("same-client", "New generation", 103);
+  EXPECT_FALSE(stream_stats::record_capture_source(102, small));
+  EXPECT_TRUE(nlohmann::json::parse(stream_stats::get_current().to_json())["capture_source"].is_null());
+}
+
+TEST(StreamStatsCaptureSourceTests, RecordsRenegotiationAndRejectsInvalidSizes) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("client", "Client", 201);
+  stream_stats::capture_source_t source {3840, 2160, 1920, 1080,
+    platf::frame_transport_e::shm, platf::frame_residency_e::cpu};
+  ASSERT_TRUE(stream_stats::record_capture_source(201, source));
+  source.width = 1920; source.height = 1080;
+  source.transport = platf::frame_transport_e::dmabuf;
+  source.residency = platf::frame_residency_e::gpu;
+  ASSERT_TRUE(stream_stats::record_capture_source(201, source));
+  for (int field = 0; field < 4; ++field) {
+    auto invalid = source;
+    const std::array<int *, 4> dimensions {&invalid.width, &invalid.height, &invalid.stream_width, &invalid.stream_height};
+    *dimensions[field] = field % 2 ? -1 : 0;
+    EXPECT_FALSE(stream_stats::record_capture_source(201, invalid));
+  }
+  const auto json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  EXPECT_EQ(json["capture_source"]["width"], 1920);
+  EXPECT_EQ(json["capture_source"]["height"], 1080);
+  EXPECT_EQ(json["capture_source"]["transport"], "dmabuf");
+  EXPECT_EQ(json["capture_source"]["residency"], "gpu");
+  EXPECT_EQ(json["capture_source"]["pixel_ratio"], 1.0);
+}
+
+TEST(StreamStatsCaptureSourceTests, ExplainsExtraCpuPixelsWithoutChangingDoctorVerdictOrAction) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.clients.emplace_back();
+  const auto before = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  // The observed source belongs to this client, independent of process-wide
+  // capture fields that another capture path may have most recently published.
+  stats.clients[0].capture_source = {3840, 2160, 1920, 1080,
+    platf::frame_transport_e::shm, platf::frame_residency_e::cpu};
+  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto &evidence = doctor.at("evidence");
+  const auto row = std::find_if(evidence.begin(), evidence.end(), [](const auto &item) {
+    return item.value("id", "") == "capture_source_size";
+  });
+  ASSERT_NE(row, evidence.end());
+  EXPECT_EQ(row->at("status"), "info");
+  EXPECT_EQ(row->at("source"), "session_capture_frame");
+  EXPECT_EQ(row->at("value").at("pixel_ratio"), 4.0);
+  EXPECT_NE(row->at("detail").get<std::string>().find("CPU capture path"), std::string::npos);
+  EXPECT_NE(row->at("detail").get<std::string>().find("not proof"), std::string::npos);
+  for (const auto *key : {"primary_issue", "traffic_light", "status", "severity"}) EXPECT_EQ(doctor.at(key), before.at(key));
+  EXPECT_EQ(doctor.at("safe_recovery_action").at("id"), before.at("safe_recovery_action").at("id"));
+  EXPECT_EQ(doctor.at("safe_recovery_action").at("endpoint"), before.at("safe_recovery_action").at("endpoint"));
+}
+
+TEST(StreamStatsCaptureSourceTests, DoesNotInferExtraCpuCopyFromSizeOrEncoderUploadAlone) {
+  for (const auto source : {
+    stream_stats::capture_source_t {3840, 2160, 1920, 1080, platf::frame_transport_e::dmabuf, platf::frame_residency_e::gpu},
+    stream_stats::capture_source_t {1920, 1080, 1920, 1080, platf::frame_transport_e::shm, platf::frame_residency_e::cpu},
+    stream_stats::capture_source_t {1280, 720, 1920, 1080, platf::frame_transport_e::shm, platf::frame_residency_e::cpu},
+    stream_stats::capture_source_t {2560, 1440, 1920, 1080, platf::frame_transport_e::shm, platf::frame_residency_e::cpu},
+  }) {
+    stream_stats::stats_t stats {};
+    stats.streaming = true;
+    stats.encode_target_residency = platf::frame_residency_e::cpu;
+    stats.clients.emplace_back();
+    stats.clients[0].capture_source = source;
+    const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+    const auto &evidence = doctor.at("evidence");
+    const auto row = std::find_if(evidence.begin(), evidence.end(), [](const auto &item) {
+      return item.value("id", "") == "capture_source_size";
+    });
+    ASSERT_NE(row, evidence.end());
+    EXPECT_EQ(row->at("detail").get<std::string>().find("CPU capture path"), std::string::npos);
+  }
+}
+
+TEST(StreamStatsCaptureSourceTests, OmitsUnobservedIdleAndMultiClientComparisons) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.clients.emplace_back();
+  const auto absent = [&] {
+    const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+    for (const auto &row : doctor.at("evidence")) EXPECT_NE(row.value("id", ""), "capture_source_size");
+  };
+  absent();
+  stats.clients[0].capture_source = {3840, 2160, 1920, 1080,
+    platf::frame_transport_e::shm, platf::frame_residency_e::cpu};
+  stats.streaming = false;
+  absent();
+  stats.streaming = true;
+  stats.clients.emplace_back();
+  absent();
+}
+
 TEST(StreamStatsDoctorTests, ClassifiesGpuNativeStreamAsReady) {
   stream_stats::stats_t stats {};
   stats.streaming = true;

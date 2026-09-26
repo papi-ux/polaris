@@ -484,6 +484,20 @@ namespace stream_stats {
       return it == session_timings.end() ? nullptr : &*it;
     }
 
+    nlohmann::json capture_source_json(const capture_source_t &source) {
+      if (source.width <= 0 || source.height <= 0 || source.stream_width <= 0 || source.stream_height <= 0) {
+        return nullptr;
+      }
+      return {
+        {"width", source.width}, {"height", source.height},
+        {"stream_width", source.stream_width}, {"stream_height", source.stream_height},
+        {"transport", platf::from_frame_transport(source.transport)},
+        {"residency", platf::from_frame_residency(source.residency)},
+        {"pixel_ratio", (static_cast<double>(source.width) * source.height) /
+                         (static_cast<double>(source.stream_width) * source.stream_height)}
+      };
+    }
+
     nlohmann::json fec_protection_json(const fec_protection_stats_t &stats) {
       return {
         {"oversized_frames_total", stats.oversized_frames_total},
@@ -687,6 +701,7 @@ namespace stream_stats {
       cj["codec"] = c.codec;
       cj["width"] = c.width;
       cj["height"] = c.height;
+      cj["capture_source"] = capture_source_json(c.capture_source);
       cj["latency_ms"] = c.latency_ms;
       cj["packet_loss"] = c.packet_loss;
       cj["packet_loss_available"] = c.packet_loss_available;
@@ -698,6 +713,7 @@ namespace stream_stats {
       clients_json.push_back(cj);
     }
     j["clients"] = clients_json;
+    j["capture_source"] = clients.empty() ? nlohmann::json(nullptr) : capture_source_json(clients.front().capture_source);
     j["active_sessions"] = static_cast<int>(clients.size());
     j["doctor"] = build_doctor_json(*this, nlohmann::json::object());
     if (const auto identity = get_single_active_session_identity()) {
@@ -2071,6 +2087,24 @@ namespace stream_stats {
     }
 #endif
     append_doctor_evidence(evidence, "capture_path", "Capture path", capture_path, "", !capture_known ? "unknown" : capture_latency_fail ? "fail" : capture_cpu_copy ? "watch" : capture_gpu_native ? "pass" : "watch", "stream_stats", capture_path_reason_message(capture_reason));
+    if (stats.streaming && stats.clients.size() == 1) {
+      const auto &source = stats.clients.front().capture_source;
+      const auto value = capture_source_json(source);
+      if (!value.is_null()) {
+        const bool source_cpu_copy = source.transport == platf::frame_transport_e::shm ||
+                                     source.residency == platf::frame_residency_e::cpu;
+        const bool oversized_cpu_source = source_cpu_copy && value["pixel_ratio"].get<double>() >= 2.0;
+        const std::string sizes = std::to_string(source.width) + "x" + std::to_string(source.height) +
+                                 " capture for a " + std::to_string(source.stream_width) + "x" + std::to_string(source.stream_height) + " stream. ";
+        append_doctor_evidence(evidence, "capture_source_size", "Capture source size", value,
+          "", "info", "session_capture_frame",
+          sizes + (oversized_cpu_source ?
+            "The CPU capture path handles at least twice the stream's pixel count before scaling. "
+            "This can add copy work, but is not proof of the frame-rate bottleneck. Check the active "
+            "output mode and the adapter's supported modes; lowering the client resolution alone may not shrink the source." :
+            "These are the delivered source dimensions before encoder scaling; size alone does not establish a performance problem."));
+      }
+    }
     append_doctor_evidence(evidence, "encoder", "Encoder", stats.encode_target_device, "", encoder_fail ? "fail" : encoder_watch ? "watch" : "pass", "stream_stats", stats.encode_time_ms > 0.0 ? "Encode timing is reported by stream telemetry." : "Encoder timing has not been reported yet.");
     const auto encoder_selection = health.value("encoder_selection", nlohmann::json::object());
     append_doctor_evidence(
@@ -2304,7 +2338,7 @@ namespace stream_stats {
     );
 
     auto advanced = nlohmann::json::object();
-    advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "capture_cpu_copy", "capture_gpu_native", "capture_cross_gpu_dmabuf_risk", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "packet_loss_available", "packet_loss_source", "control_channel_packet_loss", "control_channel_samples", "frame_interval_error_ms", "frame_jitter_ms", "video_policy_sample_count", "pacing_warning_streak", "fec_protection"});
+    advanced["stream_stats_keys"] = nlohmann::json::array({"capture_path", "capture_path_reason", "capture_transport", "capture_residency", "capture_format", "capture_source", "capture_cpu_copy", "capture_gpu_native", "capture_cross_gpu_dmabuf_risk", "encode_target_device", "encode_target_residency", "fps", "encode_time_ms", "packet_loss", "packet_loss_available", "packet_loss_source", "control_channel_packet_loss", "control_channel_samples", "frame_interval_error_ms", "frame_jitter_ms", "video_policy_sample_count", "pacing_warning_streak", "fec_protection"});
     advanced["linux_gpu_profile"] = linux_gpu_profile_json(stats);
     advanced["gpu_native_probe"] = gpu_native_probe_json(stats);
     advanced["fec_protection"] = fec_protection_json(stats.fec_protection);
@@ -2707,6 +2741,19 @@ namespace stream_stats {
     hot_avg_frame_age_ms.store(avg_frame_age_ms, std::memory_order_relaxed);
     hot_frame_jitter_ms.store(frame_jitter_ms, std::memory_order_relaxed);
     hot_video_sample_revision.fetch_add(1, std::memory_order_release);
+  }
+
+  bool record_capture_source(std::uint64_t session_generation, const capture_source_t &source) {
+    if (session_generation == 0 || source.width <= 0 || source.height <= 0 ||
+        source.stream_width <= 0 || source.stream_height <= 0) return false;
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == current_stats.clients.end()) return false;
+    client->capture_source = source;
+    return true;
   }
 
   void record_oversized_fec_frame(std::uint64_t session_generation,
