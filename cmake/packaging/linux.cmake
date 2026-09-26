@@ -110,6 +110,14 @@ endif()
 set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/postinst")
 set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/postinst")
 
+# Removal. One script for both formats, as with postinst above, because it distinguishes a removal
+# from an upgrade by reading $1, which dpkg and rpm both set and merely spell differently.
+# It exists for one reason that has no alternative: polaris-spaces-setup is the only thing that can
+# remove the SELinux policies it installed, and it ships inside this package, so after removal they
+# cannot be removed at all. See polaris#63.
+list(APPEND CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/prerm")
+set(CPACK_RPM_PRE_UNINSTALL_SCRIPT_FILE "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/prerm")
+
 # Two packages out of one build. The names are pinned per component because CPack otherwise
 # derives them from the component, and because the release picks assets by name.
 set(CPACK_COMPONENTS_ALL polaris kms)
