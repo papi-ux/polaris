@@ -140,15 +140,32 @@ namespace desktop_takeover {
       return parse_workspaces(root->dump());
     }
 
-    bool dispatch(const std::vector<std::string> &arguments) {
-      std::vector<std::string> argv {"hyprctl", "dispatch"};
-      argv.insert(argv.end(), arguments.begin(), arguments.end());
+    bool hyprctl_exits_zero(const std::vector<std::string> &argv) {
       const auto result = platf::run_process_argv_capture(
         argv,
         helper_timeout,
         4096
       );
       return result.exit_status == 0 && !result.timed_out && !result.truncated;
+    }
+
+    // Classic `hyprctl dispatch A B` is evaluated by Hyprland 0.56 as the Lua
+    // expression `hl.dispatch(A B)`, so every dispatch fails with a Lua syntax
+    // error (rc=7) and takeover could neither begin nor restore there. A
+    // dispatcher on that Hyprland is an hl.dsp.* object that must run through
+    // hl.dispatch, delivered by `hyprctl eval` — the dispatch subcommand
+    // accepts the object but does not execute it. Older Hyprland rejects the
+    // eval as an unknown dispatcher, so the classic form stays first and the
+    // second hyprctl spawn is paid only where the first one already failed.
+    bool dispatch(const std::vector<std::string> &arguments) {
+      std::vector<std::string> argv {"hyprctl", "dispatch"};
+      argv.insert(argv.end(), arguments.begin(), arguments.end());
+      if (hyprctl_exits_zero(argv)) {
+        return true;
+      }
+      const auto dispatcher = lua_dispatcher(arguments);
+      return dispatcher.has_value() &&
+             hyprctl_exits_zero({"hyprctl", "eval", "hl.dispatch(" + *dispatcher + ")"});
     }
 
     bool set_dpms(std::string_view monitor, bool enabled) {
@@ -408,6 +425,36 @@ namespace desktop_takeover {
     if (workspace.id < 0 && workspace.name.starts_with("special:") &&
         safe_token(workspace.name)) {
       return workspace.name;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<std::string> lua_dispatcher(const std::vector<std::string> &arguments) {
+    const auto lua_quote = [](std::string_view value) {
+      std::string quoted = "\"";
+      for (const char ch : value) {
+        if (ch == '\\' || ch == '"') {
+          quoted += '\\';
+        }
+        quoted += ch;
+      }
+      quoted += '"';
+      return quoted;
+    };
+
+    // Only the dispatches takeover issues; a new one is a translation to write
+    // deliberately, not a pattern to guess at.
+    if (arguments.size() == 3 && arguments.front() == "dpms" &&
+        (arguments[1] == "on" || arguments[1] == "off")) {
+      // The table form is load-bearing: a bare string argument is not parsed
+      // as `on <monitor>` but ignored, and the dispatcher then toggles every
+      // monitor Polaris did not ask about.
+      return "hl.dsp.dpms({ action = \"" + arguments[1] + "\", monitor = " +
+             lua_quote(arguments[2]) + " })";
+    }
+    if (arguments.size() == 3 && arguments.front() == "moveworkspacetomonitor") {
+      return "hl.dsp.workspace.move({ workspace = " + lua_quote(arguments[1]) +
+             ", monitor = " + lua_quote(arguments[2]) + " })";
     }
     return std::nullopt;
   }
