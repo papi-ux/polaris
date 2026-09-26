@@ -51,12 +51,14 @@ namespace net {
   net_e from_enum_string(const std::string_view &view);
   std::string_view to_enum_string(net_e net);
 
+  // Address-only policy. Shared IPv4 space (100.64/10), including VPN peers,
+  // receives WAN policy; a numeric prefix cannot prove a trusted tunnel.
   net_e from_address(const std::string_view &view);
 
   /**
    * @brief Describe the path a client reached this host by, for diagnostics only.
    * @details Never use this for access decisions; from_address does that, and it
-   *          deliberately treats the shared 100.64.0.0/10 range and link-local as LAN.
+   *          treats the shared 100.64.0.0/10 range as WAN.
    * @return One of loopback, lan, cgnat (the shared IPv4 range, which Tailscale
    *         uses), tailscale (its IPv6 range), link-local, public, or unknown when
    *         the text is not an address.
