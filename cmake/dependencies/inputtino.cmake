@@ -48,7 +48,8 @@ function(polaris_prepare_inputtino source output)
             0001-serialize-dualsense-reports-and-own-threads.patch
             0002-propagate-uinput-physical-identity.patch
             0003-neutral-dualsense-resting-axes.patch
-            0004-serialize-keyboard-repeat-and-join.patch)
+            0004-serialize-keyboard-repeat-and-join.patch
+            0005-synthesize-key-modifiers-with-repeats.patch)
         set(backport "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../../packaging/linux/patches/inputtino/${name}")
         set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${backport}")
         execute_process(

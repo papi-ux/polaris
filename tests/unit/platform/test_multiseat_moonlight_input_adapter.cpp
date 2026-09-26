@@ -271,7 +271,7 @@ namespace {
     for (const auto &typed : {
            keyboard_packet(0x8041, false),
            keyboard_packet(0x8041, false, SS_KBE_FLAG_NON_NORMALIZED),
-           keyboard_packet(0x0041, false, SS_KBE_FLAG_NON_NORMALIZED, MODIFIER_SHIFT),
+           keyboard_packet(0x0041, false, SS_KBE_FLAG_NON_NORMALIZED),
          }) {
       EXPECT_EQ(
         decoded(typed),
@@ -303,6 +303,7 @@ namespace {
           .payload = keyboard_key_event_t {
             .key_code = 0x41,
             .state = button_state_e::pressed,
+            .modifiers = keyboard_modifier_shift,
           },
         },
       })
@@ -335,6 +336,21 @@ namespace {
         },
       })
     );
+  }
+
+  TEST(MultiseatMoonlightInputAdapter, PreservesModifierIntentInOneCanonicalKeyDown) {
+    for (const auto code : {0x0041, 0x8041}) {
+      for (std::uint8_t mask = 1; mask <= 15; ++mask) {
+        const auto down = decoded(keyboard_packet(code, false, SS_KBE_FLAG_NON_NORMALIZED, mask));
+        const auto encoded = encode_input_event(down.event);
+        ASSERT_EQ(encoded.size(), 12U);
+        EXPECT_EQ(encoded[4], 9U);
+        EXPECT_EQ(encoded[11], mask);
+        const auto up = encode_input_event(decoded(keyboard_packet(code, true, 0, mask)).event);
+        EXPECT_EQ(up[4], 1U);
+        EXPECT_EQ(up[11], 0U);
+      }
+    }
   }
 
   TEST(MultiseatMoonlightInputAdapter, ConvertsTouchAndPenIntoBoundedIntegers) {
@@ -755,6 +771,13 @@ namespace {
     ASSERT_TRUE(authority.reconcile({}).admission_ready);
     const auto expectation = expectation_for(1);
     ASSERT_TRUE(authority.prepare(expectation).prepared());
+    moonlight_input_adapter_t denied {authority, expectation.handle, {}};
+    EXPECT_EQ(
+      denied.route(keyboard_packet(0x41, false, 0, MODIFIER_SHIFT | MODIFIER_CTRL)).status,
+      moonlight_route_status_e::permission_denied
+    );
+    EXPECT_TRUE(backend.calls.empty());
+    EXPECT_EQ(denied.next_sequence(), 1U);
     moonlight_input_adapter_t adapter {
       authority,
       expectation.handle,
@@ -780,7 +803,7 @@ namespace {
     EXPECT_EQ(result.status, moonlight_route_status_e::unsupported_packet);
     EXPECT_EQ(adapter.next_sequence(), 1U);
 
-    result = adapter.route(keyboard_packet(0x41, false));
+    result = adapter.route(keyboard_packet(0x41, false, 0, MODIFIER_SHIFT | MODIFIER_CTRL));
     EXPECT_EQ(result.status, moonlight_route_status_e::applied);
     EXPECT_EQ(result.authority_status, status_e::applied);
     EXPECT_EQ(result.sequence, 1U);
@@ -795,6 +818,7 @@ namespace {
         .payload = keyboard_key_event_t {
           .key_code = 0x41,
           .state = button_state_e::pressed,
+          .modifiers = keyboard_modifier_shift | keyboard_modifier_control,
         },
       })
     );
@@ -816,7 +840,7 @@ namespace {
       handle_for(4),
       all_permissions()
     };
-    const auto stale_result = stale.route(relative_packet(1, 0));
+    const auto stale_result = stale.route(keyboard_packet(0x41, false, 0, MODIFIER_SHIFT));
     EXPECT_EQ(stale_result.status, moonlight_route_status_e::authority_rejected);
     EXPECT_EQ(stale_result.authority_status, status_e::stale_authority);
     EXPECT_EQ(stale.next_sequence(), 1U);
@@ -860,14 +884,14 @@ namespace {
     };
 
     backend.next_route = backend_result_e::rejected;
-    auto result = adapter.route(relative_packet(1, 0));
+    auto result = adapter.route(keyboard_packet(0x41, false, 0, MODIFIER_SHIFT));
     EXPECT_EQ(result.status, moonlight_route_status_e::authority_rejected);
     EXPECT_EQ(result.authority_status, status_e::backend_rejected);
     EXPECT_EQ(result.sequence, 1U);
     EXPECT_EQ(adapter.next_sequence(), 1U);
     ASSERT_EQ(backend.calls.size(), 1U);
 
-    result = adapter.route(relative_packet(2, 0));
+    result = adapter.route(keyboard_packet(0x41, false, 0, MODIFIER_SHIFT));
     EXPECT_EQ(result.status, moonlight_route_status_e::authority_rejected);
     EXPECT_EQ(result.authority_status, status_e::reconciliation_required);
     EXPECT_EQ(result.sequence, 1U);
@@ -876,7 +900,7 @@ namespace {
 
     backend.next_route = backend_result_e::applied;
     ASSERT_TRUE(authority.reconcile({expectation}).admission_ready);
-    result = adapter.route(relative_packet(3, 0));
+    result = adapter.route(keyboard_packet(0x41, false, 0, MODIFIER_SHIFT));
     EXPECT_EQ(result.status, moonlight_route_status_e::applied);
     EXPECT_EQ(result.authority_status, status_e::applied);
     EXPECT_EQ(result.sequence, 1U);

@@ -271,7 +271,11 @@ namespace multiseat::input {
         return managed_device_apply_result_e::rejected;
       }
       if (key->state == button_state_e::pressed) {
-        keyboard.press(static_cast<short>(key->key_code));
+        static_assert(inputtino::Keyboard::SHIFT == keyboard_modifier_shift);
+        static_assert(inputtino::Keyboard::CTRL == keyboard_modifier_control);
+        static_assert(inputtino::Keyboard::ALT == keyboard_modifier_alt);
+        static_assert(inputtino::Keyboard::META == keyboard_modifier_meta);
+        keyboard.press(static_cast<short>(key->key_code), key->modifiers);
       } else {
         keyboard.release(static_cast<short>(key->key_code));
       }
