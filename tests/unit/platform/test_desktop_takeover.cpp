@@ -116,6 +116,45 @@ TEST(DesktopTakeover, VerifiesTakeoverAndRestoreByExactWorkspaceIdentity) {
   )) << "No newly created workspace may remain on an output Polaris will destroy";
 }
 
+TEST(DesktopTakeover, TranslatesClassicDispatchIntoHyprlandLuaDispatchers) {
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"dpms", "on", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.dpms({ action = \"on\", monitor = \"DP-2\" })"}
+  );
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"dpms", "off", "DP-3"}),
+    std::optional<std::string> {"hl.dsp.dpms({ action = \"off\", monitor = \"DP-3\" })"}
+  );
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "2", "POLARIS-HEADLESS-42-0"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"2\", monitor = \"POLARIS-HEADLESS-42-0\" })"}
+  );
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "special:scratch", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"special:scratch\", monitor = \"DP-2\" })"}
+  );
+}
+
+TEST(DesktopTakeover, LuaDispatcherQuotesWorkspaceNamesItCannotTrust) {
+  // A named special workspace is free text; neither quote nor backslash may
+  // end the Lua string early or turn into an escape.
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "special:a\"b", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"special:a\\\"b\", monitor = \"DP-2\" })"}
+  );
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "special:a\\b", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"special:a\\\\b\", monitor = \"DP-2\" })"}
+  );
+}
+
+TEST(DesktopTakeover, LuaDispatcherRefusesDispatchesTakeoverNeverIssues) {
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "toggle", "DP-2"}));
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "on"}));
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"exec", "firefox"}));
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({}));
+}
+
 TEST(DesktopTakeover, InactiveTombstoneNeedsNoTopologyDetails) {
   const auto parsed = desktop_takeover::parse_state(R"({"version":1,"active":false})");
   ASSERT_TRUE(parsed);
