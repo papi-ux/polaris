@@ -83,7 +83,7 @@
       </div>
       <div class="library-import-staged-actions">
         <Button
-          v-if="sweepSearching"
+          v-if="sweepSearching || coverSweep.automatic.value"
           variant="outline"
           data-sweep-stop
           @click="coverSweep.stop()"
@@ -94,7 +94,7 @@
           v-else
           variant="outline"
           :loading="coverSweep.starting.value"
-          :disabled="coverSweep.starting.value || coverSweep.applying.value"
+          :disabled="coverSweep.starting.value || coverSweep.applying.value || coverSweep.automatic.value"
           data-sweep-start
           @click="coverSweep.start()"
         >
@@ -111,7 +111,7 @@
         <Button
           variant="primary"
           :loading="coverSweep.applying.value"
-          :disabled="coverSweep.applying.value || sweepKeptCount === 0"
+          :disabled="coverSweep.applying.value || coverSweep.automatic.value || sweepKeptCount === 0"
           data-sweep-apply
           @click="applySweep"
         >
@@ -317,6 +317,12 @@
           <div class="section-kicker">Staged import</div>
           <div class="library-import-staged-title">{{ stagedImportSummaryTitle }}</div>
           <div class="library-import-staged-copy">{{ stagedImportSummaryCopy }}</div>
+          <label class="mt-3 flex items-start gap-2 text-sm text-silver" data-import-auto-covers>
+            <input v-model="importWithCovers" type="checkbox" class="mt-1" :disabled="gameImporting || coverSweep.starting.value || coverSweep.automatic.value" />
+            <span>Automatically add matching covers
+              <span class="block text-xs text-storm">Only newly imported games without covers. Keep this page open while covers are added. Requires a SteamGridDB key.</span>
+            </span>
+          </label>
           <div v-if="stagedImportSources.length" class="library-import-staged-sources">
             <span v-for="source in stagedImportSources" :key="source.key" class="meta-pill">
               {{ source.label }} {{ source.selected }}
@@ -330,7 +336,7 @@
           <Button variant="outline" :disabled="selectedImportCount === 0" data-import-stage-clear-all @click="clearAllImportStaging">
             Clear all
           </Button>
-          <Button variant="primary" :disabled="gameImporting || selectedImportCount === 0" :loading="gameImporting" @click="doImport">
+          <Button variant="primary" :disabled="gameImporting || coverSweep.starting.value || coverSweep.automatic.value || selectedImportCount === 0" :loading="gameImporting" @click="doImport">
             {{ importSelectedButtonLabel }}
           </Button>
         </div>
@@ -427,7 +433,7 @@
                 {{ activeImportSource?.label || 'Source' }} / {{ visibleImportGames.length }} shown
               </div>
             </div>
-            <Button variant="primary" :disabled="gameImporting || selectedImportCount === 0" :loading="gameImporting" @click="doImport">
+            <Button variant="primary" :disabled="gameImporting || coverSweep.starting.value || coverSweep.automatic.value || selectedImportCount === 0" :loading="gameImporting" @click="doImport">
               {{ importSelectedButtonLabel }}
             </Button>
           </div>
@@ -1337,11 +1343,12 @@ const { toast: showToast } = useToast()
 const {
   scanning: gameScanning, importing: gameImporting,
   steamGames, lutrisGames, heroicGames, emulatorGames, librarySources,
-  error: gameScanError,
+  error: gameScanError, importedGames,
   scan: scanGames, importSelected, toggleAll: gameToggleAll
 } = useGameScanner()
 const showImport = ref(false)
 const showImportReview = ref(false)
+const importWithCovers = ref(false)
 const importTab = ref('steam')
 const importSearch = ref('')
 const importStatus = ref('new')
@@ -1423,11 +1430,17 @@ watch(showImport, (open) => {
 // finish is reported now rather than the next time Import Games opens.
 if (romInstallsPending()) loadRomSources()
 async function doImport() {
+  const addCovers = importWithCovers.value
   const count = await importSelected()
   if (count > 0) {
     showToast(`Imported ${count} game${count > 1 ? 's' : ''}`, 'success')
     showImportReview.value = true
-    loadApps()
+    await loadApps()
+    if (addCovers && importedGames.value.length) {
+      const uuids = importedGames.value.map((game) => game.uuid).filter(Boolean)
+      showSweepReview.value = true
+      await coverSweep.start({ uuids, automaticApply: true })
+    }
   }
 }
 const i18n = inject('i18n')
@@ -2135,7 +2148,7 @@ async function useCover(cover) {
 }
 
 // --- Covers for the games that have none -----------------------------------------------------------
-const coverSweep = useCoverSweep()
+const coverSweep = useCoverSweep({ onApplied: () => loadApps() })
 const showSweepReview = ref(false)
 
 const sweepRows = computed(() => coverSweep.rows.value)
@@ -2146,7 +2159,7 @@ const sweepKeptCount = computed(
 
 const sweepTitle = computed(() => {
   const sweep = coverSweep.sweep.value
-  if (coverSweep.nothingToDo.value) return 'Every game already has a cover'
+  if (coverSweep.nothingToDo.value) return 'No covers to add'
   if (!sweep || !sweep.total) return 'Find covers for games without one'
   if (sweep.state === 'searching') return `Looking up ${sweep.total} games`
   return sweep.message || 'Cover search finished'
@@ -2156,7 +2169,7 @@ const sweepCopy = computed(() => {
   const sweep = coverSweep.sweep.value
   if (coverSweep.applying.value) return `Storing covers, ${coverSweep.applied.value} so far.`
   if (coverSweep.nothingToDo.value) {
-    return 'Nothing to look up. Every published game has a cover, or has had artwork lookup turned off.'
+    return 'The selected games already have covers, or have artwork lookup turned off.'
   }
   if (!sweep || !sweep.total) {
     return 'One pass over every game with no cover. Nothing is stored until you apply it.'

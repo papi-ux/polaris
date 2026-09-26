@@ -223,10 +223,12 @@ TEST(RomFolderRoutes, RegisterScanAndImportARomFolder) {
     // The import writes the entry from the folder, not from the browser, and publishes Eden once.
     auto imported = request("POST", "/api/games/import", import_body(rom_path));
     ASSERT_EQ(code(imported), 200);
-    EXPECT_EQ(body(imported)["imported"], 1);
+    const auto receipt = body(imported);
+    EXPECT_EQ(receipt["imported"], 1);
     auto apps = nlohmann::json::parse(read_text(config::stream.file_apps))["apps"];
     ASSERT_EQ(apps.size(), 2u);
     const auto &game = apps[0];
+    EXPECT_EQ(receipt["imported_games"], nlohmann::json::array({{{"uuid", game["uuid"]}, {"name", "Game One"}}}));
     EXPECT_EQ(game["name"], "Game One");
     EXPECT_EQ(game["cmd"], expected_command);
     EXPECT_EQ(game["source"], "emulator");
@@ -264,7 +266,9 @@ TEST(RomFolderRoutes, RegisterScanAndImportARomFolder) {
     // Importing it again is a no-op, and the scan now reports it as imported.
     auto repeat = request("POST", "/api/games/import", import_body(rom_path));
     ASSERT_EQ(code(repeat), 200);
-    EXPECT_EQ(body(repeat)["imported"], 0);
+    const auto repeat_receipt = body(repeat);
+    EXPECT_EQ(repeat_receipt["imported"], 0);
+    EXPECT_EQ(repeat_receipt["imported_games"], nlohmann::json::array());
     EXPECT_EQ(nlohmann::json::parse(read_text(config::stream.file_apps))["apps"].size(), 2u);
     EXPECT_TRUE(confighttp::rom_folder_scan_for_tests({}, {rom_path})["emulator_games"][0]["already_imported"].get<bool>());
 
