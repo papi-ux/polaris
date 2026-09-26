@@ -32,7 +32,10 @@ describe('Vulkan Video settings contract', () => {
     const encoder = webSource('configs/tabs/encoders/VulkanEncoder.vue')
     const locale = JSON.parse(webSource('public/assets/locale/en.json')).config
 
-    expect(locale.vk_quality_default).toBe('Level 0 (default)')
+    expect(locale.vk_quality_default).toBe('Level 0 (default, fastest encode)')
+    // Every level above 0 costs encode time on each frame, and the labels say so.
+    expect(locale.vk_quality_level).toBe('Quality level {level} (more encode time)')
+    expect(locale.vk_quality_desc).toContain('adds that time to stream latency')
     expect(locale.vk_quality_desc).toContain("one less than the driver's reported maximum")
     // The description must explain that Polaris clamps out-of-range saved values.
     expect(locale.vk_quality_desc).toContain('clamped to that maximum when the session starts, with a warning logged')
