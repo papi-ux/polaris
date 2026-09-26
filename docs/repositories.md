@@ -25,7 +25,6 @@ account is no longer known.
 ## Fedora
 
 ```bash
-sudo rpm --import https://repo.papi-ux.com/polaris.gpg
 sudo curl --location --output /etc/yum.repos.d/polaris.repo \
   https://repo.papi-ux.com/fedora/polaris.repo
 sudo dnf install polaris
@@ -35,14 +34,24 @@ systemctl --user restart polaris
 
 After that, `sudo dnf upgrade` carries Polaris with everything else.
 
-The first `dnf` command against the repository asks you to accept the signing
-key, showing fingerprint `58017EDFFA9F803E07ED26F835F13F14FAAD15CC`. That is
-expected: `rpm --import` populates rpm's keyring, and dnf keeps its own record
-of which repositories it trusts. Accepting once is enough.
+There is no separate key import. The repository definition carries `gpgkey=`, so
+`dnf install` fetches the key itself and asks you to accept it:
 
-It also means the first non-interactive use finds nothing rather than failing —
-a script on a fresh host should run `sudo dnf -y makecache` before relying on
-the repository.
+```
+Importing OpenPGP key 0xFAAD15CC:
+ UserID     : "Polaris Package Repository <papi@papi-ux.com>"
+ Fingerprint: 58017EDFFA9F803E07ED26F835F13F14FAAD15CC
+```
+
+Compare that fingerprint with the one on this page before answering yes.
+Accepting once is enough.
+
+Because that prompt is the only thing that puts the key in place, a script has
+to answer it. `repo_gpgcheck=1` means an unanswered prompt leaves the metadata
+unverified, and dnf reports `repomd.xml GPG signature verification error:
+Signing key not found` rather than installing anything. A script on a fresh host
+should run `sudo dnf -y makecache` first, which accepts the key, or import it
+explicitly with `sudo rpm --import https://repo.papi-ux.com/polaris.gpg`.
 
 ## Bazzite and other ostree hosts
 
@@ -56,6 +65,10 @@ rpm-ostree install polaris
 systemctl reboot
 ```
 
+The key import stays here, unlike the Fedora steps above. `dnf` offers the key
+from `gpgkey=` and waits for an answer; `rpm-ostree` does not ask, so the key has
+to be in rpm's keyring before it will layer a signed package.
+
 Layered packages are updated by `rpm-ostree upgrade`, so Polaris follows the
 image update instead of needing to be re-layered from a downloaded RPM.
 
@@ -67,9 +80,19 @@ Seat isolation still needs the input group, which on ostree hosts lives in
 ```bash
 curl -fsSL https://repo.papi-ux.com/polaris.gpg | sudo pacman-key --add -
 sudo pacman-key --lsign-key 58017EDFFA9F803E07ED26F835F13F14FAAD15CC
+grep -q '^\[polaris\]' /etc/pacman.conf ||
+  curl -fsSL https://repo.papi-ux.com/arch/polaris.conf | sudo tee -a /etc/pacman.conf
+sudo pacman -Sy polaris
+sudo -H polaris --setup-host
+systemctl --user restart polaris
 ```
 
-Then append to `/etc/pacman.conf`:
+The repository publishes its own pacman section, so that is fetched rather than
+typed. The `grep` guard is not decoration: appending it twice gives pacman a
+duplicated `[polaris]` repository, and pasting a block again is exactly what
+someone does when a step appears not to have worked.
+
+What it appends is:
 
 ```ini
 [polaris]
@@ -77,16 +100,14 @@ SigLevel = Required DatabaseRequired
 Server = https://repo.papi-ux.com/arch/$arch
 ```
 
-```bash
-sudo pacman -Sy polaris
-sudo -H polaris --setup-host
-systemctl --user restart polaris
-```
-
 `SigLevel = Required DatabaseRequired` is deliberate. Without it pacman falls
 back to the checksum recorded in the database and reports `Validated By: SHA-256
 Sum` — it never looks at the signature, so anyone who can rewrite the database
 rewrites the checksum with it.
+
+Unlike dnf, pacman has no equivalent of `gpgkey=` in a repository section, so the
+two `pacman-key` commands cannot be dropped the way `rpm --import` was for Fedora.
+Shipping a `polaris-keyring` package is what would remove them.
 
 ## SteamOS
 
