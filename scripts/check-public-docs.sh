@@ -22,7 +22,6 @@ if re.search(r"(?im)^#{1,6}\s+.*(?:what(?:'s| is) new|latest release|release)\s*
 
 required_links = (
     "https://papi-ux.com/polaris/",
-    "https://papi-ux.com/polaris/#themes",
     "https://papi-ux.com/docs/quickstart/",
     "https://papi-ux.com/docs/compatibility/",
     "https://papi-ux.com/docs/faq/",
