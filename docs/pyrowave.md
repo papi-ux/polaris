@@ -16,6 +16,9 @@ Leave the host's normal encoder selection unchanged.
   `com.papi_ux.Nova.pyrowave.json` Flatpak manifest. The ordinary Linux Alpha
   bundle published with **Nova v1.4.13-beta.3** uses the standard manifest and
   does **not** include PyroWave. A beta release label alone is not sufficient.
+  In an enabled build, select **Play Setup → Video Codec → PyroWave ·
+  Experimental** on the normal Desktop destination. The Linux device needs a
+  compatible Vulkan decoder; PyroWave is unavailable in Spaces.
 - **Moonlight:** standard clients do not contain the PyroWave decoder. A
   host-side setting cannot add it; use a compatible Nova build to test this
   codec. Moonlight continues to use its supported H.264, HEVC and AV1 paths.
