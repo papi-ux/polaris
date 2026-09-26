@@ -1895,6 +1895,36 @@ namespace {
     EXPECT_FALSE(nvhttp::profile_artwork_target(client, "space.profile-a.id.2"));
   }
 
+  TEST_F(MultiseatLaunchService, HostSetupCannotOvertakeALaunchReadingItsLibrary) {
+    auto admin = std::make_shared<spaces::host_admin_service_t>(spaces::host_admin_options_t {
+      .facts = [] {
+        spaces::host_admin_facts_t facts;
+        facts.helper = facts.pkexec = facts.policy = true;
+        return facts;
+      },
+    });
+    ASSERT_TRUE(spaces::install_host_admin_service(admin));
+    auto uninstall = util::fail_guard([&] {
+      admin->shutdown();
+      spaces::uninstall_host_admin_service(admin);
+    });
+    ASSERT_TRUE(service->shutdown(2s));
+    spaces::host_admin_service_t::submit_result_t host_result;
+    state->library = [&](std::string_view) {
+      // The launch passed its host-setup check, but has not registered an active worker yet.
+      host_result = admin->submit({spaces::host_action_e::security_install,
+        "12345678-1234-4234-8234-123456789abc"});
+      return spaces::library_t {true, {{"620", "Portal"}}};
+    };
+    service = std::make_shared<profile_launch_service_t>(std::make_unique<controller_t>(state,
+      std::vector<profile_summary_t>{{"profile-a", "Alex", {"client-a"}, "steam", false, {}, true}}), 2s);
+    auto active = launch();
+    EXPECT_EQ(service->prepare(active, "profile-a", "620").status, 200);
+    EXPECT_EQ(host_result.status, 409);
+    EXPECT_TRUE(host_result.refusal.has_value());
+    active->cancel();
+  }
+
   // While an administrator approves a change to this PC's setup, nothing starts or changes a Space.
   TEST_F(MultiseatAssignments, HostSetupInProgressHoldsLaunchesAndSpacesChangesUntilItFinishes) {
     std::mutex mutex;
