@@ -15,8 +15,11 @@ Only DRM/KMS capture still needs an explicit privileged step, repeated after eve
 update because an update replaces the binary that held the capability:
   sudo -H polaris --setup-host --enable-kms
 
-If Polaris crashes, install polaris-debug and report the backtrace:
-  coredumpctl info polaris
+For crash debugging, install polaris-debug from the same release as Polaris.
+Find the crash, then open its matching symbols in a debugger:
+  coredumpctl list
+  coredumpctl debug PID
+Replace PID with the Polaris crash's process ID from the list.
 
 Optional background autostart:
   systemctl --user enable --now polaris
