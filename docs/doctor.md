@@ -30,6 +30,19 @@ capture latency, and encoder time remain inside the active stream's real FPS bud
 when those measurements show pressure; it does not lower a healthy 120 FPS stream merely because
 its compatibility path is CPU-backed.
 
+**Capture source size** compares a delivered frame with the size encoded for that stream. For
+example, a 3840 × 2160 source feeding a 1920 × 1080 stream has four times as many pixels before
+scaling. On a CPU capture path, Doctor notes sources with at least twice the stream's pixel count
+and suggests checking the active output mode and the adapter's supported modes. Lowering the client
+resolution alone may leave the capture source unchanged. This is context for investigation: it
+does not prove a frame-rate bottleneck or authorize an automatic change.
+
+Source sizes appear after a real frame reaches the encoder and belong to that stream generation;
+probe images and late updates from retired connections do not supply them. Diagnostics include
+`capture_source` for each client and for the primary client at the top level, or `null` when no
+source has been observed. Doctor shows the size comparison while one client is active, so it does
+not present several clients' capture paths as a single diagnosis.
+
 On a Linux host configured for `gamescope_stream`, Doctor & Support also shows a **Gamescope Session
 Helper** card. It names the `polaris-gamescope-session` launcher this Polaris will run, warns when a
 stale copy under `~/.local/bin` or `/usr/local/bin` sits ahead of it on PATH, and fails when the
