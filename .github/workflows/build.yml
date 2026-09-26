@@ -43,6 +43,9 @@ jobs:
       - name: Verify bounded Arch CUDA download
         run: python3 -m unittest discover -s tests/scripts -p 'test_download_arch_cuda.py'
 
+      - name: Verify matching debug package assets
+        run: python3 -m unittest discover -s tests/scripts -p 'test_debug_package_assets.py'
+
       - name: Verify build scope classifier
         run: tests/scripts/test_classify_native_build.sh
 
@@ -928,12 +931,11 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: Polaris-steamos3.8-package
-          # Both packages, or the release job has nothing to publish the helper from. Naming one file
-          # here is what broke the first tag build after the polaris-kms split: the script below
-          # builds the helper, asserts it carries exactly two files, and the upload dropped it.
+          # Keep the host, KMS helper and matching symbols together through release assembly.
           path: |
             ${{ runner.temp }}/polaris-steamos-output/Polaris-steamos3.8-x86_64.pkg.tar.zst
             ${{ runner.temp }}/polaris-steamos-output/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst
+            ${{ runner.temp }}/polaris-steamos-output/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst
           if-no-files-found: error
 
       - name: Upload SteamOS 3.8 validation receipts
@@ -1714,25 +1716,30 @@ jobs:
       - name: Prepare release asset names
         run: |
           mkdir -p release-assets/staged release-assets/final
+          python3 scripts/ci/validate-pacman-debug.py \
+            --main release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst \
+            --kms release-assets/raw/steamos3.8/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst \
+            --debug release-assets/raw/steamos3.8/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst
           shopt -s nullglob
           steamos_packages=(release-assets/raw/steamos3.8/*.pkg.tar.zst)
-          if [ "${#steamos_packages[@]}" -ne 2 ]; then
+          if [ "${#steamos_packages[@]}" -ne 3 ]; then
             exit 1
           fi
           cp "release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst" "release-assets/staged/Polaris-steamos3.8-x86_64.pkg.tar.zst"
           cp "release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst" "release-assets/final/Polaris-steamos3.8-x86_64.pkg.tar.zst"
           cp "release-assets/raw/steamos3.8/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst" "release-assets/final/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst"
+          cp "release-assets/raw/steamos3.8/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst" "release-assets/final/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst"
 
           arch_packages=()
           arch_kms_packages=()
           arch_sources=()
-          arch_signatures=()
+          arch_debug_packages=()
           for arch_path in release-assets/raw/arch/*; do
             case "$arch_path" in
               *.pkg.tar.*.sig)
-                arch_signatures+=("$arch_path")
                 ;;
-              *debug*.pkg.tar.*)
+              */polaris-debug-*.pkg.tar.*)
+                arch_debug_packages+=("$arch_path")
                 ;;
               */polaris-kms-*.pkg.tar.*)
                 arch_kms_packages+=("$arch_path")
@@ -1746,14 +1753,21 @@ jobs:
             esac
           done
 
-          if [ "${#arch_packages[@]}" -eq 0 ]; then
-            echo "No Arch package outputs were produced by the Arch packaging job" >&2
+          if [ "${#arch_packages[@]}" -ne 1 ]; then
+            echo "Expected exactly one Arch polaris package, found ${#arch_packages[@]}" >&2
             exit 1
           fi
           if [ "${#arch_kms_packages[@]}" -ne 1 ]; then
             echo "Expected exactly one Arch polaris-kms package, found ${#arch_kms_packages[@]}" >&2
             exit 1
           fi
+
+          if [ "${#arch_debug_packages[@]}" -ne 1 ]; then
+            echo "Expected exactly one Arch polaris-debug package, found ${#arch_debug_packages[@]}" >&2
+            exit 1
+          fi
+          python3 scripts/ci/validate-pacman-debug.py \
+            --main "${arch_packages[0]}" --kms "${arch_kms_packages[0]}" --debug "${arch_debug_packages[0]}"
 
           arch_package_name="$(basename "${arch_packages[0]}")"
           arch_package_suffix="${arch_package_name#*.pkg.tar}"
@@ -1762,8 +1776,18 @@ jobs:
           arch_kms_suffix="${arch_kms_name#*.pkg.tar}"
           cp "${arch_kms_packages[0]}" "release-assets/final/Polaris-kms-arch-x86_64.pkg.tar${arch_kms_suffix}"
 
-          if [ "${#arch_signatures[@]}" -gt 0 ]; then
-            cp "${arch_signatures[0]}" "release-assets/final/Polaris-arch-x86_64.pkg.tar${arch_package_suffix}.sig"
+          arch_debug_name="$(basename "${arch_debug_packages[0]}")"
+          arch_debug_suffix="${arch_debug_name#*.pkg.tar}"
+          cp "${arch_debug_packages[0]}" "release-assets/final/Polaris-debug-arch-x86_64.pkg.tar${arch_debug_suffix}"
+
+          if [ -f "${arch_packages[0]}.sig" ]; then
+            cp "${arch_packages[0]}.sig" "release-assets/final/Polaris-arch-x86_64.pkg.tar${arch_package_suffix}.sig"
+          fi
+          if [ -f "${arch_kms_packages[0]}.sig" ]; then
+            cp "${arch_kms_packages[0]}.sig" "release-assets/final/Polaris-kms-arch-x86_64.pkg.tar${arch_kms_suffix}.sig"
+          fi
+          if [ -f "${arch_debug_packages[0]}.sig" ]; then
+            cp "${arch_debug_packages[0]}.sig" "release-assets/final/Polaris-debug-arch-x86_64.pkg.tar${arch_debug_suffix}.sig"
           fi
 
           if [ "${#arch_sources[@]}" -gt 0 ]; then
@@ -1950,6 +1974,8 @@ jobs:
             Polaris-kms-fedora44-x86_64.rpm
             Polaris-kms-steamos3.8-x86_64.pkg.tar.zst
             Polaris-kms-ubuntu24.04-x86_64.deb
+            Polaris-debug-arch-x86_64.pkg.tar.zst
+            Polaris-debug-steamos3.8-x86_64.pkg.tar.zst
           )
           for required_asset in "${required_binary_assets[@]}"; do
             if [[ ! " ${expected_assets[*]} " =~ " ${required_asset} " ]]; then
