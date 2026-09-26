@@ -147,6 +147,116 @@ describe('KMS package capability admission', () => {
   }
 })
 
+describe('removal hooks clean up what only they can', () => {
+  // polaris-spaces-setup is the only thing that can remove the SELinux policies it installed, and it
+  // ships inside the package, so after removal those policies cannot be removed at all. Every case
+  // below is about that one fact: it has to run on a removal, it must not run on an upgrade, and a
+  // refusal must not abort the removal, because a half removed package is worse than a stale policy.
+  const stubHelper = (fixture, refuse) => {
+    const helper = join(fixture, 'polaris-spaces-setup')
+    writeFileSync(helper, `#!/bin/sh\nprintf '%s\\n' "spaces-setup $*" >> "$REMOVE_TEST_LOG"\n`
+      + (refuse ? 'exit 1\n' : 'exit 0\n'))
+    chmodSync(helper, 0o755)
+    return helper
+  }
+
+  const runHook = (fixture, script, invocation, helper) => {
+    const log = join(fixture, 'commands')
+    writeFileSync(log, '')
+    const result = spawnSync('bash', ['-c', invocation, 'remove-test', script], {
+      encoding: 'utf8',
+      env: { ...process.env, REMOVE_TEST_LOG: log, REMOVE_TEST_HELPER: helper },
+    })
+    return { result, calls: readFileSync(log, 'utf8').trim() }
+  }
+
+  // dpkg passes remove, purge or upgrade; rpm passes how many versions will remain, so 0 is the last
+  // one going away and 1 is an upgrade. One script reads both.
+  for (const [argument, shouldRemove] of [['remove', true], ['purge', true], ['0', true],
+                                          ['upgrade', false], ['1', false]]) {
+    it(`the DEB and RPM hook ${shouldRemove ? 'removes' : 'leaves'} the Spaces setup on "${argument}"`, () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'polaris-removal-'))
+      try {
+        const helper = stubHelper(fixture, false)
+        const script = join(fixture, 'prerm')
+        writeFileSync(script, readSource('src_assets/linux/misc/prerm')
+          .replace('spaces_setup=/usr/bin/polaris-spaces-setup', 'spaces_setup="$REMOVE_TEST_HELPER"'))
+        const { result, calls } = runHook(fixture, script, `sh "$1" ${argument}`, helper)
+        expect(result.status, result.stderr).toBe(0)
+        expect(calls).toBe(shouldRemove ? 'spaces-setup remove' : '')
+      } finally {
+        rmSync(fixture, { force: true, recursive: true })
+      }
+    })
+  }
+
+  it('the DEB and RPM hook survives a helper that refuses, and says how to recover', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'polaris-removal-'))
+    try {
+      const helper = stubHelper(fixture, true)
+      const script = join(fixture, 'prerm')
+      writeFileSync(script, readSource('src_assets/linux/misc/prerm')
+        .replace('spaces_setup=/usr/bin/polaris-spaces-setup', 'spaces_setup="$REMOVE_TEST_HELPER"'))
+      const { result, calls } = runHook(fixture, script, 'sh "$1" remove', helper)
+      // A refusal must never abort the removal: dpkg would leave the package half configured.
+      expect(result.status, result.stderr).toBe(0)
+      expect(calls).toBe('spaces-setup remove')
+      expect(result.stdout).toContain('/usr/bin/polaris-spaces-setup remove')
+    } finally {
+      rmSync(fixture, { force: true, recursive: true })
+    }
+  })
+
+  it('the DEB and RPM hook does nothing when the helper was never installed', () => {
+    const fixture = mkdtempSync(join(tmpdir(), 'polaris-removal-'))
+    try {
+      const script = join(fixture, 'prerm')
+      writeFileSync(script, readSource('src_assets/linux/misc/prerm')
+        .replace('spaces_setup=/usr/bin/polaris-spaces-setup', 'spaces_setup="$REMOVE_TEST_HELPER"'))
+      const { result, calls } = runHook(fixture, script, 'sh "$1" remove', join(fixture, 'absent'))
+      expect(result.status, result.stderr).toBe(0)
+      expect(calls).toBe('')
+    } finally {
+      rmSync(fixture, { force: true, recursive: true })
+    }
+  })
+
+  for (const distro of ['Arch', 'SteamOS']) {
+    it(`${distro} pre_remove removes the Spaces setup and names what is left behind`, () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'polaris-removal-'))
+      try {
+        const helper = stubHelper(fixture, false)
+        const script = join(fixture, 'package.install')
+        writeFileSync(script, readSource(`packaging/linux/${distro}/polaris.install`)
+          .replace('local spaces_setup=/usr/bin/polaris-spaces-setup',
+            'local spaces_setup="$REMOVE_TEST_HELPER"'))
+        const { result, calls } = runHook(fixture, script, '. "$1"; pre_remove', helper)
+        expect(result.status, result.stderr).toBe(0)
+        expect(calls).toBe('spaces-setup remove')
+        // The data nobody else will mention, said at the one moment the user is looking.
+        expect(result.stdout).toContain('~/.config/polaris')
+      } finally {
+        rmSync(fixture, { force: true, recursive: true })
+      }
+    })
+
+    it(`${distro} declares pre_remove, because pacman runs it only on removal`, () => {
+      // An upgrade must not reach it: the replacement package puts the same helper back.
+      const source = readSource(`packaging/linux/${distro}/polaris.install`)
+      expect(source).toContain('pre_remove() {')
+      expect(source).not.toContain('pre_upgrade() {')
+    })
+  }
+
+  it('both package formats are wired to the same removal script', () => {
+    const cmake = readSource('cmake/packaging/linux.cmake')
+    expect(cmake).toContain('list(APPEND CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA '
+      + '"${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/prerm")')
+    expect(cmake).toContain('set(CPACK_RPM_PRE_UNINSTALL_SCRIPT_FILE '
+      + '"${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/prerm")')
+  })
+})
+
 const shellExecutableOccurrences = (commands, executable) => {
   const pattern = new RegExp(`(?:^|[;&|(){}]\\s*)(?:(?:if|while|until|elif|then|else|do)\\s+)?(?:!\\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^\\s;&|(){}]+\\s+)*(?:sudo\\s+)?(?:[^\\s;&|(){}]+/)?${executable}(?=\\s|$)`, 'g')
   return commands.flatMap((command, index) => (
