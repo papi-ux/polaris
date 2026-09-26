@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
+#include <nlohmann/json.hpp>
 
 namespace {
   std::filesystem::path lutris_test_root(const std::string &name) {
@@ -543,11 +544,17 @@ TEST(HeroicLibraryScannerTests, ListsBothInstallsForEveryStoreFile) {
   EXPECT_EQ(installed[3].path,
     home / ".var/app/com.heroicgameslauncher.hgl/config/heroic/legendaryConfig/legendary/installed.json");
 
-  ASSERT_EQ(cached.size(), 4u);
+  ASSERT_EQ(cached.size(), 8u);
   EXPECT_EQ(cached[0].path, home / ".config/heroic/store_cache/gog_library.json");
   EXPECT_EQ(cached[1].path, home / ".config/heroic/store_cache/legendary_library.json");
-  EXPECT_EQ(cached[2].path, home / ".var/app/com.heroicgameslauncher.hgl/config/heroic/store_cache/gog_library.json");
-  EXPECT_EQ(cached[2].install, game_library::launcher_install_t::flatpak);
+  EXPECT_EQ(cached[2].path, home / ".config/heroic/store_cache/nile_library.json");
+  EXPECT_EQ(cached[2].store, "amazon");
+  EXPECT_EQ(cached[3].path, home / ".config/heroic/sideload_apps/library.json");
+  EXPECT_EQ(cached[3].store, "sideload");
+  EXPECT_EQ(cached[4].path, home / ".var/app/com.heroicgameslauncher.hgl/config/heroic/store_cache/gog_library.json");
+  EXPECT_EQ(cached[4].install, game_library::launcher_install_t::flatpak);
+  EXPECT_EQ(cached[6].path, home / ".var/app/com.heroicgameslauncher.hgl/config/heroic/store_cache/nile_library.json");
+  EXPECT_EQ(cached[7].path, home / ".var/app/com.heroicgameslauncher.hgl/config/heroic/sideload_apps/library.json");
 }
 
 TEST(HeroicLibraryScannerTests, BuildsTheCommandForTheInstallThatHasTheTitle) {
@@ -592,7 +599,8 @@ TEST(HeroicLibraryScannerTests, BuildsTheCommandForTheInstallThatHasTheTitle) {
 TEST(HeroicLibraryScannerTests, MapsOnlySupportedStoresAndInstallNames) {
   EXPECT_EQ(game_library::heroic_runner_for_store("gog"), "gog");
   EXPECT_EQ(game_library::heroic_runner_for_store("epic"), "legendary");
-  EXPECT_TRUE(game_library::heroic_runner_for_store("amazon").empty());
+  EXPECT_EQ(game_library::heroic_runner_for_store("amazon"), "nile");
+  EXPECT_EQ(game_library::heroic_runner_for_store("sideload"), "sideload");
   EXPECT_TRUE(game_library::heroic_runner_for_store("legendary").empty());
 
   EXPECT_EQ(game_library::heroic_install_name(game_library::launcher_install_t::native), "native");
@@ -619,7 +627,7 @@ TEST(HeroicLibraryScannerTests, RebuildsImportsFromExactMetadataAndRejectsTamper
   EXPECT_FALSE(game_library::heroic_game_from_metadata("Snow", "epic", "epic", "flatpak").has_value());
   EXPECT_FALSE(game_library::heroic_game_from_metadata("Snow", "gog", "gog", "system").has_value());
   EXPECT_FALSE(game_library::heroic_game_from_metadata("Snow;id", "gog", "gog", "native").has_value());
-  EXPECT_FALSE(game_library::heroic_game_from_metadata("Snow", "amazon", "nile", "native").has_value());
+  EXPECT_FALSE(game_library::heroic_game_from_metadata("Snow", "amazon", "amazon", "native").has_value());
 }
 
 TEST(HeroicLibraryScannerTests, ParsesOnlyExactLegacyPolarisCommands) {
@@ -697,6 +705,86 @@ TEST(HeroicLibraryScannerTests, ParsesOnlyInstalledNonDlcLegendaryCacheEntries) 
   EXPECT_EQ(games[0].runner, "legendary");
   EXPECT_EQ(games[0].poster_url, "https://cdn1.epicgames.com/item/installed/poster");
   EXPECT_EQ(games[0].hero_url, "https://cdn1.epicgames.com/item/installed/hero");
+}
+
+TEST(HeroicLibraryScannerTests, DiscoversInstalledAmazonAndSideloadedGames) {
+  // Heroic's Nile cache has no is_dlc field; its sideload store uses games instead of library.
+  const auto amazon = game_library::parse_heroic_cache_json(R"json({"library":[
+    {"app_name":"amzn1.adg.product.fixture-id","title":"Amazon Game","runner":"nile",
+     "is_installed":true,"install":{"platform":"Windows"},"art_square":"https://example.invalid/poster.jpg"}
+  ]})json", "amazon", game_library::launcher_install_t::flatpak);
+  ASSERT_EQ(amazon.size(), 1u);
+  EXPECT_EQ(amazon.front().store, "amazon");
+  EXPECT_EQ(amazon.front().runner, "nile");
+  EXPECT_EQ(amazon.front().platform, "windows");
+  EXPECT_EQ(amazon.front().command,
+    "setsid flatpak run com.heroicgameslauncher.hgl 'heroic://launch?appName=amzn1.adg.product.fixture-id&runner=nile'");
+
+  const auto sideload = game_library::parse_heroic_cache_json(R"json({"games":[
+    {"app_name":"custom-game-1","title":"Local Game","runner":"sideload","is_installed":true,
+     "install":{"platform":"linux","is_dlc":false,"executable":"/games/not-used-by-polaris"}}
+  ]})json", "sideload", game_library::launcher_install_t::native);
+  ASSERT_EQ(sideload.size(), 1u);
+  EXPECT_EQ(sideload.front().runner, "sideload");
+  EXPECT_EQ(sideload.front().platform, "linux");
+  EXPECT_EQ(sideload.front().command,
+    "setsid heroic --no-gui --no-sandbox 'heroic://launch?appName=custom-game-1&runner=sideload'");
+}
+
+TEST(HeroicLibraryScannerTests, AdditionalStoresRejectUninstalledDlcAndMismatchedIdentities) {
+  using json = nlohmann::json;
+  for (const auto store : {"amazon", "sideload"}) {
+    const auto runner = std::string(store) == "amazon" ? "nile" : "sideload";
+    const auto key = std::string(store) == "amazon" ? "library" : "games";
+    const json valid {{"app_name", "safe-id"}, {"title", "Installed Game"}, {"runner", runner},
+      {"is_installed", true}, {"install", {{"platform", "Windows"}, {"is_dlc", false}}}};
+    for (const auto &[field, value] : std::vector<std::pair<std::string, json>> {
+           {"is_installed", false}, {"is_installed", "yes"}, {"runner", "legendary"}, {"runner", 1},
+           {"app_name", "bad;command"}, {"app_name", "../escape"}, {"app_name", 7}, {"title", ""}, {"title", 7},
+           {"is_dlc", true}, {"is_dlc", "false"},
+           {"install", nullptr}, {"install", {{"is_dlc", true}}}, {"install", {{"is_dlc", "false"}}}}) {
+      auto bad = valid;
+      bad[field] = value;
+      const json payload {{key, json::array({bad, valid})}};
+      const auto games = game_library::parse_heroic_cache_json(payload.dump(), store, game_library::launcher_install_t::native);
+      ASSERT_EQ(games.size(), 1u) << store << ' ' << field;
+      EXPECT_EQ(games.front().app_name, "safe-id");
+    }
+  }
+}
+
+TEST(HeroicLibraryScannerTests, NewStoresUseOnlyCurrentCommandFormsAndExactRunnerMetadata) {
+  for (const auto store : {"amazon", "sideload"}) {
+    const auto runner = std::string(store) == "amazon" ? "nile" : "sideload";
+    for (const auto install : {game_library::launcher_install_t::native, game_library::launcher_install_t::flatpak}) {
+      const auto game = game_library::heroic_game_from_metadata("safe-id", store, runner, game_library::heroic_install_name(install));
+      ASSERT_TRUE(game);
+      const auto commands = game_library::heroic_launch_commands_for_install(store, "safe-id", install);
+      ASSERT_EQ(commands.size(), 1u);
+      EXPECT_EQ(commands.front(), game->command);
+      EXPECT_FALSE(game_library::heroic_game_from_metadata("safe-id", store, "legendary", game_library::heroic_install_name(install)));
+    }
+    EXPECT_FALSE(game_library::parse_legacy_heroic_launch_command("setsid heroic heroic://launch/" + std::string(store) + "/safe-id"));
+  }
+}
+
+TEST(HeroicLibraryScannerTests, FindsNewStoresOnlyWithinTheRequestedHeroicInstallation) {
+  const auto home = lutris_test_root("heroic_additional_stores");
+  const auto heroic = home / ".var/app/com.heroicgameslauncher.hgl/config/heroic";
+  std::filesystem::create_directories(heroic / "store_cache");
+  std::filesystem::create_directories(heroic / "sideload_apps");
+  write_text(heroic / "store_cache/nile_library.json", R"json({"library":[
+    {"app_name":"amazon-id","title":"Amazon Game","runner":"nile","is_installed":true,"install":{"platform":"Windows"}}
+  ]})json");
+  write_text(heroic / "sideload_apps/library.json", R"json({"games":[
+    {"app_name":"sideload-id","title":"Local Game","runner":"sideload","is_installed":true,"install":{"is_dlc":false}}
+  ]})json");
+  for (const auto store : {"amazon", "sideload"}) {
+    const auto id = std::string(store) + "-id";
+    EXPECT_TRUE(game_library::find_heroic_cached_game({home}, id, store, game_library::launcher_install_t::flatpak));
+    EXPECT_FALSE(game_library::find_heroic_cached_game({home}, id, store, game_library::launcher_install_t::native));
+    EXPECT_FALSE(game_library::find_heroic_cached_game({home}, "different-id", store, game_library::launcher_install_t::flatpak));
+  }
 }
 
 TEST(HeroicLibraryScannerTests, ResolvesArtworkFromTheExactHeroicInstallAndIdentity) {
