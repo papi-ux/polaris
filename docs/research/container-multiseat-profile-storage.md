@@ -101,8 +101,10 @@ existing configured Steam runtime. The first runtime and catalog still require
 administrative setup. See the
 [profile interface](container-multiseat-launch-integration.md#profile-assignment-interface)
 for the creation request, idempotent retries, and controller ownership boundary.
-Steam has a typed launcher and dedicated network policy. Heroic and Lutris have
-typed catalog families and built runtime images; their launch adapters remain pending.
+Steam, Heroic and Lutris have typed launch adapters and catalog families.
+Heroic and Lutris also have per-profile library readers and runtime entries;
+see [Heroic in a Space](../spaces-heroic.md) and
+[Lutris in a Space](../spaces-lutris.md) for the player setup flows.
 The catalog does not claim real game or client playback acceptance.
 
 The runtime images use Polaris builds from official Ubuntu. Required notices and
