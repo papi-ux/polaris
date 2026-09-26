@@ -383,3 +383,138 @@ describe('useCoverSweep', () => {
     expect(sweep.applied.value).toBe(1)
   })
 })
+
+describe('automatic covers for an import', () => {
+  let scope
+  beforeEach(() => { scope = effectScope(); global.fetch = vi.fn() })
+  afterEach(() => { scope.stop(); vi.restoreAllMocks(); vi.useRealTimers() })
+  const ready = (id, uuids = ['new']) => ({ ...sweepReady(uuids.map(uuid => proposed(uuid, `Name ${uuid}`, `Match ${uuid}`))), id })
+  const posters = () => jsonOnce({ status: true, choices: [{ token: 'fresh', preview: 'preview' }] })
+  const calls = () => global.fetch.mock.calls.map(([url, options]) => ({ url, body: options?.body && JSON.parse(options.body) }))
+
+  it('uses only import receipts and saves a fresh pick with run and name preconditions', async () => {
+    const refreshed = vi.fn()
+    global.fetch.mockResolvedValueOnce(jsonOnce({ status: true, sweep: ready('r1') }))
+      .mockResolvedValueOnce(posters()).mockResolvedValueOnce(jsonOnce({ status: true, path: '/new.png' }))
+    const sweep = scope.run(() => useCoverSweep({ onApplied: refreshed }))
+    await sweep.start({ uuids: ['new', 'new'], automaticApply: true })
+    expect(calls()).toEqual([
+      { url: './api/covers/sweep', body: { uuids: ['new'] } },
+      { url: './api/covers/choices', body: { uuid: 'new', provider_game_id: '2254', title: 'Match new' } },
+      { url: './api/covers/apply-missing', body: { uuid: 'new', token: 'fresh', run_id: 'r1', expected_name: 'Name new' } },
+    ])
+    expect(sweep.applied.value).toBe(1)
+    expect(sweep.automatic.value).toBe(false)
+    expect(refreshed).toHaveBeenCalledOnce()
+  })
+
+  it('an empty receipt never starts a whole-library automatic search', async () => {
+    const sweep = scope.run(() => useCoverSweep())
+    await sweep.start({ uuids: [], automaticApply: true })
+    await sweep.start({ automaticApply: true })
+    expect(global.fetch).not.toHaveBeenCalled()
+  })
+
+  it('an existing run returned by a conflict cannot inherit automatic approval', async () => {
+    global.fetch.mockResolvedValueOnce(jsonOnce({ status: false, sweep: ready('someone-else'), error: 'Already running' }, false, 409))
+    const sweep = scope.run(() => useCoverSweep())
+    await sweep.start({ uuids: ['new'], automaticApply: true })
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    expect(sweep.automatic.value).toBe(false)
+  })
+
+  it('a replacement run retires the original import intent', async () => {
+    global.fetch.mockResolvedValueOnce(jsonOnce({ status: true, sweep: { ...ready('r1'), state: 'searching' } }))
+      .mockResolvedValueOnce(jsonOnce({ status: true, sweep: ready('replacement', ['old-library-game']) }))
+    const sweep = scope.run(() => useCoverSweep())
+    await sweep.start({ uuids: ['new'], automaticApply: true })
+    await sweep.load()
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+    expect(sweep.automatic.value).toBe(false)
+  })
+
+  it('two ready polls claim one apply loop', async () => {
+    let resolvePosters
+    global.fetch.mockResolvedValueOnce(jsonOnce({ status: true, sweep: { ...ready('r1'), state: 'searching' } }))
+    const sweep = scope.run(() => useCoverSweep())
+    await sweep.start({ uuids: ['new'], automaticApply: true })
+    global.fetch.mockImplementation((url) => {
+      if (url.endsWith('/sweep')) return Promise.resolve(jsonOnce({ status: true, sweep: ready('r1') }))
+      if (url.endsWith('/choices')) return new Promise(resolve => { resolvePosters = resolve })
+      return Promise.resolve(jsonOnce({ status: true, path: '/new.png' }))
+    })
+    const first = sweep.load()
+    await vi.waitFor(() => expect(resolvePosters).toBeTypeOf('function'))
+    await sweep.load()
+    resolvePosters(posters())
+    await first
+    expect(calls().filter(call => call.url.endsWith('/apply-missing'))).toHaveLength(1)
+  })
+
+  it('closing the page during poster lookup prevents automatic publication', async () => {
+    let resolvePosters
+    global.fetch.mockResolvedValueOnce(jsonOnce({ status: true, sweep: ready('r1') }))
+      .mockImplementationOnce(() => new Promise(resolve => { resolvePosters = resolve }))
+    const sweep = scope.run(() => useCoverSweep())
+    const applying = sweep.start({ uuids: ['new'], automaticApply: true })
+    await vi.waitFor(() => expect(resolvePosters).toBeTypeOf('function'))
+    scope.stop()
+    resolvePosters(posters())
+    await applying
+    expect(calls().some(call => call.url.endsWith('/apply-missing'))).toBe(false)
+  })
+
+  it('stopping during poster lookup prevents automatic publication', async () => {
+    let resolvePosters
+    global.fetch.mockResolvedValueOnce(jsonOnce({ status: true, sweep: ready('r1') }))
+      .mockImplementationOnce(() => new Promise(resolve => { resolvePosters = resolve }))
+      .mockResolvedValueOnce(jsonOnce({ status: true, sweep: ready('r1') }))
+    const sweep = scope.run(() => useCoverSweep())
+    const applying = sweep.start({ uuids: ['new'], automaticApply: true })
+    await vi.waitFor(() => expect(resolvePosters).toBeTypeOf('function'))
+    await sweep.stop()
+    resolvePosters(posters())
+    await applying
+    expect(calls().some(call => call.url.endsWith('/apply-missing'))).toBe(false)
+  })
+
+  it('a concurrently changed entry is reported as kept, without a full-app save', async () => {
+    global.fetch.mockResolvedValueOnce(jsonOnce({ status: true, sweep: ready('r1') }))
+      .mockResolvedValueOnce(posters()).mockResolvedValueOnce(jsonOnce({ status: true, skipped: true, message: 'Changed; kept.' }))
+    const sweep = scope.run(() => useCoverSweep())
+    await sweep.start({ uuids: ['new'], automaticApply: true })
+    expect(sweep.applied.value).toBe(0)
+    expect(sweep.rows.value[0]).toMatchObject({ outcome: 'skipped', note: 'Changed; kept.', keep: false })
+    expect(calls().some(call => call.url.endsWith('/apps'))).toBe(false)
+  })
+
+  it('imports over 500 games continue in scoped batches, including an empty first batch', async () => {
+    const uuids = Array.from({ length: 501 }, (_, i) => `new-${i}`)
+    global.fetch.mockResolvedValueOnce(jsonOnce({ status: true, nothing_to_do: true, sweep: ready('', []) }))
+      .mockResolvedValueOnce(jsonOnce({ status: true, sweep: ready('r2', ['new-500']) }))
+      .mockResolvedValueOnce(posters()).mockResolvedValueOnce(jsonOnce({ status: true, path: '/last.png' }))
+    const sweep = scope.run(() => useCoverSweep())
+    await sweep.start({ uuids, automaticApply: true })
+    const starts = calls().filter(call => call.url.endsWith('/sweep'))
+    expect(starts.map(call => call.body.uuids.length)).toEqual([500, 1])
+    expect(starts[1].body.uuids).toEqual(['new-500'])
+    expect(sweep.applied.value).toBe(1)
+  })
+})
+
+it('stop while a start reply is pending cannot restore automatic intent', async () => {
+  const scope = effectScope()
+  let answerStart
+  global.fetch = vi.fn()
+    .mockImplementationOnce(() => new Promise(resolve => { answerStart = resolve }))
+    .mockResolvedValueOnce(jsonOnce({ status: true, sweep: { id: '', state: 'ready', proposals: [] } }))
+  const sweep = scope.run(() => useCoverSweep())
+  try {
+    const started = sweep.start({ uuids: ['new'], automaticApply: true })
+    await sweep.stop()
+    answerStart(jsonOnce({ status: true, sweep: { ...sweepReady([proposed('new', 'New', 'New')]), id: 'late' } }))
+    await started
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+    expect(sweep.automatic.value).toBe(false)
+  } finally { scope.stop(); vi.restoreAllMocks() }
+})

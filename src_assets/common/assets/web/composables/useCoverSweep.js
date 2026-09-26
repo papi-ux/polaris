@@ -46,11 +46,12 @@ function rowFor(proposal) {
  *
  * Applying is the same three steps the Find Cover panel already takes for one game, repeated for each
  * row that was kept: list that game's posters, pick one, and save the entry pointing at it. Saving is
- * the caller's, because the entry belongs to the page.
+ * the caller's, because the entry belongs to the page. An opted-in import instead uses the host's
+ * conditional apply route, tied to that import's run and a freshly read entry.
  *
  * @returns Reactive run state, the rows under review, and start, stop, load, loadPosters and apply.
  */
-export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) {
+export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS, onApplied = () => {} } = {}) {
   const sweep = ref(null)
   const rows = ref([])
   // The last start found nothing to look up, which is an answer rather than a failure.
@@ -58,6 +59,9 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
   const loading = ref(false)
   const starting = ref(false)
   const applying = ref(false)
+  const automatic = ref(false)
+  let automaticIntent = null
+  let intentVersion = 0
   const applied = ref(0)
   const error = ref('')
 
@@ -82,12 +86,17 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
    * poster somebody has just looked at or a row they have just unticked.
    */
   function absorb(next) {
+    const sameRun = sweep.value?.id === next?.id
+    if (automaticIntent && automaticIntent.runId !== next?.id) {
+      automaticIntent = null
+      automatic.value = false
+    }
     sweep.value = next
     // An apply is walking rows.value right now. Rebuilding it would hand that loop orphaned objects:
     // every row it marked applied after this point would be marked on something nothing renders, the
     // count would disagree with the rows, and pressing Apply again would store those covers twice.
     if (applying.value) return
-    const previous = new Map(rows.value.map((row) => [row.uuid, row]))
+    const previous = new Map((sameRun ? rows.value : []).map((row) => [row.uuid, row]))
     rows.value = (next?.proposals || []).map((proposal) => {
       const before = previous.get(proposal.uuid)
       const row = rowFor(proposal)
@@ -129,9 +138,40 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
     if (sequence < appliedSequence || disposed) return
     stopPolling()
     if (searching()) pollTimer = setTimeout(load, pollIntervalMs)
+    await applyAutomaticIfReady()
   }
 
-  async function start() {
+  async function applyAutomaticIfReady() {
+    const intent = automaticIntent
+    if (!intent || intent.claimed || disposed || searching()) return
+    if (sweep.value?.state !== 'ready' || sweep.value?.id !== intent.runId) {
+      automaticIntent = null
+      automatic.value = false
+      return
+    }
+    intent.claimed = true
+    await apply(undefined, { runId: intent.runId, isCurrent: () => automaticIntent === intent })
+    if (disposed || automaticIntent !== intent) return
+    await onApplied()
+    if (disposed || automaticIntent !== intent) return
+    if (intent.remaining.length) {
+      await start({ uuids: intent.remaining, automaticApply: true })
+    } else {
+      automaticIntent = null
+      automatic.value = false
+    }
+  }
+
+  async function start({ uuids, automaticApply = false } = {}) {
+    if (disposed || starting.value || applying.value) return
+    // Retire reads and automatic intent from the previous run before starting another.
+    appliedSequence = ++loadSequence
+    const version = ++intentVersion
+    automaticIntent = null
+    automatic.value = false
+    stopPolling()
+    const scoped = Array.isArray(uuids) ? [...new Set(uuids)] : null
+    if (automaticApply && !scoped?.length) return
     starting.value = true
     error.value = ''
     applied.value = 0
@@ -141,12 +181,16 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
         credentials: 'include',
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: '{}',
+        body: JSON.stringify(scoped ? { uuids: scoped.slice(0, 500) } : {}),
       })
       const data = await readJson(res)
-      if (disposed) return
+      if (disposed || version !== intentVersion) return
       if (res.ok && data?.status) {
         nothingToDo.value = Boolean(data.nothing_to_do)
+        if (automaticApply && data.sweep?.id && !data.nothing_to_do) {
+          automaticIntent = { runId: data.sweep.id, remaining: scoped.slice(500), claimed: false }
+          automatic.value = true
+        }
         absorb(data.sweep || null)
         stopPolling()
         if (searching()) pollTimer = setTimeout(load, pollIntervalMs)
@@ -163,9 +207,17 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
     } finally {
       starting.value = false
     }
+    await applyAutomaticIfReady()
+    // A batch with no blank entries still permits the remaining newly imported games.
+    if (!disposed && version === intentVersion && automaticApply && nothingToDo.value && scoped.length > 500) {
+      await start({ uuids: scoped.slice(500), automaticApply: true })
+    }
   }
 
   async function stop() {
+    ++intentVersion
+    automaticIntent = null
+    automatic.value = false
     error.value = ''
     try {
       const res = await fetch('./api/covers/sweep', { credentials: 'include', method: 'DELETE' })
@@ -237,14 +289,14 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
    * @param saveCover Called with (uuid, path) for each stored image, to write it into the entry.
    *                  Returning false marks that row as failed and the rest carry on.
    */
-  async function apply(saveCover) {
+  async function apply(saveCover, { runId, isCurrent = () => true } = {}) {
     if (disposed || applying.value) return
     applying.value = true
     applied.value = 0
     error.value = ''
     try {
       for (const row of rows.value) {
-        if (disposed) return
+        if (disposed || !isCurrent()) return
         if (!row.keep || row.applied || row.outcome !== 'proposed') continue
         row.applyError = ''
         // Read the posters again, always. A token the reviewer's browser is still showing may already
@@ -253,26 +305,34 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
         await loadPosters(row, { force: true })
         // Closing the page retires this apply loop. A cached poster can still be
         // present after an in-flight refresh returns without updating the row.
-        if (disposed) return
+        if (disposed || !isCurrent()) return
         const token = row.posters[row.chosenIndex]?.token
         if (!token) {
           row.applyError = row.postersError || 'No poster to store for this game.'
           continue
         }
         try {
-          const res = await fetch('./api/covers/select', {
+          const res = await fetch(runId ? './api/covers/apply-missing' : './api/covers/select', {
             credentials: 'include',
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uuid: row.uuid, token }),
+            body: JSON.stringify(runId
+              ? { uuid: row.uuid, token, run_id: runId, expected_name: row.name }
+              : { uuid: row.uuid, token }),
           })
           const data = await readJson(res)
-          if (disposed) return
+          if (disposed || !isCurrent()) return
+          if (res.ok && data?.status && data?.skipped) {
+            row.outcome = 'skipped'
+            row.keep = false
+            row.note = data.message || 'The entry changed; its artwork was kept.'
+            continue
+          }
           if (!res.ok || !data?.status || !data?.path) {
             row.applyError = data?.error || 'Could not store this cover'
             continue
           }
-          const saved = await saveCover(row.uuid, data.path)
+          const saved = runId ? true : await saveCover(row.uuid, data.path)
           if (saved === false) {
             row.applyError = 'Could not save the entry for this cover'
             continue
@@ -302,6 +362,7 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
     loading,
     starting,
     applying,
+    automatic,
     applied,
     error,
     load,
