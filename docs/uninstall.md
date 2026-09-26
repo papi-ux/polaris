@@ -26,10 +26,14 @@ lists all of it, in the order that works.
    It should print nothing. A second instance you forgot about, for example a validation build,
    counts too.
 
-## 1. Remove the Spaces security setup first
+## 1. The Spaces security setup, which removal now handles
 
-Do this while the package is still installed. The helper is a package file, and nothing else
-knows how to remove the policies it installed.
+**Since 1.4.13 you do not have to remember this.** Removing the package runs the helper for you,
+before the helper itself goes away, and prints what it did. The helper is a package file and nothing
+else knows how to remove the policies it installed, so that moment is the only one that works.
+
+Read the removal output. If it says the helper refused, the policies are still installed and the
+package is gone, so put it back, run the helper, then remove again:
 
 ```bash
 sudo -H /usr/bin/polaris-spaces-setup remove
@@ -38,6 +42,9 @@ sudo -H /usr/bin/polaris-spaces-setup remove
 It removes only the SELinux policies and the input rule it installed, and it never touches player
 homes. If it refuses, [Prepare Spaces security support](spaces.md#prepare-spaces-security-support)
 explains each message.
+
+On an older Polaris, or to check before removing, run that command yourself first. Doing it twice is
+harmless.
 
 Docker keeps the gaming runtime image and each Space's Steam home after the package is gone.
 Polaris deletes a home only when you remove its Space for good. The homes left are Docker volumes

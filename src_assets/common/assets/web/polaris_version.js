@@ -29,16 +29,22 @@ class PolarisVersion {
       v = v.substring(1);
     }
 
-    const [mainVer, incrementalVer] = v.split('-');
-    const versionParts = mainVer.split('.').map(i => parseInt(i, 10));
-    if (incrementalVer) {
-      const [prefix, verStr] = incrementalVer.split('.');
-      let incremental = parseInt(verStr, 10);
-      if (prefix === 'beta') {
-        // we couldn't have 2^16 alpha versions?
-        incremental <<= 16;
+    const match = v.match(/^(\d+)\.(\d+)\.(\d+)(?:-([^+]+))?(?:\+[^+]+)?$/);
+    if (!match) return null;
+    const versionParts = match.slice(1, 4).map(Number);
+    if (!versionParts.every(Number.isSafeInteger)) return null;
+    const suffix = match[4];
+    // Compare channel and sequence separately: rc.1 outranks every beta, and
+    // the stable release outranks its rc builds. This agrees with Nova's bands
+    // without bitwise overflow or imposing Android's versionCode limits here.
+    if (!suffix) versionParts.push(4, 0);
+    else if (suffix === 'pre') versionParts.push(0, 0);
+    else {
+      const prerelease = suffix.match(/^(alpha|beta|rc)\.(\d+)$/);
+      if (prerelease && Number.isSafeInteger(Number(prerelease[2]))) {
+        versionParts.push({ alpha: 1, beta: 2, rc: 3 }[prerelease[1]], Number(prerelease[2]));
       }
-      versionParts.push(incremental);
+      // Unknown development suffixes retain release-number-only comparison.
     }
 
     return versionParts;
@@ -57,7 +63,7 @@ class PolarisVersion {
     if (!this.versionParts || !otherVersionParts) {
       return false;
     }
-    for (let i = 0; i < Math.min(checkIncremental && 4 || 3, this.versionParts.length, otherVersionParts.length); i++) {
+    for (let i = 0; i < Math.min(checkIncremental ? 5 : 3, this.versionParts.length, otherVersionParts.length); i++) {
       if (this.versionParts[i] > otherVersionParts[i]) {
         return true;
       } else if (this.versionParts[i] < otherVersionParts[i]) {

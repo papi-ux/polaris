@@ -13,7 +13,7 @@ describe('app chrome version display', () => {
   it('refreshes the version after authenticated navigation exposes the app shell', () => {
     const source = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/App.vue'), 'utf8')
 
-    expect(source).toContain("import { getCachedConfig } from './config-cache.js'")
+    expect(source).toContain("import { clearCachedConfig, getCachedConfig } from './config-cache.js'")
     expect(source).toContain('async function loadAppVersion()')
     expect(source).toContain('watch(showNav, (visible) => {')
     expect(source).toContain('void loadAppVersion()')

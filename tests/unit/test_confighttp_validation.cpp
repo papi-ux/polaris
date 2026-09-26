@@ -403,6 +403,8 @@ TEST(ConfigLiveApplyTests, OnlyKeysTheHostAppliesLiveSkipTheRestart) {
   using confighttp::validation::config_change_requires_restart;
   EXPECT_FALSE(config_change_requires_restart({}));
   EXPECT_FALSE(config_change_requires_restart({"steamgriddb_api_key"}));
+  EXPECT_FALSE(config_change_requires_restart({"notify_pre_releases"}));
+  EXPECT_TRUE(config_change_requires_restart({"notify_pre_releases", "capture"}));
   EXPECT_FALSE(config_change_requires_restart({"adaptive_bitrate_enabled", "ai_api_key", "ai_auth_mode", "ai_base_url",
     "ai_cache_ttl_hours", "ai_codex_home", "ai_enabled", "ai_model", "ai_provider", "ai_timeout_ms", "ai_use_subscription"}));
   EXPECT_TRUE(config_change_requires_restart({"capture", "steamgriddb_api_key"}));

@@ -1944,31 +1944,40 @@ namespace multiseat::container {
       "--filter=label=" + std::string {label_deployment} + "=" + options_.deployment_id,
       "--format={{.ID}}",
     });
-    const auto listed = host_.run(
-      listing_argv,
-      options_.command_timeout,
-      options_.max_command_output_bytes
-    );
-    if (listed.timed_out || listed.output_truncated || listed.exit_status != 0) {
-      throw std::runtime_error {"container inventory listing " + describe_command_failure(listed)};
-    }
-    const auto ids = parse_container_ids(listed.output, options_.max_inventory_workers);
-    if (ids.empty()) {
-      require_current_gpu_catalog();
-      return {};
-    }
+    std::vector<std::string> ids;
+    command_result_t inspected;
+    for (unsigned attempt = 0; attempt < 2; ++attempt) {
+      if (attempt != 0) require_current_gpu_catalog();
+      const auto listed = host_.run(
+        listing_argv,
+        options_.command_timeout,
+        options_.max_command_output_bytes
+      );
+      if (listed.timed_out || listed.output_truncated || listed.exit_status != 0) {
+        throw std::runtime_error {"container inventory listing " + describe_command_failure(listed)};
+      }
+      ids = parse_container_ids(listed.output, options_.max_inventory_workers);
+      if (ids.empty()) {
+        require_current_gpu_catalog();
+        return {};
+      }
 
-    auto inspect_argv = command_prefix(options_);
-    inspect_argv.insert(inspect_argv.end(), {"container", "inspect"});
-    inspect_argv.insert(inspect_argv.end(), ids.begin(), ids.end());
-    const auto inspected = host_.run(
-      inspect_argv,
-      options_.command_timeout,
-      options_.max_command_output_bytes
-    );
-    if (inspected.timed_out || inspected.output_truncated || inspected.exit_status != 0) {
-      // A worker that exits between the listing and this call is the usual one.
-      throw std::runtime_error {"container inventory inspection " + describe_command_failure(inspected)};
+      auto inspect_argv = command_prefix(options_);
+      inspect_argv.insert(inspect_argv.end(), {"container", "inspect"});
+      inspect_argv.insert(inspect_argv.end(), ids.begin(), ids.end());
+      inspected = host_.run(
+        inspect_argv,
+        options_.command_timeout,
+        options_.max_command_output_bytes
+      );
+      if (inspected.timed_out || inspected.output_truncated ||
+          (inspected.exit_status != 0 && attempt != 0)) {
+        throw std::runtime_error {"container inventory inspection " + describe_command_failure(inspected)};
+      }
+      if (inspected.exit_status == 0) break;
+      // Auto-removed workers can vanish between ps and inspect. Retry once
+      // from a fresh listing; never treat a failed inspect's partial output as
+      // evidence that a worker disappeared or that its seat can be released.
     }
 
     try {

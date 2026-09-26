@@ -35,6 +35,10 @@ namespace multiseat::input {
 
     constexpr std::uint8_t known_modifier_mask =
       MODIFIER_SHIFT | MODIFIER_CTRL | MODIFIER_ALT | MODIFIER_META;
+    static_assert(MODIFIER_SHIFT == keyboard_modifier_shift);
+    static_assert(MODIFIER_CTRL == keyboard_modifier_control);
+    static_assert(MODIFIER_ALT == keyboard_modifier_alt);
+    static_assert(MODIFIER_META == keyboard_modifier_meta);
 
     /// The high byte every Moonlight client puts on a virtual key code.
     constexpr std::uint8_t moonlight_key_prefix = 0x80;
@@ -331,6 +335,7 @@ namespace multiseat::input {
           .payload = keyboard_key_event_t {
             .key_code = static_cast<std::uint16_t>(wire_code & 0x00FFU),
             .state = state,
+            .modifiers = state == button_state_e::pressed ? packet[11] : std::uint8_t {0},
           },
         }
       );

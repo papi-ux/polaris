@@ -320,7 +320,7 @@ completion dataset). Keys: `sunshine_name`, `notify_pre_releases`, `system_tray`
 | **Server Name** (`sunshine_name`) | The name displayed by Moonlight. If not specified, the PC's hostname is used |
 | **Log Level** (`min_log_level`) | The minimum log level printed to standard out |
 | **Server Commands** (`server_cmd`) | Configure a list of commands to be executed when called from client during streaming. |
-| **PreRelease Notifications** (`notify_pre_releases`) | Whether to be notified of new pre-release versions of Polaris |
+| **Include beta releases** (`notify_pre_releases`) | Offer newer beta and release-candidate packages in Update Center. Off by default; also available in **System → Update Center**. Older versions label it **PreRelease Notifications**. See [updates and beta releases](updates.md). |
 | **Enable System Tray** (`system_tray`) | Whether to show Polaris icon in the system tray |
 | **Hide tray control options** (`hide_tray_controls`) | Do not show "Force Stop", "Restart" and "Quit" in tray menu. |
 | **SteamGridDB API Key** (`steamgriddb_api_key`) | Optional API key used to fetch artwork metadata from SteamGridDB. The first-run wizard can check and save it. A saved key is used right away, by the cover search and by Nova, with no restart. |
@@ -393,6 +393,10 @@ pair without a PIN, so only trust networks you control.
 | **LAN Encryption Mode** (`lan_encryption_mode`) | This determines when encryption will be used when streaming over your local network. Encryption can reduce streaming performance, particularly on less powerful hosts and clients. |
 | **WAN Encryption Mode** (`wan_encryption_mode`) | This determines when encryption will be used when streaming over the Internet. Encryption can reduce streaming performance, particularly on less powerful hosts and clients. |
 | **Ping Timeout** (`ping_timeout`) | How long to wait in milliseconds for data from moonlight before shutting down the stream |
+
+Peers in shared IPv4 space (`100.64.0.0/10`, also used by VPNs) follow WAN origin
+and encryption policy. A configured trusted-pairing subnet does not override
+those gates. See [Network trust and shared address space](network-trust.md).
 
 ### Audio and video tab
 

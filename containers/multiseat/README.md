@@ -210,8 +210,11 @@ worker-local codec roundtrips; continuous media transport and client playback
 remain separate acceptance gates.
 
 The production `run --media=enabled` path supplies the implemented providers
-and continuous encoder media source for Gamescope and Steam allocations.
-Heroic and Lutris launcher implementations remain outstanding. A worker that announces a contract on
+and continuous encoder media source for Gamescope, Steam, Heroic and Lutris
+allocations. Heroic and Lutris have typed launch adapters and per-profile
+library readers; the user flows are documented in
+[Heroic in a Space](../../docs/spaces-heroic.md) and
+[Lutris in a Space](../../docs/spaces-lutris.md). A worker that announces a contract on
 its media channel has it held against what the client negotiated, acknowledged,
 and its frames carried to that client's own packet destination, with keyframe
 requests and reference invalidations travelling back on control. Provider readiness proves a resource or

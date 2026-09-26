@@ -171,11 +171,11 @@ import Toast from './components/Toast.vue'
 import SpaceParticles from './components/SpaceParticles.vue'
 import ThemeToggle from './ThemeToggle.vue'
 import { initTheme } from './theme.js'
-import { getCachedConfig } from './config-cache.js'
+import { clearCachedConfig, getCachedConfig } from './config-cache.js'
 import { markWebUiUnauthenticated, webUiAuthenticated } from './auth-state.js'
 import { isPublicRoute } from './router-helpers.js'
 import { createNavSections, getNavItemByPath } from './nav-metadata.js'
-import { buildUpdateCenterState, updateStatusLightClass } from './update-center.js'
+import { buildUpdateCenterState, isPrereleaseOptIn, updateStatusLightClass } from './update-center.js'
 
 const route = useRoute()
 const commandPaletteOpen = ref(false)
@@ -250,8 +250,12 @@ async function loadAppVersion() {
   }
 }
 
+let sidebarUpdateRefreshPending = false
 async function refreshSidebarUpdateStatus() {
-  if (sidebarUpdateLoading.value) return
+  if (sidebarUpdateLoading.value) {
+    sidebarUpdateRefreshPending = true
+    return
+  }
   sidebarUpdateLoading.value = true
   sidebarUpdateError.value = ''
   try {
@@ -259,7 +263,7 @@ async function refreshSidebarUpdateStatus() {
     if (config?.version && !appVersion.value) {
       appVersion.value = config.version
     }
-    sidebarNotifyPreReleases.value = config?.notify_pre_releases === true || config?.notify_pre_releases === 'enabled'
+    sidebarNotifyPreReleases.value = isPrereleaseOptIn(config?.notify_pre_releases)
 
     const hostStatus = await fetch('./api/update-status', { credentials: 'include' }).then((r) => r.ok ? r.json() : null).catch(() => null)
     sidebarUpdateHost.value = hostStatus || { platform: config?.platform || '', distro: {} }
@@ -271,7 +275,7 @@ async function refreshSidebarUpdateStatus() {
     sidebarLatestRelease.value = latest
     if (sidebarNotifyPreReleases.value) {
       const releases = await fetch('https://api.github.com/repos/papi-ux/polaris/releases').then((r) => r.ok ? r.json() : [])
-      sidebarPrereleaseRelease.value = Array.isArray(releases) ? releases.find((release) => release.prerelease) || null : null
+      sidebarPrereleaseRelease.value = Array.isArray(releases) ? releases.find((release) => release.prerelease && !release.draft) || null : null
     } else {
       sidebarPrereleaseRelease.value = null
     }
@@ -282,6 +286,11 @@ async function refreshSidebarUpdateStatus() {
     console.error(error)
   } finally {
     sidebarUpdateLoading.value = false
+    if (sidebarUpdateRefreshPending) {
+      sidebarUpdateRefreshPending = false
+      clearCachedConfig()
+      void refreshSidebarUpdateStatus()
+    }
   }
 }
 
@@ -352,6 +361,7 @@ watch(() => route.path, () => { sidebarOpen.value = false })
 onMounted(() => {
   initTheme()
   window.addEventListener('keydown', handleKeydown)
+  window.addEventListener('polaris-update-channel-changed', refreshSidebarUpdateStatus)
   if (showNav.value) {
     void loadAppVersion()
     void refreshSidebarUpdateStatus()
@@ -360,6 +370,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeydown)
+  window.removeEventListener('polaris-update-channel-changed', refreshSidebarUpdateStatus)
 })
 </script>
 

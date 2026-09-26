@@ -47,3 +47,22 @@ describe('Game scanner import contract', () => {
     })
   })
 })
+
+describe('Import receipts', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  it('exposes only server-confirmed games and clears receipts on a no-op or failed import', async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: true, json: async () => ({
+      status: true, imported: 1, imported_games: [{ uuid: 'confirmed', name: 'Kept' }],
+    }) }).mockResolvedValueOnce({ ok: false, json: async () => ({ status: false }) })
+    vi.stubGlobal('fetch', fetchMock)
+    const scanner = useGameScanner()
+    scanner.lutrisGames.value = [{ selected: true, name: 'Kept', source: 'lutris' }]
+    expect(await scanner.importSelected()).toBe(1)
+    expect(scanner.importedGames.value).toEqual([{ uuid: 'confirmed', name: 'Kept' }])
+    expect(await scanner.importSelected()).toBe(0)
+    expect(scanner.importedGames.value).toEqual([])
+    scanner.lutrisGames.value = [{ selected: true, name: 'Failed', source: 'lutris' }]
+    expect(await scanner.importSelected()).toBe(0)
+    expect(scanner.importedGames.value).toEqual([])
+  })
+})

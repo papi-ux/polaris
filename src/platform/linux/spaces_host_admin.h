@@ -12,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -90,6 +91,10 @@ namespace multiseat::spaces {
     std::chrono::milliseconds approval_timeout = std::chrono::minutes(5);
   };
 
+  class host_activity_guard_t;
+  /// Refuses while host setup runs or shuts down. With no installed service, admission is unchanged.
+  [[nodiscard]] std::optional<host_activity_guard_t> try_begin_host_activity();
+
   class host_admin_service_t {
   public:
     explicit host_admin_service_t(host_admin_options_t options);
@@ -110,6 +115,10 @@ namespace multiseat::spaces {
     void shutdown();
 
   private:
+    friend class host_activity_guard_t;
+    friend std::optional<host_activity_guard_t> try_begin_host_activity();
+    bool begin_activity();
+    void finish_activity();
     struct job_t {
       host_action_request_t request;
       std::string state, message, detail;
@@ -123,7 +132,22 @@ namespace multiseat::spaces {
     std::optional<host_action_request_t> pending_;  ///< claimed, facts still being read
     std::atomic<bool> running_ {false};
     bool closing_ = false;
+    std::size_t activities_ = 0;
     std::jthread worker_;
+  };
+
+  /// Keeps host setup out until a Space launch/change has either failed or become visible to
+  /// the setup probes. Moving the guard transfers this reservation; destruction releases it.
+  class host_activity_guard_t {
+  public:
+    host_activity_guard_t(host_activity_guard_t &&) = default;
+    host_activity_guard_t &operator=(host_activity_guard_t &&) = delete;
+    ~host_activity_guard_t();
+
+  private:
+    friend std::optional<host_activity_guard_t> try_begin_host_activity();
+    explicit host_activity_guard_t(std::shared_ptr<host_admin_service_t> service);
+    std::shared_ptr<host_admin_service_t> service_;
   };
 
   /// This PC's side of the refusals: helper, pkexec, policy, image based host and the desktop session.

@@ -457,6 +457,36 @@ TEST_F(SpacesHostAdminService, TheGateFollowsTheInstalledService) {
   EXPECT_EQ(rechecks, 0U);
 }
 
+TEST_F(SpacesHostAdminService, ActivityReservationsReleaseExactlyOnceAndCloseBothAdmissionDirections) {
+  ASSERT_TRUE(spaces::try_begin_host_activity());
+  auto service = make();
+  ASSERT_TRUE(spaces::install_host_admin_service(service));
+  auto uninstall = util::fail_guard([&] {
+    finish({});
+    service->shutdown();
+    spaces::uninstall_host_admin_service(service);
+  });
+  auto first = spaces::try_begin_host_activity();
+  auto second = spaces::try_begin_host_activity();
+  ASSERT_TRUE(first);
+  ASSERT_TRUE(second);
+  auto moved = std::move(first);
+  first.reset();
+  second.reset();
+  EXPECT_FALSE(service->snapshot()["available"].get<bool>());
+  EXPECT_EQ(service->snapshot()["reason"], "spaces_active");
+  EXPECT_EQ(service->submit({spaces::host_action_e::docker_access, std::string(first_id)}).status, 409);
+  moved.reset();
+  EXPECT_TRUE(service->snapshot()["available"].get<bool>());
+  ASSERT_EQ(service->submit({spaces::host_action_e::docker_access, std::string(first_id)}).status, 202);
+  EXPECT_FALSE(spaces::try_begin_host_activity());
+  finish({.exit_status = 126});
+  ASSERT_TRUE(wait_idle(*service));
+  EXPECT_TRUE(spaces::try_begin_host_activity());
+  service->shutdown();
+  EXPECT_FALSE(spaces::try_begin_host_activity());
+}
+
 TEST_F(SpacesHostAdminService, RoutesNeedTheConsoleLoginAndCsrfAndSayWhyARequestWasRefused) {
   const auto old_config = config::sunshine;
   auto restore = util::fail_guard([&] { config::sunshine = old_config; });
