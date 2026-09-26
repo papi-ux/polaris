@@ -243,10 +243,17 @@ if(CUDA_FOUND)
     add_compile_definitions(POLARIS_BUILD_CUDA)
 endif()
 
-# CUDA interop and FFmpeg's Vulkan Video encoder both use the Vulkan loader.
+# CUDA interop and FFmpeg's Vulkan Video encoder both use the Vulkan loader. Polaris resolves every
+# entry point it calls from the loader by name (vulkan_loader.cpp) and is built without Vulkan
+# prototypes, because the compute codec links volk in, whose global variables share those names and
+# would otherwise capture the calls at link time. See vulkan_loader.h.
 if(CUDA_FOUND OR POLARIS_ENABLE_VULKAN)
     find_package(Vulkan REQUIRED)
     list(APPEND PLATFORM_LIBRARIES Vulkan::Vulkan)
+    list(APPEND POLARIS_DEFINITIONS VK_NO_PROTOTYPES)
+    list(APPEND PLATFORM_TARGET_FILES
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_loader.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_loader.cpp")
 endif()
 
 # libdrm is required for DRM (KMS), Wayland, Vulkan, and Portal capture

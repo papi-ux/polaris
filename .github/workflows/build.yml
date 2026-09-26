@@ -931,7 +931,11 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: Polaris-steamos3.8-package
-          # Keep the host, KMS helper and matching symbols together through release assembly.
+          # All three, or the release job has nothing to publish from. Naming one file here is
+          # what broke the first tag build after the polaris-kms split: the script builds the helper,
+          # asserts it carries exactly two files, and the upload dropped it. The debug symbols joined
+          # the same list for the same reason, so the host, the KMS helper and the matching symbols
+          # travel through release assembly together.
           path: |
             ${{ runner.temp }}/polaris-steamos-output/Polaris-steamos3.8-x86_64.pkg.tar.zst
             ${{ runner.temp }}/polaris-steamos-output/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst
