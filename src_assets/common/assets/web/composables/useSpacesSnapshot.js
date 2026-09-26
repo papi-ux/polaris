@@ -9,7 +9,7 @@ import { validSnapshot } from '../spaces-access.js'
  * while the caller reports itself busy, so a save is never raced by a refresh.
  *
  * @param {{ intervalMs?: number, maxBackoffMs?: number, timeoutMs?: number,
- *   busy?: () => boolean, onSnapshot?: (next: object) => void,
+ *   busy?: () => boolean, shouldPoll?: () => boolean, onSnapshot?: (next: object) => void,
  *   messages?: { load?: string, verify?: string } }} options
  */
 export function useSpacesSnapshot(options = {}) {
@@ -29,6 +29,7 @@ export function useSpacesSnapshot(options = {}) {
   let failures = 0
   let mounted = false
   let disposed = false
+  let started = false
 
   function emptyState() {
     return {
@@ -92,13 +93,13 @@ export function useSpacesSnapshot(options = {}) {
 
   function schedule() {
     stopTimer()
-    if (!mounted || hidden()) return
+    if (!mounted || !started || hidden() || options.shouldPoll?.() === false) return
     timer = setTimeout(poll, nextDelayMs())
   }
 
   async function poll() {
     timer = null
-    if (!mounted || hidden()) return
+    if (!mounted || !started || hidden() || options.shouldPoll?.() === false) return
     if (!busy() && !loading.value) await load()
     schedule()
   }
@@ -110,9 +111,19 @@ export function useSpacesSnapshot(options = {}) {
 
   /** Load now, then keep polling. */
   async function start() {
+    if (disposed) return false
+    started = true
     const ok = await load()
     schedule()
     return ok
+  }
+
+  function stop() {
+    started = false
+    stopTimer()
+    request?.abort()
+    request = null
+    loading.value = false
   }
 
   onMounted(() => {
@@ -122,10 +133,9 @@ export function useSpacesSnapshot(options = {}) {
   onUnmounted(() => {
     mounted = false
     disposed = true
-    stopTimer()
-    request?.abort()
+    stop()
     if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', handleVisibility)
   })
 
-  return { state, loading, loadError, loaded, load, start }
+  return { state, loading, loadError, loaded, load, start, stop }
 }
