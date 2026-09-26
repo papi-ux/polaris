@@ -191,7 +191,7 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
    *              expire and get evicted. An apply always forces, so it stores with a fresh one.
    */
   async function loadPosters(row, { force = false } = {}) {
-    if (!row?.providerGameId) return
+    if (disposed || !row?.providerGameId) return
     // Already on its way. Awaiting the same promise is what stops an apply, which forces, from
     // deciding there is no poster while the first read is still in flight.
     if (row.postersLoading) return inFlight.get(row.uuid)
@@ -238,17 +238,22 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS } = {}) 
    *                  Returning false marks that row as failed and the rest carry on.
    */
   async function apply(saveCover) {
+    if (disposed || applying.value) return
     applying.value = true
     applied.value = 0
     error.value = ''
     try {
       for (const row of rows.value) {
+        if (disposed) return
         if (!row.keep || row.applied || row.outcome !== 'proposed') continue
         row.applyError = ''
         // Read the posters again, always. A token the reviewer's browser is still showing may already
         // have been evicted from the host's cache by the rows they opened after it, and select refuses
         // an evicted token.
         await loadPosters(row, { force: true })
+        // Closing the page retires this apply loop. A cached poster can still be
+        // present after an in-flight refresh returns without updating the row.
+        if (disposed) return
         const token = row.posters[row.chosenIndex]?.token
         if (!token) {
           row.applyError = row.postersError || 'No poster to store for this game.'

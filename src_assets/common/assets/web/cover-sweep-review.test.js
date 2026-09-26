@@ -297,4 +297,89 @@ describe('useCoverSweep', () => {
 
     expect(global.fetch.mock.calls.length).toBe(before)
   })
+
+  it('does not select a cached poster after the page closes during its refresh', async () => {
+    let release
+    global.fetch
+      .mockResolvedValueOnce(jsonOnce({ status: true, sweep: sweepReady([proposed('u1', 'One', 'Game One')]) }))
+      .mockResolvedValueOnce(jsonOnce({ status: true, choices: [{ token: 'cached', preview: 'p1' }] }))
+      .mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+      .mockResolvedValue(jsonOnce({ status: true, path: '/covers/u1.png' }))
+    sweep = run(() => useCoverSweep())
+    await sweep.load()
+    await sweep.loadPosters(sweep.rows.value[0])
+    const save = vi.fn(() => true)
+
+    const applying = sweep.apply(save)
+    scope.stop()
+    release(jsonOnce({ status: true, choices: [{ token: 'fresh', preview: 'p1' }] }))
+    await applying
+
+    expect(global.fetch.mock.calls.map(([url]) => url)).toEqual([
+      './api/covers/sweep', './api/covers/choices', './api/covers/choices',
+    ])
+    expect(save).not.toHaveBeenCalled()
+    expect(sweep.applying.value).toBe(false)
+  })
+
+  it('does not start the next row after the page closes during an entry save', async () => {
+    let release
+    const saving = new Promise(resolve => { release = resolve })
+    global.fetch
+      .mockResolvedValueOnce(jsonOnce({ status: true, sweep: sweepReady([
+        proposed('u1', 'One', 'Game One'), proposed('u2', 'Two', 'Game Two'),
+      ]) }))
+      .mockResolvedValueOnce(jsonOnce({ status: true, choices: [{ token: 't1', preview: 'p1' }] }))
+      .mockResolvedValueOnce(jsonOnce({ status: true, path: '/covers/u1.png' }))
+      .mockResolvedValue(jsonOnce({ status: true, choices: [] }))
+    sweep = run(() => useCoverSweep())
+    await sweep.load()
+    const save = vi.fn(() => {
+      scope.stop()
+      return saving
+    })
+
+    const applying = sweep.apply(save)
+    await vi.waitFor(() => expect(save).toHaveBeenCalledOnce())
+    release(true)
+    await applying
+
+    expect(global.fetch).toHaveBeenCalledTimes(3)
+    expect(sweep.applying.value).toBe(false)
+  })
+
+  it('does not start an apply or poster lookup after disposal', async () => {
+    global.fetch
+      .mockResolvedValueOnce(jsonOnce({ status: true, sweep: sweepReady([proposed('u1', 'One', 'Game One')]) }))
+      .mockResolvedValue(jsonOnce({ status: true, choices: [] }))
+    sweep = run(() => useCoverSweep())
+    await sweep.load()
+    scope.stop()
+
+    await sweep.apply(() => true)
+    await sweep.loadPosters(sweep.rows.value[0])
+
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    expect(sweep.applying.value).toBe(false)
+  })
+
+  it('does not overlap two apply loops while their poster read is pending', async () => {
+    let release
+    global.fetch
+      .mockResolvedValueOnce(jsonOnce({ status: true, sweep: sweepReady([proposed('u1', 'One', 'Game One')]) }))
+      .mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+      .mockResolvedValue(jsonOnce({ status: true, path: '/covers/u1.png' }))
+    sweep = run(() => useCoverSweep())
+    await sweep.load()
+    const save = vi.fn(() => true)
+
+    const first = sweep.apply(save)
+    const second = sweep.apply(save)
+    release(jsonOnce({ status: true, choices: [{ token: 't1', preview: 'p1' }] }))
+    await Promise.all([first, second])
+
+    expect(global.fetch.mock.calls.filter(([url]) => url === './api/covers/select')).toHaveLength(1)
+    expect(save).toHaveBeenCalledOnce()
+    expect(sweep.applied.value).toBe(1)
+  })
 })
