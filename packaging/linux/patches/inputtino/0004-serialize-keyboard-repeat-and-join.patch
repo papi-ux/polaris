@@ -1,0 +1,78 @@
+--- a/src/uinput/include/inputtino/protected_types.hpp
++++ b/src/uinput/include/inputtino/protected_types.hpp
+@@ -1,6 +1,8 @@
+ #pragma once
+ 
++#include <condition_variable>
+ #include <cstring>
++#include <mutex>
+ #include <fcntl.h>
+ #include <linux/uinput.h>
+ #include <sys/ioctl.h>
+@@ -84,6 +86,8 @@
+ struct SwitchJoypadState : BaseJoypadState {};
+ 
+ struct KeyboardState {
++  std::mutex mutex;
++  std::condition_variable changed;
+   std::thread repeat_press_t;
+   bool stop_repeat_thread = false;
+   libevdev_uinput_ptr kb = nullptr;
+--- a/src/uinput/keyboard.cpp
++++ b/src/uinput/keyboard.cpp
+@@ -58,7 +58,11 @@
+ 
+ Keyboard::~Keyboard() {
+   if (_state) {
+-    _state->stop_repeat_thread = true;
++    {
++      std::lock_guard<std::mutex> lock(_state->mutex);
++      _state->stop_repeat_thread = true;
++    }
++    _state->changed.notify_all();
+     if (_state->repeat_press_t.joinable()) {
+       _state->repeat_press_t.join();
+     }
+@@ -71,8 +75,9 @@
+     Keyboard kb;
+     kb._state->kb = std::move(*kb_el);
+     auto repeat_thread = std::thread([state = kb._state, millis_repress_key]() {
+-      while (!state->stop_repeat_thread) {
+-        std::this_thread::sleep_for(std::chrono::milliseconds(millis_repress_key));
++      std::unique_lock<std::mutex> lock(state->mutex);
++      const auto period = std::chrono::milliseconds(std::max(1, millis_repress_key));
++      while (!state->changed.wait_for(lock, period, [&] { return state->stop_repeat_thread; })) {
+         for (auto key : state->cur_press_keys) {
+           if (auto keyboard = state->kb.get()) {
+             press_btn(keyboard, key);
+@@ -81,7 +86,6 @@
+       }
+     });
+     kb._state->repeat_press_t = std::move(repeat_thread);
+-    kb._state->repeat_press_t.detach();
+     return kb;
+   } else {
+     return Error(kb_el.getErrorMessage());
+@@ -89,14 +93,20 @@
+ }
+ 
+ void Keyboard::press(short key_code) {
++  std::lock_guard<std::mutex> lock(_state->mutex);
+   if (auto keyboard = _state->kb.get()) {
+-    if (auto key = press_btn(keyboard, key_code)) {
+-      _state->cur_press_keys.push_back(key_code);
++    if (keyboard::key_mappings.find(key_code) != keyboard::key_mappings.end()) {
++      // Repeated callers may emit a new press, but retain only one repeat owner.
++      // Allocate before writing input so a failed allocation cannot strand a key.
++      auto &keys = _state->cur_press_keys;
++      if (std::find(keys.begin(), keys.end(), key_code) == keys.end()) keys.push_back(key_code);
++      press_btn(keyboard, key_code);
+     }
+   }
+ }
+ 
+ void Keyboard::release(short key_code) {
++  std::lock_guard<std::mutex> lock(_state->mutex);
+   auto search_key = keyboard::key_mappings.find(key_code);
+   if (search_key != keyboard::key_mappings.end()) {
+     if (auto keyboard = _state->kb.get()) {
