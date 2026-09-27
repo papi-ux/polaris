@@ -57,6 +57,18 @@ describe('Vulkan Video settings contract', () => {
     expect(qualitySelect).toContain('v-if="vkQualitySaved"')
   })
 
+  it('keeps the AMD tuning note in the description, not in an option every GPU sees', () => {
+    const locale = JSON.parse(webSource('public/assets/locale/en.json')).config
+
+    expect(locale.vk_tune_ull).toBe('Ultra-low latency')
+    for (const key of ['vk_tune_default', 'vk_tune_hq', 'vk_tune_ll', 'vk_tune_ull']) {
+      expect(locale[key]).not.toContain('AMD')
+    }
+    expect(locale.vk_tune_desc).toContain("On AMD, only Low latency and Ultra-low latency turn on the encoder's low-latency mode, and the two behave the same")
+    // This is Vulkan Video on RADV, whose latency switch treats the two targets alike; radeonsi is the VA-API driver.
+    expect(locale.vk_tune_desc).not.toContain('radeonsi')
+  })
+
   it('serves the probed Vulkan quality maximum from encoder_codec_support', () => {
     const videoHeader = source('src/video.h')
     const configHttp = source('src/confighttp.cpp')

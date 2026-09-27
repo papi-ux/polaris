@@ -17,6 +17,17 @@ starts at `v1.0.0`.
   card's MAC in place of the one it learned on its own network. Whether a magic packet sent from
   outside the host's network reaches a sleeping host still depends on that network.
 
+- The AMD notes in the VA-API encoder settings name the driver they describe. The quality preset
+  and strict frame bitrate notes began "On AMD", but Polaris sends the quality presets as bit
+  fields, and pairs the single-frame buffer with CBR, only when the VA-API driver is Mesa radeonsi,
+  so they now say "On AMD (Mesa radeonsi)". Balanced is described as having no measurable encode
+  cost on VCN 4, where it was measured, rather than as costing no extra encode time anywhere, and
+  the driver's slower quality presets as too slow for a 4K AV1 stream at 60 fps on VCN 4, rather
+  than as unable to keep up with 4K at 60 fps on any card. The Vulkan tuning select no longer puts
+  "same as low latency on AMD" in the Ultra-low latency option, which every GPU showed; the
+  description under the select says it for AMD instead. The v1.4.13 entries for the two VA-API
+  changes name the driver as well.
+
 - On AMD, Auto tries Vulkan Video first on Gamescope Stream captured through the portal (#635),
   where it used to try VA-API alone and never probed Vulkan Video at all. On the reporter's RX 9070
   XT at 4K60, Vulkan Video took 9 ms a frame there against VA-API's 16 ms, and held it under load.
@@ -338,19 +349,20 @@ starts at `v1.0.0`.
   never leaves the service pointing at a binary that is gone. It reports what it removed, and says
   so plainly when there was nothing to remove.
 
-- On AMD, the VA-API encoding quality presets are sent as the bit fields radeonsi reads, not as a
-  point on the range it reports. Read as a scale, Balanced landed on the speed preset with VBAQ.
-  Polaris now sends the speed preset for Prefer speed, the balanced preset with VBAQ for Balanced,
-  and the balanced preset with pre-encoding and VBAQ for Prefer quality, which is what the driver
-  already ran for it. The driver's quality and high-quality presets stay unused: on an RX 7900 XTX
-  they took AV1 at 4K from 4.6 ms to 17 and 32 ms a frame, too slow for 60 fps. The startup log
-  says `quality_mapping=radeonsi`. Other drivers keep the range mapping.
+- On AMD with Mesa radeonsi, the VA-API encoding quality presets are sent as the bit fields the
+  driver reads, not as a point on the range it reports. Read as a scale, Balanced landed on the
+  speed preset with VBAQ. Polaris now sends the speed preset for Prefer speed, the balanced preset
+  with VBAQ for Balanced, and the balanced preset with pre-encoding and VBAQ for Prefer quality,
+  which is what the driver already ran for it. The driver's quality and high-quality presets stay
+  unused: on an RX 7900 XTX they took AV1 at 4K from 4.6 ms to 17 and 32 ms a frame, too slow for
+  60 fps. The startup log says `quality_mapping=radeonsi`. Other drivers keep the range mapping.
 
-- On AMD, automatic VA-API rate control uses CBR wherever it applies the single-frame buffer: for
-  AV1, and for H.264 and HEVC with the strict frame bitrate limit on. radeonsi keeps to that buffer
-  only in CBR. On an RX 7900 XTX the largest frame after a scene change was two to three times the
-  average frame in CBR and twelve to fifteen times it in VBR, where Polaris used to put it, for
-  0.05 dB of PSNR or less. Intel keeps VBR, and an explicit `vaapi_rc = vbr` is still honoured.
+- On AMD with Mesa radeonsi, automatic VA-API rate control uses CBR wherever it applies the
+  single-frame buffer: for AV1, and for H.264 and HEVC with the strict frame bitrate limit on. The
+  driver keeps to that buffer only in CBR. On an RX 7900 XTX the largest frame after a scene change
+  was two to three times the average frame in CBR and twelve to fifteen times it in VBR, where
+  Polaris used to put it, for 0.05 dB of PSNR or less. Intel keeps VBR, and an explicit
+  `vaapi_rc = vbr` is still honoured.
 
 - The Vulkan encode quality select offers every level H.264 and HEVC support. The highest level
   was taken across AV1 as well, which the Vulkan encoder never uses, so a driver reporting fewer

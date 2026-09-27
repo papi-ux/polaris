@@ -32,7 +32,25 @@ describe('VA-API session settings', () => {
     expect(copy.vaapi_quality_balanced).toBe('Balanced')
     expect(copy.vaapi_quality_quality).toBe('Prefer quality (more encode time)')
     expect(copy.vaapi_quality_desc).toContain('adds that time to stream latency')
-    expect(copy.vaapi_quality_desc).toContain('costs no extra encode time')
-    expect(copy.vaapi_strict_rc_buffer_desc).toContain('On AMD the limit holds only in CBR, so auto uses CBR with it there')
+    // Balanced was measured once, on VCN 4, so the copy says where rather than promising it everywhere.
+    expect(copy.vaapi_quality_desc).toContain('at no measurable cost on VCN 4')
+    expect(copy.vaapi_quality_desc).not.toContain('no extra encode time')
+    // The slower presets were timed only on that VCN 4 card too, so the reason they go unused names it.
+    expect(copy.vaapi_quality_desc).toContain('because on VCN 4 they were too slow for a 4K AV1 stream at 60 fps')
+    expect(copy.vaapi_quality_desc).not.toContain('cannot keep up')
+    expect(copy.vaapi_strict_rc_buffer_desc).toContain('the limit holds only in CBR, so auto uses CBR with it there')
+  })
+
+  it('names Mesa radeonsi, the driver the AMD quality bits and CBR pairing are gated on', () => {
+    const copy = locale()
+    const tuning = readFileSync(join(process.cwd(), 'src/platform/linux/vaapi_tuning.h'), 'utf8')
+    // The code applies both only when the VA-API driver is radeonsi, not on every AMD GPU.
+    expect(tuning).toContain('return is_driver(vendor) && range >= static_cast<uint32_t>(quality);')
+    expect(tuning).toContain('!(radeonsi::is_driver(vendor) && (mask & VA_RC_CBR))')
+    expect(copy.vaapi_quality_desc).toContain('On AMD (Mesa radeonsi), Prefer speed')
+    expect(copy.vaapi_strict_rc_buffer_desc).toContain('On AMD (Mesa radeonsi) the limit holds only in CBR')
+    for (const key of ['vaapi_quality_desc', 'vaapi_strict_rc_buffer_desc']) {
+      expect(copy[key]).not.toMatch(/On AMD(?! \(Mesa radeonsi\))/)
+    }
   })
 })
