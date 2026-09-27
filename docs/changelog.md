@@ -7,6 +7,15 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- A beta or release candidate now sorts below the release it precedes in every package format, so
+  that release replaces it through an ordinary upgrade. The 1.4.13 betas carried `1.4.13` itself,
+  and dnf answered the 1.4.13 release with "Nothing to do", which left beta testers on the beta. A
+  tag like `v1.4.14-beta.1` now builds `1.4.14~beta.1` for RPM and DEB and `1.4.14beta.1` for
+  pacman, with `polaris-kms` pinned to that same version, and the host reports `1.4.14-beta.1`, so
+  the Update Center can tell a beta from its release. Stable packages keep exactly the versions they
+  had. A host still on a 1.4.13 beta needs one reinstall by hand, which
+  [Leave a 1.4.13 beta](updates.md#leave-a-1413-beta) gives for each distribution.
+
 - The 1.4.13 release notes say what shipped. They called Polaris 1.4.13 matched with Nova 1.4.13
   while Nova 1.4.13 was still in beta; they quoted a 0.49 ms PyroWave frame from a path that Private
   Stream, wlroots and X11 capture never take; and they still sent readers to the packages of a

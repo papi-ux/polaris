@@ -148,8 +148,15 @@ For the complete opt-in, installation, subsequent-update and return-to-stable
 steps, see [Polaris updates and beta releases](updates.md).
 
 A release is sometimes published early as a beta, tagged `v1.4.13-beta.1` and
-marked as a prerelease on GitHub. A beta is the same release told early: it
-carries the version it will ship as, and it reuses that release's notes.
+marked as a prerelease on GitHub. A beta reuses the notes of the release it
+precedes. Its packages carry a version that sorts below that release, so the
+release replaces the beta through an ordinary upgrade: a tag like
+`v1.4.14-beta.1` builds `1.4.14~beta.1` for RPM and DEB and `1.4.14beta.1` for
+pacman, and the host reports `1.4.14-beta.1`. The 1.4.13 betas predate this and
+carry `1.4.13` itself, so dnf treats the 1.4.13 release as already installed on
+them and a repository upgrade leaves them in place.
+[Leave a 1.4.13 beta](updates.md#leave-a-1413-beta) has the reinstall commands
+that replace one.
 
 A beta never reaches anyone who has not asked for it. GitHub keeps prereleases
 out of `releases/latest`, the repositories above never serve one, and Polaris
@@ -161,8 +168,8 @@ To try one, turn that setting on and let the Update Center offer it, or take the
 package straight from the
 [releases page](https://github.com/papi-ux/polaris/releases) and install it the
 way its release notes describe. Turning the preference off does not downgrade
-an installed beta; wait for a newer stable release or follow the stable package's
-downgrade instructions.
+an installed beta; wait for the stable release it precedes, which an ordinary
+upgrade installs over it, or follow the stable package's downgrade instructions.
 
 ---
 

@@ -107,6 +107,8 @@ prepare() {
 build() {
   export BRANCH="@GITHUB_BRANCH@"
   export BUILD_VERSION="@BUILD_VERSION@"
+  # Without it the package would be named for the prerelease and the binary would report the release.
+  export POLARIS_PRERELEASE_LABEL="@POLARIS_PRERELEASE_LABEL@"
   export COMMIT="${_commit}"
   export CC="${CC:-gcc}"
   export CXX="${CXX:-g++}"
@@ -181,8 +183,9 @@ package_polaris() {
   cd "$srcdir"
   DESTDIR="$pkgdir" cmake --install build --component polaris
   python "$srcdir/$pkgname/scripts/spaces/verify_package.py" "$pkgdir"
-  test -x "$pkgdir/usr/bin/polaris-$pkgver"
-  test "$(readlink "$pkgdir/usr/bin/polaris")" = "polaris-$pkgver"
+  # The binary is named for the release number alone. A prerelease's pkgver carries its label too.
+  test -x "$pkgdir/usr/bin/polaris-@PROJECT_VERSION@"
+  test "$(readlink "$pkgdir/usr/bin/polaris")" = "polaris-@PROJECT_VERSION@"
   test -f "$pkgdir/usr/lib/udev/rules.d/60-polaris.rules"
   test -f "$pkgdir/usr/lib/modules-load.d/60-polaris.conf"
   test -x "$pkgdir/usr/bin/polaris-gamescope-session"

@@ -148,6 +148,8 @@ prepare() {
 build() {
     export BRANCH="@GITHUB_BRANCH@"
     export BUILD_VERSION="@BUILD_VERSION@"
+    # Without it the package would be named for the prerelease and the binary would report the release.
+    export POLARIS_PRERELEASE_LABEL="@POLARIS_PRERELEASE_LABEL@"
     export COMMIT="${_commit}"
 
     export CC="${CC:-gcc}"

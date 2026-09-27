@@ -50,7 +50,9 @@ namespace update_status {
 
   /**
    * The Polaris version the OS package database reports, or empty when it
-   * reports none. Debian epochs and package releases are not part of it.
+   * reports none. Debian epochs and package releases are not part of it. A
+   * prerelease package (1.4.13~beta.3 from rpm or dpkg, 1.4.13beta.3-1 from
+   * pacman) comes back as the version the host reports, 1.4.13-beta.3.
    */
   std::string parse_installed_package_version(std::string_view package_family, std::string_view query_output);
 

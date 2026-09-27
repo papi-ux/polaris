@@ -308,10 +308,13 @@ function isReleaseGreater(release, version, includeIncremental = false) {
   }
 }
 
+// The channel counts: the release replaces its own beta through an ordinary upgrade, and until the
+// host restarts, 1.4.14 is installed while 1.4.14-beta.3 runs. On the release number alone those are
+// the same, and the Update Center would offer the release this host already has.
 function isInstalledNewerThanRunning(installedVersion, runningVersion) {
   if (!installedVersion || !runningVersion) return false
   try {
-    return new PolarisVersion(null, installedVersion).isGreater(new PolarisVersion(null, runningVersion))
+    return new PolarisVersion(null, installedVersion).isGreater(new PolarisVersion(null, runningVersion), true)
   } catch {
     return false
   }
@@ -332,14 +335,14 @@ function isVersionGreater(version, release) {
 // an update nobody restarted after, or the Bazzite KMS runtime copy, which no
 // update touches. Hosts before 1.4.3 report no installed package version and
 // hosts before 1.4.8 no running binary, so for them this is the only signal.
-// Release numbers only: a development build's commit suffix says nothing here.
+// A development build's commit suffix does not parse as a version, so it says nothing here. The
+// console is named exactly as it was built, channel included: 1.4.14-rc.1 is not 1.4.14.
 function describeHostBehindConsole(consoleVersion, runningVersion) {
   if (!isInstalledNewerThanRunning(consoleVersion, runningVersion)) return null
-  const consoleRelease = new PolarisVersion(null, consoleVersion).versionParts.slice(0, 3).join('.')
   return {
     status: 'restart_required',
     statusLabel: 'Console is newer than the host',
-    summary: `This console came with Polaris ${consoleRelease}, but the host process answering it is ${runningVersion}. The package was updated and the service still runs an older binary. Restart Polaris. If it still shows ${runningVersion}, the service runs a copy outside the package, on Bazzite /usr/local/bin/polaris-kms: run sudo -H polaris --setup-host, then restart again.`,
+    summary: `This console came with Polaris ${consoleVersion}, but the host process answering it is ${runningVersion}. The package was updated and the service still runs an older binary. Restart Polaris. If it still shows ${runningVersion}, the service runs a copy outside the package, on Bazzite /usr/local/bin/polaris-kms: run sudo -H polaris --setup-host, then restart again.`,
   }
 }
 

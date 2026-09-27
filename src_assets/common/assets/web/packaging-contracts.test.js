@@ -1010,7 +1010,15 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain("sed -n 's/^pkgname = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
     expect(buildScript).toContain("sed -n 's/^pkgver = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
     expect(buildScript).toContain("sed -n 's/^arch = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
-    expect(buildScript).toContain("'polaris|1.4.13-1|x86_64'")
+    // The release number stays literal. A prerelease joins its label to it with no separator, which
+    // pacman sorts below that release, and the helper carries that version and depends on it.
+    expect(buildScript).toContain('EXPECTED_PKGVER="1.4.13${POLARIS_PRERELEASE_LABEL}-1"')
+    expect(buildScript).toContain('if [ "$PACKAGE_IDENTITY" != "polaris|$EXPECTED_PKGVER|x86_64" ]; then')
+    expect(buildScript).toContain('if [ "$KMS_IDENTITY" != "polaris-kms|$EXPECTED_PKGVER|x86_64" ]; then')
+    expect(buildScript).toContain('if ! grep -Fqx "depend = polaris=$EXPECTED_PKGVER" "$KMS_RECEIPT_ROOT/.PKGINFO"; then')
+    expect(buildScript).toContain(
+      'if [ -n "$POLARIS_PRERELEASE_LABEL" ] && [ "$(vercmp "$PACKAGE_VERSION" "$BUILD_VERSION-1")" != -1 ]; then',
+    )
     expect(buildScript).toContain('PACKAGE_PATHS=(polaris-[0-9]*-x86_64.pkg.tar.zst)')
     expect(buildScript).toContain('CLONE_URL=https://github.com/papi-ux/polaris.git')
     expect(buildScript).toContain("sed -n 's/^depend = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
@@ -1055,10 +1063,13 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/share/polaris"')
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/share/applications/dev.polaris-stream.app.Polaris.desktop"')
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/lib/systemd/user/polaris.service"')
-    expect(pkgbuild).toContain('test -x "$pkgdir/usr/bin/polaris-$pkgver"')
-    expect(pkgbuild).toContain('test "$(readlink "$pkgdir/usr/bin/polaris")" = "polaris-$pkgver"')
+    // Named for the release number alone: a prerelease's pkgver, 1.4.13beta.3, is not the binary's
+    // name, and the reviewed namcap warnings name usr/bin/polaris-1.4.13 either way.
+    expect(pkgbuild).toContain('test -x "$pkgdir/usr/bin/polaris-@PROJECT_VERSION@"')
+    expect(pkgbuild).toContain('test "$(readlink "$pkgdir/usr/bin/polaris")" = "polaris-@PROJECT_VERSION@"')
     expect(pkgbuild).not.toContain('mv "$pkgdir/usr/bin/polaris"')
     expect(pkgbuild).not.toContain('ln -s "polaris-$pkgver"')
+    expect(pkgbuild).not.toContain('ln -s "polaris-@PROJECT_VERSION@"')
     expect(statSync('scripts/check-packaged-binary-paths.sh').mode & 0o111).not.toBe(0)
 
     const releaseVerifierIndex = workflow.indexOf('      - name: Verify release assets on GitHub release')
@@ -1127,6 +1138,50 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).not.toMatch(/CLONE_URL=(?:file:\/\/)?\$\{?SOURCE_ROOT/)
     for (const script of [bootstrap, buildScript]) {
       expect(script).toContain("POLARIS_LOCAL_CANDIDATE_BUILD must be 0 or 1")
+    }
+  })
+
+  it('hands the SteamOS build the release tag\'s prerelease label and refuses any other', () => {
+    const workflow = readSource('.github/workflows/build.yml')
+    const steamOs = section(workflow, '  steamos-build:', '  ubuntu-build:')
+    const bootstrap = readSource('scripts/ci/run-steamos-build.sh')
+    const buildScript = readSource('scripts/ci/build-steamos-package.sh')
+
+    // The lane checks out a commit and never sees the tag, so the label is handed in by name.
+    expect(steamOs).toContain('POLARIS_PRERELEASE_LABEL: ${{ needs.resolve-source.outputs.prerelease_label }}')
+    expect(steamOs).toContain('--env "POLARIS_PRERELEASE_LABEL=$POLARIS_PRERELEASE_LABEL"')
+    // The package is named from the label at configure time, and the inner build has to build the
+    // same version, or the package would say beta and the binary would report the release.
+    for (const path of ['packaging/linux/SteamOS/PKGBUILD', 'packaging/linux/Arch/PKGBUILD']) {
+      const pkgbuild = readSource(path)
+      expect(pkgbuild).toContain('pkgver=@PROJECT_VERSION@@POLARIS_SUB_VERSION@\npkgrel=1\n')
+      expect(pkgbuild).toContain('export POLARIS_PRERELEASE_LABEL="@POLARIS_PRERELEASE_LABEL@"')
+      expect(pkgbuild).toContain('depends=("polaris=$pkgver-$pkgrel")')
+    }
+
+    for (const script of [bootstrap, buildScript]) {
+      const lines = script.split('\n')
+      const guardStart = lines.indexOf('POLARIS_PRERELEASE_LABEL="${POLARIS_PRERELEASE_LABEL-}"')
+      const guardEnd = lines.indexOf('fi', guardStart + 1)
+      expect(guardStart).toBeGreaterThanOrEqual(0)
+      expect(guardEnd).toBeGreaterThan(guardStart)
+      expect(lines[guardEnd + 1]).toBe('export POLARIS_PRERELEASE_LABEL')
+      const guardScript = lines.slice(guardStart, guardEnd + 1).join('\n')
+      // Unset means stable, so a local candidate build needs nothing new.
+      for (const [value, expectedStatus] of [
+        [undefined, 0], ['', 0], ['beta.3', 0], ['beta.10', 0], ['rc.1', 0],
+        ['beta', 1], ['beta.', 1], ['beta.3.1', 1], ['-beta.3', 1], ['alpha.1', 1], ['Beta.3', 1],
+        ['beta.3 ', 1], ['beta.3\nrc.1', 1], ['~beta.3', 1],
+      ]) {
+        const env = { ...process.env }
+        if (value === undefined) delete env.POLARIS_PRERELEASE_LABEL
+        else env.POLARIS_PRERELEASE_LABEL = value
+        const result = spawnSync('bash', ['-c', guardScript], { encoding: 'utf8', env })
+        expect(result.status, `unexpected guard status for ${JSON.stringify(value)}`).toBe(expectedStatus)
+        if (expectedStatus !== 0) {
+          expect(result.stderr).toContain('POLARIS_PRERELEASE_LABEL must be empty, beta.N or rc.N')
+        }
+      }
     }
   })
 

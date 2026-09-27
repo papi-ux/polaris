@@ -357,9 +357,12 @@ const installedVersionNotStable = computed(() => {
   return version.value.isGreater(githubVersion.value)
 })
 
+// The channel counts, as it does in the Update Center: a beta is older than the release it precedes,
+// so a host on 1.4.14-beta.3 has a new stable release waiting once v1.4.14 is out. On the release
+// number alone the two are equal, and the headline called that beta the current public release.
 const stableBuildAvailable = computed(() => {
   if (!githubVersion.value || !version.value) return false
-  return githubVersion.value.isGreater(version.value)
+  return githubVersion.value.isGreater(version.value, true)
 })
 
 const preReleaseBuildAvailable = computed(() => {

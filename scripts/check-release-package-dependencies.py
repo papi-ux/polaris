@@ -321,14 +321,16 @@ resolve_tokens = shell_tokens(resolve_script)
 reject_heredoc(resolve_tokens, "exact-source resolver")
 if resolve_job.count("      version: ${{ steps.source.outputs.version }}\n") != 1:
     raise AssertionError("exact-source resolver must publish one source-derived version output")
+if resolve_job.count("      prerelease_label: ${{ steps.source.outputs.prerelease_label }}\n") != 1:
+    raise AssertionError("exact-source resolver must publish the tag's prerelease label beside the version")
 for required_source_command in (
     ["set", "-euo", "pipefail"],
     ["source_commit=$(git rev-parse HEAD)"],
     ["build_version=$(grep -Pom1 '^project\\(Polaris VERSION \\K[^ ]+' CMakeLists.txt)"],
     ["git", "fetch", "--no-tags", "--force", "origin", "refs/tags/${release_tag}:refs/tags/${release_tag}"],
     ["tag_commit=$(git rev-parse refs/tags/${release_tag}^{commit})"],
-    # A beta or rc tag is accepted, and only the numeric part of it has to equal the built version:
-    # the channel lives on the tag alone, so every package and pin stays at vMAJOR.MINOR.PATCH.
+    # A beta or rc tag is accepted, and only the numeric part of it has to equal the built version.
+    # Its label travels to the package builds, which spell it so a prerelease sorts below its release.
     [
         "if", "[[", "!", "$release_tag", "=~", "^v[0-9]+.[0-9]+.[0-9]+(-(beta", "|", "rc).[0-9]+)?$", "]]", ";", "then", ";",
         "echo", "Release tag must match vMAJOR.MINOR.PATCH, optionally -beta.N or -rc.N: $release_tag", ">", "&", "2", ";",
@@ -344,9 +346,10 @@ for required_source_command in (
     # Anything carrying a channel suffix is a prerelease, decided once here and carried downstream,
     # so the staging and publishing steps cannot disagree about what they are publishing.
     ["prerelease=false"],
+    ["prerelease_label="],
     [
         "if", "[", "$release_tag", "!=", "v${build_version}", "]", ";", "then", ";",
-        "prerelease=true", ";", "fi",
+        "prerelease=true", ";", "prerelease_label=${release_tag#v${build_version}-}", ";", "fi",
     ],
     [
         "if", "[", "$tag_commit", "!=", "$source_commit", "]", ";", "then", ";",
@@ -356,6 +359,7 @@ for required_source_command in (
     ["echo", "commit=$source_commit", ">>", "$GITHUB_OUTPUT"],
     ["echo", "version=$build_version", ">>", "$GITHUB_OUTPUT"],
     ["echo", "prerelease=$prerelease", ">>", "$GITHUB_OUTPUT"],
+    ["echo", "prerelease_label=$prerelease_label", ">>", "$GITHUB_OUTPUT"],
 ):
     require_command(resolve_tokens, required_source_command, "exact-source resolver")
 
@@ -445,11 +449,12 @@ ubuntu_job = workflow_job(workflow, "ubuntu-build")
 expected_package_version_env = (
     "      BRANCH: ${{ github.head_ref || inputs.release_tag || github.ref_name }}\n"
     "      BUILD_VERSION: ${{ needs.resolve-source.outputs.version }}\n"
+    "      POLARIS_PRERELEASE_LABEL: ${{ needs.resolve-source.outputs.prerelease_label }}\n"
 )
 for job_name, job in (("Ubuntu DEB", ubuntu_job), ("Fedora RPM", fedora_job)):
     if job.count(expected_package_version_env) != 1:
         raise AssertionError(
-            f"{job_name} CI must bind BRANCH and BUILD_VERSION to the exact resolved source"
+            f"{job_name} CI must bind BRANCH, BUILD_VERSION and the prerelease label to the exact resolved source"
         )
 
 fedora_clang_configure = workflow_step(fedora_clang_job, "Configure")
@@ -501,10 +506,17 @@ package_identity_contracts = (
             'package_version="$(dpkg-deb --field "$deb_path" Version)"',
             'package_architecture="$(dpkg-deb --field "$deb_path" Architecture)"',
             'package_identity="${package_name}|${package_version}|${package_architecture}"',
-            'expected_package_identity="polaris|${BUILD_VERSION}|amd64"',
+            # A prerelease is X.Y.Z~beta.N, the spelling dpkg sorts below X.Y.Z, and it has to.
+            'expected_package_version="${BUILD_VERSION}"',
+            'if [ -n "$POLARIS_PRERELEASE_LABEL" ]; then',
+            'expected_package_version="${BUILD_VERSION}~${POLARIS_PRERELEASE_LABEL}"',
+            'expected_package_identity="polaris|${expected_package_version}|amd64"',
             "printf '%s\\n' \"$package_identity\" | tee build/cpack_artifacts/package-identity.txt",
             'if [ "$package_identity" != "$expected_package_identity" ]; then',
             'echo "Ubuntu package identity mismatch: expected \'$expected_package_identity\', got \'$package_identity\'" >&2',
+            'if [ -n "$POLARIS_PRERELEASE_LABEL" ] && ! dpkg --compare-versions "$package_version" lt "$BUILD_VERSION"; then',
+            'test "$kms_identity" = "polaris-kms|${expected_package_version}|amd64"',
+            'test "$(dpkg-deb --field "$kms_deb_path" Depends)" = "polaris (= ${expected_package_version}), libcap2-bin, passwd"',
         ),
     ),
     (
@@ -513,10 +525,18 @@ package_identity_contracts = (
         "Smoke test Fedora RPM package",
         (
             'package_identity="$(rpm -qp --qf \'%{NAME}|%{VERSION}|%{RELEASE}|%{ARCH}\\n\' "$rpm_path")"',
-            'expected_package_identity="polaris|${BUILD_VERSION}|1|x86_64"',
+            # A prerelease is X.Y.Z~beta.N, the spelling rpm sorts below X.Y.Z, and it has to.
+            'expected_package_version="${BUILD_VERSION}"',
+            'if [ -n "$POLARIS_PRERELEASE_LABEL" ]; then',
+            'expected_package_version="${BUILD_VERSION}~${POLARIS_PRERELEASE_LABEL}"',
+            'expected_package_identity="polaris|${expected_package_version}|1|x86_64"',
             "printf '%s\\n' \"$package_identity\" | tee build/cpack_artifacts/package-identity.txt",
             'if [ "$package_identity" != "$expected_package_identity" ]; then',
             'echo "Fedora package identity mismatch: expected \'$expected_package_identity\', got \'$package_identity\'" >&2',
+            'package_evr="$(rpm -qp --qf \'%{VERSION}-%{RELEASE}\' "$rpm_path")"',
+            'if [ -n "$POLARIS_PRERELEASE_LABEL" ] && [ "$(rpm --eval "%{lua: print(rpm.vercmp(\'${package_evr}\', \'${BUILD_VERSION}-1\'))}")" != "-1" ]; then',
+            'test "$kms_identity" = "polaris-kms|${expected_package_version}|1|x86_64"',
+            'rpm -qpR "$kms_rpm_path" | grep -Fx "polaris = ${expected_package_version}"',
         ),
     ),
 )
@@ -564,6 +584,8 @@ if release_checkout.strip() != expected_release_checkout.strip():
     )
 release_step_names = (
     "Check out exact release source",
+    "Prepare release asset names",
+    "Verify release package versions match the tag",
     "Revalidate release tag against packaged source",
     "Stage curated GitHub release",
     "Upload release assets to GitHub release",
@@ -940,5 +962,177 @@ for cpack_dependency in ("libei1, \\\n", "libei >= 1.0, \\\n"):
         raise AssertionError(f"CPack runtime dependencies must name {cpack_dependency.split(',')[0]}")
 if not re.search(r"(?m)^Requires:\s+libei >= 1\.0\s*$", fedora):
     raise AssertionError("Fedora runtime dependencies must explicitly include libei")
+
+# A prerelease has to sort below its release in every format, and the binary has to report the label
+# its package was named for. Each check is pinned whole, down to the exit that fails the step: a check
+# that only prints is no check.
+def require_block(script: str, block: str, context: str) -> None:
+    if script.count(block) != 1:
+        raise AssertionError(f"{context} must run this check exactly once and fail on it:\n{block}")
+
+
+def runtime_version_block(release: str, output: str, package: str) -> str:
+    return (
+        f'expected_runtime_version="${{{release}}}"\n'
+        'if [ -n "$POLARIS_PRERELEASE_LABEL" ]; then\n'
+        f'  expected_runtime_version="${{{release}}}-${{POLARIS_PRERELEASE_LABEL}}"\n'
+        'fi\n'
+        f'if ! grep -Fq "Polaris version: ${{expected_runtime_version}} commit:" {output}; then\n'
+        f'  echo "Installed {package} reports a version other than ${{expected_runtime_version}}" >&2\n'
+        '  exit 1\n'
+        'fi\n'
+    )
+
+
+ubuntu_smoke = workflow_run_script(workflow_step(ubuntu_job, "Smoke test Ubuntu DEB package"))
+fedora_smoke = workflow_run_script(workflow_step(fedora_job, "Smoke test Fedora RPM package"))
+arch_smoke_script = workflow_run_script(arch_smoke)
+for context, script, blocks in (
+    ("Ubuntu DEB smoke", ubuntu_smoke, (
+        'if [ "$package_identity" != "$expected_package_identity" ]; then\n'
+        '  echo "Ubuntu package identity mismatch: expected \'$expected_package_identity\', got \'$package_identity\'" >&2\n'
+        '  exit 1\n'
+        'fi\n'
+        'if [ -n "$POLARIS_PRERELEASE_LABEL" ] && ! dpkg --compare-versions "$package_version" lt "$BUILD_VERSION"; then\n'
+        '  echo "Ubuntu prerelease $package_version does not sort below $BUILD_VERSION, so an upgrade to that release would not replace it" >&2\n'
+        '  exit 1\n'
+        'fi\n',
+        'polaris --version | tee build/cpack_artifacts/package-version.txt\n',
+        runtime_version_block("BUILD_VERSION", "build/cpack_artifacts/package-version.txt", "Ubuntu DEB"),
+    )),
+    ("Fedora RPM smoke", fedora_smoke, (
+        'if [ "$package_identity" != "$expected_package_identity" ]; then\n'
+        '  echo "Fedora package identity mismatch: expected \'$expected_package_identity\', got \'$package_identity\'" >&2\n'
+        '  exit 1\n'
+        'fi\n'
+        'package_evr="$(rpm -qp --qf \'%{VERSION}-%{RELEASE}\' "$rpm_path")"\n'
+        'if [ -n "$POLARIS_PRERELEASE_LABEL" ] && [ "$(rpm --eval "%{lua: print(rpm.vercmp(\'${package_evr}\', \'${BUILD_VERSION}-1\'))}")" != "-1" ]; then\n'
+        '  echo "Fedora prerelease $package_evr does not sort below ${BUILD_VERSION}-1, so an upgrade to that release would not replace it" >&2\n'
+        '  exit 1\n'
+        'fi\n',
+        'polaris --version | tee build/cpack_artifacts/package-version.txt\n',
+        runtime_version_block("BUILD_VERSION", "build/cpack_artifacts/package-version.txt", "Fedora RPM"),
+    )),
+    ("Arch package smoke", arch_smoke_script, (
+        'release_version="$(grep -Pom1 \'^project\\(Polaris VERSION \\K[^ ]+\' CMakeLists.txt)"\n'
+        'expected_pkgver="${release_version}${POLARIS_PRERELEASE_LABEL}-1"\n'
+        'if ! grep -Fqx "pkgver = ${expected_pkgver}" arch-pkgbuild/package-pkginfo.txt; then\n'
+        '  echo "Arch package version mismatch: expected ${expected_pkgver}" >&2\n'
+        '  exit 1\n'
+        'fi\n'
+        'if [ -n "$POLARIS_PRERELEASE_LABEL" ] && [ "$(vercmp "$expected_pkgver" "${release_version}-1")" != "-1" ]; then\n'
+        '  echo "Arch prerelease ${expected_pkgver} does not sort below ${release_version}-1, so an upgrade to that release would not replace it" >&2\n'
+        '  exit 1\n'
+        'fi\n'
+        'kms_pkg_path="$(find arch-pkgbuild -maxdepth 1 -type f -name \'polaris-kms-[0-9]*-x86_64.pkg.tar.*\' | sort | head -n 1)"\n'
+        'if [ -z "$kms_pkg_path" ]; then\n'
+        '  echo "No Arch polaris-kms package was produced" >&2\n'
+        '  exit 1\n'
+        'fi\n'
+        'tar -xOf "$kms_pkg_path" .PKGINFO > arch-pkgbuild/kms-package-pkginfo.txt\n'
+        'if ! grep -Fqx "pkgver = ${expected_pkgver}" arch-pkgbuild/kms-package-pkginfo.txt ||\n'
+        '   ! grep -Fqx "depend = polaris=${expected_pkgver}" arch-pkgbuild/kms-package-pkginfo.txt; then\n'
+        '  echo "Arch polaris-kms must be ${expected_pkgver} and depend on exactly polaris=${expected_pkgver}" >&2\n'
+        '  exit 1\n'
+        'fi\n',
+        'polaris --version | tee arch-pkgbuild/package-version.txt\n',
+        runtime_version_block("release_version", "arch-pkgbuild/package-version.txt", "Arch package"),
+    )),
+):
+    for block in blocks:
+        require_block(script, block, context)
+    # The binary is asked after it is installed, and only then is its answer read.
+    if script.index("polaris --version | tee ") > script.index('expected_runtime_version="'):
+        raise AssertionError(f"{context} must read the installed binary's version before checking it")
+
+steamos_build_script = read("scripts/ci/build-steamos-package.sh")
+for block in (
+    'EXPECTED_PKGVER="1.4.13${POLARIS_PRERELEASE_LABEL}-1"\n'
+    'if [ "$PACKAGE_IDENTITY" != "polaris|$EXPECTED_PKGVER|x86_64" ]; then\n'
+    "  printf 'unexpected SteamOS package identity: %s\\n' \"$PACKAGE_IDENTITY\" >&2\n"
+    '  exit 1\n'
+    'fi\n'
+    'if [ -n "$POLARIS_PRERELEASE_LABEL" ] && [ "$(vercmp "$PACKAGE_VERSION" "$BUILD_VERSION-1")" != -1 ]; then\n'
+    "  printf 'SteamOS prerelease %s does not sort below %s-1, so an upgrade to that release would not replace it\\n' \\\n"
+    '    "$PACKAGE_VERSION" "$BUILD_VERSION" >&2\n'
+    '  exit 1\n'
+    'fi\n',
+    'if [ "$KMS_IDENTITY" != "polaris-kms|$EXPECTED_PKGVER|x86_64" ]; then\n'
+    "  printf 'unexpected SteamOS polaris-kms package identity: %s\\n' \"$KMS_IDENTITY\" >&2\n"
+    '  exit 1\n'
+    'fi\n'
+    '# Exactly this version of Polaris, so the helper and the binary can never disagree.\n'
+    'if ! grep -Fqx "depend = polaris=$EXPECTED_PKGVER" "$KMS_RECEIPT_ROOT/.PKGINFO"; then\n'
+    "  printf '%s\\n' 'polaris-kms must depend on the exact Polaris it was built with' >&2\n"
+    "  sed -n 's/^depend = /  depends: /p' \"$KMS_RECEIPT_ROOT/.PKGINFO\" >&2\n"
+    '  exit 1\n'
+    'fi\n',
+):
+    require_block(steamos_build_script, block, "SteamOS package build")
+require_block(
+    read("scripts/ci/run-steamos-build.sh"),
+    'chroot "$STEAMOS_ROOT" /usr/bin/polaris --version \\\n'
+    '  > /output/steamos3.8-installed-version.txt\n'
+    '# The binary reports the release number, and a prerelease\'s label the way the host spells it,\n'
+    '# X.Y.Z-beta.N. The package version alone cannot show that the build itself had the label.\n'
+    'EXPECTED_RUNTIME_VERSION="$(grep -Pom1 \'^project\\(Polaris VERSION \\K[^ ]+\' /workspace/CMakeLists.txt)"\n'
+    'if [ -n "$POLARIS_PRERELEASE_LABEL" ]; then\n'
+    '  EXPECTED_RUNTIME_VERSION="$EXPECTED_RUNTIME_VERSION-$POLARIS_PRERELEASE_LABEL"\n'
+    'fi\n'
+    'if ! grep -Fq "Polaris version: $EXPECTED_RUNTIME_VERSION commit:" /output/steamos3.8-installed-version.txt; then\n'
+    "  printf 'installed SteamOS binary reports a version other than %s\\n' \"$EXPECTED_RUNTIME_VERSION\" >&2\n"
+    '  exit 1\n'
+    'fi\n',
+    "SteamOS installed binary",
+)
+
+# Each package lane receives the label on its own, so release assembly reads every final package
+# against the tag and the resolved channel before anything is published.
+release_versions = workflow_step(release_job, "Verify release package versions match the tag")
+if "        if:" in release_versions:
+    raise AssertionError("the release package version check must run on every release")
+for binding in (
+    "          BUILD_VERSION: ${{ needs.resolve-source.outputs.version }}\n",
+    "          IS_PRERELEASE: ${{ needs.resolve-source.outputs.prerelease }}\n",
+    "          POLARIS_PRERELEASE_LABEL: ${{ needs.resolve-source.outputs.prerelease_label }}\n",
+):
+    if release_versions.count(binding) != 1:
+        raise AssertionError(f"the release package version check must bind {binding.strip()}")
+require_block(
+    workflow_run_script(release_versions),
+    'set -euo pipefail\n'
+    'if ! command -v rpm >/dev/null; then\n'
+    '  sudo apt-get update -qq\n'
+    '  sudo apt-get install -y -qq --no-install-recommends rpm\n'
+    'fi\n'
+    'python3 scripts/ci/check-release-package-versions.py \\\n'
+    '  --tag "$POLARIS_PACKAGE_REF_NAME" \\\n'
+    '  --version "$BUILD_VERSION" \\\n'
+    '  --prerelease "$IS_PRERELEASE" \\\n'
+    '  --label "$POLARIS_PRERELEASE_LABEL" \\\n'
+    '  release-assets/final\n',
+    "release package version check",
+)
+
+# The ordering test runs wherever a package manager lives, and each run names the one it must have:
+# dpkg on the Ubuntu runner, vercmp in the Arch container, rpm in the Fedora container.
+for job_name, job, step_name, tool in (
+    ("resolve-source", resolve_job, "Verify prerelease package versions sort below their release", "dpkg"),
+    ("arch-build", arch_job, "Verify prerelease pacman versions sort below their release", "vercmp"),
+    ("fedora-rpm-build", fedora_job, "Verify prerelease RPM versions sort below their release", "rpm"),
+):
+    order_step = workflow_step(job, step_name)
+    expected_order_step = (
+        "        env:\n"
+        f"          POLARIS_VERSION_ORDER_TOOLS: {tool}\n"
+        "        run: python3 -m unittest discover -s tests/scripts -p 'test_prerelease_package_versions.py'\n"
+    )
+    if order_step.count(expected_order_step) != 1 or "        if:" in order_step:
+        raise AssertionError(f"{job_name} must always run the prerelease ordering test and require {tool}")
+release_check_test = workflow_step(resolve_job, "Verify the release package version check")
+if release_check_test.strip() != (
+    "run: python3 -m unittest discover -s tests/scripts -p 'test_release_package_versions.py'"
+):
+    raise AssertionError("resolve-source must run the release package version check's own tests")
 
 print("Release package dependency contracts look correct.")

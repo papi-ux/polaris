@@ -326,6 +326,60 @@ describe('Update Center release awareness', () => {
     }
   })
 
+  it('says a beta host that installed the release has not restarted into it', () => {
+    // A beta package now sorts below its release, so an ordinary upgrade installs the release over it
+    // while the beta keeps running until Polaris restarts.
+    const latestRelease = { ...release, tag_name: 'v1.4.14', name: 'v1.4.14' }
+    const host = { platform: 'linux', distro: { id: 'fedora', version_id: '44' } }
+    const running = (installed_package_version, extra = {}) => buildUpdateCenterState({
+      currentVersion: '1.4.14-beta.3',
+      latestRelease,
+      host: { ...host, installed_package_version },
+      ...extra,
+    })
+
+    const state = running('1.4.14')
+    expect(state.status).toBe('restart_required')
+    expect(state.statusLabel).toBe('Installed, not running')
+    expect(state.summary).toContain('1.4.14 is installed but this host is still running 1.4.14-beta.3')
+    expect(running('1.4.14-rc.1').status).toBe('restart_required')
+    expect(running('1.4.14-beta.10').status).toBe('restart_required')
+
+    // The beta that is installed is the one running, or an older one: nothing to restart into.
+    expect(running('1.4.14-beta.3').status).toBe('update_available')
+    expect(running('1.4.14-beta.2').status).toBe('update_available')
+    // A host with no package answer keeps the release offer.
+    expect(running('').status).toBe('update_available')
+
+    // Arch and SteamOS build the console with the host's own version, label included.
+    expect(running('', { consoleVersion: '1.4.14' }).statusLabel).toBe('Console is newer than the host')
+    expect(running('', { consoleVersion: '1.4.14-beta.3' }).status).toBe('update_available')
+  })
+
+  it('names the console it came with, channel included', () => {
+    // A release candidate's console is not the release's, so the summary names it as it was built.
+    const behind = (consoleVersion) => buildUpdateCenterState({ currentVersion: '1.4.14-beta.3', consoleVersion, latestRelease: null })
+    expect(behind('1.4.14-rc.1').statusLabel).toBe('Console is newer than the host')
+    expect(behind('1.4.14-rc.1').summary).toContain('This console came with Polaris 1.4.14-rc.1, but the host process answering it is 1.4.14-beta.3.')
+    expect(behind('1.4.14').summary).toContain('This console came with Polaris 1.4.14, but the host process answering it is 1.4.14-beta.3.')
+  })
+
+  it('reads a host on a 1.4.13 beta as the 1.4.13 release, which it is never offered', () => {
+    // The published 1.4.13 betas carry and report 1.4.13 itself, so nothing here can tell them from
+    // the release. docs/updates.md states this exception and gives the reinstall that replaces them.
+    const host = { platform: 'linux', distro: { id: 'fedora', version_id: '44' }, installed_package_version: '1.4.13' }
+    const latestRelease = { ...release, tag_name: 'v1.4.13', name: 'v1.4.13' }
+    const prereleaseRelease = { ...release, tag_name: 'v1.4.13-beta.3', name: 'v1.4.13-beta.3', prerelease: true }
+    for (const includePrereleases of [false, true]) {
+      const state = buildUpdateCenterState({ currentVersion: '1.4.13', latestRelease, prereleaseRelease, includePrereleases, host })
+      expect(state.status, `includePrereleases=${includePrereleases}`).toBe('current')
+      expect(state.statusLabel).toBe('Current release')
+    }
+    // The next release is newer on the number alone, and is offered as usual.
+    const next = buildUpdateCenterState({ currentVersion: '1.4.13', latestRelease: { ...release, tag_name: 'v1.4.14', name: 'v1.4.14' }, host })
+    expect(next.status).toBe('update_available')
+  })
+
   it('keeps quiet about the console when it has nothing to say', () => {
     const latestRelease = { ...release, tag_name: 'v1.4.12', name: 'v1.4.12' }
     const host = { platform: 'linux', distro: { id: 'fedora', version_id: '44' } }
@@ -698,7 +752,7 @@ describe('Update Center release awareness', () => {
 })
 
 describe('the DRM/KMS helper on the download path', () => {
-  // polaris-kms carries `Requires: polaris = %{version}-%{release}` on RPM and
+  // polaris-kms carries `Requires: polaris = <its own version>` on RPM and
   // `depends=("polaris=$pkgver-$pkgrel")` on pacman. Installing the base package on its own is
   // therefore not an upgrade of a host that has the helper: it is a broken dependency, on exactly
   // the hosts 1.4.13 told to install it.

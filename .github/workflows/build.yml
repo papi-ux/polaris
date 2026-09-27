@@ -34,6 +34,7 @@ jobs:
       native_required: ${{ steps.source.outputs.native_required }}
       version: ${{ steps.source.outputs.version }}
       prerelease: ${{ steps.source.outputs.prerelease }}
+      prerelease_label: ${{ steps.source.outputs.prerelease_label }}
 
     steps:
       - uses: actions/checkout@v7
@@ -45,6 +46,16 @@ jobs:
 
       - name: Verify matching debug package assets
         run: python3 -m unittest discover -s tests/scripts -p 'test_debug_package_assets.py'
+
+      - name: Verify prerelease package versions sort below their release
+        # Each job that runs this names the package manager its image carries, which then has to be
+        # there: dpkg here, vercmp in the Arch build and rpm in the Fedora RPM build.
+        env:
+          POLARIS_VERSION_ORDER_TOOLS: dpkg
+        run: python3 -m unittest discover -s tests/scripts -p 'test_prerelease_package_versions.py'
+
+      - name: Verify the release package version check
+        run: python3 -m unittest discover -s tests/scripts -p 'test_release_package_versions.py'
 
       - name: Verify build scope classifier
         run: tests/scripts/test_classify_native_build.sh
@@ -88,11 +99,14 @@ jobs:
             native_required="$(git diff --name-only --no-renames -z "$BASE_COMMIT" "$source_commit" | scripts/ci/classify-native-build.sh)"
           fi
           prerelease=false
+          prerelease_label=""
 
           if [ "$IS_RELEASE" = "true" ]; then
             release_tag="${POLARIS_PACKAGE_REF_NAME}"
-            # A beta carries the version it is a beta of, with the channel on the tag alone: the
-            # packages, the catalog and every version pin stay at vMAJOR.MINOR.PATCH.
+            # A beta carries the number of the release it precedes. Its label, beta.N or rc.N, goes to
+            # every package build, which spells it so the package sorts below that release: a beta
+            # that carried the release's own version was left in place by an upgrade to that release
+            # (cmake/prep/prerelease_versions.cmake). The catalog and the notes stay at vMAJOR.MINOR.PATCH.
             if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.[0-9]+)?$ ]]; then
               echo "Release tag must match vMAJOR.MINOR.PATCH, optionally -beta.N or -rc.N: $release_tag" >&2
               exit 1
@@ -105,6 +119,7 @@ jobs:
             fi
             if [ "$release_tag" != "v${build_version}" ]; then
               prerelease=true
+              prerelease_label="${release_tag#v${build_version}-}"
             fi
 
             git tag -d "$release_tag" >/dev/null 2>&1 || true
@@ -121,6 +136,7 @@ jobs:
           echo "native_required=$native_required" >> "$GITHUB_OUTPUT"
           echo "version=$build_version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "prerelease_label=$prerelease_label" >> "$GITHUB_OUTPUT"
 
       - name: Refuse beta-only text in stable release notes
         if: (startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') && steps.source.outputs.prerelease == 'false'
@@ -426,6 +442,11 @@ jobs:
           printf '%s  %s\n' "$ARCH_BOOST_LIBS_SHA256" "$boost_libraries_package" | sha256sum --check --strict
           pacman -U --noconfirm "$boost_package" "$boost_libraries_package"
 
+      - name: Verify prerelease pacman versions sort below their release
+        env:
+          POLARIS_VERSION_ORDER_TOOLS: vercmp
+        run: python3 -m unittest discover -s tests/scripts -p 'test_prerelease_package_versions.py'
+
       # Fail download setup before the expensive compile. This only fills the
       # package cache; CUDA is installed later for the makepkg validation.
       - name: Download Arch CUDA packages
@@ -499,6 +520,8 @@ jobs:
           run_test_suite '^polaris_multiseat_worker_go$'
 
       - name: Generate Arch package files
+        env:
+          POLARIS_PRERELEASE_LABEL: ${{ needs.resolve-source.outputs.prerelease_label }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           BUILD_VERSION="$(grep -Pom1 '^project\(Polaris VERSION \K[^ ]+' CMakeLists.txt)"
@@ -507,6 +530,7 @@ jobs:
           env \
             BRANCH="$BRANCH" \
             BUILD_VERSION="$BUILD_VERSION" \
+            POLARIS_PRERELEASE_LABEL="$POLARIS_PRERELEASE_LABEL" \
             CLONE_URL="file://$GITHUB_WORKSPACE" \
             COMMIT="$COMMIT" \
             cmake -S . -B arch-pkgbuild \
@@ -576,6 +600,8 @@ jobs:
 
       - name: Smoke test Arch package
         if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
+        env:
+          POLARIS_PRERELEASE_LABEL: ${{ needs.resolve-source.outputs.prerelease_label }}
         run: |
           set -euo pipefail
 
@@ -587,6 +613,32 @@ jobs:
 
           tar -xOf "$pkg_path" .BUILDINFO | tee arch-pkgbuild/package-buildinfo.txt
           tar -xOf "$pkg_path" .PKGINFO | tee arch-pkgbuild/package-pkginfo.txt
+
+          # A prerelease joins its label straight onto the release number, which pacman sorts below
+          # that release; a tilde, an underscore or a dot there sorts above it
+          # (cmake/prep/prerelease_versions.cmake). The helper carries the same version and depends
+          # on exactly this polaris.
+          release_version="$(grep -Pom1 '^project\(Polaris VERSION \K[^ ]+' CMakeLists.txt)"
+          expected_pkgver="${release_version}${POLARIS_PRERELEASE_LABEL}-1"
+          if ! grep -Fqx "pkgver = ${expected_pkgver}" arch-pkgbuild/package-pkginfo.txt; then
+            echo "Arch package version mismatch: expected ${expected_pkgver}" >&2
+            exit 1
+          fi
+          if [ -n "$POLARIS_PRERELEASE_LABEL" ] && [ "$(vercmp "$expected_pkgver" "${release_version}-1")" != "-1" ]; then
+            echo "Arch prerelease ${expected_pkgver} does not sort below ${release_version}-1, so an upgrade to that release would not replace it" >&2
+            exit 1
+          fi
+          kms_pkg_path="$(find arch-pkgbuild -maxdepth 1 -type f -name 'polaris-kms-[0-9]*-x86_64.pkg.tar.*' | sort | head -n 1)"
+          if [ -z "$kms_pkg_path" ]; then
+            echo "No Arch polaris-kms package was produced" >&2
+            exit 1
+          fi
+          tar -xOf "$kms_pkg_path" .PKGINFO > arch-pkgbuild/kms-package-pkginfo.txt
+          if ! grep -Fqx "pkgver = ${expected_pkgver}" arch-pkgbuild/kms-package-pkginfo.txt ||
+             ! grep -Fqx "depend = polaris=${expected_pkgver}" arch-pkgbuild/kms-package-pkginfo.txt; then
+            echo "Arch polaris-kms must be ${expected_pkgver} and depend on exactly polaris=${expected_pkgver}" >&2
+            exit 1
+          fi
 
           if ! grep -Fq "installed = cuda-" arch-pkgbuild/package-buildinfo.txt; then
             echo "Arch package was not built with CUDA installed" >&2
@@ -682,6 +734,16 @@ jobs:
           fi
 
           polaris --version | tee arch-pkgbuild/package-version.txt
+          # The binary reports the release number, and a prerelease's label the way the host spells it,
+          # X.Y.Z-beta.N. The package version alone cannot show that the build itself had the label.
+          expected_runtime_version="${release_version}"
+          if [ -n "$POLARIS_PRERELEASE_LABEL" ]; then
+            expected_runtime_version="${release_version}-${POLARIS_PRERELEASE_LABEL}"
+          fi
+          if ! grep -Fq "Polaris version: ${expected_runtime_version} commit:" arch-pkgbuild/package-version.txt; then
+            echo "Installed Arch package reports a version other than ${expected_runtime_version}" >&2
+            exit 1
+          fi
 
       - name: Summarize Arch validation
         if: always()
@@ -944,10 +1006,13 @@ jobs:
           git -c submodule.third-party/build-deps.update=none submodule update --init --recursive
 
       - name: Build and validate SteamOS 3.8 package
+        env:
+          POLARIS_PRERELEASE_LABEL: ${{ needs.resolve-source.outputs.prerelease_label }}
         run: |
           mkdir -p "$RUNNER_TEMP/polaris-steamos-output"
           sudo docker run --privileged --rm \
             --env "POLARIS_BUILD_COMMIT=$POLARIS_BUILD_COMMIT" \
+            --env "POLARIS_PRERELEASE_LABEL=$POLARIS_PRERELEASE_LABEL" \
             --volume "$GITHUB_WORKSPACE:/workspace:rw" \
             --volume "$RUNNER_TEMP/polaris-steamos-output:/output:rw" \
             archlinux:latest \
@@ -985,6 +1050,7 @@ jobs:
       CCACHE_COMPILERCHECK: content
       BRANCH: ${{ github.head_ref || inputs.release_tag || github.ref_name }}
       BUILD_VERSION: ${{ needs.resolve-source.outputs.version }}
+      POLARIS_PRERELEASE_LABEL: ${{ needs.resolve-source.outputs.prerelease_label }}
 
     steps:
       - uses: actions/checkout@v7
@@ -1214,10 +1280,20 @@ jobs:
           package_version="$(dpkg-deb --field "$deb_path" Version)"
           package_architecture="$(dpkg-deb --field "$deb_path" Architecture)"
           package_identity="${package_name}|${package_version}|${package_architecture}"
-          expected_package_identity="polaris|${BUILD_VERSION}|amd64"
+          # A prerelease is X.Y.Z~beta.N, the spelling dpkg sorts below X.Y.Z. A hyphen would be read
+          # as the Debian revision and sort above it (cmake/prep/prerelease_versions.cmake).
+          expected_package_version="${BUILD_VERSION}"
+          if [ -n "$POLARIS_PRERELEASE_LABEL" ]; then
+            expected_package_version="${BUILD_VERSION}~${POLARIS_PRERELEASE_LABEL}"
+          fi
+          expected_package_identity="polaris|${expected_package_version}|amd64"
           printf '%s\n' "$package_identity" | tee build/cpack_artifacts/package-identity.txt
           if [ "$package_identity" != "$expected_package_identity" ]; then
             echo "Ubuntu package identity mismatch: expected '$expected_package_identity', got '$package_identity'" >&2
+            exit 1
+          fi
+          if [ -n "$POLARIS_PRERELEASE_LABEL" ] && ! dpkg --compare-versions "$package_version" lt "$BUILD_VERSION"; then
+            echo "Ubuntu prerelease $package_version does not sort below $BUILD_VERSION, so an upgrade to that release would not replace it" >&2
             exit 1
           fi
 
@@ -1247,8 +1323,8 @@ jobs:
           )
           sudo apt-get "${apt_options[@]}" install -y "./$deb_path"
           kms_identity="$(dpkg-deb --field "$kms_deb_path" Package)|$(dpkg-deb --field "$kms_deb_path" Version)|$(dpkg-deb --field "$kms_deb_path" Architecture)"
-          test "$kms_identity" = "polaris-kms|${BUILD_VERSION}|amd64"
-          test "$(dpkg-deb --field "$kms_deb_path" Depends)" = "polaris (= ${BUILD_VERSION}), libcap2-bin, passwd"
+          test "$kms_identity" = "polaris-kms|${expected_package_version}|amd64"
+          test "$(dpkg-deb --field "$kms_deb_path" Depends)" = "polaris (= ${expected_package_version}), libcap2-bin, passwd"
           sudo apt-get "${apt_options[@]}" install -y "./$kms_deb_path"
           helper=/usr/libexec/polaris/polaris-kms
           test "$(stat -c '%a %U %G' "$helper")" = '750 root polaris-kms'
@@ -1300,6 +1376,16 @@ jobs:
           if [ "${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}" = "true" ] &&
               ! grep -Fq "cuda=enabled" build/cpack_artifacts/package-version.txt; then
             echo "Release Ubuntu DEB was not built with CUDA enabled" >&2
+            exit 1
+          fi
+          # The binary reports the release number, and a prerelease's label the way the host spells it,
+          # X.Y.Z-beta.N. The package version alone cannot show that the build itself had the label.
+          expected_runtime_version="${BUILD_VERSION}"
+          if [ -n "$POLARIS_PRERELEASE_LABEL" ]; then
+            expected_runtime_version="${BUILD_VERSION}-${POLARIS_PRERELEASE_LABEL}"
+          fi
+          if ! grep -Fq "Polaris version: ${expected_runtime_version} commit:" build/cpack_artifacts/package-version.txt; then
+            echo "Installed Ubuntu DEB reports a version other than ${expected_runtime_version}" >&2
             exit 1
           fi
 
@@ -1360,6 +1446,7 @@ jobs:
       CXX: ${{ matrix.cxx }}
       BRANCH: ${{ github.head_ref || inputs.release_tag || github.ref_name }}
       BUILD_VERSION: ${{ needs.resolve-source.outputs.version }}
+      POLARIS_PRERELEASE_LABEL: ${{ needs.resolve-source.outputs.prerelease_label }}
 
     steps:
       - name: Bootstrap Fedora container
@@ -1445,6 +1532,11 @@ jobs:
           rpm2archive --help | grep -q -- '--format'
           command -v gpg
           python3 -m unittest discover -s scripts/packaging/sysext -p 'test_*.py'
+
+      - name: Verify prerelease RPM versions sort below their release
+        env:
+          POLARIS_VERSION_ORDER_TOOLS: rpm
+        run: python3 -m unittest discover -s tests/scripts -p 'test_prerelease_package_versions.py'
 
       - name: Install CUDA toolkit
         if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}
@@ -1588,10 +1680,21 @@ jobs:
           fi
 
           package_identity="$(rpm -qp --qf '%{NAME}|%{VERSION}|%{RELEASE}|%{ARCH}\n' "$rpm_path")"
-          expected_package_identity="polaris|${BUILD_VERSION}|1|x86_64"
+          # A prerelease is X.Y.Z~beta.N, the spelling rpm sorts below X.Y.Z. CPack's default turns a
+          # hyphen into an underscore, which sorts above it (cmake/prep/prerelease_versions.cmake).
+          expected_package_version="${BUILD_VERSION}"
+          if [ -n "$POLARIS_PRERELEASE_LABEL" ]; then
+            expected_package_version="${BUILD_VERSION}~${POLARIS_PRERELEASE_LABEL}"
+          fi
+          expected_package_identity="polaris|${expected_package_version}|1|x86_64"
           printf '%s\n' "$package_identity" | tee build/cpack_artifacts/package-identity.txt
           if [ "$package_identity" != "$expected_package_identity" ]; then
             echo "Fedora package identity mismatch: expected '$expected_package_identity', got '$package_identity'" >&2
+            exit 1
+          fi
+          package_evr="$(rpm -qp --qf '%{VERSION}-%{RELEASE}' "$rpm_path")"
+          if [ -n "$POLARIS_PRERELEASE_LABEL" ] && [ "$(rpm --eval "%{lua: print(rpm.vercmp('${package_evr}', '${BUILD_VERSION}-1'))}")" != "-1" ]; then
+            echo "Fedora prerelease $package_evr does not sort below ${BUILD_VERSION}-1, so an upgrade to that release would not replace it" >&2
             exit 1
           fi
 
@@ -1608,8 +1711,8 @@ jobs:
 
           dnf install -y "$rpm_path"
           kms_identity="$(rpm -qp --qf '%{NAME}|%{VERSION}|%{RELEASE}|%{ARCH}' "$kms_rpm_path")"
-          test "$kms_identity" = "polaris-kms|${BUILD_VERSION}|1|x86_64"
-          rpm -qpR "$kms_rpm_path" | grep -Fx "polaris = ${BUILD_VERSION}"
+          test "$kms_identity" = "polaris-kms|${expected_package_version}|1|x86_64"
+          rpm -qpR "$kms_rpm_path" | grep -Fx "polaris = ${expected_package_version}"
           dnf install -y "$kms_rpm_path"
           helper=/usr/libexec/polaris/polaris-kms
           test "$(stat -c '%a %U %G' "$helper")" = '750 root polaris-kms'
@@ -1662,6 +1765,16 @@ jobs:
           if [ "${{ startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '' }}" = "true" ] &&
               ! grep -Fq "cuda=enabled" build/cpack_artifacts/package-version.txt; then
             echo "Release Fedora RPM was not built with CUDA enabled" >&2
+            exit 1
+          fi
+          # The binary reports the release number, and a prerelease's label the way the host spells it,
+          # X.Y.Z-beta.N. The package version alone cannot show that the build itself had the label.
+          expected_runtime_version="${BUILD_VERSION}"
+          if [ -n "$POLARIS_PRERELEASE_LABEL" ]; then
+            expected_runtime_version="${BUILD_VERSION}-${POLARIS_PRERELEASE_LABEL}"
+          fi
+          if ! grep -Fq "Polaris version: ${expected_runtime_version} commit:" build/cpack_artifacts/package-version.txt; then
+            echo "Installed Fedora RPM reports a version other than ${expected_runtime_version}" >&2
             exit 1
           fi
 
@@ -1885,6 +1998,27 @@ jobs:
           cp "${ubuntu_debs[0]}" "release-assets/final/Polaris-ubuntu24.04-x86_64.deb"
           cp "${ubuntu_kms_debs[0]}" "release-assets/final/Polaris-kms-ubuntu24.04-x86_64.deb"
           ls -la release-assets/staged release-assets/final
+
+      - name: Verify release package versions match the tag
+        # Every package build receives the prerelease label on its own. One that lost it builds the
+        # release's own version for a beta and still passes its own smoke step, which reads the same
+        # empty label, so the final packages are read here against the tag and the resolved channel.
+        env:
+          BUILD_VERSION: ${{ needs.resolve-source.outputs.version }}
+          IS_PRERELEASE: ${{ needs.resolve-source.outputs.prerelease }}
+          POLARIS_PRERELEASE_LABEL: ${{ needs.resolve-source.outputs.prerelease_label }}
+        run: |
+          set -euo pipefail
+          if ! command -v rpm >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq --no-install-recommends rpm
+          fi
+          python3 scripts/ci/check-release-package-versions.py \
+            --tag "$POLARIS_PACKAGE_REF_NAME" \
+            --version "$BUILD_VERSION" \
+            --prerelease "$IS_PRERELEASE" \
+            --label "$POLARIS_PRERELEASE_LABEL" \
+            release-assets/final
 
       - name: Revalidate release tag against packaged source
         env:

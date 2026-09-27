@@ -27,6 +27,8 @@ endif()
 
 target_link_libraries(polaris ${POLARIS_EXTERNAL_LIBRARIES} ${EXTRA_LIBS})
 target_compile_definitions(polaris PUBLIC ${POLARIS_DEFINITIONS})
+# The binary is named after the plain release number even in a prerelease, so every package of one
+# release installs /usr/bin/polaris-X.Y.Z. The label is in what it reports and in the package versions.
 set_target_properties(polaris PROPERTIES CXX_STANDARD 23
         VERSION ${PROJECT_VERSION}
         SOVERSION ${PROJECT_VERSION_MAJOR})
@@ -83,7 +85,7 @@ add_custom_command(
         OUTPUT "${WEB_UI_BUILD_STAMP}"
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
         COMMENT "Building the Web UI"
-        COMMAND "${CMAKE_COMMAND}" -E env "POLARIS_BUILD_HOMEBREW=${NPM_BUILD_HOMEBREW}" "POLARIS_SOURCE_ASSETS_DIR=${NPM_SOURCE_ASSETS_DIR}" "POLARIS_ASSETS_DIR=${NPM_ASSETS_DIR}" "POLARIS_CONSOLE_VERSION=${PROJECT_VERSION}" "$<$<BOOL:${WIN32}>:cmd;/C>" "${NPM}" run build  # cmake-lint: disable=C0301
+        COMMAND "${CMAKE_COMMAND}" -E env "POLARIS_BUILD_HOMEBREW=${NPM_BUILD_HOMEBREW}" "POLARIS_SOURCE_ASSETS_DIR=${NPM_SOURCE_ASSETS_DIR}" "POLARIS_ASSETS_DIR=${NPM_ASSETS_DIR}" "POLARIS_CONSOLE_VERSION=${POLARIS_RUNTIME_VERSION}" "$<$<BOOL:${WIN32}>:cmd;/C>" "${NPM}" run build  # cmake-lint: disable=C0301
         COMMAND "${CMAKE_COMMAND}" -E touch "${WEB_UI_BUILD_STAMP}"
         DEPENDS
             "${WEB_UI_NPM_STAMP}"
