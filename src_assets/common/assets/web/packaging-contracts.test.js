@@ -1036,14 +1036,11 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain('namcap emitted unreviewed warnings or a reviewed warning disappeared')
     expect(buildScript).not.toContain('namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt" || true')
     const reviewedWarnings = reviewedNamcap.trim().split('\n')
-    // 18 since the compute codec brought volk in. volk resolves every Vulkan entry point with dlopen
-    // at runtime, and so does Polaris itself (src/platform/linux/vulkan_loader.cpp), because volk's
-    // global variables share the entry points' names and would otherwise capture Polaris's direct
-    // calls at link time. No object in the binary makes a direct call to libvulkan, so namcap reports
-    // it as an unused shared library. The dependency is real and stays declared: dropping it to quiet the
-    // linter would move the failure on a host without Vulkan from install time into the middle of a
-    // stream. The exact inverse of the line below, which retired when the Vulkan Video encoder started
-    // calling the loader for real.
+    // Still 18 after LTO and volk namespace isolation removed DT_NEEDED libvulkan.so.1.
+    // namcap now calls vulkan-icd-loader potentially unneeded instead of reporting an
+    // unused linked library. Both loaders still dlopen it, so the runtime dependency stays.
+    // The compute codec had added the unused-library warning while sharing entry-point
+    // names with Polaris; replacing that warning is an exact one-for-one change.
     // It was 17 since the Vulkan Video encoder started using vulkan-icd-loader for real:
     // namcap stopped calling that dependency possibly unneeded, and a reviewed warning
     // that no longer appears fails the gate exactly like an unreviewed one, so its line
@@ -1055,7 +1052,7 @@ describe('Linux packaging contracts', () => {
     // dependency's line the same way (#415).
     expect(reviewedWarnings).toHaveLength(18)
     expect(reviewedWarnings).toContain(
-      "polaris W: Unused shared library '/usr/lib/libvulkan.so.1' by file ('usr/bin/polaris-1.4.13')",
+      "polaris W: Dependency included, but may not be needed ('vulkan-icd-loader')",
     )
     expect(new Set(reviewedWarnings).size).toBe(reviewedWarnings.length)
     expect(reviewedWarnings.every((warning) => warning.startsWith('polaris W: '))).toBe(true)

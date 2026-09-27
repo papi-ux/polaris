@@ -746,4 +746,7 @@ endif ()
 # Exercise actual inputtino code with private in-memory/socket transports.
 if(UNIX AND NOT APPLE)
     add_subdirectory(fixtures/inputtino)
+    if(TARGET granite-volk)
+        add_subdirectory(fixtures/volk_link)
+    endif()
 endif()

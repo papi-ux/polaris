@@ -7,6 +7,10 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Arch and SteamOS packages keep link-time optimisation enabled. Vulkan Video and PyroWave now
+  use distinct loader symbols and scaler shader types, fixing the conflicts that previously
+  required disabling LTO.
+
 - A PyroWave stream's encoder selection reason says where its colour is converted. It read "PyroWave
   is encoding with Vulkan after CPU color conversion." for every PyroWave stream, which has been
   wrong since GPU colour conversion became the default. The reason now comes from the stream's own

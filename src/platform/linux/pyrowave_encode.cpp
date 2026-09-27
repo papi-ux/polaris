@@ -5,11 +5,9 @@
 // PyroWave's header refuses to compile unless the Vulkan API is already declared, and says so with
 // an #error.
 //
-// The system header, not the volk copy PyroWave builds against. volk declares every entry point as
-// a function pointer variable, Polaris's own Vulkan encoder uses the ordinary prototypes, and with
-// link time optimisation the compiler sees both and refuses: "function redeclared as variable".
-// The types are the same either way; only the linkage of the entry points differs, and Polaris does
-// not call any of them from here.
+// This translation unit needs Vulkan types from the system header. Granite's volk
+// function pointers live in their C++ namespace, separate from the host's Vulkan
+// function prototypes, including when link-time optimization is enabled.
 #include <vulkan/vulkan.h>
 
 #include "pyrowave.h"
