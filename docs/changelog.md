@@ -7,6 +7,16 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- The first Space of a launcher made from the Spaces page can be made on Docker's containerd image
+  store, the default on a fresh Docker 29 install (#664). There every such create was refused with
+  `spaces_change_not_saved` and nothing was made, so a PC whose Steam Space came from Steam's first
+  Space setup could not add a first Heroic or Lutris Space. That store knows a runtime image by the
+  manifest digest it was pulled by, and the create named the image by the config digest in the
+  runtime catalog, which the store holds nothing under. The create now names the image by the Id
+  Docker reports for the verified runtime, as Steam's first Space setup already did, and Polaris
+  still makes the Space only after Docker describes exactly that image. Docker's classic image store
+  reports the config digest, so nothing changes there.
+
 - The adaptive bitrate ceiling no longer cuts the bitrate a client asked for. Nothing in the
   controller ever climbs above a client's request, so `adaptive_bitrate_max`, 100 Mbps unless
   changed, did one thing: it cut any stream whose encoder rate was above it, whatever the codec.

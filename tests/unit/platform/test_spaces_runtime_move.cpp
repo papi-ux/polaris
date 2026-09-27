@@ -1,4 +1,5 @@
 #include "src/platform/linux/spaces_runtime_move.h"
+#include "src/platform/linux/multiseat_profile_network.h"
 #include "src/private_state_file.h"
 #include "../../tests_log_capture.h"
 
@@ -889,6 +890,141 @@ namespace {
     ASSERT_TRUE(result.refusal) << result.error;
     EXPECT_EQ(result.refusal->code, "space_runtime_not_downloaded");
     EXPECT_EQ(host.calls.size(), 1U);
+  }
+
+  /**
+   * Docker holding one pulled runtime on either of its image stores, and making a Space's home.
+   * The classic store knows the image by its config digest. The containerd store, which a fresh
+   * Docker 29 uses, knows it by the manifest digest it was pulled by, and holds nothing under the
+   * config digest. Either store also answers for the reference the image was pulled by.
+   */
+  class image_store_host_t : public container::host_t {
+  public:
+    image_store_host_t(spaces::runtime_t pulled, bool containerd_store) :
+      runtime(std::move(pulled)), containerd(containerd_store) {}
+    const spaces::runtime_t runtime;
+    const bool containerd;
+    std::vector<std::vector<std::string>> calls;
+    std::string volume;
+    /// The Id this store reports for the pulled image.
+    std::string id() const { return containerd ? runtime.registry_digest : runtime.config_digest; }
+    std::uint64_t effective_uid() const override { return 1000; }
+    bool executable_file(const std::filesystem::path &) const override { return true; }
+    bool trusted_runtime_file(const std::filesystem::path &) const override { return true; }
+    std::optional<std::vector<std::uint64_t>> supplementary_groups() const override { return std::vector<std::uint64_t> {}; }
+    bool readable_directory(const std::filesystem::path &) const override { return false; }
+    bool private_read_write_directory(const std::filesystem::path &) const override { return false; }
+    bool private_readable_file(const std::filesystem::path &) const override { return false; }
+    std::optional<container::character_device_identity_t> read_write_character_device(const std::filesystem::path &) const override { return std::nullopt; }
+    std::optional<std::string> read_owned_regular_file(const std::filesystem::path &, std::size_t) const override { return std::nullopt; }
+    container::command_result_t run(const std::vector<std::string> &argv, std::chrono::milliseconds, std::size_t) override {
+      const auto prefix = container::command_prefix({});
+      EXPECT_TRUE(std::equal(prefix.begin(), prefix.end(), argv.begin()));
+      const std::vector<std::string> args(argv.begin() + prefix.size(), argv.end());
+      calls.push_back(args);
+      const auto answer = [](const json &value) { return container::command_result_t {.exit_status = 0, .output = value.dump()}; };
+      const std::string space = volume.size() > 3 ? volume.substr(3) : std::string {};
+      if (args.size() < 2) {
+        ADD_FAILURE() << "Unexpected Docker operation";
+        return {.exit_status = 1};
+      }
+      if (args[0] == "info")
+        return answer({{"OSType", "linux"}, {"Runtimes", {{"runc", {{"path", "runc"}}}}},
+          {"SecurityOptions", json::array({"name=seccomp,profile=builtin"})}});
+      if (args[0] == "image" && args[1] == "inspect") {
+        // Docker prints an empty list and exits 1 for a name it holds nothing under.
+        if (args.back() != runtime.reference() && args.back() != id()) return {.exit_status = 1, .output = "[]\n"};
+        auto image = verified(runtime);
+        image[0]["Id"] = id();
+        image[0]["Config"]["Labels"]["io.polaris.multiseat.profile"] = runtime.profile;
+        if (containerd)
+          image[0]["Descriptor"] = {{"digest", runtime.registry_digest}, {"size", 7834},
+            {"mediaType", "application/vnd.oci.image.manifest.v1+json"}};
+        return answer(image);
+      }
+      if (args[0] == "volume" && args[1] == "ls") return {.exit_status = 0, .output = "\"unrelated-volume\"\n"};
+      if (args[0] == "volume" && args[1] == "create") {
+        volume = args.back();
+        return {.exit_status = 0, .output = volume + "\n"};
+      }
+      if (args[0] == "volume" && args[1] == "inspect")
+        return answer(json::array({{{"Name", volume}, {"Driver", "local"}, {"Scope", "local"}, {"Options", nullptr},
+          {"Labels", {{"io.polaris.multiseat.profile", space}}}}}));
+      if (args[0] == "run") return {.exit_status = 0};
+      if (args[0] == "network" && args[1] == "ls") return {.exit_status = 0, .output = "\"bridge\"\n\"none\"\n"};
+      if (args[0] == "network" && args[1] == "create") return {.exit_status = 0, .output = std::string(64, 'e') + "\n"};
+      if (args[0] == "network" && args[1] == "inspect")
+        return answer(json::array({{{"Id", std::string(64, 'e')}, {"Name", container::profile_network_name(space)},
+          {"Driver", "bridge"}, {"Scope", "local"}, {"Internal", false}, {"Ingress", false}, {"Attachable", false},
+          {"EnableIPv6", false}, {"Labels", {{"io.polaris.multiseat.profile", space}}},
+          {"Options", {{"com.docker.network.bridge.enable_icc", "false"}, {"com.docker.network.bridge.enable_ip_masquerade", "true"}}},
+          {"IPAM", {{"Driver", "default"}, {"Options", nullptr}}}, {"Containers", json::object()}}}));
+      ADD_FAILURE() << "Unexpected Docker operation " << args[0] << ' ' << args[1];
+      return {.exit_status = 1};
+    }
+  };
+
+  /**
+   * The first Space of a launcher names its runtime by the Id Docker reports for it, as setup
+   * names Steam's. It named the catalog's config digest, which the containerd image store holds
+   * nothing under, so on a fresh Docker 29 the first Heroic or Lutris Space was refused as not
+   * saved and nothing was made, on a PC whose Steam Space had been made (#664).
+   */
+  class SpacesFirstSpaceImageStore : public SpacesCreateInCatalog {
+  protected:
+    const spaces::runtime_t heroic = [] {
+      auto runtime = catalog_runtime("heroic-default", "default", "", '7');
+      runtime.profile = "heroic";
+      return runtime;
+    }();
+    profiles::change_result_t make(image_store_host_t &docker, spaces::runtime_inspection_cache_t *cache = nullptr) {
+      auto creation = request;
+      creation.family = "heroic";
+      return spaces::create_space_in_catalog(path, creation, docker, std::vector {heroic}, std::nullopt, cache);
+    }
+    /// The image the saved Space names, or nothing when no single Space was saved.
+    std::optional<std::string> saved_image() const {
+      const auto loaded = profiles::load(path);
+      if (!loaded || loaded->catalog.profiles.size() != 1) return std::nullopt;
+      return loaded->catalog.profiles.front().storage.image_reference;
+    }
+    /// How often Docker was asked to describe exactly this name.
+    static long inspected(const image_store_host_t &docker, const std::string &name) {
+      return std::count(docker.calls.begin(), docker.calls.end(), std::vector<std::string> {"image", "inspect", name});
+    }
+  };
+
+  TEST_F(SpacesFirstSpaceImageStore, OnTheContainerdStoreItNamesTheManifestDigestDockerReports) {
+    image_store_host_t docker(heroic, true);
+    const auto result = make(docker);
+    ASSERT_TRUE(result) << result.error << " (" << result.cause << ")";
+    EXPECT_EQ(saved_image(), heroic.registry_digest);
+    // The home was made only after Docker described exactly the image the Space names.
+    EXPECT_EQ(inspected(docker, heroic.registry_digest), 1);
+    EXPECT_EQ(inspected(docker, heroic.config_digest), 0);
+    EXPECT_EQ(docker.volume, "pv-" + request.request_id);
+  }
+
+  TEST_F(SpacesFirstSpaceImageStore, OnTheClassicStoreItStillNamesTheConfigDigest) {
+    image_store_host_t docker(heroic, false);
+    const auto result = make(docker);
+    ASSERT_TRUE(result) << result.error << " (" << result.cause << ")";
+    EXPECT_EQ(saved_image(), heroic.config_digest);
+    EXPECT_EQ(inspected(docker, heroic.config_digest), 1);
+    EXPECT_EQ(inspected(docker, heroic.registry_digest), 0);
+    EXPECT_EQ(docker.volume, "pv-" + request.request_id);
+  }
+
+  // The Spaces page checks the runtime before the create does, and the create takes that answer
+  // from the cache without asking Docker again. The kept answer names the image as well.
+  TEST_F(SpacesFirstSpaceImageStore, ARuntimeCheckTakenFromTheCacheStillNamesTheImageDockerReported) {
+    image_store_host_t docker(heroic, true);
+    spaces::runtime_inspection_cache_t cache;
+    ASSERT_EQ(spaces::inspect_runtime(docker, {heroic}, std::nullopt, true, &cache, "heroic").status, "ready");
+    const auto result = make(docker, &cache);
+    ASSERT_TRUE(result) << result.error << " (" << result.cause << ")";
+    EXPECT_EQ(saved_image(), heroic.registry_digest);
+    EXPECT_EQ(inspected(docker, heroic.reference()), 1) << "the create asked the cache, not Docker";
   }
 
   TEST_F(SpacesCreateService, ARefusedFirstSpaceStartsNoJobAndNoDownload) {

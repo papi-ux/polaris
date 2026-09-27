@@ -379,8 +379,13 @@ namespace multiseat::spaces {
         if (facts.status != "ready")
           return {.error = std::string(profiles::space_runtime_not_downloaded.message),
             .cause = absent_runtime_cause(*choice.runtime, facts), .refusal = profiles::space_runtime_not_downloaded};
+        // The Space names the image Docker reported for the verified runtime,
+        // as setup names Steam's. The containerd image store, the default on a
+        // fresh Docker 29, knows it only by the manifest digest it was pulled
+        // by, so the catalog's config digest named nothing there, and every
+        // first Space made this way was refused (#664).
         return profiles::create_first_space(path, {request.request_id, request.name},
-          choice.runtime->config_digest, request.family, host);
+          facts.image, request.family, host);
       }
     }
     return profiles::create_space(path, request, host);
