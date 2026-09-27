@@ -184,6 +184,47 @@ def reject_heredoc(tokens: list[str], context: str) -> None:
         raise AssertionError(f"{context} must not use heredoc payloads as contract evidence")
 
 
+def require_fail_closed_step(step: str, context: str) -> None:
+    """Refuse the ways a step can keep its commands and still never fail."""
+    if re.search(r"(?m)^        continue-on-error\s*:", step):
+        raise AssertionError(f"{context} must not continue on error")
+    tokens = workflow_run_tokens(step)
+    if "||" in tokens:
+        raise AssertionError(f"{context} must not use || to swallow a failure")
+    for swallow in (["true"], [":"], ["exit", "0"]):
+        if command_count(tokens, swallow):
+            raise AssertionError(f"{context} must not run {' '.join(swallow)} to end in success")
+    if command_arguments(tokens, "set") != [["-euo", "pipefail"]]:
+        raise AssertionError(f"{context} must set -euo pipefail, once, and no other shell option")
+
+
+def self_test_fail_closed_step() -> None:
+    clean = (
+        "        if: steps.source.outputs.prerelease == 'false'\n"
+        "        run: |\n"
+        "          set -euo pipefail\n"
+        "          python3 scripts/check-stable-release-notes.py notes.md\n"
+    )
+    require_fail_closed_step(clean, "valid fail-closed step self-test")
+    for label, step in {
+        "or true": clean.replace("notes.md\n", "notes.md || true\n"),
+        "or colon": clean.replace("notes.md\n", "notes.md || :\n"),
+        "or echo": clean.replace("notes.md\n", "notes.md || echo ignored\n"),
+        "a trailing true": clean + "          true\n",
+        "an early exit 0": clean.replace("          python3", "          exit 0\n          python3"),
+        "set +e": clean.replace("pipefail\n", "pipefail\n          set +e\n"),
+        "no set -e": clean.replace("          set -euo pipefail\n", ""),
+        "continue-on-error": clean.replace(
+            "        run: |\n", "        continue-on-error: true\n        run: |\n"
+        ),
+    }.items():
+        try:
+            require_fail_closed_step(step, "fail-closed step self-test")
+        except AssertionError:
+            continue
+        raise AssertionError(f"fail-closed step contract must reject {label}")
+
+
 def self_test_executable_release_contract() -> None:
     expected = ["gh", "release", "edit", "v1.2.3", "--draft=true"]
     require_command(
@@ -203,6 +244,7 @@ def self_test_executable_release_contract() -> None:
 
 self_test_cmake_bool_contract()
 self_test_executable_release_contract()
+self_test_fail_closed_step()
 
 arch = read("packaging/linux/Arch/PKGBUILD")
 require_package(shell_array(arch, "depends"), "vulkan-icd-loader", "Arch runtime dependencies")
@@ -316,6 +358,62 @@ for required_source_command in (
     ["echo", "prerelease=$prerelease", ">>", "$GITHUB_OUTPUT"],
 ):
     require_command(resolve_tokens, required_source_command, "exact-source resolver")
+
+# A beta publishes the notes of the release it precedes, and the stable page is published from the
+# same file as it stands, so a stable tag is where anything those notes told beta testers has to be
+# refused. The resolver is where that costs nothing: every packaging job waits on it.
+stable_notes_tests = workflow_step(resolve_job, "Verify stable release notes gate")
+if not stable_notes_tests.startswith("        run: |\n"):
+    raise AssertionError("exact-source resolver must test the stable release notes gate on every build")
+stable_notes_test_tokens = workflow_run_tokens(stable_notes_tests)
+reject_heredoc(stable_notes_test_tokens, "stable release notes gate tests")
+for required_test_command in (
+    ["set", "-euo", "pipefail"],
+    # A rebuild of a tag cut before the gate is refused by name. unittest alone would refuse it too,
+    # by finding no tests, which reads as a broken runner rather than as a decision.
+    [
+        "if", "[", "!", "-f", "scripts/check-stable-release-notes.py", "]", ";", "then", ";",
+        "echo",
+        (
+            "This checkout predates scripts/check-stable-release-notes.py, so nothing has checked the "
+            "release notes a rebuild would publish over its page. For v1.4.13 they are the text its "
+            "hand-posted page replaced. Rebuilding a tag this old is refused."
+        ),
+        ">", "&", "2", ";",
+        "exit", "1", ";", "fi",
+    ],
+    [
+        "python3", "-m", "unittest", "discover", "-s", "tests/scripts",
+        "-p", "test_check_stable_release_notes.py",
+    ],
+):
+    require_command(stable_notes_test_tokens, required_test_command, "stable release notes gate tests")
+# Keeping the commands proves nothing if the step cannot fail: `|| true` after the gate, or
+# continue-on-error on its step, leaves every command above in place and publishes the notes anyway.
+require_fail_closed_step(stable_notes_tests, "stable release notes gate tests")
+stable_notes_gate = workflow_step(resolve_job, "Refuse beta-only text in stable release notes")
+if not stable_notes_gate.startswith(
+    "        if: (startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') "
+    "&& steps.source.outputs.prerelease == 'false'\n"
+):
+    raise AssertionError(
+        "the stable release notes gate must run for every stable release tag and for no prerelease"
+    )
+stable_notes_tokens = workflow_run_tokens(stable_notes_gate)
+reject_heredoc(stable_notes_tokens, "stable release notes gate")
+for required_gate_command in (
+    ["set", "-euo", "pipefail"],
+    [
+        "python3", "scripts/check-stable-release-notes.py",
+        "docs/release-notes/${POLARIS_PACKAGE_REF_NAME}.md",
+    ],
+):
+    require_command(stable_notes_tokens, required_gate_command, "stable release notes gate")
+require_fail_closed_step(stable_notes_gate, "stable release notes gate")
+if resolve_job.index("- name: Refuse beta-only text in stable release notes") < resolve_job.index(
+    "- name: Bind release tag to source commit"
+):
+    raise AssertionError("the stable release notes gate must follow the step that decides the channel")
 
 exact_checkout_ref = "ref: ${{ needs.resolve-source.outputs.commit }}"
 for job_name in (

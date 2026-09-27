@@ -7,6 +7,15 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- The 1.4.13 release notes say what shipped. They called Polaris 1.4.13 matched with Nova 1.4.13
+  while Nova 1.4.13 was still in beta; they quoted a 0.49 ms PyroWave frame from a path that Private
+  Stream, wlroots and X11 capture never take; and they still sent readers to the packages of a
+  prerelease. They now tell a host that ran 1.4.13-beta.2 or beta.3 to reinstall the release over
+  it, because the two share the version 1.4.13 and a package manager can treat the release as
+  installed. A release page is published from the notes its tag carries, so a stable tag is now
+  refused while its notes still hold the line the release notes template gives beta testers, or a
+  rewording of it the check knows, or call the release matched with a Nova version.
+
 - A KDE host with `capture = kms` and an HDR display now says why PyroWave cannot stream from it.
   KWin scans out sixteen bit float there, which the codec cannot read, and capture reported that
   scanout as eight bit BGRA, so diagnostics named the wrong format while the stream carried no
