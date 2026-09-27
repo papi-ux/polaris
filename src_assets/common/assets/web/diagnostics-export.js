@@ -578,8 +578,17 @@ export function describeLinuxGpuProfile(stats = {}) {
 
 export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, logs = '', recentIssues = [] } = {}) {
   const streaming = Boolean(stats?.streaming)
-  const packetLoss = Number(stats?.packet_loss)
-  const encodeTime = Number(stats?.encode_time_ms)
+  const liveTelemetry = statsConnected && streaming
+  const packetLoss = stats?.packet_loss
+  const encodeTime = stats?.encode_time_ms
+  // Match Doctor's current-media window. Control-channel estimates and cached
+  // values from an ended session cannot establish media loss or justify tuning.
+  const mediaLossAge = stats?.media_loss_last_received_age_ms
+  const currentMediaLoss = liveTelemetry &&
+    stats?.packet_loss_available === true && stats?.packet_loss_source === 'media_transport' &&
+    Number.isInteger(stats?.media_loss_sample_revision) && stats.media_loss_sample_revision > 0 &&
+    Number.isFinite(mediaLossAge) && mediaLossAge >= 0 && mediaLossAge <= 2000 &&
+    Number.isFinite(packetLoss) && packetLoss >= 0 && packetLoss <= 100
   const captureKnown = Boolean(stats?.capture_path || stats?.capture_transport || stats?.capture_path_reason)
   const captureCpuCopy = Boolean(stats?.capture_cpu_copy)
   const capturePressure = capturePressureActive(stats)
@@ -598,16 +607,20 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
   const hostConfig = hostConfigurationWarningItems(stats)
   const displayMode = displayModeOverrideItem(stats)
 
-  const loss = Number.isFinite(packetLoss)
+  const loss = currentMediaLoss
     ? packetLoss > 2
       ? checklistItem('packet-loss', 'Packet loss', 'fail', `Packet loss is ${packetLoss.toFixed(1)}%, which can look like stutter before the encoder is at fault.`, 'Try wired/5 GHz, lower bitrate, or enable FEC before changing encoder settings.')
       : packetLoss > 0.5
         ? checklistItem('packet-loss', 'Packet loss', 'warning', `Packet loss is ${packetLoss.toFixed(1)}%; watch for artifacts and input delay.`, 'Lower bitrate one step and re-test the same scene.')
         : checklistItem('packet-loss', 'Packet loss', 'pass', `Packet loss is ${packetLoss.toFixed(1)}%.`, 'Network is not the loudest signal right now.')
-    : checklistItem('packet-loss', 'Packet loss', 'warning', 'Packet loss has not been reported yet.', 'Start a live stream and wait for session telemetry.')
+    : liveTelemetry
+      ? checklistItem('packet-loss', 'Packet loss', 'info', 'No current confirmed media packet-loss measurement is available for this active stream.', 'Control-channel estimates are context only; media packet loss remains unmeasured until this client reports fresh media counters.')
+      : checklistItem('packet-loss', 'Packet loss', 'warning', 'No current confirmed media packet-loss measurement is available.', 'Start a live stream and wait for fresh media-loss telemetry.')
 
   const captureFrameAge = Number(stats?.avg_frame_age_ms)
-  const capture = captureCpuCopy
+  const capture = !liveTelemetry
+    ? checklistItem('capture-path', 'Capture path', 'warning', 'No active connected stream is available to verify capture.', 'Start a stream and wait for current capture metadata.')
+    : captureCpuCopy
     ? capturePressure
       ? checklistItem(
         'capture-path',
@@ -633,7 +646,9 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
         ? checklistItem('capture-path', 'Capture path', 'warning', gpuProfileDescription || `Capture path is ${stats.capture_path || stats.capture_transport || 'mixed/unknown'}.`, 'Check whether the chosen display and encoder are paired to the intended GPU path.')
         : checklistItem('capture-path', 'Capture path', 'warning', 'No capture metadata has been reported yet.', 'Start a stream, then confirm capture path and display pairing.')
 
-  const pressure = encoderPressure(stats, encodeTime)
+  const pressure = liveTelemetry && Number.isFinite(encodeTime) && encodeTime > 0
+    ? encoderPressure(stats, encodeTime)
+    : null
   const targetBudgetDetail = pressure?.targetFps
     ? `${pressure.frameBudgetMs.toFixed(1)} ms frame budget for ${Math.round(pressure.targetFps)} FPS`
     : 'safe low-latency budget'
@@ -654,7 +669,9 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
       : pressure.status === 'warning'
         ? checklistItem('encoder-pressure', 'Encoder pressure', 'warning', pressure.targetFps ? `${encodeTime.toFixed(1)} ms encode time uses ${targetBudgetUse}.` : `${encodeTime.toFixed(1)} ms encode time is close to the ${targetBudgetDetail}.`, 'Watch for frame pacing spikes before chasing network fixes.')
         : checklistItem('encoder-pressure', 'Encoder pressure', 'pass', pressure.targetFps ? `${encodeTime.toFixed(1)} ms encode time uses ${targetBudgetUse} and leaves headroom.` : `${encodeTime.toFixed(1)} ms encode time leaves headroom within the ${targetBudgetDetail}.`, 'Encoder pressure is not the loudest signal right now.')
-    : checklistItem('encoder-pressure', 'Encoder pressure', 'warning', 'Encoder timing has not been reported yet.', 'Start a live stream and wait for encoder telemetry.')
+    : liveTelemetry
+      ? checklistItem('encoder-pressure', 'Encoder pressure', 'info', 'No current encoder timing is available for this active stream.', 'Encoder pressure remains unmeasured until positive timing is reported.')
+      : checklistItem('encoder-pressure', 'Encoder pressure', 'warning', 'No current encoder timing is available.', 'Start a live stream and wait for encoder telemetry.')
 
   const authPairing = authPairingIssue
     ? checklistItem('auth-pairing', 'Auth / pairing', 'fail', redactSensitiveText(authPairingIssue), 'Re-pair the client or verify Web UI credentials/trust before tuning stream quality.')
