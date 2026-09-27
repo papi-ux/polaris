@@ -7,6 +7,16 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- A client that reaches the host over WireGuard, Tailscale or another tunnel with no MAC of its own
+  now learns the MAC address of the host's network card for Wake-on-LAN. The host used to report
+  none for such a tunnel, and a client that had never seen the host on its own network had nothing
+  to send a magic packet to. Polaris now reports the MAC of the card that holds the default route
+  and has a link when the one the client reached has none. A tunnel that carries Ethernet, such as
+  ZeroTier or an OpenVPN tap device, has a MAC of its own, and the host still reports that one. On
+  a host with two network cards, a client that checks in over a tunnel now stores the default route
+  card's MAC in place of the one it learned on its own network. Whether a magic packet sent from
+  outside the host's network reaches a sleeping host still depends on that network.
+
 - On AMD, Auto tries Vulkan Video first on Gamescope Stream captured through the portal (#635),
   where it used to try VA-API alone and never probed Vulkan Video at all. On the reporter's RX 9070
   XT at 4K60, Vulkan Video took 9 ms a frame there against VA-API's 16 ms, and held it under load.

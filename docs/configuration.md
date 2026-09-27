@@ -114,6 +114,19 @@ last request.
 Waking the host again is Wake-on-LAN, which Polaris does not do for you: enable it in the firmware
 and on the interface, and send the magic packet from the client.
 
+A paired client learns the MAC address to wake from the host. It is the MAC of the interface the
+client reached, or, when that is WireGuard, Tailscale or another tunnel with no MAC of its own, the
+MAC of the card that holds the default route and has a link. A tunnel that carries Ethernet, such
+as ZeroTier or an OpenVPN tap device, has a MAC of its own, and a client that reaches the host
+through it learns that one, which wakes nothing. The magic packet still has to arrive on the host's
+own network: a client outside it, over a VPN too, can only wake the host if something forwards the
+packet onto that network.
+
+A client keeps the last MAC it learned. On a host with two network cards, where the client's own
+network reaches the card that does not hold the default route, a check-in over a tunnel replaces
+the right MAC with the default route card's, and a magic packet sent from the client's network
+wakes nothing until the client next sees the host awake there.
+
 #### Before you turn it on
 
 A host that sleeps and cannot wake is worse than one that never sleeps, and four separate things can

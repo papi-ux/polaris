@@ -26,6 +26,7 @@
 #include <arpa/inet.h>
 #include <dlfcn.h>
 #include <ifaddrs.h>
+#include <net/if.h>
 #include <netinet/udp.h>
 #include <pthread.h>
 #include <pwd.h>
@@ -67,6 +68,7 @@
 #include "src/config.h"
 #include "src/entry_handler.h"
 #include "src/logging.h"
+#include "src/network.h"
 #include "src/platform/common.h"
 #include "src/platform/send_wait.h"
 #include "src/video.h"
@@ -647,20 +649,37 @@ namespace platf {
   }
 
   std::string get_mac_address(const std::string_view &address) {
+    std::vector<net::host_interface_t> interfaces;
     auto ifaddrs = get_ifaddrs();
     for (auto pos = ifaddrs.get(); pos != nullptr; pos = pos->ifa_next) {
-      if (pos->ifa_addr && address == from_sockaddr(pos->ifa_addr)) {
+      auto entry = std::find_if(interfaces.begin(), interfaces.end(), [pos](const net::host_interface_t &known) {
+        return known.name == pos->ifa_name;
+      });
+      if (entry == interfaces.end()) {
+        net::host_interface_t added;
+        added.name = pos->ifa_name;
+        // A WireGuard or Tailscale interface has no hardware address: this reads an empty line.
         std::ifstream mac_file("/sys/class/net/"s + pos->ifa_name + "/address");
-        if (mac_file.good()) {
-          std::string mac_address;
-          std::getline(mac_file, mac_address);
-          return mac_address;
-        }
+        std::getline(mac_file, added.mac);
+        // IFF_RUNNING is the operational state: off for a wired card with its cable out.
+        added.link_up = (pos->ifa_flags & IFF_RUNNING) != 0;
+        interfaces.push_back(std::move(added));
+        entry = std::prev(interfaces.end());
+      }
+      if (pos->ifa_addr && (pos->ifa_addr->sa_family == AF_INET || pos->ifa_addr->sa_family == AF_INET6)) {
+        entry->addresses.push_back(from_sockaddr(pos->ifa_addr));
       }
     }
 
-    BOOST_LOG(warning) << "Unable to find MAC address for "sv << address;
-    return "00:00:00:00:00:00"s;
+    std::stringstream routes;
+    if (std::ifstream route_file("/proc/net/route"); route_file) {
+      routes << route_file.rdbuf();
+    }
+    auto mac = net::wake_on_lan_mac(interfaces, address, net::default_route_interfaces(routes.str()));
+    if (mac == net::no_wake_on_lan_mac) {
+      BOOST_LOG(warning) << "Unable to find a Wake-on-LAN MAC address for "sv << address;
+    }
+    return mac;
   }
 
 std::string get_local_ip_for_gateway() {
