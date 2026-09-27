@@ -1867,9 +1867,11 @@ namespace video {
             if (!complained_about_import) {
               complained_about_import = true;
               BOOST_LOG(error) << "PyroWave: capture is handing over a dmabuf in a format this codec "sv
-                               << "cannot read (fourcc "sv << buffer.fourcc
-                               << "); ending the stream, because that does not change while the "sv
-                               << "display keeps its mode"sv;
+                               << "cannot read ("sv << util::view(buffer.fourcc) << ", fourcc "sv
+                               << buffer.fourcc << "); ending the stream, because that does not change "sv
+                               << "while the display keeps its mode. A KDE desktop in HDR composites "sv
+                               << "sixteen bit float, which this codec cannot read: turn HDR off on the "sv
+                               << "host display, or capture by another route, to use PyroWave there"sv;
             }
             return convert_session_is_over;
           }

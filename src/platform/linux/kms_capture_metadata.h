@@ -18,8 +18,16 @@ namespace platf::kms_capture {
    * @brief What a scanout buffer in this DRM format holds, in the terms the encoders read.
    *
    * p010 stands in for a ten bit source the same way the PipeWire path uses it, because the enum has
-   * no packed ten bit RGB. Anything else is reported as eight bit BGRA, which is what it was before
-   * and what every consumer already expects.
+   * no packed ten bit RGB.
+   *
+   * The sixteen bit float formats are named rather than left to the default, because the default is
+   * eight bit BGRA and reporting one of these as that is a lie with a cost. KWin composites HDR as
+   * ABGR16161616F, so a KDE host with capture = kms and an HDR display scans out sixteen bit float,
+   * and every diagnostic read capture_format bgra8 while PyroWave refused the same buffer for being a
+   * format it cannot read. That left a stream moving no bytes as the only evidence of the cause.
+   *
+   * Anything still unrecognised stays eight bit BGRA, which is what it was before and what every
+   * consumer already expects.
    */
   inline frame_format_e frame_format_for_fourcc(std::uint32_t fourcc) {
     switch (fourcc) {
@@ -28,6 +36,11 @@ namespace platf::kms_capture {
       case DRM_FORMAT_XBGR2101010:
       case DRM_FORMAT_ABGR2101010:
         return frame_format_e::p010;
+      case DRM_FORMAT_XRGB16161616F:
+      case DRM_FORMAT_ARGB16161616F:
+      case DRM_FORMAT_XBGR16161616F:
+      case DRM_FORMAT_ABGR16161616F:
+        return frame_format_e::rgba16f;
       default:
         return frame_format_e::bgra8;
     }

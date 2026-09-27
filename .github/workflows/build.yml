@@ -55,6 +55,22 @@ jobs:
       - name: Verify private sysext input and assembly boundaries
         run: python3 -m unittest discover -s scripts/packaging/sysext -p 'test_*.py'
 
+      - name: Verify stable release notes gate
+        run: |
+          set -euo pipefail
+
+          # A rebuild runs this workflow against the tag it names. A tag cut before the gate has
+          # neither the gate nor its tests, and refusing it is right: the v1.4.13 tag still carries
+          # what the betas said, its page is corrected by hand, and a rebuild would publish that
+          # text over it. The refusal says so here instead of as unittest finding nothing to run.
+          # A rerun of a tag's own run uses that tag's workflow, which this step cannot reach, so
+          # the v1.4.13 release run must not be rerun once its page is corrected.
+          if [ ! -f scripts/check-stable-release-notes.py ]; then
+            echo "This checkout predates scripts/check-stable-release-notes.py, so nothing has checked the release notes a rebuild would publish over its page. For v1.4.13 they are the text its hand-posted page replaced. Rebuilding a tag this old is refused." >&2
+            exit 1
+          fi
+          python3 -m unittest discover -s tests/scripts -p 'test_check_stable_release_notes.py'
+
       - name: Bind release tag to source commit
         id: source
         env:
@@ -105,6 +121,16 @@ jobs:
           echo "native_required=$native_required" >> "$GITHUB_OUTPUT"
           echo "version=$build_version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse beta-only text in stable release notes
+        if: (startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') && steps.source.outputs.prerelease == 'false'
+        run: |
+          set -euo pipefail
+
+          # A beta publishes the notes of the release it precedes, and the stable page is published
+          # from the same file as it stands. Whatever those notes told beta testers is refused here,
+          # before an hour of packaging, instead of being found on the public page, as it was for v1.4.13.
+          python3 scripts/check-stable-release-notes.py "docs/release-notes/${POLARIS_PACKAGE_REF_NAME}.md"
 
   web-checks:
     name: Web checks

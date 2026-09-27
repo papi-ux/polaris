@@ -7,6 +7,32 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- The 1.4.13 release notes say what shipped. They called Polaris 1.4.13 matched with Nova 1.4.13
+  while Nova 1.4.13 was still in beta; they quoted a 0.49 ms PyroWave frame from a path that Private
+  Stream, wlroots and X11 capture never take; and they still sent readers to the packages of a
+  prerelease. They now tell a host that ran 1.4.13-beta.2 or beta.3 to reinstall the release over
+  it, because the two share the version 1.4.13 and a package manager can treat the release as
+  installed. A release page is published from the notes its tag carries, so a stable tag is now
+  refused while its notes still hold the line the release notes template gives beta testers, or a
+  rewording of it the check knows, or call the release matched with a Nova version.
+
+- A KDE host with `capture = kms` and an HDR display now says why PyroWave cannot stream from it.
+  KWin scans out sixteen bit float there, which the codec cannot read, and capture reported that
+  scanout as eight bit BGRA, so diagnostics named the wrong format while the stream carried no
+  video.
+  Capture now reports the format as sixteen bit float, Doctor raises
+  `capture_format_unreadable_by_pyrowave` with the fix, and the log names the format (`AB4H`) and
+  says to turn HDR off on the host display or capture by another route.
+
+## v1.4.13 - 2026-09-26
+
+- PyroWave, an experimental intra only Vulkan compute codec, is built into every Linux package:
+  Fedora 44, Arch, Ubuntu 24.04 and SteamOS 3.8, and each `polaris-kms` package. Only a Nova client
+  that selects it by name gets it, and there is no host setting. Every frame is a key frame, so it
+  decodes much faster than H.264, HEVC or AV1 and needs far more bandwidth: it is for a wired link.
+  Nova for Android selects it in its 1.4.13 beta; Moonlight never asks for it, and Auto never picks
+  it. HDR on it has not been shown end to end. See [PyroWave](pyrowave.md).
+
 - Turning DRM/KMS capture back off is one command. `sudo -H polaris --setup-host --disable-kms`
   removes the capability from the binary, the copy of the binary the Bazzite recipe may have left in
   `/usr/local/bin/polaris-kms`, and the service drop-in that pointed at that copy, in the order that
