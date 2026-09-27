@@ -35,7 +35,7 @@ describe('settings surfaces affordances', () => {
     expect(readFileSync(join(process.cwd(), 'docs/devices.md'), 'utf8')).toContain('# Pair and manage devices')
     expect(readFileSync(join(process.cwd(), 'docs/moonlight.md'), 'utf8')).toContain('# Play with Moonlight')
     expect(webSource('views/PinView.vue')).toContain('href="https://papi-ux.com/docs/troubleshooting/#paired-client-gets-permission-denied-403-when-starting-a-stream"')
-    expect(webSource('views/HomeView.vue')).toContain('href="https://papi-ux.com/docs/repositories/#after-install-or-upgrade"')
+    expect(webSource('views/HomeView.vue')).toContain('href="https://papi-ux.com/docs/updates/"')
     expect(webSource('views/PasswordView.vue')).toContain('href="https://papi-ux.com/docs/configuration/#rotate-the-web-credentials"')
     expect(webSource('views/PasswordView.vue')).not.toContain('<InfoHint')
     expect(webSource('views/HomeView.vue')).not.toContain('<InfoHint')

@@ -108,6 +108,23 @@ cp "$KMS_PACKAGE_PATH" "$OUTPUT_ROOT/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst"
 sha256sum "$OUTPUT_ROOT/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst" \
   > "$OUTPUT_ROOT/steamos3.8-kms-package-sha256.txt"
 
+# makepkg splits the host's detached symbols into polaris-debug. Keep that package
+# attached to the same version and ELF build ID as both copies of the host binary.
+DEBUG_PACKAGE_PATHS=(polaris-debug-[0-9]*-x86_64.pkg.tar.zst)
+if [ "${#DEBUG_PACKAGE_PATHS[@]}" -ne 1 ]; then
+  printf 'expected exactly one SteamOS debug package, found %s\n' "${#DEBUG_PACKAGE_PATHS[@]}" >&2
+  exit 1
+fi
+DEBUG_PACKAGE_PATH="${DEBUG_PACKAGE_PATHS[0]}"
+python3 "$SOURCE_ROOT/scripts/ci/validate-pacman-debug.py" \
+  --main "$PACKAGE_PATH" --kms "$KMS_PACKAGE_PATH" --debug "$DEBUG_PACKAGE_PATH" \
+  > "$OUTPUT_ROOT/steamos3.8-debug-build-id.txt"
+cp "$DEBUG_PACKAGE_PATH" "$OUTPUT_ROOT/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst"
+pacman -Qip "$DEBUG_PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-debug-package-info.txt"
+pacman -Qlp "$DEBUG_PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-debug-package-files.txt"
+sha256sum "$OUTPUT_ROOT/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst" \
+  > "$OUTPUT_ROOT/steamos3.8-debug-package-sha256.txt"
+
 FINAL_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
 FINAL_TREE="$(git -C "$SOURCE_ROOT" rev-parse 'HEAD^{tree}')"
 FINAL_STATUS="$(git -C "$SOURCE_ROOT" status --porcelain=v1 --untracked-files=all --ignore-submodules=none)"
@@ -168,10 +185,11 @@ fi
 # see command/runtime-discovered dependencies. Every exception remains exact;
 # additions, removals, or wording changes fail the candidate gate.
 #
-# libvulkan is the same class. The compute codec brings volk in, which resolves every Vulkan entry
-# point with dlopen at runtime, so no object makes a direct call and namcap reports the library as
-# unused. The dependency is real and stays declared on purpose: dropping it would move the failure on
-# a host without Vulkan from install time to the middle of a stream.
+# libvulkan is the same class. Polaris resolves every Vulkan entry point it calls from the loader by
+# name at runtime (src/platform/linux/vulkan_loader.cpp), and the compute codec's volk does the same,
+# so no object makes a direct call and namcap reports the library as unused. The dependency is real
+# and stays declared on purpose: dropping it would move the failure on a host without Vulkan from
+# install time to the middle of a stream.
 NAMCAP_ACTUAL="$BUILD_ROOT/namcap-actual.sorted"
 NAMCAP_ALLOWED="$BUILD_ROOT/namcap-allowed.sorted"
 NAMCAP_MISSING="$BUILD_ROOT/namcap-reviewed-missing.txt"

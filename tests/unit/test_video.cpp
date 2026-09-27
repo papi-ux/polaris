@@ -44,6 +44,11 @@ INSTANTIATE_TEST_SUITE_P(
 #ifdef __linux__
     &video::vaapi,
 #endif
+#ifdef POLARIS_BUILD_VULKAN
+    // Exercises the Vulkan Video device and a real probe encode in a binary that also links the
+    // compute codec's volk, whose globals share the Vulkan entry points' names.
+    &video::vulkan,
+#endif
 #ifdef __APPLE__
     &video::videotoolbox,
 #endif
@@ -1074,6 +1079,17 @@ TEST(VideoVulkanQualityClampTests, ClampsToDriverReportedMaximum) {
   EXPECT_EQ(video::vulkan_quality_clamp(3, 4), 3);
   EXPECT_EQ(video::vulkan_quality_clamp(4, 4), 3);
   EXPECT_EQ(video::vulkan_quality_clamp(9, 1), 0);
+}
+
+TEST(VideoVulkanQualityClampTests, AdvertisedMaximumIgnoresAv1WhileTheEncoderKeepsItOff) {
+  // Counts are indexed H.264, HEVC, AV1. A lower AV1 count must not cap H.264 and HEVC
+  // on the Vulkan encoder, which keeps AV1 fail-closed.
+  EXPECT_EQ(video::vulkan_quality_max({4, 4, 2}, false), 3);
+  EXPECT_EQ(video::vulkan_quality_max({4, 4, 2}, true), 1);
+  EXPECT_EQ(video::vulkan_quality_max({4, 3, 4}, false), 2);
+  EXPECT_EQ(video::vulkan_quality_max({-1, 4, -1}, false), 3);
+  EXPECT_EQ(video::vulkan_quality_max({-1, -1, 4}, false), -1);
+  EXPECT_EQ(video::vulkan_quality_max({-1, -1, -1}, true), -1);
 }
 
 TEST(VideoVulkanQualityClampTests, NegativeConfiguredValueFloorsAtZero) {

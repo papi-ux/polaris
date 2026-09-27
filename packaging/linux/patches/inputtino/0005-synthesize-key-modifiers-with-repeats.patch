@@ -1,0 +1,142 @@
+--- a/include/inputtino/input.hpp
++++ b/include/inputtino/input.hpp
+@@ -254,6 +254,11 @@
+ 
+   void press(short key_code);
+ 
++  enum MODIFIER : uint8_t { SHIFT = 1, CTRL = 2, ALT = 4, META = 8 };
++  // Synthesize missing modifiers around this press and its repeats. Modifier
++  // keys themselves ignore this mask; physically held modifiers stay owned.
++  void press(short key_code, uint8_t modifiers);
++
+   void release(short key_code);
+ 
+ protected:
+--- a/src/uinput/include/inputtino/protected_types.hpp
++++ b/src/uinput/include/inputtino/protected_types.hpp
+@@ -85,13 +85,18 @@
+ struct XboxOneJoypadState : BaseJoypadState {};
+ struct SwitchJoypadState : BaseJoypadState {};
+ 
++struct KeyboardPress {
++  short code;
++  uint8_t synthetic_modifiers;
++};
++
+ struct KeyboardState {
+   std::mutex mutex;
+   std::condition_variable changed;
+   std::thread repeat_press_t;
+   bool stop_repeat_thread = false;
+   libevdev_uinput_ptr kb = nullptr;
+-  std::vector<short> cur_press_keys = {};
++  std::vector<KeyboardPress> cur_press_keys = {};
+ };
+ 
+ struct MouseState {
+--- a/src/uinput/keyboard.cpp
++++ b/src/uinput/keyboard.cpp
+@@ -1,6 +1,7 @@
+ #include "inputtino/input.hpp"
+ 
+ #include <algorithm>
++#include <array>
+ #include <cstring>
+ #include <inputtino/protected_types.hpp>
+ #include <inputtino/keyboard.hpp>
+@@ -54,6 +55,46 @@
+   return {};
+ }
+ 
++static uint8_t modifier_for(short code) {
++  switch (code) {
++    case 0x10: case 0xA0: case 0xA1: return Keyboard::SHIFT;
++    case 0x11: case 0xA2: case 0xA3: return Keyboard::CTRL;
++    case 0x12: case 0xA4: case 0xA5: return Keyboard::ALT;
++    case 0x5B: case 0x5C: return Keyboard::META;
++    default: return 0;
++  }
++}
++
++static uint8_t missing_modifiers(const KeyboardState &state, uint8_t requested) {
++  for (const auto &key : state.cur_press_keys) requested &= ~modifier_for(key.code);
++  return requested & (Keyboard::SHIFT | Keyboard::CTRL | Keyboard::ALT | Keyboard::META);
++}
++
++static void release_btn(libevdev_uinput *kb, short code) {
++  const auto found = keyboard::key_mappings.find(code);
++  if (found == keyboard::key_mappings.end()) return;
++  libevdev_uinput_write_event(kb, EV_MSC, MSC_SCAN, found->second.scan_code);
++  libevdev_uinput_write_event(kb, EV_KEY, found->second.linux_code, 0);
++  libevdev_uinput_write_event(kb, EV_SYN, SYN_REPORT, 0);
++}
++
++static void press_with_modifiers(KeyboardState &state, const KeyboardPress &key) {
++  // Recheck physical keys for every repeat: a left/right modifier may have been
++  // pressed since this chord started. Temporary modifiers never become held keys.
++  const auto modifiers = missing_modifiers(state, key.synthetic_modifiers);
++  static constexpr std::array<std::pair<uint8_t, short>, 4> keys{{
++      {Keyboard::SHIFT, 0xA0}, {Keyboard::CTRL, 0xA2},
++      {Keyboard::ALT, 0xA4}, {Keyboard::META, 0x5B}}};
++  auto *kb = state.kb.get();
++  for (const auto &[flag, code] : keys) if (modifiers & flag) press_btn(kb, code);
++  press_btn(kb, key.code);
++  // Attempt every release even if a kernel write returned an error. This is
++  // the library's existing best-effort write contract, not an acknowledgement.
++  for (auto it = keys.rbegin(); it != keys.rend(); ++it) {
++    if (modifiers & it->first) release_btn(kb, it->second);
++  }
++}
++
+ Keyboard::Keyboard() : _state(std::make_shared<KeyboardState>()) {}
+ 
+ Keyboard::~Keyboard() {
+@@ -80,7 +121,7 @@
+       while (!state->changed.wait_for(lock, period, [&] { return state->stop_repeat_thread; })) {
+         for (auto key : state->cur_press_keys) {
+           if (auto keyboard = state->kb.get()) {
+-            press_btn(keyboard, key);
++            press_with_modifiers(*state, key);
+           }
+         }
+       }
+@@ -93,16 +134,20 @@
+ }
+ 
+ void Keyboard::press(short key_code) {
++  press(key_code, 0);
++}
++
++void Keyboard::press(short key_code, uint8_t modifiers) {
+   std::lock_guard<std::mutex> lock(_state->mutex);
+-  if (auto keyboard = _state->kb.get()) {
+-    if (keyboard::key_mappings.find(key_code) != keyboard::key_mappings.end()) {
+-      // Repeated callers may emit a new press, but retain only one repeat owner.
+-      // Allocate before writing input so a failed allocation cannot strand a key.
+-      auto &keys = _state->cur_press_keys;
+-      if (std::find(keys.begin(), keys.end(), key_code) == keys.end()) keys.push_back(key_code);
+-      press_btn(keyboard, key_code);
+-    }
+-  }
++  if (!_state->kb || keyboard::key_mappings.find(key_code) == keyboard::key_mappings.end()) return;
++  const KeyboardPress pressed{key_code, modifier_for(key_code) ? uint8_t{0} : missing_modifiers(*_state, modifiers)};
++  auto &keys = _state->cur_press_keys;
++  const auto found = std::find_if(keys.begin(), keys.end(), [key_code](const auto &key) { return key.code == key_code; });
++  // Allocate before emitting input. A duplicate updates intent without adding a
++  // repeat owner. The plain press API keeps its existing unmodified behavior.
++  if (found == keys.end()) keys.push_back(pressed);
++  else *found = pressed;
++  press_with_modifiers(*_state, pressed);
+ }
+ 
+ void Keyboard::release(short key_code) {
+@@ -112,7 +157,8 @@
+     if (auto keyboard = _state->kb.get()) {
+       auto mapped_key = search_key->second;
+       this->_state->cur_press_keys.erase(
+-          std::remove(this->_state->cur_press_keys.begin(), this->_state->cur_press_keys.end(), key_code),
++          std::remove_if(this->_state->cur_press_keys.begin(), this->_state->cur_press_keys.end(),
++                         [key_code](const auto &key) { return key.code == key_code; }),
+           this->_state->cur_press_keys.end());
+ 
+       libevdev_uinput_write_event(keyboard, EV_MSC, MSC_SCAN, mapped_key.scan_code);

@@ -343,8 +343,12 @@ function describeHostBehindConsole(consoleVersion, runningVersion) {
   }
 }
 
+export function isPrereleaseOptIn(value) {
+  return value === true || value === 'enabled'
+}
+
 export function chooseCandidateRelease({ latestRelease, prereleaseRelease, includePrereleases = false, currentVersion = '' } = {}) {
-  if (includePrereleases && prereleaseRelease && isReleaseGreater(prereleaseRelease, latestRelease ? versionFromRelease(latestRelease) : currentVersion, true)) {
+  if (isPrereleaseOptIn(includePrereleases) && prereleaseRelease && !prereleaseRelease.draft && isReleaseGreater(prereleaseRelease, latestRelease ? versionFromRelease(latestRelease) : currentVersion, true)) {
     return prereleaseRelease
   }
   return latestRelease || null
@@ -404,7 +408,7 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
   let status = 'current'
   let statusLabel = 'Current release'
   let summary = 'This host is on the latest public release.'
-  if (isReleaseGreater(candidateRelease, currentVersion, includePrereleases)) {
+  if (isReleaseGreater(candidateRelease, currentVersion, true)) {
     status = 'update_available'
     statusLabel = candidateRelease.prerelease ? 'Prerelease available' : 'Update available'
     summary = 'A newer Polaris package is available. Copy the manual install command when you are ready.'

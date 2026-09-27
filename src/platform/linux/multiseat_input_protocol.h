@@ -26,6 +26,11 @@ namespace multiseat::input {
   inline constexpr std::int32_t maximum_relative_pointer_delta = 32767;
   inline constexpr std::int32_t maximum_scroll_delta = 32767;
   inline constexpr std::uint32_t supported_gamepad_buttons = 0x0000F7FFU;
+  inline constexpr std::uint8_t keyboard_modifier_shift = 0x01;
+  inline constexpr std::uint8_t keyboard_modifier_control = 0x02;
+  inline constexpr std::uint8_t keyboard_modifier_alt = 0x04;
+  inline constexpr std::uint8_t keyboard_modifier_meta = 0x08;
+  inline constexpr std::uint8_t supported_keyboard_modifiers = 0x0F;
 
   enum class button_state_e : std::uint8_t {
     pressed = 1,
@@ -65,11 +70,15 @@ namespace multiseat::input {
     touch_contact = 6,
     pen_tool = 7,
     gamepad_state = 8,
+    keyboard_key_with_modifiers = 9,
   };
 
   struct keyboard_key_event_t {
     std::uint16_t key_code = 0;
     button_state_e state = button_state_e::pressed;
+    // Required modifiers on key down. Physical modifier keys retain ownership.
+    // A release always uses zero; nonzero masks use the distinct wire kind 9.
+    std::uint8_t modifiers = 0;
 
     bool operator==(const keyboard_key_event_t &) const = default;
   };

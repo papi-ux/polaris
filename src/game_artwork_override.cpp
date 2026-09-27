@@ -523,6 +523,10 @@ namespace game_artwork {
     return std::shared_lock(override_gate());
   }
 
+  std::unique_lock<std::shared_mutex> acquire_artwork_cache_write_lock() {
+    return std::unique_lock(override_gate());
+  }
+
   bool commit_staged_artwork_override(
     const fs::path &appdata,
     const fs::path &staging_appdata,

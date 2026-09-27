@@ -139,6 +139,7 @@ namespace artwork_sweep {
 
   /// A snapshot of a run, safe to read while it is going.
   struct job_t {
+    std::string id;  ///< opaque identity; a replacement run must not inherit an apply
     state_e state = state_e::ready;
     std::size_t total = 0;  ///< how many games the run was given
     std::size_t looked_at = 0;  ///< how many it has answered for
@@ -171,15 +172,15 @@ namespace artwork_sweep {
 
     ~sweeper_t() {
       cancel();
-      // Long enough for the lookup in flight to time out and the thread to leave. A wait that gave
-      // up early would let a detached thread lock this mutex after it had been destroyed.
-      wait_for_idle(std::chrono::seconds {90});
+      // A lookup may outlive a guessed timeout. Keep the owner and its mutex alive
+      // until the worker has returned and released its thread-owned resources.
+      if (worker_.joinable()) worker_.join();
     }
 
     /// Begin a run over these games. At most `maximum_games_per_run` of them are looked up.
-    start_e start(std::vector<candidate_t> games) {
+    start_e start(std::vector<candidate_t> games, std::string id = {}) {
       std::unique_lock lock(mutex_);
-      if (job_.state == state_e::searching) {
+      if (running_) {
         return start_e::already_running;
       }
 
@@ -196,24 +197,41 @@ namespace artwork_sweep {
         games.resize(maximum_games_per_run);
       }
 
-      job_ = job_t {};
-      job_.state = state_e::searching;
-      job_.total = games.size();
-      job_.started_at = now_seconds();
-      job_.message = clipped ? "Looking up the first " + std::to_string(games.size()) + " games without a cover." : "Looking up " + std::to_string(games.size()) + " games without a cover.";
-      job_.proposals.reserve(games.size());
-      for (const auto &game : games) {
-        job_.proposals.push_back(proposal_t {game.uuid, game.name, outcome_e::skipped, std::nullopt, {}});
-      }
-      cancelled_ = false;
-      running_ = true;
       const auto lookup = lookup_;
       const auto sleep = sleep_;
+      job_t next;
+      next.id = std::move(id);
+      next.state = state_e::searching;
+      next.total = games.size();
+      next.started_at = now_seconds();
+      next.message = clipped ? "Looking up the first " + std::to_string(games.size()) + " games without a cover." : "Looking up " + std::to_string(games.size()) + " games without a cover.";
+      next.proposals.reserve(games.size());
+      for (const auto &game : games) {
+        next.proposals.push_back(proposal_t {game.uuid, game.name, outcome_e::skipped, std::nullopt, {}});
+      }
+      // All preparation that can throw finishes before reserving the worker.
+      job_ = std::move(next);
+      cancelled_ = false;
+      running_ = true;
+      auto previous = std::move(worker_);
       lock.unlock();
-
-      std::thread([this, games = std::move(games), lookup, sleep]() {
-        run(games, lookup, sleep);
-      }).detach();
+      // Reserve the new run before releasing the lock, so another start cannot
+      // replace it while we join the old worker. Never join with mutex_ held.
+      if (previous.joinable()) previous.join();
+      lock.lock();
+      try {
+        worker_ = std::thread([this, games = std::move(games), lookup, sleep]() {
+          try {
+            run(games, lookup, sleep);
+          } catch (...) {
+            std::lock_guard failure_lock(mutex_);
+            fail_run();
+          }
+        });
+      } catch (...) {
+        fail_run();
+        throw;
+      }
       return start_e::started;
     }
 
@@ -226,6 +244,9 @@ namespace artwork_sweep {
     void cancel() {
       std::lock_guard lock(mutex_);
       cancelled_ = true;
+      // Observers in other browser tabs must retire automatic approval immediately,
+      // even if an in-flight lookup later leaves a proposal for manual review.
+      job_.id.clear();
     }
 
     /**
@@ -241,13 +262,26 @@ namespace artwork_sweep {
       return true;
     }
 
-    /// Wait for the running thread to leave. For tests and for shutdown.
+    /// Wait for job processing to finish. Destruction also joins the worker thread.
     bool wait_for_idle(std::chrono::milliseconds timeout) {
       std::unique_lock lock(mutex_);
       return idle_.wait_for(lock, timeout, [this] { return !running_; });
     }
 
   private:
+    // Called with mutex_ held. Keep provider exception text out of console state.
+    void fail_run() {
+      job_.state = state_e::failed;
+      job_.message = "The cover search stopped after an unexpected error. Try again.";
+      try {
+        job_.finished_at = now_seconds();
+      } catch (...) {
+        job_.finished_at = job_.started_at;
+      }
+      running_ = false;
+      idle_.notify_all();
+    }
+
     [[nodiscard]] std::int64_t now_seconds() const {
       if (clock_) {
         return clock_();
@@ -298,6 +332,10 @@ namespace artwork_sweep {
         }
         if (index > 0) {
           pause(between_games_milliseconds);
+          if (cancelled()) {
+            stopped_because = stopped_here(index);
+            break;
+          }
         }
 
         auto answer = lookup ? lookup(games[index]) : lookup_t {};
@@ -383,6 +421,7 @@ namespace artwork_sweep {
 
     mutable std::mutex mutex_;
     std::condition_variable idle_;
+    std::thread worker_;
     lookup_fn_t lookup_;
     sleep_fn_t sleep_;
     clock_fn_t clock_;

@@ -1406,6 +1406,7 @@ TEST(ProcessMigrationTests, ReadsTheGameIdentityHeroicAndLutrisImportsCarry) {
         {"uuid", "44444444-4444-4444-8444-444444444444"},
         {"source", "heroic"},
         {"heroic-app-name", "dc9d2e595d0e4650b35d659f90d41059"},
+        {"heroic-store", "epic"}, {"heroic-runner", "legendary"}, {"heroic-install", "flatpak"},
         {"detached", {"setsid flatpak run com.heroicgameslauncher.hgl 'heroic://launch?appName=dc9d2e595d0e4650b35d659f90d41059'"}}
       },
       {
@@ -1437,6 +1438,9 @@ TEST(ProcessMigrationTests, ReadsTheGameIdentityHeroicAndLutrisImportsCarry) {
   EXPECT_EQ(heroic->heroic_app_name, "");
   EXPECT_FALSE(proc::is_one_game(*heroic));
   EXPECT_EQ(heroic_game->heroic_app_name, "dc9d2e595d0e4650b35d659f90d41059");
+  EXPECT_EQ(heroic_game->heroic_store, "epic");
+  EXPECT_EQ(heroic_game->heroic_runner, "legendary");
+  EXPECT_EQ(heroic_game->heroic_install, "flatpak");
   EXPECT_TRUE(proc::is_one_game(*heroic_game));
   EXPECT_EQ(lutris_game->lutris_slug, "peak");
   EXPECT_TRUE(proc::is_one_game(*lutris_game));

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <src/game_artwork_provider.h>
+#include <src/game_artwork_override.h>
 
 #include <algorithm>
 #include <filesystem>
@@ -273,4 +274,66 @@ TEST(GameArtworkDownloadExecutor, RejectsInvalidUuidWithoutInvokingTransport) {
   );
   EXPECT_TRUE(assets.empty());
   EXPECT_EQ(calls, 0);
+}
+
+TEST(GameArtworkDownloadExecutor, RemovalDuringDownloadPreventsPublicationAndFurtherAutomaticDownloads) {
+  for (const auto provider : {provider_e::steam, provider_e::steamgriddb}) {
+    temp_dir_t temp("remove-during-download");
+    const std::string url = provider == provider_e::steam ?
+      "https://cdn.cloudflare.steamstatic.com/steam/apps/620/library_600x900.jpg" :
+      "https://cdn.steamgriddb.com/grid/selected.jpg";
+    const std::vector<request_t> plan {
+      {provider, operation_e::download, kind_e::poster, url, false},
+      {provider, operation_e::download, kind_e::hero, url, false},
+    };
+    int downloaded = 0, published = 0;
+    const auto assets = game_artwork::providers::execute_download_plan(
+      temp.path, GAME_UUID, plan,
+      [&](const request_t &request, std::uintmax_t) -> std::optional<transport_response_t> {
+        ++downloaded;
+        // The console removal finishes after lookup starts but before the response arrives.
+        EXPECT_TRUE(game_artwork::remove_downloaded_artwork(temp.path, GAME_UUID));
+        return transport_response_t {200, jpeg(1), request.url};
+      },
+      {.force_replace = true, .on_published = [&](const game_artwork::asset_t &) { ++published; }});
+    EXPECT_TRUE(assets.empty());
+    EXPECT_EQ(downloaded, 1);
+    EXPECT_EQ(published, 0);
+    EXPECT_FALSE(game_artwork::automatic_artwork_lookup_enabled(temp.path, GAME_UUID));
+  }
+}
+
+TEST(GameArtworkDownloadExecutor, AutomaticDownloadsStayDisabledUntilFindArtworkAgain) {
+  temp_dir_t temp("remove-before-download");
+  ASSERT_TRUE(game_artwork::remove_downloaded_artwork(temp.path, GAME_UUID));
+  const auto plan = game_artwork::providers::plan_steam_assets("620");
+  int downloaded = 0;
+  const auto transport = [&](const request_t &request, std::uintmax_t) -> std::optional<transport_response_t> {
+    ++downloaded;
+    return transport_response_t {200, jpeg(2), request.url};
+  };
+  EXPECT_TRUE(game_artwork::providers::execute_download_plan(temp.path, GAME_UUID, plan, transport).empty());
+  EXPECT_EQ(downloaded, 0);
+  ASSERT_TRUE(game_artwork::enable_automatic_artwork_lookup(temp.path, GAME_UUID));
+  EXPECT_FALSE(game_artwork::providers::execute_download_plan(temp.path, GAME_UUID, plan, transport).empty());
+  EXPECT_GT(downloaded, 0);
+  ASSERT_TRUE(game_artwork::remove_downloaded_artwork(temp.path, GAME_UUID));
+  EXPECT_TRUE(game_artwork::scan_cached_assets(temp.path, GAME_UUID).empty());
+}
+
+TEST(GameArtworkDownloadExecutor, ExplicitOverrideCanPublishAfterRemovalWithoutEnablingAutomaticLookup) {
+  temp_dir_t temp("manual-after-remove");
+  ASSERT_TRUE(game_artwork::remove_downloaded_artwork(temp.path, GAME_UUID));
+  const std::vector<request_t> plan {
+    {provider_e::steamgriddb, operation_e::download, kind_e::poster,
+     "https://cdn.steamgriddb.com/grid/selected.jpg", false},
+  };
+  const auto assets = game_artwork::providers::execute_download_plan(
+    temp.path, GAME_UUID, plan,
+    [&](const request_t &request, std::uintmax_t) -> std::optional<transport_response_t> {
+      return transport_response_t {200, jpeg(3), request.url};
+    }, {.destination_source = source_e::override, .force_replace = true});
+  ASSERT_EQ(assets.size(), 1);
+  EXPECT_EQ(assets.front().source, source_e::override);
+  EXPECT_FALSE(game_artwork::automatic_artwork_lookup_enabled(temp.path, GAME_UUID));
 }

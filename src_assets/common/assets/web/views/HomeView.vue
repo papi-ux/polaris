@@ -196,7 +196,7 @@
           <p><span class="system-update-state-summary">{{ updateCenterState.statusLabel }}</span> · {{ updateCheckError || updateCenterState.primaryActionSummary }}</p>
           <p class="system-update-safety">
             {{ $t('index.never_auto_installs') }}
-            <a href="https://papi-ux.com/docs/repositories/#after-install-or-upgrade" target="_blank" rel="noopener" class="focus-ring system-text-link">{{ $t('index.updates_docs_link') }}</a>
+            <a href="https://papi-ux.com/docs/updates/" target="_blank" rel="noopener" class="focus-ring system-text-link">{{ $t('index.updates_docs_link') }}</a>
           </p>
         </div>
         <div class="system-update-actions">
@@ -214,7 +214,7 @@
             data-update-center-refresh
             type="button"
             class="focus-ring system-button system-button-secondary"
-            :disabled="checkingUpdates"
+            :disabled="checkingUpdates || channelSaving"
             @click="refreshUpdateStatus"
           >
             {{ checkingUpdates ? $t('index.checking') : $t('index.check_again') }}
@@ -231,6 +231,15 @@
           </button>
         </div>
       </div>
+
+      <UpdateChannelControl
+        :enabled="notifyPreReleases"
+        :revision="updateConfigRevision"
+        :disabled="checkingUpdates"
+        @busy="channelSaving = $event"
+        @saved="handleUpdateChannelSaved"
+        @refresh="refreshUpdateStatus"
+      />
 
       <div v-show="showUpdateDetails" id="system-update-details" data-update-center-details class="system-update-details">
         <div class="system-update-grid">
@@ -312,7 +321,8 @@
 import { ref, computed, inject } from 'vue'
 import { useSystemStats } from '../composables/useSystemStats'
 import PolarisVersion from '../polaris_version'
-import { buildUpdateCenterState, updateStatusLightClass } from '../update-center.js'
+import { buildUpdateCenterState, isPrereleaseOptIn, updateStatusLightClass } from '../update-center.js'
+import UpdateChannelControl from '../components/UpdateChannelControl.vue'
 import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
 import { groupRecentIssueLogs } from '../recent-issues.js'
 import { resources, legalDocs, sponsor } from '../resource-links.js'
@@ -324,6 +334,8 @@ const { gpu, displays, audio, sessionType, displaySession, gameModeHost, loading
 const version = ref(null)
 const githubVersion = ref(null)
 const notifyPreReleases = ref(false)
+const updateConfigRevision = ref('')
+const channelSaving = ref(false)
 const preReleaseVersion = ref(null)
 const logs = ref(null)
 const copiedVersion = ref(false)
@@ -540,20 +552,32 @@ async function handlePrimaryUpdateAction() {
   if (action === 'copy_install_command') await copyInstallCommand()
 }
 
+async function handleUpdateChannelSaved(enabled) {
+  notifyPreReleases.value = enabled
+  if (!enabled) preReleaseVersion.value = null
+  await refreshUpdateStatus()
+}
+
 async function refreshUpdateStatus() {
+  if (checkingUpdates.value) return
   checkingUpdates.value = true
   updateCheckError.value = ''
   try {
-    const config = await fetch('./api/config', { credentials: 'include' }).then((response) => response.json())
+    const response = await fetch('./api/config', { credentials: 'include', cache: 'no-store' })
+    if (!response.ok) throw new Error('Host update settings unavailable')
+    const config = await response.json()
+    updateConfigRevision.value = config.configuration_revision || ''
     const hostStatus = await fetch('./api/update-status', { credentials: 'include' }).then((response) => response.json()).catch(() => null)
     updateHost.value = hostStatus || { platform: config.platform || '', distro: {} }
-    notifyPreReleases.value = config.notify_pre_releases
+    notifyPreReleases.value = isPrereleaseOptIn(config.notify_pre_releases)
     version.value = new PolarisVersion(null, hostStatus?.version || config.version)
 
     try {
       githubVersion.value = new PolarisVersion(await fetch('https://api.github.com/repos/papi-ux/polaris/releases/latest').then((response) => response.json()), null)
-      const releases = await fetch('https://api.github.com/repos/papi-ux/polaris/releases').then((response) => response.json())
-      const preRelease = releases.find((release) => release.prerelease)
+      const releases = notifyPreReleases.value
+        ? await fetch('https://api.github.com/repos/papi-ux/polaris/releases').then((response) => response.ok ? response.json() : Promise.reject(new Error('Release check unavailable')))
+        : []
+      const preRelease = Array.isArray(releases) ? releases.find((release) => release.prerelease && !release.draft) : null
       preReleaseVersion.value = preRelease ? new PolarisVersion(preRelease, null) : null
     } catch (error) {
       githubVersion.value = null
@@ -562,6 +586,7 @@ async function refreshUpdateStatus() {
       console.error(error)
     }
   } catch (error) {
+    updateConfigRevision.value = ''
     updateCheckError.value = 'Host update status unavailable'
     console.error(error)
   } finally {

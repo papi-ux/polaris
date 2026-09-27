@@ -80,3 +80,64 @@ TEST(LauncherIdentityTests, CustomAndUnknownEmulatorsStayHonest) {
     EXPECT_TRUE(identity.runtime_label.empty()) << unknown;
   }
 }
+
+TEST(LauncherIdentityTests, HeroicApiMetadataUsesExactStoredIdentityAndCurrentSettings) {
+  game_library::heroic_runtime_snapshot_t snapshot {
+    {{game_library::launcher_install_t::native, "epic", "SameId"}, {"linux", "native", ""}},
+    {{game_library::launcher_install_t::flatpak, "epic", "SameId"}, {"windows", "proton", "GE-Proton"}},
+    {{game_library::launcher_install_t::flatpak, "gog", "SameId"}, {"windows", "wine", "Wine-GE"}},
+  };
+  proc::ctx_t app {};
+  app.source = "heroic";
+  app.heroic_app_name = "SameId";
+  app.heroic_store = "epic";
+  app.heroic_runner = "legendary";
+  app.heroic_install = "flatpak";
+  EXPECT_EQ(proc::launcher_metadata_for_app(app, snapshot), (nlohmann::json {
+    {"platform", "windows"}, {"runtime", "proton"}, {"runtime_label", "GE-Proton"}}));
+  app.heroic_install = "native";
+  EXPECT_EQ(proc::launcher_metadata_for_app(app, snapshot), (nlohmann::json {
+    {"platform", "linux"}, {"runtime", "native"}}));
+  app.heroic_install = "flatpak";
+  app.heroic_store = "gog";
+  EXPECT_TRUE(proc::launcher_metadata_for_app(app, snapshot).empty());
+  app.heroic_runner = "gog";
+  EXPECT_EQ(proc::launcher_metadata_for_app(app, snapshot).at("runtime"), "wine");
+  app.heroic_app_name.clear();
+  EXPECT_TRUE(proc::launcher_metadata_for_app(app, snapshot).empty()) << "the Heroic launcher has no game's runtime";
+  app.heroic_app_name = "OtherId";
+  EXPECT_TRUE(proc::launcher_metadata_for_app(app, snapshot).empty());
+  app.heroic_app_name = "../SameId";
+  EXPECT_TRUE(proc::launcher_metadata_for_app(app, snapshot).empty());
+}
+
+TEST(LauncherIdentityTests, HeroicApiLeavesUnknownFieldsAbsentAndUsesNovaPlatformIds) {
+  game_library::heroic_runtime_snapshot_t snapshot {
+    {{game_library::launcher_install_t::native, "gog", "123"}, {"mac", "", ""}},
+  };
+  proc::ctx_t app {};
+  app.source = "heroic";
+  app.heroic_app_name = "123";
+  app.heroic_store = "gog";
+  app.heroic_runner = "gog";
+  app.heroic_install = "native";
+  app.lutris_runner = "wine"; // Unrelated imported fields cannot supply a missing Heroic runtime.
+  EXPECT_EQ(proc::launcher_metadata_for_app(app, snapshot), (nlohmann::json {{"platform", "macos"}}));
+  EXPECT_TRUE(proc::launcher_metadata_for_app(app, {}).empty());
+}
+
+TEST(LauncherIdentityTests, SharedApiMetadataPreservesLutrisEmulatorAndManualFields) {
+  proc::ctx_t app {};
+  app.source = "lutris";
+  app.lutris_runner = "wine";
+  EXPECT_EQ(proc::launcher_metadata_for_app(app, {}), (nlohmann::json {
+    {"platform", "windows"}, {"runtime", "wine"}}));
+  app.source = "emulator";
+  app.lutris_runner.clear();
+  app.emulator = "eden";
+  EXPECT_EQ(proc::launcher_metadata_for_app(app, {}), (nlohmann::json {
+    {"platform", "switch"}, {"platform_label", "Nintendo Switch"}, {"runtime", "eden"},
+    {"runtime_label", "Eden"}, {"emulator", "eden"}}));
+  app.source = "manual";
+  EXPECT_TRUE(proc::launcher_metadata_for_app(app, {}).empty());
+}

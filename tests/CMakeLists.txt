@@ -111,6 +111,7 @@ set(TEST_AUDIT_SUPPORT_SOURCES
 )
 
 set(TEST_FAST_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_lookup_workers.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_packet_owner.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_bounded_log_file.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_benchmark_control_contract.cpp
@@ -203,6 +204,8 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_session_manager.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_pyrowave_encode.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_virtual_display.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_vulkan_encode_capture.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_vulkan_loader.cpp
 )
 
 if (NOT WIN32 AND NOT APPLE)
@@ -250,6 +253,7 @@ set(TEST_PAIRING_SOURCES
 )
 
 set(TEST_HTTP_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_lookup_routes.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_nvhttp_tls_close.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_live_tuning_http.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_httpcommon.cpp
