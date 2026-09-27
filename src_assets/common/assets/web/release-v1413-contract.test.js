@@ -68,15 +68,22 @@ describe('v1.4.13 release contract', () => {
     expect(notes).toContain('on the second and third betas a stream could take the host down')
   })
 
-  // Nova 1.4.13 was still in beta when Polaris 1.4.13 went stable, so the two are not a matched pair.
-  it('does not call Nova 1.4.13 a matched release', () => {
+  // Nova 1.4.13 went stable on 2026-09-27, the day after Polaris 1.4.13, and the stable notes gate
+  // still refuses "matched" wording. PyroWave sits in a different place in each Nova build: the
+  // Android beta (Nova Pre, beta.3) has it only in Settings, because its Play Setup had no codec row
+  // yet; stable Android compiles it out; Linux needs the separate bundle. A reader who looked in
+  // Play Setup found nothing, so the notes name each path.
+  it('says where PyroWave is in each Nova build without calling the two a matched release', () => {
     const notes = currentNotes()
     expect(notes).not.toMatch(/matched with Nova/i)
-    expect(notes).toContain('Nova 1.4.13 is still in beta, and its stable release follows')
-    expect(notes).toContain('Nova for Android asks for it in its 1.4.13 beta')
+    expect(notes).not.toContain('Nova 1.4.13 is still in beta')
+    expect(notes).toContain('Nova 1.4.13 is out too!')
     expect(notes).toContain(
-      'The Nova for Linux Alpha Flatpak attached to those betas is built without the decoder.',
+      'Settings → Client Stream Defaults → Change codec settings → PyroWave (experimental)',
     )
+    expect(notes).toContain("Nova's stable 1.4.13 APKs don't turn it on")
+    expect(notes).toContain('`Nova-Linux-PyroWave-x86_64-alpha.flatpak`')
+    expect(notes).toContain('Play Setup → Video Codec → PyroWave · Experimental')
   })
 
   // 0.49 ms was one host encoding a frame that never left the GPU. Private Stream, wlroots and X11
