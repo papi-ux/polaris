@@ -132,6 +132,15 @@ namespace adaptive_bitrate {
     doctor_network_policy_regressed_during_override = false;
   }
 
+  // adaptive_bitrate_max never cuts what a client asked for. Nothing in this
+  // controller moves the target above its base, so raising the session's
+  // ceiling to the client's request leaves every clamp below it (adaptive
+  // feedback, Doctor and its Undo) working from the bitrate the encoder was
+  // given, not from a smaller configured number.
+  static void admit_client_bitrate_locked(int kbps) {
+    current_config.max_bitrate_kbps = std::max(current_config.max_bitrate_kbps, kbps);
+  }
+
   static int clamp_target(int target, int base) {
     target = std::clamp(target, current_config.min_bitrate_kbps, current_config.max_bitrate_kbps);
     return std::min(target, base);
@@ -722,6 +731,7 @@ namespace adaptive_bitrate {
     retire_doctor_override_locked();
     explicit_live_override_active.store(false, std::memory_order_relaxed);
     pending_live_update_active.store(false, std::memory_order_relaxed);
+    admit_client_bitrate_locked(kbps);
     const int clamped = std::clamp(kbps, current_config.min_bitrate_kbps, current_config.max_bitrate_kbps);
     base_bitrate_kbps.store(clamped, std::memory_order_relaxed);
 
@@ -743,7 +753,13 @@ namespace adaptive_bitrate {
       !enabled.load(std::memory_order_relaxed),
       std::memory_order_relaxed
     );
-    const int clamped = std::clamp(kbps, current_config.min_bitrate_kbps, current_config.max_bitrate_kbps);
+    // The paired endpoints already hold this to 1000..300000 kbps. The host
+    // cap, max_bitrate, bounds it as it bounds RTSP and launch requests;
+    // adaptive_bitrate_max does not.
+    const int requested = config::video.max_bitrate > 0 ?
+      std::min(kbps, config::video.max_bitrate) : kbps;
+    admit_client_bitrate_locked(requested);
+    const int clamped = std::clamp(requested, current_config.min_bitrate_kbps, current_config.max_bitrate_kbps);
     base_bitrate_kbps.store(clamped, std::memory_order_relaxed);
     target_bitrate_kbps.store(clamped, std::memory_order_relaxed);
     pending_live_update_active.store(false, std::memory_order_relaxed);

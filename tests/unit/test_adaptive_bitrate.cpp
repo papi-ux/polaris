@@ -410,12 +410,85 @@ TEST(AdaptiveBitrateController, EncoderPressureAtFloorAdvancesControllerRevision
   EXPECT_GT(after_pressure.revision, before_pressure.revision);
 }
 
-TEST(AdaptiveBitrateController, ClampsBaseToConfiguredBounds) {
-  enable_controller(100000);
+TEST(AdaptiveBitrateController, ConfiguredCeilingNeverCutsTheClientsStartingBitrate) {
+  // A PyroWave client asking for 180 Mbps at 1080p60 reaches the encoder at
+  // about 161 Mbps, far above the 50 Mbps ceiling configured here.
+  enable_controller(161000);
+
+  auto state = adaptive_bitrate::get_state();
+  EXPECT_EQ(161000, state.base_bitrate_kbps);
+  EXPECT_EQ(161000, state.target_bitrate_kbps);
+  // The ceiling the controller holds, and the host reports, is the request.
+  EXPECT_EQ(161000, state.max_bitrate_kbps);
+  // Adaptive is on, so the encoder polls this request every 30 frames. It has
+  // to hold the rate the stream opened at rather than cut it to the ceiling.
+  const auto request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(request.has_value());
+  EXPECT_EQ(161000, request->target_bitrate_kbps);
+
+  // Pressure lowers the bitrate from the client's request, not from the ceiling.
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  std::this_thread::sleep_for(1100ms);
+  adaptive_bitrate::update_network_stats(8.0, 8.0);
+  state = adaptive_bitrate::get_state();
+  EXPECT_EQ("network_pressure", state.state);
+  EXPECT_LT(state.target_bitrate_kbps, 161000);
+  EXPECT_GT(state.target_bitrate_kbps, 50000);
+
+  // The raise belongs to the stream. It never reaches the configured value, so
+  // the next stream start reloads 50 Mbps for a smaller stream after this one.
+  EXPECT_EQ(50000, config::video.adaptive_bitrate.max_bitrate_kbps);
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_base_bitrate(20000);
+  EXPECT_EQ(50000, adaptive_bitrate::get_state().max_bitrate_kbps);
+}
+
+TEST(AdaptiveBitrateController, ARequestBelowTheConfiguredCeilingStartsAsBefore) {
+  // A guard, not proof of the fix: this passed before it too. It pins that a
+  // stream under the configured ceiling starts exactly as it did, and fails if
+  // the fix sets the ceiling to the request instead of raising it to the request.
+  enable_controller(20000);
 
   const auto state = adaptive_bitrate::get_state();
-  EXPECT_EQ(50000, state.base_bitrate_kbps);
-  EXPECT_EQ(50000, state.target_bitrate_kbps);
+  EXPECT_EQ(20000, state.base_bitrate_kbps);
+  EXPECT_EQ(20000, state.target_bitrate_kbps);
+  EXPECT_EQ(50000, state.max_bitrate_kbps);
+}
+
+TEST(AdaptiveBitrateController, ARequestBelowTheFloorStartsAtTheFloor) {
+  // A guard, not proof of the fix: this held before it too. The floor is the one
+  // place the bitrate can sit above what a client asked for, and the Live Tuning
+  // docs say so. A client asking 10 Mbps opens the encoder near 7988 kbps; with
+  // the floor at 20000 the controller starts at 20000, and the rewritten live
+  // write has to keep that floor as well.
+  struct restore_adaptive_config_t {
+    decltype(config::video.adaptive_bitrate) saved = config::video.adaptive_bitrate;
+
+    ~restore_adaptive_config_t() {
+      config::video.adaptive_bitrate = saved;
+    }
+  } restore;
+  config::video.adaptive_bitrate.enabled = true;
+  config::video.adaptive_bitrate.min_bitrate_kbps = 20000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 50000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 7988);
+  adaptive_bitrate::set_base_bitrate(7988);
+
+  auto state = adaptive_bitrate::get_state();
+  EXPECT_EQ(20000, state.base_bitrate_kbps);
+  EXPECT_EQ(50000, state.max_bitrate_kbps);
+  // With Live Tuning on, the encoder's first bitrate check raises it to the floor.
+  const auto request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(request.has_value());
+  EXPECT_EQ(20000, request->target_bitrate_kbps);
+
+  adaptive_bitrate::set_live_bitrate(10000);
+  state = adaptive_bitrate::get_state();
+  EXPECT_EQ(20000, state.base_bitrate_kbps);
+  EXPECT_EQ(20000, state.target_bitrate_kbps);
 }
 
 TEST(AdaptiveBitrateController, ExplicitLiveRetryCanRaiseSessionCeilingAndTarget) {
@@ -431,6 +504,43 @@ TEST(AdaptiveBitrateController, ExplicitLiveRetryCanRaiseSessionCeilingAndTarget
   EXPECT_EQ(state.target_bitrate_kbps, 9475);
   EXPECT_EQ(state.reason, "paired_client_action");
   EXPECT_EQ(config::video.adaptive_bitrate.max_bitrate_kbps, configured_ceiling);
+}
+
+TEST(AdaptiveBitrateController, ExplicitLiveWriteAboveTheConfiguredCeilingIsKept) {
+  enable_controller(20000);
+  adaptive_bitrate::set_live_bitrate(180000);
+
+  auto state = adaptive_bitrate::get_state();
+  EXPECT_EQ(180000, state.base_bitrate_kbps);
+  EXPECT_EQ(180000, state.target_bitrate_kbps);
+  EXPECT_EQ(180000, state.max_bitrate_kbps);
+  EXPECT_EQ(50000, config::video.adaptive_bitrate.max_bitrate_kbps);
+
+  // Adaptive stays on in this controller, so pressure works down from the
+  // written 180 Mbps and must not snap to the configured 50 Mbps ceiling.
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  std::this_thread::sleep_for(1100ms);
+  adaptive_bitrate::update_network_stats(8.0, 8.0);
+  state = adaptive_bitrate::get_state();
+  EXPECT_LT(state.target_bitrate_kbps, 180000);
+  EXPECT_GT(state.target_bitrate_kbps, 50000);
+}
+
+TEST(AdaptiveBitrateController, ExplicitLiveWriteStaysUnderTheHostMaxBitrate) {
+  const auto host_cap = config::video.max_bitrate;
+  enable_controller(20000);
+  config::video.max_bitrate = 150000;
+  adaptive_bitrate::set_live_bitrate(180000);
+  const auto capped = adaptive_bitrate::get_state();
+  config::video.max_bitrate = 0;
+  adaptive_bitrate::set_live_bitrate(180000);
+  const auto uncapped = adaptive_bitrate::get_state();
+  config::video.max_bitrate = host_cap;
+
+  EXPECT_EQ(150000, capped.base_bitrate_kbps);
+  EXPECT_EQ(150000, capped.target_bitrate_kbps);
+  EXPECT_EQ(180000, uncapped.base_bitrate_kbps);
+  EXPECT_EQ(180000, uncapped.target_bitrate_kbps);
 }
 
 TEST(AdaptiveBitrateController, HidesTargetsWhenEncoderCannotApplyRuntimeUpdates) {
@@ -449,18 +559,22 @@ TEST(AdaptiveBitrateController, HidesTargetsWhenEncoderCannotApplyRuntimeUpdates
   EXPECT_EQ("encoder_runtime_update_unsupported", state.reason);
 }
 
-TEST(AdaptiveBitrateController, NormalizesMaxBelowMinBeforeClampingBase) {
+TEST(AdaptiveBitrateController, NormalizesMaxBelowMinWithoutCuttingTheBase) {
   config::video.adaptive_bitrate.enabled = false;
   config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
   config::video.adaptive_bitrate.max_bitrate_kbps = 0;
 
   adaptive_bitrate::load_config();
+  EXPECT_EQ(2000, config::video.adaptive_bitrate.max_bitrate_kbps);
   adaptive_bitrate::reset();
+  // The controller's own ceiling is normalized up to the floor as well.
+  EXPECT_EQ(2000, adaptive_bitrate::get_state().max_bitrate_kbps);
   adaptive_bitrate::set_base_bitrate(30000);
 
   const auto state = adaptive_bitrate::get_state();
-  EXPECT_GE(state.max_bitrate_kbps, state.min_bitrate_kbps);
-  EXPECT_EQ(state.min_bitrate_kbps, state.base_bitrate_kbps);
+  // The stream then raises that ceiling to its request rather than being cut to it.
+  EXPECT_EQ(30000, state.max_bitrate_kbps);
+  EXPECT_EQ(30000, state.base_bitrate_kbps);
   EXPECT_EQ(0, state.target_bitrate_kbps);
 }
 

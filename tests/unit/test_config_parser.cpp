@@ -147,6 +147,30 @@ TEST(ConfigParserTests, ZeroBackButtonTimeoutWarnsWithoutASecondsGuess) {
   EXPECT_TRUE(contains(advice, "-1 to disable"));
 }
 
+TEST(ConfigParserTests, ASettingsFileThatStillSetsTheAdaptiveCeilingIsToldItCapsNothing) {
+  // #178: adaptive_bitrate_max no longer caps a stream, and the settings page no
+  // longer shows it. A host that set it to 30000 as a cap would see its streams
+  // run above 30 Mbps with nothing saying why, so parsing names max_bitrate.
+  EXPECT_TRUE(config::retired_adaptive_bitrate_max_warning({}).empty());
+  EXPECT_TRUE(config::retired_adaptive_bitrate_max_warning({{"adaptive_bitrate_min", "4000"}}).empty());
+
+  const auto advice = config::retired_adaptive_bitrate_max_warning({{"adaptive_bitrate_max", "30000"}});
+  ASSERT_FALSE(advice.empty());
+  EXPECT_TRUE(contains(advice, "adaptive_bitrate_max = 30000"));
+  EXPECT_TRUE(contains(advice, "no longer limits"));
+  EXPECT_TRUE(contains(advice, "set max_bitrate"));
+
+  // Startup has to ask before the key is parsed, because parsing consumes it.
+  std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / "src/config.cpp");
+  ASSERT_TRUE(in);
+  const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  const auto warned = source.find("retired_adaptive_bitrate_max_warning(vars)");
+  const auto parsed = source.find("int_between_f(vars, \"adaptive_bitrate_max\"");
+  ASSERT_NE(warned, std::string::npos) << "startup no longer warns about adaptive_bitrate_max";
+  ASSERT_NE(parsed, std::string::npos);
+  EXPECT_LT(warned, parsed) << "the warning must run before parsing consumes the key";
+}
+
 TEST(ConfigParserTests, VaapiOptionsParseAndCanReturnToAutomatic) {
   const auto initial = config::parse_vaapi_settings({
     {"vaapi_quality", "balanced"}, {"vaapi_rc", "qvbr"}, {"vaapi_blbrc", "enabled"}, {"vaapi_strict_rc_buffer", "true"}

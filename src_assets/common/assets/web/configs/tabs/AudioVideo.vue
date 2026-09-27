@@ -1173,21 +1173,10 @@ pactl info | grep Source</pre>
                 class="settings-input text-sm"
               />
             </div>
-            <div>
-              <label class="block text-sm font-medium text-storm mb-1">{{ $t('config.av_adaptive_range_max_label') }}</label>
-              <input
-                v-model.number="config.adaptive_bitrate_max"
-                type="number"
-                min="1000"
-                max="300000"
-                step="1000"
-                class="settings-input text-sm"
-              />
-            </div>
           </div>
 
           <div v-if="autoQualityEnabled" class="text-sm text-storm">
-            {{ $t('config.av_adaptive_range_bounds', { floor: config.adaptive_bitrate_min / 1000, ceiling: config.adaptive_bitrate_max / 1000 }) }}
+            {{ $t('config.av_adaptive_range_bounds', { floor: config.adaptive_bitrate_min / 1000 }) }}
           </div>
           <div v-else class="text-sm text-storm">
             {{ $t('config.av_adaptive_range_disabled_hint') }}

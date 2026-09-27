@@ -463,6 +463,7 @@ TEST_F(ConfigConsistencyTest, AllConfigOptionsExistInAllFiles) {
 
   // Options that are internal/special and shouldn't be in UI/docs
   const std::set<std::string, std::less<>> internalOptions = {
+    "adaptive_bitrate_max",  // Retired: still read so existing files load, but a session lifts it to the client's own request, so it limits nothing
     "flags",  // Internal config flags, not user-configurable
     "api_key",  // Backend API secret, intentionally not exposed in the config UI
     "benchmark_mode_enabled",  // P0-5 benchmark harness control plane - config-file-only, requires a process restart, not a mainstream user-facing toggle

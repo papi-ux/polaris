@@ -7,6 +7,26 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- The adaptive bitrate ceiling no longer cuts the bitrate a client asked for. Nothing in the
+  controller ever climbs above a client's request, so `adaptive_bitrate_max`, 100 Mbps unless
+  changed, did one thing: it cut any stream whose encoder rate was above it, whatever the codec.
+  FEC and audio come off a request before the encoder sees it, so at the default 10% FEC that is a
+  request above about 112 Mbps. With adaptive bitrate on, such a stream dropped to 100 Mbps half a
+  second in and never came back, and every PyroWave stream Nova asks to run at 180 Mbps or more is
+  one. With it off, a live bitrate change from a paired client, which Nova's Deck HUD sends, was
+  clamped to 100 Mbps, and Doctor read the clamped figure as the current bitrate, so its one step
+  took a PyroWave stream running at 161 Mbps to 100 and Undo put back 100. Now a stream keeps the
+  bitrate it opened at, a live change applies as asked up to the endpoint's 300000 kbps, and Doctor
+  steps and undoes from the bitrate the encoder runs at. The host cap stays with `max_bitrate`,
+  which now also caps a live change, at the encoder rate its description names. A launch applies it
+  to the request before FEC and audio come off, so a launch at the cap encodes a little lower. A
+  host that set `max_bitrate` below a live change now gets `max_bitrate`, where the adaptive ceiling
+  used to decide. `adaptive_bitrate_max` limits nothing now. Polaris still reads it so existing
+  settings files load, and logs a warning when a file sets it, so a host that used it as a cap
+  knows to move that cap to `max_bitrate`. The settings page drops its field, and the adaptive range
+  there names the client's request as its ceiling. A stream at or below the configured ceiling runs
+  as before, and a request below `adaptive_bitrate_min` still starts at that floor.
+
 - A client that reaches the host over WireGuard, Tailscale or another tunnel with no MAC of its own
   now learns the MAC address of the host's network card for Wake-on-LAN. The host used to report
   none for such a tunnel, and a client that had never seen the host on its own network had nothing

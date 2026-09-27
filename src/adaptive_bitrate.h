@@ -20,7 +20,9 @@ namespace adaptive_bitrate {
   struct config_t {
     bool enabled = false;
     int min_bitrate_kbps = 2000;       // 2 Mbps floor
-    int max_bitrate_kbps = 100000;     // 100 Mbps ceiling
+    // adaptive_bitrate_max. A session lifts it to the client's own request,
+    // so it never cuts the bitrate a client asked for.
+    int max_bitrate_kbps = 100000;
     double max_change_rate = 0.20;     // Max 20% change per adjustment
     double ewma_alpha = 0.3;           // EWMA smoothing factor (0-1, higher = more responsive)
     int adjustment_interval_ms = 1000; // How often to adjust
@@ -39,6 +41,9 @@ namespace adaptive_bitrate {
     int base_bitrate_kbps = 0;
     int target_bitrate_kbps = 0;
     int min_bitrate_kbps = 0;
+    // The ceiling the controller holds: adaptive_bitrate_max, raised to the
+    // stream's own request, so it never limits what a client asked for. Like
+    // base_bitrate_kbps it keeps the last stream's value until the next starts.
     int max_bitrate_kbps = 0;
     double ewma_packet_loss = 0.0;
     double ewma_rtt_ms = 0.0;
@@ -244,6 +249,9 @@ namespace adaptive_bitrate {
 
   /**
    * @brief Set the base bitrate from client request.
+   *
+   * The session's ceiling rises to at least kbps: adaptive_bitrate_max never
+   * cuts the bitrate a client asked for. The adaptive floor still applies.
    * @param kbps Base bitrate in kilobits per second.
    */
   void set_base_bitrate(int kbps);
@@ -252,8 +260,9 @@ namespace adaptive_bitrate {
    * @brief Set both the live target and its base immediately.
    *
    * Unlike set_base_bitrate(), this is an explicit operator action and does
-   * not preserve a previously reduced target. The value is still clamped to
-   * the configured adaptive bitrate bounds.
+   * not preserve a previously reduced target. The host cap, max_bitrate, and
+   * the adaptive floor bound it; adaptive_bitrate_max does not, and the
+   * session's ceiling rises to the written value.
    */
   void set_live_bitrate(int kbps);
 

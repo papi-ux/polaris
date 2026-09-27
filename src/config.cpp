@@ -152,6 +152,20 @@ namespace config {
     return advice.str();
   }
 
+  std::string retired_adaptive_bitrate_max_warning(const std::unordered_map<std::string, std::string> &vars) {
+    const auto it = vars.find("adaptive_bitrate_max");
+    if (it == vars.end()) {
+      return {};
+    }
+
+    std::ostringstream advice;
+    advice << "config: adaptive_bitrate_max = "sv << it->second
+           << " no longer limits a stream's bitrate. A stream keeps the bitrate its client asked for, "sv
+           << "and Live Tuning and Doctor only lower it from there. To cap every stream, set max_bitrate "sv
+           << "instead. adaptive_bitrate_max can be removed from the settings file."sv;
+    return advice.str();
+  }
+
   namespace amd {
 #if !defined(_WIN32) || defined(DOXYGEN)
   // values accurate as of 27/12/2022, but aren't strictly necessary for MacOS build
@@ -627,7 +641,7 @@ namespace config {
     {
       false,   // adaptive_bitrate.enabled
       2000,    // adaptive_bitrate.min_bitrate_kbps (2 Mbps floor)
-      100000,  // adaptive_bitrate.max_bitrate_kbps (100 Mbps ceiling)
+      100000,  // adaptive_bitrate.max_bitrate_kbps (read, but never cuts a client's own bitrate)
     },  // adaptive_bitrate
 
     0,  // max_bitrate
@@ -1561,6 +1575,12 @@ namespace config {
 
     bool_f(vars, "adaptive_bitrate_enabled", video.adaptive_bitrate.enabled);
     int_between_f(vars, "adaptive_bitrate_min", video.adaptive_bitrate.min_bitrate_kbps, {500, 1000000});
+    // Still read so existing files load. A session lifts this ceiling to the
+    // client's own request, so it no longer limits any stream's bitrate. A host
+    // that set it as a cap is told so, since the settings page no longer shows it.
+    if (const auto advice = retired_adaptive_bitrate_max_warning(vars); !advice.empty()) {
+      BOOST_LOG(warning) << advice;
+    }
     int_between_f(vars, "adaptive_bitrate_max", video.adaptive_bitrate.max_bitrate_kbps, {1000, 1000000});
 
     int_f(vars, "max_bitrate", video.max_bitrate);

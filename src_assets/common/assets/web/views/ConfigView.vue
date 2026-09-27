@@ -441,7 +441,6 @@ const tabs = ref([
       "disconnect_resume_timeout_seconds": 300,
       "adaptive_bitrate_enabled": "disabled",
       "adaptive_bitrate_min": 2000,
-      "adaptive_bitrate_max": 100000,
     },
   },
   {

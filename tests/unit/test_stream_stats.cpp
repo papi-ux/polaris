@@ -4603,6 +4603,105 @@ TEST(DoctorActionTests, EquivalentFreshTelemetryCannotMakeAutoFixUnclickable) {
   stream_stats::update_stream_active(false);
 }
 
+TEST(DoctorActionTests, AutoFixStepsAndUndoesFromTheRateTheEncoderOpenedAt) {
+  config::video.adaptive_bitrate.enabled = false;
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  stream_stats::update_stream_active(
+    true, "DoctorAboveCeiling", "203.0.113.27"
+  );
+  // PyroWave at 1080p60 opens near 161 Mbps, above the 100 Mbps adaptive ceiling.
+  stream_stats::update_video_stats(
+    60.0, 161000, 5.0, "pyrowave", 1920, 1080
+  );
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(5.0, 0.0, 1000);
+  }
+  for (int i = 0; i < 3; ++i) {
+    stream_stats::update_network_stats(52.0, 3.4, 1000);
+  }
+
+  constexpr std::uint64_t generation = 427;
+  doctor_actions::session_started(
+    "client-owner", generation, "launch-427", 161000
+  );
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 161000);
+  stream_stats::start_session_timing(
+    "client-owner", generation, "launch-427"
+  );
+  const auto cleanup = util::fail_guard([&] {
+    doctor_actions::session_ended("client-owner", generation);
+    stream_stats::stop_session_timing("client-owner", generation);
+    stream_stats::update_stream_active(false);
+  });
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 161000);
+
+  doctor_actions::recovery_action_context_t context;
+  context.active_owner = true;
+  context.host_tuning_allowed = true;
+  context.enforce_request_scope = true;
+  context.owner_uuid = "client-owner";
+  context.app_uuid = "game-owner";
+  context.launch_instance_id = "launch-427";
+  context.session_generation = generation;
+  context.stats = stream_stats::get_current();
+  ASSERT_TRUE(context.stats.network_risk);
+  const auto request = trusted_doctor_action_request(context);
+  ASSERT_EQ(request.at("action_id"), "lower_bitrate");
+  ASSERT_EQ(request.at("target_bitrate_kbps"), 128800);
+
+  // One guarded step is 20% of what the encoder runs at, not a cut to the
+  // ceiling followed by 20% of that.
+  const auto applied = execute_with_encoder_ack(128800, [&] {
+    return doctor_actions::execute(request, context);
+  });
+  ASSERT_TRUE(applied.at("status").get<bool>());
+  EXPECT_EQ(applied.at("before").at("bitrate_kbps"), 161000);
+  EXPECT_EQ(applied.at("requested").at("bitrate_kbps"), 128800);
+
+  const auto run_id = applied.at("run_id").get<std::string>();
+  const auto undone = execute_with_encoder_ack(161000, [&] {
+    return doctor_actions::execute({
+      {"action_id", "undo"},
+      {"run_id", run_id},
+      {"app_session_id", "launch-427"},
+      {"session_generation", generation}
+    }, context);
+  });
+  ASSERT_TRUE(undone.at("status").get<bool>());
+  EXPECT_EQ(undone.at("state"), "undone");
+  EXPECT_EQ(undone.at("restored_bitrate_kbps"), 161000);
+}
+
+TEST(DoctorActionTests, OwnerLiveBitrateAboveTheAdaptiveCeilingReachesTheEncoder) {
+  LiveConfigurationGuard live_configuration;
+  config::video.adaptive_bitrate.enabled = false;
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+
+  constexpr std::uint64_t generation = 428;
+  doctor_actions::session_started(
+    "client-owner", generation, "launch-428", 20000
+  );
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  const auto cleanup = util::fail_guard([&] {
+    doctor_actions::session_ended("client-owner", generation);
+  });
+
+  // Nova's Deck HUD asks for 180 Mbps in the middle of a stream.
+  ASSERT_TRUE(doctor_actions::set_owner_live_bitrate(
+    "client-owner", generation, "launch-428", 180000
+  ));
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 180000);
+  const auto request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(request.has_value());
+  EXPECT_EQ(request->target_bitrate_kbps, 180000);
+}
+
 TEST(PolarisEventListenerTests, ReportsExceptionsWithoutASourceLocation) {
   PolarisEventListener listener;
   const testing::TestPartResult result(

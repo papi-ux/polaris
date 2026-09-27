@@ -421,6 +421,13 @@ are explained in [Launch modes and capture paths](launch-modes.md). Keys: `linux
 `headless_mode`, `linux_use_cage_compositor`, `linux_prefer_gpu_native_capture`, `fallback_mode`,
 `display_plan`, `adaptive_bitrate_enabled`, `disconnect_resume_timeout_seconds`.
 
+The adaptive range has a floor, `adaptive_bitrate_min`, and no ceiling of its own: the bitrate the
+client asked for is the ceiling, and `max_bitrate` caps what a client may ask for. Live Tuning and
+Doctor lower the bitrate from that request and bring it back no higher, except that a request below
+the floor starts at the floor. `adaptive_bitrate_max` no longer limits anything. Polaris still reads
+it, so a settings file that sets it loads as before, and logs a warning that names `max_bitrate` as
+the cap to use. The settings page no longer shows it. See [Live Tuning](live-tuning.md#range).
+
 ### Advanced tab
 
 Load handling (limit the capture frame rate to what the client asked for), compatibility switches

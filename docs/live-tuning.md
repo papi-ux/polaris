@@ -15,6 +15,40 @@ an explicit fixed live bitrate also turns tuning off and supersedes a pending
 Doctor bitrate action. Auto, Quality, High FPS, and Stability launch presets still
 apply at the next explicit launch.
 
+## Range
+
+Live Tuning lowers the bitrate on measured loss, latency or encoder load, and recovers
+it toward the client's own request. That request is the bitrate the stream opened at,
+which is what the client asked for less FEC and audio overhead, or a later live
+change. The floor is `adaptive_bitrate_min`. There is no ceiling of its own: the
+client's request is the ceiling, and `max_bitrate` caps what a client may request.
+Doctor's bitrate step and its Undo start from the bitrate the encoder runs at, so one
+step cuts at most 20% of that rate and Undo puts that rate back.
+
+The floor is the one place the bitrate can sit above the request. A client that asks
+for less than `adaptive_bitrate_min` starts the controller at the floor. With Live
+Tuning on, the stream rises to the floor at the encoder's first bitrate check. With it
+off, the stream stays at the request, but Doctor works from the floor rather than from
+the rate the encoder runs at.
+
+A live bitrate from a paired client, such as Nova's Deck HUD, applies as asked up to
+300000 kbps, the most the endpoint takes, with `adaptive_bitrate_min` as its floor.
+`max_bitrate`, when set, caps it at the encoder, the rate that setting's description
+names. A launch applies `max_bitrate` to the client's request before FEC and audio come
+off, so a launch at the cap encodes a little below a live change at the cap. The reply
+reports the target the host set after the cap and floor, not an encoder
+acknowledgement; the applied bitrate still comes from the encoder.
+
+`adaptive_bitrate_max` used to cut a client's request down to it, 100 Mbps unless
+changed. A PyroWave stream Nova asked to run at 180 Mbps or more dropped to 100 Mbps
+half a second in when adaptive bitrate was on, and a live bitrate write clamped the
+same way even with it off. It no longer limits anything. Polaris still reads it, so
+an existing settings file loads unchanged, and logs a warning that names `max_bitrate`
+as the cap to use instead. The status field `adaptive_max_bitrate_kbps` reports the
+ceiling the controller holds, which a stream raises to its own request. Like
+`adaptive_base_bitrate_kbps`, it keeps the last stream's value until the next stream
+starts.
+
 ## API contract
 
 `GET /api/live-tuning` requires web administrator authentication. Its response

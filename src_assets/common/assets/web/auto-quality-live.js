@@ -50,7 +50,11 @@ export function buildLiveAutoQualityRows({ autoQuality, tuning }, t) {
   const streaming = Number(autoQuality?.live_bitrate_kbps) > 0 || tuning?.adaptive_bitrate_active === true
   const liveBitrate = formatMbps(autoQuality?.live_bitrate_kbps) || (streaming ? formatMbps(tuning?.adaptive_target_bitrate_kbps) : '')
   const minMbps = formatMbps(tuning?.adaptive_min_bitrate_kbps)
-  const maxMbps = formatMbps(tuning?.adaptive_max_bitrate_kbps)
+  // The controller's base tops the range: the client's request, a later live
+  // change, or Doctor's target while its step holds. Live tuning never climbs
+  // above it, and adaptive_max_bitrate_kbps can sit above it and bounds nothing.
+  // The base outlives the stream that set it, so an idle host shows no range.
+  const maxMbps = streaming ? formatMbps(tuning?.adaptive_base_bitrate_kbps) : ''
   const rtt = streaming ? formatNumber(tuning?.adaptive_rtt_ewma_ms, 0) : ''
   const loss = streaming ? formatNumber(Number(tuning?.adaptive_packet_loss_ewma) * 100, 1) : ''
   const target = formatMbps(autoQuality?.target_bitrate_kbps)
