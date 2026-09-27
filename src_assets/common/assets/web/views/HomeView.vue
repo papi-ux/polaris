@@ -322,6 +322,7 @@ import { ref, computed, inject } from 'vue'
 import { useSystemStats } from '../composables/useSystemStats'
 import PolarisVersion from '../polaris_version'
 import { buildUpdateCenterState, isPrereleaseOptIn, updateStatusLightClass } from '../update-center.js'
+import { readConfigOrNull } from '../config-cache.js'
 import UpdateChannelControl from '../components/UpdateChannelControl.vue'
 import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
 import { groupRecentIssueLogs } from '../recent-issues.js'
@@ -567,8 +568,8 @@ async function refreshUpdateStatus() {
   updateCheckError.value = ''
   try {
     const response = await fetch('./api/config', { credentials: 'include', cache: 'no-store' })
-    if (!response.ok) throw new Error('Host update settings unavailable')
-    const config = await response.json()
+    const config = await readConfigOrNull(response)
+    if (!config) throw new Error('Host update settings unavailable')
     updateConfigRevision.value = config.configuration_revision || ''
     const hostStatus = await fetch('./api/update-status', { credentials: 'include' }).then((response) => response.json()).catch(() => null)
     updateHost.value = hostStatus || { platform: config.platform || '', distro: {} }

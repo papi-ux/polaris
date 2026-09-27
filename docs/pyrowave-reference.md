@@ -365,10 +365,12 @@ because the whole source is copied to the GPU every frame. A KWin Host Virtual D
 copy.
 
 [Doctor](doctor.md), the stream check in Nova's Command Center and in Mission Control, names the
-codec and reports the capture transport and whether frames were on the GPU or in host memory. It
-cannot yet show where colour was converted: it gives every PyroWave stream the reason
-"PyroWave is encoding with Vulkan after CPU color conversion.", even though conversion runs on the
-GPU by default. Go by the host log instead.
+codec and reports the capture transport and whether frames were on the GPU or in host memory. The
+stream stats also carry how the encoder took its frames, `pyrowave_route` (`zero_copy`,
+`gpu_upload` or `cpu_convert`), and the encoder selection reason says the same in words. That is the
+encoder's input only, so `zero_copy` does not prove that capture stayed on the GPU. Polaris 1.4.13
+gives every PyroWave stream the reason "PyroWave is encoding with Vulkan after CPU color
+conversion." instead, even though conversion runs on the GPU by default; there, go by the host log.
 
 ## Read the host log
 
@@ -427,7 +429,7 @@ means the largest frames went out without their error correction (see [Limits](#
   loss is least protected when frames are largest.
 - **An ultrawide source costs more when frames arrive in host memory**, because the whole source is
   copied to the GPU every frame. A 32:9 source is letterboxed, and the bars cost nothing.
-- **Diagnostics do not show where colour was converted.** Use the host log.
+- **Polaris 1.4.13 diagnostics do not show where colour was converted.** Use the host log there.
 - **A mode that negotiates is not a performance promise.** A given GPU and network may not sustain
   it.
 - **A working SDR stream is not HDR validation.** They are separate paths and need separate proof.
@@ -520,9 +522,11 @@ b38588e2 on the development branch, not yet released, the log names it `AB4H` an
 `capture_format_unreadable_by_pyrowave`. That is a clearer diagnosis, not a fix: the conversion for
 sixteen bit float is not written.
 
-The encoder selection reason in diagnostics is a fixed string, "PyroWave is encoding with Vulkan
-after CPU color conversion.", for every PyroWave stream, and the PyroWave session records no encode
-target, so diagnostics cannot report a GPU native capture path for it. The log lines under
+The encoder selection reason is built from `pyrowave_route` and says where the encoder converted
+colour: after importing a DMA-BUF (`zero_copy`), after copying a frame from host memory to the GPU
+(`gpu_upload`), or on the CPU (`cpu_convert`). It describes the encoder's input, not capture, so it
+is no proof of a GPU native capture path. Polaris 1.4.13 gives every PyroWave stream the fixed
+reason "PyroWave is encoding with Vulkan after CPU color conversion." The log lines under
 [Read the host log](#read-the-host-log) are the observed path.
 
 ### Reading the numbers

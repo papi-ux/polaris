@@ -72,6 +72,8 @@ namespace mail {
   MAIL(invalidate_ref_frames);
   MAIL(gamepad_feedback);
   MAIL(hdr);
+  /// Raised by a session's encoder before it ends a stream it can never produce a picture for.
+  MAIL(frame_conversion_failed);
 #undef MAIL
 
 }  // namespace mail

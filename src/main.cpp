@@ -327,6 +327,12 @@ int main(int argc, char *argv[]) {
   }
   config::modified_config_settings.clear();
 
+#ifdef __linux__
+  // The load ran inside config::parse, before logging was up. What it did to the capture setting
+  // waited for this point, so it lands in polaris.log right after the config lines it explains.
+  stream_display_policy::log_config_load_notes();
+#endif
+
 #if defined(__linux__) && defined(POLARIS_BUILD_PORTAL)
   if (!capability_outcome.empty()) {
     if (capability_result == portal_capability::prepare_result_e::failed) {

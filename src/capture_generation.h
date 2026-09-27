@@ -36,4 +36,20 @@ namespace capture_generation {
     bool operator==(const identity_t &) const = default;
   };
 
+  /**
+   * @brief What a session measured its generation's capture request against, taken as it started.
+   *
+   * Kept beside the identity rather than in it: two sessions of one generation may take it at
+   * different moments, and neither is a reason to refuse the other a shared display.
+   */
+  struct request_context_t {
+    /// polaris.conf's capture as loaded, before any host rewrite, aliases as written. Empty is Autodetect.
+    std::string preference;
+    /// The k_capture_override_* id of the rule that set the preference aside for this request.
+    /// Empty when none did.
+    std::string mode_override_reason;
+
+    bool operator==(const request_context_t &) const = default;
+  };
+
 }  // namespace capture_generation

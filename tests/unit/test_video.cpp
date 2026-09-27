@@ -6,13 +6,24 @@
 
 #include <src/video.h>
 #include <src/encoder_probe_reuse.h>
+#include <src/stream_stats.h>
+#include <nlohmann/json.hpp>
 #include <thread>
 #include <future>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #ifdef __linux__
+#include <src/platform/linux/encoder_auto_policy.h>
 #include <src/platform/linux/encoder_probe_driver_proof.h>
+#include <src/logging.h>
+
+#include <boost/core/null_deleter.hpp>
+#include <boost/log/core.hpp>
+#include <boost/log/sinks/sync_frontend.hpp>
+#include <boost/log/sinks/text_ostream_backend.hpp>
+#include <boost/smart_ptr/make_shared_object.hpp>
+#include <boost/smart_ptr/shared_ptr.hpp>
 #endif
 
 struct EncoderTest: PlatformTestSuite, testing::WithParamInterface<video::encoder_t *> {
@@ -188,6 +199,54 @@ TEST(VideoCacheTests, NvencFallbackNamesTheDriverAndWhereToLook) {
   EXPECT_TRUE(video::nvenc_fallback_detail("nvenc", "software", "").empty())
     << "without a known driver version there is no fact to report";
 }
+
+#if defined(POLARIS_TESTS) && defined(__linux__)
+TEST(VideoEncoderSelectionTests, AnAutoFallbackOpensItsReasonWithTheEncoderItFellBackTo) {
+  // A fallback is the one case the Doctor grades encoder selection watch, and so the one case Nova's
+  // Android Doctor card can show the reason, in two lines after its own text. On AMD outside labwc
+  // the reason opened "Auto uses VA-API" and put the fallback last, about 560 characters on, so a
+  // host that fell back to software read that it was on VA-API.
+  video::encoder_selection_info_t amd;
+  amd.mode = "auto";
+  amd.gpu_driver = "amdgpu";
+  amd.policy = "amd_established_desktop";
+  amd.preferred_encoder = "vaapi";
+  amd.fallback_encoder = "next_available";
+  amd.reason = std::string {linux_encoder_auto_policy::reason(amd.policy, true, true)};
+  const auto policy_sentence = amd.reason;
+
+  auto fell_back = amd;
+  video::finalize_encoder_selection_info_for_tests(fell_back, "software");
+  ASSERT_TRUE(fell_back.fallback_used);
+  EXPECT_EQ(
+    fell_back.reason,
+    "Preferred encoder [vaapi] did not satisfy this runtime; selected [software] instead. " + policy_sentence
+  );
+  EXPECT_EQ(fell_back.reason.find("uses VA-API"), std::string::npos) << fell_back.reason;
+
+  // Where Auto got the encoder it prefers, the policy sentence still opens the reason.
+  auto landed = amd;
+  video::finalize_encoder_selection_info_for_tests(landed, "vaapi");
+  EXPECT_FALSE(landed.fallback_used);
+  EXPECT_EQ(landed.reason, policy_sentence + " Selected [vaapi].");
+
+  // The NVENC driver detail explains the fallback, so it stays beside it, ahead of the policy.
+  video::encoder_selection_info_t nvidia;
+  nvidia.mode = "auto";
+  nvidia.gpu_driver = "nvidia";
+  nvidia.policy = "nvidia_nvenc";
+  nvidia.preferred_encoder = "nvenc";
+  nvidia.fallback_encoder = "next_available";
+  nvidia.driver_version = "580.178.04";
+  nvidia.reason = std::string {linux_encoder_auto_policy::reason(nvidia.policy, true, true)};
+  video::finalize_encoder_selection_info_for_tests(nvidia, "software");
+  EXPECT_EQ(
+    nvidia.reason,
+    "Preferred encoder [nvenc] did not satisfy this runtime; selected [software] instead." +
+      video::nvenc_fallback_detail("nvenc", "software", "580.178.04") + " Auto detected NVIDIA; prefer NVENC."
+  );
+}
+#endif
 
 TEST(VideoCacheTests, DriverVersionRejectsAnythingThatIsNotAVersion) {
   // nvidia-smi prints its NVML failure to stdout, so without this the banner
@@ -667,6 +726,67 @@ TEST(VideoProbeReuseTests, OnlyCompleteUnchangedSuccessfulIdentityCanReuse) {
   }
 }
 
+TEST(VideoProbeReuseTests, VulkanAndLastResortEncodersProbeLiveWhateverThePolicySays) {
+  // #635: explicit encoder = vulkan logs exact_live_probe_required=0, because only Auto sets that
+  // flag, yet a Vulkan probe is never reused. The reuse gate and the encoder_auto line both ask
+  // this one rule, so the line cannot report reuse the gate would refuse.
+  using video::probe_reuse::live_probe_mandatory;
+  EXPECT_FALSE(live_probe_mandatory(false, false, "", "vaapi"));
+  EXPECT_FALSE(live_probe_mandatory(false, false, "nvenc", "nvenc"));
+  EXPECT_TRUE(live_probe_mandatory(false, true, "", "vaapi"));
+  EXPECT_TRUE(live_probe_mandatory(false, false, "vulkan", "vulkan"));
+  EXPECT_TRUE(live_probe_mandatory(false, false, "vulkan", "vaapi"));
+  EXPECT_TRUE(live_probe_mandatory(false, false, "", "vulkan"));
+  EXPECT_TRUE(live_probe_mandatory(true, false, "", "software"));
+}
+
+TEST(VideoProbeReuseTests, NextProbeLineSaysReuseOnlyWhereTheGateGivesIt) {
+  // #635: next_probe_reuse read allowed wherever live_probe_mandatory said no, the reporter's Auto
+  // VA-API route on Gamescope Stream included, where no probe identity exists and the gate never
+  // reuses. The line now takes the gate's own answer and otherwise says why a fresh probe runs.
+  using video::probe_reuse::next_probe_reuse;
+  using video::probe_reuse::route_carries_identity;
+  constexpr auto npos = std::string_view::npos;
+
+  // Only NVENC on the labwc private compositor, capturing through wlr, carries an identity.
+  EXPECT_TRUE(route_carries_identity(true, "wlr", "nvenc"));
+  EXPECT_TRUE(route_carries_identity(true, "", "nvenc"));
+  EXPECT_FALSE(route_carries_identity(true, "wlr", "vaapi"));
+  EXPECT_FALSE(route_carries_identity(true, "wlr", "vulkan"));
+  EXPECT_FALSE(route_carries_identity(true, "kms", "nvenc"));
+  EXPECT_FALSE(route_carries_identity(false, "portal", "vaapi"));
+  EXPECT_FALSE(route_carries_identity(false, "", "nvenc"));
+
+  // Reuse is said only when the gate gives it, and never otherwise, whatever the other inputs.
+  EXPECT_EQ(next_probe_reuse(true, false, false, "", "nvenc", true).rfind("if_unchanged (", 0), 0u);
+  const std::string_view refused[] {
+    next_probe_reuse(false, false, false, "vulkan", "vulkan", false),
+    next_probe_reuse(false, false, false, "", "vulkan", true),
+    next_probe_reuse(false, true, false, "", "software", false),
+    next_probe_reuse(false, false, true, "", "vaapi", false),
+    next_probe_reuse(false, false, false, "", "vaapi", false),
+    next_probe_reuse(false, false, false, "nvenc", "nvenc", false),
+    next_probe_reuse(false, false, false, "nvenc", "nvenc", true),
+  };
+  for (const auto text : refused) {
+    EXPECT_EQ(text.rfind("off (", 0), 0u) << text;
+    EXPECT_EQ(text.find("allowed"), npos) << text;
+  }
+  EXPECT_NE(refused[0].find("Vulkan Video"), npos) << refused[0];
+  EXPECT_NE(refused[1].find("Vulkan Video"), npos) << refused[1];
+  EXPECT_NE(refused[2].find("last resort"), npos) << refused[2];
+  EXPECT_NE(refused[3].find("Auto policy"), npos) << refused[3];
+  EXPECT_NE(refused[4].find("a fresh probe runs every time here"), npos) << refused[4];
+  EXPECT_NE(refused[5].find("a fresh probe runs every time here"), npos) << refused[5];
+  EXPECT_NE(refused[6].find("left no identity"), npos) << refused[6];
+  for (const auto text : {next_probe_reuse(true, false, false, "", "nvenc", true), refused[0], refused[1],
+                          refused[2], refused[3], refused[4], refused[6]}) {
+    for (const auto dash : {std::string_view {"\xE2\x80\x94"}, std::string_view {"\xE2\x80\x93"}, std::string_view {" - "}}) {
+      EXPECT_EQ(text.find(dash), npos) << text;
+    }
+  }
+}
+
 TEST(VideoProbeReuseTests, IdentityChangeDuringProbeAndFailureInvalidatePriorSuccess) {
   video::probe_reuse::cache_t cache;
   const auto before = complete_probe_identity();
@@ -758,6 +878,11 @@ TEST(VideoProbeReuseTests, ResetTimeoutDuringRealProbeEntryCannotAuthorizeReuse)
   config::video.encoder = "nvenc";
   config::video.hevc_mode = 1;
   config::video.av1_mode = 1;
+#ifdef __linux__
+  // The test identity stands in for providers and hardware, not for the route, so this test sits
+  // on the one route where the real gate can reuse a probe: NVENC on the labwc private compositor.
+  config::video.linux_display.use_cage_compositor = true;
+#endif
   const auto identity = complete_probe_identity();
   std::promise<void> entered;
   std::promise<void> resume;
@@ -791,6 +916,148 @@ TEST(VideoProbeReuseTests, ResetTimeoutDuringRealProbeEntryCannotAuthorizeReuse)
   EXPECT_EQ(video::probe_encoders_with_hooks_for_tests(identity, count), 0);
   EXPECT_EQ(validations, 1) << "unchanged successful validation may then reuse";
 }
+#endif
+
+#if defined(POLARIS_TESTS) && defined(__linux__)
+namespace {
+  /// The lines the host logs while it is alive, as an operator reads them.
+  class ProbeLogCapture {
+  public:
+    ProbeLogCapture():
+        stream_ {boost::make_shared<std::ostringstream>()} {
+      auto backend = boost::make_shared<boost::log::sinks::text_ostream_backend>();
+      backend->add_stream(boost::shared_ptr<std::ostream> {stream_.get(), boost::null_deleter {}});
+      backend->auto_flush(true);
+      sink_ = boost::make_shared<sink_t>(backend);
+      sink_->set_formatter(&logging::formatter);
+      boost::log::core::get()->add_sink(sink_);
+    }
+
+    ~ProbeLogCapture() {
+      boost::log::core::get()->remove_sink(sink_);
+    }
+
+    ProbeLogCapture(const ProbeLogCapture &) = delete;
+    ProbeLogCapture &operator=(const ProbeLogCapture &) = delete;
+
+    /// Every captured line that holds needle.
+    [[nodiscard]] std::string lines_with(std::string_view needle) const {
+      std::istringstream input {stream_->str()};
+      std::string out;
+      for (std::string line; std::getline(input, line);) {
+        if (line.find(needle) != std::string::npos) {
+          out += line;
+          out += '\n';
+        }
+      }
+      return out;
+    }
+
+  private:
+    using sink_t = boost::log::sinks::synchronous_sink<boost::log::sinks::text_ostream_backend>;
+    boost::shared_ptr<std::ostringstream> stream_;
+    boost::shared_ptr<sink_t> sink_;
+  };
+
+  struct next_probe_route_t {
+    std::string_view name;
+    std::string_view configured;  ///< config::video.encoder; empty is Auto
+    std::string_view chosen;  ///< the one encoder the test lets pass validation
+    bool private_compositor;
+    std::string_view stream_mode;
+    std::string_view capture;
+    bool gate_reuses;  ///< what the real gate does with the next probe
+    std::string_view says;  ///< what the encoder_auto line says about it
+  };
+
+  /// Probes twice through the real probe_encoders() and its reuse gate, and returns the
+  /// encoder_auto line of the first probe and whether the second one validated nothing.
+  std::pair<std::string, bool> probe_twice(const next_probe_route_t &route) {
+    video::reset_encoder_probe_state();
+    config::video.encoder = std::string {route.configured};
+    config::video.hevc_mode = 1;
+    config::video.av1_mode = 1;
+    config::video.capture = std::string {route.capture};
+    config::video.linux_display.use_cage_compositor = route.private_compositor;
+    config::video.linux_display.stream_mode = std::string {route.stream_mode};
+    int validations = 0;
+    auto validate = [&](video::encoder_t &encoder, bool) {
+      ++validations;
+      return encoder.name == route.chosen;
+    };
+    const video::probe_reuse::identity_t identity {"pci-gpu-device", "kernel-and-userspace-driver", "live-capture-generation", "capability-settings"};
+    ProbeLogCapture log;
+    EXPECT_EQ(video::probe_encoders_with_hooks_for_tests(identity, validate), 0) << route.name;
+    const auto line = log.lines_with("encoder_auto:");
+    const auto first = validations;
+    EXPECT_GT(first, 0) << route.name;
+    EXPECT_EQ(video::probe_encoders_with_hooks_for_tests(identity, validate), 0) << route.name;
+    return {line, validations == first};
+  }
+}  // namespace
+
+TEST(VideoProbeReuseTests, EncoderAutoLineMatchesWhatTheRealGateDoesWithTheNextProbe) {
+  // #635: the line said next_probe_reuse=allowed on routes where the gate never reuses, because it
+  // asked only live_probe_mandatory and not whether the route gives a probe an identity at all.
+  // Each route here is probed twice through the real gate, and the line of the first probe has to
+  // say what the gate then did with the second.
+  const auto old_config = config::video;
+  auto restore = util::fail_guard([&] {
+    video::reset_encoder_probe_state();
+    config::video = old_config;
+  });
+  constexpr auto npos = std::string::npos;
+  std::vector<next_probe_route_t> routes {
+    {"Auto VA-API on Gamescope Stream", "", "vaapi", false, "gamescope_stream", "portal", false,
+     "next_probe_reuse=off (a fresh probe runs every time here"},
+    {"NVENC outside labwc", "nvenc", "nvenc", false, "desktop_display", "", false,
+     "next_probe_reuse=off (a fresh probe runs every time here"},
+    {"NVENC on labwc", "nvenc", "nvenc", true, "headless_stream", "", true,
+     "next_probe_reuse=if_unchanged ("},
+  };
+#ifdef POLARIS_BUILD_VULKAN
+  routes.push_back({"explicit Vulkan on Gamescope Stream", "vulkan", "vulkan", false, "gamescope_stream", "portal",
+                    false, "next_probe_reuse=off (Vulkan Video probes fresh every time)"});
+  routes.push_back({"explicit Vulkan on labwc", "vulkan", "vulkan", true, "headless_stream", "", false,
+                    "next_probe_reuse=off (Vulkan Video probes fresh every time)"});
+#endif
+  for (const auto &route : routes) {
+    const auto [line, reused] = probe_twice(route);
+    ASSERT_NE(line.find("selected=" + std::string {route.chosen}), npos) << route.name << "\n" << line;
+    EXPECT_EQ(reused, route.gate_reuses) << route.name;
+    EXPECT_EQ(line.find("next_probe_reuse=if_unchanged") != npos, reused) << route.name << "\n" << line;
+    EXPECT_NE(line.find(route.says), npos) << route.name << "\n" << line;
+    EXPECT_EQ(line.find("allowed"), npos) << route.name << "\n" << line;
+  }
+}
+
+#ifdef POLARIS_BUILD_VULKAN
+TEST(VideoProbeReuseTests, ExplicitVulkanReasonSaysWhatItCostsHere) {
+  // #635 was reported on encoder = vulkan, where the reason said only that the encoder passed
+  // validation. It now says what the Auto sentence says Vulkan Video costs, qualified the same way,
+  // and opens with Vulkan Video and its first cost, which the Selection reason on the web console's
+  // Troubleshooting page and the system stats route show first. Nova's Doctor card never shows it:
+  // encoder = vulkan cannot fall back, so this evidence is always graded pass.
+  const auto old_config = config::video;
+  auto restore = util::fail_guard([&] {
+    video::reset_encoder_probe_state();
+    config::video = old_config;
+  });
+  constexpr auto npos = std::string::npos;
+  const auto reason_after_probe = [](std::string_view encoder) {
+    probe_twice({encoder, encoder, encoder, false, "gamescope_stream", "portal", false, ""});
+    return video::active_encoder_selection_info().reason;
+  };
+  const auto vulkan = reason_after_probe("vulkan");
+  EXPECT_EQ(
+    vulkan.rfind("Vulkan Video, configured explicitly, passed runtime validation and offers no AV1 here;", 0),
+    0u
+  ) << vulkan;
+  EXPECT_NE(vulkan.find("on portal capture, which Gamescope Stream uses, frames reach the encoder through system memory."), npos) << vulkan;
+  const auto nvenc = reason_after_probe("nvenc");
+  EXPECT_EQ(nvenc, "The explicitly configured encoder passed runtime validation.");
+}
+#endif
 #endif
 
 #ifdef __linux__
@@ -1233,9 +1500,75 @@ TEST(PyroWaveAnnounceTests, AFormatThisSessionCanNeverReadEndsTheStream) {
   // codec runs there anyway, so it is left exactly as it was.
 }
 
+/**
+ * Both places the encode loop ends a stream its encoder can never serve tell the client why.
+ *
+ * Raising the shutdown event alone ended the stream with a bare disconnect, which a Moonlight client
+ * answers by reconnecting into the same refusal. The helper raises the reason first, and the stream
+ * control tests hold what the control thread sends for it.
+ */
+TEST(PyroWaveAnnounceTests, TheLoopEndsAStreamItsEncoderCannotServeWithTheReason) {
+  const auto video = video_source_for_contract("src/video.cpp");
+  ASSERT_FALSE(video.empty());
+  // The loop's convert branch, and the session that could not be built for a reason that will still
+  // hold on the next attempt.
+  for (const auto *opening : {"if (converted == convert_session_is_over) {",
+                              "// Returning alone leaves the host to build this session again"}) {
+    const auto branch = video.find(opening);
+    ASSERT_NE(branch, std::string::npos) << opening;
+    const auto told = video.find("end_stream_encoder_cannot_serve(mail);", branch);
+    const auto closed = video.find('}', branch);
+    ASSERT_NE(told, std::string::npos) << opening;
+    EXPECT_LT(told, closed) << opening << " ends the stream without saying why";
+  }
+}
+
 TEST(PyroWaveAnnounceTests, TheEndOfStreamAnswerIsNotSomethingAFrameCanMean) {
   EXPECT_LT(video::convert_session_is_over, 0);
   EXPECT_NE(video::convert_session_is_over, -1);
+}
+
+namespace {
+  /// A device that answers every frame the same way, which is all the converter in front of it reads.
+  struct answering_device_t: platf::avcodec_encode_device_t {
+    explicit answering_device_t(int answer):
+        answer {answer} {
+    }
+
+    int convert(platf::img_t &) override {
+      return answer;
+    }
+
+    int answer;
+  };
+
+  int converted_by(int device_answer) {
+    auto img = std::make_shared<platf::img_t>();
+    static std::vector<std::uint8_t> pixels(64 * 4 * 4);
+    img->data = pixels.data();
+    img->width = 64;
+    img->height = 4;
+    img->pixel_pitch = 4;
+    img->row_pitch = 64 * 4;
+    video::frame_t frame {img};
+    return video::convert_with_encode_device_for_tests(std::make_unique<answering_device_t>(device_answer), frame);
+  }
+}  // namespace
+
+/**
+ * A device that can never read what capture hands it ends the stream once, through the converter.
+ *
+ * The converter an avcodec session puts in front of its device used to answer every failure with
+ * -1, which the capture thread reads as one bad frame and answers by building the session again. The
+ * Vulkan Video system memory upload meeting a DMA-BUF frame is a device that cannot read anything
+ * this capture will produce, and a session built again meets the same frame: a new session for every
+ * frame, with no picture ever sent.
+ */
+TEST(VideoFrameConverterTests, ADeviceThatCanNeverReadTheCaptureEndsTheStream) {
+  EXPECT_EQ(converted_by(platf::convert_capture_unreadable), video::convert_session_is_over)
+    << "the converter turned the device's answer into one failed frame, so the host builds the session again";
+  EXPECT_EQ(converted_by(-1), -1) << "a frame that went wrong is still one frame";
+  EXPECT_EQ(converted_by(0), 0);
 }
 
 TEST(PyroWaveAnnounceTests, ADynamicRangeThisCodecDoesNotKnowIsRefused) {
@@ -1246,3 +1579,347 @@ TEST(PyroWaveAnnounceTests, ADynamicRangeThisCodecDoesNotKnowIsRefused) {
   ASSERT_TRUE(refusal.has_value());
   EXPECT_NE(refusal->find("two dynamic ranges"), std::string::npos) << *refusal;
 }
+
+TEST(VideoMain10Authority, ReadsKwinAsThePortalItOpens) {
+#ifdef __linux__
+  // The portal probes an NV12 dummy, so on a Gamescope Stream host that captures through it a
+  // failed 10-bit probe keeps the configured mode. A host set to kwin captures through the same
+  // portal, and the literal comparison let that probe take Main10 away from it.
+  EXPECT_FALSE(video::main10_probe_is_authoritative("portal", "gamescope_stream"));
+  EXPECT_FALSE(video::main10_probe_is_authoritative("kwin", "gamescope_stream"));
+  EXPECT_TRUE(video::main10_probe_is_authoritative("kms", "gamescope_stream"));
+  EXPECT_TRUE(video::main10_probe_is_authoritative("drm", "gamescope_stream"));
+  EXPECT_TRUE(video::main10_probe_is_authoritative("portal", "desktop_display"));
+  EXPECT_TRUE(video::main10_probe_is_authoritative("kwin", "desktop_display"));
+#else
+  EXPECT_TRUE(video::main10_probe_is_authoritative("portal", "gamescope_stream"));
+#endif
+}
+
+#if defined(POLARIS_TESTS) && defined(__linux__)
+namespace {
+  video::config_t capture_session_config(std::uint64_t session_generation) {
+    video::config_t config {};
+    config.session_generation = session_generation;
+    config.capture_generation.capture_backend = "kwin";
+    config.capture_request.preference = "kwin";
+    return config;
+  }
+
+  nlohmann::json capture_of_client(std::size_t index) {
+    return nlohmann::json::parse(stream_stats::get_current().to_json())["clients"][index].value("capture", nlohmann::json {});
+  }
+}  // namespace
+
+TEST(VideoCaptureBackendPublicationTests, EachConsumingSessionPublishesUntilItsOwnGenerationLands) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  const platf::capture_route_t route {"portal", "portal_kwin_node", ""};
+  const auto owner = capture_session_config(391);
+  bool owner_published = false;
+  // The video thread opened the display before the session registered its stats entry.
+  EXPECT_FALSE(video::publish_capture_backend_for_tests(owner, route, owner_published));
+  stream_stats::add_client("10.0.0.5", "Owner", 391);
+  EXPECT_TRUE(video::publish_capture_backend_for_tests(owner, route, owner_published));
+
+  // A second viewer joins the display the owner opened, and publishes it for itself.
+  const auto viewer = capture_session_config(392);
+  bool viewer_published = false;
+  stream_stats::add_client("10.0.0.6", "Viewer", 392);
+  EXPECT_TRUE(video::publish_capture_backend_for_tests(viewer, route, viewer_published));
+  for (std::size_t client = 0; client < 2; ++client) {
+    const auto capture = capture_of_client(client);
+    EXPECT_EQ(capture.value("preference", ""), "kwin") << "polaris.conf as written";
+    EXPECT_EQ(capture.value("requested", ""), "portal") << "read the way dispatch reads it";
+    EXPECT_EQ(capture.value("opened", ""), "portal");
+    EXPECT_EQ(capture.value("route", ""), "portal_kwin_node");
+  }
+
+  // No generation and nothing opened are nothing to publish.
+  bool legacy_published = false;
+  EXPECT_FALSE(video::publish_capture_backend_for_tests(capture_session_config(0), route, legacy_published));
+  bool unopened_published = false;
+  EXPECT_FALSE(video::publish_capture_backend_for_tests(capture_session_config(391), {}, unopened_published));
+}
+
+TEST(VideoCaptureBackendPublicationTests, AProbeNeverPublishesWhatItsDisplayOpened) {
+  const auto old_config = config::video;
+  // The validate hook sets the global NVENC capabilities, and ctest runs this binary as one process.
+  const auto old_h264 = video::nvenc.h264.capabilities;
+  const auto old_hevc = video::nvenc.hevc.capabilities;
+  const auto old_av1 = video::nvenc.av1.capabilities;
+  auto restore = util::fail_guard([&] {
+    video::reset_encoder_probe_state();
+    config::video = old_config;
+    video::nvenc.h264.capabilities = old_h264;
+    video::nvenc.hevc.capabilities = old_hevc;
+    video::nvenc.av1.capabilities = old_av1;
+    stream_stats::update_stream_active(false);
+  });
+  stream_stats::update_stream_active(false);
+  video::reset_encoder_probe_state();
+  config::video.encoder = "nvenc";
+  config::video.linux_display.use_cage_compositor = true;
+  stream_stats::add_client("10.0.0.5", "Client", 393);
+  const platf::capture_route_t route {"wlr", "wlr", ""};
+  const auto session = capture_session_config(393);
+  bool published = false;
+  std::optional<bool> published_in_probe;
+  auto validate = [&](video::encoder_t &encoder, bool) {
+    encoder.h264.capabilities.set();
+    if (!published_in_probe) {
+      published_in_probe = video::publish_capture_backend_for_tests(session, route, published);
+    }
+    return true;
+  };
+  EXPECT_EQ(video::probe_encoders_with_hooks_for_tests(complete_probe_identity(), validate), 0);
+  ASSERT_TRUE(published_in_probe.has_value()) << "the probe validated nothing";
+  EXPECT_FALSE(*published_in_probe);
+  EXPECT_TRUE(capture_of_client(0).is_null());
+  // The same session publishes from its own encode loop.
+  EXPECT_TRUE(video::publish_capture_backend_for_tests(session, route, published));
+  EXPECT_EQ(capture_of_client(0).value("opened", ""), "wlr");
+}
+
+TEST(VideoCaptureBackendPublicationTests, AcceptedFramesCarryTheirSourceFormatAndALandingWritesTheNextOneAgain) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  const platf::capture_route_t route {"portal", "portal_screencast", ""};
+  auto session = capture_session_config(394);
+  session.width = 1280;
+  session.height = 720;
+  std::array<std::uint8_t, 4> pixels {};
+  video::frame_t frame;
+  frame.width = 1920;
+  frame.height = 1080;
+  frame.cpu_data = pixels.data();
+  // What the capture delivered, and what conversion made of it for the encoder.
+  frame.source_metadata = {platf::frame_transport_e::dmabuf, platf::frame_residency_e::gpu, platf::frame_format_e::p010, {}};
+  frame.metadata = {platf::frame_transport_e::dmabuf, platf::frame_residency_e::gpu, platf::frame_format_e::nv12, {}};
+  std::optional<stream_stats::capture_source_t> reported;
+  bool published = false;
+
+  // The video thread opened the display before the session registered, and the session's first
+  // frame lands between the refused attempt and the retry.
+  EXPECT_FALSE(video::publish_capture_backend_for_tests(session, route, published, reported));
+  stream_stats::add_client("10.0.0.5", "Client", 394);
+  video::record_capture_source_for_tests(session, frame, reported);
+  ASSERT_TRUE(reported.has_value());
+  EXPECT_TRUE(video::publish_capture_backend_for_tests(session, route, published, reported));
+  EXPECT_EQ(capture_of_client(0).value("transport", ""), "unknown")
+    << "a landing starts the frames over for the display it names";
+
+  // The next accepted frame is written although it matches the last one, or the capture would
+  // read unknown for as long as the frames stay the same.
+  video::record_capture_source_for_tests(session, frame, reported);
+  auto capture = capture_of_client(0);
+  EXPECT_EQ(capture.value("transport", ""), "dmabuf");
+  EXPECT_EQ(capture.value("residency", ""), "gpu");
+  EXPECT_EQ(capture.value("format", ""), "p010") << "the source frame's format, not the converted frame's";
+
+  // A change of format alone is written, through the record the loop keeps.
+  frame.source_metadata.format = platf::frame_format_e::bgra8;
+  video::record_capture_source_for_tests(session, frame, reported);
+  EXPECT_EQ(capture_of_client(0).value("format", ""), "bgra8");
+}
+
+TEST(VideoPyroWaveRouteTests, ASessionWritesItsRouteWhenItMovesAndKeepsItOnlyOnceItLands) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  const auto route_of_client = [] {
+    return nlohmann::json::parse(stream_stats::get_current().to_json())["clients"][0].value("pyrowave_route", "");
+  };
+  const auto session = capture_session_config(397);
+  std::string reported;
+
+  // The first frame can be encoded before the session registers its stats entry.
+  video::record_pyrowave_route_for_tests(session, "gpu_upload", reported);
+  EXPECT_EQ(reported, "") << "a write that did not land was kept, so the route is never written";
+  stream_stats::add_client("10.0.0.5", "Client", 397);
+  video::record_pyrowave_route_for_tests(session, "", reported);
+  EXPECT_EQ(route_of_client(), "") << "unknown was written as a route";
+  video::record_pyrowave_route_for_tests(session, "gpu_upload", reported);
+  EXPECT_EQ(reported, "gpu_upload");
+  EXPECT_EQ(route_of_client(), "gpu_upload");
+
+  // A GPU path that falls back moves the route, and the move is written.
+  video::record_pyrowave_route_for_tests(session, "cpu_convert", reported);
+  EXPECT_EQ(route_of_client(), "cpu_convert");
+
+  // Generation zero names no session, so nothing it encodes lands on a session's entry.
+  std::string unowned;
+  video::record_pyrowave_route_for_tests(capture_session_config(0), "zero_copy", unowned);
+  EXPECT_EQ(unowned, "");
+  EXPECT_EQ(route_of_client(), "cpu_convert");
+}
+
+/**
+ * A display that opens starts the session's PyroWave route over, in the stats and in the loop.
+ *
+ * The encoder built for a new display has encoded nothing, so the route the one before it took is no
+ * answer for it. The loop's record starts over with the landing too, or a route the session wrote
+ * while its publication was still refused would be the one it never writes again.
+ */
+TEST(VideoPyroWaveRouteTests, ALandingStartsTheRouteOverForTheDisplayItNames) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  const auto route_of_client = [] {
+    return nlohmann::json::parse(stream_stats::get_current().to_json())["clients"][0].value("pyrowave_route", "");
+  };
+  const auto session = capture_session_config(396);
+  const platf::capture_route_t route {"portal", "portal_screencast", ""};
+  std::optional<stream_stats::capture_source_t> reported_source;
+  std::string reported_route;
+  bool published = false;
+
+  // The video thread opened the display before the session registered, and the session's first
+  // frame lands between the refused attempt and the retry.
+  EXPECT_FALSE(video::publish_capture_backend_for_tests(session, route, published, reported_source, reported_route));
+  stream_stats::add_client("10.0.0.5", "Client", 396);
+  video::record_pyrowave_route_for_tests(session, "zero_copy", reported_route);
+  ASSERT_EQ(route_of_client(), "zero_copy");
+  EXPECT_TRUE(video::publish_capture_backend_for_tests(session, route, published, reported_source, reported_route));
+  EXPECT_EQ(route_of_client(), "") << "a landing kept the route the session wrote before it";
+  EXPECT_EQ(reported_route, "") << "the loop kept a route the landing cleared";
+
+  // The next frame's route is written although it matches the last one.
+  video::record_pyrowave_route_for_tests(session, "zero_copy", reported_route);
+  EXPECT_EQ(route_of_client(), "zero_copy") << "the route stays unknown for as long as it does not move";
+
+  // Capture reinitializes. A fresh loop publishes the new display, and until that display's
+  // encoder takes a frame the session has no route.
+  bool reopened_published = false;
+  std::optional<stream_stats::capture_source_t> reopened_source;
+  std::string reopened_route;
+  EXPECT_TRUE(video::publish_capture_backend_for_tests(session, {"portal", "portal_kwin_node", ""},
+                                                       reopened_published, reopened_source, reopened_route));
+  EXPECT_EQ(route_of_client(), "") << "a display that has encoded nothing reads the last display's route";
+  video::record_pyrowave_route_for_tests(session, "gpu_upload", reopened_route);
+  EXPECT_EQ(route_of_client(), "gpu_upload");
+}
+
+TEST(VideoPyroWaveRouteTests, TheEncodeLoopRecordsTheRouteOfEveryFrameItAccepts) {
+  const auto video = video_source_for_contract("src/video.cpp");
+  ASSERT_FALSE(video.empty());
+  // Where the call sits. What it records is held below, by running it.
+  const std::string accepted =
+    "          record_capture_source(config, frame, reported_source);\n"
+    "#ifdef POLARIS_BUILD_PYROWAVE\n"
+    "          record_pyrowave_route(config, *session, reported_pyrowave_route);\n"
+    "#endif\n";
+  EXPECT_NE(video.find(accepted), std::string::npos)
+    << "the parallel encode loop does not publish the PyroWave route beside the frame the session accepted";
+}
+
+/**
+ * The route the loop publishes is the one the session the host builds reports.
+ *
+ * The call the encode loop makes reads it from the codec session through the wrapper the host builds
+ * for a PyroWave stream. If either answered unknown, every stream would say its route is not known
+ * yet, forever, while the encoder and stats tests passed on routes they are handed.
+ */
+TEST(VideoPyroWaveRouteTests, TheLoopRecordsTheRouteOfTheSessionTheHostBuilds) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  const auto route_of_client = [](std::size_t index) {
+    return nlohmann::json::parse(stream_stats::get_current().to_json())["clients"][index].value("pyrowave_route", "");
+  };
+  const auto session_for = [](std::uint64_t generation) {
+    auto config = capture_session_config(generation);
+    config.width = 640;
+    config.height = 360;
+    config.framerate = 60;
+    config.bitrate = 20000;
+    return config;
+  };
+
+  stream_stats::add_client("10.0.0.7", "Deck", 398);
+  const auto on_the_gpu = video::pyrowave_route_of_a_host_frame_for_tests(session_for(398));
+  if (!on_the_gpu) {
+    GTEST_SKIP() << "no Vulkan device PyroWave can use";
+  }
+  EXPECT_EQ(*on_the_gpu, "gpu_upload") << "the loop did not record the route of a frame copied from host memory";
+  EXPECT_EQ(route_of_client(0), "gpu_upload");
+
+  stream_stats::add_client("10.0.0.8", "Tablet", 399);
+  setenv("POLARIS_PYROWAVE_GPU_INPUT", "off", 1);
+  const auto on_the_cpu = video::pyrowave_route_of_a_host_frame_for_tests(session_for(399));
+  unsetenv("POLARIS_PYROWAVE_GPU_INPUT");
+  ASSERT_TRUE(on_the_cpu);
+  EXPECT_EQ(*on_the_cpu, "cpu_convert") << "the loop did not record the route of a frame converted on the CPU";
+  EXPECT_EQ(route_of_client(1), "cpu_convert");
+  EXPECT_EQ(route_of_client(0), "gpu_upload") << "one session's route landed on another's entry";
+}
+
+TEST(VideoCaptureBackendPublicationTests, AProbeNeverReachesTheLastSession) {
+  const auto old_config = config::video;
+  // The validate hook sets the global NVENC capabilities, and ctest runs this binary as one process.
+  const auto old_h264 = video::nvenc.h264.capabilities;
+  const auto old_hevc = video::nvenc.hevc.capabilities;
+  const auto old_av1 = video::nvenc.av1.capabilities;
+  auto restore = util::fail_guard([&] {
+    video::reset_encoder_probe_state();
+    config::video = old_config;
+    video::nvenc.h264.capabilities = old_h264;
+    video::nvenc.hevc.capabilities = old_hevc;
+    video::nvenc.av1.capabilities = old_av1;
+    stream_stats::update_stream_active(false);
+  });
+  const auto last_session = [] {
+    const auto json = nlohmann::json::parse(stream_stats::get_current().to_json());
+    return json.contains("last_session") ? json["last_session"] : nlohmann::json {};
+  };
+  stream_stats::update_stream_active(false);
+  video::reset_encoder_probe_state();
+  config::video.encoder = "nvenc";
+  config::video.linux_display.use_cage_compositor = true;
+  auto session = capture_session_config(396);
+  session.width = 1280;
+  session.height = 720;
+  std::array<std::uint8_t, 4> pixels {};
+  video::frame_t frame;
+  frame.width = 1920;
+  frame.height = 1080;
+  frame.cpu_data = pixels.data();
+  frame.source_metadata = {platf::frame_transport_e::dmabuf, platf::frame_residency_e::gpu, platf::frame_format_e::nv12, {}};
+  std::optional<stream_stats::capture_source_t> reported;
+  bool published = false;
+  stream_stats::add_client("10.0.0.5", "Client", 396);
+  ASSERT_TRUE(video::publish_capture_backend_for_tests(session, {"wlr", "wlr", ""}, published, reported));
+  video::record_capture_source_for_tests(session, frame, reported);
+
+  // A probe can run while the stream is still registered, and it opens a display of its own. It
+  // tries to publish that display under the session's config. Had it landed, the session would
+  // end with the probe's display in its last session.
+  std::optional<bool> published_in_probe;
+  auto validate = [&](video::encoder_t &encoder, bool) {
+    encoder.h264.capabilities.set();
+    if (!published_in_probe) {
+      bool probe_published = false;
+      std::optional<stream_stats::capture_source_t> probe_reported;
+      published_in_probe = video::publish_capture_backend_for_tests(
+        session, {"portal", "portal_screencast", ""}, probe_published, probe_reported
+      );
+    }
+    return true;
+  };
+  EXPECT_EQ(video::probe_encoders_with_hooks_for_tests(complete_probe_identity(), validate), 0);
+  ASSERT_TRUE(published_in_probe.has_value()) << "the probe validated nothing";
+  EXPECT_FALSE(*published_in_probe);
+
+  stream_stats::remove_client("10.0.0.5", 396);
+  const auto frozen = last_session();
+  ASSERT_EQ(frozen.value("stream_instance_id", ""), stream_stats::stream_instance_id(396)) << frozen.dump();
+  EXPECT_EQ(frozen["capture"].value("opened", ""), "wlr") << "the session's own display, not the probe's";
+  EXPECT_EQ(frozen["capture"].value("route", ""), "wlr");
+  EXPECT_EQ(frozen["capture"].value("transport", ""), "dmabuf") << frozen.dump();
+
+  // A probe after the end finds no entry to reach, and only the next session's end replaces it.
+  video::reset_encoder_probe_state();
+  published_in_probe.reset();
+  EXPECT_EQ(video::probe_encoders_with_hooks_for_tests(complete_probe_identity(), validate), 0);
+  ASSERT_TRUE(published_in_probe.has_value()) << "the probe after the end validated nothing";
+  EXPECT_FALSE(*published_in_probe);
+  EXPECT_EQ(last_session(), frozen);
+}
+#endif

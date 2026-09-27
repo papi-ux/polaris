@@ -2,6 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import WelcomeView from './WelcomeView.vue'
+import { forgetSettingsRefusal, settingsUnreadable } from '../settings-unreadable.js'
 
 function response(status, body = {}) {
   return {
@@ -206,6 +207,63 @@ describe('WelcomeView optional setup steps', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals()
+  })
+
+  describe('on a settings file the host refuses (#782)', () => {
+    const refused = {
+      status: false,
+      error: 'config_unreadable',
+      path: '/srv/polaris/polaris.conf',
+      reason: 'It is writable by its group (mode 0664), and the settings store refuses a file another user can change.',
+      fix: 'Restrict it with "chmod go-w /srv/polaris/polaris.conf".',
+    }
+
+    afterEach(() => {
+      forgetSettingsRefusal()
+    })
+
+    it('says the reason and the fix where a step save failed, and shows the banner', async () => {
+      // Every step saves through PATCH ./api/config, which answers a refused file with 503 and
+      // config_unreadable. The step put that code into its sentence, and first-time setup renders
+      // outside the signed-in shell, so no banner said which file or what to run.
+      const routes = baseRoutes()
+      routes['PATCH ./api/config'] = () => response(503, refused)
+      routeFetch(routes)
+      const wrapper = mount(WelcomeView, {
+        global: {
+          mocks: { $t: (key, params) => (params && 'error' in params ? `${key}: ${params.error}` : key) },
+          stubs: { ResourceCard: true },
+        },
+      })
+      await settle()
+      await reachStep(wrapper, 1)
+      expect(wrapper.find('[data-settings-unreadable-banner]').exists()).toBe(false)
+
+      await wrapper.get('#welcomeEncoder').setValue('nvenc')
+      await button(wrapper, 'welcome.gpu_choice_save').trigger('click')
+      await settle()
+
+      const text = wrapper.text()
+      expect(text).toContain(`welcome.gpu_choice_save_failed: welcome.settings_unreadable ${refused.reason} ${refused.fix}`)
+      expect(text).not.toContain('config_unreadable')
+      expect(settingsUnreadable.value).toEqual({ path: refused.path, reason: refused.reason, fix: refused.fix })
+      expect(wrapper.get('[data-settings-unreadable-banner-path]').text()).toBe(refused.path)
+      expect(wrapper.get('[data-settings-unreadable-banner-fix]').text()).toBe(refused.fix)
+      wrapper.unmount()
+    })
+
+    it('shows the banner when the first read of the settings is refused', async () => {
+      const routes = baseRoutes()
+      routes['GET ./api/config'] = () => response(503, refused)
+      routeFetch(routes)
+      const wrapper = mountWelcome()
+      await settle()
+      await reachStep(wrapper, 1)
+
+      expect(wrapper.text()).toContain('Step 2 of 8')
+      expect(wrapper.get('[data-settings-unreadable-banner-reason]').text()).toBe(refused.reason)
+      wrapper.unmount()
+    })
   })
 
   it('lists eight steps in order, with First App last', async () => {

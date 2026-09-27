@@ -1,5 +1,6 @@
 import { readonly, ref } from 'vue'
 import { clearCachedConfig, primeCachedConfig } from './config-cache.js'
+import { forgetSettingsRefusal } from './settings-unreadable.js'
 
 const authenticated = ref(false)
 
@@ -15,6 +16,7 @@ export function initializeWebUiAuthState() {
   authenticated.value = false
   publishAuthenticationState(false)
   clearCachedConfig()
+  forgetSettingsRefusal()
 }
 
 export function isWebUiAuthenticated() {
@@ -31,4 +33,5 @@ export function markWebUiUnauthenticated() {
   authenticated.value = false
   publishAuthenticationState(false)
   clearCachedConfig()
+  forgetSettingsRefusal()
 }

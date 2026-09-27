@@ -24,7 +24,10 @@ TEST(KmsgrabLoggingSource, AutoProbeSetcapGuidanceIsNotFatalOnWayland) {
   // host never enabled KMS, and the probe runs at each capture evaluation, so it says so once, as info.
   const auto probe = source.find("note_kms_capture_refused_for_capability();");
   ASSERT_NE(probe, std::string::npos);
-  const auto chosen = source.find("if (config::video.capture == \"kms\") {", probe);
+  const auto chosen = source.find(
+    "if (stream_display_policy::canonical_capture_backend(config::video.capture) == \"kms\") {",
+    probe
+  );
   const auto fatal_line = source.find("BOOST_LOG(fatal)", probe);
   const auto once = source.find("std::call_once(said,", probe);
   const auto quiet = source.find("BOOST_LOG(info) << \"KMS capture is off on this host, so Polaris captures another way.", probe);
@@ -44,6 +47,19 @@ TEST(KmsgrabLoggingSource, AutoProbeSetcapGuidanceIsNotFatalOnWayland) {
   ASSERT_NE(held, std::string::npos);
   EXPECT_LT(held, probe);
   EXPECT_LT(probe - held, 700u);
+}
+
+TEST(KmsgrabLoggingSource, AHostSetToDrmIsReadAsTheKmsHostItIs) {
+  // Dispatch, the capture evaluation and the refusal record all read drm as kms. The probe's own
+  // lines compared the literal, so a drm host refused the capability was recorded as having asked
+  // for KMS and told in the same breath that it needs KMS only if it wants it.
+  const auto source = read_kmsgrab_source();
+  EXPECT_EQ(source.find("config::video.capture == \"kms\""), std::string::npos);
+  EXPECT_EQ(source.find("config::video.capture != \"kms\""), std::string::npos);
+  EXPECT_NE(
+    source.find("stream_display_policy::canonical_capture_backend(config::video.capture) != \"kms\""),
+    std::string::npos
+  ) << "the X11 fallback for a driver without atomic mode setting reads drm as no KMS choice again";
 }
 
 TEST(KmsgrabLoggingSource, VirtualDisplayCardsDoNotWarnAboutRenderNodesOrNvenc) {

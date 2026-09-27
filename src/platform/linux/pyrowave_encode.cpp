@@ -188,6 +188,9 @@ namespace pyrowave_encode {
 
         const auto encoded = encode(planes[0].data(), planes[1].data(), planes[2].data(), max_bytes);
         report_timing(conversion_started, encode_started);
+        if (encoded) {
+          last_route = route_e::cpu_convert;
+        }
         return encoded;
       }
 
@@ -446,6 +449,7 @@ namespace pyrowave_encode {
         if (!encode_recorded(max_bytes)) {
           return false;
         }
+        last_route = route_e::zero_copy;
 
         if (gpu == gpu_e::unknown) {
           gpu = gpu_e::yes;
@@ -489,6 +493,7 @@ namespace pyrowave_encode {
           }
           return false;
         }
+        last_route = route_e::gpu_upload;
 
         if (gpu == gpu_e::unknown) {
           gpu = gpu_e::yes;
@@ -793,6 +798,10 @@ namespace pyrowave_encode {
         return staging ? staging->buffers_described() : 0;
       }
 
+      route_e route() const override {
+        return last_route;
+      }
+
       const std::vector<uint8_t> &bitstream() const override {
         return frame;
       }
@@ -811,6 +820,8 @@ namespace pyrowave_encode {
       const vk_device_t *owner = nullptr;
       std::unique_ptr<upload_t> staging;
       gpu_e gpu = gpu_e::no;
+      /// How the last frame with a picture in it arrived. The primer and a repeat leave it alone.
+      route_e last_route = route_e::unknown;
       pyrowave_encoder encoder = nullptr;
       int width = 0;
       int height = 0;
@@ -847,6 +858,20 @@ namespace pyrowave_encode {
 
   bool available() {
     return shared_device() != nullptr;
+  }
+
+  std::string_view route_name(route_e route) {
+    switch (route) {
+      case route_e::zero_copy:
+        return "zero_copy"sv;
+      case route_e::gpu_upload:
+        return "gpu_upload"sv;
+      case route_e::cpu_convert:
+        return "cpu_convert"sv;
+      case route_e::unknown:
+        break;
+    }
+    return {};
   }
 
   bool hdr_available() {

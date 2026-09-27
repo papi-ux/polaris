@@ -36,6 +36,7 @@
 #include "src/platform/linux/portal_capability.h"
 #include "src/platform/linux/portal_session.h"
 #include "src/platform/linux/session_media.h"
+#include "src/platform/linux/stream_display_policy.h"
 #include "src/platform/linux/virtual_display.h"
 #include "src/process.h"
 #include "src/rtsp.h"
@@ -53,10 +54,20 @@ namespace portal {
   bool wait_for_capture_negotiation_for_tests(const std::shared_ptr<pipewire_capture::capture_t> &capture);
   bool kwin_rate_query_with_hook_for_tests(const std::function<void(GCancellable *)> &hook);
   bool portal_capture_backend_allowed_for_tests(std::string_view capture_backend);
+  std::string dmabuf_policy_log_for_tests(
+    platf::mem_type_e mem_type,
+    pipewire_capture::dmabuf_override_e override,
+    std::string_view source
+  );
+  std::string missing_import_path_log_for_tests(platf::mem_type_e mem_type);
   bool portal_capture_generation_matches_for_tests(
     const capture_generation::identity_t &cached,
     const capture_generation::identity_t &requested
   );
+  platf::capture_route_t portal_capture_route_for_tests(std::string_view gamescope, std::string_view kwin);
+#ifdef POLARIS_BUILD_WAYLAND
+  platf::capture_route_t portal_route_without_kwin_session_for_tests(std::string_view gamescope, std::string_view failure);
+#endif
 }
 
 namespace platf {
@@ -80,6 +91,105 @@ namespace platf {
     bool x11_available,
     bool cuda_memory
   );
+
+  capture_route_t name_capture_route_for_tests(capture_route_t route, std::string_view backend);
+
+  capture_route_t name_opened_display_for_tests(
+    capture_route_t route,
+    std::string_view requested,
+    bool nvfbc_available,
+    bool wayland_available,
+    bool portal_available,
+    bool kms_available,
+    bool x11_available,
+    bool cuda_memory
+  );
+}
+
+TEST(PortalGrabPolicyTests, APortalCaptureNamesTheNodeItTookAndTheFirstItCouldNot) {
+  // The portal backend reached a ScreenCast when the gamescope node or the KWin output it asked
+  // for was not there, and only a log line said so. The route says which node it is on, and the
+  // fallback names the node the capture wanted first.
+  struct case_t {
+    std::string_view gamescope;
+    std::string_view kwin;
+    std::string_view route;
+    std::string_view fallback;
+  };
+  for (const auto &c : std::array {
+         case_t {"started", "not_asked", "portal_gamescope_node", ""},
+         case_t {"missing", "not_asked", "portal_screencast", "gamescope_node_missing"},
+         case_t {"failed", "not_asked", "portal_screencast", "gamescope_node_failed"},
+         case_t {"not_asked", "started", "portal_kwin_node", ""},
+         case_t {"not_asked", "missing", "portal_screencast", "kwin_node_unavailable"},
+         case_t {"not_asked", "failed", "portal_screencast", "kwin_node_failed"},
+         // Game Mode asks for both: the gamescope node was the one it wanted.
+         case_t {"missing", "started", "portal_kwin_node", "gamescope_node_missing"},
+         case_t {"failed", "missing", "portal_screencast", "gamescope_node_failed"},
+         case_t {"not_asked", "not_asked", "portal_screencast", ""},
+       }) {
+    const auto route = portal::portal_capture_route_for_tests(c.gamescope, c.kwin);
+    EXPECT_EQ(route.opened, "portal") << c.gamescope << "/" << c.kwin;
+    EXPECT_EQ(route.route, c.route) << c.gamescope << "/" << c.kwin;
+    EXPECT_EQ(route.fallback_reason, c.fallback) << c.gamescope << "/" << c.kwin;
+  }
+}
+
+#ifdef POLARIS_BUILD_WAYLAND
+TEST(PortalGrabPolicyTests, AScreenCastOnAHostWithoutKWinFellBackFromNothing) {
+  // Mirror Desktop, the dongle and an empty mode ask KWin for an output session whatever the
+  // compositor is. On GNOME, a wlroots desktop with the portal or X11 there is no KWin output, the
+  // ScreenCast is the only route the host has, and the readout said it fell back from one.
+  for (const auto failure : {"no_wayland", "not_kwin"}) {
+    const auto route = portal::portal_route_without_kwin_session_for_tests("not_asked", failure);
+    EXPECT_EQ(route.route, "portal_screencast") << failure;
+    EXPECT_EQ(route.fallback_reason, "") << failure;
+  }
+  // KWin withholding its protocol, or opening no output stream, is a KWin output not taken.
+  for (const auto failure : {"protocol_withheld", "stream_failed"}) {
+    const auto route = portal::portal_route_without_kwin_session_for_tests("not_asked", failure);
+    EXPECT_EQ(route.route, "portal_screencast") << failure;
+    EXPECT_EQ(route.fallback_reason, "kwin_node_unavailable") << failure;
+  }
+  // A gamescope node asked for first is still the one the capture wanted.
+  EXPECT_EQ(
+    portal::portal_route_without_kwin_session_for_tests("missing", "not_kwin").fallback_reason,
+    "gamescope_node_missing"
+  );
+}
+#endif
+
+TEST(PortalGrabPolicyTests, AnOpenedDisplayNamesItsBackendWhenItSaysNothingItself) {
+  // Every backend but the portal has one route, the backend itself. The name is the one the capture
+  // setting uses, from the backend dispatch chose, never the enum's spelling or the request's alias:
+  // the Wayland backend is wlr, and a request for drm or kwin opens kms or the portal.
+  struct case_t {
+    std::string_view requested;
+    std::string_view opened;
+  };
+  for (const auto &c : std::array {
+         case_t {"kms", "kms"},
+         case_t {"drm", "kms"},
+         case_t {"wlr", "wlr"},
+         case_t {"x11", "x11"},
+         case_t {"nvfbc", "nvfbc"},
+         case_t {"portal", "portal"},
+         case_t {"kwin", "portal"},
+       }) {
+    const auto route = platf::name_opened_display_for_tests({}, c.requested, true, true, true, true, true, true);
+    EXPECT_EQ(route.opened, c.opened) << c.requested;
+    EXPECT_EQ(route.route, c.opened) << c.requested;
+    EXPECT_TRUE(route.fallback_reason.empty()) << c.requested;
+  }
+  // Autodetect names whichever backend it lands on in the same words.
+  EXPECT_EQ(platf::name_opened_display_for_tests({}, "", false, true, true, true, true, false).opened, "wlr");
+  EXPECT_EQ(platf::name_opened_display_for_tests({}, "auto", true, true, true, true, true, true).opened, "nvfbc");
+  // The portal's own words stand, fallback and all.
+  const platf::capture_route_t portal {"portal", "portal_screencast", "kwin_node_unavailable"};
+  EXPECT_EQ(platf::name_capture_route_for_tests(portal, "portal"), portal);
+  // Polaris' own labwc captured through the portal backend's direct screencopy is cage, not portal.
+  const platf::capture_route_t cage {"cage", "cage", ""};
+  EXPECT_EQ(platf::name_capture_route_for_tests(cage, "portal"), cage);
 }
 
 TEST(PortalCapabilityPolicyTests, ExplicitCaptureSelectionWinsOverStreamModeDefault) {
@@ -87,6 +197,18 @@ TEST(PortalCapabilityPolicyTests, ExplicitCaptureSelectionWinsOverStreamModeDefa
   EXPECT_TRUE(portal_capability::requires_unprivileged_process("PoRtAl", "headless_stream"));
   EXPECT_FALSE(portal_capability::requires_unprivileged_process("kms", "gamescope_stream"));
   EXPECT_FALSE(portal_capability::requires_unprivileged_process("wlr", "gamescope_stream"));
+}
+
+TEST(PortalCapabilityPolicyTests, KwinCaptureIsThePortalAndDropsCapabilitiesLikeIt) {
+  // Dispatch sends capture = kwin through the portal, and since the capture evaluation reads it
+  // that way too, a kwin host opens the portal instead of an auto substitute. A setcap binary kept
+  // CAP_SYS_ADMIN for it and then asked the portal, which refuses such a caller, for a screen.
+  for (const char *mode : {"headless_stream", "desktop_display", "host_virtual_display"}) {
+    EXPECT_TRUE(portal_capability::requires_unprivileged_process("kwin", mode)) << mode;
+    EXPECT_TRUE(portal_capability::requires_unprivileged_process("KWin", mode)) << mode;
+    // drm is kms under another name, and KMS is what the capability is for.
+    EXPECT_FALSE(portal_capability::requires_unprivileged_process("drm", mode)) << mode;
+  }
 }
 
 TEST(PortalCapabilityPolicyTests, PortalOrientedModesDropCapabilitiesForImplicitCapture) {
@@ -712,8 +834,18 @@ TEST(PortalGrabPolicyTests, HeadlessDongleNormalizeForcesKmsCapture) {
   const auto body = out.str();
   EXPECT_NE(body.find("normalize_config_from_load"), std::string::npos);
   EXPECT_NE(body.find("k_headless_dongle"), std::string::npos);
-  // Dongle defaults to portal (host ScreenCast); explicit kms still allowed.
-  EXPECT_NE(body.find("capture = \"portal\""), std::string::npos);
+  // Dongle defaults to portal (host ScreenCast); explicit kms still allowed. The load and a launch
+  // ask one rule for the fill, so the load's dongle branch is held to that rule and the rule to
+  // portal for an unset or auto capture and to kms kept.
+  const auto load = body.find("void normalize_config_from_load()");
+  ASSERT_NE(load, std::string::npos);
+  const auto dongle_fill = body.find("capture_filled_for_mode(path->id, config::video.capture)", load);
+  ASSERT_NE(dongle_fill, std::string::npos);
+  EXPECT_LT(body.rfind("k_headless_dongle", dongle_fill), dongle_fill);
+  EXPECT_GT(body.rfind("k_headless_dongle", dongle_fill), load);
+  EXPECT_EQ(stream_display_policy::capture_filled_for_mode("headless_dongle", ""), "portal");
+  EXPECT_EQ(stream_display_policy::capture_filled_for_mode("headless_dongle", "auto"), "portal");
+  EXPECT_EQ(stream_display_policy::capture_filled_for_mode("headless_dongle", "kms"), "kms");
 }
 
 TEST(PortalGrabPolicyTests, DonglePrivacyBootstrapKeepsDeskWithoutHostToken) {
@@ -951,6 +1083,46 @@ TEST(PipeWireCapturePolicyTests, DmaBufEnvironmentOverrideRequiresAnExactZeroOrO
   EXPECT_EQ(pipewire_capture::dmabuf_override_from_env("01"), default_safe);
   EXPECT_EQ(pipewire_capture::dmabuf_override_from_env("true"), default_safe);
   EXPECT_EQ(pipewire_capture::dmabuf_override_from_env(" 1"), default_safe);
+}
+
+TEST(PipeWireCapturePolicyTests, VulkanVideoDmabufExclusionIsLoggedAsPolicyNotAsTheBuild) {
+  // #635: with POLARIS_PORTAL_DMABUF=1 and Vulkan Video the portal said nothing about the
+  // variable, and the one line it did log blamed the build. Vulkan Video on the portal is kept on
+  // shared memory on purpose, so the log has to say that, and say the opt-in is VA-API's.
+  using enum pipewire_capture::dmabuf_override_e;
+  using platf::mem_type_e;
+  constexpr auto npos = std::string::npos;
+
+  const auto opted_in = portal::dmabuf_policy_log_for_tests(mem_type_e::vulkan, allow_vaapi, "local_graph");
+  EXPECT_TRUE(opted_in.starts_with("warning ")) << opted_in;
+  EXPECT_NE(opted_in.find("vulkan_pipewire_dmabuf_opt_in_is_vaapi_only"), npos) << opted_in;
+  EXPECT_NE(opted_in.find("source=local_graph"), npos) << opted_in;
+  EXPECT_NE(opted_in.find("POLARIS_PORTAL_DMABUF=1"), npos) << opted_in;
+  EXPECT_NE(opted_in.find("VA-API"), npos) << opted_in;
+  EXPECT_NE(opted_in.find("shared memory by policy"), npos) << opted_in;
+
+  const auto by_default = portal::dmabuf_policy_log_for_tests(mem_type_e::vulkan, default_safe, "portal_remote");
+  EXPECT_TRUE(by_default.starts_with("info ")) << by_default;
+  EXPECT_NE(by_default.find("vulkan_pipewire_dmabuf_disabled_by_policy"), npos) << by_default;
+  EXPECT_NE(by_default.find("source=portal_remote"), npos) << by_default;
+  EXPECT_NE(by_default.find("shared memory by policy"), npos) << by_default;
+  EXPECT_EQ(by_default.find("POLARIS_PORTAL_DMABUF"), npos) << by_default;
+
+  // The policy line speaks for Vulkan Video, so the line that blames the build stays out of it.
+  EXPECT_TRUE(portal::missing_import_path_log_for_tests(mem_type_e::vulkan).empty());
+  for (const auto *line : {&opted_in, &by_default}) {
+    EXPECT_EQ(line->find("build lacks"), npos) << *line;
+  }
+
+  // Everything else says what it said before: an operator forcing SHM, the VA-API lines, and the
+  // build line for an encoder whose import path really is a build or driver fact.
+  EXPECT_NE(portal::dmabuf_policy_log_for_tests(mem_type_e::vulkan, force_cpu, "local_graph").find("portal_dmabuf_forced_off"), npos);
+  EXPECT_NE(portal::dmabuf_policy_log_for_tests(mem_type_e::vaapi, allow_vaapi, "local_graph").find("vaapi_pipewire_dmabuf_explicitly_enabled"), npos);
+  EXPECT_NE(portal::dmabuf_policy_log_for_tests(mem_type_e::vaapi, default_safe, "local_graph").find("vaapi_pipewire_dmabuf_disabled_for_stability"), npos);
+  EXPECT_TRUE(portal::dmabuf_policy_log_for_tests(mem_type_e::cuda, allow_vaapi, "local_graph").empty());
+  EXPECT_TRUE(portal::dmabuf_policy_log_for_tests(mem_type_e::vulkan_pyrowave, allow_vaapi, "local_graph").empty());
+  EXPECT_NE(portal::missing_import_path_log_for_tests(mem_type_e::vulkan_pyrowave).find("this build lacks"), npos);
+  EXPECT_NE(portal::missing_import_path_log_for_tests(mem_type_e::cuda).find("this build lacks"), npos);
 }
 
 TEST(PipeWireCapturePolicyTests, DmaBufCapabilityFilteringKeepsOnlyPackedRgbImportableNonExternalFormats) {

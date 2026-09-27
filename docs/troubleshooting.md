@@ -94,6 +94,23 @@ works.
 3. Accept the local HTTPS certificate warning in the browser.
 4. Check your local firewall rules if the UI is unreachable from another device on the LAN.
 
+## Settings will not load or save
+
+When Polaris refuses to read its settings file, every page of the console you reach once signed
+in, first-time setup included, shows a banner that names the file, says why and gives the command
+that fixes it, and Settings says the same in place of its form. A save from Settings, a Quick
+Controls switch, the Live Tuning switch, a first-time setup step and the update preference answer
+with the reason and the fix.
+Only settings are held up: apps, pairing and the console password are kept in other files and
+still save.
+The Doctor reports it as `settings_file_unreadable`, and the log says it once each time the
+reason changes.
+
+The usual cause is a settings file other users can write, which a umask of 002 leaves behind:
+`chmod go-w ~/.config/polaris/polaris.conf` fixes it. Polaris keeps running on the settings it
+has loaded, and it reads the file again on the next request, so **Try again** in the banner is
+enough once the file is fixed. No restart is needed.
+
 ## Polaris and Sunshine on the same host
 
 Polaris keeps its config under `~/.config/polaris`, so installing it should not remove or overwrite
@@ -369,7 +386,13 @@ does. Installing or updating the package replaces the binary, and the new one do
 capability, so run the step again after every install or update. With `capture = kms` and no capability, Polaris finds the display, logs
 `Failed to gain CAP_SYS_ADMIN` and `Couldn't get handle for DRM Framebuffer`, and then either
 substitutes another backend or, when nothing else can capture, serves with no capture at all and
-H.264 as the only codec. The Doctor reports both cases as `kms_capture_needs_capability`.
+H.264 as the only codec. The Doctor reports both cases as `kms_capture_needs_capability`, for
+`capture = drm` too, and for a host with capture unset whose search for a backend reached KMS. It
+reports it as well for a host whose configured backend captured nothing, because the automatic
+choice that stands in for that backend searches KMS first. In Private Stream capture goes through
+wlroots whatever `capture` says, and a launch into Gamescope Stream or the dongle fills an unset
+capture with the portal, so the Doctor does not report it in Private Stream, or in those two modes
+while capture is unset.
 
 ```
 sudo -H polaris --setup-host --enable-kms
@@ -472,11 +495,16 @@ startup. Each cause has one fix.
 | `headless_dmabuf_unavailable` | Private Stream runs the hidden headless compositor, and its last attempt on this host could not hand frames over as DMA-BUF, so capture fell back to SHM. | Pick **Private Stream (GPU-native)** in Play Setup for one launch, or set `linux_prefer_gpu_native_capture = enabled` and restart: Polaris then runs the private compositor windowed, where DMA-BUF capture works. |
 | `windowed_dmabuf_unavailable` | The private compositor already runs windowed for GPU capture and the last DMA-BUF probe failed. | This path needs `wlr-export-dmabuf` from labwc and a driver that can import the buffer. Send a support bundle from one stream; it carries the import error. |
 | `vaapi_system_memory_by_design` | AMD and Intel: every VA-API capture path takes one copy per frame on purpose, because the DMA-BUF import into the encoder has crashed or stalled on AMD hosts (#367) and stays off until affected hosts prove it safe. Reported as `info`. | Nothing. If throughput falls short at high resolution or refresh, lower resolution, frame rate or bitrate first. `POLARIS_PORTAL_DMABUF=1` opts the portal path into the unvalidated DMA-BUF route with no automatic fallback. |
+| `vulkan_portal_system_memory_by_design` | Vulkan Video on portal capture (Mirror Desktop, Host Virtual Display, Gamescope Stream). The portal hands Vulkan Video every frame in shared memory and Vulkan Video uploads it to the GPU itself. That is policy, not a missing build feature: the portal has no way yet to fall back when a DMA-BUF frame fails to import, so it never offers Vulkan Video DMA-BUF. Auto picks Vulkan Video only for Private Stream, so this shows up when `encoder = vulkan` or a launch chooses it. Reported as `info`. | Nothing. If throughput falls short at high resolution or refresh, lower resolution, frame rate or bitrate first. Private Stream can keep Vulkan Video frames on the GPU. `POLARIS_PORTAL_DMABUF=1` applies to VA-API only and does not change this. |
 
 Mirror Desktop and Host Virtual Display on KDE or GNOME capture through the desktop portal.
-With CUDA or Vulkan the portal is asked for DMA-BUF and the compositor decides; KDE handed over
-system memory in testing. The forecast says nothing for that case, and the session's
-`capture_transport=` log line says which it got.
+With CUDA the portal is asked for DMA-BUF and the compositor decides; KDE handed over system
+memory in testing. The forecast says nothing for that case, and the session's
+`capture_transport=` log line says which it got. Vulkan Video is never offered DMA-BUF on the
+portal, so the forecast answers for it before the first stream with
+`vulkan_portal_system_memory_by_design`. The portal log says
+`vulkan_pipewire_dmabuf_disabled_by_policy`, or `vulkan_pipewire_dmabuf_opt_in_is_vaapi_only`
+when `POLARIS_PORTAL_DMABUF=1` is set.
 
 The forecast is silent until Polaris has evaluated its capture backends at startup, and it can
 only tell NVIDIA from AMD once an encoder is chosen: with `encoder` left on auto and a headless
@@ -518,7 +546,7 @@ any one of them is enough. Check them in this order; each has a line in
 | gate | what the journal says | fix |
 |---|---|---|
 | capture backend cannot report HDR | `HDR decision: ... display_hdr=false` with `capture = wlr` or unset on a private mode | `capture = kms` |
-| stream mode captures Polaris' own compositor | `session_runtime: ... effective_headless=true` | Mirror Desktop, Host Virtual Display, Desktop Takeover or Gamescope |
+| stream mode captures Polaris' own compositor | `session_runtime: ... effective_headless=true` | Mirror Desktop as the host's stream mode, with `capture = kms` |
 | binary lacks `CAP_SYS_ADMIN` | `Failed to gain CAP_SYS_ADMIN`, `Couldn't get handle for DRM Framebuffer [...]: Probably not permitted` | `sudo -H polaris --setup-host --enable-kms`, restart |
 | client forced off on the host | Doctor `hdr_disabled_by_saved_setting`; `client_profiles.json` `hdr: false` or `device_db.json` `hdr_capable: false` | clear both, or let the client's own HDR10 report win (1.4.8) |
 | client never asked | `portal HDR force -> 0 from enable_hdr=false`, `client_dynamic_range=0` | turn on Request HDR in the client; in Nova it is off by default |

@@ -101,6 +101,202 @@ namespace stream_display_policy {
       );
     }
 
+    /// A capture value, and the id of the rule that produced it when a rule replaced the one given.
+    struct capture_decision_t {
+      std::string capture;
+      std::string_view reason;
+    };
+
+    /**
+     * An override is an explicit choice that a rule replaced with a different backend. Auto asked
+     * the host to choose, and an alias replaced by the backend it names is no change at all.
+     */
+    std::optional<capture_override_t> override_for(
+      std::string_view configured,
+      const capture_decision_t &decision
+    ) {
+      const auto configured_backend = canonical_capture_backend(configured);
+      if (decision.reason.empty() ||
+          configured_backend.empty() ||
+          canonical_capture_backend(decision.capture) == configured_backend) {
+        return std::nullopt;
+      }
+      return capture_override_t {
+        std::string {configured},
+        decision.capture,
+        std::string {decision.reason},
+      };
+    }
+
+    capture_decision_t decide_capture_for_host_virtual_display_backend(
+      virtual_display::backend_e backend,
+      std::string_view current_capture
+    ) {
+      if (backend == virtual_display::backend_e::WAYLAND_WLR) {
+        return {"wlr", k_capture_override_virtual_display_backend};
+      }
+
+      // All three are ordinary KWin monitors to capture: kwingrab streams them by
+      // output name through portal_grab.
+      if (backend == virtual_display::backend_e::EVDI ||
+          backend == virtual_display::backend_e::KSCREEN_DOCTOR ||
+          backend == virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT) {
+        return {"portal", k_capture_override_virtual_display_backend};
+      }
+
+      return {std::string {current_capture}, {}};
+    }
+
+    capture_decision_t decide_capture_for_session_transition(
+      std::string_view configured_selection,
+      std::string_view session_selection,
+      std::string_view current_capture
+    ) {
+      const auto configured = to_lower_copy(configured_selection);
+      const auto session = to_lower_copy(session_selection);
+      if (configured == session) {
+        return {std::string {current_capture}, {}};
+      }
+
+      if (session == k_headless_stream || session == k_windowed_stream) {
+        return {"wlr", k_capture_override_private_compositor};
+      }
+
+      if (session == k_gamescope_stream) {
+        return {"portal", k_capture_override_gamescope_session};
+      }
+      if (session == k_headless_dongle) {
+        return {"portal", k_capture_override_dongle_session};
+      }
+
+      const auto capture = to_lower_copy(current_capture);
+      if (session == k_desktop_display &&
+          (capture == "wlr" || capture == "wlroots" || capture == "auto")) {
+        // Let desktop capture discovery prefer a working KMS path when the
+        // process retained CAP_SYS_ADMIN, then fall through to Portal on an
+        // ordinary unprivileged installation. Pinning WLR here leaves neither.
+        return {{}, k_capture_override_desktop_discovery};
+      }
+
+      return {std::string {current_capture}, {}};
+    }
+
+    capture_decision_t decide_capture_for_mode(
+      std::string_view configured_capture,
+      std::string_view stream_mode,
+      bool use_cage_compositor,
+      bool substitution_active,
+      bool exact_output_owned
+    ) {
+      if (use_cage_compositor) {
+        return {"wlr", k_capture_override_private_compositor};
+      }
+      // A Gamescope session is not the host desktop, and auto would land on a backend that
+      // captures the desktop instead of it; keep the configured one and let it fail visibly.
+      if (substitution_active && !exact_output_owned &&
+          to_lower_copy(stream_mode) != k_gamescope_stream) {
+        return {{}, k_capture_override_substituted};
+      }
+      return {std::string {configured_capture}, {}};
+    }
+
+    /// The capture setting as the last load parsed it; see loaded_capture_setting().
+    std::mutex loaded_capture_mutex;
+    std::string loaded_capture;
+
+    /// A line the last load had to say before logging started; see log_config_load_notes().
+    struct load_note_t {
+      bool warning;
+      std::string line;
+    };
+    std::vector<load_note_t> load_notes;  ///< guarded by loaded_capture_mutex
+
+    void keep_load_note(bool warning, std::string line) {
+      const std::lock_guard<std::mutex> guard {loaded_capture_mutex};
+      load_notes.push_back({warning, std::move(line)});
+    }
+
+    /// Who rewrote the live capture setting, which decides how long the record of why lasts.
+    enum class rewrite_source_e {
+      load,  ///< a Host Virtual Display load; lasts until the next load
+      session,  ///< a launch; lasts until the host setting is back at teardown
+      game_mode,  ///< Steam Game Mode; lasts until the hold is given back
+    };
+
+    /**
+     * Why the live capture setting holds a value a rule wrote there. The live setting keeps only
+     * the value, and after a rewrite it no longer says what polaris.conf chose or which rule chose
+     * otherwise, so a session asking why its request differs finds the answer here.
+     */
+    struct capture_rewrite_t {
+      rewrite_source_e source;
+      std::string capture;  ///< canonical_capture_backend() of what the rule wrote
+      std::string reason;  ///< a k_capture_override_* id
+    };
+
+    std::mutex capture_rewrites_mutex;
+    std::vector<capture_rewrite_t> capture_rewrites;  ///< oldest first, one per source
+
+    void note_capture_rewrite(rewrite_source_e source, std::string_view capture, std::string_view reason) {
+      if (reason.empty()) {
+        return;
+      }
+      const std::lock_guard<std::mutex> guard {capture_rewrites_mutex};
+      std::erase_if(capture_rewrites, [source](const capture_rewrite_t &rewrite) {
+        return rewrite.source == source;
+      });
+      capture_rewrites.push_back({source, canonical_capture_backend(capture), std::string {reason}});
+    }
+
+    /// Forget the rewrites one source made, or every rewrite when none is named.
+    void forget_capture_rewrites(std::optional<rewrite_source_e> source) {
+      const std::lock_guard<std::mutex> guard {capture_rewrites_mutex};
+      std::erase_if(capture_rewrites, [source](const capture_rewrite_t &rewrite) {
+        return !source || rewrite.source == *source;
+      });
+    }
+
+    /// The reason of the newest rewrite that wrote the backend capture names, or empty.
+    std::string capture_rewrite_reason_for(std::string_view capture) {
+      const auto backend = canonical_capture_backend(capture);
+      const std::lock_guard<std::mutex> guard {capture_rewrites_mutex};
+      for (auto rewrite = capture_rewrites.rbegin(); rewrite != capture_rewrites.rend(); ++rewrite) {
+        if (rewrite->capture == backend) {
+          return rewrite->reason;
+        }
+      }
+      return {};
+    }
+
+    std::string describe_capture(std::string_view capture) {
+      return capture.empty() ? std::string {"auto"} : std::string {capture};
+    }
+
+    /**
+     * What a mode says when it fills an unset capture with portal. The load and a launch that
+     * enters the mode fill it the same way, so they say the same line.
+     */
+    std::string portal_fill_line(std::string_view mode) {
+      if (mode == k_gamescope_stream) {
+        return "stream_display_policy: stream mode [gamescope_stream] captures the Gamescope session "
+               "through [portal], with capture set to [auto]";
+      }
+      return "stream_display_policy: stream mode [headless_dongle] captures the host desktop "
+             "through [portal] after the topology swap, with capture set to [auto]";
+    }
+
+    /// Say a portal fill at info. A load waits for logging, and a preview is put back by its caller.
+    void say_portal_fill(std::string_view mode, capture_rewrite_scope_e scope) {
+      if (scope == capture_rewrite_scope_e::preview) {
+        return;
+      }
+      if (scope == capture_rewrite_scope_e::load) {
+        keep_load_note(false, portal_fill_line(mode));
+        return;
+      }
+      BOOST_LOG(info) << portal_fill_line(mode);
+    }
+
     void clear_connector_output_authority(bool retire_connectors) {
       auto &linux_display = config::video.linux_display;
       linux_display.auto_manage_displays = false;
@@ -115,9 +311,11 @@ namespace stream_display_policy {
       }
     }
 
-    void normalize_host_virtual_display_state() {
+    void normalize_host_virtual_display_state(std::string_view stream_mode, capture_rewrite_scope_e scope) {
       normalize_host_virtual_display_state_for_backend(
-        virtual_display::detect_backend()
+        virtual_display::detect_backend(),
+        scope,
+        stream_mode
       );
     }
 
@@ -371,19 +569,7 @@ namespace stream_display_policy {
     virtual_display::backend_e backend,
     std::string_view current_capture
   ) {
-    if (backend == virtual_display::backend_e::WAYLAND_WLR) {
-      return "wlr";
-    }
-
-    // All three are ordinary KWin monitors to capture: kwingrab streams them by
-    // output name through portal_grab.
-    if (backend == virtual_display::backend_e::EVDI ||
-        backend == virtual_display::backend_e::KSCREEN_DOCTOR ||
-        backend == virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT) {
-      return "portal";
-    }
-
-    return std::string {current_capture};
+    return decide_capture_for_host_virtual_display_backend(backend, current_capture).capture;
   }
 
   std::string capture_for_session_transition(
@@ -391,30 +577,12 @@ namespace stream_display_policy {
     std::string_view session_selection,
     std::string_view current_capture
   ) {
-    const auto configured = to_lower_copy(configured_selection);
-    const auto session = to_lower_copy(session_selection);
-    if (configured == session) {
-      return std::string {current_capture};
-    }
-
-    if (session == k_headless_stream || session == k_windowed_stream) {
-      return "wlr";
-    }
-
-    if (session == k_gamescope_stream || session == k_headless_dongle) {
-      return "portal";
-    }
-
-    const auto capture = to_lower_copy(current_capture);
-    if (session == k_desktop_display &&
-        (capture == "wlr" || capture == "wlroots" || capture == "auto")) {
-      // Let desktop capture discovery prefer a working KMS path when the
-      // process retained CAP_SYS_ADMIN, then fall through to Portal on an
-      // ordinary unprivileged installation. Pinning WLR here leaves neither.
-      return {};
-    }
-
-    return std::string {current_capture};
+    const auto decision = decide_capture_for_session_transition(
+      configured_selection,
+      session_selection,
+      current_capture
+    );
+    return decision.capture;
   }
 
   std::string capture_for_mode(
@@ -424,16 +592,14 @@ namespace stream_display_policy {
     bool substitution_active,
     bool exact_output_owned
   ) {
-    if (use_cage_compositor) {
-      return "wlr";
-    }
-    // A Gamescope session is not the host desktop, and auto would land on a backend that
-    // captures the desktop instead of it; keep the configured one and let it fail visibly.
-    if (substitution_active && !exact_output_owned &&
-        to_lower_copy(stream_mode) != k_gamescope_stream) {
-      return {};
-    }
-    return std::string {configured_capture};
+    const auto decision = decide_capture_for_mode(
+      configured_capture,
+      stream_mode,
+      use_cage_compositor,
+      substitution_active,
+      exact_output_owned
+    );
+    return decision.capture;
   }
 
   std::string capture_for_current_mode(bool exact_output_owned) {
@@ -446,8 +612,214 @@ namespace stream_display_policy {
     );
   }
 
+  std::string capture_filled_for_mode(std::string_view stream_mode, std::string_view capture) {
+    const auto mode = to_lower_copy(stream_mode);
+    // A Gamescope session is not the host desktop, and the automatic search would land on a
+    // backend that captures the desktop instead of it.
+    if (mode == k_gamescope_stream && capture.empty()) {
+      return "portal";
+    }
+    // KMS needs CAP_SYS_ADMIN and returns an empty monitor list without it, so the dongle captures
+    // the host desktop through the portal once the topology is swapped. Explicit kms is kept.
+    if (mode == k_headless_dongle && (capture.empty() || capture == "auto")) {
+      return "portal";
+    }
+    return std::string {capture};
+  }
+
+  std::string capture_for_launch_into_current_mode(bool exact_output_owned) {
+    const auto &stream_mode = config::video.linux_display.stream_mode;
+    return capture_for_mode(
+      capture_filled_for_mode(stream_mode, config::video.capture),
+      stream_mode,
+      config::video.linux_display.use_cage_compositor,
+      !platf::capture_backend_substitution_note().empty(),
+      exact_output_owned
+    );
+  }
+
+  std::optional<capture_override_t> capture_mode_override(
+    std::string_view configured_capture,
+    std::string_view stream_mode,
+    bool use_cage_compositor,
+    bool substitution_active,
+    bool exact_output_owned
+  ) {
+    return override_for(
+      configured_capture,
+      decide_capture_for_mode(
+        configured_capture,
+        stream_mode,
+        use_cage_compositor,
+        substitution_active,
+        exact_output_owned
+      )
+    );
+  }
+
+  std::optional<capture_override_t> capture_mode_override_for_current_mode(bool exact_output_owned) {
+    // Decided on the live setting, as capture_for_current_mode() is, and measured against
+    // polaris.conf as loaded: the live setting may already be a replacement nobody chose.
+    return override_for(
+      loaded_capture_setting(),
+      decide_capture_for_mode(
+        config::video.capture,
+        config::video.linux_display.stream_mode,
+        config::video.linux_display.use_cage_compositor,
+        !platf::capture_backend_substitution_note().empty(),
+        exact_output_owned
+      )
+    );
+  }
+
+  std::string capture_request_override_reason(
+    std::string_view preference,
+    std::string_view requested,
+    std::string_view stream_mode,
+    bool use_cage_compositor,
+    bool exact_output_owned
+  ) {
+    const auto preferred = canonical_capture_backend(preference);
+    const auto asked = canonical_capture_backend(requested);
+    if (preferred.empty() || preferred == asked) {
+      return {};
+    }
+    const auto &live = config::video.capture;
+    const auto decision = decide_capture_for_mode(
+      live,
+      stream_mode,
+      use_cage_compositor,
+      !platf::capture_backend_substitution_note().empty(),
+      exact_output_owned
+    );
+    // The mode rule answers only for the backend it asked for. A rule that set the live setting
+    // aside for another backend did not produce this request.
+    if (!decision.reason.empty() &&
+        canonical_capture_backend(decision.capture) != canonical_capture_backend(live) &&
+        canonical_capture_backend(decision.capture) == asked) {
+      return std::string {decision.reason};
+    }
+    // Otherwise the newest rule that wrote the backend this request asked for.
+    return capture_rewrite_reason_for(asked);
+  }
+
+  std::optional<capture_override_t> capture_session_transition_override(
+    std::string_view configured_selection,
+    std::string_view session_selection,
+    std::string_view current_capture
+  ) {
+    return override_for(
+      current_capture,
+      decide_capture_for_session_transition(configured_selection, session_selection, current_capture)
+    );
+  }
+
+  void apply_capture_for_session_transition(
+    std::string_view configured_selection,
+    std::string_view session_selection
+  ) {
+    const auto decision = decide_capture_for_session_transition(
+      configured_selection,
+      session_selection,
+      config::video.capture
+    );
+    if (decision.capture == config::video.capture) {
+      // Nothing to rewrite: an older rule already wrote this backend, such as a Host Virtual
+      // Display load before a launch into a Gamescope session. This session's own rule still asks
+      // for it, and that rule, not the older one, is why its request differs from polaris.conf.
+      note_capture_rewrite(rewrite_source_e::session, decision.capture, decision.reason);
+      return;
+    }
+    // Measured against polaris.conf as loaded. After a Host Virtual Display load the live setting is
+    // already the replacement, and a host set to kms was told that its configured backend was portal.
+    if (const auto discarded = override_for(loaded_capture_setting(), decision)) {
+      // An explicit choice set aside, such as kms under a Gamescope session, is what a host on a
+      // capture path nobody picked looks like, so it is a warning and not a note.
+      BOOST_LOG(warning) << describe_capture_override(*discarded, session_selection)
+                         << "; for this session only, and the host setting comes back at teardown";
+    }
+    else {
+      BOOST_LOG(info) << "process: session capture backend override [" << describe_capture(config::video.capture)
+                      << "] -> [" << describe_capture(decision.capture) << "] for stream mode ["
+                      << session_selection << "]; host default restored at teardown";
+    }
+    config::video.capture = decision.capture;
+    note_capture_rewrite(rewrite_source_e::session, decision.capture, decision.reason);
+  }
+
+  std::optional<capture_override_t> capture_host_virtual_display_override(
+    virtual_display::backend_e backend,
+    std::string_view current_capture
+  ) {
+    return override_for(
+      current_capture,
+      decide_capture_for_host_virtual_display_backend(backend, current_capture)
+    );
+  }
+
+  std::string describe_capture_override(
+    const capture_override_t &override,
+    std::string_view stream_mode
+  ) {
+    std::string_view why;
+    if (override.reason == k_capture_override_private_compositor) {
+      why = "a private labwc session can only be captured through wlroots";
+    }
+    else if (override.reason == k_capture_override_substituted) {
+      why = "the configured backend captured nothing in this mode, and auto lands on the backend the evaluation found";
+    }
+    else if (override.reason == k_capture_override_gamescope_session) {
+      why = "a Gamescope session is captured through the portal";
+    }
+    else if (override.reason == k_capture_override_dongle_session) {
+      why = "a dongle session captures the host desktop through the portal once the topology is swapped";
+    }
+    else if (override.reason == k_capture_override_desktop_discovery) {
+      why = "Mirror Desktop lets desktop capture discovery choose, which prefers KMS when the process may use it and the portal otherwise";
+    }
+    else if (override.reason == k_capture_override_virtual_display_backend) {
+      why = "a host virtual display can only be captured the way its backend exposes it";
+    }
+    else {
+      why = "a stream mode rule replaced it";
+    }
+
+    std::string line = "capture override: stream mode [";
+    line += stream_mode.empty() ? std::string_view {"unset"} : stream_mode;
+    line += "] asks for [";
+    line += describe_capture(override.effective);
+    line += "], not the configured [";
+    line += describe_capture(override.configured);
+    line += "], because ";
+    line += why;
+    return line;
+  }
+
+  std::string loaded_capture_setting() {
+    const std::lock_guard<std::mutex> guard {loaded_capture_mutex};
+    return loaded_capture;
+  }
+
+  void log_config_load_notes() {
+    std::vector<load_note_t> notes;
+    {
+      const std::lock_guard<std::mutex> guard {loaded_capture_mutex};
+      notes.swap(load_notes);
+    }
+    for (const auto &note : notes) {
+      if (note.warning) {
+        BOOST_LOG(warning) << note.line;
+      }
+      else {
+        BOOST_LOG(info) << note.line;
+      }
+    }
+  }
+
   void normalize_host_virtual_display_state_for_backend(
-      virtual_display::backend_e backend) {
+      virtual_display::backend_e backend,
+      capture_rewrite_scope_e scope,
+      std::string_view stream_mode) {
     auto &linux_display = config::video.linux_display;
     clear_connector_output_authority(
       host_virtual_backend_creates_output(backend)
@@ -467,17 +839,58 @@ namespace stream_display_policy {
       backend,
       previous_capture
     );
-    if (config::video.capture != previous_capture) {
-      // This discards a capture backend the operator chose. Say so, rather than
-      // leaving them to infer it from a capture path they did not pick.
-      const auto describe = [](const std::string &capture) {
-        return capture.empty() ? std::string {"auto"} : capture;
-      };
-      BOOST_LOG(info) << "stream_display_policy: host virtual display backend ["
-                      << virtual_display::backend_name(backend)
-                      << "] cannot be captured through [" << describe(previous_capture)
-                      << "]; this session uses [" << describe(config::video.capture)
-                      << "] and the host setting is restored at teardown";
+    // A preview is put back by its caller, and the launch that enters the mode applies it again and
+    // speaks for it then. A line here described a state the host never kept.
+    if (config::video.capture == previous_capture || scope == capture_rewrite_scope_e::preview) {
+      return;
+    }
+    note_capture_rewrite(
+      scope == capture_rewrite_scope_e::load ? rewrite_source_e::load : rewrite_source_e::session,
+      config::video.capture,
+      k_capture_override_virtual_display_backend
+    );
+
+    const std::string mode = stream_mode.empty() ? linux_display.stream_mode : std::string {stream_mode};
+    const std::string backend_label = virtual_display::backend_name(backend);
+    const bool other_backend = scope == capture_rewrite_scope_e::backend_change;
+    // Measured against polaris.conf as loaded, in every scope. The live setting the rewrite found may
+    // already be a replacement nobody chose: what a Host Virtual Display load put in place, which a
+    // launch finds when the virtual display backend changed since, or what a launch put in place
+    // before its display came up on another backend. At load the two are the same value.
+    const auto configured = loaded_capture_setting();
+    const auto override = capture_host_virtual_display_override(backend, configured);
+    std::string line;
+    if (override) {
+      // This discards a capture backend the operator chose. Say so, rather than leaving them to
+      // infer it from a capture path they did not pick, and say how long it lasts.
+      line = describe_capture_override(*override, mode);
+      line += other_backend ? ". The virtual display came up on [" : ". The backend is [";
+      line += backend_label;
+      line += other_backend ? "], not on the backend the launch checked" : "]";
+      line += scope == capture_rewrite_scope_e::load ?
+                "; this lasts until Polaris restarts, and polaris.conf is not changed" :
+                "; for this session only, and the host setting comes back at teardown";
+    }
+    else if (other_backend) {
+      line = "stream_display_policy: the virtual display came up on [" + backend_label +
+             "], not on the backend the launch checked, so stream mode [" + mode + "] captures it through [" +
+             describe_capture(config::video.capture) + "] instead of [" + describe_capture(previous_capture) + "]";
+    }
+    else {
+      line = "stream_display_policy: stream mode [" + mode + "] captures the [" + backend_label +
+             "] virtual display through [" + describe_capture(config::video.capture) + "], with capture set to [" +
+             describe_capture(configured) + "]";
+    }
+
+    if (scope == capture_rewrite_scope_e::load) {
+      // polaris.conf is parsed before logging starts, and a line logged now reaches stdout only.
+      keep_load_note(override.has_value(), std::move(line));
+    }
+    else if (override) {
+      BOOST_LOG(warning) << line;
+    }
+    else {
+      BOOST_LOG(info) << line;
     }
   }
 
@@ -564,7 +977,21 @@ namespace stream_display_policy {
       if (!apply_selection(k_desktop_display, error)) {
         return game_mode_reconcile_e::unchanged;
       }
-      config::video.capture = capture_for_session_transition(configured, k_desktop_display, hold.capture);
+      const auto decision = decide_capture_for_session_transition(configured, k_desktop_display, hold.capture);
+      config::video.capture = decision.capture;
+      note_capture_rewrite(rewrite_source_e::game_mode, decision.capture, decision.reason);
+      // Measured against polaris.conf as loaded, as a launch's transition is. After a Host Virtual
+      // Display load the held setting is that load's replacement, and naming it as the configured
+      // backend told a host set to kms that it had chosen wlr, and warned a host with capture unset.
+      if (const auto override = override_for(loaded_capture_setting(), decision)) {
+        BOOST_LOG(warning) << describe_capture_override(*override, k_desktop_display)
+                           << "; Steam Game Mode is running, and [" << describe_capture(hold.capture)
+                           << "] comes back when the Game Mode session ends";
+      }
+      else if (config::video.capture != hold.capture) {
+        BOOST_LOG(info) << "game_mode: capture [" << describe_capture(hold.capture) << "] is ["
+                        << describe_capture(config::video.capture) << "] while Steam Game Mode is running";
+      }
       game_mode_hold = std::move(hold);
       return game_mode_reconcile_e::entered;
     }
@@ -592,6 +1019,7 @@ namespace stream_display_policy {
       }
     }
     game_mode_hold.reset();
+    forget_capture_rewrites(rewrite_source_e::game_mode);
     return game_mode_reconcile_e::left;
   }
 
@@ -603,11 +1031,16 @@ namespace stream_display_policy {
   void forget_game_mode_hold() {
     const std::lock_guard<std::mutex> guard {game_mode_mutex};
     game_mode_hold.reset();
+    forget_capture_rewrites(rewrite_source_e::game_mode);
   }
 
   void forget_host_default() {
-    const std::lock_guard<std::mutex> guard {host_default_mutex};
-    held_host_default.reset();
+    {
+      const std::lock_guard<std::mutex> guard {host_default_mutex};
+      held_host_default.reset();
+    }
+    // The live setting is the host default again, so a launch's rewrite no longer explains it.
+    forget_capture_rewrites(rewrite_source_e::session);
   }
 
   std::string host_default_selection() {
@@ -795,7 +1228,7 @@ namespace stream_display_policy {
     return key == k_desktop_display;
   }
 
-  bool apply_selection(std::string_view selection, std::string &error) {
+  bool apply_selection(std::string_view selection, std::string &error, capture_rewrite_scope_e scope) {
     if (!selection_valid_fresh(selection, error)) {
       return false;
     }
@@ -819,7 +1252,7 @@ namespace stream_display_policy {
     }
 
     if (key == k_host_virtual_display || key == k_desktop_takeover) {
-      normalize_host_virtual_display_state();
+      normalize_host_virtual_display_state(key, scope);
     }
 
     if (key == stream_path::k_gamescope_stream) {
@@ -829,8 +1262,9 @@ namespace stream_display_policy {
         return false;
       }
       // Prefer portal capture of gamescope; leave idle unit free to attach.
-      if (config::video.capture.empty()) {
-        config::video.capture = "portal";
+      if (auto filled = capture_filled_for_mode(key, config::video.capture); filled != config::video.capture) {
+        config::video.capture = std::move(filled);
+        say_portal_fill(key, scope);
       }
     }
 
@@ -851,8 +1285,9 @@ namespace stream_display_policy {
       // Prefer portal on Wayland hosts: KMS needs CAP_SYS_ADMIN and returns an empty
       // monitor list without it (lea). Portal ScreenCast after topology prepare is the
       // working path once the portal lock-contract is fixed. Explicit capture=kms is kept.
-      if (config::video.capture.empty() || config::video.capture == "auto") {
-        config::video.capture = "portal";
+      if (auto filled = capture_filled_for_mode(key, config::video.capture); filled != config::video.capture) {
+        config::video.capture = std::move(filled);
+        say_portal_fill(key, scope);
       }
       if (config::video.output_name.empty()) {
         config::video.output_name = linux_display.streaming_output;
@@ -882,6 +1317,14 @@ namespace stream_display_policy {
     // What was just loaded is what the host is configured for now. A hold taken before the load
     // would put back older values when Game Mode ends; the next reconcile holds these instead.
     forget_game_mode_hold();
+    {
+      const std::lock_guard<std::mutex> guard {loaded_capture_mutex};
+      loaded_capture = config::video.capture;
+      // Lines an older load kept and nobody said belong to a configuration that is gone.
+      load_notes.clear();
+    }
+    // So does every record of why the live setting differed from the one that was loaded before.
+    forget_capture_rewrites(std::nullopt);
     auto &linux_display = config::video.linux_display;
 
     if (!linux_display.stream_mode.empty()) {
@@ -897,7 +1340,7 @@ namespace stream_display_policy {
           linux_display.private_runtime = std::string {k_runtime_labwc};
         }
         if (path->id == k_host_virtual_display || path->id == k_desktop_takeover) {
-          normalize_host_virtual_display_state();
+          normalize_host_virtual_display_state(path->id, capture_rewrite_scope_e::load);
         }
         if (path->id != stream_path::k_headless_dongle &&
             path->id != k_host_virtual_display &&
@@ -911,8 +1354,10 @@ namespace stream_display_policy {
         // headless_dongle: default to portal (host desktop after topology swap).
         // Do not force KMS — without CAP_SYS_ADMIN encoder probe fails empty.
         if (path->id == stream_path::k_headless_dongle) {
-          if (config::video.capture.empty() || config::video.capture == "auto") {
-            config::video.capture = "portal";
+          if (auto filled = capture_filled_for_mode(path->id, config::video.capture);
+              filled != config::video.capture) {
+            say_portal_fill(path->id, capture_rewrite_scope_e::load);
+            config::video.capture = std::move(filled);
           }
         }
         return;
@@ -927,7 +1372,7 @@ namespace stream_display_policy {
     });
     if (linux_display.stream_mode == k_host_virtual_display ||
         linux_display.stream_mode == k_desktop_takeover) {
-      normalize_host_virtual_display_state();
+      normalize_host_virtual_display_state(linux_display.stream_mode, capture_rewrite_scope_e::load);
     }
 
     if (const auto *path = stream_path::find(linux_display.stream_mode)) {

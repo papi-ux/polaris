@@ -5,6 +5,7 @@
 #include "../tests_common.h"
 
 #include <src/config.h>
+#include <src/configuration_store.h>
 #include <src/nvenc/nvenc_config.h>
 #include <src/private_state_file.h>
 #include <src/utility.h>
@@ -12,12 +13,26 @@
 #include <filesystem>
 #include <fstream>
 #ifndef _WIN32
+  #include <fcntl.h>
+  #include <sys/file.h>
+  #include <sys/socket.h>
   #include <sys/stat.h>
+  #include <sys/un.h>
   #include <unistd.h>
 #endif
+#include <cstring>
 #include <iterator>
+#include <sstream>
 #include <string>
+#include <string_view>
 #include <unordered_map>
+
+#include <boost/core/null_deleter.hpp>
+#include <boost/log/core.hpp>
+#include <boost/log/sinks/sync_frontend.hpp>
+#include <boost/log/sinks/text_ostream_backend.hpp>
+#include <boost/smart_ptr/make_shared_object.hpp>
+#include <boost/smart_ptr/shared_ptr.hpp>
 
 TEST(ConfigParserTests, ProtocolDecimalsUseDotAndRequireTheWholeValue) {
   const auto fps = util::parse_decimal<double>("60.0");
@@ -254,6 +269,29 @@ TEST(ConfigLiveApplyTests, AiSettingsFromSavedVariablesStartFromTheBuiltInDefaul
   EXPECT_EQ(vars.count("port"), 1u);
 }
 
+TEST(ConfigParserTests, CaptureAutoLoadsAsUnset) {
+  // Every backend chooser reads an empty capture as auto. The word itself reached the capture
+  // evaluation as a backend it did not know, which then substituted one and recorded a silent
+  // failure for a host that was doing exactly what it was told.
+  std::unordered_map<std::string, std::string> vars {{"capture", "auto"}, {"port", "47989"}};
+  EXPECT_EQ(config::capture_setting(vars, "kms"), "");
+  EXPECT_EQ(vars.count("capture"), 0u) << "the key is consumed, as apply_config consumes it";
+  EXPECT_EQ(vars.count("port"), 1u);
+
+  std::unordered_map<std::string, std::string> named {{"capture", "kms"}};
+  EXPECT_EQ(config::capture_setting(named, ""), "kms");
+  std::unordered_map<std::string, std::string> absent;
+  EXPECT_EQ(config::capture_setting(absent, "portal"), "portal") << "an absent key leaves the setting alone";
+
+  // Startup has to parse the key through it, or none of this reaches a running host.
+  std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / "src/config.cpp");
+  ASSERT_TRUE(in);
+  const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  EXPECT_NE(source.find("video.capture = capture_setting(vars, "), std::string::npos);
+  EXPECT_EQ(source.find("string_f(vars, \"capture\", video.capture);"), std::string::npos)
+    << "capture is parsed around capture_setting again";
+}
+
 TEST(ConfigLiveApplyTests, SteamGridDbKeyAccessorRoundTrips) {
   const auto previous = config::steamgriddb_api_key();
   config::set_steamgriddb_api_key("round-trip-key");
@@ -387,5 +425,474 @@ TEST(ConfigFileModeTests, SymlinkIsNotFollowed) {
 
   EXPECT_TRUE(config::restrict_config_file_mode(link));
   EXPECT_EQ(fixture.mode(), 0664u);
+}
+
+// #782: the settings store refused a 0664 polaris.conf on read, and the console
+// got a bare 503 with nothing in the log, while the write side printed a chmod.
+// Every refusal now carries a reason and a fix, and the read side says them.
+namespace {
+  // What an operator would read, severity included.
+  class settings_log_capture_t {
+  public:
+    settings_log_capture_t():
+        stream_ {boost::make_shared<std::ostringstream>()} {
+      auto backend = boost::make_shared<boost::log::sinks::text_ostream_backend>();
+      backend->add_stream(boost::shared_ptr<std::ostream> {stream_.get(), boost::null_deleter {}});
+      backend->auto_flush(true);
+      sink_ = boost::make_shared<sink_t>(backend);
+      sink_->set_formatter(&logging::formatter);
+      boost::log::core::get()->add_sink(sink_);
+    }
+
+    ~settings_log_capture_t() {
+      boost::log::core::get()->remove_sink(sink_);
+    }
+
+    settings_log_capture_t(const settings_log_capture_t &) = delete;
+    settings_log_capture_t &operator=(const settings_log_capture_t &) = delete;
+
+    [[nodiscard]] std::string text() const {
+      return stream_->str();
+    }
+
+  private:
+    using sink_t = boost::log::sinks::synchronous_sink<boost::log::sinks::text_ostream_backend>;
+    boost::shared_ptr<std::ostringstream> stream_;
+    boost::shared_ptr<sink_t> sink_;
+  };
+
+  std::size_t occurrences(const std::string &text, std::string_view needle) {
+    std::size_t count = 0;
+    for (auto at = text.find(needle); at != std::string::npos; at = text.find(needle, at + needle.size())) {
+      ++count;
+    }
+    return count;
+  }
+
+  // What GET /api/config serves and the log says for a file the store refuses.
+  configuration_store::refusal_t refused_read(const std::filesystem::path &file) {
+    configuration_store::refusal_t refusal;
+    EXPECT_FALSE(configuration_store::read(file.string(), &refusal).has_value())
+      << "the settings store read a file it has to refuse: " << file;
+    EXPECT_EQ(refusal.path, file.string());
+    return refusal;
+  }
+
+  std::string warning_for(const std::filesystem::path &file) {
+    return "Warning: Refusing to use the settings file [" + file.string() + "]: ";
+  }
+
+  // A UNIX socket bound at a path. open(2) refuses one with ENXIO.
+  class bound_socket_t {
+  public:
+    explicit bound_socket_t(const std::filesystem::path &path):
+        descriptor_ {::socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0)} {
+      sockaddr_un address {};
+      address.sun_family = AF_UNIX;
+      const auto text = path.string();
+      if (descriptor_ < 0 || text.size() >= sizeof(address.sun_path)) return;
+      std::memcpy(address.sun_path, text.c_str(), text.size() + 1);
+      bound_ = ::bind(descriptor_, reinterpret_cast<const sockaddr *>(&address), sizeof(address)) == 0;
+    }
+
+    ~bound_socket_t() {
+      if (descriptor_ >= 0) ::close(descriptor_);
+    }
+
+    bound_socket_t(const bound_socket_t &) = delete;
+    bound_socket_t &operator=(const bound_socket_t &) = delete;
+
+    [[nodiscard]] bool bound() const {
+      return bound_;
+    }
+
+  private:
+    int descriptor_;
+    bool bound_ = false;
+  };
+
+  bool fits_a_socket_address(const std::filesystem::path &path) {
+    return path.string().size() < sizeof(sockaddr_un {}.sun_path);
+  }
+}  // namespace
+
+TEST(ConfigFileRefusalTests, GroupWritableFileNamesItsModeAndTheChmod) {
+  config_file_mode_fixture_t fixture {0664};
+  const auto refusal = refused_read(fixture.file);
+  EXPECT_EQ(refusal.kind, private_state_file::refusal_e::group_writable);
+  EXPECT_EQ(refusal.reason,
+            "It is writable by its group (mode 0664), and the settings store refuses a file another user can change.");
+  EXPECT_EQ(refusal.fix, "Restrict it with \"chmod go-w " + fixture.file.string() + "\".");
+}
+
+TEST(ConfigFileRefusalTests, OtherWritableFileNamesItsModeAndTheChmod) {
+  config_file_mode_fixture_t fixture {0666};
+  const auto refusal = refused_read(fixture.file);
+  EXPECT_EQ(refusal.kind, private_state_file::refusal_e::other_writable);
+  EXPECT_EQ(refusal.reason,
+            "It is writable by every user on this machine (mode 0666), and the settings store refuses a file another user can change.");
+  EXPECT_EQ(refusal.fix, "Restrict it with \"chmod go-w " + fixture.file.string() + "\".");
+}
+
+TEST(ConfigFileRefusalTests, SymlinkIsNamedAndReplacedWithWhatItPointsTo) {
+  config_file_mode_fixture_t fixture {0600};
+  const auto link = fixture.directory / "linked.conf";
+  std::filesystem::create_symlink(fixture.file, link);
+  const auto refusal = refused_read(link);
+  EXPECT_EQ(refusal.kind, private_state_file::refusal_e::symlink);
+  EXPECT_EQ(refusal.reason, "It is a symbolic link, and the settings store only reads a real file.");
+  EXPECT_EQ(refusal.fix, "Replace the link with a copy of what it points to: \"cp --remove-destination \"$(readlink -f " +
+                           link.string() + ")\" " + link.string() + "\".");
+}
+
+TEST(ConfigFileRefusalTests, HardLinkedFileIsNamedAndGivenOneLink) {
+  config_file_mode_fixture_t fixture {0600};
+  std::filesystem::create_hard_link(fixture.file, fixture.directory / "second-name.conf");
+  const auto refusal = refused_read(fixture.file);
+  EXPECT_EQ(refusal.kind, private_state_file::refusal_e::hard_linked);
+  EXPECT_EQ(refusal.reason,
+            "It has 2 hard links. The settings store only reads a file with one, since any other name for it can change it too.");
+  const auto file = fixture.file.string();
+  EXPECT_EQ(refusal.fix, "Give it a single link with \"cp -p " + file + ' ' + file + ".new && mv " + file + ".new " + file + "\".");
+}
+
+TEST(ConfigFileRefusalTests, OversizedFileNamesItsSizeAndTheLimit) {
+  config_file_mode_fixture_t fixture {0600};
+  std::ofstream {fixture.file, std::ios::trunc} << std::string(4 * 1024 * 1024 + 1, '#');
+  const auto refusal = refused_read(fixture.file);
+  EXPECT_EQ(refusal.kind, private_state_file::refusal_e::oversize);
+  EXPECT_EQ(refusal.reason, "It is 4194305 bytes, more than the 4 MiB the settings store reads.");
+  const auto file = fixture.file.string();
+  EXPECT_EQ(refusal.fix, "Move it aside with \"mv " + file + ' ' + file +
+                           ".old\", restart Polaris to write a new one, then copy back the settings you need.");
+}
+
+TEST(ConfigFileRefusalTests, MissingFileSaysSoAndHowToGetOneBack) {
+  config_file_mode_fixture_t fixture {0600};
+  const auto absent = fixture.directory / "absent.conf";
+  const auto refusal = refused_read(absent);
+  EXPECT_EQ(refusal.kind, private_state_file::refusal_e::missing);
+  EXPECT_EQ(refusal.reason, "The settings file does not exist.");
+  EXPECT_EQ(refusal.fix, "Restart Polaris to write a new one with the defaults, or put your copy back at " +
+                           absent.string() + ".");
+}
+
+TEST(ConfigFileRefusalTests, MissingFolderIsNamed) {
+  config_file_mode_fixture_t fixture {0600};
+  const auto gone = fixture.directory / "gone";
+  const auto refusal = refused_read(gone / "polaris.conf");
+  EXPECT_EQ(refusal.kind, private_state_file::refusal_e::directory_missing);
+  EXPECT_EQ(refusal.reason, "The folder that holds it, " + gone.string() + ", does not exist.");
+  EXPECT_TRUE(contains(refusal.fix, "Restart Polaris to create it")) << refusal.fix;
+}
+
+TEST(ConfigFileRefusalTests, DirectoryInPlaceOfTheFileIsNamed) {
+  config_file_mode_fixture_t fixture {0600};
+  const auto folder = fixture.directory / "folder.conf";
+  ASSERT_TRUE(std::filesystem::create_directory(folder));
+  const auto refusal = refused_read(folder);
+  EXPECT_EQ(refusal.kind, private_state_file::refusal_e::not_regular);
+  EXPECT_EQ(refusal.reason, "It is not a regular file.");
+  EXPECT_EQ(refusal.fix, "Move it out of the way with \"mv " + folder.string() + ' ' + folder.string() +
+                           ".old\" and restart Polaris to write a new settings file.");
+}
+
+TEST(ConfigFileRefusalTests, FileThisUserCannotOpenIsNamed) {
+  if (::geteuid() == 0) GTEST_SKIP() << "root opens a 0200 file anyway";
+  config_file_mode_fixture_t fixture {0200};
+  const auto refusal = refused_read(fixture.file);
+  EXPECT_EQ(refusal.kind, private_state_file::refusal_e::permission_denied);
+  EXPECT_EQ(refusal.reason, "Your user is not allowed to open it: Permission denied.");
+  const auto file = fixture.file.string();
+  EXPECT_EQ(refusal.fix, "Take it back with \"sudo chown \"$USER\": " + file + "\" and \"chmod 600 " + file +
+                           "\", then start Polaris without sudo.");
+}
+
+TEST(ConfigFileRefusalTests, UnsafeLockSidecarIsNamedAndMovedAside) {
+  config_file_mode_fixture_t fixture {0600};
+  const auto lock = fixture.directory / "polaris.conf.lock";
+  std::ofstream {fixture.directory / "elsewhere"} << "";
+  std::filesystem::create_hard_link(fixture.directory / "elsewhere", lock);
+  const auto refusal = refused_read(fixture.file);
+  EXPECT_EQ(refusal.kind, private_state_file::refusal_e::lock_unsafe);
+  EXPECT_EQ(refusal.reason, "Its lock file, " + lock.string() +
+                              ", is not a regular file that your user owns with a single link.");
+  EXPECT_EQ(refusal.fix, "Move it out of the way with \"mv " + lock.string() + ' ' + lock.string() +
+                           ".old\"; Polaris creates a new one.");
+}
+
+TEST(ConfigFileRefusalTests, HeldLockIsNamedAndTheReadWorksOnceItIsReleased) {
+  config_file_mode_fixture_t fixture {0600};
+  const auto lock = fixture.directory / "polaris.conf.lock";
+  const int holder = ::open(lock.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+  ASSERT_GE(holder, 0);
+  ASSERT_EQ(::flock(holder, LOCK_EX), 0);
+  const auto refusal = refused_read(fixture.file);
+  EXPECT_EQ(refusal.kind, private_state_file::refusal_e::lock_busy);
+  EXPECT_EQ(refusal.reason, "Another process is holding its lock file, " + lock.string() + ".");
+  EXPECT_TRUE(contains(refusal.fix, "pgrep -a polaris")) << refusal.fix;
+  ::close(holder);
+  configuration_store::refusal_t after;
+  EXPECT_TRUE(configuration_store::read(fixture.file.string(), &after).has_value());
+  EXPECT_FALSE(after);
+}
+
+TEST(ConfigFileRefusalTests, GroupWritableFolderIsNamedOncePerChangeInOneVoice) {
+  config_file_mode_fixture_t fixture {0600};
+  ASSERT_EQ(::chmod(fixture.directory.c_str(), 0775), 0);
+  settings_log_capture_t capture;
+  const auto refusal = refused_read(fixture.file);
+  EXPECT_EQ(refusal.kind, private_state_file::refusal_e::directory_writable);
+  EXPECT_EQ(refusal.reason, "The folder that holds it, " + fixture.directory.string() +
+                              ", is writable by group or other users (mode 0775), so Polaris will not keep private state there.");
+  EXPECT_EQ(refusal.fix, "Restrict it with \"chmod 700 " + fixture.directory.string() +
+                           "\"; a umask of 002 is enough to leave it group writable.");
+  // Settings asks again every few seconds while it is open. The store says it
+  // once, and the folder walk leaves it to the store rather than repeating it.
+  EXPECT_FALSE(configuration_store::read(fixture.file.string()).has_value());
+  EXPECT_FALSE(configuration_store::read(fixture.file.string()).has_value());
+  const auto log = capture.text();
+  EXPECT_EQ(occurrences(log, warning_for(fixture.file) + refusal.reason + ' ' + refusal.fix), 1u) << log;
+  EXPECT_EQ(occurrences(log, "Refusing to keep private state in ["), 0u) << log;
+}
+
+TEST(ConfigFileRefusalTests, FolderAboveTheFileIsNamedAsOneOnTheWayToIt) {
+  // ~/.config left 0775 by a 002 umask refuses ~/.config/polaris/polaris.conf.
+  // Calling ~/.config the folder that holds the file sends people to the wrong one.
+  config_file_mode_fixture_t fixture {0600};
+  const auto inner = fixture.directory / "polaris";
+  ASSERT_TRUE(std::filesystem::create_directory(inner));
+  ASSERT_EQ(::chmod(inner.c_str(), 0700), 0);
+  const auto file = inner / "polaris.conf";
+  std::ofstream {file} << "encoder = vaapi\n";
+  ASSERT_EQ(::chmod(file.c_str(), 0600), 0);
+  ASSERT_EQ(::chmod(fixture.directory.c_str(), 0775), 0);
+  const auto refusal = refused_read(file);
+  EXPECT_EQ(refusal.kind, private_state_file::refusal_e::directory_writable);
+  EXPECT_EQ(refusal.reason, "A folder on the way to it, " + fixture.directory.string() +
+                              ", is writable by group or other users (mode 0775), so Polaris will not keep private state there.");
+  EXPECT_EQ(refusal.fix, "Restrict it with \"chmod 700 " + fixture.directory.string() +
+                           "\"; a umask of 002 is enough to leave it group writable.");
+}
+
+TEST(ConfigFileRefusalTests, SymlinkedFolderIsNamedAsALink) {
+  // A config folder linked into a dotfiles repository. The walk never follows a
+  // link, and opening one as a folder fails with ENOTDIR rather than ELOOP.
+  config_file_mode_fixture_t fixture {0600};
+  const auto real = fixture.directory / "real";
+  ASSERT_TRUE(std::filesystem::create_directory(real));
+  ASSERT_EQ(::chmod(real.c_str(), 0700), 0);
+  std::ofstream {real / "polaris.conf"} << "encoder = vaapi\n";
+  const auto link = fixture.directory / "linked";
+  std::filesystem::create_directory_symlink(real, link);
+  const auto refusal = refused_read(link / "polaris.conf");
+  EXPECT_EQ(refusal.kind, private_state_file::refusal_e::directory_symlink);
+  EXPECT_EQ(refusal.reason, "The folder that holds it, " + link.string() +
+                              ", is a symbolic link, and Polaris only walks real folders to private state.");
+  EXPECT_EQ(refusal.fix, "Replace the link with the folder it points to, which \"readlink -f " + link.string() +
+                           "\" prints.");
+}
+
+TEST(ConfigFileRefusalTests, LockFileInTheWayIsMovedAside) {
+  // A folder there fails to open with EISDIR and a link with ELOOP. Both are in
+  // the way, and the fix is to move them, not to chown a lock file.
+  for (const bool as_link : {false, true}) {
+    config_file_mode_fixture_t fixture {0600};
+    const auto lock = fixture.directory / "polaris.conf.lock";
+    if (as_link) {
+      std::ofstream {fixture.directory / "elsewhere"} << "";
+      std::filesystem::create_symlink(fixture.directory / "elsewhere", lock);
+    } else {
+      ASSERT_TRUE(std::filesystem::create_directory(lock));
+    }
+    const auto refusal = refused_read(fixture.file);
+    EXPECT_EQ(refusal.kind, private_state_file::refusal_e::lock_unsafe) << "link " << as_link;
+    EXPECT_EQ(refusal.reason, "Its lock file, " + lock.string() +
+                                ", is not a regular file that your user owns with a single link.") << "link " << as_link;
+    EXPECT_EQ(refusal.fix, "Move it out of the way with \"mv " + lock.string() + ' ' + lock.string() +
+                             ".old\"; Polaris creates a new one.") << "link " << as_link;
+  }
+
+  // Nothing in the way, but the folder will not take a new lock file.
+  if (::geteuid() == 0) return;
+  config_file_mode_fixture_t fixture {0600};
+  ASSERT_EQ(::chmod(fixture.directory.c_str(), 0500), 0);
+  const auto refusal = refused_read(fixture.file);
+  ASSERT_EQ(::chmod(fixture.directory.c_str(), 0700), 0);
+  EXPECT_EQ(refusal.kind, private_state_file::refusal_e::lock_unavailable);
+  const auto lock = fixture.directory.string() + "/polaris.conf.lock";
+  EXPECT_EQ(refusal.reason, "Polaris could not open or lock its lock file, " + lock + ": Permission denied.");
+  EXPECT_EQ(refusal.fix, "Take it back with \"sudo chown \"$USER\": " + lock +
+                           "\" if another user owns it, and make sure your user can write to the folder that holds it.");
+}
+
+TEST(ConfigFileRefusalTests, SocketInPlaceOfTheFileOrItsLockIsNamed) {
+  // open(2) refuses a socket with ENXIO, which read as "Reading it failed" and a disk check.
+  config_file_mode_fixture_t fixture {0600};
+  if (!fits_a_socket_address(fixture.directory / "polaris.conf.lock")) {
+    GTEST_SKIP() << "the temporary directory is too deep for a socket address";
+  }
+  ASSERT_TRUE(std::filesystem::remove(fixture.file));
+  {
+    bound_socket_t socket {fixture.file};
+    ASSERT_TRUE(socket.bound()) << std::strerror(errno);
+    const auto refusal = refused_read(fixture.file);
+    EXPECT_EQ(refusal.kind, private_state_file::refusal_e::not_regular);
+    EXPECT_EQ(refusal.reason, "It is not a regular file.");
+    EXPECT_EQ(refusal.fix, "Move it out of the way with \"mv " + fixture.file.string() + ' ' + fixture.file.string() +
+                             ".old\" and restart Polaris to write a new settings file.");
+  }
+
+  config_file_mode_fixture_t locked {0600};
+  const auto lock = locked.directory / "polaris.conf.lock";
+  bound_socket_t socket {lock};
+  ASSERT_TRUE(socket.bound()) << std::strerror(errno);
+  const auto refusal = refused_read(locked.file);
+  EXPECT_EQ(refusal.kind, private_state_file::refusal_e::lock_unsafe);
+  EXPECT_EQ(refusal.fix, "Move it out of the way with \"mv " + lock.string() + ' ' + lock.string() +
+                           ".old\"; Polaris creates a new one.");
+}
+
+TEST(ConfigFileRefusalTests, FileDirectlyUnderTheRootIsNeverGivenAChownOfTheRoot) {
+  if (::geteuid() == 0) GTEST_SKIP() << "root owns / and may keep private state there";
+  // Only the walk opens /, and it refuses / before anything is created there.
+  const auto path = "/polaris-refusal-test-" + std::to_string(::getpid()) + ".conf";
+  const auto refusal = refused_read(path);
+  EXPECT_EQ(refusal.kind, private_state_file::refusal_e::directory_foreign_owner);
+  EXPECT_EQ(refusal.reason, "The folder that holds it, /, is owned by uid 0, and Polaris runs as uid " +
+                              std::to_string(::geteuid()) + ", so Polaris will not keep private state there.");
+  EXPECT_EQ(refusal.fix, "Keep the settings file in a folder your user owns, such as ~/.config/polaris, "
+                         "and start Polaris with that path instead of " + path + ".");
+
+  // A relative path is walked from the folder Polaris runs in. A command that
+  // says "." would run against whatever folder the operator's shell is in.
+  const auto here = std::filesystem::current_path().string();
+  const auto relative = configuration_store::describe_refusal(
+    "polaris.conf",
+    {.kind = private_state_file::refusal_e::directory_foreign_owner, .directory = ".", .holds_file = true}
+  );
+  EXPECT_TRUE(contains(relative.reason, "The folder that holds it, " + here + ", ")) << relative.reason;
+  EXPECT_TRUE(contains(relative.fix, "sudo chown -R \"$USER\": ")) << relative.fix;
+  EXPECT_TRUE(contains(relative.fix, here)) << relative.fix;
+  EXPECT_FALSE(contains(relative.fix, ": .\"")) << relative.fix;
+}
+
+TEST(ConfigFileRefusalTests, SaveAgainstAMissingFileLeavesItMissing) {
+  // A save carries the revision it read, so against a missing file it
+  // conflicts. The file did not read, so the log must not say it reads again,
+  // and the next read must not warn about it a second time.
+  config_file_mode_fixture_t fixture {0600};
+  const auto absent = fixture.directory / "absent.conf";
+  settings_log_capture_t capture;
+  EXPECT_EQ(configuration_store::revision(absent.string(), true), "");
+  EXPECT_EQ(configuration_store::replace(absent.string(), "encoder = nvenc\n", ""), configuration_store::result::conflict);
+  EXPECT_EQ(configuration_store::patch(absent.string(), {{"encoder", "nvenc"}}, std::string(64, 'a')),
+            configuration_store::result::conflict);
+  EXPECT_FALSE(configuration_store::read(absent.string()).has_value());
+  const auto log = capture.text();
+  EXPECT_EQ(occurrences(log, warning_for(absent) + "The settings file does not exist."), 1u) << log;
+  EXPECT_EQ(occurrences(log, "can be read again"), 0u) << log;
+  EXPECT_FALSE(std::filesystem::exists(absent));
+}
+
+TEST(ConfigFileRefusalTests, ReadableFileCarriesNoRefusal) {
+  config_file_mode_fixture_t fixture {0644};
+  configuration_store::refusal_t refusal {.kind = private_state_file::refusal_e::group_writable, .reason = "stale"};
+  const auto snapshot = configuration_store::read(fixture.file.string(), &refusal);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->contents, "encoder = vaapi\n");
+  EXPECT_FALSE(refusal);
+  EXPECT_EQ(refusal.path, fixture.file.string());
+  EXPECT_TRUE(refusal.reason.empty());
+  EXPECT_TRUE(refusal.fix.empty());
+}
+
+TEST(ConfigFileRefusalTests, EveryRefusalHasAReasonAndAFixInPlainWords) {
+  using private_state_file::refusal_e;
+  const std::string path = "/srv/polaris/polaris.conf";
+  for (auto kind = static_cast<int>(refusal_e::missing); kind <= static_cast<int>(refusal_e::read_failed); ++kind) {
+    private_state_file::refusal_t status {
+      .kind = static_cast<refusal_e>(kind),
+      .error_number = EIO,
+      .directory = "/srv/polaris",
+      .inspected = true,
+      .mode = 0664,
+      .owner = 4242,
+      .links = 1,
+      .size = 12,
+    };
+    const auto refusal = configuration_store::describe_refusal(path, status);
+    EXPECT_EQ(refusal.kind, status.kind) << kind;
+    EXPECT_EQ(refusal.path, path) << kind;
+    EXPECT_FALSE(refusal.reason.empty()) << kind;
+    EXPECT_FALSE(refusal.fix.empty()) << kind;
+    for (const std::string_view dash : {"\u2014", "\u2013", " - "}) {
+      EXPECT_FALSE(contains(refusal.reason, dash)) << kind << ": " << refusal.reason;
+      EXPECT_FALSE(contains(refusal.fix, dash)) << kind << ": " << refusal.fix;
+    }
+  }
+
+  // The branches a test cannot provoke without root or a racing writer.
+  const auto foreign = configuration_store::describe_refusal(path, {.kind = refusal_e::foreign_owner, .inspected = true, .owner = 0});
+  EXPECT_TRUE(contains(foreign.reason, "It is owned by uid 0, and Polaris runs as uid " + std::to_string(::geteuid()))) << foreign.reason;
+  EXPECT_TRUE(contains(foreign.fix, "sudo chown \"$USER\": " + path)) << foreign.fix;
+  const auto shrinking = configuration_store::describe_refusal(path, {.kind = refusal_e::size_changed});
+  EXPECT_EQ(shrinking.reason, "It changed size while Polaris was reading it, so something else is writing to it.");
+  const auto failing = configuration_store::describe_refusal(path, {.kind = refusal_e::read_failed, .error_number = EIO});
+  EXPECT_EQ(failing.reason, "Reading it failed: Input/output error.");
+  const auto unlockable = configuration_store::describe_refusal(path, {.kind = refusal_e::lock_unavailable, .error_number = EACCES});
+  EXPECT_EQ(unlockable.reason, "Polaris could not open or lock its lock file, " + path + ".lock: Permission denied.");
+  const auto owned = configuration_store::describe_refusal(path, {.kind = refusal_e::directory_foreign_owner, .directory = "/srv/polaris"});
+  EXPECT_TRUE(contains(owned.fix, "sudo chown -R \"$USER\": /srv/polaris")) << owned.fix;
+
+  // A path a shell would split is quoted in the command and left alone in prose.
+  const auto spaced = configuration_store::describe_refusal("/srv/a b/polaris.conf", {.kind = refusal_e::group_writable, .mode = 0664});
+  EXPECT_EQ(spaced.fix, "Restrict it with \"chmod go-w '/srv/a b/polaris.conf'\".");
+}
+
+TEST(ConfigFileRefusalTests, LogsOneWarningPerChangeOfRefusalNotPerRead) {
+  config_file_mode_fixture_t fixture {0664};
+  settings_log_capture_t capture;
+  for (int request = 0; request < 3; ++request) {
+    EXPECT_FALSE(configuration_store::read(fixture.file.string()).has_value());
+  }
+  auto log = capture.text();
+  EXPECT_EQ(occurrences(log, warning_for(fixture.file)), 1u) << log;
+  EXPECT_TRUE(contains(log, warning_for(fixture.file) +
+                              "It is writable by its group (mode 0664), and the settings store refuses a file another user can change. "
+                              "Restrict it with \"chmod go-w " + fixture.file.string() + "\".")) << log;
+
+  ASSERT_EQ(::chmod(fixture.file.c_str(), 0644), 0);
+  EXPECT_TRUE(configuration_store::read(fixture.file.string()).has_value());
+  EXPECT_TRUE(configuration_store::read(fixture.file.string()).has_value());
+  log = capture.text();
+  EXPECT_EQ(occurrences(log, "Info: The settings file [" + fixture.file.string() + "] can be read again."), 1u) << log;
+
+  ASSERT_EQ(::chmod(fixture.file.c_str(), 0666), 0);
+  EXPECT_FALSE(configuration_store::read(fixture.file.string()).has_value());
+  EXPECT_FALSE(configuration_store::read(fixture.file.string()).has_value());
+  log = capture.text();
+  EXPECT_EQ(occurrences(log, warning_for(fixture.file)), 2u) << log;
+  EXPECT_TRUE(contains(log, "writable by every user on this machine (mode 0666)")) << log;
+}
+
+TEST(ConfigFileRefusalTests, WriteSideSharesTheReadSidesWordsAndWarning) {
+  config_file_mode_fixture_t fixture {0664};
+  settings_log_capture_t capture;
+  EXPECT_EQ(configuration_store::replace(fixture.file.string(), "encoder = nvenc\n"), configuration_store::result::failed);
+  auto log = capture.text();
+  EXPECT_EQ(occurrences(log, warning_for(fixture.file)), 1u) << log;
+  EXPECT_TRUE(contains(log, "Restrict it with \"chmod go-w " + fixture.file.string() + "\".")) << log;
+
+  // The console reads next; the status has not changed, so the log does not repeat it.
+  EXPECT_FALSE(configuration_store::read(fixture.file.string()).has_value());
+  EXPECT_EQ(configuration_store::patch(fixture.file.string(), {{"encoder", "nvenc"}}), configuration_store::result::failed);
+  log = capture.text();
+  EXPECT_EQ(occurrences(log, warning_for(fixture.file)), 1u) << log;
+
+  ASSERT_EQ(::chmod(fixture.file.c_str(), 0644), 0);
+  EXPECT_EQ(configuration_store::replace(fixture.file.string(), "encoder = nvenc\n"), configuration_store::result::committed);
+  log = capture.text();
+  EXPECT_EQ(occurrences(log, "Info: The settings file [" + fixture.file.string() + "] can be read again."), 1u) << log;
 }
 #endif

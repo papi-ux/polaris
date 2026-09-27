@@ -161,23 +161,14 @@ namespace video {
       }
 #endif
 
-      if (info.gpu_driver.empty()) {
-        info.reason = "Auto could not identify the selected render-node driver; probing available encoders in the established order.";
-      } else if (info.policy == "amd_private_vulkan_live_probe") {
-        info.reason = "Auto detected AMD on a private-compositor route; prefer Vulkan Video and verify the exact live GPU-native frame path, with VA-API fallback.";
-      } else if (info.policy == "amd_private_vulkan_not_built") {
-        info.reason = "Auto detected AMD, but this build has no Vulkan Video support; prefer VA-API.";
-      } else if (info.policy == "amd_established_desktop") {
-        info.reason = "Auto detected AMD on a desktop capture route; use the established VA-API path until desktop Vulkan has the same live-frame safety gate.";
-      } else if (info.policy == "nvidia_nvenc") {
-        info.reason = "Auto detected NVIDIA; prefer NVENC.";
-      } else if (info.policy == "nouveau_availability_probe") {
-        info.reason = "Auto detected Nouveau; probe available encoders because the proprietary NVENC stack is unavailable.";
-      } else if (info.policy == "intel_vaapi") {
-        info.reason = "Auto detected Intel; prefer VA-API.";
-      } else {
-        info.reason = "Auto is probing the encoders available for the selected GPU.";
-      }
+#ifdef POLARIS_BUILD_VULKAN
+      constexpr bool vulkan_built = true;
+#else
+      constexpr bool vulkan_built = false;
+#endif
+      info.reason = std::string {
+        linux_encoder_auto_policy::reason(info.policy, !info.gpu_driver.empty(), vulkan_built)
+      };
 #else
       info.policy = ::config::video.encoder.empty() ? "availability_probe" : "explicit";
       info.preferred_encoder = ::config::video.encoder.empty() ? "automatic" : ::config::video.encoder;
@@ -214,18 +205,28 @@ namespace video {
 
       if (info.mode == "explicit" && !info.fallback_used) {
         info.reason = "The explicitly configured encoder passed runtime validation.";
+#ifdef __linux__
+        if (const auto own = linux_encoder_auto_policy::explicit_encoder_reason(info.selected_encoder); !own.empty()) {
+          info.reason = std::string {own};
+        }
+#endif
       } else if (info.mode == "explicit") {
         info.reason = "The explicitly configured encoder did not pass this legacy non-strict probe; selected [" +
                       info.selected_encoder + "] instead.";
       } else if (info.fallback_used) {
-        info.reason += " Preferred encoder [" + info.preferred_encoder +
-                       "] did not satisfy this runtime; selected [" +
-                       info.selected_encoder + "] instead.";
-        info.reason += nvenc_fallback_detail_impl(
+        // A fallback is the one case the Doctor grades encoder selection watch, and so the one case
+        // Nova's Android Doctor card can show this reason, in two lines after its own classification
+        // and Try first text. The policy sentence runs to about 560 characters on AMD outside labwc,
+        // so the fallback opens the reason and the policy sentence follows it.
+        std::string fallback = "Preferred encoder [" + info.preferred_encoder +
+                               "] did not satisfy this runtime; selected [" +
+                               info.selected_encoder + "] instead.";
+        fallback += nvenc_fallback_detail_impl(
           info.preferred_encoder,
           info.selected_encoder,
           info.driver_version
         );
+        info.reason = info.reason.empty() ? std::move(fallback) : std::move(fallback) + " " + info.reason;
       } else if (!info.selected_encoder.empty()) {
         info.reason += " Selected [" + info.selected_encoder + "].";
       }
@@ -1152,24 +1153,41 @@ namespace video {
       return key.str();
     }
 
-    std::optional<probe_reuse::identity_t> current_probe_identity(std::string_view backend) {
-#ifdef POLARIS_TESTS
-      if (probe_test_hooks) return probe_test_hooks->identity;
+    /**
+     * Whether this route and encoder can give a probe an identity at all, from the inputs
+     * current_probe_identity() reads. The encoder_auto line asks it to say why a fresh probe runs.
+     */
+    bool probe_route_carries_identity(std::string_view backend) {
+#ifdef __linux__
+      return probe_reuse::route_carries_identity(
+        config::video.linux_display.use_cage_compositor,
+        stream_display_policy::capture_for_current_mode(),
+        backend
+      );
+#else
+      return false;
 #endif
+    }
+
+    std::optional<probe_reuse::identity_t> current_probe_identity(std::string_view backend) {
 #ifdef __linux__
       auto decline = [](std::string_view reason) -> std::optional<probe_reuse::identity_t> {
         BOOST_LOG(debug) << "Encoder probe requires live validation: " << reason;
         return std::nullopt;
       };
       // Only the owned private compositor currently provides a live,
-      // generation-bound topology observation. Desktop/portal/unknown routes
-      // keep probing until they implement an equally strong identity contract.
-      const auto requested_capture = stream_display_policy::capture_for_current_mode();
-      if (!config::video.linux_display.use_cage_compositor || !probe_drivers ||
-          (!requested_capture.empty() && requested_capture != "wlr") ||
-          !probe_drivers->has_capture_routes()) return decline("capture route or retained provider proof unavailable");
+      // generation-bound topology observation, and only NVENC binds provider
+      // evidence to it. Desktop/portal/unknown routes keep probing until they
+      // implement an equally strong identity contract.
+      if (!probe_route_carries_identity(backend)) return decline("capture route or encoder carries no probe identity");
+#ifdef POLARIS_TESTS
+      // A test identity stands in for the provider and hardware observation below, not for the
+      // route, so a test sees the reuse the real gate gives on the route it sets up.
+      if (probe_test_hooks) return probe_test_hooks->identity;
+#endif
+      if (!probe_drivers || !probe_drivers->has_capture_routes()) return decline("retained provider proof unavailable");
       // Require actual provider evidence, collected before probe owners died.
-      if (backend != "nvenc" || !probe_drivers->contains_provider("libnvidia-encode.so") ||
+      if (!probe_drivers->contains_provider("libnvidia-encode.so") ||
           !probe_drivers->contains_provider("libcuda.so")) return decline("NVENC or CUDA provider unavailable");
       const auto providers = probe_drivers->current_key();
       const auto selection = platf::encoder_probe_identity::provider_selection_key();
@@ -1188,6 +1206,9 @@ namespace video {
       return probe_reuse::identity_t {hardware->gpu, hardware->driver + *providers + *selection, *topology,
                                       encoder_probe_settings(config::video)};
 #else
+#ifdef POLARIS_TESTS
+      if (probe_test_hooks) return probe_test_hooks->identity;
+#endif
       return std::nullopt;
 #endif
     }
@@ -1588,8 +1609,10 @@ namespace video {
         return -1;
       }
 
-      if (device_->convert(*compat_img)) {
-        return -1;
+      if (const auto status = device_->convert(*compat_img); status != 0) {
+        // A device that can never read what this capture hands it says so, and the stream ends once
+        // instead of a session being built again for every frame. Anything else fails this frame.
+        return status == platf::convert_capture_unreadable ? convert_session_is_over : -1;
       }
 
       frame.apply_conversion_result(request);
@@ -2023,6 +2046,11 @@ namespace video {
       return session->bitstream();
     }
 
+    /// How the last frame with a picture in it reached the codec, for the stream stats.
+    pyrowave_encode::route_e route() const {
+      return session ? session->route() : pyrowave_encode::route_e::unknown;
+    }
+
   private:
     std::unique_ptr<pyrowave_encode::session_t> session;
     int framerate = 60;
@@ -2122,10 +2150,67 @@ namespace video {
     stream_packets::destination_t channel_data;
   };
 
+  /**
+   * What one consuming session publishes about its capture: its request, taken as the session
+   * started, and what the display it encodes from opened.
+   *
+   * The display is shared. A second viewer joins one it did not open, and the video thread can open
+   * it before the session registers its stats entry. So every session publishes for itself from its
+   * own encode loop, and keeps trying until a write matched by its own generation lands, the way
+   * record_capture_source() keeps its value only after one does.
+   */
+  struct capture_backend_publication_t {
+    std::uint64_t session_generation = 0;
+    stream_stats::capture_backend_t backend;
+    bool published = false;
+  };
+
+  static capture_backend_publication_t capture_backend_publication(const config_t &config, const platf::capture_route_t &route) {
+    capture_backend_publication_t publication;
+    publication.session_generation = config.session_generation;
+    publication.backend.preference = config.capture_request.preference;
+#ifdef __linux__
+    publication.backend.requested = stream_display_policy::canonical_capture_backend(config.capture_generation.capture_backend);
+#else
+    publication.backend.requested = config.capture_generation.capture_backend;
+#endif
+    publication.backend.opened = route.opened;
+    publication.backend.route = route.route;
+    publication.backend.mode_override_reason = config.capture_request.mode_override_reason;
+    publication.backend.route_fallback_reason = route.fallback_reason;
+    return publication;
+  }
+
+  // A display that says nothing about what it opened has nothing to publish, and a probe's display
+  // is not what any session streams from, so neither ever writes. A publication that lands starts
+  // the frame record over for the display it names: stats reads the frames as unknown until one
+  // is written again, so the next accepted frame is written even when it matches the last one.
+  // It starts the PyroWave route record over the same way, for a loop that keeps one: the landing
+  // cleared the session's route, and a route written before it, while the publication was still
+  // being refused, would otherwise never be written again.
+  static void publish_capture_backend(
+    capture_backend_publication_t &publication,
+    std::optional<stream_stats::capture_source_t> &reported_source,
+    std::string *reported_pyrowave_route = nullptr
+  ) {
+    if (publication.published || publication.session_generation == 0 ||
+        publication.backend.opened.empty() || encoder_probe_active()) {
+      return;
+    }
+    publication.published = stream_stats::record_capture_backend(publication.session_generation, publication.backend);
+    if (publication.published) {
+      reported_source.reset();
+      if (reported_pyrowave_route) {
+        reported_pyrowave_route->clear();
+      }
+    }
+  }
+
   struct sync_session_t {
     sync_session_ctx_t *ctx;
     std::unique_ptr<encode_session_t> session;
     std::optional<stream_stats::capture_source_t> reported_source;
+    capture_backend_publication_t capture_backend;
   };
 
   void record_capture_source(const config_t &config, const frame_t &frame,
@@ -2133,13 +2218,44 @@ namespace video {
     if (config.session_generation == 0 || !frame.valid()) return;
     const stream_stats::capture_source_t source {
       frame.width, frame.height, config.width, config.height,
-      frame.source_metadata.transport, frame.source_metadata.residency
+      frame.source_metadata.transport, frame.source_metadata.residency,
+      frame.source_metadata.format
     };
     // Dimensions normally stay fixed. Avoid another per-frame stats lock while
     // still publishing a renegotiated size or a changed capture path.
     if (reported == source) return;
     if (stream_stats::record_capture_source(config.session_generation, source)) reported = source;
   }
+
+  /**
+   * Publish how a PyroWave session's frames reach the codec, for the session's own generation, when
+   * that changes.
+   *
+   * The first frame with a picture in it decides the route and a GPU path that falls back changes
+   * it, so the loop reads it after every frame the session accepts and this writes only when it
+   * moved. Like record_capture_source(), the value is kept only once a write for the session's own
+   * generation lands, so a session that registers after its first frame is still written. An unknown
+   * route is never written, because missing is unknown. A probe writes nothing, and nothing here
+   * moves a network or video policy revision.
+   */
+  void record_pyrowave_route(const config_t &config, std::string_view route, std::string &reported) {
+    if (config.session_generation == 0 || route.empty() || route == reported || encoder_probe_active()) {
+      return;
+    }
+    if (stream_stats::record_pyrowave_route(config.session_generation, route)) {
+      reported = route;
+    }
+  }
+
+#ifdef POLARIS_BUILD_PYROWAVE
+  /// What the encode loop records after a frame its session accepted: the route of a PyroWave
+  /// session, read from the codec session it wraps, and nothing for any other encoder.
+  void record_pyrowave_route(const config_t &config, const encode_session_t &session, std::string &reported) {
+    if (const auto *pyrowave = dynamic_cast<const pyrowave_encode_session_t *>(&session)) {
+      record_pyrowave_route(config, pyrowave_encode::route_name(pyrowave->route()), reported);
+    }
+  }
+#endif
 
   using encode_session_ctx_queue_t = safe::queue_t<sync_session_ctx_t>;
   using encode_e = platf::capture_e;
@@ -2945,6 +3061,26 @@ namespace video {
   ) {
     return active == incoming;
   }
+
+#ifdef __linux__
+  /**
+   * What a session measures its generation's capture request against: polaris.conf's capture as
+   * loaded, and the rule that set it aside for this request, asked with the generation's own mode,
+   * compositor and exact output.
+   */
+  static capture_generation::request_context_t capture_request_for_session(const capture_generation::identity_t &generation) {
+    capture_generation::request_context_t request;
+    request.preference = stream_display_policy::loaded_capture_setting();
+    request.mode_override_reason = stream_display_policy::capture_request_override_reason(
+      request.preference,
+      generation.capture_backend,
+      generation.stream_mode,
+      generation.use_cage_compositor,
+      !generation.exact_display_name.empty()
+    );
+    return request;
+  }
+#endif
 
   capture_generation::identity_t current_capture_generation_identity() {
     auto configured_output_name = config::video.output_name;
@@ -4313,6 +4449,21 @@ namespace video {
     return session;
   }
 
+  /**
+   * End a stream its encoder can never produce a picture for, and have the client told why.
+   *
+   * Raising the shutdown event alone ended the stream with a bare disconnect. A Moonlight client
+   * reads that as a dropped connection and reconnects, Nova up to four times, and each new session
+   * met the same refusal before the client gave up with a generic error. With this raised first, the
+   * session's control thread ends the stream with the frame conversion termination code instead,
+   * which the client shows as a fatal video encoding error and does not reconnect into. First, so
+   * that whoever sees the shutdown already sees why.
+   */
+  void end_stream_encoder_cannot_serve(const safe::mail_t &mail) {
+    mail->event<bool>(mail::frame_conversion_failed)->raise(true);
+    mail->event<bool>(mail::shutdown)->raise(true);
+  }
+
   void encode_run(
     int &frame_nr,  // Store progress of the frame number
     safe::mail_t mail,
@@ -4342,7 +4493,7 @@ namespace video {
       if (refused_for_good) {
         // Returning alone leaves the host to build this session again, which is right for a failure
         // that might not repeat and wrong for one that cannot do anything else.
-        mail->event<bool>(mail::shutdown)->raise(true);
+        end_stream_encoder_cannot_serve(mail);
       }
       return;
     }
@@ -4442,6 +4593,11 @@ namespace video {
 
     bool missing_frame_timestamp_warning_logged = false;
     std::optional<stream_stats::capture_source_t> reported_source;
+    // Only a PyroWave session records a route into it. Each display's publication starts it over.
+    std::string reported_pyrowave_route;
+    // Published from the loop until it lands, so a session registered after the display opened,
+    // and one that joined a display another session opened, both carry it.
+    auto capture_backend = capture_backend_publication(config, disp->capture_route);
     auto fps_window_start = std::chrono::steady_clock::now();
     int fps_window_frames = 0;
     double measured_fps = 0.0;
@@ -4468,6 +4624,8 @@ namespace video {
       if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1)) {
         break;
       }
+
+      publish_capture_backend(capture_backend, reported_source, &reported_pyrowave_route);
 
       bool requested_idr_frame = false;
 
@@ -4545,13 +4703,17 @@ namespace video {
               // Breaking out of this loop is what the host answers by building the session again,
               // which is right for a frame that arrived wrong and wrong for a session that cannot
               // read any frame capture will produce. End the stream instead, after the route
-              // handler above has had its say, so a retired GPU-native route is still retired.
-              shutdown_event->raise(true);
+              // handler above has had its say, so a retired GPU-native route is still retired, and
+              // tell the client why, so it does not reconnect into the same refusal.
+              end_stream_encoder_cannot_serve(mail);
             }
             break;
           }
 
           record_capture_source(config, frame, reported_source);
+#ifdef POLARIS_BUILD_PYROWAVE
+          record_pyrowave_route(config, *session, reported_pyrowave_route);
+#endif
           *frame_timestamp = pacing_decision.timestamp;
         } else if (!images->running()) {
           break;
@@ -4700,7 +4862,8 @@ namespace video {
               config.videoFormat == 1 ? "hevc" : "h264",
             config.width,
             config.height,
-            encoder.name
+            encoder.name,
+            config.session_generation
           );
         }
         } // end fps tracking scope
@@ -4968,6 +5131,8 @@ namespace video {
     }
 
     encode_session.session = std::move(session);
+    encode_session.capture_backend = capture_backend_publication(ctx.config, disp->capture_route);
+    publish_capture_backend(encode_session.capture_backend, encode_session.reported_source);
 
     return encode_session;
   }
@@ -5179,6 +5344,8 @@ namespace video {
             ec = platf::capture_e::reinit;
             return false;
           }
+          // Published first, so the frame this session accepts next is recorded for its display.
+          publish_capture_backend(pos->capture_backend, pos->reported_source);
           if (frame_captured) record_capture_source(ctx->config, frame, pos->reported_source);
           if (encode(ctx->frame_nr++, *pos->session, ctx->packets, ctx->channel_data, frame_timestamp)) {
             BOOST_LOG(error) << "Could not encode video packet"sv;
@@ -5257,6 +5424,86 @@ namespace video {
     while (encode_run_sync(synced_session_ctxs, ctx, display_names, display_p) == encode_e::reinit) {}
   }
 
+  /**
+   * Build an encode session on the display capture last published, and build it again each time one
+   * returns, until the stream is over.
+   *
+   * A session that returns is built again on whatever display capture has published by then, which
+   * is right for a failure that might not repeat and for a display that was opened again. A session
+   * that can never be built for this stream, such as a PyroWave session whose client negotiated HDR
+   * from a display that is not in HDR, raises the stream's shutdown through
+   * end_stream_encoder_cannot_serve() before it returns, and the loop stops there instead of
+   * building the same refusal again for as long as the stream lasts.
+   *
+   * @param capture_ctx The capture thread's display and its reinitialization signals.
+   */
+  void encode_published_displays(
+    int &frame_nr,
+    const safe::mail_t &mail,
+    const img_event_t &images,
+    config_t &config,
+    capture_thread_async_ctx_t &capture_ctx,
+    const stream_packets::destination_t &channel_data,
+    const packet_queue_t &packets
+  ) {
+    auto shutdown_event = mail->event<bool>(mail::shutdown);
+    auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
+    auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
+
+    while (!shutdown_event->peek() && images->running()) {
+      // Wait for the main capture event when the display is being reinitialized
+      if (capture_ctx.reinit_event.peek() || capture_ctx.reinit_request_event.peek()) {
+        std::this_thread::sleep_for(20ms);
+        continue;
+      }
+      // Wait for the display to be ready
+      std::shared_ptr<platf::display_t> display;
+      {
+        auto lg = capture_ctx.display_wp.lock();
+        if (capture_ctx.display_wp->expired()) {
+          continue;
+        }
+
+        display = capture_ctx.display_wp->lock();
+      }
+
+      auto &encoder = encoder_for_session(config);
+
+      // A rollback or newer paired target can arrive while an FFmpeg NVENC
+      // session is being torn down. Build the replacement directly at the
+      // latest exact target; successful session open remains the ack boundary.
+      if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
+        config.bitrate = request->target_bitrate_kbps;
+      }
+
+      auto encode_device = make_encode_device(*display, encoder, config);
+      if (!encode_device) {
+        invalidate_live_probe_reuse();
+        return;
+      }
+
+      // absolute mouse coordinates require that the dimensions of the screen are known
+      touch_port_event->raise(make_port(display.get(), config));
+
+      // Update client with our current HDR display state
+      hdr_event->raise(make_hdr_info(*encode_device));
+
+      encode_run(
+        frame_nr,
+        mail,
+        images,
+        config,
+        display,
+        std::move(encode_device),
+        capture_ctx.reinit_event,
+        capture_ctx.reinit_request_event,
+        encoder,
+        channel_data,
+        packets
+      );
+    }
+  }
+
   void capture_async(
     safe::mail_t mail,
     config_t &config,
@@ -5291,64 +5538,10 @@ namespace video {
 
     int frame_nr = 1;
 
-    auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
-    auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
-
     // Encoding takes place on this thread
     platf::adjust_thread_priority(platf::thread_priority_e::high);
 
-    while (!shutdown_event->peek() && images->running()) {
-      // Wait for the main capture event when the display is being reinitialized
-      if (ref->reinit_event.peek() || ref->reinit_request_event.peek()) {
-        std::this_thread::sleep_for(20ms);
-        continue;
-      }
-      // Wait for the display to be ready
-      std::shared_ptr<platf::display_t> display;
-      {
-        auto lg = ref->display_wp.lock();
-        if (ref->display_wp->expired()) {
-          continue;
-        }
-
-        display = ref->display_wp->lock();
-      }
-
-      auto &encoder = encoder_for_session(config);
-
-      // A rollback or newer paired target can arrive while an FFmpeg NVENC
-      // session is being torn down. Build the replacement directly at the
-      // latest exact target; successful session open remains the ack boundary.
-      if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
-        config.bitrate = request->target_bitrate_kbps;
-      }
-
-      auto encode_device = make_encode_device(*display, encoder, config);
-      if (!encode_device) {
-        invalidate_live_probe_reuse();
-        return;
-      }
-
-      // absolute mouse coordinates require that the dimensions of the screen are known
-      touch_port_event->raise(make_port(display.get(), config));
-
-      // Update client with our current HDR display state
-      hdr_event->raise(make_hdr_info(*encode_device));
-
-      encode_run(
-        frame_nr,
-        mail,
-        images,
-        config,
-        display,
-        std::move(encode_device),
-        ref->reinit_event,
-        ref->reinit_request_event,
-        encoder,
-        channel_data,
-        packets
-      );
-    }
+    encode_published_displays(frame_nr, mail, images, config, *ref.get(), channel_data, packets);
   }
 
   capture_preparation_e prepare_capture_for_launch(const config_t &config, std::shared_ptr<void> &preparation) {
@@ -5422,6 +5615,11 @@ namespace video {
     if (config.capture_generation.empty()) {
       config.capture_generation = current_capture_generation_identity();
     }
+#ifdef __linux__
+    // Taken now, as the session starts, and never read again from the live configuration, which a
+    // reload or a teardown can move while this session is still streaming.
+    config.capture_request = capture_request_for_session(config.capture_generation);
+#endif
     if (encoder_for_session(config).flags & PARALLEL_ENCODING) {
       capture_async(
         std::move(mail),
@@ -5982,8 +6180,12 @@ namespace video {
     const auto identity_before = current_probe_identity(chosen_encoder ? chosen_encoder->name : std::string_view(config::video.encoder));
     if (chosen_encoder && successful_probe.reusable(
           identity_before, chosen_encoder->name, config::video.encoder,
-          (chosen_encoder->flags & ALWAYS_REPROBE) || selection_plan.exact_live_probe_required ||
-            config::video.encoder == "vulkan"sv || chosen_encoder->name == "vulkan"sv)) {
+          probe_reuse::live_probe_mandatory(
+            (chosen_encoder->flags & ALWAYS_REPROBE) != 0,
+            selection_plan.exact_live_probe_required,
+            config::video.encoder,
+            chosen_encoder->name
+          ))) {
       BOOST_LOG(info) << "Encoder probe reused: unchanged live GPU, driver, capture generation and settings"sv;
       return 0;
     }
@@ -6066,14 +6268,10 @@ namespace video {
     // cuda_dmabuf_t. Zeroing the mode here drops the Main10 bits from
     // ServerCodecModeSupport, so clients refuse to start an HDR stream at all
     // and the host never gets the chance to prove itself.
-    const bool main10_probe_is_authoritative = [] {
-#ifdef __linux__
-      return !(config::video.capture == "portal" &&
-               config::video.linux_display.stream_mode == "gamescope_stream");
-#else
-      return true;
-#endif
-    }();
+    const bool main10_probe_is_authoritative = video::main10_probe_is_authoritative(
+      config::video.capture,
+      config::video.linux_display.stream_mode
+    );
 
     auto adjust_encoder_constraints = [&](encoder_t *encoder) {
       // If we can't satisfy both the encoder and codec requirement, prefer the encoder over codec support
@@ -6228,13 +6426,6 @@ namespace video {
       encoder_selection_info.driver_version = current_nvidia_driver_version();
     }
     finalize_encoder_selection_info(encoder_selection_info, encoder.name);
-    BOOST_LOG(info) << "encoder_auto: mode="sv << encoder_selection_info.mode
-                    << " driver="sv << (encoder_selection_info.gpu_driver.empty() ? "unknown" : encoder_selection_info.gpu_driver)
-                    << " policy="sv << encoder_selection_info.policy
-                    << " preferred="sv << encoder_selection_info.preferred_encoder
-                    << " selected="sv << encoder_selection_info.selected_encoder
-                    << " fallback_used="sv << encoder_selection_info.fallback_used
-                    << " exact_live_probe_required="sv << encoder_selection_info.exact_live_probe_required;
 
     // A configured encoder that fails validation is quietly replaced by the
     // fallback search above, and the stream still comes up. The user set an
@@ -6311,7 +6502,45 @@ namespace video {
 #ifdef __linux__
     probe_drivers = collecting_probe_drivers;
 #endif
-    successful_probe.remember(identity_before, current_probe_identity(encoder.name), encoder.name, successful_epoch);
+    const auto identity_after = current_probe_identity(encoder.name);
+    successful_probe.remember(identity_before, identity_after, encoder.name, successful_epoch);
+
+    // exact_live_probe_required is only the Auto policy's input to probe reuse, and only Auto sets
+    // it. #635 read the flag as a check the probe had failed, so the line keeps the field's name,
+    // which Doctor and Nova use, and says what it is whatever its value. next_probe_reuse is the
+    // reuse gate's own answer: reusable() asked with the identity just recorded and the inputs the
+    // gate at the top of the next probe uses. It says reuse only where that gate would give it,
+    // which is NVENC on the labwc private compositor, and otherwise says why a fresh probe runs.
+    // It is logged here, after remember(), because nothing before it knows what was recorded.
+    const bool always_reprobe = (encoder.flags & ALWAYS_REPROBE) != 0;
+    const bool gate_reuses = successful_probe.reusable(
+      identity_after,
+      encoder.name,
+      config::video.encoder,
+      probe_reuse::live_probe_mandatory(
+        always_reprobe,
+        selection_plan.exact_live_probe_required,
+        config::video.encoder,
+        encoder.name
+      )
+    );
+    BOOST_LOG(info) << "encoder_auto: mode="sv << encoder_selection_info.mode
+                    << " driver="sv << (encoder_selection_info.gpu_driver.empty() ? "unknown" : encoder_selection_info.gpu_driver)
+                    << " policy="sv << encoder_selection_info.policy
+                    << " preferred="sv << encoder_selection_info.preferred_encoder
+                    << " selected="sv << encoder_selection_info.selected_encoder
+                    << " fallback_used="sv << encoder_selection_info.fallback_used
+                    << " exact_live_probe_required="sv << encoder_selection_info.exact_live_probe_required
+                    << " (Auto policy flag, not a probe result)"sv
+                    << " next_probe_reuse="sv
+                    << probe_reuse::next_probe_reuse(
+                         gate_reuses,
+                         always_reprobe,
+                         selection_plan.exact_live_probe_required,
+                         config::video.encoder,
+                         encoder.name,
+                         probe_route_carries_identity(encoder.name)
+                       );
     return 0;
   }
 
@@ -6772,6 +7001,17 @@ namespace video {
     }
   }
 
+  bool main10_probe_is_authoritative(std::string_view capture, std::string_view stream_mode) {
+#ifdef __linux__
+    return !(stream_display_policy::canonical_capture_backend(capture) == "portal" &&
+             stream_mode == stream_display_policy::k_gamescope_stream);
+#else
+    (void) capture;
+    (void) stream_mode;
+    return true;
+#endif
+  }
+
   bool automatic_encoder_prefers_gpu_native_capture() {
 #ifdef __linux__
     if (!config::video.encoder.empty()) {
@@ -6942,6 +7182,30 @@ namespace video {
     return results;
   }
 
+  int convert_with_encode_device_for_tests(std::unique_ptr<platf::avcodec_encode_device_t> device, frame_t &frame) {
+    encode_device_frame_converter_t<platf::avcodec_encode_device_t> converter {
+      "convert-test", std::move(device), conversion_request_t {}
+    };
+    return converter.convert(frame, conversion_request_t {});
+  }
+
+  void end_stream_encoder_cannot_serve_for_tests(const safe::mail_t &mail) {
+    end_stream_encoder_cannot_serve(mail);
+  }
+
+  void encode_published_display_for_tests(const safe::mail_t &mail, config_t config,
+                                          const std::shared_ptr<platf::display_t> &display,
+                                          const stream_packets::destination_t &channel_data) {
+    // What the capture thread publishes, without a capture thread: its display and signals that
+    // are never raised.
+    capture_thread_async_ctx_t capture_ctx {};
+    capture_ctx.display_wp = display;
+    const auto images = std::make_shared<img_event_t::element_type>();
+    int frame_nr = 1;
+    encode_published_displays(frame_nr, mail, images, config, capture_ctx, channel_data,
+                              mail->queue<packet_t>(mail::video_packets));
+  }
+
   int hevc_profile_for_input_for_tests(int bit_depth, int chroma_sampling_type) {
     return hevc_profile_for_input(bit_depth, chroma_sampling_type);
   }
@@ -6990,6 +7254,13 @@ namespace video {
     };
   }
 
+  void finalize_encoder_selection_info_for_tests(
+    encoder_selection_info_t &info,
+    std::string_view selected_encoder
+  ) {
+    finalize_encoder_selection_info(info, selected_encoder);
+  }
+
   int probe_encoders_with_hooks_for_tests(
     const probe_reuse::identity_t &identity,
     const std::function<bool(encoder_t &, bool)> &validate
@@ -7027,6 +7298,92 @@ namespace video {
   ) {
     return capture_generations_match(active, incoming);
   }
+
+  bool publish_capture_backend_for_tests(
+    const config_t &config,
+    const platf::capture_route_t &route,
+    bool &published,
+    std::optional<stream_stats::capture_source_t> &reported_source
+  ) {
+    auto publication = capture_backend_publication(config, route);
+    publication.published = published;
+    publish_capture_backend(publication, reported_source);
+    published = publication.published;
+    return published;
+  }
+
+  bool publish_capture_backend_for_tests(const config_t &config, const platf::capture_route_t &route, bool &published) {
+    std::optional<stream_stats::capture_source_t> reported_source;
+    return publish_capture_backend_for_tests(config, route, published, reported_source);
+  }
+
+  bool publish_capture_backend_for_tests(
+    const config_t &config,
+    const platf::capture_route_t &route,
+    bool &published,
+    std::optional<stream_stats::capture_source_t> &reported_source,
+    std::string &reported_pyrowave_route
+  ) {
+    auto publication = capture_backend_publication(config, route);
+    publication.published = published;
+    publish_capture_backend(publication, reported_source, &reported_pyrowave_route);
+    published = publication.published;
+    return published;
+  }
+
+  void record_pyrowave_route_for_tests(const config_t &config, std::string_view route, std::string &reported) {
+    record_pyrowave_route(config, route, reported);
+  }
+
+  std::optional<std::string> pyrowave_route_of_a_host_frame_for_tests(const config_t &config) {
+#ifdef POLARIS_BUILD_PYROWAVE
+    if (!pyrowave_encode::available()) {
+      return std::nullopt;
+    }
+    constexpr auto range = pyrowave_encode::dynamic_range_e::sdr;
+    auto codec = pyrowave_encode::make_session(config.width, config.height, pyrowave_encode::chroma_e::yuv420, range);
+    if (!codec) {
+      return std::string {};
+    }
+    // The session the host builds for a PyroWave stream, held the way the encode loop holds it.
+    const std::unique_ptr<encode_session_t> session =
+      std::make_unique<pyrowave_encode_session_t>(std::move(codec), config.framerate, config.bitrate, range);
+
+    // One grey frame in host memory, the way shared memory capture hands one over.
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(config.width) * config.height * 4, 0x80);
+    auto img = std::make_shared<platf::img_t>();
+    img->data = pixels.data();
+    img->width = config.width;
+    img->height = config.height;
+    img->pixel_pitch = 4;
+    img->row_pitch = config.width * 4;
+    frame_t frame {img};
+    if (session->convert(frame) != 0) {
+      return std::string {};
+    }
+
+    std::string reported;
+    record_pyrowave_route(config, *session, reported);
+    return reported;
+#else
+    (void) config;
+    return std::nullopt;
+#endif
+  }
+
+  void record_capture_source_for_tests(
+    const config_t &config,
+    const frame_t &frame,
+    std::optional<stream_stats::capture_source_t> &reported_source
+  ) {
+    record_capture_source(config, frame, reported_source);
+  }
+
+  #ifdef __linux__
+  capture_generation::request_context_t capture_request_for_session_for_tests(const capture_generation::identity_t &generation) {
+    return capture_request_for_session(generation);
+  }
+  #endif
 
   std::optional<int> find_display_index_for_tests(
     const std::vector<std::string> &display_names,

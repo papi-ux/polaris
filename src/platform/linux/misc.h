@@ -90,6 +90,25 @@ namespace platf {
    *        host's real render nodes never leak into a fixture, nullopt restores the probe.
    */
   void set_effective_encoder_render_device_for_tests(std::optional<std::string> node);
+
+  struct capture_route_t;
+
+  /// What platf::display() does to the route a display's initialization reported, for a backend
+  /// named the way dispatch names it.
+  capture_route_t name_capture_route_for_tests(capture_route_t route, std::string_view backend);
+
+  /// The route platf::display() gives a display it opened, for the backend dispatch chooses for
+  /// requested with the given availability, named the way display() names it.
+  capture_route_t name_opened_display_for_tests(
+    capture_route_t route,
+    std::string_view requested,
+    bool nvfbc_available,
+    bool wayland_available,
+    bool portal_available,
+    bool kms_available,
+    bool x11_available,
+    bool cuda_memory
+  );
 #endif
 
   /**

@@ -1021,6 +1021,14 @@ namespace config {
     }
   }
 
+  std::string capture_setting(std::unordered_map<std::string, std::string> &vars, std::string current) {
+    string_f(vars, "capture", current);
+    if (current == "auto"sv) {
+      current.clear();
+    }
+    return current;
+  }
+
   std::optional<bool> parse_bool(std::string_view value) {
     std::string normalized {value};
     std::transform(std::begin(normalized), std::end(normalized), std::begin(normalized), [](unsigned char ch) {
@@ -1525,7 +1533,7 @@ namespace config {
     int_f(vars, "vk_rc_mode", video.vk.rc_mode);
     int_between_f(vars, "vk_quality", video.vk.quality, {0, INT_MAX});
 
-    string_f(vars, "capture", video.capture);
+    video.capture = capture_setting(vars, std::move(video.capture));
     string_f(vars, "encoder", video.encoder);
     string_f(vars, "adapter_name", video.adapter_name);
     string_f(vars, "output_name", video.output_name);

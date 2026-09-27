@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <future>
 #include <fstream>
+#include <sys/stat.h>
 
 namespace {
   class LiveTuningTest: public testing::Test {
@@ -62,6 +63,43 @@ TEST_F(LiveTuningTest, FailedCommitDoesNotApplyPreference) {
   auto authority = doctor_actions::acquire_admin_global_control();
   private_state_file::set_write_fault_for_tests(private_state_file::write_fault_e::rename);
   EXPECT_EQ(live_tuning::set_enabled(authority, false)["http_status"], 500);
+  EXPECT_TRUE(adaptive_bitrate::get_state().configured_enabled);
+}
+
+// #782: a settings file the store refused answered 500 save_failed, which said
+// nothing about the file, and a missing one did the same.
+TEST_F(LiveTuningTest, RefusedSettingsFileAnswersWithTheStoreRefusal) {
+  auto authority = doctor_actions::acquire_admin_global_control();
+  const auto path = config::sunshine.config_file;
+  const auto revision = configuration_store::revision(path, true);
+  const auto before = private_state_file::read_secure(path, 4096).payload;
+  ASSERT_EQ(::chmod(path.c_str(), 0664), 0);
+
+  for (const auto &expected : {std::optional<std::string> {revision}, std::optional<std::string> {}}) {
+    SCOPED_TRACE(expected ? "with a revision" : "without a revision");
+    configuration_store::refusal_t refusal;
+    const auto result = live_tuning::set_enabled(authority, false, expected, &refusal);
+    EXPECT_EQ(result["status"], false);
+    EXPECT_EQ(result["http_status"], 503);
+    EXPECT_EQ(result["code"], "config_unreadable");
+    EXPECT_TRUE(result.contains("live_tuning"));
+    // The paired routes forward this object as it is, so it never names the file.
+    EXPECT_FALSE(result.contains("path"));
+    EXPECT_FALSE(result.contains("fix"));
+    EXPECT_EQ(refusal.kind, private_state_file::refusal_e::group_writable);
+    EXPECT_EQ(refusal.path, path);
+    EXPECT_EQ(refusal.fix, "Restrict it with \"chmod go-w " + path + "\".");
+  }
+  // A caller that does not ask why still gets the code.
+  EXPECT_EQ(live_tuning::set_enabled(authority, false)["code"], "config_unreadable");
+  EXPECT_TRUE(adaptive_bitrate::get_state().configured_enabled);
+  ASSERT_EQ(::chmod(path.c_str(), 0600), 0);
+  EXPECT_EQ(private_state_file::read_secure(path, 4096).payload, before);
+
+  ASSERT_TRUE(std::filesystem::remove(path));
+  configuration_store::refusal_t missing;
+  EXPECT_EQ(live_tuning::set_enabled(authority, false, std::nullopt, &missing)["http_status"], 503);
+  EXPECT_EQ(missing.kind, private_state_file::refusal_e::missing);
   EXPECT_TRUE(adaptive_bitrate::get_state().configured_enabled);
 }
 

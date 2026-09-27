@@ -523,6 +523,18 @@ namespace platf {
     std::optional<null_t> null;
   };
 
+  /**
+   * @brief What encode_device_t::convert() answers for a frame it can never read, when every frame
+   *        the same capture hands over after it would arrive the same way.
+   *
+   * Any other non-zero answer fails that one frame, and the capture thread answers a failed frame by
+   * building the session again. A device that cannot read what this capture produces is built again
+   * identically and refuses the next frame identically, at whatever rate frames arrive, so this
+   * answer ends the stream instead: video's frame converter hands it on as
+   * video::convert_session_is_over.
+   */
+  constexpr int convert_capture_unreadable = -2;
+
   struct encode_device_t {
     virtual ~encode_device_t() = default;
 
@@ -621,6 +633,42 @@ namespace platf {
     error  ///< Error
   };
 
+  /**
+   * @brief What a display's initialization opened, named the way the capture setting names backends.
+   *
+   * Initialization, not proof of frames. Which frames arrive, and how, is read from the frames
+   * themselves. Empty until platf::display() returns a display whose initialization succeeded.
+   */
+  struct capture_route_t {
+    /// The backend whose initialization succeeded: kms, wlr, portal, x11, nvfbc or cage.
+    std::string opened;
+    /// The route inside it. The portal backend names one of the k_capture_route_portal_* routes;
+    /// every other backend has one route, named as opened is.
+    std::string route;
+    /// A k_capture_route_fallback_* id when the route is not the one the capture asked for first.
+    /// Empty when it is.
+    std::string fallback_reason;
+
+    bool operator==(const capture_route_t &) const = default;
+  };
+
+  /// The portal asked xdg-desktop-portal for a ScreenCast.
+  constexpr std::string_view k_capture_route_portal_screencast = "portal_screencast";
+  /// The portal attached to the PipeWire node gamescope exports, with no ScreenCast.
+  constexpr std::string_view k_capture_route_portal_gamescope_node = "portal_gamescope_node";
+  /// The portal attached to the PipeWire node of a KWin output session, with no picker.
+  constexpr std::string_view k_capture_route_portal_kwin_node = "portal_kwin_node";
+  /// The gamescope node was asked for and gamescope exported none.
+  constexpr std::string_view k_capture_route_fallback_gamescope_node_missing = "gamescope_node_missing";
+  /// The gamescope node was there and capture on it did not start.
+  constexpr std::string_view k_capture_route_fallback_gamescope_node_failed = "gamescope_node_failed";
+  /// KWin was the compositor and opened no output session for the capture: it withheld its
+  /// screencast protocol from Polaris, or the output stream did not start. A compositor that is not
+  /// KWin has no KWin output to fall back from, so its ScreenCast carries no fallback.
+  constexpr std::string_view k_capture_route_fallback_kwin_node_unavailable = "kwin_node_unavailable";
+  /// KWin opened the output session and capture on its node did not start.
+  constexpr std::string_view k_capture_route_fallback_kwin_node_failed = "kwin_node_failed";
+
   class display_t {
   public:
     /**
@@ -713,6 +761,10 @@ namespace platf {
     // Degrees the compositor turns a touch before delivering it, which input turns back: a Steam
     // Deck's gamescope turns touches by its portrait panel's orientation. Zero everywhere else.
     int compositor_touch_turn = 0;
+
+    // What initialization opened. platf::display() fills in what the backend leaves unsaid, once
+    // initialization has succeeded, so a display that failed never reports one.
+    capture_route_t capture_route;
 
   protected:
     // collect capture timing data (at loglevel debug)

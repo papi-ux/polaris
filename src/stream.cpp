@@ -605,6 +605,9 @@ namespace stream {
     std::list<crypto::command_entry_t> undo_cmds;
 
     safe::mail_raw_t::event_t<bool> shutdown_event;
+    // Raised by this session's encoder when it ends the stream because it can never produce a
+    // picture for it. Held here so the raise outlives the encoder: the mail keeps only weak handles.
+    safe::mail_raw_t::event_t<bool> frame_conversion_failed;
     safe::signal_t controlEnd;
     // Requested from RTSP or the control thread; only the control thread
     // sends termination and acknowledges the session's final control use.
@@ -1267,15 +1270,40 @@ namespace stream {
     }
   }
 
+  /// NVST_DISCONN_SERVER_TERMINATED_CLOSED: the host ended the stream, and nothing went wrong.
+  constexpr std::uint32_t termination_closed = 0x80030023;
+  /// NVST_DISCONN_SERVER_VIDEO_ENCODER_CONVERT_INPUT_FRAME_FAILED, which Moonlight clients read as
+  /// ML_ERROR_FRAME_CONVERSION: a fatal video encoding error, not a connection to take back.
+  constexpr std::uint32_t termination_frame_conversion_failed = 0x800e9403;
+
+  /**
+   * What the control thread tells the client as it retires a stopping session, or nothing for a stop
+   * that only disconnects it.
+   *
+   * An encoder that can never produce a picture for the stream says so on the session's mail before
+   * the stream ends, and that stop is answered with the frame conversion code whether or not anyone
+   * asked for a graceful one. A bare disconnect is what a Moonlight client reads as a dropped
+   * connection: it reconnected into the same refusal until it ran out of attempts.
+   */
+  std::optional<std::uint32_t> control_termination_code(session_t &session) {
+    if (session.frame_conversion_failed && session.frame_conversion_failed->peek()) {
+      return termination_frame_conversion_failed;
+    }
+    if (session.graceful_stop_requested.load(std::memory_order_acquire)) {
+      return termination_closed;
+    }
+    return std::nullopt;
+  }
+
   // ENet, sequence numbers and control encryption are owned by the control
   // thread. Stop callers only request termination; they never send it directly.
-  void send_control_termination(control_server_t *server, session_t *session) {
+  void send_control_termination(control_server_t *server, session_t *session, std::uint32_t code) {
     if (!session->control.peer) return;
 
     control_terminate_t plaintext {};
     plaintext.header.type = packetTypes[IDX_TERMINATION];
     plaintext.header.payloadLength = sizeof(plaintext.ec);
-    plaintext.ec = util::endian::big<std::uint32_t>(0x80030023);
+    plaintext.ec = util::endian::big<std::uint32_t>(code);
     std::array<std::uint8_t, sizeof(control_encrypted_t) +
       crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) +
       crypto::cipher::tag_size> encrypted_payload;
@@ -1581,8 +1609,8 @@ namespace stream {
           }
 
           if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
-            if (session->graceful_stop_requested.load(std::memory_order_acquire)) {
-              send_control_termination(server, session);
+            if (const auto code = control_termination_code(*session)) {
+              send_control_termination(server, session, *code);
             }
             pos = server->_sessions->erase(pos);
 
@@ -1638,7 +1666,7 @@ namespace stream {
     auto lg = server->_sessions.lock();
     while (!server->_sessions->empty()) {
       auto session = server->_sessions->back();
-      send_control_termination(server, session);
+      send_control_termination(server, session, control_termination_code(*session).value_or(termination_closed));
       server->_sessions->pop_back();
       if (session->control.peer) {
         auto peers = server->_peer_to_session.lock();
@@ -2655,6 +2683,14 @@ namespace stream {
       session.state.store(state, std::memory_order_relaxed);
     }
 
+    std::optional<std::uint32_t> control_termination_code_for_tests(session_t &session) {
+      return control_termination_code(session);
+    }
+
+    safe::mail_t mail_for_tests(session_t &session) {
+      return session.mail;
+    }
+
 #ifdef __linux__
     std::shared_ptr<multiseat::input::worker_launch_connection_t>
     worker_connection_for_tests(const session_t &session) {
@@ -3161,7 +3197,9 @@ namespace stream {
         0,  // encode_time_ms
         codec_name,
         session.config.monitor.width,
-        session.config.monitor.height
+        session.config.monitor.height,
+        std::string_view {},
+        session.session_generation
       );
 
       // Update legacy single-client stats for backward compatibility
@@ -3180,7 +3218,9 @@ namespace stream {
         0,  // encode_time_ms
         codec_name,
         session.config.monitor.width,
-        session.config.monitor.height
+        session.config.monitor.height,
+        std::string_view {},
+        session.session_generation
       );
 
       // If this is the first session, invoke the platform callbacks
@@ -3232,6 +3272,7 @@ namespace stream {
       auto mail = std::make_shared<safe::mail_raw_t>();
 
       session->shutdown_event = mail->event<bool>(mail::shutdown);
+      session->frame_conversion_failed = mail->event<bool>(mail::frame_conversion_failed);
       session->launch_session_id = launch_session.id;
 #ifdef __linux__
       session->launch_worker_connection_required = launch_session.worker_connection_requirement();

@@ -36,6 +36,7 @@
 #include "kms_frame_transfer.h"
 #include <format>
 #include "vaapi.h"
+#include "stream_display_policy.h"
 #include "vulkan_encode.h"
 #include "wayland.h"
 
@@ -395,7 +396,8 @@ namespace platf {
 #if defined(POLARIS_BUILD_X11)
           // We won't be able to capture the mouse cursor with KMS on non-atomic drivers,
           // so fall back to X11 if it's available and the user didn't explicitly force KMS.
-          if (window_system == window_system_e::X11 && config::video.capture != "kms") {
+          if (window_system == window_system_e::X11 &&
+              stream_display_policy::canonical_capture_backend(config::video.capture) != "kms") {
             BOOST_LOG(info) << "Avoiding KMS capture under X11 due to lack of atomic mode-setting"sv;
             return -1;
           }
@@ -1898,7 +1900,9 @@ namespace platf {
           }
           // The probe, not the capture loop: this is the evaluation the Doctor reports on.
           note_kms_capture_refused_for_capability();
-          if (config::video.capture == "kms") {
+          // drm is kms under another name. The refusal record just above counts it as a host that
+          // asked for KMS, so the line has to say the same thing.
+          if (stream_display_policy::canonical_capture_backend(config::video.capture) == "kms") {
             BOOST_LOG(fatal)
               << "KMS display capture requires CAP_SYS_ADMIN, which this Polaris binary does not hold, and capture is "sv
               << "set to KMS. Installing or updating the package replaces the binary without it; run "sv

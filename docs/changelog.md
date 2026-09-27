@@ -7,6 +7,89 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- A PyroWave stream's encoder selection reason says where its colour is converted. It read "PyroWave
+  is encoding with Vulkan after CPU color conversion." for every PyroWave stream, which has been
+  wrong since GPU colour conversion became the default. The reason now comes from the stream's own
+  encoder and opens with the answer: it imports captured DMA-BUF frames and converts colour on the
+  GPU without a CPU upload at the encoder input, it converts on the GPU after copying captured frames
+  from host memory, or it converts on the CPU, which `POLARIS_PYROWAVE_GPU_INPUT=off` asks for and a
+  host falls back to when the GPU path cannot start. It says how the encoder took the frames, not how
+  capture filled them. Before the first captured frame it says that is not known yet, and again
+  after capture opens the display again, until the new display's first frame. Nova receives this
+  reason in the session status, about its own stream even while Watch Stream or a Browser Stream
+  runs beside it or its reconnect overlaps the stream it replaced, and the live stream stats carry
+  the same answer as `pyrowave_route` on the stream's client and in `last_session`.
+
+- The web console shows the encoder selection. Troubleshooting's advanced diagnostics read the
+  Detected GPU driver, Encoder policy, Preferred and Fallback encoder, Fallback used and Selection
+  reason from the Doctor in the live stream stats, which was built without the selection, so they
+  read unknown, and the Fallback encoder none, on every host. They now show the selection of the
+  stream that is running, the one every running stream shares, or the host's own when nothing
+  streams, and nothing when two streams were selected differently.
+
+- The session status answers each client about its own stream's codec and encoder. With Watch
+  Stream running beside a stream, a reconnect overlapping the stream it replaced, or a Browser
+  Stream running beside even a single stream, the encoder block's `codec`, `active_backend`,
+  `effective_backend`, `fallback_allowed` and `selection` came from whichever encoder had sampled
+  last, so a PyroWave stream beside an HEVC watcher could be told it ran HEVC with the Auto reason,
+  the watcher that PyroWave had not encoded a frame yet, and a stream beside a Browser Stream that
+  it ran Browser Stream's H.264. They now come from the stream the response names as
+  `session_generation`, in either startup order and before a reconnect's first frame. The session
+  health beside them, and in the other paired endpoints, takes that stream's codec and encoder for
+  `active_encoder`, `encoder_selection`, the AV1 part of `decoder_risk`, `safe_codec` and the
+  CUDA-disabled NVENC finding, so the `issues`, `primary_issue`, `limiting_factor`, `auto_action`,
+  `grade`, `summary`, `recovery_policy` and Doctor that follow from them can change as well, and so
+  can the session status `auto_quality` and `profile_state` built from that health, whose
+  `current_profile.preferred_codec` is the encoder block's `codec`. The encoder's target device,
+  residency and format, which decide Nova's 10b, GPU and CPU labels and the 10-bit part of
+  `decoder_risk`, and the frame rate, bitrate, encode time and pacing are still the host's,
+  whichever encoder wrote them last. A request that names no stream of its own reads everything as
+  before.
+
+- Vulkan Video on the portal no longer streams a black picture when capture hands it a DMA-BUF frame
+  (#635). The portal gives Vulkan Video its frames in shared memory by policy, and the upload that
+  takes them read a DMA-BUF frame, which has no pixels in host memory, as black: a build with the
+  portal's DMA-BUF offer to Vulkan Video opened streamed black at full frame rate with nothing in the
+  log. Polaris now logs once for the stream that this route takes shared memory only and ends the
+  stream, telling the client its video could not be encoded, instead of building the session again
+  for every frame. The frame an encoder starts on, before capture delivers one, is still black.
+
+- A stream that Polaris ends because its encoder can never produce a picture for it now tells the
+  client why. That is the Vulkan Video case above, and PyroWave refusing a DMA-BUF format it cannot
+  read, a frame format its session was not built for, or an HDR stream from a display that is not in
+  HDR. Polaris used to drop the connection with no reason, which Nova read as a network drop: on
+  Android it reconnected up to four times, each new stream met the same refusal and logged it again,
+  and then it showed a generic connection error. The stream now ends with the code Moonlight clients
+  know as a video encoding failure, so Nova on Android shows its fatal video encoding error and does
+  not reconnect, and Nova on the Steam Deck stops without retrying on its own.
+
+- When a stream ends, the live stream stats keep what it captured as `last_session`: its
+  `stream_instance_id`, client name, start and end times in UTC, its `capture` block as it stood
+  when the stream ended, and the codec and encoder that stream reported. It is the most recently
+  ended session on this host, including a viewer that ends while another client keeps streaming, and
+  it stays after the last stream ends until another one does or Polaris restarts. Packet loss and
+  latency are not kept. With two clients streaming at once, or a Browser Stream running beside one,
+  each client's fps, bitrate, encode time, codec and size under `clients[]` are now that client's
+  own; the first client used to take every stream's values. Each client also carries the
+  `encoder_backend` its own stream sampled, the one `last_session` keeps, and with one client
+  streaming it repeats at the top level. `/polaris/v1/session/status` is unchanged.
+
+- The live stream stats say, for each client under `clients[].capture`, which capture backend
+  polaris.conf names, which one the stream asked for, which one opened and the route inside it.
+  When one of the host's rules set polaris.conf's choice aside, such as a stream mode, a launch into
+  another mode, a substitution or a Host Virtual Display, `mode_override_reason` names the rule.
+  When the portal could not take the gamescope node or the KWin output it asked for and took a
+  ScreenCast instead, `route_fallback_reason` says which; a host whose compositor is not KWin has
+  no KWin output to fall back from and reports none. docs/doctor.md lists every value. Transport,
+  residency and format come from the frames that client's encoder accepted from the display that
+  opened, and read `unknown` until that display delivers one, including after a display is opened
+  again, so an opened backend is never taken as evidence that frames stayed on the GPU. With one
+  client streaming, the same answers appear at the top level as `capture_backend_preference`,
+  `capture_backend_requested`, `capture_backend_opened`, `capture_backend_route`,
+  `capture_mode_override_reason` and `capture_route_fallback_reason`. Each client also carries a
+  `stream_instance_id`, which the support export keeps readable. `/polaris/v1/session/status` is
+  unchanged.
+
 - A beta or release candidate now sorts below the release it precedes in every package format, so
   that release replaces it through an ordinary upgrade. The 1.4.13 betas carried `1.4.13` itself,
   and dnf answered the 1.4.13 release with "Nothing to do", which left beta testers on the beta. A
@@ -32,6 +115,95 @@ starts at `v1.0.0`.
   Capture now reports the format as sixteen bit float, Doctor raises
   `capture_format_unreadable_by_pyrowave` with the fix, and the log names the format (`AB4H`) and
   says to turn HDR off on the host display or capture by another route.
+
+- A settings file Polaris refuses to read now says why, on the read side as well as the save side
+  (#782). Settings used to sit on its loading placeholder and the log said nothing, because the
+  console got a bare 503. Now the log names the file, the reason and the fix once, when the reason
+  changes, where a folder Polaris refused used to log an error on every request. Settings shows the
+  same three in place of the placeholder: a file others can write, a symbolic link, a second hard
+  link, a file owned by another user, one too large, a missing file, a lock file in the way, or a
+  folder on the way to it that Polaris will not trust, a linked folder included. A restart that comes
+  back to an unreadable file counts as a host that is up, and the sign-in check no longer sends
+  the console to Reconnecting over it. A save on such a file answered "Settings changed. Refresh
+  before saving." when it carried a revision and "Failed to write config file" when it did not,
+  and Live Tuning answered 500 `save_failed`. `POST` and `PATCH /api/config` now answer with the
+  503 and the file, reason and fix the read gives, Live Tuning answers 503 `config_unreadable`
+  with the same three, and Settings, Quick Controls, the Live Tuning switch, the first-time setup
+  steps and the update preference show them in place of their generic failure, where a setup step
+  showed the bare code `config_unreadable`. Every other page of the console shows one banner with
+  the file, the reason and the fix, first-time setup included, where Dashboard, System and Apps
+  took the refusal for missing settings and said nothing, and the Doctor reports it as `settings_file_unreadable`. Both say that only
+  settings are held up: apps, pairing and the console password are kept in other files and still
+  save.
+
+- On AMD, Auto says why it never tries Vulkan Video outside Private Stream (#635). It called every
+  route but the labwc private compositor a desktop capture route, Gamescope Stream included, and
+  never said Vulkan Video was not a candidate there, so a Gamescope Stream host read it as a Vulkan
+  probe that had failed. The reason now opens with the answer, that Auto prefers VA-API on those
+  routes and does not try Vulkan Video. It then names `encoder = vulkan` as the way to choose it and
+  says what that costs there: no AV1, and on portal capture, frames through system memory. A host
+  set to `encoder = vulkan` now reads a reason that opens with Vulkan Video and the same two costs,
+  where it used to say only that the encoder passed validation. Before the first stream, the Doctor
+  also says that Vulkan Video on the portal keeps frames in system memory by policy, with the cause
+  `vulkan_portal_system_memory_by_design`. The portal log calls it policy where it used to blame the
+  build, and says `POLARIS_PORTAL_DMABUF=1` applies to VA-API only when that is set. The
+  `encoder_auto` log line says `exact_live_probe_required` is an Auto policy flag and not a probe
+  result, and adds `next_probe_reuse`, the reuse gate's own answer for the next probe. It reads
+  `if_unchanged` only where the gate would reuse this probe, which is NVENC on the labwc private
+  compositor, and `off` everywhere else with the reason a fresh probe runs, Vulkan Video and every
+  Gamescope Stream route included.
+
+- When Auto falls back from the encoder it prefers, the encoder selection reason now opens with the
+  fallback, for example "Preferred encoder [vaapi] did not satisfy this runtime; selected
+  [software] instead.", and the sentence saying what Auto prefers follows it. The fallback used to
+  close the reason, after the whole policy sentence, which on AMD outside Private Stream runs to
+  several lines. A fallback is the one case the Doctor grades encoder selection as watch, and so the
+  one case Nova's Doctor card can show this reason, in a caption two lines long.
+
+- `capture = kwin` and `capture = drm` open what they name. Capture has always opened the portal
+  for kwin and KMS for drm, but the check Polaris runs to find a working backend did not know
+  either name, found nothing for it, and swapped in a backend of its own: a kwin host streamed
+  through KMS when the binary held the capability, and a drm host through whatever the automatic
+  choice found. A kwin host now captures through the portal, and Polaris drops its capabilities
+  at startup for it as it does for `capture = portal`, because the portal and KWin refuse a
+  caller that holds them. A drm host captures through KMS, and the startup log and the Doctor
+  treat it as the KMS host it is. The places that still compared the setting word for word read
+  the two names the same way now. On a dongle, a kwin host keeps the streaming output in SDR, as
+  portal capture needs, and keeps the desk visible until the screen sharing prompt is approved,
+  where it used to blank it and get no video. On Gamescope Stream, a kwin host keeps Main10 and
+  10-bit AV1 when the portal's stand in probe fails them, as a portal host does. And
+  `runtime_backend`, which session status also reports as `capture.backend`, says `portal` where
+  it said `kwin`.
+
+- `capture = auto` written in polaris.conf now counts as capture left unset. On Gamescope Stream
+  it gets the portal an unset capture gets. On a Mirror Desktop host `runtime_backend` and the
+  session status `capture.backend` say `host` where they said `auto`, and in Private Stream the
+  Doctor's HDR finding names the wlroots path, as it does for an unset capture.
+
+- The host says when a stream mode sets aside a capture backend you chose. Private Stream
+  captures through wlroots whatever `capture` says, Host Virtual Display and Desktop Takeover
+  capture their display through the portal or wlroots, and a launch that enters Gamescope Stream
+  or the dongle from another mode captures through the portal. Each of these used to be an info line at most, and is now a
+  warning that names the mode, the backend polaris.conf names, the one used instead, and how long
+  that lasts. A mode loaded from polaris.conf is said once logging starts, so it reaches
+  polaris.log, where it used to reach only standard output. The warnings name the backend
+  polaris.conf holds, so a host set to kms under Host Virtual Display is no longer told it chose
+  the portal the mode put in its place, and a host with capture unset is not warned at all. When
+  a Gamescope Stream or dongle launch fills an unset capture with the portal, it says so at info,
+  as the dongle already did at load.
+
+- The Doctor's HDR finding names Mirror Desktop, as the host's stream mode, for `capture = kms`.
+  It also listed Host Virtual Display, Desktop Takeover and Gamescope. It now says which modes set
+  kms aside and for how long: Host Virtual Display and Desktop Takeover capture through the portal
+  or wlroots, and loading either one replaces kms for a Mirror Desktop launch as well until Polaris
+  restarts, while Gamescope Stream and the dongle keep kms only as the host's own mode and capture
+  through the portal when a launch enters them from another mode. `kms_capture_needs_capability` now appears only where KMS
+  is what a launch into the host's mode asks for: `capture = kms` or `drm`, capture unset outside
+  Private Stream, Gamescope Stream and the dongle, or a configured backend that captured nothing,
+  whose automatic stand in searches KMS first. It no longer tells a Private Stream host, which
+  captures through wlroots, or a Gamescope Stream host with capture unset, which a launch fills
+  with the portal, to grant a capability that would change nothing about its stream. The HDR
+  recipe in the runtime, troubleshooting and configuration docs says the same.
 
 ## v1.4.13 - 2026-09-26
 

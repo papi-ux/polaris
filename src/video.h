@@ -31,6 +31,7 @@ extern "C" {
 
 struct AVPacket;
 namespace config { struct video_t; }
+namespace stream_stats { struct capture_source_t; }
 
 namespace video {
 
@@ -68,6 +69,8 @@ namespace video {
     AVRational stream_rate {0, 1};  // RTSP stream request, before integer budget rounding
     AVRational encode_rate {0, 1};  // Host limiter: launch rate when enabled, stream rate otherwise
     std::uint64_t session_generation = 0;  // Host-owned identity for source-frame diagnostics
+    // What this session's capture request is measured against, taken as the session starts.
+    capture_generation::request_context_t capture_request;
 
   };
 
@@ -501,8 +504,11 @@ namespace video {
    * sessions in two minutes, all of them logging the same sentence.
    *
    * A session that answers with this is saying the stream is over. The caller stops rather than
-   * starting another, and the client is told, which is the difference between an error someone can
-   * act on and a log nobody can read.
+   * starting another, and the client is told: the stream ends with the frame conversion termination
+   * code, which a Moonlight client shows as a fatal video encoding error and does not reconnect
+   * into. A bare disconnect is what it reads as a dropped connection, and it reconnected into the
+   * same refusal. That is the difference between an error someone can act on and a log nobody can
+   * read.
    */
   constexpr int convert_session_is_over = -2;
 
@@ -866,6 +872,16 @@ namespace video {
   bool automatic_encoder_prefers_gpu_native_capture();
 
   /**
+   * @brief Whether a failed HEVC or AV1 10-bit probe speaks for the live capture path.
+   * @details The portal does not connect to its PipeWire source while probing and
+   *          encodes an NV12 dummy instead, so on a Gamescope Stream host that
+   *          captures through the portal a failed 10-bit probe says nothing about
+   *          the 10-bit DMA-BUF the live session negotiates. The capture setting is
+   *          read the way dispatch reads it, so kwin counts as the portal it opens.
+   */
+  bool main10_probe_is_authoritative(std::string_view capture, std::string_view stream_mode);
+
+  /**
    * @brief Validate that the active encoder can start the requested codec/runtime path right now.
    * @details This is intended for per-session checks after topology/runtime changes such as cage startup.
    * @return True when the active encoder can open and validate the requested codec configuration.
@@ -892,6 +908,22 @@ namespace video {
     std::unique_ptr<platf::avcodec_encode_device_t> device,
     std::size_t frame_count
   );
+
+  /** One frame through the frame converter an avcodec session puts in front of its device. */
+  int convert_with_encode_device_for_tests(std::unique_ptr<platf::avcodec_encode_device_t> device, frame_t &frame);
+
+  /** What the encode loop raises on a session's mail to end a stream its encoder can never serve. */
+  void end_stream_encoder_cannot_serve_for_tests(const safe::mail_t &mail);
+
+  /**
+   * The loop capture_async() runs for a session on the parallel encode path, which builds an encode
+   * session on the display capture published and builds it again each time one returns, run over
+   * @p display with the session's own mail. It returns when the loop does, which is when the loop
+   * sees the stream's shutdown.
+   */
+  void encode_published_display_for_tests(const safe::mail_t &mail, config_t config,
+                                          const std::shared_ptr<platf::display_t> &display,
+                                          const stream_packets::destination_t &channel_data);
 
   int hevc_profile_for_input_for_tests(int bit_depth, int chroma_sampling_type);
 
@@ -930,6 +962,14 @@ namespace video {
     std::string_view current_topology
   );
 
+  /**
+   * @brief Finalize a planned encoder selection against the encoder a probe chose, as the probe does.
+   */
+  void finalize_encoder_selection_info_for_tests(
+    encoder_selection_info_t &info,
+    std::string_view selected_encoder
+  );
+
   int probe_encoders_with_hooks_for_tests(
     const probe_reuse::identity_t &identity,
     const std::function<bool(encoder_t &, bool)> &validate
@@ -947,6 +987,54 @@ namespace video {
     const capture_generation::identity_t &active,
     const capture_generation::identity_t &incoming
   );
+
+  /**
+   * @brief One attempt by a consuming session to publish what its display opened, as its encode
+   *        loop makes it. published carries across attempts, as the loop keeps it.
+   * @return Whether a write matched by the session's generation has landed.
+   */
+  bool publish_capture_backend_for_tests(const config_t &config, const platf::capture_route_t &route, bool &published);
+
+  /// The same attempt with the frame record the loop keeps beside it, which a landing clears.
+  bool publish_capture_backend_for_tests(
+    const config_t &config,
+    const platf::capture_route_t &route,
+    bool &published,
+    std::optional<stream_stats::capture_source_t> &reported_source
+  );
+
+  /// The same attempt as the parallel encode loop makes it, with the PyroWave route record it also
+  /// keeps, which a landing clears too.
+  bool publish_capture_backend_for_tests(
+    const config_t &config,
+    const platf::capture_route_t &route,
+    bool &published,
+    std::optional<stream_stats::capture_source_t> &reported_source,
+    std::string &reported_pyrowave_route
+  );
+
+  /// What an encode loop records of a PyroWave session's route after a frame, with the record it keeps.
+  void record_pyrowave_route_for_tests(const config_t &config, std::string_view route, std::string &reported);
+
+  /**
+   * Builds the encode session the host builds for a PyroWave stream, converts one frame from host
+   * memory through it, and records its route the way the encode loop does, for config's generation.
+   * @return What the loop kept, which is empty when nothing was written, or nullopt on a host with no
+   *         Vulkan device PyroWave can use.
+   */
+  std::optional<std::string> pyrowave_route_of_a_host_frame_for_tests(const config_t &config);
+
+  /// What an encode loop records for a frame its session accepted, with the record it keeps.
+  void record_capture_source_for_tests(
+    const config_t &config,
+    const frame_t &frame,
+    std::optional<stream_stats::capture_source_t> &reported_source
+  );
+
+  #ifdef __linux__
+  /// What a session takes as it starts to measure its generation's capture request against.
+  capture_generation::request_context_t capture_request_for_session_for_tests(const capture_generation::identity_t &generation);
+  #endif
 
   std::optional<int> find_display_index_for_tests(
     const std::vector<std::string> &display_names,

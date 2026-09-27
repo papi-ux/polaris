@@ -144,8 +144,14 @@ proven on.
 1. **`capture = kms`.** It is the only Linux capture path that reads the connector's
    `HDR_OUTPUT_METADATA`. `wlr` does not report HDR at all, and `portal` only does with the
    Gamescope force file.
-2. **A stream mode that shows the real HDR output**: Mirror Desktop, Host Virtual Display, Desktop
-   Takeover or Gamescope. Private Stream captures Polaris' own labwc, which is SDR.
+2. **Mirror Desktop** as the host's stream mode, streaming the HDR monitor itself. A launch into
+   Mirror Desktop from another mode keeps `capture = kms` too, except on a host whose own mode is
+   Host Virtual Display or Desktop Takeover: loading that mode puts the portal or wlroots in place
+   of `kms`, and that lasts until Polaris restarts. Those two modes capture their display through
+   the portal or wlroots whatever `capture` says. Gamescope Stream and the dongle keep
+   `capture = kms` only as the host's own mode, and a launch into either from another mode
+   captures through the portal. Private Stream captures Polaris' own labwc through wlroots, which
+   is SDR.
 3. **`CAP_SYS_ADMIN` on the binary**, granted once with `sudo -H polaris --setup-host --enable-kms`.
    Without it kms finds the display and then cannot read a framebuffer; the Doctor reports
    `kms_capture_needs_capability`.

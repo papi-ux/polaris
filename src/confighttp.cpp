@@ -1255,6 +1255,23 @@ namespace confighttp {
   }
 
   /**
+   * @brief The body for a settings file the store refused (#782).
+   *
+   * GET, POST and PATCH /api/config and a Live Tuning change from the console
+   * all answer with it, so the console reads one shape wherever the file stops
+   * it. It names the file, the reason and the fix, and never what the file holds.
+   */
+  nlohmann::json settings_unreadable_json(const configuration_store::refusal_t &refusal) {
+    return {
+      {"status", false},
+      {"error", "config_unreadable"},
+      {"path", refusal.path},
+      {"reason", refusal.reason},
+      {"fix", refusal.fix},
+    };
+  }
+
+  /**
    * @brief Send a 401 Unauthorized response.
    * @param response The HTTP response object.
    * @param request The HTTP request object.
@@ -5726,9 +5743,13 @@ namespace confighttp {
     output_tree["stream_display_mode_options"] = nlohmann::json::array();
 #endif
     std::lock_guard configuration_guard(configuration_store::mutex());
-    const auto observed = configuration_store::read(config::sunshine.config_file);
+    configuration_store::refusal_t refusal;
+    const auto observed = configuration_store::read(config::sunshine.config_file, &refusal);
     if (!observed) {
-      response->write(SimpleWeb::StatusCode::server_error_service_unavailable);
+      // The host is up and the session is authenticated; only the settings file
+      // was refused. Say which file, why and how to fix it, never what it holds.
+      send_response(response, SimpleWeb::StatusCode::server_error_service_unavailable,
+                    settings_unreadable_json(refusal));
       return;
     }
     auto vars = config::parse_config(observed->contents);
@@ -5907,6 +5928,23 @@ namespace confighttp {
     return value.substr(1, 64);
   }
 
+  /**
+   * @brief Answer a save the way GET /api/config answers a file the store refuses.
+   *
+   * A save reads the file before it writes it, so a file the store refuses
+   * cannot be saved either. A refused file has an empty revision, so a save
+   * with If-Match used to answer 412 "Settings changed. Refresh before saving."
+   * and one without it wrote nothing and answered 400 "Failed to write config
+   * file". Call it with the configuration lock held.
+   */
+  bool configuration_readable(resp_https_t response) {
+    configuration_store::refusal_t refusal;
+    if (configuration_store::read(config::sunshine.config_file, &refusal)) return true;
+    send_response(response, SimpleWeb::StatusCode::server_error_service_unavailable,
+                  settings_unreadable_json(refusal));
+    return false;
+  }
+
   bool configuration_current(resp_https_t response, req_https_t request, bool required) {
     const auto expected = expected_configuration_revision(request);
     if ((!expected && !required) ||
@@ -5936,8 +5974,12 @@ namespace confighttp {
       }
       auto authority = doctor_actions::acquire_admin_global_control();
       const auto expected = expected_configuration_revision(request);
+      configuration_store::refusal_t refusal;
       auto result = live_tuning::set_enabled(authority, body["enabled"].get<bool>(),
-        expected.value_or(std::string {}));
+        expected.value_or(std::string {}), &refusal);
+      // Only this signed-in console route names the file, the reason and the
+      // fix; a paired client gets the code alone.
+      if (refusal) result.update(settings_unreadable_json(refusal));
       SimpleWeb::CaseInsensitiveMultimap headers;
       append_json_security_headers(headers);
       response->write(static_cast<SimpleWeb::StatusCode>(result.value("http_status", 500)), result.dump(), headers);
@@ -6094,6 +6136,7 @@ namespace confighttp {
       }
       auto authority = doctor_actions::acquire_admin_global_control();
       std::lock_guard configuration_guard(configuration_store::mutex());
+      if (!configuration_readable(response)) return;
       const bool changes_tuning = input_tree.contains("adaptive_bitrate_enabled") &&
         json_config_enabled(input_tree["adaptive_bitrate_enabled"]) != adaptive_bitrate::get_state().configured_enabled;
       if (!configuration_current(response, request, changes_tuning)) return;
@@ -6136,6 +6179,7 @@ namespace confighttp {
       }
       auto authority = doctor_actions::acquire_admin_global_control();
       std::lock_guard configuration_guard(configuration_store::mutex());
+      if (!configuration_readable(response)) return;
       const bool changes_tuning = input_tree.contains("adaptive_bitrate_enabled") &&
         json_config_enabled(input_tree["adaptive_bitrate_enabled"]) != adaptive_bitrate::get_state().configured_enabled;
       if (!configuration_current(response, request, changes_tuning)) return;
@@ -9786,6 +9830,20 @@ namespace confighttp {
     return stats_json;
   }
 
+  nlohmann::json stream_stats_json(const stream_stats::stats_t &stats) {
+    // The stats hold no encoder selection, so a Doctor built from them alone listed it as
+    // unavailable, and Troubleshooting's Selection reason read unknown on every host. The selection
+    // is the one piece of session health this Doctor is given.
+    const nlohmann::json doctor_health {
+      {"encoder_selection", nvhttp::stream_stats_encoder_selection_json(stats)}
+    };
+    return nlohmann::json::parse(stats.to_json(doctor_health));
+  }
+
+  std::string stream_stats_payload(const stream_stats::stats_t &stats) {
+    return augment_stream_stats_json(stream_stats_json(stats), stats).dump();
+  }
+
   void getStreamStats(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request))
       return;
@@ -9795,10 +9853,7 @@ namespace confighttp {
     auto stats = stream_stats::get_current();
     SimpleWeb::CaseInsensitiveMultimap headers;
     append_json_security_headers(headers);
-    response->write(
-      augment_stream_stats_json(nlohmann::json::parse(stats.to_json()), stats).dump(),
-      headers
-    );
+    response->write(stream_stats_payload(stats), headers);
   }
 
   /**
@@ -9844,9 +9899,7 @@ namespace confighttp {
       // Stream stats every second until shutdown or client disconnect
       while (!shutdown_event->peek()) {
         auto stats = stream_stats::get_current();
-        *response << "data: "
-                  << augment_stream_stats_json(nlohmann::json::parse(stats.to_json()), stats).dump()
-                  << "\n\n";
+        *response << "data: " << stream_stats_payload(stats) << "\n\n";
 
         std::promise<bool> send_error;
         response->send([&send_error](const SimpleWeb::error_code &ec) {

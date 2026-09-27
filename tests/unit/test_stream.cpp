@@ -4,11 +4,15 @@
  */
 
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <functional>
 #include <nlohmann/json.hpp>
 #include <optional>
+#include <sstream>
 #include <src/stream_stats.h>
+#include <src/utility.h>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -31,6 +35,23 @@ namespace nvhttp {
     const std::string &device_name,
     const std::string &app_name
   );
+  nlohmann::json build_session_health_json_for_tests(
+    const stream_stats::stats_t &stats,
+    bool current_virtual_display,
+    const std::string &device_name,
+    const std::string &app_name,
+    std::uint64_t requester_generation
+  );
+  std::uint64_t requester_session_generation_for_tests(const std::string &device_uuid);
+  nlohmann::json session_encoder_identity_json_for_tests(const stream_stats::stats_t &stats,
+                                                         const std::string &requested_backend,
+                                                         const std::string &launch_backend,
+                                                         bool session_override,
+                                                         std::uint64_t requester_generation);
+}
+
+namespace confighttp {
+  nlohmann::json stream_stats_json(const stream_stats::stats_t &stats);
 }
 
 namespace proc {
@@ -130,6 +151,380 @@ TEST(NvhttpSessionHealthTests, PyrowaveReportsItsActualEncoderAndCpuConversion) 
   EXPECT_FALSE(selection.at("fallback_used").get<bool>());
   EXPECT_TRUE(health.at("capture_cpu_copy").get<bool>());
   EXPECT_FALSE(health.at("capture_gpu_native").get<bool>());
+}
+
+TEST(NvhttpSessionHealthTests, PyrowaveReasonIsTheRouteItsOwnEncoderReported) {
+  auto stats = stable_cpu_copy_stats(120.0, 120.0);
+  stats.codec = "pyrowave";
+  stats.clients.emplace_back();
+  const auto reason_for = [&stats](std::string route) {
+    stats.clients.front().pyrowave_route = std::move(route);
+    const auto health = nvhttp::build_session_health_json_for_tests(stats, false, "Nova Client", "Test");
+    return health.at("encoder_selection").at("reason").get<std::string>();
+  };
+
+  // This is session_encoder_selection.reason, which Nova's Doctor card shows in two lines.
+  const auto on_the_gpu = reason_for("gpu_upload");
+  EXPECT_EQ(on_the_gpu.rfind("PyroWave converts colour on the GPU", 0), 0u) << on_the_gpu;
+  EXPECT_EQ(on_the_gpu.find("CPU color conversion"), std::string::npos)
+    << "a stream converting on the GPU is still said to convert on the CPU";
+  const auto on_the_cpu = reason_for("cpu_convert");
+  EXPECT_EQ(on_the_cpu.rfind("PyroWave converts colour on the CPU", 0), 0u) << on_the_cpu;
+  EXPECT_EQ(reason_for("").rfind("PyroWave has not encoded a captured frame yet", 0), 0u);
+}
+
+/**
+ * A paired client is answered about its own PyroWave stream.
+ *
+ * Watch Stream runs a session per watcher, each with its own encoder and route, and a reconnect keeps
+ * the stream it replaced in the stats until that one's teardown. The reason used to give up on any
+ * of those with a sentence that sent Nova to a field it never reads.
+ */
+TEST(NvhttpSessionHealthTests, PyrowaveReasonAnswersTheStreamThatAsked) {
+  auto stats = stable_cpu_copy_stats(120.0, 120.0);
+  stats.codec = "pyrowave";
+  stats.clients.resize(2);
+  stats.clients[0].session_generation = 391;
+  stats.clients[0].pyrowave_route = "zero_copy";
+  stats.clients[1].session_generation = 392;
+  stats.clients[1].pyrowave_route = "cpu_convert";
+  const auto reason_for = [&stats](std::uint64_t requester) {
+    const auto health = nvhttp::build_session_health_json_for_tests(stats, false, "Nova Client", "Test", requester);
+    return health.at("encoder_selection").at("reason").get<std::string>();
+  };
+
+  const auto watcher = reason_for(392);
+  EXPECT_EQ(watcher.rfind("PyroWave converts colour on the CPU", 0), 0u) << watcher;
+  const auto owner = reason_for(391);
+  EXPECT_EQ(owner.rfind("PyroWave imports captured DMA-BUF frames and converts colour on the GPU", 0), 0u) << owner;
+
+  // The generation is the asking device's live stream, as the paired endpoints resolve it. A
+  // reconnect starts its new session over the old one's, while the old stream's entry stays.
+  const std::string device = "reconnecting-tablet-4f1c";
+  stream_stats::start_session_timing(device, 392, "first-launch");
+  stream_stats::start_session_timing(device, 393, "second-launch");
+  const auto asking = nvhttp::requester_session_generation_for_tests(device);
+  stream_stats::stop_session_timing(device, 393);
+  EXPECT_EQ(asking, 393u) << "the reconnect was resolved to the stream it replaced";
+  EXPECT_EQ(nvhttp::requester_session_generation_for_tests(device), 0u) << "a device with no stream has a generation";
+
+  stats.clients.emplace_back();
+  stats.clients.back().session_generation = 393;
+  const auto reconnected = reason_for(asking);
+  EXPECT_EQ(reconnected.rfind("PyroWave has not encoded a captured frame yet", 0), 0u)
+    << "the reconnect was answered about the stream it replaced: " << reconnected;
+  for (const auto &reason : {watcher, owner, reconnected, reason_for(0)}) {
+    EXPECT_EQ(reason.find("pyrowave_route"), std::string::npos) << "Nova never reads that field: " << reason;
+  }
+}
+
+namespace {
+  /// A session registering and starting the way rtsp_stream::start() does: both start writes carry
+  /// the negotiated codec and no encoder yet.
+  void start_stream(const std::string &ip, const std::string &name, std::uint64_t generation, const std::string &codec) {
+    stream_stats::add_client(ip, name, generation);
+    stream_stats::update_video_stats(ip, 0.0, 20000, 0.0, codec, 1920, 1080, {}, generation);
+    stream_stats::update_video_stats(0.0, 20000, 0.0, codec, 1920, 1080, {}, generation);
+  }
+
+  /// One sample from a session's encode loop, which also writes the process-wide codec and encoder.
+  void sample_encoder(std::uint64_t generation, const std::string &codec, const std::string &encoder) {
+    stream_stats::update_video_stats(60.0, 20000, 4.0, codec, 1920, 1080, encoder, generation);
+  }
+
+  /// The encoder block /polaris/v1/session/status serves the client whose stream has this generation.
+  nlohmann::json encoder_block_for(const stream_stats::stats_t &stats, std::uint64_t requester) {
+    return nvhttp::session_encoder_identity_json_for_tests(stats, "auto", "", false, requester);
+  }
+
+  /// The block and the session health served beside it say this stream is PyroWave, with this reason.
+  void expect_pyrowave_answer(const stream_stats::stats_t &stats, std::uint64_t requester) {
+    SCOPED_TRACE("asked by generation " + std::to_string(requester));
+    const auto block = encoder_block_for(stats, requester);
+    EXPECT_EQ(block.at("codec"), "pyrowave");
+    EXPECT_EQ(block.at("active_backend"), "pyrowave");
+    EXPECT_EQ(block.at("effective_backend"), "pyrowave");
+    EXPECT_FALSE(block.at("fallback_allowed").get<bool>());
+    const auto &selection = block.at("selection");
+    EXPECT_EQ(selection.at("policy"), "explicit_codec");
+    EXPECT_EQ(selection.at("selected_encoder"), "pyrowave");
+    EXPECT_EQ(selection.at("reason"), stream_stats::pyrowave_route_reason(stats, requester));
+    const auto health = nvhttp::build_session_health_json_for_tests(stats, false, "Nova Client", "Test", requester);
+    EXPECT_EQ(health.at("active_encoder"), "pyrowave");
+    EXPECT_EQ(health.at("encoder_selection"), selection);
+    EXPECT_EQ(health.value("safe_codec", ""), "pyrowave");
+  }
+
+  /// The block and the session health say this stream runs a conventional codec, never PyroWave.
+  void expect_conventional_answer(const stream_stats::stats_t &stats, std::uint64_t requester,
+                                  const std::string &codec, const std::string &encoder) {
+    SCOPED_TRACE("asked by generation " + std::to_string(requester));
+    const auto block = encoder_block_for(stats, requester);
+    EXPECT_EQ(block.at("codec"), codec);
+    EXPECT_NE(block.at("active_backend"), "pyrowave");
+    EXPECT_NE(block.at("effective_backend"), "pyrowave");
+    if (!encoder.empty()) {
+      EXPECT_EQ(block.at("active_backend"), encoder);
+      EXPECT_EQ(block.at("effective_backend"), encoder);
+    }
+    const auto &selection = block.at("selection");
+    EXPECT_NE(selection.at("policy"), "explicit_codec");
+    EXPECT_NE(selection.at("selected_encoder"), "pyrowave");
+    EXPECT_EQ(selection.at("reason").get<std::string>().find("PyroWave"), std::string::npos)
+      << "a stream that is not PyroWave was given a PyroWave reason: " << selection.at("reason");
+    const auto health = nvhttp::build_session_health_json_for_tests(stats, false, "Nova Client", "Test", requester);
+    EXPECT_NE(health.at("active_encoder"), "pyrowave");
+    EXPECT_EQ(health.at("encoder_selection"), selection);
+    EXPECT_EQ(health.value("safe_codec", ""), codec);
+  }
+}  // namespace
+
+/**
+ * A PyroWave owner and an HEVC watcher are each answered with their own codec, encoder and selection.
+ *
+ * Watch Stream runs a session per watcher beside the owner's, each with its own codec and encoder,
+ * and the process-wide codec and encoder are whichever encode loop sampled last. The selection took
+ * its PyroWave branch from those, so the watcher could be told PyroWave had not encoded a frame yet
+ * and the owner could get the conventional Auto reason, depending on which one sampled last.
+ */
+TEST(NvhttpSessionEncoderTests, APyroWaveOwnerAndAnHevcWatcherEachGetTheirOwnAnswerInEitherStartupOrder) {
+  constexpr std::uint64_t owner = 511;
+  constexpr std::uint64_t watcher = 512;
+  for (const bool owner_first : {true, false}) {
+    SCOPED_TRACE(owner_first ? "the owner started first" : "the watcher started first");
+    stream_stats::update_stream_active(false);
+    auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+    const auto start = [&](std::uint64_t generation) {
+      if (generation == owner) {
+        start_stream("10.0.0.5", "Deck", owner, "pyrowave");
+      } else {
+        start_stream("10.0.0.6", "Tablet", watcher, "hevc");
+      }
+    };
+    const auto sample = [&](std::uint64_t generation) {
+      if (generation == owner) {
+        sample_encoder(owner, "pyrowave", "pyrowave");
+        ASSERT_TRUE(stream_stats::record_pyrowave_route(owner, "gpu_upload"));
+      } else {
+        sample_encoder(watcher, "hevc", "nvenc");
+      }
+    };
+    // The stream that started first samples last, so the process-wide values are its own.
+    const auto first = owner_first ? owner : watcher;
+    const auto second = owner_first ? watcher : owner;
+    start(first);
+    start(second);
+    sample(second);
+    sample(first);
+
+    const auto stats = stream_stats::get_current();
+    ASSERT_EQ(stats.clients.size(), 2u);
+    EXPECT_EQ(stats.encoder_backend, first == owner ? "pyrowave" : "nvenc")
+      << "the process-wide encoder is not the one that sampled last, so this proves nothing";
+    expect_pyrowave_answer(stats, owner);
+    EXPECT_NE(encoder_block_for(stats, owner).at("selection").at("reason").get<std::string>().find("GPU"),
+              std::string::npos) << "the owner was not answered about its own route";
+    expect_conventional_answer(stats, watcher, "hevc", "nvenc");
+  }
+}
+
+/**
+ * A reconnect is answered about its new stream before that stream's first frame.
+ *
+ * The stream it replaced stays listed until its teardown, and the device's session timing already
+ * names the new one, which has registered and started with its codec but sampled no encoder and
+ * reported no route. Another stream keeps sampling beside it.
+ */
+TEST(NvhttpSessionEncoderTests, AReconnectIsAnsweredAboutItsNewStreamBeforeItsFirstFrame) {
+  stream_stats::update_stream_active(false);
+  const std::string deck = "reconnecting-deck-7a21";
+  const std::string tablet = "reconnecting-tablet-7a22";
+  auto reset = util::fail_guard([&] {
+    stream_stats::stop_session_timing(deck, 523);
+    stream_stats::stop_session_timing(tablet, 525);
+    stream_stats::update_stream_active(false);
+  });
+  start_stream("10.0.0.5", "Deck", 521, "pyrowave");
+  sample_encoder(521, "pyrowave", "pyrowave");
+  ASSERT_TRUE(stream_stats::record_pyrowave_route(521, "zero_copy"));
+  start_stream("10.0.0.6", "Tablet", 522, "hevc");
+  sample_encoder(522, "hevc", "nvenc");
+
+  // The PyroWave Deck reconnects, and the HEVC watcher samples after the new stream starts.
+  stream_stats::start_session_timing(deck, 521, "deck-first-launch");
+  start_stream("10.0.0.5", "Deck", 523, "pyrowave");
+  stream_stats::start_session_timing(deck, 523, "deck-second-launch");
+  sample_encoder(522, "hevc", "nvenc");
+  auto stats = stream_stats::get_current();
+  ASSERT_EQ(stats.clients.size(), 3u);
+  ASSERT_EQ(stats.encoder_backend, "nvenc");
+  const auto reconnect = nvhttp::requester_session_generation_for_tests(deck);
+  ASSERT_EQ(reconnect, 523u);
+  expect_pyrowave_answer(stats, reconnect);
+  EXPECT_NE(encoder_block_for(stats, reconnect).at("selection").at("reason"),
+            stream_stats::pyrowave_route_reason(stats, 521))
+    << "the reconnect was answered with the route of the stream it replaced";
+  expect_conventional_answer(stats, 522, "hevc", "nvenc");
+
+  // The HEVC watcher reconnects too, and the PyroWave stream samples after its new stream starts.
+  stream_stats::start_session_timing(tablet, 522, "tablet-first-launch");
+  start_stream("10.0.0.6", "Tablet", 525, "hevc");
+  stream_stats::start_session_timing(tablet, 525, "tablet-second-launch");
+  sample_encoder(521, "pyrowave", "pyrowave");
+  stats = stream_stats::get_current();
+  ASSERT_EQ(stats.clients.size(), 4u);
+  ASSERT_EQ(stats.encoder_backend, "pyrowave");
+  ASSERT_EQ(stats.codec, "pyrowave");
+  const auto watcher_reconnect = nvhttp::requester_session_generation_for_tests(tablet);
+  ASSERT_EQ(watcher_reconnect, 525u);
+  expect_conventional_answer(stats, watcher_reconnect, "hevc", "");
+  expect_pyrowave_answer(stats, reconnect);
+  expect_pyrowave_answer(stats, 521);
+}
+
+namespace {
+  /// The Doctor the web console reads from the live stream stats, as /api/stats/stream and its SSE
+  /// variant serve it. The blocks they add after it read the settings file, and say nothing here.
+  nlohmann::json console_doctor(const stream_stats::stats_t &stats) {
+    return confighttp::stream_stats_json(stats).at("doctor");
+  }
+
+  /// The encoder selection that Doctor's advanced evidence carries, which Troubleshooting shows.
+  nlohmann::json console_encoder_selection(const stream_stats::stats_t &stats) {
+    return console_doctor(stats).at("advanced_evidence").at("encoder_selection");
+  }
+
+  /// The Doctor's encoder selection evidence row.
+  nlohmann::json encoder_selection_evidence(const nlohmann::json &doctor) {
+    for (const auto &item : doctor.at("evidence")) {
+      if (item.value("id", "") == "encoder_selection") {
+        return item;
+      }
+    }
+    return {};
+  }
+
+  /// The selection the session health gives the client whose stream has this generation.
+  nlohmann::json client_selection(const stream_stats::stats_t &stats, std::uint64_t generation) {
+    return nvhttp::build_session_health_json_for_tests(stats, false, "Nova Client", "Test", generation)
+      .at("encoder_selection");
+  }
+}  // namespace
+
+/**
+ * The web console's Doctor shows the encoder selection of the stream it describes.
+ *
+ * The live stream stats built their Doctor with no session health, so its encoder selection was an
+ * empty object, its evidence row said the selection was unavailable, and Troubleshooting's Selection
+ * reason read unknown on every host while Nova was told the reason. The Doctor now carries the sole
+ * stream's own selection, never the one the process-wide encoder would give, which is whichever
+ * encode loop sampled last.
+ */
+TEST(ConsoleDoctorEncoderSelectionTests, TheSoleStreamIsShownItsOwnSelectionAndTwoThatDifferNone) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  constexpr std::uint64_t owner = 621;
+  constexpr std::uint64_t watcher = 622;
+
+  // A PyroWave stream, and a Browser Stream sample after it, which names no session and leaves
+  // the process-wide encoder its own.
+  start_stream("10.0.0.5", "Deck", owner, "pyrowave");
+  sample_encoder(owner, "pyrowave", "pyrowave");
+  ASSERT_TRUE(stream_stats::record_pyrowave_route(owner, "zero_copy"));
+  sample_encoder(0, "hevc", "nvenc");
+  auto stats = stream_stats::get_current();
+  ASSERT_EQ(stats.clients.size(), 1u);
+  ASSERT_EQ(stats.encoder_backend, "nvenc") << "the process-wide encoder is the stream's own, so this proves nothing";
+  auto doctor = console_doctor(stats);
+  const auto pyrowave = doctor.at("advanced_evidence").at("encoder_selection");
+  EXPECT_EQ(pyrowave.value("selected_encoder", ""), "pyrowave") << pyrowave.dump();
+  EXPECT_EQ(pyrowave.value("policy", ""), "explicit_codec");
+  EXPECT_EQ(pyrowave.value("reason", ""), stream_stats::pyrowave_route_reason(stats, owner));
+  EXPECT_EQ(pyrowave, client_selection(stats, owner)) << "the console and the stream's own client were told apart";
+  const auto row = encoder_selection_evidence(doctor);
+  EXPECT_EQ(row.value("value", ""), "pyrowave") << row.dump();
+  EXPECT_EQ(row.value("status", ""), "pass");
+  EXPECT_EQ(row.value("detail", ""), pyrowave.value("reason", ""));
+
+  // An HEVC watcher joins, and the owner samples last. Two streams have two selections, and the
+  // console is shown neither.
+  start_stream("10.0.0.6", "Tablet", watcher, "hevc");
+  sample_encoder(watcher, "hevc", "nvenc");
+  sample_encoder(owner, "pyrowave", "pyrowave");
+  stats = stream_stats::get_current();
+  ASSERT_EQ(stats.clients.size(), 2u);
+  doctor = console_doctor(stats);
+  EXPECT_TRUE(doctor.at("advanced_evidence").at("encoder_selection").empty())
+    << doctor.at("advanced_evidence").at("encoder_selection").dump();
+  EXPECT_EQ(encoder_selection_evidence(doctor).value("value", ""), "unknown");
+
+  // The owner ends. The watcher is the sole stream, while the process-wide encoder is still the one
+  // the owner sampled last.
+  stream_stats::remove_client("10.0.0.5", owner);
+  stats = stream_stats::get_current();
+  ASSERT_EQ(stats.clients.size(), 1u);
+  ASSERT_EQ(stats.encoder_backend, "pyrowave") << "the process-wide encoder is the watcher's own, so this proves nothing";
+  const auto hevc = console_encoder_selection(stats);
+  EXPECT_NE(hevc.value("selected_encoder", ""), "pyrowave") << hevc.dump();
+  EXPECT_NE(hevc.value("policy", ""), "explicit_codec") << hevc.dump();
+  EXPECT_EQ(hevc, client_selection(stats, watcher));
+}
+
+/**
+ * Both routes the web console reads the live stream stats from serve the Doctor with the selection.
+ *
+ * The tests above run stream_stats_json(). A route that went back to serializing the stats itself
+ * would serve the Doctor without it, and they would stay green.
+ */
+TEST(ConsoleDoctorEncoderSelectionTests, BothStreamStatsRoutesServeThePayloadWithTheSelection) {
+  std::ifstream input(std::filesystem::path {POLARIS_SOURCE_DIR} / "src/confighttp.cpp");
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+  ASSERT_FALSE(source.empty());
+  for (const std::string_view route : {"  void getStreamStats(resp_https_t response, req_https_t request) {",
+                                       "  void getStreamStatsSSE(resp_https_t response, req_https_t request) {"}) {
+    const auto begin = source.find(route);
+    ASSERT_NE(begin, std::string::npos) << route;
+    const auto end = source.find("\n  }\n", begin);
+    ASSERT_NE(end, std::string::npos) << route;
+    const auto body = source.substr(begin, end - begin);
+    EXPECT_NE(body.find("stream_stats_payload(stats)"), std::string::npos) << route;
+    EXPECT_EQ(body.find("to_json("), std::string::npos) << route << " serializes the stats without the selection";
+  }
+  const auto payload = source.find("  std::string stream_stats_payload(const stream_stats::stats_t &stats) {");
+  ASSERT_NE(payload, std::string::npos);
+  const auto payload_end = source.find("\n  }\n", payload);
+  ASSERT_NE(payload_end, std::string::npos);
+  EXPECT_NE(source.substr(payload, payload_end - payload).find("augment_stream_stats_json(stream_stats_json(stats), stats)"),
+            std::string::npos) << "the payload is not built from the stats the tests above read";
+}
+
+/**
+ * Streams that agree are shown their selection, and a host with nothing streaming is shown its own.
+ */
+TEST(ConsoleDoctorEncoderSelectionTests, StreamsThatAgreeAndAnIdleHostAreShownTheHostsSelection) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+
+  // Nothing streams: the selection the host has made, as a client asking with no stream is told it.
+  auto stats = stream_stats::get_current();
+  ASSERT_TRUE(stats.clients.empty());
+  const auto idle = console_encoder_selection(stats);
+  EXPECT_TRUE(idle.contains("policy")) << "an idle host showed no selection: " << idle.dump();
+  EXPECT_EQ(idle, client_selection(stats, 0));
+
+  // An owner and a Watch Stream watcher on the host's encoder have one selection between them.
+  start_stream("10.0.0.5", "Deck", 631, "hevc");
+  start_stream("10.0.0.6", "Tablet", 632, "hevc");
+  sample_encoder(631, "hevc", "nvenc");
+  sample_encoder(632, "hevc", "nvenc");
+  stats = stream_stats::get_current();
+  ASSERT_EQ(stats.clients.size(), 2u);
+  const auto agreed = console_encoder_selection(stats);
+  EXPECT_TRUE(agreed.contains("policy")) << "two streams that agree showed no selection: " << agreed.dump();
+  EXPECT_EQ(agreed, client_selection(stats, 631));
+  EXPECT_EQ(agreed, client_selection(stats, 632));
 }
 
 TEST(NvhttpSessionHealthTests, HealthyShmFallbackRemainsInformational) {

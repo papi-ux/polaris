@@ -142,6 +142,9 @@ namespace stream {
     void set_host_start_abort_hook_for_tests(std::function<void()> hook);
     unsigned exchange_active_count_for_tests(unsigned count);
     void set_state_for_tests(session_t &session, state_e state);
+    /** What the control thread would send as it retires this session once it is stopping. */
+    std::optional<std::uint32_t> control_termination_code_for_tests(session_t &session);
+    safe::mail_t mail_for_tests(session_t &session);
     bool control_ended_for_tests(session_t &session);
     std::chrono::steady_clock::time_point register_control_session_for_tests(session_t &session);
     stream_packets::destination_t packet_destination_for_tests(session_t &session);

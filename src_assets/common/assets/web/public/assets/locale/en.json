@@ -748,6 +748,20 @@
     "qsv_slow_hevc_desc": "This can enable HEVC encoding on older Intel GPUs, at the cost of higher GPU usage and worse performance.",
     "restart_note": "Polaris is restarting to apply changes.",
     "restart_ready": "Polaris is back online.",
+    "restart_ready_unreadable": "Polaris is back online, but it cannot read its settings file. The reason and the fix are at the top of this page.",
+    "unreadable_kicker": "Settings file",
+    "unreadable_title": "Polaris cannot read its settings",
+    "unreadable_desc": "Polaris is running, but it refused to read its settings file, so there is nothing to show here until the file is fixed.",
+    "unreadable_desc_loaded": "Polaris is running, but it refused to read its settings file. Your edits here are kept, but they cannot be saved until the file is fixed.",
+    "unreadable_path": "File",
+    "unreadable_reason": "Why",
+    "unreadable_reason_unknown": "Polaris did not say why.",
+    "unreadable_fix": "How to fix it",
+    "unreadable_retry": "Try again",
+    "unreadable_banner_desc": "Polaris is running, but it refused to read its settings file. Until the file is fixed, Settings cannot load and no settings change can be saved, from Settings, Quick Controls, Live Tuning or first-time setup. Apps, pairing and the console password are kept in other files and still save.",
+    "save_unreadable": "Settings were not saved, because Polaris refused to read its settings file.",
+    "load_failed_kicker": "Settings did not load",
+    "load_failed": "Polaris did not return its settings ({detail}). Check that it is running, then try again.",
     "restart_timeout": "Restart requested. If the Web UI is still unavailable, wait a moment and refresh manually.",
     "restart_error": "Failed to request Polaris restart.",
     "server_cmd": "Server Commands",
@@ -1276,7 +1290,8 @@
     "stable_and_beta": "Checking stable and beta releases",
     "stable_only": "Checking stable releases only",
     "update_channel_changed": "Settings changed elsewhere. Check again before saving your update preference.",
-    "update_channel_failed": "Could not confirm the update preference. Check again before retrying."
+    "update_channel_failed": "Could not confirm the update preference. Check again before retrying.",
+    "update_channel_unreadable": "The update preference was not saved, because Polaris refused to read its settings file."
   },
   "navbar": {
     "applications": "Applications",
@@ -1337,6 +1352,7 @@
     "helper": "Fast toggles",
     "saving": "Saving…",
     "save_failed": "Unable to update that setting.",
+    "save_unreadable": "That setting was not saved, because Polaris refused to read its settings file.",
     "enabled_now": "enabled",
     "disabled_now": "disabled",
     "live_badge": "Live",
@@ -2521,6 +2537,7 @@
     "logs_level_fatal": "Fatal"
   },
   "welcome": {
+    "settings_unreadable": "Polaris refused to read its settings file.",
     "confirm_password": "Confirm password",
     "create_creds": "Before Getting Started, we need you to make a new username and password for accessing the Web UI.",
     "create_creds_alert": "The credentials below are needed to access Polaris's Web UI. Keep them safe, since you will never see them again!",

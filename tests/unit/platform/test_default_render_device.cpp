@@ -181,6 +181,76 @@ TEST(LinuxEncoderAutoPolicy, AmdDesktopStaysOnEstablishedBackend) {
   EXPECT_EQ(decision.fallback_encoder, "next_available");
 }
 
+TEST(LinuxEncoderAutoPolicy, AmdOutsideLabwcSaysVulkanIsNotACandidateAndWhatChoosingItCosts) {
+  // #635: a Gamescope Stream host was told it sat on a "desktop capture route" and went looking
+  // for a Vulkan probe that had failed. None had run. Auto treats every AMD route but the labwc
+  // private compositor as an established desktop route, so the reason has to say Vulkan was never
+  // a candidate there, how to ask for it, and what asking costs on that route.
+  constexpr auto npos = std::string_view::npos;
+  const auto decision = linux_encoder_auto_policy::decide("amdgpu", false);
+  const auto reason = linux_encoder_auto_policy::reason(decision.policy, true, true);
+
+  EXPECT_EQ(reason.find("desktop capture route"), npos) << reason;
+  EXPECT_NE(reason.find("labwc"), npos) << reason;
+  EXPECT_NE(reason.find("Gamescope Stream"), npos) << reason;
+  // The answer opens it, as what Auto prefers: after a fallback this sentence follows the encoder
+  // Auto fell back to, so it must not say VA-API is in use.
+  EXPECT_EQ(
+    reason.rfind("Auto prefers VA-API on AMD outside labwc, including Gamescope Stream; Vulkan Video is not tried.", 0),
+    0u
+  ) << reason;
+  EXPECT_EQ(reason.find("uses VA-API"), npos) << reason;
+  EXPECT_NE(reason.find("encoder = vulkan"), npos) << reason;
+  EXPECT_NE(reason.find("AV1 is then unavailable"), npos) << reason;
+  EXPECT_NE(reason.find("through system memory"), npos) << reason;
+  for (const auto dash : {std::string_view {"\xE2\x80\x94"}, std::string_view {"\xE2\x80\x93"}, std::string_view {" - "}}) {
+    EXPECT_EQ(reason.find(dash), npos) << reason;
+  }
+
+  // The labwc route and the driver-unknown case keep their own sentences.
+  EXPECT_NE(
+    linux_encoder_auto_policy::reason(linux_encoder_auto_policy::decide("amdgpu", true).policy, true, true).find("prefer Vulkan Video"),
+    npos
+  );
+  EXPECT_NE(linux_encoder_auto_policy::reason(decision.policy, false, true).find("could not identify"), npos);
+
+  // A build without Vulkan Video has nothing to offer, so it must not point at encoder = vulkan.
+  const auto without_vulkan = linux_encoder_auto_policy::reason(decision.policy, true, false);
+  EXPECT_EQ(without_vulkan.find("encoder = vulkan"), npos) << without_vulkan;
+  EXPECT_NE(without_vulkan.find("no Vulkan Video support"), npos) << without_vulkan;
+  EXPECT_EQ(without_vulkan.rfind("Auto prefers VA-API on AMD outside labwc", 0), 0u) << without_vulkan;
+  EXPECT_EQ(without_vulkan.find("uses VA-API"), npos) << without_vulkan;
+  EXPECT_NE(without_vulkan.find("labwc"), npos) << without_vulkan;
+  EXPECT_EQ(without_vulkan.find("desktop capture route"), npos) << without_vulkan;
+}
+
+TEST(LinuxEncoderAutoPolicy, ExplicitVulkanReasonSaysWhatTheAutoSentenceSaysItCosts) {
+  // #635 was reported on encoder = vulkan, whose reason said only that it passed validation. The
+  // explicit reason says what the Auto sentence says choosing Vulkan Video costs, with the same
+  // qualification, so the two cannot drift apart. It opens with Vulkan Video and its first cost
+  // instead of the sentence every explicit encoder gives, for the Selection reason on the web
+  // console's Troubleshooting page and the system stats route, which show it in full. Nova's Doctor
+  // card never shows it: a passing explicit encoder grades pass.
+  constexpr auto npos = std::string_view::npos;
+  constexpr std::string_view portal_clause =
+    "on portal capture, which Gamescope Stream uses, frames reach the encoder through system memory.";
+  const auto explicit_reason = linux_encoder_auto_policy::explicit_encoder_reason("vulkan");
+  const auto auto_reason = linux_encoder_auto_policy::reason("amd_established_desktop", true, true);
+
+  EXPECT_EQ(
+    explicit_reason.rfind("Vulkan Video, configured explicitly, passed runtime validation and offers no AV1 here;", 0),
+    0u
+  ) << explicit_reason;
+  EXPECT_NE(explicit_reason.find(portal_clause), npos) << explicit_reason;
+  EXPECT_NE(auto_reason.find(portal_clause), npos) << auto_reason;
+  for (const auto dash : {std::string_view {"\xE2\x80\x94"}, std::string_view {"\xE2\x80\x93"}, std::string_view {" - "}}) {
+    EXPECT_EQ(explicit_reason.find(dash), npos) << explicit_reason;
+  }
+  for (const auto encoder : {"nvenc", "vaapi", "software", ""}) {
+    EXPECT_TRUE(linux_encoder_auto_policy::explicit_encoder_reason(encoder).empty()) << encoder;
+  }
+}
+
 #else
 
 TEST(DefaultRenderDevice, LinuxOnly) {

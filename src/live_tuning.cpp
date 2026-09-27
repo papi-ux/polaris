@@ -42,9 +42,21 @@ namespace live_tuning {
     return value;
   }
   nlohmann::json set_enabled(doctor_actions::paired_global_control_guard_t &authority,
-                            bool enabled, const std::optional<std::string> &expected) {
+                            bool enabled, const std::optional<std::string> &expected,
+                            configuration_store::refusal_t *refusal) {
     if (!authority) return {{"status", false}, {"http_status", 403}, {"code", "active_owner_required"}};
     std::lock_guard guard(configuration_store::mutex());
+    // The patch below stops at a file the store refuses and answered 500
+    // save_failed, which said nothing about the file. Ask the store first, the
+    // way GET /api/config does, and answer as it does.
+    configuration_store::refusal_t refused;
+    if (!configuration_store::read(config::sunshine.config_file, &refused)) {
+      if (refusal) *refusal = std::move(refused);
+      return {
+        {"status", false}, {"http_status", 503}, {"code", "config_unreadable"},
+        {"live_tuning", snapshot(stream_stats::get_current())}
+      };
+    }
     const auto result = configuration_store::patch(config::sunshine.config_file,
       {{"adaptive_bitrate_enabled", enabled ? "enabled" : "disabled"}}, expected);
     if (result != configuration_store::result::committed) return {

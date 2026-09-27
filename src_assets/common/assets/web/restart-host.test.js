@@ -65,6 +65,46 @@ describe('host restart flow', () => {
     expect(reload).not.toHaveBeenCalled()
   })
 
+  // #782: a bare 503 from a refused settings file kept the restart spinning
+  // until it timed out. The host is up; only its settings file is unreadable.
+  it('reports a host that answers with a refused settings file as up and passes the refusal on', async () => {
+    const refusal = {
+      path: '/srv/polaris/polaris.conf',
+      reason: 'It is writable by its group (mode 0664), and the settings store refuses a file another user can change.',
+      fix: 'Restrict it with "chmod go-w /srv/polaris/polaris.conf".',
+    }
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce({ ok: true, status: 202 })
+      // Any other 503 is still a host that is not ready yet.
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ status: false, error: 'Web UI session validation is temporarily unavailable.' }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ status: false, error: 'config_unreadable', ...refusal }),
+      })
+    const onReady = vi.fn()
+    const onTimeout = vi.fn()
+
+    const result = await requestHostRestart({
+      fetchImpl,
+      sleep: vi.fn(() => Promise.resolve()),
+      onReady,
+      onTimeout,
+      readyPollAttempts: 3,
+    })
+
+    expect(result).toEqual({ accepted: true, ready: true, attempts: 2, settingsUnreadable: refusal })
+    expect(onReady).toHaveBeenCalledWith({ ready: true, attempts: 2, settingsUnreadable: refusal })
+    expect(onTimeout).not.toHaveBeenCalled()
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
+  })
+
   it('wires config and troubleshooting restart actions through the shared readiness flow', () => {
     for (const view of ['ConfigView.vue', 'TroubleshootingView.vue']) {
       const source = readFileSync(join(process.cwd(), 'src_assets/common/assets/web/views', view), 'utf8')

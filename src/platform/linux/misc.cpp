@@ -70,6 +70,7 @@
 #include "src/platform/common.h"
 #include "src/platform/send_wait.h"
 #include "src/video.h"
+#include "stream_display_policy.h"
 #include "vaapi.h"
 #include "virtual_display.h"
 
@@ -1833,43 +1834,109 @@ std::string get_local_ip_for_gateway() {
     const video::config_t &config
   );
 
+  std::string_view display_backend_name(display_backend_e backend);
+
+  /**
+   * @brief The route a display whose initialization succeeded reports, with what it left unsaid
+   *        filled in from the backend dispatch opened.
+   *
+   * The portal backend names its own route, and says when it is not the one it asked for first.
+   * Every other backend has one route, which is the backend itself.
+   */
+  static capture_route_t name_capture_route(capture_route_t route, std::string_view backend) {
+    if (route.opened.empty()) {
+      route.opened = backend;
+    }
+    if (route.route.empty()) {
+      route.route = route.opened;
+    }
+    return route;
+  }
+
+  /**
+   * @brief The route a display dispatch opened on backend reports: its own words, and the name
+   *        the capture setting gives backend for what it left unsaid.
+   *
+   * The name is the setting's, kms, wlr, portal, x11 or nvfbc, never the enum's or the request's
+   * spelling, so a wayland display is wlr and a request for drm or kwin opens kms or portal.
+   */
+  static capture_route_t name_opened_display(capture_route_t route, display_backend_e backend) {
+    return name_capture_route(std::move(route), display_backend_name(backend));
+  }
+
+#ifdef POLARIS_TESTS
+  capture_route_t name_capture_route_for_tests(capture_route_t route, std::string_view backend) {
+    return name_capture_route(std::move(route), backend);
+  }
+
+  capture_route_t name_opened_display_for_tests(
+    capture_route_t route,
+    std::string_view requested,
+    bool nvfbc_available,
+    bool wayland_available,
+    bool portal_available,
+    bool kms_available,
+    bool x11_available,
+    bool cuda_memory
+  ) {
+    const auto backend = choose_display_backend(
+      requested,
+      false,
+      nvfbc_available,
+      wayland_available,
+      portal_available,
+      kms_available,
+      x11_available,
+      cuda_memory
+    );
+    return name_opened_display(std::move(route), backend);
+  }
+#endif
+
   std::shared_ptr<display_t> display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config) {
     const auto requested_backend = config.capture_generation.capture_backend;
     const auto backend = selected_display_backend(hwdevice_type, config);
     log_display_backend_choice(backend, config);
+    // A display whose initialization succeeded says what it opened. One that failed says nothing.
+    [[maybe_unused]] const auto named = [backend](std::shared_ptr<display_t> opened) {
+      if (opened) {
+        opened->capture_route = name_opened_display(std::move(opened->capture_route), backend);
+      }
+      return opened;
+    };
     switch (backend) {
       case display_backend_e::nvfbc:
 #ifdef POLARIS_BUILD_CUDA
         BOOST_LOG(info) << "Screencasting with NvFBC"sv;
-        return nvfbc_display(hwdevice_type, display_name, config);
+        return named(nvfbc_display(hwdevice_type, display_name, config));
 #else
         break;
 #endif
       case display_backend_e::wayland:
 #ifdef POLARIS_BUILD_WAYLAND
         BOOST_LOG(info) << "Screencasting with Wayland's protocol"sv;
-        return wl_display(hwdevice_type, display_name, config);
+        return named(wl_display(hwdevice_type, display_name, config));
 #else
         break;
 #endif
       case display_backend_e::portal:
 #ifdef POLARIS_BUILD_PORTAL
         BOOST_LOG(info) << "Screencasting with XDG Desktop Portal"sv;
-        return portal_display(hwdevice_type, display_name, config);
+        return named(portal_display(hwdevice_type, display_name, config));
 #else
         break;
 #endif
       case display_backend_e::kms:
 #ifdef POLARIS_BUILD_DRM
         BOOST_LOG(info) << "Screencasting with KMS"sv;
-        return kms_display(hwdevice_type, display_name, config);
+        return named(kms_display(hwdevice_type, display_name, config));
 #else
         break;
 #endif
       case display_backend_e::x11:
 #ifdef POLARIS_BUILD_X11
         BOOST_LOG(info) << "Screencasting with X11"sv;
-        return x11_display(hwdevice_type, display_name, config);
+        return named(x11_display(hwdevice_type, display_name, config));
 #else
         break;
 #endif
@@ -2021,10 +2088,19 @@ std::string get_local_ip_for_gateway() {
    */
   void log_display_backend_choice(display_backend_e backend, const video::config_t &config) {
     const auto &generation = config.capture_generation;
+    // configured is polaris.conf as loaded. By the time a display opens, Host Virtual Display, a
+    // session transition or Game Mode may have rewritten the live setting, and printing that as the
+    // configured backend hid the very rewrite this line is here to show.
+    const auto configured = stream_display_policy::loaded_capture_setting();
     BOOST_LOG(info) << "capture_backend: chose ["sv << display_backend_name(backend)
                     << "] requested=["sv
                     << (generation.capture_backend.empty() ? "auto"sv
                                                            : std::string_view {generation.capture_backend})
+                    << "] configured=["sv << (configured.empty() ? "auto"sv : std::string_view {configured})
+                    << "] live=["sv
+                    << (config::video.capture.empty() ? "auto"sv : std::string_view {config::video.capture})
+                    << "] mode=["sv
+                    << (generation.stream_mode.empty() ? "unset"sv : std::string_view {generation.stream_mode})
                     << "] exact_output=["sv
                     << (generation.exact_display_name.empty() ? "none"sv
                                                               : std::string_view {generation.exact_display_name})
@@ -2055,12 +2131,16 @@ std::string get_local_ip_for_gateway() {
 
   void evaluate_capture_sources() {
     sources.reset();
+    // Dispatch accepts kwin for portal and drm for kms. Compared as literals, an alias enumerated
+    // nothing, and the fallback below substituted a backend and recorded a silent failure for a
+    // host that asked for one dispatch serves.
+    const auto requested = stream_display_policy::canonical_capture_backend(requested_capture());
 
 #ifdef POLARIS_BUILD_CUDA
     const bool force_cage_wlr_capture = config::video.linux_display.use_cage_compositor
-                                     && (requested_capture().empty() || requested_capture() == "wlr");
+                                     && (requested.empty() || requested == "wlr");
 
-    if (!force_cage_wlr_capture && ((requested_capture().empty() && sources.none()) || requested_capture() == "nvfbc")) {
+    if (!force_cage_wlr_capture && ((requested.empty() && sources.none()) || requested == "nvfbc")) {
       if (verify_nvfbc()) {
         sources[source::NVFBC] = true;
       }
@@ -2068,8 +2148,8 @@ std::string get_local_ip_for_gateway() {
 #endif
 #ifdef POLARIS_BUILD_WAYLAND
     const bool virtual_output_needs_portal = host_virtual_display_needs_portal();
-    if (((requested_capture().empty() && sources.none() && !virtual_output_needs_portal)
-         || requested_capture() == "wlr"
+    if (((requested.empty() && sources.none() && !virtual_output_needs_portal)
+         || requested == "wlr"
          || config::video.linux_display.use_cage_compositor)) {
       // When cage/labwc is configured, prefer direct wlr capture over portal
       // and connect to labwc's socket instead of the desktop compositor.
@@ -2088,22 +2168,22 @@ std::string get_local_ip_for_gateway() {
     }
 #endif
 #ifdef POLARIS_BUILD_DRM
-    if ((requested_capture().empty() && sources.none()) || requested_capture() == "kms") {
+    if ((requested.empty() && sources.none()) || requested == "kms") {
       if (verify_kms()) {
         sources[source::KMS] = true;
       }
     }
 #endif
 #ifdef POLARIS_BUILD_PORTAL
-    if ((requested_capture().empty() && sources.none()) || requested_capture() == "portal") {
+    if ((requested.empty() && sources.none()) || requested == "portal") {
       if (verify_portal()) {
         sources[source::PORTAL] = true;
       }
-      else if (requested_capture() == "portal") {
+      else if (requested == "portal") {
         BOOST_LOG(warning) << "Portal capture requested but XDG Desktop Portal ScreenCast interface is not available"sv;
       }
     }
-    else if (requested_capture().empty() && sources.any()) {
+    else if (requested.empty() && sources.any()) {
       // Another source was already selected via auto-detection; log Portal as an alternative if available
       if (verify_portal()) {
         BOOST_LOG(info) << "XDG Desktop Portal ScreenCast is available. Set capture = portal to use it."sv;
@@ -2114,7 +2194,7 @@ std::string get_local_ip_for_gateway() {
 #ifdef POLARIS_BUILD_X11
     // We enumerate this capture backend regardless of other suitable sources,
     // since it may be needed as a NvFBC fallback for software encoding on X11.
-    if (requested_capture().empty() || requested_capture() == "x11") {
+    if (requested.empty() || requested == "x11") {
       if (verify_x11()) {
         sources[source::X11] = true;
       }
@@ -2123,18 +2203,40 @@ std::string get_local_ip_for_gateway() {
 
   }
 
+  /**
+   * Say, once per evaluation, when the stream mode asks for another backend than polaris.conf
+   * names. The per-open line shows only the rewritten request, so a host set to kms in a private
+   * compositor mode read as a host on the KMS path. This speaks for the encoder probe and
+   * for every generation without an exact output, which is what capture_for_current_mode() answers
+   * by default. A substitution is left to the warning that reports it, which names the substitute.
+   */
+  void log_capture_mode_override() {
+    const auto override = stream_display_policy::capture_mode_override_for_current_mode();
+    if (!override || override->reason == stream_display_policy::k_capture_override_substituted) {
+      return;
+    }
+    BOOST_LOG(warning) << stream_display_policy::describe_capture_override(
+      *override,
+      config::video.linux_display.stream_mode
+    );
+  }
+
   void reevaluate_capture_sources() {
     capture_backend_override.reset();
     capture_backend_substitution.clear();
     kms_capability_refused = false;
     capture_sources_evaluated = true;
     capture_sources_evaluated_for = capture_sources_evaluation_key();
+    // Whatever this evaluation concludes, say once whether the mode sets the capture setting aside.
+    auto say_override = util::fail_guard([]() {
+      log_capture_mode_override();
+    });
     evaluate_capture_sources();
 
     if (!sources.none()) {
       return;
     }
-    if (config::video.capture.empty()) {
+    if (stream_display_policy::canonical_capture_backend(config::video.capture).empty()) {
       BOOST_LOG(warning) << "reevaluate_capture_sources: no capture method available for the current mode"sv;
       return;
     }
@@ -2161,9 +2263,14 @@ std::string get_local_ip_for_gateway() {
     }
 
     const auto selected = describe_selected_sources();
-    capture_backend_substitution = requested + " -> " + selected;
+    // Named the way dispatch reads the setting, so a host set to drm gets the Doctor's KMS advice
+    // (a missing capability, one command away) and not the advice for a compositor without a protocol.
+    capture_backend_substitution = stream_display_policy::canonical_capture_backend(requested) + " -> " + selected;
+    const auto &mode = config::video.linux_display.stream_mode;
     BOOST_LOG(warning) << "capture = "sv << requested
-                       << " cannot capture anything in the current stream mode, so the encoder "sv
+                       << " cannot capture anything in stream mode ["sv
+                       << (mode.empty() ? "unset"sv : std::string_view {mode})
+                       << "], so the encoder "sv
                        << "probe and streams that capture the host desktop use "sv << selected
                        << " instead. On a compositor without the wlroots capture protocols, only "sv
                        << "the private-compositor modes can use wlr; every other mode has to "sv
@@ -2285,7 +2392,7 @@ std::string get_local_ip_for_gateway() {
     kms_capability_refused = true;
     // A silent failure is an action that was asked for and did not land. Only a host set to KMS
     // capture asked; on any other the probe simply found KMS off, which the probe itself says.
-    if (config::video.capture == "kms") {
+    if (stream_display_policy::canonical_capture_backend(config::video.capture) == "kms") {
       verified_action::confirm(
         "video.kms_capability",
         "Read a DRM framebuffer handle for KMS capture",

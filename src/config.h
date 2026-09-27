@@ -460,6 +460,16 @@ namespace config {
    */
   std::optional<bool> parse_bool(std::string_view value);
 
+  /**
+   * @brief The capture setting in parsed configuration variables, the way startup parses it.
+   *
+   * Consumes the key, as apply_config consumes it, and returns current when the
+   * key is absent. A literal auto comes back empty: every backend chooser reads
+   * an empty value as auto, and the word itself reached the capture evaluation
+   * as a backend name it did not know.
+   */
+  std::string capture_setting(std::unordered_map<std::string, std::string> &vars, std::string current);
+
   int write_config_with_vaapi_settings(const std::string &path, const std::string &contents,
                                      const std::optional<std::string> &expected = std::nullopt);
 

@@ -8,9 +8,12 @@
 #if defined(__linux__) && defined(POLARIS_BUILD_VULKAN)
 
   // standard includes
+  #include <algorithm>
   #include <cstring>
   #include <memory>
+  #include <sstream>
   #include <string>
+  #include <string_view>
   #include <utility>
   #include <vector>
 
@@ -26,7 +29,16 @@ extern "C" {
   #include <libavutil/hwcontext.h>
 }
 
+  // lib includes
+  #include <boost/core/null_deleter.hpp>
+  #include <boost/log/core.hpp>
+  #include <boost/log/sinks/sync_frontend.hpp>
+  #include <boost/log/sinks/text_ostream_backend.hpp>
+  #include <boost/smart_ptr/make_shared_object.hpp>
+  #include <boost/smart_ptr/shared_ptr.hpp>
+
   // local includes
+  #include "src/logging.h"
   #include "src/platform/linux/graphics.h"
   #include "src/platform/linux/vulkan_encode.h"
 
@@ -122,6 +134,107 @@ namespace {
    * Luma samples from the encoder's frame, read back through FFmpeg, which waits on the timeline
    * semaphores the conversion signalled. Returns the centre and the top-left corner.
    */
+  /**
+   * An encoder frame and the device that converts into it, set up the way video.cpp sets them up for
+   * a session. The hardware device and the frames context are declared before the converting device
+   * so they outlive it: its teardown still uses the Vulkan device, and it keeps a plain pointer to the
+   * frames context.
+   */
+  struct encoder_frame_t {
+    buffer_t hw_device;
+    buffer_t frames_ref;
+    std::unique_ptr<platf::avcodec_encode_device_t> device;
+    AVFrame *frame = nullptr;  // The device owns it once set_frame() takes it.
+
+    bool open(std::unique_ptr<platf::avcodec_encode_device_t> made) {
+      device = std::move(made);
+      if (!device || !device->data) {
+        return false;
+      }
+      using init_hw_device_fn = int (*)(platf::avcodec_encode_device_t *, AVBufferRef **);
+      AVBufferRef *created_device = nullptr;
+      if (reinterpret_cast<init_hw_device_fn>(device->data)(device.get(), &created_device) != 0) {
+        return false;
+      }
+      hw_device.reset(created_device);
+
+      frames_ref.reset(av_hwframe_ctx_alloc(hw_device.get()));
+      if (!frames_ref) {
+        return false;
+      }
+      auto *frames = reinterpret_cast<AVHWFramesContext *>(frames_ref->data);
+      frames->format = AV_PIX_FMT_VULKAN;
+      frames->sw_format = AV_PIX_FMT_NV12;
+      frames->width = frame_width;
+      frames->height = frame_height;
+      frames->initial_pool_size = 0;
+      device->init_hwframes(frames);
+      if (av_hwframe_ctx_init(frames_ref.get()) < 0) {
+        return false;
+      }
+
+      frame = av_frame_alloc();
+      if (!frame || device->set_frame(frame, frames_ref.get()) != 0) {
+        return false;
+      }
+      device->colorspace = {video::colorspace_e::rec709, false, 8};
+      device->apply_colorspace();
+      return true;
+    }
+  };
+
+  /// A frame in host memory, the way portal shared memory capture hands one over.
+  struct host_frame_t: platf::img_t {
+    explicit host_frame_t(std::uint8_t level):
+        pixels(static_cast<std::size_t>(frame_width) * frame_height * 4, level) {
+      data = pixels.data();
+      width = frame_width;
+      height = frame_height;
+      pixel_pitch = 4;
+      row_pitch = frame_width * 4;
+    }
+
+    std::vector<std::uint8_t> pixels;
+  };
+
+  /// The lines the host logs while it is alive, as an operator reads them.
+  class log_capture_t {
+  public:
+    log_capture_t():
+        stream_ {boost::make_shared<std::ostringstream>()} {
+      auto backend = boost::make_shared<boost::log::sinks::text_ostream_backend>();
+      backend->add_stream(boost::shared_ptr<std::ostream> {stream_.get(), boost::null_deleter {}});
+      backend->auto_flush(true);
+      sink_ = boost::make_shared<sink_t>(backend);
+      sink_->set_formatter(&logging::formatter);
+      boost::log::core::get()->add_sink(sink_);
+    }
+
+    ~log_capture_t() {
+      boost::log::core::get()->remove_sink(sink_);
+    }
+
+    log_capture_t(const log_capture_t &) = delete;
+    log_capture_t &operator=(const log_capture_t &) = delete;
+
+    /// Every captured line that holds needle.
+    [[nodiscard]] std::vector<std::string> lines_with(std::string_view needle) const {
+      std::istringstream input {stream_->str()};
+      std::vector<std::string> out;
+      for (std::string line; std::getline(input, line);) {
+        if (line.find(needle) != std::string::npos) {
+          out.push_back(line);
+        }
+      }
+      return out;
+    }
+
+  private:
+    using sink_t = boost::log::sinks::synchronous_sink<boost::log::sinks::text_ostream_backend>;
+    boost::shared_ptr<std::ostringstream> stream_;
+    boost::shared_ptr<sink_t> sink_;
+  };
+
   std::pair<int, int> centre_and_corner_luma(AVFrame *hw_frame) {
     std::unique_ptr<AVFrame, void (*)(AVFrame *)> sw_frame {av_frame_alloc(), [](AVFrame *frame) {
                                                               av_frame_free(&frame);
@@ -202,6 +315,123 @@ TEST(VulkanEncodeCaptureTests, ImportsADmabufAndCursorIntoTheEncoderFrame) {
   EXPECT_LE(black_centre, 26) << "the black capture did not reach the encoder frame";
   EXPECT_GE(black_corner, 225) << "the cursor was not drawn over the capture";
   EXPECT_GE(white_corner, 225);
+}
+
+/**
+ * The refusal belongs to the system memory upload alone.
+ *
+ * VRAM capture hands over exactly the frame that upload refuses whenever no cursor is drawn: a
+ * DMA-BUF with nothing in host memory, since KMS capture sets the cursor pixels to null when none is
+ * visible. Refused here, it would end every KMS or wlroots Vulkan Video stream on its first frame
+ * without a cursor.
+ */
+TEST(VulkanEncodeCaptureTests, AVramFrameWithNoCursorIsImportedNotRefused) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t white {0xFF};
+  if (!white.ok) {
+    GTEST_SKIP() << "Could not allocate a linear DMA-BUF on " << render_node;
+  }
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+
+  egl::img_descriptor_t img;
+  white.describe(img, 1);
+  ASSERT_EQ(img.data, nullptr) << "a cursor was drawn, so this is not the frame the refusal matches";
+  ASSERT_TRUE(vk::ram_upload_cannot_read(img)) << "this is not the frame the system memory upload refuses";
+
+  EXPECT_EQ(encoder.device->convert(img), 0) << "a VRAM frame with no cursor was refused, which ends the stream";
+  EXPECT_GE(centre_and_corner_luma(encoder.frame).first, 225) << "the DMA-BUF did not reach the encoder frame";
+}
+
+/**
+ * The system memory upload refuses a live DMA-BUF frame and keeps the primer.
+ *
+ * It reads pixels from host memory and read a frame with none as black. A portal that negotiated
+ * DMA-BUF hands over two such frames: the primer, which has no DMA-BUF either and is rightly black,
+ * and every live frame after it, which has a DMA-BUF this route cannot read. Encoding those as black
+ * streamed a black picture at full frame rate with nothing in any log (#635).
+ */
+TEST(VulkanRamUploadTests, OnlyALiveDmabufFrameIsRefused) {
+  // The primer, exactly as the portal makes it once DMA-BUF is negotiated: alloc_img() leaves the
+  // descriptors closed and the pixels unset, and dummy_img() sets the sequence to zero.
+  egl::img_descriptor_t primer;
+  primer.width = frame_width;
+  primer.height = frame_height;
+  primer.pixel_pitch = 4;
+  primer.row_pitch = frame_width * 4;
+  primer.sequence = 0;
+  EXPECT_FALSE(vk::ram_upload_cannot_read(primer)) << "the primer is refused, so no session ever starts";
+
+  const host_frame_t shared_memory {0x80};
+  EXPECT_FALSE(vk::ram_upload_cannot_read(shared_memory)) << "shared memory is the frame this route exists for";
+
+  // A live frame as portal capture fills one in: a DMA-BUF, no pixels in host memory.
+  egl::img_descriptor_t live;
+  live.width = frame_width;
+  live.height = frame_height;
+  live.sd.fds[0] = ::open("/dev/null", O_RDONLY | O_CLOEXEC);  // The descriptor closes it.
+  ASSERT_GE(live.sd.fds[0], 0);
+  live.sequence = 1;
+  EXPECT_TRUE(vk::ram_upload_cannot_read(live)) << "a DMA-BUF frame is read as black";
+}
+
+TEST(VulkanRamUploadTests, ThePrimerStillEncodesBlack) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_ram(frame_width, frame_height, render_node)));
+
+  egl::img_descriptor_t primer;
+  primer.width = frame_width;
+  primer.height = frame_height;
+  primer.pixel_pitch = 4;
+  primer.row_pitch = frame_width * 4;
+  primer.sequence = 0;
+  ASSERT_EQ(encoder.device->convert(primer), 0) << "the frame every session is primed with was refused";
+
+  const auto [centre, corner] = centre_and_corner_luma(encoder.frame);
+  EXPECT_LE(centre, 26) << "the primer is not black";
+  EXPECT_LE(corner, 26);
+}
+
+TEST(VulkanRamUploadTests, ALiveDmabufFrameEndsTheStreamInsteadOfEncodingBlack) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t captured {0x00};
+  if (!captured.ok) {
+    GTEST_SKIP() << "Could not allocate a linear DMA-BUF on " << render_node;
+  }
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_ram(frame_width, frame_height, render_node)));
+
+  // A shared memory frame first, which this route reads, so a black frame after it can only be the
+  // refused frame encoded anyway.
+  host_frame_t white {0xFF};
+  ASSERT_EQ(encoder.device->convert(white), 0);
+  ASSERT_GE(centre_and_corner_luma(encoder.frame).first, 225) << "the shared memory frame did not reach the encoder";
+
+  egl::img_descriptor_t live;
+  captured.describe(live, 1);
+  live.width = frame_width;
+  live.height = frame_height;
+  live.pixel_pitch = 4;
+  live.row_pitch = frame_width * 4;
+  const log_capture_t log;
+  EXPECT_EQ(encoder.device->convert(live), platf::convert_capture_unreadable)
+    << "the DMA-BUF frame was taken, so the stream goes on without a picture";
+  EXPECT_GE(centre_and_corner_luma(encoder.frame).first, 225) << "the refused frame was encoded as black";
+
+  // A capture that hands this route a DMA-BUF hands it one for every frame, and the log says so once,
+  // at error, naming the route and that Vulkan Video on the portal takes shared memory only.
+  EXPECT_EQ(encoder.device->convert(live), platf::convert_capture_unreadable);
+  const auto said = log.lines_with("DMA-BUF frame reached the system memory upload route");
+  ASSERT_EQ(said.size(), 1u) << "the refusal was logged " << said.size() << " times for two frames";
+  EXPECT_NE(said.front().find("Error: "), std::string::npos) << said.front();
+  EXPECT_NE(said.front().find("Vulkan Video on the portal takes shared memory only"), std::string::npos) << said.front();
 }
 
 #endif

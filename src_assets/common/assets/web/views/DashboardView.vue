@@ -573,6 +573,7 @@ import { resolveAutoQualityState } from '../auto-quality-state'
 import { resolveDoctorActionHttpResponse } from '../doctor-action-http.js'
 import { buildReadyCheckDisplay } from '../dashboard-ready-checks'
 import { previewOutputForConfig } from '../dashboard-preview-output.js'
+import { readConfigOrNull } from '../config-cache.js'
 import {
   buildLiveSummary,
   buildQualityGrade,
@@ -1243,7 +1244,7 @@ async function explainDoctorVerdict() {
   try {
     const { explainDoctorWithAi } = await import('../ai-doctor-explanation.js')
     const configRes = await fetch('./api/config', { credentials: 'include' })
-    const config = configRes.ok ? await configRes.json() : {}
+    const config = (await readConfigOrNull(configRes)) || {}
     const result = await explainDoctorWithAi({
       aiEnabled: config.ai_enabled === true || config.ai_enabled === 'enabled' || config.ai_enabled === 'true',
       config,
@@ -1604,8 +1605,8 @@ const statsLoaded = ref(false)
 async function fetchSystemInfo() {
   try {
     const configRes = await fetch('./api/config', { credentials: 'include' })
-    if (configRes.ok) {
-      const config = await configRes.json()
+    const config = await readConfigOrNull(configRes)
+    if (config) {
       refreshClientSettingsSync(config)
       streamingOutput.value = previewOutputForConfig(config)
       discoveryEnabled.value = config.enable_discovery !== 'disabled'
@@ -1899,8 +1900,8 @@ onMounted(async () => {
   } catch {}
   try {
     const res = await fetch('./api/config', { credentials: 'include' })
-    if (res.ok) {
-      const data = await res.json()
+    const data = await readConfigOrNull(res)
+    if (data) {
       refreshClientSettingsSync(data)
       version.value = data.version || '0.0.0'
       headlessEnabled.value = data.headless_mode === 'enabled'

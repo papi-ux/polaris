@@ -10,11 +10,14 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <deque>
 #include <filesystem>
 #include <limits>
 #include <mutex>
+#include <random>
 #include <string_view>
 #include <vector>
 
@@ -24,6 +27,7 @@
 // local includes
 #include "adaptive_bitrate.h"
 #include "config.h"
+#include "configuration_store.h"
 #include "crypto.h"
 #include "logging.h"
 #include "network.h"
@@ -84,6 +88,10 @@ namespace stream_stats {
 
   static std::mutex stats_mutex;
   static stats_t current_stats;
+  // The most recently ended session, guarded by stats_mutex. It lives outside current_stats
+  // because update_stream_active(false) resets that wholesale when the last stream ends, which is
+  // when a person comes to read it. remove_client() is its only writer.
+  static std::optional<ended_session_t> last_ended_session;
 
   // measurement-spec-v1.md 6.1: increments on every add_client()/
   // remove_client() call. Deliberately its own atomic, outside stats_t -
@@ -498,6 +506,96 @@ namespace stream_stats {
       };
     }
 
+    /// Drawn once per process, so a stream_instance_id never repeats across a restart, where
+    /// session generations begin again at one.
+    const std::string &process_instance_nonce() {
+      static const std::string nonce = [] {
+        std::random_device device;
+        const auto value = (static_cast<std::uint64_t>(device()) << 32) ^ static_cast<std::uint64_t>(device());
+        char text[17] {};
+        std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(value));
+        return std::string {text};
+      }();
+      return nonce;
+    }
+
+    /// The frames a client accepted from the display its capture names. Only frames that display
+    /// delivered count, so until it delivers one, transport, residency and format read unknown,
+    /// and a display opened again starts over.
+    capture_source_t frames_of_published_display(const client_stats_t &client) {
+      return client.capture_frame_since_publication ? client.capture_source : capture_source_t {};
+    }
+
+    /// A session's capture: what it asked for and opened, and what its accepted frames carried.
+    nlohmann::json capture_backend_json(const capture_backend_t &backend, const capture_source_t &frames) {
+      nlohmann::json capture {
+        {"preference", backend.preference},
+        {"requested", backend.requested},
+        {"opened", backend.opened},
+        {"route", backend.route},
+        {"transport", platf::from_frame_transport(frames.transport)},
+        {"residency", platf::from_frame_residency(frames.residency)},
+        {"format", platf::from_frame_format(frames.format)},
+      };
+      if (!backend.mode_override_reason.empty()) {
+        capture["mode_override_reason"] = backend.mode_override_reason;
+      }
+      if (!backend.route_fallback_reason.empty()) {
+        capture["route_fallback_reason"] = backend.route_fallback_reason;
+      }
+      return capture;
+    }
+
+    /// A lifecycle time in UTC ISO 8601, to the second. Empty for a time that was never set.
+    std::string iso8601_utc(std::chrono::system_clock::time_point at) {
+      if (at.time_since_epoch().count() == 0) {
+        return {};
+      }
+      const std::time_t seconds = std::chrono::system_clock::to_time_t(at);
+      std::tm utc {};
+#ifdef _WIN32
+      gmtime_s(&utc, &seconds);
+#else
+      gmtime_r(&seconds, &utc);
+#endif
+      char buffer[32];
+      if (std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utc) == 0) {
+        return {};
+      }
+      return buffer;
+    }
+
+    /// The last session as the stats report it. Every value was frozen from the session's own
+    /// generation, and one it never reported is absent rather than given a default.
+    nlohmann::json ended_session_json(const ended_session_t &ended) {
+      nlohmann::json session {
+        {"state", "ended"},
+        {"client_name", ended.client_name},
+      };
+      if (const auto id = stream_instance_id(ended.session_generation); !id.empty()) {
+        session["stream_instance_id"] = id;
+      }
+      if (const auto at = iso8601_utc(ended.started_at); !at.empty()) {
+        session["started_at"] = at;
+      }
+      if (const auto at = iso8601_utc(ended.ended_at); !at.empty()) {
+        session["ended_at"] = at;
+      }
+      if (!ended.capture_backend.opened.empty()) {
+        session["capture"] = capture_backend_json(ended.capture_backend, ended.capture_frames);
+      }
+      if (!ended.codec.empty()) {
+        session["codec"] = ended.codec;
+      }
+      if (!ended.encoder_backend.empty()) {
+        session["encoder_backend"] = ended.encoder_backend;
+      }
+      if (!ended.pyrowave_route.empty()) {
+        session["pyrowave_route"] = ended.pyrowave_route;
+      }
+      return session;
+    }
+
     nlohmann::json fec_protection_json(const fec_protection_stats_t &stats) {
       return {
         {"oversized_frames_total", stats.oversized_frames_total},
@@ -547,6 +645,10 @@ namespace stream_stats {
   }  // namespace
 
   std::string stats_t::to_json() const {
+    return to_json(nlohmann::json::object());
+  }
+
+  std::string stats_t::to_json(const nlohmann::json &doctor_health) const {
     nlohmann::json j;
 
     j["streaming"] = streaming;
@@ -699,9 +801,23 @@ namespace stream_stats {
       cj["bitrate_kbps"] = c.bitrate_kbps;
       cj["encode_time_ms"] = c.encode_time_ms;
       cj["codec"] = c.codec;
+      // The encoder this client's own stream sampled, which last_session keeps when it ends.
+      // Absent before its first sample, because missing is unknown.
+      if (!c.encoder_backend.empty()) {
+        cj["encoder_backend"] = c.encoder_backend;
+      }
       cj["width"] = c.width;
       cj["height"] = c.height;
       cj["capture_source"] = capture_source_json(c.capture_source);
+      if (c.session_generation != 0) {
+        cj["stream_instance_id"] = stream_instance_id(c.session_generation);
+      }
+      if (!c.capture_backend.opened.empty()) {
+        cj["capture"] = capture_backend_json(c.capture_backend, frames_of_published_display(c));
+      }
+      if (!c.pyrowave_route.empty()) {
+        cj["pyrowave_route"] = c.pyrowave_route;
+      }
       cj["latency_ms"] = c.latency_ms;
       cj["packet_loss"] = c.packet_loss;
       cj["packet_loss_available"] = c.packet_loss_available;
@@ -714,8 +830,36 @@ namespace stream_stats {
     }
     j["clients"] = clients_json;
     j["capture_source"] = clients.empty() ? nlohmann::json(nullptr) : capture_source_json(clients.front().capture_source);
+    // The one client's capture at the top level, for a reader that expects a single stream. Two
+    // clients have two answers, and the first one's is no answer for both, so then there is none.
+    if (clients.size() == 1 && !clients.front().capture_backend.opened.empty()) {
+      const auto &backend = clients.front().capture_backend;
+      j["capture_backend_preference"] = backend.preference;
+      j["capture_backend_requested"] = backend.requested;
+      j["capture_backend_opened"] = backend.opened;
+      j["capture_backend_route"] = backend.route;
+      if (!backend.mode_override_reason.empty()) {
+        j["capture_mode_override_reason"] = backend.mode_override_reason;
+      }
+      if (!backend.route_fallback_reason.empty()) {
+        j["capture_route_fallback_reason"] = backend.route_fallback_reason;
+      }
+    }
+    // The one client's encoder at the top level, for the same reader. The process-wide
+    // encoder_backend is whichever encode loop sampled last, Browser Stream's included, so it is
+    // never the top-level encoder_backend: with two clients there is no one answer. The capture
+    // forecast in linux_gpu_profile still names it, as the encoder the next stream is likely to get.
+    if (clients.size() == 1 && !clients.front().encoder_backend.empty()) {
+      j["encoder_backend"] = clients.front().encoder_backend;
+    }
+    // The most recently ended session on this host, which may not be any client listed above: one
+    // viewer can end while another streams. A report about one session matches its
+    // stream_instance_id.
+    if (last_session) {
+      j["last_session"] = ended_session_json(*last_session);
+    }
     j["active_sessions"] = static_cast<int>(clients.size());
-    j["doctor"] = build_doctor_json(*this, nlohmann::json::object());
+    j["doctor"] = build_doctor_json(*this, doctor_health);
     if (const auto identity = get_single_active_session_identity()) {
       const auto controller = adaptive_bitrate::get_doctor_state();
       bind_doctor_action_scope(
@@ -872,9 +1016,32 @@ namespace stream_stats {
       );
       return out;
     }
+    if (vulkan && backend == "portal") {
+      // The portal never offers Vulkan Video a DMA-BUF: its encode device there is the RAM
+      // uploader whatever PipeWire could negotiate, until the portal can retire a failed DMA-BUF
+      // frame to that uploader the way the private compositor can. POLARIS_PORTAL_DMABUF=1 is
+      // VA-API's opt-in and does not reach it. Say so before the first stream, as VA-API does,
+      // rather than wait for a stream to show a path that cannot change (#635).
+      system_memory(
+        "vulkan_portal_system_memory_by_design",
+        "info",
+        "Capture through the portal (Mirror Desktop, Host Virtual Display, Gamescope Stream) on "
+        "Vulkan Video keeps frames in system memory by design: the portal hands Vulkan Video every "
+        "frame in shared memory and Vulkan Video uploads it to the GPU itself, because the portal "
+        "has no way yet to fall back when a DMA-BUF frame fails to import. This is the expected "
+        "path for Vulkan Video on the portal, not a fault.",
+        std::string {"Nothing to change for a stable stream. If throughput falls short at high "
+                     "resolution or refresh, lower resolution, frame rate or bitrate first. "
+                     "Private Stream can keep Vulkan Video frames on the GPU."} +
+          (in.portal_vaapi_dmabuf_opted_in ?
+             " POLARIS_PORTAL_DMABUF=1 applies to VA-API only and does not change this." :
+             "")
+      );
+      return out;
+    }
     if (backend == "portal") {
-      // With CUDA or Vulkan the portal is asked for DMA-BUF and the compositor decides; KDE
-      // handed over system memory in the lab. Nothing to say until a stream shows which.
+      // With CUDA the portal is asked for DMA-BUF and the compositor decides; KDE handed over
+      // system memory in the lab. Nothing to say until a stream shows which.
       return out;
     }
     if (backend == "wlr" && vulkan) {
@@ -1162,8 +1329,16 @@ namespace stream_stats {
 
     // The refusal on its own, whatever happened next. With capture = kms and nothing to
     // substitute, the host serves with no capture at all and this is the one line that says
-    // why; with a substitute, it is why the stream cannot carry HDR.
-    if (kms_refused) {
+    // why; with a substitute, it is why the stream cannot carry HDR. It speaks only where KMS is
+    // what a launch into the live mode asks for, the question a launch refusal asks: kms, drm,
+    // which dispatch reads as kms, or auto, whose search reached KMS. A private compositor mode
+    // captures through wlroots whatever capture says, and a launch into Gamescope Stream or the
+    // dongle fills an unset capture with the portal before it asks, so a refusal the idle search
+    // met there changes nothing about the stream.
+    const auto mode_capture = stream_display_policy::canonical_capture_backend(
+      stream_display_policy::capture_for_launch_into_current_mode()
+    );
+    if (kms_refused && (mode_capture == "kms" || mode_capture.empty())) {
       const bool nothing_else = platf::capture_sources_missing();
       configuration_warnings.push_back({
         {"id", "kms_capture_needs_capability"},
@@ -1315,9 +1490,14 @@ namespace stream_stats {
            "capture display did not report HDR."},
         {"action", std::string {
            "True HDR needs a capture path that reads the display's HDR metadata, which today "
-           "means the KMS/DRM path: capture = kms with a stream mode that shows the real HDR "
-           "output (Mirror Desktop, Host Virtual Display, Desktop Takeover or Gamescope). "
-           "Private Stream on headless labwc is always SDR. See docs/runtime.md."} +
+           "means the KMS/DRM path: capture = kms with Mirror Desktop as the host's stream mode, "
+           "streaming the HDR monitor itself. A launch into Mirror Desktop from another mode keeps "
+           "kms too, except on a host whose own mode is Host Virtual Display or Desktop Takeover: "
+           "loading that mode put the portal or wlroots in place of kms, and that lasts until "
+           "Polaris restarts. Those two modes capture their display through the portal or "
+           "wlroots. Gamescope Stream and the dongle keep kms only as the host's own mode, and a "
+           "launch into either from another mode captures through the portal. Private Stream on "
+           "headless labwc captures through wlroots and is always SDR. See docs/runtime.md."} +
            (kms_refused ?
               std::string {" On this host KMS capture was refused for a missing capability; run "} +
                 enable_kms_command + " first." :
@@ -1384,6 +1564,28 @@ namespace stream_stats {
 
     append_host_virtual_display_warnings(configuration_warnings, virtual_display::doctor_notes());
 #endif
+
+    // A settings file the store refused (#782). Polaris keeps running on the settings it loaded,
+    // but Settings, every settings save and Live Tuning go through the store, and until now only
+    // the console's Settings page said so. Apps, pairing and the console password have files of
+    // their own and still save. This is the refusal the last read or save met, so it
+    // clears the moment the file reads again. Paired clients read this profile in session status
+    // and support bundles carry it, so it names the kind of refusal and leaves the file's path,
+    // which carries the user's name, to the console and the log.
+    if (const auto refused = configuration_store::last_refusal(config::sunshine.config_file)) {
+      configuration_warnings.push_back({
+        {"id", "settings_file_unreadable"},
+        {"severity", "warning"},
+        {"refusal", private_state_file::refusal_name(refused->kind)},
+        {"message", "Polaris refused to read its settings file, so Settings cannot load and no settings change "
+                    "can be saved, whether it comes from the console, Live Tuning or a paired client. Apps, "
+                    "pairing and the console password are kept in other files and still save. Polaris keeps "
+                    "running on the settings it has already loaded."},
+        {"action", "The banner at the top of the console names the file, the reason and the command that fixes "
+                   "it, and so does the Polaris log. Once the file is fixed, Try again in the banner reads it "
+                   "again, and Polaris does not need a restart."}
+      });
+    }
 
     nlohmann::json profile = {
       {"encoder_api", stats.encode_target_device},
@@ -2614,6 +2816,7 @@ namespace stream_stats {
       client.name = client_name;
       client.ip = client_ip;
       client.session_generation = session_generation;
+      client.started_at = std::chrono::system_clock::now();
       current_stats.clients.push_back(std::move(client));
     }
 
@@ -2631,6 +2834,29 @@ namespace stream_stats {
     client_population_revision_counter.fetch_add(1, std::memory_order_relaxed);
 
     std::lock_guard<std::mutex> lock(stats_mutex);
+
+    // Freeze the ending session before its entry goes, from what its own generation stored. Only a
+    // removal that finds its live generation writes it, so removing the same session twice, one that
+    // was never added, or a legacy entry with no generation leaves the last session as it was.
+    if (session_generation > 0) {
+      const auto ending = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+        [session_generation](const client_stats_t &c) {
+          return c.session_generation == session_generation;
+        });
+      if (ending != current_stats.clients.end()) {
+        last_ended_session = ended_session_t {
+          .session_generation = ending->session_generation,
+          .client_name = ending->name,
+          .started_at = ending->started_at,
+          .ended_at = std::chrono::system_clock::now(),
+          .capture_backend = ending->capture_backend,
+          .capture_frames = frames_of_published_display(*ending),
+          .codec = ending->codec,
+          .encoder_backend = ending->encoder_backend,
+          .pyrowave_route = ending->pyrowave_route,
+        };
+      }
+    }
 
     current_stats.clients.erase(
       std::remove_if(current_stats.clients.begin(), current_stats.clients.end(),
@@ -2654,7 +2880,7 @@ namespace stream_stats {
     }
   }
 
-  void update_video_stats(double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height, std::string_view encoder_backend) {
+  void update_video_stats(double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height, std::string_view encoder_backend, std::uint64_t session_generation) {
     hot_bitrate_kbps.store(bitrate_kbps, std::memory_order_relaxed);
     hot_codec_id.store(codec_to_id(codec), std::memory_order_relaxed);
     hot_width.store(width, std::memory_order_relaxed);
@@ -2673,8 +2899,18 @@ namespace stream_stats {
     // and the only reason this call still needs stats_mutex at all.
     std::lock_guard<std::mutex> lock(stats_mutex);
     current_stats.encoder_backend = encoder_backend;
-    if (!current_stats.clients.empty()) {
-      auto &c = current_stats.clients.front();
+    // Every session's encode loop writes here, so each writes its own entry. Writing the first
+    // client put one session's codec and encoder on another's entry, while the other entries kept
+    // what they started with. Generation zero names no session: Browser Stream's encode loop
+    // passes it, and nothing keeps a Browser Stream from running beside a Moonlight or Nova
+    // session. It writes only an entry registered with no generation either, the way add_client()
+    // and remove_client() match one, so it never lands on a session's entry or its last_session.
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client != current_stats.clients.end()) {
+      auto &c = *client;
       c.fps = fps;
       c.bitrate_kbps = bitrate_kbps;
       c.encode_time_ms = encode_time_ms;
@@ -2685,11 +2921,18 @@ namespace stream_stats {
     }
   }
 
-  void update_video_stats(const std::string &client_ip, double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height, std::string_view encoder_backend) {
+  void update_video_stats(const std::string &client_ip, double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height, std::string_view encoder_backend, std::uint64_t session_generation) {
     std::lock_guard<std::mutex> lock(stats_mutex);
 
+    // Overlapping reconnects share an address, so a session with a generation finds its own entry
+    // by it. The address alone found the older session's. A caller with no generation finds only
+    // an entry registered with none at that address, as add_client() does, never a session's.
     auto it = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
-      [&client_ip](const client_stats_t &c) { return c.ip == client_ip; });
+      [&client_ip, session_generation](const client_stats_t &c) {
+        return session_generation > 0 ?
+          c.session_generation == session_generation :
+          c.session_generation == 0 && c.ip == client_ip;
+      });
 
     if (it != current_stats.clients.end()) {
       it->fps = fps;
@@ -2775,7 +3018,98 @@ namespace stream_stats {
       });
     if (client == current_stats.clients.end()) return false;
     client->capture_source = source;
+    client->capture_frame_since_publication = true;
     return true;
+  }
+
+  bool record_capture_backend(std::uint64_t session_generation, const capture_backend_t &backend) {
+    if (session_generation == 0 || backend.opened.empty()) return false;
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == current_stats.clients.end()) return false;
+    client->capture_backend = backend;
+    // A publication names the display a session now encodes from. Frames an earlier display
+    // delivered say nothing about this one, and neither does the PyroWave route an earlier
+    // display's encoder took: the encoder for this one has encoded nothing yet. Its route reads
+    // unknown until its own first frame, so neither the reason nor the last session gives a
+    // display that delivered no frame the route of the one before it.
+    client->capture_frame_since_publication = false;
+    client->pyrowave_route.clear();
+    return true;
+  }
+
+  bool record_pyrowave_route(std::uint64_t session_generation, std::string_view route) {
+    if (session_generation == 0 || route.empty()) return false;
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == current_stats.clients.end()) return false;
+    client->pyrowave_route = route;
+    return true;
+  }
+
+  namespace {
+    std::string pyrowave_reason_for_route(std::string_view route) {
+      // Each says what the encoder saw at its own input, which is all the route records. A
+      // zero_copy frame was imported as a DMA-BUF, and that says nothing about how capture filled
+      // the buffer. A repeated frame is encoded again without another upload or conversion, so
+      // none of them says the work happens on each frame.
+      if (route == "zero_copy") {
+        return "PyroWave imports captured DMA-BUF frames and converts colour on the GPU, without a "
+               "CPU upload at the encoder input.";
+      }
+      if (route == "gpu_upload") {
+        return "PyroWave converts colour on the GPU after copying captured frames there from host memory.";
+      }
+      if (route == "cpu_convert") {
+        return "PyroWave converts colour on the CPU and copies the planes to the GPU, which costs host "
+               "CPU time on captured frames. POLARIS_PYROWAVE_GPU_INPUT=off asks for this, and a host "
+               "falls back to it when the GPU path cannot start.";
+      }
+      return "PyroWave has not encoded a captured frame yet, so where it converts colour is not known.";
+    }
+  }  // namespace
+
+  std::string pyrowave_route_reason(const stats_t &stats, std::uint64_t requester_generation) {
+    // The stream that asked, when it is one of these. Watch Stream and every reconnect overlap put
+    // more than one entry here, and a client is answered about its own stream in both: the old
+    // entry of a reconnect stays until its teardown, and the asker's generation is the new one.
+    if (requester_generation != 0) {
+      const auto asking = std::find_if(stats.clients.begin(), stats.clients.end(),
+        [requester_generation](const client_stats_t &client) {
+          return client.session_generation == requester_generation;
+        });
+      if (asking != stats.clients.end()) {
+        return pyrowave_reason_for_route(asking->pyrowave_route);
+      }
+    }
+    // Asked from the host, or by a client with no stream here: one answer when every stream that has
+    // reported a route reports the same one, which is the sole stream's route when there is one.
+    std::string_view shared;
+    for (const auto &client : stats.clients) {
+      if (client.pyrowave_route.empty()) {
+        continue;
+      }
+      if (shared.empty()) {
+        shared = client.pyrowave_route;
+      } else if (client.pyrowave_route != shared) {
+        return "PyroWave streams on this host convert colour in different places, so no one answer "
+               "covers them all.";
+      }
+    }
+    return pyrowave_reason_for_route(shared);
+  }
+
+  std::string stream_instance_id(std::uint64_t session_generation) {
+    if (session_generation == 0) {
+      return {};
+    }
+    return process_instance_nonce() + "." + std::to_string(session_generation);
   }
 
   void record_oversized_fec_frame(std::uint64_t session_generation,
@@ -4126,6 +4460,7 @@ namespace stream_stats {
       }
 
       result = current_stats;
+      result.last_session = last_ended_session;
     }
     if (const auto identity = get_single_active_session_identity()) {
       result.session_generation = identity->session_generation;

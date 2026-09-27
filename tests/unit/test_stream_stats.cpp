@@ -5,6 +5,7 @@
 
 #include <src/stream_stats.h>
 #include <src/config.h>
+#include <src/configuration_store.h>
 #include <src/platform/common.h>
 #include <src/doctor_actions.h>
 #include <src/adaptive_bitrate.h>
@@ -21,12 +22,17 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <regex>
+#include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #ifdef __linux__
   #include <src/platform/linux/misc.h>
+  #include <src/platform/linux/stream_display_policy.h>
   #include <src/platform/linux/user_unit_override.h>
   #include <src/platform/linux/virtual_display.h>
+  #include <sys/stat.h>
   #include <unistd.h>
 #endif
 
@@ -38,7 +44,8 @@ namespace {
         encoder {config::video.encoder},
         headless_mode {config::video.linux_display.headless_mode},
         use_cage_compositor {config::video.linux_display.use_cage_compositor},
-        prefer_gpu_native_capture {config::video.linux_display.prefer_gpu_native_capture} {
+        prefer_gpu_native_capture {config::video.linux_display.prefer_gpu_native_capture},
+        stream_mode {config::video.linux_display.stream_mode} {
     }
 
     ~LinuxDisplayConfigGuard() {
@@ -48,6 +55,7 @@ namespace {
       config::video.linux_display.headless_mode = headless_mode;
       config::video.linux_display.use_cage_compositor = use_cage_compositor;
       config::video.linux_display.prefer_gpu_native_capture = prefer_gpu_native_capture;
+      config::video.linux_display.stream_mode = stream_mode;
 #ifdef __linux__
       platf::set_selected_capture_backend_for_tests(std::nullopt);
       platf::set_effective_encoder_render_device_for_tests(std::string {});
@@ -61,6 +69,7 @@ namespace {
     bool headless_mode;
     bool use_cage_compositor;
     bool prefer_gpu_native_capture;
+    std::string stream_mode;
   };
 
   // A uniquely-named, empty regular file under the system temp directory,
@@ -890,6 +899,737 @@ TEST(StreamStatsCaptureSourceTests, ExplainsExtraCpuPixelsWithoutChangingDoctorV
   EXPECT_EQ(doctor.at("safe_recovery_action").at("endpoint"), before.at("safe_recovery_action").at("endpoint"));
 }
 
+namespace {
+  stream_stats::capture_backend_t portal_capture(std::string route = "portal_screencast", std::string fallback = {}) {
+    return {"", "portal", "portal", std::move(route), "", std::move(fallback)};
+  }
+
+  const std::array<const char *, 6> k_capture_mirrors {
+    "capture_backend_preference", "capture_backend_requested", "capture_backend_opened",
+    "capture_backend_route", "capture_mode_override_reason", "capture_route_fallback_reason",
+  };
+
+  bool has_capture_mirror(const nlohmann::json &json) {
+    return std::any_of(k_capture_mirrors.begin(), k_capture_mirrors.end(), [&json](const char *key) {
+      return json.contains(key);
+    });
+  }
+
+  nlohmann::json current_stats_json() {
+    return nlohmann::json::parse(stream_stats::get_current().to_json());
+  }
+}  // namespace
+
+TEST(StreamStatsCaptureBackendTests, TwoViewersOfOneDisplayEachCarryItsCaptureAndOnlyOneIsMirrored) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Owner", 301);
+  stream_stats::add_client("10.0.0.6", "Viewer", 302);
+  // The viewer joined the display the owner opened, and publishes it for itself.
+  const auto shared = portal_capture("portal_kwin_node");
+  ASSERT_TRUE(stream_stats::record_capture_backend(301, shared));
+  ASSERT_TRUE(stream_stats::record_capture_backend(302, shared));
+  auto json = current_stats_json();
+  ASSERT_EQ(json["clients"].size(), 2u);
+  for (const auto &client : json["clients"]) {
+    EXPECT_EQ(client["capture"]["opened"], "portal");
+    EXPECT_EQ(client["capture"]["route"], "portal_kwin_node");
+    EXPECT_EQ(client["capture"]["requested"], "portal");
+  }
+  // Two clients have two answers, and the first one's is no answer for both.
+  EXPECT_FALSE(has_capture_mirror(json)) << json.dump();
+
+  // The moment two become one, the one left is mirrored.
+  stream_stats::remove_client("10.0.0.5", 301);
+  json = current_stats_json();
+  EXPECT_EQ(json["capture_backend_preference"], "");
+  EXPECT_EQ(json["capture_backend_requested"], "portal");
+  EXPECT_EQ(json["capture_backend_opened"], "portal");
+  EXPECT_EQ(json["capture_backend_route"], "portal_kwin_node");
+  EXPECT_FALSE(json.contains("capture_mode_override_reason")) << "absent when no rule set anything aside";
+  EXPECT_FALSE(json.contains("capture_route_fallback_reason")) << "absent when the route is the one asked for";
+
+  stream_stats::remove_client("10.0.0.6", 302);
+  EXPECT_FALSE(has_capture_mirror(current_stats_json()));
+}
+
+TEST(StreamStatsCaptureBackendTests, EachSessionCarriesAnOpaqueInstanceIdentityAndALegacyEntryNone) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Same address", 311);
+  stream_stats::add_client("10.0.0.5", "Same address", 312);
+  stream_stats::add_client("10.0.0.7", "Legacy");
+  const auto json = current_stats_json();
+  ASSERT_EQ(json["clients"].size(), 3u);
+  const std::regex shape {"^([0-9a-f]{16})\\.([0-9]+)$"};
+  std::smatch first;
+  std::smatch second;
+  const auto first_id = json["clients"][0].value("stream_instance_id", "");
+  const auto second_id = json["clients"][1].value("stream_instance_id", "");
+  ASSERT_TRUE(std::regex_match(first_id, first, shape)) << first_id;
+  ASSERT_TRUE(std::regex_match(second_id, second, shape)) << second_id;
+  EXPECT_EQ(first[2], "311");
+  EXPECT_EQ(second[2], "312");
+  EXPECT_EQ(first[1], second[1]) << "one value is drawn per process, not per session";
+  // Generation zero has no owner, so no identity is made up for it.
+  EXPECT_FALSE(json["clients"][2].contains("stream_instance_id")) << json["clients"][2].dump();
+  EXPECT_EQ(stream_stats::stream_instance_id(0), "");
+  // The support export redacts a field named session_id as a Web UI credential.
+  for (const auto &client : json["clients"]) {
+    EXPECT_FALSE(client.contains("session_id"));
+  }
+}
+
+TEST(StreamStatsCaptureBackendTests, OverlappingReconnectsFromOneAddressKeepTheirOwnCapture) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Leaving", 321);
+  stream_stats::add_client("10.0.0.5", "Replacement", 322);
+  ASSERT_TRUE(stream_stats::record_capture_backend(321, portal_capture("portal_kwin_node")));
+  ASSERT_TRUE(stream_stats::record_capture_backend(322, portal_capture("portal_screencast", "kwin_node_unavailable")));
+  stream_stats::remove_client("10.0.0.5", 321);
+  EXPECT_FALSE(stream_stats::record_capture_backend(321, portal_capture("portal_kwin_node")))
+    << "a retired generation writes nothing, whatever address it shares";
+  const auto json = current_stats_json();
+  ASSERT_EQ(json["clients"].size(), 1u);
+  EXPECT_EQ(json["clients"][0]["name"], "Replacement");
+  EXPECT_EQ(json["clients"][0]["capture"]["route"], "portal_screencast");
+  EXPECT_EQ(json["clients"][0]["capture"]["route_fallback_reason"], "kwin_node_unavailable");
+  EXPECT_EQ(json["capture_backend_route"], "portal_screencast");
+  EXPECT_EQ(json["capture_route_fallback_reason"], "kwin_node_unavailable");
+}
+
+TEST(StreamStatsCaptureBackendTests, APublicationBeforeTheSessionRegistersIsRefusedUntilARetryLands) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  // The video thread opens the display before the session calls add_client.
+  EXPECT_FALSE(stream_stats::record_capture_backend(331, portal_capture()));
+  stream_stats::add_client("10.0.0.5", "Client", 331);
+  auto json = current_stats_json();
+  EXPECT_FALSE(json["clients"][0].contains("capture")) << "missing is unknown, never a default";
+  EXPECT_FALSE(has_capture_mirror(json));
+  ASSERT_TRUE(stream_stats::record_capture_backend(331, portal_capture()));
+  json = current_stats_json();
+  EXPECT_EQ(json["clients"][0]["capture"]["opened"], "portal");
+  EXPECT_EQ(json["capture_backend_opened"], "portal");
+  // A display that opened nothing has nothing to say, and generation zero belongs to no one.
+  EXPECT_FALSE(stream_stats::record_capture_backend(331, stream_stats::capture_backend_t {}));
+  EXPECT_FALSE(stream_stats::record_capture_backend(0, portal_capture()));
+}
+
+TEST(StreamStatsCaptureBackendTests, AnInitializationWithNoAcceptedFrameLeavesTheFramesUnknown) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] {
+    stream_stats::update_capture_metadata({});
+    stream_stats::update_stream_active(false);
+  });
+  stream_stats::add_client("10.0.0.5", "Client", 341);
+  // Another stream's capture already filled the process-wide capture metadata. This client's
+  // encoder has accepted no frame, so none of it is this client's.
+  stream_stats::update_capture_metadata(platf::frame_metadata_t {
+    .transport = platf::frame_transport_e::dmabuf,
+    .residency = platf::frame_residency_e::gpu,
+    .format = platf::frame_format_e::p010,
+  });
+  ASSERT_TRUE(stream_stats::record_capture_backend(341, portal_capture()));
+  const auto json = current_stats_json();
+  ASSERT_EQ(json["capture_transport"], "dmabuf") << "the process-wide value this client must not borrow";
+  const auto &capture = json["clients"][0]["capture"];
+  EXPECT_EQ(capture["transport"], "unknown");
+  EXPECT_EQ(capture["residency"], "unknown");
+  EXPECT_EQ(capture["format"], "unknown");
+  EXPECT_TRUE(json["clients"][0]["capture_source"].is_null());
+  EXPECT_FALSE(capture.contains("mode_override_reason"));
+  EXPECT_FALSE(capture.contains("route_fallback_reason"));
+}
+
+TEST(StreamStatsCaptureBackendTests, NamingNvfbcNeverMakesUnknownTransferGpuNativeOrClearsAWarning) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.clients.emplace_back();
+  stats.clients[0].session_generation = 351;
+  const auto before = nlohmann::json::parse(stats.to_json());
+  const auto doctor_before = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto capture_path_evidence = [](const nlohmann::json &doctor) {
+    for (const auto &entry : doctor.at("evidence")) {
+      if (entry.at("id") == "capture_path") {
+        return entry;
+      }
+    }
+    return nlohmann::json {};
+  };
+  // The warning naming NvFBC must not clear is there to begin with.
+  ASSERT_EQ(before["capture_path_reason"], "no_capture_metadata");
+  ASSERT_EQ(capture_path_evidence(doctor_before).value("status", ""), "unknown");
+  // NvFBC reports no transfer evidence of its own.
+  stats.clients[0].capture_backend = {"nvfbc", "nvfbc", "nvfbc", "nvfbc", "", ""};
+  const auto after = nlohmann::json::parse(stats.to_json());
+  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto &capture = after["clients"][0]["capture"];
+  EXPECT_EQ(capture["opened"], "nvfbc");
+  EXPECT_EQ(capture["transport"], "unknown");
+  EXPECT_EQ(capture["residency"], "unknown");
+  EXPECT_EQ(capture["format"], "unknown");
+  EXPECT_FALSE(after["capture_gpu_native"].get<bool>());
+  for (const auto *key : {"capture_path", "capture_path_reason", "capture_path_reason_message", "capture_gpu_native", "capture_cpu_copy"}) {
+    EXPECT_EQ(after[key], before[key]) << key;
+  }
+  for (const auto *key : {"primary_issue", "traffic_light", "status", "severity"}) {
+    EXPECT_EQ(doctor.at(key), doctor_before.at(key)) << key;
+  }
+  EXPECT_EQ(doctor.at("evidence"), doctor_before.at("evidence"));
+  EXPECT_EQ(after["capture_path_reason"], "no_capture_metadata");
+  EXPECT_EQ(capture_path_evidence(doctor).value("status", ""), "unknown");
+
+  // Known process-wide metadata is some capture's, not evidence NvFBC reported for this client.
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.capture_format = platf::frame_format_e::p010;
+  const auto with_known_metadata = nlohmann::json::parse(stats.to_json());
+  const auto &borrowed = with_known_metadata["clients"][0]["capture"];
+  EXPECT_EQ(borrowed["transport"], "unknown");
+  EXPECT_EQ(borrowed["residency"], "unknown");
+  EXPECT_EQ(borrowed["format"], "unknown");
+}
+
+// What this proves is the stats layer: a later write replaces an earlier one, a publication starts
+// the frames over, and a format change is kept. It opens no display. That the host publishes again
+// for each display it opens is held by
+// SourceSafetyContracts.CaptureReadoutIsPublishedFromEveryEncodeLoopForEachDisplay.
+TEST(StreamStatsCaptureBackendTests, ANewPublicationStartsTheFramesOverAndLaterWritesReplaceEarlierOnes) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Client", 361);
+  ASSERT_TRUE(stream_stats::record_capture_backend(361, portal_capture("portal_kwin_node")));
+  stream_stats::capture_source_t source {1920, 1080, 1920, 1080,
+    platf::frame_transport_e::dmabuf, platf::frame_residency_e::gpu, platf::frame_format_e::p010};
+  ASSERT_TRUE(stream_stats::record_capture_source(361, source));
+  auto capture = current_stats_json()["clients"][0]["capture"];
+  EXPECT_EQ(capture["transport"], "dmabuf");
+  EXPECT_EQ(capture["residency"], "gpu");
+  EXPECT_EQ(capture["format"], "p010");
+
+  // The display is opened again, on the ScreenCast this time. Until it delivers a frame, the frames
+  // the last display delivered say nothing about it, and a stuck new display must not keep saying gpu.
+  ASSERT_TRUE(stream_stats::record_capture_backend(361, portal_capture("portal_screencast", "kwin_node_failed")));
+  auto json = current_stats_json();
+  capture = json["clients"][0]["capture"];
+  EXPECT_EQ(capture["route"], "portal_screencast");
+  EXPECT_EQ(capture["transport"], "unknown");
+  EXPECT_EQ(capture["residency"], "unknown");
+  EXPECT_EQ(capture["format"], "unknown");
+  // capture_source keeps the last frame any display delivered, as it did before capture existed.
+  EXPECT_EQ(json["clients"][0]["capture_source"]["transport"], "dmabuf");
+
+  // Its frames arrive in shared memory.
+  source.transport = platf::frame_transport_e::shm;
+  source.residency = platf::frame_residency_e::cpu;
+  source.format = platf::frame_format_e::bgra8;
+  ASSERT_TRUE(stream_stats::record_capture_source(361, source));
+  capture = current_stats_json()["clients"][0]["capture"];
+  EXPECT_EQ(capture["route"], "portal_screencast");
+  EXPECT_EQ(capture["route_fallback_reason"], "kwin_node_failed");
+  EXPECT_EQ(capture["transport"], "shm");
+  EXPECT_EQ(capture["residency"], "cpu");
+  EXPECT_EQ(capture["format"], "bgra8");
+}
+
+// The serializer's half: one record carrying both reasons says both, and mirrors both. That the
+// policy's reason and the portal's fallback reach that record through the session's publication is
+// StreamDisplayPolicyTests.AModeRewriteAndARouteFallbackReachTheSessionsPublishedCapture.
+TEST(StreamStatsCaptureBackendTests, OneRecordWithBothReasonsSaysAndMirrorsBoth) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Client", 371);
+  // polaris.conf says kms, a Gamescope session asked for the portal, and the portal found no
+  // gamescope node and took a ScreenCast.
+  ASSERT_TRUE(stream_stats::record_capture_backend(371,
+    {"kms", "portal", "portal", "portal_screencast", "gamescope_session", "gamescope_node_missing"}));
+  const auto json = current_stats_json();
+  const auto &capture = json["clients"][0]["capture"];
+  EXPECT_EQ(capture["preference"], "kms");
+  EXPECT_EQ(capture["requested"], "portal");
+  EXPECT_EQ(capture["mode_override_reason"], "gamescope_session");
+  EXPECT_EQ(capture["route_fallback_reason"], "gamescope_node_missing");
+  EXPECT_EQ(json["capture_backend_preference"], "kms");
+  EXPECT_EQ(json["capture_mode_override_reason"], "gamescope_session");
+  EXPECT_EQ(json["capture_route_fallback_reason"], "gamescope_node_missing");
+}
+
+TEST(StreamStatsCaptureBackendTests, ReadoutWritesLeaveTheNetworkAndVideoPolicyRevisionsAlone) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Client", 381);
+  const auto before = stream_stats::get_current();
+  const auto controller_before = adaptive_bitrate::get_doctor_state();
+  ASSERT_TRUE(stream_stats::record_capture_backend(381, portal_capture()));
+  ASSERT_TRUE(stream_stats::record_capture_source(381, {1920, 1080, 1920, 1080,
+    platf::frame_transport_e::shm, platf::frame_residency_e::cpu, platf::frame_format_e::bgra8}));
+  const auto after = stream_stats::get_current();
+  const auto controller_after = adaptive_bitrate::get_doctor_state();
+  EXPECT_EQ(after.video_sample_revision, before.video_sample_revision);
+  EXPECT_EQ(after.network_sample_revision, before.network_sample_revision);
+  EXPECT_EQ(after.video_policy_sample_count, before.video_policy_sample_count);
+  EXPECT_EQ(after.pacing_warning_streak, before.pacing_warning_streak);
+  EXPECT_EQ(controller_after.revision, controller_before.revision);
+  EXPECT_EQ(controller_after.action_authority_revision, controller_before.action_authority_revision);
+}
+
+TEST(StreamStatsPyroWaveRouteTests, EachSessionCarriesItsOwnRouteAndKeepsItWhenItEnds) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Deck", 391);
+  stream_stats::add_client("10.0.0.6", "Tablet", 392);
+  const auto before = stream_stats::get_current();
+  const auto controller_before = adaptive_bitrate::get_doctor_state();
+
+  EXPECT_FALSE(stream_stats::record_pyrowave_route(393, "zero_copy")) << "a generation no client holds";
+  EXPECT_FALSE(stream_stats::record_pyrowave_route(0, "zero_copy")) << "generation zero belongs to no one";
+  EXPECT_FALSE(stream_stats::record_pyrowave_route(391, "")) << "unknown is written as a route";
+  ASSERT_TRUE(stream_stats::record_pyrowave_route(391, "zero_copy"));
+
+  auto json = current_stats_json();
+  ASSERT_EQ(json["clients"].size(), 2u);
+  EXPECT_EQ(json["clients"][0].value("pyrowave_route", ""), "zero_copy");
+  EXPECT_FALSE(json["clients"][1].contains("pyrowave_route")) << "one session's route landed on another's entry";
+
+  // A readout write, so no policy revision moves.
+  const auto after = stream_stats::get_current();
+  const auto controller_after = adaptive_bitrate::get_doctor_state();
+  EXPECT_EQ(after.video_sample_revision, before.video_sample_revision);
+  EXPECT_EQ(after.network_sample_revision, before.network_sample_revision);
+  EXPECT_EQ(after.video_policy_sample_count, before.video_policy_sample_count);
+  EXPECT_EQ(controller_after.revision, controller_before.revision);
+  EXPECT_EQ(controller_after.action_authority_revision, controller_before.action_authority_revision);
+
+  // A GPU path that falls back changes the route, and the session ends with the one it had last.
+  ASSERT_TRUE(stream_stats::record_pyrowave_route(391, "cpu_convert"));
+  stream_stats::remove_client("10.0.0.5", 391);
+  json = current_stats_json();
+  ASSERT_TRUE(json.contains("last_session")) << json.dump();
+  EXPECT_EQ(json["last_session"].value("pyrowave_route", ""), "cpu_convert");
+  EXPECT_FALSE(stream_stats::record_pyrowave_route(391, "zero_copy")) << "a retired generation still writes";
+
+  stream_stats::remove_client("10.0.0.6", 392);
+  EXPECT_FALSE(current_stats_json()["last_session"].contains("pyrowave_route"))
+    << "a session that never reported a route ended with another session's";
+}
+
+/**
+ * A display opened again has encoded nothing, so the session's PyroWave route reads unknown until it
+ * does, and a session that ends before then never pairs that display's unknown frames with the route
+ * of the display before it.
+ */
+TEST(StreamStatsPyroWaveRouteTests, ADisplayOpenedAgainHasNoRouteUntilItsEncoderTakesAFrame) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Deck", 395);
+  ASSERT_TRUE(stream_stats::record_capture_backend(395, portal_capture("portal_kwin_node")));
+  ASSERT_TRUE(stream_stats::record_capture_source(395,
+    {1920, 1080, 1920, 1080, platf::frame_transport_e::dmabuf, platf::frame_residency_e::gpu, platf::frame_format_e::bgra8}));
+  ASSERT_TRUE(stream_stats::record_pyrowave_route(395, "zero_copy"));
+  const auto unknown = [] {
+    stream_stats::stats_t none;
+    none.streaming = true;
+    none.clients.emplace_back();
+    return stream_stats::pyrowave_route_reason(none);
+  }();
+  ASSERT_NE(stream_stats::pyrowave_route_reason(stream_stats::get_current(), 395), unknown);
+
+  // Capture reinitializes onto the ScreenCast, and the stream ends before that display delivers.
+  ASSERT_TRUE(stream_stats::record_capture_backend(395, portal_capture("portal_screencast", "kwin_node_failed")));
+  auto json = current_stats_json();
+  ASSERT_EQ(json["clients"].size(), 1u);
+  EXPECT_FALSE(json["clients"][0].contains("pyrowave_route"))
+    << "the display that has encoded nothing kept the last display's route: " << json["clients"][0].dump();
+  EXPECT_EQ(stream_stats::pyrowave_route_reason(stream_stats::get_current(), 395), unknown);
+
+  stream_stats::remove_client("10.0.0.5", 395);
+  const auto last = current_stats_json()["last_session"];
+  ASSERT_EQ(last.value("stream_instance_id", ""), stream_stats::stream_instance_id(395)) << last.dump();
+  EXPECT_EQ(last["capture"].value("transport", ""), "unknown");
+  EXPECT_FALSE(last.contains("pyrowave_route"))
+    << "the ended session paired unknown frames with the route of the display before: " << last.dump();
+}
+
+TEST(StreamStatsPyroWaveRouteTests, TheReasonOpensWithWhereTheStreamConvertsColour) {
+  stream_stats::stats_t stats;
+  stats.streaming = true;
+  stats.codec = "pyrowave";
+  stats.clients.emplace_back();
+  const auto reason_for = [&stats](std::string route) {
+    stats.clients.front().pyrowave_route = std::move(route);
+    return stream_stats::pyrowave_route_reason(stats);
+  };
+  const auto opens_with = [](const std::string &reason, std::string_view start) {
+    return reason.rfind(start, 0) == 0;
+  };
+
+  // Nova's Doctor card shows two lines, so the answer comes first. A route is what the encoder saw
+  // at its input: an imported DMA-BUF says nothing about how capture filled it, so the zero_copy
+  // sentence claims the encoder input and no more.
+  const auto zero_copy = reason_for("zero_copy");
+  EXPECT_EQ(zero_copy, "PyroWave imports captured DMA-BUF frames and converts colour on the GPU, without a "
+                       "CPU upload at the encoder input.");
+  const auto gpu_upload = reason_for("gpu_upload");
+  EXPECT_EQ(gpu_upload, "PyroWave converts colour on the GPU after copying captured frames there from host memory.");
+  const auto cpu_convert = reason_for("cpu_convert");
+  EXPECT_TRUE(opens_with(cpu_convert, "PyroWave converts colour on the CPU and copies the planes to the GPU, "
+                                      "which costs host CPU time on captured frames.")) << cpu_convert;
+  EXPECT_NE(cpu_convert.find("POLARIS_PYROWAVE_GPU_INPUT=off"), std::string::npos) << cpu_convert;
+  const auto unknown = reason_for("");
+  EXPECT_TRUE(opens_with(unknown, "PyroWave has not encoded a captured frame yet")) << unknown;
+
+  for (const auto &reason : {zero_copy, gpu_upload, cpu_convert, unknown}) {
+    // A repeated frame is encoded again without another upload or conversion.
+    EXPECT_EQ(reason.find("each frame"), std::string::npos) << reason;
+    EXPECT_EQ(reason.find("every frame"), std::string::npos) << reason;
+  }
+  for (const auto &reason : {zero_copy, gpu_upload, unknown}) {
+    EXPECT_EQ(reason.find("on the CPU"), std::string::npos) << "a stream that converts on the GPU reads: " << reason;
+    EXPECT_EQ(reason.find("CPU time"), std::string::npos) << "a stream that converts on the GPU reads: " << reason;
+  }
+  // Nothing past the encoder input is claimed for an imported frame.
+  EXPECT_EQ(zero_copy.find("host memory"), std::string::npos) << zero_copy;
+  EXPECT_EQ(zero_copy.find("where capture left it"), std::string::npos) << zero_copy;
+
+  // Two streams have two routes, and one's is no answer for the other. Each stream that asks is
+  // answered from its own entry.
+  stats.clients.front().session_generation = 391;
+  stats.clients.front().pyrowave_route = "zero_copy";
+  stats.clients.emplace_back();
+  stats.clients.back().session_generation = 392;
+  stats.clients.back().pyrowave_route = "cpu_convert";
+  EXPECT_TRUE(opens_with(stream_stats::pyrowave_route_reason(stats, 392), "PyroWave converts colour on the CPU"));
+  EXPECT_TRUE(opens_with(stream_stats::pyrowave_route_reason(stats, 391), "PyroWave imports captured DMA-BUF frames"));
+
+  // Asked from the host, or by a client with no stream among them, the reason says the routes differ
+  // and never sends its reader to a field Nova does not read.
+  for (const std::uint64_t asker : {std::uint64_t {0}, std::uint64_t {999}}) {
+    const auto differ = stream_stats::pyrowave_route_reason(stats, asker);
+    EXPECT_TRUE(opens_with(differ, "PyroWave streams on this host convert colour in different places")) << differ;
+    EXPECT_EQ(differ.find("pyrowave_route"), std::string::npos) << differ;
+  }
+
+  // Where they agree there is one answer, including beside a stream that has reported none yet.
+  stats.clients.back().pyrowave_route = "zero_copy";
+  stats.clients.emplace_back();
+  stats.clients.back().session_generation = 393;
+  const auto agreed = stream_stats::pyrowave_route_reason(stats);
+  EXPECT_TRUE(opens_with(agreed, "PyroWave imports captured DMA-BUF frames")) << agreed;
+  EXPECT_TRUE(opens_with(stream_stats::pyrowave_route_reason(stats, 393), "PyroWave has not encoded a captured frame yet"))
+    << "a stream that has not reported was answered with another stream's route";
+}
+
+namespace {
+  const std::regex k_utc_second {"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"};
+
+  nlohmann::json last_session_json() {
+    const auto json = current_stats_json();
+    return json.contains("last_session") ? json["last_session"] : nlohmann::json {};
+  }
+
+  stream_stats::capture_source_t shm_frames() {
+    return {1920, 1080, 1920, 1080, platf::frame_transport_e::shm, platf::frame_residency_e::cpu, platf::frame_format_e::bgra8};
+  }
+}  // namespace
+
+TEST(StreamStatsLastSessionTests, AnEndedSessionKeepsItsCaptureOutcomeUnderItsOwnIdentity) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Deck", 401);
+  ASSERT_TRUE(stream_stats::record_capture_backend(401,
+    {"kms", "portal", "portal", "portal_screencast", "gamescope_session", "gamescope_node_missing"}));
+  ASSERT_TRUE(stream_stats::record_capture_source(401, shm_frames()));
+  stream_stats::update_video_stats(60.0, 20000, 4.0, "hevc", 1920, 1080, "vaapi", 401);
+  const auto live = current_stats_json();
+  ASSERT_EQ(live["clients"].size(), 1u);
+  const auto live_capture = live["clients"][0]["capture"];
+
+  const auto before = stream_stats::get_current();
+  const auto controller_before = adaptive_bitrate::get_doctor_state();
+  stream_stats::remove_client("10.0.0.5", 401);
+  const auto after = stream_stats::get_current();
+  const auto controller_after = adaptive_bitrate::get_doctor_state();
+  // Freezing is a readout write, and moves no network or video policy revision.
+  EXPECT_EQ(after.video_sample_revision, before.video_sample_revision);
+  EXPECT_EQ(after.network_sample_revision, before.network_sample_revision);
+  EXPECT_EQ(after.video_policy_sample_count, before.video_policy_sample_count);
+  EXPECT_EQ(controller_after.revision, controller_before.revision);
+  EXPECT_EQ(controller_after.action_authority_revision, controller_before.action_authority_revision);
+
+  const auto json = nlohmann::json::parse(after.to_json());
+  EXPECT_TRUE(json["clients"].empty());
+  EXPECT_FALSE(has_capture_mirror(json)) << "the mirrors describe a client that is still streaming";
+  ASSERT_TRUE(json.contains("last_session")) << json.dump();
+  const auto &last = json["last_session"];
+  EXPECT_EQ(last["state"], "ended");
+  EXPECT_EQ(last["stream_instance_id"], stream_stats::stream_instance_id(401));
+  EXPECT_EQ(last["client_name"], "Deck");
+  EXPECT_EQ(last["capture"], live_capture) << "the capture the session streamed with, as it streamed";
+  EXPECT_EQ(last["capture"]["mode_override_reason"], "gamescope_session");
+  EXPECT_EQ(last["capture"]["route_fallback_reason"], "gamescope_node_missing");
+  EXPECT_EQ(last["capture"]["transport"], "shm");
+  EXPECT_EQ(last["codec"], "hevc");
+  EXPECT_EQ(last["encoder_backend"], "vaapi");
+  const auto started = last.value("started_at", "");
+  const auto ended = last.value("ended_at", "");
+  EXPECT_TRUE(std::regex_match(started, k_utc_second)) << started;
+  EXPECT_TRUE(std::regex_match(ended, k_utc_second)) << ended;
+  EXPECT_LE(started, ended);
+  // A capture outcome, not a telemetry snapshot: loss and latency have no session-owned freshness
+  // to carry, and encode targets are the host's, not the session's.
+  std::set<std::string> keys;
+  for (const auto &item : last.items()) {
+    keys.insert(item.key());
+  }
+  EXPECT_EQ(keys, (std::set<std::string> {
+    "state", "stream_instance_id", "client_name", "started_at", "ended_at", "capture", "codec", "encoder_backend",
+  }));
+}
+
+TEST(StreamStatsLastSessionTests, NothingWrittenAfterTheSessionEndsChangesIt) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Deck", 411);
+  ASSERT_TRUE(stream_stats::record_capture_backend(411, portal_capture("portal_kwin_node")));
+  ASSERT_TRUE(stream_stats::record_capture_source(411, shm_frames()));
+  stream_stats::update_video_stats(60.0, 20000, 4.0, "hevc", 1920, 1080, "vaapi", 411);
+  stream_stats::remove_client("10.0.0.5", 411);
+  const auto frozen = last_session_json();
+  ASSERT_EQ(frozen.value("stream_instance_id", ""), stream_stats::stream_instance_id(411)) << frozen.dump();
+
+  // Late writes for the retired generation find no entry, and a legacy periodic write with no
+  // generation finds no client to take it.
+  auto dmabuf = shm_frames();
+  dmabuf.transport = platf::frame_transport_e::dmabuf;
+  dmabuf.residency = platf::frame_residency_e::gpu;
+  EXPECT_FALSE(stream_stats::record_capture_backend(411, portal_capture("portal_screencast", "kwin_node_failed")));
+  EXPECT_FALSE(stream_stats::record_capture_source(411, dmabuf));
+  stream_stats::update_video_stats(30.0, 5000, 9.0, "h264", 1280, 720, "software", 411);
+  stream_stats::update_video_stats(30.0, 5000, 9.0, "av1", 1280, 720, "nvenc");
+  EXPECT_EQ(last_session_json(), frozen);
+
+  // The reset when the last stream ends comes just before a person looks for it.
+  stream_stats::update_stream_active(false);
+  EXPECT_EQ(last_session_json(), frozen);
+
+  // A new session from the same address streams with its own facts and changes nothing until it
+  // ends itself.
+  stream_stats::add_client("10.0.0.5", "Deck", 412);
+  ASSERT_TRUE(stream_stats::record_capture_backend(412, portal_capture("portal_screencast", "kwin_node_failed")));
+  ASSERT_TRUE(stream_stats::record_capture_source(412, dmabuf));
+  stream_stats::update_video_stats("10.0.0.5", 0.0, 5000, 0.0, "h264", 1280, 720, {}, 412);
+  stream_stats::update_video_stats(30.0, 5000, 9.0, "h264", 1280, 720, "software", 412);
+  EXPECT_EQ(last_session_json(), frozen);
+}
+
+TEST(StreamStatsLastSessionTests, AViewerThatEndsWhileTheOwnerStreamsIsTheLastSession) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Owner", 421);
+  stream_stats::add_client("10.0.0.6", "Viewer", 422);
+  ASSERT_TRUE(stream_stats::record_capture_backend(421, portal_capture("portal_kwin_node")));
+  ASSERT_TRUE(stream_stats::record_capture_backend(422, portal_capture("portal_kwin_node")));
+  // Each session's encode loop reports its own encoder. The owner is listed first and writes last.
+  stream_stats::update_video_stats(60.0, 20000, 4.0, "hevc", 1920, 1080, "vaapi", 421);
+  stream_stats::update_video_stats(30.0, 8000, 6.0, "h264", 1280, 720, "software", 422);
+  stream_stats::update_video_stats(60.0, 20000, 4.0, "hevc", 1920, 1080, "vaapi", 421);
+  auto json = current_stats_json();
+  ASSERT_EQ(json["clients"].size(), 2u);
+  EXPECT_EQ(json["clients"][0]["codec"], "hevc");
+  EXPECT_EQ(json["clients"][1]["codec"], "h264") << "the viewer's own encoder, not the owner's";
+  EXPECT_EQ(json["clients"][1]["fps"], 30.0);
+
+  stream_stats::remove_client("10.0.0.6", 422);
+  json = current_stats_json();
+  ASSERT_EQ(json["clients"].size(), 1u);
+  EXPECT_EQ(json["clients"][0]["name"], "Owner");
+  EXPECT_TRUE(json["streaming"].get<bool>());
+  EXPECT_EQ(json["capture_backend_route"], "portal_kwin_node") << "the owner is the one live client now";
+  const auto &viewer = json["last_session"];
+  EXPECT_EQ(viewer["stream_instance_id"], stream_stats::stream_instance_id(422));
+  EXPECT_EQ(viewer["client_name"], "Viewer");
+  EXPECT_EQ(viewer["capture"]["route"], "portal_kwin_node");
+  EXPECT_EQ(viewer["codec"], "h264");
+  EXPECT_EQ(viewer["encoder_backend"], "software");
+
+  // The owner ends next and replaces it.
+  stream_stats::remove_client("10.0.0.5", 421);
+  const auto owner = last_session_json();
+  EXPECT_EQ(owner["stream_instance_id"], stream_stats::stream_instance_id(421));
+  EXPECT_EQ(owner["client_name"], "Owner");
+  EXPECT_EQ(owner["codec"], "hevc");
+  EXPECT_EQ(owner["encoder_backend"], "vaapi");
+}
+
+TEST(StreamStatsLastSessionTests, OverlappingReconnectsFromOneAddressEachEndWithTheirOwnCodec) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  // The session start writes by address. The replacement shares it with the session still leaving.
+  stream_stats::add_client("10.0.0.5", "Leaving", 431);
+  stream_stats::update_video_stats("10.0.0.5", 0.0, 20000, 0.0, "hevc", 1920, 1080, {}, 431);
+  stream_stats::add_client("10.0.0.5", "Replacement", 432);
+  stream_stats::update_video_stats("10.0.0.5", 0.0, 8000, 0.0, "av1", 1920, 1080, {}, 432);
+  // The replacement ends first, while the older session is still listed ahead of it at the same
+  // address, so a freeze that found the ending session by its address would take the older one.
+  stream_stats::remove_client("10.0.0.5", 432);
+  auto last = last_session_json();
+  EXPECT_EQ(last.value("stream_instance_id", ""), stream_stats::stream_instance_id(432));
+  EXPECT_EQ(last.value("client_name", ""), "Replacement");
+  EXPECT_EQ(last.value("codec", ""), "av1") << "the replacement's codec landed on the older session";
+  stream_stats::remove_client("10.0.0.5", 431);
+  last = last_session_json();
+  EXPECT_EQ(last.value("stream_instance_id", ""), stream_stats::stream_instance_id(431));
+  EXPECT_EQ(last.value("client_name", ""), "Leaving");
+  EXPECT_EQ(last.value("codec", ""), "hevc");
+}
+
+TEST(StreamStatsLastSessionTests, AStreamThatNamesNoSessionNeverWritesASessionsEntry) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  // Browser Stream's encode loop names no session, and nothing keeps it from running beside a
+  // Moonlight or Nova session. That session is listed first, and an entry registered with no
+  // generation after it.
+  stream_stats::add_client("10.0.0.5", "Deck", 461);
+  stream_stats::add_client("10.0.0.9", "Legacy");
+  stream_stats::update_video_stats("10.0.0.5", 0.0, 20000, 0.0, "hevc", 1920, 1080, {}, 461);
+  stream_stats::update_video_stats(60.0, 20000, 4.0, "hevc", 1920, 1080, "vaapi", 461);
+  stream_stats::update_video_stats(30.0, 5000, 9.0, "h264", 1280, 720, "software");
+  stream_stats::update_video_stats("10.0.0.5", 30.0, 5000, 9.0, "h264", 1280, 720, "software");
+  const auto json = current_stats_json();
+  ASSERT_EQ(json["clients"].size(), 2u);
+  const auto &session = json["clients"][0];
+  EXPECT_EQ(session["codec"], "hevc") << "the stream with no session wrote over the session's entry";
+  EXPECT_EQ(session["fps"], 60.0);
+  EXPECT_EQ(session["bitrate_kbps"], 20000);
+  EXPECT_EQ(session["width"], 1920);
+  EXPECT_EQ(json["clients"][1]["codec"], "h264") << "an entry with no generation still takes it";
+  // The process-wide values take every writer's, as they always have.
+  const auto host = stream_stats::get_current();
+  EXPECT_EQ(host.codec, "h264");
+  EXPECT_EQ(host.encoder_backend, "software");
+  ASSERT_EQ(host.clients.size(), 2u);
+  EXPECT_EQ(host.clients.front().encoder_backend, "vaapi");
+
+  stream_stats::remove_client("10.0.0.5", 461);
+  const auto last = last_session_json();
+  EXPECT_EQ(last.value("stream_instance_id", ""), stream_stats::stream_instance_id(461));
+  EXPECT_EQ(last.value("codec", ""), "hevc");
+  EXPECT_EQ(last.value("encoder_backend", ""), "vaapi");
+}
+
+/**
+ * Each live client serves the encoder its own stream sampled, as last_session keeps it when it ends,
+ * and only a sole client's repeats at the top level.
+ */
+TEST(StreamStatsLastSessionTests, EachLiveClientServesTheEncoderItsEndedSessionKeeps) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  // Both start writes carry the codec and no encoder yet, the way rtsp_stream::start() makes them.
+  const auto start = [](const std::string &ip, const std::string &name, std::uint64_t generation,
+                        const std::string &codec) {
+    stream_stats::add_client(ip, name, generation);
+    stream_stats::update_video_stats(ip, 0.0, 20000, 0.0, codec, 1920, 1080, {}, generation);
+    stream_stats::update_video_stats(0.0, 20000, 0.0, codec, 1920, 1080, {}, generation);
+  };
+  start("10.0.0.5", "Owner", 481, "hevc");
+  start("10.0.0.6", "Viewer", 482, "h264");
+  auto json = current_stats_json();
+  ASSERT_EQ(json["clients"].size(), 2u);
+  for (const auto &client : json["clients"]) {
+    EXPECT_FALSE(client.contains("encoder_backend")) << "an encoder before the first sample: " << client.dump();
+  }
+
+  stream_stats::update_video_stats(60.0, 20000, 4.0, "hevc", 1920, 1080, "vaapi", 481);
+  stream_stats::update_video_stats(30.0, 8000, 6.0, "h264", 1280, 720, "software", 482);
+  // Browser Stream's encode loop names no session, and writes only the process-wide encoder.
+  stream_stats::update_video_stats(30.0, 5000, 9.0, "h264", 1280, 720, "nvenc");
+  json = current_stats_json();
+  ASSERT_EQ(json["clients"].size(), 2u);
+  EXPECT_EQ(json["clients"][0].value("encoder_backend", ""), "vaapi");
+  EXPECT_EQ(json["clients"][1].value("encoder_backend", ""), "software") << "the viewer's own encoder";
+  EXPECT_FALSE(json.contains("encoder_backend")) << "two clients have no one encoder";
+  const auto viewer_live = json["clients"][1].value("encoder_backend", "");
+
+  stream_stats::remove_client("10.0.0.6", 482);
+  json = current_stats_json();
+  EXPECT_EQ(json["last_session"].value("encoder_backend", ""), viewer_live)
+    << "the ended session reports an encoder its live entry never showed";
+  ASSERT_EQ(json["clients"].size(), 1u);
+  ASSERT_EQ(stream_stats::get_current().encoder_backend, "nvenc");
+  EXPECT_EQ(json.value("encoder_backend", ""), "vaapi")
+    << "the top level is the sole client's own encoder, not the last sample on the host";
+  const auto owner_live = json["clients"][0].value("encoder_backend", "");
+
+  stream_stats::remove_client("10.0.0.5", 481);
+  json = current_stats_json();
+  EXPECT_EQ(json["last_session"].value("encoder_backend", ""), owner_live);
+  EXPECT_FALSE(json.contains("encoder_backend")) << "no client streams";
+}
+
+TEST(StreamStatsLastSessionTests, ARepeatedOrUnmatchedRemovalLeavesItAsItWas) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  // A replacement from the same address keeps streaming through every removal below, so a
+  // removal that matched by address would find it.
+  stream_stats::add_client("10.0.0.5", "Deck", 441);
+  stream_stats::add_client("10.0.0.5", "Replacement", 442);
+  ASSERT_TRUE(stream_stats::record_capture_backend(441, portal_capture()));
+  ASSERT_TRUE(stream_stats::record_capture_backend(442, portal_capture("portal_kwin_node")));
+  stream_stats::remove_client("10.0.0.5", 441);
+  const auto frozen = last_session_json();
+  ASSERT_EQ(frozen.value("stream_instance_id", ""), stream_stats::stream_instance_id(441)) << frozen.dump();
+
+  // The same teardown again, a generation that was never added, and a legacy entry with no
+  // generation, which owns no facts and has no identity to report.
+  stream_stats::remove_client("10.0.0.5", 441);
+  EXPECT_EQ(last_session_json(), frozen);
+  stream_stats::remove_client("10.0.0.5", 449);
+  EXPECT_EQ(last_session_json(), frozen);
+  stream_stats::add_client("10.0.0.9", "Legacy");
+  stream_stats::remove_client("10.0.0.9");
+  EXPECT_EQ(last_session_json(), frozen);
+  const auto live = current_stats_json();
+  ASSERT_EQ(live["clients"].size(), 1u) << "none of them removes the replacement";
+  EXPECT_EQ(live["clients"][0]["stream_instance_id"], stream_stats::stream_instance_id(442));
+}
+
+TEST(StreamStatsLastSessionTests, ADisplayOpenedAgainEndsWithUnknownFramesUntilItDeliversOne) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Deck", 471);
+  ASSERT_TRUE(stream_stats::record_capture_backend(471, portal_capture("portal_kwin_node")));
+  ASSERT_TRUE(stream_stats::record_capture_source(471, shm_frames()));
+  // The display is opened again on the fallback route, and the stream ends before that display
+  // delivers a frame. The frames the first display delivered say nothing about this one.
+  ASSERT_TRUE(stream_stats::record_capture_backend(471, portal_capture("portal_screencast", "kwin_node_failed")));
+  stream_stats::remove_client("10.0.0.5", 471);
+  const auto capture = last_session_json()["capture"];
+  EXPECT_EQ(capture.value("route", ""), "portal_screencast");
+  EXPECT_EQ(capture.value("route_fallback_reason", ""), "kwin_node_failed");
+  EXPECT_EQ(capture.value("transport", ""), "unknown") << "the earlier display's frames: " << capture.dump();
+  EXPECT_EQ(capture.value("residency", ""), "unknown");
+  EXPECT_EQ(capture.value("format", ""), "unknown");
+}
+
+TEST(StreamStatsLastSessionTests, ASessionWhoseDisplayNeverOpenedEndsWithNoCapture) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  // Stats that never saw a session end say nothing about one.
+  EXPECT_FALSE(nlohmann::json::parse(stream_stats::stats_t {}.to_json()).contains("last_session"));
+
+  stream_stats::add_client("10.0.0.5", "Deck", 451);
+  stream_stats::remove_client("10.0.0.5", 451);
+  const auto last = last_session_json();
+  EXPECT_EQ(last.value("state", ""), "ended");
+  EXPECT_EQ(last.value("stream_instance_id", ""), stream_stats::stream_instance_id(451));
+  // Missing is unknown, never a default.
+  EXPECT_FALSE(last.contains("capture")) << last.dump();
+  EXPECT_FALSE(last.contains("codec"));
+  EXPECT_FALSE(last.contains("encoder_backend"));
+}
+
 TEST(StreamStatsCaptureSourceTests, DoesNotInferExtraCpuCopyFromSizeOrEncoderUploadAlone) {
   for (const auto source : {
     stream_stats::capture_source_t {3840, 2160, 1920, 1080, platf::frame_transport_e::dmabuf, platf::frame_residency_e::gpu},
@@ -1052,6 +1792,82 @@ TEST(StreamStatsDoctorTests, ReportsAHostWithNoCaptureBackendAsFailed) {
 
   platf::set_capture_sources_missing_for_tests(false);
 }
+
+#ifdef __linux__
+// #782: a settings file the store refused was explained only on the console's Settings page.
+// The Doctor carries it as settings_file_unreadable for as long as the last read or save met the
+// refusal. Paired clients and support bundles read this list, so it names the kind of refusal and
+// never the file's path.
+TEST(StreamStatsDoctorTests, ReportsASettingsFileTheStoreRefused) {
+  const auto old_path = config::sunshine.config_file;
+  const auto directory = std::filesystem::temp_directory_path() /
+    ("polaris-doctor-settings-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  std::filesystem::create_directory(directory);
+  auto restore = util::fail_guard([&] {
+    config::sunshine.config_file = old_path;
+    std::filesystem::remove_all(directory);
+  });
+  const auto path = (directory / "polaris.conf").string();
+  config::sunshine.config_file = path;
+  ASSERT_TRUE(private_state_file::write_atomic(path, "sunshine_name = doctor\n"));
+  const auto finding = [] {
+    const auto doctor = stream_stats::build_doctor_json({}, {{"primary_issue", "steady"}, {"grade", "good"}});
+    for (const auto &warning :
+         doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+      if (warning.at("id") == "settings_file_unreadable") return warning;
+    }
+    return nlohmann::json {};
+  };
+
+  ASSERT_TRUE(configuration_store::read(path));
+  EXPECT_TRUE(finding().is_null());
+
+  ASSERT_EQ(::chmod(path.c_str(), 0664), 0);
+  configuration_store::refusal_t refusal;
+  ASSERT_FALSE(configuration_store::read(path, &refusal));
+  ASSERT_EQ(refusal.kind, private_state_file::refusal_e::group_writable);
+  const auto warning = finding();
+  ASSERT_FALSE(warning.is_null());
+  EXPECT_EQ(warning.at("severity"), "warning");
+  EXPECT_EQ(warning.at("refusal"), "group_writable");
+  EXPECT_EQ(warning.dump().find(directory.string()), std::string::npos) << warning.dump();
+  EXPECT_NE(warning.at("action").get<std::string>().find("banner"), std::string::npos);
+  // Only settings go through the store. Apps, pairing and the password have files of their own and
+  // still save, so the finding must not say that nothing can be saved.
+  const auto message = warning.at("message").get<std::string>();
+  EXPECT_NE(message.find("no settings change can be saved"), std::string::npos) << message;
+  EXPECT_NE(message.find("still save"), std::string::npos) << message;
+  EXPECT_EQ(message.find("no change can be saved"), std::string::npos) << message;
+  // The top level stats payload carries the same list.
+  bool in_stats = false;
+  for (const auto &entry : stream_stats::linux_gpu_profile_json({}).at("configuration_warnings")) {
+    in_stats = in_stats || entry.at("id") == "settings_file_unreadable";
+  }
+  EXPECT_TRUE(in_stats);
+
+  ASSERT_EQ(::chmod(path.c_str(), 0600), 0);
+  ASSERT_TRUE(configuration_store::read(path));
+  EXPECT_TRUE(finding().is_null());
+
+  // A missing file is a refusal too, and the id says which.
+  ASSERT_TRUE(std::filesystem::remove(path));
+  ASSERT_FALSE(configuration_store::read(path));
+  ASSERT_FALSE(finding().is_null());
+  EXPECT_EQ(finding().at("refusal"), "missing");
+  ASSERT_TRUE(private_state_file::write_atomic(path, "sunshine_name = doctor\n"));
+  ASSERT_TRUE(configuration_store::read(path));
+  EXPECT_TRUE(finding().is_null());
+
+  // Every kind has its own name, so no two refusals read alike.
+  std::set<std::string> names;
+  for (auto kind = static_cast<int>(private_state_file::refusal_e::none);
+       kind <= static_cast<int>(private_state_file::refusal_e::read_failed); ++kind) {
+    const std::string name {private_state_file::refusal_name(static_cast<private_state_file::refusal_e>(kind))};
+    EXPECT_FALSE(name.empty()) << kind;
+    EXPECT_TRUE(names.insert(name).second) << name;
+  }
+}
+#endif
 
 TEST(StreamStatsDoctorTests, ReportsThreadPriorityThatCouldNotBeRaised) {
   // Logged once at the first stream and then gone from view. A support bundle carried it only
@@ -1392,28 +2208,99 @@ TEST(StreamStatsDoctorTests, NamesTheCapabilityWhenKmsWasRefusedAndNothingElseCa
   // framebuffer, and the host serves with no capture at all. The journal says which command to
   // run, once, at boot. The Doctor has to say it where the person is standing.
   LinuxDisplayConfigGuard guard;
-  config::video.capture = "kms";
+  config::video.linux_display.stream_mode = "desktop_display";
+  config::video.linux_display.use_cage_compositor = false;
   platf::set_capture_sources_missing_for_tests(true);
   platf::set_kms_capture_refused_for_tests(true);
 
-  stream_stats::stats_t stats {};
-  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+  // drm is kms under another name: dispatch opens KMS for it, and the probe records its refusal.
+  for (const auto capture : {"kms", "drm"}) {
+    config::video.capture = capture;
+    stream_stats::stats_t stats {};
+    const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
 
-  bool saw_warning = false;
-  for (const auto &warning :
-       doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
-    if (warning.at("id") != "kms_capture_needs_capability") {
-      continue;
+    bool saw_warning = false;
+    for (const auto &warning :
+         doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+      if (warning.at("id") != "kms_capture_needs_capability") {
+        continue;
+      }
+      saw_warning = true;
+      EXPECT_EQ(warning.at("severity"), "fail");
+      EXPECT_NE(warning.at("message").get<std::string>().find("CAP_SYS_ADMIN"), std::string::npos);
+      EXPECT_NE(warning.at("action").get<std::string>().find("--setup-host --enable-kms"), std::string::npos);
     }
-    saw_warning = true;
-    EXPECT_EQ(warning.at("severity"), "fail");
-    EXPECT_NE(warning.at("message").get<std::string>().find("CAP_SYS_ADMIN"), std::string::npos);
-    EXPECT_NE(warning.at("action").get<std::string>().find("--setup-host --enable-kms"), std::string::npos);
+    EXPECT_TRUE(saw_warning) << capture;
   }
-  EXPECT_TRUE(saw_warning);
 
   platf::set_kms_capture_refused_for_tests(false);
   platf::set_capture_sources_missing_for_tests(false);
+}
+
+TEST(StreamStatsDoctorTests, NamesTheKmsCapabilityOnlyWhereCaptureAsksForKms) {
+  // A private compositor mode captures through wlroots whatever capture says, and the evaluation
+  // still probes KMS for a host set to kms or drm there. Telling that host to grant a capability
+  // changed nothing about its stream. The finding asks what a launch refusal asks: whether KMS is
+  // what capture asks for in the live mode, which is kms, drm, or auto, whose search reaches KMS.
+  LinuxDisplayConfigGuard guard;
+  platf::set_capture_backend_substitution_for_tests("");
+  platf::set_capture_sources_missing_for_tests(false);
+  platf::set_kms_capture_refused_for_tests(true);
+  const auto reports_capability = []() {
+    stream_stats::stats_t stats {};
+    const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+    for (const auto &warning :
+         doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+      if (warning.at("id") == "kms_capture_needs_capability") {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  for (const auto mode : {"headless_stream", "windowed_stream"}) {
+    config::video.linux_display.stream_mode = mode;
+    config::video.linux_display.use_cage_compositor = true;
+    for (const auto capture : {"kms", "drm", ""}) {
+      config::video.capture = capture;
+      EXPECT_FALSE(reports_capability()) << mode << " capture=[" << capture << "]";
+    }
+  }
+
+  config::video.linux_display.stream_mode = "desktop_display";
+  config::video.linux_display.use_cage_compositor = false;
+  for (const auto capture : {"kms", "drm", ""}) {
+    config::video.capture = capture;
+    EXPECT_TRUE(reports_capability()) << "desktop_display capture=[" << capture << "]";
+  }
+  // A host set to another backend never asked for KMS.
+  for (const auto capture : {"portal", "kwin", "wlr"}) {
+    config::video.capture = capture;
+    EXPECT_FALSE(reports_capability()) << "desktop_display capture=[" << capture << "]";
+  }
+
+  // A launch into Gamescope Stream or the dongle fills an unset capture with the portal before it
+  // asks for anything, so an idle host in either mode with capture unset never asks for KMS,
+  // whatever its startup search probed. That is the #635 reporter's route. An explicit kms or drm
+  // is kept in both modes and asks for KMS by name.
+  for (const auto mode : {"gamescope_stream", "headless_dongle"}) {
+    config::video.linux_display.stream_mode = mode;
+    config::video.capture = "";
+    EXPECT_FALSE(reports_capability()) << mode << " capture unset";
+    for (const auto capture : {"kms", "drm"}) {
+      config::video.capture = capture;
+      EXPECT_TRUE(reports_capability()) << mode << " capture=[" << capture << "]";
+    }
+  }
+  // The fill comes before the mode's own decision, as it does in a launch, so a dongle host set to
+  // kms whose KMS captured nothing is still asked about the capability rather than read as filled.
+  platf::set_capture_backend_substitution_for_tests("kms -> portal");
+  config::video.linux_display.stream_mode = "headless_dongle";
+  config::video.capture = "kms";
+  EXPECT_TRUE(reports_capability()) << "headless_dongle capture=[kms] substituted";
+  platf::set_capture_backend_substitution_for_tests("");
+
+  platf::set_kms_capture_refused_for_tests(false);
 }
 
 TEST(StreamStatsDoctorTests, ASubstitutedKmsNamesTheCapabilityNotTheCompositor) {
@@ -1499,8 +2386,66 @@ TEST(StreamStatsDoctorTests, HdrFindingNamesTheRecipeAndTheCapabilityWhenKmsWasR
     EXPECT_NE(action.find("capture = kms"), std::string::npos);
     EXPECT_NE(action.find("Mirror Desktop"), std::string::npos);
     EXPECT_NE(action.find("--enable-kms"), std::string::npos);
+    // The sentence that gives the recipe names only the mode that keeps kms. It used to name Host
+    // Virtual Display, Desktop Takeover and Gamescope, which the host's own warnings say rewrite it.
+    const auto recipe_start = action.find("capture = kms with");
+    ASSERT_NE(recipe_start, std::string::npos) << action;
+    const auto recipe = action.substr(recipe_start, action.find('.', recipe_start) - recipe_start);
+    EXPECT_NE(recipe.find("Mirror Desktop"), std::string::npos) << recipe;
+    for (const auto mode : {"Host Virtual Display", "Desktop Takeover", "Gamescope", "Private Stream"}) {
+      EXPECT_EQ(recipe.find(mode), std::string::npos) << mode << " in: " << recipe;
+    }
+    // It used to call Mirror Desktop the one mode that keeps kms and say a Gamescope Stream session
+    // is captured through the portal. A host whose own mode is Gamescope Stream or the dongle keeps
+    // kms, and a Host Virtual Display host's load replaced kms for its Mirror Desktop launches too.
+    EXPECT_EQ(action.find("the stream mode that keeps"), std::string::npos) << action;
+    EXPECT_EQ(action.find("Gamescope Stream session is captured through the portal"), std::string::npos) << action;
+    EXPECT_NE(action.find("Gamescope Stream and the dongle keep kms only as the host's own mode"), std::string::npos)
+      << action;
+    EXPECT_NE(action.find("launch into either from another mode captures through the portal"), std::string::npos)
+      << action;
+    EXPECT_NE(action.find("own mode is Host Virtual Display or Desktop Takeover"), std::string::npos) << action;
+    EXPECT_NE(action.find("until Polaris restarts"), std::string::npos) << action;
   }
   EXPECT_TRUE(saw_hdr);
+
+#ifdef __linux__
+  // What the action says is what the policy does, for the host's own mode and for a launch that
+  // enters another one.
+  using stream_display_policy::capture_filled_for_mode;
+  using stream_display_policy::capture_for_host_virtual_display_backend;
+  using stream_display_policy::capture_for_mode;
+  using stream_display_policy::capture_for_session_transition;
+  // Mirror Desktop keeps kms as the host's mode, and a launch into it keeps the kms a host in
+  // Private Stream, Gamescope Stream or the dongle still holds.
+  EXPECT_EQ(capture_for_mode("kms", "desktop_display", false, false, false), "kms");
+  for (const auto from : {"headless_stream", "windowed_stream", "gamescope_stream", "headless_dongle"}) {
+    EXPECT_EQ(capture_for_session_transition(from, "desktop_display", "kms"), "kms") << from;
+  }
+  // Loading Host Virtual Display or Desktop Takeover puts another backend in place of kms until
+  // restart, and a launch into Mirror Desktop starts from that replacement, not from kms.
+  for (const auto backend : {virtual_display::backend_e::EVDI,
+                             virtual_display::backend_e::KSCREEN_DOCTOR,
+                             virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT,
+                             virtual_display::backend_e::WAYLAND_WLR}) {
+    const auto loaded = capture_for_host_virtual_display_backend(backend, "kms");
+    EXPECT_NE(loaded, "kms") << virtual_display::backend_name(backend);
+    for (const auto from : {"host_virtual_display", "desktop_takeover"}) {
+      EXPECT_NE(capture_for_session_transition(from, "desktop_display", loaded), "kms")
+        << from << " on " << virtual_display::backend_name(backend);
+    }
+  }
+  // Gamescope Stream and the dongle keep kms as the host's own mode, filled or not, and a launch
+  // that enters either from another mode captures through the portal.
+  for (const auto mode : {"gamescope_stream", "headless_dongle"}) {
+    EXPECT_EQ(capture_for_mode(capture_filled_for_mode(mode, "kms"), mode, false, false, false), "kms") << mode;
+    EXPECT_EQ(capture_for_session_transition("desktop_display", mode, "kms"), "portal") << mode;
+  }
+  // Private Stream captures through wlroots whatever capture says.
+  for (const auto mode : {"headless_stream", "windowed_stream"}) {
+    EXPECT_EQ(capture_for_mode("kms", mode, true, false, false), "wlr") << mode;
+  }
+#endif
 
   platf::set_kms_capture_refused_for_tests(false);
 }
@@ -6274,6 +7219,60 @@ TEST(StreamStatsDoctorTests, SaysX11CaptureCopiesThroughSystemMemory) {
   }
   EXPECT_TRUE(saw_forecast);
 }
+
+TEST(StreamStatsDoctorTests, SaysVulkanVideoOnThePortalCopiesThroughSystemMemoryByPolicy) {
+  // #635: forecast_capture_path answers for Vulkan Video on the portal. This holds the route that
+  // carries the answer to Doctor, and the POLARIS_PORTAL_DMABUF read that adds the sentence saying
+  // the variable is VA-API's.
+  LinuxDisplayConfigGuard guard;
+  config::video.encoder = "vulkan";
+  config::video.linux_display.use_cage_compositor = false;
+  platf::set_selected_capture_backend_for_tests("portal");
+  stream_stats::set_build_has_cuda_for_tests(false);
+
+  const char *previous = std::getenv("POLARIS_PORTAL_DMABUF");
+  const std::optional<std::string> saved = previous ? std::optional<std::string> {previous} : std::nullopt;
+  auto restore = util::fail_guard([&saved] {
+    if (saved) {
+      setenv("POLARIS_PORTAL_DMABUF", saved->c_str(), 1);
+    } else {
+      unsetenv("POLARIS_PORTAL_DMABUF");
+    }
+  });
+  unsetenv("POLARIS_PORTAL_DMABUF");
+
+  const auto forecast_warning = [] {
+    stream_stats::stats_t stats {};
+    const auto profile = stream_stats::linux_gpu_profile_json(stats);
+    EXPECT_EQ(profile.at("capture_forecast").at("backend"), "portal");
+    EXPECT_EQ(profile.at("capture_forecast").at("residency"), "system_memory");
+    EXPECT_EQ(profile.at("capture_forecast").at("cause"), "vulkan_portal_system_memory_by_design");
+    nlohmann::json found;
+    for (const auto &warning : profile.at("configuration_warnings")) {
+      if (warning.at("id") == "capture_copies_through_system_memory") {
+        EXPECT_TRUE(found.is_null()) << "one forecast warning per profile";
+        found = warning;
+      }
+    }
+    return found;
+  };
+
+  auto warning = forecast_warning();
+  ASSERT_FALSE(warning.is_null());
+  EXPECT_EQ(warning.at("cause"), "vulkan_portal_system_memory_by_design");
+  EXPECT_EQ(warning.at("severity"), "info");
+  EXPECT_NE(warning.at("action").get<std::string>().find("Private Stream"), std::string::npos);
+  EXPECT_EQ(warning.at("action").get<std::string>().find("POLARIS_PORTAL_DMABUF"), std::string::npos);
+
+  setenv("POLARIS_PORTAL_DMABUF", "1", 1);
+  warning = forecast_warning();
+  ASSERT_FALSE(warning.is_null());
+  EXPECT_EQ(warning.at("cause"), "vulkan_portal_system_memory_by_design");
+  EXPECT_NE(
+    warning.at("action").get<std::string>().find("POLARIS_PORTAL_DMABUF=1 applies to VA-API only"),
+    std::string::npos
+  );
+}
 #endif
 
 TEST(CaptureForecastTests, VaapiStaysInSystemMemoryByDesignOnEveryPath) {
@@ -6308,6 +7307,82 @@ TEST(CaptureForecastTests, VaapiStaysInSystemMemoryByDesignOnEveryPath) {
   forecast = stream_stats::forecast_capture_path(inputs);
   EXPECT_EQ(forecast.residency, "gpu");
   EXPECT_TRUE(forecast.cause.empty());
+}
+
+TEST(CaptureForecastTests, VulkanVideoOnThePortalStaysInSystemMemoryByDesign) {
+  // #635: the forecast said the portal is asked for DMA-BUF on Vulkan Video and waited for a
+  // stream to show which. The portal hands Vulkan Video shared memory whatever it is asked, so
+  // there was never anything to wait for.
+  stream_stats::capture_forecast_inputs_t inputs;
+  inputs.encoder = "vulkan";
+  inputs.build_has_cuda = false;
+  inputs.capture_backend = "portal";
+
+  auto forecast = stream_stats::forecast_capture_path(inputs);
+  EXPECT_EQ(forecast.residency, "system_memory");
+  EXPECT_EQ(forecast.cause, "vulkan_portal_system_memory_by_design");
+  EXPECT_EQ(forecast.severity, "info");
+  EXPECT_NE(forecast.message.find("Gamescope Stream"), std::string::npos) << forecast.message;
+  EXPECT_NE(forecast.message.find("by design"), std::string::npos) << forecast.message;
+  EXPECT_NE(forecast.message.find("not a fault"), std::string::npos) << forecast.message;
+  EXPECT_NE(forecast.action.find("Private Stream"), std::string::npos) << forecast.action;
+  EXPECT_EQ(forecast.action.find("POLARIS_PORTAL_DMABUF"), std::string::npos) << forecast.action;
+
+  // The VA-API opt-in does not reach Vulkan Video, so the forecast keeps its answer and says why
+  // the variable made no difference, instead of going quiet the way it does for VA-API.
+  inputs.portal_vaapi_dmabuf_opted_in = true;
+  forecast = stream_stats::forecast_capture_path(inputs);
+  EXPECT_EQ(forecast.residency, "system_memory");
+  EXPECT_EQ(forecast.cause, "vulkan_portal_system_memory_by_design");
+  EXPECT_NE(forecast.action.find("POLARIS_PORTAL_DMABUF=1 applies to VA-API only"), std::string::npos) << forecast.action;
+
+  // Other backends keep their own answers for Vulkan Video.
+  inputs.capture_backend = "wlr";
+  forecast = stream_stats::forecast_capture_path(inputs);
+  EXPECT_EQ(forecast.residency, "gpu");
+  EXPECT_TRUE(forecast.cause.empty());
+  inputs.capture_backend = "kms";
+  forecast = stream_stats::forecast_capture_path(inputs);
+  EXPECT_EQ(forecast.residency, "gpu");
+  EXPECT_TRUE(forecast.cause.empty());
+
+  // CUDA on the portal is offered DMA-BUF and still waits for a stream to show which it got.
+  inputs.encoder = "nvenc";
+  inputs.build_has_cuda = true;
+  inputs.capture_backend = "portal";
+  forecast = stream_stats::forecast_capture_path(inputs);
+  EXPECT_EQ(forecast.residency, "unknown");
+  EXPECT_TRUE(forecast.cause.empty());
+}
+
+TEST(CaptureForecastTests, EveryCauseHasARowInTroubleshooting) {
+  // Doctor reports capture_copies_through_system_memory with a cause, and Troubleshooting promises
+  // a row with the fix for each one. vulkan_portal_system_memory_by_design shipped without its row,
+  // so this reads every cause the forecast can give and looks for it in the table.
+  const auto read = [](const char *relative) {
+    std::ifstream input(std::filesystem::path {POLARIS_SOURCE_DIR} / relative);
+    EXPECT_TRUE(input.good()) << relative;
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    return contents.str();
+  };
+  const auto source = read("src/stream_stats.cpp");
+  const auto docs = read("docs/troubleshooting.md");
+
+  const std::string call = "system_memory(\n";
+  std::vector<std::string> causes;
+  for (auto at = source.find(call); at != std::string::npos; at = source.find(call, at + call.size())) {
+    const auto open = source.find_first_not_of(" \n", at + call.size());
+    ASSERT_NE(open, std::string::npos);
+    ASSERT_EQ(source[open], '"') << source.substr(at, 80);
+    const auto close = source.find('"', open + 1);
+    ASSERT_NE(close, std::string::npos);
+    causes.push_back(source.substr(open + 1, close - open - 1));
+  }
+  EXPECT_GE(causes.size(), 6u) << "the forecast lost its causes, or this test lost track of them";
+  for (const auto &cause : causes) {
+    EXPECT_NE(docs.find("| `" + cause + "` |"), std::string::npos) << cause;
+  }
 }
 
 TEST(CaptureForecastTests, NvidiaPrivateStreamFollowsTheLastDmabufProbe) {

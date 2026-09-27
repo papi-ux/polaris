@@ -7608,21 +7608,9 @@ namespace proc {
       if (!session_mode_failed &&
           !stream_display_policy::selection_companion_state_matches(session_mode)) {
         if (stream_display_policy::apply_selection(session_mode, mode_error)) {
-          const auto session_capture =
-            stream_display_policy::capture_for_session_transition(
-              configured_session_mode,
-              session_mode,
-              config::video.capture
-            );
-          if (session_capture != config::video.capture) {
-            BOOST_LOG(info) << "process: session capture backend override ["sv
-                            << (config::video.capture.empty() ? "auto" : config::video.capture)
-                            << "] -> ["sv
-                            << (session_capture.empty() ? "auto" : session_capture)
-                            << "] for stream mode ["sv << session_mode
-                            << "]; host default restored at teardown"sv;
-            config::video.capture = session_capture;
-          }
+          // Rewrites capture for this session and says what it set aside, measured against
+          // polaris.conf as loaded rather than a live value a Host Virtual Display load replaced.
+          stream_display_policy::apply_capture_for_session_transition(configured_session_mode, session_mode);
           this->initial_linux_display_saved = true;
           remember_host_display_default(*this);
           session_mode_applied = true;
@@ -8457,7 +8445,8 @@ namespace proc {
           // capture authority to the backend that actually created this
           // display before capture identity or game-placement hints are built.
           stream_display_policy::normalize_host_virtual_display_state_for_backend(
-            linux_vdisplay->backend
+            linux_vdisplay->backend,
+            stream_display_policy::capture_rewrite_scope_e::backend_change
           );
           this->initial_linux_display_saved = true;
           remember_host_display_default(*this);

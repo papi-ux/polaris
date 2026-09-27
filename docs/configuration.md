@@ -488,9 +488,14 @@ capture = kms
 linux_stream_mode = desktop_display
 ```
 
-`host_virtual_display`, `desktop_takeover` and `gamescope_stream` also show the real output;
-`headless_stream` and `windowed_stream` do not. KMS capture needs `CAP_SYS_ADMIN` on the binary,
-granted once with `sudo -H polaris --setup-host --enable-kms`. The paired client must not have HDR
+`linux_stream_mode` is the host's own mode here. A launch into `desktop_display` from another mode
+keeps `capture = kms` too, except on a host whose own mode is `host_virtual_display` or
+`desktop_takeover`: loading either one puts the portal or wlroots in place of `kms` until Polaris
+restarts, and both capture their display through the portal or wlroots whatever `capture` says.
+`gamescope_stream` and `headless_dongle` keep `capture = kms` only as the host's own mode, and a
+launch into either from another mode captures through the portal. `headless_stream` and
+`windowed_stream` capture Polaris' own labwc through wlroots. KMS capture needs `CAP_SYS_ADMIN` on
+the binary, granted once with `sudo -H polaris --setup-host --enable-kms`. The paired client must not have HDR
 forced off in `client_profiles.json` (`hdr`) or `device_db.json` (`hdr_capable`), and the client has
 to request HDR itself. The full checklist with the log line for each step is in
 [runtime.md](runtime.md#the-recipe-that-works-today).
@@ -542,9 +547,12 @@ encode extensions. Explicit selection supports direct DRM/KMS, wlroots, and Port
 DRM/KMS and wlroots frames remain matched to the encoder's render node; Portal and any safely retired
 wlroots DMA-BUF route use the Vulkan RAM uploader rather than pretending a CPU copy is zero-copy.
 
-With `encoder` left on Auto, Polaris promotes Vulkan only for a compatible AMD private-compositor
-route that can validate the exact first live GPU-native frame and retire a failed route to VA-API.
-NVIDIA stays on NVENC, Intel stays on VA-API, and AMD desktop capture stays on VA-API by default.
+With `encoder` left on Auto, Polaris promotes Vulkan only on AMD with the labwc private compositor
+that Private Stream runs, the one route that can validate the exact first live GPU-native frame and
+retire a failed route to VA-API. NVIDIA stays on NVENC and Intel stays on VA-API. Every other AMD
+route, Gamescope Stream included, counts as desktop capture and stays on VA-API, so Vulkan Video is
+not a candidate there. Set `encoder = vulkan` to choose it on such a route: AV1 is then unavailable,
+and on portal capture, which Gamescope Stream uses, frames reach the encoder through system memory.
 
 Before selecting it, enable KMS host access once, restart Polaris, then set both overrides:
 

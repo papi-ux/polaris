@@ -27,6 +27,10 @@ cookie CSRF validation; the endpoint still enforces its authentication checks.
 A stale or absent revision returns HTTP 412 without changing the controller.
 A failed durable commit returns an error without changing the preference. Refresh
 the state before asking the user to retry; do not automatically replay the save.
+A settings file the settings store refuses returns HTTP 503 with `code`
+`config_unreadable` and changes nothing. On `POST /api/live-tuning` the reply also
+carries `error`, `path`, `reason` and `fix`, the fields `GET /api/config` answers
+such a file with; the paired route carries the code alone.
 `GET /api/config` returns contents and revision from one secure file snapshot.
 Configuration saves preserve the live preference when it is omitted.
 

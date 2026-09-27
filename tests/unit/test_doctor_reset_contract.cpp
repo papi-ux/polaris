@@ -251,6 +251,23 @@ TEST(DoctorResetContract, ReconnectSerializesOldEvidenceResetWithNewDoctorScope)
   EXPECT_LT(new_count_started, start_unlock);
 }
 
+TEST(DoctorResetContract, AnEndingSessionIsFrozenBeforeTheLastStreamResetsTheStats) {
+  // remove_client() freezes last_session from the ending session's own entry. When the last stream
+  // ends, update_stream_active(false) clears every entry, so a removal after it would find nothing
+  // to freeze, and the most common end, the last stream's, would leave no record at all.
+  const auto stream = source("src/stream.cpp");
+  const auto join = between(
+    stream,
+    "void join(session_t &session)",
+    "int start(session_t &session"
+  );
+  const auto session_frozen = join.find("stream_stats::remove_client(");
+  const auto stats_reset = join.find("stream_stats::update_stream_active(false)");
+  ASSERT_NE(session_frozen, std::string::npos);
+  ASSERT_NE(stats_reset, std::string::npos);
+  EXPECT_LT(session_frozen, stats_reset);
+}
+
 TEST(DoctorResetContract, ResumeTimeoutCannotTerminateAcrossReconnectAdmission) {
   const auto stream = source("src/stream.cpp");
   const auto timeout = between(

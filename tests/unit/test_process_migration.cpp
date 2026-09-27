@@ -295,6 +295,36 @@ namespace {
     return collapsed;
   }
 
+  /**
+   * @brief The arguments of a call, from just after its opening parenthesis to the one that
+   *        closes it, split at its own commas with whitespace collapsed.
+   *
+   * Empty when the call never closes.
+   */
+  std::vector<std::string> call_arguments(std::string_view source, std::size_t after_open) {
+    std::vector<std::string> arguments;
+    std::string current;
+    int depth = 0;
+    for (auto at = after_open; at < source.size(); ++at) {
+      const char ch = source[at];
+      if (depth == 0 && (ch == ',' || ch == ')')) {
+        arguments.push_back(collapse_whitespace(current));
+        if (ch == ')') {
+          return arguments;
+        }
+        current.clear();
+        continue;
+      }
+      if (ch == '(' || ch == '{' || ch == '[') {
+        ++depth;
+      } else if (ch == ')' || ch == '}' || ch == ']') {
+        --depth;
+      }
+      current.push_back(ch);
+    }
+    return {};
+  }
+
 }  // namespace
 
 TEST(ProcessRuntimeConfigTests, PolarisV1SessionStopContractIsAdvertisedAndRouted) {
@@ -321,6 +351,30 @@ TEST(ProcessRuntimeConfigTests, PolarisV1SessionStopContractIsAdvertisedAndRoute
   EXPECT_NE(source.find("session_stop_v1"), std::string::npos);
   EXPECT_NE(source.find("/polaris/v1/session/stop"), std::string::npos);
   EXPECT_NE(status_handler.find("PERM::launch"), std::string::npos);
+  // The encoder block's codec, encoder and selection with its PyroWave reason, and the Doctor's
+  // evidence, answer the stream this response names as session_generation, not whichever stream
+  // sampled last or is listed first. Only the helper the encoder tests run writes those keys.
+  EXPECT_NE(status_handler.find("session_timing.session_active ? session_timing.session_generation : 0;\n"
+                                "      write_session_encoder_identity(\n"
+                                "        encoder,\n"
+                                "        stats,\n"
+                                "        status_snapshot.requested_encoder_backend,\n"
+                                "        status_snapshot.effective_encoder_backend,\n"
+                                "        status_snapshot.encoder_backend_explicit,\n"
+                                "        requester_generation\n"
+                                "      );"),
+            std::string::npos);
+  for (const auto *process_wide : {
+         "session_encoder_name(stats)",
+         "encoder_selection_json(stats)",
+         "encoder[\"active_backend\"] =",
+         "encoder[\"effective_backend\"] =",
+         "encoder[\"selection\"] =",
+         "encoder[\"codec\"] =",
+       }) {
+    EXPECT_EQ(status_handler.find(process_wide), std::string::npos) << process_wide;
+  }
+  EXPECT_NE(status_handler.find("status_snapshot.game_uuid,\n        requester_generation\n      );"), std::string::npos);
   EXPECT_NE(status_handler.find("get_session_status_view("), std::string::npos);
   EXPECT_NE(status_handler.find("auto status_view = proc::proc.get_session_status_view("), std::string::npos);
   EXPECT_NE(status_handler.find("const auto &status_snapshot = status_view.snapshot"), std::string::npos);
@@ -393,6 +447,83 @@ TEST(ProcessRuntimeConfigTests, PolarisV1SessionStopContractIsAdvertisedAndRoute
       .find("request_session_shutdown( named_cert_p->uuid, expected_token, can_launch, true )"),
     std::string::npos
   );
+}
+
+/**
+ * Every paired endpoint that serves session health builds it for the stream of the device it
+ * answers, as the session status does. That stream's codec, encoder and selection decide the
+ * health's active_encoder, encoder_selection, decoder_risk and safe_codec, the grade, issues and
+ * summary that follow from them, and the Doctor built from the health. A call that passed no
+ * generation would answer about whichever stream sampled last, Browser Stream's included, and no
+ * behaviour test would notice, because none of them runs these handlers.
+ */
+TEST(ProcessRuntimeConfigTests, PairedSessionHealthAnswersTheStreamOfTheDeviceItDescribes) {
+  const auto source = read_source_file_for_contract("src/nvhttp.cpp");
+  ASSERT_FALSE(source.empty());
+
+  struct paired_health_t {
+    std::string handler;
+    // The device the response describes, whose name the health is built for.
+    std::string device;
+    // The stream that device runs now, or zero when it runs none.
+    std::string generation;
+  };
+  const std::vector<paired_health_t> expected {
+    {"polarisSessionStatus", "named_cert_p->", "requester_generation"},
+    {"polarisStreamPolicy", "response_client->", "requester_session_generation(response_client->uuid)"},
+    {"polarisClientSettings", "rendered_response_client.", "requester_session_generation(rendered_response_client.uuid)"},
+    {"polarisDoctorAction", "named_cert_p->", "timing.session_active ? timing.session_generation : 0"},
+    {"polarisSetBitrate", "named_cert_p->", "requester_session_generation(named_cert_p->uuid)"},
+    {"polarisSetAdaptiveBitrate", "named_cert_p->", "requester_session_generation(named_cert_p->uuid)"},
+  };
+
+  // Each handler runs from its declaration to the next one's.
+  std::vector<std::size_t> starts;
+  for (auto at = source.find("auto polaris"); at != std::string::npos; at = source.find("auto polaris", at + 1)) {
+    const auto declared = source.find(" = [", at);
+    if (declared != std::string::npos && declared < source.find('\n', at)) {
+      starts.push_back(at);
+    }
+  }
+  ASSERT_FALSE(starts.empty());
+
+  const std::string call = "build_session_health_json(";
+  std::vector<std::string> builders;
+  for (std::size_t index = 0; index < starts.size(); ++index) {
+    const auto name_start = starts[index] + std::string_view {"auto "}.size();
+    const auto name = source.substr(name_start, source.find(" = [", name_start) - name_start);
+    const auto end = index + 1 < starts.size() ? starts[index + 1] : source.size();
+    const auto handler = source.substr(starts[index], end - starts[index]);
+    const auto first = handler.find(call);
+    if (first == std::string::npos) {
+      continue;
+    }
+    SCOPED_TRACE(name);
+    builders.push_back(name);
+    EXPECT_EQ(handler.find(call, first + 1), std::string::npos);
+    const auto want = std::find_if(expected.begin(), expected.end(), [&name](const paired_health_t &entry) {
+      return entry.handler == name;
+    });
+    ASSERT_NE(want, expected.end()) << "a handler this test does not know builds session health";
+    const auto arguments = call_arguments(handler, first + call.size());
+    ASSERT_EQ(arguments.size(), 6u);
+    EXPECT_EQ(arguments[2], want->device + "name");
+    EXPECT_EQ(arguments[5], want->generation);
+    if (name == "polarisDoctorAction") {
+      // The Doctor action reads the device's own timing, which also scopes the action it takes.
+      const auto timing = collapse_whitespace(handler).find(
+        "const auto timing = stream_stats::get_session_timing(named_cert_p->uuid);"
+      );
+      EXPECT_NE(timing, std::string::npos);
+      EXPECT_LT(timing, collapse_whitespace(handler).find(call));
+    }
+  }
+
+  std::vector<std::string> expected_builders;
+  for (const auto &entry : expected) {
+    expected_builders.push_back(entry.handler);
+  }
+  EXPECT_EQ(builders, expected_builders);
 }
 
 TEST(ProcessRuntimeConfigTests, NestedSessionPrepReceivesCredentialAndFailsLaunchClosed) {

@@ -105,7 +105,8 @@ PyroWave.
 
 **Capture path.** [Doctor](doctor.md) shows whether frames reached the encoder on the GPU or in
 host memory; either works ([what each frame costs](pyrowave-reference.md#what-each-frame-costs-the-host)).
-Its "CPU color conversion" label shows for every PyroWave stream; ignore it.
+On Polaris 1.4.13, its "CPU color conversion" label shows for every PyroWave stream; ignore it.
+Newer builds say where the encoder converted colour.
 
 **Bitrate.** Plan the link for the full bitrate you set.
 

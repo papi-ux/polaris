@@ -42,6 +42,18 @@ namespace display_topology {
   bool swap_makes_headless_primary(std::string_view swap_mode);
 
   /**
+   * @brief Whether a dongle with this capture setting captures through the host portal.
+   *
+   * Two steps of the swap depend on it. Host portal ScreenCast is 8-bit SDR, so
+   * the streaming output is kept out of HDR and KWin hands over tone-mapped BGRx
+   * rather than its HDR compositor view. And the one-time ScreenCast picker needs
+   * a visible desk, so the primary is not blanked until a restore token is saved.
+   * The setting is read the way dispatch reads it: kwin opens the portal, and an
+   * unset capture, which a dongle fills with portal, lands there too.
+   */
+  bool captures_through_host_portal(std::string_view capture);
+
+  /**
    * @brief True when the configured path should run kscreen-doctor display swap.
    *
    * Requires auto_manage + streaming_output, and must not run for private labwc sessions.

@@ -1537,7 +1537,13 @@ namespace nvhttp {
         config::video.output_name = previous_output_name;
       };
 
-      if (!stream_display_policy::apply_selection(selection, error)) {
+      // The capture setting is put back below, so what the selection does to it is a preview. The
+      // launch that enters the mode applies it again and says then what it does to capture.
+      if (!stream_display_policy::apply_selection(
+            selection,
+            error,
+            stream_display_policy::capture_rewrite_scope_e::preview
+          )) {
         // Dongle discovery can fill only one connector before discovering that
         // the pair is incomplete. A rejected request must be observation-only.
         restore_live_state();
@@ -2312,34 +2318,98 @@ namespace nvhttp {
       return std::clamp(safe_kbps, 6000, std::max(6000, baseline_kbps > 0 ? baseline_kbps : safe_kbps));
     }
 
-    std::string session_encoder_name(const stream_stats::stats_t &stats) {
-      if (!stats.encoder_backend.empty()) {
-        return stats.encoder_backend;
+    /**
+     * The asking client's own entry in the stream stats, or null when it asked from the host, has no
+     * stream among them, or its entry has no codec yet.
+     *
+     * Every Watch Stream watcher runs its own session beside the owner's, and a reconnect keeps the
+     * stream it replaced listed until that one's teardown, each with its own codec and encoder. The
+     * process-wide codec and encoder_backend are whichever encode loop sampled last, so they are no
+     * answer for any one of them. An entry gets its codec from the start write right after it is
+     * registered, and until then it says nothing about its stream.
+     */
+    const stream_stats::client_stats_t *requester_client(const stream_stats::stats_t &stats,
+                                                          std::uint64_t requester_generation) {
+      if (requester_generation == 0) {
+        return nullptr;
+      }
+      const auto own = std::find_if(stats.clients.begin(), stats.clients.end(),
+        [requester_generation](const stream_stats::client_stats_t &client) {
+          return client.session_generation == requester_generation;
+        });
+      return own == stats.clients.end() || own->codec.empty() ? nullptr : &*own;
+    }
+
+    /// The encoder that sampled a stream and whether the stream negotiated PyroWave: the asking
+    /// client's own when it has a stream here, and the process-wide values otherwise.
+    struct session_encoder_facts_t {
+      std::string_view encoder_backend;
+      bool pyrowave_negotiated = false;
+    };
+
+    session_encoder_facts_t session_encoder_facts(const stream_stats::stats_t &stats,
+                                                  std::uint64_t requester_generation) {
+      if (const auto *own = requester_client(stats, requester_generation)) {
+        return {own->encoder_backend, own->codec == "pyrowave"};
+      }
+      return {stats.encoder_backend, stats.streaming && stats.codec == "pyrowave"};
+    }
+
+    /// The codec the asking client's own stream negotiated, or the process-wide one without it.
+    std::string session_codec(const stream_stats::stats_t &stats, std::uint64_t requester_generation = 0) {
+      const auto *own = requester_client(stats, requester_generation);
+      return own ? own->codec : stats.codec;
+    }
+
+    std::string session_encoder_name(const stream_stats::stats_t &stats,
+                                     std::uint64_t requester_generation = 0) {
+      const auto facts = session_encoder_facts(stats, requester_generation);
+      if (!facts.encoder_backend.empty()) {
+        return std::string {facts.encoder_backend};
       }
       // Preserve the negotiated-codec fallback until the first encoder sample.
-      return stats.streaming && stats.codec == "pyrowave" ? "pyrowave" : video::active_encoder_name();
+      return facts.pyrowave_negotiated ? "pyrowave" : video::active_encoder_name();
     }
 
     std::string effective_session_encoder_name(const stream_stats::stats_t &stats,
-                                               const std::string &launch_encoder) {
-      if (!stats.encoder_backend.empty()) return stats.encoder_backend;
+                                               const std::string &launch_encoder,
+                                               std::uint64_t requester_generation = 0) {
+      const auto facts = session_encoder_facts(stats, requester_generation);
+      if (!facts.encoder_backend.empty()) return std::string {facts.encoder_backend};
       // Negotiating PyroWave supersedes the conventional startup encoder even
       // before its first statistics sample arrives.
-      if (stats.streaming && stats.codec == "pyrowave") return "pyrowave";
+      if (facts.pyrowave_negotiated) return "pyrowave";
       if (!launch_encoder.empty()) return launch_encoder;
-      const auto active = session_encoder_name(stats);
+      const auto active = session_encoder_name(stats, requester_generation);
       return active.empty() ? "unknown" : active;
     }
 
-    nlohmann::json encoder_selection_json(const stream_stats::stats_t &stats) {
-      if (stats.streaming && session_encoder_name(stats) == "pyrowave") {
+    /**
+     * The generation of the stream a paired device is running now, or zero when it runs none.
+     *
+     * Only a device's newest session holds its timing, so a client reconnecting over its own old
+     * stream is answered about the new one, while the old stream's stats entry waits for teardown.
+     */
+    std::uint64_t requester_session_generation(const std::string &device_uuid) {
+      const auto timing = stream_stats::get_session_timing(device_uuid);
+      return timing.session_active ? timing.session_generation : 0;
+    }
+
+    nlohmann::json encoder_selection_json(const stream_stats::stats_t &stats,
+                                          std::uint64_t requester_generation = 0) {
+      // Whether the asking client's own stream is PyroWave, not whichever stream sampled last:
+      // beside an HEVC watcher, either one could be told the other's encoder.
+      if (stats.streaming && session_encoder_name(stats, requester_generation) == "pyrowave") {
         // Conventional encoder probing does not select the codec's own Vulkan
         // device. Do not label this stream software/NVENC or infer its GPU from
         // the capture adapter. Explicit PyroWave selection has no codec fallback.
+        // The reason is the route the asking client's own encoder reported,
+        // because GPU colour conversion is the default and the CPU is only a
+        // fallback, and another stream's route is no answer for this one.
         return {{"mode", "explicit"}, {"gpu_driver", "unknown"}, {"policy", "explicit_codec"},
           {"preferred_encoder", "pyrowave"}, {"fallback_encoder", ""}, {"selected_encoder", "pyrowave"},
           {"exact_live_probe_required", false}, {"fallback_used", false},
-          {"reason", "PyroWave is encoding with Vulkan after CPU color conversion."}};
+          {"reason", stream_stats::pyrowave_route_reason(stats, requester_generation)}};
       }
       const auto selection = video::active_encoder_selection_info();
       return {
@@ -2355,14 +2425,46 @@ namespace nvhttp {
       };
     }
 
+    /**
+     * The encoder block's answers about which codec and encoder a stream runs, in
+     * /polaris/v1/session/status.
+     *
+     * They are about the asking client's own stream when it has one among the stream stats, the
+     * way the PyroWave route already was, so a PyroWave owner and an HEVC watcher each read their
+     * own codec, encoder and selection in either startup order, and a reconnect reads its new
+     * stream's before that stream's first frame.
+     */
+    void write_session_encoder_identity(nlohmann::json &encoder,
+                                        const stream_stats::stats_t &stats,
+                                        const std::string &requested_backend,
+                                        const std::string &launch_backend,
+                                        bool session_override,
+                                        std::uint64_t requester_generation) {
+      const auto active_backend = session_encoder_name(stats, requester_generation);
+      const bool pyrowave_stream = stats.streaming && active_backend == "pyrowave";
+      encoder["active_backend"] = active_backend.empty() ? "unknown" : active_backend;
+      encoder["requested_backend"] = requested_backend;
+      encoder["effective_backend"] = effective_session_encoder_name(
+        stats, launch_backend, requester_generation);
+      encoder["session_override"] = session_override;
+      encoder["fallback_allowed"] = !pyrowave_stream && encoder_backend_fallback_allowed(
+        requested_backend,
+        session_override
+      );
+      encoder["selection"] = encoder_selection_json(stats, requester_generation);
+      encoder["codec"] = session_codec(stats, requester_generation);
+    }
+
     nlohmann::json build_session_health_json(const stream_stats::stats_t &stats,
                                              bool current_virtual_display,
                                              const std::string &device_name,
                                              const std::string &app_name,
-                                             std::string_view app_uuid = {}) {
+                                             std::string_view app_uuid = {},
+                                             std::uint64_t requester_generation = 0) {
       const auto device_profile = device_db::get_device(device_name);
       const bool mobile_client = is_mobile_client_type(device_profile);
-      const std::string active_codec_family = codec_family(stats.codec);
+      // The asking client's own codec and encoder, beside the selection built for it below.
+      const std::string active_codec_family = codec_family(session_codec(stats, requester_generation));
       const double target_fps =
         stats.encode_target_fps > 0 ? stats.encode_target_fps :
         stats.session_target_fps > 0 ? stats.session_target_fps :
@@ -2390,7 +2492,7 @@ namespace nvhttp {
         stream_stats::capture_path_uses_cpu_copy(stats);
       const auto capture_path = stream_stats::capture_path_summary(stats);
       const auto capture_reason = stream_stats::capture_path_reason(stats);
-      const auto active_encoder_name = session_encoder_name(stats);
+      const auto active_encoder_name = session_encoder_name(stats, requester_generation);
       const bool nvenc_cuda_disabled_path =
         active_encoder_name == "nvenc" &&
         !build_has_cuda() &&
@@ -2610,7 +2712,7 @@ namespace nvhttp {
       health["capture_pressure"] = capture_pressure;
       health["capture_gpu_native"] = stream_stats::capture_path_is_gpu_native(stats);
       health["active_encoder"] = active_encoder_name.empty() ? "unknown" : active_encoder_name;
-      health["encoder_selection"] = encoder_selection_json(stats);
+      health["encoder_selection"] = encoder_selection_json(stats, requester_generation);
       health["cuda_build"] = build_has_cuda();
       health["vulkan_build"] = build_has_vulkan();
       health["relaunch_recommended"] = hdr_source_missing || hdr_risk || decoder_risk || virtual_display_risk ||
@@ -2746,6 +2848,30 @@ namespace nvhttp {
                                                    const std::string &device_name,
                                                    const std::string &app_name) {
     return build_session_health_json(stats, current_virtual_display, device_name, app_name);
+  }
+
+  nlohmann::json build_session_health_json_for_tests(const stream_stats::stats_t &stats,
+                                                   bool current_virtual_display,
+                                                   const std::string &device_name,
+                                                   const std::string &app_name,
+                                                   std::uint64_t requester_generation) {
+    return build_session_health_json(stats, current_virtual_display, device_name, app_name, {},
+                                     requester_generation);
+  }
+
+  std::uint64_t requester_session_generation_for_tests(const std::string &device_uuid) {
+    return requester_session_generation(device_uuid);
+  }
+
+  nlohmann::json session_encoder_identity_json_for_tests(const stream_stats::stats_t &stats,
+                                                         const std::string &requested_backend,
+                                                         const std::string &launch_backend,
+                                                         bool session_override,
+                                                         std::uint64_t requester_generation) {
+    auto encoder = nlohmann::json::object();
+    write_session_encoder_identity(encoder, stats, requested_backend, launch_backend, session_override,
+                                   requester_generation);
+    return encoder;
   }
 
   nlohmann::json build_launch_mode_contract_for_tests(bool app_prefers_virtual_display,
@@ -6805,6 +6931,24 @@ namespace nvhttp {
     return projection;
   }
 
+  nlohmann::json stream_stats_encoder_selection_json(const stream_stats::stats_t &stats) {
+    if (stats.clients.empty()) {
+      return encoder_selection_json(stats);
+    }
+    // Each stream as its own client is answered about it. The process-wide encoder is whichever
+    // encode loop sampled last, Browser Stream's included, so it is no answer for any one of them.
+    nlohmann::json agreed;
+    for (const auto &client : stats.clients) {
+      auto selection = encoder_selection_json(stats, client.session_generation);
+      if (agreed.is_null()) {
+        agreed = std::move(selection);
+      } else if (selection != agreed) {
+        return nlohmann::json::object();
+      }
+    }
+    return agreed;
+  }
+
   nlohmann::json auto_quality_status_json() {
     const auto stats = stream_stats::get_current();
     const auto health = build_session_health_json(
@@ -8425,19 +8569,18 @@ namespace nvhttp {
 
       // Encoder info
       auto &encoder = output["encoder"];
-      const auto active_backend = session_encoder_name(stats);
-      const bool pyrowave_stream = stats.streaming && active_backend == "pyrowave";
-      encoder["active_backend"] = active_backend.empty() ? "unknown" : active_backend;
-      encoder["requested_backend"] = status_snapshot.requested_encoder_backend;
-      encoder["effective_backend"] = effective_session_encoder_name(
-        stats, status_snapshot.effective_encoder_backend);
-      encoder["session_override"] = status_snapshot.encoder_backend_explicit;
-      encoder["fallback_allowed"] = !pyrowave_stream && encoder_backend_fallback_allowed(
+      // The stream this response names as session_generation, so its codec, encoder and selection
+      // are that stream's even while another one runs or a reconnect overlaps the stream it replaced.
+      const auto requester_generation =
+        session_timing.session_active ? session_timing.session_generation : 0;
+      write_session_encoder_identity(
+        encoder,
+        stats,
         status_snapshot.requested_encoder_backend,
-        status_snapshot.encoder_backend_explicit
+        status_snapshot.effective_encoder_backend,
+        status_snapshot.encoder_backend_explicit,
+        requester_generation
       );
-      encoder["selection"] = encoder_selection_json(stats);
-      encoder["codec"] = stats.codec;
       encoder["encode_time_ms"] = stats.encode_time_ms;
       encoder["bitrate_kbps"] = stats.bitrate_kbps;
       encoder["fps"] = stats.fps;
@@ -8459,7 +8602,8 @@ namespace nvhttp {
         status_snapshot.virtual_display,
         named_cert_p->name,
         status_snapshot.game,
-        status_snapshot.game_uuid
+        status_snapshot.game_uuid,
+        requester_generation
       );
       output["health"] = health;
       auto doctor_v1 = health.value("doctor", nlohmann::json::object());
@@ -8722,7 +8866,8 @@ namespace nvhttp {
           proc::proc.session_uses_virtual_display(),
           response_client->name,
           app_name,
-          proc::proc.get_running_app_uuid()
+          proc::proc.get_running_app_uuid(),
+          requester_session_generation(response_client->uuid)
         );
 
         nlohmann::json output;
@@ -9140,7 +9285,8 @@ namespace nvhttp {
           proc::proc.session_uses_virtual_display(),
           rendered_response_client.name,
           proc::proc.get_last_run_app_name(),
-          proc::proc.get_running_app_uuid()
+          proc::proc.get_running_app_uuid(),
+          requester_session_generation(rendered_response_client.uuid)
         );
 
         nlohmann::json output;
@@ -10753,7 +10899,8 @@ namespace nvhttp {
         const bool virtual_display = proc::proc.session_uses_virtual_display();
         const auto timing = stream_stats::get_session_timing(named_cert_p->uuid);
         const auto health = build_session_health_json(
-          stats, virtual_display, named_cert_p->name, app_name, app_uuid
+          stats, virtual_display, named_cert_p->name, app_name, app_uuid,
+          timing.session_active ? timing.session_generation : 0
         );
         doctor_actions::recovery_action_context_t recovery_context {
           .active_owner = active_owner,
@@ -10855,7 +11002,8 @@ namespace nvhttp {
           proc::proc.session_uses_virtual_display(),
           named_cert_p->name,
           proc::proc.get_last_run_app_name(),
-          proc::proc.get_running_app_uuid()
+          proc::proc.get_running_app_uuid(),
+          requester_session_generation(named_cert_p->uuid)
         );
         output["client_settings"] = build_client_settings_json(*named_cert_p, stats, health);
         output["sync_status"] = output["client_settings"]["sync_status"];
@@ -10942,7 +11090,8 @@ namespace nvhttp {
           proc::proc.session_uses_virtual_display(),
           named_cert_p->name,
           proc::proc.get_last_run_app_name(),
-          proc::proc.get_running_app_uuid()
+          proc::proc.get_running_app_uuid(),
+          requester_session_generation(named_cert_p->uuid)
         );
         output["client_settings"] = build_client_settings_json(*named_cert_p, stats, health);
         output["sync_status"] = output["client_settings"]["sync_status"];
