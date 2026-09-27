@@ -7,6 +7,23 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- A KDE host with `capture = kms` and an HDR display now says why PyroWave cannot stream from it.
+  KWin scans out sixteen bit float there, which the codec cannot read, and capture reported that
+  scanout as eight bit BGRA, so diagnostics named the wrong format while the stream carried no
+  video.
+  Capture now reports the format as sixteen bit float, Doctor raises
+  `capture_format_unreadable_by_pyrowave` with the fix, and the log names the format (`AB4H`) and
+  says to turn HDR off on the host display or capture by another route.
+
+## v1.4.13 - 2026-09-26
+
+- PyroWave, an experimental intra only Vulkan compute codec, is built into every Linux package:
+  Fedora 44, Arch, Ubuntu 24.04 and SteamOS 3.8, and each `polaris-kms` package. Only a Nova client
+  that selects it by name gets it, and there is no host setting. Every frame is a key frame, so it
+  decodes much faster than H.264, HEVC or AV1 and needs far more bandwidth: it is for a wired link.
+  Nova for Android selects it in its 1.4.13 beta; Moonlight never asks for it, and Auto never picks
+  it. HDR on it has not been shown end to end. See [PyroWave](pyrowave.md).
+
 - Turning DRM/KMS capture back off is one command. `sudo -H polaris --setup-host --disable-kms`
   removes the capability from the binary, the copy of the binary the Bazzite recipe may have left in
   `/usr/local/bin/polaris-kms`, and the service drop-in that pointed at that copy, in the order that

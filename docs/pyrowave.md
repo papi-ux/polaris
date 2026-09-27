@@ -1,176 +1,126 @@
 # PyroWave
 
-PyroWave is an experimental Vulkan compute video codec. It decodes far faster
-than H.264, HEVC or AV1 because every frame is coded on its own, and it wants a
-great deal more bandwidth for the same picture for exactly the same reason. On a
-wired local network that trade is often worth taking. Over anything slower it is
-not.
+PyroWave is an experimental video codec for a wired gigabit local network, and of the published
+clients only the Nova for Android beta can play it. Nova is the client built alongside Polaris.
+Moonlight cannot play it on any platform, and no iPhone, iPad, Mac or Windows client can: if you
+stream from one of those, nothing changes and there is nothing to turn on. Every frame is a key
+frame, so the client decodes each one much faster than H.264, HEVC or AV1, and the stream needs much
+more bandwidth for the same picture. Details are in the [PyroWave reference](pyrowave-reference.md).
 
-It is host support for compatible Nova clients only. Ordinary Moonlight clients
-cannot select it.
+## Is it for you?
 
-## Turning it on
+It suits you if fast decoding, or sharp text on a streamed desktop (Nova for Android streams it in
+4:4:4), matters more to you than bandwidth. It does not work in a [Space](spaces.md), which exists
+only if you set one up. You will need:
 
-**There is nothing to turn on in the Polaris console.** The host advertises the
-codec and the client chooses it, so there is no PyroWave setting on this side and
-nothing to change in your encoder selection. If you are looking for a switch and
-not finding one, that is why.
+- **The Polaris 1.4.13 release on a Linux host**, not a Polaris beta, which reports the same
+  version. If you install from the package repositories and never installed a beta by hand, you
+  have the release ([otherwise, check](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta)).
+- **Nova for Android 1.4.13-beta.3 or newer on the phone or handheld**, a beta that installs beside
+  stable Nova ([below](#nova-for-android)). So: the Polaris release on the host, a Nova beta on
+  the client.
+- **Or, on Linux or a Steam Deck, a Nova build you make yourself.** No published Nova Flatpak can
+  play it. [How to build it](pyrowave-reference.md#nova-for-linux): SDR 4:2:0 only, untested on a
+  Deck.
+- **Wired gigabit ethernet on every link, the client's included**, usually through a USB ethernet
+  adapter or dock ([below](#the-network)). Nothing blocks Wi-Fi, but it usually stutters.
+- **Vulkan 1.3 on the host's GPU and on the client's.** You can
+  [check the host first](pyrowave-reference.md#check-the-hosts-gpu); the phone has no check to run
+  first ([why](pyrowave-reference.md#the-phones-gpu)).
 
-The console also does not currently tell you whether your host can offer
-PyroWave. Every Linux package from **v1.4.13** onwards contains the encoder, so
-if you installed Polaris from the repository you have it.
+**Caution, KDE host with a display in HDR:** if capture goes through kms, PyroWave cannot stream at
+all, SDR included. Capture can go through kms when **Force a Specific Capture Method** (`capture`,
+**Settings > Advanced** in the web console) is **KMS**, or, on Autodetect, when the optional
+polaris-kms add-on is installed and enabled; most hosts have neither. If yours does, turn HDR off on
+every display before each PyroWave stream, or keep HEVC or AV1 for HDR; PyroWave on a KDE desktop is
+SDR either way
+([how to check, and other routes such as Private Stream](pyrowave-reference.md#a-kde-host-with-a-display-in-hdr)).
 
-### What you need
+## What you need
 
-- **Polaris v1.4.13 or newer on Linux**, from the repository or a build with the
-  submodules fetched. Windows and macOS hosts do not have it.
-- **A Nova client with the decoder compiled in.** This is the part people get
-  wrong; see below, because a beta version label is not enough.
-- **A GPU on the host with the Vulkan features the encoder needs.** If it is
-  missing, the host says `PyroWave: no GPU on this host has what the encoder
-  needs` and the codec is simply not offered.
-- **A fast wired link.** Start there rather than discovering the bitrate cost
-  over Wi-Fi.
+### Nova for Android
 
-### Nova on Android
+Install Nova for Android 1.4.13-beta.3 or newer from
+[Nova's releases](https://github.com/papi-ux/nova/releases), where betas are marked Pre-release. For
+almost any current phone or handheld, take `Nova-Beta-Android-arm64-v8a.apk`
+([other devices](pyrowave-reference.md#which-apk)). Stable Nova 1.4.12 cannot select PyroWave, and
+Nova 1.4.13 stable is not released yet.
 
-**Play Setup → Video codec → PyroWave (experimental)**.
+The beta installs beside stable Nova as a separate app, **Nova Pre** on the home screen (**Nova Beta**
+in later betas), with its own settings and host list. Pair your host in the beta ([Pair and manage devices](devices.md))
+before you stream; stable Nova keeps its own pairing.
 
-**Auto will not choose it.** You have to select it by name. That is deliberate,
-because it is experimental and expensive on bandwidth.
+### Polaris
 
-### Nova on Linux
+Install the [Polaris v1.4.13 release](https://github.com/papi-ux/polaris/releases/tag/v1.4.13)
+with the [update guide](updates.md) or the [package repositories](repositories.md), which never
+serve a beta. Every release package contains the encoder: Fedora 44 (Bazzite takes this RPM), Arch,
+Ubuntu 24.04 and SteamOS 3.8. Polaris 1.4.12 and older, and Windows and macOS hosts, have none.
 
-The ordinary Linux Alpha Flatpak **does not contain the decoder**, whatever
-version it is. It is built from the standard manifest. You need a bundle built
-from `com.papi_ux.Nova.pyrowave.json`, which is published as its own asset.
+**If you ever installed a Polaris 1.4.13 beta by hand**, an update will not replace it (the
+version is the same), and on Fedora neither does `dnf install` of the release file. Beta.1 has no
+encoder; beta.2 and beta.3 have it but can crash as a stream starts, so a working PyroWave stream
+does not show that the release is installed.
+[Compare build dates, and reinstall the release](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta).
 
-In a build that has it: **Play Setup → Video Codec → PyroWave · Experimental**,
-on the normal Desktop destination. The Linux device needs a compatible Vulkan
-decoder of its own.
+### The network
 
-A beta release label alone is not sufficient, and neither is the version number.
-Check which manifest your bundle came from.
+Every link should be gigabit: the host's port, any switch, and the client's USB ethernet adapter or
+dock. Many cheap USB adapters are 100 Mbps, which leaves no headroom even at 1920x1080 at 60 fps, so
+pick one sold as gigabit (1000 Mbps). Turn Wi-Fi off on the client while you stream; if Nova still
+reaches the host, the adapter is carrying the stream.
 
-### Moonlight
+## Turn it on
 
-Not possible, and not a setting you are missing. Standard Moonlight clients do
-not contain a PyroWave decoder, and no host option can add one. Moonlight keeps
-using H.264, HEVC and AV1.
+You choose PyroWave in the beta, not on the host: the Polaris web console has no PyroWave setting.
+Nova for Linux has [its own steps](pyrowave-reference.md#turn-it-on-in-nova-for-linux).
 
-## What it costs
+1. Open the beta, not stable Nova, then **Settings > Client Stream Defaults**. Steps 2 to 5 are
+   on that screen.
+2. If you use a **Quality Preset** (the first item), pick it first: it sets resolution, bitrate and
+   codec together.
+3. Set **Video resolution** and **Video frame rate**, then raise **Video bitrate** to Nova's advice:
+   about **91 Mbps** for 1920x1080 at 60 fps, **114 Mbps** for 2400x1080 at 60 fps, **162 Mbps**
+   for 2560x1440 at 60 fps and **182 Mbps** for 1920x1080 at 120 fps
+   ([other modes](pyrowave-reference.md#bitrate-advice)). Pick the figure for the resolution you set
+   here, not the host's screen. The slider stops at 300 Mbps, below the advice for 2560x1440 at
+   120 fps (about 323), and Nova does not raise the bitrate for you.
+4. Open **Change codec settings** and choose **PyroWave (experimental)**.
+5. Leave **Request HDR when host supports it** off. HDR on PyroWave has not been shown end to end.
+6. Start a stream that is not a Space.
 
-- **Bandwidth, substantially.** PyroWave is intra-only, so every frame is a key
-  frame. Sharpness can need several times the bitrate an inter-frame codec would
-  use for the same picture. Measure it on your own link rather than assuming a
-  number: the host does not apply a PyroWave-specific quality floor and there is
-  no single recommended bitrate.
-- **Frame size is capped at 3 MiB.** Large frames below that cap can lose FEC
-  parity protection under the transport's existing policy, so packet loss is
-  less well protected exactly when frames are biggest.
-- **GPU time on both ends.** It is a compute codec, so the win is in decode
-  latency rather than in efficiency.
+The codec applies to every host in the beta. While PyroWave is chosen, a stream to a Space, or to
+a host that does not offer PyroWave, is refused, so choose another codec before you stream one.
+Auto never picks PyroWave.
 
-## Limits worth knowing before you test
+## Check that it is working
 
-- **Spaces cannot use it.** PyroWave is unavailable on that route.
-- **Auto never selects it** on either client.
-- **HDR needs the right capture input.** The host carries both an SDR 4:2:0 and
-  an HDR 2020 PQ 4:2:0 profile, but see the capture format section below, because
-  one common HDR desktop configuration cannot feed it at all.
-- **Accepted frame rates and resolutions are not a performance promise.** A
-  mode being negotiable does not mean a given GPU and network will sustain it.
-- **A successful SDR stream is not HDR validation.** They are separate paths and
-  separate proofs.
+- **In Nova for Android**, turn on **Nova Stream HUD** under **Settings > Overlays & Controls** (off
+  by default). During the stream it shows the codec as **PYRO**.
+- **In Polaris**, [Mission Control](mission-control.md) in the web console names the codec of the
+  running stream.
 
-## Confirming it is actually running
+Nova never falls back from PyroWave to another codec: a stream started with PyroWave chosen is
+PyroWave.
 
-Connect, then check the stream diagnostics: they name the codec, so **PyroWave**
-appearing there is the confirmation. They also distinguish CPU capture from
-Vulkan encoding, which matters because a host can run this codec while still
-converting colour on the CPU, and that is much slower than the path is capable
-of.
+**Capture path.** [Doctor](doctor.md) shows whether frames reached the encoder on the GPU or in
+host memory; either works ([what each frame costs](pyrowave-reference.md#what-each-frame-costs-the-host)).
+Its "CPU color conversion" label shows for every PyroWave stream; ignore it.
 
-Two things the numbers do not mean. Encoder timing excludes the deliberate wait
-for the next frame, so it is not a duty cycle. And the high-refresh adaptive
-guard needs both encoder-budget pressure and a delivery shortfall, so pacing
-time on its own is not evidence the encoder is overloaded.
+**Bitrate.** Plan the link for the full bitrate you set.
 
-A user's requested bitrate, the host's current target, the encoder's applied
-budget and the measured received video bitrate are four different numbers. Do
-not read one as another.
+## If it does not work
 
-The encoder does accept bitrate changes live, without restarting the stream.
-
-## Capture formats the codec cannot read
-
-PyroWave reads eight bit BGRA and RGBA and the four ten bit packed formats,
-`XBGR2101010`, `ABGR2101010`, `XRGB2101010` and `ARGB2101010`. It cannot read the
-sixteen bit float formats.
-
-That matters on one configuration in particular. **KWin composites HDR as
-`ABGR16161616F`**, so on a KDE host with `capture = kms` and the display in HDR
-mode, the scanout PyroWave is handed is sixteen bit float and it has to refuse.
-The stream ends with `capture is handing over a dmabuf in a format this codec
-cannot read`, and the refusal is correct: it does not change while the display
-keeps its mode.
-
-Today that refusal arrives after the client has already negotiated the codec and
-built a decoder, so the symptom is a session that starts and moves zero video
-bytes rather than a codec that is never offered. Turning HDR off on the host
-display, or capturing by another route, is what makes PyroWave available there.
-A host scanning out ten bit packed HDR is unaffected.
-
-## Building it
-
-`POLARIS_ENABLE_PYROWAVE` defaults to `ON`, so a normal Linux configuration
-already builds the encoder and there is no flag to add. What it needs is the
-pinned dependencies, which a plain clone does not fetch:
-
-```sh
-git submodule update --init --recursive third-party/pyrowave third-party/Granite
-```
-
-Pass `-DPOLARIS_ENABLE_PYROWAVE=OFF` to leave the encoder out. Do not assume a
-package contains the encoder because its version is recent; verify the build
-option for the package you are actually testing.
-
-## Transport reference
-
-The shared Android and Linux profile uses PyroWave revision
-`186f0393b77f7755953b5ecde994bb1cec2e4155` (C API 0.6.0) and Granite revision
-`b6cffd5ce81f540f0855e6778428483e14763d9b`. The RTSP offer contains
-`a=rtpmap:99 PYROWAVE/90000` with the profile token in `a=fmtp:99`. The host
-carries two tokens, `pyrowave-186f0393-sdr420-v1` and
-`pyrowave-186f0393-hdr2020pq420-v1`. The client format is `0x10000`, the server
-capability is `0x00800000`, and the selected `bitStreamFormat` is `3`.
-
-Each GameStream frame carries one complete raw PyroWave bitstream, with the
-coefficient packets concatenated in order, and each frame is independently
-coded. The exact payload length excludes transport padding. Encoding retained
-capture content still produces a new codec frame at the current bitrate budget;
-it must not resend the previous codec sequence unchanged.
-
-Keep client and host dependency pins and the profile token in agreement. The C
-API version alone does not establish bitstream compatibility.
-
-## Validation boundaries
-
-Build and test both enabled and disabled configurations. Enabled coverage
-includes whole-frame transport, retained-frame encoding, live budget changes,
-resizing, letterboxing and colour conversion. The disabled binary must not gain
-a PyroWave shared-library dependency. Run the matching client parser, Vulkan
-decode and presentation tests against the host-produced frame as well.
-
-Live automation needs one designated host owner and isolated capture and
-playback audio services without access to physical outputs. Separate ports and
-a null capture sink on the desktop audio service do not isolate client playback
-or prevent changes to desktop routing. Refuse a competing host rather than
-stopping someone else's service.
-
-A completed soak, upgrade checks and physical display, input and audio testing
-remain separate acceptance gates. Decoded-frame counters do not establish
-physical presentation or audio quality, and an interrupted soak is not a pass.
-
-See the [Polaris update guide](updates.md) and the
-[Nova update guide](https://papi-ux.com/docs/nova/updates/).
+| Symptom | Cause | Fix |
+|---|---|---|
+| No PyroWave in the codec list. | You opened stable Nova, or an older Nova beta. | Open the beta app, 1.4.13-beta.3 or newer ([Nova for Android](#nova-for-android)). |
+| No codec choice in Play Setup. | Nova for Android 1.4.13-beta.3's Play Setup has none. | Use **Settings > Client Stream Defaults > Change codec settings**. |
+| Nova for Linux: no PyroWave in **Video Codec**, or Play Setup says it cannot start. | Published Flatpaks have no decoder. Otherwise, Play Setup names the reason. | [Build the PyroWave Flatpak](pyrowave-reference.md#nova-for-linux), or look up [Play Setup's message](pyrowave-reference.md#turn-it-on-in-nova-for-linux). |
+| Nova says "This host does not offer the PyroWave profile this build of Nova can decode." | The host runs Polaris older than 1.4.13, 1.4.13-beta.1 or a build without the encoder, or its GPU lacks what the encoder needs. Or the stream is a Space. | Install the release ([over a beta](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta)), then [check the host's GPU](pyrowave-reference.md#check-the-hosts-gpu). For a Space, choose another codec. |
+| Nova says "Failed to start video stream establishment (error -2)" or "Video decoder failed to initialize...". | The phone's decoder could not start at this size, or the phone cannot decode PyroWave. | Lower the resolution; otherwise choose another codec ([the phone's GPU](pyrowave-reference.md#the-phones-gpu)). |
+| No picture ever, and `systemctl --user status polaris` on the host shows Polaris failed or restarted. | A Polaris 1.4.13-beta.2 or beta.3 package, whose Vulkan video encoder crashes as a stream starts. | [Reinstall the release](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta). |
+| KDE host with a display in HDR: Nova connects, shows no picture, and the stream ends, SDR too. | Capture goes through kms, and KWin's HDR frames come in a format PyroWave cannot read. Doctor does not flag it. | Turn HDR off on the host display, or use HEVC or AV1 ([other fixes](pyrowave-reference.md#a-kde-host-with-a-display-in-hdr)). |
+| Refused with **Request HDR when host supports it** on. | The host refuses PyroWave HDR unless the captured display is in HDR, and it has not been shown end to end. | Turn **Request HDR when host supports it** off. |
+| Soft picture, and Nova says "PyroWave asks for about N Mbps at this resolution and frame rate." | The bitrate is too low, often from a **Quality Preset** (10, 20 or 50 Mbps). | Raise **Video bitrate**, or lower the resolution or frame rate. |
+| Stutter or dropped frames. | The link cannot carry the bitrate: Wi-Fi, or a 100 Mbps adapter or port. | Wired gigabit on every link, Wi-Fi off on the client, or a lower mode and bitrate ([why](pyrowave-reference.md#limits)). |
+| A stream used another codec after you chose PyroWave. | A **Quality Preset** picked afterwards set the codec. | Set **Video bitrate** and choose PyroWave again. |
