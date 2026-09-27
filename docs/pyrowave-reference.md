@@ -265,51 +265,40 @@ it shows the codec as PYRO, and a long press on it opens Command Center.
 
 ## Nova for Linux
 
-No PyroWave build of Nova for Linux can be downloaded. Every Nova for Linux Flatpak on
-[Nova's releases page](https://github.com/papi-ux/nova/releases), stable 1.4.12 included, is
-`Nova-Deck-x86_64-alpha.flatpak` (the Alpha), and the Alpha is built without the decoder, even where
-it is attached to the Nova 1.4.13 betas and carries a 1.4.13 version. The only way to get a PyroWave
-build is to build it yourself from `com.papi_ux.Nova.pyrowave.json`, which sits beside
-`com.papi_ux.Nova.json` in `clients/deck/packaging/flatpak/`.
+Nova 1.4.13 attaches an experimental PyroWave build of Nova for Linux to
+[its release](https://github.com/papi-ux/nova/releases/tag/v1.4.13):
+`Nova-Linux-PyroWave-x86_64-alpha.flatpak`, beside the standard `Nova-Linux-x86_64-alpha.flatpak`,
+which is built without the decoder. Earlier Nova releases, the 1.4.13 betas included, attach only
+the standard Flatpak, which was named `Nova-Deck-x86_64-alpha.flatpak` before 1.4.13.
 
-That build is an unpublished development preview, and Nova's own README calls the Linux Flatpak a
-development preview too. It negotiates SDR 4:2:0 only. No PyroWave stream decoded by it on a Steam
-Deck has been recorded yet, so treat a Deck as untested.
+The PyroWave build is an Alpha, like the standard Flatpak. It negotiates SDR 4:2:0 only. No
+PyroWave stream decoded by it on a Steam Deck has been recorded yet, so treat a Deck as untested.
 
-### Build and install it
+### Install it
 
-Build on any x86_64 Linux PC, the Polaris host included, from Nova's tag `v1.4.13-beta.3` (Nova's
-tag, unrelated to the Polaris betas). You need `git`, `flatpak` and `flatpak-builder` from your
-distribution's packages. Build this tag: a later Nova tag works with a Polaris 1.4.13 host only while its
-`clients/deck/pyrowave/protocol.h` still names `pyrowave-186f0393-sdr420-v1`. These are the
-commands in
-[Nova's Flatpak README](https://github.com/papi-ux/nova/blob/v1.4.13-beta.3/clients/deck/packaging/flatpak/README.md),
-with `com.papi_ux.Nova.pyrowave.json` in place of `com.papi_ux.Nova.json`, plus a
-`flatpak remote-add` line that adds Flathub for your user if it is not there yet:
+Download `Nova-Linux-PyroWave-x86_64-alpha.flatpak` and its `.sha256` file from the
+[Nova 1.4.13 release](https://github.com/papi-ux/nova/releases/tag/v1.4.13). Close Nova, then run
+this in the download folder (on a Deck, in Desktop Mode):
 
 ```sh
-git clone https://github.com/papi-ux/nova.git && cd nova
-git checkout v1.4.13-beta.3
-git submodule update --init --recursive
-flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
-flatpak install --user flathub org.kde.Platform//6.10 org.kde.Sdk//6.10
-flatpak-builder --user --force-clean --repo=build/flatpak-repo build/flatpak clients/deck/packaging/flatpak/com.papi_ux.Nova.pyrowave.json
-flatpak build-bundle build/flatpak-repo build/Nova.flatpak com.papi_ux.Nova
+sha256sum -c Nova-Linux-PyroWave-x86_64-alpha.flatpak.sha256
+flatpak install --user ./Nova-Linux-PyroWave-x86_64-alpha.flatpak
 ```
 
-Copy `build/Nova.flatpak` to the Deck and, in Desktop Mode, run
-`flatpak install --user Nova.flatpak` in the folder you copied it to. The README also covers adding
-Nova to Game Mode.
+The PyroWave build has the same app ID as the standard Flatpak, `com.papi_ux.Nova`, so it replaces
+that app and keeps its pairing and preferences. It has no automatic update feed. That holds when
+both go into the same installation. If `flatpak list --app --columns=application,installation`
+shows `com.papi_ux.Nova` under `system`, a `--user` install sits beside that copy rather than
+replacing it; remove one of them, for example with `flatpak uninstall --system com.papi_ux.Nova`. To
+go back, install `Nova-Linux-x86_64-alpha.flatpak` from the same release with
+`flatpak install --user`, keeping the app data. The PyroWave build still offers H.264 and HEVC, and
+Auto never picks PyroWave in it.
 
-The PyroWave build has the same app ID as the Alpha, `com.papi_ux.Nova`.
-[Nova's Linux PyroWave notes](https://github.com/papi-ux/nova/blob/v1.4.13-beta.3/clients/deck/docs/pyrowave.md)
-say installing this bundle updates the existing app rather than adding a second one, and advise
-keeping a copy of the previous bundle. That holds when both go into the same installation. If
-`flatpak list --app --columns=application,installation` shows `com.papi_ux.Nova` under `system`, a
-`--user` install sits beside that copy rather than replacing it; remove one of them, for example
-with `flatpak uninstall --system com.papi_ux.Nova`. To go back, install
-`Nova-Deck-x86_64-alpha.flatpak` from Nova's releases with `flatpak install --user`; it replaces the PyroWave build. The PyroWave build
-still offers H.264 and HEVC, and Auto never picks PyroWave in it.
+You can also build it yourself from `com.papi_ux.Nova.pyrowave.json`, beside `com.papi_ux.Nova.json`
+in `clients/deck/packaging/flatpak/`, with the commands in
+[Nova's Flatpak README](https://github.com/papi-ux/nova/blob/v1.4.13/clients/deck/packaging/flatpak/README.md).
+A build from a later Nova tag works with a Polaris 1.4.13 host only while its
+`clients/deck/pyrowave/protocol.h` still names `pyrowave-186f0393-sdr420-v1`.
 
 ### Turn it on in Nova for Linux
 

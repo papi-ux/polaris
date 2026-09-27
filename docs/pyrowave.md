@@ -19,9 +19,8 @@ only if you set one up. You will need:
 - **Nova for Android 1.4.13-beta.3 or newer on the phone or handheld**, a beta that installs beside
   stable Nova ([below](#nova-for-android)). So: the Polaris release on the host, a Nova beta on
   the client.
-- **Or, on Linux or a Steam Deck, a Nova build you make yourself.** No published Nova Flatpak can
-  play it. [How to build it](pyrowave-reference.md#nova-for-linux): SDR 4:2:0 only, untested on a
-  Deck.
+- **Or, on Linux or a Steam Deck, Nova 1.4.13's PyroWave Flatpak**
+  ([how to install it](pyrowave-reference.md#nova-for-linux)): SDR 4:2:0 only, untested on a Deck.
 - **Wired gigabit ethernet on every link, the client's included**, usually through a USB ethernet
   adapter or dock ([below](#the-network)). Nothing blocks Wi-Fi, but it usually stutters.
 - **Vulkan 1.3 on the host's GPU and on the client's.** You can
@@ -43,8 +42,8 @@ SDR either way
 Install Nova for Android 1.4.13-beta.3 or newer from
 [Nova's releases](https://github.com/papi-ux/nova/releases), where betas are marked Pre-release. For
 almost any current phone or handheld, take `Nova-Beta-Android-arm64-v8a.apk`
-([other devices](pyrowave-reference.md#which-apk)). Stable Nova 1.4.12 cannot select PyroWave, and
-Nova 1.4.13 stable is not released yet.
+([other devices](pyrowave-reference.md#which-apk)). Stable Nova, 1.4.13 included, cannot select
+PyroWave on Android: its release builds leave the codec out.
 
 The beta installs beside stable Nova as a separate app, **Nova Pre** on the home screen (**Nova Beta**
 in later betas), with its own settings and host list. Pair your host in the beta ([Pair and manage devices](devices.md))
@@ -116,7 +115,7 @@ Newer builds say where the encoder converted colour.
 |---|---|---|
 | No PyroWave in the codec list. | You opened stable Nova, or an older Nova beta. | Open the beta app, 1.4.13-beta.3 or newer ([Nova for Android](#nova-for-android)). |
 | No codec choice in Play Setup. | Nova for Android 1.4.13-beta.3's Play Setup has none. | Use **Settings > Client Stream Defaults > Change codec settings**. |
-| Nova for Linux: no PyroWave in **Video Codec**, or Play Setup says it cannot start. | Published Flatpaks have no decoder. Otherwise, Play Setup names the reason. | [Build the PyroWave Flatpak](pyrowave-reference.md#nova-for-linux), or look up [Play Setup's message](pyrowave-reference.md#turn-it-on-in-nova-for-linux). |
+| Nova for Linux: no PyroWave in **Video Codec**, or Play Setup says it cannot start. | Only `Nova-Linux-PyroWave-x86_64-alpha.flatpak` has the decoder. Otherwise, Play Setup names the reason. | [Install the PyroWave Flatpak](pyrowave-reference.md#nova-for-linux), or look up [Play Setup's message](pyrowave-reference.md#turn-it-on-in-nova-for-linux). |
 | Nova says "This host does not offer the PyroWave profile this build of Nova can decode." | The host runs Polaris older than 1.4.13, 1.4.13-beta.1 or a build without the encoder, or its GPU lacks what the encoder needs. Or the stream is a Space. | Install the release ([over a beta](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta)), then [check the host's GPU](pyrowave-reference.md#check-the-hosts-gpu). For a Space, choose another codec. |
 | Nova says "Failed to start video stream establishment (error -2)" or "Video decoder failed to initialize...". | The phone's decoder could not start at this size, or the phone cannot decode PyroWave. | Lower the resolution; otherwise choose another codec ([the phone's GPU](pyrowave-reference.md#the-phones-gpu)). |
 | No picture ever, and `systemctl --user status polaris` on the host shows Polaris failed or restarted. | A Polaris 1.4.13-beta.2 or beta.3 package, whose Vulkan video encoder crashes as a stream starts. | [Reinstall the release](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta). |
