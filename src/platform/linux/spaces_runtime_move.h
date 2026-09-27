@@ -128,6 +128,19 @@ namespace multiseat::spaces {
   /// is happening on the host right now. A download is never begun under a running stream.
   [[nodiscard]] move_decision_t decide_create(const create_facts_t &facts);
 
+  /**
+   * Makes a Space in the catalog at `path`, as the Spaces owner does for a create. A launcher
+   * with a live Space this PC streams copies that Space's runtime. The first Space of a launcher
+   * has none to copy, so it takes the image of `runtimes`' entry for that family, which Docker
+   * must already hold: this never downloads, and refuses with space_runtime_not_downloaded
+   * instead. A failure carries the error the person is answered with and, apart from it, the
+   * cause the host log keeps.
+   */
+  [[nodiscard]] profiles::change_result_t create_space_in_catalog(const std::filesystem::path &path,
+    const profiles::space_create_request_t &request, container::host_t &host,
+    const std::optional<std::vector<runtime_t>> &runtimes, const std::optional<std::string> &nvidia_driver,
+    runtime_inspection_cache_t *cache);
+
   struct move_operations_t {
     std::function<move_facts_t(const move_request_t &)> facts;
     /// Checks Docker for the runtime and downloads it when missing, verified against the catalog.

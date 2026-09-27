@@ -1,5 +1,6 @@
 #include "src/platform/linux/multiseat_launch_service.h"
 #include "src/platform/linux/spaces_host_admin.h"
+#include "../../tests_log_capture.h"
 #include "src/config.h"
 #include "src/launch_failure.h"
 #include "src/nvhttp.h"
@@ -130,6 +131,7 @@ namespace {
     profiles::removal_result_t removal_answer {.outcome = profiles::removal_outcome_e::removed};
     profiles::runtime_move_result_t move_answer {.outcome = profiles::runtime_move_outcome_e::moved};
     std::optional<profiles::refusal_t> persist_refusal;
+    std::optional<profiles::change_result_t> create_answer;
     std::vector<std::string> paired_at_access_change, devices_at_access_change;
     bool with_desktop_at_access_change = false;
     std::string space_at_access_change;
@@ -160,6 +162,7 @@ namespace {
             ++creates;
             EXPECT_GT(state->destroyed.load(), 0U);
             if (before_write) before_write();
+            if (create_answer) return *create_answer;
             if (write_status != private_state_file::write_status_e::not_committed)
               catalog.push_back({request.request_id, request.name, {}, "steam"});
             return profiles::change_result_t {.status = write_status, .profile_key = request.request_id};
@@ -651,6 +654,55 @@ namespace {
     EXPECT_FALSE(service->admin_snapshot().failed);
     EXPECT_EQ(service->admin_snapshot().profiles.size(), 2U);
     EXPECT_EQ(service->profile_for_client("client-a"), "profile-a");
+  }
+
+  /**
+   * Every create the catalog did not save answers the client with
+   * spaces_change_not_saved, which the Spaces page reads, so the host log is the
+   * one place that can say which check stopped it.
+   */
+  TEST_F(MultiseatAssignments, AFailedCreationLogsItsCauseAndKeepsItsCode) {
+    create_answer = profiles::change_result_t {
+      .error = "Profile operation failed. Retain any reported provisioning resources for inspection.",
+      .cause = "rootless Docker is not admitted"};
+    const test_log_capture_t log;
+    const auto created = service->create_space_profile(create_request);
+    EXPECT_EQ(created.status, 409);
+    EXPECT_EQ(created.code, "spaces_change_not_saved");
+    EXPECT_NE(log.text().find("Warning: Creating the Space Second player failed: Profile operation failed. Retain any "
+      "reported provisioning resources for inspection. Cause: rootless Docker is not admitted."), std::string::npos) << log.text();
+    EXPECT_FALSE(service->admin_snapshot().failed);
+  }
+
+  /**
+   * The first Space of a launcher whose runtime is not on this PC is refused on
+   * its way to the job that downloads the runtime and then makes the Space. That
+   * is a normal step of a create that succeeds, so the log notes it with its
+   * cause and never warns that the Space was not created.
+   */
+  TEST_F(MultiseatAssignments, ARefusedCreationIsNotedAndNotWarnedOf) {
+    create_answer = profiles::change_result_t {
+      .error = std::string(profiles::space_runtime_not_downloaded.message),
+      .cause = "Docker holds no image for runtime steam-default yet (not_downloaded)",
+      .refusal = profiles::space_runtime_not_downloaded};
+    const test_log_capture_t log;
+    const auto created = service->create_space_profile(create_request);
+    EXPECT_EQ(created.status, 409);
+    EXPECT_EQ(created.code, "space_runtime_not_downloaded");
+    EXPECT_NE(log.text().find("Info: Creating the Space Second player was refused with space_runtime_not_downloaded. "
+      "Cause: Docker holds no image for runtime steam-default yet (not_downloaded)."), std::string::npos) << log.text();
+    EXPECT_EQ(log.text().find("Warning: Creating the Space"), std::string::npos) << log.text();
+    EXPECT_EQ(log.text().find("was not created"), std::string::npos) << log.text();
+  }
+
+  TEST_F(MultiseatAssignments, ACreationThatThrowsLogsWhatItSaid) {
+    before_write = [] { throw std::runtime_error("the catalog lease vanished"); };
+    const test_log_capture_t log;
+    const auto created = service->create_space_profile(create_request);
+    EXPECT_EQ(created.status, 503);
+    EXPECT_EQ(created.code, "spaces_admin_failed");
+    EXPECT_NE(log.text().find("A Space change failed unexpectedly, so Spaces stay closed until Polaris restarts: "
+      "the catalog lease vanished"), std::string::npos) << log.text();
   }
 
   TEST_F(MultiseatAssignments, UncertainCreationDurabilityKeepsExistingRoutesUnavailable) {

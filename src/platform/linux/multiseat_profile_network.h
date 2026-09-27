@@ -36,7 +36,8 @@ namespace multiseat::container {
   [[nodiscard]] std::optional<std::string> profile_network_id(host_t &host, std::string_view profile_key,
     bool require_empty = false, std::string_view only_container = {});
   // Prove absence before creation, then verify the immutable ID. Failure may
-  // retain a network; callers must report its opaque resource name.
-  [[nodiscard]] bool create_profile_network(host_t &host, std::string_view profile_key);
+  // retain a network; callers must report its opaque resource name. On failure
+  // `why`, when given, says which step stopped it, for the host log.
+  [[nodiscard]] bool create_profile_network(host_t &host, std::string_view profile_key, std::string *why = nullptr);
 }
 #endif

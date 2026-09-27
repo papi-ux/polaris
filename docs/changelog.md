@@ -28,6 +28,16 @@ starts at `v1.0.0`.
   description under the select says it for AMD instead. The v1.4.13 entries for the two VA-API
   changes name the driver as well.
 
+- A Space that could not be created says why in the host log. The client is still answered with
+  `spaces_change_not_saved`, which the Spaces page reads, and the log now names the check that
+  stopped it: the Docker command that failed and how, a Docker answer without a field Polaris
+  checks, a Docker or runc binary Polaris does not trust, rootless Docker, an image labelled for
+  another launcher or not labelled at all, a volume or network of the same name left from an earlier
+  attempt, a catalog Polaris could not lock, read or write, or one that belongs to another account.
+  The first Space of a launcher names the runtime it is waiting for and whether Docker lacks it,
+  holds a different image under its name, or did not answer. A Space change that throws logs what
+  the exception said, where it used to log only that it failed.
+
 - On AMD, Auto tries Vulkan Video first on Gamescope Stream captured through the portal (#635),
   where it used to try VA-API alone and never probed Vulkan Video at all. On the reporter's RX 9070
   XT at 4K60, Vulkan Video took 9 ms a frame there against VA-API's 16 ms, and held it under load.

@@ -498,37 +498,8 @@ namespace multiseat {
       if (!admin.create && !admin.catalog.empty())
         admin.create = [path = admin.catalog](const auto &request) {
           container::local_host_t host;
-          // A launcher this PC already runs a Space for copies that Space's
-          // runtime. The first Space of a launcher has none to copy, so it
-          // takes the image from the admitted catalog entry for that family,
-          // which must already be downloaded: this path never pulls.
-          if (!request.family.empty()) {
-            const auto &catalog = spaces::trusted_runtimes();
-            // Read the catalog and let go of it: the lease this takes is the
-            // same one the write below needs, so holding it here would refuse
-            // every first Space of a launcher.
-            bool have_one = false;
-            {
-              const auto existing = profiles::load(path);
-              have_one = existing && std::any_of(existing->catalog.profiles.begin(),
-                existing->catalog.profiles.end(), [&](const auto &entry) {
-                  return runtime_profile_name(entry.storage.runtime_profile) == request.family && !entry.archived;
-                });
-            }
-            if (!have_one && catalog) {
-              const auto choice = spaces::choose_runtime(*catalog, spaces::loaded_nvidia_driver(), request.family);
-              if (!choice.runtime)
-                return profiles::change_result_t {.error = "This Polaris build has no gaming runtime for that launcher."};
-              const auto facts = spaces::inspect_runtime(host, *catalog, spaces::loaded_nvidia_driver(), true,
-                &spaces::runtime_inspection_cache(), request.family);
-              if (facts.status != "ready")
-                return profiles::change_result_t {.error = std::string(profiles::space_runtime_not_downloaded.message),
-                  .refusal = profiles::space_runtime_not_downloaded};
-              return profiles::create_first_space(path, {request.request_id, request.name},
-                choice.runtime->config_digest, request.family, host);
-            }
-          }
-          return profiles::create_space(path, request, host);
+          return spaces::create_space_in_catalog(path, request, host, spaces::trusted_runtimes(),
+            spaces::loaded_nvidia_driver(), &spaces::runtime_inspection_cache());
         };
       if (!admin.edit && !admin.catalog.empty())
         admin.edit = [path = admin.catalog](const auto &request) { return profiles::edit(path, request); };
@@ -630,6 +601,14 @@ namespace multiseat {
       }
     }
 
+    // What a change was, for the log line that says why it was not saved.
+    static std::string change_name(const admin_request_t &request) {
+      if (request.creation) return "Creating the Space " + request.creation->name;
+      if (request.edit) return "Changing Space " + request.edit->profile_id;
+      if (request.access || request.all_clients) return "Changing access to " + request.profile;
+      return "Saving the Default Space";
+    }
+
     static const char *move_outcome_name(profiles::runtime_move_outcome_e outcome) {
       using outcome_e = profiles::runtime_move_outcome_e;
       switch (outcome) {
@@ -705,6 +684,22 @@ namespace multiseat {
                 request->edit ? admin.edit(*request->edit) : request->creation ? admin.create(*request->creation) :
                 admin.persist(request->profile, request->client);
             }
+            // A change that was not saved answers the client with
+            // spaces_change_not_saved whatever stopped it, so the log is the
+            // only place that says which check it was. A refusal answers with
+            // its own code instead, and one of them is a normal step: the first
+            // Space of a launcher whose runtime is not here yet is refused on
+            // its way to the job that downloads it. So a refusal is noted, not
+            // warned about. A save that may have landed is reported below.
+            if (!moving && !removal && persisted.status == private_state_file::write_status_e::not_committed) {
+              const auto cause = persisted.cause.empty() ? std::string {} : " Cause: " + persisted.cause + '.';
+              if (persisted.refusal) {
+                BOOST_LOG(info) << change_name(*request) << " was refused with " << persisted.refusal->code << '.' << cause;
+              } else {
+                BOOST_LOG(warning) << change_name(*request) << " failed: "
+                  << (persisted.error.empty() ? std::string {"no reason given"} : persisted.error) << cause;
+              }
+            }
             if (request->creation && !persisted && !persisted.volume_name.empty()) {
               BOOST_LOG(error) << "Profile creation retained resources for inspection: volume=" << persisted.volume_name
                 << " initializer=" << persisted.initializer_name << " network=" << persisted.network_name;
@@ -739,6 +734,10 @@ namespace multiseat {
             }
           }
         }
+      } catch (const std::exception &e) {
+        BOOST_LOG(error) << "A Space change failed unexpectedly, so Spaces stay closed until Polaris restarts: " << e.what();
+        std::lock_guard lock(mutex);
+        admin_failed = true;
       } catch (...) {
         BOOST_LOG(error) << "A Space change failed unexpectedly, so Spaces stay closed until Polaris restarts";
         std::lock_guard lock(mutex);
