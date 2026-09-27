@@ -164,8 +164,23 @@ namespace desktop_takeover {
         return true;
       }
       const auto dispatcher = lua_dispatcher(arguments);
-      return dispatcher.has_value() &&
-             hyprctl_exits_zero({"hyprctl", "eval", "hl.dispatch(" + *dispatcher + ")"});
+      if (dispatcher.has_value() &&
+          hyprctl_exits_zero({"hyprctl", "eval", "hl.dispatch(" + *dispatcher + ")"})) {
+        return true;
+      }
+      std::string dispatch_line;
+      for (const auto &argument : arguments) {
+        if (!dispatch_line.empty()) {
+          dispatch_line += ' ';
+        }
+        dispatch_line += argument;
+      }
+      BOOST_LOG(error) << "Desktop Takeover hyprctl dispatch ["sv << dispatch_line
+                       << "] failed: classic form rejected and "
+                       << (dispatcher.has_value()
+                              ? "the Hyprland 0.56 `hyprctl eval` form exited nonzero too"sv
+                              : "takeover has no hl.dsp.* translation to retry it with"sv);
+      return false;
     }
 
     bool set_dpms(std::string_view monitor, bool enabled) {
