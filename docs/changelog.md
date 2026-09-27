@@ -76,6 +76,45 @@ starts at `v1.0.0`.
   use distinct loader symbols and scaler shader types, fixing the conflicts that previously
   required disabling LTO.
 
+- `sudo -H polaris --setup-host --enable-kms` no longer stops the Polaris user service from
+  starting. It pointed the service at the DRM/KMS capture helper straight away, but only members of
+  the `polaris-kms` group may run the helper, and a session picks up a new group only at login, so
+  until the next login the service failed with status=203/EXEC. Host setup now reads the groups the
+  account's running `systemd --user` holds. Until `polaris-kms` is among them it parks the change in
+  `20-polaris-kms.conf.disabled-until-relogin`, which systemd ignores, and says to log out and back
+  in, then run the command again. Where lingering keeps that service manager running from boot to
+  shutdown, it says to reboot instead: headless boot turns lingering on, other user services can
+  too, and so does an `--enable-headless-boot` in the same run. The second run turns it on, and
+  running it more than once is safe.
+
+- A host that 1.4.13 left unable to start Polaris, with the service pointed at the DRM/KMS helper
+  before its session held the `polaris-kms` group, starts again after `sudo -H polaris --setup-host`
+  and the reload and restart it prints. That plain run, which the package notes print, said "nothing
+  to do" there. It now parks that drop-in until the login, together with the old Bazzite recipe's
+  drop-in when that still names the copy in `/usr/local/bin/polaris-kms` an earlier run deleted,
+  which would otherwise take over and fail the same way. On a host still running that copy, the
+  plain run keeps the copy and its capability until the helper can take over, where it used to
+  delete the copy that was capturing and leave a service that could not start, and the recipe's
+  drop-in now goes with the copy. The plain run turns a parked drop-in on after the login, but it
+  never adds the account to the group, and when `polaris-kms` is not installed it leaves the drop-in
+  parked and says what turns it on or removes it.
+
+- `sudo -H polaris --setup-host --disable-kms` removes a parked drop-in too, and every drop-in beneath
+  the one it removes that points at the helper or the copy, so the service then runs the packaged
+  binary as the summary says, not a leftover drop-in naming a copy that is gone.
+
+- The package notes no longer say DRM/KMS capture has to be set up again after every update. The
+  `polaris-kms` package keeps the capability across updates, so the notes now say to install it and
+  run the setup step, and to run it once more after a new login or a reboot if it asks.
+
+- The DRM/KMS capture log line and the Doctor's `kms_capture_needs_capability` and
+  `capture_backend_substituted` findings no longer say to run `--enable-kms` again after each install
+  or update, or that an update replaces the binary without the capability. The `polaris-kms` package
+  keeps the capability on its own helper across updates, and the first run may only park the change
+  until a new login, so they now say to run `sudo -H polaris --setup-host --enable-kms` once, do what
+  it prints, and then restart Polaris. Troubleshooting sends a host still running the old Bazzite
+  copy to `polaris-kms` instead of refreshing the copy after every update.
+
 - A PyroWave stream's encoder selection reason says where its colour is converted. It read "PyroWave
   is encoding with Vulkan after CPU color conversion." for every PyroWave stream, which has been
   wrong since GPU colour conversion became the default. The reason now comes from the stream's own

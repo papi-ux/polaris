@@ -252,6 +252,8 @@ Follow the [quickstart](quickstart.md) or your distribution's page. Two things t
   ```bash
   sudo -H polaris --setup-host --enable-kms
   ```
-  Log out and back in afterwards the first time, because a session picks up its groups at login.
+  The first time, it adds you to the `polaris-kms` group and asks you to log out and back in, or
+  to reboot where lingering is on (headless boot turns it on), and run it again, because a session
+  picks up its groups when it starts.
   After that it stays working: the capability belongs to the package, so an upgrade no longer
   takes it away and there is nothing to re-run.

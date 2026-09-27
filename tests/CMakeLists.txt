@@ -194,6 +194,7 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_game_mode_repaint.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_steam_title_process.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_user_unit_override.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_kms_enable.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamescope_session_helper.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_graphics.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_labwc_startup_diagnostics.cpp

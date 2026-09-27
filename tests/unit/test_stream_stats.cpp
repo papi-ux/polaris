@@ -2229,6 +2229,12 @@ TEST(StreamStatsDoctorTests, NamesTheCapabilityWhenKmsWasRefusedAndNothingElseCa
       EXPECT_EQ(warning.at("severity"), "fail");
       EXPECT_NE(warning.at("message").get<std::string>().find("CAP_SYS_ADMIN"), std::string::npos);
       EXPECT_NE(warning.at("action").get<std::string>().find("--setup-host --enable-kms"), std::string::npos);
+      // The helper package keeps the capability across updates, and the first run may only park it
+      // until a login, so the finding says to follow the command, not to repeat it after updates.
+      EXPECT_EQ(warning.at("message").get<std::string>().find("replaces the binary without it"), std::string::npos);
+      EXPECT_NE(warning.at("message").get<std::string>().find("polaris-kms package"), std::string::npos);
+      EXPECT_EQ(warning.at("action").get<std::string>().find("after each install or update"), std::string::npos);
+      EXPECT_NE(warning.at("action").get<std::string>().find("once and do what it prints"), std::string::npos);
     }
     EXPECT_TRUE(saw_warning) << capture;
   }
@@ -2324,6 +2330,7 @@ TEST(StreamStatsDoctorTests, ASubstitutedKmsNamesTheCapabilityNotTheCompositor) 
       EXPECT_NE(warning.at("message").get<std::string>().find("CAP_SYS_ADMIN"), std::string::npos);
       EXPECT_EQ(warning.at("message").get<std::string>().find("wlroots capture protocols"), std::string::npos);
       EXPECT_NE(warning.at("action").get<std::string>().find("--enable-kms"), std::string::npos);
+      EXPECT_EQ(warning.at("action").get<std::string>().find("after each install or update"), std::string::npos);
     }
     if (id == "kms_capture_needs_capability") {
       saw_capability = true;

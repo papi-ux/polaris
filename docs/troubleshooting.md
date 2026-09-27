@@ -65,8 +65,9 @@ systemctl --user daemon-reload
 systemctl --user start polaris
 ```
 
-To keep the copy, refresh it after every update as the
-[Bazzite guide](bazzite.md#optional-drmkms-capture) describes. On rpm-ostree hosts the console
+To keep DRM/KMS capture without the copy, install `polaris-kms` and run `sudo -H polaris --setup-host`,
+as the [Bazzite guide](bazzite.md#optional-drmkms-capture) describes: it moves the service onto the
+packaged helper, which updates keep current, and removes the copy. On rpm-ostree hosts the console
 also shows the old version until the new deployment is booted; `rpm-ostree status` marks the
 booted one with `●`.
 

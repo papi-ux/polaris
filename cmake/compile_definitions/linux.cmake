@@ -634,6 +634,7 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/steam_title_process.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/steam_title_process.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/user_unit_override.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/kms_enable.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/display_topology.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/display_topology.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_path.h"

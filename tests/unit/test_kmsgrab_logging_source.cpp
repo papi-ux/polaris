@@ -74,9 +74,16 @@ TEST(KmsgrabLoggingSource, VirtualDisplayCardsDoNotWarnAboutRenderNodesOrNvenc) 
   EXPECT_LT(nvenc - guard, 300u);
 }
 
-TEST(KmsgrabLoggingSource, MissingCapabilityGuidanceSaysUpdatesDropIt) {
+TEST(KmsgrabLoggingSource, MissingCapabilityGuidanceNamesTheHelperNotEveryUpdate) {
   const auto source = read_kmsgrab_source();
 
-  EXPECT_NE(source.find("[sudo -H polaris --setup-host --enable-kms] after each install or update"), std::string::npos);
+  // Since 1.4.13 the capability is on the polaris-kms package's helper, which updates keep. Telling
+  // someone to rerun --enable-kms after every update sends them to redo what the package already
+  // keeps, and while a drop-in is parked until a login, a rerun alone only parks it again.
+  EXPECT_EQ(source.find("after each install or update"), std::string::npos);
+  EXPECT_EQ(source.find("replaces the binary without it"), std::string::npos);
+  EXPECT_NE(source.find("DRM/KMS helper in the polaris-kms package, which updates \"sv"), std::string::npos);
+  EXPECT_NE(source.find("run [sudo -H polaris --setup-host --enable-kms] once"), std::string::npos);
+  EXPECT_NE(source.find("since it may ask for a new login first"), std::string::npos);
   EXPECT_EQ(source.find("sudo setcap cap_sys_admin+ep $(readlink -f $(which polaris))"), std::string::npos);
 }

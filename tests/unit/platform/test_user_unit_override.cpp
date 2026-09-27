@@ -339,6 +339,9 @@ TEST(UserUnitOverrideTests, SetupHostAdviceForTheGuideCopyNamesTheCommandThatRef
 
   const auto advice = uu::setup_host_advice(override, "deck", packaged, copy);
   EXPECT_NE(advice.find("Package updates do not change it"), std::string::npos);
+  // Refreshing after every update is the chore the polaris-kms package ends, so the way out comes first.
+  EXPECT_NE(advice.find("Install the polaris-kms package and run\n  sudo -H polaris --setup-host\nonce"), std::string::npos) << advice;
+  EXPECT_EQ(advice.find("after every update"), std::string::npos) << advice;
   // By name, not by the versioned path the package installs: that path changes with the next update.
   EXPECT_NE(advice.find("sudo -H polaris --setup-host"), std::string::npos);
   EXPECT_EQ(advice.find(packaged.string()), std::string::npos);
@@ -387,6 +390,20 @@ TEST(UserUnitOverrideTests, KmsTeardownLeavesSomeoneElsesDropInAlone) {
   EXPECT_TRUE(plan.drop_in.empty());
   EXPECT_TRUE(plan.remove_guide_copy);
   EXPECT_TRUE(plan.clear_binary_capability);
+}
+
+TEST(UserUnitOverrideTests, KmsTeardownTakesADropInParkedUntilTheNextLogin) {
+  scratch_t scratch;
+  const auto copy = scratch.root / "usr/local/bin/polaris-kms";
+  const auto parked = scratch.file(".config/systemd/user/polaris.service.d/20-polaris-kms.conf.disabled-until-relogin", "[Service]\nExecStart=\nExecStart=/usr/libexec/polaris/polaris-kms\n");
+  const auto override = uu::effective_exec_override(scratch.drop_ins());
+  ASSERT_FALSE(override.active()) << "systemd reads only *.conf, so a parked drop-in points the service nowhere";
+
+  // Left behind, the next --setup-host would find it and turn DRM/KMS capture back on.
+  const auto plan = uu::kms_teardown_plan(override, false, false, copy, parked);
+  EXPECT_FALSE(plan.empty());
+  EXPECT_EQ(plan.parked_drop_in, parked);
+  EXPECT_TRUE(plan.drop_in.empty());
 }
 
 TEST(UserUnitOverrideTests, KmsTeardownStillClearsTheBinaryWhenOnlyItHoldsTheCapability) {

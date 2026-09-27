@@ -1905,8 +1905,9 @@ namespace platf {
           if (stream_display_policy::canonical_capture_backend(config::video.capture) == "kms") {
             BOOST_LOG(fatal)
               << "KMS display capture requires CAP_SYS_ADMIN, which this Polaris binary does not hold, and capture is "sv
-              << "set to KMS. Installing or updating the package replaces the binary without it; run "sv
-              << "[sudo -H polaris --setup-host --enable-kms] after each install or update, then restart Polaris.\n"sv
+              << "set to KMS. The capability comes with the DRM/KMS helper in the polaris-kms package, which updates "sv
+              << "keep; run [sudo -H polaris --setup-host --enable-kms] once to point the polaris user service at it, do "sv
+              << "what it prints, since it may ask for a new login first, then restart Polaris.\n"sv
               << "https://github.com/papi-ux/polaris/blob/master/docs/troubleshooting.md"sv;
           } else {
             // Most hosts never enable KMS capture, and the probe runs at every capture evaluation.

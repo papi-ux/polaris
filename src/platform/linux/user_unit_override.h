@@ -176,6 +176,14 @@ namespace platf::user_unit {
    */
   inline constexpr std::string_view kms_drop_in_name = "20-polaris-kms.conf";
 
+  /**
+   * @brief Where --enable-kms leaves that drop-in while the account's session cannot execute the helper yet.
+   *
+   * systemd reads only `*.conf`, so under this name it points the service nowhere. A run of
+   * --setup-host after the next login turns it on, and --disable-kms removes it.
+   */
+  inline constexpr std::string_view kms_parked_drop_in_name = "20-polaris-kms.conf.disabled-until-relogin";
+
   /** @brief The group allowed to execute the helper, per the package's sysusers.d file. */
   inline constexpr std::string_view kms_group = "polaris-kms";
 
@@ -250,11 +258,12 @@ namespace platf::user_unit {
    */
   struct kms_teardown_t {
     std::filesystem::path drop_in;  ///< the drop-in to remove because it points the service at the copy; empty when none does
+    std::filesystem::path parked_drop_in;  ///< a drop-in --enable-kms parked until the next login; empty when there is none
     bool remove_guide_copy = false;  ///< the guide's copy is there to remove, and its capability leaves with it
     bool clear_binary_capability = false;  ///< the packaged binary carries cap_sys_admin
 
     bool empty() const {
-      return drop_in.empty() && !remove_guide_copy && !clear_binary_capability;
+      return drop_in.empty() && parked_drop_in.empty() && !remove_guide_copy && !clear_binary_capability;
     }
   };
 
@@ -262,16 +271,19 @@ namespace platf::user_unit {
     const exec_override_t &override,
     bool binary_holds_capability,
     bool guide_copy_exists,
-    const std::filesystem::path &guide_copy = std::filesystem::path {guide_runtime_copy}
+    const std::filesystem::path &guide_copy = std::filesystem::path {guide_runtime_copy},
+    const std::filesystem::path &parked_drop_in = {},
+    const std::filesystem::path &helper = std::filesystem::path {packaged_kms_helper}
   ) {
     kms_teardown_t plan;
     plan.clear_binary_capability = binary_holds_capability;
     plan.remove_guide_copy = guide_copy_exists;
+    // Left behind, a parked drop-in would turn capture back on at the next --setup-host.
+    plan.parked_drop_in = parked_drop_in;
     // Only a drop-in that points at a binary this feature put there is this feature's to remove:
     // the packaged helper, or the copy the old recipe had people make. Someone who pointed the
     // service at a build tree of their own is not running DRM/KMS capture, and their drop-in stays.
-    if (override.active() &&
-        (override.binary == guide_copy || override.binary == std::filesystem::path {packaged_kms_helper})) {
+    if (override.active() && (override.binary == guide_copy || override.binary == helper)) {
       plan.drop_in = override.drop_in;
     }
     return plan;
@@ -323,10 +335,15 @@ namespace platf::user_unit {
       return {};
     }
     if (override.binary == guide_copy) {
+      // --setup-host prints this only without the helper: with it installed, host setup moves the
+      // service off the copy and says so itself. So the way out comes first, and the refresh is what
+      // happens meanwhile.
       return "The polaris user service for [" + account + "] runs " + binary + " through " + drop_in +
-             ", a copy outside the package. Package updates do not change it: after every update, run\n"
+             ", a copy outside the package. Package updates do not change it. Install the polaris-kms package and run\n"
              "  sudo -H polaris --setup-host\n"
-             "which refreshes the copy and its DRM/KMS capability, or remove the drop-in to run the packaged binary again.\n";
+             "once: it moves the service onto the packaged helper, which updates keep current, and removes the copy.\n"
+             "Until then the same command refreshes the copy and its DRM/KMS capability when an update leaves it\n"
+             "behind. Or remove the drop-in to run the packaged binary again.\n";
     }
     if (override.binary == std::filesystem::path {packaged_kms_helper}) {
       // Nothing to warn about: this is the arrangement --enable-kms makes, and the package keeps

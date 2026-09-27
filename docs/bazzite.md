@@ -272,9 +272,16 @@ After the reboot, once:
 sudo -H polaris --setup-host --enable-kms
 ```
 
-Then log out and back in. The helper is readable only by the `polaris-kms`
-group, `--enable-kms` adds you to it, and a session picks up its groups when it
-starts, so this first login is what makes capture work.
+Then log out and back in, and run the same command once more. Where lingering
+is on, reboot instead: it keeps your user service manager running from boot to
+shutdown, so logging out does not restart it. Headless boot turns lingering on,
+and other user services can too; `loginctl show-user $USER -p Linger` says
+whether it is on. The helper is readable only by
+the `polaris-kms` group, `--enable-kms` adds you to it, and a session picks up
+its groups when it starts. Until then the first run leaves the change parked
+where systemd ignores it, so Polaris keeps starting and capturing the way it
+did; the run after the new session turns it on. Each run says which of the two
+it did, and running it again is always safe.
 
 That is the whole recipe now. Updates and rollbacks leave it alone, because the
 package owns the file that carries the capability.
@@ -282,8 +289,11 @@ package owns the file that carries the capability.
 If this host followed the older recipe, which copied the binary to
 `/usr/local/bin/polaris-kms` by hand, `--setup-host` moves it across: it points
 the service at the packaged helper, removes the copy, and takes the capability
-off `/usr/bin/polaris`. That copy is why a Bazzite host could report one version
-through `rpm` while the console ran another, since no update ever touched it.
+off `/usr/bin/polaris`. It waits for the same login first. Until your session
+holds the `polaris-kms` group, the copy stays in place and keeps capturing, and
+setup says to log back in, or reboot, and run it again. That copy is why a Bazzite
+host could report one version through `rpm` while the console ran another,
+since no update ever touched it.
 
 The capability grants the access KMS needs; it does not select a capture backend
 or validate Game Mode streaming.

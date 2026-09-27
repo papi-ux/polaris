@@ -147,6 +147,46 @@ describe('KMS package capability admission', () => {
   }
 })
 
+describe('package notes on DRM/KMS capture', () => {
+  // An update used to replace the binary that held the capability, so the notes said to repeat the
+  // step after every one. The polaris-kms package carries it now, and a note that still says so
+  // sends people to redo what the package keeps, and never mentions the package at all.
+  const notes = {
+    'deb and rpm': (fixture) => {
+      // udevadm is stubbed so the hook reloads nothing on the machine running the test.
+      const udevadm = join(fixture, 'udevadm')
+      writeFileSync(udevadm, '#!/bin/sh\nexit 0\n')
+      chmodSync(udevadm, 0o755)
+      return spawnSync('sh', [join(process.cwd(), 'src_assets/linux/misc/postinst')], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${fixture}:${process.env.PATH}` },
+      })
+    },
+    Arch: () => spawnSync('bash', ['-c', '. "$1"; post_upgrade', 'notes',
+      join(process.cwd(), 'packaging/linux/Arch/polaris.install')], { encoding: 'utf8' }),
+    SteamOS: () => spawnSync('bash', ['-c', '. "$1"; post_upgrade', 'notes',
+      join(process.cwd(), 'packaging/linux/SteamOS/polaris.install')], { encoding: 'utf8' }),
+  }
+
+  for (const [label, run] of Object.entries(notes)) {
+    it(`${label} says the helper package keeps the capability, not to repeat the step`, () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'polaris-kms-notes-'))
+      try {
+        const result = run(fixture)
+        expect(result.status, result.stderr).toBe(0)
+        const printed = result.stdout.replace(/\s+/g, ' ')
+        expect(printed).not.toMatch(/after every update|each update|every install/)
+        expect(printed).toContain('Install the polaris-kms package, which keeps the capability across updates')
+        expect(printed).toContain('sudo -H polaris --setup-host --enable-kms')
+        // The first run may only park the change until the account logs in with the group.
+        expect(printed).toContain('If it asks for a new login or a reboot first, do that and run it again.')
+      } finally {
+        rmSync(fixture, { force: true, recursive: true })
+      }
+    })
+  }
+})
+
 describe('removal hooks clean up what only they can', () => {
   // polaris-spaces-setup is the only thing that can remove the SELinux policies it installed, and it
   // ships inside the package, so after removal those policies cannot be removed at all. Every case
