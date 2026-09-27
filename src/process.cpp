@@ -8454,6 +8454,12 @@ namespace proc {
 
           if (launch_session->expected_stream_mode ==
               stream_display_policy::k_desktop_takeover) {
+            // A locked Hyprland refuses to move the workspace a monitor is
+            // currently showing, so a takeover attempted behind the lock
+            // screen can never place that workspace and rolls back. The
+            // client taking over the desktop is the unlock: dismiss the lock
+            // before moving anything.
+            session_manager::unlock_screen();
             auto takeover = desktop_takeover::begin(this->display_name);
             if (takeover.recovery_state && takeover.recovery_state->active) {
               linux_desktop_takeover = std::move(takeover.recovery_state);

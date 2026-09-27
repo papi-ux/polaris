@@ -23,6 +23,9 @@ namespace desktop_takeover {
     std::int64_t id = 0;
     std::string name;
     std::string monitor;
+    // Window count from Hyprland; defaults to non-empty so an unreported count
+    // is moved off the target rather than left on an output Polaris destroys.
+    int windows = 1;
 
     bool operator==(const workspace_state_t &) const = default;
   };
@@ -77,7 +80,7 @@ namespace desktop_takeover {
     const std::vector<workspace_state_t> &current
   );
 
-  /** True when recorded workspaces are restored and none remain on the target. */
+  /** True when recorded workspaces are restored and only empty unrecorded workspaces remain on the target. */
   bool restored_layout_matches(
     const state_t &state,
     const std::vector<workspace_state_t> &current

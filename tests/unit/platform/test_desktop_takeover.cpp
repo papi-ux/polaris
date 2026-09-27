@@ -26,6 +26,12 @@ TEST(DesktopTakeover, ParsesMonitorPowerAndWorkspacePlacement) {
   ASSERT_EQ(workspaces->size(), 2u);
   EXPECT_EQ(desktop_takeover::workspace_selector(workspaces->front()), "1");
   EXPECT_EQ(desktop_takeover::workspace_selector(workspaces->back()), "special:scratch");
+  EXPECT_EQ(workspaces->front().windows, 1) << "An unreported window count is treated as non-empty";
+
+  const auto counted = desktop_takeover::parse_workspaces(
+    R"json([{"id":5,"name":"5","monitor":"DP-3","windows":3}])json");
+  ASSERT_TRUE(counted);
+  EXPECT_EQ(counted->front().windows, 3);
 }
 
 TEST(DesktopTakeover, RejectsUnsafeOrUnaddressableWorkspaceIdentity) {
@@ -114,6 +120,14 @@ TEST(DesktopTakeover, VerifiesTakeoverAndRestoreByExactWorkspaceIdentity) {
     state,
     {{1, "1", "DP-3"}, {2, "2", "DP-3"}, {3, "3", state.target_output}}
   )) << "No newly created workspace may remain on an output Polaris will destroy";
+  EXPECT_TRUE(desktop_takeover::restored_layout_matches(
+    state,
+    {{1, "1", "DP-3"}, {2, "2", "DP-3"}, {3, "3", state.target_output, 0}}
+  )) << "Hyprland backfills an empty workspace the moment the last one leaves; it dies with the output";
+  EXPECT_FALSE(desktop_takeover::restored_layout_matches(
+    state,
+    {{1, "1", "DP-3"}, {2, "2", "DP-3"}, {3, "3", state.target_output, 2}}
+  )) << "A backfilled workspace that gained windows must still move off the target";
 }
 
 TEST(DesktopTakeover, TranslatesClassicDispatchIntoHyprlandLuaDispatchers) {

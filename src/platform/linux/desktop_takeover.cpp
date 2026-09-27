@@ -327,6 +327,9 @@ namespace desktop_takeover {
         workspace.id = item["id"].get<std::int64_t>();
         workspace.name = item["name"].get<std::string>();
         workspace.monitor = item["monitor"].get<std::string>();
+        if (item.contains("windows") && item["windows"].is_number_integer()) {
+          workspace.windows = item["windows"].get<int>();
+        }
         if (!safe_token(workspace.monitor) || !workspace_selector(workspace)) {
           return std::nullopt;
         }
@@ -494,9 +497,20 @@ namespace desktop_takeover {
       });
       return found == current.end() || found->monitor == expected.monitor;
     });
-    return recorded_restored && std::none_of(current.begin(), current.end(), [&](const auto &workspace) {
-      return workspace.monitor == state.target_output;
+    // Hyprland backfills a fresh empty workspace the moment the last one
+    // leaves an output, so an unrecorded empty workspace on the target is not
+    // a stuck restore — it is the placeholder that dies with the output when
+    // the virtual display is torn down. Anything holding a window must move.
+    const bool target_clear = std::all_of(current.begin(), current.end(), [&](const auto &workspace) {
+      if (workspace.monitor != state.target_output) {
+        return true;
+      }
+      const bool recorded = std::any_of(state.workspaces.begin(), state.workspaces.end(), [&](const auto &original) {
+        return original.id == workspace.id && original.name == workspace.name;
+      });
+      return !recorded && workspace.windows == 0;
     });
+    return recorded_restored && target_clear;
   }
 
   bool is_available() {
@@ -567,13 +581,17 @@ namespace desktop_takeover {
       return names;
     }();
     for (const auto &workspace : *observed_workspaces) {
-      if (source_names.contains(workspace.monitor)) {
+      // Hyprland deletes an empty workspace instead of moving it cross-
+      // monitor, so a takeover that recorded one could never verify it onto
+      // the target — right after a reboot, behind the lock screen, every
+      // fresh workspace is empty and takeover refused to start. An empty
+      // workspace carries nothing worth taking over or restoring: record and
+      // move only workspaces that hold windows. A desktop with none recorded
+      // still powers its monitors down and streams; restore has nothing to
+      // place and verification already tolerates that.
+      if (source_names.contains(workspace.monitor) && workspace.windows > 0) {
         state.workspaces.push_back(workspace);
       }
-    }
-    if (state.workspaces.empty()) {
-      result.error = "Desktop Takeover found no live workspace on the physical monitors.";
-      return result;
     }
     if (!persist(state)) {
       result.error = "Desktop Takeover could not durably record the layout; no display changes were made.";
@@ -596,8 +614,41 @@ namespace desktop_takeover {
         return rollback("Desktop Takeover could not move every workspace; Polaris is restoring the prior layout.");
       }
     }
-    const auto moved_workspaces = observe_workspaces();
-    if (!moved_workspaces || !takeover_layout_matches(state, *moved_workspaces)) {
+    // A single observation is not proof of placement: a dispatch Hyprland
+    // accepted is not necessarily reflected in the next JSON read, and a
+    // compositor busy with a fresh session can serve stale reads. Restore
+    // settles the same way — require two consecutive matching observations
+    // before the layout counts as placed.
+    bool placement_verified = false;
+    int consecutive_matches = 0;
+    const auto placement_deadline = std::chrono::steady_clock::now() + std::chrono::seconds {4};
+    for (int attempt = 0; attempt < 20 && std::chrono::steady_clock::now() < placement_deadline; ++attempt) {
+      const auto observed = observe_workspaces();
+      if (observed && takeover_layout_matches(state, *observed)) {
+        if (++consecutive_matches >= 2) {
+          placement_verified = true;
+          break;
+        }
+      } else {
+        consecutive_matches = 0;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds {50});
+    }
+    if (!placement_verified) {
+      const auto observed = observe_workspaces();
+      if (observed) {
+        std::string observed_line;
+        for (const auto &workspace : *observed) {
+          if (!observed_line.empty()) {
+            observed_line += ' ';
+          }
+          observed_line += workspace.name + "@" + workspace.monitor;
+        }
+        BOOST_LOG(error) << "Desktop Takeover placement never verified; observed ["sv << observed_line
+                         << "] but every recorded workspace belongs on ["sv << state.target_output << "]"sv;
+      } else {
+        BOOST_LOG(error) << "Desktop Takeover placement never verified; Hyprland workspaces could not be read"sv;
+      }
       return rollback("Desktop Takeover could not verify workspace placement; Polaris is restoring the prior layout.");
     }
 
@@ -651,7 +702,11 @@ namespace desktop_takeover {
       const bool recorded = std::any_of(state.workspaces.begin(), state.workspaces.end(), [&](const auto &original) {
         return original.id == workspace.id && original.name == workspace.name;
       });
-      if (!recorded && workspace.monitor == state.target_output) {
+      // An empty unrecorded workspace on the target is not evicted: moving the
+      // last workspace off an output makes Hyprland backfill a fresh one, so
+      // restore would chase its own tail. Empty ones carry nothing and die
+      // with the output during virtual-display teardown.
+      if (!recorded && workspace.monitor == state.target_output && workspace.windows > 0) {
         commands_succeeded = move_workspace(workspace, state.fallback_monitor) && commands_succeeded;
       }
     }
