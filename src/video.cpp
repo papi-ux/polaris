@@ -94,6 +94,9 @@ namespace video {
     struct probe_test_hooks_t {
       probe_reuse::identity_t identity;
       std::function<bool(encoder_t &, bool)> validate;
+      /// The kernel driver Auto plans for, in place of the selected render node's. Empty reads the
+      /// real one.
+      std::string gpu_driver;
     };
     thread_local const probe_test_hooks_t *probe_test_hooks = nullptr;
     thread_local const std::function<capture_preparation_e(const config_t &, std::shared_ptr<void> &)> *capture_prepare_test_hook = nullptr;
@@ -135,31 +138,47 @@ namespace video {
                                    platf::default_render_device() :
                                    ::config::video.adapter_name;
       info.gpu_driver = platf::render_device_driver(render_device);
+#ifdef POLARIS_TESTS
+      if (probe_test_hooks && !probe_test_hooks->gpu_driver.empty()) {
+        info.gpu_driver = probe_test_hooks->gpu_driver;
+      }
+#endif
+
+      // The route comes from the stream mode's own state and the capture as that mode fills it, not
+      // from the capture setting as written: a Gamescope Stream host can load with capture unset, and
+      // a startup probe that planned for a desktop route would advertise AV1 that the launch probe on
+      // the portal then takes away. An explicit encoder = vulkan reads the same route for its HDR.
+      const auto route = linux_encoder_auto_policy::route_of(
+        ::config::video.linux_display.use_cage_compositor,
+        ::config::video.linux_display.private_runtime,
+        stream_display_policy::canonical_capture_backend(stream_display_policy::capture_filled_for_mode(
+          ::config::video.linux_display.stream_mode,
+          ::config::video.capture
+        ))
+      );
+      const linux_encoder_auto_policy::codec_settings_t codecs {
+        .hevc_mode = ::config::video.hevc_mode,
+        .av1_mode = ::config::video.av1_mode,
+      };
 
       if (!::config::video.encoder.empty()) {
         info.policy = "explicit";
         info.preferred_encoder = ::config::video.encoder;
         info.reason = "The encoder is explicitly configured and must pass exact runtime validation.";
+        info.vulkan_withholds_hdr =
+          linux_encoder_auto_policy::explicit_vulkan_offers_no_hdr(::config::video.encoder, route, codecs);
         return info;
       }
 
-      const auto decision = linux_encoder_auto_policy::decide(
-        info.gpu_driver,
-        ::config::video.linux_display.use_cage_compositor
-      );
+      auto decision = linux_encoder_auto_policy::decide(info.gpu_driver, route, codecs);
+#ifndef POLARIS_BUILD_VULKAN
+      decision = linux_encoder_auto_policy::decision_without_vulkan_video(decision);
+#endif
       info.policy = std::string {decision.policy};
       info.preferred_encoder = std::string {decision.preferred_encoder};
       info.fallback_encoder = std::string {decision.fallback_encoder};
       info.exact_live_probe_required = decision.exact_live_probe_required;
-
-#ifndef POLARIS_BUILD_VULKAN
-      if (decision.prefer_vulkan) {
-        info.policy = "amd_private_vulkan_not_built";
-        info.preferred_encoder = "vaapi";
-        info.fallback_encoder = "next_available";
-        info.exact_live_probe_required = false;
-      }
-#endif
+      info.vulkan_withholds_hdr = linux_encoder_auto_policy::vulkan_offers_no_hdr(info.policy);
 
 #ifdef POLARIS_BUILD_VULKAN
       constexpr bool vulkan_built = true;
@@ -206,7 +225,7 @@ namespace video {
       if (info.mode == "explicit" && !info.fallback_used) {
         info.reason = "The explicitly configured encoder passed runtime validation.";
 #ifdef __linux__
-        if (const auto own = linux_encoder_auto_policy::explicit_encoder_reason(info.selected_encoder); !own.empty()) {
+        if (const auto own = linux_encoder_auto_policy::explicit_encoder_reason(info.selected_encoder, info.vulkan_withholds_hdr); !own.empty()) {
           info.reason = std::string {own};
         }
 #endif
@@ -216,8 +235,9 @@ namespace video {
       } else if (info.fallback_used) {
         // A fallback is the one case the Doctor grades encoder selection watch, and so the one case
         // Nova's Android Doctor card can show this reason, in two lines after its own classification
-        // and Try first text. The policy sentence runs to about 560 characters on AMD outside labwc,
-        // so the fallback opens the reason and the policy sentence follows it.
+        // and Try first text. The policy sentence runs to about 630 characters on AMD outside labwc
+        // and Gamescope Stream, so the fallback opens the reason and the policy sentence follows it.
+        // On Gamescope Stream a failed Vulkan Video probe is that case.
         std::string fallback = "Preferred encoder [" + info.preferred_encoder +
                                "] did not satisfy this runtime; selected [" +
                                info.selected_encoder + "] instead.";
@@ -6139,7 +6159,27 @@ namespace video {
                     << ", topology " << topology << ")";
   }
 
+  static int probe_encoders_impl(
+    bool strict_configured_encoder,
+    bool save_successful_cache,
+    bool keep_previous_selection_on_failure
+  );
+
   int probe_encoders(bool strict_configured_encoder, bool save_successful_cache) {
+    return probe_encoders_impl(strict_configured_encoder, save_successful_cache, false);
+  }
+
+  /**
+   * @param keep_previous_selection_on_failure Put the encoder selected before this probe back when no
+   *        encoder passes, as a strict probe does. A refresh between launches asks for it: the host goes
+   *        on advertising what that encoder serves, where it would advertise H.264 alone with no
+   *        encoder, and the next launch probes again, since this probe retired probe reuse.
+   */
+  static int probe_encoders_impl(
+    bool strict_configured_encoder,
+    bool save_successful_cache,
+    bool keep_previous_selection_on_failure
+  ) {
     if (!allow_encoder_probing()) {
       // Error already logged
       return -1;
@@ -6165,13 +6205,16 @@ namespace video {
       strict_configured_encoder || config::video.encoder == "vulkan"sv;
 
 #ifdef POLARIS_BUILD_VULKAN
-    // Auto promotes Vulkan only for an AMD private-compositor route. That path
-    // has a live first-frame validation and can retire a failed DMA-BUF route
-    // to the RAM uploader. Other routes remain explicit until they carry the
-    // same contract; a stale cache entry cannot opt them in.
+    // Auto promotes Vulkan on AMD for two routes. labwc has a live first-frame
+    // validation and can retire a failed DMA-BUF route to the RAM uploader.
+    // Gamescope Stream gives Vulkan its frames through the RAM uploader, the
+    // device this probe runs, so a failed probe falls back to VA-API below;
+    // strict semantics stay with an explicit encoder = vulkan. Other routes
+    // remain explicit until they carry a live-frame contract, and a stale cache
+    // entry cannot opt them in.
     const bool automatic_vulkan_candidate =
       config::video.encoder.empty() &&
-      selection_plan.policy == "amd_private_vulkan_live_probe";
+      linux_encoder_auto_policy::admits_vulkan(selection_plan.policy);
     if (config::video.encoder != "vulkan"sv && !automatic_vulkan_candidate) {
       std::erase(encoder_list, &vulkan);
     }
@@ -6233,7 +6276,8 @@ namespace video {
       };
 
       prioritize_encoder(selection_plan.preferred_encoder, 0);
-      if (selection_plan.policy == "amd_private_vulkan_live_probe") {
+      // Both Vulkan policies name VA-API as their fallback; try it straight after.
+      if (selection_plan.fallback_encoder == "vaapi") {
         prioritize_encoder("vaapi", 1);
       }
     }
@@ -6405,6 +6449,12 @@ namespace video {
       });
     }
 
+    if (chosen_encoder == nullptr && keep_previous_selection_on_failure) {
+      BOOST_LOG(warning) << "No encoder passed the probe; keeping the encoder selected before it"sv;
+      restore_previous_probe_state();
+      return -1;
+    }
+
     if (chosen_encoder == nullptr) {
       encoder_selection_info.reason += " No compatible encoder passed runtime validation.";
       const auto output_name {display_device::map_output_name(config::video.output_name)};
@@ -6422,6 +6472,28 @@ namespace video {
     BOOST_LOG(info);
 
     auto &encoder = *chosen_encoder;
+#ifdef POLARIS_BUILD_VULKAN
+    if (&encoder == &vulkan && selection_plan.vulkan_withholds_hdr) {
+      // See vulkan_offers_no_hdr() and explicit_vulkan_offers_no_hdr(). Cleared before the
+      // advertised modes are worked out below, so the host offers HEVC Main without Main10 and the
+      // encoder cache records the same. Under Auto the codec settings that ask for HDR never reach
+      // here, because they keep VA-API; for an explicit encoder = vulkan, HEVC Support set to
+      // advertise HDR does not reach here either, and is kept as written.
+      encoder.h264[encoder_t::DYNAMIC_RANGE] = false;
+      encoder.hevc[encoder_t::DYNAMIC_RANGE] = false;
+      encoder.av1[encoder_t::DYNAMIC_RANGE] = false;
+      if (selection_plan.mode == "explicit") {
+        BOOST_LOG(info) << "Vulkan Video: encoder = vulkan on Gamescope Stream reads each frame through "sv
+                        << "system memory as 8-bit BGRA, so this host offers no HDR with it; HEVC "sv
+                        << "Support set to advertise HDR (hevc_mode = 3) offers it anyway, and such a "sv
+                        << "stream ends at its first 10-bit frame"sv;
+      } else {
+        BOOST_LOG(info) << "encoder_auto: Vulkan Video on Gamescope Stream reads each frame through "sv
+                        << "system memory as 8-bit BGRA, so this host offers no HDR with it; setting "sv
+                        << "HEVC or AV1 Support to advertise HDR keeps VA-API"sv;
+      }
+    }
+#endif
     if (encoder_selection_info.gpu_driver == "nvidia") {
       encoder_selection_info.driver_version = current_nvidia_driver_version();
     }
@@ -6795,7 +6867,34 @@ namespace video {
     return vulkan_quality_max(load_vulkan_quality_levels(), include_av1);
   }
 
+  namespace {
+    /// Guards auto_plan_refresh_failed_change alone. Nothing else is taken while it is held, so it
+    /// can be taken under the encoder state lock and under the refresh lock alike.
+    std::mutex auto_plan_refresh_failed_change_mutex;
+    /// The plan change a refresh last probed and failed, "<probed under> -> <planned>", so a client
+    /// that polls serverinfo does not run a failing probe on every poll. It belongs to the encoder
+    /// that probe failed to replace: every probe and every reset replaces that encoder and clears
+    /// it, and so does a request that finds the plan back where that encoder was probed.
+    std::string auto_plan_refresh_failed_change;
+
+    void forget_failed_auto_plan_refresh() {
+      std::scoped_lock lock {auto_plan_refresh_failed_change_mutex};
+      auto_plan_refresh_failed_change.clear();
+    }
+
+    void remember_failed_auto_plan_refresh(const std::string &change) {
+      std::scoped_lock lock {auto_plan_refresh_failed_change_mutex};
+      auto_plan_refresh_failed_change = change;
+    }
+
+    bool auto_plan_refresh_failed_before(const std::string &change) {
+      std::scoped_lock lock {auto_plan_refresh_failed_change_mutex};
+      return change == auto_plan_refresh_failed_change;
+    }
+  }  // namespace
+
   static void reset_encoder_probe_state_unlocked(bool invalidate_reuse) {
+    forget_failed_auto_plan_refresh();
     if (invalidate_reuse) {
       successful_probe.invalidate();
 #ifdef __linux__
@@ -6823,6 +6922,112 @@ namespace video {
       return;
     }
     reset_encoder_probe_state_unlocked();
+  }
+
+  namespace {
+    /// Held across a refresh's probe: the requests that call it run concurrently, and one probe is
+    /// enough for all of them.
+    std::mutex auto_plan_refresh_mutex;
+
+    /// What the advertised codecs depend on in a plan: its policy, and whether Vulkan Video offers HDR
+    /// under it. Auto's policy decides both. An explicit encoder = vulkan keeps the policy "explicit"
+    /// on every route and withholds HDR on Gamescope Stream alone, so its route shows only in the
+    /// second, and a host that moves into or out of Gamescope Stream probes again.
+    std::string advertised_plan_key(const encoder_selection_info_t &info) {
+      return info.vulkan_withholds_hdr ? info.policy + " without Vulkan Video HDR" : info.policy;
+    }
+
+    auto_plan_refresh_e refresh_advertised_codecs_for_auto_plan_impl(bool stream_active, bool save_cache) {
+#ifdef __linux__
+      // "<plan the advertised codecs were probed under> -> <plan the host has now>", or nothing
+      // when the two agree or no probe chose an encoder.
+      const auto plan_change = []() -> std::optional<std::string> {
+        std::string probed_under;
+        {
+          std::shared_lock encoder_state_lock {encoder_state_mutex};
+          if (!chosen_encoder) {
+            return std::nullopt;
+          }
+          probed_under = advertised_plan_key(encoder_selection_info);
+        }
+        auto plan = advertised_plan_key(planned_encoder_selection_info());
+        if (plan == probed_under) {
+          return std::nullopt;
+        }
+        return probed_under + " -> " + plan;
+      };
+      if (config::video.linux_display.use_cage_compositor) {
+        // labwc has to be started to probe at all, which the deferred cage probe does, so this never
+        // probes. An encoder another plan probed, such as VA-API for Mirror Desktop while Steam Game
+        // Mode held the mode, would keep advertising its codecs here, and the cage probe runs only
+        // while no encoder is selected. Dropping it hands serverinfo the cage probe's cache, and the
+        // cage probe itself when there is none.
+        if (!plan_change()) {
+          return auto_plan_refresh_e::current;
+        }
+        if (stream_active) {
+          return auto_plan_refresh_e::deferred;
+        }
+        // Checked again under the encoder state lock, so a launch probe that lands in between keeps
+        // the encoder it chose for this route.
+        std::unique_lock encoder_state_lock {encoder_state_mutex, std::defer_lock};
+        if (!encoder_state_lock.try_lock_for(2s)) {
+          return auto_plan_refresh_e::deferred;
+        }
+        const auto plan = advertised_plan_key(planned_encoder_selection_info());
+        if (!chosen_encoder || advertised_plan_key(encoder_selection_info) == plan) {
+          return auto_plan_refresh_e::current;
+        }
+        BOOST_LOG(info) << "encoder_auto: the encoder plan moved to the private compositor ["sv
+                        << advertised_plan_key(encoder_selection_info) << " -> "sv << plan
+                        << "], so this host drops the encoder the other plan probed and advertises what "sv
+                        << "the cage probe finds"sv;
+        reset_encoder_probe_state_unlocked();
+        return auto_plan_refresh_e::left_to_cage_probe;
+      }
+      if (!plan_change()) {
+        // The plan is back where the encoder was probed, so a change that failed before is a new
+        // change the next time the plan makes it.
+        forget_failed_auto_plan_refresh();
+        return auto_plan_refresh_e::current;
+      }
+      if (stream_active) {
+        return auto_plan_refresh_e::deferred;
+      }
+
+      std::scoped_lock refresh_lock {auto_plan_refresh_mutex};
+      const auto change = plan_change();
+      if (!change) {
+        forget_failed_auto_plan_refresh();
+        return auto_plan_refresh_e::current;
+      }
+      if (auto_plan_refresh_failed_before(*change)) {
+        return auto_plan_refresh_e::failed;
+      }
+      BOOST_LOG(info) << "encoder_auto: the encoder plan changed since the last probe ["sv << *change
+                      << "], so this host probes again and advertises the codecs the next launch gets"sv;
+      // A probe that fails puts the encoder it was replacing back, and the probe itself clears the
+      // failed change it could have replaced.
+      const bool probed = probe_encoders_impl(false, save_cache, true) == 0;
+      // A probe that passed and still left the old plan behind would be run again by every request.
+      if (!probed || plan_change()) {
+        remember_failed_auto_plan_refresh(*change);
+        BOOST_LOG(warning) << "encoder_auto: the probe for the new encoder plan ["sv << *change
+                           << "] did not pass; this host keeps the codecs it advertised, and the next "sv
+                           << "launch probes again"sv;
+        return auto_plan_refresh_e::failed;
+      }
+      return auto_plan_refresh_e::reprobed;
+#else
+      (void) stream_active;
+      (void) save_cache;
+      return auto_plan_refresh_e::current;
+#endif
+    }
+  }  // namespace
+
+  auto_plan_refresh_e refresh_advertised_codecs_for_auto_plan(bool stream_active) {
+    return refresh_advertised_codecs_for_auto_plan_impl(stream_active, true);
   }
 
   std::vector<std::string> selectable_encoder_backends() {
@@ -6942,6 +7147,98 @@ namespace video {
         "Encoder row says which encoder was tried and why it failed." :
         "Check the host Doctor's Encoder and Capture rows; they say which encoder was tried and "
         "why it failed. If this mode captures a real display, make sure one is connected and on."
+    );
+  }
+
+  bool active_encoder_withholds_hdr() {
+#if defined(__linux__) && defined(POLARIS_BUILD_VULKAN)
+    std::shared_lock encoder_state_lock {encoder_state_mutex};
+    return chosen_encoder == &vulkan && encoder_selection_info.vulkan_withholds_hdr;
+#else
+    return false;
+#endif
+  }
+
+  bool active_encoder_withholds_hdr_for_explicit_vulkan() {
+#if defined(__linux__) && defined(POLARIS_BUILD_VULKAN)
+    std::shared_lock encoder_state_lock {encoder_state_mutex};
+    return chosen_encoder == &vulkan && encoder_selection_info.vulkan_withholds_hdr &&
+           encoder_selection_info.mode == "explicit";
+#else
+    return false;
+#endif
+  }
+
+  std::string av1_announce_refusal(int configured_av1_mode, const encoder_selection_info_t &selection) {
+    if (configured_av1_mode == 1) {
+      return "The client asked for AV1, and AV1 Support is set to never advertise it (av1_mode = 1), "
+             "so this stream is refused.";
+    }
+    if (selection.selected_encoder == "vulkan" && selection.policy == "amd_gamescope_vulkan_ram") {
+      // #635a: the launch cannot refuse this by name, because the client picks its codec at ANNOUNCE.
+      return "The client asked for AV1, and on AMD Gamescope Stream Auto encodes with Vulkan Video, "
+             "which carries no AV1, so this stream is refused. The client picked AV1 from the codecs "
+             "the host offered before the launch, as a launch that switches into Gamescope Stream "
+             "from another mode does. av1_mode = 2 keeps VA-API and AV1 on Gamescope Stream.";
+    }
+    if (!selection.selected_encoder.empty()) {
+      return "The client asked for AV1, and the encoder this host selected, " + selection.selected_encoder +
+             ", offers no AV1, so this stream is refused.";
+    }
+    return "The client asked for AV1, and this host advertises no AV1, so this stream is refused.";
+  }
+
+  void note_launch_refused_for_hdr(bool encoder_chosen_for_launch) {
+    // The probe passed, so "no encoder could start" would send someone looking for a fault that is
+    // not there. A launch reaches this with codecs another encoder advertised, which is how a launch
+    // that switches to Gamescope Stream for itself asks Vulkan Video for HDR.
+    if (active_encoder_withholds_hdr_for_explicit_vulkan() && encoder_chosen_for_launch) {
+      // A launch that picks Vulkan Video for itself writes it where polaris.conf's encoder lives until
+      // teardown, so the plan reads it as explicit. The host may be on Auto or VA-API.
+      launch_failure::refuse(
+        503,
+        "encoder_offers_no_hdr",
+        "This launch asks for HDR with Vulkan Video chosen for it, which offers no HDR on Gamescope "
+        "Stream: it reads each frame through system memory as 8-bit.",
+        "Launch without HDR, or choose another encoder for this launch. VA-API on Gamescope Stream takes "
+        "frames through the same 8-bit system memory upload unless POLARIS_PORTAL_DMABUF=1 is set, and "
+        "HDR through that unvalidated DMA-BUF route is not proven."
+      );
+      return;
+    }
+    if (active_encoder_withholds_hdr_for_explicit_vulkan()) {
+      launch_failure::refuse(
+        503,
+        "encoder_offers_no_hdr",
+        "This launch asks for HDR, and this host is set to encoder = vulkan, which offers no HDR on "
+        "Gamescope Stream: it reads each frame through system memory as 8-bit.",
+        "Launch without HDR. encoder = vaapi keeps VA-API on Gamescope Stream, but VA-API there takes "
+        "frames through the same 8-bit system memory upload unless POLARIS_PORTAL_DMABUF=1 is set, and "
+        "HDR through that unvalidated DMA-BUF route is not proven."
+      );
+      return;
+    }
+    if (active_encoder_withholds_hdr()) {
+      launch_failure::refuse(
+        503,
+        "encoder_offers_no_hdr",
+        "This launch asks for HDR, and on Gamescope Stream Auto encodes with Vulkan Video, which offers "
+        "no HDR there: it reads each frame through system memory as 8-bit.",
+        // VA-API is no way back to HDR here: on the portal it takes the same 8-bit upload
+        // (va_ram_t through sws_t::load_ram) unless the unvalidated DMA-BUF opt-in is set.
+        "Launch without HDR. hevc_mode = 3 or encoder = vaapi keeps VA-API on Gamescope Stream, but "
+        "VA-API there takes frames through the same 8-bit system memory upload unless "
+        "POLARIS_PORTAL_DMABUF=1 is set, and HDR through that unvalidated DMA-BUF route is not proven."
+      );
+      return;
+    }
+    const auto encoder = active_encoder_name();
+    launch_failure::refuse(
+      503,
+      "encoder_offers_no_hdr",
+      "This launch asks for HDR, and the encoder this host selected for it, " +
+        (encoder.empty() ? std::string {"its encoder"} : encoder) + ", offers no HDR profile.",
+      "Launch without HDR, or check the host Doctor's Encoder row and the HEVC and AV1 Support settings."
     );
   }
 
@@ -7265,11 +7562,40 @@ namespace video {
     const probe_reuse::identity_t &identity,
     const std::function<bool(encoder_t &, bool)> &validate
   ) {
-    const probe_test_hooks_t hooks {identity, validate};
+    return probe_encoders_with_hooks_for_tests(identity, validate, {});
+  }
+
+  int probe_encoders_with_hooks_for_tests(
+    const probe_reuse::identity_t &identity,
+    const std::function<bool(encoder_t &, bool)> &validate,
+    std::string_view gpu_driver
+  ) {
+    const probe_test_hooks_t hooks {identity, validate, std::string {gpu_driver}};
     const auto previous = probe_test_hooks;
     probe_test_hooks = &hooks;
     auto restore = util::fail_guard([previous] { probe_test_hooks = previous; });
     return probe_encoders(true, false);
+  }
+
+  encoder_selection_info_t planned_encoder_selection_info_for_tests(std::string_view gpu_driver) {
+    const probe_test_hooks_t hooks {{}, {}, std::string {gpu_driver}};
+    const auto previous = probe_test_hooks;
+    probe_test_hooks = &hooks;
+    auto restore = util::fail_guard([previous] { probe_test_hooks = previous; });
+    return planned_encoder_selection_info();
+  }
+
+  auto_plan_refresh_e refresh_advertised_codecs_for_auto_plan_with_hooks_for_tests(
+    const probe_reuse::identity_t &identity,
+    const std::function<bool(encoder_t &, bool)> &validate,
+    std::string_view gpu_driver,
+    bool stream_active
+  ) {
+    const probe_test_hooks_t hooks {identity, validate, std::string {gpu_driver}};
+    const auto previous = probe_test_hooks;
+    probe_test_hooks = &hooks;
+    auto restore = util::fail_guard([previous] { probe_test_hooks = previous; });
+    return refresh_advertised_codecs_for_auto_plan_impl(stream_active, false);
   }
 
   std::string encoder_probe_settings_for_tests(const config::video_t &settings) {

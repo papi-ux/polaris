@@ -1845,7 +1845,8 @@ namespace rtsp_stream {
     }
 
     if (config.monitor.videoFormat == 2 && video::active_av1_mode == 1) {
-      BOOST_LOG(warning) << "AV1 is disabled, yet the client requested AV1"sv;
+      // The client has no reason to show for this refusal, so the log says what took AV1 away.
+      BOOST_LOG(warning) << video::av1_announce_refusal(::config::video.av1_mode, video::active_encoder_selection_info());
 
       respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
       return;

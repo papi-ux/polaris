@@ -7,6 +7,71 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- On AMD, Auto tries Vulkan Video first on Gamescope Stream captured through the portal (#635),
+  where it used to try VA-API alone and never probed Vulkan Video at all. On the reporter's RX 9070
+  XT at 4K60, Vulkan Video took 9 ms a frame there against VA-API's 16 ms, and held it under load.
+  The portal hands Vulkan Video every frame in system memory, and the encoder probe runs that same
+  upload, so a probe that fails falls back to VA-API as before. Vulkan Video offers less on this
+  route. AV1 is the trade: it carries none in this build, so a client that preferred AV1 loses it,
+  and one that cannot decode HEVC, or any client on a host with `hevc_mode = 1`, is left with H.264.
+  A launch that switches to Gamescope Stream for itself from a mode that offered AV1 is worse off:
+  its client chose AV1 before the launch, and the host refuses that stream as it starts, with no
+  reason the client can show, where it used to stream AV1 on VA-API. An AV1 refusal on any host now
+  names, in the host log, the setting or the encoder that took AV1 away. Here it says Auto encodes
+  Gamescope Stream with Vulkan Video, which carries no AV1, and that `av1_mode = 2` keeps VA-API and
+  AV1 there. HDR goes too on this route, because the upload reads 8-bit frames only and a 10-bit HDR
+  frame read that way is garbled, so the host stops offering HEVC Main10 and Nova's library stops
+  marking its games HDR. Keeping VA-API does not bring HDR back on its own: on the portal VA-API
+  takes frames through the same 8-bit system memory upload unless `POLARIS_PORTAL_DMABUF=1` is set,
+  and HDR through that unvalidated route is not proven. `POLARIS_PORTAL_DMABUF=1` applies to
+  VA-API only, so a host that set it now streams Vulkan Video over shared memory. AV1 Support set to always
+  advertise AV1 (`av1_mode = 2` or `3`), or HEVC Support set to advertise HDR (`hevc_mode = 3`),
+  keeps VA-API on this route, as `encoder = vaapi` does, and each of these keeps the DMA-BUF opt-in,
+  which applies wherever VA-API encodes on the portal. The encoder selection Nova reads names the
+  new policy `amd_gamescope_vulkan_ram`, or `amd_gamescope_vaapi_codec_setting` when a codec setting
+  keeps VA-API, each with its own reason. On a card or Mesa without Vulkan Video encode, every
+  launch tries it first, falls back to VA-API and reports the fallback; `encoder = vaapi` skips the
+  attempt. Every other stream mode, Steam Game Mode's own screen, Gamescope Stream with `capture`
+  set to `kms`, `wlr`, `x11` or `auto`, builds without Vulkan Video, and every NVIDIA and Intel host
+  decide as before; on Gamescope Stream with one of those captures the reason says the capture keeps
+  VA-API, instead of calling the host outside Gamescope Stream. One risk is known: nothing retires
+  Vulkan Video on Gamescope Stream if it passes the probe and then fails on the live stream, which
+  only Private Stream can do so far. A host that sees that should set `encoder = vaapi` and say so
+  on #635.
+
+- The codecs a host advertises follow its stream mode between launches. When Steam Game Mode takes
+  the configured mode or gives it back, a launch that switched stream mode for itself ends, or a
+  client saves another host default mode, the first client request afterwards probes the encoder
+  again, so serverinfo, the app lists and the resolved launch profile describe the encoder the next
+  launch gets. Until the next launch the host used to keep the codecs of the mode it had left. That
+  request takes one probe longer to answer. Only the private compositor Private Stream starts can
+  probe Private Stream, so on a return to Private Stream that request drops the other mode's encoder
+  and advertises what the private compositor's own probe found, running that probe first when the
+  host has no record of it. A probe that fails leaves the codecs the host already advertised, and the
+  next launch probes again.
+
+- A launch that asks for HDR from an encoder that passed its probe but offers no HDR is refused
+  with `encoder_offers_no_hdr`, which names the encoder, instead of `encoder_probe_failed` and "No
+  video encoder could start". On AMD Gamescope Stream under Auto that is Vulkan Video, which a
+  launch switching to Gamescope Stream for itself can reach after the mode it came from advertised
+  VA-API's HDR. The refusal and the Doctor's HDR finding name the settings that keep VA-API there,
+  and say that VA-API takes the same 8-bit upload there unless `POLARIS_PORTAL_DMABUF=1` is set, so
+  neither promises HDR from it.
+  With `ignore_encoder_probe_failure` set, that launch is refused instead of starting a stream that
+  never shows a frame.
+
+- Vulkan Video on the portal ends a stream that hands it a 10-bit frame instead of garbling it.
+  The system memory upload copied a packed 10-bit HDR frame, which the portal delivers for an HDR
+  stream on Gamescope Stream, into an 8-bit BGRA image, so `encoder = vulkan` with HDR there
+  streamed garbled frames with nothing in the log. Polaris now logs once that Vulkan Video on the
+  portal streams SDR only and ends the stream, telling the client its video could not be encoded,
+  as it does for a DMA-BUF frame on that route. `encoder = vulkan` on Gamescope Stream also stops
+  offering HDR there, so Nova's library stops marking its games HDR and an HDR launch is refused
+  with `encoder_offers_no_hdr`. HEVC Support set to advertise HDR (`hevc_mode = 3`) is kept as
+  written: the host offers HDR, and such a stream ends at its first 10-bit frame. The encoder
+  selection reason for `encoder = vulkan` says which of the two a host gets, and a host that moves
+  into or out of Gamescope Stream probes again, so what it advertises follows the route.
+
 - Arch and SteamOS packages keep link-time optimisation enabled. Vulkan Video and PyroWave now
   use distinct loader symbols and scaler shader types, fixing the conflicts that previously
   required disabling LTO.

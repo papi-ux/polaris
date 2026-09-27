@@ -37,6 +37,8 @@
 
 namespace video {
   std::string active_encoder_name();
+  bool active_encoder_withholds_hdr();
+  bool active_encoder_withholds_hdr_for_explicit_vulkan();
 }
 #ifdef __linux__
   #include "platform/linux/misc.h"
@@ -1451,6 +1453,26 @@ namespace stream_stats {
                   "overrides what the client asks for.";
         action = "Turn Enable HDR back on for that device on the Devices page, or delete its "
                  "saved profile, then start a stream and check the HDR row again.";
+      } else if (reason == "host_encoder_hdr_unsupported" && video::active_encoder_withholds_hdr_for_explicit_vulkan()) {
+        // Stream stats carry no flag for an encoder the launch chose, so this names both sources.
+        message = "HDR was refused because this stream encodes with Vulkan Video, set by encoder = vulkan "
+                  "or chosen for the launch, which reads each frame on Gamescope Stream through system "
+                  "memory as 8-bit and offers no HDR there. Nothing fell back.";
+        action = "Stream without HDR on Gamescope Stream, or with another encoder there. VA-API takes "
+                 "frames through the same 8-bit system memory upload unless POLARIS_PORTAL_DMABUF=1 is "
+                 "set, and HDR through that unvalidated DMA-BUF route is not proven.";
+      } else if (reason == "host_encoder_hdr_unsupported" && video::active_encoder_withholds_hdr()) {
+        // The usual source of this reason on AMD Gamescope Stream, and nothing fell back: the encoder
+        // row reads pass, so the advice below led nowhere.
+        message = "HDR was refused because Auto encodes Gamescope Stream on this AMD host with Vulkan "
+                  "Video, which reads each frame through system memory as 8-bit and offers no HDR "
+                  "there. Nothing fell back; that is the route's policy.";
+        // VA-API takes the same 8-bit upload on the portal unless the DMA-BUF opt-in is set, so
+        // keeping it is no promise of HDR.
+        action = "Stream without HDR on Gamescope Stream. hevc_mode = 3 or encoder = vaapi keeps VA-API "
+                 "there, but VA-API takes frames through the same 8-bit system memory upload unless "
+                 "POLARIS_PORTAL_DMABUF=1 is set, and HDR through that unvalidated DMA-BUF route is not "
+                 "proven.";
       } else if (reason == "host_encoder_hdr_unsupported") {
         message = "HDR was refused because this host's encoder did not advertise a 10-bit "
                   "profile when the stream was resolved.";

@@ -4038,6 +4038,31 @@ namespace proc {
              (no_active_sessions_at_launch || !encoder_selected);
     }
 #endif
+  }  // namespace
+
+  launch_probe_outcome_e launch_probe_outcome(
+    bool matched,
+    bool hdr_unservable,
+    bool hdr_withheld_by_route,
+    bool may_ignore_failure
+  ) {
+    if (matched) {
+      return launch_probe_outcome_e::proceed;
+    }
+    // make_encode_session() refuses an HDR session on an encoder without dynamic range, and the
+    // capture loop builds it again and again, so going on would start a stream that never shows a
+    // frame. Where the route withholds HDR by policy, that is certain.
+    if (hdr_unservable && hdr_withheld_by_route) {
+      return launch_probe_outcome_e::refuse_hdr;
+    }
+    if (may_ignore_failure) {
+      return launch_probe_outcome_e::continue_despite_failure;
+    }
+    // A probe that passed has an encoder; saying none could start sent people looking for one.
+    return hdr_unservable ? launch_probe_outcome_e::refuse_hdr : launch_probe_outcome_e::refuse_no_encoder;
+  }
+
+  namespace {
 
     std::string join_layers(const std::vector<std::string> &layers) {
       std::ostringstream stream;
@@ -8120,7 +8145,11 @@ namespace proc {
     const bool strict_session_encoder =
       launch_session->encoder_backend_explicit &&
       launch_session->encoder_backend != "auto";
+    // Set by encoder_probe_matches_session() when the encoder passed and the HDR the launch asks for is
+    // the one thing it cannot serve.
+    bool session_hdr_unservable = false;
     const auto encoder_probe_matches_session = [&]() {
+      session_hdr_unservable = false;
       const auto active_encoder = video::active_encoder_name();
       if (active_encoder.empty()) {
         BOOST_LOG(error) << "process: encoder probe completed without an active encoder"sv;
@@ -8141,9 +8170,15 @@ namespace proc {
           launch_session->host_hdr_capable == false) {
         BOOST_LOG(error) << "process: selected session encoder ["sv << active_encoder
                          << "] cannot satisfy the requested HDR stream"sv;
+        session_hdr_unservable = true;
         return false;
       }
       return true;
+    };
+    const auto may_ignore_encoder_probe_failure = [&]() {
+      return config::video.ignore_encoder_probe_failure &&
+             !launch_session->encoder_backend_explicit &&
+             config::video.encoder != "vulkan"sv;
     };
 
     BOOST_LOG(info) << "session_optimization: requested="sv
@@ -8602,16 +8637,24 @@ namespace proc {
 #endif
     if (!delay_encoder_probe_until_cage && no_active_sessions_at_launch) {
       const bool probe_failed = video::probe_encoders(strict_session_encoder) != 0;
-      const bool selection_failed = !probe_failed && !encoder_probe_matches_session();
-      if (probe_failed || selection_failed) {
-        if (config::video.ignore_encoder_probe_failure &&
-            !launch_session->encoder_backend_explicit &&
-            config::video.encoder != "vulkan"sv) {
+      const bool matched = !probe_failed && encoder_probe_matches_session();
+      switch (launch_probe_outcome(
+        matched,
+        !probe_failed && session_hdr_unservable,
+        video::active_encoder_withholds_hdr(),
+        may_ignore_encoder_probe_failure()
+      )) {
+        case launch_probe_outcome_e::proceed:
+          break;
+        case launch_probe_outcome_e::continue_despite_failure:
           BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration.";
-        } else {
+          break;
+        case launch_probe_outcome_e::refuse_hdr:
+          video::note_launch_refused_for_hdr(strict_session_encoder);
+          return 503;
+        case launch_probe_outcome_e::refuse_no_encoder:
           video::note_launch_refused_by_probe(false);
           return 503;
-        }
       }
     } else if (!delay_encoder_probe_until_cage &&
                launch_session->encoder_backend_explicit &&
@@ -8981,19 +9024,26 @@ namespace proc {
       restore_env_var("AT_SPI_BUS_ADDRESS", original_at_spi_bus_address);
       restore_env_var("WAYLAND_DISPLAY", original_wayland_display);
 
-      if (probe_status == 0 && encoder_probe_matches_session()) {
-        BOOST_LOG(info) << "session_manager: Cage reprobe selected encoder ["
-                        << video::active_encoder_name() << ']';
-        return true;
+      const bool matched = probe_status == 0 && encoder_probe_matches_session();
+      switch (launch_probe_outcome(
+        matched,
+        probe_status == 0 && session_hdr_unservable,
+        video::active_encoder_withholds_hdr(),
+        may_ignore_encoder_probe_failure()
+      )) {
+        case launch_probe_outcome_e::proceed:
+          BOOST_LOG(info) << "session_manager: Cage reprobe selected encoder ["
+                          << video::active_encoder_name() << ']';
+          return true;
+        case launch_probe_outcome_e::continue_despite_failure:
+          BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration."sv;
+          return true;
+        case launch_probe_outcome_e::refuse_hdr:
+          video::note_launch_refused_for_hdr(strict_session_encoder);
+          return false;
+        case launch_probe_outcome_e::refuse_no_encoder:
+          break;
       }
-
-      if (config::video.ignore_encoder_probe_failure &&
-          !launch_session->encoder_backend_explicit &&
-          config::video.encoder != "vulkan"sv) {
-        BOOST_LOG(warning) << "Encoder probe failed, but continuing due to user configuration."sv;
-        return true;
-      }
-
       video::note_launch_refused_by_probe(true);
       return false;
     };

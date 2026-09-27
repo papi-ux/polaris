@@ -735,6 +735,46 @@ namespace video {
   void reset_encoder_probe_state();
 
   /**
+   * @brief What refresh_advertised_codecs_for_auto_plan() found, and what it did about it.
+   */
+  enum class auto_plan_refresh_e {
+    current,  ///< The advertised codecs came from a probe under the plan the host has now, or none did.
+    reprobed,  ///< The plan had changed since that probe, and a probe under the new plan passed.
+    deferred,  ///< The plan had changed, but a stream or an app is running, so nothing was probed.
+    left_to_cage_probe,  ///< The plan moved to a private compositor route, which only the deferred cage
+                         ///< probe can probe, so the encoder another plan probed was dropped for it.
+    failed,  ///< The plan had changed and the probe under it failed. The encoder from before stays, and
+             ///< this change is not probed again until a probe replaces that encoder or the plan returns.
+  };
+
+  /**
+   * @brief Probe again when the host's Auto plan is no longer the plan its advertised codecs came from.
+   *
+   * serverinfo, the app lists and the launch profile resolver all advertise the codecs of the last
+   * probe. On AMD, Auto tries Vulkan Video first on Gamescope Stream and VA-API on the routes around
+   * it, and the two do not offer the same codecs: Vulkan Video there has no AV1 and no HDR. The route
+   * can change with no launch to probe it. Steam Game Mode's hold swaps Gamescope Stream for Mirror
+   * Desktop and hands it back, a client saves another host default mode, and a launch that switched
+   * the mode for itself restores the default at teardown. A host left alone kept advertising the other
+   * encoder's codecs, and the next launch probed the encoder its plan names and then refused what had
+   * been advertised: an AV1 client at ANNOUNCE, an HDR launch with a 503.
+   *
+   * The plan is compared by its policy together with whether Vulkan Video offers no HDR under it
+   * (encoder_selection_info_t::vulkan_withholds_hdr). Auto's policy names the route, the driver and
+   * the codec settings that chose the encoder, and decides both. An explicit encoder keeps the policy
+   * "explicit" on every route, so for encoder = vulkan only the flag shows a move into or out of
+   * Gamescope Stream, and that host probes again as well. A private compositor route is never
+   * probed here, because only the deferred cage probe can start labwc to probe it. An encoder another
+   * plan probed is dropped instead, so serverinfo reads that probe's cache, and the probe runs when there is none: Steam
+   * Game Mode's hold on a Private Stream host is refreshed onto VA-API, whose AV1 the next Private
+   * Stream launch, on Vulkan Video, would refuse.
+   *
+   * @param stream_active Whether a stream or an app is running. The encoder a running stream uses
+   *        stays, and a request made after it ends probes.
+   */
+  auto_plan_refresh_e refresh_advertised_codecs_for_auto_plan(bool stream_active);
+
+  /**
    * @brief Retire a successful probe so the next launch cannot reuse it without probing.
    * @details Keeps the chosen encoder. /serverinfo advertises codecs from it until a launch
    *          probes again, and reset_encoder_probe_state() would advertise H.264 alone meanwhile.
@@ -810,9 +850,24 @@ namespace video {
     std::string reason;
     bool exact_live_probe_required = false;
     bool fallback_used = false;
+    /// Whether Vulkan Video, when it is the encoder, offers no HDR on this route: under Auto's
+    /// policy (linux_encoder_auto_policy::vulkan_offers_no_hdr()), or for an explicit
+    /// encoder = vulkan (linux_encoder_auto_policy::explicit_vulkan_offers_no_hdr()).
+    bool vulkan_withholds_hdr = false;
   };
 
   encoder_selection_info_t active_encoder_selection_info();
+
+  /**
+   * @brief The sentence the host logs when a client asks for AV1 at ANNOUNCE and AV1 is off.
+   * @param configured_av1_mode av1_mode as polaris.conf holds it.
+   * @param selection The active encoder selection.
+   * @details A client picks its codec from what the host offered before the launch, and a launch that
+   *          switches into Gamescope Stream on AMD moves Auto to Vulkan Video, which carries no AV1.
+   *          That stream is refused as it starts with no reason the client can show, so the host log
+   *          says what took AV1 away, the setting or the encoder, and on that route how to keep it.
+   */
+  std::string av1_announce_refusal(int configured_av1_mode, const encoder_selection_info_t &selection);
 
   /**
    * @brief The extra sentence shown when a preferred NVENC encoder did not start.
@@ -835,6 +890,30 @@ namespace video {
    *          capability), otherwise the encoder side with the NVENC driver detail when it applies.
    */
   void note_launch_refused_by_probe(bool against_private_compositor);
+
+  /**
+   * @brief Whether the selected encoder offers no HDR on this route.
+   *
+   * Vulkan Video on Gamescope Stream reads each frame through system memory as 8-bit BGRA, so the
+   * probe clears its dynamic range, under Auto on AMD (linux_encoder_auto_policy::vulkan_offers_no_hdr())
+   * and for an explicit encoder = vulkan unless HEVC Support asks for HDR
+   * (linux_encoder_auto_policy::explicit_vulkan_offers_no_hdr()), and every HDR session it is asked
+   * to build is refused.
+   */
+  bool active_encoder_withholds_hdr();
+
+  /**
+   * @brief Whether active_encoder_withholds_hdr() holds because polaris.conf sets encoder = vulkan,
+   *        rather than because Auto chose Vulkan Video.
+   */
+  bool active_encoder_withholds_hdr_for_explicit_vulkan();
+
+  /**
+   * @brief Record why a launch that asks for HDR is refused by an encoder that passed its probe and
+   *        offers no HDR: encoder_offers_no_hdr, naming the encoder, and on Gamescope Stream the
+   *        settings that keep VA-API there.
+   */
+  void note_launch_refused_for_hdr(bool encoder_chosen_for_launch = false);
 
   /**
    * @brief Refuse a launch whose capture request cannot land on any capture source.
@@ -973,6 +1052,34 @@ namespace video {
   int probe_encoders_with_hooks_for_tests(
     const probe_reuse::identity_t &identity,
     const std::function<bool(encoder_t &, bool)> &validate
+  );
+
+  /**
+   * @brief Probe as probe_encoders_with_hooks_for_tests() does, with Auto planning for a GPU driven
+   *        by gpu_driver instead of the selected render node's own driver.
+   */
+  int probe_encoders_with_hooks_for_tests(
+    const probe_reuse::identity_t &identity,
+    const std::function<bool(encoder_t &, bool)> &validate,
+    std::string_view gpu_driver
+  );
+
+  /**
+   * @brief The encoder selection Auto plans from the host's configuration now, for a GPU driven by
+   *        gpu_driver instead of the selected render node's own driver.
+   */
+  encoder_selection_info_t planned_encoder_selection_info_for_tests(std::string_view gpu_driver);
+
+  /**
+   * @brief refresh_advertised_codecs_for_auto_plan() with the hooks
+   *        probe_encoders_with_hooks_for_tests() takes, planning for gpu_driver. It never writes the
+   *        encoder cache.
+   */
+  auto_plan_refresh_e refresh_advertised_codecs_for_auto_plan_with_hooks_for_tests(
+    const probe_reuse::identity_t &identity,
+    const std::function<bool(encoder_t &, bool)> &validate,
+    std::string_view gpu_driver,
+    bool stream_active
   );
   std::string encoder_probe_settings_for_tests(const config::video_t &settings);
   std::string current_encoder_topology_key_for_tests();

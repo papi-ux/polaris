@@ -434,4 +434,64 @@ TEST(VulkanRamUploadTests, ALiveDmabufFrameEndsTheStreamInsteadOfEncodingBlack) 
   EXPECT_NE(said.front().find("Vulkan Video on the portal takes shared memory only"), std::string::npos) << said.front();
 }
 
+
+/**
+ * The system memory upload refuses a packed 10-bit frame and reads an 8-bit one.
+ *
+ * The portal hands an HDR stream packed 10-bit frames in shared memory, at the same four bytes a
+ * pixel as BGRA, and the upload copied them into an 8-bit BGRA image. What it encoded was noise, with
+ * nothing in any log (#635).
+ */
+TEST(VulkanRamUploadTests, OnlyAFrameCaptureTaggedTenBitIsRefusedForItsDepth) {
+  host_frame_t ten_bit {0x80};
+  ten_bit.frame_metadata = {platf::frame_transport_e::shm, platf::frame_residency_e::cpu, platf::frame_format_e::p010};
+  EXPECT_TRUE(vk::ram_upload_frame_is_ten_bit(ten_bit)) << "a 10-bit frame is read as 8-bit BGRA";
+
+  host_frame_t eight_bit {0x80};
+  eight_bit.frame_metadata = {platf::frame_transport_e::shm, platf::frame_residency_e::cpu, platf::frame_format_e::bgra8};
+  EXPECT_FALSE(vk::ram_upload_frame_is_ten_bit(eight_bit)) << "shared memory BGRA is the frame this route exists for";
+
+  const host_frame_t untagged {0x80};
+  EXPECT_FALSE(vk::ram_upload_frame_is_ten_bit(untagged)) << "a backend that tags nothing hands over BGRA";
+
+  // The primer carries no pixels to misread; a live frame with none is the DMA-BUF refusal's.
+  egl::img_descriptor_t primer;
+  primer.width = frame_width;
+  primer.height = frame_height;
+  primer.pixel_pitch = 4;
+  primer.row_pitch = frame_width * 4;
+  primer.frame_metadata.format = platf::frame_format_e::p010;
+  EXPECT_FALSE(vk::ram_upload_frame_is_ten_bit(primer));
+}
+
+TEST(VulkanRamUploadTests, ATenBitFrameEndsTheStreamInsteadOfEncodingNoise) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_ram(frame_width, frame_height, render_node)));
+
+  // An 8-bit frame first, which this route reads, so a black frame after it can only be the refused
+  // frame encoded anyway.
+  host_frame_t white {0xFF};
+  white.frame_metadata = {platf::frame_transport_e::shm, platf::frame_residency_e::cpu, platf::frame_format_e::bgra8};
+  ASSERT_EQ(encoder.device->convert(white), 0);
+  ASSERT_GE(centre_and_corner_luma(encoder.frame).first, 225) << "the shared memory frame did not reach the encoder";
+
+  // Zero words, which read as 8-bit BGRA are black.
+  host_frame_t ten_bit {0x00};
+  ten_bit.frame_metadata = {platf::frame_transport_e::shm, platf::frame_residency_e::cpu, platf::frame_format_e::p010};
+  const log_capture_t log;
+  EXPECT_EQ(encoder.device->convert(ten_bit), platf::convert_capture_unreadable)
+    << "the 10-bit frame was read as 8-bit BGRA";
+  EXPECT_GE(centre_and_corner_luma(encoder.frame).first, 225) << "the refused frame was encoded";
+
+  // The portal fixes the format for the whole capture, and the log says so once, at error.
+  EXPECT_EQ(encoder.device->convert(ten_bit), platf::convert_capture_unreadable);
+  const auto said = log.lines_with("10-bit frame reached the system memory upload route");
+  ASSERT_EQ(said.size(), 1u) << "the refusal was logged " << said.size() << " times for two frames";
+  EXPECT_NE(said.front().find("Error: "), std::string::npos) << said.front();
+  EXPECT_NE(said.front().find("Vulkan Video on the portal streams SDR only"), std::string::npos) << said.front();
+}
+
 #endif

@@ -328,6 +328,72 @@ describe('WelcomeView optional setup steps', () => {
     wrapper.unmount()
   })
 
+  it('names the Gamescope Stream rule on an AMD host that Auto puts on Vulkan Video', async () => {
+    // #635: Auto tries Vulkan Video first on AMD Gamescope Stream, and says what that costs.
+    const routes = baseRoutes()
+    routes['GET ./api/setup/hardware'] = () => response(200, {
+      status: true,
+      gpus: [{
+        render_node: '/dev/dri/renderD128',
+        vendor: 'amd',
+        model: 'Navi 48 [Radeon RX 9070 XT]',
+        driver: 'amdgpu',
+        driver_version: '',
+        selected: true,
+        vaapi: { driver_loaded: true, driver_vendor: 'Mesa Gallium driver 26.1.6 for AMD Radeon RX 9070 XT', h264: true, hevc: true, av1: true },
+      }],
+      build: { cuda: true, vaapi: true },
+      encoder: { configured: '', policy: 'amd_gamescope_vulkan_ram', planned: 'vulkan', active: '', expected: 'vulkan' },
+      encoder_choices: [],
+      nvenc_min_driver: '570',
+      advice: [],
+    })
+    routeFetch(routes)
+    const wrapper = mountWelcome()
+    await settle()
+    await reachStep(wrapper, 1)
+
+    const text = wrapper.text()
+    expect(text).toContain('welcome.encoder_vulkan')
+    expect(text).toContain('welcome.gpu_reason_amd_gamescope_vulkan')
+    expect(text).not.toContain('welcome.gpu_reason_amd_vulkan')
+    wrapper.unmount()
+  })
+
+  it('names VA-API on an AMD Gamescope Stream host whose codec settings keep it', async () => {
+    // AV1 Support or HEVC Support asking for AV1 or HDR keeps VA-API on Gamescope Stream. The step
+    // says VA-API, as it does for AMD, and not the generic probe sentence or the Vulkan Video one.
+    const routes = baseRoutes()
+    routes['GET ./api/setup/hardware'] = () => response(200, {
+      status: true,
+      gpus: [{
+        render_node: '/dev/dri/renderD128',
+        vendor: 'amd',
+        model: 'Navi 48 [Radeon RX 9070 XT]',
+        driver: 'amdgpu',
+        driver_version: '',
+        selected: true,
+        vaapi: { driver_loaded: true, driver_vendor: 'Mesa Gallium driver 26.1.6 for AMD Radeon RX 9070 XT', h264: true, hevc: true, av1: true },
+      }],
+      build: { cuda: true, vaapi: true },
+      encoder: { configured: '', policy: 'amd_gamescope_vaapi_codec_setting', planned: 'vaapi', active: '', expected: 'vaapi' },
+      encoder_choices: [],
+      nvenc_min_driver: '570',
+      advice: [],
+    })
+    routeFetch(routes)
+    const wrapper = mountWelcome()
+    await settle()
+    await reachStep(wrapper, 1)
+
+    const text = wrapper.text()
+    expect(text).toContain('welcome.encoder_vaapi')
+    expect(text).toContain('welcome.gpu_reason_amd')
+    expect(text).not.toContain('welcome.gpu_reason_amd_gamescope_vulkan')
+    expect(text).not.toContain('welcome.gpu_reason_probe')
+    wrapper.unmount()
+  })
+
   it('tells an AMD host on stock Fedora Mesa what is missing and how to fix it', async () => {
     const routes = baseRoutes()
     routes['GET ./api/setup/hardware'] = () => response(200, {

@@ -1503,7 +1503,9 @@ namespace nvhttp {
       // The next launch probes the encoder against the new mode either way: a desktop launch
       // always probes, and a private compositor launch reprobes against its own socket. Retire
       // probe reuse only. Dropping the chosen encoder as well would leave /serverinfo advertising
-      // H.264 alone to the client that just made the change, until that launch had run.
+      // H.264 alone to the client that just made the change, until that launch had run. A mode that
+      // moves the Auto plan, such as Gamescope Stream on AMD, is probed by the next request that
+      // advertises codecs (video::refresh_advertised_codecs_for_auto_plan()).
       video::invalidate_encoder_probe_reuse();
       if (!capture_idle) {
         return;
@@ -3081,6 +3083,13 @@ namespace nvhttp {
 #ifdef __linux__
       if (allow_deferred_headless_prime) {
         reconcile_game_mode_host();
+        // After the Game Mode check, which is one of the things that moves the Auto plan. A launch
+        // that switched the mode for itself and a client that saved another host default are the
+        // others; this is the first request to see any of them. Before the deferred cage probe: on
+        // a private compositor route the refresh drops an encoder another plan probed, and the cage
+        // probe then primes labwc's own codecs for this same request.
+        const bool stream_active = rtsp_stream::session_count() > 0 || proc::proc.running() > 0;
+        (void) video::refresh_advertised_codecs_for_auto_plan(stream_active);
         (void) prime_deferred_headless_codec_capabilities();
       }
 #endif

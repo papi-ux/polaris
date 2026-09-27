@@ -171,6 +171,36 @@ namespace proc {
   );
 #endif
 
+  /**
+   * @brief What a launch does once its encoder probe has run.
+   */
+  enum class launch_probe_outcome_e {
+    proceed,  ///< The probe passed and the encoder serves the session.
+    continue_despite_failure,  ///< ignore_encoder_probe_failure lets the launch go on.
+    refuse_no_encoder,  ///< No encoder passed, or none the session may use: encoder_probe_failed.
+    refuse_hdr,  ///< An encoder passed, and it offers no HDR to a launch that asks for it: encoder_offers_no_hdr.
+  };
+
+  /**
+   * @brief Decide a launch once its encoder probe has run.
+   *
+   * @param matched Whether the probe passed and its encoder serves the session.
+   * @param hdr_unservable Whether the probe passed and the one thing its encoder cannot serve is the
+   *        HDR the launch asks for.
+   * @param hdr_withheld_by_route Whether the selected encoder offers no HDR on this route
+   *        (video::active_encoder_withholds_hdr()): Vulkan Video on Gamescope Stream, under Auto's
+   *        policy, an explicit encoder = vulkan, or Vulkan Video chosen for the launch. Its HDR
+   *        session is refused every time it is built, so ignoring the failure would start a stream
+   *        that never shows a frame.
+   * @param may_ignore_failure Whether ignore_encoder_probe_failure applies to this launch.
+   */
+  launch_probe_outcome_e launch_probe_outcome(
+    bool matched,
+    bool hdr_unservable,
+    bool hdr_withheld_by_route,
+    bool may_ignore_failure
+  );
+
 #if defined(POLARIS_TESTS) && defined(__linux__)
 
   bool should_reprobe_deferred_cage_encoder_for_tests(

@@ -4,9 +4,12 @@
  */
 
 #include <src/platform/linux/stream_display_policy.h>
+#include <src/platform/linux/game_mode_host.h>
+#include <src/platform/linux/stream_path.h>
 #include <src/platform/linux/virtual_display.h>
 #include <src/platform/linux/display_topology.h>
 #include <src/config.h>
+#include <src/video.h>
 #include <src/logging.h>
 #include <src/nvhttp.h>
 #include <src/platform/common.h>
@@ -707,6 +710,67 @@ TEST(StreamDisplayPolicyTests, AGameModeSessionHoldsTheConfiguredModeAndGivesItB
   EXPECT_EQ(config::video.capture, "wlr");
   EXPECT_TRUE(stream_display_policy::game_mode_held_selection().empty());
   EXPECT_EQ(stream_display_policy::reconcile_game_mode(false, false), game_mode_reconcile_e::unchanged);
+}
+
+// #635: Auto tries Vulkan Video first on AMD Gamescope Stream and on no other host mode, Steam Game
+// Mode's own screen included. Auto reads the route from the state a mode writes when it is loaded or
+// applied, so walk every mode through the load, and Gamescope Stream through the Game Mode hold.
+TEST(StreamDisplayPolicyTests, OnlyGamescopeStreamPutsAmdAutoOnTheGamescopeRoute) {
+  using stream_display_policy::game_mode_reconcile_e;
+  ScopedPrivateRuntimePath runtime_path({"labwc", "wlr-randr", "gamescope"});
+  LinuxDisplayPolicyGuard guard;
+  auto &d = config::video.linux_display;
+  const auto codecs = std::pair {config::video.hevc_mode, config::video.av1_mode};
+  config::video.hevc_mode = 0;
+  config::video.av1_mode = 0;
+  auto restore_codecs = util::fail_guard([codecs] {
+    config::video.hevc_mode = codecs.first;
+    config::video.av1_mode = codecs.second;
+  });
+  // The plan the host makes, for an AMD card, from the state the mode wrote.
+  const auto amd_policy = [] {
+    return video::planned_encoder_selection_info_for_tests("amdgpu").policy;
+  };
+
+  config::video.capture.clear();
+  for (const auto &path : stream_path::registry()) {
+    d.stream_mode = std::string {path.id};
+    stream_display_policy::normalize_config_from_load();
+    const std::string expected =
+      path.id == stream_path::k_gamescope_stream              ? "amd_gamescope_vulkan_ram" :
+      path.runtime == stream_path::runtime_kind_e::LABWC ? "amd_private_vulkan_live_probe" :
+                                                           "amd_established_desktop";
+    EXPECT_EQ(amd_policy(), expected) << path.id;
+  }
+
+  std::string error;
+  ASSERT_TRUE(stream_display_policy::apply_selection("gamescope_stream", error)) << error;
+  EXPECT_EQ(amd_policy(), "amd_gamescope_vulkan_ram");
+
+  ASSERT_EQ(stream_display_policy::reconcile_game_mode(true, false), game_mode_reconcile_e::entered);
+  EXPECT_TRUE(platf::game_mode_host::streams_session_screen(d.stream_mode, d.use_cage_compositor, false, true))
+    << "the hold is the Game Mode screen route";
+  EXPECT_EQ(amd_policy(), "amd_established_desktop") << "Game Mode's screen is not Gamescope Stream";
+
+  ASSERT_EQ(stream_display_policy::reconcile_game_mode(false, false), game_mode_reconcile_e::left);
+  EXPECT_EQ(amd_policy(), "amd_gamescope_vulkan_ram") << "the mode comes back when Game Mode ends";
+
+  // Gamescope Stream loaded with a capture it keeps and the portal does not serve stays on VA-API;
+  // unset and kwin are the portal.
+  for (const auto &[capture, expected] : std::initializer_list<std::pair<const char *, const char *>> {
+         {"kms", "amd_established_desktop"},
+         {"wlr", "amd_established_desktop"},
+         {"x11", "amd_established_desktop"},
+         {"auto", "amd_established_desktop"},
+         {"", "amd_gamescope_vulkan_ram"},
+         {"portal", "amd_gamescope_vulkan_ram"},
+         {"kwin", "amd_gamescope_vulkan_ram"},
+       }) {
+    d.stream_mode = "gamescope_stream";
+    config::video.capture = capture;
+    stream_display_policy::normalize_config_from_load();
+    EXPECT_EQ(amd_policy(), expected) << "capture=" << capture;
+  }
 }
 
 TEST(StreamDisplayPolicyTests, AGameModeSessionLeavesAMirrorHostAndAReloadedConfigAlone) {

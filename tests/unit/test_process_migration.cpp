@@ -1042,6 +1042,93 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
   EXPECT_NE(setup_failure.find("request_abandoned_desktop_takeover_teardown"), std::string::npos);
 }
 
+TEST(ProcessRuntimeConfigTests, TheAnnounceAv1RefusalLogsWhatTookAv1Away) {
+  // papi's call on #635a (finding 6): the client picks AV1 at ANNOUNCE, after the launch, so the
+  // launch cannot refuse it by name, and the log line is the only place that says why. It logs the
+  // sentence video::av1_announce_refusal() builds, not the fixed line it used to.
+  const auto source = read_source_file_for_contract("src/rtsp.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto at = source.find("config.monitor.videoFormat == 2 && video::active_av1_mode == 1");
+  ASSERT_NE(at, std::string::npos);
+  const auto body = source.substr(at, source.find("respond(sock, session, &option, 400", at) - at);
+  EXPECT_NE(body.find("video::av1_announce_refusal(::config::video.av1_mode, video::active_encoder_selection_info())"),
+            std::string::npos)
+    << body;
+  EXPECT_EQ(body.find("AV1 is disabled, yet the client requested AV1"), std::string::npos) << body;
+}
+
+TEST(ProcessRuntimeConfigTests, AnHdrLaunchItsEncoderCannotServeIsRefusedForHdrAndNotPushedThrough) {
+  using proc::launch_probe_outcome;
+  using proc::launch_probe_outcome_e;
+  // A probe that passed and serves the session goes on, whatever else is true.
+  EXPECT_EQ(launch_probe_outcome(true, false, true, true), launch_probe_outcome_e::proceed);
+
+  // Vulkan Video on AMD Gamescope Stream offers no HDR by policy. An HDR launch that reached it was
+  // refused as "No video encoder could start" and, with ignore_encoder_probe_failure, went on into a
+  // stream that rebuilt its refused session forever and never showed a frame.
+  EXPECT_EQ(launch_probe_outcome(false, true, true, false), launch_probe_outcome_e::refuse_hdr);
+  EXPECT_EQ(launch_probe_outcome(false, true, true, true), launch_probe_outcome_e::refuse_hdr);
+
+  // Any other encoder short of HDR is refused for HDR too, and ignore_encoder_probe_failure keeps
+  // its meaning there, where a configured 8-bit HEVC mode can still leave an HDR stream to start.
+  EXPECT_EQ(launch_probe_outcome(false, true, false, false), launch_probe_outcome_e::refuse_hdr);
+  EXPECT_EQ(launch_probe_outcome(false, true, false, true), launch_probe_outcome_e::continue_despite_failure);
+
+  // A probe that failed is what encoder_probe_failed has always said.
+  EXPECT_EQ(launch_probe_outcome(false, false, false, false), launch_probe_outcome_e::refuse_no_encoder);
+  EXPECT_EQ(launch_probe_outcome(false, false, true, false), launch_probe_outcome_e::refuse_no_encoder);
+  EXPECT_EQ(launch_probe_outcome(false, false, false, true), launch_probe_outcome_e::continue_despite_failure);
+
+  // Both launch probes, the desktop one and the private compositor one, decide through it.
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  std::size_t sites = 0;
+  for (auto at = source.find("switch (launch_probe_outcome("); at != std::string::npos;
+       at = source.find("switch (launch_probe_outcome(", at + 1)) {
+    ++sites;
+    const auto body = source.substr(at, source.find("video::note_launch_refused_by_probe(", at) - at);
+    // The launch's own encoder choice decides whose Vulkan Video the refusal names.
+    EXPECT_NE(body.find("video::note_launch_refused_for_hdr(strict_session_encoder);"), std::string::npos) << body;
+    EXPECT_NE(body.find("session_hdr_unservable"), std::string::npos) << body;
+  }
+  EXPECT_EQ(sites, 2u);
+}
+
+TEST(ProcessRuntimeConfigTests, EveryRequestThatAdvertisesCodecsRefreshesTheAutoPlanFirst) {
+  // serverinfo, the app lists, /optimize and /launch advertise codecs through
+  // advertised_codec_support_for_http(), and the refresh there is what keeps them on the encoder the
+  // next launch gets. The refresh tests call it directly, so deleting this call passed every test. It
+  // runs after the Game Mode check, one of the things that moves the plan, and before the deferred
+  // cage probe, which runs in the same request once the refresh has dropped an encoder another plan
+  // probed.
+  const auto source = read_source_file_for_contract("src/nvhttp.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto start = source.find("video::codec_capability_state_t advertised_codec_support_for_http(");
+  ASSERT_NE(start, std::string::npos);
+  const auto end = source.find("return video::advertised_codec_capability_state();", start);
+  ASSERT_NE(end, std::string::npos);
+  const auto body = source.substr(start, end - start);
+  const auto reconcile = body.find("reconcile_game_mode_host();");
+  const auto stream_active = body.find("rtsp_stream::session_count() > 0 || proc::proc.running() > 0");
+  const auto refresh = body.find("video::refresh_advertised_codecs_for_auto_plan(stream_active);");
+  const auto prime = body.find("prime_deferred_headless_codec_capabilities();");
+  ASSERT_NE(reconcile, std::string::npos) << body;
+  ASSERT_NE(stream_active, std::string::npos) << body;
+  ASSERT_NE(refresh, std::string::npos) << body;
+  ASSERT_NE(prime, std::string::npos) << body;
+  EXPECT_LT(reconcile, refresh) << body;
+  EXPECT_LT(stream_active, refresh) << body;
+  EXPECT_LT(refresh, prime) << body;
+
+  std::size_t requests = 0;
+  for (auto at = source.find("advertised_codec_support_for_http(true)"); at != std::string::npos;
+       at = source.find("advertised_codec_support_for_http(true)", at + 1)) {
+    ++requests;
+  }
+  EXPECT_GE(requests, 4u);
+  EXPECT_NE(source.find("advertised_codec_support_for_http(std::is_same_v<PolarisHTTPS, T>)"), std::string::npos);
+}
+
 #ifdef __linux__
 TEST(ProcessRuntimeConfigTests, DeferredCageProbeRecoversWhenNovaLaunchAlreadyCountsASession) {
   EXPECT_TRUE(proc::should_reprobe_deferred_cage_encoder_for_tests(true, true, false));

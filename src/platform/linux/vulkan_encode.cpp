@@ -464,6 +464,21 @@ namespace vk {
         }
         return platf::convert_capture_unreadable;
       }
+      // A packed 10-bit frame, which the portal hands an HDR stream on Gamescope Stream. The upload
+      // copies it into an 8-bit BGRA image at the same four bytes a pixel, so nothing about its size
+      // gives it away, and what it encoded was noise. Refused the same way: the portal fixed the
+      // format when it negotiated, so a session built again would meet the same frame.
+      if (ram_input && ram_upload_frame_is_ten_bit(img)) {
+        if (!refused_ten_bit_frame) {
+          refused_ten_bit_frame = true;
+          BOOST_LOG(error) << "Vulkan Video: a "sv << img.width << 'x' << img.height
+                           << " 10-bit frame reached the system memory upload route, which reads 8-bit "sv
+                           << "BGRA only and would encode it garbled, so this stream ends. The portal "sv
+                           << "hands over 10-bit frames for an HDR stream; Vulkan Video on the portal "sv
+                           << "streams SDR only"sv;
+        }
+        return platf::convert_capture_unreadable;
+      }
 
       auto *descriptor = ram_input ? nullptr : dynamic_cast<egl::img_descriptor_t *>(&img);
       if (!ram_input && !descriptor) {
@@ -1631,6 +1646,8 @@ namespace vk {
     bool ram_input = false;
     /// Said once. A capture that hands this route a DMA-BUF does it for every frame.
     bool refused_dmabuf_frame = false;
+    /// Said once, for the same reason: the portal negotiates the frame format once per capture.
+    bool refused_ten_bit_frame = false;
     bool is_10bit = false;
     AVBufferRef *hw_frames_ctx = nullptr;
     frame_t hwframe;
@@ -1703,6 +1720,10 @@ namespace vk {
     }
     const auto *descriptor = dynamic_cast<const egl::img_descriptor_t *>(&img);
     return descriptor && descriptor->sd.fds[0] >= 0;
+  }
+
+  bool ram_upload_frame_is_ten_bit(const platf::img_t &img) {
+    return img.data && img.frame_metadata.format == platf::frame_format_e::p010;
   }
 
   int vulkan_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *, AVBufferRef **hw_device_buf) {

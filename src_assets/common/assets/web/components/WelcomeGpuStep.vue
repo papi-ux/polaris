@@ -148,6 +148,8 @@ const reasonKeys = {
   amd_private_vulkan_live_probe: 'welcome.gpu_reason_amd_vulkan',
   amd_private_vulkan_not_built: 'welcome.gpu_reason_amd',
   amd_established_desktop: 'welcome.gpu_reason_amd',
+  amd_gamescope_vulkan_ram: 'welcome.gpu_reason_amd_gamescope_vulkan',
+  amd_gamescope_vaapi_codec_setting: 'welcome.gpu_reason_amd',
   intel_vaapi: 'welcome.gpu_reason_intel',
   nouveau_availability_probe: 'welcome.gpu_reason_nouveau',
 }
