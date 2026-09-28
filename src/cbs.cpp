@@ -3,6 +3,7 @@
  * @brief Definitions for FFmpeg Coded Bitstream API.
  */
 // standard includes
+#include <cstring>
 #include <iterator>
 
 extern "C" {
@@ -302,5 +303,81 @@ namespace cbs {
 
     const auto *sps = ((CodedBitstreamH265Context *) ctx->priv_data)->active_sps;
     return sps && sps->vui_parameters_present_flag;
+  }
+
+  namespace {
+    /// Where the next Annex B start code (00 00 01) begins at or after `from`, or `size` if none does.
+    std::size_t find_start_code(const std::uint8_t *data, std::size_t from, std::size_t size) {
+      while (size >= 3 && from <= size - 3) {
+        const auto *one = static_cast<const std::uint8_t *>(std::memchr(data + from + 2, 0x01, size - from - 2));
+        if (!one) {
+          break;
+        }
+        const auto at = static_cast<std::size_t>(one - data);
+        if (data[at - 1] == 0 && data[at - 2] == 0) {
+          return at - 2;
+        }
+        from = at - 1;
+      }
+      return size;
+    }
+
+    bool is_filler_data(std::uint8_t header, int codec_id) {
+      if (codec_id == AV_CODEC_ID_H264) {
+        return (header & 0x1f) == H264_NAL_FILLER_DATA;
+      }
+      return ((header >> 1) & 0x3f) == HEVC_NAL_FD_NUT;
+    }
+  }  // namespace
+
+  // radeonsi and RADV pad H.264 and HEVC frames in CBR with filler data up to the target bitrate,
+  // and FFmpeg has no option to turn it off. A decoder discards filler data, so the client has no
+  // use for it.
+  //
+  // A unit runs from the zero bytes in front of its start code to the zero bytes in front of the
+  // next one. A unit never ends in a zero byte, so those zeros are all framing, and removing a unit
+  // with them leaves the units on either side exactly as they were. The payload is escaped, so a
+  // start code can only mark the start of a unit. A start code with no unit after it goes too.
+  //
+  // Only units that are kept move, and every one of them counts as something other than filler, so
+  // a frame returned whole was never touched.
+  std::size_t strip_filler_data(std::uint8_t *data, std::size_t size, int codec_id) {
+    if (codec_id != AV_CODEC_ID_H264 && codec_id != AV_CODEC_ID_H265) {
+      return size;
+    }
+
+    auto code = find_start_code(data, 0, size);
+    if (code == size) {
+      return size;
+    }
+
+    std::size_t begin = 0;
+    std::size_t kept = 0;
+    bool removed = false;
+    bool anything_else = false;
+    while (begin < size) {
+      const auto header = code + 3;
+      const auto next_code = header < size ? find_start_code(data, header, size) : size;
+      auto next_begin = next_code;
+      while (next_code < size && next_begin > header && data[next_begin - 1] == 0) {
+        --next_begin;
+      }
+
+      if (header >= size || is_filler_data(data[header], codec_id)) {
+        removed = true;
+      } else {
+        if (kept != begin) {
+          std::memmove(data + kept, data + begin, next_begin - begin);
+        }
+        kept += next_begin - begin;
+        anything_else = true;
+      }
+
+      begin = next_begin;
+      code = next_code;
+    }
+
+    // A frame of nothing but filler is left whole rather than sent empty.
+    return removed && anything_else ? kept : size;
   }
 }  // namespace cbs
