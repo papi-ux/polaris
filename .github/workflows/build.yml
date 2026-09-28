@@ -1446,6 +1446,7 @@ jobs:
 
       - name: Install and launch on a minimal Ubuntu 24.04
         timeout-minutes: 10
+        shell: bash
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive

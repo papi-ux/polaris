@@ -960,8 +960,12 @@ if release_job.count("      - arch-current-compatibility\n") != 1:
 # libpipewire-0.3-0t64 that way. ubuntu-minimal-install installs the same DEB on a bare
 # ubuntu:24.04 without Recommends, and a release waits for it.
 ubuntu_minimal_job = workflow_job(workflow, "ubuntu-minimal-install")
-for minimal_step in ("Download exact Ubuntu DEB", "Install and launch on a minimal Ubuntu 24.04"):
-    workflow_step(ubuntu_minimal_job, minimal_step)
+workflow_step(ubuntu_minimal_job, "Download exact Ubuntu DEB")
+ubuntu_minimal_install_step = workflow_step(ubuntu_minimal_job, "Install and launch on a minimal Ubuntu 24.04")
+# The step runs in the bare container, whose sh is dash, and dash stops at "set -o pipefail" before
+# the DEB is installed. That is how every run failed from the job's first day until it said bash.
+if ubuntu_minimal_install_step.count("        shell: bash\n") != 1:
+    raise AssertionError("the minimal Ubuntu install step must run under bash: the container's sh is dash, which has no pipefail")
 ubuntu_minimal_not_found = (
     '          if grep -Fq "not found" ubuntu-minimal-package/package-ldd.txt; then\n'
     '            echo "The Ubuntu DEB leaves a library it links uninstalled on a bare Ubuntu 24.04;'
