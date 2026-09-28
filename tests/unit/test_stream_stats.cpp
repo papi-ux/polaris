@@ -2079,7 +2079,10 @@ TEST(StreamStatsDoctorTests, ReportsASettingsFileTheStoreRefused) {
   EXPECT_EQ(message.find("no change can be saved"), std::string::npos) << message;
   // The top level stats payload carries the same list.
   bool in_stats = false;
-  for (const auto &entry : stream_stats::linux_gpu_profile_json({}).at("configuration_warnings")) {
+  // Keep the payload alive for the loop: a range-for over .at() on the temporary would iterate a
+  // reference into an object destroyed before the first iteration.
+  const auto stats_payload = stream_stats::linux_gpu_profile_json({});
+  for (const auto &entry : stats_payload.at("configuration_warnings")) {
     in_stats = in_stats || entry.at("id") == "settings_file_unreadable";
   }
   EXPECT_TRUE(in_stats);
