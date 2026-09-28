@@ -374,9 +374,10 @@ conversion." instead, even though conversion runs on the GPU by default; there, 
 
 ## Read the host log
 
-`journalctl --user --since '10 min ago' | grep 'PyroWave:'` shows the last stream. Run it as the
-user who runs Polaris, without sudo: Polaris runs as a user service, so its log is in your user
-journal. Every line below contains `PyroWave:`.
+`journalctl --user --since '10 min ago' | grep -E 'PyroWave:|Refusing (launch|resume|RTSP setup) \['`
+shows the last stream. Run it as the user who runs Polaris, without sudo: Polaris runs as a user
+service, so its log is in your user journal. The refusals below start with `Refusing` and name
+their code in brackets; every other line below contains `PyroWave:`.
 
 | Log line | What it means |
 |---|---|
@@ -386,13 +387,13 @@ journal. Every line below contains `PyroWave:`.
 | `encoding straight from a 1920x1080 picture on <GPU>` | The frame arrived in host memory, was copied to the GPU, and its colour was converted there. |
 | `falling back to converting frames on the CPU` | The GPU path could not start, so colour conversion runs on the CPU. This happens for SDR only. |
 | `POLARIS_PYROWAVE_GPU_INPUT is off, so frames are converted on the CPU` | That environment variable forced the CPU converter. If this run's log has no such line, it is not set. |
-| `Refusing launch [pyrowave_capture_unreadable]`, or the same code after `Refusing resume` or `Refusing RTSP setup` | The display capture would read is in a format PyroWave cannot read, so the stream was refused before it started; the rest of the line says which. See [A KDE host with a display in HDR](#a-kde-host-with-a-display-in-hdr). |
-| `Refusing resume [capture_in_use_by_other_codec]` or `Refusing RTSP setup [capture_in_use_by_other_codec]` | Another stream on the host is capturing for a different codec, one PyroWave and the other not, and one capture cannot serve both. |
+| `Refusing launch [pyrowave_capture_unreadable]: PyroWave cannot ...`, or the same after `Refusing resume` or `Refusing RTSP setup` | The display capture would read is in a format PyroWave cannot read, so the stream was refused before it started; the rest of the line says which. See [A KDE host with a display in HDR](#a-kde-host-with-a-display-in-hdr). |
+| `Refusing resume [capture_in_use_by_other_codec]: Another stream on this host is running ...`, or the same after `Refusing RTSP setup` | Another stream on the host is capturing for a different codec, one PyroWave and the other not, and one capture cannot serve both. |
 | `Error: PyroWave: capture is handing over a dmabuf in a format this codec cannot read (fourcc ...)` | Capture hands over a format PyroWave cannot read, identified by its fourcc (the four character code of a pixel format), and the stream ends. From Polaris 1.4.14 this is a backstop for a display whose format changed after the stream started. See [A KDE host with a display in HDR](#a-kde-host-with-a-display-in-hdr). |
 | `this client negotiated HDR and the captured display is not in HDR` | The client asked for HDR and the captured display is not in HDR, or its HDR metadata could not be read, so the stream is refused, whatever the capture route. See [Limits](#limits). |
 | `over 300 frames, ... ms and encode ... ms a frame` | The average cost of a frame, after 300 frames (five seconds at 60 fps), then every 18,000 frames (five minutes). |
 
-One line without the `PyroWave:` prefix also matters: `Skipping FEC for oversized encoded frame(s)`
+One more line matters, and that grep leaves it out: `Skipping FEC for oversized encoded frame(s)`
 means the largest frames went out without their error correction (see [Limits](#limits)).
 
 ## How Polaris advises and tunes PyroWave
@@ -402,8 +403,9 @@ lossless game clips through it at every 16:9 size from 1280x720 to 3840x2160, sc
 with PSNR-HVS-M-H, an objective metric weighted for how far away the picture is watched, and fitted
 the bitrate each quality needed. Polaris evaluates that fit at 35 dB, the level the author calls good
 quality, for two distances: a device's own screen, 2.875 picture heights away (the far figure, and
-the lower one), and a television or monitor, 2 picture heights away (the near figure). Nova 1.4.14
-carries the same model, and a fixture in Polaris's tests holds the two to the same numbers.
+the lower one), and a television or monitor, 2 picture heights away (the near figure). The host
+computes these figures itself. Nova's matching estimator is in review, and a fixture in Polaris's
+tests pins the host's figures.
 
 Every figure below is what to set in the client, at the host's default 10% FEC with stereo audio in
 high quality, rounded up to a whole Mbps. More FEC or surround audio asks a little more for the same

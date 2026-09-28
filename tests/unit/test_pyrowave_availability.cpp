@@ -2,7 +2,7 @@
  * @file tests/unit/test_pyrowave_availability.cpp
  * @brief Whether PyroWave is offered, and the refusals a launch it cannot serve gets instead.
  *
- * The regression behind these (#159): a KDE host in HDR with capture = kms offered PyroWave, the
+ * The regression behind these: a KDE host in HDR with capture = kms offered PyroWave, the
  * client negotiated it and built a decoder, and the stream carried no bytes, because the codec found
  * out at the first frame that it could not read the sixteen bit float scanout.
  */
@@ -170,7 +170,7 @@ TEST(PyroWaveAvailability, AReadableOrUnknownRouteIsNeverRefused) {
 }
 
 TEST(PyroWaveAvailability, OneCaptureServesStreamsOnOneSideOfPyroWaveOnly) {
-  // #78: the capture thread opens its display for the first stream's memory type.
+  // The capture thread opens its display for the first stream's memory type.
   EXPECT_TRUE(pa::shares_capture(true, {}));
   EXPECT_TRUE(pa::shares_capture(false, {}));
   EXPECT_TRUE(pa::shares_capture(true, {true, true}));

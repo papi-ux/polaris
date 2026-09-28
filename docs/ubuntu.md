@@ -151,7 +151,9 @@ so the two are installed and updated as a pair, as [Update](#update) shows. `--d
 points the user service back at the ordinary binary.
 
 The default compositor and portal paths do not require granting KMS capability.
-The experimental Vulkan Video encoder does require this KMS setup and an explicit `capture = kms` selection.
+The experimental Vulkan Video encoder does not need it either: on portal capture its frames reach the
+encoder through system memory, and this KMS setup with `capture = kms` gives it the GPU-native path
+([Vulkan Encoder](configuration.md#vulkan-encoder)).
 
 ## Headless Labwc Checks
 

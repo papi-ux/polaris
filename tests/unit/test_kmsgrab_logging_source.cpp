@@ -93,7 +93,7 @@ TEST(KmsgrabLoggingSource, MissingCapabilityGuidanceNamesTheHelperNotEveryUpdate
 }
 
 TEST(KmsgrabLoggingSource, EveryOtherKmsSetupAdviceNamesTheHelperNotEveryUpdate) {
-  // #174 took the rerun-after-every-update advice out of kmsgrab. The launch refusal and the
+  // kmsgrab no longer gives the rerun-after-every-update advice. The launch refusal and the
   // command line help still said it, and both reach people who already have the helper.
   const auto video = read_source("src/video.cpp");
   EXPECT_EQ(video.find("Every Polaris install or update needs this again."), std::string::npos);

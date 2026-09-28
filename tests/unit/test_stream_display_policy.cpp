@@ -16,7 +16,6 @@
 #include <src/stream_stats.h>
 #include <src/utility.h>
 #include <src/verified_action.h>
-#include <src/video.h>
 
 #include <nlohmann/json.hpp>
 

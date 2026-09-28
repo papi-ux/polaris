@@ -148,7 +148,7 @@ TEST(ConfigParserTests, ZeroBackButtonTimeoutWarnsWithoutASecondsGuess) {
 }
 
 TEST(ConfigParserTests, ASettingsFileThatStillSetsTheAdaptiveCeilingIsToldItCapsNothing) {
-  // #178: adaptive_bitrate_max no longer caps a stream, and the settings page no
+  // adaptive_bitrate_max no longer caps a stream, and the settings page no
   // longer shows it. A host that set it to 30000 as a cap would see its streams
   // run above 30 Mbps with nothing saying why, so parsing names max_bitrate.
   EXPECT_TRUE(config::retired_adaptive_bitrate_max_warning({}).empty());
@@ -159,6 +159,13 @@ TEST(ConfigParserTests, ASettingsFileThatStillSetsTheAdaptiveCeilingIsToldItCaps
   EXPECT_TRUE(contains(advice, "adaptive_bitrate_max = 30000"));
   EXPECT_TRUE(contains(advice, "no longer limits"));
   EXPECT_TRUE(contains(advice, "set max_bitrate"));
+  // Two things run a stream above its request: a request below adaptive_bitrate_min starts at that
+  // floor, and Doctor may raise a starved PyroWave stream. The warning names both rather than
+  // saying nothing does, or that Doctor alone does.
+  EXPECT_FALSE(contains(advice, "only lower"));
+  EXPECT_FALSE(contains(advice, "only Doctor"));
+  EXPECT_TRUE(contains(advice, "a request below adaptive_bitrate_min starts at that floor"));
+  EXPECT_TRUE(contains(advice, "PyroWave"));
 
   // Startup has to ask before the key is parsed, because parsing consumes it.
   std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / "src/config.cpp");

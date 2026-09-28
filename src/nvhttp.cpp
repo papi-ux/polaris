@@ -6264,7 +6264,7 @@ namespace nvhttp {
       return profile_launch_response_t {400, "The Space launch is missing its key material.", {}, "space_key_material", "Update the client app and try again."};
     auto launch = make_launch_session(false, false, args, current.get(), true);
     if (!launch) return profile_launch_response_t {400, "These display or media options are not supported for a Space stream.", {},
-      "space_display_options", "Launch with HDR off, stereo audio, a whole frame rate such as 60, and the encoder on Auto."};
+      "space_display_options", "Launch with HDR off, stereo audio, the encoder on Auto, a bitrate of 8 Mbps or less, and a resolution from 320x240 to 4096x2160 in even numbers at a whole frame rate such as 60."};
     if (!launch->rtsp_cipher) return profile_launch_response_t {403, "Space streams require encrypted RTSP.", {}, "space_encryption_required",
       "Update the client app to a version that encrypts stream setup."};
     if (args.count("workerTarget") > 1 || args.count("workerProfile") > 1)

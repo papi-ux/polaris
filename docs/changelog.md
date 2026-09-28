@@ -31,10 +31,10 @@ starts at `v1.0.0`.
   `capture_in_use_by_other_codec`, where the second stream used to get no picture.
 - The launch refusal `kms_capture_needs_capability`, `polaris --help` and the troubleshooting
   guide no longer say that every install or update removes the KMS capability. Since 1.4.13 the
-  polaris-kms package carries it on a helper that updates keep, and #174 took that advice out of
-  the startup log but left it in these three places. The refusal now says to run `--enable-kms`
-  once and do what it prints, since it may ask for a new login first, and that the package keeps
-  the capability across updates.
+  polaris-kms package carries it on a helper that updates keep. Another change in this release
+  took that advice out of the startup log but left it in these three places. The refusal now says
+  to run `--enable-kms` once and do what it prints, since it may ask for a new login first, and
+  that the package keeps the capability across updates.
 
 - `--setup-host --enable-kms` on a host whose service already runs the polaris-kms helper says
   nothing needs reloading or restarting, and leaves the drop-in as it is. It used to write the
@@ -153,8 +153,9 @@ starts at `v1.0.0`.
   Play Setup: desktop Steam that did not exit said "Nova did not start a private stream",
   `encoder_probe_failed` against the private compositor said to pick Private Stream (GPU-native) in
   Play Setup, and refused Space launches said to update Nova or to set Play Setup to Auto frame rate
-  with HDR off. They now name the setting instead, the launch mode, HDR and the frame rate, or the
-  client app, which is right for Nova and for Moonlight alike. The codes are unchanged.
+  with HDR off. They now name the setting instead, the launch mode, HDR, the frame rate and a
+  Space's bitrate and size limits, or the client app, which is right for Nova and for Moonlight
+  alike. The codes are unchanged.
 
 - Mission Control says which kind of client each live stream belongs to, Nova or Moonlight /
   Artemis, as the Devices page already did, so it is clear at a glance what that stream can use.
@@ -173,8 +174,8 @@ starts at `v1.0.0`.
 - Polaris now knows what bitrate a PyroWave stream needs. It carries the model PyroWave's author
   published and evaluates it at 35 dB, the level the author calls good quality: for 1920x1080 at
   60 fps, about 172 Mbps in 4:2:0 and 201 Mbps in 4:4:4 on a device's own screen, and about 246 and
-  298 on a television or monitor, as what to set at the default 10% FEC with stereo audio. Nova
-  1.4.14 carries the same model, and a shared fixture holds both ends to the same figures. While a
+  298 on a television or monitor, as what to set at the default 10% FEC with stereo audio. Nova's
+  matching estimator is in review, and a fixture in Polaris's tests pins the host's figures. While a
   PyroWave stream runs, session status carries the advice, the rate the encoder runs at, and the
   share of recent frames that reached PyroWave's byte budget, which the host used to write only to
   its log. `GET /polaris/v1/pyrowave/advice` answers the same figures before a launch, announced as
@@ -209,9 +210,9 @@ starts at `v1.0.0`.
   Tuning now reads as off until the stream ends, the next stream starts with the saved preference,
   and switching it on during the stream resumes it.
 
-- The adaptive bitrate ceiling no longer cuts the bitrate a client asked for. Nothing in the
-  controller ever climbs above a client's request, so `adaptive_bitrate_max`, 100 Mbps unless
-  changed, did one thing: it cut any stream whose encoder rate was above it, whatever the codec.
+- The adaptive bitrate ceiling no longer cuts the bitrate a client asked for. Live Tuning climbs
+  above a client's request only to reach `adaptive_bitrate_min`, so `adaptive_bitrate_max`, 100 Mbps
+  unless changed, did one thing: it cut any stream whose encoder rate was above it, whatever the codec.
   FEC and audio come off a request before the encoder sees it, so at the default 10% FEC that is a
   request above about 112 Mbps. With adaptive bitrate on, such a stream dropped to 100 Mbps half a
   second in and never came back, and every PyroWave stream Nova asks to run at 180 Mbps or more is
@@ -285,7 +286,7 @@ starts at `v1.0.0`.
   keeps VA-API, each with its own reason. On a card or Mesa without Vulkan Video encode, every
   launch tries it first, falls back to VA-API and reports the fallback; `encoder = vaapi` skips the
   attempt. Every other stream mode, Steam Game Mode's own screen, Gamescope Stream with `capture`
-  set to `kms`, `wlr`, `x11` or `auto`, builds without Vulkan Video, and every NVIDIA and Intel host
+  set to `kms`, `wlr` or `x11`, builds without Vulkan Video, and every NVIDIA and Intel host
   decide as before; on Gamescope Stream with one of those captures the reason says the capture keeps
   VA-API, instead of calling the host outside Gamescope Stream. One risk is known: nothing retires
   Vulkan Video on Gamescope Stream if it passes the probe and then fails on the live stream, which
@@ -325,9 +326,9 @@ starts at `v1.0.0`.
   selection reason for `encoder = vulkan` says which of the two a host gets, and a host that moves
   into or out of Gamescope Stream probes again, so what it advertises follows the route.
 
-- Arch and SteamOS packages keep link-time optimisation enabled. Vulkan Video and PyroWave now
-  use distinct loader symbols and scaler shader types, fixing the conflicts that previously
-  required disabling LTO.
+- Arch and SteamOS packages are built with link-time optimisation again; 1.4.13 built them
+  without it. Vulkan Video and PyroWave now use distinct loader symbols and scaler shader types,
+  fixing the conflicts that made 1.4.13 turn LTO off.
 
 - `sudo -H polaris --setup-host --enable-kms` no longer stops the Polaris user service from
   starting. It pointed the service at the DRM/KMS capture helper straight away, but only members of

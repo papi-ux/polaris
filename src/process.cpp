@@ -9550,7 +9550,7 @@ namespace proc {
     // A launch that said it will ask for PyroWave is refused here, with the reason, when its capture
     // route hands over frames PyroWave cannot read. Without the word from the client the refusal
     // waits for the handshake, which can only return a status, and before either existed it came at
-    // the first frame, after the client had built a decoder for a stream that carried nothing (#159).
+    // the first frame, after the client had built a decoder for a stream that carried nothing.
     if (!launch_session->input_only && !launch_session->watch_only &&
         launch_session->requested_video_codec == "pyrowave") {
       if (const auto refusal = video::pyrowave_capture_refusal(capture_generation)) {

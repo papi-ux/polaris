@@ -31,7 +31,7 @@ adaptive_bitrate_enabled = enabled
 max_sessions = 2
 ```
 
-These are the settings behind the recommended Headless Stream mode on a Linux host. Use `encoder = nvenc` on NVIDIA, `encoder = vaapi` on AMD/Intel Mesa VAAPI hosts, and `encoder = software` only as a fallback or diagnostic path. Vulkan Video is experimental: an explicit choice supports DRM/KMS, wlroots, and Portal capture, while Auto promotes it only for a compatible AMD private-stream route that passes an exact live-frame safety probe.
+These are the settings behind the recommended Headless Stream mode on a Linux host. Use `encoder = nvenc` on NVIDIA, `encoder = vaapi` on AMD/Intel Mesa VAAPI hosts, and `encoder = software` only as a fallback or diagnostic path. Vulkan Video is experimental: an explicit choice supports DRM/KMS, wlroots, and Portal capture, while Auto tries it first on AMD only for Private Stream, which checks an exact live frame, and for Gamescope Stream through the portal ([Vulkan Encoder](#vulkan-encoder)).
 
 The `encoder` key remains the host-wide default. Clients that advertise the typed session-encoder contract can ask Polaris to keep that default, use Auto, or require one backend for a single game. Polaris accepts only a backend compiled into the running build, validates it again against the live capture route at launch, and restores the host value at teardown. Auto is the only request allowed to fall back; a named backend fails closed instead of silently selecting another encoder.
 
@@ -608,8 +608,8 @@ the fallback:
   green; `encoder = vaapi` skips the attempt. Nothing retires Vulkan Video here if it passes the
   probe and then fails on the live stream, which only Private Stream can do so far; if a Gamescope
   Stream stream fails where VA-API worked, set `encoder = vaapi`. Gamescope Stream keeps a `capture`
-  set to `kms`, `wlr`, `x11` or `auto`, which can hand Vulkan Video GPU frames that nothing retires,
-  so Auto stays on VA-API there.
+  set to `kms`, `wlr` or `x11`, which can hand Vulkan Video GPU frames that nothing retires, so Auto
+  stays on VA-API there. A `capture` of `auto` loads as unset, so it goes through the portal.
 
   The codecs the host advertises follow the route. When Steam Game Mode takes Gamescope Stream or
   gives it back, or the host default mode changes, the next client request probes the encoder again.
@@ -628,7 +628,9 @@ frames reach the encoder through system memory. On Gamescope Stream through the 
 to advertise HDR (`hevc_mode = 3`) offers it anyway, as written, and such a stream ends at its first
 10-bit frame.
 
-Before selecting it, enable KMS host access once, restart Polaris, then set both overrides:
+Portal capture needs no setup for it: `encoder = vulkan` alone works there, with frames reaching
+the encoder through system memory. For the GPU-native path, where DRM/KMS frames stay on the
+encoder's GPU, enable KMS host access once and do what it prints, then set both overrides:
 
 ```bash
 sudo -H polaris --setup-host --enable-kms

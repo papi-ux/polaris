@@ -73,8 +73,9 @@ to Welcome.
 - **AMD / VAAPI** is the default-friendly path (`-DPOLARIS_ENABLE_CUDA=OFF`); choose the
   VAAPI encoder in the web UI. NVIDIA hosts: install the CUDA toolkit and use
   `-DPOLARIS_ENABLE_CUDA=ON`.
-- **Vulkan Video** is experimental and requires `shaderc`, `vulkan-devel`, explicit DRM/KMS
-  capture, and a driver exposing Vulkan Video encode. It does not require CUDA.
+- **Vulkan Video** is experimental and requires `shaderc`, `vulkan-devel`, and a driver exposing
+  Vulkan Video encode. It does not require CUDA or DRM/KMS capture: on portal capture its frames
+  reach the encoder through system memory, and KMS gives it the GPU-native path.
 
 ## 3. Optional: build an installable RPM
 

@@ -1,7 +1,7 @@
 /**
  * @file tests/unit/test_pyrowave_advice.cpp
- * @brief PyroWave's bitrate model, the request it becomes on the wire, and the fixture that holds the
- *        host to the figures Nova computes.
+ * @brief PyroWave's bitrate model, the request it becomes on the wire, and the fixture that pins the
+ *        host's figures.
  */
 #include "src/crypto.h"
 #include "src/pyrowave_advice.h"
@@ -70,7 +70,7 @@ TEST(StreamBitrateTests, TheRequestForAnEncoderRateIsTheSmallestThatReachesIt) {
   EXPECT_EQ(stream_bitrate::wire_kbps_for_encoder(-5, 10, 512), 0);
 }
 
-TEST(PyroWaveAdviceTests, TheModelMatchesNovaAtTheRevisionTheFixtureNames) {
+TEST(PyroWaveAdviceTests, TheModelMatchesTheFixtureAtTheRevisionItNames) {
   if (!pyrowave_advice::model_available()) {
     GTEST_SKIP() << "built without PyroWave, so there is no model to compare";
   }

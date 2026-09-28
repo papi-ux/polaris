@@ -25,6 +25,13 @@ describe('Vulkan Video settings contract', () => {
     expect(encoder).toContain('Explicit Vulkan selection is strict')
     expect(encoder).toContain('H.264 and HEVC are enabled; AV1 remains unavailable')
     expect(encoder).toContain('Doctor reports the detected driver')
+    // Auto tries Vulkan Video first on AMD Gamescope Stream through the portal as well, so the
+    // encoder checklist and the panel summary name it beside Private Stream.
+    const locale = JSON.parse(webSource('public/assets/locale/en.json')).config
+    expect(locale.av_checklist_encoder_copy_manual).toContain('Private Stream and for Gamescope Stream through the portal')
+    expect(locale.av_checklist_encoder_copy_manual).not.toContain('only on a live-validated AMD private stream')
+    const summary = webSource('views/ConfigView.vue').match(/id: "vulkan",[\s\S]*?summary: "([^"]*)"/)?.[1] ?? ''
+    expect(summary).toContain('Private Stream and Gamescope Stream')
     expect(encoder).toContain('id="vk_tune" class="settings-input"')
     expect(encoder).toContain('id="vk_rc_mode" class="settings-input"')
     expect(encoder).toContain('id="vk_quality" class="settings-input"')

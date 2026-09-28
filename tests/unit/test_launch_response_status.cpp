@@ -260,7 +260,7 @@ namespace {
 
 #ifdef POLARIS_BUILD_PYROWAVE
 TEST(LaunchRefusal, APyroWaveLaunchOnAnHdrDesktopIsRefusedByNameBeforeTheStream) {
-  // #159: KWin scans an HDR desktop out as ABGR16161616F. The launch used to succeed, the client
+  // KWin scans an HDR desktop out as ABGR16161616F. The launch used to succeed, the client
   // built a decoder, and the stream ended at its first frame having carried nothing.
   RestoreCaptureRouteFacts restore;
   platf::set_capture_route_facts_for_tests(platf::capture_route_facts_for_tests_t {"kms", "kms", 1211384385u});
@@ -344,7 +344,7 @@ TEST(PyroWaveOffer, CapabilitiesSaysWhyPyroWaveIsMissingInTheContractShape) {
 }
 
 TEST(LaunchRefusal, AStreamCannotJoinACaptureAnotherCodecsStreamHolds) {
-  // #78: one capture thread serves every stream and opens its display for the first one's memory
+  // One capture thread serves every stream and opens its display for the first one's memory
   // type, so a PyroWave stream beside an H.264 one, either way round, got no picture.
   rtsp_stream::set_cleanup_session_probe_for_tests([]() {});
   struct Restore {

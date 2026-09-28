@@ -131,10 +131,6 @@ namespace {
   };
 
   /**
-   * Luma samples from the encoder's frame, read back through FFmpeg, which waits on the timeline
-   * semaphores the conversion signalled. Returns the centre and the top-left corner.
-   */
-  /**
    * An encoder frame and the device that converts into it, set up the way video.cpp sets them up for
    * a session. The hardware device and the frames context are declared before the converting device
    * so they outlive it: its teardown still uses the Vulkan device, and it keeps a plain pointer to the
@@ -235,6 +231,10 @@ namespace {
     boost::shared_ptr<sink_t> sink_;
   };
 
+  /**
+   * Luma samples from the encoder's frame, read back through FFmpeg, which waits on the timeline
+   * semaphores the conversion signalled. Returns the centre and the top-left corner.
+   */
   std::pair<int, int> centre_and_corner_luma(AVFrame *hw_frame) {
     std::unique_ptr<AVFrame, void (*)(AVFrame *)> sw_frame {av_frame_alloc(), [](AVFrame *frame) {
                                                               av_frame_free(&frame);

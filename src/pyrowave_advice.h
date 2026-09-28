@@ -8,14 +8,14 @@
  * needed. The fit ships as eval-results/pyrowave_regression_results.h in the PyroWave tree Polaris
  * builds, and this evaluates it at 35 dB, the level the author calls the default good quality.
  *
- * Nova carries a port of the same header (nova#107), so the host and the client quote the same number
- * for the same picture. A picture outside the sizes the model was fitted on gets the bits per pixel of
- * the nearest edge, exactly as Nova extrapolates, and tests/fixtures/pyrowave-rate-model.json pins the
- * two ends to each other.
+ * Nova's matching estimator, a port of the same header, is in review, so that the host and the client
+ * can quote the same number for the same picture. A picture outside the sizes the model was fitted on
+ * gets the bits per pixel of the nearest edge, and tests/fixtures/pyrowave-rate-model.json pins the
+ * host's figures.
  *
  * The model's limits travel with every number it gives: an objective metric on four clips of about ten
  * frames each, luma only, sampled at 16:9, measured on SDR. It is not a measurement on any device.
- * papi's Retroid Pocket 6 found 200 Mbps right for Control at 1080p120 where the model asks about 359,
+ * On a Retroid Pocket 6, 200 Mbps was right for Control at 1080p120 where the model asks about 359,
  * which is why Doctor raises no further than the far figure and never past k_cap_kbps.
  */
 #pragma once
@@ -53,7 +53,7 @@ namespace pyrowave_advice {
   /// Stereo in high quality, which is what the pre-launch advice assumes the stream's audio costs.
   inline constexpr int k_default_audio_kbps = 512;
 
-  /// Which rule produced a figure. Named as Nova names them.
+  /// Which rule produced a figure. rule_name() gives the name the contract carries.
   enum class rule_e {
     none,  ///< A size or frame rate that is not positive, which describes no stream.
     model,  ///< The model's own estimate, 16:9 and inside the sizes it was fitted on.
@@ -72,7 +72,7 @@ namespace pyrowave_advice {
   /// One estimate of what the encoder needs.
   struct estimate_t {
     double mbps = 0.0;  ///< The model's figure, unrounded, in Mbps.
-    int kbps = 0;  ///< The same figure truncated to a whole kbps, as Nova truncates it.
+    int kbps = 0;  ///< The same figure truncated, not rounded, to a whole kbps.
     rule_e rule = rule_e::none;
   };
 

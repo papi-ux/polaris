@@ -270,7 +270,7 @@ TEST(KmsCaptureReadinessTests, ASessionWithoutTheGroupWaitsForALoginBeforeAnyRes
   facts.session_group = ke::session_group_e::not_live;
   EXPECT_EQ(kr::decide(facts), kr::state_e::waiting_for_login);
 
-  // What host setup leaves after #174: the drop-in parked under a name systemd ignores.
+  // What host setup leaves until the next login: the drop-in parked under a name systemd ignores.
   facts.service_points_at_helper = false;
   facts.parked = true;
   EXPECT_EQ(kr::decide(facts), kr::state_e::waiting_for_login);

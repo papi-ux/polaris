@@ -282,7 +282,7 @@ namespace linux_encoder_auto_policy {
              "Video is not tried. Auto tries Vulkan Video first only on labwc, the private compositor "
              "that Private Stream runs, which checks a live frame and can fall back if it fails, and on "
              "Gamescope Stream captured through the portal, whose probe runs the same system memory "
-             "upload as its stream. Gamescope Stream with capture set to kms, wlr, x11 or auto stays on "
+             "upload as its stream. Gamescope Stream with capture set to kms, wlr or x11 stays on "
              "VA-API. To use Vulkan Video here, set encoder = vulkan or choose Vulkan Video for one "
              "launch. AV1 is then unavailable, and on portal capture frames reach the encoder through "
              "system memory.";

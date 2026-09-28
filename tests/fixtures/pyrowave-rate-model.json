@@ -1,6 +1,6 @@
 {
-  "description": "The PyroWave bitrate model at 35 dB, as Nova computes it. Polaris and Nova quote the same number for the same picture only while both evaluate the same header the same way, and tests/unit/test_pyrowave_advice.cpp holds Polaris to these rows. Every mbps is the encoder's rate, before FEC, audio and overhead.",
-  "source": "Nova PR107 (branch feat/pyrowave-rate-estimator): the model rows are upstream's own answers from app/src/test/resources/pyrowave-rate-reference.csv, which tools/pyrowave_rate_model.py generates; the two edge rows follow PyroWaveDecoderRenderer.bitrateAdvice and PyroWaveBitrateAdviceTest.",
+  "description": "The PyroWave bitrate model at 35 dB, as the host computes it. tests/unit/test_pyrowave_advice.cpp holds Polaris to these rows. Nova's matching estimator is in review, and the two quote the same number for the same picture only while both evaluate the same header the same way. Every mbps is the encoder's rate, before FEC, audio and overhead.",
+  "source": "The model rows are upstream's own answers: the C function in the header below, compiled against it and run over a grid. The two edge rows follow the nearest edge rule src/pyrowave_advice.h describes.",
   "pyrowave_revision": "186f0393b77f7755953b5ecde994bb1cec2e4155",
   "header": "eval-results/pyrowave_regression_results.h",
   "header_sha256": "384e2ca2901318dd0e82a4bad44c7be902984382e87127d58c751b5ed95246a3",

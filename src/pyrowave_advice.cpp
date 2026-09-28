@@ -38,7 +38,7 @@ namespace pyrowave_advice {
     constexpr std::int64_t k_max_pixels = static_cast<std::int64_t>(k_largest_width) * k_largest_height;
     constexpr int k_height_factors = 16;
 
-    // The flat figure Nova advised before it had a model, measured by eye. Kept only as the last
+    // The flat figure Nova advises without a model, measured by eye. Kept only as the last
     // fallback, for a question the model and its edges cannot answer.
     constexpr double k_fallback_bits_per_pixel = 0.73;
 

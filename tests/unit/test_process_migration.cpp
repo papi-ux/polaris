@@ -1045,7 +1045,7 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
 }
 
 TEST(ProcessRuntimeConfigTests, TheAnnounceAv1RefusalLogsWhatTookAv1Away) {
-  // papi's call on #635a (finding 6): the client picks AV1 at ANNOUNCE, after the launch, so the
+  // #635: the client picks AV1 at ANNOUNCE, after the launch, so the
   // launch cannot refuse it by name, and the log line is the only place that says why. It logs the
   // sentence video::av1_announce_refusal() builds, not the fixed line it used to.
   const auto source = read_source_file_for_contract("src/rtsp.cpp");

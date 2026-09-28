@@ -7300,7 +7300,7 @@ namespace video {
              "so this stream is refused.";
     }
     if (selection.selected_encoder == "vulkan" && selection.policy == "amd_gamescope_vulkan_ram") {
-      // #635a: the launch cannot refuse this by name, because the client picks its codec at ANNOUNCE.
+      // #635: the launch cannot refuse this by name, because the client picks its codec at ANNOUNCE.
       return "The client asked for AV1, and on AMD Gamescope Stream Auto encodes with Vulkan Video, "
              "which carries no AV1, so this stream is refused. The client picked AV1 from the codecs "
              "the host offered before the launch, as a launch that switches into Gamescope Stream "

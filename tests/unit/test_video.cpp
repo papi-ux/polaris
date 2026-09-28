@@ -1310,7 +1310,8 @@ TEST(VideoAutoPolicyProbeTests, EveryOtherRouteAndDriverKeepsItsAutoChoice) {
 
 TEST(VideoAutoPolicyProbeTests, GamescopeStreamOnKmsWlrOrX11CaptureKeepsVaapi) {
   // Gamescope Stream keeps a configured kms, wlr or x11 capture, and those hand Vulkan Video GPU
-  // frames that nothing retires, so Auto stays on VA-API there. Unset fills to the portal.
+  // frames that nothing retires, so Auto stays on VA-API there. Unset fills to the portal, and so
+  // does auto, which the settings file loads as unset.
   const auto_probe_guard_t guard;
   for (const auto capture : {"kms", "wlr", "x11"}) {
     auto route = amd_gamescope_stream;
@@ -1323,11 +1324,13 @@ TEST(VideoAutoPolicyProbeTests, GamescopeStreamOnKmsWlrOrX11CaptureKeepsVaapi) {
     // Told it is on Gamescope Stream off the portal, never outside Gamescope Stream.
     EXPECT_EQ(probe.selection.reason.find("outside labwc and Gamescope Stream;"), std::string::npos) << probe.selection.reason;
     EXPECT_NE(
-      probe.selection.reason.find("Gamescope Stream with capture set to kms, wlr, x11 or auto stays on VA-API."),
+      probe.selection.reason.find("Gamescope Stream with capture set to kms, wlr or x11 stays on VA-API."),
       std::string::npos
     ) << probe.selection.reason;
   }
-  for (const auto capture : {"", "kwin"}) {
+  std::unordered_map<std::string, std::string> autodetect_vars {{"capture", "auto"}};
+  const auto autodetect = config::capture_setting(autodetect_vars, {});
+  for (const std::string_view capture : {std::string_view {}, std::string_view {"kwin"}, std::string_view {autodetect}}) {
     auto route = amd_gamescope_stream;
     route.capture = capture;
     const auto probe = probe_auto(route);
@@ -1512,7 +1515,7 @@ TEST(VideoAutoPolicyProbeTests, AnHdrLaunchOnGamescopeStreamIsRefusedForHdrWitho
 }
 
 TEST(VideoAutoPolicyProbeTests, ExplicitVulkanOnGamescopeStreamOffersNoHdrUnlessHevcSupportAsksForIt) {
-  // papi's call on #635a (finding 11): an explicit encoder = vulkan reads Gamescope Stream frames
+  // #635: an explicit encoder = vulkan reads Gamescope Stream frames
   // through the same 8-bit system memory upload as Auto's Vulkan Video, and the host offered Main10
   // with it from a probe that encoded a zeroed 8-bit frame. It now offers no HDR there unless HEVC
   // Support asks for it, which is kept as written. Off Gamescope Stream nothing changes.
@@ -1620,7 +1623,7 @@ TEST(VideoAutoPolicyProbeTests, ExplicitVulkanProbesAgainWhenTheRouteDecidesItsH
 }
 
 TEST(VideoAutoPolicyProbeTests, AnAv1RefusalAtAnnounceSaysWhatTookAv1Away) {
-  // papi's call on #635a (finding 6): a launch that switches into Gamescope Stream on AMD cannot be
+  // #635: a launch that switches into Gamescope Stream on AMD cannot be
   // refused for AV1 by name, because the client picks its codec at ANNOUNCE, after the launch. The
   // refusal there logged "AV1 is disabled, yet the client requested AV1" whatever took AV1 away.
   const auto_probe_guard_t guard;
