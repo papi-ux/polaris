@@ -674,10 +674,16 @@ const aiDoctorCategoriesText = computed(() => `${i18n.t('troubleshooting.ai_doct
 const doctorPlainDiagnosis = computed(() => {
   const doctor = doctorPayload.value
   if (doctor?.simple_state || doctor?.summary || doctor?.diagnosis) {
+    const title = doctor.simple_state || doctor.summary || doctor.diagnosis
+    // The title is often only "Needs attention", and the summary is what says what happened.
+    const summary = doctor.summary && doctor.summary !== title ? doctor.summary : ''
+    // Manual guidance carries its next step as the reason Doctor cannot act, which says more than "Manual".
+    const action = doctor.safe_recovery_action
+    const guidance = action?.kind === 'manual_guidance' ? action.unavailable_reason : ''
     return {
-      title: doctor.simple_state || doctor.summary || doctor.diagnosis,
-      detail: doctor.detail || doctor.reason || i18n.t('troubleshooting.doctor_plain_diagnosis_desc'),
-      action: doctor.safe_recovery_action?.label || doctor.safe_recovery_action?.id || i18n.t('troubleshooting.doctor_plain_diagnosis_action'),
+      title,
+      detail: doctor.detail || doctor.reason || summary || i18n.t('troubleshooting.doctor_plain_diagnosis_desc'),
+      action: guidance || action?.label || action?.id || i18n.t('troubleshooting.doctor_plain_diagnosis_action'),
     }
   }
 
@@ -706,7 +712,13 @@ const doctorAdvancedItems = computed(() => {
   return [
     { label: i18n.t('troubleshooting.doctor_issue'), value: doctor.primary_issue || none },
     { label: i18n.t('troubleshooting.doctor_action'), value: doctor.safe_recovery_action?.id || none },
-    { label: i18n.t('troubleshooting.doctor_client'), value: s.client_name || s.client_type || unknown },
+    {
+      label: i18n.t('troubleshooting.doctor_client'),
+      value: s.client_name || s.client_type ||
+        (!s.streaming && s.last_session?.client_name ?
+          i18n.t('troubleshooting.doctor_client_last', { client: s.last_session.client_name }) :
+          unknown),
+    },
     { label: i18n.t('troubleshooting.doctor_runtime'), value: s.launch_mode || s.stream_display_mode || s.runtime_backend || unknown },
     { label: i18n.t('troubleshooting.doctor_capture_path'), value: s.capture_path || s.capture_transport || unknown },
     { label: i18n.t('troubleshooting.doctor_capture_reason'), value: s.capture_path_reason || unknown },

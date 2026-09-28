@@ -599,11 +599,23 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
   const authPairingIssue = latestIssueMatching(logs, ['auth', 'pair', 'pin', 'credential', 'unauthorized', 'forbidden'])
   const recentIssueCount = Array.isArray(recentIssues) ? recentIssues.length : 0
 
+  // A start the client left during its own video setup. The host names it once nothing streams,
+  // and "no active stream" would only repeat what the person already knows.
+  const doctor = stats?.doctor || {}
+  const failedStart = statsConnected && !streaming && doctor.primary_issue === 'stream_failed_to_start'
   const connection = !statsConnected
     ? checklistItem('connection', 'Connection', 'warning', 'Stream telemetry is disconnected, so Polaris cannot confirm the live session path yet.', 'Refresh the page, verify the host is reachable, then start or resume the stream.')
     : streaming
       ? checklistItem('connection', 'Connection', 'pass', 'Live telemetry is connected and a stream is active.', 'Keep this page open while reproducing the issue.')
-      : checklistItem('connection', 'Connection', 'warning', 'Telemetry is connected, but no active stream is running.', 'Start the affected game/session before exporting diagnostics.')
+      : failedStart
+        ? checklistItem(
+          'connection',
+          'Connection',
+          'fail',
+          firstNonEmpty(doctor.summary, 'The last stream failed to start: the client left during video setup.'),
+          firstNonEmpty(doctor.recommendation?.body, 'The client stopped during video setup; its own error message names the cause.')
+        )
+        : checklistItem('connection', 'Connection', 'warning', 'Telemetry is connected, but no active stream is running.', 'Start the affected game/session before exporting diagnostics.')
   const hostConfig = hostConfigurationWarningItems(stats)
   const displayMode = displayModeOverrideItem(stats)
 
@@ -730,6 +742,35 @@ function formatGpuNativeProbe(probe = {}) {
   return `${outcomes} — selected ${formatIssueValue(probe.selected_strategy || probe.selectedStrategy, 'unknown')}, fallback ${formatIssueValue(probe.fallback, 'none')}`
 }
 
+// XDG_CURRENT_DESKTOP names the desktop. Plasma always composites with KWin and GNOME with Mutter,
+// so those two can name their compositor too; any other desktop is reported as itself.
+function desktopCompositor(desktop) {
+  const value = String(desktop || '').trim()
+  if (!value || lower(value) === 'unknown') return ''
+  const parts = value.split(':').map((part) => part.trim().toUpperCase())
+  if (parts.includes('KDE')) return 'KDE Plasma (KWin)'
+  if (parts.includes('GNOME')) return 'GNOME (Mutter)'
+  return value
+}
+
+// The client a support report names, or empty when there is none to name. The console fills a
+// missing client with the word "unknown", which is not a client. With nothing streaming, the client
+// that matters is the one the last stream was for, said as such.
+function describeSupportClient(client = {}, stats = {}) {
+  const type = firstNonEmpty(lower(client.type) === 'unknown' ? '' : client.type, stats.client_type, stats.client_name)
+  const name = firstNonEmpty(client.name, stats.client_name)
+  if (type) return `${formatIssueValue(type)}${name ? ` (${formatIssueValue(name)})` : ''}`
+  const lastClient = !stats.streaming ? firstNonEmpty(stats.last_session?.client_name) : ''
+  return lastClient ? `${formatIssueValue(lastClient)} (last stream)` : ''
+}
+
+// Safe actions a support report can name. Exporting the bundle is what made the report, so
+// suggesting it inside the report sends the reader in a circle.
+function reportableSafeAction(action) {
+  const id = String(action?.id || '')
+  return id && id !== 'none' && id !== 'export_support_bundle' ? action : null
+}
+
 function formatIssueNumber(value, digits = 1, fallback = 'unknown') {
   const numeric = Number(value)
   return Number.isFinite(numeric) ? numeric.toFixed(digits) : fallback
@@ -838,9 +879,8 @@ export function buildGithubIssueDraft(input = {}, { addresses = new NetworkAddre
   const driver = firstNonEmpty(system?.gpu?.driver, system?.driver, config.driver, stats.driver)
   const distro = firstNonEmpty(system?.os?.distro, system?.distro, config.distro, safeInput.platform)
   const sessionType = firstNonEmpty(system?.session?.type, system?.session_type, config.session_type, stats.session_type)
-  const compositor = firstNonEmpty(system?.session?.compositor, system?.compositor, config.compositor, stats.compositor)
-  const clientType = firstNonEmpty(client.type, stats.client_type, stats.client_name, 'unknown')
-  const clientName = firstNonEmpty(client.name, stats.client_name)
+  const compositor = firstNonEmpty(system?.session?.compositor, system?.compositor, config.compositor, stats.compositor, desktopCompositor(system?.display_session?.desktop))
+  const clientLine = describeSupportClient(client, stats)
   const capture = `${formatIssueValue(stats.capture_path || stats.capture_transport, 'unknown')} — ${formatIssueValue(stats.capture_path_reason, 'unknown')}`
   const gpuProfile = linuxGpuProfile(stats)
   const gpuNativeProbe = stats.gpu_native_probe || stats.gpuNativeProbe || {}
@@ -865,6 +905,10 @@ export function buildGithubIssueDraft(input = {}, { addresses = new NetworkAddre
   if (encoderAdapter && adapterPairingDevice && adapterPairing) gpuDiagnosticLines.push(issueDraftLine('Adapter pairing', adapterPairing))
   if (Object.keys(gpuNativeProbe).length > 0) gpuDiagnosticLines.push(issueDraftLine('GPU-native probe', probeSummary))
   const doctorSummary = firstNonEmpty(doctor.simple_state, doctor.summary, doctor.diagnosis, doctor.primary_issue, 'Polaris did not include a Doctor diagnosis yet.')
+  // The headline is often only "Needs attention"; the summary says what happened.
+  const doctorDetail = doctor.summary && doctor.summary !== doctorSummary ? doctor.summary : ''
+  const doctorNextStep = doctor.primary_issue && doctor.primary_issue !== 'none' ? firstNonEmpty(doctor.recommendation?.body) : ''
+  const safeAction = reportableSafeAction(doctor.safe_recovery_action)
   const crashSection = formatCrashSection(safeInput.crash || {})
   const silentFailureSection = formatSilentFailures(safeInput.silent_failures || doctor.silent_failures || [])
 
@@ -879,7 +923,7 @@ export function buildGithubIssueDraft(input = {}, { addresses = new NetworkAddre
     issueDraftLine('GPU', gpu),
     issueDraftLine('Driver', driver),
     issueDraftLine('Session/compositor', `${formatIssueValue(sessionType)} / ${formatIssueValue(compositor)}`),
-    issueDraftLine('Client', `${formatIssueValue(clientType)}${clientName ? ` (${formatIssueValue(clientName)})` : ''}`),
+    issueDraftLine('Client', clientLine),
     ...(crashSection ? ['', '## How the previous run ended', crashSection] : []),
     '',
     '## Stream evidence',
@@ -893,10 +937,14 @@ export function buildGithubIssueDraft(input = {}, { addresses = new NetworkAddre
     '',
     '## What Polaris thinks happened',
     formatIssueValue(doctorSummary, 'No Doctor summary was included.'),
+    doctorDetail ? `
+${formatIssueValue(doctorDetail)}` : '',
     doctor.primary_issue ? `
 Primary issue: ${formatIssueValue(doctor.primary_issue)}` : '',
-    doctor.safe_recovery_action?.id ? `
-Suggested safe action: ${formatIssueValue(doctor.safe_recovery_action.id)}${doctor.safe_recovery_action.destructive ? ' (destructive)' : ' (non-destructive)'}` : '',
+    doctorNextStep ? `
+Next step: ${formatIssueValue(doctorNextStep)}` : '',
+    safeAction ? `
+Suggested safe action: ${formatIssueValue(safeAction.id)}${safeAction.destructive ? ' (destructive)' : ' (non-destructive)'}` : '',
     '',
     '## Fix My Stream checklist',
     formatChecklist(safeInput.fix_my_stream_checklist),
@@ -1319,7 +1367,8 @@ export function buildGithubIssueUrl(input = {}, options = {}) {
     ['describe-bug', describeBug],
     ['host-os', String(firstNonEmpty(system?.os?.distro, system?.distro, config.distro, safeInput.platform) || '')],
     ['gpu', [firstNonEmpty(system?.gpu?.name, system?.gpu_name, config.gpu, stats.gpu_name), firstNonEmpty(system?.gpu?.driver, system?.driver, config.driver)].filter(Boolean).join(' / ')],
-    ['client', [firstNonEmpty(client.type, stats.client_type, stats.client_name), firstNonEmpty(client.name, stats.client_name)].filter(Boolean).join(' ')],
+    // The same client the report's Client line names, so the form never says "unknown" for it.
+    ['client', describeSupportClient(client, stats)],
     ['runtime', [firstNonEmpty(stats.launch_mode, stats.stream_display_mode, stats.runtime_backend), firstNonEmpty(stats.capture_path, stats.capture_transport), firstNonEmpty(stats.encoder, stats.encode_target_device)].filter(Boolean).join(' / ')],
     ['additional', `Polaris version ${formatIssueValue(safeInput.version)}. Attach the exported support bundle to this issue; it carries the full redacted evidence.`],
   ]

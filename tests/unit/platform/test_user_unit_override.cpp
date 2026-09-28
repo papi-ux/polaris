@@ -160,6 +160,59 @@ TEST(UserUnitOverrideTests, DescribesWhetherTheRunningBinaryIsThePackagedOne) {
   EXPECT_EQ(described.packaged_path, packaged.string());
 }
 
+TEST(UserUnitOverrideTests, ThePackagedKmsHelperIsPackagedAndACopyOfItIsNot) {
+  // A host that runs the polaris-kms helper read as running a stale copy that package updates never
+  // touch, which is the one thing the helper is not: the package replaces it on every update.
+  scratch_t scratch;
+  const auto packaged = scratch.file("usr/bin/polaris", "#!/bin/sh\n", true);
+  const auto helper = scratch.file("usr/libexec/polaris/polaris-kms", "#!/bin/sh\n", true);
+  const auto copy = scratch.file("usr/local/bin/polaris-kms", "#!/bin/sh\n", true);
+
+  auto described = uu::describe_running_binary(helper, packaged.string(), helper.string());
+  EXPECT_TRUE(described.kms_helper);
+  EXPECT_EQ(described.matches_package, std::optional<bool> {true});
+  EXPECT_EQ(described.path, helper.string());
+  EXPECT_EQ(described.packaged_path, helper.string());
+  EXPECT_EQ(uu::running_binary_note(described), "This is the packaged DRM/KMS helper from polaris-kms.");
+
+  // The copy the old Bazzite guide made keeps its warning, helper or not.
+  described = uu::describe_running_binary(copy, packaged.string(), helper.string());
+  EXPECT_FALSE(described.kms_helper);
+  EXPECT_EQ(described.matches_package, std::optional<bool> {false});
+  EXPECT_EQ(described.packaged_path, packaged.string());
+  const auto copy_note = uu::running_binary_note(described);
+  EXPECT_NE(copy_note.find("That is not the packaged " + packaged.string()), std::string::npos) << copy_note;
+  EXPECT_NE(copy_note.find("package updates do not change a copy"), std::string::npos) << copy_note;
+
+  // The main binary is still the packaged binary with a helper beside it.
+  described = uu::describe_running_binary(packaged, packaged.string(), helper.string());
+  EXPECT_FALSE(described.kms_helper);
+  EXPECT_EQ(described.matches_package, std::optional<bool> {true});
+  EXPECT_EQ(uu::running_binary_note(described), "This is the packaged binary.");
+
+  // A non-packaged build knows nothing to compare against, and says nothing.
+  described = uu::describe_running_binary(copy, "polaris", "");
+  EXPECT_FALSE(described.matches_package.has_value());
+  EXPECT_EQ(uu::running_binary_note(described), "");
+}
+
+TEST(UserUnitOverrideTests, ABinaryAnUpdateReplacedIsStillThePackagedOne) {
+  // /proc/self/exe reads "<path> (deleted)" once the package replaces the file a process runs. That
+  // is the packaged path with the old version still running, which a restart fixes, not a copy.
+  scratch_t scratch;
+  const auto packaged = scratch.file("usr/bin/polaris", "#!/bin/sh\n", true);
+  const auto helper = scratch.file("usr/libexec/polaris/polaris-kms", "#!/bin/sh\n", true);
+
+  auto described = uu::describe_running_binary(fs::path {packaged.string() + " (deleted)"}, packaged.string(), helper.string());
+  EXPECT_EQ(described.path, packaged.string());
+  EXPECT_EQ(described.matches_package, std::optional<bool> {true});
+  EXPECT_FALSE(described.kms_helper);
+
+  described = uu::describe_running_binary(fs::path {helper.string() + " (deleted)"}, packaged.string(), helper.string());
+  EXPECT_TRUE(described.kms_helper);
+  EXPECT_EQ(described.matches_package, std::optional<bool> {true});
+}
+
 TEST(UserUnitOverrideTests, SetupHostAdviceNamesTheMissingCopyAndBothWaysOut) {
   scratch_t scratch;
   const auto packaged = scratch.file("usr/bin/polaris", "#!/bin/sh\n", true);

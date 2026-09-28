@@ -31,6 +31,7 @@
 #include "crypto.h"
 #include "logging.h"
 #include "network.h"
+#include "stream_start_outcome.h"
 #include "stream_stats.h"
 #include "utility.h"
 #include "verified_action.h"
@@ -596,6 +597,12 @@ namespace stream_stats {
       if (!ended.pyrowave_route.empty()) {
         session["pyrowave_route"] = ended.pyrowave_route;
       }
+      if (!ended.start_outcome.empty()) {
+        session["start"] = {{"outcome", ended.start_outcome}};
+        if (ended.start_client_left_after_ms >= 0) {
+          session["start"]["client_left_after_ms"] = ended.start_client_left_after_ms;
+        }
+      }
       return session;
     }
 
@@ -824,6 +831,9 @@ namespace stream_stats {
       }
       if (!c.pyrowave_route.empty()) {
         cj["pyrowave_route"] = c.pyrowave_route;
+      }
+      if (!c.start_outcome.empty()) {
+        cj["start_outcome"] = c.start_outcome;
       }
       cj["latency_ms"] = c.latency_ms;
       cj["packet_loss"] = c.packet_loss;
@@ -1867,6 +1877,66 @@ namespace stream_stats {
       });
     }
 
+    /// How long a failed start stays the thing Doctor leads with once nothing is streaming.
+    constexpr auto DOCTOR_FAILED_START_WINDOW = std::chrono::minutes {15};
+
+    /// Whether an ended session ended within the window before now. A clock set back reads as recent.
+    bool ended_within(const ended_session_t &ended, std::chrono::system_clock::time_point now,
+                      std::chrono::system_clock::duration window) {
+      if (ended.ended_at == std::chrono::system_clock::time_point {}) {
+        return false;
+      }
+      return ended.ended_at >= now || now - ended.ended_at <= window;
+    }
+
+    /**
+     * The last session, when it was a start the client gave up on during its own video setup, nothing
+     * streams now, and it ended recently enough to be what someone opening Doctor is asking about.
+     */
+    const ended_session_t *recent_failed_start(const stats_t &stats, std::chrono::system_clock::time_point now) {
+      if (stats.streaming || !stats.last_session) {
+        return nullptr;
+      }
+      const auto &last = *stats.last_session;
+      if (last.start_outcome != stream_start::k_client_left_during_setup ||
+          !ended_within(last, now, DOCTOR_FAILED_START_WINDOW)) {
+        return nullptr;
+      }
+      return &last;
+    }
+
+    /// "The last stream, to <client>" or "The last stream", for the sentences below.
+    std::string last_stream_subject(const ended_session_t &ended) {
+      return ended.client_name.empty() ? std::string {"The last stream"} :
+                                         "The last stream, to " + ended.client_name + ",";
+    }
+
+    /// What Doctor says about a start the client left during video setup.
+    std::string failed_start_summary(const ended_session_t &ended) {
+      std::string summary = last_stream_subject(ended) + " failed to start: the client left during video setup";
+      if (ended.start_client_left_after_ms >= 0) {
+        summary += " " + std::to_string(ended.start_client_left_after_ms) + " ms after connecting";
+      }
+      summary += ", before any video arrived.";
+      if (const auto codec = stream_start::codec_label(ended.codec); !codec.empty()) {
+        summary += " It had negotiated " + std::string {codec} + ".";
+      }
+      return summary;
+    }
+
+    nlohmann::json failed_start_recommendation(const ended_session_t &ended, const std::string &summary) {
+      const bool pyrowave = ended.codec == "pyrowave";
+      return {
+        {"title", "Try this first"},
+        {"body", stream_start::failed_start_next_step(ended.codec)},
+        {"why", summary},
+        {"next_step_label", pyrowave ? "Choose HEVC or H.264" : "Read the client's error"},
+        {"expected_effect", pyrowave ?
+           "The next stream starts on a codec that device can decode." :
+           "The client's own message says what stopped it, such as a decoder it could not create."}
+      };
+    }
+
     /// What Doctor's recommendation and action need to know about a PyroWave stream.
     struct pyrowave_doctor_t {
       /// The stream is PyroWave and its shape gives advice.
@@ -2044,7 +2114,8 @@ namespace stream_stats {
                                       bool auto_safe_managing,
                                       const pyrowave_doctor_t &pyrowave,
                                       const std::string &source_result_id,
-                                      std::string_view app_uuid) {
+                                      std::string_view app_uuid,
+                                      const std::string &failed_start_next_step = {}) {
       std::string id = "none";
       std::string label = "No automatic action";
       std::string kind = "none";
@@ -2194,6 +2265,18 @@ namespace stream_stats {
           {"delay_seconds", 0},
           {"endpoint", ""},
           {"success_when", nlohmann::json::array({"Steam Input host opt-in and per-game overrides are reviewed manually"})}
+        };
+      } else if (primary_issue == "stream_failed_to_start") {
+        id = "none";
+        label = "Manual";
+        kind = "manual_guidance";
+        unavailable_reason = failed_start_next_step;
+        rollback = "Read-only guidance; Doctor changes nothing.";
+        verification = {
+          {"mode", "manual_client_change"},
+          {"delay_seconds", 0},
+          {"endpoint", ""},
+          {"success_when", nlohmann::json::array({"the next stream from that client starts"})}
         };
       } else if (primary_issue == "no_active_stream" || primary_issue == "capture_missing") {
         id = "export_support_bundle";
@@ -2373,6 +2456,8 @@ namespace stream_stats {
       strict_gamepad_isolation &&
       (stats.input_steam_profiles_with_xbox_support > 0 ||
        stats.input_steam_forced_app_count > 0);
+    const auto doctor_now = std::chrono::system_clock::now();
+    const ended_session_t *const failed_start = recent_failed_start(stats, doctor_now);
 
     std::string primary_issue = health.value("primary_issue", std::string {});
     if (primary_issue == "steady" || primary_issue == "none") primary_issue.clear();
@@ -2404,6 +2489,11 @@ namespace stream_stats {
       // controller is structurally dead inside the strict sandbox.
       primary_issue = "steam_input_conflict";
     }
+    if (failed_start) {
+      // Nothing streams, so no live finding is current, and a start that just failed is what the
+      // person opening Doctor is looking at. "No active stream" told them only what they knew.
+      primary_issue = "stream_failed_to_start";
+    }
     if (primary_issue.empty()) {
       if (!stats.streaming) primary_issue = "no_active_stream";
       else if (network_fail) primary_issue = "network_jitter";
@@ -2432,7 +2522,12 @@ namespace stream_stats {
       (!health_claims_network_jitter || network_fail) &&
       !health_claims_unconfirmed_frame_pacing &&
       !health_claims_unconfirmed_capture_pressure;
-    if (primary_issue == "no_active_stream" || primary_issue == "capture_missing") {
+    if (primary_issue == "stream_failed_to_start") {
+      traffic = "amber";
+      status = "needs_action";
+      severity = "warning";
+      simple_state = "Needs attention";
+    } else if (primary_issue == "no_active_stream" || primary_issue == "capture_missing") {
       traffic = "amber";
       status = "unknown";
       severity = "warning";
@@ -2469,6 +2564,7 @@ namespace stream_stats {
     }
     const std::string summary =
       primary_issue == "none" ? "Streaming telemetry looks ready." :
+      primary_issue == "stream_failed_to_start" ? failed_start_summary(*failed_start) :
       primary_issue == "no_active_stream" ? "No active stream is running, so Doctor cannot verify the live path yet." :
       primary_issue == "capture_missing" ? "Capture metadata has not arrived yet; start a stream before tuning advanced settings." :
       primary_issue == "network_jitter" ? "Sustained network pressure is affecting this stream." :
@@ -2485,6 +2581,30 @@ namespace stream_stats {
 
     nlohmann::json evidence = nlohmann::json::array();
     append_doctor_evidence(evidence, "streaming", "Active stream", stats.streaming, "", stats.streaming ? "pass" : "unknown", "stream_stats", stats.streaming ? "A stream is active." : "No active stream is reporting live telemetry.");
+    // How the last stream's start ended, while nothing streams. Right after "no active stream",
+    // because a start that failed is usually why nothing is.
+    if (!stats.streaming && stats.last_session && !stats.last_session->start_outcome.empty()) {
+      const auto &last = *stats.last_session;
+      const bool recent = ended_within(last, doctor_now, DOCTOR_FAILED_START_WINDOW);
+      std::string row_status = "info";
+      std::string detail;
+      if (last.start_outcome == stream_start::k_client_left_during_setup) {
+        row_status = recent ? "fail" : "info";
+        detail = failed_start_summary(last);
+      } else if (last.start_outcome == stream_start::k_no_ping) {
+        // Written when a socket's wait for its first ping runs out, even after the other socket heard
+        // from the client, so it names the wait rather than claiming neither packet came.
+        row_status = recent ? "watch" : "info";
+        detail = last_stream_subject(last) +
+                 " ended waiting for a first packet from the client on its video or audio port. A firewall "
+                 "or a UDP path problem between the client and this host usually does that.";
+      } else {
+        row_status = "pass";
+        detail = last_stream_subject(last) + " started: the client's first video or audio packet arrived.";
+      }
+      append_doctor_evidence(evidence, "last_stream_start", "Last stream start", last.start_outcome, "", row_status,
+                             "stream_session", detail);
+    }
 #ifdef __linux__
     // Which binary produced this report. The Bazzite DRM/KMS recipe runs a copy
     // outside the package, and that copy stays on the old version across
@@ -2494,11 +2614,8 @@ namespace stream_stats {
       const auto binary = platf::user_unit::describe_running_binary(*running, POLARIS_EXECUTABLE_PATH);
       const bool outside_package = binary.matches_package == std::optional<bool> {false};
       std::string detail = std::string {"Polaris "} + PROJECT_VERSION + " is running from " + binary.path + ".";
-      if (outside_package) {
-        detail += " That is not the packaged " + binary.packaged_path +
-                  "; package updates do not change a copy, so refresh it from the package or remove the service drop-in after updating.";
-      } else if (binary.matches_package) {
-        detail += " This is the packaged binary.";
+      if (const auto note = platf::user_unit::running_binary_note(binary); !note.empty()) {
+        detail += " " + note;
       }
       append_doctor_evidence(evidence, "running_binary", "Running binary", binary.path, "", outside_package ? "watch" : "pass", "process", detail);
     }
@@ -2808,6 +2925,10 @@ namespace stream_stats {
       confidence_score = 0.98;
       confidence_level = "high";
       basis = "local_steam_config_and_isolation_plan";
+    } else if (primary_issue == "stream_failed_to_start") {
+      confidence_score = 0.9;
+      confidence_level = "high";
+      basis = "host_session_record";
     } else if (primary_issue == "quality_reduced_live") {
       confidence_score = 0.96;
       confidence_level = "high";
@@ -2875,10 +2996,12 @@ namespace stream_stats {
       }}
     };
     doctor["summary"] = summary;
-    doctor["recommendation"] = doctor_recommendation(
-      primary_issue, summary, health, live_bitrate_tunable, single_session_scope,
-      auto_safe_managing, pyrowave_doctor
-    );
+    doctor["recommendation"] = failed_start ?
+      failed_start_recommendation(*failed_start, summary) :
+      doctor_recommendation(
+        primary_issue, summary, health, live_bitrate_tunable, single_session_scope,
+        auto_safe_managing, pyrowave_doctor
+      );
     doctor["evidence"] = std::move(evidence);
     doctor["advanced_evidence"] = std::move(advanced);
     doctor["safe_recovery_action"] = doctor_safe_action(
@@ -2891,7 +3014,8 @@ namespace stream_stats {
       auto_safe_managing,
       pyrowave_doctor,
       doctor["result_id"].get<std::string>(),
-      app_uuid
+      app_uuid,
+      failed_start ? stream_start::failed_start_next_step(failed_start->codec) : std::string {}
     );
     doctor["suppressed_findings"] = nlohmann::json::array();
     if (suppressed_stale_network_finding) {
@@ -3066,6 +3190,8 @@ namespace stream_stats {
           .codec = ending->codec,
           .encoder_backend = ending->encoder_backend,
           .pyrowave_route = ending->pyrowave_route,
+          .start_outcome = ending->start_outcome,
+          .start_client_left_after_ms = ending->start_client_left_after_ms,
         };
       }
     }
@@ -3271,6 +3397,20 @@ namespace stream_stats {
       });
     if (client == current_stats.clients.end()) return false;
     client->pyrowave_route = route;
+    return true;
+  }
+
+  bool record_start_outcome(std::uint64_t session_generation, std::string_view outcome,
+                            std::int64_t client_left_after_ms) {
+    if (session_generation == 0 || outcome.empty()) return false;
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == current_stats.clients.end()) return false;
+    client->start_outcome = outcome;
+    client->start_client_left_after_ms = client_left_after_ms >= 0 ? client_left_after_ms : -1;
     return true;
   }
 

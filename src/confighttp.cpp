@@ -9056,6 +9056,19 @@ namespace confighttp {
         gpu = nlohmann::json::object();
         gpu["name"] = fields[0];
         gpu["vendor"] = "nvidia";
+        // The support report's Driver line read "unknown" on every NVIDIA host. The kernel module
+        // names the driver version, and reading it costs no process.
+        if (std::ifstream module_version {"/sys/module/nvidia/version"}; module_version) {
+          std::string version;
+          if (std::getline(module_version, version)) {
+            const auto end = version.find_last_not_of(" \t\r");
+            version.erase(end == std::string::npos ? 0 : end + 1);
+            if (!version.empty()) {
+              gpu["driver"] = "NVIDIA " + version;
+              gpu["driver_version"] = version;
+            }
+          }
+        }
         try {
           gpu["temperature_c"] = std::stoi(fields[1]);
           gpu["utilization_pct"] = std::stoi(fields[2]);
@@ -9465,6 +9478,7 @@ namespace confighttp {
       output["running_binary"]["version"] = PROJECT_VERSION;
       output["running_binary"]["packaged_path"] = binary.packaged_path.empty() ? nlohmann::json(nullptr) : nlohmann::json(binary.packaged_path);
       output["running_binary"]["matches_package"] = binary.matches_package ? nlohmann::json(*binary.matches_package) : nlohmann::json(nullptr);
+      output["running_binary"]["kms_helper"] = binary.kms_helper;
     }
     if (!account_home.empty()) {
       const auto override = platf::user_unit::effective_exec_override(account_home / ".config/systemd/user/polaris.service.d");

@@ -197,6 +197,21 @@ A reported running session does not verify its video or input.
 These checks read diagnostics without changing host setup or the stream's Doctor verdict and Auto
 Fix action. Opening **Spaces** is the next step when a setup finding needs attention.
 
+## When the stream never started
+
+A client that negotiates a stream and then cannot build its decoder leaves during video setup, so
+there is no stream left to measure. For fifteen minutes after such a start, while nothing streams,
+Doctor's primary issue is `stream_failed_to_start`. It names the client and the codec it
+negotiated, and the Fix My Stream checklist and the support report lead with it. When the codec was
+PyroWave, the client could not start its PyroWave decoder: choose HEVC or H.264 for that device, or
+update the client. For any other codec, the client's own error message names the cause.
+
+The host log names that start in one line that begins
+`Stream failed to start for [<client>]: the client left during video setup`. A client that stays
+connected while its video never arrives, or leaves only after waiting several seconds for it, logs
+`Initial Ping Timeout` instead, with the UDP port it waited on. That usually means a firewall or a
+UDP path problem between the client and the host.
+
 ## Pick the offered action
 
 Doctor uses a small action vocabulary so the button says what will happen:

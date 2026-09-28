@@ -404,6 +404,94 @@ describe('GitHub issue draft support flow', () => {
 })
 
 
+describe('support report after a stream that failed to start', () => {
+  // What the host serves once an Android TV client negotiated PyroWave, could not build the
+  // decoder, and left during video setup.
+  const failedStartDoctor = {
+    simple_state: 'Needs attention',
+    summary: 'The last stream, to Living Room TV, failed to start: the client left during video setup 113 ms after connecting, before any video arrived. It had negotiated PyroWave.',
+    primary_issue: 'stream_failed_to_start',
+    recommendation: { body: 'The client could not start its PyroWave decoder. Choose HEVC or H.264 for that device, or update the client.' },
+    safe_recovery_action: { id: 'none', kind: 'manual_guidance', label: 'Manual', destructive: false },
+    evidence: [{ id: 'last_stream_start', detail: 'The last stream, to Living Room TV, failed to start: the client left during video setup 113 ms after connecting, before any video arrived. It had negotiated PyroWave.' }],
+  }
+  const failedStartStats = {
+    streaming: false,
+    doctor: failedStartDoctor,
+    last_session: { state: 'ended', client_name: 'Living Room TV', codec: 'pyrowave', start: { outcome: 'client_left_during_setup', client_left_after_ms: 113 } },
+  }
+
+  it('names the failed start, its next step, and no circular export', () => {
+    const draft = buildGithubIssueDraft({
+      version: '1.4.14',
+      session_snapshot: failedStartStats,
+      client: { type: 'unknown', name: '' },
+      system_stats: {
+        gpu: { name: 'NVIDIA GeForce RTX 4090', vendor: 'nvidia', driver: 'NVIDIA 615.71.09', driver_version: '615.71.09' },
+        session_type: 'wayland',
+        display_session: { session_type: 'wayland', desktop: 'KDE' },
+      },
+    })
+
+    expect(draft).toContain('- Driver: NVIDIA 615.71.09')
+    expect(draft).toContain('- Session/compositor: wayland / KDE Plasma (KWin)')
+    expect(draft).toContain('- Client: Living Room TV (last stream)')
+    expect(draft).toContain('Needs attention\n\nThe last stream, to Living Room TV, failed to start: the client left during video setup 113 ms after connecting, before any video arrived. It had negotiated PyroWave.')
+    expect(draft).toContain('Primary issue: stream_failed_to_start')
+    expect(draft).toContain('Next step: The client could not start its PyroWave decoder. Choose HEVC or H.264 for that device, or update the client.')
+    expect(draft).not.toContain('Suggested safe action')
+    expect(draft).not.toContain('export_support_bundle')
+  })
+
+  it('never suggests exporting the report from inside it', () => {
+    const draft = buildGithubIssueDraft({
+      session_snapshot: {
+        streaming: false,
+        doctor: {
+          simple_state: 'Needs attention',
+          summary: 'No active stream is running, so Doctor cannot verify the live path yet.',
+          primary_issue: 'no_active_stream',
+          safe_recovery_action: { id: 'export_support_bundle', destructive: false },
+        },
+      },
+    })
+    expect(draft).toContain('Primary issue: no_active_stream')
+    expect(draft).not.toContain('export_support_bundle')
+  })
+
+  it('still names a real safe action', () => {
+    const draft = buildGithubIssueDraft({
+      session_snapshot: {
+        streaming: true,
+        doctor: { simple_state: 'Needs attention', primary_issue: 'network_jitter', safe_recovery_action: { id: 'lower_bitrate', destructive: false } },
+      },
+    })
+    expect(draft).toContain('Suggested safe action: lower_bitrate (non-destructive)')
+  })
+
+  it('reports the desktop as itself when its compositor is not implied', () => {
+    const draft = buildGithubIssueDraft({ system_stats: { session_type: 'wayland', display_session: { desktop: 'Hyprland' } } })
+    expect(draft).toContain('- Session/compositor: wayland / Hyprland')
+    const gnome = buildGithubIssueDraft({ system_stats: { session_type: 'wayland', display_session: { desktop: 'ubuntu:GNOME' } } })
+    expect(gnome).toContain('- Session/compositor: wayland / GNOME (Mutter)')
+    const unknown = buildGithubIssueDraft({ system_stats: { session_type: 'wayland', display_session: { desktop: 'unknown' } } })
+    expect(unknown).toContain('- Session/compositor: wayland / unknown')
+  })
+
+  it('leads the checklist with the failed start instead of an idle warning', () => {
+    const connection = buildFixMyStreamChecklist({ statsConnected: true, stats: failedStartStats })
+      .find((entry) => entry.key === 'connection')
+    expect(connection.status).toBe('fail')
+    expect(connection.detail).toBe('The last stream, to Living Room TV, failed to start: the client left during video setup 113 ms after connecting, before any video arrived. It had negotiated PyroWave.')
+    expect(connection.action).toBe('The client could not start its PyroWave decoder. Choose HEVC or H.264 for that device, or update the client.')
+
+    const idle = buildFixMyStreamChecklist({ statsConnected: true, stats: { streaming: false, doctor: { primary_issue: 'no_active_stream' } } })
+      .find((entry) => entry.key === 'connection')
+    expect(idle.status).toBe('warning')
+    expect(idle.detail).toBe('Telemetry is connected, but no active stream is running.')
+  })
+})
+
 describe('Fix My Stream checklist', () => {
   const confirmedMedia = {
     packet_loss_available: true,
@@ -1633,6 +1721,22 @@ describe('prefilled github issue url', () => {
     expect(url.searchParams.get('client')).toContain('Nova')
     expect(url.searchParams.get('runtime')).toContain('headless_stream')
     expect(url.searchParams.get('describe-bug')).toContain('SIGSEGV')
+  })
+
+  it('names the last stream client in the form the way the report does', () => {
+    // The console sends client type "unknown" when nothing streams, and the form used to say exactly
+    // that while the report named the client the failed start was for.
+    const idle = new URL(buildGithubIssueUrl({
+      version: '1.4.14',
+      client: { type: 'unknown', name: '' },
+      session_snapshot: { streaming: false, last_session: { client_name: 'Living Room TV' } },
+    }))
+    expect(idle.searchParams.get('client')).toBe('Living Room TV (last stream)')
+
+    const nothing = new URL(buildGithubIssueUrl({ version: '1.4.14', client: { type: 'unknown', name: '' } }))
+    expect(nothing.searchParams.get('client')).toBeNull()
+
+    expect(new URL(buildGithubIssueUrl(context)).searchParams.get('client')).toBe('Nova (Retroid Pocket 6)')
   })
 
   it('does not guess the install method', () => {

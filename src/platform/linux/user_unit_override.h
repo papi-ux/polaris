@@ -151,21 +151,44 @@ namespace platf::user_unit {
     std::string path;  ///< canonical path of the running executable
     std::string packaged_path;  ///< the absolute path the package installs, when the build declares one
     std::optional<bool> matches_package;  ///< nullopt when the packaged path is unknown or not installed
+    /// The running executable is the DRM/KMS helper the polaris-kms package installs. packaged_path then
+    /// names the helper and matches_package is true: the package replaces it on every update, as it
+    /// does the main binary, so it is not a copy that updates leave behind.
+    bool kms_helper = false;
   };
 
   /**
-   * @brief Whether the running executable is the one the package installed.
+   * @brief Whether the running executable is one the packages installed.
    * @param running The running executable, from running_executable().
    * @param packaged The build's POLARIS_EXECUTABLE_PATH; a relative value means a non-packaged build.
+   * @param kms_helper The build's POLARIS_KMS_HELPER_PATH, the polaris-kms package's DRM/KMS helper.
    */
-  inline running_binary_t describe_running_binary(const std::filesystem::path &running, std::string_view packaged) {
+  inline running_binary_t describe_running_binary(const std::filesystem::path &running, std::string_view packaged,
+                                                  std::string_view kms_helper) {
     running_binary_t out;
+    // An executable the package replaced while this process runs reads "<path> (deleted)". It is still
+    // the one that path installed, so it is compared by that path, which is not a copy.
+    constexpr std::string_view replaced_suffix = " (deleted)";
+    std::filesystem::path running_path = running;
+    if (const auto text = running.string(); text.ends_with(replaced_suffix)) {
+      running_path = text.substr(0, text.size() - replaced_suffix.size());
+    }
     std::error_code ec;
-    auto canonical_running = std::filesystem::canonical(running, ec);
+    auto canonical_running = std::filesystem::canonical(running_path, ec);
     if (ec) {
-      canonical_running = running;
+      canonical_running = running_path;
     }
     out.path = canonical_running.string();
+    if (!kms_helper.empty() && kms_helper.front() == '/') {
+      std::error_code helper_ec;
+      const auto canonical_helper = std::filesystem::canonical(std::filesystem::path {kms_helper}, helper_ec);
+      if (!helper_ec && canonical_helper == canonical_running) {
+        out.packaged_path = std::string {kms_helper};
+        out.matches_package = true;
+        out.kms_helper = true;
+        return out;
+      }
+    }
     if (packaged.empty() || packaged.front() != '/') {
       return out;
     }
@@ -190,6 +213,31 @@ namespace platf::user_unit {
    * survive that binary being replaced, which every install and every update does.
    */
   inline constexpr std::string_view packaged_kms_helper = POLARIS_KMS_HELPER_PATH;
+
+  /// describe_running_binary() against this build's own DRM/KMS helper.
+  inline running_binary_t describe_running_binary(const std::filesystem::path &running, std::string_view packaged) {
+    return describe_running_binary(running, packaged, packaged_kms_helper);
+  }
+
+  /**
+   * @brief The sentence a report puts after "Polaris <version> is running from <path>."
+   *
+   * The packaged DRM/KMS helper is named as packaged. Before it was, a host running the helper read as
+   * running a stale copy that package updates never touch, which is the one thing it is not.
+   */
+  inline std::string running_binary_note(const running_binary_t &binary) {
+    if (binary.kms_helper) {
+      return "This is the packaged DRM/KMS helper from polaris-kms.";
+    }
+    if (binary.matches_package == std::optional<bool> {false}) {
+      return "That is not the packaged " + binary.packaged_path +
+             "; package updates do not change a copy, so refresh it from the package or remove the service drop-in after updating.";
+    }
+    if (binary.matches_package) {
+      return "This is the packaged binary.";
+    }
+    return {};
+  }
 
   /**
    * @brief The drop-in --enable-kms writes, and the only one it will remove.

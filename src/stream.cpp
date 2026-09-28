@@ -46,6 +46,7 @@ extern "C" {
 #include "stream.h"
 #include "stream_fec.h"
 #include "stream_recorder.h"
+#include "stream_start_outcome.h"
 #include "stream_stats.h"
 #include "sync.h"
 #include "system_tray.h"
@@ -514,6 +515,17 @@ namespace stream {
 
     std::chrono::steady_clock::time_point pingTimeout;
 
+    // What the control stream did while this session waited for its first ping, on the steady
+    // clock in nanoseconds, zero until it happens. A client that cannot build its decoder connects
+    // and leaves before any ping, and that start has to read differently from a UDP path that never
+    // delivered one.
+    struct {
+      std::atomic<std::int64_t> control_connected_ns {0};
+      std::atomic<std::int64_t> control_disconnected_ns {0};
+      std::atomic_bool pinged {false};
+      std::atomic_bool timeout_reported {false};
+    } start_watch;
+
     safe::shared_t<broadcast_ctx_t>::ptr_t broadcast_ref;
 
     boost::asio::ip::address localAddress;
@@ -884,6 +896,52 @@ namespace stream {
     }
   }
 
+  namespace {
+    std::int64_t steady_now_ns() {
+      return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()
+      )
+        .count();
+    }
+
+    void note_control_connected(session_t &session) {
+      std::int64_t unset = 0;
+      session.start_watch.control_connected_ns.compare_exchange_strong(unset, steady_now_ns());
+    }
+
+    void note_control_disconnected(session_t &session) {
+      if (session.start_watch.control_connected_ns.load() == 0) {
+        return;
+      }
+      std::int64_t unset = 0;
+      session.start_watch.control_disconnected_ns.compare_exchange_strong(unset, steady_now_ns());
+    }
+
+    stream_start::control_timeline_t start_timeline(const session_t &session) {
+      const auto connected = session.start_watch.control_connected_ns.load();
+      const auto disconnected = session.start_watch.control_disconnected_ns.load();
+      stream_start::control_timeline_t timeline;
+      timeline.connected = connected != 0;
+      timeline.disconnected = disconnected != 0;
+      if (timeline.connected && timeline.disconnected && disconnected >= connected) {
+        timeline.connected_for = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::nanoseconds {disconnected - connected}
+        );
+      }
+      timeline.any_ping = session.start_watch.pinged.load();
+      return timeline;
+    }
+  }  // namespace
+
+  /// The codec a session negotiated, by the id stream_stats and the logs use.
+  std::string_view session_codec_name(const session_t &session) {
+    const auto format = session.config.monitor.videoFormat;
+    return format == video::VIDEO_FORMAT_PYROWAVE ? "pyrowave"sv :
+           format == 2                             ? "av1"sv :
+           format == 1                             ? "hevc"sv :
+                                                     "h264"sv;
+  }
+
   void control_server_t::iterate(std::chrono::milliseconds timeout) {
     ENetEvent event;
     auto res = enet_host_service(_host.get(), &event, timeout.count());
@@ -917,9 +975,11 @@ namespace stream {
           break;
         case ENET_EVENT_TYPE_CONNECT:
           BOOST_LOG(info) << "CLIENT CONNECTED"sv;
+          note_control_connected(*session);
           break;
         case ENET_EVENT_TYPE_DISCONNECT:
           BOOST_LOG(info) << "CLIENT DISCONNECTED"sv;
+          note_control_disconnected(*session);
           // No more clients to send video data to ^_^
           if (session->state == session::state_e::RUNNING) {
             session::stop(*session);
@@ -2453,10 +2513,39 @@ namespace stream {
 
       // Update connection details.
       peer = recv_peer;
+      if (!session->start_watch.pinged.exchange(true)) {
+        stream_stats::record_start_outcome(session->session_generation, stream_start::k_started);
+      }
       return 0;
     }
 
-    BOOST_LOG(error) << "Initial Ping Timeout"sv;
+    // Both sockets wait out the same timeout, so a client that left during its own setup would log
+    // two ping timeouts that read as a network fault. That start is named once instead, and a client
+    // that stayed, left only after waiting for video, or never connected still gets a real ping
+    // timeout for each socket that heard nothing.
+    const auto timeline = start_timeline(*session);
+    const auto outcome = stream_start::classify_ping_timeout(timeline);
+    const bool first_timeout = !session->start_watch.timeout_reported.exchange(true);
+    const std::string_view socket_name = type == socket_e::video ? "video"sv : "audio"sv;
+    if (outcome == stream_start::k_client_left_during_setup) {
+      if (first_timeout) {
+        BOOST_LOG(warning) << stream_start::client_left_during_setup_message(
+          session->device_name, session_codec_name(*session), timeline.connected_for
+        );
+      } else {
+        BOOST_LOG(debug) << "No "sv << socket_name << " ping either; the failed start is already reported"sv;
+      }
+    } else {
+      const auto port = net::map_port(type == socket_e::video ? VIDEO_STREAM_PORT : AUDIO_STREAM_PORT);
+      BOOST_LOG(error) << stream_start::ping_timeout_message(socket_name, port, config::stream.ping_timeout, timeline);
+    }
+    if (first_timeout) {
+      stream_stats::record_start_outcome(
+        session->session_generation,
+        outcome,
+        timeline.disconnected ? timeline.connected_for.count() : -1
+      );
+    }
     return -1;
   }
 
@@ -3185,9 +3274,7 @@ namespace stream {
 
       session.state.store(state_e::RUNNING, std::memory_order_relaxed);
 
-      auto codec_name = session.config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE ? "pyrowave" :
-                         session.config.monitor.videoFormat == 2 ? "av1" :
-                         session.config.monitor.videoFormat == 1 ? "hevc" : "h264";
+      const std::string codec_name {session_codec_name(session)};
       stream_recorder::set_active_video_format(session.config.monitor.videoFormat);
 
       // Track this client in multi-client stats
@@ -3263,6 +3350,17 @@ namespace stream {
 
       BOOST_LOG(info) << "Session started for ["sv << session.device_name << "] from "sv << addr_string
                       << " [active sessions: "sv << session_num << "]"sv;
+      // The codec a client chose was never in the log, so a stream that failed on the client's
+      // decoder read the same as any other.
+      BOOST_LOG(info) << stream_start::describe_negotiated_stream({
+        .client = session.device_name,
+        .codec = codec_name,
+        .dynamic_range = session.config.monitor.dynamicRange,
+        .chroma_sampling = session.config.monitor.chromaSamplingType,
+        .width = session.config.monitor.width,
+        .height = session.config.monitor.height,
+        .fps = av_q2d(video::framerate_to_rational(session.config.monitor)),
+      });
 
       confighttp::set_session_state(confighttp::session_state_e::streaming);
       confighttp::emit_session_event("stream_active", "Streaming to " + session.device_name);

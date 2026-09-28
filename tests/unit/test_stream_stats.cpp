@@ -1672,6 +1672,165 @@ TEST(StreamStatsCaptureSourceTests, OmitsUnobservedIdleAndMultiClientComparisons
   absent();
 }
 
+namespace {
+  /// A host with nothing streaming whose last session ended the given time ago with this start.
+  stream_stats::stats_t after_last_start(std::string_view outcome, std::string codec,
+                                         std::chrono::system_clock::duration ago) {
+    stream_stats::stats_t stats {};
+    stats.streaming = false;
+    stream_stats::ended_session_t last;
+    last.session_generation = 901;
+    last.client_name = "Living Room TV";
+    last.started_at = std::chrono::system_clock::now() - ago - std::chrono::seconds {10};
+    last.ended_at = std::chrono::system_clock::now() - ago;
+    last.codec = std::move(codec);
+    last.start_outcome = outcome;
+    last.start_client_left_after_ms = outcome == "client_left_during_setup" ? 113 : -1;
+    stats.last_session = last;
+    return stats;
+  }
+
+  const nlohmann::json *find_evidence_row(const nlohmann::json &doctor, std::string_view id) {
+    for (const auto &entry : doctor.at("evidence")) {
+      if (entry.at("id") == id) {
+        return &entry;
+      }
+    }
+    return nullptr;
+  }
+}  // namespace
+
+TEST(StreamStatsDoctorTests, NamesAPyroWaveStartTheClientLeftAsTheIssue) {
+  // An Android TV client negotiated PyroWave, could not build the decoder, and left during video
+  // setup. The report then said only "no_active_stream" and suggested exporting the report it was.
+  const auto doctor = stream_stats::build_doctor_json(
+    after_last_start("client_left_during_setup", "pyrowave", std::chrono::minutes {2}),
+    {{"primary_issue", "steady"}, {"grade", "good"}}
+  );
+
+  EXPECT_EQ(doctor.at("primary_issue"), "stream_failed_to_start");
+  EXPECT_EQ(doctor.at("status"), "needs_action");
+  EXPECT_EQ(doctor.at("traffic_light"), "amber");
+  const auto summary = doctor.at("summary").get<std::string>();
+  EXPECT_EQ(summary,
+            "The last stream, to Living Room TV, failed to start: the client left during video setup 113 ms after "
+            "connecting, before any video arrived. It had negotiated PyroWave.");
+  const auto next = std::string {
+    "The client could not start its PyroWave decoder. Choose HEVC or H.264 for that device, or update the client."};
+  EXPECT_EQ(doctor.at("recommendation").at("body"), next);
+  EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Choose HEVC or H.264");
+  const auto &action = doctor.at("safe_recovery_action");
+  EXPECT_EQ(action.at("id"), "none") << "the report must not suggest exporting itself: " << action.dump();
+  EXPECT_EQ(action.at("kind"), "manual_guidance");
+  EXPECT_EQ(action.at("unavailable_reason"), next);
+  EXPECT_FALSE(action.at("requires_owner").get<bool>());
+
+  const auto *row = find_evidence_row(doctor, "last_stream_start");
+  ASSERT_NE(row, nullptr) << doctor.at("evidence").dump();
+  EXPECT_EQ(row->at("value"), "client_left_during_setup");
+  EXPECT_EQ(row->at("status"), "fail");
+  EXPECT_EQ(row->at("detail"), summary);
+  // It follows the "no active stream" row, so the first rows a support report keeps name it.
+  ASSERT_GE(doctor.at("evidence").size(), 2u);
+  EXPECT_EQ(doctor.at("evidence")[0].at("id"), "streaming");
+  EXPECT_EQ(doctor.at("evidence")[1].at("id"), "last_stream_start");
+}
+
+TEST(StreamStatsDoctorTests, AnotherCodecsFailedStartPointsAtTheClientsOwnError) {
+  for (const auto *codec : {"h264", "hevc", "av1"}) {
+    const auto doctor = stream_stats::build_doctor_json(
+      after_last_start("client_left_during_setup", codec, std::chrono::minutes {1}),
+      {{"primary_issue", "steady"}, {"grade", "good"}}
+    );
+    EXPECT_EQ(doctor.at("primary_issue"), "stream_failed_to_start") << codec;
+    EXPECT_EQ(doctor.at("recommendation").at("body"),
+              "The client stopped during video setup; its own error message names the cause.")
+      << codec;
+    EXPECT_EQ(doctor.at("safe_recovery_action").at("unavailable_reason"),
+              "The client stopped during video setup; its own error message names the cause.")
+      << codec;
+    EXPECT_EQ(doctor.at("summary").get<std::string>().find("PyroWave"), std::string::npos) << codec;
+  }
+}
+
+TEST(StreamStatsDoctorTests, AFailedStartLeadsOnlyWhileNothingStreamsAndForFifteenMinutes) {
+  const nlohmann::json steady = {{"primary_issue", "steady"}, {"grade", "good"}};
+
+  // Older than the window: nothing streams, and that is all Doctor says; the row stays as a fact.
+  auto doctor = stream_stats::build_doctor_json(
+    after_last_start("client_left_during_setup", "pyrowave", std::chrono::minutes {16}), steady
+  );
+  EXPECT_EQ(doctor.at("primary_issue"), "no_active_stream");
+  const auto *row = find_evidence_row(doctor, "last_stream_start");
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(row->at("status"), "info");
+
+  // A stream running now is what Doctor reads, whatever the last one did.
+  auto streaming = after_last_start("client_left_during_setup", "pyrowave", std::chrono::minutes {1});
+  streaming.streaming = true;
+  doctor = stream_stats::build_doctor_json(streaming, steady);
+  EXPECT_NE(doctor.at("primary_issue"), "stream_failed_to_start");
+  EXPECT_EQ(find_evidence_row(doctor, "last_stream_start"), nullptr);
+
+  // A client that stayed and whose packets never arrived is not a failed setup: the row names the
+  // path, and the issue stays no_active_stream.
+  doctor = stream_stats::build_doctor_json(after_last_start("no_ping", "hevc", std::chrono::minutes {1}), steady);
+  EXPECT_EQ(doctor.at("primary_issue"), "no_active_stream");
+  row = find_evidence_row(doctor, "last_stream_start");
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(row->at("status"), "watch");
+  // no_ping is also written when only the audio socket waited out a stream whose video had arrived,
+  // so the row must not claim that nothing came.
+  EXPECT_EQ(row->at("detail"),
+            "The last stream, to Living Room TV, ended waiting for a first packet from the client on its video or "
+            "audio port. A firewall or a UDP path problem between the client and this host usually does that.");
+
+  // A last session that started says so, and changes nothing.
+  doctor = stream_stats::build_doctor_json(after_last_start("started", "hevc", std::chrono::minutes {1}), steady);
+  EXPECT_EQ(doctor.at("primary_issue"), "no_active_stream");
+  row = find_evidence_row(doctor, "last_stream_start");
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(row->at("status"), "pass");
+}
+
+TEST(StreamStatsLastSessionTests, AnEndedSessionKeepsHowItsStartEnded) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.6", "Living Room TV", 931);
+  stream_stats::update_video_stats("10.0.0.6", 0, 20000, 0, "pyrowave", 1920, 1080, {}, 931);
+
+  EXPECT_FALSE(stream_stats::record_start_outcome(932, "client_left_during_setup", 113)) << "a generation no client holds";
+  EXPECT_FALSE(stream_stats::record_start_outcome(0, "client_left_during_setup", 113)) << "generation zero is no one's";
+  EXPECT_FALSE(stream_stats::record_start_outcome(931, "", 113)) << "an empty outcome was written";
+  ASSERT_TRUE(stream_stats::record_start_outcome(931, "client_left_during_setup", 113));
+  auto json = current_stats_json();
+  ASSERT_EQ(json["clients"].size(), 1u);
+  EXPECT_EQ(json["clients"][0].value("start_outcome", ""), "client_left_during_setup");
+
+  stream_stats::remove_client("10.0.0.6", 931);
+  json = current_stats_json();
+  ASSERT_TRUE(json.contains("last_session")) << json.dump();
+  const auto &last = json["last_session"];
+  EXPECT_EQ(last.value("client_name", ""), "Living Room TV");
+  EXPECT_EQ(last.value("codec", ""), "pyrowave");
+  ASSERT_TRUE(last.contains("start")) << last.dump();
+  EXPECT_EQ(last["start"].value("outcome", ""), "client_left_during_setup");
+  EXPECT_EQ(last["start"].value("client_left_after_ms", -1), 113);
+  EXPECT_FALSE(stream_stats::record_start_outcome(931, "started")) << "a retired generation still writes";
+
+  // And Doctor, reading the same stats a moment later, names it.
+  const auto doctor = stream_stats::build_doctor_json(stream_stats::get_current(), {{"primary_issue", "steady"}});
+  EXPECT_EQ(doctor.at("primary_issue"), "stream_failed_to_start");
+
+  // A session that started keeps started, without a time the client left.
+  stream_stats::add_client("10.0.0.6", "Living Room TV", 933);
+  ASSERT_TRUE(stream_stats::record_start_outcome(933, "started"));
+  stream_stats::remove_client("10.0.0.6", 933);
+  const auto started = current_stats_json()["last_session"];
+  EXPECT_EQ(started["start"].value("outcome", ""), "started");
+  EXPECT_FALSE(started["start"].contains("client_left_after_ms")) << started.dump();
+}
+
 TEST(StreamStatsDoctorTests, ClassifiesGpuNativeStreamAsReady) {
   stream_stats::stats_t stats {};
   stats.streaming = true;

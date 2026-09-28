@@ -23,7 +23,14 @@ export function yesNo(value, t) {
 }
 
 export function summarizeStreamStats(s = {}, t) {
-  if (!s.streaming) return t('troubleshooting.snapshot_no_active_stream')
+  if (!s.streaming) {
+    // The host names a start the client left during video setup for fifteen minutes after it.
+    const lastClient = String(s.last_session?.client_name || '').trim()
+    if (s.doctor?.primary_issue === 'stream_failed_to_start' && lastClient) {
+      return t('troubleshooting.snapshot_last_stream_failed_to_start', { client: lastClient })
+    }
+    return t('troubleshooting.snapshot_no_active_stream')
+  }
   return t('troubleshooting.snapshot_stream_summary', {
     fps: formatFps(s.fps),
     target: formatFps(s.session_target_fps || s.requested_client_fps),

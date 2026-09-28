@@ -82,6 +82,34 @@ starts at `v1.0.0`.
   KWin screens, gives every capability up at startup, so its search meets KMS without one and
   moves on, which is the design. The finding told that host, often one already running the
   polaris-kms helper, to run `--enable-kms`, which changes nothing about its stream.
+- A stream that fails to start on the client is named now. A client that negotiates a stream and
+  then cannot build its decoder, as an Android TV client whose GPU cannot run PyroWave does,
+  connects and leaves within a fraction of a second. The host then waited out its ping timeout and
+  logged `Initial Ping Timeout` once for each socket, which reads as a network fault, and a support
+  report made afterwards said only that no stream was active and suggested exporting the report it
+  was part of. The host now logs the stream every session negotiated as it starts: client, codec,
+  bit depth, chroma, resolution and frame rate. A start the client left gets one line instead of the
+  two timeouts, naming the codec and how long after connecting the client left, and the last
+  session's record keeps that outcome. For fifteen minutes after such a start, while nothing
+  streams, Doctor, the Fix My Stream checklist and the support report lead with
+  `stream_failed_to_start` and a next step: for PyroWave, choose HEVC or H.264 for that device or
+  update the client; for any other codec, the client's own error message names the cause. A client
+  that stays connected while its video never arrives, or leaves only after waiting several seconds
+  for it, still gets a real `Initial Ping Timeout`, now naming the UDP port and the firewall or path
+  problem that usually causes it. The report no longer suggests exporting itself.
+
+- Doctor, the support report and the Update Center no longer call the polaris-kms DRM/KMS helper a
+  stale copy. A host whose service runs `/usr/libexec/polaris/polaris-kms`, which the polaris-kms
+  package installs and replaces on every update, read as running "a copy outside the package" that
+  updates never change. It now reads as the packaged DRM/KMS helper. A binary an update replaced
+  while it runs, which the kernel reports with a `(deleted)` suffix, reads as the packaged binary
+  it is, so the Update Center gives restart advice rather than copy advice. A real copy, such as the
+  old Bazzite guide's `/usr/local/bin/polaris-kms`, keeps its warning.
+
+- The support report's header fills in what the host already knew. The Driver line reads the
+  NVIDIA driver version from the kernel module, Session/compositor names the desktop and, for KDE
+  Plasma and GNOME, the compositor they always use, and with nothing streaming the Client line
+  names the last stream's client and says it was the last stream.
 
 - The first Space of a launcher made from the Spaces page can be made on Docker's containerd image
   store, the default on a fresh Docker 29 install (#664). There every such create was refused with

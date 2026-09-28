@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <sstream>
+#include <src/stream_start_outcome.h>
 #include <src/stream_stats.h>
 #include <src/utility.h>
 #include <string>
@@ -884,6 +885,109 @@ TEST(NvhttpSessionHealthTests, PyrowaveReportsItsSessionEncoderWithoutNvencWarni
   EXPECT_EQ(health.at("encoder_selection").at("selected_encoder"), "pyrowave");
   EXPECT_EQ(health.at("encoder_selection").at("preferred_encoder"), "pyrowave");
   EXPECT_FALSE(health.at("encoder_selection").at("fallback_used").get<bool>());
+}
+
+TEST(StreamStartOutcomeTests, AClientThatConnectedAndLeftBeforeAnyPingStoppedDuringSetup) {
+  // An Android TV client negotiated PyroWave, could not build the decoder, and left 113 ms after its
+  // control stream connected. The host logged two ping timeouts ten seconds later, which read as a
+  // network fault.
+  stream_start::control_timeline_t timeline;
+  timeline.connected = true;
+  timeline.disconnected = true;
+  timeline.connected_for = std::chrono::milliseconds {113};
+  EXPECT_EQ(stream_start::classify_ping_timeout(timeline), stream_start::k_client_left_during_setup);
+
+  const auto line = stream_start::client_left_during_setup_message("Living Room TV", "pyrowave", timeline.connected_for);
+  EXPECT_EQ(line,
+            "Stream failed to start for [Living Room TV]: the client left during video setup 113 ms after "
+            "connecting, before any video or audio arrived (codec PyroWave)");
+  EXPECT_EQ(line.find("Initial Ping Timeout"), std::string::npos);
+
+  // A ping before the disconnect means the client got past its own setup.
+  timeline.any_ping = true;
+  EXPECT_EQ(stream_start::classify_ping_timeout(timeline), stream_start::k_no_ping);
+  const auto after_ping = stream_start::ping_timeout_message("video", 47998, std::chrono::milliseconds {10000}, timeline);
+  EXPECT_NE(after_ping.find("disconnected 113 ms after connecting"), std::string::npos) << after_ping;
+  EXPECT_EQ(after_ping.find("firewall"), std::string::npos) << "the client left; the path did not fail: " << after_ping;
+}
+
+TEST(StreamStartOutcomeTests, AClientThatStayedConnectedAndNeverPingedIsARealPingTimeout) {
+  stream_start::control_timeline_t timeline;
+  timeline.connected = true;
+  EXPECT_EQ(stream_start::classify_ping_timeout(timeline), stream_start::k_no_ping);
+  const auto stayed = stream_start::ping_timeout_message("video", 47998, std::chrono::milliseconds {10000}, timeline);
+  EXPECT_EQ(stayed,
+            "Initial Ping Timeout: no video ping arrived on UDP 47998 within 10000 ms while the client's control "
+            "stream stayed connected. A firewall or a UDP path problem between the client and this host usually does that");
+
+  // A client whose control stream never arrived either is the same kind of path problem.
+  timeline.connected = false;
+  EXPECT_EQ(stream_start::classify_ping_timeout(timeline), stream_start::k_no_ping);
+  const auto never = stream_start::ping_timeout_message("audio", 48000, std::chrono::milliseconds {10000}, timeline);
+  EXPECT_NE(never.find("no audio ping arrived on UDP 48000"), std::string::npos) << never;
+  EXPECT_NE(never.find("never connected its control stream"), std::string::npos) << never;
+  EXPECT_NE(never.find("firewall or a UDP path problem"), std::string::npos) << never;
+
+  // A disconnect without a connect is not a client that left during setup.
+  timeline.disconnected = true;
+  EXPECT_EQ(stream_start::classify_ping_timeout(timeline), stream_start::k_no_ping);
+}
+
+TEST(StreamStartOutcomeTests, AClientThatLeftAfterWaitingForVideoIsARealPingTimeout) {
+  // A client whose pings never reach the host waits for video and then leaves; moonlight-common-c
+  // gives up after ten seconds without any. With ping_timeout raised past that, the host sees the
+  // client leave before its own wait ends. That is the UDP path, and a PyroWave stream behind a
+  // blocked port must not be told its decoder failed.
+  stream_start::control_timeline_t timeline;
+  timeline.connected = true;
+  timeline.disconnected = true;
+  timeline.connected_for = std::chrono::milliseconds {10050};
+  EXPECT_EQ(stream_start::classify_ping_timeout(timeline), stream_start::k_no_ping);
+  EXPECT_EQ(stream_start::ping_timeout_message("video", 47998, std::chrono::milliseconds {30000}, timeline),
+            "Initial Ping Timeout: no video ping arrived on UDP 47998 within 30000 ms, and the client disconnected "
+            "10050 ms after connecting. A firewall or a UDP path problem between the client and this host usually does that");
+
+  // The limit splits the two: a quick leave is the client's own setup, a late one is the path.
+  timeline.connected_for = stream_start::k_setup_leave_limit - std::chrono::milliseconds {1};
+  EXPECT_EQ(stream_start::classify_ping_timeout(timeline), stream_start::k_client_left_during_setup);
+  timeline.connected_for = stream_start::k_setup_leave_limit;
+  EXPECT_EQ(stream_start::classify_ping_timeout(timeline), stream_start::k_no_ping);
+}
+
+TEST(StreamStartOutcomeTests, TheSessionStartLineNamesWhatTheClientNegotiated) {
+  EXPECT_EQ(stream_start::describe_negotiated_stream({
+              .client = "Living Room TV",
+              .codec = "pyrowave",
+              .dynamic_range = 0,
+              .chroma_sampling = 0,
+              .width = 1920,
+              .height = 1080,
+              .fps = 60.0,
+            }),
+            "Stream negotiated for [Living Room TV]: PyroWave, 8-bit, 4:2:0, 1920x1080 at 60 fps");
+  EXPECT_EQ(stream_start::describe_negotiated_stream({
+              .client = "Deck",
+              .codec = "hevc",
+              .dynamic_range = 1,
+              .chroma_sampling = 1,
+              .width = 2560,
+              .height = 1440,
+              .fps = 60000.0 / 1001.0,
+            }),
+            "Stream negotiated for [Deck]: HEVC, 10-bit, 4:4:4, 2560x1440 at 59.94 fps");
+  EXPECT_EQ(stream_start::codec_label("h264"), "H.264");
+  EXPECT_EQ(stream_start::codec_label("av1"), "AV1");
+  EXPECT_EQ(stream_start::codec_label("vp9"), "");
+}
+
+TEST(StreamStartOutcomeTests, TheNextStepNamesPyroWaveOnlyForPyroWave) {
+  EXPECT_EQ(stream_start::failed_start_next_step("pyrowave"),
+            "The client could not start its PyroWave decoder. Choose HEVC or H.264 for that device, or update the client.");
+  for (const auto *codec : {"h264", "hevc", "av1", ""}) {
+    EXPECT_EQ(stream_start::failed_start_next_step(codec),
+              "The client stopped during video setup; its own error message names the cause.")
+      << codec;
+  }
 }
 
 TEST(NvhttpSessionHealthTests, EffectiveEncoderUsesNegotiatedPyrowaveBeforeFirstSample) {

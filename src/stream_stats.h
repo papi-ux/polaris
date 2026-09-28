@@ -141,6 +141,11 @@ namespace stream_stats {
     // publication for a newly opened display clears it with the frames, so it is always the route
     // of the display capture_backend names.
     std::string pyrowave_route;
+    // How this session's start ended: stream_start's started, client_left_during_setup or no_ping.
+    // Empty until its first ping or its ping timeout decides.
+    std::string start_outcome;
+    // How long the client's control stream stayed before it left, or -1 when it did not leave.
+    std::int64_t start_client_left_after_ms = -1;
     // Whether capture_source came from a frame the display capture_backend names delivered. A
     // publication for a newly opened display clears it, so the capture block never pairs one
     // display's route with another display's frames. capture_source itself keeps the last frame
@@ -201,6 +206,11 @@ namespace stream_stats {
     std::string encoder_backend;
     /// The PyroWave route the session's own encoder last reported. Empty when it never reported one.
     std::string pyrowave_route;
+    /// How the session's start ended, from stream_start: started, client_left_during_setup or
+    /// no_ping. Empty when neither a ping nor a ping timeout decided it.
+    std::string start_outcome;
+    /// How long the client's control stream stayed before it left, or -1 when it did not leave.
+    std::int64_t start_client_left_after_ms = -1;
   };
 
   struct capture_profile_sample_t {
@@ -678,6 +688,20 @@ namespace stream_stats {
    * @return False when no client holds that generation or the route is empty, so the caller retries.
    */
   bool record_pyrowave_route(std::uint64_t session_generation, std::string_view route);
+
+  /**
+   * @brief Record how a live nonzero generation's start ended.
+   *
+   * Written by the session's own video and audio threads: started at the first ping, and the
+   * classified outcome when a ping timeout ends the session. The session's entry keeps the last one
+   * written, and last_session keeps it once the session ends, so a support report made after a
+   * failed start can name it. Nothing here moves a network or video policy revision.
+   * @param outcome stream_start's started, client_left_during_setup or no_ping. Empty is never written.
+   * @param client_left_after_ms How long the control stream stayed before the client left, or -1.
+   * @return False when no client holds that generation or the outcome is empty.
+   */
+  bool record_start_outcome(std::uint64_t session_generation, std::string_view outcome,
+                            std::int64_t client_left_after_ms = -1);
 
   /**
    * @brief Record how a live nonzero generation's stream was negotiated, as it starts.

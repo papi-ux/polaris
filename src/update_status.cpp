@@ -398,6 +398,8 @@ namespace update_status {
       {"path", binary.path},
       {"packaged_path", binary.packaged_path.empty() ? nlohmann::json(nullptr) : nlohmann::json(binary.packaged_path)},
       {"matches_package", binary.matches_package ? nlohmann::json(*binary.matches_package) : nlohmann::json(nullptr)},
+      // The polaris-kms helper is packaged too, and updates with polaris: restart advice applies to it.
+      {"kms_helper", binary.kms_helper},
     };
 #else
     return nullptr;

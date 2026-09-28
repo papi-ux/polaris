@@ -728,8 +728,10 @@ namespace args {
       // itself stale, so its console says the old version after every update
       // while rpm says the new one. Only the packaged binary refreshes it; a
       // build tree running --setup-host has no business replacing it.
-      const bool setup_runs_packaged_binary =
-        platf::user_unit::describe_running_binary(*exe_path, POLARIS_EXECUTABLE_PATH).matches_package.value_or(false);
+      // The polaris-kms helper is packaged as well, but refreshing the guide's copy stays the main
+      // binary's job, so a run through the helper leaves it alone as it always has.
+      const auto setup_binary = platf::user_unit::describe_running_binary(*exe_path, POLARIS_EXECUTABLE_PATH);
+      const bool setup_runs_packaged_binary = setup_binary.matches_package.value_or(false) && !setup_binary.kms_helper;
       if (setup_runs_packaged_binary) {
         const auto copy_state = platf::user_unit::guide_runtime_copy_state(service_override, *exe_path);
         runtime_copy_stale = copy_state == platf::user_unit::runtime_copy_e::stale;
