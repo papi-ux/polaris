@@ -940,6 +940,34 @@ for current_contract in (
 if release_job.count("      - arch-current-compatibility\n") != 1:
     raise AssertionError("release publication must wait for current Arch compatibility")
 
+# The Ubuntu build job installs its DEB on the runner that built it, which has every library the
+# binary links, so a library missing from Depends passes there. 1.4.13 shipped without
+# libpipewire-0.3-0t64 that way. ubuntu-minimal-install installs the same DEB on a bare
+# ubuntu:24.04 without Recommends, and a release waits for it.
+ubuntu_minimal_job = workflow_job(workflow, "ubuntu-minimal-install")
+for minimal_step in ("Download exact Ubuntu DEB", "Install and launch on a minimal Ubuntu 24.04"):
+    workflow_step(ubuntu_minimal_job, minimal_step)
+ubuntu_minimal_not_found = (
+    '          if grep -Fq "not found" ubuntu-minimal-package/package-ldd.txt; then\n'
+    '            echo "The Ubuntu DEB leaves a library it links uninstalled on a bare Ubuntu 24.04;'
+    ' name its package in CPACK_DEBIAN_PACKAGE_DEPENDS" >&2\n'
+    '            exit 1\n'
+    '          fi\n'
+)
+for minimal_contract in (
+    "needs: [resolve-source, ubuntu-build]",
+    "if: needs.resolve-source.outputs.native_required == 'true'",
+    'apt-get -o Acquire::Retries=3 install -y --no-install-recommends "./$deb_path"',
+    ubuntu_minimal_not_found,
+    "polaris --version | tee ubuntu-minimal-package/package-version.txt",
+):
+    if ubuntu_minimal_job.count(minimal_contract) != 1:
+        raise AssertionError(f"the minimal Ubuntu install is missing: {minimal_contract.strip()}")
+if not re.search(r"(?m)^      image: ubuntu@sha256:[0-9a-f]{64}$", ubuntu_minimal_job):
+    raise AssertionError("the minimal Ubuntu install must pin its image by digest")
+if release_job.count("      - ubuntu-minimal-install\n") != 1:
+    raise AssertionError("release publication must wait for the minimal Ubuntu install")
+
 libei_needed = "NEEDED.*\\[libei\\.so\\.1\\]"
 for job_name, job in (("Arch", arch_job), ("Ubuntu DEB", ubuntu_job), ("Fedora RPM", fedora_job)):
     if job.count(libei_needed) != 1:
@@ -960,6 +988,23 @@ packaging_cmake = read("cmake/packaging/linux.cmake")
 for cpack_dependency in ("libei1, \\\n", "libei >= 1.0, \\\n"):
     if packaging_cmake.count(cpack_dependency) != 1:
         raise AssertionError(f"CPack runtime dependencies must name {cpack_dependency.split(',')[0]}")
+# The binary links libpipewire-0.3 whenever PipeWire audio or portal capture is built, and
+# dpkg-shlibdeps is off, so the DEB names it by hand. 1.4.13 did not, and on an Ubuntu 24.04 without
+# PipeWire the loader refused to start Polaris at all. The Ubuntu build job could not see that, since
+# it installs the package on the machine that built it; ubuntu-minimal-install, pinned above, now
+# installs it on a bare ubuntu:24.04. (Fedora's rpmbuild finds the library itself, and both
+# PKGBUILDs name it.)
+linux_compile_cmake = read("cmake/compile_definitions/linux.cmake")
+if linux_compile_cmake.count("list(APPEND PLATFORM_LIBRARIES ${PIPEWIRE_LIBRARIES})") != 1:
+    raise AssertionError("expected Polaris to link libpipewire-0.3 exactly once; revisit the DEB dependency on it")
+deb_dependencies = re.search(
+    r'(?ms)^set\(CPACK_DEBIAN_PACKAGE_DEPENDS "\\\n(?P<body>.*?)"\)$',
+    packaging_cmake,
+)
+if not deb_dependencies:
+    raise AssertionError("missing the CPack DEB runtime dependency list")
+if not re.search(r"(?m)^\s+libpipewire-0\.3-0t64, \\$", deb_dependencies.group("body")):
+    raise AssertionError("CPack DEB runtime dependencies must name libpipewire-0.3-0t64, which the binary links")
 if not re.search(r"(?m)^Requires:\s+libei >= 1\.0\s*$", fedora):
     raise AssertionError("Fedora runtime dependencies must explicitly include libei")
 

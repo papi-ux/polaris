@@ -7,6 +7,13 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- The Ubuntu package depends on PipeWire's client library, `libpipewire-0.3-0t64`, which Polaris
+  links for PipeWire audio and portal capture. The 1.4.13 `.deb` left it out, so on an Ubuntu 24.04
+  system without PipeWire, such as the minimal `ubuntu:24.04` image, apt installed Polaris without
+  it, and every `polaris` command, `sudo -H polaris --setup-host` first, stopped with
+  `libpipewire-0.3.so.0: cannot open shared object file`. apt now installs it with Polaris. On
+  1.4.13, `sudo apt install libpipewire-0.3-0t64` fixes it.
+
 - The first Space of a launcher made from the Spaces page can be made on Docker's containerd image
   store, the default on a fresh Docker 29 install (#664). There every such create was refused with
   `spaces_change_not_saved` and nothing was made, so a PC whose Steam Space came from Steam's first

@@ -541,6 +541,20 @@ describe('Linux packaging contracts', () => {
     expect(portalGrab).toMatch(/#ifdef POLARIS_BUILD_WAYLAND[\s\S]*?cage_screencopy::capture\([\s\S]*?#endif/)
   })
 
+  it('names libpipewire in the DEB, because PipeWire audio and portal capture link it and shlibdeps is off', () => {
+    const compileCmake = readSource('cmake/compile_definitions/linux.cmake')
+    const packagingCmake = readSource('cmake/packaging/linux.cmake')
+    const debDependencies = section(packagingCmake, 'set(CPACK_DEBIAN_PACKAGE_DEPENDS', 'set(CPACK_RPM_PACKAGE_REQUIRES')
+
+    // Nothing works out the DEB's library dependencies, so each one the binary links is named by
+    // hand. 1.4.13 left this one out, and on an Ubuntu 24.04 without PipeWire the loader refused to
+    // start Polaris at all, while CI passed because it installed the package only on the machine
+    // that built it. The ubuntu-minimal-install job now installs it on a bare ubuntu:24.04.
+    expect(compileCmake).toContain('list(APPEND PLATFORM_LIBRARIES ${PIPEWIRE_LIBRARIES})')
+    expect(packagingCmake).toContain('set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)')
+    expect(debDependencies).toMatch(/\n\s+libpipewire-0\.3-0t64, \\\n/)
+  })
+
   it('installs Vulkan headers, loader, and shader compiler independently of CUDA', () => {
     const installer = readSource('scripts/install/01-install-deps.sh')
     const distroContracts = [

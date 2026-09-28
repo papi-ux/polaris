@@ -167,6 +167,13 @@ set(CPACK_DEBIAN_KMS_PACKAGE_CONTROL_EXTRA
         "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/kms/postinst")
 set(CPACK_DEBIAN_KMS_DESCRIPTION
         "DRM/KMS capture helper for Polaris")
+# dpkg-shlibdeps is off (below), so this list is the only thing that makes apt install what the
+# binary links, and a library missing here stops the loader before Polaris runs at all. Portal
+# capture links libpipewire-0.3 even when native PipeWire audio is off
+# (cmake/compile_definitions/linux.cmake). 1.4.13 left it out, and on an Ubuntu 24.04 without
+# PipeWire `polaris --setup-host` failed with "libpipewire-0.3.so.0: cannot open shared object
+# file". CI installed it only on the machine that built it, which already had the library, so it
+# passed; the ubuntu-minimal-install job in build.yml now installs it on a bare ubuntu:24.04.
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             ${CPACK_DEB_PLATFORM_PACKAGE_DEPENDS} \
             bash, \
@@ -182,6 +189,7 @@ set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             libevdev2, \
             libnuma1, \
             libopus0, \
+            libpipewire-0.3-0t64, \
             libpulse0, \
             libva2, \
             libva-drm2, \
