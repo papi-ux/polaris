@@ -171,8 +171,9 @@ actually resolved to before you start it.
 ![Nova's game page for Control Resonant: full-bleed artwork, the resolved 1920x1080 at 120 FPS line, and Launch, Play Setup and Reset Game Profile](docs/screenshots/nova-game-page-v1.4.13.webp)
 
 Standard Moonlight-compatible clients remain supported for pairing, browsing,
-launching, input, and streaming. Features that depend on Polaris-specific host
-metadata are naturally limited there. Check the maintained [compatibility
+launching, input, and streaming; the [client
+table](https://papi-ux.com/docs/compatibility/#clients) says what they get next
+to Nova. Check the maintained [compatibility
 guide](https://papi-ux.com/docs/compatibility/) before choosing a distro, GPU,
 capture path, HDR mode, or experimental Browser Stream setup.
 

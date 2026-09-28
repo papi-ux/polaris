@@ -13,7 +13,7 @@ Pairing and permissions stay on this page.
 | Route | For | How it works |
 |---|---|---|
 | **Nova QR** | Nova on Android | Generate a passphrase; Nova scans a QR code that carries the host address, the PIN, and the pairing context. The fastest path for Nova on your network. |
-| **Trusted Network** | Devices on a subnet you control | Any device inside a listed trusted subnet pairs without a PIN. Enable it under **Settings, Network, Trusted Subnet Auto-Pairing** and list the subnets in CIDR form. Off by default. |
+| **Trusted Network** | Nova on a subnet you control | Nova asks for Trusted Pair, and from inside a listed trusted subnet it pairs without a PIN. Moonlight and Artemis never ask, so they pair with the PIN. Enable it under **Settings, Network, Trusted Subnet Auto-Pairing** and list the subnets in CIDR form. Off by default. |
 | **Manual PIN** | Standard Moonlight clients | The client shows a four-digit PIN; enter it here and choose **Send**. The classic Moonlight flow, described step by step in [Play with Moonlight](moonlight.md). |
 
 Every route applies the access preset selected under **Access for this device** at pairing time.

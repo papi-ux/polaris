@@ -172,6 +172,7 @@ For a clean slate, or to remove what the package leaves behind, see
 
 ## GPU notes
 
-NVIDIA with NVENC is the most validated path. AMD and Intel Mesa VAAPI are supported and use the same
-Headless Stream flow, with the real capture path reported in Mission Control rather than assumed. See
-[Compatibility](compatibility.md) for the current status of each combination.
+NVIDIA with NVENC is the most validated path. AMD with Mesa VA-API is supported and uses the same
+Headless Stream flow, with the real capture path reported in Mission Control rather than assumed.
+Intel encodes through VA-API as well, but no Intel GPU has been through release validation. See
+[Compatibility](compatibility.md#gpu-and-encoding) for the current status of each combination.

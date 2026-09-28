@@ -7142,7 +7142,7 @@ namespace video {
       "encoder_probe_failed",
       message,
       against_private_compositor ?
-        "On NVIDIA, pick Private Stream (GPU-native) in Play Setup, or set "
+        "On NVIDIA, set the launch mode to Private Stream (GPU-native), or set "
         "linux_prefer_gpu_native_capture = enabled on the host, and retry. The host Doctor's "
         "Encoder row says which encoder was tried and why it failed." :
         "Check the host Doctor's Encoder and Capture rows; they say which encoder was tried and "

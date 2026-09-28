@@ -112,13 +112,15 @@ linux_stream_mode = windowed_stream
 linux_prefer_gpu_native_capture = enabled
 ```
 
-> **What you'll see:** the built-in **Desktop** entry now streams Polaris' *private* compositor — an
-> intentionally empty screen (right-click opens the session menu) until you launch a game from your
-> client. Wanting your actual desktop on the stream is a different mode: `desktop_display` mirrors
-> the host desktop at host resolution, and `host_virtual_display` adds an extra display sized to the
-> client. On Hyprland, `desktop_takeover` moves the live desktop onto that temporary client-sized
-> output and blanks the original displays until the stream ends. All three are one click in the web
-> UI under Settings → Audio/Video.
+> **What you'll see:** the built-in **Desktop** entry streams your real desktop, whatever the launch
+> mode, because it has **Mirror the host desktop** turned on in the
+> [app editor](apps.md#runtime-behavior). Games still run in Private Stream's own session, off your
+> desktop. For an empty private session to launch things into, add an entry with no command and that
+> setting off; right-click its empty screen to open the session menu. Other ways to put a desktop on
+> the stream are modes of their own: Host Virtual Display adds an extra display sized to the client,
+> and on Hyprland, Desktop Takeover moves the live desktop onto a temporary client-sized output and
+> blanks the original displays until the stream ends. Both are one click in the web UI under
+> Settings → Audio/Video.
 
 To pick a different mode later, such as Gamescope, a virtual display, or a dummy plug, see
 [Launch modes and capture paths](launch-modes.md). [Configuration](configuration.md) explains every
@@ -128,10 +130,11 @@ setting, and [Runtime and streaming model](runtime.md) explains what these keys 
 
 Pick whichever fits your network:
 
-- **Trusted Pair** on a trusted LAN, for a TOFU flow that auto-approves first pairing on a
-  configured trusted subnet.
-- **QR pairing** for Nova.
-- **Manual PIN** for standard Moonlight clients.
+- **Trusted Pair** for Nova on a trusted LAN, a TOFU flow that auto-approves Nova's first pairing
+  from a configured trusted subnet.
+- **QR pairing** for Nova for Android.
+- **Manual PIN** for Moonlight, Artemis and every other client. Moonlight cannot ask for Trusted
+  Pair or scan the QR code.
 
 New devices use **Game Control** by default, which is the least-privilege preset that can browse,
 launch, and control a game. **Browse & Watch** is intentionally read-only: it can list the library
@@ -144,7 +147,8 @@ that PIN, keep **Game Control** selected, and choose **Send**. Return to Moonlig
 host if its library does not appear immediately. Steam is not required on the client.
 
 The Moonlight flow step by step, including which client settings matter, is in
-[Play with Moonlight](moonlight.md). The access presets and the device editor are in
+[Play with Moonlight](moonlight.md). What Moonlight, Artemis and Browser Stream get next to Nova is
+in [Clients](compatibility.md#clients). The access presets and the device editor are in
 [Pair and manage devices](devices.md).
 
 ## 5. Start a game and verify the path

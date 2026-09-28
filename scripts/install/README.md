@@ -102,7 +102,7 @@ Environment=POLARIS_PORTAL_DBUS_ADDRESS=unix:path=%t/polaris-portal/bus
 ## Color / HDR tips (gamescope_stream)
 
 - SDR capture is SPA **BGRx** → keep host convert as classic BGR (do not force RGB8 on XRGB).  
-- Avoid **HDR gamescope + SDR encode** (blue wash): use Moonlight SDR or client profile `hdr: false` until full HDR encode is proven.  
+- Avoid an **HDR gamescope with an SDR encode** (blue wash). HDR10 end to end needs a gamescope with Polaris's 10-bit PQ capture patch, set as `POLARIS_GAMESCOPE_BIN`, and a client that asks for HDR; it is proven on NVIDIA. With a stock gamescope, keep the client on SDR or set the client profile to `hdr: false`.  
 
 ## Uninstall (user units)
 

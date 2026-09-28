@@ -776,7 +776,7 @@
     "host_power_ready": "Linux says this host can sleep. Make sure it wakes again before you rely on it.",
     "host_power_ready_link": "Before you turn it on",
     "host_power_unsupported_platform": "Host sleep only works on Linux hosts.",
-    "host_sleep_enabled_desc": "Lets a paired client put this machine to sleep. Watch-only clients cannot. Polaris refuses while a stream is running. Wake it again with Wake-on-LAN.",
+    "host_sleep_enabled_desc": "Lets Nova put this machine to sleep; Moonlight has no sleep control. Watch-only clients cannot. Polaris refuses while a stream is running. Wake it again with Wake-on-LAN.",
     "steamgriddb_api_key": "SteamGridDB API Key",
     "steamgriddb_api_key_desc": "Optional API key used to fetch artwork metadata from SteamGridDB.",
     "stream_audio": "Stream Audio",

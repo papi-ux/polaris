@@ -872,7 +872,7 @@ namespace multiseat {
         launch->temporary_authorization || !(launch->perm & crypto::PERM::launch) ||
         launch->width <= 0 || launch->height <= 0 || launch->fps <= 0 || launch->fps % 1000 != 0 || launch->enable_hdr) {
       return {400, "A Space stream needs a new SDR session at a whole frame rate.", "space_stream_options",
-        "Set Play Setup to Auto frame rate with HDR off."};
+        "Launch with HDR off and a whole frame rate such as 60."};
     }
     const auto host_activity = spaces::try_begin_host_activity();
     if (!host_activity) return spaces_host_setup_running_result;

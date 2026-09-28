@@ -255,7 +255,7 @@
                         {{ client.name }}
                         <span v-if="isClientAiOptimized(client.name)" class="ml-1 inline-flex items-center gap-0.5 rounded-full bg-accent/15 px-1.5 py-0.5 text-[9px] font-medium text-accent">AI</span>
                       </div>
-                      <div class="mt-1 text-[11px] text-storm">{{ client.ip || '--' }}</div>
+                      <div class="mt-1 text-[11px] text-storm">{{ client.ip || '--' }}<template v-if="liveClientFamily(client.name)"> · {{ liveClientFamily(client.name) }}</template></div>
                     </div>
                     <div class="text-right text-[11px] text-storm tabular-nums">
                       <div>{{ client.latency_ms?.toFixed(0) || '--' }} ms</div>
@@ -574,6 +574,7 @@ import { resolveDoctorActionHttpResponse } from '../doctor-action-http.js'
 import { buildReadyCheckDisplay } from '../dashboard-ready-checks'
 import { previewOutputForConfig } from '../dashboard-preview-output.js'
 import { readConfigOrNull } from '../config-cache.js'
+import { liveClientFamilyLabel } from '../client-family.js'
 import {
   buildLiveSummary,
   buildQualityGrade,
@@ -1006,6 +1007,12 @@ const liveSummary = computed(() => {
 // Check if a specific client name has AI-optimized settings (for multi-viewer list)
 function isClientAiOptimized(clientName) {
   return aiCacheKeys.value.some(key => key.startsWith(clientName + ':'))
+}
+
+// Nova or Moonlight / Artemis, as the Devices page names it, so a stream says which client is
+// playing and therefore what it can use.
+function liveClientFamily(clientName) {
+  return liveClientFamilyLabel(clientName, pairedClientList.value)
 }
 
 function gradeColor(grade) {

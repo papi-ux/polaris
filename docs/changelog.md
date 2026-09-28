@@ -24,6 +24,29 @@ starts at `v1.0.0`.
   still makes the Space only after Docker describes exactly that image. Docker's classic image store
   reports the config digest, so nothing changes there.
 
+- Launch refusals that Moonlight shows word for word no longer send a Moonlight player to Nova.
+  Moonlight shows a refusal's reason and fix as one line of text, and several named Nova or Nova's
+  Play Setup: desktop Steam that did not exit said "Nova did not start a private stream",
+  `encoder_probe_failed` against the private compositor said to pick Private Stream (GPU-native) in
+  Play Setup, and refused Space launches said to update Nova or to set Play Setup to Auto frame rate
+  with HDR off. They now name the setting instead, the launch mode, HDR and the frame rate, or the
+  client app, which is right for Nova and for Moonlight alike. The codes are unchanged.
+
+- Mission Control says which kind of client each live stream belongs to, Nova or Moonlight /
+  Artemis, as the Devices page already did, so it is clear at a glance what that stream can use.
+  The host sleep setting now says only Nova can put the host to sleep; Moonlight has no sleep
+  control.
+
+- The compatibility guide has one table of what each client gets: Nova for Android, Nova for
+  Linux, Moonlight, Artemis and Browser Stream, row by row from pairing to refusal detail, and what
+  the host can set for a Moonlight player instead. It also gains an Intel row, which says plainly
+  that no Intel GPU has been through release validation, 4:4:4, Vulkan Video and PyroWave rows,
+  what each stream mode needs from the desktop, HDR by stream mode, and the host requirements. The
+  Moonlight guide, the FAQ, the device guide and the quick start stop saying that Trusted Pair
+  works for Moonlight, that Moonlight can watch another player's stream, that `max_sessions` has
+  to be raised for one watcher, and that the Desktop entry streams the private compositor. The app
+  editor's **Always create Virtual Display** now says it changes nothing on a Private Stream host.
+
 - The adaptive bitrate ceiling no longer cuts the bitrate a client asked for. Nothing in the
   controller ever climbs above a client's request, so `adaptive_bitrate_max`, 100 Mbps unless
   changed, did one thing: it cut any stream whose encoder rate was above it, whatever the codec.

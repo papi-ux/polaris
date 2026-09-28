@@ -82,12 +82,13 @@ Two client-facing notes: Moonlight-protocol clients can request the mirror for a
 | `stream_audio` | `enabled` | Capture and stream audio |
 | `steamgriddb_api_key` | key | Cover art lookups for non-Steam apps |
 | `beat_times_lookup` | `enabled` | Ask How Long To Beat about titles missing from the local completion-estimate dataset; disable to keep the host from making those requests |
-| `host_sleep_enabled` | `disabled` | Let a paired client put this host to sleep |
+| `host_sleep_enabled` | `disabled` | Let a paired Nova client put this host to sleep; Moonlight has no sleep control |
 
 ### Host sleep
 
-`host_sleep_enabled` lets a paired client suspend the host. It is off by default: a client putting
-the host to sleep takes the machine away from everyone on it, and there is no undo from the couch.
+`host_sleep_enabled` lets a paired Nova client suspend the host; Moonlight has no sleep control. It
+is off by default: a client putting the host to sleep takes the machine away from everyone on it,
+and there is no undo from the couch.
 
 With it on, `POST /polaris/v1/host/sleep` suspends the host. The request needs a paired client
 certificate carrying launch permission, which every paired client has unless you made it watch
@@ -338,7 +339,7 @@ completion dataset). Keys: `sunshine_name`, `notify_pre_releases`, `system_tray`
 | **Hide tray control options** (`hide_tray_controls`) | Do not show "Force Stop", "Restart" and "Quit" in tray menu. |
 | **SteamGridDB API Key** (`steamgriddb_api_key`) | Optional API key used to fetch artwork metadata from SteamGridDB. The first-run wizard can check and save it. A saved key is used right away, by the cover search and by Nova, with no restart. |
 | **Completion Estimate Lookups** (`beat_times_lookup`) | Allow Polaris to ask How Long To Beat about titles missing from its local completion-estimate dataset. Disabling it keeps the estimates already stored and stops the host making those requests on your behalf. |
-| **Allow Clients To Sleep This Host** (`host_sleep_enabled`) | Let a paired client put this machine to sleep. Watch-only clients cannot. Polaris refuses while a stream is running. Waking it again is Wake-on-LAN. |
+| **Allow Clients To Sleep This Host** (`host_sleep_enabled`) | Let a paired Nova client put this machine to sleep; Nova for Android and Nova for Linux have the control, and Moonlight has none. Watch-only clients cannot. Polaris refuses while a stream is running. Waking it again is Wake-on-LAN. |
 
 ### Input tab
 
@@ -482,9 +483,12 @@ Forcing `hdr_mode = 2` can still select a 10-bit HEVC/Main10 or P010 encode path
 create a true HDR source when the captured display path is SDR and may produce incorrect colors on
 some VAAPI stacks.
 
-True Linux HDR requires the active capture path to expose HDR display metadata. Today that means a
-KMS/DRM display path with an HDR-capable output reporting `HDR_OUTPUT_METADATA`, plus a client HDR
-request and a 10-bit-capable encoder. A valid true HDR session logs:
+True Linux HDR requires the active capture path to expose HDR display metadata, plus a client HDR
+request and a 10-bit-capable encoder. Two paths do today: a KMS/DRM display path with an HDR-capable
+output reporting `HDR_OUTPUT_METADATA`, and Gamescope Stream when its gamescope carries Polaris's
+10-bit BT.2020 PQ capture patch, proven on NVIDIA
+([Runtime and streaming model](runtime.md#hdr-and-main10) has the conditions). A valid true HDR
+session logs:
 
 ```text
 HDR metadata: available=true usable=true
@@ -501,7 +505,7 @@ Headless labwc/wlroots sessions are intentionally treated as SDR until the headl
 truthfully provide HDR metadata. In that mode, `hdr_mode = 2` can still be useful to test Main10/P010
 encode support, but Polaris will not advertise true HDR to the client without metadata.
 
-The configuration that carries true HDR today, verified end to end:
+The KMS configuration that carries true HDR today, verified end to end:
 
 ```ini
 capture = kms

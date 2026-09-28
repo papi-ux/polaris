@@ -131,6 +131,12 @@ namespace nvhttp {
   namespace pt = boost::property_tree;
 
   namespace {
+    // Moonlight shows this verbatim, so it names the setting and not a Nova screen: the launch mode
+    // is Where games run on the host and the mode Nova picks per launch.
+    constexpr const char *desktop_steam_did_not_exit_message =
+      "Desktop Steam did not exit, so Polaris did not start the private stream. Quit Steam on the host "
+      "desktop and launch again, or set the launch mode to Mirror Desktop.";
+
     struct request_stream_scope_t {
       std::uint64_t session_generation = 0;
       std::string app_session_id;
@@ -6177,11 +6183,12 @@ namespace nvhttp {
         (!appuuid.empty() && appuuid != multiseat::profile_app_uuid)))
       return profile_launch_response_t {400, "This launch did not name the device's Space.", {}, "space_app_identity", "Open the Space from the library."};
     if (!args.contains("rikey") || !args.contains("rikeyid"))
-      return profile_launch_response_t {400, "The Space launch is missing its key material.", {}, "space_key_material", "Update Nova and try again."};
+      return profile_launch_response_t {400, "The Space launch is missing its key material.", {}, "space_key_material", "Update the client app and try again."};
     auto launch = make_launch_session(false, false, args, current.get(), true);
     if (!launch) return profile_launch_response_t {400, "These display or media options are not supported for a Space stream.", {},
-      "space_display_options", "Set Play Setup to Auto frame rate with HDR off."};
-    if (!launch->rtsp_cipher) return profile_launch_response_t {403, "Space streams require encrypted RTSP.", {}, "space_encryption_required", "Update Nova."};
+      "space_display_options", "Launch with HDR off, stereo audio, a whole frame rate such as 60, and the encoder on Auto."};
+    if (!launch->rtsp_cipher) return profile_launch_response_t {403, "Space streams require encrypted RTSP.", {}, "space_encryption_required",
+      "Update the client app to a version that encrypts stream setup."};
     if (args.count("workerTarget") > 1 || args.count("workerProfile") > 1)
       return profile_launch_response_t {400, "The Space launch identity was sent twice.", {}, "space_identity_duplicate"};
     const auto target = get_arg(args, "workerTarget", "");
@@ -7448,7 +7455,7 @@ namespace nvhttp {
           if (!proc::request_desktop_steam_shutdown_for_private_stream()) {
             tree.put("root.resume", 0);
             tree.put("root.<xmlattr>.status_code", 409);
-            tree.put("root.<xmlattr>.status_message", "Desktop Steam did not exit, so Nova did not start a private stream. Quit Steam on the desktop or choose Mirror Desktop.");
+            tree.put("root.<xmlattr>.status_message", desktop_steam_did_not_exit_message);
             tree.put("root.error_code", "desktop_steam_shutdown_failed");
             tree.put("root.gamesession", 0);
             return;
@@ -10203,7 +10210,7 @@ namespace nvhttp {
         if (launch_policy.recommendedAction == "force_private_stream_after_desktop_steam_shutdown") {
           if (!proc::request_desktop_steam_shutdown_for_private_stream()) {
             nlohmann::json err;
-            err["error"] = "Desktop Steam did not exit, so Nova did not start a private stream. Quit Steam on the desktop or choose Mirror Desktop.";
+            err["error"] = desktop_steam_did_not_exit_message;
             err["error_code"] = "desktop_steam_shutdown_failed";
             err["launchPolicy"] = launch_policy_json;
             SimpleWeb::CaseInsensitiveMultimap headers;

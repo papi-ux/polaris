@@ -159,6 +159,9 @@ TEST(LaunchRefusal, AFailedProbeNamesTheCaptureCauseBeforeTheEncoder) {
   EXPECT_EQ(taken->code, "encoder_probe_failed");
   EXPECT_NE(taken->message.find("private stream compositor"), std::string::npos);
   EXPECT_NE(taken->action.find("Private Stream (GPU-native)"), std::string::npos);
+  // Moonlight shows the action verbatim, so it names the launch mode, not a Nova screen.
+  EXPECT_NE(taken->action.find("launch mode"), std::string::npos);
+  EXPECT_EQ(taken->action.find("Play Setup"), std::string::npos);
 
   video::note_launch_refused_by_probe(false);
   taken = launch_failure::take();

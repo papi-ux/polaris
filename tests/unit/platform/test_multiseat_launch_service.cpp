@@ -1564,6 +1564,33 @@ namespace {
     EXPECT_EQ(refused.status, 400);
     EXPECT_EQ(refused.code, "space_stream_options");
     EXPECT_EQ(std::string(refused.message), "A Space stream needs a new SDR session at a whole frame rate.");
+    EXPECT_EQ(std::string(refused.action), "Launch with HDR off and a whole frame rate such as 60.");
+  }
+
+  // Moonlight shows a Space refusal as one line, the message and then the action, so each action
+  // names something every client has instead of a Nova screen or Nova itself.
+  TEST_F(MultiseatProfileHttp, SpaceLaunchRefusalsNameTheFixForEveryClient) {
+    auto hdr = args();
+    hdr.emplace("hdrMode", "1");
+    const auto options = nvhttp::launch_profile_request(client, hdr, false, [](const auto &) { return true; });
+    ASSERT_TRUE(options);
+    EXPECT_EQ(options->code, "space_display_options");
+    auto keyless = args();
+    keyless.erase("rikey");
+    const auto keys = nvhttp::launch_profile_request(client, keyless, false, [](const auto &) { return true; });
+    ASSERT_TRUE(keys);
+    EXPECT_EQ(keys->code, "space_key_material");
+    auto unencrypted = args();
+    unencrypted.erase("corever");
+    const auto cipher = nvhttp::launch_profile_request(client, unencrypted, false, [](const auto &) { return true; });
+    ASSERT_TRUE(cipher);
+    EXPECT_EQ(cipher->code, "space_encryption_required");
+    for (const auto *result : {&*options, &*keys, &*cipher}) {
+      EXPECT_FALSE(result->action.empty()) << result->code;
+      EXPECT_EQ(result->action.find("Nova"), std::string::npos) << result->code;
+      EXPECT_EQ(result->action.find("Play Setup"), std::string::npos) << result->code;
+    }
+    EXPECT_EQ(state->begins.load(), 0U);
   }
 
   TEST_F(MultiseatProfileHttp, UnmappedDeviceUsesOrdinaryRequestPath) {

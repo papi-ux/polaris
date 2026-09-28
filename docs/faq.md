@@ -8,10 +8,12 @@ hosts, HDR, and the optional AI features. If your question is about a specific f
 
 ### Do I need an NVIDIA GPU?
 
-No. NVIDIA and NVENC are the most heavily tested path today, but AMD and Intel Mesa VAAPI and
-software encode are supported. GPU-native DMA-BUF capture is an optimization request on both NVIDIA
-and AMD-capable stacks, and Polaris reports the actual path when a host falls back to SHM or system
-memory. [Launch modes and capture paths](launch-modes.md) has per-vendor recommendations.
+No. NVIDIA and NVENC are the most heavily tested path. AMD encodes through Mesa VA-API and is
+supported. Intel uses the same VA-API path but no Intel GPU has been through release validation yet,
+and software encode works anywhere as a fallback. On AMD and Intel, capture copies each frame through
+system memory on purpose, and Polaris reports the path it actually used.
+[Support and compatibility](compatibility.md#gpu-and-encoding) has the status of each vendor, and
+[Launch modes and capture paths](launch-modes.md) has per-vendor recommendations.
 
 ### Can Polaris stream 10-bit to an SDR handheld screen?
 
@@ -21,17 +23,21 @@ HDR.
 
 ### Can Polaris stream true HDR on Linux?
 
-Yes, but Polaris only advertises true HDR when the active capture path reports HDR display metadata.
-Headless labwc and wlroots sessions stay honestly SDR until the runtime can provide real metadata.
-[Runtime and streaming model](runtime.md) has the details.
+Yes, on two routes, both proven on NVIDIA: Mirror Desktop with `capture = kms` streaming an HDR
+monitor, and Gamescope Stream with a gamescope that carries Polaris's 10-bit capture patch. Polaris
+only advertises true HDR when the active capture path reports HDR display metadata, so Private
+Stream, whose labwc session has none, stays SDR. [HDR by stream mode](compatibility.md#hdr-by-stream-mode)
+has the conditions, and [Runtime and streaming model](runtime.md#hdr-and-main10) the details.
 
 ## Clients
 
 ### Does Polaris work with Moonlight on iOS, macOS, and PC?
 
-Yes. Polaris speaks the Moonlight protocol, so any Moonlight client can connect. Polaris-specific
-features — launch-mode selection, watch mode, optimization guidance, and richer session state —
-require Nova on Android.
+Yes. Polaris speaks the Moonlight protocol, so any Moonlight client can pair and stream. A launch
+mode per launch, Play Setup, Spaces, PyroWave, watching another player's stream and host sleep need
+Nova, for Android or Linux. [What each client gets](compatibility.md#clients) compares Nova,
+Moonlight, Artemis and Browser Stream, and says what the host can set for a Moonlight player
+instead.
 
 ### Does Moonlight lock streams to 60 FPS?
 
@@ -50,7 +56,10 @@ codec and HDR, because the host has to offer the matching encoder profile. The f
 
 No. The host's saved launch mode applies to every standard Moonlight session; only Nova can pick a
 mode per launch. A protocol client can still ask for a one-off desktop mirror by adding
-`mirrorDesktop=1` to its launch request, without changing the host setting.
+`mirrorDesktop=1` to its launch request, without changing the host setting, and Artemis's virtual
+display option asks for a Host Virtual Display. The standard Moonlight apps send neither, so on the
+host give each way of playing its own app entry
+([how](compatibility.md#what-the-host-can-do-for-a-moonlight-player)).
 
 ### Moonlight shows the library but cannot start anything
 
@@ -81,9 +90,12 @@ touchpads yet.
 
 ### Can multiple people watch the same stream?
 
-Yes. Set `max_sessions` above `1`. Polaris tracks owner and viewer roles explicitly, and passive
-watch mode is designed so a second client can observe without taking over. Viewers match the active
-owner profile rather than silently creating a different, downgraded stream.
+Yes, from Nova. A Nova device can watch the stream another device is playing, and a Nova device
+with **Browse & Watch** access can only watch. `max_sessions` is `2` by default, which leaves room for one
+watcher; raise it for more. Polaris tracks owner and viewer roles explicitly, and passive watch mode
+is designed so a second client can observe without taking over. Viewers match the active owner
+profile rather than silently creating a different, downgraded stream. Moonlight cannot watch: it
+never asks to, so the host refuses its launch while another device owns the stream.
 
 ## Coexisting with other hosts
 
@@ -129,9 +141,10 @@ because MangoHud can crash helper processes before the session gets a usable fra
 
 ### How does Trusted Pair work?
 
-Trusted Pair is Polaris' TOFU flow. If the client is on a configured trusted subnet, Polaris can
-auto-approve first pairing. QR and manual PIN pairing remain available if you want a stricter or more
-traditional flow.
+Trusted Pair is Polaris' TOFU flow for Nova. When Nova asks for it from a subnet listed under
+**Settings, Network, Trusted Subnet Auto-Pairing**, Polaris approves the first pairing without a PIN.
+Moonlight and Artemis never ask for it, so they pair with the PIN. QR and manual PIN pairing remain
+available if you want a stricter or more traditional flow.
 
 ## AI features
 
