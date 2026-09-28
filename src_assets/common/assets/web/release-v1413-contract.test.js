@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 const read = (path) => readFileSync(join(process.cwd(), path), 'utf8')
 
-const currentNotes = () => read('docs/release-notes/v1.4.13.md')
+const historicalNotes = () => read('docs/release-notes/v1.4.13.md')
 
 const expectedAssets = [
   'Polaris-arch-x86_64.pkg.tar.zst',
@@ -13,29 +13,9 @@ const expectedAssets = [
   'Polaris-ubuntu24.04-x86_64.deb',
 ].sort()
 
-describe('v1.4.13 release contract', () => {
-  // These four are what the source says it builds, not what the last release was. Two of them are
-  // only read during a package build, so a mismatch surfaces as a failed SteamOS job rather than as
-  // a failed test, which is why they are pinned here where a local run sees them.
-  it('pins the version every packaging surface agrees on', () => {
-    expect(read('CMakeLists.txt')).toContain('project(Polaris VERSION 1.4.13')
-    expect(read('docs/benchmark-control-openapi.json')).toContain('"collector_version": "1.4.13"')
-    expect(read('packaging/linux/SteamOS/namcap-reviewed-warnings.txt')).toContain(
-      'usr/bin/polaris-1.4.13',
-    )
-    expect(read('scripts/ci/build-steamos-package.sh')).toContain('EXPECTED_PKGVER="1.4.13${POLARIS_PRERELEASE_LABEL}-1"')
-  })
-
-  // The release workflow refuses a tag whose notes file is missing or empty, and a beta reads the
-  // notes of the release it precedes, so this file has to exist from the moment the version opens.
-  it('has curated notes a beta can publish', () => {
-    const notes = currentNotes()
-    expect(notes.split('\n')[0]).toBe('# Polaris v1.4.13')
-    expect(notes.trim().length).toBeGreaterThan(0)
-  })
-
+describe('historical v1.4.13 release contract', () => {
   it('ships exactly the four supported packages and installs them from this tag', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     for (const asset of expectedAssets) {
       expect(notes).toContain(asset)
       expect(notes).toContain(
@@ -55,7 +35,7 @@ describe('v1.4.13 release contract', () => {
   // from it. The release shares its version with the betas, so a host that ran one can find its
   // package manager treating the release as installed: the notes say how to put it over the beta.
   it('speaks to someone installing the release, not to a beta tester', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     expect(notes).not.toContain('While 1.4.13 is in beta')
     expect(notes).not.toContain('the prerelease you are reading')
     expect(notes).not.toContain('which does not exist yet')
@@ -74,7 +54,7 @@ describe('v1.4.13 release contract', () => {
   // yet; stable Android compiles it out; Linux needs the separate bundle. A reader who looked in
   // Play Setup found nothing, so the notes name each path.
   it('says where PyroWave is in each Nova build without calling the two a matched release', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     expect(notes).not.toMatch(/matched with Nova/i)
     expect(notes).not.toContain('Nova 1.4.13 is still in beta')
     expect(notes).toContain('Nova 1.4.13 is out too!')
@@ -90,7 +70,7 @@ describe('v1.4.13 release contract', () => {
   // capture hand PyroWave frames in host memory, which pay an upload first, and HDR on this codec
   // had not been shown end to end, so the page quotes what a recorded session paid instead.
   it('quotes the PyroWave cost that host memory capture pays', () => {
-    const notes = currentNotes()
+    const notes = historicalNotes()
     expect(notes).not.toContain('0.49 ms')
     expect(notes).not.toContain('without the frame ever leaving the GPU')
     expect(notes).toContain('that averaged 0.35 ms for the copy plus 0.95 ms to encode')
@@ -103,7 +83,7 @@ describe('v1.4.13 release contract', () => {
     // capture permission, because it did. A package owns it now, so repeating that warning would
     // send someone to re-run a command they no longer need, and would hide the one thing this
     // release actually asks of them: install polaris-kms, and log out once.
-    const notes = currentNotes()
+    const notes = historicalNotes()
     expect(notes).not.toContain('removes the KMS capture permission')
     expect(notes).toContain('polaris-kms')
     expect(notes).toContain('sudo -H polaris --setup-host --enable-kms')
@@ -113,7 +93,7 @@ describe('v1.4.13 release contract', () => {
   it('offers the capture helper for every distro it ships Polaris for', () => {
     // A release asset is the only way to install the helper on SteamOS and Ubuntu, which have no
     // package repository, so leaving one out silently removes DRM/KMS capture from those hosts.
-    const notes = currentNotes()
+    const notes = historicalNotes()
     for (const asset of expectedAssets) {
       expect(notes).toContain(asset.replace('Polaris-', 'Polaris-kms-'))
     }

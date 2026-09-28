@@ -454,7 +454,8 @@ Tuning is on, Doctor says what to set instead of acting. A stream cut below a re
 meets the far figure climbs back to that request, by Doctor's ordinary quality restore or by Live
 Tuning's own recovery, and Doctor never asks for less than the player set.
 
-**Live Tuning.** Live Tuning never raises a stream above the player's request. On a PyroWave stream
+**Live Tuning.** Live Tuning raises a stream above the player's request only to lift one below
+`adaptive_bitrate_min` (2 Mbps by default) to that floor. On a PyroWave stream
 it cuts no lower than half the far figure at the encoder, about 77 Mbps for 1920x1080 at 60 fps in
 4:2:0, or no lower than the request when that is lower still. At that floor it stops, and Doctor
 suggests HEVC or a lower mode instead of another cut. It does not cut PyroWave for a slow encode,

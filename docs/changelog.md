@@ -229,8 +229,8 @@ starts at `v1.0.0`.
   for a device's own screen, or more than 80% of recent frames hit the byte budget, and the network
   is clean, Doctor offers one tap to raise it to that advice, never above 300 Mbps or `max_bitrate`,
   in the same guarded steps with the same verification and Undo as its other bitrate fixes. The
-  raise can go above the bitrate the player asked for, and it is the only thing that can: Live
-  Tuning never does. While Live Tuning is on, Doctor says what to set instead. A stream with no
+  raise can go above the bitrate the player asked for. Live Tuning goes above a request only to
+  lift one below `adaptive_bitrate_min` to that floor. While Live Tuning is on, Doctor says what to set instead. A stream with no
   saved paired profile can now climb back after a reduction too, to the bitrate it opened at, where
   Doctor used to offer nothing. The bitrate row in Doctor's evidence, which always read pass, now
   reflects network pressure and a stream short of its goal.
@@ -369,9 +369,11 @@ starts at `v1.0.0`.
   selection reason for `encoder = vulkan` says which of the two a host gets, and a host that moves
   into or out of Gamescope Stream probes again, so what it advertises follows the route.
 
-- Arch and SteamOS packages are built with link-time optimisation again; 1.4.13 built them
-  without it. Vulkan Video and PyroWave now use distinct loader symbols and scaler shader types,
-  fixing the conflicts that made 1.4.13 turn LTO off.
+- Every package builds Polaris with link-time optimisation again, as releases before 1.4.13 did.
+  In 1.4.13 the Arch and SteamOS packages opted out of it, and the setting that was meant to keep
+  it off the vendored PyroWave trees turned it off for the Polaris binary in every package.
+  Vulkan Video and PyroWave now use distinct loader symbols and scaler shader types, which fixes
+  the conflicts that needed LTO off, so neither the opt-out nor that setting remains.
 
 - `sudo -H polaris --setup-host --enable-kms` no longer stops the Polaris user service from
   starting. It pointed the service at the DRM/KMS capture helper straight away, but only members of

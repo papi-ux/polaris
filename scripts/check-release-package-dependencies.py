@@ -1107,7 +1107,7 @@ for context, script, blocks in (
 
 steamos_build_script = read("scripts/ci/build-steamos-package.sh")
 for block in (
-    'EXPECTED_PKGVER="1.4.13${POLARIS_PRERELEASE_LABEL}-1"\n'
+    'EXPECTED_PKGVER="1.4.14${POLARIS_PRERELEASE_LABEL}-1"\n'
     'if [ "$PACKAGE_IDENTITY" != "polaris|$EXPECTED_PKGVER|x86_64" ]; then\n'
     "  printf 'unexpected SteamOS package identity: %s\\n' \"$PACKAGE_IDENTITY\" >&2\n"
     '  exit 1\n'

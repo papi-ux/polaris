@@ -31,8 +31,9 @@ A PyroWave stream has a floor of its own: half what the codec's model advises fo
 device's own screen, at the encoder, and never above the client's request. At that floor
 Live Tuning stops cutting, and Doctor suggests HEVC or a lower mode rather than another
 cut. Live Tuning does not cut PyroWave for a slow encode, which takes as long at any
-bitrate. Live Tuning never raises a stream above the request. Doctor's raise for a starved
-PyroWave stream is the one change that can, as one tap with Undo
+bitrate. Live Tuning raises a stream above the request only to lift one below
+`adaptive_bitrate_min` to that floor. Doctor's raise for a starved PyroWave stream is the other
+change that can, as one tap with Undo
 ([PyroWave reference](pyrowave-reference.md#how-polaris-advises-and-tunes-pyrowave)).
 
 The floor is the one place the bitrate can sit above the request. A client that asks

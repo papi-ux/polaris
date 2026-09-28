@@ -113,8 +113,8 @@ handheld's own screen, set about 172 Mbps in 4:2:0 or 201 Mbps in 4:4:4, which N
 streams, at the host's default 10% FEC with stereo audio
 ([other figures, and their limits](pyrowave-reference.md#how-polaris-advises-and-tunes-pyrowave)).
 When a stream sits below that on a clean network, or most frames hit PyroWave's size limit,
-[Doctor](doctor.md) offers one tap to raise it, to at most 300 Mbps, with Undo. Live Tuning never
-raises a stream above your setting, and stops cutting at half the advice.
+[Doctor](doctor.md) offers one tap to raise it, to at most 300 Mbps, with Undo. Live Tuning raises a
+stream above your setting only to its 2 Mbps floor, and stops cutting at half the advice.
 
 ## If it does not work
 

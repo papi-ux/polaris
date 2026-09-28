@@ -1066,7 +1066,7 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain("sed -n 's/^arch = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
     // The release number stays literal. A prerelease joins its label to it with no separator, which
     // pacman sorts below that release, and the helper carries that version and depends on it.
-    expect(buildScript).toContain('EXPECTED_PKGVER="1.4.13${POLARIS_PRERELEASE_LABEL}-1"')
+    expect(buildScript).toContain('EXPECTED_PKGVER="1.4.14${POLARIS_PRERELEASE_LABEL}-1"')
     expect(buildScript).toContain('if [ "$PACKAGE_IDENTITY" != "polaris|$EXPECTED_PKGVER|x86_64" ]; then')
     expect(buildScript).toContain('if [ "$KMS_IDENTITY" != "polaris-kms|$EXPECTED_PKGVER|x86_64" ]; then')
     expect(buildScript).toContain('if ! grep -Fqx "depend = polaris=$EXPECTED_PKGVER" "$KMS_RECEIPT_ROOT/.PKGINFO"; then')
@@ -1114,8 +1114,8 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/share/polaris"')
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/share/applications/dev.polaris-stream.app.Polaris.desktop"')
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/lib/systemd/user/polaris.service"')
-    // Named for the release number alone: a prerelease's pkgver, 1.4.13beta.3, is not the binary's
-    // name, and the reviewed namcap warnings name usr/bin/polaris-1.4.13 either way.
+    // Named for the release number alone: a prerelease's pkgver, 1.4.14beta.1, is not the binary's
+    // name, and the reviewed namcap warnings name usr/bin/polaris-1.4.14 either way.
     expect(pkgbuild).toContain('test -x "$pkgdir/usr/bin/polaris-@PROJECT_VERSION@"')
     expect(pkgbuild).toContain('test "$(readlink "$pkgdir/usr/bin/polaris")" = "polaris-@PROJECT_VERSION@"')
     expect(pkgbuild).not.toContain('mv "$pkgdir/usr/bin/polaris"')
