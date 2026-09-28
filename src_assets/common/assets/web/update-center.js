@@ -350,6 +350,34 @@ export function isPrereleaseOptIn(value) {
   return value === true || value === 'enabled'
 }
 
+function plainVersion(version) {
+  return String(version || '').trim().replace(/^v(?=\d)/i, '')
+}
+
+// A local build carries the commit after the release it was built from, 1.4.13.36e05224 or
+// 1.4.14-beta.1.36e05224.dirty. The release is the part a published beta is compared with.
+function developmentBuildBase(version) {
+  const match = plainVersion(version).match(/^(\d+\.\d+\.\d+.*?)\.[0-9a-f]{7,40}(?:\.dirty)?$/i)
+  return match ? match[1] : ''
+}
+
+// With betas included and nothing newer to offer, "on the latest public release" reads as though the
+// beta channel was never checked. So the status line says what the check found: no newer beta, and
+// which build is the newest one.
+function betaChannelNote({ includePrereleases, status, candidateRelease, currentVersion }) {
+  if (!isPrereleaseOptIn(includePrereleases) || status !== 'current' || !candidateRelease) return ''
+  const base = developmentBuildBase(currentVersion)
+  const installed = base || plainVersion(currentVersion)
+  const stable = plainVersion(versionFromRelease(candidateRelease))
+  const found = candidateRelease.prerelease
+    ? `No beta newer than ${installed} is published yet.`
+    : `No beta newer than ${installed} is published yet, so stable ${stable} is the newest build.`
+  if (base) {
+    return `This host runs a development build of ${base}. ${found}`
+  }
+  return candidateRelease.prerelease ? `${found} This host runs the newest beta.` : found
+}
+
 export function chooseCandidateRelease({ latestRelease, prereleaseRelease, includePrereleases = false, currentVersion = '' } = {}) {
   if (isPrereleaseOptIn(includePrereleases) && prereleaseRelease && !prereleaseRelease.draft && isReleaseGreater(prereleaseRelease, latestRelease ? versionFromRelease(latestRelease) : currentVersion, true)) {
     return prereleaseRelease
@@ -459,6 +487,7 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
   const releaseUrl = candidateRelease.html_url || ''
   const kmsHelperMissingFromRelease = host.kms_helper_installed === true && Boolean(asset) && !kmsAsset
   const action = buildActionMetadata(status, asset, installCommand, releaseUrl, kmsHelperMissingFromRelease)
+  const channelNote = betaChannelNote({ includePrereleases, status, candidateRelease, currentVersion })
 
   return {
     status,
@@ -476,7 +505,14 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
     manualInstallOnly: true,
     runningBinaryPath,
     runningOutsidePackage,
+    // The helper is built for this exact Polaris, so a host that has it installs both, and the
+    // Package card lists what the install command takes rather than half of it.
+    kmsAsset,
+    kmsAssetDigest: kmsAsset?.digest || '',
+    kmsHelperMissingFromRelease,
+    channelNote,
     ...action,
+    ...(channelNote ? { primaryActionSummary: channelNote } : {}),
   }
 }
 

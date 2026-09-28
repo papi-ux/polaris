@@ -96,6 +96,10 @@ describe('System page product hierarchy', () => {
 
     expect(home).toContain('class="system-telemetry-live')
     expect(home.match(/class="system-telemetry-item"/g)).toHaveLength(4)
+    // Capture is one row across the grid, not a fifth tile that leaves a gap beside it.
+    expect(home.match(/class="system-telemetry-item system-telemetry-item-wide"/g)).toHaveLength(1)
+    expect(css).toMatch(/\.system-telemetry-item-wide\s*\{[^}]*grid-column:\s*1 \/ -1/)
+    expect(css).toMatch(/\.system-capture-readout,[\s\S]*?grid-template-columns: minmax\(0, 1fr\)/)
     expect(css).toContain('.system-ops-grid')
     expect(css).toContain('.system-telemetry-grid')
     expect(css).toContain('.system-telemetry-live')

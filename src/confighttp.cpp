@@ -118,6 +118,7 @@
   #include "platform/linux/session_manager.h"
   #include "platform/linux/game_mode_host.h"
   #include "platform/linux/user_unit_override.h"
+  #include "platform/linux/kms_capture_readiness.h"
   #include "platform/linux/stream_runtime.h"
   #include "platform/linux/stream_display_policy.h"
   #include "platform/linux/display_topology.h"
@@ -9472,6 +9473,109 @@ namespace confighttp {
         output["running_binary"]["service_override"]["exec_start"] = override.exec_start;
         output["running_binary"]["service_override"]["binary_missing"] = override.binary_missing;
       }
+    }
+
+    // Where DRM/KMS capture stands for the capture this host is set to. Readiness only counts where
+    // capture would use KMS: a host set to portal or kwin runs the polaris-kms helper without
+    // CAP_SYS_ADMIN on purpose, and calling that a helper without its capability sends someone to
+    // repair a host that works. Beside it, what the stream running now or the last one opened, so
+    // the preference, what the host can do and what it did read in one place.
+    {
+      namespace kr = platf::kms_readiness;
+      namespace ke = platf::kms_enable;
+      const fs::path kms_helper {platf::user_unit::packaged_kms_helper};
+      const auto loaded_capture = stream_display_policy::loaded_capture_setting();
+      const auto stream_mode = stream_display_policy::configured_selection();
+      const auto substitution = platf::capture_backend_substitution_note();
+      constexpr std::string_view kms_substitution = "kms -> ";
+
+      kr::facts_t kms;
+      kms.capture = stream_display_policy::canonical_capture_backend(loaded_capture);
+      kms.route = stream_display_policy::canonical_capture_backend(stream_display_policy::capture_for_launch_into_current_mode());
+      kms.kms_substituted = substitution.starts_with(kms_substitution);
+      if (const auto status = ke::read_small_file("/proc/self/status")) {
+        kms.cap_sys_admin = kr::cap_sys_admin_permitted(*status);
+      }
+      kms.capability_set_aside = kr::capability_set_aside();
+      kms.helper_installed = update_status::kms_helper_installed();
+      kms.helper_has_capability = kms.helper_installed && ke::file_holds_capability(kms_helper);
+      bool running_replaced_helper = false;
+      if (const auto running = platf::user_unit::running_executable()) {
+        // A helper an update replaced reads "<path> (deleted)", which is not the file on disk now.
+        // It is still the helper, though, and the console words its advice for a host that has one.
+        std::error_code running_ec;
+        std::error_code helper_ec;
+        const auto running_canonical = fs::canonical(*running, running_ec);
+        const auto helper_canonical = fs::canonical(kms_helper, helper_ec);
+        kms.running_helper = !running_ec && !helper_ec && running_canonical == helper_canonical;
+        running_replaced_helper = running->string() == kms_helper.string() + " (deleted)";
+      }
+      if (const auto cgroup = ke::read_small_file("/proc/self/cgroup")) {
+        kms.in_service = platf::user_unit::in_polaris_service(*cgroup);
+      }
+      if (!account_home.empty()) {
+        const auto drop_ins = account_home / ".config/systemd/user/polaris.service.d";
+        const auto effective = platf::user_unit::effective_exec_override(drop_ins);
+        kms.service_points_at_helper = effective.active() && effective.binary == kms_helper;
+        std::error_code ec;
+        kms.parked = fs::exists(fs::symlink_status(drop_ins / std::string {platf::user_unit::kms_parked_drop_in_name}, ec));
+      }
+      const std::string kms_group {platf::user_unit::kms_group};
+      kms.group_member = !account.name.empty() && ke::user_in_group(account.name, kms_group.c_str());
+      if (kr::needs_session_group(kms)) {
+        if (const auto *group = getgrnam(kms_group.c_str())) {
+          kms.session_group = ke::user_manager_group("/proc", geteuid(), group->gr_gid);
+        }
+      }
+
+      nlohmann::json report {
+        {"state", std::string {kr::id(kr::decide(kms))}},
+        {"route_kind", std::string {kr::id(kr::route_of(kms))}},
+        {"capture", kms.capture},
+        {"capture_setting", loaded_capture},
+        {"route", kms.route},
+        {"stream_mode", stream_mode},
+        {"stream_mode_label", stream_display_policy::label_for_selection(stream_mode)},
+        {"kms_possible_in_mode", kr::kms_possible_in_mode(stream_mode)},
+        {"cap_sys_admin", kms.cap_sys_admin},
+        {"capability_set_aside", kms.capability_set_aside},
+        {"helper_installed", kms.helper_installed},
+        {"running_helper", kms.running_helper},
+        {"running_replaced_helper", running_replaced_helper},
+        {"in_service", kms.in_service},
+        {"lingering", boot.linger_enabled},
+        {"account", account.name},
+      };
+      if (kms.kms_substituted) {
+        report["substitute"] = substitution.substr(kms_substitution.size());
+      }
+
+      // What capture opened, from the stream stats: the one stream running now, or the last one
+      // that ended when none runs. Two streams at once have two answers, so then there is none.
+      nlohmann::json observed = nullptr;
+      const auto observed_capture = [](std::string_view when, const std::string &client, const stream_stats::capture_backend_t &backend) {
+        nlohmann::json capture {
+          {"when", std::string {when}},
+          {"client_name", client},
+          {"opened", backend.opened},
+          {"route", backend.route},
+        };
+        if (!backend.mode_override_reason.empty()) {
+          capture["mode_override_reason"] = backend.mode_override_reason;
+        }
+        return capture;
+      };
+      const auto streams = stream_stats::get_current();
+      if (streams.clients.size() == 1 && !streams.clients.front().capture_backend.opened.empty()) {
+        observed = observed_capture("streaming", streams.clients.front().name, streams.clients.front().capture_backend);
+      } else if (streams.clients.empty() && streams.last_session && !streams.last_session->capture_backend.opened.empty()) {
+        observed = observed_capture("last_session", streams.last_session->client_name, streams.last_session->capture_backend);
+      }
+      report["observed"] = observed;
+      // How many clients stream now, so a host with two streams, or with one that has not opened
+      // capture yet, does not read as having had none.
+      report["streams_running"] = streams.clients.size();
+      output["kms_capture"] = report;
     }
 
     // A headless-boot host has no desktop on purpose, and a Game Mode host

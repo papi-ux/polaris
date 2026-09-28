@@ -16,6 +16,7 @@
  */
 #pragma once
 
+#include "stream_display_policy.h"
 #include "user_unit_override.h"
 
 #include <algorithm>
@@ -31,6 +32,10 @@
 #include <string_view>
 #include <system_error>
 #include <vector>
+
+#include <grp.h>
+#include <pwd.h>
+#include <sys/xattr.h>
 
 namespace platf::kms_enable {
   /// What /proc/<pid>/status says about whose a process is and which groups the kernel checks for it.
@@ -125,6 +130,35 @@ namespace platf::kms_enable {
     return std::string {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
   }
 
+  /**
+   * @brief Whether a file carries a capability set.
+   *
+   * setcap stores it as the security.capability extended attribute, so the kernel answers directly.
+   * libcap would too, but it is only linked into builds with DRM support, and `setcap -r` cannot
+   * answer it: on a binary that never had one it exits 1 with "has no capability to remove", which
+   * in a summary of what was undone reads as a failure rather than as nothing to undo.
+   */
+  inline bool file_holds_capability(const std::filesystem::path &path) {
+    return getxattr(path.c_str(), "security.capability", nullptr, 0) >= 0;
+  }
+
+  /// Whether the account database puts an account in a group, which is what its next login gets.
+  inline bool user_in_group(const std::string &user, const char *group_name) {
+    const auto *gr = getgrnam(group_name);
+    if (!gr) {
+      return false;
+    }
+    if (const auto *pw = getpwnam(user.c_str()); pw && pw->pw_gid == gr->gr_gid) {
+      return true;
+    }
+    for (char **member = gr->gr_mem; member && *member; ++member) {
+      if (user == *member) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /// Where the account's running service manager stands with a group.
   enum class session_group_e {
     live,  ///< the manager holds the group, so a service it starts can execute the helper
@@ -173,6 +207,95 @@ namespace platf::kms_enable {
     return all_hold ? session_group_e::live : session_group_e::not_live;
   }
 
+  /// What the account's polaris user service runs now, measured against one binary.
+  enum class service_run_e {
+    other,  ///< it runs something else, or nothing
+    runs,  ///< it runs that binary, the file on disk now
+    runs_replaced,  ///< it runs a copy of that binary that an update has since replaced on disk
+  };
+
+  /**
+   * @brief What a process of the account's polaris user service runs now, read from /proc.
+   *
+   * Only the service's own cgroup counts, so a Polaris started from the desktop, which runs under a
+   * unit of its own and never reads the drop-in, is not the service. The kernel names a binary that
+   * was replaced after it started "<path> (deleted)": the service still runs the helper, but an
+   * older copy of it, which only a restart replaces.
+   *
+   * @param proc_root /proc, or a stand in for it.
+   */
+  inline service_run_e user_service_running(const std::filesystem::path &proc_root, std::uint32_t uid, const std::filesystem::path &binary) {
+    const auto replaced = binary.string() + " (deleted)";
+    bool saw_replaced = false;
+    std::error_code ec;
+    for (std::filesystem::directory_iterator it {proc_root, ec}, end; !ec && it != end; it.increment(ec)) {
+      const auto pid = it->path().filename().string();
+      if (pid.empty() || !std::all_of(pid.begin(), pid.end(), [](char c) {
+            return c >= '0' && c <= '9';
+          })) {
+        continue;
+      }
+      // A process can exit between listing and reading, which just means it is not the service.
+      const auto status_text = read_small_file(it->path() / "status");
+      if (!status_text || parse_process_status(*status_text).real_uid != uid) {
+        continue;
+      }
+      const auto cgroup = read_small_file(it->path() / "cgroup");
+      if (!cgroup || !user_unit::in_polaris_service(*cgroup)) {
+        continue;
+      }
+      std::error_code link_ec;
+      const auto exe = std::filesystem::read_symlink(it->path() / "exe", link_ec);
+      if (link_ec) {
+        continue;
+      }
+      if (exe == binary) {
+        return service_run_e::runs;
+      }
+      saw_replaced = saw_replaced || exe.string() == replaced;
+    }
+    return saw_replaced ? service_run_e::runs_replaced : service_run_e::other;
+  }
+
+  /**
+   * @brief The last line of a run that turned DRM/KMS capture on, for the capture polaris.conf sets.
+   *
+   * The helper only gives Polaris the capability. A host whose capture goes another way gives it up
+   * at startup, or never asks for KMS, and "DRM/KMS capture is on" sent someone to look for KMS in a
+   * stream that was never going to use it.
+   *
+   * @param capture The capture polaris.conf sets, as written; nothing when it could not be read.
+   */
+  inline std::string capture_line(const std::optional<std::string> &capture) {
+    const std::string on = "DRM/KMS capture is on, and an update cannot take it away again.\n";
+    if (!capture) {
+      return on;
+    }
+    const auto canonical = stream_display_policy::canonical_capture_backend(*capture);
+    if (canonical == "kms") {
+      return on;
+    }
+    std::string text = "The helper is ready, and an update cannot take it away again. But ";
+    if (canonical.empty()) {
+      text += "polaris.conf leaves capture on\n"
+              "Autodetect, which uses KMS only when its search reaches it, and passes over it in Mirror\n"
+              "Desktop and Desktop Takeover, where Polaris starts without capabilities.";
+    } else if (canonical == "portal") {
+      text += "polaris.conf sets capture = " + *capture + ",\n"
+              "and for that Polaris gives the capability up at startup, because the portal and KWin refuse\n"
+              "a program that holds it.";
+    } else {
+      text += "polaris.conf sets capture = " + *capture + ",\n"
+              "so Polaris captures through that and not through KMS.";
+    }
+    // Choosing a stream mode in Settings writes capture too, Mirror Desktop the portal, so a KMS
+    // chosen first does not survive the mode.
+    text += " To capture through KMS, set capture = kms (Force a Specific\n"
+            "Capture Method under Settings, Advanced, after choosing the stream mode, which sets capture\n"
+            "too) and restart Polaris.\n";
+    return text;
+  }
+
   /**
    * @brief Whether the account's service manager outlives its logins.
    *
@@ -211,6 +334,10 @@ namespace platf::kms_enable {
     std::function<void(const std::filesystem::path &, const account_t &)> hand_to;  ///< chown to the account
     /// Lingering keeps the account's service manager running from boot to shutdown; unset means no.
     std::function<bool(const account_t &)> lingering;
+    /// What the account's polaris user service runs now; unset means other, which keeps the reload steps.
+    std::function<service_run_e(const account_t &, const std::filesystem::path &)> service_running;
+    /// The capture the account's polaris.conf sets, as written; nothing when it cannot be read.
+    std::function<std::optional<std::string>(const account_t &)> configured_capture;
   };
 
   enum class result_e {
@@ -363,7 +490,14 @@ namespace platf::kms_enable {
            "  systemctl --user restart polaris\n";
   }
 
-  /// Point the service at the helper, and take away a parked drop-in that did the same.
+  /**
+   * @brief Point the service at the helper, and take away a parked drop-in that did the same.
+   *
+   * A drop-in that already points the service at the helper stays exactly as it is. Writing it
+   * again changes nothing systemd reads and still makes systemd ask for a daemon-reload. When the
+   * service already runs the helper too, there is nothing to reload or restart, and saying there is
+   * sends someone to restart a host that works.
+   */
   inline bool turn_on(const account_t &account, const host_t &host, outcome_t &out) {
     namespace fs = std::filesystem;
     const auto helper = host.helper.string();
@@ -371,25 +505,48 @@ namespace platf::kms_enable {
     const auto active = dir / std::string {user_unit::kms_drop_in_name};
     const auto parked = dir / std::string {user_unit::kms_parked_drop_in_name};
 
-    if (!write_text(active, std::string {active_header} + drop_in_body(host.helper))) {
-      out.result = result_e::failed;
-      out.refusal = "Could not write [" + active.string() + "]\n";
-      return false;
+    const auto before = user_unit::effective_exec_override(dir);
+    const bool already_pointed = before.active() && before.drop_in == active && before.binary == host.helper;
+    if (!already_pointed) {
+      if (!write_text(active, std::string {active_header} + drop_in_body(host.helper))) {
+        out.result = result_e::failed;
+        out.refusal = "Could not write [" + active.string() + "]\n";
+        return false;
+      }
+      host.hand_to(active, account);
     }
-    host.hand_to(active, account);
     std::error_code ec;
     const bool had_parked = fs::exists(fs::symlink_status(parked, ec));
     if (had_parked) {
       fs::remove(parked, ec);
     }
-    out.summary += "Pointed the polaris user service at " + helper + " (" + active.string() + ").\n";
-    if (had_parked) {
-      out.summary += "That replaces the drop-in an earlier run parked until " + account.name + " logged in again.\n";
+    if (!already_pointed) {
+      out.summary += "Pointed the polaris user service at " + helper + " (" + active.string() + ").\n";
+      if (had_parked) {
+        out.summary += "That replaces the drop-in an earlier run parked until " + account.name + " logged in again.\n";
+      }
+      out.summary += "The service still runs the old command until it is reloaded. As " + account.name + ":\n"
+                     "  systemctl --user daemon-reload\n"
+                     "  systemctl --user restart polaris\n";
+    } else {
+      if (had_parked) {
+        out.summary += "Removed " + parked.string() + ", a parked copy of a drop-in that is on already.\n";
+      }
+      const auto running = host.service_running ? host.service_running(account, host.helper) : service_run_e::other;
+      if (running == service_run_e::runs) {
+        out.summary += "The polaris user service already runs " + helper + " (" + active.string() + "),\n"
+                       "so nothing needs reloading or restarting.\n";
+      } else if (running == service_run_e::runs_replaced) {
+        out.summary += "The polaris user service is pointed at " + helper + " (" + active.string() + "),\n"
+                       "but runs an older copy of it, which an update replaced. " +
+                       reload_steps(account);
+      } else {
+        out.summary += "The polaris user service is already pointed at " + helper + " (" + active.string() + "),\n"
+                       "but it is not running it now. " +
+                       reload_steps(account);
+      }
     }
-    out.summary += "The service still runs the old command until it is reloaded. As " + account.name + ":\n"
-                   "  systemctl --user daemon-reload\n"
-                   "  systemctl --user restart polaris\n"
-                   "DRM/KMS capture is on, and an update cannot take it away again.\n";
+    out.summary += capture_line(host.configured_capture ? host.configured_capture(account) : std::nullopt);
     out.result = result_e::on;
     return true;
   }

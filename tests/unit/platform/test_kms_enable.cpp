@@ -60,6 +60,8 @@ namespace {
     std::vector<fs::path> handed;
     bool lingering = false;
     std::vector<std::string> failing;  ///< commands starting with one of these fail
+    ke::service_run_e service = ke::service_run_e::other;  ///< what the account's polaris user service runs now
+    std::optional<std::string> capture;  ///< the capture the account's polaris.conf sets; nothing when unread
 
     fake_host_t() {
       fs::create_directories(account.home);
@@ -158,6 +160,12 @@ namespace {
       host.lingering = [this](const ke::account_t &) {
         return lingering;
       };
+      host.service_running = [this](const ke::account_t &, const fs::path &binary) {
+        return binary == helper() ? service : ke::service_run_e::other;
+      };
+      host.configured_capture = [this](const ke::account_t &) {
+        return capture;
+      };
       return host;
     }
   };
@@ -194,6 +202,13 @@ namespace {
 
     void user_manager(int pid, std::uint32_t uid, const std::string &groups) {
       process(pid, "systemd", uid, groups, std::string {"/usr/lib/systemd/systemd\0--user\0", 32});
+    }
+
+    /// A process in a cgroup, whose exe link names what the kernel says it runs.
+    void running(int pid, std::uint32_t uid, const std::string &cgroup, const std::string &exe) {
+      process(pid, fs::path {exe}.filename().string(), uid, std::to_string(uid), exe + std::string {"\0", 1});
+      write(root / std::to_string(pid) / "cgroup", cgroup);
+      fs::create_symlink(exe, root / std::to_string(pid) / "exe");
     }
   };
 }  // namespace
@@ -774,6 +789,150 @@ TEST(KmsEnableTests, HostSetupRunsTheRealSeamsThroughOneDecision) {
     << "a plain run settles; it does not run --enable-kms, which adds the account to the group";
   EXPECT_NE(source.find("service_override_advice.clear();"), std::string::npos)
     << "the copy's own advice does not outlive the move off the copy";
+  EXPECT_NE(source.find("return platf::kms_enable::user_service_running(\"/proc\", account.uid, binary);"), std::string::npos)
+    << "whether the service already runs the helper is read from the service's own processes";
+  EXPECT_NE(source.find("platf::kms_enable::read_small_file(account.home / \".config/polaris/polaris.conf\")"), std::string::npos)
+    << "the capture the summary names is the account's own";
+}
+
+TEST(KmsEnableTests, EnableKmsOnAServiceAlreadyRunningTheHelperNeedsNoReload) {
+  // A host set up for DRM/KMS whose service runs the helper already. Running --enable-kms again used
+  // to rewrite the drop-in and ask for a daemon-reload and a restart that changed nothing.
+  fake_host_t fake;
+  fake.install_helper();
+  write(fake.active(), "# kept exactly as it was\n[Service]\nExecStart=\nExecStart=" + fake.helper().string() + "\n");
+  fake.service = ke::service_run_e::runs;
+  const auto written = read(fake.active());
+
+  const auto outcome = ke::enable(fake.account, fake.host(), "sudo -H polaris --setup-host --enable-kms");
+
+  ASSERT_EQ(outcome.result, ke::result_e::on) << outcome.refusal;
+  EXPECT_NE(outcome.summary.find("The polaris user service already runs " + fake.helper().string() + " (" + fake.active().string() + "),\n"
+                                 "so nothing needs reloading or restarting.\n"),
+            std::string::npos)
+    << outcome.summary;
+  EXPECT_EQ(outcome.summary.find("daemon-reload"), std::string::npos) << outcome.summary;
+  EXPECT_EQ(outcome.summary.find("still runs the old command"), std::string::npos) << outcome.summary;
+  EXPECT_NE(outcome.summary.find("DRM/KMS capture is on"), std::string::npos);
+  // A rewrite alone makes systemd ask for a daemon-reload, and would have dropped the first line.
+  EXPECT_EQ(read(fake.active()), written);
+  EXPECT_EQ(std::find(fake.handed.begin(), fake.handed.end(), fake.active()), fake.handed.end()) << "nothing written, nothing to hand back";
+}
+
+TEST(KmsEnableTests, APointedServiceThatRunsSomethingElseStillGetsTheReloadSteps) {
+  // The drop-in is right, and the service started before it.
+  fake_host_t fake;
+  fake.install_helper();
+  fake.write_active_drop_in();
+
+  const auto outcome = ke::enable(fake.account, fake.host(), "sudo -H polaris --setup-host --enable-kms");
+
+  ASSERT_EQ(outcome.result, ke::result_e::on) << outcome.refusal;
+  EXPECT_NE(outcome.summary.find("The polaris user service is already pointed at " + fake.helper().string() + " (" + fake.active().string() + "),\n"
+                                 "but it is not running it now. Reload and restart it now, as streamer:\n"
+                                 "  systemctl --user daemon-reload\n"
+                                 "  systemctl --user restart polaris\n"),
+            std::string::npos)
+    << outcome.summary;
+  EXPECT_EQ(outcome.summary.find("nothing needs reloading"), std::string::npos) << outcome.summary;
+}
+
+TEST(KmsEnableTests, AServiceStillRunningAReplacedHelperGetsTheRestart) {
+  // An update replaced the helper under a running service: the kernel names it "(deleted)", and the
+  // service keeps the older copy until it restarts.
+  fake_host_t fake;
+  fake.install_helper();
+  fake.write_active_drop_in();
+  fake.service = ke::service_run_e::runs_replaced;
+
+  const auto outcome = ke::enable(fake.account, fake.host(), "sudo -H polaris --setup-host --enable-kms");
+
+  ASSERT_EQ(outcome.result, ke::result_e::on) << outcome.refusal;
+  EXPECT_NE(outcome.summary.find("but runs an older copy of it, which an update replaced. Reload and restart it now, as streamer:\n"
+                                 "  systemctl --user daemon-reload\n"
+                                 "  systemctl --user restart polaris\n"),
+            std::string::npos)
+    << outcome.summary;
+  EXPECT_EQ(outcome.summary.find("nothing needs reloading"), std::string::npos) << outcome.summary;
+}
+
+TEST(KmsEnableTests, ADropInThisRunWritesAlwaysGetsTheReloadSteps) {
+  // systemd reads a new drop-in only after a reload, whatever the service runs meanwhile.
+  fake_host_t fake;
+  fake.install_helper();
+  fake.service = ke::service_run_e::runs;
+
+  const auto outcome = ke::enable(fake.account, fake.host(), "sudo -H polaris --setup-host --enable-kms");
+
+  ASSERT_EQ(outcome.result, ke::result_e::on) << outcome.refusal;
+  EXPECT_NE(outcome.summary.find("Pointed the polaris user service at " + fake.helper().string()), std::string::npos) << outcome.summary;
+  EXPECT_NE(outcome.summary.find("  systemctl --user daemon-reload\n  systemctl --user restart polaris\n"), std::string::npos) << outcome.summary;
+  EXPECT_EQ(outcome.summary.find("nothing needs reloading"), std::string::npos) << outcome.summary;
+}
+
+TEST(KmsEnableTests, TurningKmsOnSaysWhenCaptureGoesAnotherWay) {
+  // The helper only gives Polaris the capability. A host set to portal or kwin gives it up at
+  // startup, and "DRM/KMS capture is on" sent someone to look for KMS in a stream that never uses it.
+  const auto line_for = [](std::optional<std::string> capture) {
+    fake_host_t fake;
+    fake.install_helper();
+    fake.capture = std::move(capture);
+    const auto outcome = ke::enable(fake.account, fake.host(), "sudo -H polaris --setup-host --enable-kms");
+    EXPECT_EQ(outcome.result, ke::result_e::on) << outcome.refusal;
+    return outcome.summary;
+  };
+
+  for (const auto *capture : {"kms", "drm"}) {
+    const auto summary = line_for(std::string {capture});
+    EXPECT_NE(summary.find("DRM/KMS capture is on, and an update cannot take it away again.\n"), std::string::npos) << capture;
+  }
+  // polaris.conf could not be read, so there is nothing to say about capture.
+  EXPECT_NE(line_for(std::nullopt).find("DRM/KMS capture is on"), std::string::npos);
+
+  for (const auto *capture : {"portal", "kwin"}) {
+    const auto summary = line_for(std::string {capture});
+    EXPECT_EQ(summary.find("DRM/KMS capture is on"), std::string::npos) << capture;
+    EXPECT_NE(summary.find("The helper is ready, and an update cannot take it away again. But polaris.conf sets capture = " + std::string {capture} + ",\n"
+                           "and for that Polaris gives the capability up at startup, because the portal and KWin refuse\n"
+                           "a program that holds it. To capture through KMS, set capture = kms"),
+              std::string::npos)
+      << summary;
+  }
+
+  const auto autodetect = line_for(std::string {});
+  EXPECT_NE(autodetect.find("But polaris.conf leaves capture on\nAutodetect, which uses KMS only when its search reaches it"), std::string::npos) << autodetect;
+  const auto wlr = line_for(std::string {"wlr"});
+  EXPECT_NE(wlr.find("so Polaris captures through that and not through KMS. To capture through KMS, set capture = kms"), std::string::npos) << wlr;
+  EXPECT_NE(wlr.find("after choosing the stream mode, which sets capture\ntoo) and restart Polaris.\n"), std::string::npos) << wlr;
+}
+
+TEST(KmsEnableTests, OnlyTheServicesOwnProcessRunningTheBinaryCounts) {
+  const fs::path helper {"/usr/libexec/polaris/polaris-kms"};
+  const std::string service = "1:net_cls:/\n0::/user.slice/user-1000.slice/user@1000.service/app.slice/polaris.service\n";
+  const std::string desktop = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-dev.polaris\\x2dstream.app.Polaris@7.service\n";
+
+  {
+    fake_proc_t proc;
+    EXPECT_EQ(ke::user_service_running(proc.root, streamer_uid, helper), ke::service_run_e::other) << "nothing runs";
+
+    proc.running(100, streamer_uid, desktop, helper.string());
+    EXPECT_EQ(ke::user_service_running(proc.root, streamer_uid, helper), ke::service_run_e::other) << "a desktop launch never reads the drop-in";
+
+    proc.running(101, streamer_uid + 1, service, helper.string());
+    EXPECT_EQ(ke::user_service_running(proc.root, streamer_uid, helper), ke::service_run_e::other) << "another account's service";
+
+    proc.running(102, streamer_uid, service, "/usr/bin/polaris");
+    EXPECT_EQ(ke::user_service_running(proc.root, streamer_uid, helper), ke::service_run_e::other) << "the service runs the plain binary";
+    EXPECT_EQ(ke::user_service_running(proc.root, streamer_uid, "/usr/bin/polaris"), ke::service_run_e::runs);
+
+    proc.running(103, streamer_uid, service, helper.string() + " (deleted)");
+    EXPECT_EQ(ke::user_service_running(proc.root, streamer_uid, helper), ke::service_run_e::runs_replaced) << "an update replaced the helper it runs";
+
+    proc.running(104, streamer_uid, service, helper.string());
+    EXPECT_EQ(ke::user_service_running(proc.root, streamer_uid, helper), ke::service_run_e::runs);
+  }
+  fake_proc_t empty;
+  EXPECT_EQ(ke::user_service_running(empty.root / "missing", streamer_uid, helper), ke::service_run_e::other);
 }
 
 #endif

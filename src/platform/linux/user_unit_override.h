@@ -124,6 +124,29 @@ namespace platf::user_unit {
     return std::filesystem::path(path.data());
   }
 
+  /**
+   * @brief Whether a /proc/<pid>/cgroup text puts the process in the polaris user service's own cgroup.
+   *
+   * Only the service reads its drop-ins. A Polaris started from the desktop runs under a unit of its
+   * own, and one started from a terminal under the session's scope, so neither runs what host setup
+   * pointed the service at.
+   */
+  inline bool in_polaris_service(std::string_view cgroup) {
+    constexpr std::string_view unit = "/polaris.service";
+    while (!cgroup.empty()) {
+      const auto newline = cgroup.find('\n');
+      const auto line = trim_view(cgroup.substr(0, newline));
+      if (line.ends_with(unit)) {
+        return true;
+      }
+      if (newline == std::string_view::npos) {
+        break;
+      }
+      cgroup.remove_prefix(newline + 1);
+    }
+    return false;
+  }
+
   struct running_binary_t {
     std::string path;  ///< canonical path of the running executable
     std::string packaged_path;  ///< the absolute path the package installs, when the build declares one

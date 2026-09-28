@@ -179,18 +179,6 @@ namespace {
     return true;
   }
 
-  /**
-   * @brief Whether a file carries a capability set.
-   *
-   * setcap stores it as the security.capability extended attribute, so the kernel answers directly.
-   * libcap would too, but it is only linked into builds with DRM support, and `setcap -r` cannot
-   * answer it: on a binary that never had one it exits 1 with "has no capability to remove", which
-   * in a summary of what was undone reads as a failure rather than as nothing to undo.
-   */
-  bool file_holds_capability(const fs::path &path) {
-    return getxattr(path.c_str(), "security.capability", nullptr, 0) >= 0;
-  }
-
   bool run_host_command(const std::string &description, const std::string &cmd, bool required = true) {
     std::error_code ec;
     auto env = boost::this_process::environment();
@@ -407,25 +395,6 @@ namespace {
   }
 
   /**
-   * @brief Whether this account is already in a group.
-   */
-  bool user_in_group(const std::string &user, const char *group_name) {
-    const auto *gr = getgrnam(group_name);
-    if (!gr) {
-      return false;
-    }
-    if (const auto *pw = getpwnam(user.c_str()); pw && pw->pw_gid == gr->gr_gid) {
-      return true;
-    }
-    for (char **member = gr->gr_mem; member && *member; ++member) {
-      if (user == *member) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /**
    * @brief The account the polaris user service runs as, for DRM/KMS setup; nothing for root or an unknown name.
    */
   std::optional<platf::kms_enable::account_t> kms_account_for(const std::string &user) {
@@ -451,9 +420,9 @@ namespace {
    */
   platf::kms_enable::host_t kms_setup_host(bool enabling_headless_boot) {
     platf::kms_enable::host_t host;
-    host.holds_capability = file_holds_capability;
+    host.holds_capability = platf::kms_enable::file_holds_capability;
     host.in_group = [](const platf::kms_enable::account_t &account) {
-      return user_in_group(account.name, std::string {platf::user_unit::kms_group}.c_str());
+      return platf::kms_enable::user_in_group(account.name, std::string {platf::user_unit::kms_group}.c_str());
     };
     host.session_group = [](const platf::kms_enable::account_t &account) {
       const auto *gr = getgrnam(std::string {platf::user_unit::kms_group}.c_str());
@@ -472,6 +441,23 @@ namespace {
     };
     host.lingering = [enabling_headless_boot](const platf::kms_enable::account_t &account) {
       return platf::kms_enable::lingers("/var/lib/systemd/linger", account.name, enabling_headless_boot);
+    };
+    host.service_running = [](const platf::kms_enable::account_t &account, const fs::path &binary) {
+      return platf::kms_enable::user_service_running("/proc", account.uid, binary);
+    };
+    // Where the packaged unit's Polaris keeps its settings for this account. A file that cannot be
+    // read says nothing, and the summary then keeps to what host setup itself did.
+    host.configured_capture = [](const platf::kms_enable::account_t &account) -> std::optional<std::string> {
+      const auto text = platf::kms_enable::read_small_file(account.home / ".config/polaris/polaris.conf");
+      if (!text) {
+        return std::nullopt;
+      }
+      const auto vars = config::parse_config(*text);
+      auto capture = vars.contains("capture") ? vars.at("capture") : std::string {};
+      std::transform(capture.begin(), capture.end(), capture.begin(), [](char c) {
+        return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+      });
+      return capture;
     };
     return host;
   }

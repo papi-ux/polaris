@@ -381,14 +381,16 @@ Polaris starts its own `labwc` Wayland socket for the client session.
 
 ## KMS capture refused for a missing capability
 
-KMS/DRM capture reads framebuffers straight from the kernel, which needs `CAP_SYS_ADMIN` on the
-Polaris binary. That is deliberately opt-in: the package does not grant it, the host setup step
-does. Installing or updating the package replaces the binary, and the new one does not carry the
-capability, so run the step again after every install or update. With `capture = kms` and no capability, Polaris finds the display, logs
-`Failed to gain CAP_SYS_ADMIN` and `Couldn't get handle for DRM Framebuffer`, and then either
-substitutes another backend or, when nothing else can capture, serves with no capture at all and
-H.264 as the only codec. The Doctor reports both cases as `kms_capture_needs_capability`, for
-`capture = drm` too, and for a host with capture unset whose search for a backend reached KMS. It
+KMS/DRM capture reads framebuffers straight from the kernel, which needs `CAP_SYS_ADMIN` in the
+Polaris process. That is deliberately opt-in: the `polaris-kms` package carries the capability on a
+helper of its own, which updates keep, and host setup points the polaris user service at that
+helper. Run the step below once and do what it prints; it may ask for a new login first. With
+`capture = kms` and no capability, Polaris finds the display, logs `Failed to gain CAP_SYS_ADMIN`
+and `Couldn't get handle for DRM Framebuffer`, and then either substitutes another backend or, when
+nothing else can capture, serves with no capture at all and H.264 as the only codec. The Doctor
+reports both cases as `kms_capture_needs_capability`, for `capture = drm` too, and for a host with
+capture unset whose search for a backend reached KMS, unless that host started without
+capabilities for the portal or KWin, as Autodetect does in Mirror Desktop and Desktop Takeover. It
 reports it as well for a host whose configured backend captured nothing, because the automatic
 choice that stands in for that backend searches KMS first. In Private Stream capture goes through
 wlroots whatever `capture` says, and a launch into Gamescope Stream or the dongle fills an unset
@@ -400,6 +402,11 @@ sudo -H polaris --setup-host --enable-kms
 ```
 
 then restart Polaris. KMS capture is the path that carries HDR, so keep it if HDR is the goal.
+
+The Capture row on the System page reads this from the running host. It says whether capture would
+use KMS at all, and where it would, whether Polaris holds the capability or which step is still
+missing, with the command for it. A host set to `capture = portal` or `kwin` runs without the
+capability on purpose, and the row calls that KMS not in use rather than a fault.
 
 ## NVIDIA KMS capture issues
 
@@ -659,7 +666,7 @@ below are stable, so they can be searched for here and in support threads.
 | `encoder_offers_no_hdr` | The launch asks for HDR, and the encoder that passed its probe offers none. On AMD Gamescope Stream under Auto, or with `encoder = vulkan` on Gamescope Stream, that is Vulkan Video, which reads frames through system memory as 8-bit; a launch that switches to Gamescope Stream for itself can ask for HDR another mode's encoder advertised | Launch without HDR. `encoder = vaapi` keeps VA-API on Gamescope Stream, and under Auto so does `hevc_mode = 3`. With `encoder = vulkan`, or Vulkan Video chosen for the launch, `hevc_mode = 3` offers HDR anyway, and that stream ends at its first 10-bit frame. VA-API there takes frames through the same 8-bit system memory upload unless `POLARIS_PORTAL_DMABUF=1` is set, and HDR through that unvalidated DMA-BUF route is not proven |
 | `no_capture_backend` | No capture backend works in the configured stream mode, so nothing could be probed | Check `capture` against the stream mode; unset lets Polaris pick. The Doctor names the missing protocol |
 | `capture_backend_unavailable` | The launch asks for a capture backend that cannot capture anything in its stream mode, such as `capture = wlr` in Mirror Desktop on KDE or GNOME | Set **Force a Specific Capture Method** under Advanced to Autodetect, or use a stream mode that backend can serve |
-| `kms_capture_needs_capability` | `capture = kms` without `CAP_SYS_ADMIN` on the binary | `sudo -H polaris --setup-host --enable-kms`, restart |
+| `kms_capture_needs_capability` | `capture = kms` without `CAP_SYS_ADMIN` in the Polaris process | `sudo -H polaris --setup-host --enable-kms` once, do what it prints, restart |
 | `desktop_capture_not_prepared` | The screen sharing prompt was declined, or desktop capture could not be prepared | Approve the prompt on the host desktop, or use a Private Stream mode |
 | `private_runtime_unavailable` | labwc (or gamescope) is not installed for the chosen mode | Install it, or use Mirror Desktop |
 | `private_runtime_start_failed`, `private_runtime_socket_missing` | The private compositor did not start, or started without a Wayland socket | The host journal has the compositor's own error; restart Polaris and retry |

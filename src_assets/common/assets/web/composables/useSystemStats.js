@@ -8,7 +8,7 @@ import { ref, onMounted, onUnmounted, watch } from 'vue'
  *
  * @param {number} intervalMs - Poll interval in ms (default: 3000)
  * @param {{ shouldPoll?: (() => boolean) | { value: boolean }, pauseWhenHidden?: boolean, maxBackoffMs?: number }} options
- * @returns {{ gpu: Ref, displays: Ref, audio: Ref, sessionType: Ref, displaySession: Ref, gameModeHost: Ref, loading: Ref<boolean> }}
+ * @returns {{ gpu: Ref, displays: Ref, audio: Ref, sessionType: Ref, displaySession: Ref, gameModeHost: Ref, kmsCapture: Ref, runningBinary: Ref, loading: Ref<boolean> }}
  */
 export function useSystemStats(intervalMs = 3000, options = {}) {
   const gpu = ref(null)
@@ -17,6 +17,8 @@ export function useSystemStats(intervalMs = 3000, options = {}) {
   const sessionType = ref(null)
   const displaySession = ref(null)
   const gameModeHost = ref(null)
+  const kmsCapture = ref(null)
+  const runningBinary = ref(null)
   const loading = ref(true)
 
   const maxBackoffMs = Math.max(intervalMs, options.maxBackoffMs ?? intervalMs * 8)
@@ -86,6 +88,8 @@ export function useSystemStats(intervalMs = 3000, options = {}) {
           sessionType.value = data.session_type || null
           displaySession.value = data.display_session || null
           gameModeHost.value = data.game_mode_host || null
+          kmsCapture.value = data.kms_capture || null
+          runningBinary.value = data.running_binary || null
           ok = true
         }
       } catch {
@@ -151,5 +155,5 @@ export function useSystemStats(intervalMs = 3000, options = {}) {
     }
   })
 
-  return { gpu, displays, audio, sessionType, displaySession, gameModeHost, loading }
+  return { gpu, displays, audio, sessionType, displaySession, gameModeHost, kmsCapture, runningBinary, loading }
 }

@@ -29,6 +29,7 @@
 #include <string>
 #include <thread>
 #ifdef __linux__
+  #include <src/platform/linux/kms_capture_readiness.h>
   #include <src/platform/linux/misc.h>
   #include <src/platform/linux/stream_display_policy.h>
   #include <src/platform/linux/user_unit_override.h>
@@ -2306,6 +2307,40 @@ TEST(StreamStatsDoctorTests, NamesTheKmsCapabilityOnlyWhereCaptureAsksForKms) {
   config::video.capture = "kms";
   EXPECT_TRUE(reports_capability()) << "headless_dongle capture=[kms] substituted";
   platf::set_capture_backend_substitution_for_tests("");
+
+  platf::set_kms_capture_refused_for_tests(false);
+}
+
+TEST(StreamStatsDoctorTests, DoesNotAskForAKmsCapabilityTheHostSetAsideOnPurpose) {
+  // Autodetect in Mirror Desktop starts Polaris without capabilities, so the portal and KWin accept
+  // it, and its search then meets KMS without one. That refusal is the design: the stream captures
+  // through the portal, and --enable-kms, which a host running the helper has already run, would
+  // change nothing about it.
+  LinuxDisplayConfigGuard guard;
+  platf::set_capture_backend_substitution_for_tests("");
+  platf::set_capture_sources_missing_for_tests(false);
+  platf::set_kms_capture_refused_for_tests(true);
+  config::video.linux_display.stream_mode = "desktop_display";
+  config::video.linux_display.use_cage_compositor = false;
+  config::video.capture = "";
+  const auto reports_capability = []() {
+    stream_stats::stats_t stats {};
+    const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+    for (const auto &warning :
+         doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings")) {
+      if (warning.at("id") == "kms_capture_needs_capability") {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const bool before = platf::kms_readiness::capability_set_aside();
+  platf::kms_readiness::note_capability_set_aside(true);
+  EXPECT_FALSE(reports_capability());
+  platf::kms_readiness::note_capability_set_aside(false);
+  EXPECT_TRUE(reports_capability()) << "a process that kept its capabilities searched KMS and was refused";
+  platf::kms_readiness::note_capability_set_aside(before);
 
   platf::set_kms_capture_refused_for_tests(false);
 }

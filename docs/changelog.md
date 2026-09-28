@@ -29,6 +29,59 @@ starts at `v1.0.0`.
   `nvfbc`, now refuses PyroWave by name too. The same checks refuse a stream that would share the
   host's one capture with another codec's stream, one PyroWave and the other not, with
   `capture_in_use_by_other_codec`, where the second stream used to get no picture.
+- The launch refusal `kms_capture_needs_capability`, `polaris --help` and the troubleshooting
+  guide no longer say that every install or update removes the KMS capability. Since 1.4.13 the
+  polaris-kms package carries it on a helper that updates keep, and #174 took that advice out of
+  the startup log but left it in these three places. The refusal now says to run `--enable-kms`
+  once and do what it prints, since it may ask for a new login first, and that the package keeps
+  the capability across updates.
+
+- `--setup-host --enable-kms` on a host whose service already runs the polaris-kms helper says
+  nothing needs reloading or restarting, and leaves the drop-in as it is. It used to write the
+  same drop-in again, which alone makes systemd ask for a daemon-reload, and told a working host
+  to reload and restart. A service that is pointed at the helper but runs something else still
+  gets the reload steps, and so does one that runs an older copy of the helper an update has
+  since replaced. Only the service's own processes count, so a Polaris started from the desktop
+  is not taken for it. The run also stops saying DRM/KMS capture is on when polaris.conf sets
+  capture to something else: for `portal` or `kwin` it says Polaris gives the capability up at
+  startup, for Autodetect that KMS is used only where its search reaches it, and for any other
+  backend that capture goes through that one, each with the setting that captures through KMS.
+
+- With betas included and nothing newer to offer, the Update Center says what its check found. It
+  read "This host is on the latest public release." whether or not a beta had been looked for, so
+  the beta channel looked unchecked. It now says no beta newer than the installed version is
+  published yet, and names the newest build: the stable release, or the beta this host already
+  runs. A development build is named by the release it was built from. On a host with the
+  polaris-kms helper, the Package card lists the helper's package and digest beside Polaris, since
+  the install command takes both, and says so when a release has no helper package for that host.
+
+- The System page has a Capture row under Host Now that says where DRM/KMS capture stands for the
+  capture this host is set to. KMS readiness counts only where capture would use KMS. A host set to
+  `capture = portal` or `kwin`, or left on Autodetect in Mirror Desktop or Desktop Takeover or with
+  KWin screens, starts Polaris without capabilities on purpose, because the portal and KWin refuse
+  a program that holds one. A polaris-kms helper that runs there without CAP_SYS_ADMIN reads as KMS
+  not in use, with how to switch to it, and never as a helper without its capability. A stream mode
+  that captures its own display another way, such as Private Stream, reads as setting KMS aside,
+  and names Mirror Desktop and the Headless Dongle as the modes that capture the real screen
+  through KMS. A host set to KMS reads as ready when it holds the capability, and otherwise names
+  the one step still missing, with its command and a Copy button: installing polaris-kms,
+  `--enable-kms`, the login that brings the polaris-kms group in, and a reboot where lingering
+  keeps the service manager, the run that turns on a drop-in host setup parked, starting the
+  service rather than a Polaris started from the desktop, or a restart. Reinstalling polaris-kms
+  is the advice only when the helper itself carries no capability. Where it says how to switch, it
+  also says that choosing a stream mode in Settings sets capture again, Mirror Desktop to the
+  portal, so KMS is chosen after the mode. The row also shows the capture
+  setting, what the host's stream mode captures through, and what the stream running now, or the
+  last one from `last_session`, opened; with more than one client streaming, it says how many. A
+  capture setting that found nothing is named as that setting rather than as Autodetect, and a
+  helper an update replaced under the running service still counts as the helper.
+  `/api/stats/system` reports all of it as `kms_capture`.
+
+- The Doctor no longer reports `kms_capture_needs_capability` on a host that starts without
+  capabilities for the portal or KWin. Autodetect in Mirror Desktop or Desktop Takeover, or with
+  KWin screens, gives every capability up at startup, so its search meets KMS without one and
+  moves on, which is the design. The finding told that host, often one already running the
+  polaris-kms helper, to run `--enable-kms`, which changes nothing about its stream.
 
 - The first Space of a launcher made from the Spaces page can be made on Docker's containerd image
   store, the default on a fresh Docker 29 install (#664). There every such create was refused with

@@ -41,6 +41,7 @@ namespace video {
   bool active_encoder_withholds_hdr_for_explicit_vulkan();
 }
 #ifdef __linux__
+  #include "platform/linux/kms_capture_readiness.h"
   #include "platform/linux/misc.h"
   #include "platform/linux/stream_runtime.h"
   #include "platform/linux/user_unit_override.h"
@@ -1344,7 +1345,11 @@ namespace stream_stats {
     const auto mode_capture = stream_display_policy::canonical_capture_backend(
       stream_display_policy::capture_for_launch_into_current_mode()
     );
-    if (kms_refused && (mode_capture == "kms" || mode_capture.empty())) {
+    // Autodetect in Mirror Desktop, Desktop Takeover, Gamescope Stream or the dongle, or beside KWin
+    // screens, starts Polaris without capabilities so the portal and KWin accept it. Its search
+    // passes over KMS on purpose, and granting the capability again changes nothing about the stream.
+    const bool kms_set_aside = mode_capture.empty() && platf::kms_readiness::capability_set_aside();
+    if (kms_refused && !kms_set_aside && (mode_capture == "kms" || mode_capture.empty())) {
       const bool nothing_else = platf::capture_sources_missing();
       configuration_warnings.push_back({
         {"id", "kms_capture_needs_capability"},
