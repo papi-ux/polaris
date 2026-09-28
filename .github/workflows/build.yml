@@ -1770,6 +1770,15 @@ jobs:
           kms_identity="$(rpm -qp --qf '%{NAME}|%{VERSION}|%{RELEASE}|%{ARCH}' "$kms_rpm_path")"
           test "$kms_identity" = "polaris-kms|${expected_package_version}|1|x86_64"
           rpm -qpR "$kms_rpm_path" | grep -Fx "polaris = ${expected_package_version}"
+          # The helper carries no scripts. CPack falls back to the main package's, and that prerm
+          # ran polaris-spaces-setup remove when only the helper was uninstalled
+          # (cmake/packaging/linux.cmake).
+          kms_scripts="$(rpm -qp --scripts "$kms_rpm_path")"
+          if [ -n "$kms_scripts" ]; then
+            printf 'polaris-kms must carry no scripts, found:\n%s\n' "$kms_scripts" >&2
+            exit 1
+          fi
+          rpm -qp --scripts "$rpm_path" | grep -Fq polaris-spaces-setup
           dnf install -y "$kms_rpm_path"
           helper=/usr/libexec/polaris/polaris-kms
           test "$(stat -c '%a %U %G' "$helper")" = '750 root polaris-kms'

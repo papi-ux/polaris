@@ -7,6 +7,11 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- On Fedora, removing only `polaris-kms` no longer removes the Spaces security setup from the
+  Polaris you keep. The helper package carried the main package's install and removal scripts, so
+  `sudo dnf remove polaris-kms` ran `polaris-spaces-setup remove`, and every update printed the
+  install message twice. The helper now carries no scripts. On 1.4.13, update first, then remove
+  the helper.
 - Desktop Takeover no longer hands hyprctl a special workspace name that hyprctl would read as
   request syntax. hyprctl chooses which request to send by looking for text such as `/--batch` or
   `/hyprpaper` anywhere in its arguments, so a special workspace named, say, `special:a/--batch;x`

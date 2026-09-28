@@ -292,8 +292,19 @@ describe('removal hooks clean up what only they can', () => {
     const cmake = readSource('cmake/packaging/linux.cmake')
     expect(cmake).toContain('list(APPEND CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA '
       + '"${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/prerm")')
-    expect(cmake).toContain('set(CPACK_RPM_PRE_UNINSTALL_SCRIPT_FILE '
+    expect(cmake).toContain('set(CPACK_RPM_POLARIS_PRE_UNINSTALL_SCRIPT_FILE '
       + '"${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/prerm")')
+  })
+
+  it('gives the RPM scripts to the main package only, never to polaris-kms', () => {
+    // CPack hands a component with no script of its own the generic CPACK_RPM_*_SCRIPT_FILE. Set
+    // there, the prerm rode along into polaris-kms, and removing only the helper ran
+    // polaris-spaces-setup remove under a Polaris that stayed installed.
+    const cmake = readSource('cmake/packaging/linux.cmake')
+    expect(cmake).toContain('set(CPACK_RPM_POLARIS_POST_INSTALL_SCRIPT_FILE '
+      + '"${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/postinst")')
+    expect(cmake).not.toMatch(/set\(CPACK_RPM_(PRE|POST)_(INSTALL|UNINSTALL)_SCRIPT_FILE\b/)
+    expect(cmake).not.toMatch(/set\(CPACK_RPM_KMS_\w*SCRIPT_FILE\b/)
   })
 })
 
