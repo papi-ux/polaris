@@ -61,6 +61,16 @@ namespace desktop_takeover {
   /** Only a valid inactive tombstone permits replacing an existing document. */
   bool recovery_document_allows_takeover(std::string_view json);
 
+  /**
+   * Why a special workspace's name cannot be handed to hyprctl, or nothing
+   * when it can. hyprctl chooses its request by looking for text such as
+   * "/--batch" anywhere in its arguments, so a name holding request syntax
+   * could turn a move into another request. Takeover leaves such a workspace
+   * where it is. A regular workspace is selected by id, so its name never
+   * reaches hyprctl and is never refused.
+   */
+  std::optional<std::string> special_workspace_refusal(const workspace_state_t &workspace);
+
   /** Stable Hyprland selector for a regular or named special workspace. */
   std::optional<std::string> workspace_selector(const workspace_state_t &workspace);
 
@@ -70,7 +80,10 @@ namespace desktop_takeover {
     const std::vector<workspace_state_t> &current
   );
 
-  /** True when recorded workspaces are restored and none remain on the target. */
+  /**
+   * True when recorded workspaces are restored and none that Polaris can move
+   * remain on the target.
+   */
   bool restored_layout_matches(
     const state_t &state,
     const std::vector<workspace_state_t> &current

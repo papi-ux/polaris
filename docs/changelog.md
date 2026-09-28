@@ -7,6 +7,14 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Desktop Takeover no longer hands hyprctl a special workspace name that hyprctl would read as
+  request syntax. hyprctl chooses which request to send by looking for text such as `/--batch` or
+  `/hyprpaper` anywhere in its arguments, so a special workspace named, say, `special:a/--batch;x`
+  could turn the move into a different request. A special workspace whose name holds `/`, `;`,
+  `--`, `\`, `[` or `]` now stays where it is, and the host log names it and says why; every other
+  workspace moves as before. One opened on the stream's output during the session is left there
+  for Hyprland to move when that output closes. Regular workspaces are moved by number, so their
+  names were never involved. (#788)
 - The Ubuntu package depends on PipeWire's client library, `libpipewire-0.3-0t64`, which Polaris
   links for PipeWire audio and portal capture. The 1.4.13 `.deb` left it out, so on an Ubuntu 24.04
   system without PipeWire, such as the minimal `ubuntu:24.04` image, apt installed Polaris without

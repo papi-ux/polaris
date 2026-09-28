@@ -13,6 +13,7 @@
 #include "src/private_state_file.h"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -67,6 +68,29 @@ namespace desktop_takeover {
         return ch == '\0' || ch <= 0x20 || ch == 0x7f;
       });
     }
+
+    struct request_syntax_t {
+      std::string_view text;
+      std::string_view meaning;
+    };
+
+    // hyprctl reads its own flags but never parses the request it sends. It
+    // joins the rest of its arguments behind a '/' and picks the request by
+    // looking for text anywhere in the result: "/--batch" sends a batch that
+    // Hyprland splits at ';' (0.56 also groups with '[' and ']', and newer
+    // code escapes with '\' instead), "/hyprpaper" and "/hyprsunset" go to
+    // another program's socket, and "/instances" sends nothing. A special
+    // workspace's name is the one part of a move Polaris does not write
+    // itself, and hyprctl can only select a special workspace by that name,
+    // so a name holding any of these is never handed to it.
+    constexpr std::array request_syntax {
+      request_syntax_t {"/", "'/', which hyprctl reads as the start of a request name"},
+      request_syntax_t {";", "';', which ends a command in a hyprctl batch"},
+      request_syntax_t {"--", "'--', which spells a hyprctl flag such as --batch"},
+      request_syntax_t {"\\", "'\\', which a hyprctl batch reads as an escape"},
+      request_syntax_t {"[", "'[', which a hyprctl batch reads as grouping"},
+      request_syntax_t {"]", "']', which a hyprctl batch reads as grouping"},
+    };
 
     bool owner_is_alive(int owner_pid) {
       if (owner_pid <= 0) {
@@ -295,7 +319,11 @@ namespace desktop_takeover {
         workspace.id = item["id"].get<std::int64_t>();
         workspace.name = item["name"].get<std::string>();
         workspace.monitor = item["monitor"].get<std::string>();
-        if (!safe_token(workspace.monitor) || !workspace_selector(workspace)) {
+        // A special workspace whose name hyprctl would misread is still a
+        // well-formed report. begin() leaves it where it is, and restore()
+        // has to see it to know it is not one to move.
+        if (!safe_token(workspace.monitor) ||
+            (!workspace_selector(workspace) && !special_workspace_refusal(workspace))) {
           return std::nullopt;
         }
         workspaces.emplace_back(std::move(workspace));
@@ -356,7 +384,18 @@ namespace desktop_takeover {
           item["name"].get<std::string>(),
           item["monitor"].get<std::string>(),
         };
-        if (!safe_token(workspace.monitor) || !workspace_selector(workspace)) {
+        if (!safe_token(workspace.monitor)) {
+          return std::nullopt;
+        }
+        // An older build could record a special workspace whose name hyprctl
+        // reads as request syntax. Refusing the whole record would leave the
+        // monitors dark and every other workspace where the takeover put it,
+        // so recovery replays the rest and leaves that one where it is, as a
+        // takeover started now would. Its name is never handed to hyprctl.
+        if (special_workspace_refusal(workspace)) {
+          continue;
+        }
+        if (!workspace_selector(workspace)) {
           return std::nullopt;
         }
         state.workspaces.emplace_back(std::move(workspace));
@@ -401,12 +440,25 @@ namespace desktop_takeover {
     return state.has_value() && !state->active;
   }
 
+  std::optional<std::string> special_workspace_refusal(const workspace_state_t &workspace) {
+    if (workspace.id >= 0 || !workspace.name.starts_with("special:") ||
+        !safe_token(workspace.name)) {
+      return std::nullopt;
+    }
+    for (const auto &syntax : request_syntax) {
+      if (workspace.name.find(syntax.text) != std::string::npos) {
+        return "its name has " + std::string {syntax.meaning};
+      }
+    }
+    return std::nullopt;
+  }
+
   std::optional<std::string> workspace_selector(const workspace_state_t &workspace) {
     if (workspace.id > 0) {
       return std::to_string(workspace.id);
     }
     if (workspace.id < 0 && workspace.name.starts_with("special:") &&
-        safe_token(workspace.name)) {
+        safe_token(workspace.name) && !special_workspace_refusal(workspace)) {
       return workspace.name;
     }
     return std::nullopt;
@@ -432,8 +484,10 @@ namespace desktop_takeover {
       });
       return found == current.end() || found->monitor == expected.monitor;
     });
+    // A special workspace Polaris will not name to hyprctl is left where it
+    // is, and Hyprland moves every workspace off an output as it closes.
     return recorded_restored && std::none_of(current.begin(), current.end(), [&](const auto &workspace) {
-      return workspace.monitor == state.target_output;
+      return workspace.monitor == state.target_output && !special_workspace_refusal(workspace);
     });
   }
 
@@ -505,9 +559,15 @@ namespace desktop_takeover {
       return names;
     }();
     for (const auto &workspace : *observed_workspaces) {
-      if (source_names.contains(workspace.monitor)) {
-        state.workspaces.push_back(workspace);
+      if (!source_names.contains(workspace.monitor)) {
+        continue;
       }
+      if (const auto refusal = special_workspace_refusal(workspace)) {
+        BOOST_LOG(info) << "Desktop Takeover leaves special workspace ["sv << workspace.name
+                        << "] on ["sv << workspace.monitor << "]: "sv << *refusal;
+        continue;
+      }
+      state.workspaces.push_back(workspace);
     }
     if (state.workspaces.empty()) {
       result.error = "Desktop Takeover found no live workspace on the physical monitors.";
@@ -590,6 +650,12 @@ namespace desktop_takeover {
         return original.id == workspace.id && original.name == workspace.name;
       });
       if (!recorded && workspace.monitor == state.target_output) {
+        if (const auto refusal = special_workspace_refusal(workspace)) {
+          BOOST_LOG(info) << "Desktop Takeover leaves special workspace ["sv << workspace.name
+                          << "] on ["sv << state.target_output
+                          << "] for Hyprland to move when that output closes: "sv << *refusal;
+          continue;
+        }
         commands_succeeded = move_workspace(workspace, state.fallback_monitor) && commands_succeeded;
       }
     }

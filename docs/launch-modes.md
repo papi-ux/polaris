@@ -62,7 +62,7 @@ Adds an extra screen to your real desktop, sized to match the client, and stream
 
 ### Desktop Takeover
 
-Creates a client-sized virtual output in the current Hyprland session, moves the live workspaces and windows onto it, and turns the original active displays off with DPMS. On the final disconnect, Polaris immediately turns those displays back on, returns every recorded workspace to its original output, verifies the restoration, and only then removes the virtual output.
+Creates a client-sized virtual output in the current Hyprland session, moves the live workspaces and windows onto it, and turns the original active displays off with DPMS. On the final disconnect, Polaris immediately turns those displays back on, returns every recorded workspace to its original output, verifies the restoration, and only then removes the virtual output. A special workspace whose name holds `/`, `;`, `--`, `\`, `[` or `]` stays where it is, because hyprctl would read part of that name as a different request, and the host log names it and says why.
 
 - **Best for:** playing from the same Hyprland desktop while keeping the host monitors dark and matching the client's display size.
 - **One caveat:** this is an explicitly disruptive mode and is only selectable when a live Hyprland session, `hyprctl`, and an EVDI or native wlroots virtual-output backend are available. Polaris fails closed if it cannot prove or later recover the layout; it does not hold this mode open for resumable disconnects.
