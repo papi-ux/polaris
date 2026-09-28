@@ -169,6 +169,60 @@ TEST(DesktopTakeover, LuaDispatcherRefusesDispatchesTakeoverNeverIssues) {
   EXPECT_FALSE(desktop_takeover::lua_dispatcher({}));
 }
 
+TEST(DesktopTakeover, TranslatesMonitorLayoutStateForLuaConfig) {
+  EXPECT_EQ(
+    desktop_takeover::lua_monitor_state("DP-2", false),
+    std::optional<std::string> {"hl.monitor({ output = \"DP-2\", disabled = true })"}
+  );
+  EXPECT_EQ(
+    desktop_takeover::lua_monitor_state("DP-3", true),
+    std::optional<std::string> {"hl.monitor({ output = \"DP-3\", disabled = false })"}
+  );
+  EXPECT_EQ(
+    desktop_takeover::lua_monitor_state("a\"b", false),
+    std::optional<std::string> {"hl.monitor({ output = \"a\\\"b\", disabled = true })"}
+  );
+  EXPECT_FALSE(desktop_takeover::lua_monitor_state("DP 2", false));
+  EXPECT_FALSE(desktop_takeover::lua_monitor_state("", true));
+  EXPECT_FALSE(desktop_takeover::lua_monitor_state("DP-2\n", true));
+}
+
+TEST(DesktopTakeover, LuaDispatcherRefusesArgumentsItCannotNameSafely) {
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "on", "DP-2\n"}));
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "on", "DP-2\r"}));
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "on", std::string {"DP-2\0", 5}}));
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "on", "DP-2\x7f"}));
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "on", "DP 2"}));
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "on", ""}));
+}
+
+TEST(DesktopTakeover, LuaDispatcherNeutralizesLuaEscapeAndBreakoutAttempts) {
+  // A leading backslash survives as literal text: the quoting escapes it, so
+  // Lua cannot read \z, \x22, \u{22} or \34 as an escape inside the string.
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "special:a\\z", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"special:a\\\\z\", monitor = \"DP-2\" })"}
+  );
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "special:a\\x22", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"special:a\\\\x22\", monitor = \"DP-2\" })"}
+  );
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "special:a\\u{22}", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"special:a\\\\u{22}\", monitor = \"DP-2\" })"}
+  );
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "special:a\\34", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"special:a\\\\34\", monitor = \"DP-2\" })"}
+  );
+  // Printable hostile input is nameable, so it must come back quoted shut
+  // rather than refused: the quotes are escaped and nothing after them runs.
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "x\")os.execute(\"id\")--", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"x\\\")os.execute(\\\"id\\\")--\", monitor = \"DP-2\" })"}
+  );
+}
+
 TEST(DesktopTakeover, InactiveTombstoneNeedsNoTopologyDetails) {
   const auto parsed = desktop_takeover::parse_state(R"({"version":1,"active":false})");
   ASSERT_TRUE(parsed);

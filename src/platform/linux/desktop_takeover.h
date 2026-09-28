@@ -69,10 +69,18 @@ namespace desktop_takeover {
 
   /**
    * Translate a classic `hyprctl dispatch` argument vector into the hl.dsp.*
-   * dispatcher object expression Hyprland 0.56+ evaluates, or nullopt when
-   * takeover issues no such dispatch.
+   * dispatcher object expression a Hyprland with a Lua config evaluates, or
+   * nullopt when takeover issues no such dispatch or any argument fails the
+   * safe-token check.
    */
   std::optional<std::string> lua_dispatcher(const std::vector<std::string> &arguments);
+
+  /**
+   * Build the hl.monitor expression that puts an output on or off a Lua-config
+   * Hyprland's layout, or nullopt when the output name fails the safe-token
+   * check. A disabled output leaves the layout, which confines the pointer.
+   */
+  std::optional<std::string> lua_monitor_state(std::string_view output, bool enabled);
 
   /** True when every recorded workspace is on the takeover target. */
   bool takeover_layout_matches(
