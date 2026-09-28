@@ -2,6 +2,8 @@
 // a renderer, the labels live in the locale files, and the host settings
 // projection can feed the stream display and provenance rows when it is served.
 
+import { streamClientFamilyLabel } from './client-family.js'
+
 export function formatNumber(value, digits = 1) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
     return '0'
@@ -107,6 +109,17 @@ export function networkPathDescription(path, t) {
   return t(`troubleshooting.snapshot_network_path_${kind.replace('-', '_')}`)
 }
 
+// Nova or Moonlight / Artemis, as the Devices page names it. A Moonlight-protocol client also says
+// what it cannot use, because nothing else on the page tells a Moonlight player that.
+function clientFamilyRow(s, t) {
+  const row = {
+    label: t('troubleshooting.snapshot_client_family'),
+    value: streamClientFamilyLabel(s.client_family) || t('troubleshooting.snapshot_unknown'),
+  }
+  if (s.client_family === 'moonlight') row.note = t('troubleshooting.snapshot_client_family_moonlight_note')
+  return row
+}
+
 function networkPathRow(s, t) {
   const row = { label: t('troubleshooting.snapshot_network_path'), value: networkPathDescription(s.client_network_path, t) }
   const kind = String(s.client_network_path || '').toLowerCase()
@@ -166,6 +179,7 @@ export function buildSessionSnapshotRows(stats, t, { streamDisplay = null, prove
     { label: t('troubleshooting.snapshot_fps'), value: t('troubleshooting.snapshot_fps_value', { encoded: formatFps(s.fps), target: formatFps(s.session_target_fps) }) },
     { label: t('troubleshooting.snapshot_bitrate'), value: t('troubleshooting.snapshot_bitrate_value', { kbps: s.bitrate_kbps || 0 }) },
     { label: t('troubleshooting.snapshot_client_ip'), value: s.client_ip || unknown },
+    clientFamilyRow(s, t),
     networkPathRow(s, t),
     { label: t('troubleshooting.snapshot_display_mode'), value: displayModeDecisionDescription(s.display_mode_decision, t) },
     { label: t('troubleshooting.snapshot_active_sessions'), value: `${s.active_sessions ?? 0}` },

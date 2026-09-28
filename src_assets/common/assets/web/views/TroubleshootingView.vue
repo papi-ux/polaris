@@ -535,6 +535,7 @@ import { AI_DOCTOR_EXPLANATION_CATEGORIES, explainDoctorWithAi } from '../ai-doc
 import { aiReadinessCopy, describeAiReadiness } from '../doctor-ai-readiness.js'
 import { describePreviousRunBanner } from '../previous-run-banner.js'
 import { buildSessionSnapshotRows, summarizeStreamStats } from '../session-snapshot-rows.js'
+import { streamClientFamilyLabel } from '../client-family.js'
 import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
 import { groupRecentIssueLogs } from '../recent-issues.js'
 import { statusTone } from '../status-tones.js'
@@ -1171,7 +1172,8 @@ async function collectSupportContext() {
     fix_my_stream_checklist: fixMyStreamChecklist.value,
     session_snapshot: streamStats.value,
     client: {
-      type: streamStats.value?.client_type || streamStats.value?.client_name || 'unknown',
+      type: streamStats.value?.client_type || streamClientFamilyLabel(streamStats.value?.client_family) ||
+        streamStats.value?.client_name || 'unknown',
       name: streamStats.value?.client_name || '',
     },
     config,

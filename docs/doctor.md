@@ -18,6 +18,18 @@ Doctor reports one of four plain outcomes:
 | **Client** | Received, decoded, or rendered evidence points to the playback device when those measurements are available. |
 | **No confirmed issue** | The available evidence does not support blaming one stage. Unavailable measurements stay unknown instead of becoming a guess. |
 
+Doctor also names the kind of client streaming, in its `client_family` evidence row: `nova`, or
+`moonlight` for a client that speaks only the Moonlight protocol, such as Moonlight or Artemis. The
+host reads it from the device's pairing record when the device launches or resumes, as the Devices
+page does, so it cannot tell Nova for Android from Nova for Linux, or Moonlight from Artemis. For a
+Moonlight-protocol client the row says what it cannot use. Polaris gets no media loss from it, so
+the **Network** verdict rests on round-trip time, and the **Client** verdict needs decode and render
+timing that only Nova for Android measures. PyroWave, Live Tuning from the client and choosing the
+launch mode per launch are Nova only, though Artemis can ask for Host Virtual Display; Live Tuning
+on Mission Control still tunes the stream. Diagnostics carry `client_family` for the stream and for
+each client, and Session Snapshot on **Doctor & Support** shows it as **Client type** ([what each
+client gets](compatibility.md#clients)).
+
 Static menus and repeated frames do not by themselves prove a pacing fault. Doctor collects six
 complete video telemetry windows after startup and requires a warning threshold in two consecutive
 windows before grading frame pacing. While that window is still filling, pacing evidence stays

@@ -682,6 +682,20 @@ namespace stream_stats {
       stats.fec_percentage = fec_percentage;
       stats.packet_size = packet_size;
     }
+
+    /**
+     * The kind of client the top-level client_name belongs to, from the session entry with that name
+     * and address. The top-level name is the session that started last, not always the first entry,
+     * so the kind is looked up rather than copied. Empty when no entry matches or none was given one.
+     */
+    std::string streaming_client_family(const stats_t &stats) {
+      for (const auto &client : stats.clients) {
+        if (client.name == stats.client_name && client.ip == stats.client_ip) {
+          return client.client_family;
+        }
+      }
+      return {};
+    }
   }  // namespace
 
   std::string stats_t::to_json() const {
@@ -694,6 +708,8 @@ namespace stream_stats {
     j["streaming"] = streaming;
     j["client_name"] = client_name;
     j["client_ip"] = client_ip;
+    // "nova" or "moonlight" for the stream client_name names; empty when nothing says which.
+    j["client_family"] = streaming_client_family(*this);
     j["client_network_path"] = client_network_path;
     // Named apart from the session status display_mode object, which describes the virtual display.
     j["display_mode_decision"] = {
@@ -841,6 +857,10 @@ namespace stream_stats {
       nlohmann::json cj;
       cj["name"] = c.name;
       cj["ip"] = c.ip;
+      // Absent when the session was given no kind, because missing is unknown.
+      if (!c.client_family.empty()) {
+        cj["client_family"] = c.client_family;
+      }
       cj["fps"] = c.fps;
       cj["bitrate_kbps"] = c.bitrate_kbps;
       cj["encode_time_ms"] = c.encode_time_ms;
@@ -1109,10 +1129,10 @@ namespace stream_stats {
             "Private Stream runs the hidden headless compositor, and the last time this host "
             "tried, that compositor could not hand frames over as DMA-BUF, so capture fell back "
             "to system memory (SHM) and each frame is copied before NVENC.",
-            "Pick Private Stream (GPU-native) in Play Setup for one launch, or set "
-            "linux_prefer_gpu_native_capture = enabled and restart Polaris to make it the "
-            "default: Polaris then runs the private compositor windowed, where DMA-BUF capture "
-            "works."
+            "Use the Private Stream (GPU-native) launch mode, which runs the private compositor "
+            "windowed, where DMA-BUF capture works. Nova can choose it for one launch. For every "
+            "client, choose it under Settings, Audio/Video, Where games run, or set "
+            "linux_prefer_gpu_native_capture = enabled, and restart Polaris."
           );
         } else if (in.headless_extcopy_dmabuf_probe == std::optional<bool> {true}) {
           out.residency = "gpu";
@@ -2717,6 +2737,24 @@ namespace stream_stats {
         "Round-trip latency reported by the active client control channel." :
         "No current media or control-channel latency sample is available for this stream."
     );
+    // Which kind of client is streaming, because what Doctor can see and what the player can change
+    // both follow from it. A Moonlight-protocol client reads as every other stream does, so without
+    // this row its missing media loss and its host-only controls looked like faults of the stream.
+    if (stats.streaming) {
+      const auto family = streaming_client_family(stats);
+      const std::string who = stats.client_name.empty() ? std::string {"This client"} : stats.client_name;
+      if (family == "nova") {
+        append_doctor_evidence(evidence, "client_family", "Client", family, "", "info", "pairing_record",
+                               who + " is Nova, for Android or for Linux; Polaris cannot tell which from the stream.");
+      } else if (family == "moonlight") {
+        append_doctor_evidence(evidence, "client_family", "Client", family, "", "info", "pairing_record",
+                               who + " speaks only the Moonlight protocol, as Moonlight and Artemis do. Polaris gets no "
+                               "media loss from it, so Doctor works from round-trip time and host evidence. PyroWave, "
+                               "Live Tuning from the client and choosing the launch mode per launch are Nova only, "
+                               "though Artemis can ask for Host Virtual Display; Live Tuning on Mission Control still "
+                               "tunes this stream.");
+      }
+    }
     // Both rows below survive the end of a stream, so they say which one they describe.
     const std::string last_stream_prefix = stats.streaming ? "" : "From the last stream. ";
     const std::string last_launch_prefix = stats.streaming ? "" : "From the last launch. ";
@@ -3154,9 +3192,14 @@ namespace stream_stats {
     current_stats.display_mode_pinned_by_host = pinned_by_host;
   }
 
+  std::string client_family_for_stream(std::string_view pairing_family) {
+    return pairing_family == "nova" ? "nova" : "moonlight";
+  }
+
   void add_client(const std::string &client_ip,
                   const std::string &client_name,
-                  std::uint64_t session_generation) {
+                  std::uint64_t session_generation,
+                  const std::string &client_family) {
     // Every call is a real attach from rtsp_stream::start() - bump the
     // population revision unconditionally, matching measurement-spec-v1.md
     // 6.1's "increments on every client attach or detach" (the dedup guard
@@ -3181,6 +3224,7 @@ namespace stream_stats {
       client_stats_t client;
       client.name = client_name;
       client.ip = client_ip;
+      client.client_family = client_family;
       client.session_generation = session_generation;
       client.started_at = std::chrono::system_clock::now();
       current_stats.clients.push_back(std::move(client));

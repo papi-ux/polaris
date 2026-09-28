@@ -170,6 +170,25 @@ starts at `v1.0.0`.
   The host sleep setting now says only Nova can put the host to sleep; Moonlight has no sleep
   control.
 
+- Doctor names the kind of client a stream belongs to, and for Moonlight and Artemis, what they
+  cannot use. The host reads the kind from the device's pairing record at launch or resume, as the
+  Devices page does, and serves it as `client_family`, `nova` or `moonlight`, for the stream and for
+  each client. Doctor's `client_family` row says for a Moonlight-protocol client that Polaris gets
+  no media loss from it, so Doctor works from round-trip time and host evidence; that PyroWave, Live
+  Tuning from the client and choosing the launch mode per launch are Nova only, though Artemis can
+  ask for Host Virtual Display; and that Live Tuning on Mission Control still tunes the stream.
+  Session Snapshot on Doctor & Support shows a Client type tile with the same note, the support
+  report's Client line names the kind before the device, and Mission Control takes the kind from the
+  stream itself, so two devices that share a name no longer hide it.
+- Doctor's advice for a Private Stream host whose hidden compositor could not hand over DMA-BUF no
+  longer says to pick Private Stream (GPU-native) in Play Setup, which Moonlight does not have. Nova
+  can choose that mode for one launch, and every client gets it from Where games run. The first-run
+  launch mode step says Moonlight and other clients get the mode chosen there, where it said each
+  game could pick its own mode in Nova's Play Setup.
+- The pairing settings and the Trusted Network card say that Nova pairs without a PIN from a
+  trusted subnet and other clients use a PIN. They read as if any device on the subnet did, while
+  the host approves without a PIN only a Trusted Pair request, which only Nova sends.
+
 - The compatibility guide has one table of what each client gets: Nova for Android, Nova for
   Linux, Moonlight, Artemis and Browser Stream, row by row from pairing to refusal detail, and what
   the host can set for a Moonlight player instead. It also gains an Intel row, which says plainly

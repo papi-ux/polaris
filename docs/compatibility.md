@@ -135,7 +135,9 @@ What the rows mean, and where they come from:
   the client, and Nova for Linux can set a live bitrate as well. The host sees media loss only from
   Nova for Android, so for every other client it tunes on round-trip time and encoder load.
 - **Doctor** has network and host evidence for every stream. Decode and render timing come only from
-  Nova for Android, so only there can it blame the playback device.
+  Nova for Android, so only there can it blame the playback device. Doctor names which kind of
+  client a stream is, Nova or Moonlight / Artemis, and what a Moonlight-protocol client cannot use
+  ([Doctor](doctor.md)).
 - **Host sleep** is a request only Nova sends, and the host accepts it only while **Allow Clients To
   Sleep This Host** is on. **Wake-on-LAN** is the client's own magic packet, sent to the MAC the
   host reports.

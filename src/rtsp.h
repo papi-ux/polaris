@@ -57,6 +57,14 @@ namespace rtsp_stream {
     std::string device_name;
     std::string unique_id;
     /**
+     * @brief The paired device's client_family as it launched: "nova" once it has called the
+     *        Polaris API, which only Nova does, and empty for every other client.
+     *
+     * Copied here so the stream reads it without the pairing lock, which nvhttp holds while it asks
+     * RTSP for its sessions, the opposite order to a stream starting under RTSP's session lock.
+     */
+    std::string client_family;
+    /**
      * @brief The size of display to create for this device, as WIDTHxHEIGHTxFPS; empty for the
      *        stream size, which is what every release before this one used.
      */

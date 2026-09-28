@@ -585,6 +585,8 @@ namespace stream {
     std::uint64_t launch_lifecycle_generation = 0;
     std::string device_name;
     std::string device_uuid;
+    // The launching device's pairing-record client_family, "nova" or empty; see launch_session_t.
+    std::string client_family;
     std::string session_token;
 
     // Process-lifetime-monotonic, assigned fresh in alloc() for every
@@ -3279,7 +3281,8 @@ namespace stream {
 
       // Track this client in multi-client stats
       stream_stats::add_client(
-        addr_string, session.device_name, session.session_generation
+        addr_string, session.device_name, session.session_generation,
+        stream_stats::client_family_for_stream(session.client_family)
       );
       stream_stats::start_session_timing(
         session.device_uuid, session.session_generation, session.session_token
@@ -3406,6 +3409,7 @@ namespace stream {
         launch_session.lifecycle_generation.value_or(0);
       session->device_name = launch_session.device_name;
       session->device_uuid = launch_session.unique_id;
+      session->client_family = launch_session.client_family;
       session->session_token = launch_session.session_token;
       session->session_generation = next_session_generation.fetch_add(1, std::memory_order_relaxed);
       session->requested_fps = launch_session.requested_fps;

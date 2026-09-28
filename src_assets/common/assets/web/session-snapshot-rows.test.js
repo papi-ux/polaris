@@ -61,6 +61,29 @@ describe('session snapshot rows', () => {
     expect(lanRow.note).toBeUndefined()
   })
 
+  it('names the kind of client and, for a Moonlight-protocol client, what it cannot use', () => {
+    const moonlight = buildSessionSnapshotRows({ ...streaming, client_family: 'moonlight' }, t)
+    const row = moonlight.details.find((entry) => entry.label === 'snapshot_client_family')
+    expect(row).toEqual({
+      label: 'snapshot_client_family',
+      value: 'Moonlight / Artemis',
+      note: 'snapshot_client_family_moonlight_note',
+    })
+    // Beside the address the client came from.
+    const labels = moonlight.details.map((entry) => entry.label)
+    expect(labels.indexOf('snapshot_client_family')).toBe(labels.indexOf('snapshot_client_ip') + 1)
+
+    const nova = buildSessionSnapshotRows({ ...streaming, client_family: 'nova' }, t)
+    expect(nova.details.find((entry) => entry.label === 'snapshot_client_family')).toEqual({
+      label: 'snapshot_client_family',
+      value: 'Nova',
+    })
+
+    // An older host says nothing, and nothing is not Moonlight.
+    const older = buildSessionSnapshotRows(streaming, t)
+    expect(older.details.find((entry) => entry.label === 'snapshot_client_family').value).toBe('snapshot_unknown')
+  })
+
   it('says when a Display Mode Override replaced the mode the client asked for', () => {
     const rows = buildSessionSnapshotRows({
       ...streaming,

@@ -2356,6 +2356,137 @@ TEST(StreamStatsDoctorTests, PointsATailnetClientAtTheRelayCheck) {
   EXPECT_NE(row->at("detail").get<std::string>().find("tailscale ping"), std::string::npos);
 }
 
+namespace {
+  stream_stats::stats_t one_stream_from(const std::string &name, const std::string &family) {
+    stream_stats::stats_t stats {};
+    stats.streaming = true;
+    stats.client_name = name;
+    stats.client_ip = "10.0.0.50";
+    stream_stats::client_stats_t client;
+    client.name = name;
+    client.ip = stats.client_ip;
+    client.client_family = family;
+    stats.clients.push_back(client);
+    return stats;
+  }
+}  // namespace
+
+TEST(StreamStatsDoctorTests, NamesAMoonlightClientAndWhatItCannotUse) {
+  // A Moonlight or Artemis stream read like any other, so a stream that can never report media loss
+  // or switch Live Tuning from the client looked as though something on it was broken.
+  const auto stats = one_stream_from("Living Room TV", "moonlight");
+
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  const auto *row = find_doctor_evidence(doctor, "client_family");
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(row->at("label"), "Client");
+  EXPECT_EQ(row->at("value"), "moonlight");
+  EXPECT_EQ(row->at("status"), "info");
+  const auto detail = row->at("detail").get<std::string>();
+  EXPECT_EQ(detail.rfind("Living Room TV speaks only the Moonlight protocol, as Moonlight and Artemis do.", 0), 0U)
+    << detail;
+  EXPECT_NE(detail.find("no media loss"), std::string::npos) << detail;
+  for (const auto *nova_only : {"PyroWave", "choosing the launch mode per launch", "Live Tuning from the client"}) {
+    EXPECT_NE(detail.find(nova_only), std::string::npos) << nova_only;
+  }
+  // Artemis's virtual display option asks for Host Virtual Display for one launch, so the row does not
+  // say only Nova can ask for a mode (compatibility.md, the Launch mode per launch row).
+  EXPECT_NE(detail.find("though Artemis can ask for Host Virtual Display"), std::string::npos) << detail;
+  EXPECT_NE(detail.find("Live Tuning on Mission Control still tunes this stream."), std::string::npos) << detail;
+  // A Moonlight player reads this too, and has no Play Setup to go to.
+  EXPECT_EQ(detail.find("Play Setup"), std::string::npos) << detail;
+  // Information, never a finding: nothing is wrong with a Moonlight stream for being one.
+  const auto without_kind = stream_stats::build_doctor_json(one_stream_from("Living Room TV", ""),
+                                                            {{"primary_issue", "steady"}, {"grade", "good"}});
+  EXPECT_EQ(doctor.at("primary_issue"), without_kind.at("primary_issue"));
+  EXPECT_EQ(doctor.at("traffic_light"), without_kind.at("traffic_light"));
+  EXPECT_EQ(doctor.at("severity"), without_kind.at("severity"));
+}
+
+TEST(StreamStatsDoctorTests, NamesNovaWithoutClaimingWhichNova) {
+  // Nothing in the stream says whether Nova runs on Android or Linux, so the row does not guess.
+  const auto stats = one_stream_from("RetroidPocket6", "nova");
+
+  const auto doctor = stream_stats::build_doctor_json(stats, {{"primary_issue", "steady"}, {"grade", "good"}});
+
+  const auto *row = find_doctor_evidence(doctor, "client_family");
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(row->at("value"), "nova");
+  EXPECT_EQ(row->at("status"), "info");
+  EXPECT_EQ(row->at("detail"), "RetroidPocket6 is Nova, for Android or for Linux; Polaris cannot tell which from the stream.");
+}
+
+TEST(StreamStatsDoctorTests, NamesNoClientKindItWasNotGiven) {
+  // A session given no kind, a top-level name no session entry carries, and no stream at all each
+  // leave the row out rather than guess Moonlight.
+  EXPECT_EQ(find_doctor_evidence(stream_stats::build_doctor_json(one_stream_from("Deck", ""), nlohmann::json::object()),
+                                 "client_family"),
+            nullptr);
+
+  auto other_name = one_stream_from("Deck", "nova");
+  other_name.client_name = "Pixel";
+  EXPECT_EQ(find_doctor_evidence(stream_stats::build_doctor_json(other_name, nlohmann::json::object()), "client_family"),
+            nullptr);
+
+  auto ended = one_stream_from("Deck", "moonlight");
+  ended.streaming = false;
+  EXPECT_EQ(find_doctor_evidence(stream_stats::build_doctor_json(ended, nlohmann::json::object()), "client_family"),
+            nullptr);
+}
+
+TEST(StreamStatsDoctorTests, AStreamIsNovaOnlyWhenItsPairingRecordSaysSo) {
+  // Every RTSP stream is a paired device's launch, and the host marks a device Nova the first time it
+  // calls the Polaris API. Any other record is a client that speaks only the Moonlight protocol.
+  EXPECT_EQ(stream_stats::client_family_for_stream("nova"), "nova");
+  EXPECT_EQ(stream_stats::client_family_for_stream(""), "moonlight");
+  EXPECT_EQ(stream_stats::client_family_for_stream("Nova"), "moonlight");
+
+  // The stream start hands the launch's record to the stats, read from the launch session and not
+  // from the pairing state: nvhttp holds the pairing lock while it asks RTSP for its sessions, and a
+  // stream starts under RTSP's session lock, so looking it up there could deadlock.
+  std::ifstream input(std::filesystem::path {POLARIS_SOURCE_DIR} / "src/stream.cpp");
+  ASSERT_TRUE(input.good());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+  EXPECT_NE(source.find("session->client_family = launch_session.client_family;"), std::string::npos);
+  EXPECT_NE(source.find("stream_stats::client_family_for_stream(session.client_family)"), std::string::npos);
+}
+
+TEST(StreamStatsDoctorTests, TheClientKindFollowsTheStreamTheTopLevelNames) {
+  // A watcher starts after the owner and becomes the top-level client_name, as every session start
+  // does, so the top-level kind is looked up by that session and not copied from the first entry.
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Owner", 401, "nova");
+  stream_stats::update_stream_active(true, "Owner", "10.0.0.5");
+  auto json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  EXPECT_EQ(json.at("client_family"), "nova");
+  EXPECT_EQ(json.at("clients").at(0).at("client_family"), "nova");
+
+  stream_stats::add_client("10.0.0.6", "Television", 402, "moonlight");
+  stream_stats::update_stream_active(true, "Television", "10.0.0.6");
+  json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  EXPECT_EQ(json.at("client_family"), "moonlight");
+  EXPECT_EQ(json.at("clients").at(1).at("client_family"), "moonlight");
+
+  // The caller that says nothing leaves the entry without a kind, and the entry says nothing.
+  stream_stats::add_client("10.0.0.7", "Legacy", 403);
+  json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  EXPECT_FALSE(json.at("clients").at(2).contains("client_family"));
+
+  stream_stats::remove_client("10.0.0.7", 403);
+  stream_stats::remove_client("10.0.0.6", 402);
+  json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  EXPECT_EQ(json.at("client_name"), "Owner");
+  EXPECT_EQ(json.at("client_family"), "nova");
+
+  stream_stats::remove_client("10.0.0.5", 401);
+  json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  EXPECT_EQ(json.at("client_family"), "");
+}
+
 TEST(StreamStatsDoctorTests, SaysNothingAboutPathOrDisplayModeBeforeAnyLaunch) {
   stream_stats::stats_t stats {};
 
@@ -8297,6 +8428,10 @@ TEST(CaptureForecastTests, NvidiaPrivateStreamFollowsTheLastDmabufProbe) {
   EXPECT_EQ(forecast.severity, "warning");
   EXPECT_NE(forecast.action.find("Private Stream (GPU-native)"), std::string::npos);
   EXPECT_NE(forecast.action.find("linux_prefer_gpu_native_capture = enabled"), std::string::npos);
+  // Moonlight reads this advice too and has no Play Setup, so it names where every client gets the mode.
+  EXPECT_EQ(forecast.action.find("Play Setup"), std::string::npos) << forecast.action;
+  EXPECT_NE(forecast.action.find("Settings, Audio/Video, Where games run"), std::string::npos) << forecast.action;
+  EXPECT_NE(forecast.action.find("Nova can choose it for one launch"), std::string::npos) << forecast.action;
 
   // With the preference on, the private compositor runs windowed and the other probe rules.
   inputs.prefer_gpu_native_capture = true;

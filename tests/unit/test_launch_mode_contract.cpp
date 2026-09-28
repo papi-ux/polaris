@@ -337,6 +337,19 @@ TEST(SessionEncoderContract, LegacyResolvedLaunchWithoutEncoderEnvelopeStillPars
   EXPECT_TRUE(session->expected_encoder_backend.empty());
 }
 
+TEST(SessionEncoderContract, ALaunchCarriesItsDevicesClientFamilyToTheStream) {
+  // The stream reads the kind of client from its launch, so Doctor can name it without the pairing lock.
+  auto cert = launch_client_cert();
+  auto session = nvhttp::make_launch_session(true, false, resolved_launch_args(), cert.get());
+  ASSERT_NE(session, nullptr);
+  EXPECT_EQ(session->client_family, "");
+
+  cert->client_family = "nova";
+  session = nvhttp::make_launch_session(true, false, resolved_launch_args(), cert.get());
+  ASSERT_NE(session, nullptr);
+  EXPECT_EQ(session->client_family, "nova");
+}
+
 TEST(LaunchModeContractTests, RecommendationAlwaysBelongsToAllowedModesWithoutPrivateRuntime) {
   ScopedPath path {"/polaris-test/no-runtime-binaries"};
   const auto contract = nvhttp::build_launch_mode_contract_for_tests(

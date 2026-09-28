@@ -5123,6 +5123,7 @@ namespace nvhttp {
       launch_session->fps = launch_session->requested_fps = fps;
       launch_session->device_name = named_cert_p->name;
       launch_session->unique_id = named_cert_p->uuid;
+      launch_session->client_family = named_cert_p->client_family;
       launch_session->temporary_authorization = named_cert_p->temporary_authorization;
       launch_session->watch_only = watch_requested(args);
       launch_session->perm = named_cert_p->perm & PERM::_game_control;
@@ -5238,6 +5239,7 @@ namespace nvhttp {
     launch_session->controller_type = named_cert_p->controller_type;
     launch_session->client_reports_hdr10_display = named_cert_p->client_reports_hdr10_display;
     launch_session->unique_id = named_cert_p->uuid;
+    launch_session->client_family = named_cert_p->client_family;
     launch_session->temporary_authorization = named_cert_p->temporary_authorization;
     launch_session->profile_preference = launch_profile::normalize_preset(
       get_arg(args, "profilePreference", "auto")

@@ -118,6 +118,11 @@ namespace stream_stats {
   struct client_stats_t {
     std::string name;
     std::string ip;
+    // Which kind of client this session belongs to, read from its device's pairing record when the
+    // stream started, as the Devices page reads it: "nova" once the device has called the Polaris
+    // API, which only Nova does, or "moonlight" for a device that speaks only the Moonlight
+    // protocol, such as Moonlight or Artemis. Empty when the caller did not say.
+    std::string client_family;
     // Internal lifecycle identity. This is deliberately not serialized: the
     // public client contract remains name/IP/telemetry, while overlapping
     // reconnects from the same address can still be removed independently.
@@ -609,15 +614,27 @@ namespace stream_stats {
   void record_display_mode_decision(const std::string &requested, const std::string &applied, bool pinned_by_host);
 
   /**
+   * @brief The kind of client a stream belongs to, from its device's pairing-record client_family.
+   *
+   * Every RTSP stream is a paired device's /launch or /resume, so a record that is not "nova" is a
+   * client that has never called the Polaris API and speaks only the Moonlight protocol.
+   * @param pairing_family The paired device's client_family: "nova", or empty.
+   * @return "nova" or "moonlight".
+   */
+  std::string client_family_for_stream(std::string_view pairing_family);
+
+  /**
    * @brief Add a new client session to the stats tracker.
    * @param client_ip IP address of the client.
    * @param client_name Display name of the client.
    * @param session_generation Process-unique stream-session identity. Zero
    * keeps the legacy IP-keyed behavior for callers without a session object.
+   * @param client_family "nova" or "moonlight", as client_stats_t::client_family; empty when unknown.
    */
   void add_client(const std::string &client_ip,
                   const std::string &client_name,
-                  std::uint64_t session_generation = 0);
+                  std::uint64_t session_generation = 0,
+                  const std::string &client_family = {});
 
   /**
    * @brief Remove a client session from the stats tracker.
