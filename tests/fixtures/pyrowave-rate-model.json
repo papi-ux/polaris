@@ -1,0 +1,26 @@
+{
+  "description": "The PyroWave bitrate model at 35 dB, as Nova computes it. Polaris and Nova quote the same number for the same picture only while both evaluate the same header the same way, and tests/unit/test_pyrowave_advice.cpp holds Polaris to these rows. Every mbps is the encoder's rate, before FEC, audio and overhead.",
+  "source": "Nova PR107 (branch feat/pyrowave-rate-estimator): the model rows are upstream's own answers from app/src/test/resources/pyrowave-rate-reference.csv, which tools/pyrowave_rate_model.py generates; the two edge rows follow PyroWaveDecoderRenderer.bitrateAdvice and PyroWaveBitrateAdviceTest.",
+  "pyrowave_revision": "186f0393b77f7755953b5ecde994bb1cec2e4155",
+  "header": "eval-results/pyrowave_regression_results.h",
+  "header_sha256": "384e2ca2901318dd0e82a4bad44c7be902984382e87127d58c751b5ed95246a3",
+  "target_db": 35,
+  "height_factors": {
+    "8": "H 2.0, a television, a monitor or an external display",
+    "15": "H 2.875, a device's own screen"
+  },
+  "cases": [
+    {"width": 1920, "height": 1080, "fps": 60, "chroma": "420", "height_factor": 15, "mbps": 153.5715366712067, "rule": "model"},
+    {"width": 1920, "height": 1080, "fps": 60, "chroma": "444", "height_factor": 15, "mbps": 179.49200987931056, "rule": "model"},
+    {"width": 1920, "height": 1080, "fps": 60, "chroma": "420", "height_factor": 8, "mbps": 220.30126005302972, "rule": "model"},
+    {"width": 1920, "height": 1080, "fps": 60, "chroma": "444", "height_factor": 8, "mbps": 266.74499991058082, "rule": "model"},
+    {"width": 1920, "height": 1080, "fps": 120, "chroma": "444", "height_factor": 15, "mbps": 358.98401975862112, "rule": "model"},
+    {"width": 1280, "height": 720, "fps": 60, "chroma": "444", "height_factor": 15, "mbps": 137.51314128028847, "rule": "model"},
+    {"width": 1280, "height": 800, "fps": 60, "chroma": "444", "height_factor": 15, "mbps": 143.17582686381931, "rule": "model_not_16_9"},
+    {"width": 2560, "height": 1440, "fps": 60, "chroma": "444", "height_factor": 8, "mbps": 341.82424787733623, "rule": "model"},
+    {"width": 3840, "height": 2160, "fps": 60, "chroma": "444", "height_factor": 8, "mbps": 313.80319908126512, "rule": "model"},
+    {"width": 2560, "height": 1080, "fps": 120, "chroma": "420", "height_factor": 15, "mbps": 323.39289133499955, "rule": "model_not_16_9"},
+    {"width": 640, "height": 360, "fps": 60, "chroma": "444", "height_factor": 15, "mbps": 34.378285320072118, "rule": "below_model_edge"},
+    {"width": 7680, "height": 4320, "fps": 60, "chroma": "444", "height_factor": 15, "mbps": 937.55421789718652, "rule": "above_model_edge"}
+  ]
+}

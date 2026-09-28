@@ -210,6 +210,15 @@ namespace ai_optimizer {
   session_history_t sanitize_session_history(session_history_t session);
 
   /**
+   * @brief The most a remembered or suggested bitrate may be, for a codec.
+   *
+   * 100 Mbps for every codec but PyroWave, which needs several times that for the same picture and
+   * gets the 300 Mbps the paired endpoints take. Nothing here feeds a launch today; this keeps a
+   * PyroWave record from being cut to an H.264 figure if a later change reads it.
+   */
+  int bitrate_ceiling_kbps(std::string_view codec);
+
+  /**
    * @brief Derive a safe frame-rate target from recent pacing feedback.
    */
   double derive_safe_target_fps(double target_fps,

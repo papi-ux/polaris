@@ -979,3 +979,34 @@ TEST(AdaptiveBitrateController, DisableSerializesWithInFlightEncoderApplication)
   EXPECT_EQ(adaptive_bitrate::get_state().applied_bitrate_kbps, 14000);
   EXPECT_FALSE(adaptive_bitrate::get_live_bitrate_request());
 }
+
+TEST(AdaptiveBitrateController, PyroWaveFloorStopsLiveTuningAndNeverLiftsARequest) {
+  // A request below the codec's floor becomes the floor itself: Live Tuning cannot cut it at all, and
+  // the stream is never raised above what the client asked for.
+  enable_controller(20000);
+  adaptive_bitrate::set_session_floor(76785, "pyrowave_advice");
+  auto state = adaptive_bitrate::get_state();
+  EXPECT_EQ(state.min_bitrate_kbps, 20000);
+  EXPECT_EQ(state.base_bitrate_kbps, 20000);
+  EXPECT_EQ(state.target_bitrate_kbps, 20000);
+  EXPECT_EQ(state.floor_source, "pyrowave_advice");
+
+  // Above the floor, heavy loss cuts down to it and no further.
+  enable_controller(100000);
+  adaptive_bitrate::set_session_floor(90000, "pyrowave_advice");
+  ASSERT_EQ(adaptive_bitrate::get_state().min_bitrate_kbps, 90000);
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  for (int i = 0; i < 2; ++i) {
+    std::this_thread::sleep_for(1100ms);
+    adaptive_bitrate::update_network_stats(20.0, 8.0);
+  }
+  state = adaptive_bitrate::get_state();
+  EXPECT_EQ(state.state, "network_pressure");
+  EXPECT_EQ(state.target_bitrate_kbps, 90000);
+
+  // The next stream starts from adaptive_bitrate_min again.
+  enable_controller(20000);
+  state = adaptive_bitrate::get_state();
+  EXPECT_EQ(state.min_bitrate_kbps, 2000);
+  EXPECT_EQ(state.floor_source, "adaptive_bitrate_min");
+}

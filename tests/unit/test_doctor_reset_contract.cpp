@@ -115,11 +115,14 @@ TEST(DoctorResetContract, RunningSessionCannotRewriteTheConfiguredHostBitrateCap
     std::string::npos
   );
 
+  // The handshake reads the launch target beside max_bitrate, and never writes either back.
   const auto rtsp = source("src/rtsp.cpp");
   EXPECT_NE(
-    rtsp.find("session.target_bitrate_kbps.value_or(\n        config::video.max_bitrate"),
+    rtsp.find("session.target_bitrate_kbps,\n        session.target_bitrate_source,\n        config::video.max_bitrate"),
     std::string::npos
   );
+  EXPECT_EQ(rtsp.find("config::video.max_bitrate ="), std::string::npos);
+  EXPECT_EQ(rtsp.find("session.target_bitrate_kbps ="), std::string::npos);
 }
 
 TEST(DoctorResetContract, ExplicitClientBitrateRoutesReplaceTheLiveTarget) {

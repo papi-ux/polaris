@@ -2525,6 +2525,25 @@ TEST(VideoPyroWaveRouteTests, TheEncodeLoopRecordsTheRouteOfEveryFrameItAccepts)
 }
 
 /**
+ * encode_time_ms counts PyroWave's time in convert(), and Live Tuning's encoder pressure does not.
+ *
+ * Live Tuning answers a slow encode by cutting bitrate. PyroWave spends that time on colour conversion
+ * and a wavelet transform, which take as long at any bitrate, so handing it to the controller would
+ * cut a 4K PyroWave stream on the CPU colour path toward its floor and give the encoder nothing back.
+ */
+TEST(VideoPyroWaveRouteTests, LiveTuningIsNotHandedEncodeTimeABitrateCutCannotShorten) {
+  const auto video = video_source_for_contract("src/video.cpp");
+  ASSERT_FALSE(video.empty());
+  EXPECT_NE(video.find("const double bitrate_relievable_encode_ms = encode_duration - codec_time_in_convert;"),
+            std::string::npos);
+  const auto health = video.find("adaptive_bitrate::update_stream_health(");
+  ASSERT_NE(health, std::string::npos);
+  const auto call = video.substr(health, video.find(");", health) - health);
+  EXPECT_NE(call.find("bitrate_relievable_encode_ms"), std::string::npos) << call;
+  EXPECT_EQ(call.find("encode_duration"), std::string::npos) << call;
+}
+
+/**
  * The route the loop publishes is the one the session the host builds reports.
  *
  * The call the encode loop makes reads it from the codec session through the wrapper the host builds

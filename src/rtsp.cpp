@@ -37,6 +37,7 @@ extern "C" {
 #include "process.h"
 #include "rtsp.h"
 #include "stream.h"
+#include "stream_bitrate.h"
 #include "sync.h"
 #include "video.h"
 #ifdef POLARIS_BUILD_PYROWAVE
@@ -94,6 +95,33 @@ namespace rtsp_stream {
       return warped_bitrate_kbps;
     }
 
+  }  // namespace
+
+  session_bitrate_ceiling_t session_bitrate_ceiling(
+      std::int64_t requested_kbps,
+      bool pyrowave,
+      std::optional<int> launch_target_kbps,
+      const std::string &launch_target_source,
+      int max_bitrate_kbps) {
+    const std::string max_bitrate_source = max_bitrate_kbps > 0 ? "max_bitrate" : "";
+    if (!pyrowave) {
+      if (launch_target_kbps) {
+        return {*launch_target_kbps, launch_target_source.empty() ? "launch_target" : launch_target_source};
+      }
+      return {max_bitrate_kbps, max_bitrate_source};
+    }
+    session_bitrate_ceiling_t ceiling {max_bitrate_kbps, max_bitrate_source};
+    // A launch target that max_bitrate would cut to anyway is the same cap, not one set aside.
+    const int effective_cap = max_bitrate_kbps > 0 ? max_bitrate_kbps : std::numeric_limits<int>::max();
+    if (launch_target_kbps && *launch_target_kbps > 0 && *launch_target_kbps < requested_kbps &&
+        *launch_target_kbps < effective_cap) {
+      ceiling.set_aside_kbps = *launch_target_kbps;
+      ceiling.set_aside_source = launch_target_source.empty() ? "launch_target" : launch_target_source;
+    }
+    return ceiling;
+  }
+
+  namespace {
     session_role_e merge_session_role(session_role_e current, bool watch_only) {
       if (current == session_role_e::controller || !watch_only) {
         return session_role_e::controller;
@@ -1739,11 +1767,17 @@ namespace rtsp_stream {
       }
 
       BOOST_LOG(info) << "Client Requested bitrate is [" << configuredBitrateKbps << "kbps]";
+      config.bitrate_request.client_kbps = configuredBitrateKbps;
 
       // A resolved launch target belongs to this RTSP session. Never publish it
       // through config::video.max_bitrate: that is the stable configured host
       // capability used by other clients' deterministic /optimize requests.
-      const int session_bitrate_ceiling = session.target_bitrate_kbps.value_or(
+      const bool pyrowave_request = config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE;
+      const auto ceiling = session_bitrate_ceiling(
+        configuredBitrateKbps,
+        pyrowave_request,
+        session.target_bitrate_kbps,
+        session.target_bitrate_source,
         config::video.max_bitrate
       );
       // Hack: Restore bitrate for warp mode
@@ -1751,11 +1785,28 @@ namespace rtsp_stream {
       if (config::video.limit_framerate && warp_factor >= 2) {
         BOOST_LOG(info) << "Warp factor [" << warp_factor << "] engaged";
       }
+      const auto effective_warp_factor = config::video.limit_framerate ? warp_factor : 1;
+      const auto uncapped_bitrate_kbps = bound_session_bitrate(configuredBitrateKbps, effective_warp_factor, 0);
       configuredBitrateKbps = bound_session_bitrate(
         configuredBitrateKbps,
-        config::video.limit_framerate ? warp_factor : 1,
-        session_bitrate_ceiling
+        effective_warp_factor,
+        ceiling.ceiling_kbps
       );
+      if (configuredBitrateKbps < uncapped_bitrate_kbps) {
+        config.bitrate_request.cap_kbps = ceiling.ceiling_kbps;
+        config.bitrate_request.cap_source = ceiling.source;
+        if (pyrowave_request) {
+          BOOST_LOG(info) << "PyroWave: "sv << ceiling.source << " caps the client's request of "sv
+                          << config.bitrate_request.client_kbps << " kbps at "sv << ceiling.ceiling_kbps << " kbps"sv;
+        }
+      }
+      if (ceiling.set_aside_kbps > 0) {
+        config.bitrate_request.set_aside_kbps = ceiling.set_aside_kbps;
+        config.bitrate_request.set_aside_source = ceiling.set_aside_source;
+        BOOST_LOG(info) << "PyroWave: keeping the client's request of "sv << config.bitrate_request.client_kbps
+                        << " kbps; the launch resolved "sv << ceiling.set_aside_kbps << " kbps from "sv
+                        << ceiling.set_aside_source << ", sized before the codec was known, and PyroWave does not apply it"sv;
+      }
 
       BOOST_LOG(info) << "Host Streaming bitrate is [" << configuredBitrateKbps << "kbps]";
 
@@ -1813,20 +1864,17 @@ namespace rtsp_stream {
     if (configuredBitrateKbps) {
       BOOST_LOG(debug) << "Client configured bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
 
-      // If the FEC percentage isn't too high, adjust the configured bitrate to ensure video
-      // traffic doesn't exceed the user's selected bitrate when the FEC shards are included.
-      if (config::stream.fec_percentage <= 80) {
-        configuredBitrateKbps /= 100.f / (100 - config::stream.fec_percentage);
-      }
-
-      // Adjust the bitrate to account for audio traffic bandwidth usage (capped at 20% reduction).
-      // The bitrate per channel is 256 Kbps for high quality mode and 96 Kbps for normal quality.
-      auto audioBitrateAdjustment = (config.audio.flags[audio::config_t::HIGH_QUALITY] ? 256 : 96) * config.audio.channels;
-      configuredBitrateKbps -= std::min((std::int64_t) audioBitrateAdjustment, configuredBitrateKbps / 5);
-
-      // Reduce it by another 500Kbps to account for A/V packet overhead and control data
-      // traffic (capped at 10% reduction).
-      configuredBitrateKbps -= std::min((std::int64_t) 500, configuredBitrateKbps / 10);
+      // FEC comes off so video traffic with its FEC shards stays inside the selected bitrate,
+      // then the audio (at most a fifth), then 500 kbps of A/V packet overhead and control
+      // traffic (at most a tenth). stream_bitrate holds the arithmetic, so PyroWave's advice can
+      // say what to request for a given encoder rate using exactly these steps.
+      const auto audioBitrateAdjustment = stream_bitrate::audio_kbps(
+        config.audio.flags[audio::config_t::HIGH_QUALITY], config.audio.channels
+      );
+      configuredBitrateKbps = stream_bitrate::encoder_kbps_for_wire(
+        configuredBitrateKbps, config::stream.fec_percentage, audioBitrateAdjustment
+      );
+      config.bitrate_request.audio_kbps = audioBitrateAdjustment;
 
       BOOST_LOG(debug) << "Final adjusted video encoding bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
       config.monitor.bitrate = configuredBitrateKbps;

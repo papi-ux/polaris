@@ -198,3 +198,20 @@ TEST_F(LiveTuningTest, ReadRetainsTheRevisionOfItsContentsAcrossAnExternalCommit
   EXPECT_EQ(current->contents, replacement);
   EXPECT_NE(current->revision, observed->revision);
 }
+
+TEST_F(LiveTuningTest, TurningItOnResumesAStreamAManualBitrateTurnedItOffFor) {
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  adaptive_bitrate::set_base_bitrate(20000);
+  adaptive_bitrate::set_live_bitrate_for_stream(30000);
+  ASSERT_TRUE(adaptive_bitrate::get_state().paused_for_stream);
+  EXPECT_FALSE(adaptive_bitrate::is_enabled());
+  EXPECT_TRUE(adaptive_bitrate::get_state().configured_enabled);
+  EXPECT_EQ(live_tuning::snapshot({})["enabled"], false);
+
+  auto authority = doctor_actions::acquire_admin_global_control();
+  ASSERT_TRUE(live_tuning::set_enabled(authority, true)["status"].get<bool>());
+  authority.release();
+  EXPECT_TRUE(adaptive_bitrate::is_enabled());
+  EXPECT_FALSE(adaptive_bitrate::get_state().paused_for_stream);
+  EXPECT_EQ(live_tuning::snapshot({})["enabled"], true);
+}

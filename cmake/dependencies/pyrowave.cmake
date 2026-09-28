@@ -86,4 +86,7 @@ target_include_directories(polaris_pyrowave
         "${CMAKE_SOURCE_DIR}/third-party/pyrowave/shaders"
         "${CMAKE_SOURCE_DIR}/third-party/Granite/video")
 target_link_libraries(polaris_pyrowave PRIVATE pyrowave granite-vulkan granite-math)
+# Upstream's bitrate model, a generated header and nothing to link. Public, so the host's own advice
+# (src/pyrowave_advice.cpp) evaluates the same polynomials the codec's author fitted.
+target_link_libraries(polaris_pyrowave PUBLIC pyrowave-regression-results)
 set_target_properties(polaris_pyrowave PROPERTIES POSITION_INDEPENDENT_CODE ON)

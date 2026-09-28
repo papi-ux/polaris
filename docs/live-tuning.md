@@ -11,8 +11,10 @@ Disconnected or invalid status is Unknown; it is not permission to change settin
 
 The displayed applied bitrate comes from the encoder acknowledgement, not the
 requested target. Turning tuning off holds the last confirmed bitrate. Choosing
-an explicit fixed live bitrate also turns tuning off and supersedes a pending
-Doctor bitrate action. Auto, Quality, High FPS, and Stability launch presets still
+an explicit fixed live bitrate turns tuning off for the rest of that stream and
+supersedes a pending Doctor bitrate action. Nothing is saved: tuning reads as off
+until the stream ends, the next stream starts with the saved preference, and
+switching tuning on during the stream resumes it. Auto, Quality, High FPS, and Stability launch presets still
 apply at the next explicit launch.
 
 ## Range
@@ -24,6 +26,14 @@ change. The floor is `adaptive_bitrate_min`. There is no ceiling of its own: the
 client's request is the ceiling, and `max_bitrate` caps what a client may request.
 Doctor's bitrate step and its Undo start from the bitrate the encoder runs at, so one
 step cuts at most 20% of that rate and Undo puts that rate back.
+
+A PyroWave stream has a floor of its own: half what the codec's model advises for it on a
+device's own screen, at the encoder, and never above the client's request. At that floor
+Live Tuning stops cutting, and Doctor suggests HEVC or a lower mode rather than another
+cut. Live Tuning does not cut PyroWave for a slow encode, which takes as long at any
+bitrate. Live Tuning never raises a stream above the request. Doctor's raise for a starved
+PyroWave stream is the one change that can, as one tap with Undo
+([PyroWave reference](pyrowave-reference.md#how-polaris-advises-and-tunes-pyrowave)).
 
 The floor is the one place the bitrate can sit above the request. A client that asks
 for less than `adaptive_bitrate_min` starts the controller at the floor. With Live

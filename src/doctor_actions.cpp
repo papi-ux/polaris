@@ -55,6 +55,8 @@ namespace doctor_actions {
       std::uint64_t controller_revision = 0;
       int applied_bitrate_kbps = 0;
       int goal_bitrate_kbps = 0;
+      // pyrowave_advice, launch_ceiling or launch_bitrate for a quality restore.
+      std::string goal_source;
       std::uint64_t verification_step = 0;
       std::uint64_t network_sample_revision_at_apply = 0;
       bool requires_media_sample = false;
@@ -509,15 +511,6 @@ namespace doctor_actions {
         latency_ms < 45.0;
     }
 
-    int effective_quality_restore_target(const stream_stats::stats_t &stats) {
-      if (stats.paired_target_bitrate_kbps <= 0) return 0;
-      if (stats.effective_launch_bitrate_kbps <= 0) return 0;
-      return std::min(
-        stats.paired_target_bitrate_kbps,
-        stats.effective_launch_bitrate_kbps
-      );
-    }
-
     void run_verification_watchdog(const std::string &run_id,
                                    std::uint64_t verification_step,
                                    const std::string &owner_uuid,
@@ -811,12 +804,10 @@ namespace doctor_actions {
         controller_sessions.front().launch_instance_id != launch_instance_id) {
       return false;
     }
-    std::lock_guard configuration_guard(configuration_store::mutex());
-    if (configuration_store::patch(config::sunshine.config_file,
-          {{"adaptive_bitrate_enabled", "disabled"}}) != configuration_store::result::committed) return false;
+    // A player who picks a bitrate by hand has taken it from Live Tuning for this stream, not for
+    // every stream after it. Nothing is saved; session_ended() puts the saved preference back.
     const auto superseded_run = action_run;
-    adaptive_bitrate::set_enabled(false);
-    adaptive_bitrate::set_live_bitrate(bitrate_kbps);
+    adaptive_bitrate::set_live_bitrate_for_stream(bitrate_kbps);
     if (superseded_run.active) {
       remember_terminal_locked(
         superseded_run,
@@ -1313,7 +1304,10 @@ namespace doctor_actions {
           {"changed", false},
           {"run_id", run_id},
           {"state", "resolved"},
-          {"message", "The capability-validated launch bitrate ceiling is restored and live network evidence remains stable."},
+          {"message", action_run.goal_source == "pyrowave_advice" ?
+            "PyroWave's advised bitrate is reached and live network evidence remains stable." :
+            "The capability-validated launch bitrate ceiling is restored and live network evidence remains stable."},
+          {"goal_source", action_run.goal_source},
           {"elapsed_seconds", elapsed_seconds},
           {"evidence", verification_evidence},
           {"verification_window", verification_window_json(response_verification_window)},
@@ -1370,6 +1364,7 @@ namespace doctor_actions {
       int current_bitrate_kbps = 0;
       int target_bitrate_kbps = 0;
       int goal_bitrate_kbps = 0;
+      stream_stats::doctor_quality_goal_t goal;
       nlohmann::json mutation_evidence;
       {
         std::lock_guard<std::mutex> lock(action_mutex);
@@ -1395,7 +1390,12 @@ namespace doctor_actions {
         }
         current_bitrate_kbps = adaptive_state.live_bitrate_kbps > 0 ?
           adaptive_state.live_bitrate_kbps : current_live_bitrate(mutation_stats);
-        goal_bitrate_kbps = effective_quality_restore_target(mutation_stats);
+        // The envelope above already held goal_source to what the host derives now. PyroWave's goal
+        // may sit above the player's own request; the launch goal never does.
+        const auto source = request.contains("goal_source") && request["goal_source"].is_string() ?
+          request["goal_source"].get<std::string>() : std::string {};
+        goal = stream_stats::doctor_quality_goal(mutation_stats, source);
+        goal_bitrate_kbps = goal.encoder_kbps;
         target_bitrate_kbps = guarded_quality_retry_target(
           current_bitrate_kbps, goal_bitrate_kbps
         );
@@ -1428,6 +1428,7 @@ namespace doctor_actions {
         run.previous_controller = adaptive_state;
         run.applied_bitrate_kbps = target_bitrate_kbps;
         run.goal_bitrate_kbps = goal_bitrate_kbps;
+        run.goal_source = goal.source;
         run.verification_step = 1;
         run.requires_media_sample = false;
         const auto applied = adaptive_bitrate::set_doctor_quality_bitrate_if_revision(
@@ -1465,7 +1466,7 @@ namespace doctor_actions {
       BOOST_LOG(info) << "Doctor: started guarded quality retry "sv
                       << current_bitrate_kbps << " -> " << target_bitrate_kbps
                       << " kbps toward " << goal_bitrate_kbps
-                      << " kbps run=" << run.run_id;
+                      << " kbps (" << goal.source << ") run=" << run.run_id;
 
       return {
         {"status", true},
@@ -1474,7 +1475,9 @@ namespace doctor_actions {
         {"message", "Doctor requested one quality step and will begin verification after the encoder acknowledges it."},
         {"run_id", run.run_id},
         {"request_id", run.request_id},
-        {"requested", {{"bitrate_kbps", target_bitrate_kbps}, {"target_bitrate_kbps", goal_bitrate_kbps}, {"adaptive_bitrate_enabled", adaptive_state.enabled}}},
+        {"requested", {{"bitrate_kbps", target_bitrate_kbps}, {"target_bitrate_kbps", goal_bitrate_kbps},
+                       {"goal_source", goal.source}, {"goal_request_kbps", goal.target_kbps},
+                       {"adaptive_bitrate_enabled", adaptive_state.enabled}}},
         {"encoder_application_confirmed", false},
         {"before", {{"bitrate_kbps", current_bitrate_kbps}, {"adaptive_bitrate_enabled", adaptive_state.enabled}}},
         {"verification", {{"delay_seconds", 8}, {"action_id", "verify"}, {"run_id", run.run_id}}},
@@ -1719,6 +1722,10 @@ namespace doctor_actions {
     }
 
     adaptive_bitrate::set_session_scope(0, {}, false);
+    // A manual live bitrate turned Live Tuning off for the stream that just ended, and only for it.
+    if (controller_sessions.empty()) {
+      adaptive_bitrate::end_stream_override();
+    }
 
     // Encoder teardown already publishes runtime support loss. Do not change
     // the configured adaptive policy here; the next stream start reloads it,

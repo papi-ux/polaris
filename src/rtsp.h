@@ -206,6 +206,8 @@ namespace rtsp_stream {
     uint32_t scale_factor;
     std::optional<int> paired_target_bitrate_kbps;
     std::optional<int> target_bitrate_kbps;
+    // What decided target_bitrate_kbps, such as stability_preset_selected or paired_bitrate_setting.
+    std::string target_bitrate_source;
     std::optional<int> nvenc_tune;
     std::optional<std::string> preferred_codec;
     // The codec the client said at /launch or /resume it will ask for at ANNOUNCE, lower case, or
@@ -275,6 +277,33 @@ namespace rtsp_stream {
   find_session(const std::string_view& uuid);
 
   session_snapshot_t session_snapshot(const std::string_view& uuid);
+
+  /** The ceiling a client's bitrate request meets at the handshake, and what it set aside. */
+  struct session_bitrate_ceiling_t {
+    /// 0 when nothing caps the request.
+    int ceiling_kbps = 0;
+    std::string source;
+    /// A launch target lower than the request that the codec does not apply. PyroWave only.
+    int set_aside_kbps = 0;
+    std::string set_aside_source;
+  };
+
+  /**
+   * @brief The ceiling for a client's bitrate request.
+   *
+   * Every codec but PyroWave is capped by the bitrate its launch resolved, or by max_bitrate when the
+   * launch resolved none. A launch resolves its bitrate before it knows the codec, from a preset, a
+   * device profile or a saved paired profile sized for H.264, so a PyroWave stream keeps its client's
+   * own request and only max_bitrate, the host's explicit cap, bounds it. A lower launch target is
+   * reported as set aside, so the log and session status can name it.
+   */
+  session_bitrate_ceiling_t session_bitrate_ceiling(
+    std::int64_t requested_kbps,
+    bool pyrowave,
+    std::optional<int> launch_target_kbps,
+    const std::string &launch_target_source,
+    int max_bitrate_kbps
+  );
 
   /**
    * @brief The refusal for a stream that would share the host's one capture with another codec's,

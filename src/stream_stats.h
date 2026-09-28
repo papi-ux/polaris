@@ -23,12 +23,20 @@
 
 // local includes
 #include "platform/common.h"
+#include "pyrowave_advice.h"
+#include "stream_bitrate.h"
 #include "stream_fec.h"
 
 namespace stream_stats {
 
   inline constexpr std::uint64_t DOCTOR_PACING_WARMUP_SAMPLES = 6;
   inline constexpr std::uint64_t DOCTOR_PACING_CONFIRMATION_SAMPLES = 2;
+
+  /// How many recent PyroWave frames the byte ceiling share covers: about four seconds at 60 fps.
+  inline constexpr std::uint32_t k_pyrowave_ceiling_window_frames = 240;
+
+  /// The share stays unknown until this many frames are in the window, about a second at 60 fps.
+  inline constexpr std::uint32_t k_pyrowave_ceiling_min_frames = 60;
 
   /**
    * @brief Return true when delivered FPS is materially below target.
@@ -138,6 +146,15 @@ namespace stream_stats {
     // display's route with another display's frames. capture_source itself keeps the last frame
     // any display delivered, as it always has.
     bool capture_frame_since_publication = false;
+    // "444" or "420" as this session negotiated its chroma, and what its client asked for at the
+    // handshake. Written once, when the session starts.
+    std::string stream_chroma;
+    stream_bitrate::request_t bitrate_request;
+    // This session's recent PyroWave frames in the batches its encode loop reported them in, oldest
+    // first, as (frames, frames at the byte ceiling), and the totals over those batches.
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> pyrowave_ceiling_batches;
+    std::uint32_t pyrowave_window_frames = 0;
+    std::uint32_t pyrowave_window_ceiling_frames = 0;
     // When add_client() registered this session. A lifecycle time for the record kept once the
     // session ends, and not serialized while it streams.
     std::chrono::system_clock::time_point started_at {};
@@ -297,6 +314,15 @@ namespace stream_stats {
     int width = 0;
     int height = 0;
 
+    /// "444" or "420" as the stream negotiated its chroma at start. Empty before a stream starts.
+    std::string stream_chroma;
+    /// What the client asked for at the handshake, and what the host did to it.
+    stream_bitrate::request_t bitrate_request;
+    /// Recent PyroWave frames and how many of them reached 99% of the codec's byte budget, over about
+    /// the last k_pyrowave_ceiling_window_frames frames of the stream that reported last.
+    std::uint32_t pyrowave_window_frames = 0;
+    std::uint32_t pyrowave_window_ceiling_frames = 0;
+
     // Encoded frames that were transmitted without parity because the
     // packetized payload exceeded the four-block wire-format envelope.
     fec_protection_stats_t fec_protection;
@@ -339,6 +365,9 @@ namespace stream_stats {
     bool adaptive_runtime_update_supported = false;
     /// True only while one uncontaminated stream generation owns the global actuator.
     bool doctor_live_action_scope_available = true;
+    /// Live Tuning's floor for this stream, and what set it: adaptive_bitrate_min or pyrowave_advice.
+    int adaptive_min_bitrate_kbps = 0;
+    std::string adaptive_floor_source;
 
     // System
     double gpu_usage = 0;
@@ -649,6 +678,83 @@ namespace stream_stats {
    * @return False when no client holds that generation or the route is empty, so the caller retries.
    */
   bool record_pyrowave_route(std::uint64_t session_generation, std::string_view route);
+
+  /**
+   * @brief Record how a live nonzero generation's stream was negotiated, as it starts.
+   * @param yuv444 Whether the session carries 4:4:4 chroma.
+   * @param request What its client asked for at the handshake, and what the host did to it.
+   * @return False when no client holds that generation.
+   */
+  bool record_stream_request(std::uint64_t session_generation, bool yuv444, const stream_bitrate::request_t &request);
+
+  /**
+   * @brief Add a batch of a PyroWave session's sent frames to its rolling byte ceiling window.
+   *
+   * The codec fills a frame up to a byte budget the bitrate sets. A frame at 99% of that budget or more
+   * was cut short by it, and a stream where most frames are asks for more bits than it is given. The
+   * session's own encode loop writes a batch at a time; nothing here moves a policy revision.
+   * @return False when no client holds that generation or the batch is empty.
+   */
+  bool record_pyrowave_frames(std::uint64_t session_generation, std::uint32_t frames, std::uint32_t ceiling_frames);
+
+  /// The share of recent PyroWave frames at the byte ceiling, or nullopt while the window is too short.
+  std::optional<double> pyrowave_ceiling_frame_share(const stats_t &stats);
+
+  /**
+   * @brief PyroWave's bitrate advice for the stream, and the host's verdict on it.
+   *
+   * Inactive unless the stream is PyroWave and its shape gives advice. The verdict compares encoder
+   * rates with encoder rates; the advice itself is carried as requests, which is what a client sets.
+   */
+  struct pyrowave_bitrate_t {
+    bool active = false;
+    pyrowave_advice::advice_t advice;
+    /// The rate the encoder runs at now.
+    int encoder_kbps = 0;
+    std::optional<double> ceiling_frame_share;
+    /// The encoder runs below where Doctor's raise would land it.
+    bool below_goal = false;
+    /// More than pyrowave_advice::k_starved_ceiling_share of recent frames hit the byte ceiling.
+    bool ceiling_starved = false;
+    /// Either of those two: the host's own verdict.
+    bool starved = false;
+    /// Live Tuning's PyroWave floor for this stream at the encoder, when PyroWave's advice set it.
+    int floor_encoder_kbps = 0;
+    /// The live rate sits at or under that floor, where Live Tuning stops cutting.
+    bool at_floor = false;
+  };
+
+  /// Evaluate PyroWave's advice against the live stream. Reads fec_percentage and max_bitrate.
+  pyrowave_bitrate_t evaluate_pyrowave_bitrate(const stats_t &stats);
+
+  /// The session status pyrowave_bitrate object, or null when the stream is not PyroWave.
+  nlohmann::json pyrowave_bitrate_json(const stats_t &stats);
+
+  /**
+   * @brief The launch bitrate a Doctor quality restore climbs back to, at the encoder.
+   *
+   * The saved paired profile's bitrate when it is lower than the rate the stream opened at, and the
+   * rate the stream opened at when there is no saved profile. A PyroWave stream climbs back to the
+   * rate it opened at: the handshake sets a saved profile aside for it, so a restore does too. Zero
+   * before a stream has opened.
+   */
+  int doctor_launch_quality_goal_kbps(const stats_t &stats);
+
+  /// Where a Doctor quality restore climbs to, and what its action payload calls that.
+  struct doctor_quality_goal_t {
+    /// Where the encoder ends up. Doctor's steps and its temporary ceiling work in this.
+    int encoder_kbps = 0;
+    /// What the payload names as target_bitrate_kbps: a request for PyroWave's advice, else the launch goal.
+    int target_kbps = 0;
+    /// pyrowave_advice, launch_ceiling (a saved paired profile) or launch_bitrate.
+    std::string source;
+  };
+
+  /**
+   * @brief The goal for a Doctor quality restore.
+   * @param source pyrowave_advice for PyroWave's raise goal, anything else for the launch goal.
+   */
+  doctor_quality_goal_t doctor_quality_goal(const stats_t &stats, std::string_view source);
 
   /**
    * @brief The encoder selection reason for a PyroWave stream, built from the route its own encoder

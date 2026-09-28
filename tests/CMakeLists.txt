@@ -299,6 +299,7 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_display_policy.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_recovery_doctor_actions.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_stats.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_pyrowave_advice.cpp
 )
 
 if (NOT WIN32 AND NOT APPLE)

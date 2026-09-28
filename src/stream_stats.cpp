@@ -740,6 +740,10 @@ namespace stream_stats {
     j["recommendation_version"] = recommendation_version;
     j["paired_target_bitrate_kbps"] = paired_target_bitrate_kbps;
     j["effective_launch_bitrate_kbps"] = effective_launch_bitrate_kbps;
+    j["stream_chroma"] = stream_chroma;
+    if (auto pyrowave = pyrowave_bitrate_json(*this); !pyrowave.is_null()) {
+      j["pyrowave_bitrate"] = std::move(pyrowave);
+    }
     j["width"] = width;
     j["height"] = height;
     j["fec_protection"] = fec_protection_json(fec_protection);
@@ -1858,12 +1862,44 @@ namespace stream_stats {
       });
     }
 
+    /// What Doctor's recommendation and action need to know about a PyroWave stream.
+    struct pyrowave_doctor_t {
+      /// The stream is PyroWave and its shape gives advice.
+      bool active = false;
+      /// Doctor can raise the stream toward raise_goal_kbps.
+      bool raise_available = false;
+      /// The raise goal as a request, and which of advice, cap or max_bitrate set it.
+      int raise_goal_kbps = 0;
+      std::string_view limited_by;
+      /// Live Tuning's PyroWave floor is reached, and the floor at the encoder.
+      bool at_floor = false;
+      int floor_encoder_kbps = 0;
+    };
+
+    /// A bitrate as a player sets it, in whole Mbps, rounded up so setting it satisfies it.
+    std::string whole_mbps(int kbps) {
+      return std::to_string((std::max(kbps, 0) + 999) / 1000) + " Mbps";
+    }
+
+    std::string pyrowave_limit_phrase(std::string_view limited_by) {
+      if (limited_by == "max_bitrate") return "the host's max_bitrate";
+      if (limited_by == "cap") return "the most Doctor raises PyroWave to";
+      return "what PyroWave's model advises";
+    }
+
+    std::string pyrowave_floor_guidance(const pyrowave_doctor_t &pyrowave) {
+      return "PyroWave is at its floor of " + whole_mbps(pyrowave.floor_encoder_kbps) +
+             " at the encoder, half what its model advises, where Live Tuning and Doctor stop cutting because "
+             "below it the picture falls apart. Switch to HEVC, or lower the resolution or frame rate.";
+    }
+
     nlohmann::json doctor_recommendation(const std::string &primary_issue,
                                          const std::string &summary,
                                          const nlohmann::json &health,
                                          bool live_bitrate_tunable,
                                          bool single_session_scope,
-                                         bool auto_safe_managing) {
+                                         bool auto_safe_managing,
+                                         const pyrowave_doctor_t &pyrowave) {
       std::string title = "Try this first";
       std::string body = "Start a stream, reproduce the issue, then export diagnostics with this Doctor result attached.";
       std::string next_step = "Export diagnostics";
@@ -1875,7 +1911,11 @@ namespace stream_stats {
         next_step = "Keep monitoring";
         expected = "No recovery action should be needed right now.";
       } else if (primary_issue == "network_jitter") {
-        if (auto_safe_managing) {
+        if (pyrowave.at_floor) {
+          body = "Confirmed network pressure is affecting this stream. " + pyrowave_floor_guidance(pyrowave);
+          next_step = "Use HEVC or a lower mode";
+          expected = "A codec that needs fewer bits, or a smaller picture, fits the link without the picture falling apart.";
+        } else if (auto_safe_managing) {
           body = "Confirmed network pressure is affecting this stream, and Auto Safe already owns the live bitrate correction. Doctor will measure the result without racing the active controller.";
           next_step = "Recheck Auto Safe";
           expected = "Auto Safe should lower the encoder target until loss and latency return to the stable range.";
@@ -1919,12 +1959,45 @@ namespace stream_stats {
           next_step = "Keep current settings";
           expected = "Any later launch remains governed only by the user's selected preset and capability validation.";
         }
+      } else if (primary_issue == "pyrowave_starved") {
+        const auto goal = whole_mbps(pyrowave.raise_goal_kbps);
+        if (auto_safe_managing) {
+          body = "The network is clean and PyroWave is short of bits. Live Tuning owns the bitrate and never raises it above "
+                 "your request, so set about " + goal + " as the live bitrate in your client, which turns Live Tuning off for "
+                 "this stream only.";
+          next_step = "Raise the bitrate";
+          expected = "Fewer frames should hit PyroWave's byte ceiling, and the picture should sharpen.";
+        } else if (pyrowave.raise_available && live_bitrate_tunable) {
+          body = "The network is clean and PyroWave is below the bitrate its model advises. Doctor can raise it to " + goal +
+                 " in guarded steps, verifying each one, and Undo puts back the bitrate you chose.";
+          next_step = "Raise and verify";
+          expected = "Fewer frames should hit PyroWave's byte ceiling while loss and latency stay in range.";
+        } else if (pyrowave.raise_available && !single_session_scope) {
+          body = "Doctor requires one fresh stream generation that has not shared the process-global bitrate target. Disconnect additional viewers and reconnect the affected stream before rechecking.";
+          next_step = "Reconnect one stream";
+          expected = "No other encoder can be changed by this stream's Auto Fix.";
+        } else if (pyrowave.raise_available) {
+          body = "PyroWave is below the bitrate its model advises, but this stream cannot change bitrate live. Set about " +
+                 goal + " in your client for the next stream.";
+          next_step = "Raise next-stream bitrate";
+          expected = "The next stream should start at a bitrate PyroWave can use.";
+        } else {
+          body = "PyroWave already runs at or above " + goal + ", " + pyrowave_limit_phrase(pyrowave.limited_by) +
+                 ", and most frames still hit its byte ceiling. Lower the resolution or frame rate, or use HEVC, for a "
+                 "sharper picture on this link.";
+          next_step = "Use a lower mode or HEVC";
+          expected = "A smaller or slower picture needs fewer bits, so fewer frames hit the ceiling.";
+        }
       } else if (primary_issue == "steam_input_conflict") {
         body = "Local Steam Input settings can claim the Polaris Xbox virtual controller while strict isolation prevents Steam from creating its replacement controller. Disable Steam Input for Xbox controllers in Steam Settings, and set any per-game Force On overrides to Default or Disable.";
         next_step = "Adjust Steam Input";
         expected = "Proton games should read the Polaris virtual controller directly without a per-game workaround.";
       } else if (primary_issue == "encoder_load") {
-        body = "Trim bitrate, resolution, or FPS to give the active encoder more frame time.";
+        // PyroWave's time goes to colour conversion and a wavelet transform, which take as long at any
+        // bitrate, so a lower bitrate softens the picture and gives the encoder nothing back.
+        body = pyrowave.active ?
+          "Lower the resolution or FPS to give PyroWave more frame time. Its encode takes as long at any bitrate, so a lower bitrate would only soften the picture." :
+          "Trim bitrate, resolution, or FPS to give the active encoder more frame time.";
         next_step = "Lower stream load";
         expected = "Encode time should fall back under the low-latency budget.";
       } else if (primary_issue == "host_render_limited") {
@@ -1960,10 +2033,11 @@ namespace stream_stats {
     nlohmann::json doctor_safe_action(const std::string &primary_issue,
                                       const nlohmann::json &health,
                                       int current_bitrate_kbps,
-                                      int paired_target_bitrate_kbps,
+                                      const doctor_quality_goal_t &quality_goal,
                                       bool live_bitrate_tunable,
                                       bool single_session_scope,
                                       bool auto_safe_managing,
+                                      const pyrowave_doctor_t &pyrowave,
                                       const std::string &source_result_id,
                                       std::string_view app_uuid) {
       std::string id = "none";
@@ -1984,7 +2058,53 @@ namespace stream_stats {
 
       const bool auto_safe_network_management = auto_safe_managing &&
         (primary_issue == "network_jitter" || primary_issue == "quality_reduced_live");
-      if (auto_safe_network_management) {
+      const auto read_only_guidance = [&](std::string reason) {
+        id = "none";
+        label = "Manual";
+        kind = "manual_guidance";
+        unavailable_reason = std::move(reason);
+        rollback = "Read-only guidance; Doctor does not change the stream.";
+      };
+      if (primary_issue == "network_jitter" && pyrowave.at_floor) {
+        // No cut below PyroWave's floor, from Live Tuning or from Doctor: the answer is another codec
+        // or a smaller picture.
+        read_only_guidance(pyrowave_floor_guidance(pyrowave));
+      } else if (primary_issue == "pyrowave_starved" && !auto_safe_managing &&
+                 pyrowave.raise_available && live_bitrate_tunable) {
+        // The one place Polaris raises a stream above the player's own request: a single tap, on a
+        // clean network, to the far advice and no higher than the cap and max_bitrate, verified in
+        // guarded steps with Undo. Live Tuning, which acts on its own, never does.
+        id = "restore_quality";
+        label = "Auto Fix";
+        kind = "live_tuning";
+        endpoint = "/api/doctor/action";
+        method = "POST";
+        payload["action_id"] = id;
+        payload["source_result_id"] = source_result_id;
+        payload["target_bitrate_kbps"] = pyrowave.raise_goal_kbps;
+        payload["goal_source"] = "pyrowave_advice";
+        rollback = "Undo restores the live bitrate and Auto Quality state that were active before this Doctor run.";
+        verification = {
+          {"mode", "graduated_live_telemetry"},
+          {"delay_seconds", 8},
+          {"endpoint", "/api/doctor/action"},
+          {"success_when", nlohmann::json::array({"network_risk stays clear", "packet_loss_pct <= 2", "latency_ms < 45", "PyroWave's advised bitrate is reached"})}
+        };
+      } else if (primary_issue == "pyrowave_starved") {
+        const auto goal = whole_mbps(pyrowave.raise_goal_kbps);
+        read_only_guidance(
+          auto_safe_managing ?
+            "Live Tuning owns the bitrate and never raises it above your request. Set about " + goal +
+              " as the live bitrate in your client, which turns Live Tuning off for this stream only." :
+          !pyrowave.raise_available ?
+            "PyroWave already runs at or above " + goal + ", " + pyrowave_limit_phrase(pyrowave.limited_by) +
+              ". Lower the resolution or frame rate, or use HEVC." :
+          single_session_scope ?
+            "The active encoder does not support runtime bitrate updates. Set about " + goal +
+              " in your client for the next stream." :
+            "Auto Fix requires a fresh, unshared stream generation to own the process-global bitrate controller."
+        );
+      } else if (auto_safe_network_management) {
         id = "recheck_network";
         label = "Recheck";
         kind = "verification";
@@ -2010,7 +2130,10 @@ namespace stream_stats {
         const int health_bitrate_kbps = health.value("safe_bitrate_kbps", 0);
         payload["action_id"] = id;
         payload["source_result_id"] = source_result_id;
-        payload["target_bitrate_kbps"] = health_bitrate_kbps > 0 ? health_bitrate_kbps : derived_bitrate_kbps;
+        // A safe bitrate that is no lower than the stream, which is what PyroWave's health reports,
+        // names no step, so the payload names one guarded 20% step instead.
+        payload["target_bitrate_kbps"] = health_bitrate_kbps > 0 && health_bitrate_kbps < current_bitrate_kbps ?
+          health_bitrate_kbps : derived_bitrate_kbps;
         rollback = "Undo restores the live bitrate and Auto Quality state that were active before this Doctor run.";
         verification = {
           {"mode", "live_telemetry"},
@@ -2041,7 +2164,8 @@ namespace stream_stats {
         method = "POST";
         payload["action_id"] = id;
         payload["source_result_id"] = source_result_id;
-        payload["target_bitrate_kbps"] = paired_target_bitrate_kbps;
+        payload["target_bitrate_kbps"] = quality_goal.target_kbps;
+        payload["goal_source"] = quality_goal.source;
         rollback = "Undo restores the live bitrate and Auto Quality state that were active before this Doctor run.";
         verification = {
           {"mode", "graduated_live_telemetry"},
@@ -2152,21 +2276,43 @@ namespace stream_stats {
       stats.control_channel_packet_loss >= network_risk_tracker_t::k_loss_elevated_pct;
     const int live_bitrate_kbps = stats.adaptive_runtime_update_supported && stats.adaptive_target_bitrate_kbps > 0 ?
       stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
-    const int effective_quality_target_kbps =
-      stats.paired_target_bitrate_kbps > 0 && stats.effective_launch_bitrate_kbps > 0 ?
-        std::min(stats.paired_target_bitrate_kbps, stats.effective_launch_bitrate_kbps) :
-        0;
+    // The saved paired profile's bitrate, or the rate the stream opened at when there is none, so a
+    // stream with no saved profile can climb back after a reduction too.
+    const auto launch_quality_goal = doctor_quality_goal(stats, "launch");
+    const int effective_quality_target_kbps = launch_quality_goal.encoder_kbps;
     // Enabled Auto Safe remains the sole continuous bitrate owner even while
     // its actuator is momentarily holding or recovering. A clean, reduced
     // target is therefore an informational observation, not a user action.
     const bool auto_safe_managing = stats.adaptive_bitrate_enabled;
     const bool network_evidence_available = current_network_observation &&
       (current_media_loss_observation || stats.control_channel_samples > 0);
-    const bool quality_reduced_live =
+    // Clean enough to raise quality: the loss and latency limits a Doctor quality restore verifies with.
+    const bool network_clean_for_quality =
       stats.streaming && network_evidence_available && !stats.network_risk &&
       (!current_media_loss_observation || stats.packet_loss <= 2.0) &&
-      stats.latency_ms < 45.0 &&
+      stats.latency_ms < 45.0;
+    const bool quality_reduced_live =
+      network_clean_for_quality &&
       stats.adaptive_runtime_update_supported && effective_quality_target_kbps > live_bitrate_kbps;
+    // PyroWave below the rate its model advises, or starved at its byte ceiling, on a clean network. A
+    // watch finding that ranks below every network, encoder and capture failure.
+    const auto pyrowave = evaluate_pyrowave_bitrate(stats);
+    // A stream cut below a request that already meets the raise goal climbs back to that request, by
+    // the ordinary quality restore or by Live Tuning's own recovery when it owns the bitrate. PyroWave's
+    // raise would stop short of what the player asked for, and its text would ask for less.
+    const bool launch_restore_covers_pyrowave = quality_reduced_live &&
+      effective_quality_target_kbps >= pyrowave.advice.raise_goal_encoder_kbps;
+    const bool pyrowave_starved = pyrowave.active && pyrowave.starved && network_clean_for_quality &&
+      !launch_restore_covers_pyrowave;
+    pyrowave_doctor_t pyrowave_doctor;
+    if (pyrowave.active) {
+      pyrowave_doctor.active = true;
+      pyrowave_doctor.raise_goal_kbps = pyrowave.advice.raise_goal_kbps;
+      pyrowave_doctor.limited_by = pyrowave.advice.raise_goal_limited_by;
+      pyrowave_doctor.raise_available = pyrowave.advice.raise_goal_encoder_kbps > live_bitrate_kbps;
+      pyrowave_doctor.at_floor = pyrowave.at_floor;
+      pyrowave_doctor.floor_encoder_kbps = pyrowave.floor_encoder_kbps;
+    }
     const bool single_session_scope = stats.clients.size() <= 1 &&
       stats.doctor_live_action_scope_available;
     const bool live_bitrate_tunable =
@@ -2266,6 +2412,7 @@ namespace stream_stats {
       else if (capture_latency_watch || capture_pacing_watch) primary_issue = capture_reason;
       else if (!capture_known) primary_issue = "capture_missing";
       else if (pacing_watch) primary_issue = "frame_pacing";
+      else if (pyrowave_starved) primary_issue = "pyrowave_starved";
       else if (quality_reduced_live && !auto_safe_managing) primary_issue = "quality_reduced_live";
       else if (control_channel_observation) primary_issue = "control_channel_observation";
       else primary_issue = "none";
@@ -2298,6 +2445,23 @@ namespace stream_stats {
       simple_state = "Needs attention";
     }
 
+    // Both sides as requests, so the player compares what they set with what to set.
+    const auto pyrowave_link_audio_kbps = stats.bitrate_request.audio_kbps > 0 ?
+      stats.bitrate_request.audio_kbps : pyrowave_advice::k_default_audio_kbps;
+    const auto pyrowave_set_kbps = static_cast<int>(stream_bitrate::wire_kbps_for_encoder(
+      pyrowave.encoder_kbps, config::stream.fec_percentage, pyrowave_link_audio_kbps));
+    std::string pyrowave_summary;
+    if (pyrowave.active) {
+      pyrowave_summary = "PyroWave is set to about " + whole_mbps(pyrowave_set_kbps) + " where its 35 dB model advises " +
+                         whole_mbps(pyrowave.advice.advice_far_kbps) + " for " + std::to_string(pyrowave.advice.width) +
+                         "x" + std::to_string(pyrowave.advice.height) + " at " + std::to_string(pyrowave.advice.fps) +
+                         " fps on a device's own screen";
+      if (pyrowave.ceiling_frame_share) {
+        pyrowave_summary += ", and " + std::to_string(static_cast<int>(std::lround(*pyrowave.ceiling_frame_share * 100.0))) +
+                            "% of recent frames hit its byte ceiling";
+      }
+      pyrowave_summary += ".";
+    }
     const std::string summary =
       primary_issue == "none" ? "Streaming telemetry looks ready." :
       primary_issue == "no_active_stream" ? "No active stream is running, so Doctor cannot verify the live path yet." :
@@ -2306,6 +2470,7 @@ namespace stream_stats {
       primary_issue == "network_observation" ? "A network warning needs more live evidence before Doctor changes quality." :
       primary_issue == "control_channel_observation" ? "Control-channel retries were observed, but video packet loss is not confirmed." :
       primary_issue == "quality_reduced_live" ? "The reversible live bitrate target is below the capability-validated launch ceiling and current network evidence is clean." :
+      primary_issue == "pyrowave_starved" ? pyrowave_summary + " The network is clean." :
       primary_issue == "steam_input_conflict" ? "Local Steam Input settings conflict with strict gamepad isolation for the Polaris Xbox virtual controller." :
       primary_issue == "encoder_load" ? "Encoder load is above the low-latency budget." :
       primary_issue == "frame_pacing" ? "Frame pacing telemetry needs attention." :
@@ -2458,7 +2623,25 @@ namespace stream_stats {
       append_doctor_evidence(evidence, "display_mode_decision", "Display mode", applied, "",
                              replaced_request ? "watch" : "info", "launch", last_launch_prefix + detail);
     }
-    append_doctor_evidence(evidence, "bitrate", "Live bitrate", live_bitrate_kbps, "kbps", "pass", "stream_stats", stats.adaptive_runtime_update_supported ? "Current live encoder target; Doctor changes it only for confirmed pressure or a verified same-stream restore." : "Applied encoder bitrate; this encoder does not expose live bitrate updates.");
+    {
+      std::string detail = stats.adaptive_runtime_update_supported ?
+        "Current live encoder target; Doctor changes it only for confirmed pressure or a verified same-stream restore." :
+        "Applied encoder bitrate; this encoder does not expose live bitrate updates.";
+      if (pyrowave.active) {
+        detail += " " + pyrowave_summary + " On a television or monitor (H 2.0) it advises " +
+                  whole_mbps(pyrowave.advice.advice_near_kbps) + ", in " +
+                  (pyrowave.advice.chroma444 ? "4:4:4" : "4:2:0") + ". Every figure is what to request.";
+        if (pyrowave.floor_encoder_kbps > 0) {
+          detail += " Live Tuning cuts it no lower than " + whole_mbps(pyrowave.floor_encoder_kbps) + " at the encoder.";
+        }
+      }
+      const bool bitrate_short = quality_reduced_live || (pyrowave.active && pyrowave.starved);
+      append_doctor_evidence(
+        evidence, "bitrate", "Live bitrate", live_bitrate_kbps, "kbps",
+        !stats.streaming ? "unknown" : network_fail ? "fail" : bitrate_short ? "watch" : "pass",
+        "stream_stats", detail
+      );
+    }
     const bool has_oversized_fec_frames =
       stats.fec_protection.oversized_frames_total > 0;
     const std::string fec_protection_detail = has_oversized_fec_frames ?
@@ -2516,7 +2699,7 @@ namespace stream_stats {
       "launch_policy",
       quality_reduced_live ?
         "The reversible live bitrate target is below the capability-validated launch ceiling." :
-        "The launch ceiling is the paired preference after host capability validation."
+        "The launch ceiling is the paired preference after host capability validation, or the bitrate the stream opened at when no paired preference is saved."
     );
     append_doctor_evidence(
       evidence,
@@ -2689,7 +2872,7 @@ namespace stream_stats {
     doctor["summary"] = summary;
     doctor["recommendation"] = doctor_recommendation(
       primary_issue, summary, health, live_bitrate_tunable, single_session_scope,
-      auto_safe_managing
+      auto_safe_managing, pyrowave_doctor
     );
     doctor["evidence"] = std::move(evidence);
     doctor["advanced_evidence"] = std::move(advanced);
@@ -2697,10 +2880,11 @@ namespace stream_stats {
       primary_issue,
       health,
       live_bitrate_kbps,
-      effective_quality_target_kbps,
+      launch_quality_goal,
       live_bitrate_tunable,
       single_session_scope,
       auto_safe_managing,
+      pyrowave_doctor,
       doctor["result_id"].get<std::string>(),
       app_uuid
     );
@@ -2895,11 +3079,20 @@ namespace stream_stats {
       current_stats.client_name.clear();
       current_stats.client_ip.clear();
       current_stats.fec_protection = {};
+      current_stats.stream_chroma.clear();
+      current_stats.bitrate_request = {};
+      current_stats.pyrowave_window_frames = 0;
+      current_stats.pyrowave_window_ceiling_frames = 0;
     } else {
       // Update primary client info to first remaining client
-      current_stats.client_name = current_stats.clients.front().name;
-      current_stats.client_ip = current_stats.clients.front().ip;
-      current_stats.fec_protection = current_stats.clients.front().fec_protection;
+      const auto &primary = current_stats.clients.front();
+      current_stats.client_name = primary.name;
+      current_stats.client_ip = primary.ip;
+      current_stats.fec_protection = primary.fec_protection;
+      current_stats.stream_chroma = primary.stream_chroma;
+      current_stats.bitrate_request = primary.bitrate_request;
+      current_stats.pyrowave_window_frames = primary.pyrowave_window_frames;
+      current_stats.pyrowave_window_ceiling_frames = primary.pyrowave_window_ceiling_frames;
     }
   }
 
@@ -3074,6 +3267,129 @@ namespace stream_stats {
     if (client == current_stats.clients.end()) return false;
     client->pyrowave_route = route;
     return true;
+  }
+
+  bool record_stream_request(std::uint64_t session_generation, bool yuv444, const stream_bitrate::request_t &request) {
+    if (session_generation == 0) return false;
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == current_stats.clients.end()) return false;
+    client->stream_chroma = yuv444 ? "444" : "420";
+    client->bitrate_request = request;
+    client->pyrowave_ceiling_batches.clear();
+    client->pyrowave_window_frames = 0;
+    client->pyrowave_window_ceiling_frames = 0;
+    current_stats.stream_chroma = client->stream_chroma;
+    current_stats.bitrate_request = request;
+    current_stats.pyrowave_window_frames = 0;
+    current_stats.pyrowave_window_ceiling_frames = 0;
+    return true;
+  }
+
+  bool record_pyrowave_frames(std::uint64_t session_generation, std::uint32_t frames, std::uint32_t ceiling_frames) {
+    if (session_generation == 0 || frames == 0) return false;
+    ceiling_frames = std::min(ceiling_frames, frames);
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == current_stats.clients.end()) return false;
+    auto &batches = client->pyrowave_ceiling_batches;
+    batches.emplace_back(frames, ceiling_frames);
+    client->pyrowave_window_frames += frames;
+    client->pyrowave_window_ceiling_frames += ceiling_frames;
+    // Drop the oldest batch while the rest still covers the window, so the share always speaks for
+    // at least the last k_pyrowave_ceiling_window_frames frames once there are that many.
+    while (batches.size() > 1 &&
+           client->pyrowave_window_frames - batches.front().first >= k_pyrowave_ceiling_window_frames) {
+      client->pyrowave_window_frames -= batches.front().first;
+      client->pyrowave_window_ceiling_frames -= batches.front().second;
+      batches.erase(batches.begin());
+    }
+    current_stats.pyrowave_window_frames = client->pyrowave_window_frames;
+    current_stats.pyrowave_window_ceiling_frames = client->pyrowave_window_ceiling_frames;
+    return true;
+  }
+
+  std::optional<double> pyrowave_ceiling_frame_share(const stats_t &stats) {
+    if (stats.pyrowave_window_frames < k_pyrowave_ceiling_min_frames) return std::nullopt;
+    return static_cast<double>(stats.pyrowave_window_ceiling_frames) /
+           static_cast<double>(stats.pyrowave_window_frames);
+  }
+
+  pyrowave_bitrate_t evaluate_pyrowave_bitrate(const stats_t &stats) {
+    pyrowave_bitrate_t result;
+    if (!stats.streaming || stats.codec != "pyrowave") return result;
+    const double fps = stats.encode_target_fps > 0.0 ? stats.encode_target_fps : stats.session_target_fps;
+    const pyrowave_advice::link_t link {
+      config::stream.fec_percentage,
+      stats.bitrate_request.audio_kbps > 0 ? stats.bitrate_request.audio_kbps : pyrowave_advice::k_default_audio_kbps
+    };
+    result.advice = pyrowave_advice::advise(
+      stats.width, stats.height, static_cast<int>(std::lround(fps)), stats.stream_chroma == "444", link,
+      config::video.max_bitrate
+    );
+    if (!result.advice.valid) return result;
+    result.active = true;
+    result.encoder_kbps = stats.adaptive_runtime_update_supported && stats.adaptive_target_bitrate_kbps > 0 ?
+      stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
+    result.ceiling_frame_share = pyrowave_ceiling_frame_share(stats);
+    result.below_goal = result.encoder_kbps > 0 && result.encoder_kbps < result.advice.raise_goal_encoder_kbps;
+    result.ceiling_starved = result.ceiling_frame_share &&
+      *result.ceiling_frame_share > pyrowave_advice::k_starved_ceiling_share;
+    result.starved = result.below_goal || result.ceiling_starved;
+    if (stats.adaptive_floor_source == "pyrowave_advice" && stats.adaptive_min_bitrate_kbps > 0) {
+      result.floor_encoder_kbps = stats.adaptive_min_bitrate_kbps;
+      result.at_floor = result.encoder_kbps > 0 && result.encoder_kbps <= result.floor_encoder_kbps;
+    }
+    return result;
+  }
+
+  nlohmann::json pyrowave_bitrate_json(const stats_t &stats) {
+    const auto pyrowave = evaluate_pyrowave_bitrate(stats);
+    if (!pyrowave.active) return nullptr;
+    auto value = pyrowave_advice::advice_json(pyrowave.advice);
+    value["encoder_kbps"] = pyrowave.encoder_kbps;
+    value["ceiling_frame_share"] = pyrowave.ceiling_frame_share ?
+      nlohmann::json(std::round(*pyrowave.ceiling_frame_share * 1000.0) / 1000.0) : nlohmann::json(nullptr);
+    value["starved"] = pyrowave.starved;
+    value["live_tuning_floor_encoder_kbps"] = pyrowave.floor_encoder_kbps > 0 ?
+      nlohmann::json(pyrowave.floor_encoder_kbps) : nlohmann::json(nullptr);
+    const auto &request = stats.bitrate_request;
+    value["request_cap"] = request.cap_kbps > 0 ?
+      nlohmann::json {{"kbps", request.cap_kbps}, {"source", request.cap_source}} : nlohmann::json(nullptr);
+    value["cap_set_aside"] = request.set_aside_kbps > 0 ?
+      nlohmann::json {{"kbps", request.set_aside_kbps}, {"source", request.set_aside_source}} :
+      nlohmann::json(nullptr);
+    return value;
+  }
+
+  namespace {
+    // The handshake sets a saved paired profile aside for a PyroWave stream, sized for H.264 as it is,
+    // so it is no restore goal for one either.
+    bool paired_profile_caps_restore(const stats_t &stats) {
+      return stats.paired_target_bitrate_kbps > 0 && stats.codec != "pyrowave";
+    }
+  }  // namespace
+
+  int doctor_launch_quality_goal_kbps(const stats_t &stats) {
+    if (stats.effective_launch_bitrate_kbps <= 0) return 0;
+    if (!paired_profile_caps_restore(stats)) return stats.effective_launch_bitrate_kbps;
+    return std::min(stats.paired_target_bitrate_kbps, stats.effective_launch_bitrate_kbps);
+  }
+
+  doctor_quality_goal_t doctor_quality_goal(const stats_t &stats, std::string_view source) {
+    if (source == "pyrowave_advice") {
+      const auto pyrowave = evaluate_pyrowave_bitrate(stats);
+      if (!pyrowave.active) return {};
+      return {pyrowave.advice.raise_goal_encoder_kbps, pyrowave.advice.raise_goal_kbps, "pyrowave_advice"};
+    }
+    const int launch = doctor_launch_quality_goal_kbps(stats);
+    return {launch, launch, paired_profile_caps_restore(stats) ? "launch_ceiling" : "launch_bitrate"};
   }
 
   namespace {
@@ -4476,6 +4792,8 @@ namespace stream_stats {
       current_stats.adaptive_bitrate_active = adaptive_state.active;
       current_stats.adaptive_bitrate_state = adaptive_state.state;
       current_stats.adaptive_runtime_update_supported = adaptive_state.runtime_update_supported;
+      current_stats.adaptive_min_bitrate_kbps = adaptive_state.min_bitrate_kbps;
+      current_stats.adaptive_floor_source = adaptive_state.floor_source;
 
       // Also update adaptive bitrate for all clients
       for (auto &c : current_stats.clients) {

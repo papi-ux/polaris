@@ -18,6 +18,7 @@
 #include <shared_mutex>
 #include <string>
 #include <thread>
+#include <utility>
 
 // lib includes
 #include <boost/pointer_cast.hpp>
@@ -2071,11 +2072,36 @@ namespace video {
       return session ? session->route() : pyrowave_encode::route_e::unknown;
     }
 
+    /// Frames this session sent since the last report, and how many reached 99% of the byte budget.
+    struct ceiling_counts_t {
+      std::uint32_t frames = 0;
+      std::uint32_t ceiling_frames = 0;
+    };
+
+    ceiling_counts_t take_ceiling_counts() {
+      return std::exchange(ceiling_counts, {});
+    }
+
+    /**
+     * Count one frame that is about to leave, against the budget it was encoded under.
+     *
+     * The codec fills a frame up to its budget and stops there, so a frame at the budget is one the
+     * bitrate cut short. The stream stats keep the share of recent frames that were, which is how the
+     * host knows a stream is starved rather than only logging it.
+     */
+    void note_sent_frame(std::size_t bytes) {
+      ++ceiling_counts.frames;
+      if (max_frame_bytes > 0 && bytes * 100 >= max_frame_bytes * 99) {
+        ++ceiling_counts.ceiling_frames;
+      }
+    }
+
   private:
     std::unique_ptr<pyrowave_encode::session_t> session;
     int framerate = 60;
     std::size_t max_frame_bytes = 0;
     bool converted_since_last_packet = false;
+    ceiling_counts_t ceiling_counts;
 
     /// What the session was built to read, which decides what a frame has to be.
     pyrowave_encode::dynamic_range_e range = pyrowave_encode::dynamic_range_e::sdr;
@@ -2274,6 +2300,20 @@ namespace video {
     if (const auto *pyrowave = dynamic_cast<const pyrowave_encode_session_t *>(&session)) {
       record_pyrowave_route(config, pyrowave_encode::route_name(pyrowave->route()), reported);
     }
+  }
+
+  /// What the encode loop reports with each stats sample: a PyroWave session's frames since the last
+  /// sample, and how many of them reached the byte ceiling. Nothing for another encoder or a probe.
+  void record_pyrowave_ceiling_frames(const config_t &config, encode_session_t &session) {
+    auto *pyrowave = dynamic_cast<pyrowave_encode_session_t *>(&session);
+    if (!pyrowave) {
+      return;
+    }
+    const auto counts = pyrowave->take_ceiling_counts();
+    if (config.session_generation == 0 || counts.frames == 0 || encoder_probe_active()) {
+      return;
+    }
+    stream_stats::record_pyrowave_frames(config.session_generation, counts.frames, counts.ceiling_frames);
   }
 #endif
 
@@ -3822,6 +3862,7 @@ namespace video {
     if (encoded.empty()) {
       return -1;
     }
+    session.note_sent_frame(encoded.size());
 
     // One frame, one packet. The codec will also hand over a packet table, and raising a packet_t
     // for each entry is the mistake that looks right: every packet_t downstream becomes its own
@@ -4632,6 +4673,8 @@ namespace video {
     const double encode_target_fps = av_q2d(encoding_framerate_to_rational(config));
     const double target_frame_interval_ms = encode_target_fps > 0.0 ? 1000.0 / encode_target_fps : 0.0;
     int applied_adaptive_bitrate = config.bitrate;
+    // Codec time spent in convert() for the frame about to be encoded. Only PyroWave encodes there.
+    double codec_time_in_convert_ms = 0.0;
 
     while (true) {
       // Break out of the encoding loop if any of the following are true:
@@ -4711,6 +4754,9 @@ namespace video {
           }
 #endif
 
+#ifdef POLARIS_BUILD_PYROWAVE
+          const auto convert_started = std::chrono::steady_clock::now();
+#endif
           if (const auto converted = session->convert(frame); converted) {
             invalidate_live_probe_reuse();
             BOOST_LOG(error) << "Could not convert image"sv;
@@ -4730,6 +4776,15 @@ namespace video {
             break;
           }
 
+#ifdef POLARIS_BUILD_PYROWAVE
+          // PyroWave encodes inside convert(), where it is handed the frame, so that time is the codec's
+          // and belongs in the encode time the stream stats report, beside the repeat encodes below.
+          if (config.videoFormat == VIDEO_FORMAT_PYROWAVE) {
+            codec_time_in_convert_ms = std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - convert_started
+            ).count();
+          }
+#endif
           record_capture_source(config, frame, reported_source);
 #ifdef POLARIS_BUILD_PYROWAVE
           record_pyrowave_route(config, *session, reported_pyrowave_route);
@@ -4759,7 +4814,13 @@ namespace video {
           break;
         }
         auto encode_end = std::chrono::steady_clock::now();
-        auto encode_duration = std::chrono::duration<double, std::milli>(encode_end - encode_start).count();
+        const double codec_time_in_convert = std::exchange(codec_time_in_convert_ms, 0.0);
+        auto encode_duration = std::chrono::duration<double, std::milli>(encode_end - encode_start).count() +
+                               codec_time_in_convert;
+        // Live Tuning answers a slow encode by cutting bitrate. PyroWave's time in convert() is colour
+        // conversion and a wavelet transform, which take as long at any bitrate, so a cut would soften
+        // the picture and give the encoder nothing back. The stats report it; Live Tuning is not handed it.
+        const double bitrate_relievable_encode_ms = encode_duration - codec_time_in_convert;
         frames_encoded++;
         if (reused_previous_frame || !frame_timestamp.has_value()) {
           duplicate_frames++;
@@ -4817,7 +4878,7 @@ namespace video {
               dropped_frame_ratio,
               duplicate_frame_ratio,
               frame_jitter_ms,
-              encode_duration,
+              bitrate_relievable_encode_ms,
               avg_frame_age_ms,
               target_fps
             );
@@ -4866,6 +4927,9 @@ namespace video {
             }
           }
 
+#ifdef POLARIS_BUILD_PYROWAVE
+          record_pyrowave_ceiling_frames(config, *session);
+#endif
           stream_stats::update_frame_delivery(
             duplicate_frame_ratio,
             dropped_frame_ratio,

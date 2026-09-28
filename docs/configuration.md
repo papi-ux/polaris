@@ -425,7 +425,14 @@ are explained in [Launch modes and capture paths](launch-modes.md). Keys: `linux
 The adaptive range has a floor, `adaptive_bitrate_min`, and no ceiling of its own: the bitrate the
 client asked for is the ceiling, and `max_bitrate` caps what a client may ask for. Live Tuning and
 Doctor lower the bitrate from that request and bring it back no higher, except that a request below
-the floor starts at the floor. `adaptive_bitrate_max` no longer limits anything. Polaris still reads
+the floor starts at the floor. A PyroWave stream has a floor of its own, half what the codec's model
+advises for it on a device's own screen and never above the request. `max_bitrate` is the only cap a
+PyroWave request meets; the Stability preset, a device profile and a saved paired profile do not cut
+it. Doctor may raise a starved PyroWave stream above its request, as one tap with Undo, to no more
+than 300 Mbps and `max_bitrate`
+([PyroWave reference](pyrowave-reference.md#how-polaris-advises-and-tunes-pyrowave)). A live bitrate
+a client sets by hand turns Live Tuning off for that stream only; `adaptive_bitrate_enabled` keeps
+its saved value. `adaptive_bitrate_max` no longer limits anything. Polaris still reads
 it, so a settings file that sets it loads as before, and logs a warning that names `max_bitrate` as
 the cap to use. The settings page no longer shows it. See [Live Tuning](live-tuning.md#range).
 

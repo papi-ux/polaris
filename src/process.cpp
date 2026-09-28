@@ -3940,6 +3940,8 @@ namespace proc {
       std::string hdr_source;
       std::string virtual_display_source;
       std::string bitrate_source;
+      // The reason code behind bitrate_source, such as stability_preset_selected.
+      std::string bitrate_reason;
       std::string nvenc_tune_source;
       std::string preferred_codec_source;
       std::vector<std::string> reasoning;
@@ -7737,6 +7739,7 @@ namespace proc {
     launch_session->height = launch_session->requested_height;
     launch_session->fps = launch_session->requested_fps;
     launch_session->target_bitrate_kbps.reset();
+    launch_session->target_bitrate_source.clear();
     launch_session->nvenc_tune.reset();
     launch_session->preferred_codec.reset();
     launch_session->optimization_source.clear();
@@ -7881,6 +7884,7 @@ namespace proc {
     resolved_optimization.display_mode_source = resolved_field_source("display_mode");
     resolved_optimization.target_bitrate_kbps = preset_resolution.target_bitrate_kbps;
     resolved_optimization.bitrate_source = resolved_field_source("target_bitrate_kbps");
+    resolved_optimization.bitrate_reason = resolved_field_reason("target_bitrate_kbps");
     resolved_optimization.preferred_codec = preset_resolution.preferred_codec;
     resolved_optimization.preferred_codec_source = resolved_field_source("preferred_codec");
     resolved_optimization.nvenc_tune = preset_resolution.nvenc_tune;
@@ -8072,6 +8076,8 @@ namespace proc {
 
     if (resolved_optimization.target_bitrate_kbps.has_value()) {
       launch_session->target_bitrate_kbps = *resolved_optimization.target_bitrate_kbps;
+      launch_session->target_bitrate_source = resolved_optimization.bitrate_reason.empty() ?
+        resolved_optimization.bitrate_source : resolved_optimization.bitrate_reason;
     }
 
     if (resolved_optimization.nvenc_tune.has_value()) {

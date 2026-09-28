@@ -19,6 +19,7 @@
 // local includes
 #include "audio.h"
 #include "crypto.h"
+#include "stream_bitrate.h"
 #include "video.h"
 
 #ifdef __linux__
@@ -79,6 +80,9 @@ namespace stream {
     uint32_t encryptionFlagsEnabled;
 
     std::optional<int> gcmap;
+
+    /// What the client asked for at the handshake, and what the host did to it.
+    stream_bitrate::request_t bitrate_request;
   };
 
   namespace session {

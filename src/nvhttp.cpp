@@ -87,6 +87,7 @@
 #endif
 #include "process.h"
 #include "private_state_file.h"
+#include "pyrowave_advice.h"
 #include "rtsp.h"
 #include "stream.h"
 #ifdef __linux__
@@ -2356,7 +2357,15 @@ namespace nvhttp {
 
     int derive_safe_bitrate_kbps(int baseline_kbps,
                                  const std::optional<device_db::device_t> &device_profile,
-                                 bool degraded_history) {
+                                 bool degraded_history,
+                                 bool pyrowave = false) {
+      // The device caps below are sized for H.264 and HEVC, and PyroWave needs several times as much
+      // for the same picture. Its safe bitrate is the one it runs at: a suggested relaunch at a
+      // handheld's 16 Mbps would be a PyroWave stream that falls apart. Real network pressure is met
+      // by Doctor's guarded step, which stops at PyroWave's own floor.
+      if (pyrowave && baseline_kbps > 0) {
+        return baseline_kbps;
+      }
       int safe_kbps = baseline_kbps > 0 ? baseline_kbps : 15000;
 
       if (device_profile) {
@@ -2690,7 +2699,8 @@ namespace nvhttp {
         current_bitrate_kbps > 0 ? current_bitrate_kbps :
           (device_profile ? device_profile->ideal_bitrate_kbps : 15000),
         device_profile,
-        grade != "good"
+        grade != "good",
+        active_codec_family == "pyrowave"
       );
       const double safe_target_fps =
         ai_optimizer::derive_safe_target_fps(
@@ -8322,6 +8332,9 @@ namespace nvhttp {
       // cannot own launch settings in this contract.
       features["ai_auto_quality"] = false;
       features["live_tuning_v1"] = true;
+      // GET /polaris/v1/pyrowave/advice, and pyrowave_bitrate in session status while a PyroWave
+      // stream runs. The route answers on every build and says so when PyroWave is not available.
+      features["pyrowave_advice_v1"] = true;
       features["ai_auto_quality_control"] = false;
       features["ai_optimizer"] = false;
       features["ai_optimizer_control"] = false;
@@ -8436,6 +8449,42 @@ namespace nvhttp {
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");
       response->write(output.dump(), headers);
+    };
+
+    // PyroWave's bitrate advice for a shape a client is about to ask for. The same figures session
+    // status carries while a PyroWave stream runs, so Play Setup and Doctor never disagree.
+    auto polarisPyroWaveAdvice = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+
+      const auto named_cert_p = get_verified_cert(request);
+      if (!named_cert_p) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      const auto query = request->parse_query_string();
+      const auto field = [&query](const char *name) -> std::string {
+        if (query.count(name) != 1) {
+          return {};
+        }
+        return query.find(name)->second;
+      };
+      pyrowave_advice::route_host_t host;
+      host.built = pyrowave_advice::model_available();
+#ifdef POLARIS_BUILD_PYROWAVE
+      host.device_available = pyrowave_encode::available();
+#endif
+      host.fec_percentage = config::stream.fec_percentage;
+      host.max_bitrate_kbps = config::video.max_bitrate;
+      int http_status = 200;
+      const auto output = pyrowave_advice::advice_reply(
+        field("width"), field("height"), field("fps"), field("chroma"), host, http_status
+      );
+
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      headers.emplace("Cache-Control", "no-store");
+      response->write(static_cast<SimpleWeb::StatusCode>(http_status), output.dump(), headers);
     };
 
     // Wire format (frame_processing_latency) is untouched by this - a new,
@@ -8685,6 +8734,11 @@ namespace nvhttp {
       encoder["optimization_reasoning"] = stats.optimization_reasoning;
       encoder["optimization_normalization_reason"] = stats.optimization_normalization_reason;
       encoder["recommendation_version"] = stats.recommendation_version;
+      // PyroWave's bitrate advice for this stream and the host's verdict on it, only while the stream
+      // is PyroWave. Every advice figure is a request, which is what a client sets.
+      if (auto pyrowave_bitrate = stream_stats::pyrowave_bitrate_json(stats); !pyrowave_bitrate.is_null()) {
+        output["pyrowave_bitrate"] = std::move(pyrowave_bitrate);
+      }
       const auto health = build_session_health_json(
         stats,
         status_snapshot.virtual_display,
@@ -12070,6 +12124,7 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/optimize$"]["GET"] = polarisOptimize;
     https_server.resource["^/polaris/v1/capabilities$"]["GET"] = polarisCapabilities;
     https_server.resource["^/polaris/v1/session/status$"]["GET"] = polarisSessionStatus;
+    https_server.resource["^/polaris/v1/pyrowave/advice$"]["GET"] = polarisPyroWaveAdvice;
     https_server.resource["^/polaris/v1/spaces$"]["GET"] = polarisSpaces;
     https_server.resource["^/polaris/v1/spaces/select$"]["POST"] = polarisSpaces;
     https_server.resource["^/polaris/v1/spaces/library$"]["GET"] = polarisSpaceLibrary;

@@ -201,9 +201,12 @@ Fix action. Opening **Spaces** is the next step when a setup finding needs atten
 
 Doctor uses a small action vocabulary so the button says what will happen:
 
-- **Auto Fix** changes one reversible setting in the current stream. In this release that means one
-  guarded bitrate step backed by fresh network evidence. Doctor verifies the encoder and the next
-  evidence window, then restores the previous live target if verification fails.
+- **Auto Fix** changes one reversible setting in the current stream: the live bitrate. Under
+  confirmed loss or latency that is one guarded step down. On a clean network it is steps of at most
+  a quarter back up to the bitrate the stream opened at, or, for a starved PyroWave stream, up to
+  the codec's advice ([PyroWave reference](pyrowave-reference.md#how-polaris-advises-and-tunes-pyrowave)).
+  Doctor verifies the encoder and the next evidence window after each step, then restores the
+  previous live target if verification fails.
 - **Recheck** gathers a fresh read-only measurement. It does not change the stream.
 - **Manual** explains the next check when Polaris cannot safely act for you.
 - **Undo** restores the previous live bitrate while the same stream generation still owns it.

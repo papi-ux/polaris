@@ -62,6 +62,44 @@ starts at `v1.0.0`.
   works for Moonlight, that Moonlight can watch another player's stream, that `max_sessions` has
   to be raised for one watcher, and that the Desktop entry streams the private compositor. The app
   editor's **Always create Virtual Display** now says it changes nothing on a Private Stream host.
+- Polaris now knows what bitrate a PyroWave stream needs. It carries the model PyroWave's author
+  published and evaluates it at 35 dB, the level the author calls good quality: for 1920x1080 at
+  60 fps, about 172 Mbps in 4:2:0 and 201 Mbps in 4:4:4 on a device's own screen, and about 246 and
+  298 on a television or monitor, as what to set at the default 10% FEC with stereo audio. Nova
+  1.4.14 carries the same model, and a shared fixture holds both ends to the same figures. While a
+  PyroWave stream runs, session status carries the advice, the rate the encoder runs at, and the
+  share of recent frames that reached PyroWave's byte budget, which the host used to write only to
+  its log. `GET /polaris/v1/pyrowave/advice` answers the same figures before a launch, announced as
+  `pyrowave_advice_v1`. The model is an objective metric on four game clips, not a measurement on a
+  device ([PyroWave reference](pyrowave-reference.md#how-polaris-advises-and-tunes-pyrowave)).
+
+- Doctor can raise a PyroWave stream that is short of bits. When the stream runs below the advice
+  for a device's own screen, or more than 80% of recent frames hit the byte budget, and the network
+  is clean, Doctor offers one tap to raise it to that advice, never above 300 Mbps or `max_bitrate`,
+  in the same guarded steps with the same verification and Undo as its other bitrate fixes. The
+  raise can go above the bitrate the player asked for, and it is the only thing that can: Live
+  Tuning never does. While Live Tuning is on, Doctor says what to set instead. A stream with no
+  saved paired profile can now climb back after a reduction too, to the bitrate it opened at, where
+  Doctor used to offer nothing. The bitrate row in Doctor's evidence, which always read pass, now
+  reflects network pressure and a stream short of its goal.
+
+- A PyroWave stream is no longer cut to an H.264 sized bitrate behind the player's back. A launch
+  decides its bitrate before it knows the codec, so the Stability preset's 15 Mbps cap, a device
+  profile's rate and a saved paired profile (Keep in Step) capped a PyroWave request at the
+  handshake. A PyroWave stream now keeps its client's own request, and only `max_bitrate` caps it;
+  the host log and session status name any cap that applied or was set aside. Live Tuning cuts a
+  PyroWave stream no lower than half its advice, never above the request, where it stops and Doctor
+  suggests HEVC or a lower mode. The health report's safe bitrate keeps a PyroWave stream's own
+  rate instead of suggesting a handheld's 16 Mbps. PyroWave's encode time now counts in
+  `encode_time_ms`; it ran outside the timer. Live Tuning does not cut a PyroWave stream for that
+  time, since a lower bitrate does not shorten it, and Doctor asks for a smaller picture instead. A
+  PyroWave stream cut below a request that already meets its advice climbs back to that request, and
+  a saved paired profile no longer caps that climb.
+
+- A live bitrate set by hand turns Live Tuning off for that stream only. It used to save
+  `adaptive_bitrate_enabled` as disabled, so every later stream started with Live Tuning off. Live
+  Tuning now reads as off until the stream ends, the next stream starts with the saved preference,
+  and switching it on during the stream resumes it.
 
 - The adaptive bitrate ceiling no longer cuts the bitrate a client asked for. Nothing in the
   controller ever climbs above a client's request, so `adaptive_bitrate_max`, 100 Mbps unless

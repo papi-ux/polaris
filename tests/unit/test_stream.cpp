@@ -576,6 +576,21 @@ TEST(NvhttpSessionHealthTests, OverBudgetShmEncoderUsesActualNinetySevenFpsBudge
   EXPECT_EQ(health.at("doctor").at("primary_issue"), "encoder_load");
 }
 
+TEST(NvhttpSessionHealthTests, PyroWaveSafeBitrateIsTheBitrateItRunsAt) {
+  auto stats = stable_gpu_native_stats(60.0, 60.0);
+  stats.encode_time_ms = 30.0;
+  stats.bitrate_kbps = 180000;
+  stats.codec = "pyrowave";
+  const auto pyrowave = nvhttp::build_session_health_json_for_tests(stats, false, "Nova Client", "Control");
+  ASSERT_NE(pyrowave.at("grade"), "good");
+  EXPECT_EQ(pyrowave.at("safe_bitrate_kbps"), 180000);
+
+  // The same stream in HEVC gets the usual cut for a stream that is not good.
+  stats.codec = "hevc";
+  const auto hevc = nvhttp::build_session_health_json_for_tests(stats, false, "Nova Client", "Control");
+  EXPECT_EQ(hevc.at("safe_bitrate_kbps"), 135000);
+}
+
 TEST(NvhttpSessionHealthTests, MeaningfulTargetMissRemainsHostRenderLimited) {
   const auto health = nvhttp::build_session_health_json_for_tests(
     stable_gpu_native_stats(54.0, 60.0),

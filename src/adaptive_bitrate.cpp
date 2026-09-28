@@ -101,6 +101,11 @@ namespace adaptive_bitrate {
   static std::string controller_state = "disabled";
   static std::string controller_reason = "disabled";
   static std::string runtime_update_reason = "encoder_not_initialized";
+  // What set current_config.min_bitrate_kbps for this stream. Protected by state_mutex.
+  static std::string floor_source = "adaptive_bitrate_min";
+  // A manual live bitrate turned the controller's feedback off for this stream while the saved
+  // preference, current_config.enabled, stayed on. Protected by state_mutex.
+  static bool paused_for_stream = false;
 
   static void set_controller_status(const std::string &state, const std::string &reason) {
     controller_state = state;
@@ -452,6 +457,8 @@ namespace adaptive_bitrate {
     state.target_bitrate_kbps = state.active ? target_bitrate_kbps.load(std::memory_order_relaxed) : 0;
     state.min_bitrate_kbps = current_config.min_bitrate_kbps;
     state.max_bitrate_kbps = current_config.max_bitrate_kbps;
+    state.floor_source = floor_source;
+    state.paused_for_stream = paused_for_stream;
     state.ewma_packet_loss = ewma_packet_loss;
     state.ewma_rtt_ms = ewma_rtt;
     state.state = doctor_override && state.active ? "doctor_override" :
@@ -746,8 +753,34 @@ namespace adaptive_bitrate {
     state_changed.notify_all();
   }
 
+  static void apply_live_bitrate_locked(int kbps);
+
   void set_live_bitrate(int kbps) {
     std::lock_guard<std::mutex> lock(state_mutex);
+    apply_live_bitrate_locked(kbps);
+  }
+
+  void set_live_bitrate_for_stream(int kbps) {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    // Only a stream that had Live Tuning running has anything to put back when it ends.
+    paused_for_stream = paused_for_stream || enabled.load(std::memory_order_relaxed);
+    enabled.store(false, std::memory_order_relaxed);
+    apply_live_bitrate_locked(kbps);
+  }
+
+  void end_stream_override() {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    if (!paused_for_stream) {
+      return;
+    }
+    paused_for_stream = false;
+    enabled.store(current_config.enabled, std::memory_order_relaxed);
+    ++operator_revision;
+    ++action_authority_revision;
+    state_changed.notify_all();
+  }
+
+  static void apply_live_bitrate_locked(int kbps) {
     retire_doctor_override_locked();
     explicit_live_override_active.store(
       !enabled.load(std::memory_order_relaxed),
@@ -764,6 +797,28 @@ namespace adaptive_bitrate {
     target_bitrate_kbps.store(clamped, std::memory_order_relaxed);
     pending_live_update_active.store(false, std::memory_order_relaxed);
     set_controller_status("steady", "paired_client_action");
+    ++operator_revision;
+    ++action_authority_revision;
+    state_changed.notify_all();
+  }
+
+  void set_session_floor(int kbps, std::string_view source) {
+    if (kbps <= 0) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(state_mutex);
+    const int base = base_bitrate_kbps.load(std::memory_order_relaxed);
+    const int floor = std::max(
+      current_config.min_bitrate_kbps,
+      base > 0 ? std::min(kbps, base) : kbps
+    );
+    current_config.min_bitrate_kbps = floor;
+    current_config.max_bitrate_kbps = std::max(current_config.max_bitrate_kbps, floor);
+    floor_source = source;
+    const int target = target_bitrate_kbps.load(std::memory_order_relaxed);
+    if (target > 0 && target < floor) {
+      target_bitrate_kbps.store(floor, std::memory_order_relaxed);
+    }
     ++operator_revision;
     ++action_authority_revision;
     state_changed.notify_all();
@@ -803,6 +858,7 @@ namespace adaptive_bitrate {
     current_config.enabled = enable;
     config::video.adaptive_bitrate.enabled = enable;
     enabled.store(enable, std::memory_order_relaxed);
+    paused_for_stream = false;
     ++action_authority_revision;
     const auto revision = ++operator_revision;
     const int target = target_bitrate_kbps.load(std::memory_order_relaxed);
@@ -818,6 +874,7 @@ namespace adaptive_bitrate {
   void set_runtime_enabled(bool enable) {
     std::lock_guard<std::mutex> lock(state_mutex);
     retire_doctor_override_locked();
+    paused_for_stream = false;
     explicit_live_override_active.store(false, std::memory_order_relaxed);
     pending_live_update_active.store(false, std::memory_order_relaxed);
     enabled.store(enable, std::memory_order_relaxed);
@@ -872,6 +929,8 @@ namespace adaptive_bitrate {
 
     current_config.enabled = config::video.adaptive_bitrate.enabled;
     current_config.min_bitrate_kbps = config::video.adaptive_bitrate.min_bitrate_kbps;
+    floor_source = "adaptive_bitrate_min";
+    paused_for_stream = false;
     current_config.max_bitrate_kbps = config::video.adaptive_bitrate.max_bitrate_kbps;
     normalize_config_bounds(current_config);
     config::video.adaptive_bitrate.max_bitrate_kbps = current_config.max_bitrate_kbps;

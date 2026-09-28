@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 
 namespace adaptive_bitrate {
 
@@ -45,6 +46,10 @@ namespace adaptive_bitrate {
     // stream's own request, so it never limits what a client asked for. Like
     // base_bitrate_kbps it keeps the last stream's value until the next starts.
     int max_bitrate_kbps = 0;
+    /// What set min_bitrate_kbps: adaptive_bitrate_min, or pyrowave_advice for a PyroWave stream.
+    std::string floor_source = "adaptive_bitrate_min";
+    /// A manual live bitrate turned Live Tuning off for this stream; the saved preference stands.
+    bool paused_for_stream = false;
     double ewma_packet_loss = 0.0;
     double ewma_rtt_ms = 0.0;
     std::string state = "disabled";
@@ -265,6 +270,34 @@ namespace adaptive_bitrate {
    * session's ceiling rises to the written value.
    */
   void set_live_bitrate(int kbps);
+
+  /**
+   * @brief Apply a player's own live bitrate and turn Live Tuning off for this stream only.
+   *
+   * set_live_bitrate(), with the controller's feedback turned off for the rest of the stream. Nothing
+   * is saved: adaptive_bitrate_enabled keeps its value, and end_stream_override() or the next stream
+   * puts the controller back to it.
+   */
+  void set_live_bitrate_for_stream(int kbps);
+
+  /**
+   * @brief Put back the saved Live Tuning preference after a stream a manual bitrate turned it off for.
+   *
+   * Does nothing when no manual bitrate did.
+   */
+  void end_stream_override();
+
+  /**
+   * @brief Raise the controller's floor for this stream, never above the stream's own request.
+   *
+   * PyroWave's picture falls apart well above adaptive_bitrate_min, so a PyroWave stream gets a floor
+   * of its own, half what its model advises. The floor is never set above the stream's base, which is
+   * the client's request: a client that asked for less than the codec's floor gets a stream Live
+   * Tuning cannot cut at all. The next stream's load_config() puts adaptive_bitrate_min back.
+   * @param kbps The floor at the encoder.
+   * @param source What set it, reported as state_t::floor_source.
+   */
+  void set_session_floor(int kbps, std::string_view source);
 
   /**
    * @brief Change the in-memory adaptive bitrate ceiling for this session.

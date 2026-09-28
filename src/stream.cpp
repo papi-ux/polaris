@@ -42,6 +42,7 @@ extern "C" {
   #include "platform/linux/session_media.h"
 #endif
 #include "process.h"
+#include "pyrowave_advice.h"
 #include "stream.h"
 #include "stream_fec.h"
 #include "stream_recorder.h"
@@ -3158,6 +3159,26 @@ namespace stream {
         session.session_token,
         session.config.monitor.bitrate
       );
+      // A PyroWave stream gets a Live Tuning floor of its own, half what the codec's model advises for
+      // it on a device's own screen, never above the client's request. After session_started(), which
+      // reloads the controller for this stream, and before the encoder publishes anything.
+      if (session.config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE) {
+        const auto &request = session.config.bitrate_request;
+        const auto advice = pyrowave_advice::advise(
+          session.config.monitor.width,
+          session.config.monitor.height,
+          static_cast<int>(std::lround(av_q2d(video::encoding_framerate_to_rational(session.config.monitor)))),
+          session.config.monitor.chromaSamplingType == 1,
+          {config::stream.fec_percentage, request.audio_kbps > 0 ? request.audio_kbps : pyrowave_advice::k_default_audio_kbps},
+          config::video.max_bitrate
+        );
+        if (advice.valid) {
+          adaptive_bitrate::set_session_floor(advice.floor_encoder_kbps, "pyrowave_advice");
+          BOOST_LOG(info) << "PyroWave: Live Tuning cuts this stream no lower than "sv
+                          << adaptive_bitrate::get_state().min_bitrate_kbps << " kbps at the encoder, half the "sv
+                          << advice.far_encoder_kbps << " kbps its 35 dB model advises on a device's own screen"sv;
+        }
+      }
 
       session.audioThread = std::thread {audioThread, &session};
       session.videoThread = std::thread {videoThread, &session};
@@ -3200,6 +3221,12 @@ namespace stream {
         session.config.monitor.height,
         std::string_view {},
         session.session_generation
+      );
+
+      stream_stats::record_stream_request(
+        session.session_generation,
+        session.config.monitor.chromaSamplingType == 1,
+        session.config.bitrate_request
       );
 
       // Update legacy single-client stats for backward compatibility

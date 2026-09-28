@@ -35,7 +35,9 @@ namespace live_tuning {
     static const auto instance = uuid_util::uuid_t::generate().string();
     static std::atomic<std::uint64_t> sequence {0};
     const auto controller = adaptive_bitrate::get_state();
-    auto value = describe(controller, stats, controller.configured_enabled);
+    // A manual live bitrate turned Live Tuning off for this stream only. It reads as off until the
+    // stream ends, and the saved preference is back for the next one.
+    auto value = describe(controller, stats, controller.configured_enabled && !controller.paused_for_stream);
     value["configuration_revision"] = configuration_store::revision(config::sunshine.config_file);
     value["host_instance"] = instance;
     value["sequence"] = ++sequence;
@@ -64,8 +66,12 @@ namespace live_tuning {
       {"code", result == configuration_store::result::conflict ? "configuration_changed" : "save_failed"},
       {"live_tuning", snapshot(stream_stats::get_current())}
     };
-    // An identical retry acknowledges intent without superseding a Doctor run.
-    if (enabled != adaptive_bitrate::get_state().configured_enabled && !authority.set_adaptive_enabled(enabled)) {
+    // An identical retry acknowledges intent without superseding a Doctor run. Turning Live Tuning on
+    // during a stream a manual bitrate turned it off for is not identical: it resumes it.
+    const auto controller = adaptive_bitrate::get_state();
+    const bool changes_controller = enabled != controller.configured_enabled ||
+      (enabled && controller.paused_for_stream);
+    if (changes_controller && !authority.set_adaptive_enabled(enabled)) {
       return {{"status", false}, {"http_status", 409}, {"code", "session_changed"}};
     }
     settings_metadata::note_config_write("live_tuning", {"adaptive_bitrate_enabled"});
