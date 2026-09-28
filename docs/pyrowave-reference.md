@@ -170,8 +170,18 @@ copy you launched. A package check covers the installed files, not the running c
 
 Polaris encodes PyroWave with Vulkan compute rather than with the GPU's video engine, so the
 encoder needs a Vulkan 1.3 GPU with the features its shaders use. The host checks its GPU once per
-Polaris run, the first time a client asks what it serves. To check a host before you set up a
-PyroWave client:
+Polaris run, the first time a client or the web console asks what it serves.
+
+From Polaris 1.4.14 the web console answers without a stream. Open **Settings > Encoder Profiles**;
+on a Linux host every encoder tab starts with **Advertised codec support**, and its PyroWave row says
+**Available** or **Not available**. When it is not available, the row shows the host's reason and
+message, the same ones a client is given. When the host offers PyroWave only to stream modes with
+their own compositor, such as Private Stream, the row also shows the refusal a launch into the
+host's own mode gets. While a PyroWave stream runs, the row shows its route and the bitrate advice
+in [How Polaris advises and tunes PyroWave](#how-polaris-advises-and-tunes-pyrowave).
+
+On an older Polaris, or to read the GPU the host picked, check the log. To check a host before you
+set up a PyroWave client:
 
 1. Quit any Polaris you started from the desktop, then run `systemctl --user restart polaris`, so
    Polaris runs as the service and logs to your user journal. `systemctl --user is-active polaris`
@@ -266,8 +276,8 @@ Choose another codec there before you stream one. On a newer Nova beta, if the c
 Client Stream Defaults, look for a codec choice in Play Setup.
 
 Auto never picks PyroWave, so it has to be chosen by name. The PyroWave entry is in Nova's Settings
-whatever host you use. Whether the host can serve it shows only when a stream starts, or in
-[Check the host's GPU](#check-the-hosts-gpu).
+whatever host you use. Whether the host can serve it shows when a stream starts, and on the host in
+the web console ([Check the host's GPU](#check-the-hosts-gpu)).
 
 ### Nova Stream HUD
 

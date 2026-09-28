@@ -24,6 +24,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 extern "C" {
@@ -954,6 +955,29 @@ namespace video {
    *        running launch installed, or the live configuration's when none has.
    */
   std::optional<launch_failure::record_t> pyrowave_session_capture_refusal();
+
+  /**
+   * @brief pyrowave_capture_refusal for a launch into the host's own stream mode, the one that
+   *        names no mode.
+   * @details Capabilities offers PyroWave while any mode a client can pick would stream it, so this is
+   *          how the console says which launches are left out. Records nothing and opens no display.
+   */
+  std::optional<launch_failure::record_t> pyrowave_host_mode_refusal();
+
+  /**
+   * @brief Whether this host can carry PyroWave in HDR10, which needs the GPU input path.
+   * @details False on a build without PyroWave, so callers need no build guard of their own.
+   */
+  bool pyrowave_hdr_available();
+
+  /**
+   * @brief Every encoder the probe can choose in this build, in its search order, and whether its
+   *        table lets H.264, HEVC and AV1 carry 4:4:4.
+   * @details A property of the build, not of this host's GPU: the probe still has to pass a codec in
+   *          4:4:4 before a client is offered it. PyroWave is not among them, because the probe never
+   *          chooses it; it carries 4:4:4 whenever the host can run it.
+   */
+  std::vector<std::pair<std::string_view, std::array<bool, 3>>> yuv444_encoders();
 
   /**
    * @brief Get the name of the currently selected encoder.

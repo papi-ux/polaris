@@ -198,6 +198,22 @@ starts at `v1.0.0`.
   works for Moonlight, that Moonlight can watch another player's stream, that `max_sessions` has
   to be raised for one watcher, and that the Desktop entry streams the private compositor. The app
   editor's **Always create Virtual Display** now says it changes nothing on a Private Stream host.
+- The codec readout under **Settings > Encoder Profiles** has a 4:4:4 row and a PyroWave row, and
+  shows on the NVENC and Software tabs as well as VA-API and Vulkan Video. The 4:4:4 row says
+  whether the active encoder offers clients 4:4:4, and plainly which encoders in the build can: on
+  Linux only the software encoder, for H.264 on the CPU, while NVENC, VA-API and Vulkan Video stream
+  4:2:0, and PyroWave where the host can run it. The PyroWave row says whether the host offers
+  PyroWave and that it streams only to Nova. When the host does not offer it, the row shows the
+  host's own reason and message, the same `capture.pyrowave_unavailable` a client gets, where
+  before the console never mentioned the codec. A host that offers PyroWave only to stream modes
+  with their own compositor also shows the refusal a launch into its own mode gets. While a
+  PyroWave stream runs, the row shows its route and the bitrate advice with its conditions: the own
+  screen and television figures, the FEC they include, the model's rule, the encoder rate, the
+  share of frames at the byte budget and where Doctor's raise goes. `encoder_codec_support` on
+  `GET /api/config` gains `yuv444` and `pyrowave` for this, and session status's `pyrowave_bitrate`
+  gains `assumes`, the FEC share and audio cost its figures were grossed up for, as the advice route
+  already names them.
+
 - Polaris now knows what bitrate a PyroWave stream needs. It carries the model PyroWave's author
   published and evaluates it at 35 dB, the level the author calls good quality: for 1920x1080 at
   60 fps, about 172 Mbps in 4:2:0 and 201 Mbps in 4:4:4 on a device's own screen, and about 246 and

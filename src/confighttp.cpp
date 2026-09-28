@@ -44,6 +44,7 @@
 #include "adaptive_bitrate.h"
 #include "browser_stream.h"
 #include "client_support_report.h"
+#include "codec_support_readout.h"
 #include "confighttp.h"
 #include "confighttp_benchmark_auth.h"
 #include "confighttp_validation.h"
@@ -5665,12 +5666,20 @@ namespace confighttp {
     // not supported, *_reason tells the panel why: "disabled_in_config" when the
     // user switched it off, "not_available_on_encoder" once the probe found the
     // encoder cannot do it, or null while probing has not finished yet.
+    // yuv444 says which codecs clients are offered in 4:4:4 and which encoders in
+    // this build could carry it; pyrowave is the capabilities answer for PyroWave,
+    // with the refusal a launch into the host's own mode gets when only other
+    // modes can stream it. See codec_support_readout.h.
     {
       const auto codec_state = video::advertised_codec_capability_state();
       const bool ready = video::advertised_codec_capability_state_ready();
       // Highest Vulkan quality level the probed driver exposes for every usable
       // codec (maxQualityLevels-1), or null when not on a live-probed Vulkan encoder.
       const int vk_quality_max = video::advertised_vulkan_quality_max();
+      // Not part of the encoder probe: a client chooses PyroWave per stream, so whether the host can
+      // serve it is a property of the build, the GPU and the capture route, asked the way
+      // capabilities asks it.
+      const auto pyrowave_unavailable = video::pyrowave_unavailable();
       const auto off_reason = [ready](int configured_mode, int effective_mode) -> nlohmann::json {
         if (effective_mode >= 2) {
           return nlohmann::json {};
@@ -5693,6 +5702,15 @@ namespace confighttp {
         {"hevc_reason", off_reason(config::video.hevc_mode, codec_state.hevc_mode)},
         {"av1_reason", off_reason(config::video.av1_mode, codec_state.av1_mode)},
         {"vk_quality_max", vk_quality_max >= 0 ? nlohmann::json(vk_quality_max) : nlohmann::json(nullptr)},
+        {"yuv444", codec_support_readout::yuv444_json(
+                     codec_state.hevc_mode, codec_state.av1_mode, codec_state.yuv444_for_codec,
+                     video::yuv444_encoders()
+                   )},
+        {"pyrowave", codec_support_readout::pyrowave_json(
+                       pyrowave_unavailable,
+                       !pyrowave_unavailable && video::pyrowave_hdr_available(),
+                       pyrowave_unavailable ? std::nullopt : video::pyrowave_host_mode_refusal()
+                     )},
       };
     }
 #ifdef _WIN32

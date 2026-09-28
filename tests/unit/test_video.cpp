@@ -9,6 +9,8 @@
 #include <src/launch_failure.h>
 #include <src/stream_stats.h>
 #include <nlohmann/json.hpp>
+#include <algorithm>
+#include <array>
 #include <thread>
 #include <future>
 #include <filesystem>
@@ -249,6 +251,35 @@ TEST(VideoEncoderSelectionTests, AnAutoFallbackOpensItsReasonWithTheEncoderItFel
   );
 }
 #endif
+
+TEST(VideoYuv444Tests, EncodersInThisBuildSayWhichCodecsTheirTablesCarryIn444) {
+  // The console words its 4:4:4 row from this list, so it has to match the tables the probe reads.
+  const auto listed = video::yuv444_encoders();
+  ASSERT_FALSE(listed.empty());
+  std::vector<std::string> names;
+  for (const auto &[name, codecs] : listed) {
+    names.emplace_back(name);
+    EXPECT_NE(name, "pyrowave") << "the probe never chooses PyroWave, so it is not one of these";
+    if (name == "software") {
+      // libx264 in 4:4:4; H264_ONLY keeps HEVC out under Auto.
+      EXPECT_EQ(codecs, (std::array<bool, 3> {true, false, false}));
+    }
+#ifdef __linux__
+    else {
+      // On Linux no GPU encoder table carries 4:4:4: NVENC, VA-API and Vulkan Video stream 4:2:0.
+      EXPECT_EQ(codecs, (std::array<bool, 3> {false, false, false})) << name;
+    }
+#endif
+  }
+  EXPECT_EQ(names.back(), "software") << "the encoder of last resort comes last";
+#ifdef __linux__
+  EXPECT_NE(std::find(names.begin(), names.end(), "nvenc"), names.end());
+  EXPECT_NE(std::find(names.begin(), names.end(), "vaapi"), names.end());
+  #ifdef POLARIS_BUILD_VULKAN
+  EXPECT_NE(std::find(names.begin(), names.end(), "vulkan"), names.end());
+  #endif
+#endif
+}
 
 TEST(VideoCacheTests, DriverVersionRejectsAnythingThatIsNotAVersion) {
   // nvidia-smi prints its NVML failure to stdout, so without this the banner

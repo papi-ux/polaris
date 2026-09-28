@@ -483,6 +483,11 @@ The AI tab is covered under [AI provider settings](#ai-provider-settings); the e
 switches (`hevc_mode`, `av1_mode`), the quantisation fallback (`qp`), and the software encoder thread
 floor (`min_threads`) on the encoder pages themselves.
 
+On Linux every encoder tab starts with **Advertised codec support**: the codecs the active encoder
+offers clients, a 4:4:4 row that says which encoders in this build can deliver 4:4:4, and a
+PyroWave row that says whether the host offers PyroWave and, when it does not, why. See
+[Check the host's GPU](pyrowave-reference.md#check-the-hosts-gpu).
+
 ## Linux HDR and Main10
 
 On Linux, treat sessions that log `stream_hdr_enabled=false` as SDR even if the client requests HDR.

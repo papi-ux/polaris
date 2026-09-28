@@ -916,12 +916,14 @@
         "advice_near_kbps is H 2.0, a television or monitor. raise_goal_kbps is what Doctor raises to,",
         "the far figure capped at cap_kbps and max_bitrate. encoder_kbps is the rate the encoder runs",
         "at now, ceiling_frame_share the share of recent frames at 99% of the byte budget (null while",
-        "unknown), and starved the host's verdict. No nova_reader yet: Nova builds against it for",
-        "1.4.14."
+        "unknown), and starved the host's verdict. assumes names the FEC share and audio cost the",
+        "requests were grossed up for, as the advice route does. No nova_reader yet: Nova builds",
+        "against it for 1.4.14."
       ],
       "fields": [
         "advice_far_kbps",
         "advice_near_kbps",
+        "assumes",
         "cap_kbps",
         "cap_set_aside",
         "ceiling_frame_share",

@@ -824,6 +824,8 @@ namespace stream_stats {
   struct pyrowave_bitrate_t {
     bool active = false;
     pyrowave_advice::advice_t advice;
+    /// The FEC share and audio cost the advice's requests were grossed up for.
+    pyrowave_advice::link_t link;
     /// The rate the encoder runs at now.
     int encoder_kbps = 0;
     std::optional<double> ceiling_frame_share;
@@ -842,7 +844,8 @@ namespace stream_stats {
   /// Evaluate PyroWave's advice against the live stream. Reads fec_percentage and max_bitrate.
   pyrowave_bitrate_t evaluate_pyrowave_bitrate(const stats_t &stats);
 
-  /// The session status pyrowave_bitrate object, or null when the stream is not PyroWave.
+  /// The session status pyrowave_bitrate object, or null when the stream is not PyroWave. Its assumes
+  /// names the FEC share and audio cost the requests were grossed up for, as the pre-launch advice does.
   nlohmann::json pyrowave_bitrate_json(const stats_t &stats);
 
   /**

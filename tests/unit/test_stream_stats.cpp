@@ -5250,6 +5250,7 @@ TEST(StreamStatsPyroWaveTests, SessionStatusCarriesTheAdviceOnlyWhileTheStreamIs
   EXPECT_TRUE(pyrowave.at("request_cap").is_null());
   EXPECT_EQ(pyrowave.at("cap_set_aside").at("kbps"), 15000);
   EXPECT_EQ(pyrowave.at("cap_set_aside").at("source"), "stability_preset_selected");
+  EXPECT_EQ(pyrowave.at("assumes"), (nlohmann::json {{"fec_percentage", 10}, {"audio_kbps", 512}}));
 
   stats.pyrowave_window_frames = 240;
   stats.pyrowave_window_ceiling_frames = 223;
@@ -5264,6 +5265,22 @@ TEST(StreamStatsPyroWaveTests, SessionStatusCarriesTheAdviceOnlyWhileTheStreamIs
   stats.codec = "pyrowave";
   stats.streaming = false;
   EXPECT_TRUE(stream_stats::pyrowave_bitrate_json(stats).is_null());
+}
+
+TEST(StreamStatsPyroWaveTests, SessionStatusNamesTheFecAndAudioItsAdviceWasGrossedUpFor) {
+  // The console words the advice as including this FEC share. The stream's fec_protection cannot say
+  // it: it records a percentage only once a frame outgrows FEC, so a healthy stream reads 0 there.
+  PyroWaveHostGuard host;
+  config::stream.fec_percentage = 20;
+  auto stats = clean_pyrowave_stats(20000);
+  stats.bitrate_request.audio_kbps = 1536;
+  ASSERT_EQ(stats.fec_protection.fec_percentage, 0);
+
+  const auto pyrowave = stream_stats::pyrowave_bitrate_json(stats);
+  EXPECT_EQ(pyrowave.at("assumes").at("fec_percentage"), 20);
+  EXPECT_EQ(pyrowave.at("assumes").at("audio_kbps"), 1536);
+  // The figures are the ones grossed up for those two: more than the 10% FEC and stereo request.
+  EXPECT_GT(pyrowave.at("advice_far_kbps").get<int>(), 171759);
 }
 
 TEST(StreamStatsDoctorTests, PyroWaveBelowItsAdviceOnACleanNetworkOffersARaiseToTheFarAdvice) {

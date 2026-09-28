@@ -3574,6 +3574,7 @@ namespace stream_stats {
       config::stream.fec_percentage,
       stats.bitrate_request.audio_kbps > 0 ? stats.bitrate_request.audio_kbps : pyrowave_advice::k_default_audio_kbps
     };
+    result.link = link;
     result.advice = pyrowave_advice::advise(
       stats.width, stats.height, static_cast<int>(std::lround(fps)), stats.stream_chroma == "444", link,
       config::video.max_bitrate
@@ -3598,6 +3599,10 @@ namespace stream_stats {
     const auto pyrowave = evaluate_pyrowave_bitrate(stats);
     if (!pyrowave.active) return nullptr;
     auto value = pyrowave_advice::advice_json(pyrowave.advice);
+    // What the requests were grossed up for, named the way the pre-launch advice names it. A reader
+    // cannot take it from fec_protection, which records a percentage only once a frame outgrows FEC
+    // and reads 0 on a healthy stream.
+    value["assumes"] = {{"fec_percentage", pyrowave.link.fec_percentage}, {"audio_kbps", pyrowave.link.audio_kbps}};
     value["encoder_kbps"] = pyrowave.encoder_kbps;
     value["ceiling_frame_share"] = pyrowave.ceiling_frame_share ?
       nlohmann::json(std::round(*pyrowave.ceiling_frame_share * 1000.0) / 1000.0) : nlohmann::json(nullptr);

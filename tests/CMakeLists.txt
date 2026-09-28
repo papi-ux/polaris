@@ -138,6 +138,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_kmsgrab_logging_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_kms_capture_metadata.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_pyrowave_availability.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_codec_support_readout.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_hdr_probe_guard_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_preallocated_gamepad_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_capture_backend_fallback_source.cpp

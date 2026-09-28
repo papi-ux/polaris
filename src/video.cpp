@@ -7231,6 +7231,38 @@ namespace video {
     return pyrowave_availability::launch_refusal(pyrowave_capture_route(generation), generation.capture_backend);
   }
 
+  std::optional<launch_failure::record_t> pyrowave_host_mode_refusal() {
+    // The generation a launch that names no mode captures, the same one capabilities judges when no
+    // private mode stands behind the offer.
+    return pyrowave_capture_refusal(current_capture_generation_identity());
+  }
+
+  bool pyrowave_hdr_available() {
+#if defined(__linux__) && defined(POLARIS_BUILD_PYROWAVE)
+    return pyrowave_encode::hdr_available();
+#else
+    return false;
+#endif
+  }
+
+  std::vector<std::pair<std::string_view, std::array<bool, 3>>> yuv444_encoders() {
+    std::vector<std::pair<std::string_view, std::array<bool, 3>>> listed;
+    listed.reserve(encoders.size());
+    for (const auto *encoder : encoders) {
+      std::array<bool, 3> codecs {false, false, false};
+      // The flags the probe reads: YUV444_SUPPORT before it tries 4:4:4 at all, and H264_ONLY and
+      // NO_AV1 before it tries HEVC or AV1 with the codec settings on Auto. An H264_ONLY encoder can
+      // still pass HEVC when HEVC Support forces it; the probe's own result says so when it does.
+      if (encoder->flags & YUV444_SUPPORT) {
+        codecs[0] = true;
+        codecs[1] = !(encoder->flags & H264_ONLY);
+        codecs[2] = !(encoder->flags & (H264_ONLY | NO_AV1));
+      }
+      listed.emplace_back(encoder->name, codecs);
+    }
+    return listed;
+  }
+
   std::optional<launch_failure::record_t> pyrowave_session_capture_refusal() {
     // The generation capture() will take, chosen the way it chooses it.
     auto generation = proc::proc.capture_generation;
