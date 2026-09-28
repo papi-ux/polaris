@@ -457,6 +457,21 @@ for job_name, job in (("Ubuntu DEB", ubuntu_job), ("Fedora RPM", fedora_job)):
             f"{job_name} CI must bind BRANCH, BUILD_VERSION and the prerelease label to the exact resolved source"
         )
 
+# X-Resource names the host pid behind each window of a private app, which a sandboxed game's own
+# _NET_WM_PID does not, and the build leaves it out without a word when its headers are missing.
+# Debian's Depends is written by hand, so the library the binary links is named there, and the
+# Ubuntu package job installs its headers. Fedora, Arch and SteamOS ship it inside libxcb.
+linux_packaging = read("cmake/packaging/linux.cmake")
+debian_depends = re.search(r'(?ms)^set\(CPACK_DEBIAN_PACKAGE_DEPENDS "(?P<body>.*?)"\)', linux_packaging)
+if not debian_depends or not re.search(r"(?m)^\s*libxcb-res0,\s*\\$", debian_depends.group("body")):
+    raise AssertionError("Debian runtime dependencies must explicitly include libxcb-res0")
+if not re.search(r"(?m)^\s+.*\blibxcb-res0-dev\b", ubuntu_job):
+    raise AssertionError("the Ubuntu DEB job must install libxcb-res0-dev so its package links X-Resource")
+for recipe_path in ("packaging/linux/Arch/PKGBUILD", "packaging/linux/SteamOS/PKGBUILD"):
+    require_package(shell_array(read(recipe_path), "depends"), "libxcb", f"{recipe_path} runtime dependencies")
+if not re.search(r"(?m)^BuildRequires:\s+libxcb-devel\s*$", fedora):
+    raise AssertionError("Fedora build dependencies must explicitly include libxcb-devel")
+
 fedora_clang_configure = workflow_step(fedora_clang_job, "Configure")
 fedora_clang_tokens = workflow_run_tokens(fedora_clang_configure)
 fedora_clang_commands = command_arguments(fedora_clang_tokens, "cmake")

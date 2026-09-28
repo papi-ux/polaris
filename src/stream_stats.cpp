@@ -597,6 +597,36 @@ namespace stream_stats {
       if (!ended.pyrowave_route.empty()) {
         session["pyrowave_route"] = ended.pyrowave_route;
       }
+      if (const auto &stop = ended.app_stop; !stop.path.empty()) {
+        nlohmann::json app_stop {
+          {"path", stop.path},
+          {"windows_asked", stop.windows_asked},
+          {"waited_ms", stop.waited.count()},
+        };
+        if (!stop.target.empty()) {
+          app_stop["target"] = stop.target;
+        }
+        if (stop.launcher) {
+          app_stop["launcher"] = {
+            {"app_id", stop.launcher->app_id},
+            {"path", stop.launcher->path},
+            {"waited_ms", stop.launcher->waited.count()},
+          };
+        }
+        if (stop.flatpak_instances) {
+          app_stop["flatpak_instances"] = {
+            {"launcher", stop.flatpak_instances->launcher},
+            {"game", stop.flatpak_instances->game},
+            {"helper", stop.flatpak_instances->helper},
+            {"left_alone", stop.flatpak_instances->left_alone},
+          };
+        }
+        if (!stop.capture.empty()) {
+          app_stop["capture"] = stop.capture;
+          app_stop["unattributed"] = stop.unattributed;
+        }
+        session["app_stop"] = std::move(app_stop);
+      }
       if (!ended.start_outcome.empty()) {
         session["start"] = {{"outcome", ended.start_outcome}};
         if (ended.start_client_left_after_ms >= 0) {
@@ -3398,6 +3428,32 @@ namespace stream_stats {
     if (client == current_stats.clients.end()) return false;
     client->pyrowave_route = route;
     return true;
+  }
+
+  void record_app_stop(std::string_view path, int windows_asked, std::chrono::milliseconds waited) {
+    app_stop_t stop;
+    stop.path = path;
+    stop.windows_asked = windows_asked;
+    stop.waited = waited;
+    record_app_stop(stop);
+  }
+
+  void record_app_stop(const app_stop_t &stop) {
+    if (stop.path.empty()) return;
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    if (!last_ended_session) return;
+    last_ended_session->app_stop = stop;
+  }
+
+  void record_app_stop_check(bool capture_complete, int unattributed, bool live_at_compositor_stop) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    if (!last_ended_session || last_ended_session->app_stop.path.empty()) return;
+    auto &stop = last_ended_session->app_stop;
+    stop.capture = capture_complete ? "complete" : "incomplete";
+    stop.unattributed = unattributed;
+    if (live_at_compositor_stop) {
+      stop.path = "compositor_stop";
+    }
   }
 
   bool record_start_outcome(std::uint64_t session_generation, std::string_view outcome,

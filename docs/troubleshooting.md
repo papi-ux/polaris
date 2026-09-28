@@ -246,6 +246,15 @@ WAYLAND_DISPLAY=wayland-1 DISPLAY=:2 heroic --no-gui "heroic://launch?appName=<i
 Polaris exports both of those variables into the private session already, so setting them by hand
 is redundant rather than required. They are shown here because that is the entry that was verified.
 
+**A launcher that was already open on the desktop.** When a Flatpak launcher such as Heroic is
+already running on the host desktop, `flatpak run` from a stream hands the launch to that running
+instance and exits. The game then starts from the desktop's instance, with the desktop's display,
+and nothing of it belongs to the stream. Polaris warns at launch when the app it is about to start is
+already running on the host. Ending the stream leaves a launcher that was already open on the desktop
+alone, along with anything it started, because the stream did not start them; the host log says so
+with a line naming the instances of that app the session did not start. Quit the launcher on the
+host before launching from a client.
+
 Polaris logs a warning at launch when an app command can reach the portal. If the private compositor
 does not expose a managed window within the observation period, Polaris reports that it could not
 confirm attachment. Check the client image before applying the portal workaround: some fullscreen or

@@ -17,11 +17,13 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -120,6 +122,10 @@ namespace proc {
   std::string normalize_steam_launch_mode(std::string mode);
   bool is_valid_steam_launch_mode(std::string_view mode);
   bool steam_launch_mode_is_big_picture(std::string_view mode);
+
+  /// The Steam shutdown undo a generated Steam app carries, in the form parse() keeps it, so that
+  /// nothing has to be upgraded each time apps.json is read.
+  std::string canonical_steam_shutdown_undo();
 
 #if defined(__linux__)
   struct desktop_launch_safety_policy_t {
@@ -405,6 +411,59 @@ namespace proc {
     const struct ctx_t &app,
     std::string_view session_instance_id
   );
+
+  /// How a private Steam app lineage stop went.
+  struct private_steam_app_stop_test_result_t {
+    bool drained = false;
+    std::string path;  ///< exited_before_stop, close_request, sigterm or sigkill; empty when it failed
+    int windows_asked = 0;
+  };
+
+  /// The lineage stop with its close requester and timeouts supplied, and no shared budget.
+  private_steam_app_stop_test_result_t stop_session_owned_steam_app_lineage_for_tests(
+    const struct ctx_t &app,
+    std::string_view session_instance_id,
+    std::function<int(pid_t)> request_close,
+    std::chrono::milliseconds close_timeout,
+    std::chrono::milliseconds sigterm_timeout,
+    std::chrono::milliseconds sigterm_after_close_timeout
+  );
+  /// Everything the ordered private Steam stop may wait for in all.
+  std::chrono::milliseconds private_steam_stop_budget_for_tests();
+  /// The share of that budget a stage may wait, given what is left.
+  std::chrono::milliseconds private_steam_stop_budget_clamp_for_tests(
+    std::chrono::milliseconds remaining,
+    std::chrono::milliseconds timeout
+  );
+
+  /// How a private app stop went.
+  struct private_app_stop_test_result_t {
+    bool acted = false;  ///< it found something of the session's to stop
+    std::string path;  ///< exited_before_stop, close_request, sigterm or sigkill
+    int windows_asked = 0;
+    std::vector<std::string> launcher_paths;
+    bool drained = false;
+    std::chrono::milliseconds elapsed {};
+    std::vector<pid_t> sigterm;  ///< every pid it sent SIGTERM
+    std::vector<pid_t> sigkill;  ///< every pid it sent SIGKILL
+  };
+
+  /**
+   * @brief The private app stop against this host's processes, for a supervisor the test spawned.
+   *
+   * @param runtime_dir Where the Flatpak instance records are read from; a test gives one of its own.
+   * @param timing_divisor Every wait of the phase is divided by it.
+   * @param request_close Stands in for the X close request: it is given the test for a host pid
+   *        whose window would be asked, and returns how many it asked.
+   */
+  private_app_stop_test_result_t stop_private_session_apps_for_tests(
+    std::string_view session_instance_id,
+    pid_t supervisor_pid,
+    const std::filesystem::path &runtime_dir,
+    bool immediate,
+    int timing_divisor,
+    std::function<int(const std::function<bool(pid_t)> &asks_host_pid)> request_close
+  );
   bool steam_launch_cmdline_matches_appid_for_tests(
     std::string_view cmdline,
     std::string_view appid
@@ -585,6 +644,28 @@ namespace proc {
     bool session_owned_cage,
     bool generation_available,
     bool exact_cleanup_complete
+  );
+  bool isolated_session_stops_compositor_before_sweep_for_tests(bool session_owned_cage, bool gamescope_runtime);
+  std::chrono::milliseconds isolated_session_sweep_grace_for_tests(
+    bool compositor_stopped_first,
+    bool apps_stopped_first,
+    std::chrono::seconds exit_timeout
+  );
+
+  /// What one exact-generation capture found.
+  struct exact_generation_snapshot_test_result_t {
+    bool capture_complete = false;
+    std::vector<pid_t> owned;
+    std::vector<pid_t> flatpak_sandboxes;
+    std::vector<pid_t> unattributed;  ///< every process that kept it from completing
+    std::vector<std::string> reasons;  ///< why, in the same order
+  };
+
+  /// The exact capture, retries included, with @p recorded_flatpak_sandboxes taken as the bwraps
+  /// of a live Flatpak instance.
+  exact_generation_snapshot_test_result_t exact_generation_snapshot_for_tests(
+    std::string_view session_instance_id,
+    const std::set<pid_t> &recorded_flatpak_sandboxes
   );
   bool isolated_session_cleanup_clears_state_for_tests(
     bool session_owned_cage,
@@ -1062,6 +1143,11 @@ namespace proc {
     void stop(bool immediate, bool needs_refresh, bool ends_session);
 #ifdef __linux__
     bool request_session_owned_steam_graceful_shutdown_before_cage_stop();
+    /// Ask the private session app rooted at app_root_pid to close its windows; returns how many were asked.
+    int request_private_steam_app_window_close(pid_t app_root_pid) const;
+    /// Stop a private labwc session's apps in order, the game and then its launcher, while the
+    /// compositor is still up. It never stops the compositor; the generation cleanup after it does.
+    void stop_private_session_apps_before_compositor(bool immediate);
     bool terminate_session_owned_steam_before_cage_stop();
     bool cleanup_tracked_detached_children_after_launch_failure();
     bool retry_retained_steam_shutdown();
@@ -1119,6 +1205,9 @@ namespace proc {
     bool _session_used_cage_compositor = false;
     bool _session_used_gamescope_runtime = false;
     bool _exact_generation_cleanup_complete = true;
+    /// This teardown's private app phase ran before the compositor stopped, so the sweep after it
+    /// is a check. Read and cleared by the generation cleanup.
+    bool _private_apps_stopped_before_compositor = false;
     std::optional<retained_steam_shutdown_t> _retained_steam_shutdown;
     /// The Steam title this launch opened in the Steam that runs Game Mode. Empty when there is none,
     /// or when the title was open before the launch and so is not this session's to close.

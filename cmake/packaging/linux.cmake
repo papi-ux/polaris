@@ -195,6 +195,7 @@ set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             libva-drm2, \
             libwayland-client0, \
             libx11-6, \
+            libxcb-res0, \
             miniupnpc, \
             openssl | libssl3, \
             wlr-randr, \

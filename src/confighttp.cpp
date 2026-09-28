@@ -4206,7 +4206,7 @@ namespace confighttp {
           app["detached"] = steam_library_launch_commands(appid);
           app["prep-cmd"] = nlohmann::json::array({
             {
-              {"undo", "setsid steam -shutdown"}
+              {"undo", proc::canonical_steam_shutdown_undo()}
             }
           });
           app["steam-appid"] = appid;

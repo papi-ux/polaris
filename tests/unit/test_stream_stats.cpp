@@ -1390,6 +1390,84 @@ TEST(StreamStatsLastSessionTests, AnEndedSessionKeepsItsCaptureOutcomeUnderItsOw
   }));
 }
 
+TEST(StreamStatsLastSessionTests, HowTheAppWasStoppedIsKeptOnTheSessionThatEnded) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "RP6", 431);
+  stream_stats::update_video_stats(60.0, 20000, 4.0, "hevc", 1920, 1080, "vaapi", 431);
+  stream_stats::remove_client("10.0.0.5", 431);
+  EXPECT_FALSE(last_session_json().contains("app_stop"));
+
+  // The teardown stops the app after its streams end, so it writes to the session that ended.
+  stream_stats::record_app_stop("close_request", 1, std::chrono::milliseconds {4200});
+  const auto last = last_session_json();
+  ASSERT_TRUE(last.contains("app_stop")) << last.dump();
+  EXPECT_EQ(last["app_stop"]["path"], "close_request");
+  EXPECT_EQ(last["app_stop"]["windows_asked"], 1);
+  EXPECT_EQ(last["app_stop"]["waited_ms"], 4200);
+  EXPECT_EQ(last["stream_instance_id"], stream_stats::stream_instance_id(431));
+
+  // An empty path says nothing and changes nothing.
+  stream_stats::record_app_stop("", 0, {});
+  EXPECT_EQ(last_session_json(), last);
+}
+
+TEST(StreamStatsLastSessionTests, LastSessionAppStopCarriesLauncherFlatpakAndCapture) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.6", "Android TV", 432);
+  stream_stats::update_video_stats(60.0, 20000, 4.0, "hevc", 1920, 1080, "vaapi", 432);
+  stream_stats::remove_client("10.0.0.6", 432);
+
+  // A Heroic game quit from a private stream: the game closed when asked, then Heroic quit.
+  stream_stats::app_stop_t stop;
+  stop.path = "close_request";
+  stop.windows_asked = 1;
+  stop.waited = std::chrono::milliseconds {4210};
+  stop.target = "flatpak";
+  stop.launcher = stream_stats::app_stop_t::launcher_t {"com.heroicgameslauncher.hgl", "sigterm", std::chrono::milliseconds {850}};
+  stop.flatpak_instances = stream_stats::app_stop_t::flatpak_instances_t {1, 1, 1, 2};
+  stream_stats::record_app_stop(stop);
+  auto last = last_session_json();
+  ASSERT_TRUE(last.contains("app_stop")) << last.dump();
+  EXPECT_EQ(last["app_stop"]["path"], "close_request");
+  EXPECT_EQ(last["app_stop"]["target"], "flatpak");
+  EXPECT_EQ(last["app_stop"]["launcher"]["app_id"], "com.heroicgameslauncher.hgl");
+  EXPECT_EQ(last["app_stop"]["launcher"]["path"], "sigterm");
+  EXPECT_EQ(last["app_stop"]["launcher"]["waited_ms"], 850);
+  EXPECT_EQ(last["app_stop"]["flatpak_instances"]["launcher"], 1);
+  EXPECT_EQ(last["app_stop"]["flatpak_instances"]["game"], 1);
+  EXPECT_EQ(last["app_stop"]["flatpak_instances"]["helper"], 1);
+  EXPECT_EQ(last["app_stop"]["flatpak_instances"]["left_alone"], 2);
+  EXPECT_FALSE(last["app_stop"].contains("capture")) << "the check after the compositor has not reported yet";
+
+  // The check after the compositor stopped found every process of the session.
+  stream_stats::record_app_stop_check(true, 0, false);
+  last = last_session_json();
+  EXPECT_EQ(last["app_stop"]["capture"], "complete");
+  EXPECT_EQ(last["app_stop"]["unattributed"], 0);
+  EXPECT_EQ(last["app_stop"]["path"], "close_request");
+
+  // What the 2026-09-27 teardown would have said: the compositor went down with the app live, and
+  // two processes could not be attributed.
+  stream_stats::record_app_stop_check(false, 2, true);
+  last = last_session_json();
+  EXPECT_EQ(last["app_stop"]["path"], "compositor_stop");
+  EXPECT_EQ(last["app_stop"]["capture"], "incomplete");
+  EXPECT_EQ(last["app_stop"]["unattributed"], 2);
+
+  // A Steam game's stop names its lane and nothing it did not use.
+  stream_stats::app_stop_t steam;
+  steam.path = "sigterm";
+  steam.target = "steam";
+  stream_stats::record_app_stop(steam);
+  last = last_session_json();
+  EXPECT_EQ(last["app_stop"]["target"], "steam");
+  EXPECT_FALSE(last["app_stop"].contains("launcher"));
+  EXPECT_FALSE(last["app_stop"].contains("flatpak_instances"));
+  EXPECT_FALSE(last["app_stop"].contains("capture"));
+}
+
 TEST(StreamStatsLastSessionTests, NothingWrittenAfterTheSessionEndsChangesIt) {
   stream_stats::update_stream_active(false);
   auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });

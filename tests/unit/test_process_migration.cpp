@@ -1,4 +1,5 @@
 #include "../tests_common.h"
+#include "../tests_log_capture.h"
 #include "../tests_paths.h"
 
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -3000,6 +3002,46 @@ TEST(ProcessRuntimeConfigTests, UnreadableEnvironRetryIsLimitedToKnownPolarisDes
 #endif
 }
 
+TEST(ProcessRuntimeConfigTests, TheCheckAfterThePrivateCompositorStopsIsShort) {
+  using namespace std::chrono_literals;
+  // After the private app phase gave the app its exit timeout while its display was up, the sweep
+  // after the compositor stops is a check, and anything it finds has no display left: two seconds,
+  // so the lifecycle lock is not held for a second exit timeout.
+  EXPECT_EQ(proc::isolated_session_sweep_grace_for_tests(true, true, 30s), 2000ms);
+  EXPECT_EQ(proc::isolated_session_sweep_grace_for_tests(true, true, 5s), 2000ms);
+  // Without the phase, the sweep is still what ends the app, and gives it the exit timeout,
+  // at least 2 s and at most 30 s, as it always did.
+  EXPECT_EQ(proc::isolated_session_sweep_grace_for_tests(true, false, 20s), 20000ms);
+  EXPECT_EQ(proc::isolated_session_sweep_grace_for_tests(false, true, 20s), 20000ms);
+  EXPECT_EQ(proc::isolated_session_sweep_grace_for_tests(false, false, 1s), 2000ms);
+  EXPECT_EQ(proc::isolated_session_sweep_grace_for_tests(false, false, 90s), 30000ms);
+
+  // The phase says it ran only once it has, and the generation cleanup reads that once.
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto member_start = source.find("void proc_t::stop_private_session_apps_before_compositor(");
+  const auto member_end = source.find("void proc_t::finalize_isolated_session_runtime(", member_start);
+  ASSERT_NE(member_start, std::string::npos);
+  ASSERT_NE(member_end, std::string::npos);
+  const auto member = source.substr(member_start, member_end - member_start);
+  const auto reset = member.find("_private_apps_stopped_before_compositor = false;");
+  const auto first_return = member.find("return;");
+  const auto phase = member.find("stop_private_session_apps(request);");
+  const auto ran = member.find("_private_apps_stopped_before_compositor = true;");
+  ASSERT_NE(reset, std::string::npos);
+  ASSERT_NE(phase, std::string::npos);
+  ASSERT_NE(ran, std::string::npos);
+  EXPECT_LT(reset, first_return) << "every early return leaves it false";
+  EXPECT_LT(phase, ran);
+  const auto generation_start = source.find("void proc_t::terminate_isolated_session_generation()");
+  const auto generation_sweep = source.find("terminate_isolated_session_processes(", generation_start);
+  const auto generation_read = source.find("_private_apps_stopped_before_compositor = false;", generation_start);
+  ASSERT_NE(generation_read, std::string::npos);
+  EXPECT_LT(generation_read, source.find("if (!exact_cleanup_required)", generation_start))
+    << "read before any return, so it never carries into a later teardown";
+  EXPECT_LT(generation_read, generation_sweep);
+}
+
 TEST(ProcessRuntimeConfigTests, IsolatedSessionCleanupPolicyRetainsIncompleteCageGeneration) {
 #ifdef __linux__
   EXPECT_TRUE(proc::isolated_session_generation_blocks_launch_for_tests(true, true));
@@ -3020,6 +3062,13 @@ TEST(ProcessRuntimeConfigTests, IsolatedSessionCleanupPolicyRetainsIncompleteCag
 
   EXPECT_TRUE(proc::isolated_session_cleanup_resets_router_for_tests(true, true, true));
   EXPECT_TRUE(proc::isolated_session_cleanup_clears_state_for_tests(true, true, true));
+
+  // A private labwc session's apps are stopped first and its compositor next, so the sweep after it
+  // is a check and there is no router to reset. Only a Gamescope generation still has the sweep end
+  // its runtime's clients and the router reset after it.
+  EXPECT_TRUE(proc::isolated_session_stops_compositor_before_sweep_for_tests(true, false));
+  EXPECT_FALSE(proc::isolated_session_stops_compositor_before_sweep_for_tests(true, true));
+  EXPECT_FALSE(proc::isolated_session_stops_compositor_before_sweep_for_tests(false, false));
 
   // Mirror/non-cage launches still receive a generation token, but no cage state
   // is owned; teardown must clear that token without touching the cage router.
@@ -3298,6 +3347,161 @@ TEST(ProcessRuntimeConfigTests, NonCageDetachedCaptureFailureRetainsGenerationAn
   GTEST_SKIP() << "Linux-only detached generation capture fault";
 #endif
 }
+
+#ifdef __linux__
+namespace {
+  std::vector<pid_t> proc_children(pid_t pid) {
+    std::ifstream in("/proc/" + std::to_string(pid) + "/task/" + std::to_string(pid) + "/children");
+    std::vector<pid_t> children;
+    pid_t child = 0;
+    while (in >> child) {
+      children.push_back(child);
+    }
+    return children;
+  }
+
+  std::optional<std::size_t> environ_size(pid_t pid) {
+    std::ifstream in("/proc/" + std::to_string(pid) + "/environ", std::ios::binary);
+    if (!in) {
+      return std::nullopt;
+    }
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()).size();
+  }
+
+  bool contains_pid(const std::vector<pid_t> &pids, pid_t pid) {
+    return std::find(pids.begin(), pids.end(), pid) != pids.end();
+  }
+
+  /**
+   * A descendant whose environ reads as zero bytes for as long as it lives and whose comm is bwrap,
+   * as Flatpak's outer bwrap is, without bwrap itself: a sleep started through a link named bwrap
+   * with an empty environment.
+   */
+  struct zero_environ_bwrap_t {
+    std::filesystem::path dir;
+    pid_t pid = -1;
+
+    zero_environ_bwrap_t() {
+      dir = std::filesystem::temp_directory_path() / ("polaris-zero-environ-" + std::to_string(getpid()));
+      std::filesystem::remove_all(dir);
+      std::filesystem::create_directories(dir);
+      std::filesystem::create_symlink("/bin/sleep", dir / "bwrap");
+      const auto path = (dir / "bwrap").string();
+      pid = fork();
+      if (pid == 0) {
+        char *empty[] = {nullptr};
+        execle(path.c_str(), "bwrap", "30", static_cast<char *>(nullptr), empty);
+        _exit(127);
+      }
+      for (int attempt = 0; attempt < 200 && pid > 0; ++attempt) {
+        std::ifstream comm("/proc/" + std::to_string(pid) + "/comm");
+        std::string name;
+        std::getline(comm, name);
+        if (name == "bwrap") {
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    }
+
+    ~zero_environ_bwrap_t() {
+      if (pid > 0) {
+        (void) kill(pid, SIGKILL);
+        while (waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {}
+      }
+      std::error_code ignored;
+      std::filesystem::remove_all(dir, ignored);
+    }
+  };
+}  // namespace
+
+TEST(ProcessRuntimeConfigTests, ZeroByteEnvironFlatpakBwrapDescendantIsOwned) {
+  // What `flatpak run` leaves under the session: an outer bwrap and a sandbox init whose environ
+  // reads as zero bytes for as long as they live, and the app inside with the session token.
+  const std::filesystem::path bwrap = "/usr/bin/bwrap";
+  if (!std::filesystem::exists(bwrap)) {
+    GTEST_SKIP() << "bwrap is not installed";
+  }
+  const std::string token = "zero-byte-environ-flatpak-bwrap-" + std::to_string(getpid());
+  const auto outer = fork();
+  ASSERT_GE(outer, 0);
+  if (outer == 0) {
+    char *empty[] = {nullptr};
+    execle(
+      bwrap.c_str(), "bwrap", "--unshare-pid", "--die-with-parent", "--ro-bind", "/", "/", "--dev", "/dev",
+      "--setenv", "POLARIS_SESSION_INSTANCE_ID", token.c_str(), "/bin/sleep", "30", static_cast<char *>(nullptr), empty
+    );
+    _exit(127);
+  }
+  linux_child_guard_t outer_guard {outer};
+  pid_t init = -1;
+  pid_t app = -1;
+  for (int attempt = 0; attempt < 300 && app <= 0; ++attempt) {
+    const auto inits = proc_children(outer);
+    if (!inits.empty()) {
+      init = inits.front();
+      const auto apps = proc_children(init);
+      if (!apps.empty()) {
+        std::ifstream comm("/proc/" + std::to_string(apps.front()) + "/comm");
+        std::string name;
+        std::getline(comm, name);
+        if (name == "sleep") {
+          app = apps.front();
+        }
+      }
+    }
+    if (app <= 0) {
+      int status = 0;
+      if (waitpid(outer, &status, WNOHANG) == outer) {
+        outer_guard.reaped = true;
+        GTEST_SKIP() << "bwrap could not make a pid namespace here";
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+  ASSERT_GT(app, 0);
+  ASSERT_EQ(environ_size(outer), std::optional<std::size_t> {0});
+  ASSERT_EQ(environ_size(init), std::optional<std::size_t> {0});
+
+  const auto recorded = proc::exact_generation_snapshot_for_tests(token, {outer, init});
+  EXPECT_TRUE(recorded.capture_complete) << "the bwraps Flatpak records are accounted for, not ambiguous";
+  EXPECT_TRUE(contains_pid(recorded.flatpak_sandboxes, outer));
+  EXPECT_TRUE(contains_pid(recorded.flatpak_sandboxes, init));
+  EXPECT_EQ(recorded.owned, (std::vector<pid_t> {app})) << "the app inside carries the token";
+  EXPECT_TRUE(recorded.unattributed.empty());
+
+  // The same processes without a Flatpak record still hold the capture, as they always did.
+  const auto unrecorded = proc::exact_generation_snapshot_for_tests(token, {});
+  EXPECT_FALSE(unrecorded.capture_complete);
+  EXPECT_TRUE(contains_pid(unrecorded.unattributed, outer) || contains_pid(unrecorded.unattributed, init));
+}
+
+TEST(ProcessRuntimeConfigTests, ZeroByteEnvironNonFlatpakDescendantStillLatches) {
+  zero_environ_bwrap_t process;
+  ASSERT_GT(process.pid, 0);
+  ASSERT_EQ(environ_size(process.pid), std::optional<std::size_t> {0});
+  const auto snapshot = proc::exact_generation_snapshot_for_tests("zero-byte-environ-unrecorded", {});
+  EXPECT_FALSE(snapshot.capture_complete) << "a zero-byte environ no Flatpak record names stays ambiguous";
+  EXPECT_TRUE(snapshot.flatpak_sandboxes.empty());
+  ASSERT_TRUE(contains_pid(snapshot.unattributed, process.pid));
+  const auto at = std::find(snapshot.unattributed.begin(), snapshot.unattributed.end(), process.pid) - snapshot.unattributed.begin();
+  EXPECT_NE(snapshot.reasons[static_cast<std::size_t>(at)].find("zero-byte environ"), std::string::npos)
+    << snapshot.reasons[static_cast<std::size_t>(at)];
+  EXPECT_EQ(kill(process.pid, 0), 0) << "an ambiguous process is never signalled";
+}
+
+TEST(ProcessRuntimeConfigTests, IncompleteCaptureListsUnattributedPids) {
+  zero_environ_bwrap_t process;
+  ASSERT_GT(process.pid, 0);
+  test_log_capture_t log;
+  EXPECT_FALSE(proc::terminate_exact_generation_processes_for_tests("incomplete-capture-names-its-cause"));
+  const auto text = log.text();
+  const auto line = "Warning: process: exact-generation capture could not attribute pid=" + std::to_string(process.pid) +
+                    " comm=bwrap ppid=" + std::to_string(getpid()) + ": zero-byte environ";
+  EXPECT_NE(text.find(line), std::string::npos) << text;
+  EXPECT_EQ(kill(process.pid, 0), 0);
+}
+#endif
 
 TEST(ProcessRuntimeConfigTests, ExactGenerationTransientCaptureFailureRetriesBeforeSignaling) {
 #ifdef __linux__
@@ -4006,6 +4210,11 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   EXPECT_LT(terminate_attached, attached_failure_barrier);
   EXPECT_LT(attached_failure_barrier, terminate_private_steam);
   EXPECT_LT(terminate_private_steam, terminate_generation);
+  const auto terminate_private_apps = terminate.find("stop_private_session_apps_before_compositor(immediate);");
+  ASSERT_NE(terminate_private_apps, std::string::npos);
+  EXPECT_LT(terminate_private_steam, terminate_private_apps);
+  EXPECT_LT(terminate_private_apps, terminate_generation)
+    << "a private session's apps stop while its compositor is still up";
   EXPECT_NE(source.find("_session_used_gamescope_runtime = gamescope_stream_session;"), std::string::npos);
   EXPECT_NE(terminate.find("_session_used_gamescope_runtime"), std::string::npos);
   EXPECT_NE(source.find("const bool prior_cleanup_complete = _exact_generation_cleanup_complete;"), std::string::npos);
@@ -4070,7 +4279,23 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   const auto retain_generation = generation_cleanup.find(
     "retaining immutable cage generation because exact-generation cleanup was incomplete"
   );
-  const auto stop_runtime = generation_cleanup.find("finalize_isolated_session_runtime(false)");
+  // The Gamescope generation's retention branch still stops its runtime rather than orphan it.
+  const auto stop_runtime = generation_cleanup.find("finalize_isolated_session_runtime(false)", retain_generation);
+  // A labwc generation stops its compositor before the sweep, which is then a check, and keeps the
+  // generation when that check is incomplete.
+  const auto compositor_first_gate = generation_cleanup.find("isolated_session_stops_compositor_before_sweep(");
+  const auto compositor_first_stop = generation_cleanup.find("finalize_isolated_session_runtime(false)", compositor_first_gate);
+  const auto compositor_first_retain = generation_cleanup.find(
+    "retaining immutable cage generation after its compositor stopped, because exact-generation cleanup was incomplete"
+  );
+  ASSERT_NE(compositor_first_gate, std::string::npos);
+  ASSERT_NE(compositor_first_stop, std::string::npos);
+  ASSERT_NE(compositor_first_retain, std::string::npos);
+  EXPECT_LT(compositor_first_gate, compositor_first_stop);
+  EXPECT_LT(compositor_first_stop, cleanup_result) << "the compositor stops before the sweep that checks";
+  EXPECT_LT(cleanup_result, compositor_first_retain);
+  EXPECT_LT(compositor_first_retain, cleanup_success_gate)
+    << "a labwc generation returns before the Gamescope router reset";
   const auto cleanup_clear_gate = generation_finish.find("isolated_session_cleanup_clears_state(");
   const auto clear_generation = generation_finish.find("_session_instance_id.clear()");
   ASSERT_NE(cleanup_result, std::string::npos);
@@ -5823,6 +6048,73 @@ TEST(ProcessMigrationTests, ParseNormalizesCurrentSteamLibraryLaunchWithoutBigPi
   const auto parsed_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
   EXPECT_EQ(parsed_tree["version"], 14);
 
+  std::filesystem::remove(file_path);
+}
+
+TEST(ProcessMigrationTests, GeneratedSteamUndoIsCanonical) {
+  EXPECT_EQ(proc::canonical_steam_shutdown_undo(), expected_steam_shutdown_command());
+  // Both writers of a Steam app's undo write the form parse() keeps. Each used to write the old
+  // form, which every read of apps.json then upgraded again in memory and logged.
+  const auto confighttp = read_source_file_for_contract("src/confighttp.cpp");
+  const auto process = read_source_file_for_contract("src/process.cpp");
+  ASSERT_FALSE(confighttp.empty());
+  ASSERT_FALSE(process.empty());
+  EXPECT_EQ(confighttp.find("{\"undo\", \"setsid steam -shutdown\"}"), std::string::npos);
+  EXPECT_NE(confighttp.find("{\"undo\", proc::canonical_steam_shutdown_undo()}"), std::string::npos);
+  EXPECT_EQ(process.find("{\"undo\", \"setsid steam -shutdown\"}"), std::string::npos);
+  EXPECT_NE(process.find("{\"undo\", canonical_steam_shutdown_undo()}"), std::string::npos);
+}
+
+TEST(ProcessMigrationTests, CanonicalUndoParsesWithoutUpgradeLog) {
+#ifdef __linux__
+  linux_cage_compositor_guard_t guard;
+  config::video.linux_display.use_cage_compositor = false;
+#endif
+
+  const auto file_path = test_paths::root() / "steam_library_canonical_undo.json";
+  const auto apps_with_undo = [](const std::string &undo) {
+    return nlohmann::json {
+      {"version", 8},
+      {"apps", {
+        {
+          {"name", "Control"},
+          {"uuid", "steam-library-canonical-undo-test"},
+          {"cmd", ""},
+          {"detached", {"setsid steam steam://rungameid/870780"}},
+          {"prep-cmd", {{{"undo", undo}}}},
+          {"source", "steam"},
+          {"steam-appid", "870780"},
+        }
+      }}
+    };
+  };
+  const auto parsed_undo = [&file_path]() {
+    auto parsed = proc::parse(file_path.string());
+    if (!parsed) {
+      return std::string {};
+    }
+    const auto &apps = parsed->get_apps();
+    const auto control = std::find_if(apps.begin(), apps.end(), [](const auto &app) {
+      return app.name == "Control";
+    });
+    return control == apps.end() || control->prep_cmds.empty() ? std::string {} : control->prep_cmds.back().undo_cmd;
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps_with_undo(proc::canonical_steam_shutdown_undo()).dump(2)), 0);
+  {
+    test_log_capture_t log;
+    EXPECT_EQ(parsed_undo(), expected_steam_shutdown_command());
+    EXPECT_EQ(log.text().find("upgraded Steam"), std::string::npos) << log.text();
+  }
+
+  // An apps.json an older Polaris wrote is still upgraded in memory, without a line at info on each
+  // read, which is every session's end and every start.
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps_with_undo("setsid steam -shutdown").dump(2)), 0);
+  {
+    test_log_capture_t log;
+    EXPECT_EQ(parsed_undo(), expected_steam_shutdown_command());
+    EXPECT_EQ(log.text().find("Info: process: upgraded Steam"), std::string::npos) << log.text();
+  }
   std::filesystem::remove(file_path);
 }
 

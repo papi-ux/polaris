@@ -110,6 +110,33 @@ starts at `v1.0.0`.
   NVIDIA driver version from the kernel module, Session/compositor names the desktop and, for KDE
   Plasma and GNOME, the compositor they always use, and with nothing streaming the Client line
   names the last stream's client and says it was the last stream.
+- Ending a private stream now quits the app the way a player would, in order, while the stream's
+  private display is still up, and stops the display only after that. It used to stop the display
+  with the app still on it, or in the same instant it asked the app to quit. Alan Wake 2, started
+  from Heroic's Flatpak, crashed together with Heroic when its stream ended, and Heroic never
+  recorded the playtime; Control, quit from Nova, had sixteen processes killed after two seconds of
+  SIGTERM. Polaris now sends the game's windows the ICCCM close request, `WM_DELETE_WINDOW`, which
+  is what a player's click on the close button sends and what Wine hands a Windows game as the close
+  from its title bar. Each window is chosen by the process the X server says made it, through
+  X-Resource, so Steam's and a launcher's own windows are never asked and a game in a Flatpak
+  sandbox is still found. The game has its app's exit timeout to close, at least 10 seconds, and the
+  stop moves on as soon as it has. One that does not close gets SIGTERM with 5 seconds of grace. One
+  with no window to ask, such as a native Wayland one, gets 10, or its app's exit timeout when that
+  is longer and it is not a Steam game. SIGKILL comes only after that, and it is the only step
+  logged as a warning. A Flatpak launcher that started the game, such as Heroic, is quit after the
+  game: it gets up to 3 seconds to see the game return and record it, then SIGTERM, and its sandbox
+  is ended only as a last resort. Only what the stream started is touched: a Flatpak launcher is
+  recognized by Flatpak's own record of each running instance, checked against the kernel, and an
+  app that was already open on the desktop, such as a slicer or a browser, is never signalled. The
+  app's part of the stop has one 30 second deadline, the most the host already let an app take to
+  exit, and the check after the display stops gives anything it still finds two seconds. The host
+  log names each step, and the stream readout's `last_session` keeps it as `app_stop`: which step
+  ended the game and how long it took, what was stopped, how the launcher quit, the Flatpak
+  instances the stream owned and left alone, and whether the check after the display stopped found
+  everything. When the host cannot account for a stream's processes, the log now names each one it
+  could not, and Flatpak's own sandbox processes no longer keep the host from finishing a stream's
+  cleanup. The sixteen "upgraded Steam cleanup command" lines a host with Steam apps logged at every
+  start and every stream's end are gone.
 
 - The first Space of a launcher made from the Spaces page can be made on Docker's containerd image
   store, the default on a fresh Docker 29 install (#664). There every such create was refused with

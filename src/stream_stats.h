@@ -181,6 +181,47 @@ namespace stream_stats {
   };
 
   /**
+   * @brief How a session's teardown stopped its app, as the stream readout's last_session keeps it.
+   */
+  struct app_stop_t {
+    /// exited_before_stop, close_request, sigterm or sigkill, for the step that ended the app; or
+    /// compositor_stop, when the private compositor went down while processes of the session were
+    /// still live. Empty when no teardown has said.
+    std::string path;
+    /// Windows the app was asked to close before any signal.
+    int windows_asked = 0;
+    /// How long the app took to stop, from the first request to the last process gone.
+    std::chrono::milliseconds waited {};
+    /// What was stopped: steam for a private Steam game, flatpak when the session started Flatpak
+    /// sandboxes, session for the session's own processes. Empty when not said.
+    std::string target;
+
+    /// How a Flatpak launcher the session started was quit, once its game was gone.
+    struct launcher_t {
+      std::string app_id;
+      std::string path;  ///< exited, sigterm or sigkill
+      std::chrono::milliseconds waited {};
+    };
+
+    std::optional<launcher_t> launcher;
+
+    /// The Flatpak instances the session was found to own, by role, and those it left alone.
+    struct flatpak_instances_t {
+      int launcher = 0;
+      int game = 0;
+      int helper = 0;
+      int left_alone = 0;
+    };
+
+    std::optional<flatpak_instances_t> flatpak_instances;
+    /// complete or incomplete: whether the check after the compositor stopped found every process
+    /// of the session. Empty when that check has not reported.
+    std::string capture;
+    /// Processes that check could not attribute.
+    int unattributed = 0;
+  };
+
+  /**
    * @brief The most recently ended session's capture outcome, frozen as its client is removed.
    *
    * remove_client() copies it from the facts the session's own generation stored, before the entry
@@ -206,6 +247,9 @@ namespace stream_stats {
     std::string encoder_backend;
     /// The PyroWave route the session's own encoder last reported. Empty when it never reported one.
     std::string pyrowave_route;
+    /// How the app was stopped when this session's teardown ended it. Its path is empty when no
+    /// teardown has said, which is every app but one in a private session.
+    app_stop_t app_stop;
     /// How the session's start ended, from stream_start: started, client_left_during_setup or
     /// no_ping. Empty when neither a ping nor a ping timeout decided it.
     std::string start_outcome;
@@ -688,6 +732,36 @@ namespace stream_stats {
    * @return False when no client holds that generation or the route is empty, so the caller retries.
    */
   bool record_pyrowave_route(std::uint64_t session_generation, std::string_view route);
+
+  /**
+   * @brief Record how the app was stopped, on the last ended session.
+   *
+   * An app is stopped after its streams have ended, so the last ended session is the one whose app
+   * this was. Nothing is written when no session has ended, or when path is empty.
+   * @param path exited_before_stop, close_request, sigterm or sigkill.
+   * @param windows_asked Windows asked to close before any signal was sent.
+   * @param waited How long the app took to stop.
+   */
+  void record_app_stop(std::string_view path, int windows_asked, std::chrono::milliseconds waited);
+
+  /**
+   * @brief Record how the app was stopped, with what was stopped, on the last ended session.
+   *
+   * Replaces what an earlier stop of the same teardown recorded. Nothing is written when no session
+   * has ended, or when the path is empty.
+   */
+  void record_app_stop(const app_stop_t &stop);
+
+  /**
+   * @brief Record what the check after the private compositor stopped found, on the app stop the
+   *        last ended session already has.
+   *
+   * @param capture_complete Every process of the session was accounted for.
+   * @param unattributed Processes the check could not attribute.
+   * @param live_at_compositor_stop Processes of the session were still live when the compositor
+   *        went down. The stop's path then becomes compositor_stop, because that is what ended them.
+   */
+  void record_app_stop_check(bool capture_complete, int unattributed, bool live_at_compositor_stop);
 
   /**
    * @brief Record how a live nonzero generation's start ended.

@@ -506,6 +506,21 @@ if(X11_FOUND)
     if(X11_xcb_FOUND)
         add_compile_definitions(POLARIS_BUILD_X11_XCB)
         list(APPEND PLATFORM_LIBRARIES ${X11_xcb_LIB})
+        # X-Resource names the host pid behind each window of a private app, which a client in a
+        # Flatpak or pressure-vessel pid namespace does not give in its own _NET_WM_PID. Without
+        # it, a private app's windows are chosen by _NET_WM_PID alone.
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(XCB_RES xcb-res)
+        endif()
+        if(XCB_RES_FOUND)
+            add_compile_definitions(POLARIS_BUILD_X11_XCB_RES)
+            include_directories(SYSTEM ${XCB_RES_INCLUDE_DIRS})
+            link_directories(${XCB_RES_LIBRARY_DIRS})
+            list(APPEND PLATFORM_LIBRARIES ${XCB_RES_LIBRARIES})
+        else()
+            message(STATUS "xcb-res not found; a private app's windows are chosen by _NET_WM_PID alone")
+        endif()
     else()
         message(STATUS "libxcb not found; private-session Xwayland attach signal disabled")
     endif()
@@ -619,6 +634,10 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/private_session_input.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/private_session_attach.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/private_session_attach.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/flatpak_session_instances.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/flatpak_session_instances.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/private_app_stop.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/private_app_stop.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/input/input_group_access.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/input/input_group_access.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/cage_display_router.h"

@@ -103,7 +103,7 @@ case "$DISTRO" in
       libpulse-dev libopus-dev libcurl4-openssl-dev \
       libdrm-dev libgbm-dev libcap-dev libwayland-dev wayland-protocols \
       libpipewire-0.3-dev libx11-dev libxrandr-dev \
-      libxfixes-dev libxi-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev \
+      libxfixes-dev libxi-dev libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev libxcb-res0-dev \
       libva-dev libminiupnpc-dev libnotify-dev nlohmann-json3-dev \
       libappindicator3-dev libgtk-3-dev \
       libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \

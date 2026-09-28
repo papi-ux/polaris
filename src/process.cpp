@@ -85,6 +85,8 @@
   #include "platform/linux/stream_display_policy.h"
   #include "platform/linux/stream_runtime.h"
   #include "platform/linux/private_session_attach.h"
+  #include "platform/linux/flatpak_session_instances.h"
+  #include "platform/linux/private_app_stop.h"
   #include "platform/linux/session_launch_linux.h"
   #include "platform/linux/display_topology.h"
   #include "platform/linux/gamescope_process.h"
@@ -1230,6 +1232,33 @@ namespace proc {
       return session_owned_cage && generation_available && exact_cleanup_complete;
     }
 
+    /// A private labwc session's apps are stopped before its compositor, so the compositor stops
+    /// ahead of the exact sweep, which is then a check. A Gamescope generation keeps the old order:
+    /// the sweep, then the runtime, reset when the sweep found everything.
+    bool isolated_session_stops_compositor_before_sweep(bool session_owned_cage, bool gamescope_runtime) {
+      return session_owned_cage && !gamescope_runtime;
+    }
+
+    /**
+     * The grace the exact sweep's first SIGTERM gives: the app's exit timeout, at least the two
+     * seconds this path always allowed and at most 30 s. Once a private labwc session's apps were
+     * stopped in order while its compositor was up, and the compositor has stopped, the sweep only
+     * checks that nothing is left, and anything it still finds has no display to save to: it gets
+     * the two seconds, so the check cannot hold the lifecycle lock for a second exit timeout.
+     */
+    std::chrono::milliseconds isolated_session_sweep_grace(
+      bool compositor_stopped_first,
+      bool apps_stopped_first,
+      std::chrono::seconds exit_timeout
+    ) {
+      if (compositor_stopped_first && apps_stopped_first) {
+        return 2s;
+      }
+      return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::clamp(exit_timeout, std::chrono::seconds(2), std::chrono::seconds(30))
+      );
+    }
+
     bool isolated_session_cleanup_clears_state(
       bool exact_cleanup_required,
       bool generation_available,
@@ -1385,15 +1414,17 @@ namespace proc {
       return result == 1 && (descriptor.revents & POLLIN) != 0;
     }
 
+    /// Wait for every handle to exit, or with @p include for only the handles it takes.
     bool wait_for_pidfds_exit(
       const std::vector<pidfd_handle_t> &handles,
-      std::chrono::milliseconds timeout
+      std::chrono::milliseconds timeout,
+      const std::function<bool(const pidfd_handle_t &)> &include = {}
     ) {
       const auto deadline = std::chrono::steady_clock::now() + timeout;
       for (;;) {
         std::vector<pollfd> pending;
         for (const auto &handle : handles) {
-          if (!pidfd_has_exited(handle)) {
+          if ((!include || include(handle)) && !pidfd_has_exited(handle)) {
             pending.emplace_back(pollfd {handle.fd, POLLIN, 0});
           }
         }
@@ -1814,21 +1845,42 @@ namespace proc {
       return before && after && *before == *after;
     }
 
+    /// A live process that kept the exact capture from completing, and why.
+    struct unattributed_process_t {
+      pid_t pid = -1;
+      std::string reason;
+    };
+
     struct isolated_session_process_snapshot_t {
       std::vector<pidfd_handle_t> owned;
       std::vector<pidfd_handle_t> ambiguous;
+      /// The outer bwraps and sandbox inits of live Flatpak instances that descend from Polaris. Their
+      /// environ reads as zero bytes for as long as they live, so the token cannot name them, and
+      /// they are accounted for by Flatpak's own record rather than held as ambiguous. They are never
+      /// sent SIGTERM: they exit with the app inside them.
+      std::vector<pidfd_handle_t> flatpak_sandboxes;
+      /// What kept the capture from completing, so the log can name it.
+      std::vector<unattributed_process_t> unattributed;
       bool capture_complete = true;
       bool retryable_capture_failure = false;
       bool hard_capture_failure = false;
 
-      void mark_retryable_failure() {
+      void note_unattributed(pid_t pid, std::string_view reason) {
+        if (pid > 0) {
+          unattributed.push_back({pid, std::string {reason}});
+        }
+      }
+
+      void mark_retryable_failure(pid_t pid = -1, std::string_view reason = {}) {
+        note_unattributed(pid, reason);
         capture_complete = false;
         if (!hard_capture_failure) {
           retryable_capture_failure = true;
         }
       }
 
-      void mark_hard_failure() {
+      void mark_hard_failure(pid_t pid = -1, std::string_view reason = {}) {
+        note_unattributed(pid, reason);
         capture_complete = false;
         retryable_capture_failure = false;
         hard_capture_failure = true;
@@ -1860,7 +1912,12 @@ namespace proc {
     thread_local pid_t forced_empty_isolated_session_environ_pid = -1;
     thread_local int forced_empty_isolated_session_environ_failures_remaining = 0;
     thread_local pid_t forced_steam_ownership_capture_failure_pid = -1;
+    /// Pids a test's snapshot treats as the bwraps of a live Flatpak instance, which it cannot
+    /// make: a live instance needs a systemd scope of its own.
+    thread_local const std::set<pid_t> *forced_flatpak_sandbox_pids_for_tests = nullptr;
 #endif
+
+    std::filesystem::path private_session_runtime_dir();
 
     dirent *read_next_proc_entry(DIR *directory) {
       errno = 0;
@@ -1893,6 +1950,25 @@ namespace proc {
         snapshot.mark_hard_failure();
         return snapshot;
       }
+
+      // Read once, and only when a zero-byte environ asks for it.
+      std::optional<std::vector<flatpak_session_instances::instance_t>> flatpak_records;
+      const auto is_recorded_flatpak_sandbox = [&flatpak_records](pid_t pid) {
+#ifdef POLARIS_TESTS
+        if (forced_flatpak_sandbox_pids_for_tests != nullptr && forced_flatpak_sandbox_pids_for_tests->contains(pid)) {
+          return true;
+        }
+#endif
+        if (!flatpak_records) {
+          flatpak_records = flatpak_session_instances::read_live_instances(
+                              private_session_runtime_dir(),
+                              flatpak_session_instances::live_proc_reader()
+          )
+                              .live;
+        }
+        const auto start = proc_start_time_ticks(pid);
+        return start && flatpak_session_instances::is_instance_bwrap({pid, *start}, *flatpak_records);
+      };
 
       for (;;) {
         auto *entry = read_next_proc_entry(dir);
@@ -1947,6 +2023,25 @@ namespace proc {
           }
           const auto real_uid = proc_status_real_uid(status);
           const auto descends_from_polaris = proc_pid_descends_from(pid, getpid());
+          // Flatpak's outer bwrap and its sandbox's init read as zero bytes for as long as they
+          // live, not just while an exec is in progress. A bwrap Flatpak records for a live instance
+          // is accounted for by that record, rather than holding the capture as ambiguous until it
+          // fails.
+          if (transiently_empty_environ && descends_from_polaris && *descends_from_polaris &&
+              is_recorded_flatpak_sandbox(pid)) {
+            int open_error = 0;
+            if (auto sandbox = open_process_pidfd(pid, open_error)) {
+              if (!pidfd_has_exited(*sandbox)) {
+                snapshot.flatpak_sandboxes.emplace_back(std::move(*sandbox));
+              }
+            } else if (!process_vanished_during_proc_read(open_error)) {
+              snapshot.mark_hard_failure(pid, "the pidfd of a Flatpak sandbox process could not be opened");
+            }
+            continue;
+          }
+          const auto environ_reason = transiently_empty_environ ?
+                                        std::string {"zero-byte environ"} :
+                                        "environ unreadable: " + std::string {std::strerror(environ_error)};
           if (unreadable_environ_latches_capture(
                 environ_error,
                 real_uid,
@@ -1965,16 +2060,16 @@ namespace proc {
                 if (process_vanished_during_proc_read(open_error)) {
                   snapshot.mark_retryable_failure();
                 } else {
-                  snapshot.mark_hard_failure();
+                  snapshot.mark_hard_failure(pid, environ_reason + ", and its pidfd could not be opened");
                 }
               } else {
-                snapshot.mark_retryable_failure();
+                snapshot.mark_retryable_failure(pid, environ_reason);
                 if (!pidfd_has_exited(*ambiguous)) {
                   snapshot.ambiguous.emplace_back(std::move(*ambiguous));
                 }
               }
             } else {
-              snapshot.mark_hard_failure();
+              snapshot.mark_hard_failure(pid, environ_reason + ", and its ancestry is unknown");
             }
           }
           continue;
@@ -2009,13 +2104,13 @@ namespace proc {
           if (process_vanished_during_proc_read(identity_before_result.error)) {
             snapshot.mark_retryable_failure();
           } else {
-            snapshot.mark_hard_failure();
+            snapshot.mark_hard_failure(pid, "its stat could not be read");
           }
           continue;
         }
         const auto identity_before = proc_start_time_from_stat(identity_before_result.bytes);
         if (!identity_before) {
-          snapshot.mark_hard_failure();
+          snapshot.mark_hard_failure(pid, "its stat holds no start time");
           continue;
         }
 
@@ -2025,7 +2120,7 @@ namespace proc {
           if (open_error == ESRCH) {
             snapshot.mark_retryable_failure();
           } else {
-            snapshot.mark_hard_failure();
+            snapshot.mark_hard_failure(pid, "its pidfd could not be opened: " + std::string {std::strerror(open_error)});
           }
           continue;
         }
@@ -2068,7 +2163,7 @@ namespace proc {
           const bool replacement_may_be_exact_generation =
             !identity_matches && (!environ_after.ok() || environment_matches);
           if (!captured_process_exited) {
-            snapshot.mark_hard_failure();
+            snapshot.mark_hard_failure(pid, "it changed while it was captured");
           } else if (replacement_may_be_exact_generation) {
             snapshot.mark_retryable_failure();
           }
@@ -2127,7 +2222,7 @@ namespace proc {
             }
           );
           if (!now_captured) {
-            snapshot.mark_hard_failure();
+            snapshot.mark_hard_failure(ambiguous.pid, "it was still ambiguous on the next attempt");
           }
         }
         unresolved_ambiguous.clear();
@@ -2161,6 +2256,31 @@ namespace proc {
       return exhausted;
     }
 
+    /// What the exact sweep found, for the fact the last ended session keeps.
+    struct isolated_sweep_report_t {
+      bool capture_complete = true;
+      bool terminated_any = false;  ///< it found live processes of the generation and signalled them
+      bool sandboxes_remained = false;  ///< Flatpak sandbox processes of the generation were live
+      int unattributed = 0;  ///< processes that kept its capture from completing
+    };
+
+    /// Name each process that kept the capture from completing, once, with its comm and parent.
+    int log_unattributed_processes(const isolated_session_process_snapshot_t &snapshot, std::string_view reason) {
+      std::set<pid_t> logged;
+      for (const auto &process : snapshot.unattributed) {
+        if (!logged.insert(process.pid).second) {
+          continue;
+        }
+        auto comm = read_proc_status_file(process.pid, "comm");
+        boost::trim(comm);
+        const auto parent = proc_parent_pid_from_stat(read_proc_status_file(process.pid, "stat"));
+        BOOST_LOG(warning) << "process: exact-generation capture could not attribute pid="sv << process.pid << " comm="sv
+                           << (comm.empty() ? "?"s : comm) << " ppid="sv << (parent ? std::to_string(*parent) : "?"s)
+                           << ": "sv << process.reason << ' ' << reason;
+      }
+      return static_cast<int>(logged.size());
+    }
+
     // graceful_timeout is how long the first SIGTERM pass waits before SIGKILL; an emulator
     // writing its save on exit needs the app's own exit timeout here, not the two seconds the
     // second pass keeps for whatever the first one left behind.
@@ -2168,7 +2288,8 @@ namespace proc {
       std::string_view session_instance_id,
       std::string_view reason,
       std::vector<pidfd_handle_t> *tracked_detached_children = nullptr,
-      std::chrono::milliseconds graceful_timeout = std::chrono::milliseconds(2s)
+      std::chrono::milliseconds graceful_timeout = std::chrono::milliseconds(2s),
+      isolated_sweep_report_t *sweep = nullptr
     ) {
       if (session_instance_id.empty()) {
         return false;
@@ -2186,6 +2307,21 @@ namespace proc {
         auto snapshot = isolated_session_process_snapshot_after_quiescence(session_instance_id, reason);
         if (!snapshot.capture_complete) {
           BOOST_LOG(warning) << "process: exact-generation isolated process capture was incomplete "sv << reason;
+          const auto unattributed = log_unattributed_processes(snapshot, reason);
+          if (sweep) {
+            sweep->capture_complete = false;
+            sweep->unattributed = unattributed;
+          }
+          return false;
+        }
+        if (snapshot.owned.empty() && !snapshot.flatpak_sandboxes.empty()) {
+          // Nothing the token names is left to end them, and they are never signalled themselves.
+          BOOST_LOG(warning) << "process: "sv << snapshot.flatpak_sandboxes.size()
+                             << " Flatpak sandbox process(es) of the generation remain, with no process the session "sv
+                             << "token names left to end them "sv << reason;
+          if (sweep) {
+            sweep->sandboxes_remained = true;
+          }
           return false;
         }
         if (snapshot.owned.empty()) {
@@ -2203,6 +2339,9 @@ namespace proc {
 
         BOOST_LOG(info) << "process: terminating "sv << snapshot.owned.size()
                         << " exact-generation isolated process(es) "sv << reason;
+        if (sweep) {
+          sweep->terminated_any = true;
+        }
         const auto pass_timeout = pass == 0 ? graceful_timeout : std::chrono::milliseconds(2s);
         const bool terminated = terminate_pidfds(snapshot.owned, pass_timeout, 1s, "isolated session process"sv);
         if (tracked_detached_children != nullptr) {
@@ -2222,9 +2361,19 @@ namespace proc {
           BOOST_LOG(warning) << "process: exact-generation isolated processes remained after bounded pidfd cleanup "sv
                              << reason;
         }
+        if (!snapshot.flatpak_sandboxes.empty()) {
+          // A sandbox exits once the app inside it has; give it a moment after the app's processes.
+          if (sweep) {
+            sweep->sandboxes_remained = true;
+          }
+          (void) wait_for_pidfds_exit(snapshot.flatpak_sandboxes, 2s);
+        }
       }
 
       const auto final_snapshot = isolated_session_process_snapshot_after_quiescence(session_instance_id, reason);
+      if (sweep && !final_snapshot.capture_complete) {
+        sweep->capture_complete = false;
+      }
       if (tracked_detached_children != nullptr) {
         direct_child_reap_complete = reap_tracked_detached_children(
                                        *tracked_detached_children,
@@ -2235,6 +2384,7 @@ namespace proc {
       }
       return final_snapshot.capture_complete &&
              final_snapshot.owned.empty() &&
+             final_snapshot.flatpak_sandboxes.empty() &&
              direct_child_reap_complete &&
              (tracked_detached_children == nullptr || tracked_detached_children->empty());
     }
@@ -2256,13 +2406,80 @@ namespace proc {
     constexpr auto private_steam_app_exit_timeout = 5s;
     constexpr auto private_steam_app_settle_time = 5s;
     constexpr auto private_steam_app_capture_timeout = 500ms;
-    constexpr auto private_steam_app_sigterm_timeout = 2s;
+    /// How long the app has to close after its windows are asked to, the way a player's click asks.
+    constexpr auto private_steam_app_close_timeout = 10s;
+    /// SIGTERM's grace when nothing could be asked to close first. It was two seconds, which is short
+    /// for a Proton title that saves as it quits.
+    constexpr auto private_steam_app_sigterm_timeout = 10s;
+    /// SIGTERM's grace after a close request went unanswered: the app has had its chance to save.
+    constexpr auto private_steam_app_sigterm_after_close_timeout = 5s;
     constexpr auto private_steam_app_sigkill_timeout = 1s;
+    /// SIGTERM's grace before the app was asked to close first, kept only to size the budget below.
+    constexpr auto private_steam_app_former_sigterm_timeout = 2s;
+    /// How long the private session's X display has to take the close request. It answers in
+    /// milliseconds; this only stops one that has wedged from holding the teardown. The time comes
+    /// out of the budget below, because every wait after it is measured against its deadline.
+    constexpr auto private_steam_app_close_request_timeout = 1s;
+
+    /**
+     * Everything the ordered private Steam stop may wait for in all: capture, the former SIGTERM grace,
+     * the SIGKILL wait, Steam's app-stopped event and its settle, and the native shutdown. That is
+     * what it could wait for before the app was asked to close first. The longer waits above come out
+     * of this rather than on top of it, so the teardown, which holds the session lifecycle lock that a
+     * new launch and a stop request's answer wait on, takes no longer in all than it could before.
+     */
+    constexpr std::chrono::milliseconds private_steam_stop_budget =
+      private_steam_app_capture_timeout + private_steam_app_former_sigterm_timeout +
+      private_steam_app_sigkill_timeout + private_steam_app_exit_timeout +
+      private_steam_app_settle_time + private_steam_native_shutdown_timeout;
+
+    /// The share of a budget a stage may wait: its own timeout, or what is left, whichever is less.
+    std::chrono::milliseconds clamp_to_budget(std::chrono::milliseconds remaining, std::chrono::milliseconds timeout) {
+      return std::max(0ms, std::min(remaining, timeout));
+    }
+
+    /// One deadline the stages of a private Steam stop share. Without one, a stage waits its own timeout.
+    struct private_steam_stop_budget_t {
+      std::optional<std::chrono::steady_clock::time_point> deadline;
+
+      static private_steam_stop_budget_t starting_now() {
+        return {std::chrono::steady_clock::now() + private_steam_stop_budget};
+      }
+
+      std::chrono::milliseconds clamp(std::chrono::milliseconds timeout) const {
+        if (!deadline) {
+          return timeout;
+        }
+        return clamp_to_budget(
+          std::chrono::duration_cast<std::chrono::milliseconds>(*deadline - std::chrono::steady_clock::now()),
+          timeout
+        );
+      }
+    };
+
+    /// Ask the app whose lineage starts at a root process to close its windows. Returns how many
+    /// windows were asked, and zero when none could be.
+    using private_steam_app_close_request_t = std::function<int(pid_t app_root_pid)>;
+
+    struct private_steam_app_stop_timeouts_t {
+      std::chrono::milliseconds close = private_steam_app_close_timeout;
+      std::chrono::milliseconds sigterm = private_steam_app_sigterm_timeout;
+      std::chrono::milliseconds sigterm_after_close = private_steam_app_sigterm_after_close_timeout;
+    };
+
+    /// How the app lineage stopped, which the last session's facts keep.
+    struct private_steam_app_stop_outcome_t {
+      std::string path;  ///< exited_before_stop, close_request, sigterm or sigkill
+      int windows_asked = 0;
+      std::chrono::milliseconds waited {};
+    };
 
     bool quiesce_session_owned_steam_app_before_native_shutdown(
       const proc::ctx_t &app,
       std::string_view session_instance_id,
-      const boost::process::v1::environment &env
+      const boost::process::v1::environment &env,
+      const private_steam_app_close_request_t &request_close,
+      const private_steam_stop_budget_t &budget
     );
 
     template<typename Request, typename Wait>
@@ -2638,9 +2855,543 @@ namespace proc {
       return all_safe;
     }
 
+    /// Keep how the app stopped in the last session's facts, and hand it to a caller that asked.
+    void record_private_steam_app_stop(
+      private_steam_app_stop_outcome_t outcome,
+      private_steam_app_stop_outcome_t *out
+    ) {
+      stream_stats::app_stop_t stop;
+      stop.path = outcome.path;
+      stop.windows_asked = outcome.windows_asked;
+      stop.waited = outcome.waited;
+      stop.target = "steam";
+      stream_stats::record_app_stop(stop);
+      if (out) {
+        *out = std::move(outcome);
+      }
+    }
+
+    /**
+     * Ask the windows of a private session's app to close, on this session's own Xwayland and no
+     * other. A Gamescope runtime has no display here to ask on. The exchange is bounded by timeout,
+     * because it runs under the lifecycle lock and X has no timeout of its own.
+     */
+    private_session_attach::close_request_result_t request_private_app_window_close(
+      std::string_view session_instance_id,
+      private_session_attach::window_owner_test_t belongs_to_app,
+      std::chrono::milliseconds timeout
+    ) {
+      if (session_instance_id.empty() || !stream_runtime::labwc::is_running() ||
+          stream_runtime::labwc::session_instance_id() != session_instance_id) {
+        return {};
+      }
+      const auto x11_display = stream_runtime::labwc::x11_display();
+      const auto request = private_session_attach::request_x11_window_close_within(
+        x11_display,
+        std::move(belongs_to_app),
+        timeout
+      );
+      if (request.timed_out) {
+        BOOST_LOG(info) << "process: the private session's X display did not answer the close request within "sv
+                        << timeout.count() << " ms"sv;
+      } else if (request.status != private_session_attach::probe_status_e::ok) {
+        BOOST_LOG(info) << "process: the private session's X display could not be asked to close the app's windows"sv;
+      }
+      return request;
+    }
+
+    std::filesystem::path private_session_runtime_dir() {
+      const char *xdg = std::getenv("XDG_RUNTIME_DIR");
+      return (xdg && *xdg) ? std::filesystem::path(xdg) : std::filesystem::path("/run/user") / std::to_string(getuid());
+    }
+
+    /**
+     * Issue #234, the half a session can see coming: a Flatpak launcher already open on the host
+     * desktop takes the session's `flatpak run` and starts the game itself, with the desktop's
+     * environment and outside the private session. Ending the session then leaves both alone, since
+     * the session started neither.
+     */
+    void warn_if_flatpak_app_already_running(const std::string &cmd) {
+      const auto app_id = private_session_attach::flatpak_run_app_id(cmd);
+      if (!app_id) {
+        return;
+      }
+      const auto instances = flatpak_session_instances::read_live_instances(
+        private_session_runtime_dir(),
+        flatpak_session_instances::live_proc_reader()
+      );
+      const auto running = flatpak_session_instances::instances_of(instances, *app_id);
+      if (running.empty()) {
+        return;
+      }
+      BOOST_LOG(warning) << "private_session: "sv << *app_id << " is already running on the host (Flatpak instance "sv
+                         << running.front().id << "). Flatpak hands this launch to that instance, so what it starts "sv
+                         << "opens where that instance runs, not in the private session, and ending the session leaves "sv
+                         << "it running. Quit it on the host before launching (issue #234)."sv;
+    }
+
+    /// pidfds for processes named by pid and start time. Each is checked again once open, so a pid
+    /// reused since it was read is never signalled, and one already gone is left out.
+    std::vector<pidfd_handle_t> open_exact_pidfds(const std::vector<flatpak_session_instances::process_t> &processes) {
+      std::vector<pidfd_handle_t> handles;
+      std::set<pid_t> opened;
+      for (const auto &process : processes) {
+        if (process.pid <= 1 || !opened.insert(process.pid).second) {
+          continue;
+        }
+        int open_error = 0;
+        auto handle = open_process_pidfd(process.pid, open_error);
+        if (!handle) {
+          continue;
+        }
+        const auto start = proc_start_time_ticks(process.pid);
+        if (!start || *start != process.start_time || pidfd_has_exited(*handle)) {
+          continue;
+        }
+        handles.emplace_back(std::move(*handle));
+      }
+      return handles;
+    }
+
+    std::vector<flatpak_session_instances::process_t> processes_of(const std::vector<flatpak_session_instances::member_t> &members) {
+      std::vector<flatpak_session_instances::process_t> processes;
+      processes.reserve(members.size());
+      for (const auto &member : members) {
+        processes.push_back(member.process);
+      }
+      return processes;
+    }
+
+    int signal_all(const std::vector<pidfd_handle_t> &handles, int signal_number) {
+      int signalled = 0;
+      for (const auto &handle : handles) {
+        if (pidfd_has_exited(handle)) {
+          continue;
+        }
+        if (send_pidfd_signal(handle, signal_number)) {
+          ++signalled;
+        } else {
+          BOOST_LOG(warning) << "process: private app stop: pidfd signal "sv << signal_number << " failed pid="sv
+                             << handle.pid << " error="sv << std::strerror(errno);
+        }
+      }
+      return signalled;
+    }
+
+    /// Everything the host reads of each process for private_app_stop::classify, in one pass.
+    std::vector<private_app_stop::process_facts_t> read_process_facts(const flatpak_session_instances::proc_reader_t &reader) {
+      namespace fsi = flatpak_session_instances;
+      std::vector<private_app_stop::process_facts_t> facts;
+      for (const auto pid : reader.all_pids()) {
+        if (pid <= 1 || pid == getpid()) {
+          continue;
+        }
+        const auto stat = reader.read(pid, "stat");
+        const auto start = stat ? fsi::start_time_from_stat(*stat) : std::nullopt;
+        const auto parent = stat ? fsi::parent_from_stat(*stat) : std::nullopt;
+        if (!start || !parent) {
+          continue;
+        }
+        private_app_stop::process_facts_t fact;
+        fact.process = {pid, *start};
+        fact.parent = *parent;
+        if (auto comm = reader.read(pid, "comm")) {
+          boost::trim(*comm);
+          fact.comm = std::move(*comm);
+        }
+        if (fact.comm == "sleep") {
+          // labwc's `sleep infinity` startup client is told apart by its arguments.
+          if (auto cmdline = reader.read(pid, "cmdline")) {
+            fact.cmdline = std::move(*cmdline);
+          }
+        }
+        if (const auto status = reader.read(pid, "status")) {
+          fact.nspid = fsi::nspid_from_status(*status);
+          fact.uid = proc_status_real_uid(*status);
+        }
+        if (const auto cgroup = reader.read(pid, "cgroup")) {
+          fact.cgroup = fsi::cgroup_from_proc(*cgroup);
+        }
+        fact.environ = reader.read(pid, "environ");
+        facts.push_back(std::move(fact));
+      }
+      return facts;
+    }
+
+    /// What the private app stop was asked to do, with everything a test may stand in for.
+    struct private_app_stop_request_t {
+      std::string session_instance_id;
+      flatpak_session_instances::process_t supervisor;
+      std::chrono::seconds exit_timeout {};
+      bool immediate = false;
+      /// A Steam context's app was stopped by the Steam lane just before, which keeps its own fact.
+      bool steam_context = false;
+      std::vector<std::string> launched_app_ids;
+      std::filesystem::path runtime_dir;
+      private_app_stop::timings_t timings;
+      /// Asks the session's windows to close within a timeout.
+      std::function<private_session_attach::close_request_result_t(
+        private_session_attach::window_owner_test_t,
+        std::chrono::milliseconds
+      )>
+        request_close;
+    };
+
+    /// What the private app stop found and did.
+    struct private_app_stop_report_t {
+      bool acted = false;  ///< it found something of the session's to stop
+      private_app_stop::outcome_t outcome;
+      stream_stats::app_stop_t stop;
+      std::vector<pid_t> signalled_sigterm;  ///< every pid sent SIGTERM, for the tests
+      std::vector<pid_t> signalled_sigkill;  ///< every pid sent SIGKILL, for the tests
+    };
+
+    /**
+     * Stop the session's apps the way a player would, in order, while the compositor is still up:
+     * ask the game's windows to close, signal the game, quit the launcher that started it, and SIGKILL
+     * a launcher's sandbox init only as the backstop. Only processes proven to be the session's are
+     * signalled: those of the Flatpak instances it owns, and its own processes outside any sandbox.
+     * The compositor, the shells that ran the launcher, and every instance the session did not start
+     * are left alone.
+     */
+    private_app_stop_report_t stop_private_session_apps(const private_app_stop_request_t &request) {
+      namespace fsi = flatpak_session_instances;
+      private_app_stop_report_t report;
+      const auto reader = fsi::live_proc_reader();
+      const auto &token = request.session_instance_id;
+
+      const auto instances = fsi::read_live_instances(request.runtime_dir, reader);
+      const auto attribution = fsi::attribute(instances, {request.supervisor, token, request.launched_app_ids}, reader);
+
+      if (!attribution.owned.empty()) {
+        std::ostringstream owned;
+        std::string previous_app;
+        for (const auto &instance : attribution.owned) {
+          if (owned.tellp() > 0) {
+            owned << ", ";
+          }
+          owned << (instance.instance.app_id == previous_app ? "" : instance.instance.app_id) << '/'
+                << instance.instance.id << ' ' << fsi::role_name(instance.role);
+          previous_app = instance.instance.app_id;
+        }
+        BOOST_LOG(info) << "process: private app stop: session owns "sv << attribution.owned.size()
+                        << " Flatpak instance(s) ["sv << owned.str() << "]; left alone "sv << attribution.left_alone
+                        << " the session did not start"sv;
+      }
+      if (!attribution.left_alone_same_app.empty()) {
+        BOOST_LOG(info) << "process: private app stop: "sv
+                        << (attribution.owned.empty() ? "no session-owned Flatpak instance remains; "sv : ""sv)
+                        << "left alone "sv << attribution.left_alone_same_app.size() << " instance(s) of "sv
+                        << attribution.left_alone_same_app.front().app_id << " the session did not start"sv;
+      }
+      if (!attribution.unresolved.empty()) {
+        BOOST_LOG(info) << "process: private app stop: "sv << attribution.unresolved.size()
+                        << " Flatpak instance(s) could not be confirmed and are left alone, starting with "sv
+                        << attribution.unresolved.front().app_id << '/' << attribution.unresolved.front().id;
+      }
+
+      const auto facts = read_process_facts(reader);
+      const auto session = private_app_stop::classify(facts, request.supervisor, token, instances, getuid());
+      if (!session.launch_chain.empty()) {
+        BOOST_LOG(info) << "process: private app stop: leaving "sv << session.launch_chain.size()
+                        << " process(es) that ran the launcher to exit with it"sv;
+      }
+
+      // A pid namespace no instance left alone shares, so SIGKILL to its pid 1 ends only the session's.
+      std::set<std::uint64_t> foreign_namespaces;
+      for (const auto &instance : instances.live) {
+        const bool owned = std::any_of(attribution.owned.begin(), attribution.owned.end(), [&instance](const auto &candidate) {
+          return candidate.instance.id == instance.id;
+        });
+        if (!owned) {
+          foreign_namespaces.insert(instance.pid_namespace);
+        }
+      }
+      const auto init_ends_namespace = [&](const fsi::instance_t &instance) {
+        const auto status = reader.read(instance.init.pid, "status");
+        const auto nspid = status ? fsi::nspid_from_status(*status) : std::vector<pid_t> {};
+        return nspid.size() >= 2 && nspid.back() == 1 && !foreign_namespaces.contains(instance.pid_namespace);
+      };
+
+      struct unit_t {
+        const fsi::owned_instance_t *owned = nullptr;
+        std::vector<fsi::member_t> apps;
+        bool init_ends_namespace = false;
+      };
+
+      std::vector<unit_t> games;
+      std::vector<unit_t> launchers;
+      std::vector<unit_t> helpers;
+      for (const auto &owned : attribution.owned) {
+        const auto members = fsi::scope_members(owned.instance, token, instances.live, reader);
+        unit_t unit {&owned, members ? fsi::app_processes(owned.instance, *members) : std::vector<fsi::member_t> {}, init_ends_namespace(owned.instance)};
+        switch (owned.role) {
+          case fsi::role_e::game:
+            games.push_back(std::move(unit));
+            break;
+          case fsi::role_e::launcher:
+            launchers.push_back(std::move(unit));
+            break;
+          case fsi::role_e::helper:
+            helpers.push_back(std::move(unit));
+            break;
+        }
+      }
+
+      // With no game and nothing of the session's own, a launcher is the app: a Flatpak game or
+      // emulator run directly, or a launcher whose game already quit. It is asked to close first.
+      std::string app_label = games.empty() ? "app" : "game";
+      bool launchers_are_the_app = games.empty() && session.session.empty() && !launchers.empty();
+      if (launchers_are_the_app) {
+        for (auto &launcher : launchers) {
+          games.push_back(std::move(launcher));
+        }
+        launchers.clear();
+      }
+
+      std::vector<fsi::process_t> app_processes = session.session;
+      // Every app process a pidfd is held for, by pid and start time, so one the app starts during
+      // the phase, a crash handler or a respawned helper, is found and signalled with the rest.
+      std::set<std::pair<pid_t, std::uint64_t>> tracked;
+      private_app_stop::window_owners_t owners;
+      // The close wait waits for the game's processes and for those whose windows were asked, not for
+      // the rest of the session's own, which are ended after it.
+      std::set<pid_t> game_pids;
+      const auto asked_owners = std::make_shared<private_app_stop::asked_owners_t>();
+      for (const auto &process : session.session) {
+        owners.host.insert(process.pid);
+      }
+      std::vector<fsi::process_t> backstop_inits;
+      std::vector<fsi::process_t> backstop_processes = session.session;
+      for (const auto &game : games) {
+        for (const auto &member : game.apps) {
+          app_processes.push_back(member.process);
+          game_pids.insert(member.process.pid);
+          owners.host.insert(member.process.pid);
+          if (member.nspid.size() >= 2) {
+            owners.sandbox_app.insert(member.nspid.back());
+          }
+        }
+        if (game.init_ends_namespace) {
+          backstop_inits.push_back(game.owned->instance.init);
+        } else {
+          const auto processes = processes_of(game.apps);
+          backstop_processes.insert(backstop_processes.end(), processes.begin(), processes.end());
+        }
+      }
+      for (const auto *others : {&launchers, &helpers}) {
+        for (const auto &unit : *others) {
+          for (const auto &member : unit.apps) {
+            if (member.nspid.size() >= 2) {
+              owners.sandbox_other.insert(member.nspid.back());
+            }
+          }
+        }
+      }
+
+      for (const auto &process : app_processes) {
+        tracked.insert({process.pid, process.start_time});
+      }
+      auto app_handles = open_exact_pidfds(app_processes);
+      auto backstop_init_handles = open_exact_pidfds(backstop_inits);
+      auto backstop_process_handles = open_exact_pidfds(backstop_processes);
+      // One pidfd per launcher's init, or none when it was already gone.
+      std::vector<std::vector<pidfd_handle_t>> launcher_inits;
+      std::vector<std::string> launcher_ids;
+      for (const auto &launcher : launchers) {
+        launcher_inits.push_back(open_exact_pidfds({launcher.owned->instance.init}));
+        launcher_ids.push_back(launcher.owned->instance.app_id);
+      }
+
+      const auto current_members = [&](const fsi::owned_instance_t &owned) {
+        const auto members = fsi::scope_members(owned.instance, token, instances.live, reader);
+        return members ? *members : std::vector<fsi::member_t> {};
+      };
+      // Find what the app started since the phase began, by the same rules that found the rest.
+      const auto track_new_app_processes = [&]() {
+        std::vector<fsi::process_t> added;
+        std::vector<fsi::process_t> added_backstop;
+        const auto fresh = private_app_stop::classify(read_process_facts(reader), request.supervisor, token, instances, getuid());
+        for (const auto &process : fresh.session) {
+          if (tracked.insert({process.pid, process.start_time}).second) {
+            added.push_back(process);
+            added_backstop.push_back(process);
+          }
+        }
+        for (const auto &game : games) {
+          for (const auto &member : fsi::app_processes(game.owned->instance, current_members(*game.owned))) {
+            if (tracked.insert({member.process.pid, member.process.start_time}).second) {
+              added.push_back(member.process);
+              game_pids.insert(member.process.pid);
+              if (!game.init_ends_namespace) {
+                added_backstop.push_back(member.process);
+              }
+            }
+          }
+        }
+        for (auto &handle : open_exact_pidfds(added)) {
+          app_handles.emplace_back(std::move(handle));
+        }
+        for (auto &handle : open_exact_pidfds(added_backstop)) {
+          backstop_process_handles.emplace_back(std::move(handle));
+        }
+      };
+      const auto record_signal = [&report](const std::vector<pidfd_handle_t> &handles, int signal_number) {
+        auto &record = signal_number == SIGKILL ? report.signalled_sigkill : report.signalled_sigterm;
+        for (const auto &handle : handles) {
+          if (!pidfd_has_exited(handle)) {
+            record.push_back(handle.pid);
+          }
+        }
+      };
+
+      private_app_stop::plan_t plan;
+      plan.immediate = request.immediate;
+      plan.exit_timeout = request.exit_timeout;
+      plan.has_app = !app_handles.empty();
+      plan.app_label = app_label;
+      plan.launchers = launcher_ids;
+      report.acted = plan.has_app || !plan.launchers.empty() || !helpers.empty();
+
+      private_app_stop::actions_t actions;
+      actions.ask_app_to_close = [&](std::chrono::milliseconds timeout) {
+        if (!request.request_close) {
+          return 0;
+        }
+        return request.request_close(private_app_stop::window_owner_test(owners, asked_owners), timeout).windows_asked;
+      };
+      actions.wait_app = [&](std::chrono::milliseconds timeout) {
+        return wait_for_pidfds_exit(app_handles, timeout);
+      };
+      actions.wait_asked = [&](std::chrono::milliseconds timeout) {
+        std::set<pid_t> asked;
+        {
+          std::lock_guard lock(asked_owners->mutex);
+          asked = asked_owners->host;
+        }
+        return wait_for_pidfds_exit(app_handles, timeout, [&](const pidfd_handle_t &handle) {
+          return game_pids.contains(handle.pid) || asked.contains(handle.pid);
+        });
+      };
+      actions.sigterm_app = [&]() {
+        track_new_app_processes();
+        record_signal(app_handles, SIGTERM);
+        return signal_all(app_handles, SIGTERM);
+      };
+      actions.sigkill_app = [&]() {
+        track_new_app_processes();
+        record_signal(backstop_init_handles, SIGKILL);
+        record_signal(backstop_process_handles, SIGKILL);
+        (void) signal_all(backstop_init_handles, SIGKILL);
+        (void) signal_all(backstop_process_handles, SIGKILL);
+      };
+      actions.launcher_alive = [&](std::size_t index) {
+        return !launcher_inits[index].empty() && !pidfd_has_exited(launcher_inits[index].front());
+      };
+      actions.settle_launchers = [&](std::chrono::milliseconds timeout) {
+        std::vector<pidfd_handle_t> settle;
+        for (const auto &launcher : launchers) {
+          const auto members = current_members(*launcher.owned);
+          auto handles = open_exact_pidfds(processes_of(private_app_stop::settle_processes(launcher.owned->instance, members)));
+          for (auto &handle : handles) {
+            settle.emplace_back(std::move(handle));
+          }
+        }
+        if (settle.empty()) {
+          return true;
+        }
+        BOOST_LOG(info) << "process: private app stop: waiting up to "sv << timeout.count() << " ms for "sv << settle.size()
+                        << " process(es) the launcher ran for the "sv << app_label << " to return"sv;
+        return wait_for_pidfds_exit(settle, timeout);
+      };
+      actions.sigterm_launcher = [&](std::size_t index) {
+        const auto &launcher = launchers[index];
+        auto handles = open_exact_pidfds(processes_of(fsi::app_processes(launcher.owned->instance, current_members(*launcher.owned))));
+        record_signal(handles, SIGTERM);
+        return signal_all(handles, SIGTERM);
+      };
+      actions.wait_launcher = [&](std::size_t index, std::chrono::milliseconds timeout) {
+        return wait_for_pidfds_exit(launcher_inits[index], timeout);
+      };
+      actions.sigkill_launcher_init = [&](std::size_t index) {
+        const auto &launcher = launchers[index];
+        if (launcher.init_ends_namespace && !launcher_inits[index].empty()) {
+          const auto &init = launcher_inits[index].front();
+          BOOST_LOG(warning) << "process: private app stop: SIGKILL to sandbox init pid="sv << init.pid
+                             << " of launcher "sv << launcher.owned->instance.app_id;
+          report.signalled_sigkill.push_back(init.pid);
+          (void) send_pidfd_signal(init, SIGKILL);
+          return;
+        }
+        // An init that is not pid 1 of a namespace of the session's alone ends nothing else, so its
+        // processes are killed one by one.
+        auto handles = open_exact_pidfds(processes_of(fsi::app_processes(launcher.owned->instance, current_members(*launcher.owned))));
+        BOOST_LOG(warning) << "process: private app stop: SIGKILL to "sv << handles.size() << " process(es) of launcher "sv
+                           << launcher.owned->instance.app_id;
+        record_signal(handles, SIGKILL);
+        (void) signal_all(handles, SIGKILL);
+      };
+      actions.wait_scopes = [&](std::chrono::milliseconds timeout) {
+        std::vector<pidfd_handle_t> remaining;
+        for (const auto &owned : attribution.owned) {
+          auto handles = open_exact_pidfds(processes_of(current_members(owned)));
+          for (auto &handle : handles) {
+            remaining.emplace_back(std::move(handle));
+          }
+        }
+        return remaining.empty() || wait_for_pidfds_exit(remaining, timeout);
+      };
+
+      report.outcome = private_app_stop::run(plan, actions, request.timings);
+      const auto &outcome = report.outcome;
+
+      auto &stop = report.stop;
+      stop.path = outcome.path.empty() ? "exited_before_stop" : outcome.path;
+      stop.windows_asked = outcome.windows_asked;
+      stop.waited = outcome.waited;
+      stop.target = attribution.owned.empty() ? "session" : "flatpak";
+      if (!outcome.launchers.empty()) {
+        stop.launcher = stream_stats::app_stop_t::launcher_t {outcome.launchers.front().app_id, outcome.launchers.front().path, outcome.launchers.front().waited};
+      }
+      if (!attribution.owned.empty() || attribution.left_alone > 0) {
+        stream_stats::app_stop_t::flatpak_instances_t counts;
+        for (const auto &owned : attribution.owned) {
+          switch (owned.role) {
+            case fsi::role_e::launcher:
+              ++counts.launcher;
+              break;
+            case fsi::role_e::game:
+              ++counts.game;
+              break;
+            case fsi::role_e::helper:
+              ++counts.helper;
+              break;
+          }
+        }
+        counts.left_alone = attribution.left_alone;
+        stop.flatpak_instances = counts;
+      }
+
+      if (report.acted) {
+        BOOST_LOG(info) << "process: private app stop: done path="sv << stop.path << " launcher="sv
+                        << (stop.launcher ? stop.launcher->path : "none"s) << " elapsed_ms="sv << outcome.elapsed.count()
+                        << (outcome.drained ? ""sv : " with processes remaining"sv) << "; stopping the compositor"sv;
+      } else {
+        BOOST_LOG(info) << "process: private app stop: nothing of the session's is running; stopping the compositor"sv;
+      }
+      if (!request.steam_context) {
+        stream_stats::record_app_stop(stop);
+      }
+      return report;
+    }
+
     bool terminate_session_owned_steam_app_lineage(
       const proc::ctx_t &app,
-      std::string_view session_instance_id
+      std::string_view session_instance_id,
+      const private_steam_app_close_request_t &request_close = {},
+      const private_steam_stop_budget_t &budget = {},
+      const private_steam_app_stop_timeouts_t &timeouts = {},
+      private_steam_app_stop_outcome_t *outcome = nullptr
     ) {
       const auto appid = steam_appid_for_context(app);
       if (appid.empty()) {
@@ -2654,10 +3405,38 @@ namespace proc {
       }
       if (roots.roots.empty()) {
         BOOST_LOG(info) << "process: private Steam app is already quiescent appid="sv << appid;
+        record_private_steam_app_stop({"exited_before_stop", 0, {}}, outcome);
         return true;
       }
 
       const auto app_root_pid = roots.roots.front().pid;
+      const auto stop_started = std::chrono::steady_clock::now();
+      const auto waited = [&stop_started]() {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - stop_started);
+      };
+
+      // Ask first, the way a player closing the window would, while the app can still run to hear
+      // it: a Proton title saves as it quits, and a signal gives it no chance to. Nothing is frozen
+      // yet, so a lineage that closes is gone before any signal is sent.
+      const int windows_asked = request_close ? request_close(app_root_pid) : 0;
+      if (windows_asked > 0) {
+        const auto close_wait = budget.clamp(timeouts.close);
+        BOOST_LOG(info) << "process: asked the private Steam app to close "sv << windows_asked
+                        << " window(s) the way a player would; waiting up to "sv << close_wait.count()
+                        << " ms appid="sv << appid;
+        if (wait_for_pidfds_exit(roots.roots, close_wait)) {
+          BOOST_LOG(info) << "process: private Steam app closed after the close request appid="sv << appid
+                          << " waited_ms="sv << waited().count();
+          record_private_steam_app_stop({"close_request", windows_asked, waited()}, outcome);
+          return true;
+        }
+        BOOST_LOG(info) << "process: private Steam app did not close within "sv << close_wait.count()
+                        << " ms of the close request; asking it with SIGTERM appid="sv << appid;
+      } else {
+        BOOST_LOG(info) << "process: no window of the private Steam app takes a close request; asking it "sv
+                        << "with SIGTERM appid="sv << appid;
+      }
+      const auto sigterm_wait = budget.clamp(windows_asked > 0 ? timeouts.sigterm_after_close : timeouts.sigterm);
       std::vector<pidfd_handle_t> frozen;
       std::set<pid_t> captured;
       for (auto &root : roots.roots) {
@@ -2757,9 +3536,11 @@ namespace proc {
         return false;
       }
       resume_on_failure.disable();
-      if (!wait_for_pidfds_exit(frozen, private_steam_app_sigterm_timeout)) {
-        BOOST_LOG(warning) << "process: exact private Steam app lineage did not exit after SIGTERM; sending pidfd SIGKILL appid="sv
-                           << appid;
+      std::string path = "sigterm";
+      if (!wait_for_pidfds_exit(frozen, sigterm_wait)) {
+        BOOST_LOG(warning) << "process: exact private Steam app lineage did not exit "sv << sigterm_wait.count()
+                           << " ms after SIGTERM; sending pidfd SIGKILL appid="sv << appid;
+        path = "sigkill";
         for (const auto &handle : frozen) {
           if (!send_pidfd_signal(handle, SIGKILL)) {
             return false;
@@ -2768,9 +3549,13 @@ namespace proc {
         if (!wait_for_pidfds_exit(frozen, private_steam_app_sigkill_timeout)) {
           return false;
         }
+      } else {
+        BOOST_LOG(info) << "process: private Steam app exited after SIGTERM appid="sv << appid
+                        << " waited_ms="sv << waited().count();
       }
+      record_private_steam_app_stop({path, windows_asked, waited()}, outcome);
       BOOST_LOG(info) << "process: exact private Steam app lineage drained before native shutdown appid="sv
-                      << appid << " processes="sv << frozen.size();
+                      << appid << " processes="sv << frozen.size() << " path="sv << path;
       return true;
     }
 
@@ -2779,8 +3564,11 @@ namespace proc {
       bool session_owned_cage,
       std::string_view session_instance_id,
       const boost::process::v1::environment &env,
-      private_steam_graceful_shutdown_request_t request_graceful_shutdown
+      private_steam_graceful_shutdown_request_t request_graceful_shutdown,
+      private_steam_app_close_request_t request_app_close = {}
     ) {
+      // Taken before the first wait, so every stage below draws on it.
+      const auto budget = private_steam_stop_budget_t::starting_now();
       const bool steam_context = context_uses_steam(app);
       if (!session_owned_cage || session_instance_id.empty() || !steam_context) {
         return false;
@@ -2832,7 +3620,9 @@ namespace proc {
         const bool app_quiescent = quiesce_session_owned_steam_app_before_native_shutdown(
           app,
           session_instance_id,
-          env
+          env,
+          request_app_close,
+          budget
         );
         if (app_quiescent) {
           BOOST_LOG(info) << "process: requesting session-owned Steam native shutdown after exact app quiescence"sv;
@@ -2845,7 +3635,7 @@ namespace proc {
             [&]() {
               return wait_for_pidfds_exit(
                 ownership.roots,
-                private_steam_native_shutdown_timeout
+                budget.clamp(private_steam_native_shutdown_timeout)
               );
             }
           );
@@ -3716,8 +4506,9 @@ namespace proc {
         if (command_contains_steam_big_picture_close(cmd.undo_cmd) || command_requests_steam_shutdown(cmd.undo_cmd)) {
           const auto shutdown_cmd = canonical_steam_shutdown_command(cmd.undo_cmd);
           if (shutdown_cmd != cmd.undo_cmd) {
-            BOOST_LOG(info) << "process: upgraded Steam Big Picture cleanup command from ["
-                            << cmd.undo_cmd << "] to [" << shutdown_cmd << ']';
+            // In memory only, on every read of an apps.json an older Polaris wrote, so not news.
+            BOOST_LOG(debug) << "process: upgraded Steam Big Picture cleanup command from ["
+                             << cmd.undo_cmd << "] to [" << shutdown_cmd << ']';
             cmd.undo_cmd = shutdown_cmd;
           }
         }
@@ -3824,8 +4615,9 @@ namespace proc {
         if (command_contains_steam_big_picture_close(cmd.undo_cmd) || command_requests_steam_shutdown(cmd.undo_cmd)) {
           const auto shutdown_cmd = canonical_steam_shutdown_command(cmd.undo_cmd);
           if (shutdown_cmd != cmd.undo_cmd) {
-            BOOST_LOG(info) << "process: upgraded Steam cleanup command from ["
-                            << cmd.undo_cmd << "] to [" << shutdown_cmd << ']';
+            // In memory only, on every read of an apps.json an older Polaris wrote, so not news.
+            BOOST_LOG(debug) << "process: upgraded Steam cleanup command from ["
+                             << cmd.undo_cmd << "] to [" << shutdown_cmd << ']';
             cmd.undo_cmd = shutdown_cmd;
           }
         }
@@ -4041,6 +4833,10 @@ namespace proc {
     }
 #endif
   }  // namespace
+
+  std::string canonical_steam_shutdown_undo() {
+    return canonical_steam_shutdown_command("setsid steam");
+  }
 
   launch_probe_outcome_e launch_probe_outcome(
     bool matched,
@@ -4449,14 +5245,15 @@ namespace proc {
     bool wait_for_steam_app_stopped_event(
       const std::filesystem::path &path,
       const steam_game_process_log_snapshot_result_t &snapshot,
-      std::string_view appid
+      std::string_view appid,
+      const private_steam_stop_budget_t &budget
     ) {
       if (snapshot.status != steam_game_process_log_snapshot_status_e::captured ||
           !snapshot.identity) {
         return false;
       }
       auto cursor = snapshot.offset;
-      const auto deadline = std::chrono::steady_clock::now() + private_steam_app_exit_timeout;
+      const auto deadline = std::chrono::steady_clock::now() + budget.clamp(private_steam_app_exit_timeout);
       while (std::chrono::steady_clock::now() < deadline) {
         const auto current_identity = steam_game_process_log_identity(path);
         if (!current_identity || *current_identity != *snapshot.identity) {
@@ -4478,7 +5275,7 @@ namespace proc {
           const auto event = parse_steam_game_process_event(line);
           if (event.kind == steam_game_process_event_kind_internal_e::stopped &&
               event.appid == appid) {
-            std::this_thread::sleep_for(private_steam_app_settle_time);
+            std::this_thread::sleep_for(budget.clamp(private_steam_app_settle_time));
             return true;
           }
         }
@@ -4493,7 +5290,9 @@ namespace proc {
     bool quiesce_session_owned_steam_app_before_native_shutdown(
       const proc::ctx_t &app,
       std::string_view session_instance_id,
-      const boost::process::v1::environment &env
+      const boost::process::v1::environment &env,
+      const private_steam_app_close_request_t &request_close,
+      const private_steam_stop_budget_t &budget
     ) {
       const auto appid = steam_appid_for_context(app);
       if (appid.empty()) {
@@ -4511,10 +5310,10 @@ namespace proc {
         return false;
       }
       if (!roots_before.roots.empty() &&
-          !terminate_session_owned_steam_app_lineage(app, session_instance_id)) {
+          !terminate_session_owned_steam_app_lineage(app, session_instance_id, request_close, budget)) {
         return false;
       }
-      if (!wait_for_steam_app_stopped_event(log_path, log_snapshot, appid)) {
+      if (!wait_for_steam_app_stopped_event(log_path, log_snapshot, appid, budget)) {
         BOOST_LOG(warning) << "process: exact Steam app-stopped event did not arrive before native shutdown appid="sv
                            << appid;
         return false;
@@ -5629,6 +6428,87 @@ namespace proc {
     return terminate_session_owned_steam_app_lineage(app, session_instance_id);
   }
 
+  private_steam_app_stop_test_result_t stop_session_owned_steam_app_lineage_for_tests(
+    const ctx_t &app,
+    std::string_view session_instance_id,
+    std::function<int(pid_t)> request_close,
+    std::chrono::milliseconds close_timeout,
+    std::chrono::milliseconds sigterm_timeout,
+    std::chrono::milliseconds sigterm_after_close_timeout
+  ) {
+    private_steam_app_stop_outcome_t outcome;
+    private_steam_app_stop_test_result_t result;
+    result.drained = terminate_session_owned_steam_app_lineage(
+      app,
+      session_instance_id,
+      request_close,
+      {},
+      private_steam_app_stop_timeouts_t {close_timeout, sigterm_timeout, sigterm_after_close_timeout},
+      &outcome
+    );
+    result.path = outcome.path;
+    result.windows_asked = outcome.windows_asked;
+    return result;
+  }
+
+  std::chrono::milliseconds private_steam_stop_budget_for_tests() {
+    return private_steam_stop_budget;
+  }
+
+  std::chrono::milliseconds private_steam_stop_budget_clamp_for_tests(
+    std::chrono::milliseconds remaining,
+    std::chrono::milliseconds timeout
+  ) {
+    return clamp_to_budget(remaining, timeout);
+  }
+
+  private_app_stop_test_result_t stop_private_session_apps_for_tests(
+    std::string_view session_instance_id,
+    pid_t supervisor_pid,
+    const std::filesystem::path &runtime_dir,
+    bool immediate,
+    int timing_divisor,
+    std::function<int(const std::function<bool(pid_t)> &asks_host_pid)> request_close
+  ) {
+    private_app_stop_test_result_t result;
+    const auto supervisor_start = proc_start_time_ticks(supervisor_pid);
+    if (!supervisor_start) {
+      return result;
+    }
+    private_app_stop_request_t request;
+    request.session_instance_id = std::string {session_instance_id};
+    request.supervisor = {supervisor_pid, *supervisor_start};
+    request.immediate = immediate;
+    request.runtime_dir = runtime_dir;
+    auto &timings = request.timings;
+    const auto divisor = std::max(1, timing_divisor);
+    for (auto *timing : {&timings.budget, &timings.close_request, &timings.close_wait_floor, &timings.exit_timeout_ceiling, &timings.sigterm, &timings.sigterm_after_close, &timings.immediate_sigterm, &timings.sigkill_wait, &timings.left_settle, &timings.launcher_settle, &timings.launcher_quit, &timings.backstop_wait}) {
+      *timing /= divisor;
+    }
+    if (request_close) {
+      request.request_close = [request_close](private_session_attach::window_owner_test_t owners, std::chrono::milliseconds) {
+        private_session_attach::close_request_result_t asked;
+        asked.status = private_session_attach::probe_status_e::ok;
+        asked.windows_asked = request_close([&owners](pid_t pid) {
+          return owners.host_pid && owners.host_pid(static_cast<std::uint32_t>(pid));
+        });
+        return asked;
+      };
+    }
+    const auto report = stop_private_session_apps(request);
+    result.acted = report.acted;
+    result.path = report.stop.path;
+    result.windows_asked = report.outcome.windows_asked;
+    for (const auto &launcher : report.outcome.launchers) {
+      result.launcher_paths.push_back(launcher.path);
+    }
+    result.drained = report.outcome.drained;
+    result.elapsed = report.outcome.elapsed;
+    result.sigterm = report.signalled_sigterm;
+    result.sigkill = report.signalled_sigkill;
+    return result;
+  }
+
   bool steam_launch_cmdline_matches_appid_for_tests(
     std::string_view cmdline,
     std::string_view appid
@@ -6203,6 +7083,31 @@ namespace proc {
     return !terminate_isolated_session_processes(session_instance_id, "during reused-pid test"sv);
   }
 
+  exact_generation_snapshot_test_result_t exact_generation_snapshot_for_tests(
+    std::string_view session_instance_id,
+    const std::set<pid_t> &recorded_flatpak_sandboxes
+  ) {
+    const auto previous = forced_flatpak_sandbox_pids_for_tests;
+    auto restore = util::fail_guard([previous]() {
+      forced_flatpak_sandbox_pids_for_tests = previous;
+    });
+    forced_flatpak_sandbox_pids_for_tests = &recorded_flatpak_sandboxes;
+    const auto snapshot = isolated_session_process_snapshot_after_quiescence(session_instance_id, "during snapshot test"sv);
+    exact_generation_snapshot_test_result_t result;
+    result.capture_complete = snapshot.capture_complete;
+    for (const auto &handle : snapshot.owned) {
+      result.owned.push_back(handle.pid);
+    }
+    for (const auto &handle : snapshot.flatpak_sandboxes) {
+      result.flatpak_sandboxes.push_back(handle.pid);
+    }
+    for (const auto &process : snapshot.unattributed) {
+      result.unattributed.push_back(process.pid);
+      result.reasons.push_back(process.reason);
+    }
+    return result;
+  }
+
   bool exact_generation_pidfd_open_error_fails_closed_for_tests(
     std::string_view session_instance_id,
     pid_t forced_pid
@@ -6440,6 +7345,7 @@ namespace proc {
       _session_used_cage_compositor,
       _session_instance_id,
       boost::this_process::environment(),
+      {},
       {}
     );
   }
@@ -6632,6 +7538,18 @@ namespace proc {
       generation_available,
       exact_cleanup_complete
     );
+  }
+
+  bool isolated_session_stops_compositor_before_sweep_for_tests(bool session_owned_cage, bool gamescope_runtime) {
+    return isolated_session_stops_compositor_before_sweep(session_owned_cage, gamescope_runtime);
+  }
+
+  std::chrono::milliseconds isolated_session_sweep_grace_for_tests(
+    bool compositor_stopped_first,
+    bool apps_stopped_first,
+    std::chrono::seconds exit_timeout
+  ) {
+    return isolated_session_sweep_grace(compositor_stopped_first, apps_stopped_first, exit_timeout);
   }
 
   bool isolated_session_cleanup_clears_state_for_tests(
@@ -9547,6 +10465,7 @@ namespace proc {
                          << "and Wine can render to the host desktop instead of the private session "sv
                          << "(issue #234). A native, non-Flatpak launcher avoids the hop. See "sv
                          << "docs/troubleshooting.md."sv;
+      warn_if_flatpak_app_already_running(cmd);
     };
 
     auto spawn_detached_into_runtime = [&](const std::string &raw_cmd) {
@@ -10464,8 +11383,33 @@ namespace proc {
       _env,
       [this]() {
         return request_session_owned_steam_graceful_shutdown_before_cage_stop();
+      },
+      [this](pid_t app_root_pid) {
+        return request_private_steam_app_window_close(app_root_pid);
       }
     );
+  }
+
+  int proc_t::request_private_steam_app_window_close(pid_t app_root_pid) const {
+    // Only this session's own labwc, whose Xwayland the app's windows live on. A Gamescope runtime has
+    // no display here to ask on, and its app is asked with SIGTERM instead.
+    const auto in_app_lineage = [app_root_pid](std::uint32_t pid) {
+      // The process each window names, checked against the app's lineage, so Steam's windows in the
+      // same session are never among those asked. X-Resource names it as a host pid; a window's own
+      // _NET_WM_PID is one too for a game outside any pid namespace, as a Steam game is.
+      const auto window_pid = static_cast<pid_t>(pid);
+      if (window_pid == app_root_pid) {
+        return true;
+      }
+      const auto descends = proc_pid_descends_from(window_pid, app_root_pid);
+      return descends && *descends;
+    };
+    return request_private_app_window_close(
+             _session_instance_id,
+             {in_app_lineage, {}},
+             private_steam_app_close_request_timeout
+    )
+      .windows_asked;
   }
 
   bool proc_t::cleanup_tracked_detached_children_after_launch_failure() {
@@ -10488,6 +11432,49 @@ namespace proc {
       BOOST_LOG(error) << "process: retained detached child cleanup incomplete after partial launch failure"sv;
     }
     return complete;
+  }
+
+  // Runs in terminate_impl after the Steam lane and before the generation cleanup, which stops the
+  // compositor. Every app of a private labwc session is stopped the way a player would stop it, while
+  // the compositor it draws on is still up. A Steam context's game was just stopped by the Steam lane,
+  // so this normally finds nothing there.
+  void proc_t::stop_private_session_apps_before_compositor(bool immediate) {
+    _private_apps_stopped_before_compositor = false;
+    if (!_session_used_cage_compositor || _session_used_gamescope_runtime || _session_instance_id.empty()) {
+      return;
+    }
+    if (!stream_runtime::labwc::is_running() || stream_runtime::labwc::session_instance_id() != _session_instance_id) {
+      BOOST_LOG(info) << "process: private app stop: this session's compositor has already stopped; nothing to stop ahead of it"sv;
+      return;
+    }
+    const auto supervisor_pid = stream_runtime::labwc::pid();
+    const auto supervisor_start = supervisor_pid > 1 ? proc_start_time_ticks(supervisor_pid) : std::nullopt;
+    if (!supervisor_start) {
+      BOOST_LOG(warning) << "process: private app stop: the compositor supervisor could not be read; leaving the apps to the exact sweep"sv;
+      return;
+    }
+
+    private_app_stop_request_t request;
+    request.session_instance_id = _session_instance_id;
+    request.supervisor = {supervisor_pid, *supervisor_start};
+    request.exit_timeout = _app.exit_timeout;
+    request.immediate = immediate;
+    request.steam_context = context_uses_steam(_app);
+    request.runtime_dir = private_session_runtime_dir();
+    if (auto app_id = private_session_attach::flatpak_run_app_id(_app.cmd)) {
+      request.launched_app_ids.push_back(std::move(*app_id));
+    }
+    for (const auto &command : _app.detached) {
+      if (auto app_id = private_session_attach::flatpak_run_app_id(command)) {
+        request.launched_app_ids.push_back(std::move(*app_id));
+      }
+    }
+    const auto session_instance_id = _session_instance_id;
+    request.request_close = [session_instance_id](private_session_attach::window_owner_test_t owners, std::chrono::milliseconds timeout) {
+      return request_private_app_window_close(session_instance_id, std::move(owners), timeout);
+    };
+    (void) stop_private_session_apps(request);
+    _private_apps_stopped_before_compositor = true;
   }
 
   void proc_t::finalize_isolated_session_runtime(bool runtime_was_stopped_externally) {
@@ -10517,6 +11504,9 @@ namespace proc {
   }
 
   void proc_t::terminate_isolated_session_generation() {
+    // Whether this teardown's private app phase ran, read once so no later cleanup reuses it.
+    const bool apps_stopped_first = _private_apps_stopped_before_compositor;
+    _private_apps_stopped_before_compositor = false;
     const bool prior_cleanup_complete = _exact_generation_cleanup_complete;
     const bool detached_only = !_app.detached.empty() && _app.cmd.empty();
     const bool exact_cleanup_required = isolated_session_requires_exact_generation_cleanup(
@@ -10528,19 +11518,39 @@ namespace proc {
       return;
     }
 
-    const auto reason = _session_used_cage_compositor ?
-                          "after private Steam pre-cage termination"sv :
-                          "during non-cage detached-only shutdown"sv;
+    // A private labwc session's apps were stopped before this, in order and while the compositor
+    // was still up (stop_private_session_apps_before_compositor). The compositor stops now, first,
+    // and the exact sweep after it is the check that nothing of the generation is left rather than
+    // what ends the app. The sweep used to come first, and its SIGTERM reached labwc, its supervisor
+    // and Xwayland, which carry the session token too, in the same instant as the app, so an app
+    // lost its display as it was asked to quit.
+    const bool compositor_stopped_first = isolated_session_stops_compositor_before_sweep(
+      _session_used_cage_compositor,
+      _session_used_gamescope_runtime
+    );
+    if (compositor_stopped_first) {
+      finalize_isolated_session_runtime(false);
+    }
+
+    const auto reason = compositor_stopped_first      ? "after the private app stop and the compositor stop"sv :
+                        _session_used_cage_compositor ? "after private Steam pre-cage termination"sv :
+                                                        "during non-cage detached-only shutdown"sv;
     // The app's Exit Timeout is the grace the first SIGTERM gets, floored at the two seconds
     // this path always allowed and capped so a stuck process cannot hold End Session for long.
-    const auto graceful_timeout = std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::clamp(std::chrono::seconds(_app.exit_timeout), std::chrono::seconds(2), std::chrono::seconds(30))
+    // After the private app phase, which gave the app that time while its display was up, the
+    // check gets two seconds.
+    const auto graceful_timeout = isolated_session_sweep_grace(
+      compositor_stopped_first,
+      apps_stopped_first,
+      std::chrono::seconds(_app.exit_timeout)
     );
+    isolated_sweep_report_t sweep;
     const bool isolated_cleanup_complete = terminate_isolated_session_processes(
       _session_instance_id,
       reason,
       (!_session_used_cage_compositor && detached_only) ? &_detached_child_pidfds : nullptr,
-      graceful_timeout
+      graceful_timeout,
+      &sweep
     );
     const bool detached_authority_complete =
       _session_used_cage_compositor || !detached_only || _detached_child_authority_complete;
@@ -10551,6 +11561,20 @@ namespace proc {
     if (!_session_used_cage_compositor) {
       if (!_exact_generation_cleanup_complete) {
         BOOST_LOG(error) << "process: retaining immutable detached-only generation after incomplete exact cleanup"sv;
+      }
+      return;
+    }
+
+    if (compositor_stopped_first) {
+      // Anything the sweep had to signal was still running when the compositor went, which is what
+      // ended it; the last session's app_stop says so.
+      stream_stats::record_app_stop_check(
+        sweep.capture_complete,
+        sweep.unattributed,
+        sweep.terminated_any || sweep.sandboxes_remained
+      );
+      if (!_exact_generation_cleanup_complete) {
+        BOOST_LOG(error) << "process: retaining immutable cage generation after its compositor stopped, because exact-generation cleanup was incomplete"sv;
       }
       return;
     }
@@ -10678,6 +11702,7 @@ namespace proc {
     if (!immediate) {
       terminate_session_owned_steam_before_cage_stop();
     }
+    stop_private_session_apps_before_compositor(immediate);
 
     // The immutable launch generation, not mutable config, owns this cleanup.
     // Keep exact-generation ancestors alive while proving pressure-vessel client
@@ -12179,7 +13204,7 @@ namespace proc {
         }
       }
       if (!has_shutdown) {
-        prep.push_back({{"undo", "setsid steam -shutdown"}});
+        prep.push_back({{"undo", canonical_steam_shutdown_undo()}});
       }
       app["prep-cmd"] = std::move(prep);
 

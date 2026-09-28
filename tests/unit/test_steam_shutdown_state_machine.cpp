@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <fstream>
 #include <optional>
+#include <thread>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -14,7 +16,9 @@
 #if defined(__linux__)
   #include <fcntl.h>
   #include <poll.h>
+  #include <set>
   #include <signal.h>
+  #include <sys/prctl.h>
   #include <sys/stat.h>
   #include <sys/syscall.h>
   #include <sys/wait.h>
@@ -419,7 +423,9 @@ TEST(SteamShutdownStateMachineTests, EmptySteamAppRootStillUsesPinnedStopBarrier
     "bool quiesce_session_owned_steam_app_before_native_shutdown(\n"
     "      const proc::ctx_t &app,\n"
     "      std::string_view session_instance_id,\n"
-    "      const boost::process::v1::environment &env\n"
+    "      const boost::process::v1::environment &env,\n"
+    "      const private_steam_app_close_request_t &request_close,\n"
+    "      const private_steam_stop_budget_t &budget\n"
     "    ) {\n"
     "      const auto appid",
     "bool dispatch_steam_big_picture_action("
@@ -564,6 +570,606 @@ TEST(SteamShutdownStateMachineTests, PrivateSteamAppQuiescenceTerminatesOnlyExac
     << "the cage compositor must remain alive until cage teardown";
   EXPECT_EQ(steam_guard.wait(&survivor_status, WNOHANG), 0)
     << "the Steam root must remain alive until native shutdown is dispatched";
+}
+
+#if defined(__linux__)
+namespace {
+  /**
+   * A stand in for a private Steam app: a reaper root carrying Steam's launch marker and the session
+   * token, running script under bash with one background child, as the lineage stop finds a real one.
+   */
+  struct fake_steam_app_t {
+    std::string appid;
+    child_guard_t root;
+    fd_guard_t root_pidfd;
+  };
+
+  std::unique_ptr<fake_steam_app_t> spawn_fake_steam_app(const std::string &token, const char *script) {
+    static int serial = 0;
+    auto app = std::make_unique<fake_steam_app_t>();
+    app->appid = "5151" + std::to_string(getpid()) + std::to_string(++serial);
+    const std::string marker = "AppId=" + app->appid;
+    const auto root = fork();
+    if (root == 0) {
+      setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+      execl("/bin/bash", "reaper", "-c", script, "SteamLaunch", marker.c_str(), nullptr);
+      _exit(127);
+    }
+    if (root < 0) {
+      return nullptr;
+    }
+    app->root.pid = root;
+    app->root_pidfd.fd = static_cast<int>(syscall(SYS_pidfd_open, root, 0));
+    for (int attempt = 0; attempt < 80; ++attempt) {
+      std::ifstream cmdline_file("/proc/" + std::to_string(root) + "/cmdline", std::ios::binary);
+      const std::string cmdline((std::istreambuf_iterator<char>(cmdline_file)), std::istreambuf_iterator<char>());
+      if (proc::steam_launch_cmdline_matches_appid_for_tests(cmdline, app->appid)) {
+        // The background child exists once bash has run the script this far.
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        return app;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return nullptr;
+  }
+
+  proc::ctx_t fake_steam_context(const std::string &appid) {
+    proc::ctx_t app {};
+    app.name = "Control";
+    app.source = "steam";
+    app.steam_appid = appid;
+    return app;
+  }
+
+  int exit_status_of(child_guard_t &root) {
+    int status = 0;
+    if (root.wait(&status, 0) != root.pid || !WIFEXITED(status)) {
+      return -1;
+    }
+    return WEXITSTATUS(status);
+  }
+}  // namespace
+
+TEST(SteamShutdownStateMachineTests, AnAppThatClosesWhenAskedIsNeverSignalled) {
+  // The Control quit papi pasted: SIGTERM, two seconds, then SIGKILL for sixteen processes. A game
+  // asked the way a player's close button asks gets to save and quit on its own.
+  const std::string token = "private-steam-app-close-request";
+  auto app = spawn_fake_steam_app(token, "trap 'kill $!; exit 0' USR1; trap 'kill $!; exit 3' TERM; sleep 60 & wait");
+  ASSERT_TRUE(app);
+  pid_t asked_root = -1;
+  const auto result = proc::stop_session_owned_steam_app_lineage_for_tests(
+    fake_steam_context(app->appid),
+    token,
+    [&](pid_t app_root) {
+      asked_root = app_root;
+      // What Wine does with WM_DELETE_WINDOW, stood in for by a signal the app treats as a close.
+      (void) kill(app_root, SIGUSR1);
+      return 1;
+    },
+    std::chrono::seconds(5),
+    std::chrono::seconds(5),
+    std::chrono::seconds(5)
+  );
+  EXPECT_TRUE(result.drained);
+  EXPECT_EQ(result.path, "close_request");
+  EXPECT_EQ(result.windows_asked, 1);
+  EXPECT_EQ(asked_root, app->root.pid) << "the close request goes to the exact AppID root's lineage";
+  EXPECT_EQ(exit_status_of(app->root), 0) << "the app quit on its own, with no SIGTERM";
+}
+
+TEST(SteamShutdownStateMachineTests, AnAppThatIgnoresTheCloseRequestIsAskedWithSigterm) {
+  const std::string token = "private-steam-app-close-ignored";
+  auto app = spawn_fake_steam_app(token, "trap 'kill $!; exit 3' TERM; sleep 60 & wait");
+  ASSERT_TRUE(app);
+  const auto result = proc::stop_session_owned_steam_app_lineage_for_tests(
+    fake_steam_context(app->appid),
+    token,
+    [](pid_t) {
+      return 1;
+    },
+    std::chrono::milliseconds(200),
+    std::chrono::seconds(5),
+    std::chrono::seconds(5)
+  );
+  EXPECT_TRUE(result.drained);
+  EXPECT_EQ(result.path, "sigterm");
+  EXPECT_EQ(result.windows_asked, 1);
+  EXPECT_EQ(exit_status_of(app->root), 3) << "SIGTERM, not SIGKILL, ended it";
+}
+
+TEST(SteamShutdownStateMachineTests, AnAppWithNothingToAskGoesStraightToSigterm) {
+  // A native Wayland window, or a session whose X display cannot be reached.
+  const std::string token = "private-steam-app-no-window";
+  auto app = spawn_fake_steam_app(token, "trap 'kill $!; exit 3' TERM; sleep 60 & wait");
+  ASSERT_TRUE(app);
+  const auto result = proc::stop_session_owned_steam_app_lineage_for_tests(
+    fake_steam_context(app->appid),
+    token,
+    [](pid_t) {
+      return 0;
+    },
+    std::chrono::seconds(30),
+    std::chrono::seconds(5),
+    std::chrono::seconds(5)
+  );
+  EXPECT_TRUE(result.drained);
+  EXPECT_EQ(result.path, "sigterm");
+  EXPECT_EQ(result.windows_asked, 0);
+  EXPECT_EQ(exit_status_of(app->root), 3);
+}
+
+TEST(SteamShutdownStateMachineTests, OnlyAnAppThatOutlivesSigtermIsKilled) {
+  const std::string token = "private-steam-app-sigkill";
+  auto app = spawn_fake_steam_app(token, "trap '' TERM; sleep 60 & wait");
+  ASSERT_TRUE(app);
+  const auto result = proc::stop_session_owned_steam_app_lineage_for_tests(
+    fake_steam_context(app->appid),
+    token,
+    {},
+    std::chrono::milliseconds(200),
+    std::chrono::milliseconds(300),
+    std::chrono::milliseconds(300)
+  );
+  EXPECT_TRUE(result.drained);
+  EXPECT_EQ(result.path, "sigkill");
+  int status = 0;
+  ASSERT_EQ(app->root.wait(&status, 0), app->root.pid);
+  EXPECT_TRUE(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+}
+
+TEST(SteamShutdownStateMachineTests, AnAppAlreadyGoneIsRecordedAsExitedBeforeTheStop) {
+  const auto result = proc::stop_session_owned_steam_app_lineage_for_tests(
+    fake_steam_context("51519999999"),
+    "private-steam-app-already-gone",
+    [](pid_t) {
+      ADD_FAILURE() << "nothing is left to ask";
+      return 0;
+    },
+    std::chrono::seconds(1),
+    std::chrono::seconds(1),
+    std::chrono::seconds(1)
+  );
+  EXPECT_TRUE(result.drained);
+  EXPECT_EQ(result.path, "exited_before_stop");
+}
+
+namespace {
+  std::vector<pid_t> children_of(pid_t pid) {
+    std::ifstream in("/proc/" + std::to_string(pid) + "/task/" + std::to_string(pid) + "/children");
+    std::vector<pid_t> children;
+    pid_t child = 0;
+    while (in >> child) {
+      children.push_back(child);
+    }
+    return children;
+  }
+
+  std::string comm_of(pid_t pid) {
+    std::ifstream in("/proc/" + std::to_string(pid) + "/comm");
+    std::string comm;
+    std::getline(in, comm);
+    return comm;
+  }
+
+  /// Alive and not a zombie, which kill(pid, 0) alone cannot tell apart.
+  bool running(pid_t pid) {
+    std::ifstream in("/proc/" + std::to_string(pid) + "/stat");
+    std::string stat;
+    std::getline(in, stat);
+    const auto state = stat.rfind(')');
+    return state != std::string::npos && state + 2 < stat.size() && stat[state + 2] != 'Z';
+  }
+
+  void collect_descendants(pid_t pid, std::vector<pid_t> &out) {
+    for (const auto child : children_of(pid)) {
+      out.push_back(child);
+      collect_descendants(child, out);
+    }
+  }
+
+  /**
+   * A private session as the app stop finds it, with no compositor behind the names: a supervisor
+   * that is a subreaper and carries the session token, labwc and Xwayland under it by name, and a
+   * startup shell under labwc running the app's script. Everything here is this test's own, and it
+   * reaps it all.
+   */
+  struct fake_private_session_t {
+    child_guard_t supervisor;
+    pid_t labwc = -1;
+    pid_t xwayland = -1;
+    pid_t shell = -1;
+    pid_t anonymous_bwrap = -1;
+    pid_t placeholder = -1;  ///< labwc's startup client when the app is Polaris's own child
+    pid_t background = -1;  ///< swaybg, which the generated autostart starts
+    pid_t user_helper = -1;  ///< what a user's own autostart runs
+    std::filesystem::path runtime_dir;
+
+    ~fake_private_session_t() {
+      std::vector<pid_t> tree;
+      if (supervisor.pid > 0) {
+        collect_descendants(supervisor.pid, tree);
+      }
+      for (const auto pid : tree) {
+        (void) kill(pid, SIGKILL);
+      }
+      std::error_code ignored;
+      std::filesystem::remove_all(runtime_dir, ignored);
+    }
+
+    bool compositor_running() const {
+      return running(supervisor.pid) && running(labwc) && running(xwayland);
+    }
+  };
+
+  std::unique_ptr<fake_private_session_t> spawn_fake_private_session(const std::string &token, const char *script, bool with_helpers = false) {
+    static int serial = 0;
+    auto session = std::make_unique<fake_private_session_t>();
+    session->runtime_dir = std::filesystem::temp_directory_path() /
+                           ("polaris-private-app-stop-" + std::to_string(getpid()) + "-" + std::to_string(++serial));
+    std::filesystem::remove_all(session->runtime_dir);
+    std::filesystem::create_directories(session->runtime_dir / ".flatpak");
+    // A process named bwrap with a zero-byte environ, as Flatpak's are, which no record names.
+    const auto bwrap_link = session->runtime_dir / "bwrap";
+    std::filesystem::create_symlink("/bin/sleep", bwrap_link);
+    const auto bwrap_path = bwrap_link.string();
+
+    const auto supervisor = fork();
+    if (supervisor == 0) {
+      setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+      (void) prctl(PR_SET_CHILD_SUBREAPER, 1);
+      const auto labwc = fork();
+      if (labwc == 0) {
+        (void) prctl(PR_SET_NAME, "labwc");
+        (void) signal(SIGCHLD, SIG_IGN);
+        if (fork() == 0) {
+          (void) signal(SIGCHLD, SIG_DFL);
+          (void) prctl(PR_SET_NAME, "Xwayland");
+          for (;;) {
+            pause();
+          }
+        }
+        if (fork() == 0) {
+          (void) signal(SIGCHLD, SIG_DFL);
+          char *empty[] = {nullptr};
+          execle(bwrap_path.c_str(), "bwrap", "30", static_cast<char *>(nullptr), empty);
+          _exit(127);
+        }
+        if (fork() == 0) {
+          (void) signal(SIGCHLD, SIG_DFL);
+          // A startup file a user's environment names would run first and start processes of its own.
+          (void) unsetenv("BASH_ENV");
+          (void) unsetenv("ENV");
+          execl("/bin/bash", "bash", "-c", script, static_cast<char *>(nullptr));
+          _exit(127);
+        }
+        if (with_helpers) {
+          // What never exits on its own: labwc's startup client when the app is Polaris's own
+          // child, the background the generated autostart paints, and a user's autostart helper.
+          if (fork() == 0) {
+            (void) signal(SIGCHLD, SIG_DFL);
+            execl("/bin/sleep", "sleep", "infinity", static_cast<char *>(nullptr));
+            _exit(127);
+          }
+          for (const char *name : {"swaybg", "waybar"}) {
+            if (fork() == 0) {
+              (void) signal(SIGCHLD, SIG_DFL);
+              (void) prctl(PR_SET_NAME, name);
+              for (;;) {
+                pause();
+              }
+            }
+          }
+        }
+        for (;;) {
+          pause();
+        }
+      }
+      for (;;) {
+        if (wait(nullptr) < 0 && errno == ECHILD) {
+          pause();
+        }
+      }
+    }
+    if (supervisor < 0) {
+      return nullptr;
+    }
+    session->supervisor.pid = supervisor;
+    for (int attempt = 0; attempt < 400; ++attempt) {
+      for (const auto child : children_of(supervisor)) {
+        if (comm_of(child) == "labwc") {
+          session->labwc = child;
+        }
+      }
+      if (session->labwc > 0) {
+        for (const auto child : children_of(session->labwc)) {
+          const auto comm = comm_of(child);
+          if (comm == "Xwayland") {
+            session->xwayland = child;
+          } else if (comm == "bash") {
+            session->shell = child;
+          } else if (comm == "bwrap") {
+            session->anonymous_bwrap = child;
+          } else if (comm == "sleep") {
+            session->placeholder = child;
+          } else if (comm == "swaybg") {
+            session->background = child;
+          } else if (comm == "waybar") {
+            session->user_helper = child;
+          }
+        }
+      }
+      // The script's own sleep is started once bash has run it this far.
+      std::vector<pid_t> started;
+      if (session->shell > 0) {
+        collect_descendants(session->shell, started);
+      }
+      const bool script_running = std::any_of(started.begin(), started.end(), [](pid_t pid) {
+        return comm_of(pid) == "sleep";
+      });
+      const bool helpers_running = !with_helpers || (session->placeholder > 0 && session->background > 0 && session->user_helper > 0);
+      if (session->xwayland > 0 && session->shell > 0 && session->anonymous_bwrap > 0 && script_running && helpers_running) {
+        return session;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return nullptr;
+  }
+
+  std::string private_app_stop_token() {
+    static int serial = 0;
+    return "private-app-stop-test-" + std::to_string(getpid()) + "-" + std::to_string(++serial);
+  }
+
+  bool contains(const std::vector<pid_t> &pids, pid_t pid) {
+    return std::find(pids.begin(), pids.end(), pid) != pids.end();
+  }
+
+  void expect_compositor_untouched(const fake_private_session_t &session, const proc::private_app_stop_test_result_t &result) {
+    EXPECT_TRUE(session.compositor_running()) << "the compositor is stopped after the phase, never by it";
+    for (const auto pid : {session.supervisor.pid, session.labwc, session.xwayland, session.anonymous_bwrap}) {
+      EXPECT_FALSE(contains(result.sigterm, pid)) << pid << " (" << comm_of(pid) << ") was sent SIGTERM";
+      EXPECT_FALSE(contains(result.sigkill, pid)) << pid << " (" << comm_of(pid) << ") was sent SIGKILL";
+    }
+    EXPECT_TRUE(running(session.anonymous_bwrap)) << "a bwrap with a zero-byte environ is never signalled";
+  }
+}  // namespace
+
+TEST(SteamShutdownStateMachineTests, PrivateAppStopAsksTheGameToCloseWhileTheCompositorIsUp) {
+  const auto token = private_app_stop_token();
+  auto session = spawn_fake_private_session(token, "trap 'kill $!; exit 0' USR1; trap 'kill $!; exit 3' TERM; sleep 30 & wait");
+  ASSERT_TRUE(session);
+  const auto shell = session->shell;
+  const auto result = proc::stop_private_session_apps_for_tests(
+    token,
+    session->supervisor.pid,
+    session->runtime_dir,
+    false,
+    5,
+    [&](const std::function<bool(pid_t)> &asks) {
+      EXPECT_FALSE(asks(session->labwc));
+      EXPECT_FALSE(asks(session->xwayland));
+      EXPECT_FALSE(asks(session->supervisor.pid));
+      EXPECT_FALSE(asks(session->anonymous_bwrap));
+      if (!asks(shell)) {
+        return 0;
+      }
+      // What Wine does with WM_DELETE_WINDOW, stood in for by a signal the app treats as a close.
+      (void) kill(shell, SIGUSR1);
+      return 1;
+    }
+  );
+  EXPECT_TRUE(result.acted);
+  EXPECT_EQ(result.path, "close_request");
+  EXPECT_EQ(result.windows_asked, 1);
+  EXPECT_TRUE(result.drained);
+  EXPECT_TRUE(result.sigterm.empty()) << "a game that closes when asked is never signalled";
+  EXPECT_TRUE(result.sigkill.empty());
+  EXPECT_FALSE(running(shell));
+  expect_compositor_untouched(*session, result);
+}
+
+TEST(SteamShutdownStateMachineTests, PrivateAppStopWaitsForWhatItAskedNotForTheSessionsHelpers) {
+  // A session also runs what never exits on its own: labwc's `sleep infinity` startup client when
+  // the app is Polaris's own child, as every ROM import's is, swaybg from the generated autostart,
+  // and whatever a user's own autostart starts. A game that closes when asked is done then. The
+  // compositor's two go with the compositor; the user's helper is ended before it stops.
+  const auto token = private_app_stop_token();
+  auto session = spawn_fake_private_session(token, "trap 'kill $!; exit 0' USR1; trap 'kill $!; exit 3' TERM; sleep 30 & wait", true);
+  ASSERT_TRUE(session);
+  const auto shell = session->shell;
+  const auto result = proc::stop_private_session_apps_for_tests(
+    token,
+    session->supervisor.pid,
+    session->runtime_dir,
+    false,
+    5,
+    [&](const std::function<bool(pid_t)> &asks) {
+      EXPECT_FALSE(asks(session->placeholder)) << "the startup client is the compositor's";
+      EXPECT_FALSE(asks(session->background)) << "the background is the compositor's";
+      if (!asks(shell)) {
+        return 0;
+      }
+      (void) kill(shell, SIGUSR1);
+      return 1;
+    }
+  );
+  EXPECT_EQ(result.path, "close_request");
+  EXPECT_EQ(result.windows_asked, 1);
+  EXPECT_TRUE(result.drained);
+  EXPECT_LT(result.elapsed, std::chrono::milliseconds(1500)) << "the close wait is 2 s here, and the game closed at once";
+  EXPECT_FALSE(contains(result.sigterm, shell)) << "the game closed when asked";
+  EXPECT_TRUE(contains(result.sigterm, session->user_helper)) << "what the user's autostart ran goes before the compositor";
+  EXPECT_FALSE(running(session->user_helper));
+  for (const auto pid : {session->placeholder, session->background}) {
+    EXPECT_FALSE(contains(result.sigterm, pid)) << comm_of(pid) << " is the compositor's";
+    EXPECT_FALSE(contains(result.sigkill, pid)) << comm_of(pid) << " is the compositor's";
+    EXPECT_TRUE(running(pid)) << comm_of(pid);
+  }
+  EXPECT_TRUE(result.sigkill.empty());
+  expect_compositor_untouched(*session, result);
+}
+
+TEST(SteamShutdownStateMachineTests, CompositorSurvivesThePrivateAppStopEvenWhenEverythingTimesOut) {
+  // The app ignores the close request and SIGTERM, and its child inherits both. The phase escalates
+  // to SIGKILL within its budget, and returns with the compositor still up.
+  const auto token = private_app_stop_token();
+  auto session = spawn_fake_private_session(token, "trap '' TERM USR1; sleep 30 & wait");
+  ASSERT_TRUE(session);
+  const auto shell = session->shell;
+  std::vector<pid_t> game;
+  collect_descendants(shell, game);
+  ASSERT_FALSE(game.empty());
+  const auto started = std::chrono::steady_clock::now();
+  const auto result = proc::stop_private_session_apps_for_tests(
+    token,
+    session->supervisor.pid,
+    session->runtime_dir,
+    false,
+    10,
+    [&](const std::function<bool(pid_t)> &asks) {
+      if (asks(shell)) {
+        (void) kill(shell, SIGUSR1);
+        return 1;
+      }
+      return 0;
+    }
+  );
+  const auto waited = std::chrono::steady_clock::now() - started;
+  EXPECT_EQ(result.path, "sigkill");
+  EXPECT_TRUE(result.drained);
+  EXPECT_TRUE(contains(result.sigterm, shell));
+  EXPECT_TRUE(contains(result.sigkill, shell));
+  EXPECT_GE(result.sigkill.size(), 2u) << "the shell and the game it started";
+  EXPECT_LE(result.elapsed, std::chrono::milliseconds(3000)) << "a tenth of the 30 s budget";
+  EXPECT_LT(waited, std::chrono::seconds(5));
+  EXPECT_FALSE(running(shell));
+  for (const auto pid : game) {
+    EXPECT_FALSE(running(pid)) << pid;
+  }
+  // Nothing of the session's is left but the compositor and the bwrap no record names.
+  std::vector<pid_t> left;
+  collect_descendants(session->supervisor.pid, left);
+  for (const auto pid : left) {
+    EXPECT_TRUE(pid == session->labwc || pid == session->xwayland || pid == session->anonymous_bwrap || !running(pid))
+      << pid << " (" << comm_of(pid) << ") outlived the phase";
+  }
+  expect_compositor_untouched(*session, result);
+}
+
+TEST(SteamShutdownStateMachineTests, AnImmediatePrivateAppStopAsksNothing) {
+  const auto token = private_app_stop_token();
+  auto session = spawn_fake_private_session(token, "trap 'kill $!; exit 3' TERM; sleep 30 & wait");
+  ASSERT_TRUE(session);
+  const auto result = proc::stop_private_session_apps_for_tests(
+    token,
+    session->supervisor.pid,
+    session->runtime_dir,
+    true,
+    2,
+    [](const std::function<bool(pid_t)> &) {
+      ADD_FAILURE() << "an immediate stop asks no window to close";
+      return 0;
+    }
+  );
+  EXPECT_EQ(result.path, "sigterm");
+  EXPECT_EQ(result.windows_asked, 0);
+  EXPECT_TRUE(result.sigkill.empty());
+  expect_compositor_untouched(*session, result);
+}
+
+TEST(SteamShutdownStateMachineTests, PrivateAppStopFindsNothingOnceTheSessionsAppIsGone) {
+  // What a Steam context leaves after the Steam lane: the compositor and nothing of the app.
+  const auto token = private_app_stop_token();
+  auto session = spawn_fake_private_session(token, "sleep 0.2 & wait");
+  ASSERT_TRUE(session);
+  for (int attempt = 0; attempt < 200 && running(session->shell); ++attempt) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_FALSE(running(session->shell));
+  const auto result = proc::stop_private_session_apps_for_tests(
+    token,
+    session->supervisor.pid,
+    session->runtime_dir,
+    false,
+    10,
+    [](const std::function<bool(pid_t)> &) {
+      ADD_FAILURE() << "there is nothing to ask";
+      return 0;
+    }
+  );
+  EXPECT_FALSE(result.acted);
+  EXPECT_TRUE(result.sigterm.empty());
+  EXPECT_TRUE(result.sigkill.empty());
+  EXPECT_LT(result.elapsed, std::chrono::milliseconds(500));
+  expect_compositor_untouched(*session, result);
+}
+
+TEST(SteamShutdownStateMachineTests, PrivateAppStopNeverSignalsAProcessOutsideTheSession) {
+  // A process of the host's, not under the supervisor and without the session token, stands for
+  // anything on the desktop: it is never signalled, whatever the phase does to the session.
+  child_guard_t outsider;
+  outsider.pid = fork();
+  ASSERT_GE(outsider.pid, 0);
+  if (outsider.pid == 0) {
+    execl("/bin/sleep", "sleep", "30", static_cast<char *>(nullptr));
+    _exit(127);
+  }
+  const auto token = private_app_stop_token();
+  auto session = spawn_fake_private_session(token, "trap '' TERM; sleep 30 & wait");
+  ASSERT_TRUE(session);
+  const auto result = proc::stop_private_session_apps_for_tests(token, session->supervisor.pid, session->runtime_dir, false, 10, {});
+  EXPECT_EQ(result.path, "sigkill");
+  EXPECT_FALSE(contains(result.sigterm, outsider.pid));
+  EXPECT_FALSE(contains(result.sigkill, outsider.pid));
+  EXPECT_TRUE(running(outsider.pid));
+  expect_compositor_untouched(*session, result);
+}
+
+TEST(SteamShutdownStateMachineTests, SteamContextRunsTheSteamLaneFirstThenTheAppsThenTheCompositor) {
+  const auto source = read_source_file("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto terminate_start = source.find("void proc_t::terminate_impl(");
+  const auto terminate_end = source.find("bool proc_t::reload_configuration_from_file", terminate_start);
+  ASSERT_NE(terminate_start, std::string::npos);
+  ASSERT_NE(terminate_end, std::string::npos);
+  const auto terminate = source.substr(terminate_start, terminate_end - terminate_start);
+  const auto steam_lane = terminate.find("terminate_session_owned_steam_before_cage_stop();");
+  const auto apps = terminate.find("stop_private_session_apps_before_compositor(immediate);");
+  const auto generation = terminate.find("terminate_isolated_session_generation();");
+  ASSERT_NE(steam_lane, std::string::npos);
+  ASSERT_NE(apps, std::string::npos);
+  ASSERT_NE(generation, std::string::npos);
+  EXPECT_LT(steam_lane, apps) << "a Steam context's game is stopped by the Steam lane first";
+  EXPECT_LT(apps, generation) << "the generation cleanup, which stops the compositor, comes after the apps";
+
+  // The phase itself never stops or resets the compositor.
+  const auto phase_start = source.find("private_app_stop_report_t stop_private_session_apps(");
+  const auto phase_end = source.find("bool terminate_session_owned_steam_app_lineage(", phase_start);
+  ASSERT_NE(phase_start, std::string::npos);
+  ASSERT_NE(phase_end, std::string::npos);
+  const auto phase = source.substr(phase_start, phase_end - phase_start);
+  for (const auto *compositor_stop : {"labwc::stop(", "reset_after_external_stop(", "finalize_isolated_session_runtime(", "cage_display_router::"}) {
+    EXPECT_EQ(phase.find(compositor_stop), std::string::npos) << compositor_stop;
+  }
+  const auto member_start = source.find("void proc_t::stop_private_session_apps_before_compositor(");
+  const auto member_end = source.find("void proc_t::finalize_isolated_session_runtime(", member_start);
+  ASSERT_NE(member_start, std::string::npos);
+  ASSERT_NE(member_end, std::string::npos);
+  const auto member = source.substr(member_start, member_end - member_start);
+  for (const auto *compositor_stop : {"labwc::stop(", "reset_after_external_stop(", "finalize_isolated_session_runtime(", "cage_display_router::"}) {
+    EXPECT_EQ(member.find(compositor_stop), std::string::npos) << compositor_stop;
+  }
+}
+#endif
+
+TEST(SteamShutdownStateMachineTests, TheLongerWaitsComeOutOfTheFormerWorstCase) {
+  using namespace std::chrono_literals;
+  // Capture, the former two second SIGTERM grace, the SIGKILL wait, Steam's app-stopped event and
+  // its settle, and the native shutdown: what the teardown could already hold the lifecycle lock for.
+  EXPECT_EQ(proc::private_steam_stop_budget_for_tests(), 500ms + 2s + 1s + 5s + 5s + 10s);
+  EXPECT_EQ(proc::private_steam_stop_budget_clamp_for_tests(3s, 10s), 3s);
+  EXPECT_EQ(proc::private_steam_stop_budget_clamp_for_tests(20s, 10s), 10s);
+  EXPECT_EQ(proc::private_steam_stop_budget_clamp_for_tests(-1s, 10s), 0ms);
 }
 
 TEST(SteamShutdownStateMachineTests, ProductionPrivateCageQuiescesSteamAppBeforeNativeShutdown) {

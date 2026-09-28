@@ -203,6 +203,8 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_linux_process_argv.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_portal_grab_policy.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_private_session_attach.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_flatpak_session_instances.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_private_app_stop.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_private_session_input.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_session_manager.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_pyrowave_encode.cpp
