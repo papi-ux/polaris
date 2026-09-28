@@ -315,6 +315,14 @@ starts at `v1.0.0`.
   description under the select says it for AMD instead. The v1.4.13 entries for the two VA-API
   changes name the driver as well.
 
+- On AMD with Mesa radeonsi or RADV, a still screen in H.264 or HEVC no longer streams at the full
+  bitrate. In constant bitrate, both drivers pad frames with filler data up to the target, and
+  FFmpeg has no option to turn it off, so an idle desktop at 20 Mbps sent 20 Mbps, 99.8% of it
+  filler. A decoder discards filler data, so Polaris now removes it from each frame before sending:
+  on an RX 7900 XTX the same still screen sends about 0.04 Mbps, and every decoded picture is
+  identical. This covers VA-API and Vulkan, whose default rate control is constant bitrate. AV1 was
+  never padded.
+
 - A Space that could not be created says why in the host log. The client is still answered with
   `spaces_change_not_saved`, which the Spaces page reads, and the log now names the check that
   stopped it: the Docker command that failed and how, a Docker answer without a field Polaris

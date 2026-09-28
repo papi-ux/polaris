@@ -667,6 +667,9 @@ decide; because Polaris always sets a stream bitrate, auto resolves to variable 
 driver advertises VBR and to constant bitrate otherwise. `1` selects constant-QP mode, and `4`
 selects variable bitrate.
 
+On AMD (RADV), constant bitrate pads H.264 and HEVC frames with filler data up to the target
+bitrate. Polaris removes the filler before sending each frame, as it does on VA-API.
+
 ### vk_quality
 
 Selects the Vulkan Video quality level passed to FFmpeg. `0` selects quality level 0 and always
@@ -924,9 +927,10 @@ PSNR differed by 0.05 dB or less. Automatic rate control therefore uses CBR
 whenever it applies the single-frame buffer on radeonsi: for AV1, and for H.264
 and HEVC with `vaapi_strict_rc_buffer = enabled`. Choosing `vaapi_rc = vbr`
 explicitly still gets VBR. In CBR the driver pads H.264 and HEVC with filler
-data up to the target bitrate, so a still screen uses the full bitrate; this was
-already true of automatic rate control on AMD without the strict buffer, and
-FFmpeg offers no option to turn it off. AV1 is not padded.
+data up to the target bitrate, and FFmpeg offers no option to turn it off. On a
+still screen that filler is nearly all of the stream. A decoder discards filler
+data, so Polaris removes it from each frame before sending, and a still screen
+costs what its picture needs rather than the full bitrate. AV1 is not padded.
 
 Block bitrate control requires the driver's `VA_RC_MB` capability and a mode
 other than CQP. An unsupported enable request is reported and disabled when
