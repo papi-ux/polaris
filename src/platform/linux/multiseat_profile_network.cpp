@@ -12,11 +12,18 @@ namespace multiseat::container {
     bool digest(std::string_view value) {
       return value.size() == 64 && value.find_first_not_of("0123456789abcdef") == std::string_view::npos;
     }
-    std::optional<std::string> run(host_t &host, std::initializer_list<std::string> arguments) {
+    // `why`, when given, names a command that did not complete, by its first two words.
+    std::optional<std::string> run(host_t &host, std::initializer_list<std::string> arguments, std::string *why = nullptr) {
       auto argv = command_prefix({});
       argv.insert(argv.end(), arguments.begin(), arguments.end());
       const auto result = host.run(argv, std::chrono::seconds(30), 4 * 1024 * 1024);
-      if (result.exit_status != 0 || result.timed_out || result.output_truncated) return {};
+      if (result.exit_status != 0 || result.timed_out || result.output_truncated) {
+        if (why) {
+          *why = "docker " + *arguments.begin() + " " + *std::next(arguments.begin()) + (result.timed_out ? " timed out" :
+            result.output_truncated ? " printed more than Polaris reads" : " exited with status " + std::to_string(result.exit_status));
+        }
+        return {};
+      }
       return result.output;
     }
   }
@@ -117,10 +124,14 @@ namespace multiseat::container {
       return id;
     } catch (...) { return {}; }
   }
-  bool create_profile_network(host_t &host, std::string_view profile_key) {
+  bool create_profile_network(host_t &host, std::string_view profile_key, std::string *why) {
+    const auto refuse = [&](std::string reason) {
+      if (why) *why = std::move(reason);
+      return false;
+    };
     const auto name = profile_network_name(profile_key);
-    if (name.empty()) return false;
-    const auto inventory = run(host, {"network", "ls", "--format={{json .Name}}"});
+    if (name.empty()) return refuse("Space " + std::string(profile_key) + " has an id no Docker network can be named after");
+    const auto inventory = run(host, {"network", "ls", "--format={{json .Name}}"}, why);
     if (!inventory) return false;
     try {
       std::istringstream lines(*inventory);
@@ -128,18 +139,21 @@ namespace multiseat::container {
       while (std::getline(lines, line)) {
         if (line.empty()) continue;
         const auto existing = json::parse(line);
-        if (!existing.is_string() || existing == name) return false;
+        if (!existing.is_string()) return refuse("docker network ls printed a line that is not a network name");
+        if (existing == name) return refuse("Docker already has a network named " + name + ", which Polaris never adopts");
       }
-    } catch (...) { return false; }
+    } catch (...) { return refuse("docker network ls printed a line that is not JSON"); }
     auto created = run(host, {"network", "create", "--driver=bridge",
       "--label=" + std::string(label) + "=" + std::string(profile_key),
       "--opt=com.docker.network.bridge.enable_icc=false",
-      "--opt=com.docker.network.bridge.enable_ip_masquerade=true", name});
+      "--opt=com.docker.network.bridge.enable_ip_masquerade=true", name}, why);
     if (!created) return false;
     if (!created->empty() && created->back() == '\n') created->pop_back();
-    if (!digest(*created)) return false;
+    if (!digest(*created)) return refuse("docker network create printed no network id");
     const auto inspected = profile_network_id(host, profile_key, true);
-    return inspected && *inspected == *created;
+    if (!inspected || *inspected != *created)
+      return refuse("network " + name + " is not the private, empty bridge Polaris just made");
+    return true;
   }
 }
 #endif

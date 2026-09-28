@@ -123,7 +123,12 @@ Browser Stream sessions use the same isolated runtime model as normal launches. 
 
 Polaris separates true HDR from 10-bit SDR.
 
-True HDR requires the active capture path to expose HDR display metadata. Today that means a KMS/DRM display path with an HDR-capable output reporting `HDR_OUTPUT_METADATA`, plus a client HDR request and a 10-bit-capable encoder. A valid true HDR session logs:
+True HDR requires the active capture path to expose HDR display metadata, plus a client HDR request and a 10-bit-capable encoder. Two capture paths expose it today:
+
+- A KMS/DRM display path with an HDR-capable output reporting `HDR_OUTPUT_METADATA`: Mirror Desktop with `capture = kms`, as [the recipe below](#the-recipe-that-works-today) sets up.
+- Gamescope Stream through the portal, when its gamescope offers PipeWire the 10-bit BT.2020 PQ formats that Polaris's gamescope patch adds. The Nix package builds that gamescope, and `POLARIS_GAMESCOPE_BIN` points the session at one outside Nix. This route has carried HDR10 end to end on NVIDIA since 1.4.12. AMD has no release validation, and on AMD, Auto encodes Gamescope Stream with Vulkan Video, which carries no HDR. The patch has not merged upstream ([ValveSoftware/gamescope#2270](https://github.com/ValveSoftware/gamescope/pull/2270)), so a distribution's gamescope streams SDR.
+
+A valid true HDR session logs:
 
 ```text
 HDR metadata: available=true usable=true
@@ -133,7 +138,7 @@ HDR decision: ... display_hdr=true hdr_metadata_available=true stream_hdr_enable
 
 If the log says `HDR metadata: available=true usable=false`, Polaris found an HDR metadata blob but the static metadata is incomplete. Polaris treats that stream as SDR instead of tagging it as HDR with unusable metadata.
 
-Headless labwc/wlroots sessions are treated as SDR until the headless display path can truthfully provide HDR metadata. In that mode, a client can still request a 10-bit HEVC/Main10 or P010 encode path for SDR, but Polaris will not advertise true HDR without metadata.
+Private Stream's headless labwc/wlroots sessions are treated as SDR until the headless display path can truthfully provide HDR metadata. In that mode, a client can still request a 10-bit HEVC/Main10 or P010 encode path for SDR, but Polaris will not advertise true HDR without metadata.
 
 ### The recipe that works today
 
@@ -144,8 +149,14 @@ proven on.
 1. **`capture = kms`.** It is the only Linux capture path that reads the connector's
    `HDR_OUTPUT_METADATA`. `wlr` does not report HDR at all, and `portal` only does with the
    Gamescope force file.
-2. **A stream mode that shows the real HDR output**: Mirror Desktop, Host Virtual Display, Desktop
-   Takeover or Gamescope. Private Stream captures Polaris' own labwc, which is SDR.
+2. **Mirror Desktop** as the host's stream mode, streaming the HDR monitor itself. A launch into
+   Mirror Desktop from another mode keeps `capture = kms` too, except on a host whose own mode is
+   Host Virtual Display or Desktop Takeover: loading that mode puts the portal or wlroots in place
+   of `kms`, and that lasts until Polaris restarts. Those two modes capture their display through
+   the portal or wlroots whatever `capture` says. Gamescope Stream and the dongle keep
+   `capture = kms` only as the host's own mode, and a launch into either from another mode
+   captures through the portal. Private Stream captures Polaris' own labwc through wlroots, which
+   is SDR.
 3. **`CAP_SYS_ADMIN` on the binary**, granted once with `sudo -H polaris --setup-host --enable-kms`.
    Without it kms finds the display and then cannot read a framebuffer; the Doctor reports
    `kms_capture_needs_capability`.

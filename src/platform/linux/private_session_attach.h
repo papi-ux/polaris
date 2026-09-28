@@ -7,7 +7,11 @@
 #ifdef __linux__
 
   #include <chrono>
+  #include <cstdint>
+  #include <functional>
+  #include <optional>
   #include <string>
+  #include <vector>
 
 namespace private_session_attach {
 
@@ -119,6 +123,109 @@ namespace private_session_attach {
    * portal, not about Flatpak or Proton as such. See docs/troubleshooting.md.
    */
   bool may_lose_display_to_flatpak_portal(const std::string &cmd);
+
+  /**
+   * @brief The app id a command starts with `flatpak run`, or through an exported launcher wrapper.
+   *
+   * The first word after `run` that is not an option and reads as a Flatpak app id, which has at
+   * least three dot separated parts; a ref's branch or arch is dropped. It names the app only for
+   * logging and for telling a desktop instance of the same app apart, never to signal anything.
+   */
+  std::optional<std::string> flatpak_run_app_id(const std::string &cmd);
+
+  /// What one top level X11 window in the private session says about itself.
+  struct x11_window_t {
+    std::uint32_t id = 0;
+    bool viewable = false;  ///< mapped and on screen
+    bool override_redirect = false;  ///< a menu or tooltip no window manager closes
+    std::optional<std::uint32_t> pid;  ///< _NET_WM_PID, when the client set it
+    bool accepts_delete = false;  ///< WM_DELETE_WINDOW is among its WM_PROTOCOLS
+    /// The pid of the client that made the window, as the X server knows it from the client's
+    /// socket through X-Resource. It is a pid on the host, even for a client in a sandbox's pid
+    /// namespace, whose _NET_WM_PID is its pid inside the sandbox.
+    std::optional<std::uint32_t> client_pid;
+  };
+
+  /**
+   * @brief Which processes are the app's, asked of the process each window names.
+   *
+   * The two questions differ because the two names do: X-Resource gives a host pid, while
+   * _NET_WM_PID is whatever pid the client saw itself as, which inside a Flatpak or
+   * pressure-vessel pid namespace is a small pid of that namespace.
+   */
+  struct window_owner_test_t {
+    /// Asked of a host pid, the client pid X-Resource reports.
+    std::function<bool(std::uint32_t pid)> host_pid;
+    /// Asked of a _NET_WM_PID, when the server could not report the client pid. Left empty, the
+    /// window's own word is taken as a host pid, as it is for a client outside any sandbox.
+    std::function<bool(std::uint32_t pid)> net_wm_pid;
+  };
+
+  /**
+   * @brief The windows a player closing an app would close, given which processes are the app's.
+   *
+   * Pure, so the choice is testable without an X server. Only viewable, managed windows that ask
+   * to be told about a close are chosen, and only when their process is the app's. The client pid
+   * X-Resource reports is preferred to _NET_WM_PID, and when it is known the window's own word is
+   * not consulted at all. A window that names no process either way cannot be told apart from
+   * Steam's own, and closing a window that never asked for WM_DELETE_WINDOW is what a window
+   * manager does by killing the client, which is the opposite of asking.
+   */
+  std::vector<std::uint32_t> close_targets(
+    const std::vector<x11_window_t> &windows,
+    const window_owner_test_t &belongs_to_app
+  );
+
+  /// close_targets with one test for either name, which suits an app that runs in no sandbox.
+  std::vector<std::uint32_t> close_targets(
+    const std::vector<x11_window_t> &windows,
+    const std::function<bool(std::uint32_t pid)> &belongs_to_app
+  );
+
+  /// Outcome of asking an app's X11 windows to close.
+  struct close_request_result_t {
+    probe_status_e status = probe_status_e::unavailable;
+    int windows_asked = 0;  ///< close requests sent, one per chosen window
+    bool timed_out = false;  ///< the display did not answer in time, so nothing is known to be asked
+    bool client_pids = false;  ///< the server reported each window's client pid through X-Resource
+  };
+
+  /**
+   * @brief Ask the app's windows on @p x11_display to close, the way clicking a window's close button
+   *        does: an ICCCM WM_DELETE_WINDOW client message to each window close_targets chooses.
+   *
+   * Nothing is injected into the app's input and nothing is killed. Wine turns the message into
+   * the close a Windows game gets from its title bar, so a Proton title quits the way it would on its
+   * own. Native Wayland windows are out of reach: the protocols that list them name no process, so
+   * they cannot be told apart from Steam's.
+   */
+  close_request_result_t request_x11_window_close(
+    const std::string &x11_display,
+    const window_owner_test_t &belongs_to_app
+  );
+
+  /// The exchange request_x11_window_close_within runs.
+  using close_request_t =
+    std::function<close_request_result_t(const std::string &, const window_owner_test_t &)>;
+
+  /**
+   * @brief request_x11_window_close, given at most @p timeout to finish.
+   *
+   * The X exchange has no timeout of its own, and the stop that asks holds the session lifecycle
+   * lock that a new launch and a stop request's answer wait on. An Xwayland that stops answering,
+   * behind a hung compositor or a client holding a server grab, must not hold them as well. The
+   * exchange runs on a thread of its own. When it has not finished in time, the result says so and
+   * asks nothing, the stop goes on as though no window could be asked, and the thread ends once the
+   * display goes away with the private session.
+   *
+   * @param request The exchange, request_x11_window_close unless a test stands in for it.
+   */
+  close_request_result_t request_x11_window_close_within(
+    const std::string &x11_display,
+    window_owner_test_t belongs_to_app,
+    std::chrono::milliseconds timeout,
+    close_request_t request = request_x11_window_close
+  );
 
 }  // namespace private_session_attach
 

@@ -21,7 +21,8 @@ namespace portal_capability {
   /**
    * Return whether the configured capture path may need the desktop portal.
    * Explicit non-portal capture selections always win over the stream-mode
-   * default. A host set to KWin screens also needs it: KWin identifies the
+   * default, and kwin counts as portal, because dispatch reads it as portal.
+   * A host set to KWin screens also needs it: KWin identifies the
    * client asking for a screen by /proc/<pid>/exe, which a process holding
    * file capabilities hides.
    */

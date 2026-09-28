@@ -259,6 +259,11 @@ namespace display_topology {
     return swap_mode.empty() || swap_mode == "privacy";
   }
 
+  bool captures_through_host_portal(std::string_view capture) {
+    const auto backend = stream_display_policy::canonical_capture_backend(capture);
+    return backend.empty() || backend == "portal";
+  }
+
   bool should_manage_host_topology() {
     const auto &cfg = config::video.linux_display;
     if (!cfg.auto_manage_displays || cfg.streaming_output.empty()) {
@@ -580,9 +585,9 @@ namespace display_topology {
       apply_requested_display_mode(cfg.streaming_output, width, height, refresh_hz);
     }
 
-    const bool portal_capture = config::video.capture.empty() ||
-                                config::video.capture == "auto" ||
-                                config::video.capture == "portal";
+    // A host set to kwin captures through the portal as well. Read as a literal,
+    // it kept HDR on here and blanked the desk the picker needs below.
+    const bool portal_capture = captures_through_host_portal(config::video.capture);
     // Host portal ScreenCast is 8-bit SDR. Leave the streaming output in SDR so
     // KWin dumps tone-mapped BGRx instead of an HDR compositor view.
     if (portal_capture) {

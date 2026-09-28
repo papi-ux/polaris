@@ -118,6 +118,13 @@ set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/
 list(APPEND CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/prerm")
 set(CPACK_RPM_PRE_UNINSTALL_SCRIPT_FILE "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/prerm")
 
+# Each format spells a prerelease the way it sorts below the release of the same number
+# (cmake/prep/prerelease_versions.cmake). Both are set explicitly because CPack otherwise derives them
+# from CPACK_PACKAGE_VERSION: CPackRPM turns a hyphen into an underscore, which rpm sorts above the
+# release, and dpkg reads a hyphen as the Debian revision. A stable build gets exactly the default.
+set(CPACK_RPM_PACKAGE_VERSION "${POLARIS_RPM_PACKAGE_VERSION}")
+set(CPACK_DEBIAN_PACKAGE_VERSION "${POLARIS_DEB_PACKAGE_VERSION}")
+
 # Two packages out of one build. The names are pinned per component because CPack otherwise
 # derives them from the component, and because the release picks assets by name.
 set(CPACK_COMPONENTS_ALL polaris kms)
@@ -135,8 +142,9 @@ set(CPACK_RPM_KMS_PACKAGE_SUMMARY "DRM/KMS capture helper for Polaris")
 set(CPACK_RPM_KMS_PACKAGE_DESCRIPTION
         "The privileged helper Polaris runs to capture through DRM/KMS. Install it only if you \
 capture that way; every other capture path works without it.")
-# Exactly this version of Polaris, so the two can never disagree about what the helper is.
-set(CPACK_RPM_KMS_PACKAGE_REQUIRES "polaris = ${CPACK_PACKAGE_VERSION}")
+# Exactly this version of Polaris, so the two can never disagree about what the helper is. It pins
+# the Version alone, as it always has. The tilde keeps a prerelease Version apart from the release's.
+set(CPACK_RPM_KMS_PACKAGE_REQUIRES "polaris = ${CPACK_RPM_PACKAGE_VERSION}")
 # rpm carries file capabilities in package metadata, which is the whole point: they land on disk on
 # every install and every update, including where a runtime setcap would be refused.
 set(CPACK_RPM_KMS_USER_FILELIST
@@ -151,7 +159,7 @@ set(CPACK_DEBIAN_KMS_PACKAGE_NAME "polaris-kms")
 set(CPACK_DEBIAN_KMS_PACKAGE_SHLIBDEPS OFF)
 # Keep the main runtime dependencies on Polaris. The helper's maintainer script
 # additionally needs setcap and groupadd even on a minimal installation.
-set(CPACK_DEBIAN_KMS_PACKAGE_DEPENDS "polaris (= ${CPACK_PACKAGE_VERSION}), libcap2-bin, passwd")
+set(CPACK_DEBIAN_KMS_PACKAGE_DEPENDS "polaris (= ${CPACK_DEBIAN_PACKAGE_VERSION}), libcap2-bin, passwd")
 # Its own scriptlet: the main one talks about --setup-host, and this one has real work to do.
 # dpkg runs a maintainer script only under its exact name, and CONTROL_EXTRA keeps the basename,
 # so this one lives in a directory of its own rather than being called postinst-kms and never running.
@@ -159,6 +167,13 @@ set(CPACK_DEBIAN_KMS_PACKAGE_CONTROL_EXTRA
         "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/kms/postinst")
 set(CPACK_DEBIAN_KMS_DESCRIPTION
         "DRM/KMS capture helper for Polaris")
+# dpkg-shlibdeps is off (below), so this list is the only thing that makes apt install what the
+# binary links, and a library missing here stops the loader before Polaris runs at all. Portal
+# capture links libpipewire-0.3 even when native PipeWire audio is off
+# (cmake/compile_definitions/linux.cmake). 1.4.13 left it out, and on an Ubuntu 24.04 without
+# PipeWire `polaris --setup-host` failed with "libpipewire-0.3.so.0: cannot open shared object
+# file". CI installed it only on the machine that built it, which already had the library, so it
+# passed; the ubuntu-minimal-install job in build.yml now installs it on a bare ubuntu:24.04.
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             ${CPACK_DEB_PLATFORM_PACKAGE_DEPENDS} \
             bash, \
@@ -174,11 +189,13 @@ set(CPACK_DEBIAN_PACKAGE_DEPENDS "\
             libevdev2, \
             libnuma1, \
             libopus0, \
+            libpipewire-0.3-0t64, \
             libpulse0, \
             libva2, \
             libva-drm2, \
             libwayland-client0, \
             libx11-6, \
+            libxcb-res0, \
             miniupnpc, \
             openssl | libssl3, \
             wlr-randr, \

@@ -11,6 +11,7 @@ import {
   markWebUiAuthenticated,
   markWebUiUnauthenticated,
 } from './auth-state.js'
+import { reportSettingsProbe } from './settings-unreadable.js'
 import {
   beginWebUiAuthProbeGeneration,
   isCurrentWebUiAuthProbeGeneration,
@@ -58,6 +59,7 @@ export function createWebUiAuthGuard(probeAuth = probeWebUiAuth) {
       }
       if (result.state === AUTH_PROBE_STATE.authenticated) {
         markWebUiAuthenticated(result.config)
+        reportSettingsProbe(result)
         clearPolarisReloadParam()
         if (routePath === '/login' || routePath === '/welcome') {
           return getSafeAuthReturnTarget(to.query?.redirect)
@@ -90,6 +92,7 @@ export function createWebUiAuthGuard(probeAuth = probeWebUiAuth) {
       }
 
       markWebUiAuthenticated(result.config)
+      reportSettingsProbe(result)
       clearPolarisReloadParam()
     }
   }

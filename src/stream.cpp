@@ -42,9 +42,11 @@ extern "C" {
   #include "platform/linux/session_media.h"
 #endif
 #include "process.h"
+#include "pyrowave_advice.h"
 #include "stream.h"
 #include "stream_fec.h"
 #include "stream_recorder.h"
+#include "stream_start_outcome.h"
 #include "stream_stats.h"
 #include "sync.h"
 #include "system_tray.h"
@@ -513,6 +515,17 @@ namespace stream {
 
     std::chrono::steady_clock::time_point pingTimeout;
 
+    // What the control stream did while this session waited for its first ping, on the steady
+    // clock in nanoseconds, zero until it happens. A client that cannot build its decoder connects
+    // and leaves before any ping, and that start has to read differently from a UDP path that never
+    // delivered one.
+    struct {
+      std::atomic<std::int64_t> control_connected_ns {0};
+      std::atomic<std::int64_t> control_disconnected_ns {0};
+      std::atomic_bool pinged {false};
+      std::atomic_bool timeout_reported {false};
+    } start_watch;
+
     safe::shared_t<broadcast_ctx_t>::ptr_t broadcast_ref;
 
     boost::asio::ip::address localAddress;
@@ -605,6 +618,9 @@ namespace stream {
     std::list<crypto::command_entry_t> undo_cmds;
 
     safe::mail_raw_t::event_t<bool> shutdown_event;
+    // Raised by this session's encoder when it ends the stream because it can never produce a
+    // picture for it. Held here so the raise outlives the encoder: the mail keeps only weak handles.
+    safe::mail_raw_t::event_t<bool> frame_conversion_failed;
     safe::signal_t controlEnd;
     // Requested from RTSP or the control thread; only the control thread
     // sends termination and acknowledges the session's final control use.
@@ -880,6 +896,52 @@ namespace stream {
     }
   }
 
+  namespace {
+    std::int64_t steady_now_ns() {
+      return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()
+      )
+        .count();
+    }
+
+    void note_control_connected(session_t &session) {
+      std::int64_t unset = 0;
+      session.start_watch.control_connected_ns.compare_exchange_strong(unset, steady_now_ns());
+    }
+
+    void note_control_disconnected(session_t &session) {
+      if (session.start_watch.control_connected_ns.load() == 0) {
+        return;
+      }
+      std::int64_t unset = 0;
+      session.start_watch.control_disconnected_ns.compare_exchange_strong(unset, steady_now_ns());
+    }
+
+    stream_start::control_timeline_t start_timeline(const session_t &session) {
+      const auto connected = session.start_watch.control_connected_ns.load();
+      const auto disconnected = session.start_watch.control_disconnected_ns.load();
+      stream_start::control_timeline_t timeline;
+      timeline.connected = connected != 0;
+      timeline.disconnected = disconnected != 0;
+      if (timeline.connected && timeline.disconnected && disconnected >= connected) {
+        timeline.connected_for = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::nanoseconds {disconnected - connected}
+        );
+      }
+      timeline.any_ping = session.start_watch.pinged.load();
+      return timeline;
+    }
+  }  // namespace
+
+  /// The codec a session negotiated, by the id stream_stats and the logs use.
+  std::string_view session_codec_name(const session_t &session) {
+    const auto format = session.config.monitor.videoFormat;
+    return format == video::VIDEO_FORMAT_PYROWAVE ? "pyrowave"sv :
+           format == 2                             ? "av1"sv :
+           format == 1                             ? "hevc"sv :
+                                                     "h264"sv;
+  }
+
   void control_server_t::iterate(std::chrono::milliseconds timeout) {
     ENetEvent event;
     auto res = enet_host_service(_host.get(), &event, timeout.count());
@@ -913,9 +975,11 @@ namespace stream {
           break;
         case ENET_EVENT_TYPE_CONNECT:
           BOOST_LOG(info) << "CLIENT CONNECTED"sv;
+          note_control_connected(*session);
           break;
         case ENET_EVENT_TYPE_DISCONNECT:
           BOOST_LOG(info) << "CLIENT DISCONNECTED"sv;
+          note_control_disconnected(*session);
           // No more clients to send video data to ^_^
           if (session->state == session::state_e::RUNNING) {
             session::stop(*session);
@@ -1267,15 +1331,40 @@ namespace stream {
     }
   }
 
+  /// NVST_DISCONN_SERVER_TERMINATED_CLOSED: the host ended the stream, and nothing went wrong.
+  constexpr std::uint32_t termination_closed = 0x80030023;
+  /// NVST_DISCONN_SERVER_VIDEO_ENCODER_CONVERT_INPUT_FRAME_FAILED, which Moonlight clients read as
+  /// ML_ERROR_FRAME_CONVERSION: a fatal video encoding error, not a connection to take back.
+  constexpr std::uint32_t termination_frame_conversion_failed = 0x800e9403;
+
+  /**
+   * What the control thread tells the client as it retires a stopping session, or nothing for a stop
+   * that only disconnects it.
+   *
+   * An encoder that can never produce a picture for the stream says so on the session's mail before
+   * the stream ends, and that stop is answered with the frame conversion code whether or not anyone
+   * asked for a graceful one. A bare disconnect is what a Moonlight client reads as a dropped
+   * connection: it reconnected into the same refusal until it ran out of attempts.
+   */
+  std::optional<std::uint32_t> control_termination_code(session_t &session) {
+    if (session.frame_conversion_failed && session.frame_conversion_failed->peek()) {
+      return termination_frame_conversion_failed;
+    }
+    if (session.graceful_stop_requested.load(std::memory_order_acquire)) {
+      return termination_closed;
+    }
+    return std::nullopt;
+  }
+
   // ENet, sequence numbers and control encryption are owned by the control
   // thread. Stop callers only request termination; they never send it directly.
-  void send_control_termination(control_server_t *server, session_t *session) {
+  void send_control_termination(control_server_t *server, session_t *session, std::uint32_t code) {
     if (!session->control.peer) return;
 
     control_terminate_t plaintext {};
     plaintext.header.type = packetTypes[IDX_TERMINATION];
     plaintext.header.payloadLength = sizeof(plaintext.ec);
-    plaintext.ec = util::endian::big<std::uint32_t>(0x80030023);
+    plaintext.ec = util::endian::big<std::uint32_t>(code);
     std::array<std::uint8_t, sizeof(control_encrypted_t) +
       crypto::cipher::round_to_pkcs7_padded(sizeof(plaintext)) +
       crypto::cipher::tag_size> encrypted_payload;
@@ -1581,8 +1670,8 @@ namespace stream {
           }
 
           if (session->state.load(std::memory_order_acquire) == session::state_e::STOPPING) {
-            if (session->graceful_stop_requested.load(std::memory_order_acquire)) {
-              send_control_termination(server, session);
+            if (const auto code = control_termination_code(*session)) {
+              send_control_termination(server, session, *code);
             }
             pos = server->_sessions->erase(pos);
 
@@ -1638,7 +1727,7 @@ namespace stream {
     auto lg = server->_sessions.lock();
     while (!server->_sessions->empty()) {
       auto session = server->_sessions->back();
-      send_control_termination(server, session);
+      send_control_termination(server, session, control_termination_code(*session).value_or(termination_closed));
       server->_sessions->pop_back();
       if (session->control.peer) {
         auto peers = server->_peer_to_session.lock();
@@ -2424,10 +2513,39 @@ namespace stream {
 
       // Update connection details.
       peer = recv_peer;
+      if (!session->start_watch.pinged.exchange(true)) {
+        stream_stats::record_start_outcome(session->session_generation, stream_start::k_started);
+      }
       return 0;
     }
 
-    BOOST_LOG(error) << "Initial Ping Timeout"sv;
+    // Both sockets wait out the same timeout, so a client that left during its own setup would log
+    // two ping timeouts that read as a network fault. That start is named once instead, and a client
+    // that stayed, left only after waiting for video, or never connected still gets a real ping
+    // timeout for each socket that heard nothing.
+    const auto timeline = start_timeline(*session);
+    const auto outcome = stream_start::classify_ping_timeout(timeline);
+    const bool first_timeout = !session->start_watch.timeout_reported.exchange(true);
+    const std::string_view socket_name = type == socket_e::video ? "video"sv : "audio"sv;
+    if (outcome == stream_start::k_client_left_during_setup) {
+      if (first_timeout) {
+        BOOST_LOG(warning) << stream_start::client_left_during_setup_message(
+          session->device_name, session_codec_name(*session), timeline.connected_for
+        );
+      } else {
+        BOOST_LOG(debug) << "No "sv << socket_name << " ping either; the failed start is already reported"sv;
+      }
+    } else {
+      const auto port = net::map_port(type == socket_e::video ? VIDEO_STREAM_PORT : AUDIO_STREAM_PORT);
+      BOOST_LOG(error) << stream_start::ping_timeout_message(socket_name, port, config::stream.ping_timeout, timeline);
+    }
+    if (first_timeout) {
+      stream_stats::record_start_outcome(
+        session->session_generation,
+        outcome,
+        timeline.disconnected ? timeline.connected_for.count() : -1
+      );
+    }
     return -1;
   }
 
@@ -2653,6 +2771,14 @@ namespace stream {
 
     void set_state_for_tests(session_t &session, state_e state) {
       session.state.store(state, std::memory_order_relaxed);
+    }
+
+    std::optional<std::uint32_t> control_termination_code_for_tests(session_t &session) {
+      return control_termination_code(session);
+    }
+
+    safe::mail_t mail_for_tests(session_t &session) {
+      return session.mail;
     }
 
 #ifdef __linux__
@@ -3122,15 +3248,33 @@ namespace stream {
         session.session_token,
         session.config.monitor.bitrate
       );
+      // A PyroWave stream gets a Live Tuning floor of its own, half what the codec's model advises for
+      // it on a device's own screen, never above the client's request. After session_started(), which
+      // reloads the controller for this stream, and before the encoder publishes anything.
+      if (session.config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE) {
+        const auto &request = session.config.bitrate_request;
+        const auto advice = pyrowave_advice::advise(
+          session.config.monitor.width,
+          session.config.monitor.height,
+          static_cast<int>(std::lround(av_q2d(video::encoding_framerate_to_rational(session.config.monitor)))),
+          session.config.monitor.chromaSamplingType == 1,
+          {config::stream.fec_percentage, request.audio_kbps > 0 ? request.audio_kbps : pyrowave_advice::k_default_audio_kbps},
+          config::video.max_bitrate
+        );
+        if (advice.valid) {
+          adaptive_bitrate::set_session_floor(advice.floor_encoder_kbps, "pyrowave_advice");
+          BOOST_LOG(info) << "PyroWave: Live Tuning cuts this stream no lower than "sv
+                          << adaptive_bitrate::get_state().min_bitrate_kbps << " kbps at the encoder, half the "sv
+                          << advice.far_encoder_kbps << " kbps its 35 dB model advises on a device's own screen"sv;
+        }
+      }
 
       session.audioThread = std::thread {audioThread, &session};
       session.videoThread = std::thread {videoThread, &session};
 
       session.state.store(state_e::RUNNING, std::memory_order_relaxed);
 
-      auto codec_name = session.config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE ? "pyrowave" :
-                         session.config.monitor.videoFormat == 2 ? "av1" :
-                         session.config.monitor.videoFormat == 1 ? "hevc" : "h264";
+      const std::string codec_name {session_codec_name(session)};
       stream_recorder::set_active_video_format(session.config.monitor.videoFormat);
 
       // Track this client in multi-client stats
@@ -3161,7 +3305,15 @@ namespace stream {
         0,  // encode_time_ms
         codec_name,
         session.config.monitor.width,
-        session.config.monitor.height
+        session.config.monitor.height,
+        std::string_view {},
+        session.session_generation
+      );
+
+      stream_stats::record_stream_request(
+        session.session_generation,
+        session.config.monitor.chromaSamplingType == 1,
+        session.config.bitrate_request
       );
 
       // Update legacy single-client stats for backward compatibility
@@ -3180,7 +3332,9 @@ namespace stream {
         0,  // encode_time_ms
         codec_name,
         session.config.monitor.width,
-        session.config.monitor.height
+        session.config.monitor.height,
+        std::string_view {},
+        session.session_generation
       );
 
       // If this is the first session, invoke the platform callbacks
@@ -3196,6 +3350,17 @@ namespace stream {
 
       BOOST_LOG(info) << "Session started for ["sv << session.device_name << "] from "sv << addr_string
                       << " [active sessions: "sv << session_num << "]"sv;
+      // The codec a client chose was never in the log, so a stream that failed on the client's
+      // decoder read the same as any other.
+      BOOST_LOG(info) << stream_start::describe_negotiated_stream({
+        .client = session.device_name,
+        .codec = codec_name,
+        .dynamic_range = session.config.monitor.dynamicRange,
+        .chroma_sampling = session.config.monitor.chromaSamplingType,
+        .width = session.config.monitor.width,
+        .height = session.config.monitor.height,
+        .fps = av_q2d(video::framerate_to_rational(session.config.monitor)),
+      });
 
       confighttp::set_session_state(confighttp::session_state_e::streaming);
       confighttp::emit_session_event("stream_active", "Streaming to " + session.device_name);
@@ -3232,6 +3397,7 @@ namespace stream {
       auto mail = std::make_shared<safe::mail_raw_t>();
 
       session->shutdown_event = mail->event<bool>(mail::shutdown);
+      session->frame_conversion_failed = mail->event<bool>(mail::frame_conversion_failed);
       session->launch_session_id = launch_session.id;
 #ifdef __linux__
       session->launch_worker_connection_required = launch_session.worker_connection_requirement();

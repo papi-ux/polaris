@@ -90,10 +90,26 @@ TEST(VideoCaptureGuardSource, EncoderProbeCannotMutateStateDuringCapture) {
   const auto source = read_video_source();
   ASSERT_FALSE(source.empty()) << "could not read src/video.cpp via POLARIS_SOURCE_DIR";
 
-  const auto probe_pos = source.find(
-    "int probe_encoders(bool strict_configured_encoder, bool save_successful_cache)"
+  // probe_encoders() runs its body in probe_encoders_impl(), which a refresh between launches calls
+  // as well, so the lock is pinned at the top of the one body both run, and the entry point is held
+  // to delegating there.
+  const auto entry_pos = source.find(
+    "int probe_encoders(bool strict_configured_encoder, bool save_successful_cache) {"
   );
-  ASSERT_NE(probe_pos, std::string::npos) << "encoder probe entry point not found";
+  ASSERT_NE(entry_pos, std::string::npos) << "encoder probe entry point not found";
+  const auto entry_body = source.substr(entry_pos, source.find('}', entry_pos) - entry_pos);
+  EXPECT_NE(
+    entry_body.find("return probe_encoders_impl(strict_configured_encoder, save_successful_cache, false);"),
+    std::string::npos
+  ) << "the encoder probe entry point must run the locked probe body";
+  const auto probe_pos = source.find(
+    "static int probe_encoders_impl(\n"
+    "    bool strict_configured_encoder,\n"
+    "    bool save_successful_cache,\n"
+    "    bool keep_previous_selection_on_failure\n"
+    "  ) {"
+  );
+  ASSERT_NE(probe_pos, std::string::npos) << "encoder probe body not found";
   const auto probe_prefix = source.substr(probe_pos, 1024);
   EXPECT_NE(
     probe_prefix.find("std::unique_lock encoder_state_lock {encoder_state_mutex, std::defer_lock};"),

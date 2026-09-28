@@ -4,13 +4,50 @@ Polaris publishes dnf and pacman repositories, so an upgrade is part of the
 host's normal update rather than a download and an exact filename.
 
 ```bash
-sudo dnf upgrade          # Fedora, Bazzite
+sudo dnf upgrade          # Fedora
+sudo rpm-ostree upgrade   # Bazzite and other ostree hosts
 sudo pacman -Syu          # Arch, CachyOS
 ```
 
 Adding the repository is a one-time step. Downloading a release package by hand
 still works and is still supported; the repository is an easier path to the same
 package, not a different one.
+
+## One-command install
+
+On Fedora 44, Arch Linux and CachyOS, one command trusts the repository's
+signing key, adds the repository, installs Polaris and runs host setup:
+
+```bash
+curl -fsSL https://repo.papi-ux.com/install.sh | sh
+```
+
+It announces each step before running it. An older Polaris already on the host
+is upgraded. On Arch and CachyOS it installs with `pacman -Syu`, so the rest of
+the system upgrades in the same step, without asking. If the running kernel has
+no modules left on disk afterwards, or the loaded NVIDIA driver and its
+libraries differ, it asks for a reboot and leaves host setup until after it. To
+read every command it would run without changing anything, pass `--dry-run`:
+
+```bash
+curl -fsSL https://repo.papi-ux.com/install.sh | sh -s -- --dry-run
+```
+
+What it leaves to you:
+
+- **Starting Polaris.** It runs host setup but does not start Polaris. Start it
+  with `systemctl --user enable --now polaris`, then open the console as
+  [After install or upgrade](#after-install-or-upgrade) describes.
+- **Leaving a beta.** It installs stable releases only. It does not replace a
+  1.4.13 beta, which already carries the version `1.4.13`, but it prints the
+  reinstall command that does;
+  [Leave a 1.4.13 beta](updates.md#leave-a-1413-beta) explains it.
+- **DRM/KMS capture.** It does not install `polaris-kms`. It prints the command
+  that does, and the [Fedora](fedora.md#optional-drmkms-capture) and
+  [Arch](arch.md#optional-drmkms-capture) guides cover the logout that follows.
+
+Everywhere else, Bazzite, Ubuntu and SteamOS included, follow your
+distribution's guide. The sections below are the same steps by hand.
 
 ## After install or upgrade
 
@@ -82,7 +119,7 @@ curl -fsSL https://repo.papi-ux.com/polaris.gpg | sudo pacman-key --add -
 sudo pacman-key --lsign-key 58017EDFFA9F803E07ED26F835F13F14FAAD15CC
 grep -q '^\[polaris\]' /etc/pacman.conf ||
   curl -fsSL https://repo.papi-ux.com/arch/polaris.conf | sudo tee -a /etc/pacman.conf
-sudo pacman -Sy polaris
+sudo pacman -Syu polaris
 sudo -H polaris --setup-host
 systemctl --user restart polaris
 ```
@@ -117,8 +154,8 @@ promise upgrades it cannot deliver. Follow the [SteamOS guide](steamos.md).
 
 ## Ubuntu
 
-Not yet served by a repository. The Ubuntu package remains the download-and-
-install path described in the release notes.
+Not yet served by a repository. Install the `.deb` as the
+[Ubuntu guide](ubuntu.md) describes.
 
 ## What the repository serves
 
@@ -128,7 +165,8 @@ a rebuild would ship a binary that CI never tested, and the Fedora and Ubuntu
 packaging pull a CUDA toolkit over the network at build time, which no sandboxed
 rebuild service permits.
 
-The repository currently carries the latest stable release only. Prereleases are
+The repository currently carries the latest stable release only: `polaris` and
+the optional DRM/KMS helper `polaris-kms`, at the same version. Prereleases are
 never published to it. Rolling back means installing an older release package by
 hand from the [releases page](https://github.com/papi-ux/polaris/releases).
 
@@ -148,8 +186,15 @@ For the complete opt-in, installation, subsequent-update and return-to-stable
 steps, see [Polaris updates and beta releases](updates.md).
 
 A release is sometimes published early as a beta, tagged `v1.4.13-beta.1` and
-marked as a prerelease on GitHub. A beta is the same release told early: it
-carries the version it will ship as, and it reuses that release's notes.
+marked as a prerelease on GitHub. A beta reuses the notes of the release it
+precedes. Its packages carry a version that sorts below that release, so the
+release replaces the beta through an ordinary upgrade: a tag like
+`v1.4.14-beta.1` builds `1.4.14~beta.1` for RPM and DEB and `1.4.14beta.1` for
+pacman, and the host reports `1.4.14-beta.1`. The 1.4.13 betas predate this and
+carry `1.4.13` itself, so dnf treats the 1.4.13 release as already installed on
+them and a repository upgrade leaves them in place.
+[Leave a 1.4.13 beta](updates.md#leave-a-1413-beta) has the reinstall commands
+that replace one.
 
 A beta never reaches anyone who has not asked for it. GitHub keeps prereleases
 out of `releases/latest`, the repositories above never serve one, and Polaris
@@ -161,8 +206,8 @@ To try one, turn that setting on and let the Update Center offer it, or take the
 package straight from the
 [releases page](https://github.com/papi-ux/polaris/releases) and install it the
 way its release notes describe. Turning the preference off does not downgrade
-an installed beta; wait for a newer stable release or follow the stable package's
-downgrade instructions.
+an installed beta; wait for the stable release it precedes, which an ordinary
+upgrade installs over it, or follow the stable package's downgrade instructions.
 
 ---
 

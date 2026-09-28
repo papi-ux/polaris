@@ -2,6 +2,7 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { describe, it, vi, expect, afterEach } from 'vitest'
 import fixtures from '../../../../../tests/fixtures/live-tuning-v1.json'
 import LiveTuningControl from './LiveTuningControl.vue'
+import { reportSettingsReadable, settingsUnreadable } from '../settings-unreadable.js'
 
 let wrappers = []
 afterEach(() => { wrappers.forEach(w => w.unmount()); wrappers = []; vi.unstubAllGlobals() })
@@ -45,6 +46,32 @@ describe('Live Tuning switch', () => {
     expect(fetch).toHaveBeenCalledTimes(1)
     a.unmount(); wrappers = []
     expect(close).toHaveBeenCalledTimes(1)
+  })
+  // #782: the host answered a refused settings file with 500 save_failed, and the
+  // switch said only that Live Tuning could not be saved.
+  it('names the reason and the fix when the host refuses its settings file', async () => {
+    const sources = []
+    vi.stubGlobal('EventSource', class { constructor() { sources.push(this) } close() {} })
+    const refusal = {
+      path: '/srv/polaris/polaris.conf',
+      reason: 'It is writable by its group (mode 0664), and the settings store refuses a file another user can change.',
+      fix: 'Restrict it with "chmod go-w /srv/polaris/polaris.conf".',
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 503,
+      json: async () => ({ status: false, http_status: 503, code: 'config_unreadable', error: 'config_unreadable', ...refusal }),
+    })))
+    const a = mount(LiveTuningControl); wrappers.push(a)
+    sources[0].onmessage({ data: JSON.stringify({ live_tuning: { ...fixtures[0].live_tuning, host_instance: 'refused-settings-host', sequence: 1 } }) })
+    await flushPromises()
+    await a.get('[role=switch]').trigger('click')
+    await flushPromises()
+    expect(a.get('[role=switch]').attributes('aria-checked')).toBe('false')
+    expect(a.get('[role=alert]').text()).toBe(
+      `Live Tuning was not saved, because Polaris refused to read its settings file. ${refusal.reason} ${refusal.fix}`)
+    expect(settingsUnreadable.value).toEqual(refusal)
+    reportSettingsReadable()
   })
   it('marks a missing or invalid envelope unknown after valid status', async () => {
     const sources = []

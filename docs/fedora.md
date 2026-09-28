@@ -4,6 +4,11 @@ Fedora 44 is one of the two recommended Polaris package paths, and the official
 `Polaris-fedora44-x86_64.rpm` asset ships with every release. Fedora 44 is the only Fedora release
 with a published package; earlier Fedora versions should build from source.
 
+On Fedora 45 the 1.4.13 RPM has been installed but not streamed from. In a clean Fedora 45
+prerelease container, dnf installed it with every library it links, and `polaris --version` and
+`polaris --setup-host` both exited 0. Nothing more was checked there, and the
+[one-command install](repositories.md#one-command-install) refuses Fedora 45.
+
 For an atomic Fedora derivative such as Bazzite, do not follow this page directly — layer the same
 RPM with `rpm-ostree` using the [Bazzite guide](bazzite.md) instead.
 
@@ -29,24 +34,9 @@ Fedora package operations preserve credentials, pairing keys, settings, and the 
 
 ## What `--setup-host` does
 
-It installs the udev rules and modules-load configuration that make virtual input work, and reports
-anything it could not complete. It does not silently take privileges you did not ask for.
-
-> [!WARNING]
-> Only turn on DRM/KMS capture when you actually need it. Polaris works without it on the default
-> compositor and Headless Stream paths. It takes two steps, and the first one is a package:
->
-> ```bash
-> sudo dnf install polaris-kms
-> sudo -H polaris --setup-host --enable-kms
-> ```
->
-> The capability lives in that package's own metadata rather than on the Polaris binary, so an
-> update no longer takes it away. `--enable-kms` only points the user service at the packaged
-> helper, and refuses if the package is not installed. `--disable-kms` points it back.
->
-> An upgrade has to move both packages together, because `polaris-kms` requires the exact version of
-> `polaris` beside it: `sudo dnf upgrade polaris polaris-kms`.
+The Fedora 44 RPM ships the udev rules and modules-load configuration that make virtual input
+work. `--setup-host` installs them itself only when a package did not, and reports anything it
+could not complete. It does not silently take privileges you did not ask for.
 
 If you ran `--setup-host` on a version before v1.3.5, a copy of the udev rules may still sit in
 `/etc/udev/rules.d/60-polaris.rules` and override the packaged file. Host setup keeps it and warns
@@ -66,6 +56,38 @@ The application menu entry starts this same service, so opening Polaris from the
 autostart never run two copies. Quitting from the tray stops it; the menu entry, the next login, or
 `systemctl --user start polaris` brings it back. For a host that boots with no desktop at all, see
 [Headless Boot](bazzite.md#headless-boot-and-deck-images).
+
+## Optional DRM/KMS capture
+
+Only turn this on when you need DRM/KMS capture. Polaris works without it on the default
+compositor and Headless Stream paths. It takes a second package, `polaris-kms`, from the same
+release as Polaris.
+
+With the [package repository](repositories.md) added:
+
+```bash
+sudo dnf install polaris-kms &&
+sudo -H polaris --setup-host --enable-kms
+```
+
+Without it, download the helper next to the Polaris RPM. The link takes the latest release, so
+[upgrade](#upgrade) Polaris first if yours is older:
+
+```bash
+wget --output-document=./Polaris-kms-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/latest/download/Polaris-kms-fedora44-x86_64.rpm &&
+sudo dnf install ./Polaris-kms-fedora44-x86_64.rpm &&
+sudo -H polaris --setup-host --enable-kms
+```
+
+The first time, log out and back in, or reboot where lingering is on (headless boot turns it
+on; `loginctl show-user $USER -p Linger` shows it). Only members of the `polaris-kms` group can
+run the helper, `--enable-kms` adds you to it, and a session picks up its groups at login. Then run
+`sudo -H polaris --setup-host --enable-kms` again and do what it prints.
+
+The capability lives in the helper package rather than on the Polaris binary, so an update does
+not take it away. `polaris-kms` requires the exact version of `polaris` beside it, so the two are
+upgraded and reinstalled together, as [Upgrade](#upgrade) shows. `--disable-kms` points the
+service back at the ordinary binary.
 
 ## Verify the stream path
 
@@ -92,6 +114,8 @@ sudo -H polaris --setup-host &&
 systemctl --user restart polaris
 ```
 
+If `polaris-kms` is installed, name it too: `sudo dnf upgrade polaris polaris-kms`.
+
 Without the repository, install the newer RPM the same way. `dnf` replaces the package in place, and your configuration,
 pairing keys, and library stay in `~/.config/polaris`.
 
@@ -101,6 +125,29 @@ sudo dnf install ./Polaris-fedora44-x86_64.rpm &&
 sudo -H polaris --setup-host &&
 systemctl --user restart polaris
 ```
+
+If `polaris-kms` is installed, upgrade both in one transaction instead, because the helper
+requires the exact version of `polaris` beside it:
+
+```bash
+wget --output-document=./Polaris-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/latest/download/Polaris-fedora44-x86_64.rpm &&
+wget --output-document=./Polaris-kms-fedora44-x86_64.rpm https://github.com/papi-ux/polaris/releases/latest/download/Polaris-kms-fedora44-x86_64.rpm &&
+sudo dnf install ./Polaris-fedora44-x86_64.rpm ./Polaris-kms-fedora44-x86_64.rpm &&
+sudo -H polaris --setup-host &&
+systemctl --user restart polaris
+```
+
+**On a 1.4.13 beta**, reinstall rather than upgrade. The 1.4.13 betas carry the release's own
+version, so 1.4.13-beta.3 and 1.4.13 are both `polaris-1.4.13-1`, and the commands above answer
+`Nothing to do` and keep the beta. With the repository:
+
+```bash
+sudo dnf reinstall polaris polaris-kms
+```
+
+With the files downloaded as above, it is
+`sudo dnf reinstall ./Polaris-fedora44-x86_64.rpm ./Polaris-kms-fedora44-x86_64.rpm`. Leave out
+`polaris-kms` or its file if the helper is not installed, then restart Polaris.
 
 Re-running `--setup-host` after an upgrade is how packaged udev rules and module configuration get
 refreshed.
@@ -114,6 +161,9 @@ systemctl --user disable --now polaris
 sudo dnf remove polaris
 ```
 
+If `polaris-kms` is installed, run `sudo -H polaris --setup-host --disable-kms` first, while
+Polaris is still installed. `dnf remove polaris` takes `polaris-kms` with it.
+
 Package-owned udev rules and modules-load configuration are removed with the package. Your host
 configuration in `~/.config/polaris` is left alone; delete it yourself if you want a clean slate.
 
@@ -122,6 +172,7 @@ For a clean slate, or to remove what the package leaves behind, see
 
 ## GPU notes
 
-NVIDIA with NVENC is the most validated path. AMD and Intel Mesa VAAPI are supported and use the same
-Headless Stream flow, with the real capture path reported in Mission Control rather than assumed. See
-[Compatibility](compatibility.md) for the current status of each combination.
+NVIDIA with NVENC is the most validated path. AMD with Mesa VA-API is supported and uses the same
+Headless Stream flow, with the real capture path reported in Mission Control rather than assumed.
+Intel encodes through VA-API as well, but no Intel GPU has been through release validation. See
+[Compatibility](compatibility.md#gpu-and-encoding) for the current status of each combination.

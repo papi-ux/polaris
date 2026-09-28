@@ -1,5 +1,6 @@
 #include "src/platform/linux/multiseat_launch_service.h"
 #include "src/platform/linux/spaces_host_admin.h"
+#include "../../tests_log_capture.h"
 #include "src/config.h"
 #include "src/launch_failure.h"
 #include "src/nvhttp.h"
@@ -130,6 +131,7 @@ namespace {
     profiles::removal_result_t removal_answer {.outcome = profiles::removal_outcome_e::removed};
     profiles::runtime_move_result_t move_answer {.outcome = profiles::runtime_move_outcome_e::moved};
     std::optional<profiles::refusal_t> persist_refusal;
+    std::optional<profiles::change_result_t> create_answer;
     std::vector<std::string> paired_at_access_change, devices_at_access_change;
     bool with_desktop_at_access_change = false;
     std::string space_at_access_change;
@@ -160,6 +162,7 @@ namespace {
             ++creates;
             EXPECT_GT(state->destroyed.load(), 0U);
             if (before_write) before_write();
+            if (create_answer) return *create_answer;
             if (write_status != private_state_file::write_status_e::not_committed)
               catalog.push_back({request.request_id, request.name, {}, "steam"});
             return profiles::change_result_t {.status = write_status, .profile_key = request.request_id};
@@ -651,6 +654,55 @@ namespace {
     EXPECT_FALSE(service->admin_snapshot().failed);
     EXPECT_EQ(service->admin_snapshot().profiles.size(), 2U);
     EXPECT_EQ(service->profile_for_client("client-a"), "profile-a");
+  }
+
+  /**
+   * Every create the catalog did not save answers the client with
+   * spaces_change_not_saved, which the Spaces page reads, so the host log is the
+   * one place that can say which check stopped it.
+   */
+  TEST_F(MultiseatAssignments, AFailedCreationLogsItsCauseAndKeepsItsCode) {
+    create_answer = profiles::change_result_t {
+      .error = "Profile operation failed. Retain any reported provisioning resources for inspection.",
+      .cause = "rootless Docker is not admitted"};
+    const test_log_capture_t log;
+    const auto created = service->create_space_profile(create_request);
+    EXPECT_EQ(created.status, 409);
+    EXPECT_EQ(created.code, "spaces_change_not_saved");
+    EXPECT_NE(log.text().find("Warning: Creating the Space Second player failed: Profile operation failed. Retain any "
+      "reported provisioning resources for inspection. Cause: rootless Docker is not admitted."), std::string::npos) << log.text();
+    EXPECT_FALSE(service->admin_snapshot().failed);
+  }
+
+  /**
+   * The first Space of a launcher whose runtime is not on this PC is refused on
+   * its way to the job that downloads the runtime and then makes the Space. That
+   * is a normal step of a create that succeeds, so the log notes it with its
+   * cause and never warns that the Space was not created.
+   */
+  TEST_F(MultiseatAssignments, ARefusedCreationIsNotedAndNotWarnedOf) {
+    create_answer = profiles::change_result_t {
+      .error = std::string(profiles::space_runtime_not_downloaded.message),
+      .cause = "Docker holds no image for runtime steam-default yet (not_downloaded)",
+      .refusal = profiles::space_runtime_not_downloaded};
+    const test_log_capture_t log;
+    const auto created = service->create_space_profile(create_request);
+    EXPECT_EQ(created.status, 409);
+    EXPECT_EQ(created.code, "space_runtime_not_downloaded");
+    EXPECT_NE(log.text().find("Info: Creating the Space Second player was refused with space_runtime_not_downloaded. "
+      "Cause: Docker holds no image for runtime steam-default yet (not_downloaded)."), std::string::npos) << log.text();
+    EXPECT_EQ(log.text().find("Warning: Creating the Space"), std::string::npos) << log.text();
+    EXPECT_EQ(log.text().find("was not created"), std::string::npos) << log.text();
+  }
+
+  TEST_F(MultiseatAssignments, ACreationThatThrowsLogsWhatItSaid) {
+    before_write = [] { throw std::runtime_error("the catalog lease vanished"); };
+    const test_log_capture_t log;
+    const auto created = service->create_space_profile(create_request);
+    EXPECT_EQ(created.status, 503);
+    EXPECT_EQ(created.code, "spaces_admin_failed");
+    EXPECT_NE(log.text().find("A Space change failed unexpectedly, so Spaces stay closed until Polaris restarts: "
+      "the catalog lease vanished"), std::string::npos) << log.text();
   }
 
   TEST_F(MultiseatAssignments, UncertainCreationDurabilityKeepsExistingRoutesUnavailable) {
@@ -1512,6 +1564,33 @@ namespace {
     EXPECT_EQ(refused.status, 400);
     EXPECT_EQ(refused.code, "space_stream_options");
     EXPECT_EQ(std::string(refused.message), "A Space stream needs a new SDR session at a whole frame rate.");
+    EXPECT_EQ(std::string(refused.action), "Launch with HDR off and a whole frame rate such as 60.");
+  }
+
+  // Moonlight shows a Space refusal as one line, the message and then the action, so each action
+  // names something every client has instead of a Nova screen or Nova itself.
+  TEST_F(MultiseatProfileHttp, SpaceLaunchRefusalsNameTheFixForEveryClient) {
+    auto hdr = args();
+    hdr.emplace("hdrMode", "1");
+    const auto options = nvhttp::launch_profile_request(client, hdr, false, [](const auto &) { return true; });
+    ASSERT_TRUE(options);
+    EXPECT_EQ(options->code, "space_display_options");
+    auto keyless = args();
+    keyless.erase("rikey");
+    const auto keys = nvhttp::launch_profile_request(client, keyless, false, [](const auto &) { return true; });
+    ASSERT_TRUE(keys);
+    EXPECT_EQ(keys->code, "space_key_material");
+    auto unencrypted = args();
+    unencrypted.erase("corever");
+    const auto cipher = nvhttp::launch_profile_request(client, unencrypted, false, [](const auto &) { return true; });
+    ASSERT_TRUE(cipher);
+    EXPECT_EQ(cipher->code, "space_encryption_required");
+    for (const auto *result : {&*options, &*keys, &*cipher}) {
+      EXPECT_FALSE(result->action.empty()) << result->code;
+      EXPECT_EQ(result->action.find("Nova"), std::string::npos) << result->code;
+      EXPECT_EQ(result->action.find("Play Setup"), std::string::npos) << result->code;
+    }
+    EXPECT_EQ(state->begins.load(), 0U);
   }
 
   TEST_F(MultiseatProfileHttp, UnmappedDeviceUsesOrdinaryRequestPath) {

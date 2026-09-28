@@ -63,6 +63,38 @@ namespace update_status {
     bool has_token(const std::vector<std::string> &tokens, std::string_view value) {
       return std::find(tokens.begin(), tokens.end(), value) != tokens.end();
     }
+
+    bool all_digits(std::string_view text) {
+      return !text.empty() && std::all_of(text.begin(), text.end(), [](unsigned char ch) {
+        return std::isdigit(ch) != 0;
+      });
+    }
+
+    // beta.N or rc.N, the only labels a release tag may carry.
+    bool is_prerelease_label(std::string_view label) {
+      for (const std::string_view channel : {std::string_view {"beta."}, std::string_view {"rc."}}) {
+        if (label.starts_with(channel)) {
+          return all_digits(label.substr(channel.size()));
+        }
+      }
+      return false;
+    }
+
+    // MAJOR.MINOR.PATCH and nothing else.
+    bool is_plain_release(std::string_view version) {
+      int parts = 0;
+      while (true) {
+        const auto dot = version.find('.');
+        if (!all_digits(version.substr(0, dot))) {
+          return false;
+        }
+        ++parts;
+        if (dot == std::string_view::npos) {
+          return parts == 3;
+        }
+        version.remove_prefix(dot + 1);
+      }
+    }
   }  // namespace
 
   distro_info_t parse_os_release(std::string_view content) {
@@ -296,10 +328,35 @@ namespace update_status {
     if (const auto release = text.find('-'); release != std::string::npos) {
       text = text.substr(0, release);
     }
-    const bool version_like = !text.empty() && std::all_of(text.begin(), text.end(), [](unsigned char ch) {
-      return std::isdigit(ch) != 0 || ch == '.';
+    // A prerelease package is spelled the way its own package manager sorts it below the release of
+    // the same number: 1.4.13~beta.3 in rpm and dpkg, 1.4.13beta.3 in pacman. The host running it
+    // reports 1.4.13-beta.3, so that is what this has to give back, or the console could not tell
+    // the installed package from the running process. Cutting at the first letter would answer
+    // 1.4.13 for every beta, which reads as newer than the beta that is running. Anything this does
+    // not recognise gives no version at all, which the console treats as unknown.
+    const auto numeric_end = std::find_if(text.begin(), text.end(), [](unsigned char ch) {
+      return std::isdigit(ch) == 0 && ch != '.';
     });
-    return version_like ? text : std::string {};
+    const std::string release(text.begin(), numeric_end);
+    std::string_view label(text);
+    label.remove_prefix(release.size());
+    if (release.empty()) {
+      return {};
+    }
+    if (label.empty()) {
+      return release;
+    }
+    const bool pacman = package_family == "arch" || package_family == "steamos";
+    if (!pacman) {
+      if (!label.starts_with('~')) {
+        return {};
+      }
+      label.remove_prefix(1);
+    }
+    if (!is_plain_release(release) || !is_prerelease_label(label)) {
+      return {};
+    }
+    return release + "-" + std::string(label);
   }
 
   std::string installed_package_version(const distro_info_t &distro) {
@@ -341,6 +398,8 @@ namespace update_status {
       {"path", binary.path},
       {"packaged_path", binary.packaged_path.empty() ? nlohmann::json(nullptr) : nlohmann::json(binary.packaged_path)},
       {"matches_package", binary.matches_package ? nlohmann::json(*binary.matches_package) : nlohmann::json(nullptr)},
+      // The polaris-kms helper is packaged too, and updates with polaris: restart advice applies to it.
+      {"kms_helper", binary.kms_helper},
     };
 #else
     return nullptr;

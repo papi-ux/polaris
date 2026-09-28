@@ -9,6 +9,7 @@
 #include <array>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 #include <set>
@@ -59,9 +60,12 @@ namespace {
     std::string image_family = "gamescope";
     bool wrong_network = false;
     bool retain_volume_in_inventory = false;
+    bool no_labels = false, no_runtimes = false, odd_option = false, garbled_info = false;
+    bool network_exists = false, network_without_id = false;
+    std::filesystem::path untrusted_file;
     std::uint64_t effective_uid() const override { return uid; }
     bool executable_file(const std::filesystem::path &) const override { return true; }
-    bool trusted_runtime_file(const std::filesystem::path &) const override { return true; }
+    bool trusted_runtime_file(const std::filesystem::path &file) const override { return file != untrusted_file; }
     std::optional<std::vector<std::uint64_t>> supplementary_groups() const override { return std::vector<std::uint64_t> {}; }
     bool readable_directory(const std::filesystem::path &) const override { return true; }
     bool private_read_write_directory(const std::filesystem::path &) const override { return true; }
@@ -79,12 +83,15 @@ namespace {
       const std::vector<std::string> args(argv.begin() + prefix.size(), argv.end());
       json result;
       if (args[0] == "info") {
+        if (garbled_info) return {.exit_status = 0, .output = "Client: Docker Engine"};
         result = {{"OSType", "linux"}, {"Runtimes", {{"runc", {{"path", "runc"}}}}},
-                  {"SecurityOptions", rootless ? json::array({"name=rootless"}) : json::array({"name=selinux"})}};
+                  {"SecurityOptions", rootless ? json::array({"name=rootless"}) :
+                    odd_option ? json::array({"name=selinux", 7}) : json::array({"name=selinux"})}};
+        if (no_runtimes) result.erase("Runtimes");
       } else if (args[0] == "image") {
         image = args.back();
         result = json::array({{{"Id", image}, {"Os", "linux"},
-          {"Config", {{"Labels", {{"io.polaris.multiseat.profile", image_family}}},
+          {"Config", {{"Labels", no_labels ? json(nullptr) : json {{"io.polaris.multiseat.profile", image_family}}},
             {"Volumes", implicit_volume ? json {{"/extra", json::object()}} : json(nullptr)}}}}});
       } else if (args[0] == "volume" && args[1] == "create") {
         volume = args.back();
@@ -97,10 +104,11 @@ namespace {
         if (retain_volume_in_inventory && !volume.empty()) return {.exit_status = 0, .output = json(volume).dump() + "\n"};
         return {.exit_status = 0, .output = "\"unrelated-volume\"\n"};
       } else if (args[0] == "network" && args[1] == "ls") {
-        return {.exit_status = 0, .output = "\"bridge\"\n\"none\"\n"};
+        return {.exit_status = 0, .output = "\"bridge\"\n\"none\"\n" +
+          (network_exists ? json(container::profile_network_name(profile)).dump() + "\n" : std::string {})};
       } else if (args[0] == "network" && args[1] == "create") {
         EXPECT_EQ(args.back(), container::profile_network_name(profile));
-        return {.exit_status = 0, .output = std::string(64, 'e') + "\n"};
+        return {.exit_status = 0, .output = network_without_id ? std::string {"created\n"} : std::string(64, 'e') + "\n"};
       } else if (args[0] == "network" && args[1] == "inspect") {
         result = json::array({{{"Id", std::string(64, wrong_network ? 'f' : 'e')}, {"Name", container::profile_network_name(profile)},
           {"Driver", "bridge"}, {"Scope", "local"}, {"Internal", false}, {"Ingress", false}, {"Attachable", false},
@@ -472,6 +480,152 @@ namespace {
     auto loaded = profiles::load(path);
     ASSERT_TRUE(loaded);
     EXPECT_EQ(profiles::encode(loaded->catalog), profiles::encode(catalog));
+  }
+
+  /**
+   * A failed create answers the person with one fixed message, so its cause is
+   * the only record of which check stopped it, and each check names itself. A
+   * Docker command is named by what it is, never by its arguments: the home
+   * initializer's arguments carry a script.
+   */
+  TEST_F(MultiseatProfileCatalog, AFailedCreationNamesTheCheckThatStoppedIt) {
+    auto catalog = sample();
+    catalog.profiles[0].storage.runtime_profile = runtime_profile_e::steam;
+    catalog.profiles[0].workload = {workload_kind_e::steam, "big-picture-v1"};
+    save(catalog);
+    const auto image = catalog.profiles[0].storage.image_reference;
+    const auto volume = "pv-" + steam_request.request_id;
+    const auto network = container::profile_network_name(steam_request.request_id);
+    struct case_t {
+      const char *name;
+      std::function<void(provisioning_host_t &)> arrange;
+      std::string cause;
+    };
+    for (const auto &item : std::vector<case_t> {
+           {"an untrusted runc", [](auto &h) { h.untrusted_file = "/usr/bin/runc"; },
+            "/usr/bin/runc is not one Polaris trusts: it, or a folder above it, is missing, a link, not owned by root, "
+            "or writable by anyone but root, or Polaris cannot run it, or it is setuid or setgid"},
+           {"a failed docker info", [](auto &h) { h.fail_call = 1; }, "docker info exited with status 1"},
+           {"a docker info that hung", [](auto &h) { h.fail_call = 1; h.timeout = true; }, "docker info timed out"},
+           {"a volume list too long to read", [](auto &h) { h.fail_call = 2; h.truncated = true; },
+            "docker volume ls printed more than Polaris reads"},
+           {"rootless Docker", [](auto &h) { h.rootless = true; }, "rootless Docker is not admitted"},
+           {"a security option that is not text", [](auto &h) { h.odd_option = true; },
+            "Docker listed a security option that is not text"},
+           {"a docker info that is not JSON", [](auto &h) { h.garbled_info = true; },
+            "docker info printed something that is not JSON"},
+           {"an image for another launcher", [](auto &h) { h.image_family = "heroic"; },
+            "image " + image + " is labelled for launcher \"heroic\", not steam"},
+           {"an image built without labels", [](auto &h) { h.no_labels = true; },
+            "image " + image + " carries no Polaris launcher label"},
+           {"an image with volumes of its own", [](auto &h) { h.implicit_volume = true; },
+            "image " + image + " declares its own volumes"},
+           {"a volume Docker labelled otherwise", [](auto &h) { h.wrong_label = true; },
+            "volume " + volume + " is not the local, labelled, optionless volume Polaris just made"},
+           {"a failed home initializer", [](auto &h) { h.fail_call = 6; }, "docker run exited with status 1"},
+           {"a failed network list", [](auto &h) { h.fail_call = 8; }, "docker network ls exited with status 1"},
+           {"a network of the same name", [](auto &h) { h.network_exists = true; },
+            "Docker already has a network named " + network + ", which Polaris never adopts"},
+           {"a failed network create", [](auto &h) { h.fail_call = 9; h.timeout = true; }, "docker network create timed out"},
+           {"a network create that printed no id", [](auto &h) { h.network_without_id = true; },
+            "docker network create printed no network id"},
+           {"a network that is not the one Polaris made", [](auto &h) { h.wrong_network = true; },
+            "network " + network + " is not the private, empty bridge Polaris just made"},
+         }) {
+      SCOPED_TRACE(item.name);
+      provisioning_host_t host; host.image_family = "steam";
+      item.arrange(host);
+      const auto result = profiles::create_space(path, steam_request, host);
+      EXPECT_FALSE(result);
+      EXPECT_EQ(result.cause, item.cause);
+      EXPECT_EQ(result.error, "Profile operation failed. Retain any reported provisioning resources for inspection.")
+        << "the person's answer is the same whatever the cause";
+    }
+    // An answer without a field a check reads names the command it came from,
+    // where nlohmann alone would name only the missing key.
+    {
+      provisioning_host_t host; host.image_family = "steam"; host.no_runtimes = true;
+      const auto cause = profiles::create_space(path, steam_request, host).cause;
+      EXPECT_TRUE(cause.starts_with("docker info answered without a field Polaris checks, or with one of another type: ")) << cause;
+      EXPECT_NE(cause.find("Runtimes"), std::string::npos) << cause;
+    }
+    // The home a failed attempt kept is refused by name on the retry, and never adopted.
+    provisioning_host_t host; host.image_family = "steam"; host.fail_call = 6; host.retain_volume_in_inventory = true;
+    EXPECT_FALSE(profiles::create_space(path, steam_request, host));
+    EXPECT_EQ(profiles::create_space(path, steam_request, host).cause,
+      "Docker already has a volume named " + volume + ", which Polaris never adopts");
+  }
+
+  // A create with nothing to copy is refused before Docker is asked, and says what was missing.
+  TEST_F(MultiseatProfileCatalog, ACreationWithNothingToCopySaysWhatWasMissing) {
+    save(sample());  // one gamescope Space, which no new Space copies
+    provisioning_host_t host;
+    auto unknown = steam_request; unknown.source_profile_id = "profile-z";
+    EXPECT_EQ(profiles::create_space(path, unknown, host).cause, "the catalog has no Space profile-z");
+    EXPECT_EQ(profiles::create_space(path, steam_request, host).cause, "Space profile-a runs no launcher a new Space can copy");
+    auto by_family = steam_request; by_family.source_profile_id.clear(); by_family.family = "heroic";
+    const auto refused = profiles::create_space(path, by_family, host);
+    EXPECT_EQ(refused.error, "This PC has no Space for that launcher yet. Set one up first.");
+    EXPECT_EQ(refused.cause, "the catalog has no heroic Space that is not archived and runs a launcher Polaris streams");
+    EXPECT_TRUE(host.calls.empty());
+  }
+
+  // A catalog write that did not commit says how far it got.
+  TEST_F(MultiseatProfileCatalog, ACreationTheCatalogDidNotSaveSaysHowFarItGot) {
+    provisioning_host_t host; host.image_family = "steam";
+    EXPECT_EQ(profiles::create_space(path, steam_request, host).cause, path.string() + " does not exist");
+    ASSERT_TRUE(psf::write_atomic(path, "not a catalog"));
+    EXPECT_EQ(profiles::create_space(path, steam_request, host).cause, path.string() + " is not a catalog this Polaris reads");
+    auto catalog = sample();
+    catalog.profiles[0].storage.runtime_profile = runtime_profile_e::steam;
+    catalog.profiles[0].workload = {workload_kind_e::steam, "big-picture-v1"};
+    save(catalog);
+    {
+      // Held the way another Polaris process's Spaces owner holds it for its whole life.
+      const auto lease = profiles::load(path);
+      ASSERT_TRUE(lease);
+      EXPECT_EQ(profiles::create_space(path, steam_request, host).cause, "Polaris could not lock and read " + path.string() +
+        ": another Polaris process holds its lock, or the file or its folder failed a safety check or could not be read");
+    }
+    host.uid = 1001;
+    EXPECT_EQ(profiles::create_space(path, steam_request, host).cause,
+      "the catalog belongs to 1000:1000 and Polaris runs as 1001:1001");
+    EXPECT_TRUE(host.calls.empty());
+    host.uid = 1000;
+    psf::set_write_fault_for_tests(psf::write_fault_e::rename);
+    const auto unwritten = profiles::create_space(path, steam_request, host);
+    EXPECT_EQ(unwritten.status, psf::write_status_e::not_committed);
+    EXPECT_EQ(unwritten.cause, "the new catalog could not be written to " + path.string());
+    EXPECT_EQ(unwritten.volume_name, "pv-" + steam_request.request_id) << "the home it made is kept and named";
+  }
+
+  TEST_F(MultiseatProfileCatalog, AFirstSpaceThatIsNotCreatedSaysWhy) {
+    provisioning_host_t host; host.image_family = "steam";
+    host.uid = 1001;
+    EXPECT_EQ(profiles::create_first_space(path, first_request, first_image, "steam", host).cause, "Polaris runs as 1001:1001");
+    host.uid = 1000;
+    host.rootless = true;
+    EXPECT_EQ(profiles::create_first_space(path, first_request, first_image, "steam", host).cause, "rootless Docker is not admitted");
+    host.rootless = false;
+    ASSERT_TRUE(psf::write_atomic(path, "not a catalog"));
+    EXPECT_EQ(profiles::create_first_space(path, first_request, first_image, "steam", host).cause,
+      path.string() + " is not a catalog this Polaris reads");
+    auto foreign = sample();
+    foreign.owner_uid = foreign.owner_gid = 1001;
+    save(foreign);
+    EXPECT_EQ(profiles::create_first_space(path, first_request, first_image, "steam", host).cause,
+      "the catalog belongs to 1001:1001, not 1000:1000");
+    save(sample());
+    {
+      const auto lease = profiles::load(path);
+      ASSERT_TRUE(lease);
+      EXPECT_EQ(profiles::create_first_space(path, first_request, first_image, "steam", host).cause,
+        "Polaris could not lock and read " + path.string() +
+        ": another Polaris process holds its lock, or the file or its folder failed a safety check or could not be read");
+    }
+    psf::set_write_fault_for_tests(psf::write_fault_e::rename);
+    EXPECT_EQ(profiles::create_first_space(path, first_request, first_image, "steam", host).cause,
+      "the new catalog could not be written to " + path.string());
   }
 
   TEST_F(MultiseatProfileCatalog, UncertainCreationCanBeConfirmedWithoutProvisioningAgain) {

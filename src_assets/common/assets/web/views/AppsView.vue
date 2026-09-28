@@ -1334,6 +1334,7 @@ import { hasLaunchCommand, isLaunchReadyApp, launchPriorityDetails, quickLaunchA
 import { filterImportGames, summarizeImportGames } from '../library-imports'
 import { romInstallsPending, useRomSources } from '../composables/useRomSources'
 import { useCoverSweep } from '../composables/useCoverSweep'
+import { readConfigOrNull } from '../config-cache.js'
 import {
   CUSTOM_EMULATOR, blankRomSourceForm, romEmulatorId, romEmulatorInstallFailure, romEmulatorInstallState, romSourceCountLabel,
   romSourceInstallLabel, romSourcePayload, romSourceReady, romSourceStatus, validateRomSourceForm
@@ -2278,8 +2279,8 @@ function save() {
 loadApps()
 
 fetch("./api/config", { credentials: 'include' })
-  .then(r => r.json())
-  .then(r => platform.value = r.platform)
+  .then(readConfigOrNull)
+  .then(r => { if (r) platform.value = r.platform })
 </script>
 
 <style scoped>

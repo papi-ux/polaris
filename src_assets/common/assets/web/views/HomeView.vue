@@ -143,6 +143,34 @@
               {{ $t('index.session_missing_env') }}
             </div>
           </article>
+
+          <article v-if="kmsReadiness" data-kms-capture class="system-telemetry-item system-telemetry-item-wide">
+            <div class="system-telemetry-heading">
+              <span class="system-telemetry-label">{{ $t('index.kms_capture') }}</span>
+              <span data-kms-capture-status class="system-telemetry-state" :class="kmsReadiness.toneClass">{{ $t(kmsReadiness.statusKey) }}</span>
+            </div>
+            <div class="system-telemetry-value system-telemetry-value-text">{{ $t(kmsReadiness.headlineKey) }}</div>
+            <p data-kms-capture-detail class="system-telemetry-copy">{{ kmsReadiness.detail }}</p>
+            <div v-if="kmsReadiness.command" data-kms-capture-command class="system-install-command system-kms-command">
+              <div class="system-install-heading">
+                <div class="system-update-meta">{{ $t('index.kms_command_where') }}</div>
+                <button type="button" class="focus-ring system-button system-button-secondary" @click="copyKmsCommand">
+                  {{ copiedKmsCommand ? $t('index.copied') : $t('index.copy_command') }}
+                </button>
+              </div>
+              <pre><code>{{ kmsReadiness.command }}</code></pre>
+            </div>
+            <router-link v-if="kmsReadiness.link" data-kms-capture-link class="focus-ring system-text-link system-kms-link" :to="kmsReadiness.link.to">{{ $t(kmsReadiness.link.labelKey) }}</router-link>
+            <dl data-capture-readout class="system-capture-readout">
+              <div v-for="item in kmsReadiness.readout" :key="item.label">
+                <dt>{{ item.label }}</dt>
+                <dd>{{ item.value }}</dd>
+              </div>
+            </dl>
+            <div class="system-telemetry-meta">
+              <span v-if="kmsReadiness.binary" class="break-all">{{ kmsReadiness.binary }} · </span>{{ kmsReadiness.capability }}
+            </div>
+          </article>
         </div>
       </section>
 
@@ -258,6 +286,12 @@
             <div class="system-update-package">{{ updateCenterState.packageLabel || $t('index.manual_release_page') }}</div>
             <div class="system-update-meta break-all">{{ updateCenterState.asset?.name || $t('index.no_matching_package') }}</div>
             <div v-if="updateCenterState.assetDigest" class="system-update-digest">{{ updateCenterState.assetDigest }}</div>
+            <template v-if="updateCenterState.kmsAsset">
+              <div data-update-kms-package class="system-update-meta break-all mt-3">{{ updateCenterState.kmsAsset.name }}</div>
+              <div v-if="updateCenterState.kmsAssetDigest" class="system-update-digest">{{ updateCenterState.kmsAssetDigest }}</div>
+              <div class="system-update-meta">{{ $t('index.kms_package_note') }}</div>
+            </template>
+            <div v-else-if="updateCenterState.kmsHelperMissingFromRelease" data-update-kms-package class="system-update-meta mt-3">{{ $t('index.kms_package_missing') }}</div>
           </article>
         </div>
 
@@ -322,6 +356,8 @@ import { ref, computed, inject } from 'vue'
 import { useSystemStats } from '../composables/useSystemStats'
 import PolarisVersion from '../polaris_version'
 import { buildUpdateCenterState, isPrereleaseOptIn, updateStatusLightClass } from '../update-center.js'
+import { describeKmsCapture } from '../kms-capture-readiness.js'
+import { readConfigOrNull } from '../config-cache.js'
 import UpdateChannelControl from '../components/UpdateChannelControl.vue'
 import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
 import { groupRecentIssueLogs } from '../recent-issues.js'
@@ -329,7 +365,21 @@ import { resources, legalDocs, sponsor } from '../resource-links.js'
 
 const i18n = inject('i18n')
 
-const { gpu, displays, audio, sessionType, displaySession, gameModeHost, loading: systemLoading } = useSystemStats(3000)
+const { gpu, displays, audio, sessionType, displaySession, gameModeHost, kmsCapture, runningBinary, loading: systemLoading } = useSystemStats(3000)
+
+// Where DRM/KMS capture stands for the capture this host is set to, and what the last stream
+// opened. The host decides the state; this only words it.
+const kmsReadiness = computed(() => describeKmsCapture(kmsCapture?.value, (key, params) => i18n.t(key, params), runningBinary?.value?.path))
+const copiedKmsCommand = ref(false)
+
+async function copyKmsCommand() {
+  if (!kmsReadiness.value?.command || !navigator.clipboard) return
+  await navigator.clipboard.writeText(kmsReadiness.value.command)
+  copiedKmsCommand.value = true
+  setTimeout(() => {
+    copiedKmsCommand.value = false
+  }, 2000)
+}
 
 const version = ref(null)
 const githubVersion = ref(null)
@@ -357,9 +407,12 @@ const installedVersionNotStable = computed(() => {
   return version.value.isGreater(githubVersion.value)
 })
 
+// The channel counts, as it does in the Update Center: a beta is older than the release it precedes,
+// so a host on 1.4.14-beta.3 has a new stable release waiting once v1.4.14 is out. On the release
+// number alone the two are equal, and the headline called that beta the current public release.
 const stableBuildAvailable = computed(() => {
   if (!githubVersion.value || !version.value) return false
-  return githubVersion.value.isGreater(version.value)
+  return githubVersion.value.isGreater(version.value, true)
 })
 
 const preReleaseBuildAvailable = computed(() => {
@@ -564,8 +617,8 @@ async function refreshUpdateStatus() {
   updateCheckError.value = ''
   try {
     const response = await fetch('./api/config', { credentials: 'include', cache: 'no-store' })
-    if (!response.ok) throw new Error('Host update settings unavailable')
-    const config = await response.json()
+    const config = await readConfigOrNull(response)
+    if (!config) throw new Error('Host update settings unavailable')
     updateConfigRevision.value = config.configuration_revision || ''
     const hostStatus = await fetch('./api/update-status', { credentials: 'include' }).then((response) => response.json()).catch(() => null)
     updateHost.value = hostStatus || { platform: config.platform || '', distro: {} }

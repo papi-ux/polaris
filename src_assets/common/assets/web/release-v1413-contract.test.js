@@ -23,7 +23,7 @@ describe('v1.4.13 release contract', () => {
     expect(read('packaging/linux/SteamOS/namcap-reviewed-warnings.txt')).toContain(
       'usr/bin/polaris-1.4.13',
     )
-    expect(read('scripts/ci/build-steamos-package.sh')).toContain("'polaris|1.4.13-1|x86_64'")
+    expect(read('scripts/ci/build-steamos-package.sh')).toContain('EXPECTED_PKGVER="1.4.13${POLARIS_PRERELEASE_LABEL}-1"')
   })
 
   // The release workflow refuses a tag whose notes file is missing or empty, and a beta reads the

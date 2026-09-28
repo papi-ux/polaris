@@ -67,6 +67,8 @@ Download the new `Polaris-steamos3.8-x86_64.pkg.tar.zst` artifact and repeat the
 
 A SteamOS operating-system update may remove packages layered into the mutable root. If Polaris disappears after an OS update, return to Desktop Mode and reinstall the current SteamOS 3.8 artifact. Do not substitute the rolling Arch package.
 
+The release also carries `Polaris-kms-steamos3.8-x86_64.pkg.tar.zst`, the optional DRM/KMS capture helper. Mirror Desktop, Gamescope Stream and Game Mode streaming do not need it, and it has not been validated on a Deck. If you installed it, download it from the same release each time and add `./Polaris-kms-steamos3.8-x86_64.pkg.tar.zst` to the `pacman -U` line, including the reinstall after a SteamOS update. On a host that ran 1.4.13-beta.2 or beta.3, the Polaris package named alone replaces Polaris but leaves the beta's helper in place.
+
 After Polaris restarts, return to `https://localhost:47990/#/login` with the existing web credentials.
 
 ## Remove and Roll Back
@@ -81,6 +83,22 @@ set -e
 trap 'sudo steamos-readonly enable' EXIT
 sudo steamos-readonly disable || exit $?
 sudo pacman -Rns polaris || exit $?
+sudo steamos-readonly enable || exit $?
+trap - EXIT
+)
+```
+
+If `polaris-kms` is installed, use this block instead. It runs `--disable-kms`, which points the user service back at the ordinary binary, while the root is writable, as every `--setup-host` run on SteamOS needs. Then it removes both packages, since removing `polaris` alone is refused while the helper depends on it:
+
+```bash
+sudo -H polaris --setup-host --disable-headless-boot
+systemctl --user disable --now polaris
+(
+set -e
+trap 'sudo steamos-readonly enable' EXIT
+sudo steamos-readonly disable || exit $?
+sudo -H polaris --setup-host --disable-kms || exit $?
+sudo pacman -Rns polaris polaris-kms || exit $?
 sudo steamos-readonly enable || exit $?
 trap - EXIT
 )

@@ -9,9 +9,11 @@
 #include <src/launch_failure.h>
 #include <src/nvhttp.h>
 #include <src/platform/common.h>
+#include <src/rtsp.h>
 #include <src/video.h>
 
 #include <boost/property_tree/ptree.hpp>
+#include <atomic>
 #include <optional>
 #include <gtest/gtest.h>
 
@@ -159,6 +161,9 @@ TEST(LaunchRefusal, AFailedProbeNamesTheCaptureCauseBeforeTheEncoder) {
   EXPECT_EQ(taken->code, "encoder_probe_failed");
   EXPECT_NE(taken->message.find("private stream compositor"), std::string::npos);
   EXPECT_NE(taken->action.find("Private Stream (GPU-native)"), std::string::npos);
+  // Moonlight shows the action verbatim, so it names the launch mode, not a Nova screen.
+  EXPECT_NE(taken->action.find("launch mode"), std::string::npos);
+  EXPECT_EQ(taken->action.find("Play Setup"), std::string::npos);
 
   video::note_launch_refused_by_probe(false);
   taken = launch_failure::take();
@@ -234,5 +239,142 @@ TEST(LaunchRefusal, TheSatisfiabilityCheckReadsTheLastEvaluation) {
   EXPECT_FALSE(platf::capture_request_satisfiable("kms", false));
   EXPECT_FALSE(platf::capture_request_satisfiable("", false));
   EXPECT_FALSE(platf::capture_request_satisfiable("auto", true));
+}
+
+namespace {
+  /// A generation that captures the host desktop, as Mirror Desktop with capture = kms does.
+  capture_generation::identity_t desktop_kms_generation() {
+    capture_generation::identity_t generation {};
+    generation.stream_mode = "desktop_display";
+    generation.capture_backend = "kms";
+    return generation;
+  }
+
+  struct RestoreCaptureRouteFacts {
+    ~RestoreCaptureRouteFacts() {
+      platf::set_capture_route_facts_for_tests(std::nullopt);
+      launch_failure::clear();
+    }
+  };
+}  // namespace
+
+#ifdef POLARIS_BUILD_PYROWAVE
+TEST(LaunchRefusal, APyroWaveLaunchOnAnHdrDesktopIsRefusedByNameBeforeTheStream) {
+  // #159: KWin scans an HDR desktop out as ABGR16161616F. The launch used to succeed, the client
+  // built a decoder, and the stream ended at its first frame having carried nothing.
+  RestoreCaptureRouteFacts restore;
+  platf::set_capture_route_facts_for_tests(platf::capture_route_facts_for_tests_t {"kms", "kms", 1211384385u});
+  const auto generation = desktop_kms_generation();
+
+  EXPECT_EQ(video::pyrowave_capture_route(generation), pyrowave_availability::route_e::fp16_scanout);
+  const auto refusal = video::pyrowave_capture_refusal(generation);
+  ASSERT_TRUE(refusal.has_value());
+  EXPECT_EQ(refusal->code, "pyrowave_capture_unreadable");
+
+  // It reaches the client the way every launch refusal does.
+  launch_failure::refuse(refusal->status, refusal->code, refusal->message, refusal->action);
+  pt::ptree tree;
+  nvhttp::put_launch_refusal_for_tests(tree, 503, "fallback");
+  EXPECT_EQ(tree.get<int>("root.<xmlattr>.status_code"), 503);
+  EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.error_code"), "pyrowave_capture_unreadable");
+  EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.status_message"), launch_failure::status_message(*refusal));
+  EXPECT_EQ(tree.get<std::string>("root.<xmlattr>.error_action"), refusal->action);
+}
+
+TEST(LaunchRefusal, APyroWaveLaunchOnARouteItCanReadGoesAhead) {
+  RestoreCaptureRouteFacts restore;
+  const auto generation = desktop_kms_generation();
+
+  // An eight bit scanout, and a packed ten bit HDR one, are both formats PyroWave reads.
+  for (const auto fourcc : {0x34325258u /* XR24 */, 0x30334241u /* AB30 */}) {
+    platf::set_capture_route_facts_for_tests(platf::capture_route_facts_for_tests_t {"kms", "kms", fourcc});
+    EXPECT_EQ(video::pyrowave_capture_route(generation), pyrowave_availability::route_e::readable) << fourcc;
+    EXPECT_FALSE(video::pyrowave_capture_refusal(generation).has_value()) << fourcc;
+  }
+
+  // A private compositor is never a KMS scanout, whatever the desktop is doing.
+  platf::set_capture_route_facts_for_tests(platf::capture_route_facts_for_tests_t {"wlr", "wlr", 1211384385u});
+  EXPECT_FALSE(video::pyrowave_capture_refusal(generation).has_value());
+
+  // A scanout that could not be read is no reason to refuse.
+  platf::set_capture_route_facts_for_tests(platf::capture_route_facts_for_tests_t {"kms", "kms", std::nullopt});
+  EXPECT_EQ(video::pyrowave_capture_route(generation), pyrowave_availability::route_e::unknown);
+  EXPECT_FALSE(video::pyrowave_capture_refusal(generation).has_value());
+}
+
+TEST(LaunchRefusal, ACaptureSettingOnlyNvencCanUseRefusesPyroWaveAndNamesIt) {
+  RestoreCaptureRouteFacts restore;
+  auto generation = desktop_kms_generation();
+  generation.capture_backend = "nvfbc";
+  platf::set_capture_route_facts_for_tests(platf::capture_route_facts_for_tests_t {"none", "nvfbc", std::nullopt});
+
+  EXPECT_EQ(video::pyrowave_capture_route(generation), pyrowave_availability::route_e::unsupported_backend);
+  const auto refusal = video::pyrowave_capture_refusal(generation);
+  ASSERT_TRUE(refusal.has_value());
+  EXPECT_EQ(refusal->code, "pyrowave_capture_unreadable");
+  EXPECT_NE(refusal->message.find("nvfbc"), std::string::npos) << refusal->message;
+}
+#endif
+
+TEST(PyroWaveOffer, CapabilitiesSaysWhyPyroWaveIsMissingInTheContractShape) {
+  // The field names and reason ids are what Nova builds against: capture.pyrowave_unavailable is
+  // {reason, message} exactly when pyrowave is not in capture.codecs.
+  pyrowave_availability::offer_facts_t facts;
+  facts.built = true;
+  facts.device = true;
+  facts.host_route = pyrowave_availability::route_e::fp16_scanout;
+  const auto hidden = nvhttp::capture_codecs_for_tests(2, 2, pyrowave_availability::unavailable(facts));
+  EXPECT_EQ(hidden["codecs"], nlohmann::json::array({"h264", "hevc", "av1"})) << hidden.dump();
+  ASSERT_TRUE(hidden.contains("pyrowave_unavailable")) << hidden.dump();
+  const auto &why = hidden["pyrowave_unavailable"];
+  ASSERT_TRUE(why.is_object());
+  EXPECT_EQ(why.size(), 2u) << why.dump();
+  EXPECT_EQ(why["reason"], "fp16_capture");
+  ASSERT_TRUE(why["message"].is_string());
+  EXPECT_NE(why["message"].get<std::string>().find("HDR"), std::string::npos) << why.dump();
+
+  facts = {};
+  EXPECT_EQ(nvhttp::capture_codecs_for_tests(1, 1, pyrowave_availability::unavailable(facts))["pyrowave_unavailable"]["reason"],
+            "not_built");
+
+  // Offered: in the list, and no reason beside it.
+  const auto offered = nvhttp::capture_codecs_for_tests(2, 1, std::nullopt);
+  EXPECT_EQ(offered["codecs"], nlohmann::json::array({"h264", "hevc", "pyrowave"})) << offered.dump();
+  EXPECT_FALSE(offered.contains("pyrowave_unavailable")) << offered.dump();
+}
+
+TEST(LaunchRefusal, AStreamCannotJoinACaptureAnotherCodecsStreamHolds) {
+  // #78: one capture thread serves every stream and opens its display for the first one's memory
+  // type, so a PyroWave stream beside an H.264 one, either way round, got no picture.
+  rtsp_stream::set_cleanup_session_probe_for_tests([]() {});
+  struct Restore {
+    ~Restore() {
+      rtsp_stream::terminate_sessions();
+      rtsp_stream::set_cleanup_session_probe_for_tests({});
+    }
+  } restore;
+  rtsp_stream::terminate_sessions();
+
+  EXPECT_FALSE(rtsp_stream::capture_in_use_refusal(true).has_value());
+  EXPECT_FALSE(rtsp_stream::capture_in_use_refusal(false).has_value());
+
+  rtsp_stream::launch_session_t h264 {};
+  h264.id = 7801;
+  h264.unique_id = "h264-owner";
+  rtsp_stream::add_session_for_tests(h264, false, 0);
+  EXPECT_FALSE(rtsp_stream::capture_in_use_refusal(false).has_value());
+  const auto refused = rtsp_stream::capture_in_use_refusal(true);
+  ASSERT_TRUE(refused.has_value());
+  EXPECT_EQ(refused->code, "capture_in_use_by_other_codec");
+  EXPECT_EQ(refused->status, 503);
+
+  // A stream that is stopping can still hold the capture, so it counts too.
+  rtsp_stream::terminate_sessions();
+  rtsp_stream::launch_session_t pyrowave {};
+  pyrowave.id = 7802;
+  pyrowave.unique_id = "pyrowave-owner";
+  rtsp_stream::add_session_for_tests(pyrowave, true, video::VIDEO_FORMAT_PYROWAVE);
+  EXPECT_FALSE(rtsp_stream::capture_in_use_refusal(true).has_value());
+  ASSERT_TRUE(rtsp_stream::capture_in_use_refusal(false).has_value());
 }
 #endif

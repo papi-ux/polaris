@@ -1,6 +1,8 @@
 import { ref, computed, watch } from 'vue'
 import { useStreamStats } from './useStreamStats'
 import { createLiveTuningReducer, liveTuningLabel, parseLiveTuning } from '../live-tuning'
+import { settingsRefusalFromBody } from '../config-cache.js'
+import { reportSettingsReadable, reportSettingsUnreadable, settingsRefusalSentence } from '../settings-unreadable.js'
 
 const state = ref(null)
 const saving = ref(false)
@@ -30,8 +32,15 @@ export function useLiveTuning() {
       const result = await response.json()
       if (state.value?.host_instance === hostInstance && result.live_tuning?.host_instance === hostInstance) accept(result.live_tuning)
       if (!response.ok || result.status !== true) {
+        // A settings file the host refuses cannot take the change (#782).
+        const refusal = settingsRefusalFromBody(response.status, result)
+        if (refusal) {
+          reportSettingsUnreadable(refusal)
+          throw new Error(settingsRefusalSentence('Live Tuning was not saved, because Polaris refused to read its settings file.', refusal))
+        }
         throw new Error(response.status === 412 ? 'Settings changed. Review the current state and try again.' : 'Live Tuning could not be saved.')
       }
+      reportSettingsReadable()
       if (state.value?.host_instance !== hostInstance || !parseLiveTuning(result.live_tuning) || result.live_tuning.host_instance !== hostInstance) {
         throw new Error('Host changed. Waiting for the current host to confirm the setting.')
       }

@@ -85,6 +85,102 @@ TEST(LinuxPlatformHardeningSource, PipeWireVaapiDefaultsToShmWithExplicitOptInAn
     << "the explicit VAAPI opt-in must retain the existing EGL modifier capability gate";
 }
 
+TEST(LinuxPlatformHardeningSource, EncoderAutoLogSaysExactLiveProbeOnlyGovernsProbeReuse) {
+  // #635: a reporter read exact_live_probe_required=false as a requirement the probe had failed.
+  // The flag is only the Auto policy's input to probe reuse, so the log says the same thing about
+  // it whatever its value. next_probe_reuse is the reuse gate's own answer, asked after remember()
+  // with the identity just recorded; VideoProbeReuseTests holds it against the gate on real routes.
+  const auto video = read_source("src/video.cpp");
+  constexpr auto npos = std::string::npos;
+
+  const auto line = video.find("BOOST_LOG(info) << \"encoder_auto: mode=\"sv");
+  ASSERT_NE(line, npos);
+  EXPECT_EQ(video.find("BOOST_LOG(info) << \"encoder_auto: mode=\"sv", line + 1), npos) << "one encoder_auto line";
+  const auto end = video.find(";\n", line);
+  ASSERT_NE(end, npos);
+  const auto statement = video.substr(line, end - line);
+  EXPECT_NE(statement.find("\" exact_live_probe_required=\"sv << encoder_selection_info.exact_live_probe_required"), npos) << statement;
+  EXPECT_NE(statement.find("\" (Auto policy flag, not a probe result)\"sv"), npos) << statement;
+  EXPECT_EQ(statement.find("exact_live_probe_required ?"), npos) << "the gloss must not depend on the value\n" << statement;
+  EXPECT_NE(statement.find("\" next_probe_reuse=\"sv\n                    << probe_reuse::next_probe_reuse(\n                         gate_reuses,"), npos) << statement;
+  EXPECT_NE(statement.find("probe_route_carries_identity(encoder.name)"), npos) << statement;
+  EXPECT_EQ(video.find("probe reuse not turned off"), npos);
+  EXPECT_EQ(video.find("\"allowed\"sv"), npos) << "allowed was said where the gate refused";
+
+  // gate_reuses is the gate itself, asked after this probe was recorded, with that identity.
+  const auto remember = video.rfind("successful_probe.remember(identity_before, identity_after, encoder.name, successful_epoch);", line);
+  ASSERT_NE(remember, npos);
+  const auto answer = video.find("const bool gate_reuses = successful_probe.reusable(\n      identity_after,", remember);
+  ASSERT_NE(answer, npos);
+  EXPECT_LT(answer, line);
+  const auto answer_args = video.substr(answer, line - answer);
+  EXPECT_NE(answer_args.find("probe_reuse::live_probe_mandatory("), npos) << answer_args;
+  EXPECT_NE(answer_args.find("selection_plan.exact_live_probe_required"), npos) << answer_args;
+  EXPECT_NE(answer_args.find("config::video.encoder"), npos) << answer_args;
+
+  // current_probe_identity() asks the same route rule the line explains with.
+  const auto identity = video.find("std::optional<probe_reuse::identity_t> current_probe_identity(std::string_view backend) {");
+  ASSERT_NE(identity, npos);
+  const auto route_check = video.find("if (!probe_route_carries_identity(backend)) return decline(", identity);
+  ASSERT_NE(route_check, npos);
+  const auto hook = video.find("if (probe_test_hooks) return probe_test_hooks->identity;", identity);
+  ASSERT_NE(hook, npos);
+  EXPECT_LT(route_check, hook) << "a test identity must not stand in for the route";
+
+  // The gate asks the same rule, so the line cannot say reuse where the gate refuses.
+  const auto gate = video.find("successful_probe.reusable(");
+  ASSERT_NE(gate, npos);
+  const auto gate_call = video.substr(gate, video.find(")) {", gate) - gate);
+  EXPECT_NE(gate_call.find("probe_reuse::live_probe_mandatory("), npos) << gate_call;
+  EXPECT_EQ(gate_call.find("== \"vulkan\"sv"), npos) << "the rule lives in live_probe_mandatory only\n" << gate_call;
+}
+
+TEST(LinuxPlatformHardeningSource, EncoderSelectionReasonComesFromThePolicyHelper) {
+  // #635: the reason text is tested beside decide() in encoder_auto_policy.h. This holds the one
+  // call that hands it to the system stats route, session status and Doctor, so an inverted
+  // argument or a sentence written back inline cannot slip past those tests.
+  const auto video = read_source("src/video.cpp");
+  constexpr auto npos = std::string::npos;
+
+  EXPECT_NE(video.find("linux_encoder_auto_policy::reason(info.policy, !info.gpu_driver.empty(), vulkan_built)"), npos);
+  EXPECT_NE(
+    video.find("#ifdef POLARIS_BUILD_VULKAN\n      constexpr bool vulkan_built = true;\n#else\n      constexpr bool vulkan_built = false;\n#endif"),
+    npos
+  );
+  EXPECT_EQ(video.find("desktop capture route"), npos);
+}
+
+TEST(LinuxPlatformHardeningSource, PortalVulkanVideoDmabufLinesGoThroughThePolicyHelpers) {
+  // #635: the portal blamed the build for Vulkan Video's shared memory, which is policy. The words
+  // are tested through dmabuf_policy_log_for_tests and missing_import_path_log_for_tests; this holds
+  // the call sites that write them, so neither capture path can go back to the literal line.
+  const auto capture = read_source("src/platform/linux/portal_grab.cpp");
+  constexpr auto npos = std::string::npos;
+  const auto count = [&capture](const std::string &needle) {
+    std::size_t found = 0;
+    for (auto at = capture.find(needle); at != npos; at = capture.find(needle, at + needle.size())) {
+      ++found;
+    }
+    return found;
+  };
+
+  EXPECT_EQ(count("this build lacks the encoder-specific import path"), 1u)
+    << "only missing_import_path_line may carry the build line";
+  EXPECT_EQ(count("log_dmabuf_policy(mem_type, dmabuf_override, \"local_graph\"sv);"), 1u);
+  EXPECT_EQ(count("log_dmabuf_policy(mem_type, dmabuf_override, \"portal_remote\"sv);"), 1u);
+  EXPECT_EQ(count("if (const auto line = missing_import_path_line(mem_type); !line.empty()) {"), 2u)
+    << "local graph and portal remote capture must both ask the helper";
+
+  // Remote capture stops before its render node checks for Vulkan Video: no render node could
+  // open the offer, and the build line at the end of those checks is not the reason.
+  const auto remote = capture.find("log_dmabuf_policy(mem_type, dmabuf_override, \"portal_remote\"sv);");
+  ASSERT_NE(remote, npos);
+  const auto checks = capture.find("} else if (!session->capture_render_node) {", remote);
+  ASSERT_NE(checks, npos);
+  const auto early_out = capture.substr(remote, checks - remote);
+  EXPECT_NE(early_out.find("mem_type == platf::mem_type_e::vulkan) {"), npos) << early_out;
+}
+
 TEST(LinuxPlatformHardeningSource, HeadlessModifierGuardRemainsBehindVaapiContainment) {
   const auto header = read_source("src/platform/linux/wayland.h");
   const auto capture = read_source("src/platform/linux/wlgrab.cpp");

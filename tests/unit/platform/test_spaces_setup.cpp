@@ -519,9 +519,46 @@ TEST(SpacesSetup, RuntimeInspectionIsKeptBrieflyAndForgottenAfterADownload) {
   EXPECT_EQ(host.calls.size(), 6U);
   // A download that finishes while Docker is answering makes that answer stale.
   cache.forget();
-  EXPECT_EQ(cache.remember("stale", [&] { cache.forget(); return spaces::runtime_image_e::absent; }), spaces::runtime_image_e::absent);
-  EXPECT_EQ(cache.remember("stale", [] { return spaces::runtime_image_e::verified; }), spaces::runtime_image_e::verified);
-  EXPECT_EQ(cache.remember("stale", [] { return spaces::runtime_image_e::absent; }), spaces::runtime_image_e::verified);
+  const auto answer = [](spaces::runtime_image_e state) { return spaces::runtime_inspection_t {state}; };
+  EXPECT_EQ(cache.remember("stale", [&] { cache.forget(); return answer(spaces::runtime_image_e::absent); }).state,
+    spaces::runtime_image_e::absent);
+  EXPECT_EQ(cache.remember("stale", [&] { return answer(spaces::runtime_image_e::verified); }).state, spaces::runtime_image_e::verified);
+  EXPECT_EQ(cache.remember("stale", [&] { return answer(spaces::runtime_image_e::absent); }).state, spaces::runtime_image_e::verified);
+}
+
+// A verified runtime keeps the Id Docker reported for it, which a Space made
+// from it names: the config digest on the classic image store, the manifest
+// digest on the containerd store. Nothing else names an image.
+TEST(SpacesSetup, AVerifiedRuntimeKeepsTheIdDockerReportedOnEitherImageStore) {
+  runtime_host_t host;
+  host.reply = {.exit_status = 0, .output = inspected(nvidia610).dump()};
+  auto facts = spaces::inspect_runtime(host, {amd_intel, nvidia610}, "610.57.04", true);
+  EXPECT_EQ(facts.status, "ready");
+  EXPECT_EQ(facts.image, nvidia610.config_digest);
+
+  auto containerd = inspected(nvidia610);
+  containerd[0]["Id"] = nvidia610.registry_digest;
+  containerd[0]["Descriptor"] = {{"digest", nvidia610.registry_digest}, {"size", 7834},
+    {"mediaType", "application/vnd.oci.image.manifest.v1+json"}};
+  host.reply = {.exit_status = 0, .output = containerd.dump()};
+  spaces::runtime_inspection_cache_t cache;
+  for (int read = 0; read < 2; ++read) {
+    facts = spaces::inspect_runtime(host, {amd_intel, nvidia610}, "610.57.04", true, &cache);
+    EXPECT_EQ(facts.status, "ready") << read;
+    EXPECT_EQ(facts.image, nvidia610.registry_digest) << (read ? "from the cache" : "from Docker");
+  }
+  EXPECT_EQ(host.calls.size(), 2U) << "the second read came from the cache";
+
+  auto other = containerd;
+  other[0]["Id"] = "sha256:" + std::string(64, 'd');
+  host.reply = {.exit_status = 0, .output = other.dump()};
+  facts = spaces::inspect_runtime(host, {amd_intel, nvidia610}, "610.57.04", true);
+  EXPECT_EQ(facts.code, "runtime_identity_mismatch");
+  EXPECT_EQ(facts.image, "");
+  host.reply = {.exit_status = 1, .output = "[]\n"};
+  facts = spaces::inspect_runtime(host, {amd_intel, nvidia610}, "610.57.04", true);
+  EXPECT_EQ(facts.code, "not_downloaded");
+  EXPECT_EQ(facts.image, "");
 }
 
 TEST(SpacesSecurity, EnforcingHostsRequireEveryPieceOfTheMatchingInstallation) {

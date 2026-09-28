@@ -13,6 +13,7 @@
 #include <vector>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace pyrowave_encode {
@@ -180,6 +181,27 @@ namespace pyrowave_encode {
   bool hdr_available();
 
   /**
+   * @brief How a session's frames reach the codec: where their colour is converted, and how they get
+   *        to the GPU.
+   *
+   * The first frame with a picture in it decides, and every such frame after it decides again, so a
+   * session whose GPU path falls back says so. The frame Polaris primes an encoder with decides
+   * nothing, and neither does a repeated frame.
+   */
+  enum class route_e {
+    unknown,  ///< No frame with a picture in it has been encoded yet.
+    zero_copy,  ///< Imported as a DMA-BUF where capture left it, and its colour converted on the GPU.
+    gpu_upload,  ///< Copied from host memory to the GPU, and its colour converted there.
+    cpu_convert,  ///< Its colour converted on the CPU, and the planes copied from host memory.
+  };
+
+  /**
+   * @brief The route as the stream stats name it: zero_copy, gpu_upload or cpu_convert.
+   * @return Empty for unknown, which the stats leave absent rather than name.
+   */
+  std::string_view route_name(route_e route);
+
+  /**
    * @brief One encoder, sized at construction, producing one frame at a time.
    *
    * Intra-only, so there is no reference chain to hold and nothing to invalidate: every frame
@@ -285,6 +307,15 @@ namespace pyrowave_encode {
      * being recognised, and every frame is paying that again.
      */
     virtual unsigned buffers_described() const = 0;
+
+    /**
+     * @brief How the last frame with a picture in it reached the codec.
+     *
+     * Unknown until one has been encoded. The stream's encoder selection reason is built from it,
+     * because GPU colour conversion is the default and a fixed sentence about the CPU was wrong on
+     * most hosts.
+     */
+    virtual route_e route() const = 0;
 
     /**
      * @brief The encoded frame, as one contiguous bitstream. Valid until the next encode.

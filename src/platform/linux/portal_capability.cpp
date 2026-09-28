@@ -20,6 +20,8 @@
   #include <sys/syscall.h>
   #include <unistd.h>
 
+  #include "stream_display_policy.h"
+
 using namespace std::literals;
 
 namespace portal_capability {
@@ -56,7 +58,9 @@ namespace portal_capability {
   ) {
     const auto capture = lower_copy(configured_capture);
     if (!capture.empty() && capture != "auto") {
-      return capture == "portal";
+      // Dispatch sends kwin through the portal, and the portal and KWin both refuse a caller that
+      // holds file capabilities, so kwin needs the same unprivileged process as portal.
+      return stream_display_policy::canonical_capture_backend(capture) == "portal";
     }
 
     // KWin offers its screencast protocol only to a client it can match to a

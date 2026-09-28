@@ -73,4 +73,24 @@ namespace platf::kms_selection {
     }
     return match;
   }
+
+  /**
+   * @brief The entry KMS capture opens for a display name, or nothing when it would refuse.
+   *
+   * The two lookups capture makes, folded into one: the capture thread's search of the enumerated
+   * names for the configured output, and the KMS display's own reading of the name it is handed. An
+   * empty name is the first entry, a number is a legacy position, and anything else is an entry's own
+   * name or an alias for exactly one of them.
+   */
+  inline std::optional<std::size_t> capture_index(const std::vector<std::string> &names, std::string_view display_name) {
+    if (const auto legacy = legacy_index(display_name)) {
+      if (static_cast<std::size_t>(*legacy) < names.size()) return static_cast<std::size_t>(*legacy);
+      return std::nullopt;
+    }
+    for (std::size_t i = 0; i < names.size(); ++i) {
+      if (names[i] == display_name) return i;
+    }
+    if (const auto alias = find_alias(names, display_name)) return static_cast<std::size_t>(*alias);
+    return std::nullopt;
+  }
 }

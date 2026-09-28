@@ -906,6 +906,97 @@
         "variable": "host_power",
         "style": "subscript"
       }
+    },
+    "pyrowave_bitrate": {
+      "$comment": [
+        "The pyrowave_bitrate object of GET /polaris/v1/session/status, present only while the stream",
+        "codec is PyroWave. The advice fields are PyroWave's 35 dB model for the stream's shape, as",
+        "requests: what a client sets so the encoder lands on the model's rate after FEC, audio and",
+        "overhead. advice_far_kbps is H 2.875, a device's own screen, and the lower figure;",
+        "advice_near_kbps is H 2.0, a television or monitor. raise_goal_kbps is what Doctor raises to,",
+        "the far figure capped at cap_kbps and max_bitrate. encoder_kbps is the rate the encoder runs",
+        "at now, ceiling_frame_share the share of recent frames at 99% of the byte budget (null while",
+        "unknown), and starved the host's verdict. No nova_reader yet: Nova builds against it for",
+        "1.4.14."
+      ],
+      "fields": [
+        "advice_far_kbps",
+        "advice_near_kbps",
+        "cap_kbps",
+        "cap_set_aside",
+        "ceiling_frame_share",
+        "chroma",
+        "encoder_kbps",
+        "fps",
+        "height",
+        "live_tuning_floor_encoder_kbps",
+        "model",
+        "raise_goal_kbps",
+        "raise_goal_limited_by",
+        "request_cap",
+        "rule",
+        "starved",
+        "target_db",
+        "version",
+        "width"
+      ],
+      "polaris_emitter": [
+        {
+          "file": "src/pyrowave_advice.cpp",
+          "function": "advice_json",
+          "style": "initializer_list",
+          "declaration": "return {"
+        },
+        {
+          "file": "src/stream_stats.cpp",
+          "function": "pyrowave_bitrate_json",
+          "variable": "value",
+          "style": "subscript"
+        }
+      ]
+    },
+    "pyrowave_advice": {
+      "$comment": [
+        "The response of GET /polaris/v1/pyrowave/advice?width=&height=&fps=&chroma=420|444, announced",
+        "by features.pyrowave_advice_v1. The same advice fields as pyrowave_bitrate, without the live",
+        "ones, for a shape a client is about to ask for. available is false with a reason and a",
+        "message when the host cannot serve PyroWave: not_built carries no figures, no_vulkan_device",
+        "still carries them. assumes names the FEC share and audio cost the requests were grossed up",
+        "for. No nova_reader yet."
+      ],
+      "fields": [
+        "advice_far_kbps",
+        "advice_near_kbps",
+        "assumes",
+        "available",
+        "cap_kbps",
+        "chroma",
+        "fps",
+        "height",
+        "message",
+        "model",
+        "raise_goal_kbps",
+        "raise_goal_limited_by",
+        "reason",
+        "rule",
+        "target_db",
+        "version",
+        "width"
+      ],
+      "polaris_emitter": [
+        {
+          "file": "src/pyrowave_advice.cpp",
+          "function": "advice_json",
+          "style": "initializer_list",
+          "declaration": "return {"
+        },
+        {
+          "file": "src/pyrowave_advice.cpp",
+          "function": "advice_reply",
+          "variable": "reply",
+          "style": "subscript"
+        }
+      ]
     }
   },
   "known_drift": {

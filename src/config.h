@@ -156,7 +156,7 @@ namespace config {
     struct adaptive_bitrate_t {
       bool enabled;
       int min_bitrate_kbps;
-      int max_bitrate_kbps;
+      int max_bitrate_kbps;  ///< adaptive_bitrate_max: read so old files load, and warned about; never cuts a client's bitrate.
     } adaptive_bitrate;
 
     int max_bitrate;  // Maximum bitrate, sets ceiling in kbps for bitrate requested from client
@@ -448,6 +448,18 @@ namespace config {
   std::string back_button_timeout_warning(int timeout_ms);
 
   /**
+   * @brief Warn about a settings file that still sets adaptive_bitrate_max.
+   *
+   * The key is still read so older files load, but a stream lifts it to the
+   * bitrate its client asked for, so it caps nothing. A host that set it as a
+   * cap would otherwise lose that cap without a word; max_bitrate is the cap.
+   *
+   * @param vars Parsed settings, before adaptive_bitrate_max is consumed.
+   * @return The warning, or empty when the file does not set the key.
+   */
+  std::string retired_adaptive_bitrate_max_warning(const std::unordered_map<std::string, std::string> &vars);
+
+  /**
    * @brief Parse a boolean configuration value.
    *
    * Recognizes the documented spellings case-insensitively and in both
@@ -459,6 +471,16 @@ namespace config {
    * @return The parsed value, or nullopt when the text is not a boolean.
    */
   std::optional<bool> parse_bool(std::string_view value);
+
+  /**
+   * @brief The capture setting in parsed configuration variables, the way startup parses it.
+   *
+   * Consumes the key, as apply_config consumes it, and returns current when the
+   * key is absent. A literal auto comes back empty: every backend chooser reads
+   * an empty value as auto, and the word itself reached the capture evaluation
+   * as a backend name it did not know.
+   */
+  std::string capture_setting(std::unordered_map<std::string, std::string> &vars, std::string current);
 
   int write_config_with_vaapi_settings(const std::string &path, const std::string &contents,
                                      const std::optional<std::string> &expected = std::nullopt);

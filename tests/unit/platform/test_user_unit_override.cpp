@@ -160,6 +160,59 @@ TEST(UserUnitOverrideTests, DescribesWhetherTheRunningBinaryIsThePackagedOne) {
   EXPECT_EQ(described.packaged_path, packaged.string());
 }
 
+TEST(UserUnitOverrideTests, ThePackagedKmsHelperIsPackagedAndACopyOfItIsNot) {
+  // A host that runs the polaris-kms helper read as running a stale copy that package updates never
+  // touch, which is the one thing the helper is not: the package replaces it on every update.
+  scratch_t scratch;
+  const auto packaged = scratch.file("usr/bin/polaris", "#!/bin/sh\n", true);
+  const auto helper = scratch.file("usr/libexec/polaris/polaris-kms", "#!/bin/sh\n", true);
+  const auto copy = scratch.file("usr/local/bin/polaris-kms", "#!/bin/sh\n", true);
+
+  auto described = uu::describe_running_binary(helper, packaged.string(), helper.string());
+  EXPECT_TRUE(described.kms_helper);
+  EXPECT_EQ(described.matches_package, std::optional<bool> {true});
+  EXPECT_EQ(described.path, helper.string());
+  EXPECT_EQ(described.packaged_path, helper.string());
+  EXPECT_EQ(uu::running_binary_note(described), "This is the packaged DRM/KMS helper from polaris-kms.");
+
+  // The copy the old Bazzite guide made keeps its warning, helper or not.
+  described = uu::describe_running_binary(copy, packaged.string(), helper.string());
+  EXPECT_FALSE(described.kms_helper);
+  EXPECT_EQ(described.matches_package, std::optional<bool> {false});
+  EXPECT_EQ(described.packaged_path, packaged.string());
+  const auto copy_note = uu::running_binary_note(described);
+  EXPECT_NE(copy_note.find("That is not the packaged " + packaged.string()), std::string::npos) << copy_note;
+  EXPECT_NE(copy_note.find("package updates do not change a copy"), std::string::npos) << copy_note;
+
+  // The main binary is still the packaged binary with a helper beside it.
+  described = uu::describe_running_binary(packaged, packaged.string(), helper.string());
+  EXPECT_FALSE(described.kms_helper);
+  EXPECT_EQ(described.matches_package, std::optional<bool> {true});
+  EXPECT_EQ(uu::running_binary_note(described), "This is the packaged binary.");
+
+  // A non-packaged build knows nothing to compare against, and says nothing.
+  described = uu::describe_running_binary(copy, "polaris", "");
+  EXPECT_FALSE(described.matches_package.has_value());
+  EXPECT_EQ(uu::running_binary_note(described), "");
+}
+
+TEST(UserUnitOverrideTests, ABinaryAnUpdateReplacedIsStillThePackagedOne) {
+  // /proc/self/exe reads "<path> (deleted)" once the package replaces the file a process runs. That
+  // is the packaged path with the old version still running, which a restart fixes, not a copy.
+  scratch_t scratch;
+  const auto packaged = scratch.file("usr/bin/polaris", "#!/bin/sh\n", true);
+  const auto helper = scratch.file("usr/libexec/polaris/polaris-kms", "#!/bin/sh\n", true);
+
+  auto described = uu::describe_running_binary(fs::path {packaged.string() + " (deleted)"}, packaged.string(), helper.string());
+  EXPECT_EQ(described.path, packaged.string());
+  EXPECT_EQ(described.matches_package, std::optional<bool> {true});
+  EXPECT_FALSE(described.kms_helper);
+
+  described = uu::describe_running_binary(fs::path {helper.string() + " (deleted)"}, packaged.string(), helper.string());
+  EXPECT_TRUE(described.kms_helper);
+  EXPECT_EQ(described.matches_package, std::optional<bool> {true});
+}
+
 TEST(UserUnitOverrideTests, SetupHostAdviceNamesTheMissingCopyAndBothWaysOut) {
   scratch_t scratch;
   const auto packaged = scratch.file("usr/bin/polaris", "#!/bin/sh\n", true);
@@ -339,6 +392,9 @@ TEST(UserUnitOverrideTests, SetupHostAdviceForTheGuideCopyNamesTheCommandThatRef
 
   const auto advice = uu::setup_host_advice(override, "deck", packaged, copy);
   EXPECT_NE(advice.find("Package updates do not change it"), std::string::npos);
+  // Refreshing after every update is the chore the polaris-kms package ends, so the way out comes first.
+  EXPECT_NE(advice.find("Install the polaris-kms package and run\n  sudo -H polaris --setup-host\nonce"), std::string::npos) << advice;
+  EXPECT_EQ(advice.find("after every update"), std::string::npos) << advice;
   // By name, not by the versioned path the package installs: that path changes with the next update.
   EXPECT_NE(advice.find("sudo -H polaris --setup-host"), std::string::npos);
   EXPECT_EQ(advice.find(packaged.string()), std::string::npos);
@@ -387,6 +443,20 @@ TEST(UserUnitOverrideTests, KmsTeardownLeavesSomeoneElsesDropInAlone) {
   EXPECT_TRUE(plan.drop_in.empty());
   EXPECT_TRUE(plan.remove_guide_copy);
   EXPECT_TRUE(plan.clear_binary_capability);
+}
+
+TEST(UserUnitOverrideTests, KmsTeardownTakesADropInParkedUntilTheNextLogin) {
+  scratch_t scratch;
+  const auto copy = scratch.root / "usr/local/bin/polaris-kms";
+  const auto parked = scratch.file(".config/systemd/user/polaris.service.d/20-polaris-kms.conf.disabled-until-relogin", "[Service]\nExecStart=\nExecStart=/usr/libexec/polaris/polaris-kms\n");
+  const auto override = uu::effective_exec_override(scratch.drop_ins());
+  ASSERT_FALSE(override.active()) << "systemd reads only *.conf, so a parked drop-in points the service nowhere";
+
+  // Left behind, the next --setup-host would find it and turn DRM/KMS capture back on.
+  const auto plan = uu::kms_teardown_plan(override, false, false, copy, parked);
+  EXPECT_FALSE(plan.empty());
+  EXPECT_EQ(plan.parked_drop_in, parked);
+  EXPECT_TRUE(plan.drop_in.empty());
 }
 
 TEST(UserUnitOverrideTests, KmsTeardownStillClearsTheBinaryWhenOnlyItHoldsTheCapability) {

@@ -137,6 +137,17 @@ describe('session snapshot rows', () => {
 
   it('summarises stream stats for the advanced diagnostics tile', () => {
     expect(summarizeStreamStats({}, t)).toBe('snapshot_no_active_stream')
+    expect(summarizeStreamStats({
+      streaming: false,
+      doctor: { primary_issue: 'stream_failed_to_start' },
+      last_session: { client_name: 'Living Room TV' },
+    }, t)).toBe('snapshot_last_stream_failed_to_start(client=Living Room TV)')
+    // Past the host's window the Doctor issue is no_active_stream again, and so is the row.
+    expect(summarizeStreamStats({
+      streaming: false,
+      doctor: { primary_issue: 'no_active_stream' },
+      last_session: { client_name: 'Living Room TV' },
+    }, t)).toBe('snapshot_no_active_stream')
     expect(summarizeStreamStats(streaming, t)).toBe('snapshot_stream_summary(fps=118.4 FPS,target=120.0 FPS,kbps=16988,loss=0.00,encode=0)')
   })
 })

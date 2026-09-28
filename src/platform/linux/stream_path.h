@@ -130,6 +130,18 @@ namespace stream_path {
   /// Shared ASCII lower-case helper (path/policy/runtime probes).
   std::string to_lower_copy(std::string_view value);
 
+  /**
+   * @brief The backend a capture value names, read the way capture dispatch reads it.
+   *
+   * Dispatch accepts kwin for portal and drm for kms, and treats auto like an
+   * empty value. Anything that decides what to enumerate or what was asked for
+   * has to read the value the same way, or it evaluates an alias as a backend
+   * it does not know. Other values come back unchanged. It lives with the path
+   * vocabulary so backend_name_for_path() can read the setting this way too, and
+   * stream_display_policy names the same function for the capture policy.
+   */
+  std::string canonical_capture_backend(std::string_view capture);
+
   /// Lightweight PATH probe without boost.process (X_OK).
   bool binary_on_path(const char *name);
 

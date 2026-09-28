@@ -23,12 +23,20 @@
 
 // local includes
 #include "platform/common.h"
+#include "pyrowave_advice.h"
+#include "stream_bitrate.h"
 #include "stream_fec.h"
 
 namespace stream_stats {
 
   inline constexpr std::uint64_t DOCTOR_PACING_WARMUP_SAMPLES = 6;
   inline constexpr std::uint64_t DOCTOR_PACING_CONFIRMATION_SAMPLES = 2;
+
+  /// How many recent PyroWave frames the byte ceiling share covers: about four seconds at 60 fps.
+  inline constexpr std::uint32_t k_pyrowave_ceiling_window_frames = 240;
+
+  /// The share stays unknown until this many frames are in the window, about a second at 60 fps.
+  inline constexpr std::uint32_t k_pyrowave_ceiling_min_frames = 60;
 
   /**
    * @brief Return true when delivered FPS is materially below target.
@@ -73,8 +81,35 @@ namespace stream_stats {
     int stream_height = 0;
     platf::frame_transport_e transport = platf::frame_transport_e::unknown;
     platf::frame_residency_e residency = platf::frame_residency_e::unknown;
+    // The accepted frame's own format. The process-wide capture_format is never borrowed for it.
+    platf::frame_format_e format = platf::frame_format_e::unknown;
 
     bool operator==(const capture_source_t &) const = default;
+  };
+
+  /**
+   * @brief What one session's capture asked for and what the display it encodes from opened.
+   *
+   * The session that consumes the display publishes it, so a viewer that joins a display another
+   * session opened carries it too. It records a preference, a resolved request and an initialization.
+   * It does not say the combination is supported, and an opened backend is no evidence that frames
+   * stayed on the GPU: transport, residency and format come from the frames the session accepted.
+   */
+  struct capture_backend_t {
+    /// polaris.conf's capture as loaded when the session started, aliases as written. Empty is Autodetect.
+    std::string preference;
+    /// What the session's generation asked dispatch for, read the way dispatch reads it. Empty is auto.
+    std::string requested;
+    /// The backend whose display initialization succeeded; see platf::capture_route_t.
+    std::string opened;
+    /// The route inside opened; see platf::capture_route_t.
+    std::string route;
+    /// The k_capture_override_* id of the rule that set the preference aside. Empty when none did.
+    std::string mode_override_reason;
+    /// The k_capture_route_fallback_* id when the route is not the one asked for first. Empty when it is.
+    std::string route_fallback_reason;
+
+    bool operator==(const capture_backend_t &) const = default;
   };
 
   /**
@@ -99,6 +134,35 @@ namespace stream_stats {
     int height = 0;
     // Last real source frame accepted by this client's encoder, before scaling.
     capture_source_t capture_source;
+    // What this client's capture asked for and opened. Empty opened means nothing was published.
+    capture_backend_t capture_backend;
+    // How this client's PyroWave frames reach the codec (zero_copy, gpu_upload or cpu_convert), from
+    // its own encoder. Empty until a frame with a picture in it decides, and for any other codec. A
+    // publication for a newly opened display clears it with the frames, so it is always the route
+    // of the display capture_backend names.
+    std::string pyrowave_route;
+    // How this session's start ended: stream_start's started, client_left_during_setup or no_ping.
+    // Empty until its first ping or its ping timeout decides.
+    std::string start_outcome;
+    // How long the client's control stream stayed before it left, or -1 when it did not leave.
+    std::int64_t start_client_left_after_ms = -1;
+    // Whether capture_source came from a frame the display capture_backend names delivered. A
+    // publication for a newly opened display clears it, so the capture block never pairs one
+    // display's route with another display's frames. capture_source itself keeps the last frame
+    // any display delivered, as it always has.
+    bool capture_frame_since_publication = false;
+    // "444" or "420" as this session negotiated its chroma, and what its client asked for at the
+    // handshake. Written once, when the session starts.
+    std::string stream_chroma;
+    stream_bitrate::request_t bitrate_request;
+    // This session's recent PyroWave frames in the batches its encode loop reported them in, oldest
+    // first, as (frames, frames at the byte ceiling), and the totals over those batches.
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> pyrowave_ceiling_batches;
+    std::uint32_t pyrowave_window_frames = 0;
+    std::uint32_t pyrowave_window_ceiling_frames = 0;
+    // When add_client() registered this session. A lifecycle time for the record kept once the
+    // session ends, and not serialized while it streams.
+    std::chrono::system_clock::time_point started_at {};
 
     // Network
     double latency_ms = 0;
@@ -114,6 +178,83 @@ namespace stream_stats {
 
     // Adaptive bitrate
     int adaptive_target_bitrate_kbps = 0;
+  };
+
+  /**
+   * @brief How a session's teardown stopped its app, as the stream readout's last_session keeps it.
+   */
+  struct app_stop_t {
+    /// exited_before_stop, close_request, sigterm or sigkill, for the step that ended the app; or
+    /// compositor_stop, when the private compositor went down while processes of the session were
+    /// still live. Empty when no teardown has said.
+    std::string path;
+    /// Windows the app was asked to close before any signal.
+    int windows_asked = 0;
+    /// How long the app took to stop, from the first request to the last process gone.
+    std::chrono::milliseconds waited {};
+    /// What was stopped: steam for a private Steam game, flatpak when the session started Flatpak
+    /// sandboxes, session for the session's own processes. Empty when not said.
+    std::string target;
+
+    /// How a Flatpak launcher the session started was quit, once its game was gone.
+    struct launcher_t {
+      std::string app_id;
+      std::string path;  ///< exited, sigterm or sigkill
+      std::chrono::milliseconds waited {};
+    };
+
+    std::optional<launcher_t> launcher;
+
+    /// The Flatpak instances the session was found to own, by role, and those it left alone.
+    struct flatpak_instances_t {
+      int launcher = 0;
+      int game = 0;
+      int helper = 0;
+      int left_alone = 0;
+    };
+
+    std::optional<flatpak_instances_t> flatpak_instances;
+    /// complete or incomplete: whether the check after the compositor stopped found every process
+    /// of the session. Empty when that check has not reported.
+    std::string capture;
+    /// Processes that check could not attribute.
+    int unattributed = 0;
+  };
+
+  /**
+   * @brief The most recently ended session's capture outcome, frozen as its client is removed.
+   *
+   * remove_client() copies it from the facts the session's own generation stored, before the entry
+   * is erased, and nothing writes it afterwards: a probe, a late write for the retired generation
+   * and the reset when the last stream ends all leave it as it was. It is never recomputed from the
+   * live settings, which teardown can restore and evaluate again before or after the removal. Only
+   * a removal that finds a live nonzero generation writes it, so a repeated or unmatched removal and
+   * a legacy entry replace nothing. It is a capture outcome, not a telemetry snapshot: loss and
+   * latency carry no session-owned freshness, so they are not here.
+   */
+  struct ended_session_t {
+    std::uint64_t session_generation = 0;
+    std::string client_name;
+    std::chrono::system_clock::time_point started_at {};
+    std::chrono::system_clock::time_point ended_at {};
+    /// What the session's capture asked for and opened. Empty opened when it never published one.
+    capture_backend_t capture_backend;
+    /// The frames the display capture_backend names delivered, or unknown when it delivered none.
+    capture_source_t capture_frames;
+    /// Written only under the session's own generation. A writer that names no session, such as
+    /// Browser Stream's encode loop, never reaches a session's entry. Empty when never reported.
+    std::string codec;
+    std::string encoder_backend;
+    /// The PyroWave route the session's own encoder last reported. Empty when it never reported one.
+    std::string pyrowave_route;
+    /// How the app was stopped when this session's teardown ended it. Its path is empty when no
+    /// teardown has said, which is every app but one in a private session.
+    app_stop_t app_stop;
+    /// How the session's start ended, from stream_start: started, client_left_during_setup or
+    /// no_ping. Empty when neither a ping nor a ping timeout decided it.
+    std::string start_outcome;
+    /// How long the client's control stream stayed before it left, or -1 when it did not leave.
+    std::int64_t start_client_left_after_ms = -1;
   };
 
   struct capture_profile_sample_t {
@@ -227,6 +368,15 @@ namespace stream_stats {
     int width = 0;
     int height = 0;
 
+    /// "444" or "420" as the stream negotiated its chroma at start. Empty before a stream starts.
+    std::string stream_chroma;
+    /// What the client asked for at the handshake, and what the host did to it.
+    stream_bitrate::request_t bitrate_request;
+    /// Recent PyroWave frames and how many of them reached 99% of the codec's byte budget, over about
+    /// the last k_pyrowave_ceiling_window_frames frames of the stream that reported last.
+    std::uint32_t pyrowave_window_frames = 0;
+    std::uint32_t pyrowave_window_ceiling_frames = 0;
+
     // Encoded frames that were transmitted without parity because the
     // packetized payload exceeded the four-block wire-format envelope.
     fec_protection_stats_t fec_protection;
@@ -269,6 +419,9 @@ namespace stream_stats {
     bool adaptive_runtime_update_supported = false;
     /// True only while one uncontaminated stream generation owns the global actuator.
     bool doctor_live_action_scope_available = true;
+    /// Live Tuning's floor for this stream, and what set it: adaptive_bitrate_min or pyrowave_advice.
+    int adaptive_min_bitrate_kbps = 0;
+    std::string adaptive_floor_source;
 
     // System
     double gpu_usage = 0;
@@ -300,11 +453,24 @@ namespace stream_stats {
     // Multi-client
     std::vector<client_stats_t> clients;
 
+    /// The most recently ended session on this host, which get_current() copies in. It survives the
+    /// reset when the last stream ends, and only another session's end replaces it.
+    std::optional<ended_session_t> last_session;
+
     /**
      * @brief Serialize stats to a JSON string.
      * @return JSON string representation.
      */
     std::string to_json() const;
+
+    /**
+     * @brief Serialize stats to a JSON string, with a Doctor built from this session health.
+     * @param doctor_health The stats hold no encoder selection, so the web console's stream stats
+     *        pass the one nvhttp::stream_stats_encoder_selection_json() gives them. The overload
+     *        without it builds the Doctor from the stats alone.
+     * @return JSON string representation.
+     */
+    std::string to_json(const nlohmann::json &doctor_health) const;
   };
 
   /**
@@ -455,6 +621,9 @@ namespace stream_stats {
 
   /**
    * @brief Remove a client session from the stats tracker.
+   *
+   * A removal that finds a live nonzero generation first freezes that session as the last
+   * session; see ended_session_t.
    * @param client_ip IP address of the client to remove.
    * @param session_generation Process-unique stream-session identity. Zero
    * keeps the legacy IP-keyed behavior for callers without a session object.
@@ -470,8 +639,13 @@ namespace stream_stats {
    * @param codec Current codec name.
    * @param width Current video width.
    * @param height Current video height.
+   * @param encoder_backend The encoder instance producing these samples.
+   * @param session_generation The session these samples belong to. Its own client entry takes the
+   *        per-client values, never another session's. Zero names no session, as Browser Stream's
+   *        encode loop does, and writes only the first entry registered with no generation. The
+   *        process-wide values are written either way.
    */
-  void update_video_stats(double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height, std::string_view encoder_backend = {});
+  void update_video_stats(double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height, std::string_view encoder_backend = {}, std::uint64_t session_generation = 0);
 
   /**
    * @brief Update video statistics for a specific client.
@@ -482,8 +656,12 @@ namespace stream_stats {
    * @param codec Current codec name.
    * @param width Current video width.
    * @param height Current video height.
+   * @param encoder_backend The encoder instance producing these samples.
+   * @param session_generation The session these samples belong to. When nonzero it finds the client
+   *        entry instead of the address, which overlapping reconnects from one address share. Zero
+   *        finds only an entry registered with no generation at that address.
    */
-  void update_video_stats(const std::string &client_ip, double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height, std::string_view encoder_backend = {});
+  void update_video_stats(const std::string &client_ip, double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height, std::string_view encoder_backend = {}, std::uint64_t session_generation = 0);
 
   /**
    * @brief Update static session targets for pacing and optimization telemetry.
@@ -530,6 +708,173 @@ namespace stream_stats {
    * after real-frame conversion, rather than on encoder-probe/dummy images.
    */
   bool record_capture_source(std::uint64_t session_generation, const capture_source_t &source);
+
+  /**
+   * @brief Record what a session's capture asked for and opened, for a live nonzero generation.
+   *
+   * The video thread can open the display before the session registers its stats entry, so a
+   * write can arrive early. It is refused then, and the caller publishes again until one lands.
+   * A write that lands names a newly opened display, so the capture block reads its frames as
+   * unknown until record_capture_source() writes one again, and its PyroWave route as unknown until
+   * record_pyrowave_route() writes one again. The caller must then write the next accepted frame
+   * and the next route even when they match the ones written before.
+   * Nothing here moves a network or video policy revision.
+   * @return False when no client holds that generation or nothing was opened, so the caller retries.
+   */
+  bool record_capture_backend(std::uint64_t session_generation, const capture_backend_t &backend);
+
+  /**
+   * @brief Record how a live nonzero generation's PyroWave frames reach the codec.
+   *
+   * Written by that session's own encode loop when its route changes. Nothing here moves a network
+   * or video policy revision.
+   * @param route zero_copy, gpu_upload or cpu_convert. Empty, which is unknown, is never written.
+   * @return False when no client holds that generation or the route is empty, so the caller retries.
+   */
+  bool record_pyrowave_route(std::uint64_t session_generation, std::string_view route);
+
+  /**
+   * @brief Record how the app was stopped, on the last ended session.
+   *
+   * An app is stopped after its streams have ended, so the last ended session is the one whose app
+   * this was. Nothing is written when no session has ended, or when path is empty.
+   * @param path exited_before_stop, close_request, sigterm or sigkill.
+   * @param windows_asked Windows asked to close before any signal was sent.
+   * @param waited How long the app took to stop.
+   */
+  void record_app_stop(std::string_view path, int windows_asked, std::chrono::milliseconds waited);
+
+  /**
+   * @brief Record how the app was stopped, with what was stopped, on the last ended session.
+   *
+   * Replaces what an earlier stop of the same teardown recorded. Nothing is written when no session
+   * has ended, or when the path is empty.
+   */
+  void record_app_stop(const app_stop_t &stop);
+
+  /**
+   * @brief Record what the check after the private compositor stopped found, on the app stop the
+   *        last ended session already has.
+   *
+   * @param capture_complete Every process of the session was accounted for.
+   * @param unattributed Processes the check could not attribute.
+   * @param live_at_compositor_stop Processes of the session were still live when the compositor
+   *        went down. The stop's path then becomes compositor_stop, because that is what ended them.
+   */
+  void record_app_stop_check(bool capture_complete, int unattributed, bool live_at_compositor_stop);
+
+  /**
+   * @brief Record how a live nonzero generation's start ended.
+   *
+   * Written by the session's own video and audio threads: started at the first ping, and the
+   * classified outcome when a ping timeout ends the session. The session's entry keeps the last one
+   * written, and last_session keeps it once the session ends, so a support report made after a
+   * failed start can name it. Nothing here moves a network or video policy revision.
+   * @param outcome stream_start's started, client_left_during_setup or no_ping. Empty is never written.
+   * @param client_left_after_ms How long the control stream stayed before the client left, or -1.
+   * @return False when no client holds that generation or the outcome is empty.
+   */
+  bool record_start_outcome(std::uint64_t session_generation, std::string_view outcome,
+                            std::int64_t client_left_after_ms = -1);
+
+  /**
+   * @brief Record how a live nonzero generation's stream was negotiated, as it starts.
+   * @param yuv444 Whether the session carries 4:4:4 chroma.
+   * @param request What its client asked for at the handshake, and what the host did to it.
+   * @return False when no client holds that generation.
+   */
+  bool record_stream_request(std::uint64_t session_generation, bool yuv444, const stream_bitrate::request_t &request);
+
+  /**
+   * @brief Add a batch of a PyroWave session's sent frames to its rolling byte ceiling window.
+   *
+   * The codec fills a frame up to a byte budget the bitrate sets. A frame at 99% of that budget or more
+   * was cut short by it, and a stream where most frames are asks for more bits than it is given. The
+   * session's own encode loop writes a batch at a time; nothing here moves a policy revision.
+   * @return False when no client holds that generation or the batch is empty.
+   */
+  bool record_pyrowave_frames(std::uint64_t session_generation, std::uint32_t frames, std::uint32_t ceiling_frames);
+
+  /// The share of recent PyroWave frames at the byte ceiling, or nullopt while the window is too short.
+  std::optional<double> pyrowave_ceiling_frame_share(const stats_t &stats);
+
+  /**
+   * @brief PyroWave's bitrate advice for the stream, and the host's verdict on it.
+   *
+   * Inactive unless the stream is PyroWave and its shape gives advice. The verdict compares encoder
+   * rates with encoder rates; the advice itself is carried as requests, which is what a client sets.
+   */
+  struct pyrowave_bitrate_t {
+    bool active = false;
+    pyrowave_advice::advice_t advice;
+    /// The rate the encoder runs at now.
+    int encoder_kbps = 0;
+    std::optional<double> ceiling_frame_share;
+    /// The encoder runs below where Doctor's raise would land it.
+    bool below_goal = false;
+    /// More than pyrowave_advice::k_starved_ceiling_share of recent frames hit the byte ceiling.
+    bool ceiling_starved = false;
+    /// Either of those two: the host's own verdict.
+    bool starved = false;
+    /// Live Tuning's PyroWave floor for this stream at the encoder, when PyroWave's advice set it.
+    int floor_encoder_kbps = 0;
+    /// The live rate sits at or under that floor, where Live Tuning stops cutting.
+    bool at_floor = false;
+  };
+
+  /// Evaluate PyroWave's advice against the live stream. Reads fec_percentage and max_bitrate.
+  pyrowave_bitrate_t evaluate_pyrowave_bitrate(const stats_t &stats);
+
+  /// The session status pyrowave_bitrate object, or null when the stream is not PyroWave.
+  nlohmann::json pyrowave_bitrate_json(const stats_t &stats);
+
+  /**
+   * @brief The launch bitrate a Doctor quality restore climbs back to, at the encoder.
+   *
+   * The saved paired profile's bitrate when it is lower than the rate the stream opened at, and the
+   * rate the stream opened at when there is no saved profile. A PyroWave stream climbs back to the
+   * rate it opened at: the handshake sets a saved profile aside for it, so a restore does too. Zero
+   * before a stream has opened.
+   */
+  int doctor_launch_quality_goal_kbps(const stats_t &stats);
+
+  /// Where a Doctor quality restore climbs to, and what its action payload calls that.
+  struct doctor_quality_goal_t {
+    /// Where the encoder ends up. Doctor's steps and its temporary ceiling work in this.
+    int encoder_kbps = 0;
+    /// What the payload names as target_bitrate_kbps: a request for PyroWave's advice, else the launch goal.
+    int target_kbps = 0;
+    /// pyrowave_advice, launch_ceiling (a saved paired profile) or launch_bitrate.
+    std::string source;
+  };
+
+  /**
+   * @brief The goal for a Doctor quality restore.
+   * @param source pyrowave_advice for PyroWave's raise goal, anything else for the launch goal.
+   */
+  doctor_quality_goal_t doctor_quality_goal(const stats_t &stats, std::string_view source);
+
+  /**
+   * @brief The encoder selection reason for a PyroWave stream, built from the route its own encoder
+   *        reported, and opening with where colour is converted.
+   *
+   * Nova's Doctor card can show this in two lines, so the first words carry the answer. Two streams
+   * have two routes, and one's is no answer for the other, so a client that asks is answered from its
+   * own entry. Without one, the answer is the route every stream that reported one shares, and says
+   * when they differ.
+   * @param requester_generation The session generation of the client that asked, or zero.
+   */
+  std::string pyrowave_route_reason(const stats_t &stats, std::uint64_t requester_generation = 0);
+
+  /**
+   * @brief The opaque identity a session's readout carries: a random value drawn once per process,
+   *        a dot, and the session generation.
+   *
+   * Observational only, never accepted as input. Not named session_id, which the support export
+   * redacts as a Web UI credential.
+   * @return Empty for generation zero, which legacy and test entries carry, so none is made up.
+   */
+  std::string stream_instance_id(std::uint64_t session_generation);
 
   /**
    * @brief Record one frame that exceeded the video FEC protection envelope.

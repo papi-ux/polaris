@@ -82,12 +82,13 @@ Two client-facing notes: Moonlight-protocol clients can request the mirror for a
 | `stream_audio` | `enabled` | Capture and stream audio |
 | `steamgriddb_api_key` | key | Cover art lookups for non-Steam apps |
 | `beat_times_lookup` | `enabled` | Ask How Long To Beat about titles missing from the local completion-estimate dataset; disable to keep the host from making those requests |
-| `host_sleep_enabled` | `disabled` | Let a paired client put this host to sleep |
+| `host_sleep_enabled` | `disabled` | Let a paired Nova client put this host to sleep; Moonlight has no sleep control |
 
 ### Host sleep
 
-`host_sleep_enabled` lets a paired client suspend the host. It is off by default: a client putting
-the host to sleep takes the machine away from everyone on it, and there is no undo from the couch.
+`host_sleep_enabled` lets a paired Nova client suspend the host; Moonlight has no sleep control. It
+is off by default: a client putting the host to sleep takes the machine away from everyone on it,
+and there is no undo from the couch.
 
 With it on, `POST /polaris/v1/host/sleep` suspends the host. The request needs a paired client
 certificate carrying launch permission, which every paired client has unless you made it watch
@@ -113,6 +114,19 @@ last request.
 
 Waking the host again is Wake-on-LAN, which Polaris does not do for you: enable it in the firmware
 and on the interface, and send the magic packet from the client.
+
+A paired client learns the MAC address to wake from the host. It is the MAC of the interface the
+client reached, or, when that is WireGuard, Tailscale or another tunnel with no MAC of its own, the
+MAC of the card that holds the default route and has a link. A tunnel that carries Ethernet, such
+as ZeroTier or an OpenVPN tap device, has a MAC of its own, and a client that reaches the host
+through it learns that one, which wakes nothing. The magic packet still has to arrive on the host's
+own network: a client outside it, over a VPN too, can only wake the host if something forwards the
+packet onto that network.
+
+A client keeps the last MAC it learned. On a host with two network cards, where the client's own
+network reaches the card that does not hold the default route, a check-in over a tunnel replaces
+the right MAC with the default route card's, and a magic packet sent from the client's network
+wakes nothing until the client next sees the host awake there.
 
 #### Before you turn it on
 
@@ -325,7 +339,7 @@ completion dataset). Keys: `sunshine_name`, `notify_pre_releases`, `system_tray`
 | **Hide tray control options** (`hide_tray_controls`) | Do not show "Force Stop", "Restart" and "Quit" in tray menu. |
 | **SteamGridDB API Key** (`steamgriddb_api_key`) | Optional API key used to fetch artwork metadata from SteamGridDB. The first-run wizard can check and save it. A saved key is used right away, by the cover search and by Nova, with no restart. |
 | **Completion Estimate Lookups** (`beat_times_lookup`) | Allow Polaris to ask How Long To Beat about titles missing from its local completion-estimate dataset. Disabling it keeps the estimates already stored and stops the host making those requests on your behalf. |
-| **Allow Clients To Sleep This Host** (`host_sleep_enabled`) | Let a paired client put this machine to sleep. Watch-only clients cannot. Polaris refuses while a stream is running. Waking it again is Wake-on-LAN. |
+| **Allow Clients To Sleep This Host** (`host_sleep_enabled`) | Let a paired Nova client put this machine to sleep; Nova for Android and Nova for Linux have the control, and Moonlight has none. Watch-only clients cannot. Polaris refuses while a stream is running. Waking it again is Wake-on-LAN. |
 
 ### Input tab
 
@@ -408,6 +422,20 @@ are explained in [Launch modes and capture paths](launch-modes.md). Keys: `linux
 `headless_mode`, `linux_use_cage_compositor`, `linux_prefer_gpu_native_capture`, `fallback_mode`,
 `display_plan`, `adaptive_bitrate_enabled`, `disconnect_resume_timeout_seconds`.
 
+The adaptive range has a floor, `adaptive_bitrate_min`, and no ceiling of its own: the bitrate the
+client asked for is the ceiling, and `max_bitrate` caps what a client may ask for. Live Tuning and
+Doctor lower the bitrate from that request and bring it back no higher, except that a request below
+the floor starts at the floor. A PyroWave stream has a floor of its own, half what the codec's model
+advises for it on a device's own screen and never above the request. `max_bitrate` is the only cap a
+PyroWave request meets; the Stability preset, a device profile and a saved paired profile do not cut
+it. Doctor may raise a starved PyroWave stream above its request, as one tap with Undo, to no more
+than 300 Mbps and `max_bitrate`
+([PyroWave reference](pyrowave-reference.md#how-polaris-advises-and-tunes-pyrowave)). A live bitrate
+a client sets by hand turns Live Tuning off for that stream only; `adaptive_bitrate_enabled` keeps
+its saved value. `adaptive_bitrate_max` no longer limits anything. Polaris still reads
+it, so a settings file that sets it loads as before, and logs a warning that names `max_bitrate` as
+the cap to use. The settings page no longer shows it. See [Live Tuning](live-tuning.md#range).
+
 ### Advanced tab
 
 Load handling (limit the capture frame rate to what the client asked for), compatibility switches
@@ -462,9 +490,12 @@ Forcing `hdr_mode = 2` can still select a 10-bit HEVC/Main10 or P010 encode path
 create a true HDR source when the captured display path is SDR and may produce incorrect colors on
 some VAAPI stacks.
 
-True Linux HDR requires the active capture path to expose HDR display metadata. Today that means a
-KMS/DRM display path with an HDR-capable output reporting `HDR_OUTPUT_METADATA`, plus a client HDR
-request and a 10-bit-capable encoder. A valid true HDR session logs:
+True Linux HDR requires the active capture path to expose HDR display metadata, plus a client HDR
+request and a 10-bit-capable encoder. Two paths do today: a KMS/DRM display path with an HDR-capable
+output reporting `HDR_OUTPUT_METADATA`, and Gamescope Stream when its gamescope carries Polaris's
+10-bit BT.2020 PQ capture patch, proven on NVIDIA
+([Runtime and streaming model](runtime.md#hdr-and-main10) has the conditions). A valid true HDR
+session logs:
 
 ```text
 HDR metadata: available=true usable=true
@@ -481,16 +512,21 @@ Headless labwc/wlroots sessions are intentionally treated as SDR until the headl
 truthfully provide HDR metadata. In that mode, `hdr_mode = 2` can still be useful to test Main10/P010
 encode support, but Polaris will not advertise true HDR to the client without metadata.
 
-The configuration that carries true HDR today, verified end to end:
+The KMS configuration that carries true HDR today, verified end to end:
 
 ```ini
 capture = kms
 linux_stream_mode = desktop_display
 ```
 
-`host_virtual_display`, `desktop_takeover` and `gamescope_stream` also show the real output;
-`headless_stream` and `windowed_stream` do not. KMS capture needs `CAP_SYS_ADMIN` on the binary,
-granted once with `sudo -H polaris --setup-host --enable-kms`. The paired client must not have HDR
+`linux_stream_mode` is the host's own mode here. A launch into `desktop_display` from another mode
+keeps `capture = kms` too, except on a host whose own mode is `host_virtual_display` or
+`desktop_takeover`: loading either one puts the portal or wlroots in place of `kms` until Polaris
+restarts, and both capture their display through the portal or wlroots whatever `capture` says.
+`gamescope_stream` and `headless_dongle` keep `capture = kms` only as the host's own mode, and a
+launch into either from another mode captures through the portal. `headless_stream` and
+`windowed_stream` capture Polaris' own labwc through wlroots. KMS capture needs `CAP_SYS_ADMIN` on
+the binary, granted once with `sudo -H polaris --setup-host --enable-kms`. The paired client must not have HDR
 forced off in `client_profiles.json` (`hdr`) or `device_db.json` (`hdr_capable`), and the client has
 to request HDR itself. The full checklist with the log line for each step is in
 [runtime.md](runtime.md#the-recipe-that-works-today).
@@ -529,11 +565,14 @@ controls apply to every codec Polaris probes over VA-API (H.264, HEVC, and AV1) 
 VA-API encoder tab in the web UI; see [VA-API session controls](#va-api-session-controls) for the full
 key reference.
 
-The read-only **Hardware codec support** panel at the top of the tab shows what this GPU actually passed
-validation for: the active encoder plus H.264/HEVC/AV1 rows with HDR markers where the probe accepted a
-Main10/P010 configuration. Polaris advertises AV1 to clients whenever this hardware passes AV1 validation
-and falls back to HEVC when it does not, so leave `av1_mode` on its default and let the panel show which
-codecs will actually be used.
+The read-only **Hardware codec support** panel at the top of the tab shows what this GPU actually
+passed validation for: the active encoder plus H.264/HEVC/AV1 rows with HDR markers where the probe
+accepted a Main10/P010 configuration. Polaris advertises AV1 to clients whenever the encoder in use
+passes AV1 validation. When it does not, a client gets HEVC if the host offers it and the client
+decodes it, and H.264 otherwise, so leave `av1_mode` on its default and let the panel show which
+codecs will actually be used. The exception is AMD Gamescope Stream under Auto, where Auto tries
+Vulkan Video first and Vulkan Video offers no AV1: a host there that wants AV1 sets `av1_mode = 2`,
+which keeps VA-API (see [Vulkan Encoder](#vulkan-encoder)).
 
 ## Vulkan Encoder
 
@@ -542,9 +581,52 @@ encode extensions. Explicit selection supports direct DRM/KMS, wlroots, and Port
 DRM/KMS and wlroots frames remain matched to the encoder's render node; Portal and any safely retired
 wlroots DMA-BUF route use the Vulkan RAM uploader rather than pretending a CPU copy is zero-copy.
 
-With `encoder` left on Auto, Polaris promotes Vulkan only for a compatible AMD private-compositor
-route that can validate the exact first live GPU-native frame and retire a failed route to VA-API.
-NVIDIA stays on NVENC, Intel stays on VA-API, and AMD desktop capture stays on VA-API by default.
+With `encoder` left on Auto, Polaris tries Vulkan Video first on AMD for two routes, with VA-API as
+the fallback:
+
+- **Private Stream**, on the labwc private compositor. Polaris validates the exact first live
+  GPU-native frame and can retire a failed route to VA-API.
+- **Gamescope Stream** (#635), captured through the portal: `capture` unset, `portal` or `kwin`. The
+  portal hands Vulkan Video every frame in system memory, and the encoder probe runs that same upload,
+  so a probe that fails falls back to VA-API. On an RX 9070 XT at 4K60 Vulkan Video encoded in 9 ms a
+  frame against VA-API's 16 ms. It gives up three things there. **AV1**: Vulkan Video carries none in
+  this build, so a client that preferred AV1 loses it. A client that cannot decode HEVC is left with
+  H.264, and a host with HEVC Support set to never (`hevc_mode = 1`) offers H.264 alone. **HDR**:
+  the system memory upload reads 8-bit frames only, so the host stops offering HEVC Main10 and its
+  games stop reading as HDR in Nova's library; a launch that asks for HDR anyway is refused with
+  `encoder_offers_no_hdr`. Keeping VA-API does not bring HDR back on its own: on the portal VA-API
+  takes frames through the same 8-bit system memory upload unless `POLARIS_PORTAL_DMABUF=1` is set,
+  and HDR through that unvalidated DMA-BUF route is not proven. **The portal DMA-BUF opt-in**:
+  `POLARIS_PORTAL_DMABUF=1` applies to VA-API only, so a host that set it streams Vulkan Video over
+  shared memory instead.
+
+  AV1 Support set to always advertise AV1 (`av1_mode = 2` or `3`), or HEVC Support set to advertise
+  HDR (`hevc_mode = 3`), keeps VA-API on this route, as `encoder = vaapi` does, and each of them
+  keeps the DMA-BUF opt-in in play, which applies wherever VA-API encodes on the portal. On a card
+  or Mesa without Vulkan Video encode, every launch tries Vulkan Video first and falls back to
+  VA-API, and the Doctor's encoder selection row reads watch, which on its own leaves the verdict
+  green; `encoder = vaapi` skips the attempt. Nothing retires Vulkan Video here if it passes the
+  probe and then fails on the live stream, which only Private Stream can do so far; if a Gamescope
+  Stream stream fails where VA-API worked, set `encoder = vaapi`. Gamescope Stream keeps a `capture`
+  set to `kms`, `wlr`, `x11` or `auto`, which can hand Vulkan Video GPU frames that nothing retires,
+  so Auto stays on VA-API there.
+
+  The codecs the host advertises follow the route. When Steam Game Mode takes Gamescope Stream or
+  gives it back, or the host default mode changes, the next client request probes the encoder again.
+  A launch that switches to Gamescope Stream for itself was offered the codecs of the mode it came
+  from. An HDR launch is refused with `encoder_offers_no_hdr`. A client that chose AV1 from those
+  codecs is worse off: it picks its codec after the launch, so the launch cannot refuse it by name,
+  and the host refuses the stream as it starts with no reason the client can show, where the same
+  launch used to stream AV1 on VA-API. The host log names the cause. `av1_mode = 2` keeps VA-API,
+  and AV1, on Gamescope Stream.
+
+NVIDIA stays on NVENC and Intel stays on VA-API. Every other AMD route, Steam Game Mode's own screen
+included, counts as desktop capture and stays on VA-API, so Vulkan Video is not a candidate there.
+Set `encoder = vulkan` to choose it on such a route: AV1 is then unavailable, and on portal capture
+frames reach the encoder through system memory. On Gamescope Stream through the portal,
+`encoder = vulkan` also offers no HDR, because the upload reads 8-bit frames only. HEVC Support set
+to advertise HDR (`hevc_mode = 3`) offers it anyway, as written, and such a stream ends at its first
+10-bit frame.
 
 Before selecting it, enable KMS host access once, restart Polaris, then set both overrides:
 

@@ -37,6 +37,33 @@ namespace vk {
   );
 
   /**
+   * @brief Whether the system memory upload has to refuse a frame rather than encode it.
+   *
+   * The upload reads a frame's pixels from host memory, and reads a frame with none as black. That is
+   * right for the frame an encoder is primed with before capture has produced one: on a portal that
+   * negotiated DMA-BUF the primer carries no pixels and no DMA-BUF either. A frame that carries a
+   * DMA-BUF and no pixels in host memory is a live picture this route cannot read, and encoding it as
+   * black streams a black picture with nothing anywhere to say why.
+   *
+   * @param img The frame capture handed over.
+   * @return True for a DMA-BUF frame with no pixels in host memory.
+   */
+  bool ram_upload_cannot_read(const platf::img_t &img);
+
+  /**
+   * @brief Whether the system memory upload has to refuse a frame because it is packed 10-bit.
+   *
+   * The upload copies four bytes a pixel into an 8-bit BGRA image. A packed 10-bit frame, which the
+   * portal hands over for an HDR stream on Gamescope Stream, is four bytes a pixel too, so its size
+   * gives nothing away, and read as BGRA it is noise rather than a wrong colour. Portal capture tags
+   * such a frame p010, the one format it reports for a 10-bit source.
+   *
+   * @param img The frame capture handed over.
+   * @return True for a frame in host memory that capture tagged 10-bit.
+   */
+  bool ram_upload_frame_is_ten_bit(const platf::img_t &img);
+
+  /**
    * @brief Create a Vulkan encode device for VRAM capture.
    *
    * @param width Frame or display width in pixels.

@@ -9,6 +9,7 @@
 
 #include "stream_path.h"
 
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -95,10 +96,13 @@ namespace stream_display_policy {
    *
    * Native wlroots headless outputs are capturable directly by output name.
    * EVDI and KScreen outputs are reachable only through the portal/KWin path,
-   * so an explicitly configured backend does not apply to them and is replaced
-   * for the session. This discards an operator's choice, which is why
-   * normalize_host_virtual_display_state_for_backend says so in the log; the
-   * caller restores the host setting at teardown.
+   * so an explicitly configured backend does not apply to them and is
+   * replaced. This discards an operator's choice,
+   * which is why normalize_host_virtual_display_state_for_backend says so in
+   * the log. A session-scoped override restores the host setting at teardown.
+   * A mode loaded from polaris.conf keeps the replacement in memory until
+   * Polaris restarts: a later mode switch puts back the value it found, which
+   * is already the replacement.
    */
   std::string capture_for_host_virtual_display_backend(
     virtual_display::backend_e backend,
@@ -149,6 +153,180 @@ namespace stream_display_policy {
   std::string capture_for_current_mode(bool exact_output_owned = false);
 
   /**
+   * @brief The capture a stream mode runs with once it has filled an unset one.
+   *
+   * Gamescope Stream fills an unset capture with portal when a launch enters it, and the dongle
+   * fills an unset or auto one, at load and when a launch enters it. Every other mode, and an
+   * explicit backend in any mode, keeps what it is given. The fills and the Doctor ask this one
+   * rule, so the Doctor never reads an unset capture that no launch would keep.
+   */
+  std::string capture_filled_for_mode(std::string_view stream_mode, std::string_view capture);
+
+  /**
+   * @brief capture_for_current_mode() as a launch into the live mode asks for it: after the mode
+   *        has filled an unset capture (capture_filled_for_mode()), which a launch does first.
+   */
+  std::string capture_for_launch_into_current_mode(bool exact_output_owned = false);
+
+  /**
+   * @brief A capture backend the operator named and the host does not ask for, and why.
+   *
+   * Only an explicit choice counts. An empty capture setting, or a literal
+   * auto, asks the host to choose, so the host choosing is not a rewrite.
+   */
+  struct capture_override_t {
+    std::string configured;  ///< the backend the capture setting names; never auto
+    std::string effective;  ///< the backend asked for instead; empty is auto
+    std::string reason;  ///< one of the k_capture_override_* ids
+  };
+
+  /// A private labwc session can only be captured through wlroots.
+  constexpr std::string_view k_capture_override_private_compositor = "private_compositor";
+  /// The configured backend captured nothing in this mode and the evaluation substituted another.
+  constexpr std::string_view k_capture_override_substituted = "substituted";
+  /// A Gamescope session is captured through the portal.
+  constexpr std::string_view k_capture_override_gamescope_session = "gamescope_session";
+  /// A dongle session captures the host desktop through the portal after the topology swap.
+  constexpr std::string_view k_capture_override_dongle_session = "dongle_session";
+  /// Mirror Desktop lets desktop capture discovery choose instead of pinning wlroots.
+  constexpr std::string_view k_capture_override_desktop_discovery = "desktop_discovery";
+  /// A host virtual display can only be captured the way its backend exposes it.
+  constexpr std::string_view k_capture_override_virtual_display_backend = "virtual_display_backend";
+
+  /**
+   * @brief The backend a capture value names, read the way capture dispatch reads it.
+   *
+   * This is stream_path::canonical_capture_backend(), which says what it reads.
+   * Every capture policy reader reaches it through this namespace.
+   */
+  using stream_path::canonical_capture_backend;
+
+  /**
+   * @brief What capture_for_mode() does to an explicitly configured backend, and why.
+   *
+   * Takes exactly what capture_for_mode() takes and shares its decision, so the
+   * two cannot disagree: when this returns a value, effective is what
+   * capture_for_mode() returns for the same arguments. Nothing when the
+   * configured backend stands or when the capture setting is auto.
+   */
+  std::optional<capture_override_t> capture_mode_override(
+    std::string_view configured_capture,
+    std::string_view stream_mode,
+    bool use_cage_compositor,
+    bool substitution_active,
+    bool exact_output_owned
+  );
+
+  /**
+   * @brief capture_mode_override() for the live configuration and the last
+   *        capture-source evaluation, with the inputs capture_for_current_mode() uses.
+   *
+   * The decision is made on the live setting, so effective is what capture_for_current_mode()
+   * returns. What it is measured against, and names as configured, is loaded_capture_setting().
+   * After a Host Virtual Display load or a session transition the live setting is already the
+   * replacement: named as configured, it told a host set to kms that it had chosen portal, and
+   * warned a host with capture unset that an explicit portal had been set aside.
+   */
+  std::optional<capture_override_t> capture_mode_override_for_current_mode(bool exact_output_owned = false);
+
+  /**
+   * @brief The k_capture_override_* id of the rule that asked a generation for another backend
+   *        than polaris.conf names. Empty when no rule did.
+   *
+   * preference is polaris.conf's capture as loaded (loaded_capture_setting()), and requested is what
+   * the generation asked dispatch for. Both are read the way dispatch reads them, so an alias is no
+   * rewrite, and a preference that asks the host to choose is never set aside. The mode rule is
+   * asked first, with the generation's own mode, compositor and exact output, because it is the
+   * last step between the live setting and a request, and it answers only when it asked for the
+   * backend requested names. Otherwise the newest rule that wrote that backend answers: a launch
+   * entering another mode, kept even when an older rule had already written the same backend, a
+   * Host Virtual Display load or launch, or Steam Game Mode. A difference no recorded rule explains
+   * stays empty rather than being given a guessed reason.
+   */
+  std::string capture_request_override_reason(
+    std::string_view preference,
+    std::string_view requested,
+    std::string_view stream_mode,
+    bool use_cage_compositor,
+    bool exact_output_owned
+  );
+
+  /**
+   * @brief What capture_for_session_transition() does to an explicitly configured
+   *        backend, and why. Shares its decision, like capture_mode_override().
+   */
+  std::optional<capture_override_t> capture_session_transition_override(
+    std::string_view configured_selection,
+    std::string_view session_selection,
+    std::string_view current_capture
+  );
+
+  /**
+   * @brief Rewrite the live capture setting for a launch entering session_selection, and say so.
+   *
+   * The rewrite is capture_for_session_transition() on the live setting. When it sets aside a
+   * backend polaris.conf names, measured against loaded_capture_setting() for the reason
+   * capture_mode_override_for_current_mode() is, the line is a warning naming that backend. Any
+   * other change, such as a replacement a Host Virtual Display load made or an unset capture
+   * filled in, is an info line. The caller puts the host setting back at teardown.
+   */
+  void apply_capture_for_session_transition(
+    std::string_view configured_selection,
+    std::string_view session_selection
+  );
+
+  /**
+   * @brief What capture_for_host_virtual_display_backend() does to an explicitly
+   *        configured backend, and why. Shares its decision, like capture_mode_override().
+   */
+  std::optional<capture_override_t> capture_host_virtual_display_override(
+    virtual_display::backend_e backend,
+    std::string_view current_capture
+  );
+
+  /**
+   * @brief One log line naming the stream mode, the configured and the effective
+   *        backend, and the reason. Callers append how long the rewrite lasts.
+   */
+  std::string describe_capture_override(
+    const capture_override_t &override,
+    std::string_view stream_mode
+  );
+
+  /**
+   * @brief The capture setting as the last configuration load parsed it, before
+   *        any stream mode rewrote it in memory.
+   *
+   * Nothing puts it in JSON. The line logged when a display opens names it as
+   * the configured backend, and a virtual display that comes up on another
+   * backend than the launch checked is measured against it. The live setting
+   * cannot answer either question: every writer of it after the load is an
+   * in-memory rewrite. Empty before any load and when the setting is auto.
+   */
+  std::string loaded_capture_setting();
+
+  /**
+   * @brief Who rewrites the capture setting for a virtual display, which decides
+   *        how long the rewrite lasts and what the host says about it.
+   */
+  enum class capture_rewrite_scope_e {
+    load,  ///< polaris.conf was just parsed, before logging starts; lasts until Polaris restarts
+    session,  ///< a launch entering the mode; teardown puts the host setting back
+    preview,  ///< the caller puts the capture setting back itself, so nothing is said
+    backend_change,  ///< the display came up on another backend than the launch checked
+  };
+
+  /**
+   * @brief Log what the last configuration load did to the capture setting.
+   *
+   * The load runs inside config::parse, before logging::init, and a line logged
+   * there reaches stdout but never polaris.log or the console's log viewer. So
+   * the load keeps its lines, and main() calls this once logging is up. Each
+   * line is said once, and a new load drops the lines an older one kept.
+   */
+  void log_config_load_notes();
+
+  /**
    * @brief Normalize connector and capture authority for the backend that will
    *        or did create the Host Virtual display.
    *
@@ -156,9 +334,20 @@ namespace stream_display_policy {
    * actuator calls this again with vdisplay_t::backend after creation so a
    * backend change after preflight cannot carry KScreen connector authority
    * into an EVDI or wlroots session.
+   *
+   * @param scope Who is asking. It decides what the line about a rewritten
+   *        capture setting says, how long it says the rewrite lasts, and whether
+   *        there is one. The rewrite is measured against polaris.conf as loaded
+   *        (loaded_capture_setting()) whoever asks. The actuator passes
+   *        backend_change.
+   * @param stream_mode The mode being entered, for the log line that names a
+   *        replaced capture backend. Empty reads the live stream mode, which
+   *        apply_selection() has not set yet when it calls this.
    */
   void normalize_host_virtual_display_state_for_backend(
-    virtual_display::backend_e backend
+    virtual_display::backend_e backend,
+    capture_rewrite_scope_e scope = capture_rewrite_scope_e::session,
+    std::string_view stream_mode = {}
   );
 
   /**
@@ -221,6 +410,15 @@ namespace stream_display_policy {
    * than an id list, so a future swapping path inherits the rule.
    */
   bool selection_session_overridable(std::string_view selection);
+
+  /**
+   * @brief Whether a client may pick, for one launch, a stream mode that runs its own compositor.
+   *
+   * Such a mode is captured from that compositor and never from a KMS scanout, so what the host
+   * desktop scans out does not reach it. Answered from the binaries on PATH, as the capability
+   * listing answers it for these modes, without the virtual display probes other modes need.
+   */
+  bool private_runtime_selection_available();
 
   /**
    * @brief Whether an app that mirrors the desktop should step aside for this selection.
@@ -386,9 +584,18 @@ namespace stream_display_policy {
   /**
    * @brief Apply a user/API selection into config (stream_mode + legacy bools + runtime).
    *
+   * Gamescope Stream and the dongle fill an unset capture with portal, and say so
+   * at info with the line the dongle load fill says, unless scope is preview.
+   *
+   * @param scope How long a capture rewrite made here lasts. A caller that puts
+   *        the capture setting back itself passes preview.
    * @return false and sets error on failure.
    */
-  bool apply_selection(std::string_view selection, std::string &error);
+  bool apply_selection(
+    std::string_view selection,
+    std::string &error,
+    capture_rewrite_scope_e scope = capture_rewrite_scope_e::session
+  );
 
   /**
    * @brief Normalize config after load: if stream_mode set, sync booleans; else

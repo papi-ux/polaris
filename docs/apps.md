@@ -166,7 +166,7 @@ deleted pictures back. Picking artwork in Nova still works after a removal.
 | **Close desktop Steam for private launches** | When desktop Steam is running as a private stream starts, quits it and waits for it to exit instead of refusing the launch. Unsaved state in that Steam session is lost. |
 | **Per Client App Identity** | Gives the app a separate identity per client, so one app can carry different virtual display configurations for different devices. |
 | **Use App Identity** | Creates virtual displays under the app's own identity instead of the client's, so each app gets its own display configuration. |
-| **Always create Virtual Display** | Creates a virtual display whenever this app starts, regardless of what the client asked for. Needs the virtual display driver on Windows hosts. |
+| **Always create Virtual Display** | Creates a Host Virtual Display whenever this app starts, whatever the client asked for, so a Moonlight client gets one without asking. On a Private Stream host it changes nothing, because the private session already has a display sized to the client. |
 | **Enforce Virtual Display Primary** | Makes the virtual display primary when the app starts. Kept on by default; known broken on Windows 11 24H2. |
 
 ### Environment variables

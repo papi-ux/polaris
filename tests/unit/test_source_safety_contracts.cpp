@@ -817,7 +817,7 @@ TEST(SourceSafetyContracts, PortalSourceSelectionAndPublicationUseOneCaptureGene
   EXPECT_NE(ensure_body.find("ensure_session_unlocked(generation)"), std::string::npos);
   EXPECT_NE(ensure_body.find("kwingrab::prefer_for_generation(generation)"), std::string::npos);
   EXPECT_NE(ensure_body.find("kwingrab::require_for_generation(generation)"), std::string::npos);
-  EXPECT_NE(ensure_body.find("start_output_session(generation.requested_output_name)"), std::string::npos);
+  EXPECT_NE(ensure_body.find("start_output_session(generation.requested_output_name, &kwin_failure)"), std::string::npos);
   for (const auto forbidden : {"config::video.adapter_name", "config::video.output_name",
                                "config::video.capture", "config::video.linux_display"}) {
     EXPECT_EQ(ensure_body.find(forbidden), std::string::npos) << forbidden;
@@ -979,7 +979,7 @@ TEST(SourceSafetyContracts, RequiredKwinVirtualCaptureCannotFallThroughToAnother
   const auto no_wayland_reject = portal.find("return nullptr;", no_wayland_mode);
   const auto wayland_guard = portal.find("#ifdef POLARIS_BUILD_WAYLAND", no_wayland_reject);
   const auto kwin_start = portal.find(
-    "kwingrab::start_output_session(generation.requested_output_name)",
+    "kwingrab::start_output_session(generation.requested_output_name, &kwin_failure)",
     wayland_guard
   );
   const auto required = portal.find("kwingrab::require_for_generation(generation)", kwin_start);
@@ -1487,4 +1487,229 @@ TEST(SourceSafetyContracts, ReadlinkResultsAreCheckedBeforeUse) {
     }
     return out.str();
   }();
+}
+
+TEST(SourceSafetyContracts, SessionVideoStatsAreWrittenUnderTheSessionsOwnGeneration) {
+  // The last session's codec and encoder are its own only while every writer of a client entry's
+  // video stats names the session it writes for. A caller that drops the generation names no
+  // session, so it writes no session's entry, and that session's values stop where they were.
+  // StreamStatsLastSessionTests holds what a write with no generation does beside a live session.
+  const auto read = [](const char *relative) {
+    std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / relative);
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    return contents.str();
+  };
+  const auto calls = [](const std::string &source) {
+    std::vector<std::string> found;
+    for (auto at = source.find("stream_stats::update_video_stats("); at != std::string::npos;
+         at = source.find("stream_stats::update_video_stats(", at + 1)) {
+      const auto end = source.find(");", at);
+      found.push_back(source.substr(at, end == std::string::npos ? std::string::npos : end - at));
+    }
+    return found;
+  };
+  const auto video = calls(read("src/video.cpp"));
+  const auto stream = calls(read("src/stream.cpp"));
+  ASSERT_EQ(video.size(), 1u) << "the periodic writer in each session's encode loop";
+  ASSERT_EQ(stream.size(), 2u) << "the two writes as a session starts";
+  EXPECT_NE(video.front().find("config.session_generation"), std::string::npos) << video.front();
+  for (const auto &call : stream) {
+    EXPECT_NE(call.find("session.session_generation"), std::string::npos) << call;
+  }
+}
+
+TEST(SourceSafetyContracts, CaptureReadoutIsPublishedFromEveryEncodeLoopForEachDisplay) {
+  // The capture readout's lifecycle is wiring that the helper tests never run. A session takes its
+  // request as it starts, every consuming session publishes from its own encode loop until a
+  // write lands, each display it encodes from gets a fresh publication, and dispatch names what it
+  // opened. Dropping any of those leaves every helper test green, and every production capture
+  // block missing, blank, or stuck on the display before a reinitialization.
+  const auto read = [](const char *relative) {
+    std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / relative);
+    std::ostringstream contents;
+    contents << input.rdbuf();
+    return contents.str();
+  };
+  const auto body = [](const std::string &source, std::string_view begin, std::string_view end) {
+    const auto first = source.find(begin);
+    if (first == std::string::npos) {
+      return std::string {};
+    }
+    const auto last = source.find(end, first + begin.size());
+    return last == std::string::npos ? std::string {} : source.substr(first, last - first);
+  };
+  const auto npos = std::string::npos;
+  const auto video = read("src/video.cpp");
+  const auto misc = read("src/platform/linux/misc.cpp");
+  ASSERT_FALSE(video.empty());
+  ASSERT_FALSE(misc.empty());
+
+  // The request is taken as the session starts, before either dispatch hands the config on.
+  const auto capture = body(
+    video,
+    "  void capture(\n    safe::mail_t mail,\n    config_t config,\n    stream_packets::destination_t channel_data,\n    packet_queue_t packets\n  ) {",
+    "  enum validate_flag_e"
+  );
+  ASSERT_FALSE(capture.empty());
+  const auto generation = capture.find("config.capture_generation = proc::proc.capture_generation;");
+  const auto request = capture.find("config.capture_request = capture_request_for_session(config.capture_generation);");
+  const auto dispatch = capture.find("if (encoder_for_session(config).flags & PARALLEL_ENCODING)");
+  const auto async_call = capture.find("capture_async(", dispatch);
+  const auto sync_queue = capture.find("ref->encode_session_ctx_queue.raise(sync_session_ctx_t", dispatch);
+  ASSERT_NE(generation, npos);
+  ASSERT_NE(request, npos) << "no session takes its capture request, so every preference reads Autodetect";
+  ASSERT_NE(dispatch, npos);
+  ASSERT_NE(async_call, npos);
+  ASSERT_NE(sync_queue, npos);
+  EXPECT_LT(generation, request);
+  EXPECT_LT(request, dispatch);
+
+  // The parallel loop builds its publication from the display it was handed, and retries it on
+  // every pass before the frame it records.
+  const auto encode_run = body(video, "  void encode_run(\n", "  input::touch_port_t make_port(");
+  ASSERT_FALSE(encode_run.empty());
+  const auto async_publication = encode_run.find("auto capture_backend = capture_backend_publication(config, disp->capture_route);");
+  const auto async_loop = encode_run.find("while (true) {", async_publication);
+  const auto async_publish = encode_run.find(
+    "publish_capture_backend(capture_backend, reported_source, &reported_pyrowave_route);", async_loop
+  );
+  const auto async_record = encode_run.find("record_capture_source(config, frame, reported_source);", async_publish);
+  ASSERT_NE(async_publication, npos);
+  ASSERT_NE(async_loop, npos);
+  ASSERT_NE(async_publish, npos) << "the parallel loop never retries, so a session registered late never carries capture";
+  ASSERT_NE(async_record, npos);
+
+  // capture_async hands each display to a fresh encode_run, through the loop it runs, and keeps no
+  // publication of its own, so a display opened again is published again.
+  const auto capture_async = body(video, "  void encode_published_displays(", "  capture_preparation_e prepare_capture_for_launch(");
+  ASSERT_FALSE(capture_async.empty());
+  const auto async_entry = capture_async.find("  void capture_async(");
+  ASSERT_NE(async_entry, npos);
+  EXPECT_NE(capture_async.find("encode_published_displays(frame_nr, mail, images, config, *ref.get(), channel_data, packets);", async_entry), npos);
+  EXPECT_NE(capture_async.find("encode_run("), npos);
+  EXPECT_EQ(capture_async.find("capture_backend_publication("), npos);
+  EXPECT_EQ(capture_async.find("publish_capture_backend("), npos);
+
+  // Each synchronized session is built with its own publication from the display it encodes from,
+  // which it tries at once.
+  const auto synced = body(video, "  std::optional<sync_session_t> make_synced_session(", "  encode_e encode_run_sync(");
+  ASSERT_FALSE(synced.empty());
+  const auto synced_publication = synced.find(
+    "encode_session.capture_backend = capture_backend_publication(ctx.config, disp->capture_route);"
+  );
+  const auto synced_publish = synced.find(
+    "publish_capture_backend(encode_session.capture_backend, encode_session.reported_source);",
+    synced_publication
+  );
+  ASSERT_NE(synced_publication, npos);
+  ASSERT_NE(synced_publish, npos);
+
+  // The synchronized loop retries each session's publication before it records the frame, and
+  // leaves building publications to make_synced_session, which a reinitialization calls again.
+  const auto sync = body(video, "  encode_e encode_run_sync(", "  void captureThreadSync()");
+  ASSERT_FALSE(sync.empty());
+  const auto per_session = sync.find("KITTY_WHILE_LOOP(auto pos = std::begin(synced_sessions)");
+  const auto sync_publish = sync.find("publish_capture_backend(pos->capture_backend, pos->reported_source);", per_session);
+  const auto sync_record = sync.find("record_capture_source(ctx->config, frame, pos->reported_source);", per_session);
+  ASSERT_NE(per_session, npos);
+  ASSERT_NE(sync_publish, npos) << "a synced session whose display opened before add_client never retries";
+  ASSERT_NE(sync_record, npos);
+  EXPECT_LT(sync_publish, sync_record);
+  EXPECT_NE(sync.find("make_synced_session(disp, encoder, initial_frame"), npos);
+  EXPECT_EQ(sync.find("capture_backend_publication("), npos);
+
+  // A publication never comes from a probe, and a landing starts the loop's frame record over.
+  const auto publish = body(video, "  static void publish_capture_backend(", "  struct sync_session_t {");
+  ASSERT_FALSE(publish.empty());
+  EXPECT_NE(publish.find("encoder_probe_active()"), npos);
+  EXPECT_NE(publish.find("reported_source.reset();"), npos);
+  EXPECT_NE(publish.find("reported_pyrowave_route->clear();"), npos)
+    << "a landing clears the session's PyroWave route, and the loop would never write it again";
+
+  // Every backend dispatch opens returns through named(), which names it from the chosen backend.
+  const auto display = body(
+    misc,
+    "  std::shared_ptr<display_t> display(mem_type_e hwdevice_type",
+    "No available capture backend satisfies generation request"
+  );
+  ASSERT_FALSE(display.empty());
+  const auto named = display.find("const auto named = [backend](std::shared_ptr<display_t> opened) {");
+  ASSERT_NE(named, npos);
+  EXPECT_NE(display.find("name_opened_display(std::move(opened->capture_route), backend)", named), npos);
+  for (const std::string opener : {"nvfbc_display(", "wl_display(", "portal_display(", "kms_display(", "x11_display("}) {
+    EXPECT_NE(display.find("return named(" + opener), npos) << opener;
+    EXPECT_EQ(display.find("return " + opener), npos) << opener << " returns a display nothing named";
+  }
+}
+
+TEST(SourceSafetyContracts, PortalRouteTravelsWithEveryCaptureToTheDisplayThatOpensIt) {
+  // The portal backend names its own route. ensure_global_capture() works it out from how each local
+  // node it asked for fared, keeps it beside the capture, and hands it out with the capture on the
+  // fresh return and on the reuse, and the display keeps the one it came up on. Only the pure
+  // helper that names the route has tests of its own. Drop any of these and the display says
+  // nothing, name_capture_route() fills the empty route in as "portal", a value outside the
+  // documented vocabulary, with no fallback reason, and every test stays green.
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/platform/linux/portal_grab.cpp");
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto portal = contents.str();
+  ASSERT_FALSE(portal.empty());
+  const auto npos = std::string::npos;
+
+  const auto ensure_begin = portal.find("  static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(");
+  const auto ensure_end = portal.find("  static void release_prepared_capture(", ensure_begin);
+  ASSERT_NE(ensure_begin, npos);
+  ASSERT_NE(ensure_end, npos);
+  const auto ensure = portal.substr(ensure_begin, ensure_end - ensure_begin);
+
+  // One route, named once every local node has had its say and before the capture is handed on.
+  const std::string naming = "g_media.route = portal_capture_route(gamescope_node, kwin_node);";
+  const auto named = ensure.find(naming);
+  ASSERT_NE(named, npos) << "the capture keeps no route, so every portal display reads route portal";
+  EXPECT_EQ(ensure.find(naming, named + 1), npos);
+  for (const std::string outcome : {"gamescope_node = ", "kwin_node = "}) {
+    const auto last = ensure.rfind(outcome);
+    ASSERT_NE(last, npos) << outcome;
+    EXPECT_LT(last, named) << "\"" << outcome << "\" comes after the route was named";
+  }
+  const auto negotiation = ensure.find("const bool negotiated = wait_for_capture_negotiation(capture);");
+  ASSERT_NE(negotiation, npos);
+  EXPECT_LT(named, negotiation);
+
+  // Every return that hands out a capture hands out its route on the line before, the reuse of a
+  // compatible capture included.
+  std::size_t handed_out = 0;
+  for (auto at = ensure.find("return g_media.capture;"); at != npos; at = ensure.find("return g_media.capture;", at + 1)) {
+    ++handed_out;
+    const auto line = ensure.rfind('\n', at);
+    ASSERT_NE(line, npos);
+    const auto previous = ensure.rfind('\n', line - 1);
+    ASSERT_NE(previous, npos);
+    const auto before = ensure.substr(previous + 1, line - previous - 1);
+    EXPECT_NE(before.find("if (route_out) *route_out = g_media.route;"), npos)
+      << "a capture is handed out without its route, after: " << before;
+  }
+  EXPECT_EQ(handed_out, 2u) << "the reuse of a compatible capture and the capture just started";
+  const auto reuse = ensure.find("if (compatible) {");
+  ASSERT_NE(reuse, npos);
+  const auto reuse_return = ensure.find("return g_media.capture;", reuse);
+  const auto reuse_route = ensure.find("if (route_out) *route_out = g_media.route;", reuse);
+  ASSERT_NE(reuse_return, npos);
+  ASSERT_NE(reuse_route, npos);
+  EXPECT_LT(reuse_route, reuse_return) << "a display that reuses the capture reads route portal";
+
+  // The display asks for the route as it initializes and keeps it before it reads the capture.
+  const auto asked = portal.find(
+    "auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range, generation_, requested_rate, {}, &route);"
+  );
+  ASSERT_NE(asked, npos) << "initialization no longer asks for the route its capture took";
+  const auto declared = portal.rfind("platf::capture_route_t route;", asked);
+  ASSERT_NE(declared, npos);
+  EXPECT_EQ(portal.substr(declared, asked - declared).find('}'), npos) << "the route asked for is not this call's";
+  const auto kept = portal.find("capture_route = std::move(route);", asked);
+  const auto read = portal.find("const auto info = cap->frame_info();", asked);
+  ASSERT_NE(kept, npos) << "the display drops the route its capture took";
+  ASSERT_NE(read, npos);
+  EXPECT_LT(kept, read);
 }

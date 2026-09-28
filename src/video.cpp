@@ -18,6 +18,7 @@
 #include <shared_mutex>
 #include <string>
 #include <thread>
+#include <utility>
 
 // lib includes
 #include <boost/pointer_cast.hpp>
@@ -94,6 +95,9 @@ namespace video {
     struct probe_test_hooks_t {
       probe_reuse::identity_t identity;
       std::function<bool(encoder_t &, bool)> validate;
+      /// The kernel driver Auto plans for, in place of the selected render node's. Empty reads the
+      /// real one.
+      std::string gpu_driver;
     };
     thread_local const probe_test_hooks_t *probe_test_hooks = nullptr;
     thread_local const std::function<capture_preparation_e(const config_t &, std::shared_ptr<void> &)> *capture_prepare_test_hook = nullptr;
@@ -135,49 +139,56 @@ namespace video {
                                    platf::default_render_device() :
                                    ::config::video.adapter_name;
       info.gpu_driver = platf::render_device_driver(render_device);
+#ifdef POLARIS_TESTS
+      if (probe_test_hooks && !probe_test_hooks->gpu_driver.empty()) {
+        info.gpu_driver = probe_test_hooks->gpu_driver;
+      }
+#endif
+
+      // The route comes from the stream mode's own state and the capture as that mode fills it, not
+      // from the capture setting as written: a Gamescope Stream host can load with capture unset, and
+      // a startup probe that planned for a desktop route would advertise AV1 that the launch probe on
+      // the portal then takes away. An explicit encoder = vulkan reads the same route for its HDR.
+      const auto route = linux_encoder_auto_policy::route_of(
+        ::config::video.linux_display.use_cage_compositor,
+        ::config::video.linux_display.private_runtime,
+        stream_display_policy::canonical_capture_backend(stream_display_policy::capture_filled_for_mode(
+          ::config::video.linux_display.stream_mode,
+          ::config::video.capture
+        ))
+      );
+      const linux_encoder_auto_policy::codec_settings_t codecs {
+        .hevc_mode = ::config::video.hevc_mode,
+        .av1_mode = ::config::video.av1_mode,
+      };
 
       if (!::config::video.encoder.empty()) {
         info.policy = "explicit";
         info.preferred_encoder = ::config::video.encoder;
         info.reason = "The encoder is explicitly configured and must pass exact runtime validation.";
+        info.vulkan_withholds_hdr =
+          linux_encoder_auto_policy::explicit_vulkan_offers_no_hdr(::config::video.encoder, route, codecs);
         return info;
       }
 
-      const auto decision = linux_encoder_auto_policy::decide(
-        info.gpu_driver,
-        ::config::video.linux_display.use_cage_compositor
-      );
+      auto decision = linux_encoder_auto_policy::decide(info.gpu_driver, route, codecs);
+#ifndef POLARIS_BUILD_VULKAN
+      decision = linux_encoder_auto_policy::decision_without_vulkan_video(decision);
+#endif
       info.policy = std::string {decision.policy};
       info.preferred_encoder = std::string {decision.preferred_encoder};
       info.fallback_encoder = std::string {decision.fallback_encoder};
       info.exact_live_probe_required = decision.exact_live_probe_required;
+      info.vulkan_withholds_hdr = linux_encoder_auto_policy::vulkan_offers_no_hdr(info.policy);
 
-#ifndef POLARIS_BUILD_VULKAN
-      if (decision.prefer_vulkan) {
-        info.policy = "amd_private_vulkan_not_built";
-        info.preferred_encoder = "vaapi";
-        info.fallback_encoder = "next_available";
-        info.exact_live_probe_required = false;
-      }
+#ifdef POLARIS_BUILD_VULKAN
+      constexpr bool vulkan_built = true;
+#else
+      constexpr bool vulkan_built = false;
 #endif
-
-      if (info.gpu_driver.empty()) {
-        info.reason = "Auto could not identify the selected render-node driver; probing available encoders in the established order.";
-      } else if (info.policy == "amd_private_vulkan_live_probe") {
-        info.reason = "Auto detected AMD on a private-compositor route; prefer Vulkan Video and verify the exact live GPU-native frame path, with VA-API fallback.";
-      } else if (info.policy == "amd_private_vulkan_not_built") {
-        info.reason = "Auto detected AMD, but this build has no Vulkan Video support; prefer VA-API.";
-      } else if (info.policy == "amd_established_desktop") {
-        info.reason = "Auto detected AMD on a desktop capture route; use the established VA-API path until desktop Vulkan has the same live-frame safety gate.";
-      } else if (info.policy == "nvidia_nvenc") {
-        info.reason = "Auto detected NVIDIA; prefer NVENC.";
-      } else if (info.policy == "nouveau_availability_probe") {
-        info.reason = "Auto detected Nouveau; probe available encoders because the proprietary NVENC stack is unavailable.";
-      } else if (info.policy == "intel_vaapi") {
-        info.reason = "Auto detected Intel; prefer VA-API.";
-      } else {
-        info.reason = "Auto is probing the encoders available for the selected GPU.";
-      }
+      info.reason = std::string {
+        linux_encoder_auto_policy::reason(info.policy, !info.gpu_driver.empty(), vulkan_built)
+      };
 #else
       info.policy = ::config::video.encoder.empty() ? "availability_probe" : "explicit";
       info.preferred_encoder = ::config::video.encoder.empty() ? "automatic" : ::config::video.encoder;
@@ -214,18 +225,29 @@ namespace video {
 
       if (info.mode == "explicit" && !info.fallback_used) {
         info.reason = "The explicitly configured encoder passed runtime validation.";
+#ifdef __linux__
+        if (const auto own = linux_encoder_auto_policy::explicit_encoder_reason(info.selected_encoder, info.vulkan_withholds_hdr); !own.empty()) {
+          info.reason = std::string {own};
+        }
+#endif
       } else if (info.mode == "explicit") {
         info.reason = "The explicitly configured encoder did not pass this legacy non-strict probe; selected [" +
                       info.selected_encoder + "] instead.";
       } else if (info.fallback_used) {
-        info.reason += " Preferred encoder [" + info.preferred_encoder +
-                       "] did not satisfy this runtime; selected [" +
-                       info.selected_encoder + "] instead.";
-        info.reason += nvenc_fallback_detail_impl(
+        // A fallback is the one case the Doctor grades encoder selection watch, and so the one case
+        // Nova's Android Doctor card can show this reason, in two lines after its own classification
+        // and Try first text. The policy sentence runs to about 630 characters on AMD outside labwc
+        // and Gamescope Stream, so the fallback opens the reason and the policy sentence follows it.
+        // On Gamescope Stream a failed Vulkan Video probe is that case.
+        std::string fallback = "Preferred encoder [" + info.preferred_encoder +
+                               "] did not satisfy this runtime; selected [" +
+                               info.selected_encoder + "] instead.";
+        fallback += nvenc_fallback_detail_impl(
           info.preferred_encoder,
           info.selected_encoder,
           info.driver_version
         );
+        info.reason = info.reason.empty() ? std::move(fallback) : std::move(fallback) + " " + info.reason;
       } else if (!info.selected_encoder.empty()) {
         info.reason += " Selected [" + info.selected_encoder + "].";
       }
@@ -1152,24 +1174,41 @@ namespace video {
       return key.str();
     }
 
-    std::optional<probe_reuse::identity_t> current_probe_identity(std::string_view backend) {
-#ifdef POLARIS_TESTS
-      if (probe_test_hooks) return probe_test_hooks->identity;
+    /**
+     * Whether this route and encoder can give a probe an identity at all, from the inputs
+     * current_probe_identity() reads. The encoder_auto line asks it to say why a fresh probe runs.
+     */
+    bool probe_route_carries_identity(std::string_view backend) {
+#ifdef __linux__
+      return probe_reuse::route_carries_identity(
+        config::video.linux_display.use_cage_compositor,
+        stream_display_policy::capture_for_current_mode(),
+        backend
+      );
+#else
+      return false;
 #endif
+    }
+
+    std::optional<probe_reuse::identity_t> current_probe_identity(std::string_view backend) {
 #ifdef __linux__
       auto decline = [](std::string_view reason) -> std::optional<probe_reuse::identity_t> {
         BOOST_LOG(debug) << "Encoder probe requires live validation: " << reason;
         return std::nullopt;
       };
       // Only the owned private compositor currently provides a live,
-      // generation-bound topology observation. Desktop/portal/unknown routes
-      // keep probing until they implement an equally strong identity contract.
-      const auto requested_capture = stream_display_policy::capture_for_current_mode();
-      if (!config::video.linux_display.use_cage_compositor || !probe_drivers ||
-          (!requested_capture.empty() && requested_capture != "wlr") ||
-          !probe_drivers->has_capture_routes()) return decline("capture route or retained provider proof unavailable");
+      // generation-bound topology observation, and only NVENC binds provider
+      // evidence to it. Desktop/portal/unknown routes keep probing until they
+      // implement an equally strong identity contract.
+      if (!probe_route_carries_identity(backend)) return decline("capture route or encoder carries no probe identity");
+#ifdef POLARIS_TESTS
+      // A test identity stands in for the provider and hardware observation below, not for the
+      // route, so a test sees the reuse the real gate gives on the route it sets up.
+      if (probe_test_hooks) return probe_test_hooks->identity;
+#endif
+      if (!probe_drivers || !probe_drivers->has_capture_routes()) return decline("retained provider proof unavailable");
       // Require actual provider evidence, collected before probe owners died.
-      if (backend != "nvenc" || !probe_drivers->contains_provider("libnvidia-encode.so") ||
+      if (!probe_drivers->contains_provider("libnvidia-encode.so") ||
           !probe_drivers->contains_provider("libcuda.so")) return decline("NVENC or CUDA provider unavailable");
       const auto providers = probe_drivers->current_key();
       const auto selection = platf::encoder_probe_identity::provider_selection_key();
@@ -1188,6 +1227,9 @@ namespace video {
       return probe_reuse::identity_t {hardware->gpu, hardware->driver + *providers + *selection, *topology,
                                       encoder_probe_settings(config::video)};
 #else
+#ifdef POLARIS_TESTS
+      if (probe_test_hooks) return probe_test_hooks->identity;
+#endif
       return std::nullopt;
 #endif
     }
@@ -1588,8 +1630,10 @@ namespace video {
         return -1;
       }
 
-      if (device_->convert(*compat_img)) {
-        return -1;
+      if (const auto status = device_->convert(*compat_img); status != 0) {
+        // A device that can never read what this capture hands it says so, and the stream ends once
+        // instead of a session being built again for every frame. Anything else fails this frame.
+        return status == platf::convert_capture_unreadable ? convert_session_is_over : -1;
       }
 
       frame.apply_conversion_result(request);
@@ -2023,11 +2067,41 @@ namespace video {
       return session->bitstream();
     }
 
+    /// How the last frame with a picture in it reached the codec, for the stream stats.
+    pyrowave_encode::route_e route() const {
+      return session ? session->route() : pyrowave_encode::route_e::unknown;
+    }
+
+    /// Frames this session sent since the last report, and how many reached 99% of the byte budget.
+    struct ceiling_counts_t {
+      std::uint32_t frames = 0;
+      std::uint32_t ceiling_frames = 0;
+    };
+
+    ceiling_counts_t take_ceiling_counts() {
+      return std::exchange(ceiling_counts, {});
+    }
+
+    /**
+     * Count one frame that is about to leave, against the budget it was encoded under.
+     *
+     * The codec fills a frame up to its budget and stops there, so a frame at the budget is one the
+     * bitrate cut short. The stream stats keep the share of recent frames that were, which is how the
+     * host knows a stream is starved rather than only logging it.
+     */
+    void note_sent_frame(std::size_t bytes) {
+      ++ceiling_counts.frames;
+      if (max_frame_bytes > 0 && bytes * 100 >= max_frame_bytes * 99) {
+        ++ceiling_counts.ceiling_frames;
+      }
+    }
+
   private:
     std::unique_ptr<pyrowave_encode::session_t> session;
     int framerate = 60;
     std::size_t max_frame_bytes = 0;
     bool converted_since_last_packet = false;
+    ceiling_counts_t ceiling_counts;
 
     /// What the session was built to read, which decides what a frame has to be.
     pyrowave_encode::dynamic_range_e range = pyrowave_encode::dynamic_range_e::sdr;
@@ -2122,10 +2196,67 @@ namespace video {
     stream_packets::destination_t channel_data;
   };
 
+  /**
+   * What one consuming session publishes about its capture: its request, taken as the session
+   * started, and what the display it encodes from opened.
+   *
+   * The display is shared. A second viewer joins one it did not open, and the video thread can open
+   * it before the session registers its stats entry. So every session publishes for itself from its
+   * own encode loop, and keeps trying until a write matched by its own generation lands, the way
+   * record_capture_source() keeps its value only after one does.
+   */
+  struct capture_backend_publication_t {
+    std::uint64_t session_generation = 0;
+    stream_stats::capture_backend_t backend;
+    bool published = false;
+  };
+
+  static capture_backend_publication_t capture_backend_publication(const config_t &config, const platf::capture_route_t &route) {
+    capture_backend_publication_t publication;
+    publication.session_generation = config.session_generation;
+    publication.backend.preference = config.capture_request.preference;
+#ifdef __linux__
+    publication.backend.requested = stream_display_policy::canonical_capture_backend(config.capture_generation.capture_backend);
+#else
+    publication.backend.requested = config.capture_generation.capture_backend;
+#endif
+    publication.backend.opened = route.opened;
+    publication.backend.route = route.route;
+    publication.backend.mode_override_reason = config.capture_request.mode_override_reason;
+    publication.backend.route_fallback_reason = route.fallback_reason;
+    return publication;
+  }
+
+  // A display that says nothing about what it opened has nothing to publish, and a probe's display
+  // is not what any session streams from, so neither ever writes. A publication that lands starts
+  // the frame record over for the display it names: stats reads the frames as unknown until one
+  // is written again, so the next accepted frame is written even when it matches the last one.
+  // It starts the PyroWave route record over the same way, for a loop that keeps one: the landing
+  // cleared the session's route, and a route written before it, while the publication was still
+  // being refused, would otherwise never be written again.
+  static void publish_capture_backend(
+    capture_backend_publication_t &publication,
+    std::optional<stream_stats::capture_source_t> &reported_source,
+    std::string *reported_pyrowave_route = nullptr
+  ) {
+    if (publication.published || publication.session_generation == 0 ||
+        publication.backend.opened.empty() || encoder_probe_active()) {
+      return;
+    }
+    publication.published = stream_stats::record_capture_backend(publication.session_generation, publication.backend);
+    if (publication.published) {
+      reported_source.reset();
+      if (reported_pyrowave_route) {
+        reported_pyrowave_route->clear();
+      }
+    }
+  }
+
   struct sync_session_t {
     sync_session_ctx_t *ctx;
     std::unique_ptr<encode_session_t> session;
     std::optional<stream_stats::capture_source_t> reported_source;
+    capture_backend_publication_t capture_backend;
   };
 
   void record_capture_source(const config_t &config, const frame_t &frame,
@@ -2133,13 +2264,58 @@ namespace video {
     if (config.session_generation == 0 || !frame.valid()) return;
     const stream_stats::capture_source_t source {
       frame.width, frame.height, config.width, config.height,
-      frame.source_metadata.transport, frame.source_metadata.residency
+      frame.source_metadata.transport, frame.source_metadata.residency,
+      frame.source_metadata.format
     };
     // Dimensions normally stay fixed. Avoid another per-frame stats lock while
     // still publishing a renegotiated size or a changed capture path.
     if (reported == source) return;
     if (stream_stats::record_capture_source(config.session_generation, source)) reported = source;
   }
+
+  /**
+   * Publish how a PyroWave session's frames reach the codec, for the session's own generation, when
+   * that changes.
+   *
+   * The first frame with a picture in it decides the route and a GPU path that falls back changes
+   * it, so the loop reads it after every frame the session accepts and this writes only when it
+   * moved. Like record_capture_source(), the value is kept only once a write for the session's own
+   * generation lands, so a session that registers after its first frame is still written. An unknown
+   * route is never written, because missing is unknown. A probe writes nothing, and nothing here
+   * moves a network or video policy revision.
+   */
+  void record_pyrowave_route(const config_t &config, std::string_view route, std::string &reported) {
+    if (config.session_generation == 0 || route.empty() || route == reported || encoder_probe_active()) {
+      return;
+    }
+    if (stream_stats::record_pyrowave_route(config.session_generation, route)) {
+      reported = route;
+    }
+  }
+
+#ifdef POLARIS_BUILD_PYROWAVE
+  /// What the encode loop records after a frame its session accepted: the route of a PyroWave
+  /// session, read from the codec session it wraps, and nothing for any other encoder.
+  void record_pyrowave_route(const config_t &config, const encode_session_t &session, std::string &reported) {
+    if (const auto *pyrowave = dynamic_cast<const pyrowave_encode_session_t *>(&session)) {
+      record_pyrowave_route(config, pyrowave_encode::route_name(pyrowave->route()), reported);
+    }
+  }
+
+  /// What the encode loop reports with each stats sample: a PyroWave session's frames since the last
+  /// sample, and how many of them reached the byte ceiling. Nothing for another encoder or a probe.
+  void record_pyrowave_ceiling_frames(const config_t &config, encode_session_t &session) {
+    auto *pyrowave = dynamic_cast<pyrowave_encode_session_t *>(&session);
+    if (!pyrowave) {
+      return;
+    }
+    const auto counts = pyrowave->take_ceiling_counts();
+    if (config.session_generation == 0 || counts.frames == 0 || encoder_probe_active()) {
+      return;
+    }
+    stream_stats::record_pyrowave_frames(config.session_generation, counts.frames, counts.ceiling_frames);
+  }
+#endif
 
   using encode_session_ctx_queue_t = safe::queue_t<sync_session_ctx_t>;
   using encode_e = platf::capture_e;
@@ -2946,6 +3122,26 @@ namespace video {
     return active == incoming;
   }
 
+#ifdef __linux__
+  /**
+   * What a session measures its generation's capture request against: polaris.conf's capture as
+   * loaded, and the rule that set it aside for this request, asked with the generation's own mode,
+   * compositor and exact output.
+   */
+  static capture_generation::request_context_t capture_request_for_session(const capture_generation::identity_t &generation) {
+    capture_generation::request_context_t request;
+    request.preference = stream_display_policy::loaded_capture_setting();
+    request.mode_override_reason = stream_display_policy::capture_request_override_reason(
+      request.preference,
+      generation.capture_backend,
+      generation.stream_mode,
+      generation.use_cage_compositor,
+      !generation.exact_display_name.empty()
+    );
+    return request;
+  }
+#endif
+
   capture_generation::identity_t current_capture_generation_identity() {
     auto configured_output_name = config::video.output_name;
 #ifdef __linux__
@@ -3666,6 +3862,7 @@ namespace video {
     if (encoded.empty()) {
       return -1;
     }
+    session.note_sent_frame(encoded.size());
 
     // One frame, one packet. The codec will also hand over a packet table, and raising a packet_t
     // for each entry is the mistake that looks right: every packet_t downstream becomes its own
@@ -4313,6 +4510,21 @@ namespace video {
     return session;
   }
 
+  /**
+   * End a stream its encoder can never produce a picture for, and have the client told why.
+   *
+   * Raising the shutdown event alone ended the stream with a bare disconnect. A Moonlight client
+   * reads that as a dropped connection and reconnects, Nova up to four times, and each new session
+   * met the same refusal before the client gave up with a generic error. With this raised first, the
+   * session's control thread ends the stream with the frame conversion termination code instead,
+   * which the client shows as a fatal video encoding error and does not reconnect into. First, so
+   * that whoever sees the shutdown already sees why.
+   */
+  void end_stream_encoder_cannot_serve(const safe::mail_t &mail) {
+    mail->event<bool>(mail::frame_conversion_failed)->raise(true);
+    mail->event<bool>(mail::shutdown)->raise(true);
+  }
+
   void encode_run(
     int &frame_nr,  // Store progress of the frame number
     safe::mail_t mail,
@@ -4342,7 +4554,7 @@ namespace video {
       if (refused_for_good) {
         // Returning alone leaves the host to build this session again, which is right for a failure
         // that might not repeat and wrong for one that cannot do anything else.
-        mail->event<bool>(mail::shutdown)->raise(true);
+        end_stream_encoder_cannot_serve(mail);
       }
       return;
     }
@@ -4442,6 +4654,11 @@ namespace video {
 
     bool missing_frame_timestamp_warning_logged = false;
     std::optional<stream_stats::capture_source_t> reported_source;
+    // Only a PyroWave session records a route into it. Each display's publication starts it over.
+    std::string reported_pyrowave_route;
+    // Published from the loop until it lands, so a session registered after the display opened,
+    // and one that joined a display another session opened, both carry it.
+    auto capture_backend = capture_backend_publication(config, disp->capture_route);
     auto fps_window_start = std::chrono::steady_clock::now();
     int fps_window_frames = 0;
     double measured_fps = 0.0;
@@ -4456,6 +4673,8 @@ namespace video {
     const double encode_target_fps = av_q2d(encoding_framerate_to_rational(config));
     const double target_frame_interval_ms = encode_target_fps > 0.0 ? 1000.0 / encode_target_fps : 0.0;
     int applied_adaptive_bitrate = config.bitrate;
+    // Codec time spent in convert() for the frame about to be encoded. Only PyroWave encodes there.
+    double codec_time_in_convert_ms = 0.0;
 
     while (true) {
       // Break out of the encoding loop if any of the following are true:
@@ -4468,6 +4687,8 @@ namespace video {
       if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1)) {
         break;
       }
+
+      publish_capture_backend(capture_backend, reported_source, &reported_pyrowave_route);
 
       bool requested_idr_frame = false;
 
@@ -4533,6 +4754,9 @@ namespace video {
           }
 #endif
 
+#ifdef POLARIS_BUILD_PYROWAVE
+          const auto convert_started = std::chrono::steady_clock::now();
+#endif
           if (const auto converted = session->convert(frame); converted) {
             invalidate_live_probe_reuse();
             BOOST_LOG(error) << "Could not convert image"sv;
@@ -4545,13 +4769,26 @@ namespace video {
               // Breaking out of this loop is what the host answers by building the session again,
               // which is right for a frame that arrived wrong and wrong for a session that cannot
               // read any frame capture will produce. End the stream instead, after the route
-              // handler above has had its say, so a retired GPU-native route is still retired.
-              shutdown_event->raise(true);
+              // handler above has had its say, so a retired GPU-native route is still retired, and
+              // tell the client why, so it does not reconnect into the same refusal.
+              end_stream_encoder_cannot_serve(mail);
             }
             break;
           }
 
+#ifdef POLARIS_BUILD_PYROWAVE
+          // PyroWave encodes inside convert(), where it is handed the frame, so that time is the codec's
+          // and belongs in the encode time the stream stats report, beside the repeat encodes below.
+          if (config.videoFormat == VIDEO_FORMAT_PYROWAVE) {
+            codec_time_in_convert_ms = std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - convert_started
+            ).count();
+          }
+#endif
           record_capture_source(config, frame, reported_source);
+#ifdef POLARIS_BUILD_PYROWAVE
+          record_pyrowave_route(config, *session, reported_pyrowave_route);
+#endif
           *frame_timestamp = pacing_decision.timestamp;
         } else if (!images->running()) {
           break;
@@ -4577,7 +4814,13 @@ namespace video {
           break;
         }
         auto encode_end = std::chrono::steady_clock::now();
-        auto encode_duration = std::chrono::duration<double, std::milli>(encode_end - encode_start).count();
+        const double codec_time_in_convert = std::exchange(codec_time_in_convert_ms, 0.0);
+        auto encode_duration = std::chrono::duration<double, std::milli>(encode_end - encode_start).count() +
+                               codec_time_in_convert;
+        // Live Tuning answers a slow encode by cutting bitrate. PyroWave's time in convert() is colour
+        // conversion and a wavelet transform, which take as long at any bitrate, so a cut would soften
+        // the picture and give the encoder nothing back. The stats report it; Live Tuning is not handed it.
+        const double bitrate_relievable_encode_ms = encode_duration - codec_time_in_convert;
         frames_encoded++;
         if (reused_previous_frame || !frame_timestamp.has_value()) {
           duplicate_frames++;
@@ -4635,7 +4878,7 @@ namespace video {
               dropped_frame_ratio,
               duplicate_frame_ratio,
               frame_jitter_ms,
-              encode_duration,
+              bitrate_relievable_encode_ms,
               avg_frame_age_ms,
               target_fps
             );
@@ -4684,6 +4927,9 @@ namespace video {
             }
           }
 
+#ifdef POLARIS_BUILD_PYROWAVE
+          record_pyrowave_ceiling_frames(config, *session);
+#endif
           stream_stats::update_frame_delivery(
             duplicate_frame_ratio,
             dropped_frame_ratio,
@@ -4700,7 +4946,8 @@ namespace video {
               config.videoFormat == 1 ? "hevc" : "h264",
             config.width,
             config.height,
-            encoder.name
+            encoder.name,
+            config.session_generation
           );
         }
         } // end fps tracking scope
@@ -4968,6 +5215,8 @@ namespace video {
     }
 
     encode_session.session = std::move(session);
+    encode_session.capture_backend = capture_backend_publication(ctx.config, disp->capture_route);
+    publish_capture_backend(encode_session.capture_backend, encode_session.reported_source);
 
     return encode_session;
   }
@@ -5179,6 +5428,8 @@ namespace video {
             ec = platf::capture_e::reinit;
             return false;
           }
+          // Published first, so the frame this session accepts next is recorded for its display.
+          publish_capture_backend(pos->capture_backend, pos->reported_source);
           if (frame_captured) record_capture_source(ctx->config, frame, pos->reported_source);
           if (encode(ctx->frame_nr++, *pos->session, ctx->packets, ctx->channel_data, frame_timestamp)) {
             BOOST_LOG(error) << "Could not encode video packet"sv;
@@ -5257,6 +5508,86 @@ namespace video {
     while (encode_run_sync(synced_session_ctxs, ctx, display_names, display_p) == encode_e::reinit) {}
   }
 
+  /**
+   * Build an encode session on the display capture last published, and build it again each time one
+   * returns, until the stream is over.
+   *
+   * A session that returns is built again on whatever display capture has published by then, which
+   * is right for a failure that might not repeat and for a display that was opened again. A session
+   * that can never be built for this stream, such as a PyroWave session whose client negotiated HDR
+   * from a display that is not in HDR, raises the stream's shutdown through
+   * end_stream_encoder_cannot_serve() before it returns, and the loop stops there instead of
+   * building the same refusal again for as long as the stream lasts.
+   *
+   * @param capture_ctx The capture thread's display and its reinitialization signals.
+   */
+  void encode_published_displays(
+    int &frame_nr,
+    const safe::mail_t &mail,
+    const img_event_t &images,
+    config_t &config,
+    capture_thread_async_ctx_t &capture_ctx,
+    const stream_packets::destination_t &channel_data,
+    const packet_queue_t &packets
+  ) {
+    auto shutdown_event = mail->event<bool>(mail::shutdown);
+    auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
+    auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
+
+    while (!shutdown_event->peek() && images->running()) {
+      // Wait for the main capture event when the display is being reinitialized
+      if (capture_ctx.reinit_event.peek() || capture_ctx.reinit_request_event.peek()) {
+        std::this_thread::sleep_for(20ms);
+        continue;
+      }
+      // Wait for the display to be ready
+      std::shared_ptr<platf::display_t> display;
+      {
+        auto lg = capture_ctx.display_wp.lock();
+        if (capture_ctx.display_wp->expired()) {
+          continue;
+        }
+
+        display = capture_ctx.display_wp->lock();
+      }
+
+      auto &encoder = encoder_for_session(config);
+
+      // A rollback or newer paired target can arrive while an FFmpeg NVENC
+      // session is being torn down. Build the replacement directly at the
+      // latest exact target; successful session open remains the ack boundary.
+      if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
+        config.bitrate = request->target_bitrate_kbps;
+      }
+
+      auto encode_device = make_encode_device(*display, encoder, config);
+      if (!encode_device) {
+        invalidate_live_probe_reuse();
+        return;
+      }
+
+      // absolute mouse coordinates require that the dimensions of the screen are known
+      touch_port_event->raise(make_port(display.get(), config));
+
+      // Update client with our current HDR display state
+      hdr_event->raise(make_hdr_info(*encode_device));
+
+      encode_run(
+        frame_nr,
+        mail,
+        images,
+        config,
+        display,
+        std::move(encode_device),
+        capture_ctx.reinit_event,
+        capture_ctx.reinit_request_event,
+        encoder,
+        channel_data,
+        packets
+      );
+    }
+  }
+
   void capture_async(
     safe::mail_t mail,
     config_t &config,
@@ -5291,64 +5622,10 @@ namespace video {
 
     int frame_nr = 1;
 
-    auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
-    auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
-
     // Encoding takes place on this thread
     platf::adjust_thread_priority(platf::thread_priority_e::high);
 
-    while (!shutdown_event->peek() && images->running()) {
-      // Wait for the main capture event when the display is being reinitialized
-      if (ref->reinit_event.peek() || ref->reinit_request_event.peek()) {
-        std::this_thread::sleep_for(20ms);
-        continue;
-      }
-      // Wait for the display to be ready
-      std::shared_ptr<platf::display_t> display;
-      {
-        auto lg = ref->display_wp.lock();
-        if (ref->display_wp->expired()) {
-          continue;
-        }
-
-        display = ref->display_wp->lock();
-      }
-
-      auto &encoder = encoder_for_session(config);
-
-      // A rollback or newer paired target can arrive while an FFmpeg NVENC
-      // session is being torn down. Build the replacement directly at the
-      // latest exact target; successful session open remains the ack boundary.
-      if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
-        config.bitrate = request->target_bitrate_kbps;
-      }
-
-      auto encode_device = make_encode_device(*display, encoder, config);
-      if (!encode_device) {
-        invalidate_live_probe_reuse();
-        return;
-      }
-
-      // absolute mouse coordinates require that the dimensions of the screen are known
-      touch_port_event->raise(make_port(display.get(), config));
-
-      // Update client with our current HDR display state
-      hdr_event->raise(make_hdr_info(*encode_device));
-
-      encode_run(
-        frame_nr,
-        mail,
-        images,
-        config,
-        display,
-        std::move(encode_device),
-        ref->reinit_event,
-        ref->reinit_request_event,
-        encoder,
-        channel_data,
-        packets
-      );
-    }
+    encode_published_displays(frame_nr, mail, images, config, *ref.get(), channel_data, packets);
   }
 
   capture_preparation_e prepare_capture_for_launch(const config_t &config, std::shared_ptr<void> &preparation) {
@@ -5422,6 +5699,11 @@ namespace video {
     if (config.capture_generation.empty()) {
       config.capture_generation = current_capture_generation_identity();
     }
+#ifdef __linux__
+    // Taken now, as the session starts, and never read again from the live configuration, which a
+    // reload or a teardown can move while this session is still streaming.
+    config.capture_request = capture_request_for_session(config.capture_generation);
+#endif
     if (encoder_for_session(config).flags & PARALLEL_ENCODING) {
       capture_async(
         std::move(mail),
@@ -5941,7 +6223,27 @@ namespace video {
                     << ", topology " << topology << ")";
   }
 
+  static int probe_encoders_impl(
+    bool strict_configured_encoder,
+    bool save_successful_cache,
+    bool keep_previous_selection_on_failure
+  );
+
   int probe_encoders(bool strict_configured_encoder, bool save_successful_cache) {
+    return probe_encoders_impl(strict_configured_encoder, save_successful_cache, false);
+  }
+
+  /**
+   * @param keep_previous_selection_on_failure Put the encoder selected before this probe back when no
+   *        encoder passes, as a strict probe does. A refresh between launches asks for it: the host goes
+   *        on advertising what that encoder serves, where it would advertise H.264 alone with no
+   *        encoder, and the next launch probes again, since this probe retired probe reuse.
+   */
+  static int probe_encoders_impl(
+    bool strict_configured_encoder,
+    bool save_successful_cache,
+    bool keep_previous_selection_on_failure
+  ) {
     if (!allow_encoder_probing()) {
       // Error already logged
       return -1;
@@ -5967,13 +6269,16 @@ namespace video {
       strict_configured_encoder || config::video.encoder == "vulkan"sv;
 
 #ifdef POLARIS_BUILD_VULKAN
-    // Auto promotes Vulkan only for an AMD private-compositor route. That path
-    // has a live first-frame validation and can retire a failed DMA-BUF route
-    // to the RAM uploader. Other routes remain explicit until they carry the
-    // same contract; a stale cache entry cannot opt them in.
+    // Auto promotes Vulkan on AMD for two routes. labwc has a live first-frame
+    // validation and can retire a failed DMA-BUF route to the RAM uploader.
+    // Gamescope Stream gives Vulkan its frames through the RAM uploader, the
+    // device this probe runs, so a failed probe falls back to VA-API below;
+    // strict semantics stay with an explicit encoder = vulkan. Other routes
+    // remain explicit until they carry a live-frame contract, and a stale cache
+    // entry cannot opt them in.
     const bool automatic_vulkan_candidate =
       config::video.encoder.empty() &&
-      selection_plan.policy == "amd_private_vulkan_live_probe";
+      linux_encoder_auto_policy::admits_vulkan(selection_plan.policy);
     if (config::video.encoder != "vulkan"sv && !automatic_vulkan_candidate) {
       std::erase(encoder_list, &vulkan);
     }
@@ -5982,8 +6287,12 @@ namespace video {
     const auto identity_before = current_probe_identity(chosen_encoder ? chosen_encoder->name : std::string_view(config::video.encoder));
     if (chosen_encoder && successful_probe.reusable(
           identity_before, chosen_encoder->name, config::video.encoder,
-          (chosen_encoder->flags & ALWAYS_REPROBE) || selection_plan.exact_live_probe_required ||
-            config::video.encoder == "vulkan"sv || chosen_encoder->name == "vulkan"sv)) {
+          probe_reuse::live_probe_mandatory(
+            (chosen_encoder->flags & ALWAYS_REPROBE) != 0,
+            selection_plan.exact_live_probe_required,
+            config::video.encoder,
+            chosen_encoder->name
+          ))) {
       BOOST_LOG(info) << "Encoder probe reused: unchanged live GPU, driver, capture generation and settings"sv;
       return 0;
     }
@@ -6031,7 +6340,8 @@ namespace video {
       };
 
       prioritize_encoder(selection_plan.preferred_encoder, 0);
-      if (selection_plan.policy == "amd_private_vulkan_live_probe") {
+      // Both Vulkan policies name VA-API as their fallback; try it straight after.
+      if (selection_plan.fallback_encoder == "vaapi") {
         prioritize_encoder("vaapi", 1);
       }
     }
@@ -6066,14 +6376,10 @@ namespace video {
     // cuda_dmabuf_t. Zeroing the mode here drops the Main10 bits from
     // ServerCodecModeSupport, so clients refuse to start an HDR stream at all
     // and the host never gets the chance to prove itself.
-    const bool main10_probe_is_authoritative = [] {
-#ifdef __linux__
-      return !(config::video.capture == "portal" &&
-               config::video.linux_display.stream_mode == "gamescope_stream");
-#else
-      return true;
-#endif
-    }();
+    const bool main10_probe_is_authoritative = video::main10_probe_is_authoritative(
+      config::video.capture,
+      config::video.linux_display.stream_mode
+    );
 
     auto adjust_encoder_constraints = [&](encoder_t *encoder) {
       // If we can't satisfy both the encoder and codec requirement, prefer the encoder over codec support
@@ -6207,6 +6513,12 @@ namespace video {
       });
     }
 
+    if (chosen_encoder == nullptr && keep_previous_selection_on_failure) {
+      BOOST_LOG(warning) << "No encoder passed the probe; keeping the encoder selected before it"sv;
+      restore_previous_probe_state();
+      return -1;
+    }
+
     if (chosen_encoder == nullptr) {
       encoder_selection_info.reason += " No compatible encoder passed runtime validation.";
       const auto output_name {display_device::map_output_name(config::video.output_name)};
@@ -6224,17 +6536,32 @@ namespace video {
     BOOST_LOG(info);
 
     auto &encoder = *chosen_encoder;
+#ifdef POLARIS_BUILD_VULKAN
+    if (&encoder == &vulkan && selection_plan.vulkan_withholds_hdr) {
+      // See vulkan_offers_no_hdr() and explicit_vulkan_offers_no_hdr(). Cleared before the
+      // advertised modes are worked out below, so the host offers HEVC Main without Main10 and the
+      // encoder cache records the same. Under Auto the codec settings that ask for HDR never reach
+      // here, because they keep VA-API; for an explicit encoder = vulkan, HEVC Support set to
+      // advertise HDR does not reach here either, and is kept as written.
+      encoder.h264[encoder_t::DYNAMIC_RANGE] = false;
+      encoder.hevc[encoder_t::DYNAMIC_RANGE] = false;
+      encoder.av1[encoder_t::DYNAMIC_RANGE] = false;
+      if (selection_plan.mode == "explicit") {
+        BOOST_LOG(info) << "Vulkan Video: encoder = vulkan on Gamescope Stream reads each frame through "sv
+                        << "system memory as 8-bit BGRA, so this host offers no HDR with it; HEVC "sv
+                        << "Support set to advertise HDR (hevc_mode = 3) offers it anyway, and such a "sv
+                        << "stream ends at its first 10-bit frame"sv;
+      } else {
+        BOOST_LOG(info) << "encoder_auto: Vulkan Video on Gamescope Stream reads each frame through "sv
+                        << "system memory as 8-bit BGRA, so this host offers no HDR with it; setting "sv
+                        << "HEVC or AV1 Support to advertise HDR keeps VA-API"sv;
+      }
+    }
+#endif
     if (encoder_selection_info.gpu_driver == "nvidia") {
       encoder_selection_info.driver_version = current_nvidia_driver_version();
     }
     finalize_encoder_selection_info(encoder_selection_info, encoder.name);
-    BOOST_LOG(info) << "encoder_auto: mode="sv << encoder_selection_info.mode
-                    << " driver="sv << (encoder_selection_info.gpu_driver.empty() ? "unknown" : encoder_selection_info.gpu_driver)
-                    << " policy="sv << encoder_selection_info.policy
-                    << " preferred="sv << encoder_selection_info.preferred_encoder
-                    << " selected="sv << encoder_selection_info.selected_encoder
-                    << " fallback_used="sv << encoder_selection_info.fallback_used
-                    << " exact_live_probe_required="sv << encoder_selection_info.exact_live_probe_required;
 
     // A configured encoder that fails validation is quietly replaced by the
     // fallback search above, and the stream still comes up. The user set an
@@ -6311,7 +6638,45 @@ namespace video {
 #ifdef __linux__
     probe_drivers = collecting_probe_drivers;
 #endif
-    successful_probe.remember(identity_before, current_probe_identity(encoder.name), encoder.name, successful_epoch);
+    const auto identity_after = current_probe_identity(encoder.name);
+    successful_probe.remember(identity_before, identity_after, encoder.name, successful_epoch);
+
+    // exact_live_probe_required is only the Auto policy's input to probe reuse, and only Auto sets
+    // it. #635 read the flag as a check the probe had failed, so the line keeps the field's name,
+    // which Doctor and Nova use, and says what it is whatever its value. next_probe_reuse is the
+    // reuse gate's own answer: reusable() asked with the identity just recorded and the inputs the
+    // gate at the top of the next probe uses. It says reuse only where that gate would give it,
+    // which is NVENC on the labwc private compositor, and otherwise says why a fresh probe runs.
+    // It is logged here, after remember(), because nothing before it knows what was recorded.
+    const bool always_reprobe = (encoder.flags & ALWAYS_REPROBE) != 0;
+    const bool gate_reuses = successful_probe.reusable(
+      identity_after,
+      encoder.name,
+      config::video.encoder,
+      probe_reuse::live_probe_mandatory(
+        always_reprobe,
+        selection_plan.exact_live_probe_required,
+        config::video.encoder,
+        encoder.name
+      )
+    );
+    BOOST_LOG(info) << "encoder_auto: mode="sv << encoder_selection_info.mode
+                    << " driver="sv << (encoder_selection_info.gpu_driver.empty() ? "unknown" : encoder_selection_info.gpu_driver)
+                    << " policy="sv << encoder_selection_info.policy
+                    << " preferred="sv << encoder_selection_info.preferred_encoder
+                    << " selected="sv << encoder_selection_info.selected_encoder
+                    << " fallback_used="sv << encoder_selection_info.fallback_used
+                    << " exact_live_probe_required="sv << encoder_selection_info.exact_live_probe_required
+                    << " (Auto policy flag, not a probe result)"sv
+                    << " next_probe_reuse="sv
+                    << probe_reuse::next_probe_reuse(
+                         gate_reuses,
+                         always_reprobe,
+                         selection_plan.exact_live_probe_required,
+                         config::video.encoder,
+                         encoder.name,
+                         probe_route_carries_identity(encoder.name)
+                       );
     return 0;
   }
 
@@ -6566,7 +6931,34 @@ namespace video {
     return vulkan_quality_max(load_vulkan_quality_levels(), include_av1);
   }
 
+  namespace {
+    /// Guards auto_plan_refresh_failed_change alone. Nothing else is taken while it is held, so it
+    /// can be taken under the encoder state lock and under the refresh lock alike.
+    std::mutex auto_plan_refresh_failed_change_mutex;
+    /// The plan change a refresh last probed and failed, "<probed under> -> <planned>", so a client
+    /// that polls serverinfo does not run a failing probe on every poll. It belongs to the encoder
+    /// that probe failed to replace: every probe and every reset replaces that encoder and clears
+    /// it, and so does a request that finds the plan back where that encoder was probed.
+    std::string auto_plan_refresh_failed_change;
+
+    void forget_failed_auto_plan_refresh() {
+      std::scoped_lock lock {auto_plan_refresh_failed_change_mutex};
+      auto_plan_refresh_failed_change.clear();
+    }
+
+    void remember_failed_auto_plan_refresh(const std::string &change) {
+      std::scoped_lock lock {auto_plan_refresh_failed_change_mutex};
+      auto_plan_refresh_failed_change = change;
+    }
+
+    bool auto_plan_refresh_failed_before(const std::string &change) {
+      std::scoped_lock lock {auto_plan_refresh_failed_change_mutex};
+      return change == auto_plan_refresh_failed_change;
+    }
+  }  // namespace
+
   static void reset_encoder_probe_state_unlocked(bool invalidate_reuse) {
+    forget_failed_auto_plan_refresh();
     if (invalidate_reuse) {
       successful_probe.invalidate();
 #ifdef __linux__
@@ -6596,6 +6988,112 @@ namespace video {
     reset_encoder_probe_state_unlocked();
   }
 
+  namespace {
+    /// Held across a refresh's probe: the requests that call it run concurrently, and one probe is
+    /// enough for all of them.
+    std::mutex auto_plan_refresh_mutex;
+
+    /// What the advertised codecs depend on in a plan: its policy, and whether Vulkan Video offers HDR
+    /// under it. Auto's policy decides both. An explicit encoder = vulkan keeps the policy "explicit"
+    /// on every route and withholds HDR on Gamescope Stream alone, so its route shows only in the
+    /// second, and a host that moves into or out of Gamescope Stream probes again.
+    std::string advertised_plan_key(const encoder_selection_info_t &info) {
+      return info.vulkan_withholds_hdr ? info.policy + " without Vulkan Video HDR" : info.policy;
+    }
+
+    auto_plan_refresh_e refresh_advertised_codecs_for_auto_plan_impl(bool stream_active, bool save_cache) {
+#ifdef __linux__
+      // "<plan the advertised codecs were probed under> -> <plan the host has now>", or nothing
+      // when the two agree or no probe chose an encoder.
+      const auto plan_change = []() -> std::optional<std::string> {
+        std::string probed_under;
+        {
+          std::shared_lock encoder_state_lock {encoder_state_mutex};
+          if (!chosen_encoder) {
+            return std::nullopt;
+          }
+          probed_under = advertised_plan_key(encoder_selection_info);
+        }
+        auto plan = advertised_plan_key(planned_encoder_selection_info());
+        if (plan == probed_under) {
+          return std::nullopt;
+        }
+        return probed_under + " -> " + plan;
+      };
+      if (config::video.linux_display.use_cage_compositor) {
+        // labwc has to be started to probe at all, which the deferred cage probe does, so this never
+        // probes. An encoder another plan probed, such as VA-API for Mirror Desktop while Steam Game
+        // Mode held the mode, would keep advertising its codecs here, and the cage probe runs only
+        // while no encoder is selected. Dropping it hands serverinfo the cage probe's cache, and the
+        // cage probe itself when there is none.
+        if (!plan_change()) {
+          return auto_plan_refresh_e::current;
+        }
+        if (stream_active) {
+          return auto_plan_refresh_e::deferred;
+        }
+        // Checked again under the encoder state lock, so a launch probe that lands in between keeps
+        // the encoder it chose for this route.
+        std::unique_lock encoder_state_lock {encoder_state_mutex, std::defer_lock};
+        if (!encoder_state_lock.try_lock_for(2s)) {
+          return auto_plan_refresh_e::deferred;
+        }
+        const auto plan = advertised_plan_key(planned_encoder_selection_info());
+        if (!chosen_encoder || advertised_plan_key(encoder_selection_info) == plan) {
+          return auto_plan_refresh_e::current;
+        }
+        BOOST_LOG(info) << "encoder_auto: the encoder plan moved to the private compositor ["sv
+                        << advertised_plan_key(encoder_selection_info) << " -> "sv << plan
+                        << "], so this host drops the encoder the other plan probed and advertises what "sv
+                        << "the cage probe finds"sv;
+        reset_encoder_probe_state_unlocked();
+        return auto_plan_refresh_e::left_to_cage_probe;
+      }
+      if (!plan_change()) {
+        // The plan is back where the encoder was probed, so a change that failed before is a new
+        // change the next time the plan makes it.
+        forget_failed_auto_plan_refresh();
+        return auto_plan_refresh_e::current;
+      }
+      if (stream_active) {
+        return auto_plan_refresh_e::deferred;
+      }
+
+      std::scoped_lock refresh_lock {auto_plan_refresh_mutex};
+      const auto change = plan_change();
+      if (!change) {
+        forget_failed_auto_plan_refresh();
+        return auto_plan_refresh_e::current;
+      }
+      if (auto_plan_refresh_failed_before(*change)) {
+        return auto_plan_refresh_e::failed;
+      }
+      BOOST_LOG(info) << "encoder_auto: the encoder plan changed since the last probe ["sv << *change
+                      << "], so this host probes again and advertises the codecs the next launch gets"sv;
+      // A probe that fails puts the encoder it was replacing back, and the probe itself clears the
+      // failed change it could have replaced.
+      const bool probed = probe_encoders_impl(false, save_cache, true) == 0;
+      // A probe that passed and still left the old plan behind would be run again by every request.
+      if (!probed || plan_change()) {
+        remember_failed_auto_plan_refresh(*change);
+        BOOST_LOG(warning) << "encoder_auto: the probe for the new encoder plan ["sv << *change
+                           << "] did not pass; this host keeps the codecs it advertised, and the next "sv
+                           << "launch probes again"sv;
+        return auto_plan_refresh_e::failed;
+      }
+      return auto_plan_refresh_e::reprobed;
+#else
+      (void) stream_active;
+      (void) save_cache;
+      return auto_plan_refresh_e::current;
+#endif
+    }
+  }  // namespace
+
+  auto_plan_refresh_e refresh_advertised_codecs_for_auto_plan(bool stream_active) {
+    return refresh_advertised_codecs_for_auto_plan_impl(stream_active, true);
+  }
+
   std::vector<std::string> selectable_encoder_backends() {
     std::vector<std::string> backends;
     backends.reserve(encoders.size() + 1);
@@ -6622,7 +7120,8 @@ namespace video {
       "kms_capture_needs_capability",
       "No video capture could start: this host is configured for KMS capture, but the Polaris "
       "binary does not hold CAP_SYS_ADMIN, so it cannot read a framebuffer.",
-      "On the host, run sudo -H polaris --setup-host --enable-kms, then restart Polaris. Every Polaris install or update needs this again."
+      "On the host, run sudo -H polaris --setup-host --enable-kms once and do what it prints, since it may ask for a new "
+      "login first, then restart Polaris. The polaris-kms package keeps the capability across updates."
     );
   }
 
@@ -6681,6 +7180,66 @@ namespace video {
 #endif
   }
 
+  pyrowave_availability::route_e pyrowave_capture_route(const capture_generation::identity_t &generation) {
+#if defined(__linux__) && defined(POLARIS_BUILD_PYROWAVE)
+    const bool exact = !generation.exact_display_name.empty();
+    // PyroWave's memory type is never CUDA, so dispatch never gives it NvFBC.
+    const auto backend = platf::capture_backend_for_request(generation.capture_backend, exact, false);
+    std::optional<pyrowave_availability::scanout_t> scanout;
+    if (backend == "kms") {
+      // The display the capture thread would open: its exact output when the generation owns one,
+      // otherwise the configured output, found the way refresh_displays finds it.
+      const auto &display_name = exact ? generation.exact_display_name : generation.requested_output_name;
+      if (const auto fourcc = platf::kms_capture_scanout_fourcc(display_name)) {
+        scanout = pyrowave_availability::scanout_t {
+          pyrowave_encode::can_read_dmabuf_format(*fourcc),
+          pyrowave_availability::is_fp16_fourcc(*fourcc),
+        };
+      }
+    }
+    // Asked only to tell a request PyroWave alone cannot use from one no codec can use.
+    const auto encoder_backend = backend == "none" ?
+                                   platf::capture_backend_for_request(generation.capture_backend, exact, true) :
+                                   std::string {};
+    return pyrowave_availability::classify_route(backend, encoder_backend, scanout);
+#else
+    (void) generation;
+    return pyrowave_availability::route_e::unknown;
+#endif
+  }
+
+  std::optional<pyrowave_availability::unavailable_t> pyrowave_unavailable() {
+    pyrowave_availability::offer_facts_t facts;
+#ifdef POLARIS_BUILD_PYROWAVE
+    facts.built = true;
+    facts.device = pyrowave_encode::available();
+  #ifdef __linux__
+    if (facts.device) {
+      // The cheap question first. A mode with its own compositor is a launch that streams whatever
+      // the desktop does, and when there is one nothing else here decides the answer.
+      facts.private_mode_available = stream_display_policy::private_runtime_selection_available();
+      if (!facts.private_mode_available) {
+        facts.host_route = pyrowave_capture_route(current_capture_generation_identity());
+      }
+    }
+  #endif
+#endif
+    return pyrowave_availability::unavailable(facts);
+  }
+
+  std::optional<launch_failure::record_t> pyrowave_capture_refusal(const capture_generation::identity_t &generation) {
+    return pyrowave_availability::launch_refusal(pyrowave_capture_route(generation), generation.capture_backend);
+  }
+
+  std::optional<launch_failure::record_t> pyrowave_session_capture_refusal() {
+    // The generation capture() will take, chosen the way it chooses it.
+    auto generation = proc::proc.capture_generation;
+    if (generation.empty()) {
+      generation = current_capture_generation_identity();
+    }
+    return pyrowave_capture_refusal(generation);
+  }
+
   void note_launch_refused_by_probe(bool against_private_compositor) {
 #ifdef __linux__
     if (platf::kms_capture_refused_for_capability()) {
@@ -6708,11 +7267,103 @@ namespace video {
       "encoder_probe_failed",
       message,
       against_private_compositor ?
-        "On NVIDIA, pick Private Stream (GPU-native) in Play Setup, or set "
+        "On NVIDIA, set the launch mode to Private Stream (GPU-native), or set "
         "linux_prefer_gpu_native_capture = enabled on the host, and retry. The host Doctor's "
         "Encoder row says which encoder was tried and why it failed." :
         "Check the host Doctor's Encoder and Capture rows; they say which encoder was tried and "
         "why it failed. If this mode captures a real display, make sure one is connected and on."
+    );
+  }
+
+  bool active_encoder_withholds_hdr() {
+#if defined(__linux__) && defined(POLARIS_BUILD_VULKAN)
+    std::shared_lock encoder_state_lock {encoder_state_mutex};
+    return chosen_encoder == &vulkan && encoder_selection_info.vulkan_withholds_hdr;
+#else
+    return false;
+#endif
+  }
+
+  bool active_encoder_withholds_hdr_for_explicit_vulkan() {
+#if defined(__linux__) && defined(POLARIS_BUILD_VULKAN)
+    std::shared_lock encoder_state_lock {encoder_state_mutex};
+    return chosen_encoder == &vulkan && encoder_selection_info.vulkan_withholds_hdr &&
+           encoder_selection_info.mode == "explicit";
+#else
+    return false;
+#endif
+  }
+
+  std::string av1_announce_refusal(int configured_av1_mode, const encoder_selection_info_t &selection) {
+    if (configured_av1_mode == 1) {
+      return "The client asked for AV1, and AV1 Support is set to never advertise it (av1_mode = 1), "
+             "so this stream is refused.";
+    }
+    if (selection.selected_encoder == "vulkan" && selection.policy == "amd_gamescope_vulkan_ram") {
+      // #635a: the launch cannot refuse this by name, because the client picks its codec at ANNOUNCE.
+      return "The client asked for AV1, and on AMD Gamescope Stream Auto encodes with Vulkan Video, "
+             "which carries no AV1, so this stream is refused. The client picked AV1 from the codecs "
+             "the host offered before the launch, as a launch that switches into Gamescope Stream "
+             "from another mode does. av1_mode = 2 keeps VA-API and AV1 on Gamescope Stream.";
+    }
+    if (!selection.selected_encoder.empty()) {
+      return "The client asked for AV1, and the encoder this host selected, " + selection.selected_encoder +
+             ", offers no AV1, so this stream is refused.";
+    }
+    return "The client asked for AV1, and this host advertises no AV1, so this stream is refused.";
+  }
+
+  void note_launch_refused_for_hdr(bool encoder_chosen_for_launch) {
+    // The probe passed, so "no encoder could start" would send someone looking for a fault that is
+    // not there. A launch reaches this with codecs another encoder advertised, which is how a launch
+    // that switches to Gamescope Stream for itself asks Vulkan Video for HDR.
+    if (active_encoder_withholds_hdr_for_explicit_vulkan() && encoder_chosen_for_launch) {
+      // A launch that picks Vulkan Video for itself writes it where polaris.conf's encoder lives until
+      // teardown, so the plan reads it as explicit. The host may be on Auto or VA-API.
+      launch_failure::refuse(
+        503,
+        "encoder_offers_no_hdr",
+        "This launch asks for HDR with Vulkan Video chosen for it, which offers no HDR on Gamescope "
+        "Stream: it reads each frame through system memory as 8-bit.",
+        "Launch without HDR, or choose another encoder for this launch. VA-API on Gamescope Stream takes "
+        "frames through the same 8-bit system memory upload unless POLARIS_PORTAL_DMABUF=1 is set, and "
+        "HDR through that unvalidated DMA-BUF route is not proven."
+      );
+      return;
+    }
+    if (active_encoder_withholds_hdr_for_explicit_vulkan()) {
+      launch_failure::refuse(
+        503,
+        "encoder_offers_no_hdr",
+        "This launch asks for HDR, and this host is set to encoder = vulkan, which offers no HDR on "
+        "Gamescope Stream: it reads each frame through system memory as 8-bit.",
+        "Launch without HDR. encoder = vaapi keeps VA-API on Gamescope Stream, but VA-API there takes "
+        "frames through the same 8-bit system memory upload unless POLARIS_PORTAL_DMABUF=1 is set, and "
+        "HDR through that unvalidated DMA-BUF route is not proven."
+      );
+      return;
+    }
+    if (active_encoder_withholds_hdr()) {
+      launch_failure::refuse(
+        503,
+        "encoder_offers_no_hdr",
+        "This launch asks for HDR, and on Gamescope Stream Auto encodes with Vulkan Video, which offers "
+        "no HDR there: it reads each frame through system memory as 8-bit.",
+        // VA-API is no way back to HDR here: on the portal it takes the same 8-bit upload
+        // (va_ram_t through sws_t::load_ram) unless the unvalidated DMA-BUF opt-in is set.
+        "Launch without HDR. hevc_mode = 3 or encoder = vaapi keeps VA-API on Gamescope Stream, but "
+        "VA-API there takes frames through the same 8-bit system memory upload unless "
+        "POLARIS_PORTAL_DMABUF=1 is set, and HDR through that unvalidated DMA-BUF route is not proven."
+      );
+      return;
+    }
+    const auto encoder = active_encoder_name();
+    launch_failure::refuse(
+      503,
+      "encoder_offers_no_hdr",
+      "This launch asks for HDR, and the encoder this host selected for it, " +
+        (encoder.empty() ? std::string {"its encoder"} : encoder) + ", offers no HDR profile.",
+      "Launch without HDR, or check the host Doctor's Encoder row and the HEVC and AV1 Support settings."
     );
   }
 
@@ -6770,6 +7421,17 @@ namespace video {
       default:
         return false;
     }
+  }
+
+  bool main10_probe_is_authoritative(std::string_view capture, std::string_view stream_mode) {
+#ifdef __linux__
+    return !(stream_display_policy::canonical_capture_backend(capture) == "portal" &&
+             stream_mode == stream_display_policy::k_gamescope_stream);
+#else
+    (void) capture;
+    (void) stream_mode;
+    return true;
+#endif
   }
 
   bool automatic_encoder_prefers_gpu_native_capture() {
@@ -6942,6 +7604,30 @@ namespace video {
     return results;
   }
 
+  int convert_with_encode_device_for_tests(std::unique_ptr<platf::avcodec_encode_device_t> device, frame_t &frame) {
+    encode_device_frame_converter_t<platf::avcodec_encode_device_t> converter {
+      "convert-test", std::move(device), conversion_request_t {}
+    };
+    return converter.convert(frame, conversion_request_t {});
+  }
+
+  void end_stream_encoder_cannot_serve_for_tests(const safe::mail_t &mail) {
+    end_stream_encoder_cannot_serve(mail);
+  }
+
+  void encode_published_display_for_tests(const safe::mail_t &mail, config_t config,
+                                          const std::shared_ptr<platf::display_t> &display,
+                                          const stream_packets::destination_t &channel_data) {
+    // What the capture thread publishes, without a capture thread: its display and signals that
+    // are never raised.
+    capture_thread_async_ctx_t capture_ctx {};
+    capture_ctx.display_wp = display;
+    const auto images = std::make_shared<img_event_t::element_type>();
+    int frame_nr = 1;
+    encode_published_displays(frame_nr, mail, images, config, capture_ctx, channel_data,
+                              mail->queue<packet_t>(mail::video_packets));
+  }
+
   int hevc_profile_for_input_for_tests(int bit_depth, int chroma_sampling_type) {
     return hevc_profile_for_input(bit_depth, chroma_sampling_type);
   }
@@ -6990,15 +7676,51 @@ namespace video {
     };
   }
 
+  void finalize_encoder_selection_info_for_tests(
+    encoder_selection_info_t &info,
+    std::string_view selected_encoder
+  ) {
+    finalize_encoder_selection_info(info, selected_encoder);
+  }
+
   int probe_encoders_with_hooks_for_tests(
     const probe_reuse::identity_t &identity,
     const std::function<bool(encoder_t &, bool)> &validate
   ) {
-    const probe_test_hooks_t hooks {identity, validate};
+    return probe_encoders_with_hooks_for_tests(identity, validate, {});
+  }
+
+  int probe_encoders_with_hooks_for_tests(
+    const probe_reuse::identity_t &identity,
+    const std::function<bool(encoder_t &, bool)> &validate,
+    std::string_view gpu_driver
+  ) {
+    const probe_test_hooks_t hooks {identity, validate, std::string {gpu_driver}};
     const auto previous = probe_test_hooks;
     probe_test_hooks = &hooks;
     auto restore = util::fail_guard([previous] { probe_test_hooks = previous; });
     return probe_encoders(true, false);
+  }
+
+  encoder_selection_info_t planned_encoder_selection_info_for_tests(std::string_view gpu_driver) {
+    const probe_test_hooks_t hooks {{}, {}, std::string {gpu_driver}};
+    const auto previous = probe_test_hooks;
+    probe_test_hooks = &hooks;
+    auto restore = util::fail_guard([previous] { probe_test_hooks = previous; });
+    return planned_encoder_selection_info();
+  }
+
+  auto_plan_refresh_e refresh_advertised_codecs_for_auto_plan_with_hooks_for_tests(
+    const probe_reuse::identity_t &identity,
+    const std::function<bool(encoder_t &, bool)> &validate,
+    std::string_view gpu_driver,
+    bool stream_active
+  ) {
+    const probe_test_hooks_t hooks {identity, validate, std::string {gpu_driver}};
+    const auto previous = probe_test_hooks;
+    probe_test_hooks = &hooks;
+    auto restore = util::fail_guard([previous] { probe_test_hooks = previous; });
+    return refresh_advertised_codecs_for_auto_plan_impl(stream_active, false);
   }
 
   std::string encoder_probe_settings_for_tests(const config::video_t &settings) {
@@ -7027,6 +7749,92 @@ namespace video {
   ) {
     return capture_generations_match(active, incoming);
   }
+
+  bool publish_capture_backend_for_tests(
+    const config_t &config,
+    const platf::capture_route_t &route,
+    bool &published,
+    std::optional<stream_stats::capture_source_t> &reported_source
+  ) {
+    auto publication = capture_backend_publication(config, route);
+    publication.published = published;
+    publish_capture_backend(publication, reported_source);
+    published = publication.published;
+    return published;
+  }
+
+  bool publish_capture_backend_for_tests(const config_t &config, const platf::capture_route_t &route, bool &published) {
+    std::optional<stream_stats::capture_source_t> reported_source;
+    return publish_capture_backend_for_tests(config, route, published, reported_source);
+  }
+
+  bool publish_capture_backend_for_tests(
+    const config_t &config,
+    const platf::capture_route_t &route,
+    bool &published,
+    std::optional<stream_stats::capture_source_t> &reported_source,
+    std::string &reported_pyrowave_route
+  ) {
+    auto publication = capture_backend_publication(config, route);
+    publication.published = published;
+    publish_capture_backend(publication, reported_source, &reported_pyrowave_route);
+    published = publication.published;
+    return published;
+  }
+
+  void record_pyrowave_route_for_tests(const config_t &config, std::string_view route, std::string &reported) {
+    record_pyrowave_route(config, route, reported);
+  }
+
+  std::optional<std::string> pyrowave_route_of_a_host_frame_for_tests(const config_t &config) {
+#ifdef POLARIS_BUILD_PYROWAVE
+    if (!pyrowave_encode::available()) {
+      return std::nullopt;
+    }
+    constexpr auto range = pyrowave_encode::dynamic_range_e::sdr;
+    auto codec = pyrowave_encode::make_session(config.width, config.height, pyrowave_encode::chroma_e::yuv420, range);
+    if (!codec) {
+      return std::string {};
+    }
+    // The session the host builds for a PyroWave stream, held the way the encode loop holds it.
+    const std::unique_ptr<encode_session_t> session =
+      std::make_unique<pyrowave_encode_session_t>(std::move(codec), config.framerate, config.bitrate, range);
+
+    // One grey frame in host memory, the way shared memory capture hands one over.
+    std::vector<std::uint8_t> pixels(static_cast<std::size_t>(config.width) * config.height * 4, 0x80);
+    auto img = std::make_shared<platf::img_t>();
+    img->data = pixels.data();
+    img->width = config.width;
+    img->height = config.height;
+    img->pixel_pitch = 4;
+    img->row_pitch = config.width * 4;
+    frame_t frame {img};
+    if (session->convert(frame) != 0) {
+      return std::string {};
+    }
+
+    std::string reported;
+    record_pyrowave_route(config, *session, reported);
+    return reported;
+#else
+    (void) config;
+    return std::nullopt;
+#endif
+  }
+
+  void record_capture_source_for_tests(
+    const config_t &config,
+    const frame_t &frame,
+    std::optional<stream_stats::capture_source_t> &reported_source
+  ) {
+    record_capture_source(config, frame, reported_source);
+  }
+
+  #ifdef __linux__
+  capture_generation::request_context_t capture_request_for_session_for_tests(const capture_generation::identity_t &generation) {
+    return capture_request_for_session(generation);
+  }
+  #endif
 
   std::optional<int> find_display_index_for_tests(
     const std::vector<std::string> &display_names,

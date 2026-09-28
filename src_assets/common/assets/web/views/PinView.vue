@@ -988,6 +988,7 @@ import { useToast } from '../composables/useToast'
 import { useAiOptimizer } from '../composables/useAiOptimizer'
 import { formatClientTimestamp } from '../client-timestamps'
 import { deviceNameLabels } from '../device-names.js'
+import { clientFamilyLabel } from '../client-family.js'
 import {
   useClients,
   permissionMapping, permissionGroups,
@@ -1147,10 +1148,6 @@ function clientAliasName(client) {
     return ''
   }
   return client.name
-}
-
-function clientFamilyLabel(client) {
-  return client?.client_family === 'nova' ? 'Nova' : 'Moonlight / Artemis'
 }
 
 function clientFamilyToneClass(client) {

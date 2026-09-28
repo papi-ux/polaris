@@ -6,10 +6,16 @@ and how to turn it on, start with [PyroWave](pyrowave.md).
 ## A KDE host with a display in HDR
 
 If no display on the host is in HDR, none of this applies. On a KDE desktop with a display in HDR,
-PyroWave cannot stream at all, SDR included, when capture goes through kms: Nova connects but shows
-no picture, then the stream ends. KWin sends HDR frames in a format PyroWave cannot read. This
-happens with **Request HDR when host supports it** on or off in Nova. The format check comes before
-any HDR decision, so both end the same way.
+PyroWave cannot stream the desktop at all, SDR included, when capture goes through kms. KWin sends
+HDR frames in a format PyroWave cannot read. This happens with **Request HDR when host supports it**
+on or off in Nova. The format check comes before any HDR decision, so both end the same way.
+
+From Polaris 1.4.14 the host reads the display's format before the stream starts and refuses it. A
+Nova that tells the host at launch that it will ask for PyroWave shows the reason, which names HDR;
+an older Nova shows an RTSP handshake failure with error 503. Polaris 1.4.13 lets Nova connect, show
+no picture, then end the stream. If the host can run Private Stream, which captures its own session
+rather than the desktop, it keeps offering PyroWave for that; otherwise it stops offering PyroWave
+while the desktop is in HDR.
 
 ### Does capture go through kms?
 
@@ -29,9 +35,10 @@ To see which route capture takes, start a stream with any codec, then run
 
 ### Confirm the failure
 
-After the failed stream, run `journalctl --user --since '10 min ago' | grep 'cannot read'` on the
-host. It shows `fourcc 1211384385`. Doctor in Polaris 1.4.13 does not flag this and labels the
-capture format `bgra8`, so it looks normal there.
+After the refused stream, run `journalctl --user --since '10 min ago' | grep 'pyrowave_capture_unreadable'`
+on the host. On Polaris 1.4.13, grep for `cannot read` instead; it shows `fourcc 1211384385`, and
+Doctor there does not flag this and labels the capture format `bgra8`, so it looks normal. Newer
+Doctor raises `capture_format_unreadable_by_pyrowave` once any stream has captured the desktop.
 
 ### Fixes
 
@@ -246,6 +253,10 @@ A **Quality Preset**, the first item in Client Stream Defaults, sets resolution,
 together, and some presets set 10, 20 or 50 Mbps. After any change of preset, set the bitrate and
 the codec again.
 
+That advice is Nova 1.4.13's, a flat 0.73 bits per pixel judged by eye. From Polaris 1.4.14 the host
+quotes the codec author's own model instead, which asks for more at small sizes and less at 4K
+([How Polaris advises and tunes PyroWave](#how-polaris-advises-and-tunes-pyrowave)).
+
 ### One codec for every host
 
 The codec chosen in **Settings > Client Stream Defaults > Change codec settings** applies to every
@@ -354,10 +365,12 @@ because the whole source is copied to the GPU every frame. A KWin Host Virtual D
 copy.
 
 [Doctor](doctor.md), the stream check in Nova's Command Center and in Mission Control, names the
-codec and reports the capture transport and whether frames were on the GPU or in host memory. It
-cannot yet show where colour was converted: it gives every PyroWave stream the reason
-"PyroWave is encoding with Vulkan after CPU color conversion.", even though conversion runs on the
-GPU by default. Go by the host log instead.
+codec and reports the capture transport and whether frames were on the GPU or in host memory. The
+stream stats also carry how the encoder took its frames, `pyrowave_route` (`zero_copy`,
+`gpu_upload` or `cpu_convert`), and the encoder selection reason says the same in words. That is the
+encoder's input only, so `zero_copy` does not prove that capture stayed on the GPU. Polaris 1.4.13
+gives every PyroWave stream the reason "PyroWave is encoding with Vulkan after CPU color
+conversion." instead, even though conversion runs on the GPU by default; there, go by the host log.
 
 ## Read the host log
 
@@ -373,12 +386,73 @@ journal. Every line below contains `PyroWave:`.
 | `encoding straight from a 1920x1080 picture on <GPU>` | The frame arrived in host memory, was copied to the GPU, and its colour was converted there. |
 | `falling back to converting frames on the CPU` | The GPU path could not start, so colour conversion runs on the CPU. This happens for SDR only. |
 | `POLARIS_PYROWAVE_GPU_INPUT is off, so frames are converted on the CPU` | That environment variable forced the CPU converter. If this run's log has no such line, it is not set. |
-| `Error: PyroWave: capture is handing over a dmabuf in a format this codec cannot read (fourcc ...)` | Capture hands over a format PyroWave cannot read, identified by its fourcc (the four character code of a pixel format), and the stream ends. See [A KDE host with a display in HDR](#a-kde-host-with-a-display-in-hdr). |
+| `Refusing launch [pyrowave_capture_unreadable]`, or the same code after `Refusing resume` or `Refusing RTSP setup` | The display capture would read is in a format PyroWave cannot read, so the stream was refused before it started; the rest of the line says which. See [A KDE host with a display in HDR](#a-kde-host-with-a-display-in-hdr). |
+| `Refusing resume [capture_in_use_by_other_codec]` or `Refusing RTSP setup [capture_in_use_by_other_codec]` | Another stream on the host is capturing for a different codec, one PyroWave and the other not, and one capture cannot serve both. |
+| `Error: PyroWave: capture is handing over a dmabuf in a format this codec cannot read (fourcc ...)` | Capture hands over a format PyroWave cannot read, identified by its fourcc (the four character code of a pixel format), and the stream ends. From Polaris 1.4.14 this is a backstop for a display whose format changed after the stream started. See [A KDE host with a display in HDR](#a-kde-host-with-a-display-in-hdr). |
 | `this client negotiated HDR and the captured display is not in HDR` | The client asked for HDR and the captured display is not in HDR, or its HDR metadata could not be read, so the stream is refused, whatever the capture route. See [Limits](#limits). |
 | `over 300 frames, ... ms and encode ... ms a frame` | The average cost of a frame, after 300 frames (five seconds at 60 fps), then every 18,000 frames (five minutes). |
 
 One line without the `PyroWave:` prefix also matters: `Skipping FEC for oversized encoded frame(s)`
 means the largest frames went out without their error correction (see [Limits](#limits)).
+
+## How Polaris advises and tunes PyroWave
+
+From Polaris 1.4.14 the host carries PyroWave's own bitrate model. The codec's author ran four
+lossless game clips through it at every 16:9 size from 1280x720 to 3840x2160, scored the results
+with PSNR-HVS-M-H, an objective metric weighted for how far away the picture is watched, and fitted
+the bitrate each quality needed. Polaris evaluates that fit at 35 dB, the level the author calls good
+quality, for two distances: a device's own screen, 2.875 picture heights away (the far figure, and
+the lower one), and a television or monitor, 2 picture heights away (the near figure). Nova 1.4.14
+carries the same model, and a fixture in Polaris's tests holds the two to the same numbers.
+
+Every figure below is what to set in the client, at the host's default 10% FEC with stereo audio in
+high quality, rounded up to a whole Mbps. More FEC or surround audio asks a little more for the same
+picture.
+
+| Stream | Own screen (far) | Television or monitor (near) |
+|---|---|---|
+| 1280x720 at 60 fps, 4:4:4 | 154 Mbps | 185 Mbps |
+| 1920x1080 at 60 fps, 4:2:0 | 172 Mbps | 246 Mbps |
+| 1920x1080 at 60 fps, 4:4:4 | 201 Mbps | 298 Mbps |
+| 2560x1440 at 60 fps, 4:4:4 | 206 Mbps | 381 Mbps |
+| 3840x2160 at 60 fps, 4:4:4 | 262 Mbps | 350 Mbps |
+| 1920x1080 at 120 fps, 4:4:4 | 400 Mbps | 594 Mbps |
+
+The model is an objective metric on four game clips of about ten frames each, scored on luma only,
+sampled at 16:9 and measured on SDR. It is not a measurement on any device. One check by eye on a
+Retroid Pocket 6 found Control at 1920x1080 and 120 fps soft at 50 Mbps and right at 200, where the
+far figure asks about 400. A picture smaller than 1280x720 or larger than 3840x2160 takes the bits
+per pixel of the nearest of those two sizes.
+
+**Where clients read it.** While a PyroWave stream runs, `GET /polaris/v1/session/status` carries
+`pyrowave_bitrate`, and `GET /polaris/v1/pyrowave/advice?width=&height=&fps=&chroma=420|444`
+answers the same figures before a launch. Capabilities announce both as `pyrowave_advice_v1`, and
+`docs/nova-contract.json` lists every field.
+
+**Starved.** The host keeps the share of the last 240 frames, about four seconds at 60 fps, that
+left at 99% or more of PyroWave's byte budget. A stream is starved when the encoder runs below where
+Doctor's raise would land it, or when more than 80% of those frames hit the budget.
+
+**Doctor.** A starved stream on a clean network, packet loss at most 2% and latency under 45 ms, the
+limits Doctor's quality restore verifies with, gets a Doctor finding. It ranks below every network,
+encoder and capture failure. Doctor offers to raise the bitrate to the far figure, never above
+300 Mbps or `max_bitrate`, in steps of at most a quarter, each verified for 8 seconds, with Undo.
+That is the one way Polaris raises a stream above the bitrate the player asked for. While Live
+Tuning is on, Doctor says what to set instead of acting. A stream cut below a request that already
+meets the far figure climbs back to that request, by Doctor's ordinary quality restore or by Live
+Tuning's own recovery, and Doctor never asks for less than the player set.
+
+**Live Tuning.** Live Tuning never raises a stream above the player's request. On a PyroWave stream
+it cuts no lower than half the far figure at the encoder, about 77 Mbps for 1920x1080 at 60 fps in
+4:2:0, or no lower than the request when that is lower still. At that floor it stops, and Doctor
+suggests HEVC or a lower mode instead of another cut. It does not cut PyroWave for a slow encode,
+because the encode takes as long at any bitrate. A live bitrate set by hand turns Live Tuning off
+for that stream only.
+
+**Caps.** A launch decides its bitrate before it knows the codec, so the Stability preset's 15 Mbps
+cap, a device profile's rate and a saved paired profile (Keep in Step) are sized for H.264. A
+PyroWave stream keeps its client's own request over all of them. Only `max_bitrate` caps it, and
+the host log and session status name any cap that applied or was set aside.
 
 ## Limits
 
@@ -400,12 +474,12 @@ means the largest frames went out without their error correction (see [Limits](#
 - **Other clients are unaffected.** Polaris adds PyroWave to the codecs it offers every client, when
   its GPU can run the encoder and the session is not a Space. Moonlight and stable Nova ignore it and
   keep using H.264, HEVC or AV1.
-- **It costs bandwidth.** It is intra only, so every frame is a key frame. Polaris applies no
-  PyroWave quality floor and does not recommend a bitrate. The advice in these pages comes from
-  Nova, which advises about 91 to 364 Mbps depending on the mode and whose bitrate slider stops at
-  300 Mbps ([Bitrate advice](#bitrate-advice)). Valve quotes 100 to 500 Mbit/s and at least gigabit
-  ethernet for the same codec in Steam Remote Play, and Nova's advice falls roughly within that
-  range. Steam Remote Play's PyroWave and Polaris's are separate streams and cannot connect to each
+- **It costs bandwidth.** It is intra only, so every frame is a key frame. From Polaris 1.4.14 the
+  host advises the codec author's own figure, about 154 to 594 Mbps across the modes in
+  [How Polaris advises and tunes PyroWave](#how-polaris-advises-and-tunes-pyrowave). Nova 1.4.13
+  advises about 91 to 364 Mbps from a flat figure, and its bitrate slider stops at 300 Mbps
+  ([Bitrate advice](#bitrate-advice)). Valve quotes 100 to 500 Mbit/s and at least gigabit ethernet
+  for the same codec in Steam Remote Play. Steam Remote Play's PyroWave and Polaris's are separate streams and cannot connect to each
   other.
 - **Wi-Fi is not blocked, but it rarely keeps up.** Nothing stops PyroWave on Wi-Fi, but Wi-Fi
   usually cannot carry these bitrates, so expect stutter there. A wired host does not help the
@@ -416,7 +490,7 @@ means the largest frames went out without their error correction (see [Limits](#
   loss is least protected when frames are largest.
 - **An ultrawide source costs more when frames arrive in host memory**, because the whole source is
   copied to the GPU every frame. A 32:9 source is letterboxed, and the bars cost nothing.
-- **Diagnostics do not show where colour was converted.** Use the host log.
+- **Polaris 1.4.13 diagnostics do not show where colour was converted.** Use the host log there.
 - **A mode that negotiates is not a performance promise.** A given GPU and network may not sustain
   it.
 - **A working SDR stream is not HDR validation.** They are separate paths and need separate proof.
@@ -473,7 +547,10 @@ Each frame's budget is the bitrate divided by the frame rate, at least 4096 byte
 limit. There is no PyroWave frame size cap and no payload size minimum. A frame that needs more FEC
 blocks than the transport allows is sent without FEC parity, and the host logs
 `Skipping FEC for oversized encoded frame(s)`. The encoder accepts bitrate changes live, without
-restarting the stream.
+restarting the stream. A frame that leaves at 99% of its budget or more counts toward
+`ceiling_frame_share` in session status. The encode happens where the frame is handed to the codec,
+and from Polaris 1.4.14 that time counts in `encode_time_ms`. Live Tuning does not cut the bitrate
+for it, since a lower bitrate does not shorten it.
 
 ### Capture routes and the `capture` setting
 
@@ -504,14 +581,17 @@ for as long as the display keeps its mode. A KDE display in HDR scans out `ABGR1
 `Error: PyroWave: capture is handing over a dmabuf in a format this codec cannot read (fourcc
 1211384385); ending the stream, because that does not change while the display keeps its mode`.
 This check runs before any dynamic range decision, so an SDR request ends the same way.
-Polaris 1.4.13's diagnostics and its `kms:` log line label that format `bgra8`. From commit
-b38588e2 on the development branch, not yet released, the log names it `AB4H` and Doctor raises
-`capture_format_unreadable_by_pyrowave`. That is a clearer diagnosis, not a fix: the conversion for
-sixteen bit float is not written.
+Polaris 1.4.13's diagnostics and its `kms:` log line label that format `bgra8`. From Polaris 1.4.14
+the log names it `AB4H`, Doctor raises `capture_format_unreadable_by_pyrowave`, and the host reads
+the scanout's format before the stream and refuses it with `pyrowave_capture_unreadable`. That
+refuses earlier and says why; it is not a fix, because the conversion for sixteen bit float is not
+written.
 
-The encoder selection reason in diagnostics is a fixed string, "PyroWave is encoding with Vulkan
-after CPU color conversion.", for every PyroWave stream, and the PyroWave session records no encode
-target, so diagnostics cannot report a GPU native capture path for it. The log lines under
+The encoder selection reason is built from `pyrowave_route` and says where the encoder converted
+colour: after importing a DMA-BUF (`zero_copy`), after copying a frame from host memory to the GPU
+(`gpu_upload`), or on the CPU (`cpu_convert`). It describes the encoder's input, not capture, so it
+is no proof of a GPU native capture path. Polaris 1.4.13 gives every PyroWave stream the fixed
+reason "PyroWave is encoding with Vulkan after CPU color conversion." The log lines under
 [Read the host log](#read-the-host-log) are the observed path.
 
 ### Reading the numbers

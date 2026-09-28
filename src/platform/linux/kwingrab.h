@@ -26,6 +26,14 @@ namespace kwingrab {
     std::string output_name;
   };
 
+  /// Why start_output_session() opened no session.
+  enum class start_failure_e {
+    no_wayland,  ///< there is no Wayland display to connect to, so there is no KWin to ask
+    not_kwin,  ///< the compositor is not KWin, so there is no KWin output to take
+    protocol_withheld,  ///< KWin, and it offered Polaris no zkde_screencast_unstable_v1
+    stream_failed,  ///< KWin offered the protocol, and the output stream did not start
+  };
+
   /**
    * @brief Keep the Wayland screencast stream alive while PipeWire capture runs.
    * Destroying this may tear down the KWin PW node.
@@ -44,16 +52,17 @@ namespace kwingrab {
     const stream_source_t &source() const;
 
   private:
-    friend std::unique_ptr<session_t> start_output_session(std::string_view output_name);
+    friend std::unique_ptr<session_t> start_output_session(std::string_view output_name, start_failure_e *failure);
     struct impl_t;
     std::unique_ptr<impl_t> impl_;
   };
 
   /**
    * @brief Start zkde stream_output for the named output (or first).
+   * @param failure When not null and no session opens, set to why none did.
    * @return Session holding Wayland objects + PW node/serial, or nullptr on failure.
    */
-  std::unique_ptr<session_t> start_output_session(std::string_view output_name = {});
+  std::unique_ptr<session_t> start_output_session(std::string_view output_name = {}, start_failure_e *failure = nullptr);
 
   /// True when an absent requested output may use configured/first output.
   bool output_selection_can_fallback(std::string_view requested_output_name);

@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { initializeWebUiAuthState, isWebUiAuthenticated } from './auth-state.js'
 import { createWebUiAuthGuard } from './router-auth.js'
+import { settingsUnreadable } from './settings-unreadable.js'
 import ReconnectingView from './views/ReconnectingView.vue'
 
 const EmptyView = defineComponent({ render: () => h('div') })
@@ -160,5 +161,63 @@ describe('real router auth recovery', () => {
     expect(router.currentRoute.value.fullPath).toBe('/apps')
     expect(fetch).toHaveBeenCalledOnce()
     wrapper.unmount()
+  })
+
+  // #782: the sign-in check and Reconnecting both let a session in on a refused
+  // settings file, and both dropped the refusal the probe carried, so the console
+  // landed on the Dashboard with nothing on screen about the file.
+  describe('a refused settings file', () => {
+    const refusal = {
+      path: '/srv/polaris/polaris.conf',
+      reason: 'It is writable by its group (mode 0664), and the settings store refuses a file another user can change.',
+      fix: 'Restrict it with "chmod go-w /srv/polaris/polaris.conf".',
+    }
+    const refused = () => response(503, { status: false, error: 'config_unreadable', ...refusal })
+
+    it('reaches the app banner from the sign-in check on a protected route', async () => {
+      fetch.mockResolvedValueOnce(refused())
+      const router = makeRouter()
+
+      const wrapper = await mountRoute(router, '/apps')
+
+      expect(router.currentRoute.value.fullPath).toBe('/apps')
+      expect(isWebUiAuthenticated()).toBe(true)
+      expect(settingsUnreadable.value).toEqual(refusal)
+      wrapper.unmount()
+    })
+
+    it('reaches the app banner from the sign-in check on a public route, and stays while the host is down', async () => {
+      fetch.mockResolvedValueOnce(refused())
+      const router = makeRouter()
+
+      const wrapper = await mountRoute(router, '/login?redirect=/apps')
+
+      expect(router.currentRoute.value.fullPath).toBe('/apps')
+      expect(settingsUnreadable.value).toEqual(refusal)
+      wrapper.unmount()
+
+      // A probe that could not reach the host knows nothing new about the file.
+      fetch.mockResolvedValueOnce(response(503, { status: false, error: 'Web UI session validation is temporarily unavailable.' }))
+      const down = await mountRoute(makeRouter(), '/login?redirect=/apps')
+      expect(settingsUnreadable.value).toEqual(refusal)
+      down.unmount()
+    })
+
+    it('reaches the app banner from Reconnecting, and goes when a later probe reads the file', async () => {
+      fetch.mockResolvedValueOnce(refused())
+      const router = makeRouter()
+
+      const wrapper = await mountRoute(router, '/reconnecting?redirect=/apps')
+
+      expect(router.currentRoute.value.fullPath).toBe('/apps')
+      expect(fetch).toHaveBeenCalledOnce()
+      expect(settingsUnreadable.value).toEqual(refusal)
+      wrapper.unmount()
+
+      fetch.mockResolvedValueOnce(response(200, { status: true, platform: 'linux' }))
+      const again = await mountRoute(makeRouter(), '/reconnecting?redirect=/config')
+      expect(settingsUnreadable.value).toBe(null)
+      again.unmount()
+    })
   })
 })

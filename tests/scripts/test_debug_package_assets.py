@@ -149,6 +149,35 @@ class DebugPackageAssets(unittest.TestCase):
                 self.assertEqual(output.read_bytes(), self.archives[platform, name].read_bytes())
         self.assertEqual(len(list(final.iterdir())), 10)
 
+    def test_prerelease_packages_keep_the_release_binary_name_and_stage(self):
+        # A prerelease's pkgver carries its label joined straight onto the number, 1.4.13beta.3, the
+        # spelling pacman sorts below 1.4.13. The binary inside is still named for the release number
+        # alone, so the debug check and release assembly have to accept that pair.
+        for directory, platform in ((self.arch, "arch"), (self.steam, "steamos3.8")):
+            for name, payload in (
+                ("polaris", {"usr/bin/polaris-1.4.13": self.host}),
+                ("polaris-kms", {"usr/libexec/polaris/polaris-kms": self.host}),
+                ("polaris-debug", {"usr/lib/debug/usr/bin/polaris-1.4.13.debug": self.symbols}),
+            ):
+                path = self.archives[platform, name]
+                if platform == "arch":
+                    path.unlink()
+                    path = directory / f"{name}-1.4.13beta.3-1-x86_64.pkg.tar.zst"
+                archive(path, name, payload, version="1.4.13beta.3-1")
+                self.archives[platform, name] = path
+        for platform in ("arch", "steamos3.8"):
+            with self.subTest(platform=platform):
+                result = self.validate(platform)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("polaris-debug 1.4.13beta.3-1:", result.stdout)
+        result = self.stage()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        final = self.root / "release-assets/final"
+        for platform in ("arch", "steamos3.8"):
+            for name in ("polaris", "polaris-kms", "polaris-debug"):
+                output = final / f"Polaris{name.removeprefix('polaris')}-{platform}-x86_64.pkg.tar.zst"
+                self.assertEqual(output.read_bytes(), self.archives[platform, name].read_bytes())
+
     def test_missing_or_duplicate_debug_package_stops_release_assembly(self):
         for platform in ("arch", "steamos3.8"):
             with self.subTest(platform=platform):

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nextTick, reactive, ref } from 'vue'
 
 import AudioVideo from './configs/tabs/AudioVideo.vue'
+import { useLiveTuning } from './composables/useLiveTuning'
 
 const enMessages = JSON.parse(readFileSync(
   join(process.cwd(), 'src_assets/common/assets/web/public/assets/locale/en.json'),
@@ -37,7 +38,6 @@ function linuxConfig(overrides = {}) {
     linux_capture_profile: 'disabled',
     adaptive_bitrate_enabled: 'disabled',
     adaptive_bitrate_min: 2000,
-    adaptive_bitrate_max: 100000,
     ai_enabled: 'disabled',
     max_bitrate: 0,
     client_settings_available: true,
@@ -257,6 +257,28 @@ describe('Linux Streaming Setup checklist', () => {
     expect(text).toContain('DMA-BUF capture GPU-resident')
     expect(text).not.toContain('CUDA')
     expect(text).not.toContain('NVIDIA')
+  })
+
+  it('offers the adaptive floor alone and names the client request as the ceiling', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ status: true }) })))
+    const { state } = useLiveTuning()
+    state.value = { enabled: true }
+    try {
+      // A settings file from before this change can still carry the old ceiling.
+      const wrapper = mountAudioVideo(linuxConfig({ adaptive_bitrate_min: 4000, adaptive_bitrate_max: 100000 }))
+      await flushPromises()
+      const range = wrapper.findAll('.settings-subtle-surface')
+        .find((panel) => panel.text().includes('Adaptive bitrate range'))
+
+      expect(range).toBeTruthy()
+      // adaptive_bitrate_max no longer limits anything, so there is no field for it.
+      expect(range.findAll('input')).toHaveLength(1)
+      expect(range.text()).toContain('Floor: 4 Mbps. A client that asks for less runs at the floor.')
+      expect(range.text()).toContain('Ceiling: the bitrate the client asked for')
+      expect(range.text()).not.toContain('Ceiling: 100 Mbps')
+    } finally {
+      state.value = null
+    }
   })
 
   it('warns NVIDIA true-headless hosts when GPU-native capture is disabled', () => {

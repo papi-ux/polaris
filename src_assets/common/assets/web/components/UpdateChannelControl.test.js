@@ -1,6 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import UpdateChannelControl from './UpdateChannelControl.vue'
+import { forgetSettingsRefusal, settingsUnreadable } from '../settings-unreadable.js'
 
 const revision = 'a'.repeat(64)
 const response = (status, body) => ({ ok: status >= 200 && status < 300, status, json: async () => body })
@@ -51,6 +52,33 @@ describe('Update Center beta opt-in', () => {
     expect(wrapper.emitted('saved')).toBeUndefined()
     expect(wrapper.emitted('refresh')).toHaveLength(1)
     expect(wrapper.get('[role="alert"]').text()).toContain(status === 412 ? 'update_channel_changed' : 'update_channel_failed')
+    wrapper.unmount()
+  })
+
+  it('says the reason and the fix when the host refuses its settings file', async () => {
+    // A refused file answers 503 config_unreadable (#782). The control said only that it could not
+    // confirm the preference and to check again, which no retry gets past.
+    const refused = {
+      status: false,
+      error: 'config_unreadable',
+      path: '/srv/polaris/polaris.conf',
+      reason: 'It is writable by its group (mode 0664), and the settings store refuses a file another user can change.',
+      fix: 'Restrict it with "chmod go-w /srv/polaris/polaris.conf".',
+    }
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(response(503, refused)))
+    const wrapper = mountControl()
+    await wrapper.get('input').setValue(true)
+    await flushPromises()
+    expect(wrapper.get('input').element.checked).toBe(false)
+    expect(wrapper.emitted('saved')).toBeUndefined()
+    expect(wrapper.emitted('refresh')).toHaveLength(1)
+    const alert = wrapper.get('[role="alert"]').text()
+    expect(alert).toContain('index.update_channel_unreadable')
+    expect(alert).toContain(refused.reason)
+    expect(alert).toContain(refused.fix)
+    expect(alert).not.toContain('update_channel_failed')
+    expect(settingsUnreadable.value).toEqual({ path: refused.path, reason: refused.reason, fix: refused.fix })
+    forgetSettingsRefusal()
     wrapper.unmount()
   })
 

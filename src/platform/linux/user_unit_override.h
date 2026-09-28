@@ -124,25 +124,71 @@ namespace platf::user_unit {
     return std::filesystem::path(path.data());
   }
 
+  /**
+   * @brief Whether a /proc/<pid>/cgroup text puts the process in the polaris user service's own cgroup.
+   *
+   * Only the service reads its drop-ins. A Polaris started from the desktop runs under a unit of its
+   * own, and one started from a terminal under the session's scope, so neither runs what host setup
+   * pointed the service at.
+   */
+  inline bool in_polaris_service(std::string_view cgroup) {
+    constexpr std::string_view unit = "/polaris.service";
+    while (!cgroup.empty()) {
+      const auto newline = cgroup.find('\n');
+      const auto line = trim_view(cgroup.substr(0, newline));
+      if (line.ends_with(unit)) {
+        return true;
+      }
+      if (newline == std::string_view::npos) {
+        break;
+      }
+      cgroup.remove_prefix(newline + 1);
+    }
+    return false;
+  }
+
   struct running_binary_t {
     std::string path;  ///< canonical path of the running executable
     std::string packaged_path;  ///< the absolute path the package installs, when the build declares one
     std::optional<bool> matches_package;  ///< nullopt when the packaged path is unknown or not installed
+    /// The running executable is the DRM/KMS helper the polaris-kms package installs. packaged_path then
+    /// names the helper and matches_package is true: the package replaces it on every update, as it
+    /// does the main binary, so it is not a copy that updates leave behind.
+    bool kms_helper = false;
   };
 
   /**
-   * @brief Whether the running executable is the one the package installed.
+   * @brief Whether the running executable is one the packages installed.
    * @param running The running executable, from running_executable().
    * @param packaged The build's POLARIS_EXECUTABLE_PATH; a relative value means a non-packaged build.
+   * @param kms_helper The build's POLARIS_KMS_HELPER_PATH, the polaris-kms package's DRM/KMS helper.
    */
-  inline running_binary_t describe_running_binary(const std::filesystem::path &running, std::string_view packaged) {
+  inline running_binary_t describe_running_binary(const std::filesystem::path &running, std::string_view packaged,
+                                                  std::string_view kms_helper) {
     running_binary_t out;
+    // An executable the package replaced while this process runs reads "<path> (deleted)". It is still
+    // the one that path installed, so it is compared by that path, which is not a copy.
+    constexpr std::string_view replaced_suffix = " (deleted)";
+    std::filesystem::path running_path = running;
+    if (const auto text = running.string(); text.ends_with(replaced_suffix)) {
+      running_path = text.substr(0, text.size() - replaced_suffix.size());
+    }
     std::error_code ec;
-    auto canonical_running = std::filesystem::canonical(running, ec);
+    auto canonical_running = std::filesystem::canonical(running_path, ec);
     if (ec) {
-      canonical_running = running;
+      canonical_running = running_path;
     }
     out.path = canonical_running.string();
+    if (!kms_helper.empty() && kms_helper.front() == '/') {
+      std::error_code helper_ec;
+      const auto canonical_helper = std::filesystem::canonical(std::filesystem::path {kms_helper}, helper_ec);
+      if (!helper_ec && canonical_helper == canonical_running) {
+        out.packaged_path = std::string {kms_helper};
+        out.matches_package = true;
+        out.kms_helper = true;
+        return out;
+      }
+    }
     if (packaged.empty() || packaged.front() != '/') {
       return out;
     }
@@ -168,6 +214,31 @@ namespace platf::user_unit {
    */
   inline constexpr std::string_view packaged_kms_helper = POLARIS_KMS_HELPER_PATH;
 
+  /// describe_running_binary() against this build's own DRM/KMS helper.
+  inline running_binary_t describe_running_binary(const std::filesystem::path &running, std::string_view packaged) {
+    return describe_running_binary(running, packaged, packaged_kms_helper);
+  }
+
+  /**
+   * @brief The sentence a report puts after "Polaris <version> is running from <path>."
+   *
+   * The packaged DRM/KMS helper is named as packaged. Before it was, a host running the helper read as
+   * running a stale copy that package updates never touch, which is the one thing it is not.
+   */
+  inline std::string running_binary_note(const running_binary_t &binary) {
+    if (binary.kms_helper) {
+      return "This is the packaged DRM/KMS helper from polaris-kms.";
+    }
+    if (binary.matches_package == std::optional<bool> {false}) {
+      return "That is not the packaged " + binary.packaged_path +
+             "; package updates do not change a copy, so refresh it from the package or remove the service drop-in after updating.";
+    }
+    if (binary.matches_package) {
+      return "This is the packaged binary.";
+    }
+    return {};
+  }
+
   /**
    * @brief The drop-in --enable-kms writes, and the only one it will remove.
    *
@@ -175,6 +246,14 @@ namespace platf::user_unit {
    * which --setup-host retires rather than fights.
    */
   inline constexpr std::string_view kms_drop_in_name = "20-polaris-kms.conf";
+
+  /**
+   * @brief Where --enable-kms leaves that drop-in while the account's session cannot execute the helper yet.
+   *
+   * systemd reads only `*.conf`, so under this name it points the service nowhere. A run of
+   * --setup-host after the next login turns it on, and --disable-kms removes it.
+   */
+  inline constexpr std::string_view kms_parked_drop_in_name = "20-polaris-kms.conf.disabled-until-relogin";
 
   /** @brief The group allowed to execute the helper, per the package's sysusers.d file. */
   inline constexpr std::string_view kms_group = "polaris-kms";
@@ -250,11 +329,12 @@ namespace platf::user_unit {
    */
   struct kms_teardown_t {
     std::filesystem::path drop_in;  ///< the drop-in to remove because it points the service at the copy; empty when none does
+    std::filesystem::path parked_drop_in;  ///< a drop-in --enable-kms parked until the next login; empty when there is none
     bool remove_guide_copy = false;  ///< the guide's copy is there to remove, and its capability leaves with it
     bool clear_binary_capability = false;  ///< the packaged binary carries cap_sys_admin
 
     bool empty() const {
-      return drop_in.empty() && !remove_guide_copy && !clear_binary_capability;
+      return drop_in.empty() && parked_drop_in.empty() && !remove_guide_copy && !clear_binary_capability;
     }
   };
 
@@ -262,16 +342,19 @@ namespace platf::user_unit {
     const exec_override_t &override,
     bool binary_holds_capability,
     bool guide_copy_exists,
-    const std::filesystem::path &guide_copy = std::filesystem::path {guide_runtime_copy}
+    const std::filesystem::path &guide_copy = std::filesystem::path {guide_runtime_copy},
+    const std::filesystem::path &parked_drop_in = {},
+    const std::filesystem::path &helper = std::filesystem::path {packaged_kms_helper}
   ) {
     kms_teardown_t plan;
     plan.clear_binary_capability = binary_holds_capability;
     plan.remove_guide_copy = guide_copy_exists;
+    // Left behind, a parked drop-in would turn capture back on at the next --setup-host.
+    plan.parked_drop_in = parked_drop_in;
     // Only a drop-in that points at a binary this feature put there is this feature's to remove:
     // the packaged helper, or the copy the old recipe had people make. Someone who pointed the
     // service at a build tree of their own is not running DRM/KMS capture, and their drop-in stays.
-    if (override.active() &&
-        (override.binary == guide_copy || override.binary == std::filesystem::path {packaged_kms_helper})) {
+    if (override.active() && (override.binary == guide_copy || override.binary == helper)) {
       plan.drop_in = override.drop_in;
     }
     return plan;
@@ -323,10 +406,15 @@ namespace platf::user_unit {
       return {};
     }
     if (override.binary == guide_copy) {
+      // --setup-host prints this only without the helper: with it installed, host setup moves the
+      // service off the copy and says so itself. So the way out comes first, and the refresh is what
+      // happens meanwhile.
       return "The polaris user service for [" + account + "] runs " + binary + " through " + drop_in +
-             ", a copy outside the package. Package updates do not change it: after every update, run\n"
+             ", a copy outside the package. Package updates do not change it. Install the polaris-kms package and run\n"
              "  sudo -H polaris --setup-host\n"
-             "which refreshes the copy and its DRM/KMS capability, or remove the drop-in to run the packaged binary again.\n";
+             "once: it moves the service onto the packaged helper, which updates keep current, and removes the copy.\n"
+             "Until then the same command refreshes the copy and its DRM/KMS capability when an update leaves it\n"
+             "behind. Or remove the drop-in to run the packaged binary again.\n";
     }
     if (override.binary == std::filesystem::path {packaged_kms_helper}) {
       // Nothing to warn about: this is the arrangement --enable-kms makes, and the package keeps

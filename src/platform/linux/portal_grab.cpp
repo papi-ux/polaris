@@ -129,8 +129,11 @@ namespace portal {
     // prefer_sdr (dynamicRange<=0). Reuse only when both match.
     bool prefer_hdr = false;
     bool prefer_sdr = false;
+    // The route the capture took, so a display that reuses it reports the route it is on.
+    platf::capture_route_t route;
 
     void clear_meta() {
+      route = {};
       prepared_token.reset();
       requested_width = 0;
       requested_height = 0;
@@ -255,24 +258,101 @@ namespace portal {
     }
   }
 
+  struct dmabuf_policy_note_t {
+    bool warning = false;
+    std::string text;
+  };
+
+  // What the portal says about DMA-BUF for this encoder before it looks at render nodes.
+  static std::optional<dmabuf_policy_note_t> dmabuf_policy_note(
+    platf::mem_type_e mem_type,
+    pipewire_capture::dmabuf_override_e override,
+    std::string_view source
+  ) {
+    const std::string at = "source=" + std::string {source};
+    if (override == pipewire_capture::dmabuf_override_e::force_cpu) {
+      return dmabuf_policy_note_t {false, "portal: portal_dmabuf_forced_off " + at + "; offering SHM only"};
+    }
+    if (mem_type == platf::mem_type_e::vaapi && override == pipewire_capture::dmabuf_override_e::allow_vaapi) {
+      return dmabuf_policy_note_t {
+        true,
+        "portal: vaapi_pipewire_dmabuf_explicitly_enabled " + at +
+          "; operator opted into an unvalidated path with no automatic stall fallback"
+      };
+    }
+    if (mem_type == platf::mem_type_e::vaapi) {
+      return dmabuf_policy_note_t {
+        false,
+        "portal: vaapi_pipewire_dmabuf_disabled_for_stability " + at +
+          "; offering SHM by default; set POLARIS_PORTAL_DMABUF=1 only on a host where this path is known to work"
+      };
+    }
+    // Vulkan Video on the portal always gets the RAM uploader (see make_avcodec_encode_device
+    // below), which reads a frame's CPU copy and has none to read from a DMA-BUF, so the offer
+    // stays closed on purpose until the portal can retire a failed DMA-BUF frame to that uploader.
+    // Say it is policy, and say the environment variable is VA-API's (#635).
+    constexpr std::string_view vulkan_until = ", until the portal can fall back when a DMA-BUF frame fails to import";
+    if (mem_type == platf::mem_type_e::vulkan && override == pipewire_capture::dmabuf_override_e::allow_vaapi) {
+      return dmabuf_policy_note_t {
+        true,
+        "portal: vulkan_pipewire_dmabuf_opt_in_is_vaapi_only " + at +
+          "; POLARIS_PORTAL_DMABUF=1 opts VA-API into DMA-BUF only, so Vulkan Video on the portal "
+          "stays on shared memory by policy" + std::string {vulkan_until}
+      };
+    }
+    if (mem_type == platf::mem_type_e::vulkan) {
+      return dmabuf_policy_note_t {
+        false,
+        "portal: vulkan_pipewire_dmabuf_disabled_by_policy " + at +
+          "; Vulkan Video on the portal stays on shared memory by policy, not for a missing build "
+          "feature" + std::string {vulkan_until}
+      };
+    }
+    return std::nullopt;
+  }
+
   static void log_dmabuf_policy(
     platf::mem_type_e mem_type,
     pipewire_capture::dmabuf_override_e override,
     std::string_view source
   ) {
-    if (override == pipewire_capture::dmabuf_override_e::force_cpu) {
-      BOOST_LOG(info) << "portal: portal_dmabuf_forced_off source="sv << source
-                      << "; offering SHM only"sv;
+    const auto note = dmabuf_policy_note(mem_type, override, source);
+    if (!note) {
+      return;
     }
-    else if (mem_type == platf::mem_type_e::vaapi && override == pipewire_capture::dmabuf_override_e::allow_vaapi) {
-      BOOST_LOG(warning) << "portal: vaapi_pipewire_dmabuf_explicitly_enabled source="sv << source
-                         << "; operator opted into an unvalidated path with no automatic stall fallback"sv;
-    }
-    else if (mem_type == platf::mem_type_e::vaapi) {
-      BOOST_LOG(info) << "portal: vaapi_pipewire_dmabuf_disabled_for_stability source="sv << source
-                      << "; offering SHM by default; set POLARIS_PORTAL_DMABUF=1 only on a host where this path is known to work"sv;
+    if (note->warning) {
+      BOOST_LOG(warning) << note->text;
+    } else {
+      BOOST_LOG(info) << note->text;
     }
   }
+
+  // The line for an encoder the portal has no DMA-BUF import path for. Vulkan Video has none on
+  // purpose and dmabuf_policy_note has already said so, so blaming the build would be wrong.
+  static std::string_view missing_import_path_line(platf::mem_type_e mem_type) {
+    if (mem_type == platf::mem_type_e::vulkan) {
+      return {};
+    }
+    return "portal: DMA-BUF disabled because this build lacks the encoder-specific import path"sv;
+  }
+
+#ifdef POLARIS_TESTS
+  std::string dmabuf_policy_log_for_tests(
+    platf::mem_type_e mem_type,
+    pipewire_capture::dmabuf_override_e override,
+    std::string_view source
+  ) {
+    const auto note = dmabuf_policy_note(mem_type, override, source);
+    if (!note) {
+      return {};
+    }
+    return (note->warning ? "warning " : "info ") + note->text;
+  }
+
+  std::string missing_import_path_log_for_tests(platf::mem_type_e mem_type) {
+    return std::string {missing_import_path_line(mem_type)};
+  }
+#endif
 
   // Encoder render node for DMA-BUF eligibility: the configured adapter_name
   // when it names a canonical render node, else the host's sole render node.
@@ -340,7 +420,9 @@ namespace portal {
     }
     log_dmabuf_policy(mem_type, dmabuf_override, "local_graph"sv);
     if (encoder_render_node && !encoder_import_supported) {
-      BOOST_LOG(info) << "portal: DMA-BUF disabled because this build lacks the encoder-specific import path"sv;
+      if (const auto line = missing_import_path_line(mem_type); !line.empty()) {
+        BOOST_LOG(info) << line;
+      }
     }
     if (may_use_dmabuf) {
 #ifdef POLARIS_BUILD_PYROWAVE
@@ -571,6 +653,89 @@ namespace portal {
   }
 #endif
 
+  /// How a local PipeWire node the portal backend asked for fared.
+  enum class local_node_e {
+    not_asked,
+    missing,  ///< the compositor offered nothing to attach to
+    failed,  ///< it did, and capture on it did not start
+    started,
+  };
+
+  /**
+   * The route a portal capture took, from how each local node it asked for fared. The gamescope
+   * node is asked for first and a KWin output second, and a ScreenCast is what is left. The
+   * fallback names the first node asked for and not taken, because that is the route this capture
+   * wanted; a node that was never asked for is no fallback.
+   */
+  static platf::capture_route_t portal_capture_route(local_node_e gamescope, local_node_e kwin) {
+    platf::capture_route_t route;
+    route.opened = "portal";
+    if (gamescope == local_node_e::started) {
+      route.route = platf::k_capture_route_portal_gamescope_node;
+      return route;
+    }
+    route.route = kwin == local_node_e::started ? platf::k_capture_route_portal_kwin_node :
+                                                 platf::k_capture_route_portal_screencast;
+    if (gamescope == local_node_e::missing) {
+      route.fallback_reason = platf::k_capture_route_fallback_gamescope_node_missing;
+    }
+    else if (gamescope == local_node_e::failed) {
+      route.fallback_reason = platf::k_capture_route_fallback_gamescope_node_failed;
+    }
+    else if (kwin == local_node_e::missing) {
+      route.fallback_reason = platf::k_capture_route_fallback_kwin_node_unavailable;
+    }
+    else if (kwin == local_node_e::failed) {
+      route.fallback_reason = platf::k_capture_route_fallback_kwin_node_failed;
+    }
+    return route;
+  }
+
+#ifdef POLARIS_BUILD_WAYLAND
+  /**
+   * How the KWin output fared when KWin opened no output session for it. A host with no Wayland
+   * display, or whose compositor is not KWin, has no KWin output to ask for, so its ScreenCast is
+   * the route it always had and no fallback. A KWin that withheld its screencast protocol, or
+   * whose output stream did not start, is one.
+   */
+  static local_node_e kwin_node_without_session(kwingrab::start_failure_e failure) {
+    switch (failure) {
+      case kwingrab::start_failure_e::no_wayland:
+      case kwingrab::start_failure_e::not_kwin:
+        return local_node_e::not_asked;
+      case kwingrab::start_failure_e::protocol_withheld:
+      case kwingrab::start_failure_e::stream_failed:
+        return local_node_e::missing;
+    }
+    return local_node_e::missing;
+  }
+#endif
+
+#ifdef POLARIS_TESTS
+  platf::capture_route_t portal_capture_route_for_tests(std::string_view gamescope, std::string_view kwin) {
+    const auto outcome = [](std::string_view name) {
+      if (name == "missing") return local_node_e::missing;
+      if (name == "failed") return local_node_e::failed;
+      if (name == "started") return local_node_e::started;
+      return local_node_e::not_asked;
+    };
+    return portal_capture_route(outcome(gamescope), outcome(kwin));
+  }
+
+  #ifdef POLARIS_BUILD_WAYLAND
+  platf::capture_route_t portal_route_without_kwin_session_for_tests(std::string_view gamescope, std::string_view failure) {
+    const auto gamescope_node = gamescope == "missing" ? local_node_e::missing :
+                                gamescope == "failed"  ? local_node_e::failed :
+                                                         local_node_e::not_asked;
+    auto why = kwingrab::start_failure_e::stream_failed;
+    if (failure == "no_wayland") why = kwingrab::start_failure_e::no_wayland;
+    if (failure == "not_kwin") why = kwingrab::start_failure_e::not_kwin;
+    if (failure == "protocol_withheld") why = kwingrab::start_failure_e::protocol_withheld;
+    return portal_capture_route(gamescope_node, kwin_node_without_session(why));
+  }
+  #endif
+#endif
+
   static std::shared_ptr<pipewire_capture::capture_t> ensure_global_capture(
     int width,
     int height,
@@ -578,7 +743,8 @@ namespace portal {
     int client_dynamic_range,
     const capture_generation::identity_t &generation,
     AVRational requested_rate,
-    const std::shared_ptr<const void> &prepared_token = {}
+    const std::shared_ptr<const void> &prepared_token = {},
+    platf::capture_route_t *route_out = nullptr
   ) {
     if (!portal_capture_backend_allowed(generation.capture_backend)) {
       BOOST_LOG(error) << "portal: capture generation backend ["sv << generation.capture_backend
@@ -614,6 +780,7 @@ namespace portal {
           // A normal capture call atomically adopts the preparation. A later
           // expiry of its HTTP launch must not stop an active video thread.
           g_media.prepared_token = prepared_token;
+          if (route_out) *route_out = g_media.route;
           return g_media.capture;
         }
 
@@ -650,6 +817,9 @@ namespace portal {
       }
 
       g_media.prepared_token = prepared_token;
+      // Which local node this capture asked for and how each fared, which names its route.
+      auto gamescope_node = local_node_e::not_asked;
+      auto kwin_node = local_node_e::not_asked;
 
       // W3/W5 gamescopegrab: prefer session-graph Video/Source (media.name=gamescope)
       // without private portal ScreenCast when linux_stream_mode=gamescope_stream.
@@ -678,11 +848,17 @@ namespace portal {
             g_media.prefer_hdr = want_prefer_hdr;
             g_media.prefer_sdr = want_prefer_sdr;
             capture = g_media.capture;
+            gamescope_node = local_node_e::started;
             // Skip portal session setup; negotiation wait continues below.
           }
           else {
             BOOST_LOG(info) << "portal: gamescopegrab start failed; falling back to portal ScreenCast"sv;
+            gamescope_node = local_node_e::failed;
           }
+        }
+        else {
+          // Falls through to the portal, as it always did; the route now says so.
+          gamescope_node = local_node_e::missing;
         }
       }
 
@@ -703,7 +879,8 @@ namespace portal {
           portal_like_capture &&
           kwingrab::prefer_for_generation(generation)) {
         g_media.kwin.reset();
-        if (auto kwin_session = kwingrab::start_output_session(generation.requested_output_name)) {
+        auto kwin_failure = kwingrab::start_failure_e::stream_failed;
+        if (auto kwin_session = kwingrab::start_output_session(generation.requested_output_name, &kwin_failure)) {
           const auto &src = kwin_session->source();
           if (auto local = start_local_pw_capture(
                 src.node_id,
@@ -727,9 +904,11 @@ namespace portal {
             g_media.prefer_hdr = want_prefer_hdr;
             g_media.prefer_sdr = want_prefer_sdr;
             capture = g_media.capture;
+            kwin_node = local_node_e::started;
           }
           else {
             BOOST_LOG(error) << "portal: kwingrab PipeWire start failed"sv;
+            kwin_node = local_node_e::failed;
             kwin_session.reset();
             if (kwingrab::require_for_generation(generation)) {
               BOOST_LOG(error) << "portal: host virtual capture requires output-pinned KWin capture; refusing generic portal fallback"sv;
@@ -740,6 +919,7 @@ namespace portal {
         }
         else {
           BOOST_LOG(error) << "portal: kwingrab unavailable"sv;
+          kwin_node = kwin_node_without_session(kwin_failure);
           if (kwingrab::require_for_generation(generation)) {
             BOOST_LOG(error) << "portal: host virtual capture requires output-pinned KWin capture; refusing generic portal fallback"sv;
             return nullptr;
@@ -775,9 +955,11 @@ namespace portal {
         const bool encoder_import_supported = encoder_dmabuf_import_compiled(mem_type);
         log_dmabuf_policy(mem_type, dmabuf_override, "portal_remote"sv);
         if (dmabuf_override == pipewire_capture::dmabuf_override_e::force_cpu ||
-            (mem_type == platf::mem_type_e::vaapi && !allow_vaapi)) {
+            (mem_type == platf::mem_type_e::vaapi && !allow_vaapi) ||
+            mem_type == platf::mem_type_e::vulkan) {
           // The policy log above records whether this is an operator-forced or
-          // default stability containment decision.
+          // default stability containment decision, or Vulkan Video's shared
+          // memory policy, which no render node below could change.
         } else if (!session->capture_render_node) {
           BOOST_LOG(info) << "portal: DMA-BUF disabled because the portal stream did not provide an explicit capture render node"sv;
         } else if (!encoder_render_node) {
@@ -786,7 +968,9 @@ namespace portal {
           BOOST_LOG(info) << "portal: DMA-BUF disabled because capture render node ["sv << *session->capture_render_node
                           << "] does not match encoder adapter ["sv << *encoder_render_node << ']';
         } else if (!encoder_import_supported) {
-          BOOST_LOG(info) << "portal: DMA-BUF disabled because this build lacks the encoder-specific import path"sv;
+          if (const auto line = missing_import_path_line(mem_type); !line.empty()) {
+            BOOST_LOG(info) << line;
+          }
         } else if (mem_type != platf::mem_type_e::cuda &&
                    mem_type != platf::mem_type_e::vulkan_pyrowave &&
                    !(allow_vaapi && mem_type == platf::mem_type_e::vaapi)) {
@@ -925,6 +1109,7 @@ namespace portal {
         g_media.capture = new_capture;
         capture = g_media.capture;
       }  // portal ScreenCast path
+      g_media.route = portal_capture_route(gamescope_node, kwin_node);
     }
 
     // The capture transport determines whether the encoder factory must use
@@ -948,6 +1133,7 @@ namespace portal {
         g_media.reset_all();
         return nullptr;
       }
+      if (route_out) *route_out = g_media.route;
       return g_media.capture;
     }
   }
@@ -1067,10 +1253,14 @@ namespace portal {
         cage_configured = generation_.use_cage_compositor;
 #endif
         if (!cage_configured) {
-          auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range, generation_, requested_rate);
+          platf::capture_route_t route;
+          auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range, generation_, requested_rate, {}, &route);
           if (!cap) {
             return -1;
           }
+          // What initialization opened. A later capture() that has to start the capture again
+          // does not change it: this is the route the display came up on.
+          capture_route = std::move(route);
 
 
           const auto info = cap->frame_info();
@@ -1086,6 +1276,9 @@ namespace portal {
           auto start = session_media::begin_start();
           (void) start;
           reap_portal_cleanup();
+          // Direct screencopy from Polaris' own labwc: the portal backend opened, and no portal ran.
+          capture_route.opened = "cage";
+          capture_route.route = "cage";
           BOOST_LOG(info) << "portal: Cage/labwc active — skipping portal, will use direct screencopy"sv;
         }
       } else {

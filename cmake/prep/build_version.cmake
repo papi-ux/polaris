@@ -73,6 +73,17 @@ else()
     endif()
 endif()
 
+# A prerelease label from the release tag, beta.N or rc.N, or nothing for a stable build. It changes
+# what the host reports and what each package format calls the build. PROJECT_VERSION stays the plain
+# release number, because it also names the installed binary, /usr/bin/polaris-X.Y.Z, which the
+# SteamOS namcap review pins, and the AppStream release.
+set(POLARIS_PRERELEASE_LABEL "")
+if(DEFINED ENV{POLARIS_PRERELEASE_LABEL})
+    set(POLARIS_PRERELEASE_LABEL "$ENV{POLARIS_PRERELEASE_LABEL}")
+endif()
+include(${CMAKE_CURRENT_LIST_DIR}/prerelease_versions.cmake)
+polaris_prerelease_versions("${PROJECT_VERSION}" "${POLARIS_PRERELEASE_LABEL}")
+
 # set date variables
 set(PROJECT_YEAR "1990")
 set(PROJECT_MONTH "01")
@@ -134,9 +145,16 @@ message("CMAKE_PROJECT_VERSION_PATCH: ${CMAKE_PROJECT_VERSION_PATCH}")
 message("PROJECT_YEAR: ${PROJECT_YEAR}")
 message("PROJECT_MONTH: ${PROJECT_MONTH}")
 message("PROJECT_DAY: ${PROJECT_DAY}")
+message("POLARIS_PRERELEASE_LABEL: ${POLARIS_PRERELEASE_LABEL}")
+message("POLARIS_RUNTIME_VERSION: ${POLARIS_RUNTIME_VERSION}")
+message("POLARIS_RPM_PACKAGE_VERSION: ${POLARIS_RPM_PACKAGE_VERSION}")
+message("POLARIS_DEB_PACKAGE_VERSION: ${POLARIS_DEB_PACKAGE_VERSION}")
+message("POLARIS_PACMAN_PKGVER: ${POLARIS_PACMAN_PKGVER}")
 
 list(APPEND POLARIS_DEFINITIONS PROJECT_NAME="${PROJECT_NAME}")
-list(APPEND POLARIS_DEFINITIONS PROJECT_VERSION="${PROJECT_VERSION}")
+# The C++ PROJECT_VERSION is the runtime version, label included: what /api/config, the update
+# status, the capabilities reply, the log and crash reports all say this host is.
+list(APPEND POLARIS_DEFINITIONS PROJECT_VERSION="${POLARIS_RUNTIME_VERSION}")
 list(APPEND POLARIS_DEFINITIONS PROJECT_VERSION_MAJOR="${PROJECT_VERSION_MAJOR}")
 list(APPEND POLARIS_DEFINITIONS PROJECT_VERSION_MINOR="${PROJECT_VERSION_MINOR}")
 list(APPEND POLARIS_DEFINITIONS PROJECT_VERSION_PATCH="${PROJECT_VERSION_PATCH}")

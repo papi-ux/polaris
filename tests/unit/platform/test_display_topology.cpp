@@ -94,3 +94,15 @@ TEST(DisplayTopologyModeReadBack, RejectsADegenerateModeSize) {
 
   EXPECT_TRUE(display_topology::current_output_mode(zero_size, "DP-1").empty());
 }
+
+TEST(DisplayTopologyHostPortal, ReadsTheCaptureSettingTheWayDispatchDoes) {
+  // A dongle capturing through the host portal keeps the streaming output in SDR and the desk
+  // visible until the picker is approved. A host set to kwin captures through the same portal, and
+  // read as a literal it kept HDR on and blanked the desk the picker needs.
+  for (const auto capture : {"", "auto", "portal", "kwin"}) {
+    EXPECT_TRUE(display_topology::captures_through_host_portal(capture)) << "[" << capture << "]";
+  }
+  for (const auto capture : {"kms", "drm", "wlr"}) {
+    EXPECT_FALSE(display_topology::captures_through_host_portal(capture)) << "[" << capture << "]";
+  }
+}

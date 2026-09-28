@@ -4,14 +4,26 @@
  */
 
 #include <src/platform/linux/stream_display_policy.h>
+#include <src/platform/linux/game_mode_host.h>
+#include <src/platform/linux/stream_path.h>
 #include <src/platform/linux/virtual_display.h>
 #include <src/platform/linux/display_topology.h>
 #include <src/config.h>
+#include <src/video.h>
+#include <src/logging.h>
 #include <src/nvhttp.h>
 #include <src/platform/common.h>
+#include <src/stream_stats.h>
+#include <src/utility.h>
+#include <src/verified_action.h>
+#include <src/video.h>
+
+#include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cstdlib>
+#include <initializer_list>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -22,10 +34,31 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <boost/core/null_deleter.hpp>
+#include <boost/log/core.hpp>
+#include <boost/log/sinks/sync_frontend.hpp>
+#include <boost/log/sinks/text_ostream_backend.hpp>
+#include <boost/smart_ptr/make_shared_object.hpp>
+#include <boost/smart_ptr/shared_ptr.hpp>
+
+namespace platf {
+  std::string capture_backend_dispatch_for_tests(
+    std::string_view capture_backend,
+    bool nvfbc_available,
+    bool wayland_available,
+    bool portal_available,
+    bool kms_available,
+    bool x11_available,
+    bool cuda_memory
+  );
+  void log_capture_mode_override();
+}
+
 namespace {
   class ScopedPrivateRuntimePath {
   public:
-    ScopedPrivateRuntimePath() {
+    /// PATH holds only these stand-ins, labwc and wlr-randr unless a test names others.
+    explicit ScopedPrivateRuntimePath(std::initializer_list<const char *> binaries = {"labwc", "wlr-randr"}) {
       if (const char *current = std::getenv("PATH")) {
         had_previous = true;
         previous = current;
@@ -38,7 +71,7 @@ namespace {
       }
       directory = created;
 
-      for (const char *binary : {"labwc", "wlr-randr"}) {
+      for (const char *binary : binaries) {
         const auto path = std::filesystem::path {directory} / binary;
         std::ofstream script {path};
         script << "#!/bin/sh\nexit 0\n";
@@ -677,6 +710,67 @@ TEST(StreamDisplayPolicyTests, AGameModeSessionHoldsTheConfiguredModeAndGivesItB
   EXPECT_EQ(config::video.capture, "wlr");
   EXPECT_TRUE(stream_display_policy::game_mode_held_selection().empty());
   EXPECT_EQ(stream_display_policy::reconcile_game_mode(false, false), game_mode_reconcile_e::unchanged);
+}
+
+// #635: Auto tries Vulkan Video first on AMD Gamescope Stream and on no other host mode, Steam Game
+// Mode's own screen included. Auto reads the route from the state a mode writes when it is loaded or
+// applied, so walk every mode through the load, and Gamescope Stream through the Game Mode hold.
+TEST(StreamDisplayPolicyTests, OnlyGamescopeStreamPutsAmdAutoOnTheGamescopeRoute) {
+  using stream_display_policy::game_mode_reconcile_e;
+  ScopedPrivateRuntimePath runtime_path({"labwc", "wlr-randr", "gamescope"});
+  LinuxDisplayPolicyGuard guard;
+  auto &d = config::video.linux_display;
+  const auto codecs = std::pair {config::video.hevc_mode, config::video.av1_mode};
+  config::video.hevc_mode = 0;
+  config::video.av1_mode = 0;
+  auto restore_codecs = util::fail_guard([codecs] {
+    config::video.hevc_mode = codecs.first;
+    config::video.av1_mode = codecs.second;
+  });
+  // The plan the host makes, for an AMD card, from the state the mode wrote.
+  const auto amd_policy = [] {
+    return video::planned_encoder_selection_info_for_tests("amdgpu").policy;
+  };
+
+  config::video.capture.clear();
+  for (const auto &path : stream_path::registry()) {
+    d.stream_mode = std::string {path.id};
+    stream_display_policy::normalize_config_from_load();
+    const std::string expected =
+      path.id == stream_path::k_gamescope_stream              ? "amd_gamescope_vulkan_ram" :
+      path.runtime == stream_path::runtime_kind_e::LABWC ? "amd_private_vulkan_live_probe" :
+                                                           "amd_established_desktop";
+    EXPECT_EQ(amd_policy(), expected) << path.id;
+  }
+
+  std::string error;
+  ASSERT_TRUE(stream_display_policy::apply_selection("gamescope_stream", error)) << error;
+  EXPECT_EQ(amd_policy(), "amd_gamescope_vulkan_ram");
+
+  ASSERT_EQ(stream_display_policy::reconcile_game_mode(true, false), game_mode_reconcile_e::entered);
+  EXPECT_TRUE(platf::game_mode_host::streams_session_screen(d.stream_mode, d.use_cage_compositor, false, true))
+    << "the hold is the Game Mode screen route";
+  EXPECT_EQ(amd_policy(), "amd_established_desktop") << "Game Mode's screen is not Gamescope Stream";
+
+  ASSERT_EQ(stream_display_policy::reconcile_game_mode(false, false), game_mode_reconcile_e::left);
+  EXPECT_EQ(amd_policy(), "amd_gamescope_vulkan_ram") << "the mode comes back when Game Mode ends";
+
+  // Gamescope Stream loaded with a capture it keeps and the portal does not serve stays on VA-API;
+  // unset and kwin are the portal.
+  for (const auto &[capture, expected] : std::initializer_list<std::pair<const char *, const char *>> {
+         {"kms", "amd_established_desktop"},
+         {"wlr", "amd_established_desktop"},
+         {"x11", "amd_established_desktop"},
+         {"auto", "amd_established_desktop"},
+         {"", "amd_gamescope_vulkan_ram"},
+         {"portal", "amd_gamescope_vulkan_ram"},
+         {"kwin", "amd_gamescope_vulkan_ram"},
+       }) {
+    d.stream_mode = "gamescope_stream";
+    config::video.capture = capture;
+    stream_display_policy::normalize_config_from_load();
+    EXPECT_EQ(amd_policy(), expected) << "capture=" << capture;
+  }
 }
 
 TEST(StreamDisplayPolicyTests, AGameModeSessionLeavesAMirrorHostAndAReloadedConfigAlone) {
@@ -1388,4 +1482,1222 @@ TEST(StreamDisplayPolicyTests, DesktopPathReportsHonestPortalOrHostBackend) {
   EXPECT_EQ(resolved.selection, "desktop_display");
   EXPECT_FALSE(resolved.backend_name.empty());
   EXPECT_NE(resolved.backend_name, "labwc");
+}
+
+namespace {
+  /// What an operator reads in the log, severity included: whether a line is a warning is the point.
+  class CaptureLogCapture {
+  public:
+    CaptureLogCapture():
+        stream_ {boost::make_shared<std::ostringstream>()} {
+      auto backend = boost::make_shared<boost::log::sinks::text_ostream_backend>();
+      backend->add_stream(boost::shared_ptr<std::ostream> {stream_.get(), boost::null_deleter {}});
+      backend->auto_flush(true);
+      sink_ = boost::make_shared<sink_t>(backend);
+      sink_->set_formatter(&logging::formatter);
+      boost::log::core::get()->add_sink(sink_);
+    }
+
+    ~CaptureLogCapture() {
+      boost::log::core::get()->remove_sink(sink_);
+    }
+
+    CaptureLogCapture(const CaptureLogCapture &) = delete;
+    CaptureLogCapture &operator=(const CaptureLogCapture &) = delete;
+
+    [[nodiscard]] std::string text() const {
+      return stream_->str();
+    }
+
+  private:
+    using sink_t = boost::log::sinks::synchronous_sink<boost::log::sinks::text_ostream_backend>;
+    boost::shared_ptr<std::ostringstream> stream_;
+    boost::shared_ptr<sink_t> sink_;
+  };
+
+  /// Every captured line that mentions needle, so another thread's logging cannot pass for ours.
+  std::string lines_with(const std::string &logged, std::string_view needle) {
+    std::istringstream input {logged};
+    std::string out;
+    for (std::string line; std::getline(input, line);) {
+      if (line.find(needle) != std::string::npos) {
+        out += line;
+        out += '\n';
+      }
+    }
+    return out;
+  }
+
+  const std::vector<std::string> k_capture_values {"", "auto", "wlr", "wlroots", "portal", "kms", "kwin", "drm", "nvfbc", "x11"};
+  const std::vector<std::string> k_stream_modes {
+    "headless_stream",
+    "windowed_stream",
+    "desktop_display",
+    "host_virtual_display",
+    "desktop_takeover",
+    "gamescope_stream",
+    "headless_dongle",
+  };
+
+  bool capture_is_auto(std::string_view capture) {
+    return capture.empty() || capture == "auto";
+  }
+
+  /// kwin replaced by portal is the same backend under another name, not a rewrite.
+  bool same_backend(std::string_view a, std::string_view b) {
+    return stream_display_policy::canonical_capture_backend(a) == stream_display_policy::canonical_capture_backend(b);
+  }
+
+  /**
+   * Make value the capture setting polaris.conf was loaded with, and leave the live configuration
+   * as the test set it. A rewrite names an explicit choice by this, not by the live value.
+   */
+  void set_loaded_capture_setting(std::string value) {
+    const auto linux_display = config::video.linux_display;
+    const auto capture = config::video.capture;
+    const auto output_name = config::video.output_name;
+    config::video.linux_display.stream_mode = "desktop_display";
+    config::video.capture = std::move(value);
+    stream_display_policy::normalize_config_from_load();
+    {
+      CaptureLogCapture quiet;
+      stream_display_policy::log_config_load_notes();
+    }
+    config::video.linux_display = linux_display;
+    config::video.capture = capture;
+    config::video.output_name = output_name;
+  }
+
+  /// The loaded setting is process state too, so a test that sets it puts the old one back.
+  struct LoadedCaptureGuard {
+    std::string previous {stream_display_policy::loaded_capture_setting()};
+
+    LoadedCaptureGuard() = default;
+    LoadedCaptureGuard(const LoadedCaptureGuard &) = delete;
+    LoadedCaptureGuard &operator=(const LoadedCaptureGuard &) = delete;
+
+    ~LoadedCaptureGuard() {
+      set_loaded_capture_setting(previous);
+    }
+  };
+}  // namespace
+
+TEST(StreamDisplayPolicyTests, CaptureModeOverrideNamesTheExplicitChoiceAModeSetsAside) {
+  using stream_display_policy::capture_mode_override;
+
+  // capture = kms in windowed_stream streams through wlr, and until now only the rewritten value
+  // reached the log, so the host read as being on the KMS path.
+  const auto windowed = capture_mode_override("kms", "windowed_stream", true, false, false);
+  ASSERT_TRUE(windowed.has_value());
+  EXPECT_EQ(windowed->configured, "kms");
+  EXPECT_EQ(windowed->effective, "wlr");
+  EXPECT_EQ(windowed->reason, stream_display_policy::k_capture_override_private_compositor);
+
+  // Auto asked the host to choose, so the host choosing is not a rewrite. Nor is a choice that stands.
+  EXPECT_FALSE(capture_mode_override("", "headless_stream", true, false, false).has_value());
+  EXPECT_FALSE(capture_mode_override("auto", "headless_stream", true, false, false).has_value());
+  EXPECT_FALSE(capture_mode_override("wlr", "headless_stream", true, false, false).has_value());
+  EXPECT_FALSE(capture_mode_override("portal", "desktop_display", false, false, false).has_value());
+  EXPECT_FALSE(capture_mode_override("kms", "desktop_display", false, false, false).has_value());
+
+  // #739: a substituted backend is asked for through auto.
+  const auto substituted = capture_mode_override("wlr", "desktop_display", false, true, false);
+  ASSERT_TRUE(substituted.has_value());
+  EXPECT_EQ(substituted->configured, "wlr");
+  EXPECT_EQ(substituted->effective, "");
+  EXPECT_EQ(substituted->reason, stream_display_policy::k_capture_override_substituted);
+
+  // An output the generation owns keeps the configured backend through a substitution, because
+  // auto cannot address it. Without that ownership the same substitution rewrites it.
+  EXPECT_FALSE(capture_mode_override("portal", "host_virtual_display", false, true, true).has_value());
+  const auto unowned = capture_mode_override("portal", "host_virtual_display", false, true, false);
+  ASSERT_TRUE(unowned.has_value());
+  EXPECT_EQ(unowned->effective, "");
+  EXPECT_EQ(unowned->reason, stream_display_policy::k_capture_override_substituted);
+  // The private compositor wins over an owned output: nothing else can capture it.
+  const auto owned_private = capture_mode_override("portal", "headless_stream", true, false, true);
+  ASSERT_TRUE(owned_private.has_value());
+  EXPECT_EQ(owned_private->effective, "wlr");
+
+  // Gamescope keeps the configured backend, so a substitution there rewrites nothing.
+  EXPECT_FALSE(capture_mode_override("portal", "gamescope_stream", false, true, false).has_value());
+
+  // An alias is an explicit choice like any other.
+  const auto drm = capture_mode_override("drm", "headless_stream", true, false, false);
+  ASSERT_TRUE(drm.has_value());
+  EXPECT_EQ(drm->configured, "drm");
+  EXPECT_EQ(drm->effective, "wlr");
+}
+
+TEST(StreamDisplayPolicyTests, CaptureModeOverrideNeverDisagreesWithCaptureForMode) {
+  using stream_display_policy::capture_for_mode;
+  using stream_display_policy::capture_mode_override;
+
+  for (const auto &capture : k_capture_values) {
+    for (const auto &mode : k_stream_modes) {
+      for (const bool cage : {false, true}) {
+        for (const bool substitution : {false, true}) {
+          for (const bool exact : {false, true}) {
+            const auto effective = capture_for_mode(capture, mode, cage, substitution, exact);
+            const auto override = capture_mode_override(capture, mode, cage, substitution, exact);
+            const auto where = "capture=[" + capture + "] mode=[" + mode + "] cage=" + std::to_string(cage) +
+                               " substitution=" + std::to_string(substitution) + " exact=" + std::to_string(exact);
+            if (override) {
+              EXPECT_EQ(override->configured, capture) << where;
+              EXPECT_EQ(override->effective, effective) << where;
+              EXPECT_FALSE(capture_is_auto(capture)) << where;
+              EXPECT_FALSE(override->reason.empty()) << where;
+            } else {
+              EXPECT_TRUE(capture_is_auto(capture) || same_backend(effective, capture))
+                << where << " rewrote the configured backend to [" << effective << "] without saying so";
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(StreamDisplayPolicyTests, CurrentModeOverrideReadsWhatCurrentModeCaptureReads) {
+  LinuxDisplayPolicyGuard guard;
+  LoadedCaptureGuard loaded_guard;
+  struct SubstitutionGuard {
+    ~SubstitutionGuard() {
+      platf::set_capture_backend_substitution_for_tests("");
+    }
+  } substitution_guard;
+  auto &d = config::video.linux_display;
+  set_loaded_capture_setting("kms");
+  d.stream_mode = "windowed_stream";
+  d.headless_mode = false;
+  d.use_cage_compositor = true;
+  config::video.capture = "kms";
+  platf::set_capture_backend_substitution_for_tests("");
+
+  const auto cage = stream_display_policy::capture_mode_override_for_current_mode();
+  ASSERT_TRUE(cage.has_value());
+  EXPECT_EQ(cage->effective, stream_display_policy::capture_for_current_mode());
+
+  set_loaded_capture_setting("portal");
+  d.stream_mode = "host_virtual_display";
+  d.use_cage_compositor = false;
+  config::video.capture = "portal";
+  platf::set_capture_backend_substitution_for_tests("portal -> kms");
+  const auto unowned = stream_display_policy::capture_mode_override_for_current_mode();
+  ASSERT_TRUE(unowned.has_value());
+  EXPECT_EQ(unowned->reason, stream_display_policy::k_capture_override_substituted);
+  EXPECT_FALSE(stream_display_policy::capture_mode_override_for_current_mode(true).has_value())
+    << "an owned output keeps the configured backend";
+}
+
+TEST(StreamDisplayPolicyTests, SessionTransitionOverrideNamesTheExplicitChoiceItDiscards) {
+  using stream_display_policy::capture_session_transition_override;
+
+  // A Gamescope or dongle session forces portal even over an explicit kms, which apply and load keep.
+  const auto gamescope = capture_session_transition_override("desktop_display", "gamescope_stream", "kms");
+  ASSERT_TRUE(gamescope.has_value());
+  EXPECT_EQ(gamescope->configured, "kms");
+  EXPECT_EQ(gamescope->effective, "portal");
+  EXPECT_EQ(gamescope->reason, stream_display_policy::k_capture_override_gamescope_session);
+
+  const auto dongle = capture_session_transition_override("desktop_display", "headless_dongle", "kms");
+  ASSERT_TRUE(dongle.has_value());
+  EXPECT_EQ(dongle->effective, "portal");
+  EXPECT_EQ(dongle->reason, stream_display_policy::k_capture_override_dongle_session);
+
+  // Mirror Desktop clears an explicit wlroots choice so desktop discovery can pick.
+  for (const auto capture : {"wlr", "wlroots"}) {
+    const auto mirror = capture_session_transition_override("headless_stream", "desktop_display", capture);
+    ASSERT_TRUE(mirror.has_value()) << capture;
+    EXPECT_EQ(mirror->configured, capture);
+    EXPECT_EQ(mirror->effective, "");
+    EXPECT_EQ(mirror->reason, stream_display_policy::k_capture_override_desktop_discovery);
+  }
+
+  const auto private_session = capture_session_transition_override("desktop_display", "headless_stream", "kms");
+  ASSERT_TRUE(private_session.has_value());
+  EXPECT_EQ(private_session->effective, "wlr");
+  EXPECT_EQ(private_session->reason, stream_display_policy::k_capture_override_private_compositor);
+
+  // Auto stays auto, compatible choices stand, and no transition means no override.
+  EXPECT_FALSE(capture_session_transition_override("headless_stream", "desktop_display", "auto").has_value());
+  EXPECT_FALSE(capture_session_transition_override("desktop_display", "headless_stream", "").has_value());
+  EXPECT_FALSE(capture_session_transition_override("desktop_display", "gamescope_stream", "").has_value());
+  EXPECT_FALSE(capture_session_transition_override("headless_stream", "desktop_display", "kms").has_value());
+  EXPECT_FALSE(capture_session_transition_override("desktop_display", "gamescope_stream", "portal").has_value());
+  EXPECT_FALSE(capture_session_transition_override("headless_stream", "headless_stream", "kms").has_value());
+}
+
+TEST(StreamDisplayPolicyTests, SessionTransitionOverrideNeverDisagreesWithTheTransition) {
+  using stream_display_policy::capture_for_session_transition;
+  using stream_display_policy::capture_session_transition_override;
+
+  for (const auto &configured : k_stream_modes) {
+    for (const auto &session : k_stream_modes) {
+      for (const auto &capture : k_capture_values) {
+        const auto effective = capture_for_session_transition(configured, session, capture);
+        const auto override = capture_session_transition_override(configured, session, capture);
+        const auto where = configured + " -> " + session + " capture=[" + capture + "]";
+        if (override) {
+          EXPECT_EQ(override->configured, capture) << where;
+          EXPECT_EQ(override->effective, effective) << where;
+          EXPECT_FALSE(capture_is_auto(capture)) << where;
+        } else {
+          EXPECT_TRUE(capture_is_auto(capture) || same_backend(effective, capture))
+            << where << " rewrote the configured backend to [" << effective << "] without saying so";
+        }
+      }
+    }
+  }
+}
+
+TEST(StreamDisplayPolicyTests, HostVirtualDisplayOverrideNamesTheBackendsCapture) {
+  using stream_display_policy::capture_for_host_virtual_display_backend;
+  using stream_display_policy::capture_host_virtual_display_override;
+  using virtual_display::backend_e;
+
+  const auto evdi = capture_host_virtual_display_override(backend_e::EVDI, "kms");
+  ASSERT_TRUE(evdi.has_value());
+  EXPECT_EQ(evdi->configured, "kms");
+  EXPECT_EQ(evdi->effective, "portal");
+  EXPECT_EQ(evdi->reason, stream_display_policy::k_capture_override_virtual_display_backend);
+
+  const auto wlr = capture_host_virtual_display_override(backend_e::WAYLAND_WLR, "portal");
+  ASSERT_TRUE(wlr.has_value());
+  EXPECT_EQ(wlr->effective, "wlr");
+
+  EXPECT_FALSE(capture_host_virtual_display_override(backend_e::EVDI, "").has_value());
+  EXPECT_FALSE(capture_host_virtual_display_override(backend_e::EVDI, "kwin").has_value())
+    << "kwin is the portal under another name";
+  EXPECT_FALSE(capture_host_virtual_display_override(backend_e::KWIN_VIRTUAL_OUTPUT, "portal").has_value());
+  EXPECT_FALSE(capture_host_virtual_display_override(backend_e::NONE, "kms").has_value());
+
+  for (const auto backend : {backend_e::NONE, backend_e::EVDI, backend_e::WAYLAND_WLR,
+                             backend_e::KSCREEN_DOCTOR, backend_e::KWIN_VIRTUAL_OUTPUT}) {
+    for (const auto &capture : k_capture_values) {
+      const auto effective = capture_for_host_virtual_display_backend(backend, capture);
+      const auto override = capture_host_virtual_display_override(backend, capture);
+      const auto where = std::string {virtual_display::backend_name(backend)} + " capture=[" + capture + "]";
+      if (override) {
+        EXPECT_EQ(override->effective, effective) << where;
+        EXPECT_FALSE(capture_is_auto(capture)) << where;
+      } else {
+        EXPECT_TRUE(capture_is_auto(capture) || same_backend(effective, capture)) << where;
+      }
+    }
+  }
+}
+
+TEST(StreamDisplayPolicyTests, ACaptureOverrideLineNamesModeConfiguredEffectiveAndReason) {
+  using stream_display_policy::capture_override_t;
+  using stream_display_policy::describe_capture_override;
+
+  const auto windowed = describe_capture_override(
+    capture_override_t {"kms", "wlr", std::string {stream_display_policy::k_capture_override_private_compositor}},
+    "windowed_stream"
+  );
+  EXPECT_NE(windowed.find("capture override:"), std::string::npos) << windowed;
+  EXPECT_NE(windowed.find("[windowed_stream]"), std::string::npos) << windowed;
+  EXPECT_NE(windowed.find("[kms]"), std::string::npos) << windowed;
+  EXPECT_NE(windowed.find("[wlr]"), std::string::npos) << windowed;
+  EXPECT_NE(windowed.find("labwc"), std::string::npos) << windowed;
+
+  const auto substituted = describe_capture_override(
+    capture_override_t {"wlr", "", std::string {stream_display_policy::k_capture_override_substituted}},
+    "desktop_display"
+  );
+  EXPECT_NE(substituted.find("[auto]"), std::string::npos) << "an empty backend is auto: " << substituted;
+
+  for (const auto reason : {
+         stream_display_policy::k_capture_override_private_compositor,
+         stream_display_policy::k_capture_override_substituted,
+         stream_display_policy::k_capture_override_gamescope_session,
+         stream_display_policy::k_capture_override_dongle_session,
+         stream_display_policy::k_capture_override_desktop_discovery,
+         stream_display_policy::k_capture_override_virtual_display_backend,
+       }) {
+    const auto line = describe_capture_override(capture_override_t {"kms", "portal", std::string {reason}}, "");
+    EXPECT_NE(line.find("[unset]"), std::string::npos) << line;
+    EXPECT_EQ(line.find(reason), std::string::npos) << "the reason is said in words, not as its id: " << line;
+    EXPECT_EQ(line.find(" - "), std::string::npos) << line;
+    EXPECT_EQ(line.find("\xE2\x80\x94"), std::string::npos) << line;
+    EXPECT_EQ(line.find("\xE2\x80\x93"), std::string::npos) << line;
+  }
+}
+
+TEST(StreamDisplayPolicyTests, AHostVirtualDisplayThatSetsAsideAnExplicitCaptureSaysSoAsAWarning) {
+  LinuxDisplayPolicyGuard guard;
+  LoadedCaptureGuard loaded_guard;
+  auto &d = config::video.linux_display;
+  set_loaded_capture_setting("kms");
+  d.stream_mode = "host_virtual_display";
+  config::video.capture = "kms";
+
+  std::string logged;
+  {
+    CaptureLogCapture log;
+    stream_display_policy::normalize_host_virtual_display_state_for_backend(virtual_display::backend_e::EVDI);
+    logged = log.text();
+  }
+  EXPECT_EQ(config::video.capture, "portal");
+  const auto warning = lines_with(logged, "[kms]");
+  EXPECT_NE(warning.find("Warning: "), std::string::npos) << logged;
+  EXPECT_NE(warning.find("[host_virtual_display]"), std::string::npos) << warning;
+  EXPECT_NE(warning.find("[portal]"), std::string::npos) << warning;
+  EXPECT_NE(warning.find("[EVDI]"), std::string::npos) << warning;
+  // A launch entering the mode puts the host setting back at teardown, and the line says so.
+  EXPECT_NE(warning.find("for this session only"), std::string::npos) << warning;
+  EXPECT_NE(warning.find("comes back at teardown"), std::string::npos) << warning;
+
+  // apply_selection normalizes before it records the mode it is entering, so it names the mode.
+  d.stream_mode = "desktop_display";
+  config::video.capture = "kms";
+  {
+    CaptureLogCapture log;
+    stream_display_policy::normalize_host_virtual_display_state_for_backend(
+      virtual_display::backend_e::EVDI,
+      stream_display_policy::capture_rewrite_scope_e::session,
+      "desktop_takeover"
+    );
+    logged = log.text();
+  }
+  EXPECT_NE(lines_with(logged, "[kms]").find("[desktop_takeover]"), std::string::npos) << logged;
+
+  // Auto asked the host to choose: that is worth a line, not a warning.
+  set_loaded_capture_setting("");
+  d.stream_mode = "host_virtual_display";
+  config::video.capture.clear();
+  {
+    CaptureLogCapture log;
+    stream_display_policy::normalize_host_virtual_display_state_for_backend(virtual_display::backend_e::EVDI);
+    logged = log.text();
+  }
+  EXPECT_EQ(config::video.capture, "portal");
+  const auto auto_line = lines_with(logged, "[portal]");
+  EXPECT_NE(auto_line.find("Info: "), std::string::npos) << logged;
+  EXPECT_EQ(auto_line.find("Warning: "), std::string::npos) << logged;
+}
+
+TEST(StreamDisplayPolicyTests, EachEvaluationSaysOnceWhenTheModeSetsAnExplicitCaptureAside) {
+  LinuxDisplayPolicyGuard guard;
+  LoadedCaptureGuard loaded_guard;
+  struct SubstitutionGuard {
+    ~SubstitutionGuard() {
+      platf::set_capture_backend_substitution_for_tests("");
+    }
+  } substitution_guard;
+  auto &d = config::video.linux_display;
+  const auto said = []() {
+    CaptureLogCapture log;
+    platf::log_capture_mode_override();
+    return lines_with(log.text(), "capture override:");
+  };
+
+  // A private compositor mode streams through wlr whatever capture says: one warning, naming the
+  // mode, the configured backend and the one it asks for instead.
+  set_loaded_capture_setting("kms");
+  d.stream_mode = "windowed_stream";
+  d.use_cage_compositor = true;
+  config::video.capture = "kms";
+  platf::set_capture_backend_substitution_for_tests("");
+  const auto windowed = said();
+  EXPECT_EQ(std::count(windowed.begin(), windowed.end(), '\n'), 1) << windowed;
+  EXPECT_NE(windowed.find("Warning: "), std::string::npos) << windowed;
+  EXPECT_NE(windowed.find("[windowed_stream]"), std::string::npos) << windowed;
+  EXPECT_NE(windowed.find("asks for [wlr], not the configured [kms]"), std::string::npos) << windowed;
+
+  // A substitution is an override too, and it has its own warning, which names the substitute.
+  // Saying it here as well gave one substitution two warnings.
+  set_loaded_capture_setting("wlr");
+  d.stream_mode = "desktop_display";
+  d.use_cage_compositor = false;
+  config::video.capture = "wlr";
+  platf::set_capture_backend_substitution_for_tests("wlr -> kms");
+  ASSERT_TRUE(stream_display_policy::capture_mode_override_for_current_mode().has_value());
+  EXPECT_TRUE(said().empty());
+
+  // Auto asked the host to choose, so the host choosing is nothing to warn about.
+  set_loaded_capture_setting("");
+  d.stream_mode = "headless_stream";
+  d.use_cage_compositor = true;
+  config::video.capture.clear();
+  platf::set_capture_backend_substitution_for_tests("");
+  EXPECT_TRUE(said().empty());
+}
+
+TEST(StreamDisplayPolicyTests, AnEvaluationNamesPolarisConfNotTheReplacementALoadMade) {
+  // A Host Virtual Display load puts portal in place of capture in memory, and a client's mode
+  // switch puts back the value it found, which is that replacement. Named as the configured backend,
+  // the replacement told a host set to kms that it had chosen portal, and warned a host with capture
+  // unset, or set to the very wlr the mode asks for, that an explicit portal was set aside.
+  LinuxDisplayPolicyGuard guard;
+  LoadedCaptureGuard loaded_guard;
+  struct SubstitutionGuard {
+    ~SubstitutionGuard() {
+      platf::set_capture_backend_substitution_for_tests("");
+    }
+  } substitution_guard;
+  platf::set_capture_backend_substitution_for_tests("");
+  auto &d = config::video.linux_display;
+  const auto load_host_virtual_display = [&d](const std::string &capture) {
+    set_loaded_capture_setting(capture);
+    d.stream_mode = "host_virtual_display";
+    d.use_cage_compositor = false;
+    config::video.capture = capture;
+    CaptureLogCapture quiet;
+    stream_display_policy::normalize_host_virtual_display_state_for_backend(
+      virtual_display::backend_e::EVDI,
+      stream_display_policy::capture_rewrite_scope_e::load
+    );
+    stream_display_policy::log_config_load_notes();
+  };
+  const auto evaluate_in_windowed_stream = [&d]() {
+    d.stream_mode = "windowed_stream";
+    d.use_cage_compositor = true;
+    CaptureLogCapture log;
+    platf::log_capture_mode_override();
+    return lines_with(log.text(), "capture override:");
+  };
+
+  load_host_virtual_display("kms");
+  ASSERT_EQ(config::video.capture, "portal");
+  const auto explicit_kms = evaluate_in_windowed_stream();
+  EXPECT_EQ(std::count(explicit_kms.begin(), explicit_kms.end(), '\n'), 1) << explicit_kms;
+  EXPECT_NE(explicit_kms.find("Warning: "), std::string::npos) << explicit_kms;
+  EXPECT_NE(explicit_kms.find("asks for [wlr], not the configured [kms]"), std::string::npos) << explicit_kms;
+  EXPECT_EQ(explicit_kms.find("[portal]"), std::string::npos) << explicit_kms;
+
+  load_host_virtual_display("");
+  ASSERT_EQ(config::video.capture, "portal");
+  EXPECT_TRUE(evaluate_in_windowed_stream().empty()) << "auto asked the host to choose";
+
+  load_host_virtual_display("wlr");
+  ASSERT_EQ(config::video.capture, "portal");
+  EXPECT_TRUE(evaluate_in_windowed_stream().empty()) << "the mode asks for the wlr polaris.conf names";
+}
+
+TEST(StreamDisplayPolicyTests, ASessionTransitionMeasuresItsRewriteAgainstPolarisConf) {
+  // A launch into another mode rewrites capture for the session. It named the live value as the
+  // configured one, so after a Host Virtual Display load a host set to kms read that it had chosen
+  // portal, and a host with capture unset was warned about a portal it never chose.
+  LinuxDisplayPolicyGuard guard;
+  LoadedCaptureGuard loaded_guard;
+  auto &d = config::video.linux_display;
+  const auto enter = [](std::string_view configured, std::string_view session) {
+    CaptureLogCapture log;
+    stream_display_policy::apply_capture_for_session_transition(configured, session);
+    return log.text();
+  };
+
+  // polaris.conf says kms, and the Host Virtual Display load put portal in its place.
+  set_loaded_capture_setting("kms");
+  d.stream_mode = "host_virtual_display";
+  config::video.capture = "portal";
+  auto logged = enter("host_virtual_display", "headless_stream");
+  EXPECT_EQ(config::video.capture, "wlr");
+  const auto warning = lines_with(logged, "capture override:");
+  EXPECT_NE(warning.find("Warning: "), std::string::npos) << logged;
+  EXPECT_NE(warning.find("stream mode [headless_stream] asks for [wlr], not the configured [kms]"), std::string::npos)
+    << warning;
+  EXPECT_NE(warning.find("for this session only"), std::string::npos) << warning;
+  EXPECT_EQ(warning.find("[portal]"), std::string::npos) << warning;
+
+  // With capture unset the portal was the load's own fill, so replacing it is a note.
+  set_loaded_capture_setting("");
+  config::video.capture = "portal";
+  logged = enter("host_virtual_display", "headless_stream");
+  EXPECT_EQ(config::video.capture, "wlr");
+  EXPECT_TRUE(lines_with(logged, "capture override:").empty()) << logged;
+  const auto note = lines_with(logged, "session capture backend override");
+  EXPECT_NE(note.find("Info: "), std::string::npos) << logged;
+  EXPECT_NE(note.find("[portal] -> [wlr] for stream mode [headless_stream]"), std::string::npos) << note;
+
+  // An explicit kms the live setting still holds is set aside by a Gamescope session, as before.
+  set_loaded_capture_setting("kms");
+  d.stream_mode = "desktop_display";
+  config::video.capture = "kms";
+  logged = enter("desktop_display", "gamescope_stream");
+  EXPECT_EQ(config::video.capture, "portal");
+  EXPECT_NE(lines_with(logged, "capture override:").find("asks for [portal], not the configured [kms]"), std::string::npos)
+    << logged;
+
+  // A transition that leaves capture as it is says nothing.
+  logged = enter("desktop_display", "gamescope_stream");
+  EXPECT_EQ(config::video.capture, "portal");
+  EXPECT_TRUE(lines_with(logged, "capture override:").empty()) << logged;
+  EXPECT_TRUE(lines_with(logged, "session capture backend override").empty()) << logged;
+}
+
+TEST(StreamDisplayPolicyTests, AGameModeHoldSaysWhichCaptureChoiceItSetsAside) {
+  using stream_display_policy::game_mode_reconcile_e;
+  ScopedPrivateRuntimePath runtime_path;
+  LinuxDisplayPolicyGuard guard;
+  LoadedCaptureGuard loaded_guard;
+  set_loaded_capture_setting("wlr");
+  std::string error;
+  ASSERT_TRUE(stream_display_policy::apply_selection("headless_stream", error)) << error;
+  config::video.capture = "wlr";
+
+  std::string logged;
+  {
+    CaptureLogCapture log;
+    ASSERT_EQ(stream_display_policy::reconcile_game_mode(true, false), game_mode_reconcile_e::entered);
+    logged = log.text();
+  }
+  const auto line = lines_with(logged, "capture override:");
+  EXPECT_NE(line.find("Warning: "), std::string::npos) << logged;
+  EXPECT_NE(line.find("[desktop_display]"), std::string::npos) << line;
+  EXPECT_NE(line.find("[wlr]"), std::string::npos) << line;
+  EXPECT_NE(line.find("Game Mode"), std::string::npos) << line;
+  EXPECT_EQ(stream_display_policy::reconcile_game_mode(false, false), game_mode_reconcile_e::left);
+  EXPECT_EQ(config::video.capture, "wlr");
+}
+
+TEST(StreamDisplayPolicyTests, AGameModeHoldNamesPolarisConfNotTheReplacementALoadMade) {
+  // A Host Virtual Display host on a wlroots backend holds wlr where polaris.conf says kms or
+  // nothing, because its load put wlr in place. Game Mode measured its rewrite against that held
+  // value, so it told a host set to kms that it had configured wlr, and warned a host with capture
+  // unset about a wlr it never chose.
+  using stream_display_policy::game_mode_reconcile_e;
+  LinuxDisplayPolicyGuard guard;
+  LoadedCaptureGuard loaded_guard;
+  auto &d = config::video.linux_display;
+  const auto enter_game_mode = [&d](const std::string &loaded) {
+    set_loaded_capture_setting(loaded);
+    d.stream_mode = "host_virtual_display";
+    d.use_cage_compositor = false;
+    config::video.capture = "wlr";  // what the load put in place for a wlroots virtual display
+    std::string logged;
+    {
+      CaptureLogCapture log;
+      EXPECT_EQ(stream_display_policy::reconcile_game_mode(true, false), game_mode_reconcile_e::entered);
+      logged = log.text();
+    }
+    EXPECT_EQ(stream_display_policy::reconcile_game_mode(false, false), game_mode_reconcile_e::left);
+    EXPECT_EQ(config::video.capture, "wlr") << "Game Mode gives back the setting it held";
+    return logged;
+  };
+
+  auto logged = enter_game_mode("kms");
+  const auto warning = lines_with(logged, "capture override:");
+  EXPECT_NE(warning.find("Warning: "), std::string::npos) << logged;
+  EXPECT_NE(warning.find("asks for [auto], not the configured [kms]"), std::string::npos) << warning;
+  EXPECT_NE(warning.find("[wlr] comes back when the Game Mode session ends"), std::string::npos) << warning;
+
+  logged = enter_game_mode("");
+  EXPECT_TRUE(lines_with(logged, "capture override:").empty()) << logged;
+  const auto note = lines_with(logged, "game_mode: capture");
+  EXPECT_NE(note.find("Info: "), std::string::npos) << logged;
+  EXPECT_NE(note.find("[wlr] is [auto]"), std::string::npos) << note;
+}
+
+TEST(StreamDisplayPolicyTests, ALaunchIntoHostVirtualDisplayNamesPolarisConfNotTheLoadsReplacement) {
+  // An EVDI load put portal in place of capture. The virtual display backend applies at once when it
+  // is changed in Settings, so the next launch into the mode rewrites capture for the new backend,
+  // and it measured that against the portal it found: a host set to kms read that it had configured
+  // portal, and a host with capture unset was warned about a portal it never chose.
+  LinuxDisplayPolicyGuard guard;
+  LoadedCaptureGuard loaded_guard;
+  auto &d = config::video.linux_display;
+  const auto launch_on_wlroots = [&d](const std::string &loaded) {
+    set_loaded_capture_setting(loaded);
+    d.stream_mode = "host_virtual_display";
+    d.use_cage_compositor = false;
+    config::video.capture = "portal";  // the EVDI load's replacement
+    CaptureLogCapture log;
+    stream_display_policy::normalize_host_virtual_display_state_for_backend(
+      virtual_display::backend_e::WAYLAND_WLR,
+      stream_display_policy::capture_rewrite_scope_e::session,
+      "host_virtual_display"
+    );
+    return log.text();
+  };
+  const std::string wlroots = std::string {"["} + virtual_display::backend_name(virtual_display::backend_e::WAYLAND_WLR) + "]";
+
+  auto logged = launch_on_wlroots("kms");
+  EXPECT_EQ(config::video.capture, "wlr");
+  const auto warning = lines_with(logged, "capture override:");
+  EXPECT_NE(warning.find("Warning: "), std::string::npos) << logged;
+  EXPECT_NE(warning.find("asks for [wlr], not the configured [kms]"), std::string::npos) << warning;
+  EXPECT_NE(warning.find("for this session only"), std::string::npos) << warning;
+  EXPECT_EQ(warning.find("[portal]"), std::string::npos) << warning;
+
+  logged = launch_on_wlroots("");
+  EXPECT_EQ(config::video.capture, "wlr");
+  EXPECT_TRUE(lines_with(logged, "capture override:").empty()) << logged;
+  const auto note = lines_with(logged, wlroots);
+  EXPECT_NE(note.find("Info: "), std::string::npos) << logged;
+  EXPECT_NE(note.find("through [wlr], with capture set to [auto]"), std::string::npos) << note;
+}
+
+TEST(StreamDisplayPolicyTests, CaptureAliasesReadTheWayDispatchReadsThem) {
+  using stream_display_policy::canonical_capture_backend;
+
+  EXPECT_EQ(canonical_capture_backend("kwin"), "portal");
+  EXPECT_EQ(canonical_capture_backend("drm"), "kms");
+  EXPECT_EQ(canonical_capture_backend("auto"), "");
+  for (const auto value : {"", "wlr", "portal", "kms", "x11", "nvfbc", "bogus"}) {
+    EXPECT_EQ(canonical_capture_backend(value), value);
+  }
+
+  // Dispatch is the authority, and it is not changed: every value has to dispatch exactly like
+  // the backend this reads it as, on every combination of available sources.
+  for (const auto &value : k_capture_values) {
+    const auto canonical = canonical_capture_backend(value);
+    for (int mask = 0; mask < 64; ++mask) {
+      const bool flags[6] = {bool(mask & 1), bool(mask & 2), bool(mask & 4), bool(mask & 8), bool(mask & 16), bool(mask & 32)};
+      EXPECT_EQ(
+        platf::capture_backend_dispatch_for_tests(value, flags[0], flags[1], flags[2], flags[3], flags[4], flags[5]),
+        platf::capture_backend_dispatch_for_tests(canonical, flags[0], flags[1], flags[2], flags[3], flags[4], flags[5])
+      ) << "[" << value << "] read as [" << canonical << "], sources mask " << mask;
+    }
+  }
+}
+
+TEST(StreamDisplayPolicyTests, TheRuntimeBackendNamesTheBackendAnAliasOpens) {
+  // runtime_backend, and session_capture.backend for a host mode, say what the mode captures
+  // through. A host set to kwin read kwin, a name dispatch never opens: it opens the portal. A
+  // literal auto read auto, which is no backend at all.
+  const auto *mirror = stream_path::find(stream_path::k_desktop_display);
+  ASSERT_NE(mirror, nullptr);
+  stream_path::host_capabilities_t caps {};
+  const auto backend_for = [&caps, mirror](std::string capture) {
+    caps.configured_capture = std::move(capture);
+    return stream_path::backend_name_for_path(*mirror, caps);
+  };
+  EXPECT_EQ(backend_for("portal"), "portal");
+  EXPECT_EQ(backend_for("kwin"), "portal");
+  EXPECT_EQ(backend_for("KWin"), "portal");
+  EXPECT_EQ(backend_for("kms"), "kms");
+  EXPECT_EQ(backend_for("drm"), "kms");
+  EXPECT_EQ(backend_for("auto"), backend_for("")) << "auto asks the host to choose";
+  EXPECT_EQ(backend_for(""), "host");
+}
+
+TEST(StreamDisplayPolicyTests, AHostSetToDrmAskedForKmsWhenTheCapabilityIsRefused) {
+  struct Restore {
+    std::string capture {config::video.capture};
+
+    ~Restore() {
+      config::video.capture = capture;
+      platf::set_kms_capture_refused_for_tests(false);
+      verified_action::clear();
+    }
+  } restore;
+  const auto kms_capability_failures = []() {
+    const auto records = verified_action::silent_failures();
+    return std::count_if(records.begin(), records.end(), [](const verified_action::record_t &record) {
+      return record.id == "video.kms_capability";
+    });
+  };
+
+  for (const auto value : {"kms", "drm"}) {
+    config::video.capture = value;
+    verified_action::clear();
+    platf::note_kms_capture_refused_for_capability();
+    EXPECT_EQ(kms_capability_failures(), 1) << "[" << value << "] asked for KMS, and KMS did not land";
+  }
+  // Every other host never asked for KMS, and the probe says so itself, once, at info.
+  for (const auto value : {"", "portal", "kwin", "wlr"}) {
+    config::video.capture = value;
+    verified_action::clear();
+    platf::note_kms_capture_refused_for_capability();
+    EXPECT_EQ(kms_capability_failures(), 0) << "[" << value << "] never asked for KMS";
+  }
+}
+
+TEST(StreamDisplayPolicyTests, TheLoadedCaptureSettingSurvivesAModeThatRewritesIt) {
+  LinuxDisplayPolicyGuard guard;
+  auto &d = config::video.linux_display;
+
+  d.stream_mode = "headless_stream";
+  config::video.capture = "kms";
+  stream_display_policy::normalize_config_from_load();
+  EXPECT_EQ(stream_display_policy::loaded_capture_setting(), "kms");
+
+  // The dongle fills an unset capture with portal in memory; what was loaded is still unset.
+  d.stream_mode = "headless_dongle";
+  config::video.capture.clear();
+  stream_display_policy::normalize_config_from_load();
+  EXPECT_EQ(config::video.capture, "portal");
+  EXPECT_EQ(stream_display_policy::loaded_capture_setting(), "");
+
+  // An explicit kms that a Host Virtual Display load rewrites is still kms in the snapshot. The
+  // rewrite depends on the backend this machine detects, and follows it.
+  d.stream_mode = "host_virtual_display";
+  config::video.capture = "kms";
+  stream_display_policy::normalize_config_from_load();
+  EXPECT_EQ(stream_display_policy::loaded_capture_setting(), "kms");
+  EXPECT_EQ(
+    config::video.capture,
+    stream_display_policy::capture_for_host_virtual_display_backend(virtual_display::detect_backend(), "kms")
+  );
+  {
+    CaptureLogCapture quiet;
+    stream_display_policy::log_config_load_notes();
+  }
+}
+
+TEST(StreamDisplayPolicyTests, ARewriteAtLoadIsSaidOnceLoggingIsUp) {
+  LinuxDisplayPolicyGuard guard;
+  auto &d = config::video.linux_display;
+  const auto say_load_notes = []() {
+    CaptureLogCapture log;
+    stream_display_policy::log_config_load_notes();
+    return log.text();
+  };
+  say_load_notes();  // whatever an earlier load in this process kept
+
+  // polaris.conf is parsed inside config::parse, before logging::init. A line logged there reaches
+  // stdout and never polaris.log, so the load keeps it and main() says it once logging is up.
+  d.stream_mode = "host_virtual_display";
+  config::video.capture = "kms";
+  std::string during;
+  {
+    CaptureLogCapture log;
+    stream_display_policy::normalize_host_virtual_display_state_for_backend(
+      virtual_display::backend_e::EVDI,
+      stream_display_policy::capture_rewrite_scope_e::load
+    );
+    during = log.text();
+  }
+  EXPECT_EQ(config::video.capture, "portal");
+  EXPECT_TRUE(lines_with(during, "[kms]").empty()) << during;
+  const auto after = say_load_notes();
+  const auto warning = lines_with(after, "[kms]");
+  EXPECT_NE(warning.find("Warning: "), std::string::npos) << after;
+  EXPECT_NE(warning.find("[host_virtual_display]"), std::string::npos) << warning;
+  EXPECT_NE(warning.find("[portal]"), std::string::npos) << warning;
+  // Nothing puts a loaded setting back at a teardown. A later mode switch restores the value it
+  // found, which is already the replacement, so it lasts until Polaris restarts.
+  EXPECT_NE(warning.find("until Polaris restarts"), std::string::npos) << warning;
+  EXPECT_EQ(warning.find("teardown"), std::string::npos) << warning;
+  EXPECT_TRUE(lines_with(say_load_notes(), "[kms]").empty()) << "each line is said once";
+
+  // The dongle fill of an unset capture waits the same way, at info.
+  d.stream_mode = "headless_dongle";
+  config::video.capture.clear();
+  {
+    CaptureLogCapture log;
+    stream_display_policy::normalize_config_from_load();
+    during = log.text();
+  }
+  EXPECT_EQ(config::video.capture, "portal");
+  EXPECT_TRUE(lines_with(during, "[headless_dongle]").empty()) << during;
+  const auto dongle = lines_with(say_load_notes(), "[headless_dongle]");
+  EXPECT_NE(dongle.find("Info: "), std::string::npos) << dongle;
+  EXPECT_NE(dongle.find("[portal]"), std::string::npos) << dongle;
+
+  // A load starts over: what an older load kept and nobody said belongs to a configuration that is gone.
+  d.stream_mode = "headless_dongle";
+  config::video.capture.clear();
+  stream_display_policy::normalize_config_from_load();
+  d.stream_mode = "headless_stream";
+  config::video.capture = "kms";
+  stream_display_policy::normalize_config_from_load();
+  EXPECT_TRUE(lines_with(say_load_notes(), "[headless_dongle]").empty());
+}
+
+TEST(StreamDisplayPolicyTests, ALaunchThatFillsAnUnsetCaptureWithPortalSaysSo) {
+  // A dongle load that fills an unset capture with portal says so. A launch entering Gamescope
+  // Stream or the dongle made the same fill and said nothing, so the per-open line was the first
+  // trace of a portal nobody configured.
+  ScopedPrivateRuntimePath runtime_path {"gamescope"};
+  LinuxDisplayPolicyGuard guard;
+  LoadedCaptureGuard loaded_guard;
+  auto &d = config::video.linux_display;
+  const auto apply = [](std::string_view mode, stream_display_policy::capture_rewrite_scope_e scope) {
+    CaptureLogCapture log;
+    std::string error;
+    EXPECT_TRUE(stream_display_policy::apply_selection(mode, error, scope)) << mode << ": " << error;
+    return log.text();
+  };
+  const auto said = [](const std::string &line) {
+    const auto at = line.find("Info: ");
+    return at == std::string::npos ? std::string {} : line.substr(at);
+  };
+  const auto session = stream_display_policy::capture_rewrite_scope_e::session;
+
+  d.stream_mode = "desktop_display";
+  config::video.capture.clear();
+  auto logged = apply("gamescope_stream", session);
+  EXPECT_EQ(config::video.capture, "portal");
+  const auto gamescope = lines_with(logged, "[gamescope_stream]");
+  EXPECT_NE(gamescope.find("Info: "), std::string::npos) << logged;
+  EXPECT_NE(gamescope.find("captures the Gamescope session through [portal], with capture set to [auto]"), std::string::npos)
+    << gamescope;
+
+  d.stream_mode = "desktop_display";
+  d.streaming_output = "DP-1";
+  d.primary_output = "eDP-1";
+  config::video.capture.clear();
+  config::video.output_name.clear();
+  logged = apply("headless_dongle", session);
+  EXPECT_EQ(config::video.capture, "portal");
+  const auto dongle = lines_with(logged, "[headless_dongle]");
+  EXPECT_NE(dongle.find("Info: "), std::string::npos) << logged;
+
+  // It is the line the load says for the same fill.
+  d.stream_mode = "headless_dongle";
+  config::video.capture.clear();
+  stream_display_policy::normalize_config_from_load();
+  std::string loaded;
+  {
+    CaptureLogCapture log;
+    stream_display_policy::log_config_load_notes();
+    loaded = lines_with(log.text(), "[headless_dongle]");
+  }
+  ASSERT_FALSE(said(loaded).empty()) << loaded;
+  EXPECT_EQ(said(dongle), said(loaded));
+
+  // An explicit backend is not filled, and the session transition speaks for what happens to it.
+  d.stream_mode = "desktop_display";
+  config::video.capture = "kms";
+  logged = apply("gamescope_stream", session);
+  EXPECT_EQ(config::video.capture, "kms");
+  EXPECT_TRUE(lines_with(logged, "[gamescope_stream]").empty()) << logged;
+
+  // A client's mode switch puts capture back itself, so its preview says nothing.
+  d.stream_mode = "desktop_display";
+  config::video.capture.clear();
+  logged = apply("gamescope_stream", stream_display_policy::capture_rewrite_scope_e::preview);
+  EXPECT_EQ(config::video.capture, "portal");
+  EXPECT_TRUE(lines_with(logged, "[gamescope_stream]").empty()) << logged;
+}
+
+TEST(StreamDisplayPolicyTests, AModeFillsAnUnsetCaptureBeforeALaunchAsksForIt) {
+  using stream_display_policy::capture_filled_for_mode;
+  // Gamescope Stream fills an unset capture, and the dongle an unset or auto one. An explicit
+  // backend is kept in both, and every other mode keeps what it is given.
+  EXPECT_EQ(capture_filled_for_mode("gamescope_stream", ""), "portal");
+  EXPECT_EQ(capture_filled_for_mode("headless_dongle", ""), "portal");
+  EXPECT_EQ(capture_filled_for_mode("headless_dongle", "auto"), "portal");
+  for (const auto mode : {"gamescope_stream", "headless_dongle"}) {
+    for (const auto capture : {"kms", "drm", "wlr", "kwin"}) {
+      EXPECT_EQ(capture_filled_for_mode(mode, capture), capture) << mode << " capture=[" << capture << "]";
+    }
+  }
+  for (const auto mode : {"desktop_display", "headless_stream", "windowed_stream", "host_virtual_display", "desktop_takeover"}) {
+    EXPECT_EQ(capture_filled_for_mode(mode, ""), "") << mode;
+  }
+
+  // What a launch into the live mode asks for reads the fill first and the mode's rule after it.
+  LinuxDisplayPolicyGuard guard;
+  struct SubstitutionGuard {
+    ~SubstitutionGuard() {
+      platf::set_capture_backend_substitution_for_tests("");
+    }
+  } substitution_guard;
+  auto &d = config::video.linux_display;
+  d.use_cage_compositor = false;
+  platf::set_capture_backend_substitution_for_tests("");
+  d.stream_mode = "gamescope_stream";
+  config::video.capture = "";
+  EXPECT_EQ(stream_display_policy::capture_for_current_mode(), "");
+  EXPECT_EQ(stream_display_policy::capture_for_launch_into_current_mode(), "portal");
+  d.stream_mode = "desktop_display";
+  EXPECT_EQ(stream_display_policy::capture_for_launch_into_current_mode(), "");
+  // An explicit backend the evaluation replaced asks for auto in the dongle, filled or not.
+  platf::set_capture_backend_substitution_for_tests("kms -> portal");
+  d.stream_mode = "headless_dongle";
+  config::video.capture = "kms";
+  EXPECT_EQ(stream_display_policy::capture_for_launch_into_current_mode(), "");
+}
+
+TEST(StreamDisplayPolicyTests, AModeSwitchThatPutsCaptureBackSaysNothingAboutIt) {
+  // A client switching the host mode applies the selection, then puts the capture setting back
+  // itself. A warning that the host set kms aside described a state that did not exist, until the
+  // launch that enters the mode applies it again and says so then.
+  LinuxDisplayPolicyGuard guard;
+  config::video.linux_display.stream_mode = "desktop_display";
+  config::video.capture = "kms";
+  std::string logged;
+  {
+    CaptureLogCapture log;
+    stream_display_policy::normalize_host_virtual_display_state_for_backend(
+      virtual_display::backend_e::EVDI,
+      stream_display_policy::capture_rewrite_scope_e::preview,
+      "host_virtual_display"
+    );
+    logged = log.text();
+  }
+  EXPECT_EQ(config::video.capture, "portal") << "the rewrite itself still happens, and the caller undoes it";
+  EXPECT_TRUE(lines_with(logged, "[kms]").empty()) << logged;
+  EXPECT_TRUE(lines_with(logged, "[host_virtual_display]").empty()) << logged;
+}
+
+TEST(StreamDisplayPolicyTests, AVirtualDisplayOnAnotherBackendIsMeasuredAgainstPolarisConf) {
+  // The launch checked one backend and rewrote capture for it, then the display came up on another.
+  // What the launch put in place is not the operator's choice, and measured against it, a host with
+  // capture unset was warned that its explicit portal had been set aside.
+  LinuxDisplayPolicyGuard guard;
+  auto &d = config::video.linux_display;
+  const auto load = [&d](std::string capture) {
+    d.stream_mode = "headless_stream";
+    config::video.capture = std::move(capture);
+    stream_display_policy::normalize_config_from_load();
+  };
+  const auto comes_up_on_wlroots = [&d]() {
+    d.stream_mode = "host_virtual_display";
+    d.use_cage_compositor = false;
+    config::video.capture = "portal";  // what the launch set for the EVDI display it checked
+    CaptureLogCapture log;
+    stream_display_policy::normalize_host_virtual_display_state_for_backend(
+      virtual_display::backend_e::WAYLAND_WLR,
+      stream_display_policy::capture_rewrite_scope_e::backend_change
+    );
+    return log.text();
+  };
+  const std::string wlroots = std::string {"["} + virtual_display::backend_name(virtual_display::backend_e::WAYLAND_WLR) + "]";
+
+  load("");
+  auto logged = comes_up_on_wlroots();
+  EXPECT_EQ(config::video.capture, "wlr");
+  EXPECT_TRUE(lines_with(logged, "capture override:").empty()) << logged;
+  const auto moved = lines_with(logged, wlroots);
+  EXPECT_NE(moved.find("Info: "), std::string::npos) << logged;
+  EXPECT_NE(moved.find("[host_virtual_display]"), std::string::npos) << moved;
+  EXPECT_NE(moved.find("through [wlr] instead of [portal]"), std::string::npos) << moved;
+
+  // An explicit kms is named as kms, not as the portal the launch put in its place.
+  load("kms");
+  logged = comes_up_on_wlroots();
+  const auto warning = lines_with(logged, "capture override:");
+  EXPECT_NE(warning.find("Warning: "), std::string::npos) << logged;
+  EXPECT_NE(warning.find("asks for [wlr], not the configured [kms]"), std::string::npos) << warning;
+  EXPECT_NE(warning.find(wlroots), std::string::npos) << warning;
+  EXPECT_NE(warning.find("for this session only"), std::string::npos) << warning;
+
+  // An operator who chose wlr gets it back. That is a backend change, not a choice set aside.
+  load("wlr");
+  logged = comes_up_on_wlroots();
+  EXPECT_EQ(config::video.capture, "wlr");
+  EXPECT_TRUE(lines_with(logged, "capture override:").empty()) << logged;
+  EXPECT_NE(lines_with(logged, wlroots).find("Info: "), std::string::npos) << logged;
+  {
+    CaptureLogCapture quiet;
+    stream_display_policy::log_config_load_notes();
+  }
+}
+
+namespace {
+  struct SubstitutionNoteGuard {
+    ~SubstitutionNoteGuard() {
+      platf::set_capture_backend_substitution_for_tests("");
+    }
+  };
+}  // namespace
+
+TEST(StreamDisplayPolicyTests, ARequestNamesTheRuleThatSetPolarisConfAside) {
+  using stream_display_policy::capture_request_override_reason;
+  LinuxDisplayPolicyGuard guard;
+  LoadedCaptureGuard loaded_guard;
+  HeldHostDefaultGuard held_guard;
+  SubstitutionNoteGuard substitution_guard;
+  platf::set_capture_backend_substitution_for_tests("");
+  set_loaded_capture_setting("");
+
+  // Asking the host to choose is never set aside, and an alias is the backend it names.
+  config::video.capture.clear();
+  EXPECT_EQ(capture_request_override_reason("", "portal", "gamescope_stream", false, false), "");
+  config::video.capture = "drm";
+  EXPECT_EQ(capture_request_override_reason("drm", "kms", "desktop_display", false, false), "");
+  config::video.capture = "kwin";
+  EXPECT_EQ(capture_request_override_reason("kwin", "portal", "desktop_display", false, false), "");
+
+  // A private compositor asks for wlr whatever polaris.conf names.
+  config::video.capture = "kms";
+  EXPECT_EQ(capture_request_override_reason("kms", "wlr", "headless_stream", true, false), "private_compositor");
+
+  // A substitution sends a request to auto. A generation that owns an exact output is never
+  // substituted, so a difference there is not put down to one.
+  platf::set_capture_backend_substitution_for_tests("kms -> portal");
+  EXPECT_EQ(capture_request_override_reason("kms", "", "desktop_display", false, false), "substituted");
+  EXPECT_EQ(capture_request_override_reason("kms", "", "desktop_display", false, true), "");
+  platf::set_capture_backend_substitution_for_tests("");
+
+  // A launch into a Gamescope session rewrote the live setting. Its rule answers until teardown puts
+  // the host setting back.
+  set_loaded_capture_setting("kms");
+  config::video.linux_display.stream_mode = "desktop_display";
+  config::video.capture = "kms";
+  {
+    CaptureLogCapture quiet;
+    stream_display_policy::apply_capture_for_session_transition("desktop_display", "gamescope_stream");
+  }
+  ASSERT_EQ(config::video.capture, "portal");
+  EXPECT_EQ(capture_request_override_reason("kms", "portal", "gamescope_stream", false, false), "gamescope_session");
+  config::video.capture = "kms";
+  stream_display_policy::forget_host_default();
+  config::video.capture = "portal";
+  EXPECT_EQ(capture_request_override_reason("kms", "portal", "gamescope_stream", false, false), "")
+    << "the rewrite ended at teardown, and no reason is guessed for a portal nothing explains";
+
+  // A Host Virtual Display load lasts past teardown, until the next load.
+  config::video.linux_display.stream_mode = "host_virtual_display";
+  config::video.capture = "kms";
+  {
+    CaptureLogCapture quiet;
+    stream_display_policy::normalize_host_virtual_display_state_for_backend(
+      virtual_display::backend_e::EVDI,
+      stream_display_policy::capture_rewrite_scope_e::load
+    );
+    stream_display_policy::log_config_load_notes();
+  }
+  ASSERT_EQ(config::video.capture, "portal");
+  stream_display_policy::forget_host_default();
+  EXPECT_EQ(capture_request_override_reason("kms", "portal", "host_virtual_display", false, false), "virtual_display_backend");
+  set_loaded_capture_setting("kms");
+  config::video.capture = "portal";
+  EXPECT_EQ(capture_request_override_reason("kms", "portal", "host_virtual_display", false, false), "")
+    << "a reload drops what an older load rewrote";
+}
+
+TEST(StreamDisplayPolicyTests, ASessionNamesItsOwnRuleWhenAnOlderRewriteAlreadyWroteTheSameBackend) {
+  using stream_display_policy::capture_request_override_reason;
+  LinuxDisplayPolicyGuard guard;
+  LoadedCaptureGuard loaded_guard;
+  HeldHostDefaultGuard held_guard;
+  SubstitutionNoteGuard substitution_guard;
+  platf::set_capture_backend_substitution_for_tests("");
+  set_loaded_capture_setting("kms");
+
+  // polaris.conf holds capture = kms and linux_stream_mode = host_virtual_display on EVDI, and the
+  // load rewrites the live setting to the portal.
+  config::video.linux_display.stream_mode = "host_virtual_display";
+  config::video.capture = "kms";
+  {
+    CaptureLogCapture quiet;
+    stream_display_policy::normalize_host_virtual_display_state_for_backend(
+      virtual_display::backend_e::EVDI,
+      stream_display_policy::capture_rewrite_scope_e::load
+    );
+    stream_display_policy::log_config_load_notes();
+  }
+  ASSERT_EQ(config::video.capture, "portal");
+  EXPECT_EQ(capture_request_override_reason("kms", "portal", "host_virtual_display", false, false), "virtual_display_backend");
+
+  // A launch into a Gamescope session asks for the portal as well, so nothing is rewritten, and
+  // the session is in no Host Virtual Display: the Gamescope rule is why it asked for the portal.
+  {
+    CaptureLogCapture quiet;
+    stream_display_policy::apply_capture_for_session_transition("host_virtual_display", "gamescope_stream");
+  }
+  ASSERT_EQ(config::video.capture, "portal");
+  EXPECT_EQ(capture_request_override_reason("kms", "portal", "gamescope_stream", false, false), "gamescope_session");
+
+  // Teardown ends the session's rule, and the load's answers again.
+  stream_display_policy::forget_host_default();
+  EXPECT_EQ(capture_request_override_reason("kms", "portal", "host_virtual_display", false, false), "virtual_display_backend");
+
+  // A mode rule answers only for the backend it asked for. A private compositor asks for wlr, so a
+  // request for the portal is not its doing, and the rule that wrote the portal answers.
+  EXPECT_EQ(capture_request_override_reason("kms", "portal", "headless_stream", true, false), "virtual_display_backend");
+  // A rewrite answers only for the backend it wrote. The load wrote the portal, so it does not
+  // explain a request for wlr, and nothing is guessed for one.
+  EXPECT_EQ(capture_request_override_reason("kms", "wlr", "desktop_display", false, false), "");
+}
+
+TEST(StreamDisplayPolicyTests, ARequestUnderSteamGameModeNamesDesktopDiscoveryUntilTheHoldIsGivenBack) {
+  using stream_display_policy::capture_request_override_reason;
+  using stream_display_policy::game_mode_reconcile_e;
+  ScopedPrivateRuntimePath runtime_path;
+  LinuxDisplayPolicyGuard guard;
+  LoadedCaptureGuard loaded_guard;
+  SubstitutionNoteGuard substitution_guard;
+  platf::set_capture_backend_substitution_for_tests("");
+  set_loaded_capture_setting("wlr");
+  std::string error;
+  ASSERT_TRUE(stream_display_policy::apply_selection("headless_stream", error)) << error;
+  config::video.capture = "wlr";
+  {
+    CaptureLogCapture quiet;
+    ASSERT_EQ(stream_display_policy::reconcile_game_mode(true, false), game_mode_reconcile_e::entered);
+  }
+  ASSERT_TRUE(config::video.capture.empty());
+  EXPECT_EQ(capture_request_override_reason("wlr", "", "desktop_display", false, false), "desktop_discovery");
+  ASSERT_EQ(stream_display_policy::reconcile_game_mode(false, false), game_mode_reconcile_e::left);
+  config::video.capture.clear();
+  EXPECT_EQ(capture_request_override_reason("wlr", "", "desktop_display", false, false), "");
+}
+
+namespace portal {
+  platf::capture_route_t portal_capture_route_for_tests(std::string_view gamescope, std::string_view kwin);
+}
+
+TEST(StreamDisplayPolicyTests, AModeRewriteAndARouteFallbackReachTheSessionsPublishedCapture) {
+  // polaris.conf says kms. A launch into a Gamescope session sets it aside for the portal, the
+  // portal finds no gamescope node and takes a ScreenCast, and the session publishes both reasons
+  // through the same path its encode loop takes.
+  LinuxDisplayPolicyGuard guard;
+  LoadedCaptureGuard loaded_guard;
+  HeldHostDefaultGuard held_guard;
+  SubstitutionNoteGuard substitution_guard;
+  platf::set_capture_backend_substitution_for_tests("");
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  set_loaded_capture_setting("kms");
+  config::video.linux_display.stream_mode = "desktop_display";
+  config::video.capture = "kms";
+  {
+    CaptureLogCapture quiet;
+    stream_display_policy::apply_capture_for_session_transition("desktop_display", "gamescope_stream");
+  }
+  ASSERT_EQ(config::video.capture, "portal");
+
+  video::config_t session {};
+  session.session_generation = 398;
+  session.capture_generation.stream_mode = "gamescope_stream";
+  session.capture_generation.private_runtime = "gamescope";
+  session.capture_generation.capture_backend = "portal";
+  session.capture_request = video::capture_request_for_session_for_tests(session.capture_generation);
+  const auto route = portal::portal_capture_route_for_tests("missing", "not_asked");
+  stream_stats::add_client("10.0.0.5", "Client", 398);
+  bool published = false;
+  ASSERT_TRUE(video::publish_capture_backend_for_tests(session, route, published));
+
+  const auto json = nlohmann::json::parse(stream_stats::get_current().to_json());
+  const auto &capture = json["clients"][0]["capture"];
+  EXPECT_EQ(capture["preference"], "kms");
+  EXPECT_EQ(capture["requested"], "portal");
+  EXPECT_EQ(capture["opened"], "portal");
+  EXPECT_EQ(capture["route"], "portal_screencast");
+  EXPECT_EQ(capture["mode_override_reason"], "gamescope_session");
+  EXPECT_EQ(capture["route_fallback_reason"], "gamescope_node_missing");
+  EXPECT_EQ(json["capture_mode_override_reason"], "gamescope_session");
+  EXPECT_EQ(json["capture_route_fallback_reason"], "gamescope_node_missing");
+}
+
+TEST(StreamDisplayPolicyTests, ASessionTakesPolarisConfAndTheRuleItsOwnGenerationMet) {
+  LinuxDisplayPolicyGuard guard;
+  LoadedCaptureGuard loaded_guard;
+  SubstitutionNoteGuard substitution_guard;
+  platf::set_capture_backend_substitution_for_tests("");
+  set_loaded_capture_setting("drm");
+  // The live mode is Mirror Desktop; the generation was built for Private Stream and says so.
+  config::video.linux_display.stream_mode = "desktop_display";
+  config::video.linux_display.use_cage_compositor = false;
+  config::video.capture = "drm";
+  capture_generation::identity_t generation;
+  generation.stream_mode = "headless_stream";
+  generation.use_cage_compositor = true;
+  generation.capture_backend = "wlr";
+  auto request = video::capture_request_for_session_for_tests(generation);
+  EXPECT_EQ(request.preference, "drm") << "polaris.conf as written, before any rewrite";
+  EXPECT_EQ(request.mode_override_reason, "private_compositor");
+
+  // The generation's own exact output is asked, not the default.
+  platf::set_capture_backend_substitution_for_tests("kms -> portal");
+  generation = {};
+  generation.stream_mode = "desktop_display";
+  EXPECT_EQ(video::capture_request_for_session_for_tests(generation).mode_override_reason, "substituted");
+  generation.exact_display_name = "DP-2";
+  generation.requested_output_name = "DP-2";
+  EXPECT_EQ(video::capture_request_for_session_for_tests(generation).mode_override_reason, "");
+
+  // A request for the backend polaris.conf names has nothing set aside.
+  generation = {};
+  generation.stream_mode = "desktop_display";
+  generation.capture_backend = "kms";
+  EXPECT_EQ(video::capture_request_for_session_for_tests(generation).mode_override_reason, "");
 }

@@ -1154,3 +1154,10 @@ TEST(AiOptimizerReconfigure, StatusAndEnabledFollowSavedSettingsWithoutARestart)
   EXPECT_FALSE(ai_optimizer::is_enabled());
   EXPECT_FALSE(nlohmann::json::parse(ai_optimizer::get_status_json()).value("enabled", true));
 }
+
+TEST(AiOptimizerBitrateCeiling, PyroWaveRecordsKeepTheCodecsOwnCeiling) {
+  EXPECT_EQ(ai_optimizer::bitrate_ceiling_kbps("pyrowave"), 300000);
+  EXPECT_EQ(ai_optimizer::bitrate_ceiling_kbps("PyroWave"), 300000);
+  EXPECT_EQ(ai_optimizer::bitrate_ceiling_kbps("hevc"), 100000);
+  EXPECT_EQ(ai_optimizer::bitrate_ceiling_kbps(""), 100000);
+}

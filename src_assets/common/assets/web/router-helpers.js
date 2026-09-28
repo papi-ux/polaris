@@ -1,3 +1,5 @@
+import { readSettingsRefusal } from './config-cache.js'
+
 const PUBLIC_ROUTES = new Set(['/login', '/welcome', '/recover', '/reconnecting'])
 
 function isMutatingMethod(method) {
@@ -127,6 +129,13 @@ export async function probeWebUiAuth(fetchImpl = window.fetch, baseUrl = window.
       return { state: AUTH_PROBE_STATE.login }
     }
     if (!response.ok) {
+      // GET ./api/config authenticates the request before it reads the
+      // settings file, so a refusal of that file (#782) comes from a signed-in
+      // session on a host that is up. Let it in; Settings explains the file.
+      const settingsUnreadable = await readSettingsRefusal(response)
+      if (settingsUnreadable) {
+        return { state: AUTH_PROBE_STATE.authenticated, config: null, settingsUnreadable }
+      }
       await discardResponseBody(response)
       return { state: AUTH_PROBE_STATE.unavailable }
     }
