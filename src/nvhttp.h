@@ -24,6 +24,7 @@
 
 // local includes
 #include "crypto.h"
+#include "pyrowave_availability.h"
 #include "rtsp.h"
 #include "thread_safe.h"
 
@@ -692,6 +693,12 @@ namespace nvhttp {
   int advertised_max_launch_refresh_rate_for_tests();
   /// Put a recorded launch refusal (or the fallback text) on a response tree; see launch_failure.h.
   void put_launch_refusal_for_tests(boost::property_tree::ptree &tree, int status, const std::string &fallback_message);
+  /// The capture object capabilities builds its codec offer on, with only that offer in it.
+  nlohmann::json capture_codecs_for_tests(
+    int hevc_mode,
+    int av1_mode,
+    const std::optional<pyrowave_availability::unavailable_t> &pyrowave_unavailable
+  );
 #ifdef __linux__
   void put_profile_launch_response_for_tests(boost::property_tree::ptree &tree, const profile_launch_response_t &response, bool resume);
 #endif

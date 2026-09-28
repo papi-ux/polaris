@@ -15,6 +15,7 @@
 
 // local includes
 #include "crypto.h"
+#include "launch_failure.h"
 #include "thread_safe.h"
 
 #ifdef _WIN32
@@ -207,6 +208,10 @@ namespace rtsp_stream {
     std::optional<int> target_bitrate_kbps;
     std::optional<int> nvenc_tune;
     std::optional<std::string> preferred_codec;
+    // The codec the client said at /launch or /resume it will ask for at ANNOUNCE, lower case, or
+    // empty when it did not say. It selects nothing: the handshake still picks the codec. It only
+    // lets a refusal that depends on the codec happen where its reason reaches the client.
+    std::string requested_video_codec;
     std::string optimization_source;
     std::string optimization_reasoning;
     std::string optimization_confidence;
@@ -271,6 +276,16 @@ namespace rtsp_stream {
 
   session_snapshot_t session_snapshot(const std::string_view& uuid);
 
+  /**
+   * @brief The refusal for a stream that would share the host's one capture with another codec's,
+   *        or nothing when it can share it.
+   * @param incoming_pyrowave Whether the stream asking to start is PyroWave.
+   * @details Counts every stream in the server that captures on this host, stopping ones included,
+   *          because a stopping stream can still hold the capture for a moment. See
+   *          pyrowave_availability::shares_capture.
+   */
+  std::optional<launch_failure::record_t> capture_in_use_refusal(bool incoming_pyrowave);
+
   /** Advertise the input features implemented by this launch's consumer. */
   std::uint32_t session_feature_flags(const launch_session_t &launch, std::uint32_t host_flags);
 
@@ -312,6 +327,8 @@ namespace rtsp_stream {
     int start_result
   );
   void add_session_for_tests(launch_session_t &launch_session, bool stopping);
+  /// The same, streaming the given video format.
+  void add_session_for_tests(launch_session_t &launch_session, bool stopping, int video_format);
 #endif
 
   std::list<std::string>

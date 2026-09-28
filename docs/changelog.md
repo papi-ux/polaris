@@ -13,6 +13,22 @@ starts at `v1.0.0`.
   it, and every `polaris` command, `sudo -H polaris --setup-host` first, stopped with
   `libpipewire-0.3.so.0: cannot open shared object file`. apt now installs it with Polaris. On
   1.4.13, `sudo apt install libpipewire-0.3-0t64` fixes it.
+- A PyroWave stream the host cannot capture for is refused before it starts, with the reason. On a
+  KDE desktop in HDR with capture through kms, KWin scans the desktop out in sixteen bit float,
+  which PyroWave cannot read. The host used to find that out at the first frame, after the client
+  had negotiated the codec and built a decoder, so the stream connected and carried nothing.
+  The host now reads the format of the framebuffer capture would read before the stream, and a
+  launch or resume that names PyroWave in the new `videoCodec` launch parameter is refused with
+  `pyrowave_capture_unreadable`, whose message says the desktop is in HDR and what to do instead. A
+  client that does not name its codec is refused at the RTSP handshake with status 503, before any
+  decoder is built. The capabilities reply leaves PyroWave out of `capture.codecs` when no launch
+  on the host could stream it, and says why in `capture.pyrowave_unavailable`, with a reason of
+  `not_built`, `no_vulkan_device`, `fp16_capture` or `capture_route_unsupported` and a message for
+  the player. A host that can run Private Stream keeps offering PyroWave, because Private Stream
+  captures its own session rather than the desktop. A capture setting that only NVENC can use,
+  `nvfbc`, now refuses PyroWave by name too. The same checks refuse a stream that would share the
+  host's one capture with another codec's stream, one PyroWave and the other not, with
+  `capture_in_use_by_other_codec`, where the second stream used to get no picture.
 
 - The first Space of a launcher made from the Spaces page can be made on Docker's containerd image
   store, the default on a fresh Docker 29 install (#664). There every such create was refused with

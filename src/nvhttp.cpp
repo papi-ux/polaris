@@ -422,6 +422,58 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", fallback_message);
     }
 
+    /**
+     * The refusal for a stream that joins the running app and said which codec it will ask for, when
+     * the host's capture cannot serve that codec: another codec's stream holds the one capture, or
+     * PyroWave cannot read what the capture route hands over. Nothing for a client that named no
+     * codec, which the RTSP handshake refuses instead, for a watcher, whose codec the owner's stream
+     * decides, or for a stream that captures nothing. Records the refusal when there is one.
+     */
+    bool refuse_declared_codec(const rtsp_stream::launch_session_t &launch_session) {
+      if (launch_session.requested_video_codec.empty() || launch_session.watch_only || launch_session.input_only) {
+        return false;
+      }
+      const bool pyrowave = launch_session.requested_video_codec == "pyrowave";
+      auto refusal = rtsp_stream::capture_in_use_refusal(pyrowave);
+      if (!refusal && pyrowave) {
+        refusal = video::pyrowave_session_capture_refusal();
+      }
+      if (!refusal) {
+        return false;
+      }
+      BOOST_LOG(warning) << "Refusing resume ["sv << refusal->code << "]: "sv << launch_failure::status_message(*refusal);
+      launch_failure::refuse(refusal->status, refusal->code, refusal->message, refusal->action);
+      return true;
+    }
+
+    /**
+     * The codecs capabilities offers in capture.codecs. PyroWave only where a launch can stream it,
+     * because unlike the others there is no software fallback to quietly take over: a device on this
+     * host has to run the compute shaders, and capture has to hand over frames it can read.
+     * Otherwise capture.pyrowave_unavailable says why, as {reason, message}, so a client can say
+     * why instead of sending the player to look for another build. Both field names are a client
+     * contract.
+     */
+    void put_capture_codecs(
+      nlohmann::json &capture,
+      int hevc_mode,
+      int av1_mode,
+      const std::optional<pyrowave_availability::unavailable_t> &pyrowave_unavailable
+    ) {
+      auto &codecs = capture["codecs"];
+      codecs = nlohmann::json::array({"h264"});
+      if (hevc_mode > 1) codecs.push_back("hevc");
+      if (av1_mode > 1) codecs.push_back("av1");
+      if (pyrowave_unavailable) {
+        capture["pyrowave_unavailable"] = {
+          {"reason", std::string {pyrowave_availability::reason_id(pyrowave_unavailable->reason)}},
+          {"message", pyrowave_unavailable->message},
+        };
+      } else {
+        codecs.push_back("pyrowave");
+      }
+    }
+
 #ifdef __linux__
     // A Space launch refusal reaches the client the way a host launch refusal
     // does: the words as status_message, the code and action as root attributes
@@ -2977,6 +3029,16 @@ namespace nvhttp {
     put_launch_refusal(tree, status, fallback_message);
   }
 
+  nlohmann::json capture_codecs_for_tests(
+    int hevc_mode,
+    int av1_mode,
+    const std::optional<pyrowave_availability::unavailable_t> &pyrowave_unavailable
+  ) {
+    nlohmann::json capture = nlohmann::json::object();
+    put_capture_codecs(capture, hevc_mode, av1_mode, pyrowave_unavailable);
+    return capture;
+  }
+
 #ifdef __linux__
   void put_profile_launch_response_for_tests(pt::ptree &tree, const profile_launch_response_t &response, bool resume) {
     put_profile_launch_response(tree, response, resume);
@@ -5072,6 +5134,12 @@ namespace nvhttp {
       }
       launch_session->encoder_backend = *normalized;
       launch_session->encoder_backend_explicit = true;
+    }
+    // Which codec the client will ask for at the handshake, when it says so here. It changes nothing
+    // the handshake picks; it lets a refusal that depends on the codec reach the client with its
+    // reason, where the handshake can only return a status.
+    if (const auto codec_it = args.find("videoCodec"); codec_it != args.end()) {
+      launch_session->requested_video_codec = lower_copy(codec_it->second);
     }
     const auto expected_encoder_it = args.find("expectedEncoder");
     if (launch_session->resolved_profile_from_client && launch_session->encoder_backend_explicit) {
@@ -7381,6 +7449,12 @@ namespace nvhttp {
           return;
         }
 
+        if (refuse_declared_codec(*launch_session)) {
+          tree.put("root.resume", 0);
+          put_launch_refusal(tree, 503, "The host's capture cannot serve the codec this stream asked for.");
+          return;
+        }
+
         if (no_active_sessions && !proc::proc.session_uses_virtual_display()) {
           display_device::configure_display(config::video, *launch_session);
 #ifdef __linux__
@@ -7687,6 +7761,12 @@ namespace nvhttp {
 
     if (config::input.enable_input_only_mode && current_appid == proc::input_only_app_id) {
       launch_session->input_only = true;
+    }
+
+    if (refuse_declared_codec(*launch_session)) {
+      tree.put("root.resume", 0);
+      put_launch_refusal(tree, 503, "The host's capture cannot serve the codec this stream asked for.");
+      return;
     }
 
     if (no_active_sessions && !proc::proc.session_uses_virtual_display()) {
@@ -8351,15 +8431,7 @@ namespace nvhttp {
       // ServerMaxLaunchRefreshRate. Both must reflect launch admission.
       capture["max_fps"] = advertised_max_launch_refresh_rate_for_http();
 
-      auto &codecs = capture["codecs"];
-      codecs = nlohmann::json::array({"h264"});
-      if (config::video.hevc_mode > 1) codecs.push_back("hevc");
-      if (config::video.av1_mode > 1) codecs.push_back("av1");
-#ifdef POLARIS_BUILD_PYROWAVE
-      // Only when a device on this host can actually run the compute shaders, because unlike the
-      // others there is no software fallback to quietly take over.
-      if (pyrowave_encode::available()) codecs.push_back("pyrowave");
-#endif
+      put_capture_codecs(capture, config::video.hevc_mode, config::video.av1_mode, video::pyrowave_unavailable());
 
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");

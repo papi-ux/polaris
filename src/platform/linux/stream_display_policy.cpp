@@ -445,6 +445,25 @@ namespace stream_display_policy {
     return false;
   }
 
+  bool private_runtime_selection_available() {
+    stream_path::host_capabilities_t caps;
+    caps.labwc_present = stream_path::binary_on_path("labwc");
+    caps.wlr_randr_present = stream_path::binary_on_path("wlr-randr");
+    caps.gamescope_present = stream_path::binary_on_path("gamescope");
+    for (const auto &path : stream_path::registry()) {
+      if (!path.available || !selection_session_overridable(path.id)) {
+        continue;
+      }
+      if (path.runtime == stream_path::runtime_kind_e::LABWC && stream_path::labwc_runtime_available(caps)) {
+        return true;
+      }
+      if (path.runtime == stream_path::runtime_kind_e::GAMESCOPE && caps.gamescope_present) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   std::string selection_unavailable_reason(std::string_view selection) {
     const auto key = to_lower_copy(selection);
     const bool virtual_display_available =

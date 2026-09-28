@@ -7,6 +7,8 @@
 // local includes
 #include "capture_generation.h"
 #include "encoder_probe_reuse.h"
+#include "launch_failure.h"
+#include "pyrowave_availability.h"
 #include <functional>
 #include "input.h"
 #include "nvenc/nvenc_config.h"
@@ -923,6 +925,35 @@ namespace video {
    *          sees the connection drop with a bare "-1" (#739).
    */
   bool refuse_launch_if_capture_unavailable(const capture_generation::identity_t &generation);
+
+  /**
+   * @brief What a generation's capture route hands PyroWave, judged without opening a display.
+   * @details The backend dispatch would open for PyroWave's memory type, and for KMS the format of
+   *          the framebuffer on the plane it would read, asked of the card. Unknown before the host
+   *          has evaluated its capture sources, and on a build without PyroWave.
+   */
+  pyrowave_availability::route_e pyrowave_capture_route(const capture_generation::identity_t &generation);
+
+  /**
+   * @brief Why capabilities leaves PyroWave out of capture.codecs on this host, or nothing.
+   * @details Judged for the route a launch that names no stream mode takes, and only when no mode a
+   *          client can pick for one launch runs its own compositor; see
+   *          pyrowave_availability::unavailable.
+   */
+  std::optional<pyrowave_availability::unavailable_t> pyrowave_unavailable();
+
+  /**
+   * @brief The refusal for a PyroWave stream on this generation's capture route, or nothing.
+   * @details Records nothing. A launch hands the result to launch_failure::refuse; the RTSP
+   *          handshake, which has no record to carry it to the client, logs it.
+   */
+  std::optional<launch_failure::record_t> pyrowave_capture_refusal(const capture_generation::identity_t &generation);
+
+  /**
+   * @brief pyrowave_capture_refusal for the generation the next stream will capture: the one the
+   *        running launch installed, or the live configuration's when none has.
+   */
+  std::optional<launch_failure::record_t> pyrowave_session_capture_refusal();
 
   /**
    * @brief Get the name of the currently selected encoder.

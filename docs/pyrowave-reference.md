@@ -6,10 +6,16 @@ and how to turn it on, start with [PyroWave](pyrowave.md).
 ## A KDE host with a display in HDR
 
 If no display on the host is in HDR, none of this applies. On a KDE desktop with a display in HDR,
-PyroWave cannot stream at all, SDR included, when capture goes through kms: Nova connects but shows
-no picture, then the stream ends. KWin sends HDR frames in a format PyroWave cannot read. This
-happens with **Request HDR when host supports it** on or off in Nova. The format check comes before
-any HDR decision, so both end the same way.
+PyroWave cannot stream the desktop at all, SDR included, when capture goes through kms. KWin sends
+HDR frames in a format PyroWave cannot read. This happens with **Request HDR when host supports it**
+on or off in Nova. The format check comes before any HDR decision, so both end the same way.
+
+From Polaris 1.4.14 the host reads the display's format before the stream starts and refuses it. A
+Nova that tells the host at launch that it will ask for PyroWave shows the reason, which names HDR;
+an older Nova shows an RTSP handshake failure with error 503. Polaris 1.4.13 lets Nova connect, show
+no picture, then end the stream. If the host can run Private Stream, which captures its own session
+rather than the desktop, it keeps offering PyroWave for that; otherwise it stops offering PyroWave
+while the desktop is in HDR.
 
 ### Does capture go through kms?
 
@@ -29,9 +35,10 @@ To see which route capture takes, start a stream with any codec, then run
 
 ### Confirm the failure
 
-After the failed stream, run `journalctl --user --since '10 min ago' | grep 'cannot read'` on the
-host. It shows `fourcc 1211384385`. Doctor in Polaris 1.4.13 does not flag this and labels the
-capture format `bgra8`, so it looks normal there.
+After the refused stream, run `journalctl --user --since '10 min ago' | grep 'pyrowave_capture_unreadable'`
+on the host. On Polaris 1.4.13, grep for `cannot read` instead; it shows `fourcc 1211384385`, and
+Doctor there does not flag this and labels the capture format `bgra8`, so it looks normal. Newer
+Doctor raises `capture_format_unreadable_by_pyrowave` once any stream has captured the desktop.
 
 ### Fixes
 
@@ -375,7 +382,9 @@ journal. Every line below contains `PyroWave:`.
 | `encoding straight from a 1920x1080 picture on <GPU>` | The frame arrived in host memory, was copied to the GPU, and its colour was converted there. |
 | `falling back to converting frames on the CPU` | The GPU path could not start, so colour conversion runs on the CPU. This happens for SDR only. |
 | `POLARIS_PYROWAVE_GPU_INPUT is off, so frames are converted on the CPU` | That environment variable forced the CPU converter. If this run's log has no such line, it is not set. |
-| `Error: PyroWave: capture is handing over a dmabuf in a format this codec cannot read (fourcc ...)` | Capture hands over a format PyroWave cannot read, identified by its fourcc (the four character code of a pixel format), and the stream ends. See [A KDE host with a display in HDR](#a-kde-host-with-a-display-in-hdr). |
+| `Refusing launch [pyrowave_capture_unreadable]`, or the same code after `Refusing resume` or `Refusing RTSP setup` | The display capture would read is in a format PyroWave cannot read, so the stream was refused before it started; the rest of the line says which. See [A KDE host with a display in HDR](#a-kde-host-with-a-display-in-hdr). |
+| `Refusing resume [capture_in_use_by_other_codec]` or `Refusing RTSP setup [capture_in_use_by_other_codec]` | Another stream on the host is capturing for a different codec, one PyroWave and the other not, and one capture cannot serve both. |
+| `Error: PyroWave: capture is handing over a dmabuf in a format this codec cannot read (fourcc ...)` | Capture hands over a format PyroWave cannot read, identified by its fourcc (the four character code of a pixel format), and the stream ends. From Polaris 1.4.14 this is a backstop for a display whose format changed after the stream started. See [A KDE host with a display in HDR](#a-kde-host-with-a-display-in-hdr). |
 | `this client negotiated HDR and the captured display is not in HDR` | The client asked for HDR and the captured display is not in HDR, or its HDR metadata could not be read, so the stream is refused, whatever the capture route. See [Limits](#limits). |
 | `over 300 frames, ... ms and encode ... ms a frame` | The average cost of a frame, after 300 frames (five seconds at 60 fps), then every 18,000 frames (five minutes). |
 
@@ -506,10 +515,11 @@ for as long as the display keeps its mode. A KDE display in HDR scans out `ABGR1
 `Error: PyroWave: capture is handing over a dmabuf in a format this codec cannot read (fourcc
 1211384385); ending the stream, because that does not change while the display keeps its mode`.
 This check runs before any dynamic range decision, so an SDR request ends the same way.
-Polaris 1.4.13's diagnostics and its `kms:` log line label that format `bgra8`. From commit
-b38588e2 on the development branch, not yet released, the log names it `AB4H` and Doctor raises
-`capture_format_unreadable_by_pyrowave`. That is a clearer diagnosis, not a fix: the conversion for
-sixteen bit float is not written.
+Polaris 1.4.13's diagnostics and its `kms:` log line label that format `bgra8`. From Polaris 1.4.14
+the log names it `AB4H`, Doctor raises `capture_format_unreadable_by_pyrowave`, and the host reads
+the scanout's format before the stream and refuses it with `pyrowave_capture_unreadable`. That
+refuses earlier and says why; it is not a fix, because the conversion for sixteen bit float is not
+written.
 
 The encoder selection reason is built from `pyrowave_route` and says where the encoder converted
 colour: after importing a DMA-BUF (`zero_copy`), after copying a frame from host memory to the GPU

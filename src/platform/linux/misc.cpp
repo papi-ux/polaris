@@ -1679,6 +1679,7 @@ std::string get_local_ip_for_gateway() {
 
 #ifdef POLARIS_BUILD_DRM
   std::vector<std::string> kms_display_names(mem_type_e hwdevice_type);
+  std::optional<std::uint32_t> kms_scanout_fourcc(std::string_view display_name);
   std::shared_ptr<display_t> kms_display(mem_type_e hwdevice_type, const std::string &display_name, const video::config_t &config);
 
   bool verify_kms() {
@@ -2369,6 +2370,70 @@ std::string get_local_ip_for_gateway() {
              x11_available,
              true
            ) != display_backend_e::none;
+  }
+
+#ifdef POLARIS_TESTS
+  static std::optional<capture_route_facts_for_tests_t> capture_route_facts_override;
+
+  void set_capture_route_facts_for_tests(std::optional<capture_route_facts_for_tests_t> facts) {
+    capture_route_facts_override = std::move(facts);
+  }
+#endif
+
+  std::string capture_backend_for_request(std::string_view requested, bool exact_output_owned, bool cuda_memory) {
+#ifdef POLARIS_TESTS
+    if (capture_route_facts_override) {
+      return cuda_memory ? capture_route_facts_override->encoder_backend : capture_route_facts_override->backend;
+    }
+#endif
+    // Nothing has looked yet, so there is nothing to answer with.
+    if (!capture_sources_evaluated) {
+      return {};
+    }
+    bool nvfbc_available = false;
+    bool wayland_available = false;
+    bool portal_available = false;
+    bool kms_available = false;
+    bool x11_available = false;
+#ifdef POLARIS_BUILD_CUDA
+    nvfbc_available = sources[source::NVFBC];
+#endif
+#ifdef POLARIS_BUILD_WAYLAND
+    wayland_available = sources[source::WAYLAND];
+#endif
+#ifdef POLARIS_BUILD_PORTAL
+    portal_available = sources[source::PORTAL];
+#endif
+#ifdef POLARIS_BUILD_DRM
+    kms_available = sources[source::KMS];
+#endif
+#ifdef POLARIS_BUILD_X11
+    x11_available = sources[source::X11];
+#endif
+    return std::string {display_backend_name(choose_display_backend(
+      requested,
+      exact_output_owned,
+      nvfbc_available,
+      wayland_available,
+      portal_available,
+      kms_available,
+      x11_available,
+      cuda_memory
+    ))};
+  }
+
+  std::optional<std::uint32_t> kms_capture_scanout_fourcc(std::string_view display_name) {
+#ifdef POLARIS_TESTS
+    if (capture_route_facts_override) {
+      return capture_route_facts_override->scanout_fourcc;
+    }
+#endif
+#ifdef POLARIS_BUILD_DRM
+    return kms_scanout_fourcc(display_name);
+#else
+    (void) display_name;
+    return std::nullopt;
+#endif
   }
 
   std::string thread_priority_unavailable_note() {

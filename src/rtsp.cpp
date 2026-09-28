@@ -1086,6 +1086,20 @@ namespace rtsp_stream {
       return snapshot;
     }
 
+    /// For every stream that captures on this host and has not stopped, whether it is PyroWave.
+    std::vector<bool> host_capture_pyrowave_flags() {
+      std::vector<bool> flags;
+      auto lg = _session_slots.lock();
+      for (auto &slot : *_session_slots) {
+        if (!slot || !stream::session::uses_host_process(*slot) ||
+            stream::session::state(*slot) == stream::session::state_e::STOPPED) {
+          continue;
+        }
+        flags.push_back(stream::session::profile(*slot).video_format == video::VIDEO_FORMAT_PYROWAVE);
+      }
+      return flags;
+    }
+
     std::list<std::string>
     get_all_session_uuids() {
       std::list<std::string> uuids;
@@ -1264,6 +1278,10 @@ namespace rtsp_stream {
   }
 
   void add_session_for_tests(launch_session_t &launch_session, bool stopping) {
+    add_session_for_tests(launch_session, stopping, 0);
+  }
+
+  void add_session_for_tests(launch_session_t &launch_session, bool stopping, int video_format) {
     if (launch_session.iv.size() < sizeof(std::uint32_t)) {
       launch_session.iv.resize(16);
     }
@@ -1271,6 +1289,7 @@ namespace rtsp_stream {
       launch_session.gcm_key.resize(16);
     }
     stream::config_t config {};
+    config.monitor.videoFormat = video_format;
     auto session = stream::session::alloc(config, launch_session);
     stream::session::set_state_for_tests(
       *session,
@@ -1282,6 +1301,13 @@ namespace rtsp_stream {
 
   std::list<std::string> get_all_session_uuids() {
     return server.get_all_session_uuids();
+  }
+
+  std::optional<launch_failure::record_t> capture_in_use_refusal(bool incoming_pyrowave) {
+    if (pyrowave_availability::shares_capture(incoming_pyrowave, server.host_capture_pyrowave_flags())) {
+      return std::nullopt;
+    }
+    return pyrowave_availability::capture_in_use_refusal(incoming_pyrowave);
   }
 
   void terminate_sessions() {
@@ -1859,6 +1885,24 @@ namespace rtsp_stream {
       BOOST_LOG(warning) << *mismatch;
       respond(sock, session, &option, 412, "Precondition Failed", req->sequenceNumber, {});
       return;
+    }
+
+    // Refusals that depend on what capture can do for this codec, made before the client builds a
+    // decoder for a stream that would carry nothing. A launch that named its codec was refused on the
+    // same grounds with its reason; one that did not learns only this status, so it is one no other
+    // ANNOUNCE refusal uses. A worker stream and an input only one capture nothing here.
+    if (!session.worker_connection_requirement()->load() && !session.input_only) {
+      const bool wants_pyrowave = config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE;
+      auto refusal = capture_in_use_refusal(wants_pyrowave);
+      if (!refusal && wants_pyrowave) {
+        refusal = video::pyrowave_session_capture_refusal();
+      }
+      if (refusal) {
+        BOOST_LOG(warning) << "Refusing RTSP setup ["sv << refusal->code << "]: "sv
+                           << launch_failure::status_message(*refusal);
+        respond(sock, session, &option, 503, "Service Unavailable", req->sequenceNumber, {});
+        return;
+      }
     }
 
     // Check that any required encryption is enabled

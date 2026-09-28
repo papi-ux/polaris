@@ -8623,6 +8623,18 @@ namespace proc {
         video::refuse_launch_if_capture_unavailable(capture_generation)) {
       return 503;
     }
+    // A launch that said it will ask for PyroWave is refused here, with the reason, when its capture
+    // route hands over frames PyroWave cannot read. Without the word from the client the refusal
+    // waits for the handshake, which can only return a status, and before either existed it came at
+    // the first frame, after the client had built a decoder for a stream that carried nothing (#159).
+    if (!launch_session->input_only && !launch_session->watch_only &&
+        launch_session->requested_video_codec == "pyrowave") {
+      if (const auto refusal = video::pyrowave_capture_refusal(capture_generation)) {
+        BOOST_LOG(error) << "Refusing launch ["sv << refusal->code << "]: "sv << launch_failure::status_message(*refusal);
+        launch_failure::refuse(refusal->status, refusal->code, refusal->message, refusal->action);
+        return 503;
+      }
+    }
 #endif
 
     // Probe encoders again before streaming to ensure our chosen

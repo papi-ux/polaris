@@ -1274,19 +1274,19 @@ namespace stream_stats {
 
 #ifdef POLARIS_BUILD_PYROWAVE
     // A scanout PyroWave cannot read. KWin composites HDR as sixteen bit float, so a KDE host in HDR
-    // with capture = kms hands the codec a buffer it has to refuse, and the refusal lands after the
-    // client has negotiated the codec and built a decoder: the session starts and carries no video at
-    // all. Nothing else in the report calls the format unusual, so without this there is nowhere for a
-    // user to find out why.
+    // with capture = kms hands the codec a buffer it has to refuse. The refusal comes before the
+    // stream now, by name to a client that said it would ask for PyroWave and as a bare status at
+    // the handshake to one that did not, and nothing else in the report calls the format unusual, so
+    // this is where a user finds out why.
     if (stats.capture_format == platf::frame_format_e::rgba16f) {
       configuration_warnings.push_back({
         {"id", "capture_format_unreadable_by_pyrowave"},
         {"severity", "warning"},
         {"message", "Capture on this host is handing over sixteen bit float frames, which PyroWave "
                     "cannot read. A KDE desktop in HDR composites in that format, so with "
-                    "capture = kms the codec is offered, negotiated, and then refuses the first "
-                    "frame: the stream connects and carries no video. Every other codec is "
-                    "unaffected, and so is a host scanning out packed ten bit HDR."},
+                    "capture = kms a PyroWave stream of the desktop is refused before it starts. "
+                    "Every other codec is unaffected, and so is a host scanning out packed ten bit "
+                    "HDR."},
         {"action", "Turn HDR off on the host display to use PyroWave there, or capture by another "
                    "route. This is the compositor's float buffer rather than HDR itself, so it does "
                    "not change while the display keeps its mode."}

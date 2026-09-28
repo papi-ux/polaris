@@ -412,6 +412,15 @@ namespace stream_display_policy {
   bool selection_session_overridable(std::string_view selection);
 
   /**
+   * @brief Whether a client may pick, for one launch, a stream mode that runs its own compositor.
+   *
+   * Such a mode is captured from that compositor and never from a KMS scanout, so what the host
+   * desktop scans out does not reach it. Answered from the binaries on PATH, as the capability
+   * listing answers it for these modes, without the virtual display probes other modes need.
+   */
+  bool private_runtime_selection_available();
+
+  /**
    * @brief Whether an app that mirrors the desktop should step aside for this selection.
    *
    * An entry with desktop-mirror semantics exists so that "Desktop" shows the real desktop rather

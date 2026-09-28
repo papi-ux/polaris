@@ -7115,6 +7115,66 @@ namespace video {
 #endif
   }
 
+  pyrowave_availability::route_e pyrowave_capture_route(const capture_generation::identity_t &generation) {
+#if defined(__linux__) && defined(POLARIS_BUILD_PYROWAVE)
+    const bool exact = !generation.exact_display_name.empty();
+    // PyroWave's memory type is never CUDA, so dispatch never gives it NvFBC.
+    const auto backend = platf::capture_backend_for_request(generation.capture_backend, exact, false);
+    std::optional<pyrowave_availability::scanout_t> scanout;
+    if (backend == "kms") {
+      // The display the capture thread would open: its exact output when the generation owns one,
+      // otherwise the configured output, found the way refresh_displays finds it.
+      const auto &display_name = exact ? generation.exact_display_name : generation.requested_output_name;
+      if (const auto fourcc = platf::kms_capture_scanout_fourcc(display_name)) {
+        scanout = pyrowave_availability::scanout_t {
+          pyrowave_encode::can_read_dmabuf_format(*fourcc),
+          pyrowave_availability::is_fp16_fourcc(*fourcc),
+        };
+      }
+    }
+    // Asked only to tell a request PyroWave alone cannot use from one no codec can use.
+    const auto encoder_backend = backend == "none" ?
+                                   platf::capture_backend_for_request(generation.capture_backend, exact, true) :
+                                   std::string {};
+    return pyrowave_availability::classify_route(backend, encoder_backend, scanout);
+#else
+    (void) generation;
+    return pyrowave_availability::route_e::unknown;
+#endif
+  }
+
+  std::optional<pyrowave_availability::unavailable_t> pyrowave_unavailable() {
+    pyrowave_availability::offer_facts_t facts;
+#ifdef POLARIS_BUILD_PYROWAVE
+    facts.built = true;
+    facts.device = pyrowave_encode::available();
+  #ifdef __linux__
+    if (facts.device) {
+      // The cheap question first. A mode with its own compositor is a launch that streams whatever
+      // the desktop does, and when there is one nothing else here decides the answer.
+      facts.private_mode_available = stream_display_policy::private_runtime_selection_available();
+      if (!facts.private_mode_available) {
+        facts.host_route = pyrowave_capture_route(current_capture_generation_identity());
+      }
+    }
+  #endif
+#endif
+    return pyrowave_availability::unavailable(facts);
+  }
+
+  std::optional<launch_failure::record_t> pyrowave_capture_refusal(const capture_generation::identity_t &generation) {
+    return pyrowave_availability::launch_refusal(pyrowave_capture_route(generation), generation.capture_backend);
+  }
+
+  std::optional<launch_failure::record_t> pyrowave_session_capture_refusal() {
+    // The generation capture() will take, chosen the way it chooses it.
+    auto generation = proc::proc.capture_generation;
+    if (generation.empty()) {
+      generation = current_capture_generation_identity();
+    }
+    return pyrowave_capture_refusal(generation);
+  }
+
   void note_launch_refused_by_probe(bool against_private_compositor) {
 #ifdef __linux__
     if (platf::kms_capture_refused_for_capability()) {

@@ -918,6 +918,37 @@ namespace platf {
   bool capture_request_satisfiable(std::string_view requested, bool exact_output_owned);
 
   /**
+   * @brief The capture backend dispatch would open for a request, for a session whose frames go to
+   *        CUDA memory or to anything else.
+   * @param requested The backend a generation asks for; empty or "auto" for auto-selection.
+   * @param exact_output_owned True when the generation owns an exact output name.
+   * @param cuda_memory True for the memory type NVENC reads, which is the only one NvFBC can fill.
+   * @return nvfbc, wlr, portal, kms, x11 or none, from the last evaluation; empty before any has run.
+   */
+  std::string capture_backend_for_request(std::string_view requested, bool exact_output_owned, bool cuda_memory);
+
+  /**
+   * @brief The DRM format of the framebuffer KMS capture would read for a display name, asked of the
+   *        card without opening a capture or raising a capability.
+   * @param display_name A capture display name: empty for the first display, a legacy index, or a
+   *        KMS name or alias.
+   * @return Empty when no card answers or the name does not pick out one plane.
+   */
+  std::optional<std::uint32_t> kms_capture_scanout_fourcc(std::string_view display_name);
+
+  #ifdef POLARIS_TESTS
+  /// What capture_backend_for_request and kms_capture_scanout_fourcc answer while a test pins them.
+  struct capture_route_facts_for_tests_t {
+    std::string backend;  ///< the answer for any memory type but CUDA
+    std::string encoder_backend;  ///< the answer for CUDA memory
+    std::optional<std::uint32_t> scanout_fourcc;
+  };
+
+  /// Pin both answers; nullopt restores the real ones.
+  void set_capture_route_facts_for_tests(std::optional<capture_route_facts_for_tests_t> facts);
+  #endif
+
+  /**
    * @brief The resource limits that stopped Polaris raising its capture, encode
    * and audio thread priority, such as "RLIMIT_RTPRIO=0, RLIMIT_NICE=0".
    * @return Empty unless a worker thread has actually been refused elevation, so

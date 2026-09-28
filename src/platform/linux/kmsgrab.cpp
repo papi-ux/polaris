@@ -2009,4 +2009,112 @@ namespace platf {
     return names;
   }
 
+  std::optional<std::uint32_t> kms_scanout_fourcc(std::string_view display_name) {
+    // The walk kms_display_names makes, so a name resolves to the plane capture would open, and none
+    // of the rest of it: no capability raised, no connector probed, nothing logged and no shared
+    // state written. It is asked from request handlers while a capture may be running, and the
+    // format of a framebuffer is something DRM tells any process that can open the card.
+    std::vector<kms_selection::output_t> outputs;
+    std::vector<std::uint32_t> formats;
+
+    std::error_code ec;
+    for (fs::directory_iterator entry {"/dev/dri"sv, ec}; !ec && entry != fs::directory_iterator {}; entry.increment(ec)) {
+      const auto file = entry->path().filename().generic_string();
+      if (std::string_view {file}.substr(0, 4) != "card"sv) {
+        continue;
+      }
+
+      file_t fd {open(entry->path().c_str(), O_RDWR | O_CLOEXEC)};
+      if (fd.el < 0 || drmSetClientCap(fd.el, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1)) {
+        continue;
+      }
+      kms::plane_res_t planes {drmModeGetPlaneResources(fd.el)};
+      kms::res_t resources {drmModeGetResources(fd.el)};
+      if (!planes || !resources) {
+        continue;
+      }
+
+      std::string gpu;
+      {
+        drmDevicePtr device = nullptr;
+        if (drmGetDevice2(fd.el, 0, &device) == 0 && device) {
+          if (device->bustype == DRM_BUS_PCI && device->businfo.pci) {
+            const auto &pci = *device->businfo.pci;
+            gpu = std::format("pci-{:04x}:{:02x}:{:02x}.{:x}", pci.domain, pci.bus, pci.dev, pci.func);
+          }
+          drmFreeDevice(&device);
+        }
+      }
+
+      // The first connector on a CRTC names it, as map_crtc_to_monitor has it. The current state
+      // rather than a fresh probe, which can take a tenth of a second a connector reading EDIDs.
+      struct crtc_owner_t {
+        std::uint32_t type;
+        std::uint32_t kernel_index;
+        bool connected;
+      };
+
+      std::map<std::uint32_t, crtc_owner_t> owners;
+      for (int i = 0; i < resources->count_connectors; ++i) {
+        util::safe_ptr<drmModeConnector, drmModeFreeConnector> connector {drmModeGetConnectorCurrent(fd.el, resources->connectors[i])};
+        if (!connector) {
+          continue;
+        }
+        std::uint32_t crtc_id = 0;
+        if (connector->encoder_id) {
+          if (kms::encoder_t encoder {drmModeGetEncoder(fd.el, connector->encoder_id)}) {
+            crtc_id = encoder->crtc_id;
+          }
+        }
+        owners.emplace(crtc_id, crtc_owner_t {connector->connector_type, connector->connector_type_id, connector->connection == DRM_MODE_CONNECTED});
+      }
+
+      for (std::uint32_t i = 0; i < planes->count_planes; ++i) {
+        kms::plane_t plane {drmModeGetPlane(fd.el, planes->planes[i])};
+        if (!plane || !plane->fb_id || !kms::crtc_t {drmModeGetCrtc(fd.el, plane->crtc_id)}) {
+          continue;
+        }
+
+        bool cursor = false;
+        if (kms::obj_prop_t props {drmModeObjectGetProperties(fd.el, plane->plane_id, DRM_MODE_OBJECT_PLANE)}) {
+          for (std::uint32_t p = 0; p < props->count_props; ++p) {
+            kms::prop_t prop {drmModeGetProperty(fd.el, props->props[p])};
+            if (prop && prop->name == "type"sv) {
+              cursor = props->prop_values[p] == DRM_PLANE_TYPE_CURSOR;
+              break;
+            }
+          }
+        }
+        if (cursor) {
+          continue;
+        }
+
+        // What wrapper_fb reads: the format the framebuffer was made with, and XRGB8888 from a driver
+        // that only answers the old call.
+        std::uint32_t format = DRM_FORMAT_XRGB8888;
+        if (auto *fb2 = drmModeGetFB2(fd.el, plane->fb_id)) {
+          format = fb2->pixel_format;
+          drmModeFreeFB2(fb2);
+        } else if (auto *fb = drmModeGetFB(fd.el, plane->fb_id)) {
+          drmModeFreeFB(fb);
+        } else {
+          continue;
+        }
+
+        const auto owner = owners.find(plane->crtc_id);
+        const auto *type = owner != owners.end() ? drmModeGetConnectorTypeName(owner->second.type) : nullptr;
+        const auto connector = type && owner->second.kernel_index != 0 ?
+          std::format("{}-{}", type, owner->second.kernel_index) : std::string {};
+        outputs.push_back({gpu, connector, owner != owners.end() && owner->second.connected, plane->crtc_id});
+        formats.push_back(format);
+      }
+    }
+
+    const auto index = kms_selection::capture_index(kms_selection::display_names(outputs), display_name);
+    if (!index) {
+      return std::nullopt;
+    }
+    return formats[*index];
+  }
+
 }  // namespace platf
