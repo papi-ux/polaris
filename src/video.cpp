@@ -1812,6 +1812,7 @@ namespace video {
 
     std::shared_ptr<std::vector<packet_raw_t::replace_t>> replacements = std::make_shared<std::vector<packet_raw_t::replace_t>>();
     bool frame_submitted = false;
+    bool filler_stripped = false;
 
     cbs::nal_t sps;
     cbs::nal_t vps;
@@ -3836,6 +3837,17 @@ namespace video {
       // Hardware packet buffers may depend on thread-affine conversion
       // resources. Detach them here so teardown stays on the encoder thread.
       if (!packet->detach_encoder_buffer()) return AVERROR(ENOMEM);
+      // The detached copy is ours to shrink. On a still screen in CBR, filler
+      // is nearly all of an AMD frame.
+      auto *detached = packet->av_packet;
+      const auto stripped_size = cbs::strip_filler_data(detached->data, static_cast<std::size_t>(detached->size), ctx->codec_id);
+      if (stripped_size < static_cast<std::size_t>(detached->size)) {
+        if (!session.filler_stripped) {
+          BOOST_LOG(info) << "Removing the filler data the encoder pads frames with"sv;
+          session.filler_stripped = true;
+        }
+        av_shrink_packet(detached, static_cast<int>(stripped_size));
+      }
       packet->channel_data = channel_data;
       packets->raise(std::move(packet));
     }
