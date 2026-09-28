@@ -7,6 +7,22 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Gamescope Stream starts on a stock gamescope again, SteamOS's included. Since 1.4.12 the nested
+  session launcher and the idle compositor passed `--pipewire-composite-cursor` to gamescope on
+  every launch, and only Polaris's own gamescope build has that option. SteamOS's gamescope
+  3.16.23 and Fedora's 3.16.29 exit on it with `unrecognized option '--pipewire-composite-cursor'`,
+  the launcher then logged `failed to record an exact nested gamescope generation`, and the client
+  got a 503. On SteamOS, where labwc cannot be installed, that was the only private route. Both now
+  ask the gamescope they are about to run whether its `--help` lists the option, once per launch,
+  pass it only when it does, and log which way it went. On a stock gamescope the stream has no
+  pointer drawn in, as before 1.4.12. `POLARIS_GAMESCOPE_COMPOSITE_CURSOR=0` still turns the option
+  off, and `POLARIS_GAMESCOPE_COMPOSITE_CURSOR=1` now forces it on, for a patched build whose help
+  does not list it. A host wired with `scripts/install` gets the fix once those helpers are
+  installed again from this version, since package updates never touch them. On 1.4.12 and 1.4.13,
+  add `Environment=POLARIS_GAMESCOPE_COMPOSITE_CURSOR=0` under `[Service]` with
+  `systemctl --user edit polaris` and restart the service. A `scripts/install` host runs its idle
+  compositor as a unit of its own, so add the same line with
+  `systemctl --user edit polaris-gamescope-idle` too, then restart both. (#792)
 - On Fedora, removing only `polaris-kms` no longer removes the Spaces security setup from the
   Polaris you keep. The helper package carried the main package's install and removal scripts, so
   `sudo dnf remove polaris-kms` ran `polaris-spaces-setup remove`, and every update printed the

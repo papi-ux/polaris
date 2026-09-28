@@ -117,9 +117,12 @@ fi
 # Moonlight draws no pointer of its own, so without this the stream has a
 # working but invisible cursor: gamescope keeps the cursor out of the PipeWire
 # capture by default, on the grounds that a consumer drawing its own would end
-# up with two. Set POLARIS_GAMESCOPE_COMPOSITE_CURSOR=0 for such a consumer.
+# up with two. Only Polaris's gamescope build has the option and stock gamescope
+# exits on it, so the runtime library asks this exact binary first.
+# POLARIS_GAMESCOPE_COMPOSITE_CURSOR=0 turns it off for a consumer that draws its
+# own; =1 forces it on for a patched build whose --help does not list it.
 cursor_flags=()
-if [ "${POLARIS_GAMESCOPE_COMPOSITE_CURSOR:-1}" = 1 ]; then
+if polaris_gamescope_composite_cursor_enabled "$gs" polaris-gamescope-idle; then
   cursor_flags=(--pipewire-composite-cursor)
 fi
 
