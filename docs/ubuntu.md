@@ -6,6 +6,11 @@ real-hardware validation is still limited. The CI path builds and smoke-tests
 `Polaris-ubuntu24.04-x86_64.deb`, and the asset is published with `v1.0.3` and later Polaris
 releases.
 
+The package does not run on Ubuntu 26.04. In a clean Ubuntu 26.04 container, apt installed the
+1.4.13 package without an error, but every `polaris` command then stopped before starting, because
+26.04 has no `libminiupnpc.so.17` or `libicuuc.so.74`: it ships miniupnpc 21 and ICU 78 instead.
+No package on 26.04 provides those two, so it needs a package built for 26.04.
+
 > [!WARNING]
 > Treat the Ubuntu DEB as a tester package for now, not a stable recommended install. Ubuntu desktop
 > environment differences, GPU driver packaging, compositor behavior, and Debian-family dependency
@@ -18,6 +23,14 @@ wget --output-document=./Polaris-ubuntu24.04-x86_64.deb https://github.com/papi-
 sudo apt install ./Polaris-ubuntu24.04-x86_64.deb &&
 sudo -H polaris --setup-host &&
 polaris
+```
+
+The 1.4.13 package does not pull in PipeWire. Where it is missing, as on a minimal Ubuntu image,
+`--setup-host` stops with `libpipewire-0.3.so.0: cannot open shared object file`. Install it, then
+run the chain again from `--setup-host`:
+
+```bash
+sudo apt install libpipewire-0.3-0t64
 ```
 
 **Fresh install:** open `https://localhost:47990/#/welcome`, create the web UI account, and pair
@@ -74,6 +87,20 @@ sudo -H polaris --setup-host &&
 systemctl --user restart polaris
 ```
 
+If `polaris-kms` is installed, update both in one transaction instead, because the helper
+requires the exact version of `polaris` beside it:
+
+```bash
+wget --output-document=./Polaris-ubuntu24.04-x86_64.deb https://github.com/papi-ux/polaris/releases/latest/download/Polaris-ubuntu24.04-x86_64.deb &&
+wget --output-document=./Polaris-kms-ubuntu24.04-x86_64.deb https://github.com/papi-ux/polaris/releases/latest/download/Polaris-kms-ubuntu24.04-x86_64.deb &&
+sudo apt install ./Polaris-ubuntu24.04-x86_64.deb ./Polaris-kms-ubuntu24.04-x86_64.deb &&
+sudo -H polaris --setup-host &&
+systemctl --user restart polaris
+```
+
+Installing the Polaris `.deb` alone makes apt remove the helper when the version changes, and on
+a host that ran 1.4.13-beta.2 or beta.3 it replaces Polaris but keeps the beta's helper.
+
 `--setup-host` exits without asking for root when the package already provides the udev rules and
 modules-load configuration and the virtual input nodes are usable.
 
@@ -85,6 +112,9 @@ After the restart, return to `https://localhost:47990/#/login` with the existing
 systemctl --user disable --now polaris
 sudo apt remove polaris
 ```
+
+If `polaris-kms` is installed, run `sudo -H polaris --setup-host --disable-kms` first.
+`apt remove polaris` removes the helper with it.
 
 Package-owned udev rules and modules-load configuration are removed with the package. Host
 configuration in `~/.config/polaris` is left in place.
@@ -100,19 +130,25 @@ Enable the user service if you want Polaris to start in the background:
 systemctl --user enable --now polaris
 ```
 
-Only enable DRM/KMS capture if you specifically need it. It takes two steps, and the first one is a
-package: the capability lives in that package's own metadata rather than on the Polaris binary, and
-`--enable-kms` refuses without it.
+Only enable DRM/KMS capture if you specifically need it. It takes a second package from the same
+release as Polaris, and `--enable-kms` refuses without it. The link takes the latest release, so
+[update](#update) Polaris first if yours is older:
 
 ```bash
-sudo apt install ./Polaris-kms-ubuntu24.04-x86_64.deb
+wget --output-document=./Polaris-kms-ubuntu24.04-x86_64.deb https://github.com/papi-ux/polaris/releases/latest/download/Polaris-kms-ubuntu24.04-x86_64.deb &&
+sudo apt install ./Polaris-kms-ubuntu24.04-x86_64.deb &&
 sudo -H polaris --setup-host --enable-kms
 ```
 
-Download `Polaris-kms-ubuntu24.04-x86_64.deb` from the same release as the Polaris `.deb` beside it:
-the two carry the same version, and the helper requires the exact version of `polaris` it was built
-with, so they have to be installed and updated as a pair. `--disable-kms` points the user service
-back at the ordinary binary.
+The first time, log out and back in, or reboot where lingering is on (headless boot turns it
+on; `loginctl show-user $USER -p Linger` shows it). Only members of the `polaris-kms` group can
+run the helper, `--enable-kms` adds you to it, and a session picks up its groups at login. Then run
+`sudo -H polaris --setup-host --enable-kms` again and do what it prints.
+
+The helper package sets the capability on its own file whenever it is installed or upgraded,
+rather than on the Polaris binary. It requires the exact version of `polaris` it was built with,
+so the two are installed and updated as a pair, as [Update](#update) shows. `--disable-kms`
+points the user service back at the ordinary binary.
 
 The default compositor and portal paths do not require granting KMS capability.
 The experimental Vulkan Video encoder does require this KMS setup and an explicit `capture = kms` selection.

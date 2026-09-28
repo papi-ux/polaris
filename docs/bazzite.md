@@ -230,16 +230,24 @@ systemctl --user restart polaris
 systemctl --user is-active polaris
 ```
 
-`--setup-host` reports and retires a KMS runtime copy when the host has one, and
-does nothing otherwise. This guide made that copy during every install until
-Polaris 1.4.5, so a host set up before then has one whether or not it uses
-DRM/KMS capture. A copy under `/usr/local` is outside the deployment and does not change
-with an RPM update or rollback: skip the refresh and `rpm -q polaris` reports the
-new version while the service, and so the console, keeps running the old one.
-A copy made before 1.4.8 cannot report this itself. From 1.4.12,
-`sudo -H polaris --setup-host` makes the same refresh whenever the copy differs
-from the packaged binary; the explicit lines cover older packages and change
-nothing after it.
+`--setup-host` reports a KMS runtime copy when the host has one, and does
+nothing otherwise. This guide made that copy during every install until Polaris
+1.4.5, so a host set up before then has one whether or not it uses DRM/KMS
+capture. A copy under `/usr/local` is outside the deployment and does not change
+with an RPM update or rollback, so `rpm -q polaris` can report the new version
+while the service, and so the console, keeps running the old one. A copy made
+before 1.4.8 cannot report this itself. With `polaris-kms` layered,
+`--setup-host` moves the service onto the packaged helper and removes the copy,
+as [Optional DRM/KMS capture](#optional-drmkms-capture) describes. Without it,
+`--setup-host` refreshes a stale copy from the packaged binary, as it has since
+1.4.12, and asks you to install `polaris-kms`.
+
+If setup reports that it pointed the service at the packaged helper and removed
+the copy, the restart in the block above cannot bring Polaris back yet: until
+your session holds the `polaris-kms` group, the service cannot run the helper,
+as setup says. Remove `10-bazzite-kms.conf` and log out and back in, or reboot
+where lingering is on, as
+[Optional DRM/KMS capture](#optional-drmkms-capture) describes.
 
 `sudo -H polaris --setup-host` says so when the service points at a copy, and
 says which command to run when the copy is gone but its drop-in is not;
@@ -272,35 +280,45 @@ After the reboot, once:
 sudo -H polaris --setup-host --enable-kms
 ```
 
-Then log out and back in, and run the same command once more. Where lingering
-is on, reboot instead: it keeps your user service manager running from boot to
-shutdown, so logging out does not restart it. Headless boot turns lingering on,
-and other user services can too; `loginctl show-user $USER -p Linger` says
-whether it is on. The helper is readable only by
-the `polaris-kms` group, `--enable-kms` adds you to it, and a session picks up
-its groups when it starts. Until then the first run leaves the change parked
-where systemd ignores it, so Polaris keeps starting and capturing the way it
-did; the run after the new session turns it on. Each run says which of the two
-it did, and running it again is always safe.
+Log out and back in before you restart Polaris, then run the same command once
+more and do what it prints. Where lingering is on, reboot instead: it keeps your
+user service manager running from boot to shutdown, so logging out does not
+restart it. Headless boot turns lingering on, and other user services can too;
+`loginctl show-user $USER -p Linger` says whether it is on. The helper is
+readable only by the `polaris-kms` group, `--enable-kms` adds you to it, and a
+session picks up its groups when it starts. Running the command again is safe.
 
 That is the whole recipe now. Updates and rollbacks leave it alone, because the
 package owns the file that carries the capability.
 
 If this host followed the older recipe, which copied the binary to
-`/usr/local/bin/polaris-kms` by hand, `--setup-host` moves it across: it points
-the service at the packaged helper, removes the copy, and takes the capability
-off `/usr/bin/polaris`. It waits for the same login first. Until your session
-holds the `polaris-kms` group, the copy stays in place and keeps capturing, and
-setup says to log back in, or reboot, and run it again. That copy is why a Bazzite
-host could report one version through `rpm` while the console ran another,
-since no update ever touched it.
+`/usr/local/bin/polaris-kms` by hand, run plain `sudo -H polaris --setup-host`
+after the reboot instead of `--enable-kms`. In 1.4.13, with `polaris-kms`
+layered, that moves the host across: it adds you to the `polaris-kms` group,
+points the service at the packaged helper, removes the copy, and takes the
+capability off `/usr/bin/polaris`. `--enable-kms` skips that move and leaves the
+copy in place. The move also leaves the old recipe's drop-in behind, still
+naming the deleted copy, so remove it:
+
+```bash
+rm -f ~/.config/systemd/user/polaris.service.d/10-bazzite-kms.conf
+systemctl --user daemon-reload
+systemctl --user cat polaris
+```
+
+`/usr/local/bin/polaris-kms` should appear nowhere in its output. Then log out
+and back in, or reboot where lingering is on, as above, and run plain
+`sudo -H polaris --setup-host` once more, doing what it prints. That copy is why
+a Bazzite host could report one version through `rpm` while the console ran
+another, since no update ever touched it.
 
 The capability grants the access KMS needs; it does not select a capture backend
 or validate Game Mode streaming.
 
-To return to the packaged executable, ask Polaris to take the whole recipe back out. It removes the
-drop-in, the copy and the capability on the packaged binary, in the order that never leaves the
-service pointing at a binary that is gone:
+To return to the packaged executable, ask Polaris to take the whole recipe back out. It removes its
+drop-in, the copy and the capability on the packaged binary. In 1.4.13 it removes only the drop-in
+that currently sets `ExecStart`, so on a host moved across from the older recipe, remove
+`10-bazzite-kms.conf` first as shown above, or the service is left naming the deleted copy:
 
 ```bash
 sudo -H polaris --setup-host --disable-kms
@@ -313,6 +331,7 @@ By hand it is the same three pieces:
 ```bash
 systemctl --user stop polaris
 rm -f ~/.config/systemd/user/polaris.service.d/10-bazzite-kms.conf
+rm -f ~/.config/systemd/user/polaris.service.d/20-polaris-kms.conf
 systemctl --user daemon-reload
 systemctl --user start polaris
 sudo rm -f /usr/local/bin/polaris-kms
@@ -393,7 +412,7 @@ an extension stored in `/var`.
 The NVIDIA Desktop Mode baseline is `bazzite-nvidia-open` `44.20260908`, a Plasma
 Desktop image with autologin, not a Game Mode-capable Deck image. One host and one
 GPU do not certify every released package, GPU, or Steam launch path. See [Compatibility](compatibility.md) and
-[the system-extension validation requirements](../scripts/validation/bazzite/README.md).
+[the system-extension validation requirements](https://github.com/papi-ux/polaris/blob/master/scripts/validation/bazzite/README.md).
 
 ## Troubleshooting
 

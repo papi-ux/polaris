@@ -6,6 +6,22 @@ to find your path before following the steps here.
 
 ## 1. Install the package
 
+On Fedora 44, Arch Linux or CachyOS, one command adds the signed
+[package repository](repositories.md), installs Polaris and runs host setup:
+
+```bash
+curl -fsSL https://repo.papi-ux.com/install.sh | sh
+```
+
+Then do what its last lines say, usually starting Polaris with
+`systemctl --user enable --now polaris`, and go on to step 2. To read every command it would run
+first, without changing anything, run
+`curl -fsSL https://repo.papi-ux.com/install.sh | sh -s -- --dry-run`. On Arch and CachyOS it
+upgrades the rest of the system in the same step. It installs the stable release only, not the
+optional `polaris-kms` helper, and it does not replace a 1.4.13 beta;
+[One-command install](repositories.md#one-command-install) has the details. The sections below
+are the same steps by hand.
+
 ### Fedora 44
 
 ```bash
@@ -27,16 +43,16 @@ the longer walkthrough, including upgrades and uninstall.
 ### Arch Linux / CachyOS
 
 ```bash
-wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst &&
+curl --fail --location --output ./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst &&
 sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst &&
 sudo -H polaris --setup-host &&
 polaris
 ```
 
 There is a pacman repository too, and it is worth adding for the same reason: `sudo pacman -Syu` then
-carries Polaris. It is not the default here only because it is longer to set up rather than shorter.
-pacman has no equivalent of dnf's `gpgkey=`, so the key has to be added and locally signed first. See
-[Package repositories](repositories.md#arch-and-cachyos).
+carries Polaris. The one-command install above adds it for you. By hand it takes longer to set up
+than the download, because pacman has no equivalent of dnf's `gpgkey=`, so the key has to be added
+and locally signed first. See [Package repositories](repositories.md#arch-and-cachyos).
 
 CachyOS and most pacman-compatible Arch derivatives should start with the Arch package path. See the
 [Arch guide](arch.md) for details, and fall back to the source flow in
@@ -46,11 +62,11 @@ CachyOS and most pacman-compatible Arch derivatives should start with the Arch p
 
 | Host | Path |
 |---|---|
-| SteamOS 3.8 | [SteamOS guide](steamos.md) — Desktop Mode validation only |
-| Bazzite 44 | [Bazzite guide](bazzite.md) — supported RPM installation; stage, reboot, then run host setup |
+| SteamOS 3.8 | [SteamOS guide](steamos.md), proven on a Steam Deck OLED in Desktop Mode and Game Mode |
+| Bazzite 44 | [Bazzite guide](bazzite.md), supported RPM installation: stage, reboot, then run host setup |
 | Steam Deck, ROG Ally, other handhelds | [Handhelds and Game Mode](handhelds.md), keeps Polaris reachable across mode switches |
-| Ubuntu 24.04 | [Ubuntu guide](ubuntu.md) — experimental tester DEB |
-| openSUSE Tumbleweed | [openSUSE guide](openSUSE.md) — source build |
+| Ubuntu 24.04 | [Ubuntu guide](ubuntu.md), experimental tester DEB |
+| openSUSE Tumbleweed | [openSUSE guide](openSUSE.md), source build |
 | Anything else | [Build from source](building.md) |
 
 ## 2. Open the right web console path

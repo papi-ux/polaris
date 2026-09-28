@@ -57,8 +57,9 @@ The 1.4.13 betas and the 1.4.13 release carry the same package version, `1.4.13`
 so a package manager can take the beta for the release. On Fedora, `dnf install`
 of the release package answers that it is already installed, "Nothing to do", and
 `dnf upgrade` from the Polaris repository leaves the beta in place. `pacman -Syu`
-from the Polaris repository does the same. Reinstall the release over the beta
-instead, which replaces the installed files with the release's.
+from the Polaris repository does the same, and so does the
+[one-command install](repositories.md#one-command-install) on both. Reinstall the
+release over the beta instead, which replaces the installed files with the release's.
 
 End active streams first. The commands that name files take them from the
 [1.4.13 release](https://github.com/papi-ux/polaris/releases/tag/v1.4.13), run
@@ -79,11 +80,11 @@ sudo dnf reinstall ./Polaris-fedora44-x86_64.rpm ./Polaris-kms-fedora44-x86_64.r
 sudo dnf reinstall polaris polaris-kms
 ```
 
-**Ubuntu 24.04**, from the downloaded files. Keep `--reinstall`: without it, apt
-can decide the package is already installed and change nothing.
+**Ubuntu 24.04**, from the downloaded files. apt replaces both with the release's
+files, the same command the [Ubuntu guide](ubuntu.md#update) updates with.
 
 ```bash
-sudo apt install --reinstall ./Polaris-ubuntu24.04-x86_64.deb ./Polaris-kms-ubuntu24.04-x86_64.deb
+sudo apt install ./Polaris-ubuntu24.04-x86_64.deb ./Polaris-kms-ubuntu24.04-x86_64.deb
 ```
 
 **Arch**. pacman warns that the package is up to date and reinstalls it.
@@ -92,7 +93,7 @@ sudo apt install --reinstall ./Polaris-ubuntu24.04-x86_64.deb ./Polaris-kms-ubun
 # From the downloaded files
 sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst ./Polaris-kms-arch-x86_64.pkg.tar.zst
 # Or from the Polaris repository
-sudo pacman -S polaris polaris-kms
+sudo pacman -Syu polaris polaris-kms
 ```
 
 **SteamOS** takes the same `pacman -U` its [SteamOS guide](steamos.md) installs
