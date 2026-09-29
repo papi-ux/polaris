@@ -2098,7 +2098,8 @@ namespace stream_stats {
                                          bool live_bitrate_tunable,
                                          bool single_session_scope,
                                          bool auto_safe_managing,
-                                         const pyrowave_doctor_t &pyrowave) {
+                                         const pyrowave_doctor_t &pyrowave,
+                                         const judged_network_t &network) {
       std::string title = "Try this first";
       std::string body = "Start a stream, reproduce the issue, then export diagnostics with this Doctor result attached.";
       std::string next_step = "Export diagnostics";
@@ -2137,9 +2138,15 @@ namespace stream_stats {
         expected = "Doctor will either clear the warning or gather direct evidence before offering a bitrate change.";
       } else if (primary_issue == "control_channel_observation") {
         title = "Keep monitoring";
-        body = "The reliable control channel retried packets, but video frame loss and round trip time over the last " +
-               std::to_string(network_judge_t::k_window.count()) +
-               " seconds stay below network pressure, so Doctor changes nothing for this.";
+        // Only what the window judged: a stream with no media reports, or none yet, has no loss to
+        // clear, and ENet's first seconds give no RTT to judge.
+        const std::string window = " over the last " + std::to_string(network_judge_t::k_window.count()) + " seconds";
+        const std::string judged =
+          network.loss_judged && network.rtt_judged ? "video frame loss and round trip time" + window + " stay below network pressure" :
+          network.loss_judged ? "video frame loss" + window + " stays below network pressure" :
+          network.rtt_judged ? "no video frame loss is measured, and round trip time" + window + " stays below network pressure" :
+          std::string {"neither video frame loss nor round trip time is judged yet"};
+        body = "The reliable control channel retried packets, but " + judged + ", so Doctor changes nothing for this.";
         if (auto_safe_managing) {
           body += " Live Tuning keeps adjusting the live bitrate on its own.";
         }
@@ -3186,7 +3193,7 @@ namespace stream_stats {
       failed_start_recommendation(*failed_start, summary) :
       doctor_recommendation(
         primary_issue, summary, health, live_bitrate_tunable, single_session_scope,
-        auto_safe_managing, pyrowave_doctor
+        auto_safe_managing, pyrowave_doctor, network
       );
     doctor["evidence"] = std::move(evidence);
     doctor["advanced_evidence"] = std::move(advanced);

@@ -3544,6 +3544,54 @@ TEST(StreamStatsDoctorTests, ControlLossIsInformationalAndCannotReduceQuality) {
   EXPECT_TRUE(saw_control_observation);
 }
 
+TEST(StreamStatsDoctorTests, ControlChannelFindingSaysOnlyWhatTheWindowJudged) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  stats.bitrate_kbps = 20000;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 2.0;
+  stats.control_channel_packet_loss = 7.75;
+  stats.control_channel_samples = 900;
+  stats.network_sample_revision = 900;
+  stats.network_last_received_age_ms = 0;
+  stats.latency_ms = 6.0;
+
+  // A client that sends no media reports: RTT is judged, loss is not, and nothing says it cleared.
+  const auto unreported = judged_doctor(stats);
+  EXPECT_EQ(unreported.at("primary_issue"), "control_channel_observation");
+  EXPECT_EQ(unreported.at("summary"), "Control-channel retries were observed, but no video frame loss is measured.");
+  EXPECT_EQ(unreported.at("recommendation").at("body"),
+            "The reliable control channel retried packets, but no video frame loss is measured, and round trip time over "
+            "the last 20 seconds stays below network pressure, so Doctor changes nothing for this.");
+
+  // Its reports arriving and judged light, with Live Tuning owning the bitrate.
+  stats.packet_loss = 1.4;
+  stats.packet_loss_available = true;
+  stats.media_loss_sample_revision = 890;
+  stats.media_loss_last_received_age_ms = 400;
+  stats.adaptive_bitrate_enabled = true;
+  const auto reported = judged_doctor(stats);
+  EXPECT_EQ(reported.at("primary_issue"), "control_channel_observation");
+  EXPECT_EQ(reported.at("summary"), "Control-channel retries were observed, but video frame loss stays below network pressure.");
+  EXPECT_EQ(reported.at("recommendation").at("body"),
+            "The reliable control channel retried packets, but video frame loss and round trip time over the last 20 "
+            "seconds stay below network pressure, so Doctor changes nothing for this. Live Tuning keeps adjusting the "
+            "live bitrate on its own.");
+  const auto *loss = find_evidence_row(reported, "packet_loss");
+  ASSERT_NE(loss, nullptr);
+  EXPECT_EQ(loss->at("label"), "Video frame loss");
+  EXPECT_EQ(loss->at("status"), "pass");
+  EXPECT_EQ(loss->at("source"), "media_transport");
+  EXPECT_EQ(loss->at("detail"),
+            "34 of 2400 video frames in the client's last 20 reports never reached it whole after FEC recovery, 1.40%. "
+            "Doctor calls loss network pressure at 2.00% over the last 20 seconds and clears it only below 1.00%. "
+            "Frames the host dropped before sending are counted separately.");
+}
+
 TEST(StreamStatsDoctorTests, ConfirmedNetworkPressureOffersGuardedFixWithUndo) {
   stream_stats::stats_t stats {};
   stats.streaming = true;
