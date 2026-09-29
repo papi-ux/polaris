@@ -8075,7 +8075,7 @@ TEST(StreamStatsHotFieldTests, AVerdictWhoseReportsStoppedIsServedAsStale) {
   ASSERT_NE(loss_row, evidence.end());
   EXPECT_EQ(loss_row->at("status"), "unknown");
   EXPECT_TRUE(loss_row->at("value").is_null());
-  EXPECT_NE(loss_row->at("detail").get<std::string>().find("No client media report has reached the host"), std::string::npos)
+  EXPECT_NE(loss_row->at("detail").get<std::string>().find("The client's media reports stopped reaching the host"), std::string::npos)
     << loss_row->dump();
   EXPECT_EQ(doctor.at("advanced_evidence").at("network_verdict").at("loss_state"), "stale");
 
@@ -8115,6 +8115,34 @@ namespace {
     return stream_stats::build_doctor_json(live, nlohmann::json::object()).at("primary_issue").get<std::string>();
   }
 }  // namespace
+
+TEST(StreamStatsDoctorTests, AMoonlightClientsLossRowSaysItSendsNoReports) {
+  // A Moonlight or Artemis client never sends a media report, and its loss row read "Fewer than 5
+  // client media reports arrived in the last 20 seconds" for the whole stream, as if more were coming.
+  stream_stats::update_stream_active(false);
+  constexpr std::uint64_t generation = 434;
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::remove_client("203.0.113.88", generation);
+    stream_stats::update_stream_active(false);
+  });
+  stream_stats::add_client("203.0.113.88", "Living Room TV", generation, "moonlight");
+  stream_stats::update_video_stats(60.0, 20000, 2.0, "hevc", 1920, 1080);
+  for (int ping = 0; ping < 6; ++ping) {
+    stream_stats::update_control_channel_stats(6.0, 0.0, 777);
+  }
+  auto live = stream_stats::get_current();
+  live.capture_transport = platf::frame_transport_e::dmabuf;
+  live.capture_residency = platf::frame_residency_e::gpu;
+  live.encode_target_residency = platf::frame_residency_e::gpu;
+  const auto doctor = stream_stats::build_doctor_json(live, nlohmann::json::object());
+  const auto &evidence = doctor.at("evidence");
+  const auto loss_row = std::find_if(evidence.begin(), evidence.end(), [](const nlohmann::json &row) {
+    return row.value("id", std::string {}) == "packet_loss";
+  });
+  ASSERT_NE(loss_row, evidence.end());
+  EXPECT_EQ(loss_row->at("status"), "unknown");
+  EXPECT_EQ(loss_row->at("detail"), "Moonlight and Artemis send the host no media reports, so this client's video frame loss is not judged.");
+}
 
 TEST(StreamStatsHotFieldTests, LiveTuningHearsTheLossTheVerdictConfirms) {
   // The HEVC run's reports reach Live Tuning once the verdict calls their loss pressure: nothing while

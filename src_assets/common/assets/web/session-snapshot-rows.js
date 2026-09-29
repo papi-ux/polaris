@@ -16,11 +16,20 @@ export function formatFps(value) {
   return `${formatNumber(value, 1)} FPS`
 }
 
-// The loss Doctor judged over the host's window, as a share of video frames, or a word saying it has
-// not judged any: a zero here would claim a measurement nobody made.
+// The loss Doctor judged over the host's window, as a share of video frames, or words saying why it has
+// no figure, which follow "video frame loss": a zero here would claim a measurement nobody made. A
+// Moonlight or Artemis client never sends the reports it is judged from.
 export function formatJudgedLoss(s = {}, t) {
   const loss = judgedVideoFrameLoss(s)
-  return loss ? `${loss.pct.toFixed(2)}%` : t('troubleshooting.snapshot_loss_not_judged')
+  if (loss) return `${loss.pct.toFixed(2)}%`
+  if (s?.client_family === 'moonlight') return t('troubleshooting.snapshot_loss_not_reported')
+  if (s?.network_verdict?.loss_state === 'stale') return t('troubleshooting.snapshot_loss_stale')
+  return t('troubleshooting.snapshot_loss_not_judged')
+}
+
+// A figure reads "1.87% video frame loss", its absence "video frame loss not judged yet".
+function lossKey(s, key) {
+  return judgedVideoFrameLoss(s) ? key : `${key}_unjudged`
 }
 
 // The window's median round trip, the figure Doctor judges, or the newest reading before it has one.
@@ -47,7 +56,7 @@ export function summarizeStreamStats(s = {}, t) {
     }
     return t('troubleshooting.snapshot_no_active_stream')
   }
-  return t('troubleshooting.snapshot_stream_summary', {
+  return t(lossKey(s, 'troubleshooting.snapshot_stream_summary'), {
     fps: formatFps(s.fps),
     target: formatFps(s.session_target_fps || s.requested_client_fps),
     kbps: s.bitrate_kbps || 0,
@@ -210,7 +219,7 @@ export function buildSessionSnapshotRows(stats, t, { streamDisplay = null, prove
     { label: t('troubleshooting.snapshot_cpu_copy'), value: yesNo(s.capture_cpu_copy, t) },
     { label: t('troubleshooting.snapshot_pacing_policy'), value: s.pacing_policy || t('troubleshooting.snapshot_none_word') },
     { label: t('troubleshooting.snapshot_optimization_source'), value: s.optimization_source || t('troubleshooting.snapshot_default_word') },
-    { label: t('troubleshooting.snapshot_network'), value: t('troubleshooting.snapshot_network_value', { latency: formatJudgedRtt(s), loss: formatJudgedLoss(s, t) }) },
+    { label: t('troubleshooting.snapshot_network'), value: t(lossKey(s, 'troubleshooting.snapshot_network_value'), { latency: formatJudgedRtt(s), loss: formatJudgedLoss(s, t) }) },
     { label: t('troubleshooting.snapshot_frame_delivery'), value: t('troubleshooting.snapshot_frame_delivery_value', { duplicate: formatNumber((s.duplicate_frame_ratio || 0) * 100, 2), dropped: formatNumber((s.dropped_frame_ratio || 0) * 100, 2) }) },
     { label: t('troubleshooting.snapshot_frame_timing'), value: t('troubleshooting.snapshot_frame_timing_value', { age: formatNumber(s.avg_frame_age_ms, 2), error: formatNumber(s.frame_interval_error_ms ?? s.frame_jitter_ms, 2) }) },
   ]

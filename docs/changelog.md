@@ -63,16 +63,17 @@ starts at `v1.0.0`.
   offered "Recheck Auto Safe", a name that appeared nowhere else a player could see.
 
 - The console quotes the same loss. The post-session report, the Fix My Stream checklist, the
-  session snapshot and the issue draft read the verdict's video frame loss over 20 seconds, with
-  the frame counts behind it, instead of the newest one second report, and say which loss it is:
-  frames that never arrived whole after FEC, beside the frames the host dropped before sending,
-  which are a different count. A PyroWave session whose last second lost 32.7% of its frames, while
-  the host dropped 0.96%, was reported as "Network packet loss was 32.7%" and put on the network.
-  The report names the network only when the window judged its loss as pressure, and until the
-  host has judged any the snapshot says "not judged yet" instead of 0%. A session whose client
-  dropped keeps the loss the window last judged in its report, as the host does: the host streams on
-  until the ping timeout, and its last live payloads call that loss stale with no figure, so the
-  report lost the network cause of the drop. A stale round trip is not graded either.
+  session snapshot and the issue draft read the verdict's video frame loss over 20 seconds, with the
+  frame counts behind it, instead of the newest one second report, and say which loss it is: frames
+  that never arrived whole after FEC, beside the frames the host dropped before sending, which are a
+  different count. A PyroWave session whose last second lost 32.7% of its frames, while the host
+  dropped 0.96%, was reported as "Network packet loss was 32.7%" and put on the network. The report
+  names the network only when the window judged its loss as pressure, and until the host has judged
+  any the snapshot says the loss is not judged yet instead of 0%, or, for a Moonlight or Artemis
+  client, which sends no media reports, that it does not report it. Doctor's loss row says the same
+  of such a client instead of waiting for five reports. A session whose client dropped keeps the
+  loss the window last judged in its report, as the host does, though the host's last live payloads
+  before the ping timeout call that loss stale, and a stale round trip is not graded.
 
 - Live Tuning acts on loss when Doctor does. Every control ping reached it as a second of clean
   video, ten a second, so a report that lost 7% of its frames faded to a few hundredths of a percent

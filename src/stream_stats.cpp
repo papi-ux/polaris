@@ -2841,10 +2841,13 @@ namespace stream_stats {
       loss_judged ? "media_transport" : "unavailable",
       loss_judged ?
         video_frame_loss_detail(verdict) :
+      // Stale by either gate served_network_verdict() keeps: the newest report more than five seconds
+      // old, or no reading of any kind for two.
       verdict.loss_stale ?
-        "No client media report has reached the host in the last " +
-          std::to_string(judged_network_t::k_media_report_max_age_ms / 1000) +
-          " seconds, so video frame loss is not judged." :
+        std::string {"The client's media reports stopped reaching the host, so video frame loss is not judged until they come back."} :
+      // A Moonlight or Artemis client never sends one, and read "fewer than 5 reports" for the whole stream.
+      streaming_client_family(stats) == "moonlight" ?
+        std::string {"Moonlight and Artemis send the host no media reports, so this client's video frame loss is not judged."} :
         "Fewer than " + std::to_string(network_judge_t::k_min_media_samples) +
           " client media reports arrived in the last " + std::to_string(network_judge_t::k_window.count()) +
           " seconds, so video frame loss is not judged yet."
