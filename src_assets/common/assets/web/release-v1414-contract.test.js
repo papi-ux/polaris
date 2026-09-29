@@ -207,5 +207,13 @@ describe('v1.4.14 release contract', () => {
     expect(notes).toContain('another tunnel with no MAC of its own')
     expect(notes).toContain("the TV figure hasn't been checked on a big screen yet, and Doctor's 300 Mbps ceiling may move")
     expect(notes).toContain("9 ms a frame against VA-API's 16 on one tester's RX 9070 XT at 4K60")
+    // Doctor's verdict holds over the network judge's window, and its band, which Live Tuning shares.
+    expect(notes).toContain(
+      'It now judges video frame loss and round trip time over the last 20 seconds, calls loss network ' +
+        'pressure at 2% and clears it below 1%, and Live Tuning cuts for loss from that same point.',
+    )
+    expect(notes).toContain('the share of video frames that never arrived whole after FEC.')
+    // Live Tuning's hold for moderate loss, adaptive_bitrate's MODERATE_LOSS_FLOOR_SHARE and HEAVY_LOSS_PCT.
+    expect(notes).toContain('for loss of 5% or less it goes no lower than half your bitrate')
   })
 })
