@@ -2536,10 +2536,12 @@ namespace stream_stats {
     const auto pyrowave = evaluate_pyrowave_bitrate(
       stats, auto_safe_managing && effective_quality_target_kbps > 0 ? effective_quality_target_kbps : 0
     );
-    // A stream cut below a request that already meets the raise goal climbs back to that request, by
-    // the ordinary quality restore or by Live Tuning's own recovery when it owns the bitrate. PyroWave's
-    // raise would stop short of what the player asked for, and its text would ask for less.
-    const bool launch_restore_covers_pyrowave = quality_reduced_live &&
+    // A stream cut below a request that already meets the raise goal climbs back to that request by the
+    // ordinary quality restore. PyroWave's raise would stop short of what the player asked for, and its
+    // text would ask for less. Live Tuning's own cut is no such reduction: PyroWave is judged on the rate
+    // the stream is set to, which Live Tuning comes back to, and hiding the finding while it was cut
+    // turned "needs more than Doctor allows" on and off with every cut.
+    const bool launch_restore_covers_pyrowave = quality_reduced_live && !auto_safe_managing &&
       effective_quality_target_kbps >= pyrowave.advice.raise_goal_encoder_kbps;
     const bool pyrowave_starved = pyrowave.active && pyrowave.starved && network_clean_for_quality &&
       !launch_restore_covers_pyrowave;
@@ -3684,12 +3686,21 @@ namespace stream_stats {
   bool record_pyrowave_frames(std::uint64_t session_generation, std::uint32_t frames, std::uint32_t ceiling_frames) {
     if (session_generation == 0 || frames == 0) return false;
     ceiling_frames = std::min(ceiling_frames, frames);
+    // Read before stats_mutex, as get_current() does: the controller never calls back into stream_stats.
+    const auto live_tuning = adaptive_bitrate::get_state();
+    const bool held_below_set_rate = live_tuning.enabled && live_tuning.active &&
+      live_tuning.target_bitrate_kbps > 0 && live_tuning.target_bitrate_kbps < live_tuning.base_bitrate_kbps;
     std::lock_guard<std::mutex> lock(stats_mutex);
     const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
       [session_generation](const client_stats_t &candidate) {
         return candidate.session_generation == session_generation;
       });
     if (client == current_stats.clients.end()) return false;
+    if (held_below_set_rate) {
+      // A cut's smaller byte budget fills more often. Counted, it made PyroWave "need more than Doctor
+      // allows" with every Live Tuning cut and not once the bitrate came back.
+      return true;
+    }
     auto &batches = client->pyrowave_ceiling_batches;
     batches.emplace_back(frames, ceiling_frames);
     client->pyrowave_window_frames += frames;

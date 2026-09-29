@@ -1288,6 +1288,14 @@ namespace adaptive_bitrate {
     rate_evidence.since -= age;
     last_media_report_time -= age;
   }
+
+  void hold_target_for_tests(int kbps) {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    target_bitrate_kbps.store(clamp_target(kbps, base_bitrate_kbps.load(std::memory_order_relaxed)), std::memory_order_relaxed);
+    ++action_authority_revision;
+    ++operator_revision;
+    state_changed.notify_all();
+  }
 #endif
 
   void reset() {

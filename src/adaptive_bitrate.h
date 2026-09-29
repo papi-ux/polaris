@@ -386,6 +386,9 @@ namespace adaptive_bitrate {
 #ifdef POLARIS_TESTS
   /** Move the controller's last adjustment and last pressure this much further into the past. */
   void age_for_tests(std::chrono::steady_clock::duration age);
+
+  /** Put Live Tuning's target at kbps, within its bounds, as one of its own moves would. */
+  void hold_target_for_tests(int kbps);
 #endif
 
 }  // namespace adaptive_bitrate

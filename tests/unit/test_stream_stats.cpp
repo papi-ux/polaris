@@ -8562,6 +8562,83 @@ TEST(StreamStatsDoctorTests, PyroWaveAdviceHoldsWhileLiveTuningMovesTheBitrate) 
   }
 }
 
+TEST(StreamStatsDoctorTests, PyroWaveNeedsMoreHoldsWhileLiveTuningMovesTheBitrate) {
+  // A 4K120 4:4:4 PyroWave stream on a Retroid Pocket 6 with Live Tuning on, cut for the PyroWave run's
+  // Wi-Fi RTT spikes in its proportions and brought back. Its model asks a request of 328 Mbps and
+  // Doctor raises no further than 300. Judged on the moving target, whether the stream wants more than
+  // Doctor allows came and went with every cut: a cut read as a reduction Doctor's restore would undo,
+  // and frames held to the cut's smaller byte budget filled it more often. Doctor judges the rate the
+  // stream is set to and the frames sent at it.
+  PyroWaveHostGuard host;
+  constexpr std::uint64_t generation = 433;
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::remove_client("203.0.113.86", generation);
+    stream_stats::update_stream_active(false);
+    adaptive_bitrate::reset();
+    adaptive_bitrate::set_enabled(false);
+    config::video.adaptive_bitrate.enabled = false;
+  });
+  struct run_t {
+    int request_kbps;
+    /// Of every 40 frames sent at the rate the stream is set to, how many fill the byte budget.
+    std::uint32_t ceiling_of_40;
+    const char *headline;
+  };
+  // 320 Mbps set by hand, 85% of its frames at the budget: it wants more than Doctor allows. 290 Mbps,
+  // 75% at the budget: no finding, though all of a cut's frames fill its budget.
+  for (const auto run : {run_t {320000, 34, "pyrowave_needs_more_than_allowed"}, run_t {290000, 30, "none"}}) {
+    const int set_kbps = static_cast<int>(stream_bitrate::encoder_kbps_for_wire(run.request_kbps, 10, 512));
+    stream_stats::update_stream_active(false);
+    config::video.adaptive_bitrate.enabled = true;
+    config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+    config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+    adaptive_bitrate::load_config();
+    adaptive_bitrate::reset();
+    adaptive_bitrate::set_runtime_update_supported(true, {}, set_kbps);
+    adaptive_bitrate::set_base_bitrate(set_kbps);
+    stream_stats::update_controller_input_state(false, 0, "", "", "unknown", "", false, "");
+    stream_stats::update_steam_input_state("unknown", 0, 0, 0, "");
+    stream_stats::add_client("203.0.113.86", "RetroidPocket6", generation);
+    stream_bitrate::request_t request;
+    request.client_kbps = run.request_kbps;
+    request.audio_kbps = 512;
+    request.fec_percentage = 10;
+    ASSERT_TRUE(stream_stats::record_stream_request(generation, true, request));
+    stream_stats::update_video_stats(120.0, set_kbps, 1.0, "pyrowave", 3840, 2160);
+    stream_stats::update_session_targets(
+      120.0, 120.0, 120.0, "client_requested", "deterministic_preset_v1",
+      "deterministic", "not_applicable", "Capability-validated launch profile.",
+      "", 1, 0, set_kbps
+    );
+
+    headline_run_t headlines;
+    for (int round = 0; round < 3; ++round) {
+      for (std::size_t second = 0; second < k_recorded_pyrowave_rtt_ms.size(); ++second) {
+        for (int ping = 0; ping < 10; ++ping) {
+          stream_stats::update_control_channel_stats(k_recorded_pyrowave_rtt_ms[second], 0.0, 777);
+        }
+        const int target = static_cast<int>(
+          static_cast<std::int64_t>(set_kbps) * k_recorded_pyrowave_live_targets_kbps[second] / 268988
+        );
+        adaptive_bitrate::hold_target_for_tests(target);
+        // A second of frames. Under a cut every one of them fills the smaller budget.
+        for (int batch = 0; batch < 3; ++batch) {
+          ASSERT_TRUE(stream_stats::record_pyrowave_frames(generation, 40, target < set_kbps ? 40 : run.ceiling_of_40));
+        }
+        headlines.headlines.push_back(live_headline());
+      }
+    }
+    RecordProperty(std::string {"headlines_"} + std::to_string(run.request_kbps), headlines.text());
+    EXPECT_EQ(headlines.changes(), 0) << run.request_kbps << ": " << headlines.text();
+    EXPECT_EQ(headlines.headlines.back(), run.headline) << run.request_kbps << ": " << headlines.text();
+    // The share is what the frames at the set rate said.
+    const auto share = stream_stats::pyrowave_ceiling_frame_share(stream_stats::get_current());
+    ASSERT_TRUE(share.has_value());
+    EXPECT_DOUBLE_EQ(*share, run.ceiling_of_40 / 40.0) << run.request_kbps;
+    stream_stats::remove_client("203.0.113.86", generation);
+  }
+}
+
 TEST(StreamStatsHotFieldTests, PacketLossPercentClampsDegenerateInputs) {
   constexpr uint64_t scale = 1ull << 16;
 

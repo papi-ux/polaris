@@ -18,7 +18,12 @@ starts at `v1.0.0`.
   It judged Live Tuning's moving target, so a stream set between PyroWave's starved line and the
   rate Doctor would raise it to went from no finding to "set more bitrate" and back with every cut
   Live Tuning made for a Wi-Fi RTT spike, though Live Tuning was about to bring the bitrate back on
-  its own. Whether Live Tuning sits at its PyroWave floor still reads the live rate.
+  its own. The same held for a stream that wants more than Doctor raises it to, such as 3840x2160
+  at 120 fps in 4:4:4 set to 320 Mbps by hand: a cut read as a reduction Doctor's restore would
+  undo, and frames held to the cut's smaller byte budget filled it more often, so the finding came
+  and went with every cut. A cut no longer counts as such a reduction, and the share of frames at
+  the byte budget leaves out the frames sent while Live Tuning holds the stream below its set rate.
+  Whether Live Tuning sits at its PyroWave floor still reads the live rate.
 
 - A bitrate step Doctor verifies leaves its headline judging the step's own readings. Doctor
   verified the step against the newest readings after it while the headline went on judging a

@@ -882,6 +882,11 @@ namespace stream_stats {
    * The codec fills a frame up to a byte budget the bitrate sets. A frame at 99% of that budget or more
    * was cut short by it, and a stream where most frames are asks for more bits than it is given. The
    * session's own encode loop writes a batch at a time; nothing here moves a policy revision.
+   *
+   * While Live Tuning holds the encoder below the rate the stream is set to, a batch is left out: its
+   * frames were held to a smaller budget and fill it more often, which says nothing of the set rate
+   * Doctor judges PyroWave on and Live Tuning comes back to. The window keeps what frames at that rate
+   * said.
    * @return False when no client holds that generation or the batch is empty.
    */
   bool record_pyrowave_frames(std::uint64_t session_generation, std::uint32_t frames, std::uint32_t ceiling_frames);
