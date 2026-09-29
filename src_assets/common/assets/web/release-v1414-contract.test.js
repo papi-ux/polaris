@@ -207,24 +207,22 @@ describe('v1.4.14 release contract', () => {
     expect(notes).toContain('another tunnel with no MAC of its own')
     expect(notes).toContain("the TV figure hasn't been checked on a big screen yet, and Doctor's 300 Mbps ceiling may move")
     expect(notes).toContain("9 ms a frame against VA-API's 16 on one tester's RX 9070 XT at 4K60")
-    // Doctor's verdict holds over the network judge's window, and its band, which Live Tuning shares.
+    // Doctor's verdict holds over the network judge's window, and its band.
     expect(notes).toContain(
       'It now judges video frame loss and round trip time over the last 20 seconds, calls loss network ' +
-        'pressure at 2% and clears it below 1%, and Live Tuning cuts for loss from that same point.',
+        'pressure at 2% and clears it below 1%.',
     )
     expect(notes).toContain('the share of video frames that never arrived whole after FEC.')
-    // Live Tuning's hold for moderate loss, adaptive_bitrate's MODERATE_LOSS_FLOOR_SHARE and HEAVY_LOSS_PCT,
-    // the probe below it and the climb back, with the step up rule as adaptive_bitrate.h states it.
-    expect(notes).toContain('For loss of 5% or less it stops at half your bitrate and tests the rates below')
-    expect(notes).toContain('and back to half if no lower rate lowers it, with no second try for 5 minutes.')
+    // With Live Tuning on, sustained loss gets Doctor's one step, which turns Live Tuning off for the
+    // stream, as a live bitrate set by hand does.
     expect(notes).toContain(
-      '+8% after each dwell, doubling the step (8, 16, 32%) while each step stays clean, capped at the base, your bitrate; ' +
-        'a step is kept unless loss rises above max(1.5 x the held level, held level + 1 point); ' +
-        'a failed step reverts and backs off (30 s doubling to 120 s) before trying again.',
+      'With Live Tuning on and loss at that level, Doctor now offers to lower your bitrate one step, with Undo. ' +
+        'Taking it turns Live Tuning off for the rest of that stream.',
     )
-    // Media reports that stop no longer leave Live Tuning cutting on the last loss they brought, and a
-    // pause in them, k_media_report_pause_hold, holds the rate.
-    expect(notes).toContain("or of your client's reports stopping")
-    expect(notes).toContain('holds your bitrate through a pause in those reports of up to 30 seconds')
+    // Live Tuning keeps 1.4.13's loss handling, and nothing here says otherwise.
+    expect(notes).toContain("Live Tuning's own loss handling is unchanged in this release.")
+    for (const claim of ['Live Tuning cuts for loss', 'tests the rates below', 'climbs back', 'held level', 'pause in those reports']) {
+      expect(notes).not.toContain(claim)
+    }
   })
 })
