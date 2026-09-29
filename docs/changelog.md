@@ -23,6 +23,8 @@ starts at `v1.0.0`.
   undo, and frames held to the cut's smaller byte budget filled it more often, so the finding came
   and went with every cut. A cut no longer counts as such a reduction, and the share of frames at
   the byte budget leaves out the frames sent while Live Tuning holds the stream below its set rate.
+  The session status's `pyrowave_bitrate.starved`, which the console's PyroWave readout words, judges
+  the set rate as Doctor does, where it came and went with the same cuts beside a headline that held.
   Whether Live Tuning sits at its PyroWave floor still reads the live rate.
 
 - A bitrate step Doctor verifies leaves its headline judging the step's own readings. Doctor

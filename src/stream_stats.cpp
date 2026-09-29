@@ -2533,9 +2533,7 @@ namespace stream_stats {
     // While Live Tuning owns the bitrate its target moves with the network, down for an RTT spike and
     // back a step at a time, and PyroWave's advice judged on it came and went as the target crossed
     // the starved line. Doctor judges the rate the stream is set to, which Live Tuning returns to.
-    const auto pyrowave = evaluate_pyrowave_bitrate(
-      stats, auto_safe_managing && effective_quality_target_kbps > 0 ? effective_quality_target_kbps : 0
-    );
+    const auto pyrowave = evaluate_pyrowave_bitrate(stats, pyrowave_judged_encoder_kbps(stats));
     // A stream cut below a request that already meets the raise goal climbs back to that request by the
     // ordinary quality restore. PyroWave's raise would stop short of what the player asked for, and its
     // text would ask for less. Live Tuning's own cut is no such reduction: PyroWave is judged on the rate
@@ -3759,6 +3757,11 @@ namespace stream_stats {
     return result;
   }
 
+  int pyrowave_judged_encoder_kbps(const stats_t &stats) {
+    if (!stats.adaptive_bitrate_enabled) return 0;
+    return std::max(doctor_quality_goal(stats, "launch").encoder_kbps, 0);
+  }
+
   nlohmann::json pyrowave_bitrate_json(const stats_t &stats) {
     const auto pyrowave = evaluate_pyrowave_bitrate(stats);
     if (!pyrowave.active) return nullptr;
@@ -3773,7 +3776,10 @@ namespace stream_stats {
     value["request_kbps"] = pyrowave.request_kbps;
     value["ceiling_frame_share"] = pyrowave.ceiling_frame_share ?
       nlohmann::json(std::round(*pyrowave.ceiling_frame_share * 1000.0) / 1000.0) : nlohmann::json(nullptr);
-    value["starved"] = pyrowave.starved;
+    // Starved as Doctor judges it: on the rate the stream is set to while Live Tuning owns the bitrate.
+    // Judged on the live target, the console's starved line came and went with every Live Tuning cut
+    // while Doctor's headline held.
+    value["starved"] = evaluate_pyrowave_bitrate(stats, pyrowave_judged_encoder_kbps(stats)).starved;
     value["live_tuning_floor_encoder_kbps"] = pyrowave.floor_encoder_kbps > 0 ?
       nlohmann::json(pyrowave.floor_encoder_kbps) : nlohmann::json(nullptr);
     const auto &request = stats.bitrate_request;

@@ -8562,6 +8562,51 @@ TEST(StreamStatsDoctorTests, PyroWaveAdviceHoldsWhileLiveTuningMovesTheBitrate) 
   }
 }
 
+TEST(StreamStatsDoctorTests, SessionStatusStarvedHoldsWhileLiveTuningMovesTheBitrate) {
+  // The session status's pyrowave_bitrate.starved, which the console's PyroWave readout words, judged
+  // Live Tuning's moving target while Doctor judged the rate the stream is set to. Through the PyroWave
+  // run's cuts a 1080p120 stream set at 170 Mbps read starved and not with every cut, beside a Doctor
+  // headline that held. It judges the set rate too.
+  PyroWaveHostGuard host;
+  stream_stats::update_stream_active(false);
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::update_stream_active(false);
+  });
+  stream_stats::update_controller_input_state(false, 0, "", "", "unknown", "", false, "");
+  stream_stats::update_steam_input_state("unknown", 0, 0, 0, "");
+  stream_stats::update_stream_active(true, "RetroidPocket6", "203.0.113.87");
+  const auto status_under_live_tuning = [](int target_kbps) {
+    auto live = stream_stats::get_current();
+    live.adaptive_bitrate_enabled = true;
+    live.adaptive_runtime_update_supported = true;
+    live.adaptive_target_bitrate_kbps = target_kbps;
+    return stream_stats::pyrowave_bitrate_json(live);
+  };
+  for (const int set_kbps : {170000, 120000}) {
+    stream_stats::update_video_stats(120.0, set_kbps, 1.0, "pyrowave", 1920, 1080);
+    stream_stats::update_session_targets(
+      120.0, 120.0, 120.0, "client_requested", "deterministic_preset_v1",
+      "deterministic", "not_applicable", "Capability-validated launch profile.",
+      "", 1, 0, set_kbps
+    );
+    std::string starved_trace;
+    int flips = 0;
+    std::optional<bool> was;
+    for (const auto live_target : k_recorded_pyrowave_live_targets_kbps) {
+      const int target = static_cast<int>(static_cast<std::int64_t>(set_kbps) * live_target / 268988);
+      const auto status = status_under_live_tuning(target);
+      const bool starved = status.at("starved").get<bool>();
+      starved_trace += std::to_string(target / 1000) + (starved ? ":starved " : ":fed ");
+      flips += was && *was != starved ? 1 : 0;
+      was = starved;
+      // The rate the stream runs at now is still the live one.
+      EXPECT_EQ(status.at("encoder_kbps"), target);
+    }
+    EXPECT_EQ(flips, 0) << set_kbps << ": " << starved_trace;
+    EXPECT_EQ(*was, set_kbps == 120000) << set_kbps << ": " << starved_trace;
+  }
+}
+
 TEST(StreamStatsDoctorTests, PyroWaveNeedsMoreHoldsWhileLiveTuningMovesTheBitrate) {
   // A 4K120 4:4:4 PyroWave stream on a Retroid Pocket 6 with Live Tuning on, cut for the PyroWave run's
   // Wi-Fi RTT spikes in its proportions and brought back. Its model asks a request of 328 Mbps and

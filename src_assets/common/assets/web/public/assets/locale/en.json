@@ -463,7 +463,7 @@
     "codec_support_pyrowave_rule_below_model_edge": "This picture is smaller than 1280x720, the smallest size the model was fitted on, so it takes that size's bits per pixel.",
     "codec_support_pyrowave_rule_flat_fallback": "The model has no answer for this stream, so the figures use a flat 0.73 bits per pixel.",
     "codec_support_pyrowave_rule_model_not_16_9": "The model was fitted on 16:9 pictures, so for this shape it is keyed on the pixel count.",
-    "codec_support_pyrowave_starved": "The host reads this stream as starved: as a request, it runs more than a tenth below where Doctor's raise would take it.",
+    "codec_support_pyrowave_starved": "The host reads this stream as starved: as a request, the rate it is set to is more than a tenth below where Doctor's raise would take it.",
     "codec_support_pyrowave_streaming": "PyroWave stream running: {width}x{height} at {fps} fps, {chroma}.",
     "codec_support_pyrowave_streaming_unknown": "PyroWave stream running.",
     "codec_support_pyrowave_unavailable_unknown": "The host did not say why PyroWave is not available.",

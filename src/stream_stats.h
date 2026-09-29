@@ -936,6 +936,15 @@ namespace stream_stats {
    */
   pyrowave_bitrate_t evaluate_pyrowave_bitrate(const stats_t &stats, int set_encoder_kbps = 0);
 
+  /**
+   * @brief The encoder rate PyroWave's advice is judged on: while Live Tuning owns the bitrate, the rate
+   *        the stream is set to, its launch goal, and otherwise zero, the live rate.
+   *
+   * Doctor's headline and the session status's pyrowave_bitrate.starved both judge on it, so a reader of
+   * one never sees the other flip with Live Tuning's cuts.
+   */
+  int pyrowave_judged_encoder_kbps(const stats_t &stats);
+
   /// The session status pyrowave_bitrate object, or null when the stream is not PyroWave. Its assumes
   /// names the FEC share and audio cost the requests were grossed up for, as the pre-launch advice does.
   nlohmann::json pyrowave_bitrate_json(const stats_t &stats);
