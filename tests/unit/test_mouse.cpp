@@ -211,32 +211,33 @@ namespace {
 }  // namespace
 
 // Absolute input maps onto the captured screen in the desktop's units. A capture that sets no
-// logical size, which is every one but a rotated or scaled Wayland or KMS output, maps onto its
-// frame as before; one that sets it, for a monitor turned a quarter, maps onto that.
-TEST(InputTouchPortMapping, ScreenOnDesktopTakesTheLogicalSizeOnlyWhenSet) {
+// input size, which is every one but wlroots and KMS capture on Wayland, maps onto its frame as
+// before. One that sets it maps onto that: here a 1920x1080 monitor at scale 1 right of a scale 2
+// monitor, on a desktop counted in the scale 2 monitor's pixels.
+TEST(InputTouchPortMapping, ScreenOnDesktopTakesTheInputSizeOnlyWhenSet) {
   placed_display_t display;
-  display.offset_x = 2560;
+  display.offset_x = 3840;
   display.offset_y = 0;
   display.width = 1920;
   display.height = 1080;
 
   auto screen = display.screen_on_desktop();
-  EXPECT_EQ(screen.offset_x, 2560);
+  EXPECT_EQ(screen.offset_x, 3840);
   EXPECT_EQ(screen.offset_y, 0);
   EXPECT_EQ(screen.width, 1920);
   EXPECT_EQ(screen.height, 1080);
 
   // Half a size is no size: the frame's shape is kept whole rather than mixed with it.
-  display.logical_width = 1080;
+  display.input_width = 3840;
   screen = display.screen_on_desktop();
   EXPECT_EQ(screen.width, 1920);
   EXPECT_EQ(screen.height, 1080);
 
-  display.logical_height = 1920;
+  display.input_height = 2160;
   screen = display.screen_on_desktop();
-  EXPECT_EQ(screen.offset_x, 2560);
-  EXPECT_EQ(screen.width, 1080);
-  EXPECT_EQ(screen.height, 1920);
+  EXPECT_EQ(screen.offset_x, 3840);
+  EXPECT_EQ(screen.width, 3840);
+  EXPECT_EQ(screen.height, 2160);
 }
 
 // A point on the captured screen is counted from that screen's corner, and absolute input spans

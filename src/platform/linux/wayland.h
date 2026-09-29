@@ -523,9 +523,9 @@ namespace wl {
 
   /**
    * @brief The desktop the outputs make together: the smallest rectangle holding each output's
-   *        logical rectangle, in the desktop's units.
+   *        rectangle, in desktop pixels.
    */
-  output_layout::rect_t desktop_bounds(const std::vector<std::unique_ptr<monitor_t>> &monitors);
+  output_layout::desktop_t measure_desktop(const std::vector<std::unique_ptr<monitor_t>> &monitors);
 
   /**
    * @brief One output's capture, in the two units a capture and input each count in.
@@ -534,9 +534,10 @@ namespace wl {
     /// What a capture of the output hands back: output pixels, before the transform and the scale.
     int frame_width = 0;
     int frame_height = 0;
-    /// The output on the desktop, counted from the desktop's corner, in the desktop's units.
+    /// Where absolute input places the output, counted from the desktop's corner, in desktop
+    /// pixels.
     output_layout::rect_t screen;
-    /// Every output together, which absolute input spans.
+    /// Every output together, in desktop pixels, which absolute input spans.
     output_layout::rect_t desktop;
 
     /**
@@ -547,8 +548,8 @@ namespace wl {
       display.height = frame_height;
       display.offset_x = screen.x;
       display.offset_y = screen.y;
-      display.logical_width = screen.width;
-      display.logical_height = screen.height;
+      display.input_width = screen.width;
+      display.input_height = screen.height;
       display.env_width = desktop.width;
       display.env_height = desktop.height;
     }

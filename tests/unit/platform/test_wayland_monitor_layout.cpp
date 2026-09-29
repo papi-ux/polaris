@@ -121,29 +121,84 @@ TEST(WaylandMonitorLayout, TransformPlacesAnOutputWithoutALogicalSize) {
   const auto monitors = reporters_desktop(false);
 
   EXPECT_EQ(monitors[1]->logical_rect(), (rect_t {2560, 0, 1080, 1920}));
-  EXPECT_EQ(wl::desktop_bounds(monitors), (rect_t {0, 0, 3640, 1920}));
+  EXPECT_EQ(wl::measure_desktop(monitors).rect, (rect_t {0, 0, 3640, 1920}));
   EXPECT_EQ(monitors[1]->viewport.width, 1920);
   EXPECT_EQ(monitors[1]->viewport.height, 1080);
 }
 
-// A HiDPI monitor at scale 2 is captured at its whole mode and covers half of it on the desktop,
-// whether xdg-output says so or only wl_output.scale does.
-TEST(WaylandMonitorLayout, ScaleTwoMonitorCoversHalfItsModeOnTheDesktop) {
+// A lone 3840x2160 monitor at scale 2 covers 1920x1080 logical units, and the desktop counts two
+// pixels to each, so input gets exactly the numbers it had when the desktop was measured by the
+// mode: a 3840x2160 screen on a 3840x2160 desktop, every physical pixel within the pointer's reach.
+TEST(WaylandMonitorLayout, ALoneScaleTwoMonitorMeasuresWhatItsModeDoes) {
+  for (const bool with_logical_sizes : {true, false}) {
+    std::vector<std::unique_ptr<wl::monitor_t>> monitors;
+    monitors.emplace_back(monitor(0, 0, 3840, 2160, transform::normal, 2, with_logical_sizes ? std::optional {std::pair {1920, 1080}} : std::nullopt));
+
+    const geometry_display_t display {wl::capture_geometry(monitors, 0)};
+    EXPECT_EQ(display.width, 3840) << "logical sizes sent: " << with_logical_sizes;
+    EXPECT_EQ(display.height, 2160) << "logical sizes sent: " << with_logical_sizes;
+    EXPECT_EQ(display.env_width, 3840) << "logical sizes sent: " << with_logical_sizes;
+    EXPECT_EQ(display.env_height, 2160) << "logical sizes sent: " << with_logical_sizes;
+
+    const auto port = input::make_touch_port(display.screen_on_desktop(), display.env_width, display.env_height, 1920, 1080);
+    const auto by_mode = input::make_touch_port(platf::touch_port_t {0, 0, 3840, 2160}, 3840, 2160, 1920, 1080);
+    EXPECT_EQ(port.offset_x, by_mode.offset_x);
+    EXPECT_EQ(port.offset_y, by_mode.offset_y);
+    EXPECT_EQ(port.width, by_mode.width);
+    EXPECT_EQ(port.height, by_mode.height);
+    EXPECT_EQ(port.env_width, by_mode.env_width);
+    EXPECT_EQ(port.env_height, by_mode.env_height);
+    EXPECT_FLOAT_EQ(port.client_offsetX, by_mode.client_offsetX);
+    EXPECT_FLOAT_EQ(port.client_offsetY, by_mode.client_offsetY);
+    EXPECT_FLOAT_EQ(port.scalar_inv, by_mode.scalar_inv);
+  }
+}
+
+// A HiDPI monitor at scale 2 beside a plain one. The desktop counts in the HiDPI monitor's
+// pixels, so that monitor is placed at its whole mode, and the plain one covers twice its mode.
+// That holds whether xdg-output says how big each is or only wl_output.scale does.
+TEST(WaylandMonitorLayout, MixedScaleDesktopCountsInTheSharpestMonitorsPixels) {
   for (const bool with_logical_sizes : {true, false}) {
     std::vector<std::unique_ptr<wl::monitor_t>> monitors;
     monitors.emplace_back(monitor(0, 0, 3840, 2160, transform::normal, 2, with_logical_sizes ? std::optional {std::pair {1920, 1080}} : std::nullopt));
     monitors.emplace_back(monitor(1920, 0, 2560, 1440, transform::normal, 1, with_logical_sizes ? std::optional {std::pair {2560, 1440}} : std::nullopt));
 
-    const auto geometry = wl::capture_geometry(monitors, 0);
-    EXPECT_EQ(geometry.frame_width, 3840) << "logical sizes sent: " << with_logical_sizes;
-    EXPECT_EQ(geometry.frame_height, 2160) << "logical sizes sent: " << with_logical_sizes;
-    EXPECT_EQ(geometry.screen, (rect_t {0, 0, 1920, 1080})) << "logical sizes sent: " << with_logical_sizes;
-    EXPECT_EQ(geometry.desktop, (rect_t {0, 0, 4480, 1440})) << "logical sizes sent: " << with_logical_sizes;
+    const auto hidpi = wl::capture_geometry(monitors, 0);
+    EXPECT_EQ(hidpi.frame_width, 3840) << "logical sizes sent: " << with_logical_sizes;
+    EXPECT_EQ(hidpi.frame_height, 2160) << "logical sizes sent: " << with_logical_sizes;
+    EXPECT_EQ(hidpi.screen, (rect_t {0, 0, 3840, 2160})) << "logical sizes sent: " << with_logical_sizes;
+    EXPECT_EQ(hidpi.desktop, (rect_t {0, 0, 8960, 2880})) << "logical sizes sent: " << with_logical_sizes;
+
+    const auto plain = wl::capture_geometry(monitors, 1);
+    EXPECT_EQ(plain.frame_width, 2560) << "logical sizes sent: " << with_logical_sizes;
+    EXPECT_EQ(plain.frame_height, 1440) << "logical sizes sent: " << with_logical_sizes;
+    EXPECT_EQ(plain.screen, (rect_t {3840, 0, 5120, 2880})) << "logical sizes sent: " << with_logical_sizes;
+    EXPECT_EQ(plain.desktop, (rect_t {0, 0, 8960, 2880})) << "logical sizes sent: " << with_logical_sizes;
   }
 }
 
+// On that mixed desktop, the middle of either stream lands in the middle of its monitor. In
+// logical units the HiDPI monitor spans 0 to 1920 and the plain one 1920 to 4480.
+TEST(WaylandMonitorLayout, MixedScaleClientPointLandsOnEachMonitor) {
+  std::vector<std::unique_ptr<wl::monitor_t>> monitors;
+  monitors.emplace_back(monitor(0, 0, 3840, 2160, transform::normal, 2, std::pair {1920, 1080}));
+  monitors.emplace_back(monitor(1920, 0, 2560, 1440, transform::normal, 1, std::pair {2560, 1440}));
+
+  const geometry_display_t hidpi {wl::capture_geometry(monitors, 0)};
+  const auto hidpi_middle = desktop_fraction(hidpi, 1920, 1080, 960.0f, 540.0f);
+  ASSERT_TRUE(hidpi_middle.has_value());
+  EXPECT_NEAR(hidpi_middle->first * 4480.0f, 960.0f, 1.0f);
+  EXPECT_NEAR(hidpi_middle->second * 1440.0f, 540.0f, 1.0f);
+
+  const geometry_display_t plain {wl::capture_geometry(monitors, 1)};
+  const auto plain_middle = desktop_fraction(plain, 2560, 1440, 1280.0f, 720.0f);
+  ASSERT_TRUE(plain_middle.has_value());
+  EXPECT_NEAR(plain_middle->first * 4480.0f, 1920.0f + 1280.0f, 1.0f);
+  EXPECT_NEAR(plain_middle->second * 1440.0f, 720.0f, 1.0f);
+}
+
 // At a fractional scale of 1.5, wl_output.scale rounds up to 2 and only xdg-output says the
-// monitor covers 2560x1440. Its word wins.
+// monitor covers 2560x1440. Its word wins, counted two desktop pixels to each logical unit.
 TEST(WaylandMonitorLayout, FractionalScaleTakesXdgOutputsLogicalSize) {
   std::vector<std::unique_ptr<wl::monitor_t>> monitors;
   monitors.emplace_back(monitor(0, 0, 3840, 2160, transform::normal, 2, std::pair {2560, 1440}));
@@ -151,8 +206,8 @@ TEST(WaylandMonitorLayout, FractionalScaleTakesXdgOutputsLogicalSize) {
   const auto geometry = wl::capture_geometry(monitors, 0);
   EXPECT_EQ(geometry.frame_width, 3840);
   EXPECT_EQ(geometry.frame_height, 2160);
-  EXPECT_EQ(geometry.screen, (rect_t {0, 0, 2560, 1440}));
-  EXPECT_EQ(geometry.desktop, (rect_t {0, 0, 2560, 1440}));
+  EXPECT_EQ(geometry.screen, (rect_t {0, 0, 5120, 2880}));
+  EXPECT_EQ(geometry.desktop, (rect_t {0, 0, 5120, 2880}));
 }
 
 // Plain monitors measure as they always did.

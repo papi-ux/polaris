@@ -382,13 +382,13 @@ namespace wl {
     }
   }
 
-  output_layout::rect_t desktop_bounds(const std::vector<std::unique_ptr<monitor_t>> &monitors) {
-    std::vector<output_layout::rect_t> outputs;
+  output_layout::desktop_t measure_desktop(const std::vector<std::unique_ptr<monitor_t>> &monitors) {
+    std::vector<output_layout::output_t> outputs;
     outputs.reserve(monitors.size());
     for (const auto &monitor : monitors) {
-      outputs.emplace_back(monitor->logical_rect());
+      outputs.emplace_back(monitor->layout);
     }
-    return output_layout::bounds(outputs);
+    return output_layout::measure_desktop(outputs);
   }
 
   capture_geometry_t capture_geometry(const std::vector<std::unique_ptr<monitor_t>> &monitors, std::size_t index) {
@@ -397,12 +397,12 @@ namespace wl {
     }
 
     const auto &monitor = *monitors[index];
-    const auto desktop = desktop_bounds(monitors);
+    const auto desktop = measure_desktop(monitors);
     return {
       .frame_width = monitor.viewport.width,
       .frame_height = monitor.viewport.height,
-      .screen = output_layout::on_desktop(monitor.logical_rect(), desktop),
-      .desktop = desktop,
+      .screen = output_layout::input_rect(monitor.layout, desktop),
+      .desktop = desktop.rect,
     };
   }
 

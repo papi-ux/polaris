@@ -864,8 +864,8 @@ namespace platf {
             const auto screen = output_layout::crtc_input_rect(streamed, kms::desktop);
             offset_x = screen.x;
             offset_y = screen.y;
-            logical_width = screen.width;
-            logical_height = screen.height;
+            input_width = screen.width;
+            input_height = screen.height;
 
             plane_id = plane->plane_id;
             crtc_id = plane->crtc_id;

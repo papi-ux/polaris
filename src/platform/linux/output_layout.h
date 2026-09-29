@@ -1,11 +1,13 @@
 /**
  * @file src/platform/linux/output_layout.h
- * @brief Where each output sits on the desktop, in the desktop's own units.
+ * @brief Where each output sits on the desktop, and where absolute input places a capture of one.
  *
  * A compositor lays its outputs out in logical units: an output turned a quarter is as tall on the
  * desktop as its mode is wide, and one scaled by two covers half its mode each way. A capture of
  * that output still hands back its mode in output pixels, so the two units meet here and nowhere
- * else. Absolute input is placed in the desktop's units, across every output together.
+ * else. Absolute input is placed across every output together, in desktop pixels: logical units
+ * times the largest whole scale among the outputs, so the most detailed monitor keeps every one
+ * of its pixels within reach of the pointer.
  */
 #pragma once
 
@@ -140,6 +142,61 @@ namespace output_layout {
   }
 
   /**
+   * @brief Desktop pixels per logical unit: the largest whole scale among the outputs, and at
+   *        least one.
+   *
+   * Absolute pointer devices take whole units. Counted in logical units, a pointer on a scale 2
+   * monitor could only land on every other pixel. Counted in these, a lone scale 2 monitor
+   * measures what its mode does, and every other monitor at least that finely.
+   */
+  constexpr std::int32_t desktop_scale(std::span<const output_t> outputs) {
+    std::int32_t scale = 1;
+    for (const auto &output : outputs) {
+      scale = std::max(scale, output.scale);
+    }
+    return scale;
+  }
+
+  /**
+   * @brief The output's rectangle on the desktop, in desktop pixels.
+   */
+  constexpr rect_t desktop_rect(const output_t &output, std::int32_t scale) {
+    const auto logical = logical_rect(output);
+    return {logical.x * scale, logical.y * scale, logical.width * scale, logical.height * scale};
+  }
+
+  /**
+   * @brief The desktop absolute input spans.
+   */
+  struct desktop_t {
+    /// Every output together, in desktop pixels.
+    rect_t rect;
+    /// Desktop pixels per logical unit.
+    std::int32_t scale = 1;
+  };
+
+  /**
+   * @brief The desktop the outputs make together, in desktop pixels.
+   */
+  inline desktop_t measure_desktop(std::span<const output_t> outputs) {
+    const auto scale = desktop_scale(outputs);
+    std::vector<rect_t> rects;
+    rects.reserve(outputs.size());
+    for (const auto &output : outputs) {
+      rects.emplace_back(desktop_rect(output, scale));
+    }
+    return {bounds(rects), scale};
+  }
+
+  /**
+   * @brief Where absolute input places a capture of the output: its rectangle in desktop pixels,
+   *        counted from the desktop's corner.
+   */
+  constexpr rect_t input_rect(const output_t &output, const desktop_t &desktop) {
+    return on_desktop(desktop_rect(output, desktop.scale), desktop.rect);
+  }
+
+  /**
    * @brief One active CRTC as KMS capture finds it, with the Wayland output on its connector.
    */
   struct crtc_output_t {
@@ -151,13 +208,11 @@ namespace output_layout {
   };
 
   /**
-   * @brief The desktop KMS capture places absolute input on.
+   * @brief The desktop KMS capture places absolute input on: every active CRTC together.
    */
-  struct crtc_desktop_t {
-    /// Every active CRTC together.
-    rect_t rect;
-    /// Measured by Wayland's rectangles. Otherwise by each CRTC's, which is what KMS capture always
-    /// measured by.
+  struct crtc_desktop_t: desktop_t {
+    /// Measured by Wayland's rectangles, in desktop pixels. Otherwise by each CRTC's, in the CRTC's
+    /// pixels, which is what KMS capture always measured by.
     bool by_wayland = false;
   };
 
@@ -174,12 +229,21 @@ namespace output_layout {
                               return crtc.wayland.has_value();
                             });
 
+    if (by_wayland) {
+      std::vector<output_t> outputs;
+      outputs.reserve(crtcs.size());
+      for (const auto &crtc : crtcs) {
+        outputs.emplace_back(*crtc.wayland);
+      }
+      return {measure_desktop(outputs), true};
+    }
+
     std::vector<rect_t> rects;
     rects.reserve(crtcs.size());
     for (const auto &crtc : crtcs) {
-      rects.emplace_back(by_wayland ? logical_rect(*crtc.wayland) : crtc.crtc);
+      rects.emplace_back(crtc.crtc);
     }
-    return {bounds(rects), by_wayland};
+    return {{bounds(rects), 1}, false};
   }
 
   /**
@@ -189,7 +253,7 @@ namespace output_layout {
    */
   constexpr rect_t crtc_input_rect(const crtc_output_t &crtc, const crtc_desktop_t &desktop) {
     if (desktop.by_wayland && crtc.wayland) {
-      return on_desktop(logical_rect(*crtc.wayland), desktop.rect);
+      return input_rect(*crtc.wayland, desktop);
     }
     return {crtc.crtc.x - desktop.rect.x, crtc.crtc.y - desktop.rect.y, 0, 0};
   }

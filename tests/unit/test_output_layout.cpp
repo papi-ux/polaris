@@ -15,8 +15,11 @@ namespace {
   using output_layout::bounds;
   using output_layout::crtc_input_rect;
   using output_layout::crtc_output_t;
+  using output_layout::desktop_scale;
+  using output_layout::input_rect;
   using output_layout::logical_rect;
   using output_layout::measure_crtc_desktop;
+  using output_layout::measure_desktop;
   using output_layout::on_desktop;
   using output_layout::output_t;
   using output_layout::rect_t;
@@ -148,6 +151,59 @@ TEST(OutputLayout, AnOutputWithNoAreaHoldsNothing) {
   EXPECT_EQ(bounds(std::span<const rect_t> {}), (rect_t {}));
 }
 
+// The desktop counts in the pixels of its most detailed monitor, and never in fewer than one to
+// a logical unit.
+TEST(OutputLayout, DesktopScaleIsTheLargestWholeScale) {
+  const std::array mixed {
+    mode_only(0, 0, 1920, 1080),
+    mode_only(1920, 0, 3840, 2160, transform::normal, 2),
+    mode_only(3840, 0, 5120, 2880, transform::normal, 3),
+  };
+  EXPECT_EQ(desktop_scale(mixed), 3);
+  EXPECT_EQ(desktop_scale(std::span<const output_t> {}), 1);
+
+  const std::array unsent {mode_only(0, 0, 1920, 1080, transform::normal, 0)};
+  EXPECT_EQ(desktop_scale(unsent), 1);
+}
+
+// A lone 3840x2160 monitor at scale 2 measures what its mode does, so input on it has the numbers
+// it always had.
+TEST(OutputLayout, ALoneScaleTwoMonitorMeasuresWhatItsModeDoes) {
+  const std::array outputs {described(0, 0, 1920, 1080, 3840, 2160, transform::normal, 2)};
+
+  const auto desktop = measure_desktop(outputs);
+  EXPECT_EQ(desktop.scale, 2);
+  EXPECT_EQ(desktop.rect, (rect_t {0, 0, 3840, 2160}));
+  EXPECT_EQ(input_rect(outputs[0], desktop), (rect_t {0, 0, 3840, 2160}));
+}
+
+// A scale 2 monitor beside a plain one: two desktop pixels to each logical unit on both.
+TEST(OutputLayout, MixedScaleDesktopCountsInTheSharpestMonitorsPixels) {
+  const std::array outputs {
+    described(0, 0, 1920, 1080, 3840, 2160, transform::normal, 2),
+    described(1920, 0, 2560, 1440, 2560, 1440),
+  };
+
+  const auto desktop = measure_desktop(outputs);
+  EXPECT_EQ(desktop.scale, 2);
+  EXPECT_EQ(desktop.rect, (rect_t {0, 0, 8960, 2880}));
+  EXPECT_EQ(input_rect(outputs[0], desktop), (rect_t {0, 0, 3840, 2160}));
+  EXPECT_EQ(input_rect(outputs[1], desktop), (rect_t {3840, 0, 5120, 2880}));
+}
+
+// The reporter's desktop has no scaled monitor, so desktop pixels are logical units there.
+TEST(OutputLayout, ReportersDesktopCountsOnePixelToEachLogicalUnit) {
+  const std::array outputs {
+    described(0, 0, 2560, 1440, 2560, 1440),
+    described(2560, 0, 1080, 1920, 1920, 1080, transform::turned_90),
+  };
+
+  const auto desktop = measure_desktop(outputs);
+  EXPECT_EQ(desktop.scale, 1);
+  EXPECT_EQ(desktop.rect, (rect_t {0, 0, 3640, 1920}));
+  EXPECT_EQ(input_rect(outputs[0], desktop), (rect_t {0, 0, 2560, 1440}));
+}
+
 // KMS capture on the reporter's desktop: Wayland matched an output to both CRTCs, so the desktop
 // is measured the way Wayland lays it out, and the main monitor sits at its corner.
 TEST(OutputLayout, KmsDesktopIsWaylandsWhenEveryCrtcHasAnOutput) {
@@ -203,6 +259,26 @@ TEST(OutputLayout, KmsDesktopWithoutWaylandIsTheCrtcs) {
   EXPECT_EQ(desktop.rect, (rect_t {0, 0, 4480, 1440}));
   EXPECT_EQ(crtc_input_rect(crtcs[1], desktop), (rect_t {2560, 0, 0, 0}));
   EXPECT_FALSE(measure_crtc_desktop(std::span<const crtc_output_t> {}).by_wayland);
+}
+
+// KMS capture counts a Wayland desktop in desktop pixels too: a lone scale 2 monitor measures what
+// its CRTC does, and beside a plain one both count two pixels to each logical unit.
+TEST(OutputLayout, KmsDesktopCountsInDesktopPixels) {
+  const crtc_output_t hidpi {{0, 0, 3840, 2160}, described(0, 0, 1920, 1080, 3840, 2160, transform::normal, 2)};
+  const crtc_output_t plain {{1920, 0, 2560, 1440}, described(1920, 0, 2560, 1440, 2560, 1440)};
+
+  const std::array alone {hidpi};
+  const auto lone_desktop = measure_crtc_desktop(alone);
+  EXPECT_TRUE(lone_desktop.by_wayland);
+  EXPECT_EQ(lone_desktop.rect, (rect_t {0, 0, 3840, 2160}));
+  EXPECT_EQ(crtc_input_rect(hidpi, lone_desktop), (rect_t {0, 0, 3840, 2160}));
+
+  const std::array both {hidpi, plain};
+  const auto desktop = measure_crtc_desktop(both);
+  EXPECT_EQ(desktop.scale, 2);
+  EXPECT_EQ(desktop.rect, (rect_t {0, 0, 8960, 2880}));
+  EXPECT_EQ(crtc_input_rect(hidpi, desktop), (rect_t {0, 0, 3840, 2160}));
+  EXPECT_EQ(crtc_input_rect(plain, desktop), (rect_t {3840, 0, 5120, 2880}));
 }
 
 // A CRTC capture could not tie to a monitor has only its own place, and counts from the desktop's

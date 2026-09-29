@@ -202,7 +202,7 @@ namespace wl {
                       << "] for streaming; description=["sv << monitor->description << ']';
       BOOST_LOG(debug) << "Offset: "sv << offset_x << 'x' << offset_y;
       BOOST_LOG(debug) << "Resolution: "sv << width << 'x' << height;
-      BOOST_LOG(debug) << "Size on the desktop: "sv << logical_width << 'x' << logical_height;
+      BOOST_LOG(debug) << "Size on the desktop: "sv << input_width << 'x' << input_height;
       BOOST_LOG(debug) << "Desktop Resolution: "sv << env_width << 'x' << env_height;
 
       return 0;
@@ -1151,7 +1151,7 @@ namespace platf {
       ));
     }
 
-    const auto desktop = wl::desktop_bounds(interface.monitors);
+    const auto desktop = wl::measure_desktop(interface.monitors).rect;
     BOOST_LOG(debug) << "Desktop Resolution: "sv << desktop.width << 'x' << desktop.height;
     BOOST_LOG(info) << "--------- End of Wayland monitor list ---------"sv;
 

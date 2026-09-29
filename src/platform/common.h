@@ -753,23 +753,24 @@ namespace platf {
 
     int width, height;
 
-    // The captured screen's size on the desktop, in the units offset_x and env_width count in. A
-    // Wayland output turned a quarter is as tall on the desktop as its frame is wide, and one scaled
-    // by two covers half its frame each way. A capture that leaves them at zero has input map onto
-    // the frame, which is right wherever the two sizes are the same.
-    int logical_width = 0, logical_height = 0;
+    // The captured screen's size where absolute input places it, in the units offset_x and
+    // env_width count in. wlroots and KMS capture on Wayland count the desktop in desktop pixels,
+    // logical units times the largest scale among its monitors, where a monitor turned a quarter
+    // or scaled less than that is not the size of its frame. A capture that leaves them at zero has
+    // input map onto the frame, which is right wherever the two sizes are the same.
+    int input_width = 0, input_height = 0;
 
     /**
      * @brief The captured screen's place and size on the desktop, which absolute input maps onto.
      *        The frame stays in output pixels for capture and encode.
      */
     touch_port_t screen_on_desktop() const {
-      const bool logical = logical_width > 0 && logical_height > 0;
+      const bool sized = input_width > 0 && input_height > 0;
       return {
         offset_x,
         offset_y,
-        logical ? logical_width : width,
-        logical ? logical_height : height,
+        sized ? input_width : width,
+        sized ? input_height : height,
       };
     }
 
