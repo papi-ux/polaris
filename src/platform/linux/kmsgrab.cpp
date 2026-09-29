@@ -34,6 +34,7 @@
 #include "kms_connector_selection.h"
 #include "kms_named_binding.h"
 #include "kms_frame_transfer.h"
+#include "output_layout.h"
 #include <format>
 #include "vaapi.h"
 #include "stream_display_policy.h"
@@ -159,8 +160,8 @@ namespace platf {
 
     using conn_type_count_t = std::map<std::uint32_t, std::uint32_t>;
 
-    static int env_width;
-    static int env_height;
+    // Every monitor together, in the desktop's units, which absolute input spans.
+    static output_layout::rect_t desktop;
 
     std::string_view plane_type(std::uint64_t val) {
       switch (val) {
@@ -201,9 +202,22 @@ namespace platf {
       std::uint32_t monitor_index;
 
       platf::touch_port_t viewport;
+
+      // The monitor's rectangle on the desktop as Wayland lays it out: turned and scaled, which
+      // the CRTC's mode is not. Empty when Wayland named no output for this connector.
+      std::optional<output_layout::rect_t> on_desktop;
       std::uint32_t kernel_index {};
       bool connected {};
     };
+
+    // A monitor's rectangle on the desktop. Without Wayland's word for it, the CRTC's position and
+    // mode are all there is, which is right for an output that is neither rotated nor scaled.
+    output_layout::rect_t desktop_rect(const monitor_t &monitor) {
+      if (monitor.on_desktop) {
+        return *monitor.on_desktop;
+      }
+      return {monitor.viewport.offset_x, monitor.viewport.offset_y, monitor.viewport.width, monitor.viewport.height};
+    }
 
     struct card_descriptor_t {
       std::string path;
@@ -803,8 +817,8 @@ namespace platf {
             img_offset_x = crtc->x;
             img_offset_y = crtc->y;
 
-            this->env_width = ::platf::kms::env_width;
-            this->env_height = ::platf::kms::env_height;
+            this->env_width = ::platf::kms::desktop.width;
+            this->env_height = ::platf::kms::desktop.height;
 
             auto monitor = pos->crtc_to_monitor.find(plane->crtc_id);
             if (monitor != std::end(pos->crtc_to_monitor)) {
@@ -825,8 +839,19 @@ namespace platf {
                   break;
               }
 
-              offset_x = viewport.offset_x;
-              offset_y = viewport.offset_y;
+              // Absolute input is placed on the desktop in the desktop's units. Where Wayland lays
+              // this monitor out rotated or scaled, its size there is not the frame's, and the
+              // extents were measured the same way.
+              if (monitor->second.on_desktop) {
+                const auto screen = output_layout::on_desktop(*monitor->second.on_desktop, kms::desktop);
+                offset_x = screen.x;
+                offset_y = screen.y;
+                logical_width = screen.width;
+                logical_height = screen.height;
+              } else {
+                offset_x = viewport.offset_x - kms::desktop.x;
+                offset_y = viewport.offset_y - kms::desktop.y;
+              }
             }
 
             // This code path shouldn't happen, but it's there just in case.
@@ -1781,6 +1806,12 @@ namespace platf {
             monitor_descriptor.viewport.offset_x = monitor->viewport.offset_x;
             monitor_descriptor.viewport.offset_y = monitor->viewport.offset_y;
 
+            // The CRTC knows the mode, before any rotation or scale. Wayland knows the rectangle
+            // the output covers on the desktop, which is what the extents and input count in.
+            if (const auto logical = monitor->logical_rect(); !logical.empty()) {
+              monitor_descriptor.on_desktop = logical;
+            }
+
             // A sanity check, it's guesswork after all.
             if (
               monitor_descriptor.viewport.width != monitor->viewport.width ||
@@ -1938,9 +1969,6 @@ namespace platf {
           it->second.monitor_index = count;
         }
 
-        kms::env_width = std::max(kms::env_width, (int) (crtc->x + crtc->width));
-        kms::env_height = std::max(kms::env_height, (int) (crtc->y + crtc->height));
-
         kms::print(plane.get(), fb.get(), crtc.get());
 
         const auto *connector_type = it != crtc_to_monitor.end() ? drmModeGetConnectorTypeName(it->second.type) : nullptr;
@@ -1966,22 +1994,26 @@ namespace platf {
       correlate_to_wayland(cds);
     }
 
-    // Deduce the full virtual desktop size
-    kms::env_width = 0;
-    kms::env_height = 0;
-
+    // Deduce the full virtual desktop from each monitor's rectangle on it. A CRTC's mode is in
+    // output pixels before any rotation or scale, so a rotated monitor measured by its mode gave the
+    // desktop the wrong shape and put absolute input away from its target (polaris#793).
+    std::vector<output_layout::rect_t> desktop_rects;
     for (auto &card_descriptor : cds) {
       for (auto &[_, monitor_descriptor] : card_descriptor.crtc_to_monitor) {
         BOOST_LOG(debug) << "Monitor description"sv;
         BOOST_LOG(debug) << "Resolution: "sv << monitor_descriptor.viewport.width << 'x' << monitor_descriptor.viewport.height;
         BOOST_LOG(debug) << "Offset: "sv << monitor_descriptor.viewport.offset_x << 'x' << monitor_descriptor.viewport.offset_y;
 
-        kms::env_width = std::max(kms::env_width, (int) (monitor_descriptor.viewport.offset_x + monitor_descriptor.viewport.width));
-        kms::env_height = std::max(kms::env_height, (int) (monitor_descriptor.viewport.offset_y + monitor_descriptor.viewport.height));
+        const auto rect = kms::desktop_rect(monitor_descriptor);
+        if (monitor_descriptor.on_desktop) {
+          BOOST_LOG(debug) << "On the desktop: "sv << rect;
+        }
+        desktop_rects.emplace_back(rect);
       }
     }
+    kms::desktop = output_layout::bounds(desktop_rects);
 
-    BOOST_LOG(debug) << "Desktop resolution: "sv << kms::env_width << 'x' << kms::env_height;
+    BOOST_LOG(debug) << "Desktop resolution: "sv << kms::desktop.width << 'x' << kms::desktop.height;
 
     kms::card_descriptors = std::move(cds);
 
