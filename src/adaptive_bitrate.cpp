@@ -194,7 +194,8 @@ namespace adaptive_bitrate {
   static std::optional<std::chrono::steady_clock::time_point> probes_blocked_until;
   // The base those findings were made against. A new base starts them over.
   static int rate_tests_base_kbps = 0;
-  // When the newest client media report arrived. Past k_media_report_max_age its loss is stale.
+  // When the newest client media report arrived. Past k_media_report_max_age its loss is stale, and past
+  // k_media_report_pause_hold the pause is no longer waited out.
   static bool media_report_heard = false;
   static std::chrono::steady_clock::time_point last_media_report_time {};
 
@@ -592,8 +593,12 @@ namespace adaptive_bitrate {
       media_report_heard = true;
       last_media_report_time = now;
     }
+    const auto report_age = now - last_media_report_time;
     // The host's verdict stops judging loss once the newest report is this old, and so does Live Tuning.
-    const bool loss_current = media_report_heard && now - last_media_report_time <= k_media_report_max_age;
+    const bool loss_current = media_report_heard && report_age <= k_media_report_max_age;
+    // A pause in the reports, up to k_media_report_pause_hold, is waited out: the rate and what the tests
+    // found hold, since pings carry no loss to judge a step with.
+    const bool reports_recent = media_report_heard && report_age <= k_media_report_pause_hold;
 
     // Update EWMA smoothed values. A reading with no loss figure moves only RTT: ten control pings a
     // second, each counted as clean video, diluted a real 7% frame loss to under a tenth of a percent
@@ -601,9 +606,9 @@ namespace adaptive_bitrate {
     double alpha = current_config.ewma_alpha;
     if (heard_loss) {
       ewma_packet_loss = alpha * *heard_loss + (1.0 - alpha) * ewma_packet_loss;
-    } else if (!loss_current) {
-      // No report says anything about the loss now: a client that stopped posting, a screen with no
-      // new frames, or reports too far apart to count. Held where the last report put it, the average
+    } else if (!reports_recent) {
+      // No report has said anything about the loss for longer than a pause is waited out: a client that
+      // stopped posting, or a screen with no new frames. Held where the last report put it, the average
       // had every ping cutting on it for as long as the silence lasted, so it decays as clean readings
       // would, and nothing is left to judge a test with.
       ewma_packet_loss = (1.0 - alpha) * ewma_packet_loss;
@@ -631,10 +636,15 @@ namespace adaptive_bitrate {
                            (rtt_ms > avg_rtt * 2.0) &&
                            (avg_rtt > 0);
 
-    // A ping says nothing about video, so while reports arrive it acts only on an RTT spike and leaves
-    // the loss to the next report. Pings come ten times a second and took the interval first, cutting
-    // on a loss average only a report can move.
-    if (!packet_loss_percent && loss_current && !rtt_spike) {
+    // A step up still being judged when the reports pause cannot be judged, and held it keeps the stream
+    // at an untested rate while nothing says what that rate loses. The ping that finds the pause takes
+    // it back.
+    const bool step_up_unjudged = rate_climb.step_kbps > 0 && !loss_current;
+    // A ping says nothing about video, so while reports arrive, or pause for no longer than
+    // k_media_report_pause_hold, it acts only on an RTT spike and leaves the loss to the next report.
+    // Pings come ten times a second and took the interval first, cutting on a loss average only a
+    // report can move, and climbing where only a report can say what a higher rate loses.
+    if (!packet_loss_percent && reports_recent && !rtt_spike && !step_up_unjudged) {
       return;
     }
 
@@ -677,7 +687,7 @@ namespace adaptive_bitrate {
       // queue, so both cut at once, down to the floor, and end any test.
       forget_rate_tests_locked();
       double reduction_factor;
-      if (rtt_spike && ewma_packet_loss <= LOSS_PRESSURE_PCT) {
+      if (rtt_spike && !loss_pressure) {
         // RTT spike without packet loss: moderate reduction
         reduction_factor = 0.5 * max_change;
       } else if (heavy_loss) {
@@ -689,6 +699,10 @@ namespace adaptive_bitrate {
       }
       new_target = static_cast<int>(current_target * (1.0 - reduction_factor));
       set_controller_status("network_pressure", rtt_spike ? "rtt_spike" : "packet_loss");
+    } else if (rate_climb.step_kbps > 0 && !loss_current) {
+      // Waits as a failed step does, so a pause is never a way to try the same rate sooner.
+      set_controller_status("recovering", "testing_a_step_up");
+      new_target = fail_step_up_locked();
     } else if (rate_probe.running) {
       new_target = judge_probe_locked(now, current_target, base);
     } else if (rate_climb.step_kbps > 0) {

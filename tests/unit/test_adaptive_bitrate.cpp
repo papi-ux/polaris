@@ -90,6 +90,19 @@ namespace {
 }  // namespace
 
 namespace {
+  /// Seconds with ten control pings each and no client media report: the reports have paused.
+  std::vector<int> live_tuning_pause(int seconds, double rtt_ms = 8.0) {
+    std::vector<int> targets;
+    for (int second = 0; second < seconds; ++second) {
+      adaptive_bitrate::age_for_tests(1s);
+      for (int ping = 0; ping < 10; ++ping) {
+        adaptive_bitrate::update_network_stats(std::nullopt, rtt_ms);
+      }
+      targets.push_back(adaptive_bitrate::get_state().target_bitrate_kbps);
+    }
+    return targets;
+  }
+
   struct run_t {
     std::size_t start;
     std::size_t length;
@@ -364,6 +377,68 @@ TEST(AdaptiveBitrateController, LossTheBitrateDoesNotCauseHoldsAndClimbsBackToTh
   leave_controller_clean();
 }
 
+TEST(AdaptiveBitrateController, AReportPauseHoldsTheRateAndWhatTheTestsFound) {
+  // Settled under a link that shrank, the client's reports pause for 25 s while the pings go on. Five
+  // seconds in, the pings brought the ordinary recovery, 8% a second, over the link and blind, with
+  // nothing to say what the higher rate lost, and the finding was forgotten. For up to 30 s the rate and
+  // the loss average hold, the climb waits for reports, and it goes on from where it was.
+  enable_controller(40000);
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  const auto loss = [](int, int target) { return target > 15000 ? 3.0 : 0.0; };
+  const auto settled = live_tuning_seconds(200, loss);
+  ASSERT_LE(settled.back(), 15000) << targets_text(settled);
+  const auto before = adaptive_bitrate::get_state();
+  const auto paused = live_tuning_pause(25);
+  const auto trace = targets_text(paused);
+  EXPECT_TRUE(std::all_of(paused.begin(), paused.end(), [&](int target) { return target == before.target_bitrate_kbps; })) << trace;
+  EXPECT_DOUBLE_EQ(adaptive_bitrate::get_state().ewma_packet_loss, before.ewma_packet_loss);
+  // With reports back, the finding still holds the stream under the link but for a step's dwell.
+  const auto after = live_tuning_seconds(120, loss);
+  for (const auto &run : runs_above(after, 15000)) {
+    EXPECT_LE(run.length, 8u) << targets_text(after);
+  }
+  EXPECT_LE(after.back(), 15000) << targets_text(after);
+  leave_controller_clean();
+}
+
+TEST(AdaptiveBitrateController, AStepUpBeingJudgedWhenReportsPauseGoesBack) {
+  // A pause in the reports while a step up is being judged. Nothing can judge it, and held it keeps the
+  // stream at an untested rate while nothing says what that rate loses. Once the loss is stale, the next
+  // ping takes it back, and the next step waits as after a failed one.
+  enable_controller(40000);
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  const auto targets = live_tuning_seconds(25, [](int, int target) { return target > 15000 ? 3.0 : 0.0; });
+  ASSERT_EQ(targets.back(), 10800) << targets_text(targets);
+  const auto paused = live_tuning_pause(20);
+  const auto trace = targets_text(paused);
+  const auto back = std::find(paused.begin(), paused.end(), 10000);
+  ASSERT_NE(back, paused.end()) << trace;
+  EXPECT_LE(back - paused.begin(), 6) << trace;
+  EXPECT_TRUE(std::all_of(back, paused.end(), [](int target) { return target == 10000; })) << trace;
+  const auto after = live_tuning_seconds(40, [](int, int target) { return target > 15000 ? 3.0 : 0.0; });
+  const auto next = std::find_if(after.begin(), after.end(), [](int target) { return target != 10000; });
+  ASSERT_NE(next, after.end()) << targets_text(after);
+  EXPECT_GE(static_cast<int>(next - after.begin()) + static_cast<int>(paused.end() - back), 30) << targets_text(after);
+  leave_controller_clean();
+}
+
+TEST(AdaptiveBitrateController, AnRttSpikeStillCutsDuringAReportPause) {
+  // A guard, not proof of the fix: this passed before it too. A pause holds the rate against climbing,
+  // never against a queue.
+  enable_controller(40000);
+  for (int i = 0; i < 6; ++i) {
+    adaptive_bitrate::update_network_stats(0.0, 8.0);
+  }
+  live_tuning_seconds(3, [](int, int) { return 0.0; });
+  live_tuning_pause(8);
+  ASSERT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, 40000);
+  live_tuning_pause(1, 60.0);
+  const auto state = adaptive_bitrate::get_state();
+  EXPECT_LT(state.target_bitrate_kbps, 40000);
+  EXPECT_EQ(state.reason, "rtt_spike");
+  leave_controller_clean();
+}
+
 TEST(AdaptiveBitrateController, PingsNeverCutForLossAndTheNextReportDoes) {
   // Loss arrives once a second and pings ten times a second. Counted as clean video, the pings pulled
   // the loss average to a few hundredths of a percent before the interval came round. Heard as
@@ -393,8 +468,9 @@ TEST(AdaptiveBitrateController, PingsNeverCutForLossAndTheNextReportDoes) {
 TEST(AdaptiveBitrateController, ALossAverageWhoseReportsStoppedDecaysAndCutsNothing) {
   // The client's media reports stop while the loss average is high: it stopped posting, or the screen
   // has no new frames. The average stayed where the last report put it and every ping cut on it for as
-  // long as the silence lasted. Once the newest report is older than Doctor keeps loss for, the average
-  // decays and the pings bring the stream back.
+  // long as the silence lasted. Once the newest report is older than Doctor keeps loss for, nothing cuts
+  // for it; for 30 s the rate and the average hold, as for a pause, and after that the average decays
+  // and the pings bring the stream back.
   enable_controller(40000);
   adaptive_bitrate::update_network_stats(0.0, 8.0);
   for (int second = 0; second < 3; ++second) {
@@ -415,6 +491,9 @@ TEST(AdaptiveBitrateController, ALossAverageWhoseReportsStoppedDecaysAndCutsNoth
   }
   const auto trace = targets_text(targets);
   EXPECT_GE(*std::min_element(targets.begin(), targets.end()), after_loss.target_bitrate_kbps) << trace;
+  EXPECT_TRUE(std::all_of(targets.begin(), targets.begin() + 29, [&](int target) {
+    return target == after_loss.target_bitrate_kbps;
+  })) << trace;
   EXPECT_LT(adaptive_bitrate::get_state().ewma_packet_loss, 0.01);
   EXPECT_EQ(targets.back(), 40000) << trace;
   leave_controller_clean();

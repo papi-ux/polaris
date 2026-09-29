@@ -107,6 +107,13 @@ namespace adaptive_bitrate {
   inline constexpr std::chrono::milliseconds k_media_report_max_age {5000};
 
   /**
+   * How long Live Tuning waits out a pause in the client's media reports: the rate and what its tests
+   * found hold, and pings act on RTT spikes alone. Past it the loss average decays and pings bring the
+   * ordinary recovery.
+   */
+  inline constexpr std::chrono::milliseconds k_media_report_pause_hold {30000};
+
+  /**
    * @brief Feed one network reading to Live Tuning.
    *
    * Heavy loss, over 5%, and RTT spikes cut at once, down to the floor. Moderate loss, 5% or less with
@@ -133,15 +140,17 @@ namespace adaptive_bitrate {
    *    step fails it at once. Loss within that bound holds the rate rather than cutting it; once the
    *    climb is over, the held level is forgotten when pressure has been gone for 10 seconds.
    *
-   * Only a client media report acts on loss or moves a test. A ping acts on an RTT spike, and while the
-   * newest report is no older than k_media_report_max_age it does nothing else. Past that the loss is
-   * stale: it is no pressure, its average decays with each ping as clean readings would pull it, the
-   * tests are forgotten, and pings bring the ordinary recovery.
+   * Only a client media report acts on loss or moves a test. A ping acts on an RTT spike and nothing
+   * else while the newest report is no older than k_media_report_pause_hold: past k_media_report_max_age
+   * the loss is stale and cuts nothing, the rate and the tests hold, and a step up still being judged
+   * goes back, as a failed one does, since nothing can judge it. Past k_media_report_pause_hold the loss
+   * average decays with each ping as clean readings would pull it, the tests are forgotten, and pings
+   * bring the ordinary recovery.
    *
    * @param packet_loss_percent Video frame loss, 0 to 100, from one client media report, the report's
    *        own figure. std::nullopt for a reading that says nothing about video, such as a
-   *        control-channel ping: while reports arrive it leaves the loss average where it is instead of
-   *        pulling it toward zero.
+   *        control-channel ping: it leaves the loss average where it is instead of pulling it toward
+   *        zero while reports arrive or pause.
    * @param rtt_ms Round-trip time in milliseconds.
    * @param loss_is_pressure Whether the host's network verdict calls loss pressure. Live Tuning hears a
    *        report's loss only while it does, so it acts when Doctor does, and its average falls within

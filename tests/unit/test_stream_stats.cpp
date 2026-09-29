@@ -8672,6 +8672,45 @@ TEST(StreamStatsHotFieldTests, LiveTuningProbesSteadyLossNoRateLowersOnceAndClim
   }
 }
 
+TEST(StreamStatsHotFieldTests, LiveTuningHoldsASettledRateThroughAReportPause) {
+  // Settled under a link that shrank to 100 Mbps, the client's reports pause for 6 or 12 s: a screen
+  // with no new frames. Five seconds in, the pings brought the ordinary recovery, 8% a second, over the
+  // link and blind, and the finding was forgotten, so the stream lost frames for half a minute after
+  // the pause and probed again. The rate and the finding hold through the pause, and a step up being
+  // judged when it starts goes back. No second of the pause climbs, and no more seconds are sent above
+  // the link from the pause on than without it.
+  constexpr int link_kbps = 100000;
+  for (const int tick : {-1, 5}) {
+    SCOPED_TRACE(order_name(tick));
+    std::vector<bool> steady_over;
+    {
+      live_tuning_stream_t stream("owner-live-pause", 132);
+      stream.report_tick = tick;
+      steady_over = run_over_link(stream, {.kbps = link_kbps}, 400).over;
+    }
+    // The first step over the link after it settled, to pause while one is being judged and while none is.
+    const auto step = std::find(steady_over.begin() + 180, steady_over.end(), true);
+    ASSERT_NE(step, steady_over.end());
+    const int step_at = static_cast<int>(step - steady_over.begin());
+    for (const int pause_from : {step_at + 2, step_at + 20}) {
+      for (const int pause_seconds : {6, 12}) {
+        live_tuning_stream_t stream("owner-live-pause", 132);
+        stream.report_tick = tick;
+        const auto run = run_over_link(stream, {.kbps = link_kbps}, 400, pause_from, pause_seconds);
+        const auto trace = live_tuning_trace(run.target, 400);
+        SCOPED_TRACE(::testing::Message() << pause_seconds << " s pause from " << pause_from << ": " << trace);
+        const int before = run.target[pause_from - 1];
+        for (int second = pause_from; second < pause_from + pause_seconds; ++second) {
+          EXPECT_LE(run.target[second], before) << second;
+        }
+        const auto over = std::count(run.over.begin() + pause_from, run.over.end(), true);
+        const auto over_without = std::count(steady_over.begin() + pause_from, steady_over.end(), true);
+        EXPECT_LE(over, over_without);
+      }
+    }
+  }
+}
+
 TEST(StreamStatsHotFieldTests, LiveTuningSawsUnderALinkBetweenHalfAndFullAsBefore) {
   // A guard, not proof of the fix. The link drops to 200 Mbps, between half the stream's 269 Mbps and
   // all of it, with 5% of the frames lost above it. The moderate cuts stop under the link before the

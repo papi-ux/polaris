@@ -82,12 +82,17 @@ starts at `v1.0.0`.
   read 0.08%. Pings now bring it RTT alone, and each client media report brings its own loss while
   the verdict calls loss pressure and none while it does not, so Live Tuning cuts for loss once
   Doctor calls it pressure and not before, and stops within seconds of clean reports instead of
-  cutting on for most of the 20 seconds the verdict takes to clear. Only a report acts on loss: a
-  ping acts on an RTT spike alone, and once the newest report is more than five seconds old, when
-  Doctor calls the loss stale, Live Tuning stops acting on it too, lets its average fall and brings
-  the bitrate back. The tuning block carries Doctor's figure as `network_loss_pct`, and the
-  console's Live Tuning row shows it. The row read the controller's loss average, already a
-  percentage, as a fraction, so 0.078% showed as 7.8%.
+  cutting on for most of the 20 seconds the verdict takes to clear. Only a report acts on loss or
+  moves a test of a rate. Once the newest report is more than five seconds old, when Doctor calls
+  the loss stale, Live Tuning stops acting on it too. For up to 30 seconds without a report it holds
+  the rate and what its tests found, pings act on RTT spikes alone, and a step up still being judged
+  goes back, as a failed one does. After 30 seconds it lets its average fall and brings the bitrate
+  back. Replayed on a 269 Mbps stream settled at 98 under a link that shrank to 100, a pause of 6 or
+  12 seconds sent it over the link, blind, at 8% a second, as high as 197 Mbps, and 29 to 35 more
+  seconds went over the link than with no pause. Now no second of the pause climbs, and no more
+  seconds go over the link than with no pause. The tuning block carries Doctor's figure as
+  `network_loss_pct`, and the console's Live Tuning row shows it. The row read the controller's loss
+  average, already a percentage, as a fraction, so 0.078% showed as 7.8%.
 
 - Live Tuning tests the rates below half the bitrate before it goes lower. Heavy loss, over 5%, and
   RTT spikes still cut at once, down to the floor. Loss of 5% or less cuts no lower than half the
