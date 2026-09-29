@@ -109,19 +109,34 @@ namespace adaptive_bitrate {
   /**
    * @brief Feed one network reading to Live Tuning.
    *
-   * Heavy loss, over 5%, and RTT spikes cut down to the floor. Moderate loss, 5% or less with no RTT
-   * spike beside it, cuts no lower than half the stream's base until the rate is tested. A rate held
-   * there for about 8 seconds is tested with the reports heard at it: steady loss, in most reports,
-   * gets a step below, and the steps go on only while each lowers the loss, where one that does not
-   * returns to the rate before it. Loss that comes and goes, or that a step below did not lower, is
-   * not the bitrate's doing, so the rate holds and climbs back one step up at a time, each kept only if
-   * the loss does not rise. Where a step below did lower it, the rate climbs back toward the rate that
-   * lost frames the same way.
+   * Heavy loss, over 5%, and RTT spikes cut at once, down to the floor. Moderate loss, 5% or less with
+   * no RTT spike beside it, cuts no lower than half the stream's base, the hold, and the rates below the
+   * hold are tested before the stream goes lower. Every test judges a rate after a dwell of 8 seconds
+   * and 5 client media reports, each report's own loss, the first after a change left out.
    *
-   * Only a client media report acts on loss. A ping acts on an RTT spike, and while the newest report
-   * is no older than k_media_report_max_age it does nothing else. Past that the loss is stale: it is no
-   * pressure, its average decays with each ping as clean readings would pull it, and pings bring the
-   * ordinary recovery.
+   * A. Steady loss at the hold, in at least 75% of its reports, starts a probe down that halves the rate
+   *    after each dwell. A step helps when the mean loss or the share of lossy reports falls by at least
+   *    a third against the rate above it. The probe keeps halving while the loss stays steady or keeps
+   *    falling, and stops at the first rate whose loss is gone, a mean under 1% with under 25% of
+   *    reports lossy, or at the configured minimum. Where the loss fell with one step and not with the
+   *    next, what is left is a background every rate has, and the rate where the loss fell to it is the
+   *    one found.
+   * B. Where no step lowered the loss, down to the minimum or until it stopped being steady, the loss
+   *    does not depend on the rate: back to the hold, a climb by tested steps from there, and no other
+   *    probe for 5 minutes this session. Loss that comes and goes at the hold climbs the same way, with
+   *    no probe.
+   * C. Climb back by tested steps from a found rate or the hold: +8% after each dwell, doubling the step
+   *    (8, 16, 32%) while each step stays clean, capped at the base; a step is kept unless loss rises
+   *    above max(1.5 x the held level, held level + 1 point); a failed step reverts and backs off (30 s
+   *    doubling to 120 s) before trying again. The held level is the loss heard at the rate the climb
+   *    started from, a clean step is a kept one whose loss did not rise above it, and heavy loss on a
+   *    step fails it at once. Loss within that bound holds the rate rather than cutting it; once the
+   *    climb is over, the held level is forgotten when pressure has been gone for 10 seconds.
+   *
+   * Only a client media report acts on loss or moves a test. A ping acts on an RTT spike, and while the
+   * newest report is no older than k_media_report_max_age it does nothing else. Past that the loss is
+   * stale: it is no pressure, its average decays with each ping as clean readings would pull it, the
+   * tests are forgotten, and pings bring the ordinary recovery.
    *
    * @param packet_loss_percent Video frame loss, 0 to 100, from one client media report, the report's
    *        own figure. std::nullopt for a reading that says nothing about video, such as a

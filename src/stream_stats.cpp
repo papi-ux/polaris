@@ -2124,7 +2124,7 @@ namespace stream_stats {
         } else if (auto_safe_managing) {
           body = "Confirmed network pressure is affecting this stream, and Live Tuning already owns the live bitrate correction. Doctor will measure the result without racing the active controller.";
           next_step = "Recheck Live Tuning";
-          expected = "Live Tuning should lower the encoder target while a lower rate reduces the loss or latency, and hold it where the loss does not come from the bitrate.";
+          expected = "Live Tuning should cut the encoder target at once for heavy loss or a latency spike, and for lighter loss hold half the bitrate and test the rates below it, settling where the loss is gone or going back to half when no lower rate lowers it.";
         } else if (live_bitrate_tunable) {
           body = "Current sustained loss or latency evidence confirms network pressure. Doctor can lower bitrate one guarded step and watch the same telemetry for recovery.";
           next_step = "Fix and verify";

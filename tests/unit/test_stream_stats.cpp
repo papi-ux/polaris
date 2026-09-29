@@ -24,6 +24,8 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <optional>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -8248,33 +8250,54 @@ namespace {
       config::video.adaptive_bitrate.enabled = false;
     }
 
-    /// One second as Live Tuning lives it: the second passes for the judge and the controller, the
-    /// client's media report arrives, and ten control pings follow, as Nova and ENet send them.
-    /// Returns the live target at the end of the second.
-    int second(std::uint64_t expected, std::uint64_t lost) {
-      stream_stats::age_network_judge_for_tests(std::chrono::seconds(1));
-      adaptive_bitrate::age_for_tests(std::chrono::seconds(1));
+    /// With a tick from 0 to 9, second() and quiet_second() send the ten pings 100 ms apart through the
+    /// second, the report after that many of them, as a 10 Hz control channel reaches the host. Left
+    /// at -1, the second passes at once, the report first, and the report takes the adjustment.
+    int report_tick = -1;
+
+    void report(std::uint64_t expected, std::uint64_t lost) {
       sample.client_monotonic_ms += 1'000;
       sample.frames_expected += expected;
       sample.frames_lost += lost;
       sample.frames_received = sample.frames_expected - sample.frames_lost;
       EXPECT_TRUE(stream_stats::ingest_client_media_counters(sample).observation_published);
-      for (int ping = 0; ping < 10; ++ping) {
-        stream_stats::update_control_channel_stats(6.0, 0.0, 777);
-        adaptive_bitrate::update_network_stats(std::nullopt, 6.0);
+    }
+
+    static void ping() {
+      stream_stats::update_control_channel_stats(6.0, 0.0, 777);
+      adaptive_bitrate::update_network_stats(std::nullopt, 6.0);
+    }
+
+    /// One second as Live Tuning lives it: the second passes for the judge and the controller, the
+    /// client's media report arrives, and ten control pings go with it, as Nova and ENet send them.
+    /// Returns the live target at the end of the second. A lost of std::nullopt is a second whose
+    /// report never reaches the host.
+    int second(std::uint64_t expected, std::optional<std::uint64_t> lost) {
+      if (report_tick < 0) {
+        stream_stats::age_network_judge_for_tests(std::chrono::seconds(1));
+        adaptive_bitrate::age_for_tests(std::chrono::seconds(1));
+        if (lost) {
+          report(expected, *lost);
+        }
+        for (int i = 0; i < 10; ++i) {
+          ping();
+        }
+        return adaptive_bitrate::get_state().target_bitrate_kbps;
+      }
+      for (int tick = 0; tick < 10; ++tick) {
+        stream_stats::age_network_judge_for_tests(std::chrono::milliseconds(100));
+        adaptive_bitrate::age_for_tests(std::chrono::milliseconds(100));
+        if (lost && tick == report_tick) {
+          report(expected, *lost);
+        }
+        ping();
       }
       return adaptive_bitrate::get_state().target_bitrate_kbps;
     }
 
     /// A second whose client media report never reaches the host, with its ten control pings.
     int quiet_second() {
-      stream_stats::age_network_judge_for_tests(std::chrono::seconds(1));
-      adaptive_bitrate::age_for_tests(std::chrono::seconds(1));
-      for (int ping = 0; ping < 10; ++ping) {
-        stream_stats::update_control_channel_stats(6.0, 0.0, 777);
-        adaptive_bitrate::update_network_stats(std::nullopt, 6.0);
-      }
-      return adaptive_bitrate::get_state().target_bitrate_kbps;
+      return second(0, std::nullopt);
     }
   };
 }  // namespace
@@ -8338,58 +8361,6 @@ namespace {
   }
 }  // namespace
 
-TEST(StreamStatsHotFieldTests, LiveTuningTestsItsHoldOnTheRecordedHevcRunAndClimbsBack) {
-  // The Retroid Pocket 6's HEVC run: about 2% of its frames lost in bursts every few seconds, for as
-  // long as the run lasted. Doctor calls that pressure and keeps calling it. Heard each report's loss,
-  // Live Tuning cut on toward the 2 Mbps floor, and held at half its bitrate it stayed halved for the
-  // whole run. Loss that comes and goes at half the bitrate gets no step below, and each step back up
-  // that does not raise it is kept.
-  live_tuning_stream_t stream("owner-live-hevc", 74);
-  std::vector<int> target;
-  for (int round = 0; round < 40; ++round) {
-    for (const auto &report : k_recorded_hevc_reports) {
-      target.push_back(stream.second(report.expected, report.lost));
-    }
-  }
-  const auto trace = live_tuning_trace(target);
-  RecordProperty("targets", trace);
-  const int half = static_cast<int>(k_live_tuning_base_kbps * 0.5);
-  EXPECT_GE(*std::min_element(target.begin(), target.end()), half) << trace;
-  const auto back = std::find(target.begin() + 8, target.end(), k_live_tuning_base_kbps);
-  ASSERT_NE(back, target.end()) << trace;
-  EXPECT_LE(back - target.begin(), 120) << trace;
-  EXPECT_TRUE(std::all_of(back, target.end(), [](int kbps) { return kbps == k_live_tuning_base_kbps; })) << trace;
-  // The verdict still calls the loss pressure, and Live Tuning holds rather than cut for it.
-  EXPECT_TRUE(stream_stats::current_network_verdict().loss_elevated);
-  EXPECT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, k_live_tuning_base_kbps);
-}
-
-TEST(StreamStatsHotFieldTests, LiveTuningStepsUnderALinkThatShrankBelowHalfItsBitrate) {
-  // 25 clean seconds at 269 Mbps, then the link drops to 100 Mbps, and 5% of the frames are lost
-  // whenever the stream is above it. Moderate loss cut to half the bitrate, 134 Mbps, and the hold kept
-  // the stream there, a third over the link and losing frames every second, for good. The steady loss
-  // at the hold gets a step below, which lowers it, and the steps back up stop under the link.
-  live_tuning_stream_t stream("owner-live-link", 75);
-  constexpr int link_kbps = 100000;
-  std::vector<int> target;
-  int lossy_last_minute = 0;
-  for (int second = 0; second < 240; ++second) {
-    const bool lossy = second >= 25 && adaptive_bitrate::get_state().target_bitrate_kbps > link_kbps;
-    target.push_back(stream.second(120, lossy ? 6 : 0));
-    lossy_last_minute += second >= 180 && lossy ? 1 : 0;
-  }
-  const auto trace = live_tuning_trace(target, 240);
-  RecordProperty("targets", trace);
-  const auto under = std::find_if(target.begin() + 25, target.end(), [](int kbps) { return kbps <= link_kbps; });
-  ASSERT_NE(under, target.end()) << trace;
-  EXPECT_LE(under - target.begin(), 60) << trace;
-  // One step below the hold, and no spiral under it.
-  EXPECT_GE(*std::min_element(target.begin(), target.end()), k_live_tuning_base_kbps / 4) << trace;
-  EXPECT_LE(lossy_last_minute, 10) << trace;
-  EXPECT_LE(target.back(), link_kbps) << trace;
-  EXPECT_GT(target.back(), link_kbps * 9 / 10) << trace;
-}
-
 TEST(StreamStatsHotFieldTests, LiveTuningStopsCuttingWhenReportsStopMidSession) {
   // The client's media reports stop reaching the host mid-session: it stops posting, the screen has no
   // new frames, or its reports come too far apart to count. Live Tuning's loss average stayed where the
@@ -8442,6 +8413,281 @@ TEST(StreamStatsHotFieldTests, LiveTuningStopsCuttingWithinSecondsOfABurst) {
   EXPECT_LE(last_cut, first_clean + 2) << trace;
   EXPECT_GE(*std::min_element(target.begin(), target.end()), k_live_tuning_base_kbps / 2) << trace;
   EXPECT_EQ(target.back(), k_live_tuning_base_kbps) << trace;
+}
+
+namespace {
+  /// A link that shrinks to kbps at second `from`, until `recovers_at` when that is set: a second whose
+  /// frames are sent above it loses `lost` of 120, and one at or under it `background`.
+  struct shrunk_link_t {
+    int kbps;
+    std::uint64_t lost = 6;
+    std::uint64_t background = 0;
+    int from = 25;
+    int recovers_at = -1;
+
+    bool shrunk(int second) const {
+      return second >= from && (recovers_at < 0 || second < recovers_at);
+    }
+
+    std::uint64_t loss(int second, int sent_at) const {
+      return !shrunk(second) ? 0 : sent_at > kbps ? lost : background;
+    }
+  };
+
+  struct link_run_t {
+    /// The live target at the end of each second.
+    std::vector<int> target;
+    /// Whether each second's frames were sent above the shrunk link.
+    std::vector<bool> over;
+  };
+
+  /// `seconds` of the stream over `link`, with no media report in the `pause_seconds` from `pause_from`.
+  link_run_t run_over_link(live_tuning_stream_t &stream, const shrunk_link_t &link, int seconds,
+                           int pause_from = -1, int pause_seconds = 0) {
+    link_run_t run;
+    for (int second = 0; second < seconds; ++second) {
+      const int sent_at = adaptive_bitrate::get_state().target_bitrate_kbps;
+      run.over.push_back(link.shrunk(second) && sent_at > link.kbps);
+      const bool paused = pause_from >= 0 && second >= pause_from && second < pause_from + pause_seconds;
+      run.target.push_back(paused ? stream.quiet_second() : stream.second(120, link.loss(second, sent_at)));
+    }
+    return run;
+  }
+
+  /// The rate the stream held most seconds from `from` on: the one it steps up from and back to.
+  int held_rate(const std::vector<int> &target, std::size_t from) {
+    std::map<int, int> seconds;
+    for (std::size_t i = from; i < target.size(); ++i) {
+      ++seconds[target[i]];
+    }
+    return std::max_element(seconds.begin(), seconds.end(), [](const auto &a, const auto &b) {
+             return a.second < b.second;
+           })->first;
+  }
+
+  /// Every stretch of seconds sent above the link from `from` on, the first second after the stream got
+  /// under it, lasts one dwell at most, with 30 s or more between them: a step up over it, judged and
+  /// taken back, and the wait after it.
+  void expect_only_tested_steps_over(const std::vector<bool> &over, std::size_t from, const std::string &trace) {
+    std::optional<std::size_t> start;
+    std::optional<std::size_t> last_end;
+    for (std::size_t i = from; i <= over.size(); ++i) {
+      const bool above = i < over.size() && over[i];
+      if (above && !start) {
+        start = i;
+        if (last_end) {
+          EXPECT_GE(i - *last_end, 30u) << "at " << i << " " << trace;
+        }
+      } else if (!above && start) {
+        EXPECT_LE(i - *start, 8u) << "from " << *start << " " << trace;
+        last_end = i;
+        start.reset();
+      }
+    }
+  }
+
+  std::string order_name(int tick) {
+    return tick < 0 ? "test order" : "10 Hz pings, report at tick " + std::to_string(tick);
+  }
+}  // namespace
+
+TEST(StreamStatsHotFieldTests, LiveTuningStepsUnderALinkThatShrankBelowHalfItsBitrate) {
+  // 25 clean seconds at 269 Mbps, then the link drops to 100 Mbps, and 5% of the frames are lost
+  // whenever the stream is above it. Moderate loss cut to half the bitrate, 134 Mbps, and the hold kept
+  // the stream there, a third over the link and losing frames every second, for good. The steady loss
+  // at the hold starts a probe, whose first step clears it, and the climb back by tested steps settles
+  // under the link, going over it only for a step's dwell every 30 s or longer.
+  for (const int tick : {-1, 5}) {
+    SCOPED_TRACE(order_name(tick));
+    live_tuning_stream_t stream("owner-live-link-" + std::to_string(tick + 1), 120 + tick + 1);
+    stream.report_tick = tick;
+    constexpr int link_kbps = 100000;
+    const auto run = run_over_link(stream, {.kbps = link_kbps}, 400);
+    const auto trace = live_tuning_trace(run.target, 400);
+    RecordProperty("targets_" + std::to_string(tick + 1), trace);
+    const auto under = std::find_if(run.target.begin() + 25, run.target.end(), [](int kbps) { return kbps <= link_kbps; });
+    ASSERT_NE(under, run.target.end()) << trace;
+    EXPECT_LE(under - run.target.begin(), 60) << trace;
+    // One probe step below the hold clears the loss, and no spiral under it.
+    EXPECT_GE(*std::min_element(run.target.begin(), run.target.end()), k_live_tuning_base_kbps / 4) << trace;
+    expect_only_tested_steps_over(run.over, static_cast<std::size_t>(under - run.target.begin()) + 1, trace);
+    const int held = held_rate(run.target, 280);
+    EXPECT_LE(held, link_kbps) << trace;
+    EXPECT_GT(held, link_kbps * 9 / 10) << trace;
+  }
+}
+
+TEST(StreamStatsHotFieldTests, LiveTuningProbesUnderALinkBelowAQuarterOfItsBitrate) {
+  // The link drops to 50 Mbps under a 269 Mbps stream, below a quarter of it, with 5% of the frames lost
+  // above it at any rate. The first step below the hold, 67 Mbps, loses as much, and taken for loss the
+  // bitrate does not cause it sent the stream back up to 269 Mbps, losing frames every second. The
+  // steady loss keeps the probe halving to 34 Mbps, where it is gone, and the climb back settles under
+  // the link.
+  for (const int tick : {-1, 5}) {
+    SCOPED_TRACE(order_name(tick));
+    live_tuning_stream_t stream("owner-live-quarter-" + std::to_string(tick + 1), 122 + tick + 1);
+    stream.report_tick = tick;
+    constexpr int link_kbps = 50000;
+    const auto run = run_over_link(stream, {.kbps = link_kbps}, 400);
+    const auto trace = live_tuning_trace(run.target, 400);
+    RecordProperty("targets_" + std::to_string(tick + 1), trace);
+    const auto under = std::find_if(run.target.begin() + 25, run.target.end(), [](int kbps) { return kbps <= link_kbps; });
+    ASSERT_NE(under, run.target.end()) << trace;
+    EXPECT_LE(under - run.target.begin(), 70) << trace;
+    EXPECT_EQ(*std::min_element(run.target.begin(), run.target.end()), k_live_tuning_base_kbps / 8) << trace;
+    expect_only_tested_steps_over(run.over, static_cast<std::size_t>(under - run.target.begin()) + 1, trace);
+    const int held = held_rate(run.target, 280);
+    EXPECT_LE(held, link_kbps) << trace;
+    EXPECT_GT(held, link_kbps * 9 / 10) << trace;
+  }
+}
+
+TEST(StreamStatsHotFieldTests, LiveTuningFindsALinkUnderLossEveryRateHas) {
+  // The link drops to 100 Mbps with 5% of the frames lost above it, and every rate below it still loses
+  // one frame in 120. The probe's first step cuts the mean loss by five sixths while every report still
+  // loses a frame, and a step judged on both at once did not help, so the stream went back over the
+  // link and stayed there. The step helps on its mean, the next lowers nothing, and the rate where the
+  // loss fell to that background is the one found.
+  for (const int tick : {-1, 5}) {
+    SCOPED_TRACE(order_name(tick));
+    live_tuning_stream_t stream("owner-live-background-" + std::to_string(tick + 1), 124 + tick + 1);
+    stream.report_tick = tick;
+    constexpr int link_kbps = 100000;
+    const auto run = run_over_link(stream, {.kbps = link_kbps, .background = 1}, 400);
+    const auto trace = live_tuning_trace(run.target, 400);
+    RecordProperty("targets_" + std::to_string(tick + 1), trace);
+    const auto under = std::find_if(run.target.begin() + 25, run.target.end(), [](int kbps) { return kbps <= link_kbps; });
+    ASSERT_NE(under, run.target.end()) << trace;
+    EXPECT_GE(*std::min_element(run.target.begin(), run.target.end()), k_live_tuning_base_kbps / 8) << trace;
+    expect_only_tested_steps_over(run.over, static_cast<std::size_t>(under - run.target.begin()) + 1, trace);
+    const int held = held_rate(run.target, 280);
+    EXPECT_LE(held, link_kbps) << trace;
+    EXPECT_GT(held, link_kbps * 9 / 10) << trace;
+  }
+}
+
+TEST(StreamStatsHotFieldTests, LiveTuningClimbsBackToItsBitrateOnceTheLinkRecovers) {
+  // The link drops to 100 Mbps and later recovers to 1 Gbps. Nothing at a rate under the old link says
+  // it recovered, so Live Tuning finds out with its next step up, and the steps double while each stays
+  // clean: 8, 16, then 32% a dwell. A link that is back by the time the climb from the probe's rate
+  // first steps over it is at the base within 40 s. Wherever it recovers, the next step comes within
+  // the 120 s longest wait after failed steps, and the base 40 s after that.
+  constexpr int link_kbps = 100000;
+  for (const int tick : {-1, 5}) {
+    SCOPED_TRACE(order_name(tick));
+    live_tuning_stream_t stream("owner-live-recover-" + std::to_string(tick + 1), 126 + tick + 1);
+    stream.report_tick = tick;
+    shrunk_link_t link {.kbps = link_kbps};
+    std::vector<int> target;
+    bool went_under = false;
+    for (int second = 0; second < 200; ++second) {
+      const int sent_at = adaptive_bitrate::get_state().target_bitrate_kbps;
+      went_under = went_under || (second > link.from && sent_at <= link_kbps);
+      if (link.recovers_at < 0 && went_under && sent_at > link_kbps) {
+        link.recovers_at = second;
+      }
+      target.push_back(stream.second(120, link.loss(second, sent_at)));
+    }
+    const auto trace = live_tuning_trace(target, 200);
+    RecordProperty("targets_" + std::to_string(tick + 1), trace);
+    ASSERT_GE(link.recovers_at, 0) << trace;
+    const auto back = std::find(target.begin() + link.recovers_at, target.end(), k_live_tuning_base_kbps);
+    ASSERT_NE(back, target.end()) << trace;
+    EXPECT_LE(back - target.begin() - link.recovers_at, 40) << "recovered at " << link.recovers_at << " " << trace;
+  }
+
+  std::string sweep;
+  for (int recovers_at = 30; recovers_at <= 400; recovers_at += 10) {
+    live_tuning_stream_t stream("owner-live-recover-sweep", 128);
+    const shrunk_link_t link {.kbps = link_kbps, .recovers_at = recovers_at};
+    const auto run = run_over_link(stream, link, recovers_at + 200);
+    const auto back = std::find(run.target.begin() + recovers_at, run.target.end(), k_live_tuning_base_kbps);
+    ASSERT_NE(back, run.target.end()) << recovers_at << " " << live_tuning_trace(run.target, 600);
+    const auto took = back - run.target.begin() - recovers_at;
+    sweep += std::to_string(recovers_at) + ":" + std::to_string(took) + " ";
+    EXPECT_LE(took, 160) << "recovered at " << recovers_at << " " << live_tuning_trace(run.target, 600);
+  }
+  RecordProperty("seconds_back_by_recovery", sweep);
+}
+
+TEST(StreamStatsHotFieldTests, LiveTuningTestsItsHoldOnTheRecordedHevcRunAndClimbsBack) {
+  // The Retroid Pocket 6's HEVC run: about 2% of its frames lost in bursts every few seconds, for as
+  // long as the run lasted. Doctor calls that pressure and keeps calling it. Heard each report's loss,
+  // Live Tuning cut on toward the 2 Mbps floor, and held at half its bitrate it stayed halved for the
+  // whole run. Loss in two of every eight reports at the hold is not steady, so it starts no probe:
+  // the stream climbs back by tested steps, and the base holds for the rest of the run, over 5 minutes,
+  // with no probe below the hold.
+  for (const int tick : {-1, 5}) {
+    SCOPED_TRACE(order_name(tick));
+    live_tuning_stream_t stream("owner-live-hevc-" + std::to_string(tick + 1), 136 + tick + 1);
+    stream.report_tick = tick;
+    std::vector<int> target;
+    for (int round = 0; round < 50; ++round) {
+      for (const auto &report : k_recorded_hevc_reports) {
+        target.push_back(stream.second(report.expected, report.lost));
+      }
+    }
+    const auto trace = live_tuning_trace(target);
+    RecordProperty("targets_" + std::to_string(tick + 1), trace);
+    const int half = static_cast<int>(k_live_tuning_base_kbps * 0.5);
+    EXPECT_GE(*std::min_element(target.begin(), target.end()), half) << trace;
+    const auto back = std::find(target.begin() + 8, target.end(), k_live_tuning_base_kbps);
+    ASSERT_NE(back, target.end()) << trace;
+    EXPECT_LE(back - target.begin(), 120) << trace;
+    EXPECT_GE(target.end() - back, 300) << trace;
+    EXPECT_TRUE(std::all_of(back, target.end(), [](int kbps) { return kbps == k_live_tuning_base_kbps; })) << trace;
+    // The verdict still calls the loss pressure, and Live Tuning holds rather than cut for it.
+    EXPECT_TRUE(stream_stats::current_network_verdict().loss_elevated);
+    EXPECT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, k_live_tuning_base_kbps);
+  }
+}
+
+TEST(StreamStatsHotFieldTests, LiveTuningProbesSteadyLossNoRateLowersOnceAndClimbsBack) {
+  // 3 of every 120 frames lost from the 21st second on, at any rate: steady loss the bitrate does not
+  // cause. The probe halves the rate from the hold down to the 2 Mbps minimum once, no step lowers the
+  // loss, and the stream returns to the hold and climbs back to its base, where that loss holds it. A
+  // single step below and back left the next hold to be probed again; no probe starts for 5 minutes.
+  for (const int tick : {-1, 5}) {
+    SCOPED_TRACE(order_name(tick));
+    live_tuning_stream_t stream("owner-live-steady-" + std::to_string(tick + 1), 130 + tick + 1);
+    stream.report_tick = tick;
+    std::vector<int> target;
+    for (int second = 0; second < 480; ++second) {
+      target.push_back(stream.second(120, second >= 20 ? 3 : 0));
+    }
+    const auto trace = live_tuning_trace(target, 480);
+    RecordProperty("targets_" + std::to_string(tick + 1), trace);
+    const int hold = static_cast<int>(k_live_tuning_base_kbps * 0.5);
+    const auto floor = std::find(target.begin(), target.end(), 2000);
+    ASSERT_NE(floor, target.end()) << trace;
+    const auto returned = std::find(floor, target.end(), hold);
+    ASSERT_NE(returned, target.end()) << trace;
+    EXPECT_LE(returned - floor, 20) << trace;
+    const auto back = std::find(returned, target.end(), k_live_tuning_base_kbps);
+    ASSERT_NE(back, target.end()) << trace;
+    EXPECT_LE(back - returned, 60) << trace;
+    ASSERT_GE(target.end() - returned, 300) << trace;
+    EXPECT_GE(*std::min_element(returned, target.end()), hold) << trace;
+    EXPECT_TRUE(std::all_of(back, target.end(), [](int kbps) { return kbps == k_live_tuning_base_kbps; })) << trace;
+  }
+}
+
+TEST(StreamStatsHotFieldTests, LiveTuningSawsUnderALinkBetweenHalfAndFullAsBefore) {
+  // A guard, not proof of the fix. The link drops to 200 Mbps, between half the stream's 269 Mbps and
+  // all of it, with 5% of the frames lost above it. The moderate cuts stop under the link before the
+  // hold, so nothing is probed, and the ordinary recovery climbs back over it: df0133f7, before the
+  // hold tested itself, lost frames in 68 of the last 240 seconds of this run in the test order, and
+  // 68 to 88 with 10 Hz pings.
+  for (const int tick : {-1, 5}) {
+    SCOPED_TRACE(order_name(tick));
+    live_tuning_stream_t stream("owner-live-200-" + std::to_string(tick + 1), 134 + tick + 1);
+    stream.report_tick = tick;
+    const auto run = run_over_link(stream, {.kbps = 200000}, 600);
+    const auto trace = live_tuning_trace(run.target, 600);
+    RecordProperty("targets_" + std::to_string(tick + 1), trace);
+    EXPECT_LE(std::count(run.over.end() - 240, run.over.end(), true), 68) << trace;
+    EXPECT_GT(*std::min_element(run.target.begin(), run.target.end()), k_live_tuning_base_kbps / 2) << trace;
+  }
 }
 
 TEST(StreamStatsDoctorTests, RecordedHevcRunKeepsOneHeadline) {

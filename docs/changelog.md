@@ -85,18 +85,39 @@ starts at `v1.0.0`.
   cutting on for most of the 20 seconds the verdict takes to clear. Only a report acts on loss: a
   ping acts on an RTT spike alone, and once the newest report is more than five seconds old, when
   Doctor calls the loss stale, Live Tuning stops acting on it too, lets its average fall and brings
-  the bitrate back. Loss of 5% or less cuts no lower than half the stream's bitrate until Live
-  Tuning has tested that rate. Held there for about 8 seconds, loss in most reports gets a step
-  below, and the steps go on only while each lowers the loss, where one that does not goes back to
-  the rate before it. Loss that comes and goes, or that a step below did not lower, is not the
-  bitrate's doing, so the rate holds, says `packet_loss_holding`, and climbs back a step at a time,
-  each kept only if the loss does not rise. Heavier loss, or an RTT spike, still cuts to the floor.
-  Replayed without the hold, the HEVC run's 2% in bursts took Live Tuning from 269 Mbps to 4 within
-  a minute. It now holds that run at half for about 8 seconds and is back at 269 within 90 seconds,
-  and a 269 Mbps stream on a link that shrank to 100 Mbps, losing 5% of its frames above it, settles
-  at 98. The tuning block carries Doctor's figure as `network_loss_pct`, and the console's Live
-  Tuning row shows it. The row read the controller's loss average, already a percentage, as a
-  fraction, so 0.078% showed as 7.8%.
+  the bitrate back. The tuning block carries Doctor's figure as `network_loss_pct`, and the
+  console's Live Tuning row shows it. The row read the controller's loss average, already a
+  percentage, as a fraction, so 0.078% showed as 7.8%.
+
+- Live Tuning tests the rates below half the bitrate before it goes lower. Heavy loss, over 5%, and
+  RTT spikes still cut at once, down to the floor. Loss of 5% or less cuts no lower than half the
+  stream's bitrate, the hold, and each rate below it is judged after 8 seconds and 5 reports, each
+  report's own loss. Steady loss at the hold, in at least 75% of its reports, starts a probe that
+  halves the rate after each of those dwells. A step helps when the mean loss or the share of lossy
+  reports falls by at least a third against the rate above it. The probe keeps halving while the
+  loss stays steady or keeps falling, and stops at the first rate whose loss is gone, a mean under
+  1% with under a quarter of the reports lossy, or at the configured minimum. Where the loss fell to
+  a background every rate has and the next step did not lower it, the rate where it fell is the one
+  found. Where no step lowered the loss, it does not depend on the rate: Live Tuning goes back to the
+  hold and starts no other probe for 5 minutes this session. Loss that comes and goes at the hold
+  starts no probe. Then Live Tuning climbs back by tested steps from a found rate or the hold: +8%
+  after each dwell, doubling the step (8, 16, 32%) while each step stays clean, capped at the base;
+  a step is kept unless loss rises above max(1.5 x the held level, held level + 1 point); a failed
+  step reverts and backs off (30 s doubling to 120 s) before trying again. The held level is the
+  loss at the rate the climb started from, a clean step is a kept one whose loss did not rise above
+  it, and heavy loss fails a step at once. Loss within that bound holds the rate instead of cutting
+  it, and Live Tuning says `packet_loss_holding`. Replayed at 269 Mbps without the hold, the HEVC
+  run's 2% in bursts took Live Tuning to 4 Mbps within a minute. Its loss is in 2 of every 8
+  reports, so it starts no probe: Live Tuning holds it at half for 8 seconds and is back at 269
+  within 50 seconds of the start. A link that shrinks to 100 Mbps, losing 5% of its frames above
+  it, settles at 98, one that shrinks to 50 Mbps at 49, and one that also loses a frame in 120 at
+  every rate below it at 98, each going over the link only for a step's 8 seconds, 30 seconds apart
+  or more. Steady 2.5% at every rate is probed down to the 2 Mbps minimum once, in about a minute,
+  and the stream is back at 269 half a minute after that. A link that recovers is found by the next
+  step up: a stream whose climb steps over the old link just as it recovers is back at its base
+  within 40 seconds, but that step can come as late as 120 seconds after a failed one, so across
+  recovery moments ten seconds apart the stream took from 22 to 155 seconds to get back, 57 at the
+  median.
 
 - Doctor grades the network from that verdict. Its headline, the evidence it cites, the Auto Fix it
   offers and the session status's `network_risk` all read the same 20 second judgement, so one
