@@ -93,7 +93,8 @@ starts at `v1.0.0`.
   12 seconds sent it over the link, blind, at 8% a second, as high as 197 Mbps, and 29 to 35 more
   seconds went over the link than with no pause. Now no second of the pause climbs, and no more
   seconds go over the link than with no pause. The tuning block carries Doctor's figure as
-  `network_loss_pct`, and the console's Live Tuning row shows it. The row read the controller's loss
+  `network_loss_pct`, beside `adaptive_packet_loss_ewma`, Live Tuning's own average of the reports
+  it hears, and the console's Live Tuning row shows Doctor's. The row read the controller's
   average, already a percentage, as a fraction, so 0.078% showed as 7.8%.
 
 - Live Tuning tests the rates below half the bitrate before it goes lower. Heavy loss, over 5%, and
