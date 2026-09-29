@@ -821,7 +821,8 @@ namespace stream_stats {
     j["network_last_received_age_ms"] = network_last_received_age_ms;
     j["media_loss_sample_revision"] = media_loss_sample_revision;
     j["media_loss_last_received_age_ms"] = media_loss_last_received_age_ms;
-    j["network_verdict"] = network_verdict_json(network_verdict);
+    // As served: a figure whose readings stopped reads as stale, as Doctor treats it.
+    j["network_verdict"] = network_verdict_json(served_network_verdict(*this));
     j["bytes_sent"] = bytes_sent;
     j["gpu_usage"] = gpu_usage;
     j["adaptive_target_bitrate_kbps"] = adaptive_target_bitrate_kbps;
@@ -2483,7 +2484,7 @@ namespace stream_stats {
     // headline. judged_network() says when the verdict is current enough to count. Loss comes only
     // from client media reports; ENet's peer->packetLoss is a reliable control-channel EWMA, context
     // and never video loss.
-    const auto &verdict = stats.network_verdict;
+    const auto verdict = served_network_verdict(stats);
     const auto network = judged_network(stats);
     const bool current_network_observation =
       stats.network_sample_revision > 0 &&
@@ -2829,6 +2830,10 @@ namespace stream_stats {
       loss_judged ? "media_transport" : "unavailable",
       loss_judged ?
         video_frame_loss_detail(verdict) :
+      verdict.loss_stale ?
+        "No client media report has reached the host in the last " +
+          std::to_string(judged_network_t::k_media_report_max_age_ms / 1000) +
+          " seconds, so video frame loss is not judged." :
         "Fewer than " + std::to_string(network_judge_t::k_min_media_samples) +
           " client media reports arrived in the last " + std::to_string(network_judge_t::k_window.count()) +
           " seconds, so video frame loss is not judged yet."
@@ -4040,7 +4045,7 @@ namespace stream_stats {
     }
     media.push_back({at, frames_expected, std::clamp(frames_lost, 0.0, frames_expected)});
     drop_stale(media, at, k_max_media_samples);
-    judge_band(loss_elevated, judged_loss_pct(judged_loss(media, at)), k_loss_enter_pct, k_loss_exit_pct);
+    judge_media(at);
     note_risk(at);
   }
 
@@ -4057,8 +4062,32 @@ namespace stream_stats {
     }
     rtt.push_back({at, rtt_ms});
     drop_stale(rtt, at, k_max_rtt_readings);
-    judge_band(rtt_elevated, judged_rtt(rtt, at).median_ms, k_rtt_enter_ms, k_rtt_exit_ms);
+    judge_rtt(at);
     note_risk(at);
+  }
+
+  // The figure and its band are judged together and kept together until the next report, so the
+  // verdict never quotes a figure the band was not judged on.
+  void network_judge_t::judge_media(clock_type::time_point at) {
+    const auto loss = judged_loss(media, at);
+    const auto pct = judged_loss_pct(loss);
+    judge_band(loss_elevated, pct, k_loss_enter_pct, k_loss_exit_pct);
+    judged.media_samples = loss.samples;
+    judged.frames_expected = static_cast<std::uint64_t>(std::llround(loss.frames_expected));
+    judged.frames_lost = static_cast<std::uint64_t>(std::llround(loss.frames_lost));
+    judged.loss_available = pct.has_value();
+    judged.loss_pct = pct.value_or(0.0);
+    judged.loss_elevated = judged.loss_available && loss_elevated;
+    media_oldest = loss.oldest;
+  }
+
+  void network_judge_t::judge_rtt(clock_type::time_point at) {
+    const auto round_trip = judged_rtt(rtt, at);
+    judge_band(rtt_elevated, round_trip.median_ms, k_rtt_enter_ms, k_rtt_exit_ms);
+    judged.rtt_samples = round_trip.readings;
+    judged.rtt_available = round_trip.median_ms.has_value();
+    judged.rtt_ms = round_trip.median_ms.value_or(0.0);
+    judged.rtt_elevated = judged.rtt_available && rtt_elevated;
   }
 
   void network_judge_t::note_risk(clock_type::time_point at) {
@@ -4070,26 +4099,28 @@ namespace stream_stats {
   }
 
   network_verdict_t network_judge_t::verdict(clock_type::time_point now) const {
-    network_verdict_t result;
-    const auto loss = judged_loss(media, now);
-    const auto loss_pct = judged_loss_pct(loss);
-    result.media_samples = loss.samples;
-    result.frames_expected = static_cast<std::uint64_t>(std::llround(loss.frames_expected));
-    result.frames_lost = static_cast<std::uint64_t>(std::llround(loss.frames_lost));
-    if (loss.samples > 0) {
+    auto result = judged;
+    const auto window_start = now - k_window;
+    // Once every reading of a kind has left the window, there is nothing to judge it on.
+    if (media.empty() || media.back().at <= window_start) {
+      result.loss_available = false;
+      result.loss_pct = 0.0;
+      result.loss_elevated = false;
+      result.media_samples = 0;
+      result.frames_expected = 0;
+      result.frames_lost = 0;
+    } else if (result.media_samples > 0) {
       result.media_span_ms = std::max<std::int64_t>(
         0,
-        std::chrono::duration_cast<std::chrono::milliseconds>(now - loss.oldest).count()
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - media_oldest).count()
       );
     }
-    result.loss_available = loss_pct.has_value();
-    result.loss_pct = loss_pct.value_or(0.0);
-    result.loss_elevated = result.loss_available && loss_elevated;
-    const auto round_trip = judged_rtt(rtt, now);
-    result.rtt_samples = round_trip.readings;
-    result.rtt_available = round_trip.median_ms.has_value();
-    result.rtt_ms = round_trip.median_ms.value_or(0.0);
-    result.rtt_elevated = result.rtt_available && rtt_elevated;
+    if (rtt.empty() || rtt.back().at <= window_start) {
+      result.rtt_available = false;
+      result.rtt_ms = 0.0;
+      result.rtt_elevated = false;
+      result.rtt_samples = 0;
+    }
     result.risk = result.loss_elevated || result.rtt_elevated;
     if (risk_since) {
       result.risk_held_ms = std::max<std::int64_t>(
@@ -4101,6 +4132,9 @@ namespace stream_stats {
   }
 
   std::string_view network_loss_state(const network_verdict_t &verdict) {
+    if (verdict.loss_stale) {
+      return "stale";
+    }
     if (!verdict.loss_available) {
       return "collecting";
     }
@@ -4111,6 +4145,9 @@ namespace stream_stats {
   }
 
   std::string_view network_rtt_state(const network_verdict_t &verdict) {
+    if (verdict.rtt_stale) {
+      return "stale";
+    }
     if (!verdict.rtt_available) {
       return "collecting";
     }
@@ -4420,9 +4457,8 @@ namespace stream_stats {
     return network_judge.verdict(std::chrono::steady_clock::now());
   }
 
-  judged_network_t judged_network(const stats_t &stats) {
-    judged_network_t result;
-    const auto &verdict = stats.network_verdict;
+  network_verdict_t served_network_verdict(const stats_t &stats) {
+    auto verdict = stats.network_verdict;
     const bool network_current =
       stats.network_sample_revision > 0 &&
       stats.network_last_received_age_ms >= 0 &&
@@ -4431,8 +4467,27 @@ namespace stream_stats {
       stats.media_loss_sample_revision > 0 &&
       stats.media_loss_last_received_age_ms >= 0 &&
       stats.media_loss_last_received_age_ms <= judged_network_t::k_media_report_max_age_ms;
-    result.loss_judged = network_current && media_current && verdict.loss_available;
-    result.rtt_judged = network_current && verdict.rtt_available;
+    if (!(network_current && media_current) && verdict.loss_available) {
+      verdict.loss_available = false;
+      verdict.loss_stale = true;
+      verdict.loss_pct = 0.0;
+      verdict.loss_elevated = false;
+    }
+    if (!network_current && verdict.rtt_available) {
+      verdict.rtt_available = false;
+      verdict.rtt_stale = true;
+      verdict.rtt_ms = 0.0;
+      verdict.rtt_elevated = false;
+    }
+    verdict.risk = verdict.loss_elevated || verdict.rtt_elevated;
+    return verdict;
+  }
+
+  judged_network_t judged_network(const stats_t &stats) {
+    judged_network_t result;
+    const auto verdict = served_network_verdict(stats);
+    result.loss_judged = verdict.loss_available;
+    result.rtt_judged = verdict.rtt_available;
     result.loss_pressure = result.loss_judged && verdict.loss_elevated;
     result.rtt_pressure = result.rtt_judged && verdict.rtt_elevated;
     result.rtt_fail = result.rtt_judged && verdict.rtt_ms >= network_judge_t::k_rtt_fail_ms;
@@ -4453,6 +4508,7 @@ namespace stream_stats {
 
   void age_network_judge_for_tests(std::chrono::steady_clock::duration age) {
     std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
+    network_judge.media_oldest -= age;
     for (auto &sample : network_judge.media) {
       sample.at -= age;
     }

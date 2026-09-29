@@ -585,8 +585,10 @@ namespace proc {
         stats.duplicate_frame_ratio >= 0.50 ||
         (source_cadence_available && stats.capture_source_fps < target_fps * 0.50 &&
          stats.duplicate_frame_ratio >= 0.10);
-      // The judged verdict Doctor grades with, not the newest reading's debounce.
-      classification.network_risk = stream_stats::judged_network(stats).risk;
+      // The last verdict the window judged, not the newest reading's debounce. Not the served one:
+      // this runs at teardown, after the control stream is gone and its readings have stopped, so
+      // its freshness gates would read every abrupt disconnect as a clean network.
+      classification.network_risk = stats.network_verdict.risk;
       classification.pacing_risk =
         stats.dropped_frame_ratio >= 0.04 ||
         (!static_or_duplicate_content &&

@@ -7,6 +7,18 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- A verdict read between two client reports quotes the figure its band was judged on. The band
+  moved only when a report arrived, while the figure was worked out again whenever it was read, so
+  once a lossy second left the window between reports, which PyroWave's reports a second or more
+  apart leave room for, a pressure row could read 0.70%, below the 1% that clears it. Figures whose
+  readings have stopped are no longer served either: once the client's newest media report is more
+  than five seconds old, or the host has had no reading for two, the stream stats, the tuning
+  block, Doctor's evidence and the session status call that loss or RTT stale, where they went on
+  quoting the old figure with "elevated" beside it while Doctor said it was not judging it. A
+  session that ends is still graded by the verdict the window last reached. That grading runs after
+  a dropped client's readings have stopped, and the freshness check read every abrupt disconnect as
+  a clean network.
+
 - Doctor and the session status call the live bitrate controller Live Tuning, as everything else
   does. Doctor's network findings said "Auto Safe already owns the live bitrate correction" and
   offered "Recheck Auto Safe", a name that appeared nowhere else a player could see.

@@ -7392,6 +7392,63 @@ TEST(NetworkJudgeTests, SustainedLossEntersAtItsBandAndHoldsThroughACleanSecond)
   EXPECT_GE(cleared_at, 8);
 }
 
+TEST(NetworkJudgeTests, AVerdictReadBetweenReportsQuotesTheFigureItsBandWasJudgedOn) {
+  // The band moves only when a report arrives, a second apart or more, and PyroWave's reports come
+  // 1000 ms apart or more. The figure used to be worked out again whenever the verdict was read, so
+  // a lossy report leaving the window between two reports left a pressure verdict quoting 0.70%,
+  // below the 1% that clears it, and a clean one leaving it left a clean verdict quoting 2.02%.
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  // Three seconds that lost 8 of 120 frames each: pressure from the fifth report, held until the
+  // window's figure falls below 1%.
+  for (int i = 0; i < 3; ++i) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 120.0, 8.0);
+  }
+  for (int i = 0; i < 17; ++i) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 120.0, 0.0);
+  }
+  const auto held = judge.verdict(at);
+  ASSERT_TRUE(held.loss_elevated);
+  EXPECT_NEAR(held.loss_pct, 24.0 * 100.0 / 2400.0, 1e-9);
+
+  // Half a second after the next report was due, the first lossy second has left the window. The
+  // verdict still quotes the figure its band was judged on.
+  const auto between = judge.verdict(at + std::chrono::milliseconds(1500));
+  EXPECT_TRUE(between.loss_elevated);
+  EXPECT_DOUBLE_EQ(between.loss_pct, held.loss_pct);
+  EXPECT_EQ(between.frames_lost, held.frames_lost);
+  EXPECT_EQ(between.frames_expected, held.frames_expected);
+  EXPECT_EQ(stream_stats::network_loss_state(between), "elevated");
+
+  // The next report judges the window as it now is, and that clears the band.
+  at += std::chrono::milliseconds(1500);
+  judge.add_media(at, 120.0, 0.0);
+  const auto cleared = judge.verdict(at);
+  EXPECT_FALSE(cleared.loss_elevated);
+  EXPECT_LT(cleared.loss_pct, stream_stats::network_judge_t::k_loss_exit_pct);
+
+  // The other way round: a clean window just under 2% stays clean, and its figure stays under 2%,
+  // while a clean second leaves the window before the next report.
+  stream_stats::network_judge_t rising;
+  at = judge_start();
+  for (int i = 0; i < 15; ++i) {
+    at += std::chrono::seconds(1);
+    rising.add_media(at, 120.0, 0.0);
+  }
+  for (const double lost : {9.0, 9.0, 9.0, 9.0, 10.0}) {
+    at += std::chrono::seconds(1);
+    rising.add_media(at, 120.0, lost);
+    ASSERT_FALSE(rising.verdict(at).loss_elevated);
+  }
+  const auto clean = rising.verdict(at + std::chrono::milliseconds(1500));
+  EXPECT_FALSE(clean.loss_elevated);
+  EXPECT_NEAR(clean.loss_pct, 46.0 * 100.0 / 2400.0, 1e-9);
+  EXPECT_LT(clean.loss_pct, stream_stats::network_judge_t::k_loss_enter_pct);
+  EXPECT_EQ(stream_stats::network_loss_state(clean), "light");
+}
+
 TEST(NetworkJudgeTests, RecordedPyroWaveRttSpikesNeverElevate) {
   // The newest-reading tracker flips twice on this sequence. The window's median never moves off a
   // LAN's figures.
@@ -7614,6 +7671,83 @@ TEST(StreamStatsHotFieldTests, ClientMediaCountersAreJudgedOverTheWindow) {
   EXPECT_EQ(json.at("network_verdict").at("frames_lost"), 18);
   EXPECT_EQ(json.at("network_verdict").at("loss_state"), "elevated");
   EXPECT_EQ(json.at("network_verdict").at("loss_basis"), "video_frames_lost_after_fec");
+}
+
+TEST(StreamStatsHotFieldTests, AVerdictWhoseReportsStoppedIsServedAsStale) {
+  // Doctor stops judging loss five seconds after the client's newest media report. The stream stats
+  // kept serving the window's old figure, and "elevated" beside it, until the window emptied, so the
+  // console and the session status went on quoting a loss Doctor said it was not judging.
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-stale", 63, "app-session-stale");
+  stream_stats::update_stream_active(true);
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::stop_session_timing("owner-stale", 63);
+    stream_stats::update_stream_active(false);
+  });
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_control_channel_stats(6.0, 0.0, 777);
+  }
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-stale",
+    .app_session_id = "app-session-stale",
+    .session_generation = 63,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 0,
+    .frames_received = 0,
+    .frames_lost = 0
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+  for (const auto &report : k_recorded_hevc_reports) {
+    sample.client_monotonic_ms += 1'000;
+    sample.frames_expected += report.expected;
+    sample.frames_lost += report.lost;
+    sample.frames_received = sample.frames_expected - sample.frames_lost;
+    ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).observation_published);
+  }
+  const auto live = stream_stats::get_current();
+  ASSERT_TRUE(stream_stats::judged_network(live).loss_pressure);
+  EXPECT_EQ(nlohmann::json::parse(live.to_json()).at("network_verdict").at("loss_state"), "elevated");
+
+  // The client's reports stop reaching the host while the control channel's pings go on.
+  stream_stats::age_latest_network_observation_for_tests(std::chrono::seconds(6));
+  stream_stats::update_control_channel_stats(6.0, 0.0, 777);
+  const auto stale = stream_stats::get_current();
+  const auto network = stream_stats::judged_network(stale);
+  EXPECT_FALSE(network.loss_judged);
+  EXPECT_TRUE(network.rtt_judged);
+  const auto served = stream_stats::served_network_verdict(stale);
+  EXPECT_FALSE(served.loss_available);
+  EXPECT_TRUE(served.loss_stale);
+  EXPECT_FALSE(served.loss_elevated);
+  EXPECT_FALSE(served.risk);
+  EXPECT_EQ(served.risk, network.risk);
+
+  const auto json = nlohmann::json::parse(stale.to_json()).at("network_verdict");
+  EXPECT_EQ(json.at("loss_state"), "stale");
+  EXPECT_TRUE(json.at("loss_pct").is_null());
+  EXPECT_EQ(json.at("rtt_state"), "clean");
+  EXPECT_FALSE(json.at("risk").get<bool>());
+
+  auto doctor_input = stale;
+  doctor_input.capture_transport = platf::frame_transport_e::dmabuf;
+  doctor_input.capture_residency = platf::frame_residency_e::gpu;
+  doctor_input.encode_target_residency = platf::frame_residency_e::gpu;
+  const auto doctor = stream_stats::build_doctor_json(doctor_input, nlohmann::json::object());
+  const auto &evidence = doctor.at("evidence");
+  const auto loss_row = std::find_if(evidence.begin(), evidence.end(), [](const nlohmann::json &row) {
+    return row.value("id", std::string {}) == "packet_loss";
+  });
+  ASSERT_NE(loss_row, evidence.end());
+  EXPECT_EQ(loss_row->at("status"), "unknown");
+  EXPECT_TRUE(loss_row->at("value").is_null());
+  EXPECT_NE(loss_row->at("detail").get<std::string>().find("No client media report has reached the host"), std::string::npos)
+    << loss_row->dump();
+  EXPECT_EQ(doctor.at("advanced_evidence").at("network_verdict").at("loss_state"), "stale");
+
+  // What the window last judged is still there for a session that ends now to be graded by.
+  EXPECT_TRUE(stale.network_verdict.loss_elevated);
+  EXPECT_TRUE(stale.network_verdict.risk);
 }
 
 namespace {

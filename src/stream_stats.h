@@ -309,10 +309,17 @@ namespace stream_stats {
    * figure. RTT is the median of the host's round trip readings over the same window. Doctor's
    * verdict, the session status and Live Tuning's loss input all read this one judgement, so they
    * cannot quote different figures. network_judge_t says how it is formed.
+   *
+   * Each figure is the one its newest reading judged, with the band it was judged into, so a verdict
+   * read between readings never pairs a band with a figure the window has since moved to.
+   * served_network_verdict() says which figures are still current enough to serve.
    */
   struct network_verdict_t {
     /// The window holds enough media reports to judge loss.
     bool loss_available = false;
+    /// Set only by served_network_verdict(): the window judged loss, but the client's reports stopped
+    /// reaching this host, so the figure is no longer served.
+    bool loss_stale = false;
     /// Frames lost as a percentage of frames expected over the window, 0 to 100.
     double loss_pct = 0.0;
     /// The frame counts behind loss_pct, so a report can say how many of how many.
@@ -326,6 +333,8 @@ namespace stream_stats {
     bool loss_elevated = false;
     /// The window holds enough RTT readings to judge RTT.
     bool rtt_available = false;
+    /// Set only by served_network_verdict(): the window judged RTT, but its readings stopped.
+    bool rtt_stale = false;
     /// The median round trip time over the window, in milliseconds.
     double rtt_ms = 0.0;
     int rtt_samples = 0;
@@ -458,8 +467,10 @@ namespace stream_stats {
     /// verifies against it, because its verification must see only readings from after the change.
     /// Everything that grades the stream reads network_verdict instead.
     bool network_risk = false;
-    /// Loss and RTT judged over the last network_judge_t::k_window with hysteresis: what Doctor's
-    /// verdict, the session status and Live Tuning's loss input read.
+    /// Loss and RTT judged over the last network_judge_t::k_window with hysteresis, as the newest
+    /// readings left them: what Doctor's verdict, the session status and Live Tuning's loss input read.
+    /// A reader that shows or grades it goes through served_network_verdict(), which drops figures
+    /// whose readings stopped; only a session that has already ended reads it as it stands.
     network_verdict_t network_verdict;
     uint64_t bytes_sent = 0;
 
@@ -1204,6 +1215,11 @@ namespace stream_stats {
    * k_min_media_samples reports or k_min_rtt_readings readings in the window, and a gap that thins
    * the window below that starts its judgement over instead of carrying an old one across.
    *
+   * Each kind is judged when a reading of it arrives, and the verdict keeps that figure until the
+   * next one: a lossy report aging out between two reports cannot leave a pressure verdict quoting a
+   * figure below the band that made it pressure, or a clean one quoting a figure above it. Once
+   * every reading of a kind has left the window there is no figure for it at all.
+   *
    * RTT readings are held back until the estimator has shown one calm reading, or for
    * k_rtt_armed_after readings, for the reason network_risk_tracker_t gives: ENet seeds a fresh
    * peer's RTT at 500 ms and converges over its first seconds.
@@ -1246,6 +1262,10 @@ namespace stream_stats {
     int rtt_readings_seen = 0;
     bool risk = false;
     std::optional<clock_type::time_point> risk_since;
+    /// The judgement the newest reading of each kind made, figure and band together.
+    network_verdict_t judged;
+    /// When the oldest media report counted in judged arrived.
+    clock_type::time_point media_oldest {};
 
     /** Fold in one media report: the frames it covers and how many of them were lost. */
     void add_media(clock_type::time_point at, double frames_expected, double frames_lost);
@@ -1261,6 +1281,8 @@ namespace stream_stats {
     }
 
   private:
+    void judge_media(clock_type::time_point at);
+    void judge_rtt(clock_type::time_point at);
     void note_risk(clock_type::time_point at);
   };
 
@@ -1296,14 +1318,27 @@ namespace stream_stats {
   judged_network_t judged_network(const stats_t &stats);
 
   /**
-   * @brief What a verdict's loss is called in a state field: collecting, clean, light or elevated.
+   * @brief A stream's verdict as every reader that shows or grades it serves it.
+   *
+   * The gates judged_network() grades with: no figure while the newest network reading is more than
+   * two seconds old, and no loss while the newest client media report is older than
+   * judged_network_t::k_media_report_max_age_ms. A figure it drops reads as stale rather than as
+   * still being collected. The stream stats, the tuning block, Doctor's evidence and the session
+   * status all serve this, so none of them keeps quoting a figure, or "elevated", that Doctor has
+   * stopped judging.
+   */
+  network_verdict_t served_network_verdict(const stats_t &stats);
+
+  /**
+   * @brief What a verdict's loss is called in a state field: collecting, stale, clean, light or
+   *        elevated.
    *
    * Light is loss at or above k_loss_exit_pct that is not pressure: measured, and below the figure
-   * Doctor acts on.
+   * Doctor acts on. Stale is a figure served_network_verdict() stopped serving.
    */
   std::string_view network_loss_state(const network_verdict_t &verdict);
 
-  /** @brief What a verdict's RTT is called in a state field: collecting, clean or elevated. */
+  /** @brief What a verdict's RTT is called in a state field: collecting, stale, clean or elevated. */
   std::string_view network_rtt_state(const network_verdict_t &verdict);
 
   /** @brief The verdict as the JSON the session status and stream stats serve. */

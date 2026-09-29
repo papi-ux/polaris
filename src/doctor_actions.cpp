@@ -448,7 +448,7 @@ namespace doctor_actions {
         {"media_loss_sample_revision", stats.media_loss_sample_revision},
         {"media_loss_last_received_age_ms", stats.media_loss_last_received_age_ms},
         {"latency_ms", stats.latency_ms},
-        {"network_verdict", stream_stats::network_verdict_json(stats.network_verdict)},
+        {"network_verdict", stream_stats::network_verdict_json(stream_stats::served_network_verdict(stats))},
         {"bitrate_kbps", current_live_bitrate(stats)},
         {"paired_target_bitrate_kbps", stats.paired_target_bitrate_kbps},
         {"effective_launch_bitrate_kbps", stats.effective_launch_bitrate_kbps},
@@ -458,7 +458,7 @@ namespace doctor_actions {
 
     // The judged verdict Doctor's headline reads, so a restore it offers is one this accepts.
     bool network_stable_for_quality_retry(const stream_stats::stats_t &stats) {
-      const auto &verdict = stats.network_verdict;
+      const auto verdict = stream_stats::served_network_verdict(stats);
       const auto network = stream_stats::judged_network(stats);
       return stats.streaming && (network.loss_judged || network.rtt_judged) && !network.risk &&
         (!network.loss_judged || verdict.loss_pct < stream_stats::network_judge_t::k_loss_enter_pct) &&

@@ -323,9 +323,9 @@ namespace settings_metadata {
     tuning["adaptive_packet_loss_ewma"] = adaptive_state.ewma_packet_loss;
     tuning["adaptive_rtt_ewma_ms"] = adaptive_state.ewma_rtt_ms;
     // The loss Doctor and the session status quote and Live Tuning acts on: video frames lost after
-    // FEC over the network verdict's window. adaptive_packet_loss_ewma is the controller's own average
-    // of it, already in percent.
-    const auto &verdict = stats.network_verdict;
+    // FEC over the network verdict's window, as served, so a figure Doctor stopped judging reads as
+    // stale here too. adaptive_packet_loss_ewma is the controller's own average, already in percent.
+    const auto verdict = stream_stats::served_network_verdict(stats);
     tuning["network_loss_pct"] = verdict.loss_available ? nlohmann::json(verdict.loss_pct) : nlohmann::json(nullptr);
     tuning["network_loss_state"] = stream_stats::network_loss_state(verdict);
     tuning["network_loss_basis"] = "video_frames_lost_after_fec";
