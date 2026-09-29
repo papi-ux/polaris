@@ -2066,6 +2066,32 @@ namespace stream_stats {
       return guidance;
     }
 
+    std::string two_decimals(double value) {
+      char text[32];
+      std::snprintf(text, sizeof(text), "%.2f", value);
+      return text;
+    }
+
+    /// What the loss row says: the frames behind the figure, which loss it is, and the band.
+    std::string video_frame_loss_detail(const network_verdict_t &verdict) {
+      return std::to_string(verdict.frames_lost) + " of " + std::to_string(verdict.frames_expected) +
+             " video frames in the client's last " + std::to_string(verdict.media_samples) +
+             " reports never reached it whole after FEC recovery, " + two_decimals(verdict.loss_pct) +
+             "%. Doctor calls loss network pressure at " + two_decimals(network_judge_t::k_loss_enter_pct) +
+             "% over the last " + std::to_string(network_judge_t::k_window.count()) +
+             " seconds and clears it only below " + two_decimals(network_judge_t::k_loss_exit_pct) +
+             "%. Frames the host dropped before sending are counted separately.";
+    }
+
+    /// What the latency row says: the median behind the figure and the band.
+    std::string round_trip_detail(const network_verdict_t &verdict) {
+      return "Median of the host's last " + std::to_string(verdict.rtt_samples) + " round trip readings over " +
+             std::to_string(network_judge_t::k_window.count()) + " seconds. Doctor watches RTT from " +
+             std::to_string(static_cast<int>(network_judge_t::k_rtt_enter_ms)) + " ms, clears it below " +
+             std::to_string(static_cast<int>(network_judge_t::k_rtt_exit_ms)) + " ms and fails the stream at " +
+             std::to_string(static_cast<int>(network_judge_t::k_rtt_fail_ms)) + " ms.";
+    }
+
     nlohmann::json doctor_recommendation(const std::string &primary_issue,
                                          const std::string &summary,
                                          const nlohmann::json &health,
@@ -2111,9 +2137,14 @@ namespace stream_stats {
         expected = "Doctor will either clear the warning or gather direct evidence before offering a bitrate change.";
       } else if (primary_issue == "control_channel_observation") {
         title = "Keep monitoring";
-        body = "The reliable control channel retried packets, but Polaris has no confirmed video-loss evidence and RTT remains stable. Do not lower quality from this observation alone.";
+        body = "The reliable control channel retried packets, but video frame loss and round trip time over the last " +
+               std::to_string(network_judge_t::k_window.count()) +
+               " seconds stay below network pressure, so Doctor changes nothing for this.";
+        if (auto_safe_managing) {
+          body += " Live Tuning keeps adjusting the live bitrate on its own.";
+        }
         next_step = "Keep monitoring";
-        expected = "Visible media loss or sustained RTT pressure must appear before Doctor recommends a network recovery action.";
+        expected = "Sustained video frame loss or RTT pressure must appear before Doctor recommends a network recovery action.";
       } else if (primary_issue == "quality_reduced_live") {
         if (auto_safe_managing) {
           body = "The current network is clean and Auto Safe is already holding or recovering the live target below this stream's launch ceiling. Doctor will verify that recovery without applying a competing bitrate change.";
@@ -2440,24 +2471,24 @@ namespace stream_stats {
     const double target_fps = doctor_target_fps(stats);
     const double target_fps_gap = std::max(0.0, target_fps - stats.fps);
     const bool meaningful_fps_shortfall = is_meaningful_fps_shortfall(target_fps, stats.fps);
-    // Packet-loss actions require an explicitly confirmed media source. ENet's
-    // peer->packetLoss is a reliable control-channel EWMA: useful context, but
-    // not a measurement of video packets dropped at the client.
+    // Doctor grades the network from the windowed verdict (network_judge_t), never from the newest
+    // report: a second of burst loss or a Wi-Fi RTT spike moves the window's figure, not the
+    // headline. judged_network() says when the verdict is current enough to count. Loss comes only
+    // from client media reports; ENet's peer->packetLoss is a reliable control-channel EWMA, context
+    // and never video loss.
+    const auto &verdict = stats.network_verdict;
+    const auto network = judged_network(stats);
     const bool current_network_observation =
       stats.network_sample_revision > 0 &&
       stats.network_last_received_age_ms >= 0 &&
       stats.network_last_received_age_ms <= DOCTOR_CURRENT_NETWORK_MAX_AGE_MS;
-    const bool current_media_loss_observation =
-      stats.media_loss_sample_revision > 0 &&
-      stats.media_loss_last_received_age_ms >= 0 &&
-      stats.media_loss_last_received_age_ms <= DOCTOR_CURRENT_NETWORK_MAX_AGE_MS;
-    const bool confirmed_media_loss = current_media_loss_observation &&
-      stats.packet_loss_available && stats.packet_loss > 2.0;
-    const bool network_fail = stats.network_risk &&
-      (confirmed_media_loss ||
-       (current_network_observation && stats.latency_ms >= 45.0));
-    const bool network_watch = current_network_observation &&
-      stats.network_risk && !network_fail;
+    const bool loss_judged = network.loss_judged;
+    const bool rtt_judged = network.rtt_judged;
+    const bool confirmed_media_loss = network.loss_pressure;
+    const bool rtt_fail = network.rtt_fail;
+    const bool network_risk = network.risk;
+    const bool network_fail = network.fail;
+    const bool network_watch = network_risk && !network_fail;
     const bool control_channel_observation =
       stats.streaming &&
       current_network_observation &&
@@ -2473,13 +2504,12 @@ namespace stream_stats {
     // its actuator is momentarily holding or recovering. A clean, reduced
     // target is therefore an informational observation, not a user action.
     const bool auto_safe_managing = stats.adaptive_bitrate_enabled;
-    const bool network_evidence_available = current_network_observation &&
-      (current_media_loss_observation || stats.control_channel_samples > 0);
+    const bool network_evidence_available = loss_judged || rtt_judged;
     // Clean enough to raise quality: the loss and latency limits a Doctor quality restore verifies with.
     const bool network_clean_for_quality =
-      stats.streaming && network_evidence_available && !stats.network_risk &&
-      (!current_media_loss_observation || stats.packet_loss <= 2.0) &&
-      stats.latency_ms < 45.0;
+      stats.streaming && network_evidence_available && !network_risk &&
+      (!loss_judged || verdict.loss_pct < network_judge_t::k_loss_enter_pct) &&
+      (!rtt_judged || verdict.rtt_ms < network_judge_t::k_rtt_fail_ms);
     const bool quality_reduced_live =
       network_clean_for_quality &&
       stats.adaptive_runtime_update_supported && effective_quality_target_kbps > live_bitrate_kbps;
@@ -2691,7 +2721,10 @@ namespace stream_stats {
       primary_issue == "capture_missing" ? "Capture metadata has not arrived yet; start a stream before tuning advanced settings." :
       primary_issue == "network_jitter" ? "Sustained network pressure is affecting this stream." :
       primary_issue == "network_observation" ? "A network warning needs more live evidence before Doctor changes quality." :
-      primary_issue == "control_channel_observation" ? "Control-channel retries were observed, but video packet loss is not confirmed." :
+      primary_issue == "control_channel_observation" ?
+        (loss_judged ?
+          "Control-channel retries were observed, but video frame loss stays below network pressure." :
+          "Control-channel retries were observed, but no video frame loss is measured.") :
       primary_issue == "quality_reduced_live" ? "The reversible live bitrate target is below the capability-validated launch ceiling and current network evidence is clean." :
       primary_issue == "pyrowave_starved" ? pyrowave_summary + " The network is clean." :
       primary_issue == "pyrowave_needs_more_than_allowed" ? pyrowave_limit_summary :
@@ -2776,17 +2809,22 @@ namespace stream_stats {
       "deterministic_launch_policy",
       encoder_selection.value("reason", std::string {"Encoder selection evidence is unavailable."})
     );
+    // The one loss figure: frames the client never received whole, after FEC recovery, over the
+    // window. Nova quotes this row, the session status carries the same verdict, and Live Tuning
+    // acts on it, so none of them can show a different number.
     append_doctor_evidence(
       evidence,
       "packet_loss",
-      "Video packet loss",
-      current_media_loss_observation ? nlohmann::json(stats.packet_loss) : nlohmann::json(nullptr),
+      "Video frame loss",
+      loss_judged ? nlohmann::json(verdict.loss_pct) : nlohmann::json(nullptr),
       "%",
-      !current_media_loss_observation ? "unknown" : confirmed_media_loss ? "fail" : "pass",
-      current_media_loss_observation ? stats.packet_loss_source : "unavailable",
-      current_media_loss_observation ?
-        "Packet loss confirmed by media-path telemetry." :
-        "No current confirmed media packet-loss measurement is available for this live stream."
+      !loss_judged ? "unknown" : confirmed_media_loss ? "fail" : "pass",
+      loss_judged ? "media_transport" : "unavailable",
+      loss_judged ?
+        video_frame_loss_detail(verdict) :
+        "Fewer than " + std::to_string(network_judge_t::k_min_media_samples) +
+          " client media reports arrived in the last " + std::to_string(network_judge_t::k_window.count()) +
+          " seconds, so video frame loss is not judged yet."
     );
     append_doctor_evidence(
       evidence,
@@ -2802,13 +2840,13 @@ namespace stream_stats {
       evidence,
       "latency",
       "Network latency",
-      network_evidence_available ? nlohmann::json(stats.latency_ms) : nlohmann::json(nullptr),
+      rtt_judged ? nlohmann::json(verdict.rtt_ms) : nlohmann::json(nullptr),
       "ms",
-      !network_evidence_available ? "unknown" : stats.latency_ms >= 45.0 ? "fail" : network_watch ? "watch" : "pass",
-      network_evidence_available ? "stream_stats" : "unavailable",
-      network_evidence_available ?
-        "Round-trip latency reported by the active client control channel." :
-        "No current media or control-channel latency sample is available for this stream."
+      !rtt_judged ? "unknown" : rtt_fail ? "fail" : verdict.rtt_elevated ? "watch" : "pass",
+      rtt_judged ? "stream_stats" : "unavailable",
+      rtt_judged ?
+        round_trip_detail(verdict) :
+        "No current round trip readings are available for this stream."
     );
     // Which kind of client is streaming, because what Doctor can see and what the player can change
     // both follow from it. A Moonlight-protocol client reads as every other stream does, so without
@@ -3055,6 +3093,7 @@ namespace stream_stats {
     if (steam_input_conflict) {
       advanced["recent_issue_codes"].push_back("steam_input_conflict");
     }
+    advanced["network_verdict"] = network_verdict_json(verdict);
     advanced["pacing_coverage"] = {
       {"sample_count", stats.video_policy_sample_count},
       {"required_sample_count", DOCTOR_PACING_WARMUP_SAMPLES},
@@ -3137,7 +3176,7 @@ namespace stream_stats {
       {"basis", basis},
       {"sample_window", {
         {"samples", stats.control_channel_samples},
-        {"seconds", 0},
+        {"seconds", network_evidence_available ? network_judge_t::k_window.count() : 0},
         {"video_samples", stats.video_policy_sample_count},
         {"pacing_warning_streak", stats.pacing_warning_streak}
       }}
@@ -4369,6 +4408,27 @@ namespace stream_stats {
   network_verdict_t current_network_verdict() {
     std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
     return network_judge.verdict(std::chrono::steady_clock::now());
+  }
+
+  judged_network_t judged_network(const stats_t &stats) {
+    judged_network_t result;
+    const auto &verdict = stats.network_verdict;
+    const bool network_current =
+      stats.network_sample_revision > 0 &&
+      stats.network_last_received_age_ms >= 0 &&
+      stats.network_last_received_age_ms <= DOCTOR_CURRENT_NETWORK_MAX_AGE_MS;
+    const bool media_current =
+      stats.media_loss_sample_revision > 0 &&
+      stats.media_loss_last_received_age_ms >= 0 &&
+      stats.media_loss_last_received_age_ms <= judged_network_t::k_media_report_max_age_ms;
+    result.loss_judged = network_current && media_current && verdict.loss_available;
+    result.rtt_judged = network_current && verdict.rtt_available;
+    result.loss_pressure = result.loss_judged && verdict.loss_elevated;
+    result.rtt_pressure = result.rtt_judged && verdict.rtt_elevated;
+    result.rtt_fail = result.rtt_judged && verdict.rtt_ms >= network_judge_t::k_rtt_fail_ms;
+    result.risk = result.loss_pressure || result.rtt_pressure;
+    result.fail = result.risk && (result.loss_pressure || result.rtt_fail);
+    return result;
   }
 
 #ifdef POLARIS_TESTS

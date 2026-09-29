@@ -7,6 +7,18 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Doctor grades the network from that verdict. Its headline, the evidence it cites, the Auto Fix it
+  offers and the session status's `network_risk` all read the same 20 second judgement, so one
+  second that lost a burst of frames, or one Wi-Fi RTT spike, no longer flips the verdict. On the
+  Retroid Pocket 6's recorded HEVC run Doctor changed its headline 12 times in 24 seconds, between
+  "Control-channel retries were observed" and "Sustained network pressure". It now names the
+  pressure once, seven seconds in, and keeps it. The PyroWave run's RTT spikes turned its bitrate
+  advice into a network warning and back six times in 30 seconds, and now leave it alone. The loss
+  row reads "Video frame loss" and says how many of how many frames never arrived whole after FEC
+  recovery, loss stops counting once the client's media reports are more than five seconds old, and
+  the control channel finding no longer tells a player not to lower quality while Live Tuning is
+  lowering it.
+
 - The stream stats carry `network_verdict`, video frame loss and round trip time judged over the
   last 20 seconds rather than from the newest report. Its loss is the share of video frames the
   client expected and never received whole, after FEC recovery, with the frame counts behind it, and

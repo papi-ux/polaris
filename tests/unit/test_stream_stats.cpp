@@ -3420,6 +3420,49 @@ TEST(StreamStatsDoctorTests, SuppressesStaleNetworkFindingWhenLiveEvidenceIsClea
   EXPECT_EQ(doctor.at("suppressed_findings").at(0).at("id"), "stale_network_jitter");
 }
 
+namespace {
+  /**
+   * A hand-built stream's windowed network verdict, as if its whole window read what its newest
+   * fields read. Doctor grades the network from network_verdict alone, so a test that sets the newest
+   * readings sets the verdict they would have made: the fast debounce's risk is loss pressure when
+   * the loss is over the line, and RTT pressure otherwise.
+   */
+  stream_stats::stats_t judged(stream_stats::stats_t stats) {
+    auto &verdict = stats.network_verdict;
+    const bool reading = stats.network_sample_revision > 0;
+    verdict.loss_available = reading && stats.packet_loss_available;
+    verdict.loss_pct = verdict.loss_available ? stats.packet_loss : 0.0;
+    verdict.media_samples = verdict.loss_available ? 20 : 0;
+    verdict.frames_expected = verdict.loss_available ? 2400 : 0;
+    verdict.frames_lost = verdict.loss_available ? static_cast<std::uint64_t>(std::llround(stats.packet_loss * 24.0)) : 0;
+    verdict.loss_elevated = verdict.loss_available && stats.network_risk &&
+      stats.packet_loss > stream_stats::network_judge_t::k_loss_enter_pct;
+    verdict.rtt_available = reading;
+    verdict.rtt_ms = stats.latency_ms;
+    verdict.rtt_samples = reading ? 200 : 0;
+    verdict.rtt_elevated = reading && stats.network_risk && !verdict.loss_elevated;
+    verdict.risk = verdict.loss_elevated || verdict.rtt_elevated;
+    return stats;
+  }
+
+  nlohmann::json judged_doctor(const stream_stats::stats_t &stats,
+                               const nlohmann::json &health = nlohmann::json::object(),
+                               std::string_view app_uuid = {}) {
+    return stream_stats::build_doctor_json(judged(stats), health, app_uuid);
+  }
+
+  /**
+   * Network pressure as the window judges it: the readings before this leave the window, and enough
+   * reports at this RTT and loss arrive for a verdict.
+   */
+  void sustain_network_pressure(double latency_ms, double loss_pct) {
+    stream_stats::age_network_judge_for_tests(stream_stats::network_judge_t::k_window);
+    for (int i = 0; i < stream_stats::network_judge_t::k_min_media_samples; ++i) {
+      stream_stats::update_network_stats(latency_ms, loss_pct, 1000);
+    }
+  }
+}  // namespace
+
 TEST(StreamStatsDoctorTests, NetworkWatchRechecksWithoutChangingBitrate) {
   stream_stats::stats_t stats {};
   stats.streaming = true;
@@ -3436,7 +3479,7 @@ TEST(StreamStatsDoctorTests, NetworkWatchRechecksWithoutChangingBitrate) {
   stats.network_last_received_age_ms = 0;
   stats.latency_ms = 20.0;
 
-  const auto doctor = stream_stats::build_doctor_json(
+  const auto doctor = judged_doctor(
     stats,
     {{"primary_issue", "network_jitter"}, {"grade", "watch"}, {"safe_bitrate_kbps", 12000}}
   );
@@ -3520,7 +3563,7 @@ TEST(StreamStatsDoctorTests, ConfirmedNetworkPressureOffersGuardedFixWithUndo) {
   stats.latency_ms = 52.0;
   stats.adaptive_runtime_update_supported = true;
 
-  const auto doctor = stream_stats::build_doctor_json(
+  const auto doctor = judged_doctor(
     stats,
     {{"primary_issue", "network_jitter"}, {"grade", "degraded"}}
   );
@@ -3558,7 +3601,7 @@ TEST(StreamStatsDoctorTests, AutoSafeOwnsConfirmedNetworkCorrectionWithoutCompet
   stats.media_loss_last_received_age_ms = 0;
   stats.latency_ms = 52.0;
 
-  const auto doctor = stream_stats::build_doctor_json(
+  const auto doctor = judged_doctor(
     stats,
     {{"primary_issue", "network_jitter"}, {"grade", "degraded"}}
   );
@@ -3611,7 +3654,7 @@ TEST(StreamStatsDoctorTests, AutoSafePolicyRemainsReadOnlyAcrossTransientActuato
     stats.media_loss_last_received_age_ms = 0;
     stats.latency_ms = 52.0;
 
-    const auto doctor = stream_stats::build_doctor_json(
+    const auto doctor = judged_doctor(
       stats,
       {{"primary_issue", "network_jitter"}, {"grade", "degraded"}}
     );
@@ -3650,7 +3693,7 @@ TEST(StreamStatsDoctorTests, UnsupportedRuntimeBitrateUsesAppliedRateAndOffersNo
   stats.media_loss_last_received_age_ms = 0;
   stats.latency_ms = 52.0;
 
-  const auto doctor = stream_stats::build_doctor_json(
+  const auto doctor = judged_doctor(
     stats,
     {{"primary_issue", "network_jitter"}, {"grade", "degraded"}}
   );
@@ -3697,7 +3740,7 @@ TEST(StreamStatsDoctorTests, CleanLiveReductionOffersCapabilityBoundedQualityRes
   stats.network_risk = false;
   stats.adaptive_runtime_update_supported = true;
 
-  const auto doctor = stream_stats::build_doctor_json(
+  const auto doctor = judged_doctor(
     stats,
     {{"primary_issue", "network_jitter"}, {"grade", "degraded"}, {"summary", "Old network warning"}}
   );
@@ -3738,7 +3781,7 @@ TEST(StreamStatsDoctorTests, AutoSafeOwnsCleanQualityRecoveryWithoutCompetingAut
   stats.latency_ms = 4.0;
   stats.network_risk = false;
 
-  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto doctor = judged_doctor(stats, nlohmann::json::object());
   const auto &action = doctor.at("safe_recovery_action");
 
   EXPECT_EQ(doctor.at("primary_issue"), "none");
@@ -3873,21 +3916,21 @@ TEST(DoctorActionTests, RequiresCurrentNetworkEvidenceBeforeReducingQuality) {
   stats.packet_loss = 0.4;
   stats.latency_ms = 20.0;
 
-  EXPECT_FALSE(doctor_actions::network_pressure_confirmed(stats));
+  EXPECT_FALSE(doctor_actions::network_pressure_confirmed(judged(stats)));
 
   stats.packet_loss = 3.4;
   stats.packet_loss_available = true;
   stats.media_loss_sample_revision = 1;
   stats.media_loss_last_received_age_ms = 0;
-  EXPECT_TRUE(doctor_actions::network_pressure_confirmed(stats));
+  EXPECT_TRUE(doctor_actions::network_pressure_confirmed(judged(stats)));
 
   stats.packet_loss = 0.0;
   stats.packet_loss_available = false;
   stats.latency_ms = 45.0;
-  EXPECT_TRUE(doctor_actions::network_pressure_confirmed(stats));
+  EXPECT_TRUE(doctor_actions::network_pressure_confirmed(judged(stats)));
 
   stats.network_last_received_age_ms = 2001;
-  EXPECT_FALSE(doctor_actions::network_pressure_confirmed(stats));
+  EXPECT_FALSE(doctor_actions::network_pressure_confirmed(judged(stats)));
 }
 
 TEST(DoctorActionTests, HttpStatusContractUsesConflictForTypedActionFailures) {
@@ -3976,15 +4019,14 @@ TEST(DoctorActionTests, FreshControlObservationCannotRefreshStaleMediaLoss) {
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(35.0, 3.4, 1000);
-  }
-  stream_stats::age_latest_network_observation_for_tests(3s);
+  sustain_network_pressure(35.0, 3.4);
+  // Older than a client media report may be and still count, so its window's loss is not judged.
+  stream_stats::age_latest_network_observation_for_tests(6s);
   stream_stats::update_control_channel_stats(35.0, 0.0, 1000);
 
   const auto stats = stream_stats::get_current();
   EXPECT_TRUE(stats.network_risk);
-  EXPECT_GE(stats.media_loss_last_received_age_ms, 2000);
+  EXPECT_GT(stats.media_loss_last_received_age_ms, stream_stats::judged_network_t::k_media_report_max_age_ms);
   EXPECT_LT(stats.network_last_received_age_ms, 2000);
   EXPECT_FALSE(doctor_actions::network_pressure_confirmed(stats));
   const auto doctor = stream_stats::build_doctor_json(
@@ -4034,9 +4076,7 @@ TEST(DoctorActionTests, StaleHostNetworkEvidenceCannotMutateBitrate) {
   EXPECT_EQ(stale_restore.at("state"), "evidence_changed");
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 10000);
 
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(55.0, 3.5, 1000);
-  }
+  sustain_network_pressure(55.0, 3.5);
   stream_stats::age_latest_network_observation_for_tests(3s);
   const auto stale_reduce = doctor_actions::execute({{"action_id", "lower_bitrate"}});
   EXPECT_FALSE(stale_reduce.at("status").get<bool>());
@@ -4174,9 +4214,7 @@ TEST(DoctorActionTests, CachedQualityVerificationCannotAuthorizeANewerStepAfterD
   // The watchdog's clean result is receipt history only. New current
   // degradation must prevent the next restoration step and roll the entire
   // reversible transaction back to its captured target.
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(55.0, 3.5, 1000);
-  }
+  sustain_network_pressure(55.0, 3.5);
   const auto degraded = execute_with_encoder_ack(7580, [&] {
     return doctor_actions::execute({
       {"action_id", "verify"}, {"run_id", run_id}
@@ -4270,9 +4308,7 @@ TEST(DoctorActionTests, NewerExplicitBitrateSupersedesUndoWithoutBeingOverwritte
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
   ASSERT_TRUE(applied.at("status").get<bool>());
@@ -4308,9 +4344,7 @@ TEST(DoctorActionTests, WatchdogRetainsSupersededTerminalReceipt) {
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
   ASSERT_TRUE(applied.at("status").get<bool>());
@@ -4374,9 +4408,7 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   EXPECT_FALSE(unsupported.at("status").get<bool>());
   EXPECT_EQ(unsupported.at("error"), "Unsupported Doctor action.");
 
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
   ASSERT_TRUE(stream_stats::get_current().network_risk);
 
   adaptive_bitrate::set_runtime_update_supported(false);
@@ -4459,9 +4491,7 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   EXPECT_EQ(clustered.at("state"), "rolled_back");
   EXPECT_FALSE(clustered.at("verification_window").at("complete").get<bool>());
 
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
   ASSERT_TRUE(stream_stats::get_current().network_risk);
   const auto reapplied_for_verification = doctor_actions::execute({{"action_id", "lower_bitrate"}});
   ASSERT_TRUE(reapplied_for_verification.at("status").get<bool>());
@@ -4502,9 +4532,7 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   EXPECT_EQ(replay.at("run_id"), verified_run_id);
   EXPECT_EQ(replay.at("restored_bitrate_kbps"), 20000);
 
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
   ASSERT_TRUE(stream_stats::get_current().network_risk);
   const auto reapplied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
   ASSERT_TRUE(reapplied.at("status").get<bool>());
@@ -4636,9 +4664,7 @@ TEST(DoctorActionTests, StaleWatchdogNeverRestoresIntoANewerStreamGeneration) {
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
   ASSERT_TRUE(stream_stats::get_current().network_risk);
 
   constexpr std::uint64_t original_generation = 201;
@@ -4697,9 +4723,7 @@ TEST(DoctorActionTests, AutoFixRefusesAProcessGlobalControllerSharedByTwoSession
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   doctor_actions::session_started("client-one", 301, 20000);
   adaptive_bitrate::set_runtime_update_supported(true);
@@ -4751,7 +4775,7 @@ TEST(StreamStatsDoctorTests, MultipleSessionsNeverOfferProcessGlobalAutoFix) {
   stats.encode_target_residency = platf::frame_residency_e::gpu;
   stats.clients.resize(2);
 
-  const auto doctor = stream_stats::build_doctor_json(
+  const auto doctor = judged_doctor(
     stats, nlohmann::json::object(), "multi-session-app"
   );
   EXPECT_EQ(doctor.at("primary_issue"), "network_jitter");
@@ -4800,9 +4824,7 @@ TEST(DoctorActionTests, IdempotentAutoFixCannotOverwriteANewerOwnerBitrate) {
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   constexpr std::uint64_t generation = 421;
   doctor_actions::session_started("client-owner", generation, "launch-421", 20000);
@@ -4886,9 +4908,7 @@ TEST(DoctorActionTests, StaleControllerRevisionCannotOverrideANewerOwnerChoice) 
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   constexpr std::uint64_t generation = 422;
   doctor_actions::session_started("client-owner", generation, "launch-422", 20000);
@@ -4935,9 +4955,7 @@ TEST(DoctorActionTests, EquivalentFreshTelemetryCannotMakeAutoFixUnclickable) {
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   constexpr std::uint64_t generation = 426;
   doctor_actions::session_started(
@@ -5027,9 +5045,7 @@ TEST(DoctorActionTests, AutoFixStepsAndUndoesFromTheRateTheEncoderOpenedAt) {
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   constexpr std::uint64_t generation = 427;
   doctor_actions::session_started(
@@ -5597,7 +5613,7 @@ TEST(StreamStatsBitrateUnitsTests, EachClientIsAnsweredAboutItsOwnStream) {
 TEST(StreamStatsDoctorTests, PyroWaveBelowItsAdviceOnACleanNetworkOffersARaiseToTheFarAdvice) {
   PyroWaveHostGuard host;
   const auto stats = clean_pyrowave_stats(20000);
-  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto doctor = judged_doctor(stats, nlohmann::json::object());
   const auto &action = doctor.at("safe_recovery_action");
 
   EXPECT_EQ(doctor.at("primary_issue"), "pyrowave_starved");
@@ -5623,7 +5639,7 @@ TEST(StreamStatsDoctorTests, PyroWaveBelowItsAdviceOnACleanNetworkOffersARaiseTo
 
   // max_bitrate caps the raise, and the payload says so.
   config::video.max_bitrate = 50000;
-  const auto capped = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto capped = judged_doctor(stats, nlohmann::json::object());
   EXPECT_EQ(capped.at("safe_recovery_action").at("payload_preview").at("target_bitrate_kbps"), 50000);
   // The summary quotes the figure Doctor raises to, and says what held it there.
   EXPECT_NE(capped.at("summary").get<std::string>().find("a request of about 50 Mbps for 1920x1080 at 60 fps on a "
@@ -5636,7 +5652,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAdviceIsTextWhileLiveTuningOwnsTheBitrate) 
   PyroWaveHostGuard host;
   auto stats = clean_pyrowave_stats(20000);
   stats.adaptive_bitrate_enabled = true;
-  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto doctor = judged_doctor(stats, nlohmann::json::object());
   const auto &action = doctor.at("safe_recovery_action");
 
   EXPECT_EQ(doctor.at("primary_issue"), "pyrowave_starved");
@@ -5666,11 +5682,11 @@ TEST(StreamStatsDoctorTests, PyroWaveFindingWaitsForACleanNetworkAndRanksBelowFa
   auto lossy = clean_pyrowave_stats(20000);
   lossy.network_risk = true;
   lossy.latency_ms = 60.0;
-  EXPECT_EQ(stream_stats::build_doctor_json(lossy, nlohmann::json::object()).at("primary_issue"), "network_jitter");
+  EXPECT_EQ(judged_doctor(lossy, nlohmann::json::object()).at("primary_issue"), "network_jitter");
 
   auto slow_encoder = clean_pyrowave_stats(20000);
   slow_encoder.encode_time_ms = 30.0;
-  EXPECT_EQ(stream_stats::build_doctor_json(slow_encoder, nlohmann::json::object()).at("primary_issue"), "encoder_load");
+  EXPECT_EQ(judged_doctor(slow_encoder, nlohmann::json::object()).at("primary_issue"), "encoder_load");
 
   // Without a current network observation there is no clean network to raise on.
   auto unmeasured = clean_pyrowave_stats(20000);
@@ -5678,7 +5694,7 @@ TEST(StreamStatsDoctorTests, PyroWaveFindingWaitsForACleanNetworkAndRanksBelowFa
   unmeasured.network_last_received_age_ms = -1;
   unmeasured.media_loss_sample_revision = 0;
   unmeasured.media_loss_last_received_age_ms = -1;
-  EXPECT_NE(stream_stats::build_doctor_json(unmeasured, nlohmann::json::object()).at("primary_issue"), "pyrowave_starved");
+  EXPECT_NE(judged_doctor(unmeasured, nlohmann::json::object()).at("primary_issue"), "pyrowave_starved");
 }
 
 TEST(StreamStatsDoctorTests, PyroWaveAtTheRetroidPocket6CalibrationIsHealthyWhateverItsCeilingShare) {
@@ -5699,7 +5715,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtTheRetroidPocket6CalibrationIsHealthyWhat
   // Session status carries the rate starved was decided on: the encoder's 178987 kbps as a request.
   EXPECT_EQ(status.at("encoder_kbps"), 178987);
   EXPECT_EQ(status.at("request_kbps"), 199999);
-  const auto healthy = stream_stats::build_doctor_json(rp6, nlohmann::json::object());
+  const auto healthy = judged_doctor(rp6, nlohmann::json::object());
   EXPECT_EQ(healthy.at("primary_issue"), "none");
   const auto &bitrate_row = evidence_row(healthy, "bitrate");
   EXPECT_EQ(bitrate_row.at("status"), "pass");
@@ -5717,7 +5733,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtTheRetroidPocket6CalibrationIsHealthyWhat
     << detail;
   EXPECT_EQ(detail.find("it advises"), std::string::npos) << detail;
   // Within what Polaris recommends, the television figure needs no such note.
-  const auto low = evidence_row(stream_stats::build_doctor_json(clean_pyrowave_stats(160000), nlohmann::json::object()),
+  const auto low = evidence_row(judged_doctor(clean_pyrowave_stats(160000), nlohmann::json::object()),
                                 "bitrate")
                      .at("detail")
                      .get<std::string>();
@@ -5729,7 +5745,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtTheRetroidPocket6CalibrationIsHealthyWhat
   auto fed = clean_pyrowave_stats(160000);
   fed.pyrowave_window_frames = 240;
   fed.pyrowave_window_ceiling_frames = 236;
-  EXPECT_EQ(stream_stats::build_doctor_json(fed, nlohmann::json::object()).at("primary_issue"), "none");
+  EXPECT_EQ(judged_doctor(fed, nlohmann::json::object()).at("primary_issue"), "none");
 
   // More than a tenth below it, 150 Mbps, is starved, and Doctor raises to the far figure.
   auto short_rp6 = rp6;
@@ -5737,7 +5753,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtTheRetroidPocket6CalibrationIsHealthyWhat
   short_rp6.bitrate_kbps = short_encoder;
   short_rp6.effective_launch_bitrate_kbps = short_encoder;
   short_rp6.adaptive_target_bitrate_kbps = short_encoder;
-  const auto starved = stream_stats::build_doctor_json(short_rp6, nlohmann::json::object());
+  const auto starved = judged_doctor(short_rp6, nlohmann::json::object());
   EXPECT_EQ(starved.at("primary_issue"), "pyrowave_starved");
   EXPECT_EQ(starved.at("safe_recovery_action").at("payload_preview").at("target_bitrate_kbps"), 214898);
   EXPECT_NE(starved.at("summary").get<std::string>().find("a request of about 150 Mbps"), std::string::npos)
@@ -5769,7 +5785,7 @@ namespace {
 
   // A PyroWave stream that wants more than Doctor raises it to, with 85% of its frames at the byte budget.
   nlohmann::json limit_doctor(int width, int height, int request_kbps) {
-    const auto doctor = stream_stats::build_doctor_json(clean_pyrowave_stream(width, height, 120, true, request_kbps, 204),
+    const auto doctor = judged_doctor(clean_pyrowave_stream(width, height, 120, true, request_kbps, 204),
                                                         nlohmann::json::object());
     EXPECT_EQ(doctor.at("primary_issue"), "pyrowave_needs_more_than_allowed");
     return doctor;
@@ -5789,7 +5805,7 @@ TEST(StreamStatsDoctorTests, PyroWaveHeldBelowItsModelByTheCapAtItsByteCeilingAs
   EXPECT_FALSE(status.at("starved").get<bool>());
   EXPECT_DOUBLE_EQ(status.at("ceiling_frame_share").get<double>(), 0.85);
 
-  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto doctor = judged_doctor(stats, nlohmann::json::object());
   EXPECT_EQ(doctor.at("primary_issue"), "pyrowave_needs_more_than_allowed");
   EXPECT_EQ(doctor.at("traffic_light"), "amber");
   // A player can set up to 500 Mbps by hand, so the cap is only how far Doctor raises, not what the
@@ -5816,7 +5832,7 @@ TEST(StreamStatsDoctorTests, PyroWaveHeldBelowItsModelByTheCapAtItsByteCeilingAs
 TEST(StreamStatsDoctorTests, PyroWaveAtItsByteCeilingIsAFindingOnlyWhereTheHostHoldsItBelowTheModel) {
   PyroWaveHostGuard host;
   const auto issue = [](int width, int height, int fps, int request_kbps, std::uint32_t ceiling_frames) {
-    return stream_stats::build_doctor_json(
+    return judged_doctor(
              clean_pyrowave_stream(width, height, fps, true, request_kbps, ceiling_frames), nlohmann::json::object())
       .at("primary_issue")
       .get<std::string>();
@@ -5832,7 +5848,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtItsByteCeilingIsAFindingOnlyWhereTheHostH
   config::video.max_bitrate = 200000;
   EXPECT_EQ(issue(1920, 1080, 120, 200000, 48), "none");
   EXPECT_EQ(issue(1920, 1080, 120, 200000, 192), "none");
-  const auto held = stream_stats::build_doctor_json(clean_pyrowave_stream(1920, 1080, 120, true, 200000, 204),
+  const auto held = judged_doctor(clean_pyrowave_stream(1920, 1080, 120, true, 200000, 204),
                                                     nlohmann::json::object());
   EXPECT_EQ(held.at("primary_issue"), "pyrowave_needs_more_than_allowed");
   // The host takes no more than max_bitrate by hand either, so Doctor names it and offers nothing to set.
@@ -5847,7 +5863,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtItsByteCeilingIsAFindingOnlyWhereTheHostH
   // A stream set by hand above the model's figure has what the model asks, whatever its share.
   EXPECT_EQ(issue(3840, 2160, 120, 350000, 240), "none");
   // More than a tenth below the cap it is starved, and Doctor raises it to the cap instead.
-  const auto starved = stream_stats::build_doctor_json(clean_pyrowave_stream(3840, 2160, 120, true, 250000, 204),
+  const auto starved = judged_doctor(clean_pyrowave_stream(3840, 2160, 120, true, 250000, 204),
                                                        nlohmann::json::object());
   EXPECT_EQ(starved.at("primary_issue"), "pyrowave_starved");
   EXPECT_EQ(starved.at("safe_recovery_action").at("payload_preview").at("target_bitrate_kbps"), 300000);
@@ -5855,7 +5871,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtItsByteCeilingIsAFindingOnlyWhereTheHostH
   auto lossy = clean_pyrowave_stream(3840, 2160, 120, true, 300000, 204);
   lossy.network_risk = true;
   lossy.latency_ms = 60.0;
-  EXPECT_EQ(stream_stats::build_doctor_json(lossy, nlohmann::json::object()).at("primary_issue"), "network_jitter");
+  EXPECT_EQ(judged_doctor(lossy, nlohmann::json::object()).at("primary_issue"), "network_jitter");
 }
 
 TEST(StreamStatsDoctorTests, PyroWaveLimitFindingNamesWhatHoldsTheStreamAndWhatAPlayerCanSet) {
@@ -5906,7 +5922,7 @@ TEST(StreamStatsDoctorTests, PyroWaveThatWantsMoreThanDoctorRaisesToGetsNoBitrat
     stats.adaptive_bitrate_enabled = variant.live_tuning;
     stats.adaptive_runtime_update_supported = variant.runtime_updates;
     stats.doctor_live_action_scope_available = variant.single_scope;
-    const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+    const auto doctor = judged_doctor(stats, nlohmann::json::object());
     ASSERT_EQ(doctor.at("primary_issue"), "pyrowave_needs_more_than_allowed");
     const auto &action = doctor.at("safe_recovery_action");
     EXPECT_EQ(action.at("id"), "none");
@@ -5944,7 +5960,7 @@ TEST(StreamStatsDoctorTests, PyroWaveHeldBelowItsModelButCutBelowItsLaunchBitrat
   ASSERT_EQ(status.at("raise_goal_kbps"), 300000);
   ASSERT_FALSE(status.at("starved").get<bool>());
   ASSERT_LT(launch_kbps, static_cast<int>(stream_bitrate::encoder_kbps_for_wire(300000, 10, 512)));
-  const auto doctor = stream_stats::build_doctor_json(cut, nlohmann::json::object());
+  const auto doctor = judged_doctor(cut, nlohmann::json::object());
   EXPECT_EQ(doctor.at("primary_issue"), "quality_reduced_live");
   EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Restore and verify");
   const auto &payload = doctor.at("safe_recovery_action").at("payload_preview");
@@ -5955,13 +5971,13 @@ TEST(StreamStatsDoctorTests, PyroWaveHeldBelowItsModelButCutBelowItsLaunchBitrat
   // Back at the bitrate it launched at there is nothing to restore, and the limit finding stands.
   auto restored = clean_pyrowave_stream(3840, 2160, 120, true, 290000, 204);
   ASSERT_EQ(restored.effective_launch_bitrate_kbps, launch_kbps);
-  EXPECT_EQ(stream_stats::build_doctor_json(restored, nlohmann::json::object()).at("primary_issue"),
+  EXPECT_EQ(judged_doctor(restored, nlohmann::json::object()).at("primary_issue"),
             "pyrowave_needs_more_than_allowed");
 
   // With Live Tuning on, its own recovery owns the climb and Doctor offers no restore, so the limit
   // finding stands there too.
   cut.adaptive_bitrate_enabled = true;
-  EXPECT_EQ(stream_stats::build_doctor_json(cut, nlohmann::json::object()).at("primary_issue"),
+  EXPECT_EQ(judged_doctor(cut, nlohmann::json::object()).at("primary_issue"),
             "pyrowave_needs_more_than_allowed");
 }
 
@@ -5977,7 +5993,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtItsFloorUnderPressureSuggestsHevcInsteadO
     stats.adaptive_bitrate_enabled = live_tuning;
     stats.adaptive_min_bitrate_kbps = 44560;
     stats.adaptive_floor_source = "pyrowave_advice";
-    const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+    const auto doctor = judged_doctor(stats, nlohmann::json::object());
     const auto &action = doctor.at("safe_recovery_action");
     EXPECT_EQ(doctor.at("primary_issue"), "network_jitter");
     EXPECT_EQ(action.at("id"), "none");
@@ -5997,7 +6013,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtItsFloorUnderPressureSuggestsHevcInsteadO
   above.latency_ms = 60.0;
   above.adaptive_min_bitrate_kbps = 44560;
   above.adaptive_floor_source = "pyrowave_advice";
-  EXPECT_EQ(stream_stats::build_doctor_json(above, nlohmann::json::object()).at("safe_recovery_action").at("id"),
+  EXPECT_EQ(judged_doctor(above, nlohmann::json::object()).at("safe_recovery_action").at("id"),
             "lower_bitrate");
 }
 
@@ -6007,7 +6023,7 @@ TEST(StreamStatsDoctorTests, PyroWaveCutBelowARequestThatMeetsTheAdviceClimbsBac
   // advice lands it on. Something cut the stream to 128790, and the network is clean again.
   auto stats = clean_pyrowave_stats(128790);
   stats.effective_launch_bitrate_kbps = 160988;
-  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto doctor = judged_doctor(stats, nlohmann::json::object());
   EXPECT_EQ(doctor.at("primary_issue"), "quality_reduced_live");
   const auto &payload = doctor.at("safe_recovery_action").at("payload_preview");
   EXPECT_EQ(payload.at("action_id"), "restore_quality");
@@ -6016,7 +6032,7 @@ TEST(StreamStatsDoctorTests, PyroWaveCutBelowARequestThatMeetsTheAdviceClimbsBac
 
   // A saved paired profile sized for H.264 does not cap the climb back: the handshake set it aside.
   stats.paired_target_bitrate_kbps = 20000;
-  const auto paired = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto paired = judged_doctor(stats, nlohmann::json::object());
   EXPECT_EQ(paired.at("primary_issue"), "quality_reduced_live");
   EXPECT_EQ(paired.at("safe_recovery_action").at("payload_preview").at("target_bitrate_kbps"), 160988);
   EXPECT_EQ(paired.at("safe_recovery_action").at("payload_preview").at("goal_source"), "launch_bitrate");
@@ -6025,13 +6041,13 @@ TEST(StreamStatsDoctorTests, PyroWaveCutBelowARequestThatMeetsTheAdviceClimbsBac
   // With Live Tuning on, its own recovery climbs back to the request, and Doctor does not ask the
   // player to set less than they already asked for.
   stats.adaptive_bitrate_enabled = true;
-  EXPECT_EQ(stream_stats::build_doctor_json(stats, nlohmann::json::object()).at("primary_issue"), "none");
+  EXPECT_EQ(judged_doctor(stats, nlohmann::json::object()).at("primary_issue"), "none");
 
   // A request more than a tenth below the advice still gets PyroWave's raise, which goes past the
   // request.
   auto short_request = clean_pyrowave_stats(60000);
   short_request.effective_launch_bitrate_kbps = 70000;
-  const auto raise = stream_stats::build_doctor_json(short_request, nlohmann::json::object());
+  const auto raise = judged_doctor(short_request, nlohmann::json::object());
   EXPECT_EQ(raise.at("primary_issue"), "pyrowave_starved");
   EXPECT_EQ(raise.at("safe_recovery_action").at("payload_preview").at("goal_source"), "pyrowave_advice");
   EXPECT_EQ(raise.at("safe_recovery_action").at("payload_preview").at("target_bitrate_kbps"), 100148);
@@ -6074,7 +6090,7 @@ TEST(StreamStatsDoctorTests, CleanReductionWithoutAPairedProfileRestoresTheLaunc
   stats.latency_ms = 3.8;
   stats.adaptive_runtime_update_supported = true;
 
-  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto doctor = judged_doctor(stats, nlohmann::json::object());
   const auto &action = doctor.at("safe_recovery_action");
   EXPECT_EQ(doctor.at("primary_issue"), "quality_reduced_live");
   EXPECT_EQ(action.at("id"), "restore_quality");
@@ -6082,7 +6098,7 @@ TEST(StreamStatsDoctorTests, CleanReductionWithoutAPairedProfileRestoresTheLaunc
   EXPECT_EQ(action.at("payload_preview").at("goal_source"), "launch_bitrate");
 
   stats.paired_target_bitrate_kbps = 12000;
-  const auto paired = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto paired = judged_doctor(stats, nlohmann::json::object());
   EXPECT_EQ(paired.at("safe_recovery_action").at("payload_preview").at("target_bitrate_kbps"), 12000);
   EXPECT_EQ(paired.at("safe_recovery_action").at("payload_preview").at("goal_source"), "launch_ceiling");
 }
@@ -6269,9 +6285,7 @@ TEST(DoctorActionTests, EveryRequestIdRemainsIdempotentForTheWholeStreamGenerati
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   constexpr std::uint64_t generation = 423;
   doctor_actions::session_started("client-owner", generation, "launch-423", 20000);
@@ -6349,9 +6363,7 @@ TEST(DoctorActionTests, AdaptiveToggleRestoresDoctorTargetBeforeChangingPolicy) 
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   constexpr std::uint64_t generation = 424;
   doctor_actions::session_started("client-owner", generation, "launch-424", 20000);
@@ -6973,26 +6985,30 @@ TEST(StreamStatsHotFieldTests, CleanControlPingsCannotEraseCurrentConfirmedMedia
   };
   ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
 
-  sample.client_monotonic_ms = 2'000;
-  sample.frames_expected = 1'100;
-  sample.frames_received = 1'080;
-  sample.frames_lost = 20;
-  const auto loss = stream_stats::ingest_client_media_counters(sample);
-  ASSERT_TRUE(loss.accepted);
-  ASSERT_TRUE(loss.observation_published);
-  ASSERT_DOUBLE_EQ(loss.media_loss_pct, 20.0);
-
   // Production pings arrive between Nova's one-second counter reports. They
   // carry no media-loss measurement, so their clean control-channel loss must
-  // not be interpreted as clean video delivery.
-  stream_stats::update_control_channel_stats(4.0, 0.0, 777);
-  stream_stats::update_control_channel_stats(4.0, 0.0, 777);
+  // not be interpreted as clean video delivery, in the newest reading or in
+  // the window's figure.
+  for (int report = 0; report < stream_stats::network_judge_t::k_min_media_samples; ++report) {
+    sample.client_monotonic_ms += 1'000;
+    sample.frames_expected += 100;
+    sample.frames_received += 80;
+    sample.frames_lost += 20;
+    const auto loss = stream_stats::ingest_client_media_counters(sample);
+    ASSERT_TRUE(loss.accepted);
+    ASSERT_TRUE(loss.observation_published);
+    ASSERT_DOUBLE_EQ(loss.media_loss_pct, 20.0);
+    stream_stats::update_control_channel_stats(4.0, 0.0, 777);
+    stream_stats::update_control_channel_stats(4.0, 0.0, 777);
+  }
 
   const auto stats = stream_stats::get_current();
   EXPECT_TRUE(stats.network_risk);
   EXPECT_TRUE(stats.packet_loss_available);
   EXPECT_DOUBLE_EQ(stats.packet_loss, 20.0);
   EXPECT_EQ(stats.packet_loss_source, "media_transport");
+  EXPECT_DOUBLE_EQ(stats.network_verdict.loss_pct, 20.0);
+  EXPECT_TRUE(stats.network_verdict.loss_elevated);
 
   const auto doctor = stream_stats::build_doctor_json(
     stats,
@@ -7547,6 +7563,128 @@ TEST(StreamStatsHotFieldTests, ClientMediaCountersAreJudgedOverTheWindow) {
   EXPECT_EQ(json.at("network_verdict").at("frames_lost"), 18);
   EXPECT_EQ(json.at("network_verdict").at("loss_state"), "elevated");
   EXPECT_EQ(json.at("network_verdict").at("loss_basis"), "video_frames_lost_after_fec");
+}
+
+namespace {
+  /// Each headline Doctor gave, and how many times it changed.
+  struct headline_run_t {
+    std::vector<std::string> headlines;
+
+    int changes() const {
+      int count = 0;
+      for (std::size_t i = 1; i < headlines.size(); ++i) {
+        count += headlines[i] != headlines[i - 1] ? 1 : 0;
+      }
+      return count;
+    }
+
+    std::string text() const {
+      std::string joined;
+      for (const auto &headline : headlines) {
+        joined += (joined.empty() ? "" : " ") + headline;
+      }
+      return joined;
+    }
+  };
+
+  /// What Doctor says of the live stream now, with the capture path a real stream would have published.
+  std::string live_headline() {
+    auto live = stream_stats::get_current();
+    live.capture_transport = platf::frame_transport_e::dmabuf;
+    live.capture_residency = platf::frame_residency_e::gpu;
+    live.encode_target_residency = platf::frame_residency_e::gpu;
+    return stream_stats::build_doctor_json(live, nlohmann::json::object()).at("primary_issue").get<std::string>();
+  }
+}  // namespace
+
+TEST(StreamStatsDoctorTests, RecordedHevcRunKeepsOneHeadline) {
+  // The HEVC run's reports, a second at a time, with ten control pings between reports as Nova and
+  // ENet send them, the control channel's own loss at the 7.75% the run read. Graded a report at a
+  // time, Doctor went from "Control-channel retries" to "Sustained network pressure" and back twice
+  // every eight seconds. Graded over the window it names the pressure once the window holds enough of
+  // it and keeps it.
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::update_controller_input_state(false, 0, "", "", "unknown", "", false, "");
+  stream_stats::update_steam_input_state("unknown", 0, 0, 0, "");
+  stream_stats::start_session_timing("owner-hevc-run", 71, "app-session-hevc-run");
+  stream_stats::update_stream_active(true, "RetroidPocket6", "203.0.113.80");
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::stop_session_timing("owner-hevc-run", 71);
+    stream_stats::update_stream_active(false);
+  });
+  stream_stats::update_video_stats(120.0, 268988, 2.0, "hevc", 3840, 2160);
+  stream_stats::update_session_targets(
+    120.0, 120.0, 120.0, "client_requested", "deterministic_preset_v1",
+    "deterministic", "not_applicable", "Capability-validated launch profile.",
+    "", 1, 268988, 268988
+  );
+
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-hevc-run",
+    .app_session_id = "app-session-hevc-run",
+    .session_generation = 71,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 0,
+    .frames_received = 0,
+    .frames_lost = 0
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+  headline_run_t run;
+  for (int round = 0; round < 3; ++round) {
+    for (const auto &report : k_recorded_hevc_reports) {
+      sample.client_monotonic_ms += 1'000;
+      sample.frames_expected += report.expected;
+      sample.frames_lost += report.lost;
+      sample.frames_received = sample.frames_expected - sample.frames_lost;
+      ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).observation_published);
+      for (const auto rtt_ms : k_recorded_hevc_rtt_ms) {
+        stream_stats::update_control_channel_stats(rtt_ms, 7.75, 777);
+      }
+      run.headlines.push_back(live_headline());
+    }
+  }
+
+  RecordProperty("headlines", run.text());
+  EXPECT_LE(run.changes(), 1) << run.text();
+  EXPECT_EQ(run.headlines.back(), "network_jitter") << run.text();
+}
+
+TEST(StreamStatsDoctorTests, RecordedPyroWaveRttSpikesKeepOneHeadline) {
+  // The PyroWave run's RTT, ten control pings a second, on a 1080p60 PyroWave stream well below its
+  // advice. Graded a reading at a time, its Wi-Fi spikes turned "set more bitrate on a clean network"
+  // into "a network warning needs more evidence" and back. Their median over the window stays a LAN's.
+  PyroWaveHostGuard host;
+  stream_stats::update_stream_active(false);
+  config::video.adaptive_bitrate.enabled = false;
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  const auto cleanup = util::fail_guard([] {
+    adaptive_bitrate::set_enabled(false);
+    stream_stats::update_stream_active(false);
+  });
+  stream_stats::update_controller_input_state(false, 0, "", "", "unknown", "", false, "");
+  stream_stats::update_steam_input_state("unknown", 0, 0, 0, "");
+  stream_stats::update_stream_active(true, "RetroidPocket6", "203.0.113.81");
+  stream_stats::update_video_stats(60.0, 20000, 1.0, "pyrowave", 1920, 1080);
+  stream_stats::update_session_targets(
+    60.0, 60.0, 60.0, "client_requested", "deterministic_preset_v1",
+    "deterministic", "not_applicable", "Capability-validated launch profile.",
+    "", 1, 0, 20000
+  );
+
+  headline_run_t run;
+  for (int round = 0; round < 3; ++round) {
+    for (const auto rtt_ms : k_recorded_pyrowave_rtt_ms) {
+      for (int ping = 0; ping < 10; ++ping) {
+        stream_stats::update_control_channel_stats(rtt_ms, 0.0, 777);
+      }
+      run.headlines.push_back(live_headline());
+    }
+  }
+
+  RecordProperty("headlines", run.text());
+  EXPECT_EQ(run.changes(), 0) << run.text();
+  EXPECT_EQ(run.headlines.back(), "pyrowave_starved") << run.text();
 }
 
 TEST(StreamStatsHotFieldTests, PacketLossPercentClampsDegenerateInputs) {

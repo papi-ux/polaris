@@ -2569,7 +2569,8 @@ namespace nvhttp {
         (target_fps > 0.0 && stats.capture_source_fps > 0.0 &&
          stats.capture_source_fps < target_fps * 0.50 && stats.duplicate_frame_ratio >= 0.10);
 
-      const bool network_risk = stats.network_risk;
+      // The judged verdict Doctor grades with, so the session status never contradicts it.
+      const bool network_risk = stream_stats::judged_network(stats).risk;
       const bool pacing_risk =
         stats.dropped_frame_ratio >= 0.04 ||
         (!static_or_duplicate_content &&

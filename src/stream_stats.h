@@ -1268,6 +1268,34 @@ namespace stream_stats {
   network_verdict_t current_network_verdict();
 
   /**
+   * @brief A stream's network verdict as everything that grades the stream reads it.
+   *
+   * Doctor's headline and evidence, the guarded actions it offers and the session status's
+   * network_risk all read this, so they cannot disagree. Neither figure counts while the newest
+   * network reading is more than two seconds old, and loss does not count while the newest client
+   * media report is older than k_media_report_max_age_ms: a window of reports that stopped arriving
+   * says what the stream was, not what it is.
+   */
+  struct judged_network_t {
+    static constexpr std::int64_t k_media_report_max_age_ms = 5000;
+
+    bool loss_judged = false;
+    bool rtt_judged = false;
+    /// Loss pressure: the verdict's loss is elevated.
+    bool loss_pressure = false;
+    /// RTT pressure: the verdict's RTT is elevated.
+    bool rtt_pressure = false;
+    /// The window's median RTT is at or above network_judge_t::k_rtt_fail_ms.
+    bool rtt_fail = false;
+    /// Either pressure: the network is a finding.
+    bool risk = false;
+    /// Pressure that fails the stream: confirmed loss, or RTT at the fail line.
+    bool fail = false;
+  };
+
+  judged_network_t judged_network(const stats_t &stats);
+
+  /**
    * @brief What a verdict's loss is called in a state field: collecting, clean, light or elevated.
    *
    * Light is loss at or above k_loss_exit_pct that is not pressure: measured, and below the figure

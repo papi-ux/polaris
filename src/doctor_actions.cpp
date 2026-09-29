@@ -448,6 +448,7 @@ namespace doctor_actions {
         {"media_loss_sample_revision", stats.media_loss_sample_revision},
         {"media_loss_last_received_age_ms", stats.media_loss_last_received_age_ms},
         {"latency_ms", stats.latency_ms},
+        {"network_verdict", stream_stats::network_verdict_json(stats.network_verdict)},
         {"bitrate_kbps", current_live_bitrate(stats)},
         {"paired_target_bitrate_kbps", stats.paired_target_bitrate_kbps},
         {"effective_launch_bitrate_kbps", stats.effective_launch_bitrate_kbps},
@@ -455,18 +456,13 @@ namespace doctor_actions {
       };
     }
 
+    // The judged verdict Doctor's headline reads, so a restore it offers is one this accepts.
     bool network_stable_for_quality_retry(const stream_stats::stats_t &stats) {
-      const bool network_evidence_available =
-        stats.packet_loss_available || stats.control_channel_samples > 0;
-      const bool host_observation_fresh = stats.network_sample_revision > 0 &&
-        stats.network_last_received_age_ms >= 0 &&
-        stats.network_last_received_age_ms <=
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-            initial_network_evidence_max_age
-          ).count();
-      return stats.streaming && host_observation_fresh &&
-        network_evidence_available && !stats.network_risk &&
-        stats.packet_loss <= 2.0 && stats.latency_ms < 45.0 &&
+      const auto &verdict = stats.network_verdict;
+      const auto network = stream_stats::judged_network(stats);
+      return stats.streaming && (network.loss_judged || network.rtt_judged) && !network.risk &&
+        (!network.loss_judged || verdict.loss_pct < stream_stats::network_judge_t::k_loss_enter_pct) &&
+        (!network.rtt_judged || verdict.rtt_ms < stream_stats::network_judge_t::k_rtt_fail_ms) &&
         !adaptive_bitrate::doctor_policy_blocks_quality_restore();
     }
 
@@ -727,24 +723,8 @@ namespace doctor_actions {
   }  // namespace
 
   bool network_pressure_confirmed(const stream_stats::stats_t &stats) {
-    const bool host_observation_fresh = stats.network_sample_revision > 0 &&
-      stats.network_last_received_age_ms >= 0 &&
-      stats.network_last_received_age_ms <=
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-          initial_network_evidence_max_age
-        ).count();
-    const bool media_loss_fresh = stats.media_loss_sample_revision > 0 &&
-      stats.media_loss_last_received_age_ms >= 0 &&
-      stats.media_loss_last_received_age_ms <=
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-          initial_network_evidence_max_age
-        ).count();
-    const bool confirmed_media_pressure = media_loss_fresh &&
-      stats.packet_loss_available && stats.packet_loss > 2.0;
-    const bool confirmed_latency_pressure = host_observation_fresh &&
-      stats.latency_ms >= 45.0;
-    return stats.streaming && stats.network_risk &&
-      (confirmed_media_pressure || confirmed_latency_pressure);
+    // The judged verdict Doctor's headline reads, so the step it offers is the step this takes.
+    return stats.streaming && stream_stats::judged_network(stats).fail;
   }
 
   bool paired_route_allowed(std::string_view action_id,
@@ -1558,14 +1538,8 @@ namespace doctor_actions {
       run.applied_bitrate_kbps = target_bitrate_kbps;
       run.goal_bitrate_kbps = target_bitrate_kbps;
       run.verification_step = 1;
-      run.requires_media_sample =
-        mutation_stats.media_loss_sample_revision > 0 &&
-        mutation_stats.media_loss_last_received_age_ms >= 0 &&
-        mutation_stats.media_loss_last_received_age_ms <=
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-            initial_network_evidence_max_age
-          ).count() &&
-        mutation_stats.packet_loss_available && mutation_stats.packet_loss > 2.0;
+      // A step taken for loss is verified only by a client media report from after it.
+      run.requires_media_sample = stream_stats::judged_network(mutation_stats).loss_pressure;
       const auto applied_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
         adaptive_state.revision,
         target_bitrate_kbps
