@@ -75,18 +75,21 @@ namespace pyrowave_advice {
     }
 
     /// Upstream's own function, asked only what it answers without asserting. nullopt otherwise.
-    std::optional<double> model_mbps(int width, int height, int fps, bool chroma444, int height_factor) {
+    std::optional<double> model_mbps(int width, int height, int fps, bool chroma444, int height_factor, int target_db) {
 #ifdef POLARIS_BUILD_PYROWAVE
       const auto pixels = static_cast<std::int64_t>(width) * height;
       if (pixels < k_min_pixels || pixels > k_max_pixels || height_factor < 0 ||
-          height_factor >= k_height_factors || fps <= 0) {
+          height_factor >= k_height_factors || fps <= 0 || target_db < PYROWAVE_REGRESSION_MIN_PSNR_HVS_M_H ||
+          target_db > PYROWAVE_REGRESSION_MAX_PSNR_HVS_M_H) {
         return std::nullopt;
       }
       static_assert(k_target_db >= PYROWAVE_REGRESSION_MIN_PSNR_HVS_M_H &&
                     k_target_db <= PYROWAVE_REGRESSION_MAX_PSNR_HVS_M_H);
+      static_assert(k_far_target_db >= PYROWAVE_REGRESSION_MIN_PSNR_HVS_M_H &&
+                    k_far_target_db <= PYROWAVE_REGRESSION_MAX_PSNR_HVS_M_H);
       static_assert(k_min_pixels == PYROWAVE_REGRESSION_MIN_PIXELS && k_max_pixels == PYROWAVE_REGRESSION_MAX_PIXELS);
       const double mbps = pyrowave_psnr_hvs_m_h_estimate_mbits(
-        k_target_db, width, height, static_cast<enum pyrowave_height_factor>(height_factor),
+        target_db, width, height, static_cast<enum pyrowave_height_factor>(height_factor),
         chroma444 ? 1 : 0, static_cast<double>(fps));
       if (!(mbps > 0.0) || std::isinf(mbps)) {
         return std::nullopt;
@@ -98,6 +101,7 @@ namespace pyrowave_advice {
       (void) fps;
       (void) chroma444;
       (void) height_factor;
+      (void) target_db;
       return std::nullopt;
 #endif
     }
@@ -129,14 +133,14 @@ namespace pyrowave_advice {
 #endif
   }
 
-  estimate_t estimate(int width, int height, int fps, bool chroma444, int height_factor) {
+  estimate_t estimate(int width, int height, int fps, bool chroma444, int height_factor, int target_db) {
     if (width <= 0 || height <= 0 || fps <= 0) {
       return {};
     }
     const double pixels_per_second = static_cast<double>(width) * static_cast<double>(height) * fps;
     const auto pixels = static_cast<std::int64_t>(width) * height;
 
-    if (const auto mbps = model_mbps(width, height, fps, chroma444, height_factor)) {
+    if (const auto mbps = model_mbps(width, height, fps, chroma444, height_factor, target_db)) {
       const bool sixteen_nine = static_cast<std::int64_t>(width) * 9 == static_cast<std::int64_t>(height) * 16;
       return {*mbps, kbps_of(*mbps * 1'000'000.0), sixteen_nine ? rule_e::model : rule_e::model_not_16_9};
     }
@@ -148,7 +152,7 @@ namespace pyrowave_advice {
       const bool below = pixels < k_min_pixels;
       const int edge_width = below ? k_smallest_width : k_largest_width;
       const int edge_height = below ? k_smallest_height : k_largest_height;
-      if (const auto edge_mbps = model_mbps(edge_width, edge_height, fps, chroma444, height_factor)) {
+      if (const auto edge_mbps = model_mbps(edge_width, edge_height, fps, chroma444, height_factor, target_db)) {
         const double bits_per_pixel =
           *edge_mbps * 1'000'000.0 / (static_cast<double>(edge_width) * edge_height * fps);
         const double bits_per_second = bits_per_pixel * pixels_per_second;
@@ -171,8 +175,9 @@ namespace pyrowave_advice {
     advice.fps = fps;
     advice.chroma444 = chroma444;
 
-    const auto far = estimate(width, height, fps, chroma444, k_height_factor_far);
-    const auto near = estimate(width, height, fps, chroma444, k_height_factor_near);
+    // A device's own screen at the calibrated handheld target, a television at the author's default.
+    const auto far = estimate(width, height, fps, chroma444, k_height_factor_far, k_far_target_db);
+    const auto near = estimate(width, height, fps, chroma444, k_height_factor_near, k_target_db);
     if (far.kbps <= 0 || near.kbps <= 0) {
       return advice;
     }
@@ -201,11 +206,27 @@ namespace pyrowave_advice {
     return advice;
   }
 
+  int request_for_encoder(int encoder_kbps, const link_t &link) {
+    return clamp_to_int(stream_bitrate::wire_kbps_for_encoder(encoder_kbps, link.fec_percentage, link.audio_kbps));
+  }
+
+  bool starved(const advice_t &advice, int request_kbps) {
+    return advice.valid && request_kbps > 0 && advice.raise_goal_kbps > 0 &&
+           static_cast<double>(request_kbps) < k_starved_below_share * static_cast<double>(advice.raise_goal_kbps);
+  }
+
+  bool needs_more_than_allowed(const advice_t &advice, int request_kbps, std::optional<double> ceiling_frame_share) {
+    return advice.valid && request_kbps > 0 && advice.raise_goal_kbps < advice.advice_far_kbps &&
+           !starved(advice, request_kbps) && request_kbps < advice.advice_far_kbps && ceiling_frame_share &&
+           *ceiling_frame_share > k_ceiling_bound_share;
+  }
+
   nlohmann::json advice_json(const advice_t &advice) {
     return {
       {"version", 1},
       {"model", k_model},
       {"target_db", k_target_db},
+      {"far_target_db", k_far_target_db},
       {"width", advice.width},
       {"height", advice.height},
       {"fps", advice.fps},

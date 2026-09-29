@@ -411,30 +411,49 @@ means the largest frames went out without their error correction (see [Limits](#
 From Polaris 1.4.14 the host carries PyroWave's own bitrate model. The codec's author ran four
 lossless game clips through it at every 16:9 size from 1280x720 to 3840x2160, scored the results
 with PSNR-HVS-M-H, an objective metric weighted for how far away the picture is watched, and fitted
-the bitrate each quality needed. Polaris evaluates that fit at 35 dB, the level the author calls good
-quality, for two distances: a device's own screen, 2.875 picture heights away (the far figure, and
-the lower one), and a television or monitor, 2 picture heights away (the near figure). The host
-computes these figures itself. Nova's matching estimator is in review, and a fixture in Polaris's
-tests pins the host's figures.
+the bitrate each quality needed. Polaris reads that fit at two distances, each with its own quality:
 
-Every figure below is what to set in the client, at the host's default 10% FEC with stereo audio in
-high quality, rounded up to a whole Mbps. More FEC or surround audio asks a little more for the same
-picture.
+- **A device's own screen**, 2.875 picture heights away, gets the far figure, the lower one, at
+  31 dB. That target is calibrated by eye: on a Retroid Pocket 6, Control at 1920x1080, 120 fps and
+  4:4:4 looked soft at 50 Mbps and right at 200, where the author's 35 dB asks about 400 and 31 dB
+  asks 215.
+- **A television or monitor**, 2 picture heights away, gets the near figure at 35 dB, the level the
+  author calls good quality, until it is checked on a big screen.
 
-| Stream | Own screen (far) | Television or monitor (near) |
+The host computes these figures itself, and a fixture in Polaris's tests pins them at both
+targets. Nova's estimator ports the same model. Mirroring the own screen target there is in review,
+and until it lands Nova still reads both figures at 35 dB, so for 1920x1080 at 120 fps in 4:4:4 it
+quotes about 400 Mbps where the host quotes 215.
+
+Every figure below is the model's, as the request a client sets, at the host's default 10% FEC with
+stereo audio in high quality, rounded up to a whole Mbps. More FEC or surround audio asks a little
+more for the same picture. These are the model's readouts, not what Polaris recommends: Doctor
+raises no higher than 300 Mbps, and nothing Polaris recommends on its own goes past that. A client
+can set up to 500 Mbps by hand, so the television figures past 500 Mbps are beyond every Polaris
+endpoint.
+
+| Stream | Own screen (far, 31 dB) | Television or monitor (near, 35 dB) |
 |---|---|---|
-| 1280x720 at 60 fps, 4:4:4 | 154 Mbps | 185 Mbps |
-| 1920x1080 at 60 fps, 4:2:0 | 172 Mbps | 246 Mbps |
-| 1920x1080 at 60 fps, 4:4:4 | 201 Mbps | 298 Mbps |
-| 2560x1440 at 60 fps, 4:4:4 | 206 Mbps | 381 Mbps |
-| 3840x2160 at 60 fps, 4:4:4 | 262 Mbps | 350 Mbps |
-| 1920x1080 at 120 fps, 4:4:4 | 400 Mbps | 594 Mbps |
+| 1280x720 at 60 fps, 4:4:4 | 106 Mbps | 185 Mbps |
+| 1920x1080 at 60 fps, 4:2:0 | 101 Mbps | 246 Mbps |
+| 1920x1080 at 60 fps, 4:4:4 | 109 Mbps | 298 Mbps |
+| 1920x1080 at 120 fps, 4:4:4 | 215 Mbps | 594 Mbps |
+| 2560x1440 at 60 fps, 4:4:4 | 126 Mbps | 381 Mbps |
+| 2560x1440 at 120 fps, 4:4:4 | 251 Mbps | 761 Mbps |
+| 3840x2160 at 60 fps, 4:4:4 | 165 Mbps | 350 Mbps |
+| 3840x2160 at 120 fps, 4:4:4 | 328 Mbps | 699 Mbps |
 
 The model is an objective metric on four game clips of about ten frames each, scored on luma only,
-sampled at 16:9 and measured on SDR. It is not a measurement on any device. One check by eye on a
-Retroid Pocket 6 found Control at 1920x1080 and 120 fps soft at 50 Mbps and right at 200, where the
-far figure asks about 400. A picture smaller than 1280x720 or larger than 3840x2160 takes the bits
-per pixel of the nearest of those two sizes.
+sampled at 16:9 and measured on SDR. The own screen target rests on one check by eye, on one device
+and one game, and the television target on none. A picture smaller than 1280x720 or larger than
+3840x2160 takes the bits per pixel of the nearest of those two sizes.
+
+At 31 dB the own screen figure in 4:4:4 does not rise steadily with picture size. At 60 fps it
+climbs from 106 Mbps at 1280x720 to about 114 at 1280x800 and 113 at 1600x900, falls to 109 at
+1920x1080, then rises again, so a 1280x800 handheld streaming 4:4:4 is advised a little more than
+the Retroid Pocket 6 at 1920x1080. That is the shape of the author's fit one dB above its lowest
+quality, not a Polaris rounding. The 4:2:0 figures, and every figure at 35 dB, rise with size, so
+Nova for Linux, which streams 4:2:0, is unaffected.
 
 **Where clients read it.** While a PyroWave stream runs, `GET /polaris/v1/session/status` carries
 `pyrowave_bitrate`, and `GET /polaris/v1/pyrowave/advice?width=&height=&fps=&chroma=420|444`
@@ -446,23 +465,45 @@ in high quality when it does not, which is also what session status assumes unti
 handshake is recorded. Session status also carries `bitrate_units` for every stream, PyroWave or
 not ([Live Tuning](live-tuning.md#bitrate-units)).
 
-**Starved.** The host keeps the share of the last 240 frames, about four seconds at 60 fps, that
-left at 99% or more of PyroWave's byte budget. A stream is starved when the encoder runs below where
-Doctor's raise would land it, or when more than 80% of those frames hit the budget.
+**Starved.** A stream is starved when what it runs at, as a request, is more than a tenth below the
+figure Doctor would raise it to. The Retroid Pocket 6 check at 200 Mbps is 93% of its 215, and
+healthy. Session status carries that rate as `request_kbps`, beside the encoder's own
+`encoder_kbps`, and the console and Doctor's evidence quote it the same way. The host also keeps the
+share of the last 240 frames, about four seconds at 60 fps, that left at 99% or more of PyroWave's
+byte budget, and reports it. That share never makes a stream starved.
 
 **Doctor.** A starved stream on a clean network, packet loss at most 2% and latency under 45 ms, the
 limits Doctor's quality restore verifies with, gets a Doctor finding. It ranks below every network,
-encoder and capture failure. Doctor offers to raise the bitrate to the far figure, never above
-300 Mbps or `max_bitrate`, in steps of at most a quarter, each verified for 8 seconds, with Undo.
-That is the one way Polaris raises a stream above the bitrate the player asked for. While Live
-Tuning is on, Doctor says what to set instead of acting. A stream cut below a request that already
-meets the far figure climbs back to that request, by Doctor's ordinary quality restore or by Live
-Tuning's own recovery, and Doctor never asks for less than the player set.
+encoder and capture failure. Doctor quotes one figure, as the request a player sets: the far
+figure, or 300 Mbps or `max_bitrate` when that is lower, and it says which held it. It offers to
+raise the bitrate to that figure in steps of at most a quarter, each verified for 8 seconds, with
+Undo. That is the one way Polaris raises a stream above the bitrate the player asked for. While Live
+Tuning is on, Doctor says what to set instead of acting: the same figure at the encoder, as the live
+bitrate, because a live bitrate applies at the encoder with no FEC or audio taken off. For 1920x1080
+at 120 fps in 4:4:4 that is about 193 Mbps live for the request of 215. A stream cut below a
+request that already meets the far figure climbs back to that request, by Doctor's ordinary quality
+restore or by Live Tuning's own recovery, and Doctor never asks for less than the player set.
+
+**More than Doctor raises to.** Where 300 Mbps or `max_bitrate` holds Doctor's figure below the far
+figure, a stream within a tenth of that limit and still below the far figure, with more than 80% of
+its last 240 frames at the byte budget, gets a finding of its own,
+`pyrowave_needs_more_than_allowed`, under the same clean network rule and ranked below a starved
+stream. Doctor names the model's figure and the limit and suggests a lower resolution or frame rate,
+or HEVC. It changes no bitrate there. The far figure is past the limit, so no raise Doctor offers
+reaches it, and a cut would only soften the picture further. Where only the 300 Mbps cap holds the
+stream, Doctor adds that a player can set more by hand, up to 500 Mbps or `max_bitrate` if that is
+lower. 3840x2160 at 120 fps in 4:4:4 on a device's own screen is one such stream, where the model
+asks 328 Mbps and Doctor stops at 300. A stream set by hand at the far figure or above has
+what the model asks, and a stream whose goal is the far figure itself gets no finding however full
+its budget: that figure is calibrated to where the Retroid Pocket 6 looked right, and a full budget
+says only that the codec would use more bits. A stream Doctor's quality restore would bring back to
+the bitrate it launched at gets that restore instead.
 
 **Live Tuning.** Live Tuning raises a stream above the player's request only to lift one below
 `adaptive_bitrate_min` (2 Mbps by default) to that floor. On a PyroWave stream
-it cuts no lower than half the far figure at the encoder, about 77 Mbps for 1920x1080 at 60 fps in
-4:2:0, or no lower than the request when that is lower still. At that floor it stops, and Doctor
+it cuts no lower than half the far figure at the encoder, about 45 Mbps for 1920x1080 at 60 fps in
+4:2:0, which Doctor quotes as a request of 51 Mbps, or no lower than the request when that is lower
+still. At that floor it stops, and Doctor
 suggests HEVC or a lower mode instead of another cut. It does not cut PyroWave for a slow encode,
 because the encode takes as long at any bitrate. A live bitrate set by hand turns Live Tuning off
 for that stream only.
@@ -470,7 +511,10 @@ for that stream only.
 **Caps.** A launch decides its bitrate before it knows the codec, so the Stability preset's 15 Mbps
 cap, a device profile's rate and a saved paired profile (Keep in Step) are sized for H.264. A
 PyroWave stream keeps its client's own request over all of them. Only `max_bitrate` caps it, and
-the host log and session status name any cap that applied or was set aside.
+the host log and session status name any cap that applied or was set aside. A client can set up to
+500 Mbps by hand, above the 300 Mbps Doctor raises to, so the own screen figure for 3840x2160 at
+120 fps is within reach and the television figures past 500 Mbps are not. That high, a frame can
+outgrow its error correction ([Frame budget and FEC](#frame-budget-and-fec)).
 
 ## Limits
 
@@ -493,8 +537,9 @@ the host log and session status name any cap that applied or was set aside.
   its GPU can run the encoder and the session is not a Space. Moonlight and stable Nova ignore it and
   keep using H.264, HEVC or AV1.
 - **It costs bandwidth.** It is intra only, so every frame is a key frame. From Polaris 1.4.14 the
-  host advises the codec author's own figure, about 154 to 594 Mbps across the modes in
-  [How Polaris advises and tunes PyroWave](#how-polaris-advises-and-tunes-pyrowave). Nova 1.4.13
+  host quotes the codec author's own model, which asks about 101 to 761 Mbps across the modes in
+  [How Polaris advises and tunes PyroWave](#how-polaris-advises-and-tunes-pyrowave), and recommends
+  no more than 300 Mbps on its own. Nova 1.4.13
   advises about 91 to 364 Mbps from a flat figure, and its bitrate slider stops at 300 Mbps
   ([Bitrate advice](#bitrate-advice)). Valve quotes 100 to 500 Mbit/s and at least gigabit ethernet
   for the same codec in Steam Remote Play. Steam Remote Play's PyroWave and Polaris's are separate streams and cannot connect to each
@@ -564,9 +609,12 @@ bitrate budget; it must not resend the previous codec sequence unchanged.
 Each frame's budget is the bitrate divided by the frame rate, at least 4096 bytes, with no upper
 limit. There is no PyroWave frame size cap and no payload size minimum. A frame that needs more FEC
 blocks than the transport allows is sent without FEC parity, and the host logs
-`Skipping FEC for oversized encoded frame(s)`. The encoder accepts bitrate changes live, without
-restarting the stream. A frame that leaves at 99% of its budget or more counts toward
-`ceiling_frame_share` in session status. The encode happens where the frame is handed to the codec,
+`Skipping FEC for oversized encoded frame(s)`. At 500 Mbps and 60 fps a frame is about 1.04 MB,
+inside the four-block envelope of about 1.30 MB at 10% FEC and 1392-byte packets. At 45 fps or
+fewer, or with 1024-byte packets, a frame that fills its budget outgrows it and goes out without FEC
+parity. The encoder accepts bitrate changes live, without restarting the stream. A frame that leaves
+at 99% of its budget or more counts toward `ceiling_frame_share` in session status. The encode
+happens where the frame is handed to the codec,
 and from Polaris 1.4.14 that time counts in `encode_time_ms`. Live Tuning does not cut the bitrate
 for it, since a lower bitrate does not shorten it.
 

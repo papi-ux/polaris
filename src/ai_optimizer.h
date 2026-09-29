@@ -213,7 +213,8 @@ namespace ai_optimizer {
    * @brief The most a remembered or suggested bitrate may be, for a codec.
    *
    * 100 Mbps for every codec but PyroWave, which needs several times that for the same picture and
-   * gets the 300 Mbps the paired endpoints take. Nothing here feeds a launch today; this keeps a
+   * gets pyrowave_advice::k_cap_kbps, 300 Mbps, the most the host recommends on its own. A player may
+   * set more by hand, but a suggestion stops there. Nothing here feeds a launch today; this keeps a
    * PyroWave record from being cut to an H.264 figure if a later change reads it.
    */
   int bitrate_ceiling_kbps(std::string_view codec);

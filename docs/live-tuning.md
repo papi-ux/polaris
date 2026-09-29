@@ -43,10 +43,15 @@ off, the stream stays at the request, but Doctor works from the floor rather tha
 the rate the encoder runs at.
 
 A live bitrate from a paired client, such as Nova's Deck HUD, applies as asked up to
-300000 kbps, the most the endpoint takes, with `adaptive_bitrate_min` as its floor.
+500000 kbps, the most Polaris's own endpoints take from a client, with `adaptive_bitrate_min` as
+its floor. Capabilities announce that limit as `manual_bitrate_max_kbps`, and a host without it
+takes 300000. The RTSP handshake a Moonlight client uses is not one of those endpoints, and
+`max_bitrate` alone bounds it.
 `max_bitrate`, when set, caps it at the encoder, the rate that setting's description
 names. A launch applies `max_bitrate` to the client's request before FEC and audio come
-off, so a launch at the cap encodes a little below a live change at the cap. The reply
+off, so a launch at the cap encodes a little below a live change at the cap. The same holds
+at the 500000 kbps limit: a launch there runs the encoder at about 449000 kbps at the default
+10% FEC with stereo audio, and a live change there at 500000. The reply
 reports the target the host set after the cap and floor, not an encoder
 acknowledgement; the applied bitrate still comes from the encoder.
 

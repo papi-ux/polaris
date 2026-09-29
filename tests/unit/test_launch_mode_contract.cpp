@@ -322,6 +322,34 @@ TEST(SessionEncoderContract, ExactLaunchRequiresMatchingEncoderAssertion) {
   EXPECT_EQ(nvhttp::make_launch_session(true, false, unknown, cert.get()), nullptr);
 }
 
+TEST(SessionEncoderContract, ResolvedLaunchTakesAManualBitrateUpTo500Mbps) {
+  struct max_bitrate_guard_t {
+    int previous = config::video.max_bitrate;
+
+    ~max_bitrate_guard_t() {
+      config::video.max_bitrate = previous;
+    }
+  } guard;
+  config::video.max_bitrate = 0;
+  auto cert = launch_client_cert();
+
+  auto most = resolved_launch_args();
+  most.erase("bitrateKbps");
+  most.emplace("bitrateKbps", "500000");
+  const auto session = nvhttp::make_launch_session(true, false, most, cert.get());
+  ASSERT_NE(session, nullptr);
+  ASSERT_TRUE(session->explicit_target_bitrate_kbps);
+  EXPECT_EQ(*session->explicit_target_bitrate_kbps, 500000);
+
+  for (const char *refused : {"500001", "999"}) {
+    SCOPED_TRACE(refused);
+    auto args = resolved_launch_args();
+    args.erase("bitrateKbps");
+    args.emplace("bitrateKbps", refused);
+    EXPECT_EQ(nvhttp::make_launch_session(true, false, args, cert.get()), nullptr);
+  }
+}
+
 TEST(SessionEncoderContract, LegacyResolvedLaunchWithoutEncoderEnvelopeStillParses) {
   auto cert = launch_client_cert();
   const auto session = nvhttp::make_launch_session(

@@ -7,6 +7,48 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- A client can set up to 500 Mbps by hand. The endpoints a paired client sets its own bitrate
+  through, its client settings' `target_bitrate_kbps`, a live bitrate change, a resolved launch's
+  `bitrateKbps`, the launch profile route and a Space's resolver, stopped at 300000 kbps, below
+  PyroWave's own advice for 3840x2160 at 120 fps on a device's own screen. They now take 1000 to
+  500000 kbps. A Space still streams at its encoder's 8 Mbps and says so when it normalizes a
+  request, and a Doctor trial on a stream above 300 Mbps is no longer refused. Capabilities announce
+  the limit as `manual_bitrate_max_kbps`, so a client offers more than 300 Mbps only to a host that
+  takes it. The RTSP handshake a Moonlight client uses never had this limit and still has none of
+  its own: `max_bitrate` alone bounds it. Doctor's PyroWave raise, and every bitrate the host
+  recommends on its own, still stop at 300 Mbps.
+
+- NVENC's VBV buffer no longer overflows at the new bitrates. With `nvenc_vbv_increase` at 258% or
+  more, a 500 Mbps stream at 60 fps overflowed the buffer size FFmpeg takes before the increase was
+  divided down, and the standalone NVENC encoder wrapped its own at 30 fps. Both now grow the buffer
+  in 64 bits and hold it to what the encoder's field takes. The default increase, 0, never hit it.
+
+- PyroWave's advice for a device's own screen is calibrated to a check by eye. On a Retroid Pocket 6,
+  200 Mbps was right for Control at 1920x1080, 120 fps and 4:4:4, where the author's 35 dB target
+  asked about 400. The own screen figure now aims for 31 dB, which asks about 215 there, and the
+  television or monitor figure keeps 35 dB until someone checks it on a big screen. Session status
+  and `GET /polaris/v1/pyrowave/advice` carry the new target as `far_target_db` beside `target_db`,
+  and Nova's estimator will mirror it; until that change lands, Nova reads both figures at 35 dB.
+  The model's figures stay uncapped there, and the console and Doctor say so wherever one passes
+  the 300 Mbps Polaris recommends on its own. Doctor quotes one figure, the request a player sets
+  with FEC and audio included, and names what held it there when the 300 Mbps cap or `max_bitrate`
+  did. While Live Tuning owns the bitrate it says what to set as the live bitrate instead, the same
+  goal at the encoder, because a live bitrate applies there. Session status carries the stream's rate as a
+  request, `request_kbps`, beside `encoder_kbps`, and the console and Doctor's evidence read it that
+  way, so a stream at 200 Mbps no longer shows as an encoder at 179 against advice of 215. It reads
+  a stream as starved only when it runs more than a tenth below that figure, so the 200 Mbps judged
+  right reads healthy, and the share of frames that fill PyroWave's byte budget no longer makes a
+  stream starved. That share decides one thing now. Where the 300 Mbps cap or `max_bitrate` holds the
+  figure below the model's, as for 3840x2160 at 120 fps in 4:4:4 on a device's own screen, where the
+  model asks about 328, a stream within a tenth of that limit and still below the model's figure,
+  with more than 80% of its recent frames filling the budget, gets its own Doctor finding,
+  `pyrowave_needs_more_than_allowed`. Doctor names the model's figure and the limit and suggests a
+  lower resolution or frame rate, or HEVC. Where only the cap holds the stream, it adds that a player
+  can set more by hand, up to 500 Mbps or the host's `max_bitrate` if that is lower. Doctor changes
+  no bitrate itself there, and a stream its
+  quality restore would bring back to its launch bitrate gets that restore instead
+  ([PyroWave reference](pyrowave-reference.md#how-polaris-advises-and-tunes-pyrowave)).
+
 - Session status says what a stream's bitrate request was split into, on every codec. A client
   asks for one bitrate for the video, its FEC, the audio and the packet overhead, and the host
   hands the encoder what is left, but only a PyroWave stream published any of those figures. While
@@ -252,19 +294,21 @@ starts at `v1.0.0`.
   already names them.
 
 - Polaris now knows what bitrate a PyroWave stream needs. It carries the model PyroWave's author
-  published and evaluates it at 35 dB, the level the author calls good quality: for 1920x1080 at
-  60 fps, about 172 Mbps in 4:2:0 and 201 Mbps in 4:4:4 on a device's own screen, and about 246 and
-  298 on a television or monitor, as what to set at the default 10% FEC with stereo audio. Nova's
-  matching estimator is in review, and a fixture in Polaris's tests pins the host's figures. While a
+  published and evaluates it at 35 dB, the level the author calls good quality, for a television or
+  monitor, and at 31 dB for a device's own screen: for 1920x1080 at 60 fps, about 101 Mbps in 4:2:0
+  and 109 Mbps in 4:4:4 on a device's own screen, and about 246 and 298 on a television or monitor,
+  as what to set at the default 10% FEC with stereo audio. Nova's estimator ports the same model,
+  and a fixture in Polaris's tests pins the host's figures. While a
   PyroWave stream runs, session status carries the advice, the rate the encoder runs at, and the
   share of recent frames that reached PyroWave's byte budget, which the host used to write only to
   its log. `GET /polaris/v1/pyrowave/advice` answers the same figures before a launch, announced as
-  `pyrowave_advice_v1`. The model is an objective metric on four game clips, not a measurement on a
-  device ([PyroWave reference](pyrowave-reference.md#how-polaris-advises-and-tunes-pyrowave)).
+  `pyrowave_advice_v1`. The model is an objective metric on four game clips, and the own screen
+  target one check on one device
+  ([PyroWave reference](pyrowave-reference.md#how-polaris-advises-and-tunes-pyrowave)).
 
-- Doctor can raise a PyroWave stream that is short of bits. When the stream runs below the advice
-  for a device's own screen, or more than 80% of recent frames hit the byte budget, and the network
-  is clean, Doctor offers one tap to raise it to that advice, never above 300 Mbps or `max_bitrate`,
+- Doctor can raise a PyroWave stream that is short of bits. When the stream runs more than a tenth
+  below the advice for a device's own screen, as a request, and the network is clean, Doctor offers
+  one tap to raise it to that advice, never above 300 Mbps or `max_bitrate`,
   in the same guarded steps with the same verification and Undo as its other bitrate fixes. The
   raise can go above the bitrate the player asked for. Live Tuning goes above a request only to
   lift one below `adaptive_bitrate_min` to that floor. While Live Tuning is on, Doctor says what to set instead. A stream with no
@@ -299,7 +343,7 @@ starts at `v1.0.0`.
   one. With it off, a live bitrate change from a paired client, which Nova's Deck HUD sends, was
   clamped to 100 Mbps, and Doctor read the clamped figure as the current bitrate, so its one step
   took a PyroWave stream running at 161 Mbps to 100 and Undo put back 100. Now a stream keeps the
-  bitrate it opened at, a live change applies as asked up to the endpoint's 300000 kbps, and Doctor
+  bitrate it opened at, a live change applies as asked up to the endpoint's 500000 kbps, and Doctor
   steps and undoes from the bitrate the encoder runs at. The host cap stays with `max_bitrate`,
   which now also caps a live change, at the encoder rate its description names. A launch applies it
   to the request before FEC and audio come off, so a launch at the cap encodes a little lower. A

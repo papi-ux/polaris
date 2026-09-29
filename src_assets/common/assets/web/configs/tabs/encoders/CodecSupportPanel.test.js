@@ -278,9 +278,9 @@ describe('CodecSupportPanel 4:4:4 and PyroWave rows', () => {
       fec_protection: { fec_percentage: 0, oversized_frames_total: 0 },
       clients: [{ name: 'Retroid Pocket 6', codec: 'pyrowave', pyrowave_route: 'zero_copy' }],
       pyrowave_bitrate: {
-        width: 1920, height: 1080, fps: 60, chroma: '444', target_db: 35,
-        advice_far_kbps: 200500, advice_near_kbps: 297100, raise_goal_kbps: 200500, cap_kbps: 300000,
-        encoder_kbps: 180000, ceiling_frame_share: 0.12, starved: false, rule: 'model', raise_goal_limited_by: 'advice',
+        width: 1920, height: 1080, fps: 60, chroma: '444', target_db: 35, far_target_db: 31,
+        advice_far_kbps: 108012, advice_near_kbps: 297507, raise_goal_kbps: 108012, cap_kbps: 300000,
+        encoder_kbps: 180000, request_kbps: 201125, ceiling_frame_share: 0.12, starved: false, rule: 'model', raise_goal_limited_by: 'advice',
         request_cap: null, cap_set_aside: null, assumes: { fec_percentage: 10, audio_kbps: 512 },
       },
     }
@@ -289,9 +289,9 @@ describe('CodecSupportPanel 4:4:4 and PyroWave rows', () => {
     const stream = wrapper.find('[data-pyrowave-stream]')
     expect(stream.find('[data-pyrowave-stream-heading]').text()).toBe('PyroWave stream running: 1920x1080 at 60 fps, 4:4:4.')
     expect(stream.find('[data-pyrowave-route]').text()).toContain('Route: zero copy.')
-    expect(stream.text()).toContain("Advice for this stream: 201 Mbps on a device's own screen, 298 Mbps on a television or monitor.")
-    expect(stream.text()).toContain('with 10% FEC and the stream\'s audio included, for 35 dB of PSNR-HVS-M-H')
-    expect(stream.text()).toContain('The encoder runs at 180 Mbps now.')
+    expect(stream.text()).toContain("PyroWave's model for this stream: 109 Mbps on a device's own screen, 298 Mbps on a television or monitor.")
+    expect(stream.text()).toContain('with 10% FEC and the stream\'s audio included, for 31 dB of PSNR-HVS-M-H on a device\'s own screen and 35 dB on a television or monitor')
+    expect(stream.text()).toContain('This stream runs at a request of about 201 Mbps now, 180 Mbps at the encoder.')
     expect(stream.text()).not.toContain('reads this stream as starved')
     wrapper.unmount()
   })

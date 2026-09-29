@@ -1386,6 +1386,23 @@ namespace {
     EXPECT_EQ(state->begins.load(), 0U);
   }
 
+  TEST_F(MultiseatProfileHttp, ResolverTakesAManualBitrateUpTo500MbpsAndNormalizesItToTheSpace) {
+    nvhttp::args_t most {{"game", std::string(profile_app_uuid)}, {"bitrate_kbps", "500000"}};
+    const auto resolved = nvhttp::resolve_profile_request(client, most);
+    ASSERT_TRUE(resolved);
+    ASSERT_EQ(resolved->status, 200);
+    const auto &bitrate = resolved->body["resolved_profile"]["fields"]["target_bitrate_kbps"];
+    EXPECT_EQ(bitrate["value"], 8000);
+    EXPECT_EQ(bitrate["normalized"], true);
+    for (const char *refused : {"500001", "999"}) {
+      nvhttp::args_t request {{"game", std::string(profile_app_uuid)}, {"bitrate_kbps", refused}};
+      const auto result = nvhttp::resolve_profile_request(client, request);
+      ASSERT_TRUE(result);
+      EXPECT_EQ(result->status, 400) << refused;
+    }
+    EXPECT_EQ(state->begins.load(), 0U);
+  }
+
   TEST_F(MultiseatProfileHttp, LowerLockedBitrateIsResolvedAndCarriedToTheLaunch) {
     nvhttp::args_t request {{"game", std::string(profile_app_uuid)},
       {"bitrate_locked", "1"}, {"bitrate_kbps", "4000"}};

@@ -343,6 +343,64 @@ TEST(NovaContractTests, BitrateUnitsAreAnnouncedAndServedForEveryStream) {
   EXPECT_EQ(guard.find("pyrowave"), std::string::npos) << guard;
 }
 
+TEST(NovaContractTests, EveryManualBitrateEndpointTakesUpTo500Mbps) {
+  // A client sets its own bitrate through its paired client settings, a live change, a resolved
+  // launch, a Space resolve and the launch profile route. The last three are exercised directly
+  // elsewhere; the first two are handlers, so this holds them to the shared range, 1000 to 500000 kbps.
+  const auto nvhttp = read_source_file("src/nvhttp.cpp");
+  const auto between = [&](std::string_view first, std::string_view next) {
+    const auto start = nvhttp.find(first);
+    const auto end = nvhttp.find(next, start);
+    EXPECT_NE(start, std::string::npos) << first;
+    EXPECT_NE(end, std::string::npos) << next;
+    return start == std::string::npos || end == std::string::npos ? std::string {} : nvhttp.substr(start, end - start);
+  };
+  const auto settings = between("auto polarisClientSettings = [", "auto polarisGames = [");
+  EXPECT_NE(settings.find("target_bitrate_kbps != 0 && !stream_bitrate::request_in_range(target_bitrate_kbps)"),
+            std::string::npos);
+  EXPECT_NE(settings.find("\"target_bitrate_kbps must be 0 or \" + stream_bitrate::request_range_text()"),
+            std::string::npos);
+  const auto live = between("auto polarisSetBitrate = [", "auto polarisSetAdaptiveBitrate = [");
+  EXPECT_NE(live.find("if (!stream_bitrate::request_in_range(bitrate_kbps)) {"), std::string::npos);
+  EXPECT_NE(live.find("\"bitrate_kbps must be \" + stream_bitrate::request_range_text()"), std::string::npos);
+  EXPECT_NE(nvhttp.find("consumed != raw_bitrate.size() || !stream_bitrate::request_in_range(parsed)"), std::string::npos);
+  EXPECT_NE(nvhttp.find("bitrate > stream_bitrate::k_max_request_kbps"), std::string::npos);
+
+  // No endpoint keeps the old limit of its own.
+  for (const auto *file : {"src/nvhttp.cpp", "src/launch_profile.cpp", "src/doctor_trial.cpp"}) {
+    const auto source = read_source_file(file);
+    EXPECT_EQ(source.find("300000"), std::string::npos) << file;
+    EXPECT_EQ(source.find("300'000"), std::string::npos) << file;
+  }
+}
+
+TEST(NovaContractTests, ManualBitrateLimitIsAnnouncedInCapabilities) {
+  // A 1.4.13 host refuses a manual bitrate above 300000 kbps, a resolved launch outright, so a client
+  // offers up to 500 Mbps only to a host that announces it. The number comes from the same constant the
+  // endpoints check against, directly in the capabilities handler's body, under no condition of its own.
+  const auto source = read_source_file("src/nvhttp.cpp");
+  const auto capabilities = source.find("auto polarisCapabilities = [");
+  ASSERT_NE(capabilities, std::string::npos);
+  const auto capabilities_end = source.find("auto polarisPyroWaveAdvice = [", capabilities);
+  const auto flag = source.find("features[\"manual_bitrate_max_kbps\"] = stream_bitrate::k_max_request_kbps;", capabilities);
+  ASSERT_NE(capabilities_end, std::string::npos);
+  ASSERT_NE(flag, std::string::npos);
+  EXPECT_LT(flag, capabilities_end);
+  EXPECT_EQ(brace_depth(source, capabilities, flag), 1);
+
+  const auto bitrate = read_source_file("src/stream_bitrate.h");
+  EXPECT_NE(bitrate.find("inline constexpr int k_max_request_kbps = 500000;"), std::string::npos);
+
+  // The manifest tells Nova what the number means and what a host without it takes.
+  const auto units = manifest()["objects"]["bitrate_units"]["$comment"];
+  std::string comment;
+  for (const auto &line : units) {
+    comment += line.get<std::string>() + " ";
+  }
+  EXPECT_NE(comment.find("features.manual_bitrate_max_kbps"), std::string::npos) << comment;
+  EXPECT_NE(comment.find("A host without it takes 300000"), std::string::npos) << comment;
+}
+
 TEST(NovaContractTests, PyroWaveAdviceIsGrossedUpForTheStreamsOwnLink) {
   // The advice route and the PyroWave Live Tuning floor take the FEC share and audio from the stream's
   // recorded handshake through stream_link, as pyrowave_bitrate does, so a config reload mid stream

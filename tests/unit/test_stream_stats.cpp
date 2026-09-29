@@ -5147,7 +5147,8 @@ namespace {
   };
 
   // A 1080p60 4:2:0 PyroWave stream on a clean, current network, with Live Tuning off. The model's far
-  // figure for it is 153571 kbps at the encoder and 171759 kbps as a request at 10% FEC.
+  // figure for it, at the calibrated 31 dB, is 89121 kbps at the encoder and 100148 kbps as a request at
+  // 10% FEC.
   stream_stats::stats_t clean_pyrowave_stats(int encoder_kbps) {
     stream_stats::stats_t stats {};
     stats.streaming = true;
@@ -5237,15 +5238,19 @@ TEST(StreamStatsPyroWaveTests, SessionStatusCarriesTheAdviceOnlyWhileTheStreamIs
   EXPECT_EQ(pyrowave.at("version"), 1);
   EXPECT_EQ(pyrowave.at("model"), "psnr-hvs-m");
   EXPECT_EQ(pyrowave.at("target_db"), 35);
+  EXPECT_EQ(pyrowave.at("far_target_db"), 31);
   EXPECT_EQ(pyrowave.at("width"), 1920);
   EXPECT_EQ(pyrowave.at("height"), 1080);
   EXPECT_EQ(pyrowave.at("fps"), 60);
   EXPECT_EQ(pyrowave.at("chroma"), "420");
-  EXPECT_EQ(pyrowave.at("advice_far_kbps"), 171759);
+  EXPECT_EQ(pyrowave.at("advice_far_kbps"), 100148);
   EXPECT_EQ(pyrowave.at("advice_near_kbps"), 245904);
-  EXPECT_EQ(pyrowave.at("raise_goal_kbps"), 171759);
+  EXPECT_EQ(pyrowave.at("raise_goal_kbps"), 100148);
   EXPECT_EQ(pyrowave.at("cap_kbps"), 300000);
   EXPECT_EQ(pyrowave.at("encoder_kbps"), 20000);
+  // The same rate as a request, which is what starved compares with the raise goal.
+  EXPECT_EQ(pyrowave.at("request_kbps"), 23347);
+  EXPECT_EQ(pyrowave.at("request_kbps"), stream_bitrate::wire_kbps_for_encoder(20000, 10, 512));
   EXPECT_TRUE(pyrowave.at("ceiling_frame_share").is_null());
   EXPECT_TRUE(pyrowave.at("starved").get<bool>());
   EXPECT_TRUE(pyrowave.at("request_cap").is_null());
@@ -5256,6 +5261,11 @@ TEST(StreamStatsPyroWaveTests, SessionStatusCarriesTheAdviceOnlyWhileTheStreamIs
   stats.pyrowave_window_frames = 240;
   stats.pyrowave_window_ceiling_frames = 223;
   EXPECT_DOUBLE_EQ(stream_stats::pyrowave_bitrate_json(stats).at("ceiling_frame_share").get<double>(), 0.929);
+
+  // Within a tenth of the far figure is healthy, and below that is starved, both as requests: 90% of
+  // 100148 is 90133.2, and a request of 90134 lands the encoder on 80108, 90133 on 80107.
+  EXPECT_FALSE(stream_stats::pyrowave_bitrate_json(clean_pyrowave_stats(80108)).at("starved").get<bool>());
+  EXPECT_TRUE(stream_stats::pyrowave_bitrate_json(clean_pyrowave_stats(80107)).at("starved").get<bool>());
 
   // At the raise goal with a quiet ceiling, the host has nothing to ask for.
   auto fed = clean_pyrowave_stats(160000);
@@ -5286,14 +5296,14 @@ TEST(StreamStatsPyroWaveTests, SessionStatusNamesTheFecAndAudioItsAdviceWasGross
   EXPECT_EQ(pyrowave.at("assumes").at("fec_percentage"), 20);
   EXPECT_EQ(pyrowave.at("assumes").at("audio_kbps"), 1536);
   // The figures are the ones grossed up for those two: more than the 10% FEC and stereo request.
-  EXPECT_GT(pyrowave.at("advice_far_kbps").get<int>(), 171759);
+  EXPECT_GT(pyrowave.at("advice_far_kbps").get<int>(), 100148);
 
   // Before a handshake is recorded, the host's share now and stereo in high quality.
   stats.bitrate_request_recorded = false;
   const auto pending = stream_stats::pyrowave_bitrate_json(stats);
   EXPECT_EQ(pending.at("assumes").at("fec_percentage"), 10);
   EXPECT_EQ(pending.at("assumes").at("audio_kbps"), 512);
-  EXPECT_EQ(pending.at("advice_far_kbps"), 171759);
+  EXPECT_EQ(pending.at("advice_far_kbps"), 100148);
 }
 
 namespace {
@@ -5592,9 +5602,17 @@ TEST(StreamStatsDoctorTests, PyroWaveBelowItsAdviceOnACleanNetworkOffersARaiseTo
 
   EXPECT_EQ(doctor.at("primary_issue"), "pyrowave_starved");
   EXPECT_EQ(doctor.at("traffic_light"), "amber");
-  EXPECT_NE(doctor.at("summary").get<std::string>().find("172 Mbps"), std::string::npos) << doctor.at("summary");
+  // One figure, in one unit: what the stream runs at and what to set, both as requests.
+  const auto summary = doctor.at("summary").get<std::string>();
+  EXPECT_NE(summary.find("PyroWave runs at a request of about 24 Mbps, where Polaris advises a request of about "
+                         "101 Mbps for 1920x1080 at 60 fps on a device's own screen."),
+            std::string::npos)
+    << summary;
+  EXPECT_EQ(summary.find("dB"), std::string::npos) << summary;
+  EXPECT_EQ(summary.find("encoder"), std::string::npos) << summary;
+  EXPECT_NE(doctor.at("recommendation").at("body").get<std::string>().find("a request of 101 Mbps"), std::string::npos);
   EXPECT_EQ(action.at("id"), "restore_quality");
-  EXPECT_EQ(action.at("payload_preview").at("target_bitrate_kbps"), 171759);
+  EXPECT_EQ(action.at("payload_preview").at("target_bitrate_kbps"), 100148);
   EXPECT_EQ(action.at("payload_preview").at("goal_source"), "pyrowave_advice");
   EXPECT_FALSE(action.at("requires_confirmation"));
   EXPECT_TRUE(action.at("undo").at("supported"));
@@ -5607,6 +5625,11 @@ TEST(StreamStatsDoctorTests, PyroWaveBelowItsAdviceOnACleanNetworkOffersARaiseTo
   config::video.max_bitrate = 50000;
   const auto capped = stream_stats::build_doctor_json(stats, nlohmann::json::object());
   EXPECT_EQ(capped.at("safe_recovery_action").at("payload_preview").at("target_bitrate_kbps"), 50000);
+  // The summary quotes the figure Doctor raises to, and says what held it there.
+  EXPECT_NE(capped.at("summary").get<std::string>().find("a request of about 50 Mbps for 1920x1080 at 60 fps on a "
+                                                         "device's own screen, the host's max_bitrate"),
+            std::string::npos)
+    << capped.at("summary");
 }
 
 TEST(StreamStatsDoctorTests, PyroWaveAdviceIsTextWhileLiveTuningOwnsTheBitrate) {
@@ -5621,9 +5644,21 @@ TEST(StreamStatsDoctorTests, PyroWaveAdviceIsTextWhileLiveTuningOwnsTheBitrate) 
   EXPECT_EQ(action.at("kind"), "manual_guidance");
   const auto reason = action.at("unavailable_reason").get<std::string>();
   EXPECT_NE(reason.find("Live Tuning"), std::string::npos) << reason;
-  EXPECT_NE(reason.find("172 Mbps"), std::string::npos) << reason;
   EXPECT_NE(reason.find("this stream only"), std::string::npos) << reason;
   EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Raise the bitrate");
+
+  // A live bitrate applies at the encoder, so the figure to set live is the goal at the encoder, 89121
+  // kbps, and the text ties it to the 100148 kbps request Doctor quotes everywhere else. Setting 101
+  // live would run the encoder at 101 Mbps, a request of about 114, a tenth past the advice.
+  const auto body = doctor.at("recommendation").at("body").get<std::string>();
+  for (const auto &text : {reason, body}) {
+    SCOPED_TRACE(text);
+    EXPECT_NE(text.find("set about 90 Mbps as the live bitrate in your client"), std::string::npos);
+    EXPECT_NE(text.find("A live bitrate applies at the encoder, so that is the request of about 101 Mbps Polaris "
+                        "advises without its FEC and audio."),
+              std::string::npos);
+    EXPECT_EQ(text.find("101 Mbps as the live bitrate"), std::string::npos);
+  }
 }
 
 TEST(StreamStatsDoctorTests, PyroWaveFindingWaitsForACleanNetworkAndRanksBelowFailures) {
@@ -5646,36 +5681,301 @@ TEST(StreamStatsDoctorTests, PyroWaveFindingWaitsForACleanNetworkAndRanksBelowFa
   EXPECT_NE(stream_stats::build_doctor_json(unmeasured, nlohmann::json::object()).at("primary_issue"), "pyrowave_starved");
 }
 
-TEST(StreamStatsDoctorTests, PyroWaveCeilingStarvationAtTheRaiseGoalSuggestsALowerModeOrHevc) {
+TEST(StreamStatsDoctorTests, PyroWaveAtTheRetroidPocket6CalibrationIsHealthyWhateverItsCeilingShare) {
   PyroWaveHostGuard host;
-  auto stats = clean_pyrowave_stats(160000);
-  stats.pyrowave_window_frames = 240;
-  stats.pyrowave_window_ceiling_frames = 216;
-  const auto starved = stream_stats::build_doctor_json(stats, nlohmann::json::object());
-  EXPECT_EQ(starved.at("primary_issue"), "pyrowave_starved");
-  EXPECT_EQ(starved.at("safe_recovery_action").at("id"), "none");
-  EXPECT_NE(starved.at("safe_recovery_action").at("unavailable_reason").get<std::string>().find("use HEVC"),
-            std::string::npos);
-  EXPECT_EQ(starved.at("recommendation").at("next_step_label"), "Use a lower mode or HEVC");
+  // 1920x1080 at 120 fps in 4:4:4 at the 200 Mbps request judged right on a Retroid Pocket 6, with every
+  // recent frame at PyroWave's byte ceiling. 93% of the 215 Mbps far figure: healthy.
+  auto rp6 = clean_pyrowave_stats(static_cast<int>(stream_bitrate::encoder_kbps_for_wire(200000, 10, 512)));
+  rp6.fps = 120.0;
+  rp6.encode_target_fps = 120.0;
+  rp6.stream_chroma = "444";
+  rp6.pyrowave_window_frames = 240;
+  rp6.pyrowave_window_ceiling_frames = 240;
+  const auto status = stream_stats::pyrowave_bitrate_json(rp6);
+  EXPECT_EQ(status.at("advice_far_kbps"), 214898);
+  EXPECT_EQ(status.at("raise_goal_kbps"), 214898);
+  EXPECT_DOUBLE_EQ(status.at("ceiling_frame_share").get<double>(), 1.0);
+  EXPECT_FALSE(status.at("starved").get<bool>());
+  // Session status carries the rate starved was decided on: the encoder's 178987 kbps as a request.
+  EXPECT_EQ(status.at("encoder_kbps"), 178987);
+  EXPECT_EQ(status.at("request_kbps"), 199999);
+  const auto healthy = stream_stats::build_doctor_json(rp6, nlohmann::json::object());
+  EXPECT_EQ(healthy.at("primary_issue"), "none");
+  const auto &bitrate_row = evidence_row(healthy, "bitrate");
+  EXPECT_EQ(bitrate_row.at("status"), "pass");
+  // The row's value is the encoder's rate in kbps and its detail quotes requests, so it says which is
+  // which. The television figure is the model's alone past the 300 Mbps Polaris recommends.
+  EXPECT_EQ(bitrate_row.at("value"), 178987);
+  const auto detail = bitrate_row.at("detail").get<std::string>();
+  EXPECT_NE(detail.find("PyroWave runs at a request of about 200 Mbps"), std::string::npos) << detail;
+  EXPECT_NE(detail.find("The kbps value is the rate at the encoder, and every Mbps figure here is a request."),
+            std::string::npos)
+    << detail;
+  EXPECT_NE(detail.find("On a television or monitor (H 2.0) PyroWave's model asks for a request of 594 Mbps, in "
+                        "4:4:4, more than the 300 Mbps Polaris recommends on its own."),
+            std::string::npos)
+    << detail;
+  EXPECT_EQ(detail.find("it advises"), std::string::npos) << detail;
+  // Within what Polaris recommends, the television figure needs no such note.
+  const auto low = evidence_row(stream_stats::build_doctor_json(clean_pyrowave_stats(160000), nlohmann::json::object()),
+                                "bitrate")
+                     .at("detail")
+                     .get<std::string>();
+  EXPECT_NE(low.find("PyroWave's model asks for a request of 246 Mbps, in 4:2:0. The kbps value"), std::string::npos)
+    << low;
 
-  // Eighty percent is the line, and a stream under it at the goal is left alone.
-  stats.pyrowave_window_ceiling_frames = 120;
-  EXPECT_EQ(stream_stats::build_doctor_json(stats, nlohmann::json::object()).at("primary_issue"), "none");
-  stats.pyrowave_window_ceiling_frames = 192;
-  EXPECT_EQ(stream_stats::build_doctor_json(stats, nlohmann::json::object()).at("primary_issue"), "none");
-  stats.pyrowave_window_ceiling_frames = 193;
-  EXPECT_EQ(stream_stats::build_doctor_json(stats, nlohmann::json::object()).at("primary_issue"), "pyrowave_starved");
+  // A stream at its far figure with most frames at the ceiling is left alone too: nothing holds it
+  // below what the model asks, so the share is only reported.
+  auto fed = clean_pyrowave_stats(160000);
+  fed.pyrowave_window_frames = 240;
+  fed.pyrowave_window_ceiling_frames = 236;
+  EXPECT_EQ(stream_stats::build_doctor_json(fed, nlohmann::json::object()).at("primary_issue"), "none");
+
+  // More than a tenth below it, 150 Mbps, is starved, and Doctor raises to the far figure.
+  auto short_rp6 = rp6;
+  const auto short_encoder = static_cast<int>(stream_bitrate::encoder_kbps_for_wire(150000, 10, 512));
+  short_rp6.bitrate_kbps = short_encoder;
+  short_rp6.effective_launch_bitrate_kbps = short_encoder;
+  short_rp6.adaptive_target_bitrate_kbps = short_encoder;
+  const auto starved = stream_stats::build_doctor_json(short_rp6, nlohmann::json::object());
+  EXPECT_EQ(starved.at("primary_issue"), "pyrowave_starved");
+  EXPECT_EQ(starved.at("safe_recovery_action").at("payload_preview").at("target_bitrate_kbps"), 214898);
+  EXPECT_NE(starved.at("summary").get<std::string>().find("a request of about 150 Mbps"), std::string::npos)
+    << starved.at("summary");
+  EXPECT_NE(starved.at("summary").get<std::string>().find("100% of recent frames hit its byte ceiling"), std::string::npos)
+    << starved.at("summary");
+}
+
+namespace {
+  // A PyroWave stream of this shape at a request, at 10% FEC with stereo, with ceiling_frames of its last
+  // 240 frames at the byte budget, on the clean network clean_pyrowave_stats() describes.
+  stream_stats::stats_t clean_pyrowave_stream(int width, int height, int fps, bool chroma444, int request_kbps,
+                                              std::uint32_t ceiling_frames) {
+    auto stats = clean_pyrowave_stats(static_cast<int>(stream_bitrate::encoder_kbps_for_wire(request_kbps, 10, 512)));
+    stats.width = width;
+    stats.height = height;
+    stats.fps = fps;
+    stats.encode_target_fps = fps;
+    stats.stream_chroma = chroma444 ? "444" : "420";
+    stats.pyrowave_window_frames = 240;
+    stats.pyrowave_window_ceiling_frames = ceiling_frames;
+    return stats;
+  }
+
+  // What Doctor tells a stream that wants more than Doctor raises it to, whoever owns the bitrate, and
+  // what it adds where only the cap holds the stream back and a player can set more by hand.
+  const std::string k_lower_mode_or_hevc = "Lower the resolution or frame rate, or use HEVC, for a sharper picture.";
+  const std::string k_lower_mode_or_hevc_or_by_hand = k_lower_mode_or_hevc + " You can also set up to 500 Mbps by hand.";
+
+  // A PyroWave stream that wants more than Doctor raises it to, with 85% of its frames at the byte budget.
+  nlohmann::json limit_doctor(int width, int height, int request_kbps) {
+    const auto doctor = stream_stats::build_doctor_json(clean_pyrowave_stream(width, height, 120, true, request_kbps, 204),
+                                                        nlohmann::json::object());
+    EXPECT_EQ(doctor.at("primary_issue"), "pyrowave_needs_more_than_allowed");
+    return doctor;
+  }
+}  // namespace
+
+TEST(StreamStatsDoctorTests, PyroWaveHeldBelowItsModelByTheCapAtItsByteCeilingAsksForALowerModeOrHevc) {
+  PyroWaveHostGuard host;
+  // A Retroid Pocket 6 at 3840x2160, 120 fps and 4:4:4. PyroWave's model asks a request of 327675 kbps
+  // on a device's own screen, and Doctor raises no further than the 300000 cap. At the cap the stream
+  // is not starved, yet 204 of its last 240 frames, 85%, fill the byte budget.
+  const auto stats = clean_pyrowave_stream(3840, 2160, 120, true, 300000, 204);
+  const auto status = stream_stats::pyrowave_bitrate_json(stats);
+  ASSERT_EQ(status.at("advice_far_kbps"), 327675);
+  ASSERT_EQ(status.at("raise_goal_kbps"), 300000);
+  ASSERT_EQ(status.at("raise_goal_limited_by"), "cap");
+  EXPECT_FALSE(status.at("starved").get<bool>());
+  EXPECT_DOUBLE_EQ(status.at("ceiling_frame_share").get<double>(), 0.85);
+
+  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  EXPECT_EQ(doctor.at("primary_issue"), "pyrowave_needs_more_than_allowed");
+  EXPECT_EQ(doctor.at("traffic_light"), "amber");
+  // A player can set up to 500 Mbps by hand, so the cap is only how far Doctor raises, not what the
+  // host allows.
+  EXPECT_EQ(doctor.at("summary").get<std::string>(),
+            "PyroWave at 3840x2160 and 120 fps wants a request of about 328 Mbps on this screen, above the 300 Mbps "
+            "Doctor raises it to, and 85% of recent frames fill its byte budget.");
+  const auto &recommendation = doctor.at("recommendation");
+  EXPECT_EQ(recommendation.at("body").get<std::string>(),
+            "Lower the resolution or frame rate, or use HEVC, for a sharper picture. You can also set up to 500 Mbps "
+            "by hand.");
+  EXPECT_EQ(recommendation.at("next_step_label"), "Use a lower mode or HEVC");
+  EXPECT_EQ(recommendation.at("expected_effect"),
+            "A smaller or slower picture needs fewer bits, and HEVC needs fewer for the same picture.");
+  EXPECT_EQ(recommendation.at("why"), doctor.at("summary"));
+  const auto &action = doctor.at("safe_recovery_action");
+  EXPECT_EQ(action.at("id"), "none");
+  EXPECT_EQ(action.at("kind"), "manual_guidance");
+  EXPECT_EQ(action.at("unavailable_reason").get<std::string>(), recommendation.at("body").get<std::string>());
+  // The evidence behind the finding reads as a watch, not a pass.
+  EXPECT_EQ(evidence_row(doctor, "bitrate").at("status"), "watch");
+}
+
+TEST(StreamStatsDoctorTests, PyroWaveAtItsByteCeilingIsAFindingOnlyWhereTheHostHoldsItBelowTheModel) {
+  PyroWaveHostGuard host;
+  const auto issue = [](int width, int height, int fps, int request_kbps, std::uint32_t ceiling_frames) {
+    return stream_stats::build_doctor_json(
+             clean_pyrowave_stream(width, height, fps, true, request_kbps, ceiling_frames), nlohmann::json::object())
+      .at("primary_issue")
+      .get<std::string>();
+  };
+  // 1920x1080 at 120 fps in 4:4:4 at 200 Mbps, the Retroid Pocket 6 check. Its goal is the model's own
+  // 215, which nothing holds back, so the share of frames at the byte budget is only reported.
+  EXPECT_EQ(issue(1920, 1080, 120, 200000, 48), "none");
+  EXPECT_EQ(issue(1920, 1080, 120, 200000, 204), "none");
+  EXPECT_EQ(issue(1920, 1080, 120, 200000, 240), "none");
+
+  // With max_bitrate at 200 Mbps the host holds the same stream below the model's 215. A low share is
+  // still no finding, and neither is exactly 80%; more than 80% is.
+  config::video.max_bitrate = 200000;
+  EXPECT_EQ(issue(1920, 1080, 120, 200000, 48), "none");
+  EXPECT_EQ(issue(1920, 1080, 120, 200000, 192), "none");
+  const auto held = stream_stats::build_doctor_json(clean_pyrowave_stream(1920, 1080, 120, true, 200000, 204),
+                                                    nlohmann::json::object());
+  EXPECT_EQ(held.at("primary_issue"), "pyrowave_needs_more_than_allowed");
+  // The host takes no more than max_bitrate by hand either, so Doctor names it and offers nothing to set.
+  EXPECT_EQ(held.at("summary").get<std::string>(),
+            "PyroWave at 1920x1080 and 120 fps wants a request of about 215 Mbps on this screen, above the 200 Mbps "
+            "this host's max_bitrate allows, and 85% of recent frames fill its byte budget.");
+  EXPECT_EQ(held.at("recommendation").at("body").get<std::string>(),
+            "Lower the resolution or frame rate, or use HEVC, for a sharper picture.");
+  EXPECT_EQ(held.at("safe_recovery_action").at("unavailable_reason").get<std::string>(), k_lower_mode_or_hevc);
+  config::video.max_bitrate = 0;
+
+  // A stream set by hand above the model's figure has what the model asks, whatever its share.
+  EXPECT_EQ(issue(3840, 2160, 120, 350000, 240), "none");
+  // More than a tenth below the cap it is starved, and Doctor raises it to the cap instead.
+  const auto starved = stream_stats::build_doctor_json(clean_pyrowave_stream(3840, 2160, 120, true, 250000, 204),
+                                                       nlohmann::json::object());
+  EXPECT_EQ(starved.at("primary_issue"), "pyrowave_starved");
+  EXPECT_EQ(starved.at("safe_recovery_action").at("payload_preview").at("target_bitrate_kbps"), 300000);
+  // Network pressure comes first.
+  auto lossy = clean_pyrowave_stream(3840, 2160, 120, true, 300000, 204);
+  lossy.network_risk = true;
+  lossy.latency_ms = 60.0;
+  EXPECT_EQ(stream_stats::build_doctor_json(lossy, nlohmann::json::object()).at("primary_issue"), "network_jitter");
+}
+
+TEST(StreamStatsDoctorTests, PyroWaveLimitFindingNamesWhatHoldsTheStreamAndWhatAPlayerCanSet) {
+  PyroWaveHostGuard host;
+  // With max_bitrate above the cap, the cap is still only how far Doctor raises, and a player can set
+  // up to max_bitrate by hand.
+  config::video.max_bitrate = 400000;
+  const auto above_cap = limit_doctor(3840, 2160, 300000);
+  EXPECT_EQ(above_cap.at("summary").get<std::string>(),
+            "PyroWave at 3840x2160 and 120 fps wants a request of about 328 Mbps on this screen, above the 300 Mbps "
+            "Doctor raises it to, and 85% of recent frames fill its byte budget.");
+  EXPECT_EQ(above_cap.at("recommendation").at("body").get<std::string>(),
+            k_lower_mode_or_hevc + " You can also set up to 400 Mbps by hand.");
+
+  // A stream set by hand above the cap and still below the model's figure hears the same.
+  config::video.max_bitrate = 0;
+  const auto by_hand = limit_doctor(3840, 2160, 320000);
+  EXPECT_EQ(by_hand.at("summary").get<std::string>(),
+            "PyroWave at 3840x2160 and 120 fps wants a request of about 328 Mbps on this screen, above the 300 Mbps "
+            "Doctor raises it to, and 85% of recent frames fill its byte budget.");
+  EXPECT_EQ(by_hand.at("recommendation").at("body").get<std::string>(), k_lower_mode_or_hevc_or_by_hand);
+
+  // With max_bitrate at the cap, the cap still sets the goal, but the host takes no more by hand, so
+  // Doctor names max_bitrate and offers nothing to set.
+  config::video.max_bitrate = 300000;
+  const auto at_cap = limit_doctor(3840, 2160, 300000);
+  EXPECT_EQ(stream_stats::pyrowave_bitrate_json(clean_pyrowave_stream(3840, 2160, 120, true, 300000, 204))
+              .at("raise_goal_limited_by"),
+            "cap");
+  EXPECT_EQ(at_cap.at("summary").get<std::string>(),
+            "PyroWave at 3840x2160 and 120 fps wants a request of about 328 Mbps on this screen, above the 300 Mbps "
+            "this host's max_bitrate allows, and 85% of recent frames fill its byte budget.");
+  EXPECT_EQ(at_cap.at("recommendation").at("body").get<std::string>(), k_lower_mode_or_hevc);
+}
+
+TEST(StreamStatsDoctorTests, PyroWaveThatWantsMoreThanDoctorRaisesToGetsNoBitrateAction) {
+  PyroWaveHostGuard host;
+  struct variant_t {
+    const char *name;
+    bool live_tuning;
+    bool runtime_updates;
+    bool single_scope;
+  };
+  for (const auto &variant : {variant_t {"Live Tuning off", false, true, true}, variant_t {"Live Tuning on", true, true, true},
+                              variant_t {"no live bitrate", false, false, true}, variant_t {"shared encoder", false, true, false}}) {
+    SCOPED_TRACE(variant.name);
+    auto stats = clean_pyrowave_stream(3840, 2160, 120, true, 300000, 204);
+    stats.adaptive_bitrate_enabled = variant.live_tuning;
+    stats.adaptive_runtime_update_supported = variant.runtime_updates;
+    stats.doctor_live_action_scope_available = variant.single_scope;
+    const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+    ASSERT_EQ(doctor.at("primary_issue"), "pyrowave_needs_more_than_allowed");
+    const auto &action = doctor.at("safe_recovery_action");
+    EXPECT_EQ(action.at("id"), "none");
+    EXPECT_EQ(action.at("kind"), "manual_guidance");
+    EXPECT_EQ(action.at("capability"), "manual");
+    EXPECT_EQ(action.at("endpoint"), "");
+    EXPECT_TRUE(action.at("payload_preview").empty()) << action.at("payload_preview");
+    EXPECT_FALSE(action.at("undo").at("supported").get<bool>());
+    const auto &recommendation = doctor.at("recommendation");
+    EXPECT_EQ(recommendation.at("next_step_label"), "Use a lower mode or HEVC");
+    EXPECT_EQ(recommendation.at("body").get<std::string>(), k_lower_mode_or_hevc_or_by_hand);
+    for (const auto &text : {recommendation.at("body").get<std::string>(),
+                             recommendation.at("next_step_label").get<std::string>(),
+                             recommendation.at("expected_effect").get<std::string>(),
+                             action.at("unavailable_reason").get<std::string>()}) {
+      SCOPED_TRACE(text);
+      EXPECT_NE(text.find("HEVC"), std::string::npos);
+      for (const char *offer : {"aise", "live bitrate", "et a request", "et about", "ower the bitrate", "rim bitrate", "Auto Fix"}) {
+        EXPECT_EQ(text.find(offer), std::string::npos) << offer;
+      }
+    }
+  }
+}
+
+TEST(StreamStatsDoctorTests, PyroWaveHeldBelowItsModelButCutBelowItsLaunchBitrateGetsTheQualityRestore) {
+  PyroWaveHostGuard host;
+  // 3840x2160 at 120 fps in 4:4:4, launched at a request of 290 Mbps and cut live to 280 on a network
+  // that is clean again. At 280 the stream is within a tenth of the 300 Mbps cap, below the model's
+  // 328, and 85% of its frames fill the byte budget, yet Doctor can restore the 290 the player chose,
+  // so it offers that restore rather than hide it behind the limit finding.
+  const int launch_kbps = static_cast<int>(stream_bitrate::encoder_kbps_for_wire(290000, 10, 512));
+  auto cut = clean_pyrowave_stream(3840, 2160, 120, true, 280000, 204);
+  cut.effective_launch_bitrate_kbps = launch_kbps;
+  const auto status = stream_stats::pyrowave_bitrate_json(cut);
+  ASSERT_EQ(status.at("raise_goal_kbps"), 300000);
+  ASSERT_FALSE(status.at("starved").get<bool>());
+  ASSERT_LT(launch_kbps, static_cast<int>(stream_bitrate::encoder_kbps_for_wire(300000, 10, 512)));
+  const auto doctor = stream_stats::build_doctor_json(cut, nlohmann::json::object());
+  EXPECT_EQ(doctor.at("primary_issue"), "quality_reduced_live");
+  EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Restore and verify");
+  const auto &payload = doctor.at("safe_recovery_action").at("payload_preview");
+  EXPECT_EQ(payload.at("action_id"), "restore_quality");
+  EXPECT_EQ(payload.at("target_bitrate_kbps"), launch_kbps);
+  EXPECT_EQ(payload.at("goal_source"), "launch_bitrate");
+
+  // Back at the bitrate it launched at there is nothing to restore, and the limit finding stands.
+  auto restored = clean_pyrowave_stream(3840, 2160, 120, true, 290000, 204);
+  ASSERT_EQ(restored.effective_launch_bitrate_kbps, launch_kbps);
+  EXPECT_EQ(stream_stats::build_doctor_json(restored, nlohmann::json::object()).at("primary_issue"),
+            "pyrowave_needs_more_than_allowed");
+
+  // With Live Tuning on, its own recovery owns the climb and Doctor offers no restore, so the limit
+  // finding stands there too.
+  cut.adaptive_bitrate_enabled = true;
+  EXPECT_EQ(stream_stats::build_doctor_json(cut, nlohmann::json::object()).at("primary_issue"),
+            "pyrowave_needs_more_than_allowed");
 }
 
 TEST(StreamStatsDoctorTests, PyroWaveAtItsFloorUnderPressureSuggestsHevcInsteadOfCutting) {
   PyroWaveHostGuard host;
   for (const bool live_tuning : {false, true}) {
     SCOPED_TRACE(live_tuning ? "Live Tuning on" : "Live Tuning off");
-    auto stats = clean_pyrowave_stats(76785);
+    // The calibrated floor for 1080p60 in 4:2:0: half the far figure, 44560 kbps at the encoder, which
+    // is a request of 50636.
+    auto stats = clean_pyrowave_stats(44560);
     stats.network_risk = true;
     stats.latency_ms = 60.0;
     stats.adaptive_bitrate_enabled = live_tuning;
-    stats.adaptive_min_bitrate_kbps = 76785;
+    stats.adaptive_min_bitrate_kbps = 44560;
     stats.adaptive_floor_source = "pyrowave_advice";
     const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
     const auto &action = doctor.at("safe_recovery_action");
@@ -5683,6 +5983,11 @@ TEST(StreamStatsDoctorTests, PyroWaveAtItsFloorUnderPressureSuggestsHevcInsteadO
     EXPECT_EQ(action.at("id"), "none");
     EXPECT_EQ(action.at("kind"), "manual_guidance");
     EXPECT_NE(action.at("unavailable_reason").get<std::string>().find("HEVC"), std::string::npos);
+    EXPECT_NE(action.at("unavailable_reason").get<std::string>().find("its floor, a request of about 51 Mbps"),
+              std::string::npos)
+      << action.at("unavailable_reason");
+    EXPECT_NE(evidence_row(doctor, "bitrate").at("detail").get<std::string>().find("no lower than a request of 51 Mbps"),
+              std::string::npos);
     EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Use HEVC or a lower mode");
   }
 
@@ -5690,7 +5995,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtItsFloorUnderPressureSuggestsHevcInsteadO
   auto above = clean_pyrowave_stats(120000);
   above.network_risk = true;
   above.latency_ms = 60.0;
-  above.adaptive_min_bitrate_kbps = 76785;
+  above.adaptive_min_bitrate_kbps = 44560;
   above.adaptive_floor_source = "pyrowave_advice";
   EXPECT_EQ(stream_stats::build_doctor_json(above, nlohmann::json::object()).at("safe_recovery_action").at("id"),
             "lower_bitrate");
@@ -5698,7 +6003,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtItsFloorUnderPressureSuggestsHevcInsteadO
 
 TEST(StreamStatsDoctorTests, PyroWaveCutBelowARequestThatMeetsTheAdviceClimbsBackToTheRequest) {
   PyroWaveHostGuard host;
-  // The player asked for 180 Mbps, which lands the encoder on 160988 kbps, above the 153571 the far
+  // The player asked for 180 Mbps, which lands the encoder on 160988 kbps, above the 89121 the far
   // advice lands it on. Something cut the stream to 128790, and the network is clean again.
   auto stats = clean_pyrowave_stats(128790);
   stats.effective_launch_bitrate_kbps = 160988;
@@ -5722,13 +6027,14 @@ TEST(StreamStatsDoctorTests, PyroWaveCutBelowARequestThatMeetsTheAdviceClimbsBac
   stats.adaptive_bitrate_enabled = true;
   EXPECT_EQ(stream_stats::build_doctor_json(stats, nlohmann::json::object()).at("primary_issue"), "none");
 
-  // A request below the advice still gets PyroWave's raise, which goes past the request.
-  auto short_request = clean_pyrowave_stats(80000);
-  short_request.effective_launch_bitrate_kbps = 100000;
+  // A request more than a tenth below the advice still gets PyroWave's raise, which goes past the
+  // request.
+  auto short_request = clean_pyrowave_stats(60000);
+  short_request.effective_launch_bitrate_kbps = 70000;
   const auto raise = stream_stats::build_doctor_json(short_request, nlohmann::json::object());
   EXPECT_EQ(raise.at("primary_issue"), "pyrowave_starved");
   EXPECT_EQ(raise.at("safe_recovery_action").at("payload_preview").at("goal_source"), "pyrowave_advice");
-  EXPECT_EQ(raise.at("safe_recovery_action").at("payload_preview").at("target_bitrate_kbps"), 171759);
+  EXPECT_EQ(raise.at("safe_recovery_action").at("payload_preview").at("target_bitrate_kbps"), 100148);
 }
 
 TEST(StreamStatsDoctorTests, PyroWaveEncoderLoadAsksForASmallerPictureNotALowerBitrate) {
@@ -5865,14 +6171,14 @@ TEST(DoctorActionTests, PyroWaveRaiseClimbsPastTheRequestToTheAdviceAndLiveTunin
   ASSERT_EQ(doctor.at("primary_issue"), "pyrowave_starved") << doctor.dump();
   const auto &payload = doctor.at("safe_recovery_action").at("payload_preview");
   ASSERT_EQ(payload.at("action_id"), "restore_quality");
-  EXPECT_EQ(payload.at("target_bitrate_kbps"), 171759);
+  EXPECT_EQ(payload.at("target_bitrate_kbps"), 100148);
 
   const auto applied = doctor_actions::execute({{"action_id", "restore_quality"}, {"goal_source", "pyrowave_advice"}});
   ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
   EXPECT_EQ(applied.at("requested").at("bitrate_kbps"), 25000);
-  EXPECT_EQ(applied.at("requested").at("target_bitrate_kbps"), 153571);
+  EXPECT_EQ(applied.at("requested").at("target_bitrate_kbps"), 89121);
   EXPECT_EQ(applied.at("requested").at("goal_source"), "pyrowave_advice");
-  EXPECT_EQ(applied.at("requested").at("goal_request_kbps"), 171759);
+  EXPECT_EQ(applied.at("requested").at("goal_request_kbps"), 100148);
   const auto run_id = applied.at("run_id").get<std::string>();
 
   // Guarded steps of a quarter each, every one verified on a clean window.
@@ -5887,12 +6193,12 @@ TEST(DoctorActionTests, PyroWaveRaiseClimbsPastTheRequestToTheAdviceAndLiveTunin
   }
   ASSERT_EQ(step.at("state"), "resolved") << step.dump();
   EXPECT_EQ(step.at("goal_source"), "pyrowave_advice");
-  // Past the 20000 kbps the player asked for, to where the advice lands the encoder.
-  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 153571);
+  // Past the 20000 kbps the player asked for, to where the calibrated far advice lands the encoder.
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 89121);
 
   // Live Tuning cannot follow the raise: its feedback is held while Doctor owns the change.
   adaptive_bitrate::update_network_stats(0.0, 3.0);
-  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 153571);
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 89121);
 
   // Turning Live Tuning on first puts back the player's own request, which stays its ceiling.
   (void) execute_with_encoder_ack(20000, [] {

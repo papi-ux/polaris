@@ -3267,7 +3267,8 @@ namespace stream {
           adaptive_bitrate::set_session_floor(advice.floor_encoder_kbps, "pyrowave_advice");
           BOOST_LOG(info) << "PyroWave: Live Tuning cuts this stream no lower than "sv
                           << adaptive_bitrate::get_state().min_bitrate_kbps << " kbps at the encoder, half the "sv
-                          << advice.far_encoder_kbps << " kbps its 35 dB model advises on a device's own screen"sv;
+                          << advice.far_encoder_kbps << " kbps its model advises at "sv << pyrowave_advice::k_far_target_db
+                          << " dB on a device's own screen"sv;
         }
       }
 

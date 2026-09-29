@@ -108,12 +108,15 @@ On Polaris 1.4.13, its "CPU color conversion" label shows for every PyroWave str
 Newer builds say where the encoder converted colour.
 
 **Bitrate.** Plan the link for the full bitrate you set. Polaris 1.4.14 and newer quote PyroWave's
-own figure, from its author's 35 dB quality model. For 1920x1080 at 60 fps on a phone's or
-handheld's own screen, set about 172 Mbps in 4:2:0 or 201 Mbps in 4:4:4, which Nova for Android
-streams, at the host's default 10% FEC with stereo audio
+own figure, from its author's quality model, with the target for a phone's or handheld's own screen
+set by a check on a Retroid Pocket 6. On such a screen, set about 101 Mbps for 1920x1080 at 60 fps
+in 4:2:0, 109 Mbps in 4:4:4, which Nova for Android streams, and 215 Mbps at 120 fps in 4:4:4, at
+the host's default 10% FEC with stereo audio
 ([other figures, and their limits](pyrowave-reference.md#how-polaris-advises-and-tunes-pyrowave)).
-When a stream sits below that on a clean network, or most frames hit PyroWave's size limit,
-[Doctor](doctor.md) offers one tap to raise it, to at most 300 Mbps, with Undo. Live Tuning raises a
+When a stream sits more than a tenth below that on a clean network, [Doctor](doctor.md) offers one
+tap to raise it, to at most 300 Mbps, with Undo. Where 300 Mbps or your `max_bitrate` is less than
+the model asks, as at 3840x2160 and 120 fps in 4:4:4, and most frames still fill the codec's byte
+budget, Doctor suggests a lower resolution or frame rate, or HEVC, instead. Live Tuning raises a
 stream above your setting only to its 2 Mbps floor, and stops cutting at half the advice.
 
 ## If it does not work

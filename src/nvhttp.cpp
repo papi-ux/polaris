@@ -5252,7 +5252,7 @@ namespace nvhttp {
       try {
         std::size_t consumed = 0;
         const auto parsed = std::stoll(raw_bitrate, &consumed);
-        if (consumed != raw_bitrate.size() || parsed < 1000 || parsed > 300000) {
+        if (consumed != raw_bitrate.size() || !stream_bitrate::request_in_range(parsed)) {
           BOOST_LOG(warning) << "Rejecting resolved launch profile with invalid bitrate"sv;
           return nullptr;
         }
@@ -6174,7 +6174,8 @@ namespace nvhttp {
       if ((hdr != 0 && hdr != 1) || (display_locked != 0 && display_locked != 1) ||
           (bitrate_locked != 0 && bitrate_locked != 1) || width != std::floor(width) ||
           height != std::floor(height) || width < 320 || width > 4096 || height < 240 || height > 2160 ||
-          fps < 15 || fps > 240 || ceiling < 15 || ceiling > 1000 || bitrate < 1000 || bitrate > 300000 || bitrate != std::floor(bitrate))
+          fps < 15 || fps > 240 || ceiling < 15 || ceiling > 1000 || bitrate < stream_bitrate::k_min_request_kbps ||
+          bitrate > stream_bitrate::k_max_request_kbps || bitrate != std::floor(bitrate))
         return reject(400, "Unsupported Space stream limits");
       if (!current->display_mode.empty()) {
         std::istringstream input(current->display_mode);
@@ -8340,6 +8341,11 @@ namespace nvhttp {
       // bitrate_units in session status for every stream, whatever its codec: what its request was
       // split into, by the arithmetic bitrate_units.formula names.
       features["bitrate_units_v1"] = true;
+      // The most a client may set by hand, in kbps, through this host's own endpoints: client settings,
+      // a live bitrate, a resolved launch, a Space's resolver and the launch profile route. A host
+      // without it takes up to 300 Mbps, so a client offers more only where this says so. The RTSP
+      // handshake is not one of them: max_bitrate alone bounds it.
+      features["manual_bitrate_max_kbps"] = stream_bitrate::k_max_request_kbps;
       features["ai_auto_quality_control"] = false;
       features["ai_optimizer"] = false;
       features["ai_optimizer_control"] = false;
@@ -9271,8 +9277,8 @@ namespace nvhttp {
               return;
             }
             target_bitrate_kbps = body["target_bitrate_kbps"].get<int>();
-            if (target_bitrate_kbps != 0 && (target_bitrate_kbps < 1000 || target_bitrate_kbps > 300000)) {
-              write_json({{"error", "target_bitrate_kbps must be 0 or between 1000 and 300000"}}, SimpleWeb::StatusCode::client_error_bad_request);
+            if (target_bitrate_kbps != 0 && !stream_bitrate::request_in_range(target_bitrate_kbps)) {
+              write_json({{"error", "target_bitrate_kbps must be 0 or " + stream_bitrate::request_range_text()}}, SimpleWeb::StatusCode::client_error_bad_request);
               return;
             }
           }
@@ -11124,9 +11130,9 @@ namespace nvhttp {
           return;
         }
         int bitrate_kbps = body.value("bitrate_kbps", 0);
-        if (bitrate_kbps < 1000 || bitrate_kbps > 300000) {
+        if (!stream_bitrate::request_in_range(bitrate_kbps)) {
           nlohmann::json err;
-          err["error"] = "bitrate_kbps must be between 1000 and 300000";
+          err["error"] = "bitrate_kbps must be " + stream_bitrate::request_range_text();
           SimpleWeb::CaseInsensitiveMultimap headers;
           headers.emplace("Content-Type", "application/json");
           response->write(SimpleWeb::StatusCode::client_error_bad_request, err.dump(), headers);

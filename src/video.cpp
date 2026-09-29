@@ -4220,7 +4220,9 @@ namespace video {
 
 #ifndef __APPLE__
           if (encoder.name == "nvenc" && config::video.nv_legacy.vbv_percentage_increase > 0) {
-            ctx->rc_buffer_size += ctx->rc_buffer_size * config::video.nv_legacy.vbv_percentage_increase / 100;
+            ctx->rc_buffer_size = static_cast<int>(nvenc::grown_vbv_buffer_bits(
+              ctx->rc_buffer_size, config::video.nv_legacy.vbv_percentage_increase, std::numeric_limits<int>::max()
+            ));
           }
 #endif
         }

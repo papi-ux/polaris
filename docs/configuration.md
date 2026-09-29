@@ -423,10 +423,12 @@ are explained in [Launch modes and capture paths](launch-modes.md). Keys: `linux
 `display_plan`, `adaptive_bitrate_enabled`, `disconnect_resume_timeout_seconds`.
 
 The adaptive range has a floor, `adaptive_bitrate_min`, and no ceiling of its own: the bitrate the
-client asked for is the ceiling, and `max_bitrate` caps what a client may ask for. Live Tuning and
-Doctor lower the bitrate from that request and bring it back no higher, except that a request below
-the floor starts at the floor. A PyroWave stream has a floor of its own, half what the codec's model
-advises for it on a device's own screen and never above the request. `max_bitrate` is the only cap a
+client asked for is the ceiling, and `max_bitrate` caps what a client may ask for. Polaris's own
+endpoints take up to 500 Mbps from a client; a Moonlight client's RTSP request meets `max_bitrate`
+alone. Live Tuning and Doctor lower the bitrate from that request and bring it back no higher, except
+that a request below the floor starts at the floor. A PyroWave stream has a floor of its own, half
+what the codec's model advises for it on a device's own screen and never above the request.
+`max_bitrate` is the only cap a
 PyroWave request meets; the Stability preset, a device profile and a saved paired profile do not cut
 it. Doctor may raise a starved PyroWave stream above its request, as one tap with Undo, to no more
 than 300 Mbps and `max_bitrate`

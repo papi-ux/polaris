@@ -163,20 +163,22 @@ const PYROWAVE_BITRATE = {
   version: 1,
   model: 'psnr-hvs-m',
   target_db: 35,
+  far_target_db: 31,
   width: 1920,
   height: 1080,
   fps: 60,
   chroma: '420',
-  advice_far_kbps: 171759,
+  advice_far_kbps: 100148,
   advice_near_kbps: 245904,
-  raise_goal_kbps: 171759,
+  raise_goal_kbps: 100148,
   cap_kbps: 300000,
   encoder_kbps: 20000,
+  request_kbps: 23347,
   ceiling_frame_share: 0.929,
   starved: true,
   rule: 'model',
   raise_goal_limited_by: 'advice',
-  live_tuning_floor_encoder_kbps: 76785,
+  live_tuning_floor_encoder_kbps: 44560,
   request_cap: null,
   cap_set_aside: { kbps: 15000, source: 'stability_preset_selected' },
   assumes: { fec_percentage: 10, audio_kbps: 512 },
@@ -206,12 +208,12 @@ describe('describePyroWaveStream', () => {
     ])
     expect(stream.lines).toEqual([
       'The route says how frames reach the encoder, not how capture produced them.',
-      "Advice for this stream: 172 Mbps on a device's own screen, 246 Mbps on a television or monitor.",
-      "Each figure is what a client sets, with 10% FEC and the stream's audio included, for 35 dB of PSNR-HVS-M-H in PyroWave's own bitrate model at this size, frame rate and chroma. The model is an objective estimate from four game clips on SDR, not a measurement on any device.",
-      'The encoder runs at 20 Mbps now.',
+      "PyroWave's model for this stream: 101 Mbps on a device's own screen, 246 Mbps on a television or monitor.",
+      "Each figure is a request, what a client sets, with 10% FEC and the stream's audio included, for 31 dB of PSNR-HVS-M-H on a device's own screen and 35 dB on a television or monitor, in PyroWave's own bitrate model at this size, frame rate and chroma. The own screen target comes from one check by eye on a Retroid Pocket 6, and the model is an objective estimate from four game clips on SDR.",
+      'This stream runs at a request of about 23 Mbps now, 20 Mbps at the encoder.',
       "93% of about the last 240 frames hit PyroWave's byte budget.",
-      "The host reads this stream as starved: the encoder runs below where Doctor's raise would land it, or more than 80% of recent frames hit the byte budget.",
-      "Doctor's PyroWave raise, for a starved stream on a clean network, goes to 172 Mbps, the own screen figure.",
+      "The host reads this stream as starved: as a request, it runs more than a tenth below where Doctor's raise would take it.",
+      "Doctor's PyroWave raise, for a starved stream on a clean network, goes to 101 Mbps, the own screen figure.",
       'A launch cap of 15 Mbps (stability_preset_selected), sized for H.264, was set aside for this stream.',
     ])
     expectHouseStyle(everyLine(stream))
@@ -269,7 +271,7 @@ describe('describePyroWaveStream', () => {
   })
 
   it('words the FEC the host grossed the advice up for, never the oversized frame telemetry', () => {
-    const conditions = (stream) => stream.lines.find((line) => line.startsWith('Each figure is what a client sets'))
+    const conditions = (stream) => stream.lines.find((line) => line.startsWith('Each figure is a request'))
     const configured = describePyroWaveStream(t, streaming({
       pyrowave_bitrate: { ...PYROWAVE_BITRATE, assumes: { fec_percentage: 20, audio_kbps: 1536 } },
     }))
@@ -282,7 +284,46 @@ describe('describePyroWaveStream', () => {
 
   it('keeps the conditions when the host sends no FEC figure', () => {
     const stream = describePyroWaveStream(t, streaming({ pyrowave_bitrate: { ...PYROWAVE_BITRATE, assumes: undefined } }))
-    expect(stream.lines).toContain("Each figure is what a client sets, with FEC and the stream's audio included, for 35 dB of PSNR-HVS-M-H in PyroWave's own bitrate model at this size, frame rate and chroma. The model is an objective estimate from four game clips on SDR, not a measurement on any device.")
+    expect(stream.lines).toContain("Each figure is a request, what a client sets, with FEC and the stream's audio included, for 31 dB of PSNR-HVS-M-H on a device's own screen and 35 dB on a television or monitor, in PyroWave's own bitrate model at this size, frame rate and chroma. The own screen target comes from one check by eye on a Retroid Pocket 6, and the model is an objective estimate from four game clips on SDR.")
+  })
+
+  it('never pairs the Retroid Pocket 6 calibration with 35 dB on a device\'s own screen', () => {
+    // The host serving the console always sends far_target_db. Without it, the line falls back to the
+    // host's own screen target, not to the television's, which would contradict its next sentence.
+    const missing = { ...PYROWAVE_BITRATE }
+    delete missing.far_target_db
+    const stream = describePyroWaveStream(t, streaming({ pyrowave_bitrate: missing }))
+    expect(stream.lines).toContain("Each figure is a request, what a client sets, with 10% FEC and the stream's audio included, for 31 dB of PSNR-HVS-M-H on a device's own screen and 35 dB on a television or monitor, in PyroWave's own bitrate model at this size, frame rate and chroma. The own screen target comes from one check by eye on a Retroid Pocket 6, and the model is an objective estimate from four game clips on SDR.")
+    expect(stream.lines.join(' ')).not.toContain("35 dB of PSNR-HVS-M-H on a device's own screen")
+  })
+
+  it('reads the Retroid Pocket 6 stream as a request, and names figures past what Polaris recommends', () => {
+    // 1920x1080 at 120 fps in 4:4:4 at the 200 Mbps judged right: the encoder runs at 179 Mbps, which is
+    // a request of 200 against the 215 advised, 93%, not the 83% an encoder rate against a request reads.
+    const stream = describePyroWaveStream(t, streaming({
+      pyrowave_bitrate: {
+        ...PYROWAVE_BITRATE,
+        fps: 120,
+        chroma: '444',
+        advice_far_kbps: 214898,
+        advice_near_kbps: 593890,
+        raise_goal_kbps: 214898,
+        encoder_kbps: 178987,
+        request_kbps: 199999,
+        ceiling_frame_share: 1,
+        starved: false,
+        cap_set_aside: null,
+      },
+    }))
+    expect(stream.lines).toContain("PyroWave's model for this stream: 215 Mbps on a device's own screen, 594 Mbps on a television or monitor.")
+    expect(stream.lines).toContain("Polaris recommends no more than 300 Mbps on its own, so a figure above that is the model's alone. Doctor's raise stops there, and a client can set more by hand.")
+    expect(stream.lines).toContain('This stream runs at a request of about 200 Mbps now, 179 Mbps at the encoder.')
+    expect(stream.lines.join(' ')).not.toContain('The encoder runs at')
+    expect(stream.lines.join(' ')).not.toContain('starved:')
+    expectHouseStyle(everyLine(stream))
+
+    // Every figure within what Polaris recommends gets no such line.
+    expect(describePyroWaveStream(t, streaming()).lines.join(' ')).not.toContain('recommends no more than')
   })
 
   it('shows the last PyroWave stream when none runs, and nothing for another codec', () => {

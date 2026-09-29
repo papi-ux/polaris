@@ -172,13 +172,31 @@ describe('v1.4.14 release contract', () => {
   it('quotes each number with the conditions it holds under', () => {
     const notes = currentNotes()
     const reference = read('docs/pyrowave-reference.md')
-    expect(reference).toContain('| 1920x1080 at 60 fps, 4:2:0 | 172 Mbps | 246 Mbps |')
-    expect(reference).toContain('| 1920x1080 at 60 fps, 4:4:4 | 201 Mbps | 298 Mbps |')
+    expect(reference).toContain('| 1920x1080 at 60 fps, 4:2:0 | 101 Mbps | 246 Mbps |')
+    expect(reference).toContain('| 1920x1080 at 60 fps, 4:4:4 | 109 Mbps | 298 Mbps |')
     expect(notes).toContain(
-      "At 1920x1080 and 60 fps in 4:2:0 that's about 172 Mbps on the device's own screen and 246 " +
-        'on a TV or monitor (201 and 298 in 4:4:4), at the default 10% FEC with stereo audio.',
+      "At 1920x1080 and 60 fps in 4:2:0 that's about 101 Mbps on the device's own screen and 246 " +
+        'on a TV or monitor (109 and 298 in 4:4:4), at the default 10% FEC with stereo audio.',
     )
-    expect(notes).toContain('more than 80% of its recent frames hit the codec')
+    // The own screen target is calibrated to the Retroid Pocket 6, and the notes quote its row.
+    expect(reference).toContain('| 1920x1080 at 120 fps, 4:4:4 | 215 Mbps | 594 Mbps |')
+    expect(notes).toContain('looked right at 200 Mbps. The figure there is 215, so 200 reads healthy.')
+    // A stream is starved more than a tenth below the figure; the byte budget share no longer makes it so.
+    expect(notes).toContain('runs more than a tenth below the lower of those figures')
+    expect(notes).not.toContain('80% of its recent frames')
+    // Held below the model by the cap or max_bitrate with the budget full, Doctor suggests a smaller
+    // picture or HEVC, and where only its 300 holds the stream, a bitrate set by hand. The notes quote
+    // the 2160p120 row the reference computes.
+    expect(reference).toContain('| 3840x2160 at 120 fps, 4:4:4 | 328 Mbps | 699 Mbps |')
+    expect(notes).toContain("as at 3840x2160 and 120 fps in 4:4:4 on the device's own screen")
+    expect(notes).toContain("Doctor says so and suggests a lower resolution or frame rate, or HEVC. If only Doctor's 300 stands in the way, it adds that you can set more yourself.")
+    expect(notes).not.toContain("It doesn't offer to change the bitrate there.")
+    // A live bitrate applies at the encoder, so Doctor names a lower live figure while Live Tuning is on.
+    expect(notes).toContain('With Live Tuning on it names the live bitrate instead, a little lower, because a live change skips the FEC and audio.')
+    // The host takes up to 500 Mbps by hand and announces it; nothing it recommends goes past 300.
+    expect(notes).toContain("Polaris takes a bitrate you set yourself up to 500 Mbps now, up from 300, and tells your client it does. Doctor's raise, and anything else Polaris recommends on its own, still stops at 300.")
+    expect(notes).not.toContain('wherever your client sends its own bitrate')
+    expect(notes).toContain('NVENC with `nvenc_vbv_increase` at 258% or more no longer overflows its buffer at 500 Mbps.')
     expect(notes).toContain('never past 300 Mbps or your `max_bitrate`')
     // Live Tuning lifts a request below adaptive_bitrate_min to that floor, so Doctor is not the only lift.
     expect(notes).toContain('Live Tuning lifting a request below `adaptive_bitrate_min` (2 Mbps by default) to that floor')
@@ -187,7 +205,7 @@ describe('v1.4.14 release contract', () => {
     expect(notes).toContain('With Live Tuning on, which is the default, Doctor says what to set instead.')
     // A tunnel that carries Ethernet, ZeroTier or an OpenVPN tap, still reports its own MAC.
     expect(notes).toContain('another tunnel with no MAC of its own')
-    expect(notes).toContain('not yet checked side by side on a device, and the 300 Mbps ceiling may move')
+    expect(notes).toContain("the TV figure hasn't been checked on a big screen yet, and Doctor's 300 Mbps ceiling may move")
     expect(notes).toContain("9 ms a frame against VA-API's 16 on one tester's RX 9070 XT at 4K60")
   })
 })

@@ -61,6 +61,27 @@ namespace stream_bitrate {
   /// The FEC share above which the handshake stops taking FEC off a request.
   inline constexpr int k_max_adjusted_fec_percentage = 80;
 
+  /// The least bitrate a client may set by hand, in kbps.
+  inline constexpr int k_min_request_kbps = 1000;
+
+  /// The most bitrate a client may set by hand, in kbps: 500 Mbps. Every Polaris HTTP endpoint a
+  /// paired client sets its own bitrate through takes up to this, whatever the codec, and capabilities
+  /// announce it as manual_bitrate_max_kbps. The RTSP handshake is not one of them: a Moonlight
+  /// client's request there is bounded by max_bitrate alone. Nothing the host proposes on its own goes
+  /// this high: Doctor's PyroWave raise and every figure the host recommends stop at
+  /// pyrowave_advice::k_cap_kbps, 300 Mbps.
+  inline constexpr int k_max_request_kbps = 500000;
+
+  /// Whether a bitrate a client set by hand is one the host takes, k_min_request_kbps to k_max_request_kbps.
+  inline constexpr bool request_in_range(std::int64_t kbps) {
+    return kbps >= k_min_request_kbps && kbps <= k_max_request_kbps;
+  }
+
+  /// That range as the endpoints' refusals word it: "between 1000 and 500000".
+  inline std::string request_range_text() {
+    return "between " + std::to_string(k_min_request_kbps) + " and " + std::to_string(k_max_request_kbps);
+  }
+
   /// What a stream's audio costs, as the handshake counts it: 256 kbps a channel in high quality, 96 otherwise.
   inline int audio_kbps(bool high_quality, int channels) {
     return (high_quality ? 256 : 96) * channels;

@@ -17,6 +17,7 @@
 #include <boost/algorithm/string/predicate.hpp>
 
 #include "private_state_file.h"
+#include "pyrowave_advice.h"
 
 using namespace std::literals;
 
@@ -52,7 +53,9 @@ namespace recovery_profile {
         profile.width >= 320 && profile.width <= 16384 &&
         profile.height >= 240 && profile.height <= 16384 &&
         profile.target_fps >= 15 && profile.target_fps <= 240 &&
-        profile.target_bitrate_kbps >= 1000 && profile.target_bitrate_kbps <= 300000;
+        // A recovery profile is Doctor's own recommendation, so it stops where every figure the host
+        // recommends does, below the 500 Mbps a player may set by hand.
+        profile.target_bitrate_kbps >= 1000 && profile.target_bitrate_kbps <= pyrowave_advice::k_cap_kbps;
     }
 
     nlohmann::json record_json(const record_t &record) {

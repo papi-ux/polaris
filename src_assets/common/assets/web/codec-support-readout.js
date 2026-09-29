@@ -177,15 +177,28 @@ export function describePyroWaveStream(t, stats) {
   // The FEC share the host grossed the advice up for. Not fec_protection.fec_percentage: that records
   // a percentage only once a frame outgrows FEC, so it reads 0 on a healthy stream.
   const fec = advice.assumes?.fec_percentage
+  // The own screen figure aims for its calibrated quality and the television figure for the author's
+  // default. The host serving this console computed the advice and sends both; the fallbacks are its own
+  // two targets, so a missing field never pairs the Retroid Pocket 6 calibration with 35 dB.
+  const db = positive(advice.target_db) || 35
+  const farDb = positive(advice.far_target_db) || 31
   lines.push(Number.isFinite(fec) && fec >= 0 ?
-    t('config.codec_support_pyrowave_advice_conditions', { fec, db: positive(advice.target_db) || 35 }) :
-    t('config.codec_support_pyrowave_advice_conditions_no_fec', { db: positive(advice.target_db) || 35 }))
+    t('config.codec_support_pyrowave_advice_conditions', { fec, db, far_db: farDb }) :
+    t('config.codec_support_pyrowave_advice_conditions_no_fec', { db, far_db: farDb }))
+  // The figures above are the model's readouts and are not capped. Past what Polaris recommends on its
+  // own, the line says so, so a television figure of 594 Mbps does not read as advice to set it.
+  const recommendedMost = positive(advice.cap_kbps)
+  if (recommendedMost && (advice.advice_far_kbps > recommendedMost || advice.advice_near_kbps > recommendedMost)) {
+    lines.push(t('config.codec_support_pyrowave_above_cap', { cap: mbps(recommendedMost) }))
+  }
   if (RULES.has(text(advice.rule))) {
     lines.push(t(`config.codec_support_pyrowave_rule_${text(advice.rule)}`))
   }
 
-  if (positive(advice.encoder_kbps)) {
-    lines.push(t('config.codec_support_pyrowave_encoder_rate', { encoder: mbps(advice.encoder_kbps) }))
+  // What the stream runs at, as the request the advice is in, beside the encoder's own rate: an encoder
+  // rate read against a request looks a tenth short when it is not.
+  if (positive(advice.request_kbps) && positive(advice.encoder_kbps)) {
+    lines.push(t('config.codec_support_pyrowave_rate_now', { request: mbps(advice.request_kbps), encoder: mbps(advice.encoder_kbps) }))
   }
   if (Number.isFinite(advice.ceiling_frame_share)) {
     lines.push(t('config.codec_support_pyrowave_ceiling_share', { share: Math.round(advice.ceiling_frame_share * 100) }))

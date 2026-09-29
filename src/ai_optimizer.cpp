@@ -957,7 +957,7 @@ namespace ai_optimizer {
   }
 
   int bitrate_ceiling_kbps(std::string_view codec) {
-    return to_lower_copy(std::string {codec}) == "pyrowave" ? 300000 : 100000;
+    return to_lower_copy(std::string {codec}) == "pyrowave" ? pyrowave_advice::k_cap_kbps : 100000;
   }
 
   static int derive_safe_bitrate_kbps(int baseline_kbps,

@@ -6,22 +6,28 @@
  * to 3840x2160, scored each result with PSNR-HVS-M-H (PSNR-HVS-M weighted for how far away the picture
  * is watched), and fitted one polynomial per quality, viewing distance and chroma to the bitrate each
  * needed. The fit ships as eval-results/pyrowave_regression_results.h in the PyroWave tree Polaris
- * builds, and this evaluates it at 35 dB, the level the author calls the default good quality.
+ * builds, and this evaluates it at two qualities. A television or monitor gets 35 dB, the level the
+ * author calls the default good quality. A device's own screen gets 31 dB, calibrated by eye: on a
+ * Retroid Pocket 6, 200 Mbps was right for Control at 1920x1080, 120 fps and 4:4:4, where the model
+ * asks about 359 Mbps at the encoder at 35 dB, about 400 as a request, and about 192 at 31 dB, about
+ * 215 as a request. The television figure keeps 35 dB until it is checked on a big screen.
  *
- * Nova's matching estimator, a port of the same header, is in review, so that the host and the client
- * can quote the same number for the same picture. A picture outside the sizes the model was fitted on
- * gets the bits per pixel of the nearest edge, and tests/fixtures/pyrowave-rate-model.json pins the
- * host's figures.
+ * Nova's estimator is a port of the same header, so the host and the client quote the same number for
+ * the same picture only while both evaluate it at the same two qualities. Nova's merged estimator
+ * (nova#107) still reads the far figure at 35 dB. It mirrors k_far_target_db from nova#130, and until
+ * that lands Nova's own estimate for a device's own screen is higher than the host's. A picture outside
+ * the sizes the model was fitted on gets the bits per pixel of the nearest edge, and
+ * tests/fixtures/pyrowave-rate-model.json pins the host's figures at both qualities.
  *
  * The model's limits travel with every number it gives: an objective metric on four clips of about ten
- * frames each, luma only, sampled at 16:9, measured on SDR. It is not a measurement on any device.
- * On a Retroid Pocket 6, 200 Mbps was right for Control at 1080p120 where the model asks about 359,
- * which is why Doctor raises no further than the far figure and never past k_cap_kbps.
+ * frames each, luma only, sampled at 16:9, measured on SDR. The 31 dB target is one check by eye on
+ * one device, and Doctor raises no further than the far figure and never past k_cap_kbps.
  */
 #pragma once
 
 // standard includes
 #include <cstdint>
+#include <optional>
 #include <string_view>
 
 // lib includes
@@ -32,8 +38,15 @@
 
 namespace pyrowave_advice {
 
-  /// The quality the advice aims for, in dB of PSNR-HVS-M-H.
+  /// The quality the near figure aims for, in dB of PSNR-HVS-M-H: 35, the author's default good
+  /// quality, for a television, a monitor or an external display. Not yet checked on one.
   inline constexpr int k_target_db = 35;
+
+  /// The handheld target: the quality the far figure aims for on a device's own screen, in dB of
+  /// PSNR-HVS-M-H. 31, calibrated to the Retroid Pocket 6 check above rather than the author's default.
+  /// Nova's estimator mirrors it from nova#130, and from then on it changes on both ends together,
+  /// with the fixture.
+  inline constexpr int k_far_target_db = 31;
 
   /// The model's name in the contract clients read.
   inline constexpr std::string_view k_model = "psnr-hvs-m";
@@ -41,7 +54,8 @@ namespace pyrowave_advice {
   /// The PyroWave revision whose regression header this evaluates, and which the fixture is keyed by.
   inline constexpr std::string_view k_model_revision = "186f0393b77f7755953b5ecde994bb1cec2e4155";
 
-  /// The most Doctor raises a PyroWave stream to, on the wire. Also the most any paired endpoint takes.
+  /// The most Doctor raises a PyroWave stream to, as a request, and the most any figure the host
+  /// recommends on its own. A player may set more by hand, up to stream_bitrate::k_max_request_kbps.
   inline constexpr int k_cap_kbps = 300000;
 
   /// H 2.0, a television, a monitor or an external display. The model's higher, "near" figure.
@@ -50,8 +64,16 @@ namespace pyrowave_advice {
   /// H 2.875, a device's own screen. The farthest distance the model reaches, and its lower figure.
   inline constexpr int k_height_factor_far = 15;
 
-  /// More than this share of recent frames at the byte ceiling is a starved stream.
-  inline constexpr double k_starved_ceiling_share = 0.8;
+  /// A stream is starved below this share of Doctor's raise goal, both as requests. The far figure is
+  /// one judgment by eye, so a stream within a tenth of it is healthy: 200 Mbps on the Retroid Pocket 6
+  /// at 1920x1080, 120 fps and 4:4:4 is 93% of the 215 Mbps the far figure asks there.
+  inline constexpr double k_starved_below_share = 0.9;
+
+  /// A stream the cap or max_bitrate holds below the far figure wants more than Doctor raises it to once
+  /// more than this share of its recent frames fill PyroWave's byte budget. The share decides nothing
+  /// else: where nothing holds the goal below the far figure, a full budget says only that the codec
+  /// would use more bits, and that figure is calibrated to where the Retroid Pocket 6 looked right.
+  inline constexpr double k_ceiling_bound_share = 0.8;
 
   /// Stereo in high quality, which is what the pre-launch advice assumes the stream's audio costs.
   inline constexpr int k_default_audio_kbps = 512;
@@ -80,14 +102,18 @@ namespace pyrowave_advice {
   };
 
   /**
-   * @brief What the encoder needs for a picture at 35 dB, watched from height_factor.
+   * @brief What the encoder needs for a picture at target_db, watched from height_factor.
    *
    * Upstream asserts on a picture outside 1280x720 to 3840x2160 pixels, so such a picture is never
-   * handed to it: it gets the edge's bits per pixel instead. A height factor outside 0 to 15 gets the
-   * flat fallback, and a size or frame rate that is not positive gets nothing.
+   * handed to it: it gets the edge's bits per pixel instead. A height factor outside 0 to 15, or a
+   * target outside the model's 30 to 50 dB, gets the flat fallback, and a size or frame rate that is
+   * not positive gets nothing.
    * @param height_factor An index into upstream's distances, H = 1 + index / 8.
+   * @param target_db The quality to reach, in dB of PSNR-HVS-M-H: k_far_target_db or k_target_db. It has
+   * no default, so a caller names the target of the figure it evaluates, and a far figure cannot fall
+   * back to the television's 35 dB unseen.
    */
-  estimate_t estimate(int width, int height, int fps, bool chroma444, int height_factor);
+  estimate_t estimate(int width, int height, int fps, bool chroma444, int height_factor, int target_db);
 
   /// What the stream around the video costs, which is what turns an encoder rate into a request.
   struct link_t {
@@ -121,7 +147,8 @@ namespace pyrowave_advice {
     int fps = 0;
     bool chroma444 = false;
     rule_e rule = rule_e::none;
-    /// What the encoder needs on a device's own screen (H 2.875) and on a television (H 2.0).
+    /// What the encoder needs on a device's own screen (H 2.875, at k_far_target_db) and on a
+    /// television (H 2.0, at k_target_db).
     int far_encoder_kbps = 0;
     int near_encoder_kbps = 0;
     /// The same two as requests, grossed up for FEC, audio and overhead. What a client should ask for.
@@ -144,11 +171,40 @@ namespace pyrowave_advice {
    */
   advice_t advise(int width, int height, int fps, bool chroma444, const link_t &link, int max_bitrate_kbps);
 
+  /// The request that lands the encoder on encoder_kbps over link: what a client sets for that rate.
+  /// 0 when encoder_kbps is not positive.
+  int request_for_encoder(int encoder_kbps, const link_t &link);
+
+  /**
+   * @brief Whether a stream that runs at request_kbps is short of bits.
+   *
+   * True below k_starved_below_share of the raise goal, both as requests, which is the one figure
+   * Doctor quotes. A stream with no advice, or at no known rate, is not starved.
+   */
+  bool starved(const advice_t &advice, int request_kbps);
+
+  /**
+   * @brief Whether a stream wants more than Doctor raises it to at its size and frame rate.
+   *
+   * True when k_cap_kbps or max_bitrate holds the raise goal below the far figure, the stream runs at
+   * request_kbps no more than a tenth below that goal, so it is not starved, and below the far figure,
+   * and more than k_ceiling_bound_share of its recent frames fill PyroWave's byte budget. No raise
+   * Doctor offers reaches what the model asks and a cut only softens the picture, so Doctor suggests a
+   * smaller or slower picture, or HEVC, and where only k_cap_kbps holds the goal, notes that a player
+   * can set more by hand, up to stream_bitrate::k_max_request_kbps or max_bitrate if that is lower.
+   * A stream whose goal is the far
+   * figure itself never wants more, whatever its ceiling share, and neither does one that runs at the
+   * far figure or above it.
+   * @param ceiling_frame_share The share of recent frames at the byte budget, or nullopt while unknown.
+   */
+  bool needs_more_than_allowed(const advice_t &advice, int request_kbps, std::optional<double> ceiling_frame_share);
+
   /**
    * @brief The advice fields of the contract, without anything live.
    *
-   * version, model, target_db, width, height, fps, chroma, advice_far_kbps, advice_near_kbps,
-   * raise_goal_kbps and cap_kbps, plus rule and raise_goal_limited_by. Every kbps figure is a request.
+   * version, model, target_db (the near figure's quality), far_target_db (the far figure's), width,
+   * height, fps, chroma, advice_far_kbps, advice_near_kbps, raise_goal_kbps and cap_kbps, plus rule and
+   * raise_goal_limited_by. Every kbps figure is a request.
    */
   nlohmann::json advice_json(const advice_t &advice);
 

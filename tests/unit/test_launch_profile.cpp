@@ -515,6 +515,22 @@ TEST(LaunchProfileExplicitFields, AcceptsACompleteRequestAndKeepsTheOldUnits) {
   EXPECT_EQ(launch_profile::describe_explicit_launch_rejection(fields), "Explicit launch fields must be complete and within supported bounds.");
 }
 
+TEST(LaunchProfileExplicitFields, TakesAManualBitrateUpTo500Mbps) {
+  const auto most = launch_profile::parse_explicit_launch_fields(
+    lookup_from({{"width", "1920"}, {"height", "1080"}, {"fps", "120"}, {"bitrate_kbps", "500000"}})
+  );
+  EXPECT_TRUE(most.problems.empty());
+  EXPECT_EQ(most.bitrate_kbps, 500000);
+
+  const auto over = launch_profile::parse_explicit_launch_fields(
+    lookup_from({{"width", "1920"}, {"height", "1080"}, {"fps", "120"}, {"bitrate_kbps", "500001"}})
+  );
+  ASSERT_EQ(over.problems.size(), 1u);
+  EXPECT_EQ(over.problems[0].field, "bitrate_kbps");
+  EXPECT_NE(over.problems[0].reason.find("between 1000 and 500000"), std::string::npos) << over.problems[0].reason;
+  EXPECT_NE(over.problems[0].reason.find("got '500001'"), std::string::npos) << over.problems[0].reason;
+}
+
 TEST(LaunchProfileExplicitFields, NamesMissingModeFieldsAndLockPrerequisites) {
   const auto partial = launch_profile::parse_explicit_launch_fields(lookup_from({{"width", "1920"}, {"display_locked", "1"}}));
   ASSERT_EQ(partial.problems.size(), 2u);

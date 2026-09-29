@@ -11,6 +11,8 @@
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <array>
+#include <cstdint>
+#include <limits>
 #include <thread>
 #include <future>
 #include <filesystem>
@@ -2689,3 +2691,37 @@ TEST(VideoCaptureBackendPublicationTests, AProbeNeverReachesTheLastSession) {
   EXPECT_EQ(last_session(), frozen);
 }
 #endif
+
+TEST(NvencVbvBufferTests, AnIncreaseAt500MbpsFitsTheEncodersField) {
+  // One frame at the 500 Mbps a client may set by hand, 60 fps: 8333333 bits. nvenc_vbv_increase goes
+  // to 400%, and from 258% the product overflowed an int before the division.
+  constexpr std::int64_t int_max = std::numeric_limits<int>::max();
+  constexpr std::int64_t uint32_max = std::numeric_limits<uint32_t>::max();
+  const std::int64_t frame = 500000LL * 1000 / 60;
+  EXPECT_EQ(nvenc::grown_vbv_buffer_bits(frame, 258, int_max), 29833332);
+  EXPECT_EQ(nvenc::grown_vbv_buffer_bits(frame, 400, int_max), 41666665);
+  // At 30 fps the NVENC SDK's uint32 field wrapped from 258% the same way.
+  const std::int64_t slow = 500000LL * 1000 / 30;
+  EXPECT_EQ(nvenc::grown_vbv_buffer_bits(slow, 258, uint32_max), 59666664);
+  EXPECT_EQ(nvenc::grown_vbv_buffer_bits(slow, 400, uint32_max), 83333330);
+  // No increase leaves the buffer alone, and a buffer the field cannot hold stops at the field.
+  EXPECT_EQ(nvenc::grown_vbv_buffer_bits(frame, 0, int_max), frame);
+  EXPECT_EQ(nvenc::grown_vbv_buffer_bits(int_max, 400, int_max), int_max);
+  EXPECT_EQ(nvenc::grown_vbv_buffer_bits(uint32_max, 400, uint32_max), uint32_max);
+
+  // Both encoders grow the buffer through it, not in the field's own type.
+  const auto read = [](const char *relative) {
+    std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / relative);
+    std::ostringstream out;
+    out << in.rdbuf();
+    return out.str();
+  };
+  const auto video = read("src/video.cpp");
+  ASSERT_FALSE(video.empty());
+  EXPECT_NE(video.find("ctx->rc_buffer_size = static_cast<int>(nvenc::grown_vbv_buffer_bits("), std::string::npos);
+  EXPECT_EQ(video.find("ctx->rc_buffer_size += ctx->rc_buffer_size *"), std::string::npos);
+  const auto nvenc = read("src/nvenc/nvenc_base.cpp");
+  ASSERT_FALSE(nvenc.empty());
+  EXPECT_NE(nvenc.find("enc_config.rcParams.vbvBufferSize = static_cast<uint32_t>(grown_vbv_buffer_bits("), std::string::npos);
+  EXPECT_EQ(nvenc.find("vbvBufferSize += enc_config.rcParams.vbvBufferSize *"), std::string::npos);
+}

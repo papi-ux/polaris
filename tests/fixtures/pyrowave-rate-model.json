@@ -1,10 +1,11 @@
 {
-  "description": "The PyroWave bitrate model at 35 dB, as the host computes it. tests/unit/test_pyrowave_advice.cpp holds Polaris to these rows. Nova's matching estimator is in review, and the two quote the same number for the same picture only while both evaluate the same header the same way. Every mbps is the encoder's rate, before FEC, audio and overhead.",
+  "description": "The PyroWave bitrate model as the host computes it. cases are at target_db, 35 dB, the author's default good quality, which the near figure (a television or monitor) uses. far_cases are at far_target_db, 31 dB, the handheld target the far figure (a device's own screen) uses, calibrated to one check by eye on a Retroid Pocket 6. tests/unit/test_pyrowave_advice.cpp holds Polaris to these rows. Nova's estimator ports the same header and mirrors both targets, and the two quote the same number for the same picture only while both evaluate the same header the same way at the same targets. Every mbps is the encoder's rate, before FEC, audio and overhead.",
   "source": "The model rows are upstream's own answers: the C function in the header below, compiled against it and run over a grid. The two edge rows follow the nearest edge rule src/pyrowave_advice.h describes.",
   "pyrowave_revision": "186f0393b77f7755953b5ecde994bb1cec2e4155",
   "header": "eval-results/pyrowave_regression_results.h",
   "header_sha256": "384e2ca2901318dd0e82a4bad44c7be902984382e87127d58c751b5ed95246a3",
   "target_db": 35,
+  "far_target_db": 31,
   "height_factors": {
     "8": "H 2.0, a television, a monitor or an external display",
     "15": "H 2.875, a device's own screen"
@@ -22,5 +23,21 @@
     {"width": 2560, "height": 1080, "fps": 120, "chroma": "420", "height_factor": 15, "mbps": 323.39289133499955, "rule": "model_not_16_9"},
     {"width": 640, "height": 360, "fps": 60, "chroma": "444", "height_factor": 15, "mbps": 34.378285320072118, "rule": "below_model_edge"},
     {"width": 7680, "height": 4320, "fps": 60, "chroma": "444", "height_factor": 15, "mbps": 937.55421789718652, "rule": "above_model_edge"}
+  ],
+  "far_cases": [
+    {"width": 1920, "height": 1080, "fps": 60, "chroma": "420", "height_factor": 15, "mbps": 89.121772171692498, "rule": "model"},
+    {"width": 1920, "height": 1080, "fps": 60, "chroma": "444", "height_factor": 15, "mbps": 96.198487986059746, "rule": "model"},
+    {"width": 1920, "height": 1080, "fps": 120, "chroma": "420", "height_factor": 15, "mbps": 178.243544343385, "rule": "model"},
+    {"width": 1920, "height": 1080, "fps": 120, "chroma": "444", "height_factor": 15, "mbps": 192.39697597211949, "rule": "model"},
+    {"width": 1280, "height": 720, "fps": 60, "chroma": "444", "height_factor": 15, "mbps": 93.758563093903234, "rule": "model"},
+    {"width": 1280, "height": 800, "fps": 60, "chroma": "444", "height_factor": 15, "mbps": 100.97379483959622, "rule": "model_not_16_9"},
+    {"width": 2560, "height": 1440, "fps": 60, "chroma": "444", "height_factor": 15, "mbps": 112.08465606908295, "rule": "model"},
+    {"width": 2560, "height": 1440, "fps": 120, "chroma": "444", "height_factor": 15, "mbps": 224.16931213816591, "rule": "model"},
+    {"width": 2560, "height": 1080, "fps": 120, "chroma": "420", "height_factor": 15, "mbps": 193.39477536830543, "rule": "model_not_16_9"},
+    {"width": 3840, "height": 2160, "fps": 60, "chroma": "444", "height_factor": 15, "mbps": 146.94775411310039, "rule": "model"},
+    {"width": 3840, "height": 2160, "fps": 120, "chroma": "420", "height_factor": 15, "mbps": 286.07374535227422, "rule": "model"},
+    {"width": 3840, "height": 2160, "fps": 120, "chroma": "444", "height_factor": 15, "mbps": 293.89550822620077, "rule": "model"},
+    {"width": 640, "height": 360, "fps": 60, "chroma": "444", "height_factor": 15, "mbps": 23.439640773475809, "rule": "below_model_edge"},
+    {"width": 7680, "height": 4320, "fps": 60, "chroma": "444", "height_factor": 15, "mbps": 587.79101645240155, "rule": "above_model_edge"}
   ]
 }

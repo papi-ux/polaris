@@ -823,8 +823,9 @@ namespace stream_stats {
   /**
    * @brief PyroWave's bitrate advice for the stream, and the host's verdict on it.
    *
-   * Inactive unless the stream is PyroWave and its shape gives advice. The verdict compares encoder
-   * rates with encoder rates; the advice itself is carried as requests, which is what a client sets.
+   * Inactive unless the stream is PyroWave and its shape gives advice. The verdict and every figure
+   * Doctor quotes are requests, which is what a client sets, except the live bitrate it suggests while
+   * Live Tuning owns the bitrate: a live bitrate applies at the encoder, so that one is an encoder rate.
    */
   struct pyrowave_bitrate_t {
     bool active = false;
@@ -833,15 +834,22 @@ namespace stream_stats {
     pyrowave_advice::link_t link;
     /// The rate the encoder runs at now.
     int encoder_kbps = 0;
+    /// The same rate as a request: what a client sets to land the encoder there.
+    int request_kbps = 0;
+    /// The share of recent frames at PyroWave's byte ceiling. It never makes a stream starved, and
+    /// decides only needs_more_than_allowed.
     std::optional<double> ceiling_frame_share;
-    /// The encoder runs below where Doctor's raise would land it.
-    bool below_goal = false;
-    /// More than pyrowave_advice::k_starved_ceiling_share of recent frames hit the byte ceiling.
-    bool ceiling_starved = false;
-    /// Either of those two: the host's own verdict.
+    /// The host's own verdict: request_kbps is below pyrowave_advice::k_starved_below_share of the
+    /// raise goal, see pyrowave_advice::starved().
     bool starved = false;
+    /// The cap or max_bitrate holds the stream below the far figure, it runs within a tenth of that
+    /// limit and below the far figure, and most recent frames fill the byte budget, see
+    /// pyrowave_advice::needs_more_than_allowed().
+    bool needs_more_than_allowed = false;
     /// Live Tuning's PyroWave floor for this stream at the encoder, when PyroWave's advice set it.
     int floor_encoder_kbps = 0;
+    /// The same floor as a request.
+    int floor_request_kbps = 0;
     /// The live rate sits at or under that floor, where Live Tuning stops cutting.
     bool at_floor = false;
   };

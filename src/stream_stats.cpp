@@ -1996,9 +1996,14 @@ namespace stream_stats {
       /// The raise goal as a request, and which of advice, cap or max_bitrate set it.
       int raise_goal_kbps = 0;
       std::string_view limited_by;
-      /// Live Tuning's PyroWave floor is reached, and the floor at the encoder.
+      /// The same goal at the encoder, which is where a live bitrate applies.
+      int raise_goal_encoder_kbps = 0;
+      /// Live Tuning's PyroWave floor is reached, and the floor as a request.
       bool at_floor = false;
-      int floor_encoder_kbps = 0;
+      int floor_kbps = 0;
+      /// The most a player can set by hand on this host, as a request: stream_bitrate::k_max_request_kbps,
+      /// or max_bitrate where that is lower.
+      int manual_max_kbps = 0;
     };
 
     /// A bitrate as a player sets it, in whole Mbps, rounded up so setting it satisfies it.
@@ -2012,10 +2017,45 @@ namespace stream_stats {
       return "what PyroWave's model advises";
     }
 
+    /// What to set as a live bitrate to reach the raise goal. A live bitrate applies at the encoder, with
+    /// no FEC or audio taken off it, so it is the goal at the encoder, and the text says how that relates
+    /// to the request Doctor quotes everywhere else.
+    std::string pyrowave_live_goal_guidance(const pyrowave_doctor_t &pyrowave) {
+      return "set about " + whole_mbps(pyrowave.raise_goal_encoder_kbps) + " as the live bitrate in your client, which "
+             "turns Live Tuning off for this stream only. A live bitrate applies at the encoder, so that is the request "
+             "of about " + whole_mbps(pyrowave.raise_goal_kbps) + " Polaris advises without its FEC and audio.";
+    }
+
     std::string pyrowave_floor_guidance(const pyrowave_doctor_t &pyrowave) {
-      return "PyroWave is at its floor of " + whole_mbps(pyrowave.floor_encoder_kbps) +
-             " at the encoder, half what its model advises, where Live Tuning and Doctor stop cutting because "
-             "below it the picture falls apart. Switch to HEVC, or lower the resolution or frame rate.";
+      return "PyroWave is at its floor, a request of about " + whole_mbps(pyrowave.floor_kbps) +
+             ", where Live Tuning and Doctor stop cutting because below it the picture falls apart. Switch to "
+             "HEVC, or lower the resolution or frame rate.";
+    }
+
+    /// Whether a player can set more by hand than the raise goal, both in the whole Mbps Doctor quotes.
+    /// True where the cap holds the goal and max_bitrate, if set, is above it; where max_bitrate holds the
+    /// goal, the host takes no more by hand either.
+    bool pyrowave_more_by_hand(const pyrowave_doctor_t &pyrowave) {
+      return pyrowave.manual_max_kbps / 1000 > (pyrowave.raise_goal_kbps + 999) / 1000;
+    }
+
+    /// The limit that holds the raise goal below the far figure, with the goal. Where a player can still
+    /// set more by hand it is only how far Doctor raises, and otherwise it is what this host allows.
+    std::string pyrowave_limit_figure(const pyrowave_doctor_t &pyrowave) {
+      return "the " + whole_mbps(pyrowave.raise_goal_kbps) +
+             (pyrowave_more_by_hand(pyrowave) ? " Doctor raises it to" : " this host's max_bitrate allows");
+    }
+
+    /// A smaller or slower picture, or HEVC, and the most a player can set by hand where that is more than
+    /// Doctor raises to. Doctor changes no bitrate itself: no raise it offers reaches what the model asks,
+    /// and a cut would only soften the picture further.
+    std::string pyrowave_host_limit_guidance(const pyrowave_doctor_t &pyrowave) {
+      std::string guidance = "Lower the resolution or frame rate, or use HEVC, for a sharper picture.";
+      if (pyrowave_more_by_hand(pyrowave)) {
+        // Rounded down, so a player who sets it stays within what the host takes.
+        guidance += " You can also set up to " + std::to_string(pyrowave.manual_max_kbps / 1000) + " Mbps by hand.";
+      }
+      return guidance;
     }
 
     nlohmann::json doctor_recommendation(const std::string &primary_issue,
@@ -2085,34 +2125,36 @@ namespace stream_stats {
           expected = "Any later launch remains governed only by the user's selected preset and capability validation.";
         }
       } else if (primary_issue == "pyrowave_starved") {
+        // A starved stream always has a raise to offer: it is starved only more than a tenth below the raise
+        // goal as a request, and a request never falls as the encoder rate rises, so its encoder runs below
+        // the goal's. The PyroWave advice tests hold that.
         const auto goal = whole_mbps(pyrowave.raise_goal_kbps);
         if (auto_safe_managing) {
           body = "The network is clean and PyroWave is short of bits. Live Tuning owns the bitrate and never raises it above "
-                 "your request, so set about " + goal + " as the live bitrate in your client, which turns Live Tuning off for "
-                 "this stream only.";
+                 "your request, so " + pyrowave_live_goal_guidance(pyrowave);
           next_step = "Raise the bitrate";
           expected = "Fewer frames should hit PyroWave's byte ceiling, and the picture should sharpen.";
-        } else if (pyrowave.raise_available && live_bitrate_tunable) {
-          body = "The network is clean and PyroWave is below the bitrate its model advises. Doctor can raise it to " + goal +
-                 " in guarded steps, verifying each one, and Undo puts back the bitrate you chose.";
+        } else if (live_bitrate_tunable) {
+          body = "The network is clean and PyroWave is more than a tenth below the request Polaris advises. Doctor can "
+                 "raise it to a request of " + goal + " in guarded steps, verifying each one, and Undo puts back the bitrate "
+                 "you chose.";
           next_step = "Raise and verify";
           expected = "Fewer frames should hit PyroWave's byte ceiling while loss and latency stay in range.";
-        } else if (pyrowave.raise_available && !single_session_scope) {
+        } else if (!single_session_scope) {
           body = "Doctor requires one fresh stream generation that has not shared the process-global bitrate target. Disconnect additional viewers and reconnect the affected stream before rechecking.";
           next_step = "Reconnect one stream";
           expected = "No other encoder can be changed by this stream's Auto Fix.";
-        } else if (pyrowave.raise_available) {
-          body = "PyroWave is below the bitrate its model advises, but this stream cannot change bitrate live. Set about " +
-                 goal + " in your client for the next stream.";
+        } else {
+          body = "PyroWave is more than a tenth below the request Polaris advises, but this stream cannot change bitrate "
+                 "live. Set a request of about " + goal + " in your client for the next stream.";
           next_step = "Raise next-stream bitrate";
           expected = "The next stream should start at a bitrate PyroWave can use.";
-        } else {
-          body = "PyroWave already runs at or above " + goal + ", " + pyrowave_limit_phrase(pyrowave.limited_by) +
-                 ", and most frames still hit its byte ceiling. Lower the resolution or frame rate, or use HEVC, for a "
-                 "sharper picture on this link.";
-          next_step = "Use a lower mode or HEVC";
-          expected = "A smaller or slower picture needs fewer bits, so fewer frames hit the ceiling.";
         }
+      } else if (primary_issue == "pyrowave_needs_more_than_allowed") {
+        // The same guidance whoever owns the bitrate, because Doctor changes no bitrate here.
+        body = pyrowave_host_limit_guidance(pyrowave);
+        next_step = "Use a lower mode or HEVC";
+        expected = "A smaller or slower picture needs fewer bits, and HEVC needs fewer for the same picture.";
       } else if (primary_issue == "steam_input_conflict") {
         body = "Local Steam Input settings can claim the Polaris Xbox virtual controller while strict isolation prevents Steam from creating its replacement controller. Disable Steam Input for Xbox controllers in Steam Settings, and set any per-game Force On overrides to Default or Disable.";
         next_step = "Adjust Steam Input";
@@ -2220,16 +2262,17 @@ namespace stream_stats {
         const auto goal = whole_mbps(pyrowave.raise_goal_kbps);
         read_only_guidance(
           auto_safe_managing ?
-            "Live Tuning owns the bitrate and never raises it above your request. Set about " + goal +
-              " as the live bitrate in your client, which turns Live Tuning off for this stream only." :
-          !pyrowave.raise_available ?
-            "PyroWave already runs at or above " + goal + ", " + pyrowave_limit_phrase(pyrowave.limited_by) +
-              ". Lower the resolution or frame rate, or use HEVC." :
+            "Live Tuning owns the bitrate and never raises it above your request, so " +
+              pyrowave_live_goal_guidance(pyrowave) :
           single_session_scope ?
-            "The active encoder does not support runtime bitrate updates. Set about " + goal +
+            "The active encoder does not support runtime bitrate updates. Set a request of about " + goal +
               " in your client for the next stream." :
             "Auto Fix requires a fresh, unshared stream generation to own the process-global bitrate controller."
         );
+      } else if (primary_issue == "pyrowave_needs_more_than_allowed") {
+        // Read only whoever owns the bitrate: no raise Doctor offers reaches what the model asks, and a
+        // cut only softens the picture.
+        read_only_guidance(pyrowave_host_limit_guidance(pyrowave));
       } else if (auto_safe_network_management) {
         id = "recheck_network";
         label = "Recheck";
@@ -2432,8 +2475,9 @@ namespace stream_stats {
     const bool quality_reduced_live =
       network_clean_for_quality &&
       stats.adaptive_runtime_update_supported && effective_quality_target_kbps > live_bitrate_kbps;
-    // PyroWave below the rate its model advises, or starved at its byte ceiling, on a clean network. A
-    // watch finding that ranks below every network, encoder and capture failure.
+    // PyroWave more than a tenth below the rate Polaris advises, or held below its model's figure by the
+    // cap or max_bitrate with most frames at its byte ceiling, on a clean network. Watch findings that
+    // rank below every network, encoder and capture failure.
     const auto pyrowave = evaluate_pyrowave_bitrate(stats);
     // A stream cut below a request that already meets the raise goal climbs back to that request, by
     // the ordinary quality restore or by Live Tuning's own recovery when it owns the bitrate. PyroWave's
@@ -2442,14 +2486,22 @@ namespace stream_stats {
       effective_quality_target_kbps >= pyrowave.advice.raise_goal_encoder_kbps;
     const bool pyrowave_starved = pyrowave.active && pyrowave.starved && network_clean_for_quality &&
       !launch_restore_covers_pyrowave;
+    // Never the same stream as a starved one: it runs within a tenth of its goal, and no raise Doctor
+    // offers reaches what the model asks. Nor one Doctor's quality restore would bring back: that restore
+    // is a step Doctor can take, and this finding must not hide it.
+    const bool pyrowave_needs_more = pyrowave.active && pyrowave.needs_more_than_allowed &&
+      network_clean_for_quality && !launch_restore_covers_pyrowave && !(quality_reduced_live && !auto_safe_managing);
     pyrowave_doctor_t pyrowave_doctor;
     if (pyrowave.active) {
       pyrowave_doctor.active = true;
       pyrowave_doctor.raise_goal_kbps = pyrowave.advice.raise_goal_kbps;
       pyrowave_doctor.limited_by = pyrowave.advice.raise_goal_limited_by;
+      pyrowave_doctor.raise_goal_encoder_kbps = pyrowave.advice.raise_goal_encoder_kbps;
       pyrowave_doctor.raise_available = pyrowave.advice.raise_goal_encoder_kbps > live_bitrate_kbps;
       pyrowave_doctor.at_floor = pyrowave.at_floor;
-      pyrowave_doctor.floor_encoder_kbps = pyrowave.floor_encoder_kbps;
+      pyrowave_doctor.floor_kbps = pyrowave.floor_request_kbps;
+      pyrowave_doctor.manual_max_kbps = config::video.max_bitrate > 0 ?
+        std::min(stream_bitrate::k_max_request_kbps, config::video.max_bitrate) : stream_bitrate::k_max_request_kbps;
     }
     const bool single_session_scope = stats.clients.size() <= 1 &&
       stats.doctor_live_action_scope_available;
@@ -2559,6 +2611,7 @@ namespace stream_stats {
       else if (pacing_watch) primary_issue = "frame_pacing";
       else if (pyrowave_starved) primary_issue = "pyrowave_starved";
       else if (quality_reduced_live && !auto_safe_managing) primary_issue = "quality_reduced_live";
+      else if (pyrowave_needs_more) primary_issue = "pyrowave_needs_more_than_allowed";
       else if (control_channel_observation) primary_issue = "control_channel_observation";
       else primary_issue = "none";
     }
@@ -2595,20 +2648,33 @@ namespace stream_stats {
       simple_state = "Needs attention";
     }
 
-    // Both sides as requests, so the player compares what they set with what to set.
-    const auto pyrowave_set_kbps = static_cast<int>(stream_bitrate::wire_kbps_for_encoder(
-      pyrowave.encoder_kbps, pyrowave.link.fec_percentage, pyrowave.link.audio_kbps));
+    // One figure in one unit: what the stream runs at and what Doctor would raise it to, both as the
+    // request a player sets, FEC and audio included, so the player compares like with like.
     std::string pyrowave_summary;
     if (pyrowave.active) {
-      pyrowave_summary = "PyroWave is set to about " + whole_mbps(pyrowave_set_kbps) + " where its 35 dB model advises " +
-                         whole_mbps(pyrowave.advice.advice_far_kbps) + " for " + std::to_string(pyrowave.advice.width) +
-                         "x" + std::to_string(pyrowave.advice.height) + " at " + std::to_string(pyrowave.advice.fps) +
-                         " fps on a device's own screen";
+      pyrowave_summary = "PyroWave runs at a request of about " + whole_mbps(pyrowave.request_kbps) +
+                         ", where Polaris advises a request of about " + whole_mbps(pyrowave.advice.raise_goal_kbps) +
+                         " for " + std::to_string(pyrowave.advice.width) + "x" + std::to_string(pyrowave.advice.height) +
+                         " at " + std::to_string(pyrowave.advice.fps) + " fps on a device's own screen";
+      if (pyrowave.advice.raise_goal_limited_by != "advice") {
+        pyrowave_summary += ", " + pyrowave_limit_phrase(pyrowave.advice.raise_goal_limited_by);
+      }
       if (pyrowave.ceiling_frame_share) {
         pyrowave_summary += ", and " + std::to_string(static_cast<int>(std::lround(*pyrowave.ceiling_frame_share * 100.0))) +
                             "% of recent frames hit its byte ceiling";
       }
       pyrowave_summary += ".";
+    }
+    // The limit finding in one sentence: what the model asks, the limit below it, and how full the byte
+    // budget runs. The finding needs a known share, so it always has one.
+    std::string pyrowave_limit_summary;
+    if (pyrowave.active && pyrowave.ceiling_frame_share) {
+      pyrowave_limit_summary =
+        "PyroWave at " + std::to_string(pyrowave.advice.width) + "x" + std::to_string(pyrowave.advice.height) + " and " +
+        std::to_string(pyrowave.advice.fps) + " fps wants a request of about " + whole_mbps(pyrowave.advice.advice_far_kbps) +
+        " on this screen, above " + pyrowave_limit_figure(pyrowave_doctor) + ", and " +
+        std::to_string(static_cast<int>(std::lround(*pyrowave.ceiling_frame_share * 100.0))) +
+        "% of recent frames fill its byte budget.";
     }
     const std::string summary =
       primary_issue == "none" ? "Streaming telemetry looks ready." :
@@ -2620,6 +2686,7 @@ namespace stream_stats {
       primary_issue == "control_channel_observation" ? "Control-channel retries were observed, but video packet loss is not confirmed." :
       primary_issue == "quality_reduced_live" ? "The reversible live bitrate target is below the capability-validated launch ceiling and current network evidence is clean." :
       primary_issue == "pyrowave_starved" ? pyrowave_summary + " The network is clean." :
+      primary_issue == "pyrowave_needs_more_than_allowed" ? pyrowave_limit_summary :
       primary_issue == "steam_input_conflict" ? "Local Steam Input settings conflict with strict gamepad isolation for the Polaris Xbox virtual controller." :
       primary_issue == "encoder_load" ? "Encoder load is above the low-latency budget." :
       primary_issue == "frame_pacing" ? "Frame pacing telemetry needs attention." :
@@ -2816,14 +2883,20 @@ namespace stream_stats {
         "Current live encoder target; Doctor changes it only for confirmed pressure or a verified same-stream restore." :
         "Applied encoder bitrate; this encoder does not expose live bitrate updates.";
       if (pyrowave.active) {
-        detail += " " + pyrowave_summary + " On a television or monitor (H 2.0) it advises " +
-                  whole_mbps(pyrowave.advice.advice_near_kbps) + ", in " +
-                  (pyrowave.advice.chroma444 ? "4:4:4" : "4:2:0") + ". Every figure is what to request.";
-        if (pyrowave.floor_encoder_kbps > 0) {
-          detail += " Live Tuning cuts it no lower than " + whole_mbps(pyrowave.floor_encoder_kbps) + " at the encoder.";
+        // The television figure is the model's readout, uncapped, so it says so where it passes what
+        // Polaris recommends on its own.
+        detail += " " + pyrowave_summary + " On a television or monitor (H 2.0) PyroWave's model asks for a request of " +
+                  whole_mbps(pyrowave.advice.advice_near_kbps) + ", in " + (pyrowave.advice.chroma444 ? "4:4:4" : "4:2:0");
+        if (pyrowave.advice.advice_near_kbps > pyrowave.advice.cap_kbps) {
+          detail += ", more than the " + whole_mbps(pyrowave.advice.cap_kbps) + " Polaris recommends on its own";
+        }
+        detail += ". The kbps value is the rate at the encoder, and every Mbps figure here is a request.";
+        if (pyrowave.floor_request_kbps > 0) {
+          detail += " Live Tuning cuts it no lower than a request of " + whole_mbps(pyrowave.floor_request_kbps) + ".";
         }
       }
-      const bool bitrate_short = quality_reduced_live || (pyrowave.active && pyrowave.starved);
+      const bool bitrate_short = quality_reduced_live ||
+        (pyrowave.active && (pyrowave.starved || pyrowave.needs_more_than_allowed));
       append_doctor_evidence(
         evidence, "bitrate", "Live bitrate", live_bitrate_kbps, "kbps",
         !stats.streaming ? "unknown" : network_fail ? "fail" : bitrate_short ? "watch" : "pass",
@@ -3585,13 +3658,18 @@ namespace stream_stats {
     result.active = true;
     result.encoder_kbps = stats.adaptive_runtime_update_supported && stats.adaptive_target_bitrate_kbps > 0 ?
       stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
+    result.request_kbps = pyrowave_advice::request_for_encoder(result.encoder_kbps, link);
     result.ceiling_frame_share = pyrowave_ceiling_frame_share(stats);
-    result.below_goal = result.encoder_kbps > 0 && result.encoder_kbps < result.advice.raise_goal_encoder_kbps;
-    result.ceiling_starved = result.ceiling_frame_share &&
-      *result.ceiling_frame_share > pyrowave_advice::k_starved_ceiling_share;
-    result.starved = result.below_goal || result.ceiling_starved;
+    // Starved against the one figure Doctor quotes, as a request, with a tenth to spare. The ceiling
+    // share never makes a stream starved: a full budget says the codec would use more bits, not that
+    // the stream is short of the calibrated far figure. It decides only whether a stream the cap or
+    // max_bitrate holds below that figure wants more than Doctor raises it to.
+    result.starved = pyrowave_advice::starved(result.advice, result.request_kbps);
+    result.needs_more_than_allowed =
+      pyrowave_advice::needs_more_than_allowed(result.advice, result.request_kbps, result.ceiling_frame_share);
     if (stats.adaptive_floor_source == "pyrowave_advice" && stats.adaptive_min_bitrate_kbps > 0) {
       result.floor_encoder_kbps = stats.adaptive_min_bitrate_kbps;
+      result.floor_request_kbps = pyrowave_advice::request_for_encoder(result.floor_encoder_kbps, link);
       result.at_floor = result.encoder_kbps > 0 && result.encoder_kbps <= result.floor_encoder_kbps;
     }
     return result;
@@ -3606,6 +3684,9 @@ namespace stream_stats {
     // and reads 0 on a healthy stream.
     value["assumes"] = {{"fec_percentage", pyrowave.link.fec_percentage}, {"audio_kbps", pyrowave.link.audio_kbps}};
     value["encoder_kbps"] = pyrowave.encoder_kbps;
+    // The same rate as a request, the figure starved compares with raise_goal_kbps, so a reader compares
+    // like with like instead of an encoder rate with a request.
+    value["request_kbps"] = pyrowave.request_kbps;
     value["ceiling_frame_share"] = pyrowave.ceiling_frame_share ?
       nlohmann::json(std::round(*pyrowave.ceiling_frame_share * 1000.0) / 1000.0) : nlohmann::json(nullptr);
     value["starved"] = pyrowave.starved;
