@@ -8,28 +8,37 @@ starts at `v1.0.0`.
 ## Unreleased
 
 - Absolute mouse input lands where it was aimed on a desktop with a rotated or scaled monitor, with
-  wlroots and KMS capture (#793). Both measured the desktop from each monitor's mode, which is in
-  output pixels before the monitor is turned or scaled, and placed each monitor by its xdg-output
-  position, which is after. A 1920x1080 monitor turned to portrait beside a 2560x1440 one made the
-  desktop 4480x1440 instead of 3640x1920, so the middle of the main monitor took its pointer at
-  1040,960 instead of 1280,720. Each monitor is measured now by the rectangle it covers on the
-  desktop: xdg-output's logical size, or, from a compositor that sends none, the mode turned by the
-  output's transform and divided by its scale. The desktop is counted in desktop pixels, those
-  logical units times the largest whole scale among the monitors, so the pointer still reaches
-  every physical pixel of a HiDPI monitor, and a lone 3840x2160 monitor at scale 2 measures
-  3840x2160, as it did. KMS capture takes Wayland's rectangles only when Wayland matched an output
-  to every active CRTC on the cards it opened, and otherwise measures every CRTC by its mode, as it
-  did. The streamed monitor's frame stays in output pixels for capture and encode. A monitor turned
-  a quarter still streams sideways, since both captures hand its frame back unturned, and input on
-  its own stream maps onto that frame at the monitor's place, as it did. Portal, KWin and X11
-  capture are unchanged. Reported and diagnosed by ertywastaken.
+  wlroots capture, and with KMS capture when Wayland names every output KMS sees (#793). Both
+  measured the desktop from each monitor's mode, which is in output pixels before the monitor is
+  turned or scaled, and placed each monitor by its xdg-output position, which is after. A
+  1920x1080 monitor turned to portrait beside a 2560x1440 one made the desktop 4480x1440 instead of
+  3640x1920, so the middle of the main monitor took its pointer at 1040,960 instead of 1280,720.
+  Each monitor is measured now by the rectangle it covers on the desktop: xdg-output's logical
+  size, or, from a compositor that sends none, the mode turned by the output's transform and
+  divided by its scale. The desktop is counted in desktop pixels, those logical units times the
+  largest whole scale among the monitors, so the pointer still reaches every physical pixel of a
+  HiDPI monitor, and a lone 3840x2160 monitor at scale 2 measures 3840x2160, as it did. KMS
+  capture takes Wayland's rectangles only when Wayland matched an output to every active CRTC on
+  the cards it opened, and otherwise measures every CRTC by its mode, as it did. The streamed
+  monitor's frame stays in output pixels for capture and encode. The fix applies when the streamed
+  monitor is not itself rotated 90 or 270 degrees. Streaming a monitor rotated that way behaves as
+  in 1.4.13: its picture comes out as it did, sideways wherever the capture hands the frame back
+  unturned, and its absolute input keeps every number 1.4.13 gave it, so the pointer lands where it
+  did then, which on the reporter's desktop is the main monitor. Turning that picture upright is a
+  later fix.
+  Touch and pen on every other stream use the corrected desktop size, and still leave out the
+  streamed monitor's place on the desktop. Portal, KWin and X11 capture are unchanged. Reported
+  and diagnosed by ertywastaken.
 
 - Absolute mouse input for a monitor right of or below another lands on that monitor, with
   wlroots, KMS and X11 capture, NvFBC included. Linux left the streamed monitor's place on the
   desktop out of every absolute point, so the pointer landed on whichever monitor sits at the
   desktop's corner, where Windows always put the place in. It goes in now, counted from the
-  desktop's own corner, which is left of or above the origin when a monitor sits there. Portal and
-  KWin capture give the stream no place on a larger desktop, so they are unchanged. Touch and pen
+  desktop's own corner, which is left of or above the origin when a monitor sits there. With
+  wlroots or KMS, a stream of a monitor rotated 90 or 270 degrees still leaves it out, as 1.4.13
+  did, and so does KMS
+  capture of a CRTC that appears after it measured a desktop Wayland named. Portal and KWin
+  capture give the stream no place on a larger desktop, so they are unchanged. Touch and pen
   still leave the place out.
 
 - A client can set up to 500 Mbps by hand. The endpoints a paired client sets its own bitrate
