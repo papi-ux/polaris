@@ -164,6 +164,7 @@ set(TEST_FAST_SOURCES
 if (NOT WIN32 AND NOT APPLE)
     list(APPEND TEST_FAST_SOURCES
         ${CMAKE_SOURCE_DIR}/tests/unit/test_linux_executable_path.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_output_layout.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_wlgrab_capture_policy.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_wlgrab_frame_source.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_wlgrab_pixel_copy.cpp
@@ -221,6 +222,7 @@ if (NOT WIN32 AND NOT APPLE)
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_input_group_access.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_ei_virtual_input.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_wayland_virtual_input.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_wayland_monitor_layout.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_kwin_permission_entries.cpp
     )
 endif()

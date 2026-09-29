@@ -29,9 +29,6 @@
 using namespace std::literals;
 
 namespace wl {
-  static int env_width;
-  static int env_height;
-
   bool supports_gpu_native_capture(platf::mem_type_e hwdevice_type) {
     switch (hwdevice_type) {
 #ifdef POLARIS_BUILD_VAAPI
@@ -189,13 +186,13 @@ namespace wl {
       stream_stats::update_wayland_main_device(reported_wayland_main_device);
       interface.consume_output_topology_dirty();
       output = monitor->output;
-      offset_x = monitor->viewport.offset_x;
-      offset_y = monitor->viewport.offset_y;
-      width = monitor->viewport.width;
-      height = monitor->viewport.height;
 
-      this->env_width = ::wl::env_width;
-      this->env_height = ::wl::env_height;
+      // Two units meet here. The capture hands back the output's mode in output pixels, so the
+      // frame is sized in those. The desktop is laid out in logical units, where an output turned
+      // a quarter is as tall as its mode is wide and a scaled one is smaller than its mode, and
+      // absolute input is placed there. Measuring the desktop in modes put the pointer away from
+      // where it was aimed on any host with a rotated or scaled monitor (polaris#793).
+      wl::capture_geometry(interface.monitors, *monitor_index).apply_to(*this);
 
       const auto selected_monitor_identity = wlgrab_capture_policy::enumerated_monitor_identity(
         *monitor_index,
@@ -205,6 +202,7 @@ namespace wl {
                       << "] for streaming; description=["sv << monitor->description << ']';
       BOOST_LOG(debug) << "Offset: "sv << offset_x << 'x' << offset_y;
       BOOST_LOG(debug) << "Resolution: "sv << width << 'x' << height;
+      BOOST_LOG(debug) << "Size on the desktop: "sv << logical_width << 'x' << logical_height;
       BOOST_LOG(debug) << "Desktop Resolution: "sv << env_width << 'x' << env_height;
 
       return 0;
@@ -1134,9 +1132,6 @@ namespace platf {
       return {};
     }
 
-    wl::env_width = 0;
-    wl::env_height = 0;
-
     for (auto &monitor : interface.monitors) {
       monitor->listen(interface.output_manager);
     }
@@ -1148,9 +1143,6 @@ namespace platf {
     for (int x = 0; x < interface.monitors.size(); ++x) {
       auto monitor = interface.monitors[x].get();
 
-      wl::env_width = std::max(wl::env_width, (int) (monitor->viewport.offset_x + monitor->viewport.width));
-      wl::env_height = std::max(wl::env_height, (int) (monitor->viewport.offset_y + monitor->viewport.height));
-
       BOOST_LOG(info) << "Monitor " << x << " is "sv << monitor->name << ": "sv << monitor->description;
 
       display_names.emplace_back(wlgrab_capture_policy::enumerated_monitor_identity(
@@ -1159,6 +1151,8 @@ namespace platf {
       ));
     }
 
+    const auto desktop = wl::desktop_bounds(interface.monitors);
+    BOOST_LOG(debug) << "Desktop Resolution: "sv << desktop.width << 'x' << desktop.height;
     BOOST_LOG(info) << "--------- End of Wayland monitor list ---------"sv;
 
     return display_names;

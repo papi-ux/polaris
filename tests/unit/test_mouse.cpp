@@ -190,6 +190,55 @@ TEST(InputTouchPortMapping, NamesWhyACoordinateWasRefused) {
             "the capture never reported a size of its own");
 }
 
+namespace {
+  /**
+   * @brief A display that holds nothing but where its screen sits.
+   */
+  class placed_display_t final: public platf::display_t {
+  public:
+    platf::capture_e capture(const push_captured_image_cb_t &, const pull_free_image_cb_t &, bool *) override {
+      return platf::capture_e::error;
+    }
+
+    std::shared_ptr<platf::img_t> alloc_img() override {
+      return {};
+    }
+
+    int dummy_img(platf::img_t *) override {
+      return -1;
+    }
+  };
+}  // namespace
+
+// Absolute input maps onto the captured screen in the desktop's units. A capture that sets no
+// logical size, which is every one but a rotated or scaled Wayland or KMS output, maps onto its
+// frame as before; one that sets it, for a monitor turned a quarter, maps onto that.
+TEST(InputTouchPortMapping, ScreenOnDesktopTakesTheLogicalSizeOnlyWhenSet) {
+  placed_display_t display;
+  display.offset_x = 2560;
+  display.offset_y = 0;
+  display.width = 1920;
+  display.height = 1080;
+
+  auto screen = display.screen_on_desktop();
+  EXPECT_EQ(screen.offset_x, 2560);
+  EXPECT_EQ(screen.offset_y, 0);
+  EXPECT_EQ(screen.width, 1920);
+  EXPECT_EQ(screen.height, 1080);
+
+  // Half a size is no size: the frame's shape is kept whole rather than mixed with it.
+  display.logical_width = 1080;
+  screen = display.screen_on_desktop();
+  EXPECT_EQ(screen.width, 1920);
+  EXPECT_EQ(screen.height, 1080);
+
+  display.logical_height = 1920;
+  screen = display.screen_on_desktop();
+  EXPECT_EQ(screen.offset_x, 2560);
+  EXPECT_EQ(screen.width, 1080);
+  EXPECT_EQ(screen.height, 1920);
+}
+
 // A point on the captured screen is counted from that screen's corner, and absolute input spans
 // the whole desktop, so the screen's own place on the desktop goes in first. Linux left it out, and
 // a screen right of another took its pointer on the one at the origin.

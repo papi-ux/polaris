@@ -4982,13 +4982,10 @@ namespace video {
                     config.width,
                     config.height
                   ) :
+                  // Input maps onto the screen in the desktop's units, which a rotated or scaled
+                  // output does not share with its frame.
                   input::make_touch_port(
-                    platf::touch_port_t {
-                      display->offset_x,
-                      display->offset_y,
-                      display->width,
-                      display->height,
-                    },
+                    display->screen_on_desktop(),
                     display->env_width,
                     display->env_height,
                     config.width,
