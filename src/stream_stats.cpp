@@ -4350,11 +4350,14 @@ namespace stream_stats {
       if (!media_sample) {
         network_judge.add_control_loss(received_at, loss);
       }
+      // Judged as Doctor offers a quality restore: by the window's verdict at this reading, not by the
+      // reading alone. One 7.4% report in a window under 2% latched a regression and rolled back a
+      // restore the same verdict had offered.
+      const auto judged_now = network_judge.verdict(received_at);
       const bool suppresses_quality_restore =
-        primary_network_state.network_risk ||
-        (primary_network_state.packet_loss_available &&
-         primary_network_state.packet_loss > 2.0) ||
-        primary_network_state.latency_ms >= 45.0;
+        judged_now.risk ||
+        (judged_now.loss_available && judged_now.loss_pct >= network_judge_t::k_loss_enter_pct) ||
+        (judged_now.rtt_available && judged_now.rtt_ms >= network_judge_t::k_rtt_fail_ms);
       // Advance or latch Doctor policy before exposing this complete
       // observation. Before a change, the controller epoch rejects a stale
       // action. During a guarded quality transaction, a regression is latched

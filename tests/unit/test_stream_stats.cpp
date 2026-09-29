@@ -4285,6 +4285,72 @@ TEST(DoctorActionTests, CachedQualityVerificationCannotAuthorizeANewerStepAfterD
   stream_stats::update_stream_active(false);
 }
 
+TEST(DoctorActionTests, AQualityRestoreOnTheRp6sLightLossVerifiesOnTheVerdictThatOfferedIt) {
+  // The Retroid Pocket 6's HEVC loss, 9 of 121 frames lost, 7.4%, in one report in five: a window that
+  // reads a light 1.5% and never calls it pressure. Doctor offers to restore quality on that window,
+  // and verified the restore on the newest readings: a report above 2% in the eight seconds after the
+  // step, or one latched while the step was Doctor's, rolled it back, which on this pattern is almost
+  // every time. It verifies on the verdict that offered it.
+  stream_stats::update_stream_active(false);
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_runtime_update_supported(true);
+  adaptive_bitrate::set_live_bitrate(7580);
+  adaptive_bitrate::set_base_bitrate(15000);
+  const auto cleanup = util::fail_guard([] {
+    adaptive_bitrate::set_enabled(false);
+    stream_stats::update_stream_active(false);
+  });
+
+  stream_stats::update_stream_active(true, "DoctorRestoreLightLoss", "203.0.113.19");
+  stream_stats::update_video_stats(60.0, 7580, 5.0, "hevc", 1920, 1080);
+  stream_stats::update_session_targets(
+    60.0, 60.0, 60.0, "client_requested", "deterministic_preset_v1",
+    "deterministic", "not_applicable", "Capability-validated launch profile.",
+    "", 1, 20000, 15000
+  );
+  int report = 0;
+  const auto next_report = [&] {
+    stream_stats::update_network_stats(5.0, ++report % 5 == 0 ? 900.0 / 121.0 : 0.0, 1000);
+  };
+  for (int i = 0; i < 10; ++i) {
+    next_report();
+  }
+  auto verdict = stream_stats::current_network_verdict();
+  ASSERT_TRUE(verdict.loss_available);
+  ASSERT_FALSE(verdict.loss_elevated);
+  ASSERT_GE(verdict.loss_pct, stream_stats::network_judge_t::k_loss_exit_pct);
+
+  const auto applied = doctor_actions::execute({{"action_id", "restore_quality"}});
+  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
+  ASSERT_EQ(applied.at("requested").at("bitrate_kbps"), 9475);
+  const auto run_id = applied.at("run_id").get<std::string>();
+  const auto apply_request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(apply_request.has_value());
+  adaptive_bitrate::acknowledge_live_bitrate_applied(apply_request->revision, apply_request->target_bitrate_kbps);
+
+  // Eight seconds after the step, one of them a 7.4% report, the window still light.
+  for (int i = 0; i < 8; ++i) {
+    next_report();
+  }
+  verdict = stream_stats::current_network_verdict();
+  ASSERT_FALSE(verdict.loss_elevated);
+  EXPECT_FALSE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
+
+  doctor_actions::make_verification_window_complete_for_tests();
+  const auto verified = doctor_actions::execute({{"action_id", "verify"}, {"run_id", run_id}});
+  // Stable, so Doctor takes the next guarded step toward the launch bitrate.
+  EXPECT_EQ(verified.at("state"), "applying") << verified.dump();
+  EXPECT_GT(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 9475);
+
+  const auto undone = execute_with_encoder_ack(7580, [&] {
+    return doctor_actions::execute({{"action_id", "undo"}, {"run_id", run_id}});
+  });
+  EXPECT_EQ(undone.at("state"), "undone") << undone.dump();
+}
+
 TEST(DoctorActionTests, VideoWarningDuringQualityVerificationRollsBackTheRestore) {
   stream_stats::update_stream_active(false);
   config::video.adaptive_bitrate.min_bitrate_kbps = 2000;

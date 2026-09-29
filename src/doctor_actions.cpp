@@ -456,14 +456,18 @@ namespace doctor_actions {
       };
     }
 
-    // The judged verdict Doctor's headline reads, so a restore it offers is one this accepts.
-    bool network_stable_for_quality_retry(const stream_stats::stats_t &stats) {
+    // The judged verdict Doctor's headline reads, so a restore it offers is one this accepts, and one it
+    // verifies is judged the way it was offered.
+    bool network_verdict_clear_for_quality(const stream_stats::stats_t &stats) {
       const auto verdict = stream_stats::served_network_verdict(stats);
       const auto network = stream_stats::judged_network(stats);
       return stats.streaming && (network.loss_judged || network.rtt_judged) && !network.risk &&
         (!network.loss_judged || verdict.loss_pct < stream_stats::network_judge_t::k_loss_enter_pct) &&
-        (!network.rtt_judged || verdict.rtt_ms < stream_stats::network_judge_t::k_rtt_fail_ms) &&
-        !adaptive_bitrate::doctor_policy_blocks_quality_restore();
+        (!network.rtt_judged || verdict.rtt_ms < stream_stats::network_judge_t::k_rtt_fail_ms);
+    }
+
+    bool network_stable_for_quality_retry(const stream_stats::stats_t &stats) {
+      return network_verdict_clear_for_quality(stats) && !adaptive_bitrate::doctor_policy_blocks_quality_restore();
     }
 
     nlohmann::json verification_window_json(
@@ -494,34 +498,33 @@ namespace doctor_actions {
       const bool required_media_arrived =
         !run.requires_media_sample || window.media_sample_count > 0;
       const bool restoring_quality = run.kind == action_kind_e::restore_quality;
-      if (!restoring_quality) {
-        // A step for network pressure is verified against the verdict Doctor's headline will read
-        // once it verifies: the window judged afresh from the moment the encoder applied the step,
-        // counting only media reports whose second began after it. The first report after the step
-        // covers the second before it. With enough readings the two cannot disagree. A step that
-        // verifies starts the headline's judgement over from the same moment, and a step whose own
-        // readings are still pressure rolls back, as the headline would have it. A step taken for loss
-        // needs its loss judged; until then the newest readings decide, as they did.
-        auto post_step = stats;
-        post_step.network_verdict = stream_stats::network_verdict_since(run.applied_at);
-        const auto network = stream_stats::judged_network(post_step);
-        const bool judged = run.requires_media_sample ? network.loss_judged : network.loss_judged || network.rtt_judged;
-        if (judged) {
-          return window.complete && required_media_arrived && !network.risk;
-        }
+      if (restoring_quality) {
+        // A restore is verified on the window verdict that offered it, and on the network latch, which
+        // reads that verdict at every reading since the step. Held to the newest readings instead, the
+        // Retroid Pocket 6's light HEVC loss, a 7.4% report every few seconds in a window under 2%, rolled
+        // back almost every restore Doctor had offered on it.
+        return window.complete && required_media_arrived &&
+          !adaptive_bitrate::doctor_policy_blocks_quality_restore() &&
+          network_verdict_clear_for_quality(stats);
       }
-      const bool network_risk = restoring_quality ? window.any_network_risk : window.network_risk;
-      const bool packet_loss_available = restoring_quality ?
-        window.any_packet_loss_available : window.packet_loss_available;
-      const double packet_loss = restoring_quality ? window.max_packet_loss : window.packet_loss;
-      const double latency_ms = restoring_quality ? window.max_latency_ms : window.latency_ms;
-      const bool quality_policy_clear = !restoring_quality ||
-        !adaptive_bitrate::doctor_policy_blocks_quality_restore();
+      // A step for network pressure is verified against the verdict Doctor's headline will read once
+      // it verifies: the window judged afresh from the moment the encoder applied the step, counting
+      // only media reports whose second began after it. The first report after the step covers the
+      // second before it. With enough readings the two cannot disagree. A step that verifies starts the
+      // headline's judgement over from the same moment, and a step whose own readings are still
+      // pressure rolls back, as the headline would have it. A step taken for loss needs its loss
+      // judged; until then the newest readings decide, as they did.
+      auto post_step = stats;
+      post_step.network_verdict = stream_stats::network_verdict_since(run.applied_at);
+      const auto network = stream_stats::judged_network(post_step);
+      const bool judged = run.requires_media_sample ? network.loss_judged : network.loss_judged || network.rtt_judged;
+      if (judged) {
+        return window.complete && required_media_arrived && !network.risk;
+      }
       return window.complete && required_media_arrived &&
-        quality_policy_clear &&
-        !network_risk &&
-        (!packet_loss_available || packet_loss <= 2.0) &&
-        latency_ms < 45.0;
+        !window.network_risk &&
+        (!window.packet_loss_available || window.packet_loss <= 2.0) &&
+        window.latency_ms < 45.0;
     }
 
     // A verified step for network pressure hands Doctor's headline the judgement verification read:

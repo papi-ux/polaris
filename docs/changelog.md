@@ -106,7 +106,9 @@ starts at `v1.0.0`.
   row reads "Video frame loss" and says how many of how many frames never arrived whole after FEC
   recovery, loss stops counting once the client's media reports are more than five seconds old, and
   the control channel finding no longer tells a player not to lower quality while Live Tuning is
-  lowering it.
+  lowering it. A quality restore Doctor offers on that judgement is verified on it too, at every
+  reading while the restore is under way, so light loss like the Retroid Pocket 6's, a 7.4% report
+  every few seconds in a window under 2%, no longer rolls back the restore it was offered on.
 
 - The stream stats carry `network_verdict`, video frame loss and round trip time judged over the
   last 20 seconds rather than from the newest report. Its loss is the share of video frames the
