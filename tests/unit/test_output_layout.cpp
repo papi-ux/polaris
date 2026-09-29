@@ -174,7 +174,7 @@ TEST(OutputLayout, ALoneScaleTwoMonitorMeasuresWhatItsModeDoes) {
   const auto desktop = measure_desktop(outputs);
   EXPECT_EQ(desktop.scale, 2);
   EXPECT_EQ(desktop.rect, (rect_t {0, 0, 3840, 2160}));
-  EXPECT_EQ(input_rect(outputs[0], desktop), (rect_t {0, 0, 3840, 2160}));
+  EXPECT_EQ(input_rect(outputs[0], desktop, 3840, 2160), (rect_t {0, 0, 3840, 2160}));
 }
 
 // A scale 2 monitor beside a plain one: two desktop pixels to each logical unit on both.
@@ -187,8 +187,8 @@ TEST(OutputLayout, MixedScaleDesktopCountsInTheSharpestMonitorsPixels) {
   const auto desktop = measure_desktop(outputs);
   EXPECT_EQ(desktop.scale, 2);
   EXPECT_EQ(desktop.rect, (rect_t {0, 0, 8960, 2880}));
-  EXPECT_EQ(input_rect(outputs[0], desktop), (rect_t {0, 0, 3840, 2160}));
-  EXPECT_EQ(input_rect(outputs[1], desktop), (rect_t {3840, 0, 5120, 2880}));
+  EXPECT_EQ(input_rect(outputs[0], desktop, 3840, 2160), (rect_t {0, 0, 3840, 2160}));
+  EXPECT_EQ(input_rect(outputs[1], desktop, 2560, 1440), (rect_t {3840, 0, 5120, 2880}));
 }
 
 // The reporter's desktop has no scaled monitor, so desktop pixels are logical units there.
@@ -201,7 +201,58 @@ TEST(OutputLayout, ReportersDesktopCountsOnePixelToEachLogicalUnit) {
   const auto desktop = measure_desktop(outputs);
   EXPECT_EQ(desktop.scale, 1);
   EXPECT_EQ(desktop.rect, (rect_t {0, 0, 3640, 1920}));
-  EXPECT_EQ(input_rect(outputs[0], desktop), (rect_t {0, 0, 2560, 1440}));
+  EXPECT_EQ(input_rect(outputs[0], desktop, 2560, 1440), (rect_t {0, 0, 2560, 1440}));
+}
+
+// Streaming the reporter's turned monitor: the capture hands back its 1920x1080 frame sideways,
+// so input keeps that frame's shape at the monitor's place rather than fitting its 1080x1920
+// rectangle into the picture as a band. The same holds for each quarter turn, flipped or not.
+TEST(OutputLayout, ATurnedStreamedMonitorKeepsItsFramesShapeForInput) {
+  for (const auto turned : {transform::turned_90, transform::turned_270, transform::flipped_90, transform::flipped_270}) {
+    const std::array outputs {
+      described(0, 0, 2560, 1440, 2560, 1440),
+      described(2560, 0, 1080, 1920, 1920, 1080, turned),
+    };
+
+    const auto desktop = measure_desktop(outputs);
+    EXPECT_EQ(desktop.rect, (rect_t {0, 0, 3640, 1920})) << "transform " << turned;
+    EXPECT_EQ(input_rect(outputs[1], desktop, 1920, 1080), (rect_t {2560, 0, 1920, 1080})) << "transform " << turned;
+  }
+}
+
+// Turned and scaled together, the frame's shape is kept in desktop pixels: the 3840x2160 monitor
+// at scale 2 covers 1080x1920 logical units, 2160x3840 desktop pixels, and input covers 3840x2160.
+TEST(OutputLayout, ATurnedScaledStreamedMonitorKeepsItsFramesShapeInDesktopPixels) {
+  const std::array outputs {
+    described(0, 0, 2560, 1440, 2560, 1440),
+    described(2560, 0, 1080, 1920, 3840, 2160, transform::turned_90, 2),
+  };
+
+  const auto desktop = measure_desktop(outputs);
+  EXPECT_EQ(desktop.rect, (rect_t {0, 0, 7280, 3840}));
+  EXPECT_EQ(input_rect(outputs[1], desktop, 3840, 2160), (rect_t {5120, 0, 3840, 2160}));
+}
+
+// A frame the capture has already turned to the monitor's shape keeps that shape, as KMS capture
+// does for a panel turned by plane rotation. A frame that has not, from a portrait panel shown as
+// landscape, keeps the portrait frame's shape.
+TEST(OutputLayout, AFrameInTheMonitorsShapeKeepsIt) {
+  const std::array outputs {described(0, 0, 1280, 800, 800, 1280, transform::turned_270)};
+  const auto desktop = measure_desktop(outputs);
+
+  EXPECT_EQ(input_rect(outputs[0], desktop, 1280, 800), (rect_t {0, 0, 1280, 800}));
+  EXPECT_EQ(input_rect(outputs[0], desktop, 800, 1280), (rect_t {0, 0, 800, 1280}));
+}
+
+// Half a turn and the flips keep an output's shape, so input takes its rectangle as it is.
+TEST(OutputLayout, OnlyAQuarterTurnKeepsTheFramesShape) {
+  for (const auto kept : {transform::normal, transform::turned_180, transform::flipped, transform::flipped_180}) {
+    const std::array outputs {described(0, 0, 1080, 1920, 1080, 1920, kept)};
+    const auto desktop = measure_desktop(outputs);
+    // A frame of another shape than the output's own mode never comes back for these, and even
+    // one that did would not turn the rectangle.
+    EXPECT_EQ(input_rect(outputs[0], desktop, 1920, 1080), (rect_t {0, 0, 1080, 1920})) << "transform " << kept;
+  }
 }
 
 // KMS capture on the reporter's desktop: Wayland matched an output to both CRTCs, so the desktop
@@ -215,7 +266,9 @@ TEST(OutputLayout, KmsDesktopIsWaylandsWhenEveryCrtcHasAnOutput) {
   const auto desktop = measure_crtc_desktop(crtcs);
   EXPECT_TRUE(desktop.by_wayland);
   EXPECT_EQ(desktop.rect, (rect_t {0, 0, 3640, 1920}));
-  EXPECT_EQ(crtc_input_rect(crtcs[0], desktop), (rect_t {0, 0, 2560, 1440}));
+  EXPECT_EQ(crtc_input_rect(crtcs[0], desktop, 2560, 1440), (rect_t {0, 0, 2560, 1440}));
+  // The turned monitor streams sideways, so input keeps its frame's shape at its place.
+  EXPECT_EQ(crtc_input_rect(crtcs[1], desktop, 1920, 1080), (rect_t {2560, 0, 1920, 1080}));
 }
 
 // One CRTC without a Wayland output keeps the whole desktop in CRTC rectangles, as KMS capture has
@@ -231,7 +284,7 @@ TEST(OutputLayout, OneCrtcWithoutAnOutputKeepsTheDesktopInCrtcRectangles) {
   EXPECT_FALSE(desktop.by_wayland);
   EXPECT_EQ(desktop.rect, (rect_t {0, 0, 3840, 2160}));
   // No size of its own: input maps onto the 3840x2160 frame across a 3840x2160 desktop.
-  EXPECT_EQ(crtc_input_rect(crtcs[0], desktop), (rect_t {0, 0, 0, 0}));
+  EXPECT_EQ(crtc_input_rect(crtcs[0], desktop, 3840, 2160), (rect_t {0, 0, 0, 0}));
 }
 
 // A CRTC a plane scans out of that no connector names has no Wayland output either, and no place
@@ -257,7 +310,7 @@ TEST(OutputLayout, KmsDesktopWithoutWaylandIsTheCrtcs) {
   const auto desktop = measure_crtc_desktop(crtcs);
   EXPECT_FALSE(desktop.by_wayland);
   EXPECT_EQ(desktop.rect, (rect_t {0, 0, 4480, 1440}));
-  EXPECT_EQ(crtc_input_rect(crtcs[1], desktop), (rect_t {2560, 0, 0, 0}));
+  EXPECT_EQ(crtc_input_rect(crtcs[1], desktop, 1920, 1080), (rect_t {2560, 0, 0, 0}));
   EXPECT_FALSE(measure_crtc_desktop(std::span<const crtc_output_t> {}).by_wayland);
 }
 
@@ -271,14 +324,14 @@ TEST(OutputLayout, KmsDesktopCountsInDesktopPixels) {
   const auto lone_desktop = measure_crtc_desktop(alone);
   EXPECT_TRUE(lone_desktop.by_wayland);
   EXPECT_EQ(lone_desktop.rect, (rect_t {0, 0, 3840, 2160}));
-  EXPECT_EQ(crtc_input_rect(hidpi, lone_desktop), (rect_t {0, 0, 3840, 2160}));
+  EXPECT_EQ(crtc_input_rect(hidpi, lone_desktop, 3840, 2160), (rect_t {0, 0, 3840, 2160}));
 
   const std::array both {hidpi, plain};
   const auto desktop = measure_crtc_desktop(both);
   EXPECT_EQ(desktop.scale, 2);
   EXPECT_EQ(desktop.rect, (rect_t {0, 0, 8960, 2880}));
-  EXPECT_EQ(crtc_input_rect(hidpi, desktop), (rect_t {0, 0, 3840, 2160}));
-  EXPECT_EQ(crtc_input_rect(plain, desktop), (rect_t {3840, 0, 5120, 2880}));
+  EXPECT_EQ(crtc_input_rect(hidpi, desktop, 3840, 2160), (rect_t {0, 0, 3840, 2160}));
+  EXPECT_EQ(crtc_input_rect(plain, desktop, 2560, 1440), (rect_t {3840, 0, 5120, 2880}));
 }
 
 // A CRTC capture could not tie to a monitor has only its own place, and counts from the desktop's
@@ -293,5 +346,5 @@ TEST(OutputLayout, AnUntiedCrtcCountsFromTheDesktopsCorner) {
   EXPECT_EQ(desktop.rect, (rect_t {-1920, 0, 4480, 1440}));
 
   const crtc_output_t untied {{0, 0, 2560, 1440}, std::nullopt};
-  EXPECT_EQ(crtc_input_rect(untied, desktop), (rect_t {1920, 0, 0, 0}));
+  EXPECT_EQ(crtc_input_rect(untied, desktop, 2560, 1440), (rect_t {1920, 0, 0, 0}));
 }

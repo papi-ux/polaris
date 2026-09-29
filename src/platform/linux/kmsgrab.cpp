@@ -859,9 +859,10 @@ namespace platf {
             }
 
             // Absolute input is placed on the desktop in the desktop's units, counted from its
-            // corner. Where Wayland lays this monitor out rotated or scaled, its size there is not
-            // the frame's, and the extents were measured the same way.
-            const auto screen = output_layout::crtc_input_rect(streamed, kms::desktop);
+            // corner. Where Wayland lays this monitor out scaled, its size there is not the
+            // frame's, and the extents were measured the same way. A monitor Wayland turns a
+            // quarter streams sideways, and input keeps the frame's shape there.
+            const auto screen = output_layout::crtc_input_rect(streamed, kms::desktop, width, height);
             offset_x = screen.x;
             offset_y = screen.y;
             input_width = screen.width;

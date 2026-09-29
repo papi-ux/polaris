@@ -95,25 +95,27 @@ TEST(WaylandMonitorLayout, ReportersDesktopIsMeasuredInLogicalUnits) {
   EXPECT_EQ(geometry.frame_height, 1440);
 }
 
-// Streaming the turned monitor itself: the capture still hands back its 1920x1080 mode, and input
-// gets the 1080x1920 rectangle it covers on the desktop.
-TEST(WaylandMonitorLayout, RotatedStreamedMonitorKeepsItsFrameInOutputPixels) {
-  const auto monitors = reporters_desktop(true);
-  const auto geometry = wl::capture_geometry(monitors, 1);
+// Streaming the turned monitor itself: the capture hands back its 1920x1080 mode unturned, so the
+// picture is sideways, and input keeps that frame's shape at the monitor's place on the desktop.
+TEST(WaylandMonitorLayout, RotatedStreamedMonitorKeepsItsFramesShapeForInput) {
+  for (const bool with_logical_sizes : {true, false}) {
+    const auto monitors = reporters_desktop(with_logical_sizes);
+    const auto geometry = wl::capture_geometry(monitors, 1);
 
-  EXPECT_EQ(geometry.frame_width, 1920);
-  EXPECT_EQ(geometry.frame_height, 1080);
-  EXPECT_EQ(geometry.screen, (rect_t {2560, 0, 1080, 1920}));
-  EXPECT_EQ(geometry.desktop, (rect_t {0, 0, 3640, 1920}));
+    EXPECT_EQ(geometry.frame_width, 1920) << "logical sizes sent: " << with_logical_sizes;
+    EXPECT_EQ(geometry.frame_height, 1080) << "logical sizes sent: " << with_logical_sizes;
+    EXPECT_EQ(geometry.screen, (rect_t {2560, 0, 1920, 1080})) << "logical sizes sent: " << with_logical_sizes;
+    EXPECT_EQ(geometry.desktop, (rect_t {0, 0, 3640, 1920})) << "logical sizes sent: " << with_logical_sizes;
 
-  const geometry_display_t display {geometry};
-  EXPECT_EQ(display.width, 1920);
-  EXPECT_EQ(display.height, 1080);
-  const auto screen = display.screen_on_desktop();
-  EXPECT_EQ(screen.offset_x, 2560);
-  EXPECT_EQ(screen.offset_y, 0);
-  EXPECT_EQ(screen.width, 1080);
-  EXPECT_EQ(screen.height, 1920);
+    const geometry_display_t display {geometry};
+    EXPECT_EQ(display.width, 1920);
+    EXPECT_EQ(display.height, 1080);
+    const auto screen = display.screen_on_desktop();
+    EXPECT_EQ(screen.offset_x, 2560);
+    EXPECT_EQ(screen.offset_y, 0);
+    EXPECT_EQ(screen.width, 1920);
+    EXPECT_EQ(screen.height, 1080);
+  }
 }
 
 // A compositor that sends no logical size still says how the output is turned.
@@ -241,24 +243,23 @@ TEST(WaylandMonitorLayout, ReportersClientPointLandsOnTheStreamedMonitor) {
   EXPECT_NEAR(corner->second * 1920.0f, 1440.0f, 1.0f);
 }
 
-// Streaming the turned monitor: its 1080x1920 rectangle is fitted into the stream, and a point
-// lands on that monitor, right of the main one, rather than on the main one.
-TEST(WaylandMonitorLayout, ClientPointLandsOnARotatedStreamedMonitor) {
+// Streaming the turned monitor, the sideways picture fills the stream with no bars, and every part
+// of it moves the pointer: a point starts from the monitor's corner, right of the main monitor,
+// and moves one desktop pixel for each frame pixel, as it did before the desktop was measured by
+// logical rectangles. None of it is pinned to the edge of a portrait band.
+TEST(WaylandMonitorLayout, ARotatedStreamedMonitorsWholePictureReachesThePointer) {
   const auto monitors = reporters_desktop(true);
   const geometry_display_t display {wl::capture_geometry(monitors, 1)};
 
-  const auto middle = desktop_fraction(display, 1920, 1080, 960.0f, 540.0f);
-  ASSERT_TRUE(middle.has_value());
-  EXPECT_NEAR(middle->first * 3640.0f, 2560.0f + 540.0f, 1.0f);
-  EXPECT_NEAR(middle->second * 1920.0f, 960.0f, 1.0f);
+  const auto port = input::make_touch_port(display.screen_on_desktop(), display.env_width, display.env_height, 1920, 1080);
+  EXPECT_FLOAT_EQ(port.client_offsetX, 0.0f);
+  EXPECT_FLOAT_EQ(port.client_offsetY, 0.0f);
 
-  // The stream is wider than the monitor is, so the monitor sits between bars. The bottom right of
-  // the picture is the monitor's own bottom right corner.
-  const auto scale = 1080.0f / 1920.0f;
-  const auto picture_right = 960.0f + 1080.0f * scale / 2.0f;
-  const auto corner = desktop_fraction(display, 1920, 1080, picture_right, 1080.0f);
-  ASSERT_TRUE(corner.has_value());
-  EXPECT_NEAR(corner->first * 3640.0f, 3640.0f, 1.0f);
-  EXPECT_NEAR(corner->second * 1920.0f, 1920.0f, 1.0f);
+  for (const auto &[x, y] : {std::pair {0.0f, 0.0f}, std::pair {100.0f, 100.0f}, std::pair {960.0f, 540.0f}, std::pair {1000.0f, 1000.0f}}) {
+    const auto point = desktop_fraction(display, 1920, 1080, x, y);
+    ASSERT_TRUE(point.has_value());
+    EXPECT_NEAR(point->first * 3640.0f, 2560.0f + x, 1.0f) << "client point " << x << ',' << y;
+    EXPECT_NEAR(point->second * 1920.0f, y, 1.0f) << "client point " << x << ',' << y;
+  }
 }
 #endif

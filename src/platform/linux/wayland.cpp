@@ -401,7 +401,7 @@ namespace wl {
     return {
       .frame_width = monitor.viewport.width,
       .frame_height = monitor.viewport.height,
-      .screen = output_layout::input_rect(monitor.layout, desktop),
+      .screen = output_layout::input_rect(monitor.layout, desktop, monitor.viewport.width, monitor.viewport.height),
       .desktop = desktop.rect,
     };
   }

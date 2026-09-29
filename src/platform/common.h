@@ -755,9 +755,9 @@ namespace platf {
 
     // The captured screen's size where absolute input places it, in the units offset_x and
     // env_width count in. wlroots and KMS capture on Wayland count the desktop in desktop pixels,
-    // logical units times the largest scale among its monitors, where a monitor turned a quarter
-    // or scaled less than that is not the size of its frame. A capture that leaves them at zero has
-    // input map onto the frame, which is right wherever the two sizes are the same.
+    // logical units times the largest scale among its monitors, where a monitor scaled less than
+    // that covers more pixels than its frame has. A capture that leaves them at zero has input map
+    // onto the frame, which is right wherever the two sizes are the same.
     int input_width = 0, input_height = 0;
 
     /**

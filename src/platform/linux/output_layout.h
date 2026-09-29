@@ -191,9 +191,27 @@ namespace output_layout {
   /**
    * @brief Where absolute input places a capture of the output: its rectangle in desktop pixels,
    *        counted from the desktop's corner.
+   *
+   * wlroots and KMS capture hand an output's frame back as the compositor scans it out, before its
+   * transform, so a monitor turned a quarter streams sideways. Input mapped onto its portrait
+   * rectangle would fit a portrait band into the landscape picture and leave the rest of the
+   * picture out of the pointer's reach. Until capture turns the picture, input there keeps the
+   * frame's shape instead: the monitor's rectangle turned back, at its place on the desktop, which
+   * is how input always mapped that stream. A frame the capture already turned, as KMS capture
+   * does for a panel turned by plane rotation, has the monitor's shape and keeps it.
+   * @param output The output as the compositor described it.
+   * @param desktop The desktop it is on.
+   * @param frame_width The width of the frame the capture hands back.
+   * @param frame_height The height of that frame.
    */
-  constexpr rect_t input_rect(const output_t &output, const desktop_t &desktop) {
-    return on_desktop(desktop_rect(output, desktop.scale), desktop.rect);
+  constexpr rect_t input_rect(const output_t &output, const desktop_t &desktop, int frame_width, int frame_height) {
+    auto screen = on_desktop(desktop_rect(output, desktop.scale), desktop.rect);
+    const bool frame_is_wide = frame_width > frame_height;
+    const bool screen_is_wide = screen.width > screen.height;
+    if (turns_a_quarter(output.transform) && frame_width > 0 && frame_height > 0 && frame_is_wide != screen_is_wide) {
+      std::swap(screen.width, screen.height);
+    }
+    return screen;
   }
 
   /**
@@ -250,10 +268,14 @@ namespace output_layout {
    * @brief Where absolute input places a KMS capture of one CRTC, counted from the desktop's corner
    *        like every other. On a desktop of CRTC rectangles the size stays zero, so input maps
    *        onto the frame, as it always did there.
+   * @param crtc The CRTC.
+   * @param desktop The desktop it is on.
+   * @param frame_width The width of the frame the capture hands back, after any panel turn.
+   * @param frame_height The height of that frame.
    */
-  constexpr rect_t crtc_input_rect(const crtc_output_t &crtc, const crtc_desktop_t &desktop) {
+  constexpr rect_t crtc_input_rect(const crtc_output_t &crtc, const crtc_desktop_t &desktop, int frame_width, int frame_height) {
     if (desktop.by_wayland && crtc.wayland) {
-      return input_rect(*crtc.wayland, desktop);
+      return input_rect(*crtc.wayland, desktop, frame_width, frame_height);
     }
     return {crtc.crtc.x - desktop.rect.x, crtc.crtc.y - desktop.rect.y, 0, 0};
   }
