@@ -56,9 +56,8 @@ export function buildLiveAutoQualityRows({ autoQuality, tuning }, t) {
   // The base outlives the stream that set it, so an idle host shows no range.
   const maxMbps = streaming ? formatMbps(tuning?.adaptive_base_bitrate_kbps) : ''
   const rtt = streaming ? formatNumber(tuning?.adaptive_rtt_ewma_ms, 0) : ''
-  // The loss Doctor quotes, already a percentage. Live Tuning acts on each report's own loss instead,
-  // and adaptive_packet_loss_ewma, its own average of those, is a percentage too; it was read as a
-  // fraction, so 0.078% showed as 7.8%.
+  // The loss Doctor quotes, already a percentage. Live Tuning acts on its own average instead,
+  // adaptive_packet_loss_ewma, a percentage too; it was read as a fraction, so 0.078% showed as 7.8%.
   const loss = streaming && tuning?.network_loss_pct != null ? formatNumber(tuning.network_loss_pct, 1) : ''
   const target = formatMbps(autoQuality?.target_bitrate_kbps)
   const reason = String(autoQuality?.blocked_reason || '')

@@ -12,7 +12,7 @@ export function formatLiveNumber(value, digits = 1, suffix = '') {
 }
 
 // The loss the Dashboard shows, charts and grades: the share of video frames Doctor judged lost after
-// FEC over the host's window, the figure Doctor, Live Tuning and the session status quote, or null
+// FEC over the host's window, the figure Doctor and the session status quote, or null
 // until the host has judged any. The newest one second report, packet_loss, swings between 0 and 7%
 // on a Wi-Fi burst, and moved the tile, its colour and the grade with it.
 export function dashboardLossPct(statsPayload = {}) {

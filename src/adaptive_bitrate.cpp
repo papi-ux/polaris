@@ -8,7 +8,6 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <deque>
 #include <mutex>
 
 // local includes
@@ -25,42 +24,6 @@ namespace adaptive_bitrate {
   // Doctor uses. A relative-only spike check turns normal LAN jitter such as
   // 1 ms -> 3 ms into "congestion" even though the path is still excellent.
   static constexpr double ACTIONABLE_RTT_MS = 45.0;
-  // Loss above this share of frames is pressure, and above HEAVY_LOSS_PCT it is heavy: the controller
-  // cuts by its whole max_change_rate.
-  static constexpr double LOSS_PRESSURE_PCT = 1.0;
-  static constexpr double HEAVY_LOSS_PCT = 5.0;
-  // Moderate loss with no RTT spike beside it cuts the target no lower than this share of the stream's
-  // base, the hold, until a probe below it finds the rate the loss depends on. See update_network_stats().
-  static constexpr double MODERATE_LOSS_FLOOR_SHARE = 0.5;
-  // Each probe step and each step up is judged after a dwell: this long at the rate, over at least
-  // RATE_TEST_MIN_REPORTS client media reports.
-  static constexpr auto RATE_TEST_DWELL = 8s;
-  static constexpr std::size_t RATE_TEST_MIN_REPORTS = 5;
-  // The newest reports at a rate that judge it.
-  static constexpr std::size_t RATE_TEST_MAX_REPORTS = 20;
-  // Loss in at least this share of a rate's reports is steady. A link too small for the stream loses
-  // frames every second, while Wi-Fi loses them in bursts at any rate.
-  static constexpr double STEADY_LOSS_SHARE = 0.75;
-  // A rate's loss is gone when its mean is under LOSS_PRESSURE_PCT and under this share of its reports
-  // lose any frames.
-  static constexpr double GONE_LOSS_SHARE = 0.25;
-  // A probe step helps when the mean loss or the share of lossy reports falls by at least a third
-  // against the rate above it.
-  static constexpr double PROBE_STEP_HELPED = 2.0 / 3.0;
-  // Each probe step halves the rate. A smaller step can land above the link still and show nothing.
-  static constexpr double RATE_TEST_STEP_DOWN = 0.5;
-  // Steps up start at 8% and double while each stays clean, to at most 32%.
-  static constexpr double STEP_UP_FIRST = 0.08;
-  static constexpr double STEP_UP_MAX = 0.32;
-  // After a failed step up the next waits this long, twice as long after each failure in a row, up to
-  // RATE_TEST_RETRY_MAX.
-  static constexpr std::chrono::steady_clock::duration RATE_TEST_RETRY = 30s;
-  static constexpr std::chrono::steady_clock::duration RATE_TEST_RETRY_MAX = 120s;
-  // Once a probe finds loss that no lower rate lowers, no other probe starts for this long.
-  static constexpr std::chrono::steady_clock::duration PROBE_BLOCK = 5min;
-  // Pressure gone this long, with no climb running, forgets the loss a climb held, as it starts
-  // ordinary recovery.
-  static constexpr auto RECOVERY_WAIT = 10s;
 
   // Internal state protected by mutex for complex operations,
   // atomics for simple reads from the encoding thread.
@@ -143,61 +106,6 @@ namespace adaptive_bitrate {
   // A manual live bitrate turned the controller's feedback off for this stream while the saved
   // preference, current_config.enabled, stayed on. Protected by state_mutex.
   static bool paused_for_stream = false;
-
-  // Live Tuning's tests of the rates below its hold, see update_network_stats(). All protected by
-  // state_mutex.
-
-  /// The client media reports heard at the rate Live Tuning holds now, each with its own loss.
-  struct rate_evidence_t {
-    int kbps = 0;
-    std::chrono::steady_clock::time_point since {};
-    /// The first report after a change covers time before it, so it does not count.
-    bool skip_next = true;
-    std::deque<double> loss_pct;
-  };
-
-  /// A probe down from the hold: each step halves the rate and is judged against the rate above it.
-  struct rate_probe_t {
-    bool running = false;
-    /// The rate the step being judged set.
-    int kbps = 0;
-    /// Where the probe started and the loss heard there, where it returns when no step lowers the loss.
-    int hold_kbps = 0;
-    double hold_loss_pct = 0.0;
-    /// The loss and the share of lossy reports at the rate above the step being judged.
-    double above_loss_pct = 0.0;
-    double above_steady_share = 0.0;
-    /// The latest rate a step lowered the loss at, and the loss there; zero while none has.
-    int fell_kbps = 0;
-    double fell_loss_pct = 0.0;
-  };
-
-  /// A climb back to the base by tested steps, from the rate a probe found or from the hold.
-  struct rate_climb_t {
-    bool running = false;
-    /// The rate the step up being judged set, and the rate it returns to if it fails; zero between steps.
-    int step_kbps = 0;
-    int from_kbps = 0;
-    /// The next step, doubling while each stays clean.
-    double step_share = STEP_UP_FIRST;
-    /// How long a rate is held before the next step: zero for one dwell, else the wait after a failure.
-    std::chrono::steady_clock::duration wait {};
-  };
-
-  static rate_evidence_t rate_evidence;
-  static rate_probe_t rate_probe;
-  static rate_climb_t rate_climb;
-  // The loss heard at the rate a climb started from, the held level. Loss up to held_loss_bound() of it
-  // holds the rate instead of cutting it, and keeps a step up.
-  static std::optional<double> held_loss_pct;
-  // Set when a probe found loss that no lower rate lowered: no probe starts before it.
-  static std::optional<std::chrono::steady_clock::time_point> probes_blocked_until;
-  // The base those findings were made against. A new base starts them over.
-  static int rate_tests_base_kbps = 0;
-  // When the newest client media report arrived. Past k_media_report_max_age its loss is stale, and past
-  // k_media_report_pause_hold the pause is no longer waited out.
-  static bool media_report_heard = false;
-  static std::chrono::steady_clock::time_point last_media_report_time {};
 
   static void set_controller_status(const std::string &state, const std::string &reason) {
     controller_state = state;
@@ -309,248 +217,7 @@ namespace adaptive_bitrate {
       doctor_network_policy_regressed_during_override;
   }
 
-  static void forget_rate_tests_locked() {
-    rate_probe = {};
-    rate_climb = {};
-    held_loss_pct.reset();
-  }
-
-  static void restart_rate_evidence_locked(int kbps, std::chrono::steady_clock::time_point now) {
-    rate_evidence.kbps = kbps;
-    rate_evidence.since = now;
-    rate_evidence.skip_next = true;
-    rate_evidence.loss_pct.clear();
-  }
-
-  static void note_rate_evidence_locked(double loss_pct) {
-    if (rate_evidence.skip_next) {
-      rate_evidence.skip_next = false;
-      return;
-    }
-    rate_evidence.loss_pct.push_back(loss_pct);
-    if (rate_evidence.loss_pct.size() > RATE_TEST_MAX_REPORTS) {
-      rate_evidence.loss_pct.pop_front();
-    }
-  }
-
-  static bool rate_evidence_complete(std::chrono::steady_clock::time_point now,
-                                     std::chrono::steady_clock::duration dwell = RATE_TEST_DWELL) {
-    return now - rate_evidence.since >= dwell && rate_evidence.loss_pct.size() >= RATE_TEST_MIN_REPORTS;
-  }
-
-  static double rate_evidence_loss_pct() {
-    if (rate_evidence.loss_pct.empty()) {
-      return 0.0;
-    }
-    double sum = 0.0;
-    for (const double loss : rate_evidence.loss_pct) {
-      sum += loss;
-    }
-    return sum / static_cast<double>(rate_evidence.loss_pct.size());
-  }
-
-  /// The share of the rate's reports that lost any frames.
-  static double rate_evidence_steady_share() {
-    if (rate_evidence.loss_pct.empty()) {
-      return 0.0;
-    }
-    const auto lossy = std::count_if(rate_evidence.loss_pct.begin(), rate_evidence.loss_pct.end(), [](double loss) {
-      return loss > 0.0;
-    });
-    return static_cast<double>(lossy) / static_cast<double>(rate_evidence.loss_pct.size());
-  }
-
-  /// The most loss a step up may bring and still be kept: max(1.5 x the held level, held level + 1 point).
-  static double held_loss_bound(double held_pct) {
-    return std::max(1.5 * held_pct, held_pct + LOSS_PRESSURE_PCT);
-  }
-
-  /// Whether the loss at this rate is still the held level's, too few reports yet counting as held.
-  static bool held_loss_covers_locked() {
-    return held_loss_pct && (rate_evidence.loss_pct.size() < RATE_TEST_MIN_REPORTS ||
-                             rate_evidence_loss_pct() <= held_loss_bound(*held_loss_pct));
-  }
-
-  static int step_up_locked(int current_target, int base) {
-    const int step = clamp_target(static_cast<int>(current_target * (1.0 + rate_climb.step_share)), base);
-    if (step <= current_target) {
-      // At the base, or bounds that leave no step: the climb is over.
-      rate_climb.running = false;
-      return current_target;
-    }
-    rate_climb.step_kbps = step;
-    rate_climb.from_kbps = current_target;
-    set_controller_status("recovering", "testing_a_step_up");
-    return step;
-  }
-
-  /// The climb's next step, once the rate has been held for a dwell, or for the wait after a failed step.
-  static int next_step_up_locked(std::chrono::steady_clock::time_point now, int current_target, int base) {
-    if (current_target >= base) {
-      rate_climb.running = false;
-      return current_target;
-    }
-    std::chrono::steady_clock::duration wait = rate_climb.wait;
-    if (wait == wait.zero()) {
-      wait = RATE_TEST_DWELL;
-    }
-    if (!rate_evidence_complete(now, wait)) {
-      return current_target;
-    }
-    return step_up_locked(current_target, base);
-  }
-
-  /// A step up failed: back to the rate it left, a first step of 8% again, and a wait of 30 s before it
-  /// that doubles, to 120 s, while steps fail in a row.
-  static int fail_step_up_locked() {
-    rate_climb.step_kbps = 0;
-    rate_climb.step_share = STEP_UP_FIRST;
-    rate_climb.wait = std::min(std::max(rate_climb.wait * 2, RATE_TEST_RETRY), RATE_TEST_RETRY_MAX);
-    return rate_climb.from_kbps;
-  }
-
-  static int judge_step_up_locked(std::chrono::steady_clock::time_point now, int current_target, int base) {
-    set_controller_status("recovering", "testing_a_step_up");
-    if (!rate_evidence_complete(now)) {
-      return current_target;
-    }
-    const double held = held_loss_pct.value_or(0.0);
-    const double loss = rate_evidence_loss_pct();
-    if (loss > held_loss_bound(held)) {
-      BOOST_LOG(debug) << "Adaptive bitrate: " << loss << "% loss at " << current_target << " kbps against "
-                       << held << "% held, back to " << rate_climb.from_kbps << " kbps";
-      set_controller_status("network_pressure", "packet_loss");
-      return fail_step_up_locked();
-    }
-    // Kept. A clean step, one whose loss did not rise above the held level, doubles the next.
-    rate_climb.step_kbps = 0;
-    rate_climb.wait = {};
-    if (loss <= held) {
-      rate_climb.step_share = std::min(rate_climb.step_share * 2.0, STEP_UP_MAX);
-    }
-    return step_up_locked(current_target, base);
-  }
-
-  static void start_climb_locked(double held_pct) {
-    rate_probe = {};
-    rate_climb = {};
-    rate_climb.running = true;
-    held_loss_pct = held_pct;
-  }
-
-  /// The probe found the rate the loss depends on: where it is gone, or where it fell to a background
-  /// level that every rate has. The climb starts there, at once if it is the rate being judged.
-  static int probe_found_locked(std::chrono::steady_clock::time_point now, int current_target, int found_kbps,
-                                double found_loss_pct, int base) {
-    BOOST_LOG(debug) << "Adaptive bitrate: " << found_loss_pct << "% loss at " << found_kbps
-                     << " kbps, the probe found the rate; climbing back by tested steps";
-    start_climb_locked(found_loss_pct);
-    set_controller_status("network_pressure", "packet_loss_holding");
-    if (found_kbps != current_target) {
-      return found_kbps;
-    }
-    return next_step_up_locked(now, current_target, base);
-  }
-
-  /// No probe step lowered the loss, so it does not depend on the rate: back to the hold, a climb by
-  /// tested steps from there, and no other probe for PROBE_BLOCK.
-  static int loss_not_the_bitrates_locked(std::chrono::steady_clock::time_point now) {
-    const int hold = rate_probe.hold_kbps;
-    const double held = rate_probe.hold_loss_pct;
-    BOOST_LOG(debug) << "Adaptive bitrate: no lower rate lowered the " << held << "% loss held at " << hold
-                     << " kbps, returning to it";
-    start_climb_locked(held);
-    probes_blocked_until = now + PROBE_BLOCK;
-    set_controller_status("network_pressure", "packet_loss_holding");
-    return hold;
-  }
-
-  static int start_probe_locked(std::chrono::steady_clock::time_point now, int current_target, int base) {
-    rate_probe = {};
-    rate_climb = {};
-    held_loss_pct.reset();
-    rate_probe.running = true;
-    rate_probe.hold_kbps = current_target;
-    rate_probe.hold_loss_pct = rate_evidence_loss_pct();
-    rate_probe.above_loss_pct = rate_probe.hold_loss_pct;
-    rate_probe.above_steady_share = rate_evidence_steady_share();
-    const int step = clamp_target(static_cast<int>(current_target * RATE_TEST_STEP_DOWN), base);
-    if (step == current_target) {
-      // Already at the configured minimum, with nothing below it to test.
-      return loss_not_the_bitrates_locked(now);
-    }
-    BOOST_LOG(debug) << "Adaptive bitrate: steady " << rate_probe.hold_loss_pct << "% loss at " << current_target
-                     << " kbps, probing " << step << " kbps";
-    rate_probe.kbps = step;
-    set_controller_status("network_pressure", "packet_loss_testing");
-    return step;
-  }
-
-  static int judge_probe_locked(std::chrono::steady_clock::time_point now, int current_target, int base) {
-    set_controller_status("network_pressure", "packet_loss_testing");
-    if (!rate_evidence_complete(now)) {
-      return current_target;
-    }
-    const double loss = rate_evidence_loss_pct();
-    const double share = rate_evidence_steady_share();
-    if (loss < LOSS_PRESSURE_PCT && share < GONE_LOSS_SHARE) {
-      return probe_found_locked(now, current_target, current_target, loss, base);
-    }
-    const bool helped = loss <= rate_probe.above_loss_pct * PROBE_STEP_HELPED ||
-                        share <= rate_probe.above_steady_share * PROBE_STEP_HELPED;
-    if (helped) {
-      rate_probe.fell_kbps = current_target;
-      rate_probe.fell_loss_pct = loss;
-    } else if (rate_probe.fell_kbps > 0) {
-      // The loss fell with an earlier step and then stayed: a background every rate has. The rate where
-      // it fell to that level is the one found.
-      return probe_found_locked(now, current_target, rate_probe.fell_kbps, rate_probe.fell_loss_pct, base);
-    } else if (share < STEADY_LOSS_SHARE) {
-      // Neither steady nor falling: no lower rate has lowered it.
-      return loss_not_the_bitrates_locked(now);
-    }
-    const int step = clamp_target(static_cast<int>(current_target * RATE_TEST_STEP_DOWN), base);
-    if (step == current_target) {
-      // The configured minimum ends the probe.
-      return helped ? probe_found_locked(now, current_target, current_target, loss, base) :
-                      loss_not_the_bitrates_locked(now);
-    }
-    BOOST_LOG(debug) << "Adaptive bitrate: " << loss << "% loss at " << current_target << " kbps against "
-                     << rate_probe.above_loss_pct << "% above it, probing " << step << " kbps";
-    rate_probe.kbps = step;
-    rate_probe.above_loss_pct = loss;
-    rate_probe.above_steady_share = share;
-    return step;
-  }
-
-  // Moderate loss that no finding holds: a cut in proportion, no lower than the hold at half the base.
-  // Once the cuts stop at or below the hold and the rate has been held a dwell, steady loss starts a
-  // probe, and loss that comes and goes, or steady loss within PROBE_BLOCK of a probe that found loss no
-  // rate lowers, starts a climb by tested steps from here.
-  static int cut_for_moderate_loss_locked(std::chrono::steady_clock::time_point now, int current_target, int base) {
-    // Whatever an earlier test found no longer holds this loss.
-    forget_rate_tests_locked();
-    const double reduction = current_config.max_change_rate * std::min(ewma_packet_loss / HEAVY_LOSS_PCT, 1.0);
-    const int hold = static_cast<int>(base * MODERATE_LOSS_FLOOR_SHARE);
-    const int new_target = std::max(static_cast<int>(current_target * (1.0 - reduction)), std::min(current_target, hold));
-    if (new_target != current_target) {
-      set_controller_status("network_pressure", "packet_loss");
-      return new_target;
-    }
-    set_controller_status("network_pressure", "packet_loss_holding");
-    if (!rate_evidence_complete(now) || rate_evidence_loss_pct() < LOSS_PRESSURE_PCT) {
-      return current_target;
-    }
-    if (rate_evidence_steady_share() >= STEADY_LOSS_SHARE && (!probes_blocked_until || now >= *probes_blocked_until)) {
-      return start_probe_locked(now, current_target, base);
-    }
-    BOOST_LOG(debug) << "Adaptive bitrate: " << rate_evidence_loss_pct() << "% loss at " << current_target
-                     << " kbps, holding and climbing back by tested steps";
-    start_climb_locked(rate_evidence_loss_pct());
-    return next_step_up_locked(now, current_target, base);
-  }
-
-  void update_network_stats(std::optional<double> packet_loss_percent, double rtt_ms, bool loss_is_pressure) {
+  void update_network_stats(double packet_loss_percent, double rtt_ms) {
     if (!enabled.load(std::memory_order_relaxed) ||
         !runtime_update_supported.load(std::memory_order_relaxed)) {
       return;
@@ -562,60 +229,22 @@ namespace adaptive_bitrate {
       return;
     }
     auto now = std::chrono::steady_clock::now();
-    // Live Tuning cuts only for loss the host's verdict calls pressure, so it hears any other report as
-    // clean. The report's own figure still judges the rate it arrived at.
-    const std::optional<double> heard_loss = packet_loss_percent ?
-      std::optional<double> {loss_is_pressure ? *packet_loss_percent : 0.0} :
-      std::nullopt;
 
     if (!initialized) {
-      ewma_packet_loss = heard_loss.value_or(0.0);
+      ewma_packet_loss = packet_loss_percent;
       ewma_rtt = rtt_ms;
       avg_rtt = rtt_ms;
       rtt_sample_count = 1;
       last_adjustment_time = now;
-      last_pressure_time = (heard_loss.value_or(0.0) > 0) ? now : (now - 10s);
-      if (packet_loss_percent) {
-        media_report_heard = true;
-        last_media_report_time = now;
-      }
+      last_pressure_time = (packet_loss_percent > 0) ? now : (now - 10s);
       set_controller_status("steady", "warming_up");
       initialized = true;
       return;
     }
 
-    const int held_target = target_bitrate_kbps.load(std::memory_order_relaxed);
-    if (held_target != rate_evidence.kbps) {
-      restart_rate_evidence_locked(held_target, now);
-    }
-    if (packet_loss_percent) {
-      note_rate_evidence_locked(*packet_loss_percent);
-      media_report_heard = true;
-      last_media_report_time = now;
-    }
-    const auto report_age = now - last_media_report_time;
-    // The host's verdict stops judging loss once the newest report is this old, and so does Live Tuning.
-    const bool loss_current = media_report_heard && report_age <= k_media_report_max_age;
-    // A pause in the reports, up to k_media_report_pause_hold, is waited out: the rate and what the tests
-    // found hold, since pings carry no loss to judge a step with.
-    const bool reports_recent = media_report_heard && report_age <= k_media_report_pause_hold;
-
-    // Update EWMA smoothed values. A reading with no loss figure moves only RTT: ten control pings a
-    // second, each counted as clean video, diluted a real 7% frame loss to under a tenth of a percent
-    // before Live Tuning could see it.
+    // Update EWMA smoothed values
     double alpha = current_config.ewma_alpha;
-    if (heard_loss) {
-      ewma_packet_loss = alpha * *heard_loss + (1.0 - alpha) * ewma_packet_loss;
-    } else if (!reports_recent) {
-      // No report has said anything about the loss for longer than a pause is waited out: a client that
-      // stopped posting, or a screen with no new frames. Held where the last report put it, the average
-      // had every ping cutting on it for as long as the silence lasted, so it decays as clean readings
-      // would, and nothing is left to judge a test with.
-      ewma_packet_loss = (1.0 - alpha) * ewma_packet_loss;
-      if (rate_probe.running || rate_climb.running || held_loss_pct) {
-        forget_rate_tests_locked();
-      }
-    }
+    ewma_packet_loss = alpha * packet_loss_percent + (1.0 - alpha) * ewma_packet_loss;
     ewma_rtt = alpha * rtt_ms + (1.0 - alpha) * ewma_rtt;
 
     // Track long-term average RTT for spike detection
@@ -625,27 +254,8 @@ namespace adaptive_bitrate {
     avg_rtt += (rtt_ms - avg_rtt) / rtt_sample_count;
 
     // Track when we last saw loss
-    if (heard_loss.value_or(0.0) > 0.0) {
+    if (packet_loss_percent > 0.0) {
       last_pressure_time = now;
-    }
-
-    // RTT spike detection: if current RTT is more than 2x the long-term average,
-    // treat it as congestion and reduce bitrate immediately
-    const bool rtt_spike = (rtt_sample_count > 5) &&
-                           (rtt_ms >= ACTIONABLE_RTT_MS) &&
-                           (rtt_ms > avg_rtt * 2.0) &&
-                           (avg_rtt > 0);
-
-    // A step up still being judged when the reports pause cannot be judged, and held it keeps the stream
-    // at an untested rate while nothing says what that rate loses. The ping that finds the pause takes
-    // it back.
-    const bool step_up_unjudged = rate_climb.step_kbps > 0 && !loss_current;
-    // A ping says nothing about video, so while reports arrive, or pause for no longer than
-    // k_media_report_pause_hold, it acts only on an RTT spike and leaves the loss to the next report.
-    // Pings come ten times a second and took the interval first, cutting on a loss average only a
-    // report can move, and climbing where only a report can say what a higher rate loses.
-    if (!packet_loss_percent && reports_recent && !rtt_spike && !step_up_unjudged) {
-      return;
     }
 
     // Check if enough time has passed for an adjustment
@@ -658,100 +268,44 @@ namespace adaptive_bitrate {
     if (base <= 0) {
       return;
     }
-    if (rate_tests_base_kbps != base) {
-      forget_rate_tests_locked();
-      probes_blocked_until.reset();
-      rate_tests_base_kbps = base;
-    }
-    // Something else moved the rate under a test, so there is nothing left to judge.
-    if (rate_probe.running && current_target != rate_probe.kbps) {
-      forget_rate_tests_locked();
-    }
-    if (rate_climb.step_kbps > 0 && current_target != rate_climb.step_kbps) {
-      rate_climb.step_kbps = 0;
-    }
 
     double max_change = current_config.max_change_rate;
     int new_target = current_target;
 
-    // Stale loss is no pressure: Doctor does not judge it either.
-    const bool loss_pressure = loss_current && ewma_packet_loss > LOSS_PRESSURE_PCT;
-    const bool heavy_loss = loss_current && ewma_packet_loss > HEAVY_LOSS_PCT;
-    const bool network_pressure = loss_pressure || rtt_spike;
-    if (heavy_loss && !rtt_spike && rate_climb.step_kbps > 0) {
-      // Heavy loss on a step up being judged: the step failed, and it goes back at once.
-      set_controller_status("network_pressure", "packet_loss");
-      new_target = fail_step_up_locked();
-    } else if (rtt_spike || heavy_loss) {
-      // Heavy loss is the mark of a link too small for the stream, and an RTT spike the mark of a
-      // queue, so both cut at once, down to the floor, and end any test.
-      forget_rate_tests_locked();
+    // RTT spike detection: if current RTT is more than 2x the long-term average,
+    // treat it as congestion and reduce bitrate immediately
+    bool rtt_spike = (rtt_sample_count > 5) &&
+                     (rtt_ms >= ACTIONABLE_RTT_MS) &&
+                     (rtt_ms > avg_rtt * 2.0) &&
+                     (avg_rtt > 0);
+
+    const bool network_pressure = ewma_packet_loss > 1.0 || rtt_spike;
+    if (network_pressure) {
+      // Network is congested -- reduce bitrate
+
+      // Scale reduction by severity of the loss
       double reduction_factor;
-      if (rtt_spike && !loss_pressure) {
+      if (rtt_spike && ewma_packet_loss <= 1.0) {
         // RTT spike without packet loss: moderate reduction
         reduction_factor = 0.5 * max_change;
-      } else if (heavy_loss) {
+      } else if (ewma_packet_loss > 5.0) {
         // Heavy loss: maximum reduction
         reduction_factor = max_change;
       } else {
-        // An RTT spike beside moderate loss: proportional reduction
-        reduction_factor = max_change * std::min(ewma_packet_loss / HEAVY_LOSS_PCT, 1.0);
+        // Moderate loss: proportional reduction (1-5% loss -> proportional within max_change)
+        reduction_factor = max_change * std::min(ewma_packet_loss / 5.0, 1.0);
       }
-      new_target = static_cast<int>(current_target * (1.0 - reduction_factor));
-      set_controller_status("network_pressure", rtt_spike ? "rtt_spike" : "packet_loss");
-    } else if (rate_climb.step_kbps > 0 && !loss_current) {
-      // Waits as a failed step does, so a pause is never a way to try the same rate sooner.
-      set_controller_status("recovering", "testing_a_step_up");
-      new_target = fail_step_up_locked();
-    } else if (rate_probe.running) {
-      new_target = judge_probe_locked(now, current_target, base);
-    } else if (rate_climb.step_kbps > 0) {
-      new_target = judge_step_up_locked(now, current_target, base);
-    } else if (loss_pressure && !held_loss_covers_locked()) {
-      // Moderate loss, 5% or less with no RTT spike beside it. Replayed with each report's loss, the
-      // Retroid Pocket 6's recorded HEVC run, about 2% lost in bursts every few seconds, took a
-      // controller that cut on for it from 269 Mbps to 4 in a minute and on to the 2 Mbps floor: a
-      // Wi-Fi burst loses the same frames at any rate. So the cuts stop at half the base, and the rate
-      // held there is tested before anything goes lower.
-      //
-      // A. Steady loss at the hold, in at least 75% of its reports, starts a probe down. Each step halves
-      //    the rate after a dwell of 8 s and 5 reports. A step helps when the mean loss or the share of
-      //    lossy reports falls by at least a third against the rate above it. The probe keeps halving
-      //    while the loss stays steady or keeps falling, and stops at the first rate whose loss is gone,
-      //    a mean under 1% with under 25% of reports lossy, or at the configured minimum. Where loss fell
-      //    with a step and the next did not lower it, the rest is a background every rate has, and the
-      //    rate where the loss fell to it is the one found.
-      // B. Where no step lowered the loss, down to the minimum or until it stopped being steady, the
-      //    loss does not depend on the rate: back to the hold, a climb by tested steps from there, and
-      //    no other probe for 5 minutes this session. Loss that comes and goes at the hold climbs the
-      //    same way, with no probe.
-      // C. Climb back by tested steps from a found rate or the hold: +8% after each dwell, doubling the
-      //    step (8, 16, 32%) while each step stays clean, capped at the base; a step is kept unless loss
-      //    rises above max(1.5 x the held level, held level + 1 point); a failed step reverts and backs
-      //    off (30 s doubling to 120 s) before trying again. The held level is the loss heard at the
-      //    rate the climb started from, and a clean step is a kept one whose loss did not rise above
-      //    it. Heavy loss on a step fails it at once.
-      new_target = cut_for_moderate_loss_locked(now, current_target, base);
-    } else if (rate_climb.running) {
-      if (loss_pressure) {
-        set_controller_status("network_pressure", "packet_loss_holding");
-      } else {
-        set_controller_status("recovering", "waiting_to_test_a_step_up");
-      }
-      new_target = next_step_up_locked(now, current_target, base);
-    } else if (loss_pressure) {
-      // Back at the base with the loss a climb held: it holds the rate.
-      set_controller_status("network_pressure", "packet_loss_holding");
-    }
 
-    if (network_pressure) {
+      new_target = static_cast<int>(current_target * (1.0 - reduction_factor));
       last_pressure_time = now;
-    } else if (held_loss_pct && !rate_climb.running && now - last_pressure_time >= RECOVERY_WAIT) {
-      // The loss the climb held has gone.
-      held_loss_pct.reset();
-    }
-    if (!network_pressure && !rate_probe.running && !rate_climb.running && !held_loss_pct &&
-        new_target == current_target) {
+      set_controller_status("network_pressure", rtt_spike ? "rtt_spike" : "packet_loss");
+
+      BOOST_LOG(debug) << "Adaptive bitrate: reducing "
+                       << current_target << " -> " << new_target << " kbps"
+                       << " (loss=" << ewma_packet_loss << "%, rtt=" << ewma_rtt << "ms"
+                       << (rtt_spike ? ", RTT spike" : "") << ")";
+
+    } else {
       // Network is healthy -- consider increasing bitrate back toward base
 
       // Only increase if the stream has been healthy for at least 10 seconds
@@ -765,21 +319,21 @@ namespace adaptive_bitrate {
         // Don't overshoot the base bitrate
         new_target = std::min(new_target, base);
         set_controller_status("recovering", "healthy_window");
+
+        BOOST_LOG(debug) << "Adaptive bitrate: recovering "
+                         << current_target << " -> " << new_target << " kbps"
+                         << " (loss=" << ewma_packet_loss << "%, rtt=" << ewma_rtt << "ms)";
       }
     }
 
-    if (new_target == current_target && controller_state != "network_pressure" && !rate_probe.running &&
-        !rate_climb.running) {
+    if (new_target == current_target && controller_state != "network_pressure") {
       set_controller_status("steady", "healthy");
     }
 
     const int clamped_target = clamp_target(new_target, base);
     if (clamped_target != current_target) {
-      BOOST_LOG(debug) << "Adaptive bitrate: " << current_target << " -> " << clamped_target << " kbps ("
-                       << controller_reason << ", loss=" << ewma_packet_loss << "%, rtt=" << ewma_rtt << "ms)";
       target_bitrate_kbps.store(clamped_target, std::memory_order_relaxed);
       ++action_authority_revision;
-      restart_rate_evidence_locked(clamped_target, now);
     }
     // Keep direct controller callers safe at the floor too. Production network
     // observations already advance the common evidence/controller epoch before
@@ -1392,27 +946,6 @@ namespace adaptive_bitrate {
                     << " kbps, max=" << current_config.max_bitrate_kbps << " kbps)";
   }
 
-#ifdef POLARIS_TESTS
-  void age_for_tests(std::chrono::steady_clock::duration age) {
-    std::lock_guard<std::mutex> lock(state_mutex);
-    last_adjustment_time -= age;
-    last_pressure_time -= age;
-    rate_evidence.since -= age;
-    last_media_report_time -= age;
-    if (probes_blocked_until) {
-      *probes_blocked_until -= age;
-    }
-  }
-
-  void hold_target_for_tests(int kbps) {
-    std::lock_guard<std::mutex> lock(state_mutex);
-    target_bitrate_kbps.store(clamp_target(kbps, base_bitrate_kbps.load(std::memory_order_relaxed)), std::memory_order_relaxed);
-    ++action_authority_revision;
-    ++operator_revision;
-    state_changed.notify_all();
-  }
-#endif
-
   void reset() {
     std::lock_guard<std::mutex> lock(state_mutex);
     doctor_override_active.store(false, std::memory_order_relaxed);
@@ -1425,12 +958,6 @@ namespace adaptive_bitrate {
     avg_rtt = 0.0;
     rtt_sample_count = 0;
     initialized = false;
-    forget_rate_tests_locked();
-    probes_blocked_until.reset();
-    rate_evidence = rate_evidence_t {};
-    rate_tests_base_kbps = 0;
-    media_report_heard = false;
-    last_media_report_time = {};
     runtime_update_supported.store(false, std::memory_order_relaxed);
     runtime_update_reason = "encoder_not_initialized";
     set_controller_status(enabled.load(std::memory_order_relaxed) ? "steady" : "disabled",

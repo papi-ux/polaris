@@ -576,7 +576,7 @@ export function describeLinuxGpuProfile(stats = {}) {
   return `${vaapiLabel} is active. Compare the reported capture path, render node, and encoder adapter before changing advanced capture flags.`
 }
 
-// The one loss figure Doctor grades with, Live Tuning acts on and the session status carries:
+// The one loss figure Doctor grades with and the session status carries:
 // video frames the client never received whole, after FEC recovery, over the host's window, with
 // the frame counts behind it. Null until the host has judged some, so nothing here grades one second.
 export function judgedVideoFrameLoss(stats = {}) {
@@ -648,7 +648,7 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
     ? judgedLoss.state === 'elevated'
       ? checklistItem('packet-loss', 'Video frame loss', 'fail', `${describeVideoFrameLoss(judgedLoss)}, which Doctor calls network pressure. It can look like stutter before the encoder is at fault.`, 'Try wired/5 GHz, lower bitrate, or enable FEC before changing encoder settings.')
       : judgedLoss.state === 'light'
-        ? checklistItem('packet-loss', 'Video frame loss', 'warning', `${describeVideoFrameLoss(judgedLoss)}, below the 2% Doctor calls network pressure; watch for artifacts.`, 'Re-test the same scene before changing bitrate; Doctor and Live Tuning act on loss from 2%.')
+        ? checklistItem('packet-loss', 'Video frame loss', 'warning', `${describeVideoFrameLoss(judgedLoss)}, below the 2% Doctor calls network pressure; watch for artifacts.`, 'Re-test the same scene before changing bitrate; Doctor acts on loss from 2%.')
         : checklistItem('packet-loss', 'Video frame loss', 'pass', `${describeVideoFrameLoss(judgedLoss)}.`, 'Network is not the loudest signal right now.')
     : liveTelemetry
       ? checklistItem('packet-loss', 'Video frame loss', 'info', 'No current confirmed video frame loss measurement is available for this active stream.', 'Control-channel estimates are context only; video frame loss stays unmeasured until this client reports fresh media counters.')

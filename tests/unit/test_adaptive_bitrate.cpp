@@ -8,13 +8,13 @@
 
 #include <gtest/gtest.h>
 
-#include <algorithm>
+#include <array>
 #include <chrono>
+#include <initializer_list>
+#include <optional>
 #include <thread>
 #include <future>
 #include <limits>
-#include <optional>
-#include <string>
 #include <vector>
 
 using namespace std::chrono_literals;
@@ -42,461 +42,6 @@ TEST(AdaptiveBitrateController, ReducesTargetOnNetworkPressure) {
   EXPECT_TRUE(state.enabled);
   EXPECT_LT(state.target_bitrate_kbps, state.base_bitrate_kbps);
   EXPECT_EQ("network_pressure", state.state);
-}
-
-TEST(AdaptiveBitrateController, AReadingWithoutLossLeavesTheLossAverageWhereItIs) {
-  enable_controller();
-
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  adaptive_bitrate::update_network_stats(6.0, 8.0);
-  const double after_loss = adaptive_bitrate::get_state().ewma_packet_loss;
-  ASSERT_GT(after_loss, 0.0);
-
-  // A second of control pings carries RTT and nothing about video.
-  for (int i = 0; i < 10; ++i) {
-    adaptive_bitrate::update_network_stats(std::nullopt, 8.0);
-  }
-  EXPECT_DOUBLE_EQ(adaptive_bitrate::get_state().ewma_packet_loss, after_loss);
-}
-
-namespace {
-  /// One client media report a second for `seconds`, its loss given by the rate Live Tuning holds.
-  /// Returns the target after each second.
-  template<class Loss>
-  std::vector<int> live_tuning_seconds(int seconds, Loss loss_at) {
-    std::vector<int> targets;
-    for (int second = 0; second < seconds; ++second) {
-      adaptive_bitrate::age_for_tests(1s);
-      adaptive_bitrate::update_network_stats(loss_at(second, adaptive_bitrate::get_state().target_bitrate_kbps), 8.0);
-      targets.push_back(adaptive_bitrate::get_state().target_bitrate_kbps);
-    }
-    return targets;
-  }
-
-  std::string targets_text(const std::vector<int> &targets) {
-    std::string text;
-    for (std::size_t i = 0; i < targets.size(); ++i) {
-      text += std::to_string(i) + ":" + std::to_string(targets[i]) + " ";
-    }
-    return text;
-  }
-
-  /// Leave no cut target behind for a later suite in this binary to read as a reduced stream.
-  void leave_controller_clean() {
-    adaptive_bitrate::reset();
-    adaptive_bitrate::set_enabled(false);
-    config::video.adaptive_bitrate.enabled = false;
-  }
-}  // namespace
-
-namespace {
-  /// Seconds with ten control pings each and no client media report: the reports have paused.
-  std::vector<int> live_tuning_pause(int seconds, double rtt_ms = 8.0) {
-    std::vector<int> targets;
-    for (int second = 0; second < seconds; ++second) {
-      adaptive_bitrate::age_for_tests(1s);
-      for (int ping = 0; ping < 10; ++ping) {
-        adaptive_bitrate::update_network_stats(std::nullopt, rtt_ms);
-      }
-      targets.push_back(adaptive_bitrate::get_state().target_bitrate_kbps);
-    }
-    return targets;
-  }
-
-  struct run_t {
-    std::size_t start;
-    std::size_t length;
-  };
-
-  /// Each stretch of seconds the target spent above kbps, from `from` on.
-  std::vector<run_t> runs_above(const std::vector<int> &targets, int kbps, std::size_t from = 0) {
-    std::vector<run_t> runs;
-    for (std::size_t i = from; i < targets.size(); ++i) {
-      if (targets[i] <= kbps) {
-        continue;
-      }
-      if (!runs.empty() && runs.back().start + runs.back().length == i) {
-        ++runs.back().length;
-      } else {
-        runs.push_back({i, 1});
-      }
-    }
-    return runs;
-  }
-
-  /// Each second the target moved up after moving down, and how long after the move down it came.
-  std::vector<std::size_t> waits_after_a_step_back(const std::vector<int> &targets, std::size_t from) {
-    std::vector<std::size_t> waits;
-    std::optional<std::size_t> back;
-    for (std::size_t i = std::max<std::size_t>(from, 1); i < targets.size(); ++i) {
-      if (targets[i] < targets[i - 1]) {
-        back = i;
-      } else if (targets[i] > targets[i - 1] && back) {
-        waits.push_back(i - *back);
-        back.reset();
-      }
-    }
-    return waits;
-  }
-}  // namespace
-
-TEST(AdaptiveBitrateController, ModerateLossNoLowerRateLowersProbesDownOnceAndClimbsBack) {
-  // 3% of every second's frames lost at any rate. Moderate loss cuts to half the base and holds there,
-  // and the steady loss there starts a probe that halves the rate after each dwell, down to the
-  // configured minimum. No step lowers the loss, so it does not depend on the rate: back to the hold,
-  // up by tested steps to the base, where that loss holds the rate, and no second probe for 5 minutes.
-  // A single step below, back and up again left it to be probed every time it came back. Heavy loss is
-  // a link too small for the stream and still cuts at once.
-  enable_controller(40000);
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  const auto targets = live_tuning_seconds(400, [](int, int) { return 3.0; });
-  const auto trace = targets_text(targets);
-  const auto held = std::find(targets.begin(), targets.end(), 20000);
-  ASSERT_NE(held, targets.end()) << trace;
-  EXPECT_GE(std::find_if(held, targets.end(), [](int target) { return target != 20000; }) - held, 8) << trace;
-  // Each probe step is held long enough to judge it, down to the configured minimum.
-  auto step = held;
-  for (const int probe : {10000, 5000, 2500, 2000}) {
-    step = std::find(step, targets.end(), probe);
-    ASSERT_NE(step, targets.end()) << probe << " " << trace;
-    EXPECT_GE(std::find_if(step, targets.end(), [probe](int target) { return target != probe; }) - step, 8) << trace;
-  }
-  const auto returned = std::find(step, targets.end(), 20000);
-  ASSERT_NE(returned, targets.end()) << trace;
-  const auto back = std::find(returned, targets.end(), 40000);
-  ASSERT_NE(back, targets.end()) << trace;
-  EXPECT_LE(back - returned, 60) << trace;
-  // No second probe, for the 5 minutes after the first, and the loss holds the base.
-  ASSERT_GE(targets.end() - returned, 300) << trace;
-  EXPECT_GE(*std::min_element(returned, targets.end()), 20000) << trace;
-  EXPECT_TRUE(std::all_of(back, targets.end(), [](int target) { return target == 40000; })) << trace;
-  EXPECT_EQ(adaptive_bitrate::get_state().reason, "packet_loss_holding");
-
-  for (int second = 0; second < 3; ++second) {
-    adaptive_bitrate::age_for_tests(1s);
-    adaptive_bitrate::update_network_stats(20.0, 8.0);
-  }
-  const auto state = adaptive_bitrate::get_state();
-  EXPECT_LT(state.target_bitrate_kbps, 40000);
-  EXPECT_EQ(state.reason, "packet_loss");
-  leave_controller_clean();
-}
-
-TEST(AdaptiveBitrateController, AProbeThatFindsLossNoRateLowersBlocksTheNextForFiveMinutes) {
-  // 3% lost at any rate, probed down to the minimum once and back at the base. The loss then rises to
-  // 4.8% at any rate, past what the climb held, and cuts to the hold again. Probing it again within 5
-  // minutes of the probe that found loss no rate lowers would halve the stream to the minimum a second
-  // time for loss it already knows the rate does not cause: the hold climbs back by tested steps
-  // instead. Once the 5 minutes are over, steady loss at the hold probes again.
-  enable_controller(40000);
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  const auto targets = live_tuning_seconds(460, [](int second, int) {
-    return second < 90 ? 3.0 : second < 330 ? 4.8 : second < 360 ? 0.0 : 3.0;
-  });
-  const auto trace = targets_text(targets);
-  const auto first_probe_end = std::find(targets.begin(), targets.end(), 2000);
-  ASSERT_NE(first_probe_end, targets.end()) << trace;
-  ASSERT_LT(first_probe_end - targets.begin(), 60) << trace;
-  // The rise cuts to the hold and no lower, and the stream climbs back.
-  EXPECT_EQ(*std::min_element(targets.begin() + 90, targets.begin() + 330), 20000) << trace;
-  EXPECT_EQ(targets[329], 40000) << trace;
-  // Past the 5 minutes, the next steady loss probes again.
-  EXPECT_EQ(*std::min_element(targets.begin() + 360, targets.end()), 2000) << trace;
-  leave_controller_clean();
-}
-
-TEST(AdaptiveBitrateController, ModerateLossStepsUnderALinkBelowHalfTheBase) {
-  // The link shrank to 15 Mbps under a 40 Mbps stream, and 3% of the frames are lost while the stream
-  // is above it. The hold at half the base stopped every cut at 20 Mbps and kept the stream losing
-  // frames for good. The steady loss there starts a probe, whose first step clears it, and the steps up
-  // back toward the link are kept only while the loss stays down. A step over the link lasts one dwell.
-  enable_controller(40000);
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  const auto targets = live_tuning_seconds(400, [](int, int target) { return target > 15000 ? 3.0 : 0.0; });
-  const auto trace = targets_text(targets);
-  const auto first_under = std::find_if(targets.begin(), targets.end(), [](int target) { return target <= 15000; });
-  ASSERT_NE(first_under, targets.end()) << trace;
-  EXPECT_LE(first_under - targets.begin(), 30) << trace;
-  // One step below the hold, and no spiral under it.
-  EXPECT_GE(*std::min_element(targets.begin(), targets.end()), 10000) << trace;
-  const auto over = runs_above(targets, 15000, static_cast<std::size_t>(first_under - targets.begin()));
-  ASSERT_FALSE(over.empty()) << trace;
-  for (std::size_t i = 0; i < over.size(); ++i) {
-    EXPECT_LE(over[i].length, 8u) << trace;
-    if (i > 0) {
-      EXPECT_GE(over[i].start - over[i - 1].start - over[i - 1].length, 30u) << trace;
-    }
-  }
-  // Close under the link, not left at the step below.
-  EXPECT_LE(targets.back(), 15000) << trace;
-  EXPECT_GT(targets.back(), 13500) << trace;
-  leave_controller_clean();
-}
-
-TEST(AdaptiveBitrateController, ModerateLossProbesPastARateThatDoesNotLowerIt) {
-  // The link shrank to 8 Mbps under a 40 Mbps stream, below a quarter of it, with 3% of the frames
-  // lost above it. The first step below the hold, 10 Mbps, is still over the link and loses as much,
-  // and taken for loss the bitrate does not cause it sent the stream back up to 40 Mbps and the loss.
-  // The steady loss keeps the probe halving, to the first rate it is gone at, and the climb back stops
-  // under the link.
-  enable_controller(40000);
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  const auto targets = live_tuning_seconds(300, [](int, int target) { return target > 8000 ? 3.0 : 0.0; });
-  const auto trace = targets_text(targets);
-  const auto first_under = std::find_if(targets.begin(), targets.end(), [](int target) { return target <= 8000; });
-  ASSERT_NE(first_under, targets.end()) << trace;
-  EXPECT_LE(first_under - targets.begin(), 40) << trace;
-  EXPECT_EQ(*std::min_element(targets.begin(), targets.end()), 5000) << trace;
-  for (const auto &run : runs_above(targets, 8000, static_cast<std::size_t>(first_under - targets.begin()))) {
-    EXPECT_LE(run.length, 8u) << trace;
-  }
-  EXPECT_LE(targets.back(), 8000) << trace;
-  EXPECT_GT(targets.back(), 7200) << trace;
-  leave_controller_clean();
-}
-
-TEST(AdaptiveBitrateController, ModerateLossFindsTheRateWhereItFallsToABackground) {
-  // The link shrank to 15 Mbps under a 40 Mbps stream: 3% of the frames lost above it, and 0.5% at any
-  // rate below it. The probe's first step lowers the mean loss by five sixths while every report still
-  // loses frames, and read as a step that did not help it sent the stream back over the link. A step
-  // helps when the mean loss or the share of lossy reports falls by a third. The next step lowers
-  // nothing, so the 0.5% is a background every rate has, and the rate where the loss fell to it is the
-  // one found.
-  enable_controller(40000);
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  const auto targets = live_tuning_seconds(300, [](int, int target) { return target > 15000 ? 3.0 : 0.5; });
-  const auto trace = targets_text(targets);
-  const auto probed = std::find(targets.begin(), targets.end(), 5000);
-  ASSERT_NE(probed, targets.end()) << trace;
-  EXPECT_EQ(*std::min_element(targets.begin(), targets.end()), 5000) << trace;
-  // Back to the rate above the step that lowered nothing, and up from there.
-  const auto found = std::find_if(probed, targets.end(), [](int target) { return target != 5000; });
-  ASSERT_NE(found, targets.end()) << trace;
-  EXPECT_EQ(*found, 10000) << trace;
-  for (const auto &run : runs_above(targets, 15000, static_cast<std::size_t>(found - targets.begin()))) {
-    EXPECT_LE(run.length, 8u) << trace;
-  }
-  EXPECT_LE(targets.back(), 15000) << trace;
-  EXPECT_GT(targets.back(), 13500) << trace;
-  leave_controller_clean();
-}
-
-TEST(AdaptiveBitrateController, AClimbStepsUpByEightSixteenAndThirtyTwoPercentAndBacksOffAfterFailures) {
-  // From the rate a probe found, the climb steps up 8% after each dwell and doubles the step while each
-  // stays clean, to 32%. A step whose loss rises past the held level's bound goes back, and the next
-  // waits 30 s, doubling to 120 s while steps fail in a row.
-  enable_controller(40000);
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  const auto targets = live_tuning_seconds(700, [](int, int target) { return target > 15000 ? 3.0 : 0.0; });
-  const auto trace = targets_text(targets);
-  const auto found = std::find(targets.begin(), targets.end(), 10000);
-  ASSERT_NE(found, targets.end()) << trace;
-  std::vector<int> rates;
-  for (auto it = found; it != targets.end() && rates.size() < 5; ++it) {
-    if (rates.empty() || *it != rates.back()) {
-      rates.push_back(*it);
-    }
-  }
-  // 10000, +8%, +16%, +32% over the link, and back.
-  EXPECT_EQ(rates, (std::vector<int> {10000, 10800, 12528, 16536, 12528})) << trace;
-  // Each wait after a failed step, the first three after a kept step reset it.
-  const auto waits = waits_after_a_step_back(targets, static_cast<std::size_t>(found - targets.begin()) + 1);
-  ASSERT_GE(waits.size(), 7u) << trace;
-  EXPECT_EQ(std::vector<std::size_t>(waits.begin(), waits.begin() + 7),
-            (std::vector<std::size_t> {30, 30, 30, 60, 120, 120, 120})) << trace;
-  leave_controller_clean();
-}
-
-TEST(AdaptiveBitrateController, AStepUpIsKeptUpToHalfAgainTheHeldLossOrAPointAboveIt) {
-  // A step up is kept unless its loss rises above max(1.5 x the held level, held level + 1 point), the
-  // held level being the loss where the climb started. The probe here finds 10 Mbps, where the loss fell
-  // from the hold's and a step lower does not lower it, so the level held there is exact. A step that
-  // is kept but loses more than the held level is not clean, and the next is no bigger.
-  struct case_t {
-    double held;
-    double above;
-    double step_loss;
-    bool kept;
-  };
-  for (const auto c : {case_t {3.0, 4.8, 4.5, true}, case_t {3.0, 4.8, 4.6, false},
-                       case_t {0.5, 3.0, 1.5, true}, case_t {0.5, 3.0, 1.6, false}}) {
-    SCOPED_TRACE(::testing::Message() << "held " << c.held << ", step " << c.step_loss);
-    enable_controller(40000);
-    adaptive_bitrate::update_network_stats(0.0, 8.0);
-    const auto targets = live_tuning_seconds(70, [c](int, int target) {
-      return target >= 20000 ? c.above : target > 10000 ? c.step_loss : c.held;
-    });
-    const auto trace = targets_text(targets);
-    const auto first_step = std::find(targets.begin(), targets.end(), 10800);
-    ASSERT_NE(first_step, targets.end()) << trace;
-    const auto next = std::find_if(first_step, targets.end(), [](int target) { return target != 10800; });
-    ASSERT_NE(next, targets.end()) << trace;
-    // Judged after its dwell: kept and not clean, one more 8% step; failed, back to the found rate.
-    EXPECT_EQ(*next, c.kept ? 11664 : 10000) << trace;
-    EXPECT_GE(next - first_step, 8) << trace;
-    leave_controller_clean();
-  }
-}
-
-TEST(AdaptiveBitrateController, HeavyLossOnAStepUpFailsItAtOnce) {
-  // A step up over a link whose loss there is heavy. Heavy loss cut 20% and forgot the climb, so the next
-  // step came after one dwell, over the link again. It fails the step at once, back to the rate it
-  // left, and the next waits as after any failure.
-  enable_controller(40000);
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  const auto targets = live_tuning_seconds(120, [](int, int target) {
-    return target >= 20000 ? 3.0 : target > 15000 ? 8.0 : 0.0;
-  });
-  const auto trace = targets_text(targets);
-  const auto over = std::find(targets.begin(), targets.end(), 16536);
-  ASSERT_NE(over, targets.end()) << trace;
-  const auto back = std::find_if(over, targets.end(), [](int target) { return target != 16536; });
-  ASSERT_NE(back, targets.end()) << trace;
-  EXPECT_EQ(*back, 12528) << trace;
-  EXPECT_LT(back - over, 8) << trace;
-  const auto next = std::find_if(back, targets.end(), [](int target) { return target != 12528; });
-  ASSERT_NE(next, targets.end()) << trace;
-  EXPECT_GE(next - back, 30) << trace;
-  EXPECT_GT(*next, 12528) << trace;
-  leave_controller_clean();
-}
-
-TEST(AdaptiveBitrateController, LossTheBitrateDoesNotCauseHoldsAndClimbsBackToTheBase) {
-  // 8% of the frames lost one second in four, whatever the rate: a Wi-Fi burst. Held at half the base,
-  // it was halved for the rest of the stream. Loss that comes and goes gets no probe, and climbs back
-  // by tested steps.
-  enable_controller(40000);
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  const auto targets = live_tuning_seconds(180, [](int second, int) { return second % 4 == 3 ? 8.0 : 0.0; });
-  const auto trace = targets_text(targets);
-  EXPECT_GE(*std::min_element(targets.begin(), targets.end()), 20000) << trace;
-  const auto back = std::find(targets.begin() + 20, targets.end(), 40000);
-  ASSERT_NE(back, targets.end()) << trace;
-  EXPECT_LE(back - targets.begin(), 120) << trace;
-  EXPECT_EQ(targets.back(), 40000) << trace;
-  leave_controller_clean();
-}
-
-TEST(AdaptiveBitrateController, AReportPauseHoldsTheRateAndWhatTheTestsFound) {
-  // Settled under a link that shrank, the client's reports pause for 25 s while the pings go on. Five
-  // seconds in, the pings brought the ordinary recovery, 8% a second, over the link and blind, with
-  // nothing to say what the higher rate lost, and the finding was forgotten. For up to 30 s the rate and
-  // the loss average hold, the climb waits for reports, and it goes on from where it was.
-  enable_controller(40000);
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  const auto loss = [](int, int target) { return target > 15000 ? 3.0 : 0.0; };
-  const auto settled = live_tuning_seconds(200, loss);
-  ASSERT_LE(settled.back(), 15000) << targets_text(settled);
-  const auto before = adaptive_bitrate::get_state();
-  const auto paused = live_tuning_pause(25);
-  const auto trace = targets_text(paused);
-  EXPECT_TRUE(std::all_of(paused.begin(), paused.end(), [&](int target) { return target == before.target_bitrate_kbps; })) << trace;
-  EXPECT_DOUBLE_EQ(adaptive_bitrate::get_state().ewma_packet_loss, before.ewma_packet_loss);
-  // With reports back, the finding still holds the stream under the link but for a step's dwell.
-  const auto after = live_tuning_seconds(120, loss);
-  for (const auto &run : runs_above(after, 15000)) {
-    EXPECT_LE(run.length, 8u) << targets_text(after);
-  }
-  EXPECT_LE(after.back(), 15000) << targets_text(after);
-  leave_controller_clean();
-}
-
-TEST(AdaptiveBitrateController, AStepUpBeingJudgedWhenReportsPauseGoesBack) {
-  // A pause in the reports while a step up is being judged. Nothing can judge it, and held it keeps the
-  // stream at an untested rate while nothing says what that rate loses. Once the loss is stale, the next
-  // ping takes it back, and the next step waits as after a failed one.
-  enable_controller(40000);
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  const auto targets = live_tuning_seconds(25, [](int, int target) { return target > 15000 ? 3.0 : 0.0; });
-  ASSERT_EQ(targets.back(), 10800) << targets_text(targets);
-  const auto paused = live_tuning_pause(20);
-  const auto trace = targets_text(paused);
-  const auto back = std::find(paused.begin(), paused.end(), 10000);
-  ASSERT_NE(back, paused.end()) << trace;
-  EXPECT_LE(back - paused.begin(), 6) << trace;
-  EXPECT_TRUE(std::all_of(back, paused.end(), [](int target) { return target == 10000; })) << trace;
-  const auto after = live_tuning_seconds(40, [](int, int target) { return target > 15000 ? 3.0 : 0.0; });
-  const auto next = std::find_if(after.begin(), after.end(), [](int target) { return target != 10000; });
-  ASSERT_NE(next, after.end()) << targets_text(after);
-  EXPECT_GE(static_cast<int>(next - after.begin()) + static_cast<int>(paused.end() - back), 30) << targets_text(after);
-  leave_controller_clean();
-}
-
-TEST(AdaptiveBitrateController, AnRttSpikeStillCutsDuringAReportPause) {
-  // A guard, not proof of the fix: this passed before it too. A pause holds the rate against climbing,
-  // never against a queue.
-  enable_controller(40000);
-  for (int i = 0; i < 6; ++i) {
-    adaptive_bitrate::update_network_stats(0.0, 8.0);
-  }
-  live_tuning_seconds(3, [](int, int) { return 0.0; });
-  live_tuning_pause(8);
-  ASSERT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, 40000);
-  live_tuning_pause(1, 60.0);
-  const auto state = adaptive_bitrate::get_state();
-  EXPECT_LT(state.target_bitrate_kbps, 40000);
-  EXPECT_EQ(state.reason, "rtt_spike");
-  leave_controller_clean();
-}
-
-TEST(AdaptiveBitrateController, PingsNeverCutForLossAndTheNextReportDoes) {
-  // Loss arrives once a second and pings ten times a second. Counted as clean video, the pings pulled
-  // the loss average to a few hundredths of a percent before the interval came round. Heard as
-  // nothing, they left it alone but took the interval first and cut on it. A ping says nothing about
-  // video, so it leaves the loss a report brought to the next report.
-  enable_controller();
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  for (int i = 0; i < 3; ++i) {
-    adaptive_bitrate::update_network_stats(6.0, 8.0);
-  }
-  adaptive_bitrate::age_for_tests(1100ms);
-  for (int i = 0; i < 10; ++i) {
-    adaptive_bitrate::update_network_stats(std::nullopt, 8.0);
-  }
-  auto state = adaptive_bitrate::get_state();
-  EXPECT_GT(state.ewma_packet_loss, 1.0);
-  EXPECT_EQ(state.target_bitrate_kbps, state.base_bitrate_kbps);
-
-  adaptive_bitrate::update_network_stats(6.0, 8.0);
-  state = adaptive_bitrate::get_state();
-  EXPECT_LT(state.target_bitrate_kbps, state.base_bitrate_kbps);
-  EXPECT_EQ(state.state, "network_pressure");
-  EXPECT_EQ(state.reason, "packet_loss");
-  leave_controller_clean();
-}
-
-TEST(AdaptiveBitrateController, ALossAverageWhoseReportsStoppedDecaysAndCutsNothing) {
-  // The client's media reports stop while the loss average is high: it stopped posting, or the screen
-  // has no new frames. The average stayed where the last report put it and every ping cut on it for as
-  // long as the silence lasted. Once the newest report is older than Doctor keeps loss for, nothing cuts
-  // for it; for 30 s the rate and the average hold, as for a pause, and after that the average decays
-  // and the pings bring the stream back.
-  enable_controller(40000);
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  for (int second = 0; second < 3; ++second) {
-    adaptive_bitrate::age_for_tests(1s);
-    adaptive_bitrate::update_network_stats(4.0, 8.0);
-  }
-  const auto after_loss = adaptive_bitrate::get_state();
-  ASSERT_LT(after_loss.target_bitrate_kbps, 40000);
-  ASSERT_GT(after_loss.ewma_packet_loss, 1.0);
-
-  std::vector<int> targets;
-  for (int second = 0; second < 40; ++second) {
-    adaptive_bitrate::age_for_tests(1s);
-    for (int ping = 0; ping < 10; ++ping) {
-      adaptive_bitrate::update_network_stats(std::nullopt, 8.0);
-    }
-    targets.push_back(adaptive_bitrate::get_state().target_bitrate_kbps);
-  }
-  const auto trace = targets_text(targets);
-  EXPECT_GE(*std::min_element(targets.begin(), targets.end()), after_loss.target_bitrate_kbps) << trace;
-  EXPECT_TRUE(std::all_of(targets.begin(), targets.begin() + 29, [&](int target) {
-    return target == after_loss.target_bitrate_kbps;
-  })) << trace;
-  EXPECT_LT(adaptive_bitrate::get_state().ewma_packet_loss, 0.01);
-  EXPECT_EQ(targets.back(), 40000) << trace;
-  leave_controller_clean();
 }
 
 TEST(AdaptiveBitrateController, IgnoresSubthresholdRelativeRttSpikeOnFastLan) {
@@ -1468,4 +1013,176 @@ TEST(AdaptiveBitrateController, PyroWaveFloorStopsLiveTuningAndNeverLiftsAReques
   state = adaptive_bitrate::get_state();
   EXPECT_EQ(state.min_bitrate_kbps, 2000);
   EXPECT_EQ(state.floor_source, "adaptive_bitrate_min");
+}
+
+namespace {
+  // Live Tuning keeps 1.4.13's loss handling in this release. Every control ping reaches it as a reading
+  // with 0% loss, about ten a second, and each client media report with its own loss. Every reading moves
+  // its loss average by ewma_alpha, 0.3, and it acts on the first reading once a second is up: an average
+  // above 1% cuts in proportion and one above 5% by the whole 20%, an RTT reading of 45 ms or more and
+  // twice the running average cuts 10%, and it recovers only after 10 seconds with no lossy report.
+
+  /// One client media report: the frames the client expected in its second, and how many never arrived.
+  struct media_report_t {
+    double expected;
+    double lost;
+
+    double loss_pct() const {
+      return lost * 100.0 / expected;
+    }
+  };
+
+  // The Retroid Pocket 6's recorded HEVC run, 3840x2160 at 120 fps over Wi-Fi: 9 of 122 frames lost and 9
+  // of 121, in two of every eight reports, for five minutes, and the host's RTT through it. The same run
+  // test_stream_stats.cpp replays through Doctor's judge.
+  constexpr std::array<media_report_t, 8> k_rp6_hevc_reports {{
+    {120, 0}, {122, 9}, {120, 0}, {120, 0}, {120, 0}, {120, 0}, {121, 9}, {120, 0}
+  }};
+  constexpr std::array<double, 8> k_rp6_hevc_rtt_ms {4.0, 4.4, 10.1, 7.6, 9.6, 7.9, 8.6, 4.3};
+  constexpr int k_rp6_hevc_kbps = 268988;
+
+  struct live_second_t {
+    int target_kbps = 0;
+    /// Live Tuning's loss average when it acted, after the second's first reading.
+    double loss_acted_on_pct = 0.0;
+  };
+
+  /// One second as Live Tuning hears it: ten control pings and, when there is one, the client's media
+  /// report after `pings_before_report` of them. The second begins once a second has passed since the
+  /// last one began, so its first reading is the one Live Tuning acts on.
+  live_second_t live_second(std::optional<double> report_loss_pct, int pings_before_report, double rtt_ms = 8.0) {
+    std::this_thread::sleep_for(1005ms);
+    live_second_t second;
+    for (int ping = 0; ping < 10; ++ping) {
+      if (report_loss_pct && ping == pings_before_report) {
+        adaptive_bitrate::update_network_stats(*report_loss_pct, rtt_ms);
+        if (ping == 0) {
+          second.loss_acted_on_pct = adaptive_bitrate::get_state().ewma_packet_loss;
+        }
+      }
+      adaptive_bitrate::update_network_stats(0.0, rtt_ms);
+      if (ping == 0 && !(report_loss_pct && pings_before_report == 0)) {
+        second.loss_acted_on_pct = adaptive_bitrate::get_state().ewma_packet_loss;
+      }
+    }
+    second.target_kbps = adaptive_bitrate::get_state().target_bitrate_kbps;
+    return second;
+  }
+
+  /// Live Tuning's loss average after each of `readings`, fed back to back so none is acted on.
+  std::vector<double> loss_average_after(std::initializer_list<double> readings) {
+    std::vector<double> averages;
+    for (const double loss : readings) {
+      adaptive_bitrate::update_network_stats(loss, 8.0);
+      averages.push_back(adaptive_bitrate::get_state().ewma_packet_loss);
+    }
+    return averages;
+  }
+
+  /// Leave no cut target behind for a later suite in this binary to read as a reduced stream.
+  void leave_live_tuning_clean() {
+    adaptive_bitrate::reset();
+    adaptive_bitrate::set_enabled(false);
+    config::video.adaptive_bitrate.enabled = false;
+  }
+}  // namespace
+
+TEST(AdaptiveBitrateController, TheRecordedRp6HevcRunCutsNothingForItsLoss) {
+  // The Retroid Pocket 6's HEVC run with its reports landing mid-second, five pings after each second
+  // begins. A 7.4% report lifts the loss average to 2.2%, and the six pings before the next adjustment
+  // take it under 0.3%, so no adjustment sees loss above 1% and the stream stays at 269 Mbps.
+  enable_controller(k_rp6_hevc_kbps);
+  adaptive_bitrate::update_network_stats(0.0, k_rp6_hevc_rtt_ms[0]);
+  for (int ping = 0; ping < 6; ++ping) {
+    adaptive_bitrate::update_network_stats(0.0, k_rp6_hevc_rtt_ms[ping % k_rp6_hevc_rtt_ms.size()]);
+  }
+  for (std::size_t second = 0; second < k_rp6_hevc_reports.size(); ++second) {
+    const auto heard = live_second(k_rp6_hevc_reports[second].loss_pct(), 5, k_rp6_hevc_rtt_ms[second]);
+    EXPECT_EQ(heard.target_kbps, k_rp6_hevc_kbps) << "second " << second;
+    EXPECT_LT(heard.loss_acted_on_pct, 1.0) << "second " << second;
+    EXPECT_NE(adaptive_bitrate::get_state().state, "network_pressure") << "second " << second;
+  }
+  leave_live_tuning_clean();
+}
+
+TEST(AdaptiveBitrateController, AnRp6ReportThatMeetsAnAdjustmentCutsForItsOwnLoss) {
+  // Where the run's reports land decides whether 1.4.13 cuts for them. A 7.4% report keeps the loss
+  // average above 1% for its own reading and the two pings after it and no longer, so an adjustment
+  // that falls on one of those three cuts in proportion, under a tenth, and the others see none.
+  enable_controller(k_rp6_hevc_kbps);
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  const double report = k_rp6_hevc_reports[6].loss_pct();
+  const auto averages = loss_average_after({report, 0.0, 0.0, 0.0});
+  EXPECT_NEAR(averages[0], 0.3 * report, 1e-9);
+  EXPECT_GT(averages[1], 1.0);
+  EXPECT_GT(averages[2], 1.0);
+  EXPECT_LT(averages[3], 1.0);
+  for (int ping = 0; ping < 30; ++ping) {
+    adaptive_bitrate::update_network_stats(0.0, 8.0);
+  }
+  ASSERT_LT(adaptive_bitrate::get_state().ewma_packet_loss, 0.01);
+
+  // The report is the first reading once the second is up.
+  const auto heard = live_second(report, 0);
+  EXPECT_GT(heard.loss_acted_on_pct, 1.0);
+  EXPECT_LT(heard.target_kbps, k_rp6_hevc_kbps);
+  EXPECT_GT(heard.target_kbps, k_rp6_hevc_kbps * 9 / 10);
+  const auto state = adaptive_bitrate::get_state();
+  EXPECT_EQ(state.state, "network_pressure");
+  EXPECT_EQ(state.reason, "packet_loss");
+  leave_live_tuning_clean();
+}
+
+TEST(AdaptiveBitrateController, ATwentyPercentBurstCutsWhereItsReportsLandLateInTheSecond) {
+  // Three seconds that lose a fifth of their frames, each report landing two pings before the second
+  // ends. The pings before the next adjustment leave the average near 2%, and each of the three
+  // adjustments after a lossy report cuts in proportion. A 20% report keeps the average above 1% for
+  // its own reading and five pings, so a burst whose reports land six readings or more before an
+  // adjustment is under the line when Live Tuning acts, and one that lands on the adjustment is heavy
+  // loss and cuts the whole 20%.
+  enable_controller(k_rp6_hevc_kbps);
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  const auto averages = loss_average_after({20.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+  EXPECT_GT(averages[0], 5.0);
+  EXPECT_GT(averages[5], 1.0);
+  EXPECT_LT(averages[6], 1.0);
+  for (int ping = 0; ping < 30; ++ping) {
+    adaptive_bitrate::update_network_stats(0.0, 8.0);
+  }
+  ASSERT_LT(adaptive_bitrate::get_state().ewma_packet_loss, 0.01);
+
+  std::vector<int> targets;
+  for (int second = 0; second < 3; ++second) {
+    targets.push_back(live_second(20.0, 8).target_kbps);
+  }
+  targets.push_back(live_second(0.0, 8).target_kbps);
+  // The first lossy second's adjustment came before its report.
+  EXPECT_EQ(targets[0], k_rp6_hevc_kbps);
+  for (std::size_t i = 1; i < targets.size(); ++i) {
+    EXPECT_LT(targets[i], targets[i - 1]) << i;
+    EXPECT_GT(targets[i], targets[i - 1] * 9 / 10) << i;
+  }
+  const auto state = adaptive_bitrate::get_state();
+  EXPECT_EQ(state.state, "network_pressure");
+  EXPECT_EQ(state.reason, "packet_loss");
+  leave_live_tuning_clean();
+}
+
+TEST(AdaptiveBitrateController, AnRttSpikeCutsTenPercentEachSecondItLasts) {
+  // A Wi-Fi RTT spike to 60 ms on a stream that has read 8 ms, two seconds long, as ENet's estimate
+  // stays up. Every ping and report carries it, and each second's adjustment cuts 10% with no loss at all.
+  enable_controller(k_rp6_hevc_kbps);
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  for (int ping = 0; ping < 200; ++ping) {
+    adaptive_bitrate::update_network_stats(0.0, 8.0);
+  }
+  const auto first = live_second(0.0, 5, 60.0);
+  EXPECT_EQ(first.target_kbps, static_cast<int>(k_rp6_hevc_kbps * 0.9));
+  EXPECT_EQ(adaptive_bitrate::get_state().reason, "rtt_spike");
+  const auto second = live_second(0.0, 5, 60.0);
+  EXPECT_EQ(second.target_kbps, static_cast<int>(static_cast<int>(k_rp6_hevc_kbps * 0.9) * 0.9));
+  const auto state = adaptive_bitrate::get_state();
+  EXPECT_EQ(state.state, "network_pressure");
+  EXPECT_EQ(state.reason, "rtt_spike");
+  leave_live_tuning_clean();
 }

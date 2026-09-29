@@ -312,8 +312,9 @@ namespace stream_stats {
    * whole, as a share of the frames it expected, summed over the media reports in the window. It is
    * not a packet count. Frames the host dropped before sending are dropped_frame_ratio, a separate
    * figure. RTT is the median of the host's round trip readings over the same window. Doctor's
-   * verdict, the session status and Live Tuning's loss input all read this one judgement, so they
-   * cannot quote different figures. network_judge_t says how it is formed.
+   * verdict and the session status both read this one judgement, so they cannot quote different
+   * figures. Live Tuning does not: it keeps its own average of each report's loss and every control
+   * ping's 0%. network_judge_t says how it is formed.
    *
    * Each figure is the one its newest reading judged, with the band it was judged into, so a verdict
    * read between readings never pairs a band with a figure the window has since moved to.
@@ -482,7 +483,7 @@ namespace stream_stats {
     /// Everything that grades the stream reads network_verdict instead.
     bool network_risk = false;
     /// Loss and RTT judged over the last network_judge_t::k_window with hysteresis, as the newest
-    /// readings left them: what Doctor's verdict, the session status and Live Tuning's loss input read.
+    /// readings left them: what Doctor's verdict and the session status read.
     /// A reader that shows or grades it goes through served_network_verdict(), which drops figures
     /// whose readings stopped; only a session that has already ended reads it as it stands.
     network_verdict_t network_verdict;

@@ -1396,8 +1396,7 @@ namespace stream {
       const auto client_ip = platf::from_sockaddr((sockaddr *) &session->control.peer->address.address);
       record_network_stats(client_ip, rtt_ms, loss_pct, 0);
       if (adaptive_bitrate::is_enabled()) {
-        // A ping says nothing about video, so it brings Live Tuning an RTT reading and no loss.
-        adaptive_bitrate::update_network_stats(std::nullopt, rtt_ms);
+        adaptive_bitrate::update_network_stats(0.0, rtt_ms);
       }
     });
 
@@ -1436,7 +1435,7 @@ namespace stream {
       // percentage, so retain RTT and wait for quantified media telemetry.
       record_network_stats(client_ip, rtt_ms, 0.0, 0);
       if (adaptive_bitrate::is_enabled() && t.count() > 0) {
-        adaptive_bitrate::update_network_stats(std::nullopt, rtt_ms);
+        adaptive_bitrate::update_network_stats(0.0, rtt_ms);
       }
     });
 

@@ -2829,8 +2829,8 @@ namespace stream_stats {
       encoder_selection.value("reason", std::string {"Encoder selection evidence is unavailable."})
     );
     // The one loss figure: frames the client never received whole, after FEC recovery, over the
-    // window. Nova quotes this row, the session status carries the same verdict, and Live Tuning
-    // acts on it, so none of them can show a different number.
+    // window. Nova quotes this row and the session status carries the same verdict, so neither can
+    // show a different number.
     append_doctor_evidence(
       evidence,
       "packet_loss",
@@ -4561,16 +4561,8 @@ namespace stream_stats {
       }
     }
     if (adaptive_bitrate::is_enabled()) {
-      // Live Tuning acts when Doctor does: it hears each report's own loss while the verdict calls loss
-      // network pressure, and none while it does not. Not the window's figure: that stays at 1% or more
-      // for most of the 20 seconds after the loss stops, and Live Tuning cut on it every second, late
-      // and long after, where each report's figure lets its average fall within seconds. The report's
-      // own figure also judges the rate Live Tuning holds, whatever the verdict says.
-      static_assert(
-        adaptive_bitrate::k_media_report_max_age.count() == judged_network_t::k_media_report_max_age_ms,
-        "Live Tuning stops acting on loss when Doctor stops judging it"
-      );
-      adaptive_bitrate::update_network_stats(result.media_loss_pct, host.latency_ms, verdict.loss_elevated);
+      // Live Tuning hears the report's own loss, whatever the verdict above says, as it did in 1.4.13.
+      adaptive_bitrate::update_network_stats(result.media_loss_pct, host.latency_ms);
     }
     result.observation_published = true;
     if (logged_media_report_generation.exchange(sample.session_generation) != sample.session_generation) {

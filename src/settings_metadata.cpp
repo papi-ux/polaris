@@ -320,14 +320,13 @@ namespace settings_metadata {
     tuning["adaptive_max_bitrate_kbps"] = adaptive_state.max_bitrate_kbps;
     tuning["adaptive_bitrate_state"] = adaptive_state.state;
     tuning["adaptive_bitrate_reason"] = adaptive_state.reason;
-    // A second loss figure beside network_loss_pct: Live Tuning's own average of the reports it hears,
-    // each report's own loss while the verdict calls loss pressure, already in percent.
+    // A second loss figure beside network_loss_pct: Live Tuning's own average, already in percent, of
+    // each client media report's own loss and every control ping's 0%.
     tuning["adaptive_packet_loss_ewma"] = adaptive_state.ewma_packet_loss;
     tuning["adaptive_rtt_ewma_ms"] = adaptive_state.ewma_rtt_ms;
     // The loss Doctor and the session status quote: video frames lost after FEC over the network
     // verdict's window, as served, so a figure Doctor stopped judging reads as stale here too. Live
-    // Tuning does not act on it. It hears each client media report's own loss while this verdict calls
-    // loss pressure, and adaptive_packet_loss_ewma above is its average of those.
+    // Tuning does not act on it: adaptive_packet_loss_ewma above is what it acts on.
     const auto verdict = stream_stats::served_network_verdict(stats);
     tuning["network_loss_pct"] = verdict.loss_available ? nlohmann::json(verdict.loss_pct) : nlohmann::json(nullptr);
     tuning["network_loss_state"] = stream_stats::network_loss_state(verdict);
