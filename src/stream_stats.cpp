@@ -2124,7 +2124,7 @@ namespace stream_stats {
         } else if (auto_safe_managing) {
           body = "Confirmed network pressure is affecting this stream, and Live Tuning already owns the live bitrate correction. Doctor will measure the result without racing the active controller.";
           next_step = "Recheck Live Tuning";
-          expected = "Live Tuning should lower the encoder target until loss and latency return to the stable range.";
+          expected = "Live Tuning should lower the encoder target while a lower rate reduces the loss or latency, and hold it where the loss does not come from the bitrate.";
         } else if (live_bitrate_tunable) {
           body = "Current sustained loss or latency evidence confirms network pressure. Doctor can lower bitrate one guarded step and watch the same telemetry for recovery.";
           next_step = "Fix and verify";
@@ -4531,11 +4531,12 @@ namespace stream_stats {
       }
     }
     if (adaptive_bitrate::is_enabled()) {
-      // Live Tuning acts when Doctor does: each report's own loss while the verdict calls loss network
-      // pressure, and none while it does not. Not the window's figure: that stays at 1% or more for
-      // most of the 20 seconds after the loss stops, and Live Tuning cut on it every second, late and
-      // long after, where each report's figure lets its average fall within seconds.
-      adaptive_bitrate::update_network_stats(verdict.loss_elevated ? result.media_loss_pct : 0.0, host.latency_ms);
+      // Live Tuning acts when Doctor does: it hears each report's own loss while the verdict calls loss
+      // network pressure, and none while it does not. Not the window's figure: that stays at 1% or more
+      // for most of the 20 seconds after the loss stops, and Live Tuning cut on it every second, late
+      // and long after, where each report's figure lets its average fall within seconds. The report's
+      // own figure also judges the rate Live Tuning holds, whatever the verdict says.
+      adaptive_bitrate::update_network_stats(result.media_loss_pct, host.latency_ms, verdict.loss_elevated);
     }
     result.observation_published = true;
     if (logged_media_report_generation.exchange(sample.session_generation) != sample.session_generation) {

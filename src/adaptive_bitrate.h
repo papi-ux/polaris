@@ -103,20 +103,26 @@ namespace adaptive_bitrate {
   /**
    * @brief Feed one network reading to Live Tuning.
    *
-   * Moderate loss, 5% or less with no RTT spike beside it, takes the target no lower than half the
-   * stream's base: loss still there at half the bitrate is not the bitrate's doing. Heavy loss and
-   * RTT spikes cut down to the floor.
+   * Heavy loss, over 5%, and RTT spikes cut down to the floor. Moderate loss, 5% or less with no RTT
+   * spike beside it, cuts no lower than half the stream's base until the rate is tested. A rate held
+   * there for about 8 seconds is tested with the reports heard at it: steady loss, in most reports,
+   * gets a step below, and the steps go on only while each lowers the loss, where one that does not
+   * returns to the rate before it. Loss that comes and goes, or that a step below did not lower, is
+   * not the bitrate's doing, so the rate holds and climbs back one step up at a time, each kept only if
+   * the loss does not rise. Where a step below did lower it, the rate climbs back toward the rate that
+   * lost frames the same way.
    *
-   * @param packet_loss_percent Video frame loss, 0 to 100, from one client media report. stream_stats
-   *        passes the report's own figure while the host's network verdict calls loss pressure and
-   *        zero while it does not, so Live Tuning acts when Doctor does and its average falls within
-   *        seconds of clean reports, where the verdict's 20 second window holds for most of its
-   *        length. std::nullopt for a reading that says nothing about video, such as a
+   * @param packet_loss_percent Video frame loss, 0 to 100, from one client media report, the report's
+   *        own figure. std::nullopt for a reading that says nothing about video, such as a
    *        control-channel ping: it leaves the loss average where it is instead of pulling it toward
    *        zero.
    * @param rtt_ms Round-trip time in milliseconds.
+   * @param loss_is_pressure Whether the host's network verdict calls loss pressure. Live Tuning hears a
+   *        report's loss only while it does, so it acts when Doctor does, and its average falls within
+   *        seconds of clean reports, where the verdict's 20 second window holds for most of its
+   *        length. The report's own figure still judges the rate it arrived at.
    */
-  void update_network_stats(std::optional<double> packet_loss_percent, double rtt_ms);
+  void update_network_stats(std::optional<double> packet_loss_percent, double rtt_ms, bool loss_is_pressure = true);
 
   /**
    * @brief Linearize a newly received host network observation with Doctor.

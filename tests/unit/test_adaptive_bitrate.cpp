@@ -8,10 +8,13 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <thread>
 #include <future>
 #include <limits>
+#include <string>
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -77,32 +80,99 @@ TEST(AdaptiveBitrateController, SustainedLossBetweenPingsStillReducesTheTarget) 
   EXPECT_EQ(state.reason, "packet_loss");
 }
 
-TEST(AdaptiveBitrateController, ModerateLossHoldsAtHalfTheBaseWhileHeavyLossCutsOn) {
-  // A few percent of loss that is still there at half the bitrate is not the bitrate's doing, and
-  // cutting on only costs picture. Heavy loss is a link too small for the stream.
+namespace {
+  /// One client media report a second for `seconds`, its loss given by the rate Live Tuning holds.
+  /// Returns the target after each second.
+  template<class Loss>
+  std::vector<int> live_tuning_seconds(int seconds, Loss loss_at) {
+    std::vector<int> targets;
+    for (int second = 0; second < seconds; ++second) {
+      adaptive_bitrate::age_for_tests(1s);
+      adaptive_bitrate::update_network_stats(loss_at(second, adaptive_bitrate::get_state().target_bitrate_kbps), 8.0);
+      targets.push_back(adaptive_bitrate::get_state().target_bitrate_kbps);
+    }
+    return targets;
+  }
+
+  std::string targets_text(const std::vector<int> &targets) {
+    std::string text;
+    for (std::size_t i = 0; i < targets.size(); ++i) {
+      text += std::to_string(i) + ":" + std::to_string(targets[i]) + " ";
+    }
+    return text;
+  }
+
+  /// Leave no cut target behind for a later suite in this binary to read as a reduced stream.
+  void leave_controller_clean() {
+    adaptive_bitrate::reset();
+    adaptive_bitrate::set_enabled(false);
+    config::video.adaptive_bitrate.enabled = false;
+  }
+}  // namespace
+
+TEST(AdaptiveBitrateController, ModerateLossHoldsAtHalfTheBaseAndTestsOneStepBelowWhileHeavyLossCutsOn) {
+  // 3% of every second's frames lost at any rate. Moderate loss cuts to half the base and holds there,
+  // and the hold tests itself: one step below, which does not lower the loss, so back to half and on up
+  // one kept step at a time. Heavy loss is a link too small for the stream and still cuts at once.
   enable_controller(40000);
   adaptive_bitrate::update_network_stats(0.0, 8.0);
-  for (int second = 0; second < 30; ++second) {
-    adaptive_bitrate::age_for_tests(1s);
-    adaptive_bitrate::update_network_stats(3.0, 8.0);
-  }
-  auto state = adaptive_bitrate::get_state();
-  EXPECT_EQ(state.target_bitrate_kbps, 20000);
-  EXPECT_EQ(state.state, "network_pressure");
-  EXPECT_EQ(state.reason, "packet_loss_holding");
+  const auto targets = live_tuning_seconds(60, [](int, int) { return 3.0; });
+  const auto trace = targets_text(targets);
+  const auto first_held = std::find(targets.begin(), targets.end(), 20000);
+  ASSERT_NE(first_held, targets.end()) << trace;
+  // Held at half long enough to judge, then one step below it and back.
+  EXPECT_GE(std::count(targets.begin(), targets.end(), 20000), 8) << trace;
+  EXPECT_EQ(*std::min_element(targets.begin(), targets.end()), 10000) << trace;
+  const auto tested = std::find(targets.begin(), targets.end(), 10000);
+  EXPECT_LE(std::count(targets.begin(), targets.end(), 10000), 10) << trace;
+  EXPECT_NE(std::find(tested, targets.end(), 20000), targets.end()) << trace;
+  EXPECT_GT(targets.back(), 20000) << trace;
 
   for (int second = 0; second < 3; ++second) {
     adaptive_bitrate::age_for_tests(1s);
     adaptive_bitrate::update_network_stats(20.0, 8.0);
   }
-  state = adaptive_bitrate::get_state();
-  EXPECT_LT(state.target_bitrate_kbps, 20000);
+  const auto state = adaptive_bitrate::get_state();
+  EXPECT_LT(state.target_bitrate_kbps, targets.back());
   EXPECT_EQ(state.reason, "packet_loss");
+  leave_controller_clean();
+}
 
-  // Leave no cut target behind for a later suite in this binary to read as a reduced stream.
-  adaptive_bitrate::reset();
-  adaptive_bitrate::set_enabled(false);
-  config::video.adaptive_bitrate.enabled = false;
+TEST(AdaptiveBitrateController, ModerateLossStepsUnderALinkBelowHalfTheBase) {
+  // The link shrank to 15 Mbps under a 40 Mbps stream, and 3% of the frames are lost while the stream
+  // is above it. The hold at half the base stopped every cut at 20 Mbps and kept the stream losing
+  // frames for good. The steady loss there gets a step below, which lowers it, and the steps up back
+  // toward the link are kept only while the loss stays down.
+  enable_controller(40000);
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  const auto targets = live_tuning_seconds(180, [](int, int target) { return target > 15000 ? 3.0 : 0.0; });
+  const auto trace = targets_text(targets);
+  const auto first_under = std::find_if(targets.begin(), targets.end(), [](int target) { return target <= 15000; });
+  ASSERT_NE(first_under, targets.end()) << trace;
+  EXPECT_LE(first_under - targets.begin(), 30) << trace;
+  // One step below the hold, and no spiral under it.
+  EXPECT_GE(*std::min_element(targets.begin(), targets.end()), 10000) << trace;
+  EXPECT_LE(std::count_if(targets.end() - 60, targets.end(), [](int target) { return target > 15000; }), 10) << trace;
+  EXPECT_LE(targets.back(), 15000) << trace;
+  // Close under the link, not left at the step below.
+  EXPECT_GT(targets.back(), 13000) << trace;
+  leave_controller_clean();
+}
+
+TEST(AdaptiveBitrateController, LossTheBitrateDoesNotCauseHoldsAndClimbsBackToTheBase) {
+  // 8% of the frames lost one second in four, whatever the rate: a Wi-Fi burst. Held at half the base,
+  // it was halved for the rest of the stream. Loss that comes and goes gets no step below, and each
+  // step up that does not raise it is kept.
+  enable_controller(40000);
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  const auto targets = live_tuning_seconds(180, [](int second, int) { return second % 4 == 3 ? 8.0 : 0.0; });
+  const auto trace = targets_text(targets);
+  EXPECT_GE(*std::min_element(targets.begin(), targets.end()), 20000) << trace;
+  const auto back = std::find(targets.begin() + 20, targets.end(), 40000);
+  ASSERT_NE(back, targets.end()) << trace;
+  EXPECT_LE(back - targets.begin(), 120) << trace;
+  EXPECT_EQ(targets.back(), 40000) << trace;
+  leave_controller_clean();
 }
 
 TEST(AdaptiveBitrateController, IgnoresSubthresholdRelativeRttSpikeOnFastLan) {

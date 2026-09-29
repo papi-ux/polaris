@@ -69,10 +69,16 @@ starts at `v1.0.0`.
   average read 0.08%. Pings now bring it RTT alone, and each client media report brings its own loss
   while the verdict calls loss pressure and none while it does not, so Live Tuning cuts for loss
   once Doctor calls it pressure and not before, and stops within seconds of clean reports instead
-  of cutting on for most of the 20 seconds the verdict takes to clear. Loss of 5% or less that
-  is still there at half the stream's bitrate is not the bitrate's doing, so Live Tuning holds there
-  and says `packet_loss_holding`. Heavier loss, or an RTT spike, still cuts to the floor. Replayed
-  without that hold, the HEVC run's 2% in bursts took Live Tuning from 269 Mbps to 4 within a minute.
+  of cutting on for most of the 20 seconds the verdict takes to clear. Loss of 5% or less cuts no
+  lower than half the stream's bitrate until Live Tuning has tested that rate. Held there for about
+  8 seconds, loss in most reports gets a step below, and the steps go on only while each lowers the
+  loss, where one that does not goes back to the rate before it. Loss that comes and goes, or that a
+  step below did not lower, is not the bitrate's doing, so the rate holds, says
+  `packet_loss_holding`, and climbs back a step at a time, each kept only if the loss does not rise.
+  Heavier loss, or an RTT spike, still cuts to the floor. Replayed without the hold, the HEVC run's 2%
+  in bursts took Live Tuning from 269 Mbps to 4 within a minute. It now holds that run at half for
+  about 8 seconds and is back at 269 within 90 seconds, and a 269 Mbps stream on a link that shrank
+  to 100 Mbps, losing 5% of its frames above it, settles at 98.
   The tuning block carries Doctor's figure as `network_loss_pct`, and the console's Live Tuning row
   shows it. The row read the controller's loss average, already a percentage, as a fraction, so
   0.078% showed as 7.8%.
