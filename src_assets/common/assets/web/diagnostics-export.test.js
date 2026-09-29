@@ -10,6 +10,7 @@ import {
   buildGithubIssueUrl,
   buildNetworkPathTestReport,
   buildPostSessionStreamReport,
+  rememberJudgedNetworkVerdict,
   buildSupportSelfTestCopy,
   createExportAddressBook,
   describeLinuxGpuProfile,
@@ -1149,6 +1150,61 @@ describe('support self-service reports', () => {
     expect(report.issueOwner).toBe('network')
     expect(report.mainIssue).toBe('Video frame loss was network pressure: 2.4% of video frames never arrived whole after FEC over the last 20 s (57 of 2406).')
     expect(report.qualitySummary).toContain('2.4% of video frames lost after FEC')
+  })
+
+  it('keeps the loss the window last judged, and its cause, after a client drops', () => {
+    // The host streams on until the ping timeout, ten seconds by default, after a client drops. Its
+    // last live payloads call the loss stale with no figure, so the report kept from them lost the
+    // network cause of the drop. The host grades the session on the verdict its window last reached.
+    const elevated = {
+      loss_pct: 5, loss_state: 'elevated', frames_lost: 120, frames_expected: 2400, window_seconds: 20,
+      rtt_state: 'clean', rtt_median_ms: 9,
+    }
+    const stale = { loss_pct: null, loss_state: 'stale', frames_lost: 120, frames_expected: 2400, window_seconds: 20, rtt_state: 'stale', rtt_median_ms: null }
+    const payloads = [
+      { streaming: false },
+      { streaming: true, latency_ms: 9, encode_time_ms: 4, encode_target_fps: 120, dropped_frame_ratio: 0, network_verdict: elevated },
+      ...Array.from({ length: 8 }, () => ({
+        streaming: true, latency_ms: 70, encode_time_ms: 4, encode_target_fps: 120, dropped_frame_ratio: 0, network_verdict: stale,
+      })),
+      { streaming: false },
+    ]
+    let remembered = null
+    let completed = null
+    let completedVerdict = null
+    for (let i = 1; i < payloads.length; ++i) {
+      remembered = rememberJudgedNetworkVerdict(remembered, payloads[i], payloads[i - 1])
+      if (payloads[i - 1].streaming && !payloads[i].streaming) {
+        completed = payloads[i - 1]
+        completedVerdict = remembered
+      }
+    }
+    expect(completed.network_verdict.loss_state).toBe('stale')
+    expect(completedVerdict).toBe(elevated)
+
+    const report = buildPostSessionStreamReport({ stats: completed, lastJudgedVerdict: completedVerdict })
+    expect(report.issueOwner).toBe('network')
+    expect(report.mainIssue).toBe(
+      "Video frame loss was network pressure when the client's media reports stopped: 5.0% of video frames never arrived whole after FEC over the last 20 s (120 of 2400).",
+    )
+    expect(report.qualitySummary).toContain('9.0 ms latency / 5.0% of video frames lost after FEC')
+
+    // With nothing judged before, a stale verdict names no cause, and the frozen round trip beside it
+    // is no figure to grade.
+    const unjudged = buildPostSessionStreamReport({ stats: completed })
+    expect(unjudged.issueOwner).toBe('client')
+    expect(unjudged.qualitySummary).toContain('unknown ms latency / unknown of video frames lost after FEC')
+  })
+
+  it('starts the judged verdict over for a new stream', () => {
+    const judged = { loss_pct: 3, loss_state: 'elevated', window_seconds: 20 }
+    const collecting = { loss_pct: null, loss_state: 'collecting', window_seconds: 20 }
+    let remembered = rememberJudgedNetworkVerdict(null, { streaming: true, network_verdict: judged }, { streaming: true })
+    expect(remembered).toBe(judged)
+    remembered = rememberJudgedNetworkVerdict(remembered, { streaming: false }, { streaming: true, network_verdict: judged })
+    expect(remembered).toBe(judged)
+    remembered = rememberJudgedNetworkVerdict(remembered, { streaming: true, network_verdict: collecting }, { streaming: false })
+    expect(remembered).toBeNull()
   })
 
   it('does not invent a host failure from healthy SHM capability logs', () => {

@@ -1263,13 +1263,31 @@ export function buildGamescopeHelperReport(probe = {}) {
   }
 }
 
-export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnectReason = '' } = {}) {
+// The newest verdict whose loss the host judged while the stream was live, for the post-session report.
+// A client that drops leaves the host streaming until its ping timeout, ten seconds by default, and the
+// live payloads before the stream ends call that loss stale, with no figure. The host grades the ended
+// session on the verdict its window last reached, and the report reads this one the same way. A new
+// stream starts over.
+export function rememberJudgedNetworkVerdict(remembered, next, previous) {
+  const kept = next?.streaming && !previous?.streaming ? null : (remembered ?? null)
+  return next?.streaming && judgedVideoFrameLoss(next) ? next.network_verdict : kept
+}
+
+export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnectReason = '', lastJudgedVerdict = null } = {}) {
   // The figures Doctor judged over its window, not the last second's report: that one read 32.7% on a
-  // session whose frames the host dropped 0.96% of, and named the network on it.
-  const judgedLoss = judgedVideoFrameLoss(stats)
+  // session whose frames the host dropped 0.96% of, and named the network on it. A session whose
+  // client dropped ends on a stale verdict with no figure, and lost its network cause with it; the
+  // verdict the window last judged, rememberJudgedNetworkVerdict()'s, still says what it was.
+  const carried = !judgedVideoFrameLoss(stats) && Boolean(judgedVideoFrameLoss({ network_verdict: lastJudgedVerdict }))
+  const verdict = carried ? lastJudgedVerdict : stats?.network_verdict
+  const judgedLoss = judgedVideoFrameLoss({ network_verdict: verdict })
   const loss = judgedLoss ? judgedLoss.pct : NaN
-  const judgedRtt = stats?.network_verdict?.rtt_median_ms
-  const latency = typeof judgedRtt === 'number' && Number.isFinite(judgedRtt) ? judgedRtt : Number(stats.latency_ms)
+  const judgedRtt = verdict?.rtt_median_ms
+  // A stale round trip is a frozen reading, not a figure to grade on.
+  const rttStale = stats?.network_verdict?.rtt_state === 'stale'
+  const latency = typeof judgedRtt === 'number' && Number.isFinite(judgedRtt)
+    ? judgedRtt
+    : rttStale ? NaN : Number(stats.latency_ms)
   const encodeTime = Number(stats.encode_time_ms)
   const dropped = Number(stats.dropped_frame_ratio)
   const safeLogs = redactSensitiveText(logs)
@@ -1287,7 +1305,7 @@ export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnect
   if (lossPressure || (Number.isFinite(latency) && latency > 45) || networkFailureLog) {
     issueOwner = 'network'
     mainIssue = lossPressure
-      ? `Video frame loss was network pressure: ${describeVideoFrameLoss(judgedLoss)}.`
+      ? `Video frame loss was network pressure${carried ? " when the client's media reports stopped" : ''}: ${describeVideoFrameLoss(judgedLoss)}.`
       : 'Network latency/transport warnings stood out.'
     suggestedNextLaunchProfile = 'Lower bitrate one step, prefer wired/5 GHz, then retry the same game.'
   }

@@ -69,7 +69,10 @@ starts at `v1.0.0`.
   which are a different count. A PyroWave session whose last second lost 32.7% of its frames, while
   the host dropped 0.96%, was reported as "Network packet loss was 32.7%" and put on the network.
   The report names the network only when the window judged its loss as pressure, and until the
-  host has judged any the snapshot says "not judged yet" instead of 0%.
+  host has judged any the snapshot says "not judged yet" instead of 0%. A session whose client
+  dropped keeps the loss the window last judged in its report, as the host does: the host streams on
+  until the ping timeout, and its last live payloads call that loss stale with no figure, so the
+  report lost the network cause of the drop. A stale round trip is not graded either.
 
 - Live Tuning acts on loss when Doctor does. Every control ping reached it as a second of clean
   video, ten a second, so a report that lost 7% of its frames faded to a few hundredths of a percent
