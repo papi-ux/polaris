@@ -13,6 +13,7 @@
 
   #include <src/input.h>
   #include <src/platform/linux/wayland.h>
+  #include <src/video.h>
 
 namespace {
   using output_layout::rect_t;
@@ -68,11 +69,21 @@ namespace {
   };
 
   /**
+   * @brief The touch port a session streaming this capture at this size gets.
+   */
+  input::touch_port_t session_port(const platf::display_t &display, int stream_width, int stream_height) {
+    video::config_t config {};
+    config.width = stream_width;
+    config.height = stream_height;
+    return video::make_port(&display, config);
+  }
+
+  /**
    * @brief Where a client's point lands as a fraction of the desktop, which is how an absolute
-   *        pointer device places it: the path passthrough() and abs_mouse() take.
+   *        pointer device places it: the path make_port(), passthrough() and abs_mouse() take.
    */
   std::optional<std::pair<float, float>> desktop_fraction(const platf::display_t &display, int stream_width, int stream_height, float client_x, float client_y) {
-    const auto port = input::make_touch_port(display.screen_on_desktop(), display.env_width, display.env_height, stream_width, stream_height);
+    const auto port = session_port(display, stream_width, stream_height);
     const auto on_screen = input::map_client_to_touchport(port, {client_x, client_y}, {static_cast<float>(stream_width), static_cast<float>(stream_height)});
     if (!on_screen) {
       return std::nullopt;
@@ -142,7 +153,7 @@ TEST(WaylandMonitorLayout, ALoneScaleTwoMonitorMeasuresWhatItsModeDoes) {
     EXPECT_EQ(display.env_width, 3840) << "logical sizes sent: " << with_logical_sizes;
     EXPECT_EQ(display.env_height, 2160) << "logical sizes sent: " << with_logical_sizes;
 
-    const auto port = input::make_touch_port(display.screen_on_desktop(), display.env_width, display.env_height, 1920, 1080);
+    const auto port = session_port(display, 1920, 1080);
     const auto by_mode = input::make_touch_port(platf::touch_port_t {0, 0, 3840, 2160}, 3840, 2160, 1920, 1080);
     EXPECT_EQ(port.offset_x, by_mode.offset_x);
     EXPECT_EQ(port.offset_y, by_mode.offset_y);
@@ -251,7 +262,7 @@ TEST(WaylandMonitorLayout, ARotatedStreamedMonitorsWholePictureReachesThePointer
   const auto monitors = reporters_desktop(true);
   const geometry_display_t display {wl::capture_geometry(monitors, 1)};
 
-  const auto port = input::make_touch_port(display.screen_on_desktop(), display.env_width, display.env_height, 1920, 1080);
+  const auto port = session_port(display, 1920, 1080);
   EXPECT_FLOAT_EQ(port.client_offsetX, 0.0f);
   EXPECT_FLOAT_EQ(port.client_offsetY, 0.0f);
 

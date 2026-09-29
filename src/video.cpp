@@ -4971,7 +4971,7 @@ namespace video {
     }
   }
 
-  input::touch_port_t make_port(platf::display_t *display, const config_t &config) {
+  input::touch_port_t make_port(const platf::display_t *display, const config_t &config) {
     auto port = display->scaled_screen_width > 0 && display->scaled_screen_height > 0 ?
                   // The screen is fitted into the frame, and the frame into the stream.
                   input::make_touch_port_in_frame(

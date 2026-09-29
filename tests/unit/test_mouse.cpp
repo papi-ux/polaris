@@ -9,6 +9,7 @@
 #include <utility>
 
 #include <src/input.h>
+#include <src/video.h>
 
 TEST(InputTouchPortMapping, RejectsNonPositiveClientSurfaceDimensions) {
   input::touch_port_t touch_port {
@@ -258,6 +259,94 @@ TEST(InputTouchPortMapping, PointOnDesktopCountsFromTheScreensCorner) {
   const auto [origin_x, origin_y] = platf::point_on_desktop(at_the_origin, 1280.0f, 720.0f);
   EXPECT_FLOAT_EQ(origin_x, 1280.0f);
   EXPECT_FLOAT_EQ(origin_y, 720.0f);
+}
+
+namespace {
+  video::config_t streaming_at(int width, int height) {
+    video::config_t config {};
+    config.width = width;
+    config.height = height;
+    return config;
+  }
+
+  void expect_same_port(const input::touch_port_t &port, const input::touch_port_t &expected) {
+    EXPECT_EQ(port.offset_x, expected.offset_x);
+    EXPECT_EQ(port.offset_y, expected.offset_y);
+    EXPECT_EQ(port.width, expected.width);
+    EXPECT_EQ(port.height, expected.height);
+    EXPECT_EQ(port.env_width, expected.env_width);
+    EXPECT_EQ(port.env_height, expected.env_height);
+    EXPECT_FLOAT_EQ(port.client_offsetX, expected.client_offsetX);
+    EXPECT_FLOAT_EQ(port.client_offsetY, expected.client_offsetY);
+    EXPECT_FLOAT_EQ(port.scalar_inv, expected.scalar_inv);
+    EXPECT_EQ(port.compositor_touch_turn, expected.compositor_touch_turn);
+  }
+}  // namespace
+
+// make_port() builds every session's touch port. A capture that sets no input size, which is
+// every one but wlroots and KMS capture on Wayland, has input mapped onto its frame as it always
+// did: here X11 capture of a monitor right of another.
+TEST(InputTouchPortMapping, MakePortMapsOntoTheFrameWithoutAnInputSize) {
+  placed_display_t display;
+  display.offset_x = 2560;
+  display.offset_y = 0;
+  display.width = 1920;
+  display.height = 1080;
+  display.env_width = 4480;
+  display.env_height = 1440;
+
+  expect_same_port(
+    video::make_port(&display, streaming_at(1920, 1080)),
+    input::make_touch_port(platf::touch_port_t {2560, 0, 1920, 1080}, 4480, 1440, 1920, 1080)
+  );
+}
+
+// With an input size, make_port() maps onto that rectangle rather than the frame. A 1920x1080
+// monitor at scale 1 right of a scale 2 monitor covers 3840x2160 desktop pixels, so a point in
+// the middle of its 1920x1080 stream lands in the middle of that rectangle, two pixels on for
+// each pixel of the stream.
+TEST(InputTouchPortMapping, MakePortMapsOntoTheScreensRectangleOnTheDesktop) {
+  placed_display_t display;
+  display.offset_x = 3840;
+  display.offset_y = 0;
+  display.width = 1920;
+  display.height = 1080;
+  display.input_width = 3840;
+  display.input_height = 2160;
+  display.env_width = 8960;
+  display.env_height = 2880;
+
+  const auto port = video::make_port(&display, streaming_at(1920, 1080));
+  EXPECT_EQ(port.offset_x, 3840);
+  EXPECT_EQ(port.offset_y, 0);
+  EXPECT_EQ(port.env_width, 8960);
+  EXPECT_EQ(port.env_height, 2880);
+  EXPECT_FLOAT_EQ(port.scalar_inv, 2.0f);
+
+  const auto middle = input::map_client_to_touchport(port, {960.0f, 540.0f}, {1920.0f, 1080.0f});
+  ASSERT_TRUE(middle.has_value());
+  EXPECT_FLOAT_EQ(middle->first, 1920.0f);
+  EXPECT_FLOAT_EQ(middle->second, 1080.0f);
+}
+
+// Game Mode names a screen fitted inside its frame, and the turn gamescope gives a touch.
+// make_port() places input inside the picture and passes the turn on, with or without an input
+// size, which Game Mode never sets anyway.
+TEST(InputTouchPortMapping, MakePortPlacesAFittedScreenInsideThePicture) {
+  placed_display_t display;
+  display.width = 1920;
+  display.height = 1080;
+  display.scaled_screen_width = 1280;
+  display.scaled_screen_height = 800;
+  display.compositor_touch_turn = 90;
+
+  auto expected = input::make_touch_port_in_frame(1280, 800, 1920, 1080, 1920, 1080);
+  expected.compositor_touch_turn = 90;
+  expect_same_port(video::make_port(&display, streaming_at(1920, 1080)), expected);
+
+  display.input_width = 3840;
+  display.input_height = 2160;
+  expect_same_port(video::make_port(&display, streaming_at(1920, 1080)), expected);
 }
 
 TEST(InputTouchPortMapping, RejectsInvertedLetterboxBounds) {
