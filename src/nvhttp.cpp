@@ -1855,7 +1855,7 @@ namespace nvhttp {
       status["applied_stream_settings"] = client_sync.value("applied_stream_settings", nlohmann::json::object());
       status["message"] =
         manual_override ?
-          "Manual stream overrides are active; Polaris will report guidance but will not treat Auto Safe as authoritative." :
+          "Manual stream overrides are active; Polaris will report guidance but will not treat Live Tuning as authoritative." :
         relaunch_required ?
           "Desired settings are saved and will become effective after the active stream relaunches." :
         client_presentation_status == "blocked" ?
@@ -1865,7 +1865,7 @@ namespace nvhttp {
         !has_applied_stream_settings ?
           "Polaris is waiting for Nova to report the stream settings it actually applied." :
         adaptive_active ?
-          "Auto Safe is active; Polaris is adjusting the effective bitrate in real time under the saved paired-client limit." :
+          "Live Tuning is active; Polaris is adjusting the effective bitrate in real time under the saved paired-client limit." :
           "Desired settings match the current Polaris runtime state.";
       status["fields"] = std::move(fields);
       return status;
@@ -2080,7 +2080,7 @@ namespace nvhttp {
         {"allow_display_mode_change", request_client_refresh},
         {"internal_display_only", true},
         {"reason", prefer_stable_multiple ?
-          "Use an even internal display refresh multiple for capped Auto Safe streams." :
+          "Use an even internal display refresh multiple for capped streams while Live Tuning is on." :
           prefer_exact_refresh ?
           "Match internal handheld displays to the stream FPS to avoid refresh-rate flapping." :
           "No client display-mode change is requested for this stream target."}

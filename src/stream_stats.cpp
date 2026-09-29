@@ -2115,9 +2115,9 @@ namespace stream_stats {
           next_step = "Use HEVC or a lower mode";
           expected = "A codec that needs fewer bits, or a smaller picture, fits the link without the picture falling apart.";
         } else if (auto_safe_managing) {
-          body = "Confirmed network pressure is affecting this stream, and Auto Safe already owns the live bitrate correction. Doctor will measure the result without racing the active controller.";
-          next_step = "Recheck Auto Safe";
-          expected = "Auto Safe should lower the encoder target until loss and latency return to the stable range.";
+          body = "Confirmed network pressure is affecting this stream, and Live Tuning already owns the live bitrate correction. Doctor will measure the result without racing the active controller.";
+          next_step = "Recheck Live Tuning";
+          expected = "Live Tuning should lower the encoder target until loss and latency return to the stable range.";
         } else if (live_bitrate_tunable) {
           body = "Current sustained loss or latency evidence confirms network pressure. Doctor can lower bitrate one guarded step and watch the same telemetry for recovery.";
           next_step = "Fix and verify";
@@ -2147,9 +2147,9 @@ namespace stream_stats {
         expected = "Sustained video frame loss or RTT pressure must appear before Doctor recommends a network recovery action.";
       } else if (primary_issue == "quality_reduced_live") {
         if (auto_safe_managing) {
-          body = "The current network is clean and Auto Safe is already holding or recovering the live target below this stream's launch ceiling. Doctor will verify that recovery without applying a competing bitrate change.";
-          next_step = "Recheck Auto Safe";
-          expected = "Auto Safe should recover quality gradually while keeping the stream inside the measured network budget.";
+          body = "The current network is clean and Live Tuning is already holding or recovering the live target below this stream's launch ceiling. Doctor will verify that recovery without applying a competing bitrate change.";
+          next_step = "Recheck Live Tuning";
+          expected = "Live Tuning should recover quality gradually while keeping the stream inside the measured network budget.";
         } else if (live_bitrate_tunable) {
           body = "The current network is clean, and the live adaptive target is below this stream's effective launch ceiling. Doctor can retry quality gradually and verify every step.";
           next_step = "Restore and verify";
@@ -2320,12 +2320,12 @@ namespace stream_stats {
         method = "POST";
         payload["action_id"] = id;
         payload["source_result_id"] = source_result_id;
-        rollback = "This check does not change bitrate or stream settings. Auto Safe remains the only live bitrate controller.";
+        rollback = "This check does not change bitrate or stream settings. Live Tuning remains the only live bitrate controller.";
         verification = {
           {"mode", "live_telemetry"},
           {"delay_seconds", 3},
           {"endpoint", "/api/doctor/action"},
-          {"success_when", nlohmann::json::array({"Auto Safe remains the live bitrate owner", "current loss and latency are measured again"})}
+          {"success_when", nlohmann::json::array({"Live Tuning remains the live bitrate owner", "current loss and latency are measured again"})}
         };
       } else if (primary_issue == "network_jitter" && live_bitrate_tunable) {
         id = "lower_bitrate";
@@ -2979,9 +2979,9 @@ namespace stream_stats {
       auto_safe_managing || live_bitrate_tunable ? "pass" : "watch",
       "deterministic_controller",
       auto_safe_managing ?
-        "Auto Safe owns continuous live bitrate adjustment. Doctor measures it and does not offer a competing mutation." :
+        "Live Tuning owns continuous live bitrate adjustment. Doctor measures it and does not offer a competing mutation." :
       live_bitrate_tunable ?
-        "Auto Safe is not managing this target. Evidence-supported Doctor Auto Fix may own one reversible, verified bitrate step." :
+        "Live Tuning is not managing this target. Evidence-supported Doctor Auto Fix may own one reversible, verified bitrate step." :
         "The current stream has no safe, exclusive live bitrate actuator. Doctor remains observational."
     );
     append_doctor_evidence(

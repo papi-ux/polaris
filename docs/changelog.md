@@ -7,6 +7,10 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Doctor and the session status call the live bitrate controller Live Tuning, as everything else
+  does. Doctor's network findings said "Auto Safe already owns the live bitrate correction" and
+  offered "Recheck Auto Safe", a name that appeared nowhere else a player could see.
+
 - The console quotes the same loss. The post-session report, the Fix My Stream checklist, the
   session snapshot and the issue draft read the verdict's video frame loss over 20 seconds, with
   the frame counts behind it, instead of the newest one second report, and say which loss it is:

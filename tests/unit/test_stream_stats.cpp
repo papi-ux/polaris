@@ -3611,10 +3611,13 @@ TEST(StreamStatsDoctorTests, AutoSafeOwnsConfirmedNetworkCorrectionWithoutCompet
   EXPECT_EQ(action.at("id"), "recheck_network");
   EXPECT_EQ(action.at("capability"), "recheck");
   EXPECT_FALSE(action.at("undo").at("supported"));
+  // Called what the rest of the product calls it.
   EXPECT_NE(
-    doctor.at("recommendation").at("body").get<std::string>().find("Auto Safe"),
+    doctor.at("recommendation").at("body").get<std::string>().find("Live Tuning already owns the live bitrate correction"),
     std::string::npos
   );
+  EXPECT_EQ(doctor.at("recommendation").dump().find("Auto Safe"), std::string::npos);
+  EXPECT_EQ(action.dump().find("Auto Safe"), std::string::npos);
   const auto &evidence = doctor.at("evidence");
   const auto owner = std::find_if(evidence.begin(), evidence.end(), [](const auto &item) {
     return item.at("id") == "live_bitrate_owner";
