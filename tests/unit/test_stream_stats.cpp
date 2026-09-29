@@ -8285,6 +8285,88 @@ TEST(StreamStatsDoctorTests, RecordedPyroWaveRttSpikesKeepOneHeadline) {
   EXPECT_EQ(run.headlines.back(), "pyrowave_starved") << run.text();
 }
 
+namespace {
+  /// Doctor's headline for the live stream with Live Tuning owning it and holding it at target_kbps.
+  std::string live_headline_under_live_tuning(int target_kbps) {
+    auto live = stream_stats::get_current();
+    live.capture_transport = platf::frame_transport_e::dmabuf;
+    live.capture_residency = platf::frame_residency_e::gpu;
+    live.encode_target_residency = platf::frame_residency_e::gpu;
+    live.adaptive_bitrate_enabled = true;
+    live.adaptive_runtime_update_supported = true;
+    live.adaptive_target_bitrate_kbps = target_kbps;
+    return stream_stats::build_doctor_json(live, nlohmann::json::object()).at("primary_issue").get<std::string>();
+  }
+
+  // Live Tuning's targets through the PyroWave run, a second at a time beside its RTT: 269 Mbps, cut
+  // to 179 for the Wi-Fi spikes, then back through 188 and 194.
+  constexpr std::array<int, 10> k_recorded_pyrowave_live_targets_kbps {
+    268988, 268988, 179000, 179000, 179000, 188000, 188000, 194000, 194000, 194000
+  };
+}  // namespace
+
+TEST(StreamStatsDoctorTests, PyroWaveAdviceHoldsWhileLiveTuningMovesTheBitrate) {
+  // The PyroWave run had Live Tuning on, and Doctor judged PyroWave's bitrate advice on its moving
+  // target. A 1080p120 stream set at 170 Mbps sits between the starved line, 160 Mbps at the encoder,
+  // and the 178 Mbps Doctor would raise it to, so its quality restore does not cover it. Cut in the
+  // run's proportions, from 269 to 179 and back through 188 and 194, the headline went from nothing to
+  // "set more bitrate" and back with every cut, while Live Tuning was about to bring the bitrate back
+  // on its own. Doctor judges the rate the stream is set to.
+  PyroWaveHostGuard host;
+  constexpr int set_kbps = 170000;
+  stream_stats::update_stream_active(false);
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::update_stream_active(false);
+  });
+  stream_stats::update_controller_input_state(false, 0, "", "", "unknown", "", false, "");
+  stream_stats::update_steam_input_state("unknown", 0, 0, 0, "");
+  stream_stats::update_stream_active(true, "RetroidPocket6", "203.0.113.84");
+  stream_stats::update_video_stats(120.0, set_kbps, 1.0, "pyrowave", 1920, 1080);
+  stream_stats::update_session_targets(
+    120.0, 120.0, 120.0, "client_requested", "deterministic_preset_v1",
+    "deterministic", "not_applicable", "Capability-validated launch profile.",
+    "", 1, 0, set_kbps
+  );
+
+  headline_run_t run;
+  int live_target_flips = 0;
+  bool live_target_was_starved = false;
+  for (int round = 0; round < 3; ++round) {
+    for (std::size_t second = 0; second < k_recorded_pyrowave_rtt_ms.size(); ++second) {
+      for (int ping = 0; ping < 10; ++ping) {
+        stream_stats::update_control_channel_stats(k_recorded_pyrowave_rtt_ms[second], 0.0, 777);
+      }
+      const int target = static_cast<int>(
+        static_cast<std::int64_t>(set_kbps) * k_recorded_pyrowave_live_targets_kbps[second] / 268988
+      );
+      run.headlines.push_back(live_headline_under_live_tuning(target));
+      // What judging the live target said.
+      auto live = stream_stats::get_current();
+      live.adaptive_runtime_update_supported = true;
+      live.adaptive_target_bitrate_kbps = target;
+      const bool starved = stream_stats::evaluate_pyrowave_bitrate(live).starved;
+      live_target_flips += starved != live_target_was_starved ? 1 : 0;
+      live_target_was_starved = starved;
+    }
+  }
+
+  RecordProperty("headlines", run.text());
+  EXPECT_GE(live_target_flips, 5);
+  EXPECT_EQ(run.changes(), 0) << run.text();
+  EXPECT_EQ(run.headlines.back(), "none") << run.text();
+
+  // A stream set below the line stays starved whichever way Live Tuning moves it.
+  stream_stats::update_video_stats(120.0, 120000, 1.0, "pyrowave", 1920, 1080);
+  stream_stats::update_session_targets(
+    120.0, 120.0, 120.0, "client_requested", "deterministic_preset_v1",
+    "deterministic", "not_applicable", "Capability-validated launch profile.",
+    "", 1, 0, 120000
+  );
+  for (const int target : {120000, 80000, 84000, 120000}) {
+    EXPECT_EQ(live_headline_under_live_tuning(target), "pyrowave_starved") << target;
+  }
+}
+
 TEST(StreamStatsHotFieldTests, PacketLossPercentClampsDegenerateInputs) {
   constexpr uint64_t scale = 1ull << 16;
 

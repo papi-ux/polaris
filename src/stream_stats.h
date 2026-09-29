@@ -918,8 +918,13 @@ namespace stream_stats {
     bool at_floor = false;
   };
 
-  /// Evaluate PyroWave's advice against the live stream. Reads fec_percentage and max_bitrate.
-  pyrowave_bitrate_t evaluate_pyrowave_bitrate(const stats_t &stats);
+  /**
+   * @brief Evaluate PyroWave's advice against the live stream. Reads fec_percentage and max_bitrate.
+   * @param set_encoder_kbps The encoder rate to judge instead of the live one, or zero for the live
+   *        one. While Live Tuning owns the bitrate its target moves with the network and comes back on
+   *        its own, so Doctor judges the rate the stream is set to. at_floor still reads the live rate.
+   */
+  pyrowave_bitrate_t evaluate_pyrowave_bitrate(const stats_t &stats, int set_encoder_kbps = 0);
 
   /// The session status pyrowave_bitrate object, or null when the stream is not PyroWave. Its assumes
   /// names the FEC share and audio cost the requests were grossed up for, as the pre-launch advice does.

@@ -2525,7 +2525,12 @@ namespace stream_stats {
     // PyroWave more than a tenth below the rate Polaris advises, or held below its model's figure by the
     // cap or max_bitrate with most frames at its byte ceiling, on a clean network. Watch findings that
     // rank below every network, encoder and capture failure.
-    const auto pyrowave = evaluate_pyrowave_bitrate(stats);
+    // While Live Tuning owns the bitrate its target moves with the network, down for an RTT spike and
+    // back a step at a time, and PyroWave's advice judged on it came and went as the target crossed
+    // the starved line. Doctor judges the rate the stream is set to, which Live Tuning returns to.
+    const auto pyrowave = evaluate_pyrowave_bitrate(
+      stats, auto_safe_managing && effective_quality_target_kbps > 0 ? effective_quality_target_kbps : 0
+    );
     // A stream cut below a request that already meets the raise goal climbs back to that request, by
     // the ordinary quality restore or by Live Tuning's own recovery when it owns the bitrate. PyroWave's
     // raise would stop short of what the player asked for, and its text would ask for less.
@@ -3703,7 +3708,7 @@ namespace stream_stats {
            static_cast<double>(stats.pyrowave_window_frames);
   }
 
-  pyrowave_bitrate_t evaluate_pyrowave_bitrate(const stats_t &stats) {
+  pyrowave_bitrate_t evaluate_pyrowave_bitrate(const stats_t &stats, int set_encoder_kbps) {
     pyrowave_bitrate_t result;
     if (!stats.streaming || stats.codec != "pyrowave") return result;
     const double fps = stats.encode_target_fps > 0.0 ? stats.encode_target_fps : stats.session_target_fps;
@@ -3718,8 +3723,9 @@ namespace stream_stats {
     );
     if (!result.advice.valid) return result;
     result.active = true;
-    result.encoder_kbps = stats.adaptive_runtime_update_supported && stats.adaptive_target_bitrate_kbps > 0 ?
+    const int live_encoder_kbps = stats.adaptive_runtime_update_supported && stats.adaptive_target_bitrate_kbps > 0 ?
       stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
+    result.encoder_kbps = set_encoder_kbps > 0 ? set_encoder_kbps : live_encoder_kbps;
     result.request_kbps = pyrowave_advice::request_for_encoder(result.encoder_kbps, link);
     result.ceiling_frame_share = pyrowave_ceiling_frame_share(stats);
     // Starved against the one figure Doctor quotes, as a request, with a tenth to spare. The ceiling
@@ -3732,7 +3738,7 @@ namespace stream_stats {
     if (stats.adaptive_floor_source == "pyrowave_advice" && stats.adaptive_min_bitrate_kbps > 0) {
       result.floor_encoder_kbps = stats.adaptive_min_bitrate_kbps;
       result.floor_request_kbps = pyrowave_advice::request_for_encoder(result.floor_encoder_kbps, link);
-      result.at_floor = result.encoder_kbps > 0 && result.encoder_kbps <= result.floor_encoder_kbps;
+      result.at_floor = live_encoder_kbps > 0 && live_encoder_kbps <= result.floor_encoder_kbps;
     }
     return result;
   }

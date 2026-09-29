@@ -7,6 +7,12 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- With Live Tuning on, Doctor judges PyroWave's bitrate advice on the rate the stream is set to.
+  It judged Live Tuning's moving target, so a stream set between PyroWave's starved line and the
+  rate Doctor would raise it to went from no finding to "set more bitrate" and back with every cut
+  Live Tuning made for a Wi-Fi RTT spike, though Live Tuning was about to bring the bitrate back on
+  its own. Whether Live Tuning sits at its PyroWave floor still reads the live rate.
+
 - A bitrate step Doctor verifies leaves its headline judging the step's own readings. Doctor
   verified the step against the newest readings after it while the headline went on judging a
   window that still held the readings that asked for it, so a verified step left "Sustained network
