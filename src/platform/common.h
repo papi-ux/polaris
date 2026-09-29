@@ -1158,6 +1158,21 @@ namespace platf {
    */
   util::point_t get_mouse_loc(input_t &input);
   void move_mouse(input_t &input, int deltaX, int deltaY);
+
+  /**
+   * @brief Where a point on the captured screen lies on the desktop absolute input spans.
+   *
+   * abs_mouse() is given a point counted from the captured screen's corner, and the touch port's
+   * offset is that corner on a desktop of one or more screens, counted from the desktop's own.
+   * @param touch_port The captured screen's offset, and the desktop's extents.
+   * @param x Across the captured screen, in the desktop's units.
+   * @param y Down the captured screen, in the desktop's units.
+   * @return The point on the desktop.
+   */
+  inline std::pair<float, float> point_on_desktop(const touch_port_t &touch_port, float x, float y) {
+    return {x + static_cast<float>(touch_port.offset_x), y + static_cast<float>(touch_port.offset_y)};
+  }
+
   void abs_mouse(input_t &input, const touch_port_t &touch_port, float x, float y);
   void button_mouse(input_t &input, int button, bool release);
   void scroll(input_t &input, int distance);

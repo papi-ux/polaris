@@ -190,6 +190,26 @@ TEST(InputTouchPortMapping, NamesWhyACoordinateWasRefused) {
             "the capture never reported a size of its own");
 }
 
+// A point on the captured screen is counted from that screen's corner, and absolute input spans
+// the whole desktop, so the screen's own place on the desktop goes in first. Linux left it out, and
+// a screen right of another took its pointer on the one at the origin.
+TEST(InputTouchPortMapping, PointOnDesktopCountsFromTheScreensCorner) {
+  const platf::touch_port_t beside_the_main_monitor {2560, 0, 3640, 1920};
+  const auto [x, y] = platf::point_on_desktop(beside_the_main_monitor, 540.0f, 960.0f);
+  EXPECT_FLOAT_EQ(x, 3100.0f);
+  EXPECT_FLOAT_EQ(y, 960.0f);
+
+  const platf::touch_port_t below_it {0, 1440, 2560, 2520};
+  const auto [below_x, below_y] = platf::point_on_desktop(below_it, 1280.0f, 540.0f);
+  EXPECT_FLOAT_EQ(below_x, 1280.0f);
+  EXPECT_FLOAT_EQ(below_y, 1980.0f);
+
+  const platf::touch_port_t at_the_origin {0, 0, 2560, 1440};
+  const auto [origin_x, origin_y] = platf::point_on_desktop(at_the_origin, 1280.0f, 720.0f);
+  EXPECT_FLOAT_EQ(origin_x, 1280.0f);
+  EXPECT_FLOAT_EQ(origin_y, 720.0f);
+}
+
 TEST(InputTouchPortMapping, RejectsInvertedLetterboxBounds) {
   input::touch_port_t touch_port {
     {0, 0, 100, 100},
