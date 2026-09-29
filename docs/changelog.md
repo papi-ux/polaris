@@ -7,6 +7,17 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- A bitrate step Doctor verifies leaves its headline judging the step's own readings. Doctor
+  verified the step against the newest readings after it while the headline went on judging a
+  window that still held the readings that asked for it, so a verified step left "Sustained network
+  pressure" and another lower bitrate step on offer for most of 20 seconds, and a second press
+  stepped down a link that had already recovered. It went the other way too: a stepped-down stream
+  that went on losing 4% of its frames verified on two clean reports, beside a headline that still
+  called it pressure. Doctor now verifies the step against the window judged afresh from the moment
+  the encoder applied it, and once it verifies the headline's judgement starts over from that
+  moment too. A step whose own readings are still pressure rolls back, and its readings stay in the
+  window.
+
 - Doctor's control channel finding holds steady as well. It came and went with ENet's newest
   estimate of the control channel's own loss against 2%, which on the Retroid Pocket 6's HEVC run
   read 1.08 and then 2.81 on consecutive polls, so the headline could still go between that finding

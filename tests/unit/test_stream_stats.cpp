@@ -4436,6 +4436,121 @@ TEST(DoctorActionTests, ExecuteRefusesLiveTuningAndStaleUndoWithoutAStream) {
   EXPECT_EQ(stale_undo.at("error"), "This Doctor undo is no longer available.");
 }
 
+namespace {
+  /// A stream Doctor may step down: Live Tuning off, one session in scope, under sustained pressure.
+  struct doctor_step_stream_t {
+    explicit doctor_step_stream_t(const char *client) {
+      config::video.adaptive_bitrate.enabled = false;
+      config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+      config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+      adaptive_bitrate::load_config();
+      adaptive_bitrate::reset();
+      adaptive_bitrate::set_runtime_update_supported(true);
+      adaptive_bitrate::set_base_bitrate(20000);
+      adaptive_bitrate::set_enabled(false);
+      stream_stats::update_stream_active(false);
+      stream_stats::update_controller_input_state(false, 0, "", "", "unknown", "", false, "");
+      stream_stats::update_steam_input_state("unknown", 0, 0, 0, "");
+      stream_stats::update_stream_active(true, client, "203.0.113.83");
+      stream_stats::update_video_stats(60.0, 20000, 5.0, "hevc", 1920, 1080);
+      stream_stats::set_doctor_live_action_scope_available(true);
+      for (int i = 0; i < 6; ++i) {
+        stream_stats::update_network_stats(5.0, 0.0, 1000);
+      }
+      sustain_network_pressure(52.0, 3.4);
+    }
+
+    ~doctor_step_stream_t() {
+      stream_stats::set_doctor_live_action_scope_available(false);
+      adaptive_bitrate::set_enabled(false);
+      stream_stats::update_stream_active(false);
+    }
+
+    static nlohmann::json doctor() {
+      auto live = stream_stats::get_current();
+      live.capture_transport = platf::frame_transport_e::dmabuf;
+      live.capture_residency = platf::frame_residency_e::gpu;
+      live.encode_target_residency = platf::frame_residency_e::gpu;
+      return stream_stats::build_doctor_json(live, nlohmann::json::object());
+    }
+  };
+}  // namespace
+
+TEST(DoctorActionTests, AVerifiedStepLeavesDoctorJudgingOnlyTheReadingsAfterIt) {
+  // Doctor verified a step against readings from after it while its headline went on judging a
+  // window that still held the readings that asked for the step. A step that verified left
+  // "Sustained network pressure" on the headline, and lower_bitrate on offer again, for most of
+  // 20 seconds, so a second press stepped down a link that had already recovered.
+  doctor_step_stream_t stream("DoctorVerifiedStep");
+  const auto before = doctor_step_stream_t::doctor();
+  ASSERT_EQ(before.at("primary_issue"), "network_jitter");
+  ASSERT_EQ(before.at("safe_recovery_action").at("id"), "lower_bitrate");
+
+  const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  ASSERT_TRUE(applied.at("status").get<bool>());
+  const auto run_id = applied.at("run_id").get<std::string>();
+  doctor_actions::confirm_encoder_application_for_tests();
+
+  // The stepped-down stream runs clean.
+  for (int i = 0; i < 8; ++i) {
+    stream_stats::update_network_stats(8.0, 0.5, 1000);
+  }
+  doctor_actions::make_verification_window_complete_for_tests();
+  const auto verified = doctor_actions::execute({{"action_id", "verify"}, {"run_id", run_id}});
+  ASSERT_EQ(verified.at("state"), "resolved") << verified.dump();
+
+  const auto network = stream_stats::judged_network(stream_stats::get_current());
+  EXPECT_TRUE(network.loss_judged);
+  EXPECT_FALSE(network.risk);
+  const auto after = doctor_step_stream_t::doctor();
+  EXPECT_NE(after.at("primary_issue"), "network_jitter") << after.at("summary");
+  EXPECT_NE(after.at("safe_recovery_action").at("id"), "lower_bitrate");
+  const auto verdict = after.at("advanced_evidence").at("network_verdict");
+  EXPECT_EQ(verdict.at("media_samples"), 8);
+  EXPECT_EQ(verdict.at("loss_state"), "clean");
+
+  const auto undo = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute({{"action_id", "undo"}, {"run_id", run_id}});
+  });
+  EXPECT_EQ(undo.at("state"), "undone") << undo.dump();
+}
+
+TEST(DoctorActionTests, AStepThePostStepWindowStillCallsPressureRollsBack) {
+  // The other half of the same disagreement: the newest readings could clear a step whose own
+  // readings the headline still judged as pressure. Two clean reports after six that lost 4% of
+  // their frames cleared the fast debounce, and Doctor called the step verified beside a headline
+  // that still said "Sustained network pressure".
+  doctor_step_stream_t stream("DoctorPressureAfterStep");
+  const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  ASSERT_TRUE(applied.at("status").get<bool>());
+  const auto run_id = applied.at("run_id").get<std::string>();
+  doctor_actions::confirm_encoder_application_for_tests();
+  const auto stepped_at = std::chrono::steady_clock::now();
+
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(8.0, 4.0, 1000);
+  }
+  for (int i = 0; i < 2; ++i) {
+    stream_stats::update_network_stats(8.0, 0.0, 1000);
+  }
+  ASSERT_FALSE(stream_stats::get_current().network_risk);
+  const auto network = stream_stats::judged_network(stream_stats::get_current());
+  ASSERT_TRUE(network.loss_pressure);
+  EXPECT_EQ(doctor_step_stream_t::doctor().at("primary_issue"), "network_jitter");
+  // The step's own readings: six of eight reports lost 4%, 3% over the window since the step.
+  const auto since_step = stream_stats::network_verdict_since(stepped_at);
+  ASSERT_TRUE(since_step.loss_available);
+  EXPECT_EQ(since_step.media_samples, 8);
+  EXPECT_TRUE(since_step.loss_elevated);
+
+  doctor_actions::make_verification_window_complete_for_tests();
+  const auto result = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute({{"action_id", "verify"}, {"run_id", run_id}});
+  });
+  EXPECT_EQ(result.at("state"), "rolled_back") << result.dump();
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 20000);
+}
+
 TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   // Earlier suites in this binary leave adaptive_bitrate process state
   // behind; normalize the two pieces this arc depends on before seeding

@@ -489,10 +489,26 @@ namespace doctor_actions {
 
     bool verification_window_stable(
         const stream_stats::network_verification_window_t &window,
-        const action_run_t &run) {
+        const action_run_t &run,
+        const stream_stats::stats_t &stats) {
       const bool required_media_arrived =
         !run.requires_media_sample || window.media_sample_count > 0;
       const bool restoring_quality = run.kind == action_kind_e::restore_quality;
+      if (!restoring_quality) {
+        // A step for network pressure is verified against the verdict Doctor's headline will read
+        // once it verifies: the window judged afresh from the moment the encoder applied the step.
+        // With enough readings the two cannot disagree. A step that verifies starts the headline's
+        // judgement over from the same moment, and a step whose own readings are still pressure
+        // rolls back, as the headline would have it. A step taken for loss needs its loss judged;
+        // until then the newest readings decide, as they did.
+        auto post_step = stats;
+        post_step.network_verdict = stream_stats::network_verdict_since(run.applied_at);
+        const auto network = stream_stats::judged_network(post_step);
+        const bool judged = run.requires_media_sample ? network.loss_judged : network.loss_judged || network.rtt_judged;
+        if (judged) {
+          return window.complete && required_media_arrived && !network.risk;
+        }
+      }
       const bool network_risk = restoring_quality ? window.any_network_risk : window.network_risk;
       const bool packet_loss_available = restoring_quality ?
         window.any_packet_loss_available : window.packet_loss_available;
@@ -505,6 +521,18 @@ namespace doctor_actions {
         !network_risk &&
         (!packet_loss_available || packet_loss <= 2.0) &&
         latency_ms < 45.0;
+    }
+
+    // A verified step for network pressure hands Doctor's headline the judgement verification read:
+    // the window from the moment the encoder applied the step. Judged over a window that still held
+    // the readings that asked for the step, a verified step left "Sustained network pressure" and
+    // another lower_bitrate on offer for most of 20 seconds. A step that rolls back leaves the
+    // judgement as it was, since its readings are why it rolled back.
+    void mark_verified_locked(action_run_t &run) {
+      if (!run.verification_passed && run.kind == action_kind_e::lower_bitrate) {
+        stream_stats::restart_network_judgement(run.applied_at);
+      }
+      run.verification_passed = true;
     }
 
     void run_verification_watchdog(const std::string &run_id,
@@ -601,7 +629,7 @@ namespace doctor_actions {
       );
       const bool verification_passed =
         adaptive_state.runtime_update_supported &&
-        verification_window_stable(window, action_run);
+        verification_window_stable(window, action_run, stats);
       if (!verification_passed) {
         const auto run_snapshot = action_run;
         const auto outcome = restore_bitrate_run_locked(action_run);
@@ -631,7 +659,7 @@ namespace doctor_actions {
         return;
       }
 
-      action_run.verification_passed = true;
+      mark_verified_locked(action_run);
       action_run.verified_window = window;
       BOOST_LOG(info) << "Doctor: automatic verification passed run="sv << run_id
                       << " step=" << verification_step;
@@ -1176,7 +1204,8 @@ namespace doctor_actions {
       }
       const bool current_verification_stable = verification_window_stable(
         current_verification_window,
-        action_run
+        action_run,
+        verification_stats
       );
       const bool verification_stable = action_run.verification_passed ||
         current_verification_stable;
@@ -1324,7 +1353,7 @@ namespace doctor_actions {
         remember_terminal_locked(run_snapshot, result);
         return terminal_action.result;
       }
-      action_run.verification_passed = true;
+      mark_verified_locked(action_run);
       return {
         {"status", true},
         {"changed", false},
@@ -1728,6 +1757,20 @@ namespace doctor_actions {
     (void) encoder_application_confirmed_locked(action_run);
     action_run.requested_at -= verification_delay;
     action_run.applied_at -= verification_delay;
+    // The network judge's readings live through the same seconds.
+    stream_stats::age_network_judge_for_tests(verification_delay);
+  }
+
+  void confirm_encoder_application_for_tests() {
+    std::lock_guard<std::mutex> lock(action_mutex);
+    if (!action_run.active) return;
+    if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
+      adaptive_bitrate::acknowledge_live_bitrate_applied(
+        request->revision,
+        request->target_bitrate_kbps
+      );
+    }
+    (void) encoder_application_confirmed_locked(action_run);
   }
 
   void make_verification_window_complete_for_tests() {
@@ -1742,6 +1785,7 @@ namespace doctor_actions {
     (void) encoder_application_confirmed_locked(action_run);
     action_run.requested_at -= verification_delay;
     action_run.applied_at -= verification_delay;
+    stream_stats::age_network_judge_for_tests(verification_delay);
     stream_stats::spread_network_verification_window_for_tests(
       action_run.network_sample_revision_at_apply,
       action_run.applied_at,

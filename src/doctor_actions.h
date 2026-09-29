@@ -141,6 +141,9 @@ namespace doctor_actions {
   /** Make the active receipt's post-change window due without sleeping in unit tests. */
   void make_verification_due_for_tests();
 
+  /** Acknowledge the active receipt's encoder request now, as the encoder would. */
+  void confirm_encoder_application_for_tests();
+
   /** Complete the active host-received evidence window without sleeping. */
   void make_verification_window_complete_for_tests();
 

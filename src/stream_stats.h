@@ -1297,6 +1297,13 @@ namespace stream_stats {
     /** Fold in one control-channel loss reading: ENet's estimate, which a ping carries. */
     void add_control_loss(clock_type::time_point at, double loss_pct);
 
+    /**
+     * Start the judgement over from `from`: readings before it leave the window and every band
+     * starts clear, then what is left is judged afresh. ENet's RTT has already settled, so the
+     * readings that waited for it are not held back again.
+     */
+    void restart(clock_type::time_point from);
+
     /** The judgement as it stands at now. */
     network_verdict_t verdict(clock_type::time_point now) const;
 
@@ -1313,6 +1320,24 @@ namespace stream_stats {
 
   /** The network judgement as it stands now, for a reader that needs no other stream field. */
   network_verdict_t current_network_verdict();
+
+  /**
+   * @brief The verdict the judge would reach from `from` on, judged afresh: every band clear at
+   *        `from` and only the readings after it counted.
+   *
+   * Doctor verifies a bitrate step against this, from the moment the encoder applied the step.
+   */
+  network_verdict_t network_verdict_since(std::chrono::steady_clock::time_point from);
+
+  /**
+   * @brief Start the network judgement over from `from`, as network_verdict_since() judges it.
+   *
+   * Doctor calls it when a bitrate step verifies, so its headline reads the judgement verification
+   * read. Judged over a window that still held the readings that asked for the step, a step that
+   * verified left "Sustained network pressure" and another lower_bitrate on offer for most of the
+   * window.
+   */
+  void restart_network_judgement(std::chrono::steady_clock::time_point from);
 
   /**
    * @brief A stream's network verdict as everything that grades the stream reads it.

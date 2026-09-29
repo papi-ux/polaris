@@ -4078,6 +4078,39 @@ namespace stream_stats {
     judge_control(at);
   }
 
+  void network_judge_t::restart(clock_type::time_point from) {
+    const auto drop_before = [from](auto &readings) {
+      while (!readings.empty() && readings.front().at < from) {
+        readings.pop_front();
+      }
+    };
+    drop_before(media);
+    drop_before(rtt);
+    drop_before(control);
+    loss_elevated = false;
+    rtt_elevated = false;
+    control_loss_elevated = false;
+    judged = network_verdict_t {};
+    media_oldest = {};
+    risk = false;
+    risk_since.reset();
+    std::optional<clock_type::time_point> newest;
+    if (!media.empty()) {
+      judge_media(media.back().at);
+      newest = media.back().at;
+    }
+    if (!rtt.empty()) {
+      judge_rtt(rtt.back().at);
+      newest = newest ? std::max(*newest, rtt.back().at) : rtt.back().at;
+    }
+    if (!control.empty()) {
+      judge_control(control.back().at);
+    }
+    if (newest) {
+      note_risk(*newest);
+    }
+  }
+
   // The figure and its band are judged together and kept together until the next report, so the
   // verdict never quotes a figure the band was not judged on.
   void network_judge_t::judge_media(clock_type::time_point at) {
@@ -4502,6 +4535,18 @@ namespace stream_stats {
   network_verdict_t current_network_verdict() {
     std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
     return network_judge.verdict(std::chrono::steady_clock::now());
+  }
+
+  network_verdict_t network_verdict_since(std::chrono::steady_clock::time_point from) {
+    std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
+    auto judge = network_judge;
+    judge.restart(from);
+    return judge.verdict(std::chrono::steady_clock::now());
+  }
+
+  void restart_network_judgement(std::chrono::steady_clock::time_point from) {
+    std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
+    network_judge.restart(from);
   }
 
   network_verdict_t served_network_verdict(const stats_t &stats) {
