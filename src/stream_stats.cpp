@@ -895,9 +895,14 @@ namespace stream_stats {
         cj["start_outcome"] = c.start_outcome;
       }
       cj["latency_ms"] = c.latency_ms;
-      cj["packet_loss"] = c.packet_loss;
-      cj["packet_loss_available"] = c.packet_loss_available;
-      cj["packet_loss_source"] = c.packet_loss_source;
+      // A row's loss counts while its reports are current, as Doctor has it for the stream.
+      const bool client_loss_current = c.packet_loss_available &&
+        (c.packet_loss_received_at == std::chrono::steady_clock::time_point {} ||
+         std::chrono::steady_clock::now() - c.packet_loss_received_at <=
+           std::chrono::milliseconds(judged_network_t::k_media_report_max_age_ms));
+      cj["packet_loss"] = client_loss_current ? c.packet_loss : 0.0;
+      cj["packet_loss_available"] = client_loss_current;
+      cj["packet_loss_source"] = client_loss_current ? c.packet_loss_source : std::string {"unavailable"};
       cj["control_channel_packet_loss"] = c.control_channel_packet_loss;
       cj["bytes_sent"] = c.bytes_sent;
       cj["fec_protection"] = fec_protection_json(c.fec_protection);
@@ -4509,15 +4514,19 @@ namespace stream_stats {
       host.bytes_sent,
       media_report_frames_t {static_cast<double>(result.frames_expected), static_cast<double>(result.frames_lost)}
     );
+    const auto verdict = current_network_verdict();
     {
-      // The stream's own client row says what the top level says. It was never written on this
-      // path, so every client row read "unavailable" while its loss was arriving.
+      // The stream's own client row quotes the verdict's figure, the one Doctor judges with. It was
+      // never written on this path, so every client row read "unavailable" while its loss arrived,
+      // and the newest report's figure would swing the console's client line between 0 and 7% on
+      // a Wi-Fi burst. Until the window has enough reports it has no figure.
       std::lock_guard<std::mutex> stats_lock(stats_mutex);
       for (auto &client : current_stats.clients) {
         if (client.session_generation == sample.session_generation) {
-          client.packet_loss = result.media_loss_pct;
-          client.packet_loss_available = true;
-          client.packet_loss_source = "media_transport";
+          client.packet_loss = verdict.loss_available ? verdict.loss_pct : 0.0;
+          client.packet_loss_available = verdict.loss_available;
+          client.packet_loss_source = verdict.loss_available ? "media_transport" : "unavailable";
+          client.packet_loss_received_at = std::chrono::steady_clock::now();
         }
       }
     }
@@ -4526,7 +4535,6 @@ namespace stream_stats {
       // pressure, and none while it does not. Not the window's figure: that stays at 1% or more for
       // most of the 20 seconds after the loss stops, and Live Tuning cut on it every second, late and
       // long after, where each report's figure lets its average fall within seconds.
-      const auto verdict = current_network_verdict();
       adaptive_bitrate::update_network_stats(verdict.loss_elevated ? result.media_loss_pct : 0.0, host.latency_ms);
     }
     result.observation_published = true;

@@ -7774,22 +7774,42 @@ TEST(StreamStatsHotFieldTests, ClientMediaCountersFillTheStreamsOwnClientRow) {
     .frames_lost = 0
   };
   ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
-  sample.client_monotonic_ms = 2'000;
-  sample.frames_expected = 242;
-  sample.frames_received = 233;
-  sample.frames_lost = 9;
-  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).observation_published);
+  // The HEVC run's reports: the newest one second figure swings between 0 and 7.4%.
+  for (const auto &report : k_recorded_hevc_reports) {
+    sample.client_monotonic_ms += 1'000;
+    sample.frames_expected += report.expected;
+    sample.frames_lost += report.lost;
+    sample.frames_received = sample.frames_expected - sample.frames_lost;
+    ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).observation_published);
+    const auto row = stream_stats::get_current().clients.front();
+    const auto verdict = stream_stats::current_network_verdict();
+    // Until the window can judge, the row has no figure rather than the newest report's.
+    EXPECT_EQ(row.packet_loss_available, verdict.loss_available);
+    if (verdict.loss_available) {
+      EXPECT_DOUBLE_EQ(row.packet_loss, verdict.loss_pct);
+    }
+  }
 
   // The top level said the loss arrived while the stream's own row said it never had, which is how a
-  // reading of this host's stats concluded a client's loss did not reach it.
+  // reading of this host's stats concluded a client's loss did not reach it. The row now quotes the
+  // window's figure, as Doctor does: 18 of 963 frames, where the newest report lost none.
   const auto stats = stream_stats::get_current();
   ASSERT_EQ(stats.clients.size(), 1u);
   EXPECT_TRUE(stats.packet_loss_available);
+  EXPECT_DOUBLE_EQ(stats.packet_loss, 0.0);
   EXPECT_TRUE(stats.clients.front().packet_loss_available);
   EXPECT_EQ(stats.clients.front().packet_loss_source, "media_transport");
-  EXPECT_DOUBLE_EQ(stats.clients.front().packet_loss, stats.packet_loss);
-  const auto json = nlohmann::json::parse(stats.to_json());
+  EXPECT_NEAR(stats.clients.front().packet_loss, 18.0 * 100.0 / 963.0, 1e-9);
+  auto json = nlohmann::json::parse(stats.to_json());
   EXPECT_EQ(json.at("clients").at(0).at("packet_loss_available"), true);
+  EXPECT_NEAR(json.at("clients").at(0).at("packet_loss").get<double>(), 18.0 * 100.0 / 963.0, 1e-9);
+
+  // Once the client's reports stop for more than five seconds the row stops quoting it, as Doctor does.
+  auto aged = stats;
+  aged.clients.front().packet_loss_received_at -= std::chrono::seconds(6);
+  json = nlohmann::json::parse(aged.to_json());
+  EXPECT_EQ(json.at("clients").at(0).at("packet_loss_available"), false);
+  EXPECT_EQ(json.at("clients").at(0).at("packet_loss_source"), "unavailable");
 }
 
 TEST(StreamStatsHotFieldTests, ClientMediaCountersAreJudgedOverTheWindow) {

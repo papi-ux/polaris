@@ -7,6 +7,13 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- The Dashboard quotes the loss Doctor judges as well. Its Loss tile, the tile's colour, the quality
+  grade and the loss chart read the newest one second report, and so did the stream's client line
+  once the host began filling it, so on the Retroid Pocket 6's HEVC run they swung between 0% and
+  7.4% beside a Doctor that held 1.9%. They now show the window's figure, coloured as Doctor judges
+  it, and no figure until the host has judged one. A client row carries that figure and stops
+  serving it once its reports are more than five seconds old, as Doctor does.
+
 - With Live Tuning on, Doctor judges PyroWave's bitrate advice on the rate the stream is set to.
   It judged Live Tuning's moving target, so a stream set between PyroWave's starved line and the
   rate Doctor would raise it to went from no finding to "set more bitrate" and back with every cut

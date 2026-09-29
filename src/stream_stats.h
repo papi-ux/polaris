@@ -175,10 +175,15 @@ namespace stream_stats {
 
     // Network
     double latency_ms = 0;
-    /// Confirmed media-path packet loss only. ENet control loss is kept separate.
+    /// Confirmed media-path loss only. ENet control loss is kept separate. For the stream's own
+    /// client, the network verdict's figure: video frames lost after FEC over its window, the one
+    /// Doctor quotes, not the newest one second report.
     double packet_loss = 0;
     bool packet_loss_available = false;
     std::string packet_loss_source = "unavailable";
+    /// When packet_loss was written. A row serves it only while that is at most
+    /// judged_network_t::k_media_report_max_age_ms old, as Doctor counts loss.
+    std::chrono::steady_clock::time_point packet_loss_received_at {};
     double control_channel_packet_loss = 0;
     uint64_t bytes_sent = 0;
 
