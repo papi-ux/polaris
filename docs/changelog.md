@@ -7,23 +7,30 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
-- Absolute mouse input lands where it was aimed on a desktop with a rotated or scaled monitor
-  (#793). wlroots capture and KMS capture measured the desktop from each monitor's mode, which is in
+- Absolute mouse input lands where it was aimed on a desktop with a rotated or scaled monitor, with
+  wlroots and KMS capture (#793). Both measured the desktop from each monitor's mode, which is in
   output pixels before the monitor is turned or scaled, and placed each monitor by its xdg-output
   position, which is after. A 1920x1080 monitor turned to portrait beside a 2560x1440 one made the
   desktop 4480x1440 instead of 3640x1920, so the middle of the main monitor took its pointer at
   1040,960 instead of 1280,720. Each monitor is measured now by the rectangle it covers on the
   desktop: xdg-output's logical size, or, from a compositor that sends none, the mode turned by the
-  output's transform and divided by its scale. The streamed monitor's frame stays in output pixels
-  for capture and encode, and absolute input maps onto its rectangle on the desktop, which is
-  counted from the desktop's own corner when a monitor sits left of or above the origin. Reported
-  and diagnosed by ertywastaken.
+  output's transform and divided by its scale. The desktop is counted in desktop pixels, those
+  logical units times the largest whole scale among the monitors, so the pointer still reaches
+  every physical pixel of a HiDPI monitor, and a lone 3840x2160 monitor at scale 2 measures
+  3840x2160, as it did. KMS capture takes Wayland's rectangles only when Wayland matched an output
+  to every active CRTC on the cards it opened, and otherwise measures every CRTC by its mode, as it
+  did. The streamed monitor's frame stays in output pixels for capture and encode. A monitor turned
+  a quarter still streams sideways, since both captures hand its frame back unturned, and input on
+  its own stream maps onto that frame at the monitor's place, as it did. Portal, KWin and X11
+  capture are unchanged. Reported and diagnosed by ertywastaken.
 
-- Absolute mouse input for a monitor right of or below another lands on that monitor. Linux left
-  the streamed monitor's place on the desktop out of every absolute point, so the pointer landed on
-  whichever monitor sits at the desktop's corner; Windows always put it in. It goes in now, for
-  wlroots, KMS and X11 capture alike. Portal and KWin capture give the stream no place on a larger
-  desktop, so they are unchanged.
+- Absolute mouse input for a monitor right of or below another lands on that monitor, with
+  wlroots, KMS and X11 capture, NvFBC included. Linux left the streamed monitor's place on the
+  desktop out of every absolute point, so the pointer landed on whichever monitor sits at the
+  desktop's corner, where Windows always put the place in. It goes in now, counted from the
+  desktop's own corner, which is left of or above the origin when a monitor sits there. Portal and
+  KWin capture give the stream no place on a larger desktop, so they are unchanged. Touch and pen
+  still leave the place out.
 
 - A client can set up to 500 Mbps by hand. The endpoints a paired client sets its own bitrate
   through, its client settings' `target_bitrate_kbps`, a live bitrate change, a resolved launch's
