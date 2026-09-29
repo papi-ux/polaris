@@ -60,6 +60,9 @@ namespace doctor_actions {
       std::uint64_t verification_step = 0;
       std::uint64_t network_sample_revision_at_apply = 0;
       bool requires_media_sample = false;
+      // The step turned Live Tuning off for this stream, as a player's own live bitrate does. Undo and a
+      // rollback turn it back on with the rate.
+      bool paused_live_tuning = false;
       bool verification_passed = false;
       stream_stats::network_verification_window_t verified_window;
       std::chrono::steady_clock::time_point requested_at {};
@@ -176,8 +179,15 @@ namespace doctor_actions {
     restore_outcome_t restore_bitrate_run_locked(action_run_t &run) {
       const int restore_live_bitrate_kbps = run.previous_controller.live_bitrate_kbps > 0 ?
         run.previous_controller.live_bitrate_kbps : run.previous_controller.base_bitrate_kbps;
+      auto expected_revision = run.controller_revision;
+      if (run.paused_live_tuning && adaptive_bitrate::get_doctor_state().revision == run.controller_revision) {
+        // Live Tuning back on for this stream, then the rate, while the step still owns the controller.
+        // A newer writer's choice stands, Live Tuning's state included.
+        adaptive_bitrate::end_stream_override();
+        expected_revision = adaptive_bitrate::get_doctor_state().revision;
+      }
       const auto restored_revision = adaptive_bitrate::restore_doctor_state_if_revision(
-        run.controller_revision,
+        expected_revision,
         run.previous_controller
       );
       run.active = false;
@@ -194,6 +204,32 @@ namespace doctor_actions {
         encoder_restored ? restore_status_e::restored : restore_status_e::encoder_unconfirmed,
         restore_live_bitrate_kbps
       };
+    }
+
+    // A step with Live Tuning on turns it off for this stream only, the rule a player's own live
+    // bitrate follows (set_owner_live_bitrate()), and steps down from there. Nothing is saved:
+    // restore_bitrate_run_locked() turns it back on with the rate, and session_ended() puts the saved
+    // preference back for the next stream.
+    std::optional<std::uint64_t> step_with_live_tuning_off(const adaptive_bitrate::doctor_state_t &before,
+                                                           int current_kbps,
+                                                           int target_kbps) {
+      // The check set_doctor_bitrate_if_revision() makes, before anything moves.
+      if (adaptive_bitrate::get_doctor_state().revision != before.revision) {
+        return std::nullopt;
+      }
+      adaptive_bitrate::set_live_bitrate_for_stream(current_kbps);
+      const auto paused = adaptive_bitrate::get_doctor_state();
+      if (const auto revision = adaptive_bitrate::set_doctor_bitrate_if_revision(paused.revision, target_kbps)) {
+        return revision;
+      }
+      // A reading arrived between the two. Put Live Tuning and the rate back as they were.
+      adaptive_bitrate::end_stream_override();
+      for (int attempt = 0; attempt < 3; ++attempt) {
+        if (adaptive_bitrate::restore_doctor_state_if_revision(adaptive_bitrate::get_doctor_state().revision, before)) {
+          break;
+        }
+      }
+      return std::nullopt;
     }
 
     bool encoder_application_confirmed_locked(action_run_t &run) {
@@ -1537,6 +1573,16 @@ namespace doctor_actions {
           {"evidence", mutation_evidence}
         };
       }
+      // With Live Tuning on, Doctor steps in for sustained video frame loss only. Round trip time alone
+      // is Live Tuning's to cut for.
+      const bool pause_live_tuning = adaptive_state.enabled;
+      if (pause_live_tuning && !stream_stats::judged_network(mutation_stats).loss_pressure) {
+        return {
+          {"status", false}, {"changed", false}, {"state", "evidence_changed"},
+          {"error", "Live Tuning adjusts this stream's bitrate for round trip time. Doctor steps in only for sustained video frame loss."},
+          {"evidence", mutation_evidence}
+        };
+      }
       if (!adaptive_state.runtime_update_supported) {
         return {
           {"status", false}, {"changed", false}, {"state", "runtime_update_unavailable"},
@@ -1573,10 +1619,13 @@ namespace doctor_actions {
       run.verification_step = 1;
       // A step taken for loss is verified only by a client media report from after it.
       run.requires_media_sample = stream_stats::judged_network(mutation_stats).loss_pressure;
-      const auto applied_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
-        adaptive_state.revision,
-        target_bitrate_kbps
-      );
+      run.paused_live_tuning = pause_live_tuning;
+      const auto applied_revision = pause_live_tuning ?
+        step_with_live_tuning_off(adaptive_state, current_bitrate_kbps, target_bitrate_kbps) :
+        adaptive_bitrate::set_doctor_bitrate_if_revision(
+          adaptive_state.revision,
+          target_bitrate_kbps
+        );
       if (!applied_revision) {
         return {
           {"status", false}, {"changed", false}, {"state", "controller_changed"},
@@ -1599,8 +1648,9 @@ namespace doctor_actions {
       }
     }
     BOOST_LOG(info) << "Doctor: requested guarded bitrate step "sv
-                    << current_bitrate_kbps << " -> " << target_bitrate_kbps
-                    << " kbps run=" << run.run_id;
+                    << current_bitrate_kbps << " -> " << target_bitrate_kbps << " kbps"
+                    << (run.paused_live_tuning ? " with Live Tuning off for this stream"sv : ""sv)
+                    << " run=" << run.run_id;
 
     return {
       {"status", true},
@@ -1608,8 +1658,10 @@ namespace doctor_actions {
       {"state", "applying"},
       {"run_id", run.run_id},
       {"request_id", run.request_id},
-      {"message", "Doctor requested one bitrate step and will begin verification after the encoder acknowledges it."},
-      {"requested", {{"bitrate_kbps", target_bitrate_kbps}, {"adaptive_bitrate_enabled", adaptive_state.enabled}}},
+      {"message", run.paused_live_tuning ?
+        "Doctor turned Live Tuning off for this stream and requested one bitrate step. Verification begins after the encoder acknowledges it, and Undo turns Live Tuning back on." :
+        "Doctor requested one bitrate step and will begin verification after the encoder acknowledges it."},
+      {"requested", {{"bitrate_kbps", target_bitrate_kbps}, {"adaptive_bitrate_enabled", adaptive_state.enabled && !run.paused_live_tuning}}},
       {"encoder_application_confirmed", false},
       {"before", {{"bitrate_kbps", current_bitrate_kbps}, {"adaptive_bitrate_enabled", adaptive_state.enabled}}},
       {"verification", {{"delay_seconds", 8}, {"action_id", "verify"}, {"run_id", run.run_id}}},

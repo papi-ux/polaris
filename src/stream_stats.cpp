@@ -2121,10 +2121,18 @@ namespace stream_stats {
           body = "Confirmed network pressure is affecting this stream. " + pyrowave_floor_guidance(pyrowave);
           next_step = "Use HEVC or a lower mode";
           expected = "A codec that needs fewer bits, or a smaller picture, fits the link without the picture falling apart.";
-        } else if (auto_safe_managing) {
-          body = "Confirmed network pressure is affecting this stream, and Live Tuning already owns the live bitrate correction. Doctor will measure the result without racing the active controller.";
+        } else if (auto_safe_managing && !network.loss_pressure) {
+          // Round trip time alone. Live Tuning cuts for an RTT spike on its own, so Doctor adds no step.
+          body = "Round trip time is high enough to count as network pressure. Live Tuning lowers the bitrate on its own when round trip time spikes, so Doctor measures the result instead of changing the bitrate as well.";
           next_step = "Recheck Live Tuning";
-          expected = "Live Tuning should cut the encoder target at once for heavy loss or a latency spike, and for lighter loss hold half the bitrate and test the rates below it, settling where the loss is gone or going back to half when no lower rate lowers it.";
+          expected = "Live Tuning cuts the bitrate by a tenth for each spike it sees, and brings it back a step at a time once 10 seconds pass without one.";
+        } else if (auto_safe_managing && live_bitrate_tunable) {
+          // Sustained video frame loss. Live Tuning's own loss handling averages each report with every
+          // control ping's 0% and acts once a second, so a few percent of lost frames often never reach
+          // its 1% line. Doctor offers the step, which turns Live Tuning off for this stream only.
+          body = "Sustained video frame loss is affecting this stream. Doctor can lower the bitrate one step and watch whether the loss clears. That turns Live Tuning off for this stream only, and Undo puts the bitrate back and turns Live Tuning on again.";
+          next_step = "Fix and verify";
+          expected = "Video frame loss should drop out of network pressure at the lower bitrate. Live Tuning stays off for the rest of this stream unless you undo the step.";
         } else if (live_bitrate_tunable) {
           body = "Current sustained loss or latency evidence confirms network pressure. Doctor can lower bitrate one guarded step and watch the same telemetry for recovery.";
           next_step = "Fix and verify";
@@ -2256,6 +2264,7 @@ namespace stream_stats {
                                       bool live_bitrate_tunable,
                                       bool single_session_scope,
                                       bool auto_safe_managing,
+                                      bool loss_pressure,
                                       const pyrowave_doctor_t &pyrowave,
                                       const std::string &source_result_id,
                                       std::string_view app_uuid,
@@ -2276,8 +2285,11 @@ namespace stream_stats {
         {"success_when", nlohmann::json::array()}
       };
 
+      // Live Tuning keeps the live bitrate to itself, apart from sustained video frame loss, which its
+      // own loss handling seldom cuts for: there Doctor offers one step, and taking it turns Live Tuning
+      // off for this stream only.
       const bool auto_safe_network_management = auto_safe_managing &&
-        (primary_issue == "network_jitter" || primary_issue == "quality_reduced_live");
+        ((primary_issue == "network_jitter" && !loss_pressure) || primary_issue == "quality_reduced_live");
       const auto read_only_guidance = [&](std::string reason) {
         id = "none";
         label = "Manual";
@@ -2355,7 +2367,9 @@ namespace stream_stats {
         // names no step, so the payload names one guarded 20% step instead.
         payload["target_bitrate_kbps"] = health_bitrate_kbps > 0 && health_bitrate_kbps < current_bitrate_kbps ?
           health_bitrate_kbps : derived_bitrate_kbps;
-        rollback = "Undo restores the live bitrate and Auto Quality state that were active before this Doctor run.";
+        rollback = auto_safe_managing ?
+          "This turns Live Tuning off for this stream only. Undo restores the live bitrate and turns Live Tuning back on." :
+          "Undo restores the live bitrate and Auto Quality state that were active before this Doctor run.";
         verification = {
           {"mode", "live_telemetry"},
           {"delay_seconds", 8},
@@ -2564,12 +2578,13 @@ namespace stream_stats {
       stats.doctor_live_action_scope_available;
     const bool live_bitrate_tunable =
       stats.adaptive_runtime_update_supported && single_session_scope;
-    // Auto Safe ownership is a policy choice, not a momentary actuator state.
+    // Live Tuning ownership is a policy choice, not a momentary actuator state.
     // FFmpeg bitrate changes can briefly recreate the encoder, and explicit or
     // rollback hand-offs can temporarily change the controller-state label.
     // None of those transitions authorizes Doctor to become a second writer.
-    // While Auto Safe is enabled, Doctor may observe the live result; only
-    // disabling Auto Safe can make a guarded Doctor mutation available.
+    // While Live Tuning is on, Doctor observes the live result, except for
+    // sustained video frame loss: its one step turns Live Tuning off for this
+    // stream first, so the two never write at once.
     // Frame age is capture→encoder latency. On a CPU-copy capture path it is
     // dominated by the SHM copy/convert, so an over-budget age indicts the
     // capture path, not the encoder — the old verdict here sent an SHM-bound
@@ -3007,7 +3022,7 @@ namespace stream_stats {
       auto_safe_managing || live_bitrate_tunable ? "pass" : "watch",
       "deterministic_controller",
       auto_safe_managing ?
-        "Live Tuning owns continuous live bitrate adjustment. Doctor measures it and does not offer a competing mutation." :
+        "Live Tuning adjusts the live bitrate on its own. Doctor offers one reversible step only for sustained video frame loss, and taking it turns Live Tuning off for this stream." :
       live_bitrate_tunable ?
         "Live Tuning is not managing this target. Evidence-supported Doctor Auto Fix may own one reversible, verified bitrate step." :
         "The current stream has no safe, exclusive live bitrate actuator. Doctor remains observational."
@@ -3226,6 +3241,7 @@ namespace stream_stats {
       live_bitrate_tunable,
       single_session_scope,
       auto_safe_managing,
+      network.loss_pressure,
       pyrowave_doctor,
       doctor["result_id"].get<std::string>(),
       app_uuid,
