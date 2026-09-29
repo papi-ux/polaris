@@ -214,9 +214,17 @@ describe('v1.4.14 release contract', () => {
     )
     expect(notes).toContain('the share of video frames that never arrived whole after FEC.')
     // Live Tuning's hold for moderate loss, adaptive_bitrate's MODERATE_LOSS_FLOOR_SHARE and HEAVY_LOSS_PCT,
-    // and the rate tests that let it go lower or climb back.
-    expect(notes).toContain('For loss of 5% or less it stops at half your bitrate and tests that rate')
-    // Media reports that stop no longer leave Live Tuning cutting on the last loss they brought.
+    // the probe below it and the climb back, with the step up rule as adaptive_bitrate.h states it.
+    expect(notes).toContain('For loss of 5% or less it stops at half your bitrate and tests the rates below')
+    expect(notes).toContain('and back to half if no lower rate lowers it, with no second try for 5 minutes.')
+    expect(notes).toContain(
+      '+8% after each dwell, doubling the step (8, 16, 32%) while each step stays clean, capped at the base, your bitrate; ' +
+        'a step is kept unless loss rises above max(1.5 x the held level, held level + 1 point); ' +
+        'a failed step reverts and backs off (30 s doubling to 120 s) before trying again.',
+    )
+    // Media reports that stop no longer leave Live Tuning cutting on the last loss they brought, and a
+    // pause in them, k_media_report_pause_hold, holds the rate.
     expect(notes).toContain("or of your client's reports stopping")
+    expect(notes).toContain('holds your bitrate through a pause in those reports of up to 30 seconds')
   })
 })
