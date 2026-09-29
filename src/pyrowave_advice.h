@@ -27,6 +27,9 @@
 // lib includes
 #include <nlohmann/json_fwd.hpp>
 
+// local includes
+#include "stream_bitrate.h"
+
 namespace pyrowave_advice {
 
   /// The quality the advice aims for, in dB of PSNR-HVS-M-H.
@@ -92,6 +95,24 @@ namespace pyrowave_advice {
     int audio_kbps = k_default_audio_kbps;
   };
 
+  /**
+   * @brief What a stream's requests are grossed up for.
+   *
+   * A stream's own figures once its handshake is recorded: the FEC share it started with, which a
+   * config reload since does not change, and its own audio. Without one, the host's FEC share now and
+   * stereo in high quality, which is what the advice assumes before a launch. Session status, the
+   * advice route and the Live Tuning floor all take their link from here, so they agree with each
+   * other and with bitrate_units.
+   * @param request The stream's recorded request, or nullptr when there is none.
+   * @param host_fec_percentage The host's `fec_percentage` now.
+   */
+  inline link_t stream_link(const stream_bitrate::request_t *request, int host_fec_percentage) {
+    if (request == nullptr) {
+      return {host_fec_percentage, k_default_audio_kbps};
+    }
+    return {request->fec_percentage, request->audio_kbps > 0 ? request->audio_kbps : k_default_audio_kbps};
+  }
+
   /// The advice for one stream shape.
   struct advice_t {
     bool valid = false;
@@ -137,15 +158,21 @@ namespace pyrowave_advice {
     bool built = false;
     /// A device on this host can run the codec.
     bool device_available = false;
+    /// The FEC share and audio cost the advice is grossed up for: the asking client's own stream's
+    /// when it streams here, see stream_link(), and the host's FEC share with stereo in high quality
+    /// when it does not.
     int fec_percentage = 10;
     int max_bitrate_kbps = 0;
+    int audio_kbps = k_default_audio_kbps;
   };
 
   /**
    * @brief The reply to GET /polaris/v1/pyrowave/advice.
    *
    * The same advice fields session status carries while a PyroWave stream runs, for a shape a client
-   * is about to ask for, with the audio assumed to be stereo in high quality. A host that cannot serve
+   * is about to ask for, grossed up for host.fec_percentage and host.audio_kbps: the asking client's
+   * own stream's when it streams here, and the host's FEC share with stereo in high quality when it
+   * does not. A host that cannot serve
    * PyroWave says so, with a reason code and a sentence a player can read; one that has the model but
    * no device still gives the figures, because they do not depend on the device.
    * @param width,height,fps Decimal integers, 1 to 16384 and 1 to 1000.

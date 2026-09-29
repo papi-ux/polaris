@@ -242,7 +242,7 @@ namespace pyrowave_advice {
       };
     }
     const auto advice = advise(*parsed_width, *parsed_height, *parsed_fps, chroma == "444",
-                               {host.fec_percentage, k_default_audio_kbps}, host.max_bitrate_kbps);
+                               {host.fec_percentage, host.audio_kbps}, host.max_bitrate_kbps);
     auto reply = advice_json(advice);
     reply["available"] = host.device_available;
     if (!host.device_available) {
@@ -250,7 +250,7 @@ namespace pyrowave_advice {
       reply["message"] = "No GPU on this PC can run PyroWave, so it cannot stream it. The figures are what the "
                          "codec would need.";
     }
-    reply["assumes"] = {{"fec_percentage", host.fec_percentage}, {"audio_kbps", k_default_audio_kbps}};
+    reply["assumes"] = {{"fec_percentage", host.fec_percentage}, {"audio_kbps", host.audio_kbps}};
     return reply;
   }
 

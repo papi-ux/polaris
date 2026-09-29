@@ -439,7 +439,12 @@ per pixel of the nearest of those two sizes.
 **Where clients read it.** While a PyroWave stream runs, `GET /polaris/v1/session/status` carries
 `pyrowave_bitrate`, and `GET /polaris/v1/pyrowave/advice?width=&height=&fps=&chroma=420|444`
 answers the same figures before a launch. Capabilities announce both as `pyrowave_advice_v1`, and
-`docs/nova-contract.json` lists every field.
+`docs/nova-contract.json` lists every field. Both name what they assume in `assumes`: the FEC share
+the stream started with and its own audio, the figures its `bitrate_units` carry. The advice route
+uses the asking client's own stream when it has one running, and the host's FEC share with stereo
+in high quality when it does not, which is also what session status assumes until a stream's
+handshake is recorded. Session status also carries `bitrate_units` for every stream, PyroWave or
+not ([Live Tuning](live-tuning.md#bitrate-units)).
 
 **Starved.** The host keeps the share of the last 240 frames, about four seconds at 60 fps, that
 left at 99% or more of PyroWave's byte budget. A stream is starved when the encoder runs below where

@@ -16,6 +16,7 @@
 // local includes
 #include "crypto.h"
 #include "launch_failure.h"
+#include "stream_bitrate.h"
 #include "thread_safe.h"
 
 #ifdef _WIN32
@@ -311,6 +312,24 @@ namespace rtsp_stream {
     std::optional<int> launch_target_kbps,
     const std::string &launch_target_source,
     int max_bitrate_kbps
+  );
+
+  /**
+   * @brief Bound a client's bitrate request the way the handshake does, and record what that did to it.
+   *
+   * The warp factor multiplies the request, then the ceiling cuts what that gives. request records the
+   * client's own total, the warp factor, the cap when it cut the request, and a launch cap PyroWave set
+   * aside, so session status can say what stood between the client's request and the total it split.
+   * @param client_kbps What the client asked for.
+   * @param warp_factor How many times limit_framerate renders faster than the client streams; 0 or 1
+   *   when it does not.
+   * @return The total the handshake splits.
+   */
+  std::int64_t bound_session_request(
+    stream_bitrate::request_t &request,
+    std::int64_t client_kbps,
+    std::size_t warp_factor,
+    const session_bitrate_ceiling_t &ceiling
   );
 
   /**

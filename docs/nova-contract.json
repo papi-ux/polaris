@@ -917,8 +917,9 @@
         "the far figure capped at cap_kbps and max_bitrate. encoder_kbps is the rate the encoder runs",
         "at now, ceiling_frame_share the share of recent frames at 99% of the byte budget (null while",
         "unknown), and starved the host's verdict. assumes names the FEC share and audio cost the",
-        "requests were grossed up for, as the advice route does. No nova_reader yet: Nova builds",
-        "against it for 1.4.14."
+        "requests were grossed up for: the stream's own, as its bitrate_units carry them, and the",
+        "host's FEC share with stereo in high quality until its handshake is recorded. No",
+        "nova_reader yet: Nova builds against it for 1.4.14."
       ],
       "fields": [
         "advice_far_kbps",
@@ -964,7 +965,9 @@
         "ones, for a shape a client is about to ask for. available is false with a reason and a",
         "message when the host cannot serve PyroWave: not_built carries no figures, no_vulkan_device",
         "still carries them. assumes names the FEC share and audio cost the requests were grossed up",
-        "for. No nova_reader yet."
+        "for: the asking client's own stream's, as its bitrate_units carry them, when it streams",
+        "here, and the host's FEC share with stereo in high quality when it does not. No nova_reader",
+        "yet."
       ],
       "fields": [
         "advice_far_kbps",
@@ -999,6 +1002,44 @@
           "style": "subscript"
         }
       ]
+    },
+    "bitrate_units": {
+      "$comment": [
+        "The bitrate_units object of GET /polaris/v1/session/status, announced by",
+        "features.bitrate_units_v1 and present for every stream whatever its codec, once the stream's",
+        "handshake is recorded. A client's request covers the video, its FEC, the audio and packet",
+        "overhead, and the handshake hands the encoder what is left by the arithmetic formula names,",
+        "stream_bitrate_v1 (src/stream_bitrate.h): encoder_kbps_for_wire(split_kbps, fec_percentage,",
+        "audio_kbps) is encoder_kbps whenever split_kbps is not null, and wire_kbps_for_encoder",
+        "inverts it. requested_kbps is the client's own request, 0 when it sent none. split_kbps is",
+        "requested_kbps times warp_factor, cut to cap_kbps when a cap did (cap_kbps and cap_source",
+        "are null when none did), and null for a stream whose encoder rate is no split of its own",
+        "request: a watcher at its owner's rate, or a client that sent no bitrate. encoder_kbps is",
+        "where the handshake left the encoder, live_encoder_kbps the rate the encoder runs at now",
+        "after a live bitrate, Live Tuning or Doctor, fec_percentage the host's share when the",
+        "stream started. A client with a stream here gets that stream or nothing; one with no stream",
+        "here gets the first stream that recorded its handshake. A Space's stream carries none yet.",
+        "No nova_reader yet."
+      ],
+      "fields": [
+        "audio_kbps",
+        "cap_kbps",
+        "cap_source",
+        "encoder_kbps",
+        "fec_percentage",
+        "formula",
+        "live_encoder_kbps",
+        "requested_kbps",
+        "split_kbps",
+        "version",
+        "warp_factor"
+      ],
+      "polaris_emitter": {
+        "file": "src/stream_stats.cpp",
+        "function": "bitrate_units_json",
+        "style": "initializer_list",
+        "declaration": "return {"
+      }
     }
   },
   "known_drift": {

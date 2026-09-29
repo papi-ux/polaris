@@ -160,6 +160,9 @@ namespace stream_stats {
     // handshake. Written once, when the session starts.
     std::string stream_chroma;
     stream_bitrate::request_t bitrate_request;
+    // Whether record_stream_request() has written bitrate_request. Until it has, the zeros there are
+    // no figures, so nothing reports them.
+    bool bitrate_request_recorded = false;
     // This session's recent PyroWave frames in the batches its encode loop reported them in, oldest
     // first, as (frames, frames at the byte ceiling), and the totals over those batches.
     std::vector<std::pair<std::uint32_t, std::uint32_t>> pyrowave_ceiling_batches;
@@ -377,6 +380,8 @@ namespace stream_stats {
     std::string stream_chroma;
     /// What the client asked for at the handshake, and what the host did to it.
     stream_bitrate::request_t bitrate_request;
+    /// Whether a handshake recorded bitrate_request. Until one has, its zeros are no figures.
+    bool bitrate_request_recorded = false;
     /// Recent PyroWave frames and how many of them reached 99% of the codec's byte budget, over about
     /// the last k_pyrowave_ceiling_window_frames frames of the stream that reported last.
     std::uint32_t pyrowave_window_frames = 0;
@@ -847,6 +852,29 @@ namespace stream_stats {
   /// The session status pyrowave_bitrate object, or null when the stream is not PyroWave. Its assumes
   /// names the FEC share and audio cost the requests were grossed up for, as the pre-launch advice does.
   nlohmann::json pyrowave_bitrate_json(const stats_t &stats);
+
+  /**
+   * @brief The session status bitrate_units object: what a stream's bitrate request was split into.
+   *
+   * A client's request covers the video, its FEC, the audio and the packet overhead, and the handshake
+   * hands the encoder what is left, by the arithmetic formula names (stream_bitrate_v1). This carries
+   * those figures for any codec: version; requested_kbps, the client's own request; warp_factor,
+   * cap_kbps and cap_source, what the host did to it; split_kbps, the total the formula ran on;
+   * encoder_kbps and live_encoder_kbps; audio_kbps and fec_percentage; and formula. Whenever split_kbps
+   * is not null, encoder_kbps_for_wire(split_kbps, fec_percentage, audio_kbps) is encoder_kbps. It is
+   * null for a stream whose encoder rate is no split of its own request, a watcher or a client that
+   * sent no bitrate, and the formula says nothing about that stream.
+   * @param requester_generation The asking client's stream, or 0 when it has none. A client with a
+   *   stream is answered about that stream alone, and one with no stream here about the first stream
+   *   that has recorded its handshake.
+   * @return Null while nothing streams, and for a client whose own stream is not in stats or has not
+   *   recorded its handshake: in its handshake, or torn down a moment before its session timing.
+   */
+  nlohmann::json bitrate_units_json(const stats_t &stats, std::uint64_t requester_generation);
+
+  /// What the stream with this generation recorded at its handshake, or nullopt when no stream holds
+  /// that generation or it has recorded nothing yet.
+  std::optional<stream_bitrate::request_t> recorded_stream_request(std::uint64_t session_generation);
 
   /**
    * @brief The launch bitrate a Doctor quality restore climbs back to, at the encoder.

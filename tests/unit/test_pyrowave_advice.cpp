@@ -70,6 +70,53 @@ TEST(StreamBitrateTests, TheRequestForAnEncoderRateIsTheSmallestThatReachesIt) {
   EXPECT_EQ(stream_bitrate::wire_kbps_for_encoder(-5, 10, 512), 0);
 }
 
+TEST(StreamBitrateTests, SplittingARequestRecordsWhatItWasSplitFor) {
+  stream_bitrate::request_t request;
+  const auto encoder = stream_bitrate::split_request(request, 20000, 10, 512);
+  ASSERT_TRUE(encoder.has_value());
+  EXPECT_EQ(*encoder, 16988);
+  EXPECT_EQ(*encoder, stream_bitrate::encoder_kbps_for_wire(20000, 10, 512));
+  EXPECT_EQ(request.split_kbps, 20000);
+  EXPECT_EQ(request.encoder_kbps, 16988);
+  EXPECT_EQ(request.audio_kbps, 512);
+  EXPECT_EQ(request.fec_percentage, 10);
+
+  // No total splits nothing, and the audio and FEC are recorded anyway.
+  stream_bitrate::request_t unsplit;
+  EXPECT_FALSE(stream_bitrate::split_request(unsplit, 0, 20, 1536).has_value());
+  EXPECT_EQ(unsplit.split_kbps, 0);
+  EXPECT_EQ(unsplit.encoder_kbps, 0);
+  EXPECT_EQ(unsplit.audio_kbps, 1536);
+  EXPECT_EQ(unsplit.fec_percentage, 20);
+  EXPECT_EQ(stream_bitrate::k_formula, "stream_bitrate_v1");
+}
+
+TEST(StreamBitrateTests, AWatcherEncodesAtItsOwnersRateWhichIsNoSplitOfItsRequest) {
+  // Any other stream starts where its split left the encoder, and keeps its split.
+  stream_bitrate::request_t own;
+  const auto encoder = stream_bitrate::split_request(own, 50000, 10, 512);
+  ASSERT_TRUE(encoder.has_value());
+  EXPECT_EQ(stream_bitrate::settle_encoder(own, static_cast<int>(*encoder), std::nullopt), 43987);
+  EXPECT_EQ(own.split_kbps, 50000);
+  EXPECT_EQ(own.encoder_kbps, 43987);
+
+  // A watcher starts at its owner's rate, and the split of its own request is cleared, because the
+  // formula says nothing about that rate. Its audio and FEC stay.
+  stream_bitrate::request_t watcher;
+  stream_bitrate::split_request(watcher, 50000, 10, 512);
+  EXPECT_EQ(stream_bitrate::settle_encoder(watcher, 43987, 20000), 20000);
+  EXPECT_EQ(watcher.split_kbps, 0);
+  EXPECT_EQ(watcher.encoder_kbps, 20000);
+  EXPECT_EQ(watcher.audio_kbps, 512);
+  EXPECT_EQ(watcher.fec_percentage, 10);
+
+  // A client that sent no bitrate starts where it asked, 0, with nothing split.
+  stream_bitrate::request_t unsplit;
+  EXPECT_FALSE(stream_bitrate::split_request(unsplit, 0, 10, 512).has_value());
+  EXPECT_EQ(stream_bitrate::settle_encoder(unsplit, 0, std::nullopt), 0);
+  EXPECT_EQ(unsplit.split_kbps, 0);
+}
+
 TEST(PyroWaveAdviceTests, TheModelMatchesTheFixtureAtTheRevisionItNames) {
   if (!pyrowave_advice::model_available()) {
     GTEST_SKIP() << "built without PyroWave, so there is no model to compare";
@@ -240,4 +287,49 @@ TEST(PyroWaveAdviceTests, ThePreLaunchRouteChecksItsQueryAndSaysWhyPyroWaveIsUna
   const auto limited = pyrowave_advice::advice_reply("1920", "1080", "60", "420", capped, status);
   EXPECT_EQ(limited.at("raise_goal_kbps"), 50000);
   EXPECT_EQ(limited.at("raise_goal_limited_by"), "max_bitrate");
+}
+
+TEST(PyroWaveAdviceTests, AStreamsLinkIsTheOneItsHandshakeRecorded) {
+  // No stream: the host's FEC share now and stereo in high quality.
+  const auto none = pyrowave_advice::stream_link(nullptr, 15);
+  EXPECT_EQ(none.fec_percentage, 15);
+  EXPECT_EQ(none.audio_kbps, pyrowave_advice::k_default_audio_kbps);
+
+  // A stream: the FEC share it started with, whatever the host's is now, and its own audio.
+  stream_bitrate::request_t surround;
+  stream_bitrate::split_request(surround, 80000, 20, stream_bitrate::audio_kbps(true, 6));
+  const auto own = pyrowave_advice::stream_link(&surround, 10);
+  EXPECT_EQ(own.fec_percentage, 20);
+  EXPECT_EQ(own.audio_kbps, 1536);
+
+  // A share of 0 is the stream's own too, not a missing one.
+  stream_bitrate::request_t no_fec;
+  stream_bitrate::split_request(no_fec, 80000, 0, stream_bitrate::audio_kbps(false, 2));
+  const auto unprotected = pyrowave_advice::stream_link(&no_fec, 10);
+  EXPECT_EQ(unprotected.fec_percentage, 0);
+  EXPECT_EQ(unprotected.audio_kbps, 192);
+}
+
+TEST(PyroWaveAdviceTests, ThePreLaunchRouteAssumesTheAskingClientsOwnAudio) {
+  // Before a launch the route assumes stereo in high quality. A client streaming here is answered for
+  // its own stream's audio, which nvhttp puts in the host it passes.
+  pyrowave_advice::route_host_t host;
+  EXPECT_EQ(host.audio_kbps, pyrowave_advice::k_default_audio_kbps);
+  EXPECT_EQ(host.audio_kbps, stream_bitrate::audio_kbps(true, 2));
+  if (!pyrowave_advice::model_available()) {
+    GTEST_SKIP() << "built without PyroWave";
+  }
+  host.built = true;
+  host.device_available = true;
+  host.fec_percentage = 10;
+  host.audio_kbps = stream_bitrate::audio_kbps(true, 6);
+  int status = 0;
+  const auto surround = pyrowave_advice::advice_reply("1920", "1080", "60", "420", host, status);
+  EXPECT_EQ(status, 200);
+  EXPECT_EQ(surround.at("assumes").at("audio_kbps"), 1536);
+  EXPECT_EQ(surround.at("assumes").at("fec_percentage"), 10);
+  const auto advice = pyrowave_advice::advise(1920, 1080, 60, false, {10, 1536}, 0);
+  EXPECT_EQ(surround.at("advice_far_kbps"), advice.advice_far_kbps);
+  // The same encoder rate asks more with 5.1 around it than with stereo.
+  EXPECT_GT(surround.at("advice_far_kbps").get<int>(), 171759);
 }

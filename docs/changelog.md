@@ -7,6 +7,22 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Session status says what a stream's bitrate request was split into, on every codec. A client
+  asks for one bitrate for the video, its FEC, the audio and the packet overhead, and the host
+  hands the encoder what is left, but only a PyroWave stream published any of those figures. While
+  a stream runs, `GET /polaris/v1/session/status` now carries `bitrate_units`: `requested_kbps`,
+  what the client asked for; `warp_factor`, `cap_kbps` and `cap_source`, what the host did to it;
+  `split_kbps`, the total it split, which is null for a watcher at its owner's rate or a client
+  that sent no bitrate; `encoder_kbps`, where that left the encoder; `live_encoder_kbps`, the rate
+  the encoder runs at after a live bitrate or Live Tuning; the `audio_kbps` and `fec_percentage`
+  that came off; and `formula`, `stream_bitrate_v1`, which turns `split_kbps` into
+  `encoder_kbps`. Capabilities announce it as `bitrate_units_v1`. A client is answered about its
+  own stream, or about the first one running when it has none here. A Space's stream carries none
+  yet. `pyrowave_bitrate.assumes` and the PyroWave Live Tuning floor now use the FEC share a
+  stream started with rather than the host's setting after a reload, and
+  `GET /polaris/v1/pyrowave/advice` answers a client that is streaming for its own stream's audio
+  and FEC, so advice asked for during a 5.1 stream asks a little more than stereo. Before a launch
+  it still assumes stereo.
 - Gamescope Stream starts on a stock gamescope again, SteamOS's included. Since 1.4.12 the nested
   session launcher and the idle compositor passed `--pipewire-composite-cursor` to gamescope on
   every launch, and only Polaris's own gamescope build has that option. SteamOS's gamescope

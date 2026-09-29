@@ -8337,6 +8337,9 @@ namespace nvhttp {
       // GET /polaris/v1/pyrowave/advice, and pyrowave_bitrate in session status while a PyroWave
       // stream runs. The route answers on every build and says so when PyroWave is not available.
       features["pyrowave_advice_v1"] = true;
+      // bitrate_units in session status for every stream, whatever its codec: what its request was
+      // split into, by the arithmetic bitrate_units.formula names.
+      features["bitrate_units_v1"] = true;
       features["ai_auto_quality_control"] = false;
       features["ai_optimizer"] = false;
       features["ai_optimizer_control"] = false;
@@ -8476,8 +8479,18 @@ namespace nvhttp {
 #ifdef POLARIS_BUILD_PYROWAVE
       host.device_available = pyrowave_encode::available();
 #endif
-      host.fec_percentage = config::stream.fec_percentage;
       host.max_bitrate_kbps = config::video.max_bitrate;
+      // A client streaming here is advised for its own stream: the audio its request was split for and
+      // the FEC share it started with, the figures its bitrate_units carry. One that is not gets the
+      // host's FEC share now and the stereo in high quality the advice assumes before a launch.
+      std::optional<stream_bitrate::request_t> own_request;
+      if (const auto timing = stream_stats::get_session_timing(named_cert_p->uuid); timing.session_active) {
+        own_request = stream_stats::recorded_stream_request(timing.session_generation);
+      }
+      const auto link = pyrowave_advice::stream_link(own_request ? &*own_request : nullptr,
+                                                     config::stream.fec_percentage);
+      host.fec_percentage = link.fec_percentage;
+      host.audio_kbps = link.audio_kbps;
       int http_status = 200;
       const auto output = pyrowave_advice::advice_reply(
         field("width"), field("height"), field("fps"), field("chroma"), host, http_status
@@ -8740,6 +8753,12 @@ namespace nvhttp {
       // is PyroWave. Every advice figure is a request, which is what a client sets.
       if (auto pyrowave_bitrate = stream_stats::pyrowave_bitrate_json(stats); !pyrowave_bitrate.is_null()) {
         output["pyrowave_bitrate"] = std::move(pyrowave_bitrate);
+      }
+      // What the stream's bitrate request was split into, for every codec: the request, the encoder
+      // rate it became and the rate the encoder runs at now, and the audio and FEC around them. The
+      // asking client's own stream when it has one here.
+      if (auto bitrate_units = stream_stats::bitrate_units_json(stats, requester_generation); !bitrate_units.is_null()) {
+        output["bitrate_units"] = std::move(bitrate_units);
       }
       const auto health = build_session_health_json(
         stats,

@@ -121,6 +121,27 @@ namespace rtsp_stream {
     return ceiling;
   }
 
+  std::int64_t bound_session_request(
+      stream_bitrate::request_t &request,
+      std::int64_t client_kbps,
+      std::size_t warp_factor,
+      const session_bitrate_ceiling_t &ceiling) {
+    request.client_kbps = client_kbps;
+    request.warp_factor = warp_factor >= 2 ?
+      static_cast<int>(std::min<std::size_t>(warp_factor, std::numeric_limits<int>::max())) : 1;
+    const auto uncapped_kbps = bound_session_bitrate(client_kbps, warp_factor, 0);
+    const auto bounded_kbps = bound_session_bitrate(client_kbps, warp_factor, ceiling.ceiling_kbps);
+    if (bounded_kbps < uncapped_kbps) {
+      request.cap_kbps = ceiling.ceiling_kbps;
+      request.cap_source = ceiling.source;
+    }
+    if (ceiling.set_aside_kbps > 0) {
+      request.set_aside_kbps = ceiling.set_aside_kbps;
+      request.set_aside_source = ceiling.set_aside_source;
+    }
+    return bounded_kbps;
+  }
+
   namespace {
     session_role_e merge_session_role(session_role_e current, bool watch_only) {
       if (current == session_role_e::controller || !watch_only) {
@@ -1767,7 +1788,6 @@ namespace rtsp_stream {
       }
 
       BOOST_LOG(info) << "Client Requested bitrate is [" << configuredBitrateKbps << "kbps]";
-      config.bitrate_request.client_kbps = configuredBitrateKbps;
 
       // A resolved launch target belongs to this RTSP session. Never publish it
       // through config::video.max_bitrate: that is the stable configured host
@@ -1786,23 +1806,19 @@ namespace rtsp_stream {
         BOOST_LOG(info) << "Warp factor [" << warp_factor << "] engaged";
       }
       const auto effective_warp_factor = config::video.limit_framerate ? warp_factor : 1;
-      const auto uncapped_bitrate_kbps = bound_session_bitrate(configuredBitrateKbps, effective_warp_factor, 0);
-      configuredBitrateKbps = bound_session_bitrate(
+      // The client's own request, the warp and the cap are recorded on the stream, so session status can
+      // say what the host did to the request on the way to the total it splits.
+      configuredBitrateKbps = bound_session_request(
+        config.bitrate_request,
         configuredBitrateKbps,
         effective_warp_factor,
-        ceiling.ceiling_kbps
+        ceiling
       );
-      if (configuredBitrateKbps < uncapped_bitrate_kbps) {
-        config.bitrate_request.cap_kbps = ceiling.ceiling_kbps;
-        config.bitrate_request.cap_source = ceiling.source;
-        if (pyrowave_request) {
-          BOOST_LOG(info) << "PyroWave: "sv << ceiling.source << " caps the client's request of "sv
-                          << config.bitrate_request.client_kbps << " kbps at "sv << ceiling.ceiling_kbps << " kbps"sv;
-        }
+      if (config.bitrate_request.cap_kbps > 0 && pyrowave_request) {
+        BOOST_LOG(info) << "PyroWave: "sv << ceiling.source << " caps the client's request of "sv
+                        << config.bitrate_request.client_kbps << " kbps at "sv << ceiling.ceiling_kbps << " kbps"sv;
       }
-      if (ceiling.set_aside_kbps > 0) {
-        config.bitrate_request.set_aside_kbps = ceiling.set_aside_kbps;
-        config.bitrate_request.set_aside_source = ceiling.set_aside_source;
+      if (config.bitrate_request.set_aside_kbps > 0) {
         BOOST_LOG(info) << "PyroWave: keeping the client's request of "sv << config.bitrate_request.client_kbps
                         << " kbps; the launch resolved "sv << ceiling.set_aside_kbps << " kbps from "sv
                         << ceiling.set_aside_source << ", sized before the codec was known, and PyroWave does not apply it"sv;
@@ -1861,23 +1877,22 @@ namespace rtsp_stream {
     // by using FEC percentage and audio quality settings. If the calculated bitrate ends up
     // too low, we'll allow it to exceed the limits rather than reducing the encoding bitrate
     // down to nearly nothing.
-    if (configuredBitrateKbps) {
+    //
+    // FEC comes off so video traffic with its FEC shards stays inside the selected bitrate,
+    // then the audio (at most a fifth), then 500 kbps of A/V packet overhead and control
+    // traffic (at most a tenth). stream_bitrate holds the arithmetic, so PyroWave's advice can
+    // say what to request for a given encoder rate using exactly these steps. The split is
+    // recorded on the stream, audio and FEC whether or not there was a request to split, and
+    // session status reports it as bitrate_units.
+    if (const auto encoderKbps = stream_bitrate::split_request(
+          config.bitrate_request,
+          configuredBitrateKbps,
+          config::stream.fec_percentage,
+          stream_bitrate::audio_kbps(config.audio.flags[audio::config_t::HIGH_QUALITY], config.audio.channels)
+        )) {
       BOOST_LOG(debug) << "Client configured bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
-
-      // FEC comes off so video traffic with its FEC shards stays inside the selected bitrate,
-      // then the audio (at most a fifth), then 500 kbps of A/V packet overhead and control
-      // traffic (at most a tenth). stream_bitrate holds the arithmetic, so PyroWave's advice can
-      // say what to request for a given encoder rate using exactly these steps.
-      const auto audioBitrateAdjustment = stream_bitrate::audio_kbps(
-        config.audio.flags[audio::config_t::HIGH_QUALITY], config.audio.channels
-      );
-      configuredBitrateKbps = stream_bitrate::encoder_kbps_for_wire(
-        configuredBitrateKbps, config::stream.fec_percentage, audioBitrateAdjustment
-      );
-      config.bitrate_request.audio_kbps = audioBitrateAdjustment;
-
-      BOOST_LOG(debug) << "Final adjusted video encoding bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
-      config.monitor.bitrate = configuredBitrateKbps;
+      BOOST_LOG(debug) << "Final adjusted video encoding bitrate is "sv << *encoderKbps << " Kbps"sv;
+      config.monitor.bitrate = static_cast<int>(*encoderKbps);
     }
 
     // IMPORTANT: do NOT call video::active_encoder_runtime_supports_config() here.
@@ -1926,9 +1941,14 @@ namespace rtsp_stream {
       return;
     }
 
-    if (session.watch_only && session.target_bitrate_kbps) {
-      config.monitor.bitrate = *session.target_bitrate_kbps;
-    }
+    // Where the handshake leaves the encoder: where the split left it, or for a watcher its owner's rate,
+    // which is no split of its own request. Recorded on the stream for session status, and the last
+    // write of the encoder rate here.
+    config.monitor.bitrate = stream_bitrate::settle_encoder(
+      config.bitrate_request,
+      config.monitor.bitrate,
+      session.watch_only ? session.target_bitrate_kbps : std::nullopt
+    );
     if (const auto mismatch = watch_profile_mismatch(session, config)) {
       BOOST_LOG(warning) << *mismatch;
       respond(sock, session, &option, 412, "Precondition Failed", req->sequenceNumber, {});

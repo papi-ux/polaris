@@ -42,6 +42,55 @@ namespace {
   }
 
   /**
+   * @brief How deep in braces `at` sits, counting from `from`.
+   *
+   * Comments, string literals, raw strings and character literals are skipped, so a brace inside one
+   * does not count. From the start of a handler lambda, a statement directly in its body is at 1.
+   */
+  int brace_depth(const std::string &source, std::size_t from, std::size_t at) {
+    int depth = 0;
+    const auto limit = std::min(at, source.size());
+    for (std::size_t i = from; i < limit; ++i) {
+      const char c = source[i];
+      const char next = i + 1 < source.size() ? source[i + 1] : '\0';
+      if (c == '/' && next == '/') {
+        i = source.find('\n', i);
+        if (i == std::string::npos) {
+          break;
+        }
+      } else if (c == '/' && next == '*') {
+        i = source.find("*/", i + 2);
+        if (i == std::string::npos) {
+          break;
+        }
+        ++i;
+      } else if (c == 'R' && next == '"' && (i == 0 || !is_identifier_char(source[i - 1]))) {
+        const auto open = source.find('(', i + 2);
+        const auto delimiter = ")" + source.substr(i + 2, open - (i + 2)) + "\"";
+        const auto close = source.find(delimiter, open);
+        if (close == std::string::npos) {
+          break;
+        }
+        i = close + delimiter.size() - 1;
+      } else if (c == '\'' && i > 0 && std::isxdigit(static_cast<unsigned char>(source[i - 1])) &&
+                 std::isxdigit(static_cast<unsigned char>(next))) {
+        // A digit separator, as in 1'000.
+      } else if (c == '"' || c == '\'') {
+        for (++i; i < source.size() && source[i] != c; ++i) {
+          if (source[i] == '\\') {
+            ++i;
+          }
+        }
+      } else if (c == '{') {
+        ++depth;
+      } else if (c == '}') {
+        --depth;
+      }
+    }
+    return depth;
+  }
+
+  /**
    * @brief The body of a C++ function, by brace matching from its signature.
    *
    * Brace matching rather than "up to the next function", because a range that
@@ -252,6 +301,70 @@ TEST(NovaContractTests, NewLibraryFeaturesAreDeclaredInCapabilities) {
     SCOPED_TRACE(flag);
     EXPECT_NE(source.find(std::string {"features[\""} + flag + "\"]"), std::string::npos);
   }
+}
+
+TEST(NovaContractTests, BitrateUnitsAreAnnouncedAndServedForEveryStream) {
+  // A client reads bitrate_units only once capabilities announce it, and reads it on every codec, so
+  // the flag and the statement that serves the object sit directly in their handler's body, under no
+  // condition of their own: no codec branch, and no other branch either.
+  const auto source = read_source_file("src/nvhttp.cpp");
+
+  const auto capabilities = source.find("auto polarisCapabilities = [");
+  ASSERT_NE(capabilities, std::string::npos);
+  const auto capabilities_end = source.find("auto polarisPyroWaveAdvice = [", capabilities);
+  const auto features = source.find("auto &features = output[\"features\"];", capabilities);
+  const auto flag = source.find("features[\"bitrate_units_v1\"] = true;", capabilities);
+  ASSERT_NE(capabilities_end, std::string::npos);
+  ASSERT_NE(features, std::string::npos);
+  ASSERT_NE(flag, std::string::npos);
+  EXPECT_LT(flag, capabilities_end);
+  EXPECT_EQ(brace_depth(source, capabilities, features), 1);
+  EXPECT_EQ(brace_depth(source, capabilities, flag), 1);
+
+  const auto status = source.find("auto polarisSessionStatus = [");
+  ASSERT_NE(status, std::string::npos);
+  const auto status_end = source.find("auto polarisStreamPolicy = [", status);
+  const auto first_statement = source.find("print_req<PolarisHTTPS>(request);", status);
+  const auto served = source.find("output[\"bitrate_units\"] = std::move(bitrate_units);", status);
+  ASSERT_NE(status_end, std::string::npos);
+  ASSERT_NE(first_statement, std::string::npos);
+  ASSERT_NE(served, std::string::npos);
+  EXPECT_LT(served, status_end);
+  const auto built = source.rfind(
+    "if (auto bitrate_units = stream_stats::bitrate_units_json(stats, requester_generation);", served
+  );
+  ASSERT_NE(built, std::string::npos);
+  EXPECT_LT(status, built);
+  EXPECT_EQ(brace_depth(source, status, first_statement), 1);
+  EXPECT_EQ(brace_depth(source, status, built), 1);
+  EXPECT_EQ(brace_depth(source, status, served), 2);
+  const auto guard = source.substr(built, served - built);
+  EXPECT_EQ(guard.find("codec"), std::string::npos) << guard;
+  EXPECT_EQ(guard.find("pyrowave"), std::string::npos) << guard;
+}
+
+TEST(NovaContractTests, PyroWaveAdviceIsGrossedUpForTheStreamsOwnLink) {
+  // The advice route and the PyroWave Live Tuning floor take the FEC share and audio from the stream's
+  // recorded handshake through stream_link, as pyrowave_bitrate does, so a config reload mid stream
+  // leaves none of them disagreeing with bitrate_units.
+  const auto nvhttp = read_source_file("src/nvhttp.cpp");
+  const auto route = nvhttp.find("auto polarisPyroWaveAdvice = [");
+  ASSERT_NE(route, std::string::npos);
+  const auto reply = nvhttp.find("pyrowave_advice::advice_reply(", route);
+  ASSERT_NE(reply, std::string::npos);
+  const auto handler = nvhttp.substr(route, reply - route);
+  EXPECT_NE(handler.find("pyrowave_advice::stream_link("), std::string::npos) << handler;
+  EXPECT_NE(handler.find("host.fec_percentage = link.fec_percentage;"), std::string::npos) << handler;
+  EXPECT_NE(handler.find("host.audio_kbps = link.audio_kbps;"), std::string::npos) << handler;
+  EXPECT_EQ(handler.find("host.fec_percentage = config::stream.fec_percentage"), std::string::npos) << handler;
+
+  const auto stream = read_source_file("src/stream.cpp");
+  const auto floor = stream.find("adaptive_bitrate::set_session_floor(advice.floor_encoder_kbps, \"pyrowave_advice\");");
+  ASSERT_NE(floor, std::string::npos);
+  const auto advise = stream.rfind("pyrowave_advice::advise(", floor);
+  ASSERT_NE(advise, std::string::npos);
+  const auto call = stream.substr(advise, floor - advise);
+  EXPECT_NE(call.find("pyrowave_advice::stream_link(&request, config::stream.fec_percentage)"), std::string::npos) << call;
 }
 
 TEST(NovaContractTests, KnownDriftNamesFieldsThatStillExist) {

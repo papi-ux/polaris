@@ -2596,10 +2596,8 @@ namespace stream_stats {
     }
 
     // Both sides as requests, so the player compares what they set with what to set.
-    const auto pyrowave_link_audio_kbps = stats.bitrate_request.audio_kbps > 0 ?
-      stats.bitrate_request.audio_kbps : pyrowave_advice::k_default_audio_kbps;
     const auto pyrowave_set_kbps = static_cast<int>(stream_bitrate::wire_kbps_for_encoder(
-      pyrowave.encoder_kbps, config::stream.fec_percentage, pyrowave_link_audio_kbps));
+      pyrowave.encoder_kbps, pyrowave.link.fec_percentage, pyrowave.link.audio_kbps));
     std::string pyrowave_summary;
     if (pyrowave.active) {
       pyrowave_summary = "PyroWave is set to about " + whole_mbps(pyrowave_set_kbps) + " where its 35 dB model advises " +
@@ -3286,6 +3284,7 @@ namespace stream_stats {
       current_stats.fec_protection = {};
       current_stats.stream_chroma.clear();
       current_stats.bitrate_request = {};
+      current_stats.bitrate_request_recorded = false;
       current_stats.pyrowave_window_frames = 0;
       current_stats.pyrowave_window_ceiling_frames = 0;
     } else {
@@ -3296,6 +3295,7 @@ namespace stream_stats {
       current_stats.fec_protection = primary.fec_protection;
       current_stats.stream_chroma = primary.stream_chroma;
       current_stats.bitrate_request = primary.bitrate_request;
+      current_stats.bitrate_request_recorded = primary.bitrate_request_recorded;
       current_stats.pyrowave_window_frames = primary.pyrowave_window_frames;
       current_stats.pyrowave_window_ceiling_frames = primary.pyrowave_window_ceiling_frames;
     }
@@ -3524,11 +3524,13 @@ namespace stream_stats {
     if (client == current_stats.clients.end()) return false;
     client->stream_chroma = yuv444 ? "444" : "420";
     client->bitrate_request = request;
+    client->bitrate_request_recorded = true;
     client->pyrowave_ceiling_batches.clear();
     client->pyrowave_window_frames = 0;
     client->pyrowave_window_ceiling_frames = 0;
     current_stats.stream_chroma = client->stream_chroma;
     current_stats.bitrate_request = request;
+    current_stats.bitrate_request_recorded = true;
     current_stats.pyrowave_window_frames = 0;
     current_stats.pyrowave_window_ceiling_frames = 0;
     return true;
@@ -3570,10 +3572,10 @@ namespace stream_stats {
     pyrowave_bitrate_t result;
     if (!stats.streaming || stats.codec != "pyrowave") return result;
     const double fps = stats.encode_target_fps > 0.0 ? stats.encode_target_fps : stats.session_target_fps;
-    const pyrowave_advice::link_t link {
-      config::stream.fec_percentage,
-      stats.bitrate_request.audio_kbps > 0 ? stats.bitrate_request.audio_kbps : pyrowave_advice::k_default_audio_kbps
-    };
+    // The FEC share and audio the stream's request was split for, as its bitrate_units say.
+    const auto link = pyrowave_advice::stream_link(
+      stats.bitrate_request_recorded ? &stats.bitrate_request : nullptr, config::stream.fec_percentage
+    );
     result.link = link;
     result.advice = pyrowave_advice::advise(
       stats.width, stats.height, static_cast<int>(std::lround(fps)), stats.stream_chroma == "444", link,
@@ -3616,6 +3618,77 @@ namespace stream_stats {
       nlohmann::json {{"kbps", request.set_aside_kbps}, {"source", request.set_aside_source}} :
       nlohmann::json(nullptr);
     return value;
+  }
+
+  nlohmann::json bitrate_units_json(const stats_t &stats, std::uint64_t requester_generation) {
+    if (!stats.streaming) {
+      return nullptr;
+    }
+    // A client with a stream here is answered about that stream alone. While the stream is not in stats,
+    // or has not recorded its handshake, it gets nothing: another stream's figures would read as its
+    // own. That covers a stream in its handshake, a reconnect overlapping the stream it replaced, and a
+    // stream torn down a moment before its session timing stops. A client with no stream here is
+    // answered about the first stream that has recorded its handshake.
+    const client_stats_t *client = nullptr;
+    if (requester_generation != 0) {
+      const auto asking = std::find_if(stats.clients.begin(), stats.clients.end(),
+        [requester_generation](const client_stats_t &candidate) {
+          return candidate.session_generation == requester_generation;
+        });
+      if (asking == stats.clients.end() || !asking->bitrate_request_recorded) {
+        return nullptr;
+      }
+      client = &*asking;
+    } else {
+      const auto first = std::find_if(stats.clients.begin(), stats.clients.end(),
+        [](const client_stats_t &candidate) {
+          return candidate.bitrate_request_recorded;
+        });
+      if (first == stats.clients.end()) {
+        return nullptr;
+      }
+      client = &*first;
+    }
+    const auto &request = client->bitrate_request;
+    // The total the formula ran on, and null for a stream whose encoder rate is no split of its own
+    // request: a client that sent no bitrate at all, or a watcher, which encodes at its owner's rate.
+    // The formula says nothing about such a stream, and the null says so.
+    const auto split_kbps = request.split_kbps > 0 ? nlohmann::json(request.split_kbps) : nlohmann::json(nullptr);
+    // The cap that cut the request, and where it came from, or null for both when none did.
+    const bool capped = request.cap_kbps > 0;
+    const auto cap_kbps = capped ? nlohmann::json(request.cap_kbps) : nlohmann::json(nullptr);
+    const auto cap_source = capped ? nlohmann::json(request.cap_source) : nlohmann::json(nullptr);
+    // What the stream's own encode loop last reported it runs at, after a live bitrate, Live Tuning or
+    // Doctor changed it. The encoder opens at the negotiated rate, which stands in until that report.
+    const int live_encoder_kbps = client->bitrate_kbps > 0 ? client->bitrate_kbps : request.encoder_kbps;
+    return {
+      {"version", 1},
+      {"requested_kbps", request.client_kbps},
+      {"warp_factor", request.warp_factor},
+      {"cap_kbps", cap_kbps},
+      {"cap_source", cap_source},
+      {"split_kbps", split_kbps},
+      {"encoder_kbps", request.encoder_kbps},
+      {"live_encoder_kbps", live_encoder_kbps},
+      {"audio_kbps", request.audio_kbps},
+      {"fec_percentage", request.fec_percentage},
+      {"formula", stream_bitrate::k_formula},
+    };
+  }
+
+  std::optional<stream_bitrate::request_t> recorded_stream_request(std::uint64_t session_generation) {
+    if (session_generation == 0) {
+      return std::nullopt;
+    }
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == current_stats.clients.end() || !client->bitrate_request_recorded) {
+      return std::nullopt;
+    }
+    return client->bitrate_request;
   }
 
   namespace {

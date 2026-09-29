@@ -7,6 +7,8 @@
 #include <src/process.h>
 #include <src/rtsp.h>
 #include <src/launch_failure.h>
+#include <src/stream_bitrate.h>
+#include <src/stream_stats.h>
 #include <src/video.h>
 #include <src/platform/linux/stream_runtime.h>
 
@@ -112,6 +114,142 @@ TEST(SessionBitrateContract, PyroWaveKeepsTheClientsRequestOverLaunchCapsSizedFo
   const auto none = rtsp_stream::session_bitrate_ceiling(180000, true, std::nullopt, "", 0);
   EXPECT_EQ(none.ceiling_kbps, 0);
   EXPECT_EQ(none.set_aside_kbps, 0);
+}
+
+TEST(SessionBitrateContract, TheHandshakeRecordsTheClientsOwnRequestAndWhatTheHostDidToIt) {
+  // A Stability preset caps an HEVC request. The client's request stays what it asked for.
+  stream_bitrate::request_t capped;
+  const auto hevc = rtsp_stream::session_bitrate_ceiling(150000, false, 40000, "stability_preset_selected", 0);
+  EXPECT_EQ(rtsp_stream::bound_session_request(capped, 150000, 1, hevc), 40000);
+  EXPECT_EQ(capped.client_kbps, 150000);
+  EXPECT_EQ(capped.warp_factor, 1);
+  EXPECT_EQ(capped.cap_kbps, 40000);
+  EXPECT_EQ(capped.cap_source, "stability_preset_selected");
+  EXPECT_EQ(capped.set_aside_kbps, 0);
+
+  // limit_framerate warps a request nothing caps.
+  stream_bitrate::request_t warped;
+  const auto open = rtsp_stream::session_bitrate_ceiling(20000, false, std::nullopt, "", 0);
+  EXPECT_EQ(rtsp_stream::bound_session_request(warped, 20000, 2, open), 40000);
+  EXPECT_EQ(warped.client_kbps, 20000);
+  EXPECT_EQ(warped.warp_factor, 2);
+  EXPECT_EQ(warped.cap_kbps, 0);
+
+  // The warp first, then max_bitrate cuts what it gave.
+  stream_bitrate::request_t both;
+  const auto host_cap = rtsp_stream::session_bitrate_ceiling(40000, false, std::nullopt, "", 100000);
+  EXPECT_EQ(rtsp_stream::bound_session_request(both, 40000, 4, host_cap), 100000);
+  EXPECT_EQ(both.client_kbps, 40000);
+  EXPECT_EQ(both.warp_factor, 4);
+  EXPECT_EQ(both.cap_kbps, 100000);
+  EXPECT_EQ(both.cap_source, "max_bitrate");
+
+  // A cap at the request cuts nothing, and a warp factor of 0 is no warp.
+  stream_bitrate::request_t under;
+  const auto at_request = rtsp_stream::session_bitrate_ceiling(30000, false, std::nullopt, "", 30000);
+  EXPECT_EQ(rtsp_stream::bound_session_request(under, 30000, 0, at_request), 30000);
+  EXPECT_EQ(under.warp_factor, 1);
+  EXPECT_EQ(under.cap_kbps, 0);
+  EXPECT_TRUE(under.cap_source.empty());
+
+  // PyroWave keeps its request over a launch cap, and records the cap as set aside.
+  stream_bitrate::request_t pyrowave;
+  const auto set_aside = rtsp_stream::session_bitrate_ceiling(180000, true, 15000, "stability_preset_selected", 0);
+  EXPECT_EQ(rtsp_stream::bound_session_request(pyrowave, 180000, 1, set_aside), 180000);
+  EXPECT_EQ(pyrowave.client_kbps, 180000);
+  EXPECT_EQ(pyrowave.cap_kbps, 0);
+  EXPECT_EQ(pyrowave.set_aside_kbps, 15000);
+  EXPECT_EQ(pyrowave.set_aside_source, "stability_preset_selected");
+}
+
+TEST(SessionBitrateContract, BitrateUnitsReportTheHandshakeAsAnnounceRecordsIt) {
+  // The steps cmd_announce takes, in its order: bound, split, settle. Then the stream's status.
+  const auto negotiate = [](std::int64_t client_kbps, std::size_t warp_factor,
+                            const rtsp_stream::session_bitrate_ceiling_t &ceiling,
+                            std::optional<int> owner_kbps) {
+    stream_bitrate::request_t request;
+    const auto total = rtsp_stream::bound_session_request(request, client_kbps, warp_factor, ceiling);
+    int monitor_kbps = 0;
+    if (const auto encoder = stream_bitrate::split_request(request, total, 10, stream_bitrate::audio_kbps(true, 2))) {
+      monitor_kbps = static_cast<int>(*encoder);
+    }
+    stream_bitrate::settle_encoder(request, monitor_kbps, owner_kbps);
+    stream_stats::client_stats_t client;
+    client.session_generation = 31;
+    client.bitrate_request = request;
+    client.bitrate_request_recorded = true;
+    stream_stats::stats_t stats {};
+    stats.streaming = true;
+    stats.clients = {client};
+    return stream_stats::bitrate_units_json(stats, 31);
+  };
+
+  const auto capped = negotiate(
+    150000, 1, rtsp_stream::session_bitrate_ceiling(150000, false, 40000, "stability_preset_selected", 0), std::nullopt
+  );
+  EXPECT_EQ(capped.at("requested_kbps"), 150000);
+  EXPECT_EQ(capped.at("warp_factor"), 1);
+  EXPECT_EQ(capped.at("cap_kbps"), 40000);
+  EXPECT_EQ(capped.at("cap_source"), "stability_preset_selected");
+  EXPECT_EQ(capped.at("split_kbps"), 40000);
+  EXPECT_EQ(capped.at("encoder_kbps"), stream_bitrate::encoder_kbps_for_wire(40000, 10, 512));
+
+  const auto warped = negotiate(
+    20000, 2, rtsp_stream::session_bitrate_ceiling(20000, false, std::nullopt, "", 0), std::nullopt
+  );
+  EXPECT_EQ(warped.at("requested_kbps"), 20000);
+  EXPECT_EQ(warped.at("warp_factor"), 2);
+  EXPECT_TRUE(warped.at("cap_kbps").is_null());
+  EXPECT_EQ(warped.at("split_kbps"), 40000);
+  EXPECT_EQ(warped.at("encoder_kbps"), stream_bitrate::encoder_kbps_for_wire(40000, 10, 512));
+
+  const auto watcher = negotiate(
+    50000, 1, rtsp_stream::session_bitrate_ceiling(50000, false, std::nullopt, "", 0), 20000
+  );
+  EXPECT_EQ(watcher.at("requested_kbps"), 50000);
+  EXPECT_TRUE(watcher.at("split_kbps").is_null());
+  EXPECT_EQ(watcher.at("encoder_kbps"), 20000);
+}
+
+TEST(SessionBitrateContract, AnnounceBoundsSplitsAndSettlesTheRequestInThatOrder) {
+  // cmd_announce records a stream's bitrate_units through three steps. The last is the last write of
+  // the encoder rate and a watcher's owner's rate goes through it, so encoder_kbps is the rate the
+  // stream starts at, and a watcher's split is cleared.
+  const auto source = read_rtsp_source_for_contract();
+  const auto start = source.find("void cmd_announce(");
+  const auto end = source.find("void cmd_play(", start);
+  ASSERT_NE(start, std::string::npos);
+  ASSERT_NE(end, std::string::npos);
+  const auto body = source.substr(start, end - start);
+  const std::string bound_call = "configuredBitrateKbps = bound_session_request(";
+  const std::string split_call = "stream_bitrate::split_request(";
+  const std::string settle_call = "config.monitor.bitrate = stream_bitrate::settle_encoder(";
+  const auto bound = body.find(bound_call);
+  const auto split = body.find(split_call);
+  const auto settle = body.find(settle_call);
+  const auto mismatch = body.find("watch_profile_mismatch(session, config)");
+  ASSERT_NE(bound, std::string::npos);
+  ASSERT_NE(split, std::string::npos);
+  ASSERT_NE(settle, std::string::npos);
+  ASSERT_NE(mismatch, std::string::npos);
+  EXPECT_LT(bound, split);
+  EXPECT_LT(split, settle);
+  EXPECT_LT(settle, mismatch);
+  const auto owner = body.find("session.watch_only ? session.target_bitrate_kbps : std::nullopt", settle);
+  ASSERT_NE(owner, std::string::npos);
+  EXPECT_LT(owner, mismatch);
+  EXPECT_EQ(body.find("bound_session_request(", bound + bound_call.size()), std::string::npos);
+  EXPECT_EQ(body.find("split_request(", split + split_call.size()), std::string::npos);
+  EXPECT_EQ(body.find("settle_encoder(", settle + settle_call.size()), std::string::npos);
+  // Nothing moves the encoder rate after the settle, and the split and encoder rate are recorded only
+  // through these steps.
+  for (auto write = body.find("config.monitor.bitrate ="); write != std::string::npos;
+       write = body.find("config.monitor.bitrate =", write + 1)) {
+    EXPECT_LE(write, settle);
+  }
+  EXPECT_EQ(body.find("bitrate_request.split_kbps"), std::string::npos);
+  EXPECT_EQ(body.find("bitrate_request.encoder_kbps"), std::string::npos);
+  EXPECT_EQ(body.find("bitrate_request.client_kbps ="), std::string::npos);
 }
 
 TEST(ProcessRefreshContractTests, ParsedConfigurationPreservesLifecycleIdentityAndGeneration) {

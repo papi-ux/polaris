@@ -3260,7 +3260,7 @@ namespace stream {
           session.config.monitor.height,
           static_cast<int>(std::lround(av_q2d(video::encoding_framerate_to_rational(session.config.monitor)))),
           session.config.monitor.chromaSamplingType == 1,
-          {config::stream.fec_percentage, request.audio_kbps > 0 ? request.audio_kbps : pyrowave_advice::k_default_audio_kbps},
+          pyrowave_advice::stream_link(&request, config::stream.fec_percentage),
           config::video.max_bitrate
         );
         if (advice.valid) {
