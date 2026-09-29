@@ -17,6 +17,14 @@ until the stream ends, the next stream starts with the saved preference, and
 switching tuning on during the stream resumes it. Auto, Quality, High FPS, and Stability launch presets still
 apply at the next explicit launch.
 
+Doctor's one step down for sustained video frame loss turns tuning off the same way
+while tuning is on: for that stream only, with nothing saved. Tuning comes back on,
+with the bitrate from before the step, when you undo the step, when the step fails
+Doctor's check, or when you switch tuning on. Otherwise it stays off until the stream
+ends, and the next stream starts with the saved preference. Round trip time alone
+stays with tuning, and Doctor only rechecks it
+([Doctor](doctor.md#pick-the-offered-action)).
+
 ## Range
 
 Live Tuning lowers the bitrate on measured loss, latency or encoder load, and recovers

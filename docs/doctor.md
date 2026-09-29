@@ -238,6 +238,16 @@ Doctor uses a small action vocabulary so the button says what will happen:
 - **Manual** explains the next check when Polaris cannot safely act for you.
 - **Undo** restores the previous live bitrate while the same stream generation still owns it.
 
+With Live Tuning on, Doctor leaves round trip time to Live Tuning and offers only **Recheck** for it.
+For sustained video frame loss it offers **Auto Fix**, one step down. Taking that step turns Live
+Tuning off for that stream, as a live bitrate you set yourself does, and saves nothing. Undoing the
+step, a step that fails its check and rolls back, or turning Live Tuning back on puts back the
+bitrate from before the step and turns Live Tuning on again. Otherwise Live Tuning stays off until
+the stream ends, and the next stream starts with your saved preference. Pressing **Auto Fix** again
+while the step holds takes no second step: Doctor says the step still holds and how to undo it. Once
+the network is clean with the step still holding, Doctor offers the step's **Undo** instead of
+raising the bitrate itself.
+
 A change that needs a new stream is not an Auto Fix. Fresh-launch experiments are a separate future
 **Run a trial** workflow and are not enabled in this release.
 

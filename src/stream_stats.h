@@ -499,6 +499,10 @@ namespace stream_stats {
     bool adaptive_runtime_update_supported = false;
     /// True only while one uncontaminated stream generation owns the global actuator.
     bool doctor_live_action_scope_available = true;
+    /// The run of Doctor's loss step that turned Live Tuning off for this stream, while the step still
+    /// holds for Undo, or empty. Doctor offers that Undo in place of a quality restore the step's run
+    /// would refuse.
+    std::string doctor_live_tuning_step_run_id;
     /// Live Tuning's floor for this stream, and what set it: adaptive_bitrate_min or pyrowave_advice.
     int adaptive_min_bitrate_kbps = 0;
     std::string adaptive_floor_source;
@@ -1071,6 +1075,14 @@ namespace stream_stats {
 
   /** Publish whether a sole stream generation safely owns Doctor's global actuator. */
   void set_doctor_live_action_scope_available(bool available);
+
+  /**
+   * Publish Doctor's loss step that turned Live Tuning off for this stream: its run, and the controller
+   * revision the step holds. get_current() reports the run as doctor_live_tuning_step_run_id only while
+   * the controller is still at that revision, so Undo, a rollback, the end of the stream or any newer
+   * writer retires it. An empty run clears it.
+   */
+  void set_doctor_live_tuning_step(std::string run_id, std::uint64_t controller_revision);
 
   /**
    * @brief Host-received primary network observations covering one Doctor

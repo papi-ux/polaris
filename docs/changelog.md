@@ -8,13 +8,17 @@ starts at `v1.0.0`.
 ## Unreleased
 
 - With Live Tuning on, Doctor offers to lower the bitrate for sustained video frame loss. It left all
-  network pressure to Live Tuning and offered only a recheck, though Live Tuning, which counts ten
-  control pings a second as clean readings in its loss average, seldom cuts for a few percent of
-  lost frames: a 7.4% report from the Retroid Pocket 6's HEVC run is under its 1% line within three
-  readings. Doctor now offers one step with Undo, verified like any other. Taking it turns Live Tuning
-  off for this stream only, as a live bitrate set by hand does, and Undo, or a step that does not
-  verify, puts the bitrate back and turns Live Tuning on again. Round trip time alone stays Live
-  Tuning's to cut for, and Doctor only rechecks it.
+  network pressure to Live Tuning and offered only a recheck. Doctor now offers one step with Undo,
+  verified like any other. Taking it turns Live Tuning off for this stream only, as a live bitrate
+  set by hand does, and never writes the saved preference. Undo, a step that does not verify, or
+  turning Live Tuning back on puts back the bitrate from before the step and turns Live Tuning on
+  again, and the step's receipt says so. Otherwise Live Tuning stays off until the stream ends, and
+  the next stream starts with it on. While the step holds, pressing Auto Fix again takes no second
+  step and says why, and once the network is clean Doctor offers the step's Undo instead of a
+  quality restore the step would refuse. If a network report reaches the controller just as Doctor
+  takes the step, Doctor takes none, turns Live Tuning back on and says so. Round trip time alone
+  stays Live Tuning's to cut for, and Doctor only rechecks it, saying what Live Tuning's own rule
+  does rather than promising a cut.
 
 - The Dashboard quotes the loss Doctor judges as well. Its Loss tile, the tile's colour, the quality
   grade and the loss chart read the newest one second report, and so did the stream's client line
@@ -87,9 +91,13 @@ starts at `v1.0.0`.
   only while the window still holds the reports it was judged on: a session whose reports stopped
   more than 20 seconds before it ended is graded on no loss, as the host grades it.
 
-- Live Tuning's loss handling is unchanged in this release. It still hears every control ping as a
-  reading with no loss, about ten a second, and each client media report with its own loss, and acts
-  on its own average of those. The tuning block now carries Doctor's figure as `network_loss_pct`
+- Live Tuning's loss handling is 1.4.13's, unchanged in this release. It still hears every control
+  ping as a reading with no loss, about ten a second, and each client media report with its own
+  loss, and acts once a second on its own average of those. Whether a report with a few percent of
+  lost frames cuts the bitrate depends on when it lands in that second, so the Retroid Pocket 6's
+  HEVC run, a 7.4% report every 3 to 5 seconds, can still be cut for its loss. While those reports
+  keep coming Live Tuning does not climb back, because any report with lost frames restarts the 10
+  seconds it waits before a step up. The tuning block now carries Doctor's figure as `network_loss_pct`
   beside `adaptive_packet_loss_ewma`, Live Tuning's own average, and the console's Live Tuning row
   shows Doctor's. The row read the controller's average, already a percentage, as a fraction, so
   0.078% showed as 7.8%.
