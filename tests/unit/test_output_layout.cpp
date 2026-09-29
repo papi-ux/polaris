@@ -6,13 +6,17 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <span>
 
 #include "src/platform/linux/output_layout.h"
 
 namespace {
   using output_layout::bounds;
+  using output_layout::crtc_input_rect;
+  using output_layout::crtc_output_t;
   using output_layout::logical_rect;
+  using output_layout::measure_crtc_desktop;
   using output_layout::on_desktop;
   using output_layout::output_t;
   using output_layout::rect_t;
@@ -142,4 +146,76 @@ TEST(OutputLayout, AnOutputWithNoAreaHoldsNothing) {
 
   EXPECT_EQ(bounds(outputs), (rect_t {0, 0, 2560, 1440}));
   EXPECT_EQ(bounds(std::span<const rect_t> {}), (rect_t {}));
+}
+
+// KMS capture on the reporter's desktop: Wayland matched an output to both CRTCs, so the desktop
+// is measured the way Wayland lays it out, and the main monitor sits at its corner.
+TEST(OutputLayout, KmsDesktopIsWaylandsWhenEveryCrtcHasAnOutput) {
+  const std::array crtcs {
+    crtc_output_t {{0, 0, 2560, 1440}, described(0, 0, 2560, 1440, 2560, 1440)},
+    crtc_output_t {{2560, 0, 1920, 1080}, described(2560, 0, 1080, 1920, 1920, 1080, transform::turned_90)},
+  };
+
+  const auto desktop = measure_crtc_desktop(crtcs);
+  EXPECT_TRUE(desktop.by_wayland);
+  EXPECT_EQ(desktop.rect, (rect_t {0, 0, 3640, 1920}));
+  EXPECT_EQ(crtc_input_rect(crtcs[0], desktop), (rect_t {0, 0, 2560, 1440}));
+}
+
+// One CRTC without a Wayland output keeps the whole desktop in CRTC rectangles, as KMS capture has
+// always measured it. A scale 2 monitor's logical rectangle beside another CRTC's mode made a
+// desktop of two units, 2560x1440, and the pointer reached three quarters of the monitor each way.
+TEST(OutputLayout, OneCrtcWithoutAnOutputKeepsTheDesktopInCrtcRectangles) {
+  const std::array crtcs {
+    crtc_output_t {{0, 0, 3840, 2160}, described(0, 0, 1920, 1080, 3840, 2160, transform::normal, 2)},
+    crtc_output_t {{0, 0, 2560, 1440}, std::nullopt},
+  };
+
+  const auto desktop = measure_crtc_desktop(crtcs);
+  EXPECT_FALSE(desktop.by_wayland);
+  EXPECT_EQ(desktop.rect, (rect_t {0, 0, 3840, 2160}));
+  // No size of its own: input maps onto the 3840x2160 frame across a 3840x2160 desktop.
+  EXPECT_EQ(crtc_input_rect(crtcs[0], desktop), (rect_t {0, 0, 0, 0}));
+}
+
+// A CRTC a plane scans out of that no connector names has no Wayland output either, and no place
+// on the desktop.
+TEST(OutputLayout, AnUnnamedCrtcKeepsCrtcRectanglesAndTakesNoRoom) {
+  const std::array crtcs {
+    crtc_output_t {{0, 0, 3840, 2160}, described(0, 0, 1920, 1080, 3840, 2160, transform::normal, 2)},
+    crtc_output_t {},
+  };
+
+  const auto desktop = measure_crtc_desktop(crtcs);
+  EXPECT_FALSE(desktop.by_wayland);
+  EXPECT_EQ(desktop.rect, (rect_t {0, 0, 3840, 2160}));
+}
+
+// Without Wayland, on X11, every CRTC keeps its own place and mode, as it always did.
+TEST(OutputLayout, KmsDesktopWithoutWaylandIsTheCrtcs) {
+  const std::array crtcs {
+    crtc_output_t {{0, 0, 2560, 1440}, std::nullopt},
+    crtc_output_t {{2560, 0, 1920, 1080}, std::nullopt},
+  };
+
+  const auto desktop = measure_crtc_desktop(crtcs);
+  EXPECT_FALSE(desktop.by_wayland);
+  EXPECT_EQ(desktop.rect, (rect_t {0, 0, 4480, 1440}));
+  EXPECT_EQ(crtc_input_rect(crtcs[1], desktop), (rect_t {2560, 0, 0, 0}));
+  EXPECT_FALSE(measure_crtc_desktop(std::span<const crtc_output_t> {}).by_wayland);
+}
+
+// A CRTC capture could not tie to a monitor has only its own place, and counts from the desktop's
+// corner like every other CRTC. Here a monitor left of the origin puts the corner at -1920.
+TEST(OutputLayout, AnUntiedCrtcCountsFromTheDesktopsCorner) {
+  const std::array crtcs {
+    crtc_output_t {{-1920, 0, 1920, 1080}, described(-1920, 0, 1920, 1080, 1920, 1080)},
+    crtc_output_t {{0, 0, 2560, 1440}, std::nullopt},
+  };
+
+  const auto desktop = measure_crtc_desktop(crtcs);
+  EXPECT_EQ(desktop.rect, (rect_t {-1920, 0, 4480, 1440}));
+
+  const crtc_output_t untied {{0, 0, 2560, 1440}, std::nullopt};
+  EXPECT_EQ(crtc_input_rect(untied, desktop), (rect_t {1920, 0, 0, 0}));
 }

@@ -11,9 +11,11 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <ostream>
 #include <span>
 #include <utility>
+#include <vector>
 
 namespace output_layout {
   /**
@@ -135,5 +137,60 @@ namespace output_layout {
    */
   constexpr rect_t on_desktop(const rect_t &output, const rect_t &desktop) {
     return {output.x - desktop.x, output.y - desktop.y, output.width, output.height};
+  }
+
+  /**
+   * @brief One active CRTC as KMS capture finds it, with the Wayland output on its connector.
+   */
+  struct crtc_output_t {
+    /// The CRTC's mode, placed at Wayland's position for its output when one matched and at the
+    /// CRTC's own otherwise. Empty for a CRTC no connector named, which has no place on the desktop.
+    rect_t crtc;
+    /// What Wayland said about the output on this CRTC's connector, when one matched it.
+    std::optional<output_t> wayland;
+  };
+
+  /**
+   * @brief The desktop KMS capture places absolute input on.
+   */
+  struct crtc_desktop_t {
+    /// Every active CRTC together.
+    rect_t rect;
+    /// Measured by Wayland's rectangles. Otherwise by each CRTC's, which is what KMS capture always
+    /// measured by.
+    bool by_wayland = false;
+  };
+
+  /**
+   * @brief The desktop the active CRTCs make together.
+   *
+   * Wayland's rectangles are turned and scaled and a CRTC's mode is not, so the two never share a
+   * desktop. Wayland's are taken only when Wayland matched an output to every active CRTC; one CRTC
+   * without keeps the whole desktop in CRTC rectangles, where a rotated or scaled monitor is
+   * measured wrong but every monitor is measured the same way.
+   */
+  inline crtc_desktop_t measure_crtc_desktop(std::span<const crtc_output_t> crtcs) {
+    const bool by_wayland = !crtcs.empty() && std::ranges::all_of(crtcs, [](const crtc_output_t &crtc) {
+                              return crtc.wayland.has_value();
+                            });
+
+    std::vector<rect_t> rects;
+    rects.reserve(crtcs.size());
+    for (const auto &crtc : crtcs) {
+      rects.emplace_back(by_wayland ? logical_rect(*crtc.wayland) : crtc.crtc);
+    }
+    return {bounds(rects), by_wayland};
+  }
+
+  /**
+   * @brief Where absolute input places a KMS capture of one CRTC, counted from the desktop's corner
+   *        like every other. On a desktop of CRTC rectangles the size stays zero, so input maps
+   *        onto the frame, as it always did there.
+   */
+  constexpr rect_t crtc_input_rect(const crtc_output_t &crtc, const crtc_desktop_t &desktop) {
+    if (desktop.by_wayland && crtc.wayland) {
+      return on_desktop(logical_rect(*crtc.wayland), desktop.rect);
+    }
+    return {crtc.crtc.x - desktop.rect.x, crtc.crtc.y - desktop.rect.y, 0, 0};
   }
 }  // namespace output_layout
