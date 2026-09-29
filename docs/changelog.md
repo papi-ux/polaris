@@ -7,6 +7,15 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- With Live Tuning on, Doctor offers to lower the bitrate for sustained video frame loss. It left all
+  network pressure to Live Tuning and offered only a recheck, though Live Tuning, which counts ten
+  control pings a second as clean readings in its loss average, seldom cuts for a few percent of
+  lost frames: a 7.4% report from the Retroid Pocket 6's HEVC run is under its 1% line within three
+  readings. Doctor now offers one step with Undo, verified like any other. Taking it turns Live Tuning
+  off for this stream only, as a live bitrate set by hand does, and Undo, or a step that does not
+  verify, puts the bitrate back and turns Live Tuning on again. Round trip time alone stays Live
+  Tuning's to cut for, and Doctor only rechecks it.
+
 - The Dashboard quotes the loss Doctor judges as well. Its Loss tile, the tile's colour, the quality
   grade and the loss chart read the newest one second report, and so did the stream's client line
   once the host began filling it, so on the Retroid Pocket 6's HEVC run they swung between 0% and
@@ -22,7 +31,7 @@ starts at `v1.0.0`.
   at 120 fps in 4:4:4 set to 320 Mbps by hand: a cut read as a reduction Doctor's restore would
   undo, and frames held to the cut's smaller byte budget filled it more often, so the finding came
   and went with every cut. A cut no longer counts as such a reduction, and the share of frames at
-  the byte budget leaves out the frames sent while Live Tuning holds the stream below its set rate.
+  the byte budget leaves out frames sent while Live Tuning has cut the stream below its set rate.
   The session status's `pyrowave_bitrate.starved`, which the console's PyroWave readout words, judges
   the set rate as Doctor does, where it came and went with the same cuts beside a headline that held.
   Whether Live Tuning sits at its PyroWave floor still reads the live rate.
@@ -78,54 +87,12 @@ starts at `v1.0.0`.
   only while the window still holds the reports it was judged on: a session whose reports stopped
   more than 20 seconds before it ended is graded on no loss, as the host grades it.
 
-- Live Tuning acts on loss when Doctor does. Every control ping reached it as a second of clean
-  video, ten a second, so a report that lost 7% of its frames faded to a few hundredths of a percent
-  before Live Tuning looked, and on the HEVC run it cut for RTT spikes while its own loss average
-  read 0.08%. Pings now bring it RTT alone, and each client media report brings its own loss while
-  the verdict calls loss pressure and none while it does not, so Live Tuning cuts for loss once
-  Doctor calls it pressure and not before, and stops within seconds of clean reports instead of
-  cutting on for most of the 20 seconds the verdict takes to clear. Only a report acts on loss or
-  moves a test of a rate. Once the newest report is more than five seconds old, when Doctor calls
-  the loss stale, Live Tuning stops acting on it too. For up to 30 seconds without a report it holds
-  the rate and what its tests found, pings act on RTT spikes alone, and a step up still being judged
-  goes back, as a failed one does. After 30 seconds it lets its average fall and brings the bitrate
-  back. Replayed on a 269 Mbps stream settled at 98 under a link that shrank to 100, a pause of 6 or
-  12 seconds sent it over the link, blind, at 8% a second, as high as 197 Mbps, and 29 to 35 more
-  seconds went over the link than with no pause. Now no second of the pause climbs, and no more
-  seconds go over the link than with no pause. The tuning block carries Doctor's figure as
-  `network_loss_pct`, beside `adaptive_packet_loss_ewma`, Live Tuning's own average of the reports
-  it hears, and the console's Live Tuning row shows Doctor's. The row read the controller's
-  average, already a percentage, as a fraction, so 0.078% showed as 7.8%.
-
-- Live Tuning tests the rates below half the bitrate before it goes lower. Heavy loss, over 5%, and
-  RTT spikes still cut at once, down to the floor. Loss of 5% or less cuts no lower than half the
-  stream's bitrate, the hold, and each rate below it is judged after 8 seconds and 5 reports, each
-  report's own loss. Steady loss at the hold, in at least 75% of its reports, starts a probe that
-  halves the rate after each of those dwells. A step helps when the mean loss or the share of lossy
-  reports falls by at least a third against the rate above it. The probe keeps halving while the
-  loss stays steady or keeps falling, and stops at the first rate whose loss is gone, a mean under
-  1% with under a quarter of the reports lossy, or at the configured minimum. Where the loss fell to
-  a background every rate has and the next step did not lower it, the rate where it fell is the one
-  found. Where no step lowered the loss, it does not depend on the rate: Live Tuning goes back to the
-  hold and starts no other probe for 5 minutes this session. Loss that comes and goes at the hold
-  starts no probe. Then Live Tuning climbs back by tested steps from a found rate or the hold: +8%
-  after each dwell, doubling the step (8, 16, 32%) while each step stays clean, capped at the base;
-  a step is kept unless loss rises above max(1.5 x the held level, held level + 1 point); a failed
-  step reverts and backs off (30 s doubling to 120 s) before trying again. The held level is the
-  loss at the rate the climb started from, a clean step is a kept one whose loss did not rise above
-  it, and heavy loss fails a step at once. Loss within that bound holds the rate instead of cutting
-  it, and Live Tuning says `packet_loss_holding`. Replayed at 269 Mbps without the hold, the HEVC
-  run's 2% in bursts took Live Tuning to 4 Mbps within a minute. Its loss is in 2 of every 8
-  reports, so it starts no probe: Live Tuning holds it at half for 8 seconds and is back at 269
-  within 50 seconds of the start. A link that shrinks to 100 Mbps, losing 5% of its frames above
-  it, settles at 98, one that shrinks to 50 Mbps at 49, and one that also loses a frame in 120 at
-  every rate below it at 98, each going over the link only for a step's 8 seconds, 30 seconds apart
-  or more. Steady 2.5% at every rate is probed down to the 2 Mbps minimum once, in about a minute,
-  and the stream is back at 269 half a minute after that. A link that recovers is found by the next
-  step up: a stream whose climb steps over the old link just as it recovers is back at its base
-  within 40 seconds, but that step can come as late as 120 seconds after a failed one, so across
-  recovery moments ten seconds apart the stream took from 22 to 155 seconds to get back, 57 at the
-  median.
+- Live Tuning's loss handling is unchanged in this release. It still hears every control ping as a
+  reading with no loss, about ten a second, and each client media report with its own loss, and acts
+  on its own average of those. The tuning block now carries Doctor's figure as `network_loss_pct`
+  beside `adaptive_packet_loss_ewma`, Live Tuning's own average, and the console's Live Tuning row
+  shows Doctor's. The row read the controller's average, already a percentage, as a fraction, so
+  0.078% showed as 7.8%.
 
 - Doctor grades the network from that verdict. Its headline, the evidence it cites, the Auto Fix it
   offers and the session status's `network_risk` all read the same 20 second judgement, so one
