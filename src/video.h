@@ -116,7 +116,8 @@ namespace video {
    * A capture that fits a screen of another shape into its frame, which is Game Mode's, has input
    * placed inside the picture. Every other capture has it placed on the captured screen's
    * rectangle on the desktop: in desktop pixels for wlroots and KMS capture on Wayland, and the
-   * frame itself for the rest.
+   * frame itself for the rest, a monitor those two turn a quarter included. A capture whose points
+   * count from the desktop's corner has its place left out.
    * @param display The capture.
    * @param config The session, for the size the client streams at.
    * @return The touch port.

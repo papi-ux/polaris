@@ -760,15 +760,22 @@ namespace platf {
     // onto the frame, which is right wherever the two sizes are the same.
     int input_width = 0, input_height = 0;
 
+    // Whether absolute input counts each point from the captured screen's corner, offset_x and
+    // offset_y. wlroots and KMS capture clear it for a monitor turned a quarter, which keeps the
+    // input 1.4.13 gave it: offset_x and offset_y as they were, and every point counted from the
+    // desktop's corner, as Linux had it then.
+    bool input_counts_from_screen = true;
+
     /**
      * @brief The captured screen's place and size on the desktop, which absolute input maps onto.
-     *        The frame stays in output pixels for capture and encode.
+     *        The frame stays in output pixels for capture and encode. A capture whose points count
+     *        from the desktop's corner has its place left out.
      */
     touch_port_t screen_on_desktop() const {
       const bool sized = input_width > 0 && input_height > 0;
       return {
-        offset_x,
-        offset_y,
+        input_counts_from_screen ? offset_x : 0,
+        input_counts_from_screen ? offset_y : 0,
         sized ? input_width : width,
         sized ? input_height : height,
       };

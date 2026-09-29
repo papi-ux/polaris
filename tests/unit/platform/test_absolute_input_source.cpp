@@ -85,24 +85,33 @@ TEST(AbsoluteInputSource, LinuxAbsMouseAddsTheScreensPlaceOnTheDesktop) {
     << "abs_mouse() hands the backends the point on the captured screen again";
 }
 
-// KMS capture places the CRTC it streams through crtc_input_rect() on either branch, including the
-// one for a CRTC it could not tie to a monitor, and takes the desktop's size from the same place.
-TEST(AbsoluteInputSource, KmsPlacesTheStreamedCrtcThroughCrtcInputRect) {
+// KMS capture places the CRTC it streams through crtc_input_placement() on either branch, including
+// the one for a CRTC it could not tie to a monitor, and takes the extents and whether points count
+// from the screen's corner from the same place, so a turned monitor keeps 1.4.13's input.
+TEST(AbsoluteInputSource, KmsPlacesTheStreamedCrtcThroughCrtcInputPlacement) {
   const auto source = read_source("src/platform/linux/kmsgrab.cpp");
   ASSERT_FALSE(source.empty()) << "could not read kmsgrab.cpp via POLARIS_SOURCE_DIR";
 
   const auto placement = between(source, "Found monitor for DRM screencasting", "plane_id = plane->plane_id;");
   ASSERT_FALSE(placement.empty()) << "the KMS capture's placement moved";
 
-  EXPECT_TRUE(has(placement, "this->env_width = ::platf::kms::desktop.rect.width;"));
-  EXPECT_TRUE(has(placement, "this->env_height = ::platf::kms::desktop.rect.height;"));
   EXPECT_TRUE(has(placement, "streamed = kms::crtc_output(monitor->second);"))
     << "a CRTC tied to a monitor is no longer placed by what the desktop measured it by";
-  EXPECT_TRUE(has(placement, "const auto screen = output_layout::crtc_input_rect(streamed, kms::desktop, width, height);"))
-    << "KMS capture no longer places the streamed CRTC through crtc_input_rect()";
-  for (const auto *field : {"offset_x = screen.x;", "offset_y = screen.y;", "input_width = screen.width;", "input_height = screen.height;"}) {
+  EXPECT_TRUE(has(placement, "const auto placement = output_layout::crtc_input_placement(streamed, kms::desktop);"))
+    << "KMS capture no longer places the streamed CRTC through crtc_input_placement()";
+  for (const auto *field : {
+         "offset_x = placement.screen.x;",
+         "offset_y = placement.screen.y;",
+         "input_width = placement.screen.width;",
+         "input_height = placement.screen.height;",
+         "input_counts_from_screen = placement.counts_from_screen;",
+         "this->env_width = placement.extents.width;",
+         "this->env_height = placement.extents.height;",
+       }) {
     EXPECT_TRUE(has(placement, field)) << "KMS capture no longer sets " << field;
   }
+  EXPECT_FALSE(has(placement, "kms::desktop.rect.width"))
+    << "KMS capture takes the extents from the desktop by hand again, where a turned monitor keeps 1.4.13's";
   // The leading space keeps img_offset_x, the crop into the framebuffer, out of it.
   EXPECT_FALSE(has(placement, " offset_x = crtc->x"))
     << "the branch for an untied CRTC counts its offset from zero again, not from the desktop's corner";
@@ -127,6 +136,48 @@ TEST(AbsoluteInputSource, KmsMeasuresTheDesktopThroughMeasureCrtcDesktop) {
     << "the unnamed CRTCs no longer keep the desktop in CRTC rectangles";
   EXPECT_TRUE(has(names, "kms::desktop = output_layout::measure_crtc_desktop(active_crtcs);"))
     << "KMS capture no longer measures the desktop through measure_crtc_desktop()";
+
+  // 1.4.13 measured by every connector's viewport, a plane scanning out to it or not, so the
+  // extents a turned monitor keeps are taken before the connectors with no plane are skipped.
+  const auto enumerated = names.find("enumerated.emplace_back(kms::crtc_output(monitor_descriptor).crtc);");
+  const auto skipped = names.find("// A connector no plane scans out to is not on the desktop.");
+  ASSERT_NE(enumerated, std::string::npos) << "KMS capture no longer keeps every connector for 1.4.13's extents";
+  ASSERT_NE(skipped, std::string::npos) << "the skip for connectors with no plane moved";
+  EXPECT_LT(enumerated, skipped) << "1.4.13's extents leave out the connectors with no plane, which it counted";
+  EXPECT_TRUE(has(names, "kms::desktop.mode_extents = output_layout::mode_extents(enumerated);"))
+    << "KMS capture no longer measures 1.4.13's extents for a turned monitor";
   EXPECT_FALSE(has(names, "output_layout::bounds("))
     << "KMS capture measures the desktop by hand again, where Wayland and CRTC rectangles can mix";
+}
+
+// Wayland's layout reaches KMS capture in two places: correlate_to_wayland() keeps the output
+// Wayland matched to each connector, and kms::crtc_output() carries it into the desktop and the
+// placement. The layout tests build crtc_output_t by hand, so without these a KMS capture that lost
+// either line would measure every desktop by CRTC rectangles again and never see a turned monitor,
+// with every test still green.
+TEST(AbsoluteInputSource, KmsTakesWaylandsOutputForEachConnector) {
+  const auto source = read_source("src/platform/linux/kmsgrab.cpp");
+  ASSERT_FALSE(source.empty()) << "could not read kmsgrab.cpp via POLARIS_SOURCE_DIR";
+
+  const auto correlate = between(source, "void correlate_to_wayland(std::vector<kms::card_descriptor_t> &cds) {", "std::vector<std::string> kms_display_names(");
+  ASSERT_FALSE(correlate.empty()) << "correlate_to_wayland() or the kms_display_names() after it was renamed";
+
+  // Kept for the connector Wayland's name matched, before the loop moves on to the next output.
+  const auto matched = correlate.find("if (monitor_descriptor.index == index && monitor_descriptor.type == type) {");
+  const auto kept = correlate.find("monitor_descriptor.wayland = monitor->layout;");
+  const auto next = correlate.find("goto break_for_loop;");
+  ASSERT_NE(matched, std::string::npos) << "correlate_to_wayland() no longer matches a connector by Wayland's name";
+  ASSERT_NE(kept, std::string::npos) << "correlate_to_wayland() no longer keeps Wayland's output for the connector it matched";
+  ASSERT_NE(next, std::string::npos) << "correlate_to_wayland()'s match loop changed shape";
+  EXPECT_LT(matched, kept);
+  EXPECT_LT(kept, next) << "Wayland's output is kept somewhere other than for the connector just matched";
+  EXPECT_TRUE(has(correlate, "if (!monitor->logical_rect().empty()) {"))
+    << "an output Wayland has not placed yet would be taken as covering nothing";
+
+  const auto crtc_output = between(source, "output_layout::crtc_output_t crtc_output(const monitor_t &monitor) {", "struct card_descriptor_t {");
+  ASSERT_FALSE(crtc_output.empty()) << "kms::crtc_output() or the card_descriptor_t after it moved";
+  EXPECT_TRUE(has(crtc_output, "{monitor.viewport.offset_x, monitor.viewport.offset_y, monitor.viewport.width, monitor.viewport.height},"))
+    << "kms::crtc_output() no longer places the CRTC by its viewport";
+  EXPECT_TRUE(has(crtc_output, "monitor.wayland,")) << "kms::crtc_output() no longer carries Wayland's output";
+  EXPECT_FALSE(has(crtc_output, "std::nullopt")) << "kms::crtc_output() drops Wayland's output";
 }

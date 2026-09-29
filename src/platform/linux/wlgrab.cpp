@@ -191,7 +191,8 @@ namespace wl {
       // frame is sized in those. The desktop is laid out in logical units, where an output turned
       // a quarter is as tall as its mode is wide and a scaled one is smaller than its mode, and
       // absolute input is placed there. Measuring the desktop in modes put the pointer away from
-      // where it was aimed on any host with a rotated or scaled monitor (polaris#793).
+      // where it was aimed on any host with a rotated or scaled monitor (polaris#793). A monitor
+      // turned a quarter streams sideways, and its stream keeps the input 1.4.13 gave it.
       wl::capture_geometry(interface.monitors, *monitor_index).apply_to(*this);
 
       const auto selected_monitor_identity = wlgrab_capture_policy::enumerated_monitor_identity(
@@ -204,6 +205,9 @@ namespace wl {
       BOOST_LOG(debug) << "Resolution: "sv << width << 'x' << height;
       BOOST_LOG(debug) << "Size on the desktop: "sv << input_width << 'x' << input_height;
       BOOST_LOG(debug) << "Desktop Resolution: "sv << env_width << 'x' << env_height;
+      if (!input_counts_from_screen) {
+        BOOST_LOG(debug) << "Monitor turned a quarter: absolute input keeps the numbers 1.4.13 gave it"sv;
+      }
 
       return 0;
     }

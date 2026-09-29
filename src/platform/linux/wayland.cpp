@@ -396,13 +396,19 @@ namespace wl {
       return {};
     }
 
+    // Each output's mode at its xdg-output position, which is what a capture sees and what 1.4.13
+    // measured the desktop by.
+    std::vector<output_layout::rect_t> modes;
+    modes.reserve(monitors.size());
+    for (const auto &each : monitors) {
+      modes.push_back({each->viewport.offset_x, each->viewport.offset_y, each->viewport.width, each->viewport.height});
+    }
+
     const auto &monitor = *monitors[index];
-    const auto desktop = measure_desktop(monitors);
     return {
       .frame_width = monitor.viewport.width,
       .frame_height = monitor.viewport.height,
-      .screen = output_layout::input_rect(monitor.layout, desktop, monitor.viewport.width, monitor.viewport.height),
-      .desktop = desktop.rect,
+      .input = output_layout::place_input(monitor.layout, modes[index], measure_desktop(monitors), output_layout::mode_extents(modes)),
     };
   }
 

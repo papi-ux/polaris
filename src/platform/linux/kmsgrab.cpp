@@ -818,11 +818,9 @@ namespace platf {
             img_offset_x = crtc->x;
             img_offset_y = crtc->y;
 
-            this->env_width = ::platf::kms::desktop.rect.width;
-            this->env_height = ::platf::kms::desktop.rect.height;
-
             // The CRTC as absolute input places it. A CRTC the enumeration never tied to a monitor
-            // has only its own position and mode.
+            // has only its own position and mode, in output pixels. On a desktop Wayland measured,
+            // in desktop pixels, it keeps the numbers 1.4.13 gave it rather than mix the two.
             output_layout::crtc_output_t streamed {
               {(int) crtc->x, (int) crtc->y, (int) crtc->width, (int) crtc->height},
               std::nullopt,
@@ -861,12 +859,18 @@ namespace platf {
             // Absolute input is placed on the desktop in the desktop's units, counted from its
             // corner. Where Wayland lays this monitor out scaled, its size there is not the
             // frame's, and the extents were measured the same way. A monitor Wayland turns a
-            // quarter streams sideways, and input keeps the frame's shape there.
-            const auto screen = output_layout::crtc_input_rect(streamed, kms::desktop, width, height);
-            offset_x = screen.x;
-            offset_y = screen.y;
-            input_width = screen.width;
-            input_height = screen.height;
+            // quarter keeps the input 1.4.13 gave it.
+            const auto placement = output_layout::crtc_input_placement(streamed, kms::desktop);
+            offset_x = placement.screen.x;
+            offset_y = placement.screen.y;
+            input_width = placement.screen.width;
+            input_height = placement.screen.height;
+            input_counts_from_screen = placement.counts_from_screen;
+            this->env_width = placement.extents.width;
+            this->env_height = placement.extents.height;
+            if (!input_counts_from_screen) {
+              BOOST_LOG(debug) << "Absolute input keeps the numbers 1.4.13 gave this CRTC"sv;
+            }
 
             plane_id = plane->plane_id;
             crtc_id = plane->crtc_id;
@@ -2010,11 +2014,16 @@ namespace platf {
     // wrong shape and put absolute input away from its target (polaris#793). Wayland's rectangles
     // are right, and are taken when Wayland described every active CRTC.
     std::vector<output_layout::crtc_output_t> active_crtcs;
+    // Every connector's CRTC mode at its place, a plane scanning out to it or not, which is what
+    // 1.4.13 measured the desktop by. A stream of a monitor turned a quarter keeps those extents.
+    std::vector<output_layout::rect_t> enumerated;
     for (auto &card_descriptor : cds) {
       for (auto &[_, monitor_descriptor] : card_descriptor.crtc_to_monitor) {
         BOOST_LOG(debug) << "Monitor description"sv;
         BOOST_LOG(debug) << "Resolution: "sv << monitor_descriptor.viewport.width << 'x' << monitor_descriptor.viewport.height;
         BOOST_LOG(debug) << "Offset: "sv << monitor_descriptor.viewport.offset_x << 'x' << monitor_descriptor.viewport.offset_y;
+
+        enumerated.emplace_back(kms::crtc_output(monitor_descriptor).crtc);
 
         // A connector no plane scans out to is not on the desktop.
         if (monitor_descriptor.viewport.width <= 0 || monitor_descriptor.viewport.height <= 0) {
@@ -2029,6 +2038,7 @@ namespace platf {
     // A CRTC no connector names counts too, with no place on the desktop and no Wayland output.
     active_crtcs.resize(active_crtcs.size() + unnamed_active_crtcs);
     kms::desktop = output_layout::measure_crtc_desktop(active_crtcs);
+    kms::desktop.mode_extents = output_layout::mode_extents(enumerated);
 
     BOOST_LOG(debug) << "Desktop resolution: "sv << kms::desktop.rect.width << 'x' << kms::desktop.rect.height
                      << (kms::desktop.by_wayland ? ", as Wayland lays it out"sv : ", from each CRTC"sv);

@@ -7,7 +7,8 @@
  * that output still hands back its mode in output pixels, so the two units meet here and nowhere
  * else. Absolute input is placed across every output together, in desktop pixels: logical units
  * times the largest whole scale among the outputs, so the most detailed monitor keeps every one
- * of its pixels within reach of the pointer.
+ * of its pixels within reach of the pointer. The one exception is a stream of an output turned a
+ * quarter, which keeps the input 1.4.13 gave it; see keeps_mode_placement().
  */
 #pragma once
 
@@ -189,29 +190,85 @@ namespace output_layout {
   }
 
   /**
-   * @brief Where absolute input places a capture of the output: its rectangle in desktop pixels,
-   *        counted from the desktop's corner.
-   *
-   * wlroots and KMS capture hand an output's frame back as the compositor scans it out, before its
-   * transform, so a monitor turned a quarter streams sideways. Input mapped onto its portrait
-   * rectangle would fit a portrait band into the landscape picture and leave the rest of the
-   * picture out of the pointer's reach. Until capture turns the picture, input there keeps the
-   * frame's shape instead: the monitor's rectangle turned back, at its place on the desktop, which
-   * is how input always mapped that stream. A frame the capture already turned, as KMS capture
-   * does for a panel turned by plane rotation, has the monitor's shape and keeps it.
+   * @brief The output's rectangle in desktop pixels, counted from the desktop's corner, which is
+   *        where absolute input places a capture of an output keeps_mode_placement() leaves to the
+   *        layout.
    * @param output The output as the compositor described it.
    * @param desktop The desktop it is on.
-   * @param frame_width The width of the frame the capture hands back.
-   * @param frame_height The height of that frame.
    */
-  constexpr rect_t input_rect(const output_t &output, const desktop_t &desktop, int frame_width, int frame_height) {
-    auto screen = on_desktop(desktop_rect(output, desktop.scale), desktop.rect);
-    const bool frame_is_wide = frame_width > frame_height;
-    const bool screen_is_wide = screen.width > screen.height;
-    if (turns_a_quarter(output.transform) && frame_width > 0 && frame_height > 0 && frame_is_wide != screen_is_wide) {
-      std::swap(screen.width, screen.height);
+  constexpr rect_t input_rect(const output_t &output, const desktop_t &desktop) {
+    return on_desktop(desktop_rect(output, desktop.scale), desktop.rect);
+  }
+
+  /**
+   * @brief The extents absolute input spanned before the desktop was measured by layout: from zero
+   *        to the furthest right and bottom edge of any output's mode at its position. Nothing left
+   *        of or above the origin counts.
+   * @param modes Each output's mode, in output pixels, at its position on the desktop.
+   */
+  constexpr rect_t mode_extents(std::span<const rect_t> modes) {
+    int width = 0;
+    int height = 0;
+    for (const auto &mode : modes) {
+      width = std::max(width, mode.x + mode.width);
+      height = std::max(height, mode.y + mode.height);
     }
-    return screen;
+    return {0, 0, width, height};
+  }
+
+  /**
+   * @brief Where absolute input places a capture, and what it spans.
+   */
+  struct input_placement_t {
+    /// The captured screen's corner, and its size where input maps onto something other than the
+    /// frame. A zero size maps input onto the frame.
+    rect_t screen;
+    /// What absolute input spans. Only its width and height reach input.
+    rect_t extents;
+    /// Whether each absolute point counts from the screen's corner. When it does not, every point
+    /// counts from the desktop's corner, as it did on Linux before 1.4.14, whatever the corner.
+    bool counts_from_screen = true;
+  };
+
+  /**
+   * @brief Whether a capture of the output keeps the absolute input 1.4.13 gave it.
+   *
+   * wlroots capture hands a monitor turned a quarter back sideways, and so does KMS capture unless
+   * the panel's plane turns it, and no rectangle on a desktop measured by layout fits a sideways
+   * picture. The monitor's own rectangle is portrait where the picture is landscape, so part of the
+   * picture could not move the pointer, and a rectangle of the picture's shape runs past the
+   * desktop's edge wherever the monitor is alone or at the desktop's right or bottom. Until capture
+   * turns every such picture upright, a stream of a turned monitor keeps every number 1.4.13 gave
+   * its input, so none of them does worse than it did.
+   * @param output The streamed output as the compositor described it.
+   */
+  constexpr bool keeps_mode_placement(const output_t &output) {
+    return turns_a_quarter(output.transform);
+  }
+
+  /**
+   * @brief The absolute input 1.4.13 gave a capture: its mode's corner, kept but left out of every
+   *        point, no size, so input maps onto the frame, and the extents of every mode.
+   * @param mode The streamed output's mode at its position.
+   * @param extents mode_extents() of every output.
+   */
+  constexpr input_placement_t mode_placement(const rect_t &mode, const rect_t &extents) {
+    return {{mode.x, mode.y, 0, 0}, extents, false};
+  }
+
+  /**
+   * @brief Where absolute input places a capture of the output: by the layout, or as 1.4.13 did
+   *        for an output keeps_mode_placement() names.
+   * @param output The output as the compositor described it.
+   * @param mode Its mode at its position, as the capture sees it.
+   * @param desktop The desktop the outputs make together.
+   * @param extents mode_extents() of every output.
+   */
+  constexpr input_placement_t place_input(const output_t &output, const rect_t &mode, const desktop_t &desktop, const rect_t &extents) {
+    if (keeps_mode_placement(output)) {
+      return mode_placement(mode, extents);
+    }
+    return {input_rect(output, desktop), desktop.rect, true};
   }
 
   /**
@@ -232,6 +289,10 @@ namespace output_layout {
     /// Measured by Wayland's rectangles, in desktop pixels. Otherwise by each CRTC's, in the CRTC's
     /// pixels, which is what KMS capture always measured by.
     bool by_wayland = false;
+    /// mode_extents() of every connector KMS capture enumerated, a plane scanning out to it or
+    /// not, which is what 1.4.13 measured by. measure_crtc_desktop() leaves it to its caller, which
+    /// has those connectors.
+    rect_t mode_extents;
   };
 
   /**
@@ -265,18 +326,27 @@ namespace output_layout {
   }
 
   /**
-   * @brief Where absolute input places a KMS capture of one CRTC, counted from the desktop's corner
-   *        like every other. On a desktop of CRTC rectangles the size stays zero, so input maps
-   *        onto the frame, as it always did there.
+   * @brief Where absolute input places a KMS capture of one CRTC.
+   *
+   * A CRTC whose Wayland output keeps_mode_placement() names keeps 1.4.13's input, on whichever
+   * desktop. On a desktop Wayland measured, a CRTC is placed by its output's rectangle, and one
+   * with no Wayland output, which can only have appeared after the desktop was measured, keeps
+   * 1.4.13's input too: its place and mode are in output pixels, and that desktop counts desktop
+   * pixels. On a desktop of CRTC rectangles a CRTC counts from the desktop's corner like every
+   * other, and the size stays zero, so input maps onto the frame, as it always did there.
    * @param crtc The CRTC.
    * @param desktop The desktop it is on.
-   * @param frame_width The width of the frame the capture hands back, after any panel turn.
-   * @param frame_height The height of that frame.
    */
-  constexpr rect_t crtc_input_rect(const crtc_output_t &crtc, const crtc_desktop_t &desktop, int frame_width, int frame_height) {
-    if (desktop.by_wayland && crtc.wayland) {
-      return input_rect(*crtc.wayland, desktop, frame_width, frame_height);
+  constexpr input_placement_t crtc_input_placement(const crtc_output_t &crtc, const crtc_desktop_t &desktop) {
+    if (crtc.wayland && keeps_mode_placement(*crtc.wayland)) {
+      return mode_placement(crtc.crtc, desktop.mode_extents);
     }
-    return {crtc.crtc.x - desktop.rect.x, crtc.crtc.y - desktop.rect.y, 0, 0};
+    if (desktop.by_wayland) {
+      if (crtc.wayland) {
+        return {input_rect(*crtc.wayland, desktop), desktop.rect, true};
+      }
+      return mode_placement(crtc.crtc, desktop.mode_extents);
+    }
+    return {{crtc.crtc.x - desktop.rect.x, crtc.crtc.y - desktop.rect.y, 0, 0}, desktop.rect, true};
   }
 }  // namespace output_layout

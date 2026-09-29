@@ -329,6 +329,40 @@ TEST(InputTouchPortMapping, MakePortMapsOntoTheScreensRectangleOnTheDesktop) {
   EXPECT_FLOAT_EQ(middle->second, 1080.0f);
 }
 
+// wlroots and KMS capture of a monitor turned a quarter keep the input 1.4.13 gave it: the
+// display keeps the monitor's place, here 2560,0 on 4480x1440 extents, but every point counts from
+// the desktop's corner, so make_port() leaves the place out and nothing else changes. On Linux only
+// abs_mouse() reads a touch port's place, and 1.4.13's never added it.
+TEST(InputTouchPortMapping, MakePortLeavesThePlaceOutWhenPointsCountFromTheDesktopsCorner) {
+  placed_display_t display;
+  display.offset_x = 2560;
+  display.offset_y = 0;
+  display.width = 1920;
+  display.height = 1080;
+  display.env_width = 4480;
+  display.env_height = 1440;
+  display.input_counts_from_screen = false;
+
+  const auto screen = display.screen_on_desktop();
+  EXPECT_EQ(screen.offset_x, 0);
+  EXPECT_EQ(screen.offset_y, 0);
+  EXPECT_EQ(screen.width, 1920);
+  EXPECT_EQ(screen.height, 1080);
+
+  const auto port = video::make_port(&display, streaming_at(1920, 1080));
+  expect_same_port(port, input::make_touch_port(platf::touch_port_t {0, 0, 1920, 1080}, 4480, 1440, 1920, 1080));
+
+  const auto far_corner = input::map_client_to_touchport(port, {1920.0f, 1080.0f}, {1920.0f, 1080.0f});
+  ASSERT_TRUE(far_corner.has_value());
+  const auto [x, y] = platf::point_on_desktop(platf::touch_port_t {port.offset_x, port.offset_y, port.env_width, port.env_height}, far_corner->first, far_corner->second);
+  EXPECT_FLOAT_EQ(x, 1920.0f);
+  EXPECT_FLOAT_EQ(y, 1080.0f);
+
+  // Every other capture counts from its screen's corner.
+  display.input_counts_from_screen = true;
+  EXPECT_EQ(video::make_port(&display, streaming_at(1920, 1080)).offset_x, 2560);
+}
+
 // Game Mode names a screen fitted inside its frame, and the turn gamescope gives a touch.
 // make_port() places input inside the picture and passes the turn on, with or without an input
 // size, which Game Mode never sets anyway.

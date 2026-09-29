@@ -534,11 +534,9 @@ namespace wl {
     /// What a capture of the output hands back: output pixels, before the transform and the scale.
     int frame_width = 0;
     int frame_height = 0;
-    /// Where absolute input places the output, counted from the desktop's corner, in desktop
-    /// pixels.
-    output_layout::rect_t screen;
-    /// Every output together, in desktop pixels, which absolute input spans.
-    output_layout::rect_t desktop;
+    /// Where absolute input places the output and what it spans: in desktop pixels, counted from
+    /// the desktop's corner, or for an output turned a quarter, as 1.4.13 placed it.
+    output_layout::input_placement_t input;
 
     /**
      * @brief Give a display this geometry: the frame to capture and encode, and the rest to input.
@@ -546,12 +544,13 @@ namespace wl {
     void apply_to(platf::display_t &display) const {
       display.width = frame_width;
       display.height = frame_height;
-      display.offset_x = screen.x;
-      display.offset_y = screen.y;
-      display.input_width = screen.width;
-      display.input_height = screen.height;
-      display.env_width = desktop.width;
-      display.env_height = desktop.height;
+      display.offset_x = input.screen.x;
+      display.offset_y = input.screen.y;
+      display.input_width = input.screen.width;
+      display.input_height = input.screen.height;
+      display.input_counts_from_screen = input.counts_from_screen;
+      display.env_width = input.extents.width;
+      display.env_height = input.extents.height;
     }
   };
 
