@@ -74,7 +74,9 @@ starts at `v1.0.0`.
   client, which sends no media reports, that it does not report it. Doctor's loss row says the same
   of such a client instead of waiting for five reports. A session whose client dropped keeps the
   loss the window last judged in its report, as the host does, though the host's last live payloads
-  before the ping timeout call that loss stale, and a stale round trip is not graded.
+  before the ping timeout call that loss stale, and a stale round trip is not graded. It keeps it
+  only while the window still holds the reports it was judged on: a session whose reports stopped
+  more than 20 seconds before it ended is graded on no loss, as the host grades it.
 
 - Live Tuning acts on loss when Doctor does. Every control ping reached it as a second of clean
   video, ten a second, so a report that lost 7% of its frames faded to a few hundredths of a percent

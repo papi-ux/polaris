@@ -1196,6 +1196,42 @@ describe('support self-service reports', () => {
     expect(unjudged.qualitySummary).toContain('unknown ms latency / unknown of video frames lost after FEC')
   })
 
+  it('lets the judged verdict go once the window holds none of the reports it was judged on', () => {
+    // The client's reports stop 20 seconds into a stream that goes on for 40 more. The host's window
+    // keeps them for 20 seconds, then empties, and grades the session that ends later on no loss. The
+    // verdict remembered from before still named the network in the report, 40 seconds old.
+    const elevated = {
+      loss_pct: 5, loss_state: 'elevated', frames_lost: 120, frames_expected: 2400, media_samples: 20, window_seconds: 20,
+      rtt_state: 'clean', rtt_median_ms: 9,
+    }
+    const staleHeld = { ...elevated, loss_pct: null, loss_state: 'stale' }
+    const staleEmpty = { ...staleHeld, frames_lost: 0, frames_expected: 0, media_samples: 0 }
+    const live = (verdict) => ({ streaming: true, latency_ms: 9, encode_time_ms: 4, encode_target_fps: 120, dropped_frame_ratio: 0, network_verdict: verdict })
+    const payloads = [
+      { streaming: false },
+      ...Array.from({ length: 20 }, () => live(elevated)),
+      ...Array.from({ length: 20 }, () => live(staleHeld)),
+      ...Array.from({ length: 20 }, () => live(staleEmpty)),
+      { streaming: false },
+    ]
+    let remembered = null
+    let completedVerdict
+    const keptAt = []
+    for (let i = 1; i < payloads.length; ++i) {
+      remembered = rememberJudgedNetworkVerdict(remembered, payloads[i], payloads[i - 1])
+      keptAt.push(remembered)
+      if (payloads[i - 1].streaming && !payloads[i].streaming) completedVerdict = remembered
+    }
+    // Kept while the window still counts the reports, as for a client that drops.
+    expect(keptAt[39]).toBe(elevated)
+    expect(keptAt[40]).toBeNull()
+    expect(completedVerdict).toBeNull()
+
+    const report = buildPostSessionStreamReport({ stats: payloads[payloads.length - 2], lastJudgedVerdict: completedVerdict })
+    expect(report.issueOwner).toBe('client')
+    expect(report.mainIssue).not.toContain('network pressure')
+  })
+
   it('starts the judged verdict over for a new stream', () => {
     const judged = { loss_pct: 3, loss_state: 'elevated', window_seconds: 20 }
     const collecting = { loss_pct: null, loss_state: 'collecting', window_seconds: 20 }

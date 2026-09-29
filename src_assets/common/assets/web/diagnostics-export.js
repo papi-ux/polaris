@@ -1263,14 +1263,25 @@ export function buildGamescopeHelperReport(probe = {}) {
   }
 }
 
+// Whether the verdict's window still counts any of the client's reports. A stale verdict keeps them
+// until they are older than the window, 20 seconds, and the host's own grading reads no loss after.
+function verdictWindowHoldsReports(stats) {
+  const verdict = stats?.network_verdict
+  return Number(verdict?.media_samples) > 0 || Number(verdict?.frames_expected) > 0
+}
+
 // The newest verdict whose loss the host judged while the stream was live, for the post-session report.
 // A client that drops leaves the host streaming until its ping timeout, ten seconds by default, and the
 // live payloads before the stream ends call that loss stale, with no figure. The host grades the ended
-// session on the verdict its window last reached, and the report reads this one the same way. A new
-// stream starts over.
+// session on the verdict its window last reached, and the report reads this one the same way, while the
+// window still holds the reports it was judged on. Kept for the whole session, a verdict from reports
+// that stopped 40 seconds before the end still named the network, where the host's emptied window
+// named nothing. A new stream starts over.
 export function rememberJudgedNetworkVerdict(remembered, next, previous) {
-  const kept = next?.streaming && !previous?.streaming ? null : (remembered ?? null)
-  return next?.streaming && judgedVideoFrameLoss(next) ? next.network_verdict : kept
+  if (!next?.streaming) return remembered ?? null
+  if (!previous?.streaming) return judgedVideoFrameLoss(next) ? next.network_verdict : null
+  if (judgedVideoFrameLoss(next)) return next.network_verdict
+  return verdictWindowHoldsReports(next) ? (remembered ?? null) : null
 }
 
 export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnectReason = '', lastJudgedVerdict = null } = {}) {
