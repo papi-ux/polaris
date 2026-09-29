@@ -213,7 +213,10 @@ describe('v1.4.14 release contract', () => {
         'pressure at 2% and clears it below 1%, and Live Tuning cuts for loss from that same point.',
     )
     expect(notes).toContain('the share of video frames that never arrived whole after FEC.')
-    // Live Tuning's hold for moderate loss, adaptive_bitrate's MODERATE_LOSS_FLOOR_SHARE and HEAVY_LOSS_PCT.
-    expect(notes).toContain('for loss of 5% or less it goes no lower than half your bitrate')
+    // Live Tuning's hold for moderate loss, adaptive_bitrate's MODERATE_LOSS_FLOOR_SHARE and HEAVY_LOSS_PCT,
+    // and the rate tests that let it go lower or climb back.
+    expect(notes).toContain('For loss of 5% or less it stops at half your bitrate and tests that rate')
+    // Media reports that stop no longer leave Live Tuning cutting on the last loss they brought.
+    expect(notes).toContain("or of your client's reports stopping")
   })
 })
