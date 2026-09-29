@@ -171,6 +171,13 @@ describe('session snapshot rows', () => {
       doctor: { primary_issue: 'no_active_stream' },
       last_session: { client_name: 'Living Room TV' },
     }, t)).toBe('snapshot_no_active_stream')
-    expect(summarizeStreamStats(streaming, t)).toBe('snapshot_stream_summary(fps=118.4 FPS,target=120.0 FPS,kbps=16988,loss=0.00,encode=0)')
+    // Nothing judged yet says so, rather than a zero nobody measured.
+    expect(summarizeStreamStats(streaming, t)).toBe('snapshot_stream_summary(fps=118.4 FPS,target=120.0 FPS,kbps=16988,loss=snapshot_loss_not_judged,encode=0)')
+    // The window's figure, the one Doctor judges, not the newest second's report.
+    expect(summarizeStreamStats({
+      ...streaming,
+      packet_loss: 7.44,
+      network_verdict: { loss_pct: 1.869, loss_state: 'light', frames_lost: 18, frames_expected: 963, window_seconds: 20, rtt_median_ms: 7.9 },
+    }, t)).toBe('snapshot_stream_summary(fps=118.4 FPS,target=120.0 FPS,kbps=16988,loss=1.87%,encode=0)')
   })
 })

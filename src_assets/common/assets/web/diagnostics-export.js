@@ -576,19 +576,44 @@ export function describeLinuxGpuProfile(stats = {}) {
   return `${vaapiLabel} is active. Compare the reported capture path, render node, and encoder adapter before changing advanced capture flags.`
 }
 
+// The one loss figure Doctor grades with, Live Tuning acts on and the session status carries:
+// video frames the client never received whole, after FEC recovery, over the host's window, with
+// the frame counts behind it. Null until the host has judged some, so nothing here grades one second.
+export function judgedVideoFrameLoss(stats = {}) {
+  const verdict = stats?.network_verdict
+  if (!verdict || typeof verdict !== 'object') return null
+  const pct = verdict.loss_pct
+  if (typeof pct !== 'number' || !Number.isFinite(pct) || pct < 0 || pct > 100) return null
+  const count = (value) => (Number.isInteger(value) && value >= 0 ? value : null)
+  return {
+    pct,
+    state: typeof verdict.loss_state === 'string' ? verdict.loss_state : '',
+    framesLost: count(verdict.frames_lost),
+    framesExpected: count(verdict.frames_expected),
+    windowSeconds: Number.isInteger(verdict.window_seconds) && verdict.window_seconds > 0 ? verdict.window_seconds : 20,
+  }
+}
+
+// "1.9% of video frames never arrived whole after FEC over the last 20 s (18 of 963)"
+export function describeVideoFrameLoss(loss) {
+  const counts = loss.framesLost !== null && loss.framesExpected !== null
+    ? ` (${loss.framesLost} of ${loss.framesExpected})`
+    : ''
+  return `${loss.pct.toFixed(1)}% of video frames never arrived whole after FEC over the last ${loss.windowSeconds} s${counts}`
+}
+
 export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, logs = '', recentIssues = [] } = {}) {
   const streaming = Boolean(stats?.streaming)
   const liveTelemetry = statsConnected && streaming
-  const packetLoss = stats?.packet_loss
   const encodeTime = stats?.encode_time_ms
-  // Match Doctor's current-media window. Control-channel estimates and cached
-  // values from an ended session cannot establish media loss or justify tuning.
+  // Match Doctor: the host's windowed figure, while the client's media reports are current, which
+  // the host takes to be five seconds. Control-channel estimates and cached values from an ended
+  // session cannot establish video loss or justify tuning.
+  const judgedLoss = judgedVideoFrameLoss(stats)
   const mediaLossAge = stats?.media_loss_last_received_age_ms
-  const currentMediaLoss = liveTelemetry &&
-    stats?.packet_loss_available === true && stats?.packet_loss_source === 'media_transport' &&
+  const currentMediaLoss = liveTelemetry && judgedLoss !== null &&
     Number.isInteger(stats?.media_loss_sample_revision) && stats.media_loss_sample_revision > 0 &&
-    Number.isFinite(mediaLossAge) && mediaLossAge >= 0 && mediaLossAge <= 2000 &&
-    Number.isFinite(packetLoss) && packetLoss >= 0 && packetLoss <= 100
+    Number.isFinite(mediaLossAge) && mediaLossAge >= 0 && mediaLossAge <= 5000
   const captureKnown = Boolean(stats?.capture_path || stats?.capture_transport || stats?.capture_path_reason)
   const captureCpuCopy = Boolean(stats?.capture_cpu_copy)
   const capturePressure = capturePressureActive(stats)
@@ -620,14 +645,14 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
   const displayMode = displayModeOverrideItem(stats)
 
   const loss = currentMediaLoss
-    ? packetLoss > 2
-      ? checklistItem('packet-loss', 'Packet loss', 'fail', `Packet loss is ${packetLoss.toFixed(1)}%, which can look like stutter before the encoder is at fault.`, 'Try wired/5 GHz, lower bitrate, or enable FEC before changing encoder settings.')
-      : packetLoss > 0.5
-        ? checklistItem('packet-loss', 'Packet loss', 'warning', `Packet loss is ${packetLoss.toFixed(1)}%; watch for artifacts and input delay.`, 'Lower bitrate one step and re-test the same scene.')
-        : checklistItem('packet-loss', 'Packet loss', 'pass', `Packet loss is ${packetLoss.toFixed(1)}%.`, 'Network is not the loudest signal right now.')
+    ? judgedLoss.state === 'elevated'
+      ? checklistItem('packet-loss', 'Video frame loss', 'fail', `${describeVideoFrameLoss(judgedLoss)}, which Doctor calls network pressure. It can look like stutter before the encoder is at fault.`, 'Try wired/5 GHz, lower bitrate, or enable FEC before changing encoder settings.')
+      : judgedLoss.state === 'light'
+        ? checklistItem('packet-loss', 'Video frame loss', 'warning', `${describeVideoFrameLoss(judgedLoss)}, below the 2% Doctor calls network pressure; watch for artifacts.`, 'Re-test the same scene before changing bitrate; Doctor and Live Tuning act on loss from 2%.')
+        : checklistItem('packet-loss', 'Video frame loss', 'pass', `${describeVideoFrameLoss(judgedLoss)}.`, 'Network is not the loudest signal right now.')
     : liveTelemetry
-      ? checklistItem('packet-loss', 'Packet loss', 'info', 'No current confirmed media packet-loss measurement is available for this active stream.', 'Control-channel estimates are context only; media packet loss remains unmeasured until this client reports fresh media counters.')
-      : checklistItem('packet-loss', 'Packet loss', 'warning', 'No current confirmed media packet-loss measurement is available.', 'Start a live stream and wait for fresh media-loss telemetry.')
+      ? checklistItem('packet-loss', 'Video frame loss', 'info', 'No current confirmed video frame loss measurement is available for this active stream.', 'Control-channel estimates are context only; video frame loss stays unmeasured until this client reports fresh media counters.')
+      : checklistItem('packet-loss', 'Video frame loss', 'warning', 'No current confirmed video frame loss measurement is available.', 'Start a live stream and wait for fresh media-loss telemetry.')
 
   const captureFrameAge = Number(stats?.avg_frame_age_ms)
   const capture = !liveTelemetry
@@ -786,9 +811,10 @@ function summarizeActiveStream(stats = {}) {
   const fps = formatIssueNumber(stats.fps, 1)
   const target = formatIssueNumber(stats.session_target_fps || stats.requested_client_fps, 1)
   const bitrate = formatIssueValue(stats.bitrate_kbps ?? stats.bitrate, 'unknown')
-  const loss = formatIssueNumber(stats.packet_loss, 2)
+  const judgedLoss = judgedVideoFrameLoss(stats)
+  const loss = judgedLoss ? `${judgedLoss.pct.toFixed(2)}%` : 'unknown'
   const encode = formatIssueNumber(stats.encode_time_ms, 1)
-  return `${streaming}, ${fps} FPS / ${target} target, ${bitrate} kbps, ${loss}% loss, ${encode} ms encode`
+  return `${streaming}, ${fps} FPS / ${target} target, ${bitrate} kbps, ${loss} video frame loss, ${encode} ms encode`
 }
 
 function formatRecentIssues(recentIssues = []) {
@@ -1238,8 +1264,12 @@ export function buildGamescopeHelperReport(probe = {}) {
 }
 
 export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnectReason = '' } = {}) {
-  const loss = Number(stats.packet_loss)
-  const latency = Number(stats.latency_ms)
+  // The figures Doctor judged over its window, not the last second's report: that one read 32.7% on a
+  // session whose frames the host dropped 0.96% of, and named the network on it.
+  const judgedLoss = judgedVideoFrameLoss(stats)
+  const loss = judgedLoss ? judgedLoss.pct : NaN
+  const judgedRtt = stats?.network_verdict?.rtt_median_ms
+  const latency = typeof judgedRtt === 'number' && Number.isFinite(judgedRtt) ? judgedRtt : Number(stats.latency_ms)
   const encodeTime = Number(stats.encode_time_ms)
   const dropped = Number(stats.dropped_frame_ratio)
   const safeLogs = redactSensitiveText(logs)
@@ -1253,9 +1283,12 @@ export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnect
   let suggestedNextLaunchProfile = 'Retry the same launch profile once, then collect a support bundle if it repeats.'
 
   const networkFailureLog = latestIssueMatching(safeLogs, ['packet loss', 'network', 'udp', 'socket', 'enet'])
-  if ((Number.isFinite(loss) && loss > 1) || (Number.isFinite(latency) && latency > 45) || networkFailureLog) {
+  const lossPressure = judgedLoss?.state === 'elevated'
+  if (lossPressure || (Number.isFinite(latency) && latency > 45) || networkFailureLog) {
     issueOwner = 'network'
-    mainIssue = Number.isFinite(loss) && loss > 1 ? `Network packet loss was ${loss.toFixed(1)}%.` : 'Network latency/transport warnings stood out.'
+    mainIssue = lossPressure
+      ? `Video frame loss was network pressure: ${describeVideoFrameLoss(judgedLoss)}.`
+      : 'Network latency/transport warnings stood out.'
     suggestedNextLaunchProfile = 'Lower bitrate one step, prefer wired/5 GHz, then retry the same game.'
   }
 
@@ -1280,7 +1313,9 @@ export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnect
       : 'Try the low-latency hardware encoder profile or lower resolution/FPS.'
   }
 
-  const qualitySummary = `${Number.isFinite(latency) ? latency.toFixed(1) : 'unknown'} ms latency / ${Number.isFinite(loss) ? loss.toFixed(1) : 'unknown'}% loss / ${Number.isFinite(encodeTime) ? encodeTime.toFixed(1) : 'unknown'} ms encode / ${Number.isFinite(dropped) ? (dropped * 100).toFixed(2) : 'unknown'}% dropped.`
+  // Two frame shares, each named: frames lost in transit after FEC, and frames the host dropped
+  // before it sent them. They count different frames, so one may be high while the other is not.
+  const qualitySummary = `${Number.isFinite(latency) ? latency.toFixed(1) : 'unknown'} ms latency / ${Number.isFinite(loss) ? `${loss.toFixed(1)}%` : 'unknown'} of video frames lost after FEC / ${Number.isFinite(encodeTime) ? encodeTime.toFixed(1) : 'unknown'} ms encode / ${Number.isFinite(dropped) ? `${(dropped * 100).toFixed(2)}%` : 'unknown'} of frames dropped on the host.`
   const report = {
     kind: 'post-session-stream-report',
     status: issueOwner === 'client' ? 'warning' : 'fail',

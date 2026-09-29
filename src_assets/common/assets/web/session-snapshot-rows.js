@@ -3,6 +3,7 @@
 // projection can feed the stream display and provenance rows when it is served.
 
 import { streamClientFamilyLabel } from './client-family.js'
+import { judgedVideoFrameLoss } from './diagnostics-export.js'
 
 export function formatNumber(value, digits = 1) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
@@ -13,6 +14,19 @@ export function formatNumber(value, digits = 1) {
 
 export function formatFps(value) {
   return `${formatNumber(value, 1)} FPS`
+}
+
+// The loss Doctor judged over the host's window, as a share of video frames, or a word saying it has
+// not judged any: a zero here would claim a measurement nobody made.
+export function formatJudgedLoss(s = {}, t) {
+  const loss = judgedVideoFrameLoss(s)
+  return loss ? `${loss.pct.toFixed(2)}%` : t('troubleshooting.snapshot_loss_not_judged')
+}
+
+// The window's median round trip, the figure Doctor judges, or the newest reading before it has one.
+export function formatJudgedRtt(s = {}) {
+  const median = s?.network_verdict?.rtt_median_ms
+  return formatNumber(typeof median === 'number' && Number.isFinite(median) ? median : s.latency_ms, 1)
 }
 
 export function formatResolution(width, height, t) {
@@ -37,7 +51,7 @@ export function summarizeStreamStats(s = {}, t) {
     fps: formatFps(s.fps),
     target: formatFps(s.session_target_fps || s.requested_client_fps),
     kbps: s.bitrate_kbps || 0,
-    loss: formatNumber(s.packet_loss, 2),
+    loss: formatJudgedLoss(s, t),
     encode: formatNumber(s.encode_time_ms, 1),
   })
 }
@@ -196,7 +210,7 @@ export function buildSessionSnapshotRows(stats, t, { streamDisplay = null, prove
     { label: t('troubleshooting.snapshot_cpu_copy'), value: yesNo(s.capture_cpu_copy, t) },
     { label: t('troubleshooting.snapshot_pacing_policy'), value: s.pacing_policy || t('troubleshooting.snapshot_none_word') },
     { label: t('troubleshooting.snapshot_optimization_source'), value: s.optimization_source || t('troubleshooting.snapshot_default_word') },
-    { label: t('troubleshooting.snapshot_network'), value: t('troubleshooting.snapshot_network_value', { latency: formatNumber(s.latency_ms, 1), loss: formatNumber(s.packet_loss, 2) }) },
+    { label: t('troubleshooting.snapshot_network'), value: t('troubleshooting.snapshot_network_value', { latency: formatJudgedRtt(s), loss: formatJudgedLoss(s, t) }) },
     { label: t('troubleshooting.snapshot_frame_delivery'), value: t('troubleshooting.snapshot_frame_delivery_value', { duplicate: formatNumber((s.duplicate_frame_ratio || 0) * 100, 2), dropped: formatNumber((s.dropped_frame_ratio || 0) * 100, 2) }) },
     { label: t('troubleshooting.snapshot_frame_timing'), value: t('troubleshooting.snapshot_frame_timing_value', { age: formatNumber(s.avg_frame_age_ms, 2), error: formatNumber(s.frame_interval_error_ms ?? s.frame_jitter_ms, 2) }) },
   ]
