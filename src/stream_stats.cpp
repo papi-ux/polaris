@@ -2497,11 +2497,12 @@ namespace stream_stats {
     const bool network_risk = network.risk;
     const bool network_fail = network.fail;
     const bool network_watch = network_risk && !network_fail;
+    // ENet's own estimate over the same window and band, so one retransmission does not bring the
+    // finding and the next quiet poll take it away.
     const bool control_channel_observation =
       stats.streaming &&
       current_network_observation &&
-      stats.control_channel_samples > 0 &&
-      stats.control_channel_packet_loss >= network_risk_tracker_t::k_loss_elevated_pct;
+      verdict.control_loss_available && verdict.control_loss_elevated;
     const int live_bitrate_kbps = stats.adaptive_runtime_update_supported && stats.adaptive_target_bitrate_kbps > 0 ?
       stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
     // The saved paired profile's bitrate, or the rate the stream opened at when there is none, so a
@@ -2842,11 +2843,13 @@ namespace stream_stats {
       evidence,
       "control_channel_packet_loss",
       "Control-channel loss estimate",
-      stats.control_channel_samples > 0 ? nlohmann::json(stats.control_channel_packet_loss) : nlohmann::json(nullptr),
+      verdict.control_loss_available ? nlohmann::json(verdict.control_loss_pct) : nlohmann::json(nullptr),
       "%",
-      stats.control_channel_samples == 0 ? "unknown" : control_channel_observation ? "watch" : "pass",
+      !verdict.control_loss_available ? "unknown" : control_channel_observation ? "watch" : "pass",
       "enet_control_channel",
-      "ENet reliable-channel EWMA. Retransmissions can make this read high even when video delivery is healthy; it cannot grade the stream or authorize a bitrate reduction."
+      "ENet reliable-channel EWMA, averaged over the last " + std::to_string(network_judge_t::k_window.count()) +
+        " seconds; Doctor notes it from " + two_decimals(network_judge_t::k_loss_enter_pct) + "% and stops below " +
+        two_decimals(network_judge_t::k_loss_exit_pct) + "%. Retransmissions can make this read high even when video delivery is healthy; it cannot grade the stream or authorize a bitrate reduction."
     );
     append_doctor_evidence(
       evidence,
@@ -4066,6 +4069,15 @@ namespace stream_stats {
     note_risk(at);
   }
 
+  void network_judge_t::add_control_loss(clock_type::time_point at, double loss_pct) {
+    if (!std::isfinite(loss_pct) || loss_pct < 0.0) {
+      return;
+    }
+    control.push_back({at, std::min(loss_pct, 100.0)});
+    drop_stale(control, at, k_max_control_readings);
+    judge_control(at);
+  }
+
   // The figure and its band are judged together and kept together until the next report, so the
   // verdict never quotes a figure the band was not judged on.
   void network_judge_t::judge_media(clock_type::time_point at) {
@@ -4088,6 +4100,27 @@ namespace stream_stats {
     judged.rtt_available = round_trip.median_ms.has_value();
     judged.rtt_ms = round_trip.median_ms.value_or(0.0);
     judged.rtt_elevated = judged.rtt_available && rtt_elevated;
+  }
+
+  // ENet's estimate is already an average of its own, and it swings with each retransmission: the HEVC
+  // run's read 1.08 and then 2.81 on consecutive polls. Averaged over the window and banded, it names
+  // retries once they last.
+  void network_judge_t::judge_control(clock_type::time_point at) {
+    const auto from = at - k_window;
+    int readings = 0;
+    double sum = 0.0;
+    for (const auto &reading : control) {
+      if (reading.at > from && reading.at <= at) {
+        ++readings;
+        sum += reading.loss_pct;
+      }
+    }
+    const auto mean = readings >= k_min_control_readings ? std::optional<double> {sum / readings} : std::nullopt;
+    judge_band(control_loss_elevated, mean, k_loss_enter_pct, k_loss_exit_pct);
+    judged.control_samples = readings;
+    judged.control_loss_available = mean.has_value();
+    judged.control_loss_pct = mean.value_or(0.0);
+    judged.control_loss_elevated = judged.control_loss_available && control_loss_elevated;
   }
 
   void network_judge_t::note_risk(clock_type::time_point at) {
@@ -4120,6 +4153,12 @@ namespace stream_stats {
       result.rtt_ms = 0.0;
       result.rtt_elevated = false;
       result.rtt_samples = 0;
+    }
+    if (control.empty() || control.back().at <= window_start) {
+      result.control_loss_available = false;
+      result.control_loss_pct = 0.0;
+      result.control_loss_elevated = false;
+      result.control_samples = 0;
     }
     result.risk = result.loss_elevated || result.rtt_elevated;
     if (risk_since) {
@@ -4171,6 +4210,9 @@ namespace stream_stats {
       {"rtt_samples", verdict.rtt_samples},
       {"rtt_enter_ms", network_judge_t::k_rtt_enter_ms},
       {"rtt_exit_ms", network_judge_t::k_rtt_exit_ms},
+      {"control_loss_pct", verdict.control_loss_available ? nlohmann::json(verdict.control_loss_pct) : nlohmann::json(nullptr)},
+      {"control_loss_elevated", verdict.control_loss_elevated},
+      {"control_samples", verdict.control_samples},
       {"risk", verdict.risk},
       {"risk_held_ms", verdict.risk_held_ms}
     };
@@ -4237,6 +4279,9 @@ namespace stream_stats {
         }
       }
       network_judge.add_rtt(received_at, latency_ms);
+      if (!media_sample) {
+        network_judge.add_control_loss(received_at, loss);
+      }
       const bool suppresses_quality_restore =
         primary_network_state.network_risk ||
         (primary_network_state.packet_loss_available &&
@@ -4479,6 +4524,11 @@ namespace stream_stats {
       verdict.rtt_ms = 0.0;
       verdict.rtt_elevated = false;
     }
+    if (!network_current) {
+      verdict.control_loss_available = false;
+      verdict.control_loss_pct = 0.0;
+      verdict.control_loss_elevated = false;
+    }
     verdict.risk = verdict.loss_elevated || verdict.rtt_elevated;
     return verdict;
   }
@@ -4513,6 +4563,9 @@ namespace stream_stats {
       sample.at -= age;
     }
     for (auto &reading : network_judge.rtt) {
+      reading.at -= age;
+    }
+    for (auto &reading : network_judge.control) {
       reading.at -= age;
     }
     if (network_judge.risk_since) {

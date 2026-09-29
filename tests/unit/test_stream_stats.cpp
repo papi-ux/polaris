@@ -3441,6 +3441,11 @@ namespace {
     verdict.rtt_ms = stats.latency_ms;
     verdict.rtt_samples = reading ? 200 : 0;
     verdict.rtt_elevated = reading && stats.network_risk && !verdict.loss_elevated;
+    verdict.control_loss_available = reading && stats.control_channel_samples > 0;
+    verdict.control_loss_pct = verdict.control_loss_available ? stats.control_channel_packet_loss : 0.0;
+    verdict.control_samples = verdict.control_loss_available ? 200 : 0;
+    verdict.control_loss_elevated = verdict.control_loss_available &&
+      stats.control_channel_packet_loss >= stream_stats::network_judge_t::k_loss_enter_pct;
     verdict.risk = verdict.loss_elevated || verdict.rtt_elevated;
     return stats;
   }
@@ -3516,7 +3521,7 @@ TEST(StreamStatsDoctorTests, ControlLossIsInformationalAndCannotReduceQuality) {
   stats.latency_ms = 4.0;
   stats.network_risk = false;
 
-  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto doctor = judged_doctor(stats);
 
   EXPECT_EQ(doctor.at("primary_issue"), "control_channel_observation");
   EXPECT_EQ(doctor.at("status"), "ok");
@@ -7449,6 +7454,55 @@ TEST(NetworkJudgeTests, AVerdictReadBetweenReportsQuotesTheFigureItsBandWasJudge
   EXPECT_EQ(stream_stats::network_loss_state(clean), "light");
 }
 
+TEST(NetworkJudgeTests, ControlChannelLossHoldsItsBandAndNeverCountsAsPressure) {
+  // The HEVC run's control-channel estimate read 1.08 and then 2.81 on consecutive polls. Taken a
+  // reading at a time against 2%, Doctor's control channel finding came and went with every poll.
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  int per_reading_changes = 0;
+  bool per_reading_was = false;
+  int verdict_changes = 0;
+  bool verdict_was = false;
+  const auto second_of = [&](double loss_pct) {
+    for (int ping = 0; ping < 10; ++ping) {
+      at += std::chrono::milliseconds(100);
+      judge.add_control_loss(at, loss_pct);
+      const bool per_reading = loss_pct >= stream_stats::network_judge_t::k_loss_enter_pct;
+      per_reading_changes += per_reading != per_reading_was ? 1 : 0;
+      per_reading_was = per_reading;
+      const bool judged = judge.verdict(at).control_loss_elevated;
+      verdict_changes += judged != verdict_was ? 1 : 0;
+      verdict_was = judged;
+    }
+  };
+  // Retries that last: the window's figure crosses 2% and the finding stands.
+  for (int second = 0; second < 5; ++second) {
+    second_of(2.81);
+  }
+  // Then the estimate swings a poll at a time and averages under 2% but above 1%.
+  for (int second = 0; second < 25; ++second) {
+    second_of(second % 2 == 0 ? 1.08 : 2.81);
+  }
+  EXPECT_GE(per_reading_changes, 20);
+  EXPECT_EQ(verdict_changes, 1);
+  auto verdict = judge.verdict(at);
+  ASSERT_TRUE(verdict.control_loss_available);
+  EXPECT_TRUE(verdict.control_loss_elevated);
+  EXPECT_NEAR(verdict.control_loss_pct, (1.08 + 2.81) / 2.0, 1e-9);
+  EXPECT_FALSE(verdict.risk);
+
+  // Quiet for long enough that the window's figure falls below 1%, and it clears once.
+  for (int second = 0; second < 20; ++second) {
+    second_of(0.2);
+  }
+  verdict = judge.verdict(at);
+  EXPECT_FALSE(verdict.control_loss_elevated);
+  EXPECT_EQ(verdict_changes, 2);
+  const auto json = stream_stats::network_verdict_json(verdict);
+  EXPECT_NEAR(json.at("control_loss_pct").get<double>(), 0.2, 1e-9);
+  EXPECT_FALSE(json.at("control_loss_elevated").get<bool>());
+}
+
 TEST(NetworkJudgeTests, RecordedPyroWaveRttSpikesNeverElevate) {
   // The newest-reading tracker flips twice on this sequence. The window's median never moves off a
   // LAN's figures.
@@ -7889,6 +7943,46 @@ TEST(StreamStatsDoctorTests, RecordedHevcRunKeepsOneHeadline) {
   RecordProperty("headlines", run.text());
   EXPECT_LE(run.changes(), 1) << run.text();
   EXPECT_EQ(run.headlines.back(), "network_jitter") << run.text();
+}
+
+TEST(StreamStatsDoctorTests, RecordedControlChannelLossKeepsOneHeadline) {
+  // The HEVC run's control-channel estimate, ten pings a second, alternating between the 1.08 and 2.81
+  // its polls read, on a stream whose client sends no media reports. Taken a reading at a time the
+  // headline went between "none" and the control channel finding with every poll.
+  // A controller an earlier test left holding a cut target would put a quality finding above it.
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::update_controller_input_state(false, 0, "", "", "unknown", "", false, "");
+  stream_stats::update_steam_input_state("unknown", 0, 0, 0, "");
+  stream_stats::update_stream_active(true, "RetroidPocket6", "203.0.113.82");
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::update_stream_active(false);
+  });
+  stream_stats::update_video_stats(60.0, 20000, 2.0, "hevc", 1920, 1080);
+  stream_stats::update_session_targets(
+    60.0, 60.0, 60.0, "client_requested", "deterministic_preset_v1",
+    "deterministic", "not_applicable", "Capability-validated launch profile.",
+    "", 1, 20000, 20000
+  );
+
+  headline_run_t run;
+  for (int second = 0; second < 5; ++second) {
+    for (int ping = 0; ping < 10; ++ping) {
+      stream_stats::update_control_channel_stats(6.0, 2.81, 777);
+    }
+    run.headlines.push_back(live_headline());
+  }
+  for (int second = 0; second < 25; ++second) {
+    for (int ping = 0; ping < 10; ++ping) {
+      stream_stats::update_control_channel_stats(6.0, second % 2 == 0 ? 1.08 : 2.81, 777);
+    }
+    run.headlines.push_back(live_headline());
+  }
+
+  RecordProperty("headlines", run.text());
+  EXPECT_EQ(run.changes(), 0) << run.text();
+  EXPECT_EQ(run.headlines.back(), "control_channel_observation") << run.text();
 }
 
 TEST(StreamStatsDoctorTests, RecordedPyroWaveRttSpikesKeepOneHeadline) {

@@ -7,6 +7,13 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Doctor's control channel finding holds steady as well. It came and went with ENet's newest
+  estimate of the control channel's own loss against 2%, which on the Retroid Pocket 6's HEVC run
+  read 1.08 and then 2.81 on consecutive polls, so the headline could still go between that finding
+  and nothing every second. The estimate is now averaged over the same 20 seconds with the same
+  band, noted from 2% and dropped below 1%, and the stream stats carry it in `network_verdict` as
+  `control_loss_pct`. It still never counts as network pressure.
+
 - A verdict read between two client reports quotes the figure its band was judged on. The band
   moved only when a report arrived, while the figure was worked out again whenever it was read, so
   once a lossy second left the window between reports, which PyroWave's reports a second or more

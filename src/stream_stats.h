@@ -340,6 +340,15 @@ namespace stream_stats {
     int rtt_samples = 0;
     /// Pressure by RTT: set at network_judge_t::k_rtt_enter_ms and cleared below k_rtt_exit_ms.
     bool rtt_elevated = false;
+    /// The window holds enough control-channel readings to judge ENet's own loss estimate.
+    bool control_loss_available = false;
+    /// ENet's loss estimate for the reliable control channel, averaged over the window. Context for
+    /// the control channel finding and never video loss, so it is no part of risk.
+    double control_loss_pct = 0.0;
+    int control_samples = 0;
+    /// Set when control_loss_pct reaches network_judge_t::k_loss_enter_pct and cleared only below
+    /// k_loss_exit_pct, the band video loss has.
+    bool control_loss_elevated = false;
     /// Either kind of pressure.
     bool risk = false;
     /// How long risk has held its current value, or -1 before the first reading.
@@ -1223,6 +1232,9 @@ namespace stream_stats {
    * RTT readings are held back until the estimator has shown one calm reading, or for
    * k_rtt_armed_after readings, for the reason network_risk_tracker_t gives: ENet seeds a fresh
    * peer's RTT at 500 ms and converges over its first seconds.
+   *
+   * The control channel's own loss estimate is averaged over the same window with the same band. It
+   * decides only whether Doctor mentions control-channel retries, and never counts as pressure.
    */
   struct network_judge_t {
     using clock_type = std::chrono::steady_clock;
@@ -1242,6 +1254,8 @@ namespace stream_stats {
     static constexpr double k_frames_per_percentage_report = 100.0;
     static constexpr std::size_t k_max_media_samples = 64;
     static constexpr std::size_t k_max_rtt_readings = 256;
+    static constexpr int k_min_control_readings = 5;
+    static constexpr std::size_t k_max_control_readings = 256;
 
     struct media_sample_t {
       clock_type::time_point at {};
@@ -1254,10 +1268,17 @@ namespace stream_stats {
       double rtt_ms = 0.0;
     };
 
+    struct control_reading_t {
+      clock_type::time_point at {};
+      double loss_pct = 0.0;
+    };
+
     std::deque<media_sample_t> media;
     std::deque<rtt_reading_t> rtt;
+    std::deque<control_reading_t> control;
     bool loss_elevated = false;
     bool rtt_elevated = false;
+    bool control_loss_elevated = false;
     bool rtt_armed = false;
     int rtt_readings_seen = 0;
     bool risk = false;
@@ -1273,6 +1294,9 @@ namespace stream_stats {
     /** Fold in one round trip reading. */
     void add_rtt(clock_type::time_point at, double rtt_ms);
 
+    /** Fold in one control-channel loss reading: ENet's estimate, which a ping carries. */
+    void add_control_loss(clock_type::time_point at, double loss_pct);
+
     /** The judgement as it stands at now. */
     network_verdict_t verdict(clock_type::time_point now) const;
 
@@ -1283,6 +1307,7 @@ namespace stream_stats {
   private:
     void judge_media(clock_type::time_point at);
     void judge_rtt(clock_type::time_point at);
+    void judge_control(clock_type::time_point at);
     void note_risk(clock_type::time_point at);
   };
 
