@@ -7198,6 +7198,357 @@ TEST(NetworkRiskTrackerTests, BadFromTheStartStillFlagsAfterBoundedGrace) {
   EXPECT_TRUE(flagged);
 }
 
+namespace {
+  using judge_clock = stream_stats::network_judge_t::clock_type;
+
+  /// One second's media report from a client: the frames it expected and how many never arrived.
+  struct recorded_report_t {
+    std::uint64_t expected;
+    std::uint64_t lost;
+  };
+
+  // The HEVC run of the 2026-09-29 in-game smoke on the Retroid Pocket 6, 3840x2160 at 120 fps over
+  // Wi-Fi. The host's polls read 0.0, 7.38, 0.0, 0.0, 0.0, 0.0, 7.44 and 0.0 percent: at 120 fps,
+  // 9 of 122 frames and 9 of 121, each one second's report. The run went on like that for five
+  // minutes, and a later poll read 5.83, 7 of 120.
+  constexpr std::array<recorded_report_t, 8> k_recorded_hevc_reports {{
+    {120, 0}, {122, 9}, {120, 0}, {120, 0}, {120, 0}, {120, 0}, {121, 9}, {120, 0}
+  }};
+
+  // Host RTT through that run, in ms: the readings paired with its screenshots.
+  constexpr std::array<double, 10> k_recorded_hevc_rtt_ms {4.0, 4.4, 10.1, 7.6, 9.6, 7.9, 8.6, 4.3, 9.0, 17.0};
+
+  // Host RTT through the PyroWave run, 1920x1080 at 120 fps on the same device, in ms: 10, 26 and 10
+  // on close samples, and 23 and 39 in its Wi-Fi rtt_spike periods, where ENet's estimate stays up
+  // for a second or two before it comes back down.
+  constexpr std::array<double, 10> k_recorded_pyrowave_rtt_ms {10.0, 26.0, 10.0, 8.0, 39.0, 40.0, 23.0, 10.0, 6.0, 10.0};
+
+  judge_clock::time_point judge_start() {
+    return judge_clock::time_point {} + std::chrono::hours(1);
+  }
+}  // namespace
+
+TEST(NetworkJudgeTests, RecordedHevcLossChangesTheVerdictOnceAndHoldsIt) {
+  // Judged a report at a time, as Doctor did, this loss was confirmed and cleared twice every eight
+  // seconds. Over the window it runs a little under 2% with a 7% burst every few seconds, so the
+  // verdict turns to pressure once, as soon as the window holds enough of it, and keeps it: the
+  // figure never falls to 1% while the pattern lasts.
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  int per_report_changes = 0;
+  bool per_report_was = false;
+  int verdict_changes = 0;
+  bool verdict_was = false;
+  int entered_at = -1;
+  int second = 0;
+  for (int round = 0; round < 5; ++round) {
+    for (const auto &report : k_recorded_hevc_reports) {
+      ++second;
+      at += std::chrono::seconds(1);
+      judge.add_media(at, static_cast<double>(report.expected), static_cast<double>(report.lost));
+      for (int ping = 0; ping < 10; ++ping) {
+        judge.add_rtt(at + std::chrono::milliseconds(100 * ping), k_recorded_hevc_rtt_ms[ping]);
+      }
+      const bool per_report = report.lost * 100.0 / report.expected > 2.0;
+      per_report_changes += per_report != per_report_was ? 1 : 0;
+      per_report_was = per_report;
+      const auto verdict = judge.verdict(at);
+      if (verdict.loss_elevated != verdict_was) {
+        ++verdict_changes;
+        entered_at = second;
+      }
+      verdict_was = verdict.loss_elevated;
+    }
+  }
+  EXPECT_EQ(per_report_changes, 20);
+  EXPECT_EQ(verdict_changes, 1);
+  // Seven seconds in, two of seven reports lost 18 of 843 frames, 2.1%.
+  EXPECT_EQ(entered_at, 7);
+
+  const auto verdict = judge.verdict(at);
+  ASSERT_TRUE(verdict.loss_available);
+  EXPECT_TRUE(verdict.loss_elevated);
+  EXPECT_TRUE(verdict.risk);
+  EXPECT_EQ(verdict.media_samples, 20);  // the last 20 seconds
+  EXPECT_EQ(verdict.frames_expected, 2407u);
+  EXPECT_EQ(verdict.frames_lost, 45u);
+  EXPECT_NEAR(verdict.loss_pct, 45.0 * 100.0 / 2407.0, 1e-9);
+  EXPECT_EQ(stream_stats::network_loss_state(verdict), "elevated");
+  ASSERT_TRUE(verdict.rtt_available);
+  EXPECT_LT(verdict.rtt_ms, stream_stats::network_judge_t::k_rtt_exit_ms);
+  EXPECT_EQ(stream_stats::network_rtt_state(verdict), "clean");
+}
+
+TEST(NetworkJudgeTests, SustainedLossEntersAtItsBandAndHoldsThroughACleanSecond) {
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  // A clean stream first, so the window is full and judged.
+  for (int i = 0; i < 20; ++i) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 120.0, 0.0);
+  }
+  ASSERT_TRUE(judge.verdict(at).loss_available);
+  EXPECT_EQ(stream_stats::network_loss_state(judge.verdict(at)), "clean");
+
+  // Real pressure: every second loses 6 of 120 frames. The window crosses 2% on the seventh.
+  int entered_at = -1;
+  for (int i = 0; i < 12; ++i) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 120.0, 6.0);
+    if (entered_at < 0 && judge.verdict(at).loss_elevated) {
+      entered_at = i;
+    }
+  }
+  EXPECT_EQ(entered_at, 7);
+
+  // One clean second in the middle of it is not a recovery.
+  at += std::chrono::seconds(1);
+  judge.add_media(at, 120.0, 0.0);
+  EXPECT_TRUE(judge.verdict(at).loss_elevated);
+  EXPECT_TRUE(judge.verdict(at).risk);
+
+  // Once the loss stops, the verdict stands until the window's figure falls below 1%, which takes
+  // most of the window, and then clears once.
+  int cleared_at = -1;
+  for (int i = 0; i < 20; ++i) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 120.0, 0.0);
+    const auto verdict = judge.verdict(at);
+    if (cleared_at < 0 && !verdict.loss_elevated) {
+      cleared_at = i;
+      EXPECT_LT(verdict.loss_pct, stream_stats::network_judge_t::k_loss_exit_pct);
+    }
+    if (cleared_at >= 0) {
+      EXPECT_FALSE(verdict.loss_elevated) << "second " << i;
+    }
+  }
+  EXPECT_GE(cleared_at, 8);
+}
+
+TEST(NetworkJudgeTests, RecordedPyroWaveRttSpikesNeverElevate) {
+  // The newest-reading tracker flips twice on this sequence. The window's median never moves off a
+  // LAN's figures.
+  stream_stats::network_judge_t judge;
+  stream_stats::network_risk_tracker_t tracker;
+  auto at = judge_start();
+  int tracker_flips = 0;
+  bool tracker_was = false;
+  for (int round = 0; round < 3; ++round) {
+    for (const auto rtt_ms : k_recorded_pyrowave_rtt_ms) {
+      for (int ping = 0; ping < 10; ++ping) {
+        at += std::chrono::milliseconds(100);
+        judge.add_rtt(at, rtt_ms);
+        const bool tracked = tracker.update(0.0, rtt_ms);
+        tracker_flips += tracked != tracker_was ? 1 : 0;
+        tracker_was = tracked;
+        const auto verdict = judge.verdict(at);
+        EXPECT_FALSE(verdict.rtt_elevated) << "rtt " << rtt_ms << " at round " << round;
+      }
+    }
+  }
+  EXPECT_GE(tracker_flips, 4);
+  const auto verdict = judge.verdict(at);
+  ASSERT_TRUE(verdict.rtt_available);
+  EXPECT_DOUBLE_EQ(verdict.rtt_ms, 10.0);
+}
+
+TEST(NetworkJudgeTests, SustainedRttEntersAtItsBandAndClearsBelowIt) {
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  for (int i = 0; i < 50; ++i) {
+    at += std::chrono::milliseconds(100);
+    judge.add_rtt(at, 8.0);
+  }
+  EXPECT_FALSE(judge.verdict(at).rtt_elevated);
+  // A congested link: the median crosses 28 ms once more than half the window reads above it.
+  for (int i = 0; i < 60; ++i) {
+    at += std::chrono::milliseconds(100);
+    judge.add_rtt(at, 35.0);
+  }
+  EXPECT_TRUE(judge.verdict(at).rtt_elevated);
+  // Better, still inside the band: the verdict holds.
+  for (int i = 0; i < 200; ++i) {
+    at += std::chrono::milliseconds(100);
+    judge.add_rtt(at, 24.0);
+  }
+  EXPECT_DOUBLE_EQ(judge.verdict(at).rtt_ms, 24.0);
+  EXPECT_TRUE(judge.verdict(at).rtt_elevated);
+  // Below 20 ms it clears.
+  for (int i = 0; i < 200; ++i) {
+    at += std::chrono::milliseconds(100);
+    judge.add_rtt(at, 12.0);
+  }
+  EXPECT_FALSE(judge.verdict(at).rtt_elevated);
+  EXPECT_FALSE(judge.verdict(at).risk);
+}
+
+TEST(NetworkJudgeTests, AThinWindowHasNoVerdictAndAGapStartsOver) {
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  // Four reports are too few to judge, however bad.
+  for (int i = 0; i < stream_stats::network_judge_t::k_min_media_samples - 1; ++i) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 120.0, 60.0);
+    EXPECT_FALSE(judge.verdict(at).loss_available);
+    EXPECT_FALSE(judge.verdict(at).loss_elevated);
+  }
+  at += std::chrono::seconds(1);
+  judge.add_media(at, 120.0, 60.0);
+  EXPECT_TRUE(judge.verdict(at).loss_elevated);
+  EXPECT_EQ(stream_stats::network_loss_state(judge.verdict(at)), "elevated");
+
+  // Reports stop. The verdict is not carried across the gap: once the window empties there is none,
+  // and the first reports after it are judged afresh.
+  at += stream_stats::network_judge_t::k_window + std::chrono::seconds(1);
+  EXPECT_FALSE(judge.verdict(at).loss_available);
+  EXPECT_FALSE(judge.verdict(at).risk);
+  judge.add_media(at, 120.0, 0.0);
+  EXPECT_FALSE(judge.verdict(at).loss_elevated);
+  EXPECT_EQ(stream_stats::network_loss_state(judge.verdict(at)), "collecting");
+}
+
+TEST(NetworkJudgeTests, EnetRttConvergenceNeverEntersTheWindow) {
+  // ENet seeds a fresh peer at 500 ms and converges by about an eighth per ack; on a 3 ms LAN the
+  // first readings sit far above the band. They are held back until a calm reading arms the window.
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  double rtt = 500.0;
+  for (int i = 0; i < 60; ++i) {
+    at += std::chrono::milliseconds(100);
+    judge.add_rtt(at, rtt);
+    EXPECT_FALSE(judge.verdict(at).rtt_elevated) << "reading " << i << " rtt " << rtt;
+    rtt = 3.0 + (rtt - 3.0) * 7.0 / 8.0;
+  }
+  EXPECT_LT(judge.verdict(at).rtt_ms, stream_stats::network_judge_t::k_rtt_exit_ms);
+}
+
+TEST(NetworkJudgeTests, ALinkBadFromTheStartStillElevatesAfterTheGrace) {
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  for (int i = 0; i < stream_stats::network_judge_t::k_rtt_armed_after + stream_stats::network_judge_t::k_min_rtt_readings; ++i) {
+    at += std::chrono::milliseconds(100);
+    judge.add_rtt(at, 90.0);
+  }
+  EXPECT_TRUE(judge.verdict(at).rtt_elevated);
+}
+
+TEST(NetworkJudgeTests, TheFigureWeighsFramesNotReports) {
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  // A short report that lost everything does not outweigh four full seconds that lost nothing.
+  for (int i = 0; i < 4; ++i) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 120.0, 0.0);
+  }
+  at += std::chrono::seconds(1);
+  judge.add_media(at, 5.0, 5.0);
+  const auto verdict = judge.verdict(at);
+  ASSERT_TRUE(verdict.loss_available);
+  EXPECT_EQ(verdict.frames_expected, 485u);
+  EXPECT_EQ(verdict.frames_lost, 5u);
+  EXPECT_NEAR(verdict.loss_pct, 500.0 / 485.0, 1e-9);
+  EXPECT_FALSE(verdict.loss_elevated);
+
+  const auto json = stream_stats::network_verdict_json(verdict);
+  EXPECT_EQ(json.at("loss_basis"), "video_frames_lost_after_fec");
+  EXPECT_EQ(json.at("window_seconds"), 20);
+  EXPECT_EQ(json.at("frames_lost"), 5);
+  EXPECT_EQ(json.at("frames_expected"), 485);
+  EXPECT_EQ(json.at("loss_state"), "light");
+  EXPECT_TRUE(json.at("rtt_median_ms").is_null());
+  EXPECT_EQ(json.at("rtt_state"), "collecting");
+}
+
+TEST(StreamStatsHotFieldTests, ClientMediaCountersFillTheStreamsOwnClientRow) {
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::add_client("198.51.100.44", "RetroidPocket6", 61, "nova");
+  stream_stats::start_session_timing("owner-row", 61, "app-session-row");
+  stream_stats::update_stream_active(true);
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::stop_session_timing("owner-row", 61);
+    stream_stats::remove_client("198.51.100.44", 61);
+    stream_stats::update_stream_active(false);
+  });
+
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-row",
+    .app_session_id = "app-session-row",
+    .session_generation = 61,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 120,
+    .frames_received = 120,
+    .frames_lost = 0
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+  sample.client_monotonic_ms = 2'000;
+  sample.frames_expected = 242;
+  sample.frames_received = 233;
+  sample.frames_lost = 9;
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).observation_published);
+
+  // The top level said the loss arrived while the stream's own row said it never had, which is how a
+  // reading of this host's stats concluded a client's loss did not reach it.
+  const auto stats = stream_stats::get_current();
+  ASSERT_EQ(stats.clients.size(), 1u);
+  EXPECT_TRUE(stats.packet_loss_available);
+  EXPECT_TRUE(stats.clients.front().packet_loss_available);
+  EXPECT_EQ(stats.clients.front().packet_loss_source, "media_transport");
+  EXPECT_DOUBLE_EQ(stats.clients.front().packet_loss, stats.packet_loss);
+  const auto json = nlohmann::json::parse(stats.to_json());
+  EXPECT_EQ(json.at("clients").at(0).at("packet_loss_available"), true);
+}
+
+TEST(StreamStatsHotFieldTests, ClientMediaCountersAreJudgedOverTheWindow) {
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-window", 62, "app-session-window");
+  stream_stats::update_stream_active(true);
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::stop_session_timing("owner-window", 62);
+    stream_stats::update_stream_active(false);
+  });
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_control_channel_stats(6.0, 7.75, 777);
+  }
+
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-window",
+    .app_session_id = "app-session-window",
+    .session_generation = 62,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 0,
+    .frames_received = 0,
+    .frames_lost = 0
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+  for (const auto &report : k_recorded_hevc_reports) {
+    sample.client_monotonic_ms += 1'000;
+    sample.frames_expected += report.expected;
+    sample.frames_lost += report.lost;
+    sample.frames_received = sample.frames_expected - sample.frames_lost;
+    const auto result = stream_stats::ingest_client_media_counters(sample);
+    ASSERT_TRUE(result.observation_published);
+    EXPECT_EQ(result.frames_expected, report.expected);
+    EXPECT_EQ(result.frames_lost, report.lost);
+  }
+
+  // The newest report lost nothing. The window lost 18 of 963 frames, and the verdict it reached at
+  // the seventh report, 18 of 843, holds.
+  const auto stats = stream_stats::get_current();
+  EXPECT_DOUBLE_EQ(stats.packet_loss, 0.0);
+  ASSERT_TRUE(stats.network_verdict.loss_available);
+  EXPECT_EQ(stats.network_verdict.media_samples, 8);
+  EXPECT_EQ(stats.network_verdict.frames_lost, 18u);
+  EXPECT_EQ(stats.network_verdict.frames_expected, 963u);
+  EXPECT_NEAR(stats.network_verdict.loss_pct, 18.0 * 100.0 / 963.0, 1e-9);
+  EXPECT_TRUE(stats.network_verdict.loss_elevated);
+  const auto json = nlohmann::json::parse(stats.to_json());
+  EXPECT_EQ(json.at("network_verdict").at("frames_lost"), 18);
+  EXPECT_EQ(json.at("network_verdict").at("loss_state"), "elevated");
+  EXPECT_EQ(json.at("network_verdict").at("loss_basis"), "video_frames_lost_after_fec");
+}
+
 TEST(StreamStatsHotFieldTests, PacketLossPercentClampsDegenerateInputs) {
   constexpr uint64_t scale = 1ull << 16;
 

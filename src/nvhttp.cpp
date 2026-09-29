@@ -132,6 +132,24 @@ namespace nvhttp {
   namespace pt = boost::property_tree;
 
   namespace {
+    // A client media report this host refused never reaches Doctor, and the client only logs it once
+    // on its own side. Say which refusal it was here, at most once every half minute.
+    void note_refused_media_report(SimpleWeb::StatusCode code, const nlohmann::json &body) {
+      static std::atomic<std::int64_t> last_logged_ms {0};
+      const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()
+      ).count();
+      auto last = last_logged_ms.load(std::memory_order_relaxed);
+      if (last != 0 && now_ms - last < 30000) {
+        return;
+      }
+      if (!last_logged_ms.compare_exchange_strong(last, now_ms, std::memory_order_relaxed)) {
+        return;
+      }
+      BOOST_LOG(info) << "Doctor: refused a client media report with HTTP "sv << static_cast<int>(code) << ": "sv
+                      << body.value("code", std::string {"unknown"});
+    }
+
     // Moonlight shows this verbatim, so it names the setting and not a Nova screen: the launch mode
     // is Where games run on the host and the mode Nova picks per launch.
     constexpr const char *desktop_steam_did_not_exit_message =
@@ -10773,6 +10791,9 @@ namespace nvhttp {
       }
 
       auto write_json = [&](SimpleWeb::StatusCode code, const nlohmann::json &body) {
+        if (code != SimpleWeb::StatusCode::success_ok) {
+          note_refused_media_report(code, body);
+        }
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
         response->write(code, body.dump(), headers);

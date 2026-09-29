@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -298,6 +299,44 @@ namespace stream_stats {
     std::uint64_t created = 0;  ///< Creation order: a game numbers its players the same way
   };
 
+  /**
+   * @brief The windowed network judgement: one loss figure, one RTT figure, and whether either is
+   *        network pressure.
+   *
+   * Loss is video frames lost after FEC recovery: frames the client expected and never received
+   * whole, as a share of the frames it expected, summed over the media reports in the window. It is
+   * not a packet count. Frames the host dropped before sending are dropped_frame_ratio, a separate
+   * figure. RTT is the median of the host's round trip readings over the same window. Doctor's
+   * verdict, the session status and Live Tuning's loss input all read this one judgement, so they
+   * cannot quote different figures. network_judge_t says how it is formed.
+   */
+  struct network_verdict_t {
+    /// The window holds enough media reports to judge loss.
+    bool loss_available = false;
+    /// Frames lost as a percentage of frames expected over the window, 0 to 100.
+    double loss_pct = 0.0;
+    /// The frame counts behind loss_pct, so a report can say how many of how many.
+    std::uint64_t frames_expected = 0;
+    std::uint64_t frames_lost = 0;
+    int media_samples = 0;
+    /// How far back the oldest media report in the window is, in milliseconds.
+    std::int64_t media_span_ms = 0;
+    /// Pressure by loss: set when loss_pct reaches network_judge_t::k_loss_enter_pct and cleared
+    /// only once it falls below k_loss_exit_pct.
+    bool loss_elevated = false;
+    /// The window holds enough RTT readings to judge RTT.
+    bool rtt_available = false;
+    /// The median round trip time over the window, in milliseconds.
+    double rtt_ms = 0.0;
+    int rtt_samples = 0;
+    /// Pressure by RTT: set at network_judge_t::k_rtt_enter_ms and cleared below k_rtt_exit_ms.
+    bool rtt_elevated = false;
+    /// Either kind of pressure.
+    bool risk = false;
+    /// How long risk has held its current value, or -1 before the first reading.
+    std::int64_t risk_held_ms = -1;
+  };
+
   struct stats_t {
     std::uint64_t session_generation = 0;
     std::string app_session_id;
@@ -415,8 +454,13 @@ namespace stream_stats {
     /// newer control-channel sample never refreshes these fields.
     uint64_t media_loss_sample_revision = 0;
     std::int64_t media_loss_last_received_age_ms = -1;
-    /// Debounced by network_risk_tracker_t; the single truth every reader serves.
+    /// The newest reading's fast debounce by network_risk_tracker_t. A guarded Doctor action
+    /// verifies against it, because its verification must see only readings from after the change.
+    /// Everything that grades the stream reads network_verdict instead.
     bool network_risk = false;
+    /// Loss and RTT judged over the last network_judge_t::k_window with hysteresis: what Doctor's
+    /// verdict, the session status and Live Tuning's loss input read.
+    network_verdict_t network_verdict;
     uint64_t bytes_sent = 0;
 
     // Adaptive bitrate
@@ -1068,6 +1112,9 @@ namespace stream_stats {
     bool accepted = false;
     bool observation_published = false;
     double media_loss_pct = 0.0;
+    /// The frames this report covers since the one before it, and how many of them were lost.
+    std::uint64_t frames_expected = 0;
+    std::uint64_t frames_lost = 0;
   };
 
   /**
@@ -1084,6 +1131,9 @@ namespace stream_stats {
 #ifdef POLARIS_TESTS
   void age_client_media_counter_baseline_for_tests(
     std::chrono::steady_clock::duration age);
+
+  /** Move every reading the network judge holds this much further into the past. */
+  void age_network_judge_for_tests(std::chrono::steady_clock::duration age);
 #endif
 
   /**
@@ -1142,6 +1192,94 @@ namespace stream_stats {
       *this = network_risk_tracker_t {};
     }
   };
+
+  /**
+   * @brief Judges video frame loss and RTT over the last k_window, with hysteresis.
+   *
+   * Loss is the frames lost over the frames expected across every media report in the window, so a
+   * second that lost a burst of frames moves the figure by its share of the window rather than
+   * deciding it. RTT is the window's median, so a Wi-Fi spike of a few readings does not move it at
+   * all. Each verdict changes only across a band: loss becomes pressure at k_loss_enter_pct and
+   * clears only below k_loss_exit_pct, RTT at k_rtt_enter_ms and below k_rtt_exit_ms. A verdict needs
+   * k_min_media_samples reports or k_min_rtt_readings readings in the window, and a gap that thins
+   * the window below that starts its judgement over instead of carrying an old one across.
+   *
+   * RTT readings are held back until the estimator has shown one calm reading, or for
+   * k_rtt_armed_after readings, for the reason network_risk_tracker_t gives: ENet seeds a fresh
+   * peer's RTT at 500 ms and converges over its first seconds.
+   */
+  struct network_judge_t {
+    using clock_type = std::chrono::steady_clock;
+
+    static constexpr std::chrono::seconds k_window {20};
+    static constexpr int k_min_media_samples = 5;
+    static constexpr int k_min_rtt_readings = 5;
+    static constexpr double k_loss_enter_pct = network_risk_tracker_t::k_loss_elevated_pct;
+    static constexpr double k_loss_exit_pct = 1.0;
+    static constexpr double k_rtt_enter_ms = network_risk_tracker_t::k_rtt_elevated_ms;
+    static constexpr double k_rtt_exit_ms = 20.0;
+    /// Where RTT stops being pressure to watch and fails the stream, as it always has.
+    static constexpr double k_rtt_fail_ms = 45.0;
+    static constexpr int k_rtt_armed_after = network_risk_tracker_t::k_armed_after_samples;
+    /// A media report that carries only a percentage counts as this many frames, so such reports
+    /// weigh evenly. Polaris's own counter path always carries the frame counts.
+    static constexpr double k_frames_per_percentage_report = 100.0;
+    static constexpr std::size_t k_max_media_samples = 64;
+    static constexpr std::size_t k_max_rtt_readings = 256;
+
+    struct media_sample_t {
+      clock_type::time_point at {};
+      double frames_expected = 0.0;
+      double frames_lost = 0.0;
+    };
+
+    struct rtt_reading_t {
+      clock_type::time_point at {};
+      double rtt_ms = 0.0;
+    };
+
+    std::deque<media_sample_t> media;
+    std::deque<rtt_reading_t> rtt;
+    bool loss_elevated = false;
+    bool rtt_elevated = false;
+    bool rtt_armed = false;
+    int rtt_readings_seen = 0;
+    bool risk = false;
+    std::optional<clock_type::time_point> risk_since;
+
+    /** Fold in one media report: the frames it covers and how many of them were lost. */
+    void add_media(clock_type::time_point at, double frames_expected, double frames_lost);
+
+    /** Fold in one round trip reading. */
+    void add_rtt(clock_type::time_point at, double rtt_ms);
+
+    /** The judgement as it stands at now. */
+    network_verdict_t verdict(clock_type::time_point now) const;
+
+    void reset() {
+      *this = network_judge_t {};
+    }
+
+  private:
+    void note_risk(clock_type::time_point at);
+  };
+
+  /** The network judgement as it stands now, for a reader that needs no other stream field. */
+  network_verdict_t current_network_verdict();
+
+  /**
+   * @brief What a verdict's loss is called in a state field: collecting, clean, light or elevated.
+   *
+   * Light is loss at or above k_loss_exit_pct that is not pressure: measured, and below the figure
+   * Doctor acts on.
+   */
+  std::string_view network_loss_state(const network_verdict_t &verdict);
+
+  /** @brief What a verdict's RTT is called in a state field: collecting, clean or elevated. */
+  std::string_view network_rtt_state(const network_verdict_t &verdict);
+
+  /** @brief The verdict as the JSON the session status and stream stats serve. */
+  nlohmann::json network_verdict_json(const network_verdict_t &verdict);
 
   /**
    * @brief Update runtime mode metadata exposed to the dashboard.

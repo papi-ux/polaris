@@ -7,6 +7,17 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- The stream stats carry `network_verdict`, video frame loss and round trip time judged over the
+  last 20 seconds rather than from the newest report. Its loss is the share of video frames the
+  client expected and never received whole, after FEC recovery, with the frame counts behind it, and
+  its RTT is the median of the host's readings. Loss becomes pressure at 2% and clears only below
+  1%, RTT at 28 ms and below 20, and a window with fewer than five reports has no verdict. A
+  stream's own client row now says its loss arrived: it read `packet_loss_available: false` on
+  every codec while the top level had the loss, which is how a check of a PyroWave session
+  concluded the client's loss never reached the host. The host log also says once a stream when a
+  client's media reports start counting, when reports come too far apart to count, and, at most
+  every half minute, when one is refused.
+
 - A client can set up to 500 Mbps by hand. The endpoints a paired client sets its own bitrate
   through, its client settings' `target_bitrate_kbps`, a live bitrate change, a resolved launch's
   `bitrateKbps`, the launch profile route and a Space's resolver, stopped at 300000 kbps, below
