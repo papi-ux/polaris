@@ -28,8 +28,9 @@ starts at `v1.0.0`.
   that went on losing 4% of its frames verified on two clean reports, beside a headline that still
   called it pressure. Doctor now verifies the step against the window judged afresh from the moment
   the encoder applied it, and once it verifies the headline's judgement starts over from that
-  moment too. A step whose own readings are still pressure rolls back, and its readings stay in the
-  window.
+  moment too. Neither counts the first report after the step, which covers the second before it and
+  still carries the loss the step was taken for, so a step that cures 23% loss verifies. A step
+  whose own readings are still pressure rolls back, and its readings stay in the window.
 
 - Doctor's control channel finding holds steady as well. It came and went with ENet's newest
   estimate of the control channel's own loss against 2%, which on the Retroid Pocket 6's HEVC run

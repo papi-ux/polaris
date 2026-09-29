@@ -1271,6 +1271,8 @@ namespace stream_stats {
       clock_type::time_point at {};
       double frames_expected = 0.0;
       double frames_lost = 0.0;
+      /// When the second the report covers began: the arrival of the report before it.
+      clock_type::time_point begins {};
     };
 
     struct rtt_reading_t {
@@ -1297,6 +1299,9 @@ namespace stream_stats {
     network_verdict_t judged;
     /// When the oldest media report counted in judged arrived.
     clock_type::time_point media_oldest {};
+    /// When the newest media report arrived, kept after the window drops it, so the next report knows
+    /// when the second it covers began.
+    clock_type::time_point last_media_at {};
 
     /** Fold in one media report: the frames it covers and how many of them were lost. */
     void add_media(clock_type::time_point at, double frames_expected, double frames_lost);
@@ -1309,8 +1314,9 @@ namespace stream_stats {
 
     /**
      * Start the judgement over from `from`: readings before it leave the window and every band
-     * starts clear, then what is left is judged afresh. ENet's RTT has already settled, so the
-     * readings that waited for it are not held back again.
+     * starts clear, then what is left is judged afresh. A media report whose second began before
+     * `from` leaves too, although it arrived after: the frames it counts were sent before. ENet's RTT
+     * has already settled, so the readings that waited for it are not held back again.
      */
     void restart(clock_type::time_point from);
 
@@ -1333,9 +1339,12 @@ namespace stream_stats {
 
   /**
    * @brief The verdict the judge would reach from `from` on, judged afresh: every band clear at
-   *        `from` and only the readings after it counted.
+   *        `from` and only the readings after it counted, a media report only when the second it
+   *        covers began after it.
    *
-   * Doctor verifies a bitrate step against this, from the moment the encoder applied the step.
+   * Doctor verifies a bitrate step against this, from the moment the encoder applied the step. The
+   * first report after the step covers the second before it, so its loss is the loss the step was
+   * taken for, and counted against the step it rolled back one that cured it.
    */
   network_verdict_t network_verdict_since(std::chrono::steady_clock::time_point from);
 

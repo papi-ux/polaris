@@ -4057,7 +4057,9 @@ namespace stream_stats {
     if (!std::isfinite(frames_expected) || !std::isfinite(frames_lost) || frames_expected <= 0.0) {
       return;
     }
-    media.push_back({at, frames_expected, std::clamp(frames_lost, 0.0, frames_expected)});
+    const auto begins = last_media_at == clock_type::time_point {} ? at : last_media_at;
+    last_media_at = at;
+    media.push_back({at, frames_expected, std::clamp(frames_lost, 0.0, frames_expected), begins});
     drop_stale(media, at, k_max_media_samples);
     judge_media(at);
     note_risk(at);
@@ -4095,7 +4097,12 @@ namespace stream_stats {
         readings.pop_front();
       }
     };
-    drop_before(media);
+    // A report that arrived after `from` still counts the second before it. The first report after a
+    // bitrate step carries the loss the step was taken for, and counted against the step it rolled back
+    // a step that cured 23% loss.
+    while (!media.empty() && media.front().begins < from) {
+      media.pop_front();
+    }
     drop_before(rtt);
     drop_before(control);
     loss_elevated = false;
@@ -4625,8 +4632,12 @@ namespace stream_stats {
   void age_network_judge_for_tests(std::chrono::steady_clock::duration age) {
     std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
     network_judge.media_oldest -= age;
+    if (network_judge.last_media_at != judge_clock::time_point {}) {
+      network_judge.last_media_at -= age;
+    }
     for (auto &sample : network_judge.media) {
       sample.at -= age;
+      sample.begins -= age;
     }
     for (auto &reading : network_judge.rtt) {
       reading.at -= age;

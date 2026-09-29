@@ -496,11 +496,12 @@ namespace doctor_actions {
       const bool restoring_quality = run.kind == action_kind_e::restore_quality;
       if (!restoring_quality) {
         // A step for network pressure is verified against the verdict Doctor's headline will read
-        // once it verifies: the window judged afresh from the moment the encoder applied the step.
-        // With enough readings the two cannot disagree. A step that verifies starts the headline's
-        // judgement over from the same moment, and a step whose own readings are still pressure
-        // rolls back, as the headline would have it. A step taken for loss needs its loss judged;
-        // until then the newest readings decide, as they did.
+        // once it verifies: the window judged afresh from the moment the encoder applied the step,
+        // counting only media reports whose second began after it. The first report after the step
+        // covers the second before it. With enough readings the two cannot disagree. A step that
+        // verifies starts the headline's judgement over from the same moment, and a step whose own
+        // readings are still pressure rolls back, as the headline would have it. A step taken for loss
+        // needs its loss judged; until then the newest readings decide, as they did.
         auto post_step = stats;
         post_step.network_verdict = stream_stats::network_verdict_since(run.applied_at);
         const auto network = stream_stats::judged_network(post_step);

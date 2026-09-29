@@ -4506,7 +4506,8 @@ TEST(DoctorActionTests, AVerifiedStepLeavesDoctorJudgingOnlyTheReadingsAfterIt) 
   EXPECT_NE(after.at("primary_issue"), "network_jitter") << after.at("summary");
   EXPECT_NE(after.at("safe_recovery_action").at("id"), "lower_bitrate");
   const auto verdict = after.at("advanced_evidence").at("network_verdict");
-  EXPECT_EQ(verdict.at("media_samples"), 8);
+  // Eight clean reports, the first of which covers the second before the step and does not count.
+  EXPECT_EQ(verdict.at("media_samples"), 7);
   EXPECT_EQ(verdict.at("loss_state"), "clean");
 
   const auto undo = execute_with_encoder_ack(20000, [&] {
@@ -4537,10 +4538,11 @@ TEST(DoctorActionTests, AStepThePostStepWindowStillCallsPressureRollsBack) {
   const auto network = stream_stats::judged_network(stream_stats::get_current());
   ASSERT_TRUE(network.loss_pressure);
   EXPECT_EQ(doctor_step_stream_t::doctor().at("primary_issue"), "network_jitter");
-  // The step's own readings: six of eight reports lost 4%, 3% over the window since the step.
+  // The step's own readings: the first report covers the second before the step, and five of the
+  // other seven lost 4%, 2.9% over the window since the step.
   const auto since_step = stream_stats::network_verdict_since(stepped_at);
   ASSERT_TRUE(since_step.loss_available);
-  EXPECT_EQ(since_step.media_samples, 8);
+  EXPECT_EQ(since_step.media_samples, 7);
   EXPECT_TRUE(since_step.loss_elevated);
 
   doctor_actions::make_verification_window_complete_for_tests();
@@ -4549,6 +4551,53 @@ TEST(DoctorActionTests, AStepThePostStepWindowStillCallsPressureRollsBack) {
   });
   EXPECT_EQ(result.at("state"), "rolled_back") << result.dump();
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 20000);
+}
+
+TEST(DoctorActionTests, AStepThatCuresHeavyLossVerifiesPastTheReportThatStraddlesIt) {
+  // A stream losing 23% of its frames, stepped down, and clean from then on. The first report after
+  // the step covers the second before it and still carries the 23%. Counted against the step, it put
+  // the window since the step at 2.9% and rolled back a step that had cured the loss, and the headline
+  // offered the same step again. The report whose second began before the step does not count, on the
+  // watchdog's path as on a verify.
+  doctor_step_stream_t stream("DoctorStraddlingReport");
+  sustain_network_pressure(8.0, 23.0);
+  const auto before = doctor_step_stream_t::doctor();
+  ASSERT_EQ(before.at("primary_issue"), "network_jitter");
+  ASSERT_EQ(before.at("safe_recovery_action").at("id"), "lower_bitrate");
+
+  const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  ASSERT_TRUE(applied.at("status").get<bool>());
+  const auto run_id = applied.at("run_id").get<std::string>();
+  doctor_actions::confirm_encoder_application_for_tests();
+  const auto stepped_at = std::chrono::steady_clock::now();
+
+  stream_stats::update_network_stats(8.0, 23.0, 1000);
+  for (int i = 0; i < 7; ++i) {
+    stream_stats::update_network_stats(8.0, 0.0, 1000);
+  }
+  const auto since_step = stream_stats::network_verdict_since(stepped_at);
+  ASSERT_TRUE(since_step.loss_available);
+  EXPECT_EQ(since_step.media_samples, 7);
+  EXPECT_DOUBLE_EQ(since_step.loss_pct, 0.0);
+
+  doctor_actions::make_verification_window_complete_for_tests();
+  doctor_actions::run_verification_watchdog_for_tests();
+  const auto verified = doctor_actions::execute({{"action_id", "verify"}, {"run_id", run_id}});
+  EXPECT_EQ(verified.at("state"), "resolved") << verified.dump();
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 16000);
+
+  // The headline starts over from the step without the straddling report, as verification judged it.
+  const auto after = doctor_step_stream_t::doctor();
+  EXPECT_NE(after.at("primary_issue"), "network_jitter") << after.at("summary");
+  EXPECT_NE(after.at("safe_recovery_action").at("id"), "lower_bitrate");
+  const auto verdict = after.at("advanced_evidence").at("network_verdict");
+  EXPECT_EQ(verdict.at("media_samples"), 7);
+  EXPECT_EQ(verdict.at("loss_state"), "clean");
+
+  const auto undo = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute({{"action_id", "undo"}, {"run_id", run_id}});
+  });
+  EXPECT_EQ(undo.at("state"), "undone") << undo.dump();
 }
 
 TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
@@ -7464,6 +7513,36 @@ TEST(NetworkJudgeTests, RecordedHevcLossChangesTheVerdictOnceAndHoldsIt) {
   ASSERT_TRUE(verdict.rtt_available);
   EXPECT_LT(verdict.rtt_ms, stream_stats::network_judge_t::k_rtt_exit_ms);
   EXPECT_EQ(stream_stats::network_rtt_state(verdict), "clean");
+}
+
+TEST(NetworkJudgeTests, ARestartLeavesOutTheReportWhoseSecondBeganBeforeIt) {
+  // Reports a second apart, losing 23% of their frames. A bitrate step lands between two of them and
+  // cures the loss. The report after it counts the second before the step, and judged from the step
+  // it put the window at 2.9%, pressure, for a stream that had lost nothing since.
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  for (int second = 0; second < 10; ++second) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 100.0, 23.0);
+  }
+  ASSERT_TRUE(judge.verdict(at).loss_elevated);
+  const auto step = at + std::chrono::milliseconds(400);
+  at += std::chrono::seconds(1);
+  judge.add_media(at, 100.0, 23.0);
+  for (int second = 0; second < 7; ++second) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 100.0, 0.0);
+  }
+
+  auto since = judge;
+  since.restart(step);
+  const auto verdict = since.verdict(at);
+  ASSERT_TRUE(verdict.loss_available);
+  EXPECT_EQ(verdict.media_samples, 7);
+  EXPECT_DOUBLE_EQ(verdict.loss_pct, 0.0);
+  EXPECT_FALSE(verdict.loss_elevated);
+  // Unrestarted, the window still holds the loss that asked for the step.
+  EXPECT_TRUE(judge.verdict(at).loss_elevated);
 }
 
 TEST(NetworkJudgeTests, SustainedLossEntersAtItsBandAndHoldsThroughACleanSecond) {
