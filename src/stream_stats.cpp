@@ -4394,7 +4394,10 @@ namespace stream_stats {
       }
     }
     if (adaptive_bitrate::is_enabled()) {
-      adaptive_bitrate::update_network_stats(result.media_loss_pct, host.latency_ms);
+      // Live Tuning acts on the loss Doctor quotes: the window's figure while the verdict calls it
+      // network pressure, and none while it does not, so the two never disagree about the loss.
+      const auto verdict = current_network_verdict();
+      adaptive_bitrate::update_network_stats(verdict.loss_elevated ? verdict.loss_pct : 0.0, host.latency_ms);
     }
     result.observation_published = true;
     if (logged_media_report_generation.exchange(sample.session_generation) != sample.session_generation) {

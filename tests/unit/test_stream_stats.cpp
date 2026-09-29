@@ -7597,6 +7597,62 @@ namespace {
   }
 }  // namespace
 
+TEST(StreamStatsHotFieldTests, LiveTuningHearsTheLossTheVerdictConfirms) {
+  // The HEVC run's reports reach Live Tuning as the verdict judges them: no loss while the window
+  // stays under the pressure line, and the window's figure from the report that crosses it. Each
+  // report used to reach it raw, so the second one's 7.4% had Live Tuning cutting while Doctor said
+  // the loss was not confirmed.
+  config::video.adaptive_bitrate.enabled = true;
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_runtime_update_supported(true);
+  adaptive_bitrate::set_base_bitrate(268988);
+  stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-live-tuning", 72, "app-session-live-tuning");
+  stream_stats::update_stream_active(true);
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::stop_session_timing("owner-live-tuning", 72);
+    stream_stats::update_stream_active(false);
+    adaptive_bitrate::set_enabled(false);
+    config::video.adaptive_bitrate.enabled = false;
+  });
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_control_channel_stats(6.0, 7.75, 777);
+  }
+
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-live-tuning",
+    .app_session_id = "app-session-live-tuning",
+    .session_generation = 72,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 0,
+    .frames_received = 0,
+    .frames_lost = 0
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+  int report = 0;
+  for (const auto &recorded : k_recorded_hevc_reports) {
+    ++report;
+    sample.client_monotonic_ms += 1'000;
+    sample.frames_expected += recorded.expected;
+    sample.frames_lost += recorded.lost;
+    sample.frames_received = sample.frames_expected - sample.frames_lost;
+    ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).observation_published);
+    const auto heard = adaptive_bitrate::get_state().ewma_packet_loss;
+    const auto verdict = stream_stats::get_current().network_verdict;
+    if (report < 7) {
+      EXPECT_FALSE(verdict.loss_elevated) << "report " << report;
+      EXPECT_DOUBLE_EQ(heard, 0.0) << "report " << report;
+    } else {
+      EXPECT_TRUE(verdict.loss_elevated) << "report " << report;
+      EXPECT_GT(heard, 0.0) << "report " << report;
+      EXPECT_LE(heard, verdict.loss_pct) << "report " << report;
+    }
+  }
+}
+
 TEST(StreamStatsDoctorTests, RecordedHevcRunKeepsOneHeadline) {
   // The HEVC run's reports, a second at a time, with ten control pings between reports as Nova and
   // ENet send them, the control channel's own loss at the 7.75% the run read. Graded a report at a

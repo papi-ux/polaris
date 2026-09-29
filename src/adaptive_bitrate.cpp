@@ -217,7 +217,7 @@ namespace adaptive_bitrate {
       doctor_network_policy_regressed_during_override;
   }
 
-  void update_network_stats(double packet_loss_percent, double rtt_ms) {
+  void update_network_stats(std::optional<double> packet_loss_percent, double rtt_ms) {
     if (!enabled.load(std::memory_order_relaxed) ||
         !runtime_update_supported.load(std::memory_order_relaxed)) {
       return;
@@ -231,20 +231,24 @@ namespace adaptive_bitrate {
     auto now = std::chrono::steady_clock::now();
 
     if (!initialized) {
-      ewma_packet_loss = packet_loss_percent;
+      ewma_packet_loss = packet_loss_percent.value_or(0.0);
       ewma_rtt = rtt_ms;
       avg_rtt = rtt_ms;
       rtt_sample_count = 1;
       last_adjustment_time = now;
-      last_pressure_time = (packet_loss_percent > 0) ? now : (now - 10s);
+      last_pressure_time = (packet_loss_percent.value_or(0.0) > 0) ? now : (now - 10s);
       set_controller_status("steady", "warming_up");
       initialized = true;
       return;
     }
 
-    // Update EWMA smoothed values
+    // Update EWMA smoothed values. A reading with no loss figure moves only RTT: ten control pings a
+    // second, each counted as clean video, diluted a real 7% frame loss to under a tenth of a percent
+    // before Live Tuning could see it.
     double alpha = current_config.ewma_alpha;
-    ewma_packet_loss = alpha * packet_loss_percent + (1.0 - alpha) * ewma_packet_loss;
+    if (packet_loss_percent) {
+      ewma_packet_loss = alpha * *packet_loss_percent + (1.0 - alpha) * ewma_packet_loss;
+    }
     ewma_rtt = alpha * rtt_ms + (1.0 - alpha) * ewma_rtt;
 
     // Track long-term average RTT for spike detection
@@ -254,7 +258,7 @@ namespace adaptive_bitrate {
     avg_rtt += (rtt_ms - avg_rtt) / rtt_sample_count;
 
     // Track when we last saw loss
-    if (packet_loss_percent > 0.0) {
+    if (packet_loss_percent.value_or(0.0) > 0.0) {
       last_pressure_time = now;
     }
 

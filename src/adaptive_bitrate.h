@@ -101,11 +101,15 @@ namespace adaptive_bitrate {
   };
 
   /**
-   * @brief Feed network statistics from client loss reports.
-   * @param packet_loss_percent Packet loss percentage (0-100).
+   * @brief Feed one network reading to Live Tuning.
+   * @param packet_loss_percent Video frame loss, 0 to 100, as the host's network verdict judges it;
+   *        stream_stats passes the verdict's figure while it is network pressure and zero while it is
+   *        not, so Live Tuning acts on the loss Doctor quotes. std::nullopt for a reading that says
+   *        nothing about video, such as a control-channel ping: it leaves the loss average where it is
+   *        instead of pulling it toward zero.
    * @param rtt_ms Round-trip time in milliseconds.
    */
-  void update_network_stats(double packet_loss_percent, double rtt_ms);
+  void update_network_stats(std::optional<double> packet_loss_percent, double rtt_ms);
 
   /**
    * @brief Linearize a newly received host network observation with Doctor.

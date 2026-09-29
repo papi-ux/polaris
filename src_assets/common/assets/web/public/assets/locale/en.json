@@ -283,7 +283,7 @@
     "av_auto_quality_heading_on": "Auto Quality is balancing this host",
     "av_auto_quality_heading_partial": "Auto Quality is partially enabled",
     "av_auto_quality_live_kicker": "Live host status",
-    "av_auto_quality_live_loss_note": "{loss}% packet loss (smoothed)",
+    "av_auto_quality_live_loss_note": "{loss}% of video frames lost over 20 s",
     "av_auto_quality_live_not_streaming": "No stream running",
     "av_auto_quality_live_range_note": "Adaptive range {min} to {max}",
     "av_auto_quality_live_row_bitrate": "Live bitrate",

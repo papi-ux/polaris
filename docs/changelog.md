@@ -7,6 +7,15 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Live Tuning acts on the loss Doctor quotes. Every control ping reached it as a second of clean
+  video, ten a second, so a report that lost 7% of its frames faded to a few hundredths of a
+  percent before Live Tuning looked, and on the HEVC run it cut for RTT spikes while its own loss
+  average read 0.08%. Pings now bring it RTT alone, and client media reports bring it the window's
+  loss while the verdict calls it pressure and none while it does not, so Live Tuning cuts for loss
+  once Doctor calls it pressure and not before. The tuning block carries that figure as
+  `network_loss_pct`, and the console's Live Tuning row shows it. The row read the controller's
+  loss average, already a percentage, as a fraction, so 0.078% showed as 7.8%.
+
 - Doctor grades the network from that verdict. Its headline, the evidence it cites, the Auto Fix it
   offers and the session status's `network_risk` all read the same 20 second judgement, so one
   second that lost a burst of frames, or one Wi-Fi RTT spike, no longer flips the verdict. On the

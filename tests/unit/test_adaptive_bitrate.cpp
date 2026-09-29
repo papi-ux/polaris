@@ -40,6 +40,43 @@ TEST(AdaptiveBitrateController, ReducesTargetOnNetworkPressure) {
   EXPECT_EQ("network_pressure", state.state);
 }
 
+TEST(AdaptiveBitrateController, AReadingWithoutLossLeavesTheLossAverageWhereItIs) {
+  enable_controller();
+
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  adaptive_bitrate::update_network_stats(6.0, 8.0);
+  const double after_loss = adaptive_bitrate::get_state().ewma_packet_loss;
+  ASSERT_GT(after_loss, 0.0);
+
+  // A second of control pings carries RTT and nothing about video.
+  for (int i = 0; i < 10; ++i) {
+    adaptive_bitrate::update_network_stats(std::nullopt, 8.0);
+  }
+  EXPECT_DOUBLE_EQ(adaptive_bitrate::get_state().ewma_packet_loss, after_loss);
+}
+
+TEST(AdaptiveBitrateController, SustainedLossBetweenPingsStillReducesTheTarget) {
+  enable_controller();
+
+  // Loss arrives once a second and pings ten times a second. Counted as clean video, the pings pulled
+  // the loss average to a few hundredths of a percent before the interval came round.
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  for (int i = 0; i < 3; ++i) {
+    adaptive_bitrate::update_network_stats(6.0, 8.0);
+  }
+  for (int i = 0; i < 10; ++i) {
+    adaptive_bitrate::update_network_stats(std::nullopt, 8.0);
+  }
+  std::this_thread::sleep_for(1100ms);
+  adaptive_bitrate::update_network_stats(std::nullopt, 8.0);
+
+  const auto state = adaptive_bitrate::get_state();
+  EXPECT_GT(state.ewma_packet_loss, 1.0);
+  EXPECT_LT(state.target_bitrate_kbps, state.base_bitrate_kbps);
+  EXPECT_EQ(state.state, "network_pressure");
+  EXPECT_EQ(state.reason, "packet_loss");
+}
+
 TEST(AdaptiveBitrateController, IgnoresSubthresholdRelativeRttSpikeOnFastLan) {
   enable_controller();
 

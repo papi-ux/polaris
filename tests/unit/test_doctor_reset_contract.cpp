@@ -387,6 +387,26 @@ TEST(DoctorResetContract, HostNetworkEvidenceLinearizesBeforeAdaptiveFeedback) {
   EXPECT_LT(epoch, revision);
 }
 
+TEST(DoctorResetContract, ControlPingsBringLiveTuningNoLoss) {
+  // A ping or a loss-stats message says nothing about video frames. Passing zero loss for each one
+  // counted ten clean video seconds a second into Live Tuning's loss average.
+  const auto stream = source("src/stream.cpp");
+  const auto periodic_ping = between(
+    stream,
+    "server->map(packetTypes[IDX_PERIODIC_PING]",
+    "server->map(packetTypes[IDX_START_A]"
+  );
+  const auto loss_stats = between(
+    stream,
+    "server->map(packetTypes[IDX_LOSS_STATS]",
+    "server->map(packetTypes[IDX_REQUEST_IDR_FRAME]"
+  );
+  for (const auto *handler : {&periodic_ping, &loss_stats}) {
+    EXPECT_NE(handler->find("adaptive_bitrate::update_network_stats(std::nullopt, rtt_ms)"), std::string::npos);
+    EXPECT_EQ(handler->find("adaptive_bitrate::update_network_stats(0.0"), std::string::npos);
+  }
+}
+
 TEST(DoctorResetContract, LiveMediaTelemetryIsEvidenceOnlyAndGenerationBound) {
   const auto nvhttp = source("src/nvhttp.cpp");
   const auto capabilities = between(
