@@ -101,6 +101,12 @@ namespace adaptive_bitrate {
   };
 
   /**
+   * How old the newest client media report may be before Live Tuning stops acting on the loss it
+   * brought, as the host's network verdict stops judging it (judged_network_t::k_media_report_max_age_ms).
+   */
+  inline constexpr std::chrono::milliseconds k_media_report_max_age {5000};
+
+  /**
    * @brief Feed one network reading to Live Tuning.
    *
    * Heavy loss, over 5%, and RTT spikes cut down to the floor. Moderate loss, 5% or less with no RTT
@@ -112,10 +118,15 @@ namespace adaptive_bitrate {
    * the loss does not rise. Where a step below did lower it, the rate climbs back toward the rate that
    * lost frames the same way.
    *
+   * Only a client media report acts on loss. A ping acts on an RTT spike, and while the newest report
+   * is no older than k_media_report_max_age it does nothing else. Past that the loss is stale: it is no
+   * pressure, its average decays with each ping as clean readings would pull it, and pings bring the
+   * ordinary recovery.
+   *
    * @param packet_loss_percent Video frame loss, 0 to 100, from one client media report, the report's
    *        own figure. std::nullopt for a reading that says nothing about video, such as a
-   *        control-channel ping: it leaves the loss average where it is instead of pulling it toward
-   *        zero.
+   *        control-channel ping: while reports arrive it leaves the loss average where it is instead of
+   *        pulling it toward zero.
    * @param rtt_ms Round-trip time in milliseconds.
    * @param loss_is_pressure Whether the host's network verdict calls loss pressure. Live Tuning hears a
    *        report's loss only while it does, so it acts when Doctor does, and its average falls within

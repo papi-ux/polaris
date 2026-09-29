@@ -4536,6 +4536,10 @@ namespace stream_stats {
       // for most of the 20 seconds after the loss stops, and Live Tuning cut on it every second, late
       // and long after, where each report's figure lets its average fall within seconds. The report's
       // own figure also judges the rate Live Tuning holds, whatever the verdict says.
+      static_assert(
+        adaptive_bitrate::k_media_report_max_age.count() == judged_network_t::k_media_report_max_age_ms,
+        "Live Tuning stops acting on loss when Doctor stops judging it"
+      );
       adaptive_bitrate::update_network_stats(result.media_loss_pct, host.latency_ms, verdict.loss_elevated);
     }
     result.observation_published = true;

@@ -169,6 +169,9 @@ namespace adaptive_bitrate {
   static std::chrono::steady_clock::duration step_up_wait = RATE_TEST_DWELL;
   // The base those findings were made against. A new base starts them over.
   static int rate_tests_base_kbps = 0;
+  // When the newest client media report arrived. Past k_media_report_max_age its loss is stale.
+  static bool media_report_heard = false;
+  static std::chrono::steady_clock::time_point last_media_report_time {};
 
   static void set_controller_status(const std::string &state, const std::string &reason) {
     controller_state = state;
@@ -503,6 +506,10 @@ namespace adaptive_bitrate {
       rtt_sample_count = 1;
       last_adjustment_time = now;
       last_pressure_time = (heard_loss.value_or(0.0) > 0) ? now : (now - 10s);
+      if (packet_loss_percent) {
+        media_report_heard = true;
+        last_media_report_time = now;
+      }
       set_controller_status("steady", "warming_up");
       initialized = true;
       return;
@@ -514,7 +521,11 @@ namespace adaptive_bitrate {
     }
     if (packet_loss_percent) {
       note_rate_evidence_locked(*packet_loss_percent);
+      media_report_heard = true;
+      last_media_report_time = now;
     }
+    // The host's verdict stops judging loss once the newest report is this old, and so does Live Tuning.
+    const bool loss_current = media_report_heard && now - last_media_report_time <= k_media_report_max_age;
 
     // Update EWMA smoothed values. A reading with no loss figure moves only RTT: ten control pings a
     // second, each counted as clean video, diluted a real 7% frame loss to under a tenth of a percent
@@ -522,6 +533,15 @@ namespace adaptive_bitrate {
     double alpha = current_config.ewma_alpha;
     if (heard_loss) {
       ewma_packet_loss = alpha * *heard_loss + (1.0 - alpha) * ewma_packet_loss;
+    } else if (!loss_current) {
+      // No report says anything about the loss now: a client that stopped posting, a screen with no
+      // new frames, or reports too far apart to count. Held where the last report put it, the average
+      // had every ping cutting on it for as long as the silence lasted, so it decays as clean readings
+      // would, and nothing is left to judge a rate test with.
+      ewma_packet_loss = (1.0 - alpha) * ewma_packet_loss;
+      if (rate_test != rate_test_e::none || loss_not_the_bitrates_up_to_pct || lossy_rate_kbps > 0) {
+        forget_rate_tests_locked();
+      }
     }
     ewma_rtt = alpha * rtt_ms + (1.0 - alpha) * ewma_rtt;
 
@@ -534,6 +554,20 @@ namespace adaptive_bitrate {
     // Track when we last saw loss
     if (heard_loss.value_or(0.0) > 0.0) {
       last_pressure_time = now;
+    }
+
+    // RTT spike detection: if current RTT is more than 2x the long-term average,
+    // treat it as congestion and reduce bitrate immediately
+    const bool rtt_spike = (rtt_sample_count > 5) &&
+                           (rtt_ms >= ACTIONABLE_RTT_MS) &&
+                           (rtt_ms > avg_rtt * 2.0) &&
+                           (avg_rtt > 0);
+
+    // A ping says nothing about video, so while reports arrive it acts only on an RTT spike and leaves
+    // the loss to the next report. Pings come ten times a second and took the interval first, cutting
+    // on a loss average only a report can move.
+    if (!packet_loss_percent && loss_current && !rtt_spike) {
+      return;
     }
 
     // Check if enough time has passed for an adjustment
@@ -558,15 +592,9 @@ namespace adaptive_bitrate {
     double max_change = current_config.max_change_rate;
     int new_target = current_target;
 
-    // RTT spike detection: if current RTT is more than 2x the long-term average,
-    // treat it as congestion and reduce bitrate immediately
-    bool rtt_spike = (rtt_sample_count > 5) &&
-                     (rtt_ms >= ACTIONABLE_RTT_MS) &&
-                     (rtt_ms > avg_rtt * 2.0) &&
-                     (avg_rtt > 0);
-
-    const bool loss_pressure = ewma_packet_loss > LOSS_PRESSURE_PCT;
-    const bool heavy_loss = ewma_packet_loss > HEAVY_LOSS_PCT;
+    // Stale loss is no pressure: Doctor does not judge it either.
+    const bool loss_pressure = loss_current && ewma_packet_loss > LOSS_PRESSURE_PCT;
+    const bool heavy_loss = loss_current && ewma_packet_loss > HEAVY_LOSS_PCT;
     const bool network_pressure = loss_pressure || rtt_spike;
     if (rtt_spike || heavy_loss) {
       // Heavy loss is the mark of a link too small for the stream, and an RTT spike the mark of a
@@ -1258,6 +1286,7 @@ namespace adaptive_bitrate {
     last_adjustment_time -= age;
     last_pressure_time -= age;
     rate_evidence.since -= age;
+    last_media_report_time -= age;
   }
 #endif
 
@@ -1276,6 +1305,8 @@ namespace adaptive_bitrate {
     forget_rate_tests_locked();
     rate_evidence = rate_evidence_t {};
     rate_tests_base_kbps = 0;
+    media_report_heard = false;
+    last_media_report_time = {};
     runtime_update_supported.store(false, std::memory_order_relaxed);
     runtime_update_reason = "encoder_not_initialized";
     set_controller_status(enabled.load(std::memory_order_relaxed) ? "steady" : "disabled",

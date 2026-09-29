@@ -8092,6 +8092,17 @@ namespace {
       }
       return adaptive_bitrate::get_state().target_bitrate_kbps;
     }
+
+    /// A second whose client media report never reaches the host, with its ten control pings.
+    int quiet_second() {
+      stream_stats::age_network_judge_for_tests(std::chrono::seconds(1));
+      adaptive_bitrate::age_for_tests(std::chrono::seconds(1));
+      for (int ping = 0; ping < 10; ++ping) {
+        stream_stats::update_control_channel_stats(6.0, 0.0, 777);
+        adaptive_bitrate::update_network_stats(std::nullopt, 6.0);
+      }
+      return adaptive_bitrate::get_state().target_bitrate_kbps;
+    }
   };
 }  // namespace
 
@@ -8204,6 +8215,37 @@ TEST(StreamStatsHotFieldTests, LiveTuningStepsUnderALinkThatShrankBelowHalfItsBi
   EXPECT_LE(lossy_last_minute, 10) << trace;
   EXPECT_LE(target.back(), link_kbps) << trace;
   EXPECT_GT(target.back(), link_kbps * 9 / 10) << trace;
+}
+
+TEST(StreamStatsHotFieldTests, LiveTuningStopsCuttingWhenReportsStopMidSession) {
+  // The client's media reports stop reaching the host mid-session: it stops posting, the screen has no
+  // new frames, or its reports come too far apart to count. Live Tuning's loss average stayed where the
+  // last report put it and every ping cut on it: 10 seconds at 5% left a stream at half its bitrate for
+  // good, and a 3 second burst at 20% took one to the 2 Mbps floor, while Doctor called the same loss
+  // stale. Live Tuning stops cutting for it with the last report and comes all the way back.
+  struct run_t {
+    int lossy_seconds;
+    std::uint64_t lost;
+  };
+  for (const auto run : {run_t {10, 6}, run_t {3, 24}}) {
+    live_tuning_stream_t stream("owner-live-quiet-" + std::to_string(run.lost), 80 + run.lost);
+    std::vector<int> target;
+    for (int second = 0; second < 20; ++second) {
+      target.push_back(stream.second(120, 0));
+    }
+    for (int second = 0; second < run.lossy_seconds; ++second) {
+      target.push_back(stream.second(120, run.lost));
+    }
+    const std::size_t last_report = target.size() - 1;
+    for (int second = 0; second < 60; ++second) {
+      target.push_back(stream.quiet_second());
+    }
+    const auto trace = live_tuning_trace(target);
+    RecordProperty("targets_" + std::to_string(run.lost), trace);
+    ASSERT_LT(target[last_report], k_live_tuning_base_kbps) << trace;
+    EXPECT_GE(*std::min_element(target.begin() + last_report, target.end()), target[last_report]) << trace;
+    EXPECT_EQ(target.back(), k_live_tuning_base_kbps) << trace;
+  }
 }
 
 TEST(StreamStatsHotFieldTests, LiveTuningStopsCuttingWithinSecondsOfABurst) {

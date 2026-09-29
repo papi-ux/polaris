@@ -58,28 +58,6 @@ TEST(AdaptiveBitrateController, AReadingWithoutLossLeavesTheLossAverageWhereItIs
   EXPECT_DOUBLE_EQ(adaptive_bitrate::get_state().ewma_packet_loss, after_loss);
 }
 
-TEST(AdaptiveBitrateController, SustainedLossBetweenPingsStillReducesTheTarget) {
-  enable_controller();
-
-  // Loss arrives once a second and pings ten times a second. Counted as clean video, the pings pulled
-  // the loss average to a few hundredths of a percent before the interval came round.
-  adaptive_bitrate::update_network_stats(0.0, 8.0);
-  for (int i = 0; i < 3; ++i) {
-    adaptive_bitrate::update_network_stats(6.0, 8.0);
-  }
-  for (int i = 0; i < 10; ++i) {
-    adaptive_bitrate::update_network_stats(std::nullopt, 8.0);
-  }
-  std::this_thread::sleep_for(1100ms);
-  adaptive_bitrate::update_network_stats(std::nullopt, 8.0);
-
-  const auto state = adaptive_bitrate::get_state();
-  EXPECT_GT(state.ewma_packet_loss, 1.0);
-  EXPECT_LT(state.target_bitrate_kbps, state.base_bitrate_kbps);
-  EXPECT_EQ(state.state, "network_pressure");
-  EXPECT_EQ(state.reason, "packet_loss");
-}
-
 namespace {
   /// One client media report a second for `seconds`, its loss given by the rate Live Tuning holds.
   /// Returns the target after each second.
@@ -171,6 +149,62 @@ TEST(AdaptiveBitrateController, LossTheBitrateDoesNotCauseHoldsAndClimbsBackToTh
   const auto back = std::find(targets.begin() + 20, targets.end(), 40000);
   ASSERT_NE(back, targets.end()) << trace;
   EXPECT_LE(back - targets.begin(), 120) << trace;
+  EXPECT_EQ(targets.back(), 40000) << trace;
+  leave_controller_clean();
+}
+
+TEST(AdaptiveBitrateController, PingsNeverCutForLossAndTheNextReportDoes) {
+  // Loss arrives once a second and pings ten times a second. Counted as clean video, the pings pulled
+  // the loss average to a few hundredths of a percent before the interval came round. Heard as
+  // nothing, they left it alone but took the interval first and cut on it. A ping says nothing about
+  // video, so it leaves the loss a report brought to the next report.
+  enable_controller();
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  for (int i = 0; i < 3; ++i) {
+    adaptive_bitrate::update_network_stats(6.0, 8.0);
+  }
+  adaptive_bitrate::age_for_tests(1100ms);
+  for (int i = 0; i < 10; ++i) {
+    adaptive_bitrate::update_network_stats(std::nullopt, 8.0);
+  }
+  auto state = adaptive_bitrate::get_state();
+  EXPECT_GT(state.ewma_packet_loss, 1.0);
+  EXPECT_EQ(state.target_bitrate_kbps, state.base_bitrate_kbps);
+
+  adaptive_bitrate::update_network_stats(6.0, 8.0);
+  state = adaptive_bitrate::get_state();
+  EXPECT_LT(state.target_bitrate_kbps, state.base_bitrate_kbps);
+  EXPECT_EQ(state.state, "network_pressure");
+  EXPECT_EQ(state.reason, "packet_loss");
+  leave_controller_clean();
+}
+
+TEST(AdaptiveBitrateController, ALossAverageWhoseReportsStoppedDecaysAndCutsNothing) {
+  // The client's media reports stop while the loss average is high: it stopped posting, or the screen
+  // has no new frames. The average stayed where the last report put it and every ping cut on it for as
+  // long as the silence lasted. Once the newest report is older than Doctor keeps loss for, the average
+  // decays and the pings bring the stream back.
+  enable_controller(40000);
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  for (int second = 0; second < 3; ++second) {
+    adaptive_bitrate::age_for_tests(1s);
+    adaptive_bitrate::update_network_stats(4.0, 8.0);
+  }
+  const auto after_loss = adaptive_bitrate::get_state();
+  ASSERT_LT(after_loss.target_bitrate_kbps, 40000);
+  ASSERT_GT(after_loss.ewma_packet_loss, 1.0);
+
+  std::vector<int> targets;
+  for (int second = 0; second < 40; ++second) {
+    adaptive_bitrate::age_for_tests(1s);
+    for (int ping = 0; ping < 10; ++ping) {
+      adaptive_bitrate::update_network_stats(std::nullopt, 8.0);
+    }
+    targets.push_back(adaptive_bitrate::get_state().target_bitrate_kbps);
+  }
+  const auto trace = targets_text(targets);
+  EXPECT_GE(*std::min_element(targets.begin(), targets.end()), after_loss.target_bitrate_kbps) << trace;
+  EXPECT_LT(adaptive_bitrate::get_state().ewma_packet_loss, 0.01);
   EXPECT_EQ(targets.back(), 40000) << trace;
   leave_controller_clean();
 }
