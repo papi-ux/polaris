@@ -7837,10 +7837,10 @@ namespace {
 }  // namespace
 
 TEST(StreamStatsHotFieldTests, LiveTuningHearsTheLossTheVerdictConfirms) {
-  // The HEVC run's reports reach Live Tuning as the verdict judges them: no loss while the window
-  // stays under the pressure line, and the window's figure from the report that crosses it. Each
-  // report used to reach it raw, so the second one's 7.4% had Live Tuning cutting while Doctor said
-  // the loss was not confirmed.
+  // The HEVC run's reports reach Live Tuning once the verdict calls their loss pressure: nothing while
+  // the window stays under the pressure line, and each report's own figure from the report that
+  // crosses it. Each report used to reach it whatever the verdict said, so the second one's 7.4% had
+  // Live Tuning cutting while Doctor said the loss was not confirmed.
   config::video.adaptive_bitrate.enabled = true;
   config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
   config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
@@ -7884,12 +7884,160 @@ TEST(StreamStatsHotFieldTests, LiveTuningHearsTheLossTheVerdictConfirms) {
     if (report < 7) {
       EXPECT_FALSE(verdict.loss_elevated) << "report " << report;
       EXPECT_DOUBLE_EQ(heard, 0.0) << "report " << report;
-    } else {
+    } else if (report == 7) {
+      // The report that crosses the line: its own 9 of 121 frames, averaged in once.
       EXPECT_TRUE(verdict.loss_elevated) << "report " << report;
-      EXPECT_GT(heard, 0.0) << "report " << report;
-      EXPECT_LE(heard, verdict.loss_pct) << "report " << report;
+      EXPECT_NEAR(heard, 0.3 * 900.0 / 121.0, 1e-9) << "report " << report;
+    } else {
+      // A clean report under a verdict that still holds: the average falls, and nothing refreshes it.
+      EXPECT_TRUE(verdict.loss_elevated) << "report " << report;
+      EXPECT_NEAR(heard, 0.7 * 0.3 * 900.0 / 121.0, 1e-9) << "report " << report;
     }
   }
+}
+
+namespace {
+  constexpr int k_live_tuning_base_kbps = 268988;
+
+  /// A stream Live Tuning owns, at the HEVC run's 269 Mbps, with its client's counters at zero.
+  struct live_tuning_stream_t {
+    std::string owner;
+    std::uint64_t generation;
+    stream_stats::client_media_counters_t sample;
+
+    live_tuning_stream_t(std::string owner_uuid, std::uint64_t session_generation):
+        owner(std::move(owner_uuid)),
+        generation(session_generation) {
+      config::video.adaptive_bitrate.enabled = true;
+      config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+      config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+      adaptive_bitrate::load_config();
+      adaptive_bitrate::reset();
+      adaptive_bitrate::set_runtime_update_supported(true);
+      adaptive_bitrate::set_base_bitrate(k_live_tuning_base_kbps);
+      stream_stats::update_stream_active(false);
+      stream_stats::start_session_timing(owner, generation, "app-session-" + owner);
+      stream_stats::update_stream_active(true);
+      for (int ping = 0; ping < 6; ++ping) {
+        stream_stats::update_control_channel_stats(6.0, 0.0, 777);
+      }
+      sample = {
+        .owner_uuid = owner,
+        .app_session_id = "app-session-" + owner,
+        .session_generation = generation,
+        .client_monotonic_ms = 1'000,
+        .frames_expected = 0,
+        .frames_received = 0,
+        .frames_lost = 0
+      };
+      EXPECT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+    }
+
+    ~live_tuning_stream_t() {
+      stream_stats::stop_session_timing(owner, generation);
+      stream_stats::update_stream_active(false);
+      adaptive_bitrate::set_enabled(false);
+      config::video.adaptive_bitrate.enabled = false;
+    }
+
+    /// One second as Live Tuning lives it: the second passes for the judge and the controller, the
+    /// client's media report arrives, and ten control pings follow, as Nova and ENet send them.
+    /// Returns the live target at the end of the second.
+    int second(std::uint64_t expected, std::uint64_t lost) {
+      stream_stats::age_network_judge_for_tests(std::chrono::seconds(1));
+      adaptive_bitrate::age_for_tests(std::chrono::seconds(1));
+      sample.client_monotonic_ms += 1'000;
+      sample.frames_expected += expected;
+      sample.frames_lost += lost;
+      sample.frames_received = sample.frames_expected - sample.frames_lost;
+      EXPECT_TRUE(stream_stats::ingest_client_media_counters(sample).observation_published);
+      for (int ping = 0; ping < 10; ++ping) {
+        stream_stats::update_control_channel_stats(6.0, 0.0, 777);
+        adaptive_bitrate::update_network_stats(std::nullopt, 6.0);
+      }
+      return adaptive_bitrate::get_state().target_bitrate_kbps;
+    }
+  };
+}  // namespace
+
+TEST(StreamStatsHotFieldTests, LiveTuningStopsCuttingWithinSecondsOfCleanReports) {
+  // Ten seconds that lose 5% of their frames, on a stream that was clean. Fed the window's figure,
+  // Live Tuning cut every second the verdict held, which is most of 20 seconds after the loss ended,
+  // and ended far below the bitrate it recovered to by the end here. Fed each report's figure while
+  // the verdict holds, it waits for Doctor, cuts while the loss lasts, and stops within seconds.
+  live_tuning_stream_t stream("owner-live-cuts", 73);
+  std::vector<int> target;
+  std::vector<bool> elevated;
+  const auto run = [&](int seconds, std::uint64_t lost) {
+    for (int i = 0; i < seconds; ++i) {
+      target.push_back(stream.second(120, lost));
+      elevated.push_back(stream_stats::current_network_verdict().loss_elevated);
+    }
+  };
+  run(20, 0);
+  const int first_lossy = static_cast<int>(target.size());
+  run(10, 6);
+  const int first_clean = static_cast<int>(target.size());
+  run(40, 0);
+
+  std::string trace;
+  int entered = -1;
+  int last_cut = -1;
+  for (std::size_t i = 0; i < target.size(); ++i) {
+    trace += std::to_string(i) + ":" + std::to_string(target[i] / 1000) + (elevated[i] ? "*" : "") + " ";
+    if (entered < 0 && elevated[i]) {
+      entered = static_cast<int>(i);
+    }
+    if (i > 0 && target[i] < target[i - 1]) {
+      last_cut = static_cast<int>(i);
+    }
+  }
+  RecordProperty("targets", trace);
+  // Doctor names the pressure on the eighth lossy report, and Live Tuning cuts for none before it.
+  ASSERT_EQ(entered, first_lossy + 7) << trace;
+  for (int i = 0; i < entered; ++i) {
+    EXPECT_EQ(target[i], k_live_tuning_base_kbps) << trace;
+  }
+  EXPECT_LT(target[entered], k_live_tuning_base_kbps) << trace;
+  // The cuts stop within three seconds of the first clean report, while the verdict still holds.
+  EXPECT_LE(last_cut, first_clean + 2) << trace;
+  EXPECT_TRUE(elevated[first_clean + 10]) << trace;
+  // A few percent for a few seconds costs a moderate step, and the bitrate comes all the way back.
+  EXPECT_GT(*std::min_element(target.begin(), target.end()), k_live_tuning_base_kbps / 2) << trace;
+  EXPECT_EQ(target.back(), k_live_tuning_base_kbps) << trace;
+}
+
+TEST(StreamStatsHotFieldTests, LiveTuningHoldsTheRecordedHevcRunAtHalfItsBitrate) {
+  // The Retroid Pocket 6's HEVC run: about 2% of its frames lost in bursts every few seconds, for as
+  // long as the run lasted. Doctor calls that pressure and keeps calling it, and Live Tuning, heard
+  // each report's loss, cut on toward the 2 Mbps floor. Loss still there at half the bitrate is not
+  // the bitrate's doing, so it stops there and holds.
+  live_tuning_stream_t stream("owner-live-hevc", 74);
+  std::vector<int> target;
+  for (int round = 0; round < 40; ++round) {
+    for (const auto &report : k_recorded_hevc_reports) {
+      target.push_back(stream.second(report.expected, report.lost));
+    }
+  }
+  std::string trace;
+  int last_cut = -1;
+  for (std::size_t i = 0; i < target.size(); ++i) {
+    if (i < 64 || i + 1 == target.size()) {
+      trace += std::to_string(i) + ":" + std::to_string(target[i] / 1000) + " ";
+    }
+    if (i > 0 && target[i] < target[i - 1]) {
+      last_cut = static_cast<int>(i);
+    }
+  }
+  RecordProperty("targets", trace);
+  const int half = static_cast<int>(k_live_tuning_base_kbps * 0.5);
+  EXPECT_GE(*std::min_element(target.begin(), target.end()), half) << trace;
+  EXPECT_EQ(target.back(), half) << trace;
+  EXPECT_LT(last_cut, 60) << trace;
+  const auto state = adaptive_bitrate::get_state();
+  EXPECT_EQ(state.state, "network_pressure");
+  EXPECT_EQ(state.reason, "packet_loss_holding");
+  EXPECT_TRUE(stream_stats::current_network_verdict().loss_elevated);
 }
 
 TEST(StreamStatsDoctorTests, RecordedHevcRunKeepsOneHeadline) {

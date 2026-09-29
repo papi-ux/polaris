@@ -39,14 +39,19 @@ starts at `v1.0.0`.
   The report names the network only when the window judged its loss as pressure, and until the
   host has judged any the snapshot says "not judged yet" instead of 0%.
 
-- Live Tuning acts on the loss Doctor quotes. Every control ping reached it as a second of clean
+- Live Tuning acts on loss when Doctor does. Every control ping reached it as a second of clean
   video, ten a second, so a report that lost 7% of its frames faded to a few hundredths of a
   percent before Live Tuning looked, and on the HEVC run it cut for RTT spikes while its own loss
-  average read 0.08%. Pings now bring it RTT alone, and client media reports bring it the window's
-  loss while the verdict calls it pressure and none while it does not, so Live Tuning cuts for loss
-  once Doctor calls it pressure and not before. The tuning block carries that figure as
-  `network_loss_pct`, and the console's Live Tuning row shows it. The row read the controller's
-  loss average, already a percentage, as a fraction, so 0.078% showed as 7.8%.
+  average read 0.08%. Pings now bring it RTT alone, and each client media report brings its own loss
+  while the verdict calls loss pressure and none while it does not, so Live Tuning cuts for loss
+  once Doctor calls it pressure and not before, and stops within seconds of clean reports instead
+  of cutting on for most of the 20 seconds the verdict takes to clear. Loss of 5% or less that
+  is still there at half the stream's bitrate is not the bitrate's doing, so Live Tuning holds there
+  and says `packet_loss_holding`. Heavier loss, or an RTT spike, still cuts to the floor. Replayed
+  without that hold, the HEVC run's 2% in bursts took Live Tuning from 269 Mbps to 4 within a minute.
+  The tuning block carries Doctor's figure as `network_loss_pct`, and the console's Live Tuning row
+  shows it. The row read the controller's loss average, already a percentage, as a fraction, so
+  0.078% showed as 7.8%.
 
 - Doctor grades the network from that verdict. Its headline, the evidence it cites, the Auto Fix it
   offers and the session status's `network_risk` all read the same 20 second judgement, so one

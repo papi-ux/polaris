@@ -24,6 +24,11 @@ namespace adaptive_bitrate {
   // Doctor uses. A relative-only spike check turns normal LAN jitter such as
   // 1 ms -> 3 ms into "congestion" even though the path is still excellent.
   static constexpr double ACTIONABLE_RTT_MS = 45.0;
+  // Loss above this share of frames is heavy: the controller cuts by its whole max_change_rate.
+  static constexpr double HEAVY_LOSS_PCT = 5.0;
+  // Moderate loss with no RTT spike beside it takes the target no lower than this share of the
+  // stream's base. See update_network_stats().
+  static constexpr double MODERATE_LOSS_FLOOR_SHARE = 0.5;
 
   // Internal state protected by mutex for complex operations,
   // atomics for simple reads from the encoding thread.
@@ -292,17 +297,29 @@ namespace adaptive_bitrate {
       if (rtt_spike && ewma_packet_loss <= 1.0) {
         // RTT spike without packet loss: moderate reduction
         reduction_factor = 0.5 * max_change;
-      } else if (ewma_packet_loss > 5.0) {
+      } else if (ewma_packet_loss > HEAVY_LOSS_PCT) {
         // Heavy loss: maximum reduction
         reduction_factor = max_change;
       } else {
         // Moderate loss: proportional reduction (1-5% loss -> proportional within max_change)
-        reduction_factor = max_change * std::min(ewma_packet_loss / 5.0, 1.0);
+        reduction_factor = max_change * std::min(ewma_packet_loss / HEAVY_LOSS_PCT, 1.0);
       }
 
       new_target = static_cast<int>(current_target * (1.0 - reduction_factor));
+      // Moderate loss that is still there at half the stream's base is not the bitrate's doing: a
+      // Wi-Fi burst loses the same frames at any rate, and cutting on only costs picture. Replayed
+      // with each report's loss, the Retroid Pocket 6's recorded HEVC run, about 2% lost in bursts
+      // every few seconds, took this controller from 269 Mbps to 4 in a minute and on to the 2 Mbps
+      // floor. Heavy loss is the mark of a link too small for the stream, and an RTT spike the mark
+      // of a queue, so both still cut down to the floor.
+      bool holding = false;
+      if (!rtt_spike && ewma_packet_loss <= HEAVY_LOSS_PCT) {
+        const int moderate_loss_floor = static_cast<int>(base * MODERATE_LOSS_FLOOR_SHARE);
+        new_target = std::max(new_target, std::min(current_target, moderate_loss_floor));
+        holding = new_target == current_target;
+      }
       last_pressure_time = now;
-      set_controller_status("network_pressure", rtt_spike ? "rtt_spike" : "packet_loss");
+      set_controller_status("network_pressure", rtt_spike ? "rtt_spike" : holding ? "packet_loss_holding" : "packet_loss");
 
       BOOST_LOG(debug) << "Adaptive bitrate: reducing "
                        << current_target << " -> " << new_target << " kbps"
@@ -949,6 +966,14 @@ namespace adaptive_bitrate {
                     << " (min=" << current_config.min_bitrate_kbps
                     << " kbps, max=" << current_config.max_bitrate_kbps << " kbps)";
   }
+
+#ifdef POLARIS_TESTS
+  void age_for_tests(std::chrono::steady_clock::duration age) {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    last_adjustment_time -= age;
+    last_pressure_time -= age;
+  }
+#endif
 
   void reset() {
     std::lock_guard<std::mutex> lock(state_mutex);

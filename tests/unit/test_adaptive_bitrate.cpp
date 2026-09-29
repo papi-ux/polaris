@@ -77,6 +77,34 @@ TEST(AdaptiveBitrateController, SustainedLossBetweenPingsStillReducesTheTarget) 
   EXPECT_EQ(state.reason, "packet_loss");
 }
 
+TEST(AdaptiveBitrateController, ModerateLossHoldsAtHalfTheBaseWhileHeavyLossCutsOn) {
+  // A few percent of loss that is still there at half the bitrate is not the bitrate's doing, and
+  // cutting on only costs picture. Heavy loss is a link too small for the stream.
+  enable_controller(40000);
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  for (int second = 0; second < 30; ++second) {
+    adaptive_bitrate::age_for_tests(1s);
+    adaptive_bitrate::update_network_stats(3.0, 8.0);
+  }
+  auto state = adaptive_bitrate::get_state();
+  EXPECT_EQ(state.target_bitrate_kbps, 20000);
+  EXPECT_EQ(state.state, "network_pressure");
+  EXPECT_EQ(state.reason, "packet_loss_holding");
+
+  for (int second = 0; second < 3; ++second) {
+    adaptive_bitrate::age_for_tests(1s);
+    adaptive_bitrate::update_network_stats(20.0, 8.0);
+  }
+  state = adaptive_bitrate::get_state();
+  EXPECT_LT(state.target_bitrate_kbps, 20000);
+  EXPECT_EQ(state.reason, "packet_loss");
+
+  // Leave no cut target behind for a later suite in this binary to read as a reduced stream.
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_enabled(false);
+  config::video.adaptive_bitrate.enabled = false;
+}
+
 TEST(AdaptiveBitrateController, IgnoresSubthresholdRelativeRttSpikeOnFastLan) {
   enable_controller();
 

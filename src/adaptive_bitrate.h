@@ -102,11 +102,18 @@ namespace adaptive_bitrate {
 
   /**
    * @brief Feed one network reading to Live Tuning.
-   * @param packet_loss_percent Video frame loss, 0 to 100, as the host's network verdict judges it;
-   *        stream_stats passes the verdict's figure while it is network pressure and zero while it is
-   *        not, so Live Tuning acts on the loss Doctor quotes. std::nullopt for a reading that says
-   *        nothing about video, such as a control-channel ping: it leaves the loss average where it is
-   *        instead of pulling it toward zero.
+   *
+   * Moderate loss, 5% or less with no RTT spike beside it, takes the target no lower than half the
+   * stream's base: loss still there at half the bitrate is not the bitrate's doing. Heavy loss and
+   * RTT spikes cut down to the floor.
+   *
+   * @param packet_loss_percent Video frame loss, 0 to 100, from one client media report. stream_stats
+   *        passes the report's own figure while the host's network verdict calls loss pressure and
+   *        zero while it does not, so Live Tuning acts when Doctor does and its average falls within
+   *        seconds of clean reports, where the verdict's 20 second window holds for most of its
+   *        length. std::nullopt for a reading that says nothing about video, such as a
+   *        control-channel ping: it leaves the loss average where it is instead of pulling it toward
+   *        zero.
    * @param rtt_ms Round-trip time in milliseconds.
    */
   void update_network_stats(std::optional<double> packet_loss_percent, double rtt_ms);
@@ -358,5 +365,10 @@ namespace adaptive_bitrate {
    * @brief Reset all state (call when a new stream session starts).
    */
   void reset();
+
+#ifdef POLARIS_TESTS
+  /** Move the controller's last adjustment and last pressure this much further into the past. */
+  void age_for_tests(std::chrono::steady_clock::duration age);
+#endif
 
 }  // namespace adaptive_bitrate
