@@ -235,7 +235,8 @@ namespace nvhttp {
    * carry client key material.
    */
   std::shared_ptr<rtsp_stream::launch_session_t>
-  make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker = false);
+  make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker = false,
+                      const proc::ctx_t *topology_app = nullptr);
 
   /**
    * @brief Bring the host's mode in line with whether it is in Steam Game Mode right now.

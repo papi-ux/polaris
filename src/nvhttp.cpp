@@ -5104,7 +5104,10 @@ namespace nvhttp {
     return true;
   }
 
-  std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker) {
+  std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker,
+                                                                  const proc::ctx_t *topology_app) {
+    // Inert context plumbing for the failing-first door regression checkpoint.
+    (void) topology_app;
     auto launch_session = std::make_shared<rtsp_stream::launch_session_t>();
 
     launch_session->id = ++session_id_counter;
@@ -7382,7 +7385,25 @@ namespace nvhttp {
     }
 
     const bool launch_host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
-    auto launch_session = make_launch_session(launch_host_audio, is_input_only, args, named_cert_p.get());
+    // Keep an owned copy alive through parsing; the running generation's frozen entry wins over
+    // a catalogue edit when this is the same-app resume door.
+    std::optional<proc::ctx_t> topology_app;
+#ifdef __linux__
+    if (!is_input_only) {
+      if (current_appid > 0 && (appid == current_appid ||
+          (!appuuid_str.empty() && appuuid_str == current_app_uuid))) {
+        topology_app = proc::proc.running_app_context();
+      } else {
+        const auto &apps = proc::proc.get_apps();
+        const auto app = std::find_if(apps.begin(), apps.end(), [&](const auto &candidate) {
+          return candidate.id == appid_str || candidate.uuid == appuuid_str;
+        });
+        if (app != apps.end()) topology_app = *app;
+      }
+    }
+#endif
+    auto launch_session = make_launch_session(launch_host_audio, is_input_only, args, named_cert_p.get(),
+      false, topology_app ? &*topology_app : nullptr);
     if (!launch_session) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);
@@ -7811,7 +7832,12 @@ namespace nvhttp {
     if (no_active_sessions && args.find("localAudioPlayMode"s) != std::end(args)) {
       resume_host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     }
-    auto launch_session = make_launch_session(resume_host_audio, false, args, named_cert_p.get());
+    std::optional<proc::ctx_t> topology_app;
+#ifdef __linux__
+    topology_app = proc::proc.running_app_context();
+#endif
+    auto launch_session = make_launch_session(resume_host_audio, false, args, named_cert_p.get(),
+      false, topology_app ? &*topology_app : nullptr);
     if (!launch_session) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);

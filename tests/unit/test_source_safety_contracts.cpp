@@ -1741,3 +1741,38 @@ TEST(SourceSafetyContracts, BothResumeDoorsPropagateTheRecordedLaunchAsRefusal) 
   }
   EXPECT_EQ(count, 2u);
 }
+
+TEST(SourceSafetyContracts, BothParsedDoorsUseOwnedAppContextAndResumeRefusesPinsBeforeCapturePreparation) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/nvhttp.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+  const auto launch = source.find("  void launch(bool &host_audio,");
+  const auto resume = source.find("  void resume(bool &host_audio,");
+  ASSERT_NE(launch, std::string::npos);
+  ASSERT_NE(resume, std::string::npos);
+  for (const auto door : {launch, resume}) {
+    const auto parsed = source.find("auto launch_session = make_launch_session(", door);
+    const auto verified = source.find("auto named_cert_p = get_verified_cert(request);", door);
+    const auto profile = source.find("if (handle_profile_launch(", door);
+    const auto owned = source.find("std::optional<proc::ctx_t> topology_app;", door);
+    ASSERT_NE(parsed, std::string::npos);
+    ASSERT_NE(owned, std::string::npos);
+    EXPECT_LT(verified, owned);
+    EXPECT_LT(profile, owned);
+    EXPECT_LT(owned, parsed);
+    const auto parse_end = source.find(";", parsed);
+    EXPECT_LT(source.find("topology_app ? &*topology_app : nullptr", parsed), parse_end);
+  }
+  const auto resume_guard = source.find("proc::refuse_app_launch_as_before_launch(", resume);
+  const auto owner_gate = source.find("!proc::proc.is_session_owner(named_cert_p->uuid)", resume);
+  const auto token_gate = source.find("!session_token_matches_request(", resume);
+  const auto codec = source.find("if (refuse_declared_codec(*launch_session))", resume);
+  const auto capture = source.find("display_device::configure_display(", resume);
+  ASSERT_NE(resume_guard, std::string::npos);
+  EXPECT_LT(owner_gate, resume_guard);
+  EXPECT_LT(token_gate, resume_guard);
+  EXPECT_LT(resume_guard, codec);
+  EXPECT_LT(resume_guard, capture);
+}

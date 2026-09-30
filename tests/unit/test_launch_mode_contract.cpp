@@ -10,6 +10,8 @@
 #include <src/nvhttp.h>
 #include <src/process.h>
 #include <src/video.h>
+#include <src/launch_failure.h>
+#include <boost/property_tree/ptree.hpp>
 
 #include <algorithm>
 #include <cstdlib>
@@ -86,7 +88,7 @@ namespace {
       }
       directory = created;
 
-      for (const char *binary : {"labwc", "wlr-randr"}) {
+      for (const char *binary : {"labwc", "wlr-randr", "gamescope"}) {
         const auto path = std::filesystem::path {directory} / binary;
         std::ofstream script {path};
         script << "#!/bin/sh\nexit 0\n";
@@ -98,6 +100,10 @@ namespace {
       if (setenv("PATH", directory.c_str(), 1) != 0) {
         throw std::runtime_error("failed to set private-runtime test PATH");
       }
+    }
+
+    void remove_binary(const char *name) {
+      std::filesystem::remove(std::filesystem::path {directory} / name);
     }
 
     ~ScopedPrivateRuntimePath() {
@@ -369,6 +375,127 @@ namespace {
       args.emplace("streamMode", std::move(stream_mode));
     }
     return args;
+  }
+}
+
+// The actual public parser used by both authenticated HTTP doors must not swallow a stale
+// app pin's actionable refusal before their app-aware guard can run. No process/stream is started.
+class AppLaunchAsDoorTests: public testing::Test {
+protected:
+  void TearDown() override { launch_failure::clear(); }
+  ScopedPrivateRuntimePath runtime;
+};
+
+TEST_F(AppLaunchAsDoorTests, FreshLaunchParserReachesTheAppGuardAfterAPinLosesItsTool) {
+  for (const auto mode : {"headless_stream", "windowed_stream", "gamescope_stream"}) {
+    SCOPED_TRACE(mode);
+    auto cert = launch_client_cert();
+    proc::ctx_t app;
+    proc::set_launch_as(app, mode);
+    auto args = resolved_launch_args(mode, mode);
+    ASSERT_NE(nvhttp::make_launch_session(false, false, args, cert.get(), false, &app), nullptr)
+      << "fixture starts with every private runtime tool available";
+    // Each mode needs labwc/wlr-randr or gamescope; changing PATH is fresh capability loss,
+    // while the exact app pin and envelope remain as preflight advertised them.
+    ScopedPath gone {"/polaris-test/no-runtime-tools"};
+    const auto parsed = nvhttp::make_launch_session(false, false, args, cert.get(), false, &app);
+    ASSERT_NE(parsed, nullptr) << "typed app refusal must reach the real launch guard, not malformed400";
+    const auto refusal = proc::refuse_app_launch_as_before_launch(app,
+      proc::launch_selection_request_from_session(*parsed));
+    EXPECT_EQ(refusal, 503);
+    boost::property_tree::ptree response;
+    nvhttp::put_launch_refusal_for_tests(response, refusal, "generic launch failure");
+    EXPECT_EQ(response.get<std::string>("root.<xmlattr>.error_code"), "app_launch_mode_unavailable");
+    EXPECT_NE(response.get<std::string>("root.<xmlattr>.error_action").find("Launch as"), std::string::npos);
+    EXPECT_NE(response.get<std::string>("root.<xmlattr>.status_message").find(mode == std::string {"gamescope_stream"} ? "gamescope" : "labwc"), std::string::npos);
+  }
+}
+
+TEST_F(AppLaunchAsDoorTests, ResumeParserReachesTheFrozenOwnersRefusalAfterAToolDisappears) {
+  auto cert = launch_client_cert();
+  proc::ctx_t app;
+  app.uuid = "door-pin-owner";
+  proc::set_launch_as(app, "headless_stream");
+  auto owner = nvhttp::make_launch_session(false, false,
+    resolved_launch_args("headless_stream", "headless_stream"), cert.get(), false, &app);
+  ASSERT_NE(owner, nullptr);
+  proc::proc_t process {boost::process::v1::environment {}, {app}};
+  process.set_active_launch_for_tests(app, owner);
+  const auto frozen = process.running_app_context();
+  ASSERT_TRUE(frozen);
+  runtime.remove_binary("labwc");
+  auto resumed = nvhttp::make_launch_session(false, false,
+    resolved_launch_args("headless_stream", "headless_stream"), cert.get(), false, &*frozen);
+  ASSERT_NE(resumed, nullptr) << "resume must reach its recorded pin refusal before400";
+  const auto refusal = process.validate_resolved_profile_for_running_app(resumed);
+  EXPECT_EQ(refusal, 503);
+  boost::property_tree::ptree response;
+  nvhttp::put_launch_refusal_for_tests(response, refusal, "generic resume failure");
+  EXPECT_EQ(response.get<std::string>("root.<xmlattr>.error_code"), "app_launch_mode_unavailable");
+  EXPECT_NE(response.get<std::string>("root.<xmlattr>.status_message").find("labwc"), std::string::npos);
+  EXPECT_NE(response.get<std::string>("root.<xmlattr>.error_action").find("Launch as"), std::string::npos);
+}
+
+TEST_F(AppLaunchAsDoorTests, WatchParserCanReachOwnerInheritanceAfterItsNamedRuntimeDisappears) {
+  auto cert = launch_client_cert();
+  proc::ctx_t app;
+  app.uuid = "door-watched-owner";
+  proc::set_launch_as(app, "headless_stream");
+  auto owner = nvhttp::make_launch_session(false, false,
+    resolved_launch_args("headless_stream", "headless_stream"), cert.get(), false, &app);
+  ASSERT_NE(owner, nullptr);
+  proc::proc_t process {boost::process::v1::environment {}, {app}};
+  process.set_active_launch_for_tests(app, owner);
+  runtime.remove_binary("labwc");
+  auto args = resolved_launch_args("headless_stream", "headless_stream");
+  args.emplace("watch", "1");
+  const auto viewer = nvhttp::make_launch_session(false, false, args, cert.get());
+  ASSERT_NE(viewer, nullptr) << "Watch must inherit an existing admitted stream before topology freshness";
+  EXPECT_TRUE(viewer->watch_only);
+  EXPECT_EQ(process.validate_resolved_profile_for_running_app(viewer), 0);
+  EXPECT_EQ(viewer->stream_mode, owner->stream_mode);
+  EXPECT_EQ(viewer->client_named_selection, owner->client_named_selection);
+  EXPECT_FALSE(viewer->mirror_desktop);
+  EXPECT_FALSE(launch_failure::pending);
+}
+
+TEST_F(AppLaunchAsDoorTests, OrdinaryHostDefaultAndUnrelatedOrInvalidPinsKeepTheFreshGate) {
+  auto cert = launch_client_cert();
+  runtime.remove_binary("labwc");
+  const auto args = resolved_launch_args("headless_stream", "headless_stream");
+  EXPECT_EQ(nvhttp::make_launch_session(false, false, args, cert.get()), nullptr);
+  for (const auto value : {"host_default", "desktop_display", "gamescope_stream", "Host_Default"}) {
+    SCOPED_TRACE(value);
+    proc::ctx_t app;
+    proc::set_launch_as(app, value);
+    EXPECT_EQ(nvhttp::make_launch_session(false, false, args, cert.get(), false, &app), nullptr);
+  }
+}
+
+TEST_F(AppLaunchAsDoorTests, TrustedPinsAndWatchStillRejectMalformedUnknownAndHostOnlyRequests) {
+  auto cert = launch_client_cert();
+  proc::ctx_t app;
+  proc::set_launch_as(app, "headless_stream");
+  runtime.remove_binary("labwc");
+  for (const bool watch : {false, true}) {
+    for (const auto topology : {"", "not_a_mode", "family_isolated", "headless_evdi"}) {
+      auto args = resolved_launch_args("headless_stream", topology);
+      if (watch) args.emplace("watch", "1");
+      EXPECT_EQ(nvhttp::make_launch_session(false, false, args, cert.get(), false, &app), nullptr);
+    }
+    for (const auto mode : {"not_a_mode", "family_isolated", "headless_evdi", "headless_dongle"}) {
+      auto args = resolved_launch_args(mode, "headless_stream");
+      if (watch) args.emplace("watch", "1");
+      EXPECT_EQ(nvhttp::make_launch_session(false, false, args, cert.get(), false, &app), nullptr);
+    }
+    for (const auto &[key, value] : std::vector<std::pair<std::string, std::string>> {
+        {"rikey", "bad"}, {"bitrateKbps", "500001"}, {"resolvedHdr", "invalid"},
+        {"expectedEncoder", "nvenc"}}) {
+      auto args = resolved_launch_args("headless_stream", "headless_stream");
+      args.erase(key); args.emplace(key, value);
+      if (watch) args.emplace("watch", "1");
+      EXPECT_EQ(nvhttp::make_launch_session(false, false, args, cert.get(), false, &app), nullptr);
+    }
   }
 }
 
