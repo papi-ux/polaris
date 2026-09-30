@@ -28,6 +28,50 @@
 #endif
 #include <src/stream_stats.h>
 
+TEST(ProcessMigrationTests, LaunchAsV15MapsLegacyFlagsAndPreservesStoredUnknownsAndTypes) {
+  const auto fixture_path = std::filesystem::path {POLARIS_SOURCE_DIR} / "tests/fixtures/app-launch-as-v1.json";
+  const auto fixture = nlohmann::json::parse(file_handler::read_file(fixture_path.string().c_str()));
+  auto entries = nlohmann::json::array();
+  int index = 0;
+  for (const auto &row : fixture.at("legacy")) {
+    auto entry = row.at("entry");
+    entry["name"] = "Launch as fixture " + std::to_string(index);
+    entry["uuid"] = "00000000-0000-4000-8000-" + std::string(11 - std::to_string(index).size(), '0') + std::to_string(index) + "1";
+    entries.push_back(entry);
+    ++index;
+  }
+  const auto file_path = test_paths::root() / "launch_as_v15_fixture.json";
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), nlohmann::json {{"version", 14}, {"apps", entries}}.dump(2)), 0);
+  auto parsed = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed.has_value());
+  const auto migrated = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
+  EXPECT_EQ(migrated.at("version"), 15);
+  ASSERT_EQ(migrated.at("apps").size(), entries.size());
+  for (std::size_t i = 0; i < entries.size(); ++i) {
+    const auto &row = fixture.at("legacy").at(i);
+    const auto &before = entries.at(i);
+    const auto &after = migrated.at("apps").at(i);
+    SCOPED_TRACE(row.at("case").get<std::string>());
+    if (!before.contains("launch-as")) {
+      EXPECT_EQ(after.value("launch-as", nlohmann::json()), row.at("launch_as"));
+      EXPECT_EQ(after.value("launch-as-basis", nlohmann::json()), row.at("basis"));
+    } else {
+      EXPECT_EQ(after.at("launch-as"), before.at("launch-as"));
+      EXPECT_EQ(after.contains("launch-as-basis"), before.contains("launch-as-basis"));
+      if (before.contains("launch-as-basis")) EXPECT_EQ(after.at("launch-as-basis"), before.at("launch-as-basis"));
+    }
+    for (const auto key : {"desktop-mirror", "virtual-display"}) {
+      EXPECT_EQ(after.contains(key), before.contains(key));
+      if (before.contains(key)) EXPECT_EQ(after.at(key), before.at(key));
+    }
+    const auto &apps = parsed->get_apps();
+    const auto found = std::find_if(apps.begin(), apps.end(), [&](const proc::ctx_t &app) { return app.name == before.at("name"); });
+    ASSERT_NE(found, apps.end());
+    EXPECT_EQ(found->desktop_mirror, row.at("launch_as") == "desktop_display");
+    EXPECT_EQ(found->virtual_display, row.at("launch_as") == "host_virtual_display");
+  }
+}
+
 #ifdef __linux__
   #include <csignal>
   #include <poll.h>
