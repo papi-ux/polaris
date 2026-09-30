@@ -533,9 +533,18 @@ namespace stream_display_policy {
   }
 
   app_launch_as_t resolve_app_launch_as(std::string_view launch_as, std::string_view client_named_selection) {
-    // The first checkpoint exposes the existing follow-host behavior to a real
-    // failing pin contract. No launch door calls this until the guard is wired.
-    return {};
+    if (launch_as == "host_default" || launch_as == k_desktop_display) {
+      return {};
+    }
+    // Registry lookups accept case-folded host settings. An app pin is an
+    // exact saved value, so reject a lookup whose canonical id differs.
+    const auto *path = stream_path::find(launch_as);
+    if (!path || path->id != launch_as || !selection_session_overridable(launch_as)) {
+      return {app_launch_as_t::verdict_e::not_a_launch_mode, {}};
+    }
+    const bool conflict = !client_named_selection.empty() && client_named_selection != launch_as;
+    return {conflict ? app_launch_as_t::verdict_e::conflict : app_launch_as_t::verdict_e::pinned,
+      std::string {launch_as}};
   }
 
   std::string effective_session_selection_for_launch(
