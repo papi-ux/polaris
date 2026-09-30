@@ -380,11 +380,16 @@ TEST(AppLaunchAsPolicyTests, ExactSharedModesPinEveryClientUnlessItNamesAConflic
   std::ifstream source {std::filesystem::path {POLARIS_SOURCE_DIR} / "tests/fixtures/app-launch-as-v1.json"};
   ASSERT_TRUE(source.good());
   const auto fixture = nlohmann::json::parse(source);
+  std::vector<std::string> client_modes {"", "headless_dongle"};
+  for (const auto &row : fixture.at("values")) {
+    const auto mode = row.at("id").get<std::string>();
+    if (mode != "host_default") client_modes.push_back(mode);
+  }
   size_t pinned = 0;
   for (const auto &row : fixture.at("values")) {
     const auto mode = row.at("id").get<std::string>();
     const bool follows = mode == "host_default" || mode == "desktop_display";
-    for (const auto &named : {std::string {}, mode, std::string {"headless_dongle"}}) {
+    for (const auto &named : client_modes) {
       SCOPED_TRACE(mode + " / named=" + named);
       const auto result = stream_display_policy::resolve_app_launch_as(mode, named);
       EXPECT_EQ(result.verdict, follows ? verdict::follow :
