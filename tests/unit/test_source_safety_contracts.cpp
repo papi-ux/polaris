@@ -309,7 +309,7 @@ TEST(SourceSafetyContracts, UbuntuSnapshotInstallsMayDowngradeRunnerPackages) {
   EXPECT_EQ(count_exact(workflow, curl_dev_pin), 2u);
 }
 
-TEST(SourceSafetyContracts, LegacyVirtualDisplayPromotionPrecedesCaptureReevaluationAndRestoresHostState) {
+TEST(SourceSafetyContracts, LaunchAsSelectionPrecedesCaptureReevaluationAndRestoresHostState) {
   std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/process.cpp");
   ASSERT_TRUE(input.is_open());
   std::ostringstream contents;
@@ -322,7 +322,7 @@ TEST(SourceSafetyContracts, LegacyVirtualDisplayPromotionPrecedesCaptureReevalua
   ASSERT_NE(terminate, std::string::npos);
   const auto launch = source.substr(execute, terminate - execute);
 
-  const auto derive = launch.find("effective_session_selection_for_launch(");
+  const auto derive = launch.find("resolve_launch_selection_for_app(");
   const auto apply = launch.find("stream_display_policy::apply_selection(session_mode");
   const auto reevaluate = launch.find("platf::reevaluate_capture_sources()", apply);
   ASSERT_NE(derive, std::string::npos);
@@ -330,7 +330,13 @@ TEST(SourceSafetyContracts, LegacyVirtualDisplayPromotionPrecedesCaptureReevalua
   ASSERT_NE(reevaluate, std::string::npos);
   EXPECT_LT(derive, apply);
   EXPECT_LT(apply, reevaluate);
-  EXPECT_NE(launch.find("_app.virtual_display", derive), std::string::npos);
+  const auto gate_start = launch.find("Resolve and apply the exact topology before installing a new process");
+  const auto generation = launch.find("++_session_generation;", gate_start);
+  ASSERT_NE(gate_start, std::string::npos);
+  ASSERT_NE(generation, std::string::npos);
+  const auto gate = launch.substr(gate_start, generation - gate_start);
+  EXPECT_EQ(gate.find("app.virtual_display"), std::string::npos)
+    << "Linux Launch as reads the pin, without restoring a legacy app preference";
   EXPECT_NE(launch.find("launch_session->user_locked_virtual_display", derive), std::string::npos);
   EXPECT_EQ(
     launch.find("!(launch_session && launch_session->mirror_desktop)", derive),
@@ -447,34 +453,35 @@ TEST(SourceSafetyContracts, RefusingToKeepPrivateStateSaysWhichDirectoryAndWhy) 
     << "the refused directory is the one the walk stopped on, not the state file's parent";
 }
 
-TEST(SourceSafetyContracts, EveryLaunchTopologyResolverCallPassesTheHostPrivateDisplayAnswer) {
-  // A resume validates topology with the same resolver its launch used. If one
-  // call site answers "the host already provides the display" and another does
-  // not, a resume can reject the very session its own launch produced.
-  for (const auto *relative : {"src/process.cpp", "src/nvhttp.cpp"}) {
+TEST(SourceSafetyContracts, EveryLaunchTopologyResolverUsesTheSameAppAwareWrapper) {
+  const auto read = [](const char *relative) {
     std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / relative);
-    ASSERT_TRUE(input.is_open()) << relative;
-    std::ostringstream contents;
-    contents << input.rdbuf();
-    const auto source = contents.str();
-
-    size_t calls = 0;
-    for (size_t at = source.find("effective_session_selection_for_launch(");
-         at != std::string::npos;
-         at = source.find("effective_session_selection_for_launch(", at + 1)) {
-      const auto close = source.find(");", at);
-      ASSERT_NE(close, std::string::npos) << relative;
-      const auto arguments = source.substr(at, close - at);
-      const bool passes_the_host_answer =
-        arguments.find("host_default_provides_private_display()") != std::string::npos ||
-        arguments.find("host_private") != std::string::npos;
-      EXPECT_TRUE(passes_the_host_answer)
-        << relative << " resolves a launch topology without passing the host's own answer, "
-        << "either by calling host_default_provides_private_display() or by passing a host_private local";
-      ++calls;
-    }
-    EXPECT_GT(calls, 0u) << relative << " no longer resolves launch topology at all";
-  }
+    std::ostringstream content;
+    content << input.rdbuf();
+    return content.str();
+  };
+  const auto process = read("src/process.cpp");
+  const auto nvhttp = read("src/nvhttp.cpp");
+  const auto start = process.find("launch_selection_t resolve_launch_selection_for_app(");
+  const auto end = process.find("void apply_app_display_semantics(", start);
+  ASSERT_NE(start, std::string::npos);
+  ASSERT_NE(end, std::string::npos);
+  const auto wrapper = process.substr(start, end - start);
+  const auto followed = wrapper.find("host_default_launch_selection(");
+  const auto refused = wrapper.find("refuse_app_launch_as_before_launch(");
+  const auto pinned = wrapper.find("return {pin.selection, true, 0};");
+  ASSERT_NE(followed, std::string::npos);
+  ASSERT_NE(refused, std::string::npos);
+  ASSERT_NE(pinned, std::string::npos);
+  EXPECT_LT(refused, followed);
+  EXPECT_LT(pinned, followed) << "fixed pins bypass the Host default resolver";
+  EXPECT_NE(wrapper.find(".host_provides_private_display = stream_display_policy::host_default_provides_private_display()"), std::string::npos);
+  EXPECT_EQ(process.find("host_default_launch_selection(", start + followed + 1), std::string::npos)
+    << "the process wrapper is the only caller of the Host default resolver";
+  EXPECT_EQ(nvhttp.find("host_default_launch_selection("), std::string::npos);
+  EXPECT_NE(nvhttp.find("proc::resolve_launch_selection_for_app("), std::string::npos);
+  EXPECT_EQ(process.find("effective_session_selection_for_launch("), std::string::npos);
+  EXPECT_EQ(nvhttp.find("effective_session_selection_for_launch("), std::string::npos);
 }
 
 TEST(SourceSafetyContracts, LinuxVirtualDisplayCreationUsesOnlyTheEffectiveMode) {

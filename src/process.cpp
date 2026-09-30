@@ -6154,7 +6154,8 @@ namespace proc {
         (!request.client_named_selection.empty() && stream_display_policy::desktop_mirror_yields_to_selection(selection)));
     return {stream_display_policy::host_default_launch_selection({
       .requested_selection = requested,
-      .mirror_desktop = request.mirror_desktop || mirror_app || platf::game_mode_host::session_live(),
+      .mirror_desktop = request.mirror_desktop || mirror_app ||
+        (!request.watch_only && platf::game_mode_host::session_live()),
       .launch_virtual_display = request.launch_virtual_display,
       .virtual_display_user_locked = request.virtual_display_user_locked,
       .host_provides_private_display = stream_display_policy::host_default_provides_private_display(),
@@ -8126,6 +8127,7 @@ namespace proc {
       // an explicit mirror/private owner launch.
       launch_session->stream_mode = _launch_session->stream_mode;
       launch_session->client_named_selection = _launch_session->client_named_selection;
+      launch_session->client_selected_topology = _launch_session->client_selected_topology;
       launch_session->mirror_desktop = _launch_session->mirror_desktop;
       launch_session->virtual_display = _launch_session->virtual_display;
       launch_session->user_locked_virtual_display =
@@ -8141,7 +8143,7 @@ namespace proc {
         _app, launch_selection_request_from_session(*launch_session))) return refusal;
     // Resume receives a fresh request. Apply the same app display semantics as
     // execute_impl before comparing it with the normalized active launch.
-    apply_app_display_semantics(_app, *launch_session);
+    if (!launch_session->watch_only) apply_app_display_semantics(_app, *launch_session);
 #endif
     if (launch_session->encoder_backend_explicit &&
         (!_launch_session->encoder_backend_explicit ||

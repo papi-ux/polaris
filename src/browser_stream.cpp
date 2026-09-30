@@ -572,17 +572,22 @@ namespace browser_stream {
 
     bool launch_isolated_app(const proc::ctx_t &app, std::string &error_out) {
       launch_failure::clear();
-      if (proc::refuse_app_launch_as_before_launch(app, {})) {
+      const auto pin = stream_display_policy::resolve_app_launch_as(app.launch_as, {});
+      if (pin.verdict == stream_display_policy::app_launch_as_t::verdict_e::not_a_launch_mode &&
+          proc::refuse_app_launch_as_before_launch(app, {})) {
         error_out = launch_failure::status_message(*launch_failure::pending);
         return false;
       }
-      const auto pin = stream_display_policy::resolve_app_launch_as(app.launch_as, {});
       const auto *path = stream_path::find(pin.selection);
       const bool private_pin = path && path->runtime != stream_path::runtime_kind_e::NONE;
       if (app.launch_as != "host_default" && !private_pin) {
         launch_failure::refuse(503, "app_launch_mode_unavailable",
           "Browser Stream runs apps only in a private session, and this app is set to launch as " + stream_display_policy::label_for_selection(app.launch_as) + ".",
           "Stream it from Nova or Moonlight, or change Launch as for this app in the Polaris console.");
+        error_out = launch_failure::status_message(*launch_failure::pending);
+        return false;
+      }
+      if (proc::refuse_app_launch_as_before_launch(app, {})) {
         error_out = launch_failure::status_message(*launch_failure::pending);
         return false;
       }

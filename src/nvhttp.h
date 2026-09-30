@@ -43,6 +43,7 @@ namespace game_artwork::manual {
 #if defined(__linux__)
 namespace proc {
   struct desktop_launch_safety_policy_t;
+  struct launch_selection_request_t;
 }
 #endif
 
@@ -638,6 +639,7 @@ namespace nvhttp {
                                                       bool host_prefers_headless,
                                                       bool app_mirrors_desktop = false);
 #if defined(__linux__)
+  proc::launch_selection_request_t optimize_launch_selection_request_for_tests(const args_t &args, bool paired_always_virtual);
   std::string accepted_session_stream_mode_for_tests(const std::string &requested);
   bool apply_stream_display_mode_selection_for_tests(
     const std::string &selection,

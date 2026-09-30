@@ -683,10 +683,10 @@ TEST(ProcessRuntimeConfigTests, ExplicitTopologySemanticsPrecedePresetAndOwnLinu
     final_capability_validation
   );
   const auto mode_derivation = body.find(
-    "stream_display_policy::effective_session_selection_for_launch(",
+    "resolve_launch_selection_for_app(",
     desktop_mirror_semantic
   );
-  const auto mode_binding = body.rfind("auto session_mode =", mode_derivation);
+  const auto mode_binding = body.find("auto session_mode =", mode_derivation);
   const auto mode_apply = body.find(
     "stream_display_policy::apply_selection(session_mode",
     mode_binding
@@ -5112,6 +5112,54 @@ TEST_F(AppLaunchAsProcessTests, GameModeRefusesEveryFixedPinButWatchersKeepOwner
   EXPECT_NE(failure->message.find("an unknown mode"), std::string::npos);
 }
 
+TEST_F(AppLaunchAsProcessTests, ResumePinRefusalCarriesItsCodeAndActionToTheXmlResponse) {
+  proc::ctx_t app;
+  app.uuid = "launch-as-resume-refusal";
+  proc::set_launch_as(app, "headless_stream");
+  proc::proc_t process {boost::process::v1::environment {}, {app}};
+  auto owner = std::make_shared<rtsp_stream::launch_session_t>();
+  owner->stream_mode = "headless_stream";
+  owner->client_named_selection = "headless_stream";
+  owner->client_selected_topology = true;
+  process.set_active_launch_for_tests(app, owner);
+  auto request = std::make_shared<rtsp_stream::launch_session_t>();
+  request->client_named_selection = "desktop_display";
+  const auto status = process.validate_resolved_profile_for_running_app(request);
+  EXPECT_EQ(status, 409);
+  boost::property_tree::ptree response;
+  nvhttp::put_launch_refusal_for_tests(response, status, "generic resume failure");
+  EXPECT_EQ(response.get<int>("root.<xmlattr>.status_code"), 409);
+  EXPECT_EQ(response.get<std::string>("root.<xmlattr>.error_code"), "app_launch_mode_pinned");
+  EXPECT_NE(response.get<std::string>("root.<xmlattr>.error_action").find("Launch as"), std::string::npos);
+  EXPECT_NE(response.get<std::string>("root.<xmlattr>.status_message").find("Mirror Desktop"), std::string::npos);
+  EXPECT_FALSE(launch_failure::pending);
+}
+
+TEST_F(AppLaunchAsProcessTests, AWatcherKeepsAPinnedOwnersSemanticsWhenGameModeStarts) {
+  proc::ctx_t app;
+  app.uuid = "launch-as-viewer-owner";
+  proc::set_launch_as(app, "headless_stream");
+  proc::proc_t process {boost::process::v1::environment {}, {app}};
+  auto owner = std::make_shared<rtsp_stream::launch_session_t>();
+  owner->stream_mode = owner->expected_stream_mode = "headless_stream";
+  owner->client_named_selection = "headless_stream";
+  owner->client_selected_topology = true;
+  owner->requested_fps = owner->fps = 60000;
+  process.set_active_launch_for_tests(app, owner);
+  platf::game_mode_host::set_session_live_for_tests(true);
+  auto viewer = std::make_shared<rtsp_stream::launch_session_t>();
+  viewer->watch_only = true;
+  viewer->requested_fps = viewer->fps = 60000;
+  viewer->expected_stream_mode = "headless_stream";
+  viewer->client_named_selection = "desktop_display";
+  viewer->mirror_desktop = true;
+  EXPECT_EQ(process.validate_resolved_profile_for_running_app(viewer), 0);
+  EXPECT_EQ(viewer->client_named_selection, "headless_stream");
+  EXPECT_TRUE(viewer->client_selected_topology);
+  EXPECT_FALSE(viewer->mirror_desktop) << "the already-admitted owner generation is still private";
+  EXPECT_FALSE(viewer->virtual_display);
+}
+
 TEST_F(AppLaunchAsProcessTests, CatalogueReloadPreservesTheRunningGenerationsPinAndReturnsAnOwnedCopy) {
   proc::ctx_t app;
   app.name = "Pinned game";
@@ -5271,7 +5319,7 @@ TEST(ProcessRuntimeConfigTests, TheProfileAGameModeHostResolvesIsTheOneItsLaunch
   const auto optimize = nvhttp.substr(nvhttp.find("auto polarisOptimize = [](resp_https_t response, req_https_t request) {"));
   const auto authorised = optimize.find("get_verified_cert(request)");
   const auto reconciled = optimize.find("reconcile_game_mode_host();");
-  const auto resolved = optimize.find("stream_display_policy::effective_session_selection_for_launch(");
+  const auto resolved = optimize.find("proc::resolve_launch_selection_for_app(");
   ASSERT_NE(authorised, std::string::npos);
   ASSERT_NE(reconciled, std::string::npos);
   ASSERT_NE(resolved, std::string::npos);

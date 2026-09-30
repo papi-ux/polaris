@@ -628,6 +628,26 @@ namespace nvhttp {
     }
 
   #if defined(__linux__)
+    proc::launch_selection_request_t optimize_launch_selection_request(const args_t &args, bool paired_always_virtual) {
+      const auto fields = launch_profile::parse_explicit_launch_fields(
+        [&args](std::string_view name) -> std::optional<std::string> {
+          const auto it = args.find(std::string {name});
+          return it == args.end() ? std::nullopt : std::optional<std::string> {it->second};
+        });
+      const auto requested = lower_copy(get_arg(args, "mode", ""));
+      const bool mirror = explicit_mirror_desktop_requested(args);
+      const bool paired = paired_always_virtual && !fields.topology_locked;
+      const auto selection = paired ? std::string {stream_display_policy::k_host_virtual_display} : requested;
+      return {
+        .client_named_selection = mirror ? std::string {stream_display_policy::k_desktop_display} :
+          fields.topology_locked ? requested : std::string {},
+        .requested_selection = selection,
+        .mirror_desktop = mirror,
+        .launch_virtual_display = selection == stream_display_policy::k_host_virtual_display,
+        .virtual_display_user_locked = fields.topology_locked || paired,
+      };
+    }
+
     // Session-scoped stream-mode override gate: returns the requested mode when
     // it may drive this session, empty otherwise (the host default applies).
     // Which modes qualify is derived from the path registry rather than listed
@@ -2982,6 +3002,10 @@ namespace nvhttp {
   }
 
 #if defined(__linux__)
+  proc::launch_selection_request_t optimize_launch_selection_request_for_tests(const args_t &args, bool paired_always_virtual) {
+    return optimize_launch_selection_request(args, paired_always_virtual);
+  }
+
   std::string accepted_session_stream_mode_for_tests(const std::string &requested) {
     std::string reject_reason;
     return accepted_session_stream_mode(requested, reject_reason);
@@ -7482,9 +7506,7 @@ namespace nvhttp {
             return true;
           }
           tree.put("root.resume", 0);
-          tree.put("root.<xmlattr>.status_code", validation_error);
-          tree.put(
-            "root.<xmlattr>.status_message",
+          put_launch_refusal(tree, validation_error,
             validation_error == 409 ?
               "The resolved stream profile no longer matches the active app, topology, or output capabilities" :
               "The active app could not be validated for resume"
@@ -7862,9 +7884,7 @@ namespace nvhttp {
             exact_private_refresh_reapply_will_run
           )) {
       tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", validation_error);
-      tree.put(
-        "root.<xmlattr>.status_message",
+      put_launch_refusal(tree, validation_error,
         validation_error == 409 ?
           "The resolved stream profile no longer matches the active app, topology, or output capabilities" :
           "The active app could not be validated for resume"
@@ -11959,14 +11979,8 @@ namespace nvhttp {
           !requested_topology.empty()
         ));
       const auto app = optimization_app.value_or(proc::ctx_t {});
-      const auto launch_selection = proc::resolve_launch_selection_for_app(app, {
-        .client_named_selection = mirror_desktop_requested ? std::string {stream_display_policy::k_desktop_display} :
-          topology_locked ? requested_topology : std::string {},
-        .requested_selection = requested_selection,
-        .mirror_desktop = mirror_desktop_requested,
-        .launch_virtual_display = requested_selection == stream_display_policy::k_host_virtual_display,
-        .virtual_display_user_locked = topology_locked || paired_virtual_lock,
-      });
+      const auto launch_selection = proc::resolve_launch_selection_for_app(
+        app, optimize_launch_selection_request(args, named_cert_p->always_use_virtual_display));
       if (launch_selection.refusal) {
         if (const auto refusal = launch_failure::take()) reply_bad_request(refusal->code, refusal->message, refusal->action);
         else reply_bad_request("app_launch_mode_unavailable", "This app's Launch as setting cannot be used for this launch.");

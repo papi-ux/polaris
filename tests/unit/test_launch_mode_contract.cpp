@@ -319,8 +319,17 @@ TEST(SessionClientSelection, NamesOnlyAnExplicitModeBeforePairedAndUnlockedDefau
     const auto request = proc::launch_selection_request_from_session(*session);
     EXPECT_EQ(request.client_named_selection, row.named);
     EXPECT_EQ(request.requested_selection, session->stream_mode);
-    if (row.paired && !std::string {row.mode}.empty()) EXPECT_EQ(session->stream_mode, row.mode);
-    if (row.paired && std::string {row.mode}.empty()) EXPECT_EQ(session->stream_mode, "host_virtual_display");
+    nvhttp::args_t optimize;
+    const bool explicit_mode = !std::string {row.mode}.empty();
+    const bool locked_virtual = row.locked && row.virtual_display;
+    optimize.emplace("mode", explicit_mode ? row.mode : row.virtual_display ? "host_virtual_display" : "");
+    optimize.emplace("topology_locked", explicit_mode || locked_virtual ? "1" : "0");
+    if (row.mirror) optimize.emplace("mirrorDesktop", "1");
+    const auto planned = nvhttp::optimize_launch_selection_request_for_tests(optimize, row.paired);
+    EXPECT_EQ(planned.client_named_selection, session->client_named_selection)
+      << "Optimize and Launch must name the same mode for this actual request shape";
+    if (row.paired && !std::string {row.mode}.empty()) { EXPECT_EQ(session->stream_mode, row.mode); }
+    if (row.paired && std::string {row.mode}.empty()) { EXPECT_EQ(session->stream_mode, "host_virtual_display"); }
   }
 }
 

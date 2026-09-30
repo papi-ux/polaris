@@ -560,7 +560,7 @@ TEST(DoctorResetContract, FinalResolverRevalidatesPostProfileRefreshAndHdrCaps) 
   );
   EXPECT_NE(capability_snapshot.find("client_profile"), std::string::npos);
   EXPECT_NE(capability_snapshot.find("active_refresh_rate_hz_hint"), std::string::npos);
-  EXPECT_NE(capability_snapshot.find("effective_session_selection_for_launch"), std::string::npos);
+  EXPECT_NE(capability_snapshot.find("resolve_launch_selection_for_app"), std::string::npos);
   EXPECT_NE(capability_snapshot.find("selection_owns_launch_refresh_rate"), std::string::npos);
   EXPECT_NE(capability_snapshot.find("advertised_codec_capability_state"), std::string::npos);
   EXPECT_NE(capability_snapshot.find("return 409"), std::string::npos);
@@ -633,7 +633,7 @@ TEST(DoctorResetContract, ResumeRevalidatesTheExactProfileBeforeRaisingAStream) 
     "bool proc_t::raise_session_for_admitted_launch("
   );
   EXPECT_NE(process.find("validate_resolved_launch_profile_for_app"), std::string::npos);
-  EXPECT_NE(process.find("effective_session_selection_for_launch"), std::string::npos);
+  EXPECT_NE(process.find("resolve_launch_selection_for_app"), std::string::npos);
   EXPECT_NE(process.find("active app generation"), std::string::npos);
 
   const auto resume = between(
@@ -827,7 +827,7 @@ TEST(DoctorResetContract, OptimizeAndResolvedLaunchShareTheSessionTopologyGate) 
     std::string::npos
   );
   const auto effective_topology = optimize.find(
-    "effective_session_selection_for_launch("
+    "resolve_launch_selection_for_app("
   );
   const auto effective_availability = optimize.find(
     "stream_display_policy::selection_valid_fresh(",
@@ -1056,7 +1056,7 @@ TEST(DoctorResetContract, AppTopologyPrecedenceIsResolvedBeforeRequestAvailabili
     "resolved_topology = effective_selection;"
   );
   const auto effective = optimize_topology.find(
-    "auto effective_selection = stream_display_policy::effective_session_selection_for_launch("
+    "const auto launch_selection = proc::resolve_launch_selection_for_app("
   );
   const auto requested_availability = optimize_topology.find(
     "accepted_session_stream_mode(",
@@ -1066,7 +1066,7 @@ TEST(DoctorResetContract, AppTopologyPrecedenceIsResolvedBeforeRequestAvailabili
   ASSERT_NE(effective, std::string::npos);
   ASSERT_NE(requested_availability, std::string::npos);
   EXPECT_LT(effective, requested_availability)
-    << "hard app mirror and unlocked app-virtual semantics must choose the winner before a losing request is probed";
+    << "hard app pins and mirror semantics must choose the winner before a losing request is probed";
   EXPECT_NE(
     optimize_topology.find("if (effective_selection == requested_selection)"),
     std::string::npos
