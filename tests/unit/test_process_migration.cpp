@@ -65,10 +65,11 @@ TEST(ProcessMigrationTests, LaunchAsV15MapsLegacyFlagsAndPreservesStoredUnknowns
       if (before.contains(key)) EXPECT_EQ(after.at(key), before.at(key));
     }
     const auto &apps = parsed->get_apps();
-    const auto found = std::find_if(apps.begin(), apps.end(), [&](const proc::ctx_t &app) { return app.name == before.at("name"); });
+    const auto expected_name = before.at("name").get<std::string>();
+    const auto found = std::find_if(apps.begin(), apps.end(), [&](const proc::ctx_t &app) { return app.name == expected_name; });
     ASSERT_NE(found, apps.end());
-    EXPECT_EQ(found->desktop_mirror, row.at("launch_as") == "desktop_display");
-    EXPECT_EQ(found->virtual_display, row.at("launch_as") == "host_virtual_display");
+    EXPECT_EQ(found->desktop_mirror, row.at("launch_as").get<std::string>() == "desktop_display");
+    EXPECT_EQ(found->virtual_display, row.at("launch_as").get<std::string>() == "host_virtual_display");
   }
 }
 
