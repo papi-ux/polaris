@@ -208,7 +208,7 @@ TEST(LaunchModeContractTests, HostDefaultRemovesTheOldSoftVirtualDisplayPreferen
     allowed_host_virtual_display = allowed_host_virtual_display || mode == "host_virtual_display";
   }
   EXPECT_TRUE(allowed_host_virtual_display);
-  EXPECT_NE(contract.at("mode_reason").get<std::string>().find("already configured for Private Stream"), std::string::npos);
+  EXPECT_NE(contract.at("mode_reason").get<std::string>().find("already configured for private streaming"), std::string::npos);
 }
 
 TEST(LaunchModeContractTests, SteamBigPictureOnHeadlessHostExplainsPrivateDesktopSafety) {
