@@ -375,6 +375,58 @@ TEST(StreamDisplayPolicyTests, WindowedCageDefersEncoderProbeUntilRuntimeExists)
   EXPECT_TRUE(resolved.should_defer_encoder_probe);
 }
 
+TEST(AppLaunchAsPolicyTests, ExactSharedModesPinEveryClientUnlessItNamesAConflict) {
+  using verdict = stream_display_policy::app_launch_as_t::verdict_e;
+  std::ifstream source {std::filesystem::path {POLARIS_SOURCE_DIR} / "tests/fixtures/app-launch-as-v1.json"};
+  ASSERT_TRUE(source.good());
+  const auto fixture = nlohmann::json::parse(source);
+  size_t pinned = 0;
+  for (const auto &row : fixture.at("values")) {
+    const auto mode = row.at("id").get<std::string>();
+    const bool follows = mode == "host_default" || mode == "desktop_display";
+    for (const auto &named : {std::string {}, mode, std::string {"headless_dongle"}}) {
+      SCOPED_TRACE(mode + " / named=" + named);
+      const auto result = stream_display_policy::resolve_app_launch_as(mode, named);
+      EXPECT_EQ(result.verdict, follows ? verdict::follow :
+        (!named.empty() && named != mode ? verdict::conflict : verdict::pinned));
+      EXPECT_EQ(result.selection, follows ? "" : mode);
+    }
+    if (!follows) ++pinned;
+  }
+  EXPECT_EQ(pinned, 5u);
+}
+
+TEST(AppLaunchAsPolicyTests, MisspellingsWhitespaceAndHostOnlyModesNeverBecomePins) {
+  using verdict = stream_display_policy::app_launch_as_t::verdict_e;
+  for (const auto value : {"headless_dongle", "", "Host_Default", "Headless_Stream", " host_default", "host_default ", "mirror_desktop", "private_stream", "invalid", "turbo"}) {
+    SCOPED_TRACE(value);
+    const auto result = stream_display_policy::resolve_app_launch_as(value, "");
+    EXPECT_EQ(result.verdict, verdict::not_a_launch_mode);
+    EXPECT_TRUE(result.selection.empty());
+  }
+}
+
+TEST(AppLaunchAsPolicyTests, SharedVocabularyAndLabelsMatchAllSessionOverridablePaths) {
+  std::ifstream source {std::filesystem::path {POLARIS_SOURCE_DIR} / "tests/fixtures/app-launch-as-v1.json"};
+  ASSERT_TRUE(source.good());
+  const auto fixture = nlohmann::json::parse(source);
+  std::vector<std::string> expected;
+  for (const auto &row : fixture.at("values")) {
+    const auto mode = row.at("id").get<std::string>();
+    if (mode == "host_default") continue;
+    expected.push_back(mode);
+    EXPECT_EQ(stream_display_policy::label_for_selection(mode), row.at("label").get<std::string>());
+  }
+  std::vector<std::string> actual;
+  for (const auto &path : stream_path::registry()) {
+    if (stream_display_policy::selection_session_overridable(path.id)) actual.emplace_back(path.id);
+  }
+  std::sort(expected.begin(), expected.end());
+  std::sort(actual.begin(), actual.end());
+  EXPECT_EQ(actual, expected);
+  EXPECT_EQ(actual.size(), 6u);
+}
+
 TEST(StreamDisplayPolicyTests, LegacyBooleansMapToSelections) {
   using stream_display_policy::selection_from_legacy_booleans;
   using stream_display_policy::legacy_booleans_t;

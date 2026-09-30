@@ -532,6 +532,12 @@ namespace stream_display_policy {
     return booleans;
   }
 
+  app_launch_as_t resolve_app_launch_as(std::string_view launch_as, std::string_view client_named_selection) {
+    // The first checkpoint exposes the existing follow-host behavior to a real
+    // failing pin contract. No launch door calls this until the guard is wired.
+    return {};
+  }
+
   std::string effective_session_selection_for_launch(
     std::string_view requested_selection,
     bool mirror_desktop,

@@ -48,6 +48,14 @@ namespace stream_display_policy {
     bool prefer_gpu_native_capture = false;
   };
 
+  /** @brief Resolve an exact per-app pin without probing or changing host state. */
+  struct app_launch_as_t {
+    enum class verdict_e { follow, pinned, not_a_launch_mode, conflict } verdict = verdict_e::follow;
+    std::string selection;
+  };
+
+  app_launch_as_t resolve_app_launch_as(std::string_view launch_as, std::string_view client_named_selection);
+
   /**
    * @brief Derive a session mode for legacy Virtual Display launches.
    *
