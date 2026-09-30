@@ -1771,6 +1771,7 @@ TEST(SourceSafetyContracts, BothParsedDoorsUseOwnedAppContextAndResumeRefusesPin
   const auto codec = source.find("if (refuse_declared_codec(*launch_session))", resume);
   const auto capture = source.find("display_device::configure_display(", resume);
   ASSERT_NE(resume_guard, std::string::npos);
+  EXPECT_LT(resume_guard, source.find("  void cancel(", resume));
   EXPECT_LT(owner_gate, resume_guard);
   EXPECT_LT(token_gate, resume_guard);
   EXPECT_LT(resume_guard, codec);

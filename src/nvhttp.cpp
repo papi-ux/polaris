@@ -5106,8 +5106,9 @@ namespace nvhttp {
 
   std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker,
                                                                   const proc::ctx_t *topology_app) {
-    // Inert context plumbing for the failing-first door regression checkpoint.
+#ifndef __linux__
     (void) topology_app;
+#endif
     auto launch_session = std::make_shared<rtsp_stream::launch_session_t>();
 
     launch_session->id = ++session_id_counter;
@@ -5379,16 +5380,29 @@ namespace nvhttp {
     #if defined(__linux__)
     launch_session->mirror_desktop = explicit_mirror_desktop_requested(args);
     launch_session->force_private_after_desktop_steam_shutdown = force_private_after_desktop_steam_shutdown_requested(args);
+    // An exact app pin is freshly checked by the app-aware launch/resume guard, which can
+    // report its reason and recovery action. Watch inherits the admitted owner's topology.
+    // Only known session-overridable modes reach those guards without an earlier freshness
+    // check; ordinary host selections and malformed requests keep the existing parser gate.
+    const auto topology_freshness_deferred = [&](std::string_view mode) {
+      if (input_only || !stream_display_policy::selection_session_overridable(mode)) return false;
+      if (launch_session->watch_only) return true;
+      if (!topology_app) return false;
+      const auto pin = stream_display_policy::resolve_app_launch_as(topology_app->launch_as, {});
+      return pin.verdict == stream_display_policy::app_launch_as_t::verdict_e::pinned &&
+        pin.selection == mode;
+    };
     if (launch_session->resolved_profile_from_client) {
       launch_session->expected_stream_mode = lower_copy(
         get_arg(args, "expectedTopology", "")
       );
       std::string expected_topology_error;
       if (launch_session->expected_stream_mode.empty() ||
-          !stream_display_policy::selection_valid_fresh(
-            launch_session->expected_stream_mode,
-            expected_topology_error
-          )) {
+          (!topology_freshness_deferred(launch_session->expected_stream_mode) &&
+           !stream_display_policy::selection_valid_fresh(
+             launch_session->expected_stream_mode,
+             expected_topology_error
+           ))) {
         BOOST_LOG(warning) << "Rejecting exact resolved launch with missing or unavailable expectedTopology: "sv
                            << expected_topology_error;
         return nullptr;
@@ -5409,7 +5423,9 @@ namespace nvhttp {
           launch_session->resolved_profile_from_client &&
           launch_session->expected_stream_mode != requested_mode &&
           stream_display_policy::selection_session_overridable(requested_mode);
-        const auto accepted = defer_losing_mode_availability ?
+        const bool defer_owned_mode_availability =
+          topology_freshness_deferred(requested_mode);
+        const auto accepted = (defer_losing_mode_availability || defer_owned_mode_availability) ?
           requested_mode : accepted_session_stream_mode(requested_mode, reject_reason);
         if (!accepted.empty()) {
           launch_session->stream_mode = accepted;
@@ -5440,10 +5456,10 @@ namespace nvhttp {
         named_cert_p->always_use_virtual_display) {
       launch_session->stream_mode = std::string {stream_display_policy::k_host_virtual_display};
     }
-    // expectedTopology has already been freshly validated above. The final
-    // app-aware resolver freshly validates the winning mode before generation
-    // install; probing this lower-precedence paired default here would wrongly
-    // reject an app whose hard semantic is Desktop mirroring.
+    // expectedTopology was freshly checked above or deferred to the app-aware
+    // guard for a matching pin/Watch. The final resolver validates the winning
+    // mode before generation install; probing this lower-precedence paired
+    // default here would wrongly reject an app whose hard semantic is Desktop mirroring.
 #endif
     launch_session->virtual_display = !launch_session->mirror_desktop &&
       (client_requested_virtual_display ||
@@ -7888,6 +7904,20 @@ namespace nvhttp {
     if (config::input.enable_input_only_mode && current_appid == proc::input_only_app_id) {
       launch_session->input_only = true;
     }
+
+#ifdef __linux__
+    // Refuse the frozen owner's unavailable pin after owner/token admission but before
+    // any codec probe or display preparation. The full resolved-profile check below still
+    // verifies the post-probe capabilities; Watch keeps the admitted owner's generation.
+    if (topology_app) {
+      if (const auto refusal = proc::refuse_app_launch_as_before_launch(
+            *topology_app, proc::launch_selection_request_from_session(*launch_session))) {
+        tree.put("root.resume", 0);
+        put_launch_refusal(tree, refusal, "The active app's Launch as setting cannot be used for resume.");
+        return;
+      }
+    }
+#endif
 
     if (refuse_declared_codec(*launch_session)) {
       tree.put("root.resume", 0);

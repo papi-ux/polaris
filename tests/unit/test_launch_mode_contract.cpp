@@ -464,6 +464,10 @@ TEST_F(AppLaunchAsDoorTests, OrdinaryHostDefaultAndUnrelatedOrInvalidPinsKeepThe
   runtime.remove_binary("labwc");
   const auto args = resolved_launch_args("headless_stream", "headless_stream");
   EXPECT_EQ(nvhttp::make_launch_session(false, false, args, cert.get()), nullptr);
+  proc::ctx_t matching_pin;
+  proc::set_launch_as(matching_pin, "headless_stream");
+  EXPECT_EQ(nvhttp::make_launch_session(false, true, args, cert.get(), false, &matching_pin), nullptr)
+    << "input-only parsing retains the ordinary fresh gate even with a trusted pin";
   for (const auto value : {"host_default", "desktop_display", "gamescope_stream", "Host_Default"}) {
     SCOPED_TRACE(value);
     proc::ctx_t app;

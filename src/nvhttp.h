@@ -233,7 +233,8 @@ namespace nvhttp {
    *
    * Callers must check for nullptr before dereferencing or passing the session
    * to proc::execute. Host-built arguments use the host identity and do not
-   * carry client key material.
+   * carry client key material. A trusted owned app snapshot may defer a matching fixed
+   * topology pin's availability to the app-aware guard; nullptr keeps ordinary freshness.
    */
   std::shared_ptr<rtsp_stream::launch_session_t>
   make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker = false,
