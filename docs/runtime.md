@@ -117,7 +117,7 @@ Steam paths are handled conservatively:
 
 Browser Stream is experimental. It uses WebTransport and WebCodecs for browser-based streaming and exposes `/browser-stream` with `/webrtc` compatibility aliases.
 
-Browser Stream sessions use the same isolated runtime model as normal launches. When the browser stream closes, Polaris stops the browser helper, transport, audio/video capture, isolated compositor, and launched Steam game together. Polaris also settles Steam cleanup before the next Nova or Moonlight launch so a browser test does not leave stale Steam state behind.
+Browser Stream sessions use the same isolated runtime model as normal launches. Browser Stream shows only a private session, so an app whose Launch as is Host Virtual Display, Desktop Takeover or Mirror Desktop is refused with `app_launch_mode_unavailable` before it starts, and one set to a Private Stream mode runs even on a host whose own mode is not private. When the browser stream closes, Polaris stops the browser helper, transport, audio/video capture, isolated compositor, and launched Steam game together. Polaris also settles Steam cleanup before the next Nova or Moonlight launch so a browser test does not leave stale Steam state behind.
 
 ## HDR and Main10
 

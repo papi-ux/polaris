@@ -42,8 +42,8 @@ explicit:
 
 - **Where games run is a real choice.** Private Stream, Gamescope Stream, Host
   Virtual Display, Headless Dongle, and Mirror Desktop are described by their
-  display and privacy impact, unavailable modes fail closed, and the displays
-  Polaris creates for a stream go up to 240 FPS.
+  display and privacy impact, unavailable modes fail closed, each app can fix its own mode
+  with **Launch as**, and the displays Polaris creates for a stream go up to 240 FPS.
 - **Streams straight from Steam Game Mode.** A Steam Deck, or any PC running a
   gamescope Steam session, streams its Game Mode screen. A Steam title launched
   from Nova opens in Game Mode, a controller arrives as a DualSense, touch lands

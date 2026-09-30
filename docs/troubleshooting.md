@@ -173,8 +173,8 @@ launch on a specific driver/compositor stack, temporarily set it to `disabled` a
 capture decision fields in the bug report.
 
 The built-in Desktop entry streams your existing KDE, GNOME, or wlroots desktop even when the host
-default is a private stream, because it has **Mirror the host desktop** turned on in the
-[app editor](apps.md#runtime-behavior). An entry with no command and that setting off opens this private
+default is a private stream, because its **Launch as** is **Mirror Desktop** in the
+[app editor](apps.md#launch-as). An entry with no command set to Host default opens this private
 compositor instead. If such an entry connects but shows an empty or black desktop while app entries
 work, the headless runtime is alive and nothing visible has been launched in it yet; right-click the
 empty screen to open the session menu.
@@ -671,6 +671,8 @@ below are stable, so they can be searched for here and in support threads.
 
 | error_code | what happened on the host | fix |
 |---|---|---|
+| `app_launch_mode_unavailable` | The app's **Launch as** names a mode this host cannot run now: a missing tool, no virtual display backend, not Hyprland, Steam Game Mode, or a value in apps.json that is not a mode. Browser Stream also refuses an app set to a mode that is not private. The launch is refused before the stream instead of starting in another mode | The message names the reason. Pick another mode under **Launch as** in the Apps editor, or make that mode available |
+| `app_launch_mode_pinned` | The app's **Launch as** names one mode and the launch asked for another | Launch without choosing a mode, or change **Launch as** |
 | `encoder_probe_failed` | No video encoder could start; on NVIDIA the message adds the driver detail when the driver is the reason | Check the Doctor's Encoder and Capture rows. Against the private compositor: pick **Private Stream (GPU-native)** or set `linux_prefer_gpu_native_capture = enabled` |
 | `encoder_offers_no_hdr` | The launch asks for HDR, and the encoder that passed its probe offers none. On AMD Gamescope Stream under Auto, or with `encoder = vulkan` on Gamescope Stream, that is Vulkan Video, which reads frames through system memory as 8-bit; a launch that switches to Gamescope Stream for itself can ask for HDR another mode's encoder advertised | Launch without HDR. `encoder = vaapi` keeps VA-API on Gamescope Stream, and under Auto so does `hevc_mode = 3`. With `encoder = vulkan`, or Vulkan Video chosen for the launch, `hevc_mode = 3` offers HDR anyway, and that stream ends at its first 10-bit frame. VA-API there takes frames through the same 8-bit system memory upload unless `POLARIS_PORTAL_DMABUF=1` is set, and HDR through that unvalidated DMA-BUF route is not proven |
 | `no_capture_backend` | No capture backend works in the configured stream mode, so nothing could be probed | Check `capture` against the stream mode; unset lets Polaris pick. The Doctor names the missing protocol |

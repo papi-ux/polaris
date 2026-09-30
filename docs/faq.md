@@ -54,12 +54,12 @@ codec and HDR, because the host has to offer the matching encoder profile. The f
 
 ### Can Moonlight choose the launch mode?
 
-No. The host's saved launch mode applies to every standard Moonlight session; only Nova can pick a
-mode per launch. A protocol client can still ask for a one-off desktop mirror by adding
-`mirrorDesktop=1` to its launch request, without changing the host setting, and Artemis's virtual
-display option asks for a Host Virtual Display. The standard Moonlight apps send neither, so on the
-host give each way of playing its own app entry
-([how](compatibility.md#what-the-host-can-do-for-a-moonlight-player)).
+No, but each app can. The host's saved launch mode applies unless the app's **Launch as** names
+another mode; only Nova can pick a mode per launch. A protocol client can ask for a one-off desktop
+mirror with `mirrorDesktop=1`, without changing the host setting, but an app set to another fixed
+mode refuses it with `app_launch_mode_pinned`. Artemis's virtual display option asks for Host Virtual
+Display on an app set to Host default. Standard Moonlight sends neither; give each way of playing
+its own app entry under [Launch as](apps.md#launch-as).
 
 ### Moonlight shows the library but cannot start anything
 

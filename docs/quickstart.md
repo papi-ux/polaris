@@ -113,10 +113,10 @@ linux_prefer_gpu_native_capture = enabled
 ```
 
 > **What you'll see:** the built-in **Desktop** entry streams your real desktop, whatever the launch
-> mode, because it has **Mirror the host desktop** turned on in the
-> [app editor](apps.md#runtime-behavior). Games still run in Private Stream's own session, off your
-> desktop. For an empty private session to launch things into, add an entry with no command and that
-> setting off; right-click its empty screen to open the session menu. Other ways to put a desktop on
+> mode, because its **Launch as** is **Mirror Desktop** in the [app editor](apps.md#launch-as).
+> Games still run in Private Stream's own session, off your desktop. For an empty private session
+> to launch things into, add an entry with no command set to Host default; right-click its empty
+> screen to open the session menu. Other ways to put a desktop on
 > the stream are modes of their own: Host Virtual Display adds an extra display sized to the client,
 > and on Hyprland, Desktop Takeover moves the live desktop onto a temporary client-sized output and
 > blanks the original displays until the stream ends. Both are one click in the web UI under

@@ -30,7 +30,7 @@ Every card under **Settings → Audio/Video → Where games run** starts with wh
 Your game runs in its own invisible session. Your desktop never flickers, resizes, or shows the game, and nothing you do on the desktop leaks into the stream. It even works on a host with no monitor attached and nobody logged in: pair it with `sudo -H polaris --setup-host --enable-headless-boot` for a console-style box that streams straight from power-on ([Bazzite guide](bazzite.md#headless-boot-and-deck-images) has the walkthrough).
 
 - **Best for:** most setups, and the preferred path when you stream to a handheld.
-- **One caveat:** it requires both `labwc` and `wlr-randr` on the host `PATH`; the card is greyed out and names the missing tool until both are ready. The built-in Desktop entry still shows your real desktop, because it has **Mirror the host desktop** turned on in the [app editor](apps.md#runtime-behavior). An entry with no command and that setting off opens an empty private session instead. That empty screen is normal, not broken: right-click it to open the session menu.
+- **One caveat:** it requires both `labwc` and `wlr-randr` on the host `PATH`; the card is greyed out and names the missing tool until both are ready. The built-in Desktop entry still shows your real desktop, because its **Launch as** is **Mirror Desktop** in the [app editor](apps.md#launch-as). An entry with no command set to Host default opens an empty private session instead. That empty screen is normal, not broken: right-click it to open the session menu.
 
 ### Private Stream (GPU-native)
 
@@ -174,9 +174,20 @@ If a stream misbehaves, the exact reason codes and what to do about them are in 
 
 ## Streaming your desktop just once
 
-You do not need to change the host mode to briefly share your desktop. Any Moonlight-protocol client can add `mirrorDesktop=1` to a launch request to mirror the desktop for that single session, and Nova exposes this as a launch option. The host configuration is untouched.
+You do not need to change the host mode to briefly share your desktop. Any Moonlight-protocol client can add `mirrorDesktop=1` to a launch request to mirror the desktop for that single session. An app whose **Launch as** names another fixed mode refuses that request with `app_launch_mode_pinned` ([Launch as](apps.md#launch-as)). Nova exposes this as a launch option. The host configuration is untouched.
 
-Headless Dongle itself cannot be requested as a per-launch override because it rearranges physical outputs. Desktop Takeover can be selected for one launch because its recovery record and virtual output are session-owned; an explicit Mirror Desktop request still takes precedence. If Headless Dongle is the host default, a client can still choose Mirror Desktop or another supported mode for one session; the saved host setting returns on the next normal launch.
+Headless Dongle itself cannot be requested as a per-launch override because it rearranges physical outputs. Desktop Takeover can be selected for one launch because its recovery record and virtual output are session-owned; an explicit Mirror Desktop request still takes precedence, unless the app's Launch as names another fixed mode. If Headless Dongle is the host default, a client can still choose Mirror Desktop or another supported mode for one session, unless the app's Launch as names another mode; the saved host setting returns on the next normal launch.
+
+## One mode for one app
+
+**Launch as** in the Apps editor chooses one mode for one app on every client, Moonlight included.
+Host default follows **Where games run** and lets Nova choose for one launch. A fixed mode applies
+whatever the host's mode; Mirror Desktop keeps its desktop-specific choices. The same unavailable
+modes are greyed out with the same reasons as the host cards. Headless Dongle remains a host setting.
+
+A launch that needs an unavailable app mode is refused with `app_launch_mode_unavailable` and its
+reason. A launch that asks for a different mode from a fixed pin is refused with
+`app_launch_mode_pinned`, instead of starting another way. See [Launch as](apps.md#launch-as).
 
 > [!TIP]
 > The reverse situation has a switch too: a private launch is refused when desktop Steam is already running on the host, because starting Steam in the private session would fight the one on your screen. If you would rather have Polaris quit desktop Steam and continue, turn on **Close desktop Steam for private launches** on that app in the Apps editor. Polaris waits for Steam to fully exit before starting the stream. Clients can also request it per launch with `closeDesktopSteamForPrivate=1`.

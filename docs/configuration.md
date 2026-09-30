@@ -48,7 +48,8 @@ AMD/NVIDIA guidance, see [Launch modes and capture paths](launch-modes.md).
 | An isolated game-only session, desktop untouched | `headless_stream` / `windowed_stream` |
 
 Two client-facing notes: Moonlight-protocol clients can request the mirror for a single launch with
-`mirrorDesktop=1` on `/launch` (no host reconfiguration), and `headless_mode = enabled` *without*
+`mirrorDesktop=1` on `/launch` (no host reconfiguration). An app whose Launch as names a fixed mode
+refuses that request with `app_launch_mode_pinned`. Also, `headless_mode = enabled` *without*
 `linux_use_cage_compositor` derives `host_virtual_display`, not a headless session.
 
 ## Common options
