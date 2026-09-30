@@ -2937,7 +2937,7 @@ namespace stream_stats {
                                who + " speaks only the Moonlight protocol, as Moonlight and Artemis do. Polaris gets no "
                                "media loss from it, so Doctor works from round-trip time and host evidence. PyroWave, "
                                "Live Tuning from the client and choosing the launch mode per launch are Nova only, "
-                               "though Artemis can ask for Host Virtual Display; Live Tuning on Mission Control still "
+                               "though Artemis can ask for Host Virtual Display on an app whose Launch as is Host default; Live Tuning on Mission Control still "
                                "tunes this stream.");
       }
     }

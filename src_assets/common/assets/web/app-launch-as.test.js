@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { nextTick, ref } from 'vue'
 import fixture from '../../../../tests/fixtures/app-launch-as-v1.json'
 import AppsView from './views/AppsView.vue'
+import { appPayloadForSave, LAUNCH_AS_ORDER, launchAsOptions, sentence } from './app-launch-as.js'
 
 vi.mock('./composables/useGameScanner', () => ({
   useGameScanner: () => ({ scanning: ref(false), importing: ref(false), steamGames: ref([]),
@@ -22,6 +23,26 @@ const i18n = { t(key, params = {}) {
 const baseEntry = { name: 'Game', uuid: 'game-1', cmd: 'game', 'image-path': '',
   'launch-as': 'host_default', 'launch-as-basis': 'none', 'desktop-mirror': false, 'virtual-display': false }
 const catalogue = fixture.values.slice(1).map(({ id, label }) => ({ value: id, label, available: true }))
+
+describe('Launch as shared fixture', () => {
+  it('keeps exact fixture ids, labels and descriptions and excludes the host-only dongle', () => {
+    expect(LAUNCH_AS_ORDER).toEqual(fixture.values.map(({ id }) => id))
+    const options = launchAsOptions(catalogue)
+    expect(options.map(({ id, label }) => ({ id, label }))).toEqual(fixture.values)
+    expect(options.every(({ id, descKey }) => descKey === `apps.launch_as_${id}_desc`)).toBe(true)
+  })
+  it('preserves all non-legacy payload fields without mutating the loaded entry', () => {
+    const entry = { ...baseEntry, 'launch-as': 'turbo', env: { KEY: 'value' } }
+    const result = appPayloadForSave(entry)
+    expect(result).toEqual({ name: 'Game', uuid: 'game-1', cmd: 'game', 'image-path': '', 'launch-as': 'turbo', env: { KEY: 'value' } })
+    expect(entry['launch-as-basis']).toBe('none')
+  })
+  it('adds a full stop once and leaves empty reasons empty', () => {
+    expect(sentence('No backend')).toBe('No backend.')
+    expect(sentence('No backend.')).toBe('No backend.')
+    expect(sentence('')).toBe('')
+  })
+})
 
 async function editor({ entry = baseEntry, platform = 'linux', options = catalogue } = {}) {
   global.fetch = vi.fn(async (url, request = {}) => ({ ok: true, json: async () => {
@@ -96,6 +117,16 @@ describe('approved per-app Launch as editor', () => {
     expect(Object.hasOwn(body, 'desktop-mirror')).toBe(false)
     expect(Object.hasOwn(body, 'virtual-display')).toBe(false)
     expect(Object.hasOwn(body, 'launch-as-basis')).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('lets the bundled Mirror Desktop entry become Host default at the actual save boundary', async () => {
+    const wrapper = await editor({ entry: { ...baseEntry, name: 'Desktop', 'image-path': 'desktop.png', 'launch-as': 'desktop_display', 'desktop-mirror': true } })
+    expect(wrapper.find('input[value="desktop_display"]').element.checked).toBe(true)
+    await wrapper.find('input[value="host_default"]').setValue()
+    wrapper.vm.save(); await flushPromises()
+    expect(savedBody()['launch-as']).toBe('host_default')
+    expect(Object.hasOwn(savedBody(), 'desktop-mirror')).toBe(false)
     wrapper.unmount()
   })
 
