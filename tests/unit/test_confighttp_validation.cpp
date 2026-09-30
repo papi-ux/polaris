@@ -45,7 +45,9 @@ TEST(ResponseOnlyConfigKeyTests, HostDefaultModeLabelsCannotBeWrittenBack) {
   EXPECT_TRUE(confighttp::validation::is_response_only_config_key("host_default_stream_path_id"));
   EXPECT_TRUE(confighttp::validation::is_response_only_config_key("host_default_stream_path_label"));
   std::string error;
-  EXPECT_TRUE(confighttp::validation::validate_config_payload({
+  // Full-config saves remove response-only keys before validation; a direct
+  // write containing a derived label must also remain inadmissible.
+  EXPECT_FALSE(confighttp::validation::validate_config_payload({
     {"host_default_stream_path_id", "headless_stream"},
     {"host_default_stream_path_label", "Private Stream"},
   }, error)) << error;
