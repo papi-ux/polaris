@@ -4837,6 +4837,61 @@ namespace proc {
 #endif
   }  // namespace
 
+  std::string legacy_basis(const nlohmann::json &entry) {
+    const auto enabled = [&](const char *key) {
+      const auto value = entry.find(key);
+      return value != entry.end() && coerce_json_bool(*value, false);
+    };
+    const bool mirror = enabled("desktop-mirror");
+    const bool virtual_display = enabled("virtual-display");
+    return mirror ? (virtual_display ? "both" : "desktop-mirror") :
+                    (virtual_display ? "virtual-display" : "none");
+  }
+
+  std::string launch_as_from_legacy(const nlohmann::json &entry) {
+    const auto basis = legacy_basis(entry);
+    if (basis == "desktop-mirror" || basis == "both") {
+      return "desktop_display";
+    }
+    if (basis == "virtual-display") {
+      const auto source = boost::to_lower_copy(json_string_member_or(entry, "source"));
+      return source.empty() || source == "manual" ? "host_virtual_display" : "host_default";
+    }
+    return "host_default";
+  }
+
+  std::string normalize_launch_as(const nlohmann::json &entry) {
+    const auto stored = entry.find("launch-as");
+    if (stored == entry.end()) {
+      return launch_as_from_legacy(entry);
+    }
+    if (!stored->is_string()) {
+      return "invalid";
+    }
+    const auto value = stored->get<std::string>();
+    const auto basis = entry.find("launch-as-basis");
+    if (basis != entry.end() && *basis != nlohmann::json(legacy_basis(entry))) {
+      const auto mapped = launch_as_from_legacy(entry);
+      BOOST_LOG(info) << "apps.json: [" << json_string_member_or(entry, "name") << "] Launch as " << value
+                      << " predates a change to its old display flags; launching as " << mapped << ".";
+      return mapped;
+    }
+    return value;
+  }
+
+  void write_launch_as(nlohmann::json &entry, std::string_view value) {
+    entry["launch-as"] = std::string {value};
+    entry["desktop-mirror"] = value == "desktop_display";
+    entry["virtual-display"] = value == "host_virtual_display";
+    entry["launch-as-basis"] = legacy_basis(entry);
+  }
+
+  void set_launch_as(ctx_t &ctx, std::string value) {
+    ctx.launch_as = std::move(value);
+    ctx.desktop_mirror = ctx.launch_as == "desktop_display";
+    ctx.virtual_display = ctx.launch_as == "host_virtual_display";
+  }
+
   std::string canonical_steam_shutdown_undo() {
     return canonical_steam_shutdown_command("setsid steam");
   }
@@ -13456,8 +13511,27 @@ namespace proc {
     }
   }
 
+  void migration_v11(nlohmann::json &fileTree) {
+    static const int this_version = 15;
+    if (json_int_member_or(fileTree, "version", 0) >= this_version) {
+      return;
+    }
+    if (fileTree.contains("apps") && fileTree["apps"].is_array()) {
+      for (auto &app : fileTree["apps"]) {
+        if (!app.is_object() || app.contains("launch-as")) {
+          continue;
+        }
+        // Preserve legacy flags and their JSON types; the basis detects later
+        // edits made by an older console without rewriting hand-edited values.
+        app["launch-as"] = launch_as_from_legacy(app);
+        app["launch-as-basis"] = legacy_basis(app);
+      }
+    }
+    fileTree["version"] = this_version;
+  }
+
   void migrate(nlohmann::json& fileTree, const std::string& fileName) {
-    int last_version = 14;
+    int last_version = 15;
 
     int file_version = json_int_member_or(fileTree, "version", 0);
     if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
@@ -13474,6 +13548,7 @@ namespace proc {
       migration_v8(fileTree);
       migration_v9(fileTree);
       migration_v10(fileTree);
+      migration_v11(fileTree);
       file_handler::write_file(fileName.c_str(), fileTree.dump(4));
     }
   }
@@ -13624,8 +13699,7 @@ namespace proc {
           ctx.auto_detach = app_node.value("auto-detach", true);
           ctx.wait_all = app_node.value("wait-all", true);
           ctx.exit_timeout = std::chrono::seconds { app_node.value("exit-timeout", 5) };
-          ctx.virtual_display = app_node.value("virtual-display", false);
-          ctx.desktop_mirror = app_node.value("desktop-mirror", false);
+          set_launch_as(ctx, normalize_launch_as(app_node));
           ctx.close_desktop_steam_for_private = app_node.value("close-desktop-steam-for-private", false);
           ctx.scale_factor = app_node.value("scale-factor", 100);
           ctx.use_app_identity = app_node.value("use-app-identity", false);
@@ -13720,8 +13794,7 @@ namespace proc {
       ctx.uuid = FALLBACK_DESKTOP_UUID; // Placeholder UUID
       ctx.name = "Desktop (fallback)";
       ctx.image_path = parse_env_val(this_env, "desktop-alt.png");
-      ctx.virtual_display = false;
-      ctx.desktop_mirror = true;
+      set_launch_as(ctx, "desktop_display");
       ctx.scale_factor = 100;
       ctx.use_app_identity = false;
       ctx.per_client_app_identity = false;
@@ -13755,7 +13828,7 @@ namespace proc {
       ctx.uuid = VIRTUAL_DISPLAY_UUID;
       ctx.name = "Virtual Display";
       ctx.image_path = parse_env_val(this_env, "virtual_desktop.png");
-      ctx.virtual_display = true;
+      set_launch_as(ctx, "host_virtual_display");
       ctx.scale_factor = 100;
       ctx.use_app_identity = false;
       ctx.per_client_app_identity = false;
@@ -13788,7 +13861,7 @@ namespace proc {
       ctx.uuid = VIRTUAL_DISPLAY_UUID;
       ctx.name = "Virtual Display";
       ctx.image_path = parse_env_val(this_env, "virtual_desktop.png");
-      ctx.virtual_display = true;
+      set_launch_as(ctx, "host_virtual_display");
       ctx.scale_factor = 100;
       ctx.use_app_identity = false;
       ctx.per_client_app_identity = false;
@@ -13821,7 +13894,7 @@ namespace proc {
         ctx.uuid = REMOTE_INPUT_UUID;
         ctx.name = "Remote Input";
         ctx.image_path = parse_env_val(this_env, "input_only.png");
-        ctx.virtual_display = false;
+        set_launch_as(ctx, "host_default");
         ctx.scale_factor = 100;
         ctx.use_app_identity = false;
         ctx.per_client_app_identity = false;
@@ -13857,7 +13930,7 @@ namespace proc {
         ctx.uuid = TERMINATE_APP_UUID;
         ctx.name = "Terminate";
         ctx.image_path = parse_env_val(this_env, "terminate.png");
-        ctx.virtual_display = false;
+        set_launch_as(ctx, "host_default");
         ctx.scale_factor = 100;
         ctx.use_app_identity = false;
         ctx.per_client_app_identity = false;

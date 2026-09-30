@@ -58,11 +58,11 @@ TEST(ProcessMigrationTests, LaunchAsV15MapsLegacyFlagsAndPreservesStoredUnknowns
     } else {
       EXPECT_EQ(after.at("launch-as"), before.at("launch-as"));
       EXPECT_EQ(after.contains("launch-as-basis"), before.contains("launch-as-basis"));
-      if (before.contains("launch-as-basis")) EXPECT_EQ(after.at("launch-as-basis"), before.at("launch-as-basis"));
+      if (before.contains("launch-as-basis")) { EXPECT_EQ(after.at("launch-as-basis"), before.at("launch-as-basis")); }
     }
     for (const auto key : {"desktop-mirror", "virtual-display"}) {
       EXPECT_EQ(after.contains(key), before.contains(key));
-      if (before.contains(key)) EXPECT_EQ(after.at(key), before.at(key));
+      if (before.contains(key)) { EXPECT_EQ(after.at(key), before.at(key)); }
     }
     const auto &apps = parsed->get_apps();
     const auto expected_name = before.at("name").get<std::string>();
@@ -70,6 +70,32 @@ TEST(ProcessMigrationTests, LaunchAsV15MapsLegacyFlagsAndPreservesStoredUnknowns
     ASSERT_NE(found, apps.end());
     EXPECT_EQ(found->desktop_mirror, row.at("launch_as").get<std::string>() == "desktop_display");
     EXPECT_EQ(found->virtual_display, row.at("launch_as").get<std::string>() == "host_virtual_display");
+  }
+}
+
+TEST(ProcessMigrationTests, LaunchAsFixtureNormalizationAndWritesDeriveConsistentViews) {
+  const auto fixture_path = std::filesystem::path {POLARIS_SOURCE_DIR} / "tests/fixtures/app-launch-as-v1.json";
+  const auto fixture = nlohmann::json::parse(file_handler::read_file(fixture_path.string().c_str()));
+  for (const auto &row : fixture.at("legacy")) {
+    SCOPED_TRACE(row.at("case").get<std::string>());
+    EXPECT_EQ(proc::normalize_launch_as(row.at("entry")), row.at("launch_as").get<std::string>());
+    EXPECT_EQ(proc::legacy_basis(row.at("entry")), row.at("basis").get<std::string>());
+  }
+  for (const auto &row : fixture.at("writes")) {
+    auto entry = nlohmann::json {{"desktop-mirror", true}, {"virtual-display", true}, {"name", "Write fixture"}, {"keep", "metadata"}};
+    const auto mode = row.at("launch_as").get<std::string>();
+    proc::write_launch_as(entry, mode);
+    EXPECT_EQ(entry.at("launch-as"), row.at("launch_as"));
+    EXPECT_EQ(entry.at("launch-as-basis"), row.at("launch-as-basis"));
+    EXPECT_EQ(entry.at("desktop-mirror"), row.at("desktop-mirror"));
+    EXPECT_EQ(entry.at("virtual-display"), row.at("virtual-display"));
+    EXPECT_EQ(entry.at("keep"), "metadata");
+    EXPECT_EQ(proc::normalize_launch_as(entry), mode);
+    proc::ctx_t app;
+    proc::set_launch_as(app, mode);
+    EXPECT_EQ(app.launch_as, mode);
+    EXPECT_EQ(app.desktop_mirror, row.at("desktop-mirror").get<bool>());
+    EXPECT_EQ(app.virtual_display, row.at("virtual-display").get<bool>());
   }
 }
 
@@ -5477,7 +5503,7 @@ TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
   ASSERT_TRUE(migrated_tree.contains("version"));
-  EXPECT_EQ(migrated_tree["version"], 14);
+  EXPECT_EQ(migrated_tree["version"], 15);
   ASSERT_TRUE(migrated_tree.contains("apps"));
   ASSERT_TRUE(migrated_tree["apps"].is_array());
   ASSERT_EQ(migrated_tree["apps"].size(), 1);
@@ -5542,7 +5568,7 @@ TEST(ProcessMigrationTests, LegacyBundledDesktopGetsExplicitMirrorSemanticOnlyFo
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 14);
+  EXPECT_EQ(migrated_tree["version"], 15);
   EXPECT_TRUE(migrated_tree["apps"][0].value("desktop-mirror", false));
   EXPECT_FALSE(migrated_tree["apps"][1].contains("desktop-mirror"));
 
@@ -5607,7 +5633,7 @@ TEST(ProcessMigrationTests, VersionTenAndElevenCatalogsRepairOnlyTheExactLegacyB
 
     const auto first_payload = file_handler::read_file(file_path.string().c_str());
     const auto migrated_tree = nlohmann::json::parse(first_payload);
-    EXPECT_EQ(migrated_tree["version"], 14);
+    EXPECT_EQ(migrated_tree["version"], 15);
     EXPECT_TRUE(migrated_tree["apps"][0].value("desktop-mirror", false));
     EXPECT_FALSE(migrated_tree["apps"][1].contains("desktop-mirror"));
     EXPECT_FALSE(migrated_tree["apps"][2].value("desktop-mirror", true));
@@ -5701,7 +5727,7 @@ TEST(ProcessMigrationTests, MigratesOnlyExactLegacyHeroicImportsAndIsIdempotent)
 
   const auto first_payload = file_handler::read_file(file_path.string().c_str());
   const auto migrated_tree = nlohmann::json::parse(first_payload);
-  EXPECT_EQ(migrated_tree["version"], 14);
+  EXPECT_EQ(migrated_tree["version"], 15);
   ASSERT_EQ(migrated_tree["apps"].size(), 6u);
 
   const auto &epic = migrated_tree["apps"][0];
@@ -5797,7 +5823,7 @@ TEST(ProcessMigrationTests, GivesOnlyTheImagelessHeroicLauncherItsBundledPoster)
 
   const auto first_payload = file_handler::read_file(file_path.string().c_str());
   const auto migrated_tree = nlohmann::json::parse(first_payload);
-  EXPECT_EQ(migrated_tree["version"], 14);
+  EXPECT_EQ(migrated_tree["version"], 15);
   ASSERT_EQ(migrated_tree["apps"].size(), 5u);
   EXPECT_EQ(migrated_tree["apps"][0]["image-path"], "heroic.png");
   EXPECT_EQ(migrated_tree["apps"][1]["image-path"], "heroic.png");
@@ -5843,7 +5869,7 @@ TEST(ProcessMigrationTests, MigratesVersionTwelveFlatpakHeroicPathWithoutScanner
 
   const auto first_payload = file_handler::read_file(file_path.string().c_str());
   const auto migrated_tree = nlohmann::json::parse(first_payload);
-  EXPECT_EQ(migrated_tree["version"], 14);
+  EXPECT_EQ(migrated_tree["version"], 15);
   ASSERT_EQ(migrated_tree["apps"].size(), 1u);
   const auto &alan_wake = migrated_tree["apps"][0];
   EXPECT_EQ(alan_wake["uuid"], "77777777-7777-4777-8777-777777777777");
@@ -6040,7 +6066,7 @@ TEST(ProcessMigrationTests, ParseNormalizesSteamLibraryLaunchAndAddsShutdownUndo
   EXPECT_EQ(steam_ctx->source, "steam");
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 14);
+  EXPECT_EQ(migrated_tree["version"], 15);
 
   std::filesystem::remove(file_path);
 }
@@ -6091,7 +6117,7 @@ TEST(ProcessMigrationTests, ParseNormalizesCurrentSteamLibraryLaunchWithoutBigPi
   EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, expected_steam_shutdown_command());
 
   const auto parsed_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(parsed_tree["version"], 14);
+  EXPECT_EQ(parsed_tree["version"], 15);
 
   std::filesystem::remove(file_path);
 }
@@ -6371,7 +6397,7 @@ TEST(ProcessMigrationTests, ParseAddsLutrisLauncherWhenLutrisGamesExist) {
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 14);
+  EXPECT_EQ(migrated_tree["version"], 15);
   ASSERT_TRUE(migrated_tree.contains("apps"));
 
   const auto &migrated_apps = migrated_tree["apps"];
@@ -6437,7 +6463,7 @@ TEST(ProcessMigrationTests, ParseUnwrapsPolarisHdrSessionLibraryHardwire) {
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 14);
+  EXPECT_EQ(migrated_tree["version"], 15);
 
   const auto &migrated_apps = migrated_tree["apps"];
   const auto lib_app = std::find_if(migrated_apps.begin(), migrated_apps.end(), [](const auto &app) {

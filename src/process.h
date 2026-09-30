@@ -45,6 +45,7 @@
 
 // local includes
 #include "capture_generation.h"
+#include "app_launch_as.h"
 #include "config.h"
 #include "emulator_library.h"
 #include "game_library_scanner.h"
@@ -122,6 +123,12 @@ namespace proc {
   std::string normalize_steam_launch_mode(std::string mode);
   bool is_valid_steam_launch_mode(std::string_view mode);
   bool steam_launch_mode_is_big_picture(std::string_view mode);
+
+  std::string legacy_basis(const nlohmann::json &entry);
+  std::string launch_as_from_legacy(const nlohmann::json &entry);
+  std::string normalize_launch_as(const nlohmann::json &entry);
+  void write_launch_as(nlohmann::json &entry, std::string_view value);
+  void set_launch_as(struct ctx_t &ctx, std::string value);
 
   /// The Steam shutdown undo a generated Steam app carries, in the form parse() keeps it, so that
   /// nothing has to be upgraded each time apps.json is read.
@@ -741,6 +748,7 @@ namespace proc {
     bool elevated = false;
     bool auto_detach = false;
     bool wait_all = false;
+    std::string launch_as = "host_default";
     bool virtual_display = false;
     bool virtual_display_primary = false;
     bool desktop_mirror = false;
