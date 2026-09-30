@@ -24,6 +24,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -3420,6 +3421,54 @@ TEST(StreamStatsDoctorTests, SuppressesStaleNetworkFindingWhenLiveEvidenceIsClea
   EXPECT_EQ(doctor.at("suppressed_findings").at(0).at("id"), "stale_network_jitter");
 }
 
+namespace {
+  /**
+   * A hand-built stream's windowed network verdict, as if its whole window read what its newest
+   * fields read. Doctor grades the network from network_verdict alone, so a test that sets the newest
+   * readings sets the verdict they would have made: the fast debounce's risk is loss pressure when
+   * the loss is over the line, and RTT pressure otherwise.
+   */
+  stream_stats::stats_t judged(stream_stats::stats_t stats) {
+    auto &verdict = stats.network_verdict;
+    const bool reading = stats.network_sample_revision > 0;
+    verdict.loss_available = reading && stats.packet_loss_available;
+    verdict.loss_pct = verdict.loss_available ? stats.packet_loss : 0.0;
+    verdict.media_samples = verdict.loss_available ? 20 : 0;
+    verdict.frames_expected = verdict.loss_available ? 2400 : 0;
+    verdict.frames_lost = verdict.loss_available ? static_cast<std::uint64_t>(std::llround(stats.packet_loss * 24.0)) : 0;
+    verdict.loss_elevated = verdict.loss_available && stats.network_risk &&
+      stats.packet_loss > stream_stats::network_judge_t::k_loss_enter_pct;
+    verdict.rtt_available = reading;
+    verdict.rtt_ms = stats.latency_ms;
+    verdict.rtt_samples = reading ? 200 : 0;
+    verdict.rtt_elevated = reading && stats.network_risk && !verdict.loss_elevated;
+    verdict.control_loss_available = reading && stats.control_channel_samples > 0;
+    verdict.control_loss_pct = verdict.control_loss_available ? stats.control_channel_packet_loss : 0.0;
+    verdict.control_samples = verdict.control_loss_available ? 200 : 0;
+    verdict.control_loss_elevated = verdict.control_loss_available &&
+      stats.control_channel_packet_loss >= stream_stats::network_judge_t::k_loss_enter_pct;
+    verdict.risk = verdict.loss_elevated || verdict.rtt_elevated;
+    return stats;
+  }
+
+  nlohmann::json judged_doctor(const stream_stats::stats_t &stats,
+                               const nlohmann::json &health = nlohmann::json::object(),
+                               std::string_view app_uuid = {}) {
+    return stream_stats::build_doctor_json(judged(stats), health, app_uuid);
+  }
+
+  /**
+   * Network pressure as the window judges it: the readings before this leave the window, and enough
+   * reports at this RTT and loss arrive for a verdict.
+   */
+  void sustain_network_pressure(double latency_ms, double loss_pct) {
+    stream_stats::age_network_judge_for_tests(stream_stats::network_judge_t::k_window);
+    for (int i = 0; i < stream_stats::network_judge_t::k_min_media_samples; ++i) {
+      stream_stats::update_network_stats(latency_ms, loss_pct, 1000);
+    }
+  }
+}  // namespace
+
 TEST(StreamStatsDoctorTests, NetworkWatchRechecksWithoutChangingBitrate) {
   stream_stats::stats_t stats {};
   stats.streaming = true;
@@ -3436,7 +3485,7 @@ TEST(StreamStatsDoctorTests, NetworkWatchRechecksWithoutChangingBitrate) {
   stats.network_last_received_age_ms = 0;
   stats.latency_ms = 20.0;
 
-  const auto doctor = stream_stats::build_doctor_json(
+  const auto doctor = judged_doctor(
     stats,
     {{"primary_issue", "network_jitter"}, {"grade", "watch"}, {"safe_bitrate_kbps", 12000}}
   );
@@ -3473,7 +3522,7 @@ TEST(StreamStatsDoctorTests, ControlLossIsInformationalAndCannotReduceQuality) {
   stats.latency_ms = 4.0;
   stats.network_risk = false;
 
-  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto doctor = judged_doctor(stats);
 
   EXPECT_EQ(doctor.at("primary_issue"), "control_channel_observation");
   EXPECT_EQ(doctor.at("status"), "ok");
@@ -3501,6 +3550,54 @@ TEST(StreamStatsDoctorTests, ControlLossIsInformationalAndCannotReduceQuality) {
   EXPECT_TRUE(saw_control_observation);
 }
 
+TEST(StreamStatsDoctorTests, ControlChannelFindingSaysOnlyWhatTheWindowJudged) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  stats.bitrate_kbps = 20000;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.encode_time_ms = 2.0;
+  stats.control_channel_packet_loss = 7.75;
+  stats.control_channel_samples = 900;
+  stats.network_sample_revision = 900;
+  stats.network_last_received_age_ms = 0;
+  stats.latency_ms = 6.0;
+
+  // A client that sends no media reports: RTT is judged, loss is not, and nothing says it cleared.
+  const auto unreported = judged_doctor(stats);
+  EXPECT_EQ(unreported.at("primary_issue"), "control_channel_observation");
+  EXPECT_EQ(unreported.at("summary"), "Control-channel retries were observed, but no video frame loss is measured.");
+  EXPECT_EQ(unreported.at("recommendation").at("body"),
+            "The reliable control channel retried packets, but no video frame loss is measured, and round trip time over "
+            "the last 20 seconds stays below network pressure, so Doctor changes nothing for this.");
+
+  // Its reports arriving and judged light, with Live Tuning owning the bitrate.
+  stats.packet_loss = 1.4;
+  stats.packet_loss_available = true;
+  stats.media_loss_sample_revision = 890;
+  stats.media_loss_last_received_age_ms = 400;
+  stats.adaptive_bitrate_enabled = true;
+  const auto reported = judged_doctor(stats);
+  EXPECT_EQ(reported.at("primary_issue"), "control_channel_observation");
+  EXPECT_EQ(reported.at("summary"), "Control-channel retries were observed, but video frame loss stays below network pressure.");
+  EXPECT_EQ(reported.at("recommendation").at("body"),
+            "The reliable control channel retried packets, but video frame loss and round trip time over the last 20 "
+            "seconds stay below network pressure, so Doctor changes nothing for this. Live Tuning keeps adjusting the "
+            "live bitrate on its own.");
+  const auto *loss = find_evidence_row(reported, "packet_loss");
+  ASSERT_NE(loss, nullptr);
+  EXPECT_EQ(loss->at("label"), "Video frame loss");
+  EXPECT_EQ(loss->at("status"), "pass");
+  EXPECT_EQ(loss->at("source"), "media_transport");
+  EXPECT_EQ(loss->at("detail"),
+            "34 of 2400 video frames in the client's last 20 reports never reached it whole after FEC recovery, 1.40%. "
+            "Doctor calls loss network pressure at 2.00% over the last 20 seconds and clears it only below 1.00%. "
+            "Frames the host dropped before sending are counted separately.");
+}
+
 TEST(StreamStatsDoctorTests, ConfirmedNetworkPressureOffersGuardedFixWithUndo) {
   stream_stats::stats_t stats {};
   stats.streaming = true;
@@ -3520,7 +3617,7 @@ TEST(StreamStatsDoctorTests, ConfirmedNetworkPressureOffersGuardedFixWithUndo) {
   stats.latency_ms = 52.0;
   stats.adaptive_runtime_update_supported = true;
 
-  const auto doctor = stream_stats::build_doctor_json(
+  const auto doctor = judged_doctor(
     stats,
     {{"primary_issue", "network_jitter"}, {"grade", "degraded"}}
   );
@@ -3536,6 +3633,7 @@ TEST(StreamStatsDoctorTests, ConfirmedNetworkPressureOffersGuardedFixWithUndo) {
 }
 
 TEST(StreamStatsDoctorTests, AutoSafeOwnsConfirmedNetworkCorrectionWithoutCompetingAutoFix) {
+  // Round trip time alone: Live Tuning cuts for it on its own, and Doctor offers no competing step.
   stream_stats::stats_t stats {};
   stats.streaming = true;
   stats.fps = 60.0;
@@ -3550,7 +3648,7 @@ TEST(StreamStatsDoctorTests, AutoSafeOwnsConfirmedNetworkCorrectionWithoutCompet
   stats.capture_residency = platf::frame_residency_e::gpu;
   stats.encode_target_residency = platf::frame_residency_e::gpu;
   stats.network_risk = true;
-  stats.packet_loss = 3.4;
+  stats.packet_loss = 0.0;
   stats.packet_loss_available = true;
   stats.network_sample_revision = 1;
   stats.network_last_received_age_ms = 0;
@@ -3558,7 +3656,7 @@ TEST(StreamStatsDoctorTests, AutoSafeOwnsConfirmedNetworkCorrectionWithoutCompet
   stats.media_loss_last_received_age_ms = 0;
   stats.latency_ms = 52.0;
 
-  const auto doctor = stream_stats::build_doctor_json(
+  const auto doctor = judged_doctor(
     stats,
     {{"primary_issue", "network_jitter"}, {"grade", "degraded"}}
   );
@@ -3568,10 +3666,13 @@ TEST(StreamStatsDoctorTests, AutoSafeOwnsConfirmedNetworkCorrectionWithoutCompet
   EXPECT_EQ(action.at("id"), "recheck_network");
   EXPECT_EQ(action.at("capability"), "recheck");
   EXPECT_FALSE(action.at("undo").at("supported"));
+  // Called what the rest of the product calls it.
   EXPECT_NE(
-    doctor.at("recommendation").at("body").get<std::string>().find("Auto Safe"),
+    doctor.at("recommendation").at("body").get<std::string>().find("Doctor leaves round trip time to Live Tuning"),
     std::string::npos
   );
+  EXPECT_EQ(doctor.at("recommendation").dump().find("Auto Safe"), std::string::npos);
+  EXPECT_EQ(action.dump().find("Auto Safe"), std::string::npos);
   const auto &evidence = doctor.at("evidence");
   const auto owner = std::find_if(evidence.begin(), evidence.end(), [](const auto &item) {
     return item.at("id") == "live_bitrate_owner";
@@ -3580,7 +3681,84 @@ TEST(StreamStatsDoctorTests, AutoSafeOwnsConfirmedNetworkCorrectionWithoutCompet
   EXPECT_EQ(owner->at("value"), "auto_safe");
 }
 
+TEST(StreamStatsDoctorTests, LiveTuningLeavesSustainedFrameLossToOneDoctorStep) {
+  // Live Tuning keeps 1.4.13's loss handling, which averages each report with every control ping's 0%,
+  // so whether a few percent of lost frames cuts depends on when the report lands. Doctor offers one
+  // step for sustained video frame loss even while Live Tuning is on, with Undo, and says taking it
+  // turns Live Tuning off for this stream until the step is undone or rolls back or the stream ends.
+  // Round trip time alone stays Live Tuning's to cut for, and Doctor only rechecks it, saying what
+  // Live Tuning's 1.4.13 rule does and no more.
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.fps = 60.0;
+  stats.encode_target_fps = 60.0;
+  stats.bitrate_kbps = 20000;
+  stats.adaptive_target_bitrate_kbps = 20000;
+  stats.adaptive_bitrate_enabled = true;
+  stats.adaptive_bitrate_active = true;
+  stats.adaptive_bitrate_state = "steady";
+  stats.adaptive_runtime_update_supported = true;
+  stats.capture_transport = platf::frame_transport_e::dmabuf;
+  stats.capture_residency = platf::frame_residency_e::gpu;
+  stats.encode_target_residency = platf::frame_residency_e::gpu;
+  stats.network_risk = true;
+  stats.packet_loss = 3.4;
+  stats.packet_loss_available = true;
+  stats.network_sample_revision = 1;
+  stats.network_last_received_age_ms = 0;
+  stats.media_loss_sample_revision = 1;
+  stats.media_loss_last_received_age_ms = 0;
+  stats.latency_ms = 8.0;
+
+  const auto loss = judged_doctor(stats, {{"primary_issue", "network_jitter"}, {"grade", "degraded"}});
+  ASSERT_TRUE(stream_stats::judged_network(judged(stats)).loss_pressure);
+  const auto &step = loss.at("safe_recovery_action");
+  EXPECT_EQ(loss.at("primary_issue"), "network_jitter");
+  EXPECT_EQ(step.at("id"), "lower_bitrate");
+  EXPECT_EQ(step.at("capability"), "auto_fix");
+  EXPECT_EQ(step.at("payload_preview").at("target_bitrate_kbps"), 16000);
+  EXPECT_TRUE(step.at("undo").at("supported").get<bool>());
+  // Off until Undo, a rollback or the end of the stream, each of which turns it back on.
+  const std::string until = "Live Tuning off for this stream until you undo the step, the step rolls back, or the stream ends";
+  const auto rollback = step.at("rollback").get<std::string>();
+  EXPECT_NE(rollback.find("turns " + until), std::string::npos) << rollback;
+  EXPECT_NE(rollback.find("turns Live Tuning back on"), std::string::npos) << rollback;
+  const auto body = loss.at("recommendation").at("body").get<std::string>();
+  EXPECT_NE(body.find("Sustained video frame loss"), std::string::npos) << body;
+  EXPECT_NE(body.find("turns Live Tuning off for this stream only"), std::string::npos) << body;
+  const auto expected = loss.at("recommendation").at("expected_effect").get<std::string>();
+  EXPECT_NE(expected.find("Live Tuning stays off for this stream until you undo the step, the step rolls back, or the stream ends"), std::string::npos) << expected;
+  EXPECT_EQ(loss.dump().find("for the rest of this stream"), std::string::npos);
+  EXPECT_EQ(loss.dump().find("owns the live bitrate correction"), std::string::npos);
+
+  // Round trip time alone at the fail line, no loss.
+  stats.packet_loss = 0.0;
+  stats.latency_ms = 52.0;
+  const auto rtt = judged_doctor(stats, {{"primary_issue", "network_jitter"}, {"grade", "degraded"}});
+  ASSERT_FALSE(stream_stats::judged_network(judged(stats)).loss_pressure);
+  EXPECT_EQ(rtt.at("primary_issue"), "network_jitter");
+  EXPECT_EQ(rtt.at("safe_recovery_action").at("id"), "recheck_network");
+  EXPECT_FALSE(rtt.at("safe_recovery_action").at("undo").at("supported").get<bool>());
+  const auto rtt_body = rtt.at("recommendation").at("body").get<std::string>();
+  EXPECT_NE(rtt_body.find("Doctor leaves round trip time to Live Tuning"), std::string::npos) << rtt_body;
+  // No promise that Live Tuning cuts for any high RTT: its 1.4.13 rule counts a reading at its once a
+  // second check, at 45 ms and over twice its own average, which RTT that stays high lifts.
+  EXPECT_EQ(rtt_body.find("lowers the bitrate on its own"), std::string::npos) << rtt_body;
+  const auto rtt_expected = rtt.at("recommendation").at("expected_effect").get<std::string>();
+  EXPECT_NE(rtt_expected.find("at its once a second check when that round trip reading is 45 ms or more and over twice its own average"), std::string::npos) << rtt_expected;
+  EXPECT_NE(rtt_expected.find("lifts that average until it no longer counts"), std::string::npos) << rtt_expected;
+  // Any report of lost frames restarts the 10 seconds before it climbs, not only a spike.
+  EXPECT_NE(rtt_expected.find("only after 10 seconds without a cut or a report of lost frames"), std::string::npos) << rtt_expected;
+  EXPECT_EQ(rtt_expected.find("for each spike it sees"), std::string::npos) << rtt_expected;
+  // Live Tuning is the only live bitrate controller for round trip time alone, and the recheck says so.
+  const auto &recheck = rtt.at("safe_recovery_action");
+  EXPECT_NE(recheck.at("rollback").get<std::string>().find("For round trip time alone, Live Tuning stays the only live bitrate controller."), std::string::npos)
+    << recheck.at("rollback");
+  EXPECT_EQ(recheck.at("verification").at("success_when").at(0), "Live Tuning stays the live bitrate owner for round trip time");
+}
+
 TEST(StreamStatsDoctorTests, AutoSafePolicyRemainsReadOnlyAcrossTransientActuatorStates) {
+  // Round trip time alone, which Live Tuning keeps to itself whatever its actuator is doing.
   const std::array<std::string, 4> transient_states {
     "recreating_encoder",
     "doctor_override",
@@ -3603,7 +3781,7 @@ TEST(StreamStatsDoctorTests, AutoSafePolicyRemainsReadOnlyAcrossTransientActuato
     stats.capture_residency = platf::frame_residency_e::gpu;
     stats.encode_target_residency = platf::frame_residency_e::gpu;
     stats.network_risk = true;
-    stats.packet_loss = 3.4;
+    stats.packet_loss = 0.0;
     stats.packet_loss_available = true;
     stats.network_sample_revision = 1;
     stats.network_last_received_age_ms = 0;
@@ -3611,7 +3789,7 @@ TEST(StreamStatsDoctorTests, AutoSafePolicyRemainsReadOnlyAcrossTransientActuato
     stats.media_loss_last_received_age_ms = 0;
     stats.latency_ms = 52.0;
 
-    const auto doctor = stream_stats::build_doctor_json(
+    const auto doctor = judged_doctor(
       stats,
       {{"primary_issue", "network_jitter"}, {"grade", "degraded"}}
     );
@@ -3650,7 +3828,7 @@ TEST(StreamStatsDoctorTests, UnsupportedRuntimeBitrateUsesAppliedRateAndOffersNo
   stats.media_loss_last_received_age_ms = 0;
   stats.latency_ms = 52.0;
 
-  const auto doctor = stream_stats::build_doctor_json(
+  const auto doctor = judged_doctor(
     stats,
     {{"primary_issue", "network_jitter"}, {"grade", "degraded"}}
   );
@@ -3697,7 +3875,7 @@ TEST(StreamStatsDoctorTests, CleanLiveReductionOffersCapabilityBoundedQualityRes
   stats.network_risk = false;
   stats.adaptive_runtime_update_supported = true;
 
-  const auto doctor = stream_stats::build_doctor_json(
+  const auto doctor = judged_doctor(
     stats,
     {{"primary_issue", "network_jitter"}, {"grade", "degraded"}, {"summary", "Old network warning"}}
   );
@@ -3738,7 +3916,7 @@ TEST(StreamStatsDoctorTests, AutoSafeOwnsCleanQualityRecoveryWithoutCompetingAut
   stats.latency_ms = 4.0;
   stats.network_risk = false;
 
-  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto doctor = judged_doctor(stats, nlohmann::json::object());
   const auto &action = doctor.at("safe_recovery_action");
 
   EXPECT_EQ(doctor.at("primary_issue"), "none");
@@ -3873,21 +4051,21 @@ TEST(DoctorActionTests, RequiresCurrentNetworkEvidenceBeforeReducingQuality) {
   stats.packet_loss = 0.4;
   stats.latency_ms = 20.0;
 
-  EXPECT_FALSE(doctor_actions::network_pressure_confirmed(stats));
+  EXPECT_FALSE(doctor_actions::network_pressure_confirmed(judged(stats)));
 
   stats.packet_loss = 3.4;
   stats.packet_loss_available = true;
   stats.media_loss_sample_revision = 1;
   stats.media_loss_last_received_age_ms = 0;
-  EXPECT_TRUE(doctor_actions::network_pressure_confirmed(stats));
+  EXPECT_TRUE(doctor_actions::network_pressure_confirmed(judged(stats)));
 
   stats.packet_loss = 0.0;
   stats.packet_loss_available = false;
   stats.latency_ms = 45.0;
-  EXPECT_TRUE(doctor_actions::network_pressure_confirmed(stats));
+  EXPECT_TRUE(doctor_actions::network_pressure_confirmed(judged(stats)));
 
   stats.network_last_received_age_ms = 2001;
-  EXPECT_FALSE(doctor_actions::network_pressure_confirmed(stats));
+  EXPECT_FALSE(doctor_actions::network_pressure_confirmed(judged(stats)));
 }
 
 TEST(DoctorActionTests, HttpStatusContractUsesConflictForTypedActionFailures) {
@@ -3976,15 +4154,14 @@ TEST(DoctorActionTests, FreshControlObservationCannotRefreshStaleMediaLoss) {
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(35.0, 3.4, 1000);
-  }
-  stream_stats::age_latest_network_observation_for_tests(3s);
+  sustain_network_pressure(35.0, 3.4);
+  // Older than a client media report may be and still count, so its window's loss is not judged.
+  stream_stats::age_latest_network_observation_for_tests(6s);
   stream_stats::update_control_channel_stats(35.0, 0.0, 1000);
 
   const auto stats = stream_stats::get_current();
   EXPECT_TRUE(stats.network_risk);
-  EXPECT_GE(stats.media_loss_last_received_age_ms, 2000);
+  EXPECT_GT(stats.media_loss_last_received_age_ms, stream_stats::judged_network_t::k_media_report_max_age_ms);
   EXPECT_LT(stats.network_last_received_age_ms, 2000);
   EXPECT_FALSE(doctor_actions::network_pressure_confirmed(stats));
   const auto doctor = stream_stats::build_doctor_json(
@@ -4034,9 +4211,7 @@ TEST(DoctorActionTests, StaleHostNetworkEvidenceCannotMutateBitrate) {
   EXPECT_EQ(stale_restore.at("state"), "evidence_changed");
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 10000);
 
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(55.0, 3.5, 1000);
-  }
+  sustain_network_pressure(55.0, 3.5);
   stream_stats::age_latest_network_observation_for_tests(3s);
   const auto stale_reduce = doctor_actions::execute({{"action_id", "lower_bitrate"}});
   EXPECT_FALSE(stale_reduce.at("status").get<bool>());
@@ -4174,9 +4349,7 @@ TEST(DoctorActionTests, CachedQualityVerificationCannotAuthorizeANewerStepAfterD
   // The watchdog's clean result is receipt history only. New current
   // degradation must prevent the next restoration step and roll the entire
   // reversible transaction back to its captured target.
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(55.0, 3.5, 1000);
-  }
+  sustain_network_pressure(55.0, 3.5);
   const auto degraded = execute_with_encoder_ack(7580, [&] {
     return doctor_actions::execute({
       {"action_id", "verify"}, {"run_id", run_id}
@@ -4189,6 +4362,72 @@ TEST(DoctorActionTests, CachedQualityVerificationCannotAuthorizeANewerStepAfterD
 
   adaptive_bitrate::set_enabled(false);
   stream_stats::update_stream_active(false);
+}
+
+TEST(DoctorActionTests, AQualityRestoreOnTheRp6sLightLossVerifiesOnTheVerdictThatOfferedIt) {
+  // The Retroid Pocket 6's HEVC loss, 9 of 121 frames lost, 7.4%, in one report in five: a window that
+  // reads a light 1.5% and never calls it pressure. Doctor offers to restore quality on that window,
+  // and verified the restore on the newest readings: a report above 2% in the eight seconds after the
+  // step, or one latched while the step was Doctor's, rolled it back, which on this pattern is almost
+  // every time. It verifies on the verdict that offered it.
+  stream_stats::update_stream_active(false);
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_runtime_update_supported(true);
+  adaptive_bitrate::set_live_bitrate(7580);
+  adaptive_bitrate::set_base_bitrate(15000);
+  const auto cleanup = util::fail_guard([] {
+    adaptive_bitrate::set_enabled(false);
+    stream_stats::update_stream_active(false);
+  });
+
+  stream_stats::update_stream_active(true, "DoctorRestoreLightLoss", "203.0.113.19");
+  stream_stats::update_video_stats(60.0, 7580, 5.0, "hevc", 1920, 1080);
+  stream_stats::update_session_targets(
+    60.0, 60.0, 60.0, "client_requested", "deterministic_preset_v1",
+    "deterministic", "not_applicable", "Capability-validated launch profile.",
+    "", 1, 20000, 15000
+  );
+  int report = 0;
+  const auto next_report = [&] {
+    stream_stats::update_network_stats(5.0, ++report % 5 == 0 ? 900.0 / 121.0 : 0.0, 1000);
+  };
+  for (int i = 0; i < 10; ++i) {
+    next_report();
+  }
+  auto verdict = stream_stats::current_network_verdict();
+  ASSERT_TRUE(verdict.loss_available);
+  ASSERT_FALSE(verdict.loss_elevated);
+  ASSERT_GE(verdict.loss_pct, stream_stats::network_judge_t::k_loss_exit_pct);
+
+  const auto applied = doctor_actions::execute({{"action_id", "restore_quality"}});
+  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
+  ASSERT_EQ(applied.at("requested").at("bitrate_kbps"), 9475);
+  const auto run_id = applied.at("run_id").get<std::string>();
+  const auto apply_request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(apply_request.has_value());
+  adaptive_bitrate::acknowledge_live_bitrate_applied(apply_request->revision, apply_request->target_bitrate_kbps);
+
+  // Eight seconds after the step, one of them a 7.4% report, the window still light.
+  for (int i = 0; i < 8; ++i) {
+    next_report();
+  }
+  verdict = stream_stats::current_network_verdict();
+  ASSERT_FALSE(verdict.loss_elevated);
+  EXPECT_FALSE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
+
+  doctor_actions::make_verification_window_complete_for_tests();
+  const auto verified = doctor_actions::execute({{"action_id", "verify"}, {"run_id", run_id}});
+  // Stable, so Doctor takes the next guarded step toward the launch bitrate.
+  EXPECT_EQ(verified.at("state"), "applying") << verified.dump();
+  EXPECT_GT(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 9475);
+
+  const auto undone = execute_with_encoder_ack(7580, [&] {
+    return doctor_actions::execute({{"action_id", "undo"}, {"run_id", run_id}});
+  });
+  EXPECT_EQ(undone.at("state"), "undone") << undone.dump();
 }
 
 TEST(DoctorActionTests, VideoWarningDuringQualityVerificationRollsBackTheRestore) {
@@ -4270,9 +4509,7 @@ TEST(DoctorActionTests, NewerExplicitBitrateSupersedesUndoWithoutBeingOverwritte
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
   ASSERT_TRUE(applied.at("status").get<bool>());
@@ -4308,9 +4545,7 @@ TEST(DoctorActionTests, WatchdogRetainsSupersededTerminalReceipt) {
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
   ASSERT_TRUE(applied.at("status").get<bool>());
@@ -4346,6 +4581,827 @@ TEST(DoctorActionTests, ExecuteRefusesLiveTuningAndStaleUndoWithoutAStream) {
   EXPECT_EQ(stale_undo.at("error"), "This Doctor undo is no longer available.");
 }
 
+namespace {
+  /// A stream Doctor may step down: Live Tuning off, one session in scope, under sustained pressure.
+  struct doctor_step_stream_t {
+    explicit doctor_step_stream_t(const char *client) {
+      config::video.adaptive_bitrate.enabled = false;
+      config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+      config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+      adaptive_bitrate::load_config();
+      adaptive_bitrate::reset();
+      adaptive_bitrate::set_runtime_update_supported(true);
+      adaptive_bitrate::set_base_bitrate(20000);
+      adaptive_bitrate::set_enabled(false);
+      stream_stats::update_stream_active(false);
+      stream_stats::update_controller_input_state(false, 0, "", "", "unknown", "", false, "");
+      stream_stats::update_steam_input_state("unknown", 0, 0, 0, "");
+      stream_stats::update_stream_active(true, client, "203.0.113.83");
+      stream_stats::update_video_stats(60.0, 20000, 5.0, "hevc", 1920, 1080);
+      stream_stats::set_doctor_live_action_scope_available(true);
+      for (int i = 0; i < 6; ++i) {
+        stream_stats::update_network_stats(5.0, 0.0, 1000);
+      }
+      sustain_network_pressure(52.0, 3.4);
+    }
+
+    ~doctor_step_stream_t() {
+      stream_stats::set_doctor_live_action_scope_available(false);
+      adaptive_bitrate::set_enabled(false);
+      stream_stats::update_stream_active(false);
+    }
+
+    static nlohmann::json doctor() {
+      auto live = stream_stats::get_current();
+      live.capture_transport = platf::frame_transport_e::dmabuf;
+      live.capture_residency = platf::frame_residency_e::gpu;
+      live.encode_target_residency = platf::frame_residency_e::gpu;
+      return stream_stats::build_doctor_json(live, nlohmann::json::object());
+    }
+  };
+}  // namespace
+
+TEST(DoctorActionTests, AVerifiedStepLeavesDoctorJudgingOnlyTheReadingsAfterIt) {
+  // Doctor verified a step against readings from after it while its headline went on judging a
+  // window that still held the readings that asked for the step. A step that verified left
+  // "Sustained network pressure" on the headline, and lower_bitrate on offer again, for most of
+  // 20 seconds, so a second press stepped down a link that had already recovered.
+  doctor_step_stream_t stream("DoctorVerifiedStep");
+  const auto before = doctor_step_stream_t::doctor();
+  ASSERT_EQ(before.at("primary_issue"), "network_jitter");
+  ASSERT_EQ(before.at("safe_recovery_action").at("id"), "lower_bitrate");
+
+  const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  ASSERT_TRUE(applied.at("status").get<bool>());
+  const auto run_id = applied.at("run_id").get<std::string>();
+  doctor_actions::confirm_encoder_application_for_tests();
+
+  // The stepped-down stream runs clean.
+  for (int i = 0; i < 8; ++i) {
+    stream_stats::update_network_stats(8.0, 0.5, 1000);
+  }
+  doctor_actions::make_verification_window_complete_for_tests();
+  const auto verified = doctor_actions::execute({{"action_id", "verify"}, {"run_id", run_id}});
+  ASSERT_EQ(verified.at("state"), "resolved") << verified.dump();
+
+  const auto network = stream_stats::judged_network(stream_stats::get_current());
+  EXPECT_TRUE(network.loss_judged);
+  EXPECT_FALSE(network.risk);
+  const auto after = doctor_step_stream_t::doctor();
+  EXPECT_NE(after.at("primary_issue"), "network_jitter") << after.at("summary");
+  EXPECT_NE(after.at("safe_recovery_action").at("id"), "lower_bitrate");
+  const auto verdict = after.at("advanced_evidence").at("network_verdict");
+  // Eight clean reports, the first of which covers the second before the step and does not count.
+  EXPECT_EQ(verdict.at("media_samples"), 7);
+  EXPECT_EQ(verdict.at("loss_state"), "clean");
+
+  const auto undo = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute({{"action_id", "undo"}, {"run_id", run_id}});
+  });
+  EXPECT_EQ(undo.at("state"), "undone") << undo.dump();
+}
+
+TEST(DoctorActionTests, AStepThePostStepWindowStillCallsPressureRollsBack) {
+  // The other half of the same disagreement: the newest readings could clear a step whose own
+  // readings the headline still judged as pressure. Two clean reports after six that lost 4% of
+  // their frames cleared the fast debounce, and Doctor called the step verified beside a headline
+  // that still said "Sustained network pressure".
+  doctor_step_stream_t stream("DoctorPressureAfterStep");
+  const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  ASSERT_TRUE(applied.at("status").get<bool>());
+  const auto run_id = applied.at("run_id").get<std::string>();
+  doctor_actions::confirm_encoder_application_for_tests();
+  const auto stepped_at = std::chrono::steady_clock::now();
+
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(8.0, 4.0, 1000);
+  }
+  for (int i = 0; i < 2; ++i) {
+    stream_stats::update_network_stats(8.0, 0.0, 1000);
+  }
+  ASSERT_FALSE(stream_stats::get_current().network_risk);
+  const auto network = stream_stats::judged_network(stream_stats::get_current());
+  ASSERT_TRUE(network.loss_pressure);
+  EXPECT_EQ(doctor_step_stream_t::doctor().at("primary_issue"), "network_jitter");
+  // The step's own readings: the first report covers the second before the step, and five of the
+  // other seven lost 4%, 2.9% over the window since the step.
+  const auto since_step = stream_stats::network_verdict_since(stepped_at);
+  ASSERT_TRUE(since_step.loss_available);
+  EXPECT_EQ(since_step.media_samples, 7);
+  EXPECT_TRUE(since_step.loss_elevated);
+
+  doctor_actions::make_verification_window_complete_for_tests();
+  const auto result = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute({{"action_id", "verify"}, {"run_id", run_id}});
+  });
+  EXPECT_EQ(result.at("state"), "rolled_back") << result.dump();
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 20000);
+}
+
+TEST(DoctorActionTests, AStepThatCuresHeavyLossVerifiesPastTheReportThatStraddlesIt) {
+  // A stream losing 23% of its frames, stepped down, and clean from then on. The first report after
+  // the step covers the second before it and still carries the 23%. Counted against the step, it put
+  // the window since the step at 2.9% and rolled back a step that had cured the loss, and the headline
+  // offered the same step again. The report whose second began before the step does not count, on the
+  // watchdog's path as on a verify.
+  doctor_step_stream_t stream("DoctorStraddlingReport");
+  sustain_network_pressure(8.0, 23.0);
+  const auto before = doctor_step_stream_t::doctor();
+  ASSERT_EQ(before.at("primary_issue"), "network_jitter");
+  ASSERT_EQ(before.at("safe_recovery_action").at("id"), "lower_bitrate");
+
+  const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  ASSERT_TRUE(applied.at("status").get<bool>());
+  const auto run_id = applied.at("run_id").get<std::string>();
+  doctor_actions::confirm_encoder_application_for_tests();
+  const auto stepped_at = std::chrono::steady_clock::now();
+
+  stream_stats::update_network_stats(8.0, 23.0, 1000);
+  for (int i = 0; i < 7; ++i) {
+    stream_stats::update_network_stats(8.0, 0.0, 1000);
+  }
+  const auto since_step = stream_stats::network_verdict_since(stepped_at);
+  ASSERT_TRUE(since_step.loss_available);
+  EXPECT_EQ(since_step.media_samples, 7);
+  EXPECT_DOUBLE_EQ(since_step.loss_pct, 0.0);
+
+  doctor_actions::make_verification_window_complete_for_tests();
+  doctor_actions::run_verification_watchdog_for_tests();
+  const auto verified = doctor_actions::execute({{"action_id", "verify"}, {"run_id", run_id}});
+  EXPECT_EQ(verified.at("state"), "resolved") << verified.dump();
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 16000);
+
+  // The headline starts over from the step without the straddling report, as verification judged it.
+  const auto after = doctor_step_stream_t::doctor();
+  EXPECT_NE(after.at("primary_issue"), "network_jitter") << after.at("summary");
+  EXPECT_NE(after.at("safe_recovery_action").at("id"), "lower_bitrate");
+  const auto verdict = after.at("advanced_evidence").at("network_verdict");
+  EXPECT_EQ(verdict.at("media_samples"), 7);
+  EXPECT_EQ(verdict.at("loss_state"), "clean");
+
+  const auto undo = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute({{"action_id", "undo"}, {"run_id", run_id}});
+  });
+  EXPECT_EQ(undo.at("state"), "undone") << undo.dump();
+}
+
+namespace {
+  /// A stream Live Tuning owns, one session in scope, the host's saved preference on, under sustained
+  /// video frame loss: 3.4% of its frames lost at an RTT of 8 ms.
+  struct live_tuning_loss_stream_t {
+    static constexpr std::uint64_t generation = 434;
+    LiveConfigurationGuard live_configuration;
+    std::string saved_before;
+
+    live_tuning_loss_stream_t() {
+      EXPECT_TRUE(private_state_file::write_atomic(config::sunshine.config_file, "adaptive_bitrate_enabled = enabled\n"));
+      saved_before = private_state_file::read_secure(config::sunshine.config_file, 4096).payload;
+      config::video.adaptive_bitrate.enabled = true;
+      config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+      config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+      adaptive_bitrate::load_config();
+      adaptive_bitrate::reset();
+      stream_stats::update_stream_active(false);
+      stream_stats::update_controller_input_state(false, 0, "", "", "unknown", "", false, "");
+      stream_stats::update_steam_input_state("unknown", 0, 0, 0, "");
+      stream_stats::update_stream_active(true, "DoctorLiveTuningLoss", "203.0.113.88");
+      stream_stats::update_video_stats(60.0, 20000, 5.0, "hevc", 1920, 1080);
+      for (int i = 0; i < 6; ++i) {
+        stream_stats::update_network_stats(5.0, 0.0, 1000);
+      }
+      sustain_network_pressure(8.0, 3.4);
+      doctor_actions::session_started("client-owner", generation, "launch-434", 20000);
+      adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+      stream_stats::start_session_timing("client-owner", generation, "launch-434");
+    }
+
+    ~live_tuning_loss_stream_t() {
+      doctor_actions::session_ended("client-owner", generation);
+      stream_stats::stop_session_timing("client-owner", generation);
+      stream_stats::update_stream_active(false);
+      config::video.adaptive_bitrate.enabled = false;
+      adaptive_bitrate::load_config();
+      adaptive_bitrate::reset();
+    }
+
+    static doctor_actions::recovery_action_context_t context() {
+      doctor_actions::recovery_action_context_t context;
+      context.active_owner = true;
+      context.host_tuning_allowed = true;
+      context.enforce_request_scope = true;
+      context.owner_uuid = "client-owner";
+      context.app_uuid = "game-owner";
+      context.launch_instance_id = "launch-434";
+      context.session_generation = generation;
+      context.stats = stream_stats::get_current();
+      return context;
+    }
+
+    static nlohmann::json scoped(nlohmann::json request) {
+      request["app_session_id"] = "launch-434";
+      request["session_generation"] = generation;
+      return request;
+    }
+
+    /// Nothing saved for later streams: the preference in memory and on disk is still on.
+    bool saved_preference_untouched() const {
+      return config::video.adaptive_bitrate.enabled && adaptive_bitrate::get_state().configured_enabled &&
+             private_state_file::read_secure(config::sunshine.config_file, 4096).payload == saved_before;
+    }
+  };
+
+  /// Live Tuning on for this stream and the rate at kbps, as the stream began.
+  void expect_live_tuning_on_at(int kbps) {
+    EXPECT_TRUE(adaptive_bitrate::is_enabled());
+    EXPECT_FALSE(adaptive_bitrate::get_state().paused_for_stream);
+    EXPECT_EQ(live_tuning::snapshot(stream_stats::get_current()).at("enabled"), true);
+    EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, kbps);
+  }
+
+  /// Live Tuning off for this stream only, as after a live bitrate set by hand, and the rate at kbps.
+  void expect_live_tuning_off_for_stream_at(int kbps) {
+    EXPECT_FALSE(adaptive_bitrate::is_enabled());
+    EXPECT_TRUE(adaptive_bitrate::get_state().paused_for_stream);
+    EXPECT_EQ(live_tuning::snapshot(stream_stats::get_current()).at("enabled"), false);
+    EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, kbps);
+  }
+}  // namespace
+
+TEST(DoctorActionTests, ALossStepWithLiveTuningOnTurnsItOffForThisStreamAndUndoTurnsItBackOn) {
+  live_tuning_loss_stream_t stream;
+  auto context = live_tuning_loss_stream_t::context();
+  const auto doctor = stream_stats::build_doctor_json(context.stats, nlohmann::json::object(), context.app_uuid);
+  ASSERT_EQ(doctor.at("primary_issue"), "network_jitter");
+  ASSERT_EQ(doctor.at("safe_recovery_action").at("id"), "lower_bitrate");
+  expect_live_tuning_on_at(20000);
+
+  // The payload Doctor offered, as a paired client sends it back.
+  const auto request = trusted_doctor_action_request(context);
+  const auto applied = execute_with_encoder_ack(16000, [&] {
+    return doctor_actions::execute(request, context);
+  });
+  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
+  EXPECT_EQ(applied.at("requested").at("bitrate_kbps"), 16000);
+  EXPECT_FALSE(applied.at("requested").at("adaptive_bitrate_enabled").get<bool>());
+  EXPECT_TRUE(applied.at("before").at("adaptive_bitrate_enabled").get<bool>());
+  expect_live_tuning_off_for_stream_at(16000);
+  EXPECT_TRUE(stream.saved_preference_untouched());
+  // Live Tuning's feedback moves nothing while the step holds.
+  adaptive_bitrate::update_network_stats(10.0, 60.0);
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 16000);
+  // Doctor now reads the stream as one Live Tuning does not own.
+  EXPECT_FALSE(stream_stats::get_current().adaptive_bitrate_enabled);
+
+  context = live_tuning_loss_stream_t::context();
+  const auto undone = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute(
+      live_tuning_loss_stream_t::scoped({{"action_id", "undo"}, {"run_id", applied.at("run_id")}}), context
+    );
+  });
+  EXPECT_EQ(undone.at("state"), "undone") << undone.dump();
+  EXPECT_EQ(undone.at("restored_bitrate_kbps"), 20000);
+  EXPECT_TRUE(undone.at("adaptive_bitrate_enabled").get<bool>());
+  expect_live_tuning_on_at(20000);
+  EXPECT_TRUE(stream.saved_preference_untouched());
+}
+
+TEST(DoctorActionTests, ALossStepWithLiveTuningOnVerifiesOnTheReadingsAfterIt) {
+  // The step is verified as any other: on the window judged from the moment the encoder applied it,
+  // leaving out the report that straddles it. Live Tuning stays off for the stream once it verifies,
+  // and Undo still turns it back on.
+  live_tuning_loss_stream_t stream;
+  const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
+  const auto run_id = applied.at("run_id").get<std::string>();
+  doctor_actions::confirm_encoder_application_for_tests();
+  expect_live_tuning_off_for_stream_at(16000);
+
+  for (int i = 0; i < 8; ++i) {
+    stream_stats::update_network_stats(8.0, 0.5, 1000);
+  }
+  doctor_actions::make_verification_window_complete_for_tests();
+  const auto verified = doctor_actions::execute({{"action_id", "verify"}, {"run_id", run_id}});
+  EXPECT_EQ(verified.at("state"), "resolved") << verified.dump();
+  expect_live_tuning_off_for_stream_at(16000);
+
+  const auto undone = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute({{"action_id", "undo"}, {"run_id", run_id}});
+  });
+  EXPECT_EQ(undone.at("state"), "undone") << undone.dump();
+  expect_live_tuning_on_at(20000);
+  EXPECT_TRUE(stream.saved_preference_untouched());
+}
+
+TEST(DoctorActionTests, ALossStepWithLiveTuningOnThatDoesNotHelpRollsBackAndTurnsItBackOn) {
+  live_tuning_loss_stream_t stream;
+  const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
+  const auto run_id = applied.at("run_id").get<std::string>();
+  doctor_actions::confirm_encoder_application_for_tests();
+  expect_live_tuning_off_for_stream_at(16000);
+
+  // The stepped-down stream goes on losing 4% of its frames.
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(8.0, 4.0, 1000);
+  }
+  for (int i = 0; i < 2; ++i) {
+    stream_stats::update_network_stats(8.0, 0.0, 1000);
+  }
+  doctor_actions::make_verification_window_complete_for_tests();
+  const auto result = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute({{"action_id", "verify"}, {"run_id", run_id}});
+  });
+  EXPECT_EQ(result.at("state"), "rolled_back") << result.dump();
+  // The receipt says Live Tuning is back on, not only the rate.
+  EXPECT_NE(result.value("message", std::string {}).find("Live Tuning is back on for this stream."), std::string::npos) << result.dump();
+  EXPECT_TRUE(result.value("adaptive_bitrate_enabled", false)) << result.dump();
+  expect_live_tuning_on_at(20000);
+  EXPECT_TRUE(stream.saved_preference_untouched());
+}
+
+TEST(DoctorActionTests, RoundTripPressureWithLiveTuningOnTakesNoDoctorStep) {
+  // Round trip time alone, with no loss, is Live Tuning's to cut for. Doctor offers only a recheck, and
+  // a lower_bitrate sent anyway changes nothing.
+  live_tuning_loss_stream_t stream;
+  sustain_network_pressure(52.0, 0.0);
+  const auto network = stream_stats::judged_network(stream_stats::get_current());
+  ASSERT_TRUE(network.fail);
+  ASSERT_FALSE(network.loss_pressure);
+
+  const auto refused = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  EXPECT_FALSE(refused.at("status").get<bool>());
+  EXPECT_FALSE(refused.at("changed").get<bool>());
+  EXPECT_EQ(refused.at("state"), "evidence_changed");
+  expect_live_tuning_on_at(20000);
+  EXPECT_TRUE(stream.saved_preference_untouched());
+}
+
+
+namespace {
+  enum class media_verification_case_e { crossing, stale, thin_clean, control_only, graded_clean, graded_stale, crossing_no_ack, crossing_new_writer };
+  using media_verification_case_t = std::pair<media_verification_case_e, bool>;
+  class DoctorMediaVerificationTests : public testing::TestWithParam<media_verification_case_t> {};
+}
+
+TEST_P(DoctorMediaVerificationTests, UsesRealPostEncoderMediaCoverageOnBothRoutes) {
+  using namespace std::chrono_literals;
+  const auto [scenario, watchdog_first] = GetParam();
+  doctor_actions::defer_verification_watchdog_for_tests(true);
+  const auto watchdog_guard = util::fail_guard([] { doctor_actions::defer_verification_watchdog_for_tests(false); });
+  live_tuning_loss_stream_t stream;
+  stream_stats::client_media_counters_t counters {
+    .owner_uuid = "client-owner", .app_session_id = "launch-434",
+    .session_generation = live_tuning_loss_stream_t::generation,
+    .client_monotonic_ms = 1000, .frames_expected = 100, .frames_received = 100, .frames_lost = 0
+  };
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(counters).state, stream_stats::client_media_ingest_state_e::baseline);
+  auto context = live_tuning_loss_stream_t::context();
+  const auto after_revision = context.stats.network_sample_revision;
+  const auto request = trusted_doctor_action_request(context);
+  const auto applied = execute_with_encoder_ack(16000, [&] { return doctor_actions::execute(request, context); });
+  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
+  const auto encoder_request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(encoder_request.has_value());
+  const auto application = adaptive_bitrate::live_bitrate_applied_at(encoder_request->revision, 16000);
+  ASSERT_TRUE(application.has_value());
+  const auto at = *application;
+  const auto verify_request = live_tuning_loss_stream_t::scoped({{"action_id", "verify"}, {"run_id", applied.at("run_id")}});
+  // Observe the actual acknowledgement now; do not backdate or spread any report.
+  ASSERT_EQ(doctor_actions::execute(verify_request, live_tuning_loss_stream_t::context()).at("state"), "watching");
+
+  std::vector<int> report_ms;
+  switch (scenario) {
+    case media_verification_case_e::crossing:
+    case media_verification_case_e::crossing_no_ack:
+    case media_verification_case_e::crossing_new_writer: report_ms = {4000}; break;
+    case media_verification_case_e::stale: report_ms = {500, 1000}; break;
+    case media_verification_case_e::thin_clean: report_ms = {4000, 7000}; break;
+    case media_verification_case_e::control_only: report_ms = {1000, 4000, 7000}; break;
+    case media_verification_case_e::graded_clean: report_ms = {500, 1000, 2000, 3000, 4000, 7000}; break;
+    case media_verification_case_e::graded_stale: report_ms = {500, 1000, 1500, 2000, 2500, 3000}; break;
+  }
+  std::vector<int> events = {100, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8100};
+  events.insert(events.end(), report_ms.begin(), report_ms.end());
+  std::sort(events.begin(), events.end());
+  events.erase(std::unique(events.begin(), events.end()), events.end());
+  for (const int ms : events) {
+    std::this_thread::sleep_until(at + std::chrono::milliseconds(ms));
+    stream_stats::update_control_channel_stats(8.0, 0.0, 1000);
+    if (std::find(report_ms.begin(), report_ms.end(), ms) != report_ms.end()) {
+      counters.client_monotonic_ms = 1000 + ms;
+      if (scenario != media_verification_case_e::control_only) {
+        counters.frames_expected += 100;
+        counters.frames_received += 100;
+      }
+      const auto ingested = stream_stats::ingest_client_media_counters(counters);
+      ASSERT_TRUE(ingested.accepted);
+      ASSERT_EQ(ingested.observation_published, scenario != media_verification_case_e::control_only);
+      ASSERT_EQ(ingested.state, scenario == media_verification_case_e::control_only ?
+        stream_stats::client_media_ingest_state_e::waiting_for_frames : stream_stats::client_media_ingest_state_e::observed);
+    }
+  }
+  const auto window = stream_stats::get_network_verification_window(after_revision, at, 8s);
+  ASSERT_TRUE(window.complete);
+  ASSERT_LT(window.last_age_ms, 1000);
+  ASSERT_EQ(window.media_sample_count, scenario == media_verification_case_e::control_only ? 0 : report_ms.size());
+  ASSERT_EQ(window.eligible_media_sample_count, scenario == media_verification_case_e::control_only ? 0 : report_ms.size() - 1);
+  if (window.eligible_media_sample_count == 0) ASSERT_EQ(window.eligible_media_last_age_ms, -1);
+  else if (scenario == media_verification_case_e::thin_clean || scenario == media_verification_case_e::graded_clean) ASSERT_LT(window.eligible_media_last_age_ms, 5000);
+  else ASSERT_GT(window.eligible_media_last_age_ms, 5000);
+  const auto post = stream_stats::network_verdict_since(at);
+  ASSERT_EQ(post.media_samples, scenario == media_verification_case_e::control_only ? 0 : report_ms.size() - 1);
+  if (scenario == media_verification_case_e::crossing || scenario == media_verification_case_e::crossing_no_ack || scenario == media_verification_case_e::crossing_new_writer || scenario == media_verification_case_e::thin_clean || scenario == media_verification_case_e::graded_clean) {
+    ASSERT_LT(stream_stats::get_current().media_loss_last_received_age_ms, 5000);
+  } else {
+    ASSERT_GT(stream_stats::get_current().media_loss_last_received_age_ms, 5000);
+  }
+  const bool accepts = scenario == media_verification_case_e::thin_clean || scenario == media_verification_case_e::graded_clean;
+  const auto verify = [&] {
+    if (watchdog_first) doctor_actions::run_verification_watchdog_for_tests();
+    return doctor_actions::execute(verify_request, live_tuning_loss_stream_t::context());
+  };
+  const bool no_ack = scenario == media_verification_case_e::crossing_no_ack;
+  const bool new_writer = scenario == media_verification_case_e::crossing_new_writer;
+  if (new_writer) adaptive_bitrate::set_live_bitrate(24000);
+  const auto newer_revision = adaptive_bitrate::get_doctor_state().revision;
+  const auto result = accepts || no_ack || new_writer ? verify() : execute_with_encoder_ack(20000, verify);
+  EXPECT_EQ(result.at("state"), accepts ? "resolved" : no_ack ? "rollback_unconfirmed" : new_writer ? "superseded" : "rolled_back") << result.dump();
+  EXPECT_TRUE(stream.saved_preference_untouched());
+  if (accepts) expect_live_tuning_off_for_stream_at(16000);
+  else if (no_ack) {
+    EXPECT_FALSE(result.at("status").get<bool>());
+    EXPECT_TRUE(result.at("changed").get<bool>());
+    EXPECT_EQ(result.at("requested_restore_bitrate_kbps"), 20000);
+    EXPECT_TRUE(adaptive_bitrate::is_enabled());
+    EXPECT_FALSE(adaptive_bitrate::get_state().paused_for_stream);
+  } else if (new_writer) {
+    expect_live_tuning_off_for_stream_at(24000);
+    EXPECT_EQ(adaptive_bitrate::get_doctor_state().revision, newer_revision);
+  } else expect_live_tuning_on_at(20000);
+
+  // Clean up the old-code false success too, so the next case has no unresolved actuator.
+  if (result.at("state") == "resolved") {
+    const auto undo = execute_with_encoder_ack(20000, [&] {
+      return doctor_actions::execute(live_tuning_loss_stream_t::scoped({{"action_id", "undo"}, {"run_id", applied.at("run_id")}}), live_tuning_loss_stream_t::context());
+    });
+    EXPECT_EQ(undo.at("state"), "undone");
+  } else {
+    const auto revision = adaptive_bitrate::get_doctor_state().revision;
+    EXPECT_EQ(doctor_actions::execute(verify_request, live_tuning_loss_stream_t::context()), result);
+    EXPECT_EQ(doctor_actions::execute(request, live_tuning_loss_stream_t::context()), result);
+    EXPECT_EQ(doctor_actions::execute(live_tuning_loss_stream_t::scoped({{"action_id", "undo"}, {"run_id", applied.at("run_id")}}), live_tuning_loss_stream_t::context()), result);
+    EXPECT_EQ(adaptive_bitrate::get_doctor_state().revision, revision);
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(ExplicitAndWatchdog, DoctorMediaVerificationTests, testing::Values(
+  media_verification_case_t {media_verification_case_e::crossing, false}, media_verification_case_t {media_verification_case_e::crossing, true},
+  media_verification_case_t {media_verification_case_e::stale, false}, media_verification_case_t {media_verification_case_e::stale, true},
+  media_verification_case_t {media_verification_case_e::thin_clean, false}, media_verification_case_t {media_verification_case_e::thin_clean, true},
+  media_verification_case_t {media_verification_case_e::control_only, false}, media_verification_case_t {media_verification_case_e::control_only, true},
+  media_verification_case_t {media_verification_case_e::graded_clean, false}, media_verification_case_t {media_verification_case_e::graded_clean, true},
+  media_verification_case_t {media_verification_case_e::graded_stale, false}, media_verification_case_t {media_verification_case_e::graded_stale, true},
+  media_verification_case_t {media_verification_case_e::crossing_no_ack, false}, media_verification_case_t {media_verification_case_e::crossing_no_ack, true},
+  media_verification_case_t {media_verification_case_e::crossing_new_writer, false}, media_verification_case_t {media_verification_case_e::crossing_new_writer, true}));
+
+class DoctorRecheckReceiptTests : public testing::TestWithParam<int> {};
+TEST_P(DoctorRecheckReceiptTests, MessageFollowsTheRefreshedOffer) {
+  using namespace std::chrono_literals;
+  live_tuning_loss_stream_t stream;
+  sustain_network_pressure(52.0, 0.0);
+  const auto context = live_tuning_loss_stream_t::context();
+  const auto request = trusted_doctor_action_request(context);
+  ASSERT_EQ(request.at("action_id"), "recheck_network");
+  const int scenario = GetParam();
+  std::thread publisher([scenario] {
+    std::this_thread::sleep_for(100ms);
+    if (scenario != 0) {
+      sustain_network_pressure(8.0, 3.4);
+      if (scenario == 2) adaptive_bitrate::set_runtime_update_supported(false, "No live encoder update", 20000);
+    }
+    for (int i = 0; i < 31; ++i) {
+      stream_stats::update_control_channel_stats(scenario == 0 ? 52.0 : 8.0, 0.0, 1000);
+      std::this_thread::sleep_for(100ms);
+    }
+  });
+  const auto result = doctor_actions::execute(request, context);
+  publisher.join();
+  ASSERT_TRUE(result.at("status").get<bool>()) << result.dump();
+  EXPECT_FALSE(result.at("changed").get<bool>());
+  EXPECT_EQ(result.at("state"), "confirmed_pressure");
+  const auto offer = result.at("doctor").at("safe_recovery_action");
+  const auto message = result.at("message").get<std::string>();
+  if (scenario == 0) {
+    EXPECT_EQ(offer.at("id"), "recheck_network");
+    EXPECT_NE(message.find("Live Tuning remains the live bitrate controller"), std::string::npos) << message;
+    EXPECT_EQ(message.find("Doctor can safely apply"), std::string::npos) << message;
+    const auto refused = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+    EXPECT_FALSE(refused.at("changed").get<bool>());
+  } else if (scenario == 1) {
+    EXPECT_EQ(offer.at("id"), "lower_bitrate");
+    EXPECT_NE(message.find("Doctor offers one guarded bitrate step"), std::string::npos) << message;
+  } else {
+    EXPECT_NE(offer.at("id"), "lower_bitrate");
+    EXPECT_EQ(message.find("Doctor can safely apply"), std::string::npos) << message;
+    EXPECT_NE(message.find(offer.at("unavailable_reason").get<std::string>()), std::string::npos) << message;
+  }
+  expect_live_tuning_on_at(20000);
+  EXPECT_TRUE(stream.saved_preference_untouched());
+}
+INSTANTIATE_TEST_SUITE_P(AvailableActions, DoctorRecheckReceiptTests, testing::Values(0, 1, 2));
+
+TEST(DoctorActionTests, ALossStepThatMeetsANewerReadingTurnsLiveTuningBackOnAndSaysSo) {
+  // Doctor turns Live Tuning off for the stream, then takes its step, and a network report can reach
+  // the controller between the two. Then the step is not taken: Live Tuning goes back on for the
+  // stream with the rate it had, and the answer says so.
+  live_tuning_loss_stream_t stream;
+  const auto hook_guard = util::fail_guard([] {
+    doctor_actions::set_live_tuning_step_hook_for_tests({});
+  });
+  doctor_actions::set_live_tuning_step_hook_for_tests([](std::string_view stage) {
+    if (stage == "paused") {
+      adaptive_bitrate::note_network_evidence_arrival(false);
+    }
+  });
+  const auto refused = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  EXPECT_FALSE(refused.at("status").get<bool>()) << refused.dump();
+  EXPECT_FALSE(refused.at("changed").get<bool>());
+  EXPECT_EQ(refused.at("state"), "controller_changed");
+  ASSERT_TRUE(refused.contains("adaptive_bitrate_enabled")) << refused.dump();
+  EXPECT_TRUE(refused.at("adaptive_bitrate_enabled").get<bool>());
+  const auto error = refused.value("error", std::string {});
+  EXPECT_NE(error.find("so Doctor turned Live Tuning back on for this stream and left the bitrate as it was."), std::string::npos) << error;
+  expect_live_tuning_on_at(20000);
+  EXPECT_FALSE(adaptive_bitrate::get_doctor_state().explicit_live_override_active);
+  EXPECT_TRUE(stream.saved_preference_untouched());
+
+  // Every try at putting the rate back meets a newer reading too. Live Tuning is back on all the same,
+  // and the answer claims nothing about the rate.
+  doctor_actions::set_live_tuning_step_hook_for_tests([](std::string_view) {
+    adaptive_bitrate::note_network_evidence_arrival(false);
+  });
+  const auto lost = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  EXPECT_FALSE(lost.at("status").get<bool>()) << lost.dump();
+  EXPECT_EQ(lost.at("state"), "controller_changed");
+  const auto lost_error = lost.value("error", std::string {});
+  EXPECT_NE(lost_error.find("so Doctor turned Live Tuning back on for this stream."), std::string::npos) << lost_error;
+  EXPECT_EQ(lost_error.find("left the bitrate as it was"), std::string::npos) << lost_error;
+  expect_live_tuning_on_at(20000);
+  EXPECT_TRUE(stream.saved_preference_untouched());
+
+  // Nothing is left behind for Undo, and with no reading in between Doctor takes the step.
+  doctor_actions::set_live_tuning_step_hook_for_tests({});
+  const auto applied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
+  doctor_actions::confirm_encoder_application_for_tests();
+  expect_live_tuning_off_for_stream_at(16000);
+  const auto undone = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute({{"action_id", "undo"}, {"run_id", applied.at("run_id")}});
+  });
+  EXPECT_EQ(undone.at("state"), "undone") << undone.dump();
+  expect_live_tuning_on_at(20000);
+  EXPECT_TRUE(stream.saved_preference_untouched());
+}
+
+TEST(DoctorActionTests, AStreamThatEndsWhileTheLossStepHoldsLeavesTheNextStreamClean) {
+  // The stream ends while Doctor's step holds with Live Tuning off. The saved preference is never
+  // touched, and the next stream starts with Live Tuning on, nothing of the step left, and Doctor free
+  // to take a step of its own.
+  live_tuning_loss_stream_t stream;
+  auto context = live_tuning_loss_stream_t::context();
+  const auto applied = execute_with_encoder_ack(16000, [&] {
+    return doctor_actions::execute(trusted_doctor_action_request(context), context);
+  });
+  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
+  expect_live_tuning_off_for_stream_at(16000);
+
+  // The encoder goes first, as it does when a stream is torn down.
+  adaptive_bitrate::set_runtime_update_supported(false, "encoder_session_ended");
+  doctor_actions::session_ended("client-owner", live_tuning_loss_stream_t::generation);
+  EXPECT_TRUE(adaptive_bitrate::is_enabled());
+  EXPECT_FALSE(adaptive_bitrate::get_state().paused_for_stream);
+  EXPECT_NE(adaptive_bitrate::get_state().state, "doctor_override");
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().live_bitrate_kbps, 20000);
+  EXPECT_TRUE(stream.saved_preference_untouched());
+
+  constexpr std::uint64_t next = live_tuning_loss_stream_t::generation + 1;
+  doctor_actions::session_started("client-owner", next, "launch-435", 20000);
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  expect_live_tuning_on_at(20000);
+  EXPECT_FALSE(adaptive_bitrate::get_doctor_state().explicit_live_override_active);
+  EXPECT_EQ(adaptive_bitrate::get_state().state, "steady");
+  EXPECT_TRUE(stream.saved_preference_untouched());
+  // The old step's Undo changes nothing on the new stream.
+  const auto stale_undo = doctor_actions::execute({{"action_id", "undo"}, {"run_id", applied.at("run_id")}});
+  EXPECT_FALSE(stale_undo.at("status").get<bool>()) << stale_undo.dump();
+  expect_live_tuning_on_at(20000);
+
+  // A step on the new stream is Doctor's to take, and turns Live Tuning off for that stream alone.
+  const auto again = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  ASSERT_TRUE(again.at("status").get<bool>()) << again.dump();
+  EXPECT_NE(again.at("run_id"), applied.at("run_id"));
+  doctor_actions::confirm_encoder_application_for_tests();
+  expect_live_tuning_off_for_stream_at(16000);
+  const auto undone = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute({{"action_id", "undo"}, {"run_id", again.at("run_id")}});
+  });
+  EXPECT_EQ(undone.at("state"), "undone") << undone.dump();
+  expect_live_tuning_on_at(20000);
+  doctor_actions::session_ended("client-owner", next);
+  EXPECT_TRUE(stream.saved_preference_untouched());
+}
+
+TEST(DoctorActionTests, ASecondPressWhileTheLossStepHoldsTakesNoSecondStepAndSaysWhy) {
+  live_tuning_loss_stream_t stream;
+  auto context = live_tuning_loss_stream_t::context();
+  const auto first = trusted_doctor_action_request(context);
+  const auto applied = execute_with_encoder_ack(16000, [&] {
+    return doctor_actions::execute(first, context);
+  });
+  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
+  const auto run_id = applied.at("run_id").get<std::string>();
+
+  // The same press sent again is the same step.
+  const auto retried = doctor_actions::execute(first, context);
+  EXPECT_TRUE(retried.at("status").get<bool>()) << retried.dump();
+  EXPECT_FALSE(retried.at("changed").get<bool>());
+  EXPECT_EQ(retried.at("run_id"), run_id);
+
+  // A new press of what Doctor offers while the step holds, a step down from 16000.
+  context = live_tuning_loss_stream_t::context();
+  const auto second_request = trusted_doctor_action_request(context);
+  ASSERT_EQ(second_request.at("action_id"), "lower_bitrate") << second_request.dump();
+  EXPECT_EQ(second_request.at("target_bitrate_kbps"), 12800);
+  const auto second = doctor_actions::execute(second_request, context);
+  EXPECT_FALSE(second.at("status").get<bool>()) << second.dump();
+  EXPECT_FALSE(second.at("changed").get<bool>());
+  EXPECT_EQ(second.at("state"), "action_in_progress");
+  EXPECT_EQ(second.at("run_id"), run_id);
+  const auto error = second.value("error", std::string {});
+  EXPECT_NE(error.find("Doctor already lowered this stream's bitrate one step and turned Live Tuning off for it, and takes one step at a time."), std::string::npos) << error;
+  EXPECT_NE(error.find("Doctor is still checking that step."), std::string::npos) << error;
+  EXPECT_NE(error.find("Undo puts the bitrate back and turns Live Tuning on again."), std::string::npos) << error;
+  expect_live_tuning_off_for_stream_at(16000);
+
+  // Verified, the step stays until it is undone, and a press says that.
+  for (int i = 0; i < 8; ++i) {
+    stream_stats::update_network_stats(8.0, 0.5, 1000);
+  }
+  doctor_actions::make_verification_window_complete_for_tests();
+  const auto verified = doctor_actions::execute(
+    live_tuning_loss_stream_t::scoped({{"action_id", "verify"}, {"run_id", run_id}}), context
+  );
+  ASSERT_EQ(verified.at("state"), "resolved") << verified.dump();
+  const auto later = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+  EXPECT_FALSE(later.at("status").get<bool>()) << later.dump();
+  EXPECT_EQ(later.at("state"), "action_in_progress");
+  EXPECT_NE(later.value("error", std::string {}).find("That step is verified and stays until you undo it."), std::string::npos) << later.dump();
+  expect_live_tuning_off_for_stream_at(16000);
+
+  const auto undone = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute(live_tuning_loss_stream_t::scoped({{"action_id", "undo"}, {"run_id", run_id}}), context);
+  });
+  EXPECT_EQ(undone.at("state"), "undone") << undone.dump();
+  expect_live_tuning_on_at(20000);
+  EXPECT_TRUE(stream.saved_preference_untouched());
+}
+
+TEST(DoctorActionTests, TurningLiveTuningOnWhileTheLossStepHoldsEndsItAndTheReceiptSaysSo) {
+  // The console shows Live Tuning off while Doctor's step holds. Turning it on there puts back the
+  // rate from before the step with Live Tuning, and the step's receipt says the player did that, not
+  // that a newer change superseded Doctor.
+  live_tuning_loss_stream_t stream;
+  auto context = live_tuning_loss_stream_t::context();
+  const auto request = trusted_doctor_action_request(context);
+  const auto applied = execute_with_encoder_ack(16000, [&] {
+    return doctor_actions::execute(request, context);
+  });
+  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
+  const auto run_id = applied.at("run_id").get<std::string>();
+  expect_live_tuning_off_for_stream_at(16000);
+
+  const auto turned_on = execute_with_encoder_ack(20000, [] {
+    auto authority = doctor_actions::acquire_admin_global_control();
+    auto result = live_tuning::set_enabled(authority, true);
+    authority.release();
+    return result;
+  });
+  ASSERT_TRUE(turned_on.at("status").get<bool>()) << turned_on.dump();
+  EXPECT_EQ(turned_on.at("live_tuning").at("enabled"), true);
+  expect_live_tuning_on_at(20000);
+  EXPECT_TRUE(config::video.adaptive_bitrate.enabled);
+  EXPECT_NE(private_state_file::read_secure(config::sunshine.config_file, 4096).payload.find("adaptive_bitrate_enabled = enabled"), std::string::npos);
+
+  // The step's receipt, as its retry, its verification and its Undo each read it back.
+  context = live_tuning_loss_stream_t::context();
+  const auto receipt = doctor_actions::execute(request, context);
+  EXPECT_TRUE(receipt.at("status").get<bool>()) << receipt.dump();
+  EXPECT_TRUE(receipt.at("changed").get<bool>());
+  EXPECT_EQ(receipt.at("state"), "rolled_back") << receipt.dump();
+  EXPECT_EQ(receipt.at("run_id"), run_id);
+  EXPECT_EQ(receipt.value("restored_bitrate_kbps", 0), 20000);
+  EXPECT_TRUE(receipt.value("adaptive_bitrate_enabled", false));
+  EXPECT_FALSE(receipt.at("undo").at("available").get<bool>());
+  const auto message = receipt.value("message", std::string {});
+  EXPECT_NE(message.find("You turned Live Tuning back on, so Doctor put back the bitrate from before its step and ended it."), std::string::npos) << message;
+  EXPECT_EQ(receipt.dump().find("superseded"), std::string::npos) << receipt.dump();
+  const auto verify = doctor_actions::execute(live_tuning_loss_stream_t::scoped({{"action_id", "verify"}, {"run_id", run_id}}), context);
+  EXPECT_EQ(verify.at("state"), "rolled_back") << verify.dump();
+  const auto undo = doctor_actions::execute(live_tuning_loss_stream_t::scoped({{"action_id", "undo"}, {"run_id", run_id}}), context);
+  EXPECT_EQ(undo.at("state"), "rolled_back") << undo.dump();
+  expect_live_tuning_on_at(20000);
+}
+
+namespace {
+  /// The capture path a real stream publishes, which Doctor needs before it offers a quality restore.
+  stream_stats::stats_t with_gpu_capture_path(stream_stats::stats_t stats) {
+    stats.capture_transport = platf::frame_transport_e::dmabuf;
+    stats.capture_residency = platf::frame_residency_e::gpu;
+    stats.encode_target_residency = platf::frame_residency_e::gpu;
+    return stats;
+  }
+}  // namespace
+
+TEST(DoctorActionTests, AVerifiedLossStepOffersItsUndoInsteadOfAQualityRestoreUntilItIsUndone) {
+  // Verified, the step holds for Undo with Live Tuning off. The network is clean and the rate below the
+  // one the stream opened at, which is a quality restore's cue, but that restore would meet the step's
+  // own run and change nothing. Doctor offers the step's Undo instead, and once it is undone the normal
+  // flow is back.
+  live_tuning_loss_stream_t stream;
+  // The stream opened at 20000 kbps, as a launch records it.
+  stream_stats::update_session_targets(
+    60.0, 60.0, 60.0, "client_requested", "deterministic_preset_v1",
+    "deterministic", "not_applicable", "Capability-validated launch profile.",
+    "", 1, 0, 20000
+  );
+  auto context = live_tuning_loss_stream_t::context();
+  const auto applied = execute_with_encoder_ack(16000, [&] {
+    return doctor_actions::execute(trusted_doctor_action_request(context), context);
+  });
+  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
+  const auto run_id = applied.at("run_id").get<std::string>();
+  for (int i = 0; i < 8; ++i) {
+    stream_stats::update_network_stats(8.0, 0.5, 1000);
+  }
+  doctor_actions::make_verification_window_complete_for_tests();
+  context = live_tuning_loss_stream_t::context();
+  const auto verified = doctor_actions::execute(
+    live_tuning_loss_stream_t::scoped({{"action_id", "verify"}, {"run_id", run_id}}), context
+  );
+  ASSERT_EQ(verified.at("state"), "resolved") << verified.dump();
+  expect_live_tuning_off_for_stream_at(16000);
+  // Clean reports go on arriving at the lower rate, so the verdict is current.
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_network_stats(8.0, 0.0, 1000);
+  }
+
+  const auto live = with_gpu_capture_path(stream_stats::get_current());
+  EXPECT_EQ(live.doctor_live_tuning_step_run_id, run_id);
+  auto doctor = stream_stats::build_doctor_json(live, nlohmann::json::object(), context.app_uuid);
+  ASSERT_EQ(doctor.at("primary_issue"), "quality_reduced_live") << doctor.at("summary");
+  const auto &offer = doctor.at("safe_recovery_action");
+  ASSERT_EQ(offer.at("id"), "undo") << offer.dump();
+  EXPECT_EQ(offer.at("label"), "Undo");
+  EXPECT_FALSE(offer.at("requires_confirmation").get<bool>());
+  EXPECT_TRUE(offer.at("requires_owner").get<bool>());
+  EXPECT_EQ(offer.at("endpoint"), "/api/doctor/action");
+  EXPECT_EQ(offer.at("payload_preview").at("action_id"), "undo");
+  EXPECT_EQ(offer.at("payload_preview").at("run_id"), run_id);
+  EXPECT_NE(offer.at("rollback").get<std::string>().find("turns Live Tuning on again"), std::string::npos) << offer.dump();
+  EXPECT_EQ(doctor.dump().find("restore_quality"), std::string::npos);
+  const auto body = doctor.at("recommendation").at("body").get<std::string>();
+  EXPECT_NE(body.find("Doctor's bitrate step still holds with Live Tuning off for this stream"), std::string::npos) << body;
+  EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Undo Doctor's step");
+
+  // Bound to this stream, as the console and a paired client send it, the offer is the step's Undo.
+  stream_stats::bind_doctor_action_scope(
+    doctor, "launch-434", live_tuning_loss_stream_t::generation,
+    adaptive_bitrate::get_doctor_state().action_authority_revision,
+    live.network_sample_revision, live.video_sample_revision
+  );
+  const auto payload = doctor.at("safe_recovery_action").at("payload_preview");
+  EXPECT_EQ(payload.at("app_session_id"), "launch-434");
+  EXPECT_EQ(payload.at("session_generation"), live_tuning_loss_stream_t::generation);
+  const auto undone = execute_with_encoder_ack(20000, [&] {
+    return doctor_actions::execute(payload, context);
+  });
+  EXPECT_EQ(undone.at("state"), "undone") << undone.dump();
+  expect_live_tuning_on_at(20000);
+
+  // Undone, the normal flow is back: no step holds, Live Tuning owns the rate on a clean network, and
+  // sustained loss gets Doctor's step again.
+  const auto after = with_gpu_capture_path(stream_stats::get_current());
+  EXPECT_TRUE(after.doctor_live_tuning_step_run_id.empty()) << after.doctor_live_tuning_step_run_id;
+  const auto resumed = stream_stats::build_doctor_json(after, nlohmann::json::object(), context.app_uuid);
+  EXPECT_NE(resumed.at("safe_recovery_action").at("id"), "undo") << resumed.at("safe_recovery_action").dump();
+  EXPECT_NE(resumed.at("safe_recovery_action").at("id"), "restore_quality");
+  sustain_network_pressure(8.0, 3.4);
+  const auto lossy = stream_stats::build_doctor_json(
+    with_gpu_capture_path(stream_stats::get_current()), nlohmann::json::object(), context.app_uuid
+  );
+  EXPECT_EQ(lossy.at("safe_recovery_action").at("id"), "lower_bitrate") << lossy.at("safe_recovery_action").dump();
+}
+
 TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   // Earlier suites in this binary leave adaptive_bitrate process state
   // behind; normalize the two pieces this arc depends on before seeding
@@ -4374,9 +5430,7 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   EXPECT_FALSE(unsupported.at("status").get<bool>());
   EXPECT_EQ(unsupported.at("error"), "Unsupported Doctor action.");
 
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
   ASSERT_TRUE(stream_stats::get_current().network_risk);
 
   adaptive_bitrate::set_runtime_update_supported(false);
@@ -4459,9 +5513,7 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   EXPECT_EQ(clustered.at("state"), "rolled_back");
   EXPECT_FALSE(clustered.at("verification_window").at("complete").get<bool>());
 
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
   ASSERT_TRUE(stream_stats::get_current().network_risk);
   const auto reapplied_for_verification = doctor_actions::execute({{"action_id", "lower_bitrate"}});
   ASSERT_TRUE(reapplied_for_verification.at("status").get<bool>());
@@ -4502,9 +5554,7 @@ TEST(DoctorActionTests, ExecuteAppliesVerifiesAndUndoesOneGuardedStepEndToEnd) {
   EXPECT_EQ(replay.at("run_id"), verified_run_id);
   EXPECT_EQ(replay.at("restored_bitrate_kbps"), 20000);
 
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
   ASSERT_TRUE(stream_stats::get_current().network_risk);
   const auto reapplied = doctor_actions::execute({{"action_id", "lower_bitrate"}});
   ASSERT_TRUE(reapplied.at("status").get<bool>());
@@ -4636,9 +5686,7 @@ TEST(DoctorActionTests, StaleWatchdogNeverRestoresIntoANewerStreamGeneration) {
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
   ASSERT_TRUE(stream_stats::get_current().network_risk);
 
   constexpr std::uint64_t original_generation = 201;
@@ -4697,9 +5745,7 @@ TEST(DoctorActionTests, AutoFixRefusesAProcessGlobalControllerSharedByTwoSession
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   doctor_actions::session_started("client-one", 301, 20000);
   adaptive_bitrate::set_runtime_update_supported(true);
@@ -4751,7 +5797,7 @@ TEST(StreamStatsDoctorTests, MultipleSessionsNeverOfferProcessGlobalAutoFix) {
   stats.encode_target_residency = platf::frame_residency_e::gpu;
   stats.clients.resize(2);
 
-  const auto doctor = stream_stats::build_doctor_json(
+  const auto doctor = judged_doctor(
     stats, nlohmann::json::object(), "multi-session-app"
   );
   EXPECT_EQ(doctor.at("primary_issue"), "network_jitter");
@@ -4800,9 +5846,7 @@ TEST(DoctorActionTests, IdempotentAutoFixCannotOverwriteANewerOwnerBitrate) {
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   constexpr std::uint64_t generation = 421;
   doctor_actions::session_started("client-owner", generation, "launch-421", 20000);
@@ -4886,9 +5930,7 @@ TEST(DoctorActionTests, StaleControllerRevisionCannotOverrideANewerOwnerChoice) 
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   constexpr std::uint64_t generation = 422;
   doctor_actions::session_started("client-owner", generation, "launch-422", 20000);
@@ -4935,9 +5977,7 @@ TEST(DoctorActionTests, EquivalentFreshTelemetryCannotMakeAutoFixUnclickable) {
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   constexpr std::uint64_t generation = 426;
   doctor_actions::session_started(
@@ -5027,9 +6067,7 @@ TEST(DoctorActionTests, AutoFixStepsAndUndoesFromTheRateTheEncoderOpenedAt) {
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   constexpr std::uint64_t generation = 427;
   doctor_actions::session_started(
@@ -5597,7 +6635,7 @@ TEST(StreamStatsBitrateUnitsTests, EachClientIsAnsweredAboutItsOwnStream) {
 TEST(StreamStatsDoctorTests, PyroWaveBelowItsAdviceOnACleanNetworkOffersARaiseToTheFarAdvice) {
   PyroWaveHostGuard host;
   const auto stats = clean_pyrowave_stats(20000);
-  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto doctor = judged_doctor(stats, nlohmann::json::object());
   const auto &action = doctor.at("safe_recovery_action");
 
   EXPECT_EQ(doctor.at("primary_issue"), "pyrowave_starved");
@@ -5623,7 +6661,7 @@ TEST(StreamStatsDoctorTests, PyroWaveBelowItsAdviceOnACleanNetworkOffersARaiseTo
 
   // max_bitrate caps the raise, and the payload says so.
   config::video.max_bitrate = 50000;
-  const auto capped = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto capped = judged_doctor(stats, nlohmann::json::object());
   EXPECT_EQ(capped.at("safe_recovery_action").at("payload_preview").at("target_bitrate_kbps"), 50000);
   // The summary quotes the figure Doctor raises to, and says what held it there.
   EXPECT_NE(capped.at("summary").get<std::string>().find("a request of about 50 Mbps for 1920x1080 at 60 fps on a "
@@ -5636,7 +6674,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAdviceIsTextWhileLiveTuningOwnsTheBitrate) 
   PyroWaveHostGuard host;
   auto stats = clean_pyrowave_stats(20000);
   stats.adaptive_bitrate_enabled = true;
-  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto doctor = judged_doctor(stats, nlohmann::json::object());
   const auto &action = doctor.at("safe_recovery_action");
 
   EXPECT_EQ(doctor.at("primary_issue"), "pyrowave_starved");
@@ -5666,11 +6704,11 @@ TEST(StreamStatsDoctorTests, PyroWaveFindingWaitsForACleanNetworkAndRanksBelowFa
   auto lossy = clean_pyrowave_stats(20000);
   lossy.network_risk = true;
   lossy.latency_ms = 60.0;
-  EXPECT_EQ(stream_stats::build_doctor_json(lossy, nlohmann::json::object()).at("primary_issue"), "network_jitter");
+  EXPECT_EQ(judged_doctor(lossy, nlohmann::json::object()).at("primary_issue"), "network_jitter");
 
   auto slow_encoder = clean_pyrowave_stats(20000);
   slow_encoder.encode_time_ms = 30.0;
-  EXPECT_EQ(stream_stats::build_doctor_json(slow_encoder, nlohmann::json::object()).at("primary_issue"), "encoder_load");
+  EXPECT_EQ(judged_doctor(slow_encoder, nlohmann::json::object()).at("primary_issue"), "encoder_load");
 
   // Without a current network observation there is no clean network to raise on.
   auto unmeasured = clean_pyrowave_stats(20000);
@@ -5678,7 +6716,7 @@ TEST(StreamStatsDoctorTests, PyroWaveFindingWaitsForACleanNetworkAndRanksBelowFa
   unmeasured.network_last_received_age_ms = -1;
   unmeasured.media_loss_sample_revision = 0;
   unmeasured.media_loss_last_received_age_ms = -1;
-  EXPECT_NE(stream_stats::build_doctor_json(unmeasured, nlohmann::json::object()).at("primary_issue"), "pyrowave_starved");
+  EXPECT_NE(judged_doctor(unmeasured, nlohmann::json::object()).at("primary_issue"), "pyrowave_starved");
 }
 
 TEST(StreamStatsDoctorTests, PyroWaveAtTheRetroidPocket6CalibrationIsHealthyWhateverItsCeilingShare) {
@@ -5699,7 +6737,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtTheRetroidPocket6CalibrationIsHealthyWhat
   // Session status carries the rate starved was decided on: the encoder's 178987 kbps as a request.
   EXPECT_EQ(status.at("encoder_kbps"), 178987);
   EXPECT_EQ(status.at("request_kbps"), 199999);
-  const auto healthy = stream_stats::build_doctor_json(rp6, nlohmann::json::object());
+  const auto healthy = judged_doctor(rp6, nlohmann::json::object());
   EXPECT_EQ(healthy.at("primary_issue"), "none");
   const auto &bitrate_row = evidence_row(healthy, "bitrate");
   EXPECT_EQ(bitrate_row.at("status"), "pass");
@@ -5717,7 +6755,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtTheRetroidPocket6CalibrationIsHealthyWhat
     << detail;
   EXPECT_EQ(detail.find("it advises"), std::string::npos) << detail;
   // Within what Polaris recommends, the television figure needs no such note.
-  const auto low = evidence_row(stream_stats::build_doctor_json(clean_pyrowave_stats(160000), nlohmann::json::object()),
+  const auto low = evidence_row(judged_doctor(clean_pyrowave_stats(160000), nlohmann::json::object()),
                                 "bitrate")
                      .at("detail")
                      .get<std::string>();
@@ -5729,7 +6767,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtTheRetroidPocket6CalibrationIsHealthyWhat
   auto fed = clean_pyrowave_stats(160000);
   fed.pyrowave_window_frames = 240;
   fed.pyrowave_window_ceiling_frames = 236;
-  EXPECT_EQ(stream_stats::build_doctor_json(fed, nlohmann::json::object()).at("primary_issue"), "none");
+  EXPECT_EQ(judged_doctor(fed, nlohmann::json::object()).at("primary_issue"), "none");
 
   // More than a tenth below it, 150 Mbps, is starved, and Doctor raises to the far figure.
   auto short_rp6 = rp6;
@@ -5737,7 +6775,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtTheRetroidPocket6CalibrationIsHealthyWhat
   short_rp6.bitrate_kbps = short_encoder;
   short_rp6.effective_launch_bitrate_kbps = short_encoder;
   short_rp6.adaptive_target_bitrate_kbps = short_encoder;
-  const auto starved = stream_stats::build_doctor_json(short_rp6, nlohmann::json::object());
+  const auto starved = judged_doctor(short_rp6, nlohmann::json::object());
   EXPECT_EQ(starved.at("primary_issue"), "pyrowave_starved");
   EXPECT_EQ(starved.at("safe_recovery_action").at("payload_preview").at("target_bitrate_kbps"), 214898);
   EXPECT_NE(starved.at("summary").get<std::string>().find("a request of about 150 Mbps"), std::string::npos)
@@ -5769,7 +6807,7 @@ namespace {
 
   // A PyroWave stream that wants more than Doctor raises it to, with 85% of its frames at the byte budget.
   nlohmann::json limit_doctor(int width, int height, int request_kbps) {
-    const auto doctor = stream_stats::build_doctor_json(clean_pyrowave_stream(width, height, 120, true, request_kbps, 204),
+    const auto doctor = judged_doctor(clean_pyrowave_stream(width, height, 120, true, request_kbps, 204),
                                                         nlohmann::json::object());
     EXPECT_EQ(doctor.at("primary_issue"), "pyrowave_needs_more_than_allowed");
     return doctor;
@@ -5789,7 +6827,7 @@ TEST(StreamStatsDoctorTests, PyroWaveHeldBelowItsModelByTheCapAtItsByteCeilingAs
   EXPECT_FALSE(status.at("starved").get<bool>());
   EXPECT_DOUBLE_EQ(status.at("ceiling_frame_share").get<double>(), 0.85);
 
-  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto doctor = judged_doctor(stats, nlohmann::json::object());
   EXPECT_EQ(doctor.at("primary_issue"), "pyrowave_needs_more_than_allowed");
   EXPECT_EQ(doctor.at("traffic_light"), "amber");
   // A player can set up to 500 Mbps by hand, so the cap is only how far Doctor raises, not what the
@@ -5816,7 +6854,7 @@ TEST(StreamStatsDoctorTests, PyroWaveHeldBelowItsModelByTheCapAtItsByteCeilingAs
 TEST(StreamStatsDoctorTests, PyroWaveAtItsByteCeilingIsAFindingOnlyWhereTheHostHoldsItBelowTheModel) {
   PyroWaveHostGuard host;
   const auto issue = [](int width, int height, int fps, int request_kbps, std::uint32_t ceiling_frames) {
-    return stream_stats::build_doctor_json(
+    return judged_doctor(
              clean_pyrowave_stream(width, height, fps, true, request_kbps, ceiling_frames), nlohmann::json::object())
       .at("primary_issue")
       .get<std::string>();
@@ -5832,7 +6870,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtItsByteCeilingIsAFindingOnlyWhereTheHostH
   config::video.max_bitrate = 200000;
   EXPECT_EQ(issue(1920, 1080, 120, 200000, 48), "none");
   EXPECT_EQ(issue(1920, 1080, 120, 200000, 192), "none");
-  const auto held = stream_stats::build_doctor_json(clean_pyrowave_stream(1920, 1080, 120, true, 200000, 204),
+  const auto held = judged_doctor(clean_pyrowave_stream(1920, 1080, 120, true, 200000, 204),
                                                     nlohmann::json::object());
   EXPECT_EQ(held.at("primary_issue"), "pyrowave_needs_more_than_allowed");
   // The host takes no more than max_bitrate by hand either, so Doctor names it and offers nothing to set.
@@ -5847,7 +6885,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtItsByteCeilingIsAFindingOnlyWhereTheHostH
   // A stream set by hand above the model's figure has what the model asks, whatever its share.
   EXPECT_EQ(issue(3840, 2160, 120, 350000, 240), "none");
   // More than a tenth below the cap it is starved, and Doctor raises it to the cap instead.
-  const auto starved = stream_stats::build_doctor_json(clean_pyrowave_stream(3840, 2160, 120, true, 250000, 204),
+  const auto starved = judged_doctor(clean_pyrowave_stream(3840, 2160, 120, true, 250000, 204),
                                                        nlohmann::json::object());
   EXPECT_EQ(starved.at("primary_issue"), "pyrowave_starved");
   EXPECT_EQ(starved.at("safe_recovery_action").at("payload_preview").at("target_bitrate_kbps"), 300000);
@@ -5855,7 +6893,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtItsByteCeilingIsAFindingOnlyWhereTheHostH
   auto lossy = clean_pyrowave_stream(3840, 2160, 120, true, 300000, 204);
   lossy.network_risk = true;
   lossy.latency_ms = 60.0;
-  EXPECT_EQ(stream_stats::build_doctor_json(lossy, nlohmann::json::object()).at("primary_issue"), "network_jitter");
+  EXPECT_EQ(judged_doctor(lossy, nlohmann::json::object()).at("primary_issue"), "network_jitter");
 }
 
 TEST(StreamStatsDoctorTests, PyroWaveLimitFindingNamesWhatHoldsTheStreamAndWhatAPlayerCanSet) {
@@ -5906,7 +6944,7 @@ TEST(StreamStatsDoctorTests, PyroWaveThatWantsMoreThanDoctorRaisesToGetsNoBitrat
     stats.adaptive_bitrate_enabled = variant.live_tuning;
     stats.adaptive_runtime_update_supported = variant.runtime_updates;
     stats.doctor_live_action_scope_available = variant.single_scope;
-    const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+    const auto doctor = judged_doctor(stats, nlohmann::json::object());
     ASSERT_EQ(doctor.at("primary_issue"), "pyrowave_needs_more_than_allowed");
     const auto &action = doctor.at("safe_recovery_action");
     EXPECT_EQ(action.at("id"), "none");
@@ -5944,7 +6982,7 @@ TEST(StreamStatsDoctorTests, PyroWaveHeldBelowItsModelButCutBelowItsLaunchBitrat
   ASSERT_EQ(status.at("raise_goal_kbps"), 300000);
   ASSERT_FALSE(status.at("starved").get<bool>());
   ASSERT_LT(launch_kbps, static_cast<int>(stream_bitrate::encoder_kbps_for_wire(300000, 10, 512)));
-  const auto doctor = stream_stats::build_doctor_json(cut, nlohmann::json::object());
+  const auto doctor = judged_doctor(cut, nlohmann::json::object());
   EXPECT_EQ(doctor.at("primary_issue"), "quality_reduced_live");
   EXPECT_EQ(doctor.at("recommendation").at("next_step_label"), "Restore and verify");
   const auto &payload = doctor.at("safe_recovery_action").at("payload_preview");
@@ -5955,13 +6993,13 @@ TEST(StreamStatsDoctorTests, PyroWaveHeldBelowItsModelButCutBelowItsLaunchBitrat
   // Back at the bitrate it launched at there is nothing to restore, and the limit finding stands.
   auto restored = clean_pyrowave_stream(3840, 2160, 120, true, 290000, 204);
   ASSERT_EQ(restored.effective_launch_bitrate_kbps, launch_kbps);
-  EXPECT_EQ(stream_stats::build_doctor_json(restored, nlohmann::json::object()).at("primary_issue"),
+  EXPECT_EQ(judged_doctor(restored, nlohmann::json::object()).at("primary_issue"),
             "pyrowave_needs_more_than_allowed");
 
   // With Live Tuning on, its own recovery owns the climb and Doctor offers no restore, so the limit
   // finding stands there too.
   cut.adaptive_bitrate_enabled = true;
-  EXPECT_EQ(stream_stats::build_doctor_json(cut, nlohmann::json::object()).at("primary_issue"),
+  EXPECT_EQ(judged_doctor(cut, nlohmann::json::object()).at("primary_issue"),
             "pyrowave_needs_more_than_allowed");
 }
 
@@ -5977,7 +7015,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtItsFloorUnderPressureSuggestsHevcInsteadO
     stats.adaptive_bitrate_enabled = live_tuning;
     stats.adaptive_min_bitrate_kbps = 44560;
     stats.adaptive_floor_source = "pyrowave_advice";
-    const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+    const auto doctor = judged_doctor(stats, nlohmann::json::object());
     const auto &action = doctor.at("safe_recovery_action");
     EXPECT_EQ(doctor.at("primary_issue"), "network_jitter");
     EXPECT_EQ(action.at("id"), "none");
@@ -5997,7 +7035,7 @@ TEST(StreamStatsDoctorTests, PyroWaveAtItsFloorUnderPressureSuggestsHevcInsteadO
   above.latency_ms = 60.0;
   above.adaptive_min_bitrate_kbps = 44560;
   above.adaptive_floor_source = "pyrowave_advice";
-  EXPECT_EQ(stream_stats::build_doctor_json(above, nlohmann::json::object()).at("safe_recovery_action").at("id"),
+  EXPECT_EQ(judged_doctor(above, nlohmann::json::object()).at("safe_recovery_action").at("id"),
             "lower_bitrate");
 }
 
@@ -6007,7 +7045,7 @@ TEST(StreamStatsDoctorTests, PyroWaveCutBelowARequestThatMeetsTheAdviceClimbsBac
   // advice lands it on. Something cut the stream to 128790, and the network is clean again.
   auto stats = clean_pyrowave_stats(128790);
   stats.effective_launch_bitrate_kbps = 160988;
-  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto doctor = judged_doctor(stats, nlohmann::json::object());
   EXPECT_EQ(doctor.at("primary_issue"), "quality_reduced_live");
   const auto &payload = doctor.at("safe_recovery_action").at("payload_preview");
   EXPECT_EQ(payload.at("action_id"), "restore_quality");
@@ -6016,7 +7054,7 @@ TEST(StreamStatsDoctorTests, PyroWaveCutBelowARequestThatMeetsTheAdviceClimbsBac
 
   // A saved paired profile sized for H.264 does not cap the climb back: the handshake set it aside.
   stats.paired_target_bitrate_kbps = 20000;
-  const auto paired = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto paired = judged_doctor(stats, nlohmann::json::object());
   EXPECT_EQ(paired.at("primary_issue"), "quality_reduced_live");
   EXPECT_EQ(paired.at("safe_recovery_action").at("payload_preview").at("target_bitrate_kbps"), 160988);
   EXPECT_EQ(paired.at("safe_recovery_action").at("payload_preview").at("goal_source"), "launch_bitrate");
@@ -6025,13 +7063,13 @@ TEST(StreamStatsDoctorTests, PyroWaveCutBelowARequestThatMeetsTheAdviceClimbsBac
   // With Live Tuning on, its own recovery climbs back to the request, and Doctor does not ask the
   // player to set less than they already asked for.
   stats.adaptive_bitrate_enabled = true;
-  EXPECT_EQ(stream_stats::build_doctor_json(stats, nlohmann::json::object()).at("primary_issue"), "none");
+  EXPECT_EQ(judged_doctor(stats, nlohmann::json::object()).at("primary_issue"), "none");
 
   // A request more than a tenth below the advice still gets PyroWave's raise, which goes past the
   // request.
   auto short_request = clean_pyrowave_stats(60000);
   short_request.effective_launch_bitrate_kbps = 70000;
-  const auto raise = stream_stats::build_doctor_json(short_request, nlohmann::json::object());
+  const auto raise = judged_doctor(short_request, nlohmann::json::object());
   EXPECT_EQ(raise.at("primary_issue"), "pyrowave_starved");
   EXPECT_EQ(raise.at("safe_recovery_action").at("payload_preview").at("goal_source"), "pyrowave_advice");
   EXPECT_EQ(raise.at("safe_recovery_action").at("payload_preview").at("target_bitrate_kbps"), 100148);
@@ -6074,7 +7112,7 @@ TEST(StreamStatsDoctorTests, CleanReductionWithoutAPairedProfileRestoresTheLaunc
   stats.latency_ms = 3.8;
   stats.adaptive_runtime_update_supported = true;
 
-  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto doctor = judged_doctor(stats, nlohmann::json::object());
   const auto &action = doctor.at("safe_recovery_action");
   EXPECT_EQ(doctor.at("primary_issue"), "quality_reduced_live");
   EXPECT_EQ(action.at("id"), "restore_quality");
@@ -6082,7 +7120,7 @@ TEST(StreamStatsDoctorTests, CleanReductionWithoutAPairedProfileRestoresTheLaunc
   EXPECT_EQ(action.at("payload_preview").at("goal_source"), "launch_bitrate");
 
   stats.paired_target_bitrate_kbps = 12000;
-  const auto paired = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  const auto paired = judged_doctor(stats, nlohmann::json::object());
   EXPECT_EQ(paired.at("safe_recovery_action").at("payload_preview").at("target_bitrate_kbps"), 12000);
   EXPECT_EQ(paired.at("safe_recovery_action").at("payload_preview").at("goal_source"), "launch_ceiling");
 }
@@ -6269,9 +7307,7 @@ TEST(DoctorActionTests, EveryRequestIdRemainsIdempotentForTheWholeStreamGenerati
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   constexpr std::uint64_t generation = 423;
   doctor_actions::session_started("client-owner", generation, "launch-423", 20000);
@@ -6349,9 +7385,7 @@ TEST(DoctorActionTests, AdaptiveToggleRestoresDoctorTargetBeforeChangingPolicy) 
   for (int i = 0; i < 6; ++i) {
     stream_stats::update_network_stats(5.0, 0.0, 1000);
   }
-  for (int i = 0; i < 3; ++i) {
-    stream_stats::update_network_stats(52.0, 3.4, 1000);
-  }
+  sustain_network_pressure(52.0, 3.4);
 
   constexpr std::uint64_t generation = 424;
   doctor_actions::session_started("client-owner", generation, "launch-424", 20000);
@@ -6973,26 +8007,30 @@ TEST(StreamStatsHotFieldTests, CleanControlPingsCannotEraseCurrentConfirmedMedia
   };
   ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
 
-  sample.client_monotonic_ms = 2'000;
-  sample.frames_expected = 1'100;
-  sample.frames_received = 1'080;
-  sample.frames_lost = 20;
-  const auto loss = stream_stats::ingest_client_media_counters(sample);
-  ASSERT_TRUE(loss.accepted);
-  ASSERT_TRUE(loss.observation_published);
-  ASSERT_DOUBLE_EQ(loss.media_loss_pct, 20.0);
-
   // Production pings arrive between Nova's one-second counter reports. They
   // carry no media-loss measurement, so their clean control-channel loss must
-  // not be interpreted as clean video delivery.
-  stream_stats::update_control_channel_stats(4.0, 0.0, 777);
-  stream_stats::update_control_channel_stats(4.0, 0.0, 777);
+  // not be interpreted as clean video delivery, in the newest reading or in
+  // the window's figure.
+  for (int report = 0; report < stream_stats::network_judge_t::k_min_media_samples; ++report) {
+    sample.client_monotonic_ms += 1'000;
+    sample.frames_expected += 100;
+    sample.frames_received += 80;
+    sample.frames_lost += 20;
+    const auto loss = stream_stats::ingest_client_media_counters(sample);
+    ASSERT_TRUE(loss.accepted);
+    ASSERT_TRUE(loss.observation_published);
+    ASSERT_DOUBLE_EQ(loss.media_loss_pct, 20.0);
+    stream_stats::update_control_channel_stats(4.0, 0.0, 777);
+    stream_stats::update_control_channel_stats(4.0, 0.0, 777);
+  }
 
   const auto stats = stream_stats::get_current();
   EXPECT_TRUE(stats.network_risk);
   EXPECT_TRUE(stats.packet_loss_available);
   EXPECT_DOUBLE_EQ(stats.packet_loss, 20.0);
   EXPECT_EQ(stats.packet_loss_source, "media_transport");
+  EXPECT_DOUBLE_EQ(stats.network_verdict.loss_pct, 20.0);
+  EXPECT_TRUE(stats.network_verdict.loss_elevated);
 
   const auto doctor = stream_stats::build_doctor_json(
     stats,
@@ -7196,6 +8234,1051 @@ TEST(NetworkRiskTrackerTests, BadFromTheStartStillFlagsAfterBoundedGrace) {
     flagged = tracker.update(6.0, 90.0);
   }
   EXPECT_TRUE(flagged);
+}
+
+namespace {
+  using judge_clock = stream_stats::network_judge_t::clock_type;
+
+  /// One second's media report from a client: the frames it expected and how many never arrived.
+  struct recorded_report_t {
+    std::uint64_t expected;
+    std::uint64_t lost;
+  };
+
+  // The HEVC run of the 2026-09-29 in-game smoke on the Retroid Pocket 6, 3840x2160 at 120 fps over
+  // Wi-Fi. The host's polls read 0.0, 7.38, 0.0, 0.0, 0.0, 0.0, 7.44 and 0.0 percent: at 120 fps,
+  // 9 of 122 frames and 9 of 121, each one second's report. The run went on like that for five
+  // minutes, and a later poll read 5.83, 7 of 120.
+  constexpr std::array<recorded_report_t, 8> k_recorded_hevc_reports {{
+    {120, 0}, {122, 9}, {120, 0}, {120, 0}, {120, 0}, {120, 0}, {121, 9}, {120, 0}
+  }};
+
+  // Host RTT through that run, in ms: the readings paired with its screenshots.
+  constexpr std::array<double, 10> k_recorded_hevc_rtt_ms {4.0, 4.4, 10.1, 7.6, 9.6, 7.9, 8.6, 4.3, 9.0, 17.0};
+
+  // Host RTT through the PyroWave run, 1920x1080 at 120 fps on the same device, in ms: 10, 26 and 10
+  // on close samples, and 23 and 39 in its Wi-Fi rtt_spike periods, where ENet's estimate stays up
+  // for a second or two before it comes back down.
+  constexpr std::array<double, 10> k_recorded_pyrowave_rtt_ms {10.0, 26.0, 10.0, 8.0, 39.0, 40.0, 23.0, 10.0, 6.0, 10.0};
+
+  judge_clock::time_point judge_start() {
+    return judge_clock::time_point {} + std::chrono::hours(1);
+  }
+}  // namespace
+
+TEST(NetworkJudgeTests, RecordedHevcLossChangesTheVerdictOnceAndHoldsIt) {
+  // Judged a report at a time, as Doctor did, this loss was confirmed and cleared twice every eight
+  // seconds. Over the window it runs a little under 2% with a 7% burst every few seconds, so the
+  // verdict turns to pressure once, as soon as the window holds enough of it, and keeps it: the
+  // figure never falls to 1% while the pattern lasts.
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  int per_report_changes = 0;
+  bool per_report_was = false;
+  int verdict_changes = 0;
+  bool verdict_was = false;
+  int entered_at = -1;
+  int second = 0;
+  for (int round = 0; round < 5; ++round) {
+    for (const auto &report : k_recorded_hevc_reports) {
+      ++second;
+      at += std::chrono::seconds(1);
+      judge.add_media(at, static_cast<double>(report.expected), static_cast<double>(report.lost));
+      for (int ping = 0; ping < 10; ++ping) {
+        judge.add_rtt(at + std::chrono::milliseconds(100 * ping), k_recorded_hevc_rtt_ms[ping]);
+      }
+      const bool per_report = report.lost * 100.0 / report.expected > 2.0;
+      per_report_changes += per_report != per_report_was ? 1 : 0;
+      per_report_was = per_report;
+      const auto verdict = judge.verdict(at);
+      if (verdict.loss_elevated != verdict_was) {
+        ++verdict_changes;
+        entered_at = second;
+      }
+      verdict_was = verdict.loss_elevated;
+    }
+  }
+  EXPECT_EQ(per_report_changes, 20);
+  EXPECT_EQ(verdict_changes, 1);
+  // Seven seconds in, two of seven reports lost 18 of 843 frames, 2.1%.
+  EXPECT_EQ(entered_at, 7);
+
+  const auto verdict = judge.verdict(at);
+  ASSERT_TRUE(verdict.loss_available);
+  EXPECT_TRUE(verdict.loss_elevated);
+  EXPECT_TRUE(verdict.risk);
+  EXPECT_EQ(verdict.media_samples, 20);  // the last 20 seconds
+  EXPECT_EQ(verdict.frames_expected, 2407u);
+  EXPECT_EQ(verdict.frames_lost, 45u);
+  EXPECT_NEAR(verdict.loss_pct, 45.0 * 100.0 / 2407.0, 1e-9);
+  EXPECT_EQ(stream_stats::network_loss_state(verdict), "elevated");
+  ASSERT_TRUE(verdict.rtt_available);
+  EXPECT_LT(verdict.rtt_ms, stream_stats::network_judge_t::k_rtt_exit_ms);
+  EXPECT_EQ(stream_stats::network_rtt_state(verdict), "clean");
+}
+
+TEST(NetworkJudgeTests, ARestartLeavesOutTheReportWhoseSecondBeganBeforeIt) {
+  // Reports a second apart, losing 23% of their frames. A bitrate step lands between two of them and
+  // cures the loss. The report after it counts the second before the step, and judged from the step
+  // it put the window at 2.9%, pressure, for a stream that had lost nothing since.
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  for (int second = 0; second < 10; ++second) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 100.0, 23.0);
+  }
+  ASSERT_TRUE(judge.verdict(at).loss_elevated);
+  const auto step = at + std::chrono::milliseconds(400);
+  at += std::chrono::seconds(1);
+  judge.add_media(at, 100.0, 23.0);
+  for (int second = 0; second < 7; ++second) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 100.0, 0.0);
+  }
+
+  auto since = judge;
+  since.restart(step);
+  const auto verdict = since.verdict(at);
+  ASSERT_TRUE(verdict.loss_available);
+  EXPECT_EQ(verdict.media_samples, 7);
+  EXPECT_DOUBLE_EQ(verdict.loss_pct, 0.0);
+  EXPECT_FALSE(verdict.loss_elevated);
+  // Unrestarted, the window still holds the loss that asked for the step.
+  EXPECT_TRUE(judge.verdict(at).loss_elevated);
+}
+
+TEST(NetworkJudgeTests, SustainedLossEntersAtItsBandAndHoldsThroughACleanSecond) {
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  // A clean stream first, so the window is full and judged.
+  for (int i = 0; i < 20; ++i) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 120.0, 0.0);
+  }
+  ASSERT_TRUE(judge.verdict(at).loss_available);
+  EXPECT_EQ(stream_stats::network_loss_state(judge.verdict(at)), "clean");
+
+  // Real pressure: every second loses 6 of 120 frames. The window crosses 2% on the seventh.
+  int entered_at = -1;
+  for (int i = 0; i < 12; ++i) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 120.0, 6.0);
+    if (entered_at < 0 && judge.verdict(at).loss_elevated) {
+      entered_at = i;
+    }
+  }
+  EXPECT_EQ(entered_at, 7);
+
+  // One clean second in the middle of it is not a recovery.
+  at += std::chrono::seconds(1);
+  judge.add_media(at, 120.0, 0.0);
+  EXPECT_TRUE(judge.verdict(at).loss_elevated);
+  EXPECT_TRUE(judge.verdict(at).risk);
+
+  // Once the loss stops, the verdict stands until the window's figure falls below 1%, which takes
+  // most of the window, and then clears once.
+  int cleared_at = -1;
+  for (int i = 0; i < 20; ++i) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 120.0, 0.0);
+    const auto verdict = judge.verdict(at);
+    if (cleared_at < 0 && !verdict.loss_elevated) {
+      cleared_at = i;
+      EXPECT_LT(verdict.loss_pct, stream_stats::network_judge_t::k_loss_exit_pct);
+    }
+    if (cleared_at >= 0) {
+      EXPECT_FALSE(verdict.loss_elevated) << "second " << i;
+    }
+  }
+  EXPECT_GE(cleared_at, 8);
+}
+
+TEST(NetworkJudgeTests, AVerdictReadBetweenReportsQuotesTheFigureItsBandWasJudgedOn) {
+  // The band moves only when a report arrives, a second apart or more, and PyroWave's reports come
+  // 1000 ms apart or more. The figure used to be worked out again whenever the verdict was read, so
+  // a lossy report leaving the window between two reports left a pressure verdict quoting 0.70%,
+  // below the 1% that clears it, and a clean one leaving it left a clean verdict quoting 2.02%.
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  // Three seconds that lost 8 of 120 frames each: pressure from the fifth report, held until the
+  // window's figure falls below 1%.
+  for (int i = 0; i < 3; ++i) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 120.0, 8.0);
+  }
+  for (int i = 0; i < 17; ++i) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 120.0, 0.0);
+  }
+  const auto held = judge.verdict(at);
+  ASSERT_TRUE(held.loss_elevated);
+  EXPECT_NEAR(held.loss_pct, 24.0 * 100.0 / 2400.0, 1e-9);
+
+  // Half a second after the next report was due, the first lossy second has left the window. The
+  // verdict still quotes the figure its band was judged on.
+  const auto between = judge.verdict(at + std::chrono::milliseconds(1500));
+  EXPECT_TRUE(between.loss_elevated);
+  EXPECT_DOUBLE_EQ(between.loss_pct, held.loss_pct);
+  EXPECT_EQ(between.frames_lost, held.frames_lost);
+  EXPECT_EQ(between.frames_expected, held.frames_expected);
+  EXPECT_EQ(stream_stats::network_loss_state(between), "elevated");
+
+  // The next report judges the window as it now is, and that clears the band.
+  at += std::chrono::milliseconds(1500);
+  judge.add_media(at, 120.0, 0.0);
+  const auto cleared = judge.verdict(at);
+  EXPECT_FALSE(cleared.loss_elevated);
+  EXPECT_LT(cleared.loss_pct, stream_stats::network_judge_t::k_loss_exit_pct);
+
+  // The other way round: a clean window just under 2% stays clean, and its figure stays under 2%,
+  // while a clean second leaves the window before the next report.
+  stream_stats::network_judge_t rising;
+  at = judge_start();
+  for (int i = 0; i < 15; ++i) {
+    at += std::chrono::seconds(1);
+    rising.add_media(at, 120.0, 0.0);
+  }
+  for (const double lost : {9.0, 9.0, 9.0, 9.0, 10.0}) {
+    at += std::chrono::seconds(1);
+    rising.add_media(at, 120.0, lost);
+    ASSERT_FALSE(rising.verdict(at).loss_elevated);
+  }
+  const auto clean = rising.verdict(at + std::chrono::milliseconds(1500));
+  EXPECT_FALSE(clean.loss_elevated);
+  EXPECT_NEAR(clean.loss_pct, 46.0 * 100.0 / 2400.0, 1e-9);
+  EXPECT_LT(clean.loss_pct, stream_stats::network_judge_t::k_loss_enter_pct);
+  EXPECT_EQ(stream_stats::network_loss_state(clean), "light");
+}
+
+TEST(NetworkJudgeTests, ControlChannelLossHoldsItsBandAndNeverCountsAsPressure) {
+  // The HEVC run's control-channel estimate read 1.08 and then 2.81 on consecutive polls. Taken a
+  // reading at a time against 2%, Doctor's control channel finding came and went with every poll.
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  int per_reading_changes = 0;
+  bool per_reading_was = false;
+  int verdict_changes = 0;
+  bool verdict_was = false;
+  const auto second_of = [&](double loss_pct) {
+    for (int ping = 0; ping < 10; ++ping) {
+      at += std::chrono::milliseconds(100);
+      judge.add_control_loss(at, loss_pct);
+      const bool per_reading = loss_pct >= stream_stats::network_judge_t::k_loss_enter_pct;
+      per_reading_changes += per_reading != per_reading_was ? 1 : 0;
+      per_reading_was = per_reading;
+      const bool judged = judge.verdict(at).control_loss_elevated;
+      verdict_changes += judged != verdict_was ? 1 : 0;
+      verdict_was = judged;
+    }
+  };
+  // Retries that last: the window's figure crosses 2% and the finding stands.
+  for (int second = 0; second < 5; ++second) {
+    second_of(2.81);
+  }
+  // Then the estimate swings a poll at a time and averages under 2% but above 1%.
+  for (int second = 0; second < 25; ++second) {
+    second_of(second % 2 == 0 ? 1.08 : 2.81);
+  }
+  EXPECT_GE(per_reading_changes, 20);
+  EXPECT_EQ(verdict_changes, 1);
+  auto verdict = judge.verdict(at);
+  ASSERT_TRUE(verdict.control_loss_available);
+  EXPECT_TRUE(verdict.control_loss_elevated);
+  EXPECT_NEAR(verdict.control_loss_pct, (1.08 + 2.81) / 2.0, 1e-9);
+  EXPECT_FALSE(verdict.risk);
+
+  // Quiet for long enough that the window's figure falls below 1%, and it clears once.
+  for (int second = 0; second < 20; ++second) {
+    second_of(0.2);
+  }
+  verdict = judge.verdict(at);
+  EXPECT_FALSE(verdict.control_loss_elevated);
+  EXPECT_EQ(verdict_changes, 2);
+  const auto json = stream_stats::network_verdict_json(verdict);
+  EXPECT_NEAR(json.at("control_loss_pct").get<double>(), 0.2, 1e-9);
+  EXPECT_FALSE(json.at("control_loss_elevated").get<bool>());
+}
+
+TEST(NetworkJudgeTests, RecordedPyroWaveRttSpikesNeverElevate) {
+  // The newest-reading tracker flips twice on this sequence. The window's median never moves off a
+  // LAN's figures.
+  stream_stats::network_judge_t judge;
+  stream_stats::network_risk_tracker_t tracker;
+  auto at = judge_start();
+  int tracker_flips = 0;
+  bool tracker_was = false;
+  for (int round = 0; round < 3; ++round) {
+    for (const auto rtt_ms : k_recorded_pyrowave_rtt_ms) {
+      for (int ping = 0; ping < 10; ++ping) {
+        at += std::chrono::milliseconds(100);
+        judge.add_rtt(at, rtt_ms);
+        const bool tracked = tracker.update(0.0, rtt_ms);
+        tracker_flips += tracked != tracker_was ? 1 : 0;
+        tracker_was = tracked;
+        const auto verdict = judge.verdict(at);
+        EXPECT_FALSE(verdict.rtt_elevated) << "rtt " << rtt_ms << " at round " << round;
+      }
+    }
+  }
+  EXPECT_GE(tracker_flips, 4);
+  const auto verdict = judge.verdict(at);
+  ASSERT_TRUE(verdict.rtt_available);
+  EXPECT_DOUBLE_EQ(verdict.rtt_ms, 10.0);
+}
+
+TEST(NetworkJudgeTests, SustainedRttEntersAtItsBandAndClearsBelowIt) {
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  for (int i = 0; i < 50; ++i) {
+    at += std::chrono::milliseconds(100);
+    judge.add_rtt(at, 8.0);
+  }
+  EXPECT_FALSE(judge.verdict(at).rtt_elevated);
+  // A congested link: the median crosses 28 ms once more than half the window reads above it.
+  for (int i = 0; i < 60; ++i) {
+    at += std::chrono::milliseconds(100);
+    judge.add_rtt(at, 35.0);
+  }
+  EXPECT_TRUE(judge.verdict(at).rtt_elevated);
+  // Better, still inside the band: the verdict holds.
+  for (int i = 0; i < 200; ++i) {
+    at += std::chrono::milliseconds(100);
+    judge.add_rtt(at, 24.0);
+  }
+  EXPECT_DOUBLE_EQ(judge.verdict(at).rtt_ms, 24.0);
+  EXPECT_TRUE(judge.verdict(at).rtt_elevated);
+  // Below 20 ms it clears.
+  for (int i = 0; i < 200; ++i) {
+    at += std::chrono::milliseconds(100);
+    judge.add_rtt(at, 12.0);
+  }
+  EXPECT_FALSE(judge.verdict(at).rtt_elevated);
+  EXPECT_FALSE(judge.verdict(at).risk);
+}
+
+TEST(NetworkJudgeTests, AThinWindowHasNoVerdictAndAGapStartsOver) {
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  // Four reports are too few to judge, however bad.
+  for (int i = 0; i < stream_stats::network_judge_t::k_min_media_samples - 1; ++i) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 120.0, 60.0);
+    EXPECT_FALSE(judge.verdict(at).loss_available);
+    EXPECT_FALSE(judge.verdict(at).loss_elevated);
+  }
+  at += std::chrono::seconds(1);
+  judge.add_media(at, 120.0, 60.0);
+  EXPECT_TRUE(judge.verdict(at).loss_elevated);
+  EXPECT_EQ(stream_stats::network_loss_state(judge.verdict(at)), "elevated");
+
+  // Reports stop. The verdict is not carried across the gap: once the window empties there is none,
+  // and the first reports after it are judged afresh.
+  at += stream_stats::network_judge_t::k_window + std::chrono::seconds(1);
+  EXPECT_FALSE(judge.verdict(at).loss_available);
+  EXPECT_FALSE(judge.verdict(at).risk);
+  judge.add_media(at, 120.0, 0.0);
+  EXPECT_FALSE(judge.verdict(at).loss_elevated);
+  EXPECT_EQ(stream_stats::network_loss_state(judge.verdict(at)), "collecting");
+}
+
+TEST(NetworkJudgeTests, EnetRttConvergenceNeverEntersTheWindow) {
+  // ENet seeds a fresh peer at 500 ms and converges by about an eighth per ack; on a 3 ms LAN the
+  // first readings sit far above the band. They are held back until a calm reading arms the window.
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  double rtt = 500.0;
+  for (int i = 0; i < 60; ++i) {
+    at += std::chrono::milliseconds(100);
+    judge.add_rtt(at, rtt);
+    EXPECT_FALSE(judge.verdict(at).rtt_elevated) << "reading " << i << " rtt " << rtt;
+    rtt = 3.0 + (rtt - 3.0) * 7.0 / 8.0;
+  }
+  EXPECT_LT(judge.verdict(at).rtt_ms, stream_stats::network_judge_t::k_rtt_exit_ms);
+}
+
+TEST(NetworkJudgeTests, ALinkBadFromTheStartStillElevatesAfterTheGrace) {
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  for (int i = 0; i < stream_stats::network_judge_t::k_rtt_armed_after + stream_stats::network_judge_t::k_min_rtt_readings; ++i) {
+    at += std::chrono::milliseconds(100);
+    judge.add_rtt(at, 90.0);
+  }
+  EXPECT_TRUE(judge.verdict(at).rtt_elevated);
+}
+
+TEST(NetworkJudgeTests, TheFigureWeighsFramesNotReports) {
+  stream_stats::network_judge_t judge;
+  auto at = judge_start();
+  // A short report that lost everything does not outweigh four full seconds that lost nothing.
+  for (int i = 0; i < 4; ++i) {
+    at += std::chrono::seconds(1);
+    judge.add_media(at, 120.0, 0.0);
+  }
+  at += std::chrono::seconds(1);
+  judge.add_media(at, 5.0, 5.0);
+  const auto verdict = judge.verdict(at);
+  ASSERT_TRUE(verdict.loss_available);
+  EXPECT_EQ(verdict.frames_expected, 485u);
+  EXPECT_EQ(verdict.frames_lost, 5u);
+  EXPECT_NEAR(verdict.loss_pct, 500.0 / 485.0, 1e-9);
+  EXPECT_FALSE(verdict.loss_elevated);
+
+  const auto json = stream_stats::network_verdict_json(verdict);
+  EXPECT_EQ(json.at("loss_basis"), "video_frames_lost_after_fec");
+  EXPECT_EQ(json.at("window_seconds"), 20);
+  EXPECT_EQ(json.at("frames_lost"), 5);
+  EXPECT_EQ(json.at("frames_expected"), 485);
+  EXPECT_EQ(json.at("loss_state"), "light");
+  EXPECT_TRUE(json.at("rtt_median_ms").is_null());
+  EXPECT_EQ(json.at("rtt_state"), "collecting");
+}
+
+TEST(StreamStatsHotFieldTests, ClientMediaCountersFillTheStreamsOwnClientRow) {
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::add_client("198.51.100.44", "RetroidPocket6", 61, "nova");
+  stream_stats::start_session_timing("owner-row", 61, "app-session-row");
+  stream_stats::update_stream_active(true);
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::stop_session_timing("owner-row", 61);
+    stream_stats::remove_client("198.51.100.44", 61);
+    stream_stats::update_stream_active(false);
+  });
+
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-row",
+    .app_session_id = "app-session-row",
+    .session_generation = 61,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 120,
+    .frames_received = 120,
+    .frames_lost = 0
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+  // The HEVC run's reports: the newest one second figure swings between 0 and 7.4%.
+  for (const auto &report : k_recorded_hevc_reports) {
+    sample.client_monotonic_ms += 1'000;
+    sample.frames_expected += report.expected;
+    sample.frames_lost += report.lost;
+    sample.frames_received = sample.frames_expected - sample.frames_lost;
+    ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).observation_published);
+    const auto row = stream_stats::get_current().clients.front();
+    const auto verdict = stream_stats::current_network_verdict();
+    // Until the window can judge, the row has no figure rather than the newest report's.
+    EXPECT_EQ(row.packet_loss_available, verdict.loss_available);
+    if (verdict.loss_available) {
+      EXPECT_DOUBLE_EQ(row.packet_loss, verdict.loss_pct);
+    }
+  }
+
+  // The top level said the loss arrived while the stream's own row said it never had, which is how a
+  // reading of this host's stats concluded a client's loss did not reach it. The row now quotes the
+  // window's figure, as Doctor does: 18 of 963 frames, where the newest report lost none.
+  const auto stats = stream_stats::get_current();
+  ASSERT_EQ(stats.clients.size(), 1u);
+  EXPECT_TRUE(stats.packet_loss_available);
+  EXPECT_DOUBLE_EQ(stats.packet_loss, 0.0);
+  EXPECT_TRUE(stats.clients.front().packet_loss_available);
+  EXPECT_EQ(stats.clients.front().packet_loss_source, "media_transport");
+  EXPECT_NEAR(stats.clients.front().packet_loss, 18.0 * 100.0 / 963.0, 1e-9);
+  auto json = nlohmann::json::parse(stats.to_json());
+  EXPECT_EQ(json.at("clients").at(0).at("packet_loss_available"), true);
+  EXPECT_NEAR(json.at("clients").at(0).at("packet_loss").get<double>(), 18.0 * 100.0 / 963.0, 1e-9);
+
+  // Once the client's reports stop for more than five seconds the row stops quoting it, as Doctor does.
+  auto aged = stats;
+  aged.clients.front().packet_loss_received_at -= std::chrono::seconds(6);
+  json = nlohmann::json::parse(aged.to_json());
+  EXPECT_EQ(json.at("clients").at(0).at("packet_loss_available"), false);
+  EXPECT_EQ(json.at("clients").at(0).at("packet_loss_source"), "unavailable");
+}
+
+TEST(StreamStatsHotFieldTests, ClientMediaCountersAreJudgedOverTheWindow) {
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-window", 62, "app-session-window");
+  stream_stats::update_stream_active(true);
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::stop_session_timing("owner-window", 62);
+    stream_stats::update_stream_active(false);
+  });
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_control_channel_stats(6.0, 7.75, 777);
+  }
+
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-window",
+    .app_session_id = "app-session-window",
+    .session_generation = 62,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 0,
+    .frames_received = 0,
+    .frames_lost = 0
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+  for (const auto &report : k_recorded_hevc_reports) {
+    sample.client_monotonic_ms += 1'000;
+    sample.frames_expected += report.expected;
+    sample.frames_lost += report.lost;
+    sample.frames_received = sample.frames_expected - sample.frames_lost;
+    const auto result = stream_stats::ingest_client_media_counters(sample);
+    ASSERT_TRUE(result.observation_published);
+    EXPECT_EQ(result.frames_expected, report.expected);
+    EXPECT_EQ(result.frames_lost, report.lost);
+  }
+
+  // The newest report lost nothing. The window lost 18 of 963 frames, and the verdict it reached at
+  // the seventh report, 18 of 843, holds.
+  const auto stats = stream_stats::get_current();
+  EXPECT_DOUBLE_EQ(stats.packet_loss, 0.0);
+  ASSERT_TRUE(stats.network_verdict.loss_available);
+  EXPECT_EQ(stats.network_verdict.media_samples, 8);
+  EXPECT_EQ(stats.network_verdict.frames_lost, 18u);
+  EXPECT_EQ(stats.network_verdict.frames_expected, 963u);
+  EXPECT_NEAR(stats.network_verdict.loss_pct, 18.0 * 100.0 / 963.0, 1e-9);
+  EXPECT_TRUE(stats.network_verdict.loss_elevated);
+  const auto json = nlohmann::json::parse(stats.to_json());
+  EXPECT_EQ(json.at("network_verdict").at("frames_lost"), 18);
+  EXPECT_EQ(json.at("network_verdict").at("loss_state"), "elevated");
+  EXPECT_EQ(json.at("network_verdict").at("loss_basis"), "video_frames_lost_after_fec");
+}
+
+TEST(StreamStatsHotFieldTests, AVerdictWhoseReportsStoppedIsServedAsStale) {
+  // Doctor stops judging loss five seconds after the client's newest media report. The stream stats
+  // kept serving the window's old figure, and "elevated" beside it, until the window emptied, so the
+  // console and the session status went on quoting a loss Doctor said it was not judging.
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-stale", 63, "app-session-stale");
+  stream_stats::update_stream_active(true);
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::stop_session_timing("owner-stale", 63);
+    stream_stats::update_stream_active(false);
+  });
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_control_channel_stats(6.0, 0.0, 777);
+  }
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-stale",
+    .app_session_id = "app-session-stale",
+    .session_generation = 63,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 0,
+    .frames_received = 0,
+    .frames_lost = 0
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+  for (const auto &report : k_recorded_hevc_reports) {
+    sample.client_monotonic_ms += 1'000;
+    sample.frames_expected += report.expected;
+    sample.frames_lost += report.lost;
+    sample.frames_received = sample.frames_expected - sample.frames_lost;
+    ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).observation_published);
+  }
+  const auto live = stream_stats::get_current();
+  ASSERT_TRUE(stream_stats::judged_network(live).loss_pressure);
+  EXPECT_EQ(nlohmann::json::parse(live.to_json()).at("network_verdict").at("loss_state"), "elevated");
+
+  // The client's reports stop reaching the host while the control channel's pings go on.
+  stream_stats::age_latest_network_observation_for_tests(std::chrono::seconds(6));
+  stream_stats::update_control_channel_stats(6.0, 0.0, 777);
+  const auto stale = stream_stats::get_current();
+  const auto network = stream_stats::judged_network(stale);
+  EXPECT_FALSE(network.loss_judged);
+  EXPECT_TRUE(network.rtt_judged);
+  const auto served = stream_stats::served_network_verdict(stale);
+  EXPECT_FALSE(served.loss_available);
+  EXPECT_TRUE(served.loss_stale);
+  EXPECT_FALSE(served.loss_elevated);
+  EXPECT_FALSE(served.risk);
+  EXPECT_EQ(served.risk, network.risk);
+
+  const auto json = nlohmann::json::parse(stale.to_json()).at("network_verdict");
+  EXPECT_EQ(json.at("loss_state"), "stale");
+  EXPECT_TRUE(json.at("loss_pct").is_null());
+  EXPECT_EQ(json.at("rtt_state"), "clean");
+  EXPECT_FALSE(json.at("risk").get<bool>());
+
+  auto doctor_input = stale;
+  doctor_input.capture_transport = platf::frame_transport_e::dmabuf;
+  doctor_input.capture_residency = platf::frame_residency_e::gpu;
+  doctor_input.encode_target_residency = platf::frame_residency_e::gpu;
+  const auto doctor = stream_stats::build_doctor_json(doctor_input, nlohmann::json::object());
+  const auto &evidence = doctor.at("evidence");
+  const auto loss_row = std::find_if(evidence.begin(), evidence.end(), [](const nlohmann::json &row) {
+    return row.value("id", std::string {}) == "packet_loss";
+  });
+  ASSERT_NE(loss_row, evidence.end());
+  EXPECT_EQ(loss_row->at("status"), "unknown");
+  EXPECT_TRUE(loss_row->at("value").is_null());
+  EXPECT_NE(loss_row->at("detail").get<std::string>().find("The client's media reports stopped reaching the host"), std::string::npos)
+    << loss_row->dump();
+  EXPECT_EQ(doctor.at("advanced_evidence").at("network_verdict").at("loss_state"), "stale");
+
+  // What the window last judged is still there for a session that ends now to be graded by.
+  EXPECT_TRUE(stale.network_verdict.loss_elevated);
+  EXPECT_TRUE(stale.network_verdict.risk);
+}
+
+namespace {
+  /// Each headline Doctor gave, and how many times it changed.
+  struct headline_run_t {
+    std::vector<std::string> headlines;
+
+    int changes() const {
+      int count = 0;
+      for (std::size_t i = 1; i < headlines.size(); ++i) {
+        count += headlines[i] != headlines[i - 1] ? 1 : 0;
+      }
+      return count;
+    }
+
+    std::string text() const {
+      std::string joined;
+      for (const auto &headline : headlines) {
+        joined += (joined.empty() ? "" : " ") + headline;
+      }
+      return joined;
+    }
+  };
+
+  /// What Doctor says of the live stream now, with the capture path a real stream would have published.
+  std::string live_headline() {
+    auto live = stream_stats::get_current();
+    live.capture_transport = platf::frame_transport_e::dmabuf;
+    live.capture_residency = platf::frame_residency_e::gpu;
+    live.encode_target_residency = platf::frame_residency_e::gpu;
+    return stream_stats::build_doctor_json(live, nlohmann::json::object()).at("primary_issue").get<std::string>();
+  }
+}  // namespace
+
+TEST(StreamStatsDoctorTests, AMoonlightClientsLossRowSaysItSendsNoReports) {
+  // A Moonlight or Artemis client never sends a media report, and its loss row read "Fewer than 5
+  // client media reports arrived in the last 20 seconds" for the whole stream, as if more were coming.
+  stream_stats::update_stream_active(false);
+  constexpr std::uint64_t generation = 434;
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::remove_client("203.0.113.88", generation);
+    stream_stats::update_stream_active(false);
+  });
+  stream_stats::add_client("203.0.113.88", "Living Room TV", generation, "moonlight");
+  stream_stats::update_video_stats(60.0, 20000, 2.0, "hevc", 1920, 1080);
+  for (int ping = 0; ping < 6; ++ping) {
+    stream_stats::update_control_channel_stats(6.0, 0.0, 777);
+  }
+  auto live = stream_stats::get_current();
+  live.capture_transport = platf::frame_transport_e::dmabuf;
+  live.capture_residency = platf::frame_residency_e::gpu;
+  live.encode_target_residency = platf::frame_residency_e::gpu;
+  const auto doctor = stream_stats::build_doctor_json(live, nlohmann::json::object());
+  const auto &evidence = doctor.at("evidence");
+  const auto loss_row = std::find_if(evidence.begin(), evidence.end(), [](const nlohmann::json &row) {
+    return row.value("id", std::string {}) == "packet_loss";
+  });
+  ASSERT_NE(loss_row, evidence.end());
+  EXPECT_EQ(loss_row->at("status"), "unknown");
+  EXPECT_EQ(loss_row->at("detail"), "Moonlight and Artemis send the host no media reports, so this client's video frame loss is not judged.");
+}
+
+TEST(StreamStatsHotFieldTests, LiveTuningHearsEachMediaReportsOwnLoss) {
+  // Live Tuning keeps 1.4.13's loss input in this release: each client media report brings it that
+  // report's own loss, whatever Doctor's verdict says, and every control ping brings it 0%
+  // (DoctorResetContract.ControlPingsBringLiveTuningZeroLoss). The verdict judges the same reports over
+  // its window for Doctor alone. The HEVC run's second report, 9 of 122 frames, reaches Live Tuning
+  // while the window has too few reports for a verdict.
+  config::video.adaptive_bitrate.enabled = true;
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_runtime_update_supported(true);
+  adaptive_bitrate::set_base_bitrate(268988);
+  stream_stats::update_stream_active(false);
+  stream_stats::start_session_timing("owner-live-tuning-feed", 72, "app-session-live-tuning-feed");
+  stream_stats::update_stream_active(true);
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::stop_session_timing("owner-live-tuning-feed", 72);
+    stream_stats::update_stream_active(false);
+    adaptive_bitrate::reset();
+    adaptive_bitrate::set_enabled(false);
+    config::video.adaptive_bitrate.enabled = false;
+  });
+  for (int i = 0; i < 6; ++i) {
+    stream_stats::update_control_channel_stats(6.0, 7.75, 777);
+  }
+
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-live-tuning-feed",
+    .app_session_id = "app-session-live-tuning-feed",
+    .session_generation = 72,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 0,
+    .frames_received = 0,
+    .frames_lost = 0
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+  std::optional<double> expected;
+  int report = 0;
+  for (const auto &recorded : k_recorded_hevc_reports) {
+    ++report;
+    sample.client_monotonic_ms += 1'000;
+    sample.frames_expected += recorded.expected;
+    sample.frames_lost += recorded.lost;
+    sample.frames_received = sample.frames_expected - sample.frames_lost;
+    ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).observation_published);
+    const double loss = static_cast<double>(recorded.lost) * 100.0 / static_cast<double>(recorded.expected);
+    // The controller's first reading starts its average; each one after moves it by ewma_alpha, 0.3.
+    expected = expected ? 0.3 * loss + 0.7 * *expected : loss;
+    EXPECT_NEAR(adaptive_bitrate::get_state().ewma_packet_loss, *expected, 1e-9) << "report " << report;
+    if (report == 2) {
+      EXPECT_GT(*expected, 2.0);
+      EXPECT_FALSE(stream_stats::current_network_verdict().loss_elevated) << "report " << report;
+    }
+  }
+}
+
+TEST(StreamStatsDoctorTests, RecordedHevcRunKeepsOneHeadline) {
+  // The HEVC run's reports, a second at a time, with ten control pings between reports as Nova and
+  // ENet send them, the control channel's own loss at the 7.75% the run read. Graded a report at a
+  // time, Doctor went from "Control-channel retries" to "Sustained network pressure" and back twice
+  // every eight seconds. Graded over the window it names the pressure once the window holds enough of
+  // it and keeps it.
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::update_controller_input_state(false, 0, "", "", "unknown", "", false, "");
+  stream_stats::update_steam_input_state("unknown", 0, 0, 0, "");
+  stream_stats::start_session_timing("owner-hevc-run", 71, "app-session-hevc-run");
+  stream_stats::update_stream_active(true, "RetroidPocket6", "203.0.113.80");
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::stop_session_timing("owner-hevc-run", 71);
+    stream_stats::update_stream_active(false);
+  });
+  stream_stats::update_video_stats(120.0, 268988, 2.0, "hevc", 3840, 2160);
+  stream_stats::update_session_targets(
+    120.0, 120.0, 120.0, "client_requested", "deterministic_preset_v1",
+    "deterministic", "not_applicable", "Capability-validated launch profile.",
+    "", 1, 268988, 268988
+  );
+
+  stream_stats::client_media_counters_t sample {
+    .owner_uuid = "owner-hevc-run",
+    .app_session_id = "app-session-hevc-run",
+    .session_generation = 71,
+    .client_monotonic_ms = 1'000,
+    .frames_expected = 0,
+    .frames_received = 0,
+    .frames_lost = 0
+  };
+  ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).accepted);
+  headline_run_t run;
+  for (int round = 0; round < 3; ++round) {
+    for (const auto &report : k_recorded_hevc_reports) {
+      sample.client_monotonic_ms += 1'000;
+      sample.frames_expected += report.expected;
+      sample.frames_lost += report.lost;
+      sample.frames_received = sample.frames_expected - sample.frames_lost;
+      ASSERT_TRUE(stream_stats::ingest_client_media_counters(sample).observation_published);
+      for (const auto rtt_ms : k_recorded_hevc_rtt_ms) {
+        stream_stats::update_control_channel_stats(rtt_ms, 7.75, 777);
+      }
+      run.headlines.push_back(live_headline());
+    }
+  }
+
+  RecordProperty("headlines", run.text());
+  EXPECT_LE(run.changes(), 1) << run.text();
+  EXPECT_EQ(run.headlines.back(), "network_jitter") << run.text();
+}
+
+TEST(StreamStatsDoctorTests, RecordedControlChannelLossKeepsOneHeadline) {
+  // The HEVC run's control-channel estimate, ten pings a second, alternating between the 1.08 and 2.81
+  // its polls read, on a stream whose client sends no media reports. Taken a reading at a time the
+  // headline went between "none" and the control channel finding with every poll.
+  // A controller an earlier test left holding a cut target would put a quality finding above it.
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_enabled(false);
+  stream_stats::update_stream_active(false);
+  stream_stats::update_controller_input_state(false, 0, "", "", "unknown", "", false, "");
+  stream_stats::update_steam_input_state("unknown", 0, 0, 0, "");
+  stream_stats::update_stream_active(true, "RetroidPocket6", "203.0.113.82");
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::update_stream_active(false);
+  });
+  stream_stats::update_video_stats(60.0, 20000, 2.0, "hevc", 1920, 1080);
+  stream_stats::update_session_targets(
+    60.0, 60.0, 60.0, "client_requested", "deterministic_preset_v1",
+    "deterministic", "not_applicable", "Capability-validated launch profile.",
+    "", 1, 20000, 20000
+  );
+
+  headline_run_t run;
+  for (int second = 0; second < 5; ++second) {
+    for (int ping = 0; ping < 10; ++ping) {
+      stream_stats::update_control_channel_stats(6.0, 2.81, 777);
+    }
+    run.headlines.push_back(live_headline());
+  }
+  for (int second = 0; second < 25; ++second) {
+    for (int ping = 0; ping < 10; ++ping) {
+      stream_stats::update_control_channel_stats(6.0, second % 2 == 0 ? 1.08 : 2.81, 777);
+    }
+    run.headlines.push_back(live_headline());
+  }
+
+  RecordProperty("headlines", run.text());
+  EXPECT_EQ(run.changes(), 0) << run.text();
+  EXPECT_EQ(run.headlines.back(), "control_channel_observation") << run.text();
+}
+
+TEST(StreamStatsDoctorTests, RecordedPyroWaveRttSpikesKeepOneHeadline) {
+  // The PyroWave run's RTT, ten control pings a second, on a 1080p60 PyroWave stream well below its
+  // advice. Graded a reading at a time, its Wi-Fi spikes turned "set more bitrate on a clean network"
+  // into "a network warning needs more evidence" and back. Their median over the window stays a LAN's.
+  PyroWaveHostGuard host;
+  stream_stats::update_stream_active(false);
+  config::video.adaptive_bitrate.enabled = false;
+  adaptive_bitrate::set_runtime_update_supported(true, {}, 20000);
+  const auto cleanup = util::fail_guard([] {
+    adaptive_bitrate::set_enabled(false);
+    stream_stats::update_stream_active(false);
+  });
+  stream_stats::update_controller_input_state(false, 0, "", "", "unknown", "", false, "");
+  stream_stats::update_steam_input_state("unknown", 0, 0, 0, "");
+  stream_stats::update_stream_active(true, "RetroidPocket6", "203.0.113.81");
+  stream_stats::update_video_stats(60.0, 20000, 1.0, "pyrowave", 1920, 1080);
+  stream_stats::update_session_targets(
+    60.0, 60.0, 60.0, "client_requested", "deterministic_preset_v1",
+    "deterministic", "not_applicable", "Capability-validated launch profile.",
+    "", 1, 0, 20000
+  );
+
+  headline_run_t run;
+  for (int round = 0; round < 3; ++round) {
+    for (const auto rtt_ms : k_recorded_pyrowave_rtt_ms) {
+      for (int ping = 0; ping < 10; ++ping) {
+        stream_stats::update_control_channel_stats(rtt_ms, 0.0, 777);
+      }
+      run.headlines.push_back(live_headline());
+    }
+  }
+
+  RecordProperty("headlines", run.text());
+  EXPECT_EQ(run.changes(), 0) << run.text();
+  EXPECT_EQ(run.headlines.back(), "pyrowave_starved") << run.text();
+}
+
+namespace {
+  /// Doctor's headline for the live stream with Live Tuning owning it and holding it at target_kbps.
+  std::string live_headline_under_live_tuning(int target_kbps) {
+    auto live = stream_stats::get_current();
+    live.capture_transport = platf::frame_transport_e::dmabuf;
+    live.capture_residency = platf::frame_residency_e::gpu;
+    live.encode_target_residency = platf::frame_residency_e::gpu;
+    live.adaptive_bitrate_enabled = true;
+    live.adaptive_runtime_update_supported = true;
+    live.adaptive_target_bitrate_kbps = target_kbps;
+    return stream_stats::build_doctor_json(live, nlohmann::json::object()).at("primary_issue").get<std::string>();
+  }
+
+  /// Put Live Tuning's target at kbps with the stream's set rate unchanged, where one of its cuts leaves
+  /// it. The controller moves its own target only from readings a second apart, so this goes through
+  /// the call Doctor's Undo uses, which puts back a target and a base together.
+  void hold_live_tuning_target(int kbps) {
+    auto state = adaptive_bitrate::get_doctor_state();
+    ASSERT_TRUE(state.enabled);
+    state.live_bitrate_kbps = kbps;
+    ASSERT_TRUE(adaptive_bitrate::restore_doctor_state_if_revision(state.revision, state).has_value());
+  }
+
+  // Live Tuning's targets through the PyroWave run, a second at a time beside its RTT: 269 Mbps, cut
+  // to 179 for the Wi-Fi spikes, then back through 188 and 194.
+  constexpr std::array<int, 10> k_recorded_pyrowave_live_targets_kbps {
+    268988, 268988, 179000, 179000, 179000, 188000, 188000, 194000, 194000, 194000
+  };
+}  // namespace
+
+TEST(StreamStatsDoctorTests, PyroWaveAdviceHoldsWhileLiveTuningMovesTheBitrate) {
+  // The PyroWave run had Live Tuning on, and Doctor judged PyroWave's bitrate advice on its moving
+  // target. A 1080p120 stream set at 170 Mbps sits between the starved line, 160 Mbps at the encoder,
+  // and the 178 Mbps Doctor would raise it to, so its quality restore does not cover it. Cut in the
+  // run's proportions, from 269 to 179 and back through 188 and 194, the headline went from nothing to
+  // "set more bitrate" and back with every cut, while Live Tuning was about to bring the bitrate back
+  // on its own. Doctor judges the rate the stream is set to.
+  PyroWaveHostGuard host;
+  constexpr int set_kbps = 170000;
+  stream_stats::update_stream_active(false);
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::update_stream_active(false);
+  });
+  stream_stats::update_controller_input_state(false, 0, "", "", "unknown", "", false, "");
+  stream_stats::update_steam_input_state("unknown", 0, 0, 0, "");
+  stream_stats::update_stream_active(true, "RetroidPocket6", "203.0.113.84");
+  stream_stats::update_video_stats(120.0, set_kbps, 1.0, "pyrowave", 1920, 1080);
+  stream_stats::update_session_targets(
+    120.0, 120.0, 120.0, "client_requested", "deterministic_preset_v1",
+    "deterministic", "not_applicable", "Capability-validated launch profile.",
+    "", 1, 0, set_kbps
+  );
+
+  headline_run_t run;
+  int live_target_flips = 0;
+  bool live_target_was_starved = false;
+  for (int round = 0; round < 3; ++round) {
+    for (std::size_t second = 0; second < k_recorded_pyrowave_rtt_ms.size(); ++second) {
+      for (int ping = 0; ping < 10; ++ping) {
+        stream_stats::update_control_channel_stats(k_recorded_pyrowave_rtt_ms[second], 0.0, 777);
+      }
+      const int target = static_cast<int>(
+        static_cast<std::int64_t>(set_kbps) * k_recorded_pyrowave_live_targets_kbps[second] / 268988
+      );
+      run.headlines.push_back(live_headline_under_live_tuning(target));
+      // What judging the live target said.
+      auto live = stream_stats::get_current();
+      live.adaptive_runtime_update_supported = true;
+      live.adaptive_target_bitrate_kbps = target;
+      const bool starved = stream_stats::evaluate_pyrowave_bitrate(live).starved;
+      live_target_flips += starved != live_target_was_starved ? 1 : 0;
+      live_target_was_starved = starved;
+    }
+  }
+
+  RecordProperty("headlines", run.text());
+  EXPECT_GE(live_target_flips, 5);
+  EXPECT_EQ(run.changes(), 0) << run.text();
+  EXPECT_EQ(run.headlines.back(), "none") << run.text();
+
+  // A stream set below the line stays starved whichever way Live Tuning moves it.
+  stream_stats::update_video_stats(120.0, 120000, 1.0, "pyrowave", 1920, 1080);
+  stream_stats::update_session_targets(
+    120.0, 120.0, 120.0, "client_requested", "deterministic_preset_v1",
+    "deterministic", "not_applicable", "Capability-validated launch profile.",
+    "", 1, 0, 120000
+  );
+  for (const int target : {120000, 80000, 84000, 120000}) {
+    EXPECT_EQ(live_headline_under_live_tuning(target), "pyrowave_starved") << target;
+  }
+}
+
+TEST(StreamStatsDoctorTests, SessionStatusStarvedHoldsWhileLiveTuningMovesTheBitrate) {
+  // The session status's pyrowave_bitrate.starved, which the console's PyroWave readout words, judged
+  // Live Tuning's moving target while Doctor judged the rate the stream is set to. Through the PyroWave
+  // run's cuts a 1080p120 stream set at 170 Mbps read starved and not with every cut, beside a Doctor
+  // headline that held. It judges the set rate too.
+  PyroWaveHostGuard host;
+  stream_stats::update_stream_active(false);
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::update_stream_active(false);
+  });
+  stream_stats::update_controller_input_state(false, 0, "", "", "unknown", "", false, "");
+  stream_stats::update_steam_input_state("unknown", 0, 0, 0, "");
+  stream_stats::update_stream_active(true, "RetroidPocket6", "203.0.113.87");
+  const auto status_under_live_tuning = [](int target_kbps) {
+    auto live = stream_stats::get_current();
+    live.adaptive_bitrate_enabled = true;
+    live.adaptive_runtime_update_supported = true;
+    live.adaptive_target_bitrate_kbps = target_kbps;
+    return stream_stats::pyrowave_bitrate_json(live);
+  };
+  for (const int set_kbps : {170000, 120000}) {
+    stream_stats::update_video_stats(120.0, set_kbps, 1.0, "pyrowave", 1920, 1080);
+    stream_stats::update_session_targets(
+      120.0, 120.0, 120.0, "client_requested", "deterministic_preset_v1",
+      "deterministic", "not_applicable", "Capability-validated launch profile.",
+      "", 1, 0, set_kbps
+    );
+    std::string starved_trace;
+    int flips = 0;
+    std::optional<bool> was;
+    for (const auto live_target : k_recorded_pyrowave_live_targets_kbps) {
+      const int target = static_cast<int>(static_cast<std::int64_t>(set_kbps) * live_target / 268988);
+      const auto status = status_under_live_tuning(target);
+      const bool starved = status.at("starved").get<bool>();
+      starved_trace += std::to_string(target / 1000) + (starved ? ":starved " : ":fed ");
+      flips += was && *was != starved ? 1 : 0;
+      was = starved;
+      // The rate the stream runs at now is still the live one.
+      EXPECT_EQ(status.at("encoder_kbps"), target);
+    }
+    EXPECT_EQ(flips, 0) << set_kbps << ": " << starved_trace;
+    EXPECT_EQ(*was, set_kbps == 120000) << set_kbps << ": " << starved_trace;
+  }
+}
+
+TEST(StreamStatsDoctorTests, PyroWaveNeedsMoreHoldsWhileLiveTuningMovesTheBitrate) {
+  // A 4K120 4:4:4 PyroWave stream on a Retroid Pocket 6 with Live Tuning on, cut for the PyroWave run's
+  // Wi-Fi RTT spikes in its proportions and brought back. Its model asks a request of 328 Mbps and
+  // Doctor raises no further than 300. Judged on the moving target, whether the stream wants more than
+  // Doctor allows came and went with every cut: a cut read as a reduction Doctor's restore would undo,
+  // and frames held to the cut's smaller byte budget filled it more often. Doctor judges the rate the
+  // stream is set to and the frames sent at it.
+  PyroWaveHostGuard host;
+  constexpr std::uint64_t generation = 433;
+  const auto cleanup = util::fail_guard([] {
+    stream_stats::remove_client("203.0.113.86", generation);
+    stream_stats::update_stream_active(false);
+    adaptive_bitrate::reset();
+    adaptive_bitrate::set_enabled(false);
+    config::video.adaptive_bitrate.enabled = false;
+  });
+  struct run_t {
+    int request_kbps;
+    /// Of every 40 frames sent at the rate the stream is set to, how many fill the byte budget.
+    std::uint32_t ceiling_of_40;
+    const char *headline;
+  };
+  // 320 Mbps set by hand, 85% of its frames at the budget: it wants more than Doctor allows. 290 Mbps,
+  // 75% at the budget: no finding, though all of a cut's frames fill its budget.
+  for (const auto run : {run_t {320000, 34, "pyrowave_needs_more_than_allowed"}, run_t {290000, 30, "none"}}) {
+    const int set_kbps = static_cast<int>(stream_bitrate::encoder_kbps_for_wire(run.request_kbps, 10, 512));
+    stream_stats::update_stream_active(false);
+    config::video.adaptive_bitrate.enabled = true;
+    config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+    config::video.adaptive_bitrate.max_bitrate_kbps = 100000;
+    adaptive_bitrate::load_config();
+    adaptive_bitrate::reset();
+    adaptive_bitrate::set_runtime_update_supported(true, {}, set_kbps);
+    adaptive_bitrate::set_base_bitrate(set_kbps);
+    stream_stats::update_controller_input_state(false, 0, "", "", "unknown", "", false, "");
+    stream_stats::update_steam_input_state("unknown", 0, 0, 0, "");
+    stream_stats::add_client("203.0.113.86", "RetroidPocket6", generation);
+    stream_bitrate::request_t request;
+    request.client_kbps = run.request_kbps;
+    request.audio_kbps = 512;
+    request.fec_percentage = 10;
+    ASSERT_TRUE(stream_stats::record_stream_request(generation, true, request));
+    stream_stats::update_video_stats(120.0, set_kbps, 1.0, "pyrowave", 3840, 2160);
+    stream_stats::update_session_targets(
+      120.0, 120.0, 120.0, "client_requested", "deterministic_preset_v1",
+      "deterministic", "not_applicable", "Capability-validated launch profile.",
+      "", 1, 0, set_kbps
+    );
+
+    headline_run_t headlines;
+    for (int round = 0; round < 3; ++round) {
+      for (std::size_t second = 0; second < k_recorded_pyrowave_rtt_ms.size(); ++second) {
+        for (int ping = 0; ping < 10; ++ping) {
+          stream_stats::update_control_channel_stats(k_recorded_pyrowave_rtt_ms[second], 0.0, 777);
+        }
+        const int target = static_cast<int>(
+          static_cast<std::int64_t>(set_kbps) * k_recorded_pyrowave_live_targets_kbps[second] / 268988
+        );
+        hold_live_tuning_target(target);
+        // A second of frames. Under a cut every one of them fills the smaller budget.
+        for (int batch = 0; batch < 3; ++batch) {
+          ASSERT_TRUE(stream_stats::record_pyrowave_frames(generation, 40, target < set_kbps ? 40 : run.ceiling_of_40));
+        }
+        headlines.headlines.push_back(live_headline());
+      }
+    }
+    RecordProperty(std::string {"headlines_"} + std::to_string(run.request_kbps), headlines.text());
+    EXPECT_EQ(headlines.changes(), 0) << run.request_kbps << ": " << headlines.text();
+    EXPECT_EQ(headlines.headlines.back(), run.headline) << run.request_kbps << ": " << headlines.text();
+    // The share is what the frames at the set rate said.
+    const auto share = stream_stats::pyrowave_ceiling_frame_share(stream_stats::get_current());
+    ASSERT_TRUE(share.has_value());
+    EXPECT_DOUBLE_EQ(*share, run.ceiling_of_40 / 40.0) << run.request_kbps;
+    stream_stats::remove_client("203.0.113.86", generation);
+  }
 }
 
 TEST(StreamStatsHotFieldTests, PacketLossPercentClampsDegenerateInputs) {

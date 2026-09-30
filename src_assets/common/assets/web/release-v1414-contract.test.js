@@ -207,5 +207,24 @@ describe('v1.4.14 release contract', () => {
     expect(notes).toContain('another tunnel with no MAC of its own')
     expect(notes).toContain("the TV figure hasn't been checked on a big screen yet, and Doctor's 300 Mbps ceiling may move")
     expect(notes).toContain("9 ms a frame against VA-API's 16 on one tester's RX 9070 XT at 4K60")
+    // Doctor's verdict holds over the network judge's window, and its band.
+    expect(notes).toContain(
+      'It now judges video frame loss and round trip time over the last 20 seconds, calls loss network ' +
+        'pressure at 2% and clears it below 1%.',
+    )
+    expect(notes).toContain('the share of video frames that never arrived whole after FEC.')
+    // With Live Tuning on, sustained loss gets Doctor's one step, which turns Live Tuning off for the
+    // stream, as a live bitrate set by hand does, until Undo, a rollback (restore_bitrate_run_locked)
+    // or the end of the stream turns it back on.
+    expect(notes).toContain(
+      'With Live Tuning on and loss at that level, Doctor now offers to lower your bitrate one step, with Undo. ' +
+        'Taking it turns Live Tuning off for that stream until you undo it, it rolls back, or the stream ends.',
+    )
+    expect(notes).not.toContain('for the rest of that stream')
+    // Live Tuning keeps 1.4.13's loss handling, and nothing here says otherwise.
+    expect(notes).toContain("Live Tuning's own loss handling is unchanged in this release.")
+    for (const claim of ['Live Tuning cuts for loss', 'tests the rates below', 'climbs back', 'held level', 'pause in those reports']) {
+      expect(notes).not.toContain(claim)
+    }
   })
 })

@@ -50,15 +50,26 @@ describe('live Auto Quality strip', () => {
         // client's request; live tuning never climbs past that request.
         adaptive_max_bitrate_kbps: 100000,
         adaptive_rtt_ewma_ms: 7.6,
+        // A percentage, as the host reports it: the loss note must not scale it again.
         adaptive_packet_loss_ewma: 0.0123,
+        network_loss_pct: 1.23,
       },
     }, t)
 
     expect(rows.map((row) => row.label)).toEqual(['Host state', 'Live bitrate', 'Network', 'Target'])
     expect(rows[0]).toMatchObject({ value: 'Recovering bitrate', note: 'Bitrate is recovering after packet loss.' })
     expect(rows[1]).toMatchObject({ value: '18.5 Mbps', note: 'Adaptive range 10 Mbps to 40 Mbps' })
-    expect(rows[2]).toMatchObject({ value: '8 ms round trip', note: '1.2% packet loss (smoothed)' })
+    expect(rows[2]).toMatchObject({ value: '8 ms round trip', note: '1.2% of video frames lost over 20 s' })
     expect(rows[3]).toMatchObject({ value: '30 Mbps', note: 'Applied live' })
+  })
+
+  it('shows no loss until the host has judged some, rather than a zero it never measured', () => {
+    const rows = buildLiveAutoQualityRows({
+      autoQuality: { state: 'active', live_bitrate_kbps: 20000 },
+      tuning: { adaptive_bitrate_active: true, adaptive_rtt_ewma_ms: 5, adaptive_packet_loss_ewma: 0.078, network_loss_pct: null },
+    }, t)
+
+    expect(rows[2]).toMatchObject({ value: '5 ms round trip', note: '' })
   })
 
   it('degrades to "Not reported" instead of NaN when the host is silent', () => {
