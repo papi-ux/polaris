@@ -15,6 +15,32 @@
 
 #include <src/confighttp_validation.h>
 
+TEST(AppLaunchAsValidationTests, AcceptsOnlyExactSharedModesAndLegacyBasis) {
+  std::ifstream input(std::filesystem::path {POLARIS_SOURCE_DIR} / "tests/fixtures/app-launch-as-v1.json");
+  ASSERT_TRUE(input.good());
+  const auto fixture = nlohmann::json::parse(input);
+  for (const auto &mode : fixture.at("values")) {
+    std::string error;
+    EXPECT_TRUE(confighttp::validation::validate_app_payload({{"name", "Fixture"}, {"launch-as", mode.at("id")}}, error)) << error;
+  }
+  for (const auto &bad : fixture.at("rejected")) {
+    std::string error;
+    EXPECT_FALSE(confighttp::validation::validate_app_payload({{"name", "Fixture"}, {"launch-as", bad}}, error)) << bad.dump();
+    EXPECT_NE(error.find("launch-as"), std::string::npos) << bad.dump() << ": " << error;
+  }
+  for (const auto &basis : fixture.at("basis_values")) {
+    std::string error;
+    EXPECT_TRUE(confighttp::validation::validate_app_payload({{"name", "Fixture"}, {"launch-as-basis", basis}}, error)) << error;
+  }
+  for (const auto &bad : fixture.at("rejected_basis")) {
+    std::string error;
+    EXPECT_FALSE(confighttp::validation::validate_app_payload({{"name", "Fixture"}, {"launch-as-basis", bad}}, error)) << bad.dump();
+    EXPECT_NE(error.find("launch-as-basis"), std::string::npos) << bad.dump() << ": " << error;
+  }
+  std::string error;
+  EXPECT_TRUE(confighttp::validation::validate_app_payload({{"name", "Legacy"}, {"desktop-mirror", true}, {"virtual-display", false}}, error)) << error;
+}
+
 TEST(ConfigValidationTests, RejectsConfigKeysThatCanBreakSerialization) {
   nlohmann::json payload = {
     {"safe_key", "ok"},
