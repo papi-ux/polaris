@@ -633,6 +633,7 @@ namespace nvhttp {
                                                          const std::string &launch_backend,
                                                          bool session_override,
                                                          std::uint64_t requester_generation);
+  bool library_desktop_offers_own_screen_for_tests(const std::vector<proc::ctx_t> &apps, bool backend_available);
   nlohmann::json build_launch_mode_contract_for_tests(std::string_view app_launch_as,
                                                       std::string_view app_name,
                                                       bool host_virtual_display_available,

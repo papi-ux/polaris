@@ -237,6 +237,22 @@ TEST(LaunchModeContractTests, FixedVirtualDisplayPinIsTheOnlyChoiceEvenOnAPrivat
 
 // The first two metadata assertions failed at 6c8c1ad1 against the old emitter.
 // Their calls now use the typed signature required by the approved contract.
+TEST(AppLaunchAsCatalogueTests, VirtualDisplayTileIsHiddenOnlyByANamedMirrorDesktopWithABackend) {
+  for (const std::string mode : {"host_default", "headless_stream", "windowed_stream", "gamescope_stream", "host_virtual_display", "desktop_takeover", "desktop_display", "turbo"}) {
+    SCOPED_TRACE(mode);
+    proc::ctx_t desktop;
+    desktop.name = "Desktop";
+    desktop.launch_as = mode;
+    // Legacy flags and the name alone must not decide the canonical catalogue policy.
+    desktop.desktop_mirror = true;
+    EXPECT_EQ(nvhttp::library_desktop_offers_own_screen_for_tests({desktop}, true), mode == "desktop_display");
+    EXPECT_FALSE(nvhttp::library_desktop_offers_own_screen_for_tests({desktop}, false));
+    desktop.name = "Couch desktop";
+    EXPECT_FALSE(nvhttp::library_desktop_offers_own_screen_for_tests({desktop}, true));
+  }
+  EXPECT_FALSE(nvhttp::library_desktop_offers_own_screen_for_tests({}, true));
+}
+
 TEST(AppLaunchAsCatalogueTests, HostDefaultCarriesTypedLaunchAsMetadata) {
   const auto contract = nvhttp::build_launch_mode_contract_for_tests("host_default", "Game", false, false);
   EXPECT_EQ(contract.value("launch_as", "missing"), "host_default");

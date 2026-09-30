@@ -1914,6 +1914,14 @@ namespace {
     ASSERT_EQ(result.status, 200); ASSERT_EQ(result.body.at("games").size(), 2U);
     EXPECT_EQ(result.body["games"][0]["name"], "Steam Big Picture");
     EXPECT_EQ(result.body["games"][1]["id"], "space.profile-a.870780");
+    // Spaces have their own display authority and are not apps.json entries with a Launch as pin.
+    for (const auto &game : result.body.at("games")) {
+      const auto &mode = game.at("launch_mode");
+      EXPECT_FALSE(mode.contains("launch_as"));
+      EXPECT_FALSE(mode.contains("launch_as_available"));
+      EXPECT_FALSE(mode.contains("launch_as_unavailable_reason"));
+      EXPECT_EQ(mode.at("allowed_modes"), nlohmann::json::array({"gamescope_stream"}));
+    }
     EXPECT_EQ(nvhttp::profile_library_request(client, "profile-b").status, 404);
     EXPECT_EQ(nvhttp::profile_artwork_target(client, "space.profile-a.870780"), "870780");
     EXPECT_FALSE(nvhttp::profile_artwork_target(client, "space.profile-b.3527290"));

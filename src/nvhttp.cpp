@@ -1110,6 +1110,12 @@ namespace nvhttp {
       return host_power;
     }
 
+    bool library_desktop_offers_own_screen(const std::vector<proc::ctx_t> &apps, bool backend_available) {
+      return backend_available && std::any_of(apps.begin(), apps.end(), [](const auto &app) {
+        return app.name == "Desktop" && app.launch_as == "desktop_display";
+      });
+    }
+
     nlohmann::json build_launch_mode_contract(std::string_view app_launch_as,
                                               std::string_view app_name,
                                               bool virtual_display_available,
@@ -2994,6 +3000,10 @@ namespace nvhttp {
     write_session_encoder_identity(encoder, stats, requested_backend, launch_backend, session_override,
                                    requester_generation);
     return encoder;
+  }
+
+  bool library_desktop_offers_own_screen_for_tests(const std::vector<proc::ctx_t> &apps, bool backend_available) {
+    return library_desktop_offers_own_screen(apps, backend_available);
   }
 
   nlohmann::json build_launch_mode_contract_for_tests(std::string_view app_launch_as,
@@ -9657,10 +9667,7 @@ namespace nvhttp {
       // it stays here when the host cannot add a screen, so nobody loses the tile and the choice at
       // once.
       const bool desktop_offers_its_own_screen =
-        settings_metadata::host_virtual_display_available() &&
-        std::any_of(apps.begin(), apps.end(), [](const auto &app) {
-          return app.name == "Desktop" && app.launch_as == "desktop_display";
-        });
+        library_desktop_offers_own_screen(apps, settings_metadata::host_virtual_display_available());
 
       int idx = 0;
       for (auto &app : apps) {
