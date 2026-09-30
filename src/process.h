@@ -134,6 +134,11 @@ namespace proc {
   /// nothing has to be upgraded each time apps.json is read.
   std::string canonical_steam_shutdown_undo();
 
+  struct launch_as_availability_t {
+    bool available = true;
+    std::string reason;
+  };
+
 #if defined(__linux__)
   struct launch_selection_request_t {
     std::string client_named_selection;
@@ -154,10 +159,6 @@ namespace proc {
   int refuse_app_launch_as_before_launch(const struct ctx_t &app, const launch_selection_request_t &request);
   int refuse_app_launch_as_unavailable(const struct ctx_t &app, std::string reason);
 
-  struct launch_as_availability_t {
-    bool available = true;
-    std::string reason;
-  };
   launch_as_availability_t launch_as_availability(const struct ctx_t &app);
 
   struct desktop_launch_safety_policy_t {

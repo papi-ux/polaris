@@ -127,9 +127,8 @@ TEST(LaunchModeContractTests, ADesktopMirrorEntryOffersOnlyWhatItCanActuallyRunI
   // something else. papi hit exactly that: he picked Private Stream for Desktop and got Mirror.
   // Note the host here is configured for Private Stream, which is what used to drive the answer.
   const auto contract = nvhttp::build_launch_mode_contract_for_tests(
-    false,
+    "desktop_display",
     "Desktop",
-    true,
     true,
     true
   );
@@ -157,7 +156,7 @@ TEST(LaunchModeContractTests, ADesktopMirrorEntryOffersOnlyWhatItCanActuallyRunI
 
   // Every other entry does take the host's configured display, which is the whole reason a player
   // sets one. The desktop is the exception, so say so rather than making clients guess the rule.
-  const auto game = nvhttp::build_launch_mode_contract_for_tests(false, "Game", true, true, false);
+  const auto game = nvhttp::build_launch_mode_contract_for_tests("host_default", "Game", true, true);
   EXPECT_TRUE(game.at("follows_host_default").get<bool>());
 }
 
@@ -167,7 +166,7 @@ TEST(LaunchModeContractTests, ADesktopMirrorEntryStillOffersAScreenOfItsOwnWhenT
 #endif
   // The point of the merge: one Desktop entry that can either mirror the monitor or be given a
   // screen. Host Virtual Display survives the filter precisely because it still shows a desktop.
-  const auto with_backend = nvhttp::build_launch_mode_contract_for_tests(false, "Desktop", true, false, true);
+  const auto with_backend = nvhttp::build_launch_mode_contract_for_tests("desktop_display", "Desktop", true, false);
   std::set<std::string> allowed;
   for (const auto &mode : with_backend.at("allowed_modes")) {
     allowed.insert(mode.get<std::string>());
@@ -176,7 +175,7 @@ TEST(LaunchModeContractTests, ADesktopMirrorEntryStillOffersAScreenOfItsOwnWhenT
 
   // And a host with no way to add a screen offers only the mirror, rather than a choice that would
   // fail at launch.
-  const auto without_backend = nvhttp::build_launch_mode_contract_for_tests(false, "Desktop", false, false, true);
+  const auto without_backend = nvhttp::build_launch_mode_contract_for_tests("desktop_display", "Desktop", false, false);
   std::set<std::string> without;
   for (const auto &mode : without_backend.at("allowed_modes")) {
     without.insert(mode.get<std::string>());
@@ -185,18 +184,18 @@ TEST(LaunchModeContractTests, ADesktopMirrorEntryStillOffersAScreenOfItsOwnWhenT
   EXPECT_TRUE(without.count("desktop_display"));
 }
 
-TEST(LaunchModeContractTests, HostHeadlessConfigurationWinsOverPerGameVirtualDisplayPreference) {
+TEST(LaunchModeContractTests, HostDefaultRemovesTheOldSoftVirtualDisplayPreference) {
 #ifdef __linux__
   ScopedPrivateRuntimePath runtime_path;
 #endif
   const auto contract = nvhttp::build_launch_mode_contract_for_tests(
-    true,
+    "host_default",
     "Indiana Jones and the Great Circle",
     true,
     true
   );
 
-  EXPECT_EQ(contract.at("preferred_mode"), "host_virtual_display");
+  EXPECT_EQ(contract.at("preferred_mode"), "headless_stream");
   EXPECT_EQ(contract.at("recommended_mode"), "headless_stream");
   bool allowed_host_virtual_display = false;
   for (const auto &mode : contract.at("allowed_modes")) {
@@ -211,22 +210,22 @@ TEST(LaunchModeContractTests, SteamBigPictureOnHeadlessHostExplainsPrivateDeskto
   ScopedPrivateRuntimePath runtime_path;
 #endif
   const auto contract = nvhttp::build_launch_mode_contract_for_tests(
-    true,
+    "host_default",
     "Steam Big Picture",
     true,
     true
   );
 
-  EXPECT_EQ(contract.at("preferred_mode"), "host_virtual_display");
+  EXPECT_EQ(contract.at("preferred_mode"), "headless_stream");
   EXPECT_EQ(contract.at("recommended_mode"), "headless_stream");
   const auto reason = contract.at("mode_reason").get<std::string>();
   EXPECT_NE(reason.find("Private Stream session"), std::string::npos);
   EXPECT_NE(reason.find("physical desktop"), std::string::npos);
 }
 
-TEST(LaunchModeContractTests, PerGameVirtualDisplayPreferenceIsRecommendedWhenHostIsNotHeadless) {
+TEST(LaunchModeContractTests, FixedVirtualDisplayPinIsTheOnlyChoiceEvenOnAPrivateHost) {
   const auto contract = nvhttp::build_launch_mode_contract_for_tests(
-    true,
+    "host_virtual_display",
     "Indiana Jones and the Great Circle",
     true,
     false
@@ -236,9 +235,10 @@ TEST(LaunchModeContractTests, PerGameVirtualDisplayPreferenceIsRecommendedWhenHo
   EXPECT_EQ(contract.at("recommended_mode"), "host_virtual_display");
 }
 
-// These assertions first run against the existing emitter, before its typed Launch as signature.
+// The first two metadata assertions failed at 6c8c1ad1 against the old emitter.
+// Their calls now use the typed signature required by the approved contract.
 TEST(AppLaunchAsCatalogueTests, HostDefaultCarriesTypedLaunchAsMetadata) {
-  const auto contract = nvhttp::build_launch_mode_contract_for_tests(false, "Game", false, false);
+  const auto contract = nvhttp::build_launch_mode_contract_for_tests("host_default", "Game", false, false);
   EXPECT_EQ(contract.value("launch_as", "missing"), "host_default");
   ASSERT_TRUE(contract.contains("launch_as_available"));
   EXPECT_TRUE(contract.at("launch_as_available").is_boolean());
@@ -247,13 +247,58 @@ TEST(AppLaunchAsCatalogueTests, HostDefaultCarriesTypedLaunchAsMetadata) {
 }
 
 TEST(AppLaunchAsCatalogueTests, MirrorDesktopCarriesMetadataWithoutBecomingAHardPin) {
-  const auto contract = nvhttp::build_launch_mode_contract_for_tests(false, "Desktop", true, false, true);
+  const auto contract = nvhttp::build_launch_mode_contract_for_tests("desktop_display", "Desktop", true, false);
   EXPECT_EQ(contract.value("launch_as", "missing"), "desktop_display");
   ASSERT_TRUE(contract.contains("launch_as_available"));
   EXPECT_EQ(contract.at("launch_as_available"), true);
   EXPECT_EQ(contract.value("launch_as_unavailable_reason", "missing"), "");
   EXPECT_FALSE(contract.at("follows_host_default").get<bool>());
 }
+
+
+#ifdef __linux__
+TEST(AppLaunchAsCatalogueTests, EachFixedPinOwnsTheAnswerIncludingUnavailableAndUnknownValues) {
+  for (const std::string value : {"headless_stream", "windowed_stream", "gamescope_stream", "host_virtual_display", "desktop_takeover", "turbo", "Host_Default", " host_default"}) {
+    for (const bool available : {false, true}) {
+      SCOPED_TRACE(value + (available ? " available" : " unavailable"));
+      const auto contract = nvhttp::build_launch_mode_contract_for_tests(value, "Game", false, true,
+        {available, available ? "" : "The required backend is missing"});
+      EXPECT_EQ(contract.at("launch_as"), value);
+      EXPECT_EQ(contract.at("launch_as_available"), available);
+      EXPECT_EQ(contract.at("launch_as_unavailable_reason"), available ? "" : "The required backend is missing");
+      EXPECT_EQ(contract.at("preferred_mode"), value);
+      EXPECT_EQ(contract.at("recommended_mode"), value);
+      EXPECT_EQ(contract.at("allowed_modes"), nlohmann::json::array({value}));
+      EXPECT_FALSE(contract.at("follows_host_default").get<bool>());
+      const auto reason = contract.at("mode_reason").get<std::string>();
+      EXPECT_NE(reason.find(available ? "so every client gets" : "which this host cannot run right now"), std::string::npos);
+      if (!available) EXPECT_NE(reason.find("The required backend is missing."), std::string::npos);
+    }
+  }
+}
+
+TEST(AppLaunchAsCatalogueTests, HostDefaultIsAlwaysAvailableWithoutChangingTheHostChoice) {
+  ScopedPrivateRuntimePath runtime_path;
+  const auto contract = nvhttp::build_launch_mode_contract_for_tests("host_default", "Game", true, true,
+    {false, "An unrelated pin is unavailable"});
+  EXPECT_EQ(contract.at("launch_as_available"), true);
+  EXPECT_EQ(contract.at("launch_as_unavailable_reason"), "");
+  EXPECT_EQ(contract.at("preferred_mode"), "headless_stream");
+  EXPECT_EQ(contract.at("recommended_mode"), "headless_stream");
+  EXPECT_TRUE(contract.at("follows_host_default").get<bool>());
+  EXPECT_NE(contract.at("allowed_modes"), nlohmann::json::array({"headless_stream"}));
+}
+
+TEST(AppLaunchAsCatalogueTests, UnavailableMirrorKeepsItsYieldingPolicyAndReportsAvailability) {
+  const auto contract = nvhttp::build_launch_mode_contract_for_tests("desktop_display", "Desktop", true, true,
+    {false, "Steam Game Mode cannot change this display"});
+  EXPECT_EQ(contract.at("launch_as_available"), false);
+  EXPECT_EQ(contract.at("launch_as_unavailable_reason"), "Steam Game Mode cannot change this display");
+  EXPECT_EQ(contract.at("recommended_mode"), "desktop_display");
+  EXPECT_NE(contract.at("allowed_modes"), nlohmann::json::array({"desktop_display"}));
+  EXPECT_FALSE(contract.at("follows_host_default").get<bool>());
+}
+#endif
 
 #ifdef __linux__
   #include <src/platform/linux/stream_display_policy.h>
@@ -442,7 +487,7 @@ TEST(SessionEncoderContract, ALaunchCarriesItsDevicesClientFamilyToTheStream) {
 TEST(LaunchModeContractTests, RecommendationAlwaysBelongsToAllowedModesWithoutPrivateRuntime) {
   ScopedPath path {"/polaris-test/no-runtime-binaries"};
   const auto contract = nvhttp::build_launch_mode_contract_for_tests(
-    false,
+    "host_default",
     "Control",
     false,
     false

@@ -633,11 +633,11 @@ namespace nvhttp {
                                                          const std::string &launch_backend,
                                                          bool session_override,
                                                          std::uint64_t requester_generation);
-  nlohmann::json build_launch_mode_contract_for_tests(bool app_prefers_virtual_display,
-                                                      const std::string &app_name,
+  nlohmann::json build_launch_mode_contract_for_tests(std::string_view app_launch_as,
+                                                      std::string_view app_name,
                                                       bool host_virtual_display_available,
                                                       bool host_prefers_headless,
-                                                      bool app_mirrors_desktop = false);
+                                                      const proc::launch_as_availability_t &launch_as = {});
 #if defined(__linux__)
   proc::launch_selection_request_t optimize_launch_selection_request_for_tests(const args_t &args, bool paired_always_virtual);
   std::string accepted_session_stream_mode_for_tests(const std::string &requested);

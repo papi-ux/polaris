@@ -1110,25 +1110,50 @@ namespace nvhttp {
       return host_power;
     }
 
-    nlohmann::json build_launch_mode_contract(bool app_prefers_virtual_display,
+    nlohmann::json build_launch_mode_contract(std::string_view app_launch_as,
                                               std::string_view app_name,
                                               bool virtual_display_available,
                                               bool prefers_headless,
-                                              bool app_mirrors_desktop) {
+                                              const proc::launch_as_availability_t &launch_as) {
       // preferred_mode reflects the per-game stored preference; recommended_mode reflects
       // the Polaris-supported launch mode clients should choose for this host right now.
       std::string preferred_mode;
       std::string recommended_mode;
       std::string mode_reason;
 
+      nlohmann::json launch_mode;
+      launch_mode["launch_as"] = app_launch_as;
+      launch_mode["launch_as_available"] = app_launch_as == "host_default" || launch_as.available;
+      launch_mode["launch_as_unavailable_reason"] =
+        launch_mode["launch_as_available"].get<bool>() ? "" : launch_as.reason;
+
       auto allowed_modes = nlohmann::json::array();
 #ifdef __linux__
-      preferred_mode = app_prefers_virtual_display ?
-        "host_virtual_display" : "headless_stream";
+      if (app_launch_as != "host_default" && app_launch_as != "desktop_display") {
+        // A pin, including an unavailable or unknown pin, is its own answer. An empty allowed
+        // list would tell older Nova that every mode is allowed and invite a silent fallback.
+        const auto label = stream_display_policy::label_for_selection(app_launch_as);
+        const auto display_label = label.empty() ? std::string {app_launch_as} : label;
+        launch_mode["preferred_mode"] = app_launch_as;
+        launch_mode["recommended_mode"] = app_launch_as;
+        launch_mode["allowed_modes"] = nlohmann::json::array({app_launch_as});
+        launch_mode["follows_host_default"] = false;
+        auto reason = "This entry is set on the host to launch as " + display_label;
+        if (launch_as.available) {
+          reason += ", so every client gets " + display_label + ".";
+        } else {
+          reason += ", which this host cannot run right now. " + launch_as.reason;
+          if (!reason.empty() && reason.back() != '.') reason += '.';
+        }
+        launch_mode["mode_reason"] = std::move(reason);
+        return launch_mode;
+      }
+      preferred_mode = "headless_stream";
       for (const auto &mode : stream_display_policy::allowed_launch_modes(virtual_display_available, false)) {
         allowed_modes.push_back(mode);
       }
 #elif defined(_WIN32)
+      const bool app_prefers_virtual_display = app_launch_as == "host_virtual_display";
       preferred_mode = app_prefers_virtual_display && virtual_display_available ?
         "host_virtual_display" : "desktop_display";
       allowed_modes.push_back("desktop_display");
@@ -1149,7 +1174,7 @@ namespace nvhttp {
       // choose something that cannot happen and then quietly does something else. The honest set is
       // the mirror, plus the two topologies that still show the real desktop when the host offers
       // them. Answered here so the client's picker and the resolver agree before anyone presses Play.
-      if (app_mirrors_desktop) {
+      if (app_launch_as == "desktop_display") {
         auto honest_modes = nlohmann::json::array();
         honest_modes.push_back(std::string {stream_display_policy::k_desktop_display});
         for (const auto &mode : allowed_modes) {
@@ -1168,7 +1193,6 @@ namespace nvhttp {
         mode_reason =
           "This entry streams the desktop itself, so it mirrors the host screen. Pick Host Virtual "
           "Display to be given a screen of your own instead, when this host can add one.";
-        nlohmann::json launch_mode;
         launch_mode["preferred_mode"] = preferred_mode;
         launch_mode["recommended_mode"] = recommended_mode;
         launch_mode["allowed_modes"] = std::move(allowed_modes);
@@ -1180,8 +1204,6 @@ namespace nvhttp {
         launch_mode["follows_host_default"] = false;
         return launch_mode;
       }
-#else
-      (void) app_mirrors_desktop;
 #endif
 
 #ifdef __linux__
@@ -1191,19 +1213,8 @@ namespace nvhttp {
           mode_reason =
             "Steam Big Picture is safest in a Private Stream session because this Polaris host is already configured for Private Stream; this avoids waking Steam/Gamepad UI on the physical desktop during launch or teardown.";
         } else {
-          mode_reason = app_prefers_virtual_display ?
-            "This app prefers Host Virtual Display, but this Polaris host is already configured for Private Stream, so Private Stream is recommended." :
-            "Private Stream is recommended because this Polaris host is already configured for private streaming.";
+          mode_reason = "Private Stream is recommended because this Polaris host is already configured for private streaming.";
         }
-      } else if (app_prefers_virtual_display && virtual_display_available) {
-        recommended_mode = "host_virtual_display";
-        mode_reason = steam_big_picture ?
-          "Steam Big Picture is configured to prefer a dedicated virtual display on this host." :
-          "This app is configured to prefer a dedicated virtual display on the host.";
-      } else if (app_prefers_virtual_display && !virtual_display_available) {
-        recommended_mode = "headless_stream";
-        mode_reason =
-          "This app prefers Host Virtual Display, but Polaris does not currently have a virtual display backend available, so Private Stream is recommended.";
       } else if (virtual_display_available) {
         recommended_mode = "headless_stream";
         mode_reason =
@@ -1229,7 +1240,6 @@ namespace nvhttp {
         mode_reason = "Polaris will mirror the current Windows desktop session.";
       }
 #else
-      (void) app_prefers_virtual_display;
       (void) virtual_display_available;
       (void) prefers_headless;
       (void) steam_big_picture;
@@ -1263,7 +1273,6 @@ namespace nvhttp {
       }
 #endif
 
-      nlohmann::json launch_mode;
       launch_mode["preferred_mode"] = preferred_mode;
       launch_mode["recommended_mode"] = recommended_mode;
       launch_mode["allowed_modes"] = std::move(allowed_modes);
@@ -2987,17 +2996,17 @@ namespace nvhttp {
     return encoder;
   }
 
-  nlohmann::json build_launch_mode_contract_for_tests(bool app_prefers_virtual_display,
-                                                      const std::string &app_name,
+  nlohmann::json build_launch_mode_contract_for_tests(std::string_view app_launch_as,
+                                                      std::string_view app_name,
                                                       bool host_virtual_display_available,
                                                       bool host_prefers_headless,
-                                                      bool app_mirrors_desktop) {
+                                                      const proc::launch_as_availability_t &launch_as) {
     return build_launch_mode_contract(
-      app_prefers_virtual_display,
+      app_launch_as,
       app_name,
       host_virtual_display_available,
       host_prefers_headless,
-      app_mirrors_desktop
+      launch_as
     );
   }
 
@@ -3478,12 +3487,18 @@ namespace nvhttp {
     }
 
     nlohmann::json launch_mode_contract_for_app(const proc::ctx_t &app) {
+#ifdef __linux__
+      const auto availability = proc::launch_as_availability(app);
+#else
+      // The Linux-only app pin resolver does not alter other platforms' legacy display policy.
+      const proc::launch_as_availability_t availability {};
+#endif
       return build_launch_mode_contract(
-        app.virtual_display,
+        app.launch_as,
         app.name,
         settings_metadata::host_virtual_display_available(),
         host_prefers_headless(),
-        app.desktop_mirror
+        availability
       );
     }
 
@@ -9642,7 +9657,10 @@ namespace nvhttp {
       // it stays here when the host cannot add a screen, so nobody loses the tile and the choice at
       // once.
       const bool desktop_offers_its_own_screen =
-        has_desktop && settings_metadata::host_virtual_display_available();
+        settings_metadata::host_virtual_display_available() &&
+        std::any_of(apps.begin(), apps.end(), [](const auto &app) {
+          return app.name == "Desktop" && app.launch_as == "desktop_display";
+        });
 
       int idx = 0;
       for (auto &app : apps) {
