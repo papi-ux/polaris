@@ -3,6 +3,7 @@
  * @brief Input validation helpers for Web UI write endpoints.
  */
 #include "confighttp_validation.h"
+#include "app_launch_as.h"
 
 #include <algorithm>
 #include <array>
@@ -580,6 +581,27 @@ namespace confighttp::validation {
       }
 
       const auto key_view = std::string_view {key};
+      if (key == "launch-as") {
+        if (!validate_safe_string(key, value, error)) {
+          return false;
+        }
+        if (!contains(proc::launch_as_values, std::string_view {value.get<std::string>()})) {
+          error = "launch-as must be host_default, headless_stream, windowed_stream, gamescope_stream, "
+                  "host_virtual_display, desktop_takeover or desktop_display";
+          return false;
+        }
+        continue;
+      }
+      if (key == "launch-as-basis") {
+        if (!validate_safe_string(key, value, error)) {
+          return false;
+        }
+        if (!contains(proc::launch_as_basis_values, std::string_view {value.get<std::string>()})) {
+          error = "launch-as-basis must be none, desktop-mirror, virtual-display or both";
+          return false;
+        }
+        continue;
+      }
       if (key == "steam-launch-mode") {
         if (!validate_safe_string(key, value, error)) {
           return false;
