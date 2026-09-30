@@ -196,6 +196,9 @@ namespace rtsp_stream {
     // Empty = host default. Validated in make_launch_session; applied to the
     // in-memory config by proc_t::execute and restored at teardown.
     std::string stream_mode;
+    // What the client explicitly named, before paired or unlocked defaults.
+    // Empty names nothing and cannot conflict with a fixed app launch mode.
+    std::string client_named_selection;
     // Assertion copied from deterministic /optimize topology_resolution.resolved.
     // It never selects topology; final process resolution must equal it or the
     // exact launch/resume fails closed.

@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -21,6 +22,7 @@
 #include <src/file_handler.h>
 #include <src/nvhttp.h>
 #include <src/process.h>
+#include <src/launch_failure.h>
 #ifdef __linux__
   #include <src/platform/linux/cage_display_router.h>
   #include <src/platform/linux/game_mode_host.h>
@@ -68,6 +70,7 @@ TEST(ProcessMigrationTests, LaunchAsV15MapsLegacyFlagsAndPreservesStoredUnknowns
     const auto expected_name = before.at("name").get<std::string>();
     const auto found = std::find_if(apps.begin(), apps.end(), [&](const proc::ctx_t &app) { return app.name == expected_name; });
     ASSERT_NE(found, apps.end());
+    EXPECT_EQ(found->launch_as, row.at("launch_as").get<std::string>());
     EXPECT_EQ(found->desktop_mirror, row.at("launch_as").get<std::string>() == "desktop_display");
     EXPECT_EQ(found->virtual_display, row.at("launch_as").get<std::string>() == "host_virtual_display");
   }
@@ -4969,7 +4972,7 @@ TEST(ProcessRuntimeConfigTests, ClearPrivateSteamLaunchIsAllowed) {
 TEST(ProcessRuntimeConfigTests, DesktopMirrorAppOverridesPairedVirtualDisplayPreference) {
   proc::ctx_t desktop;
   desktop.name = "Desktop";
-  desktop.desktop_mirror = true;
+  proc::set_launch_as(desktop, "desktop_display");
 
   rtsp_stream::launch_session_t launch_session;
   launch_session.virtual_display = true;
@@ -5003,6 +5006,133 @@ namespace {
   };
 }  // namespace
 
+class AppLaunchAsProcessTests: public testing::Test {
+protected:
+  void SetUp() override {
+    runtime_dir = test_paths::root() / "launch-as-runtime";
+    std::filesystem::create_directories(runtime_dir);
+    if (const char *path = std::getenv("PATH")) saved_path = path;
+    setenv("PATH", runtime_dir.c_str(), 1);
+    for (const auto binary : {"labwc", "wlr-randr", "gamescope"}) {
+      const auto path = runtime_dir / binary;
+      std::ofstream {path} << "#!/bin/sh\nexit 0\n";
+      std::filesystem::permissions(path, std::filesystem::perms::owner_all);
+    }
+    config::video.capture.clear();
+    config::video.linux_display.stream_mode = "headless_stream";
+    config::video.linux_display.headless_mode = true;
+    config::video.linux_display.use_cage_compositor = true;
+    config::video.linux_display.private_runtime = "labwc";
+    stream_display_policy::forget_host_default();
+    launch_failure::clear();
+  }
+  void TearDown() override {
+    launch_failure::clear();
+    stream_display_policy::forget_host_default();
+    config::video.linux_display = saved_display;
+    config::video.capture = saved_capture;
+    if (saved_path) setenv("PATH", saved_path->c_str(), 1); else unsetenv("PATH");
+    std::error_code ignored;
+    std::filesystem::remove_all(runtime_dir, ignored);
+  }
+  game_mode_session_pin_t game_mode {false};
+  decltype(config::video.linux_display) saved_display = config::video.linux_display;
+  std::string saved_capture = config::video.capture;
+  std::optional<std::string> saved_path;
+  std::filesystem::path runtime_dir;
+};
+
+TEST_F(AppLaunchAsProcessTests, FixedPrivateModesBeatPairedAndUnlockedVirtualRequests) {
+  for (const auto mode : {"headless_stream", "windowed_stream", "gamescope_stream"}) {
+    for (const bool locked : {false, true}) {
+      SCOPED_TRACE(std::string {mode} + (locked ? " paired" : " unlocked"));
+      proc::ctx_t app;
+      proc::set_launch_as(app, mode);
+      const auto result = proc::resolve_launch_selection_for_app(app, {
+        .requested_selection = "host_virtual_display", .launch_virtual_display = true,
+        .virtual_display_user_locked = locked,
+      });
+      EXPECT_EQ(result.refusal, 0);
+      EXPECT_TRUE(result.pinned);
+      EXPECT_EQ(result.selection, mode);
+    }
+  }
+}
+
+TEST_F(AppLaunchAsProcessTests, FreshUnavailablePinWinsBeforeAClientConflictAndCanRecover) {
+  proc::ctx_t app;
+  proc::set_launch_as(app, "headless_stream");
+  std::filesystem::remove(runtime_dir / "labwc");
+  const proc::launch_selection_request_t request {.client_named_selection = "desktop_display"};
+  EXPECT_EQ(proc::refuse_app_launch_as_before_launch(app, request), 503);
+  auto failure = launch_failure::take();
+  ASSERT_TRUE(failure);
+  EXPECT_EQ(failure->code, "app_launch_mode_unavailable");
+  EXPECT_NE(failure->message.find("labwc"), std::string::npos);
+  EXPECT_NE(failure->action.find("Launch as"), std::string::npos);
+  const auto binary = runtime_dir / "labwc";
+  std::ofstream {binary} << "#!/bin/sh\nexit 0\n";
+  std::filesystem::permissions(binary, std::filesystem::perms::owner_all);
+  EXPECT_EQ(proc::refuse_app_launch_as_before_launch(app, request), 409);
+  failure = launch_failure::take();
+  ASSERT_TRUE(failure);
+  EXPECT_EQ(failure->code, "app_launch_mode_pinned");
+  EXPECT_NE(failure->message.find("Mirror Desktop"), std::string::npos);
+  EXPECT_EQ(proc::refuse_app_launch_as_before_launch(app, {}), 0);
+}
+
+TEST_F(AppLaunchAsProcessTests, GameModeRefusesEveryFixedPinButWatchersKeepOwnerMode) {
+  platf::game_mode_host::set_session_live_for_tests(true);
+  for (const auto mode : {"headless_stream", "windowed_stream", "gamescope_stream", "host_virtual_display", "desktop_takeover"}) {
+    SCOPED_TRACE(mode);
+    proc::ctx_t app;
+    proc::set_launch_as(app, mode);
+    EXPECT_EQ(proc::refuse_app_launch_as_before_launch(app, {}), 503);
+    const auto failure = launch_failure::take();
+    ASSERT_TRUE(failure);
+    EXPECT_EQ(failure->code, "app_launch_mode_unavailable");
+    EXPECT_NE(failure->message.find("Steam Game Mode"), std::string::npos);
+    const auto watcher = proc::resolve_launch_selection_for_app(app, {.client_named_selection = "desktop_display", .watch_only = true});
+    EXPECT_EQ(watcher.refusal, 0);
+    EXPECT_TRUE(watcher.pinned);
+    EXPECT_EQ(watcher.selection, mode);
+  }
+  for (const auto mode : {"host_default", "desktop_display"}) {
+    proc::ctx_t app;
+    proc::set_launch_as(app, mode);
+    const auto result = proc::resolve_launch_selection_for_app(app, {.requested_selection = "headless_stream"});
+    EXPECT_EQ(result.refusal, 0);
+    EXPECT_EQ(result.selection, "desktop_display");
+  }
+  proc::ctx_t unknown;
+  proc::set_launch_as(unknown, "Host_Default");
+  EXPECT_EQ(proc::refuse_app_launch_as_before_launch(unknown, {.watch_only = true}), 503);
+  const auto failure = launch_failure::take();
+  ASSERT_TRUE(failure);
+  EXPECT_NE(failure->message.find("an unknown mode"), std::string::npos);
+}
+
+TEST_F(AppLaunchAsProcessTests, CatalogueReloadPreservesTheRunningGenerationsPinAndReturnsAnOwnedCopy) {
+  proc::ctx_t app;
+  app.name = "Pinned game";
+  app.uuid = "launch-as-running-generation";
+  proc::set_launch_as(app, "headless_stream");
+  proc::proc_t process {boost::process::v1::environment {}, {app}};
+  EXPECT_FALSE(process.running_app_context());
+  process.set_active_launch_for_tests(app, std::make_shared<rtsp_stream::launch_session_t>());
+  auto edited = app;
+  proc::set_launch_as(edited, "host_virtual_display");
+  process.reload_configuration(proc::proc_t {boost::process::v1::environment {}, {edited}});
+  const auto active = process.running_app_context();
+  ASSERT_TRUE(active);
+  EXPECT_EQ(active->launch_as, "headless_stream");
+  ASSERT_EQ(process.get_apps().size(), 1u);
+  EXPECT_EQ(process.get_apps().front().launch_as, "host_virtual_display");
+  auto owned = *active;
+  owned.launch_as = "desktop_takeover";
+  EXPECT_EQ(process.running_app_context()->launch_as, "headless_stream");
+}
+
 TEST(ProcessRuntimeConfigTests, EveryLaunchOnAGameModeHostIsAStreamOfTheGameModeScreen) {
   proc::ctx_t game;
   game.name = "A Steam Game";
@@ -5033,9 +5163,12 @@ TEST(ProcessRuntimeConfigTests, EveryLaunchOnAGameModeHostIsAStreamOfTheGameMode
   EXPECT_TRUE(in_game_mode.mirror_desktop);
   EXPECT_FALSE(in_game_mode.virtual_display);
   EXPECT_EQ(
-    stream_display_policy::effective_session_selection_for_launch(
-      in_game_mode.stream_mode, in_game_mode.mirror_desktop, in_game_mode.virtual_display, false, false, false, true
-    ),
+    stream_display_policy::host_default_launch_selection({
+      .requested_selection = in_game_mode.stream_mode,
+      .mirror_desktop = in_game_mode.mirror_desktop,
+      .launch_virtual_display = in_game_mode.virtual_display,
+      .host_provides_private_display = true,
+    }),
     "desktop_display"
   ) << "which is the mode the capture and input gates recognise";
 
@@ -5163,11 +5296,11 @@ TEST(ProcessRuntimeConfigTests, TheProfileAGameModeHostResolvesIsTheOneItsLaunch
 
   // And that is the topology the launch ends up with.
   EXPECT_EQ(
-    stream_display_policy::effective_session_selection_for_launch("gamescope_stream", true, false, false, false, false, true),
+    stream_display_policy::host_default_launch_selection({.requested_selection = "gamescope_stream", .mirror_desktop = true, .host_provides_private_display = true}),
     "desktop_display"
   );
   EXPECT_EQ(
-    stream_display_policy::effective_session_selection_for_launch("", true, false, false, false, false, true),
+    stream_display_policy::host_default_launch_selection({.mirror_desktop = true, .host_provides_private_display = true}),
     "desktop_display"
   );
 }
@@ -5335,7 +5468,7 @@ protected:
     config::video.linux_display.stream_mode = "headless_stream";
     desktop.name = "Desktop";
     desktop.uuid = "resume-display-test";
-    desktop.desktop_mirror = true;
+    proc::set_launch_as(desktop, "desktop_display");
   }
 
   void TearDown() override {
@@ -5438,7 +5571,7 @@ TEST_F(ProcessResumeDisplayTests, DesktopResumeRejectsForcePrivateChangesInBothD
 }
 
 TEST_F(ProcessResumeDisplayTests, NonDesktopResumeStillRequiresMatchingMirrorFlag) {
-  desktop.desktop_mirror = false;
+  proc::set_launch_as(desktop, "host_default");
   auto active = request();
   active->mirror_desktop = true;
   activate(active);

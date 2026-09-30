@@ -68,6 +68,7 @@
 #include "nvhttp.h"
 #include "platform/common.h"
 #include "process.h"
+#include "launch_failure.h"
 #include "rtsp.h"
 #include "session_event_queue.h"
 #include "settings_metadata.h"
@@ -8085,9 +8086,26 @@ namespace confighttp {
           };
           BOOST_LOG(info) << "Launching app ["sv << app.name << "] from web UI"sv;
 #ifdef __linux__
-          const bool private_stream_requested =
-            config::video.linux_display.headless_mode &&
-            config::video.linux_display.use_cage_compositor;
+          launch_failure::clear();
+          if (const auto refusal = proc::refuse_app_launch_as_before_launch(app, {
+                .client_named_selection = mirror_desktop_explicit ? std::string {stream_display_policy::k_desktop_display} : std::string {},
+                .mirror_desktop = mirror_desktop_explicit,
+              })) {
+            const auto record = launch_failure::take();
+            nlohmann::json error_tree {{"status", false}, {"status_code", refusal},
+              {"error", launch_failure::status_message(*record)}, {"error_code", record->code}};
+            SimpleWeb::CaseInsensitiveMultimap headers;
+            append_json_security_headers(headers);
+            response->write(SimpleWeb::StatusCode::client_error_bad_request, error_tree.dump(), headers);
+            return;
+          }
+          const auto pin = stream_display_policy::resolve_app_launch_as(app.launch_as, {});
+          const bool private_stream_requested = pin.verdict == stream_display_policy::app_launch_as_t::verdict_e::pinned ?
+            proc::streaming_launch_requests_private_family(false, false, pin.selection, std::string {}) ||
+              pin.selection == stream_display_policy::k_headless_stream || pin.selection == stream_display_policy::k_windowed_stream :
+            proc::streaming_launch_requests_private_family(
+              config::video.linux_display.headless_mode, config::video.linux_display.use_cage_compositor,
+              config::video.linux_display.stream_mode, config::video.linux_display.private_runtime);
           const int running_app = proc::proc.running();
           const auto launch_policy = proc::resolve_desktop_launch_safety_policy(
             private_stream_requested,
@@ -8129,6 +8147,10 @@ namespace confighttp {
             error_tree["error"] = err == 503 ?
               "Failed to initialize video capture/encoding. Is a display connected and turned on?" :
               "Failed to start the specified application";
+            if (const auto refusal = launch_failure::take()) {
+              error_tree["error"] = launch_failure::status_message(*refusal);
+              error_tree["error_code"] = refusal->code;
+            }
 #ifdef __linux__
             error_tree["launchPolicy"] = launch_policy_json;
 #endif

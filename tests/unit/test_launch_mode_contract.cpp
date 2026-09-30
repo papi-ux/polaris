@@ -291,6 +291,38 @@ namespace {
   }
 }
 
+TEST(SessionClientSelection, NamesOnlyAnExplicitModeBeforePairedAndUnlockedDefaults) {
+  ScopedPrivateRuntimePath runtime_path;
+  struct row_t { const char *mode; bool virtual_display; bool locked; bool paired; bool mirror; const char *named; };
+  for (const auto &row : {
+      row_t {"", false, false, false, false, ""},
+      row_t {"", true, false, false, false, ""},
+      row_t {"", true, true, false, false, "host_virtual_display"},
+      row_t {"", false, true, false, false, ""},
+      row_t {"", false, false, true, false, ""},
+      row_t {"headless_stream", false, false, true, false, "headless_stream"},
+      row_t {"desktop_display", false, false, false, false, "desktop_display"},
+      row_t {"headless_stream", false, false, false, true, "desktop_display"},
+    }) {
+    auto cert = launch_client_cert();
+    cert->always_use_virtual_display = row.paired;
+    auto args = resolved_launch_args(row.mode);
+    for (const auto field : {"resolvedProfile", "bitrateKbps", "resolvedHdr", "expectedTopology"}) args.erase(field);
+    args.emplace("virtualDisplay", row.virtual_display ? "1" : "0");
+    args.emplace("displayModeExplicit", row.locked ? "1" : "0");
+    if (row.mirror) args.emplace("mirrorDesktop", "1");
+    SCOPED_TRACE(std::string {row.mode} + " named=" + row.named);
+    const auto session = nvhttp::make_launch_session(true, false, args, cert.get());
+    ASSERT_TRUE(session);
+    EXPECT_EQ(session->client_named_selection, row.named);
+    const auto request = proc::launch_selection_request_from_session(*session);
+    EXPECT_EQ(request.client_named_selection, row.named);
+    EXPECT_EQ(request.requested_selection, session->stream_mode);
+    if (row.paired && !std::string {row.mode}.empty()) EXPECT_EQ(session->stream_mode, row.mode);
+    if (row.paired && std::string {row.mode}.empty()) EXPECT_EQ(session->stream_mode, "host_virtual_display");
+  }
+}
+
 TEST(SessionEncoderContract, ExactLaunchCarriesAutoAsAnExplicitSessionChoice) {
   auto cert = launch_client_cert();
   auto args = resolved_launch_args();

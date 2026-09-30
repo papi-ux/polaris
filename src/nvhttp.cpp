@@ -695,7 +695,9 @@ namespace nvhttp {
 #ifdef __linux__
       // A per-session override changes which family this launch actually is.
       std::string session_mode_reject_reason;
-      const auto session_mode = accepted_session_stream_mode(session_stream_mode_requested(args), session_mode_reject_reason);
+      const auto pin = stream_display_policy::resolve_app_launch_as(app.launch_as, {});
+      const auto session_mode = pin.verdict == stream_display_policy::app_launch_as_t::verdict_e::pinned ?
+        pin.selection : accepted_session_stream_mode(session_stream_mode_requested(args), session_mode_reject_reason);
       if (!session_mode.empty() && !mirror_desktop_requested) {
         const auto session_booleans = stream_display_policy::legacy_booleans_for_selection(session_mode);
         private_stream_requested = proc::streaming_launch_requests_private_family(
@@ -739,7 +741,9 @@ namespace nvhttp {
 #ifdef __linux__
       // A per-session override changes which family this launch actually is.
       std::string session_mode_reject_reason;
-      const auto session_mode = accepted_session_stream_mode(session_stream_mode_requested(body), session_mode_reject_reason);
+      const auto pin = stream_display_policy::resolve_app_launch_as(app.launch_as, {});
+      const auto session_mode = pin.verdict == stream_display_policy::app_launch_as_t::verdict_e::pinned ?
+        pin.selection : accepted_session_stream_mode(session_stream_mode_requested(body), session_mode_reject_reason);
       if (!session_mode.empty() && !mirror_desktop_requested) {
         const auto session_booleans = stream_display_policy::legacy_booleans_for_selection(session_mode);
         private_stream_requested = proc::streaming_launch_requests_private_family(
@@ -5358,6 +5362,7 @@ namespace nvhttp {
         if (!accepted.empty()) {
           launch_session->stream_mode = accepted;
           launch_session->client_selected_topology = true;
+          launch_session->client_named_selection = accepted;
           BOOST_LOG(info) << "Session stream mode override requested: ["sv << accepted << ']';
         } else if (launch_session->resolved_profile_from_client) {
           BOOST_LOG(warning) << "Rejecting exact resolved launch streamMode ["sv
@@ -5378,6 +5383,7 @@ namespace nvhttp {
     // process resolver and /optimize observe the same input.
 #if defined(__linux__)
     if (!launch_session->mirror_desktop &&
+        !launch_session->client_selected_topology &&
         !client_display_mode_explicit &&
         named_cert_p->always_use_virtual_display) {
       launch_session->stream_mode = std::string {stream_display_policy::k_host_virtual_display};
@@ -5395,6 +5401,14 @@ namespace nvhttp {
     // selected stability preset may still conservatively normalize it.
     launch_session->user_locked_display_mode = launch_session->resolved_profile_from_client;
     launch_session->user_locked_virtual_display = client_display_mode_explicit || named_cert_p->always_use_virtual_display;
+#if defined(__linux__)
+    if (launch_session->mirror_desktop) {
+      launch_session->client_named_selection = std::string {stream_display_policy::k_desktop_display};
+    } else if (launch_session->client_named_selection.empty() &&
+               client_display_mode_explicit && client_requested_virtual_display) {
+      launch_session->client_named_selection = std::string {stream_display_policy::k_host_virtual_display};
+    }
+#endif
     launch_session->scale_factor = util::from_view(get_arg(args, "scaleFactor", "100"));
     if (named_cert_p->target_bitrate_kbps > 0) {
       launch_session->paired_target_bitrate_kbps = named_cert_p->target_bitrate_kbps;
@@ -7550,6 +7564,13 @@ namespace nvhttp {
         }
 
 #ifdef __linux__
+        if (const auto refusal = proc::refuse_app_launch_as_before_launch(
+              *app_iter, proc::launch_selection_request_from_session(*launch_session))) {
+          tree.put("root.resume", 0);
+          tree.put("root.gamesession", 0);
+          put_launch_refusal(tree, refusal, "This app's Launch as setting cannot be used for this launch.");
+          return;
+        }
         proc::apply_app_display_semantics(*app_iter, *launch_session);
         auto launch_policy = resolve_streaming_launch_safety_policy(
           args,
@@ -10373,6 +10394,23 @@ namespace nvhttp {
 
 #ifdef __linux__
         const auto &app = apps.at(static_cast<size_t>(app_id - 1));
+        launch_failure::clear();
+        const bool explicit_mirror = explicit_mirror_desktop_requested(body);
+        std::string mode_reason;
+        const auto named_mode = explicit_mirror ? std::string {stream_display_policy::k_desktop_display} :
+          accepted_session_stream_mode(session_stream_mode_requested(body), mode_reason);
+        if (const auto refusal = proc::refuse_app_launch_as_before_launch(app, {
+              .client_named_selection = named_mode,
+              .requested_selection = named_mode,
+              .mirror_desktop = explicit_mirror,
+            })) {
+          const auto record = launch_failure::take();
+          nlohmann::json error {{"status", false}, {"error", launch_failure::status_message(*record)}, {"error_code", record->code}};
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "application/json");
+          response->write(static_cast<SimpleWeb::StatusCode>(refusal), error.dump(), headers);
+          return;
+        }
         auto launch_policy = resolve_streaming_launch_safety_policy(
           body,
           app,
@@ -11831,11 +11869,13 @@ namespace nvhttp {
         args.count("preference") ? args.find("preference")->second : std::string {"auto"}
       );
       auto reply_bad_request = [&](std::string code,
-                                   std::string error = "Explicit launch fields must be complete and within supported bounds.") {
+                                   std::string error = "Explicit launch fields must be complete and within supported bounds.",
+                                   std::string action = {}) {
         nlohmann::json output {
           {"status", false}, {"code", std::move(code)},
           {"error", std::move(error)}
         };
+        if (!action.empty()) output["action"] = std::move(action);
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
         response->write(SimpleWeb::StatusCode::client_error_bad_request, output.dump(), headers);
@@ -11889,7 +11929,11 @@ namespace nvhttp {
       const auto requested_topology = lower_copy(
         args.count("mode") ? args.find("mode")->second : std::string {}
       );
-      const auto optimization_app = find_app_for_optimization_game(game);
+      auto optimization_app = find_app_for_optimization_game(game);
+      if (const auto running = proc::proc.running_app_context();
+          running && optimization_app && running->uuid == optimization_app->uuid) {
+        optimization_app = running;
+      }
       bool launch_owned_display = false;
       std::string resolved_topology = requested_topology;
       std::string topology_source = "host_configuration";
@@ -11900,7 +11944,6 @@ namespace nvhttp {
 #if defined(__linux__)
       mirror_desktop_requested = explicit_mirror_desktop_requested(args);
       force_private_requested = force_private_after_desktop_steam_shutdown_requested(args);
-      const bool app_virtual_display = optimization_app && optimization_app->virtual_display;
       const bool paired_virtual_lock =
         named_cert_p->always_use_virtual_display && !topology_locked;
       std::string requested_selection = paired_virtual_lock ?
@@ -11915,15 +11958,21 @@ namespace nvhttp {
           requested_selection,
           !requested_topology.empty()
         ));
-      auto effective_selection = stream_display_policy::effective_session_selection_for_launch(
-        requested_selection,
-        mirror_desktop,
-        requested_selection == stream_display_policy::k_host_virtual_display,
-        app_virtual_display,
-        topology_locked || paired_virtual_lock,
-        false,
-        stream_display_policy::host_default_provides_private_display()
-      );
+      const auto app = optimization_app.value_or(proc::ctx_t {});
+      const auto launch_selection = proc::resolve_launch_selection_for_app(app, {
+        .client_named_selection = mirror_desktop_requested ? std::string {stream_display_policy::k_desktop_display} :
+          topology_locked ? requested_topology : std::string {},
+        .requested_selection = requested_selection,
+        .mirror_desktop = mirror_desktop_requested,
+        .launch_virtual_display = requested_selection == stream_display_policy::k_host_virtual_display,
+        .virtual_display_user_locked = topology_locked || paired_virtual_lock,
+      });
+      if (launch_selection.refusal) {
+        if (const auto refusal = launch_failure::take()) reply_bad_request(refusal->code, refusal->message, refusal->action);
+        else reply_bad_request("app_launch_mode_unavailable", "This app's Launch as setting cannot be used for this launch.");
+        return;
+      }
+      auto effective_selection = launch_selection.selection;
       if (!mirror_desktop && !requested_selection.empty()) {
         if (effective_selection == requested_selection) {
           std::string topology_reject_reason;
@@ -11960,6 +12009,12 @@ namespace nvhttp {
               effective_selection,
               topology_reject_reason
             )) {
+          if (launch_selection.pinned) {
+            proc::refuse_app_launch_as_unavailable(app, topology_reject_reason);
+            const auto refusal = launch_failure::take();
+            reply_bad_request(refusal->code, refusal->message, refusal->action);
+            return;
+          }
           reply_bad_request(
             "invalid_or_unavailable_topology",
             topology_reject_reason.empty() ?
@@ -11974,6 +12029,9 @@ namespace nvhttp {
       if (game_mode_screen) {
         topology_source = "host_capability";
         topology_reason_code = "steam_game_mode_session";
+      } else if (launch_selection.pinned) {
+        topology_source = "app_configuration";
+        topology_reason_code = "app_launch_as";
       } else if (mirror_desktop) {
         topology_source = mirror_desktop_requested ?
           "client_launch_request" : "app_configuration";
@@ -11985,10 +12043,6 @@ namespace nvhttp {
       } else if (topology_locked && !requested_topology.empty()) {
         topology_source = "client_launch_request";
         topology_reason_code = "explicit_topology_lock";
-      } else if (app_virtual_display &&
-                 effective_selection == stream_display_policy::k_host_virtual_display) {
-        topology_source = "app_configuration";
-        topology_reason_code = "app_virtual_display_default";
       } else if (!requested_topology.empty()) {
         topology_source = "client_launch_request";
         topology_reason_code = "unlocked_topology_request";
