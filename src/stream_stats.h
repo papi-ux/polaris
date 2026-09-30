@@ -1095,6 +1095,10 @@ namespace stream_stats {
   struct network_verification_window_t {
     std::size_t sample_count = 0;
     std::size_t media_sample_count = 0;
+    /// Positive media deltas wholly covered after encoder application, independent of control pings.
+    std::size_t eligible_media_sample_count = 0;
+    std::int64_t eligible_media_last_age_ms = -1;
+    double eligible_media_packet_loss = 0.0;
     std::uint64_t last_revision = 0;
     std::int64_t first_delay_ms = 0;
     std::int64_t last_delay_ms = 0;

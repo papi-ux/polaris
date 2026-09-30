@@ -4938,7 +4938,7 @@ TEST(DoctorActionTests, RoundTripPressureWithLiveTuningOnTakesNoDoctorStep) {
 
 
 namespace {
-  enum class media_verification_case_e { crossing, stale, thin_clean, control_only, graded_clean, graded_stale };
+  enum class media_verification_case_e { crossing, stale, thin_clean, control_only, graded_clean, graded_stale, crossing_no_ack, crossing_new_writer };
   using media_verification_case_t = std::pair<media_verification_case_e, bool>;
   class DoctorMediaVerificationTests : public testing::TestWithParam<media_verification_case_t> {};
 }
@@ -4971,7 +4971,9 @@ TEST_P(DoctorMediaVerificationTests, UsesRealPostEncoderMediaCoverageOnBothRoute
 
   std::vector<int> report_ms;
   switch (scenario) {
-    case media_verification_case_e::crossing: report_ms = {4000}; break;
+    case media_verification_case_e::crossing:
+    case media_verification_case_e::crossing_no_ack:
+    case media_verification_case_e::crossing_new_writer: report_ms = {4000}; break;
     case media_verification_case_e::stale: report_ms = {500, 1000}; break;
     case media_verification_case_e::thin_clean: report_ms = {4000, 7000}; break;
     case media_verification_case_e::control_only: report_ms = {1000, 4000, 7000}; break;
@@ -5002,9 +5004,13 @@ TEST_P(DoctorMediaVerificationTests, UsesRealPostEncoderMediaCoverageOnBothRoute
   ASSERT_TRUE(window.complete);
   ASSERT_LT(window.last_age_ms, 1000);
   ASSERT_EQ(window.media_sample_count, scenario == media_verification_case_e::control_only ? 0 : report_ms.size());
+  ASSERT_EQ(window.eligible_media_sample_count, scenario == media_verification_case_e::control_only ? 0 : report_ms.size() - 1);
+  if (window.eligible_media_sample_count == 0) ASSERT_EQ(window.eligible_media_last_age_ms, -1);
+  else if (scenario == media_verification_case_e::thin_clean || scenario == media_verification_case_e::graded_clean) ASSERT_LT(window.eligible_media_last_age_ms, 5000);
+  else ASSERT_GT(window.eligible_media_last_age_ms, 5000);
   const auto post = stream_stats::network_verdict_since(at);
   ASSERT_EQ(post.media_samples, scenario == media_verification_case_e::control_only ? 0 : report_ms.size() - 1);
-  if (scenario == media_verification_case_e::crossing || scenario == media_verification_case_e::thin_clean || scenario == media_verification_case_e::graded_clean) {
+  if (scenario == media_verification_case_e::crossing || scenario == media_verification_case_e::crossing_no_ack || scenario == media_verification_case_e::crossing_new_writer || scenario == media_verification_case_e::thin_clean || scenario == media_verification_case_e::graded_clean) {
     ASSERT_LT(stream_stats::get_current().media_loss_last_received_age_ms, 5000);
   } else {
     ASSERT_GT(stream_stats::get_current().media_loss_last_received_age_ms, 5000);
@@ -5014,11 +5020,24 @@ TEST_P(DoctorMediaVerificationTests, UsesRealPostEncoderMediaCoverageOnBothRoute
     if (watchdog_first) doctor_actions::run_verification_watchdog_for_tests();
     return doctor_actions::execute(verify_request, live_tuning_loss_stream_t::context());
   };
-  const auto result = accepts ? verify() : execute_with_encoder_ack(20000, verify);
-  EXPECT_EQ(result.at("state"), accepts ? "resolved" : "rolled_back") << result.dump();
+  const bool no_ack = scenario == media_verification_case_e::crossing_no_ack;
+  const bool new_writer = scenario == media_verification_case_e::crossing_new_writer;
+  if (new_writer) adaptive_bitrate::set_live_bitrate(24000);
+  const auto newer_revision = adaptive_bitrate::get_doctor_state().revision;
+  const auto result = accepts || no_ack || new_writer ? verify() : execute_with_encoder_ack(20000, verify);
+  EXPECT_EQ(result.at("state"), accepts ? "resolved" : no_ack ? "rollback_unconfirmed" : new_writer ? "superseded" : "rolled_back") << result.dump();
   EXPECT_TRUE(stream.saved_preference_untouched());
   if (accepts) expect_live_tuning_off_for_stream_at(16000);
-  else expect_live_tuning_on_at(20000);
+  else if (no_ack) {
+    EXPECT_FALSE(result.at("status").get<bool>());
+    EXPECT_TRUE(result.at("changed").get<bool>());
+    EXPECT_EQ(result.at("requested_restore_bitrate_kbps"), 20000);
+    EXPECT_TRUE(adaptive_bitrate::is_enabled());
+    EXPECT_FALSE(adaptive_bitrate::get_state().paused_for_stream);
+  } else if (new_writer) {
+    expect_live_tuning_off_for_stream_at(24000);
+    EXPECT_EQ(adaptive_bitrate::get_doctor_state().revision, newer_revision);
+  } else expect_live_tuning_on_at(20000);
 
   // Clean up the old-code false success too, so the next case has no unresolved actuator.
   if (result.at("state") == "resolved") {
@@ -5041,7 +5060,9 @@ INSTANTIATE_TEST_SUITE_P(ExplicitAndWatchdog, DoctorMediaVerificationTests, test
   media_verification_case_t {media_verification_case_e::thin_clean, false}, media_verification_case_t {media_verification_case_e::thin_clean, true},
   media_verification_case_t {media_verification_case_e::control_only, false}, media_verification_case_t {media_verification_case_e::control_only, true},
   media_verification_case_t {media_verification_case_e::graded_clean, false}, media_verification_case_t {media_verification_case_e::graded_clean, true},
-  media_verification_case_t {media_verification_case_e::graded_stale, false}, media_verification_case_t {media_verification_case_e::graded_stale, true}));
+  media_verification_case_t {media_verification_case_e::graded_stale, false}, media_verification_case_t {media_verification_case_e::graded_stale, true},
+  media_verification_case_t {media_verification_case_e::crossing_no_ack, false}, media_verification_case_t {media_verification_case_e::crossing_no_ack, true},
+  media_verification_case_t {media_verification_case_e::crossing_new_writer, false}, media_verification_case_t {media_verification_case_e::crossing_new_writer, true}));
 
 class DoctorRecheckReceiptTests : public testing::TestWithParam<int> {};
 TEST_P(DoctorRecheckReceiptTests, MessageFollowsTheRefreshedOffer) {

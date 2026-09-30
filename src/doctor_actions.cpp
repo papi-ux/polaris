@@ -576,6 +576,11 @@ namespace doctor_actions {
         {"complete", window.complete},
         {"samples", window.sample_count},
         {"media_samples", window.media_sample_count},
+        {"eligible_media_samples", window.eligible_media_sample_count},
+        {"eligible_media_last_age_ms", window.eligible_media_last_age_ms >= 0 ?
+          nlohmann::json(window.eligible_media_last_age_ms) : nlohmann::json(nullptr)},
+        {"eligible_media_packet_loss_pct", window.eligible_media_sample_count > 0 ?
+          nlohmann::json(window.eligible_media_packet_loss) : nlohmann::json(nullptr)},
         {"first_delay_ms", window.first_delay_ms},
         {"last_delay_ms", window.last_delay_ms},
         {"span_ms", window.span_ms},
@@ -596,7 +601,9 @@ namespace doctor_actions {
         const action_run_t &run,
         const stream_stats::stats_t &stats) {
       const bool required_media_arrived =
-        !run.requires_media_sample || window.media_sample_count > 0;
+        !run.requires_media_sample ||
+        (window.eligible_media_sample_count > 0 && window.eligible_media_last_age_ms >= 0 &&
+         window.eligible_media_last_age_ms <= stream_stats::judged_network_t::k_media_report_max_age_ms);
       const bool restoring_quality = run.kind == action_kind_e::restore_quality;
       if (restoring_quality) {
         // A restore is verified on the window verdict that offered it, and on the network latch, which
@@ -623,7 +630,8 @@ namespace doctor_actions {
       }
       return window.complete && required_media_arrived &&
         !window.network_risk &&
-        (!window.packet_loss_available || window.packet_loss <= 2.0) &&
+        (run.requires_media_sample ? window.eligible_media_packet_loss <= 2.0 :
+          !window.packet_loss_available || window.packet_loss <= 2.0) &&
         window.latency_ms < 45.0;
     }
 
@@ -1167,14 +1175,27 @@ namespace doctor_actions {
         refreshed_health,
         trusted_context != nullptr ? trusted_context->app_uuid : std::string {}
       );
+      std::string message = "Current loss and latency do not justify reducing bitrate.";
+      if (pacing_recheck) {
+        message = "Collected a fresh read-only pacing observation; no launch or game-process settings were changed.";
+      } else if (confirmed) {
+        const auto &offer = refreshed_doctor.at("safe_recovery_action");
+        const auto unavailable = offer.value("unavailable_reason", std::string {});
+        if (offer.value("id", std::string {}) == "lower_bitrate" &&
+            offer.value("kind", std::string {}) == "live_tuning" && unavailable.empty()) {
+          message = "Current telemetry confirms network pressure. Doctor offers one guarded bitrate step; this recheck changed nothing.";
+        } else if (offer.value("id", std::string {}) == "recheck_network" && refreshed_stats.adaptive_bitrate_enabled) {
+          message = "Round trip time pressure is still present. Live Tuning remains the live bitrate controller; this recheck changed nothing.";
+        } else {
+          message = "Current telemetry confirms network pressure. This recheck changed nothing.";
+          if (!unavailable.empty()) message += " " + unavailable;
+        }
+      }
       return {
         {"status", true},
         {"changed", false},
         {"state", action_id == "recheck_pacing" ? "observed" : confirmed ? "confirmed_pressure" : "stable"},
-        {"message", pacing_recheck ?
-          "Collected a fresh read-only pacing observation; no launch or game-process settings were changed." : confirmed ?
-          "Current telemetry now confirms network pressure. Doctor can safely apply one bitrate step." :
-          "Current loss and latency do not justify reducing bitrate."},
+        {"message", message},
         {"evidence", network_evidence(refreshed_stats)},
         {"doctor", refreshed_doctor}
       };

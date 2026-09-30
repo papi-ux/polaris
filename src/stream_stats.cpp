@@ -247,6 +247,8 @@ namespace stream_stats {
       std::uint64_t media_loss_revision = 0;
       std::chrono::steady_clock::time_point media_loss_received_at {};
       bool media_sample = false;
+      std::chrono::steady_clock::time_point media_interval_begins {};
+      double media_frames_expected = 0.0;
       double latency_ms = 0.0;
       double packet_loss = 0.0;
       bool packet_loss_available = false;
@@ -4367,6 +4369,8 @@ namespace stream_stats {
       const auto received_at = std::chrono::steady_clock::now();
       primary_network_state.received_at = received_at;
       primary_network_state.media_sample = media_sample;
+      primary_network_state.media_interval_begins = {};
+      primary_network_state.media_frames_expected = 0.0;
       primary_network_state.latency_ms = latency_ms;
       primary_network_state.bytes_sent = bytes_sent;
       if (media_sample) {
@@ -4409,6 +4413,11 @@ namespace stream_stats {
             network_judge_t::k_frames_per_percentage_report,
             std::clamp(loss, 0.0, 100.0) * network_judge_t::k_frames_per_percentage_report / 100.0
           );
+        }
+        // Carry this accepted report's interval, never retained media metadata on a control ping.
+        if (!network_judge.media.empty() && network_judge.media.back().at == received_at) {
+          primary_network_state.media_interval_begins = network_judge.media.back().begins;
+          primary_network_state.media_frames_expected = network_judge.media.back().frames_expected;
         }
       }
       network_judge.add_rtt(received_at, latency_ms);
@@ -4771,8 +4780,8 @@ namespace stream_stats {
       std::chrono::steady_clock::time_point applied_at,
       std::chrono::steady_clock::duration required_duration) {
     network_verification_window_t result;
-    const auto now = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
+    const auto now = std::chrono::steady_clock::now();
 
     const primary_network_observation_t *first = nullptr;
     const primary_network_observation_t *last = nullptr;
@@ -4785,6 +4794,16 @@ namespace stream_stats {
       last = &observation;
       ++result.sample_count;
       if (observation.media_sample) ++result.media_sample_count;
+      if (observation.media_sample && observation.media_frames_expected > 0.0 &&
+          observation.media_interval_begins >= applied_at &&
+          observation.media_interval_begins <= observation.received_at &&
+          observation.media_loss_received_at == observation.received_at) {
+        ++result.eligible_media_sample_count;
+        result.eligible_media_last_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          now - observation.received_at
+        ).count();
+        result.eligible_media_packet_loss = observation.packet_loss;
+      }
       result.max_latency_ms = std::max(result.max_latency_ms, observation.latency_ms);
       if (observation.packet_loss_available) {
         result.any_packet_loss_available = true;
@@ -4845,8 +4864,21 @@ namespace stream_stats {
     if (eligible.size() < 2) return;
     const auto first_at = applied_at + std::chrono::seconds(1);
     const auto span = completed_at - first_at;
+    // These fixtures manufacture a complete interval. Move the media timestamps and covered
+    // intervals with the arrivals, with the first media report straddling application. The real
+    // counter/route tests use actual clock time and never call this helper.
+    auto previous_media_at = applied_at - std::chrono::milliseconds(1);
     for (std::size_t i = 0; i < eligible.size(); ++i) {
-      eligible[i]->received_at = first_at + span * i / (eligible.size() - 1);
+      auto &observation = *eligible[i];
+      observation.received_at = first_at + span * i / (eligible.size() - 1);
+      if (observation.media_sample) {
+        observation.media_interval_begins = previous_media_at;
+        previous_media_at = observation.received_at;
+      }
+      if (observation.packet_loss_available) observation.media_loss_received_at = previous_media_at;
+    }
+    if (primary_network_state.revision == eligible.back()->revision) {
+      primary_network_state = *eligible.back();
     }
   }
 
