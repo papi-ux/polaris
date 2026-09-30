@@ -8,6 +8,7 @@
 #include <src/crypto.h>
 #include <src/launch_profile.h>
 #include <src/nvhttp.h>
+#include <src/process.h>
 #include <src/video.h>
 
 #include <algorithm>

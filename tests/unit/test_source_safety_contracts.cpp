@@ -1713,3 +1713,24 @@ TEST(SourceSafetyContracts, PortalRouteTravelsWithEveryCaptureToTheDisplayThatOp
   ASSERT_NE(read, npos);
   EXPECT_LT(kept, read);
 }
+
+TEST(SourceSafetyContracts, BothResumeDoorsPropagateTheRecordedLaunchAsRefusal) {
+  std::ifstream input(fs::path {POLARIS_SOURCE_DIR} / "src/nvhttp.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream contents;
+  contents << input.rdbuf();
+  const auto source = contents.str();
+  size_t count = 0;
+  for (auto at = source.find("validate_resolved_profile_for_running_app("); at != std::string::npos;
+       at = source.find("validate_resolved_profile_for_running_app(", at + 1)) {
+    const auto failure = source.find("tree.put(\"root.resume\", 0);", at);
+    ASSERT_NE(failure, std::string::npos);
+    const auto stopped = source.find("return", failure);
+    ASSERT_NE(stopped, std::string::npos);
+    const auto reply = source.find("put_launch_refusal(tree, validation_error", failure);
+    EXPECT_NE(reply, std::string::npos);
+    EXPECT_LT(reply, stopped) << "resume must carry the app pin's code, message and action before returning";
+    ++count;
+  }
+  EXPECT_EQ(count, 2u);
+}

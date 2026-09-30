@@ -5581,6 +5581,29 @@ TEST_F(ProcessResumeDisplayTests, NonDesktopResumeStillRequiresMatchingMirrorFla
   EXPECT_FALSE(resume->mirror_desktop);
 }
 
+TEST_F(ProcessResumeDisplayTests, ViewerInheritsTheOwnersNamedVirtualDisplay) {
+  auto active = request();
+  active->stream_mode = "host_virtual_display";
+  active->expected_stream_mode = "host_virtual_display";
+  active->client_named_selection = "host_virtual_display";
+  active->client_selected_topology = true;
+  active->virtual_display = true;
+  activate(active);
+  ASSERT_FALSE(active->mirror_desktop);
+  auto viewer = request();
+  viewer->watch_only = true;
+  viewer->stream_mode = "desktop_display";
+  viewer->expected_stream_mode = "host_virtual_display";
+  viewer->client_named_selection = "desktop_display";
+  viewer->client_selected_topology = false;
+  viewer->mirror_desktop = true;
+  EXPECT_EQ(process.validate_resolved_profile_for_running_app(viewer), 0);
+  EXPECT_EQ(viewer->client_named_selection, "host_virtual_display");
+  EXPECT_TRUE(viewer->client_selected_topology);
+  EXPECT_FALSE(viewer->mirror_desktop);
+  EXPECT_TRUE(viewer->virtual_display);
+}
+
 TEST_F(ProcessResumeDisplayTests, ViewerKeepsActiveTakeoverSemantics) {
   auto active = request();
   active->stream_mode = "desktop_takeover";
