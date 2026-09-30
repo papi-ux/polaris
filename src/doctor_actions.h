@@ -134,6 +134,9 @@ namespace doctor_actions {
   void session_ended(std::string_view owner_uuid, std::uint64_t session_generation);
 
 #ifdef POLARIS_TESTS
+  /** Defer scheduled verification so a route test can select the first real verifier. */
+  void defer_verification_watchdog_for_tests(bool deferred);
+
   /** Compatibility helper for unit fixtures that do not model app-session tokens. */
   void session_started(std::string_view owner_uuid,
                        std::uint64_t session_generation,

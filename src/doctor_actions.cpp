@@ -71,6 +71,10 @@ namespace doctor_actions {
     };
 
     std::mutex action_mutex;
+#ifdef POLARIS_TESTS
+    // Route tests choose which real verifier runs first, without rewriting telemetry time.
+    bool verification_watchdog_deferred_for_tests = false;
+#endif
     action_run_t action_run;
     struct terminal_action_t {
       nlohmann::json result;
@@ -769,6 +773,9 @@ namespace doctor_actions {
                                         std::uint64_t verification_step,
                                         const std::string &owner_uuid,
                                         std::uint64_t session_generation) {
+#ifdef POLARIS_TESTS
+      if (verification_watchdog_deferred_for_tests) return;
+#endif
       task_pool.pushDelayed([run_id, verification_step, owner_uuid, session_generation]() {
         run_verification_watchdog(
           run_id, verification_step, owner_uuid, session_generation
@@ -1874,6 +1881,11 @@ namespace doctor_actions {
   }
 
 #ifdef POLARIS_TESTS
+  void defer_verification_watchdog_for_tests(bool deferred) {
+    std::lock_guard<std::mutex> lock(action_mutex);
+    verification_watchdog_deferred_for_tests = deferred;
+  }
+
   void session_started(std::string_view owner_uuid,
                        std::uint64_t session_generation,
                        int base_bitrate_kbps) {

@@ -4936,6 +4936,159 @@ TEST(DoctorActionTests, RoundTripPressureWithLiveTuningOnTakesNoDoctorStep) {
   EXPECT_TRUE(stream.saved_preference_untouched());
 }
 
+
+namespace {
+  enum class media_verification_case_e { crossing, stale, thin_clean, control_only, graded_clean, graded_stale };
+  using media_verification_case_t = std::pair<media_verification_case_e, bool>;
+  class DoctorMediaVerificationTests : public testing::TestWithParam<media_verification_case_t> {};
+}
+
+TEST_P(DoctorMediaVerificationTests, UsesRealPostEncoderMediaCoverageOnBothRoutes) {
+  using namespace std::chrono_literals;
+  const auto [scenario, watchdog_first] = GetParam();
+  doctor_actions::defer_verification_watchdog_for_tests(true);
+  const auto watchdog_guard = util::fail_guard([] { doctor_actions::defer_verification_watchdog_for_tests(false); });
+  live_tuning_loss_stream_t stream;
+  stream_stats::client_media_counters_t counters {
+    .owner_uuid = "client-owner", .app_session_id = "launch-434",
+    .session_generation = live_tuning_loss_stream_t::generation,
+    .client_monotonic_ms = 1000, .frames_expected = 100, .frames_received = 100, .frames_lost = 0
+  };
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(counters).state, stream_stats::client_media_ingest_state_e::baseline);
+  auto context = live_tuning_loss_stream_t::context();
+  const auto after_revision = context.stats.network_sample_revision;
+  const auto request = trusted_doctor_action_request(context);
+  const auto applied = execute_with_encoder_ack(16000, [&] { return doctor_actions::execute(request, context); });
+  ASSERT_TRUE(applied.at("status").get<bool>()) << applied.dump();
+  const auto encoder_request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(encoder_request.has_value());
+  const auto application = adaptive_bitrate::live_bitrate_applied_at(encoder_request->revision, 16000);
+  ASSERT_TRUE(application.has_value());
+  const auto at = *application;
+  const auto verify_request = live_tuning_loss_stream_t::scoped({{"action_id", "verify"}, {"run_id", applied.at("run_id")}});
+  // Observe the actual acknowledgement now; do not backdate or spread any report.
+  ASSERT_EQ(doctor_actions::execute(verify_request, live_tuning_loss_stream_t::context()).at("state"), "watching");
+
+  std::vector<int> report_ms;
+  switch (scenario) {
+    case media_verification_case_e::crossing: report_ms = {4000}; break;
+    case media_verification_case_e::stale: report_ms = {500, 1000}; break;
+    case media_verification_case_e::thin_clean: report_ms = {4000, 7000}; break;
+    case media_verification_case_e::control_only: report_ms = {1000, 4000, 7000}; break;
+    case media_verification_case_e::graded_clean: report_ms = {500, 1000, 2000, 3000, 4000, 7000}; break;
+    case media_verification_case_e::graded_stale: report_ms = {500, 1000, 1500, 2000, 2500, 3000}; break;
+  }
+  std::vector<int> events = {100, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8100};
+  events.insert(events.end(), report_ms.begin(), report_ms.end());
+  std::sort(events.begin(), events.end());
+  events.erase(std::unique(events.begin(), events.end()), events.end());
+  for (const int ms : events) {
+    std::this_thread::sleep_until(at + std::chrono::milliseconds(ms));
+    stream_stats::update_control_channel_stats(8.0, 0.0, 1000);
+    if (std::find(report_ms.begin(), report_ms.end(), ms) != report_ms.end()) {
+      counters.client_monotonic_ms = 1000 + ms;
+      if (scenario != media_verification_case_e::control_only) {
+        counters.frames_expected += 100;
+        counters.frames_received += 100;
+      }
+      const auto ingested = stream_stats::ingest_client_media_counters(counters);
+      ASSERT_TRUE(ingested.accepted);
+      ASSERT_EQ(ingested.observation_published, scenario != media_verification_case_e::control_only);
+      ASSERT_EQ(ingested.state, scenario == media_verification_case_e::control_only ?
+        stream_stats::client_media_ingest_state_e::waiting_for_frames : stream_stats::client_media_ingest_state_e::observed);
+    }
+  }
+  const auto window = stream_stats::get_network_verification_window(after_revision, at, 8s);
+  ASSERT_TRUE(window.complete);
+  ASSERT_LT(window.last_age_ms, 1000);
+  ASSERT_EQ(window.media_sample_count, scenario == media_verification_case_e::control_only ? 0 : report_ms.size());
+  const auto post = stream_stats::network_verdict_since(at);
+  ASSERT_EQ(post.media_samples, scenario == media_verification_case_e::control_only ? 0 : report_ms.size() - 1);
+  if (scenario == media_verification_case_e::crossing || scenario == media_verification_case_e::thin_clean || scenario == media_verification_case_e::graded_clean) {
+    ASSERT_LT(stream_stats::get_current().media_loss_last_received_age_ms, 5000);
+  } else {
+    ASSERT_GT(stream_stats::get_current().media_loss_last_received_age_ms, 5000);
+  }
+  const bool accepts = scenario == media_verification_case_e::thin_clean || scenario == media_verification_case_e::graded_clean;
+  const auto verify = [&] {
+    if (watchdog_first) doctor_actions::run_verification_watchdog_for_tests();
+    return doctor_actions::execute(verify_request, live_tuning_loss_stream_t::context());
+  };
+  const auto result = accepts ? verify() : execute_with_encoder_ack(20000, verify);
+  EXPECT_EQ(result.at("state"), accepts ? "resolved" : "rolled_back") << result.dump();
+  EXPECT_TRUE(stream.saved_preference_untouched());
+  if (accepts) expect_live_tuning_off_for_stream_at(16000);
+  else expect_live_tuning_on_at(20000);
+
+  // Clean up the old-code false success too, so the next case has no unresolved actuator.
+  if (result.at("state") == "resolved") {
+    const auto undo = execute_with_encoder_ack(20000, [&] {
+      return doctor_actions::execute(live_tuning_loss_stream_t::scoped({{"action_id", "undo"}, {"run_id", applied.at("run_id")}}), live_tuning_loss_stream_t::context());
+    });
+    EXPECT_EQ(undo.at("state"), "undone");
+  } else {
+    const auto revision = adaptive_bitrate::get_doctor_state().revision;
+    EXPECT_EQ(doctor_actions::execute(verify_request, live_tuning_loss_stream_t::context()), result);
+    EXPECT_EQ(doctor_actions::execute(request, live_tuning_loss_stream_t::context()), result);
+    EXPECT_EQ(doctor_actions::execute(live_tuning_loss_stream_t::scoped({{"action_id", "undo"}, {"run_id", applied.at("run_id")}}), live_tuning_loss_stream_t::context()), result);
+    EXPECT_EQ(adaptive_bitrate::get_doctor_state().revision, revision);
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(ExplicitAndWatchdog, DoctorMediaVerificationTests, testing::Values(
+  media_verification_case_t {media_verification_case_e::crossing, false}, media_verification_case_t {media_verification_case_e::crossing, true},
+  media_verification_case_t {media_verification_case_e::stale, false}, media_verification_case_t {media_verification_case_e::stale, true},
+  media_verification_case_t {media_verification_case_e::thin_clean, false}, media_verification_case_t {media_verification_case_e::thin_clean, true},
+  media_verification_case_t {media_verification_case_e::control_only, false}, media_verification_case_t {media_verification_case_e::control_only, true},
+  media_verification_case_t {media_verification_case_e::graded_clean, false}, media_verification_case_t {media_verification_case_e::graded_clean, true},
+  media_verification_case_t {media_verification_case_e::graded_stale, false}, media_verification_case_t {media_verification_case_e::graded_stale, true}));
+
+class DoctorRecheckReceiptTests : public testing::TestWithParam<int> {};
+TEST_P(DoctorRecheckReceiptTests, MessageFollowsTheRefreshedOffer) {
+  using namespace std::chrono_literals;
+  live_tuning_loss_stream_t stream;
+  sustain_network_pressure(52.0, 0.0);
+  const auto context = live_tuning_loss_stream_t::context();
+  const auto request = trusted_doctor_action_request(context);
+  ASSERT_EQ(request.at("action_id"), "recheck_network");
+  const int scenario = GetParam();
+  std::thread publisher([scenario] {
+    std::this_thread::sleep_for(100ms);
+    if (scenario != 0) {
+      sustain_network_pressure(8.0, 3.4);
+      if (scenario == 2) adaptive_bitrate::set_runtime_update_supported(false, "No live encoder update", 20000);
+    }
+    for (int i = 0; i < 31; ++i) {
+      stream_stats::update_control_channel_stats(scenario == 0 ? 52.0 : 8.0, 0.0, 1000);
+      std::this_thread::sleep_for(100ms);
+    }
+  });
+  const auto result = doctor_actions::execute(request, context);
+  publisher.join();
+  ASSERT_TRUE(result.at("status").get<bool>()) << result.dump();
+  EXPECT_FALSE(result.at("changed").get<bool>());
+  EXPECT_EQ(result.at("state"), "confirmed_pressure");
+  const auto offer = result.at("doctor").at("safe_recovery_action");
+  const auto message = result.at("message").get<std::string>();
+  if (scenario == 0) {
+    EXPECT_EQ(offer.at("id"), "recheck_network");
+    EXPECT_NE(message.find("Live Tuning remains the live bitrate controller"), std::string::npos) << message;
+    EXPECT_EQ(message.find("Doctor can safely apply"), std::string::npos) << message;
+    const auto refused = doctor_actions::execute({{"action_id", "lower_bitrate"}});
+    EXPECT_FALSE(refused.at("changed").get<bool>());
+  } else if (scenario == 1) {
+    EXPECT_EQ(offer.at("id"), "lower_bitrate");
+    EXPECT_NE(message.find("Doctor offers one guarded bitrate step"), std::string::npos) << message;
+  } else {
+    EXPECT_NE(offer.at("id"), "lower_bitrate");
+    EXPECT_EQ(message.find("Doctor can safely apply"), std::string::npos) << message;
+    EXPECT_NE(message.find(offer.at("unavailable_reason").get<std::string>()), std::string::npos) << message;
+  }
+  expect_live_tuning_on_at(20000);
+  EXPECT_TRUE(stream.saved_preference_untouched());
+}
+INSTANTIATE_TEST_SUITE_P(AvailableActions, DoctorRecheckReceiptTests, testing::Values(0, 1, 2));
+
 TEST(DoctorActionTests, ALossStepThatMeetsANewerReadingTurnsLiveTuningBackOnAndSaysSo) {
   // Doctor turns Live Tuning off for the stream, then takes its step, and a network report can reach
   // the controller between the two. Then the step is not taken: Live Tuning goes back on for the
