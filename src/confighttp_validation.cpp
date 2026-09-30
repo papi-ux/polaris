@@ -106,6 +106,8 @@ namespace confighttp::validation {
       "has_ai_api_key"sv,
       "has_api_key"sv,
       "has_steamgriddb_api_key"sv,
+      "host_default_stream_path_id"sv,
+      "host_default_stream_path_label"sv,
       "live_tuning"sv,
       "platform"sv,
       "runtime_backend"sv,
