@@ -41,6 +41,16 @@ TEST(AppLaunchAsValidationTests, AcceptsOnlyExactSharedModesAndLegacyBasis) {
   EXPECT_TRUE(confighttp::validation::validate_app_payload({{"name", "Legacy"}, {"desktop-mirror", true}, {"virtual-display", false}}, error)) << error;
 }
 
+TEST(ResponseOnlyConfigKeyTests, HostDefaultModeLabelsCannotBeWrittenBack) {
+  EXPECT_TRUE(confighttp::validation::is_response_only_config_key("host_default_stream_path_id"));
+  EXPECT_TRUE(confighttp::validation::is_response_only_config_key("host_default_stream_path_label"));
+  std::string error;
+  EXPECT_TRUE(confighttp::validation::validate_config_payload({
+    {"host_default_stream_path_id", "headless_stream"},
+    {"host_default_stream_path_label", "Private Stream"},
+  }, error)) << error;
+}
+
 TEST(ConfigValidationTests, RejectsConfigKeysThatCanBreakSerialization) {
   nlohmann::json payload = {
     {"safe_key", "ok"},

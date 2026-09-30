@@ -13516,6 +13516,7 @@ namespace proc {
     if (json_int_member_or(fileTree, "version", 0) >= this_version) {
       return;
     }
+    int migrated = 0;
     if (fileTree.contains("apps") && fileTree["apps"].is_array()) {
       for (auto &app : fileTree["apps"]) {
         if (!app.is_object() || app.contains("launch-as")) {
@@ -13525,9 +13526,13 @@ namespace proc {
         // edits made by an older console without rewriting hand-edited values.
         app["launch-as"] = launch_as_from_legacy(app);
         app["launch-as-basis"] = legacy_basis(app);
+        ++migrated;
       }
     }
     fileTree["version"] = this_version;
+    if (migrated > 0) {
+      BOOST_LOG(info) << "Gave " << migrated << " app(s) a Launch as setting from their old display flags (v15).";
+    }
   }
 
   void migrate(nlohmann::json& fileTree, const std::string& fileName) {
