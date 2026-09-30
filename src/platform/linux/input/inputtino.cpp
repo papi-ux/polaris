@@ -41,7 +41,11 @@ namespace platf {
 
   void abs_mouse(input_t &input, const touch_port_t &touch_port, float x, float y) {
     auto raw = (input_raw_t *) input.get();
-    platf::mouse::move_abs(raw, touch_port, x, y);
+    // The point is counted from the captured screen's corner and the extents span the whole
+    // desktop, so the screen's own place on the desktop goes in first, as Windows does. Without it
+    // the pointer for a screen right of or below another landed on the one at the origin.
+    const auto [desktop_x, desktop_y] = point_on_desktop(touch_port, x, y);
+    platf::mouse::move_abs(raw, touch_port, desktop_x, desktop_y);
   }
 
   void button_mouse(input_t &input, int button, bool release) {

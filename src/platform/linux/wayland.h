@@ -27,6 +27,7 @@ struct gbm_device;
 
 // local includes
 #include "graphics.h"
+#include "output_layout.h"
 #include "wlgrab_timing.h"
 
 namespace wl {
@@ -380,19 +381,31 @@ namespace wl {
 
     void xdg_done(zxdg_output_v1 *) {}
 
-    void wl_geometry(wl_output *wl_output, std::int32_t x, std::int32_t y, std::int32_t physical_width, std::int32_t physical_height, std::int32_t subpixel, const char *make, const char *model, std::int32_t transform) {}
+    void wl_geometry(wl_output *wl_output, std::int32_t x, std::int32_t y, std::int32_t physical_width, std::int32_t physical_height, std::int32_t subpixel, const char *make, const char *model, std::int32_t transform);
 
     void wl_mode(wl_output *wl_output, std::uint32_t flags, std::int32_t width, std::int32_t height, std::int32_t refresh);
 
     void wl_done(wl_output *wl_output) {}
 
-    void wl_scale(wl_output *wl_output, std::int32_t factor) {}
+    void wl_scale(wl_output *wl_output, std::int32_t factor);
+
+    /**
+     * @brief This output's rectangle on the desktop, in the desktop's units. An output turned a
+     *        quarter or scaled covers a different rectangle there than viewport's mode size.
+     */
+    output_layout::rect_t logical_rect() const {
+      return output_layout::logical_rect(layout);
+    }
 
     wl_output *output;
     std::uint32_t registry_id;
     std::string name;
     std::string description;
+    /// What a capture of this output sees: the offset is its xdg-output position, and the size is
+    /// the current mode in output pixels, which is what the capture hands back.
     platf::touch_port_t viewport;
+    /// What the compositor said about this output's place on the desktop.
+    output_layout::output_t layout;
     wl_output_listener wl_listener;
     zxdg_output_v1_listener xdg_listener;
   };
@@ -509,6 +522,44 @@ namespace wl {
   std::vector<std::unique_ptr<monitor_t>> monitors(const char *display_name = nullptr);
 
   /**
+   * @brief The desktop the outputs make together: the smallest rectangle holding each output's
+   *        rectangle, in desktop pixels.
+   */
+  output_layout::desktop_t measure_desktop(const std::vector<std::unique_ptr<monitor_t>> &monitors);
+
+  /**
+   * @brief One output's capture, in the two units a capture and input each count in.
+   */
+  struct capture_geometry_t {
+    /// What a capture of the output hands back: output pixels, before the transform and the scale.
+    int frame_width = 0;
+    int frame_height = 0;
+    /// Where absolute input places the output and what it spans: in desktop pixels, counted from
+    /// the desktop's corner, or for an output turned a quarter, as 1.4.13 placed it.
+    output_layout::input_placement_t input;
+
+    /**
+     * @brief Give a display this geometry: the frame to capture and encode, and the rest to input.
+     */
+    void apply_to(platf::display_t &display) const {
+      display.width = frame_width;
+      display.height = frame_height;
+      display.offset_x = input.screen.x;
+      display.offset_y = input.screen.y;
+      display.input_width = input.screen.width;
+      display.input_height = input.screen.height;
+      display.input_counts_from_screen = input.counts_from_screen;
+      display.env_width = input.extents.width;
+      display.env_height = input.extents.height;
+    }
+  };
+
+  /**
+   * @brief Where a capture of monitors[index] sits.
+   */
+  capture_geometry_t capture_geometry(const std::vector<std::unique_ptr<monitor_t>> &monitors, std::size_t index);
+
+  /**
    * @brief While alive on this thread, output enumeration logs at debug instead of info.
    * @details The console's stats poll enumerates outputs on a timer; the nine info lines that
    *          describe a capture start are noise when they repeat every refresh, and they drowned
@@ -552,11 +603,16 @@ namespace wl {
 
     void listen(zxdg_output_manager_v1 *output_manager);
 
+    output_layout::rect_t logical_rect() const {
+      return output_layout::logical_rect(layout);
+    }
+
     wl_output *output;
     std::uint32_t registry_id;
     std::string name;
     std::string description;
     platf::touch_port_t viewport;
+    output_layout::output_t layout;
   };
 
   inline std::vector<std::unique_ptr<monitor_t>> monitors(const char *display_name = nullptr) {

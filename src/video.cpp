@@ -4971,7 +4971,7 @@ namespace video {
     }
   }
 
-  input::touch_port_t make_port(platf::display_t *display, const config_t &config) {
+  input::touch_port_t make_port(const platf::display_t *display, const config_t &config) {
     auto port = display->scaled_screen_width > 0 && display->scaled_screen_height > 0 ?
                   // The screen is fitted into the frame, and the frame into the stream.
                   input::make_touch_port_in_frame(
@@ -4982,13 +4982,10 @@ namespace video {
                     config.width,
                     config.height
                   ) :
+                  // Input maps onto the screen in the desktop's units, which a rotated or scaled
+                  // output does not share with its frame.
                   input::make_touch_port(
-                    platf::touch_port_t {
-                      display->offset_x,
-                      display->offset_y,
-                      display->width,
-                      display->height,
-                    },
+                    display->screen_on_desktop(),
                     display->env_width,
                     display->env_height,
                     config.width,

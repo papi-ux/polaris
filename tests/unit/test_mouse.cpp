@@ -9,6 +9,7 @@
 #include <utility>
 
 #include <src/input.h>
+#include <src/video.h>
 
 TEST(InputTouchPortMapping, RejectsNonPositiveClientSurfaceDimensions) {
   input::touch_port_t touch_port {
@@ -188,6 +189,198 @@ TEST(InputTouchPortMapping, NamesWhyACoordinateWasRefused) {
 
   EXPECT_EQ(input::touchport_reject_name(input::touchport_reject_e::capture_viewport_empty),
             "the capture never reported a size of its own");
+}
+
+namespace {
+  /**
+   * @brief A display that holds nothing but where its screen sits.
+   */
+  class placed_display_t final: public platf::display_t {
+  public:
+    platf::capture_e capture(const push_captured_image_cb_t &, const pull_free_image_cb_t &, bool *) override {
+      return platf::capture_e::error;
+    }
+
+    std::shared_ptr<platf::img_t> alloc_img() override {
+      return {};
+    }
+
+    int dummy_img(platf::img_t *) override {
+      return -1;
+    }
+  };
+}  // namespace
+
+// Absolute input maps onto the captured screen in the desktop's units. A capture that sets no
+// input size, which is every one but wlroots and KMS capture on Wayland, maps onto its frame as
+// before. One that sets it maps onto that: here a 1920x1080 monitor at scale 1 right of a scale 2
+// monitor, on a desktop counted in the scale 2 monitor's pixels.
+TEST(InputTouchPortMapping, ScreenOnDesktopTakesTheInputSizeOnlyWhenSet) {
+  placed_display_t display;
+  display.offset_x = 3840;
+  display.offset_y = 0;
+  display.width = 1920;
+  display.height = 1080;
+
+  auto screen = display.screen_on_desktop();
+  EXPECT_EQ(screen.offset_x, 3840);
+  EXPECT_EQ(screen.offset_y, 0);
+  EXPECT_EQ(screen.width, 1920);
+  EXPECT_EQ(screen.height, 1080);
+
+  // Half a size is no size: the frame's shape is kept whole rather than mixed with it.
+  display.input_width = 3840;
+  screen = display.screen_on_desktop();
+  EXPECT_EQ(screen.width, 1920);
+  EXPECT_EQ(screen.height, 1080);
+
+  display.input_height = 2160;
+  screen = display.screen_on_desktop();
+  EXPECT_EQ(screen.offset_x, 3840);
+  EXPECT_EQ(screen.width, 3840);
+  EXPECT_EQ(screen.height, 2160);
+}
+
+// A point on the captured screen is counted from that screen's corner, and absolute input spans
+// the whole desktop, so the screen's own place on the desktop goes in first. Linux left it out, and
+// a screen right of another took its pointer on the one at the origin.
+TEST(InputTouchPortMapping, PointOnDesktopCountsFromTheScreensCorner) {
+  const platf::touch_port_t beside_the_main_monitor {2560, 0, 3640, 1920};
+  const auto [x, y] = platf::point_on_desktop(beside_the_main_monitor, 540.0f, 960.0f);
+  EXPECT_FLOAT_EQ(x, 3100.0f);
+  EXPECT_FLOAT_EQ(y, 960.0f);
+
+  const platf::touch_port_t below_it {0, 1440, 2560, 2520};
+  const auto [below_x, below_y] = platf::point_on_desktop(below_it, 1280.0f, 540.0f);
+  EXPECT_FLOAT_EQ(below_x, 1280.0f);
+  EXPECT_FLOAT_EQ(below_y, 1980.0f);
+
+  const platf::touch_port_t at_the_origin {0, 0, 2560, 1440};
+  const auto [origin_x, origin_y] = platf::point_on_desktop(at_the_origin, 1280.0f, 720.0f);
+  EXPECT_FLOAT_EQ(origin_x, 1280.0f);
+  EXPECT_FLOAT_EQ(origin_y, 720.0f);
+}
+
+namespace {
+  video::config_t streaming_at(int width, int height) {
+    video::config_t config {};
+    config.width = width;
+    config.height = height;
+    return config;
+  }
+
+  void expect_same_port(const input::touch_port_t &port, const input::touch_port_t &expected) {
+    EXPECT_EQ(port.offset_x, expected.offset_x);
+    EXPECT_EQ(port.offset_y, expected.offset_y);
+    EXPECT_EQ(port.width, expected.width);
+    EXPECT_EQ(port.height, expected.height);
+    EXPECT_EQ(port.env_width, expected.env_width);
+    EXPECT_EQ(port.env_height, expected.env_height);
+    EXPECT_FLOAT_EQ(port.client_offsetX, expected.client_offsetX);
+    EXPECT_FLOAT_EQ(port.client_offsetY, expected.client_offsetY);
+    EXPECT_FLOAT_EQ(port.scalar_inv, expected.scalar_inv);
+    EXPECT_EQ(port.compositor_touch_turn, expected.compositor_touch_turn);
+  }
+}  // namespace
+
+// make_port() builds every session's touch port. A capture that sets no input size, which is
+// every one but wlroots and KMS capture on Wayland, has input mapped onto its frame as it always
+// did: here X11 capture of a monitor right of another.
+TEST(InputTouchPortMapping, MakePortMapsOntoTheFrameWithoutAnInputSize) {
+  placed_display_t display;
+  display.offset_x = 2560;
+  display.offset_y = 0;
+  display.width = 1920;
+  display.height = 1080;
+  display.env_width = 4480;
+  display.env_height = 1440;
+
+  expect_same_port(
+    video::make_port(&display, streaming_at(1920, 1080)),
+    input::make_touch_port(platf::touch_port_t {2560, 0, 1920, 1080}, 4480, 1440, 1920, 1080)
+  );
+}
+
+// With an input size, make_port() maps onto that rectangle rather than the frame. A 1920x1080
+// monitor at scale 1 right of a scale 2 monitor covers 3840x2160 desktop pixels, so a point in
+// the middle of its 1920x1080 stream lands in the middle of that rectangle, two pixels on for
+// each pixel of the stream.
+TEST(InputTouchPortMapping, MakePortMapsOntoTheScreensRectangleOnTheDesktop) {
+  placed_display_t display;
+  display.offset_x = 3840;
+  display.offset_y = 0;
+  display.width = 1920;
+  display.height = 1080;
+  display.input_width = 3840;
+  display.input_height = 2160;
+  display.env_width = 8960;
+  display.env_height = 2880;
+
+  const auto port = video::make_port(&display, streaming_at(1920, 1080));
+  EXPECT_EQ(port.offset_x, 3840);
+  EXPECT_EQ(port.offset_y, 0);
+  EXPECT_EQ(port.env_width, 8960);
+  EXPECT_EQ(port.env_height, 2880);
+  EXPECT_FLOAT_EQ(port.scalar_inv, 2.0f);
+
+  const auto middle = input::map_client_to_touchport(port, {960.0f, 540.0f}, {1920.0f, 1080.0f});
+  ASSERT_TRUE(middle.has_value());
+  EXPECT_FLOAT_EQ(middle->first, 1920.0f);
+  EXPECT_FLOAT_EQ(middle->second, 1080.0f);
+}
+
+// wlroots and KMS capture of a monitor turned a quarter keep the input 1.4.13 gave it: the
+// display keeps the monitor's place, here 2560,0 on 4480x1440 extents, but every point counts from
+// the desktop's corner, so make_port() leaves the place out and nothing else changes. On Linux only
+// abs_mouse() reads a touch port's place, and 1.4.13's never added it.
+TEST(InputTouchPortMapping, MakePortLeavesThePlaceOutWhenPointsCountFromTheDesktopsCorner) {
+  placed_display_t display;
+  display.offset_x = 2560;
+  display.offset_y = 0;
+  display.width = 1920;
+  display.height = 1080;
+  display.env_width = 4480;
+  display.env_height = 1440;
+  display.input_counts_from_screen = false;
+
+  const auto screen = display.screen_on_desktop();
+  EXPECT_EQ(screen.offset_x, 0);
+  EXPECT_EQ(screen.offset_y, 0);
+  EXPECT_EQ(screen.width, 1920);
+  EXPECT_EQ(screen.height, 1080);
+
+  const auto port = video::make_port(&display, streaming_at(1920, 1080));
+  expect_same_port(port, input::make_touch_port(platf::touch_port_t {0, 0, 1920, 1080}, 4480, 1440, 1920, 1080));
+
+  const auto far_corner = input::map_client_to_touchport(port, {1920.0f, 1080.0f}, {1920.0f, 1080.0f});
+  ASSERT_TRUE(far_corner.has_value());
+  const auto [x, y] = platf::point_on_desktop(platf::touch_port_t {port.offset_x, port.offset_y, port.env_width, port.env_height}, far_corner->first, far_corner->second);
+  EXPECT_FLOAT_EQ(x, 1920.0f);
+  EXPECT_FLOAT_EQ(y, 1080.0f);
+
+  // Every other capture counts from its screen's corner.
+  display.input_counts_from_screen = true;
+  EXPECT_EQ(video::make_port(&display, streaming_at(1920, 1080)).offset_x, 2560);
+}
+
+// Game Mode names a screen fitted inside its frame, and the turn gamescope gives a touch.
+// make_port() places input inside the picture and passes the turn on, with or without an input
+// size, which Game Mode never sets anyway.
+TEST(InputTouchPortMapping, MakePortPlacesAFittedScreenInsideThePicture) {
+  placed_display_t display;
+  display.width = 1920;
+  display.height = 1080;
+  display.scaled_screen_width = 1280;
+  display.scaled_screen_height = 800;
+  display.compositor_touch_turn = 90;
+
+  auto expected = input::make_touch_port_in_frame(1280, 800, 1920, 1080, 1920, 1080);
+  expected.compositor_touch_turn = 90;
+  expect_same_port(video::make_port(&display, streaming_at(1920, 1080)), expected);
+
+  display.input_width = 3840;
+  display.input_height = 2160;
+  expect_same_port(video::make_port(&display, streaming_at(1920, 1080)), expected);
 }
 
 TEST(InputTouchPortMapping, RejectsInvertedLetterboxBounds) {

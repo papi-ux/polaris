@@ -264,7 +264,17 @@ namespace wl {
     return wl_display_get_registry(display_internal.get());
   }
 
-  inline monitor_t::monitor_t(wl_output *output, std::uint32_t registry_id):
+  // The protocol's own transform values, which output_layout keeps without a Wayland include.
+  static_assert(output_layout::transform::normal == WL_OUTPUT_TRANSFORM_NORMAL);
+  static_assert(output_layout::transform::turned_90 == WL_OUTPUT_TRANSFORM_90);
+  static_assert(output_layout::transform::turned_180 == WL_OUTPUT_TRANSFORM_180);
+  static_assert(output_layout::transform::turned_270 == WL_OUTPUT_TRANSFORM_270);
+  static_assert(output_layout::transform::flipped == WL_OUTPUT_TRANSFORM_FLIPPED);
+  static_assert(output_layout::transform::flipped_90 == WL_OUTPUT_TRANSFORM_FLIPPED_90);
+  static_assert(output_layout::transform::flipped_180 == WL_OUTPUT_TRANSFORM_FLIPPED_180);
+  static_assert(output_layout::transform::flipped_270 == WL_OUTPUT_TRANSFORM_FLIPPED_270);
+
+  monitor_t::monitor_t(wl_output *output, std::uint32_t registry_id):
       output {output},
       registry_id {registry_id},
       wl_listener {
@@ -297,12 +307,19 @@ namespace wl {
   void monitor_t::xdg_position(zxdg_output_v1 *, std::int32_t x, std::int32_t y) {
     viewport.offset_x = x;
     viewport.offset_y = y;
+    layout.x = x;
+    layout.y = y;
 
     BOOST_LOG(enumeration_log()) << "Offset: "sv << x << 'x' << y;
   }
 
   void monitor_t::xdg_size(zxdg_output_v1 *, std::int32_t width, std::int32_t height) {
     BOOST_LOG(enumeration_log()) << "Logical size: "sv << width << 'x' << height;
+
+    // The output's size on the desktop, turned and scaled, which is what the desktop extents and
+    // absolute input count in. The viewport below keeps the mode, which is what a capture sees.
+    layout.logical_width = width;
+    layout.logical_height = height;
 
     // wl_output.mode is the preferred source because it is in output pixels,
     // which is what the capture hands back. But a compositor is only required to
@@ -333,8 +350,66 @@ namespace wl {
 
     viewport.width = width;
     viewport.height = height;
+    layout.mode_width = width;
+    layout.mode_height = height;
 
     BOOST_LOG(enumeration_log()) << "Resolution: "sv << width << 'x' << height;
+  }
+
+  void monitor_t::wl_geometry(
+    wl_output *,
+    std::int32_t,
+    std::int32_t,
+    std::int32_t,
+    std::int32_t,
+    std::int32_t,
+    const char *,
+    const char *,
+    std::int32_t transform
+  ) {
+    // A monitor turned a quarter is as tall on the desktop as its mode is wide. xdg-output's
+    // logical size already says so; this is what places the output when that size never came.
+    layout.transform = transform;
+    if (transform != WL_OUTPUT_TRANSFORM_NORMAL) {
+      BOOST_LOG(enumeration_log()) << "Transform: "sv << transform;
+    }
+  }
+
+  void monitor_t::wl_scale(wl_output *, std::int32_t factor) {
+    layout.scale = factor;
+    if (factor != 1) {
+      BOOST_LOG(enumeration_log()) << "Scale: "sv << factor;
+    }
+  }
+
+  output_layout::desktop_t measure_desktop(const std::vector<std::unique_ptr<monitor_t>> &monitors) {
+    std::vector<output_layout::output_t> outputs;
+    outputs.reserve(monitors.size());
+    for (const auto &monitor : monitors) {
+      outputs.emplace_back(monitor->layout);
+    }
+    return output_layout::measure_desktop(outputs);
+  }
+
+  capture_geometry_t capture_geometry(const std::vector<std::unique_ptr<monitor_t>> &monitors, std::size_t index) {
+    if (index >= monitors.size()) {
+      return {};
+    }
+
+    // Each output's mode at its xdg-output position, which is what a capture sees and what 1.4.13
+    // measured the desktop by.
+    std::vector<output_layout::rect_t> modes;
+    modes.reserve(monitors.size());
+    for (const auto &each : monitors) {
+      modes.push_back({each->viewport.offset_x, each->viewport.offset_y, each->viewport.width, each->viewport.height});
+    }
+
+    const auto &monitor = *monitors[index];
+    return {
+      .frame_width = monitor.viewport.width,
+      .frame_height = monitor.viewport.height,
+      .input = output_layout::place_input(monitor.layout, modes[index], measure_desktop(monitors), output_layout::mode_extents(modes)),
+    };
   }
 
   void monitor_t::listen(zxdg_output_manager_v1 *output_manager) {

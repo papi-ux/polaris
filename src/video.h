@@ -111,6 +111,20 @@ namespace video {
   platf::mem_type_e map_base_dev_type(AVHWDeviceType type);
 
   /**
+   * @brief The touch port a session's absolute input maps through, from what its capture says.
+   *
+   * A capture that fits a screen of another shape into its frame, which is Game Mode's, has input
+   * placed inside the picture. Every other capture has it placed on the captured screen's
+   * rectangle on the desktop: in desktop pixels for wlroots and KMS capture on Wayland, and the
+   * frame itself for the rest, a monitor those two turn a quarter included. A capture whose points
+   * count from the desktop's corner has its place left out.
+   * @param display The capture.
+   * @param config The session, for the size the client streams at.
+   * @return The touch port.
+   */
+  input::touch_port_t make_port(const platf::display_t *display, const config_t &config);
+
+  /**
    * @brief Why interactive capture setup could not be completed, when it could not.
    *
    * Two very different things stop a Mirror Desktop launch here, and only one of them is about the
