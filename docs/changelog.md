@@ -41,6 +41,126 @@ starts at `v1.0.0`.
   capture give the stream no place on a larger desktop, so they are unchanged. Touch and pen
   still leave the place out.
 
+- With Live Tuning on, Doctor offers to lower the bitrate for sustained video frame loss. It left all
+  network pressure to Live Tuning and offered only a recheck. Doctor now offers one step with Undo,
+  verified like any other. Taking it turns Live Tuning off for this stream only, as a live bitrate
+  set by hand does, and never writes the saved preference. Undo, a step that does not verify, or
+  turning Live Tuning back on puts back the bitrate from before the step and turns Live Tuning on
+  again, and the step's receipt says so. Otherwise Live Tuning stays off until the stream ends, and
+  the next stream starts with it on. While the step holds, pressing Auto Fix again takes no second
+  step and says why, and once the network is clean Doctor offers the step's Undo instead of a
+  quality restore the step would refuse. If a network report reaches the controller just as Doctor
+  takes the step, Doctor takes none, turns Live Tuning back on and says so. Round trip time alone
+  stays Live Tuning's to cut for, and Doctor only rechecks it, saying what Live Tuning's own rule
+  does rather than promising a cut.
+
+- The Dashboard quotes the loss Doctor judges as well. Its Loss tile, the tile's colour, the quality
+  grade and the loss chart read the newest one second report, and so did the stream's client line
+  once the host began filling it, so on the Retroid Pocket 6's HEVC run they swung between 0% and
+  7.4% beside a Doctor that held 1.9%. They now show the window's figure, coloured as Doctor judges
+  it, and no figure until the host has judged one. A client row carries that figure and stops
+  serving it once its reports are more than five seconds old, as Doctor does.
+
+- With Live Tuning on, Doctor judges PyroWave's bitrate advice on the rate the stream is set to.
+  It judged Live Tuning's moving target, so a stream set between PyroWave's starved line and the
+  rate Doctor would raise it to went from no finding to "set more bitrate" and back with every cut
+  Live Tuning made for a Wi-Fi RTT spike, though Live Tuning was about to bring the bitrate back on
+  its own. The same held for a stream that wants more than Doctor raises it to, such as 3840x2160
+  at 120 fps in 4:4:4 set to 320 Mbps by hand: a cut read as a reduction Doctor's restore would
+  undo, and frames held to the cut's smaller byte budget filled it more often, so the finding came
+  and went with every cut. A cut no longer counts as such a reduction, and the share of frames at
+  the byte budget leaves out frames sent while Live Tuning has cut the stream below its set rate.
+  The session status's `pyrowave_bitrate.starved`, which the console's PyroWave readout words, judges
+  the set rate as Doctor does, where it came and went with the same cuts beside a headline that held.
+  Whether Live Tuning sits at its PyroWave floor still reads the live rate.
+
+- A bitrate step Doctor verifies leaves its headline judging the step's own readings. Doctor
+  verified the step against the newest readings after it while the headline went on judging a window
+  that still held the readings that asked for it, so a verified step left "Sustained network
+  pressure" and another lower bitrate step on offer for most of 20 seconds, which pressing only
+  answered by asking to finish or undo the step already taken. It went the other way too: a
+  stepped-down stream that went on losing 4% of its frames verified on two clean reports, beside a
+  headline that still called it pressure. Doctor now verifies the step against the window judged
+  afresh from the moment the encoder applied it, and once it verifies the headline's judgement
+  starts over from that moment too. Neither counts the first report after the step, which covers the
+  second before it and still carries the loss the step was taken for, so a step that cures 23% loss
+  verifies. A step whose own readings are still pressure rolls back, and its readings stay in the
+  window.
+
+- Doctor's control channel finding holds steady as well. It came and went with ENet's newest
+  estimate of the control channel's own loss against 2%, which on the Retroid Pocket 6's HEVC run
+  read 1.08 and then 2.81 on consecutive polls, so the headline could still go between that finding
+  and nothing every second. The estimate is now averaged over the same 20 seconds with the same
+  band, noted from 2% and dropped below 1%, and the stream stats carry it in `network_verdict` as
+  `control_loss_pct`. It still never counts as network pressure.
+
+- A verdict read between two client reports quotes the figure its band was judged on. The band
+  moved only when a report arrived, while the figure was worked out again whenever it was read, so
+  once a lossy second left the window between reports, which PyroWave's reports a second or more
+  apart leave room for, a pressure row could read 0.70%, below the 1% that clears it. Figures whose
+  readings have stopped are no longer served either: once the client's newest media report is more
+  than five seconds old, or the host has had no reading for two, the stream stats, the tuning
+  block, Doctor's evidence and the session status call that loss or RTT stale, where they went on
+  quoting the old figure with "elevated" beside it while Doctor said it was not judging it. A
+  session that ends is still graded by the verdict the window last reached. That grading runs after
+  a dropped client's readings have stopped, and the freshness check read every abrupt disconnect as
+  a clean network.
+
+- Doctor and the session status call the live bitrate controller Live Tuning, as everything else
+  does. Doctor's network findings said "Auto Safe already owns the live bitrate correction" and
+  offered "Recheck Auto Safe", a name that appeared nowhere else a player could see.
+
+- The console quotes the same loss. The post-session report, the Fix My Stream checklist, the
+  session snapshot and the issue draft read the verdict's video frame loss over 20 seconds, with the
+  frame counts behind it, instead of the newest one second report, and say which loss it is: frames
+  that never arrived whole after FEC, beside the frames the host dropped before sending, which are a
+  different count. A PyroWave session whose last second lost 32.7% of its frames, while the host
+  dropped 0.96%, was reported as "Network packet loss was 32.7%" and put on the network. The report
+  names the network only when the window judged its loss as pressure, and until the host has judged
+  any the snapshot says the loss is not judged yet instead of 0%, or, for a Moonlight or Artemis
+  client, which sends no media reports, that it does not report it. Doctor's loss row says the same
+  of such a client instead of waiting for five reports. A session whose client dropped keeps the
+  loss the window last judged in its report, as the host does, though the host's last live payloads
+  before the ping timeout call that loss stale, and a stale round trip is not graded. It keeps it
+  only while the window still holds the reports it was judged on: a session whose reports stopped
+  more than 20 seconds before it ended is graded on no loss, as the host grades it.
+
+- Live Tuning's loss handling is 1.4.13's, unchanged in this release. It still hears every control
+  ping as a reading with no loss, about ten a second, and each client media report with its own
+  loss, and acts once a second on its own average of those. Whether a report with a few percent of
+  lost frames cuts the bitrate depends on when it lands in that second, so the Retroid Pocket 6's
+  HEVC run, a 7.4% report every 3 to 5 seconds, can still be cut for its loss. While those reports
+  keep coming Live Tuning does not climb back, because any report with lost frames restarts the 10
+  seconds it waits before a step up. The tuning block now carries Doctor's figure as `network_loss_pct`
+  beside `adaptive_packet_loss_ewma`, Live Tuning's own average, and the console's Live Tuning row
+  shows Doctor's. The row read the controller's average, already a percentage, as a fraction, so
+  0.078% showed as 7.8%.
+
+- Doctor grades the network from that verdict. Its headline, the evidence it cites, the Auto Fix it
+  offers and the session status's `network_risk` all read the same 20 second judgement, so one
+  second that lost a burst of frames, or one Wi-Fi RTT spike, no longer flips the verdict. On the
+  Retroid Pocket 6's recorded HEVC run Doctor changed its headline 12 times in 24 seconds, between
+  "Control-channel retries were observed" and "Sustained network pressure". It now names the
+  pressure once, seven seconds in, and keeps it. The PyroWave run's RTT spikes turned its bitrate
+  advice into a network warning and back six times in 30 seconds, and now leave it alone. The loss
+  row reads "Video frame loss" and says how many of how many frames never arrived whole after FEC
+  recovery, loss stops counting once the client's media reports are more than five seconds old, and
+  the control channel finding no longer tells a player not to lower quality while Live Tuning is
+  lowering it. A quality restore Doctor offers on that judgement is verified on it too, at every
+  reading while the restore is under way, so light loss like the Retroid Pocket 6's, a 7.4% report
+  every few seconds in a window under 2%, no longer rolls back the restore it was offered on.
+
+- The stream stats carry `network_verdict`, video frame loss and round trip time judged over the
+  last 20 seconds rather than from the newest report. Its loss is the share of video frames the
+  client expected and never received whole, after FEC recovery, with the frame counts behind it, and
+  its RTT is the median of the host's readings. Loss becomes pressure at 2% and clears only below
+  1%, RTT at 28 ms and below 20, and a window with fewer than five reports has no verdict. A
+  stream's own client row now says its loss arrived: it read `packet_loss_available: false` on
+  every codec while the top level had the loss, which is how a check of a PyroWave session
+  concluded the client's loss never reached the host. The host log also says once a stream when a
+  client's media reports start counting, when reports come too far apart to count, and, at most
+  every half minute, when one is refused.
+
 - A client can set up to 500 Mbps by hand. The endpoints a paired client sets its own bitrate
   through, its client settings' `target_bitrate_kbps`, a live bitrate change, a resolved launch's
   `bitrateKbps`, the launch profile route and a Space's resolver, stopped at 300000 kbps, below

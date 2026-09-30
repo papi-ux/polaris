@@ -102,7 +102,7 @@ TEST(SettingsMetadataTests, BuildTuningJsonMirrorsAdaptiveStateAndSnapshotFlags)
 
   const auto tuning = settings_metadata::build_tuning_json(adaptive_state, stats, true);
 
-  EXPECT_EQ(tuning.size(), 14u);
+  EXPECT_EQ(tuning.size(), 18u);
   EXPECT_EQ(tuning.at("adaptive_bitrate_enabled").get<bool>(), adaptive_bitrate::is_enabled());
   EXPECT_TRUE(tuning.at("adaptive_bitrate_active").get<bool>());
   EXPECT_TRUE(tuning.at("adaptive_runtime_update_supported").get<bool>());
@@ -117,9 +117,49 @@ TEST(SettingsMetadataTests, BuildTuningJsonMirrorsAdaptiveStateAndSnapshotFlags)
   EXPECT_FALSE(tuning.at("ai_auto_quality_enabled").get<bool>());
   EXPECT_FALSE(tuning.at("ai_optimizer_enabled").get<bool>());
   EXPECT_TRUE(tuning.at("mangohud_configured").get<bool>());
+  // Nothing judged yet: no figure, rather than a zero nobody measured.
+  EXPECT_TRUE(tuning.at("network_loss_pct").is_null());
+  EXPECT_EQ(tuning.at("network_loss_state").get<std::string>(), "collecting");
+  EXPECT_EQ(tuning.at("network_loss_basis").get<std::string>(), "video_frames_lost_after_fec");
+  EXPECT_TRUE(tuning.at("network_rtt_ms").is_null());
 
   const auto without_mangohud = settings_metadata::build_tuning_json(adaptive_state, stats, false);
   EXPECT_FALSE(without_mangohud.at("mangohud_configured").get<bool>());
+}
+
+TEST(SettingsMetadataTests, BuildTuningJsonQuotesTheLossDoctorJudged) {
+  const auto adaptive_state = make_adaptive_state();
+  stream_stats::stats_t stats;
+  stats.network_sample_revision = 12;
+  stats.network_last_received_age_ms = 100;
+  stats.media_loss_sample_revision = 11;
+  stats.media_loss_last_received_age_ms = 600;
+  stats.network_verdict.loss_available = true;
+  stats.network_verdict.loss_pct = 2.4;
+  stats.network_verdict.loss_elevated = true;
+  stats.network_verdict.rtt_available = true;
+  stats.network_verdict.rtt_ms = 8.5;
+
+  const auto tuning = settings_metadata::build_tuning_json(adaptive_state, stats, false);
+
+  // The figure Doctor's loss row quotes, beside the controller's own average of what it was fed.
+  EXPECT_DOUBLE_EQ(tuning.at("network_loss_pct").get<double>(), 2.4);
+  EXPECT_EQ(tuning.at("network_loss_state").get<std::string>(), "elevated");
+  EXPECT_DOUBLE_EQ(tuning.at("network_rtt_ms").get<double>(), 8.5);
+  EXPECT_DOUBLE_EQ(tuning.at("adaptive_packet_loss_ewma").get<double>(), 0.25);
+
+  // Doctor stops judging loss once the client's newest report is more than five seconds old. The
+  // tuning block stops quoting it at the same point, and says why instead of showing the old figure.
+  stats.media_loss_last_received_age_ms = 6000;
+  const auto stale = settings_metadata::build_tuning_json(adaptive_state, stats, false);
+  EXPECT_TRUE(stale.at("network_loss_pct").is_null());
+  EXPECT_EQ(stale.at("network_loss_state").get<std::string>(), "stale");
+  EXPECT_DOUBLE_EQ(stale.at("network_rtt_ms").get<double>(), 8.5);
+
+  // With no reading at all for more than two seconds, RTT goes the same way.
+  stats.network_last_received_age_ms = 2500;
+  const auto silent = settings_metadata::build_tuning_json(adaptive_state, stats, false);
+  EXPECT_TRUE(silent.at("network_rtt_ms").is_null());
 }
 
 TEST(SettingsMetadataTests, StreamDisplayModeOptionsCarryBadges) {

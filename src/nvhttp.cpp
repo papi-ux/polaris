@@ -132,6 +132,24 @@ namespace nvhttp {
   namespace pt = boost::property_tree;
 
   namespace {
+    // A client media report this host refused never reaches Doctor, and the client only logs it once
+    // on its own side. Say which refusal it was here, at most once every half minute.
+    void note_refused_media_report(SimpleWeb::StatusCode code, const nlohmann::json &body) {
+      static std::atomic<std::int64_t> last_logged_ms {0};
+      const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()
+      ).count();
+      auto last = last_logged_ms.load(std::memory_order_relaxed);
+      if (last != 0 && now_ms - last < 30000) {
+        return;
+      }
+      if (!last_logged_ms.compare_exchange_strong(last, now_ms, std::memory_order_relaxed)) {
+        return;
+      }
+      BOOST_LOG(info) << "Doctor: refused a client media report with HTTP "sv << static_cast<int>(code) << ": "sv
+                      << body.value("code", std::string {"unknown"});
+    }
+
     // Moonlight shows this verbatim, so it names the setting and not a Nova screen: the launch mode
     // is Where games run on the host and the mode Nova picks per launch.
     constexpr const char *desktop_steam_did_not_exit_message =
@@ -1837,7 +1855,7 @@ namespace nvhttp {
       status["applied_stream_settings"] = client_sync.value("applied_stream_settings", nlohmann::json::object());
       status["message"] =
         manual_override ?
-          "Manual stream overrides are active; Polaris will report guidance but will not treat Auto Safe as authoritative." :
+          "Manual stream overrides are active; Polaris will report guidance but will not treat Live Tuning as authoritative." :
         relaunch_required ?
           "Desired settings are saved and will become effective after the active stream relaunches." :
         client_presentation_status == "blocked" ?
@@ -1847,7 +1865,7 @@ namespace nvhttp {
         !has_applied_stream_settings ?
           "Polaris is waiting for Nova to report the stream settings it actually applied." :
         adaptive_active ?
-          "Auto Safe is active; Polaris is adjusting the effective bitrate in real time under the saved paired-client limit." :
+          "Live Tuning is active; Polaris is adjusting the effective bitrate in real time under the saved paired-client limit." :
           "Desired settings match the current Polaris runtime state.";
       status["fields"] = std::move(fields);
       return status;
@@ -2062,7 +2080,7 @@ namespace nvhttp {
         {"allow_display_mode_change", request_client_refresh},
         {"internal_display_only", true},
         {"reason", prefer_stable_multiple ?
-          "Use an even internal display refresh multiple for capped Auto Safe streams." :
+          "Use an even internal display refresh multiple for capped streams while Live Tuning is on." :
           prefer_exact_refresh ?
           "Match internal handheld displays to the stream FPS to avoid refresh-rate flapping." :
           "No client display-mode change is requested for this stream target."}
@@ -2551,7 +2569,8 @@ namespace nvhttp {
         (target_fps > 0.0 && stats.capture_source_fps > 0.0 &&
          stats.capture_source_fps < target_fps * 0.50 && stats.duplicate_frame_ratio >= 0.10);
 
-      const bool network_risk = stats.network_risk;
+      // The judged verdict Doctor grades with, so the session status never contradicts it.
+      const bool network_risk = stream_stats::judged_network(stats).risk;
       const bool pacing_risk =
         stats.dropped_frame_ratio >= 0.04 ||
         (!static_or_duplicate_content &&
@@ -10773,6 +10792,9 @@ namespace nvhttp {
       }
 
       auto write_json = [&](SimpleWeb::StatusCode code, const nlohmann::json &body) {
+        if (code != SimpleWeb::StatusCode::success_ok) {
+          note_refused_media_report(code, body);
+        }
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
         response->write(code, body.dump(), headers);

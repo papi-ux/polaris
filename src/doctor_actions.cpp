@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cmath>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -60,6 +61,9 @@ namespace doctor_actions {
       std::uint64_t verification_step = 0;
       std::uint64_t network_sample_revision_at_apply = 0;
       bool requires_media_sample = false;
+      // The step turned Live Tuning off for this stream, as a player's own live bitrate does. Undo and a
+      // rollback turn it back on with the rate.
+      bool paused_live_tuning = false;
       bool verification_passed = false;
       stream_stats::network_verification_window_t verified_window;
       std::chrono::steady_clock::time_point requested_at {};
@@ -67,6 +71,10 @@ namespace doctor_actions {
     };
 
     std::mutex action_mutex;
+#ifdef POLARIS_TESTS
+    // Route tests choose which real verifier runs first, without rewriting telemetry time.
+    bool verification_watchdog_deferred_for_tests = false;
+#endif
     action_run_t action_run;
     struct terminal_action_t {
       nlohmann::json result;
@@ -154,11 +162,21 @@ namespace doctor_actions {
     }
 
     nlohmann::json action_in_progress(const action_run_t &run) {
+      std::string error = "Finish or undo the active same-stream Doctor change before starting another.";
+      if (run.kind == action_kind_e::lower_bitrate) {
+        // Doctor takes one step at a time. Say which step holds, whether it is verified, and what Undo
+        // puts back.
+        error = std::string {"Doctor already lowered this stream's bitrate one step"} +
+          (run.paused_live_tuning ? " and turned Live Tuning off for it" : "") +
+          ", and takes one step at a time. " +
+          (run.verification_passed ? "That step is verified and stays until you undo it." : "Doctor is still checking that step.") +
+          " Undo puts the bitrate back" + (run.paused_live_tuning ? " and turns Live Tuning on again." : ".");
+      }
       return {
         {"status", false}, {"changed", false}, {"state", "action_in_progress"},
         {"run_id", run.run_id},
         {"request_id", run.request_id},
-        {"error", "Finish or undo the active same-stream Doctor change before starting another."}
+        {"error", error}
       };
     }
 
@@ -176,8 +194,15 @@ namespace doctor_actions {
     restore_outcome_t restore_bitrate_run_locked(action_run_t &run) {
       const int restore_live_bitrate_kbps = run.previous_controller.live_bitrate_kbps > 0 ?
         run.previous_controller.live_bitrate_kbps : run.previous_controller.base_bitrate_kbps;
+      auto expected_revision = run.controller_revision;
+      if (run.paused_live_tuning && adaptive_bitrate::get_doctor_state().revision == run.controller_revision) {
+        // Live Tuning back on for this stream, then the rate, while the step still owns the controller.
+        // A newer writer's choice stands, Live Tuning's state included.
+        adaptive_bitrate::end_stream_override();
+        expected_revision = adaptive_bitrate::get_doctor_state().revision;
+      }
       const auto restored_revision = adaptive_bitrate::restore_doctor_state_if_revision(
-        run.controller_revision,
+        expected_revision,
         run.previous_controller
       );
       run.active = false;
@@ -194,6 +219,62 @@ namespace doctor_actions {
         encoder_restored ? restore_status_e::restored : restore_status_e::encoder_unconfirmed,
         restore_live_bitrate_kbps
       };
+    }
+
+#ifdef POLARIS_TESTS
+    std::function<void(std::string_view)> live_tuning_step_hook;
+#endif
+
+    // Where a newer controller writer can meet Doctor's step with Live Tuning off. A unit test puts a
+    // writer there; otherwise nothing runs.
+    void live_tuning_step_point([[maybe_unused]] std::string_view stage) {
+#ifdef POLARIS_TESTS
+      if (live_tuning_step_hook) {
+        live_tuning_step_hook(stage);
+      }
+#endif
+    }
+
+    /// What a step with Live Tuning on came to.
+    struct live_tuning_step_t {
+      /// The step's controller revision, once it is taken.
+      std::optional<std::uint64_t> revision;
+      /// The step was not taken after Live Tuning was turned off for it, and Live Tuning is back on.
+      bool live_tuning_back_on = false;
+      /// The rate from before the step is back too.
+      bool rate_restored = false;
+    };
+
+    // A step with Live Tuning on turns it off for this stream only, the rule a player's own live
+    // bitrate follows (set_owner_live_bitrate()), and steps down from there. Nothing is saved:
+    // restore_bitrate_run_locked() turns it back on with the rate, and session_ended() puts the saved
+    // preference back for the next stream.
+    live_tuning_step_t step_with_live_tuning_off(const adaptive_bitrate::doctor_state_t &before,
+                                                 int current_kbps,
+                                                 int target_kbps) {
+      // The check set_doctor_bitrate_if_revision() makes, before anything moves.
+      if (adaptive_bitrate::get_doctor_state().revision != before.revision) {
+        return {};
+      }
+      adaptive_bitrate::set_live_bitrate_for_stream(current_kbps);
+      const auto paused = adaptive_bitrate::get_doctor_state();
+      live_tuning_step_point("paused");
+      if (const auto revision = adaptive_bitrate::set_doctor_bitrate_if_revision(paused.revision, target_kbps)) {
+        return {revision};
+      }
+      // A newer writer, most often a network report, moved the controller between the two, so the step
+      // is not taken. Put back the rate from before while Live Tuning's feedback is still held, then
+      // turn Live Tuning back on for this stream whether or not that won: nothing it was turned off
+      // for happened.
+      live_tuning_step_t result;
+      for (int attempt = 0; attempt < 3 && !result.rate_restored; ++attempt) {
+        const auto expected = adaptive_bitrate::get_doctor_state().revision;
+        live_tuning_step_point("restoring");
+        result.rate_restored = adaptive_bitrate::restore_doctor_state_if_revision(expected, before).has_value();
+      }
+      adaptive_bitrate::end_stream_override();
+      result.live_tuning_back_on = adaptive_bitrate::is_enabled();
+      return result;
     }
 
     bool encoder_application_confirmed_locked(action_run_t &run) {
@@ -223,6 +304,13 @@ namespace doctor_actions {
     }
 
     void remember_terminal_locked(const action_run_t &run, nlohmann::json result) {
+      // A step that turned Live Tuning off for the stream and was put back turned it on again with the
+      // rate, and its receipt says so.
+      if (run.paused_live_tuning && result.value("state", std::string {}) == "rolled_back" &&
+          !result.contains("adaptive_bitrate_enabled")) {
+        result["message"] = result.value("message", std::string {}) + " Live Tuning is back on for this stream.";
+        result["adaptive_bitrate_enabled"] = true;
+      }
       result["request_id"] = run.request_id;
       if (!terminal_action.run_id.empty()) {
         terminal_action_history.push_back(terminal_action);
@@ -292,6 +380,18 @@ namespace doctor_actions {
             run_snapshot,
             rollback_unconfirmed_result(run_snapshot.run_id, outcome.bitrate_kbps)
           );
+        } else if (outcome.status == restore_status_e::restored && run_snapshot.paused_live_tuning) {
+          // Doctor's step turned Live Tuning off for this stream, and the player turned it back on, which
+          // ends the step: the rate from before it is back with Live Tuning. No newer choice superseded
+          // Doctor here.
+          remember_terminal_locked(run_snapshot, {
+            {"status", true}, {"changed", true}, {"state", "rolled_back"},
+            {"run_id", run_snapshot.run_id},
+            {"message", "You turned Live Tuning back on, so Doctor put back the bitrate from before its step and ended it."},
+            {"restored_bitrate_kbps", outcome.bitrate_kbps},
+            {"adaptive_bitrate_enabled", true},
+            {"undo", {{"available", false}}}
+          });
         } else {
           remember_terminal_locked(run_snapshot, superseded_result(run_snapshot.run_id));
         }
@@ -448,6 +548,7 @@ namespace doctor_actions {
         {"media_loss_sample_revision", stats.media_loss_sample_revision},
         {"media_loss_last_received_age_ms", stats.media_loss_last_received_age_ms},
         {"latency_ms", stats.latency_ms},
+        {"network_verdict", stream_stats::network_verdict_json(stream_stats::served_network_verdict(stats))},
         {"bitrate_kbps", current_live_bitrate(stats)},
         {"paired_target_bitrate_kbps", stats.paired_target_bitrate_kbps},
         {"effective_launch_bitrate_kbps", stats.effective_launch_bitrate_kbps},
@@ -455,19 +556,18 @@ namespace doctor_actions {
       };
     }
 
+    // The judged verdict Doctor's headline reads, so a restore it offers is one this accepts, and one it
+    // verifies is judged the way it was offered.
+    bool network_verdict_clear_for_quality(const stream_stats::stats_t &stats) {
+      const auto verdict = stream_stats::served_network_verdict(stats);
+      const auto network = stream_stats::judged_network(stats);
+      return stats.streaming && (network.loss_judged || network.rtt_judged) && !network.risk &&
+        (!network.loss_judged || verdict.loss_pct < stream_stats::network_judge_t::k_loss_enter_pct) &&
+        (!network.rtt_judged || verdict.rtt_ms < stream_stats::network_judge_t::k_rtt_fail_ms);
+    }
+
     bool network_stable_for_quality_retry(const stream_stats::stats_t &stats) {
-      const bool network_evidence_available =
-        stats.packet_loss_available || stats.control_channel_samples > 0;
-      const bool host_observation_fresh = stats.network_sample_revision > 0 &&
-        stats.network_last_received_age_ms >= 0 &&
-        stats.network_last_received_age_ms <=
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-            initial_network_evidence_max_age
-          ).count();
-      return stats.streaming && host_observation_fresh &&
-        network_evidence_available && !stats.network_risk &&
-        stats.packet_loss <= 2.0 && stats.latency_ms < 45.0 &&
-        !adaptive_bitrate::doctor_policy_blocks_quality_restore();
+      return network_verdict_clear_for_quality(stats) && !adaptive_bitrate::doctor_policy_blocks_quality_restore();
     }
 
     nlohmann::json verification_window_json(
@@ -476,6 +576,11 @@ namespace doctor_actions {
         {"complete", window.complete},
         {"samples", window.sample_count},
         {"media_samples", window.media_sample_count},
+        {"eligible_media_samples", window.eligible_media_sample_count},
+        {"eligible_media_last_age_ms", window.eligible_media_last_age_ms >= 0 ?
+          nlohmann::json(window.eligible_media_last_age_ms) : nlohmann::json(nullptr)},
+        {"eligible_media_packet_loss_pct", window.eligible_media_sample_count > 0 ?
+          nlohmann::json(window.eligible_media_packet_loss) : nlohmann::json(nullptr)},
         {"first_delay_ms", window.first_delay_ms},
         {"last_delay_ms", window.last_delay_ms},
         {"span_ms", window.span_ms},
@@ -493,22 +598,53 @@ namespace doctor_actions {
 
     bool verification_window_stable(
         const stream_stats::network_verification_window_t &window,
-        const action_run_t &run) {
+        const action_run_t &run,
+        const stream_stats::stats_t &stats) {
       const bool required_media_arrived =
-        !run.requires_media_sample || window.media_sample_count > 0;
+        !run.requires_media_sample ||
+        (window.eligible_media_sample_count > 0 && window.eligible_media_last_age_ms >= 0 &&
+         window.eligible_media_last_age_ms <= stream_stats::judged_network_t::k_media_report_max_age_ms);
       const bool restoring_quality = run.kind == action_kind_e::restore_quality;
-      const bool network_risk = restoring_quality ? window.any_network_risk : window.network_risk;
-      const bool packet_loss_available = restoring_quality ?
-        window.any_packet_loss_available : window.packet_loss_available;
-      const double packet_loss = restoring_quality ? window.max_packet_loss : window.packet_loss;
-      const double latency_ms = restoring_quality ? window.max_latency_ms : window.latency_ms;
-      const bool quality_policy_clear = !restoring_quality ||
-        !adaptive_bitrate::doctor_policy_blocks_quality_restore();
+      if (restoring_quality) {
+        // A restore is verified on the window verdict that offered it, and on the network latch, which
+        // reads that verdict at every reading since the step. Held to the newest readings instead, the
+        // Retroid Pocket 6's light HEVC loss, a 7.4% report every few seconds in a window under 2%, rolled
+        // back almost every restore Doctor had offered on it.
+        return window.complete && required_media_arrived &&
+          !adaptive_bitrate::doctor_policy_blocks_quality_restore() &&
+          network_verdict_clear_for_quality(stats);
+      }
+      // A step for network pressure is verified against the verdict Doctor's headline will read once
+      // it verifies: the window judged afresh from the moment the encoder applied the step, counting
+      // only media reports whose second began after it. The first report after the step covers the
+      // second before it. With enough readings the two cannot disagree. A step that verifies starts the
+      // headline's judgement over from the same moment, and a step whose own readings are still
+      // pressure rolls back, as the headline would have it. A step taken for loss needs its loss
+      // judged; until then the newest readings decide, as they did.
+      auto post_step = stats;
+      post_step.network_verdict = stream_stats::network_verdict_since(run.applied_at);
+      const auto network = stream_stats::judged_network(post_step);
+      const bool judged = run.requires_media_sample ? network.loss_judged : network.loss_judged || network.rtt_judged;
+      if (judged) {
+        return window.complete && required_media_arrived && !network.risk;
+      }
       return window.complete && required_media_arrived &&
-        quality_policy_clear &&
-        !network_risk &&
-        (!packet_loss_available || packet_loss <= 2.0) &&
-        latency_ms < 45.0;
+        !window.network_risk &&
+        (run.requires_media_sample ? window.eligible_media_packet_loss <= 2.0 :
+          !window.packet_loss_available || window.packet_loss <= 2.0) &&
+        window.latency_ms < 45.0;
+    }
+
+    // A verified step for network pressure hands Doctor's headline the judgement verification read:
+    // the window from the moment the encoder applied the step. Judged over a window that still held
+    // the readings that asked for the step, a verified step left "Sustained network pressure" and
+    // another lower_bitrate on offer for most of 20 seconds. A step that rolls back leaves the
+    // judgement as it was, since its readings are why it rolled back.
+    void mark_verified_locked(action_run_t &run) {
+      if (!run.verification_passed && run.kind == action_kind_e::lower_bitrate) {
+        stream_stats::restart_network_judgement(run.applied_at);
+      }
+      run.verification_passed = true;
     }
 
     void run_verification_watchdog(const std::string &run_id,
@@ -605,7 +741,7 @@ namespace doctor_actions {
       );
       const bool verification_passed =
         adaptive_state.runtime_update_supported &&
-        verification_window_stable(window, action_run);
+        verification_window_stable(window, action_run, stats);
       if (!verification_passed) {
         const auto run_snapshot = action_run;
         const auto outcome = restore_bitrate_run_locked(action_run);
@@ -635,7 +771,7 @@ namespace doctor_actions {
         return;
       }
 
-      action_run.verification_passed = true;
+      mark_verified_locked(action_run);
       action_run.verified_window = window;
       BOOST_LOG(info) << "Doctor: automatic verification passed run="sv << run_id
                       << " step=" << verification_step;
@@ -645,6 +781,9 @@ namespace doctor_actions {
                                         std::uint64_t verification_step,
                                         const std::string &owner_uuid,
                                         std::uint64_t session_generation) {
+#ifdef POLARIS_TESTS
+      if (verification_watchdog_deferred_for_tests) return;
+#endif
       task_pool.pushDelayed([run_id, verification_step, owner_uuid, session_generation]() {
         run_verification_watchdog(
           run_id, verification_step, owner_uuid, session_generation
@@ -727,24 +866,8 @@ namespace doctor_actions {
   }  // namespace
 
   bool network_pressure_confirmed(const stream_stats::stats_t &stats) {
-    const bool host_observation_fresh = stats.network_sample_revision > 0 &&
-      stats.network_last_received_age_ms >= 0 &&
-      stats.network_last_received_age_ms <=
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-          initial_network_evidence_max_age
-        ).count();
-    const bool media_loss_fresh = stats.media_loss_sample_revision > 0 &&
-      stats.media_loss_last_received_age_ms >= 0 &&
-      stats.media_loss_last_received_age_ms <=
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-          initial_network_evidence_max_age
-        ).count();
-    const bool confirmed_media_pressure = media_loss_fresh &&
-      stats.packet_loss_available && stats.packet_loss > 2.0;
-    const bool confirmed_latency_pressure = host_observation_fresh &&
-      stats.latency_ms >= 45.0;
-    return stats.streaming && stats.network_risk &&
-      (confirmed_media_pressure || confirmed_latency_pressure);
+    // The judged verdict Doctor's headline reads, so the step it offers is the step this takes.
+    return stats.streaming && stream_stats::judged_network(stats).fail;
   }
 
   bool paired_route_allowed(std::string_view action_id,
@@ -1052,14 +1175,27 @@ namespace doctor_actions {
         refreshed_health,
         trusted_context != nullptr ? trusted_context->app_uuid : std::string {}
       );
+      std::string message = "Current loss and latency do not justify reducing bitrate.";
+      if (pacing_recheck) {
+        message = "Collected a fresh read-only pacing observation; no launch or game-process settings were changed.";
+      } else if (confirmed) {
+        const auto &offer = refreshed_doctor.at("safe_recovery_action");
+        const auto unavailable = offer.value("unavailable_reason", std::string {});
+        if (offer.value("id", std::string {}) == "lower_bitrate" &&
+            offer.value("kind", std::string {}) == "live_tuning" && unavailable.empty()) {
+          message = "Current telemetry confirms network pressure. Doctor offers one guarded bitrate step; this recheck changed nothing.";
+        } else if (offer.value("id", std::string {}) == "recheck_network" && refreshed_stats.adaptive_bitrate_enabled) {
+          message = "Round trip time pressure is still present. Live Tuning remains the live bitrate controller; this recheck changed nothing.";
+        } else {
+          message = "Current telemetry confirms network pressure. This recheck changed nothing.";
+          if (!unavailable.empty()) message += " " + unavailable;
+        }
+      }
       return {
         {"status", true},
         {"changed", false},
         {"state", action_id == "recheck_pacing" ? "observed" : confirmed ? "confirmed_pressure" : "stable"},
-        {"message", pacing_recheck ?
-          "Collected a fresh read-only pacing observation; no launch or game-process settings were changed." : confirmed ?
-          "Current telemetry now confirms network pressure. Doctor can safely apply one bitrate step." :
-          "Current loss and latency do not justify reducing bitrate."},
+        {"message", message},
         {"evidence", network_evidence(refreshed_stats)},
         {"doctor", refreshed_doctor}
       };
@@ -1196,7 +1332,8 @@ namespace doctor_actions {
       }
       const bool current_verification_stable = verification_window_stable(
         current_verification_window,
-        action_run
+        action_run,
+        verification_stats
       );
       const bool verification_stable = action_run.verification_passed ||
         current_verification_stable;
@@ -1344,7 +1481,7 @@ namespace doctor_actions {
         remember_terminal_locked(run_snapshot, result);
         return terminal_action.result;
       }
-      action_run.verification_passed = true;
+      mark_verified_locked(action_run);
       return {
         {"status", true},
         {"changed", false},
@@ -1524,6 +1661,16 @@ namespace doctor_actions {
           {"evidence", mutation_evidence}
         };
       }
+      // With Live Tuning on, Doctor steps in for sustained video frame loss only. Round trip time alone
+      // is Live Tuning's to cut for.
+      const bool pause_live_tuning = adaptive_state.enabled;
+      if (pause_live_tuning && !stream_stats::judged_network(mutation_stats).loss_pressure) {
+        return {
+          {"status", false}, {"changed", false}, {"state", "evidence_changed"},
+          {"error", "Live Tuning adjusts this stream's bitrate for round trip time. Doctor steps in only for sustained video frame loss."},
+          {"evidence", mutation_evidence}
+        };
+      }
       if (!adaptive_state.runtime_update_supported) {
         return {
           {"status", false}, {"changed", false}, {"state", "runtime_update_unavailable"},
@@ -1558,18 +1705,30 @@ namespace doctor_actions {
       run.applied_bitrate_kbps = target_bitrate_kbps;
       run.goal_bitrate_kbps = target_bitrate_kbps;
       run.verification_step = 1;
-      run.requires_media_sample =
-        mutation_stats.media_loss_sample_revision > 0 &&
-        mutation_stats.media_loss_last_received_age_ms >= 0 &&
-        mutation_stats.media_loss_last_received_age_ms <=
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-            initial_network_evidence_max_age
-          ).count() &&
-        mutation_stats.packet_loss_available && mutation_stats.packet_loss > 2.0;
-      const auto applied_revision = adaptive_bitrate::set_doctor_bitrate_if_revision(
-        adaptive_state.revision,
-        target_bitrate_kbps
-      );
+      // A step taken for loss is verified only by a client media report from after it.
+      run.requires_media_sample = stream_stats::judged_network(mutation_stats).loss_pressure;
+      run.paused_live_tuning = pause_live_tuning;
+      live_tuning_step_t live_tuning_step;
+      if (pause_live_tuning) {
+        live_tuning_step = step_with_live_tuning_off(adaptive_state, current_bitrate_kbps, target_bitrate_kbps);
+      }
+      const auto applied_revision = pause_live_tuning ?
+        live_tuning_step.revision :
+        adaptive_bitrate::set_doctor_bitrate_if_revision(
+          adaptive_state.revision,
+          target_bitrate_kbps
+        );
+      if (!applied_revision && live_tuning_step.live_tuning_back_on) {
+        BOOST_LOG(info) << "Doctor: the live bitrate controller changed while Doctor took its step; Live Tuning is back on for this stream"sv
+                        << (live_tuning_step.rate_restored ? " at the prior bitrate"sv : ""sv);
+        return {
+          {"status", false}, {"changed", false}, {"state", "controller_changed"},
+          {"adaptive_bitrate_enabled", true},
+          {"error", std::string {"The live bitrate controller changed while Doctor was taking this step, so Doctor turned Live Tuning back on for this stream"} +
+            (live_tuning_step.rate_restored ? " and left the bitrate as it was." : ".") +
+            " Recheck before applying it."}
+        };
+      }
       if (!applied_revision) {
         return {
           {"status", false}, {"changed", false}, {"state", "controller_changed"},
@@ -1582,6 +1741,10 @@ namespace doctor_actions {
       run.network_sample_revision_at_apply =
         mutation_stats.network_sample_revision;
       action_run = run;
+      if (run.paused_live_tuning) {
+        // Doctor offers this step's Undo, rather than a quality restore it would refuse, while it holds.
+        stream_stats::set_doctor_live_tuning_step(run.run_id, run.controller_revision);
+      }
       if (trusted_context != nullptr) {
         schedule_verification_watchdog(
           action_run.run_id,
@@ -1592,8 +1755,9 @@ namespace doctor_actions {
       }
     }
     BOOST_LOG(info) << "Doctor: requested guarded bitrate step "sv
-                    << current_bitrate_kbps << " -> " << target_bitrate_kbps
-                    << " kbps run=" << run.run_id;
+                    << current_bitrate_kbps << " -> " << target_bitrate_kbps << " kbps"
+                    << (run.paused_live_tuning ? " with Live Tuning off for this stream"sv : ""sv)
+                    << " run=" << run.run_id;
 
     return {
       {"status", true},
@@ -1601,8 +1765,10 @@ namespace doctor_actions {
       {"state", "applying"},
       {"run_id", run.run_id},
       {"request_id", run.request_id},
-      {"message", "Doctor requested one bitrate step and will begin verification after the encoder acknowledges it."},
-      {"requested", {{"bitrate_kbps", target_bitrate_kbps}, {"adaptive_bitrate_enabled", adaptive_state.enabled}}},
+      {"message", run.paused_live_tuning ?
+        "Doctor turned Live Tuning off for this stream and requested one bitrate step. Verification begins after the encoder acknowledges it, and Undo turns Live Tuning back on." :
+        "Doctor requested one bitrate step and will begin verification after the encoder acknowledges it."},
+      {"requested", {{"bitrate_kbps", target_bitrate_kbps}, {"adaptive_bitrate_enabled", adaptive_state.enabled && !run.paused_live_tuning}}},
       {"encoder_application_confirmed", false},
       {"before", {{"bitrate_kbps", current_bitrate_kbps}, {"adaptive_bitrate_enabled", adaptive_state.enabled}}},
       {"verification", {{"delay_seconds", 8}, {"action_id", "verify"}, {"run_id", run.run_id}}},
@@ -1736,6 +1902,11 @@ namespace doctor_actions {
   }
 
 #ifdef POLARIS_TESTS
+  void defer_verification_watchdog_for_tests(bool deferred) {
+    std::lock_guard<std::mutex> lock(action_mutex);
+    verification_watchdog_deferred_for_tests = deferred;
+  }
+
   void session_started(std::string_view owner_uuid,
                        std::uint64_t session_generation,
                        int base_bitrate_kbps) {
@@ -1754,6 +1925,20 @@ namespace doctor_actions {
     (void) encoder_application_confirmed_locked(action_run);
     action_run.requested_at -= verification_delay;
     action_run.applied_at -= verification_delay;
+    // The network judge's readings live through the same seconds.
+    stream_stats::age_network_judge_for_tests(verification_delay);
+  }
+
+  void confirm_encoder_application_for_tests() {
+    std::lock_guard<std::mutex> lock(action_mutex);
+    if (!action_run.active) return;
+    if (const auto request = adaptive_bitrate::get_live_bitrate_request()) {
+      adaptive_bitrate::acknowledge_live_bitrate_applied(
+        request->revision,
+        request->target_bitrate_kbps
+      );
+    }
+    (void) encoder_application_confirmed_locked(action_run);
   }
 
   void make_verification_window_complete_for_tests() {
@@ -1768,11 +1953,17 @@ namespace doctor_actions {
     (void) encoder_application_confirmed_locked(action_run);
     action_run.requested_at -= verification_delay;
     action_run.applied_at -= verification_delay;
+    stream_stats::age_network_judge_for_tests(verification_delay);
     stream_stats::spread_network_verification_window_for_tests(
       action_run.network_sample_revision_at_apply,
       action_run.applied_at,
       std::chrono::steady_clock::now()
     );
+  }
+
+  void set_live_tuning_step_hook_for_tests(std::function<void(std::string_view)> hook) {
+    std::lock_guard<std::mutex> lock(action_mutex);
+    live_tuning_step_hook = std::move(hook);
   }
 
   void run_verification_watchdog_for_tests() {

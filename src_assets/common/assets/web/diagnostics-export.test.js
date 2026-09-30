@@ -10,6 +10,7 @@ import {
   buildGithubIssueUrl,
   buildNetworkPathTestReport,
   buildPostSessionStreamReport,
+  rememberJudgedNetworkVerdict,
   buildSupportSelfTestCopy,
   createExportAddressBook,
   describeLinuxGpuProfile,
@@ -287,6 +288,7 @@ describe('GitHub issue draft support flow', () => {
         session_target_fps: 120,
         bitrate_kbps: 45000,
         packet_loss: 2.4,
+        network_verdict: { loss_pct: 2.4, loss_state: 'elevated', frames_lost: 58, frames_expected: 2400, window_seconds: 20 },
         encode_time_ms: 9.8,
         linux_gpu_profile: {
           encoder_adapter: '/dev/dri/renderD129',
@@ -329,7 +331,7 @@ describe('GitHub issue draft support flow', () => {
     expect(draft).toContain('- Wayland main device: /dev/dri/renderD128')
     expect(draft).toContain('- Adapter pairing: mismatched')
     expect(draft).toContain('- GPU-native probe: windowed[result=failed, attempted=yes, cached=no, stage=first_frame, reason=no_live_dmabuf_frame] — selected headless_shm, fallback headless_shm')
-    expect(draft).toContain('- Active stream: yes, 118.5 FPS / 120.0 target, 45000 kbps, 2.40% loss, 9.8 ms encode')
+    expect(draft).toContain('- Active stream: yes, 118.5 FPS / 120.0 target, 45000 kbps, 2.40% video frame loss, 9.8 ms encode')
     expect(draft).toContain('## What Polaris thinks happened')
     expect(draft).toContain('Stream is playable, but capture fell back to system memory.')
     expect(draft).toContain('gpu_native_requested_shm_fallback')
@@ -493,11 +495,22 @@ describe('support report after a stream that failed to start', () => {
 })
 
 describe('Fix My Stream checklist', () => {
+  // The host's windowed verdict, as the stream stats serve it.
+  const judged = (pct, state) => ({
+    network_verdict: {
+      loss_pct: pct,
+      loss_state: state,
+      frames_lost: Math.round(pct * 24),
+      frames_expected: 2400,
+      window_seconds: 20,
+    },
+  })
   const confirmedMedia = {
     packet_loss_available: true,
     packet_loss_source: 'media_transport',
     media_loss_sample_revision: 1,
     media_loss_last_received_age_ms: 0,
+    ...judged(0, 'clean'),
   }
 
   it.each([
@@ -517,32 +530,50 @@ describe('Fix My Stream checklist', () => {
 
   it.each([
     {},
-    { packet_loss_available: false },
-    { packet_loss_source: 'legacy_control_channel' },
-    { packet_loss_source: 'unavailable' },
+    { network_verdict: null },
+    { network_verdict: { loss_pct: null, loss_state: 'collecting', window_seconds: 20 } },
     { media_loss_sample_revision: 0 },
     { media_loss_last_received_age_ms: -1 },
-    { media_loss_last_received_age_ms: 2001 },
+    { media_loss_last_received_age_ms: 5001 },
     { media_loss_last_received_age_ms: null },
-  ])('requires current confirmed media loss before giving network advice: %j', (override) => {
-    const evidence = Object.keys(override).length ? { ...confirmedMedia, ...override } : {}
+  ])('requires current confirmed video frame loss before giving network advice: %j', (override) => {
+    // The newest report and the control channel both read 8%, and the window would call it pressure,
+    // but none of that is current evidence here.
+    const evidence = Object.keys(override).length ? { ...confirmedMedia, ...judged(8, 'elevated'), ...override } : {}
     const item = buildFixMyStreamChecklist({
       statsConnected: true,
       stats: { ...evidence, streaming: true, packet_loss: 8, control_channel_packet_loss: 8, control_channel_samples: 20 },
     }).find((entry) => entry.key === 'packet-loss')
     expect(item.status).toBe('info')
     expect(item.action).not.toMatch(/start.*stream|lower bitrate|enable FEC/i)
-    expect(item.detail).toContain('No current confirmed media')
+    expect(item.detail).toContain('No current confirmed video frame loss')
   })
 
-  it.each([undefined, null, '', false, true, NaN, Infinity, -1, 101])('does not grade invalid loss %s as measured', (packet_loss) => {
+  it.each([undefined, null, '', false, true, NaN, Infinity, -1, 101])('does not grade invalid loss %s as measured', (loss_pct) => {
     const item = buildFixMyStreamChecklist({
       statsConnected: true,
-      stats: { ...confirmedMedia, streaming: true, packet_loss },
+      stats: { ...confirmedMedia, streaming: true, network_verdict: { loss_pct, loss_state: 'elevated', window_seconds: 20 } },
     }).find((entry) => entry.key === 'packet-loss')
     expect(item.status).toBe('info')
     expect(item.action).not.toMatch(/start.*stream|lower bitrate|enable FEC/i)
-    expect(item.detail).toContain('No current confirmed media')
+    expect(item.detail).toContain('No current confirmed video frame loss')
+  })
+
+  it('grades the window the host judged, not the newest second', () => {
+    // The HEVC run: its newest report read 7.4% while the window's figure was 1.9%, light loss.
+    const item = buildFixMyStreamChecklist({
+      statsConnected: true,
+      stats: {
+        ...confirmedMedia,
+        streaming: true,
+        packet_loss: 7.44,
+        network_verdict: { loss_pct: 1.87, loss_state: 'light', frames_lost: 18, frames_expected: 963, window_seconds: 20 },
+      },
+    }).find((entry) => entry.key === 'packet-loss')
+    expect(item.label).toBe('Video frame loss')
+    expect(item.status).toBe('warning')
+    expect(item.detail).toBe('1.9% of video frames never arrived whole after FEC over the last 20 s (18 of 963), below the 2% Doctor calls network pressure; watch for artifacts.')
+    expect(item.action).not.toMatch(/lower bitrate/i)
   })
 
   it.each([undefined, null, '', false, true, NaN, Infinity, -1, 0])('does not report encoder headroom for missing or invalid timing %s', (encode_time_ms) => {
@@ -556,16 +587,16 @@ describe('Fix My Stream checklist', () => {
   })
 
   it.each([
-    { packet_loss: 0, expected: 'pass' },
-    { packet_loss: 0.6, expected: 'warning' },
-    { packet_loss: 3.2, expected: 'fail' },
-  ])('preserves confirmed media-loss grading at the freshness boundary: %j', ({ packet_loss, expected }) => {
+    { pct: 0, state: 'clean', expected: 'pass' },
+    { pct: 1.2, state: 'light', expected: 'warning' },
+    { pct: 3.2, state: 'elevated', expected: 'fail' },
+  ])('preserves confirmed video frame loss grading at the freshness boundary: %j', ({ pct, state, expected }) => {
     const item = buildFixMyStreamChecklist({
       statsConnected: true,
-      stats: { ...confirmedMedia, streaming: true, packet_loss, media_loss_last_received_age_ms: 2000 },
+      stats: { ...confirmedMedia, ...judged(pct, state), streaming: true, media_loss_last_received_age_ms: 5000 },
     }).find((entry) => entry.key === 'packet-loss')
     expect(item.status).toBe(expected)
-    expect(item.detail).toContain(`Packet loss is ${packet_loss.toFixed(1)}%`)
+    expect(item.detail).toContain(`${pct.toFixed(1)}% of video frames never arrived whole after FEC over the last 20 s`)
   })
 
   it('prioritizes connection, packet loss, capture path, encoder pressure, auth pairing, and logs', () => {
@@ -573,6 +604,7 @@ describe('Fix My Stream checklist', () => {
       statsConnected: true,
       stats: {
         ...confirmedMedia,
+        ...judged(3.2, 'elevated'),
         streaming: true,
         packet_loss: 3.2,
         capture_cpu_copy: true,
@@ -1083,6 +1115,132 @@ describe('support self-service reports', () => {
     expect(report.suggestedNextLaunchProfile).toContain('Private Stream')
     expect(report.copyText).toContain('Issue owner: host')
     expect(report.copyText).not.toContain('token=')
+  })
+
+  it('names the loss it counts and does not blame the network on one second of it', () => {
+    // polaris#212: the last second's report read 32.7% on a session whose frames the host dropped
+    // 0.96% of, and the report named the network on it. The window the host judged read light loss.
+    const report = buildPostSessionStreamReport({
+      stats: {
+        packet_loss: 32.7,
+        latency_ms: 37,
+        encode_time_ms: 3.5,
+        encode_target_fps: 120,
+        dropped_frame_ratio: 0.0096,
+        network_verdict: { loss_pct: 1.4, loss_state: 'light', frames_lost: 34, frames_expected: 2400, window_seconds: 20, rtt_median_ms: 9.5 },
+      },
+    })
+
+    expect(report.issueOwner).toBe('client')
+    expect(report.mainIssue).not.toContain('32.7')
+    expect(report.qualitySummary).toBe('9.5 ms latency / 1.4% of video frames lost after FEC / 3.5 ms encode / 0.96% of frames dropped on the host.')
+    expect(report.copyText).toContain('of video frames lost after FEC')
+  })
+
+  it('names the network when the window judged its loss as pressure, with the frames behind it', () => {
+    const report = buildPostSessionStreamReport({
+      stats: {
+        encode_time_ms: 4,
+        encode_target_fps: 120,
+        dropped_frame_ratio: 0,
+        network_verdict: { loss_pct: 2.37, loss_state: 'elevated', frames_lost: 57, frames_expected: 2406, window_seconds: 20, rtt_median_ms: 6 },
+      },
+    })
+
+    expect(report.issueOwner).toBe('network')
+    expect(report.mainIssue).toBe('Video frame loss was network pressure: 2.4% of video frames never arrived whole after FEC over the last 20 s (57 of 2406).')
+    expect(report.qualitySummary).toContain('2.4% of video frames lost after FEC')
+  })
+
+  it('keeps the loss the window last judged, and its cause, after a client drops', () => {
+    // The host streams on until the ping timeout, ten seconds by default, after a client drops. Its
+    // last live payloads call the loss stale with no figure, so the report kept from them lost the
+    // network cause of the drop. The host grades the session on the verdict its window last reached.
+    const elevated = {
+      loss_pct: 5, loss_state: 'elevated', frames_lost: 120, frames_expected: 2400, window_seconds: 20,
+      rtt_state: 'clean', rtt_median_ms: 9,
+    }
+    const stale = { loss_pct: null, loss_state: 'stale', frames_lost: 120, frames_expected: 2400, window_seconds: 20, rtt_state: 'stale', rtt_median_ms: null }
+    const payloads = [
+      { streaming: false },
+      { streaming: true, latency_ms: 9, encode_time_ms: 4, encode_target_fps: 120, dropped_frame_ratio: 0, network_verdict: elevated },
+      ...Array.from({ length: 8 }, () => ({
+        streaming: true, latency_ms: 70, encode_time_ms: 4, encode_target_fps: 120, dropped_frame_ratio: 0, network_verdict: stale,
+      })),
+      { streaming: false },
+    ]
+    let remembered = null
+    let completed = null
+    let completedVerdict = null
+    for (let i = 1; i < payloads.length; ++i) {
+      remembered = rememberJudgedNetworkVerdict(remembered, payloads[i], payloads[i - 1])
+      if (payloads[i - 1].streaming && !payloads[i].streaming) {
+        completed = payloads[i - 1]
+        completedVerdict = remembered
+      }
+    }
+    expect(completed.network_verdict.loss_state).toBe('stale')
+    expect(completedVerdict).toBe(elevated)
+
+    const report = buildPostSessionStreamReport({ stats: completed, lastJudgedVerdict: completedVerdict })
+    expect(report.issueOwner).toBe('network')
+    expect(report.mainIssue).toBe(
+      "Video frame loss was network pressure when the client's media reports stopped: 5.0% of video frames never arrived whole after FEC over the last 20 s (120 of 2400).",
+    )
+    expect(report.qualitySummary).toContain('9.0 ms latency / 5.0% of video frames lost after FEC')
+
+    // With nothing judged before, a stale verdict names no cause, and the frozen round trip beside it
+    // is no figure to grade.
+    const unjudged = buildPostSessionStreamReport({ stats: completed })
+    expect(unjudged.issueOwner).toBe('client')
+    expect(unjudged.qualitySummary).toContain('unknown ms latency / unknown of video frames lost after FEC')
+  })
+
+  it('lets the judged verdict go once the window holds none of the reports it was judged on', () => {
+    // The client's reports stop 20 seconds into a stream that goes on for 40 more. The host's window
+    // keeps them for 20 seconds, then empties, and grades the session that ends later on no loss. The
+    // verdict remembered from before still named the network in the report, 40 seconds old.
+    const elevated = {
+      loss_pct: 5, loss_state: 'elevated', frames_lost: 120, frames_expected: 2400, media_samples: 20, window_seconds: 20,
+      rtt_state: 'clean', rtt_median_ms: 9,
+    }
+    const staleHeld = { ...elevated, loss_pct: null, loss_state: 'stale' }
+    const staleEmpty = { ...staleHeld, frames_lost: 0, frames_expected: 0, media_samples: 0 }
+    const live = (verdict) => ({ streaming: true, latency_ms: 9, encode_time_ms: 4, encode_target_fps: 120, dropped_frame_ratio: 0, network_verdict: verdict })
+    const payloads = [
+      { streaming: false },
+      ...Array.from({ length: 20 }, () => live(elevated)),
+      ...Array.from({ length: 20 }, () => live(staleHeld)),
+      ...Array.from({ length: 20 }, () => live(staleEmpty)),
+      { streaming: false },
+    ]
+    let remembered = null
+    let completedVerdict
+    const keptAt = []
+    for (let i = 1; i < payloads.length; ++i) {
+      remembered = rememberJudgedNetworkVerdict(remembered, payloads[i], payloads[i - 1])
+      keptAt.push(remembered)
+      if (payloads[i - 1].streaming && !payloads[i].streaming) completedVerdict = remembered
+    }
+    // Kept while the window still counts the reports, as for a client that drops.
+    expect(keptAt[39]).toBe(elevated)
+    expect(keptAt[40]).toBeNull()
+    expect(completedVerdict).toBeNull()
+
+    const report = buildPostSessionStreamReport({ stats: payloads[payloads.length - 2], lastJudgedVerdict: completedVerdict })
+    expect(report.issueOwner).toBe('client')
+    expect(report.mainIssue).not.toContain('network pressure')
+  })
+
+  it('starts the judged verdict over for a new stream', () => {
+    const judged = { loss_pct: 3, loss_state: 'elevated', window_seconds: 20 }
+    const collecting = { loss_pct: null, loss_state: 'collecting', window_seconds: 20 }
+    let remembered = rememberJudgedNetworkVerdict(null, { streaming: true, network_verdict: judged }, { streaming: true })
+    expect(remembered).toBe(judged)
+    remembered = rememberJudgedNetworkVerdict(remembered, { streaming: false }, { streaming: true, network_verdict: judged })
+    expect(remembered).toBe(judged)
+    remembered = rememberJudgedNetworkVerdict(remembered, { streaming: true, network_verdict: collecting }, { streaming: false })
+    expect(remembered).toBeNull()
   })
 
   it('does not invent a host failure from healthy SHM capability logs', () => {

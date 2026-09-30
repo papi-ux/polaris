@@ -387,6 +387,27 @@ TEST(DoctorResetContract, HostNetworkEvidenceLinearizesBeforeAdaptiveFeedback) {
   EXPECT_LT(epoch, revision);
 }
 
+TEST(DoctorResetContract, ControlPingsBringLiveTuningZeroLoss) {
+  // Live Tuning keeps 1.4.13's loss input in this release: a ping or a loss-stats message brings it the
+  // control channel's RTT and 0% loss, and each client media report its own loss, so its loss average is
+  // the one it acted on in 1.4.13. The Live Tuning redesign is where that changes.
+  const auto stream = source("src/stream.cpp");
+  const auto periodic_ping = between(
+    stream,
+    "server->map(packetTypes[IDX_PERIODIC_PING]",
+    "server->map(packetTypes[IDX_START_A]"
+  );
+  const auto loss_stats = between(
+    stream,
+    "server->map(packetTypes[IDX_LOSS_STATS]",
+    "server->map(packetTypes[IDX_REQUEST_IDR_FRAME]"
+  );
+  for (const auto *handler : {&periodic_ping, &loss_stats}) {
+    EXPECT_NE(handler->find("adaptive_bitrate::update_network_stats(0.0, rtt_ms)"), std::string::npos);
+    EXPECT_EQ(handler->find("std::nullopt"), std::string::npos);
+  }
+}
+
 TEST(DoctorResetContract, LiveMediaTelemetryIsEvidenceOnlyAndGenerationBound) {
   const auto nvhttp = source("src/nvhttp.cpp");
   const auto capabilities = between(

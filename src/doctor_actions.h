@@ -6,6 +6,7 @@
 
 #include <filesystem>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -133,6 +134,9 @@ namespace doctor_actions {
   void session_ended(std::string_view owner_uuid, std::uint64_t session_generation);
 
 #ifdef POLARIS_TESTS
+  /** Defer scheduled verification so a route test can select the first real verifier. */
+  void defer_verification_watchdog_for_tests(bool deferred);
+
   /** Compatibility helper for unit fixtures that do not model app-session tokens. */
   void session_started(std::string_view owner_uuid,
                        std::uint64_t session_generation,
@@ -141,11 +145,22 @@ namespace doctor_actions {
   /** Make the active receipt's post-change window due without sleeping in unit tests. */
   void make_verification_due_for_tests();
 
+  /** Acknowledge the active receipt's encoder request now, as the encoder would. */
+  void confirm_encoder_application_for_tests();
+
   /** Complete the active host-received evidence window without sleeping. */
   void make_verification_window_complete_for_tests();
 
   /** Run the active receipt's verification watchdog synchronously in unit tests. */
   void run_verification_watchdog_for_tests();
+
+  /**
+   * Run @p hook where a newer controller writer can meet Doctor's loss step with Live Tuning off:
+   * "paused", once Live Tuning is off for the stream and the step's revision is read, before the step,
+   * and "restoring", once a restore's revision is read, before each try at putting back the state from
+   * before the step. An empty hook removes it.
+   */
+  void set_live_tuning_step_hook_for_tests(std::function<void(std::string_view)> hook);
 #endif
 
 }  // namespace doctor_actions

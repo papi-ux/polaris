@@ -140,6 +140,10 @@ namespace stream_stats {
     std::atomic<bool> hot_network_risk {false};
     std::atomic<uint64_t> hot_bytes_sent {0};
     std::atomic<bool> hot_doctor_live_action_scope_available {false};
+    // Doctor's loss step with Live Tuning off for the stream, and the controller revision it holds.
+    std::mutex doctor_live_tuning_step_mutex;
+    std::string doctor_live_tuning_step_run;
+    std::uint64_t doctor_live_tuning_step_revision = 0;
 
     struct doctor_video_policy_state_t {
       double target_fps = 0.0;
@@ -216,7 +220,13 @@ namespace stream_stats {
     // Guarded by its own lock so the lock-free update_network_stats
     // overload stays clear of stats_mutex.
     network_risk_tracker_t network_risk_tracker;
+    network_judge_t network_judge;
     std::mutex network_risk_mutex;
+
+    // The stream generation whose first counted client media report, and whose first report that
+    // restarted its baseline after a gap, were logged, so each is said once a stream.
+    std::atomic<std::uint64_t> logged_media_report_generation {0};
+    std::atomic<std::uint64_t> logged_media_gap_generation {0};
 
     constexpr auto CLIENT_MEDIA_COUNTER_MAX_GAP = std::chrono::seconds(5);
     struct client_media_counter_epoch_t {
@@ -237,6 +247,8 @@ namespace stream_stats {
       std::uint64_t media_loss_revision = 0;
       std::chrono::steady_clock::time_point media_loss_received_at {};
       bool media_sample = false;
+      std::chrono::steady_clock::time_point media_interval_begins {};
+      double media_frames_expected = 0.0;
       double latency_ms = 0.0;
       double packet_loss = 0.0;
       bool packet_loss_available = false;
@@ -341,6 +353,7 @@ namespace stream_stats {
       {
         std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
         network_risk_tracker.reset();
+        network_judge.reset();
         primary_network_observations.clear();
         primary_network_state = primary_network_observation_t {};
       }
@@ -814,6 +827,8 @@ namespace stream_stats {
     j["network_last_received_age_ms"] = network_last_received_age_ms;
     j["media_loss_sample_revision"] = media_loss_sample_revision;
     j["media_loss_last_received_age_ms"] = media_loss_last_received_age_ms;
+    // As served: a figure whose readings stopped reads as stale, as Doctor treats it.
+    j["network_verdict"] = network_verdict_json(served_network_verdict(*this));
     j["bytes_sent"] = bytes_sent;
     j["gpu_usage"] = gpu_usage;
     j["adaptive_target_bitrate_kbps"] = adaptive_target_bitrate_kbps;
@@ -886,9 +901,14 @@ namespace stream_stats {
         cj["start_outcome"] = c.start_outcome;
       }
       cj["latency_ms"] = c.latency_ms;
-      cj["packet_loss"] = c.packet_loss;
-      cj["packet_loss_available"] = c.packet_loss_available;
-      cj["packet_loss_source"] = c.packet_loss_source;
+      // A row's loss counts while its reports are current, as Doctor has it for the stream.
+      const bool client_loss_current = c.packet_loss_available &&
+        (c.packet_loss_received_at == std::chrono::steady_clock::time_point {} ||
+         std::chrono::steady_clock::now() - c.packet_loss_received_at <=
+           std::chrono::milliseconds(judged_network_t::k_media_report_max_age_ms));
+      cj["packet_loss"] = client_loss_current ? c.packet_loss : 0.0;
+      cj["packet_loss_available"] = client_loss_current;
+      cj["packet_loss_source"] = client_loss_current ? c.packet_loss_source : std::string {"unavailable"};
       cj["control_channel_packet_loss"] = c.control_channel_packet_loss;
       cj["bytes_sent"] = c.bytes_sent;
       cj["fec_protection"] = fec_protection_json(c.fec_protection);
@@ -2058,13 +2078,40 @@ namespace stream_stats {
       return guidance;
     }
 
+    std::string two_decimals(double value) {
+      char text[32];
+      std::snprintf(text, sizeof(text), "%.2f", value);
+      return text;
+    }
+
+    /// What the loss row says: the frames behind the figure, which loss it is, and the band.
+    std::string video_frame_loss_detail(const network_verdict_t &verdict) {
+      return std::to_string(verdict.frames_lost) + " of " + std::to_string(verdict.frames_expected) +
+             " video frames in the client's last " + std::to_string(verdict.media_samples) +
+             " reports never reached it whole after FEC recovery, " + two_decimals(verdict.loss_pct) +
+             "%. Doctor calls loss network pressure at " + two_decimals(network_judge_t::k_loss_enter_pct) +
+             "% over the last " + std::to_string(network_judge_t::k_window.count()) +
+             " seconds and clears it only below " + two_decimals(network_judge_t::k_loss_exit_pct) +
+             "%. Frames the host dropped before sending are counted separately.";
+    }
+
+    /// What the latency row says: the median behind the figure and the band.
+    std::string round_trip_detail(const network_verdict_t &verdict) {
+      return "Median of the host's last " + std::to_string(verdict.rtt_samples) + " round trip readings over " +
+             std::to_string(network_judge_t::k_window.count()) + " seconds. Doctor watches RTT from " +
+             std::to_string(static_cast<int>(network_judge_t::k_rtt_enter_ms)) + " ms, clears it below " +
+             std::to_string(static_cast<int>(network_judge_t::k_rtt_exit_ms)) + " ms and fails the stream at " +
+             std::to_string(static_cast<int>(network_judge_t::k_rtt_fail_ms)) + " ms.";
+    }
+
     nlohmann::json doctor_recommendation(const std::string &primary_issue,
                                          const std::string &summary,
                                          const nlohmann::json &health,
                                          bool live_bitrate_tunable,
                                          bool single_session_scope,
                                          bool auto_safe_managing,
-                                         const pyrowave_doctor_t &pyrowave) {
+                                         const pyrowave_doctor_t &pyrowave,
+                                         const judged_network_t &network) {
       std::string title = "Try this first";
       std::string body = "Start a stream, reproduce the issue, then export diagnostics with this Doctor result attached.";
       std::string next_step = "Export diagnostics";
@@ -2080,10 +2127,21 @@ namespace stream_stats {
           body = "Confirmed network pressure is affecting this stream. " + pyrowave_floor_guidance(pyrowave);
           next_step = "Use HEVC or a lower mode";
           expected = "A codec that needs fewer bits, or a smaller picture, fits the link without the picture falling apart.";
-        } else if (auto_safe_managing) {
-          body = "Confirmed network pressure is affecting this stream, and Auto Safe already owns the live bitrate correction. Doctor will measure the result without racing the active controller.";
-          next_step = "Recheck Auto Safe";
-          expected = "Auto Safe should lower the encoder target until loss and latency return to the stable range.";
+        } else if (auto_safe_managing && !network.loss_pressure) {
+          // Round trip time alone stays Live Tuning's, so Doctor adds no step. Its 1.4.13 rule counts a
+          // reading as a spike only at its once a second check, at 45 ms or more and over twice its long
+          // run average, and a cut or any report with lost frames restarts the 10 seconds before it climbs.
+          body = "Round trip time is high enough to count as network pressure. With Live Tuning on, Doctor leaves round trip time to Live Tuning and measures again instead of changing the bitrate as well.";
+          next_step = "Recheck Live Tuning";
+          expected = "Live Tuning cuts the bitrate at its once a second check when that round trip reading is 45 ms or more and over twice its own average, and round trip time that stays high lifts that average until it no longer counts. It raises the bitrate again a step at a time only after 10 seconds without a cut or a report of lost frames.";
+        } else if (auto_safe_managing && live_bitrate_tunable) {
+          // Sustained video frame loss. Live Tuning's own loss handling averages each report with every
+          // control ping's 0% and acts once a second, so whether a few percent of lost frames cuts depends
+          // on when the report lands in that second. Doctor offers the step, which turns Live Tuning off
+          // for this stream only.
+          body = "Sustained video frame loss is affecting this stream. Doctor can lower the bitrate one step and watch whether the loss clears. That turns Live Tuning off for this stream only, and Undo puts the bitrate back and turns Live Tuning on again.";
+          next_step = "Fix and verify";
+          expected = "Video frame loss should drop out of network pressure at the lower bitrate. Live Tuning stays off for this stream until you undo the step, the step rolls back, or the stream ends.";
         } else if (live_bitrate_tunable) {
           body = "Current sustained loss or latency evidence confirms network pressure. Doctor can lower bitrate one guarded step and watch the same telemetry for recovery.";
           next_step = "Fix and verify";
@@ -2103,14 +2161,25 @@ namespace stream_stats {
         expected = "Doctor will either clear the warning or gather direct evidence before offering a bitrate change.";
       } else if (primary_issue == "control_channel_observation") {
         title = "Keep monitoring";
-        body = "The reliable control channel retried packets, but Polaris has no confirmed video-loss evidence and RTT remains stable. Do not lower quality from this observation alone.";
+        // Only what the window judged: a stream with no media reports, or none yet, has no loss to
+        // clear, and ENet's first seconds give no RTT to judge.
+        const std::string window = " over the last " + std::to_string(network_judge_t::k_window.count()) + " seconds";
+        const std::string judged =
+          network.loss_judged && network.rtt_judged ? "video frame loss and round trip time" + window + " stay below network pressure" :
+          network.loss_judged ? "video frame loss" + window + " stays below network pressure" :
+          network.rtt_judged ? "no video frame loss is measured, and round trip time" + window + " stays below network pressure" :
+          std::string {"neither video frame loss nor round trip time is judged yet"};
+        body = "The reliable control channel retried packets, but " + judged + ", so Doctor changes nothing for this.";
+        if (auto_safe_managing) {
+          body += " Live Tuning keeps adjusting the live bitrate on its own.";
+        }
         next_step = "Keep monitoring";
-        expected = "Visible media loss or sustained RTT pressure must appear before Doctor recommends a network recovery action.";
+        expected = "Sustained video frame loss or RTT pressure must appear before Doctor recommends a network recovery action.";
       } else if (primary_issue == "quality_reduced_live") {
         if (auto_safe_managing) {
-          body = "The current network is clean and Auto Safe is already holding or recovering the live target below this stream's launch ceiling. Doctor will verify that recovery without applying a competing bitrate change.";
-          next_step = "Recheck Auto Safe";
-          expected = "Auto Safe should recover quality gradually while keeping the stream inside the measured network budget.";
+          body = "The current network is clean and Live Tuning is already holding or recovering the live target below this stream's launch ceiling. Doctor will verify that recovery without applying a competing bitrate change.";
+          next_step = "Recheck Live Tuning";
+          expected = "Live Tuning should recover quality gradually while keeping the stream inside the measured network budget.";
         } else if (live_bitrate_tunable) {
           body = "The current network is clean, and the live adaptive target is below this stream's effective launch ceiling. Doctor can retry quality gradually and verify every step.";
           next_step = "Restore and verify";
@@ -2204,6 +2273,7 @@ namespace stream_stats {
                                       bool live_bitrate_tunable,
                                       bool single_session_scope,
                                       bool auto_safe_managing,
+                                      bool loss_pressure,
                                       const pyrowave_doctor_t &pyrowave,
                                       const std::string &source_result_id,
                                       std::string_view app_uuid,
@@ -2224,8 +2294,11 @@ namespace stream_stats {
         {"success_when", nlohmann::json::array()}
       };
 
+      // Live Tuning keeps the live bitrate to itself for round trip time alone. For sustained video frame
+      // loss, which its 1.4.13 loss handling cuts for or not depending on when each report lands, Doctor
+      // offers one step, and taking it turns Live Tuning off for this stream.
       const bool auto_safe_network_management = auto_safe_managing &&
-        (primary_issue == "network_jitter" || primary_issue == "quality_reduced_live");
+        ((primary_issue == "network_jitter" && !loss_pressure) || primary_issue == "quality_reduced_live");
       const auto read_only_guidance = [&](std::string reason) {
         id = "none";
         label = "Manual";
@@ -2281,12 +2354,12 @@ namespace stream_stats {
         method = "POST";
         payload["action_id"] = id;
         payload["source_result_id"] = source_result_id;
-        rollback = "This check does not change bitrate or stream settings. Auto Safe remains the only live bitrate controller.";
+        rollback = "This check does not change bitrate or stream settings. For round trip time alone, Live Tuning stays the only live bitrate controller.";
         verification = {
           {"mode", "live_telemetry"},
           {"delay_seconds", 3},
           {"endpoint", "/api/doctor/action"},
-          {"success_when", nlohmann::json::array({"Auto Safe remains the live bitrate owner", "current loss and latency are measured again"})}
+          {"success_when", nlohmann::json::array({"Live Tuning stays the live bitrate owner for round trip time", "current loss and latency are measured again"})}
         };
       } else if (primary_issue == "network_jitter" && live_bitrate_tunable) {
         id = "lower_bitrate";
@@ -2303,7 +2376,9 @@ namespace stream_stats {
         // names no step, so the payload names one guarded 20% step instead.
         payload["target_bitrate_kbps"] = health_bitrate_kbps > 0 && health_bitrate_kbps < current_bitrate_kbps ?
           health_bitrate_kbps : derived_bitrate_kbps;
-        rollback = "Undo restores the live bitrate and Auto Quality state that were active before this Doctor run.";
+        rollback = auto_safe_managing ?
+          "This turns Live Tuning off for this stream until you undo the step, the step rolls back, or the stream ends. Undo restores the live bitrate and turns Live Tuning back on." :
+          "Undo restores the live bitrate and Auto Quality state that were active before this Doctor run.";
         verification = {
           {"mode", "live_telemetry"},
           {"delay_seconds", 8},
@@ -2419,6 +2494,29 @@ namespace stream_stats {
           {"paired_endpoint", ""}}}
       };
     }
+
+    /// Doctor's loss step with Live Tuning off for the stream, offered for its Undo.
+    nlohmann::json doctor_live_tuning_step_undo(const std::string &run_id, const std::string &source_result_id) {
+      return {
+        {"id", "undo"},
+        {"label", "Undo"},
+        {"capability", "undo"},
+        {"kind", "live_tuning"},
+        {"destructive", false},
+        {"requires_confirmation", false},
+        {"requires_owner", true},
+        {"allowed_in_viewer_mode", false},
+        {"endpoint", "/api/doctor/action"},
+        {"method", "POST"},
+        {"unavailable_reason", ""},
+        {"payload_preview", {{"action_id", "undo"}, {"run_id", run_id}, {"source_result_id", source_result_id}}},
+        {"rollback", "Undo puts back the bitrate from before Doctor's step and turns Live Tuning on again for this stream."},
+        {"verification", {{"mode", "none"}, {"delay_seconds", 0}, {"endpoint", ""}, {"success_when", nlohmann::json::array()}}},
+        {"paired_endpoint", ""},
+        {"owner_tuning_allowed", false},
+        {"undo", {{"supported", false}, {"endpoint", ""}, {"paired_endpoint", ""}}}
+      };
+    }
   }  // namespace
 
   nlohmann::json build_doctor_json(const stats_t &stats,
@@ -2432,29 +2530,30 @@ namespace stream_stats {
     const double target_fps = doctor_target_fps(stats);
     const double target_fps_gap = std::max(0.0, target_fps - stats.fps);
     const bool meaningful_fps_shortfall = is_meaningful_fps_shortfall(target_fps, stats.fps);
-    // Packet-loss actions require an explicitly confirmed media source. ENet's
-    // peer->packetLoss is a reliable control-channel EWMA: useful context, but
-    // not a measurement of video packets dropped at the client.
+    // Doctor grades the network from the windowed verdict (network_judge_t), never from the newest
+    // report: a second of burst loss or a Wi-Fi RTT spike moves the window's figure, not the
+    // headline. judged_network() says when the verdict is current enough to count. Loss comes only
+    // from client media reports; ENet's peer->packetLoss is a reliable control-channel EWMA, context
+    // and never video loss.
+    const auto verdict = served_network_verdict(stats);
+    const auto network = judged_network(stats);
     const bool current_network_observation =
       stats.network_sample_revision > 0 &&
       stats.network_last_received_age_ms >= 0 &&
       stats.network_last_received_age_ms <= DOCTOR_CURRENT_NETWORK_MAX_AGE_MS;
-    const bool current_media_loss_observation =
-      stats.media_loss_sample_revision > 0 &&
-      stats.media_loss_last_received_age_ms >= 0 &&
-      stats.media_loss_last_received_age_ms <= DOCTOR_CURRENT_NETWORK_MAX_AGE_MS;
-    const bool confirmed_media_loss = current_media_loss_observation &&
-      stats.packet_loss_available && stats.packet_loss > 2.0;
-    const bool network_fail = stats.network_risk &&
-      (confirmed_media_loss ||
-       (current_network_observation && stats.latency_ms >= 45.0));
-    const bool network_watch = current_network_observation &&
-      stats.network_risk && !network_fail;
+    const bool loss_judged = network.loss_judged;
+    const bool rtt_judged = network.rtt_judged;
+    const bool confirmed_media_loss = network.loss_pressure;
+    const bool rtt_fail = network.rtt_fail;
+    const bool network_risk = network.risk;
+    const bool network_fail = network.fail;
+    const bool network_watch = network_risk && !network_fail;
+    // ENet's own estimate over the same window and band, so one retransmission does not bring the
+    // finding and the next quiet poll take it away.
     const bool control_channel_observation =
       stats.streaming &&
       current_network_observation &&
-      stats.control_channel_samples > 0 &&
-      stats.control_channel_packet_loss >= network_risk_tracker_t::k_loss_elevated_pct;
+      verdict.control_loss_available && verdict.control_loss_elevated;
     const int live_bitrate_kbps = stats.adaptive_runtime_update_supported && stats.adaptive_target_bitrate_kbps > 0 ?
       stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
     // The saved paired profile's bitrate, or the rate the stream opened at when there is none, so a
@@ -2465,24 +2564,28 @@ namespace stream_stats {
     // its actuator is momentarily holding or recovering. A clean, reduced
     // target is therefore an informational observation, not a user action.
     const bool auto_safe_managing = stats.adaptive_bitrate_enabled;
-    const bool network_evidence_available = current_network_observation &&
-      (current_media_loss_observation || stats.control_channel_samples > 0);
+    const bool network_evidence_available = loss_judged || rtt_judged;
     // Clean enough to raise quality: the loss and latency limits a Doctor quality restore verifies with.
     const bool network_clean_for_quality =
-      stats.streaming && network_evidence_available && !stats.network_risk &&
-      (!current_media_loss_observation || stats.packet_loss <= 2.0) &&
-      stats.latency_ms < 45.0;
+      stats.streaming && network_evidence_available && !network_risk &&
+      (!loss_judged || verdict.loss_pct < network_judge_t::k_loss_enter_pct) &&
+      (!rtt_judged || verdict.rtt_ms < network_judge_t::k_rtt_fail_ms);
     const bool quality_reduced_live =
       network_clean_for_quality &&
       stats.adaptive_runtime_update_supported && effective_quality_target_kbps > live_bitrate_kbps;
     // PyroWave more than a tenth below the rate Polaris advises, or held below its model's figure by the
     // cap or max_bitrate with most frames at its byte ceiling, on a clean network. Watch findings that
     // rank below every network, encoder and capture failure.
-    const auto pyrowave = evaluate_pyrowave_bitrate(stats);
-    // A stream cut below a request that already meets the raise goal climbs back to that request, by
-    // the ordinary quality restore or by Live Tuning's own recovery when it owns the bitrate. PyroWave's
-    // raise would stop short of what the player asked for, and its text would ask for less.
-    const bool launch_restore_covers_pyrowave = quality_reduced_live &&
+    // While Live Tuning owns the bitrate its target moves with the network, down for an RTT spike and
+    // back a step at a time, and PyroWave's advice judged on it came and went as the target crossed
+    // the starved line. Doctor judges the rate the stream is set to, which Live Tuning returns to.
+    const auto pyrowave = evaluate_pyrowave_bitrate(stats, pyrowave_judged_encoder_kbps(stats));
+    // A stream cut below a request that already meets the raise goal climbs back to that request by the
+    // ordinary quality restore. PyroWave's raise would stop short of what the player asked for, and its
+    // text would ask for less. Live Tuning's own cut is no such reduction: PyroWave is judged on the rate
+    // the stream is set to, which Live Tuning comes back to, and hiding the finding while it was cut
+    // turned "needs more than Doctor allows" on and off with every cut.
+    const bool launch_restore_covers_pyrowave = quality_reduced_live && !auto_safe_managing &&
       effective_quality_target_kbps >= pyrowave.advice.raise_goal_encoder_kbps;
     const bool pyrowave_starved = pyrowave.active && pyrowave.starved && network_clean_for_quality &&
       !launch_restore_covers_pyrowave;
@@ -2507,12 +2610,13 @@ namespace stream_stats {
       stats.doctor_live_action_scope_available;
     const bool live_bitrate_tunable =
       stats.adaptive_runtime_update_supported && single_session_scope;
-    // Auto Safe ownership is a policy choice, not a momentary actuator state.
+    // Live Tuning ownership is a policy choice, not a momentary actuator state.
     // FFmpeg bitrate changes can briefly recreate the encoder, and explicit or
     // rollback hand-offs can temporarily change the controller-state label.
     // None of those transitions authorizes Doctor to become a second writer.
-    // While Auto Safe is enabled, Doctor may observe the live result; only
-    // disabling Auto Safe can make a guarded Doctor mutation available.
+    // While Live Tuning is on, Doctor observes the live result, except for
+    // sustained video frame loss: its one step turns Live Tuning off for this
+    // stream first, so the two never write at once.
     // Frame age is capture→encoder latency. On a CPU-copy capture path it is
     // dominated by the SHM copy/convert, so an over-budget age indicts the
     // capture path, not the encoder — the old verdict here sent an SHM-bound
@@ -2683,7 +2787,10 @@ namespace stream_stats {
       primary_issue == "capture_missing" ? "Capture metadata has not arrived yet; start a stream before tuning advanced settings." :
       primary_issue == "network_jitter" ? "Sustained network pressure is affecting this stream." :
       primary_issue == "network_observation" ? "A network warning needs more live evidence before Doctor changes quality." :
-      primary_issue == "control_channel_observation" ? "Control-channel retries were observed, but video packet loss is not confirmed." :
+      primary_issue == "control_channel_observation" ?
+        (loss_judged ?
+          "Control-channel retries were observed, but video frame loss stays below network pressure." :
+          "Control-channel retries were observed, but no video frame loss is measured.") :
       primary_issue == "quality_reduced_live" ? "The reversible live bitrate target is below the capability-validated launch ceiling and current network evidence is clean." :
       primary_issue == "pyrowave_starved" ? pyrowave_summary + " The network is clean." :
       primary_issue == "pyrowave_needs_more_than_allowed" ? pyrowave_limit_summary :
@@ -2768,39 +2875,53 @@ namespace stream_stats {
       "deterministic_launch_policy",
       encoder_selection.value("reason", std::string {"Encoder selection evidence is unavailable."})
     );
+    // The one loss figure: frames the client never received whole, after FEC recovery, over the
+    // window. Nova quotes this row and the session status carries the same verdict, so neither can
+    // show a different number.
     append_doctor_evidence(
       evidence,
       "packet_loss",
-      "Video packet loss",
-      current_media_loss_observation ? nlohmann::json(stats.packet_loss) : nlohmann::json(nullptr),
+      "Video frame loss",
+      loss_judged ? nlohmann::json(verdict.loss_pct) : nlohmann::json(nullptr),
       "%",
-      !current_media_loss_observation ? "unknown" : confirmed_media_loss ? "fail" : "pass",
-      current_media_loss_observation ? stats.packet_loss_source : "unavailable",
-      current_media_loss_observation ?
-        "Packet loss confirmed by media-path telemetry." :
-        "No current confirmed media packet-loss measurement is available for this live stream."
+      !loss_judged ? "unknown" : confirmed_media_loss ? "fail" : "pass",
+      loss_judged ? "media_transport" : "unavailable",
+      loss_judged ?
+        video_frame_loss_detail(verdict) :
+      // Stale by either gate served_network_verdict() keeps: the newest report more than five seconds
+      // old, or no reading of any kind for two.
+      verdict.loss_stale ?
+        std::string {"The client's media reports stopped reaching the host, so video frame loss is not judged until they come back."} :
+      // A Moonlight or Artemis client never sends one, and read "fewer than 5 reports" for the whole stream.
+      streaming_client_family(stats) == "moonlight" ?
+        std::string {"Moonlight and Artemis send the host no media reports, so this client's video frame loss is not judged."} :
+        "Fewer than " + std::to_string(network_judge_t::k_min_media_samples) +
+          " client media reports arrived in the last " + std::to_string(network_judge_t::k_window.count()) +
+          " seconds, so video frame loss is not judged yet."
     );
     append_doctor_evidence(
       evidence,
       "control_channel_packet_loss",
       "Control-channel loss estimate",
-      stats.control_channel_samples > 0 ? nlohmann::json(stats.control_channel_packet_loss) : nlohmann::json(nullptr),
+      verdict.control_loss_available ? nlohmann::json(verdict.control_loss_pct) : nlohmann::json(nullptr),
       "%",
-      stats.control_channel_samples == 0 ? "unknown" : control_channel_observation ? "watch" : "pass",
+      !verdict.control_loss_available ? "unknown" : control_channel_observation ? "watch" : "pass",
       "enet_control_channel",
-      "ENet reliable-channel EWMA. Retransmissions can make this read high even when video delivery is healthy; it cannot grade the stream or authorize a bitrate reduction."
+      "ENet reliable-channel EWMA, averaged over the last " + std::to_string(network_judge_t::k_window.count()) +
+        " seconds; Doctor notes it from " + two_decimals(network_judge_t::k_loss_enter_pct) + "% and stops below " +
+        two_decimals(network_judge_t::k_loss_exit_pct) + "%. Retransmissions can make this read high even when video delivery is healthy; it cannot grade the stream or authorize a bitrate reduction."
     );
     append_doctor_evidence(
       evidence,
       "latency",
       "Network latency",
-      network_evidence_available ? nlohmann::json(stats.latency_ms) : nlohmann::json(nullptr),
+      rtt_judged ? nlohmann::json(verdict.rtt_ms) : nlohmann::json(nullptr),
       "ms",
-      !network_evidence_available ? "unknown" : stats.latency_ms >= 45.0 ? "fail" : network_watch ? "watch" : "pass",
-      network_evidence_available ? "stream_stats" : "unavailable",
-      network_evidence_available ?
-        "Round-trip latency reported by the active client control channel." :
-        "No current media or control-channel latency sample is available for this stream."
+      !rtt_judged ? "unknown" : rtt_fail ? "fail" : verdict.rtt_elevated ? "watch" : "pass",
+      rtt_judged ? "stream_stats" : "unavailable",
+      rtt_judged ?
+        round_trip_detail(verdict) :
+        "No current round trip readings are available for this stream."
     );
     // Which kind of client is streaming, because what Doctor can see and what the player can change
     // both follow from it. A Moonlight-protocol client reads as every other stream does, so without
@@ -2933,9 +3054,9 @@ namespace stream_stats {
       auto_safe_managing || live_bitrate_tunable ? "pass" : "watch",
       "deterministic_controller",
       auto_safe_managing ?
-        "Auto Safe owns continuous live bitrate adjustment. Doctor measures it and does not offer a competing mutation." :
+        "Live Tuning adjusts the live bitrate on its own. Doctor offers one reversible step only for sustained video frame loss, and taking it turns Live Tuning off for this stream." :
       live_bitrate_tunable ?
-        "Auto Safe is not managing this target. Evidence-supported Doctor Auto Fix may own one reversible, verified bitrate step." :
+        "Live Tuning is not managing this target. Evidence-supported Doctor Auto Fix may own one reversible, verified bitrate step." :
         "The current stream has no safe, exclusive live bitrate actuator. Doctor remains observational."
     );
     append_doctor_evidence(
@@ -3047,6 +3168,7 @@ namespace stream_stats {
     if (steam_input_conflict) {
       advanced["recent_issue_codes"].push_back("steam_input_conflict");
     }
+    advanced["network_verdict"] = network_verdict_json(verdict);
     advanced["pacing_coverage"] = {
       {"sample_count", stats.video_policy_sample_count},
       {"required_sample_count", DOCTOR_PACING_WARMUP_SAMPLES},
@@ -3129,7 +3251,7 @@ namespace stream_stats {
       {"basis", basis},
       {"sample_window", {
         {"samples", stats.control_channel_samples},
-        {"seconds", 0},
+        {"seconds", network_evidence_available ? network_judge_t::k_window.count() : 0},
         {"video_samples", stats.video_policy_sample_count},
         {"pacing_warning_streak", stats.pacing_warning_streak}
       }}
@@ -3139,7 +3261,7 @@ namespace stream_stats {
       failed_start_recommendation(*failed_start, summary) :
       doctor_recommendation(
         primary_issue, summary, health, live_bitrate_tunable, single_session_scope,
-        auto_safe_managing, pyrowave_doctor
+        auto_safe_managing, pyrowave_doctor, network
       );
     doctor["evidence"] = std::move(evidence);
     doctor["advanced_evidence"] = std::move(advanced);
@@ -3151,11 +3273,28 @@ namespace stream_stats {
       live_bitrate_tunable,
       single_session_scope,
       auto_safe_managing,
+      network.loss_pressure,
       pyrowave_doctor,
       doctor["result_id"].get<std::string>(),
       app_uuid,
       failed_start ? stream_start::failed_start_next_step(failed_start->codec) : std::string {}
     );
+    // Doctor's loss step turned Live Tuning off for this stream and still holds for its Undo. A quality
+    // restore would meet that step's run and change nothing, so Doctor offers the Undo in its place,
+    // which puts back the bitrate from before the step and turns Live Tuning on again.
+    if (!stats.doctor_live_tuning_step_run_id.empty() &&
+        doctor["safe_recovery_action"].value("id", std::string {}) == "restore_quality") {
+      doctor["safe_recovery_action"] = doctor_live_tuning_step_undo(
+        stats.doctor_live_tuning_step_run_id, doctor["result_id"].get<std::string>()
+      );
+      doctor["recommendation"]["body"] =
+        "The network is clean again, and Doctor's bitrate step still holds with Live Tuning off for this stream. "
+        "Doctor offers the step's Undo rather than a second change: Undo puts back the bitrate from before the step "
+        "and turns Live Tuning on again.";
+      doctor["recommendation"]["next_step_label"] = "Undo Doctor's step";
+      doctor["recommendation"]["expected_effect"] =
+        "The bitrate goes back to where it was before the step, and Live Tuning adjusts it from there.";
+    }
     doctor["suppressed_findings"] = nlohmann::json::array();
     if (suppressed_stale_network_finding) {
       doctor["suppressed_findings"].push_back({
@@ -3612,12 +3751,21 @@ namespace stream_stats {
   bool record_pyrowave_frames(std::uint64_t session_generation, std::uint32_t frames, std::uint32_t ceiling_frames) {
     if (session_generation == 0 || frames == 0) return false;
     ceiling_frames = std::min(ceiling_frames, frames);
+    // Read before stats_mutex, as get_current() does: the controller never calls back into stream_stats.
+    const auto live_tuning = adaptive_bitrate::get_state();
+    const bool held_below_set_rate = live_tuning.enabled && live_tuning.active &&
+      live_tuning.target_bitrate_kbps > 0 && live_tuning.target_bitrate_kbps < live_tuning.base_bitrate_kbps;
     std::lock_guard<std::mutex> lock(stats_mutex);
     const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
       [session_generation](const client_stats_t &candidate) {
         return candidate.session_generation == session_generation;
       });
     if (client == current_stats.clients.end()) return false;
+    if (held_below_set_rate) {
+      // A cut's smaller byte budget fills more often. Counted, it made PyroWave "need more than Doctor
+      // allows" with every Live Tuning cut and not once the bitrate came back.
+      return true;
+    }
     auto &batches = client->pyrowave_ceiling_batches;
     batches.emplace_back(frames, ceiling_frames);
     client->pyrowave_window_frames += frames;
@@ -3641,7 +3789,7 @@ namespace stream_stats {
            static_cast<double>(stats.pyrowave_window_frames);
   }
 
-  pyrowave_bitrate_t evaluate_pyrowave_bitrate(const stats_t &stats) {
+  pyrowave_bitrate_t evaluate_pyrowave_bitrate(const stats_t &stats, int set_encoder_kbps) {
     pyrowave_bitrate_t result;
     if (!stats.streaming || stats.codec != "pyrowave") return result;
     const double fps = stats.encode_target_fps > 0.0 ? stats.encode_target_fps : stats.session_target_fps;
@@ -3656,8 +3804,9 @@ namespace stream_stats {
     );
     if (!result.advice.valid) return result;
     result.active = true;
-    result.encoder_kbps = stats.adaptive_runtime_update_supported && stats.adaptive_target_bitrate_kbps > 0 ?
+    const int live_encoder_kbps = stats.adaptive_runtime_update_supported && stats.adaptive_target_bitrate_kbps > 0 ?
       stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
+    result.encoder_kbps = set_encoder_kbps > 0 ? set_encoder_kbps : live_encoder_kbps;
     result.request_kbps = pyrowave_advice::request_for_encoder(result.encoder_kbps, link);
     result.ceiling_frame_share = pyrowave_ceiling_frame_share(stats);
     // Starved against the one figure Doctor quotes, as a request, with a tenth to spare. The ceiling
@@ -3670,9 +3819,14 @@ namespace stream_stats {
     if (stats.adaptive_floor_source == "pyrowave_advice" && stats.adaptive_min_bitrate_kbps > 0) {
       result.floor_encoder_kbps = stats.adaptive_min_bitrate_kbps;
       result.floor_request_kbps = pyrowave_advice::request_for_encoder(result.floor_encoder_kbps, link);
-      result.at_floor = result.encoder_kbps > 0 && result.encoder_kbps <= result.floor_encoder_kbps;
+      result.at_floor = live_encoder_kbps > 0 && live_encoder_kbps <= result.floor_encoder_kbps;
     }
     return result;
+  }
+
+  int pyrowave_judged_encoder_kbps(const stats_t &stats) {
+    if (!stats.adaptive_bitrate_enabled) return 0;
+    return std::max(doctor_quality_goal(stats, "launch").encoder_kbps, 0);
   }
 
   nlohmann::json pyrowave_bitrate_json(const stats_t &stats) {
@@ -3689,7 +3843,10 @@ namespace stream_stats {
     value["request_kbps"] = pyrowave.request_kbps;
     value["ceiling_frame_share"] = pyrowave.ceiling_frame_share ?
       nlohmann::json(std::round(*pyrowave.ceiling_frame_share * 1000.0) / 1000.0) : nlohmann::json(nullptr);
-    value["starved"] = pyrowave.starved;
+    // Starved as Doctor judges it: on the rate the stream is set to while Live Tuning owns the bitrate.
+    // Judged on the live target, the console's starved line came and went with every Live Tuning cut
+    // while Doctor's headline held.
+    value["starved"] = evaluate_pyrowave_bitrate(stats, pyrowave_judged_encoder_kbps(stats)).starved;
     value["live_tuning_floor_encoder_kbps"] = pyrowave.floor_encoder_kbps > 0 ?
       nlohmann::json(pyrowave.floor_encoder_kbps) : nlohmann::json(nullptr);
     const auto &request = stats.bitrate_request;
@@ -3897,14 +4054,323 @@ namespace stream_stats {
   }
 
   namespace {
+    using judge_clock = network_judge_t::clock_type;
+
+    struct judged_loss_t {
+      int samples = 0;
+      double frames_expected = 0.0;
+      double frames_lost = 0.0;
+      judge_clock::time_point oldest {};
+    };
+
+    judged_loss_t judged_loss(const std::deque<network_judge_t::media_sample_t> &media,
+                              judge_clock::time_point now) {
+      judged_loss_t result;
+      const auto from = now - network_judge_t::k_window;
+      for (const auto &sample : media) {
+        if (sample.at <= from || sample.at > now) {
+          continue;
+        }
+        if (result.samples == 0) {
+          result.oldest = sample.at;
+        }
+        ++result.samples;
+        result.frames_expected += sample.frames_expected;
+        result.frames_lost += sample.frames_lost;
+      }
+      return result;
+    }
+
+    std::optional<double> judged_loss_pct(const judged_loss_t &loss) {
+      if (loss.samples < network_judge_t::k_min_media_samples || loss.frames_expected <= 0.0) {
+        return std::nullopt;
+      }
+      return std::clamp(loss.frames_lost * 100.0 / loss.frames_expected, 0.0, 100.0);
+    }
+
+    struct judged_rtt_t {
+      int readings = 0;
+      std::optional<double> median_ms;
+    };
+
+    judged_rtt_t judged_rtt(const std::deque<network_judge_t::rtt_reading_t> &rtt,
+                            judge_clock::time_point now) {
+      std::vector<double> values;
+      values.reserve(rtt.size());
+      const auto from = now - network_judge_t::k_window;
+      for (const auto &reading : rtt) {
+        if (reading.at > from && reading.at <= now) {
+          values.push_back(reading.rtt_ms);
+        }
+      }
+      judged_rtt_t result;
+      result.readings = static_cast<int>(values.size());
+      if (result.readings < network_judge_t::k_min_rtt_readings) {
+        return result;
+      }
+      std::sort(values.begin(), values.end());
+      const auto middle = values.size() / 2;
+      result.median_ms = values.size() % 2 == 1 ?
+        values[middle] :
+        (values[middle - 1] + values[middle]) / 2.0;
+      return result;
+    }
+
+    // One verdict's step across its band: it turns on at enter and off only below exit. With no
+    // figure there is no verdict, so a window that thinned out starts over instead of keeping one.
+    void judge_band(bool &elevated, std::optional<double> figure, double enter, double exit) {
+      if (!figure) {
+        elevated = false;
+        return;
+      }
+      if (elevated ? *figure < exit : *figure >= enter) {
+        elevated = !elevated;
+      }
+    }
+
+    template<class Readings>
+    void drop_stale(Readings &readings, judge_clock::time_point now, std::size_t capacity) {
+      const auto from = now - network_judge_t::k_window;
+      while (!readings.empty() && (readings.front().at <= from || readings.size() > capacity)) {
+        readings.pop_front();
+      }
+    }
+  }  // namespace
+
+  void network_judge_t::add_media(clock_type::time_point at, double frames_expected, double frames_lost) {
+    if (!std::isfinite(frames_expected) || !std::isfinite(frames_lost) || frames_expected <= 0.0) {
+      return;
+    }
+    const auto begins = last_media_at == clock_type::time_point {} ? at : last_media_at;
+    last_media_at = at;
+    media.push_back({at, frames_expected, std::clamp(frames_lost, 0.0, frames_expected), begins});
+    drop_stale(media, at, k_max_media_samples);
+    judge_media(at);
+    note_risk(at);
+  }
+
+  void network_judge_t::add_rtt(clock_type::time_point at, double rtt_ms) {
+    if (!std::isfinite(rtt_ms) || rtt_ms < 0.0) {
+      return;
+    }
+    ++rtt_readings_seen;
+    if (!rtt_armed) {
+      rtt_armed = rtt_ms < k_rtt_enter_ms || rtt_readings_seen >= k_rtt_armed_after;
+      if (!rtt_armed) {
+        return;
+      }
+    }
+    rtt.push_back({at, rtt_ms});
+    drop_stale(rtt, at, k_max_rtt_readings);
+    judge_rtt(at);
+    note_risk(at);
+  }
+
+  void network_judge_t::add_control_loss(clock_type::time_point at, double loss_pct) {
+    if (!std::isfinite(loss_pct) || loss_pct < 0.0) {
+      return;
+    }
+    control.push_back({at, std::min(loss_pct, 100.0)});
+    drop_stale(control, at, k_max_control_readings);
+    judge_control(at);
+  }
+
+  void network_judge_t::restart(clock_type::time_point from) {
+    const auto drop_before = [from](auto &readings) {
+      while (!readings.empty() && readings.front().at < from) {
+        readings.pop_front();
+      }
+    };
+    // A report that arrived after `from` still counts the second before it. The first report after a
+    // bitrate step carries the loss the step was taken for, and counted against the step it rolled back
+    // a step that cured 23% loss.
+    while (!media.empty() && media.front().begins < from) {
+      media.pop_front();
+    }
+    drop_before(rtt);
+    drop_before(control);
+    loss_elevated = false;
+    rtt_elevated = false;
+    control_loss_elevated = false;
+    judged = network_verdict_t {};
+    media_oldest = {};
+    risk = false;
+    risk_since.reset();
+    std::optional<clock_type::time_point> newest;
+    if (!media.empty()) {
+      judge_media(media.back().at);
+      newest = media.back().at;
+    }
+    if (!rtt.empty()) {
+      judge_rtt(rtt.back().at);
+      newest = newest ? std::max(*newest, rtt.back().at) : rtt.back().at;
+    }
+    if (!control.empty()) {
+      judge_control(control.back().at);
+    }
+    if (newest) {
+      note_risk(*newest);
+    }
+  }
+
+  // The figure and its band are judged together and kept together until the next report, so the
+  // verdict never quotes a figure the band was not judged on.
+  void network_judge_t::judge_media(clock_type::time_point at) {
+    const auto loss = judged_loss(media, at);
+    const auto pct = judged_loss_pct(loss);
+    judge_band(loss_elevated, pct, k_loss_enter_pct, k_loss_exit_pct);
+    judged.media_samples = loss.samples;
+    judged.frames_expected = static_cast<std::uint64_t>(std::llround(loss.frames_expected));
+    judged.frames_lost = static_cast<std::uint64_t>(std::llround(loss.frames_lost));
+    judged.loss_available = pct.has_value();
+    judged.loss_pct = pct.value_or(0.0);
+    judged.loss_elevated = judged.loss_available && loss_elevated;
+    media_oldest = loss.oldest;
+  }
+
+  void network_judge_t::judge_rtt(clock_type::time_point at) {
+    const auto round_trip = judged_rtt(rtt, at);
+    judge_band(rtt_elevated, round_trip.median_ms, k_rtt_enter_ms, k_rtt_exit_ms);
+    judged.rtt_samples = round_trip.readings;
+    judged.rtt_available = round_trip.median_ms.has_value();
+    judged.rtt_ms = round_trip.median_ms.value_or(0.0);
+    judged.rtt_elevated = judged.rtt_available && rtt_elevated;
+  }
+
+  // ENet's estimate is already an average of its own, and it swings with each retransmission: the HEVC
+  // run's read 1.08 and then 2.81 on consecutive polls. Averaged over the window and banded, it names
+  // retries once they last.
+  void network_judge_t::judge_control(clock_type::time_point at) {
+    const auto from = at - k_window;
+    int readings = 0;
+    double sum = 0.0;
+    for (const auto &reading : control) {
+      if (reading.at > from && reading.at <= at) {
+        ++readings;
+        sum += reading.loss_pct;
+      }
+    }
+    const auto mean = readings >= k_min_control_readings ? std::optional<double> {sum / readings} : std::nullopt;
+    judge_band(control_loss_elevated, mean, k_loss_enter_pct, k_loss_exit_pct);
+    judged.control_samples = readings;
+    judged.control_loss_available = mean.has_value();
+    judged.control_loss_pct = mean.value_or(0.0);
+    judged.control_loss_elevated = judged.control_loss_available && control_loss_elevated;
+  }
+
+  void network_judge_t::note_risk(clock_type::time_point at) {
+    const bool elevated = loss_elevated || rtt_elevated;
+    if (!risk_since || elevated != risk) {
+      risk = elevated;
+      risk_since = at;
+    }
+  }
+
+  network_verdict_t network_judge_t::verdict(clock_type::time_point now) const {
+    auto result = judged;
+    const auto window_start = now - k_window;
+    // Once every reading of a kind has left the window, there is nothing to judge it on.
+    if (media.empty() || media.back().at <= window_start) {
+      result.loss_available = false;
+      result.loss_pct = 0.0;
+      result.loss_elevated = false;
+      result.media_samples = 0;
+      result.frames_expected = 0;
+      result.frames_lost = 0;
+    } else if (result.media_samples > 0) {
+      result.media_span_ms = std::max<std::int64_t>(
+        0,
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - media_oldest).count()
+      );
+    }
+    if (rtt.empty() || rtt.back().at <= window_start) {
+      result.rtt_available = false;
+      result.rtt_ms = 0.0;
+      result.rtt_elevated = false;
+      result.rtt_samples = 0;
+    }
+    if (control.empty() || control.back().at <= window_start) {
+      result.control_loss_available = false;
+      result.control_loss_pct = 0.0;
+      result.control_loss_elevated = false;
+      result.control_samples = 0;
+    }
+    result.risk = result.loss_elevated || result.rtt_elevated;
+    if (risk_since) {
+      result.risk_held_ms = std::max<std::int64_t>(
+        0,
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - *risk_since).count()
+      );
+    }
+    return result;
+  }
+
+  std::string_view network_loss_state(const network_verdict_t &verdict) {
+    if (verdict.loss_stale) {
+      return "stale";
+    }
+    if (!verdict.loss_available) {
+      return "collecting";
+    }
+    if (verdict.loss_elevated) {
+      return "elevated";
+    }
+    return verdict.loss_pct >= network_judge_t::k_loss_exit_pct ? "light" : "clean";
+  }
+
+  std::string_view network_rtt_state(const network_verdict_t &verdict) {
+    if (verdict.rtt_stale) {
+      return "stale";
+    }
+    if (!verdict.rtt_available) {
+      return "collecting";
+    }
+    return verdict.rtt_elevated ? "elevated" : "clean";
+  }
+
+  nlohmann::json network_verdict_json(const network_verdict_t &verdict) {
+    return {
+      {"loss_basis", "video_frames_lost_after_fec"},
+      {"window_seconds", network_judge_t::k_window.count()},
+      {"loss_state", network_loss_state(verdict)},
+      {"loss_pct", verdict.loss_available ? nlohmann::json(verdict.loss_pct) : nlohmann::json(nullptr)},
+      {"frames_expected", verdict.frames_expected},
+      {"frames_lost", verdict.frames_lost},
+      {"media_samples", verdict.media_samples},
+      {"media_span_ms", verdict.media_span_ms},
+      {"loss_enter_pct", network_judge_t::k_loss_enter_pct},
+      {"loss_exit_pct", network_judge_t::k_loss_exit_pct},
+      {"rtt_state", network_rtt_state(verdict)},
+      {"rtt_median_ms", verdict.rtt_available ? nlohmann::json(verdict.rtt_ms) : nlohmann::json(nullptr)},
+      {"rtt_samples", verdict.rtt_samples},
+      {"rtt_enter_ms", network_judge_t::k_rtt_enter_ms},
+      {"rtt_exit_ms", network_judge_t::k_rtt_exit_ms},
+      {"control_loss_pct", verdict.control_loss_available ? nlohmann::json(verdict.control_loss_pct) : nlohmann::json(nullptr)},
+      {"control_loss_elevated", verdict.control_loss_elevated},
+      {"control_samples", verdict.control_samples},
+      {"risk", verdict.risk},
+      {"risk_held_ms", verdict.risk_held_ms}
+    };
+  }
+
+  namespace {
+    /// The frames a counted media report covers and how many of them were lost.
+    struct media_report_frames_t {
+      double expected = 0.0;
+      double lost = 0.0;
+    };
+
     void record_primary_network_observation(bool media_sample,
                                             double latency_ms,
                                             double loss,
-                                            uint64_t bytes_sent) {
+                                            uint64_t bytes_sent,
+                                            std::optional<media_report_frames_t> frames = std::nullopt) {
       std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
       const auto received_at = std::chrono::steady_clock::now();
       primary_network_state.received_at = received_at;
       primary_network_state.media_sample = media_sample;
+      primary_network_state.media_interval_begins = {};
+      primary_network_state.media_frames_expected = 0.0;
       primary_network_state.latency_ms = latency_ms;
       primary_network_state.bytes_sent = bytes_sent;
       if (media_sample) {
@@ -3936,11 +4402,36 @@ namespace stream_stats {
         confirmed_media_loss,
         latency_ms
       );
+      // The judgement every grading reader serves. A control-channel ping brings an RTT reading and
+      // nothing about video, so only a media report enters the loss window.
+      if (media_sample) {
+        if (frames) {
+          network_judge.add_media(received_at, frames->expected, frames->lost);
+        } else {
+          network_judge.add_media(
+            received_at,
+            network_judge_t::k_frames_per_percentage_report,
+            std::clamp(loss, 0.0, 100.0) * network_judge_t::k_frames_per_percentage_report / 100.0
+          );
+        }
+        // Carry this accepted report's interval, never retained media metadata on a control ping.
+        if (!network_judge.media.empty() && network_judge.media.back().at == received_at) {
+          primary_network_state.media_interval_begins = network_judge.media.back().begins;
+          primary_network_state.media_frames_expected = network_judge.media.back().frames_expected;
+        }
+      }
+      network_judge.add_rtt(received_at, latency_ms);
+      if (!media_sample) {
+        network_judge.add_control_loss(received_at, loss);
+      }
+      // Judged as Doctor offers a quality restore: by the window's verdict at this reading, not by the
+      // reading alone. One 7.4% report in a window under 2% latched a regression and rolled back a
+      // restore the same verdict had offered.
+      const auto judged_now = network_judge.verdict(received_at);
       const bool suppresses_quality_restore =
-        primary_network_state.network_risk ||
-        (primary_network_state.packet_loss_available &&
-         primary_network_state.packet_loss > 2.0) ||
-        primary_network_state.latency_ms >= 45.0;
+        judged_now.risk ||
+        (judged_now.loss_available && judged_now.loss_pct >= network_judge_t::k_loss_enter_pct) ||
+        (judged_now.rtt_available && judged_now.rtt_ms >= network_judge_t::k_rtt_fail_ms);
       // Advance or latch Doctor policy before exposing this complete
       // observation. Before a change, the controller epoch rejects a stale
       // action. During a guarded quality transaction, a regression is latched
@@ -4074,6 +4565,14 @@ namespace stream_stats {
         last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
         result.state = client_media_ingest_state_e::coverage_gap_reset;
         result.accepted = true;
+        // Accepted and never counted: reports spaced this far apart carry no loss Doctor can use,
+        // and nothing else would say so.
+        if (logged_media_gap_generation.exchange(sample.session_generation) != sample.session_generation) {
+          BOOST_LOG(info) << "Doctor: a client media report for stream generation "sv << sample.session_generation
+                          << " came "sv
+                          << std::chrono::duration_cast<std::chrono::milliseconds>(received_at - previous_epoch.received_at).count()
+                          << " ms after the one before it, so its loss starts a new baseline instead of counting"sv;
+        }
         return result;
       }
 
@@ -4100,6 +4599,8 @@ namespace stream_stats {
         return result;
       }
       result.media_loss_pct = packet_loss_percent(lost_delta, expected_delta);
+      result.frames_expected = expected_delta;
+      result.frames_lost = lost_delta;
       result.state = client_media_ingest_state_e::observed;
     }
 
@@ -4107,11 +4608,100 @@ namespace stream_stats {
     // authenticated requests cannot publish an older delta after a newer one.
     // The media counters prove loss. RTT and byte totals remain host-owned.
     const auto host = get_current();
-    update_network_stats(host.latency_ms, result.media_loss_pct, host.bytes_sent);
+    record_primary_network_observation(
+      true,
+      host.latency_ms,
+      result.media_loss_pct,
+      host.bytes_sent,
+      media_report_frames_t {static_cast<double>(result.frames_expected), static_cast<double>(result.frames_lost)}
+    );
+    const auto verdict = current_network_verdict();
+    {
+      // The stream's own client row quotes the verdict's figure, the one Doctor judges with. It was
+      // never written on this path, so every client row read "unavailable" while its loss arrived,
+      // and the newest report's figure would swing the console's client line between 0 and 7% on
+      // a Wi-Fi burst. Until the window has enough reports it has no figure.
+      std::lock_guard<std::mutex> stats_lock(stats_mutex);
+      for (auto &client : current_stats.clients) {
+        if (client.session_generation == sample.session_generation) {
+          client.packet_loss = verdict.loss_available ? verdict.loss_pct : 0.0;
+          client.packet_loss_available = verdict.loss_available;
+          client.packet_loss_source = verdict.loss_available ? "media_transport" : "unavailable";
+          client.packet_loss_received_at = std::chrono::steady_clock::now();
+        }
+      }
+    }
     if (adaptive_bitrate::is_enabled()) {
+      // Live Tuning hears the report's own loss, whatever the verdict above says, as it did in 1.4.13.
       adaptive_bitrate::update_network_stats(result.media_loss_pct, host.latency_ms);
     }
     result.observation_published = true;
+    if (logged_media_report_generation.exchange(sample.session_generation) != sample.session_generation) {
+      BOOST_LOG(info) << "Doctor: client media reports reach this host for stream generation "sv
+                      << sample.session_generation << "; the first counted one covered "sv
+                      << result.frames_expected << " frames with "sv << result.frames_lost << " lost"sv;
+    }
+    return result;
+  }
+
+  network_verdict_t current_network_verdict() {
+    std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
+    return network_judge.verdict(std::chrono::steady_clock::now());
+  }
+
+  network_verdict_t network_verdict_since(std::chrono::steady_clock::time_point from) {
+    std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
+    auto judge = network_judge;
+    judge.restart(from);
+    return judge.verdict(std::chrono::steady_clock::now());
+  }
+
+  void restart_network_judgement(std::chrono::steady_clock::time_point from) {
+    std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
+    network_judge.restart(from);
+  }
+
+  network_verdict_t served_network_verdict(const stats_t &stats) {
+    auto verdict = stats.network_verdict;
+    const bool network_current =
+      stats.network_sample_revision > 0 &&
+      stats.network_last_received_age_ms >= 0 &&
+      stats.network_last_received_age_ms <= DOCTOR_CURRENT_NETWORK_MAX_AGE_MS;
+    const bool media_current =
+      stats.media_loss_sample_revision > 0 &&
+      stats.media_loss_last_received_age_ms >= 0 &&
+      stats.media_loss_last_received_age_ms <= judged_network_t::k_media_report_max_age_ms;
+    if (!(network_current && media_current) && verdict.loss_available) {
+      verdict.loss_available = false;
+      verdict.loss_stale = true;
+      verdict.loss_pct = 0.0;
+      verdict.loss_elevated = false;
+    }
+    if (!network_current && verdict.rtt_available) {
+      verdict.rtt_available = false;
+      verdict.rtt_stale = true;
+      verdict.rtt_ms = 0.0;
+      verdict.rtt_elevated = false;
+    }
+    if (!network_current) {
+      verdict.control_loss_available = false;
+      verdict.control_loss_pct = 0.0;
+      verdict.control_loss_elevated = false;
+    }
+    verdict.risk = verdict.loss_elevated || verdict.rtt_elevated;
+    return verdict;
+  }
+
+  judged_network_t judged_network(const stats_t &stats) {
+    judged_network_t result;
+    const auto verdict = served_network_verdict(stats);
+    result.loss_judged = verdict.loss_available;
+    result.rtt_judged = verdict.rtt_available;
+    result.loss_pressure = result.loss_judged && verdict.loss_elevated;
+    result.rtt_pressure = result.rtt_judged && verdict.rtt_elevated;
+    result.rtt_fail = result.rtt_judged && verdict.rtt_ms >= network_judge_t::k_rtt_fail_ms;
+    result.risk = result.loss_pressure || result.rtt_pressure;
+    result.fail = result.risk && (result.loss_pressure || result.rtt_fail);
     return result;
   }
 
@@ -4122,6 +4712,27 @@ namespace stream_stats {
     if (last_client_media_counter_epoch) {
       last_client_media_counter_epoch->received_at =
         std::chrono::steady_clock::now() - age;
+    }
+  }
+
+  void age_network_judge_for_tests(std::chrono::steady_clock::duration age) {
+    std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
+    network_judge.media_oldest -= age;
+    if (network_judge.last_media_at != judge_clock::time_point {}) {
+      network_judge.last_media_at -= age;
+    }
+    for (auto &sample : network_judge.media) {
+      sample.at -= age;
+      sample.begins -= age;
+    }
+    for (auto &reading : network_judge.rtt) {
+      reading.at -= age;
+    }
+    for (auto &reading : network_judge.control) {
+      reading.at -= age;
+    }
+    if (network_judge.risk_since) {
+      *network_judge.risk_since -= age;
     }
   }
 #endif
@@ -4158,13 +4769,19 @@ namespace stream_stats {
     hot_doctor_live_action_scope_available.store(available, std::memory_order_release);
   }
 
+  void set_doctor_live_tuning_step(std::string run_id, std::uint64_t controller_revision) {
+    std::lock_guard<std::mutex> lock(doctor_live_tuning_step_mutex);
+    doctor_live_tuning_step_run = std::move(run_id);
+    doctor_live_tuning_step_revision = controller_revision;
+  }
+
   network_verification_window_t get_network_verification_window(
       std::uint64_t after_revision,
       std::chrono::steady_clock::time_point applied_at,
       std::chrono::steady_clock::duration required_duration) {
     network_verification_window_t result;
-    const auto now = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
+    const auto now = std::chrono::steady_clock::now();
 
     const primary_network_observation_t *first = nullptr;
     const primary_network_observation_t *last = nullptr;
@@ -4177,6 +4794,16 @@ namespace stream_stats {
       last = &observation;
       ++result.sample_count;
       if (observation.media_sample) ++result.media_sample_count;
+      if (observation.media_sample && observation.media_frames_expected > 0.0 &&
+          observation.media_interval_begins >= applied_at &&
+          observation.media_interval_begins <= observation.received_at &&
+          observation.media_loss_received_at == observation.received_at) {
+        ++result.eligible_media_sample_count;
+        result.eligible_media_last_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          now - observation.received_at
+        ).count();
+        result.eligible_media_packet_loss = observation.packet_loss;
+      }
       result.max_latency_ms = std::max(result.max_latency_ms, observation.latency_ms);
       if (observation.packet_loss_available) {
         result.any_packet_loss_available = true;
@@ -4237,8 +4864,21 @@ namespace stream_stats {
     if (eligible.size() < 2) return;
     const auto first_at = applied_at + std::chrono::seconds(1);
     const auto span = completed_at - first_at;
+    // These fixtures manufacture a complete interval. Move the media timestamps and covered
+    // intervals with the arrivals, with the first media report straddling application. The real
+    // counter/route tests use actual clock time and never call this helper.
+    auto previous_media_at = applied_at - std::chrono::milliseconds(1);
     for (std::size_t i = 0; i < eligible.size(); ++i) {
-      eligible[i]->received_at = first_at + span * i / (eligible.size() - 1);
+      auto &observation = *eligible[i];
+      observation.received_at = first_at + span * i / (eligible.size() - 1);
+      if (observation.media_sample) {
+        observation.media_interval_begins = previous_media_at;
+        previous_media_at = observation.received_at;
+      }
+      if (observation.packet_loss_available) observation.media_loss_received_at = previous_media_at;
+    }
+    if (primary_network_state.revision == eligible.back()->revision) {
+      primary_network_state = *eligible.back();
     }
   }
 
@@ -4633,7 +5273,7 @@ namespace stream_stats {
     if (payload == action->end() || !payload->is_object()) return;
     const auto action_id = action->value("id", std::string {});
     if (action_id != "lower_bitrate" && action_id != "restore_quality" &&
-        action_id != "recheck_network" && action_id != "recheck_pacing") {
+        action_id != "recheck_network" && action_id != "recheck_pacing" && action_id != "undo") {
       return;
     }
     (*payload)["app_session_id"] = app_session_id;
@@ -5236,6 +5876,7 @@ namespace stream_stats {
       // Keep the complete network group on one host-received observation.
       // Doctor must never pair a new revision with stale loss/RTT fields.
       std::lock_guard<std::mutex> risk_lock(network_risk_mutex);
+      result.network_verdict = network_judge.verdict(std::chrono::steady_clock::now());
       if (!primary_network_observations.empty()) {
         const auto &network = primary_network_observations.back();
         result.latency_ms = network.latency_ms;
@@ -5270,6 +5911,15 @@ namespace stream_stats {
     result.invalidate_ref_frames_requests_total = hot_invalidate_ref_frames_requests_total.load(std::memory_order_relaxed);
     result.doctor_live_action_scope_available =
       hot_doctor_live_action_scope_available.load(std::memory_order_acquire);
+    // Doctor's step holds only while nothing has written the controller since: Undo, a rollback, a new
+    // stream and every newer writer move its revision.
+    const auto controller_revision = adaptive_bitrate::get_doctor_state().revision;
+    {
+      std::lock_guard<std::mutex> step_lock(doctor_live_tuning_step_mutex);
+      if (!doctor_live_tuning_step_run.empty() && doctor_live_tuning_step_revision == controller_revision) {
+        result.doctor_live_tuning_step_run_id = doctor_live_tuning_step_run;
+      }
+    }
 
     return result;
   }

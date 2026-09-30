@@ -212,7 +212,7 @@ describe('describePyroWaveStream', () => {
       "Each figure is a request, what a client sets, with 10% FEC and the stream's audio included, for 31 dB of PSNR-HVS-M-H on a device's own screen and 35 dB on a television or monitor, in PyroWave's own bitrate model at this size, frame rate and chroma. The own screen target comes from one check by eye on a Retroid Pocket 6, and the model is an objective estimate from four game clips on SDR.",
       'This stream runs at a request of about 23 Mbps now, 20 Mbps at the encoder.',
       "93% of about the last 240 frames hit PyroWave's byte budget.",
-      "The host reads this stream as starved: as a request, it runs more than a tenth below where Doctor's raise would take it.",
+      "The host reads this stream as starved: as a request, the rate it is set to is more than a tenth below where Doctor's raise would take it.",
       "Doctor's PyroWave raise, for a starved stream on a clean network, goes to 101 Mbps, the own screen figure.",
       'A launch cap of 15 Mbps (stability_preset_selected), sized for H.264, was set aside for this stream.',
     ])

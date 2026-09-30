@@ -70,7 +70,7 @@
           <div class="dashboard-live-summary-tile" data-live-summary-metric="Loss">
             <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="lossChartEl"></div>
             <div class="dashboard-live-summary-label">Loss</div>
-            <div class="dashboard-live-summary-value" :class="liveSummary.lossTone">{{ liveSummary.loss }}</div>
+            <div class="dashboard-live-summary-value" :class="liveSummary.lossTone" :title="liveSummary.lossTitle">{{ liveSummary.loss }}</div>
           </div>
           <div class="dashboard-live-summary-tile" data-live-summary-metric="Bitrate">
             <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="bitrateChartEl"></div>
@@ -263,7 +263,7 @@
                         {{ client.fps.toFixed(0) }} fps<template v-if="client.bitrate_kbps"> · {{ (client.bitrate_kbps / 1000).toFixed(1) }} Mbps</template>
                       </div>
                       <div v-if="client.codec || client.width" class="mt-0.5">
-                        <template v-if="client.codec">{{ client.codec.toUpperCase() }}</template><template v-if="client.width"> · {{ client.width }}×{{ client.height }}</template><template v-if="Number.isFinite(client.packet_loss)"> · {{ client.packet_loss.toFixed(1) }}%</template>
+                        <template v-if="client.codec">{{ client.codec.toUpperCase() }}</template><template v-if="client.width"> · {{ client.width }}×{{ client.height }}</template><template v-if="client.packet_loss_available && Number.isFinite(client.packet_loss)"> · {{ client.packet_loss.toFixed(1) }}%</template>
                       </div>
                     </div>
                   </div>
@@ -579,6 +579,7 @@ import {
   buildLiveSummary,
   buildQualityGrade,
   buildQualityScore,
+  dashboardLossPct,
 } from '../dashboard-summary'
 
 const { stats } = useStreamStats(1000)
@@ -1825,7 +1826,8 @@ watch(stats, (newStats, oldStats) => {
   bitrateHistory.value.push(newStats.bitrate_kbps / 1000)
   encodeHistory.value.push(newStats.encode_time_ms)
   latencyHistory.value.push(newStats.latency_ms)
-  lossHistory.value.push(newStats.packet_loss || 0)
+  // The judged figure the tile shows; a gap until the host has judged any.
+  lossHistory.value.push(dashboardLossPct(newStats))
 
   // Keep rolling window
   while (timestamps.value.length > MAX_POINTS) {

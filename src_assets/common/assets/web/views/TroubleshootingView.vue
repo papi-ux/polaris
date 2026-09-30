@@ -525,6 +525,7 @@ import {
   buildGithubIssueUrl,
   buildNetworkPathTestReport,
   buildPostSessionStreamReport,
+  rememberJudgedNetworkVerdict,
   buildSupportSelfTestCopy,
   createExportAddressBook,
   redactSensitiveText,
@@ -589,6 +590,10 @@ const nativeNetworkPathProbe = ref(null)
 const gamescopeHelperProbe = ref(null)
 const lastCompletedStreamStats = ref(null)
 const lastDisconnectReason = ref('')
+// The verdict the host last judged the live stream's loss on, and the one the completed session ended
+// with. The last live payloads of a session whose client dropped call the loss stale.
+const lastJudgedNetworkVerdict = ref(null)
+const lastCompletedJudgedVerdict = ref(null)
 
 const confirmedActions = computed(() => ({
   forceClose: {
@@ -779,6 +784,7 @@ const postSessionReport = computed(() => buildPostSessionStreamReport({
   stats: lastCompletedStreamStats.value || streamStats.value || {},
   logs: logs.value,
   disconnectReason: lastDisconnectReason.value,
+  lastJudgedVerdict: lastCompletedStreamStats.value ? lastCompletedJudgedVerdict.value : lastJudgedNetworkVerdict.value,
 }))
 
 const supportSelfTestCopy = computed(() => buildSupportSelfTestCopy({
@@ -822,8 +828,10 @@ function copySupportSelfTests() {
 }
 
 watch(streamStats, (next, previous) => {
+  lastJudgedNetworkVerdict.value = rememberJudgedNetworkVerdict(lastJudgedNetworkVerdict.value, next, previous)
   if (previous?.streaming && next && !next.streaming) {
     lastCompletedStreamStats.value = previous
+    lastCompletedJudgedVerdict.value = lastJudgedNetworkVerdict.value
     lastDisconnectReason.value = 'Stream telemetry changed from active to idle.'
   }
 }, { deep: true })
