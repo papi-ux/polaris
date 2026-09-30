@@ -236,6 +236,25 @@ TEST(LaunchModeContractTests, PerGameVirtualDisplayPreferenceIsRecommendedWhenHo
   EXPECT_EQ(contract.at("recommended_mode"), "host_virtual_display");
 }
 
+// These assertions first run against the existing emitter, before its typed Launch as signature.
+TEST(AppLaunchAsCatalogueTests, HostDefaultCarriesTypedLaunchAsMetadata) {
+  const auto contract = nvhttp::build_launch_mode_contract_for_tests(false, "Game", false, false);
+  EXPECT_EQ(contract.value("launch_as", "missing"), "host_default");
+  ASSERT_TRUE(contract.contains("launch_as_available"));
+  EXPECT_TRUE(contract.at("launch_as_available").is_boolean());
+  EXPECT_EQ(contract.at("launch_as_available"), true);
+  EXPECT_EQ(contract.value("launch_as_unavailable_reason", "missing"), "");
+}
+
+TEST(AppLaunchAsCatalogueTests, MirrorDesktopCarriesMetadataWithoutBecomingAHardPin) {
+  const auto contract = nvhttp::build_launch_mode_contract_for_tests(false, "Desktop", true, false, true);
+  EXPECT_EQ(contract.value("launch_as", "missing"), "desktop_display");
+  ASSERT_TRUE(contract.contains("launch_as_available"));
+  EXPECT_EQ(contract.at("launch_as_available"), true);
+  EXPECT_EQ(contract.value("launch_as_unavailable_reason", "missing"), "");
+  EXPECT_FALSE(contract.at("follows_host_default").get<bool>());
+}
+
 #ifdef __linux__
   #include <src/platform/linux/stream_display_policy.h>
 
