@@ -5387,6 +5387,10 @@ namespace nvhttp {
     const auto topology_freshness_deferred = [&](std::string_view mode) {
       if (input_only || !stream_display_policy::selection_session_overridable(mode)) return false;
       if (launch_session->watch_only) return true;
+      // HVD needs both creation and output-pinned capture. Its actual app-aware
+      // resolver gives a named refusal before topology changes, instead of the
+      // legacy parser dropping this mode or calling the envelope malformed.
+      if (mode == stream_display_policy::k_host_virtual_display) return true;
       if (!topology_app) return false;
       const auto pin = stream_display_policy::resolve_app_launch_as(topology_app->launch_as, {});
       return pin.verdict == stream_display_policy::app_launch_as_t::verdict_e::pinned &&

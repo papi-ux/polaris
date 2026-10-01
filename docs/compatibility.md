@@ -48,7 +48,7 @@ describes the modes themselves.
 | Private Stream (GPU-native) | A running Wayland desktop | Its labwc runs as a window under the host desktop, so a desktop session has to be running. |
 | Gamescope Stream | Any desktop | `gamescope`. Polaris joins an idle Gamescope or starts its own, and captures it through the portal. |
 | Mirror Desktop | KDE Plasma, GNOME, wlroots desktops such as Hyprland and Sway, X11 | Portal capture on KDE Plasma and GNOME; wlroots capture or the portal on wlroots desktops. An X11 session is captured by X11 capture, which copies every frame through system memory. |
-| Host Virtual Display | KDE Plasma 6 and Hyprland on their own; GNOME, Sway and others with EVDI | Automatic tries a KWin screen on Plasma 6, then EVDI, then Hyprland, then kscreen-doctor, which only borrows a spare connector. GNOME has none of the others, so it needs the EVDI kernel module. |
+| Host Virtual Display | KDE Plasma with output-pinned KWin capture; Hyprland with its native virtual-output backend | Creation and capture must both be available. EVDI and kscreen-doctor need KWin capture; the native Hyprland backend needs its wlroots capture protocols. GNOME Wayland, Sway and other desktops without those routes cannot stream this mode, even if EVDI can create a connector. |
 | Desktop Takeover | Hyprland only | A live Hyprland session, `hyprctl`, and an EVDI or Hyprland virtual output. |
 | Headless Dongle | KDE Plasma | A dummy plug. Polaris moves the desktop onto it with kscreen-doctor. |
 
@@ -82,8 +82,8 @@ Everything else streams SDR.
   it, or with publishing turned off, clients do not find the host on their own: add it by its
   address. SteamOS ships Avahi with publishing off ([SteamOS guide](steamos.md#connect-a-client)).
 - **Each stream mode's tools**, listed in the table above: `labwc` and `wlr-randr` for Private
-  Stream, `gamescope` for Gamescope Stream, EVDI for Host Virtual Display where KWin and Hyprland
-  cannot add a screen.
+  Stream, `gamescope` for Gamescope Stream, and a supported creator plus output-pinned capture
+  provider for Host Virtual Display. EVDI alone does not add GNOME Host Virtual Display streaming.
 
 ## Clients
 

@@ -5596,14 +5596,15 @@ namespace confighttp {
       vd_backend,
       virtual_display::host_virtual_display_connector()
     );
+    const auto hvd_stream_ready = virtual_display::host_stream_readiness().available;
     const auto configured_policy = stream_display_policy::resolve(stream_display_policy::input_t {
-      vd_available,
+      hvd_stream_ready,
       false,
       false,
     });
     const auto effective_policy = stream_display_policy::resolve_effective(
       stream_display_policy::input_t {
-        vd_available,
+        hvd_stream_ready,
         false,
         stats.runtime_gpu_native_override_active,
       },
@@ -5614,7 +5615,7 @@ namespace confighttp {
     // Path/runtime display: reuse configured unless live override needs a second resolve.
     const auto policy = labwc.state.gpu_native_override_active ?
       stream_display_policy::resolve(stream_display_policy::input_t {
-        vd_available,
+        hvd_stream_ready,
         false,
         true,
       }) :
@@ -5748,14 +5749,9 @@ namespace confighttp {
       output_tree["host_default_stream_path_id"] = host_default_selection;
       output_tree["host_default_stream_path_label"] = stream_display_policy::label_for_selection(host_default_selection);
       output_tree["stream_display_mode_options"] = nlohmann::json::array();
-      for (const auto &option : stream_display_policy::mode_options(vd_available)) {
+      const auto stream_caps = stream_path::probe_host_capabilities();
+      for (const auto &option : stream_display_policy::mode_options(stream_caps)) {
         auto unavailable_reason = option.available ? std::string {} : option.unavailable_reason;
-        if (!option.available && option.value == "host_virtual_display") {
-          const auto backend_reason = virtual_display::unavailable_reason();
-          if (!backend_reason.empty()) {
-            unavailable_reason = backend_reason;
-          }
-        }
         if (!option.available && unavailable_reason.empty()) {
           unavailable_reason = "This mode is not available on this host right now.";
         }

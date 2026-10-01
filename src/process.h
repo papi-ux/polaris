@@ -156,6 +156,9 @@ namespace proc {
     int refusal = 0;
   };
   launch_selection_t resolve_launch_selection_for_app(const struct ctx_t &app, const launch_selection_request_t &request);
+
+  /// After app precedence resolves, before display creation; no-op for other modes/watchers.
+  int prepare_host_virtual_capture_for_launch(const ctx_t &app, const launch_selection_t &selection, bool watch_only);
   int refuse_app_launch_as_before_launch(const struct ctx_t &app, const launch_selection_request_t &request);
   int refuse_app_launch_as_unavailable(const struct ctx_t &app, std::string reason);
 

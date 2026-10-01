@@ -6152,14 +6152,32 @@ namespace proc {
     const bool mirror_app = app.launch_as == stream_display_policy::k_desktop_display &&
       !(selection == stream_display_policy::k_desktop_takeover ||
         (!request.client_named_selection.empty() && stream_display_policy::desktop_mirror_yields_to_selection(selection)));
-    return {stream_display_policy::host_default_launch_selection({
+    const auto resolved = stream_display_policy::host_default_launch_selection({
       .requested_selection = requested,
       .mirror_desktop = request.mirror_desktop || mirror_app ||
         (!request.watch_only && platf::game_mode_host::session_live()),
       .launch_virtual_display = request.launch_virtual_display,
       .virtual_display_user_locked = request.virtual_display_user_locked,
       .host_provides_private_display = stream_display_policy::host_default_provides_private_display(),
-    }), false, 0};
+    });
+    const auto effective = resolved.empty() ? stream_display_policy::configured_selection() : resolved;
+    if (!request.watch_only && effective == stream_display_policy::k_host_virtual_display) {
+      const auto ready = virtual_display::host_stream_readiness(true);
+      if (!ready.available) return {{}, false, launch_failure::refuse(503,
+        "host_virtual_display_capture_unavailable", ready.reason,
+        "Choose Mirror Desktop or Private Stream, or make the selected Host Virtual Display provider available.")};
+    }
+    return {resolved, false, 0};
+  }
+
+
+  int prepare_host_virtual_capture_for_launch(const ctx_t &app, const launch_selection_t &selection, bool watch_only) {
+    if (watch_only || selection.selection != stream_display_policy::k_host_virtual_display) return 0;
+    const auto ready = virtual_display::prepare_host_stream_capture();
+    if (ready.available) return 0;
+    if (selection.pinned) return refuse_launch_as_unavailable(app, ready.reason);
+    return launch_failure::refuse(503, "host_virtual_display_capture_unavailable", ready.reason,
+      "Choose Mirror Desktop or Private Stream, or repair the named Host Virtual Display capture provider.");
   }
 
   void apply_app_display_semantics(
@@ -8647,6 +8665,9 @@ namespace proc {
       return 409;
     }
 
+    if (const auto refusal = prepare_host_virtual_capture_for_launch(app,
+          launch_selection_t {session_mode, resolved_selection.pinned, 0}, launch_session->watch_only)) return refusal;
+
     // Snapshot the host policy before a session-scoped override. On a rejected
     // legacy request, restore this snapshot and retain the documented host-
     // default fallback. Exact resolved profiles never receive that fallback.
@@ -8713,6 +8734,11 @@ namespace proc {
         if (resolved_selection.pinned) {
           this->initial_video_config_saved = false;
           return refuse_launch_as_unavailable(app, std::move(mode_error));
+        }
+        if (session_mode == stream_display_policy::k_host_virtual_display) {
+          this->initial_video_config_saved = false;
+          return launch_failure::refuse(503, "host_virtual_display_capture_unavailable", std::move(mode_error),
+            "Choose Mirror Desktop or Private Stream, or make the selected Host Virtual Display provider available.");
         }
         if (launch_session->resolved_profile_from_client) {
           this->initial_video_config_saved = false;
