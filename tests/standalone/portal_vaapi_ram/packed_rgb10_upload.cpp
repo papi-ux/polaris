@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
@@ -201,6 +202,9 @@ namespace {
     EGLDisplay display=EGL_NO_DISPLAY;
     EGLContext context=EGL_NO_CONTEXT;
     software_context_t() {
+      const auto vendor=std::getenv("__EGL_VENDOR_LIBRARY_FILENAMES");
+      if (!vendor || std::string(vendor).find("mesa")==std::string::npos)
+        throw std::runtime_error("software fixture requires an explicit Mesa EGL vendor JSON before creating a context");
       if (!gladLoaderLoadEGL(EGL_NO_DISPLAY)) throw std::runtime_error("could not load EGL");
       if (!eglGetPlatformDisplay) throw std::runtime_error("EGL platform display unavailable");
       constexpr EGLenum surfaceless_mesa=0x31dd;
