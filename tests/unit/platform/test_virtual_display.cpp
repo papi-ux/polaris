@@ -854,11 +854,6 @@ TEST(VirtualDisplayKwinTests, PersistedKwinScreenRoundTrips) {
   EXPECT_EQ(entries.front().display.kscreen_primary_before->name, "DP-2");
 }
 
-#else
-TEST(VirtualDisplayTests, LinuxOnly) {
-  GTEST_SKIP() << "Linux-only virtual display tests";
-}
-
 #include <src/config.h>
 #include <src/launch_failure.h>
 #include <src/process.h>
@@ -1182,5 +1177,10 @@ TEST(HostVirtualCaptureRegistryTests, APrivateMissingSocketIsUnknownAndAnAbsentT
   EXPECT_EQ(virtual_display::probe_capture_provider(true).state, virtual_display::registry_state_e::no_wayland);
 }
 #endif
+
+#else
+TEST(VirtualDisplayTests, LinuxOnly) {
+  GTEST_SKIP() << "Linux-only virtual display tests";
+}
 
 #endif
