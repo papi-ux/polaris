@@ -4434,9 +4434,7 @@ namespace confighttp {
     nlohmann::json named_certs = nvhttp::get_all_clients();
     nlohmann::json output_tree;
     output_tree["named_certs"] = named_certs;
-#ifdef _WIN32
-    output_tree["platform"] = "windows";
-#endif
+    output_tree["platform"] = POLARIS_PLATFORM;
     output_tree["status"] = true;
     send_response(response, output_tree);
   }
@@ -4454,9 +4452,12 @@ namespace confighttp {
    *   "display_mode": "1920x1080x59.94",
    *   "do": [ { "cmd": "<command>", "elevated": false }, ... ],
    *   "undo": [ { "cmd": "<command>", "elevated": false }, ... ],
-   *   "perm": <uint32_t>
+   *   "perm": <uint32_t>,
+   *   "close_desktop_steam": true
    * }
    * @endcode
+   *
+   * Leaving out close_desktop_steam or temporary_authorization keeps the device's current value.
    */
   void updateClient(resp_https_t response, req_https_t request) {
     if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
@@ -4481,6 +4482,10 @@ namespace confighttp {
       if (input_tree.contains("temporary_authorization")) {
         temporary_authorization = input_tree.at("temporary_authorization").get<bool>();
       }
+      std::optional<bool> close_desktop_steam;
+      if (input_tree.contains("close_desktop_steam")) {
+        close_desktop_steam = input_tree.at("close_desktop_steam").get<bool>();
+      }
       auto do_cmds = nvhttp::extract_command_entries(input_tree, "do");
       auto undo_cmds = nvhttp::extract_command_entries(input_tree, "undo");
       auto perm = static_cast<crypto::PERM>(input_tree.value("perm", static_cast<uint32_t>(crypto::PERM::_no)) & static_cast<uint32_t>(crypto::PERM::_all));
@@ -4495,7 +4500,8 @@ namespace confighttp {
         enable_legacy_ordering,
         allow_client_commands,
         always_use_virtual_display,
-        temporary_authorization
+        temporary_authorization,
+        close_desktop_steam
       );
       output_tree["status"] = result == nvhttp::client_mutation_result_t::success;
       if (result == nvhttp::client_mutation_result_t::not_found) {

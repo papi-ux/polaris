@@ -527,6 +527,8 @@ namespace nvhttp {
    * @param[in]  always_use_virtual_display  Always use virtual display
    * @param[in]  temporary_authorization  Explicit temporary/durable choice;
    *                                       omitted preserves the current choice
+   * @param[in]  close_desktop_steam  Whether a launch from this device may quit desktop
+   *                                   Steam; omitted preserves the current choice
    * 
    * @return     Whether the update is successful
    */
@@ -541,7 +543,8 @@ namespace nvhttp {
     const bool enable_legacy_ordering,
     const bool allow_client_commands,
     const bool always_use_virtual_display,
-    const std::optional<bool> temporary_authorization = std::nullopt
+    const std::optional<bool> temporary_authorization = std::nullopt,
+    const std::optional<bool> close_desktop_steam = std::nullopt
   );
 
   bool update_device_info(
@@ -555,7 +558,8 @@ namespace nvhttp {
     const bool enable_legacy_ordering,
     const bool allow_client_commands,
     const bool always_use_virtual_display,
-    const std::optional<bool> temporary_authorization = std::nullopt
+    const std::optional<bool> temporary_authorization = std::nullopt,
+    const std::optional<bool> close_desktop_steam = std::nullopt
   );
 
   /** Shared trusted evidence used by both authenticated Doctor action routes. */

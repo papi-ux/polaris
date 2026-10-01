@@ -1358,4 +1358,53 @@ TEST(SteamShutdownStateMachineTests, PerAppCloseDesktopSteamReachesBothNvhttpRou
   ASSERT_FALSE(validation.empty());
   EXPECT_NE(validation.find("\"close-desktop-steam-for-private\"sv"), std::string::npos);
 }
+
+TEST(SteamShutdownStateMachineTests, DeviceCloseDesktopSteamReachesOnlyTheGameStreamLaunchRoute) {
+  // A device's close_desktop_steam switch is the closeDesktopSteamForPrivate parameter for a
+  // client that cannot send one, so it enters the policy beside the per-app switch, from the
+  // GameStream /launch route. Nova for Android asks its player what to do from the
+  // /polaris/v1/optimize preview and sends the answer, so the preview leaves the switch out
+  // and that question is still asked. The JSON launch route takes no device switch at all.
+  const auto nvhttp = read_source_file("src/nvhttp.cpp");
+  ASSERT_FALSE(nvhttp.empty());
+
+  const auto wrapper = source_between(
+    nvhttp,
+    "bool device_closes_desktop_steam\n    ) {",
+    "proc::desktop_launch_safety_policy_t resolve_streaming_launch_safety_policy("
+  );
+  ASSERT_FALSE(wrapper.empty());
+  const auto per_app = wrapper.find("app.close_desktop_steam_for_private ||");
+  ASSERT_NE(per_app, std::string::npos);
+  EXPECT_NE(wrapper.find("device_closes_desktop_steam,", per_app), std::string::npos);
+
+  const auto launch_route = source_between(
+    nvhttp,
+    "void launch(bool &host_audio",
+    "void resume(bool &host_audio"
+  );
+  ASSERT_FALSE(launch_route.empty());
+  const auto device_switch = launch_route.find("named_cert_p->close_desktop_steam");
+  const auto shutdown = launch_route.find("proc::request_desktop_steam_shutdown_for_private_stream()");
+  ASSERT_NE(device_switch, std::string::npos);
+  ASSERT_NE(shutdown, std::string::npos);
+  EXPECT_LT(device_switch, shutdown);
+
+  const auto preview = source_between(
+    nvhttp,
+    "void put_optimization_launch_policy(",
+    "output[\"launchPolicy\"]"
+  );
+  ASSERT_FALSE(preview.empty());
+  EXPECT_EQ(preview.find("named_cert"), std::string::npos);
+  EXPECT_NE(preview.find("proc::input_only_app_id,\n        false\n      );"), std::string::npos);
+
+  const auto api_route = source_between(
+    nvhttp,
+    "auto polarisLaunchGame =",
+    "// Toggle MangoHud for a game"
+  );
+  ASSERT_FALSE(api_route.empty());
+  EXPECT_EQ(api_route.find("close_desktop_steam"), std::string::npos);
+}
 #endif

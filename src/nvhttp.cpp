@@ -657,7 +657,8 @@ namespace nvhttp {
     proc::desktop_launch_safety_policy_t resolve_streaming_launch_safety_policy(
       const args_t &args,
       const proc::ctx_t &app,
-      bool active_desktop_game
+      bool active_desktop_game,
+      bool device_closes_desktop_steam
     ) {
       const bool explicit_mirror = explicit_mirror_desktop_requested(args);
       const bool mirror_desktop_requested = explicit_mirror ||
@@ -691,7 +692,8 @@ namespace nvhttp {
       return proc::resolve_desktop_launch_safety_policy(
         private_stream_requested,
         mirror_desktop_requested,
-        force_private_after_desktop_steam_shutdown_requested(args) || app.close_desktop_steam_for_private,
+        force_private_after_desktop_steam_shutdown_requested(args) || app.close_desktop_steam_for_private ||
+          device_closes_desktop_steam,
         app,
         proc::desktop_steam_client_active(),
         active_desktop_game
@@ -762,10 +764,14 @@ namespace nvhttp {
         return;
       }
 
+      // Nova for Android asks its player what to do about desktop Steam from this policy, and sends
+      // the answer with the launch. The device's close_desktop_steam switch stays out of it, so that
+      // question is still asked and the answer still decides.
       const auto launch_policy = resolve_streaming_launch_safety_policy(
         args,
         *app,
-        proc::proc.running() > 0 && proc::proc.running() != proc::input_only_app_id
+        proc::proc.running() > 0 && proc::proc.running() != proc::input_only_app_id,
+        false
       );
       output["launchPolicy"] = proc::desktop_launch_safety_policy_to_json(launch_policy);
     }
@@ -4714,6 +4720,7 @@ namespace nvhttp {
         named_cert_node["enable_legacy_ordering"] = named_cert_p->enable_legacy_ordering;
         named_cert_node["allow_client_commands"] = named_cert_p->allow_client_commands;
         named_cert_node["always_use_virtual_display"] = named_cert_p->always_use_virtual_display;
+        named_cert_node["close_desktop_steam"] = named_cert_p->close_desktop_steam;
 
         // Add "do" commands if available.
         if (!named_cert_p->do_cmds.empty()) {
@@ -4901,6 +4908,7 @@ namespace nvhttp {
           named_cert->enable_legacy_ordering = entry.value("enable_legacy_ordering", true);
           named_cert->allow_client_commands = entry.value("allow_client_commands", true);
           named_cert->always_use_virtual_display = entry.value("always_use_virtual_display", false);
+          named_cert->close_desktop_steam = entry.value("close_desktop_steam", crypto::close_desktop_steam_default);
           named_cert->do_cmds = extract_command_entries(entry, "do");
           named_cert->undo_cmds = extract_command_entries(entry, "undo");
           register_identity(named_cert);
@@ -4956,6 +4964,7 @@ namespace nvhttp {
     clone->enable_legacy_ordering = source->enable_legacy_ordering;
     clone->allow_client_commands = source->allow_client_commands;
     clone->always_use_virtual_display = source->always_use_virtual_display;
+    clone->close_desktop_steam = source->close_desktop_steam;
     clone->temporary_authorization = source->temporary_authorization;
     return clone;
   }
@@ -5689,6 +5698,7 @@ namespace nvhttp {
       named_cert_p->enable_legacy_ordering = true;
       named_cert_p->allow_client_commands = true;
       named_cert_p->always_use_virtual_display = false;
+      named_cert_p->close_desktop_steam = crypto::close_desktop_steam_default;
       named_cert_p->temporary_authorization = sess.temporary_authorization;
 
       if (add_authorized_client(named_cert_p, sess.pairing_perm)) {
@@ -6918,6 +6928,7 @@ namespace nvhttp {
       named_cert_node["enable_legacy_ordering"] = named_cert->enable_legacy_ordering;
       named_cert_node["allow_client_commands"] = named_cert->allow_client_commands;
       named_cert_node["always_use_virtual_display"] = named_cert->always_use_virtual_display;
+      named_cert_node["close_desktop_steam"] = named_cert->close_desktop_steam;
       named_cert_node["temporary_authorization"] = named_cert->temporary_authorization;
 
       // Add "do" commands if available
@@ -7529,10 +7540,12 @@ namespace nvhttp {
 
 #ifdef __linux__
         proc::apply_app_display_semantics(*app_iter, *launch_session);
+        // A stock Moonlight cannot ask for closeDesktopSteamForPrivate, so the device's switch asks for it.
         auto launch_policy = resolve_streaming_launch_safety_policy(
           args,
           *app_iter,
-          current_appid > 0 && current_appid != proc::input_only_app_id
+          current_appid > 0 && current_appid != proc::input_only_app_id,
+          named_cert_p->close_desktop_steam
         );
         put_desktop_launch_policy(tree, launch_policy);
         if (launch_policy.recommendedAction == "force_private_stream_after_desktop_steam_shutdown") {
@@ -7557,7 +7570,7 @@ namespace nvhttp {
                              << launch_policy.physicalDisplayRisk;
           tree.put("root.resume", 0);
           tree.put("root.<xmlattr>.status_code", 409);
-          tree.put("root.<xmlattr>.status_message", "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit it on the host, or turn on \"Close desktop Steam for private launches\" for this app so Polaris closes it for you, or retry with explicit desktop mirroring.");
+          tree.put("root.<xmlattr>.status_message", "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit it on the host, or turn on \"Close Steam on the host to start games\" for this device in Devices so Polaris closes Steam for you, or retry with explicit desktop mirroring.");
           tree.put("root.error_code", "desktop_active_private_stream_refused");
           tree.put("root.gamesession", 0);
           return;
@@ -12396,7 +12409,8 @@ namespace nvhttp {
     const bool enable_legacy_ordering,
     const bool allow_client_commands,
     const bool always_use_virtual_display,
-    const std::optional<bool> temporary_authorization
+    const std::optional<bool> temporary_authorization,
+    const std::optional<bool> close_desktop_steam
   ) {
     std::shared_ptr<rtsp_stream::launch_session_t> cancelled_launch;
     {
@@ -12422,6 +12436,7 @@ namespace nvhttp {
       replacement->allow_client_commands = allow_client_commands;
       replacement->always_use_virtual_display = always_use_virtual_display;
       replacement->temporary_authorization = temporary_authorization.value_or(previous->temporary_authorization);
+      replacement->close_desktop_steam = close_desktop_steam.value_or(previous->close_desktop_steam);
       *it = replacement;
       if (!save_state()) {
         *it = previous;
@@ -12447,7 +12462,8 @@ namespace nvhttp {
     const bool enable_legacy_ordering,
     const bool allow_client_commands,
     const bool always_use_virtual_display,
-    const std::optional<bool> temporary_authorization
+    const std::optional<bool> temporary_authorization,
+    const std::optional<bool> close_desktop_steam
   ) {
     return update_device_info_result(
       uuid,
@@ -12460,7 +12476,8 @@ namespace nvhttp {
       enable_legacy_ordering,
       allow_client_commands,
       always_use_virtual_display,
-      temporary_authorization
+      temporary_authorization,
+      close_desktop_steam
     ) == client_mutation_result_t::success;
   }
 

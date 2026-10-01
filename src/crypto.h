@@ -103,6 +103,10 @@ namespace crypto {
     }
   };
 
+  /// What a device gets for close_desktop_steam when it pairs, and when its record predates the
+  /// setting. One constant, so turning the default off is a one-line change.
+  inline constexpr bool close_desktop_steam_default = true;
+
   struct named_cert_t {
     std::string name;
     std::string uuid;
@@ -127,6 +131,10 @@ namespace crypto {
     bool enable_legacy_ordering;
     bool allow_client_commands;
     bool always_use_virtual_display;
+    /// Whether a launch from this device may quit desktop Steam on the host so a private stream of a
+    /// Steam app can start, instead of being refused. It stands in for the closeDesktopSteamForPrivate
+    /// launch parameter, which a stock Moonlight cannot send.
+    bool close_desktop_steam = close_desktop_steam_default;
     // Temporary authorizations are intentionally memory-only. They expire
     // after the device's final stream disconnect or when Polaris restarts.
     bool temporary_authorization = false;

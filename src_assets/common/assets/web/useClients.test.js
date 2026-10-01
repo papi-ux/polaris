@@ -82,6 +82,22 @@ describe('paired client metadata', () => {
       temporary_authorization: true,
     })
   })
+
+  it('keeps the close desktop Steam switch from the clients API', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      json: async () => ({
+        status: true,
+        platform: 'linux',
+        named_certs: [{ name: 'Steam Deck', uuid: 'client-1', perm: permissionMapping._all, close_desktop_steam: false }],
+      }),
+    }))
+    const { clients, platform, refreshClients } = useClients()
+
+    await refreshClients()
+
+    expect(platform.value).toBe('linux')
+    expect(clients.value[0].close_desktop_steam).toBe(false)
+  })
 })
 
 
@@ -134,6 +150,43 @@ describe('client update failures', () => {
     }
 
     await expect(saveClient(client)).rejects.toThrow('Paired-client update could not be persisted')
+  })
+
+  it('sends the close desktop Steam switch with the device update', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ status: true, named_certs: [] }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const { saveClient } = useClients()
+
+    await saveClient({
+      uuid: 'client-1',
+      editName: 'Steam Deck',
+      editDisplayMode: '',
+      editAllowClientCommands: true,
+      editEnableLegacyOrdering: true,
+      editAlwaysUseVirtualDisplay: false,
+      editCloseDesktopSteam: false,
+      editTemporaryAuthorization: false,
+      editPerm: permissionMapping._all,
+      edit_do: [],
+      edit_undo: [],
+    })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('./api/clients/update')
+    expect(JSON.parse(init.body).close_desktop_steam).toBe(false)
+  })
+
+  it('offers the close desktop Steam switch only on a Linux host and restores it on cancel', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src_assets/common/assets/web/views/PinView.vue'), 'utf8')
+
+    // The host only checks for desktop Steam on Linux, so the switch would do nothing elsewhere.
+    expect(source).toMatch(/v-if="platform === 'linux'"\s*:id="`close_desktop_steam-\$\{client\.uuid\}`"/)
+    expect(source).toContain('v-model="client.editCloseDesktopSteam"')
+    // editClient loads it and cancelEdit puts it back.
+    expect(source.match(/client\.editCloseDesktopSteam = client\.close_desktop_steam/g)).toHaveLength(2)
   })
 
   it('only leaves edit mode after the client update succeeds', () => {

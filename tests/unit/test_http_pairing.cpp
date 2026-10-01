@@ -1106,6 +1106,85 @@ TEST_F(PairingAccessPresetTest, DeviceUpdatePreservesTemporaryAuthorizationWhenF
   EXPECT_EQ(state.read()["root"]["named_devices"].size(), 1);
 }
 
+TEST_F(PairingAccessPresetTest, NewlyPairedClientGetsTheCloseDesktopSteamDefault) {
+  TemporaryPairingState state {"close-desktop-steam-default"};
+  auto session = successful_pairing_session("close-desktop-steam-new");
+  complete_successful_pairing(session);
+
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["close_desktop_steam"].get<bool>(), crypto::close_desktop_steam_default);
+  ASSERT_TRUE(save_pairing_state_for_tests());
+  EXPECT_EQ(
+    state.read()["root"]["named_devices"][0]["close_desktop_steam"].get<bool>(),
+    crypto::close_desktop_steam_default
+  );
+}
+
+TEST_F(PairingAccessPresetTest, DeviceUpdateSetsCloseDesktopSteamAndKeepsItWhenOmitted) {
+  TemporaryPairingState state {"close-desktop-steam-update"};
+  auto session = successful_pairing_session("close-desktop-steam-edit");
+  complete_successful_pairing(session);
+  auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  const auto uuid = clients[0]["uuid"].get<std::string>();
+  const bool changed = !crypto::close_desktop_steam_default;
+
+  EXPECT_EQ(
+    update_device_info_result(
+      uuid, "changed", "", 0, {}, {}, crypto::PERM::_game_control, true, true, false, std::nullopt, changed
+    ),
+    client_mutation_result_t::success
+  );
+  clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["close_desktop_steam"].get<bool>(), changed);
+  EXPECT_EQ(state.read()["root"]["named_devices"][0]["close_desktop_steam"].get<bool>(), changed);
+
+  // The paired-client settings routes save a device without naming the switch, and must not reset it.
+  EXPECT_EQ(
+    update_device_info_result(
+      uuid, "renamed", "", 0, {}, {}, crypto::PERM::_game_control, true, true, false
+    ),
+    client_mutation_result_t::success
+  );
+  clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["close_desktop_steam"].get<bool>(), changed);
+
+  // A device turning into a Nova device is saved from a copy of its record, which has to carry it.
+  auto cert = crypto::x509(PUBLIC_CERT);
+  auto request_snapshot = verify_client_cert_for_tests(cert.get(), clients[0]["last_seen_at"].get<std::int64_t>() + 1);
+  const auto live = resolve_authorized_client_for_tests(request_snapshot, "/polaris/v1/capabilities");
+  ASSERT_TRUE(live);
+  EXPECT_EQ(live->client_family, "nova");
+  EXPECT_EQ(live->close_desktop_steam, changed);
+
+  reset_pairing_state_for_tests();
+  load_pairing_state_for_tests();
+  clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["close_desktop_steam"].get<bool>(), changed);
+}
+
+TEST_F(PairingAccessPresetTest, DeviceSavedBeforeTheCloseDesktopSteamSwitchLoadsTheDefault) {
+  TemporaryPairingState state {"close-desktop-steam-legacy"};
+  auto session = successful_pairing_session("close-desktop-steam-legacy");
+  complete_successful_pairing(session);
+  ASSERT_TRUE(save_pairing_state_for_tests());
+
+  auto persisted = state.read();
+  persisted["root"]["named_devices"][0].erase("close_desktop_steam");
+  state.write(persisted);
+
+  reset_pairing_state_for_tests();
+  load_pairing_state_for_tests();
+
+  const auto clients = get_all_clients();
+  ASSERT_EQ(clients.size(), 1);
+  EXPECT_EQ(clients[0]["close_desktop_steam"].get<bool>(), crypto::close_desktop_steam_default);
+}
+
 TEST_F(PairingAccessPresetTest, TemporaryAuthorizationRevocationInvalidatesTheCertificate) {
   auto session = successful_pairing_session(
     "expiring-client",

@@ -179,7 +179,7 @@ You do not need to change the host mode to briefly share your desktop. Any Moonl
 Headless Dongle itself cannot be requested as a per-launch override because it rearranges physical outputs. Desktop Takeover can be selected for one launch because its recovery record and virtual output are session-owned; an explicit Mirror Desktop request still takes precedence. If Headless Dongle is the host default, a client can still choose Mirror Desktop or another supported mode for one session; the saved host setting returns on the next normal launch.
 
 > [!TIP]
-> The reverse situation has a switch too: a private launch is refused when desktop Steam is already running on the host, because starting Steam in the private session would fight the one on your screen. If you would rather have Polaris quit desktop Steam and continue, turn on **Close desktop Steam for private launches** on that app in the Apps editor. Polaris waits for Steam to fully exit before starting the stream. Clients can also request it per launch with `closeDesktopSteamForPrivate=1`.
+> The reverse situation has a switch too. A private launch of a Steam app cannot start while desktop Steam is running on the host, because the Steam in the private session would fight the one on your screen. Each device's **Close Steam on the host to start games** switch, under **Devices, Edit Access**, is on by default: Polaris quits desktop Steam, waits for it to fully exit, and starts the stream. With the switch off, that device's launch is refused instead. **Close desktop Steam for private launches** on an app in the Apps editor does the same for every device that launches the app, and clients can request it per launch with `closeDesktopSteamForPrivate=1`.
 
 ## Under the hood (optional reading)
 
