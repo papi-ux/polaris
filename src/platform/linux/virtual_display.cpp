@@ -62,6 +62,9 @@ namespace fs = std::filesystem;
 
 namespace virtual_display {
   namespace {
+#ifdef POLARIS_TESTS
+    thread_local std::optional<host_stream_probe_for_tests_t> host_stream_test_probe;
+#endif
     constexpr auto backend_detection_cache_ttl = 30s;
     std::mutex backend_detection_mutex;
     std::optional<backend_e> cached_backend;
@@ -2896,6 +2899,15 @@ namespace virtual_display {
       std::string *kwin_reason = nullptr,
       backend_preference_e *preference_out = nullptr
     ) {
+#ifdef POLARIS_TESTS
+      if (host_stream_test_probe) {
+        ++host_stream_test_probe->creator_calls;
+        if (evdi_blocked) *evdi_blocked = false;
+        if (kwin_reason) *kwin_reason = host_stream_test_probe->creator_reason;
+        if (preference_out) *preference_out = backend_preference_e::AUTO;
+        return host_stream_test_probe->backend;
+      }
+#endif
       // Detection touches both the cache and lazily initialized backend state
       // (including the EVDI library handle). Keep the full probe serialized,
       // rather than protecting only the two cache assignments.
@@ -3006,6 +3018,23 @@ namespace virtual_display {
         return true;
     }
     return false;
+  }
+
+#ifdef POLARIS_TESTS
+  void set_host_stream_probe_for_tests(std::optional<host_stream_probe_for_tests_t> probe) {
+    host_stream_test_probe = std::move(probe);
+  }
+  int host_stream_creator_probe_count_for_tests() {
+    return host_stream_test_probe ? host_stream_test_probe->creator_calls : 0;
+  }
+#endif
+
+  // Test-first baseline: existing creator-only stream admission. The next
+  // implementation commit makes provider evidence authoritative at consumers.
+  host_stream_readiness_t host_stream_readiness(bool fresh) {
+    const auto backend = fresh ? detect_backend_fresh() : detect_backend();
+    const bool available = backend_has_required_configuration(backend, host_virtual_display_connector());
+    return {available, backend, capture_provider_state_e::unknown, available ? std::string {} : unavailable_reason()};
   }
 
   bool is_available() {

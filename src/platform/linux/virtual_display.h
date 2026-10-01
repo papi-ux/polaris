@@ -12,6 +12,8 @@
 #pragma once
 
 // standard includes
+#include "host_virtual_capture.h"
+
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -146,6 +148,31 @@ namespace virtual_display {
    * authority to a backend that has since disappeared.
    */
   bool is_available_fresh();
+
+  struct host_stream_readiness_t {
+    bool available = false;
+    backend_e backend = backend_e::NONE;
+    capture_provider_state_e provider = capture_provider_state_e::unknown;
+    std::string reason;
+  };
+
+  /// Stream readiness includes the selected backend's output-pinned capture provider.
+  /// The registry query itself is read-only. Existing creator probes retain their
+  /// module/permission bootstrap behavior; manual creator availability is unchanged.
+  host_stream_readiness_t host_stream_readiness(bool fresh = false);
+
+#ifdef POLARIS_TESTS
+  struct host_stream_probe_for_tests_t {
+    backend_e backend = backend_e::EVDI;
+    capture_provider_snapshot_t initial;
+    capture_provider_snapshot_t after_bootstrap;
+    std::string creator_reason;
+    int creator_calls = 0;
+    int registry_calls = 0;
+  };
+  void set_host_stream_probe_for_tests(std::optional<host_stream_probe_for_tests_t> probe);
+  int host_stream_creator_probe_count_for_tests();
+#endif
 
   /**
    * @brief Detect which backend is installed and preferred.

@@ -1408,6 +1408,10 @@ namespace stream_display_policy {
     }
   }
 
+  std::vector<mode_option_t> mode_options(const stream_path::host_capabilities_t &caps) {
+    return mode_options(caps.virtual_display_available);
+  }
+
   std::vector<mode_option_t> mode_options(bool virtual_display_available) {
     auto caps = stream_path::probe_host_capabilities();
     caps.virtual_display_available = virtual_display_available;

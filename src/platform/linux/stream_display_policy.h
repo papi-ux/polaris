@@ -608,6 +608,9 @@ namespace stream_display_policy {
    */
   std::vector<mode_option_t> mode_options(bool virtual_display_available = false);
 
+  /// Production catalogue retains independent HVD capture and Takeover creator readiness.
+  std::vector<mode_option_t> mode_options(const stream_path::host_capabilities_t &caps);
+
   /**
    * @brief Allowed launch-mode selection ids for Nova (excludes unavailable modes).
    */

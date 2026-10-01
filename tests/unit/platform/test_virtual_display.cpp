@@ -856,4 +856,216 @@ TEST(VirtualDisplayKwinTests, PersistedKwinScreenRoundTrips) {
 TEST(VirtualDisplayTests, LinuxOnly) {
   GTEST_SKIP() << "Linux-only virtual display tests";
 }
+
+#include <src/config.h>
+#include <src/launch_failure.h>
+#include <src/process.h>
+#include <src/settings_metadata.h>
+#include <src/platform/linux/stream_display_policy.h>
+#include <src/platform/linux/stream_path.h>
+
+namespace {
+  virtual_display::capture_provider_snapshot_t complete_provider() {
+    return {.state = virtual_display::registry_state_e::complete};
+  }
+  virtual_display::capture_provider_snapshot_t kwin_provider(bool permitted = true) {
+    auto p = complete_provider();
+    p.note_global("org_kde_plasma_shell", 8);
+    if (permitted) p.note_global("zkde_screencast_unstable_v1", 6);
+    return p;
+  }
+  virtual_display::capture_provider_snapshot_t wlr_provider() {
+    auto p = complete_provider();
+    p.note_global("zxdg_output_manager_v1", 3);
+    p.note_global("zwlr_export_dmabuf_manager_v1", 1);
+    return p;
+  }
+}
+
+class HostVirtualCaptureReadinessTests: public testing::Test {
+protected:
+  decltype(config::video.linux_display) before;
+  std::string capture_before, output_before;
+  void SetUp() override {
+    before = config::video.linux_display;
+    capture_before = config::video.capture;
+    output_before = config::video.output_name;
+    config::video.linux_display.stream_mode = "host_virtual_display";
+    config::video.linux_display.headless_mode = true;
+    config::video.linux_display.use_cage_compositor = false;
+    config::video.linux_display.streaming_output.clear();
+    stream_display_policy::forget_host_default();
+    probe(virtual_display::backend_e::EVDI, complete_provider());
+    launch_failure::clear();
+  }
+  void TearDown() override {
+    virtual_display::set_host_stream_probe_for_tests(std::nullopt);
+    config::video.linux_display = before;
+    config::video.capture = capture_before;
+    config::video.output_name = output_before;
+    stream_display_policy::forget_host_default();
+    launch_failure::clear();
+  }
+  void probe(virtual_display::backend_e backend,
+             virtual_display::capture_provider_snapshot_t initial,
+             std::optional<virtual_display::capture_provider_snapshot_t> after = std::nullopt,
+             std::string reason = {}) {
+    virtual_display::set_host_stream_probe_for_tests(virtual_display::host_stream_probe_for_tests_t {
+      .backend = backend, .initial = initial, .after_bootstrap = after.value_or(initial), .creator_reason = std::move(reason),
+    });
+  }
+};
+
+TEST_F(HostVirtualCaptureReadinessTests, ACreatorOnGnomeCannotAdvertiseAnOutputPinnedCaptureProvider) {
+  EXPECT_TRUE(virtual_display::is_available()) << "fixture has an obtainable EVDI creator";
+  probe(virtual_display::backend_e::EVDI, complete_provider());
+  const auto r = virtual_display::host_stream_readiness(true);
+  EXPECT_FALSE(r.available);
+  EXPECT_EQ(r.provider, virtual_display::capture_provider_state_e::unsupported);
+  EXPECT_NE(r.reason.find("KWin"), std::string::npos);
+  EXPECT_NE(r.reason.find("Mirror Desktop"), std::string::npos);
+  EXPECT_EQ(virtual_display::host_stream_creator_probe_count_for_tests(), 0)
+    << "confirmed missing provider must refuse before module/permission creator probes";
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, NoWaylandAndNativeX11RefuseBeforeAnyCreatorProbe) {
+  probe(virtual_display::backend_e::EVDI, {});
+  const auto r = virtual_display::host_stream_readiness(true);
+  EXPECT_FALSE(r.available);
+  EXPECT_EQ(r.provider, virtual_display::capture_provider_state_e::no_wayland);
+  EXPECT_NE(r.reason.find("Wayland"), std::string::npos);
+  EXPECT_EQ(virtual_display::host_stream_creator_probe_count_for_tests(), 0);
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, IncompleteTimeoutOrConnectionErrorDoesNotAssertAGnomeDesktop) {
+  probe(virtual_display::backend_e::EVDI, {.state = virtual_display::registry_state_e::unknown});
+  const auto r = virtual_display::host_stream_readiness(true);
+  EXPECT_FALSE(r.available);
+  EXPECT_EQ(r.provider, virtual_display::capture_provider_state_e::unknown);
+  EXPECT_NE(r.reason.find("verify"), std::string::npos);
+  EXPECT_EQ(r.reason.find("GNOME"), std::string::npos);
+  EXPECT_EQ(virtual_display::host_stream_creator_probe_count_for_tests(), 0);
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, KwinCreatorsRemainAvailableWithTheirActualProtocol) {
+  for (const auto backend : {virtual_display::backend_e::EVDI, virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT}) {
+    probe(backend, kwin_provider());
+    const auto r = virtual_display::host_stream_readiness(true);
+    EXPECT_TRUE(r.available);
+    EXPECT_EQ(r.backend, backend);
+    EXPECT_TRUE(r.reason.empty());
+  }
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, KwinPublicIdentityAllowsOriginalBootstrapBeforeRecheckingPermission) {
+  EXPECT_EQ(virtual_display::classify_capture_provider(kwin_provider(false)),
+    virtual_display::capture_provider_state_e::recoverable_withheld);
+  probe(virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT, kwin_provider(false), kwin_provider());
+  const auto r = virtual_display::host_stream_readiness(true);
+  EXPECT_TRUE(r.available);
+  EXPECT_EQ(r.provider, virtual_display::capture_provider_state_e::kwin);
+  EXPECT_EQ(virtual_display::host_stream_creator_probe_count_for_tests(), 1);
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, WithheldAfterBootstrapKeepsTheExistingActionableReason) {
+  probe(virtual_display::backend_e::EVDI, kwin_provider(false), kwin_provider(false), "KWin cannot identify a process holding file capabilities; restart Polaris without them.");
+  const auto r = virtual_display::host_stream_readiness(true);
+  EXPECT_FALSE(r.available);
+  EXPECT_EQ(r.provider, virtual_display::capture_provider_state_e::recoverable_withheld);
+  EXPECT_NE(r.reason.find("file capabilities"), std::string::npos);
+  EXPECT_NE(r.reason.find("restart"), std::string::npos);
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, SelectedNativeWlrNeedsBothActualEnumerationProtocols) {
+  probe(virtual_display::backend_e::WAYLAND_WLR, wlr_provider());
+  EXPECT_TRUE(virtual_display::host_stream_readiness(true).available);
+  for (const auto global : {"zxdg_output_manager_v1", "zwlr_export_dmabuf_manager_v1", "zwlr_screencopy_manager_v1"}) {
+    auto p = complete_provider(); p.note_global(global, 1);
+    probe(virtual_display::backend_e::WAYLAND_WLR, p);
+    EXPECT_FALSE(virtual_display::host_stream_readiness(true).available) << global;
+  }
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, NativeWlrProtocolsCannotMakeAnEvdiPortalRouteSupported) {
+  probe(virtual_display::backend_e::EVDI, wlr_provider());
+  EXPECT_FALSE(virtual_display::host_stream_readiness(true).available);
+  EXPECT_TRUE(virtual_display::is_available()) << "manual creator remains separate";
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, RealSettingsJsonAndHostCapabilitiesReportCaptureNotOnlyCreation) {
+  const auto caps = stream_path::probe_host_capabilities();
+  EXPECT_FALSE(caps.virtual_display_available);
+  EXPECT_FALSE(settings_metadata::host_virtual_display_available());
+  bool found = false;
+  for (const auto &row : settings_metadata::stream_display_mode_options_json()) {
+    if (row.at("value") != "host_virtual_display") continue;
+    found = true;
+    EXPECT_FALSE(row.at("available").get<bool>());
+    EXPECT_NE(row.at("unavailable_reason").get<std::string>().find("KWin"), std::string::npos)
+      << "a creator-only reason must not overwrite the capture refusal";
+  }
+  EXPECT_TRUE(found);
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, StructuredCatalogueKeepsIndependentTakeoverAndMirrorAvailability) {
+  stream_path::host_capabilities_t caps;
+  caps.virtual_display_available = false;
+  caps.virtual_display_unavailable_reason = "Host Virtual Display needs output-pinned KWin capture here.";
+  caps.desktop_takeover_available = true;
+  bool hvd = false, takeover = false, mirror = false;
+  for (const auto &row : stream_display_policy::mode_options(caps)) {
+    if (row.value == "host_virtual_display") { hvd = true; EXPECT_FALSE(row.available); EXPECT_EQ(row.unavailable_reason, caps.virtual_display_unavailable_reason); }
+    if (row.value == "desktop_takeover") { takeover = true; EXPECT_TRUE(row.available); }
+    if (row.value == "desktop_display") { mirror = true; EXPECT_TRUE(row.available); }
+  }
+  EXPECT_TRUE(hvd); EXPECT_TRUE(takeover); EXPECT_TRUE(mirror);
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, FreshSelectionAndApplyRejectCaptureBeforeChangingCompanionConfig) {
+  EXPECT_FALSE(stream_display_policy::selection_available("host_virtual_display"));
+  std::string reason;
+  EXPECT_FALSE(stream_display_policy::selection_valid_fresh("host_virtual_display", reason));
+  EXPECT_NE(reason.find("KWin"), std::string::npos);
+  const auto mode = config::video.linux_display.stream_mode;
+  const auto capture = config::video.capture;
+  const auto output = config::video.output_name;
+  EXPECT_FALSE(stream_display_policy::apply_selection("host_virtual_display", reason));
+  EXPECT_EQ(config::video.linux_display.stream_mode, mode);
+  EXPECT_EQ(config::video.capture, capture);
+  EXPECT_EQ(config::video.output_name, output);
+  EXPECT_TRUE(stream_display_policy::selection_available("desktop_display"));
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, ActualPinnedLaunchResolverRefusesWithItsNamedReason) {
+  proc::ctx_t app; proc::set_launch_as(app, "host_virtual_display");
+  const auto r = proc::resolve_launch_selection_for_app(app, {});
+  EXPECT_EQ(r.refusal, 503);
+  const auto failure = launch_failure::take();
+  ASSERT_TRUE(failure);
+  EXPECT_EQ(failure->code, "app_launch_mode_unavailable");
+  EXPECT_NE(failure->message.find("KWin"), std::string::npos);
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, ActualLegacyOrNamedHvdLaunchRefusesInsteadOfHostDefaultFallback) {
+  for (const bool named : {false, true}) {
+    proc::ctx_t app; proc::set_launch_as(app, "host_default");
+    proc::launch_selection_request_t request;
+    if (named) request.requested_selection = "host_virtual_display";
+    const auto r = proc::resolve_launch_selection_for_app(app, request);
+    EXPECT_EQ(r.refusal, 503);
+    const auto failure = launch_failure::take();
+    ASSERT_TRUE(failure);
+    EXPECT_EQ(failure->code, "host_virtual_display_capture_unavailable");
+    EXPECT_NE(failure->message.find("KWin"), std::string::npos);
+  }
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, AWatcherStillInheritsAndMirrorDesktopDoesNotRequireHvdCapture) {
+  proc::ctx_t app; proc::set_launch_as(app, "host_virtual_display");
+  proc::launch_selection_request_t request; request.watch_only = true;
+  EXPECT_EQ(proc::resolve_launch_selection_for_app(app, request).refusal, 0);
+  proc::set_launch_as(app, "desktop_display"); request.watch_only = false; request.mirror_desktop = true;
+  EXPECT_EQ(proc::resolve_launch_selection_for_app(app, request).refusal, 0);
+}
+
 #endif

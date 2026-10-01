@@ -75,6 +75,7 @@ namespace stream_path {
     bool wlr_randr_present = false;
     bool gamescope_present = false;
     bool virtual_display_available = false;
+    std::string virtual_display_unavailable_reason;
     bool desktop_takeover_available = false;
     /// Capture backend currently configured (e.g. "portal", "kms", "wlr").
     std::string configured_capture;
