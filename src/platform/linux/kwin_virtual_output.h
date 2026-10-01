@@ -35,6 +35,11 @@ namespace kwin_virtual_output {
    */
   probe_t probe();
 
+  /// Actual launch admission: reuse permission setup and its failure reasons,
+  /// then query the registry without creating/binding a stream. Capture needs
+  /// any offered screencast version; virtual-output creation still needs v4.
+  probe_t prepare_capture();
+
   /** @brief Every output name the compositor publishes now; nullopt when it cannot be asked. */
   std::optional<std::vector<std::string>> output_names();
 

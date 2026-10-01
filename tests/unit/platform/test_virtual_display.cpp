@@ -10,6 +10,8 @@
 #include <fstream>
 #include <sstream>
 #include <thread>
+#include <map>
+#include <cerrno>
 
 #ifdef __linux__
   #include <src/platform/linux/virtual_display.h>
@@ -886,7 +888,10 @@ class HostVirtualCaptureReadinessTests: public testing::Test {
 protected:
   decltype(config::video.linux_display) before;
   std::string capture_before, output_before;
+  std::optional<std::string> path_before;
   void SetUp() override {
+    if (const char *path = std::getenv("PATH")) path_before = path;
+    setenv("PATH", "/polaris-test/no-provider-tools", 1);
     before = config::video.linux_display;
     capture_before = config::video.capture;
     output_before = config::video.output_name;
@@ -900,6 +905,7 @@ protected:
   }
   void TearDown() override {
     virtual_display::set_host_stream_probe_for_tests(std::nullopt);
+    if (path_before) setenv("PATH", path_before->c_str(), 1); else unsetenv("PATH");
     config::video.linux_display = before;
     config::video.capture = capture_before;
     config::video.output_name = output_before;
@@ -948,7 +954,8 @@ TEST_F(HostVirtualCaptureReadinessTests, IncompleteTimeoutOrConnectionErrorDoesN
 }
 
 TEST_F(HostVirtualCaptureReadinessTests, KwinCreatorsRemainAvailableWithTheirActualProtocol) {
-  for (const auto backend : {virtual_display::backend_e::EVDI, virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT}) {
+  config::video.linux_display.streaming_output = "spare-test-output";
+  for (const auto backend : {virtual_display::backend_e::EVDI, virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT, virtual_display::backend_e::KSCREEN_DOCTOR}) {
     probe(backend, kwin_provider());
     const auto r = virtual_display::host_stream_readiness(true);
     EXPECT_TRUE(r.available);
@@ -961,19 +968,52 @@ TEST_F(HostVirtualCaptureReadinessTests, KwinPublicIdentityAllowsOriginalBootstr
   EXPECT_EQ(virtual_display::classify_capture_provider(kwin_provider(false)),
     virtual_display::capture_provider_state_e::recoverable_withheld);
   probe(virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT, kwin_provider(false), kwin_provider());
-  const auto r = virtual_display::host_stream_readiness(true);
+  const auto supported = virtual_display::host_stream_readiness(true);
+  EXPECT_TRUE(supported.available);
+  EXPECT_EQ(supported.provider, virtual_display::capture_provider_state_e::recoverable_withheld);
+  EXPECT_EQ(virtual_display::host_stream_permission_count_for_tests(), 0);
+  const auto r = virtual_display::prepare_host_stream_capture();
   EXPECT_TRUE(r.available);
   EXPECT_EQ(r.provider, virtual_display::capture_provider_state_e::kwin);
-  EXPECT_EQ(virtual_display::host_stream_creator_probe_count_for_tests(), 1);
+  EXPECT_EQ(virtual_display::host_stream_permission_count_for_tests(), 1);
 }
 
 TEST_F(HostVirtualCaptureReadinessTests, WithheldAfterBootstrapKeepsTheExistingActionableReason) {
   probe(virtual_display::backend_e::EVDI, kwin_provider(false), kwin_provider(false), "KWin cannot identify a process holding file capabilities; restart Polaris without them.");
-  const auto r = virtual_display::host_stream_readiness(true);
+  EXPECT_TRUE(virtual_display::host_stream_readiness(true).available) << "identified KWin remains recoverable at capability time";
+  const auto r = virtual_display::prepare_host_stream_capture();
   EXPECT_FALSE(r.available);
   EXPECT_EQ(r.provider, virtual_display::capture_provider_state_e::recoverable_withheld);
   EXPECT_NE(r.reason.find("file capabilities"), std::string::npos);
   EXPECT_NE(r.reason.find("restart"), std::string::npos);
+}
+
+
+TEST_F(HostVirtualCaptureReadinessTests, ForcedEvdiOrAutoFallbackKwinPermissionIsPreparedOnlyForActualHvd) {
+  probe(virtual_display::backend_e::EVDI, kwin_provider(false), kwin_provider());
+  EXPECT_TRUE(virtual_display::host_stream_readiness(true).available);
+  EXPECT_EQ(virtual_display::host_stream_permission_count_for_tests(), 0);
+  proc::ctx_t app; proc::set_launch_as(app, "headless_stream");
+  EXPECT_EQ(proc::prepare_host_virtual_capture_for_launch(app, {"headless_stream", true, 0}, false), 0);
+  EXPECT_EQ(virtual_display::host_stream_permission_count_for_tests(), 0);
+  EXPECT_EQ(proc::prepare_host_virtual_capture_for_launch(app, {"host_virtual_display", false, 0}, true), 0);
+  EXPECT_EQ(virtual_display::host_stream_permission_count_for_tests(), 0);
+  proc::set_launch_as(app, "host_virtual_display");
+  EXPECT_EQ(proc::prepare_host_virtual_capture_for_launch(app, {"host_virtual_display", true, 0}, false), 0);
+  EXPECT_EQ(virtual_display::host_stream_permission_count_for_tests(), 1);
+}
+
+TEST_F(HostVirtualCaptureReadinessTests, ActualHvdPermissionFailureRetainsPinnedOrOrdinaryNamedRefusal) {
+  for (const bool pinned : {false, true}) {
+    probe(virtual_display::backend_e::EVDI, kwin_provider(false), kwin_provider(false), "KWin cannot identify a process holding file capabilities; restart Polaris without them.");
+    proc::ctx_t app; proc::set_launch_as(app, pinned ? "host_virtual_display" : "host_default");
+    EXPECT_EQ(proc::prepare_host_virtual_capture_for_launch(app, {"host_virtual_display", pinned, 0}, false), 503);
+    const auto failure = launch_failure::take();
+    ASSERT_TRUE(failure);
+    EXPECT_EQ(failure->code, pinned ? "app_launch_mode_unavailable" : "host_virtual_display_capture_unavailable");
+    EXPECT_NE(failure->message.find("file capabilities"), std::string::npos);
+    EXPECT_NE(failure->message.find("restart"), std::string::npos);
+  }
 }
 
 TEST_F(HostVirtualCaptureReadinessTests, SelectedNativeWlrNeedsBothActualEnumerationProtocols) {
@@ -1067,5 +1107,80 @@ TEST_F(HostVirtualCaptureReadinessTests, AWatcherStillInheritsAndMirrorDesktopDo
   proc::set_launch_as(app, "desktop_display"); request.watch_only = false; request.mirror_desktop = true;
   EXPECT_EQ(proc::resolve_launch_selection_for_app(app, request).refusal, 0);
 }
+
+
+#ifdef POLARIS_BUILD_WAYLAND
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <cstring>
+#include <stdexcept>
+
+namespace {
+  struct ScopedRegistryEnvironment {
+    std::map<std::string, std::optional<std::string>> saved;
+    void set(const char *key, const char *value) {
+      const char *old = std::getenv(key);
+      saved.emplace(key, old ? std::optional<std::string> {old} : std::nullopt);
+      if (value) setenv(key, value, 1); else unsetenv(key);
+    }
+    ~ScopedRegistryEnvironment() {
+      for (const auto &[key, value] : saved) {
+        if (value) setenv(key.c_str(), value->c_str(), 1); else unsetenv(key.c_str());
+      }
+    }
+  };
+}
+
+TEST(HostVirtualCaptureRegistryTests, APrivateUnresponsiveSocketTimesOutAndClosesItsOwnConnection) {
+  char dir[] = "/tmp/polaris-hvd-registry-XXXXXX";
+  ASSERT_NE(mkdtemp(dir), nullptr);
+  const std::string path = std::string {dir} + "/wayland-test";
+  const int listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  ASSERT_GE(listener, 0);
+  sockaddr_un address {}; address.sun_family = AF_UNIX;
+  ASSERT_LT(path.size(), sizeof(address.sun_path));
+  std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
+  ASSERT_EQ(bind(listener, reinterpret_cast<sockaddr *>(&address), sizeof(address)), 0);
+  ASSERT_EQ(listen(listener, 1), 0);
+  std::atomic<bool> client_closed {false};
+  std::thread server {[&]() {
+    pollfd incoming {listener, POLLIN, 0};
+    if (poll(&incoming, 1, 1500) <= 0) return;
+    const int client = accept4(listener, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+    if (client < 0) return;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+      pollfd input {client, POLLIN, 0};
+      if (poll(&input, 1, 100) <= 0) continue;
+      char bytes[512]; const auto n = recv(client, bytes, sizeof(bytes), 0);
+      if (n == 0) { client_closed = true; break; }
+      if (n < 0 && errno != EAGAIN && errno != EINTR) break;
+    }
+    close(client);
+  }};
+  ScopedRegistryEnvironment env;
+  env.set("WAYLAND_SOCKET", nullptr); env.set("WAYLAND_DISPLAY", path.c_str());
+  const auto started = std::chrono::steady_clock::now();
+  const auto p = virtual_display::probe_capture_provider(true);
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  server.join(); close(listener); std::filesystem::remove_all(dir);
+  EXPECT_EQ(p.state, virtual_display::registry_state_e::unknown);
+  EXPECT_GE(elapsed, std::chrono::milliseconds(250));
+  EXPECT_LT(elapsed, std::chrono::milliseconds(1500));
+  EXPECT_TRUE(client_closed) << "bounded timeout disconnects only its private transport";
+}
+
+TEST(HostVirtualCaptureRegistryTests, APrivateMissingSocketIsUnknownAndAnAbsentTransportIsNoWayland) {
+  ScopedRegistryEnvironment env;
+  env.set("WAYLAND_SOCKET", nullptr);
+  env.set("WAYLAND_DISPLAY", "/polaris-test/nonexistent-wayland-socket");
+  const auto started = std::chrono::steady_clock::now();
+  EXPECT_EQ(virtual_display::probe_capture_provider(true).state, virtual_display::registry_state_e::unknown);
+  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::milliseconds(1500));
+  unsetenv("WAYLAND_DISPLAY");
+  EXPECT_EQ(virtual_display::probe_capture_provider(true).state, virtual_display::registry_state_e::no_wayland);
+}
+#endif
 
 #endif

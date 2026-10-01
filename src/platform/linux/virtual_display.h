@@ -161,6 +161,10 @@ namespace virtual_display {
   /// module/permission bootstrap behavior; manual creator availability is unchanged.
   host_stream_readiness_t host_stream_readiness(bool fresh = false);
 
+  /// Actual admitted HVD launch only: prepare the existing KWin permission
+  /// actuator if needed and re-query before any output is created.
+  host_stream_readiness_t prepare_host_stream_capture();
+
 #ifdef POLARIS_TESTS
   struct host_stream_probe_for_tests_t {
     backend_e backend = backend_e::EVDI;
@@ -169,9 +173,12 @@ namespace virtual_display {
     std::string creator_reason;
     int creator_calls = 0;
     int registry_calls = 0;
+    int permission_calls = 0;
+    bool permission_prepared = false;
   };
   void set_host_stream_probe_for_tests(std::optional<host_stream_probe_for_tests_t> probe);
   int host_stream_creator_probe_count_for_tests();
+  int host_stream_permission_count_for_tests();
 #endif
 
   /**

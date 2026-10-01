@@ -10,6 +10,9 @@
 #include <src/nvhttp.h>
 #include <src/process.h>
 #include <src/video.h>
+#ifdef __linux__
+#include <src/platform/linux/virtual_display.h>
+#endif
 #include <src/launch_failure.h>
 #include <boost/property_tree/ptree.hpp>
 
@@ -409,6 +412,87 @@ TEST_F(AppLaunchAsDoorTests, FreshLaunchParserReachesTheAppGuardAfterAPinLosesIt
     EXPECT_NE(response.get<std::string>("root.<xmlattr>.error_action").find("Launch as"), std::string::npos);
     EXPECT_NE(response.get<std::string>("root.<xmlattr>.status_message").find(mode == std::string {"gamescope_stream"} ? "gamescope" : "labwc"), std::string::npos);
   }
+}
+
+
+TEST_F(AppLaunchAsDoorTests, StaleHvdLegacyAndExactRequestsReachTheRealNamedRefusalDoor) {
+  struct ProviderGuard { ~ProviderGuard() { virtual_display::set_host_stream_probe_for_tests(std::nullopt); } } guard;
+  const auto missing = virtual_display::capture_provider_snapshot_t {.state = virtual_display::registry_state_e::complete};
+  virtual_display::set_host_stream_probe_for_tests(virtual_display::host_stream_probe_for_tests_t {
+    .backend = virtual_display::backend_e::EVDI, .initial = missing, .after_bootstrap = missing,
+  });
+  for (const bool exact : {false, true}) {
+    SCOPED_TRACE(exact ? "exact" : "legacy");
+    auto cert = launch_client_cert();
+    proc::ctx_t app; proc::set_launch_as(app, "host_default");
+    auto args = resolved_launch_args("host_virtual_display", "host_virtual_display");
+    if (!exact) { args.erase("resolvedProfile"); args.erase("expectedTopology"); args.erase("resolvedHdr"); }
+    const auto parsed = nvhttp::make_launch_session(false, false, args, cert.get(), false, &app);
+    ASSERT_NE(parsed, nullptr) << "known HVD must reach its actual fresh provider refusal";
+    EXPECT_EQ(parsed->stream_mode, "host_virtual_display") << "no host-default fallback in the parser";
+    const auto result = proc::resolve_launch_selection_for_app(app, proc::launch_selection_request_from_session(*parsed));
+    EXPECT_EQ(result.refusal, 503);
+    boost::property_tree::ptree response;
+    nvhttp::put_launch_refusal_for_tests(response, result.refusal, "generic launch failure");
+    EXPECT_EQ(response.get<std::string>("root.<xmlattr>.error_code"), "host_virtual_display_capture_unavailable");
+    EXPECT_NE(response.get<std::string>("root.<xmlattr>.status_message").find("KWin"), std::string::npos);
+  }
+}
+
+
+TEST_F(AppLaunchAsDoorTests, PrivateAppPinWinsOverLegacyAndPairedVirtualPreferencesWithoutHvdRefusal) {
+  struct ProviderGuard { ~ProviderGuard() { virtual_display::set_host_stream_probe_for_tests(std::nullopt); } } guard;
+  const auto missing = virtual_display::capture_provider_snapshot_t {.state = virtual_display::registry_state_e::complete};
+  virtual_display::set_host_stream_probe_for_tests(virtual_display::host_stream_probe_for_tests_t {
+    .backend = virtual_display::backend_e::EVDI, .initial = missing, .after_bootstrap = missing,
+  });
+  for (const bool paired : {false, true}) {
+    auto cert = launch_client_cert(); cert->always_use_virtual_display = paired;
+    proc::ctx_t app; proc::set_launch_as(app, "headless_stream");
+    auto args = resolved_launch_args({}, "headless_stream");
+    args.erase("resolvedProfile"); args.erase("expectedTopology"); args.erase("resolvedHdr");
+    args.emplace("virtualDisplay", "1");
+    const auto parsed = nvhttp::make_launch_session(false, false, args, cert.get(), false, &app);
+    ASSERT_NE(parsed, nullptr);
+    const auto result = proc::resolve_launch_selection_for_app(app, proc::launch_selection_request_from_session(*parsed));
+    EXPECT_EQ(result.refusal, 0);
+    EXPECT_TRUE(result.pinned);
+    EXPECT_EQ(result.selection, "headless_stream");
+    EXPECT_FALSE(launch_failure::take());
+  }
+}
+
+TEST_F(AppLaunchAsDoorTests, MalformedExactAndInputOnlyHvdStillFailTheOriginalParserGate) {
+  struct ProviderGuard { ~ProviderGuard() { virtual_display::set_host_stream_probe_for_tests(std::nullopt); } } guard;
+  const auto missing = virtual_display::capture_provider_snapshot_t {.state = virtual_display::registry_state_e::complete};
+  virtual_display::set_host_stream_probe_for_tests(virtual_display::host_stream_probe_for_tests_t {
+    .backend = virtual_display::backend_e::EVDI, .initial = missing, .after_bootstrap = missing,
+  });
+  auto cert = launch_client_cert();
+  proc::ctx_t app; proc::set_launch_as(app, "host_default");
+  EXPECT_EQ(nvhttp::make_launch_session(false, false, resolved_launch_args("host_virtual_display", ""), cert.get(), false, &app), nullptr);
+  EXPECT_EQ(nvhttp::make_launch_session(false, false, resolved_launch_args("host_virtual_display", "not-a-mode"), cert.get(), false, &app), nullptr);
+  EXPECT_EQ(nvhttp::make_launch_session(false, true, resolved_launch_args("host_virtual_display", "host_virtual_display"), cert.get(), false, &app), nullptr);
+  EXPECT_FALSE(launch_failure::take());
+}
+
+TEST_F(AppLaunchAsDoorTests, AStaleHvdAppPinKeepsItsPinReasonInsteadOfMalformedParameters) {
+  struct ProviderGuard { ~ProviderGuard() { virtual_display::set_host_stream_probe_for_tests(std::nullopt); } } guard;
+  const auto missing = virtual_display::capture_provider_snapshot_t {.state = virtual_display::registry_state_e::complete};
+  virtual_display::set_host_stream_probe_for_tests(virtual_display::host_stream_probe_for_tests_t {
+    .backend = virtual_display::backend_e::EVDI, .initial = missing, .after_bootstrap = missing,
+  });
+  auto cert = launch_client_cert();
+  proc::ctx_t app; proc::set_launch_as(app, "host_virtual_display");
+  const auto parsed = nvhttp::make_launch_session(false, false,
+    resolved_launch_args("host_virtual_display", "host_virtual_display"), cert.get(), false, &app);
+  ASSERT_NE(parsed, nullptr);
+  const auto result = proc::resolve_launch_selection_for_app(app, proc::launch_selection_request_from_session(*parsed));
+  EXPECT_EQ(result.refusal, 503);
+  boost::property_tree::ptree response;
+  nvhttp::put_launch_refusal_for_tests(response, result.refusal, "generic launch failure");
+  EXPECT_EQ(response.get<std::string>("root.<xmlattr>.error_code"), "app_launch_mode_unavailable");
+  EXPECT_NE(response.get<std::string>("root.<xmlattr>.status_message").find("KWin"), std::string::npos);
 }
 
 TEST_F(AppLaunchAsDoorTests, ResumeParserReachesTheFrozenOwnersRefusalAfterAToolDisappears) {

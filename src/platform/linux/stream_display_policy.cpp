@@ -425,6 +425,7 @@ namespace stream_display_policy {
 
   bool selection_available(std::string_view selection) {
     const auto key = to_lower_copy(selection);
+    if (key == k_host_virtual_display) return virtual_display::host_stream_readiness().available;
     return selection_available_for_capabilities(
       key,
       (key != k_host_virtual_display && key != k_desktop_takeover) ||
@@ -466,6 +467,7 @@ namespace stream_display_policy {
 
   std::string selection_unavailable_reason(std::string_view selection) {
     const auto key = to_lower_copy(selection);
+    if (key == k_host_virtual_display) return virtual_display::host_stream_readiness().reason;
     const bool virtual_display_available =
       (key != k_host_virtual_display && key != k_desktop_takeover) ||
         virtual_display::is_available();
@@ -1076,7 +1078,7 @@ namespace stream_display_policy {
 
   bool host_default_provides_private_display() {
     const auto resolved = resolve_host_default(input_t {
-      virtual_display::is_available(),
+      virtual_display::host_stream_readiness().available,
       false,
       false,
     });
@@ -1102,7 +1104,7 @@ namespace stream_display_policy {
   resolved_t resolve_current(bool active_encoder_requires_gpu_native_capture,
                              bool runtime_gpu_native_override_active) {
     return resolve(input_t {
-      virtual_display::is_available(),
+      virtual_display::host_stream_readiness().available,
       active_encoder_requires_gpu_native_capture,
       runtime_gpu_native_override_active,
     });
@@ -1169,6 +1171,11 @@ namespace stream_display_policy {
 
   bool selection_valid(std::string_view selection, std::string &error) {
     const auto key = to_lower_copy(selection);
+    if (key == k_host_virtual_display) {
+      const auto hvd = virtual_display::host_stream_readiness(false);
+      if (!hvd.available) error = hvd.reason;
+      return hvd.available;
+    }
     return selection_valid_for_capabilities(
       key,
       (key != k_host_virtual_display && key != k_desktop_takeover) ||
@@ -1179,6 +1186,11 @@ namespace stream_display_policy {
 
   bool selection_valid_fresh(std::string_view selection, std::string &error) {
     const auto key = to_lower_copy(selection);
+    if (key == k_host_virtual_display) {
+      const auto hvd = virtual_display::host_stream_readiness(true);
+      if (!hvd.available) error = hvd.reason;
+      return hvd.available;
+    }
     if (key == k_desktop_takeover && !desktop_takeover::is_available_fresh()) {
       error = desktop_takeover::unavailable_reason();
       return false;
@@ -1409,12 +1421,28 @@ namespace stream_display_policy {
   }
 
   std::vector<mode_option_t> mode_options(const stream_path::host_capabilities_t &caps) {
-    return mode_options(caps.virtual_display_available);
+    std::vector<mode_option_t> options;
+    for (const auto &path : stream_path::options_for_host(caps)) {
+      mode_option_t option;
+      option.value = std::string {path.id};
+      option.label = std::string {path.label};
+      option.badge = std::string {path.badge};
+      option.reason = path.available ? std::string {path.reason} : path.unavailable_reason;
+      option.available = path.available;
+      option.unavailable_reason = path.unavailable_reason;
+      option.group = std::string {path.group};
+      option.runtime = std::string {stream_path::runtime_kind_id(path.runtime)};
+      option.capture = std::string {stream_path::capture_kind_id(path.capture)};
+      option.topology = std::string {stream_path::topology_kind_id(path.topology)};
+      options.push_back(std::move(option));
+    }
+    return options;
   }
 
   std::vector<mode_option_t> mode_options(bool virtual_display_available) {
     auto caps = stream_path::probe_host_capabilities();
     caps.virtual_display_available = virtual_display_available;
+    caps.virtual_display_unavailable_reason = virtual_display_available ? std::string {} : "Host virtual display is not available on this host.";
     std::vector<mode_option_t> options;
     for (const auto &path : stream_path::options_for_host(caps)) {
       mode_option_t option;
@@ -1459,9 +1487,7 @@ namespace stream_display_policy {
       if (path.group == "experimental" && !include_unavailable) {
         continue;
       }
-      if ((path.id == stream_path::k_host_virtual_display ||
-           path.id == stream_path::k_desktop_takeover) &&
-          !virtual_display_available) {
+      if (path.id == stream_path::k_host_virtual_display && !virtual_display_available) {
         continue;
       }
       // Dongle is always listable when available; apply auto-fills outputs.

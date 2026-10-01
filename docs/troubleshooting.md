@@ -514,7 +514,9 @@ startup. Each cause has one fix.
 | `vaapi_system_memory_by_design` | AMD and Intel: every VA-API capture path takes one copy per frame on purpose, because the DMA-BUF import into the encoder has crashed or stalled on AMD hosts (#367) and stays off until affected hosts prove it safe. Reported as `info`. | Nothing. If throughput falls short at high resolution or refresh, lower resolution, frame rate or bitrate first. `POLARIS_PORTAL_DMABUF=1` opts the portal path into the unvalidated DMA-BUF route with no automatic fallback. On AMD Gamescope Stream, Auto tries Vulkan Video first, which the opt-in does not cover; set `encoder = vaapi` as well to keep VA-API there. |
 | `vulkan_portal_system_memory_by_design` | Vulkan Video on portal capture (Mirror Desktop, Host Virtual Display, Gamescope Stream). The portal hands Vulkan Video every frame in shared memory and Vulkan Video uploads it to the GPU itself. That is policy, not a missing build feature: the portal has no way yet to fall back when a DMA-BUF frame fails to import, so it never offers Vulkan Video DMA-BUF. Auto picks Vulkan Video on AMD for Private Stream and Gamescope Stream, so this shows up on AMD Gamescope Stream under Auto, and wherever `encoder = vulkan` or a launch chooses it. Reported as `info`. | Nothing. If throughput falls short at high resolution or refresh, lower resolution, frame rate or bitrate first. Private Stream can keep Vulkan Video frames on the GPU. `POLARIS_PORTAL_DMABUF=1` applies to VA-API only and does not change this; a Gamescope Stream host that set it for VA-API gets that route back with `encoder = vaapi`. |
 
-Mirror Desktop and Host Virtual Display on KDE or GNOME capture through the desktop portal.
+Mirror Desktop on KDE and GNOME can use the desktop portal. Host Virtual Display on KDE uses
+output-pinned KWin capture through the portal/PipeWire backend; GNOME Host Virtual Display is not
+supported in this release, even with EVDI. Native Hyprland Host Virtual Display uses wlroots capture.
 With CUDA the portal is asked for DMA-BUF and the compositor decides; KDE handed over system
 memory in testing. The forecast says nothing for that case, and the session's
 `capture_transport=` log line says which it got. Vulkan Video is never offered DMA-BUF on the
@@ -573,6 +575,27 @@ When all six pass, the session logs `HDR metadata: available=true usable=true`,
 `Color coding: HDR (Rec. 2020 + SMPTE 2084 PQ)` and `stream_hdr_enabled=true` after
 `Session started for [...]`. The encoder probe logs the same lines earlier even when the session
 will not, so read the ones after the session starts.
+
+## Host Virtual Display on GNOME or another desktop
+
+A virtual connector and a way to capture that exact connector are separate requirements. Polaris
+currently streams Host Virtual Display through output-pinned KWin capture on KDE, or the native
+Hyprland virtual-output and capture route. GNOME Wayland, Sway and other desktops without these
+providers cannot stream this mode, even when EVDI can create a connector. An X11 session without
+Wayland has no supported Host Virtual Display capture route either. The virtual-screen feature
+in GNOME's portal is not integrated into this mode yet.
+
+Choose **Mirror Desktop** to share the existing GNOME desktop through its portal, or **Private
+Stream** to run the app in Polaris's own compositor. The mode list and a forced launch name the
+missing provider instead of adding a display and then failing capture. If the message says Polaris
+could not **verify** the provider, its Wayland registry connection failed or timed out; that is an
+unknown result, not a diagnosis that your desktop is GNOME. Check that Polaris runs in the correct
+Wayland session and retry. KWin's withheld protocol is a separate permission problem: its usual
+permission setup still runs, and the KDE section below explains the remaining refusal.
+
+Manual virtual-display creation keeps its existing behavior. A successful manual creation is not
+proof that Host Virtual Display streaming can capture the created output. Polaris never substitutes
+another monitor or a generic portal picker when the required output is unavailable.
 
 ## Host Virtual Display on KDE
 
@@ -682,6 +705,7 @@ below are stable, so they can be searched for here and in support threads.
 | `private_runtime_unavailable` | labwc (or gamescope) is not installed for the chosen mode | Install it, or use Mirror Desktop |
 | `private_runtime_start_failed`, `private_runtime_socket_missing` | The private compositor did not start, or started without a Wayland socket | The host journal has the compositor's own error; restart Polaris and retry |
 | `gamescope_session_failed` | The nested gamescope session did not start, or timed out | Check gamescope on the host; the Doctor has a Gamescope helper report |
+| `host_virtual_display_capture_unavailable` | A stale or forced Host Virtual Display launch cannot prove a supported output-pinned capture provider; an app pinned to the mode reports `app_launch_mode_unavailable` instead | The message distinguishes missing Wayland, an unsupported provider, an unverifiable registry connection, and KWin permission trouble. Choose Mirror Desktop or Private Stream, or repair the named provider |
 | `virtual_display_failed`, `virtual_display_unavailable` | Host Virtual Display could not be created, or no backend exists | The message carries the reason (usually the `evdi` module); Private Stream needs no virtual display |
 | `desktop_takeover_failed`, `desktop_takeover_recovery_pending` | Desktop Takeover could not start, or the previous one is still restoring the display | Wait for the host display to return; the Doctor's display warning names the reason |
 | `session_stopping`, `session_state_changed`, `launch_cancelled`, `previous_session_cleanup_pending`, `steam_shutdown_pending`, `virtual_display_recovery_pending` | The previous session, Steam, or a display is still being torn down | Wait a few seconds and launch again; restart Polaris if it persists |

@@ -455,6 +455,25 @@ namespace kwin_virtual_output {
     return {.available = true, .version = version, .reason = {}};
   }
 
+
+  probe_t prepare_capture() {
+    const auto permission = kwingrab::ensure_screencast_permission();
+    auto provider = virtual_display::probe_capture_provider(true);
+    const auto give_up_at = std::chrono::steady_clock::now() + permission_retry_budget;
+    while (permission == kwingrab::permission_e::written &&
+           provider.state == virtual_display::registry_state_e::complete &&
+           provider.kwin_screencast_version == 0 && std::chrono::steady_clock::now() < give_up_at) {
+      std::this_thread::sleep_for(permission_retry_step);
+      provider = virtual_display::probe_capture_provider(true);
+    }
+    if (provider.state != virtual_display::registry_state_e::complete) {
+      return {.reason = "Polaris could not verify KWin capture after permission setup. Check its Wayland connection and retry."};
+    }
+    if (!provider.kwin_identity) return {.reason = "The Wayland capture provider changed before Host Virtual Display admission. Retry, or choose Mirror Desktop or Private Stream."};
+    if (provider.kwin_screencast_version == 0) return {.reason = missing_protocol_reason(permission)};
+    return {.available = true, .version = provider.kwin_screencast_version};
+  }
+
   std::optional<std::vector<std::string>> output_names() {
     connection_t connection {false};
     if (!connection.open()) {

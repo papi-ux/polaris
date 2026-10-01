@@ -155,7 +155,7 @@ namespace settings_metadata {
 
   bool host_virtual_display_available() {
 #ifdef __linux__
-    return virtual_display::is_available();
+    return virtual_display::host_stream_readiness().available;
 #elif defined(_WIN32)
     return
       proc::vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK ||
@@ -232,26 +232,11 @@ namespace settings_metadata {
   nlohmann::json stream_display_mode_options_json() {
     nlohmann::json modes = nlohmann::json::array();
 #ifdef __linux__
-    for (const auto &option : stream_display_policy::mode_options(host_virtual_display_available())) {
-      bool available = option.available;
-      if (option.value == "host_virtual_display") {
-        available = available && host_virtual_display_available();
-      }
-      std::string unavailable_reason;
-      if (!available) {
-        unavailable_reason = option.unavailable_reason;
-        if (option.value == "host_virtual_display") {
-          // The backend probe knows exactly why creation would fail; the
-          // policy layer only knows that it would.
-          const auto backend_reason = virtual_display::unavailable_reason();
-          if (!backend_reason.empty()) {
-            unavailable_reason = backend_reason;
-          }
-        }
-        if (unavailable_reason.empty()) {
-          unavailable_reason = "This mode is not available on this host right now.";
-        }
-      }
+    const auto caps = stream_path::probe_host_capabilities();
+    for (const auto &option : stream_display_policy::mode_options(caps)) {
+      const bool available = option.available;
+      std::string unavailable_reason = available ? std::string {} : option.unavailable_reason;
+      if (!available && unavailable_reason.empty()) unavailable_reason = "This mode is not available on this host right now.";
       modes.push_back({
         {"value", option.value},
         {"label", option.label},

@@ -23,6 +23,10 @@ namespace virtual_display {
       if (name == "zwlr_export_dmabuf_manager_v1") wlr_export_dmabuf = version > 0;
     }
   };
+  /// No permission writes/bindings/sessions. One 500ms connect+registry deadline;
+  /// capability reads cache for 2s by transport, fresh launch reads bypass cache.
+  capture_provider_snapshot_t probe_capture_provider(bool fresh = false);
+
   enum class capture_provider_state_e { no_wayland, unknown, unsupported, kwin, recoverable_withheld, native_wlr };
   inline capture_provider_state_e classify_capture_provider(const capture_provider_snapshot_t &p) {
     if (p.state == registry_state_e::no_wayland) return capture_provider_state_e::no_wayland;
