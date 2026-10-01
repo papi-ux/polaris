@@ -3084,7 +3084,7 @@ namespace virtual_display {
       result.provider = provider;
     }
     if (result.backend == backend_e::WAYLAND_WLR && snapshot.state == registry_state_e::complete &&
-        snapshot.xdg_output && snapshot.wlr_export_dmabuf) {
+        snapshot.xdg_output && snapshot.wlr_screencopy) {
       provider = capture_provider_state_e::native_wlr;
       result.provider = provider;
     }

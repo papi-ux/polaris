@@ -874,7 +874,8 @@ namespace {
   virtual_display::capture_provider_snapshot_t wlr_provider() {
     auto p = complete_provider();
     p.note_global("zxdg_output_manager_v1", 3);
-    p.note_global("zwlr_export_dmabuf_manager_v1", 1);
+    // wayland.cpp binds screencopy into the historically named WLR_EXPORT_DMABUF flag.
+    p.note_global("zwlr_screencopy_manager_v1", 1);
     return p;
   }
 }
@@ -1014,6 +1015,12 @@ TEST_F(HostVirtualCaptureReadinessTests, ActualHvdPermissionFailureRetainsPinned
 TEST_F(HostVirtualCaptureReadinessTests, SelectedNativeWlrNeedsBothActualEnumerationProtocols) {
   probe(virtual_display::backend_e::WAYLAND_WLR, wlr_provider());
   EXPECT_TRUE(virtual_display::host_stream_readiness(true).available);
+  auto obsolete = complete_provider();
+  obsolete.note_global("zxdg_output_manager_v1", 3);
+  obsolete.note_global("zwlr_export_dmabuf_manager_v1", 1);
+  probe(virtual_display::backend_e::WAYLAND_WLR, obsolete);
+  EXPECT_FALSE(virtual_display::host_stream_readiness(true).available)
+    << "the legacy enum/log name does not make the export-dmabuf protocol an actual capture prerequisite";
   for (const auto global : {"zxdg_output_manager_v1", "zwlr_export_dmabuf_manager_v1", "zwlr_screencopy_manager_v1"}) {
     auto p = complete_provider(); p.note_global(global, 1);
     probe(virtual_display::backend_e::WAYLAND_WLR, p);
@@ -1043,6 +1050,7 @@ TEST_F(HostVirtualCaptureReadinessTests, RealSettingsJsonAndHostCapabilitiesRepo
 }
 
 TEST_F(HostVirtualCaptureReadinessTests, StructuredCatalogueKeepsIndependentTakeoverAndMirrorAvailability) {
+  EXPECT_TRUE(virtual_display::is_available()) << "manual creator is ready independently of HVD capture";
   stream_path::host_capabilities_t caps;
   caps.virtual_display_available = false;
   caps.virtual_display_unavailable_reason = "Host Virtual Display needs output-pinned KWin capture here.";

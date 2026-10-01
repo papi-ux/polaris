@@ -10,7 +10,7 @@ namespace virtual_display {
     bool kwin_identity = false;
     std::uint32_t kwin_screencast_version = 0;
     bool xdg_output = false;
-    bool wlr_export_dmabuf = false;
+    bool wlr_screencopy = false;
 
     void note_global(std::string_view name, std::uint32_t version) {
       if (name.starts_with("kde_output_") || name.starts_with("org_kde_plasma_") ||
@@ -20,7 +20,7 @@ namespace virtual_display {
         kwin_screencast_version = version;
       }
       if (name == "zxdg_output_manager_v1") xdg_output = version > 0;
-      if (name == "zwlr_export_dmabuf_manager_v1") wlr_export_dmabuf = version > 0;
+      if (name == "zwlr_screencopy_manager_v1") wlr_screencopy = version > 0;
     }
   };
   /// No permission writes/bindings/sessions. One 500ms connect+registry deadline;
@@ -33,7 +33,7 @@ namespace virtual_display {
     if (p.state != registry_state_e::complete) return capture_provider_state_e::unknown;
     if (p.kwin_screencast_version > 0) return capture_provider_state_e::kwin;
     if (p.kwin_identity) return capture_provider_state_e::recoverable_withheld;
-    if (p.xdg_output && p.wlr_export_dmabuf) return capture_provider_state_e::native_wlr;
+    if (p.xdg_output && p.wlr_screencopy) return capture_provider_state_e::native_wlr;
     return capture_provider_state_e::unsupported;
   }
 }
