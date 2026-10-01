@@ -5,6 +5,9 @@
 
 #include "../../tests_common.h"
 
+// This backend fixture uses SPA/GIO headers and adapters compiled only with Portal.
+#ifdef POLARIS_BUILD_PORTAL
+
 #include <array>
 #include <cstdint>
 #include <filesystem>
@@ -1655,3 +1658,5 @@ TEST(PortalDmabufOfferTests, HdrTopUpAddsNothingToAValidatedListThatRefusedTenBi
   ASSERT_EQ(formats.size(), 1u);
   EXPECT_EQ(formats.front().spa_format, static_cast<std::uint32_t>(SPA_VIDEO_FORMAT_BGRx));
 }
+
+#endif // POLARIS_BUILD_PORTAL
