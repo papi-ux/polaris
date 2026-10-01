@@ -495,10 +495,19 @@ namespace pipewire_capture {
   }
 
   platf::frame_metadata_t cpu_frame_metadata(std::uint32_t spa_format) {
+    // The staging copy normalizes 8-bit RGBx/RGBA to BGRA, but preserves
+    // both packed 10-bit word orders byte-for-byte.
+    auto layout = platf::ram_pixel_layout_e::bgra8;
+    if (spa_format == SPA_VIDEO_FORMAT_xBGR_210LE) {
+      layout = platf::ram_pixel_layout_e::xbgr2101010_le;
+    } else if (spa_format == SPA_VIDEO_FORMAT_xRGB_210LE) {
+      layout = platf::ram_pixel_layout_e::xrgb2101010_le;
+    }
     return {
       .transport = platf::frame_transport_e::shm,
       .residency = platf::frame_residency_e::cpu,
       .format = spa_to_frame_format(spa_format),
+      .ram_pixel_layout = layout,
     };
   }
 
