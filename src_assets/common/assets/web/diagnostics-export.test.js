@@ -922,7 +922,7 @@ describe('support self-service reports', () => {
     expect(multiPad.detail).toContain('Players on the host: P1 Xbox One, P2 DualSense.')
   })
 
-  it('classifies a lossy remote network path and recommends a safer bitrate ceiling', () => {
+  it('keeps a failed remote stream-port check separate from unbound stream loss and bitrate', () => {
     const report = buildNetworkPathTestReport({
       host: '203.0.113.40',
       originHostname: 'polaris-host.local',
@@ -937,7 +937,8 @@ describe('support self-service reports', () => {
     expect(report.status).toBe('fail')
     expect(report.classification).toBe('network')
     expect(report.summary).toContain('remote/VPN')
-    expect(report.recommendedBitrateKbps).toBeLessThanOrEqual(30000)
+    expect(report.recommendedBitrateKbps).toBeNull()
+    expect(report.checks.find((check) => check.key === 'latency-jitter-loss').status).toBe('warning')
     expect(report.checks.map((check) => check.key)).toEqual([
       'host-reachable',
       'control-port',
@@ -1010,6 +1011,7 @@ describe('support self-service reports', () => {
       pingSamplesMs: [37],
       packetLossPercent: 32.7,
       currentBitrateKbps: 200000,
+      streamPortOpen: context === 'foreign active stream' ? true : undefined,
       streamTelemetry: { context, client_ip: '192.0.2.40', streaming: context === 'foreign active stream' },
     })
 
@@ -1023,6 +1025,7 @@ describe('support self-service reports', () => {
     expect(quality.detail).not.toContain('32.7')
     expect(quality.action).not.toContain('Lower bitrate')
     expect(report.checks.find((check) => check.key === 'stream-port').detail).toContain('hint')
+    expect(report.checks.find((check) => check.key === 'stream-port').status).toBe('warning')
     expect(report.advancedEvidence.packetLossPercent).toBeNull()
   })
 
@@ -1079,6 +1082,52 @@ describe('support self-service reports', () => {
     expect(report.recommendedBitrateKbps).toBeNull()
     expect(report.advancedEvidence.samples).toEqual([])
     expect(report.advancedEvidence.packetLossPercent).toBeNull()
+  })
+
+  it('preserves an actual local closed-listener failure without blaming unrelated media loss', () => {
+    const report = buildNetworkPathTestReport({
+      nativeProbe: {
+        targetHost: '127.0.0.1',
+        classification: 'pc',
+        hostReachable: true,
+        ports: [{ key: 'rtsp_setup', transport: 'tcp', status: 'closed' }],
+        samples: { latencyMs: [], jitterMs: null, packetLossPercent: null },
+      },
+      streamPortOpen: true,
+      packetLossPercent: 32.7,
+      currentBitrateKbps: 200000,
+    })
+
+    expect(report.status).toBe('fail')
+    expect(report.classification).toBe('local')
+    expect(report.checks.find((check) => check.key === 'stream-port').status).toBe('fail')
+    expect(report.checks.find((check) => check.key === 'latency-jitter-loss').status).toBe('warning')
+    expect(report.recommendedBitrateKbps).toBeNull()
+  })
+
+  it('retains numeric native sample evidence without inferring media provenance from it', () => {
+    const report = buildNetworkPathTestReport({
+      nativeProbe: {
+        targetHost: '192.0.2.41',
+        classification: 'wan',
+        hostReachable: true,
+        samples: { latencyMs: [0, 0], jitterMs: 0, packetLossPercent: 0 },
+      },
+      packetLossPercent: 32.7,
+      currentBitrateKbps: 200000,
+    })
+
+    expect(report.advancedEvidence.samples).toEqual([])
+    expect(report.advancedEvidence.latency).toBeNull()
+    expect(report.advancedEvidence.jitter).toBeNull()
+    expect(report.advancedEvidence.packetLossPercent).toBeNull()
+    expect(report.advancedEvidence.nativeProbe.samples).toEqual({ latencyMs: [0, 0], jitterMs: 0, packetLossPercent: 0 })
+    expect(report.advancedEvidence.mediaMeasurementSource).toContain('unavailable')
+    expect(report.checks.find((check) => check.key === 'latency-jitter-loss').status).toBe('warning')
+    expect(report.recommendedBitrateKbps).toBeNull()
+    const copy = buildSupportSelfTestCopy({ network: report })
+    expect(copy).toContain('Bitrate ceiling: unavailable')
+    expect(copy).not.toContain('null kbps')
   })
 
   it('summarizes controller input events with native virtual pad, isolation, and haptics evidence', () => {

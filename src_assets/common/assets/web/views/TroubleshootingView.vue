@@ -152,7 +152,7 @@
             <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(networkPathReport.status).badge">{{ statusTone(networkPathReport.status).label }}</span>
           </div>
           <p class="mt-2 text-sm leading-relaxed text-storm">{{ networkPathReport.summary }}</p>
-          <p class="mt-3 text-xs leading-relaxed text-ice">{{ $t('troubleshooting.network_path_ceiling', { kbps: networkPathReport.recommendedBitrateKbps }) }}</p>
+          <p class="mt-3 text-xs leading-relaxed text-ice">{{ networkPathReport.recommendedBitrateKbps == null ? $t('troubleshooting.network_path_ceiling_unavailable') : $t('troubleshooting.network_path_ceiling', { kbps: networkPathReport.recommendedBitrateKbps }) }}</p>
           <details class="mt-3 text-xs text-storm">
             <summary class="cursor-pointer text-ice">{{ $t('troubleshooting.advanced_evidence') }}</summary>
             <div class="mt-2 space-y-2">
@@ -748,15 +748,9 @@ const doctorAdvancedItems = computed(() => {
 
 const networkPathReport = computed(() => buildNetworkPathTestReport({
   nativeProbe: nativeNetworkPathProbe.value,
-  host: streamStats.value?.client_ip || window.location.hostname,
+  host: window.location.hostname,
   originHostname: window.location.hostname,
-  hostReachable: streamStatsConnected.value,
-  controlPortOpen: streamStatsConnected.value,
-  streamPortOpen: streamStats.value?.streaming ? true : undefined,
   mdnsAvailable: window.location.hostname.endsWith('.local'),
-  pingSamplesMs: [streamStats.value?.latency_ms].filter((value) => Number.isFinite(Number(value))),
-  packetLossPercent: streamStats.value?.packet_loss,
-  currentBitrateKbps: streamStats.value?.bitrate_kbps,
 }))
 
 const browserGamepads = computed(() => {
@@ -1176,7 +1170,10 @@ async function collectSupportContext() {
     version: version.value || config.version || 'unknown',
     browser_user_agent: navigator.userAgent,
     stream_stats_connected: streamStatsConnected.value,
-    network_path_probe: nativeNetworkPathProbe.value,
+    network_path_probe: nativeNetworkPathProbe.value ? {
+      ...nativeNetworkPathProbe.value,
+      mediaMeasurementSource: networkPathReport.value.advancedEvidence.mediaMeasurementSource,
+    } : null,
     fix_my_stream_checklist: fixMyStreamChecklist.value,
     session_snapshot: streamStats.value,
     client: {
