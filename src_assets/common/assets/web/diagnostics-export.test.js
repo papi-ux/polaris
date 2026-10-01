@@ -993,6 +993,94 @@ describe('support self-service reports', () => {
     expect(copy).not.toContain('abc123')
   })
 
+  it.each(['foreign active stream', 'stale completed stream'])('keeps a host-local probe separate from a %s', (context) => {
+    const report = buildNetworkPathTestReport({
+      nativeProbe: {
+        targetHost: '127.0.0.1',
+        classification: 'pc',
+        hostReachable: true,
+        ports: [
+          { key: 'control_https', transport: 'tcp', status: 'open' },
+          { key: 'rtsp_setup', transport: 'tcp', status: 'open' },
+          { key: 'video_udp', transport: 'udp', status: 'hint' },
+        ],
+        samples: { latencyMs: [], jitterMs: null, packetLossPercent: null },
+      },
+      host: '192.0.2.40',
+      pingSamplesMs: [37],
+      packetLossPercent: 32.7,
+      currentBitrateKbps: 200000,
+      streamTelemetry: { context, client_ip: '192.0.2.40', streaming: context === 'foreign active stream' },
+    })
+
+    expect(report.status).toBe('warning')
+    expect(report.classification).toBe('local')
+    expect(report.summary).toContain('Host-local')
+    expect(report.recommendedBitrateKbps).toBeNull()
+    const quality = report.checks.find((check) => check.key === 'latency-jitter-loss')
+    expect(quality.status).toBe('warning')
+    expect(quality.detail).toContain('unknown')
+    expect(quality.detail).not.toContain('32.7')
+    expect(quality.action).not.toContain('Lower bitrate')
+    expect(report.checks.find((check) => check.key === 'stream-port').detail).toContain('hint')
+    expect(report.advancedEvidence.packetLossPercent).toBeNull()
+  })
+
+  it('keeps remote probe samples unavailable instead of borrowing unbound stream telemetry', () => {
+    const report = buildNetworkPathTestReport({
+      nativeProbe: {
+        targetHost: '192.0.2.41',
+        classification: 'wan',
+        hostReachable: true,
+        samples: { latencyMs: [], jitterMs: null, packetLossPercent: null },
+      },
+      host: '192.0.2.40',
+      pingSamplesMs: [80, 90],
+      packetLossPercent: 15,
+      currentBitrateKbps: 200000,
+    })
+
+    expect(report.status).toBe('warning')
+    expect(report.recommendedBitrateKbps).toBeNull()
+    expect(report.advancedEvidence.samples).toEqual([])
+    expect(report.advancedEvidence.packetLossPercent).toBeNull()
+    expect(report.checks.find((check) => check.key === 'latency-jitter-loss').status).toBe('warning')
+  })
+
+  it('does not turn null native measurements into a healthy zero or a rate ceiling', () => {
+    const report = buildNetworkPathTestReport({
+      nativeProbe: {
+        targetHost: '192.0.2.41',
+        classification: 'wan',
+        hostReachable: true,
+        samples: { latencyMs: [null, '', '0'], jitterMs: null, packetLossPercent: null },
+      },
+    })
+
+    expect(report.recommendedBitrateKbps).toBeNull()
+    expect(report.advancedEvidence.samples).toEqual([])
+    expect(report.advancedEvidence.latency).toBeNull()
+    expect(report.advancedEvidence.jitter).toBeNull()
+    expect(report.advancedEvidence.packetLossPercent).toBeNull()
+    const quality = report.checks.find((check) => check.key === 'latency-jitter-loss')
+    expect(quality.status).toBe('warning')
+    expect(quality.detail).not.toContain('0.0')
+  })
+
+  it('does not grade raw stream measurements as a network probe when native evidence is absent', () => {
+    const report = buildNetworkPathTestReport({
+      host: '192.0.2.40',
+      pingSamplesMs: [37],
+      packetLossPercent: 32.7,
+      currentBitrateKbps: 200000,
+    })
+
+    expect(report.status).toBe('warning')
+    expect(report.recommendedBitrateKbps).toBeNull()
+    expect(report.advancedEvidence.samples).toEqual([])
+    expect(report.advancedEvidence.packetLossPercent).toBeNull()
+  })
+
   it('summarizes controller input events with native virtual pad, isolation, and haptics evidence', () => {
     const report = buildControllerInputTestReport({
       events: [
