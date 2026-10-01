@@ -23,26 +23,26 @@ namespace {
     std::vector<rgb_t> pixels;
   } endpoint;
 
-  void APIENTRY gen_textures(GLsizei count, GLuint *ids) {
+  void GLAD_API_PTR gen_textures(GLsizei count, GLuint *ids) {
     for (GLsizei i = 0; i < count; ++i) ids[i] = 100 + i;
   }
-  void APIENTRY delete_textures(GLsizei, const GLuint *) {}
-  void APIENTRY bind_texture(GLenum, GLuint) {}
-  void APIENTRY texture_parameter_i(GLenum, GLenum, GLint) {}
-  void APIENTRY texture_parameter_fv(GLenum, GLenum, const GLfloat *) {}
-  void APIENTRY pixel_store(GLenum pname, GLint value) {
+  void GLAD_API_PTR delete_textures(GLsizei, const GLuint *) {}
+  void GLAD_API_PTR bind_texture(GLenum, GLuint) {}
+  void GLAD_API_PTR texture_parameter_i(GLenum, GLenum, GLint) {}
+  void GLAD_API_PTR texture_parameter_fv(GLenum, GLenum, const GLfloat *) {}
+  void GLAD_API_PTR pixel_store(GLenum pname, GLint value) {
     if (pname == GL_UNPACK_ROW_LENGTH) endpoint.row_length = value;
     if (pname == GL_UNPACK_ALIGNMENT) endpoint.alignment = value;
     if (pname == GL_UNPACK_SWAP_BYTES) endpoint.swap_bytes = value;
   }
-  void APIENTRY get_integer(GLenum pname, GLint *value) {
+  void GLAD_API_PTR get_integer(GLenum pname, GLint *value) {
     if (pname == GL_UNPACK_ROW_LENGTH) *value = endpoint.row_length;
     else if (pname == GL_UNPACK_ALIGNMENT) *value = endpoint.alignment;
     else if (pname == GL_UNPACK_SWAP_BYTES) *value = endpoint.swap_bytes;
     else *value = 0;
   }
-  GLenum APIENTRY no_error() { return GL_NO_ERROR; }
-  void APIENTRY upload(GLenum target, GLint level, GLint x, GLint y, GLsizei width, GLsizei height,
+  GLenum GLAD_API_PTR no_error() { return GL_NO_ERROR; }
+  void GLAD_API_PTR upload(GLenum target, GLint level, GLint x, GLint y, GLsizei width, GLsizei height,
                        GLenum format, GLenum type, const void *data) {
     if (target != GL_TEXTURE_2D || level || x || y || !data ||
         (format != GL_RGBA && format != GL_BGRA)) throw std::runtime_error("unexpected GL upload");
