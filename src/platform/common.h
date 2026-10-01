@@ -372,11 +372,21 @@ namespace platf {
     return "unknown"sv;
   }
 
+  // Actual four-byte CPU pixel packing, separate from the telemetry format class.
+  // Unspecified preserves existing BGRA8 producers, including the black primer.
+  enum class ram_pixel_layout_e {
+    unspecified,
+    bgra8,
+    xbgr2101010_le,
+    xrgb2101010_le,
+  };
+
   struct frame_metadata_t {
     frame_transport_e transport {frame_transport_e::unknown};
     frame_residency_e residency {frame_residency_e::unknown};
     frame_format_e format {frame_format_e::unknown};
     std::string device;
+    ram_pixel_layout_e ram_pixel_layout {ram_pixel_layout_e::unspecified};
   };
 
   struct runtime_state_t {

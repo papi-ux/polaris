@@ -467,10 +467,13 @@ namespace va {
   class va_ram_t: public va_t {
   public:
     int convert(platf::img_t &img) override {
-      sws.load_ram(img);
+      if (const auto status = sws.load_ram(img); status != 0) {
+        // Preserve the permanent-unreadable status so video ends that stream
+        // once instead of rebuilding the same unsupported capture every frame.
+        return status;
+      }
 
-      sws.convert(nv12->buf);
-      return 0;
+      return sws.convert(nv12->buf);
     }
   };
 

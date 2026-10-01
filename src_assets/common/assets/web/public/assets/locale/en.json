@@ -2596,6 +2596,7 @@
     "self_tests_docs_link": "What each self test checks",
     "network_path_tester": "Network Path Tester",
     "network_path_ceiling": "Recommended ceiling: {kbps} kbps.",
+    "network_path_ceiling_unavailable": "No bitrate ceiling measured by this check.",
     "controller_tester": "Controller/Input Tester",
     "gamescope_helper_tester": "Gamescope Session Helper",
     "controller_detect": "Detect controller",
