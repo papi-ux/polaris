@@ -1504,8 +1504,8 @@ TEST(VideoAutoPolicyProbeTests, AnHdrLaunchOnGamescopeStreamIsRefusedForHdrWitho
   // A launch that switches to Gamescope Stream for itself was offered HDR by the encoder of the mode
   // it came from. Vulkan Video then passed its probe, and the launch was refused as "No video
   // encoder could start", which sent the player looking for a fault that was not there. The advice
-  // must not send them to VA-API for HDR either: on the portal VA-API takes the same 8-bit system
-  // memory upload unless the unvalidated DMA-BUF opt-in is set.
+  // must not promise HDR from VA-API either: its packed RGB10 portal upload preserves the
+  // negotiated words, but physical HDR capture and playback remain unvalidated.
   const auto_probe_guard_t guard;
   launch_failure::clear();
 
@@ -1520,11 +1520,12 @@ TEST(VideoAutoPolicyProbeTests, AnHdrLaunchOnGamescopeStreamIsRefusedForHdrWitho
   EXPECT_NE(refusal->message.find("on Gamescope Stream Auto encodes with Vulkan Video, which offers no HDR there"), std::string::npos)
     << refusal->message;
   EXPECT_NE(refusal->action.find("Launch without HDR."), std::string::npos) << refusal->action;
-  EXPECT_NE(refusal->action.find("hevc_mode = 3 or encoder = vaapi keeps VA-API on Gamescope Stream, but"), std::string::npos)
+  EXPECT_NE(refusal->action.find("hevc_mode = 3 or encoder = vaapi keeps VA-API on Gamescope Stream."), std::string::npos)
     << refusal->action;
-  EXPECT_NE(refusal->action.find("the same 8-bit system memory upload unless POLARIS_PORTAL_DMABUF=1 is set"), std::string::npos)
-    << refusal->action;
-  EXPECT_NE(refusal->action.find("is not proven"), std::string::npos) << refusal->action;
+  EXPECT_NE(refusal->action.find("VA-API can upload negotiated packed RGB10"), std::string::npos) << refusal->action;
+  EXPECT_NE(refusal->action.find("HDR capture and playback on this route are not proven"), std::string::npos) << refusal->action;
+  EXPECT_EQ(refusal->action.find("same 8-bit system memory upload"), std::string::npos) << refusal->action;
+  EXPECT_EQ(refusal->action.find("POLARIS_PORTAL_DMABUF"), std::string::npos) << refusal->action;
   EXPECT_EQ(refusal->action.find("For HDR on Gamescope Stream"), std::string::npos) << refusal->action;
   for (const auto dash : {std::string_view {"\xE2\x80\x94"}, std::string_view {"\xE2\x80\x93"}, std::string_view {" - "}}) {
     EXPECT_EQ(launch_failure::status_message(*refusal).find(dash), std::string::npos);

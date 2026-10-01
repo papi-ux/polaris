@@ -37,6 +37,7 @@ add_executable(portal_vaapi_ram_convert_fixture
   "${POLARIS_ROOT}/src/platform/linux/graphics.cpp"
   "${POLARIS_ROOT}/src/platform/linux/pipewire_capture.cpp"
   "${POLARIS_ROOT}/src/video_colorspace.cpp"
+  "${POLARIS_ROOT}/src/file_handler.cpp"
   "${POLARIS_ROOT}/third-party/glad/src/gl.c"
   "${POLARIS_ROOT}/third-party/glad/src/egl.c")
 target_include_directories(portal_vaapi_ram_convert_fixture PRIVATE

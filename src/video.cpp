@@ -7368,9 +7368,8 @@ namespace video {
         "encoder_offers_no_hdr",
         "This launch asks for HDR with Vulkan Video chosen for it, which offers no HDR on Gamescope "
         "Stream: it reads each frame through system memory as 8-bit.",
-        "Launch without HDR, or choose another encoder for this launch. VA-API on Gamescope Stream takes "
-        "frames through the same 8-bit system memory upload unless POLARIS_PORTAL_DMABUF=1 is set, and "
-        "HDR through that unvalidated DMA-BUF route is not proven."
+        "Launch without HDR, or choose another encoder for this launch. VA-API can upload negotiated "
+        "packed RGB10 on this portal route, but HDR capture and playback on this route are not proven."
       );
       return;
     }
@@ -7380,9 +7379,8 @@ namespace video {
         "encoder_offers_no_hdr",
         "This launch asks for HDR, and this host is set to encoder = vulkan, which offers no HDR on "
         "Gamescope Stream: it reads each frame through system memory as 8-bit.",
-        "Launch without HDR. encoder = vaapi keeps VA-API on Gamescope Stream, but VA-API there takes "
-        "frames through the same 8-bit system memory upload unless POLARIS_PORTAL_DMABUF=1 is set, and "
-        "HDR through that unvalidated DMA-BUF route is not proven."
+        "Launch without HDR. encoder = vaapi keeps VA-API on Gamescope Stream. VA-API can upload "
+        "negotiated packed RGB10, but HDR capture and playback on this route are not proven."
       );
       return;
     }
@@ -7392,11 +7390,10 @@ namespace video {
         "encoder_offers_no_hdr",
         "This launch asks for HDR, and on Gamescope Stream Auto encodes with Vulkan Video, which offers "
         "no HDR there: it reads each frame through system memory as 8-bit.",
-        // VA-API is no way back to HDR here: on the portal it takes the same 8-bit upload
-        // (va_ram_t through sws_t::load_ram) unless the unvalidated DMA-BUF opt-in is set.
-        "Launch without HDR. hevc_mode = 3 or encoder = vaapi keeps VA-API on Gamescope Stream, but "
-        "VA-API there takes frames through the same 8-bit system memory upload unless "
-        "POLARIS_PORTAL_DMABUF=1 is set, and HDR through that unvalidated DMA-BUF route is not proven."
+        // The packed RAM upload preserves RGB10; physical HDR on this portal route
+        // still requires validation, so this refusal does not promise it from VA-API.
+        "Launch without HDR. hevc_mode = 3 or encoder = vaapi keeps VA-API on Gamescope Stream. "
+        "VA-API can upload negotiated packed RGB10, but HDR capture and playback on this route are not proven."
       );
       return;
     }

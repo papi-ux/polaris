@@ -6,7 +6,6 @@
 #include <nlohmann/json.hpp>
 #include <boost/log/utility/setup/console.hpp>
 namespace config {video_t video {};}
-namespace gbm {device_destroy_fn device_destroy=nullptr;create_device_fn create_device=nullptr;}
 namespace {
   int uploads=0,draws=0,framebuffers=0;
   bool upload_error=false,conversion_error=false;
