@@ -110,7 +110,8 @@ linux_prefer_gpu_native_capture = enabled
 > | An isolated game-only session, desktop untouched | `headless_stream` (this recommended setup) |
 >
 > Moonlight-protocol clients can also request the mirror per launch with `mirrorDesktop=1` on
-> `/launch`. And mind the trap: `headless_mode = enabled` *without* `linux_use_cage_compositor`
+> `/launch`. An app whose Launch as names a fixed mode refuses that request with
+> `app_launch_mode_pinned`. And mind the trap: `headless_mode = enabled` *without* `linux_use_cage_compositor`
 > selects `host_virtual_display`, not a headless session.
 
 Then start a game and read the active runtime, capture path, and encoder in Mission Control. See

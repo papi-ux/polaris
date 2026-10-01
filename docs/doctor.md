@@ -25,8 +25,8 @@ page does, so it cannot tell Nova for Android from Nova for Linux, or Moonlight 
 Moonlight-protocol client the row says what it cannot use. Polaris gets no media loss from it, so
 the **Network** verdict rests on round-trip time, and the **Client** verdict needs decode and render
 timing that only Nova for Android measures. PyroWave, Live Tuning from the client and choosing the
-launch mode per launch are Nova only, though Artemis can ask for Host Virtual Display; Live Tuning
-on Mission Control still tunes the stream. Diagnostics carry `client_family` for the stream and for
+launch mode per launch are Nova only, though Artemis can ask for Host Virtual Display on an app whose Launch as
+is Host default; Live Tuning on Mission Control still tunes the stream. Diagnostics carry `client_family` for the stream and for
 each client, and Session Snapshot on **Doctor & Support** shows it as **Client type** ([what each
 client gets](compatibility.md#clients)).
 

@@ -45,6 +45,7 @@
 
 // local includes
 #include "capture_generation.h"
+#include "app_launch_as.h"
 #include "config.h"
 #include "emulator_library.h"
 #include "game_library_scanner.h"
@@ -123,11 +124,43 @@ namespace proc {
   bool is_valid_steam_launch_mode(std::string_view mode);
   bool steam_launch_mode_is_big_picture(std::string_view mode);
 
+  std::string legacy_basis(const nlohmann::json &entry);
+  std::string launch_as_from_legacy(const nlohmann::json &entry);
+  std::string normalize_launch_as(const nlohmann::json &entry);
+  void write_launch_as(nlohmann::json &entry, std::string_view value);
+  void set_launch_as(struct ctx_t &ctx, std::string value);
+
   /// The Steam shutdown undo a generated Steam app carries, in the form parse() keeps it, so that
   /// nothing has to be upgraded each time apps.json is read.
   std::string canonical_steam_shutdown_undo();
 
+  struct launch_as_availability_t {
+    bool available = true;
+    std::string reason;
+  };
+
 #if defined(__linux__)
+  struct launch_selection_request_t {
+    std::string client_named_selection;
+    std::string requested_selection;
+    bool mirror_desktop = false;
+    bool launch_virtual_display = false;
+    bool virtual_display_user_locked = false;
+    bool watch_only = false;
+  };
+  launch_selection_request_t launch_selection_request_from_session(const rtsp_stream::launch_session_t &session);
+
+  struct launch_selection_t {
+    std::string selection;
+    bool pinned = false;
+    int refusal = 0;
+  };
+  launch_selection_t resolve_launch_selection_for_app(const struct ctx_t &app, const launch_selection_request_t &request);
+  int refuse_app_launch_as_before_launch(const struct ctx_t &app, const launch_selection_request_t &request);
+  int refuse_app_launch_as_unavailable(const struct ctx_t &app, std::string reason);
+
+  launch_as_availability_t launch_as_availability(const struct ctx_t &app);
+
   struct desktop_launch_safety_policy_t {
     bool desktopSteamActive = false;
     bool physicalDisplayRisk = false;
@@ -741,6 +774,7 @@ namespace proc {
     bool elevated = false;
     bool auto_detach = false;
     bool wait_all = false;
+    std::string launch_as = "host_default";
     bool virtual_display = false;
     bool virtual_display_primary = false;
     bool desktop_mirror = false;
@@ -1045,6 +1079,8 @@ namespace proc {
     std::string get_app_image(int app_id);
     std::string get_last_run_app_name();
     std::string get_running_app_uuid();
+    /// The running generation's frozen app entry, unaffected by catalogue reloads.
+    std::optional<ctx_t> running_app_context() const;
     std::string get_session_token();
     std::string get_session_owner_unique_id();
     std::shared_ptr<input::retained_gamepad_t> retained_gamepad_for_owner(const std::string &unique_id);

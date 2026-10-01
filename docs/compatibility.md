@@ -95,7 +95,7 @@ only, no controller yet, and only on the local network.
 | Feature | Nova for Android | Nova for Linux | Moonlight | Artemis | Browser Stream |
 |---|---|---|---|---|---|
 | Pairing | QR, Trusted Pair, PIN | Trusted Pair, PIN | PIN | PIN; QR unverified | None: it opens from the signed-in web console |
-| Launch mode per launch | Yes | Yes | No: the host's mode applies | Host Virtual Display only, from its virtual display option | No: the host's mode applies |
+| Launch mode per launch | Yes | Yes | No: the host's mode applies, or the app's Launch as | Host Virtual Display only, from its virtual display option, on an app set to Host default | No: the host's mode applies, or the app's Launch as when that is a Private Stream mode |
 | Play Setup | Yes | Yes | No | No | No |
 | Spaces | Yes | Yes | Unverified | Unverified | No |
 | PyroWave | A Nova beta, 1.4.13-beta.3 or newer | The PyroWave Flatpak, SDR and 4:2:0 only | No | No | No |
@@ -117,9 +117,9 @@ What the rows mean, and where they come from:
   Every other client types the PIN into **Devices, Manual PIN**
   ([Pair and manage devices](devices.md)).
 - **Launch mode per launch.** Moonlight never asks for a mode, so the mode saved under **Where
-  games run** applies to every Moonlight launch. Artemis's virtual display option asks for Host
-  Virtual Display, which the host grants unless its own mode is Private Stream, whose private
-  session already has a display sized to the client.
+  games run** applies to every Moonlight launch, unless the app's **Launch as** names another mode.
+  Artemis's virtual display option asks for Host Virtual Display, which the host grants unless
+  its own mode is Private Stream or the app's Launch as names another mode.
 - **Spaces.** A device given a Space sees that Space as its only app. Choosing titles inside a Space
   is a Nova feature, and no Moonlight or Artemis launch of a Space has been tested. A Space streams
   H.264, SDR and stereo only, and PyroWave does not work in one.
@@ -153,12 +153,11 @@ What the rows mean, and where they come from:
 Moonlight asks only for a resolution, a frame rate, a bitrate, a codec, HDR and the audio channels.
 Everything else is set on the host, where it applies to every Moonlight launch:
 
-- **Where games run** under **Settings, Audio/Video** is the launch mode every Moonlight launch gets.
-- **One app entry per way of playing.** The built-in Desktop entry has **Mirror the host desktop**
-  on, so it streams your real desktop whatever the launch mode. Turn **Always create Virtual
-  Display** on for an entry to give it a Host Virtual Display sized to the client, on a host whose
-  mode is not Private Stream. One Moonlight library can then offer a private game, the real desktop
-  and a desktop on its own screen ([Add and edit apps](apps.md#runtime-behavior)).
+- **Where games run** under **Settings, Audio/Video** is the launch mode a Moonlight app set to Host default gets.
+- **One app entry per way of playing.** Each app's **Launch as** can name its own mode. The
+  built-in Desktop entry is Mirror Desktop. An entry set to Host Virtual Display gets a screen
+  sized to the client, on a Private Stream host too. One Moonlight library can offer a private
+  game, the real desktop and a desktop on its own screen ([Launch as](apps.md#launch-as)).
 - **The device's Display Profile**, under **Devices, Edit Access**, pins what that one device gets:
   a display mode in place of the one it asks for, a host output, the color range and HDR
   ([Editing a device](devices.md#editing-a-device)).

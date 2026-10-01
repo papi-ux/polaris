@@ -13,7 +13,11 @@ export const VIRTUAL_DISPLAY_BACKEND_OPTIONS = Object.freeze([
 export const KWIN_VIRTUAL_OUTPUT_BACKEND = 'KWin virtual output'
 
 export function presentVirtualDisplayStatus(status = {}) {
-  if (PRIVATE_STREAM_MODES.has(status.policy_mode)) {
+  const pinnedApps = typeof status.launch_as_apps === 'number' && Number.isFinite(status.launch_as_apps)
+    ? Math.max(0, Math.floor(status.launch_as_apps)) : 0
+  const pinnedDetail = pinnedApps > 0
+    ? ` ${pinnedApps} app${pinnedApps === 1 ? '' : 's'} launch as Host Virtual Display or Desktop Takeover and use this backend.` : ''
+  if (PRIVATE_STREAM_MODES.has(status.policy_mode) && pinnedApps === 0) {
     return {
       kind: 'unused',
       label: 'Not needed for Private Stream',
@@ -25,7 +29,7 @@ export function presentVirtualDisplayStatus(status = {}) {
     return {
       kind: 'available',
       label: 'Available',
-      detail: `${status.backend || 'The detected backend'} is ready to create or manage the stream output.`,
+      detail: `${status.backend || 'The detected backend'} is ready to create or manage the stream output.${pinnedDetail}`,
     }
   }
 
@@ -33,14 +37,14 @@ export function presentVirtualDisplayStatus(status = {}) {
     return {
       kind: 'unconfigured',
       label: 'Configuration required',
-      detail: status.unavailable_reason || `${status.backend || 'The detected backend'} needs additional configuration.`,
+      detail: (status.unavailable_reason || `${status.backend || 'The detected backend'} needs additional configuration.`) + pinnedDetail,
     }
   }
 
   return {
     kind: 'missing',
     label: 'Not available',
-    detail: status.unavailable_reason || 'No supported host virtual-display backend was detected.',
+    detail: (status.unavailable_reason || 'No supported host virtual-display backend was detected.') + pinnedDetail,
   }
 }
 

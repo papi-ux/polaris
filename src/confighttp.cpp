@@ -68,6 +68,7 @@
 #include "nvhttp.h"
 #include "platform/common.h"
 #include "process.h"
+#include "launch_failure.h"
 #include "rtsp.h"
 #include "session_event_queue.h"
 #include "settings_metadata.h"
@@ -2342,6 +2343,16 @@ namespace confighttp {
       std::string content = file_handler::read_file(config::stream.file_apps.c_str());
       nlohmann::json file_tree = nlohmann::json::parse(content);
       hydrate_lutris_app_images(file_tree);
+      if (file_tree.contains("apps") && file_tree["apps"].is_array()) {
+        for (auto &app : file_tree["apps"]) {
+          if (!app.is_object()) continue;
+          // Response-only hydration describes what parse/launch will read,
+          // and gives older editors the basis for their next checkbox edit.
+          const auto launch_as = proc::normalize_launch_as(app);
+          app["launch-as"] = launch_as;
+          app["launch-as-basis"] = proc::legacy_basis(app);
+        }
+      }
 
       file_tree["current_app"] = proc::proc.get_running_app_uuid();
       file_tree["host_uuid"] = http::unique_id;
@@ -2450,6 +2461,7 @@ namespace confighttp {
       const auto previous_image = stored_app_image(fileTree, app_string(inputTree, "uuid"));
 
       // Migrate/merge the new app into the file tree.
+      proc::write_launch_as(inputTree, proc::normalize_launch_as(inputTree));
       proc::migrate_apps(&fileTree, &inputTree);
 
       // Write the updated file tree back to disk.
@@ -4199,7 +4211,7 @@ namespace confighttp {
         app["auto-detach"] = true;
         app["wait-all"] = true;
         app["exit-timeout"] = 5;
-        app["virtual-display"] = true;
+        proc::write_launch_as(app, "host_default");
 
         app["source"] = source;
 
@@ -5732,6 +5744,9 @@ namespace confighttp {
       output_tree["runtime_gpu_native_override_active"] = labwc.state.gpu_native_override_active;
       output_tree["stream_path_id"] = policy.selection;
       output_tree["stream_path_label"] = policy.label;
+      const auto host_default_selection = stream_display_policy::host_default_selection();
+      output_tree["host_default_stream_path_id"] = host_default_selection;
+      output_tree["host_default_stream_path_label"] = stream_display_policy::label_for_selection(host_default_selection);
       output_tree["stream_display_mode_options"] = nlohmann::json::array();
       for (const auto &option : stream_display_policy::mode_options(vd_available)) {
         auto unavailable_reason = option.available ? std::string {} : option.unavailable_reason;
@@ -8071,9 +8086,26 @@ namespace confighttp {
           };
           BOOST_LOG(info) << "Launching app ["sv << app.name << "] from web UI"sv;
 #ifdef __linux__
-          const bool private_stream_requested =
-            config::video.linux_display.headless_mode &&
-            config::video.linux_display.use_cage_compositor;
+          launch_failure::clear();
+          if (const auto refusal = proc::refuse_app_launch_as_before_launch(app, {
+                .client_named_selection = mirror_desktop_explicit ? std::string {stream_display_policy::k_desktop_display} : std::string {},
+                .mirror_desktop = mirror_desktop_explicit,
+              })) {
+            const auto record = launch_failure::take();
+            nlohmann::json error_tree {{"status", false}, {"status_code", refusal},
+              {"error", launch_failure::status_message(*record)}, {"error_code", record->code}};
+            SimpleWeb::CaseInsensitiveMultimap headers;
+            append_json_security_headers(headers);
+            response->write(SimpleWeb::StatusCode::client_error_bad_request, error_tree.dump(), headers);
+            return;
+          }
+          const auto pin = stream_display_policy::resolve_app_launch_as(app.launch_as, {});
+          const bool private_stream_requested = pin.verdict == stream_display_policy::app_launch_as_t::verdict_e::pinned ?
+            proc::streaming_launch_requests_private_family(false, false, pin.selection, std::string {}) ||
+              pin.selection == stream_display_policy::k_headless_stream || pin.selection == stream_display_policy::k_windowed_stream :
+            proc::streaming_launch_requests_private_family(
+              config::video.linux_display.headless_mode, config::video.linux_display.use_cage_compositor,
+              config::video.linux_display.stream_mode, config::video.linux_display.private_runtime);
           const int running_app = proc::proc.running();
           const auto launch_policy = proc::resolve_desktop_launch_safety_policy(
             private_stream_requested,
@@ -8115,6 +8147,10 @@ namespace confighttp {
             error_tree["error"] = err == 503 ?
               "Failed to initialize video capture/encoding. Is a display connected and turned on?" :
               "Failed to start the specified application";
+            if (const auto refusal = launch_failure::take()) {
+              error_tree["error"] = launch_failure::status_message(*refusal);
+              error_tree["error_code"] = refusal->code;
+            }
 #ifdef __linux__
             error_tree["launchPolicy"] = launch_policy_json;
 #endif
@@ -8635,6 +8671,10 @@ namespace confighttp {
     output_tree["policy_reason"] = display_policy.reason;
     output_tree["runtime_backend"] = labwc.state.backend_name;
     output_tree["runtime_effective_headless"] = labwc.state.effective_headless;
+    const auto &apps = proc::proc.get_apps();
+    output_tree["launch_as_apps"] = std::count_if(apps.begin(), apps.end(), [](const proc::ctx_t &app) {
+      return app.launch_as == "host_virtual_display" || app.launch_as == "desktop_takeover";
+    });
 
     send_response(response, output_tree);
   }

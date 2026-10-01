@@ -2394,7 +2394,7 @@ TEST(StreamStatsDoctorTests, NamesAMoonlightClientAndWhatItCannotUse) {
   }
   // Artemis's virtual display option asks for Host Virtual Display for one launch, so the row does not
   // say only Nova can ask for a mode (compatibility.md, the Launch mode per launch row).
-  EXPECT_NE(detail.find("though Artemis can ask for Host Virtual Display"), std::string::npos) << detail;
+  EXPECT_NE(detail.find("though Artemis can ask for Host Virtual Display on an app whose Launch as is Host default"), std::string::npos) << detail;
   EXPECT_NE(detail.find("Live Tuning on Mission Control still tunes this stream."), std::string::npos) << detail;
   // A Moonlight player reads this too, and has no Play Setup to go to.
   EXPECT_EQ(detail.find("Play Setup"), std::string::npos) << detail;

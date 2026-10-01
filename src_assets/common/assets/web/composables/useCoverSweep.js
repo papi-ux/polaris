@@ -333,8 +333,8 @@ export function useCoverSweep({ pollIntervalMs = SWEEP_POLL_INTERVAL_MS, onAppli
             continue
           }
           const saved = runId ? true : await saveCover(row.uuid, data.path)
-          if (saved === false) {
-            row.applyError = 'Could not save the entry for this cover'
+          if (saved === false || typeof saved === 'string') {
+            row.applyError = typeof saved === 'string' ? saved : 'Could not save the entry for this cover'
             continue
           }
           row.applied = true

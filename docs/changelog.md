@@ -7,6 +7,8 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- An app entry has one **Launch as** setting in place of **Mirror the host desktop** and **Always create Virtual Display**. It offers Host default, or one of Private Stream, Private Stream (GPU-native), Gamescope Stream, Host Virtual Display, Desktop Takeover and Mirror Desktop, each greyed out with the reason when this host cannot run it. A mode other than Host default applies to every client, Moonlight included, so one Moonlight library can offer a private game, the real desktop and a desktop on a screen of its own on any host. Always create Virtual Display did nothing on a Private Stream host, so a Moonlight player got an empty private session and no reason; Host Virtual Display now gives one there. When the host cannot run an app's mode, the launch is refused before the stream with `app_launch_mode_unavailable` and the reason, never started in another mode, and a launch that names a different mode for such an app is refused with `app_launch_mode_pinned`. Browser Stream runs an app set to a Private Stream mode on any host and refuses one set to any other fixed mode before starting it. `launch_mode` in `/polaris/v1/games` carries `launch_as`, `launch_as_available` and `launch_as_unavailable_reason`, and an app set to a fixed mode offers only that mode. apps.json moves to version 15. An entry with Mirror the host desktop becomes Mirror Desktop, which keeps its rules. An entry you set Always create Virtual Display on becomes Host Virtual Display, which is refused with the reason on a host that has no virtual display backend, where it used to start in the host's mode. A game imported from Steam, Lutris, Heroic or a ROM folder, which had that flag without anyone setting it, becomes Host default, as does any entry with a Steam app id, so on a host whose mode is not Private Stream it follows that mode instead of getting a virtual display. The old keys are still read, and still written beside `launch-as` together with `launch-as-basis`, so an edit made on an older Polaris is not lost. (#790)
+
 - Absolute mouse input lands where it was aimed on a desktop with a rotated or scaled monitor, with
   wlroots capture, and with KMS capture when Wayland names every output KMS sees (#793). Both
   measured the desktop from each monitor's mode, which is in output pixels before the monitor is
@@ -429,8 +431,7 @@ starts at `v1.0.0`.
   what each stream mode needs from the desktop, HDR by stream mode, and the host requirements. The
   Moonlight guide, the FAQ, the device guide and the quick start stop saying that Trusted Pair
   works for Moonlight, that Moonlight can watch another player's stream, that `max_sessions` has
-  to be raised for one watcher, and that the Desktop entry streams the private compositor. The app
-  editor's **Always create Virtual Display** now says it changes nothing on a Private Stream host.
+  to be raised for one watcher, and that the Desktop entry streams the private compositor.
 - The codec readout under **Settings > Encoder Profiles** has a 4:4:4 row and a PyroWave row, and
   shows on the NVENC and Software tabs as well as VA-API and Vulkan Video. The 4:4:4 row says
   whether the active encoder offers clients 4:4:4, and plainly which encoders in the build can: on

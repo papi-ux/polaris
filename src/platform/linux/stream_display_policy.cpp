@@ -532,15 +532,25 @@ namespace stream_display_policy {
     return booleans;
   }
 
-  std::string effective_session_selection_for_launch(
-    std::string_view requested_selection,
-    bool mirror_desktop,
-    bool launch_virtual_display,
-    bool app_virtual_display,
-    bool virtual_display_user_locked,
-    bool virtual_display_optimization_present,
-    bool host_provides_private_display
-  ) {
+  app_launch_as_t resolve_app_launch_as(std::string_view launch_as, std::string_view client_named_selection) {
+    if (launch_as == "host_default" || launch_as == k_desktop_display) {
+      return {};
+    }
+    // Registry lookups accept case-folded host settings. An app pin is an
+    // exact saved value, so reject a lookup whose canonical id differs.
+    const auto *path = stream_path::find(launch_as);
+    if (!path || path->id != launch_as || !selection_session_overridable(launch_as)) {
+      return {app_launch_as_t::verdict_e::not_a_launch_mode, {}};
+    }
+    const bool conflict = !client_named_selection.empty() && client_named_selection != launch_as;
+    return {conflict ? app_launch_as_t::verdict_e::conflict : app_launch_as_t::verdict_e::pinned,
+      std::string {launch_as}};
+  }
+
+  std::string host_default_launch_selection(const host_default_launch_input_t &input) {
+    const auto &[requested_selection, mirror_desktop, launch_virtual_display,
+      virtual_display_user_locked, virtual_display_optimization_present,
+      host_provides_private_display] = input;
     if (mirror_desktop) {
       return std::string {k_desktop_display};
     }
@@ -552,8 +562,7 @@ namespace stream_display_policy {
         return std::string {k_host_virtual_display};
       }
     }
-    // An unlocked virtual-display preference, whether the app's stored default
-    // or a client toggle that never locked topology, does not override a host
+    // An unlocked client toggle does not override a host
     // that already provides the session's display. The private labwc runtime
     // creates that output itself, so a second one only trades a GPU-native
     // path for an EVDI one nobody asked for.
@@ -562,11 +571,6 @@ namespace stream_display_policy {
         return std::string {requested_selection};
       }
       return {};
-    }
-    if (!virtual_display_optimization_present &&
-        app_virtual_display &&
-        !virtual_display_user_locked) {
-      return std::string {k_host_virtual_display};
     }
     if (!requested_selection.empty()) {
       return std::string {requested_selection};

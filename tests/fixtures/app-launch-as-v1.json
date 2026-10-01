@@ -1,0 +1,55 @@
+{
+  "$comment": [
+    "The per-app Launch as field (polaris#790). C++ reads it for the validator, the legacy",
+    "mapping, the basis, the write helper and the registry check; the console vitest reads it for",
+    "the selector's options, labels and saved payload. A mode added to the stream path registry",
+    "that is session overridable must be added here, or test_stream_display_policy fails."
+  ],
+  "field": "launch-as",
+  "basis_field": "launch-as-basis",
+  "default": "host_default",
+  "values": [
+    {"id": "host_default", "label": "Host default"},
+    {"id": "headless_stream", "label": "Private Stream"},
+    {"id": "windowed_stream", "label": "Private Stream (GPU-native)"},
+    {"id": "gamescope_stream", "label": "Gamescope Stream"},
+    {"id": "host_virtual_display", "label": "Host Virtual Display"},
+    {"id": "desktop_takeover", "label": "Desktop Takeover"},
+    {"id": "desktop_display", "label": "Mirror Desktop"}
+  ],
+  "rejected": ["headless_dongle", "", "Host_Default", " host_default", "mirror_desktop", "private_stream", 1, true, null, ["host_default"]],
+  "basis_values": ["none", "desktop-mirror", "virtual-display", "both"],
+  "rejected_basis": ["", "None", "mirror", "virtual_display", true, null],
+  "legacy": [
+    {"case": "bundled Desktop", "entry": {"name": "Desktop", "image-path": "desktop.png", "desktop-mirror": true}, "launch_as": "desktop_display", "basis": "desktop-mirror"},
+    {"case": "both flags, mirror wins", "entry": {"name": "Both", "desktop-mirror": true, "virtual-display": true}, "launch_as": "desktop_display", "basis": "both"},
+    {"case": "set by hand, no source", "entry": {"name": "Couch desktop", "virtual-display": true}, "launch_as": "host_virtual_display", "basis": "virtual-display"},
+    {"case": "set by hand, manual source", "entry": {"name": "Big screen", "source": "manual", "virtual-display": true}, "launch_as": "host_virtual_display", "basis": "virtual-display"},
+    {"case": "set by hand, empty source", "entry": {"name": "Big screen", "source": "", "virtual-display": true}, "launch_as": "host_virtual_display", "basis": "virtual-display"},
+    {"case": "string boolean from a hand edit", "entry": {"name": "Couch desktop", "virtual-display": "true"}, "launch_as": "host_virtual_display", "basis": "virtual-display"},
+    {"case": "hand-set flag on an entry with a Steam app id, which migration v7 marked source steam", "entry": {"name": "Portal 2", "source": "steam", "steam-appid": "620", "virtual-display": true}, "launch_as": "host_default", "basis": "virtual-display"},
+    {"case": "Steam import", "entry": {"name": "Hades", "source": "steam", "steam-appid": "1145360", "virtual-display": true}, "launch_as": "host_default", "basis": "virtual-display"},
+    {"case": "Lutris import", "entry": {"name": "Diablo", "source": "lutris", "virtual-display": true}, "launch_as": "host_default", "basis": "virtual-display"},
+    {"case": "Heroic import", "entry": {"name": "Alan Wake 2", "source": "heroic", "virtual-display": true}, "launch_as": "host_default", "basis": "virtual-display"},
+    {"case": "ROM folder import", "entry": {"name": "Zelda", "source": "emulator", "emulator": "dolphin", "virtual-display": true}, "launch_as": "host_default", "basis": "virtual-display"},
+    {"case": "neither flag", "entry": {"name": "Game"}, "launch_as": "host_default", "basis": "none"},
+    {"case": "flags false", "entry": {"name": "Game", "desktop-mirror": false, "virtual-display": false}, "launch_as": "host_default", "basis": "none"},
+    {"case": "launch-as with no basis wins", "entry": {"name": "Game", "launch-as": "headless_stream", "desktop-mirror": true}, "launch_as": "headless_stream", "basis": "desktop-mirror"},
+    {"case": "launch-as with a matching basis wins", "entry": {"name": "Game", "launch-as": "headless_stream", "launch-as-basis": "none", "desktop-mirror": false, "virtual-display": false}, "launch_as": "headless_stream", "basis": "none"},
+    {"case": "migrated import keeps Host default while its flag is unchanged", "entry": {"name": "Hades", "source": "steam", "steam-appid": "1145360", "virtual-display": true, "launch-as": "host_default", "launch-as-basis": "virtual-display"}, "launch_as": "host_default", "basis": "virtual-display"},
+    {"case": "an older console turned Mirror on after launch-as was written", "entry": {"name": "Game", "launch-as": "host_virtual_display", "launch-as-basis": "virtual-display", "desktop-mirror": true, "virtual-display": false}, "launch_as": "desktop_display", "basis": "desktop-mirror"},
+    {"case": "an older console turned the virtual display off", "entry": {"name": "Game", "launch-as": "host_virtual_display", "launch-as-basis": "virtual-display", "virtual-display": false}, "launch_as": "host_default", "basis": "none"},
+    {"case": "unknown value kept for the launch to refuse", "entry": {"name": "Game", "launch-as": "turbo"}, "launch_as": "turbo", "basis": "none"},
+    {"case": "case differs, so the value is unknown", "entry": {"name": "Game", "launch-as": "Host_Default"}, "launch_as": "Host_Default", "basis": "none"},
+    {"case": "non string value", "entry": {"name": "Game", "launch-as": 3}, "launch_as": "invalid", "basis": "none"}
+  ],
+  "writes": [
+    {"launch_as": "host_default", "desktop-mirror": false, "virtual-display": false, "launch-as-basis": "none"},
+    {"launch_as": "headless_stream", "desktop-mirror": false, "virtual-display": false, "launch-as-basis": "none"},
+    {"launch_as": "windowed_stream", "desktop-mirror": false, "virtual-display": false, "launch-as-basis": "none"},
+    {"launch_as": "gamescope_stream", "desktop-mirror": false, "virtual-display": false, "launch-as-basis": "none"},
+    {"launch_as": "host_virtual_display", "desktop-mirror": false, "virtual-display": true, "launch-as-basis": "virtual-display"},
+    {"launch_as": "desktop_takeover", "desktop-mirror": false, "virtual-display": false, "launch-as-basis": "none"},
+    {"launch_as": "desktop_display", "desktop-mirror": true, "virtual-display": false, "launch-as-basis": "desktop-mirror"}
+  ]
+}

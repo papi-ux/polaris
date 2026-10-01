@@ -699,6 +699,7 @@
                     <span v-if="app.source && app.source !== 'manual'" class="rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-eyebrow" :class="sourceBadgeClass(app.source)">
                       {{ app.source }}
                     </span>
+                    <span v-if="launchAsPinned(app)" class="meta-pill" :class="{ 'text-warning-bright border-warning/25 bg-warning/10': !launchAsChoice(app)?.available }">{{ launchAsPill(app) }}</span>
                     <span v-if="app['game-category'] && app['game-category'] !== 'unknown'" class="control-chip">
                       {{ formatCategory(app['game-category']) }}
                     </span>
@@ -996,7 +997,8 @@
               <div class="section-kicker">Launch</div>
               <h2 class="section-title">Command path</h2>
             </div>
-            <span class="data-pill">{{ editHasLaunchCommand ? 'Command set' : 'Needs command' }}</span>
+            <span v-if="launchAsPinned(editForm)" class="data-pill" :class="{ 'text-warning-bright border-warning/25 bg-warning/10': !editedLaunchAs?.available }">{{ launchAsPill(editForm) }}</span>
+            <span v-else class="data-pill">{{ editHasLaunchCommand ? 'Command set' : 'Needs command' }}</span>
           </div>
 
           <div class="app-editor-grid">
@@ -1041,6 +1043,25 @@
               <input type="text" class="app-editor-input app-editor-input-mono" id="appOutput" v-model="editForm.output" />
             </div>
           </div>
+
+          <fieldset v-if="platform === 'linux'" class="mt-4" data-launch-as-selector>
+            <legend class="settings-field-label">{{ $t('apps.launch_as') }}</legend>
+            <p class="mt-2 text-xs leading-5 text-storm">{{ $t('apps.launch_as_desc') }}</p>
+            <p v-if="unknownLaunchAs" class="mt-2 text-xs leading-5 text-warning-bright" role="status">{{ $t('apps.launch_as_unknown', { value: editForm['launch-as'] }) }}</p>
+            <div class="mt-3 space-y-2">
+              <label v-for="choice in launchAsChoices" :key="choice.id" class="flex items-start gap-3 rounded-lg border border-storm/20 p-3" :class="{ 'opacity-60': !choice.available }">
+                <input type="radio" name="launch-as" :value="choice.id" v-model="editForm['launch-as']" :disabled="!choice.available" :aria-describedby="`app-launch-as-${choice.id}-reason`" class="mt-1 accent-accent" />
+                <span class="min-w-0">
+                  <span class="block text-sm font-medium text-silver">{{ choice.label }}</span>
+                  <span :id="`app-launch-as-${choice.id}-reason`" class="mt-1 block text-xs leading-5" :class="!choice.available && editForm['launch-as'] === choice.id ? 'text-warning-bright' : 'text-storm'">
+                    <template v-if="!choice.available && editForm['launch-as'] === choice.id">{{ $t('apps.launch_as_saved_unavailable', { mode: choice.label, reason: sentence(choice.unavailableReason) }) }}</template>
+                    <template v-else-if="!choice.available">{{ $t('config.av_mode_unavailable', { reason: sentence(choice.unavailableReason) }) }}</template>
+                    <template v-else>{{ $t(choice.descKey) }}</template>
+                  </span>
+                </span>
+              </label>
+            </div>
+          </fieldset>
 
           <details class="app-editor-inline-disclosure" :open="editForm.detached.length > 0">
             <summary class="focus-ring">
@@ -1200,8 +1221,6 @@
               <Checkbox class="app-editor-toggle-card" id="autoDetach" label="apps.auto_detach" desc="apps.auto_detach_desc" v-model="editForm['auto-detach']" default="true"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="waitAll" label="apps.wait_all" desc="apps.wait_all_desc" v-model="editForm['wait-all']" default="true"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="terminateOnPause" label="apps.terminate_on_pause" desc="apps.terminate_on_pause_desc" v-model="editForm['terminate-on-pause']" default="false"></Checkbox>
-              <Checkbox class="app-editor-toggle-card" v-if="platform === 'linux'" id="desktopMirror" label="apps.desktop_mirror" desc="apps.desktop_mirror_desc" v-model="editForm['desktop-mirror']" default="false"></Checkbox>
-              <Checkbox class="app-editor-toggle-card" id="virtualDisplay" label="apps.virtual_display" desc="apps.virtual_display_desc" v-model="editForm['virtual-display']" default="false"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="closeDesktopSteamForPrivate" label="apps.close_desktop_steam_for_private" desc="apps.close_desktop_steam_for_private_desc" v-model="editForm['close-desktop-steam-for-private']" default="false"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="useAppIdentity" label="apps.use_app_identity" desc="apps.use_app_identity_desc" v-model="editForm['use-app-identity']" default="false"></Checkbox>
               <Checkbox class="app-editor-toggle-card" v-if="editForm['use-app-identity']" id="perClientAppIdentity" label="apps.per_client_app_identity" desc="apps.per_client_app_identity_desc" v-model="editForm['per-client-app-identity']" default="false"></Checkbox>
@@ -1335,6 +1354,7 @@ import { filterImportGames, summarizeImportGames } from '../library-imports'
 import { romInstallsPending, useRomSources } from '../composables/useRomSources'
 import { useCoverSweep } from '../composables/useCoverSweep'
 import { readConfigOrNull } from '../config-cache.js'
+import { appPayloadForSave, launchAsOptions, sentence } from '../app-launch-as.js'
 import {
   CUSTOM_EMULATOR, blankRomSourceForm, romEmulatorId, romEmulatorInstallFailure, romEmulatorInstallState, romSourceCountLabel,
   romSourceInstallLabel, romSourcePayload, romSourceReady, romSourceStatus, validateRomSourceForm
@@ -1467,8 +1487,7 @@ const newAppTemplate = {
   // Written explicitly so every entry records its choice. The apps.json
   // migrations infer mirroring for a keyless entry that looks like the legacy
   // bundled Desktop, and one already had to run twice.
-  "desktop-mirror": false,
-  "virtual-display": false,
+  "launch-as": "host_default",
   "close-desktop-steam-for-private": false,
   "terminate-on-pause": false,
   "gamepad": "",
@@ -1516,6 +1535,22 @@ const editHasLaunchCommand = computed(() => hasLaunchCommand(editForm.value))
 let coverSearchUuid = ""
 let coverSearchSequence = 0
 const platform = ref("")
+const launchAsCatalog = ref(null)
+const hostDefaultLabel = ref("")
+const launchAsChoices = computed(() => launchAsOptions(launchAsCatalog.value,
+  hostDefaultLabel.value ? i18n.t('apps.launch_as_host_default_now', { mode: hostDefaultLabel.value }) : i18n.t('apps.launch_as_host_default')))
+const editedLaunchAs = computed(() => launchAsChoice(editForm.value))
+const unknownLaunchAs = computed(() => editForm.value && !editedLaunchAs.value)
+
+function launchAsChoice(entry) {
+  return launchAsChoices.value.find((choice) => choice.id === entry?.['launch-as'])
+}
+function launchAsPinned(entry) {
+  return platform.value === 'linux' && typeof entry?.['launch-as'] === 'string' && entry['launch-as'] !== 'host_default'
+}
+function launchAsPill(entry) {
+  return i18n.t('apps.launch_as_pill', { mode: launchAsChoice(entry)?.label || entry?.['launch-as'] })
+}
 const currentApp = ref("")
 const draggingApp = ref(-1)
 const hostName = ref("")
@@ -2210,7 +2245,7 @@ function sweepRowCopy(row) {
 async function saveSweepCover(uuid, path) {
   const app = apps.value.find((candidate) => candidate.uuid === uuid)
   if (!app) return false
-  const payload = { ...app, 'image-path': path }
+  const payload = appPayloadForSave({ ...app, 'image-path': path })
   delete payload.id
   delete payload.launching
   delete payload.dragover
@@ -2222,7 +2257,7 @@ async function saveSweepCover(uuid, path) {
       body: JSON.stringify(payload),
     })
     const body = await res.json()
-    return Boolean(body?.status)
+    return body?.status ? true : body?.error || false
   } catch (e) {
     return false
   }
@@ -2261,7 +2296,7 @@ function save() {
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     method: 'POST',
-    body: JSON.stringify(editForm.value),
+    body: JSON.stringify(appPayloadForSave(editForm.value)),
   }).then((r) => r.json())
   .then((r) => {
     if (!r.status) {
@@ -2280,7 +2315,12 @@ loadApps()
 
 fetch("./api/config", { credentials: 'include' })
   .then(readConfigOrNull)
-  .then(r => { if (r) platform.value = r.platform })
+  .then(r => {
+    if (!r) return
+    platform.value = r.platform
+    launchAsCatalog.value = r.stream_display_mode_options
+    hostDefaultLabel.value = r.host_default_stream_path_label || ''
+  })
 </script>
 
 <style scoped>

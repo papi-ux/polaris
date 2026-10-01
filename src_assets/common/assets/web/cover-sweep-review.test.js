@@ -137,6 +137,18 @@ describe('useCoverSweep', () => {
     expect(sweep.rows.value[1].applied).toBe(false)
   })
 
+  it('retains the host save refusal rather than counting a cover as applied', async () => {
+    global.fetch.mockResolvedValueOnce(jsonOnce({ status: true, sweep: sweepReady([proposed('u1', 'One', 'Game One')]) }))
+      .mockResolvedValueOnce(jsonOnce({ status: true, choices: [{ token: 't1', preview: 'p1' }] }))
+      .mockResolvedValueOnce(jsonOnce({ status: true, path: '/covers/u1.png' }))
+    sweep = run(() => useCoverSweep())
+    await sweep.load()
+    await sweep.apply(() => 'launch-as must name an allowed launch mode')
+    expect(sweep.rows.value[0].applyError).toBe('launch-as must name an allowed launch mode')
+    expect(sweep.rows.value[0].applied).toBe(false)
+    expect(sweep.applied.value).toBe(0)
+  })
+
   it('one row failing does not stop the rest', async () => {
     global.fetch
       .mockResolvedValueOnce(

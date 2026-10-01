@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -21,12 +22,85 @@
 #include <src/file_handler.h>
 #include <src/nvhttp.h>
 #include <src/process.h>
+#include <src/launch_failure.h>
 #ifdef __linux__
   #include <src/platform/linux/cage_display_router.h>
   #include <src/platform/linux/game_mode_host.h>
   #include <src/platform/linux/stream_display_policy.h>
 #endif
 #include <src/stream_stats.h>
+
+TEST(ProcessMigrationTests, LaunchAsV15MapsLegacyFlagsAndPreservesStoredUnknownsAndTypes) {
+  const auto fixture_path = std::filesystem::path {POLARIS_SOURCE_DIR} / "tests/fixtures/app-launch-as-v1.json";
+  const auto fixture = nlohmann::json::parse(file_handler::read_file(fixture_path.string().c_str()));
+  auto entries = nlohmann::json::array();
+  int index = 0;
+  for (const auto &row : fixture.at("legacy")) {
+    auto entry = row.at("entry");
+    entry["name"] = "Launch as fixture " + std::to_string(index);
+    entry["uuid"] = "00000000-0000-4000-8000-" + std::string(11 - std::to_string(index).size(), '0') + std::to_string(index) + "1";
+    entries.push_back(entry);
+    ++index;
+  }
+  const auto file_path = test_paths::root() / "launch_as_v15_fixture.json";
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), nlohmann::json {{"version", 14}, {"apps", entries}}.dump(2)), 0);
+  auto parsed = proc::parse(file_path.string());
+  ASSERT_TRUE(parsed.has_value());
+  const auto migrated = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
+  EXPECT_EQ(migrated.at("version"), 15);
+  ASSERT_EQ(migrated.at("apps").size(), entries.size());
+  for (std::size_t i = 0; i < entries.size(); ++i) {
+    const auto &row = fixture.at("legacy").at(i);
+    const auto &before = entries.at(i);
+    const auto &after = migrated.at("apps").at(i);
+    SCOPED_TRACE(row.at("case").get<std::string>());
+    if (!before.contains("launch-as")) {
+      EXPECT_EQ(after.value("launch-as", nlohmann::json()), row.at("launch_as"));
+      EXPECT_EQ(after.value("launch-as-basis", nlohmann::json()), row.at("basis"));
+    } else {
+      EXPECT_EQ(after.at("launch-as"), before.at("launch-as"));
+      EXPECT_EQ(after.contains("launch-as-basis"), before.contains("launch-as-basis"));
+      if (before.contains("launch-as-basis")) { EXPECT_EQ(after.at("launch-as-basis"), before.at("launch-as-basis")); }
+    }
+    for (const auto key : {"desktop-mirror", "virtual-display"}) {
+      EXPECT_EQ(after.contains(key), before.contains(key));
+      if (before.contains(key)) { EXPECT_EQ(after.at(key), before.at(key)); }
+    }
+    const auto &apps = parsed->get_apps();
+    const auto expected_name = before.at("name").get<std::string>();
+    const auto found = std::find_if(apps.begin(), apps.end(), [&](const proc::ctx_t &app) { return app.name == expected_name; });
+    ASSERT_NE(found, apps.end());
+    EXPECT_EQ(found->launch_as, row.at("launch_as").get<std::string>());
+    EXPECT_EQ(found->desktop_mirror, row.at("launch_as").get<std::string>() == "desktop_display");
+    EXPECT_EQ(found->virtual_display, row.at("launch_as").get<std::string>() == "host_virtual_display");
+  }
+}
+
+TEST(ProcessMigrationTests, LaunchAsFixtureNormalizationAndWritesDeriveConsistentViews) {
+  const auto fixture_path = std::filesystem::path {POLARIS_SOURCE_DIR} / "tests/fixtures/app-launch-as-v1.json";
+  const auto fixture = nlohmann::json::parse(file_handler::read_file(fixture_path.string().c_str()));
+  for (const auto &row : fixture.at("legacy")) {
+    SCOPED_TRACE(row.at("case").get<std::string>());
+    EXPECT_EQ(proc::normalize_launch_as(row.at("entry")), row.at("launch_as").get<std::string>());
+    EXPECT_EQ(proc::legacy_basis(row.at("entry")), row.at("basis").get<std::string>());
+  }
+  for (const auto &row : fixture.at("writes")) {
+    auto entry = nlohmann::json {{"desktop-mirror", true}, {"virtual-display", true}, {"name", "Write fixture"}, {"keep", "metadata"}};
+    const auto mode = row.at("launch_as").get<std::string>();
+    proc::write_launch_as(entry, mode);
+    EXPECT_EQ(entry.at("launch-as"), row.at("launch_as"));
+    EXPECT_EQ(entry.at("launch-as-basis"), row.at("launch-as-basis"));
+    EXPECT_EQ(entry.at("desktop-mirror"), row.at("desktop-mirror"));
+    EXPECT_EQ(entry.at("virtual-display"), row.at("virtual-display"));
+    EXPECT_EQ(entry.at("keep"), "metadata");
+    EXPECT_EQ(proc::normalize_launch_as(entry), mode);
+    proc::ctx_t app;
+    proc::set_launch_as(app, mode);
+    EXPECT_EQ(app.launch_as, mode);
+    EXPECT_EQ(app.desktop_mirror, row.at("desktop-mirror").get<bool>());
+    EXPECT_EQ(app.virtual_display, row.at("virtual-display").get<bool>());
+  }
+}
 
 #ifdef __linux__
   #include <csignal>
@@ -609,10 +683,10 @@ TEST(ProcessRuntimeConfigTests, ExplicitTopologySemanticsPrecedePresetAndOwnLinu
     final_capability_validation
   );
   const auto mode_derivation = body.find(
-    "stream_display_policy::effective_session_selection_for_launch(",
+    "resolve_launch_selection_for_app(",
     desktop_mirror_semantic
   );
-  const auto mode_binding = body.rfind("auto session_mode =", mode_derivation);
+  const auto mode_binding = body.find("auto session_mode =", mode_derivation);
   const auto mode_apply = body.find(
     "stream_display_policy::apply_selection(session_mode",
     mode_binding
@@ -4898,7 +4972,7 @@ TEST(ProcessRuntimeConfigTests, ClearPrivateSteamLaunchIsAllowed) {
 TEST(ProcessRuntimeConfigTests, DesktopMirrorAppOverridesPairedVirtualDisplayPreference) {
   proc::ctx_t desktop;
   desktop.name = "Desktop";
-  desktop.desktop_mirror = true;
+  proc::set_launch_as(desktop, "desktop_display");
 
   rtsp_stream::launch_session_t launch_session;
   launch_session.virtual_display = true;
@@ -4932,6 +5006,181 @@ namespace {
   };
 }  // namespace
 
+class AppLaunchAsProcessTests: public testing::Test {
+protected:
+  void SetUp() override {
+    runtime_dir = test_paths::root() / "launch-as-runtime";
+    std::filesystem::create_directories(runtime_dir);
+    if (const char *path = std::getenv("PATH")) saved_path = path;
+    setenv("PATH", runtime_dir.c_str(), 1);
+    for (const auto binary : {"labwc", "wlr-randr", "gamescope"}) {
+      const auto path = runtime_dir / binary;
+      std::ofstream {path} << "#!/bin/sh\nexit 0\n";
+      std::filesystem::permissions(path, std::filesystem::perms::owner_all);
+    }
+    config::video.capture.clear();
+    config::video.linux_display.stream_mode = "headless_stream";
+    config::video.linux_display.headless_mode = true;
+    config::video.linux_display.use_cage_compositor = true;
+    config::video.linux_display.private_runtime = "labwc";
+    stream_display_policy::forget_host_default();
+    launch_failure::clear();
+  }
+  void TearDown() override {
+    launch_failure::clear();
+    stream_display_policy::forget_host_default();
+    config::video.linux_display = saved_display;
+    config::video.capture = saved_capture;
+    if (saved_path) setenv("PATH", saved_path->c_str(), 1); else unsetenv("PATH");
+    std::error_code ignored;
+    std::filesystem::remove_all(runtime_dir, ignored);
+  }
+  game_mode_session_pin_t game_mode {false};
+  decltype(config::video.linux_display) saved_display = config::video.linux_display;
+  std::string saved_capture = config::video.capture;
+  std::optional<std::string> saved_path;
+  std::filesystem::path runtime_dir;
+};
+
+TEST_F(AppLaunchAsProcessTests, FixedPrivateModesBeatPairedAndUnlockedVirtualRequests) {
+  for (const auto mode : {"headless_stream", "windowed_stream", "gamescope_stream"}) {
+    for (const bool locked : {false, true}) {
+      SCOPED_TRACE(std::string {mode} + (locked ? " paired" : " unlocked"));
+      proc::ctx_t app;
+      proc::set_launch_as(app, mode);
+      const auto result = proc::resolve_launch_selection_for_app(app, {
+        .requested_selection = "host_virtual_display", .launch_virtual_display = true,
+        .virtual_display_user_locked = locked,
+      });
+      EXPECT_EQ(result.refusal, 0);
+      EXPECT_TRUE(result.pinned);
+      EXPECT_EQ(result.selection, mode);
+    }
+  }
+}
+
+TEST_F(AppLaunchAsProcessTests, FreshUnavailablePinWinsBeforeAClientConflictAndCanRecover) {
+  proc::ctx_t app;
+  proc::set_launch_as(app, "headless_stream");
+  std::filesystem::remove(runtime_dir / "labwc");
+  const proc::launch_selection_request_t request {.client_named_selection = "desktop_display"};
+  EXPECT_EQ(proc::refuse_app_launch_as_before_launch(app, request), 503);
+  auto failure = launch_failure::take();
+  ASSERT_TRUE(failure);
+  EXPECT_EQ(failure->code, "app_launch_mode_unavailable");
+  EXPECT_NE(failure->message.find("labwc"), std::string::npos);
+  EXPECT_NE(failure->action.find("Launch as"), std::string::npos);
+  const auto binary = runtime_dir / "labwc";
+  std::ofstream {binary} << "#!/bin/sh\nexit 0\n";
+  std::filesystem::permissions(binary, std::filesystem::perms::owner_all);
+  EXPECT_EQ(proc::refuse_app_launch_as_before_launch(app, request), 409);
+  failure = launch_failure::take();
+  ASSERT_TRUE(failure);
+  EXPECT_EQ(failure->code, "app_launch_mode_pinned");
+  EXPECT_NE(failure->message.find("Mirror Desktop"), std::string::npos);
+  EXPECT_EQ(proc::refuse_app_launch_as_before_launch(app, {}), 0);
+}
+
+TEST_F(AppLaunchAsProcessTests, GameModeRefusesEveryFixedPinButWatchersKeepOwnerMode) {
+  platf::game_mode_host::set_session_live_for_tests(true);
+  for (const auto mode : {"headless_stream", "windowed_stream", "gamescope_stream", "host_virtual_display", "desktop_takeover"}) {
+    SCOPED_TRACE(mode);
+    proc::ctx_t app;
+    proc::set_launch_as(app, mode);
+    EXPECT_EQ(proc::refuse_app_launch_as_before_launch(app, {}), 503);
+    const auto failure = launch_failure::take();
+    ASSERT_TRUE(failure);
+    EXPECT_EQ(failure->code, "app_launch_mode_unavailable");
+    EXPECT_NE(failure->message.find("Steam Game Mode"), std::string::npos);
+    const auto watcher = proc::resolve_launch_selection_for_app(app, {.client_named_selection = "desktop_display", .watch_only = true});
+    EXPECT_EQ(watcher.refusal, 0);
+    EXPECT_TRUE(watcher.pinned);
+    EXPECT_EQ(watcher.selection, mode);
+  }
+  for (const auto mode : {"host_default", "desktop_display"}) {
+    proc::ctx_t app;
+    proc::set_launch_as(app, mode);
+    const auto result = proc::resolve_launch_selection_for_app(app, {.requested_selection = "headless_stream"});
+    EXPECT_EQ(result.refusal, 0);
+    EXPECT_EQ(result.selection, "desktop_display");
+  }
+  proc::ctx_t unknown;
+  proc::set_launch_as(unknown, "Host_Default");
+  EXPECT_EQ(proc::refuse_app_launch_as_before_launch(unknown, {.watch_only = true}), 503);
+  const auto failure = launch_failure::take();
+  ASSERT_TRUE(failure);
+  EXPECT_NE(failure->message.find("an unknown mode"), std::string::npos);
+}
+
+TEST_F(AppLaunchAsProcessTests, ResumePinRefusalCarriesItsCodeAndActionToTheXmlResponse) {
+  proc::ctx_t app;
+  app.uuid = "launch-as-resume-refusal";
+  proc::set_launch_as(app, "headless_stream");
+  proc::proc_t process {boost::process::v1::environment {}, {app}};
+  auto owner = std::make_shared<rtsp_stream::launch_session_t>();
+  owner->stream_mode = "headless_stream";
+  owner->client_named_selection = "headless_stream";
+  owner->client_selected_topology = true;
+  process.set_active_launch_for_tests(app, owner);
+  auto request = std::make_shared<rtsp_stream::launch_session_t>();
+  request->client_named_selection = "desktop_display";
+  const auto status = process.validate_resolved_profile_for_running_app(request);
+  EXPECT_EQ(status, 409);
+  boost::property_tree::ptree response;
+  nvhttp::put_launch_refusal_for_tests(response, status, "generic resume failure");
+  EXPECT_EQ(response.get<int>("root.<xmlattr>.status_code"), 409);
+  EXPECT_EQ(response.get<std::string>("root.<xmlattr>.error_code"), "app_launch_mode_pinned");
+  EXPECT_NE(response.get<std::string>("root.<xmlattr>.error_action").find("Launch as"), std::string::npos);
+  EXPECT_NE(response.get<std::string>("root.<xmlattr>.status_message").find("Mirror Desktop"), std::string::npos);
+  EXPECT_FALSE(launch_failure::pending);
+}
+
+TEST_F(AppLaunchAsProcessTests, AWatcherKeepsAPinnedOwnersSemanticsWhenGameModeStarts) {
+  proc::ctx_t app;
+  app.uuid = "launch-as-viewer-owner";
+  proc::set_launch_as(app, "headless_stream");
+  proc::proc_t process {boost::process::v1::environment {}, {app}};
+  auto owner = std::make_shared<rtsp_stream::launch_session_t>();
+  owner->stream_mode = owner->expected_stream_mode = "headless_stream";
+  owner->client_named_selection = "headless_stream";
+  owner->client_selected_topology = true;
+  owner->requested_fps = owner->fps = 60000;
+  process.set_active_launch_for_tests(app, owner);
+  platf::game_mode_host::set_session_live_for_tests(true);
+  auto viewer = std::make_shared<rtsp_stream::launch_session_t>();
+  viewer->watch_only = true;
+  viewer->requested_fps = viewer->fps = 60000;
+  viewer->expected_stream_mode = "headless_stream";
+  viewer->client_named_selection = "desktop_display";
+  viewer->mirror_desktop = true;
+  EXPECT_EQ(process.validate_resolved_profile_for_running_app(viewer), 0);
+  EXPECT_EQ(viewer->client_named_selection, "headless_stream");
+  EXPECT_TRUE(viewer->client_selected_topology);
+  EXPECT_FALSE(viewer->mirror_desktop) << "the already-admitted owner generation is still private";
+  EXPECT_FALSE(viewer->virtual_display);
+}
+
+TEST_F(AppLaunchAsProcessTests, CatalogueReloadPreservesTheRunningGenerationsPinAndReturnsAnOwnedCopy) {
+  proc::ctx_t app;
+  app.name = "Pinned game";
+  app.uuid = "launch-as-running-generation";
+  proc::set_launch_as(app, "headless_stream");
+  proc::proc_t process {boost::process::v1::environment {}, {app}};
+  EXPECT_FALSE(process.running_app_context());
+  process.set_active_launch_for_tests(app, std::make_shared<rtsp_stream::launch_session_t>());
+  auto edited = app;
+  proc::set_launch_as(edited, "host_virtual_display");
+  process.reload_configuration(proc::proc_t {boost::process::v1::environment {}, {edited}});
+  const auto active = process.running_app_context();
+  ASSERT_TRUE(active);
+  EXPECT_EQ(active->launch_as, "headless_stream");
+  ASSERT_EQ(process.get_apps().size(), 1u);
+  EXPECT_EQ(process.get_apps().front().launch_as, "host_virtual_display");
+  auto owned = *active;
+  owned.launch_as = "desktop_takeover";
+  EXPECT_EQ(process.running_app_context()->launch_as, "headless_stream");
+}
+
 TEST(ProcessRuntimeConfigTests, EveryLaunchOnAGameModeHostIsAStreamOfTheGameModeScreen) {
   proc::ctx_t game;
   game.name = "A Steam Game";
@@ -4962,9 +5211,12 @@ TEST(ProcessRuntimeConfigTests, EveryLaunchOnAGameModeHostIsAStreamOfTheGameMode
   EXPECT_TRUE(in_game_mode.mirror_desktop);
   EXPECT_FALSE(in_game_mode.virtual_display);
   EXPECT_EQ(
-    stream_display_policy::effective_session_selection_for_launch(
-      in_game_mode.stream_mode, in_game_mode.mirror_desktop, in_game_mode.virtual_display, false, false, false, true
-    ),
+    stream_display_policy::host_default_launch_selection({
+      .requested_selection = in_game_mode.stream_mode,
+      .mirror_desktop = in_game_mode.mirror_desktop,
+      .launch_virtual_display = in_game_mode.virtual_display,
+      .host_provides_private_display = true,
+    }),
     "desktop_display"
   ) << "which is the mode the capture and input gates recognise";
 
@@ -5067,7 +5319,7 @@ TEST(ProcessRuntimeConfigTests, TheProfileAGameModeHostResolvesIsTheOneItsLaunch
   const auto optimize = nvhttp.substr(nvhttp.find("auto polarisOptimize = [](resp_https_t response, req_https_t request) {"));
   const auto authorised = optimize.find("get_verified_cert(request)");
   const auto reconciled = optimize.find("reconcile_game_mode_host();");
-  const auto resolved = optimize.find("stream_display_policy::effective_session_selection_for_launch(");
+  const auto resolved = optimize.find("proc::resolve_launch_selection_for_app(");
   ASSERT_NE(authorised, std::string::npos);
   ASSERT_NE(reconciled, std::string::npos);
   ASSERT_NE(resolved, std::string::npos);
@@ -5092,11 +5344,11 @@ TEST(ProcessRuntimeConfigTests, TheProfileAGameModeHostResolvesIsTheOneItsLaunch
 
   // And that is the topology the launch ends up with.
   EXPECT_EQ(
-    stream_display_policy::effective_session_selection_for_launch("gamescope_stream", true, false, false, false, false, true),
+    stream_display_policy::host_default_launch_selection({.requested_selection = "gamescope_stream", .mirror_desktop = true, .host_provides_private_display = true}),
     "desktop_display"
   );
   EXPECT_EQ(
-    stream_display_policy::effective_session_selection_for_launch("", true, false, false, false, false, true),
+    stream_display_policy::host_default_launch_selection({.mirror_desktop = true, .host_provides_private_display = true}),
     "desktop_display"
   );
 }
@@ -5264,7 +5516,7 @@ protected:
     config::video.linux_display.stream_mode = "headless_stream";
     desktop.name = "Desktop";
     desktop.uuid = "resume-display-test";
-    desktop.desktop_mirror = true;
+    proc::set_launch_as(desktop, "desktop_display");
   }
 
   void TearDown() override {
@@ -5367,7 +5619,7 @@ TEST_F(ProcessResumeDisplayTests, DesktopResumeRejectsForcePrivateChangesInBothD
 }
 
 TEST_F(ProcessResumeDisplayTests, NonDesktopResumeStillRequiresMatchingMirrorFlag) {
-  desktop.desktop_mirror = false;
+  proc::set_launch_as(desktop, "host_default");
   auto active = request();
   active->mirror_desktop = true;
   activate(active);
@@ -5375,6 +5627,29 @@ TEST_F(ProcessResumeDisplayTests, NonDesktopResumeStillRequiresMatchingMirrorFla
   resume->stream_mode = "desktop_display";
   EXPECT_EQ(process.validate_resolved_profile_for_running_app(resume), 409);
   EXPECT_FALSE(resume->mirror_desktop);
+}
+
+TEST_F(ProcessResumeDisplayTests, ViewerInheritsTheOwnersNamedVirtualDisplay) {
+  auto active = request();
+  active->stream_mode = "host_virtual_display";
+  active->expected_stream_mode = "host_virtual_display";
+  active->client_named_selection = "host_virtual_display";
+  active->client_selected_topology = true;
+  active->virtual_display = true;
+  activate(active);
+  ASSERT_FALSE(active->mirror_desktop);
+  auto viewer = request();
+  viewer->watch_only = true;
+  viewer->stream_mode = "desktop_display";
+  viewer->expected_stream_mode = "host_virtual_display";
+  viewer->client_named_selection = "desktop_display";
+  viewer->client_selected_topology = false;
+  viewer->mirror_desktop = true;
+  EXPECT_EQ(process.validate_resolved_profile_for_running_app(viewer), 0);
+  EXPECT_EQ(viewer->client_named_selection, "host_virtual_display");
+  EXPECT_TRUE(viewer->client_selected_topology);
+  EXPECT_FALSE(viewer->mirror_desktop);
+  EXPECT_TRUE(viewer->virtual_display);
 }
 
 TEST_F(ProcessResumeDisplayTests, ViewerKeepsActiveTakeoverSemantics) {
@@ -5432,7 +5707,7 @@ TEST(ProcessMigrationTests, ParseRepairsMalformedLegacyAppsJson) {
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
   ASSERT_TRUE(migrated_tree.contains("version"));
-  EXPECT_EQ(migrated_tree["version"], 14);
+  EXPECT_EQ(migrated_tree["version"], 15);
   ASSERT_TRUE(migrated_tree.contains("apps"));
   ASSERT_TRUE(migrated_tree["apps"].is_array());
   ASSERT_EQ(migrated_tree["apps"].size(), 1);
@@ -5497,7 +5772,7 @@ TEST(ProcessMigrationTests, LegacyBundledDesktopGetsExplicitMirrorSemanticOnlyFo
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 14);
+  EXPECT_EQ(migrated_tree["version"], 15);
   EXPECT_TRUE(migrated_tree["apps"][0].value("desktop-mirror", false));
   EXPECT_FALSE(migrated_tree["apps"][1].contains("desktop-mirror"));
 
@@ -5562,7 +5837,7 @@ TEST(ProcessMigrationTests, VersionTenAndElevenCatalogsRepairOnlyTheExactLegacyB
 
     const auto first_payload = file_handler::read_file(file_path.string().c_str());
     const auto migrated_tree = nlohmann::json::parse(first_payload);
-    EXPECT_EQ(migrated_tree["version"], 14);
+    EXPECT_EQ(migrated_tree["version"], 15);
     EXPECT_TRUE(migrated_tree["apps"][0].value("desktop-mirror", false));
     EXPECT_FALSE(migrated_tree["apps"][1].contains("desktop-mirror"));
     EXPECT_FALSE(migrated_tree["apps"][2].value("desktop-mirror", true));
@@ -5656,7 +5931,7 @@ TEST(ProcessMigrationTests, MigratesOnlyExactLegacyHeroicImportsAndIsIdempotent)
 
   const auto first_payload = file_handler::read_file(file_path.string().c_str());
   const auto migrated_tree = nlohmann::json::parse(first_payload);
-  EXPECT_EQ(migrated_tree["version"], 14);
+  EXPECT_EQ(migrated_tree["version"], 15);
   ASSERT_EQ(migrated_tree["apps"].size(), 6u);
 
   const auto &epic = migrated_tree["apps"][0];
@@ -5752,7 +6027,7 @@ TEST(ProcessMigrationTests, GivesOnlyTheImagelessHeroicLauncherItsBundledPoster)
 
   const auto first_payload = file_handler::read_file(file_path.string().c_str());
   const auto migrated_tree = nlohmann::json::parse(first_payload);
-  EXPECT_EQ(migrated_tree["version"], 14);
+  EXPECT_EQ(migrated_tree["version"], 15);
   ASSERT_EQ(migrated_tree["apps"].size(), 5u);
   EXPECT_EQ(migrated_tree["apps"][0]["image-path"], "heroic.png");
   EXPECT_EQ(migrated_tree["apps"][1]["image-path"], "heroic.png");
@@ -5798,7 +6073,7 @@ TEST(ProcessMigrationTests, MigratesVersionTwelveFlatpakHeroicPathWithoutScanner
 
   const auto first_payload = file_handler::read_file(file_path.string().c_str());
   const auto migrated_tree = nlohmann::json::parse(first_payload);
-  EXPECT_EQ(migrated_tree["version"], 14);
+  EXPECT_EQ(migrated_tree["version"], 15);
   ASSERT_EQ(migrated_tree["apps"].size(), 1u);
   const auto &alan_wake = migrated_tree["apps"][0];
   EXPECT_EQ(alan_wake["uuid"], "77777777-7777-4777-8777-777777777777");
@@ -5995,7 +6270,7 @@ TEST(ProcessMigrationTests, ParseNormalizesSteamLibraryLaunchAndAddsShutdownUndo
   EXPECT_EQ(steam_ctx->source, "steam");
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 14);
+  EXPECT_EQ(migrated_tree["version"], 15);
 
   std::filesystem::remove(file_path);
 }
@@ -6046,7 +6321,7 @@ TEST(ProcessMigrationTests, ParseNormalizesCurrentSteamLibraryLaunchWithoutBigPi
   EXPECT_EQ(steam_ctx->prep_cmds.front().undo_cmd, expected_steam_shutdown_command());
 
   const auto parsed_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(parsed_tree["version"], 14);
+  EXPECT_EQ(parsed_tree["version"], 15);
 
   std::filesystem::remove(file_path);
 }
@@ -6326,7 +6601,7 @@ TEST(ProcessMigrationTests, ParseAddsLutrisLauncherWhenLutrisGamesExist) {
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 14);
+  EXPECT_EQ(migrated_tree["version"], 15);
   ASSERT_TRUE(migrated_tree.contains("apps"));
 
   const auto &migrated_apps = migrated_tree["apps"];
@@ -6392,7 +6667,7 @@ TEST(ProcessMigrationTests, ParseUnwrapsPolarisHdrSessionLibraryHardwire) {
   ASSERT_TRUE(parsed_proc.has_value());
 
   const auto migrated_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
-  EXPECT_EQ(migrated_tree["version"], 14);
+  EXPECT_EQ(migrated_tree["version"], 15);
 
   const auto &migrated_apps = migrated_tree["apps"];
   const auto lib_app = std::find_if(migrated_apps.begin(), migrated_apps.end(), [](const auto &app) {

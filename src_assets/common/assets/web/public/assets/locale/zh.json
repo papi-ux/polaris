@@ -118,8 +118,6 @@
     "terminate_on_pause_desc": "当所有客户端断开连接时终止此 APP。",
     "use_app_identity": "使用 App 身份",
     "use_app_identity_desc": "在创建虚拟显示器时使用 App 自身的身份，而非客户端的。这样可以针对 APP 进行单独的显示器组合配置。",
-    "virtual_display": "总是创建虚拟显示器",
-    "virtual_display_desc": "在启动这个 App 的时候总是创建虚拟显示器，覆盖客户端请求。请确保 SudoVDA 虚拟显示器驱动已安装并启用。",
     "wait_all": "继续串流直到所有应用进程退出",
     "wait_all_desc": "这将继续串流直到应用程序启动的所有进程终止。 当未选中时，串流将在初始应用进程终止时停止，即使其他应用进程仍在运行。",
     "working_dir": "工作目录",
