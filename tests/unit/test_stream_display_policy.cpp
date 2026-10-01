@@ -401,8 +401,8 @@ TEST(StreamDisplayPolicyTests, PrivateAndVirtualModesOwnTheirLaunchRefreshRate) 
 }
 
 TEST(StreamDisplayPolicyTests, HostVirtualClearsStaleAutoManage) {
-  if (!virtual_display::is_available()) {
-    GTEST_SKIP() << "host virtual display normalization requires an available backend";
+  if (!virtual_display::host_stream_readiness(true).available) {
+    GTEST_SKIP() << "host virtual display normalization requires a ready capture provider and creator";
   }
   LinuxDisplayPolicyGuard guard;
   std::string error;

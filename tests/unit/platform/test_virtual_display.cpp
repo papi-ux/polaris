@@ -954,9 +954,15 @@ TEST_F(HostVirtualCaptureReadinessTests, KwinCreatorsRemainAvailableWithTheirAct
   for (const auto backend : {virtual_display::backend_e::EVDI, virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT, virtual_display::backend_e::KSCREEN_DOCTOR}) {
     probe(backend, kwin_provider());
     const auto r = virtual_display::host_stream_readiness(true);
+#ifdef POLARIS_BUILD_PORTAL
     EXPECT_TRUE(r.available);
-    EXPECT_EQ(r.backend, backend);
     EXPECT_TRUE(r.reason.empty());
+#else
+    EXPECT_FALSE(r.available);
+    EXPECT_NE(r.reason.find("no output-pinned KWin capture support"), std::string::npos);
+    EXPECT_EQ(virtual_display::host_stream_permission_count_for_tests(), 0);
+#endif
+    EXPECT_EQ(r.backend, backend);
   }
 }
 
@@ -965,29 +971,54 @@ TEST_F(HostVirtualCaptureReadinessTests, KwinPublicIdentityAllowsOriginalBootstr
     virtual_display::capture_provider_state_e::recoverable_withheld);
   probe(virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT, kwin_provider(false), kwin_provider());
   const auto supported = virtual_display::host_stream_readiness(true);
+#ifdef POLARIS_BUILD_PORTAL
   EXPECT_TRUE(supported.available);
+#else
+  EXPECT_FALSE(supported.available);
+  EXPECT_NE(supported.reason.find("no output-pinned KWin capture support"), std::string::npos);
+#endif
   EXPECT_EQ(supported.provider, virtual_display::capture_provider_state_e::recoverable_withheld);
   EXPECT_EQ(virtual_display::host_stream_permission_count_for_tests(), 0);
   const auto r = virtual_display::prepare_host_stream_capture();
+#ifdef POLARIS_BUILD_PORTAL
   EXPECT_TRUE(r.available);
   EXPECT_EQ(r.provider, virtual_display::capture_provider_state_e::kwin);
   EXPECT_EQ(virtual_display::host_stream_permission_count_for_tests(), 1);
+#else
+  EXPECT_FALSE(r.available);
+  EXPECT_EQ(r.provider, virtual_display::capture_provider_state_e::recoverable_withheld);
+  EXPECT_NE(r.reason.find("no output-pinned KWin capture support"), std::string::npos);
+  EXPECT_EQ(virtual_display::host_stream_permission_count_for_tests(), 0);
+#endif
 }
 
 TEST_F(HostVirtualCaptureReadinessTests, WithheldAfterBootstrapKeepsTheExistingActionableReason) {
   probe(virtual_display::backend_e::EVDI, kwin_provider(false), kwin_provider(false), "KWin cannot identify a process holding file capabilities; restart Polaris without them.");
+#ifdef POLARIS_BUILD_PORTAL
   EXPECT_TRUE(virtual_display::host_stream_readiness(true).available) << "identified KWin remains recoverable at capability time";
+#else
+  EXPECT_FALSE(virtual_display::host_stream_readiness(true).available);
+#endif
   const auto r = virtual_display::prepare_host_stream_capture();
   EXPECT_FALSE(r.available);
   EXPECT_EQ(r.provider, virtual_display::capture_provider_state_e::recoverable_withheld);
+#ifdef POLARIS_BUILD_PORTAL
   EXPECT_NE(r.reason.find("file capabilities"), std::string::npos);
   EXPECT_NE(r.reason.find("restart"), std::string::npos);
+#else
+  EXPECT_NE(r.reason.find("no output-pinned KWin capture support"), std::string::npos);
+  EXPECT_EQ(virtual_display::host_stream_permission_count_for_tests(), 0);
+#endif
 }
 
 
 TEST_F(HostVirtualCaptureReadinessTests, ForcedEvdiOrAutoFallbackKwinPermissionIsPreparedOnlyForActualHvd) {
   probe(virtual_display::backend_e::EVDI, kwin_provider(false), kwin_provider());
+#ifdef POLARIS_BUILD_PORTAL
   EXPECT_TRUE(virtual_display::host_stream_readiness(true).available);
+#else
+  EXPECT_FALSE(virtual_display::host_stream_readiness(true).available);
+#endif
   EXPECT_EQ(virtual_display::host_stream_permission_count_for_tests(), 0);
   proc::ctx_t app; proc::set_launch_as(app, "headless_stream");
   EXPECT_EQ(proc::prepare_host_virtual_capture_for_launch(app, {"headless_stream", true, 0}, false), 0);
@@ -995,8 +1026,17 @@ TEST_F(HostVirtualCaptureReadinessTests, ForcedEvdiOrAutoFallbackKwinPermissionI
   EXPECT_EQ(proc::prepare_host_virtual_capture_for_launch(app, {"host_virtual_display", false, 0}, true), 0);
   EXPECT_EQ(virtual_display::host_stream_permission_count_for_tests(), 0);
   proc::set_launch_as(app, "host_virtual_display");
+#ifdef POLARIS_BUILD_PORTAL
   EXPECT_EQ(proc::prepare_host_virtual_capture_for_launch(app, {"host_virtual_display", true, 0}, false), 0);
   EXPECT_EQ(virtual_display::host_stream_permission_count_for_tests(), 1);
+#else
+  EXPECT_EQ(proc::prepare_host_virtual_capture_for_launch(app, {"host_virtual_display", true, 0}, false), 503);
+  const auto failure = launch_failure::take();
+  ASSERT_TRUE(failure);
+  EXPECT_EQ(failure->code, "app_launch_mode_unavailable");
+  EXPECT_NE(failure->message.find("no output-pinned KWin capture support"), std::string::npos);
+  EXPECT_EQ(virtual_display::host_stream_permission_count_for_tests(), 0);
+#endif
 }
 
 TEST_F(HostVirtualCaptureReadinessTests, ActualHvdPermissionFailureRetainsPinnedOrOrdinaryNamedRefusal) {
@@ -1007,8 +1047,13 @@ TEST_F(HostVirtualCaptureReadinessTests, ActualHvdPermissionFailureRetainsPinned
     const auto failure = launch_failure::take();
     ASSERT_TRUE(failure);
     EXPECT_EQ(failure->code, pinned ? "app_launch_mode_unavailable" : "host_virtual_display_capture_unavailable");
+#ifdef POLARIS_BUILD_PORTAL
     EXPECT_NE(failure->message.find("file capabilities"), std::string::npos);
     EXPECT_NE(failure->message.find("restart"), std::string::npos);
+#else
+    EXPECT_NE(failure->message.find("no output-pinned KWin capture support"), std::string::npos);
+    EXPECT_EQ(virtual_display::host_stream_permission_count_for_tests(), 0);
+#endif
   }
 }
 
