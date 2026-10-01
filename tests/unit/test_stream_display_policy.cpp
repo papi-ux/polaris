@@ -2582,6 +2582,7 @@ TEST(StreamDisplayPolicyTests, ARequestUnderSteamGameModeNamesDesktopDiscoveryUn
   EXPECT_EQ(capture_request_override_reason("wlr", "", "desktop_display", false, false), "");
 }
 
+#ifdef POLARIS_BUILD_PORTAL
 namespace portal {
   platf::capture_route_t portal_capture_route_for_tests(std::string_view gamescope, std::string_view kwin);
 }
@@ -2628,6 +2629,8 @@ TEST(StreamDisplayPolicyTests, AModeRewriteAndARouteFallbackReachTheSessionsPubl
   EXPECT_EQ(json["capture_mode_override_reason"], "gamescope_session");
   EXPECT_EQ(json["capture_route_fallback_reason"], "gamescope_node_missing");
 }
+
+#endif // POLARIS_BUILD_PORTAL
 
 TEST(StreamDisplayPolicyTests, ASessionTakesPolarisConfAndTheRuleItsOwnGenerationMet) {
   LinuxDisplayPolicyGuard guard;
