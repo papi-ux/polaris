@@ -4,6 +4,8 @@
  */
 // standard includes
 #include <array>
+#include <bit>
+#include <limits>
 #include <fcntl.h>
 #include <filesystem>
 #include <limits.h>
@@ -971,11 +973,102 @@ namespace egl {
     return make(in_width, in_height, out_width, out_height, std::move(tex));
   }
 
-  void sws_t::load_ram(platf::img_t &img) {
-    loaded_texture = tex[0];
+  int sws_t::load_ram(platf::img_t &img) {
+    loaded_texture = 0;
+    // The conversion samples the entire allocated input texture. A partial or
+    // oversized frame would retain old pixels or write outside that allocation.
+    if (!img.data || img.width <= 0 || img.height <= 0 ||
+        img.width != in_width || img.height != in_height ||
+        tex.size() == 0 || tex[0] == 0 || img.pixel_pitch != 4 ||
+        img.width > std::numeric_limits<int>::max() / 4 ||
+        img.row_pitch < img.width * 4) {
+      BOOST_LOG(error) << "EGL RAM upload: invalid frame dimensions, texture or stride"sv;
+      return -1;
+    }
+    const auto row_pitch = static_cast<std::size_t>(img.row_pitch);
+    const auto last_row = static_cast<std::size_t>(img.height - 1);
+    const auto width_bytes = static_cast<std::size_t>(img.width) * 4;
+    const auto pointer_limit = static_cast<std::size_t>(std::numeric_limits<std::ptrdiff_t>::max());
+    if (last_row > (pointer_limit - width_bytes) / row_pitch) {
+      BOOST_LOG(error) << "EGL RAM upload: frame byte range overflows pointer arithmetic"sv;
+      return -1;
+    }
 
-    gl::ctx.BindTexture(GL_TEXTURE_2D, loaded_texture);
-    gl::ctx.TexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, img.width, img.height, GL_BGRA, GL_UNSIGNED_BYTE, img.data);
+    GLenum format = GL_BGRA;
+    GLenum type = GL_UNSIGNED_BYTE;
+    bool little_endian_words = false;
+    switch (img.frame_metadata.ram_pixel_layout) {
+      case platf::ram_pixel_layout_e::unspecified:
+        // Existing legacy producers and the synthetic black primer are BGRA8.
+        break;
+      case platf::ram_pixel_layout_e::bgra8:
+        if (img.frame_metadata.format != platf::frame_format_e::bgra8) {
+          BOOST_LOG(error) << "EGL RAM upload: contradictory BGRA8 provenance"sv;
+          return platf::convert_capture_unreadable;
+        }
+        break;
+      case platf::ram_pixel_layout_e::xbgr2101010_le:
+      case platf::ram_pixel_layout_e::xrgb2101010_le:
+        if (img.frame_metadata.format != platf::frame_format_e::p010 ||
+            img.frame_metadata.transport != platf::frame_transport_e::shm ||
+            img.frame_metadata.residency != platf::frame_residency_e::cpu) {
+          BOOST_LOG(error) << "EGL RAM upload: contradictory packed RGB10 provenance"sv;
+          return platf::convert_capture_unreadable;
+        }
+        // LE xBGR is X2:B10:G10:R10; xRGB is X2:R10:G10:B10.
+        // REV consumes the low ten bits as the first component.
+        format = img.frame_metadata.ram_pixel_layout == platf::ram_pixel_layout_e::xbgr2101010_le ? GL_RGBA : GL_BGRA;
+        type = GL_UNSIGNED_INT_2_10_10_10_REV;
+        little_endian_words = true;
+        break;
+      default:
+        BOOST_LOG(error) << "EGL RAM upload: unsupported CPU pixel layout"sv;
+        return platf::convert_capture_unreadable;
+    }
+
+    // This is a CPU pointer even if another user left a PBO or skip offsets
+    // bound in this context. Restore every modified unpack field on all exits.
+    constexpr std::array<GLenum, 5> unpack_fields {
+      GL_UNPACK_ROW_LENGTH, GL_UNPACK_ALIGNMENT, GL_UNPACK_SWAP_BYTES,
+      GL_UNPACK_SKIP_ROWS, GL_UNPACK_SKIP_PIXELS
+    };
+    std::array<GLint, unpack_fields.size()> previous_unpack {};
+    for (std::size_t i = 0; i < unpack_fields.size(); ++i) {
+      gl::ctx.GetIntegerv(unpack_fields[i], &previous_unpack[i]);
+    }
+    GLint previous_pbo;
+    gl::ctx.GetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &previous_pbo);
+    auto restore_unpack = util::fail_guard([&] {
+      for (std::size_t i = 0; i < unpack_fields.size(); ++i) {
+        gl::ctx.PixelStorei(unpack_fields[i], previous_unpack[i]);
+      }
+      gl::ctx.BindBuffer(GL_PIXEL_UNPACK_BUFFER, static_cast<GLuint>(previous_pbo));
+    });
+    gl::ctx.BindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    gl::ctx.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    gl::ctx.PixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+    gl::ctx.PixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    gl::ctx.PixelStorei(GL_UNPACK_SWAP_BYTES, little_endian_words && std::endian::native == std::endian::big);
+    gl::ctx.BindTexture(GL_TEXTURE_2D, tex[0]);
+    if (row_pitch % 4 == 0) {
+      gl::ctx.PixelStorei(GL_UNPACK_ROW_LENGTH, img.row_pitch / 4);
+      gl::ctx.TexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, img.width, img.height, format, type, img.data);
+    } else {
+      // Arbitrary byte padding cannot be represented by GL's pixel row length.
+      gl::ctx.PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+      for (int row = 0; row < img.height; ++row) {
+        gl::ctx.TexSubImage2D(GL_TEXTURE_2D, 0, 0, row, img.width, 1, format, type,
+                             img.data + static_cast<std::size_t>(row) * row_pitch);
+        if (gl::drain_errors("RAM row upload"sv)) {
+          return -1;
+        }
+      }
+    }
+    if (gl::drain_errors("RAM upload"sv)) {
+      return -1;
+    }
+    loaded_texture = tex[0];
+    return 0;
   }
 
   void sws_t::load_vram(img_descriptor_t &img, int offset_x, int offset_y, int texture) {

@@ -323,7 +323,8 @@ namespace egl {
     // Make an area of the image black
     int blank(gl::frame_buf_t &fb, int offsetX, int offsetY, int width, int height);
 
-    void load_ram(platf::img_t &img);
+    // Returns zero only after a valid CPU frame has been uploaded.
+    int load_ram(platf::img_t &img);
     void load_vram(img_descriptor_t &img, int offset_x, int offset_y, int texture);
 
     void apply_colorspace(const video::sunshine_colorspace_t &colorspace);
