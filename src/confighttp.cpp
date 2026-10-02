@@ -6380,6 +6380,13 @@ namespace confighttp {
     response->write(content, headers);
   }
 
+#ifdef POLARIS_TESTS
+  namespace {
+    // Pause the actual upstream calls after their normal route validation in HTTPS tests.
+    std::function<std::optional<long>(const std::string &, const std::string &, std::string &)> cover_key_check_override;
+    std::function<bool(const std::string &, const std::string &)> cover_download_override;
+  }
+#endif
   /**
    * @brief One SteamGridDB autocomplete request with the given key.
    * @return The upstream HTTP status, or nothing when the request itself failed.
@@ -6459,7 +6466,13 @@ namespace confighttp {
     }
 
     std::string search_response;
+#ifdef POLARIS_TESTS
+    const auto upstream = cover_key_check_override
+      ? cover_key_check_override(api_key, "Portal", search_response)
+      : steamgriddb_autocomplete(api_key, "Portal", search_response);
+#else
     const auto upstream = steamgriddb_autocomplete(api_key, "Portal", search_response);
+#endif
     if (!upstream || *upstream < 200 || *upstream >= 300) {
       answer_failure(game_artwork::manual::classify_search_failure(true, upstream));
       return;
@@ -7243,7 +7256,13 @@ namespace confighttp {
       return;
     }
     // A poster from a game's list previews as a thumbnail; the cover is the full image behind it.
+#ifdef POLARIS_TESTS
+    const auto picked = game_artwork::manual::cover_image_for_pick(*preview,
+      cover_apply_transport_override ? cover_apply_transport_override
+                                     : nvhttp::artwork_transport(config::steamgriddb_api_key()));
+#else
     const auto picked = game_artwork::manual::cover_image_for_pick(*preview, nvhttp::artwork_transport(config::steamgriddb_api_key()));
+#endif
     if (!picked.image) {
       send_cover_failure(response, picked.failure.value_or(game_artwork::manual::classify_search_failure(true, std::nullopt)));
       return;
@@ -7322,7 +7341,14 @@ namespace confighttp {
       file_handler::make_directory(coverdir);
       std::string cover_path = coverdir + http::url_escape(app_entry->uuid) + safe_cover_extension_from_url(url);
 
+#ifdef POLARIS_TESTS
+      const bool downloaded = cover_download_override
+        ? cover_download_override(url, cover_path)
+        : http::download_file(url, cover_path, cover_download_url_allowed);
+      if (!downloaded) {
+#else
       if (!http::download_file(url, cover_path, cover_download_url_allowed)) {
+#endif
         output["status"] = false;
         output["error"] = "Failed to download cover";
         send_response(response, output);
@@ -10534,6 +10560,26 @@ namespace confighttp {
     std::string_view request_path
   ) {
     return getVerifiedClientCert(candidate, request_path) != nullptr;
+  }
+
+  void register_cover_actions_for_tests(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &server,
+                                       cover_lookup::workers_t &workers) {
+    // Same handlers and CSRF wrappers as normal registration; baseline calls remain inline.
+    // The owner is explicit for later offload tests, but this checkpoint does not submit work.
+    (void)workers;
+    server.resource["^/api/covers/select$"]["POST"] = withCsrf(selectCover);
+    server.resource["^/api/covers/apply-missing$"]["POST"] = withCsrf(applyMissingCover);
+    server.resource["^/api/covers/key/check$"]["POST"] = withCsrf(checkCoversKey);
+    server.resource["^/api/covers/download$"]["POST"] = withCsrf(downloadCover);
+    server.resource["^/api/covers/sweep$"]["POST"] = withCsrf(startCoverSweep);
+    server.resource["^/api/covers/sweep$"]["GET"] = getCoverSweep;
+  }
+
+  void set_cover_http_transports_for_tests(
+      std::function<std::optional<long>(const std::string &, const std::string &, std::string &)> key_check,
+      std::function<bool(const std::string &, const std::string &)> download) {
+    cover_key_check_override = std::move(key_check);
+    cover_download_override = std::move(download);
   }
 
   void apply_missing_cover_http_for_tests(resp_https_t response, req_https_t request) {
