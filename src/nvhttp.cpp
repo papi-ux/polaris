@@ -3260,9 +3260,10 @@ namespace nvhttp {
       const std::optional<pyrowave_availability::unavailable_t> &pyrowave_unavailable,
       bool allow_deferred_headless_prime
     ) {
-      // Behavior-preserving extraction of the paired route for the failing regression.
-      (void) allow_deferred_headless_prime;
-      put_capture_codecs(capture, config::video.hevc_mode, config::video.av1_mode, pyrowave_unavailable);
+      // Configured Auto is zero, not the encoder's resolved availability. Use the
+      // same synchronized, topology-aware snapshot as the authenticated serverinfo.
+      const auto codecs = advertised_codec_support_for_http(allow_deferred_headless_prime);
+      put_capture_codecs(capture, codecs.hevc_mode, codecs.av1_mode, pyrowave_unavailable);
     }
 
     std::optional<int> topology_max_launch_refresh_rate_for_http(
