@@ -32,6 +32,8 @@
 // lib includes
 #include <boost/algorithm/string.hpp>
 #include <boost/asio/ssl/context.hpp>
+#include <boost/asio/post.hpp>
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/filesystem.hpp>
 #include <nlohmann/json.hpp>
 #include <Simple-Web-Server/crypto.hpp>
@@ -6380,11 +6382,100 @@ namespace confighttp {
     response->write(content, headers);
   }
 
+  namespace {
+    using cover_post_t = std::function<void(std::function<void()>)>;
+    using cover_work_t = std::function<std::function<void()>(const std::shared_ptr<cover_lookup::completion_t> &)>;
+    struct cover_reply_t {
+      resp_https_t response;
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      void operator()(const nlohmann::json &body) const { response->write(body.dump(), headers); }
+      void operator()(SimpleWeb::StatusCode code, const nlohmann::json &body) const { response->write(code, body.dump(), headers); }
+    };
+#ifdef POLARIS_TESTS
+    cover_post_t cover_post_override;
+    std::function<void()> cover_commit_observer;
+#endif
+    SimpleWeb::CaseInsensitiveMultimap cover_headers() {
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
+      return headers;
+    }
+    cover_post_t cover_post_for(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &server) {
+#ifdef POLARIS_TESTS
+      if (cover_post_override) return cover_post_override;
+#endif
+      // Snapshot on the HTTP thread after start; never read the server from a worker.
+      const std::weak_ptr executor {server.io_service};
+      return [executor](std::function<void()> completion) {
+        auto io = executor.lock();
+        if (!io) throw std::runtime_error("Cover executor unavailable");
+        boost::asio::post(*io, std::move(completion));
+      };
+    }
+    void submit_cover_action(resp_https_t response, req_https_t request,
+                             cover_lookup::workers_t &workers, cover_post_t post,
+                             cover_work_t work, std::function<void()> failure) {
+      const auto headers = cover_headers();
+#ifdef POLARIS_TESTS
+      const auto observer = cover_commit_observer;
+#else
+      const std::function<void()> observer;
+#endif
+      try {
+        const auto admitted = workers.submit_completion(
+          [response, request, post = std::move(post), work = std::move(work), failure, observer](const auto &ticket) {
+            std::function<void()> commit;
+            try { commit = work(ticket); } catch (...) { commit = failure; }
+            ticket->handoff([response, request, commit = std::move(commit), failure, observer] {
+              // Revocation and commit share the actual credential lifecycle lease.
+              // CSRF exceptions stay identical to the registered mutation wrapper.
+              if (observer) observer();
+              std::lock_guard credential_lock {s_credential_lifecycle_mutex};
+              withCsrf([&](resp_https_t, req_https_t) {
+                if (authenticate(response, request)) {
+                  try { commit(); } catch (...) { failure(); }
+                }
+              })(response, request);
+            }, post);
+          });
+        if (admitted != cover_lookup::admission_e::accepted) {
+          const bool stopping = admitted == cover_lookup::admission_e::stopping;
+          response->write(SimpleWeb::StatusCode::server_error_service_unavailable,
+            nlohmann::json {{"status", false}, {"code", stopping ? "cover_lookup_stopping" : "cover_lookup_busy"},
+              {"error", stopping ? "The host is shutting down. Try again after it restarts." :
+                                  "Two cover lookups are already running. Try again shortly."}}.dump(), headers);
+        }
+      } catch (...) { failure(); }
+    }
+  }
+
+#ifdef POLARIS_TESTS
+  namespace {
+    // Pause the actual upstream calls after their normal route validation in HTTPS tests.
+    std::function<std::optional<long>(const std::string &, const std::string &, std::string &)> cover_key_check_override;
+    std::function<bool(const std::string &, const std::string &)> cover_download_override;
+  }
+#endif
+  namespace {
+    // Autocomplete is a provider listing, not the small incoming choice JSON.
+    // The tests call this same callback; no transport override bypasses its bound.
+    std::size_t append_cover_listing(char *bytes, std::size_t size, std::size_t count, void *context) {
+      auto &body = *static_cast<std::string *>(context);
+      constexpr auto limit = game_artwork::manual::maximum_listing_bytes;
+      if (size && count > limit / size) return 0;
+      const auto length = size * count;
+      if (body.size() > limit || length > limit - body.size()) return 0;
+      if (length) body.append(bytes, length);
+      return length;
+    }
+  }
+
   /**
    * @brief One SteamGridDB autocomplete request with the given key.
    * @return The upstream HTTP status, or nothing when the request itself failed.
    */
-  static std::optional<long> steamgriddb_autocomplete(const std::string &api_key, const std::string &game_name, std::string &search_response) {
+  static std::optional<long> steamgriddb_autocomplete(const std::string &api_key, const std::string &game_name, std::string &search_response,
+                                                      const std::shared_ptr<cover_lookup::completion_t> &ticket) {
     CURL *curl = curl_easy_init();
     if (!curl) {
       return std::nullopt;
@@ -6392,10 +6483,16 @@ namespace confighttp {
     const std::string search_url = "https://www.steamgriddb.com/api/v2/search/autocomplete/" + http::url_escape(game_name);
     struct curl_slist *headers = curl_slist_append(nullptr, ("Authorization: Bearer " + api_key).c_str());
     curl_easy_setopt(curl, CURLOPT_URL, search_url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_string_curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_cover_listing);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &search_response);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
+    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, +[](void *context, curl_off_t, curl_off_t, curl_off_t, curl_off_t) -> int {
+      return static_cast<cover_lookup::completion_t *>(context)->cancelled() ? 1 : 0;
+    });
+    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, ticket.get());
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Polaris/1.0");
     const CURLcode res = curl_easy_perform(curl);
     long status = 0;
@@ -6420,7 +6517,7 @@ namespace confighttp {
    *
    * @api_examples{/api/covers/key/check| POST| {"steamgriddb_api_key":"..."}}
    */
-  void checkCoversKey(resp_https_t response, req_https_t request) {
+  void checkCoversKey(resp_https_t response, req_https_t request, cover_lookup::workers_t &workers, cover_post_t post) {
     if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
       return;
     }
@@ -6458,26 +6555,34 @@ namespace confighttp {
       return;
     }
 
-    std::string search_response;
-    const auto upstream = steamgriddb_autocomplete(api_key, "Portal", search_response);
-    if (!upstream || *upstream < 200 || *upstream >= 300) {
-      answer_failure(game_artwork::manual::classify_search_failure(true, upstream));
-      return;
-    }
-
-    std::size_t matches = 0;
-    try {
-      const auto search_data = nlohmann::json::parse(search_response);
-      if (search_data.contains("data") && search_data["data"].is_array()) {
-        matches = search_data["data"].size();
-      }
-    } catch (const std::exception &) {
-      matches = 0;
-    }
-    output["status"] = true;
-    output["code"] = "steamgriddb_ok";
-    output["matches"] = matches;
-    send_response(response, output);
+    const auto headers = cover_headers();
+#ifdef POLARIS_TESTS
+    const auto key_override = cover_key_check_override;
+#else
+    const std::function<std::optional<long>(const std::string &, const std::string &, std::string &)> key_override;
+#endif
+    submit_cover_action(response, request, workers, std::move(post),
+      [response, headers, api_key, key_override](const auto &ticket) -> std::function<void()> {
+        std::string search_response;
+        const auto upstream = key_override ? key_override(api_key, "Portal", search_response)
+          : steamgriddb_autocomplete(api_key, "Portal", search_response, ticket);
+        nlohmann::json output;
+        if (!upstream || *upstream < 200 || *upstream >= 300) {
+          const auto failure = game_artwork::manual::classify_search_failure(true, upstream);
+          output = {{"status", false}, {"code", failure.code}, {"error", failure.message}};
+        } else {
+          std::size_t matches = 0;
+          try {
+            const auto data = nlohmann::json::parse(search_response);
+            if (data.contains("data") && data["data"].is_array()) matches = data["data"].size();
+          } catch (...) { }
+          output = {{"status", true}, {"code", "steamgriddb_ok"}, {"matches", matches}};
+        }
+        return [response, headers, output] { response->write(output.dump(), headers); };
+      }, [response, headers] {
+        const auto failure = game_artwork::manual::classify_search_failure(true, std::nullopt);
+        response->write(nlohmann::json {{"status", false}, {"code", failure.code}, {"error", failure.message}}.dump(), headers);
+      });
   }
 
   namespace {
@@ -7076,7 +7181,7 @@ namespace confighttp {
   }
 
   /** Store a proposed cover only while its run and the freshly read blank entry still agree. */
-  void applyMissingCover(resp_https_t response, req_https_t request) {
+  void applyMissingCover(resp_https_t response, req_https_t request, cover_lookup::workers_t &workers, cover_post_t post) {
     if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) return;
     print_req(request);
     std::string uuid, token, run_id, expected_name;
@@ -7123,86 +7228,95 @@ namespace confighttp {
     if (cover_apply_transport_override) transport = cover_apply_transport_override;
     if (cover_apply_appdata_override) appdata = *cover_apply_appdata_override;
 #endif
-    // Download without either library lock. The entry and cancellation are checked again below.
-    const auto picked = game_artwork::manual::cover_image_for_pick(*preview, transport);
-    if (!picked.image) {
-      send_cover_failure(response, picked.failure.value_or(game_artwork::manual::classify_search_failure(true, std::nullopt)));
-      return;
-    }
-
-    try {
-      std::scoped_lock apply_lock(cover_apply_mutex());
-      std::scoped_lock apps_lock(apps_file_mutex());
-      if (!cover_proposal_matches(run_id, uuid, expected_name, provider_game_id)) {
-        skipped();
-        return;
-      }
-      std::string path;
-      private_state_file::write_result_t saved;
-      {
-        // Remove artwork and Artwork Studio commits take the exclusive side of this same gate.
-        auto artwork_lock = game_artwork::acquire_artwork_override_read_lock();
-        auto tree = nlohmann::json::parse(file_handler::read_file(config::stream.file_apps.c_str()));
-        if (!tree.contains("apps") || !tree["apps"].is_array()) {
-          skipped();
-          return;
-        }
-        auto &apps = tree["apps"];
-        const auto is_target = [&](const auto &entry) {
-          return entry.is_object() && entry.value("uuid", std::string {}) == uuid;
+    const auto apps_file = config::stream.file_apps;
+    const auto headers = cover_headers();
+    submit_cover_action(response, request, workers, std::move(post),
+      [response, headers, preview = *preview, transport, appdata, apps_file, uuid, token, run_id, expected_name](const auto &) -> std::function<void()> {
+        const auto picked = game_artwork::manual::cover_image_for_pick(preview, transport);
+        return [response, headers, picked, appdata, apps_file, uuid, run_id, expected_name, provider_game_id = preview.choice->provider_game_id] {
+          const cover_reply_t reply {response, headers};
+          const auto skipped = [&] { reply({{"status", true}, {"skipped", true},
+            {"message", "The entry or cover search changed; its artwork was kept."}}); };
+          if (!picked.image) {
+            send_cover_failure(response, picked.failure.value_or(game_artwork::manual::classify_search_failure(true, std::nullopt)), {}, headers);
+            return;
+          }
+          try {
+            if (config::stream.file_apps != apps_file) { skipped(); return; }
+            std::scoped_lock apply_lock(cover_apply_mutex());
+            std::scoped_lock apps_lock(apps_file_mutex());
+            if (!cover_proposal_matches(run_id, uuid, expected_name, provider_game_id)) {
+              skipped();
+              return;
+            }
+            std::string path;
+            private_state_file::write_result_t saved;
+            {
+              // Remove artwork and Artwork Studio commits take the exclusive side of this same gate.
+              auto artwork_lock = game_artwork::acquire_artwork_override_read_lock();
+              auto tree = nlohmann::json::parse(file_handler::read_file(apps_file.c_str()));
+              if (!tree.contains("apps") || !tree["apps"].is_array()) {
+                skipped();
+                return;
+              }
+              auto &apps = tree["apps"];
+              const auto is_target = [&](const auto &entry) {
+                return entry.is_object() && entry.value("uuid", std::string {}) == uuid;
+              };
+              if (std::count_if(apps.begin(), apps.end(), is_target) != 1) {
+                skipped();
+                return;
+              }
+              auto entry = std::find_if(apps.begin(), apps.end(), is_target);
+              auto hydrated = tree;
+              hydrate_lutris_app_images(hydrated);
+              const auto &images = hydrated["apps"];
+              const auto image = std::find_if(images.begin(), images.end(), is_target);
+              // Even a presently unreadable explicit image is a player's choice. Automatic import
+              // covers fill empty paths only; the normal review can replace a broken path deliberately.
+              if (entry->value("name", std::string {}) != expected_name ||
+                  !entry->value("image-path", std::string {}).empty() ||
+                  (image != images.end() && !image->value("image-path", std::string {}).empty()) ||
+                  !game_artwork::automatic_artwork_lookup_enabled(appdata, uuid) ||
+                  game_artwork::load_artwork_override(appdata, uuid)) {
+                skipped();
+                return;
+              }
+              // A distinct directory cannot overwrite a manual pick that has not yet been saved.
+              const auto coverdir = appdata / "covers" / "automatic" / crypto::rand_alphabet(32, "0123456789abcdef");
+              const auto stored = store_selected_cover(coverdir, uuid, picked.image->mime_type, picked.image->body, {});
+              if (!stored) {
+                reply(SimpleWeb::StatusCode::server_error_internal_server_error,
+                              {{"status", false}, {"error", "The cover could not be saved on the host."}});
+                return;
+              }
+              path = *stored;
+              (*entry)["image-path"] = path;
+              saved = private_state_file::write_atomic(apps_file, tree.dump(4));
+              if (saved.status == private_state_file::write_status_e::not_committed) {
+                std::error_code ignored;
+                fs::remove_all(coverdir, ignored);
+                reply(SimpleWeb::StatusCode::server_error_internal_server_error,
+                              {{"status", false}, {"error", "The library could not be saved. Its existing entries were kept."}});
+                return;
+              }
+            }
+            // Release the artwork gate before refresh, whose artwork readers may acquire it again.
+            // Artwork changes do not change launch behavior and must not terminate a running game.
+            proc::refresh(apps_file, false);
+            if (!saved) {
+              // Rename succeeded but persistence could not be confirmed. Keep the now-referenced image.
+              reply(SimpleWeb::StatusCode::server_error_internal_server_error,
+                            {{"status", false}, {"error", "The cover was written, but saving it durably could not be confirmed."}});
+              return;
+            }
+            reply({{"status", true}, {"path", path}});
+          } catch (const std::exception &) {
+            reply(SimpleWeb::StatusCode::server_error_internal_server_error,
+                          {{"status", false}, {"error", "The cover could not be saved. Refresh the library and try again."}});
+          }
         };
-        if (std::count_if(apps.begin(), apps.end(), is_target) != 1) {
-          skipped();
-          return;
-        }
-        auto entry = std::find_if(apps.begin(), apps.end(), is_target);
-        auto hydrated = tree;
-        hydrate_lutris_app_images(hydrated);
-        const auto &images = hydrated["apps"];
-        const auto image = std::find_if(images.begin(), images.end(), is_target);
-        // Even a presently unreadable explicit image is a player's choice. Automatic import
-        // covers fill empty paths only; the normal review can replace a broken path deliberately.
-        if (entry->value("name", std::string {}) != expected_name ||
-            !entry->value("image-path", std::string {}).empty() ||
-            (image != images.end() && !image->value("image-path", std::string {}).empty()) ||
-            !game_artwork::automatic_artwork_lookup_enabled(appdata, uuid) ||
-            game_artwork::load_artwork_override(appdata, uuid)) {
-          skipped();
-          return;
-        }
-        // A distinct directory cannot overwrite a manual pick that has not yet been saved.
-        const auto coverdir = appdata / "covers" / "automatic" / crypto::rand_alphabet(32, "0123456789abcdef");
-        const auto stored = store_selected_cover(coverdir, uuid, picked.image->mime_type, picked.image->body, {});
-        if (!stored) {
-          send_response(response, SimpleWeb::StatusCode::server_error_internal_server_error,
-                        {{"status", false}, {"error", "The cover could not be saved on the host."}});
-          return;
-        }
-        path = *stored;
-        (*entry)["image-path"] = path;
-        saved = private_state_file::write_atomic(config::stream.file_apps, tree.dump(4));
-        if (saved.status == private_state_file::write_status_e::not_committed) {
-          std::error_code ignored;
-          fs::remove_all(coverdir, ignored);
-          send_response(response, SimpleWeb::StatusCode::server_error_internal_server_error,
-                        {{"status", false}, {"error", "The library could not be saved. Its existing entries were kept."}});
-          return;
-        }
-      }
-      // Release the artwork gate before refresh, whose artwork readers may acquire it again.
-      // Artwork changes do not change launch behavior and must not terminate a running game.
-      proc::refresh(config::stream.file_apps, false);
-      if (!saved) {
-        // Rename succeeded but persistence could not be confirmed. Keep the now-referenced image.
-        send_response(response, SimpleWeb::StatusCode::server_error_internal_server_error,
-                      {{"status", false}, {"error", "The cover was written, but saving it durably could not be confirmed."}});
-        return;
-      }
-      send_response(response, {{"status", true}, {"path", path}});
-    } catch (const std::exception &) {
-      send_response(response, SimpleWeb::StatusCode::server_error_internal_server_error,
-                    {{"status", false}, {"error", "The cover could not be saved. Refresh the library and try again."}});
-    }
+      }, [response, headers] { send_cover_failure(response, game_artwork::manual::classify_search_failure(true, std::nullopt), {}, headers); });
   }
 
   /**
@@ -7210,7 +7324,7 @@ namespace confighttp {
    * A cached choice supplies its allowlisted full image. The returned path becomes the entry's
    * cover when the caller saves it.
    */
-  void selectCover(resp_https_t response, req_https_t request) {
+  void selectCover(resp_https_t response, req_https_t request, cover_lookup::workers_t &workers, cover_post_t post) {
     if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) return;
     print_req(request);
 
@@ -7242,29 +7356,206 @@ namespace confighttp {
       send_response(response, SimpleWeb::StatusCode::client_error_gone, output);
       return;
     }
-    // A poster from a game's list previews as a thumbnail; the cover is the full image behind it.
-    const auto picked = game_artwork::manual::cover_image_for_pick(*preview, nvhttp::artwork_transport(config::steamgriddb_api_key()));
-    if (!picked.image) {
-      send_cover_failure(response, picked.failure.value_or(game_artwork::manual::classify_search_failure(true, std::nullopt)));
-      return;
+    const auto headers = cover_headers();
+    auto appdata = platf::appdata();
+#ifdef POLARIS_TESTS
+    if (cover_apply_appdata_override) appdata = *cover_apply_appdata_override;
+#endif
+    const auto override_before = game_artwork::load_artwork_override(appdata, uuid);
+    const auto apps_file = config::stream.file_apps;
+    std::optional<std::pair<std::string, std::string>> entry_before;
+    for (const auto &app : proc::proc.get_apps()) if (app.uuid == uuid) entry_before = std::pair {app.name, app.image_path};
+    auto transport = nvhttp::artwork_transport(config::steamgriddb_api_key());
+#ifdef POLARIS_TESTS
+    if (cover_apply_transport_override) transport = cover_apply_transport_override;
+#endif
+    submit_cover_action(response, request, workers, std::move(post),
+      [response, headers, preview = *preview, transport, appdata, apps_file, uuid, entry_before, override_before](const auto &) -> std::function<void()> {
+        const auto picked = game_artwork::manual::cover_image_for_pick(preview, transport);
+        return [response, headers, picked, appdata, apps_file, uuid, entry_before, override_before] {
+          if (!picked.image) {
+            send_cover_failure(response, picked.failure.value_or(game_artwork::manual::classify_search_failure(true, std::nullopt)), {}, headers); return;
+          }
+          std::optional<std::pair<std::string, std::string>> current;
+          for (const auto &app : proc::proc.get_apps()) if (app.uuid == uuid) current = std::pair {app.name, app.image_path};
+          auto artwork_lock = game_artwork::acquire_artwork_override_read_lock();
+          if (current != entry_before || config::stream.file_apps != apps_file ||
+              game_artwork::load_artwork_override(appdata, uuid) != override_before) {
+            response->write(SimpleWeb::StatusCode::client_error_conflict,
+              nlohmann::json {{"status", false}, {"code", "cover_entry_changed"}, {"error", "The entry changed; its artwork was kept. Search again."}}.dump(), headers); return;
+          }
+          const auto path = store_selected_cover(appdata / "covers", uuid, picked.image->mime_type,
+                                                picked.image->body, current ? fs::path(current->second) : fs::path {});
+          if (!path) {
+            response->write(SimpleWeb::StatusCode::server_error_internal_server_error,
+              nlohmann::json {{"status", false}, {"code", "cover_not_saved"}, {"error", "The cover could not be saved on the host."}}.dump(), headers); return;
+          }
+          response->write(nlohmann::json {{"status", true}, {"path", *path}}.dump(), headers);
+        };
+      }, [response, headers] { send_cover_failure(response, game_artwork::manual::classify_search_failure(true, std::nullopt), {}, headers); });
+  }
+
+  namespace {
+#ifdef POLARIS_TESTS
+    std::string cover_publication_fault;
+#endif
+    bool cover_fault([[maybe_unused]] const char *step) {
+#ifdef POLARIS_TESTS
+      return cover_publication_fault == step;
+#else
+      return false;
+#endif
     }
-    // The cover the entry names today survives a pick the player does not save.
-    std::filesystem::path keep;
-    for (const auto &app : proc::proc.get_apps()) {
-      if (app.uuid == uuid) {
-        keep = app.image_path;
-        break;
+    // Only this cover operation owns this unpredictable directory. Cancellation
+    // destroys it even when the server never executes its queued completion.
+    struct cover_stage_t {
+      fs::path directory, image;
+      bool owns = false, retain = false;
+      cover_stage_t(fs::path parent, const std::string &filename, const std::string &nonce) {
+        fs::create_directories(parent);
+        directory = parent / (".download-" + nonce);
+        if (!fs::create_directory(directory)) throw std::runtime_error("Cover staging unavailable");
+        owns = true;
+        std::error_code fs_error;
+        fs::permissions(directory, fs::perms::owner_all, fs_error);
+        if (fs_error) {
+          std::error_code cleanup_error;
+          fs::remove_all(directory, cleanup_error);
+          if (cleanup_error) BOOST_LOG(error) << "Cover staging directory retained: " << directory;
+          throw std::runtime_error("Cover staging permissions unavailable");
+        }
+        image = directory / filename;
       }
+      bool cleanup() {
+        if (!owns || retain) return !retain;
+        std::error_code fs_error;
+        if (cover_fault("cleanup")) fs_error = std::make_error_code(std::errc::permission_denied);
+        else fs::remove_all(directory, fs_error);
+        if (fs_error) { retain = true; return false; }
+        owns = false;
+        return true;
+      }
+      ~cover_stage_t() {
+        // Cleanup faults are inspected on the HTTP thread; workers never read
+        // this test/global setting. Ordinary destructor cleanup is ownership-only.
+        if (!owns || retain) return;
+        std::error_code fs_error;
+        fs::remove_all(directory, fs_error);
+        if (fs_error) BOOST_LOG(warning) << "An owned cover staging directory needs cleanup";
+      }
+    };
+
+    bool download_cover_staged(const std::string &url, const fs::path &path,
+                               const std::shared_ptr<cover_lookup::completion_t> &ticket) {
+      if (!cover_download_url_allowed(url) || ticket->cancelled()) return false;
+      auto *curl = curl_easy_init();
+      if (!curl) return false;
+      auto cleanup = util::fail_guard([&] { curl_easy_cleanup(curl); });
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds {12};
+      struct sink_t { std::ofstream *file; std::size_t bytes; };
+      curl_easy_setopt(curl, CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+      curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+      curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+      curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+      curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+      curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+      curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, +[](void *context, curl_off_t, curl_off_t, curl_off_t, curl_off_t) -> int {
+        return static_cast<cover_lookup::completion_t *>(context)->cancelled() ? 1 : 0;
+      });
+      curl_easy_setopt(curl, CURLOPT_XFERINFODATA, ticket.get());
+#if LIBCURL_VERSION_NUM >= 0x075500
+      curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
+#else
+      curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
+#endif
+      curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +[](char *bytes, std::size_t size, std::size_t count, void *context) -> std::size_t {
+        auto &sink = *static_cast<sink_t *>(context);
+        if (size && count > game_artwork::maximum_asset_bytes / size) return 0;
+        const auto length = size * count;
+        if (length > game_artwork::maximum_asset_bytes - sink.bytes) return 0;
+        sink.file->write(bytes, static_cast<std::streamsize>(length));
+        if (!*sink.file) return 0;
+        sink.bytes += length;
+        return length;
+      });
+      return http::redirect::follow(url, cover_download_url_allowed, [&](const std::string &target) {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+        if (remaining <= 0 || ticket->cancelled()) return http::redirect::hop_result_t {false, 0, std::nullopt};
+        std::ofstream output(path, std::ios::binary | std::ios::trunc);
+        if (!output) return http::redirect::hop_result_t {false, 0, std::nullopt};
+        sink_t sink {&output, 0};
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(remaining));
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, static_cast<long>(std::min<std::int64_t>(3000, remaining)));
+        curl_easy_setopt(curl, CURLOPT_URL, target.c_str());
+        const auto code = curl_easy_perform(curl);
+        output.flush();
+        long status = 0;
+        char *redirect = nullptr;
+        if (code == CURLE_OK) {
+          curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+          curl_easy_getinfo(curl, CURLINFO_REDIRECT_URL, &redirect);
+        }
+        return http::redirect::hop_result_t {code == CURLE_OK && static_cast<bool>(output), status,
+          redirect && *redirect ? std::optional<std::string> {redirect} : std::nullopt};
+      });
     }
-    const auto path = store_selected_cover(
-      platf::appdata() / "covers", uuid, picked.image->mime_type, picked.image->body, keep);
-    if (!path) {
-      nlohmann::json output {{"status", false}, {"code", "cover_not_saved"}, {"error", "The cover could not be saved on the host."}};
-      send_response(response, SimpleWeb::StatusCode::server_error_internal_server_error, output);
-      return;
+
+    // Recoverable cover+library transaction, under the main executor's credential,
+    // apps and artwork leases. Never replay an old whole-library snapshot.
+    std::string publish_download_cover(const std::shared_ptr<cover_stage_t> &stage,
+                                      const fs::path &final, const std::string &apps_file,
+                                      const nlohmann::json &tree, bool &durability_uncertain) {
+      const auto backup = stage->directory / "previous-cover";
+      std::error_code fs_error;
+      const auto previous = fs::symlink_status(final, fs_error);
+      if (fs_error && fs_error != std::errc::no_such_file_or_directory) return "The existing cover could not be inspected.";
+      fs_error.clear();
+      const bool had_previous = fs::exists(previous);
+      if (had_previous) {
+        if (!fs::is_regular_file(previous)) return "The existing cover could not be backed up.";
+        if (cover_fault("backup")) fs_error = std::make_error_code(std::errc::permission_denied);
+        else fs::create_hard_link(final, backup, fs_error);
+        if (fs_error) return "The existing cover could not be backed up.";
+      }
+      const auto payload = tree.dump(4);
+      if (cover_fault("publish")) fs_error = std::make_error_code(std::errc::permission_denied);
+      else fs::rename(stage->image, final, fs_error);
+      if (fs_error) return "The cover could not be published.";
+#ifdef POLARIS_TESTS
+      if (cover_fault("save") || cover_fault("restore")) private_state_file::set_write_fault_for_tests(private_state_file::write_fault_e::short_write);
+      if (cover_fault("durability")) private_state_file::set_write_fault_for_tests(private_state_file::write_fault_e::post_rename_durability);
+      auto reset_fault = util::fail_guard([] { private_state_file::set_write_fault_for_tests(private_state_file::write_fault_e::none); });
+#endif
+      private_state_file::write_result_t saved;
+      try { saved = private_state_file::write_atomic(apps_file, payload); }
+      catch (...) {
+        // No blind library replay. If the new exact payload is visible, keep
+        // its image; otherwise retain the backup for explicit recovery.
+        bool visible = false;
+        try { visible = file_handler::read_file(apps_file.c_str()) == payload; } catch (...) { }
+        if (visible) {
+          durability_uncertain = true;
+          return {};
+        }
+        stage->retain = true;
+        BOOST_LOG(error) << "Cover recovery directory retained: " << stage->directory;
+        return "The library save could not be classified; its owned cover backup was kept for recovery.";
+      }
+      if (saved.status == private_state_file::write_status_e::not_committed) {
+        if (cover_fault("restore")) fs_error = std::make_error_code(std::errc::permission_denied);
+        else if (had_previous) fs::rename(backup, final, fs_error);
+        else fs::remove(final, fs_error);
+        if (fs_error) {
+          stage->retain = true;
+          BOOST_LOG(error) << "Cover recovery directory retained: " << stage->directory;
+          return "The cover could not be restored; its owned backup was kept for recovery.";
+        }
+        return "The library could not be saved. Its existing entries and cover were kept.";
+      }
+      durability_uncertain = saved.status == private_state_file::write_status_e::durability_uncertain;
+      return {};
     }
-    nlohmann::json output {{"status", true}, {"path", *path}};
-    send_response(response, output);
   }
 
   /**
@@ -7272,7 +7563,7 @@ namespace confighttp {
    *
    * @api_examples{/api/covers/download| POST| {"url":"https://...","app_uuid":"aaaa-bbbb"}}
    */
-  void downloadCover(resp_https_t response, req_https_t request) {
+  void downloadCover(resp_https_t response, req_https_t request, cover_lookup::workers_t &workers, cover_post_t post) {
     if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) return;
     print_req(request);
 
@@ -7318,44 +7609,98 @@ namespace confighttp {
         return;
       }
 
-      const std::string coverdir = platf::appdata().string() + "/covers/";
-      file_handler::make_directory(coverdir);
-      std::string cover_path = coverdir + http::url_escape(app_entry->uuid) + safe_cover_extension_from_url(url);
-
-      if (!http::download_file(url, cover_path, cover_download_url_allowed)) {
-        output["status"] = false;
-        output["error"] = "Failed to download cover";
-        send_response(response, output);
-        return;
-      }
-
-      // Update the app's image-path in apps.json
-      //
-      // Under the lock, like every other change to this file. This handler read, changed and wrote it
-      // without one, which was safe only because every other writer shared the one server thread. The
-      // emulator install job already did not, and the cover sweep does not either, so a download
-      // finishing at the same moment as a job would have lost one side's change.
-      std::scoped_lock apps_lock(apps_file_mutex());
-      std::string content = file_handler::read_file(config::stream.file_apps.c_str());
-      auto file_tree = nlohmann::json::parse(content);
-      if (file_tree.contains("apps") && file_tree["apps"].is_array()) {
-        for (auto &app : file_tree["apps"]) {
-          if (app.value("uuid", "") == app_uuid) {
-            app["image-path"] = cover_path;
-            break;
-          }
+      auto appdata = platf::appdata();
+#ifdef POLARIS_TESTS
+      if (cover_apply_appdata_override) appdata = *cover_apply_appdata_override;
+#endif
+      const auto apps_file = config::stream.file_apps;
+      const auto stored_uuid = app_entry->uuid;
+      const auto filename = http::url_escape(app_entry->uuid) + safe_cover_extension_from_url(url);
+      nlohmann::json entry_before;
+      {
+        std::scoped_lock apps_lock(apps_file_mutex());
+        const auto initial = nlohmann::json::parse(file_handler::read_file(apps_file.c_str()));
+        for (const auto &app : initial.at("apps")) if (app.value("uuid", "") == stored_uuid) {
+          if (!entry_before.is_null()) throw std::runtime_error("Ambiguous app_uuid");
+          entry_before = app;
         }
-        file_handler::write_file(config::stream.file_apps.c_str(), file_tree.dump(4));
-        proc::refresh(config::stream.file_apps);
       }
-
-      output["status"] = true;
-      output["path"] = cover_path;
+      if (entry_before.is_null()) throw std::runtime_error("Unknown app_uuid");
+      const auto headers = cover_headers();
+      const auto nonce = crypto::rand_alphabet(32, "0123456789abcdef");
+#ifdef POLARIS_TESTS
+      const auto download_override = cover_download_override;
+#else
+      const std::function<bool(const std::string &, const std::string &)> download_override;
+#endif
+      submit_cover_action(response, request, workers, std::move(post),
+        [response, headers, appdata, apps_file, stored_uuid, app_uuid, filename, url, nonce, entry_before, download_override](const auto &ticket) -> std::function<void()> {
+          auto stage = std::make_shared<cover_stage_t>(appdata / "covers", filename, nonce);
+          const bool downloaded = download_override ? download_override(url, stage->image.string())
+            : download_cover_staged(url, stage->image, ticket);
+          std::error_code fs_error;
+          const bool valid_image = downloaded && fs::is_regular_file(stage->image, fs_error) && !fs_error &&
+            fs::file_size(stage->image, fs_error) <= game_artwork::maximum_asset_bytes && !fs_error &&
+            game_artwork::image_mime_type(stage->image).has_value();
+          return [response, headers, stage, apps_file, stored_uuid, app_uuid, entry_before, valid_image, appdata, filename] {
+            const cover_reply_t reply {response, headers};
+            if (!valid_image) { reply({{"status", false}, {"error", "Failed to download cover"}}); return; }
+            if (config::stream.file_apps != apps_file) {
+              reply({{"status", false}, {"error", "The entry changed; its artwork was kept."}}); return;
+            }
+            std::scoped_lock apps_lock(apps_file_mutex());
+            bool uncertain = false;
+            const auto final = appdata / "covers" / filename;
+            std::string failure;
+            {
+              auto artwork_lock = game_artwork::acquire_artwork_override_read_lock();
+              auto tree = nlohmann::json::parse(file_handler::read_file(apps_file.c_str()));
+              auto &apps = tree.at("apps");
+              if (!apps.is_array() || std::count_if(apps.begin(), apps.end(), [&](const auto &app) {
+                    return app.is_object() && app.value("uuid", "") == stored_uuid;
+                  }) != 1) {
+                reply({{"status", false}, {"error", "The entry changed; its artwork was kept."}}); return;
+              }
+              const auto current = std::find_if(apps.begin(), apps.end(), [&](const auto &app) { return app.value("uuid", "") == stored_uuid; });
+              if (current->value("name", "") != entry_before.value("name", "") ||
+                  current->value("image-path", "") != entry_before.value("image-path", "") ||
+                  game_artwork::load_artwork_override(appdata, stored_uuid)) {
+                reply({{"status", false}, {"error", "The entry changed; its artwork was kept."}}); return;
+              }
+              // Preserve the legacy case-sensitive save match separately from
+              // the case-insensitive admission lookup. Its correction is not #112.
+              for (auto &app : apps) if (app.value("uuid", "") == app_uuid) { app["image-path"] = final.string(); break; }
+              failure = publish_download_cover(stage, final, apps_file, tree, uncertain);
+            }
+            if (!failure.empty()) { reply({{"status", false}, {"error", failure}}); return; }
+            // Preserve the existing download termination policy pending its own
+            // actual process-boundary discriminator/review (apply uses false).
+            proc::refresh(apps_file);
+            if (!stage->cleanup()) {
+              BOOST_LOG(error) << "Cover recovery directory retained: " << stage->directory;
+              reply({{"status", false}, {"error", "The cover was saved; its owned backup needs cleanup."}}); return; }
+            if (uncertain) { reply({{"status", false}, {"error", "The cover was written, but saving it durably could not be confirmed."}}); return; }
+            reply({{"status", true}, {"path", final.string()}});
+          };
+        }, [response, headers] { response->write(nlohmann::json {{"status", false}, {"error", "Failed to download cover"}}.dump(), headers); });
+      return;
     } catch (const std::exception &e) {
       output["status"] = false;
       output["error"] = e.what();
     }
     send_response(response, output);
+  }
+
+  void registerCoverActions(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &server, cover_lookup::workers_t &workers) {
+    const auto route = [&server, &workers](auto handler) {
+      return withCsrf([&server, &workers, handler](resp_https_t response, req_https_t request) {
+        handler(response, request, workers, cover_post_for(server));
+      });
+    };
+    server.resource["^/api/covers/select$"]["POST"] = route(selectCover);
+    server.resource["^/api/covers/apply-missing$"]["POST"] = route(applyMissingCover);
+    server.resource["^/api/covers/key/check$"]["POST"] = route(checkCoversKey);
+    server.resource["^/api/covers/download$"]["POST"] = route(downloadCover);
   }
 
   /**
@@ -10372,10 +10717,7 @@ namespace confighttp {
     server.resource["^/api/covers/image$"]["GET"] = getCoverImage;
     registerCoverLookups(server, cover_lookups);
     server.resource["^/api/covers/preview/([0-9a-f]{32})$"]["GET"] = previewCover;
-    server.resource["^/api/covers/select$"]["POST"] = withCsrf(selectCover);
-    server.resource["^/api/covers/apply-missing$"]["POST"] = withCsrf(applyMissingCover);
-    server.resource["^/api/covers/key/check$"]["POST"] = withCsrf(checkCoversKey);
-    server.resource["^/api/covers/download$"]["POST"] = withCsrf(downloadCover);
+    registerCoverActions(server, cover_lookups);
     server.resource["^/api/covers/sweep$"]["POST"] = withCsrf(startCoverSweep);
     server.resource["^/api/covers/sweep$"]["GET"] = getCoverSweep;
     server.resource["^/api/covers/sweep$"]["DELETE"] = withCsrf(clearCoverSweep);
@@ -10536,8 +10878,42 @@ namespace confighttp {
     return getVerifiedClientCert(candidate, request_path) != nullptr;
   }
 
+  void register_cover_actions_for_tests(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &server,
+                                       cover_lookup::workers_t &workers) {
+    registerCoverActions(server, workers);
+    server.resource["^/api/covers/sweep$"]["POST"] = withCsrf(startCoverSweep);
+    server.resource["^/api/covers/sweep$"]["GET"] = getCoverSweep;
+  }
+
+  void set_cover_http_transports_for_tests(
+      std::function<std::optional<long>(const std::string &, const std::string &, std::string &)> key_check,
+      std::function<bool(const std::string &, const std::string &)> download) {
+    cover_key_check_override = std::move(key_check);
+    cover_download_override = std::move(download);
+  }
+
+  std::size_t append_cover_listing_for_tests(std::string &body, char *bytes, std::size_t size, std::size_t count) {
+    return append_cover_listing(bytes, size, count, &body);
+  }
+
+  void set_cover_post_for_tests(cover_post_t post) { cover_post_override = std::move(post); }
+  void set_cover_commit_observer_for_tests(std::function<void()> observer) { cover_commit_observer = std::move(observer); }
+  bool revoke_cover_cookie_for_tests(const std::string &cookie) { return invalidate_web_session_cookie(cookie); }
+  void set_cover_csrf_for_tests(std::string csrf) { csrfToken = std::move(csrf); }
+  void set_cover_publication_fault_for_tests(std::string step) { cover_publication_fault = std::move(step); }
+
   void apply_missing_cover_http_for_tests(resp_https_t response, req_https_t request) {
-    withCsrf(applyMissingCover)(response, request);
+    // Older apply-contract fixtures invoke a handler directly. Pump only this
+    // owned test executor on their calling HTTP thread; production uses its server.
+    boost::asio::io_context executor;
+    auto guard = boost::asio::make_work_guard(executor);
+    cover_lookup::workers_t workers;
+    const cover_post_t post = [&](std::function<void()> completion) {
+      boost::asio::post(executor, [completion = std::move(completion), &guard] { completion(); guard.reset(); });
+    };
+    withCsrf([&](resp_https_t r, req_https_t q) { applyMissingCover(r, q, workers, post); })(response, request);
+    if (workers.pending_for_tests()) executor.run();
+    workers.shutdown();
   }
 
   void set_cover_apply_for_tests(game_artwork::providers::transport_t transport, std::optional<fs::path> appdata) {

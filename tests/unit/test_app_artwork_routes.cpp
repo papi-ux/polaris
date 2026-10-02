@@ -174,7 +174,7 @@ TEST(AppCoverSearch, StoresAPickedPosterUnderItsUuidInTheFormatItReallyIs) {
   ASSERT_TRUE(confighttp::store_selected_cover(coverdir, APP_UUID, "image/jpeg", jpeg).has_value());
   EXPECT_FALSE(std::filesystem::exists(coverdir / (std::string(APP_UUID) + ".png")));
   const auto select = handler_body(read_source("src/confighttp.cpp"), "void selectCover(");
-  EXPECT_NE(select.find("keep = app.image_path"), std::string::npos);
+  EXPECT_NE(select.find("current ? fs::path(current->second) : fs::path {}"), std::string::npos);
 
   EXPECT_FALSE(confighttp::store_selected_cover(coverdir, "../escape", "image/png", png).has_value());
   EXPECT_FALSE(confighttp::store_selected_cover(coverdir, APP_UUID, "image/gif", png).has_value());
@@ -204,7 +204,9 @@ TEST(AppCoverSearch, TheConsoleSearchIsNovasSearchAndNeverLoadsImagesFromOutside
   EXPECT_EQ(select.find("download_file"), std::string::npos);
   // A listed poster previews as a thumbnail, so the pick stores the full image behind it.
   EXPECT_LT(select.find("cover_image_for_pick("), select.find("store_selected_cover("));
-  EXPECT_NE(select.find("picked.image->mime_type, picked.image->body"), std::string::npos);
+  const auto stored_image = handler_body(select, "const auto path = store_selected_cover(", "if (!path)");
+  EXPECT_NE(stored_image.find("picked.image->mime_type"), std::string::npos);
+  EXPECT_NE(stored_image.find("picked.image->body"), std::string::npos);
 
   // A game's posters: Nova's alternatives listing for the poster kind, behind the console session and CSRF.
   EXPECT_NE(search.find(R"({"provider_game_id", found.candidate.provider_game_id})"), std::string::npos);
@@ -218,7 +220,9 @@ TEST(AppCoverSearch, TheConsoleSearchIsNovasSearchAndNeverLoadsImagesFromOutside
   EXPECT_NE(source.find(R"(server.resource["^/api/covers/choices$"]["POST"] = withCsrf([&workers, transport_override])"), std::string::npos);
 
   EXPECT_NE(source.find(R"(server.resource["^/api/covers/preview/([0-9a-f]{32})$"]["GET"] = previewCover;)"), std::string::npos);
-  EXPECT_NE(source.find(R"(server.resource["^/api/covers/select$"]["POST"] = withCsrf(selectCover);)"), std::string::npos);
+  const auto actions = handler_body(source, "void registerCoverActions(");
+  EXPECT_NE(actions.find("return withCsrf("), std::string::npos);
+  EXPECT_NE(actions.find(R"(server.resource["^/api/covers/select$"]["POST"] = route(selectCover);)"), std::string::npos);
 
   const auto nova = read_source("src/nvhttp.cpp");
   const auto nova_search = handler_body(nova, "auto polarisSearchGameArtworkMatches = ", "\n    };\n");

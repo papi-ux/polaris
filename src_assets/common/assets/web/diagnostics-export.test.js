@@ -1231,6 +1231,85 @@ describe('support self-service reports', () => {
     expect(buildGamescopeHelperReport(null)).toBeNull()
   })
 
+  const starvedPyrowaveReportStats = {
+    streaming: true,
+    codec: 'pyrowave',
+    latency_ms: 37,
+    packet_loss: 32.7,
+    encode_time_ms: 3.5,
+    encode_target_fps: 120,
+    dropped_frame_ratio: 0.0096,
+    network_verdict: { loss_pct: 1.4, loss_state: 'light', frames_lost: 34, frames_expected: 2400, window_seconds: 20, rtt_median_ms: 9.5 },
+    pyrowave_bitrate: { starved: true, ceiling_frame_share: 1, request_kbps: 200000 },
+  }
+
+  it('names confirmed PyroWave starvation and its encoded frame-byte budget', () => {
+    const report = buildPostSessionStreamReport({ stats: starvedPyrowaveReportStats })
+    expect(report.issueOwner).toBe('host')
+    expect(report.mainIssue).toContain('PyroWave')
+    expect(report.mainIssue).toContain('frame-byte budget')
+    expect(report.mainIssue).toContain('100%')
+    expect(report.suggestedNextLaunchProfile).toContain('resolution/FPS')
+    expect(report.suggestedNextLaunchProfile).toContain('4:2:0')
+    expect(report.suggestedNextLaunchProfile).toContain('HEVC')
+    expect(report.suggestedNextLaunchProfile).not.toMatch(/lower bitrate|raise bitrate/i)
+    expect(report.copyText).toContain('frame-byte budget')
+    expect(report.qualitySummary).toContain('1.4% of video frames lost after FEC')
+    expect(report.mainIssue).not.toContain('32.7')
+  })
+
+  it('keeps genuine judged network pressure while avoiding a further starved-codec bitrate cut', () => {
+    const report = buildPostSessionStreamReport({ stats: {
+      ...starvedPyrowaveReportStats,
+      network_verdict: { loss_pct: 5, loss_state: 'elevated', frames_lost: 120, frames_expected: 2400, window_seconds: 20, rtt_median_ms: 9.5 },
+    } })
+    expect(report.issueOwner).toBe('network')
+    expect(report.mainIssue).toContain('frame-byte budget')
+    expect(report.mainIssue).toContain('Video frame loss was network pressure')
+    expect(report.suggestedNextLaunchProfile).toContain('resolution/FPS')
+    expect(report.suggestedNextLaunchProfile).toContain('wired/5 GHz')
+    expect(report.suggestedNextLaunchProfile).not.toMatch(/lower bitrate|raise bitrate/i)
+  })
+
+  it('keeps a transport failure and names the independent PyroWave budget shortage', () => {
+    const report = buildPostSessionStreamReport({
+      stats: starvedPyrowaveReportStats,
+      logs: 'Warning: UDP network timeout while sending video packets',
+    })
+    expect(report.issueOwner).toBe('network')
+    expect(report.mainIssue).toContain('frame-byte budget')
+    expect(report.mainIssue).toContain('Network latency/transport warnings')
+    expect(report.suggestedNextLaunchProfile).not.toMatch(/lower bitrate|raise bitrate/i)
+  })
+
+  it('keeps explicit host failure evidence alongside confirmed PyroWave budget pressure', () => {
+    const report = buildPostSessionStreamReport({
+      stats: starvedPyrowaveReportStats,
+      logs: 'Warning: encoder queue saturated after capture fell back to SHM',
+    })
+    expect(report.issueOwner).toBe('host')
+    expect(report.mainIssue).toContain('frame-byte budget')
+    expect(report.mainIssue).toContain('host capture/encoder failure')
+    expect(report.suggestedNextLaunchProfile).toContain('resolution/FPS')
+    expect(report.suggestedNextLaunchProfile).not.toMatch(/lower bitrate|raise bitrate/i)
+  })
+
+  it.each([
+    { streaming: false },
+    { codec: 'hevc' },
+    { pyrowave_bitrate: null },
+    { pyrowave_bitrate: { starved: false, ceiling_frame_share: 1 } },
+    { pyrowave_bitrate: { starved: 'true', ceiling_frame_share: 1 } },
+    ...[null, undefined, '1', NaN, Infinity, -1, 1.1, 0, 0.85].map((share) => ({
+      pyrowave_bitrate: { starved: true, ceiling_frame_share: share },
+    })),
+  ])('does not invent confirmed PyroWave budget pressure from inactive, foreign or invalid telemetry case %# %j', (override) => {
+    const report = buildPostSessionStreamReport({ stats: { ...starvedPyrowaveReportStats, ...override } })
+    expect(report.issueOwner).toBe('client')
+    expect(report.mainIssue).not.toContain('frame-byte budget')
+    expect(report.suggestedNextLaunchProfile).not.toContain('4:2:0')
+  })
+
   it('builds a post-session report with issue owner and next launch profile', () => {
     const report = buildPostSessionStreamReport({
       stats: {
