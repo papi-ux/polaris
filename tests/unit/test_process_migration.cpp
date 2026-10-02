@@ -3454,6 +3454,26 @@ TEST_F(HostVirtualOwnedShutdown, SuccessfulStopDrainsOwnedChildBeforeRemovingOut
   EXPECT_TRUE(stopped.child_reaped_before_destroy);
 }
 
+TEST_F(HostVirtualOwnedShutdown, FailedOutputRemovalRetainsOwnerUntilSameOwnerRetrySucceeds) {
+  const auto stopped = proc::host_virtual_shutdown_for_tests(token, child, false, true, false, true);
+  ASSERT_TRUE(stopped.prepared);
+  EXPECT_FALSE(stopped.authority_rejected);
+  EXPECT_FALSE(stopped.stopped);
+  EXPECT_FALSE(stopped.completion_idle);
+  EXPECT_TRUE(stopped.output_retained);
+  EXPECT_TRUE(stopped.generation_retained);
+  EXPECT_TRUE(stopped.launch_owner_retained);
+  EXPECT_TRUE(stopped.app_retained);
+  EXPECT_FALSE(stopped.child_alive);
+  EXPECT_EQ(stopped.destroy_calls, 1);
+  EXPECT_EQ(stopped.revert_calls, 0);
+  EXPECT_TRUE(stopped.retry_stopped);
+  EXPECT_TRUE(stopped.retry_output_removed);
+  EXPECT_TRUE(stopped.retry_context_retired);
+  EXPECT_EQ(stopped.retry_destroy_calls, 2);
+  EXPECT_TRUE(stopped.child_reaped_before_destroy);
+}
+
 TEST_F(HostVirtualOwnedShutdown, ForeignOwnerCannotStopChildOrRemoveOutput) {
   const auto stopped = proc::host_virtual_shutdown_for_tests(token, child, false, false, true);
   ASSERT_TRUE(stopped.prepared);

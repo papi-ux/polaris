@@ -7776,6 +7776,7 @@ namespace proc {
     int destroy_calls = 0;
     int revert_calls = 0;
     int reset_calls = 0;
+    int fail_destroy_remaining = 0;
     pid_t child_pid = -1;
     bool child_reaped_before_destroy = false;
   };
@@ -12183,6 +12184,10 @@ namespace proc {
           errno = 0;
           observer.child_reaped_before_destroy =
             waitpid(observer.child_pid, &status, WNOHANG) < 0 && errno == ECHILD;
+          if (observer.fail_destroy_remaining > 0) {
+            --observer.fail_destroy_remaining;
+            return false;
+          }
           display.active = false;
           return true;
         }
@@ -12357,7 +12362,8 @@ namespace proc {
       pid_t child_pid,
       bool force_capture_failure,
       bool retry,
-      bool wrong_owner) {
+      bool wrong_owner,
+      bool fail_first_destroy) {
     host_virtual_shutdown_test_result_t observed;
     int pidfd_error = 0;
     auto tracked_child = open_process_pidfd(child_pid, pidfd_error);
@@ -12374,6 +12380,7 @@ namespace proc {
     auto previous_display = std::move(linux_vdisplay);
     host_virtual_shutdown_observer_t observer;
     observer.child_pid = child_pid;
+    observer.fail_destroy_remaining = fail_first_destroy ? 1 : 0;
     auto restore = util::fail_guard([&]() {
       host_virtual_shutdown_observer = previous_observer;
       forced_isolated_session_capture_failure_pid = previous_failure_pid;
@@ -12458,10 +12465,10 @@ namespace proc {
 
   host_virtual_shutdown_test_result_t host_virtual_shutdown_for_tests(
       std::string_view session_instance_id, pid_t child_pid,
-      bool force_capture_failure, bool retry, bool wrong_owner) {
+      bool force_capture_failure, bool retry, bool wrong_owner, bool fail_first_destroy) {
     proc_t process {boost::process::v1::environment {}, {}};
     return process.host_virtual_shutdown_for_tests(
-      session_instance_id, child_pid, force_capture_failure, retry, wrong_owner);
+      session_instance_id, child_pid, force_capture_failure, retry, wrong_owner, fail_first_destroy);
   }
 #endif
 

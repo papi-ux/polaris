@@ -648,7 +648,8 @@ namespace proc {
     pid_t child_pid,
     bool force_capture_failure,
     bool retry,
-    bool wrong_owner = false
+    bool wrong_owner = false,
+    bool fail_first_destroy = false
   );
 
   bool non_cage_detached_partial_launch_cleanup_for_tests(
@@ -1169,7 +1170,8 @@ namespace proc {
       pid_t child_pid,
       bool force_capture_failure,
       bool retry,
-      bool wrong_owner
+      bool wrong_owner,
+      bool fail_first_destroy
     );
 
     bool non_cage_detached_partial_launch_cleanup_for_tests(
