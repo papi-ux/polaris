@@ -1303,7 +1303,7 @@ describe('support self-service reports', () => {
     ...[null, undefined, '1', NaN, Infinity, -1, 1.1, 0, 0.85].map((share) => ({
       pyrowave_bitrate: { starved: true, ceiling_frame_share: share },
     })),
-  ])('does not invent confirmed PyroWave budget pressure from inactive, foreign or invalid telemetry %j', (override) => {
+  ])('does not invent confirmed PyroWave budget pressure from inactive, foreign or invalid telemetry case %# %j', (override) => {
     const report = buildPostSessionStreamReport({ stats: { ...starvedPyrowaveReportStats, ...override } })
     expect(report.issueOwner).toBe('client')
     expect(report.mainIssue).not.toContain('frame-byte budget')
