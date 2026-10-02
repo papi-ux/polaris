@@ -1304,6 +1304,25 @@ export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnect
       : 'Try the low-latency hardware encoder profile or lower resolution/FPS.'
   }
 
+  // The host's calibrated starvation verdict and an observed recent byte-budget
+  // share are independent of media loss. Saturation alone is not starvation.
+  const pyrowave = stats.pyrowave_bitrate
+  const budgetShare = pyrowave?.ceiling_frame_share
+  const starvedAtBudget = stats.streaming === true && stats.codec === 'pyrowave' &&
+    pyrowave?.starved === true && typeof budgetShare === 'number' &&
+    Number.isFinite(budgetShare) && budgetShare > 0.85 && budgetShare <= 1
+  if (starvedAtBudget) {
+    const budgetIssue = `PyroWave was bitrate-starved for this resolution and frame rate; ${Math.round(budgetShare * 100)}% of recent encoded frames reached their frame-byte budget.`
+    if (issueOwner === 'client') {
+      issueOwner = 'host'
+      mainIssue = budgetIssue
+    } else {
+      mainIssue += ` ${budgetIssue}`
+    }
+    suggestedNextLaunchProfile = 'Lower resolution/FPS, try PyroWave 4:2:0 or HEVC/AV1 for this mode, then retry the same game.'
+    if (issueOwner === 'network') suggestedNextLaunchProfile += ' Prefer wired/5 GHz for the reported network pressure.'
+  }
+
   // Two frame shares, each named: frames lost in transit after FEC, and frames the host dropped
   // before it sent them. They count different frames, so one may be high while the other is not.
   const qualitySummary = `${Number.isFinite(latency) ? latency.toFixed(1) : 'unknown'} ms latency / ${Number.isFinite(loss) ? `${loss.toFixed(1)}%` : 'unknown'} of video frames lost after FEC / ${Number.isFinite(encodeTime) ? encodeTime.toFixed(1) : 'unknown'} ms encode / ${Number.isFinite(dropped) ? `${(dropped * 100).toFixed(2)}%` : 'unknown'} of frames dropped on the host.`
