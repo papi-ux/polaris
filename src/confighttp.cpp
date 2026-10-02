@@ -7416,9 +7416,9 @@ namespace confighttp {
         directory = parent / (".download-" + nonce);
         if (!fs::create_directory(directory)) throw std::runtime_error("Cover staging unavailable");
         owns = true;
-        std::error_code error;
-        fs::permissions(directory, fs::perms::owner_all, error);
-        if (error) {
+        std::error_code fs_error;
+        fs::permissions(directory, fs::perms::owner_all, fs_error);
+        if (fs_error) {
           std::error_code cleanup_error;
           fs::remove_all(directory, cleanup_error);
           if (cleanup_error) BOOST_LOG(error) << "Cover staging directory retained: " << directory;
@@ -7428,10 +7428,10 @@ namespace confighttp {
       }
       bool cleanup() {
         if (!owns || retain) return !retain;
-        std::error_code error;
-        if (cover_fault("cleanup")) error = std::make_error_code(std::errc::permission_denied);
-        else fs::remove_all(directory, error);
-        if (error) { retain = true; return false; }
+        std::error_code fs_error;
+        if (cover_fault("cleanup")) fs_error = std::make_error_code(std::errc::permission_denied);
+        else fs::remove_all(directory, fs_error);
+        if (fs_error) { retain = true; return false; }
         owns = false;
         return true;
       }
@@ -7439,9 +7439,9 @@ namespace confighttp {
         // Cleanup faults are inspected on the HTTP thread; workers never read
         // this test/global setting. Ordinary destructor cleanup is ownership-only.
         if (!owns || retain) return;
-        std::error_code error;
-        fs::remove_all(directory, error);
-        if (error) BOOST_LOG(warning) << "An owned cover staging directory needs cleanup";
+        std::error_code fs_error;
+        fs::remove_all(directory, fs_error);
+        if (fs_error) BOOST_LOG(warning) << "An owned cover staging directory needs cleanup";
       }
     };
 
@@ -7507,21 +7507,21 @@ namespace confighttp {
                                       const fs::path &final, const std::string &apps_file,
                                       const nlohmann::json &tree, bool &durability_uncertain) {
       const auto backup = stage->directory / "previous-cover";
-      std::error_code error;
-      const auto previous = fs::symlink_status(final, error);
-      if (error && error != std::errc::no_such_file_or_directory) return "The existing cover could not be inspected.";
-      error.clear();
+      std::error_code fs_error;
+      const auto previous = fs::symlink_status(final, fs_error);
+      if (fs_error && fs_error != std::errc::no_such_file_or_directory) return "The existing cover could not be inspected.";
+      fs_error.clear();
       const bool had_previous = fs::exists(previous);
       if (had_previous) {
         if (!fs::is_regular_file(previous)) return "The existing cover could not be backed up.";
-        if (cover_fault("backup")) error = std::make_error_code(std::errc::permission_denied);
-        else fs::create_hard_link(final, backup, error);
-        if (error) return "The existing cover could not be backed up.";
+        if (cover_fault("backup")) fs_error = std::make_error_code(std::errc::permission_denied);
+        else fs::create_hard_link(final, backup, fs_error);
+        if (fs_error) return "The existing cover could not be backed up.";
       }
       const auto payload = tree.dump(4);
-      if (cover_fault("publish")) error = std::make_error_code(std::errc::permission_denied);
-      else fs::rename(stage->image, final, error);
-      if (error) return "The cover could not be published.";
+      if (cover_fault("publish")) fs_error = std::make_error_code(std::errc::permission_denied);
+      else fs::rename(stage->image, final, fs_error);
+      if (fs_error) return "The cover could not be published.";
 #ifdef POLARIS_TESTS
       if (cover_fault("save") || cover_fault("restore")) private_state_file::set_write_fault_for_tests(private_state_file::write_fault_e::short_write);
       if (cover_fault("durability")) private_state_file::set_write_fault_for_tests(private_state_file::write_fault_e::post_rename_durability);
@@ -7543,10 +7543,10 @@ namespace confighttp {
         return "The library save could not be classified; its owned cover backup was kept for recovery.";
       }
       if (saved.status == private_state_file::write_status_e::not_committed) {
-        if (cover_fault("restore")) error = std::make_error_code(std::errc::permission_denied);
-        else if (had_previous) fs::rename(backup, final, error);
-        else fs::remove(final, error);
-        if (error) {
+        if (cover_fault("restore")) fs_error = std::make_error_code(std::errc::permission_denied);
+        else if (had_previous) fs::rename(backup, final, fs_error);
+        else fs::remove(final, fs_error);
+        if (fs_error) {
           stage->retain = true;
           BOOST_LOG(error) << "Cover recovery directory retained: " << stage->directory;
           return "The cover could not be restored; its owned backup was kept for recovery.";
@@ -7638,9 +7638,9 @@ namespace confighttp {
           auto stage = std::make_shared<cover_stage_t>(appdata / "covers", filename, nonce);
           const bool downloaded = download_override ? download_override(url, stage->image.string())
             : download_cover_staged(url, stage->image, ticket);
-          std::error_code error;
-          const bool valid_image = downloaded && fs::is_regular_file(stage->image, error) && !error &&
-            fs::file_size(stage->image, error) <= game_artwork::maximum_asset_bytes && !error &&
+          std::error_code fs_error;
+          const bool valid_image = downloaded && fs::is_regular_file(stage->image, fs_error) && !fs_error &&
+            fs::file_size(stage->image, fs_error) <= game_artwork::maximum_asset_bytes && !fs_error &&
             game_artwork::image_mime_type(stage->image).has_value();
           return [response, headers, stage, apps_file, stored_uuid, app_uuid, entry_before, valid_image, appdata, filename] {
             const cover_reply_t reply {response, headers};
