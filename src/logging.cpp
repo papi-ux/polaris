@@ -485,11 +485,11 @@ namespace logging {
       << "    --creds username password | set Web UI credentials; restart Polaris afterwards"sv << std::endl
 #ifdef __linux__
       << "    --setup-host [options]    | apply Linux host setup (udev rules, uinput/uhid); run it with sudo -H"sv << std::endl
-      << "      --enable-kms            | also grant this binary cap_sys_admin, which only capture = kms needs;"sv << std::endl
-      << "                              | every install or update removes it again, and it does not change the"sv << std::endl
-      << "                              | capture setting"sv << std::endl
-      << "      --disable-kms           | take that capability off again, with the copy of the binary and the"sv << std::endl
-      << "                              | service drop-in the DRM/KMS recipe may have left behind"sv << std::endl
+      << "      --enable-kms            | point the user service at the polaris-kms helper, which carries the"sv << std::endl
+      << "                              | cap_sys_admin only capture = kms needs and keeps it across updates;"sv << std::endl
+      << "                              | it does not change the capture setting"sv << std::endl
+      << "      --disable-kms           | stop running the helper, and remove the copy of the binary and the"sv << std::endl
+      << "                              | service drop-in the old DRM/KMS recipe may have left behind"sv << std::endl
       << "      --enable-headless-boot  | start Polaris at boot with no monitor or desktop login"sv << std::endl
       << "      --disable-headless-boot | remove that boot start again"sv << std::endl
       << "                              | polaris --setup-host --help describes every step"sv << std::endl

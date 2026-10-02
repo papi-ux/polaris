@@ -23,7 +23,7 @@ describe('v1.4.13 release contract', () => {
     expect(read('packaging/linux/SteamOS/namcap-reviewed-warnings.txt')).toContain(
       'usr/bin/polaris-1.4.13',
     )
-    expect(read('scripts/ci/build-steamos-package.sh')).toContain("'polaris|1.4.13-1|x86_64'")
+    expect(read('scripts/ci/build-steamos-package.sh')).toContain('EXPECTED_PKGVER="1.4.13${POLARIS_PRERELEASE_LABEL}-1"')
   })
 
   // The release workflow refuses a tag whose notes file is missing or empty, and a beta reads the
@@ -49,12 +49,53 @@ describe('v1.4.13 release contract', () => {
     }
   })
 
-  // Until this release ships, its notes are read by beta testers, whose packages are attached to the
-  // prerelease rather than to the tag the install commands name.
-  it('tells a beta reader which packages are theirs', () => {
-    expect(currentNotes()).toContain(
-      'While 1.4.13 is in beta, use the packages attached to the prerelease you are reading.',
+  // The v1.4.13 page is not published from this copy: the release job reads the tag's own copy,
+  // which kept what the betas told their testers, so the page is corrected by posting its body by
+  // hand. This copy has to say what shipped because the next release's notes and contract test start
+  // from it. The release shares its version with the betas, so a host that ran one can find its
+  // package manager treating the release as installed: the notes say how to put it over the beta.
+  it('speaks to someone installing the release, not to a beta tester', () => {
+    const notes = currentNotes()
+    expect(notes).not.toContain('While 1.4.13 is in beta')
+    expect(notes).not.toContain('the prerelease you are reading')
+    expect(notes).not.toContain('which does not exist yet')
+    expect(notes).toContain(
+      '**If this host ran 1.4.13-beta.2 or beta.3, reinstall this release over it.**',
     )
+    expect(notes).toContain('sudo dnf reinstall ./Polaris-fedora44-x86_64.rpm')
+    expect(notes).toContain('sudo apt install --reinstall ./Polaris-ubuntu24.04-x86_64.deb')
+    expect(notes).toContain('On SteamOS, run the install block below again.')
+    expect(notes).toContain('on the second and third betas a stream could take the host down')
+  })
+
+  // Nova 1.4.13 went stable on 2026-09-27, the day after Polaris 1.4.13, and the stable notes gate
+  // still refuses "matched" wording. PyroWave sits in a different place in each Nova build: the
+  // Android beta (Nova Pre, beta.3) has it only in Settings, because its Play Setup had no codec row
+  // yet; stable Android compiles it out; Linux needs the separate bundle. A reader who looked in
+  // Play Setup found nothing, so the notes name each path.
+  it('says where PyroWave is in each Nova build without calling the two a matched release', () => {
+    const notes = currentNotes()
+    expect(notes).not.toMatch(/matched with Nova/i)
+    expect(notes).not.toContain('Nova 1.4.13 is still in beta')
+    expect(notes).toContain('Nova 1.4.13 is out too!')
+    expect(notes).toContain(
+      'Settings → Client Stream Defaults → Change codec settings → PyroWave (experimental)',
+    )
+    expect(notes).toContain("Nova's stable 1.4.13 APKs don't turn it on")
+    expect(notes).toContain('`Nova-Linux-PyroWave-x86_64-alpha.flatpak`')
+    expect(notes).toContain('Play Setup → Video Codec → PyroWave · Experimental')
+  })
+
+  // 0.49 ms was one host encoding a frame that never left the GPU. Private Stream, wlroots and X11
+  // capture hand PyroWave frames in host memory, which pay an upload first, and HDR on this codec
+  // had not been shown end to end, so the page quotes what a recorded session paid instead.
+  it('quotes the PyroWave cost that host memory capture pays', () => {
+    const notes = currentNotes()
+    expect(notes).not.toContain('0.49 ms')
+    expect(notes).not.toContain('without the frame ever leaving the GPU')
+    expect(notes).toContain('that averaged 0.35 ms for the copy plus 0.95 ms to encode')
+    expect(notes).not.toContain('HDR works when capture goes through the desktop portal')
+    expect(notes).toContain('HDR on this codec has not been shown end to end yet.')
   })
 
   it('stops warning that an update takes the KMS capture permission away', () => {

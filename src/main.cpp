@@ -58,6 +58,7 @@
   #include "platform/linux/session_manager.h"
   #include "platform/linux/stream_display_policy.h"
   #ifdef POLARIS_BUILD_PORTAL
+    #include "platform/linux/kms_capture_readiness.h"
     #include "platform/linux/portal_capability.h"
   #endif
 #endif
@@ -280,6 +281,14 @@ int main(int argc, char *argv[]) {
     config::video.linux_display.virtual_display_backend,
     &capability_outcome
   );
+  // The same answer for the life of this process, whatever it held: a polaris-kms helper that runs
+  // here without CAP_SYS_ADMIN gave it up for the portal or KWin on purpose. The console and the
+  // Doctor read it, so neither calls that a helper without its capability.
+  platf::kms_readiness::note_capability_set_aside(portal_capability::requires_unprivileged_process(
+    config::video.capture,
+    config::video.linux_display.stream_mode,
+    config::video.linux_display.virtual_display_backend
+  ));
 #endif
 
   adaptive_bitrate::load_config();
@@ -326,6 +335,12 @@ int main(int argc, char *argv[]) {
     BOOST_LOG(info) << "config: '"sv << name << "' = "sv << config::redact_config_value(name, val);
   }
   config::modified_config_settings.clear();
+
+#ifdef __linux__
+  // The load ran inside config::parse, before logging was up. What it did to the capture setting
+  // waited for this point, so it lands in polaris.log right after the config lines it explains.
+  stream_display_policy::log_config_load_notes();
+#endif
 
 #if defined(__linux__) && defined(POLARIS_BUILD_PORTAL)
   if (!capability_outcome.empty()) {

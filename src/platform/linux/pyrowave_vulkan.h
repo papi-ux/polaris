@@ -5,8 +5,8 @@
 #pragma once
 
 // PyroWave's header refuses to compile unless the Vulkan API is already declared, and says so with
-// an #error. The system header, not the volk copy the vendored tree builds against; the note at the
-// top of pyrowave_encode.cpp says why that distinction matters.
+// an #error. Use system Vulkan types here; Granite's volk pointer symbols are
+// isolated in their C++ namespace by the build configuration.
 #include <vulkan/vulkan.h>
 
 #include "pyrowave.h"
@@ -30,10 +30,9 @@ namespace pyrowave_encode {
    * for the other direction, taking handles somebody else made, and this is that somebody.
    *
    * Vulkan is resolved through dlopen rather than linked. Polaris links the Vulkan loader only when
-   * CUDA or the FFmpeg Vulkan encoder asked for it, and the vendored codec is built against volk,
-   * which spells every entry point as a function pointer variable rather than as a function. Two
-   * spellings of vkCreateInstance in one binary is a call that lands on the address of a pointer
-   * instead of on code. Resolving by name leaves nothing for the linker to choose between.
+   * CUDA or the FFmpeg Vulkan encoder asked for it. This device keeps its own resolved entry
+   * points; Granite's separately namespaced volk loader retains its existing initialization
+   * ownership. Enabling LTO does not change either dispatch path.
    *
    * The create infos are members on purpose. The C API says the pointers it is handed, and
    * everything they point at, have to outlive the device it makes from them.

@@ -147,6 +147,46 @@ describe('KMS package capability admission', () => {
   }
 })
 
+describe('package notes on DRM/KMS capture', () => {
+  // An update used to replace the binary that held the capability, so the notes said to repeat the
+  // step after every one. The polaris-kms package carries it now, and a note that still says so
+  // sends people to redo what the package keeps, and never mentions the package at all.
+  const notes = {
+    'deb and rpm': (fixture) => {
+      // udevadm is stubbed so the hook reloads nothing on the machine running the test.
+      const udevadm = join(fixture, 'udevadm')
+      writeFileSync(udevadm, '#!/bin/sh\nexit 0\n')
+      chmodSync(udevadm, 0o755)
+      return spawnSync('sh', [join(process.cwd(), 'src_assets/linux/misc/postinst')], {
+        encoding: 'utf8',
+        env: { ...process.env, PATH: `${fixture}:${process.env.PATH}` },
+      })
+    },
+    Arch: () => spawnSync('bash', ['-c', '. "$1"; post_upgrade', 'notes',
+      join(process.cwd(), 'packaging/linux/Arch/polaris.install')], { encoding: 'utf8' }),
+    SteamOS: () => spawnSync('bash', ['-c', '. "$1"; post_upgrade', 'notes',
+      join(process.cwd(), 'packaging/linux/SteamOS/polaris.install')], { encoding: 'utf8' }),
+  }
+
+  for (const [label, run] of Object.entries(notes)) {
+    it(`${label} says the helper package keeps the capability, not to repeat the step`, () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'polaris-kms-notes-'))
+      try {
+        const result = run(fixture)
+        expect(result.status, result.stderr).toBe(0)
+        const printed = result.stdout.replace(/\s+/g, ' ')
+        expect(printed).not.toMatch(/after every update|each update|every install/)
+        expect(printed).toContain('Install the polaris-kms package, which keeps the capability across updates')
+        expect(printed).toContain('sudo -H polaris --setup-host --enable-kms')
+        // The first run may only park the change until the account logs in with the group.
+        expect(printed).toContain('If it asks for a new login or a reboot first, do that and run it again.')
+      } finally {
+        rmSync(fixture, { force: true, recursive: true })
+      }
+    })
+  }
+})
+
 describe('removal hooks clean up what only they can', () => {
   // polaris-spaces-setup is the only thing that can remove the SELinux policies it installed, and it
   // ships inside the package, so after removal those policies cannot be removed at all. Every case
@@ -499,6 +539,20 @@ describe('Linux packaging contracts', () => {
     expect(portalGrab).toMatch(/#ifdef POLARIS_BUILD_WAYLAND[\s\S]*?kwingrab::prefer_for_generation\(generation\)[\s\S]*?#endif/)
     expect(portalGrab).toContain('kwingrab::require_for_generation(generation)')
     expect(portalGrab).toMatch(/#ifdef POLARIS_BUILD_WAYLAND[\s\S]*?cage_screencopy::capture\([\s\S]*?#endif/)
+  })
+
+  it('names libpipewire in the DEB, because PipeWire audio and portal capture link it and shlibdeps is off', () => {
+    const compileCmake = readSource('cmake/compile_definitions/linux.cmake')
+    const packagingCmake = readSource('cmake/packaging/linux.cmake')
+    const debDependencies = section(packagingCmake, 'set(CPACK_DEBIAN_PACKAGE_DEPENDS', 'set(CPACK_RPM_PACKAGE_REQUIRES')
+
+    // Nothing works out the DEB's library dependencies, so each one the binary links is named by
+    // hand. 1.4.13 left this one out, and on an Ubuntu 24.04 without PipeWire the loader refused to
+    // start Polaris at all, while CI passed because it installed the package only on the machine
+    // that built it. The ubuntu-minimal-install job now installs it on a bare ubuntu:24.04.
+    expect(compileCmake).toContain('list(APPEND PLATFORM_LIBRARIES ${PIPEWIRE_LIBRARIES})')
+    expect(packagingCmake).toContain('set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS OFF)')
+    expect(debDependencies).toMatch(/\n\s+libpipewire-0\.3-0t64, \\\n/)
   })
 
   it('installs Vulkan headers, loader, and shader compiler independently of CUDA', () => {
@@ -1010,7 +1064,15 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain("sed -n 's/^pkgname = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
     expect(buildScript).toContain("sed -n 's/^pkgver = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
     expect(buildScript).toContain("sed -n 's/^arch = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
-    expect(buildScript).toContain("'polaris|1.4.13-1|x86_64'")
+    // The release number stays literal. A prerelease joins its label to it with no separator, which
+    // pacman sorts below that release, and the helper carries that version and depends on it.
+    expect(buildScript).toContain('EXPECTED_PKGVER="1.4.13${POLARIS_PRERELEASE_LABEL}-1"')
+    expect(buildScript).toContain('if [ "$PACKAGE_IDENTITY" != "polaris|$EXPECTED_PKGVER|x86_64" ]; then')
+    expect(buildScript).toContain('if [ "$KMS_IDENTITY" != "polaris-kms|$EXPECTED_PKGVER|x86_64" ]; then')
+    expect(buildScript).toContain('if ! grep -Fqx "depend = polaris=$EXPECTED_PKGVER" "$KMS_RECEIPT_ROOT/.PKGINFO"; then')
+    expect(buildScript).toContain(
+      'if [ -n "$POLARIS_PRERELEASE_LABEL" ] && [ "$(vercmp "$PACKAGE_VERSION" "$BUILD_VERSION-1")" != -1 ]; then',
+    )
     expect(buildScript).toContain('PACKAGE_PATHS=(polaris-[0-9]*-x86_64.pkg.tar.zst)')
     expect(buildScript).toContain('CLONE_URL=https://github.com/papi-ux/polaris.git')
     expect(buildScript).toContain("sed -n 's/^depend = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
@@ -1028,14 +1090,11 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain('namcap emitted unreviewed warnings or a reviewed warning disappeared')
     expect(buildScript).not.toContain('namcap "$PACKAGE_PATH" > "$OUTPUT_ROOT/steamos3.8-namcap-all.txt" || true')
     const reviewedWarnings = reviewedNamcap.trim().split('\n')
-    // 18 since the compute codec brought volk in. volk resolves every Vulkan entry point with dlopen
-    // at runtime, and so does Polaris itself (src/platform/linux/vulkan_loader.cpp), because volk's
-    // global variables share the entry points' names and would otherwise capture Polaris's direct
-    // calls at link time. No object in the binary makes a direct call to libvulkan, so namcap reports
-    // it as an unused shared library. The dependency is real and stays declared: dropping it to quiet the
-    // linter would move the failure on a host without Vulkan from install time into the middle of a
-    // stream. The exact inverse of the line below, which retired when the Vulkan Video encoder started
-    // calling the loader for real.
+    // Still 18 after LTO and volk namespace isolation removed DT_NEEDED libvulkan.so.1.
+    // namcap now calls vulkan-icd-loader potentially unneeded instead of reporting an
+    // unused linked library. Both loaders still dlopen it, so the runtime dependency stays.
+    // The compute codec had added the unused-library warning while sharing entry-point
+    // names with Polaris; replacing that warning is an exact one-for-one change.
     // It was 17 since the Vulkan Video encoder started using vulkan-icd-loader for real:
     // namcap stopped calling that dependency possibly unneeded, and a reviewed warning
     // that no longer appears fails the gate exactly like an unreviewed one, so its line
@@ -1047,7 +1106,7 @@ describe('Linux packaging contracts', () => {
     // dependency's line the same way (#415).
     expect(reviewedWarnings).toHaveLength(18)
     expect(reviewedWarnings).toContain(
-      "polaris W: Unused shared library '/usr/lib/libvulkan.so.1' by file ('usr/bin/polaris-1.4.13')",
+      "polaris W: Dependency included, but may not be needed ('vulkan-icd-loader')",
     )
     expect(new Set(reviewedWarnings).size).toBe(reviewedWarnings.length)
     expect(reviewedWarnings.every((warning) => warning.startsWith('polaris W: '))).toBe(true)
@@ -1055,10 +1114,13 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/share/polaris"')
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/share/applications/dev.polaris-stream.app.Polaris.desktop"')
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/lib/systemd/user/polaris.service"')
-    expect(pkgbuild).toContain('test -x "$pkgdir/usr/bin/polaris-$pkgver"')
-    expect(pkgbuild).toContain('test "$(readlink "$pkgdir/usr/bin/polaris")" = "polaris-$pkgver"')
+    // Named for the release number alone: a prerelease's pkgver, 1.4.13beta.3, is not the binary's
+    // name, and the reviewed namcap warnings name usr/bin/polaris-1.4.13 either way.
+    expect(pkgbuild).toContain('test -x "$pkgdir/usr/bin/polaris-@PROJECT_VERSION@"')
+    expect(pkgbuild).toContain('test "$(readlink "$pkgdir/usr/bin/polaris")" = "polaris-@PROJECT_VERSION@"')
     expect(pkgbuild).not.toContain('mv "$pkgdir/usr/bin/polaris"')
     expect(pkgbuild).not.toContain('ln -s "polaris-$pkgver"')
+    expect(pkgbuild).not.toContain('ln -s "polaris-@PROJECT_VERSION@"')
     expect(statSync('scripts/check-packaged-binary-paths.sh').mode & 0o111).not.toBe(0)
 
     const releaseVerifierIndex = workflow.indexOf('      - name: Verify release assets on GitHub release')
@@ -1127,6 +1189,50 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).not.toMatch(/CLONE_URL=(?:file:\/\/)?\$\{?SOURCE_ROOT/)
     for (const script of [bootstrap, buildScript]) {
       expect(script).toContain("POLARIS_LOCAL_CANDIDATE_BUILD must be 0 or 1")
+    }
+  })
+
+  it('hands the SteamOS build the release tag\'s prerelease label and refuses any other', () => {
+    const workflow = readSource('.github/workflows/build.yml')
+    const steamOs = section(workflow, '  steamos-build:', '  ubuntu-build:')
+    const bootstrap = readSource('scripts/ci/run-steamos-build.sh')
+    const buildScript = readSource('scripts/ci/build-steamos-package.sh')
+
+    // The lane checks out a commit and never sees the tag, so the label is handed in by name.
+    expect(steamOs).toContain('POLARIS_PRERELEASE_LABEL: ${{ needs.resolve-source.outputs.prerelease_label }}')
+    expect(steamOs).toContain('--env "POLARIS_PRERELEASE_LABEL=$POLARIS_PRERELEASE_LABEL"')
+    // The package is named from the label at configure time, and the inner build has to build the
+    // same version, or the package would say beta and the binary would report the release.
+    for (const path of ['packaging/linux/SteamOS/PKGBUILD', 'packaging/linux/Arch/PKGBUILD']) {
+      const pkgbuild = readSource(path)
+      expect(pkgbuild).toContain('pkgver=@PROJECT_VERSION@@POLARIS_SUB_VERSION@\npkgrel=1\n')
+      expect(pkgbuild).toContain('export POLARIS_PRERELEASE_LABEL="@POLARIS_PRERELEASE_LABEL@"')
+      expect(pkgbuild).toContain('depends=("polaris=$pkgver-$pkgrel")')
+    }
+
+    for (const script of [bootstrap, buildScript]) {
+      const lines = script.split('\n')
+      const guardStart = lines.indexOf('POLARIS_PRERELEASE_LABEL="${POLARIS_PRERELEASE_LABEL-}"')
+      const guardEnd = lines.indexOf('fi', guardStart + 1)
+      expect(guardStart).toBeGreaterThanOrEqual(0)
+      expect(guardEnd).toBeGreaterThan(guardStart)
+      expect(lines[guardEnd + 1]).toBe('export POLARIS_PRERELEASE_LABEL')
+      const guardScript = lines.slice(guardStart, guardEnd + 1).join('\n')
+      // Unset means stable, so a local candidate build needs nothing new.
+      for (const [value, expectedStatus] of [
+        [undefined, 0], ['', 0], ['beta.3', 0], ['beta.10', 0], ['rc.1', 0],
+        ['beta', 1], ['beta.', 1], ['beta.3.1', 1], ['-beta.3', 1], ['alpha.1', 1], ['Beta.3', 1],
+        ['beta.3 ', 1], ['beta.3\nrc.1', 1], ['~beta.3', 1],
+      ]) {
+        const env = { ...process.env }
+        if (value === undefined) delete env.POLARIS_PRERELEASE_LABEL
+        else env.POLARIS_PRERELEASE_LABEL = value
+        const result = spawnSync('bash', ['-c', guardScript], { encoding: 'utf8', env })
+        expect(result.status, `unexpected guard status for ${JSON.stringify(value)}`).toBe(expectedStatus)
+        if (expectedStatus !== 0) {
+          expect(result.stderr).toContain('POLARIS_PRERELEASE_LABEL must be empty, beta.N or rc.N')
+        }
+      }
     }
   })
 

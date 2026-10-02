@@ -255,7 +255,7 @@
                         {{ client.name }}
                         <span v-if="isClientAiOptimized(client.name)" class="ml-1 inline-flex items-center gap-0.5 rounded-full bg-accent/15 px-1.5 py-0.5 text-[9px] font-medium text-accent">AI</span>
                       </div>
-                      <div class="mt-1 text-[11px] text-storm">{{ client.ip || '--' }}</div>
+                      <div class="mt-1 text-[11px] text-storm">{{ client.ip || '--' }}<template v-if="liveClientFamily(client.name)"> · {{ liveClientFamily(client.name) }}</template></div>
                     </div>
                     <div class="text-right text-[11px] text-storm tabular-nums">
                       <div>{{ client.latency_ms?.toFixed(0) || '--' }} ms</div>
@@ -573,6 +573,8 @@ import { resolveAutoQualityState } from '../auto-quality-state'
 import { resolveDoctorActionHttpResponse } from '../doctor-action-http.js'
 import { buildReadyCheckDisplay } from '../dashboard-ready-checks'
 import { previewOutputForConfig } from '../dashboard-preview-output.js'
+import { readConfigOrNull } from '../config-cache.js'
+import { liveClientFamilyLabel } from '../client-family.js'
 import {
   buildLiveSummary,
   buildQualityGrade,
@@ -1007,6 +1009,12 @@ function isClientAiOptimized(clientName) {
   return aiCacheKeys.value.some(key => key.startsWith(clientName + ':'))
 }
 
+// Nova or Moonlight / Artemis, as the Devices page names it, so a stream says which client is
+// playing and therefore what it can use.
+function liveClientFamily(clientName) {
+  return liveClientFamilyLabel(clientName, pairedClientList.value)
+}
+
 function gradeColor(grade) {
   if (grade === 'A') return 'text-success'
   if (grade === 'B') return 'text-ice'
@@ -1243,7 +1251,7 @@ async function explainDoctorVerdict() {
   try {
     const { explainDoctorWithAi } = await import('../ai-doctor-explanation.js')
     const configRes = await fetch('./api/config', { credentials: 'include' })
-    const config = configRes.ok ? await configRes.json() : {}
+    const config = (await readConfigOrNull(configRes)) || {}
     const result = await explainDoctorWithAi({
       aiEnabled: config.ai_enabled === true || config.ai_enabled === 'enabled' || config.ai_enabled === 'true',
       config,
@@ -1604,8 +1612,8 @@ const statsLoaded = ref(false)
 async function fetchSystemInfo() {
   try {
     const configRes = await fetch('./api/config', { credentials: 'include' })
-    if (configRes.ok) {
-      const config = await configRes.json()
+    const config = await readConfigOrNull(configRes)
+    if (config) {
       refreshClientSettingsSync(config)
       streamingOutput.value = previewOutputForConfig(config)
       discoveryEnabled.value = config.enable_discovery !== 'disabled'
@@ -1899,8 +1907,8 @@ onMounted(async () => {
   } catch {}
   try {
     const res = await fetch('./api/config', { credentials: 'include' })
-    if (res.ok) {
-      const data = await res.json()
+    const data = await readConfigOrNull(res)
+    if (data) {
       refreshClientSettingsSync(data)
       version.value = data.version || '0.0.0'
       headlessEnabled.value = data.headless_mode === 'enabled'

@@ -1,5 +1,7 @@
 #include "src/platform/linux/spaces_runtime_move.h"
+#include "src/platform/linux/multiseat_profile_network.h"
 #include "src/private_state_file.h"
+#include "../../tests_log_capture.h"
 
 #include <gtest/gtest.h>
 #include <array>
@@ -549,7 +551,7 @@ namespace {
     std::vector<profiles::runtime_move_t> moved;
     std::mutex mutex;
     std::condition_variable_any changed;
-    bool hold_install = false;
+    bool hold_install = false, move_throws = false;
     std::unique_ptr<spaces::move_service_t> service;
     const spaces::move_request_t request {"12345678-1234-4234-8234-123456789abc", "space-a", "steam-nvidia-615"};
     void SetUp() override {
@@ -567,6 +569,7 @@ namespace {
           std::lock_guard lock(mutex);
           ++moves;
           moved.push_back(move);
+          if (move_throws) throw 7;  // not a std::exception, so it has nothing to say for itself
           if (move_answers.empty()) return {200, "Space moved to the new gaming runtime"};
           const auto answer = move_answers.front();
           move_answers.pop_front();
@@ -663,7 +666,7 @@ namespace {
     std::vector<profiles::space_create_request_t> created;
     std::mutex mutex;
     std::condition_variable_any changed;
-    bool hold_install = false;
+    bool hold_install = false, install_throws = false, create_throws = false;
     std::unique_ptr<spaces::move_service_t> service;
     const profiles::space_create_request_t request {"12345678-1234-4234-8234-123456789abc", "", "Player 2", "heroic"};
     void SetUp() override {
@@ -673,6 +676,7 @@ namespace {
         .install = [this](const spaces::runtime_t &target, std::stop_token stop) {
           ++installs;
           EXPECT_EQ(target.id, "heroic-nvidia-host");
+          if (install_throws) throw std::runtime_error("docker image inspect timed out");
           std::unique_lock lock(mutex);
           changed.wait(lock, stop, [&] { return !hold_install; });
           if (stop.stop_requested()) return spaces::runtime_install_result_t {false, "download_cancelled", "Setup stopped.", {}};
@@ -686,6 +690,7 @@ namespace {
         .create = [this](const profiles::space_create_request_t &creation) -> profile_launch_result_t {
           std::lock_guard lock(mutex);
           created.push_back(creation);
+          if (create_throws) throw std::runtime_error("the Spaces owner went away");
           if (create_answers.empty()) return {200, "Space created"};
           const auto answer = create_answers.front();
           create_answers.pop_front();
@@ -788,6 +793,240 @@ namespace {
     EXPECT_EQ(created.size(), 2U);
   }
 
+  // The Spaces page reads the code, so a create that throws keeps it, and only the log says why.
+  TEST_F(SpacesCreateService, ACreateThatThrowsKeepsItsCodeAndLogsWhy) {
+    create_throws = true;
+    const test_log_capture_t log;
+    ASSERT_EQ(service->submit_create(request).status, 202);
+    const auto job = settled();
+    EXPECT_EQ(job["state"], "failed");
+    EXPECT_EQ(job["code"], "spaces_change_not_saved");
+    EXPECT_EQ(job["message"], "The Space could not be created.");
+    EXPECT_NE(log.text().find("Creating the Space Player 2 failed: the Spaces owner went away"), std::string::npos) << log.text();
+  }
+
+  TEST_F(SpacesCreateService, ARuntimeCheckThatThrowsMakesNoSpaceAndLogsWhy) {
+    install_throws = true;
+    const test_log_capture_t log;
+    ASSERT_EQ(service->submit_create(request).status, 202);
+    const auto job = settled();
+    EXPECT_EQ(job["state"], "failed");
+    EXPECT_EQ(job["code"], "setup_failed");
+    EXPECT_TRUE(created.empty());
+    EXPECT_NE(log.text().find("Checking runtime heroic-nvidia-host failed: docker image inspect timed out"), std::string::npos)
+      << log.text();
+  }
+
+  /**
+   * What the Spaces owner does for a create, with this PC's runtimes and driver
+   * passed in. Each way the first Space of a launcher stops says why in words:
+   * the page's own status and code say "available" for a runtime that is not here.
+   */
+  class SpacesCreateInCatalog : public ::testing::Test {
+  protected:
+    std::filesystem::path root, path;
+    inspect_host_t host;
+    const profiles::space_create_request_t request {"12345678-1234-4234-8234-123456789abc", "", "Player 2", "steam"};
+    void SetUp() override {
+      std::array<char, 64> pattern {};
+      const std::string value = "/tmp/polaris-create-in-catalog-XXXXXX";
+      std::copy(value.begin(), value.end(), pattern.begin());
+      const auto *created = ::mkdtemp(pattern.data());
+      ASSERT_NE(created, nullptr);
+      root = created;
+      path = root / "profiles.json";
+    }
+    void TearDown() override { std::filesystem::remove_all(root); }
+    profiles::change_result_t create(const std::vector<spaces::runtime_t> &runtimes, const std::optional<std::string> &driver,
+      const profiles::space_create_request_t &creation) {
+      return spaces::create_space_in_catalog(path, creation, host, runtimes, driver, nullptr);
+    }
+  };
+
+  TEST_F(SpacesCreateInCatalog, NoRuntimeThatFitsSaysWhichAndWhy) {
+    auto heroic = request; heroic.family = "heroic";
+    auto result = create(catalog, std::nullopt, heroic);
+    EXPECT_FALSE(result);
+    EXPECT_EQ(result.error, "This Polaris build has no gaming runtime for that launcher.");
+    EXPECT_EQ(result.cause, "this build publishes no heroic runtime (runtime_not_published)");
+    // An AMD or Intel PC, with a build that has only NVIDIA runtimes for Steam.
+    EXPECT_EQ(create({nvidia610}, std::nullopt, request).cause,
+      "no steam runtime fits this PC, where no NVIDIA driver is loaded (graphics_unsupported)");
+    EXPECT_EQ(create({nvidia610}, std::string("615.71.09"), request).cause,
+      "no steam runtime fits this PC, where NVIDIA driver 615.71.09 is loaded (driver_mismatch)");
+    EXPECT_TRUE(host.calls.empty());
+  }
+
+  TEST_F(SpacesCreateInCatalog, ARuntimeNotOnThisPCIsRefusedByNameAndSaysWhatDockerAnswered) {
+    const auto refused = [&](const std::string &cause) {
+      const auto result = create(catalog, std::nullopt, request);
+      EXPECT_FALSE(result);
+      ASSERT_TRUE(result.refusal);
+      EXPECT_EQ(result.refusal->code, "space_runtime_not_downloaded");
+      EXPECT_EQ(result.cause, cause);
+    };
+    refused("Docker holds no image for runtime steam-default yet (not_downloaded)");
+    host.runtimes[amd_intel.reference()] = json::array({{{"Id", lab_image}}});
+    refused("the image Docker holds for runtime steam-default is not the one this build pins (runtime_identity_mismatch)");
+    host.silent = true;
+    refused("Docker at /var/run/docker.sock gave no usable answer about runtime steam-default: it may be stopped, "
+      "or this Polaris may not be allowed to use it (inspection_failed)");
+    EXPECT_EQ(host.calls.size(), 3U);
+  }
+
+  /**
+   * A Space the catalog holds but a create cannot copy, such as one whose game is
+   * no launcher target, is not a Space of that launcher. The Spaces owner did not
+   * count it either, so the create is the launcher's first Space, never a copy
+   * refused as "no Space for that launcher" on a PC whose catalog lists one.
+   */
+  TEST_F(SpacesCreateInCatalog, ASpaceThatCannotBeCopiedLeavesTheNextOneAFirstSpace) {
+    const profiles::catalog_t saved {1000, 1000, {{
+      .storage = {"space-a", "pv-space-a", runtime_profile_e::steam, amd_intel.config_digest},
+      .name = "Living room", .workload = {workload_kind_e::steam, "not-a-steam-game"},
+    }}};
+    ASSERT_TRUE(private_state_file::write_atomic(path, profiles::encode(saved)));
+    const auto result = create(catalog, std::nullopt, request);
+    ASSERT_TRUE(result.refusal) << result.error;
+    EXPECT_EQ(result.refusal->code, "space_runtime_not_downloaded");
+    EXPECT_EQ(host.calls.size(), 1U);
+  }
+
+  /**
+   * Docker holding one pulled runtime on either of its image stores, and making a Space's home.
+   * The classic store knows the image by its config digest. The containerd store, which a fresh
+   * Docker 29 uses, knows it by the manifest digest it was pulled by, and holds nothing under the
+   * config digest. Either store also answers for the reference the image was pulled by.
+   */
+  class image_store_host_t : public container::host_t {
+  public:
+    image_store_host_t(spaces::runtime_t pulled, bool containerd_store) :
+      runtime(std::move(pulled)), containerd(containerd_store) {}
+    const spaces::runtime_t runtime;
+    const bool containerd;
+    std::vector<std::vector<std::string>> calls;
+    std::string volume;
+    /// The Id this store reports for the pulled image.
+    std::string id() const { return containerd ? runtime.registry_digest : runtime.config_digest; }
+    std::uint64_t effective_uid() const override { return 1000; }
+    bool executable_file(const std::filesystem::path &) const override { return true; }
+    bool trusted_runtime_file(const std::filesystem::path &) const override { return true; }
+    std::optional<std::vector<std::uint64_t>> supplementary_groups() const override { return std::vector<std::uint64_t> {}; }
+    bool readable_directory(const std::filesystem::path &) const override { return false; }
+    bool private_read_write_directory(const std::filesystem::path &) const override { return false; }
+    bool private_readable_file(const std::filesystem::path &) const override { return false; }
+    std::optional<container::character_device_identity_t> read_write_character_device(const std::filesystem::path &) const override { return std::nullopt; }
+    std::optional<std::string> read_owned_regular_file(const std::filesystem::path &, std::size_t) const override { return std::nullopt; }
+    container::command_result_t run(const std::vector<std::string> &argv, std::chrono::milliseconds, std::size_t) override {
+      const auto prefix = container::command_prefix({});
+      EXPECT_TRUE(std::equal(prefix.begin(), prefix.end(), argv.begin()));
+      const std::vector<std::string> args(argv.begin() + prefix.size(), argv.end());
+      calls.push_back(args);
+      const auto answer = [](const json &value) { return container::command_result_t {.exit_status = 0, .output = value.dump()}; };
+      const std::string space = volume.size() > 3 ? volume.substr(3) : std::string {};
+      if (args.size() < 2) {
+        ADD_FAILURE() << "Unexpected Docker operation";
+        return {.exit_status = 1};
+      }
+      if (args[0] == "info")
+        return answer({{"OSType", "linux"}, {"Runtimes", {{"runc", {{"path", "runc"}}}}},
+          {"SecurityOptions", json::array({"name=seccomp,profile=builtin"})}});
+      if (args[0] == "image" && args[1] == "inspect") {
+        // Docker prints an empty list and exits 1 for a name it holds nothing under.
+        if (args.back() != runtime.reference() && args.back() != id()) return {.exit_status = 1, .output = "[]\n"};
+        auto image = verified(runtime);
+        image[0]["Id"] = id();
+        image[0]["Config"]["Labels"]["io.polaris.multiseat.profile"] = runtime.profile;
+        if (containerd)
+          image[0]["Descriptor"] = {{"digest", runtime.registry_digest}, {"size", 7834},
+            {"mediaType", "application/vnd.oci.image.manifest.v1+json"}};
+        return answer(image);
+      }
+      if (args[0] == "volume" && args[1] == "ls") return {.exit_status = 0, .output = "\"unrelated-volume\"\n"};
+      if (args[0] == "volume" && args[1] == "create") {
+        volume = args.back();
+        return {.exit_status = 0, .output = volume + "\n"};
+      }
+      if (args[0] == "volume" && args[1] == "inspect")
+        return answer(json::array({{{"Name", volume}, {"Driver", "local"}, {"Scope", "local"}, {"Options", nullptr},
+          {"Labels", {{"io.polaris.multiseat.profile", space}}}}}));
+      if (args[0] == "run") return {.exit_status = 0};
+      if (args[0] == "network" && args[1] == "ls") return {.exit_status = 0, .output = "\"bridge\"\n\"none\"\n"};
+      if (args[0] == "network" && args[1] == "create") return {.exit_status = 0, .output = std::string(64, 'e') + "\n"};
+      if (args[0] == "network" && args[1] == "inspect")
+        return answer(json::array({{{"Id", std::string(64, 'e')}, {"Name", container::profile_network_name(space)},
+          {"Driver", "bridge"}, {"Scope", "local"}, {"Internal", false}, {"Ingress", false}, {"Attachable", false},
+          {"EnableIPv6", false}, {"Labels", {{"io.polaris.multiseat.profile", space}}},
+          {"Options", {{"com.docker.network.bridge.enable_icc", "false"}, {"com.docker.network.bridge.enable_ip_masquerade", "true"}}},
+          {"IPAM", {{"Driver", "default"}, {"Options", nullptr}}}, {"Containers", json::object()}}}));
+      ADD_FAILURE() << "Unexpected Docker operation " << args[0] << ' ' << args[1];
+      return {.exit_status = 1};
+    }
+  };
+
+  /**
+   * The first Space of a launcher names its runtime by the Id Docker reports for it, as setup
+   * names Steam's. It named the catalog's config digest, which the containerd image store holds
+   * nothing under, so on a fresh Docker 29 the first Heroic or Lutris Space was refused as not
+   * saved and nothing was made, on a PC whose Steam Space had been made (#664).
+   */
+  class SpacesFirstSpaceImageStore : public SpacesCreateInCatalog {
+  protected:
+    const spaces::runtime_t heroic = [] {
+      auto runtime = catalog_runtime("heroic-default", "default", "", '7');
+      runtime.profile = "heroic";
+      return runtime;
+    }();
+    profiles::change_result_t make(image_store_host_t &docker, spaces::runtime_inspection_cache_t *cache = nullptr) {
+      auto creation = request;
+      creation.family = "heroic";
+      return spaces::create_space_in_catalog(path, creation, docker, std::vector {heroic}, std::nullopt, cache);
+    }
+    /// The image the saved Space names, or nothing when no single Space was saved.
+    std::optional<std::string> saved_image() const {
+      const auto loaded = profiles::load(path);
+      if (!loaded || loaded->catalog.profiles.size() != 1) return std::nullopt;
+      return loaded->catalog.profiles.front().storage.image_reference;
+    }
+    /// How often Docker was asked to describe exactly this name.
+    static long inspected(const image_store_host_t &docker, const std::string &name) {
+      return std::count(docker.calls.begin(), docker.calls.end(), std::vector<std::string> {"image", "inspect", name});
+    }
+  };
+
+  TEST_F(SpacesFirstSpaceImageStore, OnTheContainerdStoreItNamesTheManifestDigestDockerReports) {
+    image_store_host_t docker(heroic, true);
+    const auto result = make(docker);
+    ASSERT_TRUE(result) << result.error << " (" << result.cause << ")";
+    EXPECT_EQ(saved_image(), heroic.registry_digest);
+    // The home was made only after Docker described exactly the image the Space names.
+    EXPECT_EQ(inspected(docker, heroic.registry_digest), 1);
+    EXPECT_EQ(inspected(docker, heroic.config_digest), 0);
+    EXPECT_EQ(docker.volume, "pv-" + request.request_id);
+  }
+
+  TEST_F(SpacesFirstSpaceImageStore, OnTheClassicStoreItStillNamesTheConfigDigest) {
+    image_store_host_t docker(heroic, false);
+    const auto result = make(docker);
+    ASSERT_TRUE(result) << result.error << " (" << result.cause << ")";
+    EXPECT_EQ(saved_image(), heroic.config_digest);
+    EXPECT_EQ(inspected(docker, heroic.config_digest), 1);
+    EXPECT_EQ(inspected(docker, heroic.registry_digest), 0);
+    EXPECT_EQ(docker.volume, "pv-" + request.request_id);
+  }
+
+  // The Spaces page checks the runtime before the create does, and the create takes that answer
+  // from the cache without asking Docker again. The kept answer names the image as well.
+  TEST_F(SpacesFirstSpaceImageStore, ARuntimeCheckTakenFromTheCacheStillNamesTheImageDockerReported) {
+    image_store_host_t docker(heroic, true);
+    spaces::runtime_inspection_cache_t cache;
+    ASSERT_EQ(spaces::inspect_runtime(docker, {heroic}, std::nullopt, true, &cache, "heroic").status, "ready");
+    const auto result = make(docker, &cache);
+    ASSERT_TRUE(result) << result.error << " (" << result.cause << ")";
+    EXPECT_EQ(saved_image(), heroic.registry_digest);
+    EXPECT_EQ(inspected(docker, heroic.reference()), 1) << "the create asked the cache, not Docker";
+  }
+
   TEST_F(SpacesCreateService, ARefusedFirstSpaceStartsNoJobAndNoDownload) {
     struct case_t {
       const char *name;
@@ -856,6 +1095,17 @@ namespace {
     EXPECT_EQ(job["code"], "space_runtime_changed");
     EXPECT_EQ(job["message"], std::string(space_runtime_changed_result.message));
     EXPECT_EQ(job["action"], "Refresh Spaces and try again.");
+  }
+
+  TEST_F(SpacesMoveService, AMoveThatThrowsKeepsItsCodeAndLogsWhatItCan) {
+    move_throws = true;
+    const test_log_capture_t log;
+    ASSERT_EQ(service->submit(request).status, 202);
+    const auto job = settled();
+    EXPECT_EQ(job["state"], "failed");
+    EXPECT_EQ(job["code"], "spaces_change_not_saved");
+    EXPECT_NE(log.text().find("Moving Space space-a failed: an exception that is not a std::exception"), std::string::npos)
+      << log.text();
   }
 
   TEST_F(SpacesMoveService, StoppingPolarisMidDownloadLeavesTheSpaceAsItWas) {

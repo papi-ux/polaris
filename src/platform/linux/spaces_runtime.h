@@ -37,7 +37,9 @@ namespace multiseat::spaces {
   /**
    * True when a Space's image is a catalog runtime that carries no driver of
    * its own. A Space names the image it launches by its own identity, which is
-   * the config digest Docker reports, never the reference it was pulled by.
+   * the Id Docker reports, never the reference it was pulled by: the config
+   * digest on Docker's classic image store, and the manifest digest on its
+   * containerd store.
    */
   [[nodiscard]] bool borrows_host_driver(std::string_view image, const std::vector<runtime_t> &catalog);
 

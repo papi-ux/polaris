@@ -12,8 +12,10 @@ print_steamos_setup_hint() {
     'without rebooting first, load the modules once:' \
     '  sudo modprobe uinput uhid' \
     '' \
-    'Only DRM/KMS capture still needs a privileged step, repeated after every update:' \
+    'Only DRM/KMS capture needs a privileged step. Install the polaris-kms package, which' \
+    'keeps the capability across updates, then run:' \
     '  sudo -H polaris --setup-host --enable-kms' \
+    'If it asks for a new login or a reboot first, do that and run it again. Polaris updates leave it on.' \
     '' \
     'Optional user-service autostart:' \
     '  systemctl --user enable --now polaris'

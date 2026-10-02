@@ -45,7 +45,10 @@ describe('live Auto Quality strip', () => {
       tuning: {
         adaptive_bitrate_active: true,
         adaptive_min_bitrate_kbps: 10000,
-        adaptive_max_bitrate_kbps: 40000,
+        adaptive_base_bitrate_kbps: 40000,
+        // The host still reports the ceiling it holds, which can sit above the
+        // client's request; live tuning never climbs past that request.
+        adaptive_max_bitrate_kbps: 100000,
         adaptive_rtt_ewma_ms: 7.6,
         adaptive_packet_loss_ewma: 0.0123,
       },
@@ -71,11 +74,13 @@ describe('live Auto Quality strip', () => {
   it('does not dress an idle host in zero-valued network numbers', () => {
     const rows = buildLiveAutoQualityRows({
       autoQuality: { state: 'off', blocked_reason: 'none', live_bitrate_kbps: 0 },
-      tuning: { adaptive_bitrate_active: false, adaptive_target_bitrate_kbps: 20000, adaptive_rtt_ewma_ms: 0, adaptive_packet_loss_ewma: 0, adaptive_min_bitrate_kbps: 2000, adaptive_max_bitrate_kbps: 100000 },
+      tuning: { adaptive_bitrate_active: false, adaptive_target_bitrate_kbps: 20000, adaptive_rtt_ewma_ms: 0, adaptive_packet_loss_ewma: 0, adaptive_min_bitrate_kbps: 2000, adaptive_max_bitrate_kbps: 161000, adaptive_base_bitrate_kbps: 161000 },
     }, t)
 
     expect(rows[0]).toMatchObject({ value: 'Off', note: '' })
-    expect(rows[1]).toMatchObject({ value: 'Not reported', note: 'Adaptive range 2 Mbps to 100 Mbps' })
+    // The host still reports the last stream's base after it ends, but with no
+    // stream there is no client request, so there is no range to show.
+    expect(rows[1]).toMatchObject({ value: 'Not reported', note: '' })
     expect(rows[2]).toMatchObject({ value: 'No stream running', note: '' })
   })
 

@@ -14,6 +14,14 @@ if [ "$POLARIS_LOCAL_CANDIDATE_BUILD" != 0 ] && [ "$POLARIS_LOCAL_CANDIDATE_BUIL
   printf '%s\n' 'POLARIS_LOCAL_CANDIDATE_BUILD must be 0 or 1' >&2
   exit 1
 fi
+# The release tag's prerelease label, beta.N or rc.N, or nothing for a stable build. Unset means
+# stable, so a local candidate build needs nothing new.
+POLARIS_PRERELEASE_LABEL="${POLARIS_PRERELEASE_LABEL-}"
+if [ -n "$POLARIS_PRERELEASE_LABEL" ] && [[ ! "$POLARIS_PRERELEASE_LABEL" =~ ^(beta|rc)\.[0-9]+$ ]]; then
+  printf '%s\n' 'POLARIS_PRERELEASE_LABEL must be empty, beta.N or rc.N' >&2
+  exit 1
+fi
+export POLARIS_PRERELEASE_LABEL
 git config --global --add safe.directory "$SOURCE_ROOT"
 SOURCE_COMMIT="$(git -C "$SOURCE_ROOT" rev-parse HEAD)"
 SOURCE_TREE="$(git -C "$SOURCE_ROOT" rev-parse 'HEAD^{tree}')"
@@ -57,8 +65,16 @@ PACKAGE_NAME="$(sed -n 's/^pkgname = //p' "$RECEIPT_ROOT/.PKGINFO")"
 PACKAGE_VERSION="$(sed -n 's/^pkgver = //p' "$RECEIPT_ROOT/.PKGINFO")"
 PACKAGE_ARCH="$(sed -n 's/^arch = //p' "$RECEIPT_ROOT/.PKGINFO")"
 PACKAGE_IDENTITY="$PACKAGE_NAME|$PACKAGE_VERSION|$PACKAGE_ARCH"
-if [ "$PACKAGE_IDENTITY" != 'polaris|1.4.13-1|x86_64' ]; then
+# The release this tree builds, with a prerelease's label joined straight onto the number, which
+# pacman sorts below that release (cmake/prep/prerelease_versions.cmake).
+EXPECTED_PKGVER="1.4.13${POLARIS_PRERELEASE_LABEL}-1"
+if [ "$PACKAGE_IDENTITY" != "polaris|$EXPECTED_PKGVER|x86_64" ]; then
   printf 'unexpected SteamOS package identity: %s\n' "$PACKAGE_IDENTITY" >&2
+  exit 1
+fi
+if [ -n "$POLARIS_PRERELEASE_LABEL" ] && [ "$(vercmp "$PACKAGE_VERSION" "$BUILD_VERSION-1")" != -1 ]; then
+  printf 'SteamOS prerelease %s does not sort below %s-1, so an upgrade to that release would not replace it\n' \
+    "$PACKAGE_VERSION" "$BUILD_VERSION" >&2
   exit 1
 fi
 cp "$PACKAGE_PATH" "$OUTPUT_ROOT/Polaris-steamos3.8-x86_64.pkg.tar.zst"
@@ -81,12 +97,12 @@ KMS_PACKAGE_NAME="$(sed -n 's/^pkgname = //p' "$KMS_RECEIPT_ROOT/.PKGINFO")"
 KMS_PACKAGE_VERSION="$(sed -n 's/^pkgver = //p' "$KMS_RECEIPT_ROOT/.PKGINFO")"
 KMS_PACKAGE_ARCH="$(sed -n 's/^arch = //p' "$KMS_RECEIPT_ROOT/.PKGINFO")"
 KMS_IDENTITY="$KMS_PACKAGE_NAME|$KMS_PACKAGE_VERSION|$KMS_PACKAGE_ARCH"
-if [ "$KMS_IDENTITY" != 'polaris-kms|1.4.13-1|x86_64' ]; then
+if [ "$KMS_IDENTITY" != "polaris-kms|$EXPECTED_PKGVER|x86_64" ]; then
   printf 'unexpected SteamOS polaris-kms package identity: %s\n' "$KMS_IDENTITY" >&2
   exit 1
 fi
 # Exactly this version of Polaris, so the helper and the binary can never disagree.
-if ! grep -qx 'depend = polaris=1.4.13-1' "$KMS_RECEIPT_ROOT/.PKGINFO"; then
+if ! grep -Fqx "depend = polaris=$EXPECTED_PKGVER" "$KMS_RECEIPT_ROOT/.PKGINFO"; then
   printf '%s\n' 'polaris-kms must depend on the exact Polaris it was built with' >&2
   sed -n 's/^depend = /  depends: /p' "$KMS_RECEIPT_ROOT/.PKGINFO" >&2
   exit 1

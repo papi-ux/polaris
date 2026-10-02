@@ -956,9 +956,18 @@ namespace ai_optimizer {
       (device_profile->type == "handheld" || device_profile->type == "phone");
   }
 
+  int bitrate_ceiling_kbps(std::string_view codec) {
+    return to_lower_copy(std::string {codec}) == "pyrowave" ? 300000 : 100000;
+  }
+
   static int derive_safe_bitrate_kbps(int baseline_kbps,
                                       const std::optional<device_db::device_t> &device_profile,
-                                      bool degraded_history) {
+                                      bool degraded_history,
+                                      bool pyrowave = false) {
+    // Device caps are sized for H.264 and HEVC; a PyroWave stream's safe bitrate is its own.
+    if (pyrowave && baseline_kbps > 0) {
+      return baseline_kbps;
+    }
     int safe_kbps = baseline_kbps > 0 ? baseline_kbps : 15000;
 
     if (device_profile) {
@@ -1222,7 +1231,8 @@ namespace ai_optimizer {
       session.last_safe_bitrate_kbps = derive_safe_bitrate_kbps(
         baseline_bitrate_kbps,
         device_profile,
-        degraded_history || session.last_health_grade == "degraded"
+        degraded_history || session.last_health_grade == "degraded",
+        active_codec_family == "pyrowave"
       );
     }
 
@@ -1731,7 +1741,9 @@ namespace ai_optimizer {
       normalization_notes.push_back("Filled missing bitrate from the baseline profile.");
       normalized = true;
     } else {
-      const auto clamped = clamp_value(*optimization.target_bitrate_kbps, 2000, 100000);
+      const auto clamped = clamp_value(
+        *optimization.target_bitrate_kbps, 2000,
+        bitrate_ceiling_kbps(optimization.preferred_codec.value_or(std::string {})));
       if (clamped != *optimization.target_bitrate_kbps) {
         optimization.target_bitrate_kbps = clamped;
         normalization_notes.push_back("Clamped bitrate into the supported streaming range.");
@@ -3388,9 +3400,11 @@ namespace ai_optimizer {
     optimization.signals_used = {"session_history", "reliability_feedback"};
 
     if (session.last_safe_bitrate_kbps > 0) {
-      optimization.target_bitrate_kbps = clamp_value(session.last_safe_bitrate_kbps, 2000, 100000);
+      optimization.target_bitrate_kbps = clamp_value(
+        session.last_safe_bitrate_kbps, 2000, bitrate_ceiling_kbps(session.last_codec));
     } else if (reuse_recent_success && session.last_bitrate_kbps > 0) {
-      optimization.target_bitrate_kbps = clamp_value(session.last_bitrate_kbps, 2000, 100000);
+      optimization.target_bitrate_kbps = clamp_value(
+        session.last_bitrate_kbps, 2000, bitrate_ceiling_kbps(session.last_codec));
     }
 
     if (!session.last_safe_codec.empty()) {

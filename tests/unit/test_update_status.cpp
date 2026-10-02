@@ -99,7 +99,7 @@ TEST(UpdateStatusTests, RepositoryUpgradeCommandFollowsTheHostShape) {
   EXPECT_EQ(update_status::repository_upgrade_command_for_tests(ubuntu, false, false), "");
 }
 
-// polaris-kms carries `Requires: polaris = %{version}-%{release}` on RPM and
+// polaris-kms carries `Requires: polaris = <its own version>` on RPM and
 // `depends=("polaris=$pkgver-$pkgrel")` on pacman, so a command that names only polaris is not an
 // upgrade of this host: dnf has to solve around a dependency it was not asked about, and what the
 // user sees is either a refusal or a helper left pointing at a version that no longer exists. That
@@ -126,4 +126,48 @@ TEST(UpdateStatusTests, ParsesInstalledPackageVersionsAcrossPackageFamilies) {
   EXPECT_EQ(parse_installed_package_version("fedora", "package polaris is not installed\n"), "");
   EXPECT_EQ(parse_installed_package_version("arch", "error: package 'polaris' was not found"), "");
   EXPECT_EQ(parse_installed_package_version("ubuntu", "dpkg-query: no packages found matching polaris"), "");
+}
+
+// Each package manager spells a prerelease the way it sorts below the release of the same number
+// (cmake/prep/prerelease_versions.cmake). The host running one reports the semver form, so the
+// package's version has to come back in that form for the console to compare the two.
+TEST(UpdateStatusTests, ReadsPrereleasePackagesAsTheVersionTheHostReports) {
+  using update_status::parse_installed_package_version;
+  EXPECT_EQ(parse_installed_package_version("fedora", "1.4.13~beta.3"), "1.4.13-beta.3");
+  EXPECT_EQ(parse_installed_package_version("fedora", "1.4.13~rc.1\n"), "1.4.13-rc.1");
+  EXPECT_EQ(parse_installed_package_version("ubuntu", "1.4.13~beta.10\n"), "1.4.13-beta.10");
+  EXPECT_EQ(parse_installed_package_version("debian", "1:1.4.13~rc.2-1"), "1.4.13-rc.2");
+  EXPECT_EQ(parse_installed_package_version("arch", "polaris 1.4.13beta.3-1\n"), "1.4.13-beta.3");
+  EXPECT_EQ(parse_installed_package_version("steamos", "polaris 1.4.13rc.12-1"), "1.4.13-rc.12");
+
+  // The release that replaces a beta stays the plain number, which the console reads as newer than
+  // the beta a host keeps running until it restarts.
+  EXPECT_EQ(parse_installed_package_version("fedora", "1.4.13"), "1.4.13");
+  EXPECT_EQ(parse_installed_package_version("arch", "polaris 1.4.13-1"), "1.4.13");
+}
+
+TEST(UpdateStatusTests, GivesNoVersionForAPrereleaseSpellingPolarisNeverShips) {
+  using update_status::parse_installed_package_version;
+  // None of these is a spelling Polaris ships: some sort above the release they precede, some
+  // belong to the other package manager, and the rest are malformed. Answering 1.4.13 for any of
+  // them would claim the release is installed.
+  for (const auto &[family, output] : std::initializer_list<std::pair<const char *, const char *>> {
+         {"fedora", "1.4.13_beta.3"},
+         {"fedora", "1.4.13beta.3"},
+         {"fedora", "1.4.13.beta.3"},
+         {"ubuntu", "1.4.13beta.3"},
+         {"arch", "polaris 1.4.13~beta.3-1"},
+         {"arch", "polaris 1.4.13_beta.3-1"},
+         {"steamos", "polaris 1.4.13.beta.3-1"},
+         {"fedora", "1.4.13~alpha.1"},
+         {"fedora", "1.4.13~beta"},
+         {"fedora", "1.4.13~beta."},
+         {"fedora", "1.4.13~beta.3.1"},
+         {"fedora", "1.4.13~beta.3x"},
+         {"fedora", "1.4~beta.3"},
+         {"fedora", "1.4.13.1~beta.3"},
+         {"arch", "polaris 1.4..13beta.3-1"},
+       }) {
+    EXPECT_EQ(parse_installed_package_version(family, output), "") << family << ": " << output;
+  }
 }

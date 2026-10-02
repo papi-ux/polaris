@@ -36,23 +36,33 @@ namespace multiseat::spaces {
   // What Docker holds under the approved reference.
   enum class runtime_image_e { absent, verified, mismatch, unverifiable };
 
+  // One answer about the approved reference. A verified image also carries the
+  // Id Docker reported for it, which is the image a Space names: the config
+  // digest on Docker's classic image store, and the manifest digest the image
+  // was pulled by on its containerd store, the default on a fresh Docker 29.
+  struct runtime_inspection_t {
+    runtime_image_e state = runtime_image_e::unverifiable;
+    std::string image;  ///< empty unless state is verified
+  };
+
   // Reading the setup page must not ask Docker about the runtime every time.
   // Only definitive answers are kept, briefly, one for each runtime asked
   // about: a host with several launchers asks about several in turn, and a
   // single slot made each one evict the last. A finished or stopped download
-  // forgets them all so the next check asks again.
+  // forgets them all so the next check asks again. A kept answer keeps the Id
+  // Docker reported with it, so a Space made from it names the same image.
   class runtime_inspection_cache_t {
   public:
     using now_t = std::function<std::chrono::steady_clock::time_point()>;
     explicit runtime_inspection_cache_t(std::chrono::steady_clock::duration lifetime = std::chrono::seconds(15),
       now_t now = {});
-    runtime_image_e remember(const std::string &reference, const std::function<runtime_image_e()> &inspect);
+    runtime_inspection_t remember(const std::string &reference, const std::function<runtime_inspection_t()> &inspect);
     void forget();
 
   private:
     struct entry_t {
       std::string reference;
-      runtime_image_e image;
+      runtime_inspection_t inspection;
       std::chrono::steady_clock::time_point checked;
     };
     std::chrono::steady_clock::duration lifetime_;
@@ -70,6 +80,10 @@ namespace multiseat::spaces {
     std::optional<runtime_t> runtime;
     std::optional<std::string> host_nvidia_driver;
     std::vector<std::string> nvidia_drivers;  ///< drivers the catalog's NVIDIA runtimes need
+    // The Id Docker reported for the runtime's image when status is ready, and
+    // empty otherwise. A Space made from this runtime names this image, which
+    // is not the catalog's config digest on Docker's containerd image store.
+    std::string image;
   };
   // Bounded: one local `docker image inspect` of the pinned reference, only
   // when the engine answered, verified against the compiled catalog entry.

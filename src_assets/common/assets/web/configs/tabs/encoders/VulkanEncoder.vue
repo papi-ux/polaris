@@ -38,7 +38,7 @@ const vkQualitySaved = computed(() => {
       <CodecSupportPanel :config="config" />
 
       <div class="surface-subtle mb-4 p-4 text-sm leading-relaxed text-storm">
-        Auto can prefer Vulkan Video on a compatible AMD private-stream route after Polaris verifies the exact live GPU-native frame path. NVIDIA's proprietary driver remains on NVENC, Nouveau uses capability probing, and Intel remains on VA-API by default.
+        Auto can prefer Vulkan Video on AMD for Private Stream, after Polaris verifies the exact live GPU-native frame path, and for Gamescope Stream, where frames reach it through system memory and it offers no AV1 or HDR. AV1 Support set to always advertise AV1, or HEVC Support set to HDR, keeps VA-API on Gamescope Stream. NVIDIA's proprietary driver remains on NVENC, Nouveau uses capability probing, and Intel remains on VA-API by default.
         Explicit Vulkan selection is strict and supports DRM/KMS, wlroots, and Portal capture. Portal and retired DMA-BUF routes use the Vulkan RAM uploader rather than silently changing encoders.
         H.264 and HEVC are enabled; AV1 remains unavailable until the bundled FFmpeg path passes Vulkan validation. Doctor reports the detected driver, selection policy, fallback state, and reason.
       </div>

@@ -39,16 +39,28 @@ set(GRANITE_FFMPEG OFF CACHE BOOL "" FORCE)
 set(GRANITE_FFMPEG_VULKAN OFF CACHE BOOL "" FORCE)
 set(GRANITE_PLATFORM "null" CACHE STRING "" FORCE)
 
-# Granite is built against volk, which declares every Vulkan entry point as a function pointer
-# variable, while Polaris uses the ordinary prototypes. Both are correct in their own translation
-# units, and link time optimisation merges them and refuses: "redeclared as variable". Turning
-# interprocedural optimisation off for the vendored trees keeps their objects real object code, so
-# nothing is merged and both spellings survive. The codec is Vulkan compute either way; the loss is
-# inlining across a boundary Polaris does not call across.
-set(CMAKE_INTERPROCEDURAL_OPTIMIZATION OFF)
-
+# Granite's older minimum CMake version otherwise ignores the project's IPO
+# setting. Keep that policy local to these dependencies and restore the caller.
+set(_polaris_previous_ipo_policy "${CMAKE_POLICY_DEFAULT_CMP0069}")
+set(CMAKE_POLICY_DEFAULT_CMP0069 NEW)
 add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/Granite" EXCLUDE_FROM_ALL)
 add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/pyrowave" EXCLUDE_FROM_ALL)
+if(_polaris_previous_ipo_policy STREQUAL "")
+    unset(CMAKE_POLICY_DEFAULT_CMP0069)
+else()
+    set(CMAKE_POLICY_DEFAULT_CMP0069 "${_polaris_previous_ipo_policy}")
+endif()
+unset(_polaris_previous_ipo_policy)
+
+# Granite builds volk itself instead of using volk's CMake options. Apply volk's
+# supported C++ namespace to its shared header interface and implementation. This
+# keeps pointer globals distinct from the host's ordinary Vulkan loader functions
+# under LTO without changing either side's dispatch or initialization ownership.
+target_compile_definitions(granite-volk-headers INTERFACE VOLK_NAMESPACE)
+set_source_files_properties(
+        "${CMAKE_SOURCE_DIR}/third-party/Granite/third_party/volk/volk.c"
+        TARGET_DIRECTORY granite-volk
+        PROPERTIES LANGUAGE CXX)
 
 # The C entry points are the ones Polaris can use: they take a VkInstance, VkPhysicalDevice and
 # VkDevice somebody else made, which is what this host has once FFmpeg has built a Vulkan device.
@@ -61,8 +73,12 @@ add_subdirectory("${CMAKE_SOURCE_DIR}/third-party/pyrowave" EXCLUDE_FROM_ALL)
 # Upstream reaches into Granite as a directory inside its own tree. Polaris keeps Granite as its own
 # submodule, because a submodule cannot live inside another one, so these two paths differ from the
 # spelling in PyroWave's CMakeLists.
+include("${CMAKE_CURRENT_LIST_DIR}/pyrowave_scaler.cmake")
+set(POLARIS_PYROWAVE_SCALER_SOURCE_DIR "${CMAKE_BINARY_DIR}/dependencies/pyrowave-scaler-source")
+polaris_prepare_pyrowave_scaler(
+        "${CMAKE_SOURCE_DIR}/third-party/pyrowave" "${POLARIS_PYROWAVE_SCALER_SOURCE_DIR}")
 add_library(polaris_pyrowave STATIC
-        "${CMAKE_SOURCE_DIR}/third-party/pyrowave/pyrowave_c.cpp"
+        "${POLARIS_PYROWAVE_SCALER_SOURCE_DIR}/pyrowave_c.cpp"
         "${CMAKE_SOURCE_DIR}/third-party/Granite/video/scaler.cpp")
 target_include_directories(polaris_pyrowave
         PUBLIC "${CMAKE_SOURCE_DIR}/third-party/pyrowave"
@@ -70,4 +86,7 @@ target_include_directories(polaris_pyrowave
         "${CMAKE_SOURCE_DIR}/third-party/pyrowave/shaders"
         "${CMAKE_SOURCE_DIR}/third-party/Granite/video")
 target_link_libraries(polaris_pyrowave PRIVATE pyrowave granite-vulkan granite-math)
+# Upstream's bitrate model, a generated header and nothing to link. Public, so the host's own advice
+# (src/pyrowave_advice.cpp) evaluates the same polynomials the codec's author fitted.
+target_link_libraries(polaris_pyrowave PUBLIC pyrowave-regression-results)
 set_target_properties(polaris_pyrowave PROPERTIES POSITION_INDEPENDENT_CODE ON)

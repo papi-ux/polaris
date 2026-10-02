@@ -137,6 +137,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_game_library_scanner.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_kmsgrab_logging_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_kms_capture_metadata.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_pyrowave_availability.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_hdr_probe_guard_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_preallocated_gamepad_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_capture_backend_fallback_source.cpp
@@ -194,12 +195,16 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_game_mode_repaint.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_steam_title_process.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_user_unit_override.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_kms_enable.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_kms_capture_readiness.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamescope_session_helper.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_graphics.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_labwc_startup_diagnostics.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_linux_process_argv.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_portal_grab_policy.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_private_session_attach.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_flatpak_session_instances.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_private_app_stop.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_private_session_input.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_session_manager.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_pyrowave_encode.cpp
@@ -297,6 +302,7 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_display_policy.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_recovery_doctor_actions.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_stats.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_pyrowave_advice.cpp
 )
 
 if (NOT WIN32 AND NOT APPLE)
@@ -746,4 +752,7 @@ endif ()
 # Exercise actual inputtino code with private in-memory/socket transports.
 if(UNIX AND NOT APPLE)
     add_subdirectory(fixtures/inputtino)
+    if(TARGET granite-volk)
+        add_subdirectory(fixtures/volk_link)
+    endif()
 endif()

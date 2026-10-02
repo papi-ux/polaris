@@ -7,12 +7,16 @@
 
 namespace {
 
-std::string read_kmsgrab_source() {
-  const auto path = std::filesystem::path {POLARIS_SOURCE_DIR} / "src/platform/linux/kmsgrab.cpp";
+std::string read_source(const char *relative) {
+  const auto path = std::filesystem::path {POLARIS_SOURCE_DIR} / relative;
   std::ifstream file {path};
   std::ostringstream buffer;
   buffer << file.rdbuf();
   return buffer.str();
+}
+
+std::string read_kmsgrab_source() {
+  return read_source("src/platform/linux/kmsgrab.cpp");
 }
 
 }  // namespace
@@ -24,7 +28,10 @@ TEST(KmsgrabLoggingSource, AutoProbeSetcapGuidanceIsNotFatalOnWayland) {
   // host never enabled KMS, and the probe runs at each capture evaluation, so it says so once, as info.
   const auto probe = source.find("note_kms_capture_refused_for_capability();");
   ASSERT_NE(probe, std::string::npos);
-  const auto chosen = source.find("if (config::video.capture == \"kms\") {", probe);
+  const auto chosen = source.find(
+    "if (stream_display_policy::canonical_capture_backend(config::video.capture) == \"kms\") {",
+    probe
+  );
   const auto fatal_line = source.find("BOOST_LOG(fatal)", probe);
   const auto once = source.find("std::call_once(said,", probe);
   const auto quiet = source.find("BOOST_LOG(info) << \"KMS capture is off on this host, so Polaris captures another way.", probe);
@@ -46,6 +53,19 @@ TEST(KmsgrabLoggingSource, AutoProbeSetcapGuidanceIsNotFatalOnWayland) {
   EXPECT_LT(probe - held, 700u);
 }
 
+TEST(KmsgrabLoggingSource, AHostSetToDrmIsReadAsTheKmsHostItIs) {
+  // Dispatch, the capture evaluation and the refusal record all read drm as kms. The probe's own
+  // lines compared the literal, so a drm host refused the capability was recorded as having asked
+  // for KMS and told in the same breath that it needs KMS only if it wants it.
+  const auto source = read_kmsgrab_source();
+  EXPECT_EQ(source.find("config::video.capture == \"kms\""), std::string::npos);
+  EXPECT_EQ(source.find("config::video.capture != \"kms\""), std::string::npos);
+  EXPECT_NE(
+    source.find("stream_display_policy::canonical_capture_backend(config::video.capture) != \"kms\""),
+    std::string::npos
+  ) << "the X11 fallback for a driver without atomic mode setting reads drm as no KMS choice again";
+}
+
 TEST(KmsgrabLoggingSource, VirtualDisplayCardsDoNotWarnAboutRenderNodesOrNvenc) {
   const auto source = read_kmsgrab_source();
 
@@ -58,9 +78,34 @@ TEST(KmsgrabLoggingSource, VirtualDisplayCardsDoNotWarnAboutRenderNodesOrNvenc) 
   EXPECT_LT(nvenc - guard, 300u);
 }
 
-TEST(KmsgrabLoggingSource, MissingCapabilityGuidanceSaysUpdatesDropIt) {
+TEST(KmsgrabLoggingSource, MissingCapabilityGuidanceNamesTheHelperNotEveryUpdate) {
   const auto source = read_kmsgrab_source();
 
-  EXPECT_NE(source.find("[sudo -H polaris --setup-host --enable-kms] after each install or update"), std::string::npos);
+  // Since 1.4.13 the capability is on the polaris-kms package's helper, which updates keep. Telling
+  // someone to rerun --enable-kms after every update sends them to redo what the package already
+  // keeps, and while a drop-in is parked until a login, a rerun alone only parks it again.
+  EXPECT_EQ(source.find("after each install or update"), std::string::npos);
+  EXPECT_EQ(source.find("replaces the binary without it"), std::string::npos);
+  EXPECT_NE(source.find("DRM/KMS helper in the polaris-kms package, which updates \"sv"), std::string::npos);
+  EXPECT_NE(source.find("run [sudo -H polaris --setup-host --enable-kms] once"), std::string::npos);
+  EXPECT_NE(source.find("since it may ask for a new login first"), std::string::npos);
   EXPECT_EQ(source.find("sudo setcap cap_sys_admin+ep $(readlink -f $(which polaris))"), std::string::npos);
+}
+
+TEST(KmsgrabLoggingSource, EveryOtherKmsSetupAdviceNamesTheHelperNotEveryUpdate) {
+  // #174 took the rerun-after-every-update advice out of kmsgrab. The launch refusal and the
+  // command line help still said it, and both reach people who already have the helper.
+  const auto video = read_source("src/video.cpp");
+  EXPECT_EQ(video.find("Every Polaris install or update needs this again."), std::string::npos);
+  EXPECT_NE(video.find("run sudo -H polaris --setup-host --enable-kms once and do what it prints"), std::string::npos);
+  EXPECT_NE(video.find("The polaris-kms package keeps the capability across updates."), std::string::npos);
+
+  const auto logging = read_source("src/logging.cpp");
+  EXPECT_EQ(logging.find("every install or update removes it again"), std::string::npos);
+  EXPECT_EQ(logging.find("also grant this binary cap_sys_admin"), std::string::npos);
+  EXPECT_NE(logging.find("point the user service at the polaris-kms helper"), std::string::npos);
+
+  const auto troubleshooting = read_source("docs/troubleshooting.md");
+  EXPECT_EQ(troubleshooting.find("run the step again after every install or update"), std::string::npos);
+  EXPECT_NE(troubleshooting.find("helper of its own, which updates keep"), std::string::npos);
 }

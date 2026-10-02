@@ -97,6 +97,18 @@ namespace confighttp {
   nlohmann::json augment_stream_stats_json(nlohmann::json stats_json, const stream_stats::stats_t &stats);
 
   /**
+   * @brief The stream stats, with their Doctor given the encoder selection
+   *        nvhttp::stream_stats_encoder_selection_json() answers.
+   */
+  nlohmann::json stream_stats_json(const stream_stats::stats_t &stats);
+
+  /**
+   * @brief What GET /api/stats/stream and its SSE variant serve: stream_stats_json() with the
+   *        blocks augment_stream_stats_json() adds.
+   */
+  std::string stream_stats_payload(const stream_stats::stats_t &stats);
+
+  /**
    * @brief What the first-run GPU step shows: each GPU, the encoder Polaris will use and why,
    *        the encoders that can start, and what is missing for hardware encoding.
    */

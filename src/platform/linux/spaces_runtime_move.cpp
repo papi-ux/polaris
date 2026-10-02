@@ -4,6 +4,7 @@
  */
 #include "spaces_runtime_move.h"
 #ifdef __linux__
+#include "multiseat_profile_network.h"
 #include "spaces_host_admin.h"
 #include "spaces_setup_service.h"
 #include "src/logging.h"
@@ -17,6 +18,13 @@ namespace multiseat::spaces {
     using json = nlohmann::json;
     std::mutex installed_mutex;
     std::shared_ptr<move_service_t> installed;
+
+    // What the exception being handled says, for the log. Call it only inside a catch block.
+    std::string handled_exception() {
+      try { throw; }
+      catch (const std::exception &e) { return e.what(); }
+      catch (...) { return "an exception that is not a std::exception"; }
+    }
 
     bool image_id(std::string_view value) {
       return value.size() == 71 && value.starts_with("sha256:") &&
@@ -320,6 +328,69 @@ namespace multiseat::spaces {
     return {{202, "Creating the Space"}, facts.choice.runtime};
   }
 
+  namespace {
+    // Why no runtime of a family fits this PC, for the log. The code is the one the Spaces page shows.
+    std::string unfit_runtime_cause(const std::string &family, const std::optional<std::string> &nvidia_driver,
+      const std::string &code) {
+      if (code == "runtime_not_published") return "this build publishes no " + family + " runtime (" + code + ")";
+      const std::string graphics = !nvidia_driver ? "no NVIDIA driver is loaded" : nvidia_driver->empty() ?
+        "the loaded NVIDIA driver's version could not be read" : "NVIDIA driver " + *nvidia_driver + " is loaded";
+      return "no " + family + " runtime fits this PC, where " + graphics + " (" + code + ")";
+    }
+
+    // Why a first Space waits for its runtime, in words. The status and code are the page's
+    // vocabulary, and "available" there means published but not on this PC.
+    std::string absent_runtime_cause(const runtime_t &runtime, const runtime_facts_t &facts) {
+      if (facts.code == "not_downloaded")
+        return "Docker holds no image for runtime " + runtime.id + " yet (" + facts.code + ")";
+      if (facts.code == "runtime_identity_mismatch")
+        return "the image Docker holds for runtime " + runtime.id + " is not the one this build pins (" + facts.code + ")";
+      if (facts.code == "inspection_failed")
+        return "Docker at " + container::options_t {}.daemon_socket.string() + " gave no usable answer about runtime " +
+          runtime.id + ": it may be stopped, or this Polaris may not be allowed to use it (" + facts.code + ")";
+      return "runtime " + runtime.id + " is " + facts.status + " here (" + facts.code + ")";
+    }
+  }  // namespace
+
+  profiles::change_result_t create_space_in_catalog(const std::filesystem::path &path,
+    const profiles::space_create_request_t &request, container::host_t &host,
+    const std::optional<std::vector<runtime_t>> &runtimes, const std::optional<std::string> &nvidia_driver,
+    runtime_inspection_cache_t *cache) {
+    if (!request.family.empty() && runtimes) {
+      // Read the catalog and let go of it: the lease this takes is the same one
+      // the write needs, so holding it here would refuse every first Space of a
+      // launcher. A Space counts only when create_space could copy it, which is
+      // also how the Spaces owner counted before it asked for this one.
+      bool have_one = false;
+      {
+        const auto existing = profiles::load(path);
+        have_one = existing && std::any_of(existing->catalog.profiles.begin(), existing->catalog.profiles.end(),
+          [&](const auto &entry) {
+            return runtime_profile_name(entry.storage.runtime_profile) == request.family && !entry.archived &&
+              container::supported_streaming_workload(entry.storage.runtime_profile, entry.workload);
+          });
+      }
+      if (!have_one) {
+        const auto choice = choose_runtime(*runtimes, nvidia_driver, request.family);
+        if (!choice.runtime)
+          return {.error = "This Polaris build has no gaming runtime for that launcher.",
+            .cause = unfit_runtime_cause(request.family, nvidia_driver, choice.code)};
+        const auto facts = inspect_runtime(host, *runtimes, nvidia_driver, true, cache, request.family);
+        if (facts.status != "ready")
+          return {.error = std::string(profiles::space_runtime_not_downloaded.message),
+            .cause = absent_runtime_cause(*choice.runtime, facts), .refusal = profiles::space_runtime_not_downloaded};
+        // The Space names the image Docker reported for the verified runtime,
+        // as setup names Steam's. The containerd image store, the default on a
+        // fresh Docker 29, knows it only by the manifest digest it was pulled
+        // by, so the catalog's config digest named nothing there, and every
+        // first Space made this way was refused (#664).
+        return profiles::create_first_space(path, {request.request_id, request.name},
+          facts.image, request.family, host);
+      }
+    }
+    return profiles::create_space(path, request, host);
+  }
+
   std::optional<move_request_t> decode_move_request(std::string_view payload) {
     if (payload.empty() || payload.size() > 4096) return std::nullopt;
     try {
@@ -489,7 +560,10 @@ namespace multiseat::spaces {
       lock.unlock();
       runtime_install_result_t installed;
       try { installed = operations_.install(job.target, stop); }
-      catch (...) { installed = {false, "setup_failed", "The runtime could not be checked. Retry to check again.", {}}; }
+      catch (...) {
+        BOOST_LOG(warning) << "Checking runtime " << job.target.id << " failed: " << handled_exception();
+        installed = {false, "setup_failed", "The runtime could not be checked. Retry to check again.", {}};
+      }
       lock.lock();
       if (stop.stop_requested()) {
         finish(503, "failed", "download_cancelled", stopped, again);
@@ -514,7 +588,10 @@ namespace multiseat::spaces {
         profile_launch_result_t created {503, "Spaces are shutting down.", "spaces_stopping"};
         for (;;) {
           try { created = operations_.create(creation); }
-          catch (...) { created = {503, "The Space could not be created.", "spaces_change_not_saved", "Refresh Spaces and try again."}; }
+          catch (...) {
+            BOOST_LOG(warning) << "Creating the Space " << creation.name << " failed: " << handled_exception();
+            created = {503, "The Space could not be created.", "spaces_change_not_saved", "Refresh Spaces and try again."};
+          }
           if (created.status != 202 || stop.stop_requested()) break;
           for (auto waited = std::chrono::milliseconds::zero(); waited < retry_delay_ && !stop.stop_requested();
                waited += std::chrono::milliseconds(10))
@@ -543,7 +620,10 @@ namespace multiseat::spaces {
       profile_launch_result_t moved {503, "Spaces are shutting down.", "spaces_stopping"};
       for (;;) {
         try { moved = operations_.move(move); }
-        catch (...) { moved = {503, "The Space could not be moved.", "spaces_change_not_saved", "Refresh Spaces and try again."}; }
+        catch (...) {
+          BOOST_LOG(warning) << "Moving Space " << move.profile_id << " failed: " << handled_exception();
+          moved = {503, "The Space could not be moved.", "spaces_change_not_saved", "Refresh Spaces and try again."};
+        }
         if (moved.status != 202 || stop.stop_requested()) break;
         for (auto waited = std::chrono::milliseconds::zero(); waited < retry_delay_ && !stop.stop_requested();
              waited += std::chrono::milliseconds(10))

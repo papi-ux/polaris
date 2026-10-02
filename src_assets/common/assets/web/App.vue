@@ -148,6 +148,7 @@
       </div>
 
       <div class="relative z-[1] mx-auto max-w-[1360px] px-5 py-5 md:px-6 md:py-6">
+        <SettingsUnreadableBanner v-if="settingsBannerVisible" />
         <div :key="pageKey" class="page-enter">
           <router-view :key="$route.path" />
         </div>
@@ -169,11 +170,13 @@ import { useI18n } from 'vue-i18n'
 import CommandPalette from './CommandPalette.vue'
 import Toast from './components/Toast.vue'
 import SpaceParticles from './components/SpaceParticles.vue'
+import SettingsUnreadableBanner from './components/SettingsUnreadableBanner.vue'
 import ThemeToggle from './ThemeToggle.vue'
 import { initTheme } from './theme.js'
 import { clearCachedConfig, getCachedConfig } from './config-cache.js'
 import { markWebUiUnauthenticated, webUiAuthenticated } from './auth-state.js'
-import { isPublicRoute } from './router-helpers.js'
+import { isPublicRoute, normalizeRoutePath } from './router-helpers.js'
+import { settingsUnreadable, showsSettingsBanner } from './settings-unreadable.js'
 import { createNavSections, getNavItemByPath } from './nav-metadata.js'
 import { buildUpdateCenterState, isPrereleaseOptIn, updateStatusLightClass } from './update-center.js'
 
@@ -234,6 +237,9 @@ const sidebarUpdateStatusLightClass = computed(() => updateStatusLightClass(side
 const showNav = computed(() => {
   return webUiAuthenticated.value && !isPublicRoute(route.path)
 })
+// A refused settings file (#782) is said on every signed-in page but Settings,
+// which says it in place of its form.
+const settingsBannerVisible = computed(() => showsSettingsBanner(settingsUnreadable.value, normalizeRoutePath(route.path)))
 
 async function loadAppVersion() {
   if (appVersion.value || appVersionLoading.value) return

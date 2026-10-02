@@ -4,6 +4,7 @@ import { nextTick } from 'vue'
 
 import ConfigView from './views/ConfigView.vue'
 import { requestHostRestart } from './restart-host.js'
+import { reportSettingsReadable, settingsUnreadable } from './settings-unreadable.js'
 
 const mockToast = vi.fn()
 
@@ -63,7 +64,7 @@ function flushConfigLoad() {
   return Promise.resolve().then(() => Promise.resolve()).then(() => nextTick())
 }
 
-function mountConfigView(config = {}) {
+function mountConfigView(config = {}, firstResponse = null) {
   global.fetch = vi.fn(() => Promise.resolve({
     status: 200,
     json: () => Promise.resolve({
@@ -78,6 +79,7 @@ function mountConfigView(config = {}) {
       ...config,
     }),
   }))
+  if (firstResponse) global.fetch.mockResolvedValueOnce(firstResponse)
 
   return shallowMount(ConfigView, {
     attachTo: document.body,
@@ -405,5 +407,137 @@ describe('ConfigView pending changes review', () => {
     const body = JSON.parse(saveRequest[1].body)
     expect(body).toHaveProperty('clear_steamgriddb_api_key', true)
     expect(body).toHaveProperty('steamgriddb_api_key', '')
+  })
+})
+
+// #782: a refused settings file left Settings on its loading skeleton forever.
+describe('ConfigView when the host refuses its settings file', () => {
+  const refusal = {
+    path: '/srv/polaris/polaris.conf',
+    reason: 'It is writable by its group (mode 0664), and the settings store refuses a file another user can change.',
+    fix: 'Restrict it with "chmod go-w /srv/polaris/polaris.conf".',
+  }
+  const refused = () => ({
+    ok: false,
+    status: 503,
+    headers: new Headers({ 'content-type': 'application/json' }),
+    json: async () => ({ status: false, error: 'config_unreadable', ...refusal }),
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+    mockToast.mockClear()
+    vi.restoreAllMocks()
+    delete global.fetch
+    reportSettingsReadable()
+  })
+
+  // A save on a refused file answered 412 "Settings changed" with If-Match, or
+  // 400 "Failed to write config file" without it, and Settings toasted either.
+  it('names the reason and the fix when the host refuses to save, and keeps the edits', async () => {
+    const wrapper = mountConfigView({ configuration_revision: 'a'.repeat(64) })
+    await flushConfigLoad()
+    wrapper.vm.config.max_bitrate = 42000
+    global.fetch.mockResolvedValueOnce(refused())
+
+    await expect(wrapper.vm.save()).resolves.toBe(false)
+    await flushPromises()
+
+    const [url, request] = global.fetch.mock.calls.at(-1)
+    expect(url).toBe('./api/config')
+    expect(request.method).toBe('POST')
+    expect(request.headers['If-Match']).toBe(`"${'a'.repeat(64)}"`)
+    expect(mockToast).toHaveBeenCalledTimes(1)
+    expect(mockToast).toHaveBeenCalledWith(`config.save_unreadable ${refusal.reason} ${refusal.fix}`, 'error', 12000)
+    expect(wrapper.find('[data-settings-unreadable-reason]').text()).toBe(refusal.reason)
+    expect(wrapper.find('[data-settings-unreadable-fix]').text()).toBe(refusal.fix)
+    expect(wrapper.find('[data-settings-unreadable-desc]').text()).toBe('config.unreadable_desc_loaded')
+    expect(wrapper.vm.config.max_bitrate).toBe(42000)
+    expect(settingsUnreadable.value).toEqual(refusal)
+    wrapper.unmount()
+  })
+
+  it('names the file, the reason and the fix instead of loading forever, and loads once it is fixed', async () => {
+    const wrapper = mountConfigView({}, refused())
+    await flushPromises()
+
+    const panel = wrapper.find('[data-settings-unreadable]')
+    expect(panel.exists()).toBe(true)
+    expect(panel.attributes('role')).toBe('alert')
+    expect(wrapper.find('[data-settings-unreadable-path]').text()).toBe(refusal.path)
+    expect(wrapper.find('[data-settings-unreadable-reason]').text()).toBe(refusal.reason)
+    expect(wrapper.find('[data-settings-unreadable-fix]').text()).toBe(refusal.fix)
+    expect(wrapper.find('[data-settings-unreadable-desc]').text()).toBe('config.unreadable_desc')
+    expect(wrapper.find('[data-settings-loading]').exists()).toBe(false)
+    expect(wrapper.find('.settings-workspace').exists()).toBe(false)
+    expect(wrapper.vm.config).toBe(null)
+
+    await wrapper.find('[data-settings-unreadable-retry]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-settings-unreadable]').exists()).toBe(false)
+    expect(wrapper.find('.settings-workspace').exists()).toBe(true)
+    expect(wrapper.vm.config.sunshine_name).toBe('Old Host')
+    wrapper.unmount()
+  })
+
+  it('says so when the host comes back from a restart unable to read its settings, and keeps local edits', async () => {
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+    let callbacks
+    requestHostRestart.mockImplementationOnce((value) => { callbacks = value; return Promise.resolve() })
+    global.fetch.mockResolvedValueOnce({ status: 200, json: async () => ({ status: true }) })
+    wrapper.vm.apply()
+    await flushPromises()
+    wrapper.vm.config.max_bitrate = 42000
+    global.fetch.mockResolvedValueOnce(refused())
+    callbacks.onReady({ ready: true, attempts: 1, settingsUnreadable: refusal })
+    await flushPromises()
+
+    expect(wrapper.find('[data-settings-unreadable-reason]').text()).toBe(refusal.reason)
+    expect(wrapper.find('[data-settings-unreadable-fix]').text()).toBe(refusal.fix)
+    expect(wrapper.vm.config.max_bitrate).toBe(42000)
+    expect(mockToast).toHaveBeenCalledWith('config.restart_ready_unreadable', 'error', 8000)
+    expect(mockToast).not.toHaveBeenCalledWith('config.restart_ready', 'success', 5000)
+    wrapper.unmount()
+  })
+
+  it('says edits cannot be saved while settings stay on screen, and clears once a save goes through', async () => {
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+    // Settings are on screen when the file turns unreadable, and the form stays.
+    global.fetch.mockResolvedValueOnce(refused())
+    wrapper.vm.retrySettings()
+    await flushPromises()
+    expect(wrapper.find('[data-settings-unreadable]').exists()).toBe(true)
+    expect(wrapper.find('.settings-workspace').exists()).toBe(true)
+    expect(wrapper.find('[data-settings-unreadable-desc]').text()).toBe('config.unreadable_desc_loaded')
+
+    // The file was fixed and a save went through, which means the host read it.
+    wrapper.vm.config.max_bitrate = 42000
+    global.fetch.mockResolvedValueOnce({
+      status: 200,
+      json: async () => ({ status: true, configuration_revision: 'c'.repeat(64), restart_required: false }),
+    })
+    await expect(wrapper.vm.save()).resolves.toBe(true)
+    await flushPromises()
+    expect(wrapper.find('[data-settings-unreadable]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('says a settings request failed when the failure is not a refusal', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const wrapper = mountConfigView({}, {
+      ok: false,
+      status: 500,
+      headers: new Headers({ 'content-type': 'text/plain' }),
+      json: async () => { throw new SyntaxError('not JSON') },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-settings-load-failed]').exists()).toBe(true)
+    expect(wrapper.find('[data-settings-unreadable]').exists()).toBe(false)
+    expect(wrapper.find('[data-settings-loading]').exists()).toBe(false)
+    expect(logged).toHaveBeenCalledWith(new Error('Config request failed with status 500'))
+    wrapper.unmount()
   })
 })

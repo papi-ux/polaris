@@ -202,6 +202,43 @@ describe('router helpers', () => {
     })
   })
 
+  // #782: the probe took a refused settings file for a host that was down and
+  // parked the console on Reconnecting. The handler only reads the file after
+  // authenticating the request, so the refusal proves a signed-in session.
+  it('lets a signed-in session through when the host refuses its settings file', async () => {
+    const refusal = {
+      path: '/srv/polaris/polaris.conf',
+      reason: 'It is writable by its group (mode 0664), and the settings store refuses a file another user can change.',
+      fix: 'Restrict it with "chmod go-w /srv/polaris/polaris.conf".',
+    }
+    const result = await probeWebUiAuth(async () => ({
+      body: { cancel: vi.fn(async () => {}) },
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: vi.fn(async () => ({ status: false, error: 'config_unreadable', ...refusal })),
+      ok: false,
+      redirected: false,
+      status: 503,
+      url: 'https://127.0.0.1:47990/api/config',
+    }))
+
+    expect(result).toEqual({
+      state: AUTH_PROBE_STATE.authenticated,
+      config: null,
+      settingsUnreadable: refusal,
+    })
+
+    // Any other 503 still reads as a host that is not ready.
+    await expect(probeWebUiAuth(async () => ({
+      body: { cancel: vi.fn(async () => {}) },
+      headers: new Headers({ 'content-type': 'application/json' }),
+      json: vi.fn(async () => ({ status: false, error: 'Web UI session validation is temporarily unavailable.' })),
+      ok: false,
+      redirected: false,
+      status: 503,
+      url: 'https://127.0.0.1:47990/api/config',
+    }))).resolves.toEqual({ state: AUTH_PROBE_STATE.unavailable })
+  })
+
   it('accepts only the application/json media type for authenticated config', async () => {
     const response = (contentType) => ({
       body: { cancel: vi.fn(async () => {}) },

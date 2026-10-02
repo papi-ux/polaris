@@ -315,6 +315,8 @@ namespace settings_metadata {
     tuning["adaptive_target_bitrate_kbps"] = stats.adaptive_target_bitrate_kbps;
     tuning["adaptive_base_bitrate_kbps"] = adaptive_state.base_bitrate_kbps;
     tuning["adaptive_min_bitrate_kbps"] = adaptive_state.min_bitrate_kbps;
+    // The controller's session ceiling, not the configured adaptive_bitrate_max:
+    // a stream raises it to its own request. See adaptive_bitrate::state_t.
     tuning["adaptive_max_bitrate_kbps"] = adaptive_state.max_bitrate_kbps;
     tuning["adaptive_bitrate_state"] = adaptive_state.state;
     tuning["adaptive_bitrate_reason"] = adaptive_state.reason;

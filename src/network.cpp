@@ -433,4 +433,93 @@ namespace net {
     return {};
 #endif
   }
+
+  bool is_wake_on_lan_mac(std::string_view mac) {
+    if (mac.size() != 17) {
+      return false;
+    }
+    bool all_zeros = true;
+    bool all_ones = true;
+    for (std::size_t i = 0; i < mac.size(); ++i) {
+      const auto c = static_cast<unsigned char>(mac[i]);
+      if (i % 3 == 2) {
+        if (c != ':') {
+          return false;
+        }
+        continue;
+      }
+      if (!std::isxdigit(c)) {
+        return false;
+      }
+      all_zeros = all_zeros && c == '0';
+      all_ones = all_ones && std::tolower(c) == 'f';
+    }
+    return !all_zeros && !all_ones;
+  }
+
+  std::vector<std::string> default_route_interfaces(std::string_view proc_net_route) {
+    // Each line: "Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT", with
+    // destination, flags and mask in hex. A default route has destination and mask 00000000.
+    // Every line carries RTF_UP, a route on a card with no link included, so only reject is read.
+    constexpr unsigned long route_reject = 0x0200;  // RTF_REJECT
+    std::vector<std::pair<unsigned long, std::string>> routes;
+    std::istringstream lines {std::string {proc_net_route}};
+    std::string line;
+    std::getline(lines, line);  // The header.
+    while (std::getline(lines, line)) {
+      std::istringstream fields {line};
+      std::string name;
+      std::string destination;
+      std::string gateway;
+      std::string flags_hex;
+      std::string refcnt;
+      std::string use;
+      unsigned long metric = 0;
+      std::string mask;
+      if (!(fields >> name >> destination >> gateway >> flags_hex >> refcnt >> use >> metric >> mask)) {
+        continue;
+      }
+      unsigned long flags = 0;
+      if (std::from_chars(flags_hex.data(), flags_hex.data() + flags_hex.size(), flags, 16).ec != std::errc {}) {
+        continue;
+      }
+      if (destination != "00000000" || mask != "00000000" || (flags & route_reject)) {
+        continue;
+      }
+      routes.emplace_back(metric, std::move(name));
+    }
+    std::stable_sort(routes.begin(), routes.end(), [](const auto &a, const auto &b) {
+      return a.first < b.first;
+    });
+    std::vector<std::string> names;
+    for (auto &route : routes) {
+      if (std::find(names.begin(), names.end(), route.second) == names.end()) {
+        names.push_back(std::move(route.second));
+      }
+    }
+    return names;
+  }
+
+  std::string wake_on_lan_mac(const std::vector<host_interface_t> &interfaces, std::string_view request_address, const std::vector<std::string> &default_route_interfaces) {
+    // boost writes a link-local IPv6 address with its zone ("fe80::1%eno1"); the table has none.
+    const auto address = request_address.substr(0, request_address.find('%'));
+    for (const auto &candidate : interfaces) {
+      if (std::find(candidate.addresses.begin(), candidate.addresses.end(), address) != candidate.addresses.end() &&
+          is_wake_on_lan_mac(candidate.mac)) {
+        return candidate.mac;
+      }
+    }
+
+    // WireGuard, Tailscale and loopback have no MAC, and a client that reached the host through
+    // one still needs the card a magic packet can wake: the one the host routes the LAN through.
+    // A card with its cable out keeps its default route, but no packet reaches it.
+    for (const auto &name : default_route_interfaces) {
+      for (const auto &candidate : interfaces) {
+        if (candidate.name == name && candidate.link_up && is_wake_on_lan_mac(candidate.mac)) {
+          return candidate.mac;
+        }
+      }
+    }
+    return std::string {no_wake_on_lan_mac};
+  }
 }  // namespace net

@@ -109,7 +109,7 @@ Two practical settings:
 
 ### Intel
 
-Same advice as AMD: Private Stream, Mesa VA-API, expect SHM capture. On an Arc discrete card, set `adapter_name` so Polaris picks the Arc GPU rather than the integrated one.
+Same advice as AMD: Private Stream, VA-API (through Intel's own VA-API driver), expect SHM capture. On an Arc discrete card, set `adapter_name` so Polaris picks the Arc GPU rather than the integrated one. No Intel GPU has been through release validation yet, so reports of what works and what does not are welcome.
 
 ### Hybrid laptops (an Intel or AMD iGPU next to an NVIDIA card)
 

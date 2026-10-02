@@ -123,11 +123,12 @@ polkit policy the Spaces page asks for administrator approval with
 which is harmless.
 
 If this host captures through DRM/KMS it also has the `polaris-kms` package, which carries the
-privileged capture helper. Remove it the same way and in the same command, or it is left depending
-on a Polaris that is no longer there. Run `sudo -H polaris --setup-host --disable-kms` first, while
-Polaris is still installed: that points the user service back at the packaged binary before the
-helper it names goes away, and a service pointed at a binary that no longer exists cannot start at
-all (systemd reports `status=203/EXEC`).
+privileged capture helper. Run `sudo -H polaris --setup-host --disable-kms` first, while Polaris
+is still installed: that points the user service back at the packaged binary before the helper
+it names goes away, and a service pointed at a binary that no longer exists cannot start at all
+(systemd reports `status=203/EXEC`). Then name `polaris-kms` in the removal command too. pacman
+refuses to remove Polaris while the helper depends on it, and dnf and apt remove the helper
+along with Polaris.
 
 ## 4. What the package does not take with it
 
@@ -193,10 +194,22 @@ Check each of these. On a host that only ever ran the packaged Polaris, most of 
 - **An older host's KMS copy.** Polaris releases before 1.4.13 had you copy the binary to
   `/usr/local/bin/polaris-kms` by hand for DRM/KMS capture. `sudo -H polaris --setup-host
   --disable-kms` removes that copy, its unit drop-in and the capability together, before you remove
-  the package. The [Bazzite guide](bazzite.md#uninstall) also shows the steps by hand.
+  the package. The [Bazzite guide](bazzite.md#optional-drmkms-capture) also shows the steps by hand.
 - **The `polaris-kms` group.** Removing the package leaves the group behind, with whoever was added
   to it still a member. It grants nothing once the helper is gone, so it is harmless to keep, and
   `sudo groupdel polaris-kms` removes it if you would rather it were not there.
+- **The package repository and its key.** Adding the [package repository](repositories.md), by
+  hand or with the one-command install, leaves a repository definition and a trusted signing key
+  that removing Polaris does not touch. On Fedora:
+  ```bash
+  sudo rm -f /etc/yum.repos.d/polaris.repo
+  sudo rpmkeys --delete 58017edffa9f803e07ed26f835f13f14faad15cc
+  ```
+  On Arch and CachyOS, delete the three `[polaris]` lines from `/etc/pacman.conf` first, then the
+  key:
+  ```bash
+  sudo pacman-key --delete 58017EDFFA9F803E07ED26F835F13F14FAAD15CC
+  ```
 
 ## 5. Your data
 
@@ -252,6 +265,8 @@ Follow the [quickstart](quickstart.md) or your distribution's page. Two things t
   ```bash
   sudo -H polaris --setup-host --enable-kms
   ```
-  Log out and back in afterwards the first time, because a session picks up its groups at login.
+  The first time, it adds you to the `polaris-kms` group. A session picks up its groups when it
+  starts, so log out and back in, or reboot where lingering is on (headless boot turns it on),
+  then run it again and do what it prints.
   After that it stays working: the capability belongs to the package, so an upgrade no longer
   takes it away and there is nothing to re-run.

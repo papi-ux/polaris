@@ -31,6 +31,8 @@
           </div>
 
           <div class="mt-6 rounded-[24px] border border-storm/20 bg-deep/35 p-5 sm:p-6">
+            <!-- First-time setup renders outside the signed-in shell, so it carries the banner itself (#782). -->
+            <SettingsUnreadableBanner />
             <div class="mb-5">
               <div class="text-[10px] font-semibold uppercase tracking-eyebrow text-storm">Step {{ currentStep + 1 }} of {{ steps.length }}</div>
               <h2 class="mt-2 text-2xl font-semibold text-silver">{{ stepTitle(steps[currentStep]) }}</h2>
@@ -240,6 +242,7 @@
 
 import { computed, getCurrentInstance, ref, reactive } from 'vue'
 import ResourceCard from '../ResourceCard.vue'
+import SettingsUnreadableBanner from '../components/SettingsUnreadableBanner.vue'
 import WelcomeArtworkStep from '../components/WelcomeArtworkStep.vue'
 import WelcomeAiStep from '../components/WelcomeAiStep.vue'
 import WelcomeGpuStep from '../components/WelcomeGpuStep.vue'
@@ -247,6 +250,8 @@ import WelcomeLaunchModeStep from '../components/WelcomeLaunchModeStep.vue'
 import WelcomeTrustedNetwork from '../components/WelcomeTrustedNetwork.vue'
 import { requestHostRestart } from '../restart-host.js'
 import { saveNeedsRestart } from '../config-save-outcome.js'
+import { readConfigOrNull, readSettingsSaveRefusal } from '../config-cache.js'
+import { reportSettingsReadable, settingsRefusalSentence } from '../settings-unreadable.js'
 
 // The wizard keeps its own $t so the step list can translate titles from script code.
 const instance = getCurrentInstance()
@@ -314,6 +319,12 @@ async function patchConfig(body) {
       },
       body: JSON.stringify(body),
     })
+    // A refused settings file answers with the file, the reason and the fix (#782). The step shows
+    // the reason and the fix where it used to show the bare code, and the banner shows all three.
+    const refusal = await readSettingsSaveRefusal(response)
+    if (refusal) {
+      return { ok: false, error: settingsRefusalSentence($t('welcome.settings_unreadable'), refusal) }
+    }
     let payload = null
     try {
       payload = await response.json()
@@ -323,6 +334,7 @@ async function patchConfig(body) {
     if (!response.ok || payload?.status === false) {
       return { ok: false, error: payload?.error || `HTTP ${response.status}` }
     }
+    reportSettingsReadable()
     // What was saved is now the host's value, so a step opened again starts from it. Secrets
     // are never kept in the page.
     const saved = Object.fromEntries(Object.entries(body).filter(([key]) => !key.endsWith('_api_key') && !key.startsWith('clear_')))
@@ -364,8 +376,10 @@ async function loadConfig() {
   configLoading.value = true
   try {
     const res = await fetch('./api/config', { credentials: 'include' })
-    if (res.ok) {
-      configData.value = await res.json()
+    // A refused settings file reaches the banner; any other failure leaves the steps without settings.
+    const data = await readConfigOrNull(res)
+    if (data) {
+      configData.value = data
     }
   } catch (e) {
     console.error('Failed to load config', e)

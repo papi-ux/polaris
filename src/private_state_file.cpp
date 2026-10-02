@@ -67,21 +67,29 @@ namespace private_state_file {
     struct directory_refusal_t {
       std::string reason;
       directory_remedy_e remedy = directory_remedy_e::none;
+      bool inspected = false;  ///< mode and owner were read from the directory.
+      unsigned mode = 0;
+      unsigned owner = 0;
     };
 
     bool secure_directory_descriptor(int descriptor, bool final_parent, directory_refusal_t *refusal = nullptr) {
-      const auto refuse = [refusal](std::string explanation, directory_remedy_e remedy) {
+      struct stat metadata {};
+      bool inspected = false;
+      const auto refuse = [refusal, &metadata, &inspected](std::string explanation, directory_remedy_e remedy) {
         if (refusal) {
           refusal->reason = std::move(explanation);
           refusal->remedy = remedy;
+          refusal->inspected = inspected;
+          refusal->mode = static_cast<unsigned>(metadata.st_mode & 07777);
+          refusal->owner = static_cast<unsigned>(metadata.st_uid);
         }
         return false;
       };
 
-      struct stat metadata {};
       if (::fstat(descriptor, &metadata) != 0 || !S_ISDIR(metadata.st_mode)) {
         return refuse("it is not a directory this process can inspect", directory_remedy_e::none);
       }
+      inspected = true;
 
       const auto effective_user = ::geteuid();
       const auto writable_by_others = (metadata.st_mode & (S_IWGRP | S_IWOTH)) != 0;
@@ -135,6 +143,16 @@ namespace private_state_file {
       return 0;
     }
 
+    /// Whether a name the walk could not open as a directory is a symbolic link.
+    /// O_DIRECTORY with O_NOFOLLOW fails on one with ENOTDIR on Linux, not ELOOP.
+    bool names_a_symlink(int directory, const std::string &name, int open_error) {
+      if (open_error != ENOTDIR && open_error != ELOOP) {
+        return false;
+      }
+      struct stat metadata {};
+      return ::fstatat(directory, name.c_str(), &metadata, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(metadata.st_mode);
+    }
+
     bool has_component_prefix(const std::filesystem::path &path, const std::filesystem::path &prefix) {
       auto path_component = path.begin();
       for (auto prefix_component = prefix.begin(); prefix_component != prefix.end(); ++prefix_component) {
@@ -148,19 +166,28 @@ namespace private_state_file {
 
     class directory_handle_t {
     public:
-      explicit directory_handle_t(const std::filesystem::path &target, bool create_missing = false):
+      explicit directory_handle_t(const std::filesystem::path &target, bool create_missing = false,
+                                  refusal_log_e refusal_log = refusal_log_e::walk):
           target_name_ {target.filename().string()},
           lock_name_ {target_name_ + ".lock"} {
-        if (target_name_.empty() || target_name_ == "." || target_name_ == "..") {
-          return;
-        }
-
+        const auto unusable = [this](std::filesystem::path where, int error_number, bool holds_file = false) {
+          refusal_.kind = refusal_e::directory_unusable;
+          refusal_.error_number = error_number;
+          refusal_.directory = std::move(where);
+          refusal_.holds_file = holds_file;
+        };
         auto requested_parent = target.parent_path();
         if (requested_parent.empty()) {
           requested_parent = ".";
         }
+        if (target_name_.empty() || target_name_ == "." || target_name_ == "..") {
+          unusable(requested_parent, 0);
+          return;
+        }
+
         for (const auto &component : requested_parent.relative_path()) {
           if (component == "..") {
+            unusable(requested_parent, 0);
             return;
           }
         }
@@ -172,12 +199,14 @@ namespace private_state_file {
           struct stat link_metadata {};
           if (::lstat(trusted_home.c_str(), &link_metadata) == 0 && S_ISLNK(link_metadata.st_mode)) {
             if (link_metadata.st_uid != trusted_home_symlink_owner() || link_metadata.st_nlink != 1) {
+              unusable(trusted_home, 0);
               return;
             }
 
             std::error_code link_error;
             auto resolved_home = std::filesystem::read_symlink(trusted_home, link_error);
             if (link_error) {
+              unusable(trusted_home, link_error.value());
               return;
             }
             if (resolved_home.is_relative()) {
@@ -186,6 +215,7 @@ namespace private_state_file {
             for (const auto &component : resolved_home.relative_path()) {
               const auto name = component.string();
               if (name == "..") {
+                unusable(resolved_home, 0);
                 return;
               }
               if (!name.empty() && name != ".") {
@@ -209,13 +239,21 @@ namespace private_state_file {
             continue;
           }
           if (name == "..") {
+            unusable(path_, 0);
             return;
           }
           components.push_back(name);
         }
 
-        descriptor_ = ::open(path_.is_absolute() ? "/" : ".", directory_open_flags());
-        if (descriptor_ < 0 || !secure_directory_descriptor(descriptor_, components.empty(), nullptr)) {
+        const std::filesystem::path root {path_.is_absolute() ? "/" : "."};
+        descriptor_ = ::open(root.c_str(), directory_open_flags());
+        if (descriptor_ < 0) {
+          unusable(root, errno, components.empty());
+          return;
+        }
+        directory_refusal_t root_refusal;
+        if (!secure_directory_descriptor(descriptor_, components.empty(), &root_refusal)) {
+          refuse_directory(root, root_refusal, components.empty(), false);
           (void) close();
           return;
         }
@@ -236,32 +274,48 @@ namespace private_state_file {
 #else
           int next = ::openat(descriptor_, component.c_str(), directory_open_flags());
 #endif
+          int open_error = next < 0 ? errno : 0;
+          // Name the directory the walk actually refused. Reporting the
+          // state file's parent instead sent one reporter to a directory
+          // whose mode was fine while quoting the mode of another.
+          auto rejected = path_.is_absolute() ? std::filesystem::path {"/"} : std::filesystem::path {};
+          for (std::size_t walked = 0; walked <= index; ++walked) {
+            rejected /= components[walked];
+          }
           bool parent_entry_needs_sync = false;
-          if (next < 0 && errno == ENOENT && create_missing && index >= create_missing_from_component) {
+          if (next < 0 && open_error == ENOENT && create_missing && index >= create_missing_from_component) {
             if (::mkdirat(descriptor_, component.c_str(), S_IRWXU) != 0 && errno != EEXIST) {
+              unusable(rejected, errno, final_parent);
               (void) close();
               return;
             }
             parent_entry_needs_sync = true;
             next = ::openat(descriptor_, component.c_str(), directory_open_flags());
+            open_error = next < 0 ? errno : 0;
           }
           directory_refusal_t refusal;
           if (next < 0 || !secure_directory_descriptor(next, final_parent, &refusal)) {
             if (next >= 0) {
               ::close(next);
-            }
-            if (!refusal.reason.empty()) {
-              // The only place this is ever explained. Everything downstream
-              // reports that a write did not commit, which sends people looking
-              // at the file they were saving rather than at the directory.
-              //
-              // Name the directory the walk actually refused. Reporting the
-              // state file's parent instead sent one reporter to a directory
-              // whose mode was fine while quoting the mode of another.
-              auto rejected = path_.is_absolute() ? std::filesystem::path {"/"} : std::filesystem::path {};
-              for (std::size_t walked = 0; walked <= index; ++walked) {
-                rejected /= components[walked];
+            } else if (open_error == ENOENT) {
+              refusal_.kind = refusal_e::directory_missing;
+              refusal_.directory = rejected;
+              refusal_.holds_file = final_parent;
+            } else {
+              unusable(rejected, open_error, final_parent);
+              if (names_a_symlink(descriptor_, component, open_error)) {
+                refusal_.kind = refusal_e::directory_symlink;
               }
+            }
+            const bool walk_explains = refusal_log == refusal_log_e::walk;
+            if (!refusal.reason.empty()) {
+              refuse_directory(rejected, refusal, final_parent, walk_explains);
+            }
+            if (!refusal.reason.empty() && walk_explains) {
+              // Unless the caller explains it, this is the only place it ever
+              // is. Everything downstream reports that a write did not commit,
+              // which sends people looking at the file they were saving rather
+              // than at the directory.
               std::string remedy;
               switch (refusal.remedy) {
                 case directory_remedy_e::take_ownership:
@@ -296,6 +350,7 @@ namespace private_state_file {
             const bool parent_synchronized = ::fsync(descriptor_) == 0;
 #endif
             if (!parent_synchronized) {
+              unusable(rejected, errno, final_parent);
               ::close(next);
               (void) close();
               return;
@@ -304,12 +359,14 @@ namespace private_state_file {
           const bool parent_closed = ::close(descriptor_) == 0;
 #ifdef POLARIS_TESTS
           if (fault_this_parent && injected_fault == write_fault_e::parent_close) {
+            unusable(rejected, 0, final_parent);
             descriptor_ = -1;
             ::close(next);
             return;
           }
 #endif
           if (!parent_closed) {
+            unusable(rejected, errno, final_parent);
             descriptor_ = -1;
             ::close(next);
             return;
@@ -352,6 +409,11 @@ namespace private_state_file {
         return path_;
       }
 
+      /// Why the walk gave up; empty when it reached the directory.
+      const refusal_t &refusal() const {
+        return refusal_;
+      }
+
       bool sync() const {
         return descriptor_ >= 0 && ::fsync(descriptor_) == 0;
       }
@@ -365,10 +427,33 @@ namespace private_state_file {
       }
 
     private:
+      void refuse_directory(const std::filesystem::path &where, const directory_refusal_t &refusal,
+                            bool holds_file, bool logged) {
+        switch (refusal.remedy) {
+          case directory_remedy_e::take_ownership:
+            refusal_.kind = refusal_e::directory_foreign_owner;
+            break;
+          case directory_remedy_e::restrict_permissions:
+            refusal_.kind = refusal_e::directory_writable;
+            break;
+          case directory_remedy_e::none:
+            refusal_.kind = refusal_e::directory_unusable;
+            break;
+        }
+        refusal_.error_number = 0;
+        refusal_.directory = where;
+        refusal_.holds_file = holds_file;
+        refusal_.inspected = refusal.inspected;
+        refusal_.mode = refusal.mode;
+        refusal_.owner = refusal.owner;
+        refusal_.logged = logged;
+      }
+
       std::filesystem::path path_;
       std::string target_name_;
       std::string lock_name_;
       int descriptor_ = -1;
+      refusal_t refusal_;
     };
 
     class state_file_lock_t {
@@ -388,22 +473,32 @@ namespace private_state_file {
           S_IRUSR | S_IWUSR
         );
         if (descriptor_ < 0) {
+          // Something other than a lock file is in the way: O_NOFOLLOW turns a
+          // link into ELOOP, a folder gives EISDIR and a socket ENXIO. Moving it
+          // aside fixes those; the rest are about access to the folder.
+          const int error_number = errno;
+          const bool in_the_way = error_number == ELOOP || error_number == EISDIR || error_number == ENXIO;
+          refuse(in_the_way ? refusal_e::lock_unsafe : refusal_e::lock_unavailable, error_number);
           return;
         }
         struct stat metadata {};
-        if (::fstat(descriptor_, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
-            metadata.st_uid != ::geteuid() || metadata.st_nlink != 1 ||
-            ::fchmod(descriptor_, S_IRUSR | S_IWUSR) != 0) {
-          ::close(descriptor_);
-          descriptor_ = -1;
+        if (::fstat(descriptor_, &metadata) != 0) {
+          refuse(refusal_e::lock_unavailable, errno);
+          return;
+        }
+        if (!S_ISREG(metadata.st_mode) || metadata.st_uid != ::geteuid() || metadata.st_nlink != 1) {
+          refuse(refusal_e::lock_unsafe, 0);
+          return;
+        }
+        if (::fchmod(descriptor_, S_IRUSR | S_IWUSR) != 0) {
+          refuse(refusal_e::lock_unavailable, errno);
           return;
         }
         while (::flock(descriptor_, LOCK_EX | (wait ? 0 : LOCK_NB)) != 0) {
           if (errno == EINTR) {
             continue;
           }
-          ::close(descriptor_);
-          descriptor_ = -1;
+          refuse(errno == EWOULDBLOCK ? refusal_e::lock_busy : refusal_e::lock_unavailable, errno);
           return;
         }
         locked_ = true;
@@ -427,9 +522,24 @@ namespace private_state_file {
         return locked_;
       }
 
+      /// Why the sidecar could not be locked; empty when it was.
+      const refusal_t &refusal() const {
+        return refusal_;
+      }
+
     private:
+      void refuse(refusal_e kind, int error_number) {
+        refusal_.kind = kind;
+        refusal_.error_number = error_number;
+        if (descriptor_ >= 0) {
+          ::close(descriptor_);
+          descriptor_ = -1;
+        }
+      }
+
       bool locked_ = false;
       int descriptor_ = -1;
+      refusal_t refusal_;
     };
 
     std::string make_temporary_name(std::string_view target_name) {
@@ -487,17 +597,28 @@ namespace private_state_file {
 #ifdef O_NOFOLLOW
     flags |= O_NOFOLLOW;
 #endif
+    const auto refused = [](read_status_e status, refusal_e kind, int error_number = 0) {
+      return read_result_t {.status = status, .refusal = {.kind = kind, .error_number = error_number}};
+    };
     int descriptor = ::openat(directory.descriptor(), directory.target_name().c_str(), flags);
     if (descriptor < 0) {
-      if (errno == ENOENT) {
-        return {.status = read_status_e::missing};
+      const int error_number = errno;
+      if (error_number == ENOENT) {
+        return refused(read_status_e::missing, refusal_e::missing);
       }
 #ifdef ELOOP
-      if (errno == ELOOP) {
-        return {.status = read_status_e::rejected};
+      if (error_number == ELOOP) {
+        return refused(read_status_e::rejected, refusal_e::symlink);
       }
 #endif
-      return {.status = read_status_e::io_error};
+      if (error_number == EACCES || error_number == EPERM) {
+        return refused(read_status_e::io_error, refusal_e::permission_denied, error_number);
+      }
+      if (error_number == ENXIO || error_number == ENODEV) {
+        // A socket, or a device node with nothing behind it.
+        return refused(read_status_e::io_error, refusal_e::not_regular, error_number);
+      }
+      return refused(read_status_e::io_error, refusal_e::read_failed, error_number);
     }
     const auto close_descriptor = [&]() {
       if (descriptor < 0) {
@@ -509,14 +630,42 @@ namespace private_state_file {
 
     struct stat metadata {};
     if (::fstat(descriptor, &metadata) != 0) {
+      const int error_number = errno;
       (void) close_descriptor();
-      return {.status = read_status_e::io_error};
+      return refused(read_status_e::io_error, refusal_e::read_failed, error_number);
     }
-    if (!S_ISREG(metadata.st_mode) || metadata.st_uid != ::geteuid() || metadata.st_nlink != 1 ||
-        (metadata.st_mode & (permit_public_read ? (S_IWGRP | S_IWOTH) : (S_IRWXG | S_IRWXO))) != 0 || metadata.st_size < 0 ||
-        static_cast<std::uintmax_t>(metadata.st_size) > max_bytes) {
+    const auto inspected = [&metadata](read_result_t result) {
+      result.refusal.inspected = true;
+      result.refusal.mode = static_cast<unsigned>(metadata.st_mode & 07777);
+      result.refusal.owner = static_cast<unsigned>(metadata.st_uid);
+      result.refusal.links = static_cast<std::uintmax_t>(metadata.st_nlink);
+      result.refusal.size = metadata.st_size < 0 ? 0 : static_cast<std::uintmax_t>(metadata.st_size);
+      return result;
+    };
+    const auto rejected = [&](refusal_e kind) {
       (void) close_descriptor();
-      return {.status = read_status_e::rejected};
+      return inspected(refused(read_status_e::rejected, kind));
+    };
+    if (!S_ISREG(metadata.st_mode)) {
+      return rejected(refusal_e::not_regular);
+    }
+    if (metadata.st_uid != ::geteuid()) {
+      return rejected(refusal_e::foreign_owner);
+    }
+    if (metadata.st_nlink != 1) {
+      return rejected(refusal_e::hard_linked);
+    }
+    if ((metadata.st_mode & S_IWOTH) != 0) {
+      return rejected(refusal_e::other_writable);
+    }
+    if ((metadata.st_mode & S_IWGRP) != 0) {
+      return rejected(refusal_e::group_writable);
+    }
+    if (!permit_public_read && (metadata.st_mode & (S_IRWXG | S_IRWXO)) != 0) {
+      return rejected(refusal_e::not_private);
+    }
+    if (metadata.st_size < 0 || static_cast<std::uintmax_t>(metadata.st_size) > max_bytes) {
+      return rejected(refusal_e::oversize);
     }
 
     std::string payload(static_cast<std::size_t>(metadata.st_size), '\0');
@@ -527,12 +676,14 @@ namespace private_state_file {
         if (errno == EINTR) {
           continue;
         }
+        const int error_number = errno;
         (void) close_descriptor();
-        return {.status = read_status_e::io_error};
+        return inspected(refused(read_status_e::io_error, refusal_e::read_failed, error_number));
       }
       if (read_count == 0) {
+        // It shrank under us.
         (void) close_descriptor();
-        return {.status = read_status_e::io_error};
+        return inspected(refused(read_status_e::io_error, refusal_e::size_changed));
       }
       offset += static_cast<std::size_t>(read_count);
     }
@@ -541,12 +692,14 @@ namespace private_state_file {
     do {
       extra_count = ::read(descriptor, &extra, 1);
     } while (extra_count < 0 && errno == EINTR);
+    const int extra_error = extra_count < 0 ? errno : 0;
     const bool closed = close_descriptor();
     if (extra_count < 0 || !closed) {
-      return {.status = read_status_e::io_error};
+      return inspected(refused(read_status_e::io_error, refusal_e::read_failed, extra_count < 0 ? extra_error : errno));
     }
     if (extra_count > 0) {
-      return {.status = read_status_e::rejected};
+      // It grew under us.
+      return inspected(refused(read_status_e::rejected, refusal_e::size_changed));
     }
     return {.status = read_status_e::ok, .payload = std::move(payload)};
   }
@@ -671,11 +824,11 @@ namespace private_state_file {
   }
 
   read_result_t read_secure(const std::filesystem::path &target, std::size_t max_bytes,
-                            bool permit_public_read, bool wait_for_lock) {
-    directory_handle_t directory {target};
-    if (!directory) return {.status = read_status_e::io_error};
+                            bool permit_public_read, bool wait_for_lock, refusal_log_e refusal_log) {
+    directory_handle_t directory {target, false, refusal_log};
+    if (!directory) return {.status = read_status_e::io_error, .refusal = directory.refusal()};
     state_file_lock_t lock {directory, wait_for_lock};
-    if (!lock) return {.status = read_status_e::io_error};
+    if (!lock) return {.status = read_status_e::io_error, .refusal = lock.refusal()};
     return read_locked(directory, max_bytes, permit_public_read);
   }
 
@@ -686,7 +839,8 @@ namespace private_state_file {
       explicit lease_t(const std::filesystem::path &path) : directory(path), lock(directory, false) {}
     };
     auto lease = std::make_shared<lease_t>(target);
-    if (!lease->directory || !lease->lock) return {};
+    if (!lease->directory) return {.read = {.status = read_status_e::io_error, .refusal = lease->directory.refusal()}};
+    if (!lease->lock) return {.read = {.status = read_status_e::io_error, .refusal = lease->lock.refusal()}};
     auto result = read_locked(lease->directory, max_bytes, false);
     if (!result) return {.read = std::move(result)};
     return {.read = std::move(result), .lease = std::move(lease)};
@@ -694,25 +848,52 @@ namespace private_state_file {
 
   write_result_t write_atomic(const std::filesystem::path &target, std::string_view payload) {
     directory_handle_t directory {target, true};
-    if (!directory) return {write_status_e::not_committed};
+    if (!directory) return {write_status_e::not_committed, directory.refusal()};
     state_file_lock_t lock {directory};
-    if (!lock) return {write_status_e::not_committed};
+    if (!lock) return {write_status_e::not_committed, lock.refusal()};
     return write_locked(directory, payload);
   }
 
   write_result_t update_atomic(const std::filesystem::path &target, std::size_t max_bytes,
       const std::function<std::optional<std::string>(const read_result_t &)> &update,
-      bool permit_public_read) {
-    directory_handle_t directory {target, true};
-    if (!directory) return {write_status_e::not_committed};
+      bool permit_public_read, refusal_log_e refusal_log) {
+    directory_handle_t directory {target, true, refusal_log};
+    if (!directory) return {write_status_e::not_committed, directory.refusal()};
     state_file_lock_t lock {directory, false};
-    if (!lock) return {write_status_e::not_committed};
+    if (!lock) return {write_status_e::not_committed, lock.refusal()};
     const auto current = read_locked(directory, max_bytes, permit_public_read);
-    if (!current && current.status != read_status_e::missing) return {write_status_e::not_committed};
+    if (!current && current.status != read_status_e::missing) return {write_status_e::not_committed, current.refusal};
     const auto next = update(current);
     if (!next || next->size() > max_bytes) return {write_status_e::not_committed};
     if (current && *next == current.payload) return {write_status_e::committed};
     return write_locked(directory, *next);
+  }
+
+  std::string_view refusal_name(refusal_e kind) {
+    switch (kind) {
+      case refusal_e::none: return "none";
+      case refusal_e::missing: return "missing";
+      case refusal_e::directory_missing: return "directory_missing";
+      case refusal_e::directory_foreign_owner: return "directory_foreign_owner";
+      case refusal_e::directory_writable: return "directory_writable";
+      case refusal_e::directory_unusable: return "directory_unusable";
+      case refusal_e::directory_symlink: return "directory_symlink";
+      case refusal_e::lock_unavailable: return "lock_unavailable";
+      case refusal_e::lock_unsafe: return "lock_unsafe";
+      case refusal_e::lock_busy: return "lock_busy";
+      case refusal_e::permission_denied: return "permission_denied";
+      case refusal_e::symlink: return "symlink";
+      case refusal_e::not_regular: return "not_regular";
+      case refusal_e::foreign_owner: return "foreign_owner";
+      case refusal_e::hard_linked: return "hard_linked";
+      case refusal_e::group_writable: return "group_writable";
+      case refusal_e::other_writable: return "other_writable";
+      case refusal_e::not_private: return "not_private";
+      case refusal_e::oversize: return "oversize";
+      case refusal_e::size_changed: return "size_changed";
+      case refusal_e::read_failed: return "read_failed";
+    }
+    return "read_failed";
   }
 
 #ifdef POLARIS_TESTS

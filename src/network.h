@@ -153,4 +153,57 @@ namespace net {
    *         listens on the port (the bind failed for another reason). Linux only; empty elsewhere.
    */
   std::string describe_port_holder(std::uint16_t port);
+
+  /**
+   * @brief What serverinfo reports as the MAC address when the host has none to give.
+   * @details Moonlight clients, Nova among them, skip exactly this value and keep the MAC they
+   *          stored earlier, so it is how serverinfo says "none".
+   */
+  inline constexpr std::string_view no_wake_on_lan_mac = "00:00:00:00:00:00";
+
+  /**
+   * @brief One of the host's network interfaces, as the Wake-on-LAN MAC choice sees it.
+   */
+  struct host_interface_t {
+    std::string name;  ///< Interface name, such as "eno1" or "wg0".
+    std::string mac;  ///< Hardware address as the OS reports it: empty for WireGuard or Tailscale, zeros for loopback.
+    std::vector<std::string> addresses;  ///< Every IP address on it, without an IPv6 zone.
+    bool link_up = true;  ///< Whether it has a link: a card with its cable out cannot receive a magic packet.
+  };
+
+  /**
+   * @brief Whether a string is a MAC address a Wake-on-LAN packet can target.
+   * @details Six colon separated hex octets that are neither all zeros (loopback, or the
+   *          placeholder) nor all ones (broadcast). The empty address a WireGuard or Tailscale
+   *          interface reports is not one.
+   */
+  bool is_wake_on_lan_mac(std::string_view mac);
+
+  /**
+   * @brief The interfaces holding an IPv4 default route, parsed from /proc/net/route text.
+   * @param proc_net_route The file's content: a header line, then one route per line.
+   * @return Each interface once, lowest metric first, leaving out reject routes. The kernel marks
+   *         every route in this file up, one on a card with its cable out too, so link state has to
+   *         come from the interface table.
+   */
+  std::vector<std::string> default_route_interfaces(std::string_view proc_net_route);
+
+  /**
+   * @brief The MAC address serverinfo gives a paired client for waking this host.
+   * @param interfaces The host's interfaces.
+   * @param request_address The host address the client reached, as addr_to_normalized_string writes it.
+   * @param default_route_interfaces The interfaces holding a default route, preferred first.
+   * @return The MAC of the interface holding request_address when it has a usable one. A request
+   *         over WireGuard, Tailscale or loopback arrives on an interface without one, and then the
+   *         first default route interface with a link and a usable MAC answers: the LAN card a
+   *         magic packet has to reach. no_wake_on_lan_mac when neither has one, never an empty
+   *         string.
+   * @details A client replaces its stored MAC with any value but the placeholder. On a host with
+   *          two cards, where the client's own network reaches the one without the default route,
+   *          a tunnel request therefore swaps the right MAC for the default route card's until the
+   *          client next reaches the host on its own network. The host cannot tell which network
+   *          the client lives on, so this is accepted, and docs/configuration.md says so. A tunnel
+   *          that carries Ethernet, such as ZeroTier, has a MAC of its own and still reports it.
+   */
+  std::string wake_on_lan_mac(const std::vector<host_interface_t> &interfaces, std::string_view request_address, const std::vector<std::string> &default_route_interfaces);
 }  // namespace net

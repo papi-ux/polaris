@@ -1353,6 +1353,87 @@ TEST(PyroWaveEncodeTests, TheFrameWithNoPictureInItLeavesThePathUndecided) {
 }
 
 /**
+ * Each frame with a picture in it says how it reached the codec, and nothing else says anything.
+ *
+ * The stream's encoder selection reason is built from this. It used to be one fixed sentence that
+ * said the colour was converted on the CPU, which has been false on every host with the GPU path
+ * since that became the default.
+ */
+TEST(PyroWaveEncodeTests, TheRouteIsUnknownUntilAFrameWithAPictureTakesOne) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  auto session = make_session_420(width, height);
+  ASSERT_NE(session, nullptr);
+  EXPECT_EQ(session->route(), pyrowave_encode::route_e::unknown);
+
+  ASSERT_TRUE(session->encode_blank(512 * 1024));
+  EXPECT_EQ(session->route(), pyrowave_encode::route_e::unknown) << "the primer decided the route";
+
+  const quadrant_frame_t source {width, height, width * 4};
+  ASSERT_TRUE(session->encode_packed(source.bgra.data(), width, height, source.stride, 512 * 1024));
+  EXPECT_EQ(session->route(), pyrowave_encode::route_e::gpu_upload)
+    << "a frame from host memory had its colour converted on the GPU, and the route does not say so";
+
+  ASSERT_TRUE(session->encode_retained(512 * 1024));
+  EXPECT_EQ(session->route(), pyrowave_encode::route_e::gpu_upload) << "a repeated frame changed the route";
+}
+
+TEST(PyroWaveEncodeTests, TheRouteSaysWhenColourIsConvertedOnTheCpu) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  setenv("POLARIS_PYROWAVE_GPU_INPUT", "off", 1);
+  auto session = make_session_420(width, height);
+  unsetenv("POLARIS_PYROWAVE_GPU_INPUT");
+  ASSERT_NE(session, nullptr);
+
+  const quadrant_frame_t source {width, height, width * 4};
+  ASSERT_TRUE(session->encode_packed(source.bgra.data(), width, height, source.stride, 512 * 1024));
+  ASSERT_FALSE(session->uses_gpu_input());
+  EXPECT_EQ(session->route(), pyrowave_encode::route_e::cpu_convert);
+}
+
+TEST(PyroWaveEncodeTests, TheRouteSaysWhenAFrameArrivedWithoutACopy) {
+  if (!pyrowave_encode::available()) {
+    GTEST_SKIP() << "no Vulkan device this codec can use";
+  }
+  if (!pyrowave_encode::dmabuf_import_available()) {
+    GTEST_SKIP() << "this GPU cannot import a dmabuf";
+  }
+
+  constexpr int width = 640;
+  constexpr int height = 360;
+  const quadrant_frame_t picture {width, height, width * 4};
+  const test_dmabuf_t captured {width, height, picture};
+  if (!captured.ok) {
+    GTEST_SKIP() << "could not allocate a dmabuf on this machine";
+  }
+
+  auto session = make_session_420(width, height);
+  ASSERT_NE(session, nullptr);
+  ASSERT_TRUE(session->encode_imported(captured.buffer, 512 * 1024));
+  EXPECT_EQ(session->route(), pyrowave_encode::route_e::zero_copy);
+
+  // The route is the last frame's, so a frame that had to be copied after all says so.
+  ASSERT_TRUE(session->encode_packed(picture.bgra.data(), width, height, picture.stride, 512 * 1024));
+  EXPECT_EQ(session->route(), pyrowave_encode::route_e::gpu_upload);
+}
+
+TEST(PyroWaveEncodeTests, EachRouteHasTheNameTheStreamStatsUse) {
+  EXPECT_EQ(pyrowave_encode::route_name(pyrowave_encode::route_e::zero_copy), "zero_copy");
+  EXPECT_EQ(pyrowave_encode::route_name(pyrowave_encode::route_e::gpu_upload), "gpu_upload");
+  EXPECT_EQ(pyrowave_encode::route_name(pyrowave_encode::route_e::cpu_convert), "cpu_convert");
+  EXPECT_EQ(pyrowave_encode::route_name(pyrowave_encode::route_e::unknown), "") << "unknown is absent, never named";
+}
+
+/**
  * Every Linux display factory has to recognise this encoder's device type.
  *
  * The encoder asks for one of its own so the portal will offer it a dmabuf, and a factory that does

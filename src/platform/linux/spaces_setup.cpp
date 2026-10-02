@@ -106,26 +106,27 @@ namespace multiseat::spaces {
   runtime_inspection_cache_t::runtime_inspection_cache_t(std::chrono::steady_clock::duration lifetime, now_t now) :
     lifetime_(lifetime), now_(now ? std::move(now) : now_t([] { return std::chrono::steady_clock::now(); })) {}
 
-  runtime_image_e runtime_inspection_cache_t::remember(const std::string &reference, const std::function<runtime_image_e()> &inspect) {
+  runtime_inspection_t runtime_inspection_cache_t::remember(const std::string &reference,
+    const std::function<runtime_inspection_t()> &inspect) {
     std::uint64_t generation;
     {
       std::lock_guard lock(mutex_);
       for (const auto &entry : entries_)
-        if (entry.reference == reference && now_() - entry.checked < lifetime_) return entry.image;
+        if (entry.reference == reference && now_() - entry.checked < lifetime_) return entry.inspection;
       generation = generation_;
     }
-    const auto image = inspect();
+    const auto inspection = inspect();
     // Timeouts and unreadable replies are asked again next time. An answer
     // that raced a download is dropped too: the download may have changed it.
-    if (image != runtime_image_e::unverifiable) {
+    if (inspection.state != runtime_image_e::unverifiable) {
       std::lock_guard lock(mutex_);
       if (generation == generation_) {
         std::erase_if(entries_, [&](const auto &entry) { return entry.reference == reference; });
         if (entries_.size() >= 64) entries_.erase(entries_.begin());
-        entries_.push_back({reference, image, now_()});
+        entries_.push_back({reference, inspection, now_()});
       }
     }
-    return image;
+    return inspection;
   }
 
   void runtime_inspection_cache_t::forget() {
@@ -161,27 +162,29 @@ namespace multiseat::spaces {
       return facts;
     }
     const auto &runtime = *facts.runtime;
-    const auto inspect = [&] {
+    const auto inspect = [&]() -> runtime_inspection_t {
       auto argv = container::command_prefix({});
       argv.insert(argv.end(), {"image", "inspect", runtime.reference()});
       const auto result = host.run(argv, std::chrono::seconds(5), 65536);
-      if (result.timed_out || result.output_truncated) return runtime_image_e::unverifiable;
+      if (result.timed_out || result.output_truncated) return {runtime_image_e::unverifiable};
       if (result.exit_status == 0) {
-        if (verified_runtime_image(runtime, result.output)) return runtime_image_e::verified;
+        if (auto id = verified_runtime_image(runtime, result.output)) return {runtime_image_e::verified, std::move(*id)};
         // Docker described one image under the pinned reference, and it differs.
         const auto images = json::parse(result.output, nullptr, false);
-        return images.is_array() && images.size() == 1 ? runtime_image_e::mismatch : runtime_image_e::unverifiable;
+        return {images.is_array() && images.size() == 1 ? runtime_image_e::mismatch : runtime_image_e::unverifiable};
       }
       // Docker lists what it found, an empty list, and exits 1 when nothing
       // has this reference. The engine answered moments ago.
       std::string_view found = result.output;
       while (!found.empty() && (found.back() == '\n' || found.back() == ' ')) found.remove_suffix(1);
-      return result.exit_status == 1 && found == "[]" ? runtime_image_e::absent : runtime_image_e::unverifiable;
+      return {result.exit_status == 1 && found == "[]" ? runtime_image_e::absent : runtime_image_e::unverifiable};
     };
-    const auto image = cache ? cache->remember(runtime.reference(), inspect) : inspect();
+    const auto inspection = cache ? cache->remember(runtime.reference(), inspect) : inspect();
+    const auto image = inspection.state;
     facts.status = image == runtime_image_e::verified ? "ready" : image == runtime_image_e::absent ? "available" : "failed";
     facts.code = image == runtime_image_e::verified ? "runtime_ready" : image == runtime_image_e::absent ? "not_downloaded" :
       image == runtime_image_e::mismatch ? "runtime_identity_mismatch" : "inspection_failed";
+    if (image == runtime_image_e::verified) facts.image = inspection.image;
     return facts;
   }
 

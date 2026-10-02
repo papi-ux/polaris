@@ -115,11 +115,14 @@ TEST(DoctorResetContract, RunningSessionCannotRewriteTheConfiguredHostBitrateCap
     std::string::npos
   );
 
+  // The handshake reads the launch target beside max_bitrate, and never writes either back.
   const auto rtsp = source("src/rtsp.cpp");
   EXPECT_NE(
-    rtsp.find("session.target_bitrate_kbps.value_or(\n        config::video.max_bitrate"),
+    rtsp.find("session.target_bitrate_kbps,\n        session.target_bitrate_source,\n        config::video.max_bitrate"),
     std::string::npos
   );
+  EXPECT_EQ(rtsp.find("config::video.max_bitrate ="), std::string::npos);
+  EXPECT_EQ(rtsp.find("session.target_bitrate_kbps ="), std::string::npos);
 }
 
 TEST(DoctorResetContract, ExplicitClientBitrateRoutesReplaceTheLiveTarget) {
@@ -249,6 +252,23 @@ TEST(DoctorResetContract, ReconnectSerializesOldEvidenceResetWithNewDoctorScope)
   EXPECT_LT(start_lock, new_scope_started);
   EXPECT_LT(new_scope_started, new_count_started);
   EXPECT_LT(new_count_started, start_unlock);
+}
+
+TEST(DoctorResetContract, AnEndingSessionIsFrozenBeforeTheLastStreamResetsTheStats) {
+  // remove_client() freezes last_session from the ending session's own entry. When the last stream
+  // ends, update_stream_active(false) clears every entry, so a removal after it would find nothing
+  // to freeze, and the most common end, the last stream's, would leave no record at all.
+  const auto stream = source("src/stream.cpp");
+  const auto join = between(
+    stream,
+    "void join(session_t &session)",
+    "int start(session_t &session"
+  );
+  const auto session_frozen = join.find("stream_stats::remove_client(");
+  const auto stats_reset = join.find("stream_stats::update_stream_active(false)");
+  ASSERT_NE(session_frozen, std::string::npos);
+  ASSERT_NE(stats_reset, std::string::npos);
+  EXPECT_LT(session_frozen, stats_reset);
 }
 
 TEST(DoctorResetContract, ResumeTimeoutCannotTerminateAcrossReconnectAdmission) {

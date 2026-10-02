@@ -51,6 +51,7 @@ import {
   isCurrentWebUiAuthProbeGeneration,
   runWebUiAuthProbeForGeneration,
 } from '../auth-probe-coordinator.js'
+import { reportSettingsProbe } from '../settings-unreadable.js'
 
 const RETRY_DELAYS_MS = [500, 1000, 2000, 4000, 8000]
 
@@ -103,6 +104,7 @@ async function checkHost() {
     const result = outcome.result
     if (result.state === AUTH_PROBE_STATE.authenticated) {
       markWebUiAuthenticated(result.config)
+      reportSettingsProbe(result)
       clearPolarisReloadParam()
       await router.replace(target)
       return

@@ -21,6 +21,14 @@ if [ "$POLARIS_LOCAL_CANDIDATE_BUILD" != 0 ] && [ "$POLARIS_LOCAL_CANDIDATE_BUIL
   exit 1
 fi
 export POLARIS_LOCAL_CANDIDATE_BUILD
+# The release tag's prerelease label, beta.N or rc.N, or nothing for a stable build. Unset means
+# stable, so a local candidate build needs nothing new.
+POLARIS_PRERELEASE_LABEL="${POLARIS_PRERELEASE_LABEL-}"
+if [ -n "$POLARIS_PRERELEASE_LABEL" ] && [[ ! "$POLARIS_PRERELEASE_LABEL" =~ ^(beta|rc)\.[0-9]+$ ]]; then
+  printf '%s\n' 'POLARIS_PRERELEASE_LABEL must be empty, beta.N or rc.N' >&2
+  exit 1
+fi
+export POLARIS_PRERELEASE_LABEL
 
 cleanup() {
   umount "$STEAMOS_ROOT/etc/resolv.conf" 2>/dev/null || true
@@ -123,3 +131,13 @@ chroot "$STEAMOS_ROOT" pacman -T "${PACKAGE_DEPENDENCIES[@]}" \
 test ! -s /output/steamos3.8-missing-dependencies.txt
 chroot "$STEAMOS_ROOT" /usr/bin/polaris --version \
   > /output/steamos3.8-installed-version.txt
+# The binary reports the release number, and a prerelease's label the way the host spells it,
+# X.Y.Z-beta.N. The package version alone cannot show that the build itself had the label.
+EXPECTED_RUNTIME_VERSION="$(grep -Pom1 '^project\(Polaris VERSION \K[^ ]+' /workspace/CMakeLists.txt)"
+if [ -n "$POLARIS_PRERELEASE_LABEL" ]; then
+  EXPECTED_RUNTIME_VERSION="$EXPECTED_RUNTIME_VERSION-$POLARIS_PRERELEASE_LABEL"
+fi
+if ! grep -Fq "Polaris version: $EXPECTED_RUNTIME_VERSION commit:" /output/steamos3.8-installed-version.txt; then
+  printf 'installed SteamOS binary reports a version other than %s\n' "$EXPECTED_RUNTIME_VERSION" >&2
+  exit 1
+fi

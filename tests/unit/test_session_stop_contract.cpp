@@ -79,6 +79,41 @@ TEST(SessionBitrateContract, HardCeilingAppliesAfterWarpExpansion) {
   EXPECT_EQ(rtsp_stream::bound_session_bitrate_for_tests(10000, 4, 50000), 40000);
 }
 
+TEST(SessionBitrateContract, PyroWaveKeepsTheClientsRequestOverLaunchCapsSizedForH264) {
+  // Every other codec meets the bitrate its launch resolved.
+  const auto hevc = rtsp_stream::session_bitrate_ceiling(180000, false, 15000, "stability_preset_selected", 0);
+  EXPECT_EQ(hevc.ceiling_kbps, 15000);
+  EXPECT_EQ(hevc.source, "stability_preset_selected");
+  EXPECT_EQ(hevc.set_aside_kbps, 0);
+
+  // PyroWave keeps its client's request over the Stability preset, a device profile and a saved paired
+  // profile, and names what it set aside.
+  for (const auto *source : {"stability_preset_selected", "preset_device_capability", "paired_bitrate_setting"}) {
+    SCOPED_TRACE(source);
+    const auto pyrowave = rtsp_stream::session_bitrate_ceiling(180000, true, 15000, source, 0);
+    EXPECT_EQ(pyrowave.ceiling_kbps, 0);
+    EXPECT_EQ(pyrowave.set_aside_kbps, 15000);
+    EXPECT_EQ(pyrowave.set_aside_source, source);
+    EXPECT_EQ(rtsp_stream::bound_session_bitrate_for_tests(180000, 1, pyrowave.ceiling_kbps), 180000);
+  }
+
+  // max_bitrate still caps it, and a launch target it would cut to anyway is that same cap.
+  const auto capped = rtsp_stream::session_bitrate_ceiling(180000, true, 50000, "host_bitrate_cap", 50000);
+  EXPECT_EQ(capped.ceiling_kbps, 50000);
+  EXPECT_EQ(capped.source, "max_bitrate");
+  EXPECT_EQ(capped.set_aside_kbps, 0);
+  const auto both = rtsp_stream::session_bitrate_ceiling(180000, true, 15000, "stability_preset_selected", 100000);
+  EXPECT_EQ(both.ceiling_kbps, 100000);
+  EXPECT_EQ(both.set_aside_kbps, 15000);
+
+  // A launch target at or above the request cuts nothing, so nothing is set aside.
+  const auto own = rtsp_stream::session_bitrate_ceiling(180000, true, 180000, "requested_bitrate_lock", 0);
+  EXPECT_EQ(own.set_aside_kbps, 0);
+  const auto none = rtsp_stream::session_bitrate_ceiling(180000, true, std::nullopt, "", 0);
+  EXPECT_EQ(none.ceiling_kbps, 0);
+  EXPECT_EQ(none.set_aside_kbps, 0);
+}
+
 TEST(ProcessRefreshContractTests, ParsedConfigurationPreservesLifecycleIdentityAndGeneration) {
   auto current_env = boost::this_process::environment();
   proc::proc_t subject {std::move(current_env), {}};

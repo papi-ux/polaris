@@ -256,6 +256,7 @@ function add_debian_based_deps() {
     "libssl-dev"
     "libwayland-dev"  # Wayland
     "libx11-dev"  # X11
+    "libxcb-res0-dev"  # X11: the client pid behind a private app's windows
     "libxcb-shm0-dev"  # X11
     "libxcb-xfixes0-dev"  # X11
     "libxcb1-dev"  # X11

@@ -6,6 +6,13 @@ import {
 } from '../client-settings-sync'
 import ConfirmActionDialog from './ConfirmActionDialog.vue'
 import LiveTuningControl from './LiveTuningControl.vue'
+import {
+  readConfigOrNull,
+  readConfigResponse,
+  readSettingsSaveRefusal,
+  SettingsUnreadableError,
+} from '../config-cache.js'
+import { settingsRefusalSentence } from '../settings-unreadable.js'
 
 const config = ref({})
 const pendingKey = ref(null)
@@ -51,8 +58,8 @@ function notifyChange(key, value) {
 async function loadConfig() {
   try {
     const res = await fetch('./api/config', { credentials: 'include' })
-    if (res.ok) {
-      const data = await res.json()
+    const data = await readConfigOrNull(res)
+    if (data) {
       // Merge with defaults
       config.value = { ...defaults, ...data }
     }
@@ -65,8 +72,10 @@ async function toggle(key) {
   const newVal = isEnabled(key) ? 'disabled' : 'enabled'
   try {
     const existingRes = await fetch('./api/config', { credentials: 'include' })
-    if (!existingRes.ok) throw new Error('refresh-failed')
-    const current = await existingRes.json()
+    // A refused settings file rejects with the reason and the fix (#782).
+    const current = await readConfigResponse(existingRes).catch((error) => {
+      throw error instanceof SettingsUnreadableError ? error : new Error('refresh-failed')
+    })
     const platform = current.platform || config.value.platform
     const existing = { [key]: newVal }
     if (key === 'headless_mode' && platform === 'linux') {
@@ -81,7 +90,10 @@ async function toggle(key) {
         ? { 'If-Match': `"${current.configuration_revision}"` } : {}) },
       body: JSON.stringify(existing)
     })
-    if (!response.ok) throw new Error('save-failed')
+    if (!response.ok) {
+      const refusal = await readSettingsSaveRefusal(response)
+      throw refusal ? new SettingsUnreadableError(refusal) : new Error('save-failed')
+    }
     syncKey(key, newVal)
     if (key === 'headless_mode' && platform === 'linux') {
       syncKey('linux_use_cage_compositor', newVal)
@@ -96,7 +108,11 @@ async function toggle(key) {
     )
   } catch (e) {
     console.error('Toggle failed:', e)
-    toast(i18n.t('quick_controls.save_failed'), 'error')
+    if (e instanceof SettingsUnreadableError) {
+      toast(settingsRefusalSentence(i18n.t('quick_controls.save_unreadable'), e.refusal), 'error', 12000)
+    } else {
+      toast(i18n.t('quick_controls.save_failed'), 'error')
+    }
   }
   pendingKey.value = null
 }

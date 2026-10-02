@@ -137,24 +137,73 @@ namespace multiseat::profiles {
       return std::none_of(desktop_defaults.begin(), desktop_defaults.end(), [&](const auto &client) { return clients.contains(client); });
     }
 
+    std::string identity(std::uint64_t uid, std::uint64_t gid) {
+      return std::to_string(uid) + ":" + std::to_string(gid);
+    }
+
+    // How far a catalog transaction got. update_atomic gives no reason when it
+    // does not commit, so this is what tells a catalog that was never read from
+    // a new one that was too large or could not be written.
+    struct transaction_progress_t {
+      bool read = false;
+      std::optional<std::size_t> produced;
+    };
+
+    template<class Update>
+    status_e transact(const std::filesystem::path &path, transaction_progress_t &progress, Update update) {
+      return private_state_file::update_atomic(path, maximum_catalog_bytes,
+        [&](const private_state_file::read_result_t &current) -> std::optional<std::string> {
+          progress.read = true;
+          auto next = update(current);
+          if (next) progress.produced = next->size();
+          return next;
+        }).status;
+    }
+
+    // The cause of a transaction that did not commit and that no check of its
+    // own refused. A folder refused as unsafe also has a log line of its own.
+    std::string unsaved_cause(const std::filesystem::path &path, const transaction_progress_t &progress) {
+      // Space changes in this Polaris run one at a time, after the Spaces owner
+      // has let go of its lease, so a lock that is held is almost always
+      // another process's: a second Polaris next to the service, say.
+      if (!progress.read)
+        return "Polaris could not lock and read " + path.string() +
+          ": another Polaris process holds its lock, or the file or its folder failed a safety check or could not be read";
+      if (!progress.produced) return {};
+      if (*progress.produced > maximum_catalog_bytes)
+        return "the new catalog is " + std::to_string(*progress.produced) + " bytes, over the " +
+          std::to_string(maximum_catalog_bytes) + " byte limit";
+      return "the new catalog could not be written to " + path.string();
+    }
+
+    std::string unreadable_cause(const std::filesystem::path &path, const private_state_file::read_result_t &current) {
+      return path.string() + (current ? " is not a catalog this Polaris reads" : " does not exist");
+    }
+
     template<class Edit>
     change_result_t change(const std::filesystem::path &path, Edit edit) {
       change_result_t result;
+      transaction_progress_t progress;
       try {
-        result.status = private_state_file::update_atomic(path, maximum_catalog_bytes,
-          [&](const auto &current) -> std::optional<std::string> {
-            auto catalog = current ? decode(current.payload) : std::nullopt;
-            if (!catalog) { result.error = "Initialize a valid private catalog first."; return std::nullopt; }
-            return edit(*catalog, result);
-          }).status;
-      } catch (const std::exception &) {
+        result.status = transact(path, progress, [&](const auto &current) -> std::optional<std::string> {
+          auto catalog = current ? decode(current.payload) : std::nullopt;
+          if (!catalog) {
+            result.error = "Initialize a valid private catalog first.";
+            result.cause = unreadable_cause(path, current);
+            return std::nullopt;
+          }
+          return edit(*catalog, result);
+        });
+      } catch (const std::exception &e) {
         result.error = "Profile operation failed. Retain any reported provisioning resources for inspection.";
+        result.cause = e.what();
       }
       if (result.status == status_e::durability_uncertain) {
         result.error = "Catalog replacement occurred but durability is uncertain. Read it back before retrying; retain the volume.";
       } else if (!result && result.error.empty()) {
         result.error = "Catalog is busy, unsafe, or could not be saved. Stop its controller before editing.";
       }
+      if (result.status == status_e::not_committed && result.cause.empty()) result.cause = unsaved_cause(path, progress);
       return result;
     }
 
@@ -163,57 +212,97 @@ namespace multiseat::profiles {
       auto argv = container::command_prefix({});
       argv.insert(argv.end(), arguments.begin(), arguments.end());
       const auto result = host.run(argv, std::chrono::seconds(30), maximum_catalog_bytes);
+      // Named by its command, never its arguments: `run` carries a script.
+      auto operation = "docker " + *arguments.begin();
+      if (arguments.size() > 1 && !std::next(arguments.begin())->starts_with("-")) operation += " " + *std::next(arguments.begin());
       if (result.exit_status != 0 || result.timed_out || result.output_truncated) {
-        throw std::runtime_error("Docker operation did not complete authoritatively");
+        throw std::runtime_error(operation + (result.timed_out ? " timed out" : result.output_truncated ?
+          " printed more than Polaris reads" : " exited with status " + std::to_string(result.exit_status)));
       }
-      return parse ? json::parse(result.output) : json(result.output);
+      if (!parse) return json(result.output);
+      auto parsed = json::parse(result.output, nullptr, false);
+      if (parsed.is_discarded()) throw std::runtime_error(operation + " printed something that is not JSON");
+      return parsed;
+    }
+
+    // A Docker answer that lacks a field a check reads, or holds it as another
+    // type, throws in nlohmann's words, which name neither the command nor the
+    // check. The command whose answer it was is named here instead.
+    template<class Check>
+    void reading(std::string_view command, Check check) {
+      try {
+        check();
+      } catch (const json::exception &e) {
+        throw std::runtime_error(std::string(command) + " answered without a field Polaris checks, or with one of another type: " + e.what());
+      }
     }
 
     void provision(container::host_t &host, const entry_t &entry, change_result_t &result) {
       // Current runtime images provide a real passwd entry only for 1000:1000.
       // Fail before creating storage on hosts needing a different image identity.
-      if (host.effective_uid() != 1000 || host.effective_gid() != 1000 ||
-          !host.trusted_runtime_file("/usr/bin/docker") ||
-          !host.trusted_runtime_file("/usr/bin/runc")) {
-        throw std::runtime_error("runtime identity or executable unavailable");
+      if (host.effective_uid() != 1000 || host.effective_gid() != 1000) {
+        throw std::runtime_error("Polaris runs as " + identity(host.effective_uid(), host.effective_gid()) +
+          " and the Spaces runtime images need 1000:1000");
+      }
+      // The trust check answers only yes or no, so its cause names everything it checks.
+      for (const auto *file : {"/usr/bin/docker", "/usr/bin/runc"}) {
+        if (!host.trusted_runtime_file(file))
+          throw std::runtime_error(std::string(file) + " is not one Polaris trusts: it, or a folder above it, is missing, "
+            "a link, not owned by root, or writable by anyone but root, or Polaris cannot run it, or it is setuid or setgid");
       }
       const auto info = docker(host, {"info", "--format={{json .}}"});
-      if (info.at("OSType") != "linux" || !info.at("SecurityOptions").is_array() ||
-          (info.at("Runtimes").at("runc").at("path") != "runc" &&
-           info.at("Runtimes").at("runc").at("path") != "/usr/bin/runc")) {
-        throw std::runtime_error("local Linux runc engine required");
-      }
-      for (const auto &option : info.at("SecurityOptions")) {
-        if (!option.is_string() || option.get<std::string>().starts_with("name=rootless")) {
-          throw std::runtime_error("rootless Docker is not admitted");
+      reading("docker info", [&] {
+        if (info.at("OSType") != "linux") throw std::runtime_error("Docker's engine is " + info.at("OSType").dump() + ", not linux");
+        if (!info.at("SecurityOptions").is_array()) throw std::runtime_error("Docker did not list its security options");
+        if (const auto &runc = info.at("Runtimes").at("runc").at("path"); runc != "runc" && runc != "/usr/bin/runc")
+          throw std::runtime_error("Docker's runc runtime is " + runc.dump() + ", not runc or /usr/bin/runc");
+        for (const auto &option : info.at("SecurityOptions")) {
+          if (!option.is_string()) throw std::runtime_error("Docker listed a security option that is not text");
+          if (option.get<std::string>().starts_with("name=rootless")) throw std::runtime_error("rootless Docker is not admitted");
         }
-      }
+      });
       const auto &volume = entry.storage.opaque_volume_name;
       const auto inventory = docker(host, {"volume", "ls", "--format={{json .Name}}"}, false).get<std::string>();
       // Successful bounded inventory is required to prove absence. A failed
       // inspect is not evidence that a name is available.
-      if (inventory.find(volume) != std::string::npos) throw std::runtime_error("volume already exists");
-      const auto images = docker(host, {"image", "inspect", entry.storage.image_reference});
-      if (!images.is_array() || images.size() != 1 || images[0].at("Id") != entry.storage.image_reference ||
-          images[0].at("Os") != "linux" ||
-          images[0].at("Config").at("Labels").at("io.polaris.multiseat.profile") != family(entry.storage.runtime_profile) ||
-          (images[0].at("Config").contains("Volumes") && !images[0].at("Config").at("Volumes").empty()) ||
-          (images[0].at("Config").contains("ExposedPorts") && !images[0].at("Config").at("ExposedPorts").empty())) {
-        throw std::runtime_error("image identity, implicit volumes, or exposed ports rejected");
-      }
+      if (inventory.find(volume) != std::string::npos)
+        throw std::runtime_error("Docker already has a volume named " + volume + ", which Polaris never adopts");
+      const auto &reference = entry.storage.image_reference;
+      const auto images = docker(host, {"image", "inspect", reference});
+      reading("docker image inspect", [&] {
+        if (!images.is_array() || images.size() != 1 || images[0].at("Id") != reference)
+          throw std::runtime_error("docker image inspect did not describe exactly image " + reference);
+        const auto &image = images[0];
+        if (image.at("Os") != "linux") throw std::runtime_error("image " + reference + " is not a linux image");
+        // Docker prints "Labels": null for an image built without any.
+        const auto &config = image.at("Config");
+        const auto labels = config.contains("Labels") ? config.at("Labels") : json {};
+        const auto labelled = labels.is_object() && labels.contains("io.polaris.multiseat.profile") ?
+          labels.at("io.polaris.multiseat.profile") : json {};
+        if (labelled.is_null()) throw std::runtime_error("image " + reference + " carries no Polaris launcher label");
+        if (labelled != family(entry.storage.runtime_profile))
+          throw std::runtime_error("image " + reference + " is labelled for launcher " + labelled.dump() + ", not " +
+            std::string(family(entry.storage.runtime_profile)));
+        if (config.contains("Volumes") && !config.at("Volumes").empty())
+          throw std::runtime_error("image " + reference + " declares its own volumes");
+        if (config.contains("ExposedPorts") && !config.at("ExposedPorts").empty())
+          throw std::runtime_error("image " + reference + " exposes ports");
+      });
       result.volume_name = volume;
       result.initializer_name = "polaris-profile-init-" + entry.storage.profile_key;
       const auto label = "io.polaris.multiseat.profile=" + entry.storage.profile_key;
       docker(host, {"volume", "create", "--driver=local", "--label=" + label, volume}, false);
       const auto inspect_volume = [&] {
         const auto values = docker(host, {"volume", "inspect", volume});
-        if (!values.is_array() || values.size() != 1) throw std::runtime_error("volume inspection count");
-        const auto &value = values[0];
-        if (value.at("Name") != volume || value.at("Driver") != "local" ||
-            value.at("Scope") != "local" || !value.at("Options").empty() ||
-            value.at("Labels").at("io.polaris.multiseat.profile") != entry.storage.profile_key) {
-          throw std::runtime_error("fresh volume identity rejected");
-        }
+        reading("docker volume inspect", [&] {
+          if (!values.is_array() || values.size() != 1) throw std::runtime_error("docker volume inspect did not describe exactly volume " + volume);
+          const auto &value = values[0];
+          if (value.at("Name") != volume || value.at("Driver") != "local" ||
+              value.at("Scope") != "local" || !value.at("Options").empty() ||
+              value.at("Labels").at("io.polaris.multiseat.profile") != entry.storage.profile_key) {
+            throw std::runtime_error("volume " + volume + " is not the local, labelled, optionless volume Polaris just made");
+          }
+        });
       };
       inspect_volume();
       // Fixed code, no shell, no recursion, and no existing home adoption. The
@@ -243,8 +332,9 @@ namespace multiseat::profiles {
       // worker was then refused at launch with no container ever created.
       if (container::needs_profile_network(entry.storage.runtime_profile)) {
         result.network_name = container::profile_network_name(entry.storage.profile_key);
-        if (!container::create_profile_network(host, entry.storage.profile_key))
-          throw std::runtime_error("Space network could not be provisioned authoritatively");
+        std::string why;
+        if (!container::create_profile_network(host, entry.storage.profile_key, &why))
+          throw std::runtime_error(why.empty() ? "Docker did not make the Space's network " + result.network_name : why);
       }
     }
 
@@ -634,6 +724,8 @@ namespace multiseat::profiles {
       if (catalog.owner_uid != host.effective_uid() || catalog.owner_gid != host.effective_gid() ||
           host.effective_uid() != 1000 || host.effective_gid() != 1000) {
         result.error = "Current Spaces runtime images require the catalog and service identity to be 1000:1000.";
+        result.cause = "the catalog belongs to " + identity(catalog.owner_uid, catalog.owner_gid) +
+          " and Polaris runs as " + identity(host.effective_uid(), host.effective_gid());
         return std::nullopt;
       }
       // A picked family copies any Space that already runs that launcher, since
@@ -653,6 +745,10 @@ namespace multiseat::profiles {
           !container::supported_streaming_workload(source->storage.runtime_profile, source->workload)) {
         result.error = request.family.empty() ? "Select an existing configured Space." :
           "This PC has no Space for that launcher yet. Set one up first.";
+        result.cause = source != catalog.profiles.end() ?
+          "Space " + source->storage.profile_key + " runs no launcher a new Space can copy" :
+          request.family.empty() ? "the catalog has no Space " + request.source_profile_id :
+          "the catalog has no " + request.family + " Space that is not archived and runs a launcher Polaris streams";
         return std::nullopt;
       }
       const entry_t entry {
@@ -692,15 +788,18 @@ namespace multiseat::profiles {
         workload.kind == workload_kind_e::unknown)
       return {.error = "Invalid first-space request, runtime identity or launcher family."};
     if (host.effective_uid() != 1000 || host.effective_gid() != 1000)
-      return {.error = "The current Spaces runtimes require service identity 1000:1000. Do not change your Linux user ID."};
+      return {.error = "The current Spaces runtimes require service identity 1000:1000. Do not change your Linux user ID.",
+        .cause = "Polaris runs as " + identity(host.effective_uid(), host.effective_gid())};
     change_result_t result;
+    transaction_progress_t progress;
     try {
-      result.status = private_state_file::update_atomic(path, maximum_catalog_bytes,
-        [&](const auto &current) -> std::optional<std::string> {
+      result.status = transact(path, progress, [&](const auto &current) -> std::optional<std::string> {
           auto catalog = current.status == private_state_file::read_status_e::missing ?
             std::optional {catalog_t {1000, 1000, {}}} : current ? decode(current.payload) : std::nullopt;
           if (!catalog || catalog->owner_uid != 1000 || catalog->owner_gid != 1000) {
             result.error = "The private Spaces catalog is unsafe or belongs to another service account.";
+            result.cause = !catalog ? unreadable_cause(path, current) :
+              "the catalog belongs to " + identity(catalog->owner_uid, catalog->owner_gid) + ", not 1000:1000";
             return std::nullopt;
           }
           const entry_t entry {
@@ -740,14 +839,16 @@ namespace multiseat::profiles {
           result.profile_key = request.request_id;
           provision(host, entry, result);
           return payload;
-        }).status;
-    } catch (const std::exception &) {
+        });
+    } catch (const std::exception &e) {
       result.error = "First-space creation failed. Retain any reported resources for inspection.";
+      result.cause = e.what();
     }
     if (result.status == status_e::durability_uncertain)
       result.error = "Catalog replacement occurred but durability is uncertain. Retry the same request to confirm it; retain the volume.";
     else if (!result && result.error.empty())
       result.error = "The Spaces catalog is busy, unsafe, or could not be saved. No controller was activated.";
+    if (result.status == status_e::not_committed && result.cause.empty()) result.cause = unsaved_cause(path, progress);
     return result;
   }
 

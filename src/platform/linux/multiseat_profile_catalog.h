@@ -61,6 +61,10 @@ namespace multiseat::profiles {
   struct change_result_t {
     private_state_file::write_status_e status = private_state_file::write_status_e::not_committed;
     std::string error;
+    // What stopped it, in the words of whatever failed, such as which Docker
+    // check refused. For the log: the person is answered with `error` and a
+    // code, and neither changes with it.
+    std::string cause;
     std::optional<refusal_t> refusal;
     std::string profile_key;
     // Retain these on any failure after provisioning starts. Never silently

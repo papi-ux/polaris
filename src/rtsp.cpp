@@ -37,6 +37,7 @@ extern "C" {
 #include "process.h"
 #include "rtsp.h"
 #include "stream.h"
+#include "stream_bitrate.h"
 #include "sync.h"
 #include "video.h"
 #ifdef POLARIS_BUILD_PYROWAVE
@@ -94,6 +95,33 @@ namespace rtsp_stream {
       return warped_bitrate_kbps;
     }
 
+  }  // namespace
+
+  session_bitrate_ceiling_t session_bitrate_ceiling(
+      std::int64_t requested_kbps,
+      bool pyrowave,
+      std::optional<int> launch_target_kbps,
+      const std::string &launch_target_source,
+      int max_bitrate_kbps) {
+    const std::string max_bitrate_source = max_bitrate_kbps > 0 ? "max_bitrate" : "";
+    if (!pyrowave) {
+      if (launch_target_kbps) {
+        return {*launch_target_kbps, launch_target_source.empty() ? "launch_target" : launch_target_source};
+      }
+      return {max_bitrate_kbps, max_bitrate_source};
+    }
+    session_bitrate_ceiling_t ceiling {max_bitrate_kbps, max_bitrate_source};
+    // A launch target that max_bitrate would cut to anyway is the same cap, not one set aside.
+    const int effective_cap = max_bitrate_kbps > 0 ? max_bitrate_kbps : std::numeric_limits<int>::max();
+    if (launch_target_kbps && *launch_target_kbps > 0 && *launch_target_kbps < requested_kbps &&
+        *launch_target_kbps < effective_cap) {
+      ceiling.set_aside_kbps = *launch_target_kbps;
+      ceiling.set_aside_source = launch_target_source.empty() ? "launch_target" : launch_target_source;
+    }
+    return ceiling;
+  }
+
+  namespace {
     session_role_e merge_session_role(session_role_e current, bool watch_only) {
       if (current == session_role_e::controller || !watch_only) {
         return session_role_e::controller;
@@ -1086,6 +1114,20 @@ namespace rtsp_stream {
       return snapshot;
     }
 
+    /// For every stream that captures on this host and has not stopped, whether it is PyroWave.
+    std::vector<bool> host_capture_pyrowave_flags() {
+      std::vector<bool> flags;
+      auto lg = _session_slots.lock();
+      for (auto &slot : *_session_slots) {
+        if (!slot || !stream::session::uses_host_process(*slot) ||
+            stream::session::state(*slot) == stream::session::state_e::STOPPED) {
+          continue;
+        }
+        flags.push_back(stream::session::profile(*slot).video_format == video::VIDEO_FORMAT_PYROWAVE);
+      }
+      return flags;
+    }
+
     std::list<std::string>
     get_all_session_uuids() {
       std::list<std::string> uuids;
@@ -1264,6 +1306,10 @@ namespace rtsp_stream {
   }
 
   void add_session_for_tests(launch_session_t &launch_session, bool stopping) {
+    add_session_for_tests(launch_session, stopping, 0);
+  }
+
+  void add_session_for_tests(launch_session_t &launch_session, bool stopping, int video_format) {
     if (launch_session.iv.size() < sizeof(std::uint32_t)) {
       launch_session.iv.resize(16);
     }
@@ -1271,6 +1317,7 @@ namespace rtsp_stream {
       launch_session.gcm_key.resize(16);
     }
     stream::config_t config {};
+    config.monitor.videoFormat = video_format;
     auto session = stream::session::alloc(config, launch_session);
     stream::session::set_state_for_tests(
       *session,
@@ -1282,6 +1329,13 @@ namespace rtsp_stream {
 
   std::list<std::string> get_all_session_uuids() {
     return server.get_all_session_uuids();
+  }
+
+  std::optional<launch_failure::record_t> capture_in_use_refusal(bool incoming_pyrowave) {
+    if (pyrowave_availability::shares_capture(incoming_pyrowave, server.host_capture_pyrowave_flags())) {
+      return std::nullopt;
+    }
+    return pyrowave_availability::capture_in_use_refusal(incoming_pyrowave);
   }
 
   void terminate_sessions() {
@@ -1713,11 +1767,17 @@ namespace rtsp_stream {
       }
 
       BOOST_LOG(info) << "Client Requested bitrate is [" << configuredBitrateKbps << "kbps]";
+      config.bitrate_request.client_kbps = configuredBitrateKbps;
 
       // A resolved launch target belongs to this RTSP session. Never publish it
       // through config::video.max_bitrate: that is the stable configured host
       // capability used by other clients' deterministic /optimize requests.
-      const int session_bitrate_ceiling = session.target_bitrate_kbps.value_or(
+      const bool pyrowave_request = config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE;
+      const auto ceiling = session_bitrate_ceiling(
+        configuredBitrateKbps,
+        pyrowave_request,
+        session.target_bitrate_kbps,
+        session.target_bitrate_source,
         config::video.max_bitrate
       );
       // Hack: Restore bitrate for warp mode
@@ -1725,11 +1785,28 @@ namespace rtsp_stream {
       if (config::video.limit_framerate && warp_factor >= 2) {
         BOOST_LOG(info) << "Warp factor [" << warp_factor << "] engaged";
       }
+      const auto effective_warp_factor = config::video.limit_framerate ? warp_factor : 1;
+      const auto uncapped_bitrate_kbps = bound_session_bitrate(configuredBitrateKbps, effective_warp_factor, 0);
       configuredBitrateKbps = bound_session_bitrate(
         configuredBitrateKbps,
-        config::video.limit_framerate ? warp_factor : 1,
-        session_bitrate_ceiling
+        effective_warp_factor,
+        ceiling.ceiling_kbps
       );
+      if (configuredBitrateKbps < uncapped_bitrate_kbps) {
+        config.bitrate_request.cap_kbps = ceiling.ceiling_kbps;
+        config.bitrate_request.cap_source = ceiling.source;
+        if (pyrowave_request) {
+          BOOST_LOG(info) << "PyroWave: "sv << ceiling.source << " caps the client's request of "sv
+                          << config.bitrate_request.client_kbps << " kbps at "sv << ceiling.ceiling_kbps << " kbps"sv;
+        }
+      }
+      if (ceiling.set_aside_kbps > 0) {
+        config.bitrate_request.set_aside_kbps = ceiling.set_aside_kbps;
+        config.bitrate_request.set_aside_source = ceiling.set_aside_source;
+        BOOST_LOG(info) << "PyroWave: keeping the client's request of "sv << config.bitrate_request.client_kbps
+                        << " kbps; the launch resolved "sv << ceiling.set_aside_kbps << " kbps from "sv
+                        << ceiling.set_aside_source << ", sized before the codec was known, and PyroWave does not apply it"sv;
+      }
 
       BOOST_LOG(info) << "Host Streaming bitrate is [" << configuredBitrateKbps << "kbps]";
 
@@ -1787,20 +1864,17 @@ namespace rtsp_stream {
     if (configuredBitrateKbps) {
       BOOST_LOG(debug) << "Client configured bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
 
-      // If the FEC percentage isn't too high, adjust the configured bitrate to ensure video
-      // traffic doesn't exceed the user's selected bitrate when the FEC shards are included.
-      if (config::stream.fec_percentage <= 80) {
-        configuredBitrateKbps /= 100.f / (100 - config::stream.fec_percentage);
-      }
-
-      // Adjust the bitrate to account for audio traffic bandwidth usage (capped at 20% reduction).
-      // The bitrate per channel is 256 Kbps for high quality mode and 96 Kbps for normal quality.
-      auto audioBitrateAdjustment = (config.audio.flags[audio::config_t::HIGH_QUALITY] ? 256 : 96) * config.audio.channels;
-      configuredBitrateKbps -= std::min((std::int64_t) audioBitrateAdjustment, configuredBitrateKbps / 5);
-
-      // Reduce it by another 500Kbps to account for A/V packet overhead and control data
-      // traffic (capped at 10% reduction).
-      configuredBitrateKbps -= std::min((std::int64_t) 500, configuredBitrateKbps / 10);
+      // FEC comes off so video traffic with its FEC shards stays inside the selected bitrate,
+      // then the audio (at most a fifth), then 500 kbps of A/V packet overhead and control
+      // traffic (at most a tenth). stream_bitrate holds the arithmetic, so PyroWave's advice can
+      // say what to request for a given encoder rate using exactly these steps.
+      const auto audioBitrateAdjustment = stream_bitrate::audio_kbps(
+        config.audio.flags[audio::config_t::HIGH_QUALITY], config.audio.channels
+      );
+      configuredBitrateKbps = stream_bitrate::encoder_kbps_for_wire(
+        configuredBitrateKbps, config::stream.fec_percentage, audioBitrateAdjustment
+      );
+      config.bitrate_request.audio_kbps = audioBitrateAdjustment;
 
       BOOST_LOG(debug) << "Final adjusted video encoding bitrate is "sv << configuredBitrateKbps << " Kbps"sv;
       config.monitor.bitrate = configuredBitrateKbps;
@@ -1845,7 +1919,8 @@ namespace rtsp_stream {
     }
 
     if (config.monitor.videoFormat == 2 && video::active_av1_mode == 1) {
-      BOOST_LOG(warning) << "AV1 is disabled, yet the client requested AV1"sv;
+      // The client has no reason to show for this refusal, so the log says what took AV1 away.
+      BOOST_LOG(warning) << video::av1_announce_refusal(::config::video.av1_mode, video::active_encoder_selection_info());
 
       respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
       return;
@@ -1858,6 +1933,24 @@ namespace rtsp_stream {
       BOOST_LOG(warning) << *mismatch;
       respond(sock, session, &option, 412, "Precondition Failed", req->sequenceNumber, {});
       return;
+    }
+
+    // Refusals that depend on what capture can do for this codec, made before the client builds a
+    // decoder for a stream that would carry nothing. A launch that named its codec was refused on the
+    // same grounds with its reason; one that did not learns only this status, so it is one no other
+    // ANNOUNCE refusal uses. A worker stream and an input only one capture nothing here.
+    if (!session.worker_connection_requirement()->load() && !session.input_only) {
+      const bool wants_pyrowave = config.monitor.videoFormat == video::VIDEO_FORMAT_PYROWAVE;
+      auto refusal = capture_in_use_refusal(wants_pyrowave);
+      if (!refusal && wants_pyrowave) {
+        refusal = video::pyrowave_session_capture_refusal();
+      }
+      if (refusal) {
+        BOOST_LOG(warning) << "Refusing RTSP setup ["sv << refusal->code << "]: "sv
+                           << launch_failure::status_message(*refusal);
+        respond(sock, session, &option, 503, "Service Unavailable", req->sequenceNumber, {});
+        return;
+      }
     }
 
     // Check that any required encryption is enabled

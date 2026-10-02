@@ -446,6 +446,40 @@ namespace vk {
      * @return Conversion status.
      */
     int convert(platf::img_t &img) override {
+      // A live DMA-BUF frame on the system memory upload, which only a portal with its DMA-BUF offer
+      // to Vulkan Video opened hands over. Refused before anything is recorded, and as a stream that
+      // is over rather than one frame gone wrong: the portal keeps the transport it negotiated for as
+      // long as the capture lasts, so a session built again would meet the same frame. Encoding it
+      // was a black picture at full frame rate, with nothing in any log.
+      if (ram_input && ram_upload_cannot_read(img)) {
+        if (!refused_dmabuf_frame) {
+          refused_dmabuf_frame = true;
+          BOOST_LOG(error) << "Vulkan Video: a "sv << img.width << 'x' << img.height
+                           << " DMA-BUF frame reached the system memory upload route, which reads "sv
+                           << "pixels from host memory and has none to read. Vulkan Video on the "sv
+                           << "portal takes shared memory only, so this stream ends rather than "sv
+                           << "encoding black. The portal keeps that DMA-BUF offer closed to Vulkan "sv
+                           << "Video by policy, and a build that opens it sends frames this route "sv
+                           << "cannot read"sv;
+        }
+        return platf::convert_capture_unreadable;
+      }
+      // A packed 10-bit frame, which the portal hands an HDR stream on Gamescope Stream. The upload
+      // copies it into an 8-bit BGRA image at the same four bytes a pixel, so nothing about its size
+      // gives it away, and what it encoded was noise. Refused the same way: the portal fixed the
+      // format when it negotiated, so a session built again would meet the same frame.
+      if (ram_input && ram_upload_frame_is_ten_bit(img)) {
+        if (!refused_ten_bit_frame) {
+          refused_ten_bit_frame = true;
+          BOOST_LOG(error) << "Vulkan Video: a "sv << img.width << 'x' << img.height
+                           << " 10-bit frame reached the system memory upload route, which reads 8-bit "sv
+                           << "BGRA only and would encode it garbled, so this stream ends. The portal "sv
+                           << "hands over 10-bit frames for an HDR stream; Vulkan Video on the portal "sv
+                           << "streams SDR only"sv;
+        }
+        return platf::convert_capture_unreadable;
+      }
+
       auto *descriptor = ram_input ? nullptr : dynamic_cast<egl::img_descriptor_t *>(&img);
       if (!ram_input && !descriptor) {
         BOOST_LOG(error) << "Vulkan DMA-BUF conversion received a non-DMA-BUF frame"sv;
@@ -797,6 +831,8 @@ namespace vk {
       const auto tight_row_size = static_cast<std::size_t>(width) * 4;
       const auto tight_frame_size = tight_row_size * static_cast<std::size_t>(height);
       if (!img.data) {
+        // The primer, which carries no pixels. convert() refuses a live DMA-BUF frame with none before
+        // it gets here, so black is only ever the picture no frame has replaced yet.
         std::memset(dst, 0, tight_frame_size);
       } else if (img.width == width &&
                  img.height == height &&
@@ -1608,6 +1644,10 @@ namespace vk {
     int offset_y = 0;
     std::string render_device;
     bool ram_input = false;
+    /// Said once. A capture that hands this route a DMA-BUF does it for every frame.
+    bool refused_dmabuf_frame = false;
+    /// Said once, for the same reason: the portal negotiates the frame format once per capture.
+    bool refused_ten_bit_frame = false;
     bool is_10bit = false;
     AVBufferRef *hw_frames_ctx = nullptr;
     frame_t hwframe;
@@ -1673,6 +1713,18 @@ namespace vk {
   };
 
   // Free functions
+
+  bool ram_upload_cannot_read(const platf::img_t &img) {
+    if (img.data) {
+      return false;
+    }
+    const auto *descriptor = dynamic_cast<const egl::img_descriptor_t *>(&img);
+    return descriptor && descriptor->sd.fds[0] >= 0;
+  }
+
+  bool ram_upload_frame_is_ten_bit(const platf::img_t &img) {
+    return img.data && img.frame_metadata.format == platf::frame_format_e::p010;
+  }
 
   int vulkan_init_avcodec_hardware_input_buffer(platf::avcodec_encode_device_t *, AVBufferRef **hw_device_buf) {
     return create_vulkan_hwdevice(hw_device_buf);

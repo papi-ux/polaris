@@ -238,6 +238,19 @@ namespace stream_path {
     return {};
   }
 
+  std::string canonical_capture_backend(std::string_view capture) {
+    if (capture == "auto") {
+      return {};
+    }
+    if (capture == "kwin") {
+      return "portal";
+    }
+    if (capture == "drm") {
+      return "kms";
+    }
+    return std::string {capture};
+  }
+
   std::string backend_name_for_path(const descriptor_t &path, const host_capabilities_t &caps) {
     switch (path.runtime) {
       case runtime_kind_e::LABWC:
@@ -255,7 +268,9 @@ namespace stream_path {
 
     if (path.capture == capture_kind_e::PORTAL ||
         path.capture == capture_kind_e::AUTO) {
-      const auto capture = to_lower_copy(caps.configured_capture);
+      // Read the way dispatch reads it: kwin opens the portal and drm opens KMS, so neither is a
+      // backend of its own to report, and auto is no backend at all.
+      const auto capture = canonical_capture_backend(to_lower_copy(caps.configured_capture));
       if (capture == "portal" || capture.find("portal") != std::string::npos) {
         // External gamescope + portal is still "portal" capture on the host path.
         if (caps.gamescope_present && !config::video.linux_display.use_cage_compositor) {
@@ -266,7 +281,7 @@ namespace stream_path {
         }
         return std::string {k_backend_portal};
       }
-      if (capture == "kms" || capture == "drm") {
+      if (capture == "kms") {
         return "kms";
       }
       if (!capture.empty()) {

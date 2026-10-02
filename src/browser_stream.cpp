@@ -524,8 +524,9 @@ namespace browser_stream {
       if (config::video.linux_display.use_cage_compositor) {
         return "labwc";
       }
+      // kwin opens the portal like portal does, so it reads the same here.
       if (config::video.linux_display.stream_mode == "gamescope_stream" ||
-          config::video.capture == "portal") {
+          stream_display_policy::canonical_capture_backend(config::video.capture) == "portal") {
         return "gamescope";
       }
       return "";

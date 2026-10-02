@@ -24,6 +24,7 @@
 
 // local includes
 #include "crypto.h"
+#include "pyrowave_availability.h"
 #include "rtsp.h"
 #include "thread_safe.h"
 
@@ -581,6 +582,15 @@ namespace nvhttp {
    */
   nlohmann::json auto_quality_status_json();
 
+  /**
+   * @brief The encoder selection the web console's Doctor shows beside the live stream stats.
+   *
+   * The sole stream's own, as its client is told it in the session status; the one every stream
+   * agrees on when more than one is streaming, and an empty object when they differ, because one
+   * stream's selection is no answer for another; and the host's own when nothing is streaming.
+   */
+  nlohmann::json stream_stats_encoder_selection_json(const stream_stats::stats_t &stats);
+
 #ifdef POLARIS_TESTS
   nlohmann::json pairing_options_for_tests(std::string_view id);
   void pair_http_for_tests(
@@ -607,6 +617,21 @@ namespace nvhttp {
                                                    bool current_virtual_display,
                                                    const std::string &device_name,
                                                    const std::string &app_name);
+  /// The session health a paired client whose stream has this generation is answered with.
+  nlohmann::json build_session_health_json_for_tests(const stream_stats::stats_t &stats,
+                                                   bool current_virtual_display,
+                                                   const std::string &device_name,
+                                                   const std::string &app_name,
+                                                   std::uint64_t requester_generation);
+  /// The generation the paired endpoints answer a device about: its live stream's, or zero.
+  std::uint64_t requester_session_generation_for_tests(const std::string &device_uuid);
+  /// The codec and encoder answers /polaris/v1/session/status serves the client whose stream has
+  /// this generation, in its encoder block.
+  nlohmann::json session_encoder_identity_json_for_tests(const stream_stats::stats_t &stats,
+                                                         const std::string &requested_backend,
+                                                         const std::string &launch_backend,
+                                                         bool session_override,
+                                                         std::uint64_t requester_generation);
   nlohmann::json build_launch_mode_contract_for_tests(bool app_prefers_virtual_display,
                                                       const std::string &app_name,
                                                       bool host_virtual_display_available,
@@ -668,6 +693,12 @@ namespace nvhttp {
   int advertised_max_launch_refresh_rate_for_tests();
   /// Put a recorded launch refusal (or the fallback text) on a response tree; see launch_failure.h.
   void put_launch_refusal_for_tests(boost::property_tree::ptree &tree, int status, const std::string &fallback_message);
+  /// The capture object capabilities builds its codec offer on, with only that offer in it.
+  nlohmann::json capture_codecs_for_tests(
+    int hevc_mode,
+    int av1_mode,
+    const std::optional<pyrowave_availability::unavailable_t> &pyrowave_unavailable
+  );
 #ifdef __linux__
   void put_profile_launch_response_for_tests(boost::property_tree::ptree &tree, const profile_launch_response_t &response, bool resume);
 #endif

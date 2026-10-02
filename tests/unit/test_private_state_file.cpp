@@ -794,6 +794,90 @@ TEST_F(PrivateStateFileTest, TransactionFailsPromptlyWhileAnotherProcessHoldsLoc
 #endif
 
 #if defined(__linux__)
+// #782: a refused read said only "rejected" or "io_error", which left a caller
+// nothing to tell the operator. The result now names the check that refused.
+TEST_F(PrivateStateFileTest, RefusedReadNamesTheCheckThatRefusedIt) {
+  using private_state_file::read_status_e;
+  using private_state_file::refusal_e;
+  ASSERT_TRUE(private_state_file::write_atomic(target, "{}"));
+
+  ASSERT_EQ(::chmod(target.c_str(), 0640), 0) << std::strerror(errno);
+  auto result = private_state_file::read_secure(target, 4096);
+  EXPECT_EQ(result.status, read_status_e::rejected);
+  EXPECT_EQ(result.refusal.kind, refusal_e::not_private);
+  EXPECT_TRUE(result.refusal.inspected);
+  EXPECT_EQ(result.refusal.mode, 0640u);
+  EXPECT_EQ(result.refusal.owner, static_cast<unsigned>(::geteuid()));
+  EXPECT_EQ(result.refusal.links, 1u);
+  EXPECT_EQ(result.refusal.size, 2u);
+
+  // The same file is fine for a caller that lets others read it.
+  result = private_state_file::read_secure(target, 4096, true);
+  EXPECT_TRUE(bool(result));
+  EXPECT_FALSE(bool(result.refusal));
+
+  ASSERT_EQ(::chmod(target.c_str(), 0620), 0) << std::strerror(errno);
+  result = private_state_file::read_secure(target, 4096, true);
+  EXPECT_EQ(result.status, read_status_e::rejected);
+  EXPECT_EQ(result.refusal.kind, refusal_e::group_writable);
+
+  ASSERT_EQ(::chmod(target.c_str(), 0600), 0) << std::strerror(errno);
+  result = private_state_file::read_secure(target, 1);
+  EXPECT_EQ(result.status, read_status_e::rejected);
+  EXPECT_EQ(result.refusal.kind, refusal_e::oversize);
+
+  const auto missing = private_state_file::read_secure(directory / "absent.json", 4096);
+  EXPECT_EQ(missing.status, read_status_e::missing);
+  EXPECT_EQ(missing.refusal.kind, refusal_e::missing);
+}
+
+TEST_F(PrivateStateFileTest, RefusedTransactionCarriesTheRefusalAndAFailedWriteDoesNot) {
+  using private_state_file::refusal_e;
+  using private_state_file::write_status_e;
+  ASSERT_TRUE(private_state_file::write_atomic(target, "{}"));
+  ASSERT_EQ(::chmod(target.c_str(), 0660), 0) << std::strerror(errno);
+  bool called = false;
+  const auto refused = private_state_file::update_atomic(target, 4096, [&](const auto &) {
+    called = true;
+    return std::optional<std::string>("after");
+  }, true);
+  EXPECT_FALSE(called);
+  EXPECT_EQ(refused.status, write_status_e::not_committed);
+  EXPECT_EQ(refused.refusal.kind, refusal_e::group_writable);
+  EXPECT_EQ(refused.refusal.mode, 0660u);
+
+  // A write that fails on its own says nothing about the file, so it names no refusal.
+  ASSERT_EQ(::chmod(target.c_str(), 0600), 0) << std::strerror(errno);
+  private_state_file::set_write_fault_for_tests(private_state_file::write_fault_e::rename);
+  const auto failed = private_state_file::write_atomic(target, "after");
+  EXPECT_EQ(failed.status, write_status_e::not_committed);
+  EXPECT_FALSE(bool(failed.refusal));
+}
+
+TEST_F(PrivateStateFileTest, RefusedDirectoryIsNamedAndMarkedAsAlreadyLogged) {
+  using private_state_file::refusal_e;
+  const auto offending = directory / "inner";
+  ASSERT_TRUE(std::filesystem::create_directory(offending));
+  ASSERT_EQ(::chmod(offending.c_str(), 0775), 0) << std::strerror(errno);
+
+  const auto written = private_state_file::write_atomic(offending / "state.json", "{}");
+  EXPECT_FALSE(bool(written));
+  EXPECT_EQ(written.refusal.kind, refusal_e::directory_writable);
+  EXPECT_EQ(written.refusal.directory, offending);
+  EXPECT_TRUE(written.refusal.logged);
+
+  const auto read = private_state_file::read_secure(offending / "state.json", 4096);
+  EXPECT_EQ(read.refusal.kind, refusal_e::directory_writable);
+  EXPECT_EQ(read.refusal.directory, offending);
+
+  const auto absent = private_state_file::read_secure(directory / "gone" / "state.json", 4096);
+  EXPECT_EQ(absent.refusal.kind, refusal_e::directory_missing);
+  EXPECT_EQ(absent.refusal.directory, directory / "gone");
+  EXPECT_FALSE(absent.refusal.logged);
+}
+#endif
+
+#if defined(__linux__)
 // A reporter on discussion #637 was sent to the wrong directory by this very
 // message: it named the state file's parent, whose mode was fine, while quoting
 // the mode of the directory that actually failed. It also only ever offered

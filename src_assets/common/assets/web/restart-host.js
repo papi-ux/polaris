@@ -1,3 +1,6 @@
+import { readSettingsRefusal } from './config-cache.js'
+import { reportSettingsReadable, reportSettingsUnreadable } from './settings-unreadable.js'
+
 const DEFAULT_RESTART_URL = './api/restart'
 const DEFAULT_HEALTH_URL = './api/config'
 const DEFAULT_READY_POLL_ATTEMPTS = 20
@@ -32,7 +35,15 @@ export async function waitForHostReady({
       })
 
       if (response.ok) {
+        if (healthUrl === DEFAULT_HEALTH_URL) reportSettingsReadable()
         return { ready: true, attempts: attempt }
+      }
+      // The host is up and answering; only its settings file was refused (#782).
+      // Every page that restarts the host shows it in the app banner.
+      const settingsUnreadable = await readSettingsRefusal(response)
+      if (settingsUnreadable) {
+        reportSettingsUnreadable(settingsUnreadable)
+        return { ready: true, attempts: attempt, settingsUnreadable }
       }
     } catch {
       // Expected while the HTTPS listener is stopping/starting.
@@ -79,7 +90,7 @@ export async function requestHostRestart({
   })
 
   if (readiness.ready) {
-    onReady()
+    onReady(readiness)
   } else {
     onTimeout()
     if (reloadOnTimeout) {
@@ -91,5 +102,6 @@ export async function requestHostRestart({
     accepted: true,
     ready: readiness.ready,
     attempts: readiness.attempts,
+    ...(readiness.settingsUnreadable ? { settingsUnreadable: readiness.settingsUnreadable } : {}),
   }
 }

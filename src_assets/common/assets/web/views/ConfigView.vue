@@ -98,8 +98,41 @@
       </div>
     </section>
 
+  <!-- The host answered but refused its settings file (#782). -->
+  <section v-if="settingsRefusal" class="section-card" role="alert" data-settings-unreadable>
+    <div class="section-kicker">{{ $t('config.unreadable_kicker') }}</div>
+    <h2 class="section-title">{{ $t('config.unreadable_title') }}</h2>
+    <!-- The form can still be on screen, after a restart or a refresh that found the file refused. -->
+    <p class="section-copy" data-settings-unreadable-desc>{{ config ? $t('config.unreadable_desc_loaded') : $t('config.unreadable_desc') }}</p>
+    <dl class="mt-4 grid gap-3">
+      <div v-if="settingsRefusal.path">
+        <dt class="eyebrow-label">{{ $t('config.unreadable_path') }}</dt>
+        <dd class="mt-1 break-words font-mono text-xs text-silver" data-settings-unreadable-path>{{ settingsRefusal.path }}</dd>
+      </div>
+      <div>
+        <dt class="eyebrow-label">{{ $t('config.unreadable_reason') }}</dt>
+        <dd class="mt-1 text-sm leading-relaxed text-storm" data-settings-unreadable-reason>{{ settingsRefusal.reason || $t('config.unreadable_reason_unknown') }}</dd>
+      </div>
+      <div v-if="settingsRefusal.fix">
+        <dt class="eyebrow-label">{{ $t('config.unreadable_fix') }}</dt>
+        <dd class="mt-1 break-words rounded-lg border border-warning/20 bg-warning/10 px-3 py-2 font-mono text-xs text-warning-bright" data-settings-unreadable-fix>{{ settingsRefusal.fix }}</dd>
+      </div>
+    </dl>
+    <button class="focus-ring settings-action-button settings-action-button-secondary mt-4" :disabled="loadingConfig" data-settings-unreadable-retry @click="retrySettings">
+      {{ $t('config.unreadable_retry') }}
+    </button>
+  </section>
+
+  <section v-else-if="!config && loadFailure" class="section-card" role="alert" data-settings-load-failed>
+    <div class="section-kicker">{{ $t('config.load_failed_kicker') }}</div>
+    <p class="section-copy">{{ $t('config.load_failed', { detail: loadFailure }) }}</p>
+    <button class="focus-ring settings-action-button settings-action-button-secondary mt-4" :disabled="loadingConfig" @click="retrySettings">
+      {{ $t('config.unreadable_retry') }}
+    </button>
+  </section>
+
   <!-- Skeleton while loading -->
-  <div v-if="!config" class="space-y-4">
+  <div v-else-if="!config" class="space-y-4" data-settings-loading>
     <Skeleton type="text" />
     <Skeleton type="card" />
     <Skeleton type="card" />
@@ -273,6 +306,8 @@ import {
   stripConfigResponseOnly,
 } from '../client-settings-sync'
 import { requestHostRestart } from '../restart-host.js'
+import { readConfigResponse, readSettingsRefusal, readSettingsSaveRefusal, SettingsUnreadableError } from '../config-cache.js'
+import { reportSettingsReadable, reportSettingsUnreadable, settingsRefusalSentence } from '../settings-unreadable.js'
 import { saveNeedsRestart } from '../config-save-outcome.js'
 import { rankSettingsSearchTabs } from '../settings-search.js'
 
@@ -290,6 +325,10 @@ const restarting = ref(false)
 const hostGeneration = ref(0)
 let disposed = false
 const config = ref(null)
+// Why the host would not read its settings file, as it said so (#782).
+const settingsRefusal = ref(null)
+const loadFailure = ref('')
+const loadingConfig = ref(false)
 const responseOnlyConfig = ref({})
 const currentTab = ref("general")
 const vdisplayStatus = ref("1")
@@ -402,7 +441,6 @@ const tabs = ref([
       "disconnect_resume_timeout_seconds": 300,
       "adaptive_bitrate_enabled": "disabled",
       "adaptive_bitrate_min": 2000,
-      "adaptive_bitrate_max": 100000,
     },
   },
   {
@@ -963,6 +1001,9 @@ function save() {
     if (r.status === 200) {
       const result = await r.json()
       config.value.configuration_revision = result.configuration_revision
+      // The host read the file to save it, so it is not refused any more.
+      settingsRefusal.value = null
+      reportSettingsReadable()
       saved.value = true
       savedNeedsRestart.value = saveNeedsRestart(result)
       initialSerialized.value = JSON.stringify(serialize())
@@ -982,6 +1023,14 @@ function save() {
       return saved.value
     }
     else {
+      // The host answers a save it cannot make because it refused the settings
+      // file the way it answers the read, so say why and how to fix it (#782).
+      const refusal = await readSettingsSaveRefusal(r)
+      if (refusal) {
+        if (!disposed) settingsRefusal.value = refusal
+        toast(settingsRefusalSentence(i18n.t('config.save_unreadable'), refusal), 'error', 12000)
+        return false
+      }
       toast(await configSaveFailureMessage(r), 'error')
       return false
     }
@@ -995,9 +1044,16 @@ async function refreshHostCapabilities(generation) {
   // Refresh only response fields so edits made during restart remain intact.
   try {
     const response = await fetch('./api/config', { credentials: 'include', cache: 'no-store' })
-    if (!response.ok) return
+    if (!response.ok) {
+      const refusal = await readSettingsRefusal(response)
+      if (refusal) reportSettingsUnreadable(refusal)
+      if (refusal && !disposed && generation === hostGeneration.value) settingsRefusal.value = refusal
+      return
+    }
+    reportSettingsReadable()
     const data = await response.json()
     if (disposed || generation !== hostGeneration.value || !config.value) return
+    settingsRefusal.value = null
     if (Array.isArray(data.stream_display_mode_options)) {
       config.value.stream_display_mode_options = data.stream_display_mode_options
       responseOnlyConfig.value.stream_display_mode_options = data.stream_display_mode_options
@@ -1044,7 +1100,7 @@ function apply() {
       restarted.value = true
       toast(i18n.t('config.restart_note') || 'Polaris is restarting...', 'info', 5000)
       requestHostRestart({
-        onReady: () => {
+        onReady: (readiness) => {
           // Capabilities depend on the newly loaded host configuration. Keep
           // local form edits, but retire status fetched before this restart.
           if (disposed) return
@@ -1052,6 +1108,11 @@ function apply() {
           saved.value = false
           restarted.value = false
           restarting.value = false
+          if (readiness?.settingsUnreadable) {
+            settingsRefusal.value = readiness.settingsUnreadable
+            toast(i18n.t('config.restart_ready_unreadable') || 'Polaris is back online, but it cannot read its settings file.', 'error', 8000)
+            return
+          }
           toast(i18n.t('config.restart_ready') || 'Polaris is back online.', 'success', 5000)
         },
         onTimeout: () => {
@@ -1104,9 +1165,24 @@ function resetLocalChange(optionKey) {
   restarted.value = false
 }
 
+function retrySettings() {
+  // With settings on screen, only re-ask whether the file reads again, so
+  // local edits stay; before that, load them from the start.
+  if (config.value) {
+    refreshHostCapabilities(++hostGeneration.value)
+    return
+  }
+  loadConfig()
+}
+
 // created() logic
-fetch("./api/config", { credentials: 'include' })
-  .then((r) => r.json())
+function loadConfig() {
+  if (loadingConfig.value) return
+  loadingConfig.value = true
+  settingsRefusal.value = null
+  loadFailure.value = ''
+  fetch("./api/config", { credentials: 'include' })
+  .then(readConfigResponse)
   .then((r) => {
     config.value = r
     captureResponseOnlyConfig(config.value)
@@ -1194,6 +1270,20 @@ fetch("./api/config", { credentials: 'include' })
 
     initialSerialized.value = JSON.stringify(serialize())
   })
+  .catch((error) => {
+    if (disposed) return
+    if (error instanceof SettingsUnreadableError) {
+      settingsRefusal.value = error.refusal
+      return
+    }
+    console.error(error)
+    loadFailure.value = error?.message || String(error)
+  })
+  .finally(() => {
+    loadingConfig.value = false
+  })
+}
+loadConfig()
 
 function handleHash() {
     let hash = window.location.hash

@@ -11,7 +11,7 @@ interchangeable.
 ## Install
 
 ```bash
-wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst &&
+curl --fail --location --output ./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst &&
 sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst &&
 sudo -H polaris --setup-host &&
 polaris
@@ -30,24 +30,8 @@ the [credential reset](troubleshooting.md#web-ui-credentials) instead of returni
 
 ## What `--setup-host` does
 
-It installs the udev rules and modules-load configuration that make virtual input work, and reports
-anything it could not complete.
-
-> [!WARNING]
-> Only turn on DRM/KMS capture when you actually need it. Polaris works without it on the default
-> compositor and Headless Stream paths. It takes two steps, and the first one is a package:
->
-> ```bash
-> sudo pacman -S polaris-kms
-> sudo -H polaris --setup-host --enable-kms
-> ```
->
-> The capability lives in that package's own metadata rather than on the Polaris binary, so an
-> update no longer takes it away. `--enable-kms` only points the user service at the packaged
-> helper, and refuses if the package is not installed. `--disable-kms` points it back.
->
-> An upgrade has to move both packages together, because `polaris-kms` depends on the exact version
-> of `polaris` beside it: `sudo pacman -Syu polaris polaris-kms`.
+It installs the udev rules and modules-load configuration that make virtual input work unless
+the package already provides them, and reports anything it could not complete.
 
 If you ran `--setup-host` on a version before v1.3.5, a copy of the udev rules may still sit in
 `/etc/udev/rules.d/60-polaris.rules` and override the packaged file. Host setup keeps it and warns
@@ -62,6 +46,38 @@ systemctl --user enable --now polaris
 The application menu entry starts this same user service, so a desktop launch and autostart never
 run two copies. Quitting from the tray stops it; the menu entry or `systemctl --user start polaris`
 brings it back.
+
+## Optional DRM/KMS capture
+
+Only turn this on when you need DRM/KMS capture. Polaris works without it on the default
+compositor and Headless Stream paths. It takes a second package, `polaris-kms`, from the same
+release as Polaris.
+
+With the [package repository](repositories.md#arch-and-cachyos) added:
+
+```bash
+sudo pacman -S polaris-kms &&
+sudo -H polaris --setup-host --enable-kms
+```
+
+Without it, download the helper next to the Polaris package. The link takes the latest release, so
+[upgrade](#upgrade) Polaris first if yours is older:
+
+```bash
+curl --fail --location --output ./Polaris-kms-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-kms-arch-x86_64.pkg.tar.zst &&
+sudo pacman -U ./Polaris-kms-arch-x86_64.pkg.tar.zst &&
+sudo -H polaris --setup-host --enable-kms
+```
+
+The first time, log out and back in, or reboot where lingering is on (headless boot turns it
+on; `loginctl show-user $USER -p Linger` shows it). Only members of the `polaris-kms` group can
+run the helper, `--enable-kms` adds you to it, and a session picks up its groups at login. Then run
+`sudo -H polaris --setup-host --enable-kms` again and do what it prints.
+
+The capability lives in the helper package rather than on the Polaris binary, so an update does
+not take it away. `polaris-kms` depends on the exact version of `polaris` beside it, so the two
+are upgraded and reinstalled together, as [Upgrade](#upgrade) shows. `--disable-kms` points the
+service back at the ordinary binary.
 
 ## Arch derivatives
 
@@ -113,11 +129,28 @@ systemctl --user restart polaris
 Without the repository, install the newer package the same way:
 
 ```bash
-wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst &&
+curl --fail --location --output ./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst &&
 sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst &&
 sudo -H polaris --setup-host &&
 systemctl --user restart polaris
 ```
+
+If `polaris-kms` is installed, upgrade both in one transaction instead, because the helper
+depends on the exact version of `polaris` beside it:
+
+```bash
+curl --fail --location --output ./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst &&
+curl --fail --location --output ./Polaris-kms-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-kms-arch-x86_64.pkg.tar.zst &&
+sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst ./Polaris-kms-arch-x86_64.pkg.tar.zst &&
+sudo -H polaris --setup-host &&
+systemctl --user restart polaris
+```
+
+**On a 1.4.13 beta**, reinstall. The 1.4.13 betas carry the release's own version, so
+1.4.13-beta.3 and 1.4.13 are both `polaris 1.4.13-1`, and `sudo pacman -Syu` keeps the beta.
+With the repository, `sudo pacman -Syu polaris polaris-kms` reinstalls both; with the files
+downloaded as above, `sudo pacman -U` both files. Leave out `polaris-kms` if the helper is not
+installed, then restart Polaris.
 
 Your configuration, pairing keys, and library stay in `~/.config/polaris` across upgrades.
 Sign back in at **https://localhost:47990/#/login** with the existing web credentials.
@@ -128,6 +161,10 @@ Sign back in at **https://localhost:47990/#/login** with the existing web creden
 systemctl --user disable --now polaris
 sudo pacman -R polaris
 ```
+
+If `polaris-kms` is installed, run `sudo -H polaris --setup-host --disable-kms` first and remove
+both: `sudo pacman -R polaris polaris-kms`. `pacman -R polaris` alone refuses while the helper
+depends on it.
 
 Package-owned udev rules and modules-load configuration are removed with the package. Host
 configuration in `~/.config/polaris` is left in place.

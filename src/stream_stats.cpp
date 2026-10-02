@@ -10,11 +10,14 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <deque>
 #include <filesystem>
 #include <limits>
 #include <mutex>
+#include <random>
 #include <string_view>
 #include <vector>
 
@@ -24,17 +27,22 @@
 // local includes
 #include "adaptive_bitrate.h"
 #include "config.h"
+#include "configuration_store.h"
 #include "crypto.h"
 #include "logging.h"
 #include "network.h"
+#include "stream_start_outcome.h"
 #include "stream_stats.h"
 #include "utility.h"
 #include "verified_action.h"
 
 namespace video {
   std::string active_encoder_name();
+  bool active_encoder_withholds_hdr();
+  bool active_encoder_withholds_hdr_for_explicit_vulkan();
 }
 #ifdef __linux__
+  #include "platform/linux/kms_capture_readiness.h"
   #include "platform/linux/misc.h"
   #include "platform/linux/stream_runtime.h"
   #include "platform/linux/user_unit_override.h"
@@ -84,6 +92,10 @@ namespace stream_stats {
 
   static std::mutex stats_mutex;
   static stats_t current_stats;
+  // The most recently ended session, guarded by stats_mutex. It lives outside current_stats
+  // because update_stream_active(false) resets that wholesale when the last stream ends, which is
+  // when a person comes to read it. remove_client() is its only writer.
+  static std::optional<ended_session_t> last_ended_session;
 
   // measurement-spec-v1.md 6.1: increments on every add_client()/
   // remove_client() call. Deliberately its own atomic, outside stats_t -
@@ -498,6 +510,132 @@ namespace stream_stats {
       };
     }
 
+    /// Drawn once per process, so a stream_instance_id never repeats across a restart, where
+    /// session generations begin again at one.
+    const std::string &process_instance_nonce() {
+      static const std::string nonce = [] {
+        std::random_device device;
+        const auto value = (static_cast<std::uint64_t>(device()) << 32) ^ static_cast<std::uint64_t>(device());
+        char text[17] {};
+        std::snprintf(text, sizeof(text), "%016llx", static_cast<unsigned long long>(value));
+        return std::string {text};
+      }();
+      return nonce;
+    }
+
+    /// The frames a client accepted from the display its capture names. Only frames that display
+    /// delivered count, so until it delivers one, transport, residency and format read unknown,
+    /// and a display opened again starts over.
+    capture_source_t frames_of_published_display(const client_stats_t &client) {
+      return client.capture_frame_since_publication ? client.capture_source : capture_source_t {};
+    }
+
+    /// A session's capture: what it asked for and opened, and what its accepted frames carried.
+    nlohmann::json capture_backend_json(const capture_backend_t &backend, const capture_source_t &frames) {
+      nlohmann::json capture {
+        {"preference", backend.preference},
+        {"requested", backend.requested},
+        {"opened", backend.opened},
+        {"route", backend.route},
+        {"transport", platf::from_frame_transport(frames.transport)},
+        {"residency", platf::from_frame_residency(frames.residency)},
+        {"format", platf::from_frame_format(frames.format)},
+      };
+      if (!backend.mode_override_reason.empty()) {
+        capture["mode_override_reason"] = backend.mode_override_reason;
+      }
+      if (!backend.route_fallback_reason.empty()) {
+        capture["route_fallback_reason"] = backend.route_fallback_reason;
+      }
+      return capture;
+    }
+
+    /// A lifecycle time in UTC ISO 8601, to the second. Empty for a time that was never set.
+    std::string iso8601_utc(std::chrono::system_clock::time_point at) {
+      if (at.time_since_epoch().count() == 0) {
+        return {};
+      }
+      const std::time_t seconds = std::chrono::system_clock::to_time_t(at);
+      std::tm utc {};
+#ifdef _WIN32
+      gmtime_s(&utc, &seconds);
+#else
+      gmtime_r(&seconds, &utc);
+#endif
+      char buffer[32];
+      if (std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utc) == 0) {
+        return {};
+      }
+      return buffer;
+    }
+
+    /// The last session as the stats report it. Every value was frozen from the session's own
+    /// generation, and one it never reported is absent rather than given a default.
+    nlohmann::json ended_session_json(const ended_session_t &ended) {
+      nlohmann::json session {
+        {"state", "ended"},
+        {"client_name", ended.client_name},
+      };
+      if (const auto id = stream_instance_id(ended.session_generation); !id.empty()) {
+        session["stream_instance_id"] = id;
+      }
+      if (const auto at = iso8601_utc(ended.started_at); !at.empty()) {
+        session["started_at"] = at;
+      }
+      if (const auto at = iso8601_utc(ended.ended_at); !at.empty()) {
+        session["ended_at"] = at;
+      }
+      if (!ended.capture_backend.opened.empty()) {
+        session["capture"] = capture_backend_json(ended.capture_backend, ended.capture_frames);
+      }
+      if (!ended.codec.empty()) {
+        session["codec"] = ended.codec;
+      }
+      if (!ended.encoder_backend.empty()) {
+        session["encoder_backend"] = ended.encoder_backend;
+      }
+      if (!ended.pyrowave_route.empty()) {
+        session["pyrowave_route"] = ended.pyrowave_route;
+      }
+      if (const auto &stop = ended.app_stop; !stop.path.empty()) {
+        nlohmann::json app_stop {
+          {"path", stop.path},
+          {"windows_asked", stop.windows_asked},
+          {"waited_ms", stop.waited.count()},
+        };
+        if (!stop.target.empty()) {
+          app_stop["target"] = stop.target;
+        }
+        if (stop.launcher) {
+          app_stop["launcher"] = {
+            {"app_id", stop.launcher->app_id},
+            {"path", stop.launcher->path},
+            {"waited_ms", stop.launcher->waited.count()},
+          };
+        }
+        if (stop.flatpak_instances) {
+          app_stop["flatpak_instances"] = {
+            {"launcher", stop.flatpak_instances->launcher},
+            {"game", stop.flatpak_instances->game},
+            {"helper", stop.flatpak_instances->helper},
+            {"left_alone", stop.flatpak_instances->left_alone},
+          };
+        }
+        if (!stop.capture.empty()) {
+          app_stop["capture"] = stop.capture;
+          app_stop["unattributed"] = stop.unattributed;
+        }
+        session["app_stop"] = std::move(app_stop);
+      }
+      if (!ended.start_outcome.empty()) {
+        session["start"] = {{"outcome", ended.start_outcome}};
+        if (ended.start_client_left_after_ms >= 0) {
+          session["start"]["client_left_after_ms"] = ended.start_client_left_after_ms;
+        }
+      }
+      return session;
+    }
+
     nlohmann::json fec_protection_json(const fec_protection_stats_t &stats) {
       return {
         {"oversized_frames_total", stats.oversized_frames_total},
@@ -547,6 +685,10 @@ namespace stream_stats {
   }  // namespace
 
   std::string stats_t::to_json() const {
+    return to_json(nlohmann::json::object());
+  }
+
+  std::string stats_t::to_json(const nlohmann::json &doctor_health) const {
     nlohmann::json j;
 
     j["streaming"] = streaming;
@@ -636,6 +778,10 @@ namespace stream_stats {
     j["recommendation_version"] = recommendation_version;
     j["paired_target_bitrate_kbps"] = paired_target_bitrate_kbps;
     j["effective_launch_bitrate_kbps"] = effective_launch_bitrate_kbps;
+    j["stream_chroma"] = stream_chroma;
+    if (auto pyrowave = pyrowave_bitrate_json(*this); !pyrowave.is_null()) {
+      j["pyrowave_bitrate"] = std::move(pyrowave);
+    }
     j["width"] = width;
     j["height"] = height;
     j["fec_protection"] = fec_protection_json(fec_protection);
@@ -699,9 +845,26 @@ namespace stream_stats {
       cj["bitrate_kbps"] = c.bitrate_kbps;
       cj["encode_time_ms"] = c.encode_time_ms;
       cj["codec"] = c.codec;
+      // The encoder this client's own stream sampled, which last_session keeps when it ends.
+      // Absent before its first sample, because missing is unknown.
+      if (!c.encoder_backend.empty()) {
+        cj["encoder_backend"] = c.encoder_backend;
+      }
       cj["width"] = c.width;
       cj["height"] = c.height;
       cj["capture_source"] = capture_source_json(c.capture_source);
+      if (c.session_generation != 0) {
+        cj["stream_instance_id"] = stream_instance_id(c.session_generation);
+      }
+      if (!c.capture_backend.opened.empty()) {
+        cj["capture"] = capture_backend_json(c.capture_backend, frames_of_published_display(c));
+      }
+      if (!c.pyrowave_route.empty()) {
+        cj["pyrowave_route"] = c.pyrowave_route;
+      }
+      if (!c.start_outcome.empty()) {
+        cj["start_outcome"] = c.start_outcome;
+      }
       cj["latency_ms"] = c.latency_ms;
       cj["packet_loss"] = c.packet_loss;
       cj["packet_loss_available"] = c.packet_loss_available;
@@ -714,8 +877,36 @@ namespace stream_stats {
     }
     j["clients"] = clients_json;
     j["capture_source"] = clients.empty() ? nlohmann::json(nullptr) : capture_source_json(clients.front().capture_source);
+    // The one client's capture at the top level, for a reader that expects a single stream. Two
+    // clients have two answers, and the first one's is no answer for both, so then there is none.
+    if (clients.size() == 1 && !clients.front().capture_backend.opened.empty()) {
+      const auto &backend = clients.front().capture_backend;
+      j["capture_backend_preference"] = backend.preference;
+      j["capture_backend_requested"] = backend.requested;
+      j["capture_backend_opened"] = backend.opened;
+      j["capture_backend_route"] = backend.route;
+      if (!backend.mode_override_reason.empty()) {
+        j["capture_mode_override_reason"] = backend.mode_override_reason;
+      }
+      if (!backend.route_fallback_reason.empty()) {
+        j["capture_route_fallback_reason"] = backend.route_fallback_reason;
+      }
+    }
+    // The one client's encoder at the top level, for the same reader. The process-wide
+    // encoder_backend is whichever encode loop sampled last, Browser Stream's included, so it is
+    // never the top-level encoder_backend: with two clients there is no one answer. The capture
+    // forecast in linux_gpu_profile still names it, as the encoder the next stream is likely to get.
+    if (clients.size() == 1 && !clients.front().encoder_backend.empty()) {
+      j["encoder_backend"] = clients.front().encoder_backend;
+    }
+    // The most recently ended session on this host, which may not be any client listed above: one
+    // viewer can end while another streams. A report about one session matches its
+    // stream_instance_id.
+    if (last_session) {
+      j["last_session"] = ended_session_json(*last_session);
+    }
     j["active_sessions"] = static_cast<int>(clients.size());
-    j["doctor"] = build_doctor_json(*this, nlohmann::json::object());
+    j["doctor"] = build_doctor_json(*this, doctor_health);
     if (const auto identity = get_single_active_session_identity()) {
       const auto controller = adaptive_bitrate::get_doctor_state();
       bind_doctor_action_scope(
@@ -872,9 +1063,32 @@ namespace stream_stats {
       );
       return out;
     }
+    if (vulkan && backend == "portal") {
+      // The portal never offers Vulkan Video a DMA-BUF: its encode device there is the RAM
+      // uploader whatever PipeWire could negotiate, until the portal can retire a failed DMA-BUF
+      // frame to that uploader the way the private compositor can. POLARIS_PORTAL_DMABUF=1 is
+      // VA-API's opt-in and does not reach it. Say so before the first stream, as VA-API does,
+      // rather than wait for a stream to show a path that cannot change (#635).
+      system_memory(
+        "vulkan_portal_system_memory_by_design",
+        "info",
+        "Capture through the portal (Mirror Desktop, Host Virtual Display, Gamescope Stream) on "
+        "Vulkan Video keeps frames in system memory by design: the portal hands Vulkan Video every "
+        "frame in shared memory and Vulkan Video uploads it to the GPU itself, because the portal "
+        "has no way yet to fall back when a DMA-BUF frame fails to import. This is the expected "
+        "path for Vulkan Video on the portal, not a fault.",
+        std::string {"Nothing to change for a stable stream. If throughput falls short at high "
+                     "resolution or refresh, lower resolution, frame rate or bitrate first. "
+                     "Private Stream can keep Vulkan Video frames on the GPU."} +
+          (in.portal_vaapi_dmabuf_opted_in ?
+             " POLARIS_PORTAL_DMABUF=1 applies to VA-API only and does not change this." :
+             "")
+      );
+      return out;
+    }
     if (backend == "portal") {
-      // With CUDA or Vulkan the portal is asked for DMA-BUF and the compositor decides; KDE
-      // handed over system memory in the lab. Nothing to say until a stream shows which.
+      // With CUDA the portal is asked for DMA-BUF and the compositor decides; KDE handed over
+      // system memory in the lab. Nothing to say until a stream shows which.
       return out;
     }
     if (backend == "wlr" && vulkan) {
@@ -1103,6 +1317,28 @@ namespace stream_stats {
       });
     }
 
+#ifdef POLARIS_BUILD_PYROWAVE
+    // A scanout PyroWave cannot read. KWin composites HDR as sixteen bit float, so a KDE host in HDR
+    // with capture = kms hands the codec a buffer it has to refuse. The refusal comes before the
+    // stream now, by name to a client that said it would ask for PyroWave and as a bare status at
+    // the handshake to one that did not, and nothing else in the report calls the format unusual, so
+    // this is where a user finds out why.
+    if (stats.capture_format == platf::frame_format_e::rgba16f) {
+      configuration_warnings.push_back({
+        {"id", "capture_format_unreadable_by_pyrowave"},
+        {"severity", "warning"},
+        {"message", "Capture on this host is handing over sixteen bit float frames, which PyroWave "
+                    "cannot read. A KDE desktop in HDR composites in that format, so with "
+                    "capture = kms a PyroWave stream of the desktop is refused before it starts. "
+                    "Every other codec is unaffected, and so is a host scanning out packed ten bit "
+                    "HDR."},
+        {"action", "Turn HDR off on the host display to use PyroWave there, or capture by another "
+                   "route. This is the compositor's float buffer rather than HDR itself, so it does "
+                   "not change while the display keeps its mode."}
+      });
+    }
+#endif
+
     // The configured capture backend could not capture anything and Polaris used another one.
     // Without this the only trace is a warning in the middle of startup, while the host goes on
     // serving with a backend nobody chose.
@@ -1130,8 +1366,8 @@ namespace stream_stats {
            "capture protocols, which KDE and GNOME do not have, so only the "
            "private-compositor modes can use it there."},
         {"action", kms_for_capability ?
-           std::string {"Run "} + enable_kms_command + " after each install or update, then restart Polaris; KMS "
-           "capture is what carries HDR, so keep it if HDR is the goal." :
+           std::string {"Run "} + enable_kms_command + " once and do what it prints, since it may ask for a new "
+           "login first, then restart Polaris; KMS capture is what carries HDR, so keep it if HDR is the goal." :
            "Either set capture to the substituted backend so the configuration matches "
            "what is running, or go back to a private-compositor stream mode if you want "
            "the configured one."}
@@ -1140,17 +1376,30 @@ namespace stream_stats {
 
     // The refusal on its own, whatever happened next. With capture = kms and nothing to
     // substitute, the host serves with no capture at all and this is the one line that says
-    // why; with a substitute, it is why the stream cannot carry HDR.
-    if (kms_refused) {
+    // why; with a substitute, it is why the stream cannot carry HDR. It speaks only where KMS is
+    // what a launch into the live mode asks for, the question a launch refusal asks: kms, drm,
+    // which dispatch reads as kms, or auto, whose search reached KMS. A private compositor mode
+    // captures through wlroots whatever capture says, and a launch into Gamescope Stream or the
+    // dongle fills an unset capture with the portal before it asks, so a refusal the idle search
+    // met there changes nothing about the stream.
+    const auto mode_capture = stream_display_policy::canonical_capture_backend(
+      stream_display_policy::capture_for_launch_into_current_mode()
+    );
+    // Autodetect in Mirror Desktop, Desktop Takeover, Gamescope Stream or the dongle, or beside KWin
+    // screens, starts Polaris without capabilities so the portal and KWin accept it. Its search
+    // passes over KMS on purpose, and granting the capability again changes nothing about the stream.
+    const bool kms_set_aside = mode_capture.empty() && platf::kms_readiness::capability_set_aside();
+    if (kms_refused && !kms_set_aside && (mode_capture == "kms" || mode_capture.empty())) {
       const bool nothing_else = platf::capture_sources_missing();
       configuration_warnings.push_back({
         {"id", "kms_capture_needs_capability"},
         {"severity", nothing_else ? "fail" : "warning"},
         {"message", "KMS capture found the display but could not read a DRM framebuffer handle, "
                     "because the Polaris binary does not hold CAP_SYS_ADMIN. That capability is "
-                    "opt-in and is granted by the host setup step, not by the package, and installing or "
-                    "updating the package replaces the binary without it."},
-        {"action", std::string {"Run "} + enable_kms_command + " after each install or update, then restart Polaris."}
+                    "opt-in: the polaris-kms package carries it on a helper of its own, which updates "
+                    "keep, and host setup points the polaris user service at that helper."},
+        {"action", std::string {"Run "} + enable_kms_command + " once and do what it prints, since it may ask for a new "
+                   "login first, then restart Polaris."}
       });
     }
 
@@ -1254,6 +1503,26 @@ namespace stream_stats {
                   "overrides what the client asks for.";
         action = "Turn Enable HDR back on for that device on the Devices page, or delete its "
                  "saved profile, then start a stream and check the HDR row again.";
+      } else if (reason == "host_encoder_hdr_unsupported" && video::active_encoder_withholds_hdr_for_explicit_vulkan()) {
+        // Stream stats carry no flag for an encoder the launch chose, so this names both sources.
+        message = "HDR was refused because this stream encodes with Vulkan Video, set by encoder = vulkan "
+                  "or chosen for the launch, which reads each frame on Gamescope Stream through system "
+                  "memory as 8-bit and offers no HDR there. Nothing fell back.";
+        action = "Stream without HDR on Gamescope Stream, or with another encoder there. VA-API takes "
+                 "frames through the same 8-bit system memory upload unless POLARIS_PORTAL_DMABUF=1 is "
+                 "set, and HDR through that unvalidated DMA-BUF route is not proven.";
+      } else if (reason == "host_encoder_hdr_unsupported" && video::active_encoder_withholds_hdr()) {
+        // The usual source of this reason on AMD Gamescope Stream, and nothing fell back: the encoder
+        // row reads pass, so the advice below led nowhere.
+        message = "HDR was refused because Auto encodes Gamescope Stream on this AMD host with Vulkan "
+                  "Video, which reads each frame through system memory as 8-bit and offers no HDR "
+                  "there. Nothing fell back; that is the route's policy.";
+        // VA-API takes the same 8-bit upload on the portal unless the DMA-BUF opt-in is set, so
+        // keeping it is no promise of HDR.
+        action = "Stream without HDR on Gamescope Stream. hevc_mode = 3 or encoder = vaapi keeps VA-API "
+                 "there, but VA-API takes frames through the same 8-bit system memory upload unless "
+                 "POLARIS_PORTAL_DMABUF=1 is set, and HDR through that unvalidated DMA-BUF route is not "
+                 "proven.";
       } else if (reason == "host_encoder_hdr_unsupported") {
         message = "HDR was refused because this host's encoder did not advertise a 10-bit "
                   "profile when the stream was resolved.";
@@ -1293,9 +1562,14 @@ namespace stream_stats {
            "capture display did not report HDR."},
         {"action", std::string {
            "True HDR needs a capture path that reads the display's HDR metadata, which today "
-           "means the KMS/DRM path: capture = kms with a stream mode that shows the real HDR "
-           "output (Mirror Desktop, Host Virtual Display, Desktop Takeover or Gamescope). "
-           "Private Stream on headless labwc is always SDR. See docs/runtime.md."} +
+           "means the KMS/DRM path: capture = kms with Mirror Desktop as the host's stream mode, "
+           "streaming the HDR monitor itself. A launch into Mirror Desktop from another mode keeps "
+           "kms too, except on a host whose own mode is Host Virtual Display or Desktop Takeover: "
+           "loading that mode put the portal or wlroots in place of kms, and that lasts until "
+           "Polaris restarts. Those two modes capture their display through the portal or "
+           "wlroots. Gamescope Stream and the dongle keep kms only as the host's own mode, and a "
+           "launch into either from another mode captures through the portal. Private Stream on "
+           "headless labwc captures through wlroots and is always SDR. See docs/runtime.md."} +
            (kms_refused ?
               std::string {" On this host KMS capture was refused for a missing capability; run "} +
                 enable_kms_command + " first." :
@@ -1362,6 +1636,28 @@ namespace stream_stats {
 
     append_host_virtual_display_warnings(configuration_warnings, virtual_display::doctor_notes());
 #endif
+
+    // A settings file the store refused (#782). Polaris keeps running on the settings it loaded,
+    // but Settings, every settings save and Live Tuning go through the store, and until now only
+    // the console's Settings page said so. Apps, pairing and the console password have files of
+    // their own and still save. This is the refusal the last read or save met, so it
+    // clears the moment the file reads again. Paired clients read this profile in session status
+    // and support bundles carry it, so it names the kind of refusal and leaves the file's path,
+    // which carries the user's name, to the console and the log.
+    if (const auto refused = configuration_store::last_refusal(config::sunshine.config_file)) {
+      configuration_warnings.push_back({
+        {"id", "settings_file_unreadable"},
+        {"severity", "warning"},
+        {"refusal", private_state_file::refusal_name(refused->kind)},
+        {"message", "Polaris refused to read its settings file, so Settings cannot load and no settings change "
+                    "can be saved, whether it comes from the console, Live Tuning or a paired client. Apps, "
+                    "pairing and the console password are kept in other files and still save. Polaris keeps "
+                    "running on the settings it has already loaded."},
+        {"action", "The banner at the top of the console names the file, the reason and the command that fixes "
+                   "it, and so does the Polaris log. Once the file is fixed, Try again in the banner reads it "
+                   "again, and Polaris does not need a restart."}
+      });
+    }
 
     nlohmann::json profile = {
       {"encoder_api", stats.encode_target_device},
@@ -1611,12 +1907,104 @@ namespace stream_stats {
       });
     }
 
+    /// How long a failed start stays the thing Doctor leads with once nothing is streaming.
+    constexpr auto DOCTOR_FAILED_START_WINDOW = std::chrono::minutes {15};
+
+    /// Whether an ended session ended within the window before now. A clock set back reads as recent.
+    bool ended_within(const ended_session_t &ended, std::chrono::system_clock::time_point now,
+                      std::chrono::system_clock::duration window) {
+      if (ended.ended_at == std::chrono::system_clock::time_point {}) {
+        return false;
+      }
+      return ended.ended_at >= now || now - ended.ended_at <= window;
+    }
+
+    /**
+     * The last session, when it was a start the client gave up on during its own video setup, nothing
+     * streams now, and it ended recently enough to be what someone opening Doctor is asking about.
+     */
+    const ended_session_t *recent_failed_start(const stats_t &stats, std::chrono::system_clock::time_point now) {
+      if (stats.streaming || !stats.last_session) {
+        return nullptr;
+      }
+      const auto &last = *stats.last_session;
+      if (last.start_outcome != stream_start::k_client_left_during_setup ||
+          !ended_within(last, now, DOCTOR_FAILED_START_WINDOW)) {
+        return nullptr;
+      }
+      return &last;
+    }
+
+    /// "The last stream, to <client>" or "The last stream", for the sentences below.
+    std::string last_stream_subject(const ended_session_t &ended) {
+      return ended.client_name.empty() ? std::string {"The last stream"} :
+                                         "The last stream, to " + ended.client_name + ",";
+    }
+
+    /// What Doctor says about a start the client left during video setup.
+    std::string failed_start_summary(const ended_session_t &ended) {
+      std::string summary = last_stream_subject(ended) + " failed to start: the client left during video setup";
+      if (ended.start_client_left_after_ms >= 0) {
+        summary += " " + std::to_string(ended.start_client_left_after_ms) + " ms after connecting";
+      }
+      summary += ", before any video arrived.";
+      if (const auto codec = stream_start::codec_label(ended.codec); !codec.empty()) {
+        summary += " It had negotiated " + std::string {codec} + ".";
+      }
+      return summary;
+    }
+
+    nlohmann::json failed_start_recommendation(const ended_session_t &ended, const std::string &summary) {
+      const bool pyrowave = ended.codec == "pyrowave";
+      return {
+        {"title", "Try this first"},
+        {"body", stream_start::failed_start_next_step(ended.codec)},
+        {"why", summary},
+        {"next_step_label", pyrowave ? "Choose HEVC or H.264" : "Read the client's error"},
+        {"expected_effect", pyrowave ?
+           "The next stream starts on a codec that device can decode." :
+           "The client's own message says what stopped it, such as a decoder it could not create."}
+      };
+    }
+
+    /// What Doctor's recommendation and action need to know about a PyroWave stream.
+    struct pyrowave_doctor_t {
+      /// The stream is PyroWave and its shape gives advice.
+      bool active = false;
+      /// Doctor can raise the stream toward raise_goal_kbps.
+      bool raise_available = false;
+      /// The raise goal as a request, and which of advice, cap or max_bitrate set it.
+      int raise_goal_kbps = 0;
+      std::string_view limited_by;
+      /// Live Tuning's PyroWave floor is reached, and the floor at the encoder.
+      bool at_floor = false;
+      int floor_encoder_kbps = 0;
+    };
+
+    /// A bitrate as a player sets it, in whole Mbps, rounded up so setting it satisfies it.
+    std::string whole_mbps(int kbps) {
+      return std::to_string((std::max(kbps, 0) + 999) / 1000) + " Mbps";
+    }
+
+    std::string pyrowave_limit_phrase(std::string_view limited_by) {
+      if (limited_by == "max_bitrate") return "the host's max_bitrate";
+      if (limited_by == "cap") return "the most Doctor raises PyroWave to";
+      return "what PyroWave's model advises";
+    }
+
+    std::string pyrowave_floor_guidance(const pyrowave_doctor_t &pyrowave) {
+      return "PyroWave is at its floor of " + whole_mbps(pyrowave.floor_encoder_kbps) +
+             " at the encoder, half what its model advises, where Live Tuning and Doctor stop cutting because "
+             "below it the picture falls apart. Switch to HEVC, or lower the resolution or frame rate.";
+    }
+
     nlohmann::json doctor_recommendation(const std::string &primary_issue,
                                          const std::string &summary,
                                          const nlohmann::json &health,
                                          bool live_bitrate_tunable,
                                          bool single_session_scope,
-                                         bool auto_safe_managing) {
+                                         bool auto_safe_managing,
+                                         const pyrowave_doctor_t &pyrowave) {
       std::string title = "Try this first";
       std::string body = "Start a stream, reproduce the issue, then export diagnostics with this Doctor result attached.";
       std::string next_step = "Export diagnostics";
@@ -1628,7 +2016,11 @@ namespace stream_stats {
         next_step = "Keep monitoring";
         expected = "No recovery action should be needed right now.";
       } else if (primary_issue == "network_jitter") {
-        if (auto_safe_managing) {
+        if (pyrowave.at_floor) {
+          body = "Confirmed network pressure is affecting this stream. " + pyrowave_floor_guidance(pyrowave);
+          next_step = "Use HEVC or a lower mode";
+          expected = "A codec that needs fewer bits, or a smaller picture, fits the link without the picture falling apart.";
+        } else if (auto_safe_managing) {
           body = "Confirmed network pressure is affecting this stream, and Auto Safe already owns the live bitrate correction. Doctor will measure the result without racing the active controller.";
           next_step = "Recheck Auto Safe";
           expected = "Auto Safe should lower the encoder target until loss and latency return to the stable range.";
@@ -1672,12 +2064,45 @@ namespace stream_stats {
           next_step = "Keep current settings";
           expected = "Any later launch remains governed only by the user's selected preset and capability validation.";
         }
+      } else if (primary_issue == "pyrowave_starved") {
+        const auto goal = whole_mbps(pyrowave.raise_goal_kbps);
+        if (auto_safe_managing) {
+          body = "The network is clean and PyroWave is short of bits. Live Tuning owns the bitrate and never raises it above "
+                 "your request, so set about " + goal + " as the live bitrate in your client, which turns Live Tuning off for "
+                 "this stream only.";
+          next_step = "Raise the bitrate";
+          expected = "Fewer frames should hit PyroWave's byte ceiling, and the picture should sharpen.";
+        } else if (pyrowave.raise_available && live_bitrate_tunable) {
+          body = "The network is clean and PyroWave is below the bitrate its model advises. Doctor can raise it to " + goal +
+                 " in guarded steps, verifying each one, and Undo puts back the bitrate you chose.";
+          next_step = "Raise and verify";
+          expected = "Fewer frames should hit PyroWave's byte ceiling while loss and latency stay in range.";
+        } else if (pyrowave.raise_available && !single_session_scope) {
+          body = "Doctor requires one fresh stream generation that has not shared the process-global bitrate target. Disconnect additional viewers and reconnect the affected stream before rechecking.";
+          next_step = "Reconnect one stream";
+          expected = "No other encoder can be changed by this stream's Auto Fix.";
+        } else if (pyrowave.raise_available) {
+          body = "PyroWave is below the bitrate its model advises, but this stream cannot change bitrate live. Set about " +
+                 goal + " in your client for the next stream.";
+          next_step = "Raise next-stream bitrate";
+          expected = "The next stream should start at a bitrate PyroWave can use.";
+        } else {
+          body = "PyroWave already runs at or above " + goal + ", " + pyrowave_limit_phrase(pyrowave.limited_by) +
+                 ", and most frames still hit its byte ceiling. Lower the resolution or frame rate, or use HEVC, for a "
+                 "sharper picture on this link.";
+          next_step = "Use a lower mode or HEVC";
+          expected = "A smaller or slower picture needs fewer bits, so fewer frames hit the ceiling.";
+        }
       } else if (primary_issue == "steam_input_conflict") {
         body = "Local Steam Input settings can claim the Polaris Xbox virtual controller while strict isolation prevents Steam from creating its replacement controller. Disable Steam Input for Xbox controllers in Steam Settings, and set any per-game Force On overrides to Default or Disable.";
         next_step = "Adjust Steam Input";
         expected = "Proton games should read the Polaris virtual controller directly without a per-game workaround.";
       } else if (primary_issue == "encoder_load") {
-        body = "Trim bitrate, resolution, or FPS to give the active encoder more frame time.";
+        // PyroWave's time goes to colour conversion and a wavelet transform, which take as long at any
+        // bitrate, so a lower bitrate softens the picture and gives the encoder nothing back.
+        body = pyrowave.active ?
+          "Lower the resolution or FPS to give PyroWave more frame time. Its encode takes as long at any bitrate, so a lower bitrate would only soften the picture." :
+          "Trim bitrate, resolution, or FPS to give the active encoder more frame time.";
         next_step = "Lower stream load";
         expected = "Encode time should fall back under the low-latency budget.";
       } else if (primary_issue == "host_render_limited") {
@@ -1713,12 +2138,14 @@ namespace stream_stats {
     nlohmann::json doctor_safe_action(const std::string &primary_issue,
                                       const nlohmann::json &health,
                                       int current_bitrate_kbps,
-                                      int paired_target_bitrate_kbps,
+                                      const doctor_quality_goal_t &quality_goal,
                                       bool live_bitrate_tunable,
                                       bool single_session_scope,
                                       bool auto_safe_managing,
+                                      const pyrowave_doctor_t &pyrowave,
                                       const std::string &source_result_id,
-                                      std::string_view app_uuid) {
+                                      std::string_view app_uuid,
+                                      const std::string &failed_start_next_step = {}) {
       std::string id = "none";
       std::string label = "No automatic action";
       std::string kind = "none";
@@ -1737,7 +2164,53 @@ namespace stream_stats {
 
       const bool auto_safe_network_management = auto_safe_managing &&
         (primary_issue == "network_jitter" || primary_issue == "quality_reduced_live");
-      if (auto_safe_network_management) {
+      const auto read_only_guidance = [&](std::string reason) {
+        id = "none";
+        label = "Manual";
+        kind = "manual_guidance";
+        unavailable_reason = std::move(reason);
+        rollback = "Read-only guidance; Doctor does not change the stream.";
+      };
+      if (primary_issue == "network_jitter" && pyrowave.at_floor) {
+        // No cut below PyroWave's floor, from Live Tuning or from Doctor: the answer is another codec
+        // or a smaller picture.
+        read_only_guidance(pyrowave_floor_guidance(pyrowave));
+      } else if (primary_issue == "pyrowave_starved" && !auto_safe_managing &&
+                 pyrowave.raise_available && live_bitrate_tunable) {
+        // The one place Polaris raises a stream above the player's own request: a single tap, on a
+        // clean network, to the far advice and no higher than the cap and max_bitrate, verified in
+        // guarded steps with Undo. Live Tuning, which acts on its own, never does.
+        id = "restore_quality";
+        label = "Auto Fix";
+        kind = "live_tuning";
+        endpoint = "/api/doctor/action";
+        method = "POST";
+        payload["action_id"] = id;
+        payload["source_result_id"] = source_result_id;
+        payload["target_bitrate_kbps"] = pyrowave.raise_goal_kbps;
+        payload["goal_source"] = "pyrowave_advice";
+        rollback = "Undo restores the live bitrate and Auto Quality state that were active before this Doctor run.";
+        verification = {
+          {"mode", "graduated_live_telemetry"},
+          {"delay_seconds", 8},
+          {"endpoint", "/api/doctor/action"},
+          {"success_when", nlohmann::json::array({"network_risk stays clear", "packet_loss_pct <= 2", "latency_ms < 45", "PyroWave's advised bitrate is reached"})}
+        };
+      } else if (primary_issue == "pyrowave_starved") {
+        const auto goal = whole_mbps(pyrowave.raise_goal_kbps);
+        read_only_guidance(
+          auto_safe_managing ?
+            "Live Tuning owns the bitrate and never raises it above your request. Set about " + goal +
+              " as the live bitrate in your client, which turns Live Tuning off for this stream only." :
+          !pyrowave.raise_available ?
+            "PyroWave already runs at or above " + goal + ", " + pyrowave_limit_phrase(pyrowave.limited_by) +
+              ". Lower the resolution or frame rate, or use HEVC." :
+          single_session_scope ?
+            "The active encoder does not support runtime bitrate updates. Set about " + goal +
+              " in your client for the next stream." :
+            "Auto Fix requires a fresh, unshared stream generation to own the process-global bitrate controller."
+        );
+      } else if (auto_safe_network_management) {
         id = "recheck_network";
         label = "Recheck";
         kind = "verification";
@@ -1763,7 +2236,10 @@ namespace stream_stats {
         const int health_bitrate_kbps = health.value("safe_bitrate_kbps", 0);
         payload["action_id"] = id;
         payload["source_result_id"] = source_result_id;
-        payload["target_bitrate_kbps"] = health_bitrate_kbps > 0 ? health_bitrate_kbps : derived_bitrate_kbps;
+        // A safe bitrate that is no lower than the stream, which is what PyroWave's health reports,
+        // names no step, so the payload names one guarded 20% step instead.
+        payload["target_bitrate_kbps"] = health_bitrate_kbps > 0 && health_bitrate_kbps < current_bitrate_kbps ?
+          health_bitrate_kbps : derived_bitrate_kbps;
         rollback = "Undo restores the live bitrate and Auto Quality state that were active before this Doctor run.";
         verification = {
           {"mode", "live_telemetry"},
@@ -1794,7 +2270,8 @@ namespace stream_stats {
         method = "POST";
         payload["action_id"] = id;
         payload["source_result_id"] = source_result_id;
-        payload["target_bitrate_kbps"] = paired_target_bitrate_kbps;
+        payload["target_bitrate_kbps"] = quality_goal.target_kbps;
+        payload["goal_source"] = quality_goal.source;
         rollback = "Undo restores the live bitrate and Auto Quality state that were active before this Doctor run.";
         verification = {
           {"mode", "graduated_live_telemetry"},
@@ -1818,6 +2295,18 @@ namespace stream_stats {
           {"delay_seconds", 0},
           {"endpoint", ""},
           {"success_when", nlohmann::json::array({"Steam Input host opt-in and per-game overrides are reviewed manually"})}
+        };
+      } else if (primary_issue == "stream_failed_to_start") {
+        id = "none";
+        label = "Manual";
+        kind = "manual_guidance";
+        unavailable_reason = failed_start_next_step;
+        rollback = "Read-only guidance; Doctor changes nothing.";
+        verification = {
+          {"mode", "manual_client_change"},
+          {"delay_seconds", 0},
+          {"endpoint", ""},
+          {"success_when", nlohmann::json::array({"the next stream from that client starts"})}
         };
       } else if (primary_issue == "no_active_stream" || primary_issue == "capture_missing") {
         id = "export_support_bundle";
@@ -1905,21 +2394,43 @@ namespace stream_stats {
       stats.control_channel_packet_loss >= network_risk_tracker_t::k_loss_elevated_pct;
     const int live_bitrate_kbps = stats.adaptive_runtime_update_supported && stats.adaptive_target_bitrate_kbps > 0 ?
       stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
-    const int effective_quality_target_kbps =
-      stats.paired_target_bitrate_kbps > 0 && stats.effective_launch_bitrate_kbps > 0 ?
-        std::min(stats.paired_target_bitrate_kbps, stats.effective_launch_bitrate_kbps) :
-        0;
+    // The saved paired profile's bitrate, or the rate the stream opened at when there is none, so a
+    // stream with no saved profile can climb back after a reduction too.
+    const auto launch_quality_goal = doctor_quality_goal(stats, "launch");
+    const int effective_quality_target_kbps = launch_quality_goal.encoder_kbps;
     // Enabled Auto Safe remains the sole continuous bitrate owner even while
     // its actuator is momentarily holding or recovering. A clean, reduced
     // target is therefore an informational observation, not a user action.
     const bool auto_safe_managing = stats.adaptive_bitrate_enabled;
     const bool network_evidence_available = current_network_observation &&
       (current_media_loss_observation || stats.control_channel_samples > 0);
-    const bool quality_reduced_live =
+    // Clean enough to raise quality: the loss and latency limits a Doctor quality restore verifies with.
+    const bool network_clean_for_quality =
       stats.streaming && network_evidence_available && !stats.network_risk &&
       (!current_media_loss_observation || stats.packet_loss <= 2.0) &&
-      stats.latency_ms < 45.0 &&
+      stats.latency_ms < 45.0;
+    const bool quality_reduced_live =
+      network_clean_for_quality &&
       stats.adaptive_runtime_update_supported && effective_quality_target_kbps > live_bitrate_kbps;
+    // PyroWave below the rate its model advises, or starved at its byte ceiling, on a clean network. A
+    // watch finding that ranks below every network, encoder and capture failure.
+    const auto pyrowave = evaluate_pyrowave_bitrate(stats);
+    // A stream cut below a request that already meets the raise goal climbs back to that request, by
+    // the ordinary quality restore or by Live Tuning's own recovery when it owns the bitrate. PyroWave's
+    // raise would stop short of what the player asked for, and its text would ask for less.
+    const bool launch_restore_covers_pyrowave = quality_reduced_live &&
+      effective_quality_target_kbps >= pyrowave.advice.raise_goal_encoder_kbps;
+    const bool pyrowave_starved = pyrowave.active && pyrowave.starved && network_clean_for_quality &&
+      !launch_restore_covers_pyrowave;
+    pyrowave_doctor_t pyrowave_doctor;
+    if (pyrowave.active) {
+      pyrowave_doctor.active = true;
+      pyrowave_doctor.raise_goal_kbps = pyrowave.advice.raise_goal_kbps;
+      pyrowave_doctor.limited_by = pyrowave.advice.raise_goal_limited_by;
+      pyrowave_doctor.raise_available = pyrowave.advice.raise_goal_encoder_kbps > live_bitrate_kbps;
+      pyrowave_doctor.at_floor = pyrowave.at_floor;
+      pyrowave_doctor.floor_encoder_kbps = pyrowave.floor_encoder_kbps;
+    }
     const bool single_session_scope = stats.clients.size() <= 1 &&
       stats.doctor_live_action_scope_available;
     const bool live_bitrate_tunable =
@@ -1975,6 +2486,8 @@ namespace stream_stats {
       strict_gamepad_isolation &&
       (stats.input_steam_profiles_with_xbox_support > 0 ||
        stats.input_steam_forced_app_count > 0);
+    const auto doctor_now = std::chrono::system_clock::now();
+    const ended_session_t *const failed_start = recent_failed_start(stats, doctor_now);
 
     std::string primary_issue = health.value("primary_issue", std::string {});
     if (primary_issue == "steady" || primary_issue == "none") primary_issue.clear();
@@ -2006,6 +2519,11 @@ namespace stream_stats {
       // controller is structurally dead inside the strict sandbox.
       primary_issue = "steam_input_conflict";
     }
+    if (failed_start) {
+      // Nothing streams, so no live finding is current, and a start that just failed is what the
+      // person opening Doctor is looking at. "No active stream" told them only what they knew.
+      primary_issue = "stream_failed_to_start";
+    }
     if (primary_issue.empty()) {
       if (!stats.streaming) primary_issue = "no_active_stream";
       else if (network_fail) primary_issue = "network_jitter";
@@ -2019,6 +2537,7 @@ namespace stream_stats {
       else if (capture_latency_watch || capture_pacing_watch) primary_issue = capture_reason;
       else if (!capture_known) primary_issue = "capture_missing";
       else if (pacing_watch) primary_issue = "frame_pacing";
+      else if (pyrowave_starved) primary_issue = "pyrowave_starved";
       else if (quality_reduced_live && !auto_safe_managing) primary_issue = "quality_reduced_live";
       else if (control_channel_observation) primary_issue = "control_channel_observation";
       else primary_issue = "none";
@@ -2033,7 +2552,12 @@ namespace stream_stats {
       (!health_claims_network_jitter || network_fail) &&
       !health_claims_unconfirmed_frame_pacing &&
       !health_claims_unconfirmed_capture_pressure;
-    if (primary_issue == "no_active_stream" || primary_issue == "capture_missing") {
+    if (primary_issue == "stream_failed_to_start") {
+      traffic = "amber";
+      status = "needs_action";
+      severity = "warning";
+      simple_state = "Needs attention";
+    } else if (primary_issue == "no_active_stream" || primary_issue == "capture_missing") {
       traffic = "amber";
       status = "unknown";
       severity = "warning";
@@ -2051,14 +2575,33 @@ namespace stream_stats {
       simple_state = "Needs attention";
     }
 
+    // Both sides as requests, so the player compares what they set with what to set.
+    const auto pyrowave_link_audio_kbps = stats.bitrate_request.audio_kbps > 0 ?
+      stats.bitrate_request.audio_kbps : pyrowave_advice::k_default_audio_kbps;
+    const auto pyrowave_set_kbps = static_cast<int>(stream_bitrate::wire_kbps_for_encoder(
+      pyrowave.encoder_kbps, config::stream.fec_percentage, pyrowave_link_audio_kbps));
+    std::string pyrowave_summary;
+    if (pyrowave.active) {
+      pyrowave_summary = "PyroWave is set to about " + whole_mbps(pyrowave_set_kbps) + " where its 35 dB model advises " +
+                         whole_mbps(pyrowave.advice.advice_far_kbps) + " for " + std::to_string(pyrowave.advice.width) +
+                         "x" + std::to_string(pyrowave.advice.height) + " at " + std::to_string(pyrowave.advice.fps) +
+                         " fps on a device's own screen";
+      if (pyrowave.ceiling_frame_share) {
+        pyrowave_summary += ", and " + std::to_string(static_cast<int>(std::lround(*pyrowave.ceiling_frame_share * 100.0))) +
+                            "% of recent frames hit its byte ceiling";
+      }
+      pyrowave_summary += ".";
+    }
     const std::string summary =
       primary_issue == "none" ? "Streaming telemetry looks ready." :
+      primary_issue == "stream_failed_to_start" ? failed_start_summary(*failed_start) :
       primary_issue == "no_active_stream" ? "No active stream is running, so Doctor cannot verify the live path yet." :
       primary_issue == "capture_missing" ? "Capture metadata has not arrived yet; start a stream before tuning advanced settings." :
       primary_issue == "network_jitter" ? "Sustained network pressure is affecting this stream." :
       primary_issue == "network_observation" ? "A network warning needs more live evidence before Doctor changes quality." :
       primary_issue == "control_channel_observation" ? "Control-channel retries were observed, but video packet loss is not confirmed." :
       primary_issue == "quality_reduced_live" ? "The reversible live bitrate target is below the capability-validated launch ceiling and current network evidence is clean." :
+      primary_issue == "pyrowave_starved" ? pyrowave_summary + " The network is clean." :
       primary_issue == "steam_input_conflict" ? "Local Steam Input settings conflict with strict gamepad isolation for the Polaris Xbox virtual controller." :
       primary_issue == "encoder_load" ? "Encoder load is above the low-latency budget." :
       primary_issue == "frame_pacing" ? "Frame pacing telemetry needs attention." :
@@ -2068,6 +2611,30 @@ namespace stream_stats {
 
     nlohmann::json evidence = nlohmann::json::array();
     append_doctor_evidence(evidence, "streaming", "Active stream", stats.streaming, "", stats.streaming ? "pass" : "unknown", "stream_stats", stats.streaming ? "A stream is active." : "No active stream is reporting live telemetry.");
+    // How the last stream's start ended, while nothing streams. Right after "no active stream",
+    // because a start that failed is usually why nothing is.
+    if (!stats.streaming && stats.last_session && !stats.last_session->start_outcome.empty()) {
+      const auto &last = *stats.last_session;
+      const bool recent = ended_within(last, doctor_now, DOCTOR_FAILED_START_WINDOW);
+      std::string row_status = "info";
+      std::string detail;
+      if (last.start_outcome == stream_start::k_client_left_during_setup) {
+        row_status = recent ? "fail" : "info";
+        detail = failed_start_summary(last);
+      } else if (last.start_outcome == stream_start::k_no_ping) {
+        // Written when a socket's wait for its first ping runs out, even after the other socket heard
+        // from the client, so it names the wait rather than claiming neither packet came.
+        row_status = recent ? "watch" : "info";
+        detail = last_stream_subject(last) +
+                 " ended waiting for a first packet from the client on its video or audio port. A firewall "
+                 "or a UDP path problem between the client and this host usually does that.";
+      } else {
+        row_status = "pass";
+        detail = last_stream_subject(last) + " started: the client's first video or audio packet arrived.";
+      }
+      append_doctor_evidence(evidence, "last_stream_start", "Last stream start", last.start_outcome, "", row_status,
+                             "stream_session", detail);
+    }
 #ifdef __linux__
     // Which binary produced this report. The Bazzite DRM/KMS recipe runs a copy
     // outside the package, and that copy stays on the old version across
@@ -2077,11 +2644,8 @@ namespace stream_stats {
       const auto binary = platf::user_unit::describe_running_binary(*running, POLARIS_EXECUTABLE_PATH);
       const bool outside_package = binary.matches_package == std::optional<bool> {false};
       std::string detail = std::string {"Polaris "} + PROJECT_VERSION + " is running from " + binary.path + ".";
-      if (outside_package) {
-        detail += " That is not the packaged " + binary.packaged_path +
-                  "; package updates do not change a copy, so refresh it from the package or remove the service drop-in after updating.";
-      } else if (binary.matches_package) {
-        detail += " This is the packaged binary.";
+      if (const auto note = platf::user_unit::running_binary_note(binary); !note.empty()) {
+        detail += " " + note;
       }
       append_doctor_evidence(evidence, "running_binary", "Running binary", binary.path, "", outside_package ? "watch" : "pass", "process", detail);
     }
@@ -2211,7 +2775,25 @@ namespace stream_stats {
       append_doctor_evidence(evidence, "display_mode_decision", "Display mode", applied, "",
                              replaced_request ? "watch" : "info", "launch", last_launch_prefix + detail);
     }
-    append_doctor_evidence(evidence, "bitrate", "Live bitrate", live_bitrate_kbps, "kbps", "pass", "stream_stats", stats.adaptive_runtime_update_supported ? "Current live encoder target; Doctor changes it only for confirmed pressure or a verified same-stream restore." : "Applied encoder bitrate; this encoder does not expose live bitrate updates.");
+    {
+      std::string detail = stats.adaptive_runtime_update_supported ?
+        "Current live encoder target; Doctor changes it only for confirmed pressure or a verified same-stream restore." :
+        "Applied encoder bitrate; this encoder does not expose live bitrate updates.";
+      if (pyrowave.active) {
+        detail += " " + pyrowave_summary + " On a television or monitor (H 2.0) it advises " +
+                  whole_mbps(pyrowave.advice.advice_near_kbps) + ", in " +
+                  (pyrowave.advice.chroma444 ? "4:4:4" : "4:2:0") + ". Every figure is what to request.";
+        if (pyrowave.floor_encoder_kbps > 0) {
+          detail += " Live Tuning cuts it no lower than " + whole_mbps(pyrowave.floor_encoder_kbps) + " at the encoder.";
+        }
+      }
+      const bool bitrate_short = quality_reduced_live || (pyrowave.active && pyrowave.starved);
+      append_doctor_evidence(
+        evidence, "bitrate", "Live bitrate", live_bitrate_kbps, "kbps",
+        !stats.streaming ? "unknown" : network_fail ? "fail" : bitrate_short ? "watch" : "pass",
+        "stream_stats", detail
+      );
+    }
     const bool has_oversized_fec_frames =
       stats.fec_protection.oversized_frames_total > 0;
     const std::string fec_protection_detail = has_oversized_fec_frames ?
@@ -2269,7 +2851,7 @@ namespace stream_stats {
       "launch_policy",
       quality_reduced_live ?
         "The reversible live bitrate target is below the capability-validated launch ceiling." :
-        "The launch ceiling is the paired preference after host capability validation."
+        "The launch ceiling is the paired preference after host capability validation, or the bitrate the stream opened at when no paired preference is saved."
     );
     append_doctor_evidence(
       evidence,
@@ -2373,6 +2955,10 @@ namespace stream_stats {
       confidence_score = 0.98;
       confidence_level = "high";
       basis = "local_steam_config_and_isolation_plan";
+    } else if (primary_issue == "stream_failed_to_start") {
+      confidence_score = 0.9;
+      confidence_level = "high";
+      basis = "host_session_record";
     } else if (primary_issue == "quality_reduced_live") {
       confidence_score = 0.96;
       confidence_level = "high";
@@ -2440,22 +3026,26 @@ namespace stream_stats {
       }}
     };
     doctor["summary"] = summary;
-    doctor["recommendation"] = doctor_recommendation(
-      primary_issue, summary, health, live_bitrate_tunable, single_session_scope,
-      auto_safe_managing
-    );
+    doctor["recommendation"] = failed_start ?
+      failed_start_recommendation(*failed_start, summary) :
+      doctor_recommendation(
+        primary_issue, summary, health, live_bitrate_tunable, single_session_scope,
+        auto_safe_managing, pyrowave_doctor
+      );
     doctor["evidence"] = std::move(evidence);
     doctor["advanced_evidence"] = std::move(advanced);
     doctor["safe_recovery_action"] = doctor_safe_action(
       primary_issue,
       health,
       live_bitrate_kbps,
-      effective_quality_target_kbps,
+      launch_quality_goal,
       live_bitrate_tunable,
       single_session_scope,
       auto_safe_managing,
+      pyrowave_doctor,
       doctor["result_id"].get<std::string>(),
-      app_uuid
+      app_uuid,
+      failed_start ? stream_start::failed_start_next_step(failed_start->codec) : std::string {}
     );
     doctor["suppressed_findings"] = nlohmann::json::array();
     if (suppressed_stale_network_finding) {
@@ -2592,6 +3182,7 @@ namespace stream_stats {
       client.name = client_name;
       client.ip = client_ip;
       client.session_generation = session_generation;
+      client.started_at = std::chrono::system_clock::now();
       current_stats.clients.push_back(std::move(client));
     }
 
@@ -2610,6 +3201,31 @@ namespace stream_stats {
 
     std::lock_guard<std::mutex> lock(stats_mutex);
 
+    // Freeze the ending session before its entry goes, from what its own generation stored. Only a
+    // removal that finds its live generation writes it, so removing the same session twice, one that
+    // was never added, or a legacy entry with no generation leaves the last session as it was.
+    if (session_generation > 0) {
+      const auto ending = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+        [session_generation](const client_stats_t &c) {
+          return c.session_generation == session_generation;
+        });
+      if (ending != current_stats.clients.end()) {
+        last_ended_session = ended_session_t {
+          .session_generation = ending->session_generation,
+          .client_name = ending->name,
+          .started_at = ending->started_at,
+          .ended_at = std::chrono::system_clock::now(),
+          .capture_backend = ending->capture_backend,
+          .capture_frames = frames_of_published_display(*ending),
+          .codec = ending->codec,
+          .encoder_backend = ending->encoder_backend,
+          .pyrowave_route = ending->pyrowave_route,
+          .start_outcome = ending->start_outcome,
+          .start_client_left_after_ms = ending->start_client_left_after_ms,
+        };
+      }
+    }
+
     current_stats.clients.erase(
       std::remove_if(current_stats.clients.begin(), current_stats.clients.end(),
         [&client_ip, session_generation](const client_stats_t &c) {
@@ -2624,15 +3240,24 @@ namespace stream_stats {
       current_stats.client_name.clear();
       current_stats.client_ip.clear();
       current_stats.fec_protection = {};
+      current_stats.stream_chroma.clear();
+      current_stats.bitrate_request = {};
+      current_stats.pyrowave_window_frames = 0;
+      current_stats.pyrowave_window_ceiling_frames = 0;
     } else {
       // Update primary client info to first remaining client
-      current_stats.client_name = current_stats.clients.front().name;
-      current_stats.client_ip = current_stats.clients.front().ip;
-      current_stats.fec_protection = current_stats.clients.front().fec_protection;
+      const auto &primary = current_stats.clients.front();
+      current_stats.client_name = primary.name;
+      current_stats.client_ip = primary.ip;
+      current_stats.fec_protection = primary.fec_protection;
+      current_stats.stream_chroma = primary.stream_chroma;
+      current_stats.bitrate_request = primary.bitrate_request;
+      current_stats.pyrowave_window_frames = primary.pyrowave_window_frames;
+      current_stats.pyrowave_window_ceiling_frames = primary.pyrowave_window_ceiling_frames;
     }
   }
 
-  void update_video_stats(double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height, std::string_view encoder_backend) {
+  void update_video_stats(double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height, std::string_view encoder_backend, std::uint64_t session_generation) {
     hot_bitrate_kbps.store(bitrate_kbps, std::memory_order_relaxed);
     hot_codec_id.store(codec_to_id(codec), std::memory_order_relaxed);
     hot_width.store(width, std::memory_order_relaxed);
@@ -2651,8 +3276,18 @@ namespace stream_stats {
     // and the only reason this call still needs stats_mutex at all.
     std::lock_guard<std::mutex> lock(stats_mutex);
     current_stats.encoder_backend = encoder_backend;
-    if (!current_stats.clients.empty()) {
-      auto &c = current_stats.clients.front();
+    // Every session's encode loop writes here, so each writes its own entry. Writing the first
+    // client put one session's codec and encoder on another's entry, while the other entries kept
+    // what they started with. Generation zero names no session: Browser Stream's encode loop
+    // passes it, and nothing keeps a Browser Stream from running beside a Moonlight or Nova
+    // session. It writes only an entry registered with no generation either, the way add_client()
+    // and remove_client() match one, so it never lands on a session's entry or its last_session.
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client != current_stats.clients.end()) {
+      auto &c = *client;
       c.fps = fps;
       c.bitrate_kbps = bitrate_kbps;
       c.encode_time_ms = encode_time_ms;
@@ -2663,11 +3298,18 @@ namespace stream_stats {
     }
   }
 
-  void update_video_stats(const std::string &client_ip, double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height, std::string_view encoder_backend) {
+  void update_video_stats(const std::string &client_ip, double fps, int bitrate_kbps, double encode_time_ms, const std::string &codec, int width, int height, std::string_view encoder_backend, std::uint64_t session_generation) {
     std::lock_guard<std::mutex> lock(stats_mutex);
 
+    // Overlapping reconnects share an address, so a session with a generation finds its own entry
+    // by it. The address alone found the older session's. A caller with no generation finds only
+    // an entry registered with none at that address, as add_client() does, never a session's.
     auto it = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
-      [&client_ip](const client_stats_t &c) { return c.ip == client_ip; });
+      [&client_ip, session_generation](const client_stats_t &c) {
+        return session_generation > 0 ?
+          c.session_generation == session_generation :
+          c.session_generation == 0 && c.ip == client_ip;
+      });
 
     if (it != current_stats.clients.end()) {
       it->fps = fps;
@@ -2753,7 +3395,261 @@ namespace stream_stats {
       });
     if (client == current_stats.clients.end()) return false;
     client->capture_source = source;
+    client->capture_frame_since_publication = true;
     return true;
+  }
+
+  bool record_capture_backend(std::uint64_t session_generation, const capture_backend_t &backend) {
+    if (session_generation == 0 || backend.opened.empty()) return false;
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == current_stats.clients.end()) return false;
+    client->capture_backend = backend;
+    // A publication names the display a session now encodes from. Frames an earlier display
+    // delivered say nothing about this one, and neither does the PyroWave route an earlier
+    // display's encoder took: the encoder for this one has encoded nothing yet. Its route reads
+    // unknown until its own first frame, so neither the reason nor the last session gives a
+    // display that delivered no frame the route of the one before it.
+    client->capture_frame_since_publication = false;
+    client->pyrowave_route.clear();
+    return true;
+  }
+
+  bool record_pyrowave_route(std::uint64_t session_generation, std::string_view route) {
+    if (session_generation == 0 || route.empty()) return false;
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == current_stats.clients.end()) return false;
+    client->pyrowave_route = route;
+    return true;
+  }
+
+  void record_app_stop(std::string_view path, int windows_asked, std::chrono::milliseconds waited) {
+    app_stop_t stop;
+    stop.path = path;
+    stop.windows_asked = windows_asked;
+    stop.waited = waited;
+    record_app_stop(stop);
+  }
+
+  void record_app_stop(const app_stop_t &stop) {
+    if (stop.path.empty()) return;
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    if (!last_ended_session) return;
+    last_ended_session->app_stop = stop;
+  }
+
+  void record_app_stop_check(bool capture_complete, int unattributed, bool live_at_compositor_stop) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    if (!last_ended_session || last_ended_session->app_stop.path.empty()) return;
+    auto &stop = last_ended_session->app_stop;
+    stop.capture = capture_complete ? "complete" : "incomplete";
+    stop.unattributed = unattributed;
+    if (live_at_compositor_stop) {
+      stop.path = "compositor_stop";
+    }
+  }
+
+  bool record_start_outcome(std::uint64_t session_generation, std::string_view outcome,
+                            std::int64_t client_left_after_ms) {
+    if (session_generation == 0 || outcome.empty()) return false;
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == current_stats.clients.end()) return false;
+    client->start_outcome = outcome;
+    client->start_client_left_after_ms = client_left_after_ms >= 0 ? client_left_after_ms : -1;
+    return true;
+  }
+
+  bool record_stream_request(std::uint64_t session_generation, bool yuv444, const stream_bitrate::request_t &request) {
+    if (session_generation == 0) return false;
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == current_stats.clients.end()) return false;
+    client->stream_chroma = yuv444 ? "444" : "420";
+    client->bitrate_request = request;
+    client->pyrowave_ceiling_batches.clear();
+    client->pyrowave_window_frames = 0;
+    client->pyrowave_window_ceiling_frames = 0;
+    current_stats.stream_chroma = client->stream_chroma;
+    current_stats.bitrate_request = request;
+    current_stats.pyrowave_window_frames = 0;
+    current_stats.pyrowave_window_ceiling_frames = 0;
+    return true;
+  }
+
+  bool record_pyrowave_frames(std::uint64_t session_generation, std::uint32_t frames, std::uint32_t ceiling_frames) {
+    if (session_generation == 0 || frames == 0) return false;
+    ceiling_frames = std::min(ceiling_frames, frames);
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == current_stats.clients.end()) return false;
+    auto &batches = client->pyrowave_ceiling_batches;
+    batches.emplace_back(frames, ceiling_frames);
+    client->pyrowave_window_frames += frames;
+    client->pyrowave_window_ceiling_frames += ceiling_frames;
+    // Drop the oldest batch while the rest still covers the window, so the share always speaks for
+    // at least the last k_pyrowave_ceiling_window_frames frames once there are that many.
+    while (batches.size() > 1 &&
+           client->pyrowave_window_frames - batches.front().first >= k_pyrowave_ceiling_window_frames) {
+      client->pyrowave_window_frames -= batches.front().first;
+      client->pyrowave_window_ceiling_frames -= batches.front().second;
+      batches.erase(batches.begin());
+    }
+    current_stats.pyrowave_window_frames = client->pyrowave_window_frames;
+    current_stats.pyrowave_window_ceiling_frames = client->pyrowave_window_ceiling_frames;
+    return true;
+  }
+
+  std::optional<double> pyrowave_ceiling_frame_share(const stats_t &stats) {
+    if (stats.pyrowave_window_frames < k_pyrowave_ceiling_min_frames) return std::nullopt;
+    return static_cast<double>(stats.pyrowave_window_ceiling_frames) /
+           static_cast<double>(stats.pyrowave_window_frames);
+  }
+
+  pyrowave_bitrate_t evaluate_pyrowave_bitrate(const stats_t &stats) {
+    pyrowave_bitrate_t result;
+    if (!stats.streaming || stats.codec != "pyrowave") return result;
+    const double fps = stats.encode_target_fps > 0.0 ? stats.encode_target_fps : stats.session_target_fps;
+    const pyrowave_advice::link_t link {
+      config::stream.fec_percentage,
+      stats.bitrate_request.audio_kbps > 0 ? stats.bitrate_request.audio_kbps : pyrowave_advice::k_default_audio_kbps
+    };
+    result.advice = pyrowave_advice::advise(
+      stats.width, stats.height, static_cast<int>(std::lround(fps)), stats.stream_chroma == "444", link,
+      config::video.max_bitrate
+    );
+    if (!result.advice.valid) return result;
+    result.active = true;
+    result.encoder_kbps = stats.adaptive_runtime_update_supported && stats.adaptive_target_bitrate_kbps > 0 ?
+      stats.adaptive_target_bitrate_kbps : stats.bitrate_kbps;
+    result.ceiling_frame_share = pyrowave_ceiling_frame_share(stats);
+    result.below_goal = result.encoder_kbps > 0 && result.encoder_kbps < result.advice.raise_goal_encoder_kbps;
+    result.ceiling_starved = result.ceiling_frame_share &&
+      *result.ceiling_frame_share > pyrowave_advice::k_starved_ceiling_share;
+    result.starved = result.below_goal || result.ceiling_starved;
+    if (stats.adaptive_floor_source == "pyrowave_advice" && stats.adaptive_min_bitrate_kbps > 0) {
+      result.floor_encoder_kbps = stats.adaptive_min_bitrate_kbps;
+      result.at_floor = result.encoder_kbps > 0 && result.encoder_kbps <= result.floor_encoder_kbps;
+    }
+    return result;
+  }
+
+  nlohmann::json pyrowave_bitrate_json(const stats_t &stats) {
+    const auto pyrowave = evaluate_pyrowave_bitrate(stats);
+    if (!pyrowave.active) return nullptr;
+    auto value = pyrowave_advice::advice_json(pyrowave.advice);
+    value["encoder_kbps"] = pyrowave.encoder_kbps;
+    value["ceiling_frame_share"] = pyrowave.ceiling_frame_share ?
+      nlohmann::json(std::round(*pyrowave.ceiling_frame_share * 1000.0) / 1000.0) : nlohmann::json(nullptr);
+    value["starved"] = pyrowave.starved;
+    value["live_tuning_floor_encoder_kbps"] = pyrowave.floor_encoder_kbps > 0 ?
+      nlohmann::json(pyrowave.floor_encoder_kbps) : nlohmann::json(nullptr);
+    const auto &request = stats.bitrate_request;
+    value["request_cap"] = request.cap_kbps > 0 ?
+      nlohmann::json {{"kbps", request.cap_kbps}, {"source", request.cap_source}} : nlohmann::json(nullptr);
+    value["cap_set_aside"] = request.set_aside_kbps > 0 ?
+      nlohmann::json {{"kbps", request.set_aside_kbps}, {"source", request.set_aside_source}} :
+      nlohmann::json(nullptr);
+    return value;
+  }
+
+  namespace {
+    // The handshake sets a saved paired profile aside for a PyroWave stream, sized for H.264 as it is,
+    // so it is no restore goal for one either.
+    bool paired_profile_caps_restore(const stats_t &stats) {
+      return stats.paired_target_bitrate_kbps > 0 && stats.codec != "pyrowave";
+    }
+  }  // namespace
+
+  int doctor_launch_quality_goal_kbps(const stats_t &stats) {
+    if (stats.effective_launch_bitrate_kbps <= 0) return 0;
+    if (!paired_profile_caps_restore(stats)) return stats.effective_launch_bitrate_kbps;
+    return std::min(stats.paired_target_bitrate_kbps, stats.effective_launch_bitrate_kbps);
+  }
+
+  doctor_quality_goal_t doctor_quality_goal(const stats_t &stats, std::string_view source) {
+    if (source == "pyrowave_advice") {
+      const auto pyrowave = evaluate_pyrowave_bitrate(stats);
+      if (!pyrowave.active) return {};
+      return {pyrowave.advice.raise_goal_encoder_kbps, pyrowave.advice.raise_goal_kbps, "pyrowave_advice"};
+    }
+    const int launch = doctor_launch_quality_goal_kbps(stats);
+    return {launch, launch, paired_profile_caps_restore(stats) ? "launch_ceiling" : "launch_bitrate"};
+  }
+
+  namespace {
+    std::string pyrowave_reason_for_route(std::string_view route) {
+      // Each says what the encoder saw at its own input, which is all the route records. A
+      // zero_copy frame was imported as a DMA-BUF, and that says nothing about how capture filled
+      // the buffer. A repeated frame is encoded again without another upload or conversion, so
+      // none of them says the work happens on each frame.
+      if (route == "zero_copy") {
+        return "PyroWave imports captured DMA-BUF frames and converts colour on the GPU, without a "
+               "CPU upload at the encoder input.";
+      }
+      if (route == "gpu_upload") {
+        return "PyroWave converts colour on the GPU after copying captured frames there from host memory.";
+      }
+      if (route == "cpu_convert") {
+        return "PyroWave converts colour on the CPU and copies the planes to the GPU, which costs host "
+               "CPU time on captured frames. POLARIS_PYROWAVE_GPU_INPUT=off asks for this, and a host "
+               "falls back to it when the GPU path cannot start.";
+      }
+      return "PyroWave has not encoded a captured frame yet, so where it converts colour is not known.";
+    }
+  }  // namespace
+
+  std::string pyrowave_route_reason(const stats_t &stats, std::uint64_t requester_generation) {
+    // The stream that asked, when it is one of these. Watch Stream and every reconnect overlap put
+    // more than one entry here, and a client is answered about its own stream in both: the old
+    // entry of a reconnect stays until its teardown, and the asker's generation is the new one.
+    if (requester_generation != 0) {
+      const auto asking = std::find_if(stats.clients.begin(), stats.clients.end(),
+        [requester_generation](const client_stats_t &client) {
+          return client.session_generation == requester_generation;
+        });
+      if (asking != stats.clients.end()) {
+        return pyrowave_reason_for_route(asking->pyrowave_route);
+      }
+    }
+    // Asked from the host, or by a client with no stream here: one answer when every stream that has
+    // reported a route reports the same one, which is the sole stream's route when there is one.
+    std::string_view shared;
+    for (const auto &client : stats.clients) {
+      if (client.pyrowave_route.empty()) {
+        continue;
+      }
+      if (shared.empty()) {
+        shared = client.pyrowave_route;
+      } else if (client.pyrowave_route != shared) {
+        return "PyroWave streams on this host convert colour in different places, so no one answer "
+               "covers them all.";
+      }
+    }
+    return pyrowave_reason_for_route(shared);
+  }
+
+  std::string stream_instance_id(std::uint64_t session_generation) {
+    if (session_generation == 0) {
+      return {};
+    }
+    return process_instance_nonce() + "." + std::to_string(session_generation);
   }
 
   void record_oversized_fec_frame(std::uint64_t session_generation,
@@ -4097,6 +4993,8 @@ namespace stream_stats {
       current_stats.adaptive_bitrate_active = adaptive_state.active;
       current_stats.adaptive_bitrate_state = adaptive_state.state;
       current_stats.adaptive_runtime_update_supported = adaptive_state.runtime_update_supported;
+      current_stats.adaptive_min_bitrate_kbps = adaptive_state.min_bitrate_kbps;
+      current_stats.adaptive_floor_source = adaptive_state.floor_source;
 
       // Also update adaptive bitrate for all clients
       for (auto &c : current_stats.clients) {
@@ -4104,6 +5002,7 @@ namespace stream_stats {
       }
 
       result = current_stats;
+      result.last_session = last_ended_session;
     }
     if (const auto identity = get_single_active_session_identity()) {
       result.session_generation = identity->session_generation;

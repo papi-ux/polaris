@@ -17,7 +17,9 @@ describe('Vulkan Video settings contract', () => {
     const encoder = webSource('configs/tabs/encoders/VulkanEncoder.vue')
 
     expect(advanced).toContain('<option value="vulkan">Vulkan Video (experimental)</option>')
-    expect(encoder).toContain('Auto can prefer Vulkan Video on a compatible AMD private-stream route')
+    expect(encoder).toContain('Auto can prefer Vulkan Video on AMD for Private Stream, after Polaris verifies the exact live GPU-native frame path, and for Gamescope Stream')
+    expect(encoder).toContain('where frames reach it through system memory and it offers no AV1 or HDR')
+    expect(encoder).toContain('keeps VA-API on Gamescope Stream')
     expect(encoder).toContain("NVIDIA's proprietary driver remains on NVENC, Nouveau uses capability probing, and Intel remains on VA-API by default")
     expect(encoder).toContain('supports DRM/KMS, wlroots, and Portal capture')
     expect(encoder).toContain('Explicit Vulkan selection is strict')
@@ -53,6 +55,18 @@ describe('Vulkan Video settings contract', () => {
     expect(locale.vk_quality_unsupported).toContain('{level}')
     expect(encoder).toMatch(/const vkQualitySaved = computed\(\(\) => \{[\s\S]*?vkQualityMax\.value[\s\S]*?\}\)/)
     expect(qualitySelect).toContain('v-if="vkQualitySaved"')
+  })
+
+  it('keeps the AMD tuning note in the description, not in an option every GPU sees', () => {
+    const locale = JSON.parse(webSource('public/assets/locale/en.json')).config
+
+    expect(locale.vk_tune_ull).toBe('Ultra-low latency')
+    for (const key of ['vk_tune_default', 'vk_tune_hq', 'vk_tune_ll', 'vk_tune_ull']) {
+      expect(locale[key]).not.toContain('AMD')
+    }
+    expect(locale.vk_tune_desc).toContain("On AMD, only Low latency and Ultra-low latency turn on the encoder's low-latency mode, and the two behave the same")
+    // This is Vulkan Video on RADV, whose latency switch treats the two targets alike; radeonsi is the VA-API driver.
+    expect(locale.vk_tune_desc).not.toContain('radeonsi')
   })
 
   it('serves the probed Vulkan quality maximum from encoder_codec_support', () => {
@@ -91,16 +105,27 @@ describe('Vulkan Video settings contract', () => {
     }
   })
 
-  it('promotes Vulkan only for AMD private Auto and preserves strict fallback behavior', () => {
+  it('promotes Vulkan only for AMD labwc and Gamescope Stream Auto and preserves strict fallback behavior', () => {
     const video = source('src/video.cpp')
     const portal = source('src/platform/linux/portal_grab.cpp')
     const policy = source('src/platform/linux/encoder_auto_policy.h')
     const vulkan = source('src/platform/linux/vulkan_encode.cpp')
 
-    expect(policy).toMatch(/kernel_driver == "amdgpu" && private_compositor_live_probe_available[\s\S]*prefer_vulkan = true/)
+    expect(policy).toMatch(/kernel_driver == "amdgpu" && route\.private_compositor_live_probe_available[\s\S]*prefer_vulkan = true/)
+    // #635: Gamescope Stream on AMD prefers Vulkan Video through system memory with VA-API fallback,
+    // unless AV1 Support or HEVC Support asks for what Vulkan Video cannot give there.
+    expect(policy).toMatch(/kernel_driver == "amdgpu" && route\.gamescope_stream[\s\S]*gamescope_codec_settings_need_vaapi\(codecs\)[\s\S]*policy = "amd_gamescope_vaapi_codec_setting"[\s\S]*exact_live_probe_required = false,[\s\S]*policy = "amd_gamescope_vulkan_ram",[\s\S]*fallback_encoder = "vaapi"/)
+    expect(policy).toContain('return codecs.av1_mode >= 2 || codecs.hevc_mode == 3;')
+    expect(policy).toContain('return policy == "amd_private_vulkan_live_probe" || policy == "amd_gamescope_vulkan_ram";')
     expect(policy).toMatch(/kernel_driver == "nvidia"[\s\S]*preferred_encoder = "nvenc"/)
     expect(policy).toMatch(/kernel_driver == "nouveau"[\s\S]*policy = "nouveau_availability_probe"[\s\S]*preferred_encoder = "automatic"/)
-    expect(video).toMatch(/selection_plan\.policy == "amd_private_vulkan_live_probe"[\s\S]*std::erase\(encoder_list, &vulkan\)/)
+    expect(video).toMatch(/linux_encoder_auto_policy::admits_vulkan\(selection_plan\.policy\);[\s\S]*std::erase\(encoder_list, &vulkan\)/)
+    // The probe clears Vulkan Video's HDR from the plan's flag. Auto's policy sets it on AMD Gamescope
+    // Stream, and an explicit encoder = vulkan sets it there unless HEVC Support asks for HDR.
+    expect(video).toMatch(/&encoder == &vulkan && selection_plan\.vulkan_withholds_hdr[\s\S]*encoder\.hevc\[encoder_t::DYNAMIC_RANGE\] = false;/)
+    expect(video).toContain('info.vulkan_withholds_hdr = linux_encoder_auto_policy::vulkan_offers_no_hdr(info.policy);')
+    expect(video).toMatch(/info\.vulkan_withholds_hdr =\s*linux_encoder_auto_policy::explicit_vulkan_offers_no_hdr\(::config::video\.encoder, route, codecs\);/)
+    expect(policy).toContain('return configured_encoder == "vulkan" && route.gamescope_stream && codecs.hevc_mode != 3;')
     expect(video).toContain('strict_configured_encoder || config::video.encoder == "vulkan"sv')
     expect(video).toMatch(/LIMITED_GOP_SIZE \| PARALLEL_ENCODING \| NO_AV1/)
     expect(video).not.toContain('release_encode_resources')

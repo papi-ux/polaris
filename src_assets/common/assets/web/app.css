@@ -634,6 +634,41 @@ textarea {
   line-height: 1.45;
 }
 
+.system-telemetry-item-wide {
+  grid-column: 1 / -1;
+}
+
+.system-kms-command {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+}
+
+.system-kms-link {
+  display: inline-block;
+  margin-top: 0.625rem;
+}
+
+.system-capture-readout {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-top: 0.875rem;
+  border-top: 1px solid var(--system-edge);
+  padding-top: 0.75rem;
+}
+
+.system-capture-readout dt {
+  color: var(--color-storm);
+  font-size: 0.6875rem;
+}
+
+.system-capture-readout dd {
+  margin-top: 0.125rem;
+  color: var(--color-silver);
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+
 .system-session-health {
   margin-top: 0.75rem;
   border-width: 1px;
@@ -929,6 +964,7 @@ textarea {
 
   .system-status-strip,
   .system-telemetry-grid,
+  .system-capture-readout,
   .system-update-grid,
   .system-quick-actions {
     grid-template-columns: minmax(0, 1fr);

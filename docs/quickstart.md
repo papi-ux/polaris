@@ -6,6 +6,22 @@ to find your path before following the steps here.
 
 ## 1. Install the package
 
+On Fedora 44, Arch Linux or CachyOS, one command adds the signed
+[package repository](repositories.md), installs Polaris and runs host setup:
+
+```bash
+curl -fsSL https://repo.papi-ux.com/install.sh | sh
+```
+
+Then do what its last lines say, usually starting Polaris with
+`systemctl --user enable --now polaris`, and go on to step 2. To read every command it would run
+first, without changing anything, run
+`curl -fsSL https://repo.papi-ux.com/install.sh | sh -s -- --dry-run`. On Arch and CachyOS it
+upgrades the rest of the system in the same step. It installs the stable release only, not the
+optional `polaris-kms` helper, and it does not replace a 1.4.13 beta;
+[One-command install](repositories.md#one-command-install) has the details. The sections below
+are the same steps by hand.
+
 ### Fedora 44
 
 ```bash
@@ -27,16 +43,16 @@ the longer walkthrough, including upgrades and uninstall.
 ### Arch Linux / CachyOS
 
 ```bash
-wget --output-document=./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst &&
+curl --fail --location --output ./Polaris-arch-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-arch-x86_64.pkg.tar.zst &&
 sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst &&
 sudo -H polaris --setup-host &&
 polaris
 ```
 
 There is a pacman repository too, and it is worth adding for the same reason: `sudo pacman -Syu` then
-carries Polaris. It is not the default here only because it is longer to set up rather than shorter.
-pacman has no equivalent of dnf's `gpgkey=`, so the key has to be added and locally signed first. See
-[Package repositories](repositories.md#arch-and-cachyos).
+carries Polaris. The one-command install above adds it for you. By hand it takes longer to set up
+than the download, because pacman has no equivalent of dnf's `gpgkey=`, so the key has to be added
+and locally signed first. See [Package repositories](repositories.md#arch-and-cachyos).
 
 CachyOS and most pacman-compatible Arch derivatives should start with the Arch package path. See the
 [Arch guide](arch.md) for details, and fall back to the source flow in
@@ -46,11 +62,11 @@ CachyOS and most pacman-compatible Arch derivatives should start with the Arch p
 
 | Host | Path |
 |---|---|
-| SteamOS 3.8 | [SteamOS guide](steamos.md) — Desktop Mode validation only |
-| Bazzite 44 | [Bazzite guide](bazzite.md) — supported RPM installation; stage, reboot, then run host setup |
+| SteamOS 3.8 | [SteamOS guide](steamos.md), proven on a Steam Deck OLED in Desktop Mode and Game Mode |
+| Bazzite 44 | [Bazzite guide](bazzite.md), supported RPM installation: stage, reboot, then run host setup |
 | Steam Deck, ROG Ally, other handhelds | [Handhelds and Game Mode](handhelds.md), keeps Polaris reachable across mode switches |
-| Ubuntu 24.04 | [Ubuntu guide](ubuntu.md) — experimental tester DEB |
-| openSUSE Tumbleweed | [openSUSE guide](openSUSE.md) — source build |
+| Ubuntu 24.04 | [Ubuntu guide](ubuntu.md), experimental tester DEB |
+| openSUSE Tumbleweed | [openSUSE guide](openSUSE.md), source build |
 | Anything else | [Build from source](building.md) |
 
 ## 2. Open the right web console path
@@ -96,13 +112,15 @@ linux_stream_mode = windowed_stream
 linux_prefer_gpu_native_capture = enabled
 ```
 
-> **What you'll see:** the built-in **Desktop** entry now streams Polaris' *private* compositor — an
-> intentionally empty screen (right-click opens the session menu) until you launch a game from your
-> client. Wanting your actual desktop on the stream is a different mode: `desktop_display` mirrors
-> the host desktop at host resolution, and `host_virtual_display` adds an extra display sized to the
-> client. On Hyprland, `desktop_takeover` moves the live desktop onto that temporary client-sized
-> output and blanks the original displays until the stream ends. All three are one click in the web
-> UI under Settings → Audio/Video.
+> **What you'll see:** the built-in **Desktop** entry streams your real desktop, whatever the launch
+> mode, because it has **Mirror the host desktop** turned on in the
+> [app editor](apps.md#runtime-behavior). Games still run in Private Stream's own session, off your
+> desktop. For an empty private session to launch things into, add an entry with no command and that
+> setting off; right-click its empty screen to open the session menu. Other ways to put a desktop on
+> the stream are modes of their own: Host Virtual Display adds an extra display sized to the client,
+> and on Hyprland, Desktop Takeover moves the live desktop onto a temporary client-sized output and
+> blanks the original displays until the stream ends. Both are one click in the web UI under
+> Settings → Audio/Video.
 
 To pick a different mode later, such as Gamescope, a virtual display, or a dummy plug, see
 [Launch modes and capture paths](launch-modes.md). [Configuration](configuration.md) explains every
@@ -112,10 +130,11 @@ setting, and [Runtime and streaming model](runtime.md) explains what these keys 
 
 Pick whichever fits your network:
 
-- **Trusted Pair** on a trusted LAN, for a TOFU flow that auto-approves first pairing on a
-  configured trusted subnet.
-- **QR pairing** for Nova.
-- **Manual PIN** for standard Moonlight clients.
+- **Trusted Pair** for Nova on a trusted LAN, a TOFU flow that auto-approves Nova's first pairing
+  from a configured trusted subnet.
+- **QR pairing** for Nova for Android.
+- **Manual PIN** for Moonlight, Artemis and every other client. Moonlight cannot ask for Trusted
+  Pair or scan the QR code.
 
 New devices use **Game Control** by default, which is the least-privilege preset that can browse,
 launch, and control a game. **Browse & Watch** is intentionally read-only: it can list the library
@@ -128,7 +147,8 @@ that PIN, keep **Game Control** selected, and choose **Send**. Return to Moonlig
 host if its library does not appear immediately. Steam is not required on the client.
 
 The Moonlight flow step by step, including which client settings matter, is in
-[Play with Moonlight](moonlight.md). The access presets and the device editor are in
+[Play with Moonlight](moonlight.md). What Moonlight, Artemis and Browser Stream get next to Nova is
+in [Clients](compatibility.md#clients). The access presets and the device editor are in
 [Pair and manage devices](devices.md).
 
 ## 5. Start a game and verify the path

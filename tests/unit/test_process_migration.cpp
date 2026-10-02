@@ -1,4 +1,5 @@
 #include "../tests_common.h"
+#include "../tests_log_capture.h"
 #include "../tests_paths.h"
 
 #include <algorithm>
@@ -9,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -295,6 +297,36 @@ namespace {
     return collapsed;
   }
 
+  /**
+   * @brief The arguments of a call, from just after its opening parenthesis to the one that
+   *        closes it, split at its own commas with whitespace collapsed.
+   *
+   * Empty when the call never closes.
+   */
+  std::vector<std::string> call_arguments(std::string_view source, std::size_t after_open) {
+    std::vector<std::string> arguments;
+    std::string current;
+    int depth = 0;
+    for (auto at = after_open; at < source.size(); ++at) {
+      const char ch = source[at];
+      if (depth == 0 && (ch == ',' || ch == ')')) {
+        arguments.push_back(collapse_whitespace(current));
+        if (ch == ')') {
+          return arguments;
+        }
+        current.clear();
+        continue;
+      }
+      if (ch == '(' || ch == '{' || ch == '[') {
+        ++depth;
+      } else if (ch == ')' || ch == '}' || ch == ']') {
+        --depth;
+      }
+      current.push_back(ch);
+    }
+    return {};
+  }
+
 }  // namespace
 
 TEST(ProcessRuntimeConfigTests, PolarisV1SessionStopContractIsAdvertisedAndRouted) {
@@ -321,6 +353,30 @@ TEST(ProcessRuntimeConfigTests, PolarisV1SessionStopContractIsAdvertisedAndRoute
   EXPECT_NE(source.find("session_stop_v1"), std::string::npos);
   EXPECT_NE(source.find("/polaris/v1/session/stop"), std::string::npos);
   EXPECT_NE(status_handler.find("PERM::launch"), std::string::npos);
+  // The encoder block's codec, encoder and selection with its PyroWave reason, and the Doctor's
+  // evidence, answer the stream this response names as session_generation, not whichever stream
+  // sampled last or is listed first. Only the helper the encoder tests run writes those keys.
+  EXPECT_NE(status_handler.find("session_timing.session_active ? session_timing.session_generation : 0;\n"
+                                "      write_session_encoder_identity(\n"
+                                "        encoder,\n"
+                                "        stats,\n"
+                                "        status_snapshot.requested_encoder_backend,\n"
+                                "        status_snapshot.effective_encoder_backend,\n"
+                                "        status_snapshot.encoder_backend_explicit,\n"
+                                "        requester_generation\n"
+                                "      );"),
+            std::string::npos);
+  for (const auto *process_wide : {
+         "session_encoder_name(stats)",
+         "encoder_selection_json(stats)",
+         "encoder[\"active_backend\"] =",
+         "encoder[\"effective_backend\"] =",
+         "encoder[\"selection\"] =",
+         "encoder[\"codec\"] =",
+       }) {
+    EXPECT_EQ(status_handler.find(process_wide), std::string::npos) << process_wide;
+  }
+  EXPECT_NE(status_handler.find("status_snapshot.game_uuid,\n        requester_generation\n      );"), std::string::npos);
   EXPECT_NE(status_handler.find("get_session_status_view("), std::string::npos);
   EXPECT_NE(status_handler.find("auto status_view = proc::proc.get_session_status_view("), std::string::npos);
   EXPECT_NE(status_handler.find("const auto &status_snapshot = status_view.snapshot"), std::string::npos);
@@ -393,6 +449,83 @@ TEST(ProcessRuntimeConfigTests, PolarisV1SessionStopContractIsAdvertisedAndRoute
       .find("request_session_shutdown( named_cert_p->uuid, expected_token, can_launch, true )"),
     std::string::npos
   );
+}
+
+/**
+ * Every paired endpoint that serves session health builds it for the stream of the device it
+ * answers, as the session status does. That stream's codec, encoder and selection decide the
+ * health's active_encoder, encoder_selection, decoder_risk and safe_codec, the grade, issues and
+ * summary that follow from them, and the Doctor built from the health. A call that passed no
+ * generation would answer about whichever stream sampled last, Browser Stream's included, and no
+ * behaviour test would notice, because none of them runs these handlers.
+ */
+TEST(ProcessRuntimeConfigTests, PairedSessionHealthAnswersTheStreamOfTheDeviceItDescribes) {
+  const auto source = read_source_file_for_contract("src/nvhttp.cpp");
+  ASSERT_FALSE(source.empty());
+
+  struct paired_health_t {
+    std::string handler;
+    // The device the response describes, whose name the health is built for.
+    std::string device;
+    // The stream that device runs now, or zero when it runs none.
+    std::string generation;
+  };
+  const std::vector<paired_health_t> expected {
+    {"polarisSessionStatus", "named_cert_p->", "requester_generation"},
+    {"polarisStreamPolicy", "response_client->", "requester_session_generation(response_client->uuid)"},
+    {"polarisClientSettings", "rendered_response_client.", "requester_session_generation(rendered_response_client.uuid)"},
+    {"polarisDoctorAction", "named_cert_p->", "timing.session_active ? timing.session_generation : 0"},
+    {"polarisSetBitrate", "named_cert_p->", "requester_session_generation(named_cert_p->uuid)"},
+    {"polarisSetAdaptiveBitrate", "named_cert_p->", "requester_session_generation(named_cert_p->uuid)"},
+  };
+
+  // Each handler runs from its declaration to the next one's.
+  std::vector<std::size_t> starts;
+  for (auto at = source.find("auto polaris"); at != std::string::npos; at = source.find("auto polaris", at + 1)) {
+    const auto declared = source.find(" = [", at);
+    if (declared != std::string::npos && declared < source.find('\n', at)) {
+      starts.push_back(at);
+    }
+  }
+  ASSERT_FALSE(starts.empty());
+
+  const std::string call = "build_session_health_json(";
+  std::vector<std::string> builders;
+  for (std::size_t index = 0; index < starts.size(); ++index) {
+    const auto name_start = starts[index] + std::string_view {"auto "}.size();
+    const auto name = source.substr(name_start, source.find(" = [", name_start) - name_start);
+    const auto end = index + 1 < starts.size() ? starts[index + 1] : source.size();
+    const auto handler = source.substr(starts[index], end - starts[index]);
+    const auto first = handler.find(call);
+    if (first == std::string::npos) {
+      continue;
+    }
+    SCOPED_TRACE(name);
+    builders.push_back(name);
+    EXPECT_EQ(handler.find(call, first + 1), std::string::npos);
+    const auto want = std::find_if(expected.begin(), expected.end(), [&name](const paired_health_t &entry) {
+      return entry.handler == name;
+    });
+    ASSERT_NE(want, expected.end()) << "a handler this test does not know builds session health";
+    const auto arguments = call_arguments(handler, first + call.size());
+    ASSERT_EQ(arguments.size(), 6u);
+    EXPECT_EQ(arguments[2], want->device + "name");
+    EXPECT_EQ(arguments[5], want->generation);
+    if (name == "polarisDoctorAction") {
+      // The Doctor action reads the device's own timing, which also scopes the action it takes.
+      const auto timing = collapse_whitespace(handler).find(
+        "const auto timing = stream_stats::get_session_timing(named_cert_p->uuid);"
+      );
+      EXPECT_NE(timing, std::string::npos);
+      EXPECT_LT(timing, collapse_whitespace(handler).find(call));
+    }
+  }
+
+  std::vector<std::string> expected_builders;
+  for (const auto &entry : expected) {
+    expected_builders.push_back(entry.handler);
+  }
+  EXPECT_EQ(builders, expected_builders);
 }
 
 TEST(ProcessRuntimeConfigTests, NestedSessionPrepReceivesCredentialAndFailsLaunchClosed) {
@@ -909,6 +1042,93 @@ TEST(ProcessRuntimeConfigTests, SessionLifecycleGateOwnsLaunchRaiseAndTeardownWi
     std::string::npos
   );
   EXPECT_NE(setup_failure.find("request_abandoned_desktop_takeover_teardown"), std::string::npos);
+}
+
+TEST(ProcessRuntimeConfigTests, TheAnnounceAv1RefusalLogsWhatTookAv1Away) {
+  // papi's call on #635a (finding 6): the client picks AV1 at ANNOUNCE, after the launch, so the
+  // launch cannot refuse it by name, and the log line is the only place that says why. It logs the
+  // sentence video::av1_announce_refusal() builds, not the fixed line it used to.
+  const auto source = read_source_file_for_contract("src/rtsp.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto at = source.find("config.monitor.videoFormat == 2 && video::active_av1_mode == 1");
+  ASSERT_NE(at, std::string::npos);
+  const auto body = source.substr(at, source.find("respond(sock, session, &option, 400", at) - at);
+  EXPECT_NE(body.find("video::av1_announce_refusal(::config::video.av1_mode, video::active_encoder_selection_info())"),
+            std::string::npos)
+    << body;
+  EXPECT_EQ(body.find("AV1 is disabled, yet the client requested AV1"), std::string::npos) << body;
+}
+
+TEST(ProcessRuntimeConfigTests, AnHdrLaunchItsEncoderCannotServeIsRefusedForHdrAndNotPushedThrough) {
+  using proc::launch_probe_outcome;
+  using proc::launch_probe_outcome_e;
+  // A probe that passed and serves the session goes on, whatever else is true.
+  EXPECT_EQ(launch_probe_outcome(true, false, true, true), launch_probe_outcome_e::proceed);
+
+  // Vulkan Video on AMD Gamescope Stream offers no HDR by policy. An HDR launch that reached it was
+  // refused as "No video encoder could start" and, with ignore_encoder_probe_failure, went on into a
+  // stream that rebuilt its refused session forever and never showed a frame.
+  EXPECT_EQ(launch_probe_outcome(false, true, true, false), launch_probe_outcome_e::refuse_hdr);
+  EXPECT_EQ(launch_probe_outcome(false, true, true, true), launch_probe_outcome_e::refuse_hdr);
+
+  // Any other encoder short of HDR is refused for HDR too, and ignore_encoder_probe_failure keeps
+  // its meaning there, where a configured 8-bit HEVC mode can still leave an HDR stream to start.
+  EXPECT_EQ(launch_probe_outcome(false, true, false, false), launch_probe_outcome_e::refuse_hdr);
+  EXPECT_EQ(launch_probe_outcome(false, true, false, true), launch_probe_outcome_e::continue_despite_failure);
+
+  // A probe that failed is what encoder_probe_failed has always said.
+  EXPECT_EQ(launch_probe_outcome(false, false, false, false), launch_probe_outcome_e::refuse_no_encoder);
+  EXPECT_EQ(launch_probe_outcome(false, false, true, false), launch_probe_outcome_e::refuse_no_encoder);
+  EXPECT_EQ(launch_probe_outcome(false, false, false, true), launch_probe_outcome_e::continue_despite_failure);
+
+  // Both launch probes, the desktop one and the private compositor one, decide through it.
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  std::size_t sites = 0;
+  for (auto at = source.find("switch (launch_probe_outcome("); at != std::string::npos;
+       at = source.find("switch (launch_probe_outcome(", at + 1)) {
+    ++sites;
+    const auto body = source.substr(at, source.find("video::note_launch_refused_by_probe(", at) - at);
+    // The launch's own encoder choice decides whose Vulkan Video the refusal names.
+    EXPECT_NE(body.find("video::note_launch_refused_for_hdr(strict_session_encoder);"), std::string::npos) << body;
+    EXPECT_NE(body.find("session_hdr_unservable"), std::string::npos) << body;
+  }
+  EXPECT_EQ(sites, 2u);
+}
+
+TEST(ProcessRuntimeConfigTests, EveryRequestThatAdvertisesCodecsRefreshesTheAutoPlanFirst) {
+  // serverinfo, the app lists, /optimize and /launch advertise codecs through
+  // advertised_codec_support_for_http(), and the refresh there is what keeps them on the encoder the
+  // next launch gets. The refresh tests call it directly, so deleting this call passed every test. It
+  // runs after the Game Mode check, one of the things that moves the plan, and before the deferred
+  // cage probe, which runs in the same request once the refresh has dropped an encoder another plan
+  // probed.
+  const auto source = read_source_file_for_contract("src/nvhttp.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto start = source.find("video::codec_capability_state_t advertised_codec_support_for_http(");
+  ASSERT_NE(start, std::string::npos);
+  const auto end = source.find("return video::advertised_codec_capability_state();", start);
+  ASSERT_NE(end, std::string::npos);
+  const auto body = source.substr(start, end - start);
+  const auto reconcile = body.find("reconcile_game_mode_host();");
+  const auto stream_active = body.find("rtsp_stream::session_count() > 0 || proc::proc.running() > 0");
+  const auto refresh = body.find("video::refresh_advertised_codecs_for_auto_plan(stream_active);");
+  const auto prime = body.find("prime_deferred_headless_codec_capabilities();");
+  ASSERT_NE(reconcile, std::string::npos) << body;
+  ASSERT_NE(stream_active, std::string::npos) << body;
+  ASSERT_NE(refresh, std::string::npos) << body;
+  ASSERT_NE(prime, std::string::npos) << body;
+  EXPECT_LT(reconcile, refresh) << body;
+  EXPECT_LT(stream_active, refresh) << body;
+  EXPECT_LT(refresh, prime) << body;
+
+  std::size_t requests = 0;
+  for (auto at = source.find("advertised_codec_support_for_http(true)"); at != std::string::npos;
+       at = source.find("advertised_codec_support_for_http(true)", at + 1)) {
+    ++requests;
+  }
+  EXPECT_GE(requests, 4u);
+  EXPECT_NE(source.find("advertised_codec_support_for_http(std::is_same_v<PolarisHTTPS, T>)"), std::string::npos);
 }
 
 #ifdef __linux__
@@ -2782,6 +3002,46 @@ TEST(ProcessRuntimeConfigTests, UnreadableEnvironRetryIsLimitedToKnownPolarisDes
 #endif
 }
 
+TEST(ProcessRuntimeConfigTests, TheCheckAfterThePrivateCompositorStopsIsShort) {
+  using namespace std::chrono_literals;
+  // After the private app phase gave the app its exit timeout while its display was up, the sweep
+  // after the compositor stops is a check, and anything it finds has no display left: two seconds,
+  // so the lifecycle lock is not held for a second exit timeout.
+  EXPECT_EQ(proc::isolated_session_sweep_grace_for_tests(true, true, 30s), 2000ms);
+  EXPECT_EQ(proc::isolated_session_sweep_grace_for_tests(true, true, 5s), 2000ms);
+  // Without the phase, the sweep is still what ends the app, and gives it the exit timeout,
+  // at least 2 s and at most 30 s, as it always did.
+  EXPECT_EQ(proc::isolated_session_sweep_grace_for_tests(true, false, 20s), 20000ms);
+  EXPECT_EQ(proc::isolated_session_sweep_grace_for_tests(false, true, 20s), 20000ms);
+  EXPECT_EQ(proc::isolated_session_sweep_grace_for_tests(false, false, 1s), 2000ms);
+  EXPECT_EQ(proc::isolated_session_sweep_grace_for_tests(false, false, 90s), 30000ms);
+
+  // The phase says it ran only once it has, and the generation cleanup reads that once.
+  const auto source = read_source_file_for_contract("src/process.cpp");
+  ASSERT_FALSE(source.empty());
+  const auto member_start = source.find("void proc_t::stop_private_session_apps_before_compositor(");
+  const auto member_end = source.find("void proc_t::finalize_isolated_session_runtime(", member_start);
+  ASSERT_NE(member_start, std::string::npos);
+  ASSERT_NE(member_end, std::string::npos);
+  const auto member = source.substr(member_start, member_end - member_start);
+  const auto reset = member.find("_private_apps_stopped_before_compositor = false;");
+  const auto first_return = member.find("return;");
+  const auto phase = member.find("stop_private_session_apps(request);");
+  const auto ran = member.find("_private_apps_stopped_before_compositor = true;");
+  ASSERT_NE(reset, std::string::npos);
+  ASSERT_NE(phase, std::string::npos);
+  ASSERT_NE(ran, std::string::npos);
+  EXPECT_LT(reset, first_return) << "every early return leaves it false";
+  EXPECT_LT(phase, ran);
+  const auto generation_start = source.find("void proc_t::terminate_isolated_session_generation()");
+  const auto generation_sweep = source.find("terminate_isolated_session_processes(", generation_start);
+  const auto generation_read = source.find("_private_apps_stopped_before_compositor = false;", generation_start);
+  ASSERT_NE(generation_read, std::string::npos);
+  EXPECT_LT(generation_read, source.find("if (!exact_cleanup_required)", generation_start))
+    << "read before any return, so it never carries into a later teardown";
+  EXPECT_LT(generation_read, generation_sweep);
+}
+
 TEST(ProcessRuntimeConfigTests, IsolatedSessionCleanupPolicyRetainsIncompleteCageGeneration) {
 #ifdef __linux__
   EXPECT_TRUE(proc::isolated_session_generation_blocks_launch_for_tests(true, true));
@@ -2802,6 +3062,13 @@ TEST(ProcessRuntimeConfigTests, IsolatedSessionCleanupPolicyRetainsIncompleteCag
 
   EXPECT_TRUE(proc::isolated_session_cleanup_resets_router_for_tests(true, true, true));
   EXPECT_TRUE(proc::isolated_session_cleanup_clears_state_for_tests(true, true, true));
+
+  // A private labwc session's apps are stopped first and its compositor next, so the sweep after it
+  // is a check and there is no router to reset. Only a Gamescope generation still has the sweep end
+  // its runtime's clients and the router reset after it.
+  EXPECT_TRUE(proc::isolated_session_stops_compositor_before_sweep_for_tests(true, false));
+  EXPECT_FALSE(proc::isolated_session_stops_compositor_before_sweep_for_tests(true, true));
+  EXPECT_FALSE(proc::isolated_session_stops_compositor_before_sweep_for_tests(false, false));
 
   // Mirror/non-cage launches still receive a generation token, but no cage state
   // is owned; teardown must clear that token without touching the cage router.
@@ -3080,6 +3347,161 @@ TEST(ProcessRuntimeConfigTests, NonCageDetachedCaptureFailureRetainsGenerationAn
   GTEST_SKIP() << "Linux-only detached generation capture fault";
 #endif
 }
+
+#ifdef __linux__
+namespace {
+  std::vector<pid_t> proc_children(pid_t pid) {
+    std::ifstream in("/proc/" + std::to_string(pid) + "/task/" + std::to_string(pid) + "/children");
+    std::vector<pid_t> children;
+    pid_t child = 0;
+    while (in >> child) {
+      children.push_back(child);
+    }
+    return children;
+  }
+
+  std::optional<std::size_t> environ_size(pid_t pid) {
+    std::ifstream in("/proc/" + std::to_string(pid) + "/environ", std::ios::binary);
+    if (!in) {
+      return std::nullopt;
+    }
+    return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()).size();
+  }
+
+  bool contains_pid(const std::vector<pid_t> &pids, pid_t pid) {
+    return std::find(pids.begin(), pids.end(), pid) != pids.end();
+  }
+
+  /**
+   * A descendant whose environ reads as zero bytes for as long as it lives and whose comm is bwrap,
+   * as Flatpak's outer bwrap is, without bwrap itself: a sleep started through a link named bwrap
+   * with an empty environment.
+   */
+  struct zero_environ_bwrap_t {
+    std::filesystem::path dir;
+    pid_t pid = -1;
+
+    zero_environ_bwrap_t() {
+      dir = std::filesystem::temp_directory_path() / ("polaris-zero-environ-" + std::to_string(getpid()));
+      std::filesystem::remove_all(dir);
+      std::filesystem::create_directories(dir);
+      std::filesystem::create_symlink("/bin/sleep", dir / "bwrap");
+      const auto path = (dir / "bwrap").string();
+      pid = fork();
+      if (pid == 0) {
+        char *empty[] = {nullptr};
+        execle(path.c_str(), "bwrap", "30", static_cast<char *>(nullptr), empty);
+        _exit(127);
+      }
+      for (int attempt = 0; attempt < 200 && pid > 0; ++attempt) {
+        std::ifstream comm("/proc/" + std::to_string(pid) + "/comm");
+        std::string name;
+        std::getline(comm, name);
+        if (name == "bwrap") {
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      }
+    }
+
+    ~zero_environ_bwrap_t() {
+      if (pid > 0) {
+        (void) kill(pid, SIGKILL);
+        while (waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {}
+      }
+      std::error_code ignored;
+      std::filesystem::remove_all(dir, ignored);
+    }
+  };
+}  // namespace
+
+TEST(ProcessRuntimeConfigTests, ZeroByteEnvironFlatpakBwrapDescendantIsOwned) {
+  // What `flatpak run` leaves under the session: an outer bwrap and a sandbox init whose environ
+  // reads as zero bytes for as long as they live, and the app inside with the session token.
+  const std::filesystem::path bwrap = "/usr/bin/bwrap";
+  if (!std::filesystem::exists(bwrap)) {
+    GTEST_SKIP() << "bwrap is not installed";
+  }
+  const std::string token = "zero-byte-environ-flatpak-bwrap-" + std::to_string(getpid());
+  const auto outer = fork();
+  ASSERT_GE(outer, 0);
+  if (outer == 0) {
+    char *empty[] = {nullptr};
+    execle(
+      bwrap.c_str(), "bwrap", "--unshare-pid", "--die-with-parent", "--ro-bind", "/", "/", "--dev", "/dev",
+      "--setenv", "POLARIS_SESSION_INSTANCE_ID", token.c_str(), "/bin/sleep", "30", static_cast<char *>(nullptr), empty
+    );
+    _exit(127);
+  }
+  linux_child_guard_t outer_guard {outer};
+  pid_t init = -1;
+  pid_t app = -1;
+  for (int attempt = 0; attempt < 300 && app <= 0; ++attempt) {
+    const auto inits = proc_children(outer);
+    if (!inits.empty()) {
+      init = inits.front();
+      const auto apps = proc_children(init);
+      if (!apps.empty()) {
+        std::ifstream comm("/proc/" + std::to_string(apps.front()) + "/comm");
+        std::string name;
+        std::getline(comm, name);
+        if (name == "sleep") {
+          app = apps.front();
+        }
+      }
+    }
+    if (app <= 0) {
+      int status = 0;
+      if (waitpid(outer, &status, WNOHANG) == outer) {
+        outer_guard.reaped = true;
+        GTEST_SKIP() << "bwrap could not make a pid namespace here";
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+  ASSERT_GT(app, 0);
+  ASSERT_EQ(environ_size(outer), std::optional<std::size_t> {0});
+  ASSERT_EQ(environ_size(init), std::optional<std::size_t> {0});
+
+  const auto recorded = proc::exact_generation_snapshot_for_tests(token, {outer, init});
+  EXPECT_TRUE(recorded.capture_complete) << "the bwraps Flatpak records are accounted for, not ambiguous";
+  EXPECT_TRUE(contains_pid(recorded.flatpak_sandboxes, outer));
+  EXPECT_TRUE(contains_pid(recorded.flatpak_sandboxes, init));
+  EXPECT_EQ(recorded.owned, (std::vector<pid_t> {app})) << "the app inside carries the token";
+  EXPECT_TRUE(recorded.unattributed.empty());
+
+  // The same processes without a Flatpak record still hold the capture, as they always did.
+  const auto unrecorded = proc::exact_generation_snapshot_for_tests(token, {});
+  EXPECT_FALSE(unrecorded.capture_complete);
+  EXPECT_TRUE(contains_pid(unrecorded.unattributed, outer) || contains_pid(unrecorded.unattributed, init));
+}
+
+TEST(ProcessRuntimeConfigTests, ZeroByteEnvironNonFlatpakDescendantStillLatches) {
+  zero_environ_bwrap_t process;
+  ASSERT_GT(process.pid, 0);
+  ASSERT_EQ(environ_size(process.pid), std::optional<std::size_t> {0});
+  const auto snapshot = proc::exact_generation_snapshot_for_tests("zero-byte-environ-unrecorded", {});
+  EXPECT_FALSE(snapshot.capture_complete) << "a zero-byte environ no Flatpak record names stays ambiguous";
+  EXPECT_TRUE(snapshot.flatpak_sandboxes.empty());
+  ASSERT_TRUE(contains_pid(snapshot.unattributed, process.pid));
+  const auto at = std::find(snapshot.unattributed.begin(), snapshot.unattributed.end(), process.pid) - snapshot.unattributed.begin();
+  EXPECT_NE(snapshot.reasons[static_cast<std::size_t>(at)].find("zero-byte environ"), std::string::npos)
+    << snapshot.reasons[static_cast<std::size_t>(at)];
+  EXPECT_EQ(kill(process.pid, 0), 0) << "an ambiguous process is never signalled";
+}
+
+TEST(ProcessRuntimeConfigTests, IncompleteCaptureListsUnattributedPids) {
+  zero_environ_bwrap_t process;
+  ASSERT_GT(process.pid, 0);
+  test_log_capture_t log;
+  EXPECT_FALSE(proc::terminate_exact_generation_processes_for_tests("incomplete-capture-names-its-cause"));
+  const auto text = log.text();
+  const auto line = "Warning: process: exact-generation capture could not attribute pid=" + std::to_string(process.pid) +
+                    " comm=bwrap ppid=" + std::to_string(getpid()) + ": zero-byte environ";
+  EXPECT_NE(text.find(line), std::string::npos) << text;
+  EXPECT_EQ(kill(process.pid, 0), 0);
+}
+#endif
 
 TEST(ProcessRuntimeConfigTests, ExactGenerationTransientCaptureFailureRetriesBeforeSignaling) {
 #ifdef __linux__
@@ -3788,6 +4210,11 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   EXPECT_LT(terminate_attached, attached_failure_barrier);
   EXPECT_LT(attached_failure_barrier, terminate_private_steam);
   EXPECT_LT(terminate_private_steam, terminate_generation);
+  const auto terminate_private_apps = terminate.find("stop_private_session_apps_before_compositor(immediate);");
+  ASSERT_NE(terminate_private_apps, std::string::npos);
+  EXPECT_LT(terminate_private_steam, terminate_private_apps);
+  EXPECT_LT(terminate_private_apps, terminate_generation)
+    << "a private session's apps stop while its compositor is still up";
   EXPECT_NE(source.find("_session_used_gamescope_runtime = gamescope_stream_session;"), std::string::npos);
   EXPECT_NE(terminate.find("_session_used_gamescope_runtime"), std::string::npos);
   EXPECT_NE(source.find("const bool prior_cleanup_complete = _exact_generation_cleanup_complete;"), std::string::npos);
@@ -3852,7 +4279,23 @@ TEST(ProcessRuntimeConfigTests, SessionOwnedSteamUsesExactGenerationPidfdsBefore
   const auto retain_generation = generation_cleanup.find(
     "retaining immutable cage generation because exact-generation cleanup was incomplete"
   );
-  const auto stop_runtime = generation_cleanup.find("finalize_isolated_session_runtime(false)");
+  // The Gamescope generation's retention branch still stops its runtime rather than orphan it.
+  const auto stop_runtime = generation_cleanup.find("finalize_isolated_session_runtime(false)", retain_generation);
+  // A labwc generation stops its compositor before the sweep, which is then a check, and keeps the
+  // generation when that check is incomplete.
+  const auto compositor_first_gate = generation_cleanup.find("isolated_session_stops_compositor_before_sweep(");
+  const auto compositor_first_stop = generation_cleanup.find("finalize_isolated_session_runtime(false)", compositor_first_gate);
+  const auto compositor_first_retain = generation_cleanup.find(
+    "retaining immutable cage generation after its compositor stopped, because exact-generation cleanup was incomplete"
+  );
+  ASSERT_NE(compositor_first_gate, std::string::npos);
+  ASSERT_NE(compositor_first_stop, std::string::npos);
+  ASSERT_NE(compositor_first_retain, std::string::npos);
+  EXPECT_LT(compositor_first_gate, compositor_first_stop);
+  EXPECT_LT(compositor_first_stop, cleanup_result) << "the compositor stops before the sweep that checks";
+  EXPECT_LT(cleanup_result, compositor_first_retain);
+  EXPECT_LT(compositor_first_retain, cleanup_success_gate)
+    << "a labwc generation returns before the Gamescope router reset";
   const auto cleanup_clear_gate = generation_finish.find("isolated_session_cleanup_clears_state(");
   const auto clear_generation = generation_finish.find("_session_instance_id.clear()");
   ASSERT_NE(cleanup_result, std::string::npos);
@@ -5605,6 +6048,73 @@ TEST(ProcessMigrationTests, ParseNormalizesCurrentSteamLibraryLaunchWithoutBigPi
   const auto parsed_tree = nlohmann::json::parse(file_handler::read_file(file_path.string().c_str()));
   EXPECT_EQ(parsed_tree["version"], 14);
 
+  std::filesystem::remove(file_path);
+}
+
+TEST(ProcessMigrationTests, GeneratedSteamUndoIsCanonical) {
+  EXPECT_EQ(proc::canonical_steam_shutdown_undo(), expected_steam_shutdown_command());
+  // Both writers of a Steam app's undo write the form parse() keeps. Each used to write the old
+  // form, which every read of apps.json then upgraded again in memory and logged.
+  const auto confighttp = read_source_file_for_contract("src/confighttp.cpp");
+  const auto process = read_source_file_for_contract("src/process.cpp");
+  ASSERT_FALSE(confighttp.empty());
+  ASSERT_FALSE(process.empty());
+  EXPECT_EQ(confighttp.find("{\"undo\", \"setsid steam -shutdown\"}"), std::string::npos);
+  EXPECT_NE(confighttp.find("{\"undo\", proc::canonical_steam_shutdown_undo()}"), std::string::npos);
+  EXPECT_EQ(process.find("{\"undo\", \"setsid steam -shutdown\"}"), std::string::npos);
+  EXPECT_NE(process.find("{\"undo\", canonical_steam_shutdown_undo()}"), std::string::npos);
+}
+
+TEST(ProcessMigrationTests, CanonicalUndoParsesWithoutUpgradeLog) {
+#ifdef __linux__
+  linux_cage_compositor_guard_t guard;
+  config::video.linux_display.use_cage_compositor = false;
+#endif
+
+  const auto file_path = test_paths::root() / "steam_library_canonical_undo.json";
+  const auto apps_with_undo = [](const std::string &undo) {
+    return nlohmann::json {
+      {"version", 8},
+      {"apps", {
+        {
+          {"name", "Control"},
+          {"uuid", "steam-library-canonical-undo-test"},
+          {"cmd", ""},
+          {"detached", {"setsid steam steam://rungameid/870780"}},
+          {"prep-cmd", {{{"undo", undo}}}},
+          {"source", "steam"},
+          {"steam-appid", "870780"},
+        }
+      }}
+    };
+  };
+  const auto parsed_undo = [&file_path]() {
+    auto parsed = proc::parse(file_path.string());
+    if (!parsed) {
+      return std::string {};
+    }
+    const auto &apps = parsed->get_apps();
+    const auto control = std::find_if(apps.begin(), apps.end(), [](const auto &app) {
+      return app.name == "Control";
+    });
+    return control == apps.end() || control->prep_cmds.empty() ? std::string {} : control->prep_cmds.back().undo_cmd;
+  };
+
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps_with_undo(proc::canonical_steam_shutdown_undo()).dump(2)), 0);
+  {
+    test_log_capture_t log;
+    EXPECT_EQ(parsed_undo(), expected_steam_shutdown_command());
+    EXPECT_EQ(log.text().find("upgraded Steam"), std::string::npos) << log.text();
+  }
+
+  // An apps.json an older Polaris wrote is still upgraded in memory, without a line at info on each
+  // read, which is every session's end and every start.
+  ASSERT_EQ(file_handler::write_file(file_path.string().c_str(), apps_with_undo("setsid steam -shutdown").dump(2)), 0);
+  {
+    test_log_capture_t log;
+    EXPECT_EQ(parsed_undo(), expected_steam_shutdown_command());
+    EXPECT_EQ(log.text().find("Info: process: upgraded Steam"), std::string::npos) << log.text();
+  }
   std::filesystem::remove(file_path);
 }
 

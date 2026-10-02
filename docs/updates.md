@@ -34,8 +34,14 @@ installation steps in their [Bazzite](bazzite.md) and [SteamOS](steamos.md) guid
 
 Leave **Include beta releases** on, select **Check again**, and install the newer
 package offered by Update Center. Check the full version, including `beta.N` or
-`rc.N`, after restarting. A stable release can still be offered when it is newer
-than the beta you are running.
+`rc.N`, after restarting. A stable release is offered when it is newer than the
+beta you are running, and the release a beta precedes counts as newer.
+
+The 1.4.13 betas are the exception. They report `1.4.13`, the same version as the
+1.4.13 release, so on those hosts Update Center shows **Current release** and never
+offers 1.4.13. Replace one by hand as described in
+[Leave a 1.4.13 beta](#leave-a-1413-beta). A later stable release, such as 1.4.14,
+is offered as usual.
 
 An upgrade keeps the existing account, paired devices, settings and library.
 Sign in at `https://localhost:47990/#/login`; do not repeat first-run account
@@ -45,11 +51,69 @@ For PyroWave testing, use the [PyroWave client and build instructions](pyrowave.
 Standard Moonlight does not support that codec, and the ordinary Nova Linux
 Flatpak attached to beta.3 was not built with it enabled.
 
+## Leave a 1.4.13 beta
+
+The 1.4.13 betas and the 1.4.13 release carry the same package version, `1.4.13`,
+so a package manager can take the beta for the release. On Fedora, `dnf install`
+of the release package answers that it is already installed, "Nothing to do", and
+`dnf upgrade` from the Polaris repository leaves the beta in place. `pacman -Syu`
+from the Polaris repository does the same, and so does the
+[one-command install](repositories.md#one-command-install) on both. Reinstall the
+release over the beta instead, which replaces the installed files with the release's.
+
+End active streams first. The commands that name files take them from the
+[1.4.13 release](https://github.com/papi-ux/polaris/releases/tag/v1.4.13), run
+in the folder they were downloaded to. If `polaris-kms` is installed, reinstall
+it in the same command from the same release: a command that names only
+`polaris` leaves the beta's helper in place. Without the helper, leave out the
+`polaris-kms` package or file. Restart Polaris afterwards. Once a later stable
+release such as 1.4.14 is out, none of this is needed: an ordinary upgrade replaces
+a 1.4.13 beta, and the repository commands below stop working because the
+repository then carries only that newer release.
+
+**Fedora**:
+
+```bash
+# From the downloaded files
+sudo dnf reinstall ./Polaris-fedora44-x86_64.rpm ./Polaris-kms-fedora44-x86_64.rpm
+# Or from the Polaris repository
+sudo dnf reinstall polaris polaris-kms
+```
+
+**Ubuntu 24.04**, from the downloaded files. apt replaces both with the release's
+files, the same command the [Ubuntu guide](ubuntu.md#update) updates with.
+
+```bash
+sudo apt install ./Polaris-ubuntu24.04-x86_64.deb ./Polaris-kms-ubuntu24.04-x86_64.deb
+```
+
+**Arch**. pacman warns that the package is up to date and reinstalls it.
+
+```bash
+# From the downloaded files
+sudo pacman -U ./Polaris-arch-x86_64.pkg.tar.zst ./Polaris-kms-arch-x86_64.pkg.tar.zst
+# Or from the Polaris repository
+sudo pacman -Syu polaris polaris-kms
+```
+
+**SteamOS** takes the same `pacman -U` its [SteamOS guide](steamos.md) installs
+with: reinstall `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and
+`Polaris-kms-steamos3.8-x86_64.pkg.tar.zst` with the helper. This reinstall was
+checked with pacman on Arch, not on a Steam Deck.
+
+**Bazzite** layers the package with `rpm-ostree`, and no step that replaces a
+1.4.13 beta with the release there has been verified yet.
+
 ## Return to stable
 
 Turn off **Include beta releases** and select **Check again**. This changes which
 releases are offered; it **does not downgrade or replace** the installed beta.
-You can wait for a newer stable release and install it normally.
+You can wait for the stable release the beta precedes, or a newer one, and
+install it normally. A beta's packages sort below that release, so an ordinary
+upgrade replaces the beta. The 1.4.13 betas are the exception: they carry
+`1.4.13` itself, so a package manager can treat the 1.4.13 release as already
+installed. [Leave a 1.4.13 beta](#leave-a-1413-beta) has the commands that
+replace one.
 
 To move to an older stable release immediately, open the
 [stable release](https://github.com/papi-ux/polaris/releases/latest), back up your

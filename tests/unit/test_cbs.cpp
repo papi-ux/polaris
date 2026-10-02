@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <memory>
 #include <vector>
 
@@ -138,4 +139,97 @@ TEST(CbsReadPacket, APacketWithNoSliceHasNoActiveSps) {
   EXPECT_FALSE(cbs::validate_sps(only_filler.get(), AV_CODEC_ID_H264));
   codec_ctx_ptr ctx {avcodec_alloc_context3(nullptr)};
   EXPECT_EQ(cbs::make_sps_h264(ctx.get(), only_filler.get()).sps.old.size(), 0u);
+}
+
+namespace {
+  std::vector<std::uint8_t> stripped(std::vector<std::uint8_t> bytes, int codec_id) {
+    bytes.resize(cbs::strip_filler_data(bytes.data(), bytes.size(), codec_id));
+    return bytes;
+  }
+
+  std::vector<std::uint8_t> joined(std::initializer_list<std::vector<std::uint8_t>> parts) {
+    std::vector<std::uint8_t> bytes;
+    for (const auto &part : parts) {
+      bytes.insert(bytes.end(), part.begin(), part.end());
+    }
+    return bytes;
+  }
+
+  const std::vector<std::uint8_t> h264_filler {0x00, 0x00, 0x00, 0x01, 0x0c, 0xff, 0xff, 0xff, 0x80};
+  const std::vector<std::uint8_t> hevc_filler {0x00, 0x00, 0x00, 0x01, 0x4c, 0x01, 0xff, 0xff, 0xff, 0x80};
+}  // namespace
+
+// What radeonsi and RADV send in CBR on a still screen: the picture, then filler to the target bitrate.
+TEST(CbsStripFillerData, LeavesAnH264FrameExactlyAsItWasWithoutItsPadding) {
+  codec_ctx_ptr ctx;
+  const auto frame = encode_one_frame("libx264", ctx);
+  if (frame.empty()) {
+    GTEST_SKIP() << "this FFmpeg has no libx264";
+  }
+
+  EXPECT_EQ(stripped(joined({frame, h264_filler}), AV_CODEC_ID_H264), frame);
+  EXPECT_EQ(stripped(joined({frame, h264_filler, h264_filler, h264_filler}), AV_CODEC_ID_H264), frame);
+  // Without trailing bits, and with a three-byte start code.
+  EXPECT_EQ(stripped(joined({frame, {0x00, 0x00, 0x01, 0x0c, 0xff, 0xff, 0xff, 0xff}}), AV_CODEC_ID_H264), frame);
+  // In front of the picture, where the picture's own start code has to survive.
+  EXPECT_EQ(stripped(joined({h264_filler, frame}), AV_CODEC_ID_H264), frame);
+
+  const auto packet = packet_of(stripped(joined({frame, h264_filler}), AV_CODEC_ID_H264));
+  EXPECT_TRUE(cbs::validate_sps(packet.get(), AV_CODEC_ID_H264));
+}
+
+TEST(CbsStripFillerData, LeavesAnHevcFrameExactlyAsItWasWithoutItsPadding) {
+  codec_ctx_ptr ctx;
+  const auto frame = encode_one_frame("libx265", ctx);
+  if (frame.empty()) {
+    GTEST_SKIP() << "this FFmpeg has no libx265";
+  }
+
+  EXPECT_EQ(stripped(joined({frame, hevc_filler}), AV_CODEC_ID_H265), frame);
+  EXPECT_EQ(stripped(joined({hevc_filler, frame, hevc_filler}), AV_CODEC_ID_H265), frame);
+}
+
+TEST(CbsStripFillerData, RemovesFillerBetweenUnitsWithTheZeroBytesInFrontOfIt) {
+  const std::vector<std::uint8_t> sps {0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1f};
+  // A slice whose payload holds an escaped 00 00 01, which must not read as a start code.
+  const std::vector<std::uint8_t> slice {0x00, 0x00, 0x01, 0x65, 0x88, 0x00, 0x00, 0x03, 0x01, 0x80};
+  // trailing_zero_8bits after the SPS, then the filler.
+  const std::vector<std::uint8_t> zeros_then_filler {0x00, 0x00, 0x00, 0x00, 0x01, 0x0c, 0xff, 0x80};
+
+  EXPECT_EQ(stripped(joined({sps, zeros_then_filler, slice}), AV_CODEC_ID_H264), joined({sps, slice}));
+  EXPECT_EQ(stripped(joined({sps, slice, h264_filler}), AV_CODEC_ID_H264), joined({sps, slice}));
+}
+
+TEST(CbsStripFillerData, HandlesTheHevcUnitsNextToFiller) {
+  // TRAIL_N's header is 00 01, so the unit opens with the same bytes a start code ends with.
+  const std::vector<std::uint8_t> trail_n {0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0xaf, 0x80};
+  const std::vector<std::uint8_t> short_trail_n {0x00, 0x00, 0x01, 0x00, 0x01, 0xaf, 0x80};
+  // A three-byte start code, without trailing bits.
+  const std::vector<std::uint8_t> short_filler {0x00, 0x00, 0x01, 0x4c, 0x01, 0xff, 0xff};
+  // The high bit of nuh_layer_id is the last bit of the first header byte, so 0x4d is still FD_NUT.
+  const std::vector<std::uint8_t> layer_filler {0x00, 0x00, 0x00, 0x01, 0x4d, 0x01, 0xff, 0x80};
+
+  EXPECT_EQ(stripped(joined({trail_n, short_filler}), AV_CODEC_ID_H265), trail_n);
+  EXPECT_EQ(stripped(joined({short_filler, trail_n}), AV_CODEC_ID_H265), trail_n);
+  EXPECT_EQ(stripped(joined({short_filler, short_trail_n}), AV_CODEC_ID_H265), short_trail_n);
+  EXPECT_EQ(stripped(joined({trail_n, short_filler, short_trail_n}), AV_CODEC_ID_H265), joined({trail_n, short_trail_n}));
+  EXPECT_EQ(stripped(joined({trail_n, layer_filler}), AV_CODEC_ID_H265), trail_n);
+  EXPECT_EQ(stripped(joined({layer_filler, short_trail_n, hevc_filler}), AV_CODEC_ID_H265), short_trail_n);
+}
+
+TEST(CbsStripFillerData, LeavesEverythingElseAlone) {
+  const std::vector<std::uint8_t> slice {0x00, 0x00, 0x00, 0x01, 0x41, 0x9a, 0x00, 0x00, 0x03, 0x01, 0x80};
+  EXPECT_EQ(stripped(slice, AV_CODEC_ID_H264), slice) << "a frame with no filler";
+
+  // HEVC reads H.264's filler header, 0x0c, as type 6: a RADL_N slice, which stays.
+  const std::vector<std::uint8_t> hevc_slice {0x00, 0x00, 0x00, 0x01, 0x02, 0x01, 0xaf, 0x80};
+  EXPECT_EQ(stripped(joined({hevc_slice, h264_filler}), AV_CODEC_ID_H265), joined({hevc_slice, h264_filler}));
+
+  EXPECT_EQ(stripped(joined({slice, h264_filler}), AV_CODEC_ID_AV1), joined({slice, h264_filler})) << "not H.264 or HEVC";
+  EXPECT_EQ(stripped(h264_filler, AV_CODEC_ID_H264), h264_filler) << "a frame of nothing but filler is not sent empty";
+  EXPECT_EQ(stripped(joined({h264_filler, h264_filler, {0x00, 0x00, 0x01}}), AV_CODEC_ID_H264), joined({h264_filler, h264_filler, {0x00, 0x00, 0x01}}));
+
+  const std::vector<std::uint8_t> not_annex_b {0x0c, 0xff, 0xff, 0x80};
+  EXPECT_EQ(stripped(not_annex_b, AV_CODEC_ID_H264), not_annex_b);
+  EXPECT_EQ(stripped({}, AV_CODEC_ID_H264), std::vector<std::uint8_t> {});
 }

@@ -245,6 +245,11 @@ namespace kwingrab {
         return screencast_ != nullptr;
       }
 
+      /// Whether the compositor advertised a global only KWin offers, which it does to any client.
+      bool is_kwin() const {
+        return kwin_;
+      }
+
       int start(std::string_view output_name) {
         if (outputs_.empty()) {
           BOOST_LOG(warning) << "kwingrab: no wl_output"sv;
@@ -319,6 +324,7 @@ namespace kwingrab {
       zkde_screencast_unstable_v1 *screencast_ = nullptr;
       zkde_screencast_stream_unstable_v1 *stream_ = nullptr;
       std::map<wl_output *, std::shared_ptr<output_param_t>> outputs_;
+      bool kwin_ = false;
       bool stream_failed_ = false;
       bool stream_ready_ = false;
       std::string stream_error_;
@@ -356,6 +362,15 @@ namespace kwingrab {
         std::uint32_t version
       ) {
         auto *self = static_cast<screencast_t *>(data);
+        // KWin withholds zkde_screencast_unstable_v1 from a client without its permission entry,
+        // but offers its output management and Plasma globals to every client, and no other
+        // compositor offers those. They tell a KWin that withheld the protocol from a compositor
+        // that never had it.
+        const std::string_view global {interface};
+        if (global.starts_with("kde_output_") || global.starts_with("org_kde_plasma_") ||
+            global == "org_kde_kwin_outputdevice") {
+          self->kwin_ = true;
+        }
         if (!std::strcmp(interface, zkde_screencast_unstable_v1_interface.name)) {
           const auto ver = std::min(version, 6u);
           self->screencast_ = static_cast<zkde_screencast_unstable_v1 *>(
@@ -523,18 +538,28 @@ namespace kwingrab {
     return requested_output_name.empty();
   }
 
-  std::unique_ptr<session_t> start_output_session(std::string_view output_name) {
+  std::unique_ptr<session_t> start_output_session(std::string_view output_name, start_failure_e *failure) {
+    const auto none = [failure](start_failure_e why) -> std::unique_ptr<session_t> {
+      if (failure) {
+        *failure = why;
+      }
+      return nullptr;
+    };
     auto session = std::make_unique<session_t>();
     session->impl_->cast = std::make_unique<screencast_t>();
     if (session->impl_->cast->init(true) < 0) {
-      return nullptr;
+      return none(start_failure_e::no_wayland);
     }
     if (!session->impl_->cast->has_screencast()) {
+      if (!session->impl_->cast->is_kwin()) {
+        BOOST_LOG(info) << "kwingrab: the compositor is not KWin; the portal ScreenCast is its route"sv;
+        return none(start_failure_e::not_kwin);
+      }
       BOOST_LOG(info) << "kwingrab: screencast protocol unavailable; portal remains fallback"sv;
-      return nullptr;
+      return none(start_failure_e::protocol_withheld);
     }
     if (session->impl_->cast->start(output_name) < 0) {
-      return nullptr;
+      return none(start_failure_e::stream_failed);
     }
     return session;
   }

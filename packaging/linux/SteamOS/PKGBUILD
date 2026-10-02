@@ -15,16 +15,9 @@ license=('GPL-3.0-only')
 install=polaris.install
 
 # Split a polaris-debug package so crash reports from this build are debuggable.
-# '!lto' because the compute codec brings Granite in, and Granite vendors volk, which declares
-# Vulkan's entry points as function pointer variables. Polaris's own translation units take the real
-# prototypes from vulkan_core.h. Those coexist in separate objects and cannot coexist in one, so
-# link time optimization merging them fails with "variable 'vkDestroyInstance' redeclared as
-# function" and nothing after it builds. makepkg turns LTO on by default, which is why this has to
-# say no explicitly.
-#
-# The alternative is defining VK_NO_PROTOTYPES across Polaris and routing every Vulkan call through
-# volk's loader, including the FFmpeg Vulkan encoder's. That is the better fix and a much larger one.
-options=('debug' 'strip' '!lto')
+# The build isolates volk's pointer globals and the generated scaler shader type,
+# so makepkg's default LTO can remain enabled.
+options=('debug' 'strip')
 
 # labwc is deliberately absent. Polaris links nothing from it, and on SteamOS 3.8 it
 # resolves to labwc 0.9.0 -> wlroots0.19 -> libdisplay-info.so=2, which downgrades the
@@ -107,6 +100,8 @@ prepare() {
 build() {
   export BRANCH="@GITHUB_BRANCH@"
   export BUILD_VERSION="@BUILD_VERSION@"
+  # Without it the package would be named for the prerelease and the binary would report the release.
+  export POLARIS_PRERELEASE_LABEL="@POLARIS_PRERELEASE_LABEL@"
   export COMMIT="${_commit}"
   export CC="${CC:-gcc}"
   export CXX="${CXX:-g++}"
@@ -181,8 +176,9 @@ package_polaris() {
   cd "$srcdir"
   DESTDIR="$pkgdir" cmake --install build --component polaris
   python "$srcdir/$pkgname/scripts/spaces/verify_package.py" "$pkgdir"
-  test -x "$pkgdir/usr/bin/polaris-$pkgver"
-  test "$(readlink "$pkgdir/usr/bin/polaris")" = "polaris-$pkgver"
+  # The binary is named for the release number alone. A prerelease's pkgver carries its label too.
+  test -x "$pkgdir/usr/bin/polaris-@PROJECT_VERSION@"
+  test "$(readlink "$pkgdir/usr/bin/polaris")" = "polaris-@PROJECT_VERSION@"
   test -f "$pkgdir/usr/lib/udev/rules.d/60-polaris.rules"
   test -f "$pkgdir/usr/lib/modules-load.d/60-polaris.conf"
   test -x "$pkgdir/usr/bin/polaris-gamescope-session"

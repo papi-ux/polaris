@@ -87,6 +87,7 @@
 #endif
 #include "process.h"
 #include "private_state_file.h"
+#include "pyrowave_advice.h"
 #include "rtsp.h"
 #include "stream.h"
 #ifdef __linux__
@@ -131,6 +132,12 @@ namespace nvhttp {
   namespace pt = boost::property_tree;
 
   namespace {
+    // Moonlight shows this verbatim, so it names the setting and not a Nova screen: the launch mode
+    // is Where games run on the host and the mode Nova picks per launch.
+    constexpr const char *desktop_steam_did_not_exit_message =
+      "Desktop Steam did not exit, so Polaris did not start the private stream. Quit Steam on the host "
+      "desktop and launch again, or set the launch mode to Mirror Desktop.";
+
     struct request_stream_scope_t {
       std::uint64_t session_generation = 0;
       std::string app_session_id;
@@ -414,6 +421,58 @@ namespace nvhttp {
         return;
       }
       tree.put("root.<xmlattr>.status_message", fallback_message);
+    }
+
+    /**
+     * The refusal for a stream that joins the running app and said which codec it will ask for, when
+     * the host's capture cannot serve that codec: another codec's stream holds the one capture, or
+     * PyroWave cannot read what the capture route hands over. Nothing for a client that named no
+     * codec, which the RTSP handshake refuses instead, for a watcher, whose codec the owner's stream
+     * decides, or for a stream that captures nothing. Records the refusal when there is one.
+     */
+    bool refuse_declared_codec(const rtsp_stream::launch_session_t &launch_session) {
+      if (launch_session.requested_video_codec.empty() || launch_session.watch_only || launch_session.input_only) {
+        return false;
+      }
+      const bool pyrowave = launch_session.requested_video_codec == "pyrowave";
+      auto refusal = rtsp_stream::capture_in_use_refusal(pyrowave);
+      if (!refusal && pyrowave) {
+        refusal = video::pyrowave_session_capture_refusal();
+      }
+      if (!refusal) {
+        return false;
+      }
+      BOOST_LOG(warning) << "Refusing resume ["sv << refusal->code << "]: "sv << launch_failure::status_message(*refusal);
+      launch_failure::refuse(refusal->status, refusal->code, refusal->message, refusal->action);
+      return true;
+    }
+
+    /**
+     * The codecs capabilities offers in capture.codecs. PyroWave only where a launch can stream it,
+     * because unlike the others there is no software fallback to quietly take over: a device on this
+     * host has to run the compute shaders, and capture has to hand over frames it can read.
+     * Otherwise capture.pyrowave_unavailable says why, as {reason, message}, so a client can say
+     * why instead of sending the player to look for another build. Both field names are a client
+     * contract.
+     */
+    void put_capture_codecs(
+      nlohmann::json &capture,
+      int hevc_mode,
+      int av1_mode,
+      const std::optional<pyrowave_availability::unavailable_t> &pyrowave_unavailable
+    ) {
+      auto &codecs = capture["codecs"];
+      codecs = nlohmann::json::array({"h264"});
+      if (hevc_mode > 1) codecs.push_back("hevc");
+      if (av1_mode > 1) codecs.push_back("av1");
+      if (pyrowave_unavailable) {
+        capture["pyrowave_unavailable"] = {
+          {"reason", std::string {pyrowave_availability::reason_id(pyrowave_unavailable->reason)}},
+          {"message", pyrowave_unavailable->message},
+        };
+      } else {
+        codecs.push_back("pyrowave");
+      }
     }
 
 #ifdef __linux__
@@ -1503,7 +1562,9 @@ namespace nvhttp {
       // The next launch probes the encoder against the new mode either way: a desktop launch
       // always probes, and a private compositor launch reprobes against its own socket. Retire
       // probe reuse only. Dropping the chosen encoder as well would leave /serverinfo advertising
-      // H.264 alone to the client that just made the change, until that launch had run.
+      // H.264 alone to the client that just made the change, until that launch had run. A mode that
+      // moves the Auto plan, such as Gamescope Stream on AMD, is probed by the next request that
+      // advertises codecs (video::refresh_advertised_codecs_for_auto_plan()).
       video::invalidate_encoder_probe_reuse();
       if (!capture_idle) {
         return;
@@ -1537,7 +1598,13 @@ namespace nvhttp {
         config::video.output_name = previous_output_name;
       };
 
-      if (!stream_display_policy::apply_selection(selection, error)) {
+      // The capture setting is put back below, so what the selection does to it is a preview. The
+      // launch that enters the mode applies it again and says then what it does to capture.
+      if (!stream_display_policy::apply_selection(
+            selection,
+            error,
+            stream_display_policy::capture_rewrite_scope_e::preview
+          )) {
         // Dongle discovery can fill only one connector before discovering that
         // the pair is incomplete. A rejected request must be observation-only.
         restore_live_state();
@@ -2290,7 +2357,15 @@ namespace nvhttp {
 
     int derive_safe_bitrate_kbps(int baseline_kbps,
                                  const std::optional<device_db::device_t> &device_profile,
-                                 bool degraded_history) {
+                                 bool degraded_history,
+                                 bool pyrowave = false) {
+      // The device caps below are sized for H.264 and HEVC, and PyroWave needs several times as much
+      // for the same picture. Its safe bitrate is the one it runs at: a suggested relaunch at a
+      // handheld's 16 Mbps would be a PyroWave stream that falls apart. Real network pressure is met
+      // by Doctor's guarded step, which stops at PyroWave's own floor.
+      if (pyrowave && baseline_kbps > 0) {
+        return baseline_kbps;
+      }
       int safe_kbps = baseline_kbps > 0 ? baseline_kbps : 15000;
 
       if (device_profile) {
@@ -2312,34 +2387,98 @@ namespace nvhttp {
       return std::clamp(safe_kbps, 6000, std::max(6000, baseline_kbps > 0 ? baseline_kbps : safe_kbps));
     }
 
-    std::string session_encoder_name(const stream_stats::stats_t &stats) {
-      if (!stats.encoder_backend.empty()) {
-        return stats.encoder_backend;
+    /**
+     * The asking client's own entry in the stream stats, or null when it asked from the host, has no
+     * stream among them, or its entry has no codec yet.
+     *
+     * Every Watch Stream watcher runs its own session beside the owner's, and a reconnect keeps the
+     * stream it replaced listed until that one's teardown, each with its own codec and encoder. The
+     * process-wide codec and encoder_backend are whichever encode loop sampled last, so they are no
+     * answer for any one of them. An entry gets its codec from the start write right after it is
+     * registered, and until then it says nothing about its stream.
+     */
+    const stream_stats::client_stats_t *requester_client(const stream_stats::stats_t &stats,
+                                                          std::uint64_t requester_generation) {
+      if (requester_generation == 0) {
+        return nullptr;
+      }
+      const auto own = std::find_if(stats.clients.begin(), stats.clients.end(),
+        [requester_generation](const stream_stats::client_stats_t &client) {
+          return client.session_generation == requester_generation;
+        });
+      return own == stats.clients.end() || own->codec.empty() ? nullptr : &*own;
+    }
+
+    /// The encoder that sampled a stream and whether the stream negotiated PyroWave: the asking
+    /// client's own when it has a stream here, and the process-wide values otherwise.
+    struct session_encoder_facts_t {
+      std::string_view encoder_backend;
+      bool pyrowave_negotiated = false;
+    };
+
+    session_encoder_facts_t session_encoder_facts(const stream_stats::stats_t &stats,
+                                                  std::uint64_t requester_generation) {
+      if (const auto *own = requester_client(stats, requester_generation)) {
+        return {own->encoder_backend, own->codec == "pyrowave"};
+      }
+      return {stats.encoder_backend, stats.streaming && stats.codec == "pyrowave"};
+    }
+
+    /// The codec the asking client's own stream negotiated, or the process-wide one without it.
+    std::string session_codec(const stream_stats::stats_t &stats, std::uint64_t requester_generation = 0) {
+      const auto *own = requester_client(stats, requester_generation);
+      return own ? own->codec : stats.codec;
+    }
+
+    std::string session_encoder_name(const stream_stats::stats_t &stats,
+                                     std::uint64_t requester_generation = 0) {
+      const auto facts = session_encoder_facts(stats, requester_generation);
+      if (!facts.encoder_backend.empty()) {
+        return std::string {facts.encoder_backend};
       }
       // Preserve the negotiated-codec fallback until the first encoder sample.
-      return stats.streaming && stats.codec == "pyrowave" ? "pyrowave" : video::active_encoder_name();
+      return facts.pyrowave_negotiated ? "pyrowave" : video::active_encoder_name();
     }
 
     std::string effective_session_encoder_name(const stream_stats::stats_t &stats,
-                                               const std::string &launch_encoder) {
-      if (!stats.encoder_backend.empty()) return stats.encoder_backend;
+                                               const std::string &launch_encoder,
+                                               std::uint64_t requester_generation = 0) {
+      const auto facts = session_encoder_facts(stats, requester_generation);
+      if (!facts.encoder_backend.empty()) return std::string {facts.encoder_backend};
       // Negotiating PyroWave supersedes the conventional startup encoder even
       // before its first statistics sample arrives.
-      if (stats.streaming && stats.codec == "pyrowave") return "pyrowave";
+      if (facts.pyrowave_negotiated) return "pyrowave";
       if (!launch_encoder.empty()) return launch_encoder;
-      const auto active = session_encoder_name(stats);
+      const auto active = session_encoder_name(stats, requester_generation);
       return active.empty() ? "unknown" : active;
     }
 
-    nlohmann::json encoder_selection_json(const stream_stats::stats_t &stats) {
-      if (stats.streaming && session_encoder_name(stats) == "pyrowave") {
+    /**
+     * The generation of the stream a paired device is running now, or zero when it runs none.
+     *
+     * Only a device's newest session holds its timing, so a client reconnecting over its own old
+     * stream is answered about the new one, while the old stream's stats entry waits for teardown.
+     */
+    std::uint64_t requester_session_generation(const std::string &device_uuid) {
+      const auto timing = stream_stats::get_session_timing(device_uuid);
+      return timing.session_active ? timing.session_generation : 0;
+    }
+
+    nlohmann::json encoder_selection_json(const stream_stats::stats_t &stats,
+                                          std::uint64_t requester_generation = 0) {
+      // Whether the asking client's own stream is PyroWave, not whichever stream sampled last:
+      // beside an HEVC watcher, either one could be told the other's encoder.
+      if (stats.streaming && session_encoder_name(stats, requester_generation) == "pyrowave") {
         // Conventional encoder probing does not select the codec's own Vulkan
         // device. Do not label this stream software/NVENC or infer its GPU from
         // the capture adapter. Explicit PyroWave selection has no codec fallback.
+        // The reason is the route the asking client's own encoder reported,
+        // because GPU colour conversion is the default and the CPU is only a
+        // fallback, and another stream's route is no answer for this one.
         return {{"mode", "explicit"}, {"gpu_driver", "unknown"}, {"policy", "explicit_codec"},
           {"preferred_encoder", "pyrowave"}, {"fallback_encoder", ""}, {"selected_encoder", "pyrowave"},
           {"exact_live_probe_required", false}, {"fallback_used", false},
-          {"reason", "PyroWave is encoding with Vulkan after CPU color conversion."}};
+          {"reason", stream_stats::pyrowave_route_reason(stats, requester_generation)}};
       }
       const auto selection = video::active_encoder_selection_info();
       return {
@@ -2355,14 +2494,46 @@ namespace nvhttp {
       };
     }
 
+    /**
+     * The encoder block's answers about which codec and encoder a stream runs, in
+     * /polaris/v1/session/status.
+     *
+     * They are about the asking client's own stream when it has one among the stream stats, the
+     * way the PyroWave route already was, so a PyroWave owner and an HEVC watcher each read their
+     * own codec, encoder and selection in either startup order, and a reconnect reads its new
+     * stream's before that stream's first frame.
+     */
+    void write_session_encoder_identity(nlohmann::json &encoder,
+                                        const stream_stats::stats_t &stats,
+                                        const std::string &requested_backend,
+                                        const std::string &launch_backend,
+                                        bool session_override,
+                                        std::uint64_t requester_generation) {
+      const auto active_backend = session_encoder_name(stats, requester_generation);
+      const bool pyrowave_stream = stats.streaming && active_backend == "pyrowave";
+      encoder["active_backend"] = active_backend.empty() ? "unknown" : active_backend;
+      encoder["requested_backend"] = requested_backend;
+      encoder["effective_backend"] = effective_session_encoder_name(
+        stats, launch_backend, requester_generation);
+      encoder["session_override"] = session_override;
+      encoder["fallback_allowed"] = !pyrowave_stream && encoder_backend_fallback_allowed(
+        requested_backend,
+        session_override
+      );
+      encoder["selection"] = encoder_selection_json(stats, requester_generation);
+      encoder["codec"] = session_codec(stats, requester_generation);
+    }
+
     nlohmann::json build_session_health_json(const stream_stats::stats_t &stats,
                                              bool current_virtual_display,
                                              const std::string &device_name,
                                              const std::string &app_name,
-                                             std::string_view app_uuid = {}) {
+                                             std::string_view app_uuid = {},
+                                             std::uint64_t requester_generation = 0) {
       const auto device_profile = device_db::get_device(device_name);
       const bool mobile_client = is_mobile_client_type(device_profile);
-      const std::string active_codec_family = codec_family(stats.codec);
+      // The asking client's own codec and encoder, beside the selection built for it below.
+      const std::string active_codec_family = codec_family(session_codec(stats, requester_generation));
       const double target_fps =
         stats.encode_target_fps > 0 ? stats.encode_target_fps :
         stats.session_target_fps > 0 ? stats.session_target_fps :
@@ -2390,7 +2561,7 @@ namespace nvhttp {
         stream_stats::capture_path_uses_cpu_copy(stats);
       const auto capture_path = stream_stats::capture_path_summary(stats);
       const auto capture_reason = stream_stats::capture_path_reason(stats);
-      const auto active_encoder_name = session_encoder_name(stats);
+      const auto active_encoder_name = session_encoder_name(stats, requester_generation);
       const bool nvenc_cuda_disabled_path =
         active_encoder_name == "nvenc" &&
         !build_has_cuda() &&
@@ -2528,7 +2699,8 @@ namespace nvhttp {
         current_bitrate_kbps > 0 ? current_bitrate_kbps :
           (device_profile ? device_profile->ideal_bitrate_kbps : 15000),
         device_profile,
-        grade != "good"
+        grade != "good",
+        active_codec_family == "pyrowave"
       );
       const double safe_target_fps =
         ai_optimizer::derive_safe_target_fps(
@@ -2610,7 +2782,7 @@ namespace nvhttp {
       health["capture_pressure"] = capture_pressure;
       health["capture_gpu_native"] = stream_stats::capture_path_is_gpu_native(stats);
       health["active_encoder"] = active_encoder_name.empty() ? "unknown" : active_encoder_name;
-      health["encoder_selection"] = encoder_selection_json(stats);
+      health["encoder_selection"] = encoder_selection_json(stats, requester_generation);
       health["cuda_build"] = build_has_cuda();
       health["vulkan_build"] = build_has_vulkan();
       health["relaunch_recommended"] = hdr_source_missing || hdr_risk || decoder_risk || virtual_display_risk ||
@@ -2748,6 +2920,30 @@ namespace nvhttp {
     return build_session_health_json(stats, current_virtual_display, device_name, app_name);
   }
 
+  nlohmann::json build_session_health_json_for_tests(const stream_stats::stats_t &stats,
+                                                   bool current_virtual_display,
+                                                   const std::string &device_name,
+                                                   const std::string &app_name,
+                                                   std::uint64_t requester_generation) {
+    return build_session_health_json(stats, current_virtual_display, device_name, app_name, {},
+                                     requester_generation);
+  }
+
+  std::uint64_t requester_session_generation_for_tests(const std::string &device_uuid) {
+    return requester_session_generation(device_uuid);
+  }
+
+  nlohmann::json session_encoder_identity_json_for_tests(const stream_stats::stats_t &stats,
+                                                         const std::string &requested_backend,
+                                                         const std::string &launch_backend,
+                                                         bool session_override,
+                                                         std::uint64_t requester_generation) {
+    auto encoder = nlohmann::json::object();
+    write_session_encoder_identity(encoder, stats, requested_backend, launch_backend, session_override,
+                                   requester_generation);
+    return encoder;
+  }
+
   nlohmann::json build_launch_mode_contract_for_tests(bool app_prefers_virtual_display,
                                                       const std::string &app_name,
                                                       bool host_virtual_display_available,
@@ -2841,6 +3037,16 @@ namespace nvhttp {
 
   void put_launch_refusal_for_tests(pt::ptree &tree, int status, const std::string &fallback_message) {
     put_launch_refusal(tree, status, fallback_message);
+  }
+
+  nlohmann::json capture_codecs_for_tests(
+    int hevc_mode,
+    int av1_mode,
+    const std::optional<pyrowave_availability::unavailable_t> &pyrowave_unavailable
+  ) {
+    nlohmann::json capture = nlohmann::json::object();
+    put_capture_codecs(capture, hevc_mode, av1_mode, pyrowave_unavailable);
+    return capture;
   }
 
 #ifdef __linux__
@@ -2955,6 +3161,13 @@ namespace nvhttp {
 #ifdef __linux__
       if (allow_deferred_headless_prime) {
         reconcile_game_mode_host();
+        // After the Game Mode check, which is one of the things that moves the Auto plan. A launch
+        // that switched the mode for itself and a client that saved another host default are the
+        // others; this is the first request to see any of them. Before the deferred cage probe: on
+        // a private compositor route the refresh drops an encoder another plan probed, and the cage
+        // probe then primes labwc's own codecs for this same request.
+        const bool stream_active = rtsp_stream::session_count() > 0 || proc::proc.running() > 0;
+        (void) video::refresh_advertised_codecs_for_auto_plan(stream_active);
         (void) prime_deferred_headless_codec_capabilities();
       }
 #endif
@@ -4932,6 +5145,12 @@ namespace nvhttp {
       launch_session->encoder_backend = *normalized;
       launch_session->encoder_backend_explicit = true;
     }
+    // Which codec the client will ask for at the handshake, when it says so here. It changes nothing
+    // the handshake picks; it lets a refusal that depends on the codec reach the client with its
+    // reason, where the handshake can only return a status.
+    if (const auto codec_it = args.find("videoCodec"); codec_it != args.end()) {
+      launch_session->requested_video_codec = lower_copy(codec_it->second);
+    }
     const auto expected_encoder_it = args.find("expectedEncoder");
     if (launch_session->resolved_profile_from_client && launch_session->encoder_backend_explicit) {
       if (expected_encoder_it == args.end()) {
@@ -6042,11 +6261,12 @@ namespace nvhttp {
         (!appuuid.empty() && appuuid != multiseat::profile_app_uuid)))
       return profile_launch_response_t {400, "This launch did not name the device's Space.", {}, "space_app_identity", "Open the Space from the library."};
     if (!args.contains("rikey") || !args.contains("rikeyid"))
-      return profile_launch_response_t {400, "The Space launch is missing its key material.", {}, "space_key_material", "Update Nova and try again."};
+      return profile_launch_response_t {400, "The Space launch is missing its key material.", {}, "space_key_material", "Update the client app and try again."};
     auto launch = make_launch_session(false, false, args, current.get(), true);
     if (!launch) return profile_launch_response_t {400, "These display or media options are not supported for a Space stream.", {},
-      "space_display_options", "Set Play Setup to Auto frame rate with HDR off."};
-    if (!launch->rtsp_cipher) return profile_launch_response_t {403, "Space streams require encrypted RTSP.", {}, "space_encryption_required", "Update Nova."};
+      "space_display_options", "Launch with HDR off, stereo audio, a whole frame rate such as 60, and the encoder on Auto."};
+    if (!launch->rtsp_cipher) return profile_launch_response_t {403, "Space streams require encrypted RTSP.", {}, "space_encryption_required",
+      "Update the client app to a version that encrypts stream setup."};
     if (args.count("workerTarget") > 1 || args.count("workerProfile") > 1)
       return profile_launch_response_t {400, "The Space launch identity was sent twice.", {}, "space_identity_duplicate"};
     const auto target = get_arg(args, "workerTarget", "");
@@ -6805,6 +7025,24 @@ namespace nvhttp {
     return projection;
   }
 
+  nlohmann::json stream_stats_encoder_selection_json(const stream_stats::stats_t &stats) {
+    if (stats.clients.empty()) {
+      return encoder_selection_json(stats);
+    }
+    // Each stream as its own client is answered about it. The process-wide encoder is whichever
+    // encode loop sampled last, Browser Stream's included, so it is no answer for any one of them.
+    nlohmann::json agreed;
+    for (const auto &client : stats.clients) {
+      auto selection = encoder_selection_json(stats, client.session_generation);
+      if (agreed.is_null()) {
+        agreed = std::move(selection);
+      } else if (selection != agreed) {
+        return nlohmann::json::object();
+      }
+    }
+    return agreed;
+  }
+
   nlohmann::json auto_quality_status_json() {
     const auto stats = stream_stats::get_current();
     const auto health = build_session_health_json(
@@ -7221,6 +7459,12 @@ namespace nvhttp {
           return;
         }
 
+        if (refuse_declared_codec(*launch_session)) {
+          tree.put("root.resume", 0);
+          put_launch_refusal(tree, 503, "The host's capture cannot serve the codec this stream asked for.");
+          return;
+        }
+
         if (no_active_sessions && !proc::proc.session_uses_virtual_display()) {
           display_device::configure_display(config::video, *launch_session);
 #ifdef __linux__
@@ -7295,7 +7539,7 @@ namespace nvhttp {
           if (!proc::request_desktop_steam_shutdown_for_private_stream()) {
             tree.put("root.resume", 0);
             tree.put("root.<xmlattr>.status_code", 409);
-            tree.put("root.<xmlattr>.status_message", "Desktop Steam did not exit, so Nova did not start a private stream. Quit Steam on the desktop or choose Mirror Desktop.");
+            tree.put("root.<xmlattr>.status_message", desktop_steam_did_not_exit_message);
             tree.put("root.error_code", "desktop_steam_shutdown_failed");
             tree.put("root.gamesession", 0);
             return;
@@ -7527,6 +7771,12 @@ namespace nvhttp {
 
     if (config::input.enable_input_only_mode && current_appid == proc::input_only_app_id) {
       launch_session->input_only = true;
+    }
+
+    if (refuse_declared_codec(*launch_session)) {
+      tree.put("root.resume", 0);
+      put_launch_refusal(tree, 503, "The host's capture cannot serve the codec this stream asked for.");
+      return;
     }
 
     if (no_active_sessions && !proc::proc.session_uses_virtual_display()) {
@@ -8082,6 +8332,9 @@ namespace nvhttp {
       // cannot own launch settings in this contract.
       features["ai_auto_quality"] = false;
       features["live_tuning_v1"] = true;
+      // GET /polaris/v1/pyrowave/advice, and pyrowave_bitrate in session status while a PyroWave
+      // stream runs. The route answers on every build and says so when PyroWave is not available.
+      features["pyrowave_advice_v1"] = true;
       features["ai_auto_quality_control"] = false;
       features["ai_optimizer"] = false;
       features["ai_optimizer_control"] = false;
@@ -8191,19 +8444,47 @@ namespace nvhttp {
       // ServerMaxLaunchRefreshRate. Both must reflect launch admission.
       capture["max_fps"] = advertised_max_launch_refresh_rate_for_http();
 
-      auto &codecs = capture["codecs"];
-      codecs = nlohmann::json::array({"h264"});
-      if (config::video.hevc_mode > 1) codecs.push_back("hevc");
-      if (config::video.av1_mode > 1) codecs.push_back("av1");
-#ifdef POLARIS_BUILD_PYROWAVE
-      // Only when a device on this host can actually run the compute shaders, because unlike the
-      // others there is no software fallback to quietly take over.
-      if (pyrowave_encode::available()) codecs.push_back("pyrowave");
-#endif
+      put_capture_codecs(capture, config::video.hevc_mode, config::video.av1_mode, video::pyrowave_unavailable());
 
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");
       response->write(output.dump(), headers);
+    };
+
+    // PyroWave's bitrate advice for a shape a client is about to ask for. The same figures session
+    // status carries while a PyroWave stream runs, so Play Setup and Doctor never disagree.
+    auto polarisPyroWaveAdvice = [](resp_https_t response, req_https_t request) {
+      print_req<PolarisHTTPS>(request);
+
+      const auto named_cert_p = get_verified_cert(request);
+      if (!named_cert_p) {
+        response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+        return;
+      }
+
+      const auto query = request->parse_query_string();
+      const auto field = [&query](const char *name) -> std::string {
+        if (query.count(name) != 1) {
+          return {};
+        }
+        return query.find(name)->second;
+      };
+      pyrowave_advice::route_host_t host;
+      host.built = pyrowave_advice::model_available();
+#ifdef POLARIS_BUILD_PYROWAVE
+      host.device_available = pyrowave_encode::available();
+#endif
+      host.fec_percentage = config::stream.fec_percentage;
+      host.max_bitrate_kbps = config::video.max_bitrate;
+      int http_status = 200;
+      const auto output = pyrowave_advice::advice_reply(
+        field("width"), field("height"), field("fps"), field("chroma"), host, http_status
+      );
+
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      headers.emplace("Cache-Control", "no-store");
+      response->write(static_cast<SimpleWeb::StatusCode>(http_status), output.dump(), headers);
     };
 
     // Wire format (frame_processing_latency) is untouched by this - a new,
@@ -8425,19 +8706,18 @@ namespace nvhttp {
 
       // Encoder info
       auto &encoder = output["encoder"];
-      const auto active_backend = session_encoder_name(stats);
-      const bool pyrowave_stream = stats.streaming && active_backend == "pyrowave";
-      encoder["active_backend"] = active_backend.empty() ? "unknown" : active_backend;
-      encoder["requested_backend"] = status_snapshot.requested_encoder_backend;
-      encoder["effective_backend"] = effective_session_encoder_name(
-        stats, status_snapshot.effective_encoder_backend);
-      encoder["session_override"] = status_snapshot.encoder_backend_explicit;
-      encoder["fallback_allowed"] = !pyrowave_stream && encoder_backend_fallback_allowed(
+      // The stream this response names as session_generation, so its codec, encoder and selection
+      // are that stream's even while another one runs or a reconnect overlaps the stream it replaced.
+      const auto requester_generation =
+        session_timing.session_active ? session_timing.session_generation : 0;
+      write_session_encoder_identity(
+        encoder,
+        stats,
         status_snapshot.requested_encoder_backend,
-        status_snapshot.encoder_backend_explicit
+        status_snapshot.effective_encoder_backend,
+        status_snapshot.encoder_backend_explicit,
+        requester_generation
       );
-      encoder["selection"] = encoder_selection_json(stats);
-      encoder["codec"] = stats.codec;
       encoder["encode_time_ms"] = stats.encode_time_ms;
       encoder["bitrate_kbps"] = stats.bitrate_kbps;
       encoder["fps"] = stats.fps;
@@ -8454,12 +8734,18 @@ namespace nvhttp {
       encoder["optimization_reasoning"] = stats.optimization_reasoning;
       encoder["optimization_normalization_reason"] = stats.optimization_normalization_reason;
       encoder["recommendation_version"] = stats.recommendation_version;
+      // PyroWave's bitrate advice for this stream and the host's verdict on it, only while the stream
+      // is PyroWave. Every advice figure is a request, which is what a client sets.
+      if (auto pyrowave_bitrate = stream_stats::pyrowave_bitrate_json(stats); !pyrowave_bitrate.is_null()) {
+        output["pyrowave_bitrate"] = std::move(pyrowave_bitrate);
+      }
       const auto health = build_session_health_json(
         stats,
         status_snapshot.virtual_display,
         named_cert_p->name,
         status_snapshot.game,
-        status_snapshot.game_uuid
+        status_snapshot.game_uuid,
+        requester_generation
       );
       output["health"] = health;
       auto doctor_v1 = health.value("doctor", nlohmann::json::object());
@@ -8722,7 +9008,8 @@ namespace nvhttp {
           proc::proc.session_uses_virtual_display(),
           response_client->name,
           app_name,
-          proc::proc.get_running_app_uuid()
+          proc::proc.get_running_app_uuid(),
+          requester_session_generation(response_client->uuid)
         );
 
         nlohmann::json output;
@@ -9140,7 +9427,8 @@ namespace nvhttp {
           proc::proc.session_uses_virtual_display(),
           rendered_response_client.name,
           proc::proc.get_last_run_app_name(),
-          proc::proc.get_running_app_uuid()
+          proc::proc.get_running_app_uuid(),
+          requester_session_generation(rendered_response_client.uuid)
         );
 
         nlohmann::json output;
@@ -10048,7 +10336,7 @@ namespace nvhttp {
         if (launch_policy.recommendedAction == "force_private_stream_after_desktop_steam_shutdown") {
           if (!proc::request_desktop_steam_shutdown_for_private_stream()) {
             nlohmann::json err;
-            err["error"] = "Desktop Steam did not exit, so Nova did not start a private stream. Quit Steam on the desktop or choose Mirror Desktop.";
+            err["error"] = desktop_steam_did_not_exit_message;
             err["error_code"] = "desktop_steam_shutdown_failed";
             err["launchPolicy"] = launch_policy_json;
             SimpleWeb::CaseInsensitiveMultimap headers;
@@ -10753,7 +11041,8 @@ namespace nvhttp {
         const bool virtual_display = proc::proc.session_uses_virtual_display();
         const auto timing = stream_stats::get_session_timing(named_cert_p->uuid);
         const auto health = build_session_health_json(
-          stats, virtual_display, named_cert_p->name, app_name, app_uuid
+          stats, virtual_display, named_cert_p->name, app_name, app_uuid,
+          timing.session_active ? timing.session_generation : 0
         );
         doctor_actions::recovery_action_context_t recovery_context {
           .active_owner = active_owner,
@@ -10855,7 +11144,8 @@ namespace nvhttp {
           proc::proc.session_uses_virtual_display(),
           named_cert_p->name,
           proc::proc.get_last_run_app_name(),
-          proc::proc.get_running_app_uuid()
+          proc::proc.get_running_app_uuid(),
+          requester_session_generation(named_cert_p->uuid)
         );
         output["client_settings"] = build_client_settings_json(*named_cert_p, stats, health);
         output["sync_status"] = output["client_settings"]["sync_status"];
@@ -10942,7 +11232,8 @@ namespace nvhttp {
           proc::proc.session_uses_virtual_display(),
           named_cert_p->name,
           proc::proc.get_last_run_app_name(),
-          proc::proc.get_running_app_uuid()
+          proc::proc.get_running_app_uuid(),
+          requester_session_generation(named_cert_p->uuid)
         );
         output["client_settings"] = build_client_settings_json(*named_cert_p, stats, health);
         output["sync_status"] = output["client_settings"]["sync_status"];
@@ -11833,6 +12124,7 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/optimize$"]["GET"] = polarisOptimize;
     https_server.resource["^/polaris/v1/capabilities$"]["GET"] = polarisCapabilities;
     https_server.resource["^/polaris/v1/session/status$"]["GET"] = polarisSessionStatus;
+    https_server.resource["^/polaris/v1/pyrowave/advice$"]["GET"] = polarisPyroWaveAdvice;
     https_server.resource["^/polaris/v1/spaces$"]["GET"] = polarisSpaces;
     https_server.resource["^/polaris/v1/spaces/select$"]["POST"] = polarisSpaces;
     https_server.resource["^/polaris/v1/spaces/library$"]["GET"] = polarisSpaceLibrary;

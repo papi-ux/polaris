@@ -308,10 +308,13 @@ function isReleaseGreater(release, version, includeIncremental = false) {
   }
 }
 
+// The channel counts: the release replaces its own beta through an ordinary upgrade, and until the
+// host restarts, 1.4.14 is installed while 1.4.14-beta.3 runs. On the release number alone those are
+// the same, and the Update Center would offer the release this host already has.
 function isInstalledNewerThanRunning(installedVersion, runningVersion) {
   if (!installedVersion || !runningVersion) return false
   try {
-    return new PolarisVersion(null, installedVersion).isGreater(new PolarisVersion(null, runningVersion))
+    return new PolarisVersion(null, installedVersion).isGreater(new PolarisVersion(null, runningVersion), true)
   } catch {
     return false
   }
@@ -332,19 +335,47 @@ function isVersionGreater(version, release) {
 // an update nobody restarted after, or the Bazzite KMS runtime copy, which no
 // update touches. Hosts before 1.4.3 report no installed package version and
 // hosts before 1.4.8 no running binary, so for them this is the only signal.
-// Release numbers only: a development build's commit suffix says nothing here.
+// A development build's commit suffix does not parse as a version, so it says nothing here. The
+// console is named exactly as it was built, channel included: 1.4.14-rc.1 is not 1.4.14.
 function describeHostBehindConsole(consoleVersion, runningVersion) {
   if (!isInstalledNewerThanRunning(consoleVersion, runningVersion)) return null
-  const consoleRelease = new PolarisVersion(null, consoleVersion).versionParts.slice(0, 3).join('.')
   return {
     status: 'restart_required',
     statusLabel: 'Console is newer than the host',
-    summary: `This console came with Polaris ${consoleRelease}, but the host process answering it is ${runningVersion}. The package was updated and the service still runs an older binary. Restart Polaris. If it still shows ${runningVersion}, the service runs a copy outside the package, on Bazzite /usr/local/bin/polaris-kms: run sudo -H polaris --setup-host, then restart again.`,
+    summary: `This console came with Polaris ${consoleVersion}, but the host process answering it is ${runningVersion}. The package was updated and the service still runs an older binary. Restart Polaris. If it still shows ${runningVersion}, the service runs a copy outside the package, on Bazzite /usr/local/bin/polaris-kms: run sudo -H polaris --setup-host, then restart again.`,
   }
 }
 
 export function isPrereleaseOptIn(value) {
   return value === true || value === 'enabled'
+}
+
+function plainVersion(version) {
+  return String(version || '').trim().replace(/^v(?=\d)/i, '')
+}
+
+// A local build carries the commit after the release it was built from, 1.4.13.36e05224 or
+// 1.4.14-beta.1.36e05224.dirty. The release is the part a published beta is compared with.
+function developmentBuildBase(version) {
+  const match = plainVersion(version).match(/^(\d+\.\d+\.\d+.*?)\.[0-9a-f]{7,40}(?:\.dirty)?$/i)
+  return match ? match[1] : ''
+}
+
+// With betas included and nothing newer to offer, "on the latest public release" reads as though the
+// beta channel was never checked. So the status line says what the check found: no newer beta, and
+// which build is the newest one.
+function betaChannelNote({ includePrereleases, status, candidateRelease, currentVersion }) {
+  if (!isPrereleaseOptIn(includePrereleases) || status !== 'current' || !candidateRelease) return ''
+  const base = developmentBuildBase(currentVersion)
+  const installed = base || plainVersion(currentVersion)
+  const stable = plainVersion(versionFromRelease(candidateRelease))
+  const found = candidateRelease.prerelease
+    ? `No beta newer than ${installed} is published yet.`
+    : `No beta newer than ${installed} is published yet, so stable ${stable} is the newest build.`
+  if (base) {
+    return `This host runs a development build of ${base}. ${found}`
+  }
+  return candidateRelease.prerelease ? `${found} This host runs the newest beta.` : found
 }
 
 export function chooseCandidateRelease({ latestRelease, prereleaseRelease, includePrereleases = false, currentVersion = '' } = {}) {
@@ -456,6 +487,7 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
   const releaseUrl = candidateRelease.html_url || ''
   const kmsHelperMissingFromRelease = host.kms_helper_installed === true && Boolean(asset) && !kmsAsset
   const action = buildActionMetadata(status, asset, installCommand, releaseUrl, kmsHelperMissingFromRelease)
+  const channelNote = betaChannelNote({ includePrereleases, status, candidateRelease, currentVersion })
 
   return {
     status,
@@ -473,7 +505,14 @@ export function buildUpdateCenterState({ currentVersion = '', latestRelease = nu
     manualInstallOnly: true,
     runningBinaryPath,
     runningOutsidePackage,
+    // The helper is built for this exact Polaris, so a host that has it installs both, and the
+    // Package card lists what the install command takes rather than half of it.
+    kmsAsset,
+    kmsAssetDigest: kmsAsset?.digest || '',
+    kmsHelperMissingFromRelease,
+    channelNote,
     ...action,
+    ...(channelNote ? { primaryActionSummary: channelNote } : {}),
   }
 }
 
