@@ -6456,6 +6456,20 @@ namespace confighttp {
     std::function<bool(const std::string &, const std::string &)> cover_download_override;
   }
 #endif
+  namespace {
+    // Autocomplete is a provider listing, not the small incoming choice JSON.
+    // The tests call this same callback; no transport override bypasses its bound.
+    std::size_t append_cover_listing(char *bytes, std::size_t size, std::size_t count, void *context) {
+      auto &body = *static_cast<std::string *>(context);
+      constexpr auto limit = game_artwork::manual::maximum_listing_bytes;
+      if (size && count > limit / size) return 0;
+      const auto length = size * count;
+      if (body.size() > limit || length > limit - body.size()) return 0;
+      if (length) body.append(bytes, length);
+      return length;
+    }
+  }
+
   /**
    * @brief One SteamGridDB autocomplete request with the given key.
    * @return The upstream HTTP status, or nothing when the request itself failed.
@@ -6469,14 +6483,8 @@ namespace confighttp {
     const std::string search_url = "https://www.steamgriddb.com/api/v2/search/autocomplete/" + http::url_escape(game_name);
     struct curl_slist *headers = curl_slist_append(nullptr, ("Authorization: Bearer " + api_key).c_str());
     curl_easy_setopt(curl, CURLOPT_URL, search_url.c_str());
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +[](char *bytes, std::size_t size, std::size_t count, void *context) -> std::size_t {
-      auto &body = *static_cast<std::string *>(context);
-      if (size && count > game_artwork::manual::maximum_match_body_bytes / size) return 0;
-      const auto length = size * count;
-      if (length > game_artwork::manual::maximum_match_body_bytes - body.size()) return 0;
-      body.append(bytes, length);
-      return length;
-    });
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, append_cover_listing);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &search_response);
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
@@ -7607,7 +7615,7 @@ namespace confighttp {
 #endif
       const auto apps_file = config::stream.file_apps;
       const auto stored_uuid = app_entry->uuid;
-      const auto filename = http::url_escape(stored_uuid) + safe_cover_extension_from_url(url);
+      const auto filename = http::url_escape(app_entry->uuid) + safe_cover_extension_from_url(url);
       nlohmann::json entry_before;
       {
         std::scoped_lock apps_lock(apps_file_mutex());
@@ -10882,6 +10890,10 @@ namespace confighttp {
       std::function<bool(const std::string &, const std::string &)> download) {
     cover_key_check_override = std::move(key_check);
     cover_download_override = std::move(download);
+  }
+
+  std::size_t append_cover_listing_for_tests(std::string &body, char *bytes, std::size_t size, std::size_t count) {
+    return append_cover_listing(bytes, size, count, &body);
   }
 
   void set_cover_post_for_tests(cover_post_t post) { cover_post_override = std::move(post); }

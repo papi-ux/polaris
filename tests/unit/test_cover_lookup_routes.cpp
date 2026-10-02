@@ -35,6 +35,7 @@ namespace confighttp {
   void registerCoverLookups(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &, cover_lookup::workers_t &, game_artwork::providers::transport_t);
   void getCoverSweep(response_t, request_t);
   void register_cover_actions_for_tests(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &, cover_lookup::workers_t &);
+  std::size_t append_cover_listing_for_tests(std::string &, char *, std::size_t, std::size_t);
   void set_cover_post_for_tests(std::function<void(std::function<void()>)>);
   void set_cover_commit_observer_for_tests(std::function<void()>);
   bool revoke_cover_cookie_for_tests(const std::string &);
@@ -417,11 +418,42 @@ namespace {
       routes_t routes {port.load(), cookie, workers, stop_server};
       routes.directory = directory;
       routes.main = [&](std::function<void()> task) {
-        std::promise<void> done;
-        auto finished = done.get_future();
-        boost::asio::post(*server.io_service, [&] {
-          try { task(); done.set_value(); } catch (...) { done.set_exception(std::current_exception()); }
+        struct pending_t {
+          std::mutex mutex;
+          std::function<void()> task;
+          std::promise<void> done;
+          bool started = false;
+        };
+        auto pending = std::make_shared<pending_t>();
+        pending->task = std::move(task);
+        auto finished = pending->done.get_future();
+        auto cancel_pending = util::fail_guard([&] {
+          std::lock_guard lock(pending->mutex);
+          pending->task = {}; // A queued callback cannot outlive its caller's references.
         });
+        boost::asio::post(*server.io_service, [pending] {
+          std::function<void()> task;
+          {
+            std::lock_guard lock(pending->mutex);
+            if (!pending->task) return;
+            pending->started = true;
+            task = std::move(pending->task);
+          }
+          try { task(); pending->done.set_value(); }
+          catch (...) { pending->done.set_exception(std::current_exception()); }
+        });
+        if (finished.wait_for(3s) != std::future_status::ready) {
+          bool started;
+          {
+            std::lock_guard lock(pending->mutex);
+            started = pending->started;
+            pending->task = {};
+          }
+          // If already executing, join before unwinding its caller's references.
+          // The GREEN runner also bounds each native process, including this join.
+          if (started) stop_server();
+          throw std::runtime_error("Owned HTTPS fixture task did not complete within 3 seconds");
+        }
         finished.get();
       };
       run(routes);
@@ -815,4 +847,36 @@ TEST(CoverLookupRoutes, ProviderExceptionsKeepActionFailuresAndCleanStaging) {
     EXPECT_FALSE(r.request("POST", "/api/covers/key/check", R"({"steamgriddb_api_key":"mock-only-key"})").body.value("status", true));
     EXPECT_FALSE(request_download(r).body.value("status", true)); EXPECT_EQ(staging_count(r), 0);
   });
+}
+
+
+TEST(CoverKeyListingCallback, ValidAutocompleteBeyondChoiceBodyLimitUsesTheListingBound) {
+  auto entries = nlohmann::json::array();
+  for (int i = 0; i < 180; ++i) entries.push_back({{"id", i}, {"name", "Portal autocomplete result " + std::to_string(i)}});
+  auto listing = nlohmann::json {{"data", entries}}.dump();
+  ASSERT_GT(listing.size(), game_artwork::manual::maximum_match_body_bytes);
+  ASSERT_LT(listing.size(), game_artwork::manual::maximum_listing_bytes);
+  std::string body;
+  const auto split = listing.size() / 2;
+  EXPECT_EQ(confighttp::append_cover_listing_for_tests(body, listing.data(), 1, split), split);
+  EXPECT_EQ(confighttp::append_cover_listing_for_tests(body, listing.data() + split, 1, listing.size() - split), listing.size() - split);
+  EXPECT_EQ(body, listing);
+  EXPECT_EQ(nlohmann::json::parse(body).at("data").size(), 180);
+}
+
+TEST(CoverKeyListingCallback, ExactListingLimitAcceptsThenOverflowLeavesTheBodyUnchanged) {
+  constexpr auto limit = game_artwork::manual::maximum_listing_bytes;
+  std::string listing(limit, 'x'), body;
+  EXPECT_EQ(confighttp::append_cover_listing_for_tests(body, listing.data(), 1, listing.size()), limit);
+  const auto accepted = body;
+  EXPECT_EQ(confighttp::append_cover_listing_for_tests(body, listing.data(), 1, 1), 0);
+  EXPECT_EQ(body, accepted);
+  // Reject oversized count and multiplication overflow before touching a pointer.
+  EXPECT_EQ(confighttp::append_cover_listing_for_tests(body, nullptr, 2, limit / 2 + 1), 0);
+  EXPECT_EQ(confighttp::append_cover_listing_for_tests(body, nullptr, static_cast<std::size_t>(-1), 2), 0);
+  EXPECT_EQ(body, accepted);
+  std::string invalid_existing(limit + 1, 'y');
+  const auto old = invalid_existing;
+  EXPECT_EQ(confighttp::append_cover_listing_for_tests(invalid_existing, nullptr, 0, 1), 0);
+  EXPECT_EQ(invalid_existing, old);
 }
