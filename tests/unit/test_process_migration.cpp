@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -3380,6 +3381,93 @@ TEST(ProcessRuntimeConfigTests, NonCageDetachedGenerationCleanupReapsAlreadyExit
   GTEST_SKIP() << "Linux-only detached generation zombie cleanup";
 #endif
 }
+
+#ifdef __linux__
+namespace {
+  class HostVirtualOwnedShutdown: public testing::Test {
+  protected:
+    const std::string token = "hvd-owned-stop-252";
+    pid_t child = -1;
+    std::unique_ptr<linux_child_guard_t> child_guard;
+
+    void SetUp() override {
+      child = fork();
+      ASSERT_GE(child, 0);
+      if (child == 0) {
+        setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+        execl("/bin/sleep", "sleep", "60", nullptr);
+        _exit(127);
+      }
+      child_guard = std::make_unique<linux_child_guard_t>(child);
+      const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+      bool token_visible = false;
+      for (int attempt = 0; attempt < 40 && !token_visible; ++attempt) {
+        std::ifstream input("/proc/" + std::to_string(child) + "/environ", std::ios::binary);
+        const std::string environ(
+          (std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        token_visible = environ.find(expected) != std::string::npos;
+        if (!token_visible) std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      }
+      ASSERT_TRUE(token_visible);
+    }
+  };
+}
+
+TEST_F(HostVirtualOwnedShutdown, FailedCaptureRetainsOutputAndExactLaunchContext) {
+  const auto stopped = proc::host_virtual_shutdown_for_tests(token, child, true, false);
+  ASSERT_TRUE(stopped.prepared);
+  EXPECT_FALSE(stopped.authority_rejected);
+  EXPECT_FALSE(stopped.stopped);
+  EXPECT_FALSE(stopped.completion_idle);
+  EXPECT_TRUE(stopped.output_retained);
+  EXPECT_TRUE(stopped.generation_retained);
+  EXPECT_TRUE(stopped.launch_owner_retained);
+  EXPECT_TRUE(stopped.app_retained);
+  EXPECT_TRUE(stopped.child_alive);
+  EXPECT_EQ(stopped.destroy_calls, 0);
+  EXPECT_EQ(stopped.revert_calls, 0);
+}
+
+TEST_F(HostVirtualOwnedShutdown, SameOwnerCanRetryAfterCaptureRecoversBeforeRemovingOutput) {
+  const auto stopped = proc::host_virtual_shutdown_for_tests(token, child, true, true);
+  ASSERT_TRUE(stopped.prepared);
+  ASSERT_TRUE(stopped.child_alive);
+  EXPECT_TRUE(stopped.retry_stopped);
+  EXPECT_TRUE(stopped.retry_output_removed);
+  EXPECT_TRUE(stopped.retry_context_retired);
+  EXPECT_EQ(stopped.retry_destroy_calls, 1);
+  EXPECT_TRUE(stopped.child_reaped_before_destroy);
+}
+
+TEST_F(HostVirtualOwnedShutdown, SuccessfulStopDrainsOwnedChildBeforeRemovingOutput) {
+  const auto stopped = proc::host_virtual_shutdown_for_tests(token, child, false, false);
+  ASSERT_TRUE(stopped.prepared);
+  EXPECT_FALSE(stopped.authority_rejected);
+  EXPECT_TRUE(stopped.stopped);
+  EXPECT_TRUE(stopped.completion_idle);
+  EXPECT_FALSE(stopped.child_alive);
+  EXPECT_FALSE(stopped.output_retained);
+  EXPECT_FALSE(stopped.generation_retained);
+  EXPECT_FALSE(stopped.launch_owner_retained);
+  EXPECT_FALSE(stopped.app_retained);
+  EXPECT_EQ(stopped.destroy_calls, 1);
+  EXPECT_TRUE(stopped.child_reaped_before_destroy);
+}
+
+TEST_F(HostVirtualOwnedShutdown, ForeignOwnerCannotStopChildOrRemoveOutput) {
+  const auto stopped = proc::host_virtual_shutdown_for_tests(token, child, false, false, true);
+  ASSERT_TRUE(stopped.prepared);
+  EXPECT_TRUE(stopped.authority_rejected);
+  EXPECT_FALSE(stopped.stopped);
+  EXPECT_TRUE(stopped.child_alive);
+  EXPECT_TRUE(stopped.output_retained);
+  EXPECT_TRUE(stopped.generation_retained);
+  EXPECT_TRUE(stopped.launch_owner_retained);
+  EXPECT_TRUE(stopped.app_retained);
+  EXPECT_EQ(stopped.destroy_calls, 0);
+  EXPECT_EQ(stopped.revert_calls, 0);
+}
+#endif
 
 TEST(ProcessRuntimeConfigTests, NonCageDetachedCaptureFailureRetainsGenerationAndSendsNoSignal) {
 #ifdef __linux__

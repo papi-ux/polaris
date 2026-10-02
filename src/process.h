@@ -625,6 +625,32 @@ namespace proc {
     std::string_view session_instance_id,
     pid_t forced_capture_failure_pid
   );
+  struct host_virtual_shutdown_test_result_t {
+    bool prepared = false;
+    bool stopped = false;
+    bool completion_idle = false;
+    bool authority_rejected = false;
+    bool output_retained = false;
+    bool generation_retained = false;
+    bool launch_owner_retained = false;
+    bool app_retained = false;
+    bool child_alive = false;
+    int destroy_calls = 0;
+    int revert_calls = 0;
+    bool child_reaped_before_destroy = false;
+    bool retry_stopped = false;
+    bool retry_output_removed = false;
+    bool retry_context_retired = false;
+    int retry_destroy_calls = 0;
+  };
+  host_virtual_shutdown_test_result_t host_virtual_shutdown_for_tests(
+    std::string_view session_instance_id,
+    pid_t child_pid,
+    bool force_capture_failure,
+    bool retry,
+    bool wrong_owner = false
+  );
+
   bool non_cage_detached_partial_launch_cleanup_for_tests(
     std::string_view session_instance_id,
     pid_t prior_child_pid
@@ -1138,6 +1164,14 @@ namespace proc {
       std::string_view session_instance_id,
       pid_t forced_capture_failure_pid
     );
+    host_virtual_shutdown_test_result_t host_virtual_shutdown_for_tests(
+      std::string_view session_instance_id,
+      pid_t child_pid,
+      bool force_capture_failure,
+      bool retry,
+      bool wrong_owner
+    );
+
     bool non_cage_detached_partial_launch_cleanup_for_tests(
       std::string_view session_instance_id,
       pid_t prior_child_pid
