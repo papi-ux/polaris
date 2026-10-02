@@ -493,6 +493,12 @@ namespace nvhttp {
       }
     }
 
+    void put_paired_capture_codecs(
+      nlohmann::json &capture,
+      const std::optional<pyrowave_availability::unavailable_t> &pyrowave_unavailable,
+      bool allow_deferred_headless_prime
+    );
+
 #ifdef __linux__
     // A Space launch refusal reaches the client the way a host launch refusal
     // does: the words as status_message, the code and action as root attributes
@@ -3115,6 +3121,15 @@ namespace nvhttp {
     return capture;
   }
 
+  nlohmann::json paired_capture_codecs_for_tests(
+    const std::optional<pyrowave_availability::unavailable_t> &pyrowave_unavailable
+  ) {
+    nlohmann::json capture = nlohmann::json::object();
+    // Exercise the same paired-route offer without starting a real encoder probe.
+    put_paired_capture_codecs(capture, pyrowave_unavailable, false);
+    return capture;
+  }
+
 #ifdef __linux__
   void put_profile_launch_response_for_tests(pt::ptree &tree, const profile_launch_response_t &response, bool resume) {
     put_profile_launch_response(tree, response, resume);
@@ -3238,6 +3253,16 @@ namespace nvhttp {
       }
 #endif
       return video::advertised_codec_capability_state();
+    }
+
+    void put_paired_capture_codecs(
+      nlohmann::json &capture,
+      const std::optional<pyrowave_availability::unavailable_t> &pyrowave_unavailable,
+      bool allow_deferred_headless_prime
+    ) {
+      // Behavior-preserving extraction of the paired route for the failing regression.
+      (void) allow_deferred_headless_prime;
+      put_capture_codecs(capture, config::video.hevc_mode, config::video.av1_mode, pyrowave_unavailable);
     }
 
     std::optional<int> topology_max_launch_refresh_rate_for_http(
@@ -8600,7 +8625,7 @@ namespace nvhttp {
       // ServerMaxLaunchRefreshRate. Both must reflect launch admission.
       capture["max_fps"] = advertised_max_launch_refresh_rate_for_http();
 
-      put_capture_codecs(capture, config::video.hevc_mode, config::video.av1_mode, video::pyrowave_unavailable());
+      put_paired_capture_codecs(capture, video::pyrowave_unavailable(), true);
 
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");

@@ -705,6 +705,10 @@ namespace nvhttp {
     int av1_mode,
     const std::optional<pyrowave_availability::unavailable_t> &pyrowave_unavailable
   );
+  /// The actual paired-route offer, with deferred hardware priming disabled for fixtures.
+  nlohmann::json paired_capture_codecs_for_tests(
+    const std::optional<pyrowave_availability::unavailable_t> &pyrowave_unavailable
+  );
 #ifdef __linux__
   void put_profile_launch_response_for_tests(boost::property_tree::ptree &tree, const profile_launch_response_t &response, bool resume);
 #endif
