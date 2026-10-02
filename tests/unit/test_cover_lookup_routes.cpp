@@ -73,11 +73,12 @@ namespace {
     std::function<void(std::function<void()>)> main;
 
     response_t request(const std::string &method, const std::string &path, const std::string &body = {},
-                       bool authorized = true, bool csrf = true, long timeout = 5, const std::string &bearer = {}) const {
+                       bool authorized = true, bool csrf = true, long timeout = 5, const std::string &bearer = {},
+                       const std::string &content_type = "application/json") const {
       SimpleWeb::Client<SimpleWeb::HTTPS> client("127.0.0.1:" + std::to_string(port), false);
       client.config.timeout = timeout;
       client.config.timeout_connect = timeout;
-      SimpleWeb::CaseInsensitiveMultimap headers {{"Content-Type", "application/json"}};
+      SimpleWeb::CaseInsensitiveMultimap headers {{"Content-Type", content_type}};
       if (authorized) headers.emplace("Cookie", "auth=" + cookie);
       if (csrf) headers.emplace("X-CSRF-Token", "lookup-test-csrf");
       if (!bearer.empty()) headers.emplace("Authorization", "Bearer " + bearer);
@@ -590,6 +591,39 @@ namespace {
       write_image(path); return true;
     }}, run);
   }
+}
+
+TEST(CoverLookupRoutes, RegisteredCoverActionsRejectAuthCsrfAndNonJsonBeforeProviderOrWrites) {
+  std::atomic<int> provider_calls {0};
+  with_action_routes({[&](const auto &, auto) -> std::optional<reply_t> {
+    ++provider_calls; return std::nullopt;
+  }, [&](const auto &, const auto &, std::string &) -> std::optional<long> {
+    ++provider_calls; return std::nullopt;
+  }, [&](const auto &, const auto &) {
+    ++provider_calls; return false;
+  }}, [&](routes_t &r) {
+    const auto original_apps = read_bytes(config::stream.file_apps);
+    const auto preview = publish_action_choice();
+    ASSERT_TRUE(preview);
+    const std::vector<std::pair<std::string, nlohmann::json>> requests {
+      {"/api/covers/select", {{"uuid", action_uuid}, {"token", preview->token}}},
+      {"/api/covers/apply-missing", {{"uuid", action_uuid}, {"token", preview->token},
+                                    {"run_id", "owned-test-run"}, {"expected_name", "Portal"}}},
+      {"/api/covers/key/check", {{"steamgriddb_api_key", "mock-only-key"}}},
+      {"/api/covers/download", {{"url", action_url}, {"app_uuid", action_uuid}}},
+    };
+    for (const auto &[path, payload] : requests) {
+      SCOPED_TRACE(path);
+      EXPECT_EQ(r.request("POST", path, payload.dump(), false).code, 401);
+      EXPECT_EQ(r.request("POST", path, payload.dump(), true, false).code, 403);
+      EXPECT_EQ(r.request("POST", path, payload.dump(), true, true, 5, {}, "text/plain").code, 400);
+      EXPECT_EQ(provider_calls.load(), 0);
+      EXPECT_FALSE(r.workers.pending_for_tests());
+      EXPECT_EQ(read_bytes(config::stream.file_apps), original_apps);
+      EXPECT_FALSE(std::filesystem::exists(final_cover(r)));
+      EXPECT_EQ(staging_count(r), 0);
+    }
+  });
 }
 
 TEST(CoverLookupRoutes, CompletionRevalidatesCookieBeforeAnyCoverPublication) {
