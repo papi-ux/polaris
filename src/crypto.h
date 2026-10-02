@@ -104,8 +104,8 @@ namespace crypto {
   };
 
   /// What a device gets for close_desktop_steam when it pairs, and when its record predates the
-  /// setting. One constant, so turning the default off is a one-line change.
-  inline constexpr bool close_desktop_steam_default = true;
+  /// setting: off, so a launch closes desktop Steam only once someone has turned this on.
+  inline constexpr bool close_desktop_steam_default = false;
 
   struct named_cert_t {
     std::string name;

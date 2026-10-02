@@ -162,19 +162,20 @@ starts at `v1.0.0`.
   `desktop_active_private_stream_refused`. Nova for Android asks its player whether to close desktop
   Steam and sends the answer with the launch, but Moonlight cannot ask, so a Moonlight player had to
   quit Steam at the host. Each device now has a **Close Steam on the host to start games** switch
-  under **Devices, Edit Access**, on by default for new devices and for devices already paired. With
-  it on, a launch from that device quits desktop Steam, waits up to ten seconds for it to exit, and
-  starts the stream. If Steam is still running, the launch is refused with
+  under **Devices, Edit Access**, off by default for new devices and for devices already paired.
+  With it on, a launch from that device quits desktop Steam, waits up to ten seconds for it to exit,
+  and starts the stream. If Steam is still running, the launch is refused with
   `desktop_steam_shutdown_failed`, as a Nova launch that asked for the same already was. Anything
   unsaved in that Steam is lost, and since Polaris knows only the apps it started, a game someone is
-  playing from that Steam at the host may close with it. With the switch off, the device's launches
-  are refused as before, unless the app's own **Close desktop Steam for private launches** switch is
-  on. Nova for Android still asks its player first, because the launch policy it asks from leaves
-  the switch out, and Nova for Linux, which never asked, now gets what Moonlight gets. Under Steam
-  Game Mode, Steam is never closed. The refusal now names the switch. The switch is shown only on a
-  Linux host; `/api/clients/list` names the host platform on Linux and macOS as it already did on
-  Windows, and lists the switch as `close_desktop_steam`, which `/api/clients/update` sets and an
-  update that leaves it out keeps.
+  playing from that Steam at the host may close with it, so a launch closes Steam only after someone
+  has turned the switch on. With the switch off, the device's launches are refused as before, unless
+  the app's own **Close desktop Steam for private launches** switch is on. Nova for Android still
+  asks its player first, because the launch policy it asks from leaves the switch out, and Nova for
+  Linux, which never asked, now gets what Moonlight gets. Under Steam Game Mode, Steam is never
+  closed. The refusal now names the switch. The switch is shown only on a Linux host;
+  `/api/clients/list` names the host platform on Linux and macOS as it already did on Windows, and
+  lists the switch as `close_desktop_steam`, which `/api/clients/update` sets and an update that
+  leaves it out keeps.
 
 - Mission Control says which kind of client each live stream belongs to, Nova or Moonlight /
   Artemis, as the Devices page already did, so it is clear at a glance what that stream can use.

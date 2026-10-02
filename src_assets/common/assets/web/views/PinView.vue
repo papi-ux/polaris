@@ -590,7 +590,7 @@
                       label="pin.close_desktop_steam"
                       desc="pin.close_desktop_steam_desc"
                       v-model="client.editCloseDesktopSteam"
-                      default="true"
+                      default="false"
                     />
 
                     <Checkbox
