@@ -225,7 +225,7 @@ TEST(SteamShutdownStateMachineTests, ProductionShutdownUsesSingleMonotonicQuiesc
   const auto shutdown = source_between(
     source,
     "bool request_desktop_steam_shutdown_for_private_stream()",
-    "#endif"
+    "bool ensure_steam_client_quiescent_for_doctor()"
   );
   ASSERT_FALSE(shutdown.empty());
 
@@ -1299,20 +1299,28 @@ TEST(SteamShutdownStateMachineTests, BothNvhttpRoutesGateOnLiveRefreshedPolicy) 
     "auto polarisLaunchGame =",
     "// Toggle MangoHud for a game"
   );
+  // /launch runs its desktop Steam step in admit_desktop_launch_policy().
+  const auto launch_step = source_between(
+    source,
+    "bool admit_desktop_launch_policy(",
+    "void put_optimization_launch_policy("
+  );
   ASSERT_FALSE(launch_route.empty());
+  ASSERT_FALSE(launch_step.empty());
   ASSERT_FALSE(api_route.empty());
+  EXPECT_NE(launch_route.find("admit_desktop_launch_policy("), std::string::npos);
 
-  const auto launch_refresh = launch_route.find(
+  const auto launch_refresh = launch_step.find(
     "launch_policy = proc::resolve_desktop_launch_safety_policy_after_shutdown("
   );
-  const auto launch_gate = launch_route.find(
+  const auto launch_gate = launch_step.find(
     "if (launch_policy.recommendedAction == \"refuse_private_stream\")",
     launch_refresh
   );
   ASSERT_NE(launch_refresh, std::string::npos);
   ASSERT_NE(launch_gate, std::string::npos);
   EXPECT_LT(launch_refresh, launch_gate);
-  EXPECT_EQ(launch_route.find("refreshed_launch_policy"), std::string::npos);
+  EXPECT_EQ(launch_step.find("refreshed_launch_policy"), std::string::npos);
 
   const auto api_refresh = api_route.find(
     "launch_policy = proc::resolve_desktop_launch_safety_policy_after_shutdown("
@@ -1362,9 +1370,10 @@ TEST(SteamShutdownStateMachineTests, PerAppCloseDesktopSteamReachesBothNvhttpRou
 TEST(SteamShutdownStateMachineTests, DeviceCloseDesktopSteamReachesOnlyTheGameStreamLaunchRoute) {
   // A device's close_desktop_steam switch is the closeDesktopSteamForPrivate parameter for a
   // client that cannot send one, so it enters the policy beside the per-app switch, from the
-  // GameStream /launch route. Nova for Android asks its player what to do from the
-  // /polaris/v1/optimize preview and sends the answer, so the preview leaves the switch out
-  // and that question is still asked. The JSON launch route takes no device switch at all.
+  // GameStream /launch route; test_launch_desktop_steam.cpp covers what that route then does to
+  // desktop Steam. Nova for Android asks its player what to do from the /polaris/v1/optimize
+  // preview and sends the answer, so the preview leaves the switch out and that question is
+  // still asked. The JSON launch route takes no device switch at all.
   const auto nvhttp = read_source_file("src/nvhttp.cpp");
   ASSERT_FALSE(nvhttp.empty());
 
@@ -1384,11 +1393,11 @@ TEST(SteamShutdownStateMachineTests, DeviceCloseDesktopSteamReachesOnlyTheGameSt
     "void resume(bool &host_audio"
   );
   ASSERT_FALSE(launch_route.empty());
+  const auto desktop_steam_step = launch_route.find("admit_desktop_launch_policy(");
   const auto device_switch = launch_route.find("named_cert_p->close_desktop_steam");
-  const auto shutdown = launch_route.find("proc::request_desktop_steam_shutdown_for_private_stream()");
+  ASSERT_NE(desktop_steam_step, std::string::npos);
   ASSERT_NE(device_switch, std::string::npos);
-  ASSERT_NE(shutdown, std::string::npos);
-  EXPECT_LT(device_switch, shutdown);
+  EXPECT_LT(desktop_steam_step, device_switch);
 
   const auto preview = source_between(
     nvhttp,

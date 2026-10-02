@@ -756,6 +756,58 @@ namespace nvhttp {
       }
     }
 
+    /**
+     * @brief The desktop Steam step of a GameStream /launch, run once the app is known.
+     *
+     * Closes desktop Steam when the policy asks for it, and refuses the launch when Steam did not
+     * exit or a private stream would share the host with desktop Steam or a desktop game.
+     * @return false when the launch is refused; `tree` then holds the refusal.
+     */
+    bool admit_desktop_launch_policy(
+      pt::ptree &tree,
+      const args_t &args,
+      const proc::ctx_t &app,
+      bool active_desktop_game,
+      bool device_closes_desktop_steam
+    ) {
+      // A stock Moonlight cannot ask for closeDesktopSteamForPrivate, so the device's switch asks for it.
+      auto launch_policy = resolve_streaming_launch_safety_policy(
+        args,
+        app,
+        active_desktop_game,
+        device_closes_desktop_steam
+      );
+      put_desktop_launch_policy(tree, launch_policy);
+      if (launch_policy.recommendedAction == "force_private_stream_after_desktop_steam_shutdown") {
+        if (!proc::request_desktop_steam_shutdown_for_private_stream()) {
+          tree.put("root.resume", 0);
+          tree.put("root.<xmlattr>.status_code", 409);
+          tree.put("root.<xmlattr>.status_message", desktop_steam_did_not_exit_message);
+          tree.put("root.error_code", "desktop_steam_shutdown_failed");
+          tree.put("root.gamesession", 0);
+          return false;
+        }
+        launch_policy = proc::resolve_desktop_launch_safety_policy_after_shutdown(
+          app,
+          proc::proc.running() > 0 && proc::proc.running() != proc::input_only_app_id
+        );
+        put_desktop_launch_policy(tree, launch_policy);
+      }
+      if (launch_policy.recommendedAction == "refuse_private_stream") {
+        BOOST_LOG(warning) << "launch_policy: refusing private stream; desktop_steam_active="sv
+                           << launch_policy.desktopSteamActive
+                           << " physical_display_risk="sv
+                           << launch_policy.physicalDisplayRisk;
+        tree.put("root.resume", 0);
+        tree.put("root.<xmlattr>.status_code", 409);
+        tree.put("root.<xmlattr>.status_message", "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit it on the host, or turn on \"Close Steam on the host to start games\" for this device in Devices so Polaris closes Steam for you, or retry with explicit desktop mirroring.");
+        tree.put("root.error_code", "desktop_active_private_stream_refused");
+        tree.put("root.gamesession", 0);
+        return false;
+      }
+      return true;
+    }
+
     void put_optimization_launch_policy(nlohmann::json &output,
                                         const args_t &args,
                                         const std::string &game) {
@@ -3034,6 +3086,16 @@ namespace nvhttp {
       active_desktop_game,
       force_private_after_desktop_steam_shutdown
     );
+  }
+
+  bool admit_desktop_launch_policy_for_tests(
+    pt::ptree &tree,
+    const args_t &args,
+    const proc::ctx_t &app,
+    bool active_desktop_game,
+    bool device_closes_desktop_steam
+  ) {
+    return admit_desktop_launch_policy(tree, args, app, active_desktop_game, device_closes_desktop_steam);
   }
 #endif
 
@@ -7540,39 +7602,13 @@ namespace nvhttp {
 
 #ifdef __linux__
         proc::apply_app_display_semantics(*app_iter, *launch_session);
-        // A stock Moonlight cannot ask for closeDesktopSteamForPrivate, so the device's switch asks for it.
-        auto launch_policy = resolve_streaming_launch_safety_policy(
-          args,
-          *app_iter,
-          current_appid > 0 && current_appid != proc::input_only_app_id,
-          named_cert_p->close_desktop_steam
-        );
-        put_desktop_launch_policy(tree, launch_policy);
-        if (launch_policy.recommendedAction == "force_private_stream_after_desktop_steam_shutdown") {
-          if (!proc::request_desktop_steam_shutdown_for_private_stream()) {
-            tree.put("root.resume", 0);
-            tree.put("root.<xmlattr>.status_code", 409);
-            tree.put("root.<xmlattr>.status_message", desktop_steam_did_not_exit_message);
-            tree.put("root.error_code", "desktop_steam_shutdown_failed");
-            tree.put("root.gamesession", 0);
-            return;
-          }
-          launch_policy = proc::resolve_desktop_launch_safety_policy_after_shutdown(
-            *app_iter,
-            proc::proc.running() > 0 && proc::proc.running() != proc::input_only_app_id
-          );
-          put_desktop_launch_policy(tree, launch_policy);
-        }
-        if (launch_policy.recommendedAction == "refuse_private_stream") {
-          BOOST_LOG(warning) << "launch_policy: refusing private stream; desktop_steam_active="sv
-                             << launch_policy.desktopSteamActive
-                             << " physical_display_risk="sv
-                             << launch_policy.physicalDisplayRisk;
-          tree.put("root.resume", 0);
-          tree.put("root.<xmlattr>.status_code", 409);
-          tree.put("root.<xmlattr>.status_message", "Unsafe private stream launch refused because desktop Steam or a desktop game is active. Quit it on the host, or turn on \"Close Steam on the host to start games\" for this device in Devices so Polaris closes Steam for you, or retry with explicit desktop mirroring.");
-          tree.put("root.error_code", "desktop_active_private_stream_refused");
-          tree.put("root.gamesession", 0);
+        if (!admit_desktop_launch_policy(
+              tree,
+              args,
+              *app_iter,
+              current_appid > 0 && current_appid != proc::input_only_app_id,
+              named_cert_p->close_desktop_steam
+            )) {
           return;
         }
 #endif
@@ -8235,6 +8271,19 @@ namespace nvhttp {
     conf_intern.servercert = cert;
   }
 
+  namespace {
+    // Verify certificates after establishing connection. A request from a certificate that is not
+    // paired goes on without a device, and each route refuses what it needs a device for.
+    bool verify_https_client(req_https_t req, SSL *ssl) {
+      if (auto named_cert_p = verify_client_cert(ssl, false)) {
+        req->userp = named_cert_p;
+        BOOST_LOG(debug) << named_cert_p->name << " -- verified"sv;
+      }
+
+      return true;
+    }
+  }  // namespace
+
   void start() {
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
 
@@ -8259,15 +8308,7 @@ namespace nvhttp {
     https_server_t https_server {config::nvhttp.cert, config::nvhttp.pkey};
     http_server_t http_server;
 
-    // Verify certificates after establishing connection
-    https_server.verify = [](req_https_t req, SSL *ssl) {
-      if (auto named_cert_p = verify_client_cert(ssl, false)) {
-        req->userp = named_cert_p;
-        BOOST_LOG(debug) << named_cert_p->name << " -- verified"sv;
-      }
-
-      return true;
-    };
+    https_server.verify = verify_https_client;
 
     https_server.on_verify_failed = [](resp_https_t resp, req_https_t req) {
       pt::ptree tree;
@@ -12351,6 +12392,55 @@ namespace nvhttp {
   int advertised_max_launch_refresh_rate_for_tests() {
     return advertised_max_launch_refresh_rate_for_http();
   }
+
+#if defined(__linux__)
+  struct launch_route_for_tests_t::impl_t {
+    impl_t(const std::string &cert_file, const std::string &key_file):
+        server {cert_file, key_file} {}
+
+    https_server_t server;
+    bool host_audio = false;
+    std::atomic<unsigned short> port {0};
+    std::thread worker;
+  };
+
+  launch_route_for_tests_t::launch_route_for_tests_t(const std::string &cert_file, const std::string &key_file):
+      impl {std::make_unique<impl_t>(cert_file, key_file)} {
+    auto *state = impl.get();
+    state->server.config.address = "127.0.0.1";
+    state->server.config.port = 0;
+    state->server.config.timeout_request = 5;
+    state->server.config.timeout_content = 5;
+    state->server.verify = verify_https_client;
+    state->server.resource["^/launch$"]["GET"] = [state](resp_https_t response, req_https_t request) {
+      launch(state->host_audio, std::move(response), std::move(request));
+    };
+    state->worker = std::thread([state]() {
+      try {
+        state->server.start([state](unsigned short assigned) {
+          state->port = assigned;
+        });
+      } catch (boost::system::system_error &err) {
+        // port() stays 0, so the test fails instead of the exception ending the process.
+        BOOST_LOG(error) << "Couldn't start the launch route for tests: "sv << err.what();
+      }
+    });
+    for (int waited = 0; state->port == 0 && waited < 500; ++waited) {
+      std::this_thread::sleep_for(10ms);
+    }
+  }
+
+  launch_route_for_tests_t::~launch_route_for_tests_t() {
+    impl->server.stop();
+    if (impl->worker.joinable()) {
+      impl->worker.join();
+    }
+  }
+
+  unsigned short launch_route_for_tests_t::port() const {
+    return impl->port;
+  }
+#endif
 #endif
 
   bool erase_all_clients() {
