@@ -484,6 +484,22 @@ TEST(PairedCodecCapabilities, ExplicitAv1OfferIsPreserved) {
             nlohmann::json::array({"h264", "av1", "pyrowave"}));
 }
 
+TEST(PairedCodecCapabilities, ExplicitHevcRequestDoesNotOfferAProbeRejectedCodec) {
+  RestorePairedCodecModes restore;
+  config::video.hevc_mode = 2;
+  video::active_hevc_mode = 1;
+  EXPECT_EQ(nvhttp::paired_capture_codecs_for_tests(std::nullopt)["codecs"],
+            nlohmann::json::array({"h264", "pyrowave"}));
+}
+
+TEST(PairedCodecCapabilities, ExplicitAv1RequestDoesNotOfferAProbeRejectedCodec) {
+  RestorePairedCodecModes restore;
+  config::video.av1_mode = 2;
+  video::active_av1_mode = 1;
+  EXPECT_EQ(nvhttp::paired_capture_codecs_for_tests(std::nullopt)["codecs"],
+            nlohmann::json::array({"h264", "pyrowave"}));
+}
+
 TEST(PairedCodecCapabilities, PyroWaveRefusalRemainsIndependentOfResolvedClassicCodecs) {
   RestorePairedCodecModes restore;
   video::active_hevc_mode = video::active_av1_mode = 2;
