@@ -398,7 +398,10 @@ namespace desktop_takeover {
         }
         state.workspaces.emplace_back(std::move(workspace));
       }
-      if (state.monitors.empty() || state.workspaces.empty()) {
+      // A takeover of a desktop with no windowed workspaces records none,
+      // and that record must survive a crash: recovery has monitors to power
+      // back on even with nothing to place.
+      if (state.monitors.empty()) {
         return std::nullopt;
       }
       return state;

@@ -70,6 +70,27 @@ TEST(DesktopTakeover, RoundTripsDurableRecoveryState) {
   EXPECT_EQ(parsed->workspaces, expected.workspaces);
 }
 
+TEST(DesktopTakeover, RoundTripsRecoveryStateWithNoWindowedWorkspaces) {
+  // A desktop with nothing open is taken over with no recorded workspaces;
+  // after a crash mid-session, recovery must still read the record and power
+  // the monitors back on rather than call the document malformed.
+  desktop_takeover::state_t expected {
+    .owner_pid = 42,
+    .active = true,
+    .target_output = "HEADLESS-POLARIS-42-1",
+    .fallback_monitor = "DP-3",
+    .monitors = {{"DP-3", true}},
+    .workspaces = {},
+  };
+  const auto parsed = desktop_takeover::parse_state(
+    desktop_takeover::serialize_state(expected)
+  );
+  ASSERT_TRUE(parsed);
+  EXPECT_TRUE(parsed->active);
+  EXPECT_EQ(parsed->monitors, expected.monitors);
+  EXPECT_TRUE(parsed->workspaces.empty());
+}
+
 TEST(DesktopTakeover, OnlyInactiveRecoveryDocumentMayBeReplaced) {
   desktop_takeover::state_t inactive;
   inactive.active = false;
