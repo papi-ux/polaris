@@ -8150,6 +8150,11 @@ namespace proc {
       bool exact_private_refresh_reapply_will_run) {
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+#ifdef __linux__
+    if (_host_virtual_cleanup_pending) {
+      return launch_failure::refuse(503, "previous_session_cleanup_pending", "The previous Host Virtual Display session is still stopping.", "End the session again after its processes can be verified; do not start another stream until cleanup finishes.");
+    }
+#endif
     if (_app_id == 0 || _app.uuid.empty() || !_launch_session || !launch_session) return launch_failure::refuse(503, "no_active_session", "There is no running app on the host to validate this resume against.", "Start the app again from the library.");
     if (launch_session->watch_only) {
       // A viewer attaches to the already-running capture generation. Pin its
@@ -11082,6 +11087,13 @@ namespace proc {
       return 0;
     }
 
+#ifdef __linux__
+    if (_host_virtual_cleanup_pending) {
+      // This is retained shutdown authority, not proof that a process lives or
+      // permission to resume. Preserve the owner-visible app for another End.
+      return _app_id;
+    }
+#endif
     if (placebo) {
       return _app_id;
     } else if (_app.wait_all && _process_group && platf::process_group_running((std::uintptr_t) _process_group.native_handle())) {
@@ -11703,6 +11715,14 @@ namespace proc {
     _private_apps_stopped_before_compositor = false;
     const bool prior_cleanup_complete = _exact_generation_cleanup_complete;
     const bool detached_only = !_app.detached.empty() && _app.cmd.empty();
+    // A failed HVD End retains the immutable launch and its pidfds. Its next
+    // exact sweep may prove that the earlier unreadable references have gone;
+    // a lost direct-child authority claim can never be recovered this way.
+    const bool revalidating_retained_host_virtual = _host_virtual_cleanup_pending &&
+      !_session_used_cage_compositor && !_session_used_gamescope_runtime && detached_only &&
+      !_session_instance_id.empty() && _detached_child_authority_complete &&
+      linux_vdisplay && _launch_session &&
+      _launch_session->expected_stream_mode == stream_display_policy::k_host_virtual_display;
     const bool exact_cleanup_required = isolated_session_requires_exact_generation_cleanup(
       _session_used_cage_compositor,
       !_app.detached.empty(),
@@ -11748,9 +11768,17 @@ namespace proc {
     );
     const bool detached_authority_complete =
       _session_used_cage_compositor || !detached_only || _detached_child_authority_complete;
-    _exact_generation_cleanup_complete = prior_cleanup_complete &&
-                                         isolated_cleanup_complete &&
-                                         detached_authority_complete;
+    if (revalidating_retained_host_virtual) {
+      // Only this retained HVD generation can replace its earlier incomplete
+      // capture with a fresh capture/signal/reap proof. Unknown environment,
+      // namespace/ancestry or PID identity still make the actual sweep fail.
+      _exact_generation_cleanup_complete = isolated_cleanup_complete && detached_authority_complete;
+    } else {
+      // Every other teardown keeps the prior fail-closed accumulation policy.
+      _exact_generation_cleanup_complete = prior_cleanup_complete &&
+                                           isolated_cleanup_complete &&
+                                           detached_authority_complete;
+    }
 
     if (!_session_used_cage_compositor) {
       if (!_exact_generation_cleanup_complete) {
@@ -11906,6 +11934,19 @@ namespace proc {
     if (_retained_steam_shutdown && !retry_retained_steam_shutdown()) {
       BOOST_LOG(error) << "process: retained Steam singleton shutdown remains incomplete"sv;
     }
+
+    const bool owns_host_virtual_output = linux_vdisplay &&
+      _launch_session && _launch_session->expected_stream_mode == stream_display_policy::k_host_virtual_display;
+    if (owns_host_virtual_output &&
+        (!_exact_generation_cleanup_complete || _retained_steam_shutdown)) {
+      // Losing the output before this generation is drained moves a surviving
+      // game onto the physical desktop. Keep its app, owner, child environment,
+      // prep undo cursor and output together; the same owner can retry End.
+      _host_virtual_cleanup_pending = true;
+      BOOST_LOG(error) << "process: retaining Host Virtual Display and launch owner because exact cleanup remains incomplete"sv;
+      return;
+    }
+    _host_virtual_cleanup_pending = false;
 
     if (isolated_session_uses_legacy_group_termination(
           _session_used_cage_compositor,
@@ -12105,22 +12146,30 @@ namespace proc {
       }
     }
 
-    for (const auto &key : _session_env_keys) {
-      _env.erase(key);
-    }
-    _session_env_keys.clear();
-
+    const auto retire_session_environment = [&]() {
+      for (const auto &key : _session_env_keys) {
+        _env.erase(key);
+      }
+      _session_env_keys.clear();
+    };
 #ifdef __linux__
-    finish_isolated_session_generation_cleanup();
+    // Even after the child exits, keep this generation credential until the
+    // owned output is verified gone. Output removal may need another End.
+    if (!owns_host_virtual_output) {
+      retire_session_environment();
+      finish_isolated_session_generation_cleanup();
+    }
 
-    // Disable streaming display after undo commands have run.
-    // Skip if a virtual display was created (it will be destroyed below).
-    if (!linux_vdisplay.has_value() || !linux_vdisplay->active) {
+    // A retained HVD handle still owns recovery even if its active bit changed.
+    // Disable streaming display only outside that bounded output authority.
+    if (!owns_host_virtual_output && (!linux_vdisplay.has_value() || !linux_vdisplay->active)) {
       linux_display::disable_streaming_display();
     }
     // Explicitly drop after undo so portal reconnect cannot race nested stop /
     // idle handoff. (Holder also ends at function exit.)
     media_stop.fence.reset();
+#else
+    retire_session_environment();
 #endif
 
     _pipe.reset();
@@ -12202,6 +12251,19 @@ namespace proc {
       }
     } else if (had_linux_vdisplay) {
       BOOST_LOG(error) << "Linux Virtual Display retained because Desktop Takeover restoration is still pending"sv;
+    }
+
+    if (owns_host_virtual_output) {
+      if (linux_vdisplay) {
+        // A false destroy result retains its handle, even if a backend already
+        // changed active. Keep the same owner/context for a removal retry;
+        // prep undos already consumed above must not run a second time.
+        _host_virtual_cleanup_pending = true;
+        BOOST_LOG(error) << "process: retaining Host Virtual Display launch owner because output removal is not verified"sv;
+        return;
+      }
+      retire_session_environment();
+      finish_isolated_session_generation_cleanup();
     }
 
     if (proc::proc.get_last_run_app_name().length() > 0 && has_run) {
@@ -12857,13 +12919,19 @@ namespace proc {
         const session_end_request_scope_t ending {sync.stop_ends_session};
         terminate_impl(false, true);
       }
-#if defined(POLARIS_TESTS) && defined(__linux__)
-      if (host_virtual_shutdown_observer) {
-        ++host_virtual_shutdown_observer->revert_calls;
-      } else
+#ifdef __linux__
+      if (!_host_virtual_cleanup_pending) {
 #endif
-      display_device::revert_configuration();
-      result.stopped = result.snapshot.had_running_app || result.snapshot.active_sessions > 0;
+#if defined(POLARIS_TESTS) && defined(__linux__)
+        if (host_virtual_shutdown_observer) {
+          ++host_virtual_shutdown_observer->revert_calls;
+        } else
+#endif
+        display_device::revert_configuration();
+        result.stopped = result.snapshot.had_running_app || result.snapshot.active_sessions > 0;
+#ifdef __linux__
+      }
+#endif
     }
 
     stop_committed = true;

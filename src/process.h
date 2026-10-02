@@ -1280,6 +1280,9 @@ namespace proc {
     bool _session_used_cage_compositor = false;
     bool _session_used_gamescope_runtime = false;
     bool _exact_generation_cleanup_complete = true;
+    // An End request still owns the app/output until its exact generation can
+    // be drained. Kept separately from process liveness and launch authority.
+    bool _host_virtual_cleanup_pending = false;
     /// This teardown's private app phase ran before the compositor stopped, so the sweep after it
     /// is a check. Read and cleared by the generation cleanup.
     bool _private_apps_stopped_before_compositor = false;
