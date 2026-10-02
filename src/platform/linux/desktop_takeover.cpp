@@ -192,24 +192,6 @@ namespace desktop_takeover {
       return dispatch({"dpms", enabled ? "on" : "off", std::string {monitor}});
     }
 
-    // Monitor enable/disable is parser-dependent: `hyprctl keyword` is the
-    // legacy-config form, but on a Lua config it answers rc=0 while doing
-    // nothing ("can't work with non-legacy parsers"), so eval goes first and
-    // keyword runs only after eval has already failed — a legacy-config
-    // hyprctl has no eval and errors out instead.
-    bool set_monitor_enabled(std::string_view monitor, bool enabled) {
-      if (!safe_token(monitor)) {
-        return false;
-      }
-      const auto lua_state = lua_monitor_state(monitor, enabled);
-      if (lua_state.has_value() &&
-          hyprctl_exits_zero({"hyprctl", "eval", *lua_state})) {
-        return true;
-      }
-      return hyprctl_exits_zero({"hyprctl", "keyword", "monitor",
-                                 std::string {monitor} + (enabled ? ",enable" : ",disable")});
-    }
-
     bool move_workspace(const workspace_state_t &workspace, std::string_view monitor) {
       const auto selector = workspace_selector(workspace);
       if (!selector || !safe_token(monitor)) {
@@ -467,20 +449,6 @@ namespace desktop_takeover {
     return std::nullopt;
   }
 
-  // Lua double-quoted string literal: the only two characters that can end
-  // the string early or change what it means are backslash and double quote.
-  std::string lua_quote(std::string_view value) {
-    std::string quoted = "\"";
-    for (const char ch : value) {
-      if (ch == '\\' || ch == '"') {
-        quoted += '\\';
-      }
-      quoted += ch;
-    }
-    quoted += '"';
-    return quoted;
-  }
-
   std::optional<std::string> lua_dispatcher(const std::vector<std::string> &arguments) {
     // The quoting below is only as trustworthy as its input is nameable:
     // refuse anything safe_token refuses, so a caller that skips its own
@@ -490,6 +458,17 @@ namespace desktop_takeover {
         return std::nullopt;
       }
     }
+    const auto lua_quote = [](std::string_view value) {
+      std::string quoted = "\"";
+      for (const char ch : value) {
+        if (ch == '\\' || ch == '"') {
+          quoted += '\\';
+        }
+        quoted += ch;
+      }
+      quoted += '"';
+      return quoted;
+    };
 
     // Only the dispatches takeover issues; a new one is a translation to write
     // deliberately, not a pattern to guess at.
@@ -506,16 +485,6 @@ namespace desktop_takeover {
              ", monitor = " + lua_quote(arguments[2]) + " })";
     }
     return std::nullopt;
-  }
-
-  std::optional<std::string> lua_monitor_state(std::string_view output, bool enabled) {
-    // hl.monitor sets monitor state on a Lua-config Hyprland; a disabled
-    // output leaves the layout entirely, which is what confines the pointer.
-    if (!safe_token(output)) {
-      return std::nullopt;
-    }
-    return "hl.monitor({ output = " + lua_quote(output) + ", disabled = " +
-           (enabled ? "false" : "true") + " })";
   }
 
   bool takeover_layout_matches(
@@ -603,10 +572,7 @@ namespace desktop_takeover {
     state.active = true;
     state.target_output = std::string {target_output};
     for (const auto &monitor : *observed_monitors) {
-      // Every physical output leaves the layout for the session — lit or
-      // already asleep — so the pointer has nowhere to escape to; the
-      // recorded dpms state puts each one back the way it was.
-      if (monitor.state.name != target_output && !monitor.disabled) {
+      if (monitor.state.name != target_output && !monitor.disabled && monitor.state.dpms_on) {
         state.monitors.push_back(monitor.state);
         if (state.fallback_monitor.empty() || monitor.focused) {
           state.fallback_monitor = monitor.state.name;
@@ -710,43 +676,9 @@ namespace desktop_takeover {
       return rollback("Desktop Takeover could not verify monitor power state; Polaris is restoring the prior layout.");
     }
 
-    // Power alone leaves the monitors in the layout: dpms is a panel state,
-    // so the pointer can still travel onto a dark output and drag focus
-    // there. Taking the outputs off the layout confines the pointer to the
-    // streamed output for the whole session.
-    for (const auto &monitor : state.monitors) {
-      if (!set_monitor_enabled(monitor.name, false)) {
-        return rollback("Desktop Takeover could not take every physical monitor off the layout; Polaris is restoring the prior layout.");
-      }
-    }
-    bool off_canvas = false;
-    int consecutive_absences = 0;
-    const auto off_canvas_deadline = std::chrono::steady_clock::now() + std::chrono::seconds {4};
-    for (int attempt = 0; attempt < 20 && std::chrono::steady_clock::now() < off_canvas_deadline; ++attempt) {
-      const auto observed = observe_monitors();
-      const bool absent = observed &&
-        std::none_of(observed->begin(), observed->end(), [&](const auto &candidate) {
-          return std::any_of(state.monitors.begin(), state.monitors.end(), [&](const auto &recorded) {
-            return recorded.name == candidate.state.name;
-          });
-        });
-      if (absent) {
-        if (++consecutive_absences >= 2) {
-          off_canvas = true;
-          break;
-        }
-      } else {
-        consecutive_absences = 0;
-      }
-      std::this_thread::sleep_for(std::chrono::milliseconds {50});
-    }
-    if (!off_canvas) {
-      return rollback("Desktop Takeover could not verify the physical monitors left the layout; Polaris is restoring the prior layout.");
-    }
-
     BOOST_LOG(info) << "Desktop Takeover active on ["sv << state.target_output
                     << "] with "sv << state.workspaces.size() << " workspace(s) and "sv
-                    << state.monitors.size() << " physical monitor(s) off the layout"sv;
+                    << state.monitors.size() << " physical monitor(s) powered off"sv;
     result.ready = true;
     result.recovery_state = std::move(state);
     return result;
@@ -757,14 +689,10 @@ namespace desktop_takeover {
       return true;
     }
     bool commands_succeeded = true;
-    // Takeover took the physical monitors off the layout to confine the
-    // pointer; they come back before anything else, so power and workspace
-    // restoration act on outputs that exist again. Re-enabling an output can
-    // wake its panel, so power is set to the recorded state rather than
-    // assumed.
     for (const auto &monitor : state.monitors) {
-      commands_succeeded = set_monitor_enabled(monitor.name, true) && commands_succeeded;
-      commands_succeeded = set_dpms(monitor.name, monitor.dpms_on) && commands_succeeded;
+      if (monitor.dpms_on) {
+        commands_succeeded = set_dpms(monitor.name, true) && commands_succeeded;
+      }
     }
 
     auto current = observe_workspaces();

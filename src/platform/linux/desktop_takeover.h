@@ -75,13 +75,6 @@ namespace desktop_takeover {
    */
   std::optional<std::string> lua_dispatcher(const std::vector<std::string> &arguments);
 
-  /**
-   * Build the hl.monitor expression that puts an output on or off a Lua-config
-   * Hyprland's layout, or nullopt when the output name fails the safe-token
-   * check. A disabled output leaves the layout, which confines the pointer.
-   */
-  std::optional<std::string> lua_monitor_state(std::string_view output, bool enabled);
-
   /** True when every recorded workspace is on the takeover target. */
   bool takeover_layout_matches(
     const state_t &state,

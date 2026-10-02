@@ -169,24 +169,6 @@ TEST(DesktopTakeover, LuaDispatcherRefusesDispatchesTakeoverNeverIssues) {
   EXPECT_FALSE(desktop_takeover::lua_dispatcher({}));
 }
 
-TEST(DesktopTakeover, TranslatesMonitorLayoutStateForLuaConfig) {
-  EXPECT_EQ(
-    desktop_takeover::lua_monitor_state("DP-2", false),
-    std::optional<std::string> {"hl.monitor({ output = \"DP-2\", disabled = true })"}
-  );
-  EXPECT_EQ(
-    desktop_takeover::lua_monitor_state("DP-3", true),
-    std::optional<std::string> {"hl.monitor({ output = \"DP-3\", disabled = false })"}
-  );
-  EXPECT_EQ(
-    desktop_takeover::lua_monitor_state("a\"b", false),
-    std::optional<std::string> {"hl.monitor({ output = \"a\\\"b\", disabled = true })"}
-  );
-  EXPECT_FALSE(desktop_takeover::lua_monitor_state("DP 2", false));
-  EXPECT_FALSE(desktop_takeover::lua_monitor_state("", true));
-  EXPECT_FALSE(desktop_takeover::lua_monitor_state("DP-2\n", true));
-}
-
 TEST(DesktopTakeover, LuaDispatcherRefusesArgumentsItCannotNameSafely) {
   EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "on", "DP-2\n"}));
   EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "on", "DP-2\r"}));
