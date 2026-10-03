@@ -7,6 +7,9 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Desktop Takeover on Hyprland supports the Lua dispatcher interface and restores monitor power even when the desktop has no windows to move. The existing special-workspace safety checks stay in place. ([#783](https://github.com/papi-ux/polaris/pull/783))
+- Moonlight players can opt in to **Close Steam on the host to start games** for each paired device. It is off by default, asks desktop Steam to quit before a private Steam launch, and refuses the launch if Steam does not finish closing. It leaves SteamOS Game Mode and unsaved game state alone. Nova for Android keeps asking the player at launch. ([#797](https://github.com/papi-ux/polaris/pull/797))
+
 - The 1.4.14 beta notes and PyroWave guide distinguish a client bitrate request from the encoder
   rate, give the calibrated handheld 31 dB target (214.898 Mbps requested / 192.396 Mbps video at
   1080p120 4:4:4 with 10% FEC and stereo audio), and separate automatic recommendations up to
