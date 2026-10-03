@@ -147,24 +147,20 @@ describe('v1.4.14 release contract', () => {
     }
   })
 
-  // #189, the private app teardown, was not on staging when these notes were first written, and
-  // its line waited in an HTML comment, which a release page does not show, so a tag cut without
-  // #189 could publish nothing unfinished. The line is visible exactly when #189's code is in the
-  // tree, and no placeholder is left either way.
-  it('announces the private app teardown exactly when its code ships', () => {
+  // Private app close requests are implemented, but an accepted End request is not proof of exit.
+  // Host Virtual Display's retained-owner fence does not solve unverified Heroic ownership.
+  it('describes private close requests without promising verified Heroic shutdown', () => {
     const notes = currentNotes()
     const visible = notes.replace(/<!--[\s\S]*?-->/g, '')
     expect(visible).not.toContain('PLACEHOLDER')
-    const teardown = visible
-      .split('\n')
-      .filter((line) => line.includes('Ending a Private Stream quits the app the way a player would'))
+    expect(visible).not.toContain('Ending a Private Stream quits the app the way a player would')
     if (existsSync(join(process.cwd(), 'src/platform/linux/private_app_stop.h'))) {
-      expect(teardown).toHaveLength(1)
-      expect(teardown[0].startsWith('- ')).toBe(true)
-      expect(notes).not.toContain('PLACEHOLDER')
-    } else {
-      expect(teardown).toHaveLength(0)
+      expect(visible).toContain("Private Stream asks the game's owned windows to close before stopping its display")
+      expect(visible).toContain('An already-open desktop app is not signalled.')
     }
+    expect(visible).toContain('Heroic games on Host Virtual Display still have an unresolved shutdown limitation')
+    expect(visible).toContain('An accepted End game request is not proof that the game quit.')
+    expect(visible).toContain("this update does not switch an existing host's chosen mode")
   })
 
   // Every figure is quoted with what it assumes. The PyroWave advice figures are the rows the

@@ -61,7 +61,11 @@ off, so a launch at the cap encodes a little below a live change at the cap. The
 at the 500000 kbps limit: a launch there runs the encoder at about 449000 kbps at the default
 10% FEC with stereo audio, and a live change there at 500000. The reply
 reports the target the host set after the cap and floor, not an encoder
-acknowledgement; the applied bitrate still comes from the encoder.
+acknowledgement; the applied bitrate still comes from the encoder. Nova's 1.4.14 beta converts
+a request-labelled control through the host's known FEC/audio split before it posts a live change.
+Its 500 Mbps request therefore remains about 449 Mbps of video in this example, rather than a
+500 Mbps raw encoder write. If the split is absent, video units remain video units. Automatic
+recommendations still stop at 300 Mbps; this manual endpoint limit does not raise that ceiling.
 
 `adaptive_bitrate_max` used to cut a client's request down to it, 100 Mbps unless
 changed. A PyroWave stream Nova asked to run at 180 Mbps or more dropped to 100 Mbps

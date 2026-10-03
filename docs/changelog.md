@@ -7,6 +7,22 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- The 1.4.14 beta notes and PyroWave guide distinguish a client bitrate request from the encoder
+  rate, give the calibrated handheld 31 dB target (214.898 Mbps requested / 192.396 Mbps video at
+  1080p120 4:4:4 with 10% FEC and stereo audio), and separate automatic recommendations up to
+  300 Mbps from a host-advertised manual limit up to 500 Mbps. Older hosts without that feature
+  keep the 300 Mbps manual fallback. The Linux beta includes PyroWave in the standard package;
+  the separate 1.4.13 PyroWave Alpha remains historical guidance, not the current beta package.
+- Doctor's local network-path probe reports listener checks and UDP hints without grading a
+  client's media path, manufacturing healthy zeroes from missing measurements or borrowing another
+  stream's bitrate ceiling. Raw probe samples stay ungraded advanced evidence. Doctor's sustained
+  media-loss correction is verified and reversible for the active stream; Live Tuning's own loss
+  handling remains unchanged from 1.4.13.
+- Heroic exact-game shutdown on Host Virtual Display remains unresolved. The pending-cleanup
+  safeguard retains the session owner and virtual screen; it does not grant authority to terminate
+  an unverified process. An accepted End game request does not prove the game exited. Private Stream
+  remains the recommended default, and an existing host's selected mode is preserved.
+
 - With HEVC or AV1 set to Auto, Nova now sees the codecs Polaris detected as available. The paired capability list used the Auto setting itself instead of the encoder result, so a working codec could appear Unavailable before launch. A codec that is disabled or fails its encoder check remains unavailable.
 - If End game cannot finish cleaning up a Host Virtual Display session, Polaris keeps its virtual screen and session owner available for another End attempt. Removing the screen first could move a surviving game to your physical monitor. This safeguard also keeps the session when screen removal fails; it does not make an unverified Heroic process safe to terminate. Private Stream keeps its existing shutdown route.
 
@@ -358,8 +374,9 @@ starts at `v1.0.0`.
   NVIDIA driver version from the kernel module, Session/compositor names the desktop and, for KDE
   Plasma and GNOME, the compositor they always use, and with nothing streaming the Client line
   names the last stream's client and says it was the last stream.
-- Ending a private stream now quits the app the way a player would, in order, while the stream's
-  private display is still up, and stops the display only after that. It used to stop the display
+- The private-stream stop route asks the game's owned windows to close, in order, while the stream's
+  private display is still up, before stopping that display. This is not a guarantee that every
+  launcher can close its game cleanly. It used to stop the display
   with the app still on it, or in the same instant it asked the app to quit. Alan Wake 2, started
   from Heroic's Flatpak, crashed together with Heroic when its stream ended, and Heroic never
   recorded the playtime; Control, quit from Nova, had sixteen processes killed after two seconds of
