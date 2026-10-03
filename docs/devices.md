@@ -70,9 +70,23 @@ window, each with its source and whether it is applied live or at the next launc
 the settings projection says so instead of guessing.
 
 **Identity & Access** holds the device name, the access preset buttons, the fine-tune permissions,
-and switches for legacy app ordering, a virtual display on every connection (Windows hosts), client
-commands, and temporary authorization. Changing a saved device to temporary removes it from the
-durable pairing store; changing it back to permanent saves it again.
+and switches for legacy app ordering, a virtual display on every connection (Windows hosts),
+closing desktop Steam (Linux hosts), client commands, and temporary authorization. Changing a saved
+device to temporary removes it from the durable pairing store; changing it back to permanent saves
+it again.
+
+**Close Steam on the host to start games** is off for every device until you turn it on,
+including devices paired before it existed. A private launch of a Steam app is refused while Steam
+is open on the host desktop, because the Steam in the private session would fight the one on your
+screen. With the switch on, a launch from this device quits desktop Steam, waits up to ten seconds
+for it to exit, and then starts the stream, or refuses the launch if Steam is still running. This is
+how a Moonlight player gets past that refusal, since Moonlight cannot ask for it. Anything unsaved
+in that Steam is lost. Polaris only knows about apps it started, so it cannot tell that someone is
+playing at the host, and a game running from that Steam may close with it. With the switch off, the
+launch is refused, unless the app's own **Close desktop Steam for private launches** switch is on
+([Add and edit apps](apps.md#runtime-behavior)). Nova for Android still asks its player first and
+sends the answer with the launch. Under Steam Game Mode, Steam is never closed, because that would
+end Game Mode.
 
 **Display Profile** overrides what the client asks for:
 

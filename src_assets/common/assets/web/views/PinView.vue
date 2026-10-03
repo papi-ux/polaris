@@ -584,6 +584,16 @@
                     />
 
                     <Checkbox
+                      v-if="platform === 'linux'"
+                      :id="`close_desktop_steam-${client.uuid}`"
+                      class=""
+                      label="pin.close_desktop_steam"
+                      desc="pin.close_desktop_steam_desc"
+                      v-model="client.editCloseDesktopSteam"
+                      default="false"
+                    />
+
+                    <Checkbox
                       :id="`allow_client_commands-${client.uuid}`"
                       class=""
                       label="pin.allow_client_commands"
@@ -1613,6 +1623,7 @@ function editClient(client) {
   client.editAllowClientCommands = client.allow_client_commands
   client.editEnableLegacyOrdering = client.enable_legacy_ordering
   client.editAlwaysUseVirtualDisplay = client.always_use_virtual_display
+  client.editCloseDesktopSteam = client.close_desktop_steam
   client.editTemporaryAuthorization = client.temporary_authorization
   client.editDisplayMode = client.display_mode
   client.edit_do = JSON.parse(JSON.stringify(client.do || []))
@@ -1640,6 +1651,7 @@ function cancelEdit(client) {
   client.editAllowClientCommands = client.allow_client_commands
   client.editEnableLegacyOrdering = client.enable_legacy_ordering
   client.editAlwaysUseVirtualDisplay = client.always_use_virtual_display
+  client.editCloseDesktopSteam = client.close_desktop_steam
   client.editTemporaryAuthorization = client.temporary_authorization
   dismissSuggestion()
   nextTick(() => {

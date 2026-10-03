@@ -7,6 +7,9 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Desktop Takeover on Hyprland supports the Lua dispatcher interface and restores monitor power even when the desktop has no windows to move. The existing special-workspace safety checks stay in place. ([#783](https://github.com/papi-ux/polaris/pull/783))
+- Moonlight players can opt in to **Close Steam on the host to start games** for each paired device. It is off by default, asks desktop Steam to quit before a private Steam launch, and refuses the launch if Steam does not finish closing. It leaves SteamOS Game Mode and unsaved game state alone. Nova for Android keeps asking the player at launch. ([#797](https://github.com/papi-ux/polaris/pull/797))
+
 - The 1.4.14 beta notes and PyroWave guide distinguish a client bitrate request from the encoder
   rate, give the calibrated handheld 31 dB target (214.898 Mbps requested / 192.396 Mbps video at
   1080p120 4:4:4 with 10% FEC and stereo audio), and separate automatic recommendations up to
@@ -421,6 +424,27 @@ starts at `v1.0.0`.
   with HDR off. They now name the setting instead, the launch mode, HDR, the frame rate and a
   Space's bitrate and size limits, or the client app, which is right for Nova and for Moonlight
   alike. The codes are unchanged.
+
+- A Moonlight player can start a Steam game on a Linux host that has Steam open on its desktop. A
+  private stream of a Steam app cannot start beside desktop Steam, because the Steam in the private
+  session would fight the one on the host's screen, so the launch was refused with
+  `desktop_active_private_stream_refused`. Nova for Android asks its player whether to close desktop
+  Steam and sends the answer with the launch, but Moonlight cannot ask, so a Moonlight player had to
+  quit Steam at the host. Each device now has a **Close Steam on the host to start games** switch
+  under **Devices, Edit Access**, off by default for new devices and for devices already paired.
+  With it on, a launch from that device quits desktop Steam, waits up to ten seconds for it to exit,
+  and starts the stream. If Steam is still running, the launch is refused with
+  `desktop_steam_shutdown_failed`, as a Nova launch that asked for the same already was. Anything
+  unsaved in that Steam is lost, and since Polaris knows only the apps it started, a game someone is
+  playing from that Steam at the host may close with it, so a launch closes Steam only after someone
+  has turned the switch on. With the switch off, the device's launches are refused as before, unless
+  the app's own **Close desktop Steam for private launches** switch is on. Nova for Android still
+  asks its player first, because the launch policy it asks from leaves the switch out, and Nova for
+  Linux, which never asked, now gets what Moonlight gets. Under Steam Game Mode, Steam is never
+  closed. The refusal now names the switch. The switch is shown only on a Linux host;
+  `/api/clients/list` names the host platform on Linux and macOS as it already did on Windows, and
+  lists the switch as `close_desktop_steam`, which `/api/clients/update` sets and an update that
+  leaves it out keeps.
 
 - Mission Control says which kind of client each live stream belongs to, Nova or Moonlight /
   Artemis, as the Devices page already did, so it is clear at a glance what that stream can use.

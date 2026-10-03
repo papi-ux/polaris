@@ -191,7 +191,7 @@ reason. A launch that asks for a different mode from a fixed pin is refused with
 `app_launch_mode_pinned`, instead of starting another way. See [Launch as](apps.md#launch-as).
 
 > [!TIP]
-> The reverse situation has a switch too: a private launch is refused when desktop Steam is already running on the host, because starting Steam in the private session would fight the one on your screen. If you would rather have Polaris quit desktop Steam and continue, turn on **Close desktop Steam for private launches** on that app in the Apps editor. Polaris waits for Steam to fully exit before starting the stream. Clients can also request it per launch with `closeDesktopSteamForPrivate=1`.
+> The reverse situation has a switch too. A private launch of a Steam app cannot start while desktop Steam is running on the host, because the Steam in the private session would fight the one on your screen, so the launch is refused. Turn on a device's **Close Steam on the host to start games** switch, under **Devices, Edit Access**, and Polaris quits desktop Steam for that device's launches, waits for it to fully exit, and starts the stream. The switch is off by default. **Close desktop Steam for private launches** on an app in the Apps editor does the same for every device that launches the app, and clients can request it per launch with `closeDesktopSteamForPrivate=1`.
 
 ## Under the hood (optional reading)
 

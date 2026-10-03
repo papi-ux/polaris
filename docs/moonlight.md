@@ -54,6 +54,11 @@ launch the way Nova can; the host's saved choice applies, unless the app's **Lau
 another mode. That is how one Moonlight library offers more than one way to play
 ([Launch as](apps.md#launch-as)).
 
+On a **Private Stream** host, a Steam game cannot start while Steam is open on the host desktop,
+and the launch is refused. To have Polaris quit desktop Steam first and then start the game, turn
+on the device's **Close Steam on the host to start games** switch under **Devices, Edit Access**
+([Editing a device](devices.md#editing-a-device)). Anything unsaved in that Steam is lost.
+
 Disconnecting does not end the game. Polaris keeps it paused for the resume window
 (**Settings, Audio/Video, Disconnect Resume Timeout**, five minutes by default) so a reconnect
 resumes the session. Moonlight cannot watch a stream another device started: it never asks to

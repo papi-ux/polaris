@@ -9,6 +9,7 @@
 #include <chrono>
 #include <functional>
 #include <list>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -43,6 +44,7 @@ namespace game_artwork::manual {
 
 #if defined(__linux__)
 namespace proc {
+  struct ctx_t;
   struct desktop_launch_safety_policy_t;
   struct launch_selection_request_t;
 }
@@ -531,6 +533,8 @@ namespace nvhttp {
    * @param[in]  always_use_virtual_display  Always use virtual display
    * @param[in]  temporary_authorization  Explicit temporary/durable choice;
    *                                       omitted preserves the current choice
+   * @param[in]  close_desktop_steam  Whether a launch from this device may quit desktop
+   *                                   Steam; omitted preserves the current choice
    * 
    * @return     Whether the update is successful
    */
@@ -545,7 +549,8 @@ namespace nvhttp {
     const bool enable_legacy_ordering,
     const bool allow_client_commands,
     const bool always_use_virtual_display,
-    const std::optional<bool> temporary_authorization = std::nullopt
+    const std::optional<bool> temporary_authorization = std::nullopt,
+    const std::optional<bool> close_desktop_steam = std::nullopt
   );
 
   bool update_device_info(
@@ -559,7 +564,8 @@ namespace nvhttp {
     const bool enable_legacy_ordering,
     const bool allow_client_commands,
     const bool always_use_virtual_display,
-    const std::optional<bool> temporary_authorization = std::nullopt
+    const std::optional<bool> temporary_authorization = std::nullopt,
+    const std::optional<bool> close_desktop_steam = std::nullopt
   );
 
   /** Shared trusted evidence used by both authenticated Doctor action routes. */
@@ -674,6 +680,39 @@ namespace nvhttp {
     bool active_desktop_game,
     bool force_private_after_desktop_steam_shutdown = false
   );
+  /**
+   * @brief The desktop Steam step of the GameStream /launch route, as the route runs it once the
+   *        app is known: closes desktop Steam when the policy asks for it, or refuses the launch.
+   * @return false when the launch is refused; `tree` then holds the refusal.
+   */
+  bool admit_desktop_launch_policy_for_tests(
+    boost::property_tree::ptree &tree,
+    const args_t &args,
+    const proc::ctx_t &app,
+    bool active_desktop_game,
+    bool device_closes_desktop_steam
+  );
+
+  /**
+   * @brief The GameStream /launch route on an HTTPS server of its own, for tests.
+   *
+   * Serves the production route behind the production client certificate check, on 127.0.0.1 at
+   * a port the system picks, until it is destroyed.
+   */
+  class launch_route_for_tests_t {
+  public:
+    launch_route_for_tests_t(const std::string &cert_file, const std::string &key_file);
+    ~launch_route_for_tests_t();
+    launch_route_for_tests_t(const launch_route_for_tests_t &) = delete;
+    launch_route_for_tests_t &operator=(const launch_route_for_tests_t &) = delete;
+
+    /// The port the route answers on, or 0 when the server did not start.
+    unsigned short port() const;
+
+  private:
+    struct impl_t;
+    std::unique_ptr<impl_t> impl;
+  };
 #endif
   void reset_pairing_state_for_tests();
   otp_claim_t claim_one_time_pin_for_tests(const std::string &salt, std::string_view presented_hash);

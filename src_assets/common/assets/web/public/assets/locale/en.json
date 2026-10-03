@@ -1765,6 +1765,8 @@
     "client_commands_section": "Client Commands",
     "client_commands_summary": "Client Commands",
     "client_commands_summary_desc": "What Polaris is allowed to run on connect or disconnect for this device.",
+    "close_desktop_steam": "Close Steam on the host to start games",
+    "close_desktop_steam_desc": "If Steam is already open on the host when this device starts a Steam game, Polaris closes it instead of refusing the launch. Anything unsaved in Steam on the host is lost.",
     "color_client_default": "Client Default",
     "color_full": "Full (JPEG)",
     "color_limited": "Limited (MPEG)",

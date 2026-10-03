@@ -178,7 +178,7 @@ Older apps.json files: **Mirror the host desktop** became Mirror Desktop. **Alwa
 | **Continue streaming until all app processes exit** | Keeps streaming until every process the app started has ended, instead of stopping when the first one does. |
 | **Continue streaming if the application exits quickly** | Detects launcher-type apps that close right after starting something else and treats them as detached. |
 | **Terminate on Pause** | Ends the app when the last client disconnects instead of keeping it paused for the resume window. |
-| **Close desktop Steam for private launches** | When desktop Steam is running as a private stream starts, quits it and waits for it to exit instead of refusing the launch. Unsaved state in that Steam session is lost. |
+| **Close desktop Steam for private launches** | When desktop Steam is running as a private stream starts, quits it and waits for it to exit instead of refusing the launch. Unsaved state in that Steam session is lost. Each device's **Close Steam on the host to start games** switch, off by default, does the same for every app that device launches ([Editing a device](devices.md#editing-a-device)). |
 | **Per Client App Identity** | Gives the app a separate identity per client, so one app can carry different virtual display configurations for different devices. |
 | **Use App Identity** | Creates virtual displays under the app's own identity instead of the client's, so each app gets its own display configuration. |
 | **Enforce Virtual Display Primary** | Makes the virtual display primary when the app starts. Kept on by default; known broken on Windows 11 24H2. |

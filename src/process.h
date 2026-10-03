@@ -380,6 +380,24 @@ namespace proc {
   bool desktop_steam_proc_read_error_fails_closed_for_tests(pid_t forced_pid);
   bool desktop_steam_proc_environ_read_error_fails_closed_for_tests(pid_t forced_pid);
   bool desktop_steam_proc_scan_only_pid_for_tests(pid_t forced_pid);
+
+  /**
+   * @brief Desktop Steam as the launch routes see it, for tests.
+   *
+   * While one is installed, the desktop Steam check reports `running` instead of scanning /proc,
+   * and request_desktop_steam_shutdown_for_private_stream() counts each call in `close_requests`.
+   * Past its Game Mode guard, that request closes this stand-in when `closes_when_asked` is set,
+   * and never runs `steam -shutdown`. Shared by every thread, because a route answers on its
+   * server's thread.
+   */
+  struct desktop_steam_double_t {
+    std::atomic<bool> running {true};
+    std::atomic<bool> closes_when_asked {false};
+    std::atomic<int> close_requests {0};
+  };
+
+  /// Installs `steam` as desktop Steam, or the real check again when it is nullptr.
+  void set_desktop_steam_double_for_tests(desktop_steam_double_t *steam);
   bool steam_instance_pipe_listener_active_for_tests(const std::string &pipe_path);
   bool doctor_steam_shutdown_required_for_tests(
     bool desktop_steam_active,
@@ -1194,6 +1212,12 @@ namespace proc {
     void with_session_lifecycle_lock_for_tests(const std::function<void()> &callback);
     bool begin_session_stop_for_tests();
     void finish_session_stop_for_tests(bool committed);
+    /**
+     * @brief Makes `app` the running app, as a launch whose command detached leaves it, without
+     *        starting anything. clear_running_app_for_tests() leaves the host with no app again.
+     */
+    void set_running_app_for_tests(const ctx_t &app);
+    void clear_running_app_for_tests();
 #endif
 
   private:
