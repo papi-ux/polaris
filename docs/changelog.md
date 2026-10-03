@@ -7,6 +7,22 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- The 1.4.14 beta notes and PyroWave guide distinguish a client bitrate request from the encoder
+  rate, give the calibrated handheld 31 dB target (214.898 Mbps requested / 192.396 Mbps video at
+  1080p120 4:4:4 with 10% FEC and stereo audio), and separate automatic recommendations up to
+  300 Mbps from a host-advertised manual limit up to 500 Mbps. Older hosts without that feature
+  keep the 300 Mbps manual fallback. The Linux beta includes PyroWave in the standard package;
+  the separate 1.4.13 PyroWave Alpha remains historical guidance, not the current beta package.
+- Doctor's local network-path probe reports listener checks and UDP hints without grading a
+  client's media path, manufacturing healthy zeroes from missing measurements or borrowing another
+  stream's bitrate ceiling. Raw probe samples stay ungraded advanced evidence. Doctor's sustained
+  media-loss correction is verified and reversible for the active stream; Live Tuning's own loss
+  handling remains unchanged from 1.4.13.
+- Heroic exact-game shutdown on Host Virtual Display remains unresolved. The pending-cleanup
+  safeguard retains the session owner and virtual screen; it does not grant authority to terminate
+  an unverified process. An accepted End game request does not prove the game exited. Private Stream
+  remains the recommended default, and an existing host's selected mode is preserved.
+
 - With HEVC or AV1 set to Auto, Nova now sees the codecs Polaris detected as available. The paired capability list used the Auto setting itself instead of the encoder result, so a working codec could appear Unavailable before launch. A codec that is disabled or fails its encoder check remains unavailable.
 - If End game cannot finish cleaning up a Host Virtual Display session, Polaris keeps its virtual screen and session owner available for another End attempt. Removing the screen first could move a surviving game to your physical monitor. This safeguard also keeps the session when screen removal fails; it does not make an unverified Heroic process safe to terminate. Private Stream keeps its existing shutdown route.
 
@@ -358,8 +374,9 @@ starts at `v1.0.0`.
   NVIDIA driver version from the kernel module, Session/compositor names the desktop and, for KDE
   Plasma and GNOME, the compositor they always use, and with nothing streaming the Client line
   names the last stream's client and says it was the last stream.
-- Ending a private stream now quits the app the way a player would, in order, while the stream's
-  private display is still up, and stops the display only after that. It used to stop the display
+- The private-stream stop route asks the game's owned windows to close, in order, while the stream's
+  private display is still up, before stopping that display. This is not a guarantee that every
+  launcher can close its game cleanly. It used to stop the display
   with the app still on it, or in the same instant it asked the app to quit. Alan Wake 2, started
   from Heroic's Flatpak, crashed together with Heroic when its stream ended, and Heroic never
   recorded the playtime; Control, quit from Nova, had sixteen processes killed after two seconds of
@@ -539,9 +556,11 @@ starts at `v1.0.0`.
   bitrate. In constant bitrate, both drivers pad frames with filler data up to the target, and
   FFmpeg has no option to turn it off, so an idle desktop at 20 Mbps sent 20 Mbps, 99.8% of it
   filler. A decoder discards filler data, so Polaris now removes it from each frame before sending:
-  on an RX 7900 XTX the same still screen sends about 0.04 Mbps, and every decoded picture is
-  identical. This covers VA-API and Vulkan, whose default rate control is constant bitrate. AV1 was
-  never padded.
+  in the [earlier RX 7900 XTX encoder-output tests](https://github.com/papi-ux/polaris/pull/785),
+  a synthetic still screen at 1080p60 fell from 20 Mbps to about 0.04 Mbps, with every decoded picture
+  identical. That driver-output test did not include a live Moonlight or Nova stream. It covered
+  VA-API and Vulkan, whose default rate control is constant bitrate; other AMD generations were
+  not tested in that report. AV1 was never padded.
 
 - A Space that could not be created says why in the host log. The client is still answered with
   `spaces_change_not_saved`, which the Spaces page reads, and the log now names the check that
@@ -554,8 +573,10 @@ starts at `v1.0.0`.
   the exception said, where it used to log only that it failed.
 
 - On AMD, Auto tries Vulkan Video first on Gamescope Stream captured through the portal (#635),
-  where it used to try VA-API alone and never probed Vulkan Video at all. On the reporter's RX 9070
-  XT at 4K60, Vulkan Video took 9 ms a frame there against VA-API's 16 ms, and held it under load.
+  where it used to try VA-API alone and never probed Vulkan Video at all. The [historical reporter's
+  RX 9070 XT readings](https://github.com/papi-ux/polaris/issues/635) at 4K60 were host processing
+  latency of 9 ms with Vulkan Video and 16 ms with VA-API, not encoder-only frame timings.
+  These are the reporter's earlier measurements, not a new beta benchmark.
   The portal hands Vulkan Video every frame in system memory, and the encoder probe runs that same
   upload, so a probe that fails falls back to VA-API as before. Vulkan Video offers less on this
   route. AV1 is the trade: it carries none in this build, so a client that preferred AV1 loses it,

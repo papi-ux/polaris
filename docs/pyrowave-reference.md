@@ -250,6 +250,16 @@ SDR 4:2:0 only.
 
 ### Bitrate advice
 
+In Nova's 1.4.14 beta, use the host's recommendation for the selected resolution, frame rate,
+colour format and audio. The shared fallback uses the same handheld 31 dB model: at 1080p120
+4:4:4, 10% FEC and stereo audio it asks for 214.898 Mbps, leaving 192.396 Mbps of video. Auto
+and Use recommended stay at or below 300 Mbps. A number entered by hand can reach a host's
+advertised 500 Mbps limit; without that feature it stays at 300 Mbps. During a stream, request
+and video units are shown separately when the handshake split is known. An unavailable split
+does not become a guessed request ([bitrate units](live-tuning.md#bitrate-units)).
+
+The rest of this subsection describes **Nova 1.4.13's older advice**.
+
 Set **Video bitrate** in **Settings > Client Stream Defaults** before the first stream. Nova's advice
 scales with the number of pixels and the frame rate: about 91 Mbps × (width × height ÷ 2,073,600) ×
 (frame rate ÷ 60). That is about 91 Mbps for 1920x1080 at 60 fps, about 114 Mbps for 2400x1080 at
@@ -285,6 +295,18 @@ the web console ([Check the host's GPU](#check-the-hosts-gpu)).
 it shows the codec as PYRO, and a long press on it opens Command Center.
 
 ## Nova for Linux
+
+The standard Nova Linux 1.4.14 beta includes PyroWave; it does not need the separate experimental
+bundle used by 1.4.13. Play Setup checks the host profile, local decoder and selected stream size
+before launch, and explains a refusal. It uses host advice first and the calibrated model as its
+fallback, for the stream's actual colour format and mode. Auto and Use recommended stay at or
+below 300 Mbps, while a manual request can reach an advertised 500 Mbps host limit. A built-in
+decoder is not proof that every Linux GPU, driver or handheld can use it. There is no automatic
+fall back to another codec.
+
+### The separate 1.4.13 Alpha
+
+The instructions below apply to the old 1.4.13 packages, not the standard 1.4.14 beta.
 
 Nova 1.4.13 attaches an experimental PyroWave build of Nova for Linux to
 [its release](https://github.com/papi-ux/nova/releases/tag/v1.4.13):
@@ -421,9 +443,10 @@ the bitrate each quality needed. Polaris reads that fit at two distances, each w
   author calls good quality, until it is checked on a big screen.
 
 The host computes these figures itself, and a fixture in Polaris's tests pins them at both
-targets. Nova's estimator ports the same model. Mirroring the own screen target there is in review,
-and until it lands Nova still reads both figures at 35 dB, so for 1920x1080 at 120 fps in 4:4:4 it
-quotes about 400 Mbps where the host quotes 215.
+targets. Nova's 1.4.14 beta reads the host advice first and mirrors the 31 dB handheld target in
+its fallback. At 1920x1080, 120 fps and 4:4:4, with default FEC and stereo audio, the exact
+request is 214.898 Mbps and the encoder figure is 192.396 Mbps. Older clients may still show the
+35 dB estimate, about 400 Mbps; it is not the current handheld recommendation.
 
 Every figure below is the model's, as the request a client sets, at the host's default 10% FEC with
 stereo audio in high quality, rounded up to a whole Mbps. More FEC or surround audio asks a little

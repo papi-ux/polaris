@@ -1,6 +1,6 @@
 # Runtime and streaming model
 
-Polaris is built around a stream runtime that is separate from your normal desktop session. The default Linux recommendation is Headless Stream: games launch inside a private `labwc` Wayland compositor, Polaris captures that compositor, and your KDE, GNOME, or wlroots desktop keeps its layout and display state.
+Polaris is built around a stream runtime that is separate from your normal desktop session. The default Linux recommendation is Private Stream (Headless Stream in the configuration): games launch inside a private `labwc` Wayland compositor, Polaris captures that compositor, and your KDE, GNOME, or wlroots desktop keeps its layout and display state.
 
 Use this page when you want the technical model behind the README, runtime dashboard, troubleshooting logs, or launch behavior.
 
@@ -105,6 +105,14 @@ Check `/polaris/v1/session/status`, `/polaris/v1/stream-policy`, or a support bu
 ## Session Lifecycle
 
 Polaris tracks owner and viewer roles explicitly. The owner controls the active session. Viewers can join in watch mode without taking over the running stream, and passive watch mode uses the active owner profile instead of silently renegotiating a different stream.
+
+An accepted End game request means the host admitted the request, not that every game process has
+exited. For Host Virtual Display, unverified process cleanup or failed screen removal keeps the
+owner, app context and virtual screen for a fresh same-owner End attempt; Resume is refused while
+that cleanup is pending. Close the game yourself before retrying when Polaris cannot verify its
+process ownership. Heroic exact-game shutdown on this route remains unresolved. Private Stream
+keeps its existing shutdown route and remains the recommended default; an upgrade preserves an
+existing host's selected mode.
 
 Steam paths are handled conservatively:
 

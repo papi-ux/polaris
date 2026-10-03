@@ -147,24 +147,20 @@ describe('v1.4.14 release contract', () => {
     }
   })
 
-  // #189, the private app teardown, was not on staging when these notes were first written, and
-  // its line waited in an HTML comment, which a release page does not show, so a tag cut without
-  // #189 could publish nothing unfinished. The line is visible exactly when #189's code is in the
-  // tree, and no placeholder is left either way.
-  it('announces the private app teardown exactly when its code ships', () => {
+  // Private app close requests are implemented, but an accepted End request is not proof of exit.
+  // Host Virtual Display's retained-owner fence does not solve unverified Heroic ownership.
+  it('describes private close requests without promising verified Heroic shutdown', () => {
     const notes = currentNotes()
     const visible = notes.replace(/<!--[\s\S]*?-->/g, '')
     expect(visible).not.toContain('PLACEHOLDER')
-    const teardown = visible
-      .split('\n')
-      .filter((line) => line.includes('Ending a Private Stream quits the app the way a player would'))
+    expect(visible).not.toContain('Ending a Private Stream quits the app the way a player would')
     if (existsSync(join(process.cwd(), 'src/platform/linux/private_app_stop.h'))) {
-      expect(teardown).toHaveLength(1)
-      expect(teardown[0].startsWith('- ')).toBe(true)
-      expect(notes).not.toContain('PLACEHOLDER')
-    } else {
-      expect(teardown).toHaveLength(0)
+      expect(visible).toContain("Private Stream asks the game's owned windows to close before stopping its display")
+      expect(visible).toContain('An already-open desktop app is not signalled.')
     }
+    expect(visible).toContain('Heroic games on Host Virtual Display still have an unresolved shutdown limitation')
+    expect(visible).toContain('An accepted End game request is not proof that the game quit.')
+    expect(visible).toContain("this update does not switch an existing host's chosen mode")
   })
 
   // Every figure is quoted with what it assumes. The PyroWave advice figures are the rows the
@@ -206,7 +202,12 @@ describe('v1.4.14 release contract', () => {
     // A tunnel that carries Ethernet, ZeroTier or an OpenVPN tap, still reports its own MAC.
     expect(notes).toContain('another tunnel with no MAC of its own')
     expect(notes).toContain("the TV figure hasn't been checked on a big screen yet, and Doctor's 300 Mbps ceiling may move")
-    expect(notes).toContain("9 ms a frame against VA-API's 16 on one tester's RX 9070 XT at 4K60")
+    expect(notes).toContain('host processing latency of 9 ms with Vulkan Video and 16 ms with VA-API')
+    expect(notes).toContain('not a new beta benchmark or an encoder-only measurement')
+    expect(notes).toContain('https://github.com/papi-ux/polaris/issues/635')
+    expect(notes).toContain('earlier RX 7900 XTX encoder-output tests')
+    expect(notes).toContain('not a live game-stream measurement')
+    expect(notes).toContain('https://github.com/papi-ux/polaris/pull/785')
     // Doctor's verdict holds over the network judge's window, and its band.
     expect(notes).toContain(
       'It now judges video frame loss and round trip time over the last 20 seconds, calls loss network ' +
