@@ -127,7 +127,7 @@ TEST(CodecSupportReadout, AvailablePyroWaveHasNoReasonAndCarriesHdr) {
 }
 
 TEST(CodecSupportReadout, PyroWaveOfferedOnlyToPrivateModesSaysWhatTheHostModeLaunchGets) {
-  // pc-papi's shape: KDE in HDR, capture = kms, and Private Stream on PATH. Capabilities offers
+  // HDR host shape: KDE in HDR, capture = kms, and Private Stream on PATH. Capabilities offers
   // PyroWave, and a launch into the host's own mode is refused at launch. The console says both.
   pa::offer_facts_t facts {true, true, pa::route_e::fp16_scanout, true};
   ASSERT_FALSE(pa::unavailable(facts).has_value());
