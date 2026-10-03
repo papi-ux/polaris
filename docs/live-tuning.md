@@ -17,6 +17,14 @@ until the stream ends, the next stream starts with the saved preference, and
 switching tuning on during the stream resumes it. Auto, Quality, High FPS, and Stability launch presets still
 apply at the next explicit launch.
 
+Doctor's one step down for sustained video frame loss turns tuning off the same way
+while tuning is on: for that stream only, with nothing saved. Tuning comes back on,
+with the bitrate from before the step, when you undo the step, when the step fails
+Doctor's check, or when you switch tuning on. Otherwise it stays off until the stream
+ends, and the next stream starts with the saved preference. Round trip time alone
+stays with tuning, and Doctor only rechecks it
+([Doctor](doctor.md#pick-the-offered-action)).
+
 ## Range
 
 Live Tuning lowers the bitrate on measured loss, latency or encoder load, and recovers
@@ -31,8 +39,9 @@ A PyroWave stream has a floor of its own: half what the codec's model advises fo
 device's own screen, at the encoder, and never above the client's request. At that floor
 Live Tuning stops cutting, and Doctor suggests HEVC or a lower mode rather than another
 cut. Live Tuning does not cut PyroWave for a slow encode, which takes as long at any
-bitrate. Live Tuning never raises a stream above the request. Doctor's raise for a starved
-PyroWave stream is the one change that can, as one tap with Undo
+bitrate. Live Tuning raises a stream above the request only to lift one below
+`adaptive_bitrate_min` to that floor. Doctor's raise for a starved PyroWave stream is the other
+change that can, as one tap with Undo
 ([PyroWave reference](pyrowave-reference.md#how-polaris-advises-and-tunes-pyrowave)).
 
 The floor is the one place the bitrate can sit above the request. A client that asks
@@ -42,12 +51,21 @@ off, the stream stays at the request, but Doctor works from the floor rather tha
 the rate the encoder runs at.
 
 A live bitrate from a paired client, such as Nova's Deck HUD, applies as asked up to
-300000 kbps, the most the endpoint takes, with `adaptive_bitrate_min` as its floor.
+500000 kbps, the most Polaris's own endpoints take from a client, with `adaptive_bitrate_min` as
+its floor. Capabilities announce that limit as `manual_bitrate_max_kbps`, and a host without it
+takes 300000. The RTSP handshake a Moonlight client uses is not one of those endpoints, and
+`max_bitrate` alone bounds it.
 `max_bitrate`, when set, caps it at the encoder, the rate that setting's description
 names. A launch applies `max_bitrate` to the client's request before FEC and audio come
-off, so a launch at the cap encodes a little below a live change at the cap. The reply
+off, so a launch at the cap encodes a little below a live change at the cap. The same holds
+at the 500000 kbps limit: a launch there runs the encoder at about 449000 kbps at the default
+10% FEC with stereo audio, and a live change there at 500000. The reply
 reports the target the host set after the cap and floor, not an encoder
-acknowledgement; the applied bitrate still comes from the encoder.
+acknowledgement; the applied bitrate still comes from the encoder. Nova's 1.4.14 beta converts
+a request-labelled control through the host's known FEC/audio split before it posts a live change.
+Its 500 Mbps request therefore remains about 449 Mbps of video in this example, rather than a
+500 Mbps raw encoder write. If the split is absent, video units remain video units. Automatic
+recommendations still stop at 300 Mbps; this manual endpoint limit does not raise that ceiling.
 
 `adaptive_bitrate_max` used to cut a client's request down to it, 100 Mbps unless
 changed. A PyroWave stream Nova asked to run at 180 Mbps or more dropped to 100 Mbps
@@ -58,6 +76,37 @@ as the cap to use instead. The status field `adaptive_max_bitrate_kbps` reports 
 ceiling the controller holds, which a stream raises to its own request. Like
 `adaptive_base_bitrate_kbps`, it keeps the last stream's value until the next stream
 starts.
+
+## Bitrate units
+
+A client's bitrate request covers the video, the FEC that protects it, the audio and the
+packet overhead. The handshake takes FEC off first, then the audio (never more than a fifth
+of what is left), then 500 kbps of overhead (never more than a tenth), and hands the encoder
+the rest. While a stream runs, `GET /polaris/v1/session/status` says how that went for it, on
+every codec, in `bitrate_units`. Capabilities announce it as `bitrate_units_v1`.
+
+| Field | What it is |
+|---|---|
+| `requested_kbps` | What the client asked for: the total it configured, or its maximum when it configured none. 0 when it sent neither. |
+| `warp_factor` | How many times the host multiplied the request because `limit_framerate` renders faster than the client streams. 1 when it did not. |
+| `cap_kbps` | The cap that cut the request, or null when none did. PyroWave meets only `max_bitrate`; every other codec meets the bitrate its launch resolved from the Stability preset, a device profile or a saved paired profile, or `max_bitrate` when it resolved none. |
+| `cap_source` | Where that cap came from, such as `max_bitrate` or `stability_preset_selected`. Null when `cap_kbps` is. |
+| `split_kbps` | The total the handshake split: `requested_kbps` times `warp_factor`, cut to `cap_kbps`. Null when the encoder rate is no split of this stream's own request: a watcher, which encodes at its owner's rate, or a client that sent no bitrate. |
+| `encoder_kbps` | Where the handshake left the encoder. |
+| `live_encoder_kbps` | The rate the encoder runs at now, after a live bitrate, Live Tuning or Doctor. |
+| `audio_kbps` | What the stream's audio costs: 256 kbps a channel in high quality, 96 otherwise. |
+| `fec_percentage` | The FEC share the stream was split with, the host's when it started. Above 80 no FEC comes off. |
+| `formula` | `stream_bitrate_v1`, the arithmetic above. |
+
+Whenever `split_kbps` is a number, `encoder_kbps` is exactly what `stream_bitrate_v1` makes of
+it with that audio and FEC, so a client can work out what to ask for to land the encoder on a
+given rate. When `split_kbps` is null the formula says nothing about the stream. `version` is 1.
+
+A client with a stream here is answered about that stream alone. While it is still in its
+handshake, or in the moment its teardown takes, the object is left out rather than filled with
+another stream's figures. A client with no stream here is answered about the first stream that
+has recorded its handshake. A stream in a Space reports through its worker and carries no
+`bitrate_units` yet, and capabilities answered for a Space's profile do not announce it.
 
 ## API contract
 

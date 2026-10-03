@@ -1027,9 +1027,12 @@ case "${1:-}" in
       # Moonlight draws no pointer of its own, so without this the stream has a
       # working but invisible cursor: gamescope keeps the cursor out of the PipeWire
       # capture by default, on the grounds that a consumer drawing its own would end
-      # up with two. Set POLARIS_GAMESCOPE_COMPOSITE_CURSOR=0 for such a consumer.
+      # up with two. Only Polaris's gamescope build has the option and stock
+      # gamescope exits on it, so the runtime library asks this exact binary first.
+      # POLARIS_GAMESCOPE_COMPOSITE_CURSOR=0 turns it off for a consumer that draws
+      # its own; =1 forces it on for a patched build whose --help does not list it.
       cursor_flags=()
-      if [ "${POLARIS_GAMESCOPE_COMPOSITE_CURSOR:-1}" = 1 ]; then
+      if polaris_gamescope_composite_cursor_enabled "${POLARIS_GAMESCOPE_BIN:-gamescope}" polaris-gamescope-session; then
         cursor_flags=(--pipewire-composite-cursor)
       fi
 
@@ -1141,7 +1144,10 @@ case "${1:-}" in
         sleep 0.02
       done
       if [ "$nested_marked" != 1 ]; then
-        echo "polaris-gamescope-session: failed to record an exact nested gamescope generation in its private setsid group" >&2
+        # gamescope's own error, an unrecognized option or a failed exec among
+        # them, went only to $steam_log, so bring its last lines to the journal.
+        echo "polaris-gamescope-session: failed to record an exact nested gamescope generation in its private setsid group; gamescope's output is in $steam_log" >&2
+        tail -n 5 "$steam_log" >&2 2>/dev/null || true
         if [ -f "$marker" ] && polaris_validate_marker "$marker" nested; then
           retire_marked_nested_gamescope_under_fence || true
         fi

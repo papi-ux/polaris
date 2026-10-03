@@ -87,6 +87,24 @@ TEST_F(DoctorTrialTest, ProposesOnlyOneHostDerivedDimensionAndPersistsPrivately)
 #endif
 }
 
+TEST_F(DoctorTrialTest, KeepsAStreamAtAManualBitrateUpTo500Mbps) {
+  auto most = settings();
+  most.bitrate_kbps = 500000;
+  const auto proposal = doctor_trial::propose(
+    target, "owner-a", "app-a", "baseline-launch", 10, evidence(), most, now
+  );
+  ASSERT_TRUE(proposal.value("status", false)) << proposal.dump();
+  EXPECT_EQ(proposal.at("preserved").value("bitrate_kbps", 0), 500000);
+
+  auto over = settings();
+  over.bitrate_kbps = 500001;
+  const auto refused = doctor_trial::propose(
+    target, "owner-b", "app-b", "baseline-launch", 10, evidence(), over, now
+  );
+  EXPECT_FALSE(refused.value("status", true));
+  EXPECT_EQ(refused.value("code", ""), "complete_matching_baseline_required");
+}
+
 TEST_F(DoctorTrialTest, RequiresExplicitConfirmationAndFreshLaunchInstance) {
   const auto proposal = doctor_trial::propose(
     target, "owner-a", "app-a", "baseline-launch", 10, evidence(), settings(), now

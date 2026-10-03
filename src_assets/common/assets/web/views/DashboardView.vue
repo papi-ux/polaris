@@ -70,7 +70,7 @@
           <div class="dashboard-live-summary-tile" data-live-summary-metric="Loss">
             <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="lossChartEl"></div>
             <div class="dashboard-live-summary-label">Loss</div>
-            <div class="dashboard-live-summary-value" :class="liveSummary.lossTone">{{ liveSummary.loss }}</div>
+            <div class="dashboard-live-summary-value" :class="liveSummary.lossTone" :title="liveSummary.lossTitle">{{ liveSummary.loss }}</div>
           </div>
           <div class="dashboard-live-summary-tile" data-live-summary-metric="Bitrate">
             <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="bitrateChartEl"></div>
@@ -255,7 +255,7 @@
                         {{ client.name }}
                         <span v-if="isClientAiOptimized(client.name)" class="ml-1 inline-flex items-center gap-0.5 rounded-full bg-accent/15 px-1.5 py-0.5 text-[9px] font-medium text-accent">AI</span>
                       </div>
-                      <div class="mt-1 text-[11px] text-storm">{{ client.ip || '--' }}<template v-if="liveClientFamily(client.name)"> · {{ liveClientFamily(client.name) }}</template></div>
+                      <div class="mt-1 text-[11px] text-storm">{{ client.ip || '--' }}<template v-if="liveClientFamily(client)"> · {{ liveClientFamily(client) }}</template></div>
                     </div>
                     <div class="text-right text-[11px] text-storm tabular-nums">
                       <div>{{ client.latency_ms?.toFixed(0) || '--' }} ms</div>
@@ -263,7 +263,7 @@
                         {{ client.fps.toFixed(0) }} fps<template v-if="client.bitrate_kbps"> · {{ (client.bitrate_kbps / 1000).toFixed(1) }} Mbps</template>
                       </div>
                       <div v-if="client.codec || client.width" class="mt-0.5">
-                        <template v-if="client.codec">{{ client.codec.toUpperCase() }}</template><template v-if="client.width"> · {{ client.width }}×{{ client.height }}</template><template v-if="Number.isFinite(client.packet_loss)"> · {{ client.packet_loss.toFixed(1) }}%</template>
+                        <template v-if="client.codec">{{ client.codec.toUpperCase() }}</template><template v-if="client.width"> · {{ client.width }}×{{ client.height }}</template><template v-if="client.packet_loss_available && Number.isFinite(client.packet_loss)"> · {{ client.packet_loss.toFixed(1) }}%</template>
                       </div>
                     </div>
                   </div>
@@ -574,11 +574,12 @@ import { resolveDoctorActionHttpResponse } from '../doctor-action-http.js'
 import { buildReadyCheckDisplay } from '../dashboard-ready-checks'
 import { previewOutputForConfig } from '../dashboard-preview-output.js'
 import { readConfigOrNull } from '../config-cache.js'
-import { liveClientFamilyLabel } from '../client-family.js'
+import { liveClientFamilyLabel, streamClientFamilyLabel } from '../client-family.js'
 import {
   buildLiveSummary,
   buildQualityGrade,
   buildQualityScore,
+  dashboardLossPct,
 } from '../dashboard-summary'
 
 const { stats } = useStreamStats(1000)
@@ -1010,9 +1011,11 @@ function isClientAiOptimized(clientName) {
 }
 
 // Nova or Moonlight / Artemis, as the Devices page names it, so a stream says which client is
-// playing and therefore what it can use.
-function liveClientFamily(clientName) {
-  return liveClientFamilyLabel(clientName, pairedClientList.value)
+// playing and therefore what it can use. The stream's own kind comes first: it is read from that
+// device's pairing record, so two devices that share a name cannot hide it.
+function liveClientFamily(client) {
+  return streamClientFamilyLabel(client?.client_family) ||
+    liveClientFamilyLabel(client?.name, pairedClientList.value)
 }
 
 function gradeColor(grade) {
@@ -1823,7 +1826,8 @@ watch(stats, (newStats, oldStats) => {
   bitrateHistory.value.push(newStats.bitrate_kbps / 1000)
   encodeHistory.value.push(newStats.encode_time_ms)
   latencyHistory.value.push(newStats.latency_ms)
-  lossHistory.value.push(newStats.packet_loss || 0)
+  // The judged figure the tile shows; a gap until the host has judged any.
+  lossHistory.value.push(dashboardLossPct(newStats))
 
   // Keep rolling window
   while (timestamps.value.length > MAX_POINTS) {

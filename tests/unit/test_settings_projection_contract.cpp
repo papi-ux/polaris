@@ -218,7 +218,7 @@ TEST_F(SettingsProjectionContract, StatsChannelAugmentationAddsTuningAndAutoQual
 
   const auto &tuning = augmented.at("tuning");
   ASSERT_TRUE(tuning.is_object());
-  EXPECT_EQ(tuning.size(), 14u);
+  EXPECT_EQ(tuning.size(), 18u);
   EXPECT_EQ(tuning.at("adaptive_target_bitrate_kbps").get<int>(), 12345);
   EXPECT_FALSE(tuning.at("ai_auto_quality_enabled").get<bool>());
 

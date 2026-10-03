@@ -42,32 +42,23 @@ explicit:
 
 - **Where games run is a real choice.** Private Stream, Gamescope Stream, Host
   Virtual Display, Headless Dongle, and Mirror Desktop are described by their
-  display and privacy impact, unavailable modes fail closed, and the displays
-  Polaris creates for a stream go up to 240 FPS.
-- **Streams straight from Steam Game Mode.** A Steam Deck, or any PC running a
-  gamescope Steam session, streams its Game Mode screen. A Steam title launched
-  from Nova opens in Game Mode, a controller arrives as a DualSense, touch lands
-  where you aim it, and End Session closes only the title the stream opened.
-  Proven on a Steam Deck OLED; the
-  [handhelds guide](https://papi-ux.com/docs/handhelds/) keeps Polaris running
-  across a switch between Desktop Mode and Game Mode.
-- **Spaces, an early preview.** Each player gets their own sign-in, library and
-  saves on one PC, in Steam, in Heroic Games Launcher with their Epic, GOG and
-  Amazon games, or in Lutris. A Space is chosen from Nova with the same words on
-  every surface and a reason whenever it cannot start, its runtime downloads
-  from Host Setup, and on NVIDIA it borrows this PC's own driver, so a driver
-  update no longer strands it. One active Space at a time; the
-  [Spaces guide](https://papi-ux.com/docs/spaces/) and
-  [Spaces or regular streaming](https://papi-ux.com/docs/spaces-or-regular/)
-  say what that means for you.
+  display and privacy impact, unavailable modes fail closed, each app can fix its own mode
+  with **Launch as**, and the displays Polaris creates for a stream go up to 240 FPS.
+- **Steam Game Mode is supported.** Stream a gamescope Steam session, launch a
+  Steam title from Nova, and end only the title the stream opened. Proven on
+  Steam Deck OLED; the [handhelds guide](https://papi-ux.com/docs/handhelds/)
+  covers switching between Desktop Mode and Game Mode.
+- **Spaces, an early preview.** Give a player their own sign-in, library and
+  saves with Steam, Heroic or Lutris. Host Setup installs the runtime; NVIDIA
+  Spaces use the host driver. One Space can be active at a time. Read
+  [Spaces](https://papi-ux.com/docs/spaces/) and
+  [Spaces or regular streaming](https://papi-ux.com/docs/spaces-or-regular/).
 - **Anyone can watch.** A second device can watch the stream that is running,
   whatever its own resolution. The host says up front what there is to watch, so
   Nova asks for exactly that stream; Moonlight still asks for the stream's mode.
-- **A library that fills from a folder of ROMs.** Import a ROM folder once and
-  rescan for new games. Eden, Dolphin, Cemu, DuckStation, PCSX2, PPSSPP and
-  mGBA are presets, covers come from your folders, ES-DE or RetroArch, and the
-  card names what an emulator still lacks before a game boots. The
-  [emulators guide](https://papi-ux.com/docs/emulators/) covers the whole path.
+- **ROM folders become a library.** Import once and rescan for new games.
+  Emulator presets, local covers and launch-health checks explain what is
+  ready; the [emulators guide](https://papi-ux.com/docs/emulators/) covers setup.
 - **Refusals say why.** A refused launch carries what went wrong and the one
   change that fixes it, with a code Nova shows, instead of error 503.
 - **Doctor acts only when it can prove the step is safe.** It can make one
@@ -89,7 +80,7 @@ validation record.
 <table>
 <tr>
 <td width="50%" valign="top"><img src="docs/screenshots/glyph-isolation.svg" width="22" height="22" alt=""><br>
-<b>A private streaming desktop.</b> Headless Stream runs a game in its own compositor instead of changing your physical monitor layout.</td>
+<b>A private streaming desktop.</b> Private Stream runs a game in its own compositor instead of changing your physical monitor layout.</td>
 <td width="50%" valign="top"><img src="docs/screenshots/glyph-truth.svg" width="22" height="22" alt=""><br>
 <b>Operational truth, not a mystery box.</b> Mission Control shows the chosen runtime, capture path, encoder, viewers, latency, loss, and Doctor guidance.</td>
 </tr>
@@ -114,13 +105,14 @@ validation record.
    Doctor suggests bounded corrections when live evidence needs attention.
 
 Read the [runtime guide](https://papi-ux.com/docs/runtime/) for the detailed
-Headless Stream, virtual-display, and desktop-mirroring behavior.
+Private Stream, virtual-display, and desktop-mirroring behavior.
 
 ## <img src="docs/screenshots/pulse-ready.svg" width="14" height="14" alt=""> Ready, live, and back to the library
 
 The same Mission Control surface changes from an idle host with a paired client
-to an active stream with live telemetry, Doctor status, and the resolved GPU
-capture path.
+to an active stream with live telemetry, Doctor status, and the observed
+capture and encoder paths. Capture can involve CPU copies even when encoding
+runs on the GPU; an idle capability forecast does not verify a live path.
 
 ![Polaris Aurora Mission Control during a live Android Handheld session, showing Doctor and the GPU-native runtime path](docs/screenshots/polaris-mission-control-live-v1.3.8.webp)
 
@@ -158,17 +150,23 @@ needs it.
 
 ## Clients and compatibility
 
-[Nova](https://papi-ux.com/nova/) is the enhanced client for Android, and now
-for Steam Deck as an Alpha. It adds a host-backed Library, the Space chooser,
-Play Setup, Private Stream choices, Command Center, NovaHUD, session ownership,
-and tuning provenance. Install it from the [latest Nova
-release](https://github.com/papi-ux/nova/releases/latest), where the Steam Deck
-Alpha is a Flatpak bundle beside the Android APKs.
+[Nova](https://papi-ux.com/nova/) is the enhanced client for Android and for
+**x86_64 Linux desktops, laptops and handhelds**, including Steam Deck, as an
+Alpha. It adds a host-backed Library, the Space chooser, Play Setup, Private
+Stream choices, Command Center, NovaHUD, session ownership and tuning provenance.
+Choose Android APKs or the standard Linux Flatpak from
+[stable](https://github.com/papi-ux/nova/releases/latest) or
+[beta releases](https://github.com/papi-ux/nova/releases); the
+[Linux install guide](https://papi-ux.com/docs/nova/linux/) covers native
+streaming and Steam Input. Steam Frame uses a separate experimental ARM64
+development route; sustained 1080p/90 and color/clarity qualification remain open.
 
-A game page in Nova gives the artwork the whole screen, and says what this launch
-actually resolved to before you start it.
+Nova reviews the launch plan before play.
 
-![Nova's game page for Control Resonant: full-bleed artwork, the resolved 1920x1080 at 120 FPS line, and Launch, Play Setup and Reset Game Profile](docs/screenshots/nova-game-page-v1.4.13.webp)
+![Nova Android 1.4.14-beta.1 candidate game page for Control Ultimate Edition, with the reviewed stream plan and matching secondary action buttons](docs/screenshots/nova-android-game-detail-v1.4.14-beta.1.webp)
+
+*Nova beta candidate; [exact source and screenshot hashes](docs/screenshots/beta1-readme-provenance.json).
+The Polaris console images above retain their labelled 1.3.8 provenance.*
 
 Standard Moonlight-compatible clients remain supported for pairing, browsing,
 launching, input, and streaming; the [client
@@ -176,6 +174,19 @@ table](https://papi-ux.com/docs/compatibility/#clients) says what they get next
 to Nova. Check the maintained [compatibility
 guide](https://papi-ux.com/docs/compatibility/) before choosing a distro, GPU,
 capture path, HDR mode, or experimental Browser Stream setup.
+
+### PyroWave and Doctor
+
+PyroWave is experimental SDR and needs compatible host, client and network
+capabilities. Nova Linux includes it in the standard 1.4.14 bundle, with a device
+check on selection. Read the [PyroWave guide](https://papi-ux.com/docs/pyrowave/)
+for request versus encoder units and limits; a suggested target does not prove
+network capacity.
+
+Doctor grades fresh media-loss evidence, not control-channel retransmissions.
+A verified loss reduction can pause Live Tuning for that stream; Undo restores
+bitrate and tuning without changing host settings. See
+[Doctor](https://papi-ux.com/docs/doctor/).
 
 Newly paired clients receive **Game Control** by default: enough access to browse,
 launch, and play, without clipboard, file-transfer, or server-command permissions.

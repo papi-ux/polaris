@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   buildSessionSnapshotRows,
@@ -11,6 +13,15 @@ const t = (key, params = {}) => {
   const base = key.replace(/^troubleshooting\./, '')
   const values = Object.entries(params).map(([k, v]) => `${k}=${v}`).join(',')
   return values ? `${base}(${values})` : base
+}
+
+const enLocale = JSON.parse(readFileSync(join(process.cwd(), 'src_assets/common/assets/web/public/assets/locale/en.json'), 'utf8'))
+
+// The console's English, so an assertion reads what a host sees.
+function english(key, params = {}) {
+  const message = key.split('.').reduce((node, part) => node?.[part], enLocale)
+  if (typeof message !== 'string') return key
+  return message.replace(/\{(\w+)\}/g, (whole, name) => (name in params ? String(params[name]) : whole))
 }
 
 const streaming = {
@@ -59,6 +70,29 @@ describe('session snapshot rows', () => {
     const lanRow = lan.details.find((entry) => entry.label === 'snapshot_network_path')
     expect(lanRow.value).toBe('snapshot_network_path_link_local')
     expect(lanRow.note).toBeUndefined()
+  })
+
+  it('names the kind of client and, for a Moonlight-protocol client, what it cannot use', () => {
+    const moonlight = buildSessionSnapshotRows({ ...streaming, client_family: 'moonlight' }, t)
+    const row = moonlight.details.find((entry) => entry.label === 'snapshot_client_family')
+    expect(row).toEqual({
+      label: 'snapshot_client_family',
+      value: 'Moonlight / Artemis',
+      note: 'snapshot_client_family_moonlight_note',
+    })
+    // Beside the address the client came from.
+    const labels = moonlight.details.map((entry) => entry.label)
+    expect(labels.indexOf('snapshot_client_family')).toBe(labels.indexOf('snapshot_client_ip') + 1)
+
+    const nova = buildSessionSnapshotRows({ ...streaming, client_family: 'nova' }, t)
+    expect(nova.details.find((entry) => entry.label === 'snapshot_client_family')).toEqual({
+      label: 'snapshot_client_family',
+      value: 'Nova',
+    })
+
+    // An older host says nothing, and nothing is not Moonlight.
+    const older = buildSessionSnapshotRows(streaming, t)
+    expect(older.details.find((entry) => entry.label === 'snapshot_client_family').value).toBe('snapshot_unknown')
   })
 
   it('says when a Display Mode Override replaced the mode the client asked for', () => {
@@ -135,6 +169,21 @@ describe('session snapshot rows', () => {
     }, t)).toBe('snapshot_runtime_override_windowed')
   })
 
+  it('says in English why video frame loss has no figure', () => {
+    // It read "not judged yet of video frames lost over 20 s", and said "not judged yet" for the whole
+    // stream to a Moonlight client, which never sends the reports loss is judged from.
+    const network = (stats) => buildSessionSnapshotRows(stats, english).details
+      .find((row) => row.label === 'Network').value
+    const live = { ...streaming, latency_ms: 8 }
+    expect(summarizeStreamStats(live, english)).toBe('118.4 FPS / 120.0 FPS target, 16988 kbps, video frame loss not judged yet, 0 ms encode')
+    expect(network(live)).toBe('8.0 ms round trip / video frame loss not judged yet')
+    expect(network({ ...live, client_family: 'moonlight' })).toBe('8.0 ms round trip / video frame loss not reported by Moonlight / Artemis')
+    expect(network({ ...live, network_verdict: { loss_pct: null, loss_state: 'stale', rtt_median_ms: 7.9 } }))
+      .toBe("7.9 ms round trip / video frame loss not judged since the client's reports stopped")
+    expect(network({ ...live, network_verdict: { loss_pct: 1.869, loss_state: 'light', rtt_median_ms: 7.9 } }))
+      .toBe('7.9 ms round trip / 1.87% of video frames lost over 20 s')
+  })
+
   it('summarises stream stats for the advanced diagnostics tile', () => {
     expect(summarizeStreamStats({}, t)).toBe('snapshot_no_active_stream')
     expect(summarizeStreamStats({
@@ -148,6 +197,13 @@ describe('session snapshot rows', () => {
       doctor: { primary_issue: 'no_active_stream' },
       last_session: { client_name: 'Living Room TV' },
     }, t)).toBe('snapshot_no_active_stream')
-    expect(summarizeStreamStats(streaming, t)).toBe('snapshot_stream_summary(fps=118.4 FPS,target=120.0 FPS,kbps=16988,loss=0.00,encode=0)')
+    // Nothing judged yet says so, rather than a zero nobody measured.
+    expect(summarizeStreamStats(streaming, t)).toBe('snapshot_stream_summary_unjudged(fps=118.4 FPS,target=120.0 FPS,kbps=16988,loss=snapshot_loss_not_judged,encode=0)')
+    // The window's figure, the one Doctor judges, not the newest second's report.
+    expect(summarizeStreamStats({
+      ...streaming,
+      packet_loss: 7.44,
+      network_verdict: { loss_pct: 1.869, loss_state: 'light', frames_lost: 18, frames_expected: 963, window_seconds: 20, rtt_median_ms: 7.9 },
+    }, t)).toBe('snapshot_stream_summary(fps=118.4 FPS,target=120.0 FPS,kbps=16988,loss=1.87%,encode=0)')
   })
 })

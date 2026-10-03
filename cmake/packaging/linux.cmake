@@ -106,9 +106,14 @@ if(NOT ${POLARIS_BUILD_APPIMAGE})
             COMPONENT kms)
 endif()
 
-# Post install
+# Post install. The RPM scripts belong to the polaris component alone. CPack gives a component with
+# no script of its own the generic CPACK_RPM_*_SCRIPT_FILE, so setting that handed polaris-kms this
+# package's postinst and prerm as well: every upgrade printed the message twice, and removing only
+# the helper ran polaris-spaces-setup remove, taking the Spaces security setup away from a Polaris
+# that stayed installed. rpm does the helper's real work from its file list and sysusers.d entry, so
+# it needs no script. The DEB helper has its own, set below.
 set(CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/postinst")
-set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/postinst")
+set(CPACK_RPM_POLARIS_POST_INSTALL_SCRIPT_FILE "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/postinst")
 
 # Removal. One script for both formats, as with postinst above, because it distinguishes a removal
 # from an upgrade by reading $1, which dpkg and rpm both set and merely spell differently.
@@ -116,7 +121,7 @@ set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/
 # remove the SELinux policies it installed, and it ships inside this package, so after removal they
 # cannot be removed at all. See polaris#63.
 list(APPEND CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/prerm")
-set(CPACK_RPM_PRE_UNINSTALL_SCRIPT_FILE "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/prerm")
+set(CPACK_RPM_POLARIS_PRE_UNINSTALL_SCRIPT_FILE "${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/prerm")
 
 # Each format spells a prerelease the way it sorts below the release of the same number
 # (cmake/prep/prerelease_versions.cmake). Both are set explicitly because CPack otherwise derives them

@@ -12,7 +12,9 @@
 // standard includes
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
 
 namespace stream_bitrate {
 
@@ -23,7 +25,8 @@ namespace stream_bitrate {
    * also say what stood between the client and the rate it asked for.
    */
   struct request_t {
-    /// The client's own request, before any host cap.
+    /// The client's own request, before the host did anything to it: the total it configured, or its
+    /// maximum when it configured none. 0 when it sent neither.
     std::int64_t client_kbps = 0;
     /// A cap that cut the request, and the setting or launch decision it came from. 0 when none did.
     int cap_kbps = 0;
@@ -31,14 +34,53 @@ namespace stream_bitrate {
     /// A launch cap the stream's codec did not apply, and where it came from. PyroWave sets them aside.
     int set_aside_kbps = 0;
     std::string set_aside_source;
-    /// What the handshake took off the request for audio.
+    /// What the stream's audio costs as the handshake counts it, see audio_kbps(). Recorded for every
+    /// stream, whether or not it had a request to take it off.
     int audio_kbps = 0;
+    /// The FEC share the handshake split with, `fec_percentage` when the stream started.
+    int fec_percentage = 0;
+    /// The total the handshake split: client_kbps times warp_factor, cut to cap_kbps when a cap did, so
+    /// that encoder_kbps_for_wire(split_kbps, fec_percentage, audio_kbps) is encoder_kbps. 0 when the
+    /// encoder rate is no split of this stream's own request: a client that sent no bitrate at all, or
+    /// a watcher, which encodes at its owner's rate. The formula says nothing about such a stream.
+    std::int64_t split_kbps = 0;
+    /// Where the handshake left the encoder, config.monitor.bitrate when the stream started.
+    int encoder_kbps = 0;
+    /// How many times the handshake multiplied the request because `limit_framerate` renders faster than
+    /// the client streams. 1 when it did not. Last, so a positional initializer of the fields above
+    /// still means what it did.
+    int warp_factor = 1;
 
     bool operator==(const request_t &) const = default;
   };
 
+  /// The name session status gives this arithmetic in bitrate_units.formula: a request becomes an
+  /// encoder rate by encoder_kbps_for_wire(), and an encoder rate a request by wire_kbps_for_encoder().
+  inline constexpr std::string_view k_formula = "stream_bitrate_v1";
+
   /// The FEC share above which the handshake stops taking FEC off a request.
   inline constexpr int k_max_adjusted_fec_percentage = 80;
+
+  /// The least bitrate a client may set by hand, in kbps.
+  inline constexpr int k_min_request_kbps = 1000;
+
+  /// The most bitrate a client may set by hand, in kbps: 500 Mbps. Every Polaris HTTP endpoint a
+  /// paired client sets its own bitrate through takes up to this, whatever the codec, and capabilities
+  /// announce it as manual_bitrate_max_kbps. The RTSP handshake is not one of them: a Moonlight
+  /// client's request there is bounded by max_bitrate alone. Nothing the host proposes on its own goes
+  /// this high: Doctor's PyroWave raise and every figure the host recommends stop at
+  /// pyrowave_advice::k_cap_kbps, 300 Mbps.
+  inline constexpr int k_max_request_kbps = 500000;
+
+  /// Whether a bitrate a client set by hand is one the host takes, k_min_request_kbps to k_max_request_kbps.
+  inline constexpr bool request_in_range(std::int64_t kbps) {
+    return kbps >= k_min_request_kbps && kbps <= k_max_request_kbps;
+  }
+
+  /// That range as the endpoints' refusals word it: "between 1000 and 500000".
+  inline std::string request_range_text() {
+    return "between " + std::to_string(k_min_request_kbps) + " and " + std::to_string(k_max_request_kbps);
+  }
 
   /// What a stream's audio costs, as the handshake counts it: 256 kbps a channel in high quality, 96 otherwise.
   inline int audio_kbps(bool high_quality, int channels) {
@@ -63,6 +105,50 @@ namespace stream_bitrate {
     kbps -= std::min(static_cast<std::int64_t>(audio_kbps), kbps / 5);
     kbps -= std::min(static_cast<std::int64_t>(500), kbps / 10);
     return kbps;
+  }
+
+  /**
+   * @brief Split a client's request the way the handshake does, and record the split on request.
+   *
+   * The audio cost and the FEC share are recorded for every stream, so a stream can always say what a
+   * request is split for. The total and the encoder rate it becomes are recorded only when there is a
+   * total: a zero one splits nothing, as the handshake has always had it.
+   * @param request Where the split is recorded.
+   * @param total_kbps What the client asked for, after any host cap.
+   * @param fec_percentage The host's FEC share, `fec_percentage`.
+   * @param audio_kbps What the stream's audio costs, see audio_kbps().
+   * @return The encoder rate the total becomes, or nullopt when there was nothing to split.
+   */
+  inline std::optional<std::int64_t> split_request(request_t &request, std::int64_t total_kbps, int fec_percentage, int audio_kbps) {
+    request.audio_kbps = audio_kbps;
+    request.fec_percentage = fec_percentage;
+    if (total_kbps == 0) {
+      return std::nullopt;
+    }
+    const auto encoder_kbps = encoder_kbps_for_wire(total_kbps, fec_percentage, audio_kbps);
+    request.split_kbps = total_kbps;
+    request.encoder_kbps = static_cast<int>(encoder_kbps);
+    return encoder_kbps;
+  }
+
+  /**
+   * @brief Record where the handshake leaves the encoder, and return that rate.
+   *
+   * The handshake's last word on the encoder rate. A watcher encodes at its owner's rate, which is no
+   * split of its own request, so its split is cleared and the formula says nothing about it. Every
+   * other stream keeps its split and starts where the split left it.
+   * @param request Where the split was recorded.
+   * @param negotiated_kbps config.monitor.bitrate after the split.
+   * @param owner_kbps A watcher's owner's rate, and nullopt for every other stream.
+   */
+  inline int settle_encoder(request_t &request, int negotiated_kbps, std::optional<int> owner_kbps) {
+    if (owner_kbps) {
+      request.split_kbps = 0;
+      request.encoder_kbps = *owner_kbps;
+    } else {
+      request.encoder_kbps = negotiated_kbps;
+    }
+    return request.encoder_kbps;
   }
 
   /**

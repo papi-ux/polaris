@@ -16,6 +16,7 @@
 // local includes
 #include "crypto.h"
 #include "launch_failure.h"
+#include "stream_bitrate.h"
 #include "thread_safe.h"
 
 #ifdef _WIN32
@@ -56,6 +57,14 @@ namespace rtsp_stream {
 
     std::string device_name;
     std::string unique_id;
+    /**
+     * @brief The paired device's client_family as it launched: "nova" once it has called the
+     *        Polaris API, which only Nova does, and empty for every other client.
+     *
+     * Copied here so the stream reads it without the pairing lock, which nvhttp holds while it asks
+     * RTSP for its sessions, the opposite order to a stream starting under RTSP's session lock.
+     */
+    std::string client_family;
     /**
      * @brief The size of display to create for this device, as WIDTHxHEIGHTxFPS; empty for the
      *        stream size, which is what every release before this one used.
@@ -187,6 +196,9 @@ namespace rtsp_stream {
     // Empty = host default. Validated in make_launch_session; applied to the
     // in-memory config by proc_t::execute and restored at teardown.
     std::string stream_mode;
+    // What the client explicitly named, before paired or unlocked defaults.
+    // Empty names nothing and cannot conflict with a fixed app launch mode.
+    std::string client_named_selection;
     // Assertion copied from deterministic /optimize topology_resolution.resolved.
     // It never selects topology; final process resolution must equal it or the
     // exact launch/resume fails closed.
@@ -303,6 +315,24 @@ namespace rtsp_stream {
     std::optional<int> launch_target_kbps,
     const std::string &launch_target_source,
     int max_bitrate_kbps
+  );
+
+  /**
+   * @brief Bound a client's bitrate request the way the handshake does, and record what that did to it.
+   *
+   * The warp factor multiplies the request, then the ceiling cuts what that gives. request records the
+   * client's own total, the warp factor, the cap when it cut the request, and a launch cap PyroWave set
+   * aside, so session status can say what stood between the client's request and the total it split.
+   * @param client_kbps What the client asked for.
+   * @param warp_factor How many times limit_framerate renders faster than the client streams; 0 or 1
+   *   when it does not.
+   * @return The total the handshake splits.
+   */
+  std::int64_t bound_session_request(
+    stream_bitrate::request_t &request,
+    std::int64_t client_kbps,
+    std::size_t warp_factor,
+    const session_bitrate_ceiling_t &ceiling
   );
 
   /**

@@ -594,7 +594,7 @@ const tabs = ref([
     name: "Vulkan Encoder",
     group: "encoders",
     groupLabel: "Encoder Profiles",
-    summary: "Experimental Linux Vulkan Video tuning with strict explicit selection and live-validated AMD private-stream Auto policy.",
+    summary: "Experimental Linux Vulkan Video tuning, strict explicit selection, and the AMD Auto policy for Private Stream and Gamescope Stream.",
     options: {
       "vk_tune": 2,
       "vk_rc_mode": 2,

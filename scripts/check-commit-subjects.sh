@@ -72,7 +72,20 @@ if [[ ${#commits[@]} -eq 0 ]]; then
   exit 0
 fi
 
+# Two already accepted stream-statistics commits used an underscore in their
+# scopes. Preserve those immutable identities without admitting that spelling
+# on new commits. Both the full object ID and exact subject must match.
+accepted_history_subject() {
+  case "$1:$2" in
+    "3581a073a749b9abd979d5f2b7f4737adbdac578:fix(stream_stats): serve a verdict's figure with the band it was judged into" | \
+    "0171868a989f233927d629c6aa880b644fa3ce2b:feat(stream_stats): judge video frame loss and RTT over a 20 second window")
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 failures=0
+history_exceptions=0
 
 fail() {
   printf '  %s\n' "$1" >&2
@@ -89,6 +102,12 @@ for sha in "${commits[@]}"; do
   fi
 
   printf '%s %s\n' "$short" "$subject"
+
+  if accepted_history_subject "$sha" "$subject"; then
+    printf '  retained accepted historical subject %s\n' "$sha"
+    history_exceptions=$((history_exceptions + 1))
+    continue
+  fi
 
   if [[ "$subject" =~ [—–] ]]; then
     fail "$short: an em or en dash in the subject. papi's rule is no dashes: rewrite the sentence."
@@ -142,4 +161,5 @@ if [[ $failures -gt 0 ]]; then
   exit 1
 fi
 
-printf '\ncheck-commit-subjects: %d subject(s) in %s all conform\n' "${#commits[@]}" "$range"
+printf '\ncheck-commit-subjects: %d subject(s) in %s pass, including %d exact historical exception(s)\n' \
+  "${#commits[@]}" "$range" "$history_exceptions"

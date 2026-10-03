@@ -292,8 +292,19 @@ describe('removal hooks clean up what only they can', () => {
     const cmake = readSource('cmake/packaging/linux.cmake')
     expect(cmake).toContain('list(APPEND CPACK_DEBIAN_PACKAGE_CONTROL_EXTRA '
       + '"${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/prerm")')
-    expect(cmake).toContain('set(CPACK_RPM_PRE_UNINSTALL_SCRIPT_FILE '
+    expect(cmake).toContain('set(CPACK_RPM_POLARIS_PRE_UNINSTALL_SCRIPT_FILE '
       + '"${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/prerm")')
+  })
+
+  it('gives the RPM scripts to the main package only, never to polaris-kms', () => {
+    // CPack hands a component with no script of its own the generic CPACK_RPM_*_SCRIPT_FILE. Set
+    // there, the prerm rode along into polaris-kms, and removing only the helper ran
+    // polaris-spaces-setup remove under a Polaris that stayed installed.
+    const cmake = readSource('cmake/packaging/linux.cmake')
+    expect(cmake).toContain('set(CPACK_RPM_POLARIS_POST_INSTALL_SCRIPT_FILE '
+      + '"${POLARIS_SOURCE_ASSETS_DIR}/linux/misc/postinst")')
+    expect(cmake).not.toMatch(/set\(CPACK_RPM_(PRE|POST)_(INSTALL|UNINSTALL)_SCRIPT_FILE\b/)
+    expect(cmake).not.toMatch(/set\(CPACK_RPM_KMS_\w*SCRIPT_FILE\b/)
   })
 })
 
@@ -1066,7 +1077,7 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain("sed -n 's/^arch = //p' \"$RECEIPT_ROOT/.PKGINFO\"")
     // The release number stays literal. A prerelease joins its label to it with no separator, which
     // pacman sorts below that release, and the helper carries that version and depends on it.
-    expect(buildScript).toContain('EXPECTED_PKGVER="1.4.13${POLARIS_PRERELEASE_LABEL}-1"')
+    expect(buildScript).toContain('EXPECTED_PKGVER="1.4.14${POLARIS_PRERELEASE_LABEL}-1"')
     expect(buildScript).toContain('if [ "$PACKAGE_IDENTITY" != "polaris|$EXPECTED_PKGVER|x86_64" ]; then')
     expect(buildScript).toContain('if [ "$KMS_IDENTITY" != "polaris-kms|$EXPECTED_PKGVER|x86_64" ]; then')
     expect(buildScript).toContain('if ! grep -Fqx "depend = polaris=$EXPECTED_PKGVER" "$KMS_RECEIPT_ROOT/.PKGINFO"; then')
@@ -1114,8 +1125,8 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/share/polaris"')
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/share/applications/dev.polaris-stream.app.Polaris.desktop"')
     expect(buildScript).toContain('"$RECEIPT_ROOT/usr/lib/systemd/user/polaris.service"')
-    // Named for the release number alone: a prerelease's pkgver, 1.4.13beta.3, is not the binary's
-    // name, and the reviewed namcap warnings name usr/bin/polaris-1.4.13 either way.
+    // Named for the release number alone: a prerelease's pkgver, 1.4.14beta.1, is not the binary's
+    // name, and the reviewed namcap warnings name usr/bin/polaris-1.4.14 either way.
     expect(pkgbuild).toContain('test -x "$pkgdir/usr/bin/polaris-@PROJECT_VERSION@"')
     expect(pkgbuild).toContain('test "$(readlink "$pkgdir/usr/bin/polaris")" = "polaris-@PROJECT_VERSION@"')
     expect(pkgbuild).not.toContain('mv "$pkgdir/usr/bin/polaris"')

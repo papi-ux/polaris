@@ -16,7 +16,6 @@
 #include <src/stream_stats.h>
 #include <src/utility.h>
 #include <src/verified_action.h>
-#include <src/video.h>
 
 #include <nlohmann/json.hpp>
 
@@ -165,104 +164,40 @@ namespace {
 }  // namespace
 
 TEST(StreamDisplayPolicyTests, APrivateHostIsNeverMovedOffItsOwnTopologyWithoutBeingAsked) {
-  // The class of bug this catches: a host configured to provide its own private
-  // display gets silently resolved onto some other topology, and the operator
-  // has no way to tell that from a choice they made. It shipped once already,
-  // as an app's stored virtual-display flag outranking the host, and the cost
-  // was an EVDI path at 16.7 fps that nobody selected.
-  //
-  // The invariant, over every registered path and every combination of the
-  // resolver's inputs: on a private host the answer must either defer to the
-  // host default, or be something the caller explicitly named. Enumerating
-  // stream_path::registry() means a path added later is covered on the day it
-  // is added, without anyone remembering to extend this test.
-  using stream_display_policy::effective_session_selection_for_launch;
-
   std::vector<std::string> candidates {""};
-  for (const auto &descriptor : stream_path::registry()) {
-    candidates.emplace_back(descriptor.id);
-  }
-  ASSERT_GT(candidates.size(), 1u) << "the path registry is empty, so this gate proves nothing";
-
+  for (const auto &path : stream_path::registry()) candidates.emplace_back(path.id);
+  ASSERT_GT(candidates.size(), 1u);
   size_t checked = 0;
   for (const auto &requested : candidates) {
-    for (int bits = 0; bits < 32; ++bits) {
-      const bool mirror_desktop = bits & 1;
-      const bool launch_virtual_display = bits & 2;
-      const bool app_virtual_display = bits & 4;
-      const bool user_locked = bits & 8;
-      const bool optimization_present = bits & 16;
-
-      const auto selection = effective_session_selection_for_launch(
-        requested,
-        mirror_desktop,
-        launch_virtual_display,
-        app_virtual_display,
-        user_locked,
-        optimization_present,
-        true  // the host already provides a private display
-      );
+    for (int bits = 0; bits < 16; ++bits) {
+      const bool mirror = bits & 1;
+      const bool launch_vd = bits & 2;
+      const bool locked = bits & 4;
+      const bool optimized = bits & 8;
+      const auto selection = stream_display_policy::host_default_launch_selection({
+        .requested_selection = requested,
+        .mirror_desktop = mirror,
+        .launch_virtual_display = launch_vd,
+        .virtual_display_user_locked = locked,
+        .virtual_display_optimization_present = optimized,
+        .host_provides_private_display = true,
+      });
       ++checked;
-
-      const bool deferred_to_the_host = selection.empty();
-      const bool the_caller_named_it = !requested.empty() && selection == requested;
-      const bool mirroring_won = mirror_desktop &&
-        selection == stream_display_policy::k_desktop_display;
-      const bool a_locked_choice_won = user_locked && launch_virtual_display &&
-        selection == stream_display_policy::k_host_virtual_display;
-
-      EXPECT_TRUE(deferred_to_the_host || the_caller_named_it || mirroring_won || a_locked_choice_won)
-        << "a private host was moved to [" << selection << "] with nothing asking for it: "
-        << "requested=[" << requested << "] mirror=" << mirror_desktop
-        << " launch_vd=" << launch_virtual_display
-        << " app_vd=" << app_virtual_display
-        << " locked=" << user_locked
-        << " optimization=" << optimization_present;
+      EXPECT_TRUE(selection.empty() || (!requested.empty() && selection == requested) ||
+        (mirror && selection == "desktop_display") || (locked && launch_vd && selection == "host_virtual_display"))
+        << "requested=" << requested << " bits=" << bits << " resolved=" << selection;
     }
   }
-  EXPECT_EQ(checked, candidates.size() * 32);
+  EXPECT_EQ(checked, candidates.size() * 16);
 }
 
 TEST(StreamDisplayPolicyTests, APrivateHostRefusesAnUnlockedVirtualDisplayPreference) {
-  using stream_display_policy::effective_session_selection_for_launch;
-
-  // A headless labwc host creates the session's output itself. An app's stored
-  // virtual-display default, or a client toggle that never locked topology, has
-  // nothing to add and would trade a GPU-native path for an EVDI one.
-  EXPECT_EQ(
-    effective_session_selection_for_launch("", false, false, true, false, false, true),
-    ""
-  ) << "an app's stored default must not drag a private host onto a virtual display";
-  EXPECT_EQ(
-    effective_session_selection_for_launch("", false, true, false, false, false, true),
-    ""
-  ) << "nor may a client toggle that did not lock topology";
-
-  // A deliberate choice still wins, so the mode stays reachable on this host.
-  EXPECT_EQ(
-    effective_session_selection_for_launch("", false, true, false, true, false, true),
-    "host_virtual_display"
-  ) << "a locked client choice, including the paired always-virtual default, is honored";
-  EXPECT_EQ(
-    effective_session_selection_for_launch("host_virtual_display", false, false, true, false, false, true),
-    "host_virtual_display"
-  ) << "an explicit accepted streamMode is honored on a private host";
-  EXPECT_EQ(
-    effective_session_selection_for_launch("headless_stream", false, false, true, false, false, true),
-    "headless_stream"
-  ) << "and an explicit private streamMode is no longer overridden by the app default";
-
-  // Desktop mirroring still outranks everything.
-  EXPECT_EQ(
-    effective_session_selection_for_launch("", true, true, true, false, false, true),
-    "desktop_display"
-  ) << "mirrorDesktop stays authoritative";
-
-  // Without the host answer, every one of those keeps its old meaning.
-  EXPECT_EQ(
-    effective_session_selection_for_launch("", false, false, true, false, false, false),
-    "host_virtual_display"
-  ) << "a host that does not provide the display still takes the app default";
+  using stream_display_policy::host_default_launch_selection;
+  EXPECT_EQ(host_default_launch_selection({.launch_virtual_display = true, .host_provides_private_display = true}), "");
+  EXPECT_EQ(host_default_launch_selection({.launch_virtual_display = true, .virtual_display_user_locked = true, .host_provides_private_display = true}), "host_virtual_display");
+  EXPECT_EQ(host_default_launch_selection({.requested_selection = "host_virtual_display", .host_provides_private_display = true}), "host_virtual_display");
+  EXPECT_EQ(host_default_launch_selection({.requested_selection = "headless_stream", .host_provides_private_display = true}), "headless_stream");
+  EXPECT_EQ(host_default_launch_selection({.mirror_desktop = true, .launch_virtual_display = true, .host_provides_private_display = true}), "desktop_display");
 }
 
 TEST(StreamDisplayPolicyTests, PrivateHostAnswerReadsTheHostNotTheParkedSession) {
@@ -376,6 +311,63 @@ TEST(StreamDisplayPolicyTests, WindowedCageDefersEncoderProbeUntilRuntimeExists)
   EXPECT_TRUE(resolved.should_defer_encoder_probe);
 }
 
+TEST(AppLaunchAsPolicyTests, ExactSharedModesPinEveryClientUnlessItNamesAConflict) {
+  using verdict = stream_display_policy::app_launch_as_t::verdict_e;
+  std::ifstream source {std::filesystem::path {POLARIS_SOURCE_DIR} / "tests/fixtures/app-launch-as-v1.json"};
+  ASSERT_TRUE(source.good());
+  const auto fixture = nlohmann::json::parse(source);
+  std::vector<std::string> client_modes {"", "headless_dongle"};
+  for (const auto &row : fixture.at("values")) {
+    const auto mode = row.at("id").get<std::string>();
+    if (mode != "host_default") client_modes.push_back(mode);
+  }
+  size_t pinned = 0;
+  for (const auto &row : fixture.at("values")) {
+    const auto mode = row.at("id").get<std::string>();
+    const bool follows = mode == "host_default" || mode == "desktop_display";
+    for (const auto &named : client_modes) {
+      SCOPED_TRACE(mode + " / named=" + named);
+      const auto result = stream_display_policy::resolve_app_launch_as(mode, named);
+      EXPECT_EQ(result.verdict, follows ? verdict::follow :
+        (!named.empty() && named != mode ? verdict::conflict : verdict::pinned));
+      EXPECT_EQ(result.selection, follows ? "" : mode);
+    }
+    if (!follows) ++pinned;
+  }
+  EXPECT_EQ(pinned, 5u);
+}
+
+TEST(AppLaunchAsPolicyTests, MisspellingsWhitespaceAndHostOnlyModesNeverBecomePins) {
+  using verdict = stream_display_policy::app_launch_as_t::verdict_e;
+  for (const auto value : {"headless_dongle", "", "Host_Default", "Headless_Stream", " host_default", "host_default ", "mirror_desktop", "private_stream", "invalid", "turbo"}) {
+    SCOPED_TRACE(value);
+    const auto result = stream_display_policy::resolve_app_launch_as(value, "");
+    EXPECT_EQ(result.verdict, verdict::not_a_launch_mode);
+    EXPECT_TRUE(result.selection.empty());
+  }
+}
+
+TEST(AppLaunchAsPolicyTests, SharedVocabularyAndLabelsMatchAllSessionOverridablePaths) {
+  std::ifstream source {std::filesystem::path {POLARIS_SOURCE_DIR} / "tests/fixtures/app-launch-as-v1.json"};
+  ASSERT_TRUE(source.good());
+  const auto fixture = nlohmann::json::parse(source);
+  std::vector<std::string> expected;
+  for (const auto &row : fixture.at("values")) {
+    const auto mode = row.at("id").get<std::string>();
+    if (mode == "host_default") continue;
+    expected.push_back(mode);
+    EXPECT_EQ(stream_display_policy::label_for_selection(mode), row.at("label").get<std::string>());
+  }
+  std::vector<std::string> actual;
+  for (const auto &path : stream_path::registry()) {
+    if (stream_display_policy::selection_session_overridable(path.id)) actual.emplace_back(path.id);
+  }
+  std::sort(expected.begin(), expected.end());
+  std::sort(actual.begin(), actual.end());
+  EXPECT_EQ(actual, expected);
+  EXPECT_EQ(actual.size(), 6u);
+}
+
 TEST(StreamDisplayPolicyTests, LegacyBooleansMapToSelections) {
   using stream_display_policy::selection_from_legacy_booleans;
   using stream_display_policy::legacy_booleans_t;
@@ -386,45 +378,14 @@ TEST(StreamDisplayPolicyTests, LegacyBooleansMapToSelections) {
   EXPECT_EQ(selection_from_legacy_booleans({false, false, false}), "desktop_display");
 }
 
-TEST(StreamDisplayPolicyTests, LegacyVirtualDisplayLaunchPromotesOnlyWhenTheClientDidNotChoose) {
-  using stream_display_policy::effective_session_selection_for_launch;
-
-  EXPECT_EQ(
-    effective_session_selection_for_launch("", false, false, true, false),
-    "host_virtual_display"
-  );
-  EXPECT_EQ(
-    effective_session_selection_for_launch("", false, true, false, true),
-    "host_virtual_display"
-  );
-  EXPECT_EQ(
-    effective_session_selection_for_launch("", false, false, true, true),
-    ""
-  ) << "an explicit client virtual-display choice must beat the app default";
-  EXPECT_EQ(
-    effective_session_selection_for_launch("", false, false, true, false, true),
-    ""
-  ) << "optimizer false must suppress an unlocked legacy app default";
-  EXPECT_EQ(
-    effective_session_selection_for_launch("", false, true, true, false, true),
-    "host_virtual_display"
-  );
-  EXPECT_EQ(
-    effective_session_selection_for_launch("", true, true, true, false),
-    "desktop_display"
-  ) << "mirrorDesktop must override a host_virtual_display default for this session";
-  EXPECT_EQ(
-    effective_session_selection_for_launch("headless_stream", false, true, true, true),
-    "headless_stream"
-  ) << "an explicit accepted streamMode remains authoritative";
-  EXPECT_EQ(
-    effective_session_selection_for_launch("gamescope_stream", true, false, false, true),
-    "desktop_display"
-  ) << "explicit desktop mirroring must still beat a stale private streamMode";
-  EXPECT_EQ(
-    effective_session_selection_for_launch("headless_stream", false, false, true, false),
-    "host_virtual_display"
-  ) << "an unlocked paired mode must not override the app's display semantic";
+TEST(StreamDisplayPolicyTests, AnUnlockedClientVirtualDisplayPromotesOnlyWhenNothingWasChosen) {
+  using stream_display_policy::host_default_launch_selection;
+  EXPECT_EQ(host_default_launch_selection({}), "") << "Host default carries no app display preference";
+  EXPECT_EQ(host_default_launch_selection({.launch_virtual_display = true, .virtual_display_user_locked = true}), "host_virtual_display");
+  EXPECT_EQ(host_default_launch_selection({.launch_virtual_display = true, .virtual_display_optimization_present = true}), "host_virtual_display");
+  EXPECT_EQ(host_default_launch_selection({.mirror_desktop = true, .launch_virtual_display = true}), "desktop_display");
+  EXPECT_EQ(host_default_launch_selection({.requested_selection = "headless_stream", .launch_virtual_display = true, .virtual_display_user_locked = true}), "headless_stream");
+  EXPECT_EQ(host_default_launch_selection({.requested_selection = "gamescope_stream", .mirror_desktop = true, .virtual_display_user_locked = true}), "desktop_display");
 }
 
 TEST(StreamDisplayPolicyTests, PrivateAndVirtualModesOwnTheirLaunchRefreshRate) {
@@ -440,8 +401,8 @@ TEST(StreamDisplayPolicyTests, PrivateAndVirtualModesOwnTheirLaunchRefreshRate) 
 }
 
 TEST(StreamDisplayPolicyTests, HostVirtualClearsStaleAutoManage) {
-  if (!virtual_display::is_available()) {
-    GTEST_SKIP() << "host virtual display normalization requires an available backend";
+  if (!virtual_display::host_stream_readiness(true).available) {
+    GTEST_SKIP() << "host virtual display normalization requires a ready capture provider and creator";
   }
   LinuxDisplayPolicyGuard guard;
   std::string error;
@@ -2621,6 +2582,7 @@ TEST(StreamDisplayPolicyTests, ARequestUnderSteamGameModeNamesDesktopDiscoveryUn
   EXPECT_EQ(capture_request_override_reason("wlr", "", "desktop_display", false, false), "");
 }
 
+#ifdef POLARIS_BUILD_PORTAL
 namespace portal {
   platf::capture_route_t portal_capture_route_for_tests(std::string_view gamescope, std::string_view kwin);
 }
@@ -2667,6 +2629,8 @@ TEST(StreamDisplayPolicyTests, AModeRewriteAndARouteFallbackReachTheSessionsPubl
   EXPECT_EQ(json["capture_mode_override_reason"], "gamescope_session");
   EXPECT_EQ(json["capture_route_fallback_reason"], "gamescope_node_missing");
 }
+
+#endif // POLARIS_BUILD_PORTAL
 
 TEST(StreamDisplayPolicyTests, ASessionTakesPolarisConfAndTheRuleItsOwnGenerationMet) {
   LinuxDisplayPolicyGuard guard;

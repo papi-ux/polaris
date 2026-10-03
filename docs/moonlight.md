@@ -50,9 +50,9 @@ Which display the game lands on is decided by the host's launch mode, not by Moo
 default **Private Stream** runs the game on a private display without touching the host
 monitors; **Mirror Desktop** streams the visible desktop instead. The modes and how to choose
 one are in [Launch modes and capture paths](launch-modes.md). Moonlight cannot switch modes per
-launch the way Nova can; the host's saved choice applies. The host can still give a Moonlight
-library more than one way to play, one app entry each
-([what the host can set](compatibility.md#what-the-host-can-do-for-a-moonlight-player)).
+launch the way Nova can; the host's saved choice applies, unless the app's **Launch as** names
+another mode. That is how one Moonlight library offers more than one way to play
+([Launch as](apps.md#launch-as)).
 
 On a **Private Stream** host, a Steam game cannot start while Steam is open on the host desktop,
 and the launch is refused. To have Polaris quit desktop Steam first and then start the game, turn

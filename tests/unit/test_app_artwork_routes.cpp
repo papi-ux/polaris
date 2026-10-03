@@ -82,7 +82,17 @@ TEST(AppArtworkRoutes, RoutesNeedTheConsoleSessionCsrfAndJson) {
             std::string::npos);
   EXPECT_NE(source.find(R"(server.resource["^/api/apps/artwork/find$"]["POST"] = withCsrf(findAppArtwork);)"),
             std::string::npos);
-  EXPECT_NE(source.find(R"(server.resource["^/api/covers/apply-missing$"]["POST"] = withCsrf(applyMissingCover);)"), std::string::npos);
+  const auto actions = handler_body(source, "void registerCoverActions(");
+  EXPECT_NE(actions.find("return withCsrf("), std::string::npos);
+  EXPECT_NE(actions.find("handler(response, request, workers, cover_post_for(server));"), std::string::npos);
+  for (const auto *binding : {
+         R"(server.resource["^/api/covers/select$"]["POST"] = route(selectCover);)",
+         R"(server.resource["^/api/covers/apply-missing$"]["POST"] = route(applyMissingCover);)",
+         R"(server.resource["^/api/covers/key/check$"]["POST"] = route(checkCoversKey);)",
+         R"(server.resource["^/api/covers/download$"]["POST"] = route(downloadCover);)",
+       }) {
+    EXPECT_NE(actions.find(binding), std::string::npos) << binding;
+  }
   for (const auto *signature : {"void removeAppArtwork(", "void findAppArtwork("}) {
     const auto body = handler_body(source, signature);
     const auto guard = body.find("validateContentType(response, request, \"application/json\") || !authenticate(response, request)");
@@ -174,7 +184,7 @@ TEST(AppCoverSearch, StoresAPickedPosterUnderItsUuidInTheFormatItReallyIs) {
   ASSERT_TRUE(confighttp::store_selected_cover(coverdir, APP_UUID, "image/jpeg", jpeg).has_value());
   EXPECT_FALSE(std::filesystem::exists(coverdir / (std::string(APP_UUID) + ".png")));
   const auto select = handler_body(read_source("src/confighttp.cpp"), "void selectCover(");
-  EXPECT_NE(select.find("keep = app.image_path"), std::string::npos);
+  EXPECT_NE(select.find("current ? fs::path(current->second) : fs::path {}"), std::string::npos);
 
   EXPECT_FALSE(confighttp::store_selected_cover(coverdir, "../escape", "image/png", png).has_value());
   EXPECT_FALSE(confighttp::store_selected_cover(coverdir, APP_UUID, "image/gif", png).has_value());
@@ -204,7 +214,9 @@ TEST(AppCoverSearch, TheConsoleSearchIsNovasSearchAndNeverLoadsImagesFromOutside
   EXPECT_EQ(select.find("download_file"), std::string::npos);
   // A listed poster previews as a thumbnail, so the pick stores the full image behind it.
   EXPECT_LT(select.find("cover_image_for_pick("), select.find("store_selected_cover("));
-  EXPECT_NE(select.find("picked.image->mime_type, picked.image->body"), std::string::npos);
+  const auto stored_image = handler_body(select, "const auto path = store_selected_cover(", "if (!path)");
+  EXPECT_NE(stored_image.find("picked.image->mime_type"), std::string::npos);
+  EXPECT_NE(stored_image.find("picked.image->body"), std::string::npos);
 
   // A game's posters: Nova's alternatives listing for the poster kind, behind the console session and CSRF.
   EXPECT_NE(search.find(R"({"provider_game_id", found.candidate.provider_game_id})"), std::string::npos);
@@ -218,7 +230,9 @@ TEST(AppCoverSearch, TheConsoleSearchIsNovasSearchAndNeverLoadsImagesFromOutside
   EXPECT_NE(source.find(R"(server.resource["^/api/covers/choices$"]["POST"] = withCsrf([&workers, transport_override])"), std::string::npos);
 
   EXPECT_NE(source.find(R"(server.resource["^/api/covers/preview/([0-9a-f]{32})$"]["GET"] = previewCover;)"), std::string::npos);
-  EXPECT_NE(source.find(R"(server.resource["^/api/covers/select$"]["POST"] = withCsrf(selectCover);)"), std::string::npos);
+  const auto actions = handler_body(source, "void registerCoverActions(");
+  EXPECT_NE(actions.find("return withCsrf("), std::string::npos);
+  EXPECT_NE(actions.find(R"(server.resource["^/api/covers/select$"]["POST"] = route(selectCover);)"), std::string::npos);
 
   const auto nova = read_source("src/nvhttp.cpp");
   const auto nova_search = handler_body(nova, "auto polarisSearchGameArtworkMatches = ", "\n    };\n");
@@ -227,27 +241,34 @@ TEST(AppCoverSearch, TheConsoleSearchIsNovasSearchAndNeverLoadsImagesFromOutside
 }
 
 TEST(AppsFile, EveryChangeTakesOneLock) {
-  // The console's handlers share a thread, but a finished install rewrites apps.json from its
-  // own, so a save and an install landing together would lose one side's change.
+  // Check each writer's fresh read under its own lock, rather than a global occurrence
+  // count: a worker-backed download legitimately locks admission and publication separately.
   const auto source = read_source("src/confighttp.cpp");
   EXPECT_NE(source.find("std::mutex &apps_file_mutex()"), std::string::npos);
-  constexpr std::string_view taken = "std::scoped_lock apps_lock(apps_file_mutex());";
-  std::size_t locks = 0;
-  for (auto at = source.find(taken); at != std::string::npos; at = source.find(taken, at + 1)) {
-    ++locks;
-  }
-  // saveApp, reorderApps, deleteApp, importGames, the install job's own rewrite, downloadCover,
-  // the cover sweep reading its scope, and conditional cover publication.
-  EXPECT_EQ(locks, 8u);
+  const auto expect_locked_read = [](const std::string &body, const char *read, const char *context) {
+    const auto lock_at = body.find("std::scoped_lock apps_lock(apps_file_mutex());");
+    const auto read_at = body.find(read);
+    ASSERT_NE(lock_at, std::string::npos) << context;
+    ASSERT_NE(read_at, std::string::npos) << context;
+    EXPECT_LT(lock_at, read_at) << context;
+  };
   for (const auto *signature : {"void saveApp(", "void reorderApps(", "void deleteApp(", "void importGames(",
-                                "void downloadCover(", "void startCoverSweep(", "void applyMissingCover("}) {
-    const auto body = handler_body(source, signature);
-    const auto lock = body.find("std::scoped_lock apps_lock(apps_file_mutex());");
-    const auto read = body.find("read_file(config::stream.file_apps.c_str())");
-    EXPECT_NE(lock, std::string::npos) << signature;
-    EXPECT_NE(read, std::string::npos) << signature;
-    EXPECT_LT(lock, read) << signature;
+                                "void startCoverSweep("}) {
+    expect_locked_read(handler_body(source, signature), "read_file(config::stream.file_apps.c_str())", signature);
   }
+  expect_locked_read(handler_body(source, "void refresh_emulator_entry_commands(", "\n    }\n"),
+                     "read_file(config::stream.file_apps.c_str())", "installer's entry rewrite");
+  expect_locked_read(handler_body(source, "void applyMissingCover("),
+                     "read_file(apps_file.c_str())", "conditional cover publication");
+
+  const auto download = handler_body(source, "void downloadCover(");
+  const auto submitted = download.find("submit_cover_action(");
+  const auto completion = download.find("return [response, headers, stage, apps_file");
+  ASSERT_NE(submitted, std::string::npos);
+  ASSERT_NE(completion, std::string::npos);
+  ASSERT_LT(submitted, completion);
+  expect_locked_read(download.substr(0, submitted), "read_file(apps_file.c_str())", "download admission");
+  expect_locked_read(download.substr(completion), "read_file(apps_file.c_str())", "download publication");
 }
 
 TEST(AppCoverSearch, SavingAChosenCoverTakesThePosterBackFromNova) {

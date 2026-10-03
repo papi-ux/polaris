@@ -62,6 +62,9 @@ namespace fs = std::filesystem;
 
 namespace virtual_display {
   namespace {
+#ifdef POLARIS_TESTS
+    thread_local std::optional<host_stream_probe_for_tests_t> host_stream_test_probe;
+#endif
     constexpr auto backend_detection_cache_ttl = 30s;
     std::mutex backend_detection_mutex;
     std::optional<backend_e> cached_backend;
@@ -2896,6 +2899,15 @@ namespace virtual_display {
       std::string *kwin_reason = nullptr,
       backend_preference_e *preference_out = nullptr
     ) {
+#ifdef POLARIS_TESTS
+      if (host_stream_test_probe) {
+        ++host_stream_test_probe->creator_calls;
+        if (evdi_blocked) *evdi_blocked = false;
+        if (kwin_reason) *kwin_reason = host_stream_test_probe->creator_reason;
+        if (preference_out) *preference_out = backend_preference_e::AUTO;
+        return host_stream_test_probe->backend;
+      }
+#endif
       // Detection touches both the cache and lazily initialized backend state
       // (including the EVDI library handle). Keep the full probe serialized,
       // rather than protecting only the two cache assignments.
@@ -3006,6 +3018,134 @@ namespace virtual_display {
         return true;
     }
     return false;
+  }
+
+#ifdef POLARIS_TESTS
+  void set_host_stream_probe_for_tests(std::optional<host_stream_probe_for_tests_t> probe) {
+    host_stream_test_probe = std::move(probe);
+  }
+  int host_stream_creator_probe_count_for_tests() {
+    return host_stream_test_probe ? host_stream_test_probe->creator_calls : 0;
+  }
+  int host_stream_permission_count_for_tests() {
+    return host_stream_test_probe ? host_stream_test_probe->permission_calls : 0;
+  }
+#endif
+
+
+  namespace {
+    capture_provider_snapshot_t host_provider_snapshot(bool fresh) {
+#ifdef POLARIS_TESTS
+      if (host_stream_test_probe) {
+        ++host_stream_test_probe->registry_calls;
+        return host_stream_test_probe->permission_prepared ? host_stream_test_probe->after_bootstrap : host_stream_test_probe->initial;
+      }
+#endif
+#ifdef POLARIS_BUILD_WAYLAND
+      return probe_capture_provider(fresh);
+#else
+      return {};
+#endif
+    }
+
+    std::string host_provider_refusal(capture_provider_state_e provider) {
+      switch (provider) {
+        case capture_provider_state_e::no_wayland:
+          return "Host Virtual Display streaming needs a supported Wayland capture provider. Use Mirror Desktop or Private Stream on this host.";
+        case capture_provider_state_e::unknown:
+          return "Polaris could not verify the Host Virtual Display capture provider. Check that its Wayland connection is available, or use Mirror Desktop or Private Stream.";
+        case capture_provider_state_e::recoverable_withheld:
+          return "KWin still withholds the screencast protocol from Polaris after its permission setup. Check the Host Virtual Display troubleshooting steps and restart Polaris.";
+        default:
+          return "Host Virtual Display streaming needs output-pinned KWin capture for this backend, or native Hyprland capture with the Hyprland backend. A generic desktop portal cannot capture this display safely. Use Mirror Desktop or Private Stream.";
+      }
+    }
+  }
+
+  host_stream_readiness_t host_stream_readiness(bool fresh) {
+    auto snapshot = host_provider_snapshot(fresh);
+    auto provider = classify_capture_provider(snapshot);
+    host_stream_readiness_t result {.provider = provider};
+    if (provider == capture_provider_state_e::no_wayland || provider == capture_provider_state_e::unknown ||
+        provider == capture_provider_state_e::unsupported) {
+      result.reason = host_provider_refusal(provider);
+      return result; // before creator module/permission probes or display mutation
+    }
+    bool evdi_blocked = false;
+    std::string kwin_reason;
+    backend_preference_e preference;
+    result.backend = detect_backend_with_cache_policy(fresh, &evdi_blocked, &kwin_reason, &preference);
+    // Existing KWin creator detection may have registered permission; other
+    // creators do not. A fresh read distinguishes the result without assuming
+    // that creation readiness means permission setup ran.
+    if (provider == capture_provider_state_e::recoverable_withheld && result.backend != backend_e::WAYLAND_WLR) {
+      snapshot = host_provider_snapshot(true);
+      provider = classify_capture_provider(snapshot);
+      result.provider = provider;
+    }
+    if (result.backend == backend_e::WAYLAND_WLR && snapshot.state == registry_state_e::complete &&
+        snapshot.xdg_output && snapshot.wlr_screencopy) {
+      provider = capture_provider_state_e::native_wlr;
+      result.provider = provider;
+    }
+    if (provider == capture_provider_state_e::unknown || provider == capture_provider_state_e::no_wayland ||
+        provider == capture_provider_state_e::unsupported) {
+      result.reason = host_provider_refusal(provider);
+      return result;
+    }
+    const bool creator_ready = backend_has_required_configuration(result.backend, host_virtual_display_connector());
+    if (!creator_ready) {
+      result.reason = result.backend == backend_e::NONE && preference != backend_preference_e::AUTO ?
+        forced_backend_unavailable_reason(preference, preference == backend_preference_e::KWIN ? kwin_reason : std::string {}) :
+        unavailable_reason_for(result.backend, evdi_blocked, !host_virtual_display_connector().empty());
+      return result;
+    }
+    const bool capture_ready = result.backend == backend_e::WAYLAND_WLR ?
+      provider == capture_provider_state_e::native_wlr :
+      (provider == capture_provider_state_e::kwin || provider == capture_provider_state_e::recoverable_withheld);
+#ifndef POLARIS_BUILD_PORTAL
+    // WLR capture is independent of the portal build. Other creators force the
+    // portal/KWin producer, so cannot stream when that producer was not built.
+    if (result.backend != backend_e::WAYLAND_WLR) {
+      result.reason = "This Polaris build has no output-pinned KWin capture support. Use Mirror Desktop or Private Stream.";
+      return result;
+    }
+#endif
+    result.available = capture_ready;
+    if (!capture_ready) result.reason = host_provider_refusal(capture_provider_state_e::unsupported);
+    return result;
+  }
+
+
+  host_stream_readiness_t prepare_host_stream_capture() {
+    auto result = host_stream_readiness(true);
+    if (!result.available || result.backend == backend_e::WAYLAND_WLR ||
+        result.provider != capture_provider_state_e::recoverable_withheld) return result;
+#ifdef POLARIS_TESTS
+    if (host_stream_test_probe) {
+      ++host_stream_test_probe->permission_calls;
+      host_stream_test_probe->permission_prepared = true;
+      result.provider = classify_capture_provider(host_provider_snapshot(true));
+      result.available = result.provider == capture_provider_state_e::kwin;
+      if (!result.available) result.reason = host_stream_test_probe->creator_reason.empty() ?
+        host_provider_refusal(result.provider) : host_stream_test_probe->creator_reason;
+      return result;
+    }
+#endif
+#ifdef POLARIS_HAS_KWIN_VIRTUAL_OUTPUT
+    // Permission semantics/failure explanations are shared with the original
+    // KWin actuator. This is called only for an actual HVD launch, after its
+    // app mode and immutable output policy won precedence, before creation.
+    const auto prepared = kwin_virtual_output::prepare_capture();
+    result.provider = classify_capture_provider(host_provider_snapshot(true));
+    result.available = prepared.available && result.provider == capture_provider_state_e::kwin;
+    result.reason = prepared.reason;
+    if (prepared.available && !result.available) result.reason = host_provider_refusal(result.provider);
+#else
+    result.available = false;
+    result.reason = "This Polaris build has no output-pinned KWin capture support. Use Mirror Desktop or Private Stream.";
+#endif
+    return result;
   }
 
   bool is_available() {

@@ -2,6 +2,9 @@
 // a renderer, the labels live in the locale files, and the host settings
 // projection can feed the stream display and provenance rows when it is served.
 
+import { streamClientFamilyLabel } from './client-family.js'
+import { judgedVideoFrameLoss } from './diagnostics-export.js'
+
 export function formatNumber(value, digits = 1) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) {
     return '0'
@@ -11,6 +14,28 @@ export function formatNumber(value, digits = 1) {
 
 export function formatFps(value) {
   return `${formatNumber(value, 1)} FPS`
+}
+
+// The loss Doctor judged over the host's window, as a share of video frames, or words saying why it has
+// no figure, which follow "video frame loss": a zero here would claim a measurement nobody made. A
+// Moonlight or Artemis client never sends the reports it is judged from.
+export function formatJudgedLoss(s = {}, t) {
+  const loss = judgedVideoFrameLoss(s)
+  if (loss) return `${loss.pct.toFixed(2)}%`
+  if (s?.client_family === 'moonlight') return t('troubleshooting.snapshot_loss_not_reported')
+  if (s?.network_verdict?.loss_state === 'stale') return t('troubleshooting.snapshot_loss_stale')
+  return t('troubleshooting.snapshot_loss_not_judged')
+}
+
+// A figure reads "1.87% video frame loss", its absence "video frame loss not judged yet".
+function lossKey(s, key) {
+  return judgedVideoFrameLoss(s) ? key : `${key}_unjudged`
+}
+
+// The window's median round trip, the figure Doctor judges, or the newest reading before it has one.
+export function formatJudgedRtt(s = {}) {
+  const median = s?.network_verdict?.rtt_median_ms
+  return formatNumber(typeof median === 'number' && Number.isFinite(median) ? median : s.latency_ms, 1)
 }
 
 export function formatResolution(width, height, t) {
@@ -31,11 +56,11 @@ export function summarizeStreamStats(s = {}, t) {
     }
     return t('troubleshooting.snapshot_no_active_stream')
   }
-  return t('troubleshooting.snapshot_stream_summary', {
+  return t(lossKey(s, 'troubleshooting.snapshot_stream_summary'), {
     fps: formatFps(s.fps),
     target: formatFps(s.session_target_fps || s.requested_client_fps),
     kbps: s.bitrate_kbps || 0,
-    loss: formatNumber(s.packet_loss, 2),
+    loss: formatJudgedLoss(s, t),
     encode: formatNumber(s.encode_time_ms, 1),
   })
 }
@@ -107,6 +132,17 @@ export function networkPathDescription(path, t) {
   return t(`troubleshooting.snapshot_network_path_${kind.replace('-', '_')}`)
 }
 
+// Nova or Moonlight / Artemis, as the Devices page names it. A Moonlight-protocol client also says
+// what it cannot use, because nothing else on the page tells a Moonlight player that.
+function clientFamilyRow(s, t) {
+  const row = {
+    label: t('troubleshooting.snapshot_client_family'),
+    value: streamClientFamilyLabel(s.client_family) || t('troubleshooting.snapshot_unknown'),
+  }
+  if (s.client_family === 'moonlight') row.note = t('troubleshooting.snapshot_client_family_moonlight_note')
+  return row
+}
+
 function networkPathRow(s, t) {
   const row = { label: t('troubleshooting.snapshot_network_path'), value: networkPathDescription(s.client_network_path, t) }
   const kind = String(s.client_network_path || '').toLowerCase()
@@ -166,6 +202,7 @@ export function buildSessionSnapshotRows(stats, t, { streamDisplay = null, prove
     { label: t('troubleshooting.snapshot_fps'), value: t('troubleshooting.snapshot_fps_value', { encoded: formatFps(s.fps), target: formatFps(s.session_target_fps) }) },
     { label: t('troubleshooting.snapshot_bitrate'), value: t('troubleshooting.snapshot_bitrate_value', { kbps: s.bitrate_kbps || 0 }) },
     { label: t('troubleshooting.snapshot_client_ip'), value: s.client_ip || unknown },
+    clientFamilyRow(s, t),
     networkPathRow(s, t),
     { label: t('troubleshooting.snapshot_display_mode'), value: displayModeDecisionDescription(s.display_mode_decision, t) },
     { label: t('troubleshooting.snapshot_active_sessions'), value: `${s.active_sessions ?? 0}` },
@@ -182,7 +219,7 @@ export function buildSessionSnapshotRows(stats, t, { streamDisplay = null, prove
     { label: t('troubleshooting.snapshot_cpu_copy'), value: yesNo(s.capture_cpu_copy, t) },
     { label: t('troubleshooting.snapshot_pacing_policy'), value: s.pacing_policy || t('troubleshooting.snapshot_none_word') },
     { label: t('troubleshooting.snapshot_optimization_source'), value: s.optimization_source || t('troubleshooting.snapshot_default_word') },
-    { label: t('troubleshooting.snapshot_network'), value: t('troubleshooting.snapshot_network_value', { latency: formatNumber(s.latency_ms, 1), loss: formatNumber(s.packet_loss, 2) }) },
+    { label: t('troubleshooting.snapshot_network'), value: t(lossKey(s, 'troubleshooting.snapshot_network_value'), { latency: formatJudgedRtt(s), loss: formatJudgedLoss(s, t) }) },
     { label: t('troubleshooting.snapshot_frame_delivery'), value: t('troubleshooting.snapshot_frame_delivery_value', { duplicate: formatNumber((s.duplicate_frame_ratio || 0) * 100, 2), dropped: formatNumber((s.dropped_frame_ratio || 0) * 100, 2) }) },
     { label: t('troubleshooting.snapshot_frame_timing'), value: t('troubleshooting.snapshot_frame_timing_value', { age: formatNumber(s.avg_frame_age_ms, 2), error: formatNumber(s.frame_interval_error_ms ?? s.frame_jitter_ms, 2) }) },
   ]

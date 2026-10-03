@@ -576,19 +576,44 @@ export function describeLinuxGpuProfile(stats = {}) {
   return `${vaapiLabel} is active. Compare the reported capture path, render node, and encoder adapter before changing advanced capture flags.`
 }
 
+// The one loss figure Doctor grades with and the session status carries:
+// video frames the client never received whole, after FEC recovery, over the host's window, with
+// the frame counts behind it. Null until the host has judged some, so nothing here grades one second.
+export function judgedVideoFrameLoss(stats = {}) {
+  const verdict = stats?.network_verdict
+  if (!verdict || typeof verdict !== 'object') return null
+  const pct = verdict.loss_pct
+  if (typeof pct !== 'number' || !Number.isFinite(pct) || pct < 0 || pct > 100) return null
+  const count = (value) => (Number.isInteger(value) && value >= 0 ? value : null)
+  return {
+    pct,
+    state: typeof verdict.loss_state === 'string' ? verdict.loss_state : '',
+    framesLost: count(verdict.frames_lost),
+    framesExpected: count(verdict.frames_expected),
+    windowSeconds: Number.isInteger(verdict.window_seconds) && verdict.window_seconds > 0 ? verdict.window_seconds : 20,
+  }
+}
+
+// "1.9% of video frames never arrived whole after FEC over the last 20 s (18 of 963)"
+export function describeVideoFrameLoss(loss) {
+  const counts = loss.framesLost !== null && loss.framesExpected !== null
+    ? ` (${loss.framesLost} of ${loss.framesExpected})`
+    : ''
+  return `${loss.pct.toFixed(1)}% of video frames never arrived whole after FEC over the last ${loss.windowSeconds} s${counts}`
+}
+
 export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, logs = '', recentIssues = [] } = {}) {
   const streaming = Boolean(stats?.streaming)
   const liveTelemetry = statsConnected && streaming
-  const packetLoss = stats?.packet_loss
   const encodeTime = stats?.encode_time_ms
-  // Match Doctor's current-media window. Control-channel estimates and cached
-  // values from an ended session cannot establish media loss or justify tuning.
+  // Match Doctor: the host's windowed figure, while the client's media reports are current, which
+  // the host takes to be five seconds. Control-channel estimates and cached values from an ended
+  // session cannot establish video loss or justify tuning.
+  const judgedLoss = judgedVideoFrameLoss(stats)
   const mediaLossAge = stats?.media_loss_last_received_age_ms
-  const currentMediaLoss = liveTelemetry &&
-    stats?.packet_loss_available === true && stats?.packet_loss_source === 'media_transport' &&
+  const currentMediaLoss = liveTelemetry && judgedLoss !== null &&
     Number.isInteger(stats?.media_loss_sample_revision) && stats.media_loss_sample_revision > 0 &&
-    Number.isFinite(mediaLossAge) && mediaLossAge >= 0 && mediaLossAge <= 2000 &&
-    Number.isFinite(packetLoss) && packetLoss >= 0 && packetLoss <= 100
+    Number.isFinite(mediaLossAge) && mediaLossAge >= 0 && mediaLossAge <= 5000
   const captureKnown = Boolean(stats?.capture_path || stats?.capture_transport || stats?.capture_path_reason)
   const captureCpuCopy = Boolean(stats?.capture_cpu_copy)
   const capturePressure = capturePressureActive(stats)
@@ -620,14 +645,14 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
   const displayMode = displayModeOverrideItem(stats)
 
   const loss = currentMediaLoss
-    ? packetLoss > 2
-      ? checklistItem('packet-loss', 'Packet loss', 'fail', `Packet loss is ${packetLoss.toFixed(1)}%, which can look like stutter before the encoder is at fault.`, 'Try wired/5 GHz, lower bitrate, or enable FEC before changing encoder settings.')
-      : packetLoss > 0.5
-        ? checklistItem('packet-loss', 'Packet loss', 'warning', `Packet loss is ${packetLoss.toFixed(1)}%; watch for artifacts and input delay.`, 'Lower bitrate one step and re-test the same scene.')
-        : checklistItem('packet-loss', 'Packet loss', 'pass', `Packet loss is ${packetLoss.toFixed(1)}%.`, 'Network is not the loudest signal right now.')
+    ? judgedLoss.state === 'elevated'
+      ? checklistItem('packet-loss', 'Video frame loss', 'fail', `${describeVideoFrameLoss(judgedLoss)}, which Doctor calls network pressure. It can look like stutter before the encoder is at fault.`, 'Try wired/5 GHz, lower bitrate, or enable FEC before changing encoder settings.')
+      : judgedLoss.state === 'light'
+        ? checklistItem('packet-loss', 'Video frame loss', 'warning', `${describeVideoFrameLoss(judgedLoss)}, below the 2% Doctor calls network pressure; watch for artifacts.`, 'Re-test the same scene before changing bitrate; Doctor acts on loss from 2%.')
+        : checklistItem('packet-loss', 'Video frame loss', 'pass', `${describeVideoFrameLoss(judgedLoss)}.`, 'Network is not the loudest signal right now.')
     : liveTelemetry
-      ? checklistItem('packet-loss', 'Packet loss', 'info', 'No current confirmed media packet-loss measurement is available for this active stream.', 'Control-channel estimates are context only; media packet loss remains unmeasured until this client reports fresh media counters.')
-      : checklistItem('packet-loss', 'Packet loss', 'warning', 'No current confirmed media packet-loss measurement is available.', 'Start a live stream and wait for fresh media-loss telemetry.')
+      ? checklistItem('packet-loss', 'Video frame loss', 'info', 'No current confirmed video frame loss measurement is available for this active stream.', 'Control-channel estimates are context only; video frame loss stays unmeasured until this client reports fresh media counters.')
+      : checklistItem('packet-loss', 'Video frame loss', 'warning', 'No current confirmed video frame loss measurement is available.', 'Start a live stream and wait for fresh media-loss telemetry.')
 
   const captureFrameAge = Number(stats?.avg_frame_age_ms)
   const capture = !liveTelemetry
@@ -786,9 +811,10 @@ function summarizeActiveStream(stats = {}) {
   const fps = formatIssueNumber(stats.fps, 1)
   const target = formatIssueNumber(stats.session_target_fps || stats.requested_client_fps, 1)
   const bitrate = formatIssueValue(stats.bitrate_kbps ?? stats.bitrate, 'unknown')
-  const loss = formatIssueNumber(stats.packet_loss, 2)
+  const judgedLoss = judgedVideoFrameLoss(stats)
+  const loss = judgedLoss ? `${judgedLoss.pct.toFixed(2)}%` : 'unknown'
   const encode = formatIssueNumber(stats.encode_time_ms, 1)
-  return `${streaming}, ${fps} FPS / ${target} target, ${bitrate} kbps, ${loss}% loss, ${encode} ms encode`
+  return `${streaming}, ${fps} FPS / ${target} target, ${bitrate} kbps, ${loss} video frame loss, ${encode} ms encode`
 }
 
 function formatRecentIssues(recentIssues = []) {
@@ -971,19 +997,6 @@ function worstStatus(items = []) {
   return items.reduce((worst, item) => statusRank(item.status) > statusRank(worst) ? item.status : worst, 'pass')
 }
 
-function average(values = []) {
-  const numeric = values.map(Number).filter(Number.isFinite)
-  if (!numeric.length) return null
-  return numeric.reduce((sum, value) => sum + value, 0) / numeric.length
-}
-
-function jitter(values = []) {
-  const numeric = values.map(Number).filter(Number.isFinite)
-  if (numeric.length < 2) return null
-  const deltas = numeric.slice(1).map((value, index) => Math.abs(value - numeric[index]))
-  return average(deltas)
-}
-
 function isPrivateHost(host = '') {
   const value = String(host || '').toLowerCase()
   return value === 'localhost' ||
@@ -1019,26 +1032,11 @@ function nativeProbePortDetail(port) {
   return `${port.label || port.key || 'Port'}${endpoint ? ` ${endpoint}` : ''}: ${status}${detail ? ` (${detail})` : ''}`
 }
 
-function nativeProbeSamples(nativeProbe = {}) {
-  const samples = nativeProbe.samples || nativeProbe.latency || {}
-  const latencySamples = Array.isArray(samples.latencyMs)
-    ? samples.latencyMs
-    : Array.isArray(samples.pingSamplesMs)
-      ? samples.pingSamplesMs
-      : Array.isArray(nativeProbe.pingSamplesMs)
-        ? nativeProbe.pingSamplesMs
-        : []
-  return {
-    latencySamples,
-    jitterMs: samples.jitterMs ?? nativeProbe.jitterMs,
-    packetLossPercent: samples.packetLossPercent ?? nativeProbe.packetLossPercent,
-  }
-}
-
 function formatNativeProbeEvidence(nativeProbe = {}) {
   const ports = Array.isArray(nativeProbe.ports) ? nativeProbe.ports : []
   const lines = [
     `Native evidence: ${nativeProbe.classification || 'unknown'}${nativeProbe.targetHost ? ` path to ${nativeProbe.targetHost}` : ''}`,
+    'Local listeners and UDP hints only; raw samples are separate, ungraded evidence for client media quality.',
     ...ports.map(nativeProbePortDetail),
     ...(Array.isArray(nativeProbe.notes) ? nativeProbe.notes : []),
   ].filter(Boolean)
@@ -1047,53 +1045,43 @@ function formatNativeProbeEvidence(nativeProbe = {}) {
 
 export function buildNetworkPathTestReport(input = {}) {
   const nativeProbe = input.nativeProbe && typeof input.nativeProbe === 'object' ? input.nativeProbe : null
-  const nativeSamples = nativeProbe ? nativeProbeSamples(nativeProbe) : {}
-  const samples = Array.isArray(nativeSamples.latencySamples) && nativeSamples.latencySamples.length
-    ? nativeSamples.latencySamples.map(Number).filter(Number.isFinite)
-    : Array.isArray(input.pingSamplesMs)
-      ? input.pingSamplesMs.map(Number).filter(Number.isFinite)
-      : []
-  const latency = average(samples)
-  const sampleJitter = Number.isFinite(Number(nativeSamples.jitterMs)) ? Number(nativeSamples.jitterMs) : jitter(samples)
-  const loss = Number(nativeSamples.packetLossPercent ?? input.packetLossPercent ?? input.packet_loss ?? input.lossPercent)
   const host = nativeProbe?.targetHost || input.host || input.originHostname || input.hostname || ''
   const nativeClassification = lower(nativeProbe?.classification)
-  const lanLike = nativeClassification ? ['pc', 'lan', 'local'].includes(nativeClassification) : isPrivateHost(host) || input.lan === true
+  const hostLocal = nativeClassification === 'pc'
+  // This endpoint checks local listeners and has no target-bound, fresh client-media sampling
+  // contract. Keep its raw sample object in advanced evidence, without grading it or borrowing
+  // another stream's counters. Numeric values alone do not establish that missing provenance.
+  const lanLike = nativeClassification ? ['lan', 'local'].includes(nativeClassification) : isPrivateHost(host) || input.lan === true
   const vpnLike = nativeClassification === 'vpn'
-  const pathLabel = lanLike ? 'LAN/local' : vpnLike ? 'VPN' : 'remote/VPN'
+  const pathLabel = hostLocal ? 'Host-local' : lanLike ? 'LAN/local' : vpnLike ? 'VPN' : 'remote/VPN'
   const controlPort = nativeProbePort(nativeProbe || {}, /(control|https)/i)
   const streamPorts = Array.isArray(nativeProbe?.ports) ? nativeProbe.ports.filter((port) => /(stream|video|audio|rtsp|udp)/i.test(String(port.key || port.label || ''))) : []
   const streamPortFailed = streamPorts.some((port) => normalizeProbeStatus(port.status) === 'fail')
-  const streamPortPassed = streamPorts.length > 0 && streamPorts.every((port) => normalizeProbeStatus(port.status) !== 'fail') && streamPorts.some((port) => normalizeProbeStatus(port.status) === 'pass')
-  const currentBitrate = Number(input.currentBitrateKbps ?? input.bitrateKbps ?? input.bitrate_kbps)
-  const latencyPenalty = Number.isFinite(latency) && latency > 60 ? 0.55 : Number.isFinite(latency) && latency > 30 ? 0.75 : 1
-  const jitterPenalty = Number.isFinite(sampleJitter) && sampleJitter > 15 ? 0.7 : 1
-  const lossPenalty = Number.isFinite(loss) && loss > 2 ? 0.45 : Number.isFinite(loss) && loss > 0.5 ? 0.7 : 1
-  const fallbackBitrate = lanLike ? 50000 : 30000
-  const bitrateBase = Number.isFinite(currentBitrate) && currentBitrate > 0 ? currentBitrate : fallbackBitrate
-  const recommendedBitrateKbps = Math.max(8000, Math.min(bitrateBase, Math.round(bitrateBase * latencyPenalty * jitterPenalty * lossPenalty / 1000) * 1000))
+  const streamPortPassed = streamPorts.length > 0 && streamPorts.every((port) => normalizeProbeStatus(port.status) === 'pass')
+  // Listener checks, UDP hints and unrelated stream targets do not measure a bitrate ceiling.
+  const recommendedBitrateKbps = null
 
   const checks = [
     checklistItem(
       'host-reachable',
-      'Host reachable',
-      nativeProbe?.hostReachable === false ? 'fail' : nativeProbe?.hostReachable === true ? 'pass' : input.hostReachable === false ? 'fail' : samples.length || input.hostReachable === true ? 'pass' : 'warning',
-      samples.length ? `${samples.length} latency sample${samples.length === 1 ? '' : 's'} collected.` : nativeProbe ? 'Polaris server returned native reachability evidence for this Web UI request.' : 'Browser-side reachability is inferred from the Web UI session.',
-      samples.length || nativeProbe ? 'Keep this host address for the client test.' : 'Open this page from the same client/network you plan to stream from.'
+      'Web UI reachable',
+      nativeProbe ? nativeProbe.hostReachable === false ? 'fail' : nativeProbe.hostReachable === true ? 'pass' : 'warning' : input.hostReachable === false ? 'fail' : input.hostReachable === true ? 'pass' : 'warning',
+      nativeProbe ? 'Polaris answered this Web UI request; client media reachability is not measured by it.' : 'Browser-side reachability is inferred from the Web UI session.',
+      hostLocal || !nativeProbe ? 'Open this page from the device/network you plan to stream from.' : 'Verify media reachability with the streaming client.'
     ),
     checklistItem(
       'control-port',
-      'Control port',
-      controlPort ? normalizeProbeStatus(controlPort.status) : input.controlPortOpen === false ? 'fail' : input.controlPortOpen === true ? 'pass' : 'warning',
-      controlPort ? nativeProbePortDetail(controlPort) : input.controlPortOpen === true ? 'Control/pairing path is reachable.' : input.controlPortOpen === false ? 'Control/pairing port did not respond.' : 'Control port was not directly tested by this browser.',
-      (controlPort && normalizeProbeStatus(controlPort.status) === 'fail') || input.controlPortOpen === false ? 'Check host firewall/NAT before pairing.' : 'If pairing fails, verify the HTTPS/control port from the client network.'
+      nativeProbe ? 'Local control TCP listener' : 'Control port',
+      nativeProbe ? controlPort ? normalizeProbeStatus(controlPort.status) : 'warning' : input.controlPortOpen === false ? 'fail' : input.controlPortOpen === true ? 'pass' : 'warning',
+      controlPort ? nativeProbePortDetail(controlPort) : nativeProbe ? 'Local control listener was not checked.' : input.controlPortOpen === true ? 'Control/pairing path is reachable.' : input.controlPortOpen === false ? 'Control/pairing port did not respond.' : 'Control port was not directly tested by this browser.',
+      (controlPort && normalizeProbeStatus(controlPort.status) === 'fail') || (!nativeProbe && input.controlPortOpen === false) ? 'Check the host\'s mapped listener; verify firewall/NAT separately from the client.' : 'If pairing fails, verify the HTTPS/control port from the client network.'
     ),
     checklistItem(
       'stream-port',
-      'Stream ports',
-      streamPortFailed ? 'fail' : streamPortPassed ? 'pass' : input.streamPortOpen === false ? 'fail' : input.streamPortOpen === true ? 'pass' : 'warning',
-      streamPorts.length ? streamPorts.map(nativeProbePortDetail).join(' · ') : input.streamPortOpen === true ? 'Stream ports look reachable.' : input.streamPortOpen === false ? 'One or more stream ports did not respond.' : 'Stream ports were not directly tested by this browser.',
-      streamPortFailed || input.streamPortOpen === false ? 'Fix firewall/NAT before tuning bitrate.' : 'If video starts then freezes, retest UDP reachability from the client.'
+      nativeProbe ? 'Local stream listeners / UDP hints' : 'Stream ports',
+      nativeProbe ? streamPortFailed ? 'fail' : streamPortPassed ? 'pass' : 'warning' : input.streamPortOpen === false ? 'fail' : input.streamPortOpen === true ? 'pass' : 'warning',
+      streamPorts.length ? streamPorts.map(nativeProbePortDetail).join(' · ') : nativeProbe ? 'Local stream listeners and UDP hints were not checked.' : input.streamPortOpen === true ? 'Stream ports look reachable.' : input.streamPortOpen === false ? 'One or more stream ports did not respond.' : 'Stream ports were not directly tested by this browser.',
+      streamPortFailed || (!nativeProbe && input.streamPortOpen === false) ? 'Check the host\'s mapped listener; verify firewall/NAT separately from the client.' : 'UDP reachability still needs a check from the streaming client.'
     ),
     checklistItem(
       'discovery-mdns',
@@ -1105,23 +1093,23 @@ export function buildNetworkPathTestReport(input = {}) {
     checklistItem(
       'lan-vpn-clue',
       'LAN / VPN clue',
-      lanLike || vpnLike ? 'pass' : 'warning',
-      lanLike ? 'Host address looks LAN/local.' : vpnLike ? 'Host address looks VPN/overlay.' : 'Host address looks remote/VPN or public.',
-      lanLike ? 'Start with normal LAN bitrate, then tune up.' : 'Expect lower bitrate and higher jitter until VPN/NAT path is proven stable.'
+      hostLocal ? 'warning' : lanLike || vpnLike ? 'pass' : 'warning',
+      hostLocal ? 'The host checked itself; this is not the streaming device\'s media path.' : lanLike ? 'Requesting address looks LAN/local.' : vpnLike ? 'Requesting address looks VPN/overlay.' : 'Requesting address looks remote/VPN or public.',
+      hostLocal ? 'Run this check from the device you stream to.' : 'Use measured streaming-client conditions before tuning bitrate.'
     ),
     checklistItem(
       'latency-jitter-loss',
       'Latency / jitter / loss',
-      (Number.isFinite(loss) && loss > 2) || (Number.isFinite(sampleJitter) && sampleJitter > 20) ? 'fail' : (Number.isFinite(loss) && loss > 0.5) || (Number.isFinite(latency) && latency > 40) ? 'warning' : 'pass',
-      `${Number.isFinite(latency) ? latency.toFixed(1) : 'unknown'} ms avg / ${Number.isFinite(sampleJitter) ? sampleJitter.toFixed(1) : 'unknown'} ms jitter / ${Number.isFinite(loss) ? loss.toFixed(1) : 'unknown'}% loss.`,
-      (Number.isFinite(loss) && loss > 0.5) ? 'Lower bitrate one step and prefer wired/5 GHz before changing encoder settings.' : 'Network quality is not the loudest signal right now.'
+      'warning',
+      'unknown latency / unknown jitter / unknown loss: client media quality is not measured by this check.',
+      'Use the streaming client\'s fresh measurements to check media quality.'
     ),
     checklistItem(
       'bitrate-ceiling',
       'Recommended bitrate ceiling',
-      recommendedBitrateKbps < bitrateBase ? 'warning' : 'pass',
-      `Recommended ceiling: ${recommendedBitrateKbps} kbps.`,
-      recommendedBitrateKbps < bitrateBase ? 'Use this as the next launch ceiling, then raise only after a clean session.' : 'Current bitrate target is reasonable for the sampled path.'
+      'warning',
+      'Unavailable: this check does not measure a client-media bitrate ceiling.',
+      'Keep stream telemetry separate and measure the client media path before changing bitrate.'
     ),
   ]
 
@@ -1129,11 +1117,11 @@ export function buildNetworkPathTestReport(input = {}) {
   return {
     kind: 'network-path-test',
     status,
-    classification: status === 'pass' ? 'clean' : 'network',
-    summary: `${pathLabel} path: ${status === 'fail' ? 'fix reachability/loss first' : status === 'warning' ? 'usable with caution' : 'ready'}.`,
+    classification: hostLocal ? 'local' : status === 'fail' ? 'network' : 'unavailable',
+    summary: `${pathLabel} check: ${!nativeProbe ? 'native probe unavailable; client media path unmeasured' : status === 'fail' ? 'a local listener needs attention; client media path unmeasured' : 'local listener checks and UDP hints; client media path unmeasured'}.`,
     recommendedBitrateKbps,
     checks,
-    advancedEvidence: sanitizeDiagnosticsValue({ host, samples, latency, jitter: sampleJitter, packetLossPercent: Number.isFinite(loss) ? loss : null, nativeProbe }),
+    advancedEvidence: sanitizeDiagnosticsValue({ host, samples: [], latency: null, jitter: null, packetLossPercent: null, mediaMeasurementSource: 'unavailable: raw probe samples are ungraded; no target-bound fresh client-media sampling contract', nativeProbe }),
     nativeEvidenceText: nativeProbe ? formatNativeProbeEvidence(nativeProbe) : '',
   }
 }
@@ -1237,9 +1225,42 @@ export function buildGamescopeHelperReport(probe = {}) {
   }
 }
 
-export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnectReason = '' } = {}) {
-  const loss = Number(stats.packet_loss)
-  const latency = Number(stats.latency_ms)
+// Whether the verdict's window still counts any of the client's reports. A stale verdict keeps them
+// until they are older than the window, 20 seconds, and the host's own grading reads no loss after.
+function verdictWindowHoldsReports(stats) {
+  const verdict = stats?.network_verdict
+  return Number(verdict?.media_samples) > 0 || Number(verdict?.frames_expected) > 0
+}
+
+// The newest verdict whose loss the host judged while the stream was live, for the post-session report.
+// A client that drops leaves the host streaming until its ping timeout, ten seconds by default, and the
+// live payloads before the stream ends call that loss stale, with no figure. The host grades the ended
+// session on the verdict its window last reached, and the report reads this one the same way, while the
+// window still holds the reports it was judged on. Kept for the whole session, a verdict from reports
+// that stopped 40 seconds before the end still named the network, where the host's emptied window
+// named nothing. A new stream starts over.
+export function rememberJudgedNetworkVerdict(remembered, next, previous) {
+  if (!next?.streaming) return remembered ?? null
+  if (!previous?.streaming) return judgedVideoFrameLoss(next) ? next.network_verdict : null
+  if (judgedVideoFrameLoss(next)) return next.network_verdict
+  return verdictWindowHoldsReports(next) ? (remembered ?? null) : null
+}
+
+export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnectReason = '', lastJudgedVerdict = null } = {}) {
+  // The figures Doctor judged over its window, not the last second's report: that one read 32.7% on a
+  // session whose frames the host dropped 0.96% of, and named the network on it. A session whose
+  // client dropped ends on a stale verdict with no figure, and lost its network cause with it; the
+  // verdict the window last judged, rememberJudgedNetworkVerdict()'s, still says what it was.
+  const carried = !judgedVideoFrameLoss(stats) && Boolean(judgedVideoFrameLoss({ network_verdict: lastJudgedVerdict }))
+  const verdict = carried ? lastJudgedVerdict : stats?.network_verdict
+  const judgedLoss = judgedVideoFrameLoss({ network_verdict: verdict })
+  const loss = judgedLoss ? judgedLoss.pct : NaN
+  const judgedRtt = verdict?.rtt_median_ms
+  // A stale round trip is a frozen reading, not a figure to grade on.
+  const rttStale = stats?.network_verdict?.rtt_state === 'stale'
+  const latency = typeof judgedRtt === 'number' && Number.isFinite(judgedRtt)
+    ? judgedRtt
+    : rttStale ? NaN : Number(stats.latency_ms)
   const encodeTime = Number(stats.encode_time_ms)
   const dropped = Number(stats.dropped_frame_ratio)
   const safeLogs = redactSensitiveText(logs)
@@ -1253,9 +1274,12 @@ export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnect
   let suggestedNextLaunchProfile = 'Retry the same launch profile once, then collect a support bundle if it repeats.'
 
   const networkFailureLog = latestIssueMatching(safeLogs, ['packet loss', 'network', 'udp', 'socket', 'enet'])
-  if ((Number.isFinite(loss) && loss > 1) || (Number.isFinite(latency) && latency > 45) || networkFailureLog) {
+  const lossPressure = judgedLoss?.state === 'elevated'
+  if (lossPressure || (Number.isFinite(latency) && latency > 45) || networkFailureLog) {
     issueOwner = 'network'
-    mainIssue = Number.isFinite(loss) && loss > 1 ? `Network packet loss was ${loss.toFixed(1)}%.` : 'Network latency/transport warnings stood out.'
+    mainIssue = lossPressure
+      ? `Video frame loss was network pressure${carried ? " when the client's media reports stopped" : ''}: ${describeVideoFrameLoss(judgedLoss)}.`
+      : 'Network latency/transport warnings stood out.'
     suggestedNextLaunchProfile = 'Lower bitrate one step, prefer wired/5 GHz, then retry the same game.'
   }
 
@@ -1280,7 +1304,28 @@ export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnect
       : 'Try the low-latency hardware encoder profile or lower resolution/FPS.'
   }
 
-  const qualitySummary = `${Number.isFinite(latency) ? latency.toFixed(1) : 'unknown'} ms latency / ${Number.isFinite(loss) ? loss.toFixed(1) : 'unknown'}% loss / ${Number.isFinite(encodeTime) ? encodeTime.toFixed(1) : 'unknown'} ms encode / ${Number.isFinite(dropped) ? (dropped * 100).toFixed(2) : 'unknown'}% dropped.`
+  // The host's calibrated starvation verdict and an observed recent byte-budget
+  // share are independent of media loss. Saturation alone is not starvation.
+  const pyrowave = stats.pyrowave_bitrate
+  const budgetShare = pyrowave?.ceiling_frame_share
+  const starvedAtBudget = stats.streaming === true && stats.codec === 'pyrowave' &&
+    pyrowave?.starved === true && typeof budgetShare === 'number' &&
+    Number.isFinite(budgetShare) && budgetShare > 0.85 && budgetShare <= 1
+  if (starvedAtBudget) {
+    const budgetIssue = `PyroWave was bitrate-starved for this resolution and frame rate; ${Math.round(budgetShare * 100)}% of recent encoded frames reached their frame-byte budget.`
+    if (issueOwner === 'client') {
+      issueOwner = 'host'
+      mainIssue = budgetIssue
+    } else {
+      mainIssue += ` ${budgetIssue}`
+    }
+    suggestedNextLaunchProfile = 'Lower resolution/FPS, try PyroWave 4:2:0 or HEVC/AV1 for this mode, then retry the same game.'
+    if (issueOwner === 'network') suggestedNextLaunchProfile += ' Prefer wired/5 GHz for the reported network pressure.'
+  }
+
+  // Two frame shares, each named: frames lost in transit after FEC, and frames the host dropped
+  // before it sent them. They count different frames, so one may be high while the other is not.
+  const qualitySummary = `${Number.isFinite(latency) ? latency.toFixed(1) : 'unknown'} ms latency / ${Number.isFinite(loss) ? `${loss.toFixed(1)}%` : 'unknown'} of video frames lost after FEC / ${Number.isFinite(encodeTime) ? encodeTime.toFixed(1) : 'unknown'} ms encode / ${Number.isFinite(dropped) ? `${(dropped * 100).toFixed(2)}%` : 'unknown'} of frames dropped on the host.`
   const report = {
     kind: 'post-session-stream-report',
     status: issueOwner === 'client' ? 'warning' : 'fail',
@@ -1304,7 +1349,7 @@ export function buildPostSessionStreamReport({ stats = {}, logs = '', disconnect
 
 export function buildSupportSelfTestCopy({ network, controller, postSession } = {}) {
   const sections = []
-  if (network) sections.push(['Network Path Tester', network.summary, `Status: ${network.status}`, `Recommended bitrate: ${network.recommendedBitrateKbps || 'unknown'} kbps`, network.nativeEvidenceText].filter(Boolean).join('\n'))
+  if (network) sections.push(['Network Path Tester', network.summary, `Status: ${network.status}`, network.recommendedBitrateKbps == null ? 'Bitrate ceiling: unavailable; client media path not measured.' : `Recommended bitrate: ${network.recommendedBitrateKbps} kbps`, network.nativeEvidenceText].filter(Boolean).join('\n'))
   if (controller) sections.push(['Controller/Input Tester', controller.summary, `Status: ${controller.status}`].join('\n'))
   if (postSession) sections.push(postSession.copyText || ['Post-session Stream Report', postSession.mainIssue].join('\n'))
   return redactSensitiveText(sections.join('\n\n'))

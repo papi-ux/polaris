@@ -372,11 +372,21 @@ namespace platf {
     return "unknown"sv;
   }
 
+  // Actual four-byte CPU pixel packing, separate from the telemetry format class.
+  // Unspecified preserves existing BGRA8 producers, including the black primer.
+  enum class ram_pixel_layout_e {
+    unspecified,
+    bgra8,
+    xbgr2101010_le,
+    xrgb2101010_le,
+  };
+
   struct frame_metadata_t {
     frame_transport_e transport {frame_transport_e::unknown};
     frame_residency_e residency {frame_residency_e::unknown};
     frame_format_e format {frame_format_e::unknown};
     std::string device;
+    ram_pixel_layout_e ram_pixel_layout {ram_pixel_layout_e::unspecified};
   };
 
   struct runtime_state_t {
@@ -752,6 +762,34 @@ namespace platf {
     int env_width, env_height;
 
     int width, height;
+
+    // The captured screen's size where absolute input places it, in the units offset_x and
+    // env_width count in. wlroots and KMS capture on Wayland count the desktop in desktop pixels,
+    // logical units times the largest scale among its monitors, where a monitor scaled less than
+    // that covers more pixels than its frame has. A capture that leaves them at zero has input map
+    // onto the frame, which is right wherever the two sizes are the same.
+    int input_width = 0, input_height = 0;
+
+    // Whether absolute input counts each point from the captured screen's corner, offset_x and
+    // offset_y. wlroots and KMS capture clear it for a monitor turned a quarter, which keeps the
+    // input 1.4.13 gave it: offset_x and offset_y as they were, and every point counted from the
+    // desktop's corner, as Linux had it then.
+    bool input_counts_from_screen = true;
+
+    /**
+     * @brief The captured screen's place and size on the desktop, which absolute input maps onto.
+     *        The frame stays in output pixels for capture and encode. A capture whose points count
+     *        from the desktop's corner has its place left out.
+     */
+    touch_port_t screen_on_desktop() const {
+      const bool sized = input_width > 0 && input_height > 0;
+      return {
+        input_counts_from_screen ? offset_x : 0,
+        input_counts_from_screen ? offset_y : 0,
+        sized ? input_width : width,
+        sized ? input_height : height,
+      };
+    }
 
     // A capture whose source fits a screen of another shape into the frame itself, bars and all,
     // names that screen here, so absolute input is placed inside the picture rather than across
@@ -1158,6 +1196,21 @@ namespace platf {
    */
   util::point_t get_mouse_loc(input_t &input);
   void move_mouse(input_t &input, int deltaX, int deltaY);
+
+  /**
+   * @brief Where a point on the captured screen lies on the desktop absolute input spans.
+   *
+   * abs_mouse() is given a point counted from the captured screen's corner, and the touch port's
+   * offset is that corner on a desktop of one or more screens, counted from the desktop's own.
+   * @param touch_port The captured screen's offset, and the desktop's extents.
+   * @param x Across the captured screen, in the desktop's units.
+   * @param y Down the captured screen, in the desktop's units.
+   * @return The point on the desktop.
+   */
+  inline std::pair<float, float> point_on_desktop(const touch_port_t &touch_port, float x, float y) {
+    return {x + static_cast<float>(touch_port.offset_x), y + static_cast<float>(touch_port.offset_y)};
+  }
+
   void abs_mouse(input_t &input, const touch_port_t &touch_port, float x, float y);
   void button_mouse(input_t &input, int button, bool release);
   void scroll(input_t &input, int distance);

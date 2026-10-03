@@ -1,5 +1,6 @@
 <script setup>
 import { ref } from 'vue'
+import CodecSupportPanel from "./CodecSupportPanel.vue";
 
 const props = defineProps([
   'platform',
@@ -17,6 +18,8 @@ const config = ref(props.config)
         <h3 class="settings-section-title">Software encoder profile</h3>
         <p class="settings-section-copy">Use software encoding when the GPU path is unavailable or when you need a predictable CPU-only fallback.</p>
       </div>
+
+      <CodecSupportPanel v-if="platform === 'linux'" :config="config" />
 
       <div class="mb-3">
         <label for="sw_preset" class="block text-sm font-medium text-storm mb-1">{{ $t('config.sw_preset') }}</label>

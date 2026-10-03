@@ -26,6 +26,7 @@
 // local includes
 #include "crypto.h"
 #include "pyrowave_availability.h"
+#include "process.h"
 #include "rtsp.h"
 #include "thread_safe.h"
 
@@ -45,6 +46,7 @@ namespace game_artwork::manual {
 namespace proc {
   struct ctx_t;
   struct desktop_launch_safety_policy_t;
+  struct launch_selection_request_t;
 }
 #endif
 
@@ -233,10 +235,12 @@ namespace nvhttp {
    *
    * Callers must check for nullptr before dereferencing or passing the session
    * to proc::execute. Host-built arguments use the host identity and do not
-   * carry client key material.
+   * carry client key material. A trusted owned app snapshot may defer a matching fixed
+   * topology pin's availability to the app-aware guard; nullptr keeps ordinary freshness.
    */
   std::shared_ptr<rtsp_stream::launch_session_t>
-  make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker = false);
+  make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker = false,
+                      const proc::ctx_t *topology_app = nullptr);
 
   /**
    * @brief Bring the host's mode in line with whether it is in Steam Game Mode right now.
@@ -638,12 +642,14 @@ namespace nvhttp {
                                                          const std::string &launch_backend,
                                                          bool session_override,
                                                          std::uint64_t requester_generation);
-  nlohmann::json build_launch_mode_contract_for_tests(bool app_prefers_virtual_display,
-                                                      const std::string &app_name,
+  bool library_desktop_offers_own_screen_for_tests(const std::vector<proc::ctx_t> &apps, bool backend_available);
+  nlohmann::json build_launch_mode_contract_for_tests(std::string_view app_launch_as,
+                                                      std::string_view app_name,
                                                       bool host_virtual_display_available,
                                                       bool host_prefers_headless,
-                                                      bool app_mirrors_desktop = false);
+                                                      const proc::launch_as_availability_t &launch_as = {});
 #if defined(__linux__)
+  proc::launch_selection_request_t optimize_launch_selection_request_for_tests(const args_t &args, bool paired_always_virtual);
   std::string accepted_session_stream_mode_for_tests(const std::string &requested);
   bool apply_stream_display_mode_selection_for_tests(
     const std::string &selection,
@@ -736,6 +742,10 @@ namespace nvhttp {
   nlohmann::json capture_codecs_for_tests(
     int hevc_mode,
     int av1_mode,
+    const std::optional<pyrowave_availability::unavailable_t> &pyrowave_unavailable
+  );
+  /// The actual paired-route offer, with deferred hardware priming disabled for fixtures.
+  nlohmann::json paired_capture_codecs_for_tests(
     const std::optional<pyrowave_availability::unavailable_t> &pyrowave_unavailable
   );
 #ifdef __linux__

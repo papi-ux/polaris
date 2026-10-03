@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "release_status": "private 1.4.14-beta.1 candidate; publication not implied",
+  "captured_on": "2026-10-03",
+  "limitations": [
+    "UI-only captures; no stream was launched for this capture set",
+    "No performance, HDR, sustained frame rate or physical streaming acceptance is established",
+    "Older README images retain the versions in their filenames and original provenance"
+  ],
+  "captures": [
+    {
+      "file": "nova-android-game-detail-v1.4.14-beta.1.webp",
+      "platform": "android",
+      "view": "game-detail",
+      "reported_version": "1.4.14-beta.1",
+      "width": 1920,
+      "height": 1080,
+      "captured_png_sha256": "ed90abeb92a577e45f9db6dca2d0491003c6871d45673e6e17c4cd47bb0b8b2f",
+      "webp_sha256": "5628380dadc4cd51daed2491b3236a4c69ba4809be73a0a2ba55c31f906599b6",
+      "webp_bytes": 105290,
+      "encoding": "WebP quality 85; no crop, resize or content edit",
+      "source_commit": "c9a30fec2e2f65e49bc23febe428722b6cf40b28",
+      "version_code": 5501,
+      "device": "Retroid Pocket 6",
+      "app_id": "com.papi.nova.pre",
+      "apk_sha256": "97a60693b4223c6a7dca6a0e174e3c57eef9391881091997b73de08647eb1f65",
+      "capture_method": "ADB screencap from the installed signed candidate after normal UI navigation"
+    }
+  ]
+}

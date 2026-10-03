@@ -31,7 +31,7 @@ adaptive_bitrate_enabled = enabled
 max_sessions = 2
 ```
 
-These are the settings behind the recommended Headless Stream mode on a Linux host. Use `encoder = nvenc` on NVIDIA, `encoder = vaapi` on AMD/Intel Mesa VAAPI hosts, and `encoder = software` only as a fallback or diagnostic path. Vulkan Video is experimental: an explicit choice supports DRM/KMS, wlroots, and Portal capture, while Auto promotes it only for a compatible AMD private-stream route that passes an exact live-frame safety probe.
+These are the settings behind the recommended Headless Stream mode on a Linux host. Use `encoder = nvenc` on NVIDIA, `encoder = vaapi` on AMD/Intel Mesa VAAPI hosts, and `encoder = software` only as a fallback or diagnostic path. Vulkan Video is experimental: an explicit choice supports DRM/KMS, wlroots, and Portal capture, while Auto tries it first on AMD only for Private Stream, which checks an exact live frame, and for Gamescope Stream through the portal ([Vulkan Encoder](#vulkan-encoder)).
 
 The `encoder` key remains the host-wide default. Clients that advertise the typed session-encoder contract can ask Polaris to keep that default, use Auto, or require one backend for a single game. Polaris accepts only a backend compiled into the running build, validates it again against the live capture route at launch, and restores the host value at teardown. Auto is the only request allowed to fall back; a named backend fails closed instead of silently selecting another encoder.
 
@@ -48,7 +48,8 @@ AMD/NVIDIA guidance, see [Launch modes and capture paths](launch-modes.md).
 | An isolated game-only session, desktop untouched | `headless_stream` / `windowed_stream` |
 
 Two client-facing notes: Moonlight-protocol clients can request the mirror for a single launch with
-`mirrorDesktop=1` on `/launch` (no host reconfiguration), and `headless_mode = enabled` *without*
+`mirrorDesktop=1` on `/launch` (no host reconfiguration). An app whose Launch as names a fixed mode
+refuses that request with `app_launch_mode_pinned`. Also, `headless_mode = enabled` *without*
 `linux_use_cage_compositor` derives `host_virtual_display`, not a headless session.
 
 ## Common options
@@ -62,7 +63,7 @@ Two client-facing notes: Moonlight-protocol clients can request the mirror for a
 | `linux_stream_mode` | `headless_stream` (new installs) | Stream path id for Linux sessions: `headless_stream`, `windowed_stream`, `gamescope_stream`, `host_virtual_display`, `desktop_takeover`, `desktop_display`, or `headless_dongle`. Empty derives the path from the legacy booleans above. See [Launch modes and capture paths](launch-modes.md) for choosing, [stream paths](stream-paths.md) for the contract |
 | `linux_private_runtime` | `labwc` | Private compositor used by paths that host the session themselves: `labwc` or `gamescope`. Ignored on host paths |
 | `headless_swap_mode` | `privacy` | Headless Dongle path only: `privacy` makes the dongle primary and blanks the panel after one-time portal approval is saved (the approval session keeps it on); `off` extends onto the dongle and leaves the panel primary |
-| `linux_virtual_display_backend` | `auto` | What creates the screen for Host Virtual Display: `auto` (a new KWin screen on KDE Plasma, then EVDI, then Hyprland, then kscreen-doctor borrowing `linux_streaming_output`), or `evdi`, `kwin`, `wlr` or `kscreen` to use only that one. A chosen backend that cannot run refuses the launch with its reason instead of falling back |
+| `linux_virtual_display_backend` | `auto` | What creates the screen for Host Virtual Display: `auto` (a new KWin screen on KDE Plasma, then EVDI, then Hyprland, then kscreen-doctor borrowing `linux_streaming_output`), or `evdi`, `kwin`, `wlr` or `kscreen` to use only that one. A chosen backend that cannot create and capture the stream refuses the launch with its reason. EVDI/kscreen need output-pinned KWin capture; native Hyprland needs its wlroots capture protocols. EVDI alone does not enable this mode on GNOME Wayland or X11 |
 | `fallback_mode` | `1920x1080x60` | Display mode used when the client-requested mode is unsupported, as `WxHxFPS`. The web UI's Display Planner presets write this same key, so Moonlight compatibility stays standard; Nova and per-game overrides can layer on top where client-settings support exists |
 | `display_plan` | `balanced` | Display Planner preset id persisted alongside `fallback_mode`: `native`, `balanced`, `sharp`, or `performance`. Empty means the mode was set manually; hand-editing `fallback_mode` clears the id so a stale pairing never lights up in the UI |
 | `trusted_subnets` | CIDR list | Enable Trusted Pair on known local networks |
@@ -423,10 +424,12 @@ are explained in [Launch modes and capture paths](launch-modes.md). Keys: `linux
 `display_plan`, `adaptive_bitrate_enabled`, `disconnect_resume_timeout_seconds`.
 
 The adaptive range has a floor, `adaptive_bitrate_min`, and no ceiling of its own: the bitrate the
-client asked for is the ceiling, and `max_bitrate` caps what a client may ask for. Live Tuning and
-Doctor lower the bitrate from that request and bring it back no higher, except that a request below
-the floor starts at the floor. A PyroWave stream has a floor of its own, half what the codec's model
-advises for it on a device's own screen and never above the request. `max_bitrate` is the only cap a
+client asked for is the ceiling, and `max_bitrate` caps what a client may ask for. Polaris's own
+endpoints take up to 500 Mbps from a client; a Moonlight client's RTSP request meets `max_bitrate`
+alone. Live Tuning and Doctor lower the bitrate from that request and bring it back no higher, except
+that a request below the floor starts at the floor. A PyroWave stream has a floor of its own, half
+what the codec's model advises for it on a device's own screen and never above the request.
+`max_bitrate` is the only cap a
 PyroWave request meets; the Stability preset, a device profile and a saved paired profile do not cut
 it. Doctor may raise a starved PyroWave stream above its request, as one tap with Undo, to no more
 than 300 Mbps and `max_bitrate`
@@ -482,6 +485,11 @@ The AI tab is covered under [AI provider settings](#ai-provider-settings); the e
 [Vulkan Encoder](#vulkan-encoder), and [Linux HDR and Main10](#linux-hdr-and-main10), with the codec
 switches (`hevc_mode`, `av1_mode`), the quantisation fallback (`qp`), and the software encoder thread
 floor (`min_threads`) on the encoder pages themselves.
+
+On Linux every encoder tab starts with **Advertised codec support**: the codecs the active encoder
+offers clients, a 4:4:4 row that says which encoders in this build can deliver 4:4:4, and a
+PyroWave row that says whether the host offers PyroWave and, when it does not, why. See
+[Check the host's GPU](pyrowave-reference.md#check-the-hosts-gpu).
 
 ## Linux HDR and Main10
 
@@ -608,8 +616,8 @@ the fallback:
   green; `encoder = vaapi` skips the attempt. Nothing retires Vulkan Video here if it passes the
   probe and then fails on the live stream, which only Private Stream can do so far; if a Gamescope
   Stream stream fails where VA-API worked, set `encoder = vaapi`. Gamescope Stream keeps a `capture`
-  set to `kms`, `wlr`, `x11` or `auto`, which can hand Vulkan Video GPU frames that nothing retires,
-  so Auto stays on VA-API there.
+  set to `kms`, `wlr` or `x11`, which can hand Vulkan Video GPU frames that nothing retires, so Auto
+  stays on VA-API there. A `capture` of `auto` loads as unset, so it goes through the portal.
 
   The codecs the host advertises follow the route. When Steam Game Mode takes Gamescope Stream or
   gives it back, or the host default mode changes, the next client request probes the encoder again.
@@ -628,7 +636,9 @@ frames reach the encoder through system memory. On Gamescope Stream through the 
 to advertise HDR (`hevc_mode = 3`) offers it anyway, as written, and such a stream ends at its first
 10-bit frame.
 
-Before selecting it, enable KMS host access once, restart Polaris, then set both overrides:
+Portal capture needs no setup for it: `encoder = vulkan` alone works there, with frames reaching
+the encoder through system memory. For the GPU-native path, where DRM/KMS frames stay on the
+encoder's GPU, enable KMS host access once and do what it prints, then set both overrides:
 
 ```bash
 sudo -H polaris --setup-host --enable-kms

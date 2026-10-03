@@ -9,6 +9,10 @@
 #include <src/launch_failure.h>
 #include <src/stream_stats.h>
 #include <nlohmann/json.hpp>
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <limits>
 #include <thread>
 #include <future>
 #include <filesystem>
@@ -249,6 +253,35 @@ TEST(VideoEncoderSelectionTests, AnAutoFallbackOpensItsReasonWithTheEncoderItFel
   );
 }
 #endif
+
+TEST(VideoYuv444Tests, EncodersInThisBuildSayWhichCodecsTheirTablesCarryIn444) {
+  // The console words its 4:4:4 row from this list, so it has to match the tables the probe reads.
+  const auto listed = video::yuv444_encoders();
+  ASSERT_FALSE(listed.empty());
+  std::vector<std::string> names;
+  for (const auto &[name, codecs] : listed) {
+    names.emplace_back(name);
+    EXPECT_NE(name, "pyrowave") << "the probe never chooses PyroWave, so it is not one of these";
+    if (name == "software") {
+      // libx264 in 4:4:4; H264_ONLY keeps HEVC out under Auto.
+      EXPECT_EQ(codecs, (std::array<bool, 3> {true, false, false}));
+    }
+#ifdef __linux__
+    else {
+      // On Linux no GPU encoder table carries 4:4:4: NVENC, VA-API and Vulkan Video stream 4:2:0.
+      EXPECT_EQ(codecs, (std::array<bool, 3> {false, false, false})) << name;
+    }
+#endif
+  }
+  EXPECT_EQ(names.back(), "software") << "the encoder of last resort comes last";
+#ifdef __linux__
+  EXPECT_NE(std::find(names.begin(), names.end(), "nvenc"), names.end());
+  EXPECT_NE(std::find(names.begin(), names.end(), "vaapi"), names.end());
+  #ifdef POLARIS_BUILD_VULKAN
+  EXPECT_NE(std::find(names.begin(), names.end(), "vulkan"), names.end());
+  #endif
+#endif
+}
 
 TEST(VideoCacheTests, DriverVersionRejectsAnythingThatIsNotAVersion) {
   // nvidia-smi prints its NVML failure to stdout, so without this the banner
@@ -1310,7 +1343,8 @@ TEST(VideoAutoPolicyProbeTests, EveryOtherRouteAndDriverKeepsItsAutoChoice) {
 
 TEST(VideoAutoPolicyProbeTests, GamescopeStreamOnKmsWlrOrX11CaptureKeepsVaapi) {
   // Gamescope Stream keeps a configured kms, wlr or x11 capture, and those hand Vulkan Video GPU
-  // frames that nothing retires, so Auto stays on VA-API there. Unset fills to the portal.
+  // frames that nothing retires, so Auto stays on VA-API there. Unset fills to the portal, and so
+  // does auto, which the settings file loads as unset.
   const auto_probe_guard_t guard;
   for (const auto capture : {"kms", "wlr", "x11"}) {
     auto route = amd_gamescope_stream;
@@ -1323,11 +1357,13 @@ TEST(VideoAutoPolicyProbeTests, GamescopeStreamOnKmsWlrOrX11CaptureKeepsVaapi) {
     // Told it is on Gamescope Stream off the portal, never outside Gamescope Stream.
     EXPECT_EQ(probe.selection.reason.find("outside labwc and Gamescope Stream;"), std::string::npos) << probe.selection.reason;
     EXPECT_NE(
-      probe.selection.reason.find("Gamescope Stream with capture set to kms, wlr, x11 or auto stays on VA-API."),
+      probe.selection.reason.find("Gamescope Stream with capture set to kms, wlr or x11 stays on VA-API."),
       std::string::npos
     ) << probe.selection.reason;
   }
-  for (const auto capture : {"", "kwin"}) {
+  std::unordered_map<std::string, std::string> autodetect_vars {{"capture", "auto"}};
+  const auto autodetect = config::capture_setting(autodetect_vars, {});
+  for (const std::string_view capture : {std::string_view {}, std::string_view {"kwin"}, std::string_view {autodetect}}) {
     auto route = amd_gamescope_stream;
     route.capture = capture;
     const auto probe = probe_auto(route);
@@ -1468,8 +1504,8 @@ TEST(VideoAutoPolicyProbeTests, AnHdrLaunchOnGamescopeStreamIsRefusedForHdrWitho
   // A launch that switches to Gamescope Stream for itself was offered HDR by the encoder of the mode
   // it came from. Vulkan Video then passed its probe, and the launch was refused as "No video
   // encoder could start", which sent the player looking for a fault that was not there. The advice
-  // must not send them to VA-API for HDR either: on the portal VA-API takes the same 8-bit system
-  // memory upload unless the unvalidated DMA-BUF opt-in is set.
+  // must not promise HDR from VA-API either: its packed RGB10 portal upload preserves the
+  // negotiated words, but physical HDR capture and playback remain unvalidated.
   const auto_probe_guard_t guard;
   launch_failure::clear();
 
@@ -1484,11 +1520,12 @@ TEST(VideoAutoPolicyProbeTests, AnHdrLaunchOnGamescopeStreamIsRefusedForHdrWitho
   EXPECT_NE(refusal->message.find("on Gamescope Stream Auto encodes with Vulkan Video, which offers no HDR there"), std::string::npos)
     << refusal->message;
   EXPECT_NE(refusal->action.find("Launch without HDR."), std::string::npos) << refusal->action;
-  EXPECT_NE(refusal->action.find("hevc_mode = 3 or encoder = vaapi keeps VA-API on Gamescope Stream, but"), std::string::npos)
+  EXPECT_NE(refusal->action.find("hevc_mode = 3 or encoder = vaapi keeps VA-API on Gamescope Stream."), std::string::npos)
     << refusal->action;
-  EXPECT_NE(refusal->action.find("the same 8-bit system memory upload unless POLARIS_PORTAL_DMABUF=1 is set"), std::string::npos)
-    << refusal->action;
-  EXPECT_NE(refusal->action.find("is not proven"), std::string::npos) << refusal->action;
+  EXPECT_NE(refusal->action.find("VA-API can upload negotiated packed RGB10"), std::string::npos) << refusal->action;
+  EXPECT_NE(refusal->action.find("HDR capture and playback on this route are not proven"), std::string::npos) << refusal->action;
+  EXPECT_EQ(refusal->action.find("same 8-bit system memory upload"), std::string::npos) << refusal->action;
+  EXPECT_EQ(refusal->action.find("POLARIS_PORTAL_DMABUF"), std::string::npos) << refusal->action;
   EXPECT_EQ(refusal->action.find("For HDR on Gamescope Stream"), std::string::npos) << refusal->action;
   for (const auto dash : {std::string_view {"\xE2\x80\x94"}, std::string_view {"\xE2\x80\x93"}, std::string_view {" - "}}) {
     EXPECT_EQ(launch_failure::status_message(*refusal).find(dash), std::string::npos);
@@ -1512,7 +1549,7 @@ TEST(VideoAutoPolicyProbeTests, AnHdrLaunchOnGamescopeStreamIsRefusedForHdrWitho
 }
 
 TEST(VideoAutoPolicyProbeTests, ExplicitVulkanOnGamescopeStreamOffersNoHdrUnlessHevcSupportAsksForIt) {
-  // papi's call on #635a (finding 11): an explicit encoder = vulkan reads Gamescope Stream frames
+  // #635: an explicit encoder = vulkan reads Gamescope Stream frames
   // through the same 8-bit system memory upload as Auto's Vulkan Video, and the host offered Main10
   // with it from a probe that encoded a zeroed 8-bit frame. It now offers no HDR there unless HEVC
   // Support asks for it, which is kept as written. Off Gamescope Stream nothing changes.
@@ -1620,7 +1657,7 @@ TEST(VideoAutoPolicyProbeTests, ExplicitVulkanProbesAgainWhenTheRouteDecidesItsH
 }
 
 TEST(VideoAutoPolicyProbeTests, AnAv1RefusalAtAnnounceSaysWhatTookAv1Away) {
-  // papi's call on #635a (finding 6): a launch that switches into Gamescope Stream on AMD cannot be
+  // #635: a launch that switches into Gamescope Stream on AMD cannot be
   // refused for AV1 by name, because the client picks its codec at ANNOUNCE, after the launch. The
   // refusal there logged "AV1 is disabled, yet the client requested AV1" whatever took AV1 away.
   const auto_probe_guard_t guard;
@@ -2655,3 +2692,37 @@ TEST(VideoCaptureBackendPublicationTests, AProbeNeverReachesTheLastSession) {
   EXPECT_EQ(last_session(), frozen);
 }
 #endif
+
+TEST(NvencVbvBufferTests, AnIncreaseAt500MbpsFitsTheEncodersField) {
+  // One frame at the 500 Mbps a client may set by hand, 60 fps: 8333333 bits. nvenc_vbv_increase goes
+  // to 400%, and from 258% the product overflowed an int before the division.
+  constexpr std::int64_t int_max = std::numeric_limits<int>::max();
+  constexpr std::int64_t uint32_max = std::numeric_limits<uint32_t>::max();
+  const std::int64_t frame = 500000LL * 1000 / 60;
+  EXPECT_EQ(nvenc::grown_vbv_buffer_bits(frame, 258, int_max), 29833332);
+  EXPECT_EQ(nvenc::grown_vbv_buffer_bits(frame, 400, int_max), 41666665);
+  // At 30 fps the NVENC SDK's uint32 field wrapped from 258% the same way.
+  const std::int64_t slow = 500000LL * 1000 / 30;
+  EXPECT_EQ(nvenc::grown_vbv_buffer_bits(slow, 258, uint32_max), 59666664);
+  EXPECT_EQ(nvenc::grown_vbv_buffer_bits(slow, 400, uint32_max), 83333330);
+  // No increase leaves the buffer alone, and a buffer the field cannot hold stops at the field.
+  EXPECT_EQ(nvenc::grown_vbv_buffer_bits(frame, 0, int_max), frame);
+  EXPECT_EQ(nvenc::grown_vbv_buffer_bits(int_max, 400, int_max), int_max);
+  EXPECT_EQ(nvenc::grown_vbv_buffer_bits(uint32_max, 400, uint32_max), uint32_max);
+
+  // Both encoders grow the buffer through it, not in the field's own type.
+  const auto read = [](const char *relative) {
+    std::ifstream in(std::filesystem::path(POLARIS_SOURCE_DIR) / relative);
+    std::ostringstream out;
+    out << in.rdbuf();
+    return out.str();
+  };
+  const auto video = read("src/video.cpp");
+  ASSERT_FALSE(video.empty());
+  EXPECT_NE(video.find("ctx->rc_buffer_size = static_cast<int>(nvenc::grown_vbv_buffer_bits("), std::string::npos);
+  EXPECT_EQ(video.find("ctx->rc_buffer_size += ctx->rc_buffer_size *"), std::string::npos);
+  const auto nvenc = read("src/nvenc/nvenc_base.cpp");
+  ASSERT_FALSE(nvenc.empty());
+  EXPECT_NE(nvenc.find("enc_config.rcParams.vbvBufferSize = static_cast<uint32_t>(grown_vbv_buffer_bits("), std::string::npos);
+  EXPECT_EQ(nvenc.find("vbvBufferSize += enc_config.rcParams.vbvBufferSize *"), std::string::npos);
+}

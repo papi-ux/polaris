@@ -214,7 +214,9 @@ namespace stream_path {
     caps.labwc_present = binary_on_path("labwc");
     caps.wlr_randr_present = binary_on_path("wlr-randr");
     caps.gamescope_present = binary_on_path("gamescope");
-    caps.virtual_display_available = virtual_display::is_available();
+    const auto hvd = virtual_display::host_stream_readiness();
+    caps.virtual_display_available = hvd.available;
+    caps.virtual_display_unavailable_reason = hvd.reason;
     caps.desktop_takeover_available = desktop_takeover::is_available();
     // Portal availability is environment-dependent; configured capture is the honest hint.
     caps.configured_capture = config::video.capture;
@@ -327,7 +329,10 @@ namespace stream_path {
       out.reason = "Private Stream is unavailable: " + out.unavailable_reason + ".";
     }
     if (path.topology == topology_kind_e::HOST_VIRTUAL && !caps.virtual_display_available) {
-      out.reason = "Host virtual display was requested, but no backend is currently available.";
+      out.available = false;
+      out.unavailable_reason = caps.virtual_display_unavailable_reason;
+      if (out.unavailable_reason.empty()) out.unavailable_reason = "Host virtual display is not available on this host.";
+      out.reason = "Host Virtual Display is unavailable: " + out.unavailable_reason;
     }
     if (path.topology == topology_kind_e::DESKTOP_TAKEOVER &&
         !caps.desktop_takeover_available) {
@@ -396,6 +401,11 @@ namespace stream_path {
       if (opt.runtime == runtime_kind_e::GAMESCOPE && !caps.gamescope_present) {
         opt.available = false;
         opt.unavailable_reason = "gamescope binary not found on PATH";
+      }
+      if (opt.topology == topology_kind_e::HOST_VIRTUAL && !caps.virtual_display_available) {
+        opt.available = false;
+        opt.unavailable_reason = caps.virtual_display_unavailable_reason;
+        if (opt.unavailable_reason.empty()) opt.unavailable_reason = "Host virtual display is not available on this host.";
       }
       if (opt.topology == topology_kind_e::DESKTOP_TAKEOVER &&
           !caps.desktop_takeover_available) {

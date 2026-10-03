@@ -132,6 +132,24 @@ namespace nvhttp {
   namespace pt = boost::property_tree;
 
   namespace {
+    // A client media report this host refused never reaches Doctor, and the client only logs it once
+    // on its own side. Say which refusal it was here, at most once every half minute.
+    void note_refused_media_report(SimpleWeb::StatusCode code, const nlohmann::json &body) {
+      static std::atomic<std::int64_t> last_logged_ms {0};
+      const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()
+      ).count();
+      auto last = last_logged_ms.load(std::memory_order_relaxed);
+      if (last != 0 && now_ms - last < 30000) {
+        return;
+      }
+      if (!last_logged_ms.compare_exchange_strong(last, now_ms, std::memory_order_relaxed)) {
+        return;
+      }
+      BOOST_LOG(info) << "Doctor: refused a client media report with HTTP "sv << static_cast<int>(code) << ": "sv
+                      << body.value("code", std::string {"unknown"});
+    }
+
     // Moonlight shows this verbatim, so it names the setting and not a Nova screen: the launch mode
     // is Where games run on the host and the mode Nova picks per launch.
     constexpr const char *desktop_steam_did_not_exit_message =
@@ -475,6 +493,12 @@ namespace nvhttp {
       }
     }
 
+    void put_paired_capture_codecs(
+      nlohmann::json &capture,
+      const std::optional<pyrowave_availability::unavailable_t> &pyrowave_unavailable,
+      bool allow_deferred_headless_prime
+    );
+
 #ifdef __linux__
     // A Space launch refusal reaches the client the way a host launch refusal
     // does: the words as status_message, the code and action as root attributes
@@ -610,6 +634,26 @@ namespace nvhttp {
     }
 
   #if defined(__linux__)
+    proc::launch_selection_request_t optimize_launch_selection_request(const args_t &args, bool paired_always_virtual) {
+      const auto fields = launch_profile::parse_explicit_launch_fields(
+        [&args](std::string_view name) -> std::optional<std::string> {
+          const auto it = args.find(std::string {name});
+          return it == args.end() ? std::nullopt : std::optional<std::string> {it->second};
+        });
+      const auto requested = lower_copy(get_arg(args, "mode", ""));
+      const bool mirror = explicit_mirror_desktop_requested(args);
+      const bool paired = paired_always_virtual && !fields.topology_locked;
+      const auto selection = paired ? std::string {stream_display_policy::k_host_virtual_display} : requested;
+      return {
+        .client_named_selection = mirror ? std::string {stream_display_policy::k_desktop_display} :
+          fields.topology_locked ? requested : std::string {},
+        .requested_selection = selection,
+        .mirror_desktop = mirror,
+        .launch_virtual_display = selection == stream_display_policy::k_host_virtual_display,
+        .virtual_display_user_locked = fields.topology_locked || paired,
+      };
+    }
+
     // Session-scoped stream-mode override gate: returns the requested mode when
     // it may drive this session, empty otherwise (the host default applies).
     // Which modes qualify is derived from the path registry rather than listed
@@ -678,7 +722,9 @@ namespace nvhttp {
 #ifdef __linux__
       // A per-session override changes which family this launch actually is.
       std::string session_mode_reject_reason;
-      const auto session_mode = accepted_session_stream_mode(session_stream_mode_requested(args), session_mode_reject_reason);
+      const auto pin = stream_display_policy::resolve_app_launch_as(app.launch_as, {});
+      const auto session_mode = pin.verdict == stream_display_policy::app_launch_as_t::verdict_e::pinned ?
+        pin.selection : accepted_session_stream_mode(session_stream_mode_requested(args), session_mode_reject_reason);
       if (!session_mode.empty() && !mirror_desktop_requested) {
         const auto session_booleans = stream_display_policy::legacy_booleans_for_selection(session_mode);
         private_stream_requested = proc::streaming_launch_requests_private_family(
@@ -723,7 +769,9 @@ namespace nvhttp {
 #ifdef __linux__
       // A per-session override changes which family this launch actually is.
       std::string session_mode_reject_reason;
-      const auto session_mode = accepted_session_stream_mode(session_stream_mode_requested(body), session_mode_reject_reason);
+      const auto pin = stream_display_policy::resolve_app_launch_as(app.launch_as, {});
+      const auto session_mode = pin.verdict == stream_display_policy::app_launch_as_t::verdict_e::pinned ?
+        pin.selection : accepted_session_stream_mode(session_stream_mode_requested(body), session_mode_reject_reason);
       if (!session_mode.empty() && !mirror_desktop_requested) {
         const auto session_booleans = stream_display_policy::legacy_booleans_for_selection(session_mode);
         private_stream_requested = proc::streaming_launch_requests_private_family(
@@ -1126,25 +1174,56 @@ namespace nvhttp {
       return host_power;
     }
 
-    nlohmann::json build_launch_mode_contract(bool app_prefers_virtual_display,
+    bool library_desktop_offers_own_screen(const std::vector<proc::ctx_t> &apps, bool backend_available) {
+      return backend_available && std::any_of(apps.begin(), apps.end(), [](const auto &app) {
+        return app.name == "Desktop" && app.launch_as == "desktop_display";
+      });
+    }
+
+    nlohmann::json build_launch_mode_contract(std::string_view app_launch_as,
                                               std::string_view app_name,
                                               bool virtual_display_available,
                                               bool prefers_headless,
-                                              bool app_mirrors_desktop) {
+                                              const proc::launch_as_availability_t &launch_as) {
       // preferred_mode reflects the per-game stored preference; recommended_mode reflects
       // the Polaris-supported launch mode clients should choose for this host right now.
       std::string preferred_mode;
       std::string recommended_mode;
       std::string mode_reason;
 
+      nlohmann::json launch_mode;
+      launch_mode["launch_as"] = app_launch_as;
+      launch_mode["launch_as_available"] = app_launch_as == "host_default" || launch_as.available;
+      launch_mode["launch_as_unavailable_reason"] =
+        launch_mode["launch_as_available"].get<bool>() ? "" : launch_as.reason;
+
       auto allowed_modes = nlohmann::json::array();
 #ifdef __linux__
-      preferred_mode = app_prefers_virtual_display ?
-        "host_virtual_display" : "headless_stream";
+      if (app_launch_as != "host_default" && app_launch_as != "desktop_display") {
+        // A pin, including an unavailable or unknown pin, is its own answer. An empty allowed
+        // list would tell older Nova that every mode is allowed and invite a silent fallback.
+        const auto label = stream_display_policy::label_for_selection(app_launch_as);
+        const auto display_label = label.empty() ? std::string {app_launch_as} : label;
+        launch_mode["preferred_mode"] = app_launch_as;
+        launch_mode["recommended_mode"] = app_launch_as;
+        launch_mode["allowed_modes"] = nlohmann::json::array({app_launch_as});
+        launch_mode["follows_host_default"] = false;
+        auto reason = "This entry is set on the host to launch as " + display_label;
+        if (launch_as.available) {
+          reason += ", so every client gets " + display_label + ".";
+        } else {
+          reason += ", which this host cannot run right now. " + launch_as.reason;
+          if (!reason.empty() && reason.back() != '.') reason += '.';
+        }
+        launch_mode["mode_reason"] = std::move(reason);
+        return launch_mode;
+      }
+      preferred_mode = "headless_stream";
       for (const auto &mode : stream_display_policy::allowed_launch_modes(virtual_display_available, false)) {
         allowed_modes.push_back(mode);
       }
 #elif defined(_WIN32)
+      const bool app_prefers_virtual_display = app_launch_as == "host_virtual_display";
       preferred_mode = app_prefers_virtual_display && virtual_display_available ?
         "host_virtual_display" : "desktop_display";
       allowed_modes.push_back("desktop_display");
@@ -1165,7 +1244,7 @@ namespace nvhttp {
       // choose something that cannot happen and then quietly does something else. The honest set is
       // the mirror, plus the two topologies that still show the real desktop when the host offers
       // them. Answered here so the client's picker and the resolver agree before anyone presses Play.
-      if (app_mirrors_desktop) {
+      if (app_launch_as == "desktop_display") {
         auto honest_modes = nlohmann::json::array();
         honest_modes.push_back(std::string {stream_display_policy::k_desktop_display});
         for (const auto &mode : allowed_modes) {
@@ -1184,7 +1263,6 @@ namespace nvhttp {
         mode_reason =
           "This entry streams the desktop itself, so it mirrors the host screen. Pick Host Virtual "
           "Display to be given a screen of your own instead, when this host can add one.";
-        nlohmann::json launch_mode;
         launch_mode["preferred_mode"] = preferred_mode;
         launch_mode["recommended_mode"] = recommended_mode;
         launch_mode["allowed_modes"] = std::move(allowed_modes);
@@ -1196,8 +1274,6 @@ namespace nvhttp {
         launch_mode["follows_host_default"] = false;
         return launch_mode;
       }
-#else
-      (void) app_mirrors_desktop;
 #endif
 
 #ifdef __linux__
@@ -1207,19 +1283,8 @@ namespace nvhttp {
           mode_reason =
             "Steam Big Picture is safest in a Private Stream session because this Polaris host is already configured for Private Stream; this avoids waking Steam/Gamepad UI on the physical desktop during launch or teardown.";
         } else {
-          mode_reason = app_prefers_virtual_display ?
-            "This app prefers Host Virtual Display, but this Polaris host is already configured for Private Stream, so Private Stream is recommended." :
-            "Private Stream is recommended because this Polaris host is already configured for private streaming.";
+          mode_reason = "Private Stream is recommended because this Polaris host is already configured for private streaming.";
         }
-      } else if (app_prefers_virtual_display && virtual_display_available) {
-        recommended_mode = "host_virtual_display";
-        mode_reason = steam_big_picture ?
-          "Steam Big Picture is configured to prefer a dedicated virtual display on this host." :
-          "This app is configured to prefer a dedicated virtual display on the host.";
-      } else if (app_prefers_virtual_display && !virtual_display_available) {
-        recommended_mode = "headless_stream";
-        mode_reason =
-          "This app prefers Host Virtual Display, but Polaris does not currently have a virtual display backend available, so Private Stream is recommended.";
       } else if (virtual_display_available) {
         recommended_mode = "headless_stream";
         mode_reason =
@@ -1245,7 +1310,6 @@ namespace nvhttp {
         mode_reason = "Polaris will mirror the current Windows desktop session.";
       }
 #else
-      (void) app_prefers_virtual_display;
       (void) virtual_display_available;
       (void) prefers_headless;
       (void) steam_big_picture;
@@ -1279,7 +1343,6 @@ namespace nvhttp {
       }
 #endif
 
-      nlohmann::json launch_mode;
       launch_mode["preferred_mode"] = preferred_mode;
       launch_mode["recommended_mode"] = recommended_mode;
       launch_mode["allowed_modes"] = std::move(allowed_modes);
@@ -1895,7 +1958,7 @@ namespace nvhttp {
       status["applied_stream_settings"] = client_sync.value("applied_stream_settings", nlohmann::json::object());
       status["message"] =
         manual_override ?
-          "Manual stream overrides are active; Polaris will report guidance but will not treat Auto Safe as authoritative." :
+          "Manual stream overrides are active; Polaris will report guidance but will not treat Live Tuning as authoritative." :
         relaunch_required ?
           "Desired settings are saved and will become effective after the active stream relaunches." :
         client_presentation_status == "blocked" ?
@@ -1905,7 +1968,7 @@ namespace nvhttp {
         !has_applied_stream_settings ?
           "Polaris is waiting for Nova to report the stream settings it actually applied." :
         adaptive_active ?
-          "Auto Safe is active; Polaris is adjusting the effective bitrate in real time under the saved paired-client limit." :
+          "Live Tuning is active; Polaris is adjusting the effective bitrate in real time under the saved paired-client limit." :
           "Desired settings match the current Polaris runtime state.";
       status["fields"] = std::move(fields);
       return status;
@@ -2120,7 +2183,7 @@ namespace nvhttp {
         {"allow_display_mode_change", request_client_refresh},
         {"internal_display_only", true},
         {"reason", prefer_stable_multiple ?
-          "Use an even internal display refresh multiple for capped Auto Safe streams." :
+          "Use an even internal display refresh multiple for capped streams while Live Tuning is on." :
           prefer_exact_refresh ?
           "Match internal handheld displays to the stream FPS to avoid refresh-rate flapping." :
           "No client display-mode change is requested for this stream target."}
@@ -2609,7 +2672,8 @@ namespace nvhttp {
         (target_fps > 0.0 && stats.capture_source_fps > 0.0 &&
          stats.capture_source_fps < target_fps * 0.50 && stats.duplicate_frame_ratio >= 0.10);
 
-      const bool network_risk = stats.network_risk;
+      // The judged verdict Doctor grades with, so the session status never contradicts it.
+      const bool network_risk = stream_stats::judged_network(stats).risk;
       const bool pacing_risk =
         stats.dropped_frame_ratio >= 0.04 ||
         (!static_or_duplicate_content &&
@@ -3002,21 +3066,29 @@ namespace nvhttp {
     return encoder;
   }
 
-  nlohmann::json build_launch_mode_contract_for_tests(bool app_prefers_virtual_display,
-                                                      const std::string &app_name,
+  bool library_desktop_offers_own_screen_for_tests(const std::vector<proc::ctx_t> &apps, bool backend_available) {
+    return library_desktop_offers_own_screen(apps, backend_available);
+  }
+
+  nlohmann::json build_launch_mode_contract_for_tests(std::string_view app_launch_as,
+                                                      std::string_view app_name,
                                                       bool host_virtual_display_available,
                                                       bool host_prefers_headless,
-                                                      bool app_mirrors_desktop) {
+                                                      const proc::launch_as_availability_t &launch_as) {
     return build_launch_mode_contract(
-      app_prefers_virtual_display,
+      app_launch_as,
       app_name,
       host_virtual_display_available,
       host_prefers_headless,
-      app_mirrors_desktop
+      launch_as
     );
   }
 
 #if defined(__linux__)
+  proc::launch_selection_request_t optimize_launch_selection_request_for_tests(const args_t &args, bool paired_always_virtual) {
+    return optimize_launch_selection_request(args, paired_always_virtual);
+  }
+
   std::string accepted_session_stream_mode_for_tests(const std::string &requested) {
     std::string reject_reason;
     return accepted_session_stream_mode(requested, reject_reason);
@@ -3114,6 +3186,15 @@ namespace nvhttp {
   ) {
     nlohmann::json capture = nlohmann::json::object();
     put_capture_codecs(capture, hevc_mode, av1_mode, pyrowave_unavailable);
+    return capture;
+  }
+
+  nlohmann::json paired_capture_codecs_for_tests(
+    const std::optional<pyrowave_availability::unavailable_t> &pyrowave_unavailable
+  ) {
+    nlohmann::json capture = nlohmann::json::object();
+    // Exercise the same paired-route offer without starting a real encoder probe.
+    put_paired_capture_codecs(capture, pyrowave_unavailable, false);
     return capture;
   }
 
@@ -3240,6 +3321,17 @@ namespace nvhttp {
       }
 #endif
       return video::advertised_codec_capability_state();
+    }
+
+    void put_paired_capture_codecs(
+      nlohmann::json &capture,
+      const std::optional<pyrowave_availability::unavailable_t> &pyrowave_unavailable,
+      bool allow_deferred_headless_prime
+    ) {
+      // Configured Auto is zero, not the encoder's resolved availability. Use the
+      // same synchronized, topology-aware snapshot as the authenticated serverinfo.
+      const auto codecs = advertised_codec_support_for_http(allow_deferred_headless_prime);
+      put_capture_codecs(capture, codecs.hevc_mode, codecs.av1_mode, pyrowave_unavailable);
     }
 
     std::optional<int> topology_max_launch_refresh_rate_for_http(
@@ -3499,12 +3591,18 @@ namespace nvhttp {
     }
 
     nlohmann::json launch_mode_contract_for_app(const proc::ctx_t &app) {
+#ifdef __linux__
+      const auto availability = proc::launch_as_availability(app);
+#else
+      // The Linux-only app pin resolver does not alter other platforms' legacy display policy.
+      const proc::launch_as_availability_t availability {};
+#endif
       return build_launch_mode_contract(
-        app.virtual_display,
+        app.launch_as,
         app.name,
         settings_metadata::host_virtual_display_available(),
         host_prefers_headless(),
-        app.desktop_mirror
+        availability
       );
     }
 
@@ -5103,7 +5201,11 @@ namespace nvhttp {
     return true;
   }
 
-  std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker) {
+  std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker,
+                                                                  const proc::ctx_t *topology_app) {
+#ifndef __linux__
+    (void) topology_app;
+#endif
     auto launch_session = std::make_shared<rtsp_stream::launch_session_t>();
 
     launch_session->id = ++session_id_counter;
@@ -5194,6 +5296,7 @@ namespace nvhttp {
       launch_session->fps = launch_session->requested_fps = fps;
       launch_session->device_name = named_cert_p->name;
       launch_session->unique_id = named_cert_p->uuid;
+      launch_session->client_family = named_cert_p->client_family;
       launch_session->temporary_authorization = named_cert_p->temporary_authorization;
       launch_session->watch_only = watch_requested(args);
       launch_session->perm = named_cert_p->perm & PERM::_game_control;
@@ -5309,6 +5412,7 @@ namespace nvhttp {
     launch_session->controller_type = named_cert_p->controller_type;
     launch_session->client_reports_hdr10_display = named_cert_p->client_reports_hdr10_display;
     launch_session->unique_id = named_cert_p->uuid;
+    launch_session->client_family = named_cert_p->client_family;
     launch_session->temporary_authorization = named_cert_p->temporary_authorization;
     launch_session->profile_preference = launch_profile::normalize_preset(
       get_arg(args, "profilePreference", "auto")
@@ -5321,7 +5425,7 @@ namespace nvhttp {
       try {
         std::size_t consumed = 0;
         const auto parsed = std::stoll(raw_bitrate, &consumed);
-        if (consumed != raw_bitrate.size() || parsed < 1000 || parsed > 300000) {
+        if (consumed != raw_bitrate.size() || !stream_bitrate::request_in_range(parsed)) {
           BOOST_LOG(warning) << "Rejecting resolved launch profile with invalid bitrate"sv;
           return nullptr;
         }
@@ -5373,16 +5477,33 @@ namespace nvhttp {
     #if defined(__linux__)
     launch_session->mirror_desktop = explicit_mirror_desktop_requested(args);
     launch_session->force_private_after_desktop_steam_shutdown = force_private_after_desktop_steam_shutdown_requested(args);
+    // An exact app pin is freshly checked by the app-aware launch/resume guard, which can
+    // report its reason and recovery action. Watch inherits the admitted owner's topology.
+    // Only known session-overridable modes reach those guards without an earlier freshness
+    // check; ordinary host selections and malformed requests keep the existing parser gate.
+    const auto topology_freshness_deferred = [&](std::string_view mode) {
+      if (input_only || !stream_display_policy::selection_session_overridable(mode)) return false;
+      if (launch_session->watch_only) return true;
+      // HVD needs both creation and output-pinned capture. Its actual app-aware
+      // resolver gives a named refusal before topology changes, instead of the
+      // legacy parser dropping this mode or calling the envelope malformed.
+      if (mode == stream_display_policy::k_host_virtual_display) return true;
+      if (!topology_app) return false;
+      const auto pin = stream_display_policy::resolve_app_launch_as(topology_app->launch_as, {});
+      return pin.verdict == stream_display_policy::app_launch_as_t::verdict_e::pinned &&
+        pin.selection == mode;
+    };
     if (launch_session->resolved_profile_from_client) {
       launch_session->expected_stream_mode = lower_copy(
         get_arg(args, "expectedTopology", "")
       );
       std::string expected_topology_error;
       if (launch_session->expected_stream_mode.empty() ||
-          !stream_display_policy::selection_valid_fresh(
-            launch_session->expected_stream_mode,
-            expected_topology_error
-          )) {
+          (!topology_freshness_deferred(launch_session->expected_stream_mode) &&
+           !stream_display_policy::selection_valid_fresh(
+             launch_session->expected_stream_mode,
+             expected_topology_error
+           ))) {
         BOOST_LOG(warning) << "Rejecting exact resolved launch with missing or unavailable expectedTopology: "sv
                            << expected_topology_error;
         return nullptr;
@@ -5403,11 +5524,14 @@ namespace nvhttp {
           launch_session->resolved_profile_from_client &&
           launch_session->expected_stream_mode != requested_mode &&
           stream_display_policy::selection_session_overridable(requested_mode);
-        const auto accepted = defer_losing_mode_availability ?
+        const bool defer_owned_mode_availability =
+          topology_freshness_deferred(requested_mode);
+        const auto accepted = (defer_losing_mode_availability || defer_owned_mode_availability) ?
           requested_mode : accepted_session_stream_mode(requested_mode, reject_reason);
         if (!accepted.empty()) {
           launch_session->stream_mode = accepted;
           launch_session->client_selected_topology = true;
+          launch_session->client_named_selection = accepted;
           BOOST_LOG(info) << "Session stream mode override requested: ["sv << accepted << ']';
         } else if (launch_session->resolved_profile_from_client) {
           BOOST_LOG(warning) << "Rejecting exact resolved launch streamMode ["sv
@@ -5428,14 +5552,15 @@ namespace nvhttp {
     // process resolver and /optimize observe the same input.
 #if defined(__linux__)
     if (!launch_session->mirror_desktop &&
+        !launch_session->client_selected_topology &&
         !client_display_mode_explicit &&
         named_cert_p->always_use_virtual_display) {
       launch_session->stream_mode = std::string {stream_display_policy::k_host_virtual_display};
     }
-    // expectedTopology has already been freshly validated above. The final
-    // app-aware resolver freshly validates the winning mode before generation
-    // install; probing this lower-precedence paired default here would wrongly
-    // reject an app whose hard semantic is Desktop mirroring.
+    // expectedTopology was freshly checked above or deferred to the app-aware
+    // guard for a matching pin/Watch. The final resolver validates the winning
+    // mode before generation install; probing this lower-precedence paired
+    // default here would wrongly reject an app whose hard semantic is Desktop mirroring.
 #endif
     launch_session->virtual_display = !launch_session->mirror_desktop &&
       (client_requested_virtual_display ||
@@ -5445,6 +5570,14 @@ namespace nvhttp {
     // selected stability preset may still conservatively normalize it.
     launch_session->user_locked_display_mode = launch_session->resolved_profile_from_client;
     launch_session->user_locked_virtual_display = client_display_mode_explicit || named_cert_p->always_use_virtual_display;
+#if defined(__linux__)
+    if (launch_session->mirror_desktop) {
+      launch_session->client_named_selection = std::string {stream_display_policy::k_desktop_display};
+    } else if (launch_session->client_named_selection.empty() &&
+               client_display_mode_explicit && client_requested_virtual_display) {
+      launch_session->client_named_selection = std::string {stream_display_policy::k_host_virtual_display};
+    }
+#endif
     launch_session->scale_factor = util::from_view(get_arg(args, "scaleFactor", "100"));
     if (named_cert_p->target_bitrate_kbps > 0) {
       launch_session->paired_target_bitrate_kbps = named_cert_p->target_bitrate_kbps;
@@ -6244,7 +6377,8 @@ namespace nvhttp {
       if ((hdr != 0 && hdr != 1) || (display_locked != 0 && display_locked != 1) ||
           (bitrate_locked != 0 && bitrate_locked != 1) || width != std::floor(width) ||
           height != std::floor(height) || width < 320 || width > 4096 || height < 240 || height > 2160 ||
-          fps < 15 || fps > 240 || ceiling < 15 || ceiling > 1000 || bitrate < 1000 || bitrate > 300000 || bitrate != std::floor(bitrate))
+          fps < 15 || fps > 240 || ceiling < 15 || ceiling > 1000 || bitrate < stream_bitrate::k_min_request_kbps ||
+          bitrate > stream_bitrate::k_max_request_kbps || bitrate != std::floor(bitrate))
         return reject(400, "Unsupported Space stream limits");
       if (!current->display_mode.empty()) {
         std::istringstream input(current->display_mode);
@@ -6336,7 +6470,7 @@ namespace nvhttp {
       return profile_launch_response_t {400, "The Space launch is missing its key material.", {}, "space_key_material", "Update the client app and try again."};
     auto launch = make_launch_session(false, false, args, current.get(), true);
     if (!launch) return profile_launch_response_t {400, "These display or media options are not supported for a Space stream.", {},
-      "space_display_options", "Launch with HDR off, stereo audio, a whole frame rate such as 60, and the encoder on Auto."};
+      "space_display_options", "Launch with HDR off, stereo audio, the encoder on Auto, a bitrate of 8 Mbps or less, and a resolution from 320x240 to 4096x2160 in even numbers at a whole frame rate such as 60."};
     if (!launch->rtsp_cipher) return profile_launch_response_t {403, "Space streams require encrypted RTSP.", {}, "space_encryption_required",
       "Update the client app to a version that encrypts stream setup."};
     if (args.count("workerTarget") > 1 || args.count("workerProfile") > 1)
@@ -7370,7 +7504,25 @@ namespace nvhttp {
     }
 
     const bool launch_host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
-    auto launch_session = make_launch_session(launch_host_audio, is_input_only, args, named_cert_p.get());
+    // Keep an owned copy alive through parsing; the running generation's frozen entry wins over
+    // a catalogue edit when this is the same-app resume door.
+    std::optional<proc::ctx_t> topology_app;
+#ifdef __linux__
+    if (!is_input_only) {
+      if (current_appid > 0 && (appid == current_appid ||
+          (!appuuid_str.empty() && appuuid_str == current_app_uuid))) {
+        topology_app = proc::proc.running_app_context();
+      } else {
+        const auto &apps = proc::proc.get_apps();
+        const auto app = std::find_if(apps.begin(), apps.end(), [&](const auto &candidate) {
+          return candidate.id == appid_str || candidate.uuid == appuuid_str;
+        });
+        if (app != apps.end()) topology_app = *app;
+      }
+    }
+#endif
+    auto launch_session = make_launch_session(launch_host_audio, is_input_only, args, named_cert_p.get(),
+      false, topology_app ? &*topology_app : nullptr);
     if (!launch_session) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);
@@ -7519,9 +7671,7 @@ namespace nvhttp {
             return true;
           }
           tree.put("root.resume", 0);
-          tree.put("root.<xmlattr>.status_code", validation_error);
-          tree.put(
-            "root.<xmlattr>.status_message",
+          put_launch_refusal(tree, validation_error,
             validation_error == 409 ?
               "The resolved stream profile no longer matches the active app, topology, or output capabilities" :
               "The active app could not be validated for resume"
@@ -7601,6 +7751,13 @@ namespace nvhttp {
         }
 
 #ifdef __linux__
+        if (const auto refusal = proc::refuse_app_launch_as_before_launch(
+              *app_iter, proc::launch_selection_request_from_session(*launch_session))) {
+          tree.put("root.resume", 0);
+          tree.put("root.gamesession", 0);
+          put_launch_refusal(tree, refusal, "This app's Launch as setting cannot be used for this launch.");
+          return;
+        }
         proc::apply_app_display_semantics(*app_iter, *launch_session);
         if (!admit_desktop_launch_policy(
               tree,
@@ -7770,7 +7927,12 @@ namespace nvhttp {
     if (no_active_sessions && args.find("localAudioPlayMode"s) != std::end(args)) {
       resume_host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     }
-    auto launch_session = make_launch_session(resume_host_audio, false, args, named_cert_p.get());
+    std::optional<proc::ctx_t> topology_app;
+#ifdef __linux__
+    topology_app = proc::proc.running_app_context();
+#endif
+    auto launch_session = make_launch_session(resume_host_audio, false, args, named_cert_p.get(),
+      false, topology_app ? &*topology_app : nullptr);
     if (!launch_session) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);
@@ -7822,6 +7984,20 @@ namespace nvhttp {
       launch_session->input_only = true;
     }
 
+#ifdef __linux__
+    // Refuse the frozen owner's unavailable pin after owner/token admission but before
+    // any codec probe or display preparation. The full resolved-profile check below still
+    // verifies the post-probe capabilities; Watch keeps the admitted owner's generation.
+    if (topology_app) {
+      if (const auto refusal = proc::refuse_app_launch_as_before_launch(
+            *topology_app, proc::launch_selection_request_from_session(*launch_session))) {
+        tree.put("root.resume", 0);
+        put_launch_refusal(tree, refusal, "The active app's Launch as setting cannot be used for resume.");
+        return;
+      }
+    }
+#endif
+
     if (refuse_declared_codec(*launch_session)) {
       tree.put("root.resume", 0);
       put_launch_refusal(tree, 503, "The host's capture cannot serve the codec this stream asked for.");
@@ -7868,9 +8044,7 @@ namespace nvhttp {
             exact_private_refresh_reapply_will_run
           )) {
       tree.put("root.resume", 0);
-      tree.put("root.<xmlattr>.status_code", validation_error);
-      tree.put(
-        "root.<xmlattr>.status_message",
+      put_launch_refusal(tree, validation_error,
         validation_error == 409 ?
           "The resolved stream profile no longer matches the active app, topology, or output capabilities" :
           "The active app could not be validated for resume"
@@ -8389,6 +8563,14 @@ namespace nvhttp {
       // GET /polaris/v1/pyrowave/advice, and pyrowave_bitrate in session status while a PyroWave
       // stream runs. The route answers on every build and says so when PyroWave is not available.
       features["pyrowave_advice_v1"] = true;
+      // bitrate_units in session status for every stream, whatever its codec: what its request was
+      // split into, by the arithmetic bitrate_units.formula names.
+      features["bitrate_units_v1"] = true;
+      // The most a client may set by hand, in kbps, through this host's own endpoints: client settings,
+      // a live bitrate, a resolved launch, a Space's resolver and the launch profile route. A host
+      // without it takes up to 300 Mbps, so a client offers more only where this says so. The RTSP
+      // handshake is not one of them: max_bitrate alone bounds it.
+      features["manual_bitrate_max_kbps"] = stream_bitrate::k_max_request_kbps;
       features["ai_auto_quality_control"] = false;
       features["ai_optimizer"] = false;
       features["ai_optimizer_control"] = false;
@@ -8498,7 +8680,7 @@ namespace nvhttp {
       // ServerMaxLaunchRefreshRate. Both must reflect launch admission.
       capture["max_fps"] = advertised_max_launch_refresh_rate_for_http();
 
-      put_capture_codecs(capture, config::video.hevc_mode, config::video.av1_mode, video::pyrowave_unavailable());
+      put_paired_capture_codecs(capture, video::pyrowave_unavailable(), true);
 
       SimpleWeb::CaseInsensitiveMultimap headers;
       headers.emplace("Content-Type", "application/json");
@@ -8528,8 +8710,18 @@ namespace nvhttp {
 #ifdef POLARIS_BUILD_PYROWAVE
       host.device_available = pyrowave_encode::available();
 #endif
-      host.fec_percentage = config::stream.fec_percentage;
       host.max_bitrate_kbps = config::video.max_bitrate;
+      // A client streaming here is advised for its own stream: the audio its request was split for and
+      // the FEC share it started with, the figures its bitrate_units carry. One that is not gets the
+      // host's FEC share now and the stereo in high quality the advice assumes before a launch.
+      std::optional<stream_bitrate::request_t> own_request;
+      if (const auto timing = stream_stats::get_session_timing(named_cert_p->uuid); timing.session_active) {
+        own_request = stream_stats::recorded_stream_request(timing.session_generation);
+      }
+      const auto link = pyrowave_advice::stream_link(own_request ? &*own_request : nullptr,
+                                                     config::stream.fec_percentage);
+      host.fec_percentage = link.fec_percentage;
+      host.audio_kbps = link.audio_kbps;
       int http_status = 200;
       const auto output = pyrowave_advice::advice_reply(
         field("width"), field("height"), field("fps"), field("chroma"), host, http_status
@@ -8792,6 +8984,12 @@ namespace nvhttp {
       // is PyroWave. Every advice figure is a request, which is what a client sets.
       if (auto pyrowave_bitrate = stream_stats::pyrowave_bitrate_json(stats); !pyrowave_bitrate.is_null()) {
         output["pyrowave_bitrate"] = std::move(pyrowave_bitrate);
+      }
+      // What the stream's bitrate request was split into, for every codec: the request, the encoder
+      // rate it became and the rate the encoder runs at now, and the audio and FEC around them. The
+      // asking client's own stream when it has one here.
+      if (auto bitrate_units = stream_stats::bitrate_units_json(stats, requester_generation); !bitrate_units.is_null()) {
+        output["bitrate_units"] = std::move(bitrate_units);
       }
       const auto health = build_session_health_json(
         stats,
@@ -9304,8 +9502,8 @@ namespace nvhttp {
               return;
             }
             target_bitrate_kbps = body["target_bitrate_kbps"].get<int>();
-            if (target_bitrate_kbps != 0 && (target_bitrate_kbps < 1000 || target_bitrate_kbps > 300000)) {
-              write_json({{"error", "target_bitrate_kbps must be 0 or between 1000 and 300000"}}, SimpleWeb::StatusCode::client_error_bad_request);
+            if (target_bitrate_kbps != 0 && !stream_bitrate::request_in_range(target_bitrate_kbps)) {
+              write_json({{"error", "target_bitrate_kbps must be 0 or " + stream_bitrate::request_range_text()}}, SimpleWeb::StatusCode::client_error_bad_request);
               return;
             }
           }
@@ -9609,7 +9807,7 @@ namespace nvhttp {
       // it stays here when the host cannot add a screen, so nobody loses the tile and the choice at
       // once.
       const bool desktop_offers_its_own_screen =
-        has_desktop && settings_metadata::host_virtual_display_available();
+        library_desktop_offers_own_screen(apps, settings_metadata::host_virtual_display_available());
 
       int idx = 0;
       for (auto &app : apps) {
@@ -10381,6 +10579,23 @@ namespace nvhttp {
 
 #ifdef __linux__
         const auto &app = apps.at(static_cast<size_t>(app_id - 1));
+        launch_failure::clear();
+        const bool explicit_mirror = explicit_mirror_desktop_requested(body);
+        std::string mode_reason;
+        const auto named_mode = explicit_mirror ? std::string {stream_display_policy::k_desktop_display} :
+          accepted_session_stream_mode(session_stream_mode_requested(body), mode_reason);
+        if (const auto refusal = proc::refuse_app_launch_as_before_launch(app, {
+              .client_named_selection = named_mode,
+              .requested_selection = named_mode,
+              .mirror_desktop = explicit_mirror,
+            })) {
+          const auto record = launch_failure::take();
+          nlohmann::json error {{"status", false}, {"error", launch_failure::status_message(*record)}, {"error_code", record->code}};
+          SimpleWeb::CaseInsensitiveMultimap headers;
+          headers.emplace("Content-Type", "application/json");
+          response->write(static_cast<SimpleWeb::StatusCode>(refusal), error.dump(), headers);
+          return;
+        }
         auto launch_policy = resolve_streaming_launch_safety_policy(
           body,
           app,
@@ -10800,6 +11015,9 @@ namespace nvhttp {
       }
 
       auto write_json = [&](SimpleWeb::StatusCode code, const nlohmann::json &body) {
+        if (code != SimpleWeb::StatusCode::success_ok) {
+          note_refused_media_report(code, body);
+        }
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
         response->write(code, body.dump(), headers);
@@ -11157,9 +11375,9 @@ namespace nvhttp {
           return;
         }
         int bitrate_kbps = body.value("bitrate_kbps", 0);
-        if (bitrate_kbps < 1000 || bitrate_kbps > 300000) {
+        if (!stream_bitrate::request_in_range(bitrate_kbps)) {
           nlohmann::json err;
-          err["error"] = "bitrate_kbps must be between 1000 and 300000";
+          err["error"] = "bitrate_kbps must be " + stream_bitrate::request_range_text();
           SimpleWeb::CaseInsensitiveMultimap headers;
           headers.emplace("Content-Type", "application/json");
           response->write(SimpleWeb::StatusCode::client_error_bad_request, err.dump(), headers);
@@ -11836,11 +12054,13 @@ namespace nvhttp {
         args.count("preference") ? args.find("preference")->second : std::string {"auto"}
       );
       auto reply_bad_request = [&](std::string code,
-                                   std::string error = "Explicit launch fields must be complete and within supported bounds.") {
+                                   std::string error = "Explicit launch fields must be complete and within supported bounds.",
+                                   std::string action = {}) {
         nlohmann::json output {
           {"status", false}, {"code", std::move(code)},
           {"error", std::move(error)}
         };
+        if (!action.empty()) output["action"] = std::move(action);
         SimpleWeb::CaseInsensitiveMultimap headers;
         headers.emplace("Content-Type", "application/json");
         response->write(SimpleWeb::StatusCode::client_error_bad_request, output.dump(), headers);
@@ -11894,7 +12114,11 @@ namespace nvhttp {
       const auto requested_topology = lower_copy(
         args.count("mode") ? args.find("mode")->second : std::string {}
       );
-      const auto optimization_app = find_app_for_optimization_game(game);
+      auto optimization_app = find_app_for_optimization_game(game);
+      if (const auto running = proc::proc.running_app_context();
+          running && optimization_app && running->uuid == optimization_app->uuid) {
+        optimization_app = running;
+      }
       bool launch_owned_display = false;
       std::string resolved_topology = requested_topology;
       std::string topology_source = "host_configuration";
@@ -11905,7 +12129,6 @@ namespace nvhttp {
 #if defined(__linux__)
       mirror_desktop_requested = explicit_mirror_desktop_requested(args);
       force_private_requested = force_private_after_desktop_steam_shutdown_requested(args);
-      const bool app_virtual_display = optimization_app && optimization_app->virtual_display;
       const bool paired_virtual_lock =
         named_cert_p->always_use_virtual_display && !topology_locked;
       std::string requested_selection = paired_virtual_lock ?
@@ -11920,15 +12143,15 @@ namespace nvhttp {
           requested_selection,
           !requested_topology.empty()
         ));
-      auto effective_selection = stream_display_policy::effective_session_selection_for_launch(
-        requested_selection,
-        mirror_desktop,
-        requested_selection == stream_display_policy::k_host_virtual_display,
-        app_virtual_display,
-        topology_locked || paired_virtual_lock,
-        false,
-        stream_display_policy::host_default_provides_private_display()
-      );
+      const auto app = optimization_app.value_or(proc::ctx_t {});
+      const auto launch_selection = proc::resolve_launch_selection_for_app(
+        app, optimize_launch_selection_request(args, named_cert_p->always_use_virtual_display));
+      if (launch_selection.refusal) {
+        if (const auto refusal = launch_failure::take()) reply_bad_request(refusal->code, refusal->message, refusal->action);
+        else reply_bad_request("app_launch_mode_unavailable", "This app's Launch as setting cannot be used for this launch.");
+        return;
+      }
+      auto effective_selection = launch_selection.selection;
       if (!mirror_desktop && !requested_selection.empty()) {
         if (effective_selection == requested_selection) {
           std::string topology_reject_reason;
@@ -11965,6 +12188,12 @@ namespace nvhttp {
               effective_selection,
               topology_reject_reason
             )) {
+          if (launch_selection.pinned) {
+            proc::refuse_app_launch_as_unavailable(app, topology_reject_reason);
+            const auto refusal = launch_failure::take();
+            reply_bad_request(refusal->code, refusal->message, refusal->action);
+            return;
+          }
           reply_bad_request(
             "invalid_or_unavailable_topology",
             topology_reject_reason.empty() ?
@@ -11979,6 +12208,9 @@ namespace nvhttp {
       if (game_mode_screen) {
         topology_source = "host_capability";
         topology_reason_code = "steam_game_mode_session";
+      } else if (launch_selection.pinned) {
+        topology_source = "app_configuration";
+        topology_reason_code = "app_launch_as";
       } else if (mirror_desktop) {
         topology_source = mirror_desktop_requested ?
           "client_launch_request" : "app_configuration";
@@ -11990,10 +12222,6 @@ namespace nvhttp {
       } else if (topology_locked && !requested_topology.empty()) {
         topology_source = "client_launch_request";
         topology_reason_code = "explicit_topology_lock";
-      } else if (app_virtual_display &&
-                 effective_selection == stream_display_policy::k_host_virtual_display) {
-        topology_source = "app_configuration";
-        topology_reason_code = "app_virtual_display_default";
       } else if (!requested_topology.empty()) {
         topology_source = "client_launch_request";
         topology_reason_code = "unlocked_topology_request";

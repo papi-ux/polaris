@@ -138,6 +138,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_kmsgrab_logging_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_kms_capture_metadata.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_pyrowave_availability.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_codec_support_readout.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_hdr_probe_guard_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_preallocated_gamepad_source.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_capture_backend_fallback_source.cpp
@@ -163,6 +164,7 @@ set(TEST_FAST_SOURCES
 if (NOT WIN32 AND NOT APPLE)
     list(APPEND TEST_FAST_SOURCES
         ${CMAKE_SOURCE_DIR}/tests/unit/test_linux_executable_path.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_output_layout.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_wlgrab_capture_policy.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_wlgrab_frame_source.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_wlgrab_pixel_copy.cpp
@@ -220,6 +222,8 @@ if (NOT WIN32 AND NOT APPLE)
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_input_group_access.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_ei_virtual_input.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_wayland_virtual_input.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_wayland_monitor_layout.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_absolute_input_source.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_kwin_permission_entries.cpp
     )
 endif()
@@ -637,6 +641,12 @@ if (UNIX)
         COMMAND ${CMAKE_COMMAND} -E env
                 POLARIS_SOURCE_DIR=${CMAKE_SOURCE_DIR}
                 bash ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamescope_session_geometry_shell.sh
+    )
+    add_test(
+        NAME polaris_gamescope_composite_cursor_shell
+        COMMAND ${CMAKE_COMMAND} -E env
+                POLARIS_SOURCE_DIR=${CMAKE_SOURCE_DIR}
+                bash ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_gamescope_composite_cursor_shell.sh
     )
 endif()
 

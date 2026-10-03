@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -118,6 +119,11 @@ namespace stream_stats {
   struct client_stats_t {
     std::string name;
     std::string ip;
+    // Which kind of client this session belongs to, read from its device's pairing record when the
+    // stream started, as the Devices page reads it: "nova" once the device has called the Polaris
+    // API, which only Nova does, or "moonlight" for a device that speaks only the Moonlight
+    // protocol, such as Moonlight or Artemis. Empty when the caller did not say.
+    std::string client_family;
     // Internal lifecycle identity. This is deliberately not serialized: the
     // public client contract remains name/IP/telemetry, while overlapping
     // reconnects from the same address can still be removed independently.
@@ -155,6 +161,9 @@ namespace stream_stats {
     // handshake. Written once, when the session starts.
     std::string stream_chroma;
     stream_bitrate::request_t bitrate_request;
+    // Whether record_stream_request() has written bitrate_request. Until it has, the zeros there are
+    // no figures, so nothing reports them.
+    bool bitrate_request_recorded = false;
     // This session's recent PyroWave frames in the batches its encode loop reported them in, oldest
     // first, as (frames, frames at the byte ceiling), and the totals over those batches.
     std::vector<std::pair<std::uint32_t, std::uint32_t>> pyrowave_ceiling_batches;
@@ -166,10 +175,15 @@ namespace stream_stats {
 
     // Network
     double latency_ms = 0;
-    /// Confirmed media-path packet loss only. ENet control loss is kept separate.
+    /// Confirmed media-path loss only. ENet control loss is kept separate. For the stream's own
+    /// client, the network verdict's figure: video frames lost after FEC over its window, the one
+    /// Doctor quotes, not the newest one second report.
     double packet_loss = 0;
     bool packet_loss_available = false;
     std::string packet_loss_source = "unavailable";
+    /// When packet_loss was written. A row serves it only while that is at most
+    /// judged_network_t::k_media_report_max_age_ms old, as Doctor counts loss.
+    std::chrono::steady_clock::time_point packet_loss_received_at {};
     double control_channel_packet_loss = 0;
     uint64_t bytes_sent = 0;
 
@@ -290,6 +304,63 @@ namespace stream_stats {
     std::uint64_t created = 0;  ///< Creation order: a game numbers its players the same way
   };
 
+  /**
+   * @brief The windowed network judgement: one loss figure, one RTT figure, and whether either is
+   *        network pressure.
+   *
+   * Loss is video frames lost after FEC recovery: frames the client expected and never received
+   * whole, as a share of the frames it expected, summed over the media reports in the window. It is
+   * not a packet count. Frames the host dropped before sending are dropped_frame_ratio, a separate
+   * figure. RTT is the median of the host's round trip readings over the same window. Doctor's
+   * verdict and the session status both read this one judgement, so they cannot quote different
+   * figures. Live Tuning does not: it keeps its own average of each report's loss and every control
+   * ping's 0%. network_judge_t says how it is formed.
+   *
+   * Each figure is the one its newest reading judged, with the band it was judged into, so a verdict
+   * read between readings never pairs a band with a figure the window has since moved to.
+   * served_network_verdict() says which figures are still current enough to serve.
+   */
+  struct network_verdict_t {
+    /// The window holds enough media reports to judge loss.
+    bool loss_available = false;
+    /// Set only by served_network_verdict(): the window judged loss, but the client's reports stopped
+    /// reaching this host, so the figure is no longer served.
+    bool loss_stale = false;
+    /// Frames lost as a percentage of frames expected over the window, 0 to 100.
+    double loss_pct = 0.0;
+    /// The frame counts behind loss_pct, so a report can say how many of how many.
+    std::uint64_t frames_expected = 0;
+    std::uint64_t frames_lost = 0;
+    int media_samples = 0;
+    /// How far back the oldest media report in the window is, in milliseconds.
+    std::int64_t media_span_ms = 0;
+    /// Pressure by loss: set when loss_pct reaches network_judge_t::k_loss_enter_pct and cleared
+    /// only once it falls below k_loss_exit_pct.
+    bool loss_elevated = false;
+    /// The window holds enough RTT readings to judge RTT.
+    bool rtt_available = false;
+    /// Set only by served_network_verdict(): the window judged RTT, but its readings stopped.
+    bool rtt_stale = false;
+    /// The median round trip time over the window, in milliseconds.
+    double rtt_ms = 0.0;
+    int rtt_samples = 0;
+    /// Pressure by RTT: set at network_judge_t::k_rtt_enter_ms and cleared below k_rtt_exit_ms.
+    bool rtt_elevated = false;
+    /// The window holds enough control-channel readings to judge ENet's own loss estimate.
+    bool control_loss_available = false;
+    /// ENet's loss estimate for the reliable control channel, averaged over the window. Context for
+    /// the control channel finding and never video loss, so it is no part of risk.
+    double control_loss_pct = 0.0;
+    int control_samples = 0;
+    /// Set when control_loss_pct reaches network_judge_t::k_loss_enter_pct and cleared only below
+    /// k_loss_exit_pct, the band video loss has.
+    bool control_loss_elevated = false;
+    /// Either kind of pressure.
+    bool risk = false;
+    /// How long risk has held its current value, or -1 before the first reading.
+    std::int64_t risk_held_ms = -1;
+  };
+
   struct stats_t {
     std::uint64_t session_generation = 0;
     std::string app_session_id;
@@ -372,6 +443,8 @@ namespace stream_stats {
     std::string stream_chroma;
     /// What the client asked for at the handshake, and what the host did to it.
     stream_bitrate::request_t bitrate_request;
+    /// Whether a handshake recorded bitrate_request. Until one has, its zeros are no figures.
+    bool bitrate_request_recorded = false;
     /// Recent PyroWave frames and how many of them reached 99% of the codec's byte budget, over about
     /// the last k_pyrowave_ceiling_window_frames frames of the stream that reported last.
     std::uint32_t pyrowave_window_frames = 0;
@@ -405,8 +478,15 @@ namespace stream_stats {
     /// newer control-channel sample never refreshes these fields.
     uint64_t media_loss_sample_revision = 0;
     std::int64_t media_loss_last_received_age_ms = -1;
-    /// Debounced by network_risk_tracker_t; the single truth every reader serves.
+    /// The newest reading's fast debounce by network_risk_tracker_t. A guarded Doctor action
+    /// verifies against it, because its verification must see only readings from after the change.
+    /// Everything that grades the stream reads network_verdict instead.
     bool network_risk = false;
+    /// Loss and RTT judged over the last network_judge_t::k_window with hysteresis, as the newest
+    /// readings left them: what Doctor's verdict and the session status read.
+    /// A reader that shows or grades it goes through served_network_verdict(), which drops figures
+    /// whose readings stopped; only a session that has already ended reads it as it stands.
+    network_verdict_t network_verdict;
     uint64_t bytes_sent = 0;
 
     // Adaptive bitrate
@@ -419,6 +499,10 @@ namespace stream_stats {
     bool adaptive_runtime_update_supported = false;
     /// True only while one uncontaminated stream generation owns the global actuator.
     bool doctor_live_action_scope_available = true;
+    /// The run of Doctor's loss step that turned Live Tuning off for this stream, while the step still
+    /// holds for Undo, or empty. Doctor offers that Undo in place of a quality restore the step's run
+    /// would refuse.
+    std::string doctor_live_tuning_step_run_id;
     /// Live Tuning's floor for this stream, and what set it: adaptive_bitrate_min or pyrowave_advice.
     int adaptive_min_bitrate_kbps = 0;
     std::string adaptive_floor_source;
@@ -609,15 +693,27 @@ namespace stream_stats {
   void record_display_mode_decision(const std::string &requested, const std::string &applied, bool pinned_by_host);
 
   /**
+   * @brief The kind of client a stream belongs to, from its device's pairing-record client_family.
+   *
+   * Every RTSP stream is a paired device's /launch or /resume, so a record that is not "nova" is a
+   * client that has never called the Polaris API and speaks only the Moonlight protocol.
+   * @param pairing_family The paired device's client_family: "nova", or empty.
+   * @return "nova" or "moonlight".
+   */
+  std::string client_family_for_stream(std::string_view pairing_family);
+
+  /**
    * @brief Add a new client session to the stats tracker.
    * @param client_ip IP address of the client.
    * @param client_name Display name of the client.
    * @param session_generation Process-unique stream-session identity. Zero
    * keeps the legacy IP-keyed behavior for callers without a session object.
+   * @param client_family "nova" or "moonlight", as client_stats_t::client_family; empty when unknown.
    */
   void add_client(const std::string &client_ip,
                   const std::string &client_name,
-                  std::uint64_t session_generation = 0);
+                  std::uint64_t session_generation = 0,
+                  const std::string &client_family = {});
 
   /**
    * @brief Remove a client session from the stats tracker.
@@ -791,6 +887,11 @@ namespace stream_stats {
    * The codec fills a frame up to a byte budget the bitrate sets. A frame at 99% of that budget or more
    * was cut short by it, and a stream where most frames are asks for more bits than it is given. The
    * session's own encode loop writes a batch at a time; nothing here moves a policy revision.
+   *
+   * While Live Tuning holds the encoder below the rate the stream is set to, a batch is left out: its
+   * frames were held to a smaller budget and fill it more often, which says nothing of the set rate
+   * Doctor judges PyroWave on and Live Tuning comes back to. The window keeps what frames at that rate
+   * said.
    * @return False when no client holds that generation or the batch is empty.
    */
   bool record_pyrowave_frames(std::uint64_t session_generation, std::uint32_t frames, std::uint32_t ceiling_frames);
@@ -801,32 +902,80 @@ namespace stream_stats {
   /**
    * @brief PyroWave's bitrate advice for the stream, and the host's verdict on it.
    *
-   * Inactive unless the stream is PyroWave and its shape gives advice. The verdict compares encoder
-   * rates with encoder rates; the advice itself is carried as requests, which is what a client sets.
+   * Inactive unless the stream is PyroWave and its shape gives advice. The verdict and every figure
+   * Doctor quotes are requests, which is what a client sets, except the live bitrate it suggests while
+   * Live Tuning owns the bitrate: a live bitrate applies at the encoder, so that one is an encoder rate.
    */
   struct pyrowave_bitrate_t {
     bool active = false;
     pyrowave_advice::advice_t advice;
+    /// The FEC share and audio cost the advice's requests were grossed up for.
+    pyrowave_advice::link_t link;
     /// The rate the encoder runs at now.
     int encoder_kbps = 0;
+    /// The same rate as a request: what a client sets to land the encoder there.
+    int request_kbps = 0;
+    /// The share of recent frames at PyroWave's byte ceiling. It never makes a stream starved, and
+    /// decides only needs_more_than_allowed.
     std::optional<double> ceiling_frame_share;
-    /// The encoder runs below where Doctor's raise would land it.
-    bool below_goal = false;
-    /// More than pyrowave_advice::k_starved_ceiling_share of recent frames hit the byte ceiling.
-    bool ceiling_starved = false;
-    /// Either of those two: the host's own verdict.
+    /// The host's own verdict: request_kbps is below pyrowave_advice::k_starved_below_share of the
+    /// raise goal, see pyrowave_advice::starved().
     bool starved = false;
+    /// The cap or max_bitrate holds the stream below the far figure, it runs within a tenth of that
+    /// limit and below the far figure, and most recent frames fill the byte budget, see
+    /// pyrowave_advice::needs_more_than_allowed().
+    bool needs_more_than_allowed = false;
     /// Live Tuning's PyroWave floor for this stream at the encoder, when PyroWave's advice set it.
     int floor_encoder_kbps = 0;
+    /// The same floor as a request.
+    int floor_request_kbps = 0;
     /// The live rate sits at or under that floor, where Live Tuning stops cutting.
     bool at_floor = false;
   };
 
-  /// Evaluate PyroWave's advice against the live stream. Reads fec_percentage and max_bitrate.
-  pyrowave_bitrate_t evaluate_pyrowave_bitrate(const stats_t &stats);
+  /**
+   * @brief Evaluate PyroWave's advice against the live stream. Reads fec_percentage and max_bitrate.
+   * @param set_encoder_kbps The encoder rate to judge instead of the live one, or zero for the live
+   *        one. While Live Tuning owns the bitrate its target moves with the network and comes back on
+   *        its own, so Doctor judges the rate the stream is set to. at_floor still reads the live rate.
+   */
+  pyrowave_bitrate_t evaluate_pyrowave_bitrate(const stats_t &stats, int set_encoder_kbps = 0);
 
-  /// The session status pyrowave_bitrate object, or null when the stream is not PyroWave.
+  /**
+   * @brief The encoder rate PyroWave's advice is judged on: while Live Tuning owns the bitrate, the rate
+   *        the stream is set to, its launch goal, and otherwise zero, the live rate.
+   *
+   * Doctor's headline and the session status's pyrowave_bitrate.starved both judge on it, so a reader of
+   * one never sees the other flip with Live Tuning's cuts.
+   */
+  int pyrowave_judged_encoder_kbps(const stats_t &stats);
+
+  /// The session status pyrowave_bitrate object, or null when the stream is not PyroWave. Its assumes
+  /// names the FEC share and audio cost the requests were grossed up for, as the pre-launch advice does.
   nlohmann::json pyrowave_bitrate_json(const stats_t &stats);
+
+  /**
+   * @brief The session status bitrate_units object: what a stream's bitrate request was split into.
+   *
+   * A client's request covers the video, its FEC, the audio and the packet overhead, and the handshake
+   * hands the encoder what is left, by the arithmetic formula names (stream_bitrate_v1). This carries
+   * those figures for any codec: version; requested_kbps, the client's own request; warp_factor,
+   * cap_kbps and cap_source, what the host did to it; split_kbps, the total the formula ran on;
+   * encoder_kbps and live_encoder_kbps; audio_kbps and fec_percentage; and formula. Whenever split_kbps
+   * is not null, encoder_kbps_for_wire(split_kbps, fec_percentage, audio_kbps) is encoder_kbps. It is
+   * null for a stream whose encoder rate is no split of its own request, a watcher or a client that
+   * sent no bitrate, and the formula says nothing about that stream.
+   * @param requester_generation The asking client's stream, or 0 when it has none. A client with a
+   *   stream is answered about that stream alone, and one with no stream here about the first stream
+   *   that has recorded its handshake.
+   * @return Null while nothing streams, and for a client whose own stream is not in stats or has not
+   *   recorded its handshake: in its handshake, or torn down a moment before its session timing.
+   */
+  nlohmann::json bitrate_units_json(const stats_t &stats, std::uint64_t requester_generation);
+
+  /// What the stream with this generation recorded at its handshake, or nullopt when no stream holds
+  /// that generation or it has recorded nothing yet.
+  std::optional<stream_bitrate::request_t> recorded_stream_request(std::uint64_t session_generation);
 
   /**
    * @brief The launch bitrate a Doctor quality restore climbs back to, at the encoder.
@@ -928,6 +1077,14 @@ namespace stream_stats {
   void set_doctor_live_action_scope_available(bool available);
 
   /**
+   * Publish Doctor's loss step that turned Live Tuning off for this stream: its run, and the controller
+   * revision the step holds. get_current() reports the run as doctor_live_tuning_step_run_id only while
+   * the controller is still at that revision, so Undo, a rollback, the end of the stream or any newer
+   * writer retires it. An empty run clears it.
+   */
+  void set_doctor_live_tuning_step(std::string run_id, std::uint64_t controller_revision);
+
+  /**
    * @brief Host-received primary network observations covering one Doctor
    *        verification interval.
    *
@@ -938,6 +1095,10 @@ namespace stream_stats {
   struct network_verification_window_t {
     std::size_t sample_count = 0;
     std::size_t media_sample_count = 0;
+    /// Positive media deltas wholly covered after encoder application, independent of control pings.
+    std::size_t eligible_media_sample_count = 0;
+    std::int64_t eligible_media_last_age_ms = -1;
+    double eligible_media_packet_loss = 0.0;
     std::uint64_t last_revision = 0;
     std::int64_t first_delay_ms = 0;
     std::int64_t last_delay_ms = 0;
@@ -1012,6 +1173,9 @@ namespace stream_stats {
     bool accepted = false;
     bool observation_published = false;
     double media_loss_pct = 0.0;
+    /// The frames this report covers since the one before it, and how many of them were lost.
+    std::uint64_t frames_expected = 0;
+    std::uint64_t frames_lost = 0;
   };
 
   /**
@@ -1028,6 +1192,9 @@ namespace stream_stats {
 #ifdef POLARIS_TESTS
   void age_client_media_counter_baseline_for_tests(
     std::chrono::steady_clock::duration age);
+
+  /** Move every reading the network judge holds this much further into the past. */
+  void age_network_judge_for_tests(std::chrono::steady_clock::duration age);
 #endif
 
   /**
@@ -1086,6 +1253,196 @@ namespace stream_stats {
       *this = network_risk_tracker_t {};
     }
   };
+
+  /**
+   * @brief Judges video frame loss and RTT over the last k_window, with hysteresis.
+   *
+   * Loss is the frames lost over the frames expected across every media report in the window, so a
+   * second that lost a burst of frames moves the figure by its share of the window rather than
+   * deciding it. RTT is the window's median, so a Wi-Fi spike of a few readings does not move it at
+   * all. Each verdict changes only across a band: loss becomes pressure at k_loss_enter_pct and
+   * clears only below k_loss_exit_pct, RTT at k_rtt_enter_ms and below k_rtt_exit_ms. A verdict needs
+   * k_min_media_samples reports or k_min_rtt_readings readings in the window, and a gap that thins
+   * the window below that starts its judgement over instead of carrying an old one across.
+   *
+   * Each kind is judged when a reading of it arrives, and the verdict keeps that figure until the
+   * next one: a lossy report aging out between two reports cannot leave a pressure verdict quoting a
+   * figure below the band that made it pressure, or a clean one quoting a figure above it. Once
+   * every reading of a kind has left the window there is no figure for it at all.
+   *
+   * RTT readings are held back until the estimator has shown one calm reading, or for
+   * k_rtt_armed_after readings, for the reason network_risk_tracker_t gives: ENet seeds a fresh
+   * peer's RTT at 500 ms and converges over its first seconds.
+   *
+   * The control channel's own loss estimate is averaged over the same window with the same band. It
+   * decides only whether Doctor mentions control-channel retries, and never counts as pressure.
+   */
+  struct network_judge_t {
+    using clock_type = std::chrono::steady_clock;
+
+    static constexpr std::chrono::seconds k_window {20};
+    static constexpr int k_min_media_samples = 5;
+    static constexpr int k_min_rtt_readings = 5;
+    static constexpr double k_loss_enter_pct = network_risk_tracker_t::k_loss_elevated_pct;
+    static constexpr double k_loss_exit_pct = 1.0;
+    static constexpr double k_rtt_enter_ms = network_risk_tracker_t::k_rtt_elevated_ms;
+    static constexpr double k_rtt_exit_ms = 20.0;
+    /// Where RTT stops being pressure to watch and fails the stream, as it always has.
+    static constexpr double k_rtt_fail_ms = 45.0;
+    static constexpr int k_rtt_armed_after = network_risk_tracker_t::k_armed_after_samples;
+    /// A media report that carries only a percentage counts as this many frames, so such reports
+    /// weigh evenly. Polaris's own counter path always carries the frame counts.
+    static constexpr double k_frames_per_percentage_report = 100.0;
+    static constexpr std::size_t k_max_media_samples = 64;
+    static constexpr std::size_t k_max_rtt_readings = 256;
+    static constexpr int k_min_control_readings = 5;
+    static constexpr std::size_t k_max_control_readings = 256;
+
+    struct media_sample_t {
+      clock_type::time_point at {};
+      double frames_expected = 0.0;
+      double frames_lost = 0.0;
+      /// When the second the report covers began: the arrival of the report before it.
+      clock_type::time_point begins {};
+    };
+
+    struct rtt_reading_t {
+      clock_type::time_point at {};
+      double rtt_ms = 0.0;
+    };
+
+    struct control_reading_t {
+      clock_type::time_point at {};
+      double loss_pct = 0.0;
+    };
+
+    std::deque<media_sample_t> media;
+    std::deque<rtt_reading_t> rtt;
+    std::deque<control_reading_t> control;
+    bool loss_elevated = false;
+    bool rtt_elevated = false;
+    bool control_loss_elevated = false;
+    bool rtt_armed = false;
+    int rtt_readings_seen = 0;
+    bool risk = false;
+    std::optional<clock_type::time_point> risk_since;
+    /// The judgement the newest reading of each kind made, figure and band together.
+    network_verdict_t judged;
+    /// When the oldest media report counted in judged arrived.
+    clock_type::time_point media_oldest {};
+    /// When the newest media report arrived, kept after the window drops it, so the next report knows
+    /// when the second it covers began.
+    clock_type::time_point last_media_at {};
+
+    /** Fold in one media report: the frames it covers and how many of them were lost. */
+    void add_media(clock_type::time_point at, double frames_expected, double frames_lost);
+
+    /** Fold in one round trip reading. */
+    void add_rtt(clock_type::time_point at, double rtt_ms);
+
+    /** Fold in one control-channel loss reading: ENet's estimate, which a ping carries. */
+    void add_control_loss(clock_type::time_point at, double loss_pct);
+
+    /**
+     * Start the judgement over from `from`: readings before it leave the window and every band
+     * starts clear, then what is left is judged afresh. A media report whose second began before
+     * `from` leaves too, although it arrived after: the frames it counts were sent before. ENet's RTT
+     * has already settled, so the readings that waited for it are not held back again.
+     */
+    void restart(clock_type::time_point from);
+
+    /** The judgement as it stands at now. */
+    network_verdict_t verdict(clock_type::time_point now) const;
+
+    void reset() {
+      *this = network_judge_t {};
+    }
+
+  private:
+    void judge_media(clock_type::time_point at);
+    void judge_rtt(clock_type::time_point at);
+    void judge_control(clock_type::time_point at);
+    void note_risk(clock_type::time_point at);
+  };
+
+  /** The network judgement as it stands now, for a reader that needs no other stream field. */
+  network_verdict_t current_network_verdict();
+
+  /**
+   * @brief The verdict the judge would reach from `from` on, judged afresh: every band clear at
+   *        `from` and only the readings after it counted, a media report only when the second it
+   *        covers began after it.
+   *
+   * Doctor verifies a bitrate step against this, from the moment the encoder applied the step. The
+   * first report after the step covers the second before it, so its loss is the loss the step was
+   * taken for, and counted against the step it rolled back one that cured it.
+   */
+  network_verdict_t network_verdict_since(std::chrono::steady_clock::time_point from);
+
+  /**
+   * @brief Start the network judgement over from `from`, as network_verdict_since() judges it.
+   *
+   * Doctor calls it when a bitrate step verifies, so its headline reads the judgement verification
+   * read. Judged over a window that still held the readings that asked for the step, a step that
+   * verified left "Sustained network pressure" and another lower_bitrate on offer for most of the
+   * window.
+   */
+  void restart_network_judgement(std::chrono::steady_clock::time_point from);
+
+  /**
+   * @brief A stream's network verdict as everything that grades the stream reads it.
+   *
+   * Doctor's headline and evidence, the guarded actions it offers and the session status's
+   * network_risk all read this, so they cannot disagree. Neither figure counts while the newest
+   * network reading is more than two seconds old, and loss does not count while the newest client
+   * media report is older than k_media_report_max_age_ms: a window of reports that stopped arriving
+   * says what the stream was, not what it is.
+   */
+  struct judged_network_t {
+    static constexpr std::int64_t k_media_report_max_age_ms = 5000;
+
+    bool loss_judged = false;
+    bool rtt_judged = false;
+    /// Loss pressure: the verdict's loss is elevated.
+    bool loss_pressure = false;
+    /// RTT pressure: the verdict's RTT is elevated.
+    bool rtt_pressure = false;
+    /// The window's median RTT is at or above network_judge_t::k_rtt_fail_ms.
+    bool rtt_fail = false;
+    /// Either pressure: the network is a finding.
+    bool risk = false;
+    /// Pressure that fails the stream: confirmed loss, or RTT at the fail line.
+    bool fail = false;
+  };
+
+  judged_network_t judged_network(const stats_t &stats);
+
+  /**
+   * @brief A stream's verdict as every reader that shows or grades it serves it.
+   *
+   * The gates judged_network() grades with: no figure while the newest network reading is more than
+   * two seconds old, and no loss while the newest client media report is older than
+   * judged_network_t::k_media_report_max_age_ms. A figure it drops reads as stale rather than as
+   * still being collected. The stream stats, the tuning block, Doctor's evidence and the session
+   * status all serve this, so none of them keeps quoting a figure, or "elevated", that Doctor has
+   * stopped judging.
+   */
+  network_verdict_t served_network_verdict(const stats_t &stats);
+
+  /**
+   * @brief What a verdict's loss is called in a state field: collecting, stale, clean, light or
+   *        elevated.
+   *
+   * Light is loss at or above k_loss_exit_pct that is not pressure: measured, and below the figure
+   * Doctor acts on. Stale is a figure served_network_verdict() stopped serving.
+   */
+  std::string_view network_loss_state(const network_verdict_t &verdict);
+
+  /** @brief What a verdict's RTT is called in a state field: collecting, stale, clean or elevated. */
+  std::string_view network_rtt_state(const network_verdict_t &verdict);
+
+  /** @brief The verdict as the JSON the session status and stream stats serve. */
+  nlohmann::json network_verdict_json(const network_verdict_t &verdict);
 
   /**
    * @brief Update runtime mode metadata exposed to the dashboard.

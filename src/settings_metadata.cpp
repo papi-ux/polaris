@@ -155,7 +155,7 @@ namespace settings_metadata {
 
   bool host_virtual_display_available() {
 #ifdef __linux__
-    return virtual_display::is_available();
+    return virtual_display::host_stream_readiness().available;
 #elif defined(_WIN32)
     return
       proc::vDisplayDriverStatus == VDISPLAY::DRIVER_STATUS::OK ||
@@ -232,26 +232,11 @@ namespace settings_metadata {
   nlohmann::json stream_display_mode_options_json() {
     nlohmann::json modes = nlohmann::json::array();
 #ifdef __linux__
-    for (const auto &option : stream_display_policy::mode_options(host_virtual_display_available())) {
-      bool available = option.available;
-      if (option.value == "host_virtual_display") {
-        available = available && host_virtual_display_available();
-      }
-      std::string unavailable_reason;
-      if (!available) {
-        unavailable_reason = option.unavailable_reason;
-        if (option.value == "host_virtual_display") {
-          // The backend probe knows exactly why creation would fail; the
-          // policy layer only knows that it would.
-          const auto backend_reason = virtual_display::unavailable_reason();
-          if (!backend_reason.empty()) {
-            unavailable_reason = backend_reason;
-          }
-        }
-        if (unavailable_reason.empty()) {
-          unavailable_reason = "This mode is not available on this host right now.";
-        }
-      }
+    const auto caps = stream_path::probe_host_capabilities();
+    for (const auto &option : stream_display_policy::mode_options(caps)) {
+      const bool available = option.available;
+      std::string unavailable_reason = available ? std::string {} : option.unavailable_reason;
+      if (!available && unavailable_reason.empty()) unavailable_reason = "This mode is not available on this host right now.";
       modes.push_back({
         {"value", option.value},
         {"label", option.label},
@@ -320,8 +305,18 @@ namespace settings_metadata {
     tuning["adaptive_max_bitrate_kbps"] = adaptive_state.max_bitrate_kbps;
     tuning["adaptive_bitrate_state"] = adaptive_state.state;
     tuning["adaptive_bitrate_reason"] = adaptive_state.reason;
+    // A second loss figure beside network_loss_pct: Live Tuning's own average, already in percent, of
+    // each client media report's own loss and every control ping's 0%.
     tuning["adaptive_packet_loss_ewma"] = adaptive_state.ewma_packet_loss;
     tuning["adaptive_rtt_ewma_ms"] = adaptive_state.ewma_rtt_ms;
+    // The loss Doctor and the session status quote: video frames lost after FEC over the network
+    // verdict's window, as served, so a figure Doctor stopped judging reads as stale here too. Live
+    // Tuning does not act on it: adaptive_packet_loss_ewma above is what it acts on.
+    const auto verdict = stream_stats::served_network_verdict(stats);
+    tuning["network_loss_pct"] = verdict.loss_available ? nlohmann::json(verdict.loss_pct) : nlohmann::json(nullptr);
+    tuning["network_loss_state"] = stream_stats::network_loss_state(verdict);
+    tuning["network_loss_basis"] = "video_frames_lost_after_fec";
+    tuning["network_rtt_ms"] = verdict.rtt_available ? nlohmann::json(verdict.rtt_ms) : nlohmann::json(nullptr);
     tuning["ai_auto_quality_enabled"] = false;
     tuning["ai_optimizer_enabled"] = false;
     tuning["mangohud_configured"] = mangohud_configured;

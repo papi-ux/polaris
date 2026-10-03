@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "private_state_file.h"
+#include "stream_bitrate.h"
 
 namespace doctor_trial {
   namespace {
@@ -77,7 +78,9 @@ namespace doctor_trial {
         settings.width >= 320 && settings.width <= 16384 &&
         settings.height >= 240 && settings.height <= 16384 &&
         settings.target_fps >= 15 && settings.target_fps <= 240 &&
-        settings.bitrate_kbps >= 1000 && settings.bitrate_kbps <= 300000;
+        // The stream's own bitrate, which a player may have set by hand up to 500 Mbps. A trial
+        // changes only the frame rate and keeps it.
+        stream_bitrate::request_in_range(settings.bitrate_kbps);
     }
 
     bool nonterminal(std::string_view state) {

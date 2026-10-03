@@ -7,6 +7,273 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- Desktop Takeover on Hyprland supports the Lua dispatcher interface and restores monitor power even when the desktop has no windows to move. The existing special-workspace safety checks stay in place. ([#783](https://github.com/papi-ux/polaris/pull/783))
+- Moonlight players can opt in to **Close Steam on the host to start games** for each paired device. It is off by default, asks desktop Steam to quit before a private Steam launch, and refuses the launch if Steam does not finish closing. It leaves SteamOS Game Mode and unsaved game state alone. Nova for Android keeps asking the player at launch. ([#797](https://github.com/papi-ux/polaris/pull/797))
+
+- The 1.4.14 beta notes and PyroWave guide distinguish a client bitrate request from the encoder
+  rate, give the calibrated handheld 31 dB target (214.898 Mbps requested / 192.396 Mbps video at
+  1080p120 4:4:4 with 10% FEC and stereo audio), and separate automatic recommendations up to
+  300 Mbps from a host-advertised manual limit up to 500 Mbps. Older hosts without that feature
+  keep the 300 Mbps manual fallback. The Linux beta includes PyroWave in the standard package;
+  the separate 1.4.13 PyroWave Alpha remains historical guidance, not the current beta package.
+- Doctor's local network-path probe reports listener checks and UDP hints without grading a
+  client's media path, manufacturing healthy zeroes from missing measurements or borrowing another
+  stream's bitrate ceiling. Raw probe samples stay ungraded advanced evidence. Doctor's sustained
+  media-loss correction is verified and reversible for the active stream; Live Tuning's own loss
+  handling remains unchanged from 1.4.13.
+- Heroic exact-game shutdown on Host Virtual Display remains unresolved. The pending-cleanup
+  safeguard retains the session owner and virtual screen; it does not grant authority to terminate
+  an unverified process. An accepted End game request does not prove the game exited. Private Stream
+  remains the recommended default, and an existing host's selected mode is preserved.
+
+- With HEVC or AV1 set to Auto, Nova now sees the codecs Polaris detected as available. The paired capability list used the Auto setting itself instead of the encoder result, so a working codec could appear Unavailable before launch. A codec that is disabled or fails its encoder check remains unavailable.
+- If End game cannot finish cleaning up a Host Virtual Display session, Polaris keeps its virtual screen and session owner available for another End attempt. Removing the screen first could move a surviving game to your physical monitor. This safeguard also keeps the session when screen removal fails; it does not make an unverified Heroic process safe to terminate. Private Stream keeps its existing shutdown route.
+
+- Host Virtual Display is offered only when Polaris can both create and capture its screen. GNOME Wayland and other desktops without a supported output-pinned provider no longer appear supported just because EVDI can create a connector. A forced or stale launch gives a reason before adding a display; Mirror Desktop and Private Stream remain alternatives. KWin permission setup and native Hyprland streaming keep their existing routes. This does not add GNOME virtual-screen streaming. (#796)
+
+- An app entry has one **Launch as** setting in place of **Mirror the host desktop** and **Always create Virtual Display**. It offers Host default, or one of Private Stream, Private Stream (GPU-native), Gamescope Stream, Host Virtual Display, Desktop Takeover and Mirror Desktop, each greyed out with the reason when this host cannot run it. A mode other than Host default applies to every client, Moonlight included, so one Moonlight library can offer a private game, the real desktop and a desktop on a screen of its own on any host. Always create Virtual Display did nothing on a Private Stream host, so a Moonlight player got an empty private session and no reason; Host Virtual Display now gives one there. When the host cannot run an app's mode, the launch is refused before the stream with `app_launch_mode_unavailable` and the reason, never started in another mode, and a launch that names a different mode for such an app is refused with `app_launch_mode_pinned`. Browser Stream runs an app set to a Private Stream mode on any host and refuses one set to any other fixed mode before starting it. `launch_mode` in `/polaris/v1/games` carries `launch_as`, `launch_as_available` and `launch_as_unavailable_reason`, and an app set to a fixed mode offers only that mode. apps.json moves to version 15. An entry with Mirror the host desktop becomes Mirror Desktop, which keeps its rules. An entry you set Always create Virtual Display on becomes Host Virtual Display, which is refused with the reason on a host that has no virtual display backend, where it used to start in the host's mode. A game imported from Steam, Lutris, Heroic or a ROM folder, which had that flag without anyone setting it, becomes Host default, as does any entry with a Steam app id, so on a host whose mode is not Private Stream it follows that mode instead of getting a virtual display. The old keys are still read, and still written beside `launch-as` together with `launch-as-basis`, so an edit made on an older Polaris is not lost. (#790)
+
+- Absolute mouse input lands where it was aimed on a desktop with a rotated or scaled monitor, with
+  wlroots capture, and with KMS capture when Wayland names every output KMS sees (#793). Both
+  measured the desktop from each monitor's mode, which is in output pixels before the monitor is
+  turned or scaled, and placed each monitor by its xdg-output position, which is after. A
+  1920x1080 monitor turned to portrait beside a 2560x1440 one made the desktop 4480x1440 instead of
+  3640x1920, so the middle of the main monitor took its pointer at 1040,960 instead of 1280,720.
+  Each monitor is measured now by the rectangle it covers on the desktop: xdg-output's logical
+  size, or, from a compositor that sends none, the mode turned by the output's transform and
+  divided by its scale. The desktop is counted in desktop pixels, those logical units times the
+  largest whole scale among the monitors, so the pointer still reaches every physical pixel of a
+  HiDPI monitor, and a lone 3840x2160 monitor at scale 2 measures 3840x2160, as it did. KMS
+  capture takes Wayland's rectangles only when Wayland matched an output to every active CRTC on
+  the cards it opened, and otherwise measures every CRTC by its mode, as it did. The streamed
+  monitor's frame stays in output pixels for capture and encode. The fix applies when the streamed
+  monitor is not itself rotated 90 or 270 degrees. Streaming a monitor rotated that way behaves as
+  in 1.4.13: its picture comes out as it did, sideways wherever the capture hands the frame back
+  unturned, and its absolute input keeps every number 1.4.13 gave it, so the pointer lands where it
+  did then, which on the reporter's desktop is the main monitor. Turning that picture upright is a
+  later fix.
+  Touch and pen on every other stream use the corrected desktop size, and still leave out the
+  streamed monitor's place on the desktop. Portal, KWin and X11 capture are unchanged. Reported
+  and diagnosed by ertywastaken.
+
+- Absolute mouse input for a monitor right of or below another lands on that monitor, with
+  wlroots, KMS and X11 capture, NvFBC included. Linux left the streamed monitor's place on the
+  desktop out of every absolute point, so the pointer landed on whichever monitor sits at the
+  desktop's corner, where Windows always put the place in. It goes in now, counted from the
+  desktop's own corner, which is left of or above the origin when a monitor sits there. With
+  wlroots or KMS, a stream of a monitor rotated 90 or 270 degrees still leaves it out, as 1.4.13
+  did, and so does KMS
+  capture of a CRTC that appears after it measured a desktop Wayland named. Portal and KWin
+  capture give the stream no place on a larger desktop, so they are unchanged. Touch and pen
+  still leave the place out.
+
+- With Live Tuning on, Doctor offers to lower the bitrate for sustained video frame loss. It left all
+  network pressure to Live Tuning and offered only a recheck. Doctor now offers one step with Undo,
+  verified like any other. Taking it turns Live Tuning off for this stream only, as a live bitrate
+  set by hand does, and never writes the saved preference. Undo, a step that does not verify, or
+  turning Live Tuning back on puts back the bitrate from before the step and turns Live Tuning on
+  again, and the step's receipt says so. Otherwise Live Tuning stays off until the stream ends, and
+  the next stream starts with it on. While the step holds, pressing Auto Fix again takes no second
+  step and says why, and once the network is clean Doctor offers the step's Undo instead of a
+  quality restore the step would refuse. If a network report reaches the controller just as Doctor
+  takes the step, Doctor takes none, turns Live Tuning back on and says so. Round trip time alone
+  stays Live Tuning's to cut for, and Doctor only rechecks it, saying what Live Tuning's own rule
+  does rather than promising a cut.
+
+- The Dashboard quotes the loss Doctor judges as well. Its Loss tile, the tile's colour, the quality
+  grade and the loss chart read the newest one second report, and so did the stream's client line
+  once the host began filling it, so on the Retroid Pocket 6's HEVC run they swung between 0% and
+  7.4% beside a Doctor that held 1.9%. They now show the window's figure, coloured as Doctor judges
+  it, and no figure until the host has judged one. A client row carries that figure and stops
+  serving it once its reports are more than five seconds old, as Doctor does.
+
+- With Live Tuning on, Doctor judges PyroWave's bitrate advice on the rate the stream is set to.
+  It judged Live Tuning's moving target, so a stream set between PyroWave's starved line and the
+  rate Doctor would raise it to went from no finding to "set more bitrate" and back with every cut
+  Live Tuning made for a Wi-Fi RTT spike, though Live Tuning was about to bring the bitrate back on
+  its own. The same held for a stream that wants more than Doctor raises it to, such as 3840x2160
+  at 120 fps in 4:4:4 set to 320 Mbps by hand: a cut read as a reduction Doctor's restore would
+  undo, and frames held to the cut's smaller byte budget filled it more often, so the finding came
+  and went with every cut. A cut no longer counts as such a reduction, and the share of frames at
+  the byte budget leaves out frames sent while Live Tuning has cut the stream below its set rate.
+  The session status's `pyrowave_bitrate.starved`, which the console's PyroWave readout words, judges
+  the set rate as Doctor does, where it came and went with the same cuts beside a headline that held.
+  Whether Live Tuning sits at its PyroWave floor still reads the live rate.
+
+- A bitrate step Doctor verifies leaves its headline judging the step's own readings. Doctor
+  verified the step against the newest readings after it while the headline went on judging a window
+  that still held the readings that asked for it, so a verified step left "Sustained network
+  pressure" and another lower bitrate step on offer for most of 20 seconds, which pressing only
+  answered by asking to finish or undo the step already taken. It went the other way too: a
+  stepped-down stream that went on losing 4% of its frames verified on two clean reports, beside a
+  headline that still called it pressure. Doctor now verifies the step against the window judged
+  afresh from the moment the encoder applied it, and once it verifies the headline's judgement
+  starts over from that moment too. Neither counts the first report after the step, which covers the
+  second before it and still carries the loss the step was taken for, so a step that cures 23% loss
+  verifies. A step whose own readings are still pressure rolls back, and its readings stay in the
+  window.
+
+- Doctor's control channel finding holds steady as well. It came and went with ENet's newest
+  estimate of the control channel's own loss against 2%, which on the Retroid Pocket 6's HEVC run
+  read 1.08 and then 2.81 on consecutive polls, so the headline could still go between that finding
+  and nothing every second. The estimate is now averaged over the same 20 seconds with the same
+  band, noted from 2% and dropped below 1%, and the stream stats carry it in `network_verdict` as
+  `control_loss_pct`. It still never counts as network pressure.
+
+- A verdict read between two client reports quotes the figure its band was judged on. The band
+  moved only when a report arrived, while the figure was worked out again whenever it was read, so
+  once a lossy second left the window between reports, which PyroWave's reports a second or more
+  apart leave room for, a pressure row could read 0.70%, below the 1% that clears it. Figures whose
+  readings have stopped are no longer served either: once the client's newest media report is more
+  than five seconds old, or the host has had no reading for two, the stream stats, the tuning
+  block, Doctor's evidence and the session status call that loss or RTT stale, where they went on
+  quoting the old figure with "elevated" beside it while Doctor said it was not judging it. A
+  session that ends is still graded by the verdict the window last reached. That grading runs after
+  a dropped client's readings have stopped, and the freshness check read every abrupt disconnect as
+  a clean network.
+
+- Doctor and the session status call the live bitrate controller Live Tuning, as everything else
+  does. Doctor's network findings said "Auto Safe already owns the live bitrate correction" and
+  offered "Recheck Auto Safe", a name that appeared nowhere else a player could see.
+
+- The console quotes the same loss. The post-session report, the Fix My Stream checklist, the
+  session snapshot and the issue draft read the verdict's video frame loss over 20 seconds, with the
+  frame counts behind it, instead of the newest one second report, and say which loss it is: frames
+  that never arrived whole after FEC, beside the frames the host dropped before sending, which are a
+  different count. A PyroWave session whose last second lost 32.7% of its frames, while the host
+  dropped 0.96%, was reported as "Network packet loss was 32.7%" and put on the network. The report
+  names the network only when the window judged its loss as pressure, and until the host has judged
+  any the snapshot says the loss is not judged yet instead of 0%, or, for a Moonlight or Artemis
+  client, which sends no media reports, that it does not report it. Doctor's loss row says the same
+  of such a client instead of waiting for five reports. A session whose client dropped keeps the
+  loss the window last judged in its report, as the host does, though the host's last live payloads
+  before the ping timeout call that loss stale, and a stale round trip is not graded. It keeps it
+  only while the window still holds the reports it was judged on: a session whose reports stopped
+  more than 20 seconds before it ended is graded on no loss, as the host grades it.
+
+- Live Tuning's loss handling is 1.4.13's, unchanged in this release. It still hears every control
+  ping as a reading with no loss, about ten a second, and each client media report with its own
+  loss, and acts once a second on its own average of those. Whether a report with a few percent of
+  lost frames cuts the bitrate depends on when it lands in that second, so the Retroid Pocket 6's
+  HEVC run, a 7.4% report every 3 to 5 seconds, can still be cut for its loss. While those reports
+  keep coming Live Tuning does not climb back, because any report with lost frames restarts the 10
+  seconds it waits before a step up. The tuning block now carries Doctor's figure as `network_loss_pct`
+  beside `adaptive_packet_loss_ewma`, Live Tuning's own average, and the console's Live Tuning row
+  shows Doctor's. The row read the controller's average, already a percentage, as a fraction, so
+  0.078% showed as 7.8%.
+
+- Doctor grades the network from that verdict. Its headline, the evidence it cites, the Auto Fix it
+  offers and the session status's `network_risk` all read the same 20 second judgement, so one
+  second that lost a burst of frames, or one Wi-Fi RTT spike, no longer flips the verdict. On the
+  Retroid Pocket 6's recorded HEVC run Doctor changed its headline 12 times in 24 seconds, between
+  "Control-channel retries were observed" and "Sustained network pressure". It now names the
+  pressure once, seven seconds in, and keeps it. The PyroWave run's RTT spikes turned its bitrate
+  advice into a network warning and back six times in 30 seconds, and now leave it alone. The loss
+  row reads "Video frame loss" and says how many of how many frames never arrived whole after FEC
+  recovery, loss stops counting once the client's media reports are more than five seconds old, and
+  the control channel finding no longer tells a player not to lower quality while Live Tuning is
+  lowering it. A quality restore Doctor offers on that judgement is verified on it too, at every
+  reading while the restore is under way, so light loss like the Retroid Pocket 6's, a 7.4% report
+  every few seconds in a window under 2%, no longer rolls back the restore it was offered on.
+
+- The stream stats carry `network_verdict`, video frame loss and round trip time judged over the
+  last 20 seconds rather than from the newest report. Its loss is the share of video frames the
+  client expected and never received whole, after FEC recovery, with the frame counts behind it, and
+  its RTT is the median of the host's readings. Loss becomes pressure at 2% and clears only below
+  1%, RTT at 28 ms and below 20, and a window with fewer than five reports has no verdict. A
+  stream's own client row now says its loss arrived: it read `packet_loss_available: false` on
+  every codec while the top level had the loss, which is how a check of a PyroWave session
+  concluded the client's loss never reached the host. The host log also says once a stream when a
+  client's media reports start counting, when reports come too far apart to count, and, at most
+  every half minute, when one is refused.
+
+- A client can set up to 500 Mbps by hand. The endpoints a paired client sets its own bitrate
+  through, its client settings' `target_bitrate_kbps`, a live bitrate change, a resolved launch's
+  `bitrateKbps`, the launch profile route and a Space's resolver, stopped at 300000 kbps, below
+  PyroWave's own advice for 3840x2160 at 120 fps on a device's own screen. They now take 1000 to
+  500000 kbps. A Space still streams at its encoder's 8 Mbps and says so when it normalizes a
+  request, and a Doctor trial on a stream above 300 Mbps is no longer refused. Capabilities announce
+  the limit as `manual_bitrate_max_kbps`, so a client offers more than 300 Mbps only to a host that
+  takes it. The RTSP handshake a Moonlight client uses never had this limit and still has none of
+  its own: `max_bitrate` alone bounds it. Doctor's PyroWave raise, and every bitrate the host
+  recommends on its own, still stop at 300 Mbps.
+
+- NVENC's VBV buffer no longer overflows at the new bitrates. With `nvenc_vbv_increase` at 258% or
+  more, a 500 Mbps stream at 60 fps overflowed the buffer size FFmpeg takes before the increase was
+  divided down, and the standalone NVENC encoder wrapped its own at 30 fps. Both now grow the buffer
+  in 64 bits and hold it to what the encoder's field takes. The default increase, 0, never hit it.
+
+- PyroWave's advice for a device's own screen is calibrated to a check by eye. On a Retroid Pocket 6,
+  200 Mbps was right for Control at 1920x1080, 120 fps and 4:4:4, where the author's 35 dB target
+  asked about 400. The own screen figure now aims for 31 dB, which asks about 215 there, and the
+  television or monitor figure keeps 35 dB until someone checks it on a big screen. Session status
+  and `GET /polaris/v1/pyrowave/advice` carry the new target as `far_target_db` beside `target_db`,
+  and Nova's estimator will mirror it; until that change lands, Nova reads both figures at 35 dB.
+  The model's figures stay uncapped there, and the console and Doctor say so wherever one passes
+  the 300 Mbps Polaris recommends on its own. Doctor quotes one figure, the request a player sets
+  with FEC and audio included, and names what held it there when the 300 Mbps cap or `max_bitrate`
+  did. While Live Tuning owns the bitrate it says what to set as the live bitrate instead, the same
+  goal at the encoder, because a live bitrate applies there. Session status carries the stream's rate as a
+  request, `request_kbps`, beside `encoder_kbps`, and the console and Doctor's evidence read it that
+  way, so a stream at 200 Mbps no longer shows as an encoder at 179 against advice of 215. It reads
+  a stream as starved only when it runs more than a tenth below that figure, so the 200 Mbps judged
+  right reads healthy, and the share of frames that fill PyroWave's byte budget no longer makes a
+  stream starved. That share decides one thing now. Where the 300 Mbps cap or `max_bitrate` holds the
+  figure below the model's, as for 3840x2160 at 120 fps in 4:4:4 on a device's own screen, where the
+  model asks about 328, a stream within a tenth of that limit and still below the model's figure,
+  with more than 80% of its recent frames filling the budget, gets its own Doctor finding,
+  `pyrowave_needs_more_than_allowed`. Doctor names the model's figure and the limit and suggests a
+  lower resolution or frame rate, or HEVC. Where only the cap holds the stream, it adds that a player
+  can set more by hand, up to 500 Mbps or the host's `max_bitrate` if that is lower. Doctor changes
+  no bitrate itself there, and a stream its
+  quality restore would bring back to its launch bitrate gets that restore instead
+  ([PyroWave reference](pyrowave-reference.md#how-polaris-advises-and-tunes-pyrowave)).
+
+- Session status says what a stream's bitrate request was split into, on every codec. A client
+  asks for one bitrate for the video, its FEC, the audio and the packet overhead, and the host
+  hands the encoder what is left, but only a PyroWave stream published any of those figures. While
+  a stream runs, `GET /polaris/v1/session/status` now carries `bitrate_units`: `requested_kbps`,
+  what the client asked for; `warp_factor`, `cap_kbps` and `cap_source`, what the host did to it;
+  `split_kbps`, the total it split, which is null for a watcher at its owner's rate or a client
+  that sent no bitrate; `encoder_kbps`, where that left the encoder; `live_encoder_kbps`, the rate
+  the encoder runs at after a live bitrate or Live Tuning; the `audio_kbps` and `fec_percentage`
+  that came off; and `formula`, `stream_bitrate_v1`, which turns `split_kbps` into
+  `encoder_kbps`. Capabilities announce it as `bitrate_units_v1`. A client is answered about its
+  own stream, or about the first one running when it has none here. A Space's stream carries none
+  yet. `pyrowave_bitrate.assumes` and the PyroWave Live Tuning floor now use the FEC share a
+  stream started with rather than the host's setting after a reload, and
+  `GET /polaris/v1/pyrowave/advice` answers a client that is streaming for its own stream's audio
+  and FEC, so advice asked for during a 5.1 stream asks a little more than stereo. Before a launch
+  it still assumes stereo.
+- Gamescope Stream starts on a stock gamescope again, SteamOS's included. Since 1.4.12 the nested
+  session launcher and the idle compositor passed `--pipewire-composite-cursor` to gamescope on
+  every launch, and only Polaris's own gamescope build has that option. SteamOS's gamescope
+  3.16.23 and Fedora's 3.16.29 exit on it with `unrecognized option '--pipewire-composite-cursor'`,
+  the launcher then logged `failed to record an exact nested gamescope generation`, and the client
+  got a 503. On SteamOS, where labwc cannot be installed, that was the only private route. Both now
+  ask the gamescope they are about to run whether its `--help` lists the option, once per launch,
+  pass it only when it does, and log which way it went. On a stock gamescope the stream has no
+  pointer drawn in, as before 1.4.12. `POLARIS_GAMESCOPE_COMPOSITE_CURSOR=0` still turns the option
+  off, and `POLARIS_GAMESCOPE_COMPOSITE_CURSOR=1` now forces it on, for a patched build whose help
+  does not list it. A host wired with `scripts/install` gets the fix once those helpers are
+  installed again from this version, since package updates never touch them. On 1.4.12 and 1.4.13,
+  add `Environment=POLARIS_GAMESCOPE_COMPOSITE_CURSOR=0` under `[Service]` with
+  `systemctl --user edit polaris` and restart the service. A `scripts/install` host runs its idle
+  compositor as a unit of its own, so add the same line with
+  `systemctl --user edit polaris-gamescope-idle` too, then restart both. (#792)
+- On Fedora, removing only `polaris-kms` no longer removes the Spaces security setup from the
+  Polaris you keep. The helper package carried the main package's install and removal scripts, so
+  `sudo dnf remove polaris-kms` ran `polaris-spaces-setup remove`, and every update printed the
+  install message twice. The helper now carries no scripts. On 1.4.13, update first, then remove
+  the helper.
+- Desktop Takeover no longer hands hyprctl a special workspace name that hyprctl would read as
+  request syntax. hyprctl chooses which request to send by looking for text such as `/--batch` or
+  `/hyprpaper` anywhere in its arguments, so a special workspace named, say, `special:a/--batch;x`
+  could turn the move into a different request. A special workspace whose name holds `/`, `;`,
+  `--`, `\`, `[` or `]` now stays where it is, and the host log names it and says why; every other
+  workspace moves as before. One opened on the stream's output during the session is left there
+  for Hyprland to move when that output closes. Regular workspaces are moved by number, so their
+  names were never involved. (#788)
 - The Ubuntu package depends on PipeWire's client library, `libpipewire-0.3-0t64`, which Polaris
   links for PipeWire audio and portal capture. The 1.4.13 `.deb` left it out, so on an Ubuntu 24.04
   system without PipeWire, such as the minimal `ubuntu:24.04` image, apt installed Polaris without
@@ -31,10 +298,10 @@ starts at `v1.0.0`.
   `capture_in_use_by_other_codec`, where the second stream used to get no picture.
 - The launch refusal `kms_capture_needs_capability`, `polaris --help` and the troubleshooting
   guide no longer say that every install or update removes the KMS capability. Since 1.4.13 the
-  polaris-kms package carries it on a helper that updates keep, and #174 took that advice out of
-  the startup log but left it in these three places. The refusal now says to run `--enable-kms`
-  once and do what it prints, since it may ask for a new login first, and that the package keeps
-  the capability across updates.
+  polaris-kms package carries it on a helper that updates keep. Another change in this release
+  took that advice out of the startup log but left it in these three places. The refusal now says
+  to run `--enable-kms` once and do what it prints, since it may ask for a new login first, and
+  that the package keeps the capability across updates.
 
 - `--setup-host --enable-kms` on a host whose service already runs the polaris-kms helper says
   nothing needs reloading or restarting, and leaves the drop-in as it is. It used to write the
@@ -110,8 +377,9 @@ starts at `v1.0.0`.
   NVIDIA driver version from the kernel module, Session/compositor names the desktop and, for KDE
   Plasma and GNOME, the compositor they always use, and with nothing streaming the Client line
   names the last stream's client and says it was the last stream.
-- Ending a private stream now quits the app the way a player would, in order, while the stream's
-  private display is still up, and stops the display only after that. It used to stop the display
+- The private-stream stop route asks the game's owned windows to close, in order, while the stream's
+  private display is still up, before stopping that display. This is not a guarantee that every
+  launcher can close its game cleanly. It used to stop the display
   with the app still on it, or in the same instant it asked the app to quit. Alan Wake 2, started
   from Heroic's Flatpak, crashed together with Heroic when its stream ended, and Heroic never
   recorded the playtime; Control, quit from Nova, had sixteen processes killed after two seconds of
@@ -153,8 +421,9 @@ starts at `v1.0.0`.
   Play Setup: desktop Steam that did not exit said "Nova did not start a private stream",
   `encoder_probe_failed` against the private compositor said to pick Private Stream (GPU-native) in
   Play Setup, and refused Space launches said to update Nova or to set Play Setup to Auto frame rate
-  with HDR off. They now name the setting instead, the launch mode, HDR and the frame rate, or the
-  client app, which is right for Nova and for Moonlight alike. The codes are unchanged.
+  with HDR off. They now name the setting instead, the launch mode, HDR, the frame rate and a
+  Space's bitrate and size limits, or the client app, which is right for Nova and for Moonlight
+  alike. The codes are unchanged.
 
 - A Moonlight player can start a Steam game on a Linux host that has Steam open on its desktop. A
   private stream of a Steam app cannot start beside desktop Steam, because the Steam in the private
@@ -182,6 +451,25 @@ starts at `v1.0.0`.
   The host sleep setting now says only Nova can put the host to sleep; Moonlight has no sleep
   control.
 
+- Doctor names the kind of client a stream belongs to, and for Moonlight and Artemis, what they
+  cannot use. The host reads the kind from the device's pairing record at launch or resume, as the
+  Devices page does, and serves it as `client_family`, `nova` or `moonlight`, for the stream and for
+  each client. Doctor's `client_family` row says for a Moonlight-protocol client that Polaris gets
+  no media loss from it, so Doctor works from round-trip time and host evidence; that PyroWave, Live
+  Tuning from the client and choosing the launch mode per launch are Nova only, though Artemis can
+  ask for Host Virtual Display; and that Live Tuning on Mission Control still tunes the stream.
+  Session Snapshot on Doctor & Support shows a Client type tile with the same note, the support
+  report's Client line names the kind before the device, and Mission Control takes the kind from the
+  stream itself, so two devices that share a name no longer hide it.
+- Doctor's advice for a Private Stream host whose hidden compositor could not hand over DMA-BUF no
+  longer says to pick Private Stream (GPU-native) in Play Setup, which Moonlight does not have. Nova
+  can choose that mode for one launch, and every client gets it from Where games run. The first-run
+  launch mode step says Moonlight and other clients get the mode chosen there, where it said each
+  game could pick its own mode in Nova's Play Setup.
+- The pairing settings and the Trusted Network card say that Nova pairs without a PIN from a
+  trusted subnet and other clients use a PIN. They read as if any device on the subnet did, while
+  the host approves without a PIN only a Trusted Pair request, which only Nova sends.
+
 - The compatibility guide has one table of what each client gets: Nova for Android, Nova for
   Linux, Moonlight, Artemis and Browser Stream, row by row from pairing to refusal detail, and what
   the host can set for a Moonlight player instead. It also gains an Intel row, which says plainly
@@ -189,25 +477,42 @@ starts at `v1.0.0`.
   what each stream mode needs from the desktop, HDR by stream mode, and the host requirements. The
   Moonlight guide, the FAQ, the device guide and the quick start stop saying that Trusted Pair
   works for Moonlight, that Moonlight can watch another player's stream, that `max_sessions` has
-  to be raised for one watcher, and that the Desktop entry streams the private compositor. The app
-  editor's **Always create Virtual Display** now says it changes nothing on a Private Stream host.
+  to be raised for one watcher, and that the Desktop entry streams the private compositor.
+- The codec readout under **Settings > Encoder Profiles** has a 4:4:4 row and a PyroWave row, and
+  shows on the NVENC and Software tabs as well as VA-API and Vulkan Video. The 4:4:4 row says
+  whether the active encoder offers clients 4:4:4, and plainly which encoders in the build can: on
+  Linux only the software encoder, for H.264 on the CPU, while NVENC, VA-API and Vulkan Video stream
+  4:2:0, and PyroWave where the host can run it. The PyroWave row says whether the host offers
+  PyroWave and that it streams only to Nova. When the host does not offer it, the row shows the
+  host's own reason and message, the same `capture.pyrowave_unavailable` a client gets, where
+  before the console never mentioned the codec. A host that offers PyroWave only to stream modes
+  with their own compositor also shows the refusal a launch into its own mode gets. While a
+  PyroWave stream runs, the row shows its route and the bitrate advice with its conditions: the own
+  screen and television figures, the FEC they include, the model's rule, the encoder rate, the
+  share of frames at the byte budget and where Doctor's raise goes. `encoder_codec_support` on
+  `GET /api/config` gains `yuv444` and `pyrowave` for this, and session status's `pyrowave_bitrate`
+  gains `assumes`, the FEC share and audio cost its figures were grossed up for, as the advice route
+  already names them.
+
 - Polaris now knows what bitrate a PyroWave stream needs. It carries the model PyroWave's author
-  published and evaluates it at 35 dB, the level the author calls good quality: for 1920x1080 at
-  60 fps, about 172 Mbps in 4:2:0 and 201 Mbps in 4:4:4 on a device's own screen, and about 246 and
-  298 on a television or monitor, as what to set at the default 10% FEC with stereo audio. Nova
-  1.4.14 carries the same model, and a shared fixture holds both ends to the same figures. While a
+  published and evaluates it at 35 dB, the level the author calls good quality, for a television or
+  monitor, and at 31 dB for a device's own screen: for 1920x1080 at 60 fps, about 101 Mbps in 4:2:0
+  and 109 Mbps in 4:4:4 on a device's own screen, and about 246 and 298 on a television or monitor,
+  as what to set at the default 10% FEC with stereo audio. Nova's estimator ports the same model,
+  and a fixture in Polaris's tests pins the host's figures. While a
   PyroWave stream runs, session status carries the advice, the rate the encoder runs at, and the
   share of recent frames that reached PyroWave's byte budget, which the host used to write only to
   its log. `GET /polaris/v1/pyrowave/advice` answers the same figures before a launch, announced as
-  `pyrowave_advice_v1`. The model is an objective metric on four game clips, not a measurement on a
-  device ([PyroWave reference](pyrowave-reference.md#how-polaris-advises-and-tunes-pyrowave)).
+  `pyrowave_advice_v1`. The model is an objective metric on four game clips, and the own screen
+  target one check on one device
+  ([PyroWave reference](pyrowave-reference.md#how-polaris-advises-and-tunes-pyrowave)).
 
-- Doctor can raise a PyroWave stream that is short of bits. When the stream runs below the advice
-  for a device's own screen, or more than 80% of recent frames hit the byte budget, and the network
-  is clean, Doctor offers one tap to raise it to that advice, never above 300 Mbps or `max_bitrate`,
+- Doctor can raise a PyroWave stream that is short of bits. When the stream runs more than a tenth
+  below the advice for a device's own screen, as a request, and the network is clean, Doctor offers
+  one tap to raise it to that advice, never above 300 Mbps or `max_bitrate`,
   in the same guarded steps with the same verification and Undo as its other bitrate fixes. The
-  raise can go above the bitrate the player asked for, and it is the only thing that can: Live
-  Tuning never does. While Live Tuning is on, Doctor says what to set instead. A stream with no
+  raise can go above the bitrate the player asked for. Live Tuning goes above a request only to
+  lift one below `adaptive_bitrate_min` to that floor. While Live Tuning is on, Doctor says what to set instead. A stream with no
   saved paired profile can now climb back after a reduction too, to the bitrate it opened at, where
   Doctor used to offer nothing. The bitrate row in Doctor's evidence, which always read pass, now
   reflects network pressure and a stream short of its goal.
@@ -230,16 +535,16 @@ starts at `v1.0.0`.
   Tuning now reads as off until the stream ends, the next stream starts with the saved preference,
   and switching it on during the stream resumes it.
 
-- The adaptive bitrate ceiling no longer cuts the bitrate a client asked for. Nothing in the
-  controller ever climbs above a client's request, so `adaptive_bitrate_max`, 100 Mbps unless
-  changed, did one thing: it cut any stream whose encoder rate was above it, whatever the codec.
+- The adaptive bitrate ceiling no longer cuts the bitrate a client asked for. Live Tuning climbs
+  above a client's request only to reach `adaptive_bitrate_min`, so `adaptive_bitrate_max`, 100 Mbps
+  unless changed, did one thing: it cut any stream whose encoder rate was above it, whatever the codec.
   FEC and audio come off a request before the encoder sees it, so at the default 10% FEC that is a
   request above about 112 Mbps. With adaptive bitrate on, such a stream dropped to 100 Mbps half a
   second in and never came back, and every PyroWave stream Nova asks to run at 180 Mbps or more is
   one. With it off, a live bitrate change from a paired client, which Nova's Deck HUD sends, was
   clamped to 100 Mbps, and Doctor read the clamped figure as the current bitrate, so its one step
   took a PyroWave stream running at 161 Mbps to 100 and Undo put back 100. Now a stream keeps the
-  bitrate it opened at, a live change applies as asked up to the endpoint's 300000 kbps, and Doctor
+  bitrate it opened at, a live change applies as asked up to the endpoint's 500000 kbps, and Doctor
   steps and undoes from the bitrate the encoder runs at. The host cap stays with `max_bitrate`,
   which now also caps a live change, at the encoder rate its description names. A launch applies it
   to the request before FEC and audio come off, so a launch at the cap encodes a little lower. A
@@ -275,9 +580,11 @@ starts at `v1.0.0`.
   bitrate. In constant bitrate, both drivers pad frames with filler data up to the target, and
   FFmpeg has no option to turn it off, so an idle desktop at 20 Mbps sent 20 Mbps, 99.8% of it
   filler. A decoder discards filler data, so Polaris now removes it from each frame before sending:
-  on an RX 7900 XTX the same still screen sends about 0.04 Mbps, and every decoded picture is
-  identical. This covers VA-API and Vulkan, whose default rate control is constant bitrate. AV1 was
-  never padded.
+  in the [earlier RX 7900 XTX encoder-output tests](https://github.com/papi-ux/polaris/pull/785),
+  a synthetic still screen at 1080p60 fell from 20 Mbps to about 0.04 Mbps, with every decoded picture
+  identical. That driver-output test did not include a live Moonlight or Nova stream. It covered
+  VA-API and Vulkan, whose default rate control is constant bitrate; other AMD generations were
+  not tested in that report. AV1 was never padded.
 
 - A Space that could not be created says why in the host log. The client is still answered with
   `spaces_change_not_saved`, which the Spaces page reads, and the log now names the check that
@@ -290,8 +597,10 @@ starts at `v1.0.0`.
   the exception said, where it used to log only that it failed.
 
 - On AMD, Auto tries Vulkan Video first on Gamescope Stream captured through the portal (#635),
-  where it used to try VA-API alone and never probed Vulkan Video at all. On the reporter's RX 9070
-  XT at 4K60, Vulkan Video took 9 ms a frame there against VA-API's 16 ms, and held it under load.
+  where it used to try VA-API alone and never probed Vulkan Video at all. The [historical reporter's
+  RX 9070 XT readings](https://github.com/papi-ux/polaris/issues/635) at 4K60 were host processing
+  latency of 9 ms with Vulkan Video and 16 ms with VA-API, not encoder-only frame timings.
+  These are the reporter's earlier measurements, not a new beta benchmark.
   The portal hands Vulkan Video every frame in system memory, and the encoder probe runs that same
   upload, so a probe that fails falls back to VA-API as before. Vulkan Video offers less on this
   route. AV1 is the trade: it carries none in this build, so a client that preferred AV1 loses it,
@@ -314,7 +623,7 @@ starts at `v1.0.0`.
   keeps VA-API, each with its own reason. On a card or Mesa without Vulkan Video encode, every
   launch tries it first, falls back to VA-API and reports the fallback; `encoder = vaapi` skips the
   attempt. Every other stream mode, Steam Game Mode's own screen, Gamescope Stream with `capture`
-  set to `kms`, `wlr`, `x11` or `auto`, builds without Vulkan Video, and every NVIDIA and Intel host
+  set to `kms`, `wlr` or `x11`, builds without Vulkan Video, and every NVIDIA and Intel host
   decide as before; on Gamescope Stream with one of those captures the reason says the capture keeps
   VA-API, instead of calling the host outside Gamescope Stream. One risk is known: nothing retires
   Vulkan Video on Gamescope Stream if it passes the probe and then fails on the live stream, which
@@ -354,9 +663,11 @@ starts at `v1.0.0`.
   selection reason for `encoder = vulkan` says which of the two a host gets, and a host that moves
   into or out of Gamescope Stream probes again, so what it advertises follows the route.
 
-- Arch and SteamOS packages keep link-time optimisation enabled. Vulkan Video and PyroWave now
-  use distinct loader symbols and scaler shader types, fixing the conflicts that previously
-  required disabling LTO.
+- Every package builds Polaris with link-time optimisation again, as releases before 1.4.13 did.
+  In 1.4.13 the Arch and SteamOS packages opted out of it, and the setting that was meant to keep
+  it off the vendored PyroWave trees turned it off for the Polaris binary in every package.
+  Vulkan Video and PyroWave now use distinct loader symbols and scaler shader types, which fixes
+  the conflicts that needed LTO off, so neither the opt-out nor that setting remains.
 
 - `sudo -H polaris --setup-host --enable-kms` no longer stops the Polaris user service from
   starting. It pointed the service at the DRM/KMS capture helper straight away, but only members of

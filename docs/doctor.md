@@ -18,6 +18,18 @@ Doctor reports one of four plain outcomes:
 | **Client** | Received, decoded, or rendered evidence points to the playback device when those measurements are available. |
 | **No confirmed issue** | The available evidence does not support blaming one stage. Unavailable measurements stay unknown instead of becoming a guess. |
 
+Doctor also names the kind of client streaming, in its `client_family` evidence row: `nova`, or
+`moonlight` for a client that speaks only the Moonlight protocol, such as Moonlight or Artemis. The
+host reads it from the device's pairing record when the device launches or resumes, as the Devices
+page does, so it cannot tell Nova for Android from Nova for Linux, or Moonlight from Artemis. For a
+Moonlight-protocol client the row says what it cannot use. Polaris gets no media loss from it, so
+the **Network** verdict rests on round-trip time, and the **Client** verdict needs decode and render
+timing that only Nova for Android measures. PyroWave, Live Tuning from the client and choosing the
+launch mode per launch are Nova only, though Artemis can ask for Host Virtual Display on an app whose Launch as
+is Host default; Live Tuning on Mission Control still tunes the stream. Diagnostics carry `client_family` for the stream and for
+each client, and Session Snapshot on **Doctor & Support** shows it as **Client type** ([what each
+client gets](compatibility.md#clients)).
+
 Static menus and repeated frames do not by themselves prove a pacing fault. Doctor collects six
 complete video telemetry windows after startup and requires a warning threshold in two consecutive
 windows before grading frame pacing. While that window is still filling, pacing evidence stays
@@ -225,6 +237,16 @@ Doctor uses a small action vocabulary so the button says what will happen:
 - **Recheck** gathers a fresh read-only measurement. It does not change the stream.
 - **Manual** explains the next check when Polaris cannot safely act for you.
 - **Undo** restores the previous live bitrate while the same stream generation still owns it.
+
+With Live Tuning on, Doctor leaves round trip time to Live Tuning and offers only **Recheck** for it.
+For sustained video frame loss it offers **Auto Fix**, one step down. Taking that step turns Live
+Tuning off for that stream, as a live bitrate you set yourself does, and saves nothing. Undoing the
+step, a step that fails its check and rolls back, or turning Live Tuning back on puts back the
+bitrate from before the step and turns Live Tuning on again. Otherwise Live Tuning stays off until
+the stream ends, and the next stream starts with your saved preference. Pressing **Auto Fix** again
+while the step holds takes no second step: Doctor says the step still holds and how to undo it. Once
+the network is clean with the step still holding, Doctor offers the step's **Undo** instead of
+raising the bitrate itself.
 
 A change that needs a new stream is not an Auto Fix. Fresh-launch experiments are a separate future
 **Run a trial** workflow and are not enabled in this release.

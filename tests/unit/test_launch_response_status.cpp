@@ -6,6 +6,7 @@
  *        #225, which stopped the client crashing (NPE) on such a body.
  */
 
+#include <src/config.h>
 #include <src/launch_failure.h>
 #include <src/nvhttp.h>
 #include <src/platform/common.h>
@@ -15,6 +16,8 @@
 #include <boost/property_tree/ptree.hpp>
 #include <atomic>
 #include <optional>
+#include <fstream>
+#include <sstream>
 #include <gtest/gtest.h>
 
 namespace pt = boost::property_tree;
@@ -260,7 +263,7 @@ namespace {
 
 #ifdef POLARIS_BUILD_PYROWAVE
 TEST(LaunchRefusal, APyroWaveLaunchOnAnHdrDesktopIsRefusedByNameBeforeTheStream) {
-  // #159: KWin scans an HDR desktop out as ABGR16161616F. The launch used to succeed, the client
+  // KWin scans an HDR desktop out as ABGR16161616F. The launch used to succeed, the client
   // built a decoder, and the stream ended at its first frame having carried nothing.
   RestoreCaptureRouteFacts restore;
   platf::set_capture_route_facts_for_tests(platf::capture_route_facts_for_tests_t {"kms", "kms", 1211384385u});
@@ -344,7 +347,7 @@ TEST(PyroWaveOffer, CapabilitiesSaysWhyPyroWaveIsMissingInTheContractShape) {
 }
 
 TEST(LaunchRefusal, AStreamCannotJoinACaptureAnotherCodecsStreamHolds) {
-  // #78: one capture thread serves every stream and opens its display for the first one's memory
+  // One capture thread serves every stream and opens its display for the first one's memory
   // type, so a PyroWave stream beside an H.264 one, either way round, got no picture.
   rtsp_stream::set_cleanup_session_probe_for_tests([]() {});
   struct Restore {
@@ -378,3 +381,146 @@ TEST(LaunchRefusal, AStreamCannotJoinACaptureAnotherCodecsStreamHolds) {
   ASSERT_TRUE(rtsp_stream::capture_in_use_refusal(false).has_value());
 }
 #endif
+
+
+namespace {
+  struct RestorePairedCodecModes {
+    int configured_hevc = config::video.hevc_mode;
+    int configured_av1 = config::video.av1_mode;
+    int resolved_hevc = video::active_hevc_mode;
+    int resolved_av1 = video::active_av1_mode;
+#ifdef __linux__
+    bool cage = config::video.linux_display.use_cage_compositor;
+#endif
+
+    RestorePairedCodecModes() {
+      config::video.hevc_mode = config::video.av1_mode = 0;
+      video::active_hevc_mode = video::active_av1_mode = 0;
+#ifdef __linux__
+      // No cache files, display creation or real GPU probing in this fixture.
+      config::video.linux_display.use_cage_compositor = false;
+#endif
+    }
+
+    ~RestorePairedCodecModes() {
+      config::video.hevc_mode = configured_hevc;
+      config::video.av1_mode = configured_av1;
+      video::active_hevc_mode = resolved_hevc;
+      video::active_av1_mode = resolved_av1;
+#ifdef __linux__
+      config::video.linux_display.use_cage_compositor = cage;
+#endif
+    }
+  };
+}
+
+TEST(PairedCodecCapabilities, ConfiguredAutoOffersResolvedHevcMain) {
+  RestorePairedCodecModes restore;
+  video::active_hevc_mode = 2;
+  const auto capture = nvhttp::paired_capture_codecs_for_tests(std::nullopt);
+  EXPECT_EQ(capture["codecs"], nlohmann::json::array({"h264", "hevc", "pyrowave"}));
+}
+
+TEST(PairedCodecCapabilities, ConfiguredAutoOffersResolvedHevcMain10AsHevc) {
+  RestorePairedCodecModes restore;
+  video::active_hevc_mode = 3;
+  EXPECT_EQ(nvhttp::paired_capture_codecs_for_tests(std::nullopt)["codecs"],
+            nlohmann::json::array({"h264", "hevc", "pyrowave"}));
+}
+
+TEST(PairedCodecCapabilities, UnresolvedAutoDoesNotInventHevcOrAv1) {
+  RestorePairedCodecModes restore;
+  EXPECT_EQ(nvhttp::paired_capture_codecs_for_tests(std::nullopt)["codecs"],
+            nlohmann::json::array({"h264", "pyrowave"}));
+}
+
+TEST(PairedCodecCapabilities, DetectedUnavailableAutoDoesNotInventHevcOrAv1) {
+  RestorePairedCodecModes restore;
+  video::active_hevc_mode = video::active_av1_mode = 1;
+  EXPECT_EQ(nvhttp::paired_capture_codecs_for_tests(std::nullopt)["codecs"],
+            nlohmann::json::array({"h264", "pyrowave"}));
+}
+
+TEST(PairedCodecCapabilities, ExplicitOffKeepsHevcAndAv1Unavailable) {
+  RestorePairedCodecModes restore;
+  config::video.hevc_mode = config::video.av1_mode = 1;
+  video::active_hevc_mode = video::active_av1_mode = 1;
+  EXPECT_EQ(nvhttp::paired_capture_codecs_for_tests(std::nullopt)["codecs"],
+            nlohmann::json::array({"h264", "pyrowave"}));
+}
+
+TEST(PairedCodecCapabilities, ExplicitHevcMainOfferIsPreserved) {
+  RestorePairedCodecModes restore;
+  config::video.hevc_mode = video::active_hevc_mode = 2;
+  EXPECT_EQ(nvhttp::paired_capture_codecs_for_tests(std::nullopt)["codecs"],
+            nlohmann::json::array({"h264", "hevc", "pyrowave"}));
+}
+
+TEST(PairedCodecCapabilities, ExplicitHevcMain10OfferIsPreserved) {
+  RestorePairedCodecModes restore;
+  config::video.hevc_mode = video::active_hevc_mode = 3;
+  EXPECT_EQ(nvhttp::paired_capture_codecs_for_tests(std::nullopt)["codecs"],
+            nlohmann::json::array({"h264", "hevc", "pyrowave"}));
+}
+
+TEST(PairedCodecCapabilities, ConfiguredAutoOffersResolvedAv1Main8) {
+  RestorePairedCodecModes restore;
+  video::active_av1_mode = 2;
+  EXPECT_EQ(nvhttp::paired_capture_codecs_for_tests(std::nullopt)["codecs"],
+            nlohmann::json::array({"h264", "av1", "pyrowave"}));
+}
+
+TEST(PairedCodecCapabilities, ConfiguredAutoOffersResolvedAv1Main10AsAv1) {
+  RestorePairedCodecModes restore;
+  video::active_av1_mode = 3;
+  EXPECT_EQ(nvhttp::paired_capture_codecs_for_tests(std::nullopt)["codecs"],
+            nlohmann::json::array({"h264", "av1", "pyrowave"}));
+}
+
+TEST(PairedCodecCapabilities, ExplicitAv1OfferIsPreserved) {
+  RestorePairedCodecModes restore;
+  config::video.av1_mode = video::active_av1_mode = 2;
+  EXPECT_EQ(nvhttp::paired_capture_codecs_for_tests(std::nullopt)["codecs"],
+            nlohmann::json::array({"h264", "av1", "pyrowave"}));
+}
+
+TEST(PairedCodecCapabilities, ExplicitHevcRequestDoesNotOfferAProbeRejectedCodec) {
+  RestorePairedCodecModes restore;
+  config::video.hevc_mode = 2;
+  video::active_hevc_mode = 1;
+  EXPECT_EQ(nvhttp::paired_capture_codecs_for_tests(std::nullopt)["codecs"],
+            nlohmann::json::array({"h264", "pyrowave"}));
+}
+
+TEST(PairedCodecCapabilities, ExplicitAv1RequestDoesNotOfferAProbeRejectedCodec) {
+  RestorePairedCodecModes restore;
+  config::video.av1_mode = 2;
+  video::active_av1_mode = 1;
+  EXPECT_EQ(nvhttp::paired_capture_codecs_for_tests(std::nullopt)["codecs"],
+            nlohmann::json::array({"h264", "pyrowave"}));
+}
+
+TEST(PairedCodecCapabilities, PyroWaveRefusalRemainsIndependentOfResolvedClassicCodecs) {
+  RestorePairedCodecModes restore;
+  video::active_hevc_mode = video::active_av1_mode = 2;
+  pyrowave_availability::offer_facts_t facts;
+  const auto capture = nvhttp::paired_capture_codecs_for_tests(pyrowave_availability::unavailable(facts));
+  EXPECT_EQ(capture["codecs"], nlohmann::json::array({"h264", "hevc", "av1"}));
+  ASSERT_TRUE(capture.contains("pyrowave_unavailable"));
+  EXPECT_EQ(capture["pyrowave_unavailable"]["reason"], "not_built");
+}
+
+TEST(PairedCodecCapabilities, ProductionCapabilitiesRouteUsesTheExercisedOfferBuilder) {
+  std::ifstream input(std::string(POLARIS_SOURCE_DIR) + "/src/nvhttp.cpp");
+  ASSERT_TRUE(input.is_open());
+  std::ostringstream bytes;
+  bytes << input.rdbuf();
+  const auto source = bytes.str();
+  const auto start = source.find("auto polarisCapabilities = ");
+  ASSERT_NE(start, std::string::npos);
+  const auto end = source.find("// PyroWave's bitrate advice", start);
+  ASSERT_NE(end, std::string::npos);
+  const auto route = source.substr(start, end - start);
+  EXPECT_NE(route.find("put_paired_capture_codecs(capture, video::pyrowave_unavailable(), true);"), std::string::npos);
+  EXPECT_EQ(route.find("put_capture_codecs(capture, config::video.hevc_mode"), std::string::npos);
+}

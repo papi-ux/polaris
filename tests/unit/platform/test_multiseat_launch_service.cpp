@@ -1386,6 +1386,23 @@ namespace {
     EXPECT_EQ(state->begins.load(), 0U);
   }
 
+  TEST_F(MultiseatProfileHttp, ResolverTakesAManualBitrateUpTo500MbpsAndNormalizesItToTheSpace) {
+    nvhttp::args_t most {{"game", std::string(profile_app_uuid)}, {"bitrate_kbps", "500000"}};
+    const auto resolved = nvhttp::resolve_profile_request(client, most);
+    ASSERT_TRUE(resolved);
+    ASSERT_EQ(resolved->status, 200);
+    const auto &bitrate = resolved->body["resolved_profile"]["fields"]["target_bitrate_kbps"];
+    EXPECT_EQ(bitrate["value"], 8000);
+    EXPECT_EQ(bitrate["normalized"], true);
+    for (const char *refused : {"500001", "999"}) {
+      nvhttp::args_t request {{"game", std::string(profile_app_uuid)}, {"bitrate_kbps", refused}};
+      const auto result = nvhttp::resolve_profile_request(client, request);
+      ASSERT_TRUE(result);
+      EXPECT_EQ(result->status, 400) << refused;
+    }
+    EXPECT_EQ(state->begins.load(), 0U);
+  }
+
   TEST_F(MultiseatProfileHttp, LowerLockedBitrateIsResolvedAndCarriedToTheLaunch) {
     nvhttp::args_t request {{"game", std::string(profile_app_uuid)},
       {"bitrate_locked", "1"}, {"bitrate_kbps", "4000"}};
@@ -1575,6 +1592,15 @@ namespace {
     const auto options = nvhttp::launch_profile_request(client, hdr, false, [](const auto &) { return true; });
     ASSERT_TRUE(options);
     EXPECT_EQ(options->code, "space_display_options");
+    // The same refusal covers the bitrate and the size, so its fix names them: a player at 20 Mbps
+    // who followed the rest of it was refused again with nothing new to go on.
+    auto fast = args();
+    fast.emplace("bitrateKbps", "20000");
+    const auto bitrate = nvhttp::launch_profile_request(client, fast, false, [](const auto &) { return true; });
+    ASSERT_TRUE(bitrate);
+    EXPECT_EQ(bitrate->code, "space_display_options");
+    EXPECT_NE(bitrate->action.find("8 Mbps or less"), std::string::npos) << bitrate->action;
+    EXPECT_NE(bitrate->action.find("4096x2160"), std::string::npos) << bitrate->action;
     auto keyless = args();
     keyless.erase("rikey");
     const auto keys = nvhttp::launch_profile_request(client, keyless, false, [](const auto &) { return true; });
@@ -1585,7 +1611,7 @@ namespace {
     const auto cipher = nvhttp::launch_profile_request(client, unencrypted, false, [](const auto &) { return true; });
     ASSERT_TRUE(cipher);
     EXPECT_EQ(cipher->code, "space_encryption_required");
-    for (const auto *result : {&*options, &*keys, &*cipher}) {
+    for (const auto *result : {&*options, &*bitrate, &*keys, &*cipher}) {
       EXPECT_FALSE(result->action.empty()) << result->code;
       EXPECT_EQ(result->action.find("Nova"), std::string::npos) << result->code;
       EXPECT_EQ(result->action.find("Play Setup"), std::string::npos) << result->code;
@@ -1888,6 +1914,14 @@ namespace {
     ASSERT_EQ(result.status, 200); ASSERT_EQ(result.body.at("games").size(), 2U);
     EXPECT_EQ(result.body["games"][0]["name"], "Steam Big Picture");
     EXPECT_EQ(result.body["games"][1]["id"], "space.profile-a.870780");
+    // Spaces have their own display authority and are not apps.json entries with a Launch as pin.
+    for (const auto &game : result.body.at("games")) {
+      const auto &mode = game.at("launch_mode");
+      EXPECT_FALSE(mode.contains("launch_as"));
+      EXPECT_FALSE(mode.contains("launch_as_available"));
+      EXPECT_FALSE(mode.contains("launch_as_unavailable_reason"));
+      EXPECT_EQ(mode.at("allowed_modes"), nlohmann::json::array({"gamescope_stream"}));
+    }
     EXPECT_EQ(nvhttp::profile_library_request(client, "profile-b").status, 404);
     EXPECT_EQ(nvhttp::profile_artwork_target(client, "space.profile-a.870780"), "870780");
     EXPECT_FALSE(nvhttp::profile_artwork_target(client, "space.profile-b.3527290"));

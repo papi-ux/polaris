@@ -144,6 +144,22 @@ deleted pictures back. Picking artwork in Nova still works after a removal.
 | **Output** | A file that receives the command's output. Ignored when unset. |
 | **Detached Commands** | Commands run in the background alongside the app. |
 
+### Launch as
+
+Which display this app gets. **Host default** follows **Where games run** under Settings, Audio/Video, and Nova can still pick another mode for one launch. Any other choice is fixed for this app on every client, Moonlight included.
+
+| Launch as | What the app gets |
+|---|---|
+| Host default | The host's mode. Nova can choose another per launch; Moonlight gets the host's. |
+| Private Stream, Private Stream (GPU-native), Gamescope Stream | A private session of its own, whatever the host's mode. |
+| Host Virtual Display | A screen sized to the client, on a Private Stream host too. |
+| Desktop Takeover | The live Hyprland desktop on a screen sized to the client, with the host monitors off. |
+| Mirror Desktop | The desktop you see on the host. Nova can still give it a screen of its own with Host Virtual Display or Desktop Takeover, and a host whose mode is Desktop Takeover does that for everyone. The built-in Desktop entry uses it. Polaris treats such an entry as the desktop, not a game, so it keeps its own image and gets no artwork lookup or completion time. |
+
+A mode this host cannot run is greyed out with the reason, like the cards under Where games run. An app already set to a mode the host can no longer run is refused at launch with `app_launch_mode_unavailable` and the reason, and Nova offers nothing else for it. Headless Dongle is not offered: it rearranges the host's displays, so only the host can use it. Browser Stream shows only private sessions, so it runs an app set to one of the Private Stream modes on any host and turns away one set to Host Virtual Display, Desktop Takeover or Mirror Desktop.
+
+Older apps.json files: **Mirror the host desktop** became Mirror Desktop. **Always create Virtual Display** became Host Virtual Display on an entry you added, and Host default on a game imported from Steam, Lutris, Heroic or a ROM folder, which had the flag without anyone setting it. An entry with a Steam app id counts as imported, because an earlier apps.json migration marked every such entry as a Steam game. Polaris still writes the old `desktop-mirror` and `virtual-display` keys next to `launch-as`, with `launch-as-basis`, so an older Polaris reads the file as before and an edit made there is not lost.
+
 ### Prep and state commands
 
 | Field | What it does |
@@ -162,11 +178,9 @@ deleted pictures back. Picking artwork in Nova still works after a removal.
 | **Continue streaming until all app processes exit** | Keeps streaming until every process the app started has ended, instead of stopping when the first one does. |
 | **Continue streaming if the application exits quickly** | Detects launcher-type apps that close right after starting something else and treats them as detached. |
 | **Terminate on Pause** | Ends the app when the last client disconnects instead of keeping it paused for the resume window. |
-| **Mirror the host desktop** | Linux only. Streams the desktop you see on the host whatever launch mode the host uses, and ignores **Always create Virtual Display** for this entry. The bundled Desktop entry has it on, which is why Desktop shows your real desktop on a Private Stream host. Turn it off, or add an entry with no command, to get an empty private session to launch things into. A Desktop Takeover launch ignores it. |
 | **Close desktop Steam for private launches** | When desktop Steam is running as a private stream starts, quits it and waits for it to exit instead of refusing the launch. Unsaved state in that Steam session is lost. Each device's **Close Steam on the host to start games** switch, off by default, does the same for every app that device launches ([Editing a device](devices.md#editing-a-device)). |
 | **Per Client App Identity** | Gives the app a separate identity per client, so one app can carry different virtual display configurations for different devices. |
 | **Use App Identity** | Creates virtual displays under the app's own identity instead of the client's, so each app gets its own display configuration. |
-| **Always create Virtual Display** | Creates a Host Virtual Display whenever this app starts, whatever the client asked for, so a Moonlight client gets one without asking. On a Private Stream host it changes nothing, because the private session already has a display sized to the client. |
 | **Enforce Virtual Display Primary** | Makes the virtual display primary when the app starts. Kept on by default; known broken on Windows 11 24H2. |
 
 ### Environment variables

@@ -462,7 +462,7 @@ TEST(PrivateAppStopTests, CloseWaitFollowsTheAppsExitTimeout) {
   EXPECT_EQ(pas::close_wait(90s), 30000ms);
 }
 
-TEST(PrivateAppStopTests, ClassifyKeepsTheCompositorLaunchChainAndSandboxesOutOfT) {
+TEST(PrivateAppStopTests, ClassifyKeepsTheCompositorLaunchChainAndSandboxesOutOfTheSession) {
   const fsi::process_t supervisor {345544, 21200000};
   const std::string scope = "/user.slice/user-1000.slice/user@1000.service/app.slice/app-flatpak-com.heroicgameslauncher.hgl-1424202439.scope";
   const std::vector<pas::process_facts_t> facts {

@@ -6,7 +6,9 @@
 #include "nvenc_base.h"
 
 // standard includes
+#include <cstdint>
 #include <format>
+#include <limits>
 
 // local includes
 #include "src/config.h"
@@ -249,10 +251,11 @@ namespace nvenc {
     enc_config.rcParams.averageBitRate = client_config.bitrate * 1000;
 
     if (get_encoder_cap(NV_ENC_CAPS_SUPPORT_CUSTOM_VBV_BUF_SIZE)) {
-      enc_config.rcParams.vbvBufferSize = client_config.bitrate * 1000 / client_config.framerate;
-      if (config.vbv_percentage_increase > 0) {
-        enc_config.rcParams.vbvBufferSize += enc_config.rcParams.vbvBufferSize * config.vbv_percentage_increase / 100;
-      }
+      enc_config.rcParams.vbvBufferSize = static_cast<uint32_t>(grown_vbv_buffer_bits(
+        static_cast<std::int64_t>(client_config.bitrate) * 1000 / client_config.framerate,
+        config.vbv_percentage_increase,
+        std::numeric_limits<uint32_t>::max()
+      ));
     }
 
     auto set_h264_hevc_common_format_config = [&](auto &format_config) {

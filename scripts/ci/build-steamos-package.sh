@@ -67,7 +67,7 @@ PACKAGE_ARCH="$(sed -n 's/^arch = //p' "$RECEIPT_ROOT/.PKGINFO")"
 PACKAGE_IDENTITY="$PACKAGE_NAME|$PACKAGE_VERSION|$PACKAGE_ARCH"
 # The release this tree builds, with a prerelease's label joined straight onto the number, which
 # pacman sorts below that release (cmake/prep/prerelease_versions.cmake).
-EXPECTED_PKGVER="1.4.13${POLARIS_PRERELEASE_LABEL}-1"
+EXPECTED_PKGVER="1.4.14${POLARIS_PRERELEASE_LABEL}-1"
 if [ "$PACKAGE_IDENTITY" != "polaris|$EXPECTED_PKGVER|x86_64" ]; then
   printf 'unexpected SteamOS package identity: %s\n' "$PACKAGE_IDENTITY" >&2
   exit 1

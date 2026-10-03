@@ -37,7 +37,6 @@ extern "C" {
 #ifdef __linux__
   #include <grp.h>
   #include <pwd.h>
-  #include <sys/xattr.h>
   #include <unistd.h>
 #endif
 #ifdef _WIN32

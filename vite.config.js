@@ -49,7 +49,9 @@ let header = fs.readFileSync(resolve(assetsSrcPath, "template_header.html"))
 export default defineConfig({
     resolve: {
         alias: {
-            vue: 'vue/dist/vue.esm-bundler.js'
+            // Single-file component templates are compiled by the Vue plugin.
+            // The browser only needs the runtime, not the template compiler.
+            vue: 'vue/dist/vue.runtime.esm-bundler.js'
         }
     },
     base: './',

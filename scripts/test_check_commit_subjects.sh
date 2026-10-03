@@ -76,6 +76,59 @@ check reject 'fix(video): an en dash – right here'
 check reject 'fix(video): a spaced hyphen - used as a connector'
 check reject 'Fix(video): a capitalised type'
 
+# The two accepted historical commits are pinned by full ID and exact subject.
+# Fresh commits carrying those same malformed scopes must still be rejected.
+check reject "fix(stream_stats): serve a verdict's figure with the band it was judged into"
+check reject 'feat(stream_stats): judge video frame loss and RTT over a 20 second window'
+
+# These immutable commits cannot be recreated in the throwaway repo. The shim
+# supplies only the two Git reads the gate uses, so the real validation path
+# still decides whether the ID/subject pair is accepted.
+mkdir -p "$tmp/history-fixture"
+cat > "$tmp/history-fixture/git" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  'rev-list --no-merges history-base..history-head')
+    printf '%s\n' "$CHECK_SUBJECT_FIXTURE_SHA"
+    ;;
+  "log -1 --format=%s $CHECK_SUBJECT_FIXTURE_SHA")
+    printf '%s\n' "$CHECK_SUBJECT_FIXTURE_TEXT"
+    ;;
+  *) echo "unexpected history fixture git call: $*" >&2; exit 2 ;;
+esac
+SH
+chmod +x "$tmp/history-fixture/git"
+
+history_check() {
+  local expectation="$1" sha="$2" subject="$3" result
+  if PATH="$tmp/history-fixture:$PATH" \
+      CHECK_SUBJECT_FIXTURE_SHA="$sha" CHECK_SUBJECT_FIXTURE_TEXT="$subject" \
+      bash "$gate" history-base history-head >/dev/null 2>&1; then
+    result=accept
+  else
+    result=reject
+  fi
+  if [[ "$result" == "$expectation" ]]; then
+    printf '  ok      %-7s historical identity %s\n' "$result" "$sha"
+  else
+    printf '  FAILED  wanted %s, got %s for historical identity %s\n' "$expectation" "$result" "$sha"
+    failures=$((failures + 1))
+  fi
+}
+
+echo "historical identities:"
+history_check accept 3581a073a749b9abd979d5f2b7f4737adbdac578 \
+  "fix(stream_stats): serve a verdict's figure with the band it was judged into"
+history_check accept 0171868a989f233927d629c6aa880b644fa3ce2b \
+  'feat(stream_stats): judge video frame loss and RTT over a 20 second window'
+history_check reject 3581a073a749b9abd979d5f2b7f4737adbdac578 \
+  'fix(stream_stats): a different malformed historical subject'
+history_check reject 0171868a989f233927d629c6aa880b644fa3ce2b \
+  'feat(Stream-Stats): a different malformed historical subject'
+history_check reject 3581a073a749b9abd979d5f2b7f4737adbdac579 \
+  "fix(stream_stats): serve a verdict's figure with the band it was judged into"
+
 echo
 echo "range handling:"
 git checkout -q -B probe "$base"

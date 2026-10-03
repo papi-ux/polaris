@@ -1140,3 +1140,82 @@ polaris_stop_marked_gamescope() (
   [ -f "$marker" ] && [ "$(<"$marker")" = "$marker_line" ] || return 1
   rm -f "$marker"
 )
+
+# Only Polaris's own gamescope build has --pipewire-composite-cursor
+# (nix/patches/gamescope/11-pipewire-composite-cursor.patch). Stock gamescope,
+# SteamOS's and Fedora's among them, rejects it as an unrecognized option and
+# exits before it opens a socket, so a launcher that always passed it could not
+# start on the system gamescope at all. Both launchers therefore ask the exact
+# binary they are about to run, and pass the flag only when its --help lists it.
+#
+# POLARIS_GAMESCOPE_COMPOSITE_CURSOR overrides the question. 1 forces the flag
+# on without asking, for a patched build whose --help text does not list it.
+# Any other value, 0 included, forces it off, for a client that draws its own
+# pointer. Unset or empty asks the binary.
+#
+# The answer is cached per resolved path and modification time for the life of
+# the calling script, so one run never asks the same binary twice. One line on
+# stderr, prefixed with the caller's name, says which way it went. Returns 0
+# when the caller should pass the flag.
+declare -gA POLARIS_COMPOSITE_CURSOR_PROBES=()
+
+polaris_gamescope_composite_cursor_enabled() {
+  local gamescope="$1" caller="$2" path mtime key verdict help detail=""
+  local help_status=0 help_limit=""
+  case "${POLARIS_GAMESCOPE_COMPOSITE_CURSOR:-}" in
+    '')
+      ;;
+    1)
+      echo "$caller: composite cursor on (forced by POLARIS_GAMESCOPE_COMPOSITE_CURSOR=1)" >&2
+      return 0
+      ;;
+    *)
+      echo "$caller: composite cursor off (POLARIS_GAMESCOPE_COMPOSITE_CURSOR=$POLARIS_GAMESCOPE_COMPOSITE_CURSOR)" >&2
+      return 1
+      ;;
+  esac
+
+  # type -P, not command -v: a function or alias named gamescope must not stand
+  # in for the file on PATH that the launcher's exec will actually run.
+  path="$(type -P -- "$gamescope" 2>/dev/null)" || path=""
+  case "$path" in
+    */*) ;;
+    *)
+      echo "$caller: composite cursor off ($gamescope not found to ask)" >&2
+      return 1
+      ;;
+  esac
+  mtime="$(stat -Lc '%Y' "$path" 2>/dev/null)" || mtime=""
+  key="$path:$mtime"
+  verdict="${POLARIS_COMPOSITE_CURSOR_PROBES[$key]:-}"
+  if [ -z "$verdict" ]; then
+    # gamescope prints its usage on stderr, so read both streams. The text
+    # decides, not the exit status: a build that exits non-zero after printing
+    # its usage still lists what it accepts, and one that hangs is cut off and
+    # counts as not listing the option.
+    if command -v timeout >/dev/null 2>&1; then
+      help_limit=5
+      help="$(timeout -k 1 "$help_limit" "$path" --help 2>&1 </dev/null)" || help_status=$?
+    else
+      help="$("$path" --help 2>&1 </dev/null)" || help_status=$?
+    fi
+    case " $help " in
+      *[[:space:]]--pipewire-composite-cursor[[:space:]]*) verdict=on ;;
+      *) verdict=off ;;
+    esac
+    POLARIS_COMPOSITE_CURSOR_PROBES[$key]="$verdict"
+    # timeout exits 124 when it stopped --help, and 137 when TERM was not enough
+    # and it sent KILL a second later.
+    case "$help_status:$help_limit" in
+      0:*) ;;
+      124:?*|137:?*) detail=", --help timed out after $help_limit s" ;;
+      *) detail=", --help exited $help_status" ;;
+    esac
+  fi
+  if [ "$verdict" = on ]; then
+    echo "$caller: composite cursor on ($path lists --pipewire-composite-cursor)" >&2
+    return 0
+  fi
+  echo "$caller: composite cursor off ($path does not list --pipewire-composite-cursor$detail; only a Polaris-patched gamescope has it, and POLARIS_GAMESCOPE_COMPOSITE_CURSOR=1 forces it for such a build whose --help omits it)" >&2
+  return 1
+}

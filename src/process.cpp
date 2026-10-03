@@ -585,7 +585,10 @@ namespace proc {
         stats.duplicate_frame_ratio >= 0.50 ||
         (source_cadence_available && stats.capture_source_fps < target_fps * 0.50 &&
          stats.duplicate_frame_ratio >= 0.10);
-      classification.network_risk = stats.network_risk;
+      // The last verdict the window judged, not the newest reading's debounce. Not the served one:
+      // this runs at teardown, after the control stream is gone and its readings have stopped, so
+      // its freshness gates would read every abrupt disconnect as a clean network.
+      classification.network_risk = stats.network_verdict.risk;
       classification.pacing_risk =
         stats.dropped_frame_ratio >= 0.04 ||
         (!static_or_duplicate_content &&
@@ -4841,6 +4844,61 @@ namespace proc {
 #endif
   }  // namespace
 
+  std::string legacy_basis(const nlohmann::json &entry) {
+    const auto enabled = [&](const char *key) {
+      const auto value = entry.find(key);
+      return value != entry.end() && coerce_json_bool(*value, false);
+    };
+    const bool mirror = enabled("desktop-mirror");
+    const bool virtual_display = enabled("virtual-display");
+    return mirror ? (virtual_display ? "both" : "desktop-mirror") :
+                    (virtual_display ? "virtual-display" : "none");
+  }
+
+  std::string launch_as_from_legacy(const nlohmann::json &entry) {
+    const auto basis = legacy_basis(entry);
+    if (basis == "desktop-mirror" || basis == "both") {
+      return "desktop_display";
+    }
+    if (basis == "virtual-display") {
+      const auto source = boost::to_lower_copy(json_string_member_or(entry, "source"));
+      return source.empty() || source == "manual" ? "host_virtual_display" : "host_default";
+    }
+    return "host_default";
+  }
+
+  std::string normalize_launch_as(const nlohmann::json &entry) {
+    const auto stored = entry.find("launch-as");
+    if (stored == entry.end()) {
+      return launch_as_from_legacy(entry);
+    }
+    if (!stored->is_string()) {
+      return "invalid";
+    }
+    const auto value = stored->get<std::string>();
+    const auto basis = entry.find("launch-as-basis");
+    if (basis != entry.end() && *basis != nlohmann::json(legacy_basis(entry))) {
+      const auto mapped = launch_as_from_legacy(entry);
+      BOOST_LOG(info) << "apps.json: [" << json_string_member_or(entry, "name") << "] Launch as " << value
+                      << " predates a change to its old display flags; launching as " << mapped << ".";
+      return mapped;
+    }
+    return value;
+  }
+
+  void write_launch_as(nlohmann::json &entry, std::string_view value) {
+    entry["launch-as"] = std::string {value};
+    entry["desktop-mirror"] = value == "desktop_display";
+    entry["virtual-display"] = value == "host_virtual_display";
+    entry["launch-as-basis"] = legacy_basis(entry);
+  }
+
+  void set_launch_as(ctx_t &ctx, std::string value) {
+    ctx.launch_as = std::move(value);
+    ctx.desktop_mirror = ctx.launch_as == "desktop_display";
+    ctx.virtual_display = ctx.launch_as == "host_virtual_display";
+  }
+
   std::string canonical_steam_shutdown_undo() {
     return canonical_steam_shutdown_command("setsid steam");
   }
@@ -6015,6 +6073,118 @@ namespace proc {
       const proc::ctx_t &app,
       const rtsp_stream::launch_session_t &launch_session) {
     return app.desktop_mirror && !launch_requests_desktop_takeover(launch_session);
+  }
+
+  namespace {
+    constexpr std::string_view game_mode_launch_as_reason =
+      "The host is in Steam Game Mode, so every stream shows the Game Mode screen.";
+
+    std::string launch_as_invalid_reason(std::string_view value) {
+      if (value == stream_path::k_headless_dongle) {
+        return "Headless Dongle rearranges the host's displays, so only the host can use it, under Where games run.";
+      }
+      return "apps.json names \"" + std::string {value} + "\", which is not a mode an app can launch as.";
+    }
+
+    int refuse_launch_as_unavailable(const ctx_t &app, std::string reason) {
+      const auto *path = stream_path::find(app.launch_as);
+      const auto label = path && path->id == app.launch_as ?
+        stream_display_policy::label_for_selection(app.launch_as) : "an unknown mode";
+      if (!reason.empty() && reason.back() != '.') reason += '.';
+      return launch_failure::refuse(503, "app_launch_mode_unavailable",
+        "This app is set to launch as " + label + ", which this host cannot run right now. " + reason,
+        "Pick another mode under Launch as for this app in the Polaris console, or make " + label + " available on the host.");
+    }
+  }
+
+  launch_selection_request_t launch_selection_request_from_session(const rtsp_stream::launch_session_t &session) {
+    return {
+      session.client_named_selection, session.stream_mode, session.mirror_desktop,
+      session.virtual_display, session.user_locked_virtual_display, session.watch_only,
+    };
+  }
+
+  int refuse_app_launch_as_unavailable(const ctx_t &app, std::string reason) {
+    return refuse_launch_as_unavailable(app, std::move(reason));
+  }
+
+  launch_as_availability_t launch_as_availability(const ctx_t &app) {
+    using verdict = stream_display_policy::app_launch_as_t::verdict_e;
+    const auto pin = stream_display_policy::resolve_app_launch_as(app.launch_as, {});
+    if (pin.verdict == verdict::not_a_launch_mode) {
+      return {false, launch_as_invalid_reason(app.launch_as)};
+    }
+    if (pin.verdict == verdict::follow) return {};
+    if (platf::game_mode_host::session_live()) return {false, std::string {game_mode_launch_as_reason}};
+    return {stream_display_policy::selection_available(pin.selection),
+      stream_display_policy::selection_unavailable_reason(pin.selection)};
+  }
+
+  int refuse_app_launch_as_before_launch(const ctx_t &app, const launch_selection_request_t &request) {
+    using verdict = stream_display_policy::app_launch_as_t::verdict_e;
+    const auto pin = stream_display_policy::resolve_app_launch_as(app.launch_as, request.client_named_selection);
+    if (pin.verdict == verdict::not_a_launch_mode) {
+      return refuse_launch_as_unavailable(app, launch_as_invalid_reason(app.launch_as));
+    }
+    if (pin.verdict == verdict::follow || request.watch_only) return 0;
+    if (platf::game_mode_host::session_live()) {
+      return refuse_launch_as_unavailable(app, std::string {game_mode_launch_as_reason});
+    }
+    // A stale cached catalogue can make a client pick another mode. Report the
+    // pin's actual inability first, before diagnosing a conflicting choice.
+    std::string reason;
+    if (!stream_display_policy::selection_valid_fresh(pin.selection, reason)) {
+      return refuse_launch_as_unavailable(app, std::move(reason));
+    }
+    if (pin.verdict == verdict::conflict) {
+      return launch_failure::refuse(409, "app_launch_mode_pinned",
+        "This app is set to launch as " + stream_display_policy::label_for_selection(pin.selection) +
+          " on the host, and this launch asked for " + stream_display_policy::label_for_selection(request.client_named_selection) + ".",
+        "Launch it again without choosing a mode, or change Launch as for this app in the Polaris console.");
+    }
+    return 0;
+  }
+
+  launch_selection_t resolve_launch_selection_for_app(const ctx_t &app, const launch_selection_request_t &request) {
+    if (const auto refusal = refuse_app_launch_as_before_launch(app, request)) return {{}, false, refusal};
+    const auto pin = stream_display_policy::resolve_app_launch_as(app.launch_as, request.client_named_selection);
+    using verdict = stream_display_policy::app_launch_as_t::verdict_e;
+    if (pin.verdict == verdict::pinned || pin.verdict == verdict::conflict) {
+      // Only a watcher can reach a conflict here; it follows the already
+      // admitted owner generation rather than selecting a different topology.
+      return {pin.selection, true, 0};
+    }
+    auto requested = request.requested_selection;
+    const auto selection = requested.empty() ? stream_display_policy::host_default_selection() : requested;
+    const bool mirror_app = app.launch_as == stream_display_policy::k_desktop_display &&
+      !(selection == stream_display_policy::k_desktop_takeover ||
+        (!request.client_named_selection.empty() && stream_display_policy::desktop_mirror_yields_to_selection(selection)));
+    const auto resolved = stream_display_policy::host_default_launch_selection({
+      .requested_selection = requested,
+      .mirror_desktop = request.mirror_desktop || mirror_app ||
+        (!request.watch_only && platf::game_mode_host::session_live()),
+      .launch_virtual_display = request.launch_virtual_display,
+      .virtual_display_user_locked = request.virtual_display_user_locked,
+      .host_provides_private_display = stream_display_policy::host_default_provides_private_display(),
+    });
+    const auto effective = resolved.empty() ? stream_display_policy::configured_selection() : resolved;
+    if (!request.watch_only && effective == stream_display_policy::k_host_virtual_display) {
+      const auto ready = virtual_display::host_stream_readiness(true);
+      if (!ready.available) return {{}, false, launch_failure::refuse(503,
+        "host_virtual_display_capture_unavailable", ready.reason,
+        "Choose Mirror Desktop or Private Stream, or make the selected Host Virtual Display provider available.")};
+    }
+    return {resolved, false, 0};
+  }
+
+
+  int prepare_host_virtual_capture_for_launch(const ctx_t &app, const launch_selection_t &selection, bool watch_only) {
+    if (watch_only || selection.selection != stream_display_policy::k_host_virtual_display) return 0;
+    const auto ready = virtual_display::prepare_host_stream_capture();
+    if (ready.available) return 0;
+    if (selection.pinned) return refuse_launch_as_unavailable(app, ready.reason);
+    return launch_failure::refuse(503, "host_virtual_display_capture_unavailable", ready.reason,
+      "Choose Mirror Desktop or Private Stream, or repair the named Host Virtual Display capture provider.");
   }
 
   void apply_app_display_semantics(
@@ -7624,6 +7794,19 @@ namespace proc {
 #ifdef __linux__
   // Linux virtual display state — holds the active virtual display instance, if any
   static std::optional<virtual_display::vdisplay_t> linux_vdisplay;
+#ifdef POLARIS_TESTS
+  // Observe only platform display effects; the real stop authority, pidfd sweep,
+  // context retirement and result publication still run unchanged in the fixture.
+  struct host_virtual_shutdown_observer_t {
+    int destroy_calls = 0;
+    int revert_calls = 0;
+    int reset_calls = 0;
+    int fail_destroy_remaining = 0;
+    pid_t child_pid = -1;
+    bool child_reaped_before_destroy = false;
+  };
+  static thread_local host_virtual_shutdown_observer_t *host_virtual_shutdown_observer = nullptr;
+#endif
   // Exact Hyprland layout authority for Desktop Takeover. It must be restored
   // before the virtual output may be destroyed.
   static std::optional<desktop_takeover::state_t> linux_desktop_takeover;
@@ -7857,15 +8040,10 @@ namespace proc {
           client_profile->output_name : config::video.output_name;
       bool launch_owns_refresh_rate = false;
 #ifdef __linux__
-      auto effective_selection = stream_display_policy::effective_session_selection_for_launch(
-        launch_session->stream_mode,
-        launch_session->mirror_desktop || app_desktop_mirror_applies(app, *launch_session),
-        launch_session->virtual_display,
-        app.virtual_display,
-        launch_session->user_locked_virtual_display,
-        false,
-        stream_display_policy::host_default_provides_private_display()
-      );
+      const auto resolved_selection = resolve_launch_selection_for_app(
+        app, launch_selection_request_from_session(*launch_session));
+      if (resolved_selection.refusal) return resolved_selection.refusal;
+      auto effective_selection = resolved_selection.selection;
       if (effective_selection.empty()) {
         effective_selection = stream_display_policy::configured_selection();
       }
@@ -7997,6 +8175,11 @@ namespace proc {
       bool exact_private_refresh_reapply_will_run) {
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+#ifdef __linux__
+    if (_host_virtual_cleanup_pending) {
+      return launch_failure::refuse(503, "previous_session_cleanup_pending", "The previous Host Virtual Display session is still stopping.", "End the session again after its processes can be verified; do not start another stream until cleanup finishes.");
+    }
+#endif
     if (_app_id == 0 || _app.uuid.empty() || !_launch_session || !launch_session) return launch_failure::refuse(503, "no_active_session", "There is no running app on the host to validate this resume against.", "Start the app again from the library.");
     if (launch_session->watch_only) {
       // A viewer attaches to the already-running capture generation. Pin its
@@ -8004,6 +8187,8 @@ namespace proc {
       // default viewer request cannot either replace or falsely conflict with
       // an explicit mirror/private owner launch.
       launch_session->stream_mode = _launch_session->stream_mode;
+      launch_session->client_named_selection = _launch_session->client_named_selection;
+      launch_session->client_selected_topology = _launch_session->client_selected_topology;
       launch_session->mirror_desktop = _launch_session->mirror_desktop;
       launch_session->virtual_display = _launch_session->virtual_display;
       launch_session->user_locked_virtual_display =
@@ -8015,9 +8200,11 @@ namespace proc {
       launch_session->effective_encoder_backend = _launch_session->effective_encoder_backend;
     }
 #ifdef __linux__
+    if (const auto refusal = refuse_app_launch_as_before_launch(
+        _app, launch_selection_request_from_session(*launch_session))) return refusal;
     // Resume receives a fresh request. Apply the same app display semantics as
     // execute_impl before comparing it with the normalized active launch.
-    apply_app_display_semantics(_app, *launch_session);
+    if (!launch_session->watch_only) apply_app_display_semantics(_app, *launch_session);
 #endif
     if (launch_session->encoder_backend_explicit &&
         (!_launch_session->encoder_backend_explicit ||
@@ -8049,21 +8236,21 @@ namespace proc {
       }
 #ifdef __linux__
       const auto effective_topology = [this](
-          const std::shared_ptr<rtsp_stream::launch_session_t> &session) {
-        auto selection = stream_display_policy::effective_session_selection_for_launch(
-          session->stream_mode,
-          session->mirror_desktop || app_desktop_mirror_applies(_app, *session),
-          session->virtual_display,
-          _app.virtual_display,
-          session->user_locked_virtual_display,
-          false,
-          stream_display_policy::host_default_provides_private_display()
-        );
-        return selection.empty() ? stream_display_policy::configured_selection() : selection;
+          const std::shared_ptr<rtsp_stream::launch_session_t> &session, bool watch_only) {
+        auto request = launch_selection_request_from_session(*session);
+        request.watch_only = watch_only;
+        auto result = resolve_launch_selection_for_app(_app, request);
+        if (result.selection.empty() && !result.refusal) result.selection = stream_display_policy::configured_selection();
+        return result;
       };
-      const auto requested_topology = effective_topology(launch_session);
-      const auto active_topology = _launch_session->expected_stream_mode.empty() ?
-        effective_topology(_launch_session) : _launch_session->expected_stream_mode;
+      const auto requested_result = effective_topology(launch_session, launch_session->watch_only);
+      if (requested_result.refusal) return requested_result.refusal;
+      const auto active_result = _launch_session->expected_stream_mode.empty() ?
+        effective_topology(_launch_session, launch_session->watch_only) :
+        launch_selection_t {_launch_session->expected_stream_mode, false, 0};
+      if (active_result.refusal) return active_result.refusal;
+      const auto &requested_topology = requested_result.selection;
+      const auto &active_topology = active_result.selection;
       if (!launch_session->watch_only &&
           game_mode_replaced_paused_topology(platf::game_mode_host::session_live(), requested_topology, active_topology)) {
         BOOST_LOG(info) << "process: refusing to resume a stream that paused as ["sv << active_topology
@@ -8477,29 +8664,20 @@ namespace proc {
                         << app.name << "]; ignoring virtual-display preference for this session"sv;
       }
     }
-    // Every launch, whichever door it came in by: the console and the browser stream start the
-    // app here without passing nvhttp, and on a host in Game Mode a launch has to be a mirror of
-    // that screen even when no client has asked the host anything yet.
-    apply_app_display_semantics(app, *launch_session);
-    _session_started_in_game_mode = platf::game_mode_host::session_live();
-
     // Resolve and apply the exact topology before installing a new process
     // generation. Availability is allowed to change after /optimize and HTTP
     // parsing, so this is the final fail-closed gate immediately before launch.
-    const bool virtual_display_requested_before_mode =
-      launch_session->virtual_display ||
-      (app.virtual_display && !launch_session->user_locked_virtual_display);
+    const bool virtual_display_requested_before_mode = launch_session->virtual_display;
     const auto configured_session_mode = stream_display_policy::configured_selection();
     const bool host_private = stream_display_policy::host_default_provides_private_display();
-    auto session_mode = stream_display_policy::effective_session_selection_for_launch(
-      launch_session->stream_mode,
-      launch_session->mirror_desktop || app_desktop_mirror_applies(app, *launch_session),
-      launch_session->virtual_display,
-      app.virtual_display,
-      launch_session->user_locked_virtual_display,
-      false,
-      host_private
-    );
+    const auto resolved_selection = resolve_launch_selection_for_app(
+      app, launch_selection_request_from_session(*launch_session));
+    if (resolved_selection.refusal) return resolved_selection.refusal;
+    auto session_mode = resolved_selection.selection;
+    // Refuse a Game Mode-incompatible pin before mirror semantics rewrite the
+    // session. Host default and Mirror Desktop retain the Game Mode screen.
+    apply_app_display_semantics(app, *launch_session);
+    _session_started_in_game_mode = platf::game_mode_host::session_live();
     if (session_mode.empty()) {
       session_mode = configured_session_mode;
     }
@@ -8511,7 +8689,7 @@ namespace proc {
       BOOST_LOG(info) << "process: session topology ["sv << session_mode
                       << "] differs from the host default ["sv << configured_session_mode
                       << "]; requested=["sv << launch_session->stream_mode
-                      << "] app_virtual_display="sv << (app.virtual_display ? 1 : 0)
+                      << "] launch_as=["sv << app.launch_as << ']'
                       << " launch_virtual_display="sv << (launch_session->virtual_display ? 1 : 0)
                       << " user_locked="sv << (launch_session->user_locked_virtual_display ? 1 : 0)
                       << " private_host="sv << (host_private ? 1 : 0);
@@ -8529,6 +8707,9 @@ namespace proc {
                          << "] no longer matches final topology ["sv << session_mode << ']';
       return 409;
     }
+
+    if (const auto refusal = prepare_host_virtual_capture_for_launch(app,
+          launch_selection_t {session_mode, resolved_selection.pinned, 0}, launch_session->watch_only)) return refusal;
 
     // Snapshot the host policy before a session-scoped override. On a rejected
     // legacy request, restore this snapshot and retain the documented host-
@@ -8593,6 +8774,15 @@ namespace proc {
       if (session_mode_failed) {
         restore_prelaunch_display_policy();
         platf::reevaluate_capture_sources();
+        if (resolved_selection.pinned) {
+          this->initial_video_config_saved = false;
+          return refuse_launch_as_unavailable(app, std::move(mode_error));
+        }
+        if (session_mode == stream_display_policy::k_host_virtual_display) {
+          this->initial_video_config_saved = false;
+          return launch_failure::refuse(503, "host_virtual_display_capture_unavailable", std::move(mode_error),
+            "Choose Mirror Desktop or Private Stream, or make the selected Host Virtual Display provider available.");
+        }
         if (launch_session->resolved_profile_from_client) {
           this->initial_video_config_saved = false;
           BOOST_LOG(warning) << "process: rejecting exact resolved session stream mode ["sv
@@ -9062,7 +9252,16 @@ namespace proc {
     const bool using_headless_cage_runtime =
       requested_headless_for_session &&
       use_cage_compositor_for_session;
-    if (using_headless_cage_runtime && virtual_display_requested_before_mode) {
+    if (resolved_selection.pinned && virtual_display_requested_before_mode &&
+        launch_session->client_named_selection.empty() &&
+        session_mode != stream_display_policy::k_host_virtual_display) {
+      const auto label = stream_display_policy::label_for_selection(session_mode);
+      stream_stats::update_runtime_display_warning(
+        "This app is set to launch as " + label + (launch_session->user_locked_virtual_display ?
+          ", so this device's virtual display on every connection did not apply." :
+          ", so the client's request for a virtual display did not apply."));
+    }
+    if (!resolved_selection.pinned && using_headless_cage_runtime && virtual_display_requested_before_mode) {
       BOOST_LOG(info) << "session_optimization: normalized virtual_display from true to false for headless cage runtime"sv;
       stream_stats::update_runtime_display_warning(
         "Virtual display request skipped: the private stream runtime provides this session's display."
@@ -9575,7 +9774,7 @@ namespace proc {
     // A launch that said it will ask for PyroWave is refused here, with the reason, when its capture
     // route hands over frames PyroWave cannot read. Without the word from the client the refusal
     // waits for the handshake, which can only return a status, and before either existed it came at
-    // the first frame, after the client had built a decoder for a stream that carried nothing (#159).
+    // the first frame, after the client had built a decoder for a stream that carried nothing.
     if (!launch_session->input_only && !launch_session->watch_only &&
         launch_session->requested_video_codec == "pyrowave") {
       if (const auto refusal = video::pyrowave_capture_refusal(capture_generation)) {
@@ -10913,6 +11112,13 @@ namespace proc {
       return 0;
     }
 
+#ifdef __linux__
+    if (_host_virtual_cleanup_pending) {
+      // This is retained shutdown authority, not proof that a process lives or
+      // permission to resume. Preserve the owner-visible app for another End.
+      return _app_id;
+    }
+#endif
     if (placebo) {
       return _app_id;
     } else if (_app.wait_all && _process_group && platf::process_group_running((std::uintptr_t) _process_group.native_handle())) {
@@ -11534,6 +11740,14 @@ namespace proc {
     _private_apps_stopped_before_compositor = false;
     const bool prior_cleanup_complete = _exact_generation_cleanup_complete;
     const bool detached_only = !_app.detached.empty() && _app.cmd.empty();
+    // A failed HVD End retains the immutable launch and its pidfds. Its next
+    // exact sweep may prove that the earlier unreadable references have gone;
+    // a lost direct-child authority claim can never be recovered this way.
+    const bool revalidating_retained_host_virtual = _host_virtual_cleanup_pending &&
+      !_session_used_cage_compositor && !_session_used_gamescope_runtime && detached_only &&
+      !_session_instance_id.empty() && _detached_child_authority_complete &&
+      linux_vdisplay && _launch_session &&
+      _launch_session->expected_stream_mode == stream_display_policy::k_host_virtual_display;
     const bool exact_cleanup_required = isolated_session_requires_exact_generation_cleanup(
       _session_used_cage_compositor,
       !_app.detached.empty(),
@@ -11579,9 +11793,17 @@ namespace proc {
     );
     const bool detached_authority_complete =
       _session_used_cage_compositor || !detached_only || _detached_child_authority_complete;
-    _exact_generation_cleanup_complete = prior_cleanup_complete &&
-                                         isolated_cleanup_complete &&
-                                         detached_authority_complete;
+    if (revalidating_retained_host_virtual) {
+      // Only this retained HVD generation can replace its earlier incomplete
+      // capture with a fresh capture/signal/reap proof. Unknown environment,
+      // namespace/ancestry or PID identity still make the actual sweep fail.
+      _exact_generation_cleanup_complete = isolated_cleanup_complete && detached_authority_complete;
+    } else {
+      // Every other teardown keeps the prior fail-closed accumulation policy.
+      _exact_generation_cleanup_complete = prior_cleanup_complete &&
+                                           isolated_cleanup_complete &&
+                                           detached_authority_complete;
+    }
 
     if (!_session_used_cage_compositor) {
       if (!_exact_generation_cleanup_complete) {
@@ -11737,6 +11959,19 @@ namespace proc {
     if (_retained_steam_shutdown && !retry_retained_steam_shutdown()) {
       BOOST_LOG(error) << "process: retained Steam singleton shutdown remains incomplete"sv;
     }
+
+    const bool owns_host_virtual_output = linux_vdisplay &&
+      _launch_session && _launch_session->expected_stream_mode == stream_display_policy::k_host_virtual_display;
+    if (owns_host_virtual_output &&
+        (!_exact_generation_cleanup_complete || _retained_steam_shutdown)) {
+      // Losing the output before this generation is drained moves a surviving
+      // game onto the physical desktop. Keep its app, owner, child environment,
+      // prep undo cursor and output together; the same owner can retry End.
+      _host_virtual_cleanup_pending = true;
+      BOOST_LOG(error) << "process: retaining Host Virtual Display and launch owner because exact cleanup remains incomplete"sv;
+      return;
+    }
+    _host_virtual_cleanup_pending = false;
 
     if (isolated_session_uses_legacy_group_termination(
           _session_used_cage_compositor,
@@ -11936,22 +12171,30 @@ namespace proc {
       }
     }
 
-    for (const auto &key : _session_env_keys) {
-      _env.erase(key);
-    }
-    _session_env_keys.clear();
-
+    const auto retire_session_environment = [&]() {
+      for (const auto &key : _session_env_keys) {
+        _env.erase(key);
+      }
+      _session_env_keys.clear();
+    };
 #ifdef __linux__
-    finish_isolated_session_generation_cleanup();
+    // Even after the child exits, keep this generation credential until the
+    // owned output is verified gone. Output removal may need another End.
+    if (!owns_host_virtual_output) {
+      retire_session_environment();
+      finish_isolated_session_generation_cleanup();
+    }
 
-    // Disable streaming display after undo commands have run.
-    // Skip if a virtual display was created (it will be destroyed below).
-    if (!linux_vdisplay.has_value() || !linux_vdisplay->active) {
+    // A retained HVD handle still owns recovery even if its active bit changed.
+    // Disable streaming display only outside that bounded output authority.
+    if (!owns_host_virtual_output && (!linux_vdisplay.has_value() || !linux_vdisplay->active)) {
       linux_display::disable_streaming_display();
     }
     // Explicitly drop after undo so portal reconnect cannot race nested stop /
     // idle handoff. (Holder also ends at function exit.)
     media_stop.fence.reset();
+#else
+    retire_session_environment();
 #endif
 
     _pipe.reset();
@@ -12006,7 +12249,26 @@ namespace proc {
     // Destroy Linux virtual display if one was created
     const bool had_linux_vdisplay = linux_vdisplay.has_value();
     if (had_linux_vdisplay && desktop_takeover_restored) {
-      if (virtual_display::destroy(*linux_vdisplay)) {
+      const auto destroy_display = [](virtual_display::vdisplay_t &display) {
+#ifdef POLARIS_TESTS
+        if (host_virtual_shutdown_observer) {
+          auto &observer = *host_virtual_shutdown_observer;
+          ++observer.destroy_calls;
+          int status = 0;
+          errno = 0;
+          observer.child_reaped_before_destroy =
+            waitpid(observer.child_pid, &status, WNOHANG) < 0 && errno == ECHILD;
+          if (observer.fail_destroy_remaining > 0) {
+            --observer.fail_destroy_remaining;
+            return false;
+          }
+          display.active = false;
+          return true;
+        }
+#endif
+        return virtual_display::destroy(display);
+      };
+      if (destroy_display(*linux_vdisplay)) {
         linux_vdisplay.reset();
         BOOST_LOG(info) << "Linux Virtual Display teardown verified"sv;
       } else {
@@ -12016,14 +12278,37 @@ namespace proc {
       BOOST_LOG(error) << "Linux Virtual Display retained because Desktop Takeover restoration is still pending"sv;
     }
 
+    if (owns_host_virtual_output) {
+      if (linux_vdisplay) {
+        // A false destroy result retains its handle, even if a backend already
+        // changed active. Keep the same owner/context for a removal retry;
+        // prep undos already consumed above must not run a second time.
+        _host_virtual_cleanup_pending = true;
+        BOOST_LOG(error) << "process: retaining Host Virtual Display launch owner because output removal is not verified"sv;
+        return;
+      }
+      retire_session_environment();
+      finish_isolated_session_generation_cleanup();
+    }
+
     if (proc::proc.get_last_run_app_name().length() > 0 && has_run) {
       if (had_linux_vdisplay) {
         if (!linux_vdisplay.has_value()) {
+#ifdef POLARIS_TESTS
+          if (host_virtual_shutdown_observer) {
+            ++host_virtual_shutdown_observer->reset_calls;
+          } else
+#endif
           display_device::reset_persistence();
         } else {
           BOOST_LOG(error) << "Linux Virtual Display recovery remains pending; skipping unrelated display reconfiguration"sv;
         }
       } else {
+#ifdef POLARIS_TESTS
+        if (host_virtual_shutdown_observer) {
+          ++host_virtual_shutdown_observer->revert_calls;
+        } else
+#endif
         display_device::revert_configuration();
       }
 #else
@@ -12158,6 +12443,122 @@ namespace proc {
     sync.metadata_capture_owner = sync.capture_owner.load();
   }
 
+#ifdef __linux__
+  host_virtual_shutdown_test_result_t proc_t::host_virtual_shutdown_for_tests(
+      std::string_view session_instance_id,
+      pid_t child_pid,
+      bool force_capture_failure,
+      bool retry,
+      bool wrong_owner,
+      bool fail_first_destroy) {
+    host_virtual_shutdown_test_result_t observed;
+    int pidfd_error = 0;
+    auto tracked_child = open_process_pidfd(child_pid, pidfd_error);
+    auto live_child = open_process_pidfd(child_pid, pidfd_error);
+    if (!tracked_child || !live_child) {
+      return observed;
+    }
+
+    const auto previous_video = config::video;
+    const auto previous_apps_file = config::stream.file_apps;
+    const auto previous_state = confighttp::get_session_state();
+    const auto previous_failure_pid = forced_isolated_session_capture_failure_pid;
+    const auto previous_observer = host_virtual_shutdown_observer;
+    auto previous_display = std::move(linux_vdisplay);
+    host_virtual_shutdown_observer_t observer;
+    observer.child_pid = child_pid;
+    observer.fail_destroy_remaining = fail_first_destroy ? 1 : 0;
+    auto restore = util::fail_guard([&]() {
+      host_virtual_shutdown_observer = previous_observer;
+      forced_isolated_session_capture_failure_pid = previous_failure_pid;
+      linux_vdisplay = std::move(previous_display);
+      config::video = previous_video;
+      config::stream.file_apps = previous_apps_file;
+      for (const auto &[name, state] : {
+          std::pair {"idle"sv, confighttp::session_state_e::idle},
+          std::pair {"initializing"sv, confighttp::session_state_e::initializing},
+          std::pair {"cage_starting"sv, confighttp::session_state_e::cage_starting},
+          std::pair {"game_launching"sv, confighttp::session_state_e::game_launching},
+          std::pair {"streaming"sv, confighttp::session_state_e::streaming},
+          std::pair {"paused"sv, confighttp::session_state_e::paused},
+          std::pair {"tearing_down"sv, confighttp::session_state_e::tearing_down}}) {
+        if (name == previous_state) confighttp::set_session_state(state);
+      }
+      // The fixture guard, not a failed shutdown, owns final child cleanup.
+      placebo = false;
+      _app = {};
+      _app_id = -1;
+      _app_name.clear();
+      _launch_session.reset();
+      _session_instance_id.clear();
+      _detached_child_pidfds.clear();
+    });
+
+    config::stream.file_apps.clear();
+    _app = {};
+    _app.id = "252";
+    _app.name = "Owned HVD test app";
+    _app.detached = {"owned-hvd-test-child"};
+    _app.exit_timeout = 0s;
+    _app_id = 252;
+    _app_name = _app.name;
+    _app_prep_begin = _app.prep_cmds.cbegin();
+    _app_prep_it = _app_prep_begin;
+    _launch_session = std::make_shared<rtsp_stream::launch_session_t>();
+    _launch_session->unique_id = "hvd-owner";
+    _launch_session->session_token = "hvd-stop-test-token";
+    _launch_session->expected_stream_mode = stream_display_policy::k_host_virtual_display;
+    session_lifecycle_sync().metadata_capture_owner = session_lifecycle_sync().capture_owner.load();
+    _session_instance_id = session_instance_id;
+    _session_used_cage_compositor = false;
+    _session_used_gamescope_runtime = false;
+    _exact_generation_cleanup_complete = true;
+    _detached_child_authority_complete = true;
+    _detached_child_pidfds.emplace_back(std::move(*tracked_child));
+    placebo = true;
+    linux_vdisplay = virtual_display::vdisplay_t {};
+    linux_vdisplay->active = true;
+    linux_vdisplay->backend = virtual_display::backend_e::KWIN_VIRTUAL_OUTPUT;
+    linux_vdisplay->output_name = "Virtual-owned-test";
+    host_virtual_shutdown_observer = &observer;
+    forced_isolated_session_capture_failure_pid = force_capture_failure ? child_pid : -1;
+    observed.prepared = true;
+
+    const auto result = request_session_shutdown(
+      wrong_owner ? "foreign-owner" : "hvd-owner", "hvd-stop-test-token", true, true);
+    observed.stopped = result.stopped;
+    observed.completion_idle = confighttp::get_session_state() == "idle";
+    observed.authority_rejected = result.snapshot.outcome != session_stop_outcome_t::allowed;
+    observed.output_retained = linux_vdisplay && linux_vdisplay->active;
+    observed.generation_retained = _session_instance_id == session_instance_id;
+    observed.launch_owner_retained = _launch_session && _launch_session->unique_id == "hvd-owner";
+    observed.app_retained = _app_id == 252 && _app.name == "Owned HVD test app";
+    observed.child_alive = !pidfd_has_exited(*live_child);
+    observed.destroy_calls = observer.destroy_calls;
+    observed.revert_calls = observer.revert_calls;
+    observed.child_reaped_before_destroy = observer.child_reaped_before_destroy;
+    if (retry) {
+      forced_isolated_session_capture_failure_pid = -1;
+      const auto retried = request_session_shutdown("hvd-owner", "hvd-stop-test-token", true, true);
+      observed.retry_stopped = retried.stopped;
+      observed.retry_output_removed = !linux_vdisplay;
+      observed.retry_context_retired = _session_instance_id.empty() &&
+        !_launch_session && _app_id <= 0 && _detached_child_pidfds.empty();
+      observed.retry_destroy_calls = observer.destroy_calls;
+      observed.child_reaped_before_destroy = observer.child_reaped_before_destroy;
+    }
+    return observed;
+  }
+
+  host_virtual_shutdown_test_result_t host_virtual_shutdown_for_tests(
+      std::string_view session_instance_id, pid_t child_pid,
+      bool force_capture_failure, bool retry, bool wrong_owner, bool fail_first_destroy) {
+    proc_t process {boost::process::v1::environment {}, {}};
+    return process.host_virtual_shutdown_for_tests(
+      session_instance_id, child_pid, force_capture_failure, retry, wrong_owner, fail_first_destroy);
+  }
+#endif
+
   std::pair<const void *, const void *> proc_t::session_lifecycle_identity_for_tests() const {
     return {_session_lifecycle_gate.get(), _session_lifecycle_sync.get()};
   }
@@ -12226,6 +12627,13 @@ namespace proc {
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     return _app.uuid;
+  }
+
+  std::optional<ctx_t> proc_t::running_app_context() const {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    if (_app_id == 0 || _app.uuid.empty() || !_launch_session) return std::nullopt;
+    return _app;
   }
 
   std::string proc_t::get_session_token() {
@@ -12552,8 +12960,19 @@ namespace proc {
         const session_end_request_scope_t ending {sync.stop_ends_session};
         terminate_impl(false, true);
       }
-      display_device::revert_configuration();
-      result.stopped = result.snapshot.had_running_app || result.snapshot.active_sessions > 0;
+#ifdef __linux__
+      if (!_host_virtual_cleanup_pending) {
+#endif
+#if defined(POLARIS_TESTS) && defined(__linux__)
+        if (host_virtual_shutdown_observer) {
+          ++host_virtual_shutdown_observer->revert_calls;
+        } else
+#endif
+        display_device::revert_configuration();
+        result.stopped = result.snapshot.had_running_app || result.snapshot.active_sessions > 0;
+#ifdef __linux__
+      }
+#endif
     }
 
     stop_committed = true;
@@ -13494,8 +13913,32 @@ namespace proc {
     }
   }
 
+  void migration_v11(nlohmann::json &fileTree) {
+    static const int this_version = 15;
+    if (json_int_member_or(fileTree, "version", 0) >= this_version) {
+      return;
+    }
+    int migrated = 0;
+    if (fileTree.contains("apps") && fileTree["apps"].is_array()) {
+      for (auto &app : fileTree["apps"]) {
+        if (!app.is_object() || app.contains("launch-as")) {
+          continue;
+        }
+        // Preserve legacy flags and their JSON types; the basis detects later
+        // edits made by an older console without rewriting hand-edited values.
+        app["launch-as"] = launch_as_from_legacy(app);
+        app["launch-as-basis"] = legacy_basis(app);
+        ++migrated;
+      }
+    }
+    fileTree["version"] = this_version;
+    if (migrated > 0) {
+      BOOST_LOG(info) << "Gave " << migrated << " app(s) a Launch as setting from their old display flags (v15).";
+    }
+  }
+
   void migrate(nlohmann::json& fileTree, const std::string& fileName) {
-    int last_version = 14;
+    int last_version = 15;
 
     int file_version = json_int_member_or(fileTree, "version", 0);
     if (fileTree.contains("version") && !coerce_json_int(fileTree["version"]).has_value()) {
@@ -13512,6 +13955,7 @@ namespace proc {
       migration_v8(fileTree);
       migration_v9(fileTree);
       migration_v10(fileTree);
+      migration_v11(fileTree);
       file_handler::write_file(fileName.c_str(), fileTree.dump(4));
     }
   }
@@ -13662,8 +14106,7 @@ namespace proc {
           ctx.auto_detach = app_node.value("auto-detach", true);
           ctx.wait_all = app_node.value("wait-all", true);
           ctx.exit_timeout = std::chrono::seconds { app_node.value("exit-timeout", 5) };
-          ctx.virtual_display = app_node.value("virtual-display", false);
-          ctx.desktop_mirror = app_node.value("desktop-mirror", false);
+          set_launch_as(ctx, normalize_launch_as(app_node));
           ctx.close_desktop_steam_for_private = app_node.value("close-desktop-steam-for-private", false);
           ctx.scale_factor = app_node.value("scale-factor", 100);
           ctx.use_app_identity = app_node.value("use-app-identity", false);
@@ -13758,8 +14201,7 @@ namespace proc {
       ctx.uuid = FALLBACK_DESKTOP_UUID; // Placeholder UUID
       ctx.name = "Desktop (fallback)";
       ctx.image_path = parse_env_val(this_env, "desktop-alt.png");
-      ctx.virtual_display = false;
-      ctx.desktop_mirror = true;
+      set_launch_as(ctx, "desktop_display");
       ctx.scale_factor = 100;
       ctx.use_app_identity = false;
       ctx.per_client_app_identity = false;
@@ -13793,7 +14235,7 @@ namespace proc {
       ctx.uuid = VIRTUAL_DISPLAY_UUID;
       ctx.name = "Virtual Display";
       ctx.image_path = parse_env_val(this_env, "virtual_desktop.png");
-      ctx.virtual_display = true;
+      set_launch_as(ctx, "host_virtual_display");
       ctx.scale_factor = 100;
       ctx.use_app_identity = false;
       ctx.per_client_app_identity = false;
@@ -13826,7 +14268,7 @@ namespace proc {
       ctx.uuid = VIRTUAL_DISPLAY_UUID;
       ctx.name = "Virtual Display";
       ctx.image_path = parse_env_val(this_env, "virtual_desktop.png");
-      ctx.virtual_display = true;
+      set_launch_as(ctx, "host_virtual_display");
       ctx.scale_factor = 100;
       ctx.use_app_identity = false;
       ctx.per_client_app_identity = false;
@@ -13859,7 +14301,7 @@ namespace proc {
         ctx.uuid = REMOTE_INPUT_UUID;
         ctx.name = "Remote Input";
         ctx.image_path = parse_env_val(this_env, "input_only.png");
-        ctx.virtual_display = false;
+        set_launch_as(ctx, "host_default");
         ctx.scale_factor = 100;
         ctx.use_app_identity = false;
         ctx.per_client_app_identity = false;
@@ -13895,7 +14337,7 @@ namespace proc {
         ctx.uuid = TERMINATE_APP_UUID;
         ctx.name = "Terminate";
         ctx.image_path = parse_env_val(this_env, "terminate.png");
-        ctx.virtual_display = false;
+        set_launch_as(ctx, "host_default");
         ctx.scale_factor = 100;
         ctx.use_app_identity = false;
         ctx.per_client_app_identity = false;

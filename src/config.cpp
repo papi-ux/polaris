@@ -160,9 +160,11 @@ namespace config {
 
     std::ostringstream advice;
     advice << "config: adaptive_bitrate_max = "sv << it->second
-           << " no longer limits a stream's bitrate. A stream keeps the bitrate its client asked for, "sv
-           << "and Live Tuning and Doctor only lower it from there. To cap every stream, set max_bitrate "sv
-           << "instead. adaptive_bitrate_max can be removed from the settings file."sv;
+           << " no longer limits a stream's bitrate. Live Tuning and Doctor lower a stream from the bitrate "sv
+           << "its client asked for and bring it back no higher, except that a request below "sv
+           << "adaptive_bitrate_min starts at that floor, and Doctor may raise a PyroWave stream short of "sv
+           << "bits above its request. To cap every stream, set max_bitrate instead. "sv
+           << "adaptive_bitrate_max can be removed from the settings file."sv;
     return advice.str();
   }
 

@@ -12,8 +12,10 @@
 
 #ifdef __linux__
 
+#include "src/config.h"
 #include "src/platform/linux/misc.h"
 #include "src/platform/linux/encoder_auto_policy.h"
+#include "src/platform/linux/stream_display_policy.h"
 
 namespace {
 
@@ -236,24 +238,42 @@ TEST(LinuxEncoderAutoPolicy, AmdOutsideLabwcSaysVulkanIsNotACandidateAndWhatChoo
 }
 
 TEST(LinuxEncoderAutoPolicy, AGamescopeStreamHostOffThePortalIsToldItsCaptureKeepsVaapi) {
-  // Gamescope Stream on kms, wlr, x11 or auto capture decides amd_established_desktop, and its
-  // sentence told that host it was "outside labwc and Gamescope Stream" and that Auto tries Vulkan
-  // Video first on Gamescope Stream: the #635 failure, a Gamescope Stream host told it is somewhere
-  // else. The sentence names the portal as what decides it, and the captures that keep VA-API.
+  // Gamescope Stream on kms, wlr or x11 capture decides amd_established_desktop, and its sentence
+  // told that host it was "outside labwc and Gamescope Stream" and that Auto tries Vulkan Video
+  // first on Gamescope Stream: the #635 failure, a Gamescope Stream host told it is somewhere else.
+  // The sentence names the portal as what decides it, and the captures that keep VA-API. The route
+  // is read as video.cpp reads it, from the capture as Gamescope Stream fills it.
   constexpr auto npos = std::string_view::npos;
-  for (const auto capture : {"kms", "wlr", "x11", "auto"}) {
-    const auto decision = linux_encoder_auto_policy::decide(
-      "amdgpu",
-      linux_encoder_auto_policy::route_of(false, "gamescope", capture == std::string_view {"auto"} ? "" : capture),
-      defaults
+  const auto gamescope_route = [](std::string_view capture) {
+    return linux_encoder_auto_policy::route_of(
+      false,
+      "gamescope",
+      stream_display_policy::canonical_capture_backend(
+        stream_display_policy::capture_filled_for_mode(stream_display_policy::k_gamescope_stream, capture)
+      )
     );
+  };
+  for (const auto capture : {"kms", "wlr", "x11"}) {
+    const auto decision = linux_encoder_auto_policy::decide("amdgpu", gamescope_route(capture), defaults);
     ASSERT_EQ(decision.policy, "amd_established_desktop") << capture;
     const auto reason = linux_encoder_auto_policy::reason(decision.policy, true, true);
     EXPECT_EQ(reason.find("outside labwc and Gamescope Stream;"), npos) << reason;
     EXPECT_NE(reason.find("outside labwc and Gamescope Stream through the portal;"), npos) << reason;
     EXPECT_NE(reason.find("on Gamescope Stream captured through the portal,"), npos) << reason;
-    EXPECT_NE(reason.find("Gamescope Stream with capture set to kms, wlr, x11 or auto stays on VA-API."), npos) << reason;
+    EXPECT_NE(reason.find("Gamescope Stream with capture set to kms, wlr or x11 stays on VA-API."), npos) << reason;
   }
+
+  // Autodetect is not one of them. The settings file's auto loads as an unset capture, which
+  // Gamescope Stream fills with the portal, so Auto tries Vulkan Video there, and the sentence for
+  // the captures that keep VA-API must not name it.
+  std::unordered_map<std::string, std::string> vars {{"capture", "auto"}};
+  const auto autodetect = config::capture_setting(vars, {});
+  EXPECT_TRUE(autodetect.empty()) << autodetect;
+  const auto decision = linux_encoder_auto_policy::decide("amdgpu", gamescope_route(autodetect), defaults);
+  EXPECT_EQ(decision.policy, "amd_gamescope_vulkan_ram");
+  EXPECT_TRUE(decision.prefer_vulkan);
+  const auto kept = linux_encoder_auto_policy::reason("amd_established_desktop", true, true);
+  EXPECT_EQ(kept.find("or auto"), npos) << kept;
 }
 
 TEST(LinuxEncoderAutoPolicy, ExplicitVulkanReasonSaysWhatTheAutoSentenceSaysItCosts) {
@@ -299,7 +319,7 @@ TEST(LinuxEncoderAutoPolicy, ExplicitVulkanReasonSaysWhatTheAutoSentenceSaysItCo
 }
 
 TEST(LinuxEncoderAutoPolicy, ExplicitVulkanOffersNoHdrOnGamescopeStreamUnlessHevcSupportAsksForIt) {
-  // papi's call on #635a (finding 11). An explicit encoder = vulkan reads Gamescope Stream frames
+  // #635. An explicit encoder = vulkan reads Gamescope Stream frames
   // through the same 8-bit system memory upload as Auto's Vulkan Video, and the host offered Main10
   // with it from a probe that encoded a zeroed 8-bit frame. HEVC Support set to advertise HDR is an
   // explicit request and is kept. At 1 or 2 no Main10 is offered anyway, so nothing HDR is left.
@@ -311,7 +331,7 @@ TEST(LinuxEncoderAutoPolicy, ExplicitVulkanOffersNoHdrOnGamescopeStreamUnlessHev
       << hevc_mode;
   }
   EXPECT_FALSE(explicit_vulkan_offers_no_hdr("vulkan", gamescope, codec_settings_t {.hevc_mode = 3}));
-  // Gamescope Stream on kms, wlr, x11 or auto hands Vulkan Video GPU frames, not this upload.
+  // Gamescope Stream on kms, wlr or x11 hands Vulkan Video GPU frames, not this upload.
   EXPECT_FALSE(explicit_vulkan_offers_no_hdr("vulkan", linux_encoder_auto_policy::route_of(false, "gamescope", "kms"), defaults));
   for (const auto route : {labwc, desktop}) {
     EXPECT_FALSE(explicit_vulkan_offers_no_hdr("vulkan", route, defaults));

@@ -45,6 +45,7 @@
 
 // local includes
 #include "capture_generation.h"
+#include "app_launch_as.h"
 #include "config.h"
 #include "emulator_library.h"
 #include "game_library_scanner.h"
@@ -123,11 +124,46 @@ namespace proc {
   bool is_valid_steam_launch_mode(std::string_view mode);
   bool steam_launch_mode_is_big_picture(std::string_view mode);
 
+  std::string legacy_basis(const nlohmann::json &entry);
+  std::string launch_as_from_legacy(const nlohmann::json &entry);
+  std::string normalize_launch_as(const nlohmann::json &entry);
+  void write_launch_as(nlohmann::json &entry, std::string_view value);
+  void set_launch_as(struct ctx_t &ctx, std::string value);
+
   /// The Steam shutdown undo a generated Steam app carries, in the form parse() keeps it, so that
   /// nothing has to be upgraded each time apps.json is read.
   std::string canonical_steam_shutdown_undo();
 
+  struct launch_as_availability_t {
+    bool available = true;
+    std::string reason;
+  };
+
 #if defined(__linux__)
+  struct launch_selection_request_t {
+    std::string client_named_selection;
+    std::string requested_selection;
+    bool mirror_desktop = false;
+    bool launch_virtual_display = false;
+    bool virtual_display_user_locked = false;
+    bool watch_only = false;
+  };
+  launch_selection_request_t launch_selection_request_from_session(const rtsp_stream::launch_session_t &session);
+
+  struct launch_selection_t {
+    std::string selection;
+    bool pinned = false;
+    int refusal = 0;
+  };
+  launch_selection_t resolve_launch_selection_for_app(const struct ctx_t &app, const launch_selection_request_t &request);
+
+  /// After app precedence resolves, before display creation; no-op for other modes/watchers.
+  int prepare_host_virtual_capture_for_launch(const ctx_t &app, const launch_selection_t &selection, bool watch_only);
+  int refuse_app_launch_as_before_launch(const struct ctx_t &app, const launch_selection_request_t &request);
+  int refuse_app_launch_as_unavailable(const struct ctx_t &app, std::string reason);
+
+  launch_as_availability_t launch_as_availability(const struct ctx_t &app);
+
   struct desktop_launch_safety_policy_t {
     bool desktopSteamActive = false;
     bool physicalDisplayRisk = false;
@@ -607,6 +643,33 @@ namespace proc {
     std::string_view session_instance_id,
     pid_t forced_capture_failure_pid
   );
+  struct host_virtual_shutdown_test_result_t {
+    bool prepared = false;
+    bool stopped = false;
+    bool completion_idle = false;
+    bool authority_rejected = false;
+    bool output_retained = false;
+    bool generation_retained = false;
+    bool launch_owner_retained = false;
+    bool app_retained = false;
+    bool child_alive = false;
+    int destroy_calls = 0;
+    int revert_calls = 0;
+    bool child_reaped_before_destroy = false;
+    bool retry_stopped = false;
+    bool retry_output_removed = false;
+    bool retry_context_retired = false;
+    int retry_destroy_calls = 0;
+  };
+  host_virtual_shutdown_test_result_t host_virtual_shutdown_for_tests(
+    std::string_view session_instance_id,
+    pid_t child_pid,
+    bool force_capture_failure,
+    bool retry,
+    bool wrong_owner = false,
+    bool fail_first_destroy = false
+  );
+
   bool non_cage_detached_partial_launch_cleanup_for_tests(
     std::string_view session_instance_id,
     pid_t prior_child_pid
@@ -759,6 +822,7 @@ namespace proc {
     bool elevated = false;
     bool auto_detach = false;
     bool wait_all = false;
+    std::string launch_as = "host_default";
     bool virtual_display = false;
     bool virtual_display_primary = false;
     bool desktop_mirror = false;
@@ -1063,6 +1127,8 @@ namespace proc {
     std::string get_app_image(int app_id);
     std::string get_last_run_app_name();
     std::string get_running_app_uuid();
+    /// The running generation's frozen app entry, unaffected by catalogue reloads.
+    std::optional<ctx_t> running_app_context() const;
     std::string get_session_token();
     std::string get_session_owner_unique_id();
     std::shared_ptr<input::retained_gamepad_t> retained_gamepad_for_owner(const std::string &unique_id);
@@ -1117,6 +1183,15 @@ namespace proc {
       std::string_view session_instance_id,
       pid_t forced_capture_failure_pid
     );
+    host_virtual_shutdown_test_result_t host_virtual_shutdown_for_tests(
+      std::string_view session_instance_id,
+      pid_t child_pid,
+      bool force_capture_failure,
+      bool retry,
+      bool wrong_owner,
+      bool fail_first_destroy
+    );
+
     bool non_cage_detached_partial_launch_cleanup_for_tests(
       std::string_view session_instance_id,
       pid_t prior_child_pid
@@ -1229,6 +1304,9 @@ namespace proc {
     bool _session_used_cage_compositor = false;
     bool _session_used_gamescope_runtime = false;
     bool _exact_generation_cleanup_complete = true;
+    // An End request still owns the app/output until its exact generation can
+    // be drained. Kept separately from process liveness and launch authority.
+    bool _host_virtual_cleanup_pending = false;
     /// This teardown's private app phase ran before the compositor stopped, so the sweep after it
     /// is a check. Read and cleared by the generation cleanup.
     bool _private_apps_stopped_before_compositor = false;

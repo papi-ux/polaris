@@ -585,6 +585,8 @@ namespace stream {
     std::uint64_t launch_lifecycle_generation = 0;
     std::string device_name;
     std::string device_uuid;
+    // The launching device's pairing-record client_family, "nova" or empty; see launch_session_t.
+    std::string client_family;
     std::string session_token;
 
     // Process-lifetime-monotonic, assigned fresh in alloc() for every
@@ -3258,14 +3260,15 @@ namespace stream {
           session.config.monitor.height,
           static_cast<int>(std::lround(av_q2d(video::encoding_framerate_to_rational(session.config.monitor)))),
           session.config.monitor.chromaSamplingType == 1,
-          {config::stream.fec_percentage, request.audio_kbps > 0 ? request.audio_kbps : pyrowave_advice::k_default_audio_kbps},
+          pyrowave_advice::stream_link(&request, config::stream.fec_percentage),
           config::video.max_bitrate
         );
         if (advice.valid) {
           adaptive_bitrate::set_session_floor(advice.floor_encoder_kbps, "pyrowave_advice");
           BOOST_LOG(info) << "PyroWave: Live Tuning cuts this stream no lower than "sv
                           << adaptive_bitrate::get_state().min_bitrate_kbps << " kbps at the encoder, half the "sv
-                          << advice.far_encoder_kbps << " kbps its 35 dB model advises on a device's own screen"sv;
+                          << advice.far_encoder_kbps << " kbps its model advises at "sv << pyrowave_advice::k_far_target_db
+                          << " dB on a device's own screen"sv;
         }
       }
 
@@ -3279,7 +3282,8 @@ namespace stream {
 
       // Track this client in multi-client stats
       stream_stats::add_client(
-        addr_string, session.device_name, session.session_generation
+        addr_string, session.device_name, session.session_generation,
+        stream_stats::client_family_for_stream(session.client_family)
       );
       stream_stats::start_session_timing(
         session.device_uuid, session.session_generation, session.session_token
@@ -3406,6 +3410,7 @@ namespace stream {
         launch_session.lifecycle_generation.value_or(0);
       session->device_name = launch_session.device_name;
       session->device_uuid = launch_session.unique_id;
+      session->client_family = launch_session.client_family;
       session->session_token = launch_session.session_token;
       session->session_generation = next_session_generation.fetch_add(1, std::memory_order_relaxed);
       session->requested_fps = launch_session.requested_fps;

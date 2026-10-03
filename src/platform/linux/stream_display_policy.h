@@ -48,29 +48,29 @@ namespace stream_display_policy {
     bool prefer_gpu_native_capture = false;
   };
 
+  /** @brief Resolve an exact per-app pin without probing or changing host state. */
+  struct app_launch_as_t {
+    enum class verdict_e { follow, pinned, not_a_launch_mode, conflict } verdict = verdict_e::follow;
+    std::string selection;
+  };
+
+  app_launch_as_t resolve_app_launch_as(std::string_view launch_as, std::string_view client_named_selection);
+
+  struct host_default_launch_input_t {
+    std::string_view requested_selection;
+    bool mirror_desktop = false;
+    bool launch_virtual_display = false;
+    bool virtual_display_user_locked = false;
+    bool virtual_display_optimization_present = false;
+    bool host_provides_private_display = false;
+  };
+
   /**
-   * @brief Derive a session mode for legacy Virtual Display launches.
-   *
-   * Explicit accepted streamMode and mirrorDesktop remain authoritative. An
-   * app default is used only when the client did not explicitly lock the
-   * virtual-display choice.
-   *
-   * @param host_provides_private_display The host's own configuration already
-   *        creates the session's output, so an unlocked virtual-display
-   *        preference has nothing to add and is refused. A locked client choice
-   *        and an explicit accepted streamMode still win. Pass
-   *        host_default_provides_private_display(); every call site has to pass
-   *        the same answer or a resume can disagree with its own launch.
+   * @brief Resolve client choices for a Host default app, with no app preference.
+   * @details The typed input and new name make stale positional calls fail to
+   *          compile. Fixed app modes bypass this resolver entirely.
    */
-  std::string effective_session_selection_for_launch(
-    std::string_view requested_selection,
-    bool mirror_desktop,
-    bool launch_virtual_display,
-    bool app_virtual_display,
-    bool virtual_display_user_locked,
-    bool virtual_display_optimization_present = false,
-    bool host_provides_private_display = false
-  );
+  std::string host_default_launch_selection(const host_default_launch_input_t &input);
 
   /**
    * @brief Whether the host's own configuration already provides the display.
@@ -607,6 +607,9 @@ namespace stream_display_policy {
    * @brief Options list for client-settings / UI (includes unavailable gamescope).
    */
   std::vector<mode_option_t> mode_options(bool virtual_display_available = false);
+
+  /// Production catalogue retains independent HVD capture and Takeover creator readiness.
+  std::vector<mode_option_t> mode_options(const stream_path::host_capabilities_t &caps);
 
   /**
    * @brief Allowed launch-mode selection ids for Nova (excludes unavailable modes).

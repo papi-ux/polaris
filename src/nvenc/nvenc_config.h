@@ -4,7 +4,29 @@
  */
 #pragma once
 
+// standard includes
+#include <algorithm>
+#include <cstdint>
+
 namespace nvenc {
+
+  /**
+   * @brief A VBV buffer grown by nvenc_vbv_increase percent, in 64 bits and held to the encoder's field.
+   *
+   * The buffer starts as one frame's bits at the stream's bitrate. At the 500 Mbps a client may set by
+   * hand, an increase of 258% or more overflowed FFmpeg's int rc_buffer_size at 60 fps, before the
+   * division by 100, and wrapped the NVENC SDK's uint32 vbvBufferSize at 30 fps or fewer.
+   * @param buffer_bits The buffer before the increase, in bits.
+   * @param percentage_increase nvenc_vbv_increase, 0 to 400. One that is not positive leaves the buffer as it is.
+   * @param limit The most the encoder's field holds.
+   */
+  inline std::int64_t grown_vbv_buffer_bits(std::int64_t buffer_bits, int percentage_increase, std::int64_t limit) {
+    std::int64_t grown = buffer_bits;
+    if (percentage_increase > 0) {
+      grown += buffer_bits * percentage_increase / 100;
+    }
+    return std::clamp<std::int64_t>(grown, 0, limit);
+  }
 
   enum class nvenc_two_pass {
     disabled,  ///< Single pass, the fastest and no extra vram

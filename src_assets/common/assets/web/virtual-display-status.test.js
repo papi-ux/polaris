@@ -47,6 +47,14 @@ describe('virtual display status presentation', () => {
     expect(state.label).toBe('Not needed for Private Stream')
   })
 
+  it('shows the real backend when apps on a private host depend on a display pin', () => {
+    const state = presentVirtualDisplayStatus({ policy_mode: 'headless_stream', available: true,
+      backend: 'EVDI', launch_as_apps: 2 })
+    expect(state.kind).toBe('available')
+    expect(state.detail).toContain('2 apps launch as Host Virtual Display or Desktop Takeover')
+    expect(state.detail).toContain('EVDI')
+  })
+
   it('shows backend-specific configuration guidance when kscreen-doctor is detected', () => {
     const state = presentVirtualDisplayStatus({
       policy_mode: 'host_virtual_display',

@@ -784,6 +784,27 @@ TEST(ProcHostPauseClassificationTests, DuplicateOnlyTargetRateDeliveryDoesNotInv
   EXPECT_FALSE(classification.at("host_render_limited").get<bool>());
 }
 
+TEST(ProcHostPauseClassificationTests, AnAbruptDisconnectKeepsItsNetworkCause) {
+  // The pause runs at teardown, after the control stream has gone and its readings have stopped, so
+  // the freshness gates a live reading needs would grade every abrupt disconnect as a clean network.
+  // It reads the verdict the window last judged.
+  auto stats = stable_gpu_native_stats(60.0, 60.0);
+  stats.network_sample_revision = 40;
+  stats.network_last_received_age_ms = 9000;
+  stats.media_loss_sample_revision = 38;
+  stats.media_loss_last_received_age_ms = 9500;
+  stats.network_verdict.loss_available = true;
+  stats.network_verdict.loss_pct = 3.1;
+  stats.network_verdict.loss_elevated = true;
+  stats.network_verdict.risk = true;
+  ASSERT_FALSE(stream_stats::judged_network(stats).risk);
+
+  const auto classification = proc::classify_host_pause_session_for_tests(stats, 60.0, false);
+
+  EXPECT_EQ(classification.at("primary_issue"), "network_jitter");
+  EXPECT_EQ(classification.at("health_grade"), "watch");
+}
+
 TEST(ProcHostPauseClassificationTests, DroppedFramesAtTargetRemainHostRenderLimited) {
   auto stats = stable_gpu_native_stats(60.0, 60.0);
   stats.dropped_frame_ratio = 0.04;

@@ -7,7 +7,8 @@
       "name": "Desktop",
       "image-path": "desktop.png",
       "desktop-mirror": true,
-      "allow-client-commands": false
+      "allow-client-commands": false,
+      "launch-as": "desktop_display"
     },
     {
       "name": "Steam Big Picture",
@@ -20,7 +21,8 @@
       "detached": [
         "setsid steam -gamepadui"
       ],
-      "image-path": "steam.png"
+      "image-path": "steam.png",
+      "launch-as": "host_default"
     },
     {
       "name": "Lutris",
@@ -31,7 +33,8 @@
       "source": "lutris",
       "auto-detach": true,
       "wait-all": true,
-      "exit-timeout": 5
+      "exit-timeout": 5,
+      "launch-as": "host_default"
     }
   ]
 }

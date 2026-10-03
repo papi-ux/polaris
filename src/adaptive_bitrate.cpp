@@ -786,8 +786,8 @@ namespace adaptive_bitrate {
       !enabled.load(std::memory_order_relaxed),
       std::memory_order_relaxed
     );
-    // The paired endpoints already hold this to 1000..300000 kbps. The host
-    // cap, max_bitrate, bounds it as it bounds RTSP and launch requests;
+    // The paired endpoints already hold this to stream_bitrate::request_in_range(), 1000 to
+    // 500000 kbps. The host cap, max_bitrate, bounds it as it bounds RTSP and launch requests;
     // adaptive_bitrate_max does not.
     const int requested = config::video.max_bitrate > 0 ?
       std::min(kbps, config::video.max_bitrate) : kbps;

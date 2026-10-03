@@ -32,7 +32,7 @@ Polaris is Linux-only by design. Windows and macOS host ports are not planned.
 | Intel / VA-API | Unvalidated | Intel encodes through the same VA-API code as AMD, with Intel's own VA-API driver. No Intel GPU has been through release validation, so nothing on Intel is known to work or known to fail. Expect SHM capture, set `adapter_name` on an Arc card, and please report what you find. |
 | Vulkan Video | Experimental | `encoder = vulkan` asks for it on a GPU whose driver can encode with Vulkan Video. On AMD, Auto tries it first for Private Stream and for Gamescope Stream through the portal, with VA-API as the fallback. It carries no AV1 in this build, and no HDR on Gamescope Stream; `encoder = vaapi` keeps VA-API. See [Vulkan Encoder](configuration.md#vulkan-encoder). |
 | PyroWave | Experimental | Encoded with Vulkan compute rather than the video engine, so it needs a Vulkan 1.3 GPU that passes the host's check, of any vendor. The published measurements are from NVIDIA. Only Nova plays it ([Clients](#clients)). See [PyroWave](pyrowave.md). |
-| 4:4:4 | Limited | Of the standard codecs, only the software H.264 encoder offers 4:4:4 on a Linux host, on the CPU; NVENC, VA-API and Vulkan Video stream 4:2:0. PyroWave is the only way to get 4:4:4 from the GPU, on NVIDIA, AMD and Intel alike. |
+| 4:4:4 | Limited | Of the standard codecs, only the software H.264 encoder offers 4:4:4 on a Linux host, on the CPU; NVENC, VA-API and Vulkan Video stream 4:2:0. PyroWave is the only way to get 4:4:4 from the GPU, on a GPU of any vendor that passes the host's check. The 4:4:4 row under **Settings > Encoder Profiles** says which of these a host has. |
 | Software encode | Supported fallback | Useful for diagnostics and unsupported hardware, but not the performance target. |
 | HDR / Main10 | Conditional | 10-bit SDR (Main10) works where the encoder offers it. True HDR needs real HDR metadata from the capture path, which only some stream modes have: see [HDR by stream mode](#hdr-by-stream-mode). |
 
@@ -48,7 +48,7 @@ describes the modes themselves.
 | Private Stream (GPU-native) | A running Wayland desktop | Its labwc runs as a window under the host desktop, so a desktop session has to be running. |
 | Gamescope Stream | Any desktop | `gamescope`. Polaris joins an idle Gamescope or starts its own, and captures it through the portal. |
 | Mirror Desktop | KDE Plasma, GNOME, wlroots desktops such as Hyprland and Sway, X11 | Portal capture on KDE Plasma and GNOME; wlroots capture or the portal on wlroots desktops. An X11 session is captured by X11 capture, which copies every frame through system memory. |
-| Host Virtual Display | KDE Plasma 6 and Hyprland on their own; GNOME, Sway and others with EVDI | Automatic tries a KWin screen on Plasma 6, then EVDI, then Hyprland, then kscreen-doctor, which only borrows a spare connector. GNOME has none of the others, so it needs the EVDI kernel module. |
+| Host Virtual Display | KDE Plasma with output-pinned KWin capture; Hyprland with its native virtual-output backend | Creation and capture must both be available. EVDI and kscreen-doctor need KWin capture; the native Hyprland backend needs its wlroots capture protocols. GNOME Wayland, Sway and other desktops without those routes cannot stream this mode, even if EVDI can create a connector. |
 | Desktop Takeover | Hyprland only | A live Hyprland session, `hyprctl`, and an EVDI or Hyprland virtual output. |
 | Headless Dongle | KDE Plasma | A dummy plug. Polaris moves the desktop onto it with kscreen-doctor. |
 
@@ -82,8 +82,8 @@ Everything else streams SDR.
   it, or with publishing turned off, clients do not find the host on their own: add it by its
   address. SteamOS ships Avahi with publishing off ([SteamOS guide](steamos.md#connect-a-client)).
 - **Each stream mode's tools**, listed in the table above: `labwc` and `wlr-randr` for Private
-  Stream, `gamescope` for Gamescope Stream, EVDI for Host Virtual Display where KWin and Hyprland
-  cannot add a screen.
+  Stream, `gamescope` for Gamescope Stream, and a supported creator plus output-pinned capture
+  provider for Host Virtual Display. EVDI alone does not add GNOME Host Virtual Display streaming.
 
 ## Clients
 
@@ -95,7 +95,7 @@ only, no controller yet, and only on the local network.
 | Feature | Nova for Android | Nova for Linux | Moonlight | Artemis | Browser Stream |
 |---|---|---|---|---|---|
 | Pairing | QR, Trusted Pair, PIN | Trusted Pair, PIN | PIN | PIN; QR unverified | None: it opens from the signed-in web console |
-| Launch mode per launch | Yes | Yes | No: the host's mode applies | Host Virtual Display only, from its virtual display option | No: the host's mode applies |
+| Launch mode per launch | Yes | Yes | No: the host's mode applies, or the app's Launch as | Host Virtual Display only, from its virtual display option, on an app set to Host default | No: the host's mode applies, or the app's Launch as when that is a Private Stream mode |
 | Play Setup | Yes | Yes | No | No | No |
 | Spaces | Yes | Yes | Unverified | Unverified | No |
 | PyroWave | A Nova beta, 1.4.13-beta.3 or newer | The PyroWave Flatpak, SDR and 4:2:0 only | No | No | No |
@@ -117,9 +117,9 @@ What the rows mean, and where they come from:
   Every other client types the PIN into **Devices, Manual PIN**
   ([Pair and manage devices](devices.md)).
 - **Launch mode per launch.** Moonlight never asks for a mode, so the mode saved under **Where
-  games run** applies to every Moonlight launch. Artemis's virtual display option asks for Host
-  Virtual Display, which the host grants unless its own mode is Private Stream, whose private
-  session already has a display sized to the client.
+  games run** applies to every Moonlight launch, unless the app's **Launch as** names another mode.
+  Artemis's virtual display option asks for Host Virtual Display, which the host grants unless
+  its own mode is Private Stream or the app's Launch as names another mode.
 - **Spaces.** A device given a Space sees that Space as its only app. Choosing titles inside a Space
   is a Nova feature, and no Moonlight or Artemis launch of a Space has been tested. A Space streams
   H.264, SDR and stereo only, and PyroWave does not work in one.
@@ -135,7 +135,9 @@ What the rows mean, and where they come from:
   the client, and Nova for Linux can set a live bitrate as well. The host sees media loss only from
   Nova for Android, so for every other client it tunes on round-trip time and encoder load.
 - **Doctor** has network and host evidence for every stream. Decode and render timing come only from
-  Nova for Android, so only there can it blame the playback device.
+  Nova for Android, so only there can it blame the playback device. Doctor names which kind of
+  client a stream is, Nova or Moonlight / Artemis, and what a Moonlight-protocol client cannot use
+  ([Doctor](doctor.md)).
 - **Host sleep** is a request only Nova sends, and the host accepts it only while **Allow Clients To
   Sleep This Host** is on. **Wake-on-LAN** is the client's own magic packet, sent to the MAC the
   host reports.
@@ -151,12 +153,11 @@ What the rows mean, and where they come from:
 Moonlight asks only for a resolution, a frame rate, a bitrate, a codec, HDR and the audio channels.
 Everything else is set on the host, where it applies to every Moonlight launch:
 
-- **Where games run** under **Settings, Audio/Video** is the launch mode every Moonlight launch gets.
-- **One app entry per way of playing.** The built-in Desktop entry has **Mirror the host desktop**
-  on, so it streams your real desktop whatever the launch mode. Turn **Always create Virtual
-  Display** on for an entry to give it a Host Virtual Display sized to the client, on a host whose
-  mode is not Private Stream. One Moonlight library can then offer a private game, the real desktop
-  and a desktop on its own screen ([Add and edit apps](apps.md#runtime-behavior)).
+- **Where games run** under **Settings, Audio/Video** is the launch mode a Moonlight app set to Host default gets.
+- **One app entry per way of playing.** Each app's **Launch as** can name its own mode. The
+  built-in Desktop entry is Mirror Desktop. An entry set to Host Virtual Display gets a screen
+  sized to the client, on a Private Stream host too. One Moonlight library can offer a private
+  game, the real desktop and a desktop on its own screen ([Launch as](apps.md#launch-as)).
 - **The device's Display Profile**, under **Devices, Edit Access**, pins what that one device gets:
   a display mode in place of the one it asks for, a host output, the color range and HDR
   ([Editing a device](devices.md#editing-a-device)).

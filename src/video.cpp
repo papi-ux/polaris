@@ -4220,7 +4220,9 @@ namespace video {
 
 #ifndef __APPLE__
           if (encoder.name == "nvenc" && config::video.nv_legacy.vbv_percentage_increase > 0) {
-            ctx->rc_buffer_size += ctx->rc_buffer_size * config::video.nv_legacy.vbv_percentage_increase / 100;
+            ctx->rc_buffer_size = static_cast<int>(nvenc::grown_vbv_buffer_bits(
+              ctx->rc_buffer_size, config::video.nv_legacy.vbv_percentage_increase, std::numeric_limits<int>::max()
+            ));
           }
 #endif
         }
@@ -4969,7 +4971,7 @@ namespace video {
     }
   }
 
-  input::touch_port_t make_port(platf::display_t *display, const config_t &config) {
+  input::touch_port_t make_port(const platf::display_t *display, const config_t &config) {
     auto port = display->scaled_screen_width > 0 && display->scaled_screen_height > 0 ?
                   // The screen is fitted into the frame, and the frame into the stream.
                   input::make_touch_port_in_frame(
@@ -4980,13 +4982,10 @@ namespace video {
                     config.width,
                     config.height
                   ) :
+                  // Input maps onto the screen in the desktop's units, which a rotated or scaled
+                  // output does not share with its frame.
                   input::make_touch_port(
-                    platf::touch_port_t {
-                      display->offset_x,
-                      display->offset_y,
-                      display->width,
-                      display->height,
-                    },
+                    display->screen_on_desktop(),
                     display->env_width,
                     display->env_height,
                     config.width,
@@ -7243,6 +7242,38 @@ namespace video {
     return pyrowave_availability::launch_refusal(pyrowave_capture_route(generation), generation.capture_backend);
   }
 
+  std::optional<launch_failure::record_t> pyrowave_host_mode_refusal() {
+    // The generation a launch that names no mode captures, the same one capabilities judges when no
+    // private mode stands behind the offer.
+    return pyrowave_capture_refusal(current_capture_generation_identity());
+  }
+
+  bool pyrowave_hdr_available() {
+#if defined(__linux__) && defined(POLARIS_BUILD_PYROWAVE)
+    return pyrowave_encode::hdr_available();
+#else
+    return false;
+#endif
+  }
+
+  std::vector<std::pair<std::string_view, std::array<bool, 3>>> yuv444_encoders() {
+    std::vector<std::pair<std::string_view, std::array<bool, 3>>> listed;
+    listed.reserve(encoders.size());
+    for (const auto *encoder : encoders) {
+      std::array<bool, 3> codecs {false, false, false};
+      // The flags the probe reads: YUV444_SUPPORT before it tries 4:4:4 at all, and H264_ONLY and
+      // NO_AV1 before it tries HEVC or AV1 with the codec settings on Auto. An H264_ONLY encoder can
+      // still pass HEVC when HEVC Support forces it; the probe's own result says so when it does.
+      if (encoder->flags & YUV444_SUPPORT) {
+        codecs[0] = true;
+        codecs[1] = !(encoder->flags & H264_ONLY);
+        codecs[2] = !(encoder->flags & (H264_ONLY | NO_AV1));
+      }
+      listed.emplace_back(encoder->name, codecs);
+    }
+    return listed;
+  }
+
   std::optional<launch_failure::record_t> pyrowave_session_capture_refusal() {
     // The generation capture() will take, chosen the way it chooses it.
     auto generation = proc::proc.capture_generation;
@@ -7312,7 +7343,7 @@ namespace video {
              "so this stream is refused.";
     }
     if (selection.selected_encoder == "vulkan" && selection.policy == "amd_gamescope_vulkan_ram") {
-      // #635a: the launch cannot refuse this by name, because the client picks its codec at ANNOUNCE.
+      // #635: the launch cannot refuse this by name, because the client picks its codec at ANNOUNCE.
       return "The client asked for AV1, and on AMD Gamescope Stream Auto encodes with Vulkan Video, "
              "which carries no AV1, so this stream is refused. The client picked AV1 from the codecs "
              "the host offered before the launch, as a launch that switches into Gamescope Stream "
@@ -7337,9 +7368,8 @@ namespace video {
         "encoder_offers_no_hdr",
         "This launch asks for HDR with Vulkan Video chosen for it, which offers no HDR on Gamescope "
         "Stream: it reads each frame through system memory as 8-bit.",
-        "Launch without HDR, or choose another encoder for this launch. VA-API on Gamescope Stream takes "
-        "frames through the same 8-bit system memory upload unless POLARIS_PORTAL_DMABUF=1 is set, and "
-        "HDR through that unvalidated DMA-BUF route is not proven."
+        "Launch without HDR, or choose another encoder for this launch. VA-API can upload negotiated "
+        "packed RGB10 on this portal route, but HDR capture and playback on this route are not proven."
       );
       return;
     }
@@ -7349,9 +7379,8 @@ namespace video {
         "encoder_offers_no_hdr",
         "This launch asks for HDR, and this host is set to encoder = vulkan, which offers no HDR on "
         "Gamescope Stream: it reads each frame through system memory as 8-bit.",
-        "Launch without HDR. encoder = vaapi keeps VA-API on Gamescope Stream, but VA-API there takes "
-        "frames through the same 8-bit system memory upload unless POLARIS_PORTAL_DMABUF=1 is set, and "
-        "HDR through that unvalidated DMA-BUF route is not proven."
+        "Launch without HDR. encoder = vaapi keeps VA-API on Gamescope Stream. VA-API can upload "
+        "negotiated packed RGB10, but HDR capture and playback on this route are not proven."
       );
       return;
     }
@@ -7361,11 +7390,10 @@ namespace video {
         "encoder_offers_no_hdr",
         "This launch asks for HDR, and on Gamescope Stream Auto encodes with Vulkan Video, which offers "
         "no HDR there: it reads each frame through system memory as 8-bit.",
-        // VA-API is no way back to HDR here: on the portal it takes the same 8-bit upload
-        // (va_ram_t through sws_t::load_ram) unless the unvalidated DMA-BUF opt-in is set.
-        "Launch without HDR. hevc_mode = 3 or encoder = vaapi keeps VA-API on Gamescope Stream, but "
-        "VA-API there takes frames through the same 8-bit system memory upload unless "
-        "POLARIS_PORTAL_DMABUF=1 is set, and HDR through that unvalidated DMA-BUF route is not proven."
+        // The packed RAM upload preserves RGB10; physical HDR on this portal route
+        // still requires validation, so this refusal does not promise it from VA-API.
+        "Launch without HDR. hevc_mode = 3 or encoder = vaapi keeps VA-API on Gamescope Stream. "
+        "VA-API can upload negotiated packed RGB10, but HDR capture and playback on this route are not proven."
       );
       return;
     }

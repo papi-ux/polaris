@@ -8,10 +8,14 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <chrono>
+#include <initializer_list>
+#include <optional>
 #include <thread>
 #include <future>
 #include <limits>
+#include <vector>
 
 using namespace std::chrono_literals;
 
@@ -1009,4 +1013,176 @@ TEST(AdaptiveBitrateController, PyroWaveFloorStopsLiveTuningAndNeverLiftsAReques
   state = adaptive_bitrate::get_state();
   EXPECT_EQ(state.min_bitrate_kbps, 2000);
   EXPECT_EQ(state.floor_source, "adaptive_bitrate_min");
+}
+
+namespace {
+  // Live Tuning keeps 1.4.13's loss handling in this release. Every control ping reaches it as a reading
+  // with 0% loss, about ten a second, and each client media report with its own loss. Every reading moves
+  // its loss average by ewma_alpha, 0.3, and it acts on the first reading once a second is up: an average
+  // above 1% cuts in proportion and one above 5% by the whole 20%, an RTT reading of 45 ms or more and
+  // twice the running average cuts 10%, and it recovers only after 10 seconds with no lossy report.
+
+  /// One client media report: the frames the client expected in its second, and how many never arrived.
+  struct media_report_t {
+    double expected;
+    double lost;
+
+    double loss_pct() const {
+      return lost * 100.0 / expected;
+    }
+  };
+
+  // The Retroid Pocket 6's recorded HEVC run, 3840x2160 at 120 fps over Wi-Fi: 9 of 122 frames lost and 9
+  // of 121, in two of every eight reports, for five minutes, and the host's RTT through it. The same run
+  // test_stream_stats.cpp replays through Doctor's judge.
+  constexpr std::array<media_report_t, 8> k_rp6_hevc_reports {{
+    {120, 0}, {122, 9}, {120, 0}, {120, 0}, {120, 0}, {120, 0}, {121, 9}, {120, 0}
+  }};
+  constexpr std::array<double, 8> k_rp6_hevc_rtt_ms {4.0, 4.4, 10.1, 7.6, 9.6, 7.9, 8.6, 4.3};
+  constexpr int k_rp6_hevc_kbps = 268988;
+
+  struct live_second_t {
+    int target_kbps = 0;
+    /// Live Tuning's loss average when it acted, after the second's first reading.
+    double loss_acted_on_pct = 0.0;
+  };
+
+  /// One second as Live Tuning hears it: ten control pings and, when there is one, the client's media
+  /// report after `pings_before_report` of them. The second begins once a second has passed since the
+  /// last one began, so its first reading is the one Live Tuning acts on.
+  live_second_t live_second(std::optional<double> report_loss_pct, int pings_before_report, double rtt_ms = 8.0) {
+    std::this_thread::sleep_for(1005ms);
+    live_second_t second;
+    for (int ping = 0; ping < 10; ++ping) {
+      if (report_loss_pct && ping == pings_before_report) {
+        adaptive_bitrate::update_network_stats(*report_loss_pct, rtt_ms);
+        if (ping == 0) {
+          second.loss_acted_on_pct = adaptive_bitrate::get_state().ewma_packet_loss;
+        }
+      }
+      adaptive_bitrate::update_network_stats(0.0, rtt_ms);
+      if (ping == 0 && !(report_loss_pct && pings_before_report == 0)) {
+        second.loss_acted_on_pct = adaptive_bitrate::get_state().ewma_packet_loss;
+      }
+    }
+    second.target_kbps = adaptive_bitrate::get_state().target_bitrate_kbps;
+    return second;
+  }
+
+  /// Live Tuning's loss average after each of `readings`, fed back to back so none is acted on.
+  std::vector<double> loss_average_after(std::initializer_list<double> readings) {
+    std::vector<double> averages;
+    for (const double loss : readings) {
+      adaptive_bitrate::update_network_stats(loss, 8.0);
+      averages.push_back(adaptive_bitrate::get_state().ewma_packet_loss);
+    }
+    return averages;
+  }
+
+  /// Leave no cut target behind for a later suite in this binary to read as a reduced stream.
+  void leave_live_tuning_clean() {
+    adaptive_bitrate::reset();
+    adaptive_bitrate::set_enabled(false);
+    config::video.adaptive_bitrate.enabled = false;
+  }
+}  // namespace
+
+TEST(AdaptiveBitrateController, TheRecordedRp6HevcRunCutsNothingForItsLoss) {
+  // The Retroid Pocket 6's HEVC run with its reports landing mid-second, five pings after each second
+  // begins. A 7.4% report lifts the loss average to 2.2%, and the six pings before the next adjustment
+  // take it under 0.3%, so no adjustment sees loss above 1% and the stream stays at 269 Mbps.
+  enable_controller(k_rp6_hevc_kbps);
+  adaptive_bitrate::update_network_stats(0.0, k_rp6_hevc_rtt_ms[0]);
+  for (int ping = 0; ping < 6; ++ping) {
+    adaptive_bitrate::update_network_stats(0.0, k_rp6_hevc_rtt_ms[ping % k_rp6_hevc_rtt_ms.size()]);
+  }
+  for (std::size_t second = 0; second < k_rp6_hevc_reports.size(); ++second) {
+    const auto heard = live_second(k_rp6_hevc_reports[second].loss_pct(), 5, k_rp6_hevc_rtt_ms[second]);
+    EXPECT_EQ(heard.target_kbps, k_rp6_hevc_kbps) << "second " << second;
+    EXPECT_LT(heard.loss_acted_on_pct, 1.0) << "second " << second;
+    EXPECT_NE(adaptive_bitrate::get_state().state, "network_pressure") << "second " << second;
+  }
+  leave_live_tuning_clean();
+}
+
+TEST(AdaptiveBitrateController, AnRp6ReportThatMeetsAnAdjustmentCutsForItsOwnLoss) {
+  // Where the run's reports land decides whether 1.4.13 cuts for them. A 7.4% report keeps the loss
+  // average above 1% for its own reading and the two pings after it and no longer, so an adjustment
+  // that falls on one of those three cuts in proportion, under a tenth, and the others see none.
+  enable_controller(k_rp6_hevc_kbps);
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  const double report = k_rp6_hevc_reports[6].loss_pct();
+  const auto averages = loss_average_after({report, 0.0, 0.0, 0.0});
+  EXPECT_NEAR(averages[0], 0.3 * report, 1e-9);
+  EXPECT_GT(averages[1], 1.0);
+  EXPECT_GT(averages[2], 1.0);
+  EXPECT_LT(averages[3], 1.0);
+  for (int ping = 0; ping < 30; ++ping) {
+    adaptive_bitrate::update_network_stats(0.0, 8.0);
+  }
+  ASSERT_LT(adaptive_bitrate::get_state().ewma_packet_loss, 0.01);
+
+  // The report is the first reading once the second is up.
+  const auto heard = live_second(report, 0);
+  EXPECT_GT(heard.loss_acted_on_pct, 1.0);
+  EXPECT_LT(heard.target_kbps, k_rp6_hevc_kbps);
+  EXPECT_GT(heard.target_kbps, k_rp6_hevc_kbps * 9 / 10);
+  const auto state = adaptive_bitrate::get_state();
+  EXPECT_EQ(state.state, "network_pressure");
+  EXPECT_EQ(state.reason, "packet_loss");
+  leave_live_tuning_clean();
+}
+
+TEST(AdaptiveBitrateController, ATwentyPercentBurstCutsWhereItsReportsLandLateInTheSecond) {
+  // Three seconds that lose a fifth of their frames, each report landing two pings before the second
+  // ends. The pings before the next adjustment leave the average near 2%, and each of the three
+  // adjustments after a lossy report cuts in proportion. A 20% report keeps the average above 1% for
+  // its own reading and five pings, so a burst whose reports land six readings or more before an
+  // adjustment is under the line when Live Tuning acts, and one that lands on the adjustment is heavy
+  // loss and cuts the whole 20%.
+  enable_controller(k_rp6_hevc_kbps);
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  const auto averages = loss_average_after({20.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+  EXPECT_GT(averages[0], 5.0);
+  EXPECT_GT(averages[5], 1.0);
+  EXPECT_LT(averages[6], 1.0);
+  for (int ping = 0; ping < 30; ++ping) {
+    adaptive_bitrate::update_network_stats(0.0, 8.0);
+  }
+  ASSERT_LT(adaptive_bitrate::get_state().ewma_packet_loss, 0.01);
+
+  std::vector<int> targets;
+  for (int second = 0; second < 3; ++second) {
+    targets.push_back(live_second(20.0, 8).target_kbps);
+  }
+  targets.push_back(live_second(0.0, 8).target_kbps);
+  // The first lossy second's adjustment came before its report.
+  EXPECT_EQ(targets[0], k_rp6_hevc_kbps);
+  for (std::size_t i = 1; i < targets.size(); ++i) {
+    EXPECT_LT(targets[i], targets[i - 1]) << i;
+    EXPECT_GT(targets[i], targets[i - 1] * 9 / 10) << i;
+  }
+  const auto state = adaptive_bitrate::get_state();
+  EXPECT_EQ(state.state, "network_pressure");
+  EXPECT_EQ(state.reason, "packet_loss");
+  leave_live_tuning_clean();
+}
+
+TEST(AdaptiveBitrateController, AnRttSpikeCutsTenPercentEachSecondItLasts) {
+  // A Wi-Fi RTT spike to 60 ms on a stream that has read 8 ms, two seconds long, as ENet's estimate
+  // stays up. Every ping and report carries it, and each second's adjustment cuts 10% with no loss at all.
+  enable_controller(k_rp6_hevc_kbps);
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  for (int ping = 0; ping < 200; ++ping) {
+    adaptive_bitrate::update_network_stats(0.0, 8.0);
+  }
+  const auto first = live_second(0.0, 5, 60.0);
+  EXPECT_EQ(first.target_kbps, static_cast<int>(k_rp6_hevc_kbps * 0.9));
+  EXPECT_EQ(adaptive_bitrate::get_state().reason, "rtt_spike");
+  const auto second = live_second(0.0, 5, 60.0);
+  EXPECT_EQ(second.target_kbps, static_cast<int>(static_cast<int>(k_rp6_hevc_kbps * 0.9) * 0.9));
+  const auto state = adaptive_bitrate::get_state();
+  EXPECT_EQ(state.state, "network_pressure");
+  EXPECT_EQ(state.reason, "rtt_spike");
+  leave_live_tuning_clean();
 }

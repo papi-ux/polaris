@@ -1,6 +1,7 @@
 <script setup>
 import { ref } from 'vue'
 import Checkbox from "../../../Checkbox.vue";
+import CodecSupportPanel from "./CodecSupportPanel.vue";
 
 const props = defineProps([
   'platform',
@@ -18,6 +19,8 @@ const config = ref(props.config)
         <h3 class="settings-section-title">Primary NVENC profile</h3>
         <p class="settings-section-copy">Tune the main NVIDIA encode path for bitrate efficiency, scene-change handling, and the latency envelope you want during streaming.</p>
       </div>
+
+      <CodecSupportPanel v-if="platform === 'linux'" :config="config" />
 
       <div class="mb-3">
         <label for="nvenc_preset" class="block text-sm font-medium text-storm mb-1">{{ $t('config.nvenc_preset') }}</label>

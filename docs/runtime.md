@@ -1,6 +1,6 @@
 # Runtime and streaming model
 
-Polaris is built around a stream runtime that is separate from your normal desktop session. The default Linux recommendation is Headless Stream: games launch inside a private `labwc` Wayland compositor, Polaris captures that compositor, and your KDE, GNOME, or wlroots desktop keeps its layout and display state.
+Polaris is built around a stream runtime that is separate from your normal desktop session. The default Linux recommendation is Private Stream (Headless Stream in the configuration): games launch inside a private `labwc` Wayland compositor, Polaris captures that compositor, and your KDE, GNOME, or wlroots desktop keeps its layout and display state.
 
 Use this page when you want the technical model behind the README, runtime dashboard, troubleshooting logs, or launch behavior.
 
@@ -106,6 +106,14 @@ Check `/polaris/v1/session/status`, `/polaris/v1/stream-policy`, or a support bu
 
 Polaris tracks owner and viewer roles explicitly. The owner controls the active session. Viewers can join in watch mode without taking over the running stream, and passive watch mode uses the active owner profile instead of silently renegotiating a different stream.
 
+An accepted End game request means the host admitted the request, not that every game process has
+exited. For Host Virtual Display, unverified process cleanup or failed screen removal keeps the
+owner, app context and virtual screen for a fresh same-owner End attempt; Resume is refused while
+that cleanup is pending. Close the game yourself before retrying when Polaris cannot verify its
+process ownership. Heroic exact-game shutdown on this route remains unresolved. Private Stream
+keeps its existing shutdown route and remains the recommended default; an upgrade preserves an
+existing host's selected mode.
+
 Steam paths are handled conservatively:
 
 - Steam library launches use an isolated Linux Gamepad UI bootstrap and cleanup path so Steam titles stay in-stream.
@@ -117,7 +125,7 @@ Steam paths are handled conservatively:
 
 Browser Stream is experimental. It uses WebTransport and WebCodecs for browser-based streaming and exposes `/browser-stream` with `/webrtc` compatibility aliases.
 
-Browser Stream sessions use the same isolated runtime model as normal launches. When the browser stream closes, Polaris stops the browser helper, transport, audio/video capture, isolated compositor, and launched Steam game together. Polaris also settles Steam cleanup before the next Nova or Moonlight launch so a browser test does not leave stale Steam state behind.
+Browser Stream sessions use the same isolated runtime model as normal launches. Browser Stream shows only a private session, so an app whose Launch as is Host Virtual Display, Desktop Takeover or Mirror Desktop is refused with `app_launch_mode_unavailable` before it starts, and one set to a Private Stream mode runs even on a host whose own mode is not private. When the browser stream closes, Polaris stops the browser helper, transport, audio/video capture, isolated compositor, and launched Steam game together. Polaris also settles Steam cleanup before the next Nova or Moonlight launch so a browser test does not leave stale Steam state behind.
 
 ## HDR and Main10
 

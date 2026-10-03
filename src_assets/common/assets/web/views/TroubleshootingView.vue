@@ -152,7 +152,7 @@
             <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(networkPathReport.status).badge">{{ statusTone(networkPathReport.status).label }}</span>
           </div>
           <p class="mt-2 text-sm leading-relaxed text-storm">{{ networkPathReport.summary }}</p>
-          <p class="mt-3 text-xs leading-relaxed text-ice">{{ $t('troubleshooting.network_path_ceiling', { kbps: networkPathReport.recommendedBitrateKbps }) }}</p>
+          <p class="mt-3 text-xs leading-relaxed text-ice">{{ networkPathReport.recommendedBitrateKbps == null ? $t('troubleshooting.network_path_ceiling_unavailable') : $t('troubleshooting.network_path_ceiling', { kbps: networkPathReport.recommendedBitrateKbps }) }}</p>
           <details class="mt-3 text-xs text-storm">
             <summary class="cursor-pointer text-ice">{{ $t('troubleshooting.advanced_evidence') }}</summary>
             <div class="mt-2 space-y-2">
@@ -525,6 +525,7 @@ import {
   buildGithubIssueUrl,
   buildNetworkPathTestReport,
   buildPostSessionStreamReport,
+  rememberJudgedNetworkVerdict,
   buildSupportSelfTestCopy,
   createExportAddressBook,
   redactSensitiveText,
@@ -535,6 +536,7 @@ import { AI_DOCTOR_EXPLANATION_CATEGORIES, explainDoctorWithAi } from '../ai-doc
 import { aiReadinessCopy, describeAiReadiness } from '../doctor-ai-readiness.js'
 import { describePreviousRunBanner } from '../previous-run-banner.js'
 import { buildSessionSnapshotRows, summarizeStreamStats } from '../session-snapshot-rows.js'
+import { streamClientFamilyLabel } from '../client-family.js'
 import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
 import { groupRecentIssueLogs } from '../recent-issues.js'
 import { statusTone } from '../status-tones.js'
@@ -588,6 +590,10 @@ const nativeNetworkPathProbe = ref(null)
 const gamescopeHelperProbe = ref(null)
 const lastCompletedStreamStats = ref(null)
 const lastDisconnectReason = ref('')
+// The verdict the host last judged the live stream's loss on, and the one the completed session ended
+// with. The last live payloads of a session whose client dropped call the loss stale.
+const lastJudgedNetworkVerdict = ref(null)
+const lastCompletedJudgedVerdict = ref(null)
 
 const confirmedActions = computed(() => ({
   forceClose: {
@@ -742,15 +748,9 @@ const doctorAdvancedItems = computed(() => {
 
 const networkPathReport = computed(() => buildNetworkPathTestReport({
   nativeProbe: nativeNetworkPathProbe.value,
-  host: streamStats.value?.client_ip || window.location.hostname,
+  host: window.location.hostname,
   originHostname: window.location.hostname,
-  hostReachable: streamStatsConnected.value,
-  controlPortOpen: streamStatsConnected.value,
-  streamPortOpen: streamStats.value?.streaming ? true : undefined,
   mdnsAvailable: window.location.hostname.endsWith('.local'),
-  pingSamplesMs: [streamStats.value?.latency_ms].filter((value) => Number.isFinite(Number(value))),
-  packetLossPercent: streamStats.value?.packet_loss,
-  currentBitrateKbps: streamStats.value?.bitrate_kbps,
 }))
 
 const browserGamepads = computed(() => {
@@ -778,6 +778,7 @@ const postSessionReport = computed(() => buildPostSessionStreamReport({
   stats: lastCompletedStreamStats.value || streamStats.value || {},
   logs: logs.value,
   disconnectReason: lastDisconnectReason.value,
+  lastJudgedVerdict: lastCompletedStreamStats.value ? lastCompletedJudgedVerdict.value : lastJudgedNetworkVerdict.value,
 }))
 
 const supportSelfTestCopy = computed(() => buildSupportSelfTestCopy({
@@ -821,8 +822,10 @@ function copySupportSelfTests() {
 }
 
 watch(streamStats, (next, previous) => {
+  lastJudgedNetworkVerdict.value = rememberJudgedNetworkVerdict(lastJudgedNetworkVerdict.value, next, previous)
   if (previous?.streaming && next && !next.streaming) {
     lastCompletedStreamStats.value = previous
+    lastCompletedJudgedVerdict.value = lastJudgedNetworkVerdict.value
     lastDisconnectReason.value = 'Stream telemetry changed from active to idle.'
   }
 }, { deep: true })
@@ -1167,11 +1170,15 @@ async function collectSupportContext() {
     version: version.value || config.version || 'unknown',
     browser_user_agent: navigator.userAgent,
     stream_stats_connected: streamStatsConnected.value,
-    network_path_probe: nativeNetworkPathProbe.value,
+    network_path_probe: nativeNetworkPathProbe.value ? {
+      ...nativeNetworkPathProbe.value,
+      mediaMeasurementSource: networkPathReport.value.advancedEvidence.mediaMeasurementSource,
+    } : null,
     fix_my_stream_checklist: fixMyStreamChecklist.value,
     session_snapshot: streamStats.value,
     client: {
-      type: streamStats.value?.client_type || streamStats.value?.client_name || 'unknown',
+      type: streamStats.value?.client_type || streamClientFamilyLabel(streamStats.value?.client_family) ||
+        streamStats.value?.client_name || 'unknown',
       name: streamStats.value?.client_name || '',
     },
     config,

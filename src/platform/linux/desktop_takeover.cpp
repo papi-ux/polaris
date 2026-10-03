@@ -13,6 +13,7 @@
 #include "src/private_state_file.h"
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
@@ -67,6 +68,29 @@ namespace desktop_takeover {
         return ch == '\0' || ch <= 0x20 || ch == 0x7f;
       });
     }
+
+    struct request_syntax_t {
+      std::string_view text;
+      std::string_view meaning;
+    };
+
+    // hyprctl reads its own flags but never parses the request it sends. It
+    // joins the rest of its arguments behind a '/' and picks the request by
+    // looking for text anywhere in the result: "/--batch" sends a batch that
+    // Hyprland splits at ';' (0.56 also groups with '[' and ']', and newer
+    // code escapes with '\' instead), "/hyprpaper" and "/hyprsunset" go to
+    // another program's socket, and "/instances" sends nothing. A special
+    // workspace's name is the one part of a move Polaris does not write
+    // itself, and hyprctl can only select a special workspace by that name,
+    // so a name holding any of these is never handed to it.
+    constexpr std::array request_syntax {
+      request_syntax_t {"/", "'/', which hyprctl reads as the start of a request name"},
+      request_syntax_t {";", "';', which ends a command in a hyprctl batch"},
+      request_syntax_t {"--", "'--', which spells a hyprctl flag such as --batch"},
+      request_syntax_t {"\\", "'\\', which a hyprctl batch reads as an escape"},
+      request_syntax_t {"[", "'[', which a hyprctl batch reads as grouping"},
+      request_syntax_t {"]", "']', which a hyprctl batch reads as grouping"},
+    };
 
     bool owner_is_alive(int owner_pid) {
       if (owner_pid <= 0) {
@@ -140,15 +164,49 @@ namespace desktop_takeover {
       return parse_workspaces(root->dump());
     }
 
-    bool dispatch(const std::vector<std::string> &arguments) {
-      std::vector<std::string> argv {"hyprctl", "dispatch"};
-      argv.insert(argv.end(), arguments.begin(), arguments.end());
+    bool hyprctl_exits_zero(const std::vector<std::string> &argv) {
       const auto result = platf::run_process_argv_capture(
         argv,
         helper_timeout,
         4096
       );
       return result.exit_status == 0 && !result.timed_out && !result.truncated;
+    }
+
+    // Classic `hyprctl dispatch A B` is evaluated by a Hyprland with a Lua
+    // config as the Lua expression `hl.dispatch(A B)`, so every dispatch
+    // fails with a Lua syntax error (rc=7) and takeover could neither begin
+    // nor restore there. A dispatcher is an hl.dsp.* object run through
+    // hl.dispatch, delivered by `hyprctl eval`. Older Hyprland rejects the
+    // eval as an unknown dispatcher, so the classic form stays first and the
+    // second hyprctl spawn is paid only where the first one already failed.
+    // The retry needs Hyprland 0.56+: its hyprctl is the first that exits
+    // nonzero on an error reply, so on 0.55 the classic form never reads as
+    // failed and this fallback never engages.
+    bool dispatch(const std::vector<std::string> &arguments) {
+      std::vector<std::string> argv {"hyprctl", "dispatch"};
+      argv.insert(argv.end(), arguments.begin(), arguments.end());
+      if (hyprctl_exits_zero(argv)) {
+        return true;
+      }
+      const auto dispatcher = lua_dispatcher(arguments);
+      if (dispatcher.has_value() &&
+          hyprctl_exits_zero({"hyprctl", "eval", "hl.dispatch(" + *dispatcher + ")"})) {
+        return true;
+      }
+      std::string dispatch_line;
+      for (const auto &argument : arguments) {
+        if (!dispatch_line.empty()) {
+          dispatch_line += ' ';
+        }
+        dispatch_line += argument;
+      }
+      BOOST_LOG(error) << "Desktop Takeover hyprctl dispatch ["sv << dispatch_line
+                       << "] failed: classic form rejected and "
+                       << (dispatcher.has_value()
+                              ? "the `hyprctl eval` form exited nonzero too"sv
+                              : "takeover has no hl.dsp.* translation to retry it with"sv);
+      return false;
     }
 
     bool set_dpms(std::string_view monitor, bool enabled) {
@@ -295,7 +353,14 @@ namespace desktop_takeover {
         workspace.id = item["id"].get<std::int64_t>();
         workspace.name = item["name"].get<std::string>();
         workspace.monitor = item["monitor"].get<std::string>();
-        if (!safe_token(workspace.monitor) || !workspace_selector(workspace)) {
+        if (item.contains("windows") && item["windows"].is_number_integer()) {
+          workspace.windows = item["windows"].get<int>();
+        }
+        // A special workspace whose name hyprctl would misread is still a
+        // well-formed report. begin() leaves it where it is, and restore()
+        // has to see it to know it is not one to move.
+        if (!safe_token(workspace.monitor) ||
+            (!workspace_selector(workspace) && !special_workspace_refusal(workspace))) {
           return std::nullopt;
         }
         workspaces.emplace_back(std::move(workspace));
@@ -356,12 +421,26 @@ namespace desktop_takeover {
           item["name"].get<std::string>(),
           item["monitor"].get<std::string>(),
         };
-        if (!safe_token(workspace.monitor) || !workspace_selector(workspace)) {
+        if (!safe_token(workspace.monitor)) {
+          return std::nullopt;
+        }
+        // An older build could record a special workspace whose name hyprctl
+        // reads as request syntax. Refusing the whole record would leave the
+        // monitors dark and every other workspace where the takeover put it,
+        // so recovery replays the rest and leaves that one where it is, as a
+        // takeover started now would. Its name is never handed to hyprctl.
+        if (special_workspace_refusal(workspace)) {
+          continue;
+        }
+        if (!workspace_selector(workspace)) {
           return std::nullopt;
         }
         state.workspaces.emplace_back(std::move(workspace));
       }
-      if (state.monitors.empty() || state.workspaces.empty()) {
+      // A takeover of a desktop with no windowed workspaces records none,
+      // and that record must survive a crash: recovery has monitors to power
+      // back on even with nothing to place.
+      if (state.monitors.empty()) {
         return std::nullopt;
       }
       return state;
@@ -401,13 +480,64 @@ namespace desktop_takeover {
     return state.has_value() && !state->active;
   }
 
+  std::optional<std::string> special_workspace_refusal(const workspace_state_t &workspace) {
+    if (workspace.id >= 0 || !workspace.name.starts_with("special:") ||
+        !safe_token(workspace.name)) {
+      return std::nullopt;
+    }
+    for (const auto &syntax : request_syntax) {
+      if (workspace.name.find(syntax.text) != std::string::npos) {
+        return "its name has " + std::string {syntax.meaning};
+      }
+    }
+    return std::nullopt;
+  }
+
   std::optional<std::string> workspace_selector(const workspace_state_t &workspace) {
     if (workspace.id > 0) {
       return std::to_string(workspace.id);
     }
     if (workspace.id < 0 && workspace.name.starts_with("special:") &&
-        safe_token(workspace.name)) {
+        safe_token(workspace.name) && !special_workspace_refusal(workspace)) {
       return workspace.name;
+    }
+    return std::nullopt;
+  }
+
+  std::optional<std::string> lua_dispatcher(const std::vector<std::string> &arguments) {
+    // The quoting below is only as trustworthy as its input is nameable:
+    // refuse anything safe_token refuses, so a caller that skips its own
+    // validation cannot smuggle control characters into the eval string.
+    for (const auto &argument : arguments) {
+      if (!safe_token(argument)) {
+        return std::nullopt;
+      }
+    }
+    const auto lua_quote = [](std::string_view value) {
+      std::string quoted = "\"";
+      for (const char ch : value) {
+        if (ch == '\\' || ch == '"') {
+          quoted += '\\';
+        }
+        quoted += ch;
+      }
+      quoted += '"';
+      return quoted;
+    };
+
+    // Only the dispatches takeover issues; a new one is a translation to write
+    // deliberately, not a pattern to guess at.
+    if (arguments.size() == 3 && arguments.front() == "dpms" &&
+        (arguments[1] == "on" || arguments[1] == "off")) {
+      // The table form is load-bearing: a bare string argument is not parsed
+      // as `on <monitor>` but ignored, and the dispatcher then toggles every
+      // monitor Polaris did not ask about.
+      return "hl.dsp.dpms({ action = \"" + arguments[1] + "\", monitor = " +
+             lua_quote(arguments[2]) + " })";
+    }
+    if (arguments.size() == 3 && arguments.front() == "moveworkspacetomonitor") {
+      return "hl.dsp.workspace.move({ workspace = " + lua_quote(arguments[1]) +
+             ", monitor = " + lua_quote(arguments[2]) + " })";
     }
     return std::nullopt;
   }
@@ -432,9 +562,20 @@ namespace desktop_takeover {
       });
       return found == current.end() || found->monitor == expected.monitor;
     });
-    return recorded_restored && std::none_of(current.begin(), current.end(), [&](const auto &workspace) {
-      return workspace.monitor == state.target_output;
+    // Hyprland backfills a fresh empty workspace the moment the last one
+    // leaves an output, so an unrecorded empty workspace on the target is not
+    // a stuck restore — it is the placeholder that dies with the output when
+    // the virtual display is torn down. Anything holding a window must move.
+    const bool target_clear = std::all_of(current.begin(), current.end(), [&](const auto &workspace) {
+      if (workspace.monitor != state.target_output || special_workspace_refusal(workspace)) {
+        return true;
+      }
+      const bool recorded = std::any_of(state.workspaces.begin(), state.workspaces.end(), [&](const auto &original) {
+        return original.id == workspace.id && original.name == workspace.name;
+      });
+      return !recorded && workspace.windows == 0;
     });
+    return recorded_restored && target_clear;
   }
 
   bool is_available() {
@@ -505,13 +646,15 @@ namespace desktop_takeover {
       return names;
     }();
     for (const auto &workspace : *observed_workspaces) {
-      if (source_names.contains(workspace.monitor)) {
-        state.workspaces.push_back(workspace);
+      if (!source_names.contains(workspace.monitor) || workspace.windows <= 0) {
+        continue;
       }
-    }
-    if (state.workspaces.empty()) {
-      result.error = "Desktop Takeover found no live workspace on the physical monitors.";
-      return result;
+      if (const auto refusal = special_workspace_refusal(workspace)) {
+        BOOST_LOG(info) << "Desktop Takeover leaves special workspace ["sv << workspace.name
+                        << "] on ["sv << workspace.monitor << "]: "sv << *refusal;
+        continue;
+      }
+      state.workspaces.push_back(workspace);
     }
     if (!persist(state)) {
       result.error = "Desktop Takeover could not durably record the layout; no display changes were made.";
@@ -534,8 +677,41 @@ namespace desktop_takeover {
         return rollback("Desktop Takeover could not move every workspace; Polaris is restoring the prior layout.");
       }
     }
-    const auto moved_workspaces = observe_workspaces();
-    if (!moved_workspaces || !takeover_layout_matches(state, *moved_workspaces)) {
+    // A single observation is not proof of placement: a dispatch Hyprland
+    // accepted is not necessarily reflected in the next JSON read, and a
+    // compositor busy with a fresh session can serve stale reads. Restore
+    // settles the same way — require two consecutive matching observations
+    // before the layout counts as placed.
+    bool placement_verified = false;
+    int consecutive_matches = 0;
+    const auto placement_deadline = std::chrono::steady_clock::now() + std::chrono::seconds {4};
+    for (int attempt = 0; attempt < 20 && std::chrono::steady_clock::now() < placement_deadline; ++attempt) {
+      const auto observed = observe_workspaces();
+      if (observed && takeover_layout_matches(state, *observed)) {
+        if (++consecutive_matches >= 2) {
+          placement_verified = true;
+          break;
+        }
+      } else {
+        consecutive_matches = 0;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds {50});
+    }
+    if (!placement_verified) {
+      const auto observed = observe_workspaces();
+      if (observed) {
+        std::string observed_line;
+        for (const auto &workspace : *observed) {
+          if (!observed_line.empty()) {
+            observed_line += ' ';
+          }
+          observed_line += workspace.name + "@" + workspace.monitor;
+        }
+        BOOST_LOG(error) << "Desktop Takeover placement never verified; observed ["sv << observed_line
+                         << "] but every recorded workspace belongs on ["sv << state.target_output << "]"sv;
+      } else {
+        BOOST_LOG(error) << "Desktop Takeover placement never verified; Hyprland workspaces could not be read"sv;
+      }
       return rollback("Desktop Takeover could not verify workspace placement; Polaris is restoring the prior layout.");
     }
 
@@ -589,7 +765,14 @@ namespace desktop_takeover {
       const bool recorded = std::any_of(state.workspaces.begin(), state.workspaces.end(), [&](const auto &original) {
         return original.id == workspace.id && original.name == workspace.name;
       });
-      if (!recorded && workspace.monitor == state.target_output) {
+      // Empty unrecorded placeholders need not move; Hyprland recreates them.
+      if (!recorded && workspace.monitor == state.target_output && workspace.windows > 0) {
+        if (const auto refusal = special_workspace_refusal(workspace)) {
+          BOOST_LOG(info) << "Desktop Takeover leaves special workspace ["sv << workspace.name
+                          << "] on ["sv << state.target_output
+                          << "] for Hyprland to move when that output closes: "sv << *refusal;
+          continue;
+        }
         commands_succeeded = move_workspace(workspace, state.fallback_monitor) && commands_succeeded;
       }
     }

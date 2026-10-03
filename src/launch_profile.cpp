@@ -3,6 +3,7 @@
 #include "config.h"
 
 #include "device_db.h"
+#include "stream_bitrate.h"
 #include "utility.h"
 
 #include <algorithm>
@@ -89,7 +90,7 @@ namespace launch_profile {
 
     fields.width = bounded_integer("width", 320, 16384);
     fields.height = bounded_integer("height", 240, 16384);
-    fields.bitrate_kbps = bounded_integer("bitrate_kbps", 1000, 300000);
+    fields.bitrate_kbps = bounded_integer("bitrate_kbps", stream_bitrate::k_min_request_kbps, stream_bitrate::k_max_request_kbps);
     fields.fps_millihertz = bounded_fps("fps", 15, 240);
     fields.client_max_fps_millihertz = bounded_fps("client_max_fps", 15, 360);
     fields.display_locked = exact_flag("display_locked");

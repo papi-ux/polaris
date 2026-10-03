@@ -15,6 +15,7 @@
 #include "logging.h"
 #include "nvhttp.h"
 #include "process.h"
+#include "launch_failure.h"
 #include "utility.h"
 #include "video.h"
 
@@ -570,7 +571,27 @@ namespace browser_stream {
     }
 
     bool launch_isolated_app(const proc::ctx_t &app, std::string &error_out) {
-      if (!private_runtime_configured()) {
+      launch_failure::clear();
+      const auto pin = stream_display_policy::resolve_app_launch_as(app.launch_as, {});
+      if (pin.verdict == stream_display_policy::app_launch_as_t::verdict_e::not_a_launch_mode &&
+          proc::refuse_app_launch_as_before_launch(app, {})) {
+        error_out = launch_failure::status_message(*launch_failure::pending);
+        return false;
+      }
+      const auto *path = stream_path::find(pin.selection);
+      const bool private_pin = path && path->runtime != stream_path::runtime_kind_e::NONE;
+      if (app.launch_as != "host_default" && !private_pin) {
+        launch_failure::refuse(503, "app_launch_mode_unavailable",
+          "Browser Stream runs apps only in a private session, and this app is set to launch as " + stream_display_policy::label_for_selection(app.launch_as) + ".",
+          "Stream it from Nova or Moonlight, or change Launch as for this app in the Polaris console.");
+        error_out = launch_failure::status_message(*launch_failure::pending);
+        return false;
+      }
+      if (proc::refuse_app_launch_as_before_launch(app, {})) {
+        error_out = launch_failure::status_message(*launch_failure::pending);
+        return false;
+      }
+      if (!private_pin && !private_runtime_configured()) {
         error_out = "Browser Stream app isolation requires a Linux private runtime (labwc cage or gamescope).";
         return false;
       }
@@ -599,6 +620,7 @@ namespace browser_stream {
         error_out = err == 503 ?
           "Browser Stream could not initialize the isolated capture runtime." :
           "Browser Stream could not start the selected application.";
+        if (launch_failure::pending) error_out = launch_failure::status_message(*launch_failure::pending);
         return false;
       }
 
@@ -1896,6 +1918,7 @@ namespace browser_stream {
       output["status"] = false;
       output["error"] = launch_error;
       output["state"] = "app_launch_failed";
+      if (const auto refusal = launch_failure::take()) output["error_code"] = refusal->code;
       return output;
     }
 
