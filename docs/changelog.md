@@ -556,9 +556,11 @@ starts at `v1.0.0`.
   bitrate. In constant bitrate, both drivers pad frames with filler data up to the target, and
   FFmpeg has no option to turn it off, so an idle desktop at 20 Mbps sent 20 Mbps, 99.8% of it
   filler. A decoder discards filler data, so Polaris now removes it from each frame before sending:
-  on an RX 7900 XTX the same still screen sends about 0.04 Mbps, and every decoded picture is
-  identical. This covers VA-API and Vulkan, whose default rate control is constant bitrate. AV1 was
-  never padded.
+  in the [earlier RX 7900 XTX encoder-output tests](https://github.com/papi-ux/polaris/pull/785),
+  a synthetic still screen at 1080p60 fell from 20 Mbps to about 0.04 Mbps, with every decoded picture
+  identical. That driver-output test did not include a live Moonlight or Nova stream. It covered
+  VA-API and Vulkan, whose default rate control is constant bitrate; other AMD generations were
+  not tested in that report. AV1 was never padded.
 
 - A Space that could not be created says why in the host log. The client is still answered with
   `spaces_change_not_saved`, which the Spaces page reads, and the log now names the check that
@@ -571,8 +573,10 @@ starts at `v1.0.0`.
   the exception said, where it used to log only that it failed.
 
 - On AMD, Auto tries Vulkan Video first on Gamescope Stream captured through the portal (#635),
-  where it used to try VA-API alone and never probed Vulkan Video at all. On the reporter's RX 9070
-  XT at 4K60, Vulkan Video took 9 ms a frame there against VA-API's 16 ms, and held it under load.
+  where it used to try VA-API alone and never probed Vulkan Video at all. The [historical reporter's
+  RX 9070 XT readings](https://github.com/papi-ux/polaris/issues/635) at 4K60 were host processing
+  latency of 9 ms with Vulkan Video and 16 ms with VA-API, not encoder-only frame timings.
+  These are the reporter's earlier measurements, not a new beta benchmark.
   The portal hands Vulkan Video every frame in system memory, and the encoder probe runs that same
   upload, so a probe that fails falls back to VA-API as before. Vulkan Video offers less on this
   route. AV1 is the trade: it carries none in this build, so a client that preferred AV1 loses it,

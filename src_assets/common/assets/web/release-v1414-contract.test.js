@@ -202,7 +202,12 @@ describe('v1.4.14 release contract', () => {
     // A tunnel that carries Ethernet, ZeroTier or an OpenVPN tap, still reports its own MAC.
     expect(notes).toContain('another tunnel with no MAC of its own')
     expect(notes).toContain("the TV figure hasn't been checked on a big screen yet, and Doctor's 300 Mbps ceiling may move")
-    expect(notes).toContain("9 ms a frame against VA-API's 16 on one tester's RX 9070 XT at 4K60")
+    expect(notes).toContain('host processing latency of 9 ms with Vulkan Video and 16 ms with VA-API')
+    expect(notes).toContain('not a new beta benchmark or an encoder-only measurement')
+    expect(notes).toContain('https://github.com/papi-ux/polaris/issues/635')
+    expect(notes).toContain('earlier RX 7900 XTX encoder-output tests')
+    expect(notes).toContain('not a live game-stream measurement')
+    expect(notes).toContain('https://github.com/papi-ux/polaris/pull/785')
     // Doctor's verdict holds over the network judge's window, and its band.
     expect(notes).toContain(
       'It now judges video frame loss and round trip time over the last 20 seconds, calls loss network ' +
