@@ -1218,11 +1218,21 @@ TEST(SourceSafetyContracts, VirtualDisplayTeardownKeepsRecoveryUntilExactReadbac
   EXPECT_LT(stable_absence, stable_window);
   EXPECT_LT(stable_window, mark_inactive);
 
-  const auto process_destroy = process.find("if (virtual_display::destroy(*linux_vdisplay))");
-  const auto process_reset = process.find("linux_vdisplay.reset()", process_destroy);
+  const auto process_destroy_adapter = process.find("const auto destroy_display = [](virtual_display::vdisplay_t &display) {");
+  const auto process_destroy = process.find("return virtual_display::destroy(display);", process_destroy_adapter);
+  const auto process_verified_destroy = process.find("if (destroy_display(*linux_vdisplay)) {", process_destroy);
+  const auto process_reset = process.find("linux_vdisplay.reset()", process_verified_destroy);
+  ASSERT_NE(process_destroy_adapter, std::string::npos);
   ASSERT_NE(process_destroy, std::string::npos);
+  ASSERT_NE(process_verified_destroy, std::string::npos);
   ASSERT_NE(process_reset, std::string::npos);
-  EXPECT_LT(process_destroy, process_reset);
+  EXPECT_LT(process_destroy_adapter, process_destroy);
+  EXPECT_LT(process_destroy, process_verified_destroy);
+  EXPECT_LT(process_verified_destroy, process_reset);
+  EXPECT_EQ(
+    process.find("if (destroy_display(*linux_vdisplay)) {\n        linux_vdisplay.reset();", process_destroy),
+    process_verified_destroy
+  );
 }
 
 TEST(SourceSafetyContracts, AWatcherHoldsNoControllerOfItsOwn) {
