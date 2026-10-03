@@ -3996,6 +3996,8 @@ namespace proc {
     thread_local pid_t forced_desktop_steam_proc_read_error_pid = -1;
     thread_local pid_t forced_desktop_steam_proc_environ_read_error_pid = -1;
     thread_local pid_t forced_desktop_steam_scan_only_pid = -1;
+    // Not thread_local: a launch route under test answers on its server's thread.
+    std::atomic<desktop_steam_double_t *> desktop_steam_double {nullptr};
 #endif
 
     // Steam's client singleton is a FIFO at ~/.steam/steam.pipe: every
@@ -4124,6 +4126,11 @@ namespace proc {
     }
 
     bool desktop_steam_client_active_impl() {
+#ifdef POLARIS_TESTS
+      if (const auto *steam = desktop_steam_double.load()) {
+        return steam->running.load();
+      }
+#endif
       DIR *dir = nullptr;
 #ifdef POLARIS_TESTS
       if (forced_desktop_steam_proc_open_error) {
@@ -6151,6 +6158,12 @@ namespace proc {
   }
 
   bool request_desktop_steam_shutdown_for_private_stream() {
+#ifdef POLARIS_TESTS
+    auto *steam_double = desktop_steam_double.load();
+    if (steam_double) {
+      ++steam_double->close_requests;
+    }
+#endif
     // Under Game Mode the running Steam is the session itself. Closing it ends Game Mode for
     // whoever is holding the device, so nothing that reaches this function may do it there:
     // not a forced Private Stream, not a per-app setting, not Doctor.
@@ -6158,6 +6171,14 @@ namespace proc {
       BOOST_LOG(warning) << "process: refusing to close Steam because it is running Steam Game Mode on this host";
       return false;
     }
+#ifdef POLARIS_TESTS
+    if (steam_double) {
+      if (steam_double->closes_when_asked) {
+        steam_double->running = false;
+      }
+      return !steam_double->running;
+    }
+#endif
     const auto pipe_path = steam_instance_pipe_path();
     if (!pipe_path) {
       BOOST_LOG(warning) << "process: cannot determine Steam singleton path; refusing Steam shutdown handoff";
@@ -6592,6 +6613,10 @@ namespace proc {
     });
     forced_desktop_steam_scan_only_pid = forced_pid;
     return desktop_steam_client_active_impl();
+  }
+
+  void set_desktop_steam_double_for_tests(desktop_steam_double_t *steam) {
+    desktop_steam_double.store(steam);
   }
 
   bool cage_mangohud_allowed_for_session_for_tests(const proc::ctx_t &app,
@@ -12153,6 +12178,22 @@ namespace proc {
 
   void proc_t::finish_session_stop_for_tests(bool committed) {
     _session_lifecycle_gate->finish_stop(committed);
+  }
+
+  void proc_t::set_running_app_for_tests(const ctx_t &app) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    _app = app;
+    _app_id = static_cast<int>(util::from_view(app.id));
+    placebo = true;
+  }
+
+  void proc_t::clear_running_app_for_tests() {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    _app = ctx_t {};
+    _app_id = 0;
+    placebo = false;
   }
 #endif
 

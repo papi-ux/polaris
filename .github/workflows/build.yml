@@ -1446,6 +1446,9 @@ jobs:
 
       - name: Install and launch on a minimal Ubuntu 24.04
         timeout-minutes: 10
+        # A step in a container runs under sh unless it names a shell, and this image's sh is dash.
+        # dash has no pipefail, so set -euo pipefail ended the step before its first command.
+        shell: bash
         run: |
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive

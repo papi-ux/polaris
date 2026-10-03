@@ -160,6 +160,9 @@ Everything else is set on the host, where it applies to every Moonlight launch:
 - **The device's Display Profile**, under **Devices, Edit Access**, pins what that one device gets:
   a display mode in place of the one it asks for, a host output, the color range and HDR
   ([Editing a device](devices.md#editing-a-device)).
+- **Close Steam on the host to start games**, in the same editor and off until you turn it on,
+  lets a Moonlight launch of a Steam game quit desktop Steam on a Linux host instead of being
+  refused, which Moonlight cannot ask for itself.
 - **Live Tuning**, in Quick Controls on Mission Control, tunes a Moonlight stream's bitrate from the
   host, and Mission Control shows the result live. Doctor there names the limiting stage from
   network and host evidence.
