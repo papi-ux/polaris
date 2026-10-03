@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -2027,35 +2028,46 @@ TEST(ProcessRuntimeConfigTests, SteamPidfdCaptureRejectsStartTimeMismatch) {
 }
 
 TEST(ProcessRuntimeConfigTests, GamescopeAttachedAuthorityFailsClosedAndRetriesTransientEmptyEnviron) {
+  test_log_capture_t log;
   int ready_pipe[2] {-1, -1};
   ASSERT_EQ(pipe(ready_pipe), 0);
+  linux_fd_guard_t ready_read {ready_pipe[0]};
+  linux_fd_guard_t ready_write {ready_pipe[1]};
   const pid_t child = fork();
   ASSERT_GE(child, 0);
   if (child == 0) {
     if (setsid() < 0) _exit(124);
-    close(ready_pipe[0]);
-    if (dup2(ready_pipe[1], 3) < 0) {
-      _exit(126);
+    close(ready_read.fd);
+    if (ready_write.fd != 3) {
+      if (dup2(ready_write.fd, 3) < 0) _exit(126);
+      close(ready_write.fd);
     }
-    close(ready_pipe[1]);
     execl(
       "/usr/bin/env",
       "env",
       "GAMESCOPE_WAYLAND_DISPLAY=gamescope-0",
       "STEAM_COMPAT_APP_ID=4242",
       "POLARIS_SESSION_INSTANCE_ID=gamescope-attached-test",
-      "/bin/sh",
+      "/usr/bin/python3",
       "-c",
-      "printf x >&3; exec /usr/bin/tail -f /dev/null",
+      // Signal readiness from the final executable, with the session credential already
+      // in its exec environment. A shell announcing readiness before exec races /proc.
+      "import os, signal\nos.write(3, b'x')\nos.close(3)\nwhile True: signal.pause()",
       static_cast<char *>(nullptr)
     );
     _exit(127);
   }
   linux_child_guard_t child_guard {child};
-  close(ready_pipe[1]);
+  close(ready_write.fd);
+  ready_write.fd = -1;
+  ASSERT_TRUE(wait_for_fd_event(ready_read.fd, POLLIN, std::chrono::seconds(2)))
+    << "owned final executable did not become ready";
   char ready = 0;
-  ASSERT_EQ(read(ready_pipe[0], &ready, 1), 1);
-  close(ready_pipe[0]);
+  ASSERT_EQ(read(ready_read.fd, &ready, 1), 1);
+  ASSERT_EQ(ready, 'x');
+  const int child_fd = static_cast<int>(syscall(SYS_pidfd_open, child, 0));
+  ASSERT_GE(child_fd, 0);
+  linux_fd_guard_t child_pidfd {child_fd};
 
   EXPECT_FALSE(proc::terminate_gamescope_attached_clients_for_tests("4242", child));
   EXPECT_EQ(kill(child, 0), 0) << "PID-reuse simulation signalled the captured process";
@@ -2063,8 +2075,12 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedAuthorityFailsClosedAndRetriesT
   EXPECT_FALSE(proc::terminate_gamescope_attached_clients_for_tests("4242", -1, child));
   EXPECT_EQ(kill(child, 0), 0) << "unreadable live candidate allowed partial pidfd signaling";
 
-  EXPECT_TRUE(proc::terminate_gamescope_attached_clients_for_tests("4242", -1, -1, child))
-    << "one transient empty environ read did not recover within the bounded capture retry";
+  // A failed capture must fail the test and unwind the owned child guard, rather than
+  // entering a blocking wait for a child that production deliberately kept alive.
+  ASSERT_TRUE(proc::terminate_gamescope_attached_clients_for_tests("4242", -1, -1, child))
+    << "one transient empty environ read did not recover within the bounded capture retry\n" << log.text();
+  ASSERT_TRUE(wait_for_pidfd_exit(child_pidfd.fd, std::chrono::seconds(2)))
+    << "successful cleanup did not stop the owned child\n" << log.text();
   int status = 0;
   ASSERT_EQ(child_guard.wait(&status, 0), child);
   EXPECT_TRUE(WIFSIGNALED(status));
@@ -3380,6 +3396,113 @@ TEST(ProcessRuntimeConfigTests, NonCageDetachedGenerationCleanupReapsAlreadyExit
   GTEST_SKIP() << "Linux-only detached generation zombie cleanup";
 #endif
 }
+
+#ifdef __linux__
+namespace {
+  class HostVirtualOwnedShutdown: public testing::Test {
+  protected:
+    const std::string token = "hvd-owned-stop-252";
+    pid_t child = -1;
+    std::unique_ptr<linux_child_guard_t> child_guard;
+
+    void SetUp() override {
+      child = fork();
+      ASSERT_GE(child, 0);
+      if (child == 0) {
+        setenv("POLARIS_SESSION_INSTANCE_ID", token.c_str(), 1);
+        execl("/bin/sleep", "sleep", "60", nullptr);
+        _exit(127);
+      }
+      child_guard = std::make_unique<linux_child_guard_t>(child);
+      const auto expected = std::string("POLARIS_SESSION_INSTANCE_ID=") + token;
+      bool token_visible = false;
+      for (int attempt = 0; attempt < 40 && !token_visible; ++attempt) {
+        std::ifstream input("/proc/" + std::to_string(child) + "/environ", std::ios::binary);
+        const std::string environ(
+          (std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        token_visible = environ.find(expected) != std::string::npos;
+        if (!token_visible) std::this_thread::sleep_for(std::chrono::milliseconds(25));
+      }
+      ASSERT_TRUE(token_visible);
+    }
+  };
+}
+
+TEST_F(HostVirtualOwnedShutdown, FailedCaptureRetainsOutputAndExactLaunchContext) {
+  const auto stopped = proc::host_virtual_shutdown_for_tests(token, child, true, false);
+  ASSERT_TRUE(stopped.prepared);
+  EXPECT_FALSE(stopped.authority_rejected);
+  EXPECT_FALSE(stopped.stopped);
+  EXPECT_FALSE(stopped.completion_idle);
+  EXPECT_TRUE(stopped.output_retained);
+  EXPECT_TRUE(stopped.generation_retained);
+  EXPECT_TRUE(stopped.launch_owner_retained);
+  EXPECT_TRUE(stopped.app_retained);
+  EXPECT_TRUE(stopped.child_alive);
+  EXPECT_EQ(stopped.destroy_calls, 0);
+  EXPECT_EQ(stopped.revert_calls, 0);
+}
+
+TEST_F(HostVirtualOwnedShutdown, SameOwnerCanRetryAfterCaptureRecoversBeforeRemovingOutput) {
+  const auto stopped = proc::host_virtual_shutdown_for_tests(token, child, true, true);
+  ASSERT_TRUE(stopped.prepared);
+  ASSERT_TRUE(stopped.child_alive);
+  EXPECT_TRUE(stopped.retry_stopped);
+  EXPECT_TRUE(stopped.retry_output_removed);
+  EXPECT_TRUE(stopped.retry_context_retired);
+  EXPECT_EQ(stopped.retry_destroy_calls, 1);
+  EXPECT_TRUE(stopped.child_reaped_before_destroy);
+}
+
+TEST_F(HostVirtualOwnedShutdown, SuccessfulStopDrainsOwnedChildBeforeRemovingOutput) {
+  const auto stopped = proc::host_virtual_shutdown_for_tests(token, child, false, false);
+  ASSERT_TRUE(stopped.prepared);
+  EXPECT_FALSE(stopped.authority_rejected);
+  EXPECT_TRUE(stopped.stopped);
+  EXPECT_TRUE(stopped.completion_idle);
+  EXPECT_FALSE(stopped.child_alive);
+  EXPECT_FALSE(stopped.output_retained);
+  EXPECT_FALSE(stopped.generation_retained);
+  EXPECT_FALSE(stopped.launch_owner_retained);
+  EXPECT_FALSE(stopped.app_retained);
+  EXPECT_EQ(stopped.destroy_calls, 1);
+  EXPECT_TRUE(stopped.child_reaped_before_destroy);
+}
+
+TEST_F(HostVirtualOwnedShutdown, FailedOutputRemovalRetainsOwnerUntilSameOwnerRetrySucceeds) {
+  const auto stopped = proc::host_virtual_shutdown_for_tests(token, child, false, true, false, true);
+  ASSERT_TRUE(stopped.prepared);
+  EXPECT_FALSE(stopped.authority_rejected);
+  EXPECT_FALSE(stopped.stopped);
+  EXPECT_FALSE(stopped.completion_idle);
+  EXPECT_TRUE(stopped.output_retained);
+  EXPECT_TRUE(stopped.generation_retained);
+  EXPECT_TRUE(stopped.launch_owner_retained);
+  EXPECT_TRUE(stopped.app_retained);
+  EXPECT_FALSE(stopped.child_alive);
+  EXPECT_EQ(stopped.destroy_calls, 1);
+  EXPECT_EQ(stopped.revert_calls, 0);
+  EXPECT_TRUE(stopped.retry_stopped);
+  EXPECT_TRUE(stopped.retry_output_removed);
+  EXPECT_TRUE(stopped.retry_context_retired);
+  EXPECT_EQ(stopped.retry_destroy_calls, 2);
+  EXPECT_TRUE(stopped.child_reaped_before_destroy);
+}
+
+TEST_F(HostVirtualOwnedShutdown, ForeignOwnerCannotStopChildOrRemoveOutput) {
+  const auto stopped = proc::host_virtual_shutdown_for_tests(token, child, false, false, true);
+  ASSERT_TRUE(stopped.prepared);
+  EXPECT_TRUE(stopped.authority_rejected);
+  EXPECT_FALSE(stopped.stopped);
+  EXPECT_TRUE(stopped.child_alive);
+  EXPECT_TRUE(stopped.output_retained);
+  EXPECT_TRUE(stopped.generation_retained);
+  EXPECT_TRUE(stopped.launch_owner_retained);
+  EXPECT_TRUE(stopped.app_retained);
+  EXPECT_EQ(stopped.destroy_calls, 0);
+  EXPECT_EQ(stopped.revert_calls, 0);
+}
+#endif
 
 TEST(ProcessRuntimeConfigTests, NonCageDetachedCaptureFailureRetainsGenerationAndSendsNoSignal) {
 #ifdef __linux__

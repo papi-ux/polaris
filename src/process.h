@@ -625,6 +625,33 @@ namespace proc {
     std::string_view session_instance_id,
     pid_t forced_capture_failure_pid
   );
+  struct host_virtual_shutdown_test_result_t {
+    bool prepared = false;
+    bool stopped = false;
+    bool completion_idle = false;
+    bool authority_rejected = false;
+    bool output_retained = false;
+    bool generation_retained = false;
+    bool launch_owner_retained = false;
+    bool app_retained = false;
+    bool child_alive = false;
+    int destroy_calls = 0;
+    int revert_calls = 0;
+    bool child_reaped_before_destroy = false;
+    bool retry_stopped = false;
+    bool retry_output_removed = false;
+    bool retry_context_retired = false;
+    int retry_destroy_calls = 0;
+  };
+  host_virtual_shutdown_test_result_t host_virtual_shutdown_for_tests(
+    std::string_view session_instance_id,
+    pid_t child_pid,
+    bool force_capture_failure,
+    bool retry,
+    bool wrong_owner = false,
+    bool fail_first_destroy = false
+  );
+
   bool non_cage_detached_partial_launch_cleanup_for_tests(
     std::string_view session_instance_id,
     pid_t prior_child_pid
@@ -1138,6 +1165,15 @@ namespace proc {
       std::string_view session_instance_id,
       pid_t forced_capture_failure_pid
     );
+    host_virtual_shutdown_test_result_t host_virtual_shutdown_for_tests(
+      std::string_view session_instance_id,
+      pid_t child_pid,
+      bool force_capture_failure,
+      bool retry,
+      bool wrong_owner,
+      bool fail_first_destroy
+    );
+
     bool non_cage_detached_partial_launch_cleanup_for_tests(
       std::string_view session_instance_id,
       pid_t prior_child_pid
@@ -1244,6 +1280,9 @@ namespace proc {
     bool _session_used_cage_compositor = false;
     bool _session_used_gamescope_runtime = false;
     bool _exact_generation_cleanup_complete = true;
+    // An End request still owns the app/output until its exact generation can
+    // be drained. Kept separately from process liveness and launch authority.
+    bool _host_virtual_cleanup_pending = false;
     /// This teardown's private app phase ran before the compositor stopped, so the sweep after it
     /// is a check. Read and cleared by the generation cleanup.
     bool _private_apps_stopped_before_compositor = false;
