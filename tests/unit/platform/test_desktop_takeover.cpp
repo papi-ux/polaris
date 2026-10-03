@@ -30,6 +30,12 @@ TEST(DesktopTakeover, ParsesMonitorPowerAndWorkspacePlacement) {
   ASSERT_EQ(workspaces->size(), 2u);
   EXPECT_EQ(desktop_takeover::workspace_selector(workspaces->front()), "1");
   EXPECT_EQ(desktop_takeover::workspace_selector(workspaces->back()), "special:scratch");
+  EXPECT_EQ(workspaces->front().windows, 1) << "An unreported window count is treated as non-empty";
+
+  const auto counted = desktop_takeover::parse_workspaces(
+    R"json([{"id":5,"name":"5","monitor":"DP-3","windows":3}])json");
+  ASSERT_TRUE(counted);
+  EXPECT_EQ(counted->front().windows, 3);
 }
 
 TEST(DesktopTakeover, RejectsUnsafeOrUnaddressableWorkspaceIdentity) {
@@ -122,8 +128,8 @@ TEST(DesktopTakeover, ReportsARefusedSpecialWorkspaceAndNeverReplaysIt) {
   EXPECT_EQ(replayed->workspaces, movable) << "The refused name is never replayed to hyprctl";
 
   recorded.workspaces = {{-98, "special:a/--batch;x", "DP-3"}};
-  EXPECT_FALSE(desktop_takeover::parse_state(desktop_takeover::serialize_state(recorded)))
-    << "A record with nothing Polaris can move back is still malformed";
+  EXPECT_TRUE(desktop_takeover::parse_state(desktop_takeover::serialize_state(recorded)))
+    << "A record with physical monitors still restores power when no workspace is movable";
 
   recorded.workspaces = {{1, "1", "DP-3"}, {-99, "special:bad name", "DP-3"}};
   EXPECT_FALSE(desktop_takeover::parse_state(desktop_takeover::serialize_state(recorded)))
@@ -149,6 +155,29 @@ TEST(DesktopTakeover, RestoreLeavesARefusedSpecialWorkspaceToHyprland) {
   )) << "A special workspace Polaris can move must still be off the output first";
 }
 
+TEST(DesktopTakeover, RefusedSpecialAndEmptyPlaceholderMayCoexistAfterRestore) {
+  desktop_takeover::state_t state {
+    .active = true,
+    .target_output = "HEADLESS-POLARIS-42-1",
+    .fallback_monitor = "DP-3",
+    .monitors = {{"DP-3", true}},
+    .workspaces = {{1, "1", "DP-3"}},
+  };
+  const auto observed = desktop_takeover::parse_workspaces(R"json([
+    {"id":1,"name":"1","monitor":"DP-3","windows":2},
+    {"id":-98,"name":"special:a/--batch;x","monitor":"HEADLESS-POLARIS-42-1","windows":3},
+    {"id":9,"name":"9","monitor":"HEADLESS-POLARIS-42-1","windows":0}
+  ])json");
+  ASSERT_TRUE(observed);
+  EXPECT_TRUE(desktop_takeover::restored_layout_matches(state, *observed));
+  auto newly_windowed = *observed;
+  newly_windowed.back().windows = 1;
+  EXPECT_FALSE(desktop_takeover::restored_layout_matches(state, newly_windowed));
+  auto restored_to_wrong_output = *observed;
+  restored_to_wrong_output.front().monitor = state.target_output;
+  EXPECT_FALSE(desktop_takeover::restored_layout_matches(state, restored_to_wrong_output));
+}
+
 TEST(DesktopTakeover, RoundTripsDurableRecoveryState) {
   desktop_takeover::state_t expected {
     .owner_pid = 42,
@@ -168,6 +197,27 @@ TEST(DesktopTakeover, RoundTripsDurableRecoveryState) {
   EXPECT_EQ(parsed->fallback_monitor, expected.fallback_monitor);
   EXPECT_EQ(parsed->monitors, expected.monitors);
   EXPECT_EQ(parsed->workspaces, expected.workspaces);
+}
+
+TEST(DesktopTakeover, RoundTripsRecoveryStateWithNoWindowedWorkspaces) {
+  // A desktop with nothing open is taken over with no recorded workspaces;
+  // after a crash mid-session, recovery must still read the record and power
+  // the monitors back on rather than call the document malformed.
+  desktop_takeover::state_t expected {
+    .owner_pid = 42,
+    .active = true,
+    .target_output = "HEADLESS-POLARIS-42-1",
+    .fallback_monitor = "DP-3",
+    .monitors = {{"DP-3", true}},
+    .workspaces = {},
+  };
+  const auto parsed = desktop_takeover::parse_state(
+    desktop_takeover::serialize_state(expected)
+  );
+  ASSERT_TRUE(parsed);
+  EXPECT_TRUE(parsed->active);
+  EXPECT_EQ(parsed->monitors, expected.monitors);
+  EXPECT_TRUE(parsed->workspaces.empty());
 }
 
 TEST(DesktopTakeover, OnlyInactiveRecoveryDocumentMayBeReplaced) {
@@ -220,6 +270,89 @@ TEST(DesktopTakeover, VerifiesTakeoverAndRestoreByExactWorkspaceIdentity) {
     state,
     {{1, "1", "DP-3"}, {2, "2", "DP-3"}, {3, "3", state.target_output}}
   )) << "No newly created workspace may remain on an output Polaris will destroy";
+  EXPECT_TRUE(desktop_takeover::restored_layout_matches(
+    state,
+    {{1, "1", "DP-3"}, {2, "2", "DP-3"}, {3, "3", state.target_output, 0}}
+  )) << "Hyprland backfills an empty workspace the moment the last one leaves; it dies with the output";
+  EXPECT_FALSE(desktop_takeover::restored_layout_matches(
+    state,
+    {{1, "1", "DP-3"}, {2, "2", "DP-3"}, {3, "3", state.target_output, 2}}
+  )) << "A backfilled workspace that gained windows must still move off the target";
+}
+
+TEST(DesktopTakeover, TranslatesClassicDispatchIntoHyprlandLuaDispatchers) {
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"dpms", "on", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.dpms({ action = \"on\", monitor = \"DP-2\" })"}
+  );
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"dpms", "off", "DP-3"}),
+    std::optional<std::string> {"hl.dsp.dpms({ action = \"off\", monitor = \"DP-3\" })"}
+  );
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "2", "POLARIS-HEADLESS-42-0"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"2\", monitor = \"POLARIS-HEADLESS-42-0\" })"}
+  );
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "special:scratch", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"special:scratch\", monitor = \"DP-2\" })"}
+  );
+}
+
+TEST(DesktopTakeover, LuaDispatcherQuotesWorkspaceNamesItCannotTrust) {
+  // A named special workspace is free text; neither quote nor backslash may
+  // end the Lua string early or turn into an escape.
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "special:a\"b", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"special:a\\\"b\", monitor = \"DP-2\" })"}
+  );
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "special:a\\b", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"special:a\\\\b\", monitor = \"DP-2\" })"}
+  );
+}
+
+TEST(DesktopTakeover, LuaDispatcherRefusesDispatchesTakeoverNeverIssues) {
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "toggle", "DP-2"}));
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "on"}));
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"exec", "firefox"}));
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({}));
+}
+
+TEST(DesktopTakeover, LuaDispatcherRefusesArgumentsItCannotNameSafely) {
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "on", "DP-2\n"}));
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "on", "DP-2\r"}));
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "on", std::string {"DP-2\0", 5}}));
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "on", "DP-2\x7f"}));
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "on", "DP 2"}));
+  EXPECT_FALSE(desktop_takeover::lua_dispatcher({"dpms", "on", ""}));
+}
+
+TEST(DesktopTakeover, LuaDispatcherNeutralizesLuaEscapeAndBreakoutAttempts) {
+  // A leading backslash survives as literal text: the quoting escapes it, so
+  // Lua cannot read \z, \x22, \u{22} or \34 as an escape inside the string.
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "special:a\\z", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"special:a\\\\z\", monitor = \"DP-2\" })"}
+  );
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "special:a\\x22", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"special:a\\\\x22\", monitor = \"DP-2\" })"}
+  );
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "special:a\\u{22}", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"special:a\\\\u{22}\", monitor = \"DP-2\" })"}
+  );
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "special:a\\34", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"special:a\\\\34\", monitor = \"DP-2\" })"}
+  );
+  // Printable hostile input is nameable, so it must come back quoted shut
+  // rather than refused: the quotes are escaped and nothing after them runs.
+  EXPECT_EQ(
+    desktop_takeover::lua_dispatcher({"moveworkspacetomonitor", "x\")os.execute(\"id\")--", "DP-2"}),
+    std::optional<std::string> {"hl.dsp.workspace.move({ workspace = \"x\\\")os.execute(\\\"id\\\")--\", monitor = \"DP-2\" })"}
+  );
 }
 
 TEST(DesktopTakeover, InactiveTombstoneNeedsNoTopologyDetails) {

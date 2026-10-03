@@ -23,6 +23,9 @@ namespace desktop_takeover {
     std::int64_t id = 0;
     std::string name;
     std::string monitor;
+    // Window count from Hyprland; defaults to non-empty so an unreported count
+    // is moved off the target rather than left on an output Polaris destroys.
+    int windows = 1;
 
     bool operator==(const workspace_state_t &) const = default;
   };
@@ -74,6 +77,14 @@ namespace desktop_takeover {
   /** Stable Hyprland selector for a regular or named special workspace. */
   std::optional<std::string> workspace_selector(const workspace_state_t &workspace);
 
+  /**
+   * Translate a classic `hyprctl dispatch` argument vector into the hl.dsp.*
+   * dispatcher object expression a Hyprland with a Lua config evaluates, or
+   * nullopt when takeover issues no such dispatch or any argument fails the
+   * safe-token check.
+   */
+  std::optional<std::string> lua_dispatcher(const std::vector<std::string> &arguments);
+
   /** True when every recorded workspace is on the takeover target. */
   bool takeover_layout_matches(
     const state_t &state,
@@ -81,8 +92,8 @@ namespace desktop_takeover {
   );
 
   /**
-   * True when recorded workspaces are restored and none that Polaris can move
-   * remain on the target.
+   * True when recorded workspaces are restored and only empty unrecorded
+   * placeholders or refused special workspaces remain on the target.
    */
   bool restored_layout_matches(
     const state_t &state,
