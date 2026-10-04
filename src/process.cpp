@@ -10851,8 +10851,7 @@ namespace proc {
         auto detached_env = _env;
         bool desktop_steam_command = false;
 #ifdef __linux__
-        desktop_steam_command = _keep_desktop_steam &&
-          (command_is_steam_library_launch_component(cmd) || command_contains_steam_big_picture_open(cmd));
+        desktop_steam_command = _keep_desktop_steam && standalone_desktop_steam_launch(cmd);
         if (desktop_steam_command) {
           // Desktop Steam outlives the stream. Its bootstrap and children must not
           // carry the exact-generation credential that owns transient app cleanup.

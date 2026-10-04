@@ -17,6 +17,20 @@ TEST(DesktopSteamLifetime, OptInAndApplicationOverride) {
   EXPECT_THROW(proc::normalize_desktop_steam_lifetime("unknown"), std::invalid_argument);
 }
 
+TEST(DesktopSteamLifetime, StandaloneSteamLaunchCanOutliveTheStream) {
+  for (const auto command : {"steam -gamepadui", "setsid steam steam://open/bigpicture",
+                            "setsid -f steam steam://rungameid/620", "steam -applaunch 620"})
+    EXPECT_TRUE(proc::standalone_desktop_steam_launch(command)) << command;
+}
+
+TEST(DesktopSteamLifetime, ShellFollowupsAndUnrelatedCommandsRemainStreamOwned) {
+  for (const auto command : {"setsid bash -lc \"sleep 6; steam steam://rungameid/620\"",
+                            "setsid steam -gamepadui && sleep 600",
+                            "echo steam://open/bigpicture", "steam steam://rungameid/620; sleep 600",
+                            "steam -shutdown", "sleep 600"})
+    EXPECT_FALSE(proc::standalone_desktop_steam_launch(command)) << command;
+}
+
 TEST(DesktopSteamLifetime, PrivateAndGameModeNeverBorrowDesktopPolicy) {
   for (const auto mode : {"headless_stream", "windowed_stream", "gamescope_stream", "desktop_takeover", "headless_dongle"})
     EXPECT_FALSE(proc::keep_desktop_steam("keep", true, mode, false));

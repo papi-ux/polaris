@@ -1,10 +1,21 @@
 #pragma once
 
 #include <stdexcept>
+#include <regex>
 #include <string>
 #include <string_view>
 
 namespace proc {
+  inline bool standalone_desktop_steam_launch(const std::string &command) {
+    // Only the managed CLI launch can become desktop-owned. Shell follow-ups
+    // and custom scripts retain their generation stamp and stop with the stream.
+    static const std::regex launch {
+      R"(^[ \t]*(?:setsid[ \t]+(?:-f[ \t]+)?)?steam[ \t]+(?:-gamepadui|steam://open/bigpicture|steam://rungameid/[0-9]+|-applaunch[ \t]+[0-9]+)[ \t]*$)",
+      std::regex::icase
+    };
+    return std::regex_match(command, launch);
+  }
+
   inline std::string normalize_desktop_steam_lifetime(std::string_view policy) {
     if (policy.empty() || policy == "inherit") return "inherit";
     if (policy == "keep" || policy == "close") return std::string {policy};

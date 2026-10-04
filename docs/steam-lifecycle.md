@@ -4,6 +4,8 @@ For Host Virtual Display or Mirror Host Desktop, enable **Keep Desktop Steam Run
 
 This applies to Polaris's managed Steam launches. Detached commands run when an application starts; they are not exit hooks. Custom prep and undo scripts still run as configured.
 
+Standalone Steam launches can remain open. Delayed launch scripts and other detached commands still stop with the stream.
+
 With the keep option, End Session asks the Steam game this stream launched to close, then removes the stream output and leaves desktop Steam running. A game already open when the stream started is left alone. A restarted game is a different launch and is left alone too. If the game does not close, Polaris retains the stream's output and owner so End Session can be retried after closing the game. It does not force-kill the game.
 
 Without the keep option, Steam started by the stream follows the existing cleanup behavior. Desktop Steam already running before the stream remains desktop-owned. A game started by this stream inside that client is still asked to close.
