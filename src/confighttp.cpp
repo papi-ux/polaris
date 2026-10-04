@@ -10343,12 +10343,16 @@ namespace confighttp {
   }
 
   nlohmann::json augment_stream_stats_json(nlohmann::json stats_json, const stream_stats::stats_t &stats) {
+    const auto context = proc::proc.try_stream_stats_context();
     stats_json["tuning"] = settings_metadata::build_tuning_json(
       adaptive_bitrate::get_state(),
       stats,
-      proc::proc.current_app_has_mangohud()
+      context && context->mangohud_configured
     );
-    stats_json["auto_quality"] = nvhttp::auto_quality_status_json();
+    if (!context) {
+      stats_json["tuning"]["mangohud_configured"] = nullptr;
+    }
+    stats_json["auto_quality"] = nvhttp::auto_quality_status_json(stats, context);
     stats_json["live_tuning"] = live_tuning::snapshot(stats);
     return stats_json;
   }

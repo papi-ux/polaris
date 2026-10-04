@@ -591,6 +591,10 @@ namespace nvhttp {
    * @brief Host-view auto-quality policy built from the live session health.
    */
   nlohmann::json auto_quality_status_json();
+  /// Use the telemetry snapshot; a busy application lifecycle suppresses advice.
+  nlohmann::json auto_quality_status_json(
+    const stream_stats::stats_t &stats,
+    const std::optional<proc::stream_stats_context_t> &context);
 
   /**
    * @brief The encoder selection the web console's Doctor shows beside the live stream stats.

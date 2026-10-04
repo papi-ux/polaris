@@ -546,6 +546,7 @@ namespace proc {
     std::string_view session_instance_id
   );
   std::optional<std::uint64_t> proc_start_time_from_stat_for_tests(std::string_view stat);
+  bool proc_group_session_from_stat_matches_for_tests(std::string_view stat, pid_t process_group, pid_t session);
   bool steam_pidfd_capture_identity_matches_for_tests(
     std::optional<std::uint64_t> before,
     std::optional<std::uint64_t> after
@@ -990,6 +991,13 @@ namespace proc {
     bool encoder_backend_explicit = false;
   };
 
+  struct stream_stats_context_t {
+    bool mangohud_configured = false;
+    bool virtual_display = false;
+    std::string game;
+    std::string game_uuid;
+  };
+
   session_stop_outcome_t evaluate_session_stop_request(
     bool can_launch,
     bool has_running_app,
@@ -1140,6 +1148,8 @@ namespace proc {
     std::string get_running_app_uuid();
     /// The running generation's frozen app entry, unaffected by catalogue reloads.
     std::optional<ctx_t> running_app_context() const;
+    /// Telemetry must not wait for launch/teardown to release application state.
+    std::optional<stream_stats_context_t> try_stream_stats_context() const;
     std::string get_session_token();
     std::string get_session_owner_unique_id();
     std::shared_ptr<input::retained_gamepad_t> retained_gamepad_for_owner(const std::string &unique_id);

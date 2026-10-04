@@ -1807,8 +1807,11 @@ namespace proc {
       std::string state;
       pid_t parent_pid = -1;
       proc_group_session_t result {};
+      // Init's group/session can be 1 inside a PID namespace. This is readable
+      // membership, not cleanup authority; callers still require an exact
+      // credentialed leader and membership in its authorized freeze set.
       if (!(fields >> state >> parent_pid >> result.process_group >> result.session) ||
-          result.process_group <= 1 || result.session <= 1) {
+          result.process_group <= 0 || result.session <= 0) {
         return std::nullopt;
       }
       return result;
@@ -6947,6 +6950,11 @@ namespace proc {
 
   std::optional<std::uint64_t> proc_start_time_from_stat_for_tests(std::string_view stat) {
     return proc_start_time_from_stat(stat);
+  }
+
+  bool proc_group_session_from_stat_matches_for_tests(std::string_view stat, pid_t process_group, pid_t session) {
+    const auto parsed = proc_group_session_from_stat(stat);
+    return parsed && parsed->process_group == process_group && parsed->session == session;
   }
 
   bool steam_pidfd_capture_identity_matches_for_tests(
@@ -12885,6 +12893,20 @@ namespace proc {
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     if (_app_id == 0 || _app.uuid.empty() || !_launch_session) return std::nullopt;
     return _app;
+  }
+
+  std::optional<stream_stats_context_t> proc_t::try_stream_stats_context() const {
+    auto &sync = session_lifecycle_sync();
+    std::unique_lock<std::recursive_mutex> lifecycle_lock(sync.mutex, std::try_to_lock);
+    if (!lifecycle_lock.owns_lock()) {
+      return std::nullopt;
+    }
+    return stream_stats_context_t {
+      .mangohud_configured = !_app.uuid.empty() && env_flag_enabled(_app, _env, "MANGOHUD"),
+      .virtual_display = virtual_display,
+      .game = _app_name,
+      .game_uuid = _app.uuid,
+    };
   }
 
   std::string proc_t::get_session_token() {
