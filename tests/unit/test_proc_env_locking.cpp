@@ -73,7 +73,7 @@ TEST(ProcStreamStatsContext, CopiesApplicationMetadataUnderTheReentrantLock) {
   EXPECT_EQ(context->game, subject.get_last_run_app_name());
   EXPECT_EQ(context->game_uuid, app.uuid);
 
-  app.env["MANGOHUD"] = "0";
+  app.env_vars["MANGOHUD"] = "0";
   subject.set_running_app_for_tests(app);
   const auto overridden = subject.try_stream_stats_context();
   ASSERT_TRUE(overridden);
