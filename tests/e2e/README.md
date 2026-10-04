@@ -2,7 +2,25 @@
 
 Playwright smoke tests for the Polaris web UI. These exercise the control plane (login, dashboard render, config views) only — streaming/capture paths are not testable from a browser.
 
-## Running
+## Mocked frontend lane
+
+Run the fully mocked onboarding, manual-pairing, Live Tuning and update-channel
+cases against the current checkout:
+
+```
+npm run test:e2e:mocked
+```
+
+This lane builds clean assets from this checkout and starts its own Vite preview
+on `http://127.0.0.1:49386`. It needs no Polaris host or login credentials.
+Live-host URL variables and CMake source/destination overrides do not change its
+frontend. An existing server on that port causes a refusal rather than reuse.
+
+The lane checks browser behavior with synthetic API evidence; it does not accept
+host APIs, streaming, capture or a packaged host. Test assertions and retry policy
+are the same as before the lanes were separated.
+
+## Live-host lane
 
 Polaris must already be running with a configured password.
 
@@ -12,6 +30,11 @@ POLARIS_USER=your-user \
 POLARIS_PASS=your-password \
 npm run test:e2e
 ```
+
+These cases test the frontend assets served by that host, which can differ from
+the checkout containing the specs. Record the installed host's exact package and
+source before treating this as a source/host integration result. This lane
+excludes the fully mocked cases above; a live-host pass does not run them.
 
 First run also needs browsers installed:
 
