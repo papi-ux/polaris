@@ -213,6 +213,7 @@
             <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(postSessionReport.status).badge">{{ postSessionReport.issueOwner }}</span>
           </div>
           <p class="mt-2 text-sm leading-relaxed text-storm">{{ postSessionReport.mainIssue }}</p>
+          <p class="mt-2 text-xs leading-relaxed text-storm">{{ postSessionReport.evidenceSummary }}</p>
           <p class="mt-3 text-xs leading-relaxed text-ice">{{ $t('troubleshooting.post_session_next_launch', { profile: postSessionReport.suggestedNextLaunchProfile }) }}</p>
           <details class="mt-3 text-xs text-storm">
             <summary class="cursor-pointer text-ice">{{ $t('troubleshooting.advanced_evidence') }}</summary>
@@ -508,9 +509,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onBeforeUnmount, inject, watch } from 'vue'
+import { ref, computed, onBeforeUnmount, inject } from 'vue'
 import { useToast } from '../composables/useToast'
 import { useStreamStats } from '../composables/useStreamStats'
+import { usePostSessionReport } from '../composables/usePostSessionReport'
 import VirtualLogViewer from '../components/VirtualLogViewer.vue'
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
 import StatTile from '../components/StatTile.vue'
@@ -524,8 +526,6 @@ import {
   buildGithubIssueDraft,
   buildGithubIssueUrl,
   buildNetworkPathTestReport,
-  buildPostSessionStreamReport,
-  rememberJudgedNetworkVerdict,
   buildSupportSelfTestCopy,
   createExportAddressBook,
   redactSensitiveText,
@@ -588,12 +588,6 @@ const controllerEvents = ref([])
 const controllerRumbleSupported = ref(null)
 const nativeNetworkPathProbe = ref(null)
 const gamescopeHelperProbe = ref(null)
-const lastCompletedStreamStats = ref(null)
-const lastDisconnectReason = ref('')
-// The verdict the host last judged the live stream's loss on, and the one the completed session ended
-// with. The last live payloads of a session whose client dropped call the loss stale.
-const lastJudgedNetworkVerdict = ref(null)
-const lastCompletedJudgedVerdict = ref(null)
 
 const confirmedActions = computed(() => ({
   forceClose: {
@@ -774,12 +768,7 @@ const controllerInputReport = computed(() => buildControllerInputTestReport({
 
 const gamescopeHelperReport = computed(() => buildGamescopeHelperReport(gamescopeHelperProbe.value))
 
-const postSessionReport = computed(() => buildPostSessionStreamReport({
-  stats: lastCompletedStreamStats.value || streamStats.value || {},
-  logs: logs.value,
-  disconnectReason: lastDisconnectReason.value,
-  lastJudgedVerdict: lastCompletedStreamStats.value ? lastCompletedJudgedVerdict.value : lastJudgedNetworkVerdict.value,
-}))
+const postSessionReport = usePostSessionReport(streamStats, streamStatsConnected, logs)
 
 const supportSelfTestCopy = computed(() => buildSupportSelfTestCopy({
   network: networkPathReport.value,
@@ -820,15 +809,6 @@ function copySupportSelfTests() {
   navigator.clipboard.writeText(supportSelfTestCopy.value)
   showToast(i18n.t('troubleshooting.self_tests_copied'), 'success')
 }
-
-watch(streamStats, (next, previous) => {
-  lastJudgedNetworkVerdict.value = rememberJudgedNetworkVerdict(lastJudgedNetworkVerdict.value, next, previous)
-  if (previous?.streaming && next && !next.streaming) {
-    lastCompletedStreamStats.value = previous
-    lastCompletedJudgedVerdict.value = lastJudgedNetworkVerdict.value
-    lastDisconnectReason.value = 'Stream telemetry changed from active to idle.'
-  }
-}, { deep: true })
 
 function fixMyStreamStatusLabel(status) {
   if (status === 'pass') return i18n.t('troubleshooting.fix_my_stream_status_pass')

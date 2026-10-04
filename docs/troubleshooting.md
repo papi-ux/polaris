@@ -738,14 +738,19 @@ for a host stuck restoring a changed display configuration.
 The self tests on the Doctor & Support page answer three player questions without opening the raw
 evidence.
 
-- **Network Path Tester** reads the live round trip and packet loss for the current client, checks
-  whether the control and stream ports answer, and suggests a bitrate ceiling the measured path can
-  carry. Open **Advanced evidence** for the per-check detail and the native probe output.
+- **Network Path Tester** checks local listeners and records native UDP reachability hints, even
+  when no stream is active. It does not measure the client's media path or recommend a bitrate
+  ceiling. Open **Advanced evidence** for per-check detail and ungraded native probe samples.
 - **Controller/Input Tester** shows whether the browser or the host sees a controller. **Detect
   controller** samples the browser gamepad API, **Log A press** records a manual button sample, and
   **Test rumble** pulses haptics when the browser exposes them.
-- **Post-session Stream Report** summarises the last completed stream: the loudest signal, who owned
-  the issue, and the launch profile to try next.
+- **Post-session Stream Report** summarises a completed stream observed by this page. Quality is
+  historical, with availability recorded when the sample was captured, so it does not expire just
+  because you read the report later. Idle defaults, disconnected cached telemetry and simultaneous
+  clients do not establish a completed quality sample or assign client blame. Reopening the page
+  without observed telemetry can still show the host's retained capture facts; media quality stays
+  unavailable. Capture preference, requested route, initialization and delivered-frame metadata are
+  separate, as are a mode override and an actual fallback. Initialization alone proves no delivery.
 
 **Copy self-test summary** puts all three results on the clipboard in the same form the support
 bundle uses.

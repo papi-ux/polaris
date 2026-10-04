@@ -7,6 +7,11 @@ starts at `v1.0.0`.
 
 ## Unreleased
 
+- The post-session report labels captured quality as historical and keeps missing measurements
+  unavailable. An idle host no longer assigns client blame or reports default zero loss and encoder
+  timing. Retained capture facts stay visible when no historical quality sample was captured, and
+  quality from multiple clients is not attached to one client's ended session.
+
 - Desktop Takeover on Hyprland supports the Lua dispatcher interface and restores monitor power even when the desktop has no windows to move. The existing special-workspace safety checks stay in place. ([#783](https://github.com/papi-ux/polaris/pull/783))
 - Moonlight players can opt in to **Close Steam on the host to start games** for each paired device. It is off by default, asks desktop Steam to quit before a private Steam launch, and refuses the launch if Steam does not finish closing. It leaves SteamOS Game Mode and unsaved game state alone. Nova for Android keeps asking the player at launch. ([#797](https://github.com/papi-ux/polaris/pull/797))
 
