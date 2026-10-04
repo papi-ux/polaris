@@ -10,6 +10,8 @@ import {
   buildGithubIssueUrl,
   buildNetworkPathTestReport,
   buildPostSessionStreamReport,
+  buildStreamEvidence,
+  captureLiveSessionEvidence,
   rememberJudgedNetworkVerdict,
   buildSupportSelfTestCopy,
   createExportAddressBook,
@@ -19,6 +21,30 @@ import {
   redactSensitiveText,
   sanitizeDiagnosticsValue,
 } from './diagnostics-export.js'
+
+// These attribution cases model an observed, completed single-client stream. Supply the
+// explicit sample provenance; unavailable/default input is exercised through the real view.
+function buildCompletedReport({ stats = {}, logs = '', disconnectReason = '', lastJudgedVerdict = null } = {}) {
+  const observed = (values) => ({
+    streaming: true,
+    clients: [{ stream_instance_id: 'observed-session:1', fps: 120 }],
+    video_sample_revision: 20, video_policy_sample_count: 20,
+    media_loss_sample_revision: 20, media_loss_last_received_age_ms: 100,
+    network_sample_revision: 20, network_last_received_age_ms: 100,
+    ...values,
+    network_verdict: values.network_verdict ? {
+      loss_basis: 'video_frames_lost_after_fec', media_samples: 20, rtt_samples: 20, rtt_state: 'clean',
+      ...values.network_verdict,
+    } : undefined,
+  })
+  const previous = lastJudgedVerdict ? captureLiveSessionEvidence({
+    stats: observed({ network_verdict: lastJudgedVerdict }), connected: true,
+    capturedAt: '2026-10-04T01:00:00Z',
+  }) : null
+  const sample = captureLiveSessionEvidence({ stats: observed(stats), connected: true,
+    capturedAt: '2026-10-04T01:00:01Z', logs, previous })
+  return buildPostSessionStreamReport({ snapshot: sample ? { ...sample, origin: 'completed', disconnectReason } : null })
+}
 
 const crashedRun = {
   recorded: true,
@@ -277,6 +303,7 @@ describe('GitHub issue draft support flow', () => {
         session: { type: 'wayland', compositor: 'kwin_wayland' },
       },
       client: { type: 'Nova', name: 'Living Room Deck' },
+      stream_stats_connected: true,
       session_snapshot: {
         client_name: 'Nova',
         launch_mode: 'Private Stream',
@@ -284,11 +311,17 @@ describe('GitHub issue draft support flow', () => {
         capture_path: 'shm_cpu_capture',
         capture_path_reason: 'gpu_native_requested_shm_fallback',
         streaming: true,
+        clients: [{ stream_instance_id: 'observed-session:1', fps: 118.5 }],
+        video_sample_revision: 20,
+        video_policy_sample_count: 20,
+        media_loss_sample_revision: 20,
+        media_loss_last_received_age_ms: 100,
         fps: 118.5,
         session_target_fps: 120,
         bitrate_kbps: 45000,
         packet_loss: 2.4,
-        network_verdict: { loss_pct: 2.4, loss_state: 'elevated', frames_lost: 58, frames_expected: 2400, window_seconds: 20 },
+        network_verdict: { loss_basis: 'video_frames_lost_after_fec', media_samples: 20,
+          loss_pct: 2.4, loss_state: 'elevated', frames_lost: 58, frames_expected: 2400, window_seconds: 20 },
         encode_time_ms: 9.8,
         linux_gpu_profile: {
           encoder_adapter: '/dev/dri/renderD129',
@@ -495,6 +528,43 @@ describe('support report after a stream that failed to start', () => {
 })
 
 describe('Fix My Stream checklist', () => {
+  it('keeps a disconnected cached active snapshot out of both generated live summaries', () => {
+    const input = { stream_stats_connected: false, session_snapshot: {
+      streaming: true, fps: 120, bitrate_kbps: 45000, encode_time_ms: 4,
+      network_verdict: { loss_pct: 0, loss_state: 'clean' },
+    } }
+    expect(buildGithubIssueDraft(input)).toContain('Active stream: unverified — live telemetry unavailable')
+    expect(buildStreamEvidence(input).active_stream).toBe('unverified — live telemetry unavailable')
+  })
+
+  it('keeps warmup/default measurements unavailable in a connected active export', () => {
+    const input = { stream_stats_connected: true, session_snapshot: {
+      streaming: true, fps: 0, bitrate_kbps: 0, encode_time_ms: 0,
+      clients: [{ stream_instance_id: 'process:1', fps: 0 }], video_sample_revision: 0,
+      network_verdict: { loss_pct: 0, loss_state: 'clean' },
+    } }
+    const summary = buildStreamEvidence(input).active_stream
+    expect(summary).toBe('yes, unknown FPS / unknown target, unknown kbps, unknown video frame loss, unknown ms encode')
+    expect(buildGithubIssueDraft(input)).toContain(`Active stream: ${summary}`)
+  })
+
+  it('keeps a connected idle host informational without inventing measured zeros', () => {
+    const stats = {
+      streaming: false, fps: 0, encode_target_fps: 0, bitrate_kbps: 0, encode_time_ms: 0,
+      doctor: { primary_issue: 'no_active_stream', status: 'unknown', severity: 'info', simple_state: 'Waiting for a stream' },
+    }
+    const checklist = buildFixMyStreamChecklist({ statsConnected: true, stats })
+    for (const key of ['connection', 'packet-loss', 'capture-path', 'encoder-pressure']) {
+      expect(checklist.find((item) => item.key === key).status).toBe('info')
+    }
+    const draft = buildGithubIssueDraft({ session_snapshot: stats, fix_my_stream_checklist: checklist })
+    expect(draft).toContain('Waiting for a stream')
+    expect(draft).toContain('Active stream: no — live measurements unavailable')
+    expect(draft).not.toContain('0.0 FPS')
+    expect(draft).not.toContain('0.0 ms encode')
+    expect(draft).not.toContain('Suggested safe action: lower_bitrate')
+  })
+
   // The host's windowed verdict, as the stream stats serve it.
   const judged = (pct, state) => ({
     network_verdict: {
@@ -787,7 +857,7 @@ describe('Fix My Stream checklist', () => {
 
     const capture = buildFixMyStreamChecklist({ statsConnected: true, stats })
       .find((item) => item.key === 'capture-path')
-    const report = buildPostSessionStreamReport({ stats })
+    const report = buildCompletedReport({ stats })
 
     expect(capture.action).toContain('already attempted')
     expect(capture.action).not.toContain('Try Private Stream (GPU-native)')
@@ -810,7 +880,7 @@ describe('Fix My Stream checklist', () => {
     const checklist = buildFixMyStreamChecklist({ statsConnected: true, stats })
     const hostConfig = checklist.find((item) => item.key === 'host-config')
     const capture = checklist.find((item) => item.key === 'capture-path')
-    const report = buildPostSessionStreamReport({ stats })
+    const report = buildCompletedReport({ stats })
 
     expect(hostConfig.detail).toContain('explicitly pinned to VA-API')
     expect(capture.action).toContain('Autodetect (recommended)')
@@ -1244,7 +1314,7 @@ describe('support self-service reports', () => {
   }
 
   it('names confirmed PyroWave starvation and its encoded frame-byte budget', () => {
-    const report = buildPostSessionStreamReport({ stats: starvedPyrowaveReportStats })
+    const report = buildCompletedReport({ stats: starvedPyrowaveReportStats })
     expect(report.issueOwner).toBe('host')
     expect(report.mainIssue).toContain('PyroWave')
     expect(report.mainIssue).toContain('frame-byte budget')
@@ -1259,7 +1329,7 @@ describe('support self-service reports', () => {
   })
 
   it('keeps genuine judged network pressure while avoiding a further starved-codec bitrate cut', () => {
-    const report = buildPostSessionStreamReport({ stats: {
+    const report = buildCompletedReport({ stats: {
       ...starvedPyrowaveReportStats,
       network_verdict: { loss_pct: 5, loss_state: 'elevated', frames_lost: 120, frames_expected: 2400, window_seconds: 20, rtt_median_ms: 9.5 },
     } })
@@ -1272,7 +1342,7 @@ describe('support self-service reports', () => {
   })
 
   it('keeps a transport failure and names the independent PyroWave budget shortage', () => {
-    const report = buildPostSessionStreamReport({
+    const report = buildCompletedReport({
       stats: starvedPyrowaveReportStats,
       logs: 'Warning: UDP network timeout while sending video packets',
     })
@@ -1283,7 +1353,7 @@ describe('support self-service reports', () => {
   })
 
   it('keeps explicit host failure evidence alongside confirmed PyroWave budget pressure', () => {
-    const report = buildPostSessionStreamReport({
+    const report = buildCompletedReport({
       stats: starvedPyrowaveReportStats,
       logs: 'Warning: encoder queue saturated after capture fell back to SHM',
     })
@@ -1304,16 +1374,16 @@ describe('support self-service reports', () => {
       pyrowave_bitrate: { starved: true, ceiling_frame_share: share },
     })),
   ])('does not invent confirmed PyroWave budget pressure from inactive, foreign or invalid telemetry case %# %j', (override) => {
-    const report = buildPostSessionStreamReport({ stats: { ...starvedPyrowaveReportStats, ...override } })
-    expect(report.issueOwner).toBe('client')
+    const report = buildCompletedReport({ stats: { ...starvedPyrowaveReportStats, ...override } })
+    expect(report.issueOwner).toBe('unknown')
     expect(report.mainIssue).not.toContain('frame-byte budget')
     expect(report.suggestedNextLaunchProfile).not.toContain('4:2:0')
   })
 
   it('builds a post-session report with issue owner and next launch profile', () => {
-    const report = buildPostSessionStreamReport({
+    const report = buildCompletedReport({
       stats: {
-        streaming: false,
+        streaming: true,
         packet_loss: 0.1,
         latency_ms: 6.4,
         encode_time_ms: 15.2,
@@ -1336,7 +1406,7 @@ describe('support self-service reports', () => {
   it('names the loss it counts and does not blame the network on one second of it', () => {
     // polaris#212: the last second's report read 32.7% on a session whose frames the host dropped
     // 0.96% of, and the report named the network on it. The window the host judged read light loss.
-    const report = buildPostSessionStreamReport({
+    const report = buildCompletedReport({
       stats: {
         packet_loss: 32.7,
         latency_ms: 37,
@@ -1347,14 +1417,14 @@ describe('support self-service reports', () => {
       },
     })
 
-    expect(report.issueOwner).toBe('client')
+    expect(report.issueOwner).toBe('unknown')
     expect(report.mainIssue).not.toContain('32.7')
     expect(report.qualitySummary).toBe('9.5 ms latency / 1.4% of video frames lost after FEC / 3.5 ms encode / 0.96% of frames dropped on the host.')
     expect(report.copyText).toContain('of video frames lost after FEC')
   })
 
   it('names the network when the window judged its loss as pressure, with the frames behind it', () => {
-    const report = buildPostSessionStreamReport({
+    const report = buildCompletedReport({
       stats: {
         encode_time_ms: 4,
         encode_target_fps: 120,
@@ -1398,7 +1468,7 @@ describe('support self-service reports', () => {
     expect(completed.network_verdict.loss_state).toBe('stale')
     expect(completedVerdict).toBe(elevated)
 
-    const report = buildPostSessionStreamReport({ stats: completed, lastJudgedVerdict: completedVerdict })
+    const report = buildCompletedReport({ stats: completed, lastJudgedVerdict: completedVerdict })
     expect(report.issueOwner).toBe('network')
     expect(report.mainIssue).toBe(
       "Video frame loss was network pressure when the client's media reports stopped: 5.0% of video frames never arrived whole after FEC over the last 20 s (120 of 2400).",
@@ -1407,8 +1477,8 @@ describe('support self-service reports', () => {
 
     // With nothing judged before, a stale verdict names no cause, and the frozen round trip beside it
     // is no figure to grade.
-    const unjudged = buildPostSessionStreamReport({ stats: completed })
-    expect(unjudged.issueOwner).toBe('client')
+    const unjudged = buildCompletedReport({ stats: completed })
+    expect(unjudged.issueOwner).toBe('unknown')
     expect(unjudged.qualitySummary).toContain('unknown ms latency / unknown of video frames lost after FEC')
   })
 
@@ -1443,8 +1513,8 @@ describe('support self-service reports', () => {
     expect(keptAt[40]).toBeNull()
     expect(completedVerdict).toBeNull()
 
-    const report = buildPostSessionStreamReport({ stats: payloads[payloads.length - 2], lastJudgedVerdict: completedVerdict })
-    expect(report.issueOwner).toBe('client')
+    const report = buildCompletedReport({ stats: payloads[payloads.length - 2], lastJudgedVerdict: completedVerdict })
+    expect(report.issueOwner).toBe('unknown')
     expect(report.mainIssue).not.toContain('network pressure')
   })
 
@@ -1460,7 +1530,7 @@ describe('support self-service reports', () => {
   })
 
   it('does not invent a host failure from healthy SHM capability logs', () => {
-    const report = buildPostSessionStreamReport({
+    const report = buildCompletedReport({
       stats: {
         packet_loss: 0,
         latency_ms: 5,
@@ -1478,17 +1548,17 @@ describe('support self-service reports', () => {
       disconnectReason: 'client disconnected',
     })
 
-    expect(report.issueOwner).toBe('client')
+    expect(report.issueOwner).toBe('unknown')
     expect(report.mainIssue).not.toContain('capture/encoder')
     expect(report.mainIssue).not.toContain('Network')
   })
 
   it('still attributes explicit encoder and network failures from logs', () => {
-    const host = buildPostSessionStreamReport({
+    const host = buildCompletedReport({
       stats: { packet_loss: 0, latency_ms: 5, encode_time_ms: 4, encode_target_fps: 60 },
       logs: 'Warning: encoder queue saturated after capture fell back to SHM',
     })
-    const network = buildPostSessionStreamReport({
+    const network = buildCompletedReport({
       stats: { packet_loss: 0, latency_ms: 5, encode_time_ms: 4, encode_target_fps: 60 },
       logs: 'Warning: UDP network timeout while sending video packets',
     })
@@ -1501,7 +1571,7 @@ describe('support self-service reports', () => {
     const copy = buildSupportSelfTestCopy({
       network: buildNetworkPathTestReport({ controlPortOpen: true, streamPortOpen: true, pingSamplesMs: [4, 5], packetLossPercent: 0 }),
       controller: buildControllerInputTestReport({ events: [{ pad: 1, control: 'A' }], virtualController: { created: true } }),
-      postSession: buildPostSessionStreamReport({ stats: { packet_loss: 3.4, latency_ms: 70 }, logs: 'Warning: packet loss spike token=abc123' }),
+      postSession: buildCompletedReport({ stats: { packet_loss: 3.4, latency_ms: 70 }, logs: 'Warning: packet loss spike token=abc123' }),
     })
 
     expect(copy).toContain('Network Path Tester')
