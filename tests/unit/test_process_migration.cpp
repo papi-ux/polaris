@@ -105,6 +105,7 @@ TEST(ProcessMigrationTests, LaunchAsFixtureNormalizationAndWritesDeriveConsisten
 
 #ifdef __linux__
   #include <csignal>
+  #include <fcntl.h>
   #include <poll.h>
   #include <pthread.h>
   #include <sys/prctl.h>
@@ -201,6 +202,20 @@ namespace {
     }
 
     int fd = -1;
+  };
+
+  // A fixture descendant can leave its root's process group. Keep its exact
+  // pidfd alive until all assertions unwind, including a failed cleanup call.
+  struct linux_pidfd_child_guard_t: linux_fd_guard_t {
+    explicit linux_pidfd_child_guard_t(int descriptor): linux_fd_guard_t(descriptor) {}
+    linux_pidfd_child_guard_t(const linux_pidfd_child_guard_t &) = delete;
+    linux_pidfd_child_guard_t &operator=(const linux_pidfd_child_guard_t &) = delete;
+
+    ~linux_pidfd_child_guard_t() {
+      if (fd >= 0) {
+        (void) syscall(SYS_pidfd_send_signal, fd, SIGKILL, nullptr, 0);
+      }
+    }
   };
 
   bool wait_for_fd_event(int fd, short events, std::chrono::milliseconds timeout) {
@@ -2027,6 +2042,21 @@ TEST(ProcessRuntimeConfigTests, SteamPidfdCaptureRejectsStartTimeMismatch) {
   EXPECT_FALSE(proc::steam_pidfd_capture_identity_matches_for_tests(4242, std::nullopt));
 }
 
+TEST(ProcessRuntimeConfigTests, ProcGroupSessionParserAcceptsInitNamespaceIdentifiers) {
+  EXPECT_TRUE(proc::proc_group_session_from_stat_matches_for_tests("42 (wrapper) S 1 1 1", 1, 1));
+  EXPECT_TRUE(proc::proc_group_session_from_stat_matches_for_tests("42 (helper (worker)) S 1 42 1", 42, 1));
+  EXPECT_TRUE(proc::proc_group_session_from_stat_matches_for_tests("42 (private) S 1 42 42", 42, 42));
+  EXPECT_FALSE(proc::proc_group_session_from_stat_matches_for_tests("42 (wrapper) S 1 1 1", 42, 42));
+}
+
+TEST(ProcessRuntimeConfigTests, ProcGroupSessionParserRejectsUnavailableOrInvalidMembership) {
+  for (const auto stat : {"malformed", "42 (wrapper) S 1", "42 (wrapper) S 1 0 1",
+                          "42 (wrapper) S 1 1 0", "42 (wrapper) S 1 -1 1", "42 (wrapper) S 1 1 -1"}) {
+    SCOPED_TRACE(stat);
+    EXPECT_FALSE(proc::proc_group_session_from_stat_matches_for_tests(stat, 1, 1));
+  }
+}
+
 TEST(ProcessRuntimeConfigTests, GamescopeAttachedAuthorityFailsClosedAndRetriesTransientEmptyEnviron) {
   test_log_capture_t log;
   int ready_pipe[2] {-1, -1};
@@ -2190,13 +2220,23 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupDrainsStrippedExactGener
 TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupDrainsReparentedPrivateGroupDescendant) {
   int ready_pipe[2] {-1, -1};
   ASSERT_EQ(pipe(ready_pipe), 0);
+  linux_fd_guard_t ready_read {ready_pipe[0]};
+  linux_fd_guard_t ready_write {ready_pipe[1]};
   setenv("POLARIS_SESSION_INSTANCE_ID", "gamescope-attached-test", 1);
   const pid_t root = fork();
   ASSERT_GE(root, 0);
   if (root == 0) {
-    close(ready_pipe[0]);
-    if (setsid() < 0 || dup2(ready_pipe[1], 3) < 0) _exit(124);
-    close(ready_pipe[1]);
+    close(ready_read.fd);
+    if (setsid() < 0) _exit(124);
+    if (ready_write.fd != 3) {
+      if (dup2(ready_write.fd, 3) < 0) _exit(124);
+      close(ready_write.fd);
+    }
+    // A failed fixture must not keep CTest's output pipes open through an
+    // escaped child. Readiness still travels through its private descriptor.
+    const int null_fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    if (null_fd < 0 || dup2(null_fd, STDOUT_FILENO) < 0 || dup2(null_fd, STDERR_FILENO) < 0) _exit(125);
+    if (null_fd > 3) close(null_fd);
     const char *program =
       "import os,signal,time\n"
       "middle=os.fork()\n"
@@ -2206,6 +2246,7 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupDrainsReparentedPrivateG
       "  time.sleep(0.05)\n"
       "  os.setpgid(0,0)\n"
       "  os.write(3, str(os.getpid()).encode()+b'\\n')\n"
+      "  os.close(3)\n"
       "  os.environ.clear()\n"
       "  signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
       "  while True: time.sleep(1)\n"
@@ -2220,10 +2261,12 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupDrainsReparentedPrivateG
     );
     _exit(127);
   }
-  close(ready_pipe[1]);
+  linux_child_guard_t root_guard {root};
+  close(ready_write.fd);
+  ready_write.fd = -1;
+  ASSERT_TRUE(wait_for_fd_event(ready_read.fd, POLLIN, std::chrono::seconds(2)));
   char descendant_text[32] {};
-  ASSERT_GT(read(ready_pipe[0], descendant_text, sizeof(descendant_text) - 1), 0);
-  close(ready_pipe[0]);
+  ASSERT_GT(read(ready_read.fd, descendant_text, sizeof(descendant_text) - 1), 0);
   const pid_t descendant = static_cast<pid_t>(std::strtol(descendant_text, nullptr, 10));
   ASSERT_GT(descendant, 1);
   const int descendant_fd = static_cast<int>(syscall(SYS_pidfd_open, descendant, 0));
@@ -2233,13 +2276,13 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedCleanupDrainsReparentedPrivateG
     (void) kill(root, SIGKILL);
     FAIL() << "pidfd_open failed for descendant " << descendant << ": " << std::strerror(pidfd_error);
   }
-  linux_fd_guard_t descendant_pidfd {descendant_fd};
+  linux_pidfd_child_guard_t descendant_pidfd {descendant_fd};
   const bool terminated = proc::terminate_gamescope_attached_clients_for_tests("4242");
   if (!terminated) {
     (void) kill(-root, SIGKILL);
   }
   EXPECT_TRUE(terminated);
-  EXPECT_EQ(waitpid(root, nullptr, 0), root);
+  EXPECT_EQ(root_guard.wait(nullptr, 0), root);
   EXPECT_TRUE(wait_for_pidfd_exit(descendant_pidfd.fd, std::chrono::seconds(2)));
 }
 
