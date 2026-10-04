@@ -12,6 +12,7 @@
     "smoke:web": "node scripts/smoke-web-routes.mjs",
     "test": "vitest run --config vitest.config.js",
     "test:e2e": "playwright test",
+    "test:e2e:mocked": "playwright test --config playwright.mocked.config.js",
     "test:e2e:ui": "playwright test --ui",
     "serve": "node scripts/serve-test-fixtures.mjs"
   },
