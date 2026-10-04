@@ -2736,7 +2736,7 @@ namespace nvhttp {
         recommendations.push_back("Lower the game preset, render resolution, or FPS target; bitrate changes alone will not fix host-render-limited stutter.");
       } else if (pacing_risk) {
         issues.push_back("frame_pacing");
-        recommendations.push_back("Match the game frame cap to the stream FPS and avoid VRR-style sync on the streaming display.");
+        recommendations.push_back("Check the game's frame cap and capture timing before changing display sync settings.");
       }
       if (capture_pressure) {
         issues.push_back(capture_reason);
