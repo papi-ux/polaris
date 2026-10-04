@@ -1807,8 +1807,11 @@ namespace proc {
       std::string state;
       pid_t parent_pid = -1;
       proc_group_session_t result {};
+      // Init's group/session can be 1 inside a PID namespace. This is readable
+      // membership, not cleanup authority; callers still require an exact
+      // credentialed leader and membership in its authorized freeze set.
       if (!(fields >> state >> parent_pid >> result.process_group >> result.session) ||
-          result.process_group <= 1 || result.session <= 1) {
+          result.process_group <= 0 || result.session <= 0) {
         return std::nullopt;
       }
       return result;
@@ -6947,6 +6950,11 @@ namespace proc {
 
   std::optional<std::uint64_t> proc_start_time_from_stat_for_tests(std::string_view stat) {
     return proc_start_time_from_stat(stat);
+  }
+
+  bool proc_group_session_from_stat_matches_for_tests(std::string_view stat, pid_t process_group, pid_t session) {
+    const auto parsed = proc_group_session_from_stat(stat);
+    return parsed && parsed->process_group == process_group && parsed->session == session;
   }
 
   bool steam_pidfd_capture_identity_matches_for_tests(

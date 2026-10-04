@@ -546,6 +546,7 @@ namespace proc {
     std::string_view session_instance_id
   );
   std::optional<std::uint64_t> proc_start_time_from_stat_for_tests(std::string_view stat);
+  bool proc_group_session_from_stat_matches_for_tests(std::string_view stat, pid_t process_group, pid_t session);
   bool steam_pidfd_capture_identity_matches_for_tests(
     std::optional<std::uint64_t> before,
     std::optional<std::uint64_t> after
