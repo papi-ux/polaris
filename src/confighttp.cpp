@@ -2356,7 +2356,12 @@ namespace confighttp {
         }
       }
 
-      file_tree["current_app"] = proc::proc.get_running_app_uuid();
+      // Teardown can own the lifecycle mutex for seconds. Never occupy the
+      // console's request thread waiting for identity: unavailable differs
+      // from a confirmed empty (idle) UUID, without caching another generation.
+      const auto context = proc::proc.try_stream_stats_context();
+      file_tree["current_app"] = context ? context->game_uuid : std::string {};
+      file_tree["current_app_available"] = context.has_value();
       file_tree["host_uuid"] = http::unique_id;
       file_tree["host_name"] = config::nvhttp.sunshine_name;
       file_tree["artwork_lookup_off"] = apps_with_artwork_lookup_off(platf::appdata(), file_tree);

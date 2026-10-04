@@ -429,6 +429,7 @@
               {{ $t('navbar.library') }}
             </router-link>
           </div>
+          <p v-if="!currentAppAvailable" role="status" class="mb-3 text-sm text-storm">Waiting for current app status.</p>
           <div v-if="recentApps.length" class="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
             <div v-for="app in recentApps" :key="app.uuid" class="dashboard-play-tile">
               <div class="dashboard-play-cover">
@@ -444,7 +445,8 @@
               <button
                 type="button"
                 class="focus-ring dashboard-play-launch"
-                :disabled="launchingUuid === app.uuid"
+                :disabled="launchingUuid === app.uuid || !currentAppAvailable"
+                :data-dashboard-launch-app="app.uuid"
                 @click="launchRecentApp(app)"
               >
                 {{ launchingUuid === app.uuid ? $t('dashboard.launching') : $t('dashboard.launch') }}
@@ -589,24 +591,36 @@ const { gpu, displays, audio, sessionType } = useSystemStats(3000)
 const { sessions, clearHistory, activeStartedAt } = useSessionHistory(stats)
 
 // Apps catalog: recents for the play rail plus the running app for the hero.
+let appsRequestRevision = 0
 async function refreshApps() {
+  const revision = ++appsRequestRevision
   try {
     const res = await fetch('./api/apps', { credentials: 'include' })
     if (res.ok) {
       const data = await res.json()
-      currentAppUuid.value = data.current_app || ''
+      if (revision !== appsRequestRevision) return
+      currentAppAvailable.value = data.current_app_available !== false && typeof data.current_app === 'string'
+      currentAppUuid.value = currentAppAvailable.value ? data.current_app : ''
       allAppsById.value = Object.fromEntries((data.apps || []).filter(a => a.uuid).map(a => [a.uuid, a.name]))
       const apps = (data.apps || []).filter(a => a.uuid && a.name !== 'Desktop')
       apps.sort((a, b) => (b['last-launched'] || 0) - (a['last-launched'] || 0))
       appCatalogCount.value = apps.length
       recentApps.value = apps.slice(0, 5)
+    } else if (revision === appsRequestRevision) {
+      currentAppAvailable.value = false
+      currentAppUuid.value = ''
     }
-  } catch {}
+  } catch {
+    if (revision !== appsRequestRevision) return
+    currentAppAvailable.value = false
+    currentAppUuid.value = ''
+  }
 }
 
 // Hero context: what is being played and for how long. current_app arrives
 // with the /api/apps payload; duration ticks against the SSE stats clock.
 const currentAppUuid = ref('')
+const currentAppAvailable = ref(false)
 const currentAppName = computed(() => {
   if (!currentAppUuid.value) return ''
   return recentApps.value.find((app) => app.uuid === currentAppUuid.value)?.name
@@ -1481,7 +1495,7 @@ async function undoDoctorAction() {
 const launchingUuid = ref('')
 
 async function launchRecentApp(app) {
-  if (launchingUuid.value) return
+  if (launchingUuid.value || !currentAppAvailable.value) return
   launchingUuid.value = app.uuid
   try {
     const response = await fetch('./api/apps/launch', {
