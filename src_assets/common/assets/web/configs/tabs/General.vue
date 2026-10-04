@@ -347,6 +347,11 @@ function handleSteamGridDbKeyInput() {
       ></Checkbox>
     </section>
 
+    <section v-if="platform === 'linux'" class="settings-section settings-section-compact">
+      <Checkbox id="keep_desktop_steam_running" locale-prefix="config"
+                v-model="config.keep_desktop_steam_running" default="false"></Checkbox>
+    </section>
+
     <section class="settings-section settings-section-compact">
       <div class="settings-section-header">
         <div class="section-kicker">{{ $t('config.general_kicker_host_power') }}</div>

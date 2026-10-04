@@ -777,6 +777,7 @@ namespace config {
     {},  // server commands
     false,  // benchmark_mode_enabled
     false,  // host_sleep_enabled
+    false,  // keep_desktop_steam_running
   };
 
   recording_t recording {
@@ -1743,6 +1744,7 @@ namespace config {
     bool_f(vars, "legacy_ordering", sunshine.legacy_ordering);
     bool_f(vars, "benchmark_mode_enabled", sunshine.benchmark_mode_enabled);
     bool_f(vars, "host_sleep_enabled", sunshine.host_sleep_enabled);
+    bool_f(vars, "keep_desktop_steam_running", sunshine.keep_desktop_steam_running);
     bool_f(vars, "forward_rumble", input.forward_rumble);
 
     int port = sunshine.port;
