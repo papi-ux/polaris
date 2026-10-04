@@ -2235,10 +2235,17 @@ std::string get_local_ip_for_gateway() {
     if (!override || override->reason == stream_display_policy::k_capture_override_substituted) {
       return;
     }
-    BOOST_LOG(warning) << stream_display_policy::describe_capture_override(
+    const auto line = stream_display_policy::describe_capture_override(
       *override,
       config::video.linux_display.stream_mode
     );
+    if (override->reason == stream_display_policy::k_capture_override_private_compositor) {
+      // Private labwc sessions require wlroots; this is the selected mode's normal route.
+      BOOST_LOG(info) << line;
+    }
+    else {
+      BOOST_LOG(warning) << line;
+    }
   }
 
   void reevaluate_capture_sources() {

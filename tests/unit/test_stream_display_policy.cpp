@@ -1854,7 +1854,7 @@ TEST(StreamDisplayPolicyTests, EachEvaluationSaysOnceWhenTheModeSetsAnExplicitCa
     return lines_with(log.text(), "capture override:");
   };
 
-  // A private compositor mode streams through wlr whatever capture says: one warning, naming the
+  // A private compositor mode streams through wlr whatever capture says: one informational line, naming the
   // mode, the configured backend and the one it asks for instead.
   set_loaded_capture_setting("kms");
   d.stream_mode = "windowed_stream";
@@ -1863,7 +1863,13 @@ TEST(StreamDisplayPolicyTests, EachEvaluationSaysOnceWhenTheModeSetsAnExplicitCa
   platf::set_capture_backend_substitution_for_tests("");
   const auto windowed = said();
   EXPECT_EQ(std::count(windowed.begin(), windowed.end(), '\n'), 1) << windowed;
-  EXPECT_NE(windowed.find("Warning: "), std::string::npos) << windowed;
+  EXPECT_NE(windowed.find("Info: "), std::string::npos) << windowed;
+  EXPECT_EQ(windowed.find("Warning: "), std::string::npos) << windowed;
+  d.stream_mode = "headless_stream";
+  const auto headless = said();
+  EXPECT_NE(headless.find("Info: "), std::string::npos) << headless;
+  EXPECT_EQ(headless.find("Warning: "), std::string::npos) << headless;
+  EXPECT_NE(headless.find("[headless_stream]"), std::string::npos) << headless;
   EXPECT_NE(windowed.find("[windowed_stream]"), std::string::npos) << windowed;
   EXPECT_NE(windowed.find("asks for [wlr], not the configured [kms]"), std::string::npos) << windowed;
 
@@ -1924,7 +1930,8 @@ TEST(StreamDisplayPolicyTests, AnEvaluationNamesPolarisConfNotTheReplacementALoa
   ASSERT_EQ(config::video.capture, "portal");
   const auto explicit_kms = evaluate_in_windowed_stream();
   EXPECT_EQ(std::count(explicit_kms.begin(), explicit_kms.end(), '\n'), 1) << explicit_kms;
-  EXPECT_NE(explicit_kms.find("Warning: "), std::string::npos) << explicit_kms;
+  EXPECT_NE(explicit_kms.find("Info: "), std::string::npos) << explicit_kms;
+  EXPECT_EQ(explicit_kms.find("Warning: "), std::string::npos) << explicit_kms;
   EXPECT_NE(explicit_kms.find("asks for [wlr], not the configured [kms]"), std::string::npos) << explicit_kms;
   EXPECT_EQ(explicit_kms.find("[portal]"), std::string::npos) << explicit_kms;
 
@@ -1957,7 +1964,8 @@ TEST(StreamDisplayPolicyTests, ASessionTransitionMeasuresItsRewriteAgainstPolari
   auto logged = enter("host_virtual_display", "headless_stream");
   EXPECT_EQ(config::video.capture, "wlr");
   const auto warning = lines_with(logged, "capture override:");
-  EXPECT_NE(warning.find("Warning: "), std::string::npos) << logged;
+  EXPECT_NE(warning.find("Info: "), std::string::npos) << logged;
+  EXPECT_EQ(warning.find("Warning: "), std::string::npos) << logged;
   EXPECT_NE(warning.find("stream mode [headless_stream] asks for [wlr], not the configured [kms]"), std::string::npos)
     << warning;
   EXPECT_NE(warning.find("for this session only"), std::string::npos) << warning;
@@ -1979,6 +1987,7 @@ TEST(StreamDisplayPolicyTests, ASessionTransitionMeasuresItsRewriteAgainstPolari
   config::video.capture = "kms";
   logged = enter("desktop_display", "gamescope_stream");
   EXPECT_EQ(config::video.capture, "portal");
+  EXPECT_NE(lines_with(logged, "capture override:").find("Warning: "), std::string::npos) << logged;
   EXPECT_NE(lines_with(logged, "capture override:").find("asks for [portal], not the configured [kms]"), std::string::npos)
     << logged;
 
