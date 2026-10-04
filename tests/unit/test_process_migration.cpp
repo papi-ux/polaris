@@ -2139,6 +2139,16 @@ TEST(ProcessRuntimeConfigTests, GamescopeAttachedUnreadableLiveProcessFailsClose
   char ready = 0;
   ASSERT_EQ(read(ready_pipe[0], &ready, 1), 1);
   close(ready_pipe[0]);
+  // Privileged runners may read even a nondumpable child's environment. Verify
+  // this kernel-permission fixture's precondition, rather than assuming EACCES.
+  const auto environ_path = "/proc/" + std::to_string(child) + "/environ";
+  const int environ_fd = open(environ_path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (environ_fd >= 0) {
+    close(environ_fd);
+    GTEST_SKIP() << "Fixture reader can access a nondumpable child's environ";
+  }
+  ASSERT_TRUE(errno == EACCES || errno == EPERM)
+    << "Fixture environment probe failed for a reason other than denied access";
   EXPECT_FALSE(proc::terminate_gamescope_attached_clients_for_tests("4242"));
   EXPECT_EQ(kill(child, 0), 0);
 }
@@ -4232,6 +4242,15 @@ TEST(ProcessRuntimeConfigTests, ExactGenerationUnreadableEnvironFailsClosedAndLe
   char ready = 0;
   ASSERT_EQ(read(ready_pipe[0], &ready, 1), 1);
   close(ready_pipe[0]);
+
+  const auto environ_path = "/proc/" + std::to_string(child) + "/environ";
+  const int environ_fd = open(environ_path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (environ_fd >= 0) {
+    close(environ_fd);
+    GTEST_SKIP() << "Fixture reader can access a nondumpable child's environ";
+  }
+  ASSERT_TRUE(errno == EACCES || errno == EPERM)
+    << "Fixture environment probe failed for a reason other than denied access";
 
   EXPECT_FALSE(proc::terminate_exact_generation_processes_for_tests(token));
   EXPECT_TRUE(proc::exact_generation_unknown_ancestry_fails_closed_for_tests(token, child));
