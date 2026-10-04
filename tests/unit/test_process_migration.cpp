@@ -5503,18 +5503,33 @@ TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStream
     << "the host left Game Mode in between, so the title went with the session";
 
   const auto source = read_source_file_for_contract("src/process.cpp");
-  const auto terminate = source.substr(source.find("void proc_t::terminate_impl(bool immediate, bool needs_refresh) {"));
+  const auto terminate_start = source.find("void proc_t::terminate_impl(bool immediate, bool needs_refresh) {");
+  ASSERT_NE(terminate_start, std::string::npos);
+  const auto terminate_end = source.find("\n  bool proc_t::reload_configuration_from_file(", terminate_start);
+  ASSERT_NE(terminate_end, std::string::npos);
+  const auto terminate = source.substr(terminate_start, terminate_end - terminate_start);
+  const auto close_guard = terminate.find("if (should_close_game_mode_title(_game_mode_launched_appid, game_mode_live, session_ended_on_request)) {");
   const auto close_call = terminate.find("platf::steam_title::ask_to_close(_game_mode_launched_appid)");
   const auto forgotten = terminate.find("_game_mode_launched_appid.clear();");
+  ASSERT_NE(close_guard, std::string::npos);
   ASSERT_NE(close_call, std::string::npos);
   ASSERT_NE(forgotten, std::string::npos);
+  EXPECT_LT(close_guard, close_call);
   EXPECT_LT(close_call, forgotten) << "asked once, then forgotten, so a later stop cannot ask a title that a new launch did not open";
 
+  // Desktop Steam has its own title owner and close helper. Count the Game Mode
+  // target across the file, and all direct close calls inside this teardown.
   std::size_t callers = 0;
-  for (auto at = source.find("steam_title::ask_to_close("); at != std::string::npos; at = source.find("steam_title::ask_to_close(", at + 1)) {
+  for (auto at = source.find("steam_title::ask_to_close(_game_mode_launched_appid)"); at != std::string::npos;
+       at = source.find("steam_title::ask_to_close(_game_mode_launched_appid)", at + 1)) {
     ++callers;
   }
-  EXPECT_EQ(callers, 1u) << "the only thing that closes a title in Game Mode is End Session";
+  EXPECT_EQ(callers, 1u) << "the Game Mode title has exactly one close caller";
+  const auto first_close = terminate.find("platf::steam_title::ask_to_close(");
+  ASSERT_NE(first_close, std::string::npos);
+  EXPECT_EQ(first_close, close_call);
+  EXPECT_EQ(terminate.find("platf::steam_title::ask_to_close(", first_close + 1), std::string::npos)
+    << "only the guarded Game Mode title close is called directly by End Session";
 
   // What counts as ending on purpose: a stop through request_session_shutdown (End Session from a
   // client, the Polaris session stop, the console's Disconnect), the terminate app, and end_session
