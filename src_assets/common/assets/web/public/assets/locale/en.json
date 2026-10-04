@@ -832,7 +832,7 @@
     "beat_times_lookup": "Completion Estimate Lookups",
     "beat_times_lookup_desc": "Lets Polaris ask How Long To Beat for titles missing from its local dataset.",
     "keep_desktop_steam_running": "Keep Desktop Steam Running After End Session",
-    "keep_desktop_steam_running_desc": "Applies to Host Virtual Display and Mirror Host Desktop. Ends the game this stream launched and leaves Steam open. Private streams still clean up their runtime. Applications can override this default; custom undo scripts still run.",
+    "keep_desktop_steam_running_desc": "Leaves Steam open after ending the game this stream launched in Host Virtual Display or Mirror Host Desktop.",
     "host_sleep_enabled": "Allow Clients To Sleep This Host",
     "host_power_blocked": "This host cannot sleep from a client: {message}",
     "host_power_last_failed": "The last sleep request did not put this host to sleep: {message}",

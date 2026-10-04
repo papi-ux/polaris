@@ -327,7 +327,7 @@ behaviour (pre-release update notifications, the tray icon, and whether the tray
 stop, restart, and quit controls), and metadata integrations (a SteamGridDB key for artwork on
 non-Steam entries, and whether Polaris may ask How Long To Beat for titles missing from its local
 completion dataset). Keys: `sunshine_name`, `notify_pre_releases`, `system_tray`,
-`hide_tray_controls`, `steamgriddb_api_key`, `beat_times_lookup`, `host_sleep_enabled`.
+`hide_tray_controls`, `steamgriddb_api_key`, `beat_times_lookup`, `keep_desktop_steam_running`, `host_sleep_enabled`.
 
 | Field | What it does |
 | --- | --- |
@@ -340,6 +340,7 @@ completion dataset). Keys: `sunshine_name`, `notify_pre_releases`, `system_tray`
 | **Hide tray control options** (`hide_tray_controls`) | Do not show "Force Stop", "Restart" and "Quit" in tray menu. |
 | **SteamGridDB API Key** (`steamgriddb_api_key`) | Optional API key used to fetch artwork metadata from SteamGridDB. The first-run wizard can check and save it. A saved key is used right away, by the cover search and by Nova, with no restart. |
 | **Completion Estimate Lookups** (`beat_times_lookup`) | Allow Polaris to ask How Long To Beat about titles missing from its local completion-estimate dataset. Disabling it keeps the estimates already stored and stops the host making those requests on your behalf. |
+| **Keep Desktop Steam Running After End Session** (`keep_desktop_steam_running`) | Linux only, off by default. In Host Virtual Display or Mirror Host Desktop, close the game this stream launched and leave managed Steam open. Applications can override this default; custom undo scripts still run. Private streams retain runtime cleanup. See [desktop Steam lifecycle](steam-lifecycle.md). |
 | **Allow Clients To Sleep This Host** (`host_sleep_enabled`) | Let a paired Nova client put this machine to sleep; Nova for Android and Nova for Linux have the control, and Moonlight has none. Watch-only clients cannot. Polaris refuses while a stream is running. Waking it again is Wake-on-LAN. |
 
 ### Input tab
