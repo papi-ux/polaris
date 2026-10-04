@@ -1,4 +1,5 @@
 import { NetworkAddressBook, pseudonymizeNetworkAddresses } from './network-address-pseudonyms.js'
+import { doctorIsWaitingForStream } from './doctor-observation.js'
 
 // Words that mean "secret" wherever they appear as a whole segment of a name.
 const SENSITIVE_SEGMENT_WORDS = [
@@ -628,6 +629,7 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
   // and "no active stream" would only repeat what the person already knows.
   const doctor = stats?.doctor || {}
   const failedStart = statsConnected && !streaming && doctor.primary_issue === 'stream_failed_to_start'
+  const unavailableStatus = statsConnected && doctorIsWaitingForStream(doctor, stats) ? 'info' : 'warning'
   const connection = !statsConnected
     ? checklistItem('connection', 'Connection', 'warning', 'Stream telemetry is disconnected, so Polaris cannot confirm the live session path yet.', 'Refresh the page, verify the host is reachable, then start or resume the stream.')
     : streaming
@@ -640,7 +642,7 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
           firstNonEmpty(doctor.summary, 'The last stream failed to start: the client left during video setup.'),
           firstNonEmpty(doctor.recommendation?.body, 'The client stopped during video setup; its own error message names the cause.')
         )
-        : checklistItem('connection', 'Connection', 'warning', 'Telemetry is connected, but no active stream is running.', 'Start the affected game/session before exporting diagnostics.')
+        : checklistItem('connection', 'Connection', unavailableStatus, 'Telemetry is connected, but no active stream is running.', 'Start the affected game/session before exporting diagnostics.')
   const hostConfig = hostConfigurationWarningItems(stats)
   const displayMode = displayModeOverrideItem(stats)
 
@@ -652,11 +654,11 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
         : checklistItem('packet-loss', 'Video frame loss', 'pass', `${describeVideoFrameLoss(judgedLoss)}.`, 'Network is not the loudest signal right now.')
     : liveTelemetry
       ? checklistItem('packet-loss', 'Video frame loss', 'info', 'No current confirmed video frame loss measurement is available for this active stream.', 'Control-channel estimates are context only; video frame loss stays unmeasured until this client reports fresh media counters.')
-      : checklistItem('packet-loss', 'Video frame loss', 'warning', 'No current confirmed video frame loss measurement is available.', 'Start a live stream and wait for fresh media-loss telemetry.')
+      : checklistItem('packet-loss', 'Video frame loss', unavailableStatus, 'No current confirmed video frame loss measurement is available.', 'Start a live stream and wait for fresh media-loss telemetry.')
 
   const captureFrameAge = Number(stats?.avg_frame_age_ms)
   const capture = !liveTelemetry
-    ? checklistItem('capture-path', 'Capture path', 'warning', 'No active connected stream is available to verify capture.', 'Start a stream and wait for current capture metadata.')
+    ? checklistItem('capture-path', 'Capture path', unavailableStatus, 'No active connected stream is available to verify capture.', 'Start a stream and wait for current capture metadata.')
     : captureCpuCopy
     ? capturePressure
       ? checklistItem(
@@ -708,7 +710,7 @@ export function buildFixMyStreamChecklist({ stats = {}, statsConnected = false, 
         : checklistItem('encoder-pressure', 'Encoder pressure', 'pass', pressure.targetFps ? `${encodeTime.toFixed(1)} ms encode time uses ${targetBudgetUse} and leaves headroom.` : `${encodeTime.toFixed(1)} ms encode time leaves headroom within the ${targetBudgetDetail}.`, 'Encoder pressure is not the loudest signal right now.')
     : liveTelemetry
       ? checklistItem('encoder-pressure', 'Encoder pressure', 'info', 'No current encoder timing is available for this active stream.', 'Encoder pressure remains unmeasured until positive timing is reported.')
-      : checklistItem('encoder-pressure', 'Encoder pressure', 'warning', 'No current encoder timing is available.', 'Start a live stream and wait for encoder telemetry.')
+      : checklistItem('encoder-pressure', 'Encoder pressure', unavailableStatus, 'No current encoder timing is available.', 'Start a live stream and wait for encoder telemetry.')
 
   const authPairing = authPairingIssue
     ? checklistItem('auth-pairing', 'Auth / pairing', 'fail', redactSensitiveText(authPairingIssue), 'Re-pair the client or verify Web UI credentials/trust before tuning stream quality.')
@@ -807,6 +809,7 @@ function issueDraftLine(label, value, fallback = 'unknown') {
 
 function summarizeActiveStream(stats = {}) {
   if (!stats || Object.keys(stats).length === 0) return 'unknown'
+  if (stats.streaming === false) return 'no — live measurements unavailable'
   const streaming = stats.streaming ? 'yes' : 'no'
   const fps = formatIssueNumber(stats.fps, 1)
   const target = formatIssueNumber(stats.session_target_fps || stats.requested_client_fps, 1)

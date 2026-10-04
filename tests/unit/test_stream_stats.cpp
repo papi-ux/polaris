@@ -7731,6 +7731,29 @@ TEST(StreamStatsDoctorTests, CaptureMissingNeedsTelemetryBeforeTuning) {
   EXPECT_TRUE(doctor.at("redaction").at("applied"));
 }
 
+TEST(StreamStatsDoctorTests, IdleHostWaitsWithoutGradingUnavailableTelemetry) {
+  const auto doctor = stream_stats::build_doctor_json(stream_stats::stats_t {}, nlohmann::json::object());
+  EXPECT_EQ(doctor.at("primary_issue"), "no_active_stream");
+  EXPECT_EQ(doctor.at("status"), "unknown");
+  EXPECT_EQ(doctor.at("severity"), "info");
+  EXPECT_EQ(doctor.at("simple_state"), "Waiting for a stream");
+  EXPECT_EQ(doctor.at("traffic_light"), "amber");
+  EXPECT_NE(doctor.at("safe_recovery_action").at("id"), "lower_bitrate");
+  const auto *latency = find_evidence_row(doctor, "latency");
+  ASSERT_NE(latency, nullptr);
+  EXPECT_TRUE(latency->at("value").is_null());
+}
+
+TEST(StreamStatsDoctorTests, RecentConnectionTimeoutDoesNotBecomeNeutralIdle) {
+  const auto doctor = stream_stats::build_doctor_json(
+    after_last_start("no_ping", "hevc", std::chrono::minutes {1}), nlohmann::json::object());
+  EXPECT_EQ(doctor.at("severity"), "warning");
+  EXPECT_EQ(doctor.at("simple_state"), "Needs attention");
+  const auto *start = find_evidence_row(doctor, "last_stream_start");
+  ASSERT_NE(start, nullptr);
+  EXPECT_EQ(start->at("status"), "watch");
+}
+
 // The tests below exercise the global stats_t singleton (update_*() /
 // get_current()) rather than locally-constructed stats_t values, unlike
 // every test above. That is deliberate here: these are exactly the

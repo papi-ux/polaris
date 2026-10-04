@@ -2734,6 +2734,15 @@ namespace stream_stats {
       status = "needs_action";
       severity = "warning";
       simple_state = "Needs attention";
+    } else if (primary_issue == "no_active_stream" &&
+               !(stats.last_session && stats.last_session->start_outcome == stream_start::k_no_ping &&
+                 ended_within(*stats.last_session, doctor_now, DOCTOR_FAILED_START_WINDOW))) {
+      // Idle telemetry is unavailable, not a fault or a successful stream test.
+      // Keep the traffic-light contract; clients render unknown/info neutrally.
+      traffic = "amber";
+      status = "unknown";
+      severity = "info";
+      simple_state = "Waiting for a stream";
     } else if (primary_issue == "no_active_stream" || primary_issue == "capture_missing") {
       traffic = "amber";
       status = "unknown";

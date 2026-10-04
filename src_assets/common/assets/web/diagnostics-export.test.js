@@ -495,6 +495,23 @@ describe('support report after a stream that failed to start', () => {
 })
 
 describe('Fix My Stream checklist', () => {
+  it('keeps a connected idle host informational without inventing measured zeros', () => {
+    const stats = {
+      streaming: false, fps: 0, encode_target_fps: 0, bitrate_kbps: 0, encode_time_ms: 0,
+      doctor: { primary_issue: 'no_active_stream', status: 'unknown', severity: 'info', simple_state: 'Waiting for a stream' },
+    }
+    const checklist = buildFixMyStreamChecklist({ statsConnected: true, stats })
+    for (const key of ['connection', 'packet-loss', 'capture-path', 'encoder-pressure']) {
+      expect(checklist.find((item) => item.key === key).status).toBe('info')
+    }
+    const draft = buildGithubIssueDraft({ session_snapshot: stats, fix_my_stream_checklist: checklist })
+    expect(draft).toContain('Waiting for a stream')
+    expect(draft).toContain('Active stream: no — live measurements unavailable')
+    expect(draft).not.toContain('0.0 FPS')
+    expect(draft).not.toContain('0.0 ms encode')
+    expect(draft).not.toContain('Suggested safe action: lower_bitrate')
+  })
+
   // The host's windowed verdict, as the stream stats serve it.
   const judged = (pct, state) => ({
     network_verdict: {
