@@ -362,6 +362,7 @@ const tabs = ref([
       "steamgriddb_api_key": "",
       "beat_times_lookup": "enabled",
       "host_sleep_enabled": "disabled",
+  "keep_desktop_steam_running": "disabled",
     },
   },
   {

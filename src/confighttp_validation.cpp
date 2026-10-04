@@ -158,6 +158,7 @@ namespace confighttp::validation {
       "av1_mode"sv,
       "back_button_timeout"sv,
       "beat_times_lookup"sv,
+      "keep_desktop_steam_running"sv,
       "host_sleep_enabled"sv,
       "benchmark_mode_enabled"sv,
       "browser_streaming"sv,
@@ -600,6 +601,15 @@ namespace confighttp::validation {
         }
         if (!contains(proc::launch_as_basis_values, std::string_view {value.get<std::string>()})) {
           error = "launch-as-basis must be none, desktop-mirror, virtual-display or both";
+          return false;
+        }
+        continue;
+      }
+      if (key == "desktop-steam-lifetime") {
+        if (!validate_safe_string(key, value, error)) return false;
+        const auto policy = value.get<std::string>();
+        if (policy != "inherit" && policy != "keep" && policy != "close") {
+          error = "desktop-steam-lifetime must be inherit, keep or close";
           return false;
         }
         continue;

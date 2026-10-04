@@ -334,6 +334,7 @@ namespace config {
 
     std::string do_cmd;
     std::string undo_cmd;
+    bool managed_steam_cleanup = false;
     bool elevated;
   };
 
@@ -396,6 +397,7 @@ namespace config {
     // the machine away from everyone on it with no undo from the couch, so it
     // stays off until the host owner turns it on.
     bool host_sleep_enabled;
+    bool keep_desktop_steam_running;
   };
 
   struct recording_t {

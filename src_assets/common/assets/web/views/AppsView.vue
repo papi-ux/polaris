@@ -1221,6 +1221,15 @@
               <Checkbox class="app-editor-toggle-card" id="autoDetach" label="apps.auto_detach" desc="apps.auto_detach_desc" v-model="editForm['auto-detach']" default="true"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="waitAll" label="apps.wait_all" desc="apps.wait_all_desc" v-model="editForm['wait-all']" default="true"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="terminateOnPause" label="apps.terminate_on_pause" desc="apps.terminate_on_pause_desc" v-model="editForm['terminate-on-pause']" default="false"></Checkbox>
+              <div v-if="platform === 'linux'" class="app-editor-field">
+                <label for="desktopSteamLifetime" class="settings-field-label">Steam after End Session</label>
+                <select id="desktopSteamLifetime" class="app-editor-input" v-model="editForm['desktop-steam-lifetime']">
+                  <option value="inherit">Use host default</option>
+                  <option value="keep">Keep desktop Steam running</option>
+                  <option value="close">Close Steam started for this stream</option>
+                </select>
+                <p class="text-xs text-storm">Host Virtual Display and Mirror Host Desktop only. Private streams still clean up; custom undo scripts still run.</p>
+              </div>
               <Checkbox class="app-editor-toggle-card" id="closeDesktopSteamForPrivate" label="apps.close_desktop_steam_for_private" desc="apps.close_desktop_steam_for_private_desc" v-model="editForm['close-desktop-steam-for-private']" default="false"></Checkbox>
               <Checkbox class="app-editor-toggle-card" id="useAppIdentity" label="apps.use_app_identity" desc="apps.use_app_identity_desc" v-model="editForm['use-app-identity']" default="false"></Checkbox>
               <Checkbox class="app-editor-toggle-card" v-if="editForm['use-app-identity']" id="perClientAppIdentity" label="apps.per_client_app_identity" desc="apps.per_client_app_identity_desc" v-model="editForm['per-client-app-identity']" default="false"></Checkbox>
@@ -1489,6 +1498,7 @@ const newAppTemplate = {
   // bundled Desktop, and one already had to run twice.
   "launch-as": "host_default",
   "close-desktop-steam-for-private": false,
+  "desktop-steam-lifetime": "inherit",
   "terminate-on-pause": false,
   "gamepad": "",
   "game-category": ""

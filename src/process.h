@@ -47,6 +47,10 @@
 #include "capture_generation.h"
 #include "app_launch_as.h"
 #include "config.h"
+#include "steam_lifetime.h"
+#ifdef __linux__
+#include "platform/linux/steam_title_process.h"
+#endif
 #include "emulator_library.h"
 #include "game_library_scanner.h"
 #include "audio.h"
@@ -133,6 +137,10 @@ namespace proc {
   /// The Steam shutdown undo a generated Steam app carries, in the form parse() keeps it, so that
   /// nothing has to be upgraded each time apps.json is read.
   std::string canonical_steam_shutdown_undo();
+
+  /// Desktop Steam outlives a transient streaming generation. Keep its display,
+  /// audio and gamepad routing, but remove private and generation ownership.
+  boost::process::v1::environment desktop_steam_environment(boost::process::v1::environment env);
 
   struct launch_as_availability_t {
     bool available = true;
@@ -830,6 +838,7 @@ namespace proc {
     // desktop Steam blocks a private launch of this app, shut it down and
     // proceed instead of refusing.
     bool close_desktop_steam_for_private = false;
+    std::string desktop_steam_lifetime = "inherit";
     bool use_app_identity = false;
     bool per_client_app_identity = false;
     bool allow_client_commands = false;
@@ -1059,6 +1068,8 @@ namespace proc {
 
   class proc_t {
   public:
+    std::pair<int, nlohmann::json> desktop_steam_control(const std::string &unique_id, bool can_launch,
+      const std::string &action = {}, const std::string &revision = {}, bool confirm_game_quit = false);
     KITTY_DEFAULT_CONSTR_MOVE_THROW(proc_t)
 
     std::string display_name;
@@ -1316,6 +1327,13 @@ namespace proc {
     std::string _game_mode_launched_appid;
     /// Whether this session started with the host in Game Mode, so its Steam cleanup is not its own.
     bool _session_started_in_game_mode = false;
+    bool _keep_desktop_steam = false;
+    bool _desktop_steam_preexisting = false;
+    std::string _desktop_launched_appid;
+    std::optional<platf::steam_title::process_t> _desktop_title_root;
+    std::chrono::steady_clock::time_point _desktop_title_claim_deadline {};
+    void capture_desktop_title();
+    bool close_desktop_title();
 #endif
     std::vector<cmd_t>::const_iterator _app_prep_it;
     std::vector<cmd_t>::const_iterator _app_prep_begin;
