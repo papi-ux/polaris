@@ -146,6 +146,28 @@ describe('session snapshot rows', () => {
     })
   })
 
+  it.each([false, true])('keeps the active client mode when the host default differs (pending=%s)', (pending) => {
+    const rows = buildSessionSnapshotRows(streaming, t, {
+      streamDisplay: { configured_label: 'Private Stream', effective_label: 'Private Stream', relaunch_required: pending },
+    })
+    expect(rows.details.find((row) => row.label === 'snapshot_stream_display_mode')).toEqual({
+      label: 'snapshot_stream_display_mode',
+      value: 'Mirror Desktop',
+      note: 'snapshot_stream_display_host_default(configured=Private Stream)',
+    })
+  })
+
+  it('uses the host projection when an older live payload omits the session mode', () => {
+    const rows = buildSessionSnapshotRows({ streaming: true }, t, {
+      streamDisplay: { configured_label: 'Private Stream', effective_label: 'Private Stream', relaunch_required: false },
+    })
+    expect(rows.details.find((row) => row.label === 'snapshot_stream_display_mode')).toEqual({
+      label: 'snapshot_stream_display_mode',
+      value: 'Private Stream',
+      note: 'snapshot_stream_display_synced',
+    })
+  })
+
   it('describes the FPS gap only for high-refresh targets that fall short', () => {
     expect(fpsTargetGapDescription({ fps: 60, session_target_fps: 60 }, t)).toBe('snapshot_none')
     expect(fpsTargetGapDescription({ fps: 118, session_target_fps: 120 }, t)).toBe('snapshot_none')
