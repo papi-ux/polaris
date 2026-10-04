@@ -12636,6 +12636,20 @@ namespace proc {
     return _app;
   }
 
+  std::optional<stream_stats_context_t> proc_t::try_stream_stats_context() const {
+    auto &sync = session_lifecycle_sync();
+    std::unique_lock<std::recursive_mutex> lifecycle_lock(sync.mutex, std::try_to_lock);
+    if (!lifecycle_lock.owns_lock()) {
+      return std::nullopt;
+    }
+    return stream_stats_context_t {
+      .mangohud_configured = !_app.uuid.empty() && env_flag_enabled(_app, _env, "MANGOHUD"),
+      .virtual_display = virtual_display,
+      .game = _app_name,
+      .game_uuid = _app.uuid,
+    };
+  }
+
   std::string proc_t::get_session_token() {
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
