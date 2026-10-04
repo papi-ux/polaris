@@ -571,6 +571,7 @@ import { useI18n } from 'vue-i18n'
 import { resolveClientSettingsSync } from '../client-settings-sync'
 import { resolveAutoQualityState } from '../auto-quality-state'
 import { resolveDoctorActionHttpResponse } from '../doctor-action-http.js'
+import { doctorIsWaitingForStream } from '../doctor-observation.js'
 import { buildReadyCheckDisplay } from '../dashboard-ready-checks'
 import { previewOutputForConfig } from '../dashboard-preview-output.js'
 import { readConfigOrNull } from '../config-cache.js'
@@ -1296,6 +1297,7 @@ const doctorRecommendation = computed(() => {
 })
 
 const doctorPanelClass = computed(() => {
+  if (doctorIsWaitingForStream(doctor.value, stats.value)) return 'border-l-storm/60 bg-void/20'
   // Host contract: traffic_light is green | amber | red (never yellow).
   // The tone paints the verdict stripe on the card left edge.
   switch (doctor.value?.traffic_light) {
@@ -1308,6 +1310,7 @@ const doctorPanelClass = computed(() => {
 })
 
 const doctorLightClass = computed(() => {
+  if (doctorIsWaitingForStream(doctor.value, stats.value)) return 'bg-storm/60'
   switch (doctor.value?.traffic_light) {
     case 'red': return 'bg-danger'
     case 'amber':
