@@ -10447,6 +10447,30 @@ namespace confighttp {
     });
   }
 
+  void register_apps_stats_routes(https_server_t &server) {
+    server.resource["^/api/apps$"]["GET"] = getApps;
+    server.resource["^/api/stats/stream$"]["GET"] = getStreamStats;
+  }
+
+#ifdef POLARIS_TESTS
+  void run_apps_stats_server_for_tests(
+    const std::string &cert, const std::string &key,
+    const std::function<void(unsigned short, std::function<void()>)> &ready,
+    const std::function<void()> &before_apps
+  ) {
+    https_server_t server {cert, key};
+    server.config.address = "127.0.0.1";
+    server.config.port = 0;
+    register_apps_stats_routes(server);
+    const auto apps = server.resource["^/api/apps$"]["GET"];
+    server.resource["^/api/apps$"]["GET"] = [apps, before_apps](resp_https_t response, req_https_t request) {
+      before_apps();
+      apps(std::move(response), std::move(request));
+    };
+    server.start([&](unsigned short port) { ready(port, [&]() { server.stop(); }); });
+  }
+#endif
+
   // Session event bus (file-scope for access from emit_session_event and SSE handler)
   static std::mutex s_event_mtx;
   static session_event_queue::event_queue s_events;
@@ -10648,7 +10672,7 @@ namespace confighttp {
     server.resource["^/api/pin$"]["POST"] = withCsrf(savePin);
     server.resource["^/api/pin$"]["DELETE"] = withCsrf(cancelPairing);
     server.resource["^/api/otp$"]["POST"] = withCsrf(getOTP);
-    server.resource["^/api/apps$"]["GET"] = getApps;
+    register_apps_stats_routes(server);
     server.resource["^/api/apps$"]["POST"] = withCsrf(saveApp);
     server.resource["^/api/apps/reorder$"]["POST"] = withCsrf(reorderApps);
     server.resource["^/api/apps/delete$"]["POST"] = withCsrf(deleteApp);
@@ -10734,7 +10758,6 @@ namespace confighttp {
     server.resource["^/api/stats/system$"]["GET"] = getSystemStats;
     server.resource["^/api/setup/hardware$"]["GET"] = getSetupHardware;
     server.resource["^/api/setup/networks$"]["GET"] = getSetupNetworks;
-    server.resource["^/api/stats/stream$"]["GET"] = getStreamStats;
     server.resource["^/api/stats/stream-sse$"]["GET"] = getStreamStatsSSE;
     server.resource["^/api/support/network-path-probe$"]["GET"] = getNetworkPathProbe;
     server.resource["^/api/host/power$"]["GET"] = getHostPower;
