@@ -3,13 +3,17 @@
  * @brief Test the GET /api/settings/metadata projection contract.
  */
 
+#include <src/adaptive_bitrate.h>
 #include <src/config.h>
 #include <src/confighttp.h>
 #include <src/confighttp_validation.h>
 #include <src/crypto.h>
 #include <src/nvhttp.h>
+#include <src/process.h>
 #include <src/stream_stats.h>
 
+#include <chrono>
+#include <future>
 #include <gtest/gtest.h>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -226,6 +230,68 @@ TEST_F(SettingsProjectionContract, StatsChannelAugmentationAddsTuningAndAutoQual
   ASSERT_TRUE(auto_quality.is_object());
   EXPECT_EQ(auto_quality.at("state").get<std::string>(), "off");
   EXPECT_TRUE(auto_quality.contains("components"));
+}
+
+TEST_F(SettingsProjectionContract, StatsPayloadDoesNotWaitForApplicationTeardown) {
+  using namespace std::chrono_literals;
+  stream_stats::stats_t stats {};
+  stats.streaming = false;
+  stats.bitrate_kbps = 23456;
+  stats.last_session = stream_stats::ended_session_t {
+    .session_generation = 42,
+    .client_name = "Ended test client",
+    .codec = "hevc",
+    .encoder_backend = "nvenc",
+  };
+  const auto expected_history = nlohmann::json::parse(stats.to_json()).at("last_session");
+  std::promise<void> locked;
+  std::promise<void> release;
+  auto released = release.get_future().share();
+  auto cleanup = std::async(std::launch::async, [&]() {
+    proc::proc.with_session_lifecycle_lock_for_tests([&]() {
+      locked.set_value();
+      released.wait();
+    });
+  });
+  locked.get_future().wait();
+  auto reader = std::async(std::launch::async, [&]() {
+    return nlohmann::json::parse(confighttp::stream_stats_payload(stats));
+  });
+  const auto ready = reader.wait_for(500ms);
+  // Release before any assertion/get so the original blocking implementation
+  // fails deterministically without leaving the test hung on an owned mutex.
+  release.set_value();
+  cleanup.get();
+  const auto payload = reader.get();
+  EXPECT_EQ(ready, std::future_status::ready);
+  EXPECT_FALSE(payload.at("streaming").get<bool>());
+  EXPECT_EQ(payload.at("bitrate_kbps"), 23456);
+  EXPECT_TRUE(payload.at("tuning").at("mangohud_configured").is_null());
+  EXPECT_EQ(payload.at("auto_quality").at("state"), "insufficient_signal");
+  EXPECT_EQ(payload.at("auto_quality").at("blocked_reason"), "session_changing");
+  EXPECT_FALSE(payload.at("auto_quality").at("can_recover_live").get<bool>());
+  EXPECT_FALSE(payload.at("auto_quality").at("relaunch_required").get<bool>());
+  EXPECT_EQ(payload.at("last_session"), expected_history);
+  EXPECT_TRUE(payload.contains("doctor"));
+
+  // Once teardown releases the lock, ordinary metadata returns without any
+  // cached application generation being carried across the busy interval.
+  const auto recovered = nlohmann::json::parse(confighttp::stream_stats_payload(stats));
+  EXPECT_TRUE(recovered.at("tuning").at("mangohud_configured").is_boolean());
+  EXPECT_EQ(recovered.at("auto_quality").at("state"), "off");
+  EXPECT_EQ(recovered.at("last_session"), expected_history);
+}
+
+TEST_F(SettingsProjectionContract, AutoQualityUsesTheSuppliedStreamSnapshot) {
+  stream_stats::stats_t stats {};
+  stats.bitrate_kbps = 54321;
+  const auto adaptive = adaptive_bitrate::get_state();
+  const auto policy = nvhttp::auto_quality_status_json(stats, proc::stream_stats_context_t {});
+  EXPECT_EQ(policy.at("live_bitrate_kbps"),
+            adaptive.target_bitrate_kbps > 0 ? adaptive.target_bitrate_kbps : stats.bitrate_kbps);
+  EXPECT_EQ(policy.at("quality_cap_kbps"),
+            adaptive.base_bitrate_kbps > 0 ? adaptive.base_bitrate_kbps : stats.bitrate_kbps);
+  EXPECT_EQ(policy.at("state"), "off");
 }
 
 TEST_F(SettingsProjectionContract, ResponseOnlyKeysMirrorTheValidationList) {

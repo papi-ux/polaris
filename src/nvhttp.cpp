@@ -7252,12 +7252,29 @@ namespace nvhttp {
 
   nlohmann::json auto_quality_status_json() {
     const auto stats = stream_stats::get_current();
+    return auto_quality_status_json(stats, proc::proc.try_stream_stats_context());
+  }
+
+  nlohmann::json auto_quality_status_json(
+    const stream_stats::stats_t &stats,
+    const std::optional<proc::stream_stats_context_t> &context) {
+    if (!context) {
+      auto policy = settings_metadata::build_auto_quality_policy_json(
+        nlohmann::json::object(), adaptive_bitrate::get_state(), stats.bitrate_kbps);
+      policy["state"] = "insufficient_signal";
+      policy["blocked_reason"] = "session_changing";
+      policy["summary"] = "Session information is temporarily unavailable.";
+      policy["detail"] = "Stream measurements remain available while the session starts or stops.";
+      policy["can_recover_live"] = false;
+      policy["relaunch_required"] = false;
+      return policy;
+    }
     const auto health = build_session_health_json(
       stats,
-      proc::proc.session_uses_virtual_display(),
+      context->virtual_display,
       std::string {},
-      proc::proc.get_last_run_app_name(),
-      proc::proc.get_running_app_uuid()
+      context->game,
+      context->game_uuid
     );
     return settings_metadata::build_auto_quality_policy_json(
       health,

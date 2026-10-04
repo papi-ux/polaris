@@ -164,8 +164,20 @@ export function displayModeDecisionDescription(decision, t) {
 function streamDisplayRow(s, t, streamDisplay) {
   const label = t('troubleshooting.snapshot_stream_display_mode')
   const hostLabel = streamDisplay?.effective_label || streamDisplay?.configured_label
+  const sessionLabel = typeof s.stream_display_mode === 'string' ? s.stream_display_mode.trim() : ''
   if (!hostLabel) {
     return { label, value: runtimeModeDescription(s, t) }
+  }
+  // A client's launch choice can differ from the saved host default. The live
+  // session reports what it uses; the host projection describes host settings.
+  if (sessionLabel && sessionLabel !== hostLabel) {
+    return {
+      label,
+      value: sessionLabel,
+      note: t('troubleshooting.snapshot_stream_display_host_default', {
+        configured: streamDisplay.configured_label || hostLabel,
+      }),
+    }
   }
   return {
     label,

@@ -28,10 +28,69 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __linux__
+  #include <sys/prctl.h>
+#endif
 
 namespace {
   using proc::session_stop_outcome_t;
   using rtsp_stream::session_role_e;
+
+#ifdef __linux__
+  // Container PID 1 need not reap fixture orphans. Adopt only our descendants
+  // for these tests, and restore the prior process setting after their guards.
+  struct scoped_fixture_subreaper_t {
+    scoped_fixture_subreaper_t() {
+      installed = prctl(PR_GET_CHILD_SUBREAPER, &previous) == 0 &&
+                  prctl(PR_SET_CHILD_SUBREAPER, 1) == 0;
+    }
+    ~scoped_fixture_subreaper_t() {
+      if (installed) (void) prctl(PR_SET_CHILD_SUBREAPER, previous);
+    }
+    scoped_fixture_subreaper_t(const scoped_fixture_subreaper_t &) = delete;
+    scoped_fixture_subreaper_t &operator=(const scoped_fixture_subreaper_t &) = delete;
+    int previous = 0;
+    bool installed = false;
+  };
+
+  struct owned_fixture_child_t {
+    explicit owned_fixture_child_t(pid_t owned, owned_fixture_child_t *ancestor = nullptr): pid(owned), parent(ancestor) {
+      fd = static_cast<int>(syscall(SYS_pidfd_open, pid, 0));
+    }
+    ~owned_fixture_child_t() {
+      // On an assertion failure, exit/reap the leader before reaping its child.
+      // This makes the exact sibling an adopted child of the fixture subreaper.
+      if (!reaped && parent) parent->terminate_and_reap();
+      terminate_and_reap();
+      if (fd >= 0) close(fd);
+    }
+    void terminate_and_reap() {
+      if (!reaped) {
+        // A failed setup has not handed its direct child to production yet.
+        // After capture, signal only the exact kernel-held process identity.
+        if (fd >= 0) (void) syscall(SYS_pidfd_send_signal, fd, SIGKILL, nullptr, 0);
+        else if (waitpid(pid, nullptr, WNOHANG) == 0) (void) kill(pid, SIGKILL);
+        pid_t waited;
+        do { waited = waitpid(pid, nullptr, 0); } while (waited < 0 && errno == EINTR);
+        reaped = waited == pid || (waited < 0 && errno == ECHILD);
+      }
+    }
+    bool exit_and_reap_observed() {
+      pollfd exit {.fd = fd, .events = POLLIN, .revents = 0};
+      if (poll(&exit, 1, 2000) != 1 || !(exit.revents & POLLIN)) return false;
+      pid_t waited;
+      do { waited = waitpid(pid, nullptr, 0); } while (waited < 0 && errno == EINTR);
+      reaped = waited == pid || (waited < 0 && errno == ECHILD);
+      return reaped;
+    }
+    owned_fixture_child_t(const owned_fixture_child_t &) = delete;
+    owned_fixture_child_t &operator=(const owned_fixture_child_t &) = delete;
+    pid_t pid;
+    int fd = -1;
+    bool reaped = false;
+    owned_fixture_child_t *parent = nullptr;
+  };
+#endif
 
   session_stop_outcome_t decide(
     bool can_launch,
@@ -965,6 +1024,8 @@ TEST(SessionStopContractTests, RuntimeAcquisitionRejectsNestedOrIncompleteDurabl
 
 TEST(SessionStopContractTests, OwnedRuntimeEscalatesTermResistantPrivateGroup) {
 #ifdef __linux__
+  scoped_fixture_subreaper_t reaper;
+  ASSERT_TRUE(reaper.installed);
   int ready[2] {-1, -1};
   ASSERT_EQ(pipe(ready), 0);
   const pid_t leader = fork();
@@ -977,19 +1038,26 @@ TEST(SessionStopContractTests, OwnedRuntimeEscalatesTermResistantPrivateGroup) {
     if (sibling < 0) _exit(126);
     if (sibling == 0) {
       signal(SIGTERM, SIG_IGN);
+      const pid_t own_pid = getpid();
+      (void) write(ready[1], &own_pid, sizeof(own_pid));
+      close(ready[1]);
       for (;;) pause();
     }
-    (void) write(ready[1], &sibling, sizeof(sibling));
     close(ready[1]);
     for (;;) pause();
   }
+  owned_fixture_child_t leader_guard {leader};
+  ASSERT_GE(leader_guard.fd, 0);
   close(ready[1]);
   pid_t sibling = -1;
   ASSERT_EQ(read(ready[0], &sibling, sizeof(sibling)), sizeof(sibling));
   close(ready[0]);
+  owned_fixture_child_t sibling_guard {sibling, &leader_guard};
+  ASSERT_GE(sibling_guard.fd, 0);
   const bool drained = stream_runtime::drain_gamescope_private_group_for_tests(leader);
-  if (!drained) (void) kill(-leader, SIGKILL);
   EXPECT_TRUE(drained);
+  EXPECT_TRUE(sibling_guard.exit_and_reap_observed())
+    << "production drain did not exit the TERM-resistant owned sibling";
   errno = 0;
   EXPECT_EQ(kill(sibling, 0), -1);
   EXPECT_EQ(errno, ESRCH);
@@ -998,6 +1066,8 @@ TEST(SessionStopContractTests, OwnedRuntimeEscalatesTermResistantPrivateGroup) {
 
 TEST(SessionStopContractTests, OwnedRuntimeEscalatesAfterLeaderExitsOnTerm) {
 #ifdef __linux__
+  scoped_fixture_subreaper_t reaper;
+  ASSERT_TRUE(reaper.installed);
   int ready[2] {-1, -1};
   ASSERT_EQ(pipe(ready), 0);
   const pid_t leader = fork();
@@ -1009,19 +1079,26 @@ TEST(SessionStopContractTests, OwnedRuntimeEscalatesAfterLeaderExitsOnTerm) {
     if (sibling < 0) _exit(126);
     if (sibling == 0) {
       signal(SIGTERM, SIG_IGN);
+      const pid_t own_pid = getpid();
+      (void) write(ready[1], &own_pid, sizeof(own_pid));
+      close(ready[1]);
       for (;;) pause();
     }
-    (void) write(ready[1], &sibling, sizeof(sibling));
     close(ready[1]);
     for (;;) pause();
   }
+  owned_fixture_child_t leader_guard {leader};
+  ASSERT_GE(leader_guard.fd, 0);
   close(ready[1]);
   pid_t sibling = -1;
   ASSERT_EQ(read(ready[0], &sibling, sizeof(sibling)), sizeof(sibling));
   close(ready[0]);
+  owned_fixture_child_t sibling_guard {sibling, &leader_guard};
+  ASSERT_GE(sibling_guard.fd, 0);
   const bool drained = stream_runtime::drain_gamescope_private_group_for_tests(leader);
-  if (!drained) (void) kill(-leader, SIGKILL);
   EXPECT_TRUE(drained);
+  EXPECT_TRUE(sibling_guard.exit_and_reap_observed())
+    << "production drain did not exit the owned sibling after leader exit";
   errno = 0;
   EXPECT_EQ(kill(sibling, 0), -1);
   EXPECT_EQ(errno, ESRCH);
@@ -1066,6 +1143,8 @@ TEST(SessionStopContractTests, OwnedRuntimeDoesNotClearSameSessionEscapedGroup) 
 
 TEST(SessionStopContractTests, SpawnRollbackDrainsSiblingAfterLeaderExit) {
 #ifdef __linux__
+  scoped_fixture_subreaper_t reaper;
+  ASSERT_TRUE(reaper.installed);
   int ready[2] {-1, -1};
   ASSERT_EQ(pipe(ready), 0);
   const pid_t leader = fork();
@@ -1077,24 +1156,31 @@ TEST(SessionStopContractTests, SpawnRollbackDrainsSiblingAfterLeaderExit) {
     if (sibling < 0) _exit(126);
     if (sibling == 0) {
       signal(SIGTERM, SIG_IGN);
+      const pid_t own_pid = getpid();
+      (void) write(ready[1], &own_pid, sizeof(own_pid));
+      close(ready[1]);
       for (;;) pause();
     }
-    (void) write(ready[1], &sibling, sizeof(sibling));
     close(ready[1]);
     _exit(0);
   }
+  owned_fixture_child_t leader_guard {leader};
+  ASSERT_GE(leader_guard.fd, 0);
   close(ready[1]);
   pid_t sibling = -1;
   ASSERT_EQ(read(ready[0], &sibling, sizeof(sibling)), sizeof(sibling));
   close(ready[0]);
+  owned_fixture_child_t sibling_guard {sibling, &leader_guard};
+  ASSERT_GE(sibling_guard.fd, 0);
   const int leader_pidfd = static_cast<int>(syscall(SYS_pidfd_open, leader, 0));
   ASSERT_GE(leader_pidfd, 0);
   pollfd leader_exit {.fd = leader_pidfd, .events = POLLIN, .revents = 0};
   ASSERT_EQ(poll(&leader_exit, 1, 5000), 1);
   const bool drained = stream_runtime::rollback_gamescope_spawn_for_tests(leader, leader_pidfd);
   close(leader_pidfd);
-  if (!drained) (void) kill(-leader, SIGKILL);
   EXPECT_TRUE(drained);
+  EXPECT_TRUE(sibling_guard.exit_and_reap_observed())
+    << "production rollback did not exit the owned sibling";
   errno = 0;
   EXPECT_EQ(kill(sibling, 0), -1);
   EXPECT_EQ(errno, ESRCH);
@@ -1212,7 +1298,9 @@ TEST(SessionStopContractTests, TerminateImplStopsBrowserCaptureBeforeIsolatedKil
   ASSERT_FALSE(source.empty());
   const auto start = source.find("void proc_t::terminate_impl(");
   ASSERT_NE(start, std::string::npos);
-  const auto body = source.substr(start, 3500);
+  const auto end = source.find("\n  bool proc_t::reload_configuration_from_file(", start);
+  ASSERT_NE(end, std::string::npos);
+  const auto body = source.substr(start, end - start);
   const auto prepare = body.find("session_media::prepare_for_stop(");
   const auto kill = body.find("terminate_isolated_session_generation(");
   ASSERT_NE(prepare, std::string::npos);

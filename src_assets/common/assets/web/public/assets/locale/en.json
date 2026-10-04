@@ -2637,6 +2637,7 @@
     "snapshot_requested_fps": "Requested FPS",
     "snapshot_runtime_backend": "Runtime backend",
     "snapshot_stream_display_mode": "Stream display mode",
+    "snapshot_stream_display_host_default": "Host default: {configured}",
     "snapshot_stream_display_pending": "Saved choice {configured} applies at the next launch",
     "snapshot_stream_display_synced": "Matches the saved choice",
     "snapshot_runtime_override": "Runtime override",
