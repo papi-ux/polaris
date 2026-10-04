@@ -688,6 +688,7 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_steam_shutdown
         ${CMAKE_SOURCE_DIR}/tests/unit/test_steam_shutdown_state_machine.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_desktop_steam.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_desktop_steam_lifetime.cpp
     )
 
     configure_polaris_full_test_target(test_polaris_pairing

@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <sys/types.h>
@@ -25,6 +26,7 @@ namespace platf::steam_title {
     std::uint64_t start_ticks {0};  ///< start time from stat, which tells a process from a later one with its pid
     std::string comm;  ///< the kernel's name for it, 15 characters at most
     std::string cmdline;  ///< NUL separated
+    bool zombie {false};
   };
 
   /**
@@ -52,6 +54,8 @@ namespace platf::steam_title {
    * Only Steam's own launch processes count, the reaper and the launch wrapper, so a shell or a
    * process search whose command line happens to hold the same words is not taken for the title.
    */
+  std::optional<process_t> root(const std::vector<process_t> &table, std::string_view appid, uid_t uid);
+
   bool running(const std::vector<process_t> &table, std::string_view appid, uid_t uid);
 
   /**
@@ -71,7 +75,7 @@ namespace platf::steam_title {
   /**
    * @brief The process table of the host. Rows that vanish while being read are left out.
    */
-  std::vector<process_t> read_process_table(const std::filesystem::path &proc_root = "/proc");
+  std::vector<process_t> read_process_table(const std::filesystem::path &proc_root = "/proc", bool *complete = nullptr);
 
   struct close_result_t {
     bool was_running {false};
@@ -85,7 +89,7 @@ namespace platf::steam_title {
    * Each process is reached through a pidfd and checked against the row it was chosen from, so a
    * pid that was reused in between is never signalled.
    */
-  close_result_t ask_to_close(std::string_view appid);
+  close_result_t ask_to_close(std::string_view appid, const process_t *expected_root = nullptr);
 
 }  // namespace platf::steam_title
 

@@ -8637,8 +8637,10 @@ namespace nvhttp {
       // Speaking the protocol, not permission to use it. Whether this host
       // will actually sleep is host_power below, which a client has to read
       // before offering the control.
+      features["desktop_steam_control_v1"] = false;
       features["host_sleep_v1"] = false;
 #ifdef __linux__
+      features["desktop_steam_control_v1"] = true;
       features["host_sleep_v1"] = true;
 #endif
 
@@ -9865,6 +9867,17 @@ namespace nvhttp {
         }
         game["launch_mode"] = launch_mode_contract_for_app(app);
         game["steam_launch"] = steam_launch_contract_for_app(app);
+        bool steam_lifetime_game_mode = false;
+#ifdef __linux__
+        steam_lifetime_game_mode = platf::game_mode_host::session_live();
+#endif
+        game["steam_lifecycle"] = {
+          {"desktop_policy", app.desktop_steam_lifetime},
+          {"host_default_keep", config::sunshine.keep_desktop_steam_running},
+          {"keep_in_host_virtual_display", proc::keep_desktop_steam(app.desktop_steam_lifetime, config::sunshine.keep_desktop_steam_running, "host_virtual_display", steam_lifetime_game_mode)},
+          {"keep_in_desktop_display", proc::keep_desktop_steam(app.desktop_steam_lifetime, config::sunshine.keep_desktop_steam_running, "desktop_display", steam_lifetime_game_mode)},
+          {"private_end", "cleanup"}
+        };
         game["display_planner"] = display_planner_contract;
 
         nlohmann::json genre_arr = nlohmann::json::array();
@@ -11596,6 +11609,29 @@ namespace nvhttp {
       response->write(output.dump(), headers);
     };
 
+    auto polarisHostSteam = [](resp_https_t response, req_https_t request) {
+      const auto cert = get_verified_cert(request);
+      if (!cert) { response->write(SimpleWeb::StatusCode::client_error_unauthorized); return; }
+      std::string action, revision;
+      bool confirmed = false;
+      if (request->method == "POST") {
+        try {
+          const auto body = nlohmann::json::parse(std::string(std::istreambuf_iterator<char>(request->content), {}));
+          action = body.at("action").get<std::string>();
+          if (action.empty()) throw std::invalid_argument("action is required");
+          revision = body.at("revision").get<std::string>();
+          confirmed = body.value("confirm_game_quit", false);
+        } catch (const std::exception &) {
+          response->write(SimpleWeb::StatusCode::client_error_bad_request,
+            "{\"status\":false,\"error\":\"Invalid Steam action request\"}"); return;
+        }
+      }
+      const auto [status, body] = proc::proc.desktop_steam_control(cert->uuid,
+        static_cast<bool>(cert->perm & PERM::launch), action, revision, confirmed);
+      SimpleWeb::CaseInsensitiveMultimap headers {{"Content-Type", "application/json"}};
+      response->write(static_cast<SimpleWeb::StatusCode>(status), body.dump(), headers);
+    };
+
     auto polarisHostSleep = [](resp_https_t response, req_https_t request) {
       print_req<PolarisHTTPS>(request);
       const auto named_cert_p = get_verified_cert(request);
@@ -12413,6 +12449,8 @@ namespace nvhttp {
     https_server.resource["^/polaris/v1/session/timing$"]["GET"] = polarisSessionTiming;
     https_server.resource["^/polaris/v1/session/telemetry$"]["POST"] = polarisSessionTelemetry;
     https_server.resource["^/polaris/v1/session/stop$"]["POST"] = polarisSessionStop;
+    https_server.resource["^/polaris/v1/host/steam$"]["GET"] = polarisHostSteam;
+    https_server.resource["^/polaris/v1/host/steam/action$"]["POST"] = polarisHostSteam;
     https_server.resource["^/polaris/v1/host/power$"]["GET"] = polarisHostPower;
     https_server.resource["^/polaris/v1/host/sleep$"]["POST"] = polarisHostSleep;
     https_server.resource["^/polaris/v1/client-settings$"]["GET"] = polarisClientSettings;

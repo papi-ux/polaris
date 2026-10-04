@@ -229,4 +229,18 @@ TEST(SteamTitleProcess, AskingATitleThatIsNotRunningDoesNothing) {
   EXPECT_EQ(result.gone, 0);
 }
 
+TEST(SteamTitleProcess, ZombiesDoNotMakeAnOtherwiseCompleteTableUnavailable) {
+  const scratch_t scratch;
+  scratch.add("4242", "4242 (reaper) Z 1 4242 4242 0 -1 4194304 1 2 3 4 5 6 7 8 20 0 1 0 987654 1000 200", "");
+  bool complete = false;
+  const auto table = st::read_process_table(scratch.root, &complete);
+  ASSERT_EQ(table.size(), 1);
+  EXPECT_TRUE(table.front().zombie);
+  EXPECT_TRUE(complete);
+  EXPECT_FALSE(st::running(table, "813230", getuid()));
+  scratch.add("4243", "4243 (reaper) S 1 4243 4243 0 -1 4194304 1 2 3 4 5 6 7 8 20 0 1 0 987655 1000 200", "");
+  (void) st::read_process_table(scratch.root, &complete);
+  EXPECT_FALSE(complete) << "A live launcher with unreadable arguments is ambiguous";
+}
+
 #endif

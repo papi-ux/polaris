@@ -1151,6 +1151,7 @@ namespace proc {
       auto shutdown_cmd = canonical_steam_shutdown_command(steam_launch_reference_command(ctx));
       BOOST_LOG(info) << "process: added " << label << " cleanup undo command [" << shutdown_cmd << ']';
       ctx.prep_cmds.emplace_back(""s, std::move(shutdown_cmd), false);
+      ctx.prep_cmds.back().managed_steam_cleanup = true;
     }
 
     bool is_steam_library_app(const proc::ctx_t &ctx) {
@@ -4514,8 +4515,11 @@ namespace proc {
 
       for (auto &cmd : ctx.prep_cmds) {
         if (command_contains_steam_big_picture_close(cmd.undo_cmd) || command_requests_steam_shutdown(cmd.undo_cmd)) {
+          cmd.managed_steam_cleanup = cmd.undo_cmd == canonical_steam_shutdown_command(cmd.undo_cmd) ||
+                                      cmd.undo_cmd == "steam -shutdown" || cmd.undo_cmd == "setsid steam -shutdown" ||
+                                      cmd.undo_cmd == "steam steam://close/bigpicture" || cmd.undo_cmd == "setsid steam steam://close/bigpicture";
           const auto shutdown_cmd = canonical_steam_shutdown_command(cmd.undo_cmd);
-          if (shutdown_cmd != cmd.undo_cmd) {
+          if (cmd.managed_steam_cleanup && shutdown_cmd != cmd.undo_cmd) {
             // In memory only, on every read of an apps.json an older Polaris wrote, so not news.
             BOOST_LOG(debug) << "process: upgraded Steam Big Picture cleanup command from ["
                              << cmd.undo_cmd << "] to [" << shutdown_cmd << ']';
@@ -4623,8 +4627,11 @@ namespace proc {
 
       for (auto &cmd : ctx.prep_cmds) {
         if (command_contains_steam_big_picture_close(cmd.undo_cmd) || command_requests_steam_shutdown(cmd.undo_cmd)) {
+          cmd.managed_steam_cleanup = cmd.undo_cmd == canonical_steam_shutdown_command(cmd.undo_cmd) ||
+                                      cmd.undo_cmd == "steam -shutdown" || cmd.undo_cmd == "setsid steam -shutdown" ||
+                                      cmd.undo_cmd == "steam steam://close/bigpicture" || cmd.undo_cmd == "setsid steam steam://close/bigpicture";
           const auto shutdown_cmd = canonical_steam_shutdown_command(cmd.undo_cmd);
-          if (shutdown_cmd != cmd.undo_cmd) {
+          if (cmd.managed_steam_cleanup && shutdown_cmd != cmd.undo_cmd) {
             // In memory only, on every read of an apps.json an older Polaris wrote, so not news.
             BOOST_LOG(debug) << "process: upgraded Steam cleanup command from ["
                              << cmd.undo_cmd << "] to [" << shutdown_cmd << ']';
@@ -4897,6 +4904,12 @@ namespace proc {
     ctx.launch_as = std::move(value);
     ctx.desktop_mirror = ctx.launch_as == "desktop_display";
     ctx.virtual_display = ctx.launch_as == "host_virtual_display";
+  }
+
+  boost::process::v1::environment desktop_steam_environment(boost::process::v1::environment env) {
+    env.erase("POLARIS_SESSION_INSTANCE_ID");
+    env.erase("POLARIS_PRIVATE_SESSION");
+    return env;
   }
 
   std::string canonical_steam_shutdown_undo() {
@@ -8842,6 +8855,14 @@ namespace proc {
     _detached_child_authority_complete = true;
 #endif
     _app = app;
+#ifdef __linux__
+    _keep_desktop_steam = keep_desktop_steam(app.desktop_steam_lifetime,
+      config::sunshine.keep_desktop_steam_running, session_mode, platf::game_mode_host::session_live());
+    _desktop_steam_preexisting = (session_mode == "host_virtual_display" || session_mode == "desktop_display") &&
+      !platf::game_mode_host::session_live() && desktop_steam_client_active_impl();
+    _desktop_launched_appid.clear();
+    _desktop_title_root.reset();
+#endif
     if (resolved_emulator_command) {
       _app.cmd = *resolved_emulator_command;
     }
@@ -10798,14 +10819,27 @@ namespace proc {
         // for a Steam game, the upper half of the id for a shortcut to a non-Steam game.
         const auto reaper_appid = platf::steam_title::launch_appid(appid);
         const bool game_mode_live = platf::game_mode_host::session_live();
-        const bool title_already_open = game_mode_live && !appid.empty() &&
-                                        platf::steam_title::running(platf::steam_title::read_process_table(), reaper_appid, getuid());
+        bool table_complete = true;
+        const auto title_table = platf::steam_title::read_process_table("/proc", &table_complete);
+        if ((_keep_desktop_steam || _desktop_steam_preexisting) && !appid.empty() && !table_complete)
+          return launch_failure::refuse(503, "steam_ownership_unavailable", "Steam game ownership could not be checked. Refresh before launching.", "Check host process visibility and try again.");
+        const bool title_already_open = (game_mode_live || _keep_desktop_steam || _desktop_steam_preexisting) && !appid.empty() &&
+                                        platf::steam_title::running(title_table, reaper_appid, getuid());
         if (game_mode_live && !appid.empty()) {
           detached_to_spawn = game_mode_detached_commands(_app.detached, appid, title_already_open);
         }
         _game_mode_launched_appid = game_mode_title_to_remember(reaper_appid, game_mode_live, title_already_open);
+        if ((_keep_desktop_steam || _desktop_steam_preexisting) && !title_already_open && !appid.empty()) {
+          _desktop_launched_appid = reaper_appid;
+          _desktop_title_claim_deadline = std::chrono::steady_clock::now() + 30s;
+        }
+        if ((_keep_desktop_steam || _desktop_steam_preexisting) && title_already_open) {
+          detached_to_spawn.erase(std::remove_if(detached_to_spawn.begin(), detached_to_spawn.end(), [](const auto &command) {
+            return command_contains_steam_game_launch_uri(command) || command_contains_steam_applaunch(command);
+          }), detached_to_spawn.end());
+        }
         if (title_already_open) {
-          BOOST_LOG(info) << "game_mode: ["sv << _app.name << "] is already open in Game Mode, so this stream joins it: it is not launched again, and ending the stream will leave it open"sv;
+          BOOST_LOG(info) << "Steam title ["sv << _app.name << "] is already open; this stream joins it and leaves it open when ending"sv;
         }
       }
 #endif
@@ -10814,11 +10848,21 @@ namespace proc {
                                                 find_working_directory(cmd, _env) :
                                                 boost::filesystem::path(_app.working_dir);
         BOOST_LOG(info) << "Spawning ["sv << cmd << "] in ["sv << working_dir << ']';
-        auto child = platf::run_command(_app.elevated, true, cmd, working_dir, _env, _pipe.get(), ec, nullptr);
+        auto detached_env = _env;
+        bool desktop_steam_command = false;
+#ifdef __linux__
+        desktop_steam_command = _keep_desktop_steam && standalone_desktop_steam_launch(cmd);
+        if (desktop_steam_command) {
+          // Desktop Steam outlives the stream. Its bootstrap and children must not
+          // carry the exact-generation credential that owns transient app cleanup.
+          detached_env = desktop_steam_environment(std::move(detached_env));
+        }
+#endif
+        auto child = platf::run_command(_app.elevated, true, cmd, working_dir, detached_env, _pipe.get(), ec, nullptr);
         if (ec) {
           BOOST_LOG(warning) << "Couldn't spawn ["sv << cmd << "]: System: "sv << ec.message();
         } else {
-          if (detached_only) {
+          if (detached_only && !desktop_steam_command) {
             const auto child_pid = static_cast<pid_t>(child.id());
             int pidfd_open_error = 0;
             auto child_pidfd = open_process_pidfd(child_pid, pidfd_open_error);
@@ -10928,6 +10972,9 @@ namespace proc {
 #endif
 
     _app_launch_time = std::chrono::steady_clock::now();
+#ifdef __linux__
+    capture_desktop_title();
+#endif
 
 #ifdef __linux__
     // A launch that lands on the host session instead of the private one still
@@ -11095,6 +11142,198 @@ namespace proc {
     return 0;
   }
 
+#ifdef __linux__
+  void proc_t::capture_desktop_title() {
+    if ((!_keep_desktop_steam && !_desktop_steam_preexisting) || _desktop_launched_appid.empty() || _desktop_title_root ||
+        std::chrono::steady_clock::now() > _desktop_title_claim_deadline) return;
+    bool complete = false;
+    const auto table = platf::steam_title::read_process_table("/proc", &complete);
+    if (complete) _desktop_title_root = platf::steam_title::root(table, _desktop_launched_appid, getuid());
+  }
+
+  bool proc_t::close_desktop_title() {
+    if (_desktop_launched_appid.empty()) return true;
+    capture_desktop_title();
+    bool complete = false;
+    const auto table = platf::steam_title::read_process_table("/proc", &complete);
+    if (!complete) return false;
+    if (!platf::steam_title::running(table, _desktop_launched_appid, getuid())) {
+      // A delayed launch could still arrive. Keep the output until the claim
+      // window ends, then an absent title needs no shutdown.
+      if (!_desktop_title_root && std::chrono::steady_clock::now() < _desktop_title_claim_deadline) return false;
+      _desktop_launched_appid.clear();
+      return true;
+    }
+    const auto root = platf::steam_title::root(table, _desktop_launched_appid, getuid());
+    if (_desktop_title_root && std::none_of(table.begin(), table.end(), [&](const auto &row) {
+          return row.pid == _desktop_title_root->pid && row.start_ticks == _desktop_title_root->start_ticks;
+        })) {
+      _desktop_launched_appid.clear();
+      return true;
+    }
+    if (!root || !_desktop_title_root) return false;
+    if (root->pid != _desktop_title_root->pid || root->start_ticks != _desktop_title_root->start_ticks) {
+      // The launch we owned ended. A later launch of this appid belongs to the desktop.
+      _desktop_launched_appid.clear();
+      return true;
+    }
+    (void) platf::steam_title::ask_to_close(_desktop_launched_appid, &*_desktop_title_root);
+    const auto deadline = std::chrono::steady_clock::now() + _app.exit_timeout;
+    do {
+      const auto fresh = platf::steam_title::read_process_table("/proc", &complete);
+      if (!complete) return false;
+      if (std::none_of(fresh.begin(), fresh.end(), [&](const auto &row) {
+            return row.pid == root->pid && row.start_ticks == root->start_ticks;
+          })) {
+        _desktop_launched_appid.clear();
+        return true;
+      }
+      std::this_thread::sleep_for(50ms);
+    } while (std::chrono::steady_clock::now() < deadline);
+    return false; // No force kill: keep the output and owner for an End retry.
+  }
+#endif
+
+  std::pair<int, nlohmann::json> proc_t::desktop_steam_control(const std::string &unique_id, bool can_launch,
+    const std::string &action, const std::string &revision, bool confirm_game_quit) {
+    auto blocked = [&](int status, std::string code, std::string message) -> std::pair<int, nlohmann::json> {
+      return {status, {{"version", 1}, {"status", false}, {"state", "unavailable"},
+        {"code", std::move(code)}, {"error", std::move(message)}}};
+    };
+    if (!can_launch) return blocked(403, "permission_denied", "This device may watch but not control Steam.");
+#ifndef __linux__
+    return blocked(501, "unsupported_platform", "Desktop Steam controls require a Linux host.");
+#else
+    auto guard = session_snapshot_guard_t::try_acquire(*_session_lifecycle_gate);
+    if (!guard.owns_snapshot()) return blocked(409, "session_busy", "A stream is starting or ending. Refresh Steam status.");
+    const auto sessions = rtsp_stream::session_snapshot(unique_id);
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    if (platf::game_mode_host::session_live() || _session_started_in_game_mode)
+      return blocked(409, "game_mode", "Steam belongs to Game Mode. Use its own Steam controls.");
+    const bool has_session = _app_id > 0 || sessions.active_sessions != 0 || sessions.pending_sessions != 0;
+    if (has_session && (!_launch_session || !boost::iequals(_launch_session->unique_id, unique_id) ||
+        sessions.requester_role == rtsp_stream::session_role_e::viewer))
+      return blocked(403, "session_not_owned", "Another device owns this stream. Steam controls are unavailable.");
+    if (has_session && (_launch_session->expected_stream_mode != "host_virtual_display" &&
+                        _launch_session->expected_stream_mode != "desktop_display"))
+      return blocked(409, "private_runtime", "These controls manage desktop Steam. End or resume a private stream using its session controls.");
+    if (_host_virtual_cleanup_pending || _retained_steam_shutdown)
+      return blocked(409, "cleanup_pending", "Finish ending the current session before controlling Steam.");
+
+    // A fresh same-account observation. Unreadable ownership is unavailable,
+    // never interpreted as stopped. Private Steam is never a desktop target.
+    auto observe = [&]() -> std::optional<nlohmann::json> {
+      bool running = false, game_active = false;
+      std::vector<std::string> identities;
+      std::error_code error;
+      for (std::filesystem::directory_iterator it {"/proc", error}, end; !error && it != end; it.increment(error)) {
+        const auto name = it->path().filename().string();
+        if (!proc_pid_dir_name(name)) continue;
+        const auto pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
+        struct stat info {};
+        if (::stat(it->path().c_str(), &info) != 0) { if (errno == ENOENT) continue; return std::nullopt; }
+        if (info.st_uid != getuid()) continue;
+        const auto comm_read = read_proc_status_file_result(pid, "comm");
+        const auto cmdline = read_proc_status_file_result(pid, "cmdline");
+        const auto status = read_proc_status_file_result(pid, "status");
+        if (!comm_read.ok() || !cmdline.ok() || !status.ok()) {
+          if (process_vanished_during_proc_read(comm_read.error) || process_vanished_during_proc_read(cmdline.error) ||
+              process_vanished_during_proc_read(status.error)) continue;
+          return std::nullopt;
+        }
+        auto comm = boost::trim_copy(comm_read.bytes);
+        const bool game = (comm == "reaper" || comm == "steam-launch-wr") && cmdline.bytes.find("SteamLaunch") != std::string::npos;
+        if (game) {
+          game_active = true;
+          const auto start = read_proc_status_file_result(pid, "stat");
+          if (!start.ok()) return std::nullopt;
+          const auto ticks = proc_start_time_from_stat(start.bytes);
+          if (!ticks) return std::nullopt;
+          identities.push_back("g" + name + ":" + std::to_string(*ticks));
+        }
+        if (!is_active_desktop_steam_client_process(comm, proc_argv0_from_cmdline(cmdline.bytes), cmdline.bytes, status.bytes)) continue;
+        const auto environ = read_proc_status_file_result(pid, "environ");
+        const auto start = read_proc_status_file_result(pid, "stat");
+        if (!environ.ok() || !start.ok() || !proc_start_time_from_stat(start.bytes)) return std::nullopt;
+        if (proc_environ_is_polaris_private_session(environ.bytes)) return std::nullopt;
+        if (!proc_environ_contains_exact_entry(environ.bytes, "HOME", account_home_directory())) return std::nullopt;
+        running = true;
+        if (comm != "steamwebhelper")
+          identities.push_back("s" + name + ":" + std::to_string(*proc_start_time_from_stat(start.bytes)));
+      }
+      if (error) return std::nullopt;
+      const auto pipe = steam_instance_pipe_path();
+      if (!running && (!pipe || steam_instance_pipe_listener_active(*pipe))) return std::nullopt;
+      std::sort(identities.begin(), identities.end());
+      std::string fingerprint;
+      for (const auto &identity : identities) fingerprint += identity + ";";
+      return nlohmann::json {{"version", 1}, {"status", true}, {"state", running ? "running" : "stopped"},
+        {"game_active", game_active}, {"revision", std::to_string(std::hash<std::string> {}(fingerprint))},
+        {"keep_running_default", config::sunshine.keep_desktop_steam_running},
+        {"effective_keep_running", has_session ? (_keep_desktop_steam || _desktop_steam_preexisting) : config::sunshine.keep_desktop_steam_running}};
+    };
+    auto state = observe();
+    if (!state) return blocked(409, "ownership_unavailable", "Steam ownership could not be checked. Refresh before continuing.");
+    if (action.empty()) return {200, *state};
+    if (action != "open" && action != "big_picture" && action != "quit")
+      return blocked(400, "invalid_action", "Choose Open Steam, Open Big Picture or Quit Steam.");
+    if (revision.empty() || revision != state->at("revision").get<std::string>())
+      return blocked(409, "stale_status", "Steam changed since it was checked. Refresh and try again.");
+    if (action == "quit" && state->at("game_active").get<bool>() && !confirm_game_quit)
+      return blocked(409, "confirmation_required", "A game is running. Quitting Steam may close it. Confirm Quit Steam to continue.");
+    auto env = has_session ? _env : boost::this_process::environment();
+    env = desktop_steam_environment(std::move(env));
+    env["HOME"] = account_home_directory();
+    std::error_code command_error;
+    if (action == "quit") {
+      if (state->at("state") == "stopped") { (*state)["accepted"] = true; return {200, *state}; }
+      const auto home = std::optional<std::string> {account_home_directory()};
+      const auto pipe = steam_instance_pipe_path(home, home);
+      const auto remote = steam_remote_command_path(home, home);
+      if (!pipe || !steam_instance_pipe_listener_active(*pipe) || !remote || access(remote->c_str(), X_OK) != 0)
+        return blocked(409, "remote_unavailable", "Steam's forwarding client is unavailable. Quit Steam on the host.");
+      boost::filesystem::path working_dir {*home};
+      auto child = run_steam_remote_shutdown_without_launch(*remote, working_dir, env, nullptr, command_error);
+      if (!command_error) child.detach();
+    } else {
+      bool desktop_available = false;
+      const auto socket_available = [](const std::string &path) {
+        struct stat info {};
+        return ::stat(path.c_str(), &info) == 0 && S_ISSOCK(info.st_mode) &&
+          (info.st_uid == getuid() || info.st_uid == 0);
+      };
+      const auto wayland = env.find("WAYLAND_DISPLAY"), runtime = env.find("XDG_RUNTIME_DIR"), display = env.find("DISPLAY");
+      if (wayland != env.end() && !wayland->to_string().empty()) {
+        const auto socket = std::filesystem::path(wayland->to_string());
+        if (socket.is_absolute()) desktop_available = socket_available(socket.string());
+        else if (runtime != env.end()) desktop_available = socket_available((std::filesystem::path(runtime->to_string()) / socket).string());
+      }
+      if (display != env.end()) {
+        const auto value = display->to_string();
+        if (value.size() > 1 && value[0] == ':') {
+          const auto number = value.substr(1, value.find('.') == std::string::npos ? std::string::npos : value.find('.') - 1);
+          if (!number.empty() && std::all_of(number.begin(), number.end(), [](unsigned char c) { return std::isdigit(c); }))
+            desktop_available = desktop_available || socket_available("/tmp/.X11-unix/X" + number);
+        }
+      }
+      if (!desktop_available)
+        return blocked(409, "desktop_unavailable", "No desktop session is available for Steam. Sign in to the host desktop first.");
+      boost::system::error_code error;
+      boost::filesystem::path working_dir {account_home_directory()};
+      auto child = platf::run_command(false, true, action == "open" ? "setsid steam steam://open/main" : "setsid steam -gamepadui",
+        working_dir, env, nullptr, error, nullptr);
+      if (error) command_error = std::error_code(error.value(), std::system_category());
+      else child.detach();
+    }
+    if (command_error) return blocked(503, "dispatch_failed", "Steam did not accept the command. Refresh before retrying.");
+    state = observe();
+    if (!state) return blocked(409, "outcome_unavailable", "The command was sent but Steam's state could not be checked. Refresh; do not repeat automatically.");
+    (*state)["accepted"] = true;
+    return {200, *state};
+#endif
+  }
+
   int proc_t::running() {
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
@@ -11113,6 +11352,7 @@ namespace proc {
     }
 
 #ifdef __linux__
+    capture_desktop_title();
     if (_host_virtual_cleanup_pending) {
       // This is retained shutdown authority, not proof that a process lives or
       // permission to resume. Preserve the owner-visible app for another End.
@@ -11951,6 +12191,12 @@ namespace proc {
     }
     stop_private_session_apps_before_compositor(immediate);
 
+    if ((_keep_desktop_steam || _desktop_steam_preexisting) && !close_desktop_title()) {
+      _host_virtual_cleanup_pending = true;
+      BOOST_LOG(error) << "process: retaining desktop stream because its Steam title has not closed"sv;
+      return;
+    }
+
     // The immutable launch generation, not mutable config, owns this cleanup.
     // Keep exact-generation ancestors alive while proving pressure-vessel client
     // ancestry above, then terminate every exact-generation process via pidfds.
@@ -12078,6 +12324,11 @@ namespace proc {
       if (gamescope_session_stop_undo && command_requests_steam_shutdown(cmd.undo_cmd)) {
         BOOST_LOG(info) << "Skipping Steam -shutdown undo; polaris-gamescope-session stop owns nested Steam cleanup ["sv
                         << cmd.undo_cmd << ']';
+        continue;
+      }
+
+      if ((_keep_desktop_steam || _desktop_steam_preexisting) && cmd.managed_steam_cleanup) {
+        BOOST_LOG(info) << "process: keeping desktop Steam after End Session (keep policy or preexisting client)"sv;
         continue;
       }
 
@@ -14108,6 +14359,7 @@ namespace proc {
           ctx.exit_timeout = std::chrono::seconds { app_node.value("exit-timeout", 5) };
           set_launch_as(ctx, normalize_launch_as(app_node));
           ctx.close_desktop_steam_for_private = app_node.value("close-desktop-steam-for-private", false);
+          ctx.desktop_steam_lifetime = normalize_desktop_steam_lifetime(app_node.value("desktop-steam-lifetime", "inherit"));
           ctx.scale_factor = app_node.value("scale-factor", 100);
           ctx.use_app_identity = app_node.value("use-app-identity", false);
           ctx.per_client_app_identity = app_node.value("per-client-app-identity", false);
