@@ -16,6 +16,7 @@ const live = (override = {}) => ({
   streaming: true,
   clients: [{ stream_instance_id: id, fps: 120 }],
   video_sample_revision: 20,
+  video_policy_sample_count: 20,
   media_loss_sample_revision: 10,
   media_loss_last_received_age_ms: 100,
   network_sample_revision: 20,
@@ -203,6 +204,12 @@ describe('post-session report through the production view', () => {
 
   it('requires current client video evidence before grading a default zero host-drop ratio', async () => {
     await mountView(live({ clients: [{ stream_instance_id: id, fps: 0 }] }))
+    await receive({ streaming: false, last_session: ended() })
+    expect(card().text()).toContain('unknown ms encode / unknown of frames dropped on the host.')
+  })
+
+  it.each([0, null, '20'])('does not use a revision surviving reset as a current video sample: %s', async (sampleCount) => {
+    await mountView(live({ video_policy_sample_count: sampleCount }))
     await receive({ streaming: false, last_session: ended() })
     expect(card().text()).toContain('unknown ms encode / unknown of frames dropped on the host.')
   })

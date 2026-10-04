@@ -28,7 +28,8 @@ function buildCompletedReport({ stats = {}, logs = '', disconnectReason = '', la
   const observed = (values) => ({
     streaming: true,
     clients: [{ stream_instance_id: 'observed-session:1', fps: 120 }],
-    video_sample_revision: 20, media_loss_sample_revision: 20, media_loss_last_received_age_ms: 100,
+    video_sample_revision: 20, video_policy_sample_count: 20,
+    media_loss_sample_revision: 20, media_loss_last_received_age_ms: 100,
     network_sample_revision: 20, network_last_received_age_ms: 100,
     ...values,
     network_verdict: values.network_verdict ? {
@@ -312,6 +313,7 @@ describe('GitHub issue draft support flow', () => {
         streaming: true,
         clients: [{ stream_instance_id: 'observed-session:1', fps: 118.5 }],
         video_sample_revision: 20,
+        video_policy_sample_count: 20,
         media_loss_sample_revision: 20,
         media_loss_last_received_age_ms: 100,
         fps: 118.5,

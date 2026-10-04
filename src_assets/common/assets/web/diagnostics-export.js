@@ -1281,7 +1281,9 @@ export function captureLiveSessionEvidence({ stats, connected = false, capturedA
     sameSession?.stats,
   )
   const carried = !lossCurrent && Boolean(remembered)
-  const videoMeasured = positiveRevision(stats.video_sample_revision) && finiteMeasurement(client.fps, Number.MIN_VALUE)
+  // Revisions survive host resets; a positive revision alone is not a sample in this session.
+  const videoMeasured = positiveRevision(stats.video_sample_revision) &&
+    positiveRevision(stats.video_policy_sample_count) && finiteMeasurement(client.fps, Number.MIN_VALUE)
   // Detach every nested value from Vue's live objects before it can become history.
   return JSON.parse(JSON.stringify({
     origin: 'live-sample', streamId, capturedAt, connectedAtCapture: true, stats, logs,
