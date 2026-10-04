@@ -3280,22 +3280,38 @@ TEST(ProcessRuntimeConfigTests, ExactGenerationCleanupLeavesUnownedControlProces
     return;
   }
 
-  const auto owned_environ = "/proc/" + std::to_string(owned) + "/environ";
-  bool token_visible = false;
-  for (int i = 0; i < 40 && !token_visible; ++i) {
-    std::ifstream in(owned_environ, std::ios::binary);
-    const std::string environ((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    token_visible = environ.find("POLARIS_SESSION_INSTANCE_ID=" + token) != std::string::npos;
-    if (!token_visible) {
+  // Both children must finish exec before this ownership assertion. A control
+  // child with a transient zero-byte environ is deliberately ambiguous to the
+  // production sweep, even when the owned child's token is already readable.
+  const auto sleep_environ = [](pid_t pid) -> std::optional<std::string> {
+    const auto directory = "/proc/" + std::to_string(pid) + '/';
+    std::ifstream comm_file(directory + "comm");
+    std::string comm;
+    if (!std::getline(comm_file, comm) || comm != "sleep") {
+      return std::nullopt;
+    }
+    std::ifstream environ_file(directory + "environ", std::ios::binary);
+    std::string environ((std::istreambuf_iterator<char>(environ_file)), std::istreambuf_iterator<char>());
+    if (!environ_file.is_open() || environ.empty()) {
+      return std::nullopt;
+    }
+    return environ;
+  };
+  bool children_ready = false;
+  for (int i = 0; i < 40 && !children_ready; ++i) {
+    const auto owned_environment = sleep_environ(owned);
+    const auto control_environment = sleep_environ(control);
+    children_ready = owned_environment && control_environment &&
+                     owned_environment->find("POLARIS_SESSION_INSTANCE_ID=" + token + '\0') != std::string::npos &&
+                     control_environment->find("POLARIS_SESSION_INSTANCE_ID=") == std::string::npos;
+    if (!children_ready) {
       std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
   }
-  if (!token_visible) {
-    FAIL() << "exact generation token did not become visible in child environ";
-    return;
-  }
+  ASSERT_TRUE(children_ready) << "owned and control sleep children did not finish exec";
 
-  EXPECT_TRUE(proc::terminate_exact_generation_processes_for_tests(token));
+  // Unwind the child guards on refusal instead of blocking on sleep's 60s exit.
+  ASSERT_TRUE(proc::terminate_exact_generation_processes_for_tests(token));
 
   int owned_status = 0;
   EXPECT_EQ(owned_guard.wait(&owned_status, 0), owned);
