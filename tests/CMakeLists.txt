@@ -732,6 +732,14 @@ if (BUILD_FULL_TESTS)
         ${TEST_VIDEO_SOURCES}
     )
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # Deterministic capture ownership checks use the production conversion
+        # adapter without opening a GPU, display or PipeWire daemon.
+        add_test(NAME polaris_capture_lease_lifetime
+            COMMAND test_polaris_video --gtest_filter=VideoCaptureLeaseTests.*)
+        set_tests_properties(polaris_capture_lease_lifetime PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    endif()
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_library(encoder_probe_provider_fixture SHARED fixtures/encoder_probe_provider.cpp)
         add_dependencies(test_polaris_video encoder_probe_provider_fixture)
         target_compile_definitions(test_polaris_video PRIVATE

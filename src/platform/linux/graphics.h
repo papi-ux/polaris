@@ -302,6 +302,7 @@ namespace egl {
       }
 
       dmabuf_buffer_key = 0;
+      capture_owner.reset();
     }
 
     surface_descriptor_t sd {.fds = {-1, -1, -1, -1}};
@@ -309,6 +310,10 @@ namespace egl {
     // Increment sequence when new rgb_t needs to be created
     std::uint64_t sequence;
     std::uint64_t dmabuf_buffer_key {0};
+    // An isolated conversion image must retain the published capture owner,
+    // including a PipeWire buffer lease wrapped around the pooled image.
+    // The original image never points back to its conversion clone.
+    std::shared_ptr<platf::img_t> capture_owner;
     bool y_invert {false};
   };
 
