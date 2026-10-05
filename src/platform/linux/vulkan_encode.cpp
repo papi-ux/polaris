@@ -24,6 +24,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_vulkan.h>
+#include <libavutil/dict.h>
 }
 
 #include "capture_producer_sync.h"
@@ -157,6 +158,19 @@ namespace vk {
       }
     }
 
+    // FFmpeg enables its optional device extensions automatically, but its
+    // default list omits foreign ownership. Request it additively; unsupported
+    // devices can still open for ordinary capture, while leased import checks
+    // the actual enabled list and refuses without it.
+    AVDictionary *device_options = nullptr;
+    auto free_options = util::fail_guard([&] { av_dict_free(&device_options); });
+    if (av_dict_set(&device_options, "device_extensions", VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME, 0) < 0) {
+      return -1;
+    }
+    const auto create_device = [&](const char *selector) {
+      return av_hwdevice_ctx_create(hw_device_buf, AV_HWDEVICE_TYPE_VULKAN, selector, device_options, 0);
+    };
+
     // KMS passes the capture card's exact render node. Using a different physical
     // device can make DMA-BUF import fail or silently add a cross-GPU copy.
     const bool require_exact_device = !capture_render_path.empty() || !config::video.adapter_name.empty();
@@ -166,7 +180,7 @@ namespace vk {
     if (!render_path.empty() && render_path.front() == '/') {
       const auto idx = find_vulkan_index_for_render_node(render_path.c_str());
       if (!idx.empty()) {
-        if (av_hwdevice_ctx_create(hw_device_buf, AV_HWDEVICE_TYPE_VULKAN, idx.c_str(), nullptr, 0) >= 0) {
+        if (create_device(idx.c_str()) >= 0) {
           BOOST_LOG(info) << "Vulkan Video matched render node [" << render_path << "] to physical device [" << idx << ']';
           return 0;
         }
@@ -177,7 +191,7 @@ namespace vk {
       }
     } else if (!render_path.empty()) {
       // Non-path: treat as device name substring or numeric index
-      if (av_hwdevice_ctx_create(hw_device_buf, AV_HWDEVICE_TYPE_VULKAN, render_path.c_str(), nullptr, 0) >= 0) {
+      if (create_device(render_path.c_str()) >= 0) {
         return 0;
       }
       if (require_exact_device) {
@@ -186,7 +200,7 @@ namespace vk {
       }
     }
     // Final fallback: let FFmpeg pick default
-    if (av_hwdevice_ctx_create(hw_device_buf, AV_HWDEVICE_TYPE_VULKAN, nullptr, nullptr, 0) >= 0) {
+    if (create_device(nullptr) >= 0) {
       return 0;
     }
     return -1;
@@ -982,6 +996,9 @@ namespace vk {
           !extension_enabled(VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME)) {
         return "device was not opened with DMA-BUF and DRM modifier import extensions";
       }
+      if (!extension_enabled(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME)) {
+        return "device was not opened with foreign capture ownership support";
+      }
       const auto format = capture_admission::format_info(sd.fourcc);
       if (!format) {
         return "capture fourcc has no packed RGB mapping";
@@ -1568,11 +1585,13 @@ namespace vk {
         VkImageMemoryBarrier src_barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         src_barrier.srcAccessMask = 0;
         src_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        src_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // A leased external producer has written these pixels. UNDEFINED
+        // would discard its contents; acquire its shared GENERAL layout.
+        src_barrier.oldLayout = capture_owner ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED;
         src_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         src_barrier.image = src.image;
         src_barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        src_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+        src_barrier.srcQueueFamilyIndex = capture_owner ? VK_QUEUE_FAMILY_FOREIGN_EXT : VK_QUEUE_FAMILY_EXTERNAL;
         src_barrier.dstQueueFamilyIndex = vk_dev.compute_qf;
 
         vkCmdPipelineBarrier(cmd_buf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &src_barrier);
@@ -1620,6 +1639,22 @@ namespace vk {
       uint32_t gx = (frame->width + 15) / 16;
       uint32_t gy = (frame->height + 15) / 16;
       vkCmdDispatch(cmd_buf, gx, gy, 1);
+
+      if (capture_owner && !blank && !ram_img) {
+        // Return the source image in its shared layout. The submission fence
+        // covers this release as well as the read; only then may its exact
+        // published owner return the buffer to PipeWire.
+        VkImageMemoryBarrier release {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        release.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        release.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        release.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        release.srcQueueFamilyIndex = vk_dev.compute_qf;
+        release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
+        release.image = src.image;
+        release.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdPipelineBarrier(cmd_buf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &release);
+      }
 
       VK_CHECK(vkEndCommandBuffer(cmd_buf));
 

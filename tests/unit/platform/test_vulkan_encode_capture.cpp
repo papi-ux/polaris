@@ -279,6 +279,54 @@ namespace {
     }
   };
 
+  struct capture_queue_boundary_t {
+    inline static capture_queue_boundary_t *active = nullptr;
+    PFN_vkCmdPipelineBarrier original_barrier = platf::vulkan_loader::vkCmdPipelineBarrier;
+    PFN_vkCmdDispatch original_dispatch = platf::vulkan_loader::vkCmdDispatch;
+    std::vector<VkImageMemoryBarrier> transfers;
+    std::vector<char> order;
+
+    void install() {
+      ASSERT_EQ(active, nullptr);
+      active = this;
+      platf::vulkan_loader::vkCmdPipelineBarrier = barrier;
+      platf::vulkan_loader::vkCmdDispatch = dispatch;
+    }
+
+    ~capture_queue_boundary_t() {
+      if (active == this) {
+        platf::vulkan_loader::vkCmdPipelineBarrier = original_barrier;
+        platf::vulkan_loader::vkCmdDispatch = original_dispatch;
+        active = nullptr;
+      }
+    }
+
+    static VKAPI_ATTR void VKAPI_CALL barrier(VkCommandBuffer command, VkPipelineStageFlags source, VkPipelineStageFlags destination,
+                                             VkDependencyFlags flags, std::uint32_t memory_count, const VkMemoryBarrier *memory,
+                                             std::uint32_t buffer_count, const VkBufferMemoryBarrier *buffers,
+                                             std::uint32_t image_count, const VkImageMemoryBarrier *images) {
+      auto &self = *active;
+      for (std::uint32_t i = 0; i < image_count; ++i) {
+        const auto &image = images[i];
+        if (image.srcQueueFamilyIndex == VK_QUEUE_FAMILY_EXTERNAL || image.srcQueueFamilyIndex == VK_QUEUE_FAMILY_FOREIGN_EXT) {
+          self.transfers.push_back(image);
+          self.order.push_back('A');
+          EXPECT_EQ(destination, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        } else if (image.dstQueueFamilyIndex == VK_QUEUE_FAMILY_FOREIGN_EXT) {
+          self.transfers.push_back(image);
+          self.order.push_back('R');
+          EXPECT_EQ(source, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        }
+      }
+      self.original_barrier(command, source, destination, flags, memory_count, memory, buffer_count, buffers, image_count, images);
+    }
+
+    static VKAPI_ATTR void VKAPI_CALL dispatch(VkCommandBuffer command, std::uint32_t x, std::uint32_t y, std::uint32_t z) {
+      active->order.push_back('D');
+      active->original_dispatch(command, x, y, z);
+    }
+  };
+
   // Observe and fault only Polaris's own capability/import calls. FFmpeg and
   // actual Vulkan allocation, conversion and readback still use the driver.
   struct capture_admission_boundary_t {
@@ -836,6 +884,88 @@ TEST(VulkanCaptureAdmissionTests, ExactDeviceQueryAndDedicatedImportPreserveReal
   EXPECT_TRUE(admission.dedicated_import);
   EXPECT_TRUE(completion.completion_observed);
   EXPECT_GE(centre_and_corner_luma(encoder.frame).first, 225);
+}
+
+TEST(VulkanCaptureOwnershipTests, AcquireReadAndReleaseCompleteBeforeTheProducerLeaseReturns) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t white {0xFF};
+  if (!white.ok) {
+    GTEST_SKIP() << "Could not allocate a linear DMA-BUF on " << render_node;
+  }
+  capture_completion_boundary_t completion;
+  capture_queue_boundary_t queue;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  completion.install();
+  queue.install();
+  egl::img_descriptor_t img;
+  white.describe(img, 1);
+  completion.publish(img);
+  ASSERT_EQ(encoder.device->convert(img), 0);
+  EXPECT_EQ(queue.order, (std::vector<char> {'A', 'D', 'R'}));
+  ASSERT_EQ(queue.transfers.size(), 2);
+  const auto &acquire = queue.transfers[0];
+  const auto &release = queue.transfers[1];
+  EXPECT_EQ(acquire.srcQueueFamilyIndex, VK_QUEUE_FAMILY_FOREIGN_EXT);
+  EXPECT_EQ(acquire.dstQueueFamilyIndex, release.srcQueueFamilyIndex);
+  EXPECT_EQ(release.dstQueueFamilyIndex, VK_QUEUE_FAMILY_FOREIGN_EXT);
+  EXPECT_EQ(acquire.oldLayout, VK_IMAGE_LAYOUT_GENERAL);
+  EXPECT_EQ(acquire.newLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+  EXPECT_EQ(acquire.dstAccessMask, VK_ACCESS_SHADER_READ_BIT);
+  EXPECT_EQ(release.oldLayout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+  EXPECT_EQ(release.newLayout, VK_IMAGE_LAYOUT_GENERAL);
+  EXPECT_EQ(release.srcAccessMask, VK_ACCESS_SHADER_READ_BIT);
+  EXPECT_EQ(release.dstAccessMask, 0);
+  EXPECT_EQ(acquire.image, release.image);
+  EXPECT_TRUE(completion.completion_observed);
+  EXPECT_TRUE(completion.lease_retained_at_wait);
+  img.capture_owner.reset();
+  EXPECT_EQ(completion.returned, 1);
+  EXPECT_FALSE(completion.returned_before_completion);
+  EXPECT_GE(centre_and_corner_luma(encoder.frame).first, 225);
+}
+
+TEST(VulkanCaptureOwnershipTests, MissingEnabledForeignOwnershipEndsBeforeSubmission) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t white {0xFF};
+  if (!white.ok) {
+    GTEST_SKIP() << "Could not allocate a linear DMA-BUF on " << render_node;
+  }
+  capture_completion_boundary_t completion;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  completion.install();
+  auto *device = reinterpret_cast<AVHWDeviceContext *>(encoder.hw_device->data);
+  auto *context = static_cast<AVVulkanDeviceContext *>(device->hwctx);
+  auto *original_extensions = context->enabled_dev_extensions;
+  const int original_count = context->nb_enabled_dev_extensions;
+  std::vector<const char *> without_foreign;
+  for (int i = 0; i < original_count; ++i) {
+    if (std::string_view {original_extensions[i]} != VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME) {
+      without_foreign.push_back(original_extensions[i]);
+    }
+  }
+  egl::img_descriptor_t img;
+  white.describe(img, 1);
+  completion.publish(img);
+  context->enabled_dev_extensions = without_foreign.data();
+  context->nb_enabled_dev_extensions = static_cast<int>(without_foreign.size());
+  const auto first = encoder.device->convert(img);
+  const auto second = encoder.device->convert(img);
+  // Restore the context's actual allocation before FFmpeg tears it down.
+  context->enabled_dev_extensions = original_extensions;
+  context->nb_enabled_dev_extensions = original_count;
+  EXPECT_EQ(first, platf::convert_capture_unreadable);
+  EXPECT_EQ(second, platf::convert_capture_unreadable);
+  EXPECT_EQ(completion.submissions, 0);
+  EXPECT_TRUE(completion.waits.empty());
+  completion.completion_observed = true;
+  img.capture_owner.reset();
+  EXPECT_EQ(completion.returned, 1);
 }
 
 /**
