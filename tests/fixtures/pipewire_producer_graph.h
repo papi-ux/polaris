@@ -63,11 +63,11 @@ namespace test_utils {
     write_t write;
     remove_t remove;
     std::map<pw_buffer *, std::size_t> writes;
-    std::size_t completed = 0, submitted = 0, empty = 0, added = 0, removed = 0;
+    std::size_t completed = 0, submitted = 0, empty = 0, added = 0, removed = 0, formats = 0, destroyed = 0;
     std::uint8_t marker = 0;
     bool failed = false;
     const bool dmabuf;
-    const int width, height;
+    int width, height;
 
     pipewire_producer_graph_t(bool gpu, int w, int h, allocation_t allocation = {}, write_t writer = {}, remove_t remover = {}):
         allocate(std::move(allocation)), write(std::move(writer)), remove(std::move(remover)), dmabuf(gpu), width(w), height(h) {
@@ -104,6 +104,7 @@ namespace test_utils {
       if (!source) return false;
       static const pw_stream_events events {
         .version = PW_VERSION_STREAM_EVENTS,
+        .destroy = destroy,
         .param_changed = param_changed,
         .add_buffer = add_buffer,
         .remove_buffer = remove_buffer,
@@ -162,9 +163,38 @@ namespace test_utils {
       return false;
     }
 
+    bool renegotiate_size(int w, int h) {
+      alignas(8) std::array<std::uint8_t, 512> bytes {};
+      spa_pod_builder builder = SPA_POD_BUILDER_INIT(bytes.data(), bytes.size());
+      spa_video_info_raw info {};
+      info.format = SPA_VIDEO_FORMAT_BGRx;
+      info.size = {static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h)};
+      info.framerate = {0, 1};
+      info.max_framerate = {60, 1};
+      if (dmabuf) { info.flags = SPA_VIDEO_FLAG_MODIFIER; info.modifier = DRM_FORMAT_MOD_LINEAR; }
+      const spa_pod *format = spa_format_video_raw_build(&builder, SPA_PARAM_EnumFormat, &info);
+      pw_thread_loop_lock(access::loop(*capture));
+      const int result = pw_stream_update_params(source, &format, 1);
+      pw_thread_loop_unlock(access::loop(*capture));
+      return result >= 0;
+    }
+
+    void shutdown_capture() {
+      // Exercise production shutdown with this live graph still present. The
+      // owned core destroys its producer and link; the stream destroy event
+      // clears our pointer before the callback state can be destroyed.
+      capture->shutdown();
+      link = nullptr;
+    }
+
     static void param_changed(void *opaque, std::uint32_t id, const spa_pod *param) {
       if (id != SPA_PARAM_Format || !param) return;
       auto &g = *static_cast<pipewire_producer_graph_t *>(opaque);
+      spa_video_info_raw info {};
+      if (spa_format_video_raw_parse(param, &info) < 0) { g.failed = true; return; }
+      g.width = static_cast<int>(info.size.width);
+      g.height = static_cast<int>(info.size.height);
+      ++g.formats;
       alignas(8) std::array<std::uint8_t, 512> bytes {};
       spa_pod_builder b = SPA_POD_BUILDER_INIT(bytes.data(), bytes.size());
       const spa_pod *buffers = static_cast<const spa_pod *>(spa_pod_builder_add_object(&b,
@@ -175,6 +205,11 @@ namespace test_utils {
         SPA_PARAM_BUFFERS_stride, SPA_POD_Int(g.width * 4),
         SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(1 << (g.dmabuf ? SPA_DATA_DmaBuf : SPA_DATA_MemFd))));
       g.failed |= pw_stream_update_params(g.source, &buffers, 1) < 0;
+    }
+    static void destroy(void *opaque) {
+      auto &g = *static_cast<pipewire_producer_graph_t *>(opaque);
+      g.source = nullptr;
+      ++g.destroyed;
     }
     static void add_buffer(void *opaque, pw_buffer *buffer) {
       auto &g = *static_cast<pipewire_producer_graph_t *>(opaque);

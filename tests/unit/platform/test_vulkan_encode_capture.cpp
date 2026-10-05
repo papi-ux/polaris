@@ -10,6 +10,7 @@
   // standard includes
   #include <algorithm>
   #include <array>
+  #include <atomic>
   #include <cstdlib>
   #include <cstring>
   #include <functional>
@@ -18,6 +19,7 @@
   #include <sstream>
   #include <string>
   #include <string_view>
+  #include <thread>
   #include <utility>
   #include <vector>
 
@@ -488,13 +490,13 @@ namespace {
 
   /// A frame in host memory, the way portal shared memory capture hands one over.
   struct host_frame_t: platf::img_t {
-    explicit host_frame_t(std::uint8_t level):
-        pixels(static_cast<std::size_t>(frame_width) * frame_height * 4, level) {
+    explicit host_frame_t(std::uint8_t level, int w = frame_width, int h = frame_height):
+        pixels(static_cast<std::size_t>(w) * h * 4, level) {
       data = pixels.data();
-      width = frame_width;
-      height = frame_height;
+      width = w;
+      height = h;
       pixel_pitch = 4;
-      row_pitch = frame_width * 4;
+      row_pitch = w * 4;
     }
 
     std::vector<std::uint8_t> pixels;
@@ -1581,16 +1583,17 @@ TEST(VulkanDeviceLifecycleTests, RepeatedProbesAndSessionsKeepTheRequestedDevice
 namespace {
   struct graph_dmabuf_pool_t {
     std::map<pw_buffer *, std::unique_ptr<grey_dmabuf_t>> storage;
+    int width = frame_width, height = frame_height;
 
     bool allocate(pw_buffer *buffer) {
-      auto made = std::make_unique<grey_dmabuf_t>(0);
-      if (!made->ok || made->stride() != frame_width * 4) return false;
+      auto made = std::make_unique<grey_dmabuf_t>(0, width, height);
+      if (!made->ok || made->stride() != width * 4) return false;
       auto &data = buffer->buffer->datas[0];
       if (!(data.type & (1 << SPA_DATA_DmaBuf))) return false;
       data.type = SPA_DATA_DmaBuf;
       data.flags = SPA_DATA_FLAG_READWRITE;
       data.fd = made->export_fd();
-      data.maxsize = frame_width * frame_height * 4;
+      data.maxsize = width * height * 4;
       data.mapoffset = 0;
       data.data = nullptr;
       if (data.fd < 0) return false;
@@ -1603,7 +1606,7 @@ namespace {
       storage.erase(buffer);
     }
     test_utils::pipewire_producer_graph_t graph() {
-      return {true, frame_width, frame_height,
+      return {true, width, height,
         [this](pw_buffer *b) { return allocate(b); },
         [this](pw_buffer *b, std::uint8_t m) { return write(b, m); },
         [this](pw_buffer *b) { remove(b); }};
@@ -1799,6 +1802,114 @@ TEST(PipeWireProducerPoolTests, NewGraphGenerationReadsNewPixelsWhileOldPublicat
   new_image.reset(); encoder.device.reset();
   old_graph.close(); new_graph.close();
   EXPECT_TRUE(old_pool.storage.empty()); EXPECT_TRUE(new_pool.storage.empty());
+}
+
+TEST(PipeWireProducerPoolTests, RealShmSizeChangeRequestsReinitAndNewCaptureReadsNewPixels) {
+  test_utils::pipewire_producer_graph_t graph {false, frame_width, frame_height};
+  ASSERT_TRUE(graph.start());
+  auto image = std::make_shared<host_frame_t>(17);
+  ASSERT_TRUE(graph.step(255));
+  ASSERT_EQ(graph.capture->wait_for_frame(std::chrono::seconds(1)), pipewire_capture::wait_result_e::frame);
+  std::shared_ptr<platf::img_t> filled = image;
+  ASSERT_TRUE(graph.capture->fill_frame(filled));
+  ASSERT_TRUE(std::all_of(image->pixels.begin(), image->pixels.end(), [](auto p) { return p == 255; }));
+  // Leave another old-size frame at the capture front when the real producer
+  // updates EnumFormat; no capture callback is called directly by the test.
+  ASSERT_TRUE(graph.step(85));
+  ASSERT_EQ(graph.capture->wait_for_frame(std::chrono::seconds(1)), pipewire_capture::wait_result_e::frame);
+  ASSERT_TRUE(graph.renegotiate_size(128, 72));
+  ASSERT_TRUE(graph.wait([&] { return !graph.capture->running(); }));
+  ASSERT_EQ(graph.capture->wait_for_frame(std::chrono::seconds(2)), pipewire_capture::wait_result_e::reinit);
+  EXPECT_EQ(graph.capture->frame_info().width, 128);
+  EXPECT_EQ(graph.capture->frame_info().height, 72);
+  EXPECT_FALSE(graph.capture->fill_frame(filled));
+  EXPECT_TRUE(std::all_of(image->pixels.begin(), image->pixels.end(), [](auto p) { return p == 255; }));
+  graph.close();
+  EXPECT_EQ(graph.added, graph.removed);
+  EXPECT_EQ(graph.destroyed, 1);
+
+  test_utils::pipewire_producer_graph_t next {false, 128, 72};
+  ASSERT_TRUE(next.start());
+  auto replacement = std::make_shared<host_frame_t>(255, 128, 72);
+  ASSERT_TRUE(next.step(0));
+  ASSERT_EQ(next.capture->wait_for_frame(std::chrono::seconds(1)), pipewire_capture::wait_result_e::frame);
+  filled = replacement;
+  ASSERT_TRUE(next.capture->fill_frame(filled));
+  EXPECT_TRUE(std::all_of(replacement->pixels.begin(), replacement->pixels.end(), [](auto p) { return p == 0; }));
+  EXPECT_EQ(replacement->frame_metadata.transport, platf::frame_transport_e::shm);
+  next.close();
+  EXPECT_EQ(next.added, next.removed);
+}
+
+TEST(PipeWireProducerPoolTests, RealDmaBufSizeChangeRetainsOldPixelsUntilLateConsumerReturns) {
+  if (!vk::validate()) GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  graph_dmabuf_pool_t pool;
+  auto graph = pool.graph(); ASSERT_TRUE(graph.start());
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  ASSERT_TRUE(graph.step(255));
+  auto image = publish_graph_frame(graph); ASSERT_TRUE(image);
+  ASSERT_TRUE(graph.step(85)); // unconsumed front still owns the other buffer
+  ASSERT_EQ(graph.capture->wait_for_frame(std::chrono::seconds(1)), pipewire_capture::wait_result_e::frame);
+  pool.width = 128; pool.height = 72;
+  ASSERT_TRUE(graph.renegotiate_size(128, 72));
+  ASSERT_TRUE(graph.wait([&] { return !graph.capture->running(); }));
+  ASSERT_EQ(graph.capture->wait_for_frame(std::chrono::seconds(2)), pipewire_capture::wait_result_e::reinit);
+  EXPECT_EQ(graph.capture->frame_info().width, 128);
+  EXPECT_EQ(graph.capture->frame_info().height, 72);
+  EXPECT_EQ(pipewire_capture::capture_graph_test_access::leases(*graph.capture), 1);
+  std::shared_ptr<platf::img_t> clone;
+  // The old published descriptor and exported storage remain readable after
+  // actual producer renegotiation/removal. No new-size frame is admitted by
+  // this terminal capture generation.
+  ASSERT_EQ(convert_graph_frame(encoder, image, clone), 0);
+  EXPECT_TRUE(has_grey_quadrants(encoder.frame, frame_width, frame_height, {235,235,235,235}));
+  EXPECT_FALSE(graph.capture->fill_frame(clone));
+  clone.reset(); image.reset(); encoder.device.reset();
+  EXPECT_EQ(pipewire_capture::capture_graph_test_access::leases(*graph.capture), 0);
+  graph.close();
+  EXPECT_EQ(graph.added, graph.removed);
+  EXPECT_TRUE(pool.storage.empty());
+}
+
+TEST(PipeWireProducerPoolTests, LiveGraphShutdownWaitsForTimedOutGpuConsumerRetirement) {
+  if (!vk::validate()) GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  graph_dmabuf_pool_t pool;
+  auto graph = pool.graph(); ASSERT_TRUE(graph.start());
+  capture_completion_boundary_t boundary;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  boundary.install(); boundary.timeout = true;
+  ASSERT_TRUE(graph.step(255));
+  auto image = publish_graph_frame(graph); ASSERT_TRUE(image);
+  boundary.lease = image;
+  std::shared_ptr<platf::img_t> clone;
+  ASSERT_EQ(convert_graph_frame(encoder, image, clone), platf::convert_capture_unreadable);
+  clone.reset(); image.reset();
+  ASSERT_EQ(pipewire_capture::capture_graph_test_access::leases(*graph.capture), 1);
+  std::atomic_bool stopped {false};
+  std::thread closer([&] { graph.shutdown_capture(); stopped.store(true); });
+  auto join = util::fail_guard([&] { encoder.device.reset(); closer.join(); });
+  ASSERT_EQ(graph.capture->wait_for_frame(std::chrono::seconds(2)), pipewire_capture::wait_result_e::reinit);
+  EXPECT_FALSE(stopped.load()) << "capture disconnected while the GPU still retained producer storage";
+  ASSERT_FALSE(stopped.load());
+  EXPECT_FALSE(boundary.lease.expired());
+  ASSERT_TRUE(graph.wait([&] { return graph.removed == 0 && pool.storage.size() == 2; }));
+  // A real device idle completes the injected wait failure. Shutdown then
+  // drains through actual capture/core/producer callbacks, with no mock queue.
+  encoder.device.reset();
+  closer.join(); join.disable();
+  EXPECT_TRUE(boundary.idle_observed);
+  EXPECT_TRUE(boundary.lease.expired());
+  EXPECT_TRUE(stopped.load());
+  EXPECT_EQ(pipewire_capture::capture_graph_test_access::leases(*graph.capture), 0);
+  EXPECT_EQ(pipewire_capture::capture_graph_test_access::loop(*graph.capture), nullptr);
+  EXPECT_EQ(graph.source, nullptr);
+  EXPECT_EQ(graph.destroyed, 1);
+  EXPECT_EQ(graph.added, graph.removed);
+  EXPECT_TRUE(pool.storage.empty());
+  graph.capture->shutdown(); // idempotent with aliases still alive
+  graph.close();
 }
 #endif
 
