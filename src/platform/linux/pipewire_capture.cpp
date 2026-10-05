@@ -1046,14 +1046,14 @@ namespace pipewire_capture {
       }
 
       for (auto *buffer : older) {
-        pw_stream_queue_buffer(cap->stream_, buffer);
+        cap->queue_buffer_locked(buffer);
       }
       if (!latest) {
         return;
       }
 
       if (!cap->process_buffer(latest)) {
-        pw_stream_queue_buffer(cap->stream_, latest);
+        cap->queue_buffer_locked(latest);
       }
     } catch (...) {
       // PipeWire C callbacks must not throw across the ABI.
@@ -1154,7 +1154,7 @@ namespace pipewire_capture {
         // already holds the thread-loop lock. Queue directly here: taking
         // shutdown_mtx_ from the callback would invert shutdown's
         // shutdown_mtx_ -> thread-loop-lock order and deadlock teardown.
-        pw_stream_queue_buffer(stream_, replaced_buffer);
+        queue_buffer_locked(replaced_buffer);
       }
       frame_cv_.notify_one();
       return true;
@@ -1299,7 +1299,7 @@ namespace pipewire_capture {
     if (replaced_buffer) {
       // Format callbacks run with PipeWire's thread-loop lock held. Queue
       // directly so shutdown_mtx_ is never acquired in loop callback context.
-      pw_stream_queue_buffer(cap->stream_, replaced_buffer);
+      cap->queue_buffer_locked(replaced_buffer);
     }
     cap->frame_cv_.notify_all();
 
@@ -1402,9 +1402,26 @@ namespace pipewire_capture {
     frame_cv_.notify_all();
   }
 
+  bool capture_t::queue_buffer_available() const {
+#ifdef POLARIS_TESTS
+    if (queue_buffer_for_test_) return true;
+#endif
+    return stream_ != nullptr;
+  }
+
+  void capture_t::queue_buffer_locked(pw_buffer *buffer) {
+#ifdef POLARIS_TESTS
+    if (queue_buffer_for_test_) {
+      queue_buffer_for_test_(buffer);
+      return;
+    }
+#endif
+    pw_stream_queue_buffer(stream_, buffer);
+  }
+
   void capture_t::queue_buffer(pw_buffer *buffer) {
     std::lock_guard shutdown_lk(shutdown_mtx_);
-    if (shutdown_complete_ || !buffer || !stream_) {
+    if (shutdown_complete_ || !buffer || !queue_buffer_available()) {
       return;
     }
     // Drop buffers once teardown cleared running_; never touch PW after stop.
@@ -1413,13 +1430,13 @@ namespace pipewire_capture {
     }
     if (loop_ && !pw_thread_loop_in_thread(loop_)) {
       pw_thread_loop_lock(loop_);
-      if (stream_ && running()) {
-        pw_stream_queue_buffer(stream_, buffer);
+      if (queue_buffer_available() && running()) {
+        queue_buffer_locked(buffer);
       }
       pw_thread_loop_unlock(loop_);
       return;
     }
-    pw_stream_queue_buffer(stream_, buffer);
+    queue_buffer_locked(buffer);
   }
 
   void capture_t::release_buffer_lease(pw_buffer *buffer) {

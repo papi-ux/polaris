@@ -222,6 +222,8 @@ namespace pipewire_capture {
 #ifdef POLARIS_TESTS
     friend struct capture_test_access;
     friend struct capture_lease_test_access;
+    // Observe the actual enqueue boundary without connecting a producer.
+    std::function<void(struct pw_buffer *)> queue_buffer_for_test_;
 #endif
     static void on_process(void *userdata) noexcept;
     static void on_add_buffer(void *userdata, struct pw_buffer *buffer) noexcept;
@@ -232,6 +234,8 @@ namespace pipewire_capture {
     bool connect_stream(bool use_max_framerate);
     bool process_buffer(struct pw_buffer *buffer);
     void set_terminal(wait_result_e result);
+    bool queue_buffer_available() const;
+    void queue_buffer_locked(struct pw_buffer *buffer);
     void queue_buffer(struct pw_buffer *buffer);
     void release_buffer_lease(struct pw_buffer *buffer);
 
