@@ -95,6 +95,33 @@ namespace test_utils {
       return false;
     }
 
+    const spa_pod *build_format(spa_pod_builder &builder, int w, int h) const {
+      // PipeWire 1.0.5's raw-format helper passes max_framerate by value to
+      // a vararg that expects a pointer. Typed builders preserve the same
+      // variable-rate offer on those headers without invoking that helper.
+      spa_pod_frame frame {};
+      const spa_rectangle size {static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h)};
+      const spa_fraction variable_rate {0, 1}, maximum_rate {60, 1};
+      spa_pod_builder_push_object(&builder, &frame, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat);
+      spa_pod_builder_prop(&builder, SPA_FORMAT_mediaType, 0);
+      spa_pod_builder_id(&builder, SPA_MEDIA_TYPE_video);
+      spa_pod_builder_prop(&builder, SPA_FORMAT_mediaSubtype, 0);
+      spa_pod_builder_id(&builder, SPA_MEDIA_SUBTYPE_raw);
+      spa_pod_builder_prop(&builder, SPA_FORMAT_VIDEO_format, 0);
+      spa_pod_builder_id(&builder, SPA_VIDEO_FORMAT_BGRx);
+      spa_pod_builder_prop(&builder, SPA_FORMAT_VIDEO_size, 0);
+      spa_pod_builder_rectangle(&builder, &size);
+      spa_pod_builder_prop(&builder, SPA_FORMAT_VIDEO_framerate, 0);
+      spa_pod_builder_fraction(&builder, &variable_rate);
+      if (dmabuf) {
+        spa_pod_builder_prop(&builder, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY);
+        spa_pod_builder_long(&builder, DRM_FORMAT_MOD_LINEAR);
+      }
+      spa_pod_builder_prop(&builder, SPA_FORMAT_VIDEO_maxFramerate, 0);
+      spa_pod_builder_fraction(&builder, &maximum_rate);
+      return static_cast<const spa_pod *>(spa_pod_builder_pop(&builder, &frame));
+    }
+
     bool start() {
       if (!access::prepare(*capture)) return false;
       pw_thread_loop_lock(access::loop(*capture));
@@ -114,13 +141,7 @@ namespace test_utils {
       pw_stream_add_listener(source, &listener, &events, this);
       alignas(8) std::array<std::uint8_t, 512> bytes {};
       spa_pod_builder builder = SPA_POD_BUILDER_INIT(bytes.data(), bytes.size());
-      spa_video_info_raw info {};
-      info.format = SPA_VIDEO_FORMAT_BGRx;
-      info.size = {static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height)};
-      info.framerate = {0, 1};
-      info.max_framerate = {60, 1};
-      if (dmabuf) { info.flags = SPA_VIDEO_FLAG_MODIFIER; info.modifier = DRM_FORMAT_MOD_LINEAR; }
-      const spa_pod *format = spa_format_video_raw_build(&builder, SPA_PARAM_EnumFormat, &info);
+      const spa_pod *format = build_format(builder, width, height);
       const auto flags = PW_STREAM_FLAG_DRIVER | (dmabuf ? PW_STREAM_FLAG_ALLOC_BUFFERS : PW_STREAM_FLAG_MAP_BUFFERS);
       if (pw_stream_connect(source, PW_DIRECTION_OUTPUT, PW_ID_ANY, static_cast<pw_stream_flags>(flags), &format, 1) < 0) return false;
       unlock.disable();
@@ -166,13 +187,7 @@ namespace test_utils {
     bool renegotiate_size(int w, int h) {
       alignas(8) std::array<std::uint8_t, 512> bytes {};
       spa_pod_builder builder = SPA_POD_BUILDER_INIT(bytes.data(), bytes.size());
-      spa_video_info_raw info {};
-      info.format = SPA_VIDEO_FORMAT_BGRx;
-      info.size = {static_cast<std::uint32_t>(w), static_cast<std::uint32_t>(h)};
-      info.framerate = {0, 1};
-      info.max_framerate = {60, 1};
-      if (dmabuf) { info.flags = SPA_VIDEO_FLAG_MODIFIER; info.modifier = DRM_FORMAT_MOD_LINEAR; }
-      const spa_pod *format = spa_format_video_raw_build(&builder, SPA_PARAM_EnumFormat, &info);
+      const spa_pod *format = build_format(builder, w, h);
       pw_thread_loop_lock(access::loop(*capture));
       const int result = pw_stream_update_params(source, &format, 1);
       pw_thread_loop_unlock(access::loop(*capture));
