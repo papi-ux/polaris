@@ -26,6 +26,11 @@
 #include <src/platform/linux/encoder_probe_driver_proof.h>
 #include <src/platform/linux/stream_display_policy.h>
 #include <src/logging.h>
+#ifdef POLARIS_BUILD_PORTAL
+#include <src/platform/linux/pipewire_capture.h>
+#include <drm_fourcc.h>
+#include <spa/param/video/raw.h>
+#endif
 
 #include <boost/core/null_deleter.hpp>
 #include <boost/log/core.hpp>
@@ -2425,6 +2430,138 @@ TEST(VideoCaptureLeaseTests, LateConsumersReleaseOnlyTheirOwnCaptureGeneration) 
   pending[0].reset();
   EXPECT_EQ(returns, (std::array<int, 2> {1, 1}));
 }
+
+#ifdef POLARIS_BUILD_PORTAL
+namespace pipewire_capture {
+  struct capture_lease_test_access {
+    // Stage only synthetic producer input. Publication, FD duplication, lease
+    // callbacks and shutdown all run through the actual capture implementation.
+    static void stage(capture_t &capture, int fd, pw_buffer *buffer, std::uint64_t key) {
+      std::lock_guard lock(capture.frame_mtx_);
+      capture.front_info_ = {.width = 4, .height = 4, .stride = 16, .spa_format = SPA_VIDEO_FORMAT_BGRx};
+      capture.front_dmabuf_frame_ = dmabuf_frame_t {
+        .width = 4, .height = 4, .spa_format = SPA_VIDEO_FORMAT_BGRx,
+        .drm_fourcc = DRM_FORMAT_XRGB8888, .modifier = DRM_FORMAT_MOD_LINEAR,
+        .plane_count = 1,
+      };
+      capture.front_dmabuf_frame_->planes[0] = {.fd = fd, .chunk_size = 64, .stride = 16, .maxsize = 64};
+      capture.front_dmabuf_buffer_ = buffer;
+      capture.front_dmabuf_sequence_ = 1;
+      capture.front_dmabuf_buffer_key_ = key;
+      capture.frame_available_ = true;
+      capture.running_ = true;
+    }
+
+    static std::size_t leases(capture_t &capture) {
+      std::lock_guard lock(capture.frame_mtx_);
+      return capture.active_dmabuf_leases_;
+    }
+
+    static bool shutdown_started(capture_t &capture) {
+      std::lock_guard lock(capture.frame_mtx_);
+      return capture.stop_requested_;
+    }
+  };
+}
+
+namespace {
+  struct published_pipewire_fixture_t {
+    std::shared_ptr<pipewire_capture::capture_t> capture = std::make_shared<pipewire_capture::capture_t>(pipewire_capture::capture_options_t {});
+    std::shared_ptr<egl::img_descriptor_t> pooled = capture_descriptor_for_lifetime_test();
+    std::shared_ptr<platf::img_t> published = pooled;
+    pw_buffer producer_buffer {};
+    int fd = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+
+    bool publish(std::uint64_t key) {
+      if (fd < 0) return false;
+      pipewire_capture::capture_lease_test_access::stage(*capture, fd, &producer_buffer, key);
+      return capture->fill_frame(published);
+    }
+
+    ~published_pipewire_fixture_t() {
+      capture->stop();
+      published.reset();
+      if (fd >= 0) ::close(fd);
+    }
+  };
+
+  bool pipewire_shutdown_entered(pipewire_capture::capture_t &capture) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (!pipewire_capture::capture_lease_test_access::shutdown_started(capture)) {
+      if (std::chrono::steady_clock::now() >= deadline) return false;
+      std::this_thread::yield();
+    }
+    return true;
+  }
+}
+
+TEST(VideoCaptureLeaseTests, ActualPipeWirePublicationSurvivesTheIsolatedConsumerAndPoolOwner) {
+  published_pipewire_fixture_t producer;
+  ASSERT_TRUE(producer.publish(21));
+  EXPECT_EQ(pipewire_capture::capture_lease_test_access::leases(*producer.capture), 1);
+  EXPECT_EQ(producer.pooled->dmabuf_buffer_key, 21);
+  video::frame_t frame {producer.published};
+  std::shared_ptr<platf::img_t> pending;
+  ASSERT_EQ(video::convert_with_encode_device_for_tests(
+              std::make_unique<retaining_capture_device_t>(pending), frame), 0);
+  ASSERT_TRUE(pending);
+  frame.image.reset();
+  producer.published.reset();
+  EXPECT_EQ(pipewire_capture::capture_lease_test_access::leases(*producer.capture), 1)
+    << "the real PipeWire return callback ran while a cloned consumer still holds the frame";
+  pending.reset();
+  EXPECT_EQ(pipewire_capture::capture_lease_test_access::leases(*producer.capture), 0);
+  EXPECT_GE(::fcntl(producer.pooled->sd.fds[0], F_GETFD), 0)
+    << "the pool can still own the image after its producer lease has returned";
+}
+
+TEST(VideoCaptureLeaseTests, ActualPipeWireShutdownDrainsTheClonedPublishedLease) {
+  published_pipewire_fixture_t producer;
+  ASSERT_TRUE(producer.publish(22));
+  video::frame_t frame {producer.published};
+  std::shared_ptr<platf::img_t> pending;
+  ASSERT_EQ(video::convert_with_encode_device_for_tests(
+              std::make_unique<retaining_capture_device_t>(pending), frame), 0);
+  frame.image.reset();
+  producer.published.reset();
+  auto shutdown = std::async(std::launch::async, [&] { producer.capture->shutdown(); });
+  auto release = util::fail_guard([&] { pending.reset(); });
+  EXPECT_TRUE(pipewire_shutdown_entered(*producer.capture));
+  EXPECT_EQ(shutdown.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+  pending.reset();
+  ASSERT_EQ(shutdown.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  shutdown.get();
+  EXPECT_EQ(pipewire_capture::capture_lease_test_access::leases(*producer.capture), 0);
+  producer.capture->shutdown();  // Already-drained shutdown remains idempotent.
+}
+
+TEST(VideoCaptureLeaseTests, AnActualLatePipeWireCloneRetiresOnlyItsOwnCaptureGeneration) {
+  std::array<published_pipewire_fixture_t, 2> producers;
+  std::array<std::shared_ptr<platf::img_t>, 2> pending;
+  for (std::size_t generation = 0; generation < producers.size(); ++generation) {
+    auto &producer = producers[generation];
+    ASSERT_TRUE(producer.publish(31 + generation));
+    video::frame_t frame {producer.published};
+    ASSERT_EQ(video::convert_with_encode_device_for_tests(
+                std::make_unique<retaining_capture_device_t>(pending[generation]), frame), 0);
+    frame.image.reset();
+    producer.published.reset();
+  }
+  auto shutdown = std::async(std::launch::async, [&] { producers[0].capture->shutdown(); });
+  auto release = util::fail_guard([&] { pending = {}; });
+  EXPECT_TRUE(pipewire_shutdown_entered(*producers[0].capture));
+  EXPECT_EQ(shutdown.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+  pending[1].reset();
+  EXPECT_EQ(pipewire_capture::capture_lease_test_access::leases(*producers[1].capture), 0);
+  EXPECT_EQ(pipewire_capture::capture_lease_test_access::leases(*producers[0].capture), 1);
+  EXPECT_EQ(shutdown.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+  pending[0].reset();
+  ASSERT_EQ(shutdown.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+  shutdown.get();
+  EXPECT_EQ(pipewire_capture::capture_lease_test_access::leases(*producers[0].capture), 0);
+  producers[1].capture->shutdown();
+}
+#endif
 #endif
 
 TEST(PyroWaveAnnounceTests, ADynamicRangeThisCodecDoesNotKnowIsRefused) {
