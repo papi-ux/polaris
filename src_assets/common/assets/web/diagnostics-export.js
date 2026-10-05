@@ -883,9 +883,50 @@ function formatDoctorEvidence(doctor = {}) {
   return doctor.evidence.slice(0, 8).map((entry) => `- ${formatIssueValue(entry.id || entry.label, 'evidence')}: ${formatIssueValue(entry.detail || entry.value || entry.reason, '')}`).join('\n')
 }
 
+function retainedEndedSessionFacts(stats) {
+  const last = stats?.last_session
+  if (!last || last.state !== 'ended' || typeof last.stream_instance_id !== 'string' || !last.stream_instance_id.trim()) return null
+
+  // The host retains these session-owned facts even when the browser did not
+  // capture a quality sample. Never fill their gaps from the current stream,
+  // configuration, or probe results, and never promote them to measurements.
+  const strings = (source, fields) => Object.fromEntries(fields
+    .filter((field) => typeof source?.[field] === 'string' && source[field].trim())
+    .map((field) => [field, source[field]]))
+  const facts = strings(last, ['state', 'stream_instance_id', 'client_name', 'codec', 'encoder_backend', 'started_at', 'ended_at'])
+  if (last.capture && typeof last.capture === 'object' && !Array.isArray(last.capture)) {
+    facts.capture = strings(last.capture, ['preference', 'requested', 'opened', 'route', 'transport', 'residency', 'format', 'mode_override_reason', 'route_fallback_reason'])
+  }
+  return facts
+}
+
+function endedSessionDraftLines(facts) {
+  if (!facts) return []
+  const capture = facts.capture || {}
+  return [
+    '',
+    '## Last ended stream',
+    'Session identity and capture facts do not establish media quality or frame delivery.',
+    issueDraftLine('Stream instance', facts.stream_instance_id),
+    issueDraftLine('Client', facts.client_name),
+    ...(facts.started_at ? [issueDraftLine('Started', facts.started_at)] : []),
+    ...(facts.ended_at ? [issueDraftLine('Ended', facts.ended_at)] : []),
+    issueDraftLine('Codec', facts.codec),
+    issueDraftLine('Encoder backend', facts.encoder_backend),
+    issueDraftLine('Capture preference', capture.preference),
+    issueDraftLine('Capture requested', capture.requested),
+    issueDraftLine('Capture initialized', capture.opened),
+    issueDraftLine('Capture route', capture.route),
+    issueDraftLine('Observed frame transport / residency / format', [capture.transport, capture.residency, capture.format].map((value) => formatIssueValue(value)).join(' / ')),
+    ...(capture.mode_override_reason ? [issueDraftLine('Mode override reason', capture.mode_override_reason)] : []),
+    ...(capture.route_fallback_reason ? [issueDraftLine('Route fallback reason', capture.route_fallback_reason)] : []),
+  ]
+}
+
 export function buildStreamEvidence(input = {}, { addresses = new NetworkAddressBook() } = {}) {
   const stats = input.session_snapshot || input.stream_stats || {}
   const doctor = stats?.doctor || input.doctor || {}
+  const ended = retainedEndedSessionFacts(stats)
   return sanitizeDiagnosticsValue({
     client: input.client || { type: stats.client_type || stats.client_name || 'unknown', name: stats.client_name },
     launch_mode: stats.launch_mode || stats.stream_display_mode || stats.runtime_backend || input.launch_mode,
@@ -893,6 +934,7 @@ export function buildStreamEvidence(input = {}, { addresses = new NetworkAddress
     capture_path: stats.capture_path || stats.capture_transport,
     capture_path_reason: stats.capture_path_reason,
     active_stream: summarizeActiveStream(stats, input.stream_stats_connected),
+    ...(ended ? { last_ended_stream: ended } : {}),
     doctor,
     fix_my_stream_checklist: input.fix_my_stream_checklist || [],
     recent_issues: input.recent_issues || [],
@@ -965,6 +1007,7 @@ export function buildGithubIssueDraft(input = {}, { addresses = new NetworkAddre
     issueDraftLine('Display mode', formatDisplayModeDecision(stats.display_mode_decision)),
     ...gpuDiagnosticLines,
     issueDraftLine('Active stream', summarizeActiveStream(stats, safeInput.stream_stats_connected)),
+    ...endedSessionDraftLines(retainedEndedSessionFacts(stats)),
     '',
     '## What Polaris thinks happened',
     formatIssueValue(doctorSummary, 'No Doctor summary was included.'),
