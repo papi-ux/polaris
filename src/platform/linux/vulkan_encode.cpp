@@ -1707,6 +1707,12 @@ namespace vk {
         BOOST_LOG(error) << "vkQueueSubmit failed: " << res;
         if (slot.capture_owner) {
           capture_lease_refused = true;
+          // vkQueueSubmit guarantees unaffected resources for these allocation
+          // failures. No GPU read acquired this lease, so do not retain it until
+          // device teardown. Other errors keep the conservative ownership path.
+          if (res == VK_ERROR_OUT_OF_HOST_MEMORY || res == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+            slot.capture_owner.reset();
+          }
           return platf::convert_capture_unreadable;
         }
         return -1;
