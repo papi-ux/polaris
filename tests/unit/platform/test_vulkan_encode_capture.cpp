@@ -212,9 +212,14 @@ namespace {
     PFN_vkWaitForFences original_wait = platf::vulkan_loader::vkWaitForFences;
     PFN_vkQueueSubmit original_submit = platf::vulkan_loader::vkQueueSubmit;
     PFN_vkDeviceWaitIdle original_idle = platf::vulkan_loader::vkDeviceWaitIdle;
+    PFN_vkDestroyImage original_destroy_image = platf::vulkan_loader::vkDestroyImage;
     std::weak_ptr<platf::img_t> lease;
     VkFence submitted_fence = VK_NULL_HANDLE;
     std::vector<std::uint64_t> waits;
+    std::vector<VkResult> idle_results;
+    std::size_t idle_calls = 0;
+    int image_destructions = 0;
+    bool image_destroyed_before_retirement = false;
     int submissions = 0;
     bool timeout = false;
     VkResult submit_error = VK_SUCCESS;
@@ -232,6 +237,7 @@ namespace {
       platf::vulkan_loader::vkWaitForFences = wait;
       platf::vulkan_loader::vkQueueSubmit = submit;
       platf::vulkan_loader::vkDeviceWaitIdle = idle;
+      platf::vulkan_loader::vkDestroyImage = destroy_image;
     }
 
     ~capture_completion_boundary_t() {
@@ -239,6 +245,7 @@ namespace {
         platf::vulkan_loader::vkWaitForFences = original_wait;
         platf::vulkan_loader::vkQueueSubmit = original_submit;
         platf::vulkan_loader::vkDeviceWaitIdle = original_idle;
+        platf::vulkan_loader::vkDestroyImage = original_destroy_image;
         active = nullptr;
       }
     }
@@ -293,9 +300,25 @@ namespace {
     static VKAPI_ATTR VkResult VKAPI_CALL idle(VkDevice device) {
       auto &self = *active;
       self.lease_retained_at_idle = !self.lease.expired();
+      const auto attempt = self.idle_calls++;
+      if (attempt < self.idle_results.size() && self.idle_results[attempt] != VK_ERROR_DEVICE_LOST) {
+        // Failed waits do not establish completion. Leave actual GPU work and
+        // the producer lease alone until a subsequent terminal observation.
+        return self.idle_results[attempt];
+      }
       const auto result = self.original_idle(device);
-      self.idle_observed = result == VK_SUCCESS;
-      return result;
+      // Complete the real fixture's GPU work before reporting injected loss;
+      // this tests Polaris's error handling, not a fault inside the driver.
+      const auto reported = result == VK_SUCCESS && attempt < self.idle_results.size() ? self.idle_results[attempt] : result;
+      self.idle_observed = reported == VK_SUCCESS || reported == VK_ERROR_DEVICE_LOST;
+      return reported;
+    }
+
+    static VKAPI_ATTR void VKAPI_CALL destroy_image(VkDevice device, VkImage image, const VkAllocationCallbacks *allocator) {
+      auto &self = *active;
+      ++self.image_destructions;
+      self.image_destroyed_before_retirement |= self.idle_calls > 0 && !self.idle_observed;
+      self.original_destroy_image(device, image, allocator);
     }
   };
 
@@ -1021,6 +1044,78 @@ TEST(VulkanCaptureCompletionTests, UnknownSubmissionFailureRetainsTheLeaseAndEnd
   EXPECT_TRUE(boundary.lease_retained_at_idle);
   EXPECT_EQ(boundary.returned, 1);
   EXPECT_FALSE(boundary.returned_before_completion);
+}
+
+class VulkanCaptureTeardownRetryTests: public testing::TestWithParam<VkResult> {};
+
+TEST_P(VulkanCaptureTeardownRetryTests, FailedIdleWaitsKeepImportedResourcesAndLeaseUntilConfirmedRetirement) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t white {0xFF};
+  if (!white.ok) {
+    GTEST_SKIP() << "Could not allocate a linear DMA-BUF on " << render_node;
+  }
+  capture_completion_boundary_t boundary;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  boundary.install();
+  boundary.timeout = true;
+  boundary.idle_results = {GetParam(), GetParam()};
+  egl::img_descriptor_t img;
+  white.describe(img, 1);
+  boundary.publish(img);
+  ASSERT_EQ(encoder.device->convert(img), platf::convert_capture_unreadable);
+  img.reset();
+  ASSERT_EQ(boundary.returned, 0);
+  ASSERT_FALSE(boundary.lease.expired());
+
+  encoder.device.reset();
+
+  EXPECT_EQ(boundary.idle_calls, 3);
+  EXPECT_TRUE(boundary.idle_observed);
+  EXPECT_TRUE(boundary.lease_retained_at_idle);
+  EXPECT_GT(boundary.image_destructions, 0);
+  EXPECT_FALSE(boundary.image_destroyed_before_retirement);
+  EXPECT_FALSE(boundary.returned_before_completion);
+  EXPECT_EQ(boundary.returned, 1);
+  EXPECT_TRUE(boundary.lease.expired());
+  EXPECT_EQ(boundary.submissions, 1);
+}
+
+INSTANTIATE_TEST_SUITE_P(NonTerminalErrors, VulkanCaptureTeardownRetryTests, testing::Values(VK_ERROR_OUT_OF_HOST_MEMORY, VK_ERROR_OUT_OF_DEVICE_MEMORY, VK_ERROR_UNKNOWN));
+
+TEST(VulkanCaptureCompletionTests, DeviceLossRetiresImportedResourcesAndLeaseWithoutRetry) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t white {0xFF};
+  if (!white.ok) {
+    GTEST_SKIP() << "Could not allocate a linear DMA-BUF on " << render_node;
+  }
+  capture_completion_boundary_t boundary;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  boundary.install();
+  boundary.timeout = true;
+  boundary.idle_results = {VK_ERROR_DEVICE_LOST};
+  egl::img_descriptor_t img;
+  white.describe(img, 1);
+  boundary.publish(img);
+  ASSERT_EQ(encoder.device->convert(img), platf::convert_capture_unreadable);
+  img.reset();
+  ASSERT_EQ(boundary.returned, 0);
+
+  encoder.device.reset();
+
+  EXPECT_EQ(boundary.idle_calls, 1);
+  EXPECT_TRUE(boundary.idle_observed);
+  EXPECT_TRUE(boundary.lease_retained_at_idle);
+  EXPECT_GT(boundary.image_destructions, 0);
+  EXPECT_FALSE(boundary.image_destroyed_before_retirement);
+  EXPECT_FALSE(boundary.returned_before_completion);
+  EXPECT_EQ(boundary.returned, 1);
+  EXPECT_TRUE(boundary.lease.expired());
 }
 
 class VulkanCaptureSubmissionRejectionTests: public testing::TestWithParam<VkResult> {};
