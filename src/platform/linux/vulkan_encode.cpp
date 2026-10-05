@@ -26,6 +26,7 @@ extern "C" {
 #include <libavutil/hwcontext_vulkan.h>
 }
 
+#include "capture_producer_sync.h"
 #include "graphics.h"
 #include "src/config.h"
 #include "src/logging.h"
@@ -539,6 +540,16 @@ namespace vk {
         capture_lease_refused = true;
         BOOST_LOG(error) << "Vulkan DMA-BUF capture has no published producer lease; this stream ends before GPU submission"sv;
         return platf::convert_capture_unreadable;
+      }
+      if (leased_capture) {
+        const auto producer = capture_producer_sync::wait(descriptor->sd.fds, std::chrono::milliseconds {500});
+        if (producer.status != capture_producer_sync::status_e::ready) {
+          capture_lease_refused = true;
+          BOOST_LOG(error) << "Vulkan DMA-BUF producer fence is not readable (status="sv
+                           << capture_producer_sync::status_name(producer.status) << ", errno="sv
+                           << producer.error << "); this stream ends before GPU import"sv;
+          return platf::convert_capture_unreadable;
+        }
       }
 
       // Get encoder target frame

@@ -161,6 +161,13 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_frame_pacing.cpp
 )
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(APPEND TEST_SUPPORT_SOURCES
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/capture_producer_sync.cpp)
+    list(APPEND TEST_FAST_SOURCES
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_capture_producer_sync.cpp)
+endif()
+
 if (NOT WIN32 AND NOT APPLE)
     list(APPEND TEST_FAST_SOURCES
         ${CMAKE_SOURCE_DIR}/tests/unit/test_linux_executable_path.cpp

@@ -371,7 +371,8 @@ if(${POLARIS_ENABLE_VULKAN})
     include_directories(SYSTEM ${CMAKE_BINARY_DIR}/generated-src)
     list(APPEND PLATFORM_TARGET_FILES
             "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_encode.h"
-            "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_encode.cpp")
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/vulkan_encode.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/capture_producer_sync.cpp")
 
     set(VULKAN_SHADER_DIR "${CMAKE_BINARY_DIR}/generated-src/shaders")
     set(VULKAN_SHADER_SOURCE "${POLARIS_SOURCE_ASSETS_DIR}/linux/assets/shaders/vulkan/rgb2yuv.comp")

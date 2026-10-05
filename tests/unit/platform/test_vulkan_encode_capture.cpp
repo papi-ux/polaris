@@ -607,6 +607,35 @@ TEST(VulkanCaptureCompletionTests, ALeasedBufferWithoutItsPublishedOwnerIsRefuse
   EXPECT_TRUE(boundary.waits.empty());
 }
 
+TEST(VulkanCaptureCompletionTests, UnsupportedProducerFenceEndsBeforeGpuSubmission) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  capture_completion_boundary_t boundary;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  boundary.install();
+  egl::img_descriptor_t img;
+  img.sd.width = frame_width;
+  img.sd.height = frame_height;
+  img.sd.fds[0] = open("/dev/null", O_RDONLY | O_CLOEXEC);
+  ASSERT_GE(img.sd.fds[0], 0);
+  img.sd.fourcc = DRM_FORMAT_XRGB8888;
+  img.sd.modifier = DRM_FORMAT_MOD_LINEAR;
+  img.sd.pitches[0] = frame_width * 4;
+  img.sequence = 1;
+  boundary.publish(img);
+
+  EXPECT_EQ(encoder.device->convert(img), platf::convert_capture_unreadable);
+  EXPECT_EQ(encoder.device->convert(img), platf::convert_capture_unreadable);
+  EXPECT_EQ(boundary.submissions, 0);
+  EXPECT_TRUE(boundary.waits.empty());
+  // No GPU read was submitted; the caller can release its own lease immediately.
+  boundary.completion_observed = true;
+  img.capture_owner.reset();
+  EXPECT_EQ(boundary.returned, 1);
+}
+
 /**
  * The system memory upload refuses a live DMA-BUF frame and keeps the primer.
  *
