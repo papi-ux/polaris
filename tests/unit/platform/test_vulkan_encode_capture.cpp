@@ -47,6 +47,10 @@ extern "C" {
   #include "src/platform/linux/graphics.h"
   #include "src/platform/linux/vulkan_encode.h"
   #include "src/platform/linux/vulkan_loader.h"
+  #ifdef POLARIS_BUILD_PORTAL
+    #include "../../fixtures/pipewire_producer_graph.h"
+    #include "src/video.h"
+  #endif
 
 namespace {
   class vulkan_discovery_environment_t final: public testing::Environment {
@@ -146,6 +150,19 @@ namespace {
     }
 
     bool ok = false;
+
+    bool overwrite(std::uint8_t level) {
+      void *map_data = nullptr;
+      std::uint32_t stride = 0;
+      auto *mapped = static_cast<std::uint8_t *>(gbm_bo_map(bo, 0, 0, capture_width, capture_height, GBM_BO_TRANSFER_WRITE, &stride, &map_data));
+      if (!mapped) return false;
+      for (int row = 0; row < capture_height; ++row) std::memset(mapped + row * stride, level, capture_width * 4);
+      gbm_bo_unmap(bo, map_data);
+      return true;
+    }
+
+    int export_fd() const { return gbm_bo_get_fd(bo); }
+    std::uint32_t stride() const { return gbm_bo_get_stride(bo); }
 
   private:
     int capture_width;
@@ -1557,5 +1574,199 @@ TEST(VulkanDeviceLifecycleTests, RepeatedProbesAndSessionsKeepTheRequestedDevice
     // iteration performs discovery again in the same long-lived host process.
   }
 }
+
+#ifdef POLARIS_BUILD_PORTAL
+namespace {
+  struct graph_dmabuf_pool_t {
+    std::map<pw_buffer *, std::unique_ptr<grey_dmabuf_t>> storage;
+
+    bool allocate(pw_buffer *buffer) {
+      auto made = std::make_unique<grey_dmabuf_t>(0);
+      if (!made->ok || made->stride() != frame_width * 4) return false;
+      auto &data = buffer->buffer->datas[0];
+      if (!(data.type & (1 << SPA_DATA_DmaBuf))) return false;
+      data.type = SPA_DATA_DmaBuf;
+      data.flags = SPA_DATA_FLAG_READWRITE;
+      data.fd = made->export_fd();
+      data.maxsize = frame_width * frame_height * 4;
+      data.mapoffset = 0;
+      data.data = nullptr;
+      if (data.fd < 0) return false;
+      storage.emplace(buffer, std::move(made));
+      return true;
+    }
+    bool write(pw_buffer *buffer, std::uint8_t marker) { return storage.at(buffer)->overwrite(marker); }
+    void remove(pw_buffer *buffer) {
+      ::close(buffer->buffer->datas[0].fd);
+      storage.erase(buffer);
+    }
+    test_utils::pipewire_producer_graph_t graph() {
+      return {true, frame_width, frame_height,
+        [this](pw_buffer *b) { return allocate(b); },
+        [this](pw_buffer *b, std::uint8_t m) { return write(b, m); },
+        [this](pw_buffer *b) { remove(b); }};
+    }
+  };
+
+  std::shared_ptr<platf::img_t> publish_graph_frame(test_utils::pipewire_producer_graph_t &graph) {
+    if (graph.capture->wait_for_frame(std::chrono::seconds(1)) != pipewire_capture::wait_result_e::frame) return {};
+    std::shared_ptr<platf::img_t> image = std::make_shared<egl::img_descriptor_t>();
+    return graph.capture->fill_frame(image) ? image : nullptr;
+  }
+
+  struct forwarding_graph_device_t: platf::avcodec_encode_device_t {
+    forwarding_graph_device_t(platf::avcodec_encode_device_t &device, std::shared_ptr<platf::img_t> &clone): device(device), clone(clone) {}
+    int convert(platf::img_t &image) override {
+      clone = image.shared_from_this();
+      return device.convert(image);
+    }
+    platf::avcodec_encode_device_t &device;
+    std::shared_ptr<platf::img_t> &clone;
+  };
+
+  int convert_graph_frame(encoder_frame_t &encoder, std::shared_ptr<platf::img_t> image, std::shared_ptr<platf::img_t> &clone) {
+    video::frame_t frame {std::move(image)};
+    // This calls the actual video.cpp clone/publication adapter, followed by
+    // the actual Vulkan converter. The wrapper owns neither actual device.
+    return video::convert_with_encode_device_for_tests(std::make_unique<forwarding_graph_device_t>(*encoder.device, clone), frame);
+  }
+}
+
+TEST(PipeWireProducerPoolTests, UnmodifiedProducerNegotiatesUsableShmAndReusesPixels) {
+  test_utils::pipewire_producer_graph_t graph {false, frame_width, frame_height};
+  ASSERT_TRUE(graph.start());
+  EXPECT_FALSE(graph.capture->negotiated_dmabuf());
+  auto image = std::make_shared<host_frame_t>(0);
+  for (const std::uint8_t marker : {10, 30, 50, 70, 90, 110, 130, 150}) {
+    ASSERT_TRUE(graph.step(marker));
+    ASSERT_EQ(graph.capture->wait_for_frame(std::chrono::seconds(1)), pipewire_capture::wait_result_e::frame);
+    std::shared_ptr<platf::img_t> filled = image;
+    ASSERT_TRUE(graph.capture->fill_frame(filled));
+    EXPECT_TRUE(std::all_of(image->pixels.begin(), image->pixels.end(), [&](auto p) { return p == marker; }));
+    EXPECT_EQ(image->frame_metadata.transport, platf::frame_transport_e::shm);
+    EXPECT_EQ(image->frame_metadata.residency, platf::frame_residency_e::cpu);
+    EXPECT_TRUE(pipewire_capture::frame_requires_cpu_copy(image->frame_metadata));
+  }
+  EXPECT_EQ(graph.writes.size(), 2);
+  EXPECT_EQ(graph.submitted, 8);
+  for (const auto &[buffer, times] : graph.writes) EXPECT_GE(times, 3);
+  EXPECT_EQ(pipewire_capture::capture_graph_test_access::leases(*graph.capture), 0);
+  graph.close();
+  EXPECT_EQ(graph.added, 2);
+  EXPECT_EQ(graph.removed, 2);
+}
+
+TEST(PipeWireProducerPoolTests, HeldCaptureFramesExhaustTheRealPoolUntilOneReturns) {
+  if (!vk::validate()) GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  graph_dmabuf_pool_t pool;
+  auto graph = pool.graph();
+  ASSERT_TRUE(graph.start());
+  ASSERT_TRUE(graph.capture->negotiated_dmabuf());
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  ASSERT_TRUE(graph.step(0));
+  auto first = publish_graph_frame(graph); ASSERT_TRUE(first);
+  auto *first_descriptor = dynamic_cast<egl::img_descriptor_t *>(first.get()); ASSERT_NE(first_descriptor, nullptr);
+  const auto first_key = first_descriptor->dmabuf_buffer_key;
+  ASSERT_TRUE(graph.step(85));
+  auto second = publish_graph_frame(graph); ASSERT_TRUE(second);
+  ASSERT_EQ(pipewire_capture::capture_graph_test_access::leases(*graph.capture), 2);
+  ASSERT_TRUE(graph.step(255));
+  EXPECT_EQ(graph.submitted, 2) << "producer overwrote a published frame while its two-buffer pool was held";
+  EXPECT_GE(graph.empty, 1);
+  std::shared_ptr<platf::img_t> clone;
+  ASSERT_EQ(convert_graph_frame(encoder, first, clone), 0);
+  EXPECT_TRUE(has_grey_quadrants(encoder.frame, frame_width, frame_height, {16,16,16,16}));
+  clone.reset(); first.reset();
+  ASSERT_TRUE(graph.step(255));
+  auto replacement = publish_graph_frame(graph); ASSERT_TRUE(replacement);
+  EXPECT_EQ(dynamic_cast<egl::img_descriptor_t *>(replacement.get())->dmabuf_buffer_key, first_key);
+  ASSERT_EQ(convert_graph_frame(encoder, replacement, clone), 0);
+  EXPECT_TRUE(has_grey_quadrants(encoder.frame, frame_width, frame_height, {235,235,235,235}));
+  clone.reset(); replacement.reset(); second.reset();
+  EXPECT_EQ(pipewire_capture::capture_graph_test_access::leases(*graph.capture), 0);
+  graph.close();
+  EXPECT_TRUE(pool.storage.empty());
+  EXPECT_EQ(graph.removed, 2);
+}
+
+TEST(PipeWireProducerPoolTests, TimedOutGpuReadKeepsRealStorageUntilDeviceRetirement) {
+  if (!vk::validate()) GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  graph_dmabuf_pool_t pool;
+  auto graph = pool.graph(); ASSERT_TRUE(graph.start());
+  capture_completion_boundary_t boundary;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  boundary.install(); boundary.timeout = true;
+  ASSERT_TRUE(graph.step(0));
+  auto first = publish_graph_frame(graph); ASSERT_TRUE(first);
+  const auto first_key = dynamic_cast<egl::img_descriptor_t *>(first.get())->dmabuf_buffer_key;
+  boundary.lease = first;
+  std::shared_ptr<platf::img_t> clone;
+  EXPECT_EQ(convert_graph_frame(encoder, first, clone), platf::convert_capture_unreadable);
+  first.reset(); clone.reset();
+  ASSERT_EQ(pipewire_capture::capture_graph_test_access::leases(*graph.capture), 1);
+  EXPECT_FALSE(boundary.lease.expired());
+  ASSERT_TRUE(graph.step(85));
+  auto second = publish_graph_frame(graph); ASSERT_TRUE(second);
+  ASSERT_TRUE(graph.step(255));
+  EXPECT_EQ(graph.submitted, 2);
+  EXPECT_GE(graph.empty, 1);
+  encoder.device.reset(); // real vkDeviceWaitIdle retires the submitted GPU read
+  EXPECT_TRUE(boundary.idle_observed);
+  EXPECT_TRUE(boundary.lease.expired());
+  EXPECT_EQ(pipewire_capture::capture_graph_test_access::leases(*graph.capture), 1);
+  ASSERT_TRUE(graph.step(255));
+  auto replacement = publish_graph_frame(graph); ASSERT_TRUE(replacement);
+  EXPECT_EQ(dynamic_cast<egl::img_descriptor_t *>(replacement.get())->dmabuf_buffer_key, first_key);
+  boundary.timeout = false;
+  encoder_frame_t next;
+  ASSERT_TRUE(next.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  boundary.lease = replacement;
+  ASSERT_EQ(convert_graph_frame(next, replacement, clone), 0);
+  EXPECT_TRUE(has_grey_quadrants(next.frame, frame_width, frame_height, {235,235,235,235}));
+  clone.reset(); replacement.reset(); second.reset(); next.device.reset();
+  EXPECT_EQ(pipewire_capture::capture_graph_test_access::leases(*graph.capture), 0);
+  graph.close(); EXPECT_TRUE(pool.storage.empty());
+}
+
+TEST(PipeWireProducerPoolTests, RefusedLiveImportReleasesItsPoolAndNewShmCaptureWorks) {
+  if (!vk::validate()) GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  {
+    graph_dmabuf_pool_t pool;
+    auto graph = pool.graph(); ASSERT_TRUE(graph.start());
+    log_capture_t logs;
+    capture_admission_boundary_t admission;
+    encoder_frame_t encoder;
+    ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+    admission.install(); admission.refuse_query = true;
+    ASSERT_TRUE(graph.step(255));
+    auto image = publish_graph_frame(graph); ASSERT_TRUE(image);
+    std::shared_ptr<platf::img_t> clone;
+    EXPECT_EQ(convert_graph_frame(encoder, image, clone), platf::convert_capture_unreadable);
+    EXPECT_FALSE(logs.lines_with("Failed to import DMA-BUF").empty());
+    EXPECT_EQ(admission.imports, 0);
+    clone.reset(); image.reset();
+    EXPECT_EQ(pipewire_capture::capture_graph_test_access::leases(*graph.capture), 0);
+    encoder.device.reset(); graph.close(); EXPECT_TRUE(pool.storage.empty());
+  }
+  // Explicit new compatible capture, not a claim of automatic mid-stream
+  // fallback. Its real MemFd frame remains CPU-resident through RAM upload.
+  test_utils::pipewire_producer_graph_t fallback {false, frame_width, frame_height};
+  ASSERT_TRUE(fallback.start());
+  ASSERT_FALSE(fallback.capture->negotiated_dmabuf());
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_ram(frame_width, frame_height, 0, 0, render_node)));
+  auto image = std::make_shared<host_frame_t>(0);
+  ASSERT_TRUE(fallback.step(255));
+  ASSERT_EQ(fallback.capture->wait_for_frame(std::chrono::seconds(1)), pipewire_capture::wait_result_e::frame);
+  std::shared_ptr<platf::img_t> filled = image;
+  ASSERT_TRUE(fallback.capture->fill_frame(filled));
+  ASSERT_EQ(encoder.device->convert(*image), 0);
+  EXPECT_TRUE(has_grey_quadrants(encoder.frame, frame_width, frame_height, {235,235,235,235}));
+  EXPECT_EQ(image->frame_metadata.transport, platf::frame_transport_e::shm);
+  EXPECT_EQ(image->frame_metadata.residency, platf::frame_residency_e::cpu);
+}
+#endif
 
 #endif

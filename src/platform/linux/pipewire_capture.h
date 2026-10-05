@@ -224,6 +224,7 @@ namespace pipewire_capture {
 #ifdef POLARIS_TESTS
     friend struct capture_test_access;
     friend struct capture_lease_test_access;
+    friend struct capture_graph_test_access;
     // Observe the actual enqueue boundary without connecting a producer.
     std::function<void(struct pw_buffer *)> queue_buffer_for_test_;
 #endif
