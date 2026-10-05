@@ -17,18 +17,19 @@ const snapshot = extra => ({ enabled: true, available: true, changing: false, fa
   profiles: [{ id: 'a', name: 'Gaming Space', clients: ['device'], family: 'steam' }], activity: [], ...extra })
 const active = state => snapshot({ activity: [{ profile_id: 'a', client_id: 'device', state }] })
 const reply = data => ({ ok: true, json: async () => data })
-let wrapper, spaces, platform
+let wrapper, spaces, platform, appPayload
 beforeEach(() => {
   vi.useFakeTimers()
   shared.stats = ref(null)
   spaces = snapshot(); platform = 'linux'
+  appPayload = { apps: [], current_app: '' }
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
   vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener() {}, removeEventListener() {} }))
   vi.stubGlobal('fetch', vi.fn(async url => {
     if (url === './api/multiseat/profiles') return reply(spaces)
     if (url === './api/config') return reply({ platform, linux_stream_mode: 'desktop_display' })
     if (url === './api/clients/list') return reply({ named_certs: [{ uuid: 'device', name: 'Handheld' }] })
-    if (url === './api/apps') return reply({ apps: [] })
+    if (url === './api/apps') return reply(appPayload)
     return reply([])
   }))
 })
@@ -45,6 +46,34 @@ async function render(streaming = true) {
 const spaceReads = () => fetch.mock.calls.filter(([url]) => url === './api/multiseat/profiles')
 
 describe('Mission Control with Space sessions', () => {
+  it('blocks recent launches while app identity is unavailable and restores the current catalog', async () => {
+    appPayload = { apps: [{ uuid: 'app-a', name: 'Control A', cmd: 'run-a' }], current_app: 'app-a' }
+    await render(false)
+    appPayload = { ...appPayload, current_app: '', current_app_available: false }
+    await wrapper.vm.refreshApps(); await flushPromises()
+    const before = fetch.mock.calls.length
+    await wrapper.vm.launchRecentApp(appPayload.apps[0])
+    expect(fetch.mock.calls).toHaveLength(before)
+    expect(wrapper.get('[data-dashboard-launch-app="app-a"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-dashboard-play-rail]').text()).toContain('Waiting for current app status.')
+    let resolveLate
+    const lateBody = new Promise(resolve => { resolveLate = resolve })
+    fetch.mockResolvedValueOnce({ ok: true, json: () => lateBody })
+    const staleRead = wrapper.vm.refreshApps()
+    await wrapper.vm.refreshApps()
+    resolveLate({ apps: [{ uuid: 'app-a', name: 'Control A' }], current_app: 'app-a' })
+    await staleRead
+    expect(wrapper.vm.currentAppAvailable).toBe(false)
+    fetch.mockRejectedValueOnce(new Error('fixture read failed'))
+    await wrapper.vm.refreshApps()
+    expect(wrapper.vm.currentAppAvailable).toBe(false)
+    appPayload = { apps: [{ uuid: 'app-b', name: 'Control B', cmd: 'run-b' }], current_app: '', current_app_available: true }
+    await wrapper.vm.refreshApps(); await flushPromises()
+    const launch = wrapper.get('[data-dashboard-launch-app="app-b"]')
+    expect(launch.attributes('disabled')).toBeUndefined()
+    await launch.trigger('click'); await flushPromises()
+    expect(fetch.mock.calls.some(([url, options]) => url === './api/apps/launch' && JSON.parse(options.body).uuid === 'app-b')).toBe(true)
+  })
   it('shows worker activity even when the host stream is idle, without the idle launch hero', async () => {
     spaces = active('running')
     await render(false)

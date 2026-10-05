@@ -555,7 +555,7 @@
                   v-if="quickLaunchDetails(app).running"
                   class="focus-ring dashboard-action-button dashboard-action-button-secondary library-quick-launch-action"
                   type="button"
-                  :disabled="actionDisabled"
+                  :disabled="actionDisabled || !currentAppAvailable"
                   @click="requestCloseApp(app)"
                 >
                   {{ pendingStopAppUuid === app.uuid ? "Confirm stop" : "Stop stream" }}
@@ -563,7 +563,9 @@
                 <a
                   v-else-if="quickLaunchDetails(app).launchReady"
                   class="focus-ring dashboard-action-button dashboard-action-button-primary library-quick-launch-action no-underline"
-                  :href="launchHref(app)"
+                  :href="currentAppAvailable && !actionDisabled ? launchHref(app) : undefined"
+                  :aria-disabled="!currentAppAvailable || actionDisabled"
+                  :tabindex="currentAppAvailable && !actionDisabled ? 0 : -1"
                   @click.prevent="launchApp($event, app)"
                 >
                   Launch
@@ -705,7 +707,7 @@
                     </span>
                   </div>
                   <div class="mt-2 text-xs text-storm">
-                    {{ currentApp === app.uuid ? 'Live for connected clients.' : 'Ready.' }}
+                    {{ !currentAppAvailable ? 'Waiting for current app status.' : currentApp === app.uuid ? 'Live for connected clients.' : 'Ready.' }}
                   </div>
                   <div class="mt-3 flex flex-wrap gap-2 text-[11px] text-storm">
                     <span class="meta-pill">Position {{ appPositionLabel(app) }}</span>
@@ -724,7 +726,7 @@
                 <button
                   v-if="currentApp === app.uuid"
                   class="focus-ring icon-action-button icon-action-button-warning"
-                  :disabled="actionDisabled"
+                  :disabled="actionDisabled || !currentAppAvailable"
                   :aria-label="`Terminate ${app.name}`"
                   :title="`Terminate ${app.name}`"
                   @click="closeApp()"
@@ -736,8 +738,10 @@
                   class="focus-ring icon-action-button icon-action-button-success library-row-launch inline-flex items-center justify-center no-underline"
                   :aria-label="`Launch ${app.name}`"
                   :title="`Launch ${app.name}`"
+                  :aria-disabled="!currentAppAvailable || actionDisabled"
+                  :tabindex="currentAppAvailable && !actionDisabled ? 0 : -1"
                   @click.prevent="launchApp($event, app)"
-                  :href="launchHref(app)"
+                  :href="currentAppAvailable && !actionDisabled ? launchHref(app) : undefined"
                 >
                   <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0 0 10 9.87v4.263a1 1 0 0 0 1.555.832l3.197-2.132a1 1 0 0 0 0-1.664z"/></svg>
                 </a>
@@ -1562,6 +1566,7 @@ function launchAsPill(entry) {
   return i18n.t('apps.launch_as_pill', { mode: launchAsChoice(entry)?.label || entry?.['launch-as'] })
 }
 const currentApp = ref("")
+const currentAppAvailable = ref(false)
 const draggingApp = ref(-1)
 const hostName = ref("")
 const hostUUID = ref("")
@@ -1680,6 +1685,7 @@ function quickLaunchDetails(app) {
 }
 
 function quickLaunchStateLabel(app) {
+  if (!currentAppAvailable.value) return 'Checking status'
   const details = quickLaunchDetails(app)
   if (details.running) return 'Live'
   if (details.launchReady) return 'Ready'
@@ -1687,6 +1693,7 @@ function quickLaunchStateLabel(app) {
 }
 
 function quickLaunchStateCopy(app) {
+  if (!currentAppAvailable.value) return 'Waiting for current app status.'
   const details = quickLaunchDetails(app)
   if (details.running) return 'Currently streaming for connected clients.'
   if (!details.launchReady) return 'Missing a launch command; open the entry before sending it to clients.'
@@ -1874,17 +1881,30 @@ function saveOrder() {
   .finally(() => { actionDisabled.value = false })
 }
 
+let appsRequestRevision = 0
 function loadApps() {
+  const revision = ++appsRequestRevision
   return fetch("./api/apps", { credentials: 'include' })
-  .then(r => r.json())
   .then(r => {
+    if (r.ok === false) throw new Error(`HTTP ${r.status}`)
+    return r.json()
+  })
+  .then(r => {
+    if (revision !== appsRequestRevision) return
     apps.value = r.apps.filter(i => i.uuid).map(i => ({ ...i, launching: false, dragover: false }))
     artworkLookupOff.value = artworkLookupOffSet(r)
     pendingStopAppUuid.value = ""
-    currentApp.value = r.current_app
+    currentAppAvailable.value = r.current_app_available !== false && typeof r.current_app === 'string'
+    currentApp.value = currentAppAvailable.value ? r.current_app : ''
     hostName.value = r.host_name
     hostUUID.value = r.host_uuid
     listReordered.value = false
+  })
+  .catch(() => {
+    if (revision !== appsRequestRevision) return
+    currentAppAvailable.value = false
+    currentApp.value = ''
+    pendingStopAppUuid.value = ''
   })
 }
 
@@ -1906,6 +1926,7 @@ function newApp() {
 }
 
 function launchApp(event, app) {
+  if (!currentAppAvailable.value || actionDisabled.value) return
   const isLocalHost = ['localhost', '127.0.0.1', '[::1]'].indexOf(location.hostname) >= 0
   if (!isLocalHost && confirm(i18n.t('apps.launch_local_client'))) {
     const link = document.createElement('a')
@@ -1933,6 +1954,7 @@ function launchApp(event, app) {
 }
 
 function requestCloseApp(app) {
+  if (!currentAppAvailable.value || actionDisabled.value) return
   if (pendingStopAppUuid.value !== app.uuid) {
     pendingStopAppUuid.value = app.uuid
     return
@@ -1941,6 +1963,7 @@ function requestCloseApp(app) {
 }
 
 function closeApp(options = {}) {
+  if (!currentAppAvailable.value || actionDisabled.value) return
   const confirmFirst = options.confirmFirst !== false
   if (confirmFirst && !confirm(i18n.t("apps.close_warning"))) {
     return

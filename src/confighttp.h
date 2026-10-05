@@ -79,6 +79,15 @@ namespace confighttp {
 
   void start();
 
+#ifdef POLARIS_TESTS
+  // Serve the production read-only handlers on an owned loopback TLS listener.
+  void run_apps_stats_server_for_tests(
+    const std::string &cert, const std::string &key,
+    const std::function<void(unsigned short, std::function<void()>)> &ready,
+    const std::function<void()> &before_apps
+  );
+#endif
+
   /**
    * @brief Assemble the GET /api/settings/metadata payload.
    *
