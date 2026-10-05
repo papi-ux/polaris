@@ -1770,6 +1770,36 @@ TEST(PipeWireProducerPoolTests, RefusedLiveImportReleasesItsPoolAndNewShmCapture
   EXPECT_EQ(image->frame_metadata.transport, platf::frame_transport_e::shm);
   EXPECT_EQ(image->frame_metadata.residency, platf::frame_residency_e::cpu);
 }
+
+TEST(PipeWireProducerPoolTests, NewGraphGenerationReadsNewPixelsWhileOldPublicationRemainsHeld) {
+  if (!vk::validate()) GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  graph_dmabuf_pool_t old_pool, new_pool;
+  auto old_graph = old_pool.graph(); ASSERT_TRUE(old_graph.start());
+  auto new_graph = new_pool.graph(); ASSERT_TRUE(new_graph.start());
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  ASSERT_TRUE(old_graph.step(255));
+  auto old_image = publish_graph_frame(old_graph); ASSERT_TRUE(old_image);
+  std::shared_ptr<platf::img_t> clone;
+  ASSERT_EQ(convert_graph_frame(encoder, old_image, clone), 0);
+  EXPECT_TRUE(has_grey_quadrants(encoder.frame, frame_width, frame_height, {235,235,235,235}));
+  clone.reset();
+  ASSERT_TRUE(new_graph.step(0));
+  auto new_image = publish_graph_frame(new_graph); ASSERT_TRUE(new_image);
+  auto *old_descriptor = dynamic_cast<egl::img_descriptor_t *>(old_image.get());
+  auto *new_descriptor = dynamic_cast<egl::img_descriptor_t *>(new_image.get());
+  ASSERT_NE(old_descriptor, nullptr); ASSERT_NE(new_descriptor, nullptr);
+  EXPECT_EQ(old_descriptor->sequence, new_descriptor->sequence);
+  EXPECT_NE(old_descriptor->dmabuf_buffer_key, new_descriptor->dmabuf_buffer_key);
+  ASSERT_EQ(convert_graph_frame(encoder, new_image, clone), 0);
+  EXPECT_TRUE(has_grey_quadrants(encoder.frame, frame_width, frame_height, {16,16,16,16}));
+  clone.reset(); old_image.reset();
+  EXPECT_EQ(pipewire_capture::capture_graph_test_access::leases(*old_graph.capture), 0);
+  EXPECT_EQ(pipewire_capture::capture_graph_test_access::leases(*new_graph.capture), 1);
+  new_image.reset(); encoder.device.reset();
+  old_graph.close(); new_graph.close();
+  EXPECT_TRUE(old_pool.storage.empty()); EXPECT_TRUE(new_pool.storage.empty());
+}
 #endif
 
 #endif
