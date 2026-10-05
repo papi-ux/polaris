@@ -5,6 +5,7 @@
  */
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <cstdint>
 #include <drm_fourcc.h>
@@ -12,6 +13,7 @@
 #include <optional>
 #include <string_view>
 #include <sys/stat.h>
+#include <thread>
 #if defined(__FreeBSD__)
   #include <sys/types.h>
 #else
@@ -1779,7 +1781,22 @@ namespace vk {
       if (report_teardown) {
         BOOST_LOG(info) << "Vulkan converter teardown: waiting for device idle"sv;
       }
-      const auto idle_status = vkDeviceWaitIdle(vk_dev.dev);
+      auto idle_status = vkDeviceWaitIdle(vk_dev.dev);
+      if (idle_status != VK_SUCCESS && idle_status != VK_ERROR_DEVICE_LOST) {
+        BOOST_LOG(error) << "Vulkan converter teardown: idle wait failed (status="sv << idle_status
+                         << "); retaining conversion resources and producer leases until retirement is confirmed"sv;
+        // Allocation/unknown errors do not establish that resources are no
+        // longer in use. Keep this generation, including its hardware device,
+        // alive while retrying, rather than destroying imports or returning a
+        // producer buffer that the GPU may still read. As with the original
+        // infinite idle wait, teardown cannot finish without that observation.
+        do {
+          std::this_thread::sleep_for(50ms);
+          idle_status = vkDeviceWaitIdle(vk_dev.dev);
+        } while (idle_status != VK_SUCCESS && idle_status != VK_ERROR_DEVICE_LOST);
+      }
+      // Vulkan's lost-device contract treats VK_ERROR_DEVICE_LOST like success
+      // when determining whether command buffers/resources remain in use.
       if (report_teardown) {
         BOOST_LOG(info) << "Vulkan converter teardown: device idle status="sv << idle_status;
       }
