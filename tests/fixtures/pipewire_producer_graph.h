@@ -162,11 +162,19 @@ namespace test_utils {
     }
 
     bool step(std::uint8_t next_marker) {
-      pw_thread_loop_lock(access::loop(*capture));
+      auto *loop = access::loop(*capture);
+      pw_thread_loop_lock(loop);
       marker = next_marker;
       const auto previous = completed;
-      const auto result = pw_stream_trigger_process(source);
-      pw_thread_loop_unlock(access::loop(*capture));
+      // Older non-RT streams schedule their producer callback on the main
+      // loop before triggering the data loop. Trigger from that main loop so
+      // the callback fills its buffer before the graph can consume it. The
+      // blocking invoke releases and reacquires the thread-loop lock itself.
+      const auto result = pw_loop_invoke(pw_thread_loop_get_loop(loop),
+        [](spa_loop *, bool, std::uint32_t, const void *, std::size_t, void *opaque) {
+          return pw_stream_trigger_process(static_cast<pipewire_producer_graph_t *>(opaque)->source);
+        }, 0, nullptr, 0, true, this);
+      pw_thread_loop_unlock(loop);
       // Never destroy a stream while do_trigger_driver still owns its pointer.
       return result >= 0 && wait([&] { return completed > previous; }) && !failed;
     }
