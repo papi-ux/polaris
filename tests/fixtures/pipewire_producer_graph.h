@@ -110,15 +110,15 @@ namespace test_utils {
       spa_pod_builder_prop(&builder, SPA_FORMAT_VIDEO_format, 0);
       spa_pod_builder_id(&builder, SPA_VIDEO_FORMAT_BGRx);
       spa_pod_builder_prop(&builder, SPA_FORMAT_VIDEO_size, 0);
-      spa_pod_builder_rectangle(&builder, &size);
+      spa_pod_builder_rectangle(&builder, size.width, size.height);
       spa_pod_builder_prop(&builder, SPA_FORMAT_VIDEO_framerate, 0);
-      spa_pod_builder_fraction(&builder, &variable_rate);
+      spa_pod_builder_fraction(&builder, variable_rate.num, variable_rate.denom);
       if (dmabuf) {
         spa_pod_builder_prop(&builder, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY);
         spa_pod_builder_long(&builder, DRM_FORMAT_MOD_LINEAR);
       }
       spa_pod_builder_prop(&builder, SPA_FORMAT_VIDEO_maxFramerate, 0);
-      spa_pod_builder_fraction(&builder, &maximum_rate);
+      spa_pod_builder_fraction(&builder, maximum_rate.num, maximum_rate.denom);
       return static_cast<const spa_pod *>(spa_pod_builder_pop(&builder, &frame));
     }
 
