@@ -553,6 +553,7 @@ namespace pipewire_capture {
       terminal_result_ = wait_result_e::reinit;
       front_dmabuf_buffer_ = nullptr;
       front_dmabuf_buffer_key_ = 0;
+      front_dmabuf_generation_ = 0;
       front_dmabuf_frame_.reset();
       frame_available_ = false;
       frame_cv_.notify_all();
@@ -625,6 +626,7 @@ namespace pipewire_capture {
       loop_ = nullptr;
     }
     buffer_keys_.clear();
+    buffer_generations_.clear();
   }
 
   bool capture_t::start() {
@@ -987,17 +989,19 @@ namespace pipewire_capture {
         front_dmabuf_frame_->spa_format);
 
       auto retained_buffer = front_dmabuf_buffer_;
+      const auto retained_generation = front_dmabuf_generation_;
       auto pooled = std::move(image);
       auto *pooled_image = pooled.get();
       front_dmabuf_buffer_ = nullptr;
       front_dmabuf_buffer_key_ = 0;
+      front_dmabuf_generation_ = 0;
       front_dmabuf_frame_.reset();
       frame_available_ = false;
       ++active_dmabuf_leases_;
       auto self = shared_from_this();
-      image = std::shared_ptr<platf::img_t>(pooled_image, [pooled = std::move(pooled), self = std::move(self), retained_buffer](platf::img_t *) mutable {
+      image = std::shared_ptr<platf::img_t>(pooled_image, [pooled = std::move(pooled), self = std::move(self), retained_buffer, retained_generation](platf::img_t *) mutable {
         pooled.reset();
-        self->release_buffer_lease(retained_buffer);
+        self->release_buffer_lease(retained_buffer, retained_generation);
       });
       return true;
     }
@@ -1038,30 +1042,32 @@ namespace pipewire_capture {
     }
     try {
       pw_buffer *latest = nullptr;
-      std::vector<pw_buffer *> older;
+      std::uint64_t generation = 0;
+      std::vector<std::pair<pw_buffer *, std::uint64_t>> older;
       while (auto *buffer = pw_stream_dequeue_buffer(cap->stream_)) {
         if (latest) {
-          older.push_back(latest);
+          older.emplace_back(latest, generation);
         }
         latest = buffer;
+        generation = cap->buffer_generations_.acquire(buffer);
       }
 
-      for (auto *buffer : older) {
-        pw_stream_queue_buffer(cap->stream_, buffer);
+      for (const auto &[buffer, older_generation] : older) {
+        cap->queue_buffer_locked(buffer, older_generation);
       }
       if (!latest) {
         return;
       }
 
-      if (!cap->process_buffer(latest)) {
-        pw_stream_queue_buffer(cap->stream_, latest);
+      if (!cap->process_buffer(latest, generation)) {
+        cap->queue_buffer_locked(latest, generation);
       }
     } catch (...) {
       // PipeWire C callbacks must not throw across the ABI.
     }
   }
 
-  bool capture_t::process_buffer(pw_buffer *buffer) {
+  bool capture_t::process_buffer(pw_buffer *buffer, std::uint64_t generation) {
     if (!buffer || !buffer->buffer || buffer->buffer->n_datas == 0) {
       return false;
     }
@@ -1139,15 +1145,18 @@ namespace pipewire_capture {
       const auto frame_sequence = ++sequence_;
 
       pw_buffer *replaced_buffer = nullptr;
+      std::uint64_t replaced_generation = 0;
       {
         std::lock_guard lk(frame_mtx_);
         replaced_buffer = front_dmabuf_buffer_;
+        replaced_generation = front_dmabuf_generation_;
         front_dmabuf_buffer_ = nullptr;
         front_dmabuf_frame_ = frame;
         front_dmabuf_timestamp_ = frame_timestamp;
         front_dmabuf_sequence_ = frame_sequence;
         front_dmabuf_buffer_key_ = buffer_key;
         front_dmabuf_buffer_ = buffer;
+        front_dmabuf_generation_ = generation;
         frame_available_ = true;
       }
       if (replaced_buffer) {
@@ -1155,7 +1164,7 @@ namespace pipewire_capture {
         // already holds the thread-loop lock. Queue directly here: taking
         // shutdown_mtx_ from the callback would invert shutdown's
         // shutdown_mtx_ -> thread-loop-lock order and deadlock teardown.
-        pw_stream_queue_buffer(stream_, replaced_buffer);
+        queue_buffer_locked(replaced_buffer, replaced_generation);
       }
       frame_cv_.notify_one();
       return true;
@@ -1265,6 +1274,7 @@ namespace pipewire_capture {
     }
 
     pw_buffer *replaced_buffer = nullptr;
+    std::uint64_t replaced_generation = 0;
     bool requires_reinit = false;
     const auto negotiated_modifier = dmabuf_negotiated ? effective_modifier :
       (raw_info.flags & SPA_VIDEO_FLAG_MODIFIER ? raw_info.modifier : DRM_FORMAT_MOD_INVALID);
@@ -1279,6 +1289,7 @@ namespace pipewire_capture {
                          cap->front_info_.spa_format != raw_info.format ||
                          cap->front_info_.modifier != negotiated_modifier);
       replaced_buffer = cap->front_dmabuf_buffer_;
+      replaced_generation = cap->front_dmabuf_generation_;
       cap->front_info_ = {
         .width = width,
         .height = height,
@@ -1291,6 +1302,7 @@ namespace pipewire_capture {
       cap->front_dmabuf_frame_.reset();
       cap->front_dmabuf_buffer_ = nullptr;
       cap->front_dmabuf_buffer_key_ = 0;
+      cap->front_dmabuf_generation_ = 0;
       cap->frame_available_ = false;
       cap->negotiated_ = true;
       cap->negotiated_dmabuf_ = dmabuf_negotiated;
@@ -1300,7 +1312,7 @@ namespace pipewire_capture {
     if (replaced_buffer) {
       // Format callbacks run with PipeWire's thread-loop lock held. Queue
       // directly so shutdown_mtx_ is never acquired in loop callback context.
-      pw_stream_queue_buffer(cap->stream_, replaced_buffer);
+      cap->queue_buffer_locked(replaced_buffer, replaced_generation);
     }
     cap->frame_cv_.notify_all();
 
@@ -1320,6 +1332,7 @@ namespace pipewire_capture {
 
     if (requires_reinit) {
       cap->buffer_keys_.clear();
+      cap->buffer_generations_.clear();
       BOOST_LOG(info) << "portal: PipeWire transport/format/layout changed; reinitializing encoder"sv;
       cap->set_terminal(wait_result_e::reinit);
       return;
@@ -1345,6 +1358,7 @@ namespace pipewire_capture {
     if (!cap || !buffer) {
       return;
     }
+    cap->buffer_generations_.remove(buffer);
     cap->buffer_keys_[buffer] = allocate_buffer_key();
   }
 
@@ -1354,10 +1368,12 @@ namespace pipewire_capture {
       return;
     }
     cap->buffer_keys_.erase(buffer);
+    cap->buffer_generations_.remove(buffer);
     std::lock_guard lk(cap->frame_mtx_);
     if (cap->front_dmabuf_buffer_ == buffer) {
       cap->front_dmabuf_buffer_ = nullptr;
       cap->front_dmabuf_buffer_key_ = 0;
+      cap->front_dmabuf_generation_ = 0;
       cap->front_dmabuf_frame_.reset();
       cap->frame_available_ = false;
     }
@@ -1403,7 +1419,19 @@ namespace pipewire_capture {
     frame_cv_.notify_all();
   }
 
-  void capture_t::queue_buffer(pw_buffer *buffer) {
+  void capture_t::queue_buffer_locked(pw_buffer *buffer, std::uint64_t generation) {
+    // Callbacks hold the loop lock; consumer completion acquires it below.
+    if (!buffer_generations_.complete(buffer, generation)) return;
+#ifdef POLARIS_TESTS
+    if (queue_buffer_for_test_) {
+      queue_buffer_for_test_(buffer);
+      return;
+    }
+#endif
+    pw_stream_queue_buffer(stream_, buffer);
+  }
+
+  void capture_t::queue_buffer(pw_buffer *buffer, std::uint64_t generation) {
     std::lock_guard shutdown_lk(shutdown_mtx_);
     if (shutdown_complete_ || !buffer || !stream_) {
       return;
@@ -1415,15 +1443,15 @@ namespace pipewire_capture {
     if (loop_ && !pw_thread_loop_in_thread(loop_)) {
       pw_thread_loop_lock(loop_);
       if (stream_ && running()) {
-        pw_stream_queue_buffer(stream_, buffer);
+        queue_buffer_locked(buffer, generation);
       }
       pw_thread_loop_unlock(loop_);
       return;
     }
-    pw_stream_queue_buffer(stream_, buffer);
+    queue_buffer_locked(buffer, generation);
   }
 
-  void capture_t::release_buffer_lease(pw_buffer *buffer) {
+  void capture_t::release_buffer_lease(pw_buffer *buffer, std::uint64_t generation) {
     bool should_queue = false;
     {
       std::lock_guard lk(frame_mtx_);
@@ -1434,7 +1462,7 @@ namespace pipewire_capture {
     }
     frame_cv_.notify_all();
     if (should_queue) {
-      queue_buffer(buffer);
+      queue_buffer(buffer, generation);
     }
   }
 

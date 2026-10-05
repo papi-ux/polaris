@@ -4,6 +4,8 @@
  */
 #pragma once
 
+#include "pipewire_buffer_generation.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -222,6 +224,8 @@ namespace pipewire_capture {
 #ifdef POLARIS_TESTS
     friend struct capture_test_access;
     friend struct capture_lease_test_access;
+    // Observe the actual enqueue boundary without connecting a producer.
+    std::function<void(struct pw_buffer *)> queue_buffer_for_test_;
 #endif
     static void on_process(void *userdata) noexcept;
     static void on_add_buffer(void *userdata, struct pw_buffer *buffer) noexcept;
@@ -230,10 +234,11 @@ namespace pipewire_capture {
     static void on_state_changed(void *userdata, enum pw_stream_state old, enum pw_stream_state state, const char *errmsg) noexcept;
 
     bool connect_stream(bool use_max_framerate);
-    bool process_buffer(struct pw_buffer *buffer);
+    bool process_buffer(struct pw_buffer *buffer, std::uint64_t generation);
     void set_terminal(wait_result_e result);
-    void queue_buffer(struct pw_buffer *buffer);
-    void release_buffer_lease(struct pw_buffer *buffer);
+    void queue_buffer_locked(struct pw_buffer *buffer, std::uint64_t generation);
+    void queue_buffer(struct pw_buffer *buffer, std::uint64_t generation);
+    void release_buffer_lease(struct pw_buffer *buffer, std::uint64_t generation);
 
     capture_options_t options_;
     int remote_fd_ = -1;
@@ -243,6 +248,7 @@ namespace pipewire_capture {
     pw_stream *stream_ = nullptr;
     spa_hook stream_listener_ {};
     std::unordered_map<struct pw_buffer *, std::uint64_t> buffer_keys_;
+    buffer_generation_t buffer_generations_;
 
     std::mutex shutdown_mtx_;
     std::mutex start_stop_mtx_;
@@ -256,6 +262,7 @@ namespace pipewire_capture {
     std::chrono::steady_clock::time_point front_dmabuf_timestamp_ {};
     std::uint64_t front_dmabuf_sequence_ = 0;
     std::uint64_t front_dmabuf_buffer_key_ = 0;
+    std::uint64_t front_dmabuf_generation_ = 0;
     struct pw_buffer *front_dmabuf_buffer_ = nullptr;
     std::size_t active_dmabuf_leases_ = 0;
     frame_info_t front_info_;
