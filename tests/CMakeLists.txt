@@ -665,6 +665,13 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_platform
         ${TEST_PLATFORM_SOURCES}
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND POLARIS_ENABLE_VULKAN)
+        add_test(NAME polaris_vulkan_device_lifecycle
+            COMMAND test_polaris_platform --gtest_filter=VulkanDeviceLifecycleTests.*)
+        set_tests_properties(polaris_vulkan_device_lifecycle PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            LABELS "requires-gpu")
+    endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND POLARIS_ENABLE_PYROWAVE)
         target_sources(test_polaris_platform PRIVATE
             ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_pyrowave_session_serialization.cpp)

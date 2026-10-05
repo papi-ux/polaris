@@ -8,6 +8,7 @@
 #include <cstring>
 #include <cstdint>
 #include <drm_fourcc.h>
+#include <mutex>
 #include <optional>
 #include <string_view>
 #include <sys/stat.h>
@@ -43,6 +44,48 @@ using namespace platf::vulkan_loader;
 
 namespace vk {
 
+  namespace {
+    // Keep discovery's ICD libraries alive between hardware contexts. Repeated
+    // unload/reload can exhaust NVIDIA's static TLS allocation and make a later
+    // probe see only the software device. This holds no device, queue or frame.
+    // The loader itself is already retained for the lifetime of the process.
+    struct discovery_instance_t {
+      VkInstance instance = VK_NULL_HANDLE;
+      std::mutex mutex;
+    };
+
+    discovery_instance_t &discovery_state() {
+      static discovery_instance_t discovery;
+      return discovery;
+    }
+
+    // Caller holds discovery.mutex. Cleanup belongs to explicit platform
+    // shutdown: driver exit handlers may precede C++ static destructors.
+    bool ensure_discovery_instance(discovery_instance_t &discovery) {
+      if (discovery.instance) {
+        return true;
+      }
+      VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
+      app.apiVersion = VK_API_VERSION_1_1;
+      VkInstanceCreateInfo ci = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+      ci.pApplicationInfo = &app;
+      if (vkCreateInstance(&ci, nullptr, &discovery.instance) != VK_SUCCESS) {
+        discovery.instance = VK_NULL_HANDLE;
+        return false;
+      }
+      return true;
+    }
+  }  // namespace
+
+  void shutdown_discovery() {
+    auto &discovery = discovery_state();
+    const std::lock_guard lock {discovery.mutex};
+    if (discovery.instance) {
+      vkDestroyInstance(discovery.instance, nullptr);
+      discovery.instance = VK_NULL_HANDLE;
+    }
+  }
+
   // Match a DRI device node path to a Vulkan device index via VK_EXT_physical_device_drm.
   // Returns the index as a string (e.g. "1"), or empty string if no match.
   static std::string find_vulkan_index_for_render_node(const char *render_path) {
@@ -54,15 +97,12 @@ namespace vk {
     auto target_major = major(node_stat.st_rdev);
     auto target_minor = minor(node_stat.st_rdev);
 
-    VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    app.apiVersion = VK_API_VERSION_1_1;
-
-    VkInstanceCreateInfo ci = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-    ci.pApplicationInfo = &app;
-    VkInstance inst = VK_NULL_HANDLE;
-    if (vkCreateInstance(&ci, nullptr, &inst) != VK_SUCCESS) {
+    auto &discovery = discovery_state();
+    const std::lock_guard lock {discovery.mutex};
+    if (!ensure_discovery_instance(discovery)) {
       return {};
     }
+    const auto inst = discovery.instance;
 
     uint32_t count = 0;
     vkEnumeratePhysicalDevices(inst, &count, nullptr);
@@ -97,7 +137,6 @@ namespace vk {
         break;
       }
     }
-    vkDestroyInstance(inst, nullptr);
     return result;
   }
 
@@ -107,6 +146,13 @@ namespace vk {
     if (const auto missing = missing_entry_point(); !missing.empty()) {
       BOOST_LOG(error) << "Vulkan Video: the Vulkan loader does not provide ["sv << missing << ']';
       return -1;
+    }
+    {
+      auto &discovery = discovery_state();
+      const std::lock_guard lock {discovery.mutex};
+      if (!ensure_discovery_instance(discovery)) {
+        return -1;
+      }
     }
 
     // KMS passes the capture card's exact render node. Using a different physical
