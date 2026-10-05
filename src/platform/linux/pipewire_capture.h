@@ -221,6 +221,7 @@ namespace pipewire_capture {
   private:
 #ifdef POLARIS_TESTS
     friend struct capture_test_access;
+    friend struct capture_lease_test_access;
 #endif
     static void on_process(void *userdata) noexcept;
     static void on_add_buffer(void *userdata, struct pw_buffer *buffer) noexcept;
