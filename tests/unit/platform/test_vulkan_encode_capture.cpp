@@ -217,7 +217,7 @@ namespace {
     std::vector<std::uint64_t> waits;
     int submissions = 0;
     bool timeout = false;
-    bool reject_submit = false;
+    VkResult submit_error = VK_SUCCESS;
     bool completion_observed = false;
     bool idle_observed = false;
     bool lease_retained_at_wait = true;
@@ -280,8 +280,8 @@ namespace {
     static VKAPI_ATTR VkResult VKAPI_CALL submit(VkQueue queue, std::uint32_t count, const VkSubmitInfo *submits, VkFence fence) {
       auto &self = *active;
       ++self.submissions;
-      if (self.reject_submit) {
-        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      if (self.submit_error != VK_SUCCESS) {
+        return self.submit_error;
       }
       const auto result = self.original_submit(queue, count, submits, fence);
       if (result == VK_SUCCESS) {
@@ -994,7 +994,7 @@ TEST(VulkanCaptureCompletionTests, TimeoutRetainsTheLeaseUntilIdleAndStopsFurthe
   EXPECT_FALSE(boundary.returned_before_completion);
 }
 
-TEST(VulkanCaptureCompletionTests, SubmissionFailureRetainsTheLeaseAndEndsConversionOnce) {
+TEST(VulkanCaptureCompletionTests, UnknownSubmissionFailureRetainsTheLeaseAndEndsConversionOnce) {
   if (!vk::validate()) {
     GTEST_SKIP() << "No Vulkan Video encoder on this host";
   }
@@ -1006,7 +1006,7 @@ TEST(VulkanCaptureCompletionTests, SubmissionFailureRetainsTheLeaseAndEndsConver
   encoder_frame_t encoder;
   ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
   boundary.install();
-  boundary.reject_submit = true;
+  boundary.submit_error = VK_ERROR_UNKNOWN;
   egl::img_descriptor_t img;
   white.describe(img, 1);
   boundary.publish(img);
@@ -1022,6 +1022,45 @@ TEST(VulkanCaptureCompletionTests, SubmissionFailureRetainsTheLeaseAndEndsConver
   EXPECT_EQ(boundary.returned, 1);
   EXPECT_FALSE(boundary.returned_before_completion);
 }
+
+class VulkanCaptureSubmissionRejectionTests: public testing::TestWithParam<VkResult> {};
+
+TEST_P(VulkanCaptureSubmissionRejectionTests, UnaffectedRejectedSubmitReturnsItsUnusedLeaseBeforeTeardown) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t white {0xFF};
+  if (!white.ok) {
+    GTEST_SKIP() << "Could not allocate a linear DMA-BUF on " << render_node;
+  }
+  capture_completion_boundary_t boundary;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  boundary.install();
+  boundary.submit_error = GetParam();
+  egl::img_descriptor_t img;
+  white.describe(img, 1);
+  boundary.publish(img);
+
+  EXPECT_EQ(encoder.device->convert(img), platf::convert_capture_unreadable);
+  img.capture_owner.reset();
+  EXPECT_TRUE(boundary.lease.expired()) << "the rejected queue submission never acquired a GPU read";
+  EXPECT_EQ(boundary.returned, 1);
+  EXPECT_TRUE(boundary.returned_before_completion);
+  // No real GPU submission, completion wait, device idle or destructor is
+  // needed to return storage after these two specified rejection results.
+  EXPECT_TRUE(boundary.waits.empty());
+  EXPECT_FALSE(boundary.idle_observed);
+  EXPECT_EQ(encoder.device->convert(img), platf::convert_capture_unreadable);
+  EXPECT_EQ(boundary.submissions, 1) << "a refused generation must not retry submission";
+  encoder.device.reset();
+  EXPECT_FALSE(boundary.lease_retained_at_idle);
+  EXPECT_EQ(boundary.returned, 1);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+  UnaffectedResources, VulkanCaptureSubmissionRejectionTests,
+  testing::Values(VK_ERROR_OUT_OF_HOST_MEMORY, VK_ERROR_OUT_OF_DEVICE_MEMORY));
 
 TEST(VulkanCaptureCompletionTests, ALeasedBufferWithoutItsPublishedOwnerIsRefusedBeforeSubmission) {
   if (!vk::validate()) {
