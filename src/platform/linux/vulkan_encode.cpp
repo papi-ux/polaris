@@ -446,6 +446,9 @@ namespace vk {
      * @return Conversion status.
      */
     int convert(platf::img_t &img) override {
+      if (capture_lease_refused) {
+        return platf::convert_capture_unreadable;
+      }
       // A live DMA-BUF frame on the system memory upload, which only a portal with its DMA-BUF offer
       // to Vulkan Video opened hands over. Refused before anything is recorded, and as a stream that
       // is over rather than one frame gone wrong: the portal keeps the transport it negotiated for as
@@ -484,6 +487,12 @@ namespace vk {
       if (!ram_input && !descriptor) {
         BOOST_LOG(error) << "Vulkan DMA-BUF conversion received a non-DMA-BUF frame"sv;
         return -1;
+      }
+      const bool leased_capture = descriptor && descriptor->sequence != 0 && descriptor->dmabuf_buffer_key != 0;
+      if (leased_capture && !descriptor->capture_owner) {
+        capture_lease_refused = true;
+        BOOST_LOG(error) << "Vulkan DMA-BUF capture has no published producer lease; this stream ends before GPU submission"sv;
+        return platf::convert_capture_unreadable;
       }
 
       // Get encoder target frame
@@ -572,7 +581,7 @@ namespace vk {
       }
 
       // Record and submit compute dispatch
-      return dispatch_compute(false, ram_input ? &img : nullptr);
+      return dispatch_compute(false, ram_input ? &img : nullptr, leased_capture ? descriptor->capture_owner : nullptr);
     }
 
   private:
@@ -593,12 +602,17 @@ namespace vk {
     // when the ring wraps, preserving pipelining while making command-buffer,
     // descriptor-set, and imported-image lifetimes explicit.
     static constexpr std::size_t CMD_RING_SIZE = 3;
+    // A producer may have fewer buffers than the command ring. Retaining its
+    // leases until ring wrap would prevent it from publishing the next frame.
+    // Wait only for leased capture reads; ordinary VRAM and RAM remain pipelined.
+    static constexpr std::uint64_t CAPTURE_COMPLETION_TIMEOUT_NS = 500'000'000;
 
     struct cmd_slot_t {
       VkCommandBuffer buffer = VK_NULL_HANDLE;
       VkFence fence = VK_NULL_HANDLE;
       VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
       bool submitted = false;
+      std::shared_ptr<platf::img_t> capture_owner;
       std::vector<image_resource_t> retired_images;
       image_resource_t ram_source;
       upload_resource_t ram_upload;
@@ -1313,7 +1327,7 @@ namespace vk {
       return true;
     }
 
-    int dispatch_compute(bool blank, const platf::img_t *ram_img = nullptr) {
+    int dispatch_compute(bool blank, const platf::img_t *ram_img = nullptr, const std::shared_ptr<platf::img_t> &capture_owner = {}) {
       auto *vk_frame = (AVVkFrame *) frame->data[0];
       int num_imgs = 0;
       for (int i = 0; i < AV_NUM_DATA_POINTERS && vk_frame->img[i]; i++) {
@@ -1502,10 +1516,17 @@ namespace vk {
       submit.signalSemaphoreCount = sem_count;
       submit.pSignalSemaphores = signal_sems.data();
 
+      // Own the exact published lease before the GPU can start reading it.
+      // Descriptor duplication alone does not keep a producer from reusing it.
+      slot.capture_owner = capture_owner;
       auto res = vkQueueSubmit(vk_dev.compute_queue, 1, &submit, slot.fence);
 
       if (res != VK_SUCCESS) {
         BOOST_LOG(error) << "vkQueueSubmit failed: " << res;
+        if (slot.capture_owner) {
+          capture_lease_refused = true;
+          return platf::convert_capture_unreadable;
+        }
         return -1;
       }
 
@@ -1535,6 +1556,17 @@ namespace vk {
       }
 
       target.initialized = true;
+
+      if (slot.capture_owner) {
+        const auto completion = vkWaitForFences(vk_dev.dev, 1, &slot.fence, VK_TRUE, CAPTURE_COMPLETION_TIMEOUT_NS);
+        if (completion != VK_SUCCESS) {
+          capture_lease_refused = true;
+          BOOST_LOG(error) << "Vulkan DMA-BUF capture read did not complete within the 500 ms wait (status="sv
+                           << completion << "); this stream ends and retains its producer lease until GPU teardown"sv;
+          return platf::convert_capture_unreadable;
+        }
+        slot.capture_owner.reset();
+      }
 
       return 0;
     }
@@ -1570,6 +1602,8 @@ namespace vk {
         destroy_retired_images(slot);
         destroy_image_resource(slot.ram_source);
         destroy_upload_resource(slot.ram_upload);
+        // Device idle precedes imported-resource destruction and producer return.
+        slot.capture_owner.reset();
         slot.ram_source_initialized = false;
         if (slot.fence) {
           vkDestroyFence(vk_dev.dev, slot.fence, nullptr);
@@ -1648,6 +1682,7 @@ namespace vk {
     bool refused_dmabuf_frame = false;
     /// Said once, for the same reason: the portal negotiates the frame format once per capture.
     bool refused_ten_bit_frame = false;
+    bool capture_lease_refused = false;
     bool is_10bit = false;
     AVBufferRef *hw_frames_ctx = nullptr;
     frame_t hwframe;

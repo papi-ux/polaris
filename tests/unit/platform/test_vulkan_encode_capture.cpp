@@ -41,6 +41,7 @@ extern "C" {
   #include "src/logging.h"
   #include "src/platform/linux/graphics.h"
   #include "src/platform/linux/vulkan_encode.h"
+  #include "src/platform/linux/vulkan_loader.h"
 
 namespace {
   constexpr int frame_width = 256;
@@ -176,6 +177,95 @@ namespace {
       device->colorspace = {video::colorspace_e::rec709, false, 8};
       device->apply_colorspace();
       return true;
+    }
+  };
+
+  // Observe Polaris's actual submission boundary while leaving FFmpeg's Vulkan
+  // entry points alone. Faults are injected at the call boundary, not into the
+  // driver. Every function pointer is restored after the owned device closes.
+  struct capture_completion_boundary_t {
+    inline static capture_completion_boundary_t *active = nullptr;
+    PFN_vkWaitForFences original_wait = platf::vulkan_loader::vkWaitForFences;
+    PFN_vkQueueSubmit original_submit = platf::vulkan_loader::vkQueueSubmit;
+    PFN_vkDeviceWaitIdle original_idle = platf::vulkan_loader::vkDeviceWaitIdle;
+    std::weak_ptr<platf::img_t> lease;
+    VkFence submitted_fence = VK_NULL_HANDLE;
+    std::vector<std::uint64_t> waits;
+    int submissions = 0;
+    bool timeout = false;
+    bool reject_submit = false;
+    bool completion_observed = false;
+    bool idle_observed = false;
+    bool lease_retained_at_wait = true;
+    bool lease_retained_at_idle = false;
+    bool returned_before_completion = false;
+    int returned = 0;
+
+    void install() {
+      EXPECT_EQ(active, nullptr);
+      active = this;
+      platf::vulkan_loader::vkWaitForFences = wait;
+      platf::vulkan_loader::vkQueueSubmit = submit;
+      platf::vulkan_loader::vkDeviceWaitIdle = idle;
+    }
+
+    ~capture_completion_boundary_t() {
+      if (active == this) {
+        platf::vulkan_loader::vkWaitForFences = original_wait;
+        platf::vulkan_loader::vkQueueSubmit = original_submit;
+        platf::vulkan_loader::vkDeviceWaitIdle = original_idle;
+        active = nullptr;
+      }
+    }
+
+    void publish(egl::img_descriptor_t &img) {
+      completion_observed = false;
+      img.dmabuf_buffer_key = 1;
+      img.capture_owner = std::shared_ptr<platf::img_t>(new platf::img_t, [this](platf::img_t *owner) {
+        returned_before_completion |= !completion_observed && !idle_observed;
+        ++returned;
+        delete owner;
+      });
+      lease = img.capture_owner;
+    }
+
+    static VKAPI_ATTR VkResult VKAPI_CALL wait(VkDevice device, std::uint32_t count, const VkFence *fences, VkBool32 all, std::uint64_t timeout_ns) {
+      auto &self = *active;
+      self.waits.push_back(timeout_ns);
+      if (timeout_ns != UINT64_MAX) {
+        // One owner is still held by the caller's descriptor; GPU submission
+        // must hold another even if that descriptor is released on return.
+        self.lease_retained_at_wait &= self.lease.use_count() >= 2;
+      }
+      if (self.timeout) {
+        return VK_TIMEOUT;
+      }
+      const auto result = self.original_wait(device, count, fences, all, timeout_ns);
+      if (result == VK_SUCCESS && count == 1 && fences[0] == self.submitted_fence) {
+        self.completion_observed = true;
+      }
+      return result;
+    }
+
+    static VKAPI_ATTR VkResult VKAPI_CALL submit(VkQueue queue, std::uint32_t count, const VkSubmitInfo *submits, VkFence fence) {
+      auto &self = *active;
+      ++self.submissions;
+      if (self.reject_submit) {
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      }
+      const auto result = self.original_submit(queue, count, submits, fence);
+      if (result == VK_SUCCESS) {
+        self.submitted_fence = fence;
+      }
+      return result;
+    }
+
+    static VKAPI_ATTR VkResult VKAPI_CALL idle(VkDevice device) {
+      auto &self = *active;
+      self.lease_retained_at_idle = !self.lease.expired();
+      const auto result = self.original_idle(device);
+      self.idle_observed = result == VK_SUCCESS;
+      return result;
     }
   };
 
@@ -343,6 +433,170 @@ TEST(VulkanEncodeCaptureTests, AVramFrameWithNoCursorIsImportedNotRefused) {
 
   EXPECT_EQ(encoder.device->convert(img), 0) << "a VRAM frame with no cursor was refused, which ends the stream";
   EXPECT_GE(centre_and_corner_luma(encoder.frame).first, 225) << "the DMA-BUF did not reach the encoder frame";
+}
+
+TEST(VulkanCaptureCompletionTests, UnleasedCaptureKeepsSubmissionPipelined) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t white {0xFF};
+  if (!white.ok) {
+    GTEST_SKIP() << "Could not allocate a linear DMA-BUF on " << render_node;
+  }
+  capture_completion_boundary_t boundary;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  boundary.install();
+  egl::img_descriptor_t img;
+  white.describe(img, 1);
+
+  EXPECT_EQ(encoder.device->convert(img), 0);
+  EXPECT_EQ(boundary.submissions, 1);
+  EXPECT_TRUE(boundary.waits.empty());
+  EXPECT_GE(centre_and_corner_luma(encoder.frame).first, 225);
+}
+
+TEST(VulkanCaptureCompletionTests, PublishedLeaseIsHeldUntilTheSubmittedFenceCompletes) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t white {0xFF};
+  if (!white.ok) {
+    GTEST_SKIP() << "Could not allocate a linear DMA-BUF on " << render_node;
+  }
+  capture_completion_boundary_t boundary;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  boundary.install();
+  egl::img_descriptor_t img;
+  white.describe(img, 1);
+  boundary.publish(img);
+
+  EXPECT_EQ(encoder.device->convert(img), 0);
+  EXPECT_EQ(boundary.waits.size(), 1);
+  if (!boundary.waits.empty()) {
+    EXPECT_LE(boundary.waits.front(), 500'000'000ULL);
+  }
+  EXPECT_TRUE(boundary.completion_observed);
+  EXPECT_TRUE(boundary.lease_retained_at_wait);
+  img.capture_owner.reset();
+  EXPECT_EQ(boundary.returned, 1);
+  EXPECT_FALSE(boundary.returned_before_completion);
+  EXPECT_GE(centre_and_corner_luma(encoder.frame).first, 225);
+}
+
+TEST(VulkanCaptureCompletionTests, AOneBufferProducerCanSubmitBeyondTheCommandRing) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t white {0xFF};
+  if (!white.ok) {
+    GTEST_SKIP() << "Could not allocate a linear DMA-BUF on " << render_node;
+  }
+  capture_completion_boundary_t boundary;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  boundary.install();
+  egl::img_descriptor_t img;
+  for (int generation = 1; generation <= 7; ++generation) {
+    // A producer can reuse its sole buffer only after the previous lease was
+    // returned. Holding leases until ring wrap would stop after the first one.
+    ASSERT_EQ(boundary.returned, generation - 1);
+    white.describe(img, generation);
+    boundary.publish(img);
+    EXPECT_EQ(encoder.device->convert(img), 0);
+    img.capture_owner.reset();
+    EXPECT_EQ(boundary.returned, generation);
+    EXPECT_FALSE(boundary.returned_before_completion);
+  }
+  EXPECT_EQ(std::count_if(boundary.waits.begin(), boundary.waits.end(), [](auto timeout_ns) {
+              return timeout_ns <= 500'000'000ULL;
+            }),
+            7);
+  EXPECT_TRUE(boundary.lease_retained_at_wait);
+  EXPECT_GE(centre_and_corner_luma(encoder.frame).first, 225);
+}
+
+TEST(VulkanCaptureCompletionTests, TimeoutRetainsTheLeaseUntilIdleAndStopsFurtherSubmissions) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t white {0xFF};
+  if (!white.ok) {
+    GTEST_SKIP() << "Could not allocate a linear DMA-BUF on " << render_node;
+  }
+  capture_completion_boundary_t boundary;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  boundary.install();
+  boundary.timeout = true;
+  egl::img_descriptor_t img;
+  white.describe(img, 1);
+  boundary.publish(img);
+
+  EXPECT_EQ(encoder.device->convert(img), platf::convert_capture_unreadable);
+  EXPECT_EQ(boundary.waits.size(), 1);
+  EXPECT_TRUE(boundary.lease_retained_at_wait);
+  img.capture_owner.reset();
+  EXPECT_FALSE(boundary.lease.expired());
+  EXPECT_EQ(boundary.returned, 0);
+  EXPECT_EQ(encoder.device->convert(img), platf::convert_capture_unreadable);
+  EXPECT_EQ(boundary.submissions, 1);
+  encoder.device.reset();
+  EXPECT_TRUE(boundary.lease_retained_at_idle);
+  EXPECT_TRUE(boundary.idle_observed);
+  EXPECT_EQ(boundary.returned, 1);
+  EXPECT_FALSE(boundary.returned_before_completion);
+}
+
+TEST(VulkanCaptureCompletionTests, SubmissionFailureRetainsTheLeaseAndEndsConversionOnce) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t white {0xFF};
+  if (!white.ok) {
+    GTEST_SKIP() << "Could not allocate a linear DMA-BUF on " << render_node;
+  }
+  capture_completion_boundary_t boundary;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  boundary.install();
+  boundary.reject_submit = true;
+  egl::img_descriptor_t img;
+  white.describe(img, 1);
+  boundary.publish(img);
+
+  EXPECT_EQ(encoder.device->convert(img), platf::convert_capture_unreadable);
+  img.capture_owner.reset();
+  EXPECT_FALSE(boundary.lease.expired());
+  EXPECT_EQ(encoder.device->convert(img), platf::convert_capture_unreadable);
+  EXPECT_EQ(boundary.submissions, 1);
+  EXPECT_TRUE(boundary.waits.empty());
+  encoder.device.reset();
+  EXPECT_TRUE(boundary.lease_retained_at_idle);
+  EXPECT_EQ(boundary.returned, 1);
+  EXPECT_FALSE(boundary.returned_before_completion);
+}
+
+TEST(VulkanCaptureCompletionTests, ALeasedBufferWithoutItsPublishedOwnerIsRefusedBeforeSubmission) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t white {0xFF};
+  if (!white.ok) {
+    GTEST_SKIP() << "Could not allocate a linear DMA-BUF on " << render_node;
+  }
+  capture_completion_boundary_t boundary;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  boundary.install();
+  egl::img_descriptor_t img;
+  white.describe(img, 1);
+  img.dmabuf_buffer_key = 1;
+
+  EXPECT_EQ(encoder.device->convert(img), platf::convert_capture_unreadable);
+  EXPECT_EQ(boundary.submissions, 0);
+  EXPECT_TRUE(boundary.waits.empty());
 }
 
 /**
