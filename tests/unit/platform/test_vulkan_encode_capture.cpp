@@ -44,6 +44,14 @@ extern "C" {
   #include "src/platform/linux/vulkan_loader.h"
 
 namespace {
+  class vulkan_discovery_environment_t final: public testing::Environment {
+    void TearDown() override {
+      vk::shutdown_discovery();
+    }
+  };
+
+  [[maybe_unused]] const auto *discovery_environment = testing::AddGlobalTestEnvironment(new vulkan_discovery_environment_t);
+
   constexpr int frame_width = 256;
   constexpr int frame_height = 144;
   constexpr const char *render_node = "/dev/dri/renderD128";
@@ -746,6 +754,28 @@ TEST(VulkanRamUploadTests, ATenBitFrameEndsTheStreamInsteadOfEncodingNoise) {
   ASSERT_EQ(said.size(), 1u) << "the refusal was logged " << said.size() << " times for two frames";
   EXPECT_NE(said.front().find("Error: "), std::string::npos) << said.front();
   EXPECT_NE(said.front().find("Vulkan Video on the portal streams SDR only"), std::string::npos) << said.front();
+}
+
+TEST(VulkanDeviceLifecycleTests, RepeatedProbesAndSessionsKeepTheRequestedDeviceAvailable) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t white {0xFF};
+  if (!white.ok) {
+    GTEST_SKIP() << "Could not allocate a linear DMA-BUF on " << render_node;
+  }
+  for (int session = 1; session <= 12; ++session) {
+    ASSERT_TRUE(vk::validate()) << "probe lost the encoder before session " << session;
+    encoder_frame_t encoder;
+    ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)))
+      << "could not reopen the requested GPU for session " << session;
+    egl::img_descriptor_t img;
+    white.describe(img, 1);
+    ASSERT_EQ(encoder.device->convert(img), 0) << "conversion failed in session " << session;
+    ASSERT_GE(centre_and_corner_luma(encoder.frame).first, 225) << "capture did not reach session " << session;
+    // The image, converter, frame pool and hardware device close here. The next
+    // iteration performs discovery again in the same long-lived host process.
+  }
 }
 
 #endif
