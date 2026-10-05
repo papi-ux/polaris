@@ -19,6 +19,9 @@
 #include <fstream>
 #include <sstream>
 #ifdef __linux__
+#include <fcntl.h>
+#include <unistd.h>
+#include <src/platform/linux/graphics.h>
 #include <src/platform/linux/encoder_auto_policy.h>
 #include <src/platform/linux/encoder_probe_driver_proof.h>
 #include <src/platform/linux/stream_display_policy.h>
@@ -2320,6 +2323,109 @@ TEST(VideoFrameConverterTests, ADeviceThatCanNeverReadTheCaptureEndsTheStream) {
   EXPECT_EQ(converted_by(-1), -1) << "a frame that went wrong is still one frame";
   EXPECT_EQ(converted_by(0), 0);
 }
+
+#ifdef __linux__
+namespace {
+  struct retaining_capture_device_t: platf::avcodec_encode_device_t {
+    explicit retaining_capture_device_t(std::shared_ptr<platf::img_t> &pending):
+        pending {pending} {
+    }
+
+    int convert(platf::img_t &img) override {
+      pending = img.shared_from_this();
+      return 0;
+    }
+
+    std::shared_ptr<platf::img_t> &pending;
+  };
+
+  std::shared_ptr<egl::img_descriptor_t> capture_descriptor_for_lifetime_test() {
+    auto image = std::make_shared<egl::img_descriptor_t>();
+    image->width = image->height = 4;
+    image->pixel_pitch = 4;
+    image->row_pitch = 16;
+    image->sequence = 1;
+    image->dmabuf_buffer_key = 1;
+    image->frame_metadata = {
+      .transport = platf::frame_transport_e::dmabuf,
+      .residency = platf::frame_residency_e::gpu,
+      .format = platf::frame_format_e::bgra8,
+    };
+    return image;
+  }
+}  // namespace
+
+TEST(VideoCaptureLeaseTests, IsolatedConversionRetainsThePublishedLeaseUntilConsumerCompletion) {
+  // PipeWire publishes a second shared owner around an existing pooled image.
+  // shared_from_this() still returns the pool's owner, which cannot retain the
+  // callback that returns the producer buffer.
+  auto pooled = capture_descriptor_for_lifetime_test();
+  pooled->sd.fds[0] = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+  ASSERT_GE(pooled->sd.fds[0], 0);
+  int returns = 0;
+  auto *pointer = pooled.get();
+  auto published = std::shared_ptr<platf::img_t>(pointer, [pooled, &returns](platf::img_t *) {
+    ++returns;
+  });
+  video::frame_t frame {published};
+  std::shared_ptr<platf::img_t> pending;
+  ASSERT_EQ(video::convert_with_encode_device_for_tests(
+              std::make_unique<retaining_capture_device_t>(pending), frame), 0);
+  ASSERT_TRUE(pending);
+  EXPECT_NE(pending.get(), published.get());
+  EXPECT_EQ(returns, 0);
+  frame.image.reset();
+  published.reset();
+  EXPECT_EQ(returns, 0) << "the producer buffer was returned while the isolated consumer still owns its frame";
+  pending.reset();
+  EXPECT_EQ(returns, 1);
+}
+
+TEST(VideoCaptureLeaseTests, FailedPlaneDuplicationLeavesEveryOriginalDescriptorOwnedByCapture) {
+  auto source = capture_descriptor_for_lifetime_test();
+  source->sd.fds[0] = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+  source->sd.fds[2] = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+  ASSERT_GE(source->sd.fds[0], 0);
+  ASSERT_GE(source->sd.fds[2], 0);
+  // A closed descriptor is deliberately in the middle of the plane array.
+  // Allocate it last so the successful duplicate of plane 0 cannot reuse it.
+  int invalid = ::fcntl(source->sd.fds[0], F_DUPFD_CLOEXEC, source->sd.fds[2] + 100);
+  ASSERT_GE(invalid, 0);
+  ASSERT_EQ(::close(invalid), 0);
+  source->sd.fds[1] = invalid;
+  video::frame_t frame {source};
+  std::shared_ptr<platf::img_t> pending;
+  EXPECT_EQ(video::convert_with_encode_device_for_tests(
+              std::make_unique<retaining_capture_device_t>(pending), frame), -1);
+  EXPECT_FALSE(pending);
+  EXPECT_GE(::fcntl(source->sd.fds[0], F_GETFD), 0);
+  EXPECT_GE(::fcntl(source->sd.fds[2], F_GETFD), 0)
+    << "failure cleanup closed a source plane that the clone had not duplicated";
+  source->sd.fds[1] = -1;
+}
+
+TEST(VideoCaptureLeaseTests, LateConsumersReleaseOnlyTheirOwnCaptureGeneration) {
+  std::array<int, 2> returns {};
+  std::array<std::shared_ptr<platf::img_t>, 2> pending;
+  for (std::size_t generation = 0; generation < 2; ++generation) {
+    auto pooled = capture_descriptor_for_lifetime_test();
+    pooled->sd.fds[0] = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
+    ASSERT_GE(pooled->sd.fds[0], 0);
+    auto *pointer = pooled.get();
+    auto published = std::shared_ptr<platf::img_t>(pointer, [pooled, &returns, generation](platf::img_t *) {
+      ++returns[generation];
+    });
+    video::frame_t frame {published};
+    ASSERT_EQ(video::convert_with_encode_device_for_tests(
+                std::make_unique<retaining_capture_device_t>(pending[generation]), frame), 0);
+  }
+  EXPECT_EQ(returns, (std::array<int, 2> {0, 0}));
+  pending[1].reset();
+  EXPECT_EQ(returns, (std::array<int, 2> {0, 1}));
+  pending[0].reset();
+  EXPECT_EQ(returns, (std::array<int, 2> {1, 1}));
+}
+#endif
 
 TEST(PyroWaveAnnounceTests, ADynamicRangeThisCodecDoesNotKnowIsRefused) {
   auto config = pyrowave_request();

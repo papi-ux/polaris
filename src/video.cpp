@@ -431,14 +431,18 @@ namespace video {
       clone->sd = src->sd;
       clone->sequence = src->sequence;
       clone->dmabuf_buffer_key = src->dmabuf_buffer_key;
+      clone->capture_owner = frame.image;
 
-      for (auto &fd : clone->sd.fds) {
-        if (fd < 0) {
+      // Until duplicated, every plane belongs to capture. On a partial
+      // failure the clone's destructor may close only its own duplicates.
+      std::fill_n(clone->sd.fds, 4, -1);
+      for (std::size_t plane = 0; plane < 4; ++plane) {
+        if (src->sd.fds[plane] < 0) {
           continue;
         }
 
-        fd = dup_compat_fd(fd);
-        if (fd < 0) {
+        clone->sd.fds[plane] = dup_compat_fd(src->sd.fds[plane]);
+        if (clone->sd.fds[plane] < 0) {
           BOOST_LOG(error) << "Failed to duplicate DMA-BUF compatibility image fd for frame conversion"sv;
           return {};
         }
