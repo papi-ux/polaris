@@ -683,6 +683,16 @@ if (BUILD_FULL_TESTS)
             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
             LABELS "requires-gpu")
         if(POLARIS_ENABLE_PORTAL)
+            # These real MemFd producer cases need neither a compositor nor a
+            # usable GPU. Keep their selection separate from the GPU graph gate
+            # so ordinary CI can exercise reuse and live size renegotiation.
+            add_test(NAME polaris_pipewire_shm_lifecycle
+                COMMAND test_polaris_platform
+                    --gtest_filter=PipeWireProducerPoolTests.ProducerWithoutModifierNegotiatesUsableShmAndReusesPixels:PipeWireProducerPoolTests.RealShmSizeChangeRequestsReinitAndNewCaptureReadsNewPixels)
+            set_tests_properties(polaris_pipewire_shm_lifecycle PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+                TIMEOUT 15
+                LABELS "pipewire")
             add_test(NAME polaris_pipewire_producer_pool
                 COMMAND test_polaris_platform --gtest_filter=PipeWireProducerPoolTests.*)
             set_tests_properties(polaris_pipewire_producer_pool PROPERTIES
