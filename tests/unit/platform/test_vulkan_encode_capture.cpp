@@ -9,6 +9,8 @@
 
   // standard includes
   #include <algorithm>
+  #include <array>
+  #include <cstdlib>
   #include <cstring>
   #include <functional>
   #include <memory>
@@ -67,12 +69,18 @@ namespace {
   using buffer_t = std::unique_ptr<AVBufferRef, buffer_unref_t>;
 
   /**
-   * A linear XRGB8888 buffer the GPU owns, filled with one grey level. Linear because it is the only
-   * layout a test can write by hand, and an explicit linear modifier because that is the shape a
+   * A linear XRGB8888 buffer the GPU owns, filled with one grey level or four grey quadrants.
+   * Linear because it is the only layout a test can write by hand, and an explicit linear modifier because that is the shape a
    * portal buffer arrives in, so the import takes its modifier path rather than assuming a tiling.
    */
   struct grey_dmabuf_t {
-    explicit grey_dmabuf_t(std::uint8_t level) {
+    explicit grey_dmabuf_t(std::uint8_t level, int width = frame_width, int height = frame_height):
+        grey_dmabuf_t {std::array<std::uint8_t, 4> {level, level, level, level}, width, height} {
+    }
+
+    grey_dmabuf_t(const std::array<std::uint8_t, 4> &levels, int width, int height):
+        capture_width {width},
+        capture_height {height} {
       node = ::open(render_node, O_RDWR | O_CLOEXEC);
       if (node < 0) {
         return;
@@ -82,7 +90,7 @@ namespace {
         return;
       }
       const std::uint64_t linear = DRM_FORMAT_MOD_LINEAR;
-      bo = gbm_bo_create_with_modifiers(device, frame_width, frame_height, GBM_FORMAT_XRGB8888, &linear, 1);
+      bo = gbm_bo_create_with_modifiers(device, width, height, GBM_FORMAT_XRGB8888, &linear, 1);
       if (!bo) {
         return;
       }
@@ -90,13 +98,16 @@ namespace {
       void *map_data = nullptr;
       std::uint32_t map_stride = 0;
       auto *mapped = static_cast<std::uint8_t *>(
-        gbm_bo_map(bo, 0, 0, frame_width, frame_height, GBM_BO_TRANSFER_WRITE, &map_stride, &map_data)
+        gbm_bo_map(bo, 0, 0, width, height, GBM_BO_TRANSFER_WRITE, &map_stride, &map_data)
       );
       if (!mapped) {
         return;
       }
-      for (int row = 0; row < frame_height; ++row) {
-        std::memset(mapped + static_cast<std::size_t>(row) * map_stride, level, static_cast<std::size_t>(frame_width) * 4);
+      for (int row = 0; row < height; ++row) {
+        const auto quadrant_row = row < height / 2 ? 0 : 2;
+        auto *pixels = mapped + static_cast<std::size_t>(row) * map_stride;
+        std::memset(pixels, levels[quadrant_row], static_cast<std::size_t>(width / 2) * 4);
+        std::memset(pixels + (width / 2) * 4, levels[quadrant_row + 1], static_cast<std::size_t>(width - width / 2) * 4);
       }
       gbm_bo_unmap(bo, map_data);
       ok = true;
@@ -123,8 +134,8 @@ namespace {
      */
     void describe(egl::img_descriptor_t &img, std::uint64_t sequence) const {
       img.reset();
-      img.sd.width = frame_width;
-      img.sd.height = frame_height;
+      img.sd.width = capture_width;
+      img.sd.height = capture_height;
       img.sd.fds[0] = gbm_bo_get_fd(bo);
       img.sd.fourcc = DRM_FORMAT_XRGB8888;
       img.sd.modifier = gbm_bo_get_modifier(bo);
@@ -136,6 +147,8 @@ namespace {
     bool ok = false;
 
   private:
+    int capture_width;
+    int capture_height;
     int node = -1;
     gbm_device *device = nullptr;
     gbm_bo *bo = nullptr;
@@ -153,7 +166,7 @@ namespace {
     std::unique_ptr<platf::avcodec_encode_device_t> device;
     AVFrame *frame = nullptr;  // The device owns it once set_frame() takes it.
 
-    bool open(std::unique_ptr<platf::avcodec_encode_device_t> made) {
+    bool open(std::unique_ptr<platf::avcodec_encode_device_t> made, int width = frame_width, int height = frame_height) {
       device = std::move(made);
       if (!device || !device->data) {
         return false;
@@ -172,8 +185,8 @@ namespace {
       auto *frames = reinterpret_cast<AVHWFramesContext *>(frames_ref->data);
       frames->format = AV_PIX_FMT_VULKAN;
       frames->sw_format = AV_PIX_FMT_NV12;
-      frames->width = frame_width;
-      frames->height = frame_height;
+      frames->width = width;
+      frames->height = height;
       frames->initial_pool_size = 0;
       device->init_hwframes(frames);
       if (av_hwframe_ctx_init(frames_ref.get()) < 0) {
@@ -496,7 +509,45 @@ namespace {
     }
     const auto *luma = sw_frame->data[0];
     const auto pitch = static_cast<std::size_t>(sw_frame->linesize[0]);
-    return {luma[(frame_height / 2) * pitch + frame_width / 2], luma[4 * pitch + 4]};
+    return {luma[(sw_frame->height / 2) * pitch + sw_frame->width / 2], luma[4 * pitch + 4]};
+  }
+
+  /// Check every visible luma/chroma byte, including the last row and column.
+  /// Padding belongs to FFmpeg's allocation and is deliberately not graded.
+  testing::AssertionResult has_grey_quadrants(AVFrame *hw_frame, int width, int height, const std::array<int, 4> &luma_levels) {
+    std::unique_ptr<AVFrame, void (*)(AVFrame *)> sw_frame {av_frame_alloc(), [](AVFrame *frame) {
+                                                              av_frame_free(&frame);
+                                                            }};
+    if (!sw_frame) {
+      return testing::AssertionFailure() << "could not allocate readback frame";
+    }
+    sw_frame->format = AV_PIX_FMT_NV12;
+    if (av_hwframe_transfer_data(sw_frame.get(), hw_frame, 0) < 0) {
+      return testing::AssertionFailure() << "NV12 readback failed";
+    }
+    if (sw_frame->width != width || sw_frame->height != height || sw_frame->format != AV_PIX_FMT_NV12 ||
+        !sw_frame->data[0] || !sw_frame->data[1] || sw_frame->linesize[0] < width || sw_frame->linesize[1] < width) {
+      return testing::AssertionFailure() << "readback geometry or planes do not match " << width << 'x' << height;
+    }
+    std::size_t wrong_luma = 0, wrong_chroma = 0;
+    for (int y = 0; y < height; ++y) {
+      const auto *row = sw_frame->data[0] + static_cast<std::size_t>(y) * sw_frame->linesize[0];
+      for (int x = 0; x < width; ++x) {
+        const auto quadrant = (y < height / 2 ? 0 : 2) + (x < width / 2 ? 0 : 1);
+        wrong_luma += std::abs(static_cast<int>(row[x]) - luma_levels[quadrant]) > 3;
+      }
+    }
+    for (int y = 0; y < height / 2; ++y) {
+      const auto *row = sw_frame->data[1] + static_cast<std::size_t>(y) * sw_frame->linesize[1];
+      for (int x = 0; x < width; ++x) {
+        wrong_chroma += std::abs(static_cast<int>(row[x]) - 128) > 3;
+      }
+    }
+    if (wrong_luma || wrong_chroma) {
+      return testing::AssertionFailure() << "incorrect visible NV12 bytes at " << width << 'x' << height
+                                         << ": luma=" << wrong_luma << ", chroma=" << wrong_chroma;
+    }
+    return testing::AssertionSuccess();
   }
 }  // namespace
 
@@ -689,6 +740,47 @@ TEST_P(VulkanCaptureGenerationTests, ReplacementBufferIsReadWhenItsSequenceResta
 }
 
 INSTANTIATE_TEST_SUITE_P(RestartAndRepeat, VulkanCaptureGenerationTests, testing::Values(1ULL, 5ULL));
+
+class VulkanCaptureGeometryTests: public testing::TestWithParam<std::pair<int, int>> {};
+
+TEST_P(VulkanCaptureGeometryTests, LeasedBufferReplacementConvertsEveryVisibleNv12Pixel) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const auto [width, height] = GetParam();
+  const grey_dmabuf_t first {std::array<std::uint8_t, 4> {0, 85, 170, 255}, width, height};
+  const grey_dmabuf_t second {std::array<std::uint8_t, 4> {255, 170, 85, 0}, width, height};
+  if (!first.ok || !second.ok) {
+    GTEST_SKIP() << "Could not allocate two " << width << 'x' << height << " linear DMA-BUFs on " << render_node;
+  }
+  capture_completion_boundary_t boundary;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(width, height, 0, 0, render_node), width, height));
+  boundary.install();
+
+  egl::img_descriptor_t img;
+  first.describe(img, 5);
+  boundary.publish(img);
+  ASSERT_EQ(encoder.device->convert(img), 0);
+  img.capture_owner.reset();
+  EXPECT_EQ(boundary.returned, 1);
+  // Independent expected Rec. 709 limited-range grey values; no shader-derived oracle.
+  ASSERT_TRUE(has_grey_quadrants(encoder.frame, width, height, {16, 89, 162, 235}));
+
+  second.describe(img, 1);
+  boundary.publish(img);
+  img.dmabuf_buffer_key = 2;
+  ASSERT_EQ(encoder.device->convert(img), 0);
+  img.capture_owner.reset();
+  EXPECT_EQ(boundary.returned, 2);
+  ASSERT_TRUE(has_grey_quadrants(encoder.frame, width, height, {235, 162, 89, 16}));
+  EXPECT_EQ(boundary.submissions, 2);
+  EXPECT_EQ(boundary.waits.size(), 2);
+  EXPECT_TRUE(boundary.lease_retained_at_wait);
+  EXPECT_FALSE(boundary.returned_before_completion);
+}
+
+INSTANTIATE_TEST_SUITE_P(FullFrame, VulkanCaptureGeometryTests, testing::Values(std::pair {1920, 1080}, std::pair {3840, 2160}));
 
 TEST(VulkanCaptureCompletionTests, CallerDescriptorCanRetireDuringTheSubmittedReadWait) {
   if (!vk::validate()) {
