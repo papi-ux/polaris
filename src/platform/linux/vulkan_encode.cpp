@@ -602,8 +602,13 @@ namespace vk {
         return dispatch_compute(true);
       }
 
-      // Import new DMA-BUF as VkImage when capture sequence changes
-      if (descriptor && descriptor->sequence > sequence) {
+      // PipeWire's buffer identity survives independently of a capture-local
+      // sequence. A replacement generation can restart that sequence; using
+      // only its ordering would read the prior imported image under a new lease.
+      const bool import_changed = descriptor && (leased_capture
+        ? descriptor->dmabuf_buffer_key != imported_capture_buffer_key || descriptor->sequence != sequence
+        : descriptor->sequence > sequence);
+      if (import_changed) {
         if (!import_dmabuf(descriptor->sd, leased_capture)) {
           BOOST_LOG(error) << "Failed to import DMA-BUF"sv;
           if (leased_capture) {
@@ -613,6 +618,7 @@ namespace vk {
           return -1;
         }
         sequence = descriptor->sequence;
+        imported_capture_buffer_key = leased_capture ? descriptor->dmabuf_buffer_key : 0;
       }
 
       if (!ram_input && src.image == VK_NULL_HANDLE) {
@@ -1863,6 +1869,7 @@ namespace vk {
     AVBufferRef *hw_frames_ctx = nullptr;
     frame_t hwframe;
     std::uint64_t sequence = 0;
+    std::uint64_t imported_capture_buffer_key = 0;
 
     // Vulkan device (from FFmpeg)
     struct vk_device_t {
