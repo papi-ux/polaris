@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <regex>
 #include <sstream>
 #include <string>
 
@@ -155,7 +156,7 @@ TEST(LinuxStreamContractTests, PipeWireLoopCallbacksNeverTakeShutdownMutex) {
   ASSERT_NE(helper_end, std::string::npos);
   const auto helper = source.substr(helper_start, helper_end - helper_start);
   EXPECT_EQ(helper.find("shutdown_mtx_"), std::string::npos);
-  EXPECT_EQ(helper.find("queue_buffer("), std::string::npos);
+  EXPECT_FALSE(std::regex_search(helper, std::regex(R"(queue_buffer\s*\()")));
   EXPECT_NE(helper.find("pw_stream_queue_buffer(stream_, buffer)"), std::string::npos);
 }
 
