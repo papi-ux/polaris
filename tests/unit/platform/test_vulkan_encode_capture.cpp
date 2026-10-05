@@ -1632,7 +1632,7 @@ namespace {
   }
 }
 
-TEST(PipeWireProducerPoolTests, UnmodifiedProducerNegotiatesUsableShmAndReusesPixels) {
+TEST(PipeWireProducerPoolTests, ProducerWithoutModifierNegotiatesUsableShmAndReusesPixels) {
   test_utils::pipewire_producer_graph_t graph {false, frame_width, frame_height};
   ASSERT_TRUE(graph.start());
   EXPECT_FALSE(graph.capture->negotiated_dmabuf());
@@ -1756,7 +1756,7 @@ TEST(PipeWireProducerPoolTests, RefusedLiveImportReleasesItsPoolAndNewShmCapture
   ASSERT_TRUE(fallback.start());
   ASSERT_FALSE(fallback.capture->negotiated_dmabuf());
   encoder_frame_t encoder;
-  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_ram(frame_width, frame_height, 0, 0, render_node)));
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_ram(frame_width, frame_height, render_node)));
   auto image = std::make_shared<host_frame_t>(0);
   ASSERT_TRUE(fallback.step(255));
   ASSERT_EQ(fallback.capture->wait_for_frame(std::chrono::seconds(1)), pipewire_capture::wait_result_e::frame);
