@@ -30,6 +30,8 @@
 #include <src/platform/linux/pipewire_capture.h>
 #include <drm_fourcc.h>
 #include <spa/param/video/raw.h>
+#include <spa/param/video/format-utils.h>
+#include <spa/pod/builder.h>
 #endif
 
 #include <boost/core/null_deleter.hpp>
@@ -2448,20 +2450,29 @@ namespace pipewire_capture {
       capture.front_dmabuf_buffer_ = buffer;
       capture.front_dmabuf_sequence_ = 1;
       capture.front_dmabuf_buffer_key_ = key;
+      capture.front_dmabuf_generation_ = capture.buffer_generations_.acquire(buffer);
       capture.frame_available_ = true;
       capture.running_ = true;
     }
 
     static bool prepare_returns(capture_t &capture, std::function<void(pw_buffer *)> observer) {
       // A real thread-loop lock serializes callbacks and consumer completion.
-      // No core/stream/producer connection is made.
+      // The in-process core has no user daemon, compositor or producer connection.
       static std::once_flag initialized;
       std::call_once(initialized, [] { pw_init(nullptr, nullptr); });
       capture.loop_ = pw_thread_loop_new("polaris-lease-regression", nullptr);
       if (!capture.loop_) return false;
+      capture.context_ = pw_context_new(pw_thread_loop_get_loop(capture.loop_), nullptr, 0);
+      if (!capture.context_) return false;
+      capture.core_ = pw_context_connect_self(capture.context_, nullptr, 0);
+      if (!capture.core_) return false;
+      capture.stream_ = pw_stream_new(capture.core_, "polaris-lease-regression", pw_properties_new(nullptr, nullptr));
+      if (!capture.stream_) return false;
+      capture.stream_state_ = PW_STREAM_STATE_UNCONNECTED;
       capture.queue_buffer_for_test_ = std::move(observer);
       capture.front_info_ = {.width = 4, .height = 4, .stride = 16, .spa_format = SPA_VIDEO_FORMAT_BGRx};
       capture.negotiated_dmabuf_ = true;
+      capture.negotiated_ = true;
       capture.running_ = true;
       return true;
     }
@@ -2470,12 +2481,25 @@ namespace pipewire_capture {
       pw_thread_loop_lock(capture.loop_);
       auto unlock = util::fail_guard([&] { pw_thread_loop_unlock(capture.loop_); });
       if (!capture.buffer_keys_.contains(buffer)) capture_t::on_add_buffer(&capture, buffer);
-      return capture.process_buffer(buffer);
+      return capture.process_buffer(buffer, capture.buffer_generations_.acquire(buffer));
     }
 
     static void remove(capture_t &capture, pw_buffer *buffer) {
       pw_thread_loop_lock(capture.loop_);
       capture_t::on_remove_buffer(&capture, buffer);
+      pw_thread_loop_unlock(capture.loop_);
+    }
+
+    static void renegotiate(capture_t &capture) {
+      spa_video_info_raw info {};
+      info.format = SPA_VIDEO_FORMAT_BGRx;
+      info.size = {8, 8};
+      info.framerate = {60, 1};
+      alignas(8) std::array<std::uint8_t, 1024> bytes {};
+      spa_pod_builder builder = SPA_POD_BUILDER_INIT(bytes.data(), bytes.size());
+      auto *format = spa_format_video_raw_build(&builder, SPA_PARAM_Format, &info);
+      pw_thread_loop_lock(capture.loop_);
+      capture_t::on_param_changed(&capture, SPA_PARAM_Format, format);
       pw_thread_loop_unlock(capture.loop_);
     }
 
@@ -2728,6 +2752,36 @@ TEST(VideoCaptureLeaseTests, ReplacingThePipeWireFrontCannotReturnTheResentCurre
   ASSERT_TRUE(consumer);
   consumer.reset();
   EXPECT_EQ(producer.returned, (std::vector<pw_buffer *> {&first.buffer, &second.buffer}));
+  EXPECT_EQ(producer.leases(), 0);
+}
+
+TEST(VideoCaptureLeaseTests, ActualPipeWireFormatReinitReturnsTheFrontAndRetiresPublishedConsumers) {
+  pipewire_delivery_fixture_t producer;
+  ASSERT_TRUE(producer.ready);
+  pipewire_delivery_fixture_t::producer_buffer_t first(producer.fd), second(producer.fd);
+  auto consumer = producer.publish(first);
+  ASSERT_TRUE(consumer);
+  ASSERT_TRUE(producer.deliver(second));
+  pipewire_capture::capture_lease_test_access::renegotiate(*producer.capture);
+  EXPECT_EQ(producer.capture->wait_for_frame(std::chrono::milliseconds(0)), pipewire_capture::wait_result_e::reinit);
+  EXPECT_EQ(producer.returned, (std::vector<pw_buffer *> {&second.buffer}));
+  consumer.reset();
+  EXPECT_EQ(producer.returned, (std::vector<pw_buffer *> {&second.buffer}));
+  EXPECT_EQ(producer.leases(), 0);
+}
+
+TEST(VideoCaptureLeaseTests, ActualPipeWireFormatReinitDoesNotReturnAnOlderResendTwice) {
+  pipewire_delivery_fixture_t producer;
+  ASSERT_TRUE(producer.ready);
+  pipewire_delivery_fixture_t::producer_buffer_t buffer(producer.fd);
+  auto old = producer.publish(buffer);
+  ASSERT_TRUE(old);
+  ASSERT_TRUE(producer.deliver(buffer));
+  pipewire_capture::capture_lease_test_access::renegotiate(*producer.capture);
+  EXPECT_EQ(producer.capture->wait_for_frame(std::chrono::milliseconds(0)), pipewire_capture::wait_result_e::reinit);
+  EXPECT_EQ(producer.returned, (std::vector<pw_buffer *> {&buffer.buffer}));
+  old.reset();
+  EXPECT_EQ(producer.returned, (std::vector<pw_buffer *> {&buffer.buffer}));
   EXPECT_EQ(producer.leases(), 0);
 }
 
