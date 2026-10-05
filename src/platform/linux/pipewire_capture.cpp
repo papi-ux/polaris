@@ -349,6 +349,7 @@ namespace pipewire_capture {
       image.sd.offsets[i] = plane.chunk_offset % plane.maxsize;
     }
 
+    image.requires_producer_lease = true;
     return true;
   }
 

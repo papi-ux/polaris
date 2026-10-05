@@ -2360,6 +2360,7 @@ TEST(VideoCaptureLeaseTests, IsolatedConversionRetainsThePublishedLeaseUntilCons
   // shared_from_this() still returns the pool's owner, which cannot retain the
   // callback that returns the producer buffer.
   auto pooled = capture_descriptor_for_lifetime_test();
+  pooled->requires_producer_lease = true;
   pooled->sd.fds[0] = ::open("/dev/null", O_RDONLY | O_CLOEXEC);
   ASSERT_GE(pooled->sd.fds[0], 0);
   int returns = 0;
@@ -2372,6 +2373,9 @@ TEST(VideoCaptureLeaseTests, IsolatedConversionRetainsThePublishedLeaseUntilCons
   ASSERT_EQ(video::convert_with_encode_device_for_tests(
               std::make_unique<retaining_capture_device_t>(pending), frame), 0);
   ASSERT_TRUE(pending);
+  const auto *clone = dynamic_cast<const egl::img_descriptor_t *>(pending.get());
+  ASSERT_NE(clone, nullptr);
+  EXPECT_TRUE(clone->requires_producer_lease);
   EXPECT_NE(pending.get(), published.get());
   EXPECT_EQ(returns, 0);
   frame.image.reset();

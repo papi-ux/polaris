@@ -32,6 +32,7 @@ extern "C" {
 #include "src/logging.h"
 #include "src/video_colorspace.h"
 #include "vulkan_encode.h"
+#include "vulkan_capture_admission.h"
 #include "vulkan_loader.h"
 
 // SPIR-V data generated at build time
@@ -535,13 +536,19 @@ namespace vk {
         BOOST_LOG(error) << "Vulkan DMA-BUF conversion received a non-DMA-BUF frame"sv;
         return -1;
       }
-      const bool leased_capture = descriptor && descriptor->sequence != 0 && descriptor->dmabuf_buffer_key != 0;
-      if (leased_capture && !descriptor->capture_owner) {
+      const bool leased_capture = descriptor && descriptor->sequence != 0 && descriptor->requires_producer_lease;
+      if (leased_capture && (!descriptor->capture_owner || descriptor->dmabuf_buffer_key == 0)) {
         capture_lease_refused = true;
-        BOOST_LOG(error) << "Vulkan DMA-BUF capture has no published producer lease; this stream ends before GPU submission"sv;
+        BOOST_LOG(error) << "Vulkan DMA-BUF capture has no published producer lease or buffer identity; this stream ends before GPU submission"sv;
         return platf::convert_capture_unreadable;
       }
       if (leased_capture) {
+        if (const auto reason = capture_layout_error(descriptor->sd); !reason.empty()) {
+          capture_lease_refused = true;
+          BOOST_LOG(error) << "Vulkan DMA-BUF capture layout is unsupported ("sv << reason
+                           << "); this stream ends before GPU import"sv;
+          return platf::convert_capture_unreadable;
+        }
         const auto producer = capture_producer_sync::wait(descriptor->sd.fds, std::chrono::milliseconds {500});
         if (producer.status != capture_producer_sync::status_e::ready) {
           capture_lease_refused = true;
@@ -583,8 +590,12 @@ namespace vk {
 
       // Import new DMA-BUF as VkImage when capture sequence changes
       if (descriptor && descriptor->sequence > sequence) {
-        if (!import_dmabuf(descriptor->sd)) {
+        if (!import_dmabuf(descriptor->sd, leased_capture)) {
           BOOST_LOG(error) << "Failed to import DMA-BUF"sv;
+          if (leased_capture) {
+            capture_lease_refused = true;
+            return platf::convert_capture_unreadable;
+          }
           return -1;
         }
         sequence = descriptor->sequence;
@@ -943,48 +954,115 @@ namespace vk {
     };
 
     static drm_format_info drm_fourcc_to_vk_format(uint32_t fourcc) {
+      if (const auto known = capture_admission::format_info(fourcc)) {
+        return {known->format, known->swizzle};
+      }
       static constexpr VkComponentMapping identity = {
         VK_COMPONENT_SWIZZLE_IDENTITY,
         VK_COMPONENT_SWIZZLE_IDENTITY,
         VK_COMPONENT_SWIZZLE_IDENTITY,
         VK_COMPONENT_SWIZZLE_IDENTITY,
       };
-      static constexpr VkComponentMapping bgr_swap = {
-        VK_COMPONENT_SWIZZLE_B,
-        VK_COMPONENT_SWIZZLE_G,
-        VK_COMPONENT_SWIZZLE_R,
-        VK_COMPONENT_SWIZZLE_A,
-      };
+      // Keep the legacy unleased route unchanged. A leased capture is checked
+      // by capture_layout_error before it can reach this fallback.
+      BOOST_LOG(warning) << "Unknown DRM fourcc 0x" << std::hex << fourcc << std::dec << ", assuming B8G8R8A8";
+      return {VK_FORMAT_B8G8R8A8_UNORM, identity};
+    }
 
-      switch (fourcc) {
-        case DRM_FORMAT_XRGB8888:
-        case DRM_FORMAT_ARGB8888:
-          return {VK_FORMAT_B8G8R8A8_UNORM, identity};
-        case DRM_FORMAT_XBGR8888:
-        case DRM_FORMAT_ABGR8888:
-          return {VK_FORMAT_R8G8B8A8_UNORM, identity};
-        case DRM_FORMAT_XRGB2101010:
-        case DRM_FORMAT_ARGB2101010:
-          return {VK_FORMAT_A2R10G10B10_UNORM_PACK32, identity};
-        case DRM_FORMAT_XBGR2101010:
-        case DRM_FORMAT_ABGR2101010:
-          return {VK_FORMAT_A2B10G10R10_UNORM_PACK32, identity};
-        case DRM_FORMAT_XBGR16161616:
-        case DRM_FORMAT_ABGR16161616:
-          return {VK_FORMAT_R16G16B16A16_UNORM, identity};
-        case DRM_FORMAT_XRGB16161616:
-        case DRM_FORMAT_ARGB16161616:
-          return {VK_FORMAT_R16G16B16A16_UNORM, bgr_swap};
-        case DRM_FORMAT_XBGR16161616F:
-        case DRM_FORMAT_ABGR16161616F:
-          return {VK_FORMAT_R16G16B16A16_SFLOAT, identity};
-        case DRM_FORMAT_XRGB16161616F:
-        case DRM_FORMAT_ARGB16161616F:
-          return {VK_FORMAT_R16G16B16A16_SFLOAT, bgr_swap};
-        default:
-          BOOST_LOG(warning) << "Unknown DRM fourcc 0x" << std::hex << fourcc << std::dec << ", assuming B8G8R8A8";
-          return {VK_FORMAT_B8G8R8A8_UNORM, identity};
+    std::string_view capture_layout_error(const egl::surface_descriptor_t &sd) {
+      const auto extension_enabled = [&](std::string_view name) {
+        for (int i = 0; i < vk_dev.ctx->nb_enabled_dev_extensions; ++i) {
+          if (name == vk_dev.ctx->enabled_dev_extensions[i]) {
+            return true;
+          }
+        }
+        return false;
+      };
+      if (!extension_enabled(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME) ||
+          !extension_enabled(VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME)) {
+        return "device was not opened with DMA-BUF and DRM modifier import extensions";
       }
+      const auto format = capture_admission::format_info(sd.fourcc);
+      if (!format) {
+        return "capture fourcc has no packed RGB mapping";
+      }
+      if (const auto error = capture_admission::metadata_error(sd.width, sd.height, sd.modifier,
+                                                               sd.fds, sd.pitches, format->bytes_per_pixel); !error.empty()) {
+        return error;
+      }
+      if (offset_x < 0 || offset_y < 0 ||
+          static_cast<std::int64_t>(offset_x) + width > sd.width ||
+          static_cast<std::int64_t>(offset_y) + height > sd.height) {
+        return "capture viewport exceeds the described image";
+      }
+
+      // This importer binds one allocation to a non-disjoint packed image.
+      // Extra modifier metadata planes are supported only in that same object;
+      // a second allocation requires disjoint import, which is not implemented.
+      struct stat first {};
+      if (fstat(sd.fds[0], &first) < 0) {
+        return "capture memory object is unreadable";
+      }
+      std::uint32_t planes = 0;
+      for (int fd : sd.fds) {
+        if (fd < 0) {
+          break;
+        }
+        struct stat plane {};
+        if (fstat(fd, &plane) < 0 || first.st_dev != plane.st_dev || first.st_ino != plane.st_ino) {
+          return "capture memory planes require different allocations";
+        }
+        ++planes;
+      }
+
+      VkDrmFormatModifierPropertiesListEXT modifiers {VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT};
+      VkFormatProperties2 format_properties {VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, &modifiers};
+      vkGetPhysicalDeviceFormatProperties2(vk_dev.phys_dev, format->format, &format_properties);
+      std::vector<VkDrmFormatModifierPropertiesEXT> properties(modifiers.drmFormatModifierCount);
+      modifiers.pDrmFormatModifierProperties = properties.data();
+      vkGetPhysicalDeviceFormatProperties2(vk_dev.phys_dev, format->format, &format_properties);
+      const auto match = std::find_if(properties.begin(), properties.end(), [&](const auto &candidate) {
+        return candidate.drmFormatModifier == sd.modifier;
+      });
+      if (match == properties.end()) {
+        return "capture modifier is not reported for this device and format";
+      }
+      if (match->drmFormatModifierPlaneCount != planes) {
+        return "capture memory plane count differs from the device modifier layout";
+      }
+      constexpr auto sampler_features = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+      if ((match->drmFormatModifierTilingFeatures & sampler_features) != sampler_features) {
+        return "capture modifier does not support this sampler";
+      }
+
+      VkPhysicalDeviceImageDrmFormatModifierInfoEXT modifier_info {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT};
+      modifier_info.drmFormatModifier = sd.modifier;
+      modifier_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+      VkPhysicalDeviceExternalImageFormatInfo external_info {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO, &modifier_info};
+      external_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+      VkPhysicalDeviceImageFormatInfo2 image_info {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2, &external_info};
+      image_info.format = format->format;
+      image_info.type = VK_IMAGE_TYPE_2D;
+      image_info.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+      image_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+      VkExternalImageFormatProperties external_properties {VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES};
+      VkImageFormatProperties2 image_properties {VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2, &external_properties};
+      if (vkGetPhysicalDeviceImageFormatProperties2(vk_dev.phys_dev, &image_info, &image_properties) != VK_SUCCESS) {
+        return "device refused this format, modifier and DMA-BUF sampling query";
+      }
+      const auto &memory = external_properties.externalMemoryProperties;
+      if (!(memory.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) ||
+          !(memory.compatibleHandleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)) {
+        return "device does not report DMA-BUF import support for this image";
+      }
+      const auto &limits = image_properties.imageFormatProperties;
+      if (static_cast<std::uint32_t>(sd.width) > limits.maxExtent.width ||
+          static_cast<std::uint32_t>(sd.height) > limits.maxExtent.height ||
+          limits.maxExtent.depth < 1 || limits.maxMipLevels < 1 || limits.maxArrayLayers < 1 ||
+          !(limits.sampleCounts & VK_SAMPLE_COUNT_1_BIT)) {
+        return "capture dimensions exceed the queried image limits";
+      }
+      return {};
     }
 
     /**
@@ -1055,7 +1133,7 @@ namespace vk {
       slot.retired_images.clear();
     }
 
-    bool import_dmabuf(const egl::surface_descriptor_t &sd) {
+    bool import_dmabuf(const egl::surface_descriptor_t &sd, bool leased_capture) {
       int fd = dup(sd.fds[0]);
       if (fd < 0) {
         BOOST_LOG(error) << "Could not duplicate DMA-BUF descriptor: "sv << strerror(errno);
@@ -1097,7 +1175,8 @@ namespace vk {
         // Query driver for the expected plane count for this format+modifier.
         // DMA-BUF exports may include extra metadata planes (e.g. AMD DCC).
         int expected = query_modifier_plane_count(vk_format, sd.modifier);
-        int plane_count = (expected > 0 && expected <= dmabuf_planes) ? expected : dmabuf_planes;
+        int plane_count = leased_capture ? dmabuf_planes :
+                                          ((expected > 0 && expected <= dmabuf_planes) ? expected : dmabuf_planes);
 
         for (int i = 0; i < plane_count; ++i) {
           drm_layouts[i].offset = sd.offsets[i];
@@ -1164,8 +1243,13 @@ namespace vk {
       import_fd.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
       import_fd.fd = fd;  // Vulkan takes ownership
 
+      // Every leased import is dedicated to its exact image. This also meets
+      // DEDICATED_ONLY external-memory requirements without guessing them away.
+      VkMemoryDedicatedAllocateInfo dedicated {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, &import_fd};
+      dedicated.image = next_src.image;
+
       VkMemoryAllocateInfo alloc_info = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-      alloc_info.pNext = &import_fd;
+      alloc_info.pNext = leased_capture ? static_cast<const void *>(&dedicated) : &import_fd;
       alloc_info.allocationSize = mem_req.size;
       alloc_info.memoryTypeIndex = *memory_type;
 

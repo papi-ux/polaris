@@ -166,6 +166,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         ${CMAKE_SOURCE_DIR}/src/platform/linux/capture_producer_sync.cpp)
     list(APPEND TEST_FAST_SOURCES
         ${CMAKE_SOURCE_DIR}/tests/unit/test_capture_producer_sync.cpp)
+    if(POLARIS_ENABLE_VULKAN)
+        list(APPEND TEST_FAST_SOURCES
+            ${CMAKE_SOURCE_DIR}/tests/unit/test_vulkan_capture_admission.cpp)
+    endif()
 endif()
 
 if (NOT WIN32 AND NOT APPLE)

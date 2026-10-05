@@ -27,6 +27,7 @@
 extern "C" {
   #include <libavutil/frame.h>
   #include <libavutil/hwcontext.h>
+  #include <libavutil/hwcontext_vulkan.h>
 }
 
   // lib includes
@@ -229,6 +230,7 @@ namespace {
     void publish(egl::img_descriptor_t &img) {
       completion_observed = false;
       img.dmabuf_buffer_key = 1;
+      img.requires_producer_lease = true;
       img.capture_owner = std::shared_ptr<platf::img_t>(new platf::img_t, [this](platf::img_t *owner) {
         returned_before_completion |= !completion_observed && !idle_observed;
         ++returned;
@@ -274,6 +276,103 @@ namespace {
       const auto result = self.original_idle(device);
       self.idle_observed = result == VK_SUCCESS;
       return result;
+    }
+  };
+
+  // Observe and fault only Polaris's own capability/import calls. FFmpeg and
+  // actual Vulkan allocation, conversion and readback still use the driver.
+  struct capture_admission_boundary_t {
+    inline static capture_admission_boundary_t *active = nullptr;
+    PFN_vkGetPhysicalDeviceImageFormatProperties2 original_query = platf::vulkan_loader::vkGetPhysicalDeviceImageFormatProperties2;
+    PFN_vkGetPhysicalDeviceFormatProperties2 original_formats = platf::vulkan_loader::vkGetPhysicalDeviceFormatProperties2;
+    PFN_vkAllocateMemory original_allocate = platf::vulkan_loader::vkAllocateMemory;
+    bool refuse_query = false;
+    bool no_import = false;
+    bool no_linear_sampling = false;
+    bool small_extent = false;
+    bool dedicated_only = false;
+    int queries = 0;
+    int imports = 0;
+    bool dedicated_import = false;
+    bool exact_query = false;
+
+    void install() {
+      ASSERT_EQ(active, nullptr);
+      active = this;
+      platf::vulkan_loader::vkGetPhysicalDeviceImageFormatProperties2 = query;
+      platf::vulkan_loader::vkGetPhysicalDeviceFormatProperties2 = formats;
+      platf::vulkan_loader::vkAllocateMemory = allocate;
+    }
+
+    ~capture_admission_boundary_t() {
+      if (active == this) {
+        platf::vulkan_loader::vkGetPhysicalDeviceImageFormatProperties2 = original_query;
+        platf::vulkan_loader::vkGetPhysicalDeviceFormatProperties2 = original_formats;
+        platf::vulkan_loader::vkAllocateMemory = original_allocate;
+        active = nullptr;
+      }
+    }
+
+    static VKAPI_ATTR VkResult VKAPI_CALL query(VkPhysicalDevice physical, const VkPhysicalDeviceImageFormatInfo2 *info,
+                                               VkImageFormatProperties2 *properties) {
+      auto &self = *active;
+      ++self.queries;
+      const auto *external = static_cast<const VkPhysicalDeviceExternalImageFormatInfo *>(info->pNext);
+      const auto *modifier = external ? static_cast<const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *>(external->pNext) : nullptr;
+      self.exact_query = info->format == VK_FORMAT_B8G8R8A8_UNORM && info->type == VK_IMAGE_TYPE_2D &&
+                         info->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT && info->usage == VK_IMAGE_USAGE_SAMPLED_BIT &&
+                         info->flags == 0 && external && external->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO &&
+                         external->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT && modifier &&
+                         modifier->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT &&
+                         modifier->drmFormatModifier == DRM_FORMAT_MOD_LINEAR && modifier->sharingMode == VK_SHARING_MODE_EXCLUSIVE;
+      if (self.refuse_query) {
+        return VK_ERROR_FORMAT_NOT_SUPPORTED;
+      }
+      const auto result = self.original_query(physical, info, properties);
+      if (result == VK_SUCCESS) {
+        auto *external_properties = static_cast<VkExternalImageFormatProperties *>(properties->pNext);
+        if (self.no_import) {
+          external_properties->externalMemoryProperties.externalMemoryFeatures &= ~VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
+        }
+        if (self.dedicated_only) {
+          external_properties->externalMemoryProperties.externalMemoryFeatures |= VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT;
+        }
+        if (self.small_extent) {
+          properties->imageFormatProperties.maxExtent.width = frame_width - 1;
+        }
+      }
+      return result;
+    }
+
+    static VKAPI_ATTR void VKAPI_CALL formats(VkPhysicalDevice physical, VkFormat format, VkFormatProperties2 *properties) {
+      auto &self = *active;
+      self.original_formats(physical, format, properties);
+      auto *modifiers = static_cast<VkDrmFormatModifierPropertiesListEXT *>(properties->pNext);
+      if (self.no_linear_sampling && modifiers && modifiers->sType == VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT &&
+          modifiers->pDrmFormatModifierProperties) {
+        for (std::uint32_t i = 0; i < modifiers->drmFormatModifierCount; ++i) {
+          modifiers->pDrmFormatModifierProperties[i].drmFormatModifierTilingFeatures &= ~VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        }
+      }
+    }
+
+    static VKAPI_ATTR VkResult VKAPI_CALL allocate(VkDevice device, const VkMemoryAllocateInfo *info,
+                                                  const VkAllocationCallbacks *callbacks, VkDeviceMemory *memory) {
+      auto &self = *active;
+      const VkMemoryDedicatedAllocateInfo *dedicated = nullptr;
+      bool imported = false;
+      for (auto *next = static_cast<const VkBaseInStructure *>(info->pNext); next; next = next->pNext) {
+        if (next->sType == VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO) {
+          dedicated = reinterpret_cast<const VkMemoryDedicatedAllocateInfo *>(next);
+        } else if (next->sType == VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR) {
+          imported = reinterpret_cast<const VkImportMemoryFdInfoKHR *>(next)->handleType == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+        }
+      }
+      if (imported) {
+        ++self.imports;
+        self.dedicated_import = dedicated && dedicated->image != VK_NULL_HANDLE && dedicated->buffer == VK_NULL_HANDLE;
+      }
+      return self.original_allocate(device, info, callbacks, memory);
     }
   };
 
@@ -458,6 +557,11 @@ TEST(VulkanCaptureCompletionTests, UnleasedCaptureKeepsSubmissionPipelined) {
   egl::img_descriptor_t img;
   white.describe(img, 1);
 
+  // wlroots also publishes buffer keys, and cloning retains its image owner.
+  // Neither fact is a PipeWire producer-return lease.
+  img.dmabuf_buffer_key = 123;
+  img.capture_owner = std::make_shared<platf::img_t>();
+
   EXPECT_EQ(encoder.device->convert(img), 0);
   EXPECT_EQ(boundary.submissions, 1);
   EXPECT_TRUE(boundary.waits.empty());
@@ -601,6 +705,7 @@ TEST(VulkanCaptureCompletionTests, ALeasedBufferWithoutItsPublishedOwnerIsRefuse
   egl::img_descriptor_t img;
   white.describe(img, 1);
   img.dmabuf_buffer_key = 1;
+  img.requires_producer_lease = true;
 
   EXPECT_EQ(encoder.device->convert(img), platf::convert_capture_unreadable);
   EXPECT_EQ(boundary.submissions, 0);
@@ -634,6 +739,103 @@ TEST(VulkanCaptureCompletionTests, UnsupportedProducerFenceEndsBeforeGpuSubmissi
   boundary.completion_observed = true;
   img.capture_owner.reset();
   EXPECT_EQ(boundary.returned, 1);
+}
+
+namespace {
+  enum class admission_fault_e {
+    unknown_fourcc, unknown_modifier, extra_plane, different_allocation,
+    no_modifier, short_pitch, zero_width, no_import, failed_query, device_limit, no_linear_sampling
+  };
+
+  class VulkanCaptureAdmissionBoundaryTests: public testing::TestWithParam<admission_fault_e> {};
+}
+
+TEST_P(VulkanCaptureAdmissionBoundaryTests, UnsupportedLayoutsEndBeforeImportAndSubmission) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t white {0xFF};
+  const grey_dmabuf_t black {0x00};
+  if (!white.ok || !black.ok) {
+    GTEST_SKIP() << "Could not allocate linear DMA-BUFs on " << render_node;
+  }
+  capture_completion_boundary_t completion;
+  capture_admission_boundary_t admission;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  completion.install();
+  admission.install();
+  egl::img_descriptor_t img;
+  white.describe(img, 1);
+  completion.publish(img);
+  switch (GetParam()) {
+    case admission_fault_e::unknown_fourcc: img.sd.fourcc = DRM_FORMAT_NV12; break;
+    case admission_fault_e::unknown_modifier: img.sd.modifier = UINT64_MAX - 17; break;
+    case admission_fault_e::extra_plane:
+      img.sd.fds[1] = fcntl(img.sd.fds[0], F_DUPFD_CLOEXEC, 0);
+      ASSERT_GE(img.sd.fds[1], 0);
+      img.sd.pitches[1] = 256;
+      break;
+    case admission_fault_e::different_allocation: {
+      egl::img_descriptor_t other;
+      black.describe(other, 2);
+      img.sd.fds[1] = std::exchange(other.sd.fds[0], -1);
+      img.sd.pitches[1] = 1024;
+      break;
+    }
+    case admission_fault_e::no_modifier: img.sd.modifier = DRM_FORMAT_MOD_INVALID; break;
+    case admission_fault_e::short_pitch: img.sd.pitches[0] = 16; break;
+    case admission_fault_e::zero_width: img.sd.width = 0; break;
+    case admission_fault_e::no_import: admission.no_import = true; break;
+    case admission_fault_e::failed_query: admission.refuse_query = true; break;
+    case admission_fault_e::device_limit: admission.small_extent = true; break;
+    case admission_fault_e::no_linear_sampling: admission.no_linear_sampling = true; break;
+  }
+
+  EXPECT_EQ(encoder.device->convert(img), platf::convert_capture_unreadable);
+  EXPECT_EQ(encoder.device->convert(img), platf::convert_capture_unreadable);
+  EXPECT_EQ(admission.imports, 0);
+  EXPECT_EQ(completion.submissions, 0);
+  EXPECT_TRUE(completion.waits.empty());
+  EXPECT_LE(admission.queries, 1);
+  completion.completion_observed = true;  // No GPU read can own this lease.
+  img.capture_owner.reset();
+  EXPECT_EQ(completion.returned, 1);
+}
+
+INSTANTIATE_TEST_SUITE_P(LayoutAndDevice, VulkanCaptureAdmissionBoundaryTests,
+                        testing::Values(admission_fault_e::unknown_fourcc, admission_fault_e::unknown_modifier,
+                                        admission_fault_e::extra_plane, admission_fault_e::different_allocation,
+                                        admission_fault_e::no_modifier, admission_fault_e::short_pitch,
+                                        admission_fault_e::zero_width, admission_fault_e::no_import,
+                                        admission_fault_e::failed_query, admission_fault_e::device_limit,
+                                        admission_fault_e::no_linear_sampling));
+
+TEST(VulkanCaptureAdmissionTests, ExactDeviceQueryAndDedicatedImportPreserveRealPixels) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t white {0xFF};
+  if (!white.ok) {
+    GTEST_SKIP() << "Could not allocate a linear DMA-BUF on " << render_node;
+  }
+  capture_completion_boundary_t completion;
+  capture_admission_boundary_t admission;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  completion.install();
+  admission.install();
+  admission.dedicated_only = true;
+  egl::img_descriptor_t img;
+  white.describe(img, 1);
+  completion.publish(img);
+  ASSERT_EQ(encoder.device->convert(img), 0);
+  EXPECT_EQ(admission.queries, 1);
+  EXPECT_TRUE(admission.exact_query);
+  EXPECT_EQ(admission.imports, 1);
+  EXPECT_TRUE(admission.dedicated_import);
+  EXPECT_TRUE(completion.completion_observed);
+  EXPECT_GE(centre_and_corner_luma(encoder.frame).first, 225);
 }
 
 /**
