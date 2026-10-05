@@ -149,6 +149,19 @@ namespace test_utils {
       return result >= 0 && wait([&] { return completed > previous; }) && !failed;
     }
 
+    bool produce_after_return(std::uint8_t next_marker) {
+      const auto previous = submitted;
+      // The returned consumer buffer crosses the graph's IO handoff before
+      // it becomes dequeuable at the producer. Drive at most two completed
+      // iterations; never turn a failing assertion into an unbounded retry.
+      for (int handoff = 0; handoff < 2; ++handoff) {
+        if (!step(next_marker)) return false;
+        if (submitted == previous + 1) return true;
+        if (submitted != previous) return false;
+      }
+      return false;
+    }
+
     static void param_changed(void *opaque, std::uint32_t id, const spa_pod *param) {
       if (id != SPA_PARAM_Format || !param) return;
       auto &g = *static_cast<pipewire_producer_graph_t *>(opaque);

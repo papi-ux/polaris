@@ -403,6 +403,7 @@ namespace {
     int imports = 0;
     bool dedicated_import = false;
     bool exact_query = false;
+    VkResult import_error = VK_SUCCESS;
 
     void install() {
       ASSERT_EQ(active, nullptr);
@@ -479,6 +480,7 @@ namespace {
       if (imported) {
         ++self.imports;
         self.dedicated_import = dedicated && dedicated->image != VK_NULL_HANDLE && dedicated->buffer == VK_NULL_HANDLE;
+        if (self.import_error != VK_SUCCESS) return self.import_error;
       }
       return self.original_allocate(device, info, callbacks, memory);
     }
@@ -1678,7 +1680,8 @@ TEST(PipeWireProducerPoolTests, HeldCaptureFramesExhaustTheRealPoolUntilOneRetur
   ASSERT_EQ(convert_graph_frame(encoder, first, clone), 0);
   EXPECT_TRUE(has_grey_quadrants(encoder.frame, frame_width, frame_height, {16,16,16,16}));
   clone.reset(); first.reset();
-  ASSERT_TRUE(graph.step(255));
+  ASSERT_EQ(pipewire_capture::capture_graph_test_access::leases(*graph.capture), 1);
+  ASSERT_TRUE(graph.produce_after_return(255));
   auto replacement = publish_graph_frame(graph); ASSERT_TRUE(replacement);
   EXPECT_EQ(dynamic_cast<egl::img_descriptor_t *>(replacement.get())->dmabuf_buffer_key, first_key);
   ASSERT_EQ(convert_graph_frame(encoder, replacement, clone), 0);
@@ -1716,7 +1719,7 @@ TEST(PipeWireProducerPoolTests, TimedOutGpuReadKeepsRealStorageUntilDeviceRetire
   EXPECT_TRUE(boundary.idle_observed);
   EXPECT_TRUE(boundary.lease.expired());
   EXPECT_EQ(pipewire_capture::capture_graph_test_access::leases(*graph.capture), 1);
-  ASSERT_TRUE(graph.step(255));
+  ASSERT_TRUE(graph.produce_after_return(255));
   auto replacement = publish_graph_frame(graph); ASSERT_TRUE(replacement);
   EXPECT_EQ(dynamic_cast<egl::img_descriptor_t *>(replacement.get())->dmabuf_buffer_key, first_key);
   boundary.timeout = false;
@@ -1739,13 +1742,13 @@ TEST(PipeWireProducerPoolTests, RefusedLiveImportReleasesItsPoolAndNewShmCapture
     capture_admission_boundary_t admission;
     encoder_frame_t encoder;
     ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
-    admission.install(); admission.refuse_query = true;
+    admission.install(); admission.import_error = VK_ERROR_OUT_OF_DEVICE_MEMORY;
     ASSERT_TRUE(graph.step(255));
     auto image = publish_graph_frame(graph); ASSERT_TRUE(image);
     std::shared_ptr<platf::img_t> clone;
     EXPECT_EQ(convert_graph_frame(encoder, image, clone), platf::convert_capture_unreadable);
     EXPECT_FALSE(logs.lines_with("Failed to import DMA-BUF").empty());
-    EXPECT_EQ(admission.imports, 0);
+    EXPECT_EQ(admission.imports, 1);
     clone.reset(); image.reset();
     EXPECT_EQ(pipewire_capture::capture_graph_test_access::leases(*graph.capture), 0);
     encoder.device.reset(); graph.close(); EXPECT_TRUE(pool.storage.empty());

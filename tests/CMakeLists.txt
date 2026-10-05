@@ -682,6 +682,14 @@ if (BUILD_FULL_TESTS)
         set_tests_properties(polaris_vulkan_device_lifecycle PROPERTIES
             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
             LABELS "requires-gpu")
+        if(POLARIS_ENABLE_PORTAL)
+            add_test(NAME polaris_pipewire_producer_pool
+                COMMAND test_polaris_platform --gtest_filter=PipeWireProducerPoolTests.*)
+            set_tests_properties(polaris_pipewire_producer_pool PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+                TIMEOUT 60
+                LABELS "requires-gpu;pipewire")
+        endif()
     endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND POLARIS_ENABLE_PYROWAVE)
         target_sources(test_polaris_platform PRIVATE
