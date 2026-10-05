@@ -13,6 +13,7 @@
   #include <cstdlib>
   #include <cstring>
   #include <functional>
+  #include <limits>
   #include <memory>
   #include <sstream>
   #include <string>
@@ -781,6 +782,118 @@ TEST_P(VulkanCaptureGeometryTests, LeasedBufferReplacementConvertsEveryVisibleNv
 }
 
 INSTANTIATE_TEST_SUITE_P(FullFrame, VulkanCaptureGeometryTests, testing::Values(std::pair {1920, 1080}, std::pair {3840, 2160}));
+
+class VulkanCaptureResizeTests: public testing::TestWithParam<std::pair<int, int>> {};
+
+TEST_P(VulkanCaptureResizeTests, SmallerReplacementEndsBeforeImportOrSubmission) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const auto [new_width, new_height] = GetParam();
+  const grey_dmabuf_t first {0xFF};
+  const grey_dmabuf_t smaller {0x00, new_width, new_height};
+  if (!first.ok || !smaller.ok) {
+    GTEST_SKIP() << "Could not allocate two linear DMA-BUFs on " << render_node;
+  }
+  capture_completion_boundary_t completion;
+  capture_admission_boundary_t admission;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, 0, 0, render_node)));
+  completion.install();
+  admission.install();
+
+  egl::img_descriptor_t img;
+  first.describe(img, 1);
+  completion.publish(img);
+  ASSERT_EQ(encoder.device->convert(img), 0);
+  img.capture_owner.reset();
+  ASSERT_EQ(admission.imports, 1);
+  ASSERT_EQ(completion.submissions, 1);
+  const auto queries_before_resize = admission.queries;
+
+  smaller.describe(img, 2);
+  completion.publish(img);
+  img.dmabuf_buffer_key = 2;
+  EXPECT_EQ(encoder.device->convert(img), platf::convert_capture_unreadable);
+  EXPECT_EQ(admission.queries, queries_before_resize);
+  EXPECT_EQ(admission.imports, 1);
+  EXPECT_EQ(completion.submissions, 1);
+  img.capture_owner.reset();
+  EXPECT_EQ(completion.returned, 2);
+  EXPECT_TRUE(completion.lease.expired());
+
+  // A refused live frame ends this converter's generation. A later valid
+  // buffer must not silently revive it or be submitted under stale geometry.
+  first.describe(img, 3);
+  completion.publish(img);
+  EXPECT_EQ(encoder.device->convert(img), platf::convert_capture_unreadable);
+  EXPECT_EQ(admission.queries, queries_before_resize);
+  EXPECT_EQ(admission.imports, 1);
+  EXPECT_EQ(completion.submissions, 1);
+}
+
+INSTANTIATE_TEST_SUITE_P(SmallerDimensions, VulkanCaptureResizeTests, testing::Values(std::pair {128, 144}, std::pair {256, 72}));
+
+class VulkanCaptureRegionTests: public testing::TestWithParam<std::pair<int, int>> {};
+
+TEST_P(VulkanCaptureRegionTests, OutOfBoundsOffsetEndsBeforeImportOrSubmission) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t white {0xFF};
+  if (!white.ok) {
+    GTEST_SKIP() << "Could not allocate a linear DMA-BUF on " << render_node;
+  }
+  const auto [offset_x, offset_y] = GetParam();
+  capture_completion_boundary_t completion;
+  capture_admission_boundary_t admission;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, offset_x, offset_y, render_node)));
+  completion.install();
+  admission.install();
+  egl::img_descriptor_t img;
+  white.describe(img, 1);
+  completion.publish(img);
+
+  EXPECT_EQ(encoder.device->convert(img), platf::convert_capture_unreadable);
+  EXPECT_EQ(admission.queries, 0);
+  EXPECT_EQ(admission.imports, 0);
+  EXPECT_EQ(completion.submissions, 0);
+  img.capture_owner.reset();
+  EXPECT_EQ(completion.returned, 1);
+  EXPECT_TRUE(completion.lease.expired());
+}
+
+INSTANTIATE_TEST_SUITE_P(InvalidOffsets, VulkanCaptureRegionTests, testing::Values(std::pair {-1, 0}, std::pair {0, -1}, std::pair {std::numeric_limits<int>::max(), 0}, std::pair {0, std::numeric_limits<int>::max()}));
+
+class VulkanCaptureCropTests: public testing::TestWithParam<std::pair<int, int>> {};
+
+TEST_P(VulkanCaptureCropTests, RegionInsideALargerBufferConvertsTheRequestedPixels) {
+  if (!vk::validate()) {
+    GTEST_SKIP() << "No Vulkan Video encoder on this host";
+  }
+  const grey_dmabuf_t quadrants {std::array<std::uint8_t, 4> {0, 85, 170, 255}, frame_width * 2, frame_height * 2};
+  if (!quadrants.ok) {
+    GTEST_SKIP() << "Could not allocate a linear DMA-BUF on " << render_node;
+  }
+  const auto [offset_x, offset_y] = GetParam();
+  capture_completion_boundary_t completion;
+  encoder_frame_t encoder;
+  ASSERT_TRUE(encoder.open(vk::make_avcodec_encode_device_vram(frame_width, frame_height, offset_x, offset_y, render_node)));
+  completion.install();
+  egl::img_descriptor_t img;
+  quadrants.describe(img, 1);
+  completion.publish(img);
+  ASSERT_EQ(encoder.device->convert(img), 0);
+  const auto expected_luma = offset_x == 0 ? 16 : 235;
+  ASSERT_TRUE(has_grey_quadrants(encoder.frame, frame_width, frame_height, {expected_luma, expected_luma, expected_luma, expected_luma}));
+  img.capture_owner.reset();
+  EXPECT_EQ(completion.returned, 1);
+  EXPECT_TRUE(completion.lease_retained_at_wait);
+  EXPECT_FALSE(completion.returned_before_completion);
+}
+
+INSTANTIATE_TEST_SUITE_P(FirstAndLastQuadrants, VulkanCaptureCropTests, testing::Values(std::pair {0, 0}, std::pair {frame_width, frame_height}));
 
 TEST(VulkanCaptureCompletionTests, CallerDescriptorCanRetireDuringTheSubmittedReadWait) {
   if (!vk::validate()) {
