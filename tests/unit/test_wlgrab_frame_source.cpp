@@ -3,6 +3,7 @@
  * @brief Tests for ext-image-copy frame sourcing, pacing, and timing.
  */
 #include <chrono>
+#include <cstdint>
 
 #include <gtest/gtest.h>
 
@@ -160,22 +161,115 @@ TEST(ExtcopyTiming, RejectsPresentationTimestampOverflow) {
   EXPECT_FALSE(timing.mark_presentation(UINT32_MAX, UINT32_MAX, 999'999'999));
 }
 
-TEST(ExtcopyTiming, RecoversAfterPresentationClockMovesBackward) {
+TEST(ExtcopyTiming, BackwardPresentationNeverLowersTheValidBaseline) {
+  using vrr_policy::presentation_status_e;
   wl::extcopy_timing_tracker_t timing;
   const wl::extcopy_timing_tracker_t::time_point_t start {10s};
 
   timing.mark_requested(start);
   ASSERT_TRUE(timing.mark_presentation(0, 2, 0));
   timing.mark_ready(start + 8ms);
+  EXPECT_EQ(timing.last_sample().presentation_status, presentation_status_e::valid);
+
+  // The clock goes back a second. The value is kept as delivered, marked, and given no interval.
   timing.mark_requested(start + 9ms);
   ASSERT_TRUE(timing.mark_presentation(0, 1, 0));
   timing.mark_ready(start + 17ms);
+  EXPECT_EQ(timing.last_sample().presentation_status, presentation_status_e::nonmonotonic);
+  EXPECT_EQ(timing.last_sample().presentation_ns, 1'000'000'000);
   EXPECT_FALSE(timing.last_sample().presentation_interval.has_value());
 
+  // Still behind the last VALID time (2 s), so still nonmonotonic: the backward sample did not
+  // become a baseline a later frame could pass against.
   timing.mark_requested(start + 18ms);
   ASSERT_TRUE(timing.mark_presentation(0, 1, 8'333'333));
   timing.mark_ready(start + 26ms);
+  EXPECT_EQ(timing.last_sample().presentation_status, presentation_status_e::nonmonotonic);
+  EXPECT_FALSE(timing.last_sample().presentation_interval.has_value());
+
+  // Past the valid baseline again: valid, and the interval runs from the last valid frame.
+  timing.mark_requested(start + 27ms);
+  ASSERT_TRUE(timing.mark_presentation(0, 2, 8'333'333));
+  timing.mark_ready(start + 35ms);
+  EXPECT_EQ(timing.last_sample().presentation_status, presentation_status_e::valid);
   EXPECT_EQ(timing.last_sample().presentation_interval, 8333us);
+}
+
+TEST(ExtcopyTiming, EqualPresentationIsNotAFreshFrame) {
+  wl::extcopy_timing_tracker_t timing;
+  const wl::extcopy_timing_tracker_t::time_point_t start {10s};
+  timing.mark_requested(start);
+  ASSERT_TRUE(timing.mark_presentation(0, 3, 500));
+  timing.mark_ready(start + 8ms);
+  timing.mark_requested(start + 9ms);
+  ASSERT_TRUE(timing.mark_presentation(0, 3, 500));
+  timing.mark_ready(start + 17ms);
+  EXPECT_EQ(timing.last_sample().presentation_status, vrr_policy::presentation_status_e::nonmonotonic);
+  EXPECT_FALSE(timing.last_sample().presentation_interval.has_value());
+}
+
+TEST(ExtcopyTiming, KeepsTheRawAbsolutePresentationTime) {
+  wl::extcopy_timing_tracker_t timing;
+  const wl::extcopy_timing_tracker_t::time_point_t start {10s};
+  timing.mark_requested(start);
+  // tv_sec_hi carries the high 32 bits of seconds (ext-image-copy-capture-v1 presentation_time).
+  ASSERT_TRUE(timing.mark_presentation(1, 5, 123'456'789));
+  timing.mark_ready(start + 8ms);
+  const std::int64_t seconds = (std::int64_t {1} << 32) + 5;
+  EXPECT_EQ(timing.last_sample().presentation_ns, seconds * 1'000'000'000 + 123'456'789);
+  EXPECT_EQ(timing.last_sample().presentation_status, vrr_policy::presentation_status_e::valid);
+}
+
+TEST(ExtcopyTiming, NamesMissingAndInvalidPresentationTimes) {
+  using vrr_policy::presentation_status_e;
+  wl::extcopy_timing_tracker_t timing;
+  const wl::extcopy_timing_tracker_t::time_point_t start {10s};
+
+  // No presentation_time event before ready.
+  timing.mark_requested(start);
+  timing.mark_ready(start + 8ms);
+  EXPECT_EQ(timing.last_sample().presentation_status, presentation_status_e::missing);
+  EXPECT_FALSE(timing.last_sample().presentation_ns.has_value());
+
+  timing.mark_requested(start + 9ms);
+  EXPECT_FALSE(timing.mark_presentation(0, 1, 1'000'000'000));
+  timing.mark_ready(start + 17ms);
+  EXPECT_EQ(timing.last_sample().presentation_status, presentation_status_e::invalid_nsec);
+  EXPECT_FALSE(timing.last_sample().presentation_ns.has_value());
+
+  // One past the largest second count signed nanoseconds can carry.
+  constexpr std::uint64_t max_seconds = static_cast<std::uint64_t>(INT64_MAX) / 1'000'000'000ULL;
+  timing.mark_requested(start + 18ms);
+  EXPECT_FALSE(timing.mark_presentation(
+    static_cast<std::uint32_t>((max_seconds + 1) >> 32U), static_cast<std::uint32_t>(max_seconds + 1), 0));
+  timing.mark_ready(start + 26ms);
+  EXPECT_EQ(timing.last_sample().presentation_status, presentation_status_e::invalid_overflow);
+
+  // The largest representable value is still valid.
+  timing.mark_requested(start + 27ms);
+  EXPECT_TRUE(timing.mark_presentation(
+    static_cast<std::uint32_t>(max_seconds >> 32U), static_cast<std::uint32_t>(max_seconds), 0));
+  timing.mark_ready(start + 35ms);
+  EXPECT_EQ(timing.last_sample().presentation_status, presentation_status_e::valid);
+}
+
+TEST(ExtcopyTiming, InvalidSampleBetweenValidOnesYieldsNoHealthyInterval) {
+  using vrr_policy::presentation_status_e;
+  wl::extcopy_timing_tracker_t timing;
+  const wl::extcopy_timing_tracker_t::time_point_t start {10s};
+  timing.mark_requested(start);
+  ASSERT_TRUE(timing.mark_presentation(0, 1, 0));
+  timing.mark_ready(start + 8ms);
+  timing.mark_requested(start + 9ms);
+  EXPECT_FALSE(timing.mark_presentation(0, 1, 2'000'000'000));
+  timing.mark_ready(start + 17ms);
+  EXPECT_EQ(timing.last_sample().presentation_status, presentation_status_e::invalid_nsec);
+  EXPECT_FALSE(timing.last_sample().presentation_interval.has_value());
+  timing.mark_requested(start + 18ms);
+  ASSERT_TRUE(timing.mark_presentation(0, 1, 16'666'667));
+  timing.mark_ready(start + 26ms);
+  // Spans the invalid frame: measured from the last valid time, never from the invalid one.
+  EXPECT_EQ(timing.last_sample().presentation_interval, 16666us);
 }
 
 TEST(ExtcopyTiming, ResetPreventsIntervalsAcrossCaptureSessions) {

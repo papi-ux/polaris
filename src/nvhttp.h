@@ -237,10 +237,13 @@ namespace nvhttp {
    * to proc::execute. Host-built arguments use the host identity and do not
    * carry client key material. A trusted owned app snapshot may defer a matching fixed
    * topology pin's availability to the app-aware guard; nullptr keeps ordinary freshness.
+   * vrr_admission names which authenticated request carried clientVrrRequested (/launch or /resume);
+   * the request itself is parsed from args on every path and only recorded.
    */
   std::shared_ptr<rtsp_stream::launch_session_t>
   make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker = false,
-                      const proc::ctx_t *topology_app = nullptr);
+                      const proc::ctx_t *topology_app = nullptr,
+                      vrr_policy::admission_e vrr_admission = vrr_policy::admission_e::launch);
 
   /**
    * @brief Bring the host's mode in line with whether it is in Steam Game Mode right now.
