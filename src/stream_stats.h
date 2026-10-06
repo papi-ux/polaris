@@ -8,6 +8,7 @@
 
 // standard includes
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -115,6 +116,23 @@ namespace stream_stats {
   };
 
   /**
+   * @brief Images this encoder accepted from one capture epoch, independent of VRR policy.
+   *
+   * The producer's immutable provenance travels with the image. Counts are local to this consumer
+   * and epoch; a display reopen starts them over. They establish neither source-time pacing nor
+   * receiver presentation. A Watch consumer observes its own images without acquiring authority.
+   */
+  struct capture_timing_t {
+    platf::image_provenance_t last_accepted;
+    std::uint64_t accepted_frames = 0;
+    vrr_policy::host_presentation_counts_t presentation_counts;
+    // Protocol syntax and comparable-clock plausibility are separate. A representable valid
+    // protocol value remains clock_unverified when no authoritative producer proof exists.
+    std::array<std::uint64_t, 9> plausibility_counts {};
+    std::string last_plausibility = "clock_unverified";
+  };
+
+  /**
    * @brief Per-client statistics for multi-session tracking.
    */
   struct client_stats_t {
@@ -176,6 +194,9 @@ namespace stream_stats {
     // This session's variable-refresh request and policy inputs, frozen by record_vrr_session() when
     // the session starts. Empty for a session that never recorded one.
     std::optional<vrr_policy::record_t> vrr;
+
+    /// Accepted-image evidence, never filled by an opened display or host-wide timing counters.
+    std::optional<capture_timing_t> capture_timing;
 
     // Network
     double latency_ms = 0;
@@ -275,6 +296,8 @@ namespace stream_stats {
     std::int64_t start_client_left_after_ms = -1;
     /// The session's frozen variable-refresh request record.
     std::optional<vrr_policy::record_t> vrr;
+    /// A value snapshot of this encoder's accepted-image evidence at teardown.
+    std::optional<capture_timing_t> capture_timing;
   };
 
   struct capture_profile_sample_t {
@@ -828,6 +851,18 @@ namespace stream_stats {
    * @return False when no client holds that generation or nothing was opened, so the caller retries.
    */
   bool record_capture_backend(std::uint64_t session_generation, const capture_backend_t &backend);
+
+  /**
+   * @brief Atomically attribute one newly accepted source image to its live encoder session.
+   *
+   * Refuses zero/unknown/retired sessions, missing epoch/sequence, regressing epochs, duplicate or
+   * regressing source sequences and contradictory identities/routes/proofs within an epoch. Retry
+   * before registration is allowed: a refused write advances no consumer evidence or cache.
+   */
+  bool record_accepted_capture(std::uint64_t session_generation, const platf::image_provenance_t &provenance);
+
+  /// Authenticated diagnostic evidence for this generation only; no record returns JSON null.
+  nlohmann::json capture_timing_json(const stats_t &stats, std::uint64_t session_generation);
 
   /**
    * @brief Freeze a live generation's variable-refresh request, once.

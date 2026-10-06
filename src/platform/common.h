@@ -7,8 +7,11 @@
 // standard includes
 #include <atomic>
 #include <bitset>
+#include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -28,6 +31,7 @@
 #include "src/thread_safe.h"
 #include "src/utility.h"
 #include "src/video_colorspace.h"
+#include "src/vrr_session_policy.h"
 
 extern "C" {
 #include <moonlight-common-c/src/Limelight.h>
@@ -82,6 +86,10 @@ namespace video {
 namespace nvenc {
   class nvenc_base;
 }
+
+namespace vrr_clock {
+  struct proof_t;
+}  // namespace vrr_clock
 
 namespace platf {
   // Limited by bits in activeGamepadMask
@@ -494,6 +502,58 @@ namespace platf {
     virtual ~deinit_t() = default;
   };
 
+  /** How a display paces its capture, as the backend that opened it knows. */
+  enum class capture_pacing_e {
+    unknown,
+    fixed_interval,
+    source_driven,
+  };
+
+  /** Where a frame's presentation time comes from, when it has one. */
+  enum class presentation_clock_e {
+    none,
+    ext_image_copy_monotonic,  ///< ext-image-copy-capture-v1 presentation_time, "system monotonic time"
+  };
+
+  /** A display's timing route, filled by the backend at successful initialization. */
+  struct capture_timing_route_t {
+    capture_pacing_e pacing = capture_pacing_e::unknown;
+    presentation_clock_e presentation = presentation_clock_e::none;
+
+    bool operator==(const capture_timing_route_t &) const = default;
+  };
+
+  /** A frame's raw protocol presentation time. Never a substitute for its pacing timestamp. */
+  struct source_presentation_t {
+    std::optional<std::int64_t> ns;  ///< present only when representable as signed nanoseconds
+    vrr_policy::presentation_status_e status = vrr_policy::presentation_status_e::missing;
+
+    bool operator==(const source_presentation_t &) const = default;
+  };
+
+  /**
+   * @brief Where one captured image came from, stamped once by its producer before any consumer sees it.
+   *
+   * Reset when a pooled image is reused, copied whole by every clone and frame view, and never
+   * written while a consumer holds the image. Diagnostic evidence only: nothing here changes how a
+   * frame is stamped, paced or encoded.
+   */
+  struct image_provenance_t {
+    /// capture_generation::identity_t::generation_id; may be 0 for an ordinary desktop capture.
+    std::uint64_t capture_generation_id = 0;
+    /// Nonzero, producer-monotonic per successful display open or reopen; 0 is unstamped.
+    std::uint64_t capture_epoch_id = 0;
+    /// Unique per new source frame within the epoch, from 1; 0 is unstamped.
+    std::uint64_t source_sequence = 0;
+    capture_timing_route_t route;
+    /// When the producer received the frame, on std::chrono::steady_clock.
+    std::optional<std::chrono::steady_clock::time_point> ready_at;
+    source_presentation_t presentation;
+    /// Captured while initializing the capture: always ineligible, even with a representable time.
+    bool prefetched_init = false;
+    std::shared_ptr<const vrr_clock::proof_t> clock_proof;
+  };
+
   struct img_t: std::enable_shared_from_this<img_t> {
   public:
     img_t() = default;
@@ -514,6 +574,7 @@ namespace platf {
 
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
     frame_metadata_t frame_metadata;
+    image_provenance_t provenance;
 
     virtual ~img_t() = default;
   };
@@ -728,6 +789,16 @@ namespace platf {
       return {};
     }
 
+    /**
+     * @brief The connected socket whose peer supplies presentation times, or -1 when there is none.
+     *
+     * Only a display whose capture_timing names a presentation clock answers. The descriptor stays
+     * owned by the display; callers only read socket-peer facts from it.
+     */
+    virtual int presentation_peer_fd() const {
+      return -1;
+    }
+
     virtual std::unique_ptr<avcodec_encode_device_t> make_avcodec_encode_device(pix_fmt_e pix_fmt) {
       return nullptr;
     }
@@ -803,6 +874,10 @@ namespace platf {
     // What initialization opened. platf::display() fills in what the backend leaves unsaid, once
     // initialization has succeeded, so a display that failed never reports one.
     capture_route_t capture_route;
+
+    // How this display paces capture and where its frames' presentation times come from. Unknown
+    // and none unless the backend that opened it knows; nothing is inferred from configuration.
+    capture_timing_route_t capture_timing;
 
   protected:
     // collect capture timing data (at loglevel debug)

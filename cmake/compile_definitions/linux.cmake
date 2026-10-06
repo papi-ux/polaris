@@ -666,6 +666,8 @@ list(APPEND PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/linux/gamescope_process.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_runtime_labwc.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/stream_runtime_gamescope.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/vrr_clock_probe.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/linux/vrr_clock_probe.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_launch_linux.h"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/session_launch_linux.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/linux/multiseat_container_backend.h"

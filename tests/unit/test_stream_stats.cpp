@@ -13,6 +13,7 @@
 #include <src/live_tuning.h>
 #include <src/private_state_file.h>
 #include <src/utility.h>
+#include <src/vrr_clock_proof.h>
 #include "../tests_events.h"
 
 #include <gtest/gtest.h>
@@ -11509,4 +11510,272 @@ TEST(StreamStatsVrrTests, LastSessionKeepsTheFrozenRecordUnderItsOpaqueInstanceI
   stream_stats::add_client("10.0.0.5", "Next", 432);
   ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(432, vrr_policy::requested_e::on)));
   EXPECT_EQ(current_stats_json()["last_session"]["vrr"]["requested"], "malformed");
+}
+
+namespace {
+  class StreamStatsCaptureTimingTests : public ::testing::Test {
+  protected:
+    void SetUp() override { stream_stats::update_stream_active(false); }
+    void TearDown() override { stream_stats::update_stream_active(false); }
+
+    static platf::image_provenance_t image(std::uint64_t epoch = 71, std::uint64_t sequence = 1) {
+      platf::image_provenance_t result;
+      result.capture_generation_id = 901;
+      result.capture_epoch_id = epoch;
+      result.source_sequence = sequence;
+      result.route.pacing = platf::capture_pacing_e::source_driven;
+      result.route.presentation = platf::presentation_clock_e::ext_image_copy_monotonic;
+      result.ready_at = std::chrono::steady_clock::time_point {std::chrono::seconds {4}};
+      result.presentation.status = vrr_policy::presentation_status_e::valid;
+      result.presentation.ns = 3'999'999'000;
+      return result;
+    }
+
+    static std::shared_ptr<const vrr_clock::proof_t> proof(std::uint64_t epoch, bool identity = false) {
+      vrr_clock::mapping_t mapping;
+      mapping.valid = true;
+      mapping.samples = 8;
+      mapping.uncertainty_ns = 100;
+      return std::make_shared<const vrr_clock::proof_t>(vrr_clock::make_proof(
+        epoch, {vrr_clock::namespace_e::same, "same_dev_and_inode"}, identity,
+        identity ? "expected_identity" : "no_authoritative_compositor_identity", mapping, 0));
+    }
+
+    static nlohmann::json timing(std::uint64_t generation = 501) {
+      return stream_stats::capture_timing_json(stream_stats::get_current(), generation);
+    }
+  };
+}
+
+TEST_F(StreamStatsCaptureTimingTests, RefusedPreRegistrationWritesCanRetryButRetiredWritesNeverLand) {
+  auto frame = image();
+  EXPECT_FALSE(stream_stats::record_accepted_capture(0, frame));
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_TRUE(timing().is_null());
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  EXPECT_TRUE(timing().is_null());
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["accepted_frames"], 1u);
+  stream_stats::remove_client("10.0.0.5", 501);
+  const auto ended = current_stats_json()["last_session"];
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, image(71, 2)));
+  EXPECT_TRUE(timing().is_null());
+  EXPECT_EQ(current_stats_json()["last_session"], ended);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, SharedProducerConsumersCountOnlyTheirOwnAcceptedSubsetWithoutWatchAuthority) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  stream_stats::add_client("10.0.0.6", "Watch", 502);
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(501, vrr_policy::requested_e::on)));
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(502, vrr_policy::requested_e::on, true)));
+  const auto owner_policy = stream_stats::vrr_json(stream_stats::get_current(), 501);
+  const auto watch_policy = stream_stats::vrr_json(stream_stats::get_current(), 502);
+  auto first = image();
+  first.clock_proof = proof(71);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, first));
+  ASSERT_TRUE(stream_stats::record_accepted_capture(502, first));
+  auto later = first;
+  later.source_sequence = 4;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, later));
+  EXPECT_EQ(timing(501)["accepted_frames"], 2u);
+  EXPECT_EQ(timing(502)["accepted_frames"], 1u);
+  EXPECT_EQ(timing(501)["capture_instance_id"], timing(502)["capture_instance_id"]);
+  EXPECT_FALSE(timing(502)["pacing_authority"].get<bool>());
+  EXPECT_EQ(stream_stats::vrr_json(stream_stats::get_current(), 501), owner_policy);
+  EXPECT_EQ(stream_stats::vrr_json(stream_stats::get_current(), 502), watch_policy);
+  EXPECT_EQ(watch_policy["fallback_reason"], "watch_or_input_only");
+}
+
+TEST_F(StreamStatsCaptureTimingTests, NewEpochResetsCountsAndFencesOldImagesDuplicatesAndContradictoryBindings) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto first = image();
+  first.clock_proof = proof(71);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, first));
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, first)) << "a retained source is not a new image";
+  auto changed = first;
+  changed.source_sequence = 2;
+  changed.capture_generation_id++;
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, changed));
+  changed = first;
+  changed.source_sequence = 2;
+  changed.route.pacing = platf::capture_pacing_e::fixed_interval;
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, changed));
+  changed = first;
+  changed.source_sequence = 2;
+  changed.clock_proof = proof(71);
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, changed)) << "proof cannot be replaced inside an epoch";
+  auto next = image(72, 1);
+  next.presentation.status = vrr_policy::presentation_status_e::missing;
+  next.presentation.ns.reset();
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, next));
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, image(71, 100)));
+  EXPECT_EQ(timing()["capture_epoch_id"], 72u);
+  EXPECT_EQ(timing()["accepted_frames"], 1u);
+  EXPECT_EQ(timing()["presentation_counts"]["valid"], 0u);
+  EXPECT_EQ(timing()["presentation_counts"]["missing"], 1u);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, MatchingSocketPeerNamespaceWithoutProducerIdentityLeavesRawTimeUnverified) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto frame = image();
+  frame.clock_proof = proof(71);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  const auto readout = timing();
+  EXPECT_EQ(readout["clock"]["time_namespace"], "same");
+  EXPECT_EQ(readout["clock"]["local_mapping_verified"], true);
+  EXPECT_EQ(readout["clock"]["producer_identity_verified"], false);
+  EXPECT_EQ(readout["clock"]["clock_domain_verified"], false);
+  EXPECT_EQ(readout["last_plausibility"], "clock_unverified");
+  EXPECT_EQ(readout["presentation_counts"]["valid"], 1u) << "protocol syntax only";
+  EXPECT_EQ(readout["plausibility_counts"]["valid"], 0u);
+  EXPECT_EQ(readout["plausibility_counts"]["clock_unverified"], 1u);
+  EXPECT_EQ(readout["source_time_eligible"], false);
+  EXPECT_EQ(readout["effective_vrr"], false);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, PrefetchAndProtocolFaultsRemainDiagnosticWithoutCrossClockComparison) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto frame = image();
+  frame.prefetched_init = true;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["last_plausibility"], "prefetched_init");
+  frame.prefetched_init = false;
+  frame.source_sequence++;
+  frame.presentation.status = vrr_policy::presentation_status_e::nonmonotonic;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["last_plausibility"], "nonmonotonic");
+  EXPECT_EQ(timing()["last_presentation_ns"], *frame.presentation.ns) << "representable bad time survives privately";
+  frame.source_sequence++;
+  frame.presentation.status = vrr_policy::presentation_status_e::invalid_nsec;
+  frame.presentation.ns.reset();
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["last_plausibility"], "invalid");
+  EXPECT_TRUE(timing()["last_presentation_ns"].is_null());
+  EXPECT_EQ(timing()["plausibility_counts"]["prefetched_init"], 1u);
+  EXPECT_EQ(timing()["plausibility_counts"]["nonmonotonic"], 1u);
+  EXPECT_EQ(timing()["plausibility_counts"]["invalid"], 1u);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, MissingOrContradictoryProvenanceCannotConsumeTheNextSequence) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto frame = image();
+  frame.capture_epoch_id = 0;
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame));
+  frame = image(71, 0);
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame));
+  frame = image();
+  frame.clock_proof = proof(72);
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame));
+  frame = image();
+  frame.presentation.ns = -1;
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame));
+  frame = image();
+  frame.presentation.ns.reset();
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame));
+  frame = image();
+  frame.presentation.status = static_cast<vrr_policy::presentation_status_e>(99);
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame));
+  frame = image();
+  frame.route.presentation = platf::presentation_clock_e::none;
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame)) << "an unrelated route cannot inherit protocol metadata";
+  EXPECT_TRUE(timing().is_null());
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, image()));
+  EXPECT_EQ(timing()["accepted_frames"], 1u);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, PublicAndEndedEvidenceOmitPrivateFactsAndFreezeTheConsumersOwnEpoch) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto frame = image();
+  frame.clock_proof = proof(71);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  auto readout = current_stats_json();
+  const auto live = readout["clients"][0]["capture_timing"];
+  EXPECT_EQ(live["stream_instance_id"], readout["clients"][0]["stream_instance_id"]);
+  for (const auto key : {"session_generation", "capture_generation_id", "capture_epoch_id", "last_source_sequence",
+                         "last_presentation_ns", "epoch_start_mono_ns", "pid", "uid", "namespace_inode", "private_runtime"}) {
+    EXPECT_FALSE(live.contains(key)) << key;
+    EXPECT_FALSE(live["clock"].contains(key)) << key;
+  }
+  EXPECT_FALSE(live.contains("source_cadence"));
+  EXPECT_EQ(live["receiver_presentation_verified"], false);
+  stream_stats::remove_client("10.0.0.5", 501);
+  const auto ended = current_stats_json()["last_session"]["capture_timing"];
+  EXPECT_EQ(ended, live);
+  stream_stats::add_client("10.0.0.5", "Replacement", 502);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(502, image(72, 1)));
+  EXPECT_FALSE(stream_stats::record_accepted_capture(501, image(73, 1)));
+  EXPECT_EQ(current_stats_json()["last_session"]["capture_timing"], ended);
+  EXPECT_EQ(timing(502)["capture_epoch_id"], 72u);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, VerifiedSyntheticClockClassifiesFutureStaleAndEpochEdgesButNeverEnablesVrr) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto frame = image();
+  frame.clock_proof = proof(71, true);
+  frame.presentation.ns = 4'000'000'101;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["last_plausibility"], "future");
+  frame.source_sequence++;
+  frame.presentation.ns = 1;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["last_plausibility"], "stale");
+  frame.source_sequence++;
+  frame.presentation.ns = 4'000'000'100;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["last_plausibility"], "valid") << "exact uncertainty edge is admitted";
+  frame.source_sequence++;
+  frame.ready_at.reset();
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["last_plausibility"], "missing");
+  EXPECT_EQ(timing()["clock"]["clock_domain_verified"], true) << "synthetic proof only";
+  frame = image(72, 1);
+  auto epoch_proof = *proof(72, true);
+  epoch_proof.epoch_start_mono_ns = 2'000'000'000;
+  frame.clock_proof = std::make_shared<const vrr_clock::proof_t>(epoch_proof);
+  frame.presentation.ns = 1'999'999'999;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["last_plausibility"], "before_epoch");
+  EXPECT_EQ(timing()["source_time_eligible"], false);
+  EXPECT_EQ(timing()["effective_vrr"], false);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, OtherBackendsAndIdleClientsStayUnknownAndDoNotBorrowHostCounts) {
+  stream_stats::add_client("10.0.0.5", "Unknown path", 501);
+  stream_stats::add_client("10.0.0.6", "No accepted images", 502);
+  stream_stats::update_capture_pacing("source_driven");
+  stream_stats::note_source_presentation(vrr_policy::presentation_status_e::valid);
+  platf::image_provenance_t frame;
+  frame.capture_epoch_id = 71;
+  frame.source_sequence = 1;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["capture_pacing"], "unknown");
+  EXPECT_EQ(timing()["presentation_clock"], "none");
+  EXPECT_EQ(timing()["presentation_counts"]["valid"], 0u);
+  EXPECT_EQ(timing()["presentation_counts"]["missing"], 1u);
+  EXPECT_TRUE(timing(502).is_null());
+  EXPECT_FALSE(current_stats_json()["clients"][1].contains("capture_timing"));
+  EXPECT_TRUE(stream_stats::capture_timing_json(stream_stats::get_current(), 999).is_null());
+}
+
+TEST_F(StreamStatsCaptureTimingTests, DiagnosticWritesLeaveControllerAuthorityAndPolicyRevisionsUntouched) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(501, vrr_policy::requested_e::on)));
+  const auto before = stream_stats::get_current();
+  const auto controller_before = adaptive_bitrate::get_doctor_state();
+  const auto policy_before = stream_stats::vrr_json(before, 501);
+  auto frame = image();
+  frame.clock_proof = proof(71, true);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  frame.source_sequence++;
+  frame.presentation.ns = 7'000'000'000;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  const auto after = stream_stats::get_current();
+  const auto controller_after = adaptive_bitrate::get_doctor_state();
+  EXPECT_EQ(after.video_sample_revision, before.video_sample_revision);
+  EXPECT_EQ(after.network_sample_revision, before.network_sample_revision);
+  EXPECT_EQ(after.video_policy_sample_count, before.video_policy_sample_count);
+  EXPECT_EQ(after.pacing_warning_streak, before.pacing_warning_streak);
+  EXPECT_EQ(controller_after.revision, controller_before.revision);
+  EXPECT_EQ(controller_after.action_authority_revision, controller_before.action_authority_revision);
+  EXPECT_EQ(stream_stats::vrr_json(after, 501), policy_before);
 }

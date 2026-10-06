@@ -9025,6 +9025,11 @@ namespace nvhttp {
       if (auto bitrate_units = stream_stats::bitrate_units_json(stats, requester_generation); !bitrate_units.is_null()) {
         output["bitrate_units"] = std::move(bitrate_units);
       }
+      // Authenticated diagnostic facts for the asking stream, independent of Doctor's grading.
+      // The observation remains available when Doctor shadow mode is disabled or collecting.
+      if (auto timing = stream_stats::capture_timing_json(stats, requester_generation); !timing.is_null()) {
+        output["capture_timing"] = std::move(timing);
+      }
       const auto health = build_session_health_json(
         stats,
         status_snapshot.virtual_display,

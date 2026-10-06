@@ -35,6 +35,7 @@
 #include "stream_stats.h"
 #include "utility.h"
 #include "verified_action.h"
+#include "vrr_clock_proof.h"
 
 namespace video {
   std::string active_encoder_name();
@@ -602,6 +603,93 @@ namespace stream_stats {
       return j;
     }
 
+    constexpr std::array<std::string_view, 9> k_capture_plausibility {
+      "valid", "missing", "invalid", "nonmonotonic", "future", "stale", "before_epoch",
+      "prefetched_init", "clock_unverified",
+    };
+
+    bool capture_clock_verified(const platf::image_provenance_t &image) {
+      const auto &proof = image.clock_proof;
+      return image.route.presentation == platf::presentation_clock_e::ext_image_copy_monotonic &&
+             proof && proof->capture_epoch_id == image.capture_epoch_id &&
+             vrr_clock::authorises_clock_comparison(*proof);
+    }
+
+    std::string_view capture_plausibility(const platf::image_provenance_t &image) {
+      constexpr vrr_clock::plausibility_limits_t limits {.staleness_ns = 2'000'000'000};
+      // These outcomes need no comparison between clocks. Valid protocol syntax does.
+      if (image.prefetched_init || image.presentation.status != vrr_policy::presentation_status_e::valid) {
+        return vrr_clock::name(vrr_clock::classify(image.presentation.status, image.presentation.ns,
+                                                image.prefetched_init, image.ready_at, nullptr, limits));
+      }
+      if (!capture_clock_verified(image)) return "clock_unverified";
+      if (!image.ready_at) return "missing";
+      return vrr_clock::name(vrr_clock::classify(image.presentation.status, image.presentation.ns,
+                                               image.prefetched_init, image.ready_at, image.clock_proof.get(), limits));
+    }
+
+    // This readout is accepted-image evidence, not a pacing decision. Public records carry opaque
+    // capture/stream identities; absolute timestamps and process/namespace identifiers stay absent.
+    nlohmann::json accepted_capture_json(const capture_timing_t &timing, nlohmann::json identity) {
+      const auto &image = timing.last_accepted;
+      const auto pacing = image.route.pacing == platf::capture_pacing_e::source_driven ? "source_driven" :
+                          image.route.pacing == platf::capture_pacing_e::fixed_interval ? "fixed_interval" : "unknown";
+      const bool protocol_time = image.route.presentation == platf::presentation_clock_e::ext_image_copy_monotonic;
+      nlohmann::json counts = nlohmann::json::object();
+      for (const auto status : vrr_policy::k_presentation_statuses) {
+        counts[std::string(vrr_policy::name(status))] = timing.presentation_counts[status];
+      }
+      nlohmann::json plausibility = nlohmann::json::object();
+      for (std::size_t index = 0; index < k_capture_plausibility.size(); ++index) {
+        plausibility[std::string(k_capture_plausibility[index])] = timing.plausibility_counts[index];
+      }
+      nlohmann::json clock {
+        {"time_namespace", "unverifiable"},
+        {"producer_identity_verified", false},
+        {"local_mapping_verified", false},
+        {"clock_domain_verified", false},
+        {"reason", "not_probed"},
+      };
+      if (const auto &proof = image.clock_proof; protocol_time && proof && proof->capture_epoch_id == image.capture_epoch_id) {
+        const auto ns = proof->time_namespace;
+        const bool verified = capture_clock_verified(image);
+        clock["time_namespace"] = ns == vrr_clock::namespace_e::same ? "same" :
+                                  ns == vrr_clock::namespace_e::different ? "different" : "unverifiable";
+        clock["producer_identity_verified"] = proof->producer_identity_verified;
+        clock["local_mapping_verified"] = proof->mapping.valid;
+        clock["clock_domain_verified"] = verified;
+        // Reasons come from fixed policy gates, never arbitrary runtime strings or process facts.
+        clock["reason"] = ns != vrr_clock::namespace_e::same ? "time_namespace_unverified" :
+                          !proof->producer_identity_verified ? "producer_identity_unverified" :
+                          !proof->mapping.valid ? "clock_mapping_unverified" :
+                          !verified ? "clock_domain_unverified" : "verified";
+        clock["probe_samples"] = proof->mapping.samples;
+        clock["uncertainty_ns"] = proof->mapping.uncertainty_ns;
+      }
+      nlohmann::json j {
+        {"schema", 1},
+        {"scope", "accepted_source_images"},
+        {"capture_instance_id", process_instance_nonce() + ".capture." + std::to_string(image.capture_epoch_id)},
+        {"capture_pacing", pacing},
+        {"presentation_clock", protocol_time ? "ext_image_copy_monotonic" : "none"},
+        {"accepted_frames", timing.accepted_frames},
+        {"presentation_counts", std::move(counts)},
+        {"plausibility_counts", std::move(plausibility)},
+        {"last_plausibility", timing.last_plausibility},
+        {"last_presentation_status", vrr_policy::name(image.presentation.status)},
+        {"raw_presentation_available", image.presentation.ns.has_value()},
+        {"ready_time_available", image.ready_at.has_value()},
+        {"prefetched_init", image.prefetched_init},
+        {"clock", std::move(clock)},
+        {"source_time_eligible", false},
+        {"pacing_authority", false},
+        {"effective_vrr", false},
+        {"receiver_presentation_verified", false},
+      };
+      j.update(identity);
+      return j;
+    }
+
     nlohmann::json host_capture_presentation_json(const vrr_policy::host_presentation_counts_t &host) {
       nlohmann::json j {
         {"scope", "host_capture"},
@@ -644,6 +732,10 @@ namespace stream_stats {
       if (ended.vrr) {
         // The public record names a stream by stream_instance_id, as the rest of last_session does.
         session["vrr"] = vrr_record_json(*ended.vrr,
+          {{"stream_instance_id", stream_instance_id(ended.session_generation)}});
+      }
+      if (ended.capture_timing) {
+        session["capture_timing"] = accepted_capture_json(*ended.capture_timing,
           {{"stream_instance_id", stream_instance_id(ended.session_generation)}});
       }
       if (const auto &stop = ended.app_stop; !stop.path.empty()) {
@@ -930,6 +1022,10 @@ namespace stream_stats {
         // This client's own frozen request, named by the same opaque identity as the row.
         if (c.vrr) {
           cj["vrr"] = vrr_record_json(*c.vrr, {{"stream_instance_id", stream_instance_id(c.session_generation)}});
+        }
+        if (c.capture_timing) {
+          cj["capture_timing"] = accepted_capture_json(*c.capture_timing,
+            {{"stream_instance_id", stream_instance_id(c.session_generation)}});
         }
       }
       if (!c.capture_backend.opened.empty()) {
@@ -3527,6 +3623,7 @@ namespace stream_stats {
           .start_outcome = ending->start_outcome,
           .start_client_left_after_ms = ending->start_client_left_after_ms,
           .vrr = ending->vrr,
+          .capture_timing = ending->capture_timing,
         };
       }
     }
@@ -3723,6 +3820,73 @@ namespace stream_stats {
     client->capture_frame_since_publication = false;
     client->pyrowave_route.clear();
     return true;
+  }
+
+  bool record_accepted_capture(std::uint64_t session_generation, const platf::image_provenance_t &image) {
+    if (session_generation == 0 || image.capture_epoch_id == 0 || image.source_sequence == 0) return false;
+    if (std::find(vrr_policy::k_presentation_statuses.begin(), vrr_policy::k_presentation_statuses.end(),
+                  image.presentation.status) == vrr_policy::k_presentation_statuses.end()) return false;
+    if (image.route.pacing != platf::capture_pacing_e::unknown &&
+        image.route.pacing != platf::capture_pacing_e::fixed_interval &&
+        image.route.pacing != platf::capture_pacing_e::source_driven) return false;
+    if (image.route.presentation != platf::presentation_clock_e::none &&
+        image.route.presentation != platf::presentation_clock_e::ext_image_copy_monotonic) return false;
+    if (image.presentation.ns && *image.presentation.ns < 0) return false;
+    if (image.presentation.status == vrr_policy::presentation_status_e::valid && !image.presentation.ns) return false;
+    if (image.route.presentation == platf::presentation_clock_e::none &&
+        (image.presentation.status != vrr_policy::presentation_status_e::missing || image.presentation.ns || image.clock_proof)) return false;
+    if (image.clock_proof && image.clock_proof->capture_epoch_id != image.capture_epoch_id) return false;
+
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == current_stats.clients.end()) return false;
+    if (client->capture_timing) {
+      const auto &previous = client->capture_timing->last_accepted;
+      if (image.capture_epoch_id < previous.capture_epoch_id) return false;
+      if (image.capture_epoch_id == previous.capture_epoch_id &&
+          (image.source_sequence <= previous.source_sequence ||
+           image.capture_generation_id != previous.capture_generation_id ||
+           image.route.pacing != previous.route.pacing ||
+           image.route.presentation != previous.route.presentation ||
+           image.clock_proof != previous.clock_proof)) return false;
+    }
+    if (!client->capture_timing || client->capture_timing->last_accepted.capture_epoch_id != image.capture_epoch_id) {
+      client->capture_timing = capture_timing_t {};
+    }
+    auto &timing = *client->capture_timing;
+    timing.last_accepted = image;
+    if (timing.accepted_frames < UINT64_MAX) ++timing.accepted_frames;
+    timing.presentation_counts.count(image.presentation.status);
+    const auto plausibility = capture_plausibility(image);
+    timing.last_plausibility = plausibility;
+    const auto index = static_cast<std::size_t>(std::find(k_capture_plausibility.begin(), k_capture_plausibility.end(), plausibility) -
+                                               k_capture_plausibility.begin());
+    if (index < timing.plausibility_counts.size() && timing.plausibility_counts[index] < UINT64_MAX) {
+      ++timing.plausibility_counts[index];
+    }
+    return true;
+  }
+
+  nlohmann::json capture_timing_json(const stats_t &stats, std::uint64_t session_generation) {
+    if (session_generation == 0) return nullptr;
+    const auto client = std::find_if(stats.clients.begin(), stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == stats.clients.end() || !client->capture_timing) return nullptr;
+    const auto &timing = *client->capture_timing;
+    auto j = accepted_capture_json(timing, {{"session_generation", session_generation}});
+    // Private Doctor evidence retains source facts for debugging. They remain diagnostic: none is
+    // a cadence window, a pacing instruction or proof of physical acceptance.
+    j["capture_generation_id"] = timing.last_accepted.capture_generation_id;
+    j["capture_epoch_id"] = timing.last_accepted.capture_epoch_id;
+    j["last_source_sequence"] = timing.last_accepted.source_sequence;
+    j["last_presentation_ns"] = timing.last_accepted.presentation.ns ?
+      nlohmann::json(*timing.last_accepted.presentation.ns) : nlohmann::json(nullptr);
+    return j;
   }
 
   bool record_vrr_session(const vrr_policy::record_t &record) {
