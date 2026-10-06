@@ -1,9 +1,10 @@
-#include "../tests_common.h"
+#include <gtest/gtest.h>
 
 #include <src/doctor_v2.h>
 
 #include <cstdlib>
 #include <optional>
+#include <limits>
 #include <string>
 
 namespace {
@@ -259,4 +260,244 @@ TEST(DoctorV2Tests, ContainmentBuildCannotExposeTrialsThroughEnvironment) {
   EXPECT_EQ(status.at("actions").front().at("id"), "recheck_pacing");
   EXPECT_EQ(status.at("actions").front().at("capability"), "recheck");
   EXPECT_FALSE(status.at("actions").front().at("exposed").get<bool>());
+}
+
+namespace {
+  nlohmann::json source_time_evidence() {
+    auto evidence = host_evidence(90.0);
+    evidence["encode"]["encoded_fps"] = 90.0;
+    evidence["vrr"] = {
+      {"schema", 1}, {"session_generation", 7}, {"requested", "true"}, {"requested_from", "launch"},
+      {"effective", true}, {"pacing_mode", "source_time"}, {"fallback_reason", nullptr},
+      {"capture_pacing", "source_driven"}
+    };
+    evidence["source_cadence"] = {
+      {"schema", 1}, {"session_generation", 7}, {"clock_domain_verified", true}, {"clock_epoch_id", "test-clock-epoch"},
+      {"window_start_ms", 46000}, {"window_end_ms", 75000}, {"source_frames", 2611}, {"encoded_source_frames", 2611},
+      {"invalid_source_frames", 0}, {"routine_repeat_frames", 0}, {"source_fps", 90.0},
+      {"max_source_gap_ms", 20.0}, {"max_delivery_interval_error_ms", 0.2}, {"timestamp_error_ms", 0.005},
+      {"limits", {{"max_source_gap_ms", 25.0}, {"max_delivery_interval_error_ms", 2.0}, {"max_timestamp_error_ms", 0.01}}}
+    };
+    return evidence;
+  }
+
+  void covered_samples(double received = 90.0, double rendered = 90.0, bool loss = false) {
+    for (std::int64_t i = 0; i <= 75; ++i) {
+      ASSERT_TRUE(ingest_at("owner", "app", sample(1000 + i * 1000, i, received, rendered, loss ? i * 6 : 0))
+        .at("status").get<bool>());
+    }
+  }
+
+  bool has_hypothesis(const nlohmann::json &status, const char *id) {
+    for (const auto &hypothesis : status.at("hypotheses")) {
+      if (hypothesis.at("id") == id) return true;
+    }
+    return false;
+  }
+}
+
+TEST(DoctorV2CadenceTests, ObservedNinetyFpsSourceDoesNotFailAgainstA120Ceiling) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  const auto status = doctor_v2::status("owner", "app", source_time_evidence());
+  EXPECT_TRUE(status.at("stable").get<bool>());
+  EXPECT_FALSE(has_hypothesis(status, "encoder_pressure"));
+  EXPECT_FALSE(has_hypothesis(status, "source_or_capture_cadence"));
+  EXPECT_FALSE(status.at("trial_metrics").at("ready").get<bool>());
+  EXPECT_TRUE(status.at("trial_metrics").at("pacing_error_pct").is_null());
+}
+
+TEST(DoctorV2CadenceTests, ARequestAndSourceDrivenLabelKeepFixedGridSemantics) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  auto evidence = source_time_evidence();
+  evidence["vrr"].update({{"effective", false}, {"pacing_mode", "fixed_grid"}, {"fallback_reason", "clock_domain_unverified"}});
+  evidence.erase("source_cadence");
+  const auto status = doctor_v2::status("owner", "app", evidence);
+  EXPECT_FALSE(status.at("stable").get<bool>());
+  EXPECT_TRUE(has_hypothesis(status, "encoder_pressure"));
+  EXPECT_TRUE(has_hypothesis(status, "source_or_capture_cadence"));
+}
+
+TEST(DoctorV2CadenceTests, MissingObservedCadenceCannotBecomeHealthy) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  auto evidence = source_time_evidence();
+  evidence.erase("source_cadence");
+  const auto status = doctor_v2::status("owner", "app", evidence);
+  EXPECT_FALSE(status.at("stable").get<bool>());
+  EXPECT_FALSE(status.at("coverage_adequate").get<bool>());
+  EXPECT_EQ(status.at("state"), "collecting");
+}
+
+TEST(DoctorV2CadenceTests, GenerationMismatchCannotBorrowAnotherStreamsMeasurements) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  for (const char *object : {"vrr", "source_cadence"}) {
+    auto evidence = source_time_evidence();
+    evidence[object]["session_generation"] = 8;
+    const auto status = doctor_v2::status("owner", "app", evidence);
+    EXPECT_FALSE(status.at("stable").get<bool>()) << object;
+    EXPECT_FALSE(status.at("coverage_adequate").get<bool>()) << object;
+  }
+}
+
+TEST(DoctorV2CadenceTests, TimestampOrGenerationFloatsCannotQualify) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  for (const char *key : {"session_generation", "window_start_ms", "source_frames"}) {
+    auto evidence = source_time_evidence();
+    evidence["source_cadence"][key] = evidence["source_cadence"][key].get<double>();
+    EXPECT_FALSE(doctor_v2::status("owner", "app", evidence).at("stable").get<bool>()) << key;
+  }
+}
+
+TEST(DoctorV2CadenceTests, ABooleanCannotImpersonateANumericPolicySchema) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  auto evidence = source_time_evidence();
+  evidence["vrr"]["schema"] = true;
+  EXPECT_FALSE(doctor_v2::status("owner", "app", evidence).at("stable").get<bool>());
+}
+
+TEST(DoctorV2CadenceTests, SourceAndClientWindowsMustMatchDuringARateChange) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  auto evidence = source_time_evidence();
+  evidence["source_cadence"]["window_start_ms"] = 74000;
+  evidence["source_cadence"]["source_frames"] = 91;
+  evidence["source_cadence"]["encoded_source_frames"] = 91;
+  EXPECT_FALSE(doctor_v2::status("owner", "app", evidence).at("coverage_adequate").get<bool>());
+}
+
+TEST(DoctorV2CadenceTests, StaleHostTimingNeverQualifiesEvenWithCompleteClientHistory) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  doctor_v2::set_now_ms_for_tests(80000);
+  const auto status = doctor_v2::status("owner", "app", source_time_evidence());
+  EXPECT_FALSE(status.at("stable").get<bool>());
+  EXPECT_FALSE(status.at("coverage_adequate").get<bool>());
+}
+
+TEST(DoctorV2CadenceTests, FutureHostWindowNeverQualifies) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  doctor_v2::set_now_ms_for_tests(74000);
+  EXPECT_FALSE(doctor_v2::status("owner", "app", source_time_evidence()).at("stable").get<bool>());
+}
+
+TEST(DoctorV2CadenceTests, SourceClockMustBeVerifiedIndependentlyOfTheRequest) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  auto evidence = source_time_evidence();
+  evidence["source_cadence"]["clock_domain_verified"] = false;
+  EXPECT_FALSE(doctor_v2::status("owner", "app", evidence).at("stable").get<bool>());
+}
+
+TEST(DoctorV2CadenceTests, RealSourceFreezeStaysVisible) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  auto evidence = source_time_evidence();
+  evidence["source_cadence"]["max_source_gap_ms"] = 200.0;
+  const auto status = doctor_v2::status("owner", "app", evidence);
+  EXPECT_FALSE(status.at("stable").get<bool>());
+  EXPECT_EQ(status.at("primary_issue"), "source_or_capture_cadence");
+}
+
+TEST(DoctorV2CadenceTests, DeliveryJitterIsSeparateFromIntentionalSourceVariation) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  auto evidence = source_time_evidence();
+  evidence["source_cadence"]["max_delivery_interval_error_ms"] = 10.0;
+  const auto status = doctor_v2::status("owner", "app", evidence);
+  EXPECT_FALSE(status.at("stable").get<bool>());
+  EXPECT_EQ(status.at("primary_issue"), "delivery_jitter");
+  EXPECT_FALSE(has_hypothesis(status, "source_or_capture_cadence"));
+}
+
+TEST(DoctorV2CadenceTests, TimestampSnappingRemainsARealCadenceFault) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  auto evidence = source_time_evidence();
+  evidence["source_cadence"]["timestamp_error_ms"] = 2.0;
+  EXPECT_EQ(doctor_v2::status("owner", "app", evidence).at("primary_issue"), "source_or_capture_cadence");
+}
+
+TEST(DoctorV2CadenceTests, ConfirmedLossIsNotHiddenByHealthySourceTiming) {
+  doctor_v2_flag_t enabled;
+  covered_samples(90.0, 90.0, true);
+  const auto status = doctor_v2::status("owner", "app", source_time_evidence());
+  EXPECT_FALSE(status.at("stable").get<bool>());
+  EXPECT_EQ(status.at("primary_issue"), "network_pressure");
+}
+
+TEST(DoctorV2CadenceTests, DecoderPressureIsNotHiddenBySourceTiming) {
+  doctor_v2_flag_t enabled;
+  covered_samples(90.0, 85.0);
+  const auto status = doctor_v2::status("owner", "app", source_time_evidence());
+  EXPECT_FALSE(status.at("stable").get<bool>());
+  EXPECT_EQ(status.at("primary_issue"), "decoder_or_render_pressure");
+}
+
+TEST(DoctorV2CadenceTests, EncoderDropPressureRemainsVisible) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  auto evidence = source_time_evidence();
+  evidence["encode"]["dropped_frame_ratio"] = 0.1;
+  EXPECT_EQ(doctor_v2::status("owner", "app", evidence).at("primary_issue"), "encoder_pressure");
+}
+
+TEST(DoctorV2CadenceTests, MissingEncodedSourceFramesArePressureWithoutATargetFpsComparison) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  auto evidence = source_time_evidence();
+  evidence["source_cadence"]["encoded_source_frames"] = 2000;
+  EXPECT_EQ(doctor_v2::status("owner", "app", evidence).at("primary_issue"), "encoder_pressure");
+}
+
+TEST(DoctorV2CadenceTests, BadSourceSamplesAndRoutineRepeatsCannotQualify) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  for (const char *key : {"invalid_source_frames", "routine_repeat_frames"}) {
+    auto evidence = source_time_evidence();
+    evidence["source_cadence"][key] = 1;
+    EXPECT_FALSE(doctor_v2::status("owner", "app", evidence).at("stable").get<bool>()) << key;
+  }
+}
+
+TEST(DoctorV2CadenceTests, NonfiniteOrInconsistentMeasurementsCannotQualify) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  for (const auto value : {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN(), -1.0, 10.0}) {
+    auto evidence = source_time_evidence();
+    evidence["source_cadence"]["source_fps"] = value;
+    EXPECT_FALSE(doctor_v2::status("owner", "app", evidence).at("stable").get<bool>());
+  }
+}
+
+TEST(DoctorV2CadenceTests, UnknownDiagnosticVersionsFailClosed) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  for (const char *object : {"vrr", "source_cadence"}) {
+    auto evidence = source_time_evidence();
+    evidence[object]["schema"] = 2;
+    EXPECT_FALSE(doctor_v2::status("owner", "app", evidence).at("stable").get<bool>()) << object;
+  }
+}
+
+TEST(DoctorV2CadenceTests, StaticDuplicateHintsCannotHideASourceFreeze) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  auto evidence = source_time_evidence();
+  evidence["source_capture"]["duplicate_frame_ratio"] = 0.9;
+  evidence["source_cadence"]["max_source_gap_ms"] = 200.0;
+  EXPECT_FALSE(doctor_v2::status("owner", "app", evidence).at("stable").get<bool>());
+}
+
+TEST(DoctorV2CadenceTests, SourceTimeCannotAuthorizeAFixedRatePacingTrial) {
+  doctor_v2_flag_t enabled(true);
+  covered_samples(90.0, 60.0);
+  const auto status = doctor_v2::status("owner", "app", source_time_evidence());
+  EXPECT_FALSE(status.at("actions_exposed").get<bool>());
+  EXPECT_FALSE(status.at("trial_metrics").at("ready").get<bool>());
 }
