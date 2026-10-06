@@ -3503,15 +3503,16 @@ namespace video {
     epoch.route = disp.capture_timing;
 #ifdef __linux__
     if (epoch.route.presentation == platf::presentation_clock_e::ext_image_copy_monotonic) {
-      // The private runtime records its supervisor, not the compositor answering the socket, so no
-      // authoritative compositor identity exists to match and the clock domain stays unverified.
+      // The expectation is the lease this display retained when it connected to its frozen private
+      // generation (none for desktop, KMS, Gamescope, unowned or probe displays). collect() verifies
+      // the socket peer it actually reads against it, so the clock domain is verified only for that
+      // still-current compositor. Diagnostic only: pacing and timestamps are unchanged.
       epoch.proof = vrr_clock::collect(
         disp.presentation_peer_fd(),
         epoch.epoch_id,
         vrr_clock::linux_probe::real_system(),
         vrr_clock::mapping_limits_t {},
-        false,
-        "no_authoritative_compositor_identity"
+        disp.compositor_lease()
       );
     }
 #endif

@@ -19,6 +19,7 @@
 #include "process_environment.h"
 
 #include "cage_display_router.h"
+#include "compositor_identity_channel.h"
 #include "../../logging.h"
 #include "../../utility.h"
 #include "labwc_startup_diagnostics.h"
@@ -30,6 +31,7 @@
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <array>
+#include <vector>
 #include <atomic>
 #include <cerrno>
 #include <cctype>
@@ -91,6 +93,102 @@ namespace cage_display_router {
       probe_topology_writers.fetch_sub(1);
     }
   };
+
+  /**
+   * The compositor lease of the published generation, bound to its exact nonempty runtime instance
+   * and socket name. Published only together with that generation's topology, and cleared by every
+   * start/stop/reset under the same mutation fence. A lease someone still holds keeps its descriptors,
+   * but current() is false as soon as either publication moves on: no authority survives retirement.
+   *
+   * expected_revision is the topology revision once the publishing start() has finished: its own
+   * mutation is still open when the lease is published, and that mutation's destructor adds one. Any
+   * later mutation (an attempted output refresh, even a failed or reverted one) moves the revision on,
+   * and since it only ever grows the lease can never become current again.
+   */
+  struct compositor_lease_publication_t {
+    std::shared_ptr<const vrr_clock::compositor_lease_t> lease;
+    std::string instance_id;
+    std::string socket_name;
+    std::uint64_t expected_revision = 0;
+  };
+  static std::atomic<std::shared_ptr<const compositor_lease_publication_t>> compositor_lease_publication;
+
+  static void retire_compositor_lease() {
+    compositor_lease_publication.store(nullptr);
+  }
+
+  static bool compositor_lease_published(const vrr_clock::compositor_lease_t &lease,
+                                         const std::shared_ptr<const probe_topology_t> &topology);
+  static void publish_received_compositor_lease(compositor_identity::unique_fd_t &receiver,
+                                                const std::shared_ptr<const probe_topology_t> &topology,
+                                                const std::string &instance_id,
+                                                const std::string &socket_name);
+
+  /**
+   * Receive the supervisor's handoff and publish the lease for this exact generation. Called under
+   * start()'s mutation, after the topology is published. Unavailable identity is only diagnostic: it
+   * logs and publishes nothing, and startup continues exactly as before.
+   */
+  static void publish_compositor_lease(compositor_identity::unique_fd_t &receiver,
+                                       const std::shared_ptr<const probe_topology_t> &topology,
+                                       const std::string &instance_id,
+                                       const std::string &socket_name) {
+    if (!receiver || !topology || instance_id.empty() || socket_name.empty() || cage_pid <= 1) return;
+    // Optional identity: nothing here may unwind ordinary startup. Every owned descriptor is RAII, so
+    // a failure anywhere leaves no lease published and nothing leaked.
+    try {
+      publish_received_compositor_lease(receiver, topology, instance_id, socket_name);
+    } catch (...) {
+      retire_compositor_lease();
+      BOOST_LOG(info) << "labwc: Compositor identity failed; capture clock evidence stays unverified"sv;
+    }
+    receiver = compositor_identity::unique_fd_t {};
+  }
+
+  static void publish_received_compositor_lease(compositor_identity::unique_fd_t &receiver,
+                                                const std::shared_ptr<const probe_topology_t> &topology,
+                                                const std::string &instance_id,
+                                                const std::string &socket_name) {
+    auto received = compositor_identity::receive(receiver.get(), cage_pid, static_cast<std::uint32_t>(getuid()), 1000ms);
+    receiver = compositor_identity::unique_fd_t {};
+    if (!received.identity) {
+      BOOST_LOG(info) << "labwc: Compositor identity unavailable ("sv << received.reason
+                      << "); capture clock evidence stays unverified"sv;
+      return;
+    }
+    auto lease = compositor_identity::make_pinned_lease(
+      std::move(*received.identity), topology->pidfd, topology->socket_path,
+      [topology](const vrr_clock::compositor_lease_t &self) {
+        return compositor_lease_published(self, topology);
+      }
+    );
+    if (!lease) {
+      BOOST_LOG(info) << "labwc: Compositor identity could not be pinned; capture clock evidence stays unverified"sv;
+      return;
+    }
+    // Called under start()'s still-open mutation: its destructor is the one remaining increment.
+    const auto expected_revision = probe_topology_revision.load() + 1;
+    compositor_lease_publication.store(std::make_shared<const compositor_lease_publication_t>(
+      compositor_lease_publication_t {std::move(lease), instance_id, socket_name, expected_revision}
+    ));
+    BOOST_LOG(info) << "labwc: Compositor identity bound to this generation"sv;
+  }
+
+  /**
+   * Whether `lease` is still the published lease of the still-published `topology`, with no writer and
+   * no topology mutation since its start() completed.
+   */
+  static bool compositor_lease_published(const vrr_clock::compositor_lease_t &lease,
+                                         const std::shared_ptr<const probe_topology_t> &topology) {
+    const auto publication = compositor_lease_publication.load();
+    if (!publication || publication->lease.get() != &lease) return false;
+    if (probe_topology_writers.load() != 0 || probe_topology_revision.load() != publication->expected_revision ||
+        probe_topology.load() != topology) {
+      return false;
+    }
+    return compositor_lease_publication.load() == publication && probe_topology_writers.load() == 0 &&
+           probe_topology_revision.load() == publication->expected_revision;
+  }
 
   /**
    * A pidfd for the owned labwc supervisor, opened at spawn.
@@ -977,6 +1075,7 @@ namespace cage_display_router {
 
     const probe_topology_mutation_t probe_mutation;
     probe_topology.store(nullptr);
+    retire_compositor_lease();
 
     // Reset stale state. The pidfd of a supervisor that died without going
     // through stop() is still open here; every session would otherwise leak one.
@@ -1171,12 +1270,31 @@ namespace cage_display_router {
     for (auto &entry : environment_storage) environment.push_back(entry.data());
     environment.push_back(nullptr);
 
+    // Optional compositor identity channel: the supervisor sends the exact labwc child's pidfd over it.
+    // SO_PASSCRED is set before spawn, so the kernel attaches the real sender's credentials to the
+    // message. Any failure leaves the channel off and startup exactly as without it.
+    std::array<int, 2> identity_sockets {-1, -1};
+    int identity_copy = -1;
+    bool identity_enabled = socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, identity_sockets.data()) == 0 &&
+                            compositor_identity::prepare_receiver(identity_sockets[0]);
+    if (identity_enabled) {
+      identity_copy = fcntl(identity_sockets[1], F_DUPFD_CLOEXEC, 6);
+      identity_enabled = identity_copy >= 0;
+    }
+    compositor_identity::unique_fd_t identity_receiver {identity_enabled ? identity_sockets[0] : -1};
+    if (!identity_enabled) close_descriptor(identity_sockets[0]);
+    auto close_identity_sender = util::fail_guard([&] {
+      close_descriptor(identity_copy);
+      close_descriptor(identity_sockets[1]);
+    });
+
     std::array<int, 2> diagnostic_copies {-1, -1};
     bool child_diagnostics_enabled = startup_diagnostics_enabled;
     if (child_diagnostics_enabled) {
-      // Reserve sources above the fixed child destinations to avoid dup2 cycles.
-      diagnostic_copies[0] = fcntl(startup_stderr_pipe[1], F_DUPFD_CLOEXEC, 5);
-      diagnostic_copies[1] = fcntl(startup_status_pipe[1], F_DUPFD_CLOEXEC, 5);
+      // Reserve sources above every fixed child destination (3, 4 and the identity channel 5) to avoid
+      // dup2 cycles.
+      diagnostic_copies[0] = fcntl(startup_stderr_pipe[1], F_DUPFD_CLOEXEC, 6);
+      diagnostic_copies[1] = fcntl(startup_status_pipe[1], F_DUPFD_CLOEXEC, 6);
       child_diagnostics_enabled = diagnostic_copies[0] >= 0 && diagnostic_copies[1] >= 0;
     }
     auto close_copies = util::fail_guard([&] {
@@ -1186,12 +1304,14 @@ namespace cage_display_router {
     const auto diagnostic_startup_shell = startup_diagnostics_enabled ?
       labwc_startup_diagnostics::make_labwc_startup_command(
         labwc_startup_diagnostics::instrument_shell_command(startup_cmd, 3, 4)) : plain_startup_shell;
-    std::array<std::string, 5> arguments {
+    std::vector<std::string> arguments {
       "polaris", "--internal-labwc-supervisor", std::filesystem::absolute(labwc_path).string(),
       std::filesystem::absolute(config_dir).string(), child_diagnostics_enabled ? diagnostic_startup_shell : plain_startup_shell
     };
-    std::array<char *, 6> argv {};
-    for (std::size_t i = 0; i < arguments.size(); ++i) argv[i] = arguments[i].data();
+    if (identity_enabled) arguments.emplace_back(compositor_identity::k_supervisor_flag);
+    std::vector<char *> argv;
+    for (auto &argument : arguments) argv.push_back(argument.data());
+    argv.push_back(nullptr);
 
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attributes;
@@ -1209,10 +1329,20 @@ namespace cage_display_router {
       if (child_diagnostics_enabled) {
         record_error(posix_spawn_file_actions_adddup2(&actions, diagnostic_copies[0], 3));
         record_error(posix_spawn_file_actions_adddup2(&actions, diagnostic_copies[1], 4));
+      } else if (identity_enabled) {
+        // closefrom(6) would leave unrelated low host descriptors at 3 and 4. Replace them with
+        // CLOEXEC placeholders that the exec then closes, so the supervisor starts with exactly
+        // 0-2 and 5, as it had 0-2 alone before.
+        record_error(posix_spawn_file_actions_addopen(&actions, 3, "/dev/null", O_RDONLY | O_CLOEXEC, 0));
+        record_error(posix_spawn_file_actions_addopen(&actions, 4, "/dev/null", O_RDONLY | O_CLOEXEC, 0));
+      }
+      if (identity_enabled) {
+        record_error(posix_spawn_file_actions_adddup2(&actions, identity_copy, compositor_identity::k_channel_fd));
       }
       // closefrom runs inside spawn, so concurrent host opens cannot leak a
       // descriptor between a parent-side /proc enumeration and process creation.
-      record_error(posix_spawn_file_actions_addclosefrom_np(&actions, child_diagnostics_enabled ? 5 : 3));
+      record_error(posix_spawn_file_actions_addclosefrom_np(
+        &actions, identity_enabled ? compositor_identity::k_channel_fd + 1 : (child_diagnostics_enabled ? 5 : 3)));
       sigset_t empty, defaults;
       sigemptyset(&empty);
       sigemptyset(&defaults);
@@ -1224,6 +1354,9 @@ namespace cage_display_router {
     pid_t pid = -1;
     if (!spawn_error) spawn_error = posix_spawn(&pid, "/proc/self/exe", &actions, &attributes, argv.data(), environment.data());
     for (auto &fd : diagnostic_copies) close_descriptor(fd);
+    // The host keeps only the receiving end, so a supervisor that sends nothing reads as closed.
+    close_descriptor(identity_copy);
+    close_descriptor(identity_sockets[1]);
     if (startup_diagnostics_enabled) {
       close_descriptor(startup_stderr_pipe[1]);
       close_descriptor(startup_status_pipe[1]);
@@ -1317,7 +1450,9 @@ namespace cage_display_router {
         generation << std::quoted(session_instance_id) << ':' << cage_pid << ':'
                    << width << ':' << height << ':' << headless << ':' << force_windowed;
         topology->generation = generation.str();
-        probe_topology.store(std::move(topology));
+        const std::shared_ptr<const probe_topology_t> published_topology = std::move(topology);
+        probe_topology.store(published_topology);
+        publish_compositor_lease(identity_receiver, published_topology, session_instance_id, cage_wayland_socket);
       }
     }
     return true;
@@ -1443,6 +1578,7 @@ namespace cage_display_router {
   void stop() {
     const probe_topology_mutation_t probe_mutation;
     probe_topology.store(nullptr);
+    retire_compositor_lease();
     if (cage_pid <= 0) {
       clear_startup_diagnostics();
       return;
@@ -1519,6 +1655,7 @@ namespace cage_display_router {
   void reset_after_external_stop() {
     const probe_topology_mutation_t probe_mutation;
     probe_topology.store(nullptr);
+    retire_compositor_lease();
     if (cage_pid > 0) {
       (void) waitpid(cage_pid, nullptr, WNOHANG);
     }
@@ -1566,6 +1703,18 @@ namespace cage_display_router {
 
   std::string get_session_instance_id() {
     return cage_session_instance_id;
+  }
+
+  std::shared_ptr<const vrr_clock::compositor_lease_t> compositor_lease(
+    std::string_view instance_id,
+    std::string_view socket_name
+  ) {
+    if (instance_id.empty() || socket_name.empty()) return nullptr;
+    const auto publication = compositor_lease_publication.load();
+    if (!publication || publication->instance_id != instance_id || publication->socket_name != socket_name) {
+      return nullptr;
+    }
+    return publication->lease;
   }
 
   std::optional<labwc_startup_diagnostics::snapshot_t> get_startup_client_diagnostics(

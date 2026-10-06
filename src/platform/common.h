@@ -89,6 +89,7 @@ namespace nvenc {
 
 namespace vrr_clock {
   struct proof_t;
+  class compositor_lease_t;
 }  // namespace vrr_clock
 
 namespace platf {
@@ -797,6 +798,16 @@ namespace platf {
      */
     virtual int presentation_peer_fd() const {
       return -1;
+    }
+
+    /**
+     * @brief The authoritative compositor expectation retained when this display connected, or
+     *        nullptr. Only a display owned by a frozen private capture generation, connected to that
+     *        generation's exact socket, has one; an epoch's clock proof verifies its actual peer
+     *        against it. Desktop, KMS, Gamescope, unowned and probe displays never do.
+     */
+    virtual std::shared_ptr<const vrr_clock::compositor_lease_t> compositor_lease() const {
+      return nullptr;
     }
 
     virtual std::unique_ptr<avcodec_encode_device_t> make_avcodec_encode_device(pix_fmt_e pix_fmt) {

@@ -13,6 +13,7 @@
   #include <sys/syscall.h>
   #include <sys/prctl.h>
   #include <src/platform/linux/wayland.h>
+  #include <src/vrr_compositor_identity.h>
 
   #include <cerrno>
   #include <csignal>
@@ -213,6 +214,7 @@ report = {
     "supervisor_environment_readable": supervisor_environment_readable,
     "environment": {key: os.environ.get(key) for key in ("MANGOHUD", "MANGOHUD_DLSYM", "MANGOHUD_CONFIG", "DISPLAY", "WAYLAND_DISPLAY", "POLARIS_PRIVATE_SESSION", "POLARIS_SESSION_INSTANCE_ID")},
     "leaked_high_fds": [name for name in os.listdir("/proc/self/fd") if int(name) >= 128 and os.path.exists("/proc/self/fd/" + name)],
+    "identity_channel_inherited": os.path.exists("/proc/self/fd/5"),
 }
 with open(os.environ["FAKE_LABWC_COMPOSITOR_PID_FILE"] + ".environment.json", "w") as output:
     json.dump(report, output)
@@ -313,6 +315,7 @@ exit 0
   const std::string mode_report = R"JSON([{"name":"HEADLESS-1","enabled":true,"modes":[{"width":1280,"height":720,"refresh":60.0,"current":true}]}])JSON";
   auto query_mode = [&](const std::string &) -> std::optional<std::string> { return mode_report; };
   std::optional<std::string> previous_topology;
+  std::shared_ptr<const vrr_clock::compositor_lease_t> previous_lease;
   EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
 
   for (int cycle = 0; cycle < 2; ++cycle) {
@@ -359,6 +362,29 @@ exit 0
     EXPECT_EQ(report.at("environment").at("POLARIS_PRIVATE_SESSION"), "1");
     EXPECT_EQ(report.at("environment").at("POLARIS_SESSION_INSTANCE_ID"), "external-exit-cycle-" + std::to_string(cycle));
 
+    // The supervisor handed over its exec'd child, the process that answers the socket, and the
+    // channel itself never reached that child.
+    // cmdline is NUL-terminated, so argv[5] is followed by one empty split element.
+    ASSERT_GE(report.at("supervisor_args").size(), 6u);
+    EXPECT_EQ(report.at("supervisor_args").at(5), "--identity-fd=5");
+    EXPECT_FALSE(report.at("identity_channel_inherited").get<bool>());
+    const auto instance = "external-exit-cycle-" + std::to_string(cycle);
+    const auto socket_name = cage_display_router::get_wayland_socket();
+    const auto lease = cage_display_router::compositor_lease(instance, socket_name);
+    ASSERT_TRUE(lease) << "the production handoff published no compositor lease";
+    EXPECT_EQ(lease->process.pid, wait_for_pid_file(compositor_pid_file));
+    EXPECT_EQ(lease->process.uid, getuid());
+    EXPECT_NE(lease->process.starttime, 0u);
+    EXPECT_TRUE(lease->current());
+    EXPECT_FALSE(cage_display_router::compositor_lease("external-exit-cycle-other", socket_name));
+    EXPECT_FALSE(cage_display_router::compositor_lease(instance, "wayland-0"));
+    EXPECT_FALSE(cage_display_router::compositor_lease("", socket_name));
+    EXPECT_FALSE(cage_display_router::compositor_lease(instance, ""));
+    if (previous_lease) {
+      EXPECT_NE(previous_lease, lease);
+      EXPECT_FALSE(previous_lease->current()) << "a retained lease of a retired generation grants nothing";
+    }
+
     const auto topology = cage_display_router::encoder_probe_topology_for_tests(query_mode);
     ASSERT_TRUE(topology);
     EXPECT_EQ(topology, cage_display_router::encoder_probe_topology_for_tests(query_mode));
@@ -374,6 +400,7 @@ exit 0
     ));
     EXPECT_TRUE(cage_display_router::ensure_output_refresh(60, true));
     EXPECT_EQ(topology, cage_display_router::encoder_probe_topology_for_tests(query_mode));
+    EXPECT_TRUE(lease->current()) << "an unchanged read-back attempts no output mutation";
     // A mode mutation between observations must survive even if it returns to
     // exactly the same output bytes. Mutation during a query cannot publish.
     EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(
@@ -384,6 +411,12 @@ exit 0
         return mode_report;
       }
     ));
+    // The attempted output mutation completed (and failed, leaving 60 Hz): the same topology pointer
+    // is still published with no writer, yet the lease must not come back.
+    EXPECT_FALSE(lease->current()) << "an attempted output mutation retires the lease for good";
+    EXPECT_EQ(cage_display_router::compositor_lease(instance, socket_name), lease)
+      << "still the published object, so only the revision fence refuses it";
+    EXPECT_FALSE(lease->current());
     EXPECT_NE(topology, cage_display_router::encoder_probe_topology_for_tests(query_mode));
     // Pinning prevents inode reuse but does not make a pathname immutable.
     // Replace it during the observation and require the post-query read-back.
@@ -400,6 +433,7 @@ exit 0
     fs::rename(socket.string() + ".saved-probe", socket);
     // A detected endpoint replacement remains uncertain for this generation.
     EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
+    EXPECT_FALSE(lease->current());
 
     const auto runtime_state = cage_display_router::runtime_state();
     EXPECT_TRUE(runtime_state.requested_headless);
@@ -426,6 +460,9 @@ exit 0
     EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
     cage_display_router::stop();
     EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
+    EXPECT_FALSE(lease->current()) << "stop retires the lease even while it is still held";
+    EXPECT_FALSE(cage_display_router::compositor_lease(instance, socket_name));
+    previous_lease = lease;
 
     const bool worker_exited = wait_for_process_exit(worker, std::chrono::seconds(2));
     EXPECT_TRUE(worker_exited)
@@ -568,6 +605,8 @@ exit 0
   ));
   EXPECT_FALSE(cage_display_router::cage_pidfd_available_for_tests());
   EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
+  // Without the supervisor's pidfd no generation is published, so no lease either.
+  EXPECT_FALSE(cage_display_router::compositor_lease("pidfd-unavailable-external-exit", cage_display_router::get_wayland_socket()));
   const auto no_pidfd_supervisor_pid = cage_display_router::get_pid();
   ASSERT_GT(no_pidfd_supervisor_pid, 0);
   const auto no_pidfd_compositor_pid = wait_for_pid_file(compositor_pid_file);

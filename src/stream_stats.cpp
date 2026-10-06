@@ -608,6 +608,19 @@ namespace stream_stats {
       "prefetched_init", "clock_unverified",
     };
 
+    // Only fixed identity policy names may cross the public diagnostics boundary. A future or
+    // malformed proof reason must not expose a process identity, path or runtime-supplied text.
+    std::string_view public_compositor_identity_reason(std::string_view reason) {
+      constexpr std::array<std::string_view, 10> allowed {
+        "not_probed", "no_authoritative_compositor_identity", "compositor_generation_unavailable",
+        "compositor_generation_changed", "compositor_identity_invalid", "compositor_peer_pid_mismatch",
+        "compositor_peer_uid_mismatch", "compositor_peer_starttime_unavailable",
+        "compositor_peer_starttime_mismatch", "authoritative_compositor_peer_matched",
+      };
+      return std::find(allowed.begin(), allowed.end(), reason) != allowed.end() ? reason :
+             "identity_reason_unavailable";
+    }
+
     bool capture_clock_verified(const platf::image_provenance_t &image) {
       const auto &proof = image.clock_proof;
       return image.route.presentation == platf::presentation_clock_e::ext_image_copy_monotonic &&
@@ -646,6 +659,7 @@ namespace stream_stats {
       nlohmann::json clock {
         {"time_namespace", "unverifiable"},
         {"producer_identity_verified", false},
+        {"producer_identity_reason", "not_probed"},
         {"local_mapping_verified", false},
         {"clock_domain_verified", false},
         {"reason", "not_probed"},
@@ -656,6 +670,7 @@ namespace stream_stats {
         clock["time_namespace"] = ns == vrr_clock::namespace_e::same ? "same" :
                                   ns == vrr_clock::namespace_e::different ? "different" : "unverifiable";
         clock["producer_identity_verified"] = proof->producer_identity_verified;
+        clock["producer_identity_reason"] = public_compositor_identity_reason(proof->producer_identity_reason);
         clock["local_mapping_verified"] = proof->mapping.valid;
         clock["clock_domain_verified"] = verified;
         // Reasons come from fixed policy gates, never arbitrary runtime strings or process facts.

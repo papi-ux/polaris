@@ -61,6 +61,10 @@ namespace wl {
       return private_compositor_capture ? std::string("private-wlr/") + typeid(*this).name() : std::string {};
     }
 
+    std::shared_ptr<const vrr_clock::compositor_lease_t> compositor_lease() const override {
+      return compositor_lease_;
+    }
+
     int presentation_peer_fd() const override {
       if (capture_timing.presentation == platf::presentation_clock_e::none) return -1;
       auto *connection = const_cast<wl::display_t &>(display).get();
@@ -138,6 +142,16 @@ namespace wl {
       if (display.init(wayland_target)) {
         return -1;
       }
+#ifdef __linux__
+      // Retain the expectation for exactly the generation this display just connected to: its frozen
+      // instance and socket, never the mutable config. Unowned, desktop and probe displays get none.
+      compositor_lease_ = generation_owned && use_private_compositor ?
+                            stream_runtime::labwc::compositor_lease(
+                              generation_policy.private_runtime_instance_id,
+                              generation_policy.private_wayland_socket
+                            ) :
+                            nullptr;
+#endif
       // Screencopy pacing as capture() will choose it. No presentation clock: only ext-image-copy
       // delivers one, and that subclass names it after its own initialization succeeds.
       capture_timing = {
@@ -339,6 +353,7 @@ namespace wl {
     bool capture_transport_logged = false;
     bool prefer_shm_screencopy = false;
     bool private_compositor_capture = false;
+    std::shared_ptr<const vrr_clock::compositor_lease_t> compositor_lease_;
     std::string reported_wayland_main_device;
     std::chrono::microseconds last_dispatch_time {};
 

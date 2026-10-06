@@ -8,6 +8,8 @@
 #include <src/video.h>
 #include <src/vrr_clock_proof.h>
 #ifdef __linux__
+  #include "platform/compositor_identity_fixture.h"
+
   #include <src/platform/linux/graphics.h>
 #endif
 
@@ -162,6 +164,104 @@ TEST(CaptureProvenanceTests, AnExtImageCopyEpochCarriesAnHonestlyUnverifiedProof
   EXPECT_EQ(epoch.proof->producer_identity_reason, "no_authoritative_compositor_identity");
   EXPECT_FALSE(epoch.proof->clock_domain_verified);
   EXPECT_EQ(image->provenance.clock_proof, epoch.proof) << "every image of the epoch shares one immutable proof";
+}
+
+namespace {
+  /// A display connected to a real compositor socket, retaining that generation's lease as wlgrab does.
+  class leased_display_t final: public platf::display_t {
+  public:
+    leased_display_t(int peer_fd, std::shared_ptr<const vrr_clock::compositor_lease_t> lease):
+        peer_fd_ {peer_fd}, lease_ {std::move(lease)} {
+      capture_timing = {platf::capture_pacing_e::source_driven, platf::presentation_clock_e::ext_image_copy_monotonic};
+    }
+
+    platf::capture_e capture(const push_captured_image_cb_t &, const pull_free_image_cb_t &, bool *) override {
+      return platf::capture_e::ok;
+    }
+
+    std::shared_ptr<platf::img_t> alloc_img() override {
+      return std::make_shared<platf::img_t>();
+    }
+
+    int dummy_img(platf::img_t *) override {
+      return 0;
+    }
+
+    int presentation_peer_fd() const override {
+      return peer_fd_;
+    }
+
+    std::shared_ptr<const vrr_clock::compositor_lease_t> compositor_lease() const override {
+      return lease_;
+    }
+
+  private:
+    int peer_fd_;
+    std::shared_ptr<const vrr_clock::compositor_lease_t> lease_;
+  };
+}  // namespace
+
+TEST(CaptureProvenanceTests, AnEpochVerifiesItsRealPeerOnlyAgainstTheDisplaysCurrentLease) {
+  // A controlled compositor: a direct child listening on a real socket, handed over through the
+  // production supervisor protocol and pinned exactly as the runtime pins its generation.
+  compositor_identity_fixture::scratch_dir_t scratch;
+  const auto socket_path = (scratch.path / "wayland-1").string();
+  compositor_identity_fixture::controlled_child_t::options_t options;
+  options.listen_path = socket_path;
+  compositor_identity_fixture::controlled_child_t child {options};
+  auto received = child.receive();
+  ASSERT_TRUE(received.identity) << received.reason;
+  compositor_identity::unique_fd_t supervisor {compositor_identity_fixture::open_pidfd(getpid())};
+  auto published = std::make_shared<std::atomic<bool>>(true);
+  const auto lease = compositor_identity::make_pinned_lease(
+    std::move(*received.identity), supervisor.get(), socket_path,
+    [published](const vrr_clock::compositor_lease_t &) { return published->load(); }
+  );
+  ASSERT_TRUE(lease);
+  const compositor_identity::unique_fd_t peer {compositor_identity_fixture::connect_to(socket_path)};
+  ASSERT_TRUE(peer);
+
+  const leased_display_t display {peer.get(), lease};
+  const auto epoch = video::open_capture_epoch_for_tests(display, 2, {});
+  ASSERT_TRUE(epoch.proof);
+  EXPECT_EQ(epoch.proof->time_namespace, vrr_clock::namespace_e::same) << epoch.proof->namespace_reason;
+  EXPECT_TRUE(epoch.proof->producer_identity_verified) << epoch.proof->producer_identity_reason;
+  EXPECT_EQ(epoch.proof->producer_identity_reason, "authoritative_compositor_peer_matched");
+  EXPECT_TRUE(epoch.proof->mapping.valid) << epoch.proof->mapping.reason;
+  EXPECT_TRUE(epoch.proof->clock_domain_verified);
+
+  // The same peer without the display's lease (the previous always-unverified wiring) proves nothing.
+  const leased_display_t unleased {peer.get(), nullptr};
+  const auto without = video::open_capture_epoch_for_tests(unleased, 2, {});
+  ASSERT_TRUE(without.proof);
+  EXPECT_FALSE(without.proof->producer_identity_verified);
+  EXPECT_EQ(without.proof->producer_identity_reason, "no_authoritative_compositor_identity");
+  EXPECT_FALSE(without.proof->clock_domain_verified);
+
+  // A lease for a different process never vouches for this peer, even while current.
+  compositor_identity_fixture::controlled_child_t other;
+  auto other_received = other.receive();
+  ASSERT_TRUE(other_received.identity) << other_received.reason;
+  const auto foreign = compositor_identity::make_pinned_lease(
+    std::move(*other_received.identity), supervisor.get(), socket_path,
+    [](const vrr_clock::compositor_lease_t &) { return true; }
+  );
+  ASSERT_TRUE(foreign);
+  const leased_display_t mismatched {peer.get(), foreign};
+  const auto wrong = video::open_capture_epoch_for_tests(mismatched, 2, {});
+  ASSERT_TRUE(wrong.proof);
+  EXPECT_FALSE(wrong.proof->producer_identity_verified);
+  EXPECT_EQ(wrong.proof->producer_identity_reason, "compositor_peer_pid_mismatch");
+
+  // Retirement: the display still holds the old lease, and a new epoch gets no authority from it.
+  published->store(false);
+  const auto retired = video::open_capture_epoch_for_tests(display, 2, {});
+  ASSERT_TRUE(retired.proof);
+  EXPECT_GT(retired.epoch_id, epoch.epoch_id);
+  EXPECT_FALSE(retired.proof->producer_identity_verified);
+  EXPECT_EQ(retired.proof->producer_identity_reason, "compositor_generation_unavailable");
+  EXPECT_FALSE(retired.proof->clock_domain_verified);
+  EXPECT_TRUE(epoch.proof->clock_domain_verified) << "an earlier epoch's immutable proof is unchanged";
 }
 
 TEST(CaptureProvenanceTests, AConversionCloneCopiesTheAcceptedSnapshotNotTheSourceImage) {

@@ -6,15 +6,19 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <fcntl.h>
 #include <fstream>
 #include <optional>
 #include <linux/capability.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <string>
 #include <string_view>
 #include <sys/prctl.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#include "compositor_identity_channel.h"
 
 namespace labwc_supervisor {
   using namespace std::chrono_literals;
@@ -69,10 +73,19 @@ namespace labwc_supervisor {
   [[noreturn]] static void supervise_labwc(
     const std::string &labwc_path,
     const std::string &config_dir,
-    const std::string &startup_shell
+    const std::string &startup_shell,
+    bool identity_enabled = false
   ) {
     supervised_runtime_pid = 0;
     supervisor_stop_requested = 0;
+
+    // Optional compositor identity handoff. A CLOEXEC pipe proves the child exec'd: exec closes it,
+    // a failed exec writes errno into it. Any failure here only disables the handoff.
+    int exec_status[2] = {-1, -1};
+    if (identity_enabled && pipe2(exec_status, O_CLOEXEC) != 0) {
+      identity_enabled = false;
+      (void) close(compositor_identity::k_channel_fd);
+    }
 
     // posix_spawn creates this exact process as the session/group leader.
     // Manual internal-mode invocation must also establish a private group.
@@ -102,12 +115,20 @@ namespace labwc_supervisor {
       restore_default_signal_handler(SIGHUP);
       restore_default_signal_handler(SIGCHLD);
       (void) sigprocmask(SIG_SETMASK, &previous_mask, nullptr);
+      if (identity_enabled) {
+        // The compositor and every client it starts must never hold the identity channel. CLOEXEC
+        // would close it at exec; closing it here leaves no window at all.
+        (void) close(compositor_identity::k_channel_fd);
+        (void) close(exec_status[0]);
+      }
 
       execl(labwc_path.c_str(), "labwc",
         "-C", config_dir.c_str(),
         "-s", startup_shell.c_str(),
         nullptr);
-      _exit(errno == ENOENT ? 127 : 126);
+      const int exec_error = errno;
+      if (identity_enabled) compositor_identity::report_exec_failure(exec_status[1], exec_error);
+      _exit(exec_error == ENOENT ? 127 : 126);
     }
 
     if (runtime_pid < 0) {
@@ -117,6 +138,17 @@ namespace labwc_supervisor {
 
     supervised_runtime_pid = static_cast<sig_atomic_t>(runtime_pid);
     (void) sigprocmask(SIG_SETMASK, &previous_mask, nullptr);
+
+    if (identity_enabled) {
+      // Signals are deliverable again here, so a stop during the exec wait is honoured. The handoff
+      // never blocks on the host and never changes the supervision below.
+      (void) close(exec_status[1]);
+      (void) compositor_identity::send_after_exec(
+        compositor_identity::k_channel_fd, runtime_pid, exec_status[0], &supervisor_stop_requested
+      );
+      (void) close(exec_status[0]);
+      (void) close(compositor_identity::k_channel_fd);
+    }
 
     // A labwc startup client may call setsid() and leave the supervisor's
     // process group. PR_SET_CHILD_SUBREAPER makes that exact runtime descendant
@@ -215,9 +247,27 @@ namespace labwc_supervisor {
     _exit(127);
   }
 
+  /**
+   * Whether the inherited identity channel is usable. It is always made CLOEXEC first, so the
+   * compositor can never inherit it even when it is refused here.
+   */
+  inline bool identity_channel_usable() {
+    const int fd = compositor_identity::k_channel_fd;
+    const int flags = fcntl(fd, F_GETFD);
+    if (flags < 0 || fcntl(fd, F_SETFD, flags | FD_CLOEXEC) != 0) return false;
+    struct stat info {};
+    return fstat(fd, &info) == 0 && S_ISSOCK(info.st_mode);
+  }
+
   inline std::optional<int> dispatch(int argc, char **argv) {
     if (argc < 2 || !argv[1] || std::string_view(argv[1]) != "--internal-labwc-supervisor") return std::nullopt;
-    if (argc != 5 || !argv[2] || argv[2][0] != '/' || !argv[3] || argv[3][0] != '/' || !argv[4]) return 126;
+    if ((argc != 5 && argc != 6) || !argv[2] || argv[2][0] != '/' || !argv[3] || argv[3][0] != '/' || !argv[4]) return 126;
+    // FD 5 is trusted only when the host asked for the channel explicitly.
+    bool identity_enabled = false;
+    if (argc == 6) {
+      if (!argv[5] || std::string_view(argv[5]) != compositor_identity::k_supervisor_flag) return 126;
+      identity_enabled = identity_channel_usable();
+    }
     // Re-executing a file-capability-enabled host can regain its file caps.
     // The supervisor needs ordinary same-user process/device access only. Drop
     // that authority before creating descendants and keep /proc identity
@@ -229,6 +279,6 @@ namespace labwc_supervisor {
     if (prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0) != 0 ||
         syscall(SYS_capset, &header, capabilities) != 0 ||
         prctl(PR_SET_DUMPABLE, 1, 0, 0, 0) != 0) return 126;
-    supervise_labwc(argv[2], argv[3], argv[4]);
+    supervise_labwc(argv[2], argv[3], argv[4], identity_enabled);
   }
 }

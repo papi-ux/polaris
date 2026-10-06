@@ -235,6 +235,7 @@ if (NOT WIN32 AND NOT APPLE)
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_wayland_monitor_layout.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_absolute_input_source.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_kwin_permission_entries.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_compositor_identity_channel.cpp
     )
 endif()
 

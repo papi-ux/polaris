@@ -11779,3 +11779,53 @@ TEST_F(StreamStatsCaptureTimingTests, DiagnosticWritesLeaveControllerAuthorityAn
   EXPECT_EQ(controller_after.action_authority_revision, controller_before.action_authority_revision);
   EXPECT_EQ(stream_stats::vrr_json(after, 501), policy_before);
 }
+
+TEST_F(StreamStatsCaptureTimingTests, PublicIdentityReasonsKeepKnownPolicyNamesWithoutGrantingPacingAuthority) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  const std::array<std::string_view, 9> reasons {
+    "no_authoritative_compositor_identity", "compositor_generation_unavailable",
+    "compositor_generation_changed", "compositor_identity_invalid", "compositor_peer_pid_mismatch",
+    "compositor_peer_uid_mismatch", "compositor_peer_starttime_unavailable",
+    "compositor_peer_starttime_mismatch", "authoritative_compositor_peer_matched",
+  };
+  std::uint64_t epoch = 71;
+  for (const auto reason : reasons) {
+    auto frame = image(epoch++, 1);
+    auto evidence = *proof(frame.capture_epoch_id, reason == "authoritative_compositor_peer_matched");
+    evidence.producer_identity_reason = reason;
+    frame.clock_proof = std::make_shared<const vrr_clock::proof_t>(evidence);
+    ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+    const auto public_clock = current_stats_json()["clients"][0]["capture_timing"];
+    EXPECT_EQ(public_clock["clock"]["producer_identity_reason"], reason);
+    EXPECT_EQ(public_clock["clock"]["producer_identity_verified"], evidence.producer_identity_verified);
+    EXPECT_EQ(public_clock["source_time_eligible"], false);
+    EXPECT_EQ(public_clock["pacing_authority"], false);
+    EXPECT_EQ(public_clock["effective_vrr"], false);
+    EXPECT_EQ(public_clock["receiver_presentation_verified"], false);
+  }
+}
+
+TEST_F(StreamStatsCaptureTimingTests, UnknownIdentityReasonsCannotExposeProcessFactsInLiveOrEndedReadouts) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto frame = image();
+  auto evidence = *proof(frame.capture_epoch_id);
+  constexpr std::string_view private_reason = "pid=987654321 starttime=8877665544 /private/compositor/socket";
+  evidence.producer_identity_reason = private_reason;
+  frame.clock_proof = std::make_shared<const vrr_clock::proof_t>(evidence);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  const auto live = current_stats_json()["clients"][0]["capture_timing"];
+  EXPECT_EQ(live["clock"]["producer_identity_reason"], "identity_reason_unavailable");
+  EXPECT_EQ(timing()["clock"]["producer_identity_reason"], "identity_reason_unavailable");
+  for (const auto readout : {live, timing()}) {
+    const auto text = readout.dump();
+    for (const auto secret : {"987654321", "8877665544", "/private/compositor/socket"}) {
+      EXPECT_EQ(text.find(secret), std::string::npos) << secret;
+    }
+  }
+  stream_stats::remove_client("10.0.0.5", 501);
+  EXPECT_EQ(current_stats_json()["last_session"]["capture_timing"], live);
+  stream_stats::add_client("10.0.0.5", "Replacement", 502);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(502, image(72, 1)));
+  EXPECT_EQ(current_stats_json()["last_session"]["capture_timing"], live);
+  EXPECT_EQ(current_stats_json()["clients"][0]["capture_timing"]["clock"]["producer_identity_reason"], "not_probed");
+}
