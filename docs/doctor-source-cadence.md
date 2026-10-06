@@ -41,6 +41,7 @@ The host producer must supply the following fields in `source_cadence`:
 | `first_source_ns`, `last_source_ns` | Exact ordinary-source presentation times mapped into the verified server monotonic clock, in nanoseconds. Both must be inside the comparison window and the first must precede the last. Missing edge evidence cannot qualify. Window milliseconds must be representable as signed 64-bit nanoseconds. |
 | `source_frames`, `encoded_source_frames` | At least three ordinary source frames and the count encoded from those frames. The latter cannot exceed the former. |
 | `invalid_source_frames`, `routine_repeat_frames` | Both zero to qualify source-time measurements. Keepalive policy is separate and must not inflate these ordinary-source counts. |
+| `ceiling_dropped_source_frames` | Exact producer count of ordinary sources discarded by the stream rate ceiling, matched to this generation and source window. Explicit zero is required for this first consumer; missing, malformed or nonzero accounting cannot qualify. Neither average FPS can stand in for this ledger. |
 | `source_fps` | Positive, finite FPS matching `(source_frames - 1) * 1000 / window_duration_ms` within one percent. |
 | `max_source_gap_ms` | Finite, nonnegative maximum interior source interval, at least the mean over the first-to-last source span and no greater than that span (one nanosecond tolerance). |
 | `max_delivery_interval_error_ms`, `timestamp_error_ms` | Finite, nonnegative measurements from source/delivery correlation. |
@@ -56,10 +57,13 @@ in the diagnostic observation. Encoding fewer than 90 percent of ordinary source
 also reports encoder pressure. Static/duplicate hints cannot hide an observed
 source stall or timestamp error.
 
-This first consumer qualifies only sources at or below the stream ceiling. A
-faster source can legitimately lose frames to the ceiling, and this aggregate
-has no verified ceiling-drop accounting yet. Doctor leaves that case collecting
-rather than blaming the encoder or capture cadence.
+This first consumer qualifies only sources whose window and first-to-last span
+rates are at or below the stream ceiling, with an explicit zero ceiling-drop
+ledger. A quiet window edge can hide a faster active span; a short burst can hide
+in both means. Neither case authorizes guessing encoder pressure. Nonzero
+ceiling-drop interpretation is not implemented; such evidence stays collecting.
+The future producer must count actual ceiling discards, never infer zero from
+the averages or omit those sources from `source_frames`.
 
 Source-time evidence cannot authorize a fixed-rate pacing trial. Trial readiness
 is false and the fixed-grid pacing-error metric is unavailable for such a

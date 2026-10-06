@@ -276,6 +276,7 @@ namespace {
       {"window_start_ms", 46000}, {"window_end_ms", 75000}, {"source_frames", 2611}, {"encoded_source_frames", 2611},
       {"first_source_ns", 46000000000LL}, {"last_source_ns", 75000000000LL},
       {"invalid_source_frames", 0}, {"routine_repeat_frames", 0}, {"source_fps", 90.0},
+      {"ceiling_dropped_source_frames", 0},
       {"max_source_gap_ms", 20.0}, {"max_delivery_interval_error_ms", 0.2}, {"timestamp_error_ms", 0.005},
       {"limits", {{"max_source_gap_ms", 25.0}, {"max_delivery_interval_error_ms", 2.0}, {"max_timestamp_error_ms", 0.01}}}
     };
@@ -424,6 +425,40 @@ TEST(DoctorV2CadenceTests, ASourceAboveTheCeilingNeedsVerifiedDropAccounting) {
   EXPECT_FALSE(status.at("trial_metrics").at("ready").get<bool>());
   EXPECT_FALSE(has_hypothesis(status, "encoder_pressure"));
   EXPECT_FALSE(has_hypothesis(status, "source_or_capture_cadence"));
+}
+
+TEST(DoctorV2CadenceTests, AQuietWindowEdgeCannotHideAFasterSourceSpan) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  auto evidence = source_time_evidence();
+  // Window average is 90 FPS, but 2611 sources over this 17 s active span
+  // exceed the 120 FPS ceiling. Legitimate downselection is not encoder loss.
+  evidence["source_cadence"].update({{"first_source_ns", 52000000000LL}, {"last_source_ns", 69000000000LL},
+                                    {"max_source_gap_ms", 7.0}, {"encoded_source_frames", 2040}});
+  const auto status = doctor_v2::status("owner", "app", evidence);
+  EXPECT_EQ(status.at("state"), "collecting");
+  EXPECT_FALSE(status.at("coverage_adequate").get<bool>());
+  EXPECT_FALSE(has_hypothesis(status, "encoder_pressure"));
+  EXPECT_FALSE(has_hypothesis(status, "source_or_capture_cadence"));
+}
+
+TEST(DoctorV2CadenceTests, CeilingDropsOrAnUnknownLedgerCannotBlameEncoding) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  auto missing = source_time_evidence();
+  missing["source_cadence"].erase("ceiling_dropped_source_frames");
+  EXPECT_FALSE(doctor_v2::status("owner", "app", missing).at("coverage_adequate").get<bool>());
+  // A burst can be hidden by both means. The explicit ledger stays required
+  // even for their otherwise qualified 90 FPS window and source span.
+  for (const nlohmann::json &value : std::vector<nlohmann::json> {1, 611, true, 0.0, -1, UINT64_MAX}) {
+    auto evidence = source_time_evidence();
+    evidence["source_cadence"]["encoded_source_frames"] = 2000;
+    evidence["source_cadence"]["ceiling_dropped_source_frames"] = value;
+    const auto status = doctor_v2::status("owner", "app", evidence);
+    EXPECT_EQ(status.at("state"), "collecting") << value;
+    EXPECT_FALSE(status.at("stable").get<bool>()) << value;
+    EXPECT_FALSE(has_hypothesis(status, "encoder_pressure")) << value;
+  }
 }
 
 TEST(DoctorV2CadenceTests, MissingObservedCadenceCannotBecomeHealthy) {

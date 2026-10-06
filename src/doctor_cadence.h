@@ -131,6 +131,13 @@ namespace doctor_cadence {
           !exact_nonnegative(cadence.at("routine_repeat_frames")) || cadence.at("routine_repeat_frames") != 0) {
         return unavailable("invalid_sources_or_routine_repeats");
       }
+      // Uneven source bursts can incur ceiling drops even when both average
+      // rates are below the ceiling. Require the producer's explicit ledger;
+      // this first consumer supports only a window with no ceiling drops.
+      if (!exact_nonnegative(cadence.at("ceiling_dropped_source_frames")) ||
+          cadence.at("ceiling_dropped_source_frames") != 0) {
+        return unavailable("source_ceiling_drop_evidence_unavailable");
+      }
       const auto &limits = cadence.at("limits");
       for (const char *key : {"source_fps", "max_source_gap_ms", "max_delivery_interval_error_ms", "timestamp_error_ms"}) {
         if (!finite_nonnegative(cadence.at(key))) return unavailable("source_measurement_unavailable");
@@ -142,10 +149,12 @@ namespace doctor_cadence {
         return unavailable("source_measurement_or_limit_unavailable");
       }
       result.source_fps = cadence.at("source_fps").get<double>();
-      // This first aggregate has no verified ceiling-drop accounting. A faster
-      // source can legitimately be downselected, so leave that case unknown.
+      const auto source_span_ms = double(last_ns - first_ns) / ns_per_ms;
+      const auto source_span_fps = 1000.0 * (cadence.at("source_frames").get<std::int64_t>() - 1) / source_span_ms;
+      // A quiet edge can hide a faster active source in the window average.
+      // Nonzero ceiling drops and above-ceiling rates need fuller accounting.
       if (!std::isfinite(stream_fps_ceiling) || stream_fps_ceiling <= 0.0 ||
-          result.source_fps > stream_fps_ceiling) {
+          std::max(result.source_fps, source_span_fps) > stream_fps_ceiling) {
         return unavailable("source_above_ceiling_needs_drop_accounting");
       }
       // A declared aggregate FPS must agree with its retained ordinary-source count.
@@ -153,7 +162,6 @@ namespace doctor_cadence {
       if (std::abs(result.source_fps - counted_fps) > 0.01 * std::max(1.0, counted_fps)) {
         return unavailable("source_fps_count_mismatch");
       }
-      const auto source_span_ms = double(last_ns - first_ns) / ns_per_ms;
       const auto interior_gap_ms = cadence.at("max_source_gap_ms").get<double>();
       if (interior_gap_ms + 0.000001 < source_span_ms / (cadence.at("source_frames").get<std::int64_t>() - 1) ||
           interior_gap_ms > source_span_ms + 0.000001) {
@@ -175,6 +183,7 @@ namespace doctor_cadence {
       result.observation["leading_source_gap_ms"] = leading_gap_ms;
       result.observation["trailing_source_gap_ms"] = trailing_gap_ms;
       result.observation["max_window_source_gap_ms"] = window_gap_ms;
+      result.observation["source_span_fps"] = source_span_fps;
     } catch (const nlohmann::json::exception &) {
       return unavailable("source_or_pacing_evidence_unavailable");
     }
