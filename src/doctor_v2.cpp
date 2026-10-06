@@ -442,7 +442,7 @@ namespace doctor_v2 {
       source_capture_measured && encode_measured && transport_measured &&
       effective_settings_measured && receive_decode_render_complete;
     const auto cadence = doctor_cadence::evaluate(
-      host_evidence, generation, now_ms(), current.front().received_ms, current.back().received_ms
+      host_evidence, generation, now_ms(), current.front().received_ms, current.back().received_ms, target_fps
     );
     const bool diagnostic_evidence_adequate = core_evidence_adequate && cadence.available;
     if (!cadence.observation.is_null()) result["observations"].push_back(cadence.observation);

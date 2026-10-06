@@ -35,7 +35,8 @@ namespace doctor_cadence {
 
   /** Optional host-only aggregate contract. Counters and requests never prove cadence. */
   inline evaluation_t evaluate(const nlohmann::json &host, std::int64_t generation, std::int64_t now_ms,
-                               std::int64_t expected_begin_ms, std::int64_t expected_end_ms) {
+                               std::int64_t expected_begin_ms, std::int64_t expected_end_ms,
+                               double stream_fps_ceiling) {
     evaluation_t result;
     if (!host.contains("vrr")) return result;
     result.available = false;
@@ -120,6 +121,12 @@ namespace doctor_cadence {
         return unavailable("source_measurement_or_limit_unavailable");
       }
       result.source_fps = cadence.at("source_fps").get<double>();
+      // This first aggregate has no verified ceiling-drop accounting. A faster
+      // source can legitimately be downselected, so leave that case unknown.
+      if (!std::isfinite(stream_fps_ceiling) || stream_fps_ceiling <= 0.0 ||
+          result.source_fps > stream_fps_ceiling) {
+        return unavailable("source_above_ceiling_needs_drop_accounting");
+      }
       // A declared aggregate FPS must agree with its retained ordinary-source count.
       const auto counted_fps = 1000.0 * (cadence.at("source_frames").get<std::int64_t>() - 1) / (end_ms - begin_ms);
       if (std::abs(result.source_fps - counted_fps) > 0.01 * std::max(1.0, counted_fps)) {

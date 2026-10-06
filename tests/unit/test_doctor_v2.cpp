@@ -319,6 +319,21 @@ TEST(DoctorV2CadenceTests, ARequestAndSourceDrivenLabelKeepFixedGridSemantics) {
   EXPECT_TRUE(has_hypothesis(status, "source_or_capture_cadence"));
 }
 
+TEST(DoctorV2CadenceTests, ASourceAboveTheCeilingNeedsVerifiedDropAccounting) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  auto evidence = source_time_evidence();
+  evidence["source_cadence"]["source_fps"] = 180.0;
+  evidence["source_cadence"]["source_frames"] = 5221;
+  evidence["source_cadence"]["max_source_gap_ms"] = 10.0;
+  const auto status = doctor_v2::status("owner", "app", evidence);
+  EXPECT_EQ(status.at("state"), "collecting");
+  EXPECT_FALSE(status.at("stable").get<bool>());
+  EXPECT_FALSE(status.at("trial_metrics").at("ready").get<bool>());
+  EXPECT_FALSE(has_hypothesis(status, "encoder_pressure"));
+  EXPECT_FALSE(has_hypothesis(status, "source_or_capture_cadence"));
+}
+
 TEST(DoctorV2CadenceTests, MissingObservedCadenceCannotBecomeHealthy) {
   doctor_v2_flag_t enabled;
   covered_samples();

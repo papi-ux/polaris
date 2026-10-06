@@ -46,6 +46,11 @@ and encoder drops. Encoding fewer than 90 percent of ordinary source frames
 also reports encoder pressure. Static/duplicate hints cannot hide an observed
 source stall or timestamp error.
 
+This first consumer qualifies only sources at or below the stream ceiling. A
+faster source can legitimately lose frames to the ceiling, and this aggregate
+has no verified ceiling-drop accounting yet. Doctor leaves that case collecting
+rather than blaming the encoder or capture cadence.
+
 Source-time evidence cannot authorize a fixed-rate pacing trial. Trial readiness
 is false and the fixed-grid pacing-error metric is unavailable for such a
 stream. This diagnostic does not grant VRR activation, bitrate authority or
