@@ -19,6 +19,7 @@
 #include "video_rate.h"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cmath>
 #include <optional>
@@ -175,6 +176,8 @@ namespace video {
     native_handle_t native {};
     platf::frame_metadata_t source_metadata {};
     platf::frame_metadata_t metadata {};
+    /// The producer's provenance, copied whole; read-only for the frame's lifetime.
+    platf::image_provenance_t provenance {};
 
     frame_t() = default;
 
@@ -192,6 +195,7 @@ namespace video {
         native.fd = this->image->native_fd;
         source_metadata = this->image->frame_metadata;
         metadata = source_metadata;
+        provenance = this->image->provenance;
       }
     }
 
@@ -1206,6 +1210,74 @@ namespace video {
     const frame_t &frame,
     std::optional<stream_stats::capture_source_t> &reported_source
   );
+
+  /// One capture epoch as the capture threads open it, after the given pushes were stamped.
+  struct capture_epoch_for_tests_t {
+    std::uint64_t epoch_id = 0;
+    platf::capture_timing_route_t route;
+    std::shared_ptr<const vrr_clock::proof_t> proof;
+  };
+
+  /**
+   * Open an epoch for disp exactly as both capture threads do, then stamp each (image, frame_captured)
+   * push in order with the production stamp. The proof, when the route has a presentation clock, is
+   * collected from the real kernel facts of disp's peer descriptor.
+   */
+  capture_epoch_for_tests_t open_capture_epoch_for_tests(
+    const platf::display_t &disp,
+    std::uint64_t capture_generation_id,
+    const std::vector<std::pair<std::shared_ptr<platf::img_t>, bool>> &pushes
+  );
+
+  /// The reset both capture threads apply to a pooled image before handing it to a backend again.
+  void reset_pooled_image_for_tests(platf::img_t &img);
+
+  /**
+   * The production epoch allocator applied to a caller-owned allocator, so boundaries are tested
+   * without touching the process-wide one. Returns 0 once exhausted, permanently.
+   */
+  std::uint64_t allocate_capture_identity_for_tests(std::atomic<std::uint64_t> &allocator);
+
+  /// Stamp pushes with the production stamp from an epoch whose next sequence is seeded.
+  void stamp_seeded_epoch_for_tests(
+    std::uint64_t epoch_id,
+    std::uint64_t capture_generation_id,
+    std::uint64_t next_sequence,
+    const std::vector<std::pair<std::shared_ptr<platf::img_t>, bool>> &pushes
+  );
+
+  /**
+   * Feed provenances in order to one consumer's production accepted-capture recorder.
+   * @return How many reached a successful stream_stats::record_accepted_capture().
+   */
+  std::size_t record_accepted_captures_for_tests(
+    const config_t &config,
+    const std::vector<platf::image_provenance_t> &accepted
+  );
+
+  /**
+   * One production accepted-capture consumer that persists across calls, as an encode loop's does, so
+   * a test can register or retire its stats entry between an accepted image and the loop's retries.
+   */
+  class accepted_capture_consumer_for_tests_t {
+  public:
+    accepted_capture_consumer_for_tests_t();
+    ~accepted_capture_consumer_for_tests_t();
+    /// A newly accepted image, as the loop records it. @return Whether it was published now.
+    bool record(const config_t &config, const platf::image_provenance_t &provenance);
+    /// What an iteration that accepted no new image does. @return Whether the pending one was published.
+    bool retry(const config_t &config);
+    bool has_pending() const;
+
+  private:
+    struct state_t;
+    std::unique_ptr<state_t> state;
+  };
+
+  #ifdef __linux__
+  /// The clone a GPU conversion takes of a DMA-BUF compatibility image.
+  std::shared_ptr<platf::img_t> clone_compat_image_for_conversion_for_tests(const frame_t &frame);
+  #endif
 
   #ifdef __linux__
   /// What a session takes as it starts to measure its generation's capture request against.

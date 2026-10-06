@@ -52,11 +52,13 @@ extern "C" {
 #include "verified_action.h"
 #include "video_frame_pacing.h"
 #include "encoder_probe_reuse.h"
+#include "vrr_clock_proof.h"
 #include <iomanip>
 
 #ifdef __linux__
   #include "platform/linux/encoder_auto_policy.h"
   #include "platform/linux/stream_runtime.h"
+  #include "platform/linux/vrr_clock_probe.h"
   #include "platform/linux/session_media.h"
   #include "platform/linux/cuda.h"
   #include "platform/linux/graphics.h"
@@ -422,6 +424,9 @@ namespace video {
       clone->native_fd = src->native_fd;
       clone->frame_timestamp = src->frame_timestamp;
       clone->frame_metadata = src->frame_metadata;
+      // The immutable snapshot the consumer accepted, whole: never re-read from the source image,
+      // whose provenance belongs to the producer's pool and is reset when it is reused.
+      clone->provenance = frame.provenance;
       clone->x = src->x;
       clone->y = src->y;
       clone->src_w = src->src_w;
@@ -2257,11 +2262,73 @@ namespace video {
     }
   }
 
+  /**
+   * One consumer's record of the source images it actually accepted: called only after the pacer
+   * admitted the image and it converted, never for a repeat of the last image this consumer recorded,
+   * an input-only loop or a probe. A Watch consumer records its own images, while its frozen
+   * watch_or_input_only policy keeps every pacing authority false. Stats fences epoch and sequence again.
+   *
+   * The stream registers its stats entry after its video thread starts, so the first accepted image
+   * can be refused. That one accepted observation is kept, unchanged, and retried from the loop's
+   * later iterations, so a static source whose next frames are only repeats still lands it once.
+   * A newer accepted image replaces it; nothing here touches pacing, conversion, encoding or packets.
+   */
+  struct accepted_capture_t {
+    std::uint64_t epoch_id = 0;
+    std::uint64_t sequence = 0;
+    std::optional<platf::image_provenance_t> pending;
+
+    /**
+     * The one guard for both entry paths. Only an eligible consumer, and only a stamped image of this
+     * consumer's own logical capture generation, where 0 is the ordinary desktop's valid generation:
+     * a stale image of another generation never enters, by record or by retry.
+     */
+    static bool admissible(const config_t &config, const platf::image_provenance_t &provenance) {
+      return !config.input_only && !encoder_probe_active() && config.session_generation != 0 &&
+             provenance.capture_epoch_id != 0 && provenance.source_sequence != 0 &&
+             provenance.capture_generation_id == config.capture_generation.generation_id;
+    }
+
+    /** Publish an accepted observation; on refusal keep it as the one pending observation. */
+    bool publish(const config_t &config, const platf::image_provenance_t &provenance) {
+      if (stream_stats::record_accepted_capture(config.session_generation, provenance)) {
+        epoch_id = provenance.capture_epoch_id;
+        sequence = provenance.source_sequence;
+        pending.reset();
+        return true;
+      }
+      pending = provenance;
+      return false;
+    }
+
+    /** A newly accepted, converted source image. @return Whether it was published now. */
+    bool record(const config_t &config, const platf::image_provenance_t &provenance) {
+      if (!admissible(config, provenance)) return false;
+      if (provenance.capture_epoch_id == epoch_id && provenance.source_sequence == sequence) return false;
+      return publish(config, provenance);
+    }
+
+    /**
+     * Retry the pending observation from an iteration that accepted no new image. A pending
+     * observation that is no longer admissible for this consumer is dropped, never transferred.
+     */
+    bool retry(const config_t &config) {
+      if (!pending) return false;
+      if (!admissible(config, *pending)) {
+        pending.reset();
+        return false;
+      }
+      const auto observation = *pending;
+      return publish(config, observation);
+    }
+  };
+
   struct sync_session_t {
     sync_session_ctx_t *ctx;
     std::unique_ptr<encode_session_t> session;
     std::optional<stream_stats::capture_source_t> reported_source;
     capture_backend_publication_t capture_backend;
+    accepted_capture_t accepted_capture;
   };
 
   void record_capture_source(const config_t &config, const frame_t &frame,
@@ -3360,6 +3427,97 @@ namespace video {
     return bound.platform_formats->dev_type;
   }
 
+  /**
+   * The allocator state after issuing current. The largest value is issued once and then the state
+   * becomes 0, which never issues again: identities are never reused, even after exhaustion.
+   */
+  static constexpr std::uint64_t capture_identity_after(std::uint64_t current) {
+    return current == std::numeric_limits<std::uint64_t>::max() ? 0 : current + 1;
+  }
+
+  /** Take one nonzero identity from a shared allocator, or 0 permanently once it is exhausted. */
+  static std::uint64_t allocate_capture_identity(std::atomic<std::uint64_t> &next) {
+    auto current = next.load(std::memory_order_relaxed);
+    while (current != 0) {
+      if (next.compare_exchange_weak(current, capture_identity_after(current), std::memory_order_relaxed)) {
+        return current;
+      }
+    }
+    return 0;
+  }
+
+  /**
+   * One producer's capture epoch: minted after each successful display open or reopen, so frames of
+   * successive displays never share an identity. A probe's display mints none and its images stay
+   * unstamped. Diagnostic only: nothing here changes how frames are stamped, paced or encoded.
+   */
+  struct capture_epoch_t {
+    std::uint64_t capture_generation_id = 0;
+    std::uint64_t epoch_id = 0;
+    /// Next source sequence to issue; 0 once exhausted, after which no image is stamped again.
+    std::uint64_t next_sequence = 1;
+    platf::capture_timing_route_t route;
+    std::shared_ptr<const vrr_clock::proof_t> proof;
+
+    /**
+     * Stamp a new source frame's producer identity before any consumer can see the image. An
+     * exhausted epoch or sequence leaves the image unstamped, so it can never be recorded.
+     */
+    void stamp(platf::img_t &img) {
+      if (epoch_id == 0 || next_sequence == 0) return;
+      const auto sequence = next_sequence;
+      next_sequence = capture_identity_after(sequence);
+      img.provenance.capture_generation_id = capture_generation_id;
+      img.provenance.capture_epoch_id = epoch_id;
+      img.provenance.source_sequence = sequence;
+      img.provenance.route = route;
+      img.provenance.clock_proof = proof;
+    }
+  };
+
+  static std::atomic<std::uint64_t> next_capture_epoch_id {1};
+
+  /** What both capture threads do to a pooled image they hand to a backend again. */
+  static void reset_pooled_image(platf::img_t &img) {
+    img.frame_timestamp.reset();
+    // Only the pool holds a pulled image, so no consumer can observe this reset.
+    img.provenance = {};
+  }
+
+  /**
+   * Stamp a newly captured image once, before its first raise. An image already stamped since its
+   * pool reset is never written again, so a consumer holding it can never see its provenance change.
+   */
+  static void stamp_new_source_image(capture_epoch_t &epoch, platf::img_t *img, bool frame_captured) {
+    if (frame_captured && img && img->provenance.capture_epoch_id == 0) {
+      epoch.stamp(*img);
+    }
+  }
+
+  static capture_epoch_t open_capture_epoch(const platf::display_t &disp, std::uint64_t capture_generation_id) {
+    capture_epoch_t epoch;
+    if (encoder_probe_active()) return epoch;
+    epoch.capture_generation_id = capture_generation_id;
+    epoch.epoch_id = allocate_capture_identity(next_capture_epoch_id);
+    if (epoch.epoch_id == 0) return epoch;  // exhausted: unstamped, unrecordable, never a reused identity
+    epoch.route = disp.capture_timing;
+#ifdef __linux__
+    if (epoch.route.presentation == platf::presentation_clock_e::ext_image_copy_monotonic) {
+      // The private runtime records its supervisor, not the compositor answering the socket, so no
+      // authoritative compositor identity exists to match and the clock domain stays unverified.
+      epoch.proof = vrr_clock::collect(
+        disp.presentation_peer_fd(),
+        epoch.epoch_id,
+        vrr_clock::linux_probe::real_system(),
+        vrr_clock::mapping_limits_t {},
+        false,
+        "no_authoritative_compositor_identity"
+      );
+    }
+#endif
+    return epoch;
+  }
+
   void captureThread(
     std::shared_ptr<safe::queue_t<capture_ctx_t>> capture_ctx_queue,
     sync_util::sync_t<std::weak_ptr<platf::display_t>> &display_wp,
@@ -3448,6 +3606,7 @@ namespace video {
 
     display_wp = disp;
     initial_capture_failure.disable();
+    auto capture_epoch = open_capture_epoch(*disp, active_generation.generation_id);
 
     constexpr auto capture_buffer_size = 12;
     std::list<std::shared_ptr<platf::img_t>> imgs(capture_buffer_size);
@@ -3536,7 +3695,7 @@ namespace video {
         if (img_out) {
           // trim allocated but unused portion of the pool based on timeouts
           trim_imgs();
-          img_out->frame_timestamp.reset();
+          reset_pooled_image(*img_out);
           return true;
         } else {
           // sleep and retry if image pool is full
@@ -3553,6 +3712,7 @@ namespace video {
       bool artificial_reinit = false;
 
       auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
+        stamp_new_source_image(capture_epoch, img.get(), frame_captured);
         KITTY_WHILE_LOOP(auto capture_ctx = std::begin(capture_ctxs), capture_ctx != std::end(capture_ctxs), {
           if (!capture_ctx->images->running()) {
             capture_ctx = capture_ctxs.erase(capture_ctx);
@@ -3740,6 +3900,7 @@ namespace video {
             }
 
             display_wp = disp;
+            capture_epoch = open_capture_epoch(*disp, active_generation.generation_id);
 
             reinit_request_event.reset();
             reinit_event.reset();
@@ -4672,6 +4833,7 @@ namespace video {
 
     bool missing_frame_timestamp_warning_logged = false;
     std::optional<stream_stats::capture_source_t> reported_source;
+    accepted_capture_t accepted_capture;
     // Only a PyroWave session records a route into it. Each display's publication starts it over.
     std::string reported_pyrowave_route;
     // Published from the loop until it lands, so a session registered after the display opened,
@@ -4804,6 +4966,7 @@ namespace video {
           }
 #endif
           record_capture_source(config, frame, reported_source);
+          accepted_capture.record(config, frame.provenance);
 #ifdef POLARIS_BUILD_PYROWAVE
           record_pyrowave_route(config, *session, reported_pyrowave_route);
 #endif
@@ -4818,6 +4981,9 @@ namespace video {
       if (shutdown_event->peek() || !images->running() || (reinit_event.peek() && frame_nr > 1)) {
         break;
       }
+      // No new image was accepted this iteration: retry an accepted observation the stats refused
+      // before this session registered. The repeat itself is never recorded.
+      if (reused_previous_frame) accepted_capture.retry(config);
 
       {
         auto encode_start = std::chrono::steady_clock::now();
@@ -5336,6 +5502,8 @@ namespace video {
       invalidate_live_probe_reuse();
       return encode_e::error;
     }
+    // Every return to this function reopened the display, so each call is one epoch.
+    auto capture_epoch = open_capture_epoch(*disp, active_generation.generation_id);
 
     auto img = disp->alloc_img();
     if (!img || disp->dummy_img(img.get())) {
@@ -5361,6 +5529,7 @@ namespace video {
     auto ec = platf::capture_e::ok;
     while (encode_session_ctx_queue.running()) {
       auto push_captured_image_callback = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) -> bool {
+        stamp_new_source_image(capture_epoch, img.get(), frame_captured);
         auto frame = make_frame(std::move(img));
 
         while (encode_session_ctx_queue.peek()) {
@@ -5445,7 +5614,13 @@ namespace video {
           }
           // Published first, so the frame this session accepts next is recorded for its display.
           publish_capture_backend(pos->capture_backend, pos->reported_source);
-          if (frame_captured) record_capture_source(ctx->config, frame, pos->reported_source);
+          if (frame_captured) {
+            record_capture_source(ctx->config, frame, pos->reported_source);
+            if (frame.valid()) pos->accepted_capture.record(ctx->config, frame.provenance);
+          } else {
+            // A repeat: retry only an accepted observation refused before registration.
+            pos->accepted_capture.retry(ctx->config);
+          }
           if (encode(ctx->frame_nr++, *pos->session, ctx->packets, ctx->channel_data, frame_timestamp)) {
             BOOST_LOG(error) << "Could not encode video packet"sv;
             ctx->shutdown_event->raise(true);
@@ -5475,7 +5650,9 @@ namespace video {
 
       auto pull_free_image_callback = [&img](std::shared_ptr<platf::img_t> &img_out) -> bool {
         img_out = img;
-        img_out->frame_timestamp.reset();
+        // The previous frame was converted and encoded synchronously before this pull; clones and
+        // frame views keep their own copies of its provenance.
+        reset_pooled_image(*img_out);
         return true;
       };
 
@@ -7873,6 +8050,81 @@ namespace video {
   ) {
     record_capture_source(config, frame, reported_source);
   }
+
+  capture_epoch_for_tests_t open_capture_epoch_for_tests(
+    const platf::display_t &disp,
+    std::uint64_t capture_generation_id,
+    const std::vector<std::pair<std::shared_ptr<platf::img_t>, bool>> &pushes
+  ) {
+    auto epoch = open_capture_epoch(disp, capture_generation_id);
+    for (const auto &[img, frame_captured] : pushes) {
+      stamp_new_source_image(epoch, img.get(), frame_captured);
+    }
+    return {epoch.epoch_id, epoch.route, epoch.proof};
+  }
+
+  void reset_pooled_image_for_tests(platf::img_t &img) {
+    reset_pooled_image(img);
+  }
+
+  std::uint64_t allocate_capture_identity_for_tests(std::atomic<std::uint64_t> &allocator) {
+    return allocate_capture_identity(allocator);
+  }
+
+  void stamp_seeded_epoch_for_tests(
+    std::uint64_t epoch_id,
+    std::uint64_t capture_generation_id,
+    std::uint64_t next_sequence,
+    const std::vector<std::pair<std::shared_ptr<platf::img_t>, bool>> &pushes
+  ) {
+    capture_epoch_t epoch;
+    epoch.epoch_id = epoch_id;
+    epoch.capture_generation_id = capture_generation_id;
+    epoch.next_sequence = next_sequence;
+    for (const auto &[img, frame_captured] : pushes) {
+      stamp_new_source_image(epoch, img.get(), frame_captured);
+    }
+  }
+
+  std::size_t record_accepted_captures_for_tests(
+    const config_t &config,
+    const std::vector<platf::image_provenance_t> &accepted
+  ) {
+    accepted_capture_t consumer;
+    std::size_t recorded = 0;
+    for (const auto &provenance : accepted) {
+      if (consumer.record(config, provenance)) ++recorded;
+    }
+    return recorded;
+  }
+
+  struct accepted_capture_consumer_for_tests_t::state_t {
+    accepted_capture_t consumer;
+  };
+
+  accepted_capture_consumer_for_tests_t::accepted_capture_consumer_for_tests_t():
+      state {std::make_unique<state_t>()} {
+  }
+
+  accepted_capture_consumer_for_tests_t::~accepted_capture_consumer_for_tests_t() = default;
+
+  bool accepted_capture_consumer_for_tests_t::record(const config_t &config, const platf::image_provenance_t &provenance) {
+    return state->consumer.record(config, provenance);
+  }
+
+  bool accepted_capture_consumer_for_tests_t::retry(const config_t &config) {
+    return state->consumer.retry(config);
+  }
+
+  bool accepted_capture_consumer_for_tests_t::has_pending() const {
+    return state->consumer.pending.has_value();
+  }
+
+#ifdef __linux__
+  std::shared_ptr<platf::img_t> clone_compat_image_for_conversion_for_tests(const frame_t &frame) {
+    return clone_compat_image_for_conversion(frame);
+  }
+#endif
 
   #ifdef __linux__
   capture_generation::request_context_t capture_request_for_session_for_tests(const capture_generation::identity_t &generation) {

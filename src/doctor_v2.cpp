@@ -1,4 +1,5 @@
 #include "doctor_v2.h"
+#include "doctor_cadence.h"
 
 #include <algorithm>
 #include <array>
@@ -440,6 +441,15 @@ namespace doctor_v2 {
     const bool core_evidence_adequate =
       source_capture_measured && encode_measured && transport_measured &&
       effective_settings_measured && receive_decode_render_complete;
+    const auto cadence = doctor_cadence::evaluate(
+      host_evidence, generation, now_ms(), current.front().received_ms, current.back().received_ms, target_fps
+    );
+    const bool diagnostic_evidence_adequate = core_evidence_adequate && cadence.available;
+    if (!cadence.observation.is_null()) result["observations"].push_back(cadence.observation);
+    if (cadence.source_time) {
+      result["trial_metrics"]["pacing_error_pct"] = nullptr;
+      result["trial_metrics"]["pacing_reference"] = "observed_source_time";
+    }
 
     nlohmann::json stages;
     stages["source_capture"] = source_capture_measured ?
@@ -485,11 +495,12 @@ namespace doctor_v2 {
       }, "nova_reported_active_session");
     }
     result["stages"] = stages;
-    result["coverage_adequate"] = windows_complete && core_evidence_adequate;
-    result["trial_metrics"]["ready"] = windows_complete && core_evidence_adequate;
-    if (!core_evidence_adequate) result["trial_metrics"]["duration_seconds"] = 0;
+    result["coverage_adequate"] = windows_complete && diagnostic_evidence_adequate;
+    result["trial_metrics"]["ready"] = windows_complete && diagnostic_evidence_adequate && !cadence.source_time;
+    if (!diagnostic_evidence_adequate || cadence.source_time) result["trial_metrics"]["duration_seconds"] = 0;
 
     result["missing_evidence"] = nlohmann::json::array();
+    if (!cadence.available) result["missing_evidence"].push_back("verified_source_cadence_policy_or_measurements");
     if (retransmissions.is_null()) result["missing_evidence"].push_back("retransmissions");
     if (!receive_decode_render_complete) {
       result["missing_evidence"].push_back("decoded_frame_counter");
@@ -519,7 +530,8 @@ namespace doctor_v2 {
     });
 
     const bool network_warning = loss_pct > 2.0 || rtt_ms >= 45.0;
-    const bool render_gap = target_fps > 0.0 && rendered_fps + 1.0 < target_fps * 0.90;
+    const double cadence_reference = cadence.source_time && cadence.available ? cadence.source_fps : target_fps;
+    const bool render_gap = cadence_reference > 0.0 && rendered_fps + 1.0 < cadence_reference * 0.90;
     const bool decoder_gap = received_fps > 0.0 && rendered_fps + 3.0 < received_fps;
     const auto &source_capture = source_capture_evidence;
     const double source_fps = source_capture.value("source_fps", 0.0);
@@ -529,12 +541,16 @@ namespace doctor_v2 {
     const double encode_target_fps = encode.value("target_fps", target_fps);
     const double dropped_frame_ratio = encode.value("dropped_frame_ratio", 0.0);
     const bool encode_warning = encode_measured &&
-      ((encode_target_fps > 0.0 && encoded_fps + 1.0 < encode_target_fps * 0.90) ||
+      ((cadence.source_time ? cadence.available && cadence.source_encode_gap :
+        encode_target_fps > 0.0 && encoded_fps + 1.0 < encode_target_fps * 0.90) ||
        dropped_frame_ratio > 0.05);
     const bool static_or_duplicate_content =
       duplicate_ratio >= 0.50 ||
       (target_fps > 0.0 && source_fps > 0.0 && source_fps < target_fps * 0.50 && duplicate_ratio >= 0.10);
-    const bool pacing_gap = render_gap && !static_or_duplicate_content;
+    const bool pacing_gap = cadence.source_time ?
+      cadence.available && (cadence.source_stall || cadence.timestamp_error || (render_gap && !static_or_duplicate_content)) :
+      render_gap && !static_or_duplicate_content;
+    const bool delivery_jitter = cadence.available && cadence.delivery_jitter;
     if (encode_measured) {
       result["observations"].push_back({
         {"id", "encode_cadence"},
@@ -564,6 +580,13 @@ namespace doctor_v2 {
         {"missing_measurements", std::move(missing)}
       });
     }
+    if (delivery_jitter) {
+      result["hypotheses"].push_back({
+        {"id", "delivery_jitter"}, {"confidence", windows_complete ? "high" : "medium"},
+        {"evidence_for", nlohmann::json::array({"delivery intervals differ from observed source intervals"})},
+        {"evidence_against", nlohmann::json::array()}, {"missing_measurements", nlohmann::json::array()}
+      });
+    }
     if (decoder_gap) {
       auto missing = nlohmann::json::array();
       if (!receive_decode_render_complete) {
@@ -591,29 +614,31 @@ namespace doctor_v2 {
       if (!source_capture_measured) missing.push_back("source_duplicate_frame_counter");
       result["hypotheses"].push_back({
         {"id", "source_or_capture_cadence"}, {"confidence", "low"},
-        {"evidence_for", nlohmann::json::array({"rendered cadence is below the stream target"})},
+        {"evidence_for", nlohmann::json::array({cadence.source_time ?
+          "source-relative cadence or timestamp preservation is degraded" : "rendered cadence is below the stream target"})},
         {"evidence_against", nlohmann::json::array({"confirmed network evidence is clean"})},
         {"missing_measurements", std::move(missing)}
       });
     }
 
     const int warning_count = static_cast<int>(network_warning) + static_cast<int>(pacing_gap) +
-      static_cast<int>(decoder_gap) + static_cast<int>(encode_warning);
+      static_cast<int>(decoder_gap) + static_cast<int>(encode_warning) + static_cast<int>(delivery_jitter);
     std::string primary_issue = "undetermined";
-    if (windows_complete && core_evidence_adequate && warning_count == 1) {
+    if (windows_complete && diagnostic_evidence_adequate && warning_count == 1) {
       if (network_warning) primary_issue = "network_pressure";
+      else if (delivery_jitter) primary_issue = "delivery_jitter";
       else if (encode_warning) primary_issue = "encoder_pressure";
       else if (decoder_gap) primary_issue = "decoder_or_render_pressure";
       else if (pacing_gap) primary_issue = "source_or_capture_cadence";
     }
     const bool trial_action_exposed = trials_enabled() && windows_complete &&
-      core_evidence_adequate && pacing_gap && !network_warning && !decoder_gap && !encode_warning;
+      diagnostic_evidence_adequate && !cadence.source_time && pacing_gap && !network_warning && !decoder_gap && !encode_warning;
     result["mode"] = trials_enabled() ? "trial_enabled" : "shadow";
     result["actions_exposed"] = trial_action_exposed;
     result["primary_issue"] = primary_issue;
-    result["stable"] = windows_complete && core_evidence_adequate && warning_count == 0;
-    result["state"] = windows_complete && core_evidence_adequate ? "classified" : "collecting";
-    result["confidence"] = windows_complete && core_evidence_adequate ? "high" : "low";
+    result["stable"] = windows_complete && diagnostic_evidence_adequate && warning_count == 0;
+    result["state"] = windows_complete && diagnostic_evidence_adequate ? "classified" : "collecting";
+    result["confidence"] = windows_complete && diagnostic_evidence_adequate ? "high" : "low";
     result["actions"].push_back(network_warning ? nlohmann::json {
       {"id", "lower_bitrate"}, {"capability", "auto_fix"},
       {"exposed", false}, {"reason", "shadow_mode"}

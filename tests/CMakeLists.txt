@@ -102,6 +102,13 @@ if(NOT WIN32)
     )
 endif()
 
+# VrrClockProofTests (fast) parses /proc/<pid>/stat through the Linux probe's parse_starttime.
+if(UNIX AND NOT APPLE)
+    list(APPEND TEST_SUPPORT_SOURCES
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/vrr_clock_probe.cpp
+    )
+endif()
+
 set(TEST_AUDIT_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/confighttp_validation.cpp
     ${CMAKE_SOURCE_DIR}/src/bounded_log_file.cpp
@@ -159,6 +166,8 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_session_event_queue.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_update_status.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_frame_pacing.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_session_policy.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_clock_proof.cpp
 )
 
 if (NOT WIN32 AND NOT APPLE)
@@ -308,6 +317,7 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_recovery_doctor_actions.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_stats.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_pyrowave_advice.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_capture_provenance.cpp
 )
 
 if (NOT WIN32 AND NOT APPLE)
