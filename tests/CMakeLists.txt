@@ -161,6 +161,17 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_frame_pacing.cpp
 )
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(APPEND TEST_SUPPORT_SOURCES
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/capture_producer_sync.cpp)
+    list(APPEND TEST_FAST_SOURCES
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_capture_producer_sync.cpp)
+    if(POLARIS_ENABLE_VULKAN)
+        list(APPEND TEST_FAST_SOURCES
+            ${CMAKE_SOURCE_DIR}/tests/unit/test_vulkan_capture_admission.cpp)
+    endif()
+endif()
+
 if (NOT WIN32 AND NOT APPLE)
     list(APPEND TEST_FAST_SOURCES
         ${CMAKE_SOURCE_DIR}/tests/unit/test_linux_executable_path.cpp
@@ -665,6 +676,31 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_platform
         ${TEST_PLATFORM_SOURCES}
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND POLARIS_ENABLE_VULKAN)
+        add_test(NAME polaris_vulkan_device_lifecycle
+            COMMAND test_polaris_platform --gtest_filter=VulkanDeviceLifecycleTests.*)
+        set_tests_properties(polaris_vulkan_device_lifecycle PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            LABELS "requires-gpu")
+        if(POLARIS_ENABLE_PORTAL)
+            # These real MemFd producer cases need neither a compositor nor a
+            # usable GPU. Keep their selection separate from the GPU graph gate
+            # so ordinary CI can exercise reuse and live size renegotiation.
+            add_test(NAME polaris_pipewire_shm_lifecycle
+                COMMAND test_polaris_platform
+                    --gtest_filter=PipeWireProducerPoolTests.ProducerWithoutModifierNegotiatesUsableShmAndReusesPixels:PipeWireProducerPoolTests.RealShmSizeChangeRequestsReinitAndNewCaptureReadsNewPixels)
+            set_tests_properties(polaris_pipewire_shm_lifecycle PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+                TIMEOUT 15
+                LABELS "pipewire")
+            add_test(NAME polaris_pipewire_producer_pool
+                COMMAND test_polaris_platform --gtest_filter=PipeWireProducerPoolTests.*)
+            set_tests_properties(polaris_pipewire_producer_pool PROPERTIES
+                WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+                TIMEOUT 60
+                LABELS "requires-gpu;pipewire")
+        endif()
+    endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND POLARIS_ENABLE_PYROWAVE)
         target_sources(test_polaris_platform PRIVATE
             ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_pyrowave_session_serialization.cpp)

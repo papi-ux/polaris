@@ -431,6 +431,7 @@ namespace video {
       clone->sd = src->sd;
       clone->sequence = src->sequence;
       clone->dmabuf_buffer_key = src->dmabuf_buffer_key;
+      clone->requires_producer_lease = src->requires_producer_lease;
       clone->capture_owner = frame.image;
 
       // Until duplicated, every plane belongs to capture. On a partial
