@@ -615,6 +615,9 @@ namespace stream {
     std::string display_mode_applied;
     bool display_mode_pinned_by_host = false;
     crypto::PERM permission;
+    // This generation's variable-refresh request, copied from its admission in alloc() and never
+    // changed afterwards. An input to reporting only; nothing here changes how frames are paced.
+    vrr_policy::record_t vrr;
 
     std::list<crypto::command_entry_t> do_cmds;
     std::list<crypto::command_entry_t> undo_cmds;
@@ -3285,6 +3288,8 @@ namespace stream {
         addr_string, session.device_name, session.session_generation,
         stream_stats::client_family_for_stream(session.client_family)
       );
+      // Frozen in alloc(); recorded once against this generation's own entry.
+      stream_stats::record_vrr_session(session.vrr);
       stream_stats::start_session_timing(
         session.device_uuid, session.session_generation, session.session_token
       );
@@ -3429,6 +3434,13 @@ namespace stream {
       session->permission = launch_session.perm;
       session->watch_only = launch_session.watch_only;
       session->temporary_authorization = launch_session.temporary_authorization;
+      session->vrr = vrr_policy::make_record(
+        session->session_generation,
+        launch_session.vrr_requested,
+        launch_session.vrr_admission,
+        launch_session.watch_only,
+        launch_session.input_only
+      );
 
       session->do_cmds = std::move(launch_session.client_do_cmds);
       session->undo_cmds = std::move(launch_session.client_undo_cmds);

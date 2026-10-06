@@ -4079,6 +4079,16 @@ namespace nvhttp {
       return util::from_view(get_arg(args, "watch", "0"));
     }
 
+    // Every value the query carried, so a repeated flag reads as malformed rather than first-wins.
+    vrr_policy::requested_e vrr_request(const args_t &args) {
+      std::vector<std::string_view> values;
+      const auto [first, last] = args.equal_range(std::string {vrr_policy::k_request_arg});
+      for (auto it = first; it != last; ++it) {
+        values.emplace_back(it->second);
+      }
+      return vrr_policy::parse_request(values);
+    }
+
     bool session_token_matches_value(
       std::string_view expected_token,
       bool require_exact_token = false
@@ -5202,13 +5212,18 @@ namespace nvhttp {
   }
 
   std::shared_ptr<rtsp_stream::launch_session_t> make_launch_session(bool host_audio, bool input_only, const args_t &args, const crypto::named_cert_t* named_cert_p, bool profile_worker,
-                                                                  const proc::ctx_t *topology_app) {
+                                                                  const proc::ctx_t *topology_app,
+                                                                  vrr_policy::admission_e vrr_admission) {
 #ifndef __linux__
     (void) topology_app;
 #endif
     auto launch_session = std::make_shared<rtsp_stream::launch_session_t>();
 
     launch_session->id = ++session_id_counter;
+    // Recorded on every path, including a profile-worker launch, and never acted on here: a malformed
+    // value is kept as malformed rather than refusing an otherwise valid launch.
+    launch_session->vrr_requested = vrr_request(args);
+    launch_session->vrr_admission = vrr_admission;
 
     // If launched from client
     if (named_cert_p->uuid != http::unique_id) {
@@ -7949,7 +7964,7 @@ namespace nvhttp {
     topology_app = proc::proc.running_app_context();
 #endif
     auto launch_session = make_launch_session(resume_host_audio, false, args, named_cert_p.get(),
-      false, topology_app ? &*topology_app : nullptr);
+      false, topology_app ? &*topology_app : nullptr, vrr_policy::admission_e::resume);
     if (!launch_session) {
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 400);
@@ -9062,6 +9077,11 @@ namespace nvhttp {
           {"target_fps", stats.session_target_fps > 0.0 ? stats.session_target_fps : stats.fps},
           {"refresh_rate_hz", stats.runtime_reported_refresh_hz}
         };
+        // Only the requester's own generation: another owner's or a Watch session's record never
+        // stands in for it, and no record means no vrr evidence rather than a default.
+        if (auto vrr = stream_stats::vrr_json(stats, requester_generation); !vrr.is_null()) {
+          doctor_v2_host_evidence["vrr"] = std::move(vrr);
+        }
       }
       const auto doctor_v2_status = doctor_v2::status(
         named_cert_p->uuid,
@@ -11004,6 +11024,9 @@ namespace nvhttp {
           {"refresh_rate_hz", stats.runtime_reported_refresh_hz}
         }}
       };
+      if (auto vrr = stream_stats::vrr_json(stats, timing.session_generation); !vrr.is_null()) {
+        host_evidence["vrr"] = std::move(vrr);
+      }
       const auto evidence = doctor_v2::status(named_cert_p->uuid, app_uuid, host_evidence);
       doctor_trial::effective_settings_t settings {
         .topology = settings_metadata::effective_stream_display_mode_selection(stats, proc::proc.session_uses_virtual_display()),

@@ -11355,3 +11355,158 @@ TEST(StreamStatsHotFieldTests, EncoderSamplesFollowCodecChangesAndResetAtStreamE
   EXPECT_TRUE(stream_stats::get_current().encoder_backend.empty());
   EXPECT_TRUE(stream_stats::get_current().codec.empty());
 }
+
+namespace {
+  vrr_policy::record_t vrr_record(std::uint64_t generation, vrr_policy::requested_e requested, bool watch = false) {
+    return vrr_policy::make_record(generation, requested, vrr_policy::admission_e::launch, watch, false);
+  }
+}  // namespace
+
+TEST(StreamStatsVrrTests, AGenerationsRequestIsFrozenOnceAndOnlyForALiveEntry) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  EXPECT_FALSE(stream_stats::record_vrr_session(vrr_record(0, vrr_policy::requested_e::on)));
+  EXPECT_FALSE(stream_stats::record_vrr_session(vrr_record(401, vrr_policy::requested_e::on))) << "no entry yet";
+
+  stream_stats::add_client("10.0.0.5", "Owner", 401);
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(401, vrr_policy::requested_e::on)));
+  // A later write cannot replace the request this generation was admitted with.
+  EXPECT_FALSE(stream_stats::record_vrr_session(vrr_record(401, vrr_policy::requested_e::off)));
+
+  const auto vrr = stream_stats::vrr_json(stream_stats::get_current(), 401);
+  ASSERT_TRUE(vrr.is_object()) << vrr.dump();
+  EXPECT_EQ(vrr["schema"], 1);
+  EXPECT_EQ(vrr["session_generation"], 401u);
+  EXPECT_EQ(vrr["requested"], "true");
+  EXPECT_EQ(vrr["requested_from"], "launch");
+  EXPECT_EQ(vrr["effective"], false);
+  EXPECT_EQ(vrr["pacing_mode"], "fixed_grid");
+  EXPECT_EQ(vrr["fallback_reason"], "route_unreported");
+  EXPECT_EQ(vrr["capture_pacing"], "unknown");
+
+  // After the generation is gone, a late write for it lands nowhere.
+  stream_stats::remove_client("10.0.0.5", 401);
+  EXPECT_FALSE(stream_stats::record_vrr_session(vrr_record(401, vrr_policy::requested_e::off)));
+  EXPECT_TRUE(stream_stats::vrr_json(stream_stats::get_current(), 401).is_null());
+}
+
+TEST(StreamStatsVrrTests, EachGenerationReadsOnlyItsOwnRecordAndNeverTheOwnersForAWatcher) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Owner", 411);
+  stream_stats::add_client("10.0.0.6", "Viewer", 412);
+  stream_stats::add_client("10.0.0.7", "No record", 413);
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(411, vrr_policy::requested_e::on)));
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(412, vrr_policy::requested_e::off, true)));
+  // A process-wide capture label is not proof of any one generation's route.
+  stream_stats::update_capture_pacing("source_driven");
+
+  const auto stats = stream_stats::get_current();
+  const auto owner = stream_stats::vrr_json(stats, 411);
+  const auto viewer = stream_stats::vrr_json(stats, 412);
+  EXPECT_EQ(owner["session_generation"], 411u);
+  EXPECT_EQ(owner["requested"], "true");
+  EXPECT_EQ(owner["capture_pacing"], "unknown");
+  EXPECT_EQ(owner["fallback_reason"], "route_unreported");
+  EXPECT_EQ(owner["effective"], false);
+  EXPECT_EQ(viewer["session_generation"], 412u);
+  EXPECT_EQ(viewer["requested"], "false") << "the watcher keeps its own request, not the owner's";
+  EXPECT_EQ(viewer["fallback_reason"], "watch_or_input_only");
+  EXPECT_TRUE(stream_stats::vrr_json(stats, 413).is_null()) << "no record means no vrr evidence";
+  EXPECT_TRUE(stream_stats::vrr_json(stats, 0).is_null());
+  EXPECT_TRUE(stream_stats::vrr_json(stats, 999).is_null());
+}
+
+TEST(StreamStatsVrrTests, ActiveClientRowsCarryOnlyTheirOwnRecordUnderOpaqueIdentity) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Owner", 441);
+  stream_stats::add_client("10.0.0.6", "Viewer", 442);
+  stream_stats::add_client("10.0.0.7", "No record", 443);
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(441, vrr_policy::requested_e::on)));
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(442, vrr_policy::requested_e::malformed, true)));
+  stream_stats::update_capture_pacing("source_driven");
+  stream_stats::note_source_presentation(vrr_policy::presentation_status_e::valid);
+
+  const auto json = current_stats_json();
+  ASSERT_EQ(json["clients"].size(), 3u) << json.dump();
+  std::size_t with_vrr = 0;
+  for (const auto &client : json["clients"]) {
+    if (!client.contains("vrr")) {
+      EXPECT_EQ(client["name"], "No record");
+      continue;
+    }
+    ++with_vrr;
+    const auto &vrr = client["vrr"];
+    EXPECT_EQ(vrr["stream_instance_id"], client["stream_instance_id"]);
+    EXPECT_FALSE(vrr.contains("session_generation")) << vrr.dump();
+    EXPECT_FALSE(vrr.contains("source_presentation")) << vrr.dump();
+    EXPECT_FALSE(vrr.contains("host_capture_presentation")) << vrr.dump();
+    EXPECT_EQ(vrr["capture_pacing"], "unknown");
+    EXPECT_EQ(vrr["effective"], false);
+    if (client["name"] == "Owner") {
+      EXPECT_EQ(vrr["requested"], "true");
+      EXPECT_EQ(vrr["fallback_reason"], "route_unreported");
+    } else {
+      EXPECT_EQ(client["name"], "Viewer");
+      EXPECT_EQ(vrr["requested"], "malformed") << "the watcher's own request, not the owner's";
+      EXPECT_EQ(vrr["fallback_reason"], "watch_or_input_only");
+    }
+  }
+  EXPECT_EQ(with_vrr, 2u);
+}
+
+TEST(StreamStatsVrrTests, PresentationCountsAreHostCaptureEvidenceOnly) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Owner", 421);
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(421, vrr_policy::requested_e::on)));
+  for (int frame = 0; frame < 3; ++frame) {
+    stream_stats::note_source_presentation(vrr_policy::presentation_status_e::valid);
+  }
+  stream_stats::note_source_presentation(vrr_policy::presentation_status_e::nonmonotonic);
+
+  const auto json = current_stats_json();
+  const auto &host = json["host_capture_presentation"];
+  EXPECT_EQ(host["scope"], "host_capture");
+  EXPECT_EQ(host["source"], "ext_image_copy_ready");
+  EXPECT_EQ(host["valid"], 3u);
+  EXPECT_EQ(host["nonmonotonic"], 1u);
+  EXPECT_EQ(host["missing"], 0u);
+
+  // No frame is attributed to a generation, and valid host counts change nothing about its policy.
+  const auto vrr = stream_stats::vrr_json(stream_stats::get_current(), 421);
+  EXPECT_FALSE(vrr.contains("source_presentation")) << vrr.dump();
+  EXPECT_FALSE(vrr.contains("host_capture_presentation")) << vrr.dump();
+  EXPECT_EQ(vrr["effective"], false);
+  EXPECT_EQ(vrr["fallback_reason"], "route_unreported");
+
+  stream_stats::remove_client("10.0.0.5", 421);
+  EXPECT_FALSE(current_stats_json()["last_session"]["vrr"].contains("source_presentation"));
+}
+
+TEST(StreamStatsVrrTests, LastSessionKeepsTheFrozenRecordUnderItsOpaqueInstanceIdentity) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  stream_stats::add_client("10.0.0.5", "Owner", 431);
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_policy::make_record(
+    431, vrr_policy::requested_e::malformed, vrr_policy::admission_e::resume, false, false)));
+  stream_stats::update_capture_pacing("fixed_interval");
+  stream_stats::remove_client("10.0.0.5", 431);
+
+  const auto json = current_stats_json();
+  ASSERT_TRUE(json.contains("last_session")) << json.dump();
+  const auto &vrr = json["last_session"]["vrr"];
+  EXPECT_EQ(vrr["requested"], "malformed");
+  EXPECT_EQ(vrr["requested_from"], "resume");
+  EXPECT_EQ(vrr["fallback_reason"], "request_malformed");
+  EXPECT_EQ(vrr["capture_pacing"], "unknown") << "the global label is not this session's route";
+  EXPECT_EQ(vrr["effective"], false);
+  EXPECT_EQ(vrr["stream_instance_id"], json["last_session"]["stream_instance_id"]);
+  EXPECT_FALSE(vrr.contains("session_generation")) << "the public record names streams by opaque instance id";
+
+  // A later session's record does not rewrite the ended one.
+  stream_stats::add_client("10.0.0.5", "Next", 432);
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(432, vrr_policy::requested_e::on)));
+  EXPECT_EQ(current_stats_json()["last_session"]["vrr"]["requested"], "malformed");
+}

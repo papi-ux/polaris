@@ -582,6 +582,37 @@ namespace stream_stats {
       return buffer;
     }
 
+    /// The diagnostic `vrr` object (schema 1). identity names the stream: session_generation for
+    /// authenticated Doctor evidence, stream_instance_id where the public session record uses it.
+    /// No capture route is proven to belong to a generation yet, so its pacing is reported unknown and
+    /// a request falls back as route_unreported; the process-wide capture label never stands in.
+    nlohmann::json vrr_record_json(const vrr_policy::record_t &record, nlohmann::json identity) {
+      constexpr std::string_view owner_route_pacing {};
+      const auto decision = vrr_policy::decide(record, owner_route_pacing);
+      nlohmann::json j {
+        {"schema", 1},
+        {"requested", vrr_policy::name(record.requested)},
+        {"requested_from", vrr_policy::name(record.admission)},
+        {"effective", decision.effective},
+        {"pacing_mode", decision.pacing_mode},
+        {"fallback_reason", decision.fallback_reason},
+        {"capture_pacing", vrr_policy::reported_capture_pacing(owner_route_pacing)},
+      };
+      j.update(identity);
+      return j;
+    }
+
+    nlohmann::json host_capture_presentation_json(const vrr_policy::host_presentation_counts_t &host) {
+      nlohmann::json j {
+        {"scope", "host_capture"},
+        {"source", "ext_image_copy_ready"},
+      };
+      for (const auto status : vrr_policy::k_presentation_statuses) {
+        j[std::string {vrr_policy::name(status)}] = host[status];
+      }
+      return j;
+    }
+
     /// The last session as the stats report it. Every value was frozen from the session's own
     /// generation, and one it never reported is absent rather than given a default.
     nlohmann::json ended_session_json(const ended_session_t &ended) {
@@ -609,6 +640,11 @@ namespace stream_stats {
       }
       if (!ended.pyrowave_route.empty()) {
         session["pyrowave_route"] = ended.pyrowave_route;
+      }
+      if (ended.vrr) {
+        // The public record names a stream by stream_instance_id, as the rest of last_session does.
+        session["vrr"] = vrr_record_json(*ended.vrr,
+          {{"stream_instance_id", stream_instance_id(ended.session_generation)}});
       }
       if (const auto &stop = ended.app_stop; !stop.path.empty()) {
         nlohmann::json app_stop {
@@ -797,6 +833,7 @@ namespace stream_stats {
     j["frame_jitter_ms"] = frame_jitter_ms;
     j["capture_source_fps"] = capture_source_fps;
     j["capture_pacing"] = capture_pacing;
+    j["host_capture_presentation"] = host_capture_presentation_json(host_capture_presentation);
     j["codec"] = codec;
     j["pacing_policy"] = pacing_policy;
     j["optimization_source"] = optimization_source;
@@ -890,6 +927,10 @@ namespace stream_stats {
       cj["capture_source"] = capture_source_json(c.capture_source);
       if (c.session_generation != 0) {
         cj["stream_instance_id"] = stream_instance_id(c.session_generation);
+        // This client's own frozen request, named by the same opaque identity as the row.
+        if (c.vrr) {
+          cj["vrr"] = vrr_record_json(*c.vrr, {{"stream_instance_id", stream_instance_id(c.session_generation)}});
+        }
       }
       if (!c.capture_backend.opened.empty()) {
         cj["capture"] = capture_backend_json(c.capture_backend, frames_of_published_display(c));
@@ -3485,6 +3526,7 @@ namespace stream_stats {
           .pyrowave_route = ending->pyrowave_route,
           .start_outcome = ending->start_outcome,
           .start_client_left_after_ms = ending->start_client_left_after_ms,
+          .vrr = ending->vrr,
         };
       }
     }
@@ -3681,6 +3723,33 @@ namespace stream_stats {
     client->capture_frame_since_publication = false;
     client->pyrowave_route.clear();
     return true;
+  }
+
+  bool record_vrr_session(const vrr_policy::record_t &record) {
+    if (record.session_generation == 0) return false;
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
+      [&record](const client_stats_t &candidate) {
+        return candidate.session_generation == record.session_generation;
+      });
+    if (client == current_stats.clients.end() || client->vrr) return false;
+    client->vrr = record;
+    return true;
+  }
+
+  void note_source_presentation(vrr_policy::presentation_status_e status) {
+    std::lock_guard<std::mutex> lock(stats_mutex);
+    current_stats.host_capture_presentation.count(status);
+  }
+
+  nlohmann::json vrr_json(const stats_t &stats, std::uint64_t session_generation) {
+    if (session_generation == 0) return nullptr;
+    const auto client = std::find_if(stats.clients.begin(), stats.clients.end(),
+      [session_generation](const client_stats_t &candidate) {
+        return candidate.session_generation == session_generation;
+      });
+    if (client == stats.clients.end() || !client->vrr) return nullptr;
+    return vrr_record_json(*client->vrr, {{"session_generation", session_generation}});
   }
 
   bool record_pyrowave_route(std::uint64_t session_generation, std::string_view route) {

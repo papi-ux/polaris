@@ -27,6 +27,7 @@
 #include "pyrowave_advice.h"
 #include "stream_bitrate.h"
 #include "stream_fec.h"
+#include "vrr_session_policy.h"
 
 namespace stream_stats {
 
@@ -172,6 +173,9 @@ namespace stream_stats {
     // When add_client() registered this session. A lifecycle time for the record kept once the
     // session ends, and not serialized while it streams.
     std::chrono::system_clock::time_point started_at {};
+    // This session's variable-refresh request and policy inputs, frozen by record_vrr_session() when
+    // the session starts. Empty for a session that never recorded one.
+    std::optional<vrr_policy::record_t> vrr;
 
     // Network
     double latency_ms = 0;
@@ -269,6 +273,8 @@ namespace stream_stats {
     std::string start_outcome;
     /// How long the client's control stream stayed before it left, or -1 when it did not leave.
     std::int64_t start_client_left_after_ms = -1;
+    /// The session's frozen variable-refresh request record.
+    std::optional<vrr_policy::record_t> vrr;
   };
 
   struct capture_profile_sample_t {
@@ -423,6 +429,10 @@ namespace stream_stats {
     double frame_jitter_ms = 0;
     double capture_source_fps = 0;
     std::string capture_pacing;
+    /// ext-image-copy presentation-time availability, mixed across every route and session the host
+    /// capture producer served. Host capture evidence only: never copied into a session's vrr record,
+    /// last_session or Doctor stream evidence.
+    vrr_policy::host_presentation_counts_t host_capture_presentation;
     std::string codec;
     // The encoder instance producing these samples, not the startup probe.
     std::string encoder_backend;
@@ -818,6 +828,34 @@ namespace stream_stats {
    * @return False when no client holds that generation or nothing was opened, so the caller retries.
    */
   bool record_capture_backend(std::uint64_t session_generation, const capture_backend_t &backend);
+
+  /**
+   * @brief Freeze a live generation's variable-refresh request, once.
+   *
+   * The request is decided at admission and never changes within a generation: a second write for
+   * the same generation is refused rather than replacing the first, and a write for generation zero
+   * or for a generation with no client entry is refused.
+   * @return Whether this write stored the record.
+   */
+  bool record_vrr_session(const vrr_policy::record_t &record);
+
+  /**
+   * @brief Count one ext-image-copy presentation-time status in the host capture counters.
+   *
+   * Touches only stats_t::host_capture_presentation, never a client's vrr record: a capture frame is
+   * not attributed to any stream generation here. Descriptive only, never cadence evidence.
+   */
+  void note_source_presentation(vrr_policy::presentation_status_e status);
+
+  /**
+   * @brief The diagnostic `vrr` object for one live generation, with session_generation inside it.
+   *
+   * Reads only that generation's own record, so another owner's or a Watch session's record is never
+   * reported for it. Its capture_pacing is unknown: no capture route is proven to belong to a
+   * generation yet, and the process-wide label must not describe it. Null for generation zero or a
+   * generation with no record.
+   */
+  nlohmann::json vrr_json(const stats_t &stats, std::uint64_t session_generation);
 
   /**
    * @brief Record how a live nonzero generation's PyroWave frames reach the codec.

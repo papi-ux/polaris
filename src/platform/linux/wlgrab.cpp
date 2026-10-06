@@ -759,6 +759,9 @@ namespace wl {
         .device = extcopy.capture_render_node(),
       };
       stream_stats::update_capture_metadata(img->frame_metadata);
+      // Whether this frame carried a usable compositor presentation time, counted as host capture
+      // evidence only and not attributed to any stream. The frame is stamped and paced as before.
+      stream_stats::note_source_presentation(extcopy.last_timing_sample().presentation_status);
       log_capture_metadata(img->frame_metadata);
       if (capture_profile_enabled()) {
         const auto handoff_end = std::chrono::steady_clock::now();
