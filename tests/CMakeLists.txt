@@ -715,6 +715,14 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_stream
         ${TEST_STREAM_SOURCES}
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND POLARIS_ENABLE_PYROWAVE)
+        # These exercise the actual encode loop with an in-memory display and
+        # deterministic session refusals. No GPU, compositor or stream is opened.
+        add_test(NAME polaris_encoder_initialization_termination
+            COMMAND test_polaris_stream --gtest_filter=StreamControlTerminationTests.*)
+        set_tests_properties(polaris_encoder_initialization_termination PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         target_link_options(test_polaris_stream PRIVATE
             "-Wl,--wrap=sendmsg" "-Wl,--wrap=sendmmsg" "-Wl,--wrap=poll")
