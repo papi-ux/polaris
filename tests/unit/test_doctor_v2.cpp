@@ -274,6 +274,7 @@ namespace {
     evidence["source_cadence"] = {
       {"schema", 1}, {"session_generation", 7}, {"clock_domain_verified", true}, {"clock_epoch_id", "test-clock-epoch"},
       {"window_start_ms", 46000}, {"window_end_ms", 75000}, {"source_frames", 2611}, {"encoded_source_frames", 2611},
+      {"first_source_ns", 46000000000LL}, {"last_source_ns", 75000000000LL},
       {"invalid_source_frames", 0}, {"routine_repeat_frames", 0}, {"source_fps", 90.0},
       {"max_source_gap_ms", 20.0}, {"max_delivery_interval_error_ms", 0.2}, {"timestamp_error_ms", 0.005},
       {"limits", {{"max_source_gap_ms", 25.0}, {"max_delivery_interval_error_ms", 2.0}, {"max_timestamp_error_ms", 0.01}}}
@@ -317,6 +318,97 @@ TEST(DoctorV2CadenceTests, ARequestAndSourceDrivenLabelKeepFixedGridSemantics) {
   EXPECT_FALSE(status.at("stable").get<bool>());
   EXPECT_TRUE(has_hypothesis(status, "encoder_pressure"));
   EXPECT_TRUE(has_hypothesis(status, "source_or_capture_cadence"));
+}
+
+TEST(DoctorV2CadenceTests, ContradictoryFixedGridFallbacksCannotBecomeStable) {
+  doctor_v2_flag_t enabled;
+  covered_samples(120.0, 120.0);
+  const std::vector<nlohmann::json> policies {
+    {{"requested", "true"}, {"capture_pacing", "unknown"}, {"fallback_reason", "not_requested"}},
+    {{"requested", "absent"}, {"capture_pacing", "unknown"}, {"fallback_reason", "request_malformed"}},
+    {{"requested", "false"}, {"capture_pacing", "fixed_interval"}, {"fallback_reason", "clock_domain_unverified"}},
+    {{"requested", "true"}, {"capture_pacing", "source_driven"}, {"fallback_reason", "route_fixed_interval"}},
+    {{"requested", "true"}, {"capture_pacing", "fixed_interval"}, {"fallback_reason", "route_unreported"}},
+    {{"requested", "malformed"}, {"capture_pacing", "unknown"}, {"fallback_reason", "not_requested"}},
+    {{"requested", "false"}, {"capture_pacing", "source_driven"}, {"fallback_reason", "presentation_time_missing"}}
+  };
+  for (const auto &policy : policies) {
+    auto evidence = host_evidence(120.0);
+    evidence["vrr"] = source_time_evidence()["vrr"];
+    evidence["vrr"].update({{"effective", false}, {"pacing_mode", "fixed_grid"}});
+    evidence["vrr"].update(policy);
+    const auto status = doctor_v2::status("owner", "app", evidence);
+    EXPECT_EQ(status.at("state"), "collecting") << policy.dump();
+    EXPECT_FALSE(status.at("stable").get<bool>()) << policy.dump();
+    EXPECT_FALSE(status.at("coverage_adequate").get<bool>()) << policy.dump();
+  }
+}
+
+TEST(DoctorV2CadenceTests, ValidFoundationPoliciesRetainFixedGridAndGenerationRecovery) {
+  doctor_v2_flag_t enabled;
+  covered_samples(120.0, 120.0);
+  const std::vector<nlohmann::json> policies {
+    {{"requested", "absent"}, {"fallback_reason", "not_requested"}},
+    {{"requested", "false"}, {"fallback_reason", "not_requested"}},
+    {{"requested", "malformed"}, {"fallback_reason", "request_malformed"}},
+    {{"requested", "true"}, {"fallback_reason", "route_unreported"}},
+    {{"requested", "malformed"}, {"fallback_reason", "watch_or_input_only"}},
+    {{"requested", "true"}, {"fallback_reason", "watch_or_input_only"}}
+  };
+  for (const auto &policy : policies) {
+    auto evidence = host_evidence(120.0);
+    evidence["vrr"] = source_time_evidence()["vrr"];
+    evidence["vrr"].update({{"effective", false}, {"pacing_mode", "fixed_grid"}, {"capture_pacing", "unknown"}});
+    evidence["vrr"].update(policy);
+    evidence["vrr"]["session_generation"] = 8;
+    EXPECT_FALSE(doctor_v2::status("owner", "app", evidence).at("coverage_adequate").get<bool>());
+    evidence["vrr"]["session_generation"] = 7;
+    EXPECT_TRUE(doctor_v2::status("owner", "app", evidence).at("stable").get<bool>()) << policy.dump();
+  }
+}
+
+TEST(DoctorV2CadenceTests, SourceStallsAtEitherWindowEdgeRemainVisible) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  for (const char *edge : {"first_source_ns", "last_source_ns"}) {
+    auto evidence = source_time_evidence();
+    // Keep all counts and interior intervals plausible while placing a 400 ms
+    // freeze outside them. Source FPS alone cannot reveal the affected edge.
+    evidence["source_cadence"][edge] = edge == std::string("first_source_ns") ? 46400000000LL : 74600000000LL;
+    evidence["source_capture"]["duplicate_frame_ratio"] = 0.9;
+    const auto status = doctor_v2::status("owner", "app", evidence);
+    EXPECT_FALSE(status.at("stable").get<bool>()) << edge;
+    EXPECT_EQ(status.at("primary_issue"), "source_or_capture_cadence") << edge;
+  }
+}
+
+TEST(DoctorV2CadenceTests, MissingMalformedOrOutOfWindowSourceEdgesCannotQualify) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  for (const char *edge : {"first_source_ns", "last_source_ns"}) {
+    auto missing = source_time_evidence();
+    missing["source_cadence"].erase(edge);
+    EXPECT_FALSE(doctor_v2::status("owner", "app", missing).at("coverage_adequate").get<bool>()) << edge;
+    for (const nlohmann::json &value : std::vector<nlohmann::json> {
+           true, 46000000000.0, -1, 45999999999LL, 75000000001LL, UINT64_MAX}) {
+      auto evidence = source_time_evidence();
+      evidence["source_cadence"][edge] = value;
+      EXPECT_FALSE(doctor_v2::status("owner", "app", evidence).at("coverage_adequate").get<bool>()) << edge << value;
+    }
+  }
+  auto reversed = source_time_evidence();
+  reversed["source_cadence"].update({{"first_source_ns", 50000000000LL}, {"last_source_ns", 49000000000LL}});
+  EXPECT_FALSE(doctor_v2::status("owner", "app", reversed).at("coverage_adequate").get<bool>());
+}
+
+TEST(DoctorV2CadenceTests, AnInteriorGapCannotExceedItsSourceSpan) {
+  doctor_v2_flag_t enabled;
+  covered_samples();
+  auto evidence = source_time_evidence();
+  evidence["source_cadence"]["max_source_gap_ms"] = 30000.0;
+  const auto status = doctor_v2::status("owner", "app", evidence);
+  EXPECT_EQ(status.at("state"), "collecting");
+  EXPECT_FALSE(status.at("stable").get<bool>());
 }
 
 TEST(DoctorV2CadenceTests, ASourceAboveTheCeilingNeedsVerifiedDropAccounting) {

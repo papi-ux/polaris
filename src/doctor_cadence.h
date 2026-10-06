@@ -70,10 +70,17 @@ namespace doctor_cadence {
       result.observation["session_generation"] = generation;
       if (!vrr.at("effective").get<bool>()) {
         const auto fallback = vrr.at("fallback_reason").get<std::string>();
-        if (pacing != "fixed_grid" || (fallback != "not_requested" && fallback != "request_malformed" &&
-            fallback != "watch_or_input_only" && fallback != "route_unreported" &&
-            fallback != "route_fixed_interval" && fallback != "clock_domain_unverified" &&
-            fallback != "presentation_time_missing" && fallback != "presentation_time_invalid")) {
+        // Admission chooses the first applicable reason. A named reason alone
+        // cannot validate a contradictory request or capture-route observation.
+        const bool consistent_fallback = fallback == "watch_or_input_only" ||
+          (fallback == "request_malformed" && requested == "malformed") ||
+          (fallback == "not_requested" && (requested == "absent" || requested == "false")) ||
+          (requested == "true" &&
+           ((fallback == "route_unreported" && capture == "unknown") ||
+            (fallback == "route_fixed_interval" && capture == "fixed_interval") ||
+            ((fallback == "clock_domain_unverified" || fallback == "presentation_time_missing" ||
+              fallback == "presentation_time_invalid") && capture == "source_driven")));
+        if (pacing != "fixed_grid" || !consistent_fallback) {
           return unavailable("inconsistent_fixed_grid_policy");
         }
         result.available = true;
@@ -106,6 +113,20 @@ namespace doctor_cadence {
           cadence.at("encoded_source_frames") > cadence.at("source_frames")) {
         return unavailable("source_frame_coverage_unavailable");
       }
+      // First/last ordinary source times use the verified server monotonic
+      // clock, in nanoseconds. Interior intervals cannot expose a stall before
+      // the first frame or after the last one in the client comparison window.
+      constexpr std::int64_t ns_per_ms = 1000000;
+      const auto &first = cadence.at("first_source_ns");
+      const auto &last = cadence.at("last_source_ns");
+      if (!exact_nonnegative(first) || !exact_nonnegative(last) || end_ms > INT64_MAX / ns_per_ms) {
+        return unavailable("source_edge_coverage_unavailable");
+      }
+      const auto first_ns = first.get<std::int64_t>(), last_ns = last.get<std::int64_t>();
+      const auto begin_ns = begin_ms * ns_per_ms, end_ns = end_ms * ns_per_ms;
+      if (first_ns < begin_ns || last_ns > end_ns || first_ns >= last_ns) {
+        return unavailable("source_edges_outside_window");
+      }
       if (!exact_nonnegative(cadence.at("invalid_source_frames")) || cadence.at("invalid_source_frames") != 0 ||
           !exact_nonnegative(cadence.at("routine_repeat_frames")) || cadence.at("routine_repeat_frames") != 0) {
         return unavailable("invalid_sources_or_routine_repeats");
@@ -132,11 +153,16 @@ namespace doctor_cadence {
       if (std::abs(result.source_fps - counted_fps) > 0.01 * std::max(1.0, counted_fps)) {
         return unavailable("source_fps_count_mismatch");
       }
-      if (cadence.at("max_source_gap_ms").get<double>() + 0.000001 <
-          double(end_ms - begin_ms) / (cadence.at("source_frames").get<std::int64_t>() - 1)) {
+      const auto source_span_ms = double(last_ns - first_ns) / ns_per_ms;
+      const auto interior_gap_ms = cadence.at("max_source_gap_ms").get<double>();
+      if (interior_gap_ms + 0.000001 < source_span_ms / (cadence.at("source_frames").get<std::int64_t>() - 1) ||
+          interior_gap_ms > source_span_ms + 0.000001) {
         return unavailable("source_gap_count_mismatch");
       }
-      result.source_stall = cadence.at("max_source_gap_ms").get<double>() > limits.at("max_source_gap_ms").get<double>();
+      const auto leading_gap_ms = double(first_ns - begin_ns) / ns_per_ms;
+      const auto trailing_gap_ms = double(end_ns - last_ns) / ns_per_ms;
+      const auto window_gap_ms = std::max({interior_gap_ms, leading_gap_ms, trailing_gap_ms});
+      result.source_stall = window_gap_ms > limits.at("max_source_gap_ms").get<double>();
       result.delivery_jitter = cadence.at("max_delivery_interval_error_ms").get<double>() >
         limits.at("max_delivery_interval_error_ms").get<double>();
       result.timestamp_error = cadence.at("timestamp_error_ms").get<double>() > limits.at("max_timestamp_error_ms").get<double>();
@@ -146,6 +172,9 @@ namespace doctor_cadence {
       result.observation["state"] = "observed_source_time";
       result.observation["reason"] = "fresh_host_source_and_delivery_measurements";
       result.observation["measurements"] = cadence;
+      result.observation["leading_source_gap_ms"] = leading_gap_ms;
+      result.observation["trailing_source_gap_ms"] = trailing_gap_ms;
+      result.observation["max_window_source_gap_ms"] = window_gap_ms;
     } catch (const nlohmann::json::exception &) {
       return unavailable("source_or_pacing_evidence_unavailable");
     }
