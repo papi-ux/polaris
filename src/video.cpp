@@ -4555,7 +4555,8 @@ namespace video {
     safe::signal_t &reinit_request_event,
     const encoder_t &encoder,
     stream_packets::destination_t channel_data,
-    packet_queue_t packets
+    packet_queue_t packets,
+    bool &session_initialized
   ) {
     // A disable/rollback may have superseded the target while a former
     // FFmpeg encoder was being retired. Use the latest pending request.
@@ -4565,6 +4566,7 @@ namespace video {
     bool refused_for_good = false;
     auto session = make_encode_session(disp, encoder, config, disp->width, disp->height,
                                        std::move(encode_device), &refused_for_good);
+    session_initialized = static_cast<bool>(session);
     if (!session) {
       adaptive_bitrate::set_runtime_update_supported(
         false,
@@ -5549,6 +5551,7 @@ namespace video {
     auto shutdown_event = mail->event<bool>(mail::shutdown);
     auto touch_port_event = mail->event<input::touch_port_t>(mail::touch_port);
     auto hdr_event = mail->event<hdr_info_t>(mail::hdr);
+    unsigned int consecutive_init_failures = 0;
 
     while (!shutdown_event->peek() && images->running()) {
       // Wait for the main capture event when the display is being reinitialized
@@ -5588,6 +5591,7 @@ namespace video {
       // Update client with our current HDR display state
       hdr_event->raise(make_hdr_info(*encode_device));
 
+      bool session_initialized = false;
       encode_run(
         frame_nr,
         mail,
@@ -5599,8 +5603,33 @@ namespace video {
         capture_ctx.reinit_request_event,
         encoder,
         channel_data,
-        packets
+        packets,
+        session_initialized
       );
+
+      if (session_initialized) {
+        // Ordinary display/bitrate rebuilds get a fresh initialization budget,
+        // even if no packet was sent before the successful session ended.
+        consecutive_init_failures = 0;
+        continue;
+      }
+      if (shutdown_event->peek() || !images->running()) break;
+      if (++consecutive_init_failures >= 5) {
+        BOOST_LOG(error) << "Encoder initialization failed on five consecutive attempts; ending the stream. "sv
+                         << "Check the encoder errors and available resources before reconnecting."sv;
+        end_stream_encoder_cannot_serve(mail);
+        break;
+      }
+
+      // Resource pressure may clear, but rebuilding once per captured frame
+      // only repeats allocations until the client reports a no-video timeout.
+      // Four retries wait 100/200/400/800 ms; cancellation remains responsive.
+      const auto retry_at = std::chrono::steady_clock::now() +
+                            100ms * (1u << (consecutive_init_failures - 1));
+      while (!shutdown_event->peek() && images->running() &&
+             std::chrono::steady_clock::now() < retry_at) {
+        std::this_thread::sleep_for(20ms);
+      }
     }
   }
 
