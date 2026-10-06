@@ -103,10 +103,15 @@ if(NOT WIN32)
 endif()
 
 # VrrClockProofTests (fast) parses /proc/<pid>/stat through the Linux probe's parse_starttime.
+# The shared test main also dispatches the labwc supervisor, which hands off the compositor identity
+# through the channel (itself using parse_starttime). Targets built on test_polaris_runtime_objects
+# already get both from the production list; only the standalone targets need them here.
 if(UNIX AND NOT APPLE)
-    list(APPEND TEST_SUPPORT_SOURCES
+    set(TEST_LINUX_SUPERVISOR_SOURCES
         ${CMAKE_SOURCE_DIR}/src/platform/linux/vrr_clock_probe.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/compositor_identity_channel.cpp
     )
+    list(APPEND TEST_SUPPORT_SOURCES ${TEST_LINUX_SUPERVISOR_SOURCES})
 endif()
 
 set(TEST_AUDIT_SUPPORT_SOURCES
@@ -116,6 +121,9 @@ set(TEST_AUDIT_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/globals.cpp
     ${CMAKE_SOURCE_DIR}/src/logging.cpp
 )
+if(UNIX AND NOT APPLE)
+    list(APPEND TEST_AUDIT_SUPPORT_SOURCES ${TEST_LINUX_SUPERVISOR_SOURCES})
+endif()
 
 set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_lookup_workers.cpp

@@ -11816,7 +11816,7 @@ TEST_F(StreamStatsCaptureTimingTests, UnknownIdentityReasonsCannotExposeProcessF
   const auto live = current_stats_json()["clients"][0]["capture_timing"];
   EXPECT_EQ(live["clock"]["producer_identity_reason"], "identity_reason_unavailable");
   EXPECT_EQ(timing()["clock"]["producer_identity_reason"], "identity_reason_unavailable");
-  for (const auto readout : {live, timing()}) {
+  for (const auto &readout : {live, timing()}) {
     const auto text = readout.dump();
     for (const auto secret : {"987654321", "8877665544", "/private/compositor/socket"}) {
       EXPECT_EQ(text.find(secret), std::string::npos) << secret;
