@@ -13,7 +13,7 @@
 
 /** Diagnostic observations only. No value in this namespace authorizes a setting or pacing change. */
 namespace game_mode_adaptive_sync {
-  using clock_t = std::chrono::steady_clock;
+  using steady_clock_t = std::chrono::steady_clock;
 
   struct property_t {
     bool present = false;
@@ -61,7 +61,7 @@ namespace game_mode_adaptive_sync {
     generation_t generation;
     version_t version;
     snapshot_t properties;
-    clock_t::time_point observed_at {};
+    steady_clock_t::time_point observed_at {};
   };
 
   enum class last_state_e { active, inactive, inactive_unsupported };
@@ -97,7 +97,7 @@ namespace game_mode_adaptive_sync {
     // Supplied by an independent symptom detector, never inferred from a VRR property or silence
     // on a source-driven capture of a static desktop.
     bool freeze = false;
-    clock_t::time_point onset {};
+    steady_clock_t::time_point onset {};
   };
 
   struct evaluation_t {
@@ -110,7 +110,7 @@ namespace game_mode_adaptive_sync {
     const char *range_status = "unmapped";
   };
 
-  inline evaluation_t evaluate(const record_t &record, clock_t::time_point now, symptom_t symptom = {}) {
+  inline evaluation_t evaluate(const record_t &record, steady_clock_t::time_point now, symptom_t symptom = {}) {
     evaluation_t result;
     if (symptom.freeze) result.advice = "generic_freeze";
     if (!record.last_known || now < record.last_known->observed_at) return result;

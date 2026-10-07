@@ -12,11 +12,11 @@ namespace {
     value.properties.capable = value.properties.feedback = {true, true, 32, 1, 0, 1};
     value.version.producer_exe = "/usr/bin/gamescope";
     value.version.os_release = {{"ID", "steamos"}, {"BUILD_ID", "fixture-build"}};
-    value.observed_at = clock_t::time_point {1s};
+    value.observed_at = steady_clock_t::time_point {1s};
     return value;
   }
   evaluation_t freeze_result(const store_t &store) {
-    return evaluate(store.read(), clock_t::time_point {4s}, {true, clock_t::time_point {2s}});
+    return evaluate(store.read(), steady_clock_t::time_point {4s}, {true, steady_clock_t::time_point {2s}});
   }
 }
 
@@ -45,7 +45,7 @@ TEST(GameModeAdaptiveSyncTests, GMA2ProducerRestartRetainsHistoryWithoutCorrelat
 
 TEST(GameModeAdaptiveSyncTests, GMA3ObservationDuringFreezeIsStillOnlyACorrelation) {
   store_t store;
-  auto value = active(); value.observed_at = clock_t::time_point {3s};
+  auto value = active(); value.observed_at = steady_clock_t::time_point {3s};
   store.publish(value);
   const auto result = freeze_result(store);
   EXPECT_STREQ(result.advice, "qualified_correlation");
@@ -55,7 +55,7 @@ TEST(GameModeAdaptiveSyncTests, GMA3ObservationDuringFreezeIsStillOnlyACorrelati
 
 TEST(GameModeAdaptiveSyncTests, GMA4ActivePropertyDoesNotGradeHealthyOrProvideAdvice) {
   store_t store; store.publish(active());
-  const auto result = evaluate(store.read(), clock_t::time_point {4s});
+  const auto result = evaluate(store.read(), steady_clock_t::time_point {4s});
   EXPECT_STREQ(result.advice, "none");
   EXPECT_STREQ(result.current_state, "unknown");
 }
@@ -102,7 +102,7 @@ TEST(GameModeAdaptiveSyncTests, GMC3ContradictionCannotChooseOnePropertyAsAuthor
 
 TEST(GameModeAdaptiveSyncTests, GMC4TornReadKeepsOriginalObservationAndAge) {
   store_t store; store.publish(active());
-  auto value = active(); value.observed_at = clock_t::time_point {3s};
+  auto value = active(); value.observed_at = steady_clock_t::time_point {3s};
   value.properties.feedback.value = 0; value.properties.torn = true;
   store.publish(value);
   EXPECT_EQ(freeze_result(store).last_state, last_state_e::active);
@@ -170,7 +170,7 @@ TEST(GameModeAdaptiveSyncTests, RetiredOrUnboundObserverCannotOfferCorrelationOr
 }
 
 TEST(GameModeAdaptiveSyncTests, FutureObservationIsNotHistoryAndNonAmdgpuCannotQualify) {
-  store_t store; auto value = active(); value.observed_at = clock_t::time_point {10s};
+  store_t store; auto value = active(); value.observed_at = steady_clock_t::time_point {10s};
   store.publish(value); EXPECT_FALSE(freeze_result(store).last_state);
   value = active(); value.amdgpu = false; store.publish(value);
   EXPECT_STREQ(freeze_result(store).advice, "generic_freeze");

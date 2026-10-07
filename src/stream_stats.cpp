@@ -752,7 +752,7 @@ namespace stream_stats {
     nlohmann::json host_adaptive_sync_json(const platf::image_provenance_t &image) {
       if (!image.host_adaptive_sync) return nullptr;
       const auto record = image.host_adaptive_sync->read();
-      const auto now = game_mode_adaptive_sync::clock_t::now();
+      const auto now = game_mode_adaptive_sync::steady_clock_t::now();
       const auto evaluated = game_mode_adaptive_sync::evaluate(record, now);
       // Every reason is a fixed diagnostic code. Never export arbitrary producer/credential text.
       static constexpr std::array reasons {

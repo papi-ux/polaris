@@ -98,7 +98,7 @@ namespace platf::game_mode_feedback {
      * detach this thread, and stop it before the connection is destroyed. */
     class bounded_x_t {
     public:
-      bounded_x_t(int fd, clock_t::time_point deadline): cancel_fd_(::fcntl(fd, F_DUPFD_CLOEXEC, 0)) {
+      bounded_x_t(int fd, steady_clock_t::time_point deadline): cancel_fd_(::fcntl(fd, F_DUPFD_CLOEXEC, 0)) {
         if (cancel_fd_ < 0) { ::close(fd); return; }
         timer_ = std::thread([this, deadline] {
           std::unique_lock lock(mutex_);
@@ -126,7 +126,7 @@ namespace platf::game_mode_feedback {
       std::thread timer_;
     };
 
-    int connect_peer(const std::filesystem::path &path, const capture_producer::binding_t &binding, clock_t::time_point deadline) {
+    int connect_peer(const std::filesystem::path &path, const capture_producer::binding_t &binding, steady_clock_t::time_point deadline) {
       const auto name = path.string();
       sockaddr_un address {};
       address.sun_family = AF_UNIX;
@@ -137,7 +137,7 @@ namespace platf::game_mode_feedback {
       const auto failed = [&] { ::close(fd); return -1; };
       if (::connect(fd, reinterpret_cast<sockaddr *>(&address), sizeof(address)) < 0) {
         if (errno != EINPROGRESS) return failed();
-        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - clock_t::now()).count();
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - steady_clock_t::now()).count();
         if (remaining <= 0) return failed();
         pollfd waiting {fd, POLLOUT, 0};
         if (::poll(&waiting, 1, static_cast<int>(remaining)) <= 0) return failed();
@@ -181,7 +181,7 @@ namespace platf::game_mode_feedback {
     }
 
     observation_t read_roots(observation_t value, const capture_producer::binding_t &binding, const probe_t &probe) {
-      const auto deadline = clock_t::now() + 250ms;
+      const auto deadline = steady_clock_t::now() + 250ms;
       std::error_code error;
       std::vector<std::filesystem::path> sockets;
       for (std::filesystem::directory_iterator entry(probe.socket_dir, error), end; !error && entry != end; entry.increment(error)) {
@@ -194,12 +194,12 @@ namespace platf::game_mode_feedback {
       std::sort(sockets.begin(), sockets.end());
       std::optional<snapshot_t> selected;
       for (const auto &socket : sockets) {
-        if (clock_t::now() >= deadline) { value.reason = "x_read_timeout"; return value; }
+        if (steady_clock_t::now() >= deadline) { value.reason = "x_read_timeout"; return value; }
         const auto fd = connect_peer(socket, binding, deadline);
         if (fd < 0) continue;
         bounded_x_t connection(fd, deadline);
         if (!connection.good()) {
-          value.reason = clock_t::now() >= deadline ? "x_read_timeout" : "x_connect_failed_or_denied";
+          value.reason = steady_clock_t::now() >= deadline ? "x_read_timeout" : "x_connect_failed_or_denied";
           return value;  // Do not select a different display when this matching peer was unreadable.
         }
         auto *x = connection.get();
@@ -220,7 +220,7 @@ namespace platf::game_mode_feedback {
         const auto root_id_after = property(x, root, id);
         const auto barrier = xcb_get_input_focus(x);
         auto *reply = xcb_get_input_focus_reply(x, barrier, nullptr);
-        if (!reply || !connection.good() || clock_t::now() >= deadline) {
+        if (!reply || !connection.good() || steady_clock_t::now() >= deadline) {
           std::free(reply); value.reason = "x_read_timeout"; return value;
         }
         std::free(reply);
@@ -241,7 +241,7 @@ namespace platf::game_mode_feedback {
       if (!selected) { value.reason = "root_display_not_found"; return value; }
       value.route_bound = true;
       value.properties = *selected;
-      value.observed_at = clock_t::now();
+      value.observed_at = steady_clock_t::now();
       value.reason = snapshot_reason(value);
       return value;
     }
