@@ -75,6 +75,9 @@
 #include "stream_display_policy.h"
 #include "vaapi.h"
 #include "virtual_display.h"
+#ifdef POLARIS_BUILD_VULKAN
+  #include "vulkan_encode.h"
+#endif
 
 #include <linux/rtnetlink.h>
 
@@ -1974,6 +1977,9 @@ std::string get_local_ip_for_gateway() {
     ~linux_deinit_t() override {
 #ifdef POLARIS_BUILD_PORTAL
       ::portal::shutdown();
+#endif
+#ifdef POLARIS_BUILD_VULKAN
+      vk::shutdown_discovery();
 #endif
     }
   };

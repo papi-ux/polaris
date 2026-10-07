@@ -5,12 +5,15 @@
  */
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstring>
 #include <cstdint>
 #include <drm_fourcc.h>
+#include <mutex>
 #include <optional>
 #include <string_view>
 #include <sys/stat.h>
+#include <thread>
 #if defined(__FreeBSD__)
   #include <sys/types.h>
 #else
@@ -23,13 +26,16 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavutil/hwcontext.h>
 #include <libavutil/hwcontext_vulkan.h>
+#include <libavutil/dict.h>
 }
 
+#include "capture_producer_sync.h"
 #include "graphics.h"
 #include "src/config.h"
 #include "src/logging.h"
 #include "src/video_colorspace.h"
 #include "vulkan_encode.h"
+#include "vulkan_capture_admission.h"
 #include "vulkan_loader.h"
 
 // SPIR-V data generated at build time
@@ -43,6 +49,48 @@ using namespace platf::vulkan_loader;
 
 namespace vk {
 
+  namespace {
+    // Keep discovery's ICD libraries alive between hardware contexts. Repeated
+    // unload/reload can exhaust NVIDIA's static TLS allocation and make a later
+    // probe see only the software device. This holds no device, queue or frame.
+    // The loader itself is already retained for the lifetime of the process.
+    struct discovery_instance_t {
+      VkInstance instance = VK_NULL_HANDLE;
+      std::mutex mutex;
+    };
+
+    discovery_instance_t &discovery_state() {
+      static discovery_instance_t discovery;
+      return discovery;
+    }
+
+    // Caller holds discovery.mutex. Cleanup belongs to explicit platform
+    // shutdown: driver exit handlers may precede C++ static destructors.
+    bool ensure_discovery_instance(discovery_instance_t &discovery) {
+      if (discovery.instance) {
+        return true;
+      }
+      VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
+      app.apiVersion = VK_API_VERSION_1_1;
+      VkInstanceCreateInfo ci = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
+      ci.pApplicationInfo = &app;
+      if (vkCreateInstance(&ci, nullptr, &discovery.instance) != VK_SUCCESS) {
+        discovery.instance = VK_NULL_HANDLE;
+        return false;
+      }
+      return true;
+    }
+  }  // namespace
+
+  void shutdown_discovery() {
+    auto &discovery = discovery_state();
+    const std::lock_guard lock {discovery.mutex};
+    if (discovery.instance) {
+      vkDestroyInstance(discovery.instance, nullptr);
+      discovery.instance = VK_NULL_HANDLE;
+    }
+  }
+
   // Match a DRI device node path to a Vulkan device index via VK_EXT_physical_device_drm.
   // Returns the index as a string (e.g. "1"), or empty string if no match.
   static std::string find_vulkan_index_for_render_node(const char *render_path) {
@@ -54,15 +102,12 @@ namespace vk {
     auto target_major = major(node_stat.st_rdev);
     auto target_minor = minor(node_stat.st_rdev);
 
-    VkApplicationInfo app = {VK_STRUCTURE_TYPE_APPLICATION_INFO};
-    app.apiVersion = VK_API_VERSION_1_1;
-
-    VkInstanceCreateInfo ci = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-    ci.pApplicationInfo = &app;
-    VkInstance inst = VK_NULL_HANDLE;
-    if (vkCreateInstance(&ci, nullptr, &inst) != VK_SUCCESS) {
+    auto &discovery = discovery_state();
+    const std::lock_guard lock {discovery.mutex};
+    if (!ensure_discovery_instance(discovery)) {
       return {};
     }
+    const auto inst = discovery.instance;
 
     uint32_t count = 0;
     vkEnumeratePhysicalDevices(inst, &count, nullptr);
@@ -97,7 +142,6 @@ namespace vk {
         break;
       }
     }
-    vkDestroyInstance(inst, nullptr);
     return result;
   }
 
@@ -108,6 +152,26 @@ namespace vk {
       BOOST_LOG(error) << "Vulkan Video: the Vulkan loader does not provide ["sv << missing << ']';
       return -1;
     }
+    {
+      auto &discovery = discovery_state();
+      const std::lock_guard lock {discovery.mutex};
+      if (!ensure_discovery_instance(discovery)) {
+        return -1;
+      }
+    }
+
+    // FFmpeg enables its optional device extensions automatically, but its
+    // default list omits foreign ownership. Request it additively; unsupported
+    // devices can still open for ordinary capture, while leased import checks
+    // the actual enabled list and refuses without it.
+    AVDictionary *device_options = nullptr;
+    auto free_options = util::fail_guard([&] { av_dict_free(&device_options); });
+    if (av_dict_set(&device_options, "device_extensions", VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME, 0) < 0) {
+      return -1;
+    }
+    const auto create_device = [&](const char *selector) {
+      return av_hwdevice_ctx_create(hw_device_buf, AV_HWDEVICE_TYPE_VULKAN, selector, device_options, 0);
+    };
 
     // KMS passes the capture card's exact render node. Using a different physical
     // device can make DMA-BUF import fail or silently add a cross-GPU copy.
@@ -118,7 +182,7 @@ namespace vk {
     if (!render_path.empty() && render_path.front() == '/') {
       const auto idx = find_vulkan_index_for_render_node(render_path.c_str());
       if (!idx.empty()) {
-        if (av_hwdevice_ctx_create(hw_device_buf, AV_HWDEVICE_TYPE_VULKAN, idx.c_str(), nullptr, 0) >= 0) {
+        if (create_device(idx.c_str()) >= 0) {
           BOOST_LOG(info) << "Vulkan Video matched render node [" << render_path << "] to physical device [" << idx << ']';
           return 0;
         }
@@ -129,7 +193,7 @@ namespace vk {
       }
     } else if (!render_path.empty()) {
       // Non-path: treat as device name substring or numeric index
-      if (av_hwdevice_ctx_create(hw_device_buf, AV_HWDEVICE_TYPE_VULKAN, render_path.c_str(), nullptr, 0) >= 0) {
+      if (create_device(render_path.c_str()) >= 0) {
         return 0;
       }
       if (require_exact_device) {
@@ -138,7 +202,7 @@ namespace vk {
       }
     }
     // Final fallback: let FFmpeg pick default
-    if (av_hwdevice_ctx_create(hw_device_buf, AV_HWDEVICE_TYPE_VULKAN, nullptr, nullptr, 0) >= 0) {
+    if (create_device(nullptr) >= 0) {
       return 0;
     }
     return -1;
@@ -446,6 +510,9 @@ namespace vk {
      * @return Conversion status.
      */
     int convert(platf::img_t &img) override {
+      if (capture_lease_refused) {
+        return platf::convert_capture_unreadable;
+      }
       // A live DMA-BUF frame on the system memory upload, which only a portal with its DMA-BUF offer
       // to Vulkan Video opened hands over. Refused before anything is recorded, and as a stream that
       // is over rather than one frame gone wrong: the portal keeps the transport it negotiated for as
@@ -485,6 +552,28 @@ namespace vk {
         BOOST_LOG(error) << "Vulkan DMA-BUF conversion received a non-DMA-BUF frame"sv;
         return -1;
       }
+      const bool leased_capture = descriptor && descriptor->sequence != 0 && descriptor->requires_producer_lease;
+      if (leased_capture && (!descriptor->capture_owner || descriptor->dmabuf_buffer_key == 0)) {
+        capture_lease_refused = true;
+        BOOST_LOG(error) << "Vulkan DMA-BUF capture has no published producer lease or buffer identity; this stream ends before GPU submission"sv;
+        return platf::convert_capture_unreadable;
+      }
+      if (leased_capture) {
+        if (const auto reason = capture_layout_error(descriptor->sd); !reason.empty()) {
+          capture_lease_refused = true;
+          BOOST_LOG(error) << "Vulkan DMA-BUF capture layout is unsupported ("sv << reason
+                           << "); this stream ends before GPU import"sv;
+          return platf::convert_capture_unreadable;
+        }
+        const auto producer = capture_producer_sync::wait(descriptor->sd.fds, std::chrono::milliseconds {500});
+        if (producer.status != capture_producer_sync::status_e::ready) {
+          capture_lease_refused = true;
+          BOOST_LOG(error) << "Vulkan DMA-BUF producer fence is not readable (status="sv
+                           << capture_producer_sync::status_name(producer.status) << ", errno="sv
+                           << producer.error << "); this stream ends before GPU import"sv;
+          return platf::convert_capture_unreadable;
+        }
+      }
 
       // Get encoder target frame
       if (!frame->buf[0]) {
@@ -515,13 +604,23 @@ namespace vk {
         return dispatch_compute(true);
       }
 
-      // Import new DMA-BUF as VkImage when capture sequence changes
-      if (descriptor && descriptor->sequence > sequence) {
-        if (!import_dmabuf(descriptor->sd)) {
+      // PipeWire's buffer identity survives independently of a capture-local
+      // sequence. A replacement generation can restart that sequence; using
+      // only its ordering would read the prior imported image under a new lease.
+      const bool import_changed = descriptor && (leased_capture
+        ? descriptor->dmabuf_buffer_key != imported_capture_buffer_key || descriptor->sequence != sequence
+        : descriptor->sequence > sequence);
+      if (import_changed) {
+        if (!import_dmabuf(descriptor->sd, leased_capture)) {
           BOOST_LOG(error) << "Failed to import DMA-BUF"sv;
+          if (leased_capture) {
+            capture_lease_refused = true;
+            return platf::convert_capture_unreadable;
+          }
           return -1;
         }
         sequence = descriptor->sequence;
+        imported_capture_buffer_key = leased_capture ? descriptor->dmabuf_buffer_key : 0;
       }
 
       if (!ram_input && src.image == VK_NULL_HANDLE) {
@@ -572,7 +671,7 @@ namespace vk {
       }
 
       // Record and submit compute dispatch
-      return dispatch_compute(false, ram_input ? &img : nullptr);
+      return dispatch_compute(false, ram_input ? &img : nullptr, leased_capture ? descriptor->capture_owner : nullptr);
     }
 
   private:
@@ -593,12 +692,17 @@ namespace vk {
     // when the ring wraps, preserving pipelining while making command-buffer,
     // descriptor-set, and imported-image lifetimes explicit.
     static constexpr std::size_t CMD_RING_SIZE = 3;
+    // A producer may have fewer buffers than the command ring. Retaining its
+    // leases until ring wrap would prevent it from publishing the next frame.
+    // Wait only for leased capture reads; ordinary VRAM and RAM remain pipelined.
+    static constexpr std::uint64_t CAPTURE_COMPLETION_TIMEOUT_NS = 500'000'000;
 
     struct cmd_slot_t {
       VkCommandBuffer buffer = VK_NULL_HANDLE;
       VkFence fence = VK_NULL_HANDLE;
       VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
       bool submitted = false;
+      std::shared_ptr<platf::img_t> capture_owner;
       std::vector<image_resource_t> retired_images;
       image_resource_t ram_source;
       upload_resource_t ram_upload;
@@ -872,48 +976,118 @@ namespace vk {
     };
 
     static drm_format_info drm_fourcc_to_vk_format(uint32_t fourcc) {
+      if (const auto known = capture_admission::format_info(fourcc)) {
+        return {known->format, known->swizzle};
+      }
       static constexpr VkComponentMapping identity = {
         VK_COMPONENT_SWIZZLE_IDENTITY,
         VK_COMPONENT_SWIZZLE_IDENTITY,
         VK_COMPONENT_SWIZZLE_IDENTITY,
         VK_COMPONENT_SWIZZLE_IDENTITY,
       };
-      static constexpr VkComponentMapping bgr_swap = {
-        VK_COMPONENT_SWIZZLE_B,
-        VK_COMPONENT_SWIZZLE_G,
-        VK_COMPONENT_SWIZZLE_R,
-        VK_COMPONENT_SWIZZLE_A,
-      };
+      // Keep the legacy unleased route unchanged. A leased capture is checked
+      // by capture_layout_error before it can reach this fallback.
+      BOOST_LOG(warning) << "Unknown DRM fourcc 0x" << std::hex << fourcc << std::dec << ", assuming B8G8R8A8";
+      return {VK_FORMAT_B8G8R8A8_UNORM, identity};
+    }
 
-      switch (fourcc) {
-        case DRM_FORMAT_XRGB8888:
-        case DRM_FORMAT_ARGB8888:
-          return {VK_FORMAT_B8G8R8A8_UNORM, identity};
-        case DRM_FORMAT_XBGR8888:
-        case DRM_FORMAT_ABGR8888:
-          return {VK_FORMAT_R8G8B8A8_UNORM, identity};
-        case DRM_FORMAT_XRGB2101010:
-        case DRM_FORMAT_ARGB2101010:
-          return {VK_FORMAT_A2R10G10B10_UNORM_PACK32, identity};
-        case DRM_FORMAT_XBGR2101010:
-        case DRM_FORMAT_ABGR2101010:
-          return {VK_FORMAT_A2B10G10R10_UNORM_PACK32, identity};
-        case DRM_FORMAT_XBGR16161616:
-        case DRM_FORMAT_ABGR16161616:
-          return {VK_FORMAT_R16G16B16A16_UNORM, identity};
-        case DRM_FORMAT_XRGB16161616:
-        case DRM_FORMAT_ARGB16161616:
-          return {VK_FORMAT_R16G16B16A16_UNORM, bgr_swap};
-        case DRM_FORMAT_XBGR16161616F:
-        case DRM_FORMAT_ABGR16161616F:
-          return {VK_FORMAT_R16G16B16A16_SFLOAT, identity};
-        case DRM_FORMAT_XRGB16161616F:
-        case DRM_FORMAT_ARGB16161616F:
-          return {VK_FORMAT_R16G16B16A16_SFLOAT, bgr_swap};
-        default:
-          BOOST_LOG(warning) << "Unknown DRM fourcc 0x" << std::hex << fourcc << std::dec << ", assuming B8G8R8A8";
-          return {VK_FORMAT_B8G8R8A8_UNORM, identity};
+    std::string_view capture_layout_error(const egl::surface_descriptor_t &sd) {
+      const auto extension_enabled = [&](std::string_view name) {
+        for (int i = 0; i < vk_dev.ctx->nb_enabled_dev_extensions; ++i) {
+          if (name == vk_dev.ctx->enabled_dev_extensions[i]) {
+            return true;
+          }
+        }
+        return false;
+      };
+      if (!extension_enabled(VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME) ||
+          !extension_enabled(VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME)) {
+        return "device was not opened with DMA-BUF and DRM modifier import extensions";
       }
+      if (!extension_enabled(VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME)) {
+        return "device was not opened with foreign capture ownership support";
+      }
+      const auto format = capture_admission::format_info(sd.fourcc);
+      if (!format) {
+        return "capture fourcc has no packed RGB mapping";
+      }
+      if (const auto error = capture_admission::metadata_error(sd.width, sd.height, sd.modifier,
+                                                               sd.fds, sd.pitches, format->bytes_per_pixel); !error.empty()) {
+        return error;
+      }
+      if (offset_x < 0 || offset_y < 0 ||
+          static_cast<std::int64_t>(offset_x) + width > sd.width ||
+          static_cast<std::int64_t>(offset_y) + height > sd.height) {
+        return "capture viewport exceeds the described image";
+      }
+
+      // This importer binds one allocation to a non-disjoint packed image.
+      // Extra modifier metadata planes are supported only in that same object;
+      // a second allocation requires disjoint import, which is not implemented.
+      struct stat first {};
+      if (fstat(sd.fds[0], &first) < 0) {
+        return "capture memory object is unreadable";
+      }
+      std::uint32_t planes = 0;
+      for (int fd : sd.fds) {
+        if (fd < 0) {
+          break;
+        }
+        struct stat plane {};
+        if (fstat(fd, &plane) < 0 || first.st_dev != plane.st_dev || first.st_ino != plane.st_ino) {
+          return "capture memory planes require different allocations";
+        }
+        ++planes;
+      }
+
+      VkDrmFormatModifierPropertiesListEXT modifiers {VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT};
+      VkFormatProperties2 format_properties {VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, &modifiers};
+      vkGetPhysicalDeviceFormatProperties2(vk_dev.phys_dev, format->format, &format_properties);
+      std::vector<VkDrmFormatModifierPropertiesEXT> properties(modifiers.drmFormatModifierCount);
+      modifiers.pDrmFormatModifierProperties = properties.data();
+      vkGetPhysicalDeviceFormatProperties2(vk_dev.phys_dev, format->format, &format_properties);
+      const auto match = std::find_if(properties.begin(), properties.end(), [&](const auto &candidate) {
+        return candidate.drmFormatModifier == sd.modifier;
+      });
+      if (match == properties.end()) {
+        return "capture modifier is not reported for this device and format";
+      }
+      if (match->drmFormatModifierPlaneCount != planes) {
+        return "capture memory plane count differs from the device modifier layout";
+      }
+      constexpr auto sampler_features = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+      if ((match->drmFormatModifierTilingFeatures & sampler_features) != sampler_features) {
+        return "capture modifier does not support this sampler";
+      }
+
+      VkPhysicalDeviceImageDrmFormatModifierInfoEXT modifier_info {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT};
+      modifier_info.drmFormatModifier = sd.modifier;
+      modifier_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+      VkPhysicalDeviceExternalImageFormatInfo external_info {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO, &modifier_info};
+      external_info.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+      VkPhysicalDeviceImageFormatInfo2 image_info {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2, &external_info};
+      image_info.format = format->format;
+      image_info.type = VK_IMAGE_TYPE_2D;
+      image_info.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+      image_info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+      VkExternalImageFormatProperties external_properties {VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES};
+      VkImageFormatProperties2 image_properties {VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2, &external_properties};
+      if (vkGetPhysicalDeviceImageFormatProperties2(vk_dev.phys_dev, &image_info, &image_properties) != VK_SUCCESS) {
+        return "device refused this format, modifier and DMA-BUF sampling query";
+      }
+      const auto &memory = external_properties.externalMemoryProperties;
+      if (!(memory.externalMemoryFeatures & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT) ||
+          !(memory.compatibleHandleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT)) {
+        return "device does not report DMA-BUF import support for this image";
+      }
+      const auto &limits = image_properties.imageFormatProperties;
+      if (static_cast<std::uint32_t>(sd.width) > limits.maxExtent.width ||
+          static_cast<std::uint32_t>(sd.height) > limits.maxExtent.height ||
+          limits.maxExtent.depth < 1 || limits.maxMipLevels < 1 || limits.maxArrayLayers < 1 ||
+          !(limits.sampleCounts & VK_SAMPLE_COUNT_1_BIT)) {
+        return "capture dimensions exceed the queried image limits";
+      }
+      return {};
     }
 
     /**
@@ -984,7 +1158,7 @@ namespace vk {
       slot.retired_images.clear();
     }
 
-    bool import_dmabuf(const egl::surface_descriptor_t &sd) {
+    bool import_dmabuf(const egl::surface_descriptor_t &sd, bool leased_capture) {
       int fd = dup(sd.fds[0]);
       if (fd < 0) {
         BOOST_LOG(error) << "Could not duplicate DMA-BUF descriptor: "sv << strerror(errno);
@@ -1026,7 +1200,8 @@ namespace vk {
         // Query driver for the expected plane count for this format+modifier.
         // DMA-BUF exports may include extra metadata planes (e.g. AMD DCC).
         int expected = query_modifier_plane_count(vk_format, sd.modifier);
-        int plane_count = (expected > 0 && expected <= dmabuf_planes) ? expected : dmabuf_planes;
+        int plane_count = leased_capture ? dmabuf_planes :
+                                          ((expected > 0 && expected <= dmabuf_planes) ? expected : dmabuf_planes);
 
         for (int i = 0; i < plane_count; ++i) {
           drm_layouts[i].offset = sd.offsets[i];
@@ -1093,8 +1268,13 @@ namespace vk {
       import_fd.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
       import_fd.fd = fd;  // Vulkan takes ownership
 
+      // Every leased import is dedicated to its exact image. This also meets
+      // DEDICATED_ONLY external-memory requirements without guessing them away.
+      VkMemoryDedicatedAllocateInfo dedicated {VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, &import_fd};
+      dedicated.image = next_src.image;
+
       VkMemoryAllocateInfo alloc_info = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-      alloc_info.pNext = &import_fd;
+      alloc_info.pNext = leased_capture ? static_cast<const void *>(&dedicated) : &import_fd;
       alloc_info.allocationSize = mem_req.size;
       alloc_info.memoryTypeIndex = *memory_type;
 
@@ -1313,7 +1493,7 @@ namespace vk {
       return true;
     }
 
-    int dispatch_compute(bool blank, const platf::img_t *ram_img = nullptr) {
+    int dispatch_compute(bool blank, const platf::img_t *ram_img = nullptr, const std::shared_ptr<platf::img_t> &capture_owner = {}) {
       auto *vk_frame = (AVVkFrame *) frame->data[0];
       int num_imgs = 0;
       for (int i = 0; i < AV_NUM_DATA_POINTERS && vk_frame->img[i]; i++) {
@@ -1413,11 +1593,13 @@ namespace vk {
         VkImageMemoryBarrier src_barrier = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         src_barrier.srcAccessMask = 0;
         src_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        src_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // A leased external producer has written these pixels. UNDEFINED
+        // would discard its contents; acquire its shared GENERAL layout.
+        src_barrier.oldLayout = capture_owner ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED;
         src_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         src_barrier.image = src.image;
         src_barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        src_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL;
+        src_barrier.srcQueueFamilyIndex = capture_owner ? VK_QUEUE_FAMILY_FOREIGN_EXT : VK_QUEUE_FAMILY_EXTERNAL;
         src_barrier.dstQueueFamilyIndex = vk_dev.compute_qf;
 
         vkCmdPipelineBarrier(cmd_buf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &src_barrier);
@@ -1466,6 +1648,22 @@ namespace vk {
       uint32_t gy = (frame->height + 15) / 16;
       vkCmdDispatch(cmd_buf, gx, gy, 1);
 
+      if (capture_owner && !blank && !ram_img) {
+        // Return the source image in its shared layout. The submission fence
+        // covers this release as well as the read; only then may its exact
+        // published owner return the buffer to PipeWire.
+        VkImageMemoryBarrier release {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        release.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        release.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        release.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        release.srcQueueFamilyIndex = vk_dev.compute_qf;
+        release.dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT;
+        release.image = src.image;
+        release.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vkCmdPipelineBarrier(cmd_buf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &release);
+      }
+
       VK_CHECK(vkEndCommandBuffer(cmd_buf));
 
       // Submit with timeline semaphore signaling for FFmpeg
@@ -1502,10 +1700,23 @@ namespace vk {
       submit.signalSemaphoreCount = sem_count;
       submit.pSignalSemaphores = signal_sems.data();
 
+      // Own the exact published lease before the GPU can start reading it.
+      // Descriptor duplication alone does not keep a producer from reusing it.
+      slot.capture_owner = capture_owner;
       auto res = vkQueueSubmit(vk_dev.compute_queue, 1, &submit, slot.fence);
 
       if (res != VK_SUCCESS) {
         BOOST_LOG(error) << "vkQueueSubmit failed: " << res;
+        if (slot.capture_owner) {
+          capture_lease_refused = true;
+          // vkQueueSubmit guarantees unaffected resources for these allocation
+          // failures. No GPU read acquired this lease, so do not retain it until
+          // device teardown. Other errors keep the conservative ownership path.
+          if (res == VK_ERROR_OUT_OF_HOST_MEMORY || res == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+            slot.capture_owner.reset();
+          }
+          return platf::convert_capture_unreadable;
+        }
         return -1;
       }
 
@@ -1536,6 +1747,17 @@ namespace vk {
 
       target.initialized = true;
 
+      if (slot.capture_owner) {
+        const auto completion = vkWaitForFences(vk_dev.dev, 1, &slot.fence, VK_TRUE, CAPTURE_COMPLETION_TIMEOUT_NS);
+        if (completion != VK_SUCCESS) {
+          capture_lease_refused = true;
+          BOOST_LOG(error) << "Vulkan DMA-BUF capture read did not complete within the 500 ms wait (status="sv
+                           << completion << "); this stream ends and retains its producer lease until GPU teardown"sv;
+          return platf::convert_capture_unreadable;
+        }
+        slot.capture_owner.reset();
+      }
+
       return 0;
     }
 
@@ -1559,7 +1781,22 @@ namespace vk {
       if (report_teardown) {
         BOOST_LOG(info) << "Vulkan converter teardown: waiting for device idle"sv;
       }
-      const auto idle_status = vkDeviceWaitIdle(vk_dev.dev);
+      auto idle_status = vkDeviceWaitIdle(vk_dev.dev);
+      if (idle_status != VK_SUCCESS && idle_status != VK_ERROR_DEVICE_LOST) {
+        BOOST_LOG(error) << "Vulkan converter teardown: idle wait failed (status="sv << idle_status
+                         << "); retaining conversion resources and producer leases until retirement is confirmed"sv;
+        // Allocation/unknown errors do not establish that resources are no
+        // longer in use. Keep this generation, including its hardware device,
+        // alive while retrying, rather than destroying imports or returning a
+        // producer buffer that the GPU may still read. As with the original
+        // infinite idle wait, teardown cannot finish without that observation.
+        do {
+          std::this_thread::sleep_for(50ms);
+          idle_status = vkDeviceWaitIdle(vk_dev.dev);
+        } while (idle_status != VK_SUCCESS && idle_status != VK_ERROR_DEVICE_LOST);
+      }
+      // Vulkan's lost-device contract treats VK_ERROR_DEVICE_LOST like success
+      // when determining whether command buffers/resources remain in use.
       if (report_teardown) {
         BOOST_LOG(info) << "Vulkan converter teardown: device idle status="sv << idle_status;
       }
@@ -1570,6 +1807,8 @@ namespace vk {
         destroy_retired_images(slot);
         destroy_image_resource(slot.ram_source);
         destroy_upload_resource(slot.ram_upload);
+        // Device idle precedes imported-resource destruction and producer return.
+        slot.capture_owner.reset();
         slot.ram_source_initialized = false;
         if (slot.fence) {
           vkDestroyFence(vk_dev.dev, slot.fence, nullptr);
@@ -1648,10 +1887,12 @@ namespace vk {
     bool refused_dmabuf_frame = false;
     /// Said once, for the same reason: the portal negotiates the frame format once per capture.
     bool refused_ten_bit_frame = false;
+    bool capture_lease_refused = false;
     bool is_10bit = false;
     AVBufferRef *hw_frames_ctx = nullptr;
     frame_t hwframe;
     std::uint64_t sequence = 0;
+    std::uint64_t imported_capture_buffer_key = 0;
 
     // Vulkan device (from FFmpeg)
     struct vk_device_t {

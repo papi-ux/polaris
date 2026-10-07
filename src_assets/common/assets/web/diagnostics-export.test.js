@@ -439,6 +439,100 @@ describe('GitHub issue draft support flow', () => {
 })
 
 
+describe('ended stream session facts in support exports', () => {
+  const ended = {
+    state: 'ended', stream_instance_id: 'ended-stream:1', client_name: 'Steam Deck',
+    codec: 'hevc', encoder_backend: 'nvenc',
+    started_at: '2026-10-05T07:26:51Z', ended_at: '2026-10-05T07:28:27Z',
+    capture: {
+      preference: 'kms', requested: 'wlr', opened: 'wlr', route: 'wlr',
+      transport: 'dmabuf', residency: 'gpu', format: 'bgra8',
+      mode_override_reason: 'private_compositor',
+    },
+  }
+
+  it('exports ended capture facts even when no historical quality sample was captured', () => {
+    const input = { stream_stats_connected: true, session_snapshot: {
+      streaming: false, clients: [], fps: 0, encode_time_ms: 0, packet_loss: 0,
+      capture_path: 'unknown', capture_path_reason: 'no_capture_metadata', last_session: ended,
+    } }
+    const bundle = buildAnonymizedDiagnosticsBundle(input)
+    expect(bundle.stream_evidence.last_ended_stream).toEqual(ended)
+    expect(bundle.issue_draft).toContain('## Last ended stream')
+    expect(bundle.issue_draft).toContain('- Stream instance: ended-stream:1')
+    expect(bundle.issue_draft).toContain('- Encoder backend: nvenc')
+    expect(bundle.issue_draft).toContain('- Capture preference: kms')
+    expect(bundle.issue_draft).toContain('- Capture requested: wlr')
+    expect(bundle.issue_draft).toContain('- Capture initialized: wlr')
+    expect(bundle.issue_draft).toContain('- Capture route: wlr')
+    expect(bundle.issue_draft).toContain('- Observed frame transport / residency / format: dmabuf / gpu / bgra8')
+    expect(bundle.issue_draft).toContain('- Mode override reason: private_compositor')
+    expect(bundle.issue_draft).toContain('Session identity and capture facts do not establish media quality or frame delivery.')
+    expect(bundle.issue_draft).toContain('- Active stream: no — live measurements unavailable')
+    expect(bundle.issue_draft).not.toContain('0.00% video frame loss')
+    expect(bundle.issue_draft).not.toContain('0.0 ms encode')
+  })
+
+  it('keeps mode override and route fallback separate without borrowing a current encoder', () => {
+    const last = { ...ended, encoder_backend: undefined, capture: {
+      preference: 'portal', requested: 'portal', opened: 'portal', route: 'screencast',
+      transport: 'shm', residency: 'cpu', format: 'bgra8',
+      mode_override_reason: 'host_game_mode', route_fallback_reason: 'direct_node_unavailable',
+    } }
+    const draft = buildGithubIssueDraft({ config: { encoder: 'vaapi' }, session_snapshot: {
+      streaming: true, encoder: 'vulkan', last_session: last,
+    } })
+    const [current, historical] = draft.split('## Last ended stream')
+    expect(current).toContain('- Encoder: vulkan')
+    expect(historical).toContain('- Encoder backend: unknown')
+    expect(historical).toContain('- Mode override reason: host_game_mode')
+    expect(historical).toContain('- Route fallback reason: direct_node_unavailable')
+    expect(historical).toContain('- Observed frame transport / residency / format: shm / cpu / bgra8')
+  })
+
+  it.each([null, [], {}, { ...ended, state: 'active' }, { ...ended, stream_instance_id: '' },
+    { ...ended, stream_instance_id: ' ' }, { ...ended, stream_instance_id: 1 }])(
+    'does not turn an invalid ended identity into retained evidence: %j', (last) => {
+      const input = { session_snapshot: { last_session: last } }
+      expect(buildGithubIssueDraft(input)).not.toContain('## Last ended stream')
+      expect(buildStreamEvidence(input)).not.toHaveProperty('last_ended_stream')
+    }
+  )
+
+  it('keeps missing or malformed ended fields unavailable instead of borrowing current capture', () => {
+    const draft = buildGithubIssueDraft({ session_snapshot: {
+      capture_path: 'dmabuf', encoder: 'nvenc', last_session: {
+        state: 'ended', stream_instance_id: 'setup-only:1', encoder_backend: ['nvenc'],
+        capture: { opened: { path: 'wlr' }, route: 0 },
+      },
+    } })
+    const historical = draft.split('## Last ended stream')[1]
+    expect(historical).toContain('- Encoder backend: unknown')
+    expect(historical).toContain('- Capture initialized: unknown')
+    expect(historical).toContain('- Capture route: unknown')
+    expect(historical).not.toContain('[object Object]')
+    expect(historical).not.toContain('dmabuf')
+    expect(historical).not.toContain('nvenc')
+  })
+
+  it('uses the existing redactor and address labels for retained facts without exporting extra fields', () => {
+    const input = { logs: 'Client 192.168.1.192 connected', session_snapshot: { last_session: {
+      ...ended, client_name: '192.168.1.192', api_key: 'private-value',
+      capture: { ...ended.capture, mode_override_reason: 'token=private-value', password: 'private-value' },
+    } } }
+    const bundle = buildAnonymizedDiagnosticsBundle(input)
+    const retained = bundle.stream_evidence.last_ended_stream
+    expect(retained).toBeDefined()
+    expect(retained).not.toHaveProperty('api_key')
+    expect(retained.capture).not.toHaveProperty('password')
+    expect(bundle.issue_draft).toContain(`- Client: ${retained.client_name}`)
+    expect(bundle.logs[0]).toContain(retained.client_name)
+    expect(bundle.issue_draft).toContain('token=[redacted]')
+    expect(JSON.stringify(bundle)).not.toContain('private-value')
+    expect(JSON.stringify(bundle)).not.toContain('192.168.1.192')
+  })
+})
+
 describe('support report after a stream that failed to start', () => {
   // What the host serves once an Android TV client negotiated PyroWave, could not build the
   // decoder, and left during video setup.
