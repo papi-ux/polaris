@@ -204,7 +204,7 @@ describe('Linux Streaming Setup checklist', () => {
 
   it('keeps planned modes visible without adding selectable launch buttons', () => {
     const wrapper = mountAudioVideo()
-    const pickerButtons = wrapper.find('[data-stream-display-mode-picker]').findAll('button')
+    const pickerButtons = wrapper.find('[data-stream-display-mode-picker]').findAll('article > button')
     const planned = wrapper.find('[data-planned-stream-modes]')
 
     expect(pickerButtons).toHaveLength(7)

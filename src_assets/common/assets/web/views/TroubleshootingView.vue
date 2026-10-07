@@ -128,6 +128,8 @@
       </div>
     </section>
 
+    <StreamPacingReadout v-if="streamStats?.streaming" :stats="streamStats" />
+
     <SpacesDiagnostics v-if="platform === 'linux'" />
 
     <section class="section-card space-y-4" data-support-self-tests>
@@ -540,6 +542,8 @@ import { streamClientFamilyLabel } from '../client-family.js'
 import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
 import { groupRecentIssueLogs } from '../recent-issues.js'
 import { statusTone } from '../status-tones.js'
+import { doctorIsWaitingForStream } from '../doctor-observation.js'
+import StreamPacingReadout from '../components/StreamPacingReadout.vue'
 
 const { toast: showToast } = useToast()
 const i18n = inject('i18n')
@@ -669,9 +673,14 @@ const fixMyStreamChecklist = computed(() => buildFixMyStreamChecklist({
 }))
 
 const doctorPayload = computed(() => streamStats.value?.doctor || null)
-const doctorDiagnosisIdle = computed(() => !streamStats.value?.streaming && !doctorPayload.value)
+const doctorDiagnosisIdle = computed(() => doctorIsWaitingForStream(doctorPayload.value, streamStats.value) || (!streamStats.value?.streaming && !doctorPayload.value))
 const aiDoctorCategoriesText = computed(() => `${i18n.t('troubleshooting.ai_doctor_categories_prefix')} ${AI_DOCTOR_EXPLANATION_CATEGORIES.join(', ')}`)
 const doctorPlainDiagnosis = computed(() => {
+  if (doctorIsWaitingForStream(doctorPayload.value, streamStats.value)) return {
+    title: i18n.t('troubleshooting.doctor_waiting_title'),
+    detail: i18n.t('troubleshooting.doctor_waiting_detail'),
+    action: i18n.t('troubleshooting.doctor_waiting_action'),
+  }
   const doctor = doctorPayload.value
   if (doctor?.simple_state || doctor?.summary || doctor?.diagnosis) {
     const title = doctor.simple_state || doctor.summary || doctor.diagnosis

@@ -8,7 +8,7 @@ import DashboardView from './DashboardView.vue'
 const shared = vi.hoisted(() => ({ stats: null }))
 vi.mock('../composables/useStreamStats', () => ({ useStreamStats: () => ({ stats: shared.stats }) }))
 vi.mock('../composables/useLiveTuning', () => ({ useLiveTuning: () => ({ label: ref('Off') }) }))
-vi.mock('../composables/useSystemStats', () => ({ useSystemStats: () => ({ gpu: ref(null), displays: ref([]), audio: ref(null), sessionType: ref('') }) }))
+vi.mock('../composables/useSystemStats', () => ({ useSystemStats: () => ({ gpu: ref(null), displays: ref([]), audio: ref(null), sessionType: ref(''), readiness: ref({ displays: 'unavailable', audio: 'unavailable' }), refresh: vi.fn(async () => {}) }) }))
 vi.mock('../composables/useSessionHistory', () => ({ useSessionHistory: () => ({ sessions: ref([]), clearHistory: vi.fn(), activeStartedAt: ref(null) }), formatDuration: String }))
 vi.mock('../composables/useAiOptimizer', () => ({ useAiOptimizer: () => ({ status: ref(null), fetchStatus: vi.fn(), fetchDevices: vi.fn() }) }))
 vi.mock('../composables/useFavicon', () => ({ useFavicon: vi.fn() }))
