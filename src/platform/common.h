@@ -32,6 +32,7 @@
 #include "src/utility.h"
 #include "src/video_colorspace.h"
 #include "src/vrr_session_policy.h"
+#include "src/vrr_source_time.h"
 
 extern "C" {
 #include <moonlight-common-c/src/Limelight.h>
@@ -528,6 +529,8 @@ namespace platf {
   struct source_presentation_t {
     std::optional<std::int64_t> ns;  ///< present only when representable as signed nanoseconds
     vrr_policy::presentation_status_e status = vrr_policy::presentation_status_e::missing;
+    /// The backend's presentation-tracker session this sample came from; 0 when it has none.
+    std::uint64_t baseline = 0;
 
     bool operator==(const source_presentation_t &) const = default;
   };
@@ -553,6 +556,11 @@ namespace platf {
     /// Captured while initializing the capture: always ineligible, even with a representable time.
     bool prefetched_init = false;
     std::shared_ptr<const vrr_clock::proof_t> clock_proof;
+    /**
+     * The producer's per-frame mapping receipt, stamped with the epoch. Observation evidence only: it
+     * is never live authority and never a substitute for the frame's pacing timestamp.
+     */
+    vrr_clock::source_time_receipt_t source_time;
   };
 
   struct img_t: std::enable_shared_from_this<img_t> {

@@ -22,6 +22,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cmath>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -1228,6 +1229,29 @@ namespace video {
     std::uint64_t capture_generation_id,
     const std::vector<std::pair<std::shared_ptr<platf::img_t>, bool>> &pushes
   );
+
+  /**
+   * One production epoch held open across calls, so a test can act between pushes (retire a lease,
+   * read the clock after the epoch started) exactly as a capture loop interleaves with the world.
+   * Opening and every push use the production open and stamp paths.
+   */
+  class capture_epoch_stepper_for_tests_t {
+  public:
+    capture_epoch_stepper_for_tests_t(const platf::display_t &disp, std::uint64_t capture_generation_id);
+    ~capture_epoch_stepper_for_tests_t();
+    capture_epoch_stepper_for_tests_t(const capture_epoch_stepper_for_tests_t &) = delete;
+    capture_epoch_stepper_for_tests_t &operator=(const capture_epoch_stepper_for_tests_t &) = delete;
+
+    capture_epoch_for_tests_t opened() const;
+    /// The capture threads' push stamp for one (image, frame_captured).
+    void push(platf::img_t &img, bool frame_captured);
+    /// The epoch's saturating count of tracker sessions changing between mapped frames.
+    std::uint64_t baseline_changes() const;
+
+  private:
+    struct epoch_t;
+    std::unique_ptr<epoch_t> epoch_;
+  };
 
   /// The reset both capture threads apply to a pooled image before handing it to a backend again.
   void reset_pooled_image_for_tests(platf::img_t &img);

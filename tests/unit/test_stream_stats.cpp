@@ -14,6 +14,7 @@
 #include <src/private_state_file.h>
 #include <src/utility.h>
 #include <src/vrr_clock_proof.h>
+#include <src/vrr_source_time.h>
 #include "../tests_events.h"
 
 #include <gtest/gtest.h>
@@ -11708,35 +11709,127 @@ TEST_F(StreamStatsCaptureTimingTests, PublicAndEndedEvidenceOmitPrivateFactsAndF
   EXPECT_EQ(timing(502)["capture_epoch_id"], 72u);
 }
 
-TEST_F(StreamStatsCaptureTimingTests, VerifiedSyntheticClockClassifiesFutureStaleAndEpochEdgesButNeverEnablesVrr) {
+TEST_F(StreamStatsCaptureTimingTests, HistoricalEpochProofCannotReplaceAPerFrameObservation) {
   stream_stats::add_client("10.0.0.5", "Owner", 501);
   auto frame = image();
   frame.clock_proof = proof(71, true);
-  frame.presentation.ns = 4'000'000'101;
+  ASSERT_TRUE(vrr_clock::authorises_clock_comparison(*frame.clock_proof));
+  ASSERT_EQ(vrr_clock::classify(frame.presentation.status, frame.presentation.ns, false,
+                              frame.ready_at, frame.clock_proof.get()), vrr_clock::sample_e::valid);
   ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
-  EXPECT_EQ(timing()["last_plausibility"], "future");
+  EXPECT_EQ(timing()["last_plausibility"], "clock_unverified");
+  EXPECT_EQ(timing()["source_time"]["result"], "not_observed");
+  EXPECT_EQ(timing()["clock"]["scope"], "capture_epoch_observation");
+  EXPECT_EQ(timing()["clock"]["clock_domain_verified"], true) << "historical synthetic proof only";
+
   frame.source_sequence++;
-  frame.presentation.ns = 1;
+  frame.source_time.result = vrr_clock::source_time_e::lease_not_current;
   ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
-  EXPECT_EQ(timing()["last_plausibility"], "stale");
+  EXPECT_EQ(timing()["last_plausibility"], "clock_unverified");
+  EXPECT_EQ(timing()["source_time"]["result"], "lease_not_current");
+  EXPECT_EQ(timing()["source_time"]["mapped_available"], false);
+  EXPECT_FALSE(timing()["source_time"].contains("uncertainty_ns"));
+  EXPECT_EQ(timing()["plausibility_counts"]["valid"], 0u);
+
   frame.source_sequence++;
-  frame.presentation.ns = 4'000'000'100;
+  frame.source_time.result = vrr_clock::source_time_e::regressed_in_epoch;
   ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
-  EXPECT_EQ(timing()["last_plausibility"], "valid") << "exact uncertainty edge is admitted";
-  frame.source_sequence++;
-  frame.ready_at.reset();
-  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
-  EXPECT_EQ(timing()["last_plausibility"], "missing");
-  EXPECT_EQ(timing()["clock"]["clock_domain_verified"], true) << "synthetic proof only";
-  frame = image(72, 1);
-  auto epoch_proof = *proof(72, true);
-  epoch_proof.epoch_start_mono_ns = 2'000'000'000;
-  frame.clock_proof = std::make_shared<const vrr_clock::proof_t>(epoch_proof);
-  frame.presentation.ns = 1'999'999'999;
-  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
-  EXPECT_EQ(timing()["last_plausibility"], "before_epoch");
+  EXPECT_EQ(timing()["last_plausibility"], "nonmonotonic");
+  EXPECT_EQ(timing()["source_time"]["result_counts"]["regressed_in_epoch"], 1u);
   EXPECT_EQ(timing()["source_time_eligible"], false);
   EXPECT_EQ(timing()["effective_vrr"], false);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, PerFrameRefusalsKeepTheirMeaningWithoutBorrowingTheEpochProof) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto frame = image();
+  frame.clock_proof = proof(71, true);
+  for (const auto &[result, expected] : std::array {
+         std::pair {vrr_clock::source_time_e::future, "future"},
+         std::pair {vrr_clock::source_time_e::stale, "stale"},
+         std::pair {vrr_clock::source_time_e::before_epoch, "before_epoch"},
+         std::pair {vrr_clock::source_time_e::ready_unavailable, "missing"},
+         std::pair {vrr_clock::source_time_e::conversion_overflow, "invalid"},
+         std::pair {vrr_clock::source_time_e::mapping_drifted, "clock_unverified"},
+       }) {
+    frame.source_time.result = result;
+    ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+    EXPECT_EQ(timing()["last_plausibility"], expected);
+    EXPECT_EQ(timing()["source_time"]["result_counts"][std::string(vrr_clock::name(result))], 1u);
+    EXPECT_EQ(timing()["source_time"]["mapped_available"], false);
+    frame.source_sequence++;
+  }
+  EXPECT_EQ(timing()["plausibility_counts"]["valid"], 0u);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, ContradictoryMappedReceiptsCannotConsumeASequence) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto valid = image();
+  valid.clock_proof = proof(71, true);
+  valid.source_time.result = vrr_clock::source_time_e::mapped;
+  valid.source_time.source_steady_ns = valid.presentation.ns;
+  valid.source_time.uncertainty_ns = 100;
+  valid.source_time.observed_steady_ns = 4'000'000'000;
+  std::vector<platf::image_provenance_t> refused;
+  auto bad = valid;
+  bad.source_time.result = static_cast<vrr_clock::source_time_e>(255);
+  refused.push_back(bad);
+  bad = valid; bad.source_time.source_steady_ns.reset(); refused.push_back(bad);
+  bad = valid; bad.source_time.source_steady_ns = -1; refused.push_back(bad);
+  bad = valid; (*bad.source_time.source_steady_ns)++; refused.push_back(bad);
+  bad = valid; bad.source_time.uncertainty_ns = UINT64_MAX; refused.push_back(bad);
+  bad = valid; bad.source_time.uncertainty_ns = 0; refused.push_back(bad);
+  bad = valid; bad.source_time.presentation_baseline++; refused.push_back(bad);
+  bad = valid; bad.source_time.observed_steady_ns = -1; refused.push_back(bad);
+  bad = valid; bad.source_time.observed_steady_ns = 0; refused.push_back(bad);
+  bad = valid; bad.ready_at.reset(); refused.push_back(bad);
+  bad = valid; bad.prefetched_init = true; refused.push_back(bad);
+  bad = valid; bad.clock_proof = proof(71, false); refused.push_back(bad);
+  bad = valid; bad.source_time.result = vrr_clock::source_time_e::lease_not_current; refused.push_back(bad);
+  for (const auto &frame : refused) EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_TRUE(timing().is_null());
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, valid));
+  EXPECT_EQ(timing()["accepted_frames"], 1u);
+  EXPECT_EQ(timing()["last_plausibility"], "valid");
+  EXPECT_EQ(timing()["source_time"]["mapped_available"], true);
+  EXPECT_EQ(timing()["source_time"]["uncertainty_ns"], 100u);
+  EXPECT_EQ(timing()["source_time"]["result_counts"]["mapped"], 1u);
+  EXPECT_EQ(timing()["source_time_eligible"], false);
+  EXPECT_EQ(timing()["pacing_authority"], false);
+  EXPECT_EQ(timing()["receiver_presentation_verified"], false);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, MappedObservationIsPrivateImmutableAndCountedPerConsumer) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  stream_stats::add_client("10.0.0.6", "Watch", 502);
+  auto frame = image();
+  frame.clock_proof = proof(71, true);
+  frame.source_time.result = vrr_clock::source_time_e::mapped;
+  frame.source_time.source_steady_ns = frame.presentation.ns;
+  frame.source_time.observed_steady_ns = 4'000'000'000;
+  frame.source_time.uncertainty_ns = 100;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  ASSERT_TRUE(stream_stats::record_accepted_capture(502, frame));
+  const auto owner = current_stats_json()["clients"][0]["capture_timing"];
+  const auto frozen = owner["source_time"];
+  EXPECT_EQ(frozen["scope"], "per_frame_observation");
+  for (const auto key : {"source_steady_ns", "observed_steady_ns", "presentation_baseline", "lease",
+                         "pid", "uid", "epoch_start_mono_ns", "steady_to_mono_offset_ns"}) {
+    EXPECT_FALSE(frozen.contains(key)) << key;
+  }
+  const auto public_text = owner.dump();
+  EXPECT_EQ(public_text.find("3999999000"), std::string::npos);
+  EXPECT_EQ(public_text.find("4000000000"), std::string::npos);
+  stream_stats::remove_client("10.0.0.5", 501);
+  EXPECT_EQ(current_stats_json()["last_session"]["capture_timing"]["source_time"], frozen);
+  frame.source_sequence++;
+  frame.source_time = {};
+  frame.source_time.result = vrr_clock::source_time_e::lease_not_current;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(502, frame));
+  EXPECT_EQ(timing(502)["source_time"]["result_counts"]["mapped"], 1u);
+  EXPECT_EQ(timing(502)["source_time"]["result_counts"]["lease_not_current"], 1u);
+  EXPECT_EQ(timing(502)["last_plausibility"], "clock_unverified");
+  EXPECT_EQ(current_stats_json()["last_session"]["capture_timing"]["source_time"], frozen);
 }
 
 TEST_F(StreamStatsCaptureTimingTests, OtherBackendsAndIdleClientsStayUnknownAndDoNotBorrowHostCounts) {

@@ -36,6 +36,7 @@
 #include "utility.h"
 #include "verified_action.h"
 #include "vrr_clock_proof.h"
+#include "vrr_source_time.h"
 
 namespace video {
   std::string active_encoder_name();
@@ -608,6 +609,14 @@ namespace stream_stats {
       "prefetched_init", "clock_unverified",
     };
 
+    constexpr std::array<std::string_view, 23> k_source_time_results {
+      "not_observed", "mapped", "no_presentation_clock", "prefetched_init", "missing",
+      "invalid_nsec", "invalid_overflow", "nonmonotonic", "invalid_status", "proof_unavailable",
+      "namespace_unverified", "identity_unverified", "mapping_invalid", "lease_not_current",
+      "live_clock_unavailable", "mapping_drifted", "ready_unavailable", "before_epoch", "future",
+      "stale", "regressed_in_epoch", "conversion_overflow", "clock_domain_unverified",
+    };
+
     // Only fixed identity policy names may cross the public diagnostics boundary. A future or
     // malformed proof reason must not expose a process identity, path or runtime-supplied text.
     std::string_view public_compositor_identity_reason(std::string_view reason) {
@@ -629,16 +638,40 @@ namespace stream_stats {
     }
 
     std::string_view capture_plausibility(const platf::image_provenance_t &image) {
-      constexpr vrr_clock::plausibility_limits_t limits {.staleness_ns = 2'000'000'000};
       // These outcomes need no comparison between clocks. Valid protocol syntax does.
       if (image.prefetched_init || image.presentation.status != vrr_policy::presentation_status_e::valid) {
         return vrr_clock::name(vrr_clock::classify(image.presentation.status, image.presentation.ns,
-                                                image.prefetched_init, image.ready_at, nullptr, limits));
+                                                image.prefetched_init, image.ready_at, nullptr));
       }
-      if (!capture_clock_verified(image)) return "clock_unverified";
-      if (!image.ready_at) return "missing";
-      return vrr_clock::name(vrr_clock::classify(image.presentation.status, image.presentation.ns,
-                                               image.prefetched_init, image.ready_at, image.clock_proof.get(), limits));
+      const auto result = vrr_clock::name(image.source_time.result);
+      if (result == "mapped") return "valid";
+      if (result == "regressed_in_epoch" || result == "nonmonotonic") return "nonmonotonic";
+      if (result == "missing" || result == "ready_unavailable") return "missing";
+      if (result == "future" || result == "stale" || result == "before_epoch" || result == "prefetched_init") return result;
+      if (result == "invalid_nsec" || result == "invalid_overflow" || result == "invalid_status" ||
+          result == "conversion_overflow") return "invalid";
+      return "clock_unverified";
+    }
+
+    // Internal provenance is trusted producer evidence, but malformed or contradictory values
+    // must never be published as a mapped time or consume a consumer's next source sequence.
+    bool source_time_consistent(const platf::image_provenance_t &image) {
+      const auto &receipt = image.source_time;
+      const auto result = vrr_clock::name(receipt.result);
+      if (std::find(k_source_time_results.begin(), k_source_time_results.end(), result) == k_source_time_results.end()) return false;
+      if (result != "not_observed" && receipt.presentation_baseline != image.presentation.baseline) return false;
+      if (result != "mapped") return !receipt.source_steady_ns && receipt.uncertainty_ns == 0;
+      if (!capture_clock_verified(image) || !image.presentation.ns || !image.ready_at || image.prefetched_init ||
+          image.presentation.status != vrr_policy::presentation_status_e::valid || !receipt.source_steady_ns ||
+          *receipt.source_steady_ns < 0 || receipt.observed_steady_ns < 0 ||
+          receipt.uncertainty_ns < image.clock_proof->mapping.uncertainty_ns ||
+          receipt.uncertainty_ns > vrr_clock::source_time_limits_t {}.max_total_uncertainty_ns) return false;
+      std::int64_t mapped = 0;
+      std::int64_t latest = 0;
+      return vrr_clock::checked_add(*image.presentation.ns, image.clock_proof->mapping.steady_to_mono_offset_ns, mapped) &&
+             mapped == *receipt.source_steady_ns &&
+             vrr_clock::checked_add(receipt.observed_steady_ns, static_cast<std::int64_t>(receipt.uncertainty_ns), latest) &&
+             mapped <= latest;
     }
 
     // This readout is accepted-image evidence, not a pacing decision. Public records carry opaque
@@ -657,6 +690,7 @@ namespace stream_stats {
         plausibility[std::string(k_capture_plausibility[index])] = timing.plausibility_counts[index];
       }
       nlohmann::json clock {
+        {"scope", "capture_epoch_observation"},
         {"time_namespace", "unverifiable"},
         {"producer_identity_verified", false},
         {"producer_identity_reason", "not_probed"},
@@ -681,6 +715,18 @@ namespace stream_stats {
         clock["probe_samples"] = proof->mapping.samples;
         clock["uncertainty_ns"] = proof->mapping.uncertainty_ns;
       }
+      nlohmann::json source_time_counts = nlohmann::json::object();
+      for (const auto result : k_source_time_results) {
+        const auto count = timing.source_time_counts.find(result);
+        source_time_counts[std::string(result)] = count == timing.source_time_counts.end() ? 0 : count->second;
+      }
+      nlohmann::json source_time {
+        {"scope", "per_frame_observation"},
+        {"result", vrr_clock::name(image.source_time.result)},
+        {"mapped_available", image.source_time.source_steady_ns.has_value()},
+        {"result_counts", std::move(source_time_counts)},
+      };
+      if (image.source_time.source_steady_ns) source_time["uncertainty_ns"] = image.source_time.uncertainty_ns;
       nlohmann::json j {
         {"schema", 1},
         {"scope", "accepted_source_images"},
@@ -696,6 +742,7 @@ namespace stream_stats {
         {"ready_time_available", image.ready_at.has_value()},
         {"prefetched_init", image.prefetched_init},
         {"clock", std::move(clock)},
+        {"source_time", std::move(source_time)},
         {"source_time_eligible", false},
         {"pacing_authority", false},
         {"effective_vrr", false},
@@ -3851,6 +3898,7 @@ namespace stream_stats {
     if (image.route.presentation == platf::presentation_clock_e::none &&
         (image.presentation.status != vrr_policy::presentation_status_e::missing || image.presentation.ns || image.clock_proof)) return false;
     if (image.clock_proof && image.clock_proof->capture_epoch_id != image.capture_epoch_id) return false;
+    if (!source_time_consistent(image)) return false;
 
     std::lock_guard<std::mutex> lock(stats_mutex);
     const auto client = std::find_if(current_stats.clients.begin(), current_stats.clients.end(),
@@ -3875,6 +3923,8 @@ namespace stream_stats {
     timing.last_accepted = image;
     if (timing.accepted_frames < UINT64_MAX) ++timing.accepted_frames;
     timing.presentation_counts.count(image.presentation.status);
+    auto &source_time_count = timing.source_time_counts[vrr_clock::name(image.source_time.result)];
+    if (source_time_count < UINT64_MAX) ++source_time_count;
     const auto plausibility = capture_plausibility(image);
     timing.last_plausibility = plausibility;
     const auto index = static_cast<std::size_t>(std::find(k_capture_plausibility.begin(), k_capture_plausibility.end(), plausibility) -

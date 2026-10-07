@@ -3457,7 +3457,16 @@ namespace video {
     /// Next source sequence to issue; 0 once exhausted, after which no image is stamped again.
     std::uint64_t next_sequence = 1;
     platf::capture_timing_route_t route;
+    /// Historical evidence from the open; stable for the epoch's whole life.
     std::shared_ptr<const vrr_clock::proof_t> proof;
+    /**
+     * The display's lease, snapshotted once at open and the very object the proof was collected
+     * against. Only the epoch retains it: no proof, image, receipt or statistic does.
+     */
+    std::shared_ptr<const vrr_clock::compositor_lease_t> lease;
+    /// Clocks for the per-frame bracket; set only where a presentation clock can be mapped.
+    vrr_clock::system_t *clocks = nullptr;
+    vrr_clock::epoch_source_state_t source_state;
 
     /**
      * Stamp a new source frame's producer identity before any consumer can see the image. An
@@ -3472,6 +3481,32 @@ namespace video {
       img.provenance.source_sequence = sequence;
       img.provenance.route = route;
       img.provenance.clock_proof = proof;
+      img.provenance.source_time = map_source_time(img.provenance);
+    }
+
+    /**
+     * The per-frame receipt, observed now: the epoch's lease must be current at this moment and a
+     * fresh clock read must agree with the epoch's mapping. Diagnostic only; frame_timestamp, pacing
+     * and encoding never read it.
+     */
+    vrr_clock::source_time_receipt_t map_source_time(const platf::image_provenance_t &provenance) {
+      const bool clock = route.presentation == platf::presentation_clock_e::ext_image_copy_monotonic;
+      if (!clock || !clocks) {
+        vrr_clock::source_time_receipt_t receipt;
+        receipt.result = vrr_clock::source_time_e::no_presentation_clock;
+        receipt.presentation_baseline = provenance.presentation.baseline;
+        return receipt;
+      }
+      const vrr_clock::source_time_input_t input {
+        .route_has_presentation_clock = true,
+        .capture_epoch_id = epoch_id,
+        .status = provenance.presentation.status,
+        .presentation_ns = provenance.presentation.ns,
+        .presentation_baseline = provenance.presentation.baseline,
+        .prefetched_init = provenance.prefetched_init,
+        .ready_at = provenance.ready_at,
+      };
+      return vrr_clock::map_source_time(input, proof.get(), lease.get(), *clocks, source_state, {});
     }
   };
 
@@ -3507,12 +3542,16 @@ namespace video {
       // generation (none for desktop, KMS, Gamescope, unowned or probe displays). collect() verifies
       // the socket peer it actually reads against it, so the clock domain is verified only for that
       // still-current compositor. Diagnostic only: pacing and timestamps are unchanged.
+      // Snapshot the lease once: the proof is collected against this object, and every frame of
+      // the epoch is later checked against the same one, never against a newer foreign lease.
+      epoch.lease = disp.compositor_lease();
+      epoch.clocks = &vrr_clock::linux_probe::real_system();
       epoch.proof = vrr_clock::collect(
         disp.presentation_peer_fd(),
         epoch.epoch_id,
-        vrr_clock::linux_probe::real_system(),
+        *epoch.clocks,
         vrr_clock::mapping_limits_t {},
-        disp.compositor_lease()
+        epoch.lease
       );
     }
 #endif
@@ -8062,6 +8101,31 @@ namespace video {
       stamp_new_source_image(epoch, img.get(), frame_captured);
     }
     return {epoch.epoch_id, epoch.route, epoch.proof};
+  }
+
+  struct capture_epoch_stepper_for_tests_t::epoch_t {
+    capture_epoch_t value;
+  };
+
+  capture_epoch_stepper_for_tests_t::capture_epoch_stepper_for_tests_t(
+    const platf::display_t &disp,
+    std::uint64_t capture_generation_id
+  ):
+      epoch_ {std::make_unique<epoch_t>(epoch_t {open_capture_epoch(disp, capture_generation_id)})} {
+  }
+
+  capture_epoch_stepper_for_tests_t::~capture_epoch_stepper_for_tests_t() = default;
+
+  capture_epoch_for_tests_t capture_epoch_stepper_for_tests_t::opened() const {
+    return {epoch_->value.epoch_id, epoch_->value.route, epoch_->value.proof};
+  }
+
+  void capture_epoch_stepper_for_tests_t::push(platf::img_t &img, bool frame_captured) {
+    stamp_new_source_image(epoch_->value, &img, frame_captured);
+  }
+
+  std::uint64_t capture_epoch_stepper_for_tests_t::baseline_changes() const {
+    return epoch_->value.source_state.baseline_changes;
   }
 
   void reset_pooled_image_for_tests(platf::img_t &img) {

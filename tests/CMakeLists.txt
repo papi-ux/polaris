@@ -177,6 +177,7 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_session_policy.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_clock_proof.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_compositor_identity.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_source_time.cpp
 )
 
 if (NOT WIN32 AND NOT APPLE)

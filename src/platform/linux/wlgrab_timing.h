@@ -21,13 +21,22 @@ namespace wl {
     /// corrected or estimated. Empty when the frame carried none or an unrepresentable one.
     std::optional<std::int64_t> presentation_ns;
     vrr_policy::presentation_status_e presentation_status = vrr_policy::presentation_status_e::missing;
+    /// This tracker's session: 1 at first, advanced by every reset(). It saturates at its maximum and
+    /// never wraps back to an earlier session's value.
+    std::uint64_t baseline = 0;
   };
 
   class extcopy_timing_tracker_t {
   public:
     using time_point_t = std::chrono::steady_clock::time_point;
 
+    extcopy_timing_tracker_t() = default;
+    /// Start at a given session number; production starts at 1.
+    explicit extcopy_timing_tracker_t(std::uint64_t first_baseline):
+        baseline_ {first_baseline} {}
+
     void reset() {
+      if (baseline_ != std::numeric_limits<std::uint64_t>::max()) ++baseline_;
       request_started_at.reset();
       current_presentation_ns.reset();
       current_presentation_invalid.reset();
@@ -66,6 +75,7 @@ namespace wl {
     void mark_ready(time_point_t now) {
       sample = {};
       sample.ready_at = now;
+      sample.baseline = baseline_;
       if (request_started_at && now >= *request_started_at) {
         sample.request_to_ready = std::chrono::duration_cast<std::chrono::microseconds>(
           now - *request_started_at
@@ -102,11 +112,16 @@ namespace wl {
       return sample;
     }
 
+    std::uint64_t baseline() const {
+      return baseline_;
+    }
+
   private:
     std::optional<time_point_t> request_started_at;
     std::optional<std::int64_t> current_presentation_ns;
     std::optional<vrr_policy::presentation_status_e> current_presentation_invalid;
     std::optional<std::int64_t> last_valid_presentation_ns;
     extcopy_timing_sample_t sample;
+    std::uint64_t baseline_ = 1;
   };
 }  // namespace wl

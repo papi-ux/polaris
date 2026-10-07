@@ -4,6 +4,7 @@
  */
 #include <chrono>
 #include <cstdint>
+#include <limits>
 
 #include <gtest/gtest.h>
 
@@ -285,4 +286,36 @@ TEST(ExtcopyTiming, ResetPreventsIntervalsAcrossCaptureSessions) {
   timing.mark_ready(start + 28ms);
 
   EXPECT_FALSE(timing.last_sample().presentation_interval.has_value());
+}
+
+TEST(ExtcopyTiming, EverySampleNamesItsTrackerSessionAndResetStartsANewOne) {
+  wl::extcopy_timing_tracker_t timing;
+  const wl::extcopy_timing_tracker_t::time_point_t start {10s};
+  EXPECT_EQ(timing.baseline(), 1u);
+  timing.mark_requested(start);
+  ASSERT_TRUE(timing.mark_presentation(0, 5, 0));
+  timing.mark_ready(start + 8ms);
+  EXPECT_EQ(timing.last_sample().baseline, 1u);
+  timing.mark_ready(start + 16ms);
+  EXPECT_EQ(timing.last_sample().baseline, 1u) << "frames do not change the session";
+  timing.reset();
+  EXPECT_EQ(timing.last_sample().baseline, 0u) << "no sample yet in the new session";
+  // The new session has no baseline: a time before the previous session's is valid at this level.
+  // Only the capture epoch's mapping guard can refuse it (regressed_in_epoch).
+  timing.mark_requested(start + 20ms);
+  ASSERT_TRUE(timing.mark_presentation(0, 4, 0));
+  timing.mark_ready(start + 28ms);
+  EXPECT_EQ(timing.last_sample().baseline, 2u);
+  EXPECT_EQ(timing.last_sample().presentation_status, vrr_policy::presentation_status_e::valid);
+}
+
+TEST(ExtcopyTiming, TheSessionNumberSaturatesInsteadOfWrapping) {
+  constexpr auto max = std::numeric_limits<std::uint64_t>::max();
+  wl::extcopy_timing_tracker_t timing {max - 1};
+  timing.reset();
+  EXPECT_EQ(timing.baseline(), max);
+  timing.reset();
+  EXPECT_EQ(timing.baseline(), max) << "never wraps back to an earlier session's number";
+  timing.mark_ready(wl::extcopy_timing_tracker_t::time_point_t {1s});
+  EXPECT_EQ(timing.last_sample().baseline, max);
 }

@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -126,10 +127,11 @@ namespace stream_stats {
     platf::image_provenance_t last_accepted;
     std::uint64_t accepted_frames = 0;
     vrr_policy::host_presentation_counts_t presentation_counts;
-    // Protocol syntax and comparable-clock plausibility are separate. A representable valid
-    // protocol value remains clock_unverified when no authoritative producer proof exists.
+    // Protocol syntax and per-frame comparable-clock observations are separate. An epoch proof
+    // alone never makes a valid protocol timestamp comparable for a later image.
     std::array<std::uint64_t, 9> plausibility_counts {};
     std::string last_plausibility = "clock_unverified";
+    std::map<std::string_view, std::uint64_t> source_time_counts;
   };
 
   /**

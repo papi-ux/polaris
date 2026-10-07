@@ -799,6 +799,7 @@ namespace wl {
       img->provenance.presentation = {
         .ns = frame_timing.presentation_ns,
         .status = frame_timing.presentation_status,
+        .baseline = frame_timing.baseline,
       };
       img->provenance.prefetched_init = frame_source != extcopy_frame_source_e::capture;
       log_capture_metadata(img->frame_metadata);
