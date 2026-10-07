@@ -103,10 +103,15 @@ if(NOT WIN32)
 endif()
 
 # VrrClockProofTests (fast) parses /proc/<pid>/stat through the Linux probe's parse_starttime.
+# The shared test main also dispatches the labwc supervisor, which hands off the compositor identity
+# through the channel (itself using parse_starttime). Targets built on test_polaris_runtime_objects
+# already get both from the production list; only the standalone targets need them here.
 if(UNIX AND NOT APPLE)
-    list(APPEND TEST_SUPPORT_SOURCES
+    set(TEST_LINUX_SUPERVISOR_SOURCES
         ${CMAKE_SOURCE_DIR}/src/platform/linux/vrr_clock_probe.cpp
+        ${CMAKE_SOURCE_DIR}/src/platform/linux/compositor_identity_channel.cpp
     )
+    list(APPEND TEST_SUPPORT_SOURCES ${TEST_LINUX_SUPERVISOR_SOURCES})
 endif()
 
 set(TEST_AUDIT_SUPPORT_SOURCES
@@ -116,6 +121,9 @@ set(TEST_AUDIT_SUPPORT_SOURCES
     ${CMAKE_SOURCE_DIR}/src/globals.cpp
     ${CMAKE_SOURCE_DIR}/src/logging.cpp
 )
+if(UNIX AND NOT APPLE)
+    list(APPEND TEST_AUDIT_SUPPORT_SOURCES ${TEST_LINUX_SUPERVISOR_SOURCES})
+endif()
 
 set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_lookup_workers.cpp
@@ -168,6 +176,10 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_frame_pacing.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_session_policy.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_clock_proof.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_compositor_identity.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_source_time.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_source_pacing.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_epoch_authority.cpp
 )
 
 if (NOT WIN32 AND NOT APPLE)
@@ -234,6 +246,7 @@ if (NOT WIN32 AND NOT APPLE)
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_wayland_monitor_layout.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_absolute_input_source.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_kwin_permission_entries.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_compositor_identity_channel.cpp
     )
 endif()
 
@@ -318,6 +331,7 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_stats.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_pyrowave_advice.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_capture_provenance.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_video_source_pacing.cpp
 )
 
 if (NOT WIN32 AND NOT APPLE)
@@ -699,6 +713,7 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_steam_shutdown
         ${CMAKE_SOURCE_DIR}/tests/unit/test_steam_shutdown_state_machine.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_desktop_steam.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_prelaunch_transition.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_desktop_steam_lifetime.cpp
     )
 

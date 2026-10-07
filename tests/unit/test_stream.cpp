@@ -12,6 +12,9 @@
 #include <optional>
 #include <sstream>
 #include <src/stream_start_outcome.h>
+#include <src/stream.h>
+#include <src/rtsp.h>
+#include <src/config.h>
 #include <src/stream_stats.h>
 #include <src/utility.h>
 #include <string>
@@ -1026,4 +1029,133 @@ TEST(NvhttpSessionHealthTests, EffectiveEncoderUsesNegotiatedPyrowaveBeforeFirst
   stats.codec = "pyrowave";
   stats.streaming = false;
   EXPECT_EQ(nvhttp::effective_session_encoder_name_for_tests(stats, "nvenc"), "nvenc");
+}
+
+TEST(StreamVrrAdmissionTests, HostOptInAndAuthenticatedIntentAreFrozenByActualSessionAllocation) {
+  const bool previous = config::video.vrr_source_pacing;
+  auto restore = util::fail_guard([&] { config::video.vrr_source_pacing = previous; });
+  stream::config_t cfg {};
+  rtsp_stream::launch_session_t launch {};
+  launch.id = 1; launch.gcm_key.resize(16); launch.iv.resize(16);
+  launch.unique_id = "frozen-source-intent";
+  launch.vrr_requested = vrr_policy::requested_e::on;
+  config::video.vrr_source_pacing = false;
+  const auto off = stream::session::alloc(cfg, launch);
+  ASSERT_TRUE(off);
+  const auto &off_config = stream::session::frozen_video_config_for_tests(*off);
+  EXPECT_FALSE(off_config.vrr_pacing.eligible());
+  config::video.vrr_source_pacing = true;
+  EXPECT_FALSE(off_config.vrr_pacing.host_opt_in) << "existing generation remains off";
+  const auto on = stream::session::alloc(cfg, launch);
+  ASSERT_TRUE(on);
+  const auto &on_config = stream::session::frozen_video_config_for_tests(*on);
+  EXPECT_TRUE(on_config.vrr_pacing.eligible());
+  EXPECT_NE(on_config.session_generation, off_config.session_generation);
+  config::video.vrr_source_pacing = false;
+  EXPECT_TRUE(on_config.vrr_pacing.eligible()) << "existing generation remains opted in";
+  config::video.vrr_source_pacing = true;
+  for (int form = 0; form < 3; ++form) {
+    launch.watch_only = form == 0;
+    launch.input_only = form == 1;
+    launch.vrr_requested = form == 2 ? vrr_policy::requested_e::malformed : vrr_policy::requested_e::on;
+    const auto refused = stream::session::alloc(cfg, launch);
+    ASSERT_TRUE(refused);
+    EXPECT_FALSE(stream::session::frozen_video_config_for_tests(*refused).vrr_pacing.eligible());
+  }
+}
+
+TEST(StreamVrrAdmissionTests, SourceRelativeHealthDoesNotBorrowHostFixedFpsButKeepsMeasuredJitter) {
+  auto stats = stable_gpu_native_stats(90,120);
+  stats.video_policy_source_time = true;
+  stats.video_policy_cadence_available = true;
+  auto health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control");
+  EXPECT_EQ(health["issues"].dump().find("frame_pacing"),std::string::npos);
+  EXPECT_EQ(health["issues"].dump().find("host_render_limited"),std::string::npos);
+  EXPECT_FALSE(health.contains("safe_target_fps"));
+  stats.frame_jitter_ms = 3;
+  health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control");
+  EXPECT_FALSE(health["issues"].empty()) << "measured handoff jitter stays visible";
+  EXPECT_FALSE(health.contains("safe_target_fps")) << "measured source jitter does not prove a fixed-grid FPS shortfall";
+  stats.video_policy_cadence_available = false;
+  health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control");
+  EXPECT_EQ(health["issues"].dump().find("frame_pacing"),std::string::npos);
+  EXPECT_EQ(health["grade"], "collecting");
+  EXPECT_EQ(health["doctor"]["status"], "unknown");
+  EXPECT_FALSE(health.contains("safe_target_fps"));
+  EXPECT_EQ(health["auto_action"], "none");
+}
+
+TEST(StreamVrrAdmissionTests, PendingAndOtherGenerationsCadenceNeverBecomeHealthySessionEvidence) {
+  auto stats = stable_gpu_native_stats(90,120);
+  stream_stats::client_stats_t client;
+  client.session_generation = 7201;
+  client.vrr = vrr_policy::make_record(7201, vrr_policy::requested_e::on,
+    vrr_policy::admission_e::launch, false, false);
+  client.vrr->host_source_pacing = true;
+  stats.clients.push_back(client);
+  const auto pending = stream_stats::vrr_json(stats,7201);
+  EXPECT_EQ(pending["pacing_mode"], "source_time_pending");
+  EXPECT_EQ(pending["fallback_reason"], "source_time_unproven");
+  EXPECT_FALSE(pending["effective"].get<bool>());
+  auto health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control");
+  EXPECT_EQ(health["grade"], "collecting");
+  EXPECT_EQ(health["doctor"]["status"], "unknown");
+  EXPECT_EQ(health["doctor"]["primary_issue"], "cadence_collecting");
+  EXPECT_EQ(health["auto_action"], "none");
+
+  // A healthy source-policy sample belonging to another generation cannot grade this client.
+  stats.video_policy_source_time = true;
+  stats.video_policy_cadence_available = true;
+  stats.video_policy_session_generation = 7202;
+  EXPECT_TRUE(stream_stats::source_pacing_evidence_unavailable(stats,7201));
+  health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control",7201);
+  EXPECT_EQ(health["grade"], "collecting");
+
+  // Missing cadence does not conceal independently observed encoder pressure.
+  stats.encode_time_ms = 20;
+  health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control");
+  EXPECT_NE(health["grade"], "collecting");
+  EXPECT_EQ(health["primary_issue"], "encoder_load");
+  EXPECT_EQ(health["doctor"]["primary_issue"], "encoder_load");
+
+  // The private flag off preserves the normal fixed-rate policy.
+  stats.video_policy_source_time = false;
+  stats.clients.front().vrr->host_source_pacing = false;
+  EXPECT_FALSE(stream_stats::source_pacing_evidence_unavailable(stats,7201));
+}
+
+TEST(StreamVrrAdmissionTests, SourceEncodePressureUsesMeasuredWorkRatherThanTheNegotiatedCeilingDeadline) {
+  auto stats = stable_gpu_native_stats(90,120);
+  stats.bitrate_kbps = 20000;
+  stats.video_policy_source_time = true;
+  stats.video_policy_cadence_available = true;
+  stats.encode_time_ms = 9;
+  auto health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control");
+  EXPECT_EQ(health["grade"], "good");
+  EXPECT_EQ(health["auto_action"], "none");
+  EXPECT_EQ(health["doctor"]["status"], "ok");
+  EXPECT_NE(health["doctor"]["primary_issue"], "encoder_load");
+  EXPECT_EQ(health["safe_bitrate_kbps"], stats.bitrate_kbps);
+  EXPECT_FALSE(health.contains("safe_target_fps"));
+
+  stats.encode_time_ms = 12;
+  health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control");
+  EXPECT_EQ(health["primary_issue"], "encoder_load");
+  EXPECT_EQ(health["doctor"]["status"], "needs_action");
+  EXPECT_EQ(health["doctor"]["traffic_light"], "red");
+
+  stats.video_policy_source_time = true;
+  stats.video_policy_session_generation = 7301;
+  stats.encode_time_ms = 9;
+  health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control",7302);
+  EXPECT_EQ(health["primary_issue"], "encoder_load") << "a legacy requester cannot borrow source pressure thresholds";
+  EXPECT_EQ(health["doctor"]["traffic_light"], "red");
+
+  // Isolate the existing fixed-rate encoder threshold from the independent legacy FPS-shortfall
+  // priority. The same 9ms work is pressure at 120 FPS with source pacing off.
+  stats = stable_gpu_native_stats(120,120);
+  stats.encode_time_ms = 9;
+  health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control");
+  EXPECT_EQ(health["primary_issue"], "encoder_load");
+  EXPECT_EQ(health["doctor"]["traffic_light"], "red");
 }

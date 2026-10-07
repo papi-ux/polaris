@@ -1073,6 +1073,14 @@ namespace config {
     return std::nullopt;
   }
 
+  bool source_pacing_setting(std::unordered_map<std::string, std::string> &vars) {
+    const auto option = vars.find("vrr_source_pacing");
+    if (option == vars.end()) return false;
+    const auto enabled = parse_bool(option->second).value_or(false);
+    vars.erase(option);
+    return enabled;
+  }
+
   bool to_bool(std::string &boolean) {
     if (const auto parsed = parse_bool(boolean)) {
       return *parsed;
@@ -1470,6 +1478,7 @@ namespace config {
     }
 
     bool_f(vars, "limit_framerate", video.limit_framerate);
+    video.vrr_source_pacing = source_pacing_setting(vars);
     bool_f(vars, "double_refreshrate", video.double_refreshrate);
     int_f(vars, "qp", video.qp);
     int_between_f(vars, "hevc_mode", video.hevc_mode, {0, 3});

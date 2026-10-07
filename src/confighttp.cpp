@@ -2353,6 +2353,18 @@ namespace confighttp {
           const auto launch_as = proc::normalize_launch_as(app);
           app["launch-as"] = launch_as;
           app["launch-as-basis"] = proc::legacy_basis(app);
+          // #204, response only and only for an app that opted in: the setting is on, and whether
+          // this build can act on it (it cannot yet), so the console never presents it as working.
+          if (const auto leave = app.find(std::string {prelaunch::k_app_key}); leave != app.end() && leave->is_boolean() && leave->get<bool>()) {
+            const auto readiness = prelaunch::coordinator().readiness(true);
+            app["leave-game-mode-before-launch-readiness"] = {
+              {"enabled", readiness.enabled},
+              {"adapter_implemented", readiness.adapter_implemented},
+              {"command_present", readiness.command_present},
+              {"ready", readiness.ready},
+              {"reason", readiness.reason},
+            };
+          }
         }
       }
 
@@ -2455,6 +2467,8 @@ namespace confighttp {
     try {
       // Read the input JSON from the request body.
       nlohmann::json inputTree = nlohmann::json::parse(ss.str());
+      // Response-only #204 readiness the editor may send back; it is never stored.
+      if (inputTree.is_object()) inputTree.erase("leave-game-mode-before-launch-readiness");
       std::string validation_error;
       if (!validation::validate_app_payload(inputTree, validation_error)) {
         bad_request(response, request, validation_error);
@@ -8439,6 +8453,48 @@ namespace confighttp {
           BOOST_LOG(info) << "Launching app ["sv << app.name << "] from web UI"sv;
 #ifdef __linux__
           launch_failure::clear();
+          // #204, opt-in only: hold the launch reservation from here to execute, leave Game Mode if
+          // this app asks for it, and bring the mode in line before Launch as and the desktop-launch
+          // policy read it. An app with the setting off launches exactly as before.
+          const bool prelaunch_reserved = app.leave_game_mode_before_launch && !mirror_desktop_explicit;
+          // Owned only once this request's own admission succeeded: a refused admission never
+          // finishes a reservation that belongs to another request.
+          bool owns_prelaunch_reservation = false;
+          auto release_prelaunch_reservation = util::fail_guard([&owns_prelaunch_reservation]() {
+            if (owns_prelaunch_reservation) proc::proc.finish_session_launch();
+          });
+          std::optional<prelaunch::launch_scope_t> prelaunch_scope;
+          if (prelaunch_reserved) {
+            // The same generation-checked admission /launch uses: never queued behind, or taken
+            // under, a newer generation, a stop or a pending launch.
+            const auto lifecycle_generation = proc::proc.capture_session_launch_generation();
+            if (!lifecycle_generation || !proc::proc.try_begin_session_launch(*lifecycle_generation)) {
+              nlohmann::json error_tree {{"status", false}, {"status_code", 409},
+                {"error", "The active session is stopping or changing."}, {"error_code", "prelaunch_launch_busy"}};
+              SimpleWeb::CaseInsensitiveMultimap headers;
+              append_json_security_headers(headers);
+              response->write(SimpleWeb::StatusCode::client_error_conflict, error_tree.dump(), headers);
+              return;
+            }
+            owns_prelaunch_reservation = true;
+            const auto outcome = proc::prelaunch_for_admitted_launch(
+              prelaunch::entry_e::console, app, named_cert.uuid, *lifecycle_generation, {}, {});
+            if (!outcome.proceed()) {
+              const auto record = launch_failure::take();
+              nlohmann::json error_tree {{"status", false}, {"status_code", outcome.status},
+                {"error", record ? launch_failure::status_message(*record) : outcome.message}, {"error_code", outcome.code}};
+              SimpleWeb::CaseInsensitiveMultimap headers;
+              append_json_security_headers(headers);
+              response->write(SimpleWeb::StatusCode::client_error_bad_request, error_tree.dump(), headers);
+              return;
+            }
+            prelaunch_scope.emplace(outcome);
+            prelaunch_scope->set_others([](std::string &reason) {
+              return proc::prelaunch_other_sessions_now(reason);
+            });
+            nvhttp::reconcile_game_mode_host();
+          }
+          prelaunch::note_stage("launch_as");
           if (const auto refusal = proc::refuse_app_launch_as_before_launch(app, {
                 .client_named_selection = mirror_desktop_explicit ? std::string {stream_display_policy::k_desktop_display} : std::string {},
                 .mirror_desktop = mirror_desktop_explicit,
@@ -8491,7 +8547,14 @@ namespace confighttp {
             bad_request(response, request, "Failed to build a launch session");
             return;
           }
+#ifdef __linux__
+          auto err = prelaunch_reserved ? proc::proc.execute_admitted(app, launch_session) : proc::proc.execute(app, launch_session);
+          if (!err && prelaunch_scope) {
+            proc::proc.bind_prelaunch_transition(prelaunch_scope->commit());
+          }
+#else
           auto err = proc::proc.execute(app, launch_session);
+#endif
           if (err) {
             nlohmann::json error_tree;
             error_tree["status_code"] = static_cast<int>(SimpleWeb::StatusCode::client_error_bad_request);
@@ -10472,6 +10535,21 @@ namespace confighttp {
       before_apps();
       apps(std::move(response), std::move(request));
     };
+    server.start([&](unsigned short port) { ready(port, [&]() { server.stop(); }); });
+  }
+
+  void run_console_app_routes_for_tests(
+    const std::string &cert, const std::string &key,
+    const std::function<void(unsigned short, std::function<void()>)> &ready
+  ) {
+    // The production console app handlers (list, save, launch) on an owned loopback TLS listener.
+    // Their own authentication runs; the CSRF wrapper the console adds in front is a separate layer.
+    https_server_t server {cert, key};
+    server.config.address = "127.0.0.1";
+    server.config.port = 0;
+    server.resource["^/api/apps$"]["GET"] = getApps;
+    server.resource["^/api/apps$"]["POST"] = saveApp;
+    server.resource["^/api/apps/launch$"]["POST"] = launchApp;
     server.start([&](unsigned short port) { ready(port, [&]() { server.stop(); }); });
   }
 #endif

@@ -13,9 +13,10 @@
  *
  * Limits, stated rather than guessed:
  * - SO_PEERCRED on the connected Wayland socket gives socket-peer facts only: the process that created
- *   the listening socket, not necessarily the compositor Polaris supervises. Without an authoritative
- *   expected identity from the private runtime's lifecycle, producer_identity_verified stays false,
- *   and so does clock_domain_verified, even when the namespaces match.
+ *   the listening socket, not necessarily the compositor Polaris supervises. Only a retained lease of
+ *   the owned private runtime generation makes those same peer facts authoritative; without one, or
+ *   when it retires during collection, producer_identity_verified stays false, and so does
+ *   clock_domain_verified, even when the namespaces match.
  * - A shared namespace says the clocks agree, not that the compositor reports truthful times; the
  *   per-frame plausibility in classify() is still required.
  * - The steady/CLOCK_MONOTONIC mapping is measured once per capture epoch and bounds only that moment.
@@ -34,6 +35,7 @@
 #include <string_view>
 #include <vector>
 
+#include "vrr_compositor_identity.h"
 #include "vrr_session_policy.h"
 
 namespace vrr_clock {
@@ -271,16 +273,18 @@ namespace vrr_clock {
   /**
    * @brief Build one epoch's proof from the connected Wayland socket's peer.
    *
-   * producer_identity_verified comes from the caller's authoritative expectation of the compositor
-   * process. Absent such an expectation it is false with the given reason; a peer is never matched by
-   * process name. The probe takes min_samples clamped to [k_min_probe_samples, k_max_probe_samples].
+   * Producer identity is verified only against the retained lease of the generation this display
+   * connected to: current() brackets the very SO_PEERCRED, start time, time-namespace and mapping reads
+   * used here, and those actual peer facts must equal the lease's process. A null, retired or replaced
+   * lease leaves it false; a peer is never matched by process name. The probe takes min_samples
+   * clamped to [k_min_probe_samples, k_max_probe_samples].
    */
   inline std::shared_ptr<const proof_t> collect(int peer_fd,
                                                 std::uint64_t capture_epoch_id,
                                                 system_t &system,
                                                 const mapping_limits_t &limits,
-                                                bool producer_identity_verified,
-                                                std::string_view producer_identity_reason) {
+                                                std::shared_ptr<const compositor_lease_t> lease) {
+    const compositor_identity_check_t identity {std::move(lease)};
     const auto epoch_start = system.monotonic_now_ns();
     process_facts_t self;
     process_facts_t peer;
@@ -314,8 +318,11 @@ namespace vrr_clock {
       mapping.valid = false;
       mapping.reason = "epoch_start_read_failed";
     }
+    // After every read above: the lease must still be current, and the peer it describes the one read.
+    const auto producer = peer_fd < 0 ? compositor_match_t {} :
+                                        identity.verify(peer.pid, peer.uid, peer.starttime_before, peer.starttime_after);
     return std::make_shared<const proof_t>(make_proof(
-      capture_epoch_id, time_namespace, producer_identity_verified, producer_identity_reason, mapping, epoch_start
+      capture_epoch_id, time_namespace, producer.verified, producer.reason, mapping, epoch_start
     ));
   }
 

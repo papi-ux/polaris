@@ -68,6 +68,13 @@ namespace stream_runtime {
       return cage_display_router::get_wayland_socket();
     }
 
+    std::shared_ptr<const vrr_clock::compositor_lease_t> compositor_lease(
+      std::string_view instance_id,
+      std::string_view socket_name
+    ) {
+      return cage_display_router::compositor_lease(instance_id, socket_name);
+    }
+
     std::string session_instance_id() {
       return cage_display_router::get_session_instance_id();
     }

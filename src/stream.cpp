@@ -48,6 +48,7 @@ extern "C" {
 #include "stream_recorder.h"
 #include "stream_start_outcome.h"
 #include "stream_stats.h"
+#include "vrr_rtp_timestamp.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -1878,6 +1879,14 @@ namespace stream {
       }
       auto session = static_cast<session_t *>(delivery.get());
       auto lowseq = session->video.lowseq;
+      std::optional<std::uint32_t> source_rtp_timestamp;
+      if (packet->source_clock_timestamp) {
+        if (!packet->frame_timestamp) continue;
+        source_rtp_timestamp = vrr_pacing::rtp_timestamp(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(packet->frame_timestamp->time_since_epoch()).count(),
+          std::chrono::duration_cast<std::chrono::nanoseconds>(video_epoch.time_since_epoch()).count());
+        if (!source_rtp_timestamp) continue;
+      }
 
       std::string_view payload {(char *) packet->data(), packet->data_size()};
 
@@ -2121,7 +2130,8 @@ namespace stream {
             frame_is_dupe = true;
           }
           using rtp_tick = std::chrono::duration<uint32_t, std::ratio<1, 90000>>;
-          uint32_t timestamp = std::chrono::round<rtp_tick>(*packet->frame_timestamp - video_epoch).count();
+          uint32_t timestamp = source_rtp_timestamp ? *source_rtp_timestamp :
+            std::chrono::round<rtp_tick>(*packet->frame_timestamp - video_epoch).count();
 
           // set FEC info now that we know for sure what our percentage will be for this frame
           for (auto x = 0; x < shards.size(); ++x) {
@@ -2786,6 +2796,10 @@ namespace stream {
       return session.mail;
     }
 
+    const video::config_t &frozen_video_config_for_tests(const session_t &session) {
+      return session.config.monitor;
+    }
+
 #ifdef __linux__
     std::shared_ptr<multiseat::input::worker_launch_connection_t>
     worker_connection_for_tests(const session_t &session) {
@@ -3447,6 +3461,10 @@ namespace stream {
 
       session->config = config;
       session->config.monitor.session_generation = session->session_generation;
+      session->vrr.host_source_pacing = config::video.vrr_source_pacing;
+      session->config.monitor.vrr_pacing = {
+        session->vrr.host_source_pacing, session->vrr.requested, session->vrr.watch_or_input_only
+      };
 
       session->control.connect_data = launch_session.control_connect_data;
       session->control.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);

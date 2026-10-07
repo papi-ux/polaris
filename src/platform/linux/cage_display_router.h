@@ -13,6 +13,7 @@
 
 #include <optional>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <unistd.h>
@@ -159,6 +160,17 @@ namespace cage_display_router {
    */
   std::string get_wayland_socket();
   std::string get_session_instance_id();
+
+  /**
+   * @brief The compositor lease of the published generation, only for its exact nonempty runtime
+   *        instance and socket name. nullptr when either differs, nothing is published, or the
+   *        supervisor's identity handoff was unavailable. Holding it never retains authority:
+   *        current() turns false when the generation is stopped, reset or replaced.
+   */
+  std::shared_ptr<const vrr_clock::compositor_lease_t> compositor_lease(
+    std::string_view instance_id,
+    std::string_view socket_name
+  );
 
   /**
    * @brief Return bounded startup-client evidence only for the exact runtime generation.

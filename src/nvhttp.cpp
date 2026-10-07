@@ -2674,11 +2674,16 @@ namespace nvhttp {
 
       // The judged verdict Doctor grades with, so the session status never contradicts it.
       const bool network_risk = stream_stats::judged_network(stats).risk;
-      const bool pacing_risk =
-        stats.dropped_frame_ratio >= 0.04 ||
-        (!static_or_duplicate_content &&
-         (stats.frame_jitter_ms >= 2.2 ||
-          (meaningful_fps_shortfall && source_cadence_confirms_motion)));
+      const bool source_time_policy = stats.video_policy_source_time &&
+        (requester_generation == 0 || stats.video_policy_session_generation == requester_generation);
+      const bool cadence_unavailable = stream_stats::source_pacing_evidence_unavailable(stats, requester_generation);
+      const bool pacing_risk = cadence_unavailable ? false : source_time_policy ?
+        (stats.video_policy_cadence_available &&
+         (stats.dropped_frame_ratio >= 0.04 || stats.frame_jitter_ms >= 2.2)) :
+        (stats.dropped_frame_ratio >= 0.04 ||
+         (!static_or_duplicate_content &&
+          (stats.frame_jitter_ms >= 2.2 ||
+           (meaningful_fps_shortfall && source_cadence_confirms_motion))));
       const bool capture_fallback =
         stream_stats::capture_path_uses_cpu_copy(stats);
       const auto capture_path = stream_stats::capture_path_summary(stats);
@@ -2689,9 +2694,9 @@ namespace nvhttp {
         !build_has_cuda() &&
         capture_fallback;
       const bool encoder_time_fail =
-        stream_stats::encoder_time_fails_budget(stats.encode_time_ms, target_fps);
+        stream_stats::encoder_time_fails_budget(stats.encode_time_ms, target_fps, source_time_policy);
       const bool encoder_risk =
-        stream_stats::encoder_time_nears_budget(stats.encode_time_ms, target_fps) ||
+        stream_stats::encoder_time_nears_budget(stats.encode_time_ms, target_fps, source_time_policy) ||
         (!capture_fallback && stats.avg_frame_age_ms >= 18.0);
       const bool capture_latency_risk =
         capture_fallback && !encoder_time_fail && stats.avg_frame_age_ms >= 18.0;
@@ -2813,6 +2818,9 @@ namespace nvhttp {
         grade = "degraded";
       } else if (concern_count == 1) {
         grade = "watch";
+      } else if (cadence_unavailable) {
+        grade = "collecting";
+        primary_issue = "cadence_collecting";
       }
 
       const int current_bitrate_kbps =
@@ -2821,10 +2829,13 @@ namespace nvhttp {
         current_bitrate_kbps > 0 ? current_bitrate_kbps :
           (device_profile ? device_profile->ideal_bitrate_kbps : 15000),
         device_profile,
-        grade != "good",
+        concern_count > 0,
         active_codec_family == "pyrowave"
       );
-      const double safe_target_fps =
+      // Source cadence is not a miss of the negotiated fixed grid. The legacy recommender also
+      // derives shortfall from average FPS internally, even when its pacing_risk argument is false.
+      // Pending/stale cadence cannot authorize a fixed-FPS recommendation either.
+      const double safe_target_fps = source_time_policy || cadence_unavailable ? 0.0 :
         ai_optimizer::derive_safe_target_fps(
           target_fps,
           stats.fps,
@@ -2832,7 +2843,7 @@ namespace nvhttp {
           0.0,
           0.0,
           mobile_client,
-          grade != "good",
+          concern_count > 0,
           pacing_risk || host_render_limited
         );
       if (safe_target_fps > 0.0) {
@@ -2862,6 +2873,7 @@ namespace nvhttp {
       health["grade"] = grade;
       health["primary_issue"] = primary_issue;
       health["summary"] =
+        grade == "collecting" ? "Cadence evidence is pending or stale; keep streaming while Polaris collects it." :
         grade == "good" ? "Session looks steady." :
         network_risk ? "Network jitter is the most likely source of the hitching." :
         hdr_source_missing ? hdr_downgrade_message :
@@ -2873,6 +2885,9 @@ namespace nvhttp {
         host_render_limited ? "Host render is missing the stream FPS target; lower game render settings or stream FPS before tuning bitrate." :
         "The stream needs a safer pacing or encode path.";
       health["issues"] = std::move(issues);
+      if (stats.video_policy_source_time || cadence_unavailable) {
+        health["frame_pacing_measurement_available"] = !cadence_unavailable;
+      }
       health["recommendations"] = std::move(recommendations);
       health["safe_bitrate_kbps"] = safe_bitrate_kbps;
       health["safe_display_mode"] = (virtual_display_risk || host_prefers_headless()) ? "headless" : (current_virtual_display ? "virtual_display" : "headless");
@@ -2917,7 +2932,15 @@ namespace nvhttp {
         adaptive_bitrate::get_state(),
         stats.bitrate_kbps
       );
-      health["doctor"] = stream_stats::build_doctor_json(stats, health, app_uuid);
+      if (stats.video_policy_source_time && !source_time_policy) {
+        // A legacy requester cannot borrow another stream's source-mode pressure threshold.
+        auto requester_stats = stats;
+        requester_stats.video_policy_source_time = false;
+        requester_stats.video_policy_cadence_available = false;
+        health["doctor"] = stream_stats::build_doctor_json(requester_stats, health, app_uuid);
+      } else {
+        health["doctor"] = stream_stats::build_doctor_json(stats, health, app_uuid);
+      }
       return health;
     }
   }  // namespace
@@ -3597,13 +3620,25 @@ namespace nvhttp {
       // The Linux-only app pin resolver does not alter other platforms' legacy display policy.
       const proc::launch_as_availability_t availability {};
 #endif
-      return build_launch_mode_contract(
+      auto contract = build_launch_mode_contract(
         app.launch_as,
         app.name,
         settings_metadata::host_virtual_display_available(),
         host_prefers_headless(),
         availability
       );
+      if (app.leave_game_mode_before_launch) {
+        // #204, only for an app that opted in: the setting, and separately whether this build can
+        // act on it. No host probe runs here; the launch checks the host.
+        const auto readiness = prelaunch::coordinator().readiness(true);
+        contract["leave_game_mode_before_launch"] = {
+          {"enabled", readiness.enabled},
+          {"adapter_implemented", readiness.adapter_implemented},
+          {"ready", readiness.ready},
+          {"reason", readiness.reason},
+        };
+      }
+      return contract;
     }
 
     nlohmann::json steam_launch_contract_for_app(const proc::ctx_t &app) {
@@ -7423,7 +7458,6 @@ namespace nvhttp {
   void launch(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
     launch_failure::clear();
-    reconcile_game_mode_host();
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -7449,7 +7483,6 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "The client is not authorized. Certificate verification failed.");
       return;
     }
-
 #ifdef __linux__
     if (handle_profile_launch(tree, request, named_cert_p, args, false)) return;
 #endif
@@ -7502,6 +7535,10 @@ namespace nvhttp {
 
       return;
     }
+    // #204 O1: the host's mode is brought in line only for a verified client with launch
+    // permission, holding the launch reservation, whose request is well formed. A refused request
+    // changes neither the host's mode nor its kept Game Mode answer.
+    reconcile_game_mode_host();
 
     if (!is_input_only) {
       // Special handling for the "terminate" app
@@ -7783,6 +7820,36 @@ namespace nvhttp {
         }
 
 #ifdef __linux__
+        // #204: an app that leaves Game Mode before its launch does it here: after the certificate,
+        // the permission, the launch reservation and the occupancy checks above, and before Launch
+        // as, the app's display semantics and the launch's own mode decision. Off by default.
+        std::optional<prelaunch::launch_scope_t> prelaunch_scope;
+        if (app_iter->leave_game_mode_before_launch && !watch_only && !launch_session->mirror_desktop) {
+          const auto prelaunch_outcome = proc::prelaunch_for_admitted_launch(
+            prelaunch::entry_e::rtsp,
+            *app_iter,
+            named_cert_p->uuid,
+            *launch_generation,
+            launch_session->resolved_profile_from_client ? launch_session->expected_stream_mode : std::string {},
+            [launch_session]() {
+              return launch_session->is_cancelled();
+            }
+          );
+          if (!prelaunch_outcome.proceed()) {
+            tree.put("root.resume", 0);
+            tree.put("root.gamesession", 0);
+            put_launch_refusal(tree, prelaunch_outcome.status, prelaunch_outcome.message);
+            return;
+          }
+          prelaunch_scope.emplace(prelaunch_outcome);
+          prelaunch_scope->set_others([](std::string &reason) {
+            return proc::prelaunch_other_sessions_now(reason);
+          });
+          // The coordinator's fresh scan is the kept answer now; the mode follows it before the
+          // launch reads it.
+          reconcile_game_mode_host();
+        }
+        prelaunch::note_stage("launch_as");
         if (const auto refusal = proc::refuse_app_launch_as_before_launch(
               *app_iter, proc::launch_selection_request_from_session(*launch_session))) {
           tree.put("root.resume", 0);
@@ -7824,6 +7891,11 @@ namespace nvhttp {
           });
         });
         launch_session_raised = err == 0;
+#ifdef __linux__
+        if (!err && prelaunch_scope) {
+          proc::proc.bind_prelaunch_transition(prelaunch_scope->commit());
+        }
+#endif
         if (err) {
           put_launch_refusal(
             tree,
@@ -7885,7 +7957,6 @@ namespace nvhttp {
   void resume(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
     launch_failure::clear();
-    reconcile_game_mode_host();
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -7905,7 +7976,6 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "The client is not authorized. Certificate verification failed.");
       return;
     }
-
     if (!(named_cert_p->perm & PERM::_allow_view)) {
       BOOST_LOG(debug) << "Permission ViewApp denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
 
@@ -7950,6 +8020,9 @@ namespace nvhttp {
 
       return;
     }
+    // #204 O1: a resume binds the running generation and never leaves Game Mode. Its mode is
+    // brought in line only for a verified, permitted, reserved and well-formed request.
+    reconcile_game_mode_host();
 
     // Newer Moonlight clients send localAudioPlayMode on /resume too. Keep the
     // global choice unchanged until this request has passed every admission
@@ -12725,6 +12798,10 @@ namespace nvhttp {
     state->server.verify = verify_https_client;
     state->server.resource["^/launch$"]["GET"] = [state](resp_https_t response, req_https_t request) {
       launch(state->host_audio, std::move(response), std::move(request));
+    };
+    // The production /resume handler too (#204: a refused resume changes nothing on the host).
+    state->server.resource["^/resume$"]["GET"] = [state](resp_https_t response, req_https_t request) {
+      resume(state->host_audio, std::move(response), std::move(request));
     };
     state->worker = std::thread([state]() {
       try {

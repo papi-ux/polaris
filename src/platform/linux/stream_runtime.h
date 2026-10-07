@@ -11,6 +11,7 @@
   #include "stream_display_policy.h"
   #include "wlgrab_capture_policy.h"
 
+  #include <memory>
   #include <optional>
   #include <string>
   #include <string_view>
@@ -88,6 +89,15 @@ namespace stream_runtime {
     void reset_after_external_stop();
     std::string wayland_socket();
     std::string session_instance_id();
+    /**
+     * The published generation's compositor lease, only for its exact nonempty runtime instance and
+     * socket name (from a frozen capture generation, never from mutable configuration). nullptr when
+     * unavailable; a held lease grants nothing once its generation is stopped, reset or replaced.
+     */
+    std::shared_ptr<const vrr_clock::compositor_lease_t> compositor_lease(
+      std::string_view instance_id,
+      std::string_view socket_name
+    );
     std::optional<labwc_startup_diagnostics::snapshot_t> startup_client_diagnostics(
       std::string_view expected_session_instance_id
     );

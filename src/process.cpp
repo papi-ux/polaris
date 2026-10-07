@@ -91,6 +91,7 @@
   #include "platform/linux/display_topology.h"
   #include "platform/linux/gamescope_process.h"
   #include "platform/linux/game_mode_host.h"
+  #include "platform/linux/multiseat_launch_service.h"
   #include "platform/linux/steam_title_process.h"
   #include "platform/linux/gamescope_session_helper.h"
   #include "platform/linux/input/inputtino_gamepad_isolation.h"
@@ -6136,6 +6137,95 @@ namespace proc {
       stream_display_policy::selection_unavailable_reason(pin.selection)};
   }
 
+  namespace {
+    std::mutex prelaunch_capture_ready_mutex;
+    std::function<bool(std::string_view, std::string &)> prelaunch_capture_ready_for_tests;
+  }  // namespace
+
+  void set_prelaunch_capture_ready_for_tests(std::function<bool(std::string_view, std::string &)> ready) {
+    std::lock_guard lock {prelaunch_capture_ready_mutex};
+    prelaunch_capture_ready_for_tests = std::move(ready);
+  }
+
+  bool prelaunch_other_sessions_now(std::string &reason) {
+    const auto sessions = rtsp_stream::session_snapshot({});
+    if (proc.running() > 0) {
+      reason = "an app is running on the host";
+    } else if (sessions.active_sessions > 0 || sessions.pending_sessions > 0) {
+      reason = "a stream is active or pending on the host";
+    } else if (browser_stream::capture_active()) {
+      reason = "a Browser Stream session is active";
+    } else if (multiseat::installed_profile_service() != nullptr) {
+      reason = "profile sessions are configured on the host";
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  prelaunch::outcome_t prelaunch_for_admitted_launch(
+    prelaunch::entry_e entry,
+    const ctx_t &app,
+    const std::string &client_uuid,
+    std::uint64_t lifecycle_generation,
+    std::string_view expected_selection,
+    std::function<bool()> cancelled
+  ) {
+    prelaunch::request_t request;
+    request.entry = entry;
+    request.client_uuid = client_uuid;
+    request.lifecycle_generation = lifecycle_generation;
+    request.policy_enabled = app.leave_game_mode_before_launch;
+    if (!request.policy_enabled) {
+      // Off: no scan, no probe, nothing recorded. The launch is the one it always was.
+      prelaunch::outcome_t outcome;
+      outcome.state = prelaunch::state_e::not_needed;
+      return outcome;
+    }
+
+    // The route this launch would use once the host is out of Game Mode: the app's pin, the exact
+    // topology the client resolved, or the host's own mode that Game Mode is holding.
+    using verdict = stream_display_policy::app_launch_as_t::verdict_e;
+    const auto pin = stream_display_policy::resolve_app_launch_as(app.launch_as, {});
+    std::string selection;
+    if (pin.verdict == verdict::pinned) {
+      selection = pin.selection;
+    } else if (!expected_selection.empty()) {
+      selection = std::string {expected_selection};
+    } else {
+      const auto held = stream_display_policy::game_mode_held_selection();
+      selection = held.empty() ? stream_display_policy::configured_selection() : held;
+    }
+    request.private_route = !selection.empty() && selection != stream_display_policy::k_desktop_display;
+
+    const auto sessions = rtsp_stream::session_snapshot({});
+    request.occupancy.app_running = proc.running() > 0;
+    request.occupancy.streams_active = sessions.active_sessions > 0;
+    request.occupancy.launch_pending = sessions.pending_sessions > 0;
+    request.occupancy.browser_capture = browser_stream::capture_active();
+    request.occupancy.profile_service = multiseat::installed_profile_service() != nullptr;
+    request.cancelled = std::move(cancelled);
+    request.others_now = [](std::string &reason) {
+      return prelaunch_other_sessions_now(reason);
+    };
+    request.capture_ready = [selection](std::string &reason) {
+      {
+        std::lock_guard lock {prelaunch_capture_ready_mutex};
+        if (prelaunch_capture_ready_for_tests) return prelaunch_capture_ready_for_tests(selection, reason);
+      }
+      return stream_display_policy::selection_valid_fresh(selection, reason);
+    };
+
+    auto outcome = prelaunch::coordinator().run(request);
+    if (!outcome.proceed()) {
+      launch_failure::refuse(outcome.status, outcome.code, outcome.message, outcome.action);
+    }
+    BOOST_LOG(info) << "prelaunch: ["sv << app.name << "] entry="sv << prelaunch::name(entry)
+                    << " state="sv << prelaunch::name(outcome.state)
+                    << (outcome.code.empty() ? std::string {} : " code=" + outcome.code);
+    return outcome;
+  }
+
   int refuse_app_launch_as_before_launch(const ctx_t &app, const launch_selection_request_t &request) {
     using verdict = stream_display_policy::app_launch_as_t::verdict_e;
     const auto pin = stream_display_policy::resolve_app_launch_as(app.launch_as, request.client_named_selection);
@@ -6207,6 +6297,7 @@ namespace proc {
     const proc::ctx_t &app,
     rtsp_stream::launch_session_t &launch_session
   ) {
+    prelaunch::note_stage("semantics");
     // A host in Steam Game Mode has one screen, and it is the Game Mode screen. There is no
     // desktop to build a private display beside, and the Steam that is running IS the session:
     // a Private Stream would first have to close it, which ends Game Mode for whoever is
@@ -8135,6 +8226,17 @@ namespace proc {
     }
   }
 
+  void proc_t::bind_prelaunch_transition(std::uint64_t transition_generation) {
+    auto &sync = session_lifecycle_sync();
+    std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
+    _prelaunch_transition_generation = transition_generation;
+  }
+
+  int proc_t::execute_admitted(const ctx_t& app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
+    const bool no_active_sessions_at_launch = rtsp_stream::session_count() == 0;
+    return execute_impl(app, std::move(launch_session), no_active_sessions_at_launch);
+  }
+
   int proc_t::execute(const ctx_t& app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session) {
     auto capture_owner = std::make_shared<const char>();
     _session_lifecycle_gate->begin_launch([&]() {
@@ -8400,6 +8502,11 @@ namespace proc {
     // Preparation holds lifecycle admission, but not this metadata mutex.
     // Check owner/admission before cancelling, including the gap before the portal
     // registers its first D-Bus request. Rejected stop requests have no effect.
+    // #204: a launch still leaving Game Mode has installed nothing yet. Only its own client's
+    // cancel reaches it; the coordinator holds no lifecycle lock while it waits.
+    if (can_launch && prelaunch::coordinator().cancel_for_client(unique_id)) {
+      return std::make_shared<int>(0);
+    }
     auto &sync = session_lifecycle_sync();
     std::lock_guard<std::recursive_mutex> lifecycle_lock(sync.mutex);
     // Preserve the existing owner-certificate exemption from stale tokens.
@@ -9998,6 +10105,7 @@ namespace proc {
     std::error_code ec;
     _app_prep_begin = std::begin(_app.prep_cmds);
     _app_prep_it = _app_prep_begin;
+    prelaunch::note_stage("prep");
 
     for (; _app_prep_it != std::end(_app.prep_cmds); ++_app_prep_it) {
       auto &cmd = *_app_prep_it;
@@ -12669,6 +12777,24 @@ namespace proc {
 #endif
     publish_stream_ended_after_terminate_if_needed(has_run, cleanup_complete);
 
+#ifdef __linux__
+    // #204: a session that left Game Mode for its launch returns the host only once its cleanup is
+    // complete, only on a purposeful end, and only for the generation this session committed. A
+    // teardown that retained cleanup above keeps the binding for its retry.
+    if (cleanup_complete) {
+      if (const auto prelaunch_generation = std::exchange(_prelaunch_transition_generation, 0)) {
+        (void) prelaunch::coordinator().on_session_end(
+          prelaunch_generation,
+          session_lifecycle_sync().stop_ends_session.load(),
+          daemon_shutdown_requested(),
+          [](std::string &reason) {
+            return prelaunch_other_sessions_now(reason);
+          }
+        );
+      }
+    }
+#endif
+
     if (needs_refresh) {
       reload_configuration_from_file(config::stream.file_apps);
     }
@@ -14381,6 +14507,13 @@ namespace proc {
           ctx.exit_timeout = std::chrono::seconds { app_node.value("exit-timeout", 5) };
           set_launch_as(ctx, normalize_launch_as(app_node));
           ctx.close_desktop_steam_for_private = app_node.value("close-desktop-steam-for-private", false);
+          // Strict: only JSON true. A string, number or null leaves the app as it was.
+          if (const auto leave = app_node.find(std::string {prelaunch::k_app_key}); leave != app_node.end()) {
+            ctx.leave_game_mode_before_launch = leave->is_boolean() && leave->get<bool>();
+            if (!leave->is_boolean()) {
+              BOOST_LOG(warning) << "App [" << ctx.name << "] has a non-boolean [" << prelaunch::k_app_key << "]; it stays off";
+            }
+          }
           ctx.desktop_steam_lifetime = normalize_desktop_steam_lifetime(app_node.value("desktop-steam-lifetime", "inherit"));
           ctx.scale_factor = app_node.value("scale-factor", 100);
           ctx.use_app_identity = app_node.value("use-app-identity", false);

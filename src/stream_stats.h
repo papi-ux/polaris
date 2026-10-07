@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -29,8 +30,22 @@
 #include "stream_bitrate.h"
 #include "stream_fec.h"
 #include "vrr_session_policy.h"
+#include "vrr_pacing_receipt.h"
 
 namespace stream_stats {
+
+  struct vrr_pacing_stats_t {
+    vrr_pacing::receipt_t last;
+    std::array<std::uint64_t, vrr_pacing::k_event_count> event_counts {};
+    bool authority_lost = false;
+    bool ended = false;
+    std::uint64_t last_source_epoch = 0;
+    std::uint64_t last_source_sequence = 0;
+    std::optional<std::int64_t> last_source_ns;
+  };
+
+  // Encode-loop observations only; never authorizes future source-time use.
+  bool record_vrr_pacing_event(const vrr_pacing::receipt_t &receipt);
 
   inline constexpr std::uint64_t DOCTOR_PACING_WARMUP_SAMPLES = 6;
   inline constexpr std::uint64_t DOCTOR_PACING_CONFIRMATION_SAMPLES = 2;
@@ -59,8 +74,8 @@ namespace stream_stats {
    * assigning different pressure grades to the same encoder timing.
    */
   double encoder_pressure_frame_budget_ms(double target_fps);
-  bool encoder_time_fails_budget(double encode_time_ms, double target_fps);
-  bool encoder_time_nears_budget(double encode_time_ms, double target_fps);
+  bool encoder_time_fails_budget(double encode_time_ms, double target_fps, bool source_time = false);
+  bool encoder_time_nears_budget(double encode_time_ms, double target_fps, bool source_time = false);
 
   /** Sender-side evidence for encoded frames outside the protocol FEC envelope. */
   struct fec_protection_stats_t {
@@ -126,10 +141,11 @@ namespace stream_stats {
     platf::image_provenance_t last_accepted;
     std::uint64_t accepted_frames = 0;
     vrr_policy::host_presentation_counts_t presentation_counts;
-    // Protocol syntax and comparable-clock plausibility are separate. A representable valid
-    // protocol value remains clock_unverified when no authoritative producer proof exists.
+    // Protocol syntax and per-frame comparable-clock observations are separate. An epoch proof
+    // alone never makes a valid protocol timestamp comparable for a later image.
     std::array<std::uint64_t, 9> plausibility_counts {};
     std::string last_plausibility = "clock_unverified";
+    std::map<std::string_view, std::uint64_t> source_time_counts;
   };
 
   /**
@@ -194,6 +210,7 @@ namespace stream_stats {
     // This session's variable-refresh request and policy inputs, frozen by record_vrr_session() when
     // the session starts. Empty for a session that never recorded one.
     std::optional<vrr_policy::record_t> vrr;
+    std::optional<vrr_pacing_stats_t> vrr_pacing;
 
     /// Accepted-image evidence, never filled by an opened display or host-wide timing counters.
     std::optional<capture_timing_t> capture_timing;
@@ -296,6 +313,7 @@ namespace stream_stats {
     std::int64_t start_client_left_after_ms = -1;
     /// The session's frozen variable-refresh request record.
     std::optional<vrr_policy::record_t> vrr;
+    std::optional<vrr_pacing_stats_t> vrr_pacing;
     /// A value snapshot of this encoder's accepted-image evidence at teardown.
     std::optional<capture_timing_t> capture_timing;
   };
@@ -502,6 +520,9 @@ namespace stream_stats {
     uint64_t video_policy_sample_count = 0;
     /// Consecutive complete windows whose pacing evidence crosses a warning threshold.
     uint64_t pacing_warning_streak = 0;
+    std::uint64_t video_policy_session_generation = 0;
+    bool video_policy_source_time = false;
+    bool video_policy_cadence_available = true;
     /// Monotonic count of primary media/control network observations.
     uint64_t network_sample_revision = 0;
     /// Host monotonic age of the newest complete network observation, or -1
@@ -891,6 +912,9 @@ namespace stream_stats {
    * generation with no record.
    */
   nlohmann::json vrr_json(const stats_t &stats, std::uint64_t session_generation);
+
+  /// Pending/stale source pacing and another generation's sample cannot grade this stream's cadence.
+  bool source_pacing_evidence_unavailable(const stats_t &stats, std::uint64_t session_generation = 0);
 
   /**
    * @brief Record how a live nonzero generation's PyroWave frames reach the codec.
@@ -1539,7 +1563,10 @@ namespace stream_stats {
                                        double dropped_frame_ratio,
                                        double avg_frame_age_ms,
                                        double frame_jitter_ms,
-                                       double encode_time_ms);
+                                       double encode_time_ms,
+                                       std::uint64_t session_generation = 0,
+                                       bool source_time = false,
+                                       bool cadence_available = true);
 
   /** @brief Publish whether capture is timer-paced or compositor/source-driven. */
   void update_capture_pacing(const std::string &pacing);

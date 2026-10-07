@@ -549,6 +549,7 @@ namespace confighttp::validation {
       "terminate-on-pause"sv,
       "use-app-identity"sv,
       "close-desktop-steam-for-private"sv,
+      "leave-game-mode-before-launch"sv,
       "desktop-mirror"sv,
       "virtual-display"sv,
       "virtual-display-primary"sv,

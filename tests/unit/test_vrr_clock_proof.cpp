@@ -12,9 +12,12 @@
 #include <chrono>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 using namespace std::chrono_literals;
@@ -48,6 +51,7 @@ namespace {
     std::int64_t now = k_base;
     std::size_t clock_samples = 0;
     bool fail_clock = false;
+    std::function<void(std::size_t)> on_sample;
 
     std::optional<peer_cred_t> peer_credentials(int) override {
       return peer;
@@ -74,6 +78,7 @@ namespace {
 
     vrr_clock::probe_sample_t sample_clocks() override {
       ++clock_samples;
+      if (on_sample) on_sample(clock_samples);
       if (fail_clock) return {};
       const auto before = k_base + static_cast<std::int64_t>(clock_samples) * 1000;
       return {before, before + 100, before + 200};
@@ -81,6 +86,21 @@ namespace {
 
     std::int64_t monotonic_now_ns() override {
       return now;
+    }
+  };
+
+  /// A retained compositor expectation whose currency the test controls, counting every check.
+  class fake_lease_t final: public vrr_clock::compositor_lease_t {
+  public:
+    explicit fake_lease_t(vrr_clock::compositor_process_t expected = {4242, 1000, 77}):
+        compositor_lease_t(expected) {}
+
+    mutable bool is_current = true;
+    mutable std::size_t checks = 0;
+
+    bool current() const override {
+      ++checks;
+      return is_current;
     }
   };
 
@@ -223,7 +243,7 @@ TEST(VrrClockProofTests, CollectReadsBothSidesTwiceAndReportsSocketPeerFactsOnly
   const vrr_clock::ns_id_t ours {3, 11};
   system.namespaces[0] = {ours};
   system.namespaces[4242] = {ours};
-  const auto proof = vrr_clock::collect(7, 21, system, {}, false, "no_authoritative_compositor_identity");
+  const auto proof = vrr_clock::collect(7, 21, system, {}, nullptr);
   ASSERT_TRUE(proof);
   EXPECT_EQ(proof->capture_epoch_id, 21u);
   EXPECT_EQ(proof->time_namespace, namespace_e::same);
@@ -234,6 +254,100 @@ TEST(VrrClockProofTests, CollectReadsBothSidesTwiceAndReportsSocketPeerFactsOnly
   EXPECT_EQ(proof->epoch_start_mono_ns, k_base);
 }
 
+TEST(VrrClockProofTests, CollectVerifiesTheActualPeerAgainstACurrentRetainedLease) {
+  fake_system_t system;
+  const vrr_clock::ns_id_t ours {3, 11};
+  system.namespaces[0] = {ours};
+  system.namespaces[4242] = {ours};
+  auto lease = std::make_shared<fake_lease_t>();
+  const auto proof = vrr_clock::collect(7, 21, system, {}, lease);
+  ASSERT_TRUE(proof);
+  EXPECT_TRUE(proof->producer_identity_verified) << proof->producer_identity_reason;
+  EXPECT_EQ(proof->producer_identity_reason, "authoritative_compositor_peer_matched");
+  EXPECT_TRUE(proof->clock_domain_verified);
+  EXPECT_EQ(lease->checks, 2u) << "current() brackets the peer and mapping reads, once before and once after";
+}
+
+TEST(VrrClockProofTests, CollectRefusesALeaseThatDoesNotDescribeThePeerItRead) {
+  const vrr_clock::ns_id_t ours {3, 11};
+  const auto run = [&](vrr_clock::compositor_process_t expected, auto &&prepare) {
+    fake_system_t system;
+    system.namespaces[0] = {ours};
+    system.namespaces[4242] = {ours};
+    prepare(system);
+    const auto proof = vrr_clock::collect(7, 1, system, {}, std::make_shared<fake_lease_t>(expected));
+    EXPECT_FALSE(proof->producer_identity_verified);
+    EXPECT_FALSE(proof->clock_domain_verified);
+    return std::string(proof->producer_identity_reason);
+  };
+  const auto unchanged = [](fake_system_t &) {};
+  // The socket's peer is some other process, e.g. a launcher that created the listening socket.
+  EXPECT_EQ(run({4243, 1000, 77}, unchanged), "compositor_peer_pid_mismatch");
+  EXPECT_EQ(run({4242, 1001, 77}, unchanged), "compositor_peer_uid_mismatch");
+  // Same pid, different process: the lease's start time is not the one read.
+  EXPECT_EQ(run({4242, 1000, 78}, unchanged), "compositor_peer_starttime_mismatch");
+  EXPECT_EQ(run({4242, 1000, 77}, [](fake_system_t &system) { system.starttimes = {std::nullopt}; }),
+            "compositor_peer_starttime_unavailable");
+  EXPECT_EQ(run({4242, 1000, 77}, [](fake_system_t &system) { system.starttimes = {77, 78}; }),
+            "compositor_peer_starttime_mismatch");
+  EXPECT_EQ(run({0, 1000, 77}, unchanged), "compositor_identity_invalid");
+}
+
+TEST(VrrClockProofTests, CollectRefusesAbsentRetiredOrReplacedGenerations) {
+  const vrr_clock::ns_id_t ours {3, 11};
+  {
+    fake_system_t system;
+    system.namespaces[0] = {ours};
+    system.namespaces[4242] = {ours};
+    const auto proof = vrr_clock::collect(7, 1, system, {}, nullptr);
+    EXPECT_FALSE(proof->producer_identity_verified);
+    EXPECT_EQ(proof->producer_identity_reason, "no_authoritative_compositor_identity");
+  }
+  {
+    // A retained lease of a generation already retired grants nothing to a new epoch.
+    fake_system_t system;
+    system.namespaces[0] = {ours};
+    system.namespaces[4242] = {ours};
+    auto lease = std::make_shared<fake_lease_t>();
+    lease->is_current = false;
+    const auto proof = vrr_clock::collect(7, 1, system, {}, lease);
+    EXPECT_FALSE(proof->producer_identity_verified);
+    EXPECT_EQ(proof->producer_identity_reason, "compositor_generation_unavailable");
+    EXPECT_FALSE(proof->clock_domain_verified);
+  }
+  {
+    // Retired or replaced while the peer and clocks were being read.
+    fake_system_t system;
+    system.namespaces[0] = {ours};
+    system.namespaces[4242] = {ours};
+    auto lease = std::make_shared<fake_lease_t>();
+    system.on_sample = [&](std::size_t sample) {
+      if (sample == 1) lease->is_current = false;
+    };
+    const auto proof = vrr_clock::collect(7, 1, system, {}, lease);
+    EXPECT_FALSE(proof->producer_identity_verified);
+    EXPECT_EQ(proof->producer_identity_reason, "compositor_generation_changed");
+    EXPECT_FALSE(proof->clock_domain_verified);
+  }
+  {
+    // No connected peer: nothing was read, so nothing is verified even with a current lease.
+    fake_system_t system;
+    system.namespaces[0] = {ours};
+    const auto proof = vrr_clock::collect(-1, 1, system, {}, std::make_shared<fake_lease_t>());
+    EXPECT_FALSE(proof->producer_identity_verified);
+    EXPECT_EQ(proof->producer_identity_reason, "no_authoritative_compositor_identity");
+  }
+  {
+    // SO_PEERCRED failed: no actual peer facts to match.
+    fake_system_t system;
+    system.peer.reset();
+    system.namespaces[0] = {ours};
+    const auto proof = vrr_clock::collect(7, 1, system, {}, std::make_shared<fake_lease_t>());
+    EXPECT_FALSE(proof->producer_identity_verified);
+    EXPECT_EQ(proof->producer_identity_reason, "compositor_peer_pid_mismatch");
+  }
+}
+
 TEST(VrrClockProofTests, CollectFailsClosedOnReplacementMissingPeerAndFailedClocks) {
   const vrr_clock::ns_id_t ours {3, 11};
   {
@@ -241,31 +355,31 @@ TEST(VrrClockProofTests, CollectFailsClosedOnReplacementMissingPeerAndFailedCloc
     system.namespaces[0] = {ours};
     system.namespaces[4242] = {ours};
     system.starttimes = {77, 99};  // pid reused between the namespace reads
-    EXPECT_EQ(vrr_clock::collect(7, 1, system, {}, true, "authority")->namespace_reason, "peer_process_replaced");
+    EXPECT_EQ(vrr_clock::collect(7, 1, system, {}, std::make_shared<fake_lease_t>())->namespace_reason, "peer_process_replaced");
   }
   {
     fake_system_t system;
     system.namespaces[0] = {ours};
     system.namespaces[4242] = {ours, vrr_clock::ns_id_t {3, 12}};  // peer changed namespace mid-read
-    EXPECT_EQ(vrr_clock::collect(7, 1, system, {}, true, "authority")->namespace_reason, "peer_namespace_unstable");
+    EXPECT_EQ(vrr_clock::collect(7, 1, system, {}, std::make_shared<fake_lease_t>())->namespace_reason, "peer_namespace_unstable");
   }
   {
     fake_system_t system;
     system.namespaces[0] = {ours};
-    EXPECT_EQ(vrr_clock::collect(-1, 1, system, {}, true, "authority")->namespace_reason, "no_peer_socket");
+    EXPECT_EQ(vrr_clock::collect(-1, 1, system, {}, std::make_shared<fake_lease_t>())->namespace_reason, "no_peer_socket");
   }
   {
     fake_system_t system;
     system.peer.reset();
     system.namespaces[0] = {ours};
-    EXPECT_EQ(vrr_clock::collect(7, 1, system, {}, true, "authority")->time_namespace, namespace_e::unverifiable);
+    EXPECT_EQ(vrr_clock::collect(7, 1, system, {}, std::make_shared<fake_lease_t>())->time_namespace, namespace_e::unverifiable);
   }
   {
     fake_system_t system;
     system.namespaces[0] = {ours};
     system.namespaces[4242] = {ours};
     system.fail_clock = true;
-    const auto proof = vrr_clock::collect(7, 1, system, {}, true, "authority");
+    const auto proof = vrr_clock::collect(7, 1, system, {}, std::make_shared<fake_lease_t>());
     EXPECT_FALSE(proof->mapping.valid);
     EXPECT_FALSE(proof->clock_domain_verified) << "all-sentinel samples must never be a valid mapping";
   }
@@ -274,7 +388,7 @@ TEST(VrrClockProofTests, CollectFailsClosedOnReplacementMissingPeerAndFailedCloc
     system.namespaces[0] = {ours};
     system.namespaces[4242] = {ours};
     system.now = vrr_clock::k_failed_read;
-    const auto proof = vrr_clock::collect(7, 1, system, {}, true, "authority");
+    const auto proof = vrr_clock::collect(7, 1, system, {}, std::make_shared<fake_lease_t>());
     EXPECT_EQ(proof->mapping.reason, "epoch_start_read_failed");
     EXPECT_FALSE(proof->clock_domain_verified);
   }
@@ -285,7 +399,7 @@ TEST(VrrClockProofTests, CollectClampsTheSampleCount) {
     fake_system_t system;
     vrr_clock::mapping_limits_t limits;
     limits.min_samples = requested;
-    (void) vrr_clock::collect(-1, 1, system, limits, false, "x");
+    (void) vrr_clock::collect(-1, 1, system, limits, nullptr);
     EXPECT_EQ(system.clock_samples, taken) << requested;
   }
 }

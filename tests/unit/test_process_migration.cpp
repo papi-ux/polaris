@@ -5655,11 +5655,47 @@ TEST(ProcessRuntimeConfigTests, EndSessionInGameModeClosesOnlyTheTitleThisStream
   EXPECT_NE(browser_stop.find("proc::proc.end_session(false, false);"), std::string::npos);
 
   // And both reach proc::execute without nvhttp, so they bring the Game Mode hold in line first.
-  const auto console_launch = confighttp.substr(confighttp.find("nvhttp::reconcile_game_mode_host();"), 300);
-  EXPECT_NE(console_launch.find("nvhttp::make_launch_session(true, false, launch_args, &named_cert);"), std::string::npos);
+  // Judged inside each launch function's own body: an opted-in #204 launch reconciles once more
+  // earlier in the same function, so the reconcile that matters is the last one before the launch
+  // session is built, and it must be the statement right before it, ahead of the execute call.
+  const auto reconciled_before_launch = [](const std::string &file, const std::string &begin, const std::string &end,
+                                           const std::string &constructor, const std::string &execute) {
+    const auto start = file.find(begin);
+    ASSERT_NE(start, std::string::npos) << begin;
+    const auto stop = file.find(end, start);
+    ASSERT_NE(stop, std::string::npos) << end;
+    const auto body = file.substr(start, stop - start);
+    const auto built = body.find(constructor);
+    ASSERT_NE(built, std::string::npos) << constructor;
+    const auto reconciled = body.rfind("nvhttp::reconcile_game_mode_host();", built);
+    ASSERT_NE(reconciled, std::string::npos) << "no reconcile before " << constructor;
+    const auto statement_end = reconciled + std::string_view {"nvhttp::reconcile_game_mode_host();"}.size();
+    EXPECT_EQ(body.substr(statement_end, built - statement_end).find(';'), std::string::npos)
+      << "the reconcile is not the statement right before " << constructor;
+    const auto executed = body.find(execute, built);
+    ASSERT_NE(executed, std::string::npos) << execute;
+    EXPECT_LT(reconciled, built);
+    EXPECT_LT(built, executed);
+  };
+  reconciled_before_launch(
+    confighttp,
+    "void launchApp(resp_https_t response, req_https_t request) {",
+    "void disconnect(resp_https_t response, req_https_t request) {",
+    "auto launch_session = nvhttp::make_launch_session(true, false, launch_args, &named_cert);",
+    "proc::proc.execute"
+  );
   const auto browser = read_source_file_for_contract("src/browser_stream.cpp");
-  const auto browser_launch = browser.substr(browser.find("nvhttp::reconcile_game_mode_host();"), 200);
-  EXPECT_NE(browser_launch.find("browser_launch_session();"), std::string::npos);
+  // Browser Stream's create_session reaches the app through launch_isolated_app.
+  const auto create_session_begin = browser.find("nlohmann::json create_session(");
+  ASSERT_NE(create_session_begin, std::string::npos);
+  EXPECT_NE(browser.find("launch_isolated_app(*app, launch_error)", create_session_begin), std::string::npos);
+  reconciled_before_launch(
+    browser,
+    "bool launch_isolated_app(const proc::ctx_t &app, std::string &error_out) {",
+    "bool helper_running_locked() {",
+    "auto launch_session = browser_launch_session();",
+    "proc::proc.execute"
+  );
 }
 
 TEST(ProcessRuntimeConfigTests, ASteamTitleIsOneDirectLaunchInGameMode) {

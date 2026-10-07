@@ -13,6 +13,7 @@
   #include <sys/syscall.h>
   #include <sys/prctl.h>
   #include <src/platform/linux/wayland.h>
+  #include <src/vrr_compositor_identity.h>
 
   #include <cerrno>
   #include <csignal>
@@ -20,13 +21,83 @@
   #include <filesystem>
   #include <fstream>
   #include <fcntl.h>
+  #include <map>
   #include <nlohmann/json.hpp>
+  #include <optional>
   #include <sstream>
   #include <sys/stat.h>
+  #include <sys/wait.h>
   #include <unistd.h>
 
 namespace {
+  // When a supervisor is itself killed (its SIGKILL escalation, or the host's hard stop), the
+  // descendants it just killed are orphaned before it can reap them. They then belong to the nearest
+  // subreaper, else PID 1. A container whose PID 1 is e.g. `sleep` never reaps, so those exited
+  // processes stay zombies forever and `kill(pid, 0)` keeps succeeding. Adopt only this test's
+  // descendants for its duration, and restore the prior process setting afterwards.
+  struct scoped_fixture_subreaper_t {
+    scoped_fixture_subreaper_t() {
+      installed = prctl(PR_GET_CHILD_SUBREAPER, &previous) == 0 &&
+                  prctl(PR_SET_CHILD_SUBREAPER, 1) == 0;
+    }
+    ~scoped_fixture_subreaper_t() {
+      if (installed) (void) prctl(PR_SET_CHILD_SUBREAPER, previous);
+    }
+    scoped_fixture_subreaper_t(const scoped_fixture_subreaper_t &) = delete;
+    scoped_fixture_subreaper_t &operator=(const scoped_fixture_subreaper_t &) = delete;
+    int previous = 0;
+    bool installed = false;
+  };
+
+  /// Wait statuses of fixture descendants this test reaped itself, as exit evidence.
+  std::map<pid_t, int> &fixture_reaped_statuses() {
+    static std::map<pid_t, int> statuses;
+    return statuses;
+  }
+
+  std::optional<int> fixture_reaped_status(pid_t pid) {
+    const auto found = fixture_reaped_statuses().find(pid);
+    if (found == fixture_reaped_statuses().end()) return std::nullopt;
+    return found->second;
+  }
+
+  /**
+   * Whether pid has terminated and been reaped. An adopted (orphaned) process is reaped here and its
+   * status kept; one still parented elsewhere counts only once its parent has reaped it (ESRCH). A
+   * live process, or an exited one that nobody has reaped, never counts.
+   */
+  bool process_exit_observed(pid_t pid) {
+    int status = 0;
+    pid_t waited;
+    do {
+      waited = waitpid(pid, &status, WNOHANG);
+    } while (waited < 0 && errno == EINTR);
+    if (waited == pid) {
+      fixture_reaped_statuses()[pid] = status;
+      return true;
+    }
+    if (waited < 0 && errno == ECHILD) {
+      return kill(pid, 0) != 0 && errno == ESRCH;
+    }
+    return false;
+  }
+
   bool wait_for_process_exit(pid_t pid, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (process_exit_observed(pid)) {
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    return process_exit_observed(pid);
+  }
+
+  /**
+   * For a supervisor, which the router spawned and must reap itself: never reaped here, so a router
+   * that left its own child unreaped still fails.
+   */
+  bool wait_for_router_reaped_exit(pid_t pid, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
       if (kill(pid, 0) != 0 && errno == ESRCH) {
@@ -35,6 +106,17 @@ namespace {
       std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
     return kill(pid, 0) != 0 && errno == ESRCH;
+  }
+
+  /// A descendant the fixture reaped itself must have been ended by teardown's signal, not by exiting.
+  void expect_killed_if_reaped_here(pid_t pid, const char *what) {
+    if (const auto status = fixture_reaped_status(pid)) {
+      EXPECT_TRUE(WIFSIGNALED(*status)) << what << " pid " << pid << " exited on its own (status " << *status << ")";
+      if (WIFSIGNALED(*status)) {
+        EXPECT_TRUE(WTERMSIG(*status) == SIGTERM || WTERMSIG(*status) == SIGKILL)
+          << what << " pid " << pid << " ended by signal " << WTERMSIG(*status);
+      }
+    }
   }
 
   pid_t wait_for_pid_file(const std::filesystem::path &path) {
@@ -103,6 +185,10 @@ TEST(CageDisplayRouterLifecycleTests, ExternalExitDrainsPrivateChildrenAcrossRel
     ASSERT_EQ(prctl(PR_SET_DUMPABLE, 1, 0, 0, 0), 0);
   }
   namespace fs = std::filesystem;
+  // Declared before the cleanup guard, so it is restored only after that guard has reaped.
+  const scoped_fixture_subreaper_t fixture_subreaper;
+  ASSERT_TRUE(fixture_subreaper.installed) << "the fixture must adopt the descendants it checks";
+  fixture_reaped_statuses().clear();
 
   struct cleanup_t {
     config::video_t::linux_display_t linux_display;
@@ -128,6 +214,8 @@ TEST(CageDisplayRouterLifecycleTests, ExternalExitDrainsPrivateChildrenAcrossRel
         if (process_pid > 0 && kill(process_pid, 0) == 0) {
           (void) kill(process_pid, SIGKILL);
         }
+        // Reap it if the fixture adopted it, so no zombie outlives the test.
+        (void) wait_for_process_exit(process_pid, std::chrono::seconds(1));
       }
       config::video.linux_display = linux_display;
       auto restore_env = [](const char *name, const std::string &value, bool had_value) {
@@ -213,6 +301,7 @@ report = {
     "supervisor_environment_readable": supervisor_environment_readable,
     "environment": {key: os.environ.get(key) for key in ("MANGOHUD", "MANGOHUD_DLSYM", "MANGOHUD_CONFIG", "DISPLAY", "WAYLAND_DISPLAY", "POLARIS_PRIVATE_SESSION", "POLARIS_SESSION_INSTANCE_ID")},
     "leaked_high_fds": [name for name in os.listdir("/proc/self/fd") if int(name) >= 128 and os.path.exists("/proc/self/fd/" + name)],
+    "identity_channel_inherited": os.path.exists("/proc/self/fd/5"),
 }
 with open(os.environ["FAKE_LABWC_COMPOSITOR_PID_FILE"] + ".environment.json", "w") as output:
     json.dump(report, output)
@@ -313,6 +402,7 @@ exit 0
   const std::string mode_report = R"JSON([{"name":"HEADLESS-1","enabled":true,"modes":[{"width":1280,"height":720,"refresh":60.0,"current":true}]}])JSON";
   auto query_mode = [&](const std::string &) -> std::optional<std::string> { return mode_report; };
   std::optional<std::string> previous_topology;
+  std::shared_ptr<const vrr_clock::compositor_lease_t> previous_lease;
   EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
 
   for (int cycle = 0; cycle < 2; ++cycle) {
@@ -359,6 +449,29 @@ exit 0
     EXPECT_EQ(report.at("environment").at("POLARIS_PRIVATE_SESSION"), "1");
     EXPECT_EQ(report.at("environment").at("POLARIS_SESSION_INSTANCE_ID"), "external-exit-cycle-" + std::to_string(cycle));
 
+    // The supervisor handed over its exec'd child, the process that answers the socket, and the
+    // channel itself never reached that child.
+    // cmdline is NUL-terminated, so argv[5] is followed by one empty split element.
+    ASSERT_GE(report.at("supervisor_args").size(), 6u);
+    EXPECT_EQ(report.at("supervisor_args").at(5), "--identity-fd=5");
+    EXPECT_FALSE(report.at("identity_channel_inherited").get<bool>());
+    const auto instance = "external-exit-cycle-" + std::to_string(cycle);
+    const auto socket_name = cage_display_router::get_wayland_socket();
+    const auto lease = cage_display_router::compositor_lease(instance, socket_name);
+    ASSERT_TRUE(lease) << "the production handoff published no compositor lease";
+    EXPECT_EQ(lease->process.pid, wait_for_pid_file(compositor_pid_file));
+    EXPECT_EQ(lease->process.uid, getuid());
+    EXPECT_NE(lease->process.starttime, 0u);
+    EXPECT_TRUE(lease->current());
+    EXPECT_FALSE(cage_display_router::compositor_lease("external-exit-cycle-other", socket_name));
+    EXPECT_FALSE(cage_display_router::compositor_lease(instance, "wayland-0"));
+    EXPECT_FALSE(cage_display_router::compositor_lease("", socket_name));
+    EXPECT_FALSE(cage_display_router::compositor_lease(instance, ""));
+    if (previous_lease) {
+      EXPECT_NE(previous_lease, lease);
+      EXPECT_FALSE(previous_lease->current()) << "a retained lease of a retired generation grants nothing";
+    }
+
     const auto topology = cage_display_router::encoder_probe_topology_for_tests(query_mode);
     ASSERT_TRUE(topology);
     EXPECT_EQ(topology, cage_display_router::encoder_probe_topology_for_tests(query_mode));
@@ -374,6 +487,7 @@ exit 0
     ));
     EXPECT_TRUE(cage_display_router::ensure_output_refresh(60, true));
     EXPECT_EQ(topology, cage_display_router::encoder_probe_topology_for_tests(query_mode));
+    EXPECT_TRUE(lease->current()) << "an unchanged read-back attempts no output mutation";
     // A mode mutation between observations must survive even if it returns to
     // exactly the same output bytes. Mutation during a query cannot publish.
     EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(
@@ -384,6 +498,12 @@ exit 0
         return mode_report;
       }
     ));
+    // The attempted output mutation completed (and failed, leaving 60 Hz): the same topology pointer
+    // is still published with no writer, yet the lease must not come back.
+    EXPECT_FALSE(lease->current()) << "an attempted output mutation retires the lease for good";
+    EXPECT_EQ(cage_display_router::compositor_lease(instance, socket_name), lease)
+      << "still the published object, so only the revision fence refuses it";
+    EXPECT_FALSE(lease->current());
     EXPECT_NE(topology, cage_display_router::encoder_probe_topology_for_tests(query_mode));
     // Pinning prevents inode reuse but does not make a pathname immutable.
     // Replace it during the observation and require the post-query read-back.
@@ -400,6 +520,7 @@ exit 0
     fs::rename(socket.string() + ".saved-probe", socket);
     // A detected endpoint replacement remains uncertain for this generation.
     EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
+    EXPECT_FALSE(lease->current());
 
     const auto runtime_state = cage_display_router::runtime_state();
     EXPECT_TRUE(runtime_state.requested_headless);
@@ -426,6 +547,9 @@ exit 0
     EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
     cage_display_router::stop();
     EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
+    EXPECT_FALSE(lease->current()) << "stop retires the lease even while it is still held";
+    EXPECT_FALSE(cage_display_router::compositor_lease(instance, socket_name));
+    previous_lease = lease;
 
     const bool worker_exited = wait_for_process_exit(worker, std::chrono::seconds(2));
     EXPECT_TRUE(worker_exited)
@@ -471,6 +595,12 @@ exit 0
   EXPECT_TRUE(escaped_worker_exited)
     << "external labwc exit leaked separate-session startup client pid " << escaped_worker_pid;
   if (escaped_worker_exited) {
+    // It ignores SIGTERM: only the supervisor's SIGKILL of its adopted child can have ended it.
+    if (const auto status = fixture_reaped_status(escaped_worker_pid)) {
+      EXPECT_TRUE(WIFSIGNALED(*status) && WTERMSIG(*status) == SIGKILL) << "status " << *status;
+    }
+  }
+  if (escaped_worker_exited) {
     remove_cleanup_pid(escaped_worker_pid);
   }
   ASSERT_EQ(unsetenv("FAKE_LABWC_ESCAPE_CHILD"), 0);
@@ -506,6 +636,7 @@ exit 0
   const bool stopped_worker_exited = wait_for_process_exit(stopped_worker_pid, std::chrono::seconds(2));
   EXPECT_TRUE(stopped_worker_exited)
     << "explicit stop leaked private worker pid " << stopped_worker_pid;
+  if (stopped_worker_exited) expect_killed_if_reaped_here(stopped_worker_pid, "explicit-stop worker");
   if (stopped_worker_exited) {
     remove_cleanup_pid(stopped_worker_pid);
   }
@@ -535,7 +666,7 @@ exit 0
 
   ASSERT_EQ(kill(frozen_supervisor_pid, SIGSTOP), 0);
   cage_display_router::stop();
-  const bool frozen_supervisor_exited = wait_for_process_exit(frozen_supervisor_pid, std::chrono::seconds(2));
+  const bool frozen_supervisor_exited = wait_for_router_reaped_exit(frozen_supervisor_pid, std::chrono::seconds(2));
   const bool frozen_worker_exited = wait_for_process_exit(frozen_worker_pid, std::chrono::seconds(2));
   const bool frozen_compositor_exited = wait_for_process_exit(frozen_compositor_pid, std::chrono::seconds(2));
   EXPECT_TRUE(frozen_supervisor_exited)
@@ -544,6 +675,8 @@ exit 0
     << "hard supervisor stop leaked private worker pid " << frozen_worker_pid;
   EXPECT_TRUE(frozen_compositor_exited)
     << "hard supervisor stop leaked compositor pid " << frozen_compositor_pid;
+  if (frozen_worker_exited) expect_killed_if_reaped_here(frozen_worker_pid, "hard-stop worker");
+  if (frozen_compositor_exited) expect_killed_if_reaped_here(frozen_compositor_pid, "hard-stop compositor");
   if (frozen_worker_exited) {
     remove_cleanup_pid(frozen_worker_pid);
   }
@@ -568,6 +701,8 @@ exit 0
   ));
   EXPECT_FALSE(cage_display_router::cage_pidfd_available_for_tests());
   EXPECT_FALSE(cage_display_router::encoder_probe_topology_for_tests(query_mode));
+  // Without the supervisor's pidfd no generation is published, so no lease either.
+  EXPECT_FALSE(cage_display_router::compositor_lease("pidfd-unavailable-external-exit", cage_display_router::get_wayland_socket()));
   const auto no_pidfd_supervisor_pid = cage_display_router::get_pid();
   ASSERT_GT(no_pidfd_supervisor_pid, 0);
   const auto no_pidfd_compositor_pid = wait_for_pid_file(compositor_pid_file);
@@ -582,7 +717,7 @@ exit 0
   cage_display_router::stop();
   cage_display_router::force_cage_pidfd_open_failure_for_tests(false);
 
-  const bool no_pidfd_supervisor_exited = wait_for_process_exit(no_pidfd_supervisor_pid, std::chrono::seconds(2));
+  const bool no_pidfd_supervisor_exited = wait_for_router_reaped_exit(no_pidfd_supervisor_pid, std::chrono::seconds(2));
   const bool no_pidfd_compositor_exited = wait_for_process_exit(no_pidfd_compositor_pid, std::chrono::seconds(2));
   const bool no_pidfd_worker_exited = wait_for_process_exit(no_pidfd_worker_pid, std::chrono::seconds(2));
   EXPECT_TRUE(no_pidfd_supervisor_exited)

@@ -643,3 +643,30 @@ TEST(DoctorV2CadenceTests, SourceTimeCannotAuthorizeAFixedRatePacingTrial) {
   EXPECT_FALSE(status.at("actions_exposed").get<bool>());
   EXPECT_FALSE(status.at("trial_metrics").at("ready").get<bool>());
 }
+
+TEST(DoctorV2CadenceTests, PrivateSourcePacingWaitAndStaleEvidenceNeverBecomeHealthyFixedGrid) {
+  doctor_v2_flag_t enabled;
+  covered_samples(120.0, 120.0);
+  for (const char *reason : {"source_time_unproven", "pacing_evidence_stale"}) {
+    auto evidence = host_evidence(120.0);
+    evidence["vrr"] = source_time_evidence()["vrr"];
+    evidence["vrr"].update({{"effective", false}, {"pacing_mode", "source_time_pending"}, {"fallback_reason", reason}});
+    const auto status = doctor_v2::status("owner", "app", evidence);
+    EXPECT_EQ(status["state"], "collecting") << reason;
+    EXPECT_FALSE(status["stable"].get<bool>()) << reason;
+    EXPECT_FALSE(status["coverage_adequate"].get<bool>()) << reason;
+  }
+}
+
+TEST(DoctorV2CadenceTests, PrivateUnsupportedAndRevokedPathsRetainHonestLegacyPolicy) {
+  doctor_v2_flag_t enabled;
+  covered_samples(120.0, 120.0);
+  for (const char *reason : {"unsupported_codec", "unsupported_loop", "authority_lost"}) {
+    auto evidence = host_evidence(120.0);
+    evidence["vrr"] = source_time_evidence()["vrr"];
+    evidence["vrr"].update({{"effective", false}, {"pacing_mode", "fixed_grid"}, {"fallback_reason", reason}});
+    EXPECT_TRUE(doctor_v2::status("owner", "app", evidence)["coverage_adequate"].get<bool>()) << reason;
+    evidence["vrr"]["requested"] = "false";
+    EXPECT_FALSE(doctor_v2::status("owner", "app", evidence)["coverage_adequate"].get<bool>()) << reason;
+  }
+}
