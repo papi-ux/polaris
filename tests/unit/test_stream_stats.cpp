@@ -11594,6 +11594,102 @@ TEST_F(StreamStatsCaptureTimingTests, RefusedPreRegistrationWritesCanRetryButRet
   EXPECT_EQ(current_stats_json()["last_session"], ended);
 }
 
+namespace {
+  game_mode_adaptive_sync::observation_t host_feedback_observation() {
+    game_mode_adaptive_sync::observation_t value;
+    value.route_bound = value.generation_checked = true;
+    value.reason = "property_read_bracketed";
+    value.generation = {45678, 90, 1, 23, 100, 4};
+    value.properties.capable = value.properties.feedback = {true, true, 32, 1, 0, 1};
+    value.version.producer_exe = "/private/user/fixture/gamescope";
+    value.version.os_release = {{"ID", "steamos"}, {"BUILD_ID", "fixture-build"}};
+    value.observed_at = std::chrono::steady_clock::now();
+    value.generation_checked_at = value.observed_at;
+    return value;
+  }
+}
+
+TEST_F(StreamStatsCaptureTimingTests, HostAdaptiveSyncIsAssociatedOnlyThroughThisConsumersAcceptedImage) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  stream_stats::add_client("10.0.0.6", "Other", 502);
+  auto store = std::make_shared<game_mode_adaptive_sync::store_t>();
+  store->publish(host_feedback_observation());
+  auto frame = image(); frame.host_adaptive_sync = store;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_EQ(timing()["host_adaptive_sync"]["current_state"], "unknown");
+  EXPECT_EQ(timing()["host_adaptive_sync"]["last_known"]["state"], "active");
+  EXPECT_TRUE(timing(502).is_null());
+  const auto public_json = current_stats_json();
+  EXPECT_EQ(public_json["clients"][0]["host_adaptive_sync"]["range_status"], "unmapped");
+  EXPECT_FALSE(public_json["clients"][1].contains("host_adaptive_sync"));
+}
+
+TEST_F(StreamStatsCaptureTimingTests, FrozenCaptureRetainsObservationWhileObserverFailureCannotConfirmCurrentState) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto store = std::make_shared<game_mode_adaptive_sync::store_t>();
+  store->publish(host_feedback_observation());
+  auto frame = image(); frame.host_adaptive_sync = store;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  auto failure = host_feedback_observation(); failure.route_bound = false;
+  failure.reason = "pipewire_graph_changed"; store->publish(failure);
+  const auto readout = timing()["host_adaptive_sync"];
+  EXPECT_EQ(readout["observation_reason"], "pipewire_graph_changed");
+  EXPECT_EQ(readout["last_known"]["state"], "active");
+  EXPECT_EQ(readout["last_known"]["generation_unchanged"], false);
+  EXPECT_EQ(readout["current_state"], "unknown");
+  EXPECT_EQ(timing()["accepted_frames"], 1u);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, EndedHostObservationIsFrozenEvenWhenAnotherConsumerKeepsCaptureAlive) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  stream_stats::add_client("10.0.0.6", "Watch", 502);
+  auto store = std::make_shared<game_mode_adaptive_sync::store_t>();
+  store->publish(host_feedback_observation());
+  auto frame = image(); frame.host_adaptive_sync = store;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  ASSERT_TRUE(stream_stats::record_accepted_capture(502, frame));
+  stream_stats::remove_client("10.0.0.5", 501);
+  auto later = host_feedback_observation(); later.properties.feedback.value = 0;
+  store->publish(later);
+  EXPECT_EQ(timing(502)["host_adaptive_sync"]["last_known"]["state"], "inactive");
+  const auto ended = current_stats_json()["last_session"]["host_adaptive_sync"];
+  EXPECT_EQ(ended["last_known"]["state"], "active");
+  EXPECT_EQ(ended["ended"], true);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, ReopenedBackendCannotBorrowAnOldCapturesObserverBeforeItsFirstImage) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto store = std::make_shared<game_mode_adaptive_sync::store_t>();
+  store->publish(host_feedback_observation());
+  auto frame = image(); frame.host_adaptive_sync = store;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  stream_stats::capture_backend_t backend; backend.opened = "portal";
+  ASSERT_TRUE(stream_stats::record_capture_backend(501, backend));
+  EXPECT_TRUE(timing()["host_adaptive_sync"].is_null());
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, image(72, 1)));
+  EXPECT_TRUE(timing()["host_adaptive_sync"].is_null());
+}
+
+TEST_F(StreamStatsCaptureTimingTests, HostObservationPublicRowsExcludePrivateProducerFactsAndUnknownReasonText) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto store = std::make_shared<game_mode_adaptive_sync::store_t>();
+  store->publish(host_feedback_observation());
+  auto failure = host_feedback_observation(); failure.properties.torn = true;
+  failure.reason = "secret uid=45678 /private/user/fixture";
+  store->publish(failure);
+  auto frame = image(); frame.host_adaptive_sync = store;
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  EXPECT_FALSE(timing()["host_adaptive_sync"].contains("version_provenance"));
+  EXPECT_EQ(timing()["host_adaptive_sync"].dump().find("/private/user/fixture"), std::string::npos);
+  const auto public_readout = current_stats_json()["clients"][0]["host_adaptive_sync"];
+  EXPECT_EQ(public_readout["observation_reason"], "producer_unbound");
+  EXPECT_EQ(public_readout.dump().find("45678"), std::string::npos);
+  EXPECT_EQ(public_readout.dump().find("/private/user/fixture"), std::string::npos);
+  EXPECT_FALSE(public_readout.contains("version_provenance"));
+  stream_stats::remove_client("10.0.0.5", 501);
+  EXPECT_EQ(current_stats_json()["last_session"]["host_adaptive_sync"].dump().find("45678"), std::string::npos);
+}
+
 TEST_F(StreamStatsCaptureTimingTests, SharedProducerConsumersCountOnlyTheirOwnAcceptedSubsetWithoutWatchAuthority) {
   stream_stats::add_client("10.0.0.5", "Owner", 501);
   stream_stats::add_client("10.0.0.6", "Watch", 502);

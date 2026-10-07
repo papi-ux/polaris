@@ -14,6 +14,7 @@
 #include <cerrno>
 #include <cctype>
 #include <cstring>
+#include <ctime>
 #include <limits>
 #include <utility>
 
@@ -541,6 +542,8 @@ namespace pipewire_capture {
   }
 
   void capture_t::shutdown() {
+    // Wake a producer_binding() read first: it holds shutdown_mtx_ for at most one wait slice.
+    producer_cancel_.store(true, std::memory_order_release);
     std::lock_guard shutdown_lk(shutdown_mtx_);
     if (shutdown_complete_) {
       return;
@@ -597,6 +600,8 @@ namespace pipewire_capture {
     if (loop_) {
       pw_thread_loop_lock(loop_);
     }
+    // The registry proxy and both hooks belong to the core, so they go before it does.
+    stop_producer_tracking();
     if (stream_) {
       const int flush_result = pw_stream_flush(stream_, false);
       if (flush_result < 0) {
@@ -670,6 +675,11 @@ namespace pipewire_capture {
       }
     }
 
+    // Before the loop thread starts, so no callback can run while the listeners are added.
+    if (options_.track_producer && !start_producer_tracking()) {
+      BOOST_LOG(warning) << "portal: PipeWire producer tracking unavailable on this capture core"sv;
+    }
+
     if (!connect_stream(true)) return false;
 
     {
@@ -689,6 +699,8 @@ namespace pipewire_capture {
   }
 
   bool capture_t::connect_stream(bool use_max_framerate) {
+    // A new stream is a new capture node: no earlier binding read may complete against it.
+    ++stream_generation_;
     const bool has_node = options_.node_id != 0;
     const bool has_serial = options_.node_serial != 0 &&
                             (options_.node_serial & SPA_ID_INVALID) != SPA_ID_INVALID;
@@ -911,6 +923,7 @@ namespace pipewire_capture {
   }
 
   void capture_t::stop() {
+    producer_cancel_.store(true, std::memory_order_release);
     std::lock_guard start_stop_lk(start_stop_mtx_);
     std::lock_guard lk(frame_mtx_);
     stop_requested_ = true;
@@ -1408,6 +1421,220 @@ namespace pipewire_capture {
     if (state == PW_STREAM_STATE_ERROR || state == PW_STREAM_STATE_UNCONNECTED) {
       cap->set_terminal(state == PW_STREAM_STATE_ERROR ? wait_result_e::error : wait_result_e::reinit);
     }
+  }
+
+  bool capture_t::start_producer_tracking() {
+    // Called once from start(), before pw_thread_loop_start, on the capture's own core.
+    static const pw_registry_events registry_events = [] {
+      pw_registry_events events {};
+      events.version = PW_VERSION_REGISTRY_EVENTS;
+      events.global = &capture_t::on_registry_global;
+      events.global_remove = &capture_t::on_registry_global_remove;
+      return events;
+    }();
+    static const pw_core_events core_events = [] {
+      pw_core_events events {};
+      events.version = PW_VERSION_CORE_EVENTS;
+      events.info = &capture_t::on_core_info;
+      events.done = &capture_t::on_core_done;
+      events.error = &capture_t::on_core_error;
+      return events;
+    }();
+    if (!core_ || registry_) return registry_ != nullptr;
+    spa_zero(core_listener_);
+    pw_core_add_listener(core_, &core_listener_, &core_events, this);
+    core_listener_added_ = true;
+    registry_ = pw_core_get_registry(core_, PW_VERSION_REGISTRY, 0);
+    if (!registry_) return false;
+    spa_zero(registry_listener_);
+    pw_registry_add_listener(registry_, &registry_listener_, &registry_events, this);
+    return true;
+  }
+
+  void capture_t::stop_producer_tracking() {
+    // Under the loop lock (or before the loop ever ran), always before pw_core_disconnect.
+    if (registry_) {
+      spa_hook_remove(&registry_listener_);
+      pw_proxy_destroy(reinterpret_cast<pw_proxy *>(registry_));
+      registry_ = nullptr;
+    }
+    if (core_listener_added_) {
+      spa_hook_remove(&core_listener_);
+      core_listener_added_ = false;
+    }
+    producer_sync_seq_ = -1;
+  }
+
+  void capture_t::on_registry_global(void *userdata, std::uint32_t id, std::uint32_t, const char *type, std::uint32_t, const spa_dict *props) noexcept {
+    auto *cap = static_cast<capture_t *>(userdata);
+    if (!cap || !type) return;
+    if (id == PW_ID_CORE && std::strcmp(type, PW_TYPE_INTERFACE_Core) == 0) {
+      // The server publishes its own library version on the Core global too (impl-core.c keys),
+      // which a registry added after connect can still read.
+      try {
+        const char *version = props ? spa_dict_lookup(props, PW_KEY_CORE_VERSION) : nullptr;
+        cap->registry_core_version_ = version ? version : "";
+      } catch (...) {
+        cap->registry_core_version_.clear();
+      }
+      return;
+    }
+    if (!pipewire_producer_binding::kind_of(type)) return;
+    // Keep only the server-set keys the binding reads. Names and client-supplied process ids are
+    // deliberately not copied, so nothing downstream can mistake them for proof.
+    static constexpr const char *kept[] = {
+      "object.serial", "client.id", "link.input.node", "link.output.node", "pipewire.sec.pid", "pipewire.sec.uid",
+    };
+    std::map<std::string, std::string, std::less<>> copied;
+    try {
+      for (const char *key : kept) {
+        if (const char *value = props ? spa_dict_lookup(props, key) : nullptr) copied.emplace(key, value);
+      }
+      cap->producer_graph_.global(id, type, std::move(copied));
+    } catch (...) {
+      // An allocation failure must not unwind into PipeWire. Forget the id: a binding that needs it
+      // then fails closed instead of reading a stale or partial object.
+      cap->producer_graph_.global_remove(id);
+    }
+  }
+
+  void capture_t::on_registry_global_remove(void *userdata, std::uint32_t id) noexcept {
+    if (auto *cap = static_cast<capture_t *>(userdata)) cap->producer_graph_.global_remove(id);
+  }
+
+  void capture_t::on_core_info(void *userdata, const pw_core_info *info) noexcept {
+    auto *cap = static_cast<capture_t *>(userdata);
+    if (!cap || !info) return;
+    try {
+      // The running server's own version, not the PW_VERSION this binary was compiled against.
+      cap->server_version_ = info->version ? info->version : "";
+    } catch (...) {
+      cap->server_version_.clear();
+    }
+  }
+
+  void capture_t::on_core_done(void *userdata, std::uint32_t id, int seq) noexcept {
+    auto *cap = static_cast<capture_t *>(userdata);
+    if (!cap || id != PW_ID_CORE || cap->producer_sync_seq_ < 0 || seq != cap->producer_sync_seq_) return;
+    cap->producer_sync_done_ = true;
+    pw_thread_loop_signal(cap->loop_, false);
+  }
+
+  void capture_t::on_core_error(void *userdata, std::uint32_t id, int, int, const char *) noexcept {
+    auto *cap = static_cast<capture_t *>(userdata);
+    // Errors on other proxies (the stream's node) belong to the stream state machine. A core-level
+    // error means this connection's graph can no longer be trusted.
+    if (!cap || id != PW_ID_CORE) return;
+    cap->producer_core_error_ = true;
+    if (cap->producer_sync_seq_ >= 0) pw_thread_loop_signal(cap->loop_, false);
+  }
+
+  capture_producer::binding_t capture_t::producer_binding(std::chrono::milliseconds timeout) {
+    namespace pb = pipewire_producer_binding;
+    // The budget starts now, so lock acquisition counts against it too.
+    const auto give_up = std::chrono::steady_clock::now() + std::max(timeout, std::chrono::milliseconds {0});
+    pb::snapshot_t in;
+    in.tracking = options_.track_producer;
+    if (!in.tracking) return pb::resolve(in);  // Disabled tracking costs no lock and no IPC.
+
+    auto refuse = [](std::string_view why) {
+      capture_producer::binding_t binding;
+      binding.reason = std::string {why};
+      return binding;
+    };
+
+    if (producer_cancel_.load(std::memory_order_acquire)) {
+      in.cancelled = true;
+      return pb::resolve(in);
+    }
+    // shutdown() holds this mutex while it waits for frame leases, without a bound. Never queue
+    // behind it: a capture that is stopping answers at once. Holding it excludes shutdown() and
+    // retry_rate_negotiation(), the only long holders of the loop lock below.
+    std::unique_lock shutdown_lk(shutdown_mtx_, std::try_to_lock);
+    if (!shutdown_lk.owns_lock()) return refuse(pb::reason::capture_stopping);
+    if (shutdown_complete_ || producer_cancel_.load(std::memory_order_acquire)) {
+      in.cancelled = true;
+      return pb::resolve(in);
+    }
+    if (!loop_ || !core_) return refuse(pb::reason::capture_not_running);
+    if (pw_thread_loop_in_thread(loop_)) return refuse(pb::reason::wrong_thread);
+    {
+      std::lock_guard lk(frame_mtx_);
+      in.running = running_ && !stop_requested_;
+    }
+    if (!in.running) return pb::resolve(in);
+
+    pw_thread_loop_lock(loop_);
+    auto release_loop = util::fail_guard([&] { pw_thread_loop_unlock(loop_); });
+    if (!registry_) return refuse(pb::reason::tracking_unavailable);
+    if (!stream_) return refuse(pb::reason::capture_not_running);
+
+    const auto generation = stream_generation_;
+    const auto node_before = pw_stream_get_node_id(stream_);
+
+    timespec deadline {};
+    const auto remaining = give_up - std::chrono::steady_clock::now();
+    if (remaining <= std::chrono::steady_clock::duration::zero()) {
+      in.timed_out = true;
+      return pb::resolve(in);
+    }
+    const auto budget_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(remaining).count();
+    if (pw_thread_loop_get_time(loop_, &deadline, budget_ns) < 0) {
+      in.core_error = true;
+      return pb::resolve(in);
+    }
+
+    producer_sync_done_ = false;
+    producer_core_error_ = false;
+    producer_sync_seq_ = pw_core_sync(core_, PW_ID_CORE, 0);
+    auto clear_seq = util::fail_guard([&] { producer_sync_seq_ = -1; });
+    if (producer_sync_seq_ < 0) {
+      in.core_error = true;
+      return pb::resolve(in);
+    }
+
+    const auto before = [](const timespec &a, const timespec &b) {
+      return a.tv_sec < b.tv_sec || (a.tv_sec == b.tv_sec && a.tv_nsec < b.tv_nsec);
+    };
+    constexpr std::int64_t slice_ns = 20'000'000;  // how long stop()/shutdown() can wait for this read
+    while (!producer_sync_done_ && !producer_core_error_ && !producer_cancel_.load(std::memory_order_acquire)) {
+      timespec slice {};
+      if (pw_thread_loop_get_time(loop_, &slice, slice_ns) < 0) {
+        in.core_error = true;
+        break;
+      }
+      timespec now {};
+      if (pw_thread_loop_get_time(loop_, &now, 0) < 0) {
+        in.core_error = true;
+        break;
+      }
+      if (!before(now, deadline)) {
+        in.timed_out = true;
+        break;
+      }
+      const int waited = pw_thread_loop_timed_wait_full(loop_, before(slice, deadline) ? &slice : &deadline);
+      if (waited < 0 && waited != -ETIMEDOUT) {
+        in.core_error = true;
+        break;
+      }
+    }
+
+    // Read every fact under the same lock acquisition that saw the done event.
+    in.synced = producer_sync_done_;
+    in.core_error = in.core_error || producer_core_error_;
+    in.cancelled = producer_cancel_.load(std::memory_order_acquire);
+    in.server_version = server_version_.empty() ? registry_core_version_ : server_version_;
+    in.self_client_id = pw_proxy_get_bound_id(reinterpret_cast<pw_proxy *>(pw_core_get_client(core_)));
+    in.self_pid = static_cast<std::int64_t>(getpid());
+    in.self_uid = static_cast<std::uint64_t>(getuid());
+    in.generation_changed = !stream_ || stream_generation_ != generation || pw_stream_get_node_id(stream_) != node_before;
+    in.capture_node_id = stream_ ? pw_stream_get_node_id(stream_) : pb::invalid_id;
+    {
+      std::lock_guard lk(frame_mtx_);
+      in.running = running_ && !stop_requested_;
+    }
+    in.graph = &producer_graph_;
+    return pb::resolve(in);
   }
 
   void capture_t::set_terminal(wait_result_e result) {

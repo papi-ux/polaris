@@ -34,6 +34,7 @@
 #include "src/platform/common.h"
 #include "src/platform/linux/game_mode_host.h"
 #include "src/platform/linux/game_mode_repaint.h"
+#include "src/platform/linux/game_mode_feedback.h"
 #include "src/platform/linux/graphics.h"
 #include "src/platform/linux/misc.h"
 #include "src/video.h"
@@ -399,7 +400,8 @@ namespace portal {
     platf::mem_type_e mem_type,
     int client_dynamic_range,
     const capture_generation::identity_t &generation,
-    AVRational requested_rate
+    AVRational requested_rate,
+    bool track_producer = false
   ) {
     const auto encoder_render_node = encoder_render_node_for_dmabuf(generation.adapter_name);
     std::vector<pipewire_capture::dmabuf_format_modifier_t> dmabuf_formats;
@@ -495,6 +497,7 @@ namespace portal {
       .prefer_sdr_formats = prefer_sdr,
       .requested_rate = requested_rate,
       .request_fixed_rate = generation.private_runtime != "gamescope" && running_kwin_uses_fixed_rate(),
+      .track_producer = track_producer,
     });
     if (session_media::teardown_in_progress() || session_media::pending_start_cancelled(session_media::pending_start_owner())) return nullptr;
     if (!local->start()) {
@@ -835,7 +838,7 @@ namespace portal {
            game_mode_screen_generation(generation))) {
         if (auto gs = pipewire_capture::find_gamescope_video_source()) {
           if (auto local = start_local_pw_capture(
-                gs->node_id, gs->object_serial, width, height, mem_type, client_dynamic_range, generation, requested_rate)) {
+                gs->node_id, gs->object_serial, width, height, mem_type, client_dynamic_range, generation, requested_rate, game_mode_screen_generation(generation))) {
             BOOST_LOG(info) << "portal: gamescopegrab local Video/Source node="sv << gs->node_id
                             << " name="sv << gs->node_name << " (no private ScreenCast)"sv;
             g_media.kwin.reset();
@@ -1404,10 +1407,20 @@ namespace portal {
 #endif
 
       // Fallback: source-owned portal/KWin capture (only when cage is NOT configured)
-      auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range, generation_, requested_rate);
+      platf::capture_route_t active_route;
+      auto cap = ensure_global_capture(requested_width, requested_height, mem_type, client_dynamic_range, generation_, requested_rate, {}, &active_route);
       if (!cap) {
         BOOST_LOG(warning) << "portal: No capture available"sv;
         return platf::capture_e::reinit;
+      }
+
+      // Only the actual direct Game Mode route owns this observer. A private compositor, probe or
+      // portal/KWin fallback must never borrow a different display's adaptive-sync observation.
+      std::unique_ptr<platf::game_mode_feedback::collector_t> host_feedback;
+      if (!probe_only && game_mode_screen_generation(generation_) &&
+          active_route.route == platf::k_capture_route_portal_gamescope_node) {
+        host_feedback = std::make_unique<platf::game_mode_feedback::collector_t>(
+          [cap](std::chrono::milliseconds timeout) { return cap->producer_binding(timeout); });
       }
 
 
@@ -1473,6 +1486,7 @@ namespace portal {
         // treats as "frame is ready." This backend was the other of the two
         // display_t implementers missing frame_timestamp.
         img_out->frame_timestamp = std::chrono::steady_clock::now();
+        img_out->provenance.host_adaptive_sync = host_feedback ? host_feedback->reader() : nullptr;
 
         stream_stats::update_capture_metadata(img_out->frame_metadata);
         if (!capture_transport_logged) {

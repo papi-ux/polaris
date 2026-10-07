@@ -227,6 +227,9 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cuda_ram_encode_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_game_mode_host.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_game_mode_repaint.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_game_mode_feedback.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_pipewire_producer_graph.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_pipewire_producer_remote.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_steam_title_process.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_user_unit_override.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_kms_enable.cpp
@@ -342,6 +345,8 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_stats.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_pyrowave_advice.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_capture_provenance.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_game_mode_adaptive_sync.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_pipewire_producer_binding.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_source_pacing.cpp
 )
 
@@ -700,6 +705,15 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_platform
         ${TEST_PLATFORM_SOURCES}
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND PIPEWIRE_FOUND AND GIO_FOUND AND GIO_UNIX_FOUND)
+        add_executable(pipewire_remote_producer fixtures/pipewire_remote_producer.cpp)
+        target_include_directories(pipewire_remote_producer SYSTEM PRIVATE ${PIPEWIRE_INCLUDE_DIRS})
+        target_link_libraries(pipewire_remote_producer PRIVATE ${PIPEWIRE_LIBRARIES})
+        target_compile_definitions(test_polaris_platform PRIVATE
+            POLARIS_PIPEWIRE_REMOTE_PRODUCER_PATH="$<TARGET_FILE:pipewire_remote_producer>")
+        add_dependencies(test_polaris_platform pipewire_remote_producer)
+    endif()
+
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND POLARIS_ENABLE_VULKAN)
         add_test(NAME polaris_vulkan_device_lifecycle
             COMMAND test_polaris_platform --gtest_filter=VulkanDeviceLifecycleTests.*)

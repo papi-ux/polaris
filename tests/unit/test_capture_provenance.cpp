@@ -72,6 +72,7 @@ namespace {
     provenance.source_time.source_steady_ns = 120'000'500;
     provenance.source_time.uncertainty_ns = 1'100;
     provenance.source_time.observed_steady_ns = 123'000'000;
+    provenance.host_adaptive_sync = std::make_shared<game_mode_adaptive_sync::store_t>();
     return provenance;
   }
 
@@ -85,6 +86,7 @@ namespace {
     EXPECT_EQ(actual.prefetched_init, expected.prefetched_init);
     EXPECT_EQ(actual.clock_proof, expected.clock_proof) << "the same immutable proof, not a copy";
     EXPECT_EQ(actual.source_time, expected.source_time) << "the per-frame receipt travels whole";
+    EXPECT_EQ(actual.host_adaptive_sync, expected.host_adaptive_sync) << "the same capture observer, never a different session's";
   }
 }  // namespace
 
