@@ -5,15 +5,15 @@ const REASONS = new Set(['watch_or_input_only', 'request_malformed', 'not_reques
 
 // Each receipt belongs to its client's opaque stream identity. A global label
 // cannot stand in for another client's timing or a previous generation.
-export function streamPacingReadouts(stats = {}) {
+export function streamPacingReadouts(stats = {}, confirmed = true) {
   if (stats.streaming !== true) return []
   return (Array.isArray(stats.clients) ? stats.clients : []).map(client => {
     const receipt = client?.vrr
-    const bound = receipt?.schema === 1 && typeof client.stream_instance_id === 'string' &&
+    const bound = confirmed && receipt?.schema === 1 && typeof client.stream_instance_id === 'string' &&
       client.stream_instance_id.length > 0 && receipt.stream_instance_id === client.stream_instance_id
     const requested = bound && typeof receipt.requested === 'string' ? (REQUESTS[receipt.requested] || 'unknown') : 'unknown'
     let effective = 'unknown'
-    if (bound && receipt.effective === true && receipt.pacing_mode === 'source_time' &&
+    if (bound && requested === 'requested' && receipt.effective === true && receipt.pacing_mode === 'source_time' &&
         receipt.host_pacing?.fresh === true && receipt.host_pacing?.state === 'source_time') effective = 'source_time'
     else if (bound && receipt.effective === false && receipt.pacing_mode === 'fixed_grid') effective = 'fixed_grid'
     else if (bound && receipt.effective === false && receipt.pacing_mode === 'source_time_pending') effective = 'pending'

@@ -635,6 +635,23 @@ describe('ConfigView save and restart', () => {
     wrapper.unmount()
   })
 
+  it('only marks the submitted values saved when the form changes during a save', async () => {
+    const wrapper = mountConfigView()
+    await flushConfigLoad()
+    wrapper.vm.config.sunshine_name = 'Submitted host'
+    let finish
+    global.fetch.mockReturnValueOnce(new Promise(resolve => { finish = resolve }))
+    const saving = wrapper.vm.save()
+    wrapper.vm.config.sunshine_name = 'Later edit'
+    finish({ status: 200, json: async () => ({ restart_required: false, configuration_revision: 'new-revision' }) })
+    await expect(saving).resolves.toBe(true)
+    await flushPromises()
+    expect(wrapper.vm.hasUnsavedChanges).toBe(true)
+    expect(badge(wrapper)).toBe('Pending save')
+    expect(wrapper.vm.pendingChanges.find(change => change.key === 'sunshine_name')).toMatchObject({ before: 'Submitted host', after: 'Later edit' })
+    wrapper.unmount()
+  })
+
   it('clears the restart-needed state only once the restart it asked for is ready', async () => {
     let callbacks
     vi.mocked(requestHostRestart).mockImplementation((value) => {

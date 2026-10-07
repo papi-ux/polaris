@@ -128,7 +128,7 @@
       </div>
     </section>
 
-    <StreamPacingReadout v-if="streamStats?.streaming" :stats="streamStats" />
+    <StreamPacingReadout v-if="streamStats?.streaming" :stats="streamStats" :connected="streamStatsConnected" :observed-at="streamStatsReceivedAt" />
 
     <SpacesDiagnostics v-if="platform === 'linux'" />
 
@@ -547,7 +547,7 @@ import StreamPacingReadout from '../components/StreamPacingReadout.vue'
 
 const { toast: showToast } = useToast()
 const i18n = inject('i18n')
-const { stats: streamStats, connected: streamStatsConnected } = useStreamStats()
+const { stats: streamStats, connected: streamStatsConnected, receivedAt: streamStatsReceivedAt } = useStreamStats()
 // Host truth for this page: the settings projection feeds the stream display
 // and provenance rows, and the AI status says whether an explanation can run.
 const projection = useConfigProjection()

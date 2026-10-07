@@ -92,7 +92,7 @@
           </div>
         </section>
 
-        <StreamPacingReadout :stats="stats || {}" />
+        <StreamPacingReadout :stats="stats || {}" :connected="streamStatsConnected" :observed-at="streamStatsReceivedAt" />
 
         <!-- Doctor: the host's own per-second diagnosis replaces the old
              Auto Quality panel, stream-path notices, and priority guidance. -->
@@ -590,7 +590,7 @@ import {
   dashboardLossPct,
 } from '../dashboard-summary'
 
-const { stats } = useStreamStats(1000)
+const { stats, connected: streamStatsConnected, receivedAt: streamStatsReceivedAt } = useStreamStats(1000)
 const { label: liveTuningLabel } = useLiveTuning()
 const { gpu, displays, audio, sessionType, readiness: systemReadiness, refresh: refreshSystemStats } = useSystemStats(3000)
 const { sessions, clearHistory, activeStartedAt } = useSessionHistory(stats)

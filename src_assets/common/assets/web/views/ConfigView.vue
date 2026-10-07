@@ -1026,6 +1026,8 @@ function save() {
   restarted.value = false
 
   let configCopy = serialize()
+  // The response confirms this submission, not edits typed while it was in flight.
+  const submittedSerialized = JSON.stringify(configCopy)
   const clearSteamGridDbApiKey = configCopy.clear_steamgriddb_api_key === true
 
   tabs.value.forEach(tab => {
@@ -1057,7 +1059,7 @@ function save() {
       // A live save does not make an earlier restart-needed save live.
       savedNeedsRestart.value = saveNeedsRestart(result) || restartPending.value
       restartPending.value = savedNeedsRestart.value
-      initialSerialized.value = JSON.stringify(serialize())
+      initialSerialized.value = submittedSerialized
       if (savedNeedsRestart.value) {
         toast(
           i18n.t('config.saved_restart_needed_note') || 'Saved. Polaris uses these settings after it restarts.',

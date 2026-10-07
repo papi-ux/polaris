@@ -40,6 +40,8 @@ describe('per-client source pacing receipts', () => {
       expect(read({ ...client, vrr }).effective).toBe('unknown')
     }
     expect(streamPacingReadouts({ streaming: false, clients: [client], last_session: { vrr: receipt } })).toEqual([])
+    expect(streamPacingReadouts({ streaming: true, clients: [client] }, false)[0].effective).toBe('unknown')
+    expect(read({ ...client, vrr: { ...receipt, requested: 'false' } }).effective).toBe('unknown')
   })
   it('keeps independent requests and named fallback evidence separate', () => {
     const fixed = { ...client, name: 'Deck', stream_instance_id: 'stream-b', vrr: { ...receipt,

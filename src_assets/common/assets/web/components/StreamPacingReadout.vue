@@ -1,8 +1,15 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { streamPacingReadouts } from '../stream-pacing-readout.js'
-const props = defineProps({ stats: { type: Object, default: () => ({}) } })
-const rows = computed(() => streamPacingReadouts(props.stats))
+const props = defineProps({ stats: { type: Object, default: () => ({}) },
+  connected: { type: Boolean, default: false }, observedAt: { type: Number, default: 0 } })
+const now = ref(Date.now())
+let timer
+onMounted(() => { timer = setInterval(() => { now.value = Date.now() }, 500) })
+onUnmounted(() => clearInterval(timer))
+const current = computed(() => props.connected && props.observedAt > 0 &&
+  now.value - props.observedAt >= 0 && now.value - props.observedAt <= 2000)
+const rows = computed(() => streamPacingReadouts(props.stats, current.value))
 </script>
 
 <template>
