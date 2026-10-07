@@ -76,6 +76,28 @@ namespace {
     }
     return false;
   }
+
+  bool grandchild_terminated(pid_t pid, std::chrono::milliseconds timeout = 3s) {
+    const auto until = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < until) {
+      if (::kill(pid, 0) != 0 && errno == ESRCH) return true;
+#ifdef __linux__
+      // The test owns/reaps its direct child, but cannot waitpid a grandchild
+      // adopted by container PID1. A retained zombie is exited, not running.
+      std::ifstream stat {"/proc/" + std::to_string(pid) + "/stat"};
+      std::string record;
+      std::getline(stat, record);
+      const auto end = record.rfind(')');
+      if (end != std::string::npos && record.size() > end + 2 &&
+          (record[end + 2] == 'Z' || record[end + 2] == 'X')) {
+        std::cout << "The killed grandchild is retained as an exited /proc state " << record[end + 2] << '\n';
+        return true;
+      }
+#endif
+      std::this_thread::sleep_for(10ms);
+    }
+    return false;
+  }
 }  // namespace
 
 TEST(OwnedChildTests, TheChildGetsExactlyItsArgvAndEnvironmentAndNoInheritedDescriptor) {
@@ -282,7 +304,10 @@ TEST(OwnedChildTests, AbortStopsTheChildsWholeGroupAndReapsOnlyIt) {
   EXPECT_FALSE(child.exit_code());
   EXPECT_EQ(child.pid(), -1);
   EXPECT_TRUE(process_gone(pid));
-  EXPECT_TRUE(process_gone(static_cast<pid_t>(std::stol(grandchild)))) << "its group went with it";
+  EXPECT_TRUE(grandchild_terminated(static_cast<pid_t>(std::stol(grandchild)))) << "its group went with it";
+  errno = 0;
+  EXPECT_EQ(::waitpid(pid, nullptr, WNOHANG), -1) << "the owned parent was already reaped";
+  EXPECT_EQ(errno, ECHILD);
   int status = 0;
   EXPECT_EQ(::waitpid(bystander, &status, WNOHANG), 0) << "the bystander is untouched and unreaped";
   ::kill(bystander, SIGKILL);

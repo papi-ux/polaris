@@ -999,6 +999,9 @@ TEST_F(LaunchDesktopSteamTest, TheAppKeyIsStrictInTheRealLoaderAndValidator) {
 }
 
 TEST_F(LaunchDesktopSteamTest, ConsoleReadinessIsResponseOnlyAndAnEditorRoundTripStoresOnlyTheSetting) {
+  // This metadata/round-trip case owns an unavailable build, independent of
+  // whether the compiled production adapter supports SteamOS on this platform.
+  unavailable_build_t unavailable;
   const auto path = directory / "prelaunch-roundtrip-apps.json";
   const std::string opted_uuid = "5A6B7C8D-9E0F-4A1B-8C2D-3E4F5A6B7C8D";
   const std::string off_uuid = "1B2C3D4E-5F6A-4B7C-8D9E-0F1A2B3C4D5E";
