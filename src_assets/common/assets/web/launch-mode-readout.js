@@ -10,6 +10,6 @@ export function launchModeReadout(mode, config = {}, options = []) {
   }[mode] || 'unknown'
   const alternative = ['headless_stream', 'desktop_display', 'windowed_stream']
     .find(id => id !== mode && available(id)) || ''
-  return { provider: provider && provider !== 'None' ? provider : '', borrowed, physical,
+  return { noProvider: provider === 'None', provider: provider && provider !== 'None' ? provider : '', borrowed, physical,
     alternative, monitorOffAlternative: mode === 'host_virtual_display' && available('desktop_takeover') }
 }

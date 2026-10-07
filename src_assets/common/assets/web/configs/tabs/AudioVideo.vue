@@ -540,7 +540,7 @@ function updateDisplayPlannerSource(event) {
               <div class="space-y-2 px-4 pb-4 text-xs leading-relaxed text-storm" data-launch-mode-impact>
                 <p v-if="mode.id === 'host_virtual_display'" data-virtual-display-provider>
                   <span class="font-medium text-silver">{{ $t('config.launch_mode_provider') }}</span>
-                  {{ modeReadout(mode.id).provider || $t('config.launch_mode_provider_unknown') }}
+                  {{ modeReadout(mode.id).provider || $t(modeReadout(mode.id).noProvider ? 'config.launch_mode_provider_none' : 'config.launch_mode_provider_unknown') }}
                 </p>
                 <p><span class="font-medium text-silver">{{ $t('config.launch_mode_screens') }}</span> {{ $t(`config.launch_mode_screens_${modeReadout(mode.id).physical}`) }}</p>
                 <p v-if="modeReadout(mode.id).monitorOffAlternative">{{ $t('config.launch_mode_monitor_off_alternative') }}</p>

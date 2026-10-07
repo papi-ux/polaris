@@ -51,6 +51,18 @@ describe('per-client source pacing receipts', () => {
     expect(rows[1]).toMatchObject({ requested: 'not_requested', effective: 'fixed_grid', reasonLabel: 'reason_not_requested' })
     expect(read({ ...client, vrr: { ...receipt, requested: true } }).requested).toBe('unknown')
   })
+  it('explains frozen host permission without guessing from current config or a different stream', () => {
+    const off = { ...receipt, host_permission: false, effective: false, pacing_mode: 'fixed_grid', fallback_reason: 'route_unreported' }
+    expect(read({ ...client, vrr: off })).toMatchObject({ effective: 'fixed_grid', reasonLabel: 'reason_host_permission_off' })
+    expect(read({ ...client, vrr: { ...off, stream_instance_id: 'old' } }).reason).toBe('')
+    expect(read({ ...client, vrr: { ...off, host_permission: undefined } }).reasonLabel).toBe('reason_route_unreported')
+    expect(read({ ...client, vrr: { ...off, fallback_reason: 'watch_or_input_only' } }).reasonLabel).toBe('reason_watch_or_input_only')
+    expect(read({ ...client, vrr: { ...receipt, host_permission: false } }).effective).toBe('unknown')
+    for (const requested of ['constructor', '__proto__', 'toString']) expect(read({ ...client, vrr: { ...receipt, requested } }).requested).toBe('unknown')
+    for (const reason of ['unsupported_codec', 'unsupported_route', 'unsupported_loop']) {
+      expect(read({ ...client, vrr: { ...off, host_permission: true, fallback_reason: reason } }).reasonLabel).toBe(`reason_${reason}`)
+    }
+  })
   it('distinguishes pending evidence and preserves unfamiliar fallback codes without guessing', () => {
     expect(read({ ...client, vrr: { ...receipt, effective: false, pacing_mode: 'source_time_pending', fallback_reason: 'source_time_unproven' } })).toMatchObject({ effective: 'pending', reasonLabel: 'reason_source_time_unproven' })
     expect(read({ ...client, vrr: { ...receipt, effective: false, pacing_mode: 'unverified', fallback_reason: 'future_reason' } })).toMatchObject({ effective: 'unknown', reason: 'future_reason', reasonLabel: 'fallback_used' })

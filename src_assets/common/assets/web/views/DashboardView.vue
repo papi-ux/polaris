@@ -1025,7 +1025,9 @@ const runtimePathNote = computed(() => {
   const reason = String(stats.value?.capture_path_reason || '').toLowerCase()
 
   if (nestedLabwcShmFallbackActive.value) {
-    return 'Nested labwc fallback is active: Polaris is capturing the windowed compositor through SHM instead of the GPU-native fast path.'
+    return stats.value?.runtime_gpu_native_override_active
+      ? 'GPU-native capture was requested, but the nested labwc compositor is using SHM/system-memory capture.'
+      : 'The nested labwc compositor is using SHM/system-memory capture. This can be a healthy stream path.'
   }
 
   if (reason === 'headless_shm_fallback' || reason === 'headless_shm_default') {
