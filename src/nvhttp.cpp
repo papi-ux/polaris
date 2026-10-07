@@ -3597,13 +3597,25 @@ namespace nvhttp {
       // The Linux-only app pin resolver does not alter other platforms' legacy display policy.
       const proc::launch_as_availability_t availability {};
 #endif
-      return build_launch_mode_contract(
+      auto contract = build_launch_mode_contract(
         app.launch_as,
         app.name,
         settings_metadata::host_virtual_display_available(),
         host_prefers_headless(),
         availability
       );
+      if (app.leave_game_mode_before_launch) {
+        // #204, only for an app that opted in: the setting, and separately whether this build can
+        // act on it. No host probe runs here; the launch checks the host.
+        const auto readiness = prelaunch::coordinator().readiness(true);
+        contract["leave_game_mode_before_launch"] = {
+          {"enabled", readiness.enabled},
+          {"adapter_implemented", readiness.adapter_implemented},
+          {"ready", readiness.ready},
+          {"reason", readiness.reason},
+        };
+      }
+      return contract;
     }
 
     nlohmann::json steam_launch_contract_for_app(const proc::ctx_t &app) {
@@ -7423,7 +7435,6 @@ namespace nvhttp {
   void launch(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
     launch_failure::clear();
-    reconcile_game_mode_host();
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -7449,7 +7460,6 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "The client is not authorized. Certificate verification failed.");
       return;
     }
-
 #ifdef __linux__
     if (handle_profile_launch(tree, request, named_cert_p, args, false)) return;
 #endif
@@ -7502,6 +7512,10 @@ namespace nvhttp {
 
       return;
     }
+    // #204 O1: the host's mode is brought in line only for a verified client with launch
+    // permission, holding the launch reservation, whose request is well formed. A refused request
+    // changes neither the host's mode nor its kept Game Mode answer.
+    reconcile_game_mode_host();
 
     if (!is_input_only) {
       // Special handling for the "terminate" app
@@ -7783,6 +7797,36 @@ namespace nvhttp {
         }
 
 #ifdef __linux__
+        // #204: an app that leaves Game Mode before its launch does it here: after the certificate,
+        // the permission, the launch reservation and the occupancy checks above, and before Launch
+        // as, the app's display semantics and the launch's own mode decision. Off by default.
+        std::optional<prelaunch::launch_scope_t> prelaunch_scope;
+        if (app_iter->leave_game_mode_before_launch && !watch_only && !launch_session->mirror_desktop) {
+          const auto prelaunch_outcome = proc::prelaunch_for_admitted_launch(
+            prelaunch::entry_e::rtsp,
+            *app_iter,
+            named_cert_p->uuid,
+            *launch_generation,
+            launch_session->resolved_profile_from_client ? launch_session->expected_stream_mode : std::string {},
+            [launch_session]() {
+              return launch_session->is_cancelled();
+            }
+          );
+          if (!prelaunch_outcome.proceed()) {
+            tree.put("root.resume", 0);
+            tree.put("root.gamesession", 0);
+            put_launch_refusal(tree, prelaunch_outcome.status, prelaunch_outcome.message);
+            return;
+          }
+          prelaunch_scope.emplace(prelaunch_outcome);
+          prelaunch_scope->set_others([](std::string &reason) {
+            return proc::prelaunch_other_sessions_now(reason);
+          });
+          // The coordinator's fresh scan is the kept answer now; the mode follows it before the
+          // launch reads it.
+          reconcile_game_mode_host();
+        }
+        prelaunch::note_stage("launch_as");
         if (const auto refusal = proc::refuse_app_launch_as_before_launch(
               *app_iter, proc::launch_selection_request_from_session(*launch_session))) {
           tree.put("root.resume", 0);
@@ -7824,6 +7868,11 @@ namespace nvhttp {
           });
         });
         launch_session_raised = err == 0;
+#ifdef __linux__
+        if (!err && prelaunch_scope) {
+          proc::proc.bind_prelaunch_transition(prelaunch_scope->commit());
+        }
+#endif
         if (err) {
           put_launch_refusal(
             tree,
@@ -7885,7 +7934,6 @@ namespace nvhttp {
   void resume(bool &host_audio, resp_https_t response, req_https_t request) {
     print_req<PolarisHTTPS>(request);
     launch_failure::clear();
-    reconcile_game_mode_host();
 
     pt::ptree tree;
     auto g = util::fail_guard([&]() {
@@ -7905,7 +7953,6 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "The client is not authorized. Certificate verification failed.");
       return;
     }
-
     if (!(named_cert_p->perm & PERM::_allow_view)) {
       BOOST_LOG(debug) << "Permission ViewApp denied for [" << named_cert_p->name << "] (" << (uint32_t)named_cert_p->perm << ")";
 
@@ -7950,6 +7997,9 @@ namespace nvhttp {
 
       return;
     }
+    // #204 O1: a resume binds the running generation and never leaves Game Mode. Its mode is
+    // brought in line only for a verified, permitted, reserved and well-formed request.
+    reconcile_game_mode_host();
 
     // Newer Moonlight clients send localAudioPlayMode on /resume too. Keep the
     // global choice unchanged until this request has passed every admission
@@ -12725,6 +12775,10 @@ namespace nvhttp {
     state->server.verify = verify_https_client;
     state->server.resource["^/launch$"]["GET"] = [state](resp_https_t response, req_https_t request) {
       launch(state->host_audio, std::move(response), std::move(request));
+    };
+    // The production /resume handler too (#204: a refused resume changes nothing on the host).
+    state->server.resource["^/resume$"]["GET"] = [state](resp_https_t response, req_https_t request) {
+      resume(state->host_audio, std::move(response), std::move(request));
     };
     state->worker = std::thread([state]() {
       try {

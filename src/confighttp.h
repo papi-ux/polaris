@@ -86,6 +86,12 @@ namespace confighttp {
     const std::function<void(unsigned short, std::function<void()>)> &ready,
     const std::function<void()> &before_apps
   );
+  // Serve the production console app list, save and launch handlers (#204 entry tests) on an owned
+  // loopback TLS listener.
+  void run_console_app_routes_for_tests(
+    const std::string &cert, const std::string &key,
+    const std::function<void(unsigned short, std::function<void()>)> &ready
+  );
 #endif
 
   /**

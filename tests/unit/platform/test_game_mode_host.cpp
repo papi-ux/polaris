@@ -7,11 +7,16 @@
 #ifdef __linux__
 
 #include <src/platform/linux/game_mode_host.h>
+#include <src/utility.h>
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -366,6 +371,118 @@ TEST(GameModeHostTests, SetupHostAdviceIsSilentOffGameModeHostsAndFollowsWhatThe
   EXPECT_NE(just_disabled.find("With headless boot off"), std::string::npos);
   EXPECT_NE(just_disabled.find("Turn it back on with:\n  sudo -H /usr/bin/polaris --setup-host --enable-headless-boot"), std::string::npos);
   EXPECT_EQ(just_disabled.find("Make it start at boot instead"), std::string::npos);
+}
+
+
+TEST(GameModeHostTests, AFreshScanIsNeverReplacedByABackgroundRefreshThatStartedBeforeIt) {
+  // #204: a launch leaving Game Mode acts on a scan taken after the switch. A refresh that read the
+  // host before the switch, and finishes after it, must not put Game Mode back.
+  gm::set_session_live_for_tests(std::nullopt);
+  std::mutex mutex;
+  std::condition_variable changed;
+  bool release = false;
+  std::atomic<bool> host_live {true};
+  std::atomic<int> background_scans {0};
+  const auto test_thread = std::this_thread::get_id();
+  gm::set_session_scan_for_tests([&]() {
+    const bool seen = host_live.load();
+    if (std::this_thread::get_id() != test_thread) {
+      ++background_scans;
+      std::unique_lock lock {mutex};
+      changed.wait(lock, [&]() { return release; });
+    }
+    return seen;
+  });
+  auto restore = util::fail_guard([&]() {
+    {
+      std::lock_guard lock {mutex};
+      release = true;
+    }
+    changed.notify_all();
+    for (int wait = 0; wait < 200 && gm::session_live_refresh_pending_for_tests(); ++wait) std::this_thread::sleep_for(5ms);
+    gm::set_session_scan_for_tests({});
+  });
+
+  ASSERT_TRUE(gm::session_live()) << "first answer: a scan on the caller's thread";
+  gm::age_session_live_answer_for_tests(3s);
+  ASSERT_TRUE(gm::session_live()) << "a kept answer, while a refresh starts in the background";
+  for (int wait = 0; wait < 400 && background_scans.load() == 0; ++wait) std::this_thread::sleep_for(5ms);
+  ASSERT_EQ(background_scans.load(), 1) << "the background refresh read the host before the switch";
+
+  host_live = false;  // the session switch
+  EXPECT_FALSE(gm::session_live_fresh());
+
+  {
+    std::lock_guard lock {mutex};
+    release = true;
+  }
+  changed.notify_all();
+  for (int wait = 0; wait < 400 && gm::session_live_refresh_pending_for_tests(); ++wait) std::this_thread::sleep_for(5ms);
+  ASSERT_FALSE(gm::session_live_refresh_pending_for_tests());
+  EXPECT_FALSE(gm::session_live()) << "the stale refresh was discarded; the fresh scan stands";
+}
+
+TEST(GameModeHostTests, OverlappingFirstScansNeverReadAMissingAnswerOrRepublishAnOvertakenOne) {
+  // #204: two callers find no kept answer and both scan. The older finishes first, while the newer
+  // is still out: it acts on its own scan, publishes nothing, and never reads the empty answer.
+  gm::set_session_live_for_tests(std::nullopt);
+  std::mutex mutex;
+  std::condition_variable changed;
+  int entered = 0;
+  bool release_first = false;
+  bool release_second = false;
+  gm::set_session_scan_for_tests([&]() {
+    std::unique_lock lock {mutex};
+    const int index = ++entered;
+    changed.notify_all();
+    changed.wait(lock, [&]() { return index == 1 ? release_first : release_second; });
+    // The first scan saw Game Mode; the second, taken after the switch, did not.
+    return index == 1;
+  });
+  std::optional<bool> first;
+  std::optional<bool> second;
+  std::thread older;
+  std::thread newer;
+  auto restore = util::fail_guard([&]() {
+    {
+      std::lock_guard lock {mutex};
+      release_first = release_second = true;
+    }
+    changed.notify_all();
+    if (older.joinable()) older.join();
+    if (newer.joinable()) newer.join();
+    gm::set_session_scan_for_tests({});
+  });
+  const auto wait_for_entries = [&](int count) {
+    std::unique_lock lock {mutex};
+    return changed.wait_for(lock, 2s, [&]() { return entered >= count; });
+  };
+
+  older = std::thread([&]() { first = gm::session_live(); });
+  ASSERT_TRUE(wait_for_entries(1));
+  newer = std::thread([&]() { second = gm::session_live(); });
+  ASSERT_TRUE(wait_for_entries(2)) << "both callers are scanning at once";
+
+  {
+    std::lock_guard lock {mutex};
+    release_first = true;
+  }
+  changed.notify_all();
+  older.join();
+  ASSERT_TRUE(first.has_value());
+  EXPECT_TRUE(*first) << "the older caller acts on its own scan";
+  EXPECT_FALSE(gm::session_live_answer_for_tests().has_value())
+    << "an overtaken scan is not published, and the newer one has not answered yet";
+
+  {
+    std::lock_guard lock {mutex};
+    release_second = true;
+  }
+  changed.notify_all();
+  newer.join();
+  ASSERT_TRUE(second.has_value());
+  EXPECT_FALSE(*second);
+  EXPECT_EQ(gm::session_live_answer_for_tests(), std::optional<bool> {false}) << "the newest scan is the kept answer";
 }
 
 #endif

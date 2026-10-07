@@ -12,8 +12,10 @@
 #include <cctype>
 #include <charconv>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <sstream>
@@ -381,8 +383,20 @@ namespace platf::game_mode_host {
     std::optional<bool> session_live_answer;
     std::chrono::steady_clock::time_point session_live_read_at;
     bool session_live_refreshing {false};  ///< a scan is out; guarded by session_live_mutex
+    /// Bumped by every caller-thread scan. A background refresh that started under an older epoch
+    /// scanned before that answer and is discarded, so it can never put back a mode the host left.
+    std::uint64_t session_live_epoch {0};
+    std::function<bool()> session_scan_for_tests;  ///< guarded by session_live_mutex
 
     bool scan_session_live() {
+      {
+        std::function<bool()> scan;
+        {
+          std::lock_guard guard {session_live_mutex};
+          scan = session_scan_for_tests;
+        }
+        if (scan) return scan();
+      }
       detection_t detection;
       probe_t live;
       live.proc_root = "/proc";
@@ -401,11 +415,17 @@ namespace platf::game_mode_host {
     const auto age = std::chrono::steady_clock::now() - session_live_read_at;
     if (!session_live_answer || age >= session_live_stale_limit) {
       // No answer yet, or one too old to act on: this caller waits for a scan.
+      const auto epoch = ++session_live_epoch;
       lock.unlock();
       const bool live = scan_session_live();
       lock.lock();
       if (session_live_override) {
         return *session_live_override;
+      }
+      if (epoch != session_live_epoch) {
+        // A newer caller-thread scan started after this one. It may not have answered yet, so this
+        // caller acts on its own scan and leaves the kept answer to the newer one.
+        return live;
       }
       session_live_answer = live;
       session_live_read_at = std::chrono::steady_clock::now();
@@ -417,8 +437,9 @@ namespace platf::game_mode_host {
     // old is fine for something that changes when a person switches modes.
     if (age >= session_live_ttl && !session_live_refreshing) {
       session_live_refreshing = true;
+      const auto started_epoch = session_live_epoch;
       try {
-        std::thread([]() {
+        std::thread([started_epoch]() {
           bool live = false;
           bool scanned = false;
           try {
@@ -427,8 +448,9 @@ namespace platf::game_mode_host {
           } catch (...) {
           }
           std::lock_guard guard {session_live_mutex};
-          if (scanned && !session_live_override) {
-            // Only a scan that happened makes the answer young again.
+          if (scanned && !session_live_override && started_epoch == session_live_epoch) {
+            // Only a scan that happened makes the answer young again, and only one no caller-thread
+            // scan overtook: a fresh scan taken across a session switch is never replaced by this one.
             session_live_answer = live;
             session_live_read_at = std::chrono::steady_clock::now();
           }
@@ -439,6 +461,47 @@ namespace platf::game_mode_host {
       }
     }
     return *session_live_answer;
+  }
+
+  bool session_live_fresh() {
+    std::unique_lock lock {session_live_mutex};
+    if (session_live_override) {
+      return *session_live_override;
+    }
+    const auto epoch = ++session_live_epoch;
+    lock.unlock();
+    const bool live = scan_session_live();
+    lock.lock();
+    if (session_live_override) {
+      return *session_live_override;
+    }
+    if (epoch == session_live_epoch) {
+      session_live_answer = live;
+      session_live_read_at = std::chrono::steady_clock::now();
+    }
+    // This caller acts on its own scan, even when another fresh scan finished after it.
+    return live;
+  }
+
+  void set_session_scan_for_tests(std::function<bool()> scan) {
+    std::lock_guard lock {session_live_mutex};
+    session_scan_for_tests = std::move(scan);
+    session_live_answer.reset();
+  }
+
+  void age_session_live_answer_for_tests(std::chrono::steady_clock::duration age) {
+    std::lock_guard lock {session_live_mutex};
+    session_live_read_at -= age;
+  }
+
+  std::optional<bool> session_live_answer_for_tests() {
+    std::lock_guard lock {session_live_mutex};
+    return session_live_answer;
+  }
+
+  bool session_live_refresh_pending_for_tests() {
+    std::lock_guard lock {session_live_mutex};
+    return session_live_refreshing;
   }
 
   bool streams_session_screen(

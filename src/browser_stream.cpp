@@ -572,6 +572,41 @@ namespace browser_stream {
 
     bool launch_isolated_app(const proc::ctx_t &app, std::string &error_out) {
       launch_failure::clear();
+      // #204, opt-in only: hold the launch reservation from here to execute, leave Game Mode if
+      // this app asks for it, and bring the mode in line before Launch as reads it. An app with
+      // the setting off launches exactly as before.
+      bool prelaunch_reserved = app.leave_game_mode_before_launch;
+      // Owned only once this request's own admission succeeded: a refused admission never finishes
+      // a reservation that belongs to another request.
+      bool owns_prelaunch_reservation = false;
+      auto release_prelaunch_reservation = util::fail_guard([&owns_prelaunch_reservation]() {
+        if (owns_prelaunch_reservation) proc::proc.finish_session_launch();
+      });
+      std::optional<prelaunch::launch_scope_t> prelaunch_scope;
+      if (prelaunch_reserved) {
+        // The same generation-checked admission /launch uses: never queued behind, or taken under,
+        // a newer generation, a stop or a pending launch.
+        const auto lifecycle_generation = proc::proc.capture_session_launch_generation();
+        if (!lifecycle_generation || !proc::proc.try_begin_session_launch(*lifecycle_generation)) {
+          launch_failure::refuse(409, "prelaunch_launch_busy", "The active session is stopping or changing.",
+            "Wait for it to finish, then start Browser Stream again.");
+          error_out = launch_failure::status_message(*launch_failure::pending);
+          return false;
+        }
+        owns_prelaunch_reservation = true;
+        const auto outcome = proc::prelaunch_for_admitted_launch(
+          prelaunch::entry_e::browser, app, "browser_stream", *lifecycle_generation, {}, {});
+        if (!outcome.proceed()) {
+          error_out = launch_failure::pending ? launch_failure::status_message(*launch_failure::pending) : outcome.message;
+          return false;
+        }
+        prelaunch_scope.emplace(outcome);
+        prelaunch_scope->set_others([](std::string &reason) {
+          return proc::prelaunch_other_sessions_now(reason);
+        });
+        nvhttp::reconcile_game_mode_host();
+      }
+      prelaunch::note_stage("launch_as");
       const auto pin = stream_display_policy::resolve_app_launch_as(app.launch_as, {});
       if (pin.verdict == stream_display_policy::app_launch_as_t::verdict_e::not_a_launch_mode &&
           proc::refuse_app_launch_as_before_launch(app, {})) {
@@ -615,7 +650,16 @@ namespace browser_stream {
         error_out = "Browser Stream could not build a launch session";
         return false;
       }
-      const auto err = proc::proc.execute(app, launch_session);
+      const auto err = prelaunch_reserved ? proc::proc.execute_admitted(app, launch_session) : proc::proc.execute(app, launch_session);
+      if (prelaunch_reserved) {
+        // Bound to the session while the reservation still holds, so a stop during the settle below
+        // names this generation; it restores nothing until the change is committed.
+        if (!err && prelaunch_scope) proc::proc.bind_prelaunch_transition(prelaunch_scope->owned_generation());
+        // Released before the settle: its failure path stops the session, which needs the gate.
+        prelaunch_reserved = false;
+        owns_prelaunch_reservation = false;
+        proc::proc.finish_session_launch();
+      }
       if (err) {
         error_out = err == 503 ?
           "Browser Stream could not initialize the isolated capture runtime." :
@@ -627,6 +671,7 @@ namespace browser_stream {
       // Allow a short settle: nested gamescope / cage may take a moment.
       for (int i = 0; i < 25; ++i) {
         if (private_runtime_active()) {
+          if (prelaunch_scope) (void) prelaunch_scope->commit();
           return true;
         }
         std::this_thread::sleep_for(100ms);
@@ -1654,6 +1699,10 @@ namespace browser_stream {
 #else
     return false;
 #endif
+  }
+
+  bool capture_active() {
+    return video_capture_active();
   }
 
   session_token_t issue_session_token(std::string_view remote_address, std::string_view app_uuid, bool owns_app) {
