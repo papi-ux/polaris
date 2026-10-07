@@ -227,6 +227,7 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_cuda_ram_encode_device.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_game_mode_host.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_game_mode_repaint.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_game_mode_feedback.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_steam_title_process.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_user_unit_override.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_kms_enable.cpp
@@ -342,6 +343,8 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_stats.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_pyrowave_advice.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_capture_provenance.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_game_mode_adaptive_sync.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_pipewire_producer_binding.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_source_pacing.cpp
 )
 

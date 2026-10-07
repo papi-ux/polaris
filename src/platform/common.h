@@ -33,6 +33,7 @@
 #include "src/video_colorspace.h"
 #include "src/vrr_session_policy.h"
 #include "src/vrr_source_time_receipt.h"
+#include "src/game_mode_adaptive_sync.h"
 
 extern "C" {
 #include <moonlight-common-c/src/Limelight.h>
@@ -561,6 +562,8 @@ namespace platf {
      * is never live authority and never a substitute for the frame's pacing timestamp.
      */
     vrr_clock::source_time_receipt_t source_time;
+    /// This capture's read-only observer, retained by accepted images and retired on capture exit.
+    std::shared_ptr<const game_mode_adaptive_sync::store_t> host_adaptive_sync;
   };
 
   struct img_t: std::enable_shared_from_this<img_t> {

@@ -749,6 +749,40 @@ namespace stream_stats {
 
     // This readout is accepted-image evidence, not a pacing decision. Public records carry opaque
     // capture/stream identities; absolute timestamps and process/namespace identifiers stay absent.
+    nlohmann::json host_adaptive_sync_json(const platf::image_provenance_t &image) {
+      if (!image.host_adaptive_sync) return nullptr;
+      const auto record = image.host_adaptive_sync->read();
+      const auto now = game_mode_adaptive_sync::clock_t::now();
+      const auto evaluated = game_mode_adaptive_sync::evaluate(record, now);
+      // Every reason is a fixed diagnostic code. Never export arbitrary producer/credential text.
+      static constexpr std::array reasons {
+        "producer_unbound", "observer_disabled", "capture_stopping", "capture_not_running",
+        "source_not_linked", "source_ambiguous", "source_unattributed", "producer_credentials_absent",
+        "producer_uid_mismatch", "producer_restarted", "producer_exe_unreadable", "pid_namespace_mismatch",
+        "producer_client_not_visible", "pipewire_graph_changed", "pipewire_read_timeout",
+        "pipewire_version_unverified", "root_display_not_found", "root_display_ambiguous",
+        "x_connect_failed_or_denied", "x_read_timeout", "x_snapshot_torn", "x_reader_unavailable",
+        "property_absent", "property_malformed", "property_out_of_domain", "contradictory_properties",
+        "connector_unbound", "property_read_bracketed", "observer_read_failed"
+      };
+      const auto found = std::find(reasons.begin(), reasons.end(), record.attempt.reason);
+      const char *reason = found == reasons.end() ? "producer_unbound" : *found;
+      nlohmann::json last = nullptr;
+      if (evaluated.last_state) {
+        last = {{"state", game_mode_adaptive_sync::name(*evaluated.last_state)},
+          {"age_ms", *evaluated.age_ms}, {"generation_unchanged", evaluated.same_generation},
+          {"provenance", "property_read_bracketed"}, {"current_state_confirmed", false},
+          {"capable", record.last_known->properties.capable.value},
+          {"feedback", record.last_known->properties.feedback.value}};
+      }
+      return {{"schema", 1}, {"scope", "host_adaptive_sync_observation"},
+        {"current_state", evaluated.current_state}, {"current_reason", evaluated.current_reason},
+        {"observation_reason", reason}, {"ended", record.ended}, {"last_known", std::move(last)},
+        {"range_status", evaluated.range_status}, {"advice", evaluated.advice},
+        {"connector", "unbound"}, {"property_writer", "unattested"},
+        {"root_selection", "root_selected_by_property"}, {"pid_reuse", "unexcluded"}};
+    }
+
     nlohmann::json accepted_capture_json(const capture_timing_t &timing, nlohmann::json identity) {
       const auto &image = timing.last_accepted;
       const auto pacing = image.route.pacing == platf::capture_pacing_e::source_driven ? "source_driven" :
@@ -872,6 +906,7 @@ namespace stream_stats {
       if (ended.capture_timing) {
         session["capture_timing"] = accepted_capture_json(*ended.capture_timing,
           {{"stream_instance_id", stream_instance_id(ended.session_generation)}});
+        session["host_adaptive_sync"] = host_adaptive_sync_json(ended.capture_timing->last_accepted);
       }
       if (const auto &stop = ended.app_stop; !stop.path.empty()) {
         nlohmann::json app_stop {
@@ -1165,6 +1200,7 @@ namespace stream_stats {
         if (c.capture_timing) {
           cj["capture_timing"] = accepted_capture_json(*c.capture_timing,
             {{"stream_instance_id", stream_instance_id(c.session_generation)}});
+          cj["host_adaptive_sync"] = host_adaptive_sync_json(c.capture_timing->last_accepted);
         }
       }
       if (!c.capture_backend.opened.empty()) {
@@ -3977,6 +4013,9 @@ namespace stream_stats {
       });
     if (client == current_stats.clients.end()) return false;
     client->capture_backend = backend;
+    // An observer belongs to the accepted source, never to the replacement display that has not
+    // delivered an image yet. Other consumers of the old capture keep their own readers.
+    if (client->capture_timing) client->capture_timing->last_accepted.host_adaptive_sync.reset();
     // A publication names the display a session now encodes from. Frames an earlier display
     // delivered say nothing about this one, and neither does the PyroWave route an earlier
     // display's encoder took: the encoder for this one has encoded nothing yet. Its route reads
@@ -4054,6 +4093,15 @@ namespace stream_stats {
     j["last_source_sequence"] = timing.last_accepted.source_sequence;
     j["last_presentation_ns"] = timing.last_accepted.presentation.ns ?
       nlohmann::json(*timing.last_accepted.presentation.ns) : nlohmann::json(nullptr);
+    j["host_adaptive_sync"] = host_adaptive_sync_json(timing.last_accepted);
+    if (timing.last_accepted.host_adaptive_sync) {
+      const auto record = timing.last_accepted.host_adaptive_sync->read();
+      const auto &version = record.last_known ? record.last_known->version : record.attempt.version;
+      j["host_adaptive_sync"]["version_provenance"] = {
+        {"producer_exe", version.producer_exe}, {"os_release", version.os_release},
+        {"package", version.package ? nlohmann::json(*version.package) : nlohmann::json(nullptr)},
+        {"operator_reports", version.operator_reports}, {"range_status", "unmapped"}};
+    }
     return j;
   }
 
@@ -4141,7 +4189,9 @@ namespace stream_stats {
         return candidate.session_generation == session_generation;
       });
     if (client == stats.clients.end() || !client->vrr) return nullptr;
-    return vrr_record_json(*client->vrr, {{"session_generation", session_generation}}, client->vrr_pacing);
+    auto result = vrr_record_json(*client->vrr, {{"session_generation", session_generation}}, client->vrr_pacing);
+    result["host_adaptive_sync"] = client->capture_timing ? host_adaptive_sync_json(client->capture_timing->last_accepted) : nlohmann::json(nullptr);
+    return result;
   }
 
   bool source_pacing_evidence_unavailable(const stats_t &stats, std::uint64_t session_generation) {
