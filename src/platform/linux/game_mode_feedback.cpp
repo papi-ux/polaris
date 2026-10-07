@@ -273,6 +273,8 @@ namespace platf::game_mode_feedback {
       value.route_bound = false;
       value.generation_checked = false;
       value.reason = "producer_restarted";
+    } else {
+      value.generation_checked_at = game_mode_adaptive_sync::steady_clock_t::now();
     }
     // The socket and root-ID property are observed facts. Property writer and PID-reuse ancestry
     // remain unattested; neither a physical connector nor independently fresh VRR state is known.

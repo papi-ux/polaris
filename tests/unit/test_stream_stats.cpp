@@ -11604,6 +11604,7 @@ namespace {
     value.version.producer_exe = "/private/user/fixture/gamescope";
     value.version.os_release = {{"ID", "steamos"}, {"BUILD_ID", "fixture-build"}};
     value.observed_at = std::chrono::steady_clock::now();
+    value.generation_checked_at = value.observed_at;
     return value;
   }
 }

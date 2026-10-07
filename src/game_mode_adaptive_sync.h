@@ -62,6 +62,7 @@ namespace game_mode_adaptive_sync {
     version_t version;
     snapshot_t properties;
     steady_clock_t::time_point observed_at {};
+    std::optional<steady_clock_t::time_point> generation_checked_at;
   };
 
   enum class last_state_e { active, inactive, inactive_unsupported };
@@ -121,8 +122,10 @@ namespace game_mode_adaptive_sync {
                         last.properties.capable.value == 0 ? last_state_e::inactive_unsupported : last_state_e::inactive;
     result.age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last.observed_at).count();
     result.same_generation = !record.ended && record.attempt.generation_checked && record.attempt.route_bound &&
+                             record.attempt.generation_checked_at && *record.attempt.generation_checked_at <= now &&
                              record.attempt.generation == last.generation;
-    if (symptom.freeze && symptom.onset <= now && result.same_generation && last.amdgpu && last.version.captured() &&
+    if (symptom.freeze && symptom.onset > steady_clock_t::time_point {} && symptom.onset <= now && result.same_generation &&
+        *record.attempt.generation_checked_at >= symptom.onset && last.amdgpu && last.version.captured() &&
         result.last_state == last_state_e::active) {
       // A read before onset or within the freeze window is a correlation, never a current-state
       // confirmation. The version range remains unmapped, including operator fix claims.

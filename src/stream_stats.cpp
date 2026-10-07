@@ -749,9 +749,7 @@ namespace stream_stats {
 
     // This readout is accepted-image evidence, not a pacing decision. Public records carry opaque
     // capture/stream identities; absolute timestamps and process/namespace identifiers stay absent.
-    nlohmann::json host_adaptive_sync_json(const platf::image_provenance_t &image) {
-      if (!image.host_adaptive_sync) return nullptr;
-      const auto record = image.host_adaptive_sync->read();
+    nlohmann::json host_adaptive_sync_record_json(const game_mode_adaptive_sync::record_t &record) {
       const auto now = game_mode_adaptive_sync::steady_clock_t::now();
       const auto evaluated = game_mode_adaptive_sync::evaluate(record, now);
       // Every reason is a fixed diagnostic code. Never export arbitrary producer/credential text.
@@ -784,6 +782,10 @@ namespace stream_stats {
         {"range_status", evaluated.range_status}, {"advice", evaluated.advice},
         {"connector", "unbound"}, {"property_writer", "unattested"},
         {"root_selection", "root_selected_by_property"}, {"pid_reuse", "unexcluded"}};
+    }
+
+    nlohmann::json host_adaptive_sync_json(const platf::image_provenance_t &image) {
+      return image.host_adaptive_sync ? host_adaptive_sync_record_json(image.host_adaptive_sync->read()) : nlohmann::json(nullptr);
     }
 
     nlohmann::json accepted_capture_json(const capture_timing_t &timing, nlohmann::json identity) {
@@ -4103,6 +4105,7 @@ namespace stream_stats {
     j["host_adaptive_sync"] = host_adaptive_sync_json(timing.last_accepted);
     if (timing.last_accepted.host_adaptive_sync) {
       const auto record = timing.last_accepted.host_adaptive_sync->read();
+      j["host_adaptive_sync"] = host_adaptive_sync_record_json(record);
       const auto &version = record.last_known ? record.last_known->version : record.attempt.version;
       j["host_adaptive_sync"]["version_provenance"] = {
         {"producer_exe", version.producer_exe}, {"os_release", version.os_release},

@@ -13,6 +13,7 @@ namespace {
     value.version.producer_exe = "/usr/bin/gamescope";
     value.version.os_release = {{"ID", "steamos"}, {"BUILD_ID", "fixture-build"}};
     value.observed_at = steady_clock_t::time_point {1s};
+    value.generation_checked_at = steady_clock_t::time_point {3s};
     return value;
   }
   evaluation_t freeze_result(const store_t &store) {
@@ -41,6 +42,12 @@ TEST(GameModeAdaptiveSyncTests, GMA2ProducerRestartRetainsHistoryWithoutCorrelat
   EXPECT_EQ(result.last_state, last_state_e::active);
   EXPECT_FALSE(result.same_generation);
   EXPECT_STREQ(result.advice, "generic_freeze");
+}
+
+TEST(GameModeAdaptiveSyncTests, GenerationCheckBeforeSymptomOnsetCannotProveItStayedUnchangedUntilTheFreeze) {
+  store_t store; auto value = active();
+  value.generation_checked_at = steady_clock_t::time_point {1s}; store.publish(value);
+  EXPECT_STREQ(freeze_result(store).advice, "generic_freeze");
 }
 
 TEST(GameModeAdaptiveSyncTests, GMA3ObservationDuringFreezeIsStillOnlyACorrelation) {
