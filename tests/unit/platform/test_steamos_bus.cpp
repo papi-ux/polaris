@@ -862,6 +862,29 @@ TEST(SteamosBusTests, ALeaveIsProvedFromTheRecordsAndAPurposefulEndRestoresANewG
   EXPECT_EQ(snapshot.game_mode.active_state, "active");
 }
 
+TEST(SteamosBusTests, APurposefulEndRechecksTheCurrentStopClosureBeforeAnyReturn) {
+  rig_t rig;
+  const auto outcome = rig.coordinator->run(launch_request());
+  ASSERT_TRUE(outcome.proceed()) << outcome.code << ": " << outcome.message;
+  rig.coordinator->commit(outcome.transition_generation);
+  const auto commands = rig.world.command_lines();
+  ASSERT_EQ(commands.size(), 2u);
+  // The session still belongs to this launch, but a dependency added during
+  // the stream makes the next graphical-session stop also end Polaris.
+  rig.world.fake->edit([](host_script_t &s) {
+    s.target().consists_of.push_back("session-helper.service");
+    s.units["session-helper.service"].propagates_stop_to = {"polaris.service"};
+  });
+  ASSERT_EQ(rig.coordinator->on_session_end(outcome.transition_generation, true, false,
+    [](std::string &) { return false; }), restore_e::owned);
+  rig.coordinator->wait_for_restore();
+  const auto receipt = rig.coordinator->receipt();
+  EXPECT_EQ(receipt.restore, restore_e::refused) << receipt.restore_reason;
+  EXPECT_NE(receipt.restore_reason.find("survive"), std::string::npos);
+  EXPECT_EQ(rig.world.command_lines(), commands) << "a stale launch-time survival proof must not submit a return";
+  EXPECT_FALSE(rig.coordinator->restore_pending());
+}
+
 TEST(SteamosBusTests, AnEarlyExitZeroWhileTheOldSessionPersistsIsNeverReadyAndNeverRolledBack) {
   rig_t rig;
   rig.world.install_command("exit 0\n");
@@ -1244,6 +1267,7 @@ TEST(SteamosBusTests, RegisteredCasesAreFrozen) {
     "TheManagerMustBeThisAccountsUnitRunningThePackagedExecutable",
     "TheAdapterRunsExactlyTheFixedVerbWithOnlyTheAccountsBus",
     "ALeaveIsProvedFromTheRecordsAndAPurposefulEndRestoresANewGameModeOutsideLocks",
+    "APurposefulEndRechecksTheCurrentStopClosureBeforeAnyReturn",
     "AnEarlyExitZeroWhileTheOldSessionPersistsIsNeverReadyAndNeverRolledBack",
     "AnAbortAfterTheRequestWasDeliveredIsOutcomeUnknownAndNotRolledBack",
     "ACancelledSwitchStopsOnlyItsOwnChildAndIsOutcomeUnknown",

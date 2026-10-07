@@ -565,6 +565,10 @@ TEST(PrelaunchTransitionTests, OnlyAPurposefulEndOfTheCommittedGenerationRestore
     {"a different desktop session", true, false, false, [](auto &h) { h.session = identity("5", prelaunch::mode_e::desktop, 'd', 201, 9100); }, restore_e::refused},
     {"a restarted desktop leader with a reused pid", true, false, false, [](auto &h) { h.session->leader_start_ticks = 9999; }, restore_e::refused},
     {"a restarted graphical target", true, false, false, [](auto &h) { h.session->target_invocation = std::string(32, 'e'); }, restore_e::refused},
+    {"the current stop would now reach Polaris", true, false, false, [](auto &h) {
+       h.service = prelaunch::verdict_t::fail("prelaunch_service_not_independent", "new stop dependency reaches Polaris");
+     }, restore_e::refused},
+    {"headless boot no longer ready", true, false, false, [](auto &h) { h.independent = false; }, restore_e::refused},
     {"the host's sessions cannot be read", true, false, false, [](auto &h) {
        h.read_failure = prelaunch::verdict_t::fail("prelaunch_session_read_timeout", "stalled");
      }, restore_e::refused},

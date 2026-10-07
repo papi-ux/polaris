@@ -567,7 +567,7 @@ namespace prelaunch {
       reason = "a game is open on the host";
       return restore_e::refused;
     }
-    const auto seen = host_.observe(nullptr, wait);
+    const auto seen = host_.observe(nullptr, wait, true);
     if (!seen.read.ok()) {
       reason = "the host's session could not be read: " + seen.read.reason;
       return restore_e::refused;
@@ -578,6 +578,14 @@ namespace prelaunch {
     }
     if (!seen.session || *seen.session != post) {
       reason = "the desktop session is not the one this launch opened";
+      return restore_e::refused;
+    }
+    if (!seen.service.ok()) {
+      reason = "Polaris would not survive returning to Game Mode: " + seen.service.reason;
+      return restore_e::refused;
+    }
+    if (std::string why; !host_.service_independent(why)) {
+      reason = "Polaris would not survive returning to Game Mode: " + why;
       return restore_e::refused;
     }
     if (!adapter_.implemented()) {
