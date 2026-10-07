@@ -1071,9 +1071,11 @@ TEST(StreamVrrAdmissionTests, SourceRelativeHealthDoesNotBorrowHostFixedFpsButKe
   auto health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control");
   EXPECT_EQ(health["issues"].dump().find("frame_pacing"),std::string::npos);
   EXPECT_EQ(health["issues"].dump().find("host_render_limited"),std::string::npos);
+  EXPECT_FALSE(health.contains("safe_target_fps"));
   stats.frame_jitter_ms = 3;
   health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control");
   EXPECT_FALSE(health["issues"].empty()) << "measured handoff jitter stays visible";
+  EXPECT_FALSE(health.contains("safe_target_fps")) << "measured source jitter does not prove a fixed-grid FPS shortfall";
   stats.video_policy_cadence_available = false;
   health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control");
   EXPECT_EQ(health["issues"].dump().find("frame_pacing"),std::string::npos);
@@ -1134,6 +1136,7 @@ TEST(StreamVrrAdmissionTests, SourceEncodePressureUsesMeasuredWorkRatherThanTheN
   EXPECT_EQ(health["doctor"]["status"], "ok");
   EXPECT_NE(health["doctor"]["primary_issue"], "encoder_load");
   EXPECT_EQ(health["safe_bitrate_kbps"], stats.bitrate_kbps);
+  EXPECT_FALSE(health.contains("safe_target_fps"));
 
   stats.encode_time_ms = 12;
   health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control");
@@ -1148,8 +1151,9 @@ TEST(StreamVrrAdmissionTests, SourceEncodePressureUsesMeasuredWorkRatherThanTheN
   EXPECT_EQ(health["primary_issue"], "encoder_load") << "a legacy requester cannot borrow source pressure thresholds";
   EXPECT_EQ(health["doctor"]["traffic_light"], "red");
 
-  // The same encode work retains the existing fixed-rate threshold when source pacing is off.
-  stats.video_policy_source_time = false;
+  // Isolate the existing fixed-rate encoder threshold from the independent legacy FPS-shortfall
+  // priority. The same 9ms work is pressure at 120 FPS with source pacing off.
+  stats = stable_gpu_native_stats(120,120);
   stats.encode_time_ms = 9;
   health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control");
   EXPECT_EQ(health["primary_issue"], "encoder_load");

@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -20,8 +21,10 @@ namespace {
     switchable_lease_t(): compositor_lease_t({4242, 1000, 77}) {}
 
     mutable std::atomic<bool> is_current {true};
+    std::function<void()> on_check;
 
     bool current() const override {
+      if (on_check) on_check();
       return is_current.load();
     }
   };
@@ -84,13 +87,35 @@ TEST(VrrEpochAuthorityTests, OnlyTheEpochHoldsTheLease) {
   const auto before = epoch.lease.use_count();
   {
     auto publication = epoch.publish();
-    EXPECT_EQ(epoch.lease.use_count(), before + 1) << "the registry holds no strong reference";
+    EXPECT_EQ(epoch.lease.use_count(), before) << "the capture epoch's existing snapshot is the only owner";
     for (int check = 0; check < 3; ++check) {
       (void) vrr_clock::check_epoch_authority(epoch.epoch_id, 5, epoch.proof.get());
     }
-    EXPECT_EQ(epoch.lease.use_count(), before + 1) << "a check holds it only while checking";
+    EXPECT_EQ(epoch.lease.use_count(), before) << "a check holds it only while checking";
   }
   EXPECT_EQ(epoch.lease.use_count(), before);
+}
+
+TEST(VrrEpochAuthorityTests, AnAuthorityCannotRetainOrReplaceAnExpiredEpochLease) {
+  epoch_fixture_t epoch {unique_epoch(), 5};
+  auto publication = epoch.publish();
+  const std::weak_ptr<switchable_lease_t> original = epoch.lease;
+  epoch.lease.reset();
+  EXPECT_TRUE(original.expired()) << "publication must not prolong the original snapshot";
+  EXPECT_EQ(vrr_clock::check_epoch_authority(epoch.epoch_id, 5, epoch.proof.get()), authority_e::lease_not_current);
+  epoch.lease = std::make_shared<switchable_lease_t>();
+  EXPECT_TRUE(epoch.lease->current());
+  EXPECT_EQ(vrr_clock::check_epoch_authority(epoch.epoch_id, 5, epoch.proof.get()), authority_e::lease_not_current)
+    << "a later current lease cannot replace the original one";
+}
+
+TEST(VrrEpochAuthorityTests, WithdrawalDuringTheLeaseCheckStillRefusesTheFrame) {
+  const epoch_fixture_t epoch {unique_epoch(), 5};
+  auto publication = epoch.publish();
+  epoch.lease->on_check = [&] { publication.reset(); };
+  EXPECT_EQ(vrr_clock::check_epoch_authority(epoch.epoch_id, 5, epoch.proof.get()), authority_e::closed);
+  EXPECT_EQ(vrr_clock::check_epoch_authority(epoch.epoch_id, 5, epoch.proof.get()), authority_e::no_epoch);
+  EXPECT_EQ(epoch.lease.use_count(), 1);
 }
 
 TEST(VrrEpochAuthorityTests, ChecksRacingWithdrawalNeverSeeAClosedEpochAsCurrent) {

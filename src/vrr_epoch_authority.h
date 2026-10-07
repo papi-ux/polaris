@@ -7,8 +7,9 @@
  * open, of the consumer's own generation, with the very proof the frame carries, under the very
  * lease that proof was collected against, and with that lease still current.
  *
- * The epoch owns its authority exclusively. The registry holds only weak references, and nothing
- * else (images, receipts, proofs, statistics) ever holds the authority or its lease. A check never
+ * The epoch owns its authority and its single lease snapshot. The registry holds only weak
+ * authority references, and the authority refers weakly to that original lease. Nothing else
+ * (images, receipts, proofs, statistics) ever retains the lease. A check never
  * asks a display or runtime for its latest lease: a reopened display or relaunched compositor
  * cannot stand in for the generation a frame came from.
  */
@@ -34,7 +35,7 @@ namespace vrr_clock {
     epoch_authority_t(std::uint64_t epoch_id,
                       std::uint64_t capture_generation_id,
                       std::shared_ptr<const proof_t> proof,
-                      std::shared_ptr<const compositor_lease_t> lease):
+                      std::weak_ptr<const compositor_lease_t> lease):
         epoch_id {epoch_id},
         capture_generation_id {capture_generation_id},
         proof {std::move(proof)},
@@ -45,8 +46,8 @@ namespace vrr_clock {
     const std::uint64_t capture_generation_id;
     /// Held so the proof's address cannot be reused while this authority exists.
     const std::shared_ptr<const proof_t> proof;
-    /// The exact snapshot the proof was collected against.
-    const std::shared_ptr<const compositor_lease_t> lease;
+    /// The exact snapshot the proof was collected against, owned by the capture epoch alone.
+    const std::weak_ptr<const compositor_lease_t> lease;
     /// Cleared before the owning epoch is replaced or destroyed.
     std::atomic<bool> open {true};
   };
@@ -172,7 +173,10 @@ namespace vrr_clock {
     if (!authority->open.load()) return authority_e::closed;
     if (authority->capture_generation_id != capture_generation_id) return authority_e::generation_mismatch;
     if (!frame_proof || authority->proof.get() != frame_proof) return authority_e::proof_mismatch;
-    if (!authority->lease || !authority->lease->current()) return authority_e::lease_not_current;
+    // Retain the original lease only for this check. An authority retained by a racing checker
+    // cannot prolong the epoch's lease lifetime or adopt a replacement display's lease.
+    const auto lease = authority->lease.lock();
+    if (!lease || !lease->current()) return authority_e::lease_not_current;
     // Closed while the lease was being checked: still refused.
     return authority->open.load() ? authority_e::current : authority_e::closed;
   }

@@ -2832,7 +2832,10 @@ namespace nvhttp {
         concern_count > 0,
         active_codec_family == "pyrowave"
       );
-      const double safe_target_fps =
+      // Source cadence is not a miss of the negotiated fixed grid. The legacy recommender also
+      // derives shortfall from average FPS internally, even when its pacing_risk argument is false.
+      // Pending/stale cadence cannot authorize a fixed-FPS recommendation either.
+      const double safe_target_fps = source_time_policy || cadence_unavailable ? 0.0 :
         ai_optimizer::derive_safe_target_fps(
           target_fps,
           stats.fps,
