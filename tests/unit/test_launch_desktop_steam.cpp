@@ -26,6 +26,7 @@
 #include <boost/property_tree/xml_parser.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -33,6 +34,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(__linux__)
@@ -475,27 +477,43 @@ namespace {
     return app;
   }
 
-  /// The Game Mode answer this process reads, moved by the stand-in adapter.
+  prelaunch::session_identity_t stand_in_session(std::string id, prelaunch::mode_e mode, char generation) {
+    prelaunch::session_identity_t session;
+    session.boot_id = "6c1b5f3e-2a4d-4c8e-9f10-0123456789ab";
+    session.logind_id = std::move(id);
+    session.logind_started = 5000;
+    session.uid = 1000;
+    session.leader_pid = 100;
+    session.leader_start_ticks = 5000;
+    session.target_invocation = std::string(32, generation);
+    session.mode = mode;
+    return session;
+  }
+
+  /// The Game Mode answer this process reads, moved by the stand-in adapter, and session records
+  /// that follow it: one Game Mode session, then (unless held back) one new desktop session.
   class session_answer_host_t final: public prelaunch::host_t {
   public:
     bool desktop_appears = true;
     std::function<void()> on_scan;
     std::atomic<int> scans {0};
 
-    bool game_mode_live_fresh() override {
+    prelaunch::observation_t observe(const prelaunch::session_identity_t *since, const prelaunch::wait_t &, bool) override {
       ++scans;
       if (on_scan) on_scan();
-      return platf::game_mode_host::session_live_fresh();
-    }
-
-    std::optional<prelaunch::session_identity_t> game_mode_session() override {
-      if (!platf::game_mode_host::session_live_fresh()) return std::nullopt;
-      return prelaunch::session_identity_t {100, 5000, "session-1.scope"};
-    }
-
-    std::optional<prelaunch::session_identity_t> desktop_session() override {
-      if (!desktop_appears || platf::game_mode_host::session_live_fresh()) return std::nullopt;
-      return prelaunch::session_identity_t {200, 9000, "session-2.scope"};
+      prelaunch::observation_t out;
+      const bool live = platf::game_mode_host::session_live_fresh();
+      out.game_mode = live ? prelaunch::steamos::game_mode_e::active : prelaunch::steamos::game_mode_e::inactive;
+      if (live) {
+        out.session = stand_in_session("1", prelaunch::mode_e::game, 'a');
+      } else if (desktop_appears) {
+        out.session = stand_in_session("2", prelaunch::mode_e::desktop, 'b');
+      } else {
+        out.bind = prelaunch::verdict_t::fail("prelaunch_session_identity_unavailable", "no desktop yet");
+      }
+      out.retired = since && (!out.session || (out.session->logind_id != since->logind_id &&
+                                               out.session->target_invocation != since->target_invocation));
+      return out;
     }
 
     bool local_title_running() override {
@@ -516,12 +534,12 @@ namespace {
       return true;
     }
 
-    std::string unavailable_reason() const override {
-      return {};
-    }
-
     bool command_present() const override {
       return true;
+    }
+
+    prelaunch::verdict_t support(const prelaunch::wait_t &) override {
+      return prelaunch::verdict_t::pass();
     }
 
     bool start(prelaunch::direction_e to) override {
@@ -548,6 +566,22 @@ namespace {
 
     void sleep_for(std::chrono::milliseconds duration) override {
       at += duration;
+    }
+  };
+
+  /// A build without a session switch, whatever this test binary was built with: the unavailable
+  /// adapter, over a stand-in host, until the test's stage log resets the seams.
+  struct unavailable_build_t {
+    session_answer_host_t host;
+    prelaunch::unavailable_adapter_t adapter {"/nonexistent/polaris-test/steamosctl"};
+    instant_clock_t clock;
+
+    unavailable_build_t() {
+      prelaunch::set_dependencies_for_tests(&host, &adapter, &clock);
+    }
+
+    ~unavailable_build_t() {
+      prelaunch::set_dependencies_for_tests(nullptr, nullptr, nullptr);
     }
   };
 
@@ -631,6 +665,7 @@ namespace {
 
 TEST_F(LaunchDesktopSteamTest, OptedInLaunchOnAGameModeHostIsRefusedByTheUnavailableAdapterBeforeAnythingElse) {
   stage_log_t log;
+  unavailable_build_t build;
   pair_moonlight(std::nullopt);
   use_apps({opted_in(steam_game()), desktop(), pinned_private()});
   platf::game_mode_host::set_session_live_for_tests(true);
@@ -796,6 +831,7 @@ TEST_F(LaunchDesktopSteamTest, JoiningTheRunningOptedInAppNeverTransitions) {
 
 TEST_F(LaunchDesktopSteamTest, BrowserStreamRefusesAnOptedInPinBeforeJudgingItForGameMode) {
   stage_log_t log;
+  unavailable_build_t build;
   use_apps({steam_game(), desktop(), pinned_private()});
   platf::game_mode_host::set_session_live_for_tests(true);
 
@@ -813,6 +849,7 @@ TEST_F(LaunchDesktopSteamTest, BrowserStreamRefusesAnOptedInPinBeforeJudgingItFo
 
 TEST_F(LaunchDesktopSteamTest, ConsoleLaunchRefusesAnOptedInPinBeforeJudgingItForGameMode) {
   stage_log_t log;
+  unavailable_build_t build;
   console_routes_t console {host.cert.string(), host.key.string(), directory / "console-launch-apps.json"};
   const auto post = [&](const std::string &uuid) {
     return console.request("POST", "/api/apps/launch", nlohmann::json {{"uuid", uuid}}.dump()).second;
@@ -962,6 +999,9 @@ TEST_F(LaunchDesktopSteamTest, TheAppKeyIsStrictInTheRealLoaderAndValidator) {
 }
 
 TEST_F(LaunchDesktopSteamTest, ConsoleReadinessIsResponseOnlyAndAnEditorRoundTripStoresOnlyTheSetting) {
+  // This metadata/round-trip case owns an unavailable build, independent of
+  // whether the compiled production adapter supports SteamOS on this platform.
+  unavailable_build_t unavailable;
   const auto path = directory / "prelaunch-roundtrip-apps.json";
   const std::string opted_uuid = "5A6B7C8D-9E0F-4A1B-8C2D-3E4F5A6B7C8D";
   const std::string off_uuid = "1B2C3D4E-5F6A-4B7C-8D9E-0F1A2B3C4D5E";
@@ -1005,5 +1045,79 @@ TEST_F(LaunchDesktopSteamTest, ConsoleReadinessIsResponseOnlyAndAnEditorRoundTri
   auto bad = opted;
   bad[std::string {prelaunch::k_app_key}] = "true";
   EXPECT_EQ(console.request("POST", "/api/apps", bad.dump()).first, 400) << "a string is refused at the API";
+}
+
+TEST_F(LaunchDesktopSteamTest, AStalledOwnedRestoreFencesEveryAdmissionOfTheRealLifecycleGate) {
+  stage_log_t log;
+  session_answer_host_t host_double;
+  session_answer_adapter_t adapter;
+  instant_clock_t clock;
+  prelaunch::coordinator_t coordinator {host_double, adapter, clock};
+  platf::game_mode_host::set_session_live_for_tests(true);
+  auto request = prelaunch::request_t {};
+  request.policy_enabled = true;
+  request.client_uuid = "client-a";
+  request.capture_ready = [](std::string &) {
+    return true;
+  };
+  request.others_now = [](std::string &) {
+    return false;
+  };
+  const auto ready = coordinator.run(request);
+  ASSERT_TRUE(ready.proceed()) << ready.code;
+  coordinator.commit(ready.transition_generation);
+
+  proc::session_lifecycle_gate_t gate;
+  const prelaunch::admission_fence_t fence {
+    [&gate]() {
+      return gate.try_fence_restore();
+    },
+    [&gate]() {
+      gate.release_restore_fence();
+    },
+  };
+  std::promise<void> unstall;
+  auto unstalled = unstall.get_future().share();
+  const prelaunch::coordinator_t::others_t stalled = [unstalled](std::string &) {
+    unstalled.wait();
+    return false;
+  };
+  const auto generation = gate.capture_launch_generation();
+  ASSERT_TRUE(generation);
+  ASSERT_EQ(coordinator.on_session_end(ready.transition_generation, true, false, stalled, fence), prelaunch::restore_e::owned);
+
+  // While the owned restore stalls, no admission of any app gets through the gate.
+  EXPECT_TRUE(gate.restore_fenced());
+  EXPECT_FALSE(gate.capture_launch_generation()) << "the generation a launch would reserve is withheld";
+  EXPECT_FALSE(gate.try_begin_rtsp_launch()) << "a policy-off launch is refused";
+  EXPECT_FALSE(gate.try_begin_rtsp_launch(*generation));
+  EXPECT_FALSE(gate.try_begin_rtsp_setup(*generation));
+  std::atomic<bool> blocking_launch_admitted {false};
+  std::thread blocking([&]() {
+    gate.begin_launch();
+    blocking_launch_admitted = true;
+  });
+  std::this_thread::sleep_for(std::chrono::milliseconds {100});
+  EXPECT_FALSE(blocking_launch_admitted) << "a blocking launch waits for the restore";
+
+  unstall.set_value();
+  coordinator.wait_for_restore();
+  blocking.join();
+  EXPECT_TRUE(blocking_launch_admitted);
+  EXPECT_FALSE(gate.restore_fenced());
+  EXPECT_EQ(coordinator.receipt().restore, prelaunch::restore_e::restored);
+  gate.finish_launch();
+
+  // The other order: a launch admitted first refuses the claim, and nothing is fenced or run.
+  platf::game_mode_host::set_session_live_for_tests(true);
+  const auto again = coordinator.run(request);
+  ASSERT_TRUE(again.proceed()) << again.code;
+  coordinator.commit(again.transition_generation);
+  ASSERT_TRUE(gate.try_begin_rtsp_launch());
+  EXPECT_EQ(coordinator.on_session_end(again.transition_generation, true, false, stalled, fence), prelaunch::restore_e::refused);
+  EXPECT_FALSE(gate.restore_fenced());
+  gate.finish_launch();
+  EXPECT_EQ(adapter.starts.size(), 3u) << "leave, return, leave: the refused claim ran nothing";
+  platf::game_mode_host::set_session_live_for_tests(false);
 }
 #endif
