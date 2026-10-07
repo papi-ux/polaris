@@ -11715,7 +11715,7 @@ TEST_F(StreamStatsCaptureTimingTests, HistoricalEpochProofCannotReplaceAPerFrame
   frame.clock_proof = proof(71, true);
   ASSERT_TRUE(vrr_clock::authorises_clock_comparison(*frame.clock_proof));
   ASSERT_EQ(vrr_clock::classify(frame.presentation.status, frame.presentation.ns, false,
-                              frame.ready_at, frame.clock_proof.get()), vrr_clock::sample_e::valid);
+                              frame.ready_at, frame.clock_proof.get(), {}), vrr_clock::sample_e::valid);
   ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
   EXPECT_EQ(timing()["last_plausibility"], "clock_unverified");
   EXPECT_EQ(timing()["source_time"]["result"], "not_observed");
@@ -11733,6 +11733,7 @@ TEST_F(StreamStatsCaptureTimingTests, HistoricalEpochProofCannotReplaceAPerFrame
 
   frame.source_sequence++;
   frame.source_time.result = vrr_clock::source_time_e::regressed_in_epoch;
+  frame.source_time.observed_steady_ns = 4'000'000'000;
   ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
   EXPECT_EQ(timing()["last_plausibility"], "nonmonotonic");
   EXPECT_EQ(timing()["source_time"]["result_counts"]["regressed_in_epoch"], 1u);
@@ -11753,6 +11754,9 @@ TEST_F(StreamStatsCaptureTimingTests, PerFrameRefusalsKeepTheirMeaningWithoutBor
          std::pair {vrr_clock::source_time_e::mapping_drifted, "clock_unverified"},
        }) {
     frame.source_time.result = result;
+    frame.source_time.observed_steady_ns = 4'000'000'000;
+    if (result == vrr_clock::source_time_e::ready_unavailable) frame.ready_at.reset();
+    else frame.ready_at = std::chrono::steady_clock::time_point {std::chrono::seconds {4}};
     ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
     EXPECT_EQ(timing()["last_plausibility"], expected);
     EXPECT_EQ(timing()["source_time"]["result_counts"][std::string(vrr_clock::name(result))], 1u);
@@ -11760,6 +11764,56 @@ TEST_F(StreamStatsCaptureTimingTests, PerFrameRefusalsKeepTheirMeaningWithoutBor
     frame.source_sequence++;
   }
   EXPECT_EQ(timing()["plausibility_counts"]["valid"], 0u);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, ContradictoryRefusalsCannotReplaceAcceptedEvidenceOrConsumeASequence) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto valid = image();
+  valid.clock_proof = proof(71, true);
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, valid));
+  const auto before = timing();
+  auto candidate = valid;
+  candidate.source_sequence = 2;
+  std::vector<platf::image_provenance_t> refused;
+  for (const auto result : {vrr_clock::source_time_e::missing, vrr_clock::source_time_e::prefetched_init,
+                           vrr_clock::source_time_e::nonmonotonic, vrr_clock::source_time_e::invalid_nsec,
+                           vrr_clock::source_time_e::invalid_overflow, vrr_clock::source_time_e::invalid_status,
+                           vrr_clock::source_time_e::no_presentation_clock, vrr_clock::source_time_e::proof_unavailable,
+                           vrr_clock::source_time_e::namespace_unverified, vrr_clock::source_time_e::identity_unverified,
+                           vrr_clock::source_time_e::mapping_invalid, vrr_clock::source_time_e::clock_domain_unverified,
+                           vrr_clock::source_time_e::ready_unavailable}) {
+    auto bad = candidate;
+    bad.source_time.result = result;
+    refused.push_back(bad);
+  }
+  auto bad = candidate;
+  bad.source_time.result = vrr_clock::source_time_e::lease_not_current;
+  bad.prefetched_init = true;
+  refused.push_back(bad);
+  bad = candidate;
+  bad.source_time.result = vrr_clock::source_time_e::future;
+  bad.source_time.observed_steady_ns = 4'000'000'000;
+  bad.presentation.status = vrr_policy::presentation_status_e::missing;
+  bad.presentation.ns.reset();
+  refused.push_back(bad);
+  bad = candidate;
+  bad.clock_proof.reset();
+  bad.presentation.status = vrr_policy::presentation_status_e::missing;
+  bad.presentation.ns.reset();
+  bad.route.presentation = platf::presentation_clock_e::none;
+  bad.source_time.result = vrr_clock::source_time_e::lease_not_current;
+  refused.push_back(bad);
+  bad = candidate;
+  bad.source_time.result = vrr_clock::source_time_e::mapping_drifted;
+  refused.push_back(bad);  // no live clock read was retained
+  for (const auto &frame : refused) {
+    EXPECT_FALSE(stream_stats::record_accepted_capture(501, frame)) << vrr_clock::name(frame.source_time.result);
+    EXPECT_EQ(timing(), before) << "a contradictory refusal cannot rewrite evidence";
+  }
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, candidate));
+  EXPECT_EQ(timing()["last_source_sequence"], 2u);
+  EXPECT_EQ(timing()["accepted_frames"], 2u);
+  EXPECT_EQ(timing()["source_time"]["result_counts"]["not_observed"], 2u);
 }
 
 TEST_F(StreamStatsCaptureTimingTests, ContradictoryMappedReceiptsCannotConsumeASequence) {

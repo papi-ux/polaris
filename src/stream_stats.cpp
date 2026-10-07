@@ -641,7 +641,7 @@ namespace stream_stats {
       // These outcomes need no comparison between clocks. Valid protocol syntax does.
       if (image.prefetched_init || image.presentation.status != vrr_policy::presentation_status_e::valid) {
         return vrr_clock::name(vrr_clock::classify(image.presentation.status, image.presentation.ns,
-                                                image.prefetched_init, image.ready_at, nullptr));
+                                                image.prefetched_init, image.ready_at, nullptr, {}));
       }
       const auto result = vrr_clock::name(image.source_time.result);
       if (result == "mapped") return "valid";
@@ -660,7 +660,36 @@ namespace stream_stats {
       const auto result = vrr_clock::name(receipt.result);
       if (std::find(k_source_time_results.begin(), k_source_time_results.end(), result) == k_source_time_results.end()) return false;
       if (result != "not_observed" && receipt.presentation_baseline != image.presentation.baseline) return false;
-      if (result != "mapped") return !receipt.source_steady_ns && receipt.uncertainty_ns == 0;
+      if (result != "mapped" && (receipt.source_steady_ns || receipt.uncertainty_ns != 0)) return false;
+      if (receipt.observed_steady_ns < vrr_clock::k_failed_read) return false;
+      if (result == "not_observed") return receipt.observed_steady_ns == vrr_clock::k_failed_read;
+      // These gates precede any clock observation. Match their structural facts in producer order;
+      // statistics never consult a live lease or repeat the producer's clock measurement.
+      const auto early = [&](std::string_view expected) {
+        return result == expected && receipt.observed_steady_ns == vrr_clock::k_failed_read;
+      };
+      if (image.route.presentation == platf::presentation_clock_e::none) return early("no_presentation_clock");
+      if (result == "no_presentation_clock") return false;
+      if (image.prefetched_init) return early("prefetched_init");
+      if (image.presentation.status != vrr_policy::presentation_status_e::valid) {
+        return early(vrr_policy::name(image.presentation.status));
+      }
+      if (!image.clock_proof) return early("proof_unavailable");
+      const auto &proof = *image.clock_proof;
+      if (proof.time_namespace != vrr_clock::namespace_e::same) return early("namespace_unverified");
+      if (!proof.producer_identity_verified) return early("identity_unverified");
+      if (!proof.mapping.valid || proof.epoch_start_mono_ns < 0) return early("mapping_invalid");
+      if (!proof.clock_domain_verified) return early("clock_domain_unverified");
+      if (!vrr_clock::authorises_clock_comparison(proof)) return early("proof_unavailable");
+      if (result == "lease_not_current") return early(result);
+      if (result == "live_clock_unavailable") return true;  // failed reads can precede the steady read
+      if (result == "mapping_drifted") return receipt.observed_steady_ns >= 0;
+      if (result == "ready_unavailable") return !image.ready_at && receipt.observed_steady_ns >= 0;
+      if (result != "mapped") {
+        return (result == "before_epoch" || result == "future" || result == "stale" ||
+                result == "regressed_in_epoch" || result == "conversion_overflow") &&
+               image.ready_at && receipt.observed_steady_ns >= 0;
+      }
       if (!capture_clock_verified(image) || !image.presentation.ns || !image.ready_at || image.prefetched_init ||
           image.presentation.status != vrr_policy::presentation_status_e::valid || !receipt.source_steady_ns ||
           *receipt.source_steady_ns < 0 || receipt.observed_steady_ns < 0 ||
