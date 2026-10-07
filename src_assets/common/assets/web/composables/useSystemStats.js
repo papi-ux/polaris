@@ -20,6 +20,7 @@ export function useSystemStats(intervalMs = 3000, options = {}) {
   const kmsCapture = ref(null)
   const runningBinary = ref(null)
   const loading = ref(true)
+  const readiness = ref({ displays: 'pending', audio: 'pending' })
 
   const maxBackoffMs = Math.max(intervalMs, options.maxBackoffMs ?? intervalMs * 8)
 
@@ -82,6 +83,10 @@ export function useSystemStats(intervalMs = 3000, options = {}) {
         const res = await fetch('./api/stats/system', { credentials: 'include' })
         if (res.ok) {
           const data = await res.json()
+          readiness.value = {
+            displays: Array.isArray(data.displays) ? 'ready' : 'unavailable',
+            audio: data.audio && typeof data.audio.sink === 'string' ? 'ready' : 'unavailable',
+          }
           gpu.value = data.gpu
           displays.value = data.displays || []
           audio.value = data.audio || null
@@ -95,6 +100,7 @@ export function useSystemStats(intervalMs = 3000, options = {}) {
       } catch {
         // Silently fail because GPU stats are non-critical.
       } finally {
+        if (!ok) readiness.value = { displays: 'unavailable', audio: 'unavailable' }
         consecutiveFailures = ok ? 0 : consecutiveFailures + 1
         loading.value = false
         inFlight = null
@@ -155,5 +161,5 @@ export function useSystemStats(intervalMs = 3000, options = {}) {
     }
   })
 
-  return { gpu, displays, audio, sessionType, displaySession, gameModeHost, kmsCapture, runningBinary, loading }
+  return { gpu, displays, audio, sessionType, displaySession, gameModeHost, kmsCapture, runningBinary, loading, readiness, refresh: pollNow }
 }

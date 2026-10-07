@@ -11393,6 +11393,35 @@ TEST(StreamStatsVrrTests, AGenerationsRequestIsFrozenOnceAndOnlyForALiveEntry) {
   EXPECT_TRUE(stream_stats::vrr_json(stream_stats::get_current(), 401).is_null());
 }
 
+TEST(StreamStatsVrrTests, HostPermissionReceiptIsFrozenPerGenerationInLiveAndEndedRows) {
+  stream_stats::update_stream_active(false);
+  const bool previous_permission = config::video.vrr_source_pacing;
+  auto reset = util::fail_guard([&] {
+    config::video.vrr_source_pacing = previous_permission;
+    stream_stats::update_stream_active(false);
+  });
+  stream_stats::add_client("10.0.0.5", "Default off", 461);
+  stream_stats::add_client("10.0.0.6", "Permitted", 462);
+  auto permitted = vrr_record(462, vrr_policy::requested_e::on);
+  permitted.host_source_pacing = true;
+  ASSERT_TRUE(stream_stats::record_vrr_session(vrr_record(461, vrr_policy::requested_e::on)));
+  ASSERT_TRUE(stream_stats::record_vrr_session(permitted));
+  // A later settings change cannot relabel a stream's admission permission.
+  for (const bool configured : {false, true}) {
+    config::video.vrr_source_pacing = configured;
+    const auto stats = stream_stats::get_current();
+    EXPECT_EQ(stream_stats::vrr_json(stats, 461)["host_permission"], false);
+    EXPECT_EQ(stream_stats::vrr_json(stats, 462)["host_permission"], true);
+    const auto rows = current_stats_json()["clients"];
+    EXPECT_EQ(rows[0]["vrr"]["host_permission"], false);
+    EXPECT_EQ(rows[1]["vrr"]["host_permission"], true);
+  }
+  stream_stats::remove_client("10.0.0.5", 461);
+  EXPECT_EQ(current_stats_json()["last_session"]["vrr"]["host_permission"], false);
+  stream_stats::remove_client("10.0.0.6", 462);
+  EXPECT_EQ(current_stats_json()["last_session"]["vrr"]["host_permission"], true);
+}
+
 TEST(StreamStatsVrrTests, EachGenerationReadsOnlyItsOwnRecordAndNeverTheOwnersForAWatcher) {
   stream_stats::update_stream_active(false);
   auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });

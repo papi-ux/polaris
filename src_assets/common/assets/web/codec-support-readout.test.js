@@ -36,7 +36,16 @@ function support({ yuv444 = { h264: false, hevc: false, av1: false, encoders: LI
 
 // Every string the readout writes, in one place, so the style rules are checked on all of it.
 function everyLine(row) {
-  return [row?.heading, row?.message, row?.refusal?.lead, ...(row?.routes || []), ...(row?.lines || [])].filter(Boolean)
+  return [
+    row?.heading, row?.message, row?.refusal?.lead,
+    ...(row?.values || []).flatMap((item) => [item.label, item.value]),
+    ...(row?.lines || []), ...(row?.details || []),
+  ].filter(Boolean)
+}
+
+// A labelled value by its id, or every one with that id when a stream has several (one route each).
+function value(stream, id) {
+  return stream.values.filter((item) => item.id === id).map((item) => `${item.label}: ${item.value}`)
 }
 
 function expectHouseStyle(lines) {
@@ -44,6 +53,7 @@ function expectHouseStyle(lines) {
     expect(line).not.toMatch(/[\u2013\u2014]/)
     expect(line).not.toContain(' - ')
     expect(line).not.toContain('config.codec_support_')
+    expect(line).not.toContain('config.pyrowave_card_')
     expect(line).not.toContain('Play Setup')
   }
 }
@@ -199,24 +209,43 @@ function streaming(overrides = {}) {
 }
 
 describe('describePyroWaveStream', () => {
-  it('shows the running stream, its route and the advice with its conditions', () => {
+  it('shows the running stream with labelled rates and route, the advice, and its conditions in details', () => {
     const stream = describePyroWaveStream(t, streaming())
     expect(stream.running).toBe(true)
+    expect(stream.idle).toBe(false)
     expect(stream.heading).toBe('PyroWave stream running: 1920x1080 at 60 fps, 4:2:0.')
-    expect(stream.routes).toEqual([
-      'Route: zero copy. Captured DMA-BUF frames are imported and their colour is converted on the GPU, with no CPU upload at the encoder input.',
-    ])
+    expect(stream.clients).toEqual(['Retroid Pocket 6'])
+    // The request a client set and the encoder's own rate stay apart: one read against the other looks
+    // a tenth short when it is not.
+    expect(value(stream, 'requested')).toEqual(['Requested bitrate: 23 Mbps'])
+    expect(value(stream, 'encoded')).toEqual(['Bitrate at the encoder: 20 Mbps'])
+    expect(value(stream, 'route')).toEqual(['Route to the encoder: Zero copy'])
     expect(stream.lines).toEqual([
       'The route says how frames reach the encoder, not how capture produced them.',
       "PyroWave's model for this stream: 101 Mbps on a device's own screen, 246 Mbps on a television or monitor.",
-      "Each figure is a request, what a client sets, with 10% FEC and the stream's audio included, for 31 dB of PSNR-HVS-M-H on a device's own screen and 35 dB on a television or monitor, in PyroWave's own bitrate model at this size, frame rate and chroma. The own screen target comes from one check by eye on a Retroid Pocket 6, and the model is an objective estimate from four game clips on SDR.",
-      'This stream runs at a request of about 23 Mbps now, 20 Mbps at the encoder.',
-      "93% of about the last 240 frames hit PyroWave's byte budget.",
       "The host reads this stream as starved: as a request, the rate it is set to is more than a tenth below where Doctor's raise would take it.",
+    ])
+    expect(stream.details).toEqual([
+      'Route: zero copy. Captured DMA-BUF frames are imported and their colour is converted on the GPU, with no CPU upload at the encoder input.',
+      "Each figure is a request, what a client sets, with 10% FEC and the stream's audio included, for 31 dB of PSNR-HVS-M-H on a device's own screen and 35 dB on a television or monitor, in PyroWave's own bitrate model at this size, frame rate and chroma. The own screen target comes from one check by eye on a Retroid Pocket 6, and the model is an objective estimate from four game clips on SDR.",
+      "93% of about the last 240 frames hit PyroWave's byte budget.",
       "Doctor's PyroWave raise, for a starved stream on a clean network, goes to 101 Mbps, the own screen figure.",
       'A launch cap of 15 Mbps (stability_preset_selected), sized for H.264, was set aside for this stream.',
     ])
     expectHouseStyle(everyLine(stream))
+  })
+
+  it('says a rate the host did not report is not reported, never 0', () => {
+    const stream = describePyroWaveStream(t, streaming({
+      pyrowave_bitrate: { ...PYROWAVE_BITRATE, request_kbps: 0, encoder_kbps: undefined },
+    }))
+    expect(value(stream, 'requested')).toEqual(['Requested bitrate: Not reported'])
+    expect(value(stream, 'encoded')).toEqual(['Bitrate at the encoder: Not reported'])
+    expect(everyLine(stream).join(' ')).not.toContain('0 Mbps')
+
+    const noAdvice = describePyroWaveStream(t, streaming({ pyrowave_bitrate: undefined }))
+    expect(value(noAdvice, 'requested')).toEqual(['Requested bitrate: Not reported'])
+    expect(value(noAdvice, 'encoded')).toEqual(['Bitrate at the encoder: Not reported'])
   })
 
   it('names what limits the raise and which rule gave the figures', () => {
@@ -237,16 +266,16 @@ describe('describePyroWaveStream', () => {
       },
     }))
     expect(stream.heading).toBe('PyroWave stream running: 1920x1200 at 120 fps, 4:4:4.')
-    expect(stream.lines).toContain('The model was fitted on 16:9 pictures, so for this shape it is keyed on the pixel count.')
-    expect(stream.lines).toContain("Doctor's PyroWave raise, for a starved stream on a clean network, goes to 300 Mbps, the most Polaris raises PyroWave to.")
-    expect(stream.lines).toContain("A cap of 250 Mbps (max_bitrate) applied to this stream's request.")
-    expect(stream.lines.join(' ')).not.toContain('starved:')
-    expect(stream.lines.join(' ')).not.toContain('byte budget.')
+    expect(stream.details).toContain('The model was fitted on 16:9 pictures, so for this shape it is keyed on the pixel count.')
+    expect(stream.details).toContain("Doctor's PyroWave raise, for a starved stream on a clean network, goes to 300 Mbps, the most Polaris raises PyroWave to.")
+    expect(stream.details).toContain("A cap of 250 Mbps (max_bitrate) applied to this stream's request.")
+    expect(everyLine(stream).join(' ')).not.toContain('starved:')
+    expect(everyLine(stream).join(' ')).not.toContain('byte budget.')
 
     const limited = describePyroWaveStream(t, streaming({
       pyrowave_bitrate: { ...PYROWAVE_BITRATE, raise_goal_kbps: 120000, raise_goal_limited_by: 'max_bitrate' },
     }))
-    expect(limited.lines).toContain("Doctor's PyroWave raise, for a starved stream on a clean network, goes to 120 Mbps, this host's Maximum Bitrate.")
+    expect(limited.details).toContain("Doctor's PyroWave raise, for a starved stream on a clean network, goes to 120 Mbps, this host's Maximum Bitrate.")
   })
 
   it('gives one route per client when more than one watches PyroWave', () => {
@@ -256,7 +285,12 @@ describe('describePyroWaveStream', () => {
         { name: 'Pixel 10 Pro', codec: 'pyrowave' },
       ],
     }))
-    expect(stream.routes).toEqual([
+    expect(stream.clients).toEqual(['Retroid Pocket 6', 'Pixel 10 Pro'])
+    expect(value(stream, 'route')).toEqual([
+      'Route to the encoder, Retroid Pocket 6: GPU upload',
+      'Route to the encoder, Pixel 10 Pro: Not known until the first captured frame is encoded',
+    ])
+    expect(stream.details.slice(0, 2)).toEqual([
       'Retroid Pocket 6: Route: GPU upload. Frames are copied from host memory to the GPU and their colour is converted there.',
       'Pixel 10 Pro: Route: not known until the first captured frame is encoded.',
     ])
@@ -271,7 +305,7 @@ describe('describePyroWaveStream', () => {
   })
 
   it('words the FEC the host grossed the advice up for, never the oversized frame telemetry', () => {
-    const conditions = (stream) => stream.lines.find((line) => line.startsWith('Each figure is a request'))
+    const conditions = (stream) => stream.details.find((line) => line.startsWith('Each figure is a request'))
     const configured = describePyroWaveStream(t, streaming({
       pyrowave_bitrate: { ...PYROWAVE_BITRATE, assumes: { fec_percentage: 20, audio_kbps: 1536 } },
     }))
@@ -284,7 +318,7 @@ describe('describePyroWaveStream', () => {
 
   it('keeps the conditions when the host sends no FEC figure', () => {
     const stream = describePyroWaveStream(t, streaming({ pyrowave_bitrate: { ...PYROWAVE_BITRATE, assumes: undefined } }))
-    expect(stream.lines).toContain("Each figure is a request, what a client sets, with FEC and the stream's audio included, for 31 dB of PSNR-HVS-M-H on a device's own screen and 35 dB on a television or monitor, in PyroWave's own bitrate model at this size, frame rate and chroma. The own screen target comes from one check by eye on a Retroid Pocket 6, and the model is an objective estimate from four game clips on SDR.")
+    expect(stream.details).toContain("Each figure is a request, what a client sets, with FEC and the stream's audio included, for 31 dB of PSNR-HVS-M-H on a device's own screen and 35 dB on a television or monitor, in PyroWave's own bitrate model at this size, frame rate and chroma. The own screen target comes from one check by eye on a Retroid Pocket 6, and the model is an objective estimate from four game clips on SDR.")
   })
 
   it('never pairs the Retroid Pocket 6 calibration with 35 dB on a device\'s own screen', () => {
@@ -293,11 +327,11 @@ describe('describePyroWaveStream', () => {
     const missing = { ...PYROWAVE_BITRATE }
     delete missing.far_target_db
     const stream = describePyroWaveStream(t, streaming({ pyrowave_bitrate: missing }))
-    expect(stream.lines).toContain("Each figure is a request, what a client sets, with 10% FEC and the stream's audio included, for 31 dB of PSNR-HVS-M-H on a device's own screen and 35 dB on a television or monitor, in PyroWave's own bitrate model at this size, frame rate and chroma. The own screen target comes from one check by eye on a Retroid Pocket 6, and the model is an objective estimate from four game clips on SDR.")
-    expect(stream.lines.join(' ')).not.toContain("35 dB of PSNR-HVS-M-H on a device's own screen")
+    expect(stream.details).toContain("Each figure is a request, what a client sets, with 10% FEC and the stream's audio included, for 31 dB of PSNR-HVS-M-H on a device's own screen and 35 dB on a television or monitor, in PyroWave's own bitrate model at this size, frame rate and chroma. The own screen target comes from one check by eye on a Retroid Pocket 6, and the model is an objective estimate from four game clips on SDR.")
+    expect(everyLine(stream).join(' ')).not.toContain("35 dB of PSNR-HVS-M-H on a device's own screen")
   })
 
-  it('reads the Retroid Pocket 6 stream as a request, and names figures past what Polaris recommends', () => {
+  it('reads the Retroid Pocket 6 stream as a request, and keeps figures past what Polaris recommends in view', () => {
     // 1920x1080 at 120 fps in 4:4:4 at the 200 Mbps judged right: the encoder runs at 179 Mbps, which is
     // a request of 200 against the 215 advised, 93%, not the 83% an encoder rate against a request reads.
     const stream = describePyroWaveStream(t, streaming({
@@ -316,30 +350,37 @@ describe('describePyroWaveStream', () => {
       },
     }))
     expect(stream.lines).toContain("PyroWave's model for this stream: 215 Mbps on a device's own screen, 594 Mbps on a television or monitor.")
+    // The caveat stays beside the figures it qualifies, not in the details.
     expect(stream.lines).toContain("Polaris recommends no more than 300 Mbps on its own, so a figure above that is the model's alone. Doctor's raise stops there, and a client can set more by hand.")
-    expect(stream.lines).toContain('This stream runs at a request of about 200 Mbps now, 179 Mbps at the encoder.')
-    expect(stream.lines.join(' ')).not.toContain('The encoder runs at')
-    expect(stream.lines.join(' ')).not.toContain('starved:')
+    expect(value(stream, 'requested')).toEqual(['Requested bitrate: 200 Mbps'])
+    expect(value(stream, 'encoded')).toEqual(['Bitrate at the encoder: 179 Mbps'])
+    expect(everyLine(stream).join(' ')).not.toContain('starved:')
     expectHouseStyle(everyLine(stream))
 
     // Every figure within what Polaris recommends gets no such line.
-    expect(describePyroWaveStream(t, streaming()).lines.join(' ')).not.toContain('recommends no more than')
+    expect(everyLine(describePyroWaveStream(t, streaming())).join(' ')).not.toContain('recommends no more than')
   })
 
-  it('shows the last PyroWave stream when none runs, and nothing for another codec', () => {
+  it('shows the last PyroWave stream when none runs, idle for another codec, and unknown before stats', () => {
     const last = describePyroWaveStream(t, {
       streaming: false,
       clients: [],
       last_session: { state: 'ended', client_name: 'Retroid Pocket 6', codec: 'pyrowave', pyrowave_route: 'cpu_convert' },
     })
     expect(last.running).toBe(false)
+    expect(last.idle).toBe(false)
     expect(last.heading).toBe('Last PyroWave stream, Retroid Pocket 6')
-    expect(last.routes).toEqual([
+    expect(value(last, 'route')).toEqual(['Route to the encoder: CPU conversion'])
+    // A last stream reports no live rate, so no rate rows are invented for it.
+    expect(value(last, 'requested')).toEqual([])
+    expect(last.details).toEqual([
       'Route: CPU conversion. Colour is converted on the CPU and the planes are copied to the GPU, which costs host CPU time.',
     ])
 
-    expect(describePyroWaveStream(t, { streaming: false, clients: [], last_session: { codec: 'hevc' } })).toBeNull()
-    expect(describePyroWaveStream(t, { streaming: true, codec: 'hevc', clients: [{ codec: 'hevc' }] })).toBeNull()
+    // The host answered and has no PyroWave stream to show: idle, a neutral state.
+    expect(describePyroWaveStream(t, { streaming: false, clients: [], last_session: { codec: 'hevc' } })).toEqual({ running: false, idle: true })
+    expect(describePyroWaveStream(t, { streaming: true, codec: 'hevc', clients: [{ codec: 'hevc' }] })).toEqual({ running: false, idle: true })
+    // No stats yet: unknown, never idle.
     expect(describePyroWaveStream(t, null)).toBeNull()
   })
 })

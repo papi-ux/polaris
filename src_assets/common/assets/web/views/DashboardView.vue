@@ -92,6 +92,8 @@
           </div>
         </section>
 
+        <StreamPacingReadout :stats="stats || {}" :connected="streamStatsConnected" :observed-at="streamStatsReceivedAt" />
+
         <!-- Doctor: the host's own per-second diagnosis replaces the old
              Auto Quality panel, stream-path notices, and priority guidance. -->
         <section class="dashboard-doctor-card" :class="doctorPanelClass" data-dashboard-doctor>
@@ -321,10 +323,10 @@
           <div class="flex shrink-0 flex-col items-end gap-3">
             <span
               class="inline-flex items-center gap-2 rounded-full border px-3 py-1 font-mono text-[10px] font-semibold uppercase tracking-eyebrow"
-              :class="readyCheckDisplay.allPassing ? 'border-success/35 text-success' : 'border-warning/35 text-warning'"
+              :class="readyCheckDisplay.allPassing ? 'border-success/35 text-success' : readyCheckDisplay.attention ? 'border-warning/35 text-warning' : 'border-storm/35 text-storm'"
             >
-              <span class="pulse-dot" :class="readyCheckDisplay.allPassing ? '' : '!bg-warning'"></span>
-              {{ readyCheckDisplay.allPassing ? 'READY' : 'ATTENTION' }}
+              <span class="pulse-dot" :class="readyCheckDisplay.allPassing ? '' : readyCheckDisplay.attention ? '!bg-warning' : '!bg-storm'"></span>
+              {{ $t(readyCheckDisplay.allPassing ? 'dashboard.check_state_ready' : readyCheckDisplay.attention ? 'dashboard.check_state_attention' : 'dashboard.check_state_not_checked') }}
             </span>
             <router-link
               v-if="readyCheckDisplay.primaryIssue"
@@ -337,6 +339,7 @@
         </div>
       </section>
 
+      <button class="focus-ring dashboard-action-button dashboard-action-button-secondary" :disabled="refreshingReadiness" @click="refreshLaunchChecks">{{ $t('dashboard.refresh_checks') }}</button>
       <!-- GPU Gauges + Quick Controls -->
       <div class="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
         <div class="min-w-0 space-y-4">
@@ -378,15 +381,15 @@
                 <div class="mt-1 text-xs text-storm">Pairing, library, discovery, displays, and audio are clear.</div>
               </div>
               <span class="rounded-full border border-success/30 bg-success/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-eyebrow text-success">
-                {{ readyChecksPassing }}/{{ readyChecks.length }} {{ $t('dashboard.ready_checks_pass') }}
+                {{ readyChecksPassing }}/{{ readyCheckDisplay.total }} {{ $t('dashboard.ready_checks_pass') }}
               </span>
             </div>
             <div v-else class="space-y-3">
-              <div class="ready-check-summary ready-check-summary-attention">
+              <div :class="readyChecksAttentionCount ? 'ready-check-summary ready-check-summary-attention' : 'ready-check-summary'">
                 <div>
-                  <div class="text-sm font-semibold text-warning-bright">{{ readyChecksAttentionCount }} launch checks need attention</div>
+                  <div :class="readyChecksAttentionCount ? 'text-sm font-semibold text-warning-bright' : 'text-sm font-semibold text-storm'">{{ readyChecksAttentionCount ? $t('dashboard.checks_attention', { count: readyChecksAttentionCount }) : $t('dashboard.checks_waiting') }}</div>
                   <div class="mt-1 text-xs text-storm">
-                    Start with {{ readyChecksPrimaryIssue?.label || 'the first missing check' }} to get this host stream-ready.
+                    {{ readyChecksPrimaryIssue ? $t('dashboard.checks_start_with', { check: readyChecksPrimaryIssue.label }) : $t('dashboard.check_waiting') }}
                   </div>
                 </div>
                 <router-link
@@ -412,7 +415,7 @@
                     </span>
                   </div>
                   <div class="mt-2 text-[11px] text-storm">{{ check.detail }}</div>
-                  <div class="mt-3 text-[11px] font-medium text-ice/80">{{ $t('dashboard.open_fix') }}</div>
+                  <div class="mt-3 text-[11px] font-medium text-ice/80">{{ $t(check.status === 'attention' ? 'dashboard.open_fix' : 'dashboard.review_check') }}</div>
                 </router-link>
               </div>
             </div>
@@ -570,7 +573,9 @@ import QuickControls from '../components/QuickControls.vue'
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
 import { useToast } from '../composables/useToast'
 import { useI18n } from 'vue-i18n'
-import { resolveClientSettingsSync } from '../client-settings-sync'
+import { resolveClientSettingsSync, resolveStreamDisplayMode } from '../client-settings-sync'
+import { captureStatusTone } from '../capture-status-tone.js'
+import StreamPacingReadout from '../components/StreamPacingReadout.vue'
 import { resolveAutoQualityState } from '../auto-quality-state'
 import { resolveDoctorActionHttpResponse } from '../doctor-action-http.js'
 import { doctorIsWaitingForStream } from '../doctor-observation.js'
@@ -585,9 +590,9 @@ import {
   dashboardLossPct,
 } from '../dashboard-summary'
 
-const { stats } = useStreamStats(1000)
+const { stats, connected: streamStatsConnected, receivedAt: streamStatsReceivedAt } = useStreamStats(1000)
 const { label: liveTuningLabel } = useLiveTuning()
-const { gpu, displays, audio, sessionType } = useSystemStats(3000)
+const { gpu, displays, audio, sessionType, readiness: systemReadiness, refresh: refreshSystemStats } = useSystemStats(3000)
 const { sessions, clearHistory, activeStartedAt } = useSessionHistory(stats)
 
 // Apps catalog: recents for the play rail plus the running app for the hero.
@@ -599,6 +604,7 @@ async function refreshApps() {
     if (res.ok) {
       const data = await res.json()
       if (revision !== appsRequestRevision) return
+      readinessSources.value.apps = Array.isArray(data.apps) ? 'ready' : 'unavailable'
       currentAppAvailable.value = data.current_app_available !== false && typeof data.current_app === 'string'
       currentAppUuid.value = currentAppAvailable.value ? data.current_app : ''
       allAppsById.value = Object.fromEntries((data.apps || []).filter(a => a.uuid).map(a => [a.uuid, a.name]))
@@ -607,11 +613,13 @@ async function refreshApps() {
       appCatalogCount.value = apps.length
       recentApps.value = apps.slice(0, 5)
     } else if (revision === appsRequestRevision) {
+      readinessSources.value.apps = 'unavailable'
       currentAppAvailable.value = false
       currentAppUuid.value = ''
     }
   } catch {
     if (revision !== appsRequestRevision) return
+    readinessSources.value.apps = 'unavailable'
     currentAppAvailable.value = false
     currentAppUuid.value = ''
   }
@@ -663,6 +671,8 @@ const version = ref('')
 const headlessEnabled = ref(false)
 const discoveryEnabled = ref(false)
 const pairingEnabled = ref(false)
+const readinessSources = ref({ apps: 'pending', clients: 'pending', config: 'pending' })
+const readinessConfig = ref(null)
 const clientSettingsSync = ref(resolveClientSettingsSync({}))
 const { t } = useI18n()
 const { toast: showToast } = useToast()
@@ -693,17 +703,18 @@ const actionSummary = computed(() => {
 
 const readinessLabel = computed(() => {
   if (stats.value?.streaming) return t('dashboard.readiness_live')
-  if (pairedClients.value > 0) return t('dashboard.readiness_ready')
-  return t('dashboard.readiness_setup')
+  if (readyCheckDisplay.value.allPassing) return t('dashboard.readiness_ready')
+  return t(readyCheckDisplay.value.attention > 0 ? 'dashboard.readiness_setup' : 'dashboard.checks_waiting')
 })
 
 const readinessTone = computed(() => {
-  if (stats.value?.streaming || pairedClients.value > 0) return 'text-success'
-  return 'text-warning'
+  if (stats.value?.streaming || readyCheckDisplay.value.allPassing) return 'text-success'
+  return readyCheckDisplay.value.attention > 0 ? 'text-warning' : 'text-storm'
 })
 
 const nextStep = computed(() => {
   if (stats.value?.streaming) return { title: t('dashboard.next_step_monitor'), desc: t('dashboard.next_step_monitor_desc') }
+  if (!readyCheckDisplay.value.allPassing && !readyCheckDisplay.value.attention) return { title: t('dashboard.checks_waiting'), desc: t('dashboard.check_waiting') }
   if (!pairedClients.value) return { title: t('dashboard.next_step_pair'), desc: t('dashboard.next_step_pair_desc') }
   return { title: t('dashboard.next_step_launch'), desc: t('dashboard.next_step_launch_desc') }
 })
@@ -766,14 +777,29 @@ const readyChecks = computed(() => {
     }
   ]
 
-  return items.map((item) => ({
-    ...item,
-    state: item.ok ? t('dashboard.check_state_ready') : t('dashboard.check_state_attention'),
-    cardClass: item.ok
-      ? 'border-success/15 bg-success/5 hover:border-success/30 hover:bg-success/8'
-      : 'border-warning/15 bg-warning/5 hover:border-warning/30 hover:bg-warning/8',
-    badgeClass: item.ok ? 'bg-success/10 text-success' : 'bg-warning/10 text-warning-bright'
-  }))
+  return items.map((item) => {
+    const source = item.key === 'library' ? readinessSources.value.apps
+      : item.key === 'clients' ? readinessSources.value.clients
+        : ['display', 'audio'].includes(item.key) ? systemReadiness.value[item.key === 'display' ? 'displays' : 'audio']
+          : readinessSources.value.config
+    let status = source === 'ready' ? (item.ok ? 'ready' : 'attention') : 'not_checked'
+    const configured = readinessSources.value.config === 'ready'
+    if (configured && ((item.key === 'display' && resolveStreamDisplayMode(readinessConfig.value) === 'headless_stream') ||
+        (item.key === 'audio' && readinessConfig.value.stream_audio === 'disabled') ||
+        (item.key === 'discovery' && !discoveryEnabled.value) ||
+        (item.key === 'pairing' && !pairingEnabled.value && readinessSources.value.clients === 'ready' && pairedClients.value > 0))) status = 'not_applicable'
+    // Applicability depends on the configured mode, not a guessed default.
+    if (['display', 'audio'].includes(item.key) && !configured) status = 'not_checked'
+    const attention = status === 'attention'
+    const ready = status === 'ready'
+    return {
+      ...item, status,
+      state: t(`dashboard.check_state_${status}`),
+      detail: status === 'not_checked' ? t(source === 'unavailable' ? 'dashboard.check_read_failed' : 'dashboard.check_waiting') : item.detail,
+      cardClass: attention ? 'border-warning/15 bg-warning/5 hover:border-warning/30' : ready ? 'border-success/15 bg-success/5' : 'border-storm/25 bg-deep/30',
+      badgeClass: attention ? 'bg-warning/10 text-warning-bright' : ready ? 'bg-success/10 text-success' : 'bg-storm/10 text-storm',
+    }
+  })
 })
 
 const readyCheckDisplay = computed(() => buildReadyCheckDisplay(readyChecks.value))
@@ -799,7 +825,44 @@ function handleQuickControlChange({ key, enabled }) {
   }
 }
 
+const refreshingReadiness = ref(false)
+async function refreshLaunchChecks() {
+  if (refreshingReadiness.value) return
+  refreshingReadiness.value = true
+  readinessSources.value = { apps: 'pending', clients: 'pending', config: 'pending' }
+  try {
+    await Promise.allSettled([
+      refreshApps(), refreshSystemStats(),
+      (async () => {
+        try {
+          const res = await fetch('./api/clients/list', { credentials: 'include' })
+          if (!res.ok) throw new Error('clients unavailable')
+          const data = await res.json()
+          if (!Array.isArray(data.named_certs)) throw new Error('clients unreported')
+          pairedClientList.value = data.named_certs
+          pairedClients.value = pairedClientList.value.length
+          readinessSources.value.clients = 'ready'
+        } catch { readinessSources.value.clients = 'unavailable' }
+      })(),
+      (async () => {
+        try {
+          const res = await fetch('./api/config', { credentials: 'include' })
+          const data = await readConfigOrNull(res)
+          if (!data) throw new Error('settings unavailable')
+          refreshClientSettingsSync(data)
+          version.value = data.version || ''
+          headlessEnabled.value = data.headless_mode === 'enabled'
+          discoveryEnabled.value = data.enable_discovery !== 'disabled'
+          pairingEnabled.value = data.enable_pairing !== 'disabled'
+        } catch { readinessSources.value.config = 'unavailable' }
+      })(),
+    ])
+  } finally { refreshingReadiness.value = false }
+}
+
 function refreshClientSettingsSync(configPayload) {
+  readinessConfig.value = configPayload
+  readinessSources.value.config = configPayload ? 'ready' : 'unavailable'
   clientSettingsSync.value = resolveClientSettingsSync(configPayload || {})
   hostPlatform.value = configPayload?.platform || ''
 }
@@ -931,9 +994,6 @@ const runtimeEffectiveMode = computed(() => {
 
 const runtimeModeTone = computed(() => {
   if (!stats.value?.streaming) return 'bg-storm/20 text-storm'
-  const mode = String(runtimeEffectiveMode.value || '').toLowerCase()
-  if (mode.includes('private stream')) return 'bg-accent/15 text-accent'
-  if (mode.includes('private stream (windowed)') || mode.includes('host virtual')) return 'bg-warning/15 text-warning'
   return 'bg-storm/20 text-storm'
 })
 
@@ -956,8 +1016,8 @@ const capturePathLabel = computed(() => {
 })
 
 const captureGpuNativeTone = computed(() => {
-  if (!stats.value?.streaming) return 'text-storm'
-  return stats.value?.capture_gpu_native ? 'text-success' : 'text-warning'
+  const tone = captureStatusTone(stats.value)
+  return tone === 'warning' ? 'text-warning' : tone === 'info' ? 'text-info-bright' : 'text-storm'
 })
 
 const runtimePathNote = computed(() => {
@@ -965,7 +1025,9 @@ const runtimePathNote = computed(() => {
   const reason = String(stats.value?.capture_path_reason || '').toLowerCase()
 
   if (nestedLabwcShmFallbackActive.value) {
-    return 'Nested labwc fallback is active: Polaris is capturing the windowed compositor through SHM instead of the GPU-native fast path.'
+    return stats.value?.runtime_gpu_native_override_active
+      ? 'GPU-native capture was requested, but the nested labwc compositor is using SHM/system-memory capture.'
+      : 'The nested labwc compositor is using SHM/system-memory capture. This can be a healthy stream path.'
   }
 
   if (reason === 'headless_shm_fallback' || reason === 'headless_shm_default') {
@@ -991,13 +1053,7 @@ const runtimePathNote = computed(() => {
   return ''
 })
 
-const runtimePathNoteTone = computed(() => {
-  if (!runtimePathNote.value) return 'text-storm'
-  if (nestedLabwcShmFallbackActive.value) return 'text-warning'
-  if (stats.value?.capture_cpu_copy) return 'text-warning'
-  if (stats.value?.capture_gpu_native) return 'text-success'
-  return 'text-warning'
-})
+const runtimePathNoteTone = computed(() => captureGpuNativeTone.value)
 
 const liveSessionTitle = computed(() => (
   connectedClients.value.length > 1
@@ -1914,29 +1970,7 @@ onMounted(async () => {
     }
   } catch {}
 
-  // Fetch recent games for quick launch
-  await refreshApps()
-
-  // Fetch paired clients count + version
-  try {
-    const res = await fetch('./api/clients/list', { credentials: 'include' })
-    if (res.ok) {
-      const data = await res.json()
-      pairedClientList.value = data.named_certs || []
-      pairedClients.value = pairedClientList.value.length
-    }
-  } catch {}
-  try {
-    const res = await fetch('./api/config', { credentials: 'include' })
-    const data = await readConfigOrNull(res)
-    if (data) {
-      refreshClientSettingsSync(data)
-      version.value = data.version || '0.0.0'
-      headlessEnabled.value = data.headless_mode === 'enabled'
-      discoveryEnabled.value = data.enable_discovery !== 'disabled'
-      pairingEnabled.value = data.enable_pairing !== 'disabled'
-    }
-  } catch {}
+  await refreshLaunchChecks()
 
   resizeObserver = new ResizeObserver(() => {
     resizeCharts()

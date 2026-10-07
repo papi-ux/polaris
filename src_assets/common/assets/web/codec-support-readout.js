@@ -121,12 +121,51 @@ function routeLine(t, route) {
   return t(ROUTES.has(value) ? `config.codec_support_pyrowave_route_${value}` : 'config.codec_support_pyrowave_route_unknown')
 }
 
+// The short form a labelled route value shows; the sentence above explains it in the details.
+function routeValue(t, route) {
+  const value = text(route)
+  return t(ROUTES.has(value) ? `config.pyrowave_card_route_${value}` : 'config.pyrowave_card_route_unknown')
+}
+
 function chromaLabel(t, chroma) {
   return t(text(chroma) === '444' ? 'config.codec_support_chroma_444' : 'config.codec_support_chroma_420')
 }
 
+function clientName(t, client) {
+  return text(client?.name) || t('config.codec_support_client_unknown')
+}
+
+// One route per stream: two clients watching one PyroWave stream can each report their own.
+function routeValues(t, routed) {
+  if (routed.length > 1) {
+    return routed.map((client) => ({
+      id: 'route',
+      label: t('config.pyrowave_card_route_for', { client: clientName(t, client) }),
+      value: routeValue(t, client.pyrowave_route),
+    }))
+  }
+  return [{ id: 'route', label: t('config.pyrowave_card_route'), value: routeValue(t, routed[0]?.pyrowave_route) }]
+}
+
+function routeSentences(t, routed) {
+  if (routed.length > 1) {
+    return routed.map((client) => t('config.codec_support_pyrowave_client_route', {
+      client: clientName(t, client),
+      route: routeLine(t, client.pyrowave_route),
+    }))
+  }
+  return [routeLine(t, routed[0]?.pyrowave_route)]
+}
+
 /**
- * What the running PyroWave stream reports, or the last one when none runs; null when neither.
+ * What the running PyroWave stream reports, or the last one when none runs.
+ *
+ * Returns null when the stats have not arrived yet, so status stays unknown rather than idle, and
+ * { running: false, idle: true } when the host answered and neither a running nor a last PyroWave
+ * stream exists. Otherwise:
+ * - heading and client name the stream;
+ * - values are labelled facts, present only when the host reported them (never a zero stand-in);
+ * - lines stay visible; details hold the model's assumptions, rules and caps.
  * @param {Function} t The translate function.
  * @param {object} stats The stream stats from /api/stats/stream.
  */
@@ -138,12 +177,15 @@ export function describePyroWaveStream(t, stats) {
 
   if (!running) {
     const last = stats.last_session
-    if (!last || text(last.codec) !== 'pyrowave') return null
+    if (!last || text(last.codec) !== 'pyrowave') return { running: false, idle: true }
     return {
       running: false,
+      idle: false,
       heading: t('config.codec_support_pyrowave_last_session', { client: text(last.client_name) || t('config.codec_support_client_unknown') }),
-      routes: [routeLine(t, last.pyrowave_route)],
+      clients: [text(last.client_name) || t('config.codec_support_client_unknown')],
+      values: routeValues(t, [last]),
       lines: [t('config.codec_support_pyrowave_route_note')],
+      details: routeSentences(t, [last]),
     }
   }
 
@@ -156,24 +198,38 @@ export function describePyroWaveStream(t, stats) {
     t('config.codec_support_pyrowave_streaming', { width, height, fps, chroma: chromaLabel(t, chroma) }) :
     t('config.codec_support_pyrowave_streaming_unknown')
 
-  // One route per stream: two clients watching one PyroWave stream can each report their own.
-  const routes = pyrowaveClients.length > 1 ?
-    pyrowaveClients.map((client) => t('config.codec_support_pyrowave_client_route', {
-      client: text(client.name) || t('config.codec_support_client_unknown'),
-      route: routeLine(t, client.pyrowave_route),
-    })) :
-    [routeLine(t, pyrowaveClients[0]?.pyrowave_route)]
+  const values = []
+  // What the stream runs at, as the request the client set beside the encoder's own rate: an encoder
+  // rate read against a request looks a tenth short when it is not. A figure the host did not report
+  // reads as not reported, never as 0.
+  const notReported = t('config.pyrowave_card_not_reported')
+  values.push({
+    id: 'requested',
+    label: t('config.pyrowave_card_requested_bitrate'),
+    value: positive(advice?.request_kbps) ? t('config.pyrowave_card_mbps', { mbps: mbps(advice.request_kbps) }) : notReported,
+  })
+  values.push({
+    id: 'encoded',
+    label: t('config.pyrowave_card_encoded_bitrate'),
+    value: positive(advice?.encoder_kbps) ? t('config.pyrowave_card_mbps', { mbps: mbps(advice.encoder_kbps) }) : notReported,
+  })
+  values.push(...routeValues(t, pyrowaveClients))
 
   const lines = [t('config.codec_support_pyrowave_route_note')]
+  const details = routeSentences(t, pyrowaveClients)
+  const result = { running: true, idle: false, heading, clients: pyrowaveClients.map((client) => clientName(t, client)), values, lines, details }
   if (!advice || !positive(advice.advice_far_kbps) || !positive(advice.advice_near_kbps)) {
     lines.push(t('config.codec_support_pyrowave_no_advice'))
-    return { running: true, heading, routes, lines }
+    return result
   }
 
   lines.push(t('config.codec_support_pyrowave_advice', {
     far: mbps(advice.advice_far_kbps, { up: true }),
     near: mbps(advice.advice_near_kbps, { up: true }),
   }))
+  if (advice.starved === true) {
+    lines.push(t('config.codec_support_pyrowave_starved'))
+  }
   // The FEC share the host grossed the advice up for. Not fec_protection.fec_percentage: that records
   // a percentage only once a frame outgrows FEC, so it reads 0 on a healthy stream.
   const fec = advice.assumes?.fec_percentage
@@ -182,41 +238,32 @@ export function describePyroWaveStream(t, stats) {
   // two targets, so a missing field never pairs the Retroid Pocket 6 calibration with 35 dB.
   const db = positive(advice.target_db) || 35
   const farDb = positive(advice.far_target_db) || 31
-  lines.push(Number.isFinite(fec) && fec >= 0 ?
+  details.push(Number.isFinite(fec) && fec >= 0 ?
     t('config.codec_support_pyrowave_advice_conditions', { fec, db, far_db: farDb }) :
     t('config.codec_support_pyrowave_advice_conditions_no_fec', { db, far_db: farDb }))
   // The figures above are the model's readouts and are not capped. Past what Polaris recommends on its
-  // own, the line says so, so a television figure of 594 Mbps does not read as advice to set it.
+  // own, the visible lines say so, so a television figure of 594 Mbps does not read as advice to set it.
   const recommendedMost = positive(advice.cap_kbps)
   if (recommendedMost && (advice.advice_far_kbps > recommendedMost || advice.advice_near_kbps > recommendedMost)) {
     lines.push(t('config.codec_support_pyrowave_above_cap', { cap: mbps(recommendedMost) }))
   }
   if (RULES.has(text(advice.rule))) {
-    lines.push(t(`config.codec_support_pyrowave_rule_${text(advice.rule)}`))
-  }
-
-  // What the stream runs at, as the request the advice is in, beside the encoder's own rate: an encoder
-  // rate read against a request looks a tenth short when it is not.
-  if (positive(advice.request_kbps) && positive(advice.encoder_kbps)) {
-    lines.push(t('config.codec_support_pyrowave_rate_now', { request: mbps(advice.request_kbps), encoder: mbps(advice.encoder_kbps) }))
+    details.push(t(`config.codec_support_pyrowave_rule_${text(advice.rule)}`))
   }
   if (Number.isFinite(advice.ceiling_frame_share)) {
-    lines.push(t('config.codec_support_pyrowave_ceiling_share', { share: Math.round(advice.ceiling_frame_share * 100) }))
-  }
-  if (advice.starved === true) {
-    lines.push(t('config.codec_support_pyrowave_starved'))
+    details.push(t('config.codec_support_pyrowave_ceiling_share', { share: Math.round(advice.ceiling_frame_share * 100) }))
   }
   const limit = text(advice.raise_goal_limited_by)
   if (positive(advice.raise_goal_kbps) && RAISE_LIMITS.has(limit)) {
-    lines.push(t(`config.codec_support_pyrowave_raise_goal_${limit}`, { goal: mbps(advice.raise_goal_kbps, { up: true }) }))
+    details.push(t(`config.codec_support_pyrowave_raise_goal_${limit}`, { goal: mbps(advice.raise_goal_kbps, { up: true }) }))
   }
   const cap = advice.request_cap
   if (cap && positive(cap.kbps)) {
-    lines.push(t('config.codec_support_pyrowave_request_cap', { mbps: mbps(cap.kbps), source: text(cap.source) }))
+    details.push(t('config.codec_support_pyrowave_request_cap', { mbps: mbps(cap.kbps), source: text(cap.source) }))
   }
   const setAside = advice.cap_set_aside
   if (setAside && positive(setAside.kbps)) {
-    lines.push(t('config.codec_support_pyrowave_cap_set_aside', { mbps: mbps(setAside.kbps), source: text(setAside.source) }))
+    details.push(t('config.codec_support_pyrowave_cap_set_aside', { mbps: mbps(setAside.kbps), source: text(setAside.source) }))
   }
-  return { running: true, heading, routes, lines }
+  return result
 }

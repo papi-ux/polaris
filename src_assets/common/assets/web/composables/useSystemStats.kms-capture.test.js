@@ -58,4 +58,20 @@ describe('useSystemStats capture readiness', () => {
 
     wrapper.unmount()
   })
+
+  it('retires readiness after a failed poll and does not invent audio or display checks', async () => {
+    fetch.mockResolvedValueOnce(okResponse({ displays: [], audio: { sink: 'default' } }))
+      .mockResolvedValueOnce({ ok: false, status: 503 })
+      .mockResolvedValueOnce(okResponse({ gpu: null }))
+    const { exposed, wrapper } = mountComposable(() => useSystemStats(1000))
+    await flushPromises()
+    expect(exposed.readiness.value).toEqual({ displays: 'ready', audio: 'ready' })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(exposed.readiness.value).toEqual({ displays: 'unavailable', audio: 'unavailable' })
+    // The old sink can still be shown as historical data; it is no longer a passed check.
+    expect(exposed.audio.value.sink).toBe('default')
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(exposed.readiness.value).toEqual({ displays: 'unavailable', audio: 'unavailable' })
+    wrapper.unmount()
+  })
 })

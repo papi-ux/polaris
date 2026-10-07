@@ -606,6 +606,7 @@ namespace stream_stats {
       nlohmann::json j {
         {"schema", 1}, {"requested", vrr_policy::name(record.requested)},
         {"requested_from", vrr_policy::name(record.admission)},
+        {"host_permission", record.host_source_pacing},
         {"effective", decision.effective}, {"pacing_mode", decision.pacing_mode},
         {"fallback_reason", decision.fallback_reason}, {"capture_pacing", "unknown"},
       };
