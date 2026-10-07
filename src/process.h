@@ -45,6 +45,7 @@
 
 // local includes
 #include "capture_generation.h"
+#include "prelaunch_transition.h"
 #include "app_launch_as.h"
 #include "config.h"
 #include "steam_lifetime.h"
@@ -169,6 +170,30 @@ namespace proc {
   int prepare_host_virtual_capture_for_launch(const ctx_t &app, const launch_selection_t &selection, bool watch_only);
   int refuse_app_launch_as_before_launch(const struct ctx_t &app, const launch_selection_request_t &request);
   int refuse_app_launch_as_unavailable(const struct ctx_t &app, std::string reason);
+
+  /**
+   * @brief #204: an app's leave-Game-Mode step for one authorised, reserved launch.
+   *
+   * Every admitted entry calls this after it has authorised the request and holds the launch
+   * reservation, and before Launch as, app display semantics and the launch's own mode decision.
+   * An app with the setting off returns at once, so default launches are unchanged. A refusal is
+   * recorded with launch_failure before it returns. The caller reconciles the host's Game Mode
+   * state again after any outcome other than not_needed for an app that is off.
+   *
+   * @param expected_selection The exact topology the client resolved, when it sent one.
+   */
+  prelaunch::outcome_t prelaunch_for_admitted_launch(
+    prelaunch::entry_e entry,
+    const struct ctx_t &app,
+    const std::string &client_uuid,
+    std::uint64_t lifecycle_generation,
+    std::string_view expected_selection,
+    std::function<bool()> cancelled
+  );
+  /// #204: a fresh look, right before a restore, at what else is on the host; reason on true.
+  bool prelaunch_other_sessions_now(std::string &reason);
+  /// Tests answer the post-switch capture readiness of a selection; empty returns to the host check.
+  void set_prelaunch_capture_ready_for_tests(std::function<bool(std::string_view, std::string &)> ready);
 
   launch_as_availability_t launch_as_availability(const struct ctx_t &app);
 
@@ -839,6 +864,10 @@ namespace proc {
     // desktop Steam blocks a private launch of this app, shut it down and
     // proceed instead of refusing.
     bool close_desktop_steam_for_private = false;
+    // #204, private and off by default: leave Steam Game Mode before this app's own private launch.
+    // Only JSON true turns it on. This build has no session-switch adapter, so an enabled app on a
+    // host in Game Mode is refused before anything changes.
+    bool leave_game_mode_before_launch = false;
     std::string desktop_steam_lifetime = "inherit";
     bool use_app_identity = false;
     bool per_client_app_identity = false;
@@ -1117,6 +1146,11 @@ namespace proc {
     bool launch_input_only_and_raise(std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
 
     int execute(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    /// execute() under a reservation the caller already holds from try_begin_session_launch() (#204);
+    /// the caller finishes it.
+    int execute_admitted(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session);
+    /// #204: the transition generation the launched session committed, which its end must name.
+    void bind_prelaunch_transition(std::uint64_t transition_generation);
     int execute_and_raise(const ctx_t& _app, std::shared_ptr<rtsp_stream::launch_session_t> launch_session,
                           const std::function<int()> &publish);
     int validate_resolved_profile_for_running_app(
@@ -1337,6 +1371,8 @@ namespace proc {
     std::string _game_mode_launched_appid;
     /// Whether this session started with the host in Game Mode, so its Steam cleanup is not its own.
     bool _session_started_in_game_mode = false;
+    /// #204: the committed transition this session's end may restore; 0 for none.
+    std::uint64_t _prelaunch_transition_generation = 0;
     bool _keep_desktop_steam = false;
     bool _desktop_steam_preexisting = false;
     std::string _desktop_launched_appid;

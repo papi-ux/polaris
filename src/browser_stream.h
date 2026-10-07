@@ -20,6 +20,8 @@ namespace browser_stream {
   };
 
   bool build_enabled();
+  /// Whether a Browser Stream session holds the video capture now.
+  bool capture_active();
   nlohmann::json status_json();
   nlohmann::json create_session(
     std::string_view remote_address,
