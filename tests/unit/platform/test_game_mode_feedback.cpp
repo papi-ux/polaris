@@ -65,10 +65,10 @@ TEST_F(GameModeFeedbackTests, UnlinkedOrAmbiguousGraphNeverProbesASessionDisplay
   EXPECT_FALSE(result.route_bound);
 }
 
-TEST_F(GameModeFeedbackTests, UnreadableExecutableCannotSubstituteProcessOrNodeNames) {
+TEST_F(GameModeFeedbackTests, UnreadableGenerationCannotSubstituteProcessOrNodeNames) {
   probe.proc_root = scratch / "unavailable-proc";
   const auto result = platf::game_mode_feedback::collect_once([](auto) { return binding(getpid()); }, probe);
-  EXPECT_EQ(result.reason, "producer_exe_unreadable");
+  EXPECT_EQ(result.reason, "producer_generation_unreadable");
   EXPECT_FALSE(result.route_bound);
 }
 
@@ -185,6 +185,23 @@ TEST_F(GameModeFeedbackXTests, NodeNamesOrMatchingRootPropertiesCannotReplaceSoc
   const auto value = platf::game_mode_feedback::collect_once([](auto) { return binding(getpid()); }, probe);
   EXPECT_FALSE(value.route_bound);
   EXPECT_EQ(value.reason, "root_display_not_found");
+}
+
+TEST_F(GameModeFeedbackXTests, UnreadableExecutablePreservesBoundFeedbackWithUnknownVersionProvenance) {
+  probe.proc_root = scratch / "proc";
+  const auto producer = probe.proc_root / std::to_string(server);
+  std::filesystem::create_directories(producer);
+  for (const auto *name : {"stat", "status"}) {
+    std::ifstream source(std::filesystem::path("/proc") / std::to_string(server) / name);
+    std::ofstream destination(producer / name); destination << source.rdbuf();
+  }
+  std::filesystem::create_symlink(scratch / "not-readable", producer / "exe");
+  const auto value = collect();
+  ASSERT_TRUE(value.route_bound) << value.reason;
+  EXPECT_EQ(value.reason, "property_read_bracketed");
+  EXPECT_TRUE(value.version.producer_exe.empty());
+  EXPECT_FALSE(value.version.captured());
+  EXPECT_EQ(value.generation.exe_inode, 0u);
 }
 
 TEST_F(GameModeFeedbackXTests, SecondaryRootOneCannotStandInForRootZero) {

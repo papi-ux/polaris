@@ -11679,7 +11679,8 @@ TEST_F(StreamStatsCaptureTimingTests, HostObservationPublicRowsExcludePrivatePro
   store->publish(failure);
   auto frame = image(); frame.host_adaptive_sync = store;
   ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
-  EXPECT_EQ(timing()["host_adaptive_sync"]["version_provenance"]["producer_exe"], "/private/user/fixture/gamescope");
+  EXPECT_FALSE(timing()["host_adaptive_sync"].contains("version_provenance"));
+  EXPECT_EQ(timing()["host_adaptive_sync"].dump().find("/private/user/fixture"), std::string::npos);
   const auto public_readout = current_stats_json()["clients"][0]["host_adaptive_sync"];
   EXPECT_EQ(public_readout["observation_reason"], "producer_unbound");
   EXPECT_EQ(public_readout.dump().find("45678"), std::string::npos);

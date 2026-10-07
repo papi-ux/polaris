@@ -759,7 +759,7 @@ namespace stream_stats {
         "server_version_unsupported", "graph_identity_invalid", "capture_client_unknown",
         "capture_credentials_absent", "capture_node_unknown", "capture_node_not_owned",
         "source_not_linked", "source_ambiguous", "source_unattributed", "producer_credentials_absent",
-        "producer_uid_mismatch", "producer_restarted", "producer_exe_unreadable", "pid_namespace_mismatch",
+        "producer_uid_mismatch", "producer_restarted", "producer_exe_unreadable", "producer_generation_unreadable", "pid_namespace_mismatch",
         "producer_client_not_visible", "pipewire_graph_changed", "pipewire_read_timeout",
         "pipewire_version_unverified", "root_display_not_found", "root_display_ambiguous",
         "x_connect_failed_or_denied", "x_read_timeout", "x_snapshot_torn", "x_reader_unavailable",
@@ -4103,15 +4103,7 @@ namespace stream_stats {
     j["last_presentation_ns"] = timing.last_accepted.presentation.ns ?
       nlohmann::json(*timing.last_accepted.presentation.ns) : nlohmann::json(nullptr);
     j["host_adaptive_sync"] = host_adaptive_sync_json(timing.last_accepted);
-    if (timing.last_accepted.host_adaptive_sync) {
-      const auto record = timing.last_accepted.host_adaptive_sync->read();
-      j["host_adaptive_sync"] = host_adaptive_sync_record_json(record);
-      const auto &version = record.last_known ? record.last_known->version : record.attempt.version;
-      j["host_adaptive_sync"]["version_provenance"] = {
-        {"producer_exe", version.producer_exe}, {"os_release", version.os_release},
-        {"package", version.package ? nlohmann::json(*version.package) : nlohmann::json(nullptr)},
-        {"operator_reports", version.operator_reports}, {"range_status", "unmapped"}};
-    }
+
     return j;
   }
 

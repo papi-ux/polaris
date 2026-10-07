@@ -62,7 +62,10 @@ namespace platf::game_mode_feedback {
       generation.pid = binding.producer_pid;
       if (!decimal(field, generation.start_time) || generation.start_time == 0) return std::nullopt;
       struct stat executable {};
-      if (::stat((path / "exe").c_str(), &executable) != 0 || !S_ISREG(executable.st_mode)) return std::nullopt;
+      // Capability-holding gamescope can withhold ptrace-read access to /proc/P/exe. The linked
+      // client, socket peer, UID and process start-time bracket still bind the observation; only
+      // executable/version provenance is unknown. Never substitute comm, a node name or a path.
+      if (::stat((path / "exe").c_str(), &executable) != 0 || !S_ISREG(executable.st_mode)) return generation;
       generation.exe_device = executable.st_dev;
       generation.exe_inode = executable.st_ino;
       generation.exe_size = executable.st_size;
@@ -127,6 +130,8 @@ namespace platf::game_mode_feedback {
     };
 
     int connect_peer(const std::filesystem::path &path, const capture_producer::binding_t &binding, steady_clock_t::time_point deadline) {
+      struct stat socket_file {};
+      if (::stat(path.c_str(), &socket_file) != 0 || !S_ISSOCK(socket_file.st_mode) || socket_file.st_uid != binding.producer_uid) return -1;
       const auto name = path.string();
       sockaddr_un address {};
       address.sun_family = AF_UNIX;
@@ -254,10 +259,11 @@ namespace platf::game_mode_feedback {
     const auto before = graph(std::chrono::milliseconds(100));
     if (!before.verified) { value.reason = before.reason; return value; }
     const auto generation = process_generation(probe, before);
-    if (!generation) { value.reason = "producer_exe_unreadable"; return value; }
+    if (!generation) { value.reason = "producer_generation_unreadable"; return value; }
     value.generation = *generation;
     value.generation_checked = true;
     value.version = versions(probe, before);
+    if (generation->exe_inode == 0) value.version.producer_exe.clear();
 #ifdef POLARIS_BUILD_X11_XCB
     value = read_roots(std::move(value), before, probe);
 #else
