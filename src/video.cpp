@@ -16,6 +16,7 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -3547,7 +3548,22 @@ namespace video {
     }
   }
 
-  static capture_epoch_t open_capture_epoch(const platf::display_t &disp, std::uint64_t capture_generation_id) {
+  /// The clocks every production epoch reads: the kernel's, on Linux; none elsewhere.
+  static vrr_clock::system_t *production_epoch_clocks() {
+#ifdef __linux__
+    return &vrr_clock::linux_probe::real_system();
+#else
+    return nullptr;
+#endif
+  }
+
+  /**
+   * Open one epoch whose proof and per-frame mapping read clocks. Production passes the kernel's
+   * (production_epoch_clocks()); only the test stepper passes another. A null clocks pointer leaves the
+   * epoch without a proof, so its frames can never map.
+   */
+  static capture_epoch_t open_capture_epoch(const platf::display_t &disp, std::uint64_t capture_generation_id,
+                                            [[maybe_unused]] vrr_clock::system_t *clocks) {
     capture_epoch_t epoch;
     if (encoder_probe_active()) return epoch;
     epoch.capture_generation_id = capture_generation_id;
@@ -3555,7 +3571,7 @@ namespace video {
     if (epoch.epoch_id == 0) return epoch;  // exhausted: unstamped, unrecordable, never a reused identity
     epoch.route = disp.capture_timing;
 #ifdef __linux__
-    if (epoch.route.presentation == platf::presentation_clock_e::ext_image_copy_monotonic) {
+    if (epoch.route.presentation == platf::presentation_clock_e::ext_image_copy_monotonic && clocks) {
       // The expectation is the lease this display retained when it connected to its frozen private
       // generation (none for desktop, KMS, Gamescope, unowned or probe displays). collect() verifies
       // the socket peer it actually reads against it, so the clock domain is verified only for that
@@ -3563,7 +3579,7 @@ namespace video {
       // Snapshot the lease once: the proof is collected against this object, and every frame of
       // the epoch is later checked against the same one, never against a newer foreign lease.
       epoch.lease = disp.compositor_lease();
-      epoch.clocks = &vrr_clock::linux_probe::real_system();
+      epoch.clocks = clocks;
       epoch.proof = vrr_clock::collect(
         disp.presentation_peer_fd(),
         epoch.epoch_id,
@@ -3581,6 +3597,10 @@ namespace video {
     }
 #endif
     return epoch;
+  }
+
+  static capture_epoch_t open_capture_epoch(const platf::display_t &disp, std::uint64_t capture_generation_id) {
+    return open_capture_epoch(disp, capture_generation_id, production_epoch_clocks());
   }
 
   void captureThread(
@@ -8540,6 +8560,14 @@ namespace video {
   }
 
   struct capture_epoch_stepper_for_tests_t::epoch_t {
+    epoch_t(const platf::display_t &disp, std::uint64_t capture_generation_id, std::shared_ptr<vrr_clock::system_t> retained):
+        clocks {std::move(retained)},
+        value {open_capture_epoch(disp, capture_generation_id, clocks ? clocks.get() : production_epoch_clocks())} {
+    }
+
+    /// Declared first: initialised before the epoch reads it, destroyed after the epoch (and the
+    /// authority it published) is closed. Null means the production kernel clocks.
+    std::shared_ptr<vrr_clock::system_t> clocks;
     capture_epoch_t value;
   };
 
@@ -8547,7 +8575,22 @@ namespace video {
     const platf::display_t &disp,
     std::uint64_t capture_generation_id
   ):
-      epoch_ {std::make_unique<epoch_t>(epoch_t {open_capture_epoch(disp, capture_generation_id)})} {
+      epoch_ {std::make_unique<epoch_t>(disp, capture_generation_id, nullptr)} {
+  }
+
+  namespace {
+    std::shared_ptr<vrr_clock::system_t> require_test_clocks(std::shared_ptr<vrr_clock::system_t> clocks) {
+      if (!clocks) throw std::invalid_argument {"capture_epoch_stepper_for_tests_t needs non-null clocks"};
+      return clocks;
+    }
+  }  // namespace
+
+  capture_epoch_stepper_for_tests_t::capture_epoch_stepper_for_tests_t(
+    const platf::display_t &disp,
+    std::uint64_t capture_generation_id,
+    std::shared_ptr<vrr_clock::system_t> clocks
+  ):
+      epoch_ {std::make_unique<epoch_t>(disp, capture_generation_id, require_test_clocks(std::move(clocks)))} {
   }
 
   capture_epoch_stepper_for_tests_t::~capture_epoch_stepper_for_tests_t() = default;

@@ -18,6 +18,7 @@
 #include <src/thread_safe.h>
 #include <src/utility.h>
 #include <src/video.h>
+#include <src/vrr_epoch_authority.h>
 #include <src/vrr_source_pacing.h>
 #include <src/vrr_source_time.h>
 
@@ -84,9 +85,13 @@ TEST(SourcePacingPolicyTests, ALowerGameFrameRateIsNotEncoderPressureButASlowEnc
 #ifdef __linux__
   #include "platform/compositor_identity_fixture.h"
 
+  #include <src/platform/linux/vrr_clock_probe.h>
+
+  #include <algorithm>
   #include <atomic>
   #include <functional>
   #include <memory>
+  #include <stdexcept>
   #include <string>
   #include <thread>
   #include <time.h>
@@ -391,6 +396,115 @@ namespace {
            " proof.epoch_start_mono_ns=" + std::to_string(proof->epoch_start_mono_ns);
   }
 
+  /// The fixed, in-bound bracket of every stable clock sample (well inside the 20 us per-frame limit).
+  constexpr std::int64_t k_stable_bracket_ns = 1'000;
+
+  /**
+   * The clocks of a positive mapped-source fixture epoch. Every kernel fact collect() reads (socket peer,
+   * uid, start times, time namespaces) and the epoch start are the real kernel's, unchanged. Only the
+   * bracketed clock samples are stable: one real CLOCK_MONOTONIC read m becomes
+   * {before = m - floor(b / 2), steady = m + d, after = before + b}, so the clock advances with real
+   * elapsed time (liveness, source age, the rate ceiling and the one-second health window stay real)
+   * while scheduling jitter between two reads cannot widen a bracket. The steady coordinate is m itself
+   * because steady_clock is CLOCK_MONOTONIC here, checked by stable_clock() before any use. Production
+   * limits, lease checks and pacing are untouched; negative cases arm out-of-bound values through the
+   * same production collect() and per-frame paths. Armed only from the test thread, between pushes.
+   */
+  class stable_real_time_clock_t final: public vrr_clock::system_t {
+  public:
+    std::optional<peer_cred_t> peer_credentials(int fd) override {
+      return real().peer_credentials(fd);
+    }
+
+    std::optional<vrr_clock::ns_id_t> time_namespace(std::int64_t pid) override {
+      return real().time_namespace(pid);
+    }
+
+    std::optional<std::uint64_t> process_starttime(std::int64_t pid) override {
+      return real().process_starttime(pid);
+    }
+
+    std::uint32_t current_uid() override {
+      return real().current_uid();
+    }
+
+    std::int64_t monotonic_now_ns() override {
+      return unusable_ ? vrr_clock::k_failed_read : real().monotonic_now_ns();
+    }
+
+    vrr_clock::probe_sample_t sample_clocks() override {
+      vrr_clock::probe_sample_t sample;  // every field k_failed_read
+      const auto m = unusable_ ? vrr_clock::k_failed_read : real().monotonic_now_ns();
+      if (m < 0) return sample;
+      std::int64_t bracket = live_bracket_ns_;
+      std::int64_t drift = live_drift_ns_;
+      if (const auto pending = proof_samples_pending_.load(); pending > 0) {
+        proof_samples_pending_ = pending - 1;
+        bracket = proof_bracket_ns_;
+        drift = 0;
+      }
+      sample.mono_before_ns = m - bracket / 2;  // floor: both operands are nonnegative
+      sample.mono_after_ns = sample.mono_before_ns + bracket;  // exactly bracket wide, odd widths included
+      sample.steady_ns = m + drift;
+      return sample;
+    }
+
+    /// The next collect(), which takes exactly the default proof sample count, reads this bracket.
+    void arm_proof(std::int64_t bracket_ns) {
+      proof_bracket_ns_ = bracket_ns;
+      proof_samples_pending_ = static_cast<int>(std::clamp(
+        vrr_clock::mapping_limits_t {}.min_samples, vrr_clock::k_min_probe_samples, vrr_clock::k_max_probe_samples
+      ));
+    }
+
+    int proof_samples_pending() const {
+      return proof_samples_pending_;
+    }
+
+    /// Every later per-frame sample reads this bracket and steady drift, until disarmed.
+    void arm(std::int64_t bracket_ns, std::int64_t drift_ns) {
+      live_bracket_ns_ = bracket_ns;
+      live_drift_ns_ = drift_ns;
+    }
+
+    void disarm() {
+      arm(k_stable_bracket_ns, 0);
+    }
+
+    /// A host whose steady clock is not CLOCK_MONOTONIC: every read fails, so no proof can be built.
+    void make_unusable() {
+      unusable_ = true;
+    }
+
+  private:
+    static vrr_clock::system_t &real() {
+      return vrr_clock::linux_probe::real_system();
+    }
+
+    std::atomic<bool> unusable_ {false};
+    std::atomic<int> proof_samples_pending_ {0};
+    std::atomic<std::int64_t> proof_bracket_ns_ {k_stable_bracket_ns};
+    std::atomic<std::int64_t> live_bracket_ns_ {k_stable_bracket_ns};
+    std::atomic<std::int64_t> live_drift_ns_ {0};
+  };
+
+  /**
+   * Stable clocks for one positive fixture epoch, after confirming on this host that a real steady
+   * read lies inside a real CLOCK_MONOTONIC bracket (the steady coordinate offset is then 0). A host
+   * where it does not is a test failure, never a skip: the clocks then read nothing, so the fixture's
+   * mapped-receipt preconditions fail with their named receipt.
+   */
+  std::shared_ptr<stable_real_time_clock_t> stable_clock() {
+    const auto real = vrr_clock::linux_probe::real_system().sample_clocks();
+    const bool inside = real.mono_before_ns >= 0 && real.steady_ns >= 0 && real.mono_after_ns >= 0 &&
+                        real.mono_before_ns <= real.steady_ns && real.steady_ns <= real.mono_after_ns;
+    EXPECT_TRUE(inside) << "steady_clock is not CLOCK_MONOTONIC on this host: before=" << real.mono_before_ns
+                        << " steady=" << real.steady_ns << " after=" << real.mono_after_ns;
+    auto clocks = std::make_shared<stable_real_time_clock_t>();
+    if (!inside) clocks->make_unusable();
+    return clocks;
+  }
+
   /// Run body with the real software H.264 encoder selected once for every loop in it, then restored.
   void with_h264(const std::function<void()> &body) {
     ASSERT_TRUE(video::with_software_h264_for_tests(body)) << "this build has no software H.264 encoder";
@@ -405,7 +519,7 @@ TEST(SourcePacingProductionTests, UnevenSourceFramesAreEncodedAtExactlyTheirMapp
   REQUIRE_PRODUCTION_FIXTURE(compositor);
   with_h264([&] {
     paced_stream_t stream {compositor, stream_config(120, opted_in(), 9101)};
-    video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation};
+    video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation, stable_clock()};
     ASSERT_TRUE(epoch.opened().proof && epoch.opened().proof->clock_domain_verified);
     const auto readiness = stream.drain(150ms);
     ASSERT_FALSE(readiness.empty()) << "no initial readiness";
@@ -441,7 +555,7 @@ TEST(SourcePacingProductionTests, AStaticSourceGetsOnlyBoundedLivenessAndALabell
   REQUIRE_PRODUCTION_FIXTURE(compositor);
   with_h264([&] {
     paced_stream_t stream {compositor, stream_config(120, opted_in(), 9102)};
-    video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation};
+    video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation, stable_clock()};
     (void) stream.drain(150ms);
     auto frame = stamped_frame(epoch, monotonic_now_ns());
     stream.raise(frame);
@@ -486,7 +600,7 @@ TEST(SourcePacingProductionTests, TheRateCeilingBoundsActualEncodeWorkButAllowsA
   REQUIRE_PRODUCTION_FIXTURE(compositor);
   with_h264([&] {
     paced_stream_t stream {compositor, stream_config(60, opted_in(), 9103)};
-    video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation};
+    video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation, stable_clock()};
     (void) stream.drain(150ms);
     // 240 fps of valid source frames for 250 ms against a 60 fps stream.
     int raised = 0;
@@ -541,7 +655,7 @@ TEST(SourcePacingProductionTests, ALeaseRetiredDuringConversionIsNeverEncodedAnd
       // Stands in for a conversion that blocks while the generation is retired.
       if (++converts == retire_on.load()) published->store(false);
     }};
-    video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation};
+    video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation, stable_clock()};
     (void) stream.drain(150ms);
     auto before = stamped_frame(epoch, monotonic_now_ns());
     stream.raise(before);
@@ -562,7 +676,7 @@ TEST(SourcePacingProductionTests, ALeaseRetiredDuringConversionIsNeverEncodedAnd
     }
     // Republished and reopened (a new epoch): the generation stays in fallback.
     published->store(true);
-    video::capture_epoch_stepper_for_tests_t reopened {*stream.display(), k_capture_generation};
+    video::capture_epoch_stepper_for_tests_t reopened {*stream.display(), k_capture_generation, stable_clock()};
     for (int index = 0; index < 4; ++index) {
       std::this_thread::sleep_for(20ms);
       auto later = stamped_frame(reopened, monotonic_now_ns());
@@ -586,7 +700,7 @@ TEST(SourcePacingProductionTests, ALeaseRetiredWhileIdleBlocksAuthorisedRecovery
   REQUIRE_PRODUCTION_FIXTURE(compositor);
   with_h264([&] {
     paced_stream_t stream {compositor, stream_config(120, opted_in(), 9112)};
-    video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation};
+    video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation, stable_clock()};
     (void) stream.drain(150ms);
     auto frame = stamped_frame(epoch, monotonic_now_ns());
     stream.raise(frame);
@@ -604,7 +718,7 @@ TEST(SourcePacingProductionTests, ALeaseRetiredWhileIdleBlocksAuthorisedRecovery
     EXPECT_EQ(stream.count_reaching(event_e::authority_lost, 1u), 1u);
     // A valid new epoch after republish stays in fallback.
     compositor.published->store(true);
-    video::capture_epoch_stepper_for_tests_t reopened {*stream.display(), k_capture_generation};
+    video::capture_epoch_stepper_for_tests_t reopened {*stream.display(), k_capture_generation, stable_clock()};
     std::this_thread::sleep_for(15ms);
     auto later = stamped_frame(reopened, monotonic_now_ns());
     ASSERT_EQ(later->provenance.source_time.result, vrr_clock::source_time_e::mapped);
@@ -620,7 +734,7 @@ TEST(SourcePacingProductionTests, EmissionStaysOrderedAcrossReplayEqualTickRecov
   REQUIRE_PRODUCTION_FIXTURE(compositor);
   with_h264([&] {
     paced_stream_t stream {compositor, stream_config(120, opted_in(), 9105)};
-    video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation};
+    video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation, stable_clock()};
     (void) stream.drain(150ms);
     // Every frame this test relies on must carry a mapped receipt from the production stamp path; a
     // refusal is a fatal, named precondition failure (never skipped, never an ignored frame).
@@ -657,7 +771,7 @@ TEST(SourcePacingProductionTests, EmissionStaysOrderedAcrossReplayEqualTickRecov
     last = steady_ns(*recovery->frame_timestamp);
     stream.raise(older);
     EXPECT_FALSE(stream.next_packet(150ms)) << "a source older than the recovery was emitted";
-    video::capture_epoch_stepper_for_tests_t reopened {*stream.display(), k_capture_generation};
+    video::capture_epoch_stepper_for_tests_t reopened {*stream.display(), k_capture_generation, stable_clock()};
     std::this_thread::sleep_for(10ms);
     auto after = stamped_frame(reopened, monotonic_now_ns());
     ASSERT_EQ(after->provenance.source_time.result, vrr_clock::source_time_e::mapped) << receipt_diagnostic("after", *after);
@@ -721,7 +835,7 @@ TEST(SourcePacingProductionTests, OneStampedImageIsSourcePacedForAnEligibleConsu
     // Two concurrent real loops under one encoder selection, as two consumers of one producer.
     paced_stream_t eligible {compositor, stream_config(120, opted_in(), 9113)};
     paced_stream_t host_off {compositor, stream_config(120, {false, vrr_policy::requested_e::on, false}, 9114)};
-    video::capture_epoch_stepper_for_tests_t epoch {*eligible.display(), k_capture_generation};
+    video::capture_epoch_stepper_for_tests_t epoch {*eligible.display(), k_capture_generation, stable_clock()};
     (void) eligible.drain(150ms);
     (void) host_off.drain(150ms);
     auto frame = stamped_frame(epoch, monotonic_now_ns());
@@ -769,7 +883,7 @@ TEST(SourcePacingProductionTests, ReadinessThenAnUnprovenEpochKeepsTheLegacyLoop
     // After an effective source frame, a reopen whose epoch cannot prove anything stays fail-closed.
     {
       paced_stream_t stream {compositor, stream_config(120, opted_in(), 9116)};
-      video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation};
+      video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation, stable_clock()};
       (void) stream.drain(150ms);
       auto frame = stamped_frame(epoch, monotonic_now_ns());
       stream.raise(frame);
@@ -794,7 +908,7 @@ TEST(SourcePacingProductionTests, AFrameCarryingAnotherProofObjectIsNeverSourceP
   REQUIRE_PRODUCTION_FIXTURE(compositor);
   with_h264([&] {
     paced_stream_t stream {compositor, stream_config(120, opted_in(), 9111)};
-    video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation};
+    video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation, stable_clock()};
     (void) stream.drain(150ms);
     auto genuine = stamped_frame(epoch, monotonic_now_ns());
     stream.raise(genuine);
@@ -830,7 +944,7 @@ TEST(SourcePacingProductionTests, ThePeriodicPolicySampleIsSourceRelativeForItsO
     auto reset_own_stats = util::fail_guard([] { stream_stats::update_stream_active(false); });
     {
       paced_stream_t stream {compositor, stream_config(static_cast<int>(ceiling_fps), opted_in(), generation)};
-      video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation};
+      video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation, stable_clock()};
       ASSERT_TRUE(epoch.opened().proof && epoch.opened().proof->clock_domain_verified);
       (void) stream.drain(150ms);
       // The loop's own periodic branch, read through the published policy sample: this generation's
@@ -847,7 +961,7 @@ TEST(SourcePacingProductionTests, ThePeriodicPolicySampleIsSourceRelativeForItsO
         // the feed rate stays below the 120 FPS ceiling.
         std::this_thread::sleep_for(index % 2 ? 14ms : 12ms);
         auto frame = stamped_frame(epoch, monotonic_now_ns());
-        ASSERT_EQ(frame->provenance.source_time.result, vrr_clock::source_time_e::mapped);
+        ASSERT_EQ(frame->provenance.source_time.result, vrr_clock::source_time_e::mapped) << receipt_diagnostic("periodic", *frame);
         stream.raise(frame);
         while (auto packet = stream.next_packet(0ms)) {
           if (packet->source_time_paced) ++paced;
@@ -891,6 +1005,133 @@ TEST(SourcePacingProductionTests, ThePeriodicPolicySampleIsSourceRelativeForItsO
     for (const auto &client : after.clients) EXPECT_NE(client.session_generation, generation);
     EXPECT_TRUE(stream_stats::vrr_json(after, generation).is_null());
     EXPECT_EQ(config::video.vrr_source_pacing, host_flag) << "the case changed the host opt-in";
+  });
+}
+
+TEST(SourcePacingProductionTests, AnOverBracketOrDriftedLiveClockReadIsRefusedPerFrameAndNeverPaced) {
+  pinned_compositor_t compositor;
+  REQUIRE_PRODUCTION_FIXTURE(compositor);
+  with_h264([&] {
+    paced_stream_t stream {compositor, stream_config(120, opted_in(), 9118)};
+    // A null injection is refused before any epoch opens; the default constructor stays the real path.
+    EXPECT_THROW((void) std::make_unique<video::capture_epoch_stepper_for_tests_t>(*stream.display(), k_capture_generation, nullptr),
+                 std::invalid_argument);
+    const auto clocks = stable_clock();
+    video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation, clocks};
+    const auto opened = epoch.opened();
+    ASSERT_TRUE(opened.proof);
+    ASSERT_TRUE(opened.proof->clock_domain_verified) << opened.proof->mapping.reason;
+    EXPECT_EQ(opened.proof->mapping.max_bracket_ns, static_cast<std::uint64_t>(k_stable_bracket_ns));
+    EXPECT_EQ(vrr_clock::check_epoch_authority(opened.epoch_id, k_capture_generation, opened.proof.get()),
+              vrr_clock::authority_e::current);
+    (void) stream.drain(150ms);
+    std::uint64_t accepted = 0;
+    std::uint64_t refused = 0;
+    // An in-bound live read: mapped through the production stamp, emitted at exactly its source time.
+    const auto expect_paced = [&](const char *label) {
+      std::this_thread::sleep_for(12ms);
+      auto frame = stamped_frame(epoch, monotonic_now_ns());
+      ASSERT_EQ(frame->provenance.source_time.result, vrr_clock::source_time_e::mapped) << receipt_diagnostic(label, *frame);
+      stream.raise(frame);
+      auto packet = stream.next_packet(400ms);
+      ASSERT_TRUE(packet) << label;
+      ASSERT_TRUE(packet->frame_timestamp) << label;
+      EXPECT_TRUE(packet->source_time_paced) << label;
+      EXPECT_EQ(steady_ns(*packet->frame_timestamp), mapped_ns(*frame)) << label;
+      ++accepted;
+      EXPECT_EQ(stream.count_reaching(event_e::accepted_source, accepted), accepted) << label;
+    };
+    // An out-of-bound live read: refused at stamping, never paced, and named by the real loop.
+    const auto expect_refused = [&](const char *label) {
+      std::this_thread::sleep_for(12ms);
+      auto frame = stamped_frame(epoch, monotonic_now_ns());
+      ASSERT_EQ(frame->provenance.source_time.result, vrr_clock::source_time_e::mapping_drifted) << receipt_diagnostic(label, *frame);
+      EXPECT_EQ(mapped_ns(*frame), -1) << label;
+      stream.raise(frame);
+      for (const auto &packet : stream.drain(150ms)) {
+        EXPECT_FALSE(packet->source_time_paced) << label;
+      }
+      ++refused;
+      EXPECT_EQ(stream.count_reaching(event_e::receipt_not_mapped, refused), refused) << label;
+    };
+    ASSERT_NO_FATAL_FAILURE(expect_paced("stable"));
+    // Causal: each refusal below is the injected live sample's own, at one unit past the production bound.
+    clocks->arm(20'001, 0);
+    ASSERT_NO_FATAL_FAILURE(expect_refused("live bracket 20001 ns"));
+    clocks->arm(20'000, 0);
+    ASSERT_NO_FATAL_FAILURE(expect_paced("live bracket exactly 20000 ns"));
+    clocks->arm(k_stable_bracket_ns, 50'001);
+    ASSERT_NO_FATAL_FAILURE(expect_refused("live drift 50001 ns"));
+    clocks->arm(k_stable_bracket_ns, 50'000);
+    ASSERT_NO_FATAL_FAILURE(expect_paced("live drift exactly 50000 ns"));
+    clocks->disarm();
+    ASSERT_NO_FATAL_FAILURE(expect_paced("disarmed"));
+    // A per-frame refusal neither latched nor unsupported the session.
+    EXPECT_EQ(stream.count(event_e::authority_lost), 0u);
+    EXPECT_EQ(stream.count(event_e::unsupported_route), 0u);
+    EXPECT_EQ(stream.vrr()["effective"], true);
+  });
+}
+
+TEST(SourcePacingProductionTests, AnEpochWhoseOwnClockProofIsOutOfBoundsNeverMapsOrPaces) {
+  pinned_compositor_t compositor;
+  REQUIRE_PRODUCTION_FIXTURE(compositor);
+  with_h264([&] {
+    {
+      paced_stream_t stream {compositor, stream_config(120, opted_in(), 9119)};
+      const auto clocks = stable_clock();
+      clocks->arm_proof(50'001);
+      video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation, clocks};
+      EXPECT_EQ(clocks->proof_samples_pending(), 0) << "collect() did not read exactly the armed proof samples";
+      const auto opened = epoch.opened();
+      ASSERT_TRUE(opened.proof);
+      // The production bound refused the proof while the real identity, namespace and live lease held.
+      EXPECT_FALSE(opened.proof->mapping.valid);
+      EXPECT_EQ(opened.proof->mapping.reason, "uncertainty_out_of_bounds");
+      EXPECT_EQ(opened.proof->mapping.max_bracket_ns, 50'001u);
+      EXPECT_EQ(opened.proof->mapping.uncertainty_ns, 50'001u);
+      EXPECT_TRUE(opened.proof->producer_identity_verified) << opened.proof->producer_identity_reason;
+      EXPECT_EQ(opened.proof->time_namespace, vrr_clock::namespace_e::same) << opened.proof->namespace_reason;
+      EXPECT_FALSE(opened.proof->clock_domain_verified);
+      EXPECT_FALSE(vrr_clock::authorises_clock_comparison(*opened.proof));
+      EXPECT_EQ(vrr_clock::check_epoch_authority(opened.epoch_id, k_capture_generation, opened.proof.get()),
+                vrr_clock::authority_e::no_epoch)
+        << "an unproven epoch published authority";
+      (void) stream.drain(150ms);
+      auto frame = stamped_frame(epoch, monotonic_now_ns());
+      ASSERT_EQ(frame->provenance.source_time.result, vrr_clock::source_time_e::mapping_invalid)
+        << receipt_diagnostic("proof bracket 50001 ns", *frame);
+      stream.raise(frame);
+      for (const auto &packet : stream.drain(300ms)) {
+        EXPECT_FALSE(packet->source_time_paced);
+      }
+      EXPECT_EQ(stream.count_reaching(event_e::unsupported_route, 1u), 1u);
+      EXPECT_EQ(stream.count(event_e::accepted_source), 0u);
+    }
+    {
+      paced_stream_t stream {compositor, stream_config(120, opted_in(), 9120)};
+      const auto clocks = stable_clock();
+      clocks->arm_proof(50'000);
+      video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation, clocks};
+      EXPECT_EQ(clocks->proof_samples_pending(), 0) << "collect() did not read exactly the armed proof samples";
+      const auto opened = epoch.opened();
+      ASSERT_TRUE(opened.proof);
+      ASSERT_TRUE(opened.proof->clock_domain_verified) << opened.proof->mapping.reason;
+      EXPECT_EQ(opened.proof->mapping.uncertainty_ns, 50'000u);
+      EXPECT_EQ(vrr_clock::check_epoch_authority(opened.epoch_id, k_capture_generation, opened.proof.get()),
+                vrr_clock::authority_e::current);
+      (void) stream.drain(150ms);
+      auto first = stamped_frame(epoch, monotonic_now_ns());
+      ASSERT_EQ(first->provenance.source_time.result, vrr_clock::source_time_e::mapped)
+        << receipt_diagnostic("first under a 50000 ns proof", *first);
+      stream.raise(first);
+      auto packet = stream.next_packet(400ms);
+      ASSERT_TRUE(packet);
+      ASSERT_TRUE(packet->frame_timestamp);
+      EXPECT_TRUE(packet->source_time_paced);
+      EXPECT_EQ(steady_ns(*packet->frame_timestamp), mapped_ns(*first));
+      EXPECT_EQ(stream.count_reaching(event_e::accepted_source, 1u), 1u);
+    }
   });
 }
 

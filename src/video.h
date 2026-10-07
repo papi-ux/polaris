@@ -37,6 +37,7 @@ extern "C" {
 struct AVPacket;
 namespace config { struct video_t; }
 namespace stream_stats { struct capture_source_t; }
+namespace vrr_clock { class system_t; }
 
 namespace video {
 
@@ -1267,7 +1268,16 @@ namespace video {
    */
   class capture_epoch_stepper_for_tests_t {
   public:
+    /// The production open: the epoch reads the real kernel clocks and facts.
     capture_epoch_stepper_for_tests_t(const platf::display_t &disp, std::uint64_t capture_generation_id);
+    /**
+     * Test-only: the epoch's collect() and every per-frame mapping read their facts and clock samples
+     * through clocks instead of the kernel. The stepper retains clocks for the epoch's whole life and
+     * releases it only after the epoch (and any authority it published) is closed. Limits, lease
+     * checks and pacing are unchanged. Throws std::invalid_argument when clocks is null.
+     */
+    capture_epoch_stepper_for_tests_t(const platf::display_t &disp, std::uint64_t capture_generation_id,
+                                      std::shared_ptr<vrr_clock::system_t> clocks);
     ~capture_epoch_stepper_for_tests_t();
     capture_epoch_stepper_for_tests_t(const capture_epoch_stepper_for_tests_t &) = delete;
     capture_epoch_stepper_for_tests_t &operator=(const capture_epoch_stepper_for_tests_t &) = delete;
