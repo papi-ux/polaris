@@ -5,7 +5,7 @@ export const test = base.extend({
     const user = process.env.POLARIS_USER
     const pass = process.env.POLARIS_PASS
     if (!user || !pass) {
-      test.skip(true, 'POLARIS_USER and POLARIS_PASS must be set')
+      throw new Error('POLARIS_USER and POLARIS_PASS must be set for authenticated live-host tests')
     }
 
     await page.context().clearCookies()
