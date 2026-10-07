@@ -53,6 +53,7 @@ extern "C" {
 #include "video_frame_pacing.h"
 #include "encoder_probe_reuse.h"
 #include "vrr_clock_proof.h"
+#include "vrr_source_time.h"
 #include <iomanip>
 
 #ifdef __linux__

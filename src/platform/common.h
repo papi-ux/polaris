@@ -32,7 +32,7 @@
 #include "src/utility.h"
 #include "src/video_colorspace.h"
 #include "src/vrr_session_policy.h"
-#include "src/vrr_source_time.h"
+#include "src/vrr_source_time_receipt.h"
 
 extern "C" {
 #include <moonlight-common-c/src/Limelight.h>
