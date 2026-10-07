@@ -475,7 +475,21 @@ namespace {
     return app;
   }
 
-  /// The Game Mode answer this process reads, moved by the stand-in adapter.
+  prelaunch::session_identity_t stand_in_session(std::string id, prelaunch::mode_e mode, char generation) {
+    prelaunch::session_identity_t session;
+    session.boot_id = "6c1b5f3e-2a4d-4c8e-9f10-0123456789ab";
+    session.logind_id = std::move(id);
+    session.logind_started = 5000;
+    session.uid = 1000;
+    session.leader_pid = 100;
+    session.leader_start_ticks = 5000;
+    session.target_invocation = std::string(32, generation);
+    session.mode = mode;
+    return session;
+  }
+
+  /// The Game Mode answer this process reads, moved by the stand-in adapter, and session records
+  /// that follow it: one Game Mode session, then (unless held back) one new desktop session.
   class session_answer_host_t final: public prelaunch::host_t {
   public:
     bool desktop_appears = true;
@@ -488,14 +502,20 @@ namespace {
       return platf::game_mode_host::session_live_fresh();
     }
 
-    std::optional<prelaunch::session_identity_t> game_mode_session() override {
-      if (!platf::game_mode_host::session_live_fresh()) return std::nullopt;
-      return prelaunch::session_identity_t {100, 5000, "session-1.scope"};
-    }
-
-    std::optional<prelaunch::session_identity_t> desktop_session() override {
-      if (!desktop_appears || platf::game_mode_host::session_live_fresh()) return std::nullopt;
-      return prelaunch::session_identity_t {200, 9000, "session-2.scope"};
+    prelaunch::observation_t observe(const prelaunch::session_identity_t *since, const prelaunch::wait_t &) override {
+      ++scans;
+      if (on_scan) on_scan();
+      prelaunch::observation_t out;
+      if (platf::game_mode_host::session_live_fresh()) {
+        out.session = stand_in_session("1", prelaunch::mode_e::game, 'a');
+      } else if (desktop_appears) {
+        out.session = stand_in_session("2", prelaunch::mode_e::desktop, 'b');
+      } else {
+        out.bind = prelaunch::verdict_t::fail("prelaunch_session_identity_unavailable", "no desktop yet");
+      }
+      out.retired = since && (!out.session || (out.session->logind_id != since->logind_id &&
+                                               out.session->target_invocation != since->target_invocation));
+      return out;
     }
 
     bool local_title_running() override {
@@ -516,12 +536,12 @@ namespace {
       return true;
     }
 
-    std::string unavailable_reason() const override {
-      return {};
-    }
-
     bool command_present() const override {
       return true;
+    }
+
+    prelaunch::verdict_t support(const prelaunch::wait_t &) override {
+      return prelaunch::verdict_t::pass();
     }
 
     bool start(prelaunch::direction_e to) override {
@@ -548,6 +568,22 @@ namespace {
 
     void sleep_for(std::chrono::milliseconds duration) override {
       at += duration;
+    }
+  };
+
+  /// A build without a session switch, whatever this test binary was built with: the unavailable
+  /// adapter, over a stand-in host, until the test's stage log resets the seams.
+  struct unavailable_build_t {
+    session_answer_host_t host;
+    prelaunch::unavailable_adapter_t adapter {"/nonexistent/polaris-test/steamosctl"};
+    instant_clock_t clock;
+
+    unavailable_build_t() {
+      prelaunch::set_dependencies_for_tests(&host, &adapter, &clock);
+    }
+
+    ~unavailable_build_t() {
+      prelaunch::set_dependencies_for_tests(nullptr, nullptr, nullptr);
     }
   };
 
@@ -631,6 +667,7 @@ namespace {
 
 TEST_F(LaunchDesktopSteamTest, OptedInLaunchOnAGameModeHostIsRefusedByTheUnavailableAdapterBeforeAnythingElse) {
   stage_log_t log;
+  unavailable_build_t build;
   pair_moonlight(std::nullopt);
   use_apps({opted_in(steam_game()), desktop(), pinned_private()});
   platf::game_mode_host::set_session_live_for_tests(true);
@@ -796,6 +833,7 @@ TEST_F(LaunchDesktopSteamTest, JoiningTheRunningOptedInAppNeverTransitions) {
 
 TEST_F(LaunchDesktopSteamTest, BrowserStreamRefusesAnOptedInPinBeforeJudgingItForGameMode) {
   stage_log_t log;
+  unavailable_build_t build;
   use_apps({steam_game(), desktop(), pinned_private()});
   platf::game_mode_host::set_session_live_for_tests(true);
 
@@ -813,6 +851,7 @@ TEST_F(LaunchDesktopSteamTest, BrowserStreamRefusesAnOptedInPinBeforeJudgingItFo
 
 TEST_F(LaunchDesktopSteamTest, ConsoleLaunchRefusesAnOptedInPinBeforeJudgingItForGameMode) {
   stage_log_t log;
+  unavailable_build_t build;
   console_routes_t console {host.cert.string(), host.key.string(), directory / "console-launch-apps.json"};
   const auto post = [&](const std::string &uuid) {
     return console.request("POST", "/api/apps/launch", nlohmann::json {{"uuid", uuid}}.dump()).second;

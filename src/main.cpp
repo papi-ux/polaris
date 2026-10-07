@@ -508,6 +508,9 @@ int main(int argc, char *argv[]) {
       lifetime::debug_trap();
     };
 
+    // #204: before the teardown below can end a session, so no restore to Game Mode starts while
+    // Polaris stops, and any transition or restore in flight ends at its next check. Lock-free.
+    prelaunch::request_stop();
     proc::proc.terminate();
 
     force_shutdown = task_pool.pushDelayed(task, 10s).task_id;
@@ -522,6 +525,7 @@ int main(int argc, char *argv[]) {
     // Whoever sent SIGTERM (systemctl stop or restart, a session ending) wants
     // this process gone. A restart requested earlier must not re-exec in its place.
     lifetime::set_restart_in_place_pending(false);
+    prelaunch::request_stop();
 
     auto task = []() {
       BOOST_LOG(fatal) << "10 seconds passed, yet Sunshine's still running: Forcing shutdown"sv;
@@ -835,6 +839,8 @@ int main(int argc, char *argv[]) {
 
   // Wait for shutdown, this is not necessary when we're using the main event loop
   shutdown_event->view();
+  // #204: joins a restore worker that is still settling, outside every lock (it was told to stop).
+  prelaunch::shutdown();
 
 #ifdef __linux__
   if (profile_service) profile_service->stop_admission();

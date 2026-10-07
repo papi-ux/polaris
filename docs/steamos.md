@@ -61,6 +61,24 @@ The Private Stream paths need `labwc` on `PATH`, and labwc cannot be installed o
 
 Polaris does not depend on labwc for this reason, and links nothing from it. Private Stream cards are greyed out on SteamOS and name the missing `labwc` tool; a pre-existing Private Stream configuration also fails closed at launch. Use Mirror Desktop or Gamescope Stream instead.
 
+## Leave Game Mode Before Launch
+
+An app can opt in to leaving Game Mode before its own private launch with `"leave-game-mode-before-launch": true`. It is off for every app unless set, and it never applies to resume, watch-only, input-only, profile or Space launches. This build implements the switch on Linux builds with GIO. It has not been accepted on Steam Deck hardware, so it is a source implementation, not a certified feature.
+
+On every launch Polaris proves, without starting any service, that the host supports the switch. If any of the following cannot be read, or reads otherwise, the launch is refused with a fixed `prelaunch_*` code before anything changes:
+
+- `/usr/bin/steamosctl` is a root-owned regular file that nobody else can write, under root-owned directories.
+- Exactly one `steamos-manager` package record is installed. It names itself, is release 26.4.1 (the only release whose session switch was audited), and owns both `/usr/bin/steamosctl` and `/usr/lib/steamos-manager`.
+- This account's own user bus has SteamOS Manager. Its owner is this account's `steamos-manager.service`, running `/usr/lib/steamos-manager`, and it offers `SessionManagement1`'s two switch methods.
+- logind shows one active, local graphical session on seat0. That session belongs to this account, is its only graphical session, and was started by SDDM autologin. `graphical-session.target` is running, and `gamescope-session.service` says the session is in Game Mode.
+- `polaris.service` is not stopped with the graphical session.
+
+Polaris then runs exactly `steamosctl switch-to-desktop-mode`, with only this account's bus address, `PATH` and `LANG` in its environment. The command runs as an owned child that is bounded, stopped and reaped. Its exit 0 means only that the request was sent. The launch continues once the old session and its target generation have both ended, a new desktop session of the same account is bound, and the stream's route is ready.
+
+If the launch fails before it reaches its client, Polaris returns that same desktop to Game Mode. It does the same when the client ends the session on request. Either way the desktop must still be the one this launch opened, and Polaris proves a new Game Mode session afterwards. If the switch was stopped after it started, or its result could not be bound, the receipt records the outcome as unknown and nothing is undone. The switch takes no session argument, so a session change between Polaris's last check and SteamOS Manager acting on it cannot be prevented, only detected afterwards. Such a change is never adopted or rolled back.
+
+A launch spends at most 60 seconds leaving Game Mode and 25 more rolling back. A return after the session ends runs outside Polaris's session locks, within 45 seconds, and no launch is admitted until it settles. Console and Browser Stream launches have no cancellation of their own, and their receipts say so (`cancellation_transport: unsupported`).
+
 ## Update
 
 Download the new `Polaris-steamos3.8-x86_64.pkg.tar.zst` artifact and repeat the failure-safe install command. The package manager replaces the prior Polaris files, host setup refreshes required integration, and read-only mode is restored before service startup.

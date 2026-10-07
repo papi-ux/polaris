@@ -6222,7 +6222,8 @@ namespace proc {
     }
     BOOST_LOG(info) << "prelaunch: ["sv << app.name << "] entry="sv << prelaunch::name(entry)
                     << " state="sv << prelaunch::name(outcome.state)
-                    << (outcome.code.empty() ? std::string {} : " code=" + outcome.code);
+                    << (outcome.code.empty() ? std::string {} : " code=" + outcome.code)
+                    << " cancellation_transport="sv << (request.cancelled ? "launch"sv : "unsupported"sv);
     return outcome;
   }
 
@@ -8553,6 +8554,13 @@ namespace proc {
       return false;
     }
     if (rtsp_stream::session_snapshot({}).pending_sessions > 0) {
+      finish_session_launch();
+      return false;
+    }
+    // #204: a session-end restore runs outside the lifecycle lock, so it fences admission instead:
+    // until the host is back in Game Mode, or the restore settled otherwise, no launch of any app
+    // starts. Checked while the reservation is held, so a restore claimed before it is always seen.
+    if (prelaunch::coordinator().restore_pending()) {
       finish_session_launch();
       return false;
     }
@@ -12780,7 +12788,9 @@ namespace proc {
 #ifdef __linux__
     // #204: a session that left Game Mode for its launch returns the host only once its cleanup is
     // complete, only on a purposeful end, and only for the generation this session committed. A
-    // teardown that retained cleanup above keeps the binding for its retry.
+    // teardown that retained cleanup above keeps the binding for its retry. Under this lock the
+    // coordinator only claims the restore; its own worker proves and acts after the lock is gone,
+    // and refuses every launch until it settles (try_begin_session_launch).
     if (cleanup_complete) {
       if (const auto prelaunch_generation = std::exchange(_prelaunch_transition_generation, 0)) {
         (void) prelaunch::coordinator().on_session_end(

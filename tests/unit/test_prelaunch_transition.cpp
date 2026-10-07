@@ -13,8 +13,11 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <future>
 #include <random>
+#include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace std::literals;
@@ -25,17 +28,33 @@ using prelaunch::state_e;
 using prelaunch::step_e;
 
 namespace {
-  const session_identity_t game_mode_leader {100, 5000, "session-1.scope"};
-  const session_identity_t desktop_leader {200, 9000, "session-2.scope"};
+  session_identity_t identity(std::string id, prelaunch::mode_e mode, char generation, std::uint32_t leader, std::uint64_t ticks) {
+    session_identity_t out;
+    out.boot_id = "6c1b5f3e-2a4d-4c8e-9f10-0123456789ab";
+    out.logind_id = std::move(id);
+    out.logind_started = 1000 + ticks;
+    out.uid = 1000;
+    out.leader_pid = leader;
+    out.leader_start_ticks = ticks;
+    out.target_invocation = std::string(32, generation);
+    out.mode = mode;
+    return out;
+  }
 
-  /// A host in Game Mode that leaves it when the adapter's switch completes.
+  const session_identity_t game_mode_leader = identity("2", prelaunch::mode_e::game, 'a', 100, 5000);
+  const session_identity_t desktop_leader = identity("3", prelaunch::mode_e::desktop, 'b', 200, 9000);
+
+  /// A host in Game Mode that leaves it when the adapter's switch completes. Its session records are
+  /// what observe() reports: one bound session, or a read or bind refusal.
   class scripted_host_t final: public prelaunch::host_t {
   public:
     bool live = true;
     bool title = false;
     bool independent = true;
-    std::optional<session_identity_t> game_mode = game_mode_leader;
-    std::optional<session_identity_t> desktop;
+    std::optional<session_identity_t> session = game_mode_leader;
+    prelaunch::verdict_t read_failure;
+    prelaunch::verdict_t bind_failure;
+    prelaunch::verdict_t service;
     int scans = 0;
     int probes = 0;
     std::function<void()> on_scan;
@@ -48,14 +67,22 @@ namespace {
       return live;
     }
 
-    std::optional<session_identity_t> game_mode_session() override {
+    prelaunch::observation_t observe(const session_identity_t *since, const prelaunch::wait_t &) override {
       ++probes;
-      return game_mode;
-    }
-
-    std::optional<session_identity_t> desktop_session() override {
-      ++probes;
-      return desktop;
+      prelaunch::observation_t out;
+      out.read = read_failure;
+      if (!out.read.ok()) return out;
+      out.service = service;
+      if (!bind_failure.ok()) {
+        out.bind = bind_failure;
+      } else if (session) {
+        out.session = session;
+      } else {
+        out.bind = prelaunch::verdict_t::fail("prelaunch_session_identity_unavailable", "stand-in has no session");
+      }
+      // Retired: the session and its target generation are both gone.
+      out.retired = since && (!session || (session->logind_id != since->logind_id && session->target_invocation != since->target_invocation));
+      return out;
     }
 
     bool local_title_running() override {
@@ -75,27 +102,33 @@ namespace {
   public:
     scripted_host_t *host = nullptr;
     bool available = true;
+    bool present = true;
+    bool supported = true;
     bool start_ok = true;
     int polls_to_finish = 2;
     bool fails = false;
     bool hangs = false;
+    bool hangs_returning = false;
     std::vector<direction_e> starts;
     int aborts = 0;
     int polls = 0;
+    int supports = 0;
     std::vector<std::string> *log = nullptr;
 
     bool implemented() const override {
       return available;
     }
 
-    std::string unavailable_reason() const override {
-      return "stand-in unavailable";
-    }
-
-    bool present = true;
-
     bool command_present() const override {
       return present;
+    }
+
+    prelaunch::verdict_t support(const prelaunch::wait_t &) override {
+      ++supports;
+      if (!available) return prelaunch::verdict_t::fail("prelaunch_transition_unavailable", "stand-in unavailable");
+      if (!present) return prelaunch::verdict_t::fail("prelaunch_command_unavailable", "stand-in has no command");
+      if (!supported) return prelaunch::verdict_t::fail("prelaunch_adapter_version_unaudited", "stand-in is unaudited");
+      return prelaunch::verdict_t::pass();
     }
 
     bool start(direction_e direction) override {
@@ -109,16 +142,14 @@ namespace {
     step_e poll() override {
       ++polls;
       if (fails) return step_e::failed;
-      if (hangs || --remaining_ > 0) return step_e::running;
+      if (hangs || (hangs_returning && direction_ == direction_e::to_game_mode) || --remaining_ > 0) return step_e::running;
       if (host) {
         if (direction_ == direction_e::to_desktop) {
           host->live = false;
-          host->game_mode.reset();
-          host->desktop = desktop_leader;
+          host->session = desktop_leader;
         } else {
           host->live = true;
-          host->desktop.reset();
-          host->game_mode = session_identity_t {300, 12000, "session-3.scope"};
+          host->session = identity("4", prelaunch::mode_e::game, 'c', 300, 12000);
         }
       }
       return step_e::succeeded;
@@ -167,6 +198,8 @@ namespace {
     return false;
   };
 
+  const prelaunch::budgets_t budgets {};
+
   struct fixture_t {
     scripted_host_t host;
     scripted_adapter_t adapter;
@@ -175,6 +208,14 @@ namespace {
 
     fixture_t() {
       adapter.host = &host;
+    }
+
+    /// A session end, with its handed-over restore waited for.
+    restore_e end_session(std::uint64_t generation, bool on_request, bool shutdown, const prelaunch::coordinator_t::others_t &others) {
+      const auto handed = coordinator.on_session_end(generation, on_request, shutdown, others);
+      if (handed != restore_e::owned) return handed;
+      coordinator.wait_for_restore();
+      return coordinator.receipt().restore;
     }
   };
 }  // namespace
@@ -214,6 +255,7 @@ TEST(PrelaunchTransitionTests, TheProductionAdapterIsRefusedBeforeAnyEffectEvenW
   prelaunch::coordinator_t coordinator {host, adapter, clock};
   EXPECT_FALSE(adapter.implemented());
   EXPECT_FALSE(adapter.command_present());
+  EXPECT_EQ(adapter.support({}).code, "prelaunch_transition_unavailable");
   EXPECT_FALSE(adapter.start(direction_e::to_desktop));
   const auto outcome = coordinator.run(launch_request());
   EXPECT_EQ(outcome.status, 503);
@@ -230,7 +272,8 @@ TEST(PrelaunchTransitionTests, TheProductionAdapterIsRefusedBeforeAnyEffectEvenW
   EXPECT_TRUE(on.enabled) << "the setting is shown as on";
   EXPECT_FALSE(on.adapter_implemented) << "and distinguished from an adapter this build does not have";
   EXPECT_FALSE(on.ready);
-  EXPECT_EQ(on.reason, adapter.unavailable_reason());
+  EXPECT_EQ(on.code, "prelaunch_transition_unavailable");
+  EXPECT_EQ(on.reason, adapter.support({}).reason);
 }
 
 TEST(PrelaunchTransitionTests, AHostNotInGameModeNeedsNothing) {
@@ -279,18 +322,47 @@ TEST(PrelaunchTransitionTests, AMirrorRouteIsRefusedRatherThanLeavingGameModeFor
   EXPECT_TRUE(f.coordinator.run(request).proceed()) << "off Game Mode the launch goes on as it always did";
 }
 
-TEST(PrelaunchTransitionTests, AnOpenTitleMissingServiceIndependenceOrUnidentifiedSessionRefusesWithoutSwitching) {
-  for (int which = 0; which < 3; ++which) {
+TEST(PrelaunchTransitionTests, AnOpenTitleMissingServiceIndependenceOrUnprovenSessionRefusesWithoutSwitching) {
+  struct case_t {
+    std::string name;
+    std::function<void(fixture_t &)> change;
+    int status;
+    std::string code;
+  };
+  const std::vector<case_t> cases {
+    {"a title open", [](auto &f) { f.host.title = true; }, 409, "prelaunch_local_title_running"},
+    {"not the independent service", [](auto &f) { f.host.independent = false; }, 503, "prelaunch_service_not_independent"},
+    {"the unit stops with the session", [](auto &f) {
+       f.host.service = prelaunch::verdict_t::fail("prelaunch_service_not_independent", "PartOf graphical-session.target");
+     }, 503, "prelaunch_service_not_independent"},
+    {"no session identified", [](auto &f) { f.host.session.reset(); }, 503, "prelaunch_session_identity_unavailable"},
+    {"two graphical sessions", [](auto &f) {
+       f.host.bind_failure = prelaunch::verdict_t::fail("prelaunch_session_ambiguous", "two");
+     }, 503, "prelaunch_session_ambiguous"},
+    {"not an autologin session", [](auto &f) {
+       f.host.bind_failure = prelaunch::verdict_t::fail("prelaunch_session_not_autologin", "sddm");
+     }, 503, "prelaunch_session_not_autologin"},
+    {"a stalled read", [](auto &f) {
+       f.host.read_failure = prelaunch::verdict_t::fail("prelaunch_session_read_timeout", "stalled");
+     }, 504, "prelaunch_session_read_timeout"},
+    {"a malformed record", [](auto &f) {
+       f.host.read_failure = prelaunch::verdict_t::fail("prelaunch_session_record_malformed", "Leader as s");
+     }, 503, "prelaunch_session_record_malformed"},
+    {"the detector and the records disagree", [](auto &f) { f.host.session = desktop_leader; }, 409, "prelaunch_session_mode_unknown"},
+    {"an incomplete identity", [](auto &f) { f.host.session->target_invocation.clear(); }, 503, "prelaunch_session_identity_unavailable"},
+    {"an unaudited manager", [](auto &f) { f.adapter.supported = false; }, 503, "prelaunch_adapter_version_unaudited"},
+  };
+  for (const auto &c : cases) {
     fixture_t f;
-    f.host.title = which == 0;
-    f.host.independent = which != 1;
-    if (which == 2) f.host.game_mode.reset();
+    c.change(f);
     const auto outcome = f.coordinator.run(launch_request());
-    EXPECT_FALSE(outcome.proceed()) << which;
-    EXPECT_EQ(outcome.code, which == 0 ? "prelaunch_local_title_running" :
-                            which == 1 ? "prelaunch_service_not_independent" :
-                                         "prelaunch_session_identity_unavailable");
-    EXPECT_TRUE(f.adapter.starts.empty()) << which;
+    EXPECT_FALSE(outcome.proceed()) << c.name;
+    EXPECT_EQ(outcome.status, c.status) << c.name;
+    EXPECT_EQ(outcome.code, c.code) << c.name;
+    EXPECT_EQ(outcome.state, state_e::refused) << c.name;
+    EXPECT_FALSE(outcome.changed_session) << c.name;
+    EXPECT_TRUE(f.adapter.starts.empty()) << c.name;
+    EXPECT_FALSE(f.coordinator.receipt().outcome_unknown) << c.name;
   }
 }
 
@@ -317,7 +389,9 @@ TEST(PrelaunchTransitionTests, AnAdmittedTransitionWaitsForTheOldSessionTheDeskt
   EXPECT_EQ(receipt.post, desktop_leader);
   EXPECT_EQ(receipt.lifecycle_generation, 7u);
   EXPECT_FALSE(receipt.committed);
-  EXPECT_LT(f.clock.slept, prelaunch::k_max_deadline);
+  EXPECT_FALSE(receipt.outcome_unknown);
+  EXPECT_LT(f.clock.slept, budgets.forward);
+  EXPECT_GE(f.adapter.supports, 1) << "support proved for this launch";
 }
 
 TEST(PrelaunchTransitionTests, TheTransitionStagesAreNotedAroundTheSwitch) {
@@ -331,18 +405,20 @@ TEST(PrelaunchTransitionTests, TheTransitionStagesAreNotedAroundTheSwitch) {
   EXPECT_EQ(stages, (std::vector<std::string> {"transition_start", "transition_ready"}));
 }
 
-TEST(PrelaunchTransitionTests, AHungSwitchIsAbortedAtTheDeadlineAndNothingUnprovenIsUndone) {
+TEST(PrelaunchTransitionTests, AHungCommandIsStoppedAtItsBudgetAsOutcomeUnknownAndNothingUnprovenIsUndone) {
   fixture_t f;
   f.adapter.hangs = true;
   const auto outcome = f.coordinator.run(launch_request());
   EXPECT_EQ(outcome.status, 504);
-  EXPECT_EQ(outcome.code, "prelaunch_switch_timeout");
+  EXPECT_EQ(outcome.code, "prelaunch_switch_outcome_unknown");
   EXPECT_EQ(outcome.state, state_e::failed);
   EXPECT_EQ(f.adapter.aborts, 1);
-  EXPECT_GE(f.clock.slept, prelaunch::k_max_deadline - prelaunch::k_poll_period);
-  EXPECT_LE(f.clock.slept, prelaunch::k_max_deadline + prelaunch::k_poll_period);
+  EXPECT_GE(f.clock.slept, budgets.child - prelaunch::k_poll_period);
+  EXPECT_LE(f.clock.slept, budgets.child + prelaunch::k_poll_period);
   ASSERT_EQ(f.adapter.starts.size(), 1u) << "no restore without a desktop identity this launch owns";
-  EXPECT_EQ(f.coordinator.receipt().restore, restore_e::refused);
+  const auto receipt = f.coordinator.receipt();
+  EXPECT_EQ(receipt.restore, restore_e::refused);
+  EXPECT_TRUE(receipt.outcome_unknown) << "it may have sent the switch before it was stopped";
 }
 
 TEST(PrelaunchTransitionTests, AFailedSwitchIsRefusedWithItsOwnCode) {
@@ -352,6 +428,47 @@ TEST(PrelaunchTransitionTests, AFailedSwitchIsRefusedWithItsOwnCode) {
   EXPECT_EQ(outcome.code, "prelaunch_switch_failed");
   EXPECT_EQ(outcome.state, state_e::failed);
   EXPECT_EQ(f.adapter.starts.size(), 1u);
+  EXPECT_TRUE(f.coordinator.receipt().outcome_unknown) << "it ran; what it did before failing is not known";
+}
+
+TEST(PrelaunchTransitionTests, ACommandThatCouldNotStartChangedNothing) {
+  fixture_t f;
+  f.adapter.start_ok = false;
+  const auto outcome = f.coordinator.run(launch_request());
+  EXPECT_EQ(outcome.code, "prelaunch_switch_failed");
+  EXPECT_FALSE(f.coordinator.receipt().outcome_unknown);
+  EXPECT_EQ(f.coordinator.receipt().restore, restore_e::none);
+}
+
+TEST(PrelaunchTransitionTests, ExitZeroIsNotEnoughTheOldSessionMustBeSeenToEnd) {
+  fixture_t f;
+  // The command reports success, and the host never leaves its Game Mode session.
+  f.adapter.host = nullptr;
+  const auto outcome = f.coordinator.run(launch_request());
+  EXPECT_EQ(outcome.code, "prelaunch_old_session_timeout");
+  EXPECT_EQ(outcome.state, state_e::failed);
+  const auto receipt = f.coordinator.receipt();
+  EXPECT_EQ(receipt.restore, restore_e::refused);
+  EXPECT_TRUE(receipt.outcome_unknown);
+  EXPECT_FALSE(receipt.post);
+  EXPECT_EQ(f.adapter.starts.size(), 1u) << "never rolled back";
+}
+
+TEST(PrelaunchTransitionTests, AFailedLaunchSpendsAtMostTheForwardAndRollbackBudgets) {
+  fixture_t f;
+  f.adapter.hangs_returning = true;
+  auto request = launch_request();
+  request.capture_ready = [](std::string &reason) {
+    reason = "never";
+    return false;
+  };
+  const auto outcome = f.coordinator.run(request);
+  EXPECT_EQ(outcome.code, "prelaunch_capture_timeout");
+  const auto receipt = f.coordinator.receipt();
+  EXPECT_EQ(receipt.restore, restore_e::failed);
+  EXPECT_TRUE(receipt.outcome_unknown) << "the return was stopped after it started";
+  EXPECT_LE(f.clock.slept, budgets.forward + budgets.rollback + 2 * prelaunch::k_poll_period);
+  EXPECT_LE(budgets.forward + budgets.rollback, std::chrono::seconds {120}) << "inside the /launch reply";
 }
 
 TEST(PrelaunchTransitionTests, CaptureThatNeverBecomesReadyRollsBackOnlyTheDesktopThisLaunchOpened) {
@@ -389,7 +506,7 @@ TEST(PrelaunchTransitionTests, OnlyTheRequestingClientCanCancelItsTransition) {
   EXPECT_TRUE(tried);
   EXPECT_EQ(outcome.code, "prelaunch_cancelled");
   EXPECT_EQ(outcome.state, state_e::cancelled);
-  EXPECT_LT(f.clock.slept, prelaunch::k_max_deadline) << "cancelled promptly, not at the deadline";
+  EXPECT_LT(f.clock.slept, budgets.forward) << "cancelled promptly, not at the deadline";
   EXPECT_EQ(f.coordinator.receipt().restore, restore_e::rolled_back) << "the cancelled generation undoes its own desktop";
   EXPECT_FALSE(f.coordinator.cancel_for_client("client-a")) << "nothing is left to cancel";
 }
@@ -423,8 +540,12 @@ TEST(PrelaunchTransitionTests, OnlyAPurposefulEndOfTheCommittedGenerationRestore
     {"another session", true, false, true, {}, restore_e::refused},
     {"a game opened on the host since", true, false, false, [](auto &h) { h.title = true; }, restore_e::refused},
     {"user went back to Game Mode", true, false, false, [](auto &h) { h.live = true; }, restore_e::refused},
-    {"a different desktop session", true, false, false, [](auto &h) { h.desktop = session_identity_t {201, 9100, "session-4.scope"}; }, restore_e::refused},
-    {"a restarted desktop leader with a reused pid", true, false, false, [](auto &h) { h.desktop = session_identity_t {200, 9999, "session-2.scope"}; }, restore_e::refused},
+    {"a different desktop session", true, false, false, [](auto &h) { h.session = identity("5", prelaunch::mode_e::desktop, 'd', 201, 9100); }, restore_e::refused},
+    {"a restarted desktop leader with a reused pid", true, false, false, [](auto &h) { h.session->leader_start_ticks = 9999; }, restore_e::refused},
+    {"a restarted graphical target", true, false, false, [](auto &h) { h.session->target_invocation = std::string(32, 'e'); }, restore_e::refused},
+    {"the host's sessions cannot be read", true, false, false, [](auto &h) {
+       h.read_failure = prelaunch::verdict_t::fail("prelaunch_session_read_timeout", "stalled");
+     }, restore_e::refused},
   };
   for (const auto &c : cases) {
     fixture_t f;
@@ -438,7 +559,7 @@ TEST(PrelaunchTransitionTests, OnlyAPurposefulEndOfTheCommittedGenerationRestore
       return c.other_sessions;
     };
     const auto generation = outcome.transition_generation;
-    EXPECT_EQ(f.coordinator.on_session_end(generation, c.ended_on_request, c.daemon_shutdown, others), c.expected) << c.name;
+    EXPECT_EQ(f.end_session(generation, c.ended_on_request, c.daemon_shutdown, others), c.expected) << c.name;
     EXPECT_EQ(f.adapter.starts.size(), c.expected == restore_e::restored ? 2u : 1u) << c.name;
     EXPECT_EQ(f.coordinator.on_session_end(generation, true, false, nobody_else), restore_e::none) << c.name << ": a receipt restores at most once";
   }
@@ -465,7 +586,7 @@ TEST(PrelaunchTransitionTests, ARestoreWithNoWayToCheckTheHostsOtherSessionsIsRe
   const auto outcome = f.coordinator.run(launch_request());
   ASSERT_TRUE(outcome.proceed());
   f.coordinator.commit(outcome.transition_generation);
-  EXPECT_EQ(f.coordinator.on_session_end(outcome.transition_generation, true, false, {}), restore_e::refused);
+  EXPECT_EQ(f.end_session(outcome.transition_generation, true, false, {}), restore_e::refused);
   EXPECT_EQ(f.adapter.starts.size(), 1u);
 }
 
@@ -482,7 +603,7 @@ TEST(PrelaunchTransitionTests, AnOwnedChangeCommittedOrNotBlocksAnotherTransitio
     EXPECT_EQ(f.coordinator.receipt().transition_generation, first.transition_generation) << "the owned receipt is not overwritten";
     // Settled: rolled back before commit, or the committed session ended on request.
     f.host.live = false;
-    const auto settled = commit ? f.coordinator.on_session_end(first.transition_generation, true, false, nobody_else) :
+    const auto settled = commit ? f.end_session(first.transition_generation, true, false, nobody_else) :
                                   f.coordinator.rollback(first.transition_generation, nobody_else);
     EXPECT_EQ(settled, commit ? restore_e::restored : restore_e::rolled_back);
     EXPECT_TRUE(f.coordinator.run(launch_request("client-b")).proceed()) << "a settled change no longer blocks";
@@ -507,7 +628,7 @@ TEST(PrelaunchTransitionTests, ADesktopThatChangesWhileCaptureWaitsIsNeverPublis
   auto request = launch_request();
   request.capture_ready = [&](std::string &) {
     // The user's session changes after the first capture check.
-    if (++checks == 1) f.host.desktop = session_identity_t {250, 9500, "session-5.scope"};
+    if (++checks == 1) f.host.session = identity("6", prelaunch::mode_e::desktop, 'f', 250, 9500);
     return false;
   };
   const auto outcome = f.coordinator.run(request);
@@ -590,40 +711,11 @@ namespace {
   };
 }  // namespace
 
-TEST(PrelaunchTransitionTests, SessionIdentityIsTheLeadersPidStartTimeAndLogindScope) {
-  scratch_proc_t proc;
-  proc.add(400, 1000, {"/usr/bin/gamescope-session-plus", "steam"}, 777,
-           "0::/user.slice/user-1000.slice/session-3.scope\n");
-  proc.add(401, 1000, {"/usr/bin/gamescope-session-plus"}, 900, "0::/user.slice/user-1000.slice/session-3.scope\n");
-  proc.add(402, 1001, {"/usr/bin/gamescope-session-plus"}, 10, "0::/user.slice/user-1001.slice/session-9.scope\n");
-  proc.add(403, 1000, {"/usr/bin/startplasma-wayland"}, 5000, "0::/user.slice/user-1000.slice/session-4.scope\n");
-  const auto identity = prelaunch::process_identity(proc.root, 400);
-  ASSERT_TRUE(identity);
-  EXPECT_EQ(identity->leader_pid, 400);
-  EXPECT_EQ(identity->leader_start_ticks, 777u) << "start time read past a comm holding ') ('";
-  EXPECT_EQ(identity->logind_scope, "session-3.scope");
-  EXPECT_FALSE(prelaunch::find_session_leader(proc.root, 1000, {"gamescope-session-plus"}))
-    << "two leaders for this account are ambiguous; neither is picked";
-  EXPECT_FALSE(prelaunch::find_session_leader(proc.root, 1000, {"gamescope-session"})) << "basename match, not substring";
-  EXPECT_FALSE(prelaunch::process_identity(proc.root, 999));
-  const auto desktop = prelaunch::find_session_leader(proc.root, 1000, {"startplasma-wayland"});
-  ASSERT_TRUE(desktop) << "one leader, another account's never counted";
-  EXPECT_EQ(desktop->leader_pid, 403);
-  EXPECT_EQ(desktop->logind_scope, "session-4.scope");
-  std::filesystem::remove_all(proc.root / "401");
-  ASSERT_TRUE(prelaunch::find_session_leader(proc.root, 1000, {"gamescope-session-plus"}));
-  EXPECT_EQ(prelaunch::find_session_leader(proc.root, 1000, {"gamescope-session-plus"})->leader_pid, 400);
-}
-
-TEST(PrelaunchTransitionTests, ALeaderOutsideALogindSessionOrWithAnOutOfRangeUidIsNoSession) {
-  scratch_proc_t proc;
-  proc.add(600, 1000, {"/usr/bin/startplasma-wayland"}, 50, "0::/user.slice/user-1000.slice/user@1000.service/app.slice/x.service\n");
-  EXPECT_FALSE(prelaunch::find_session_leader(proc.root, 1000, {"startplasma-wayland"})) << "no logind scope: not a graphical session";
+TEST(PrelaunchTransitionTests, AnOutOfRangeUidNeverMatchesThisAccount) {
   scratch_proc_t overflow;
-  overflow.add(700, 1000, {"/usr/bin/startplasma-wayland"}, 50, "0::/user.slice/user-1000.slice/session-2.scope\n");
+  overflow.add(700, 1000, {"/fixture/own-account/steam/reaper", "SteamLaunch", "AppId=620"}, 50, "");
   // 2^32 + 1000 must not wrap to uid 1000.
   std::ofstream {overflow.root / "700" / "status"} << "Name:\tx\nUid:\t4294968296\t1000\t1000\t1000\n";
-  EXPECT_FALSE(prelaunch::find_session_leader(overflow.root, 1000, {"startplasma-wayland"}));
   EXPECT_FALSE(prelaunch::steam_title_running(overflow.root, 1000));
 }
 
@@ -646,4 +738,118 @@ TEST(PrelaunchTransitionTests, OnlyThePolarisUserServiceOutsideALoginScopeIsInde
     "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-polaris@abc.service\n")) << "a desktop launcher's transient unit";
   EXPECT_FALSE(prelaunch::cgroup_in_independent_service("0::/system.slice/polaris.service\n")) << "not the account's own user manager";
   EXPECT_FALSE(prelaunch::cgroup_in_independent_service(""));
+}
+
+TEST(PrelaunchTransitionTests, StoppingRefusesNewTransitionsAndEveryRestore) {
+  fixture_t f;
+  const auto outcome = f.coordinator.run(launch_request());
+  ASSERT_TRUE(outcome.proceed());
+  f.coordinator.commit(outcome.transition_generation);
+  f.coordinator.request_stop();
+  EXPECT_EQ(f.coordinator.run(launch_request("client-b")).code, "prelaunch_shutting_down");
+  EXPECT_EQ(f.coordinator.on_session_end(outcome.transition_generation, true, false, nobody_else), restore_e::refused)
+    << "the host stays where the session left it";
+  EXPECT_EQ(f.coordinator.receipt().restore_reason, "Polaris is stopping");
+  EXPECT_EQ(f.adapter.starts.size(), 1u);
+  f.coordinator.shutdown();
+  f.coordinator.shutdown();
+}
+
+TEST(PrelaunchTransitionTests, ATransitionRunningWhenPolarisStopsEndsAtItsNextCheck) {
+  fixture_t f;
+  auto request = launch_request();
+  request.capture_ready = [&](std::string &) {
+    f.coordinator.request_stop();
+    return false;
+  };
+  const auto outcome = f.coordinator.run(request);
+  EXPECT_EQ(outcome.state, state_e::cancelled);
+  EXPECT_LT(f.clock.slept, budgets.forward);
+  EXPECT_EQ(f.coordinator.receipt().restore, restore_e::refused) << "no rollback while stopping";
+  EXPECT_EQ(f.adapter.starts.size(), 1u);
+}
+
+TEST(PrelaunchTransitionTests, ASessionEndOnlyClaimsTheRestoreTheWorkerActsAfterTheCallerReturns) {
+  fixture_t f;
+  const auto outcome = f.coordinator.run(launch_request());
+  ASSERT_TRUE(outcome.proceed());
+  f.coordinator.commit(outcome.transition_generation);
+  std::atomic<bool> others_ran_on_caller {false};
+  const auto caller = std::this_thread::get_id();
+  std::promise<void> release;
+  auto released = release.get_future().share();
+  const prelaunch::coordinator_t::others_t others = [&, released](std::string &) {
+    others_ran_on_caller = std::this_thread::get_id() == caller;
+    released.wait();
+    return false;
+  };
+  EXPECT_EQ(f.coordinator.on_session_end(outcome.transition_generation, true, false, others), restore_e::owned);
+  // The caller is back while the restore waits: nothing ran under its locks, and the fence holds.
+  EXPECT_TRUE(f.coordinator.restore_pending());
+  EXPECT_EQ(f.coordinator.run(launch_request("client-b")).code, "prelaunch_transition_busy");
+  release.set_value();
+  f.coordinator.wait_for_restore();
+  EXPECT_FALSE(others_ran_on_caller);
+  EXPECT_EQ(f.coordinator.receipt().restore, restore_e::restored);
+  EXPECT_FALSE(f.coordinator.restore_pending());
+}
+
+TEST(PrelaunchTransitionTests, TheEntrysOwnCancellationTransportIsRecordedHonestly) {
+  for (const bool has_cancel : {false, true}) {
+    fixture_t f;
+    auto request = launch_request();
+    if (has_cancel) {
+      request.cancelled = []() {
+        return false;
+      };
+    }
+    ASSERT_TRUE(f.coordinator.run(request).proceed());
+    EXPECT_EQ(f.coordinator.receipt().cancellation_transport, has_cancel ? "launch" : "unsupported");
+  }
+}
+
+TEST(PrelaunchTransitionTests, RegisteredCasesAreFrozen) {
+  const std::set<std::string> expected {
+    "AnAppWithTheSettingOffNeverScansProbesOrSwitches",
+    "ResumeWatchAndInputOnlyBindTheirGenerationAndNeverSwitch",
+    "TheProductionAdapterIsRefusedBeforeAnyEffectEvenWithTheSettingOn",
+    "AHostNotInGameModeNeedsNothing",
+    "ProfileSpaceAndOccupiedHostsAreRefusedBeforeTheScan",
+    "AMirrorRouteIsRefusedRatherThanLeavingGameModeForNothing",
+    "AnOpenTitleMissingServiceIndependenceOrUnprovenSessionRefusesWithoutSwitching",
+    "AnAdmittedTransitionWaitsForTheOldSessionTheDesktopAndCaptureThenOwnsTheChange",
+    "TheTransitionStagesAreNotedAroundTheSwitch",
+    "AHungCommandIsStoppedAtItsBudgetAsOutcomeUnknownAndNothingUnprovenIsUndone",
+    "AFailedSwitchIsRefusedWithItsOwnCode",
+    "ACommandThatCouldNotStartChangedNothing",
+    "ExitZeroIsNotEnoughTheOldSessionMustBeSeenToEnd",
+    "AFailedLaunchSpendsAtMostTheForwardAndRollbackBudgets",
+    "CaptureThatNeverBecomesReadyRollsBackOnlyTheDesktopThisLaunchOpened",
+    "OnlyTheRequestingClientCanCancelItsTransition",
+    "ASecondLaunchDuringATransitionIsRefusedAndHoldsNoLockAcrossTheWait",
+    "OnlyAPurposefulEndOfTheCommittedGenerationRestoresAndOnlyItsOwnDesktop",
+    "AnUncommittedOrStaleGenerationIsNeverRestoredBySessionEnd",
+    "ARestoreWithNoWayToCheckTheHostsOtherSessionsIsRefused",
+    "AnOwnedChangeCommittedOrNotBlocksAnotherTransitionUntilItSettles",
+    "AnImplementedAdapterWithoutItsInstalledCommandIsNeverStarted",
+    "ADesktopThatChangesWhileCaptureWaitsIsNeverPublishedAsOwned",
+    "ALaunchScopeRollsBackAnUncommittedReadyTransitionOnce",
+    "StagesReachTheTestSinkInOrderAndProductionHasNone",
+    "AnOutOfRangeUidNeverMatchesThisAccount",
+    "AnOpenSteamTitleIsSteamsOwnReaperForThisAccount",
+    "OnlyThePolarisUserServiceOutsideALoginScopeIsIndependent",
+    "StoppingRefusesNewTransitionsAndEveryRestore",
+    "ATransitionRunningWhenPolarisStopsEndsAtItsNextCheck",
+    "ASessionEndOnlyClaimsTheRestoreTheWorkerActsAfterTheCallerReturns",
+    "TheEntrysOwnCancellationTransportIsRecordedHonestly",
+    "RegisteredCasesAreFrozen",
+  };
+  std::set<std::string> registered;
+  const auto *unit = ::testing::UnitTest::GetInstance();
+  for (int suite = 0; suite < unit->total_test_suite_count(); ++suite) {
+    const auto *info = unit->GetTestSuite(suite);
+    if (std::string {info->name()} != "PrelaunchTransitionTests") continue;
+    for (int test = 0; test < info->total_test_count(); ++test) registered.insert(info->GetTestInfo(test)->name());
+  }
+  EXPECT_EQ(registered, expected);
 }

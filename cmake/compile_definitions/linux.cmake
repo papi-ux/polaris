@@ -325,6 +325,13 @@ if(GIO_FOUND AND GIO_UNIX_FOUND)
     add_compile_definitions(POLARIS_BUILD_GIO)
     include_directories(SYSTEM ${GIO_INCLUDE_DIRS} ${GIO_UNIX_INCLUDE_DIRS})
     list(APPEND PLATFORM_LIBRARIES ${GIO_LIBRARIES} ${GIO_UNIX_LIBRARIES})
+    # #204: the SteamOS session switch reads logind, the user manager and SteamOS Manager over GIO.
+    # Without GIO the coordinator keeps its unavailable adapter.
+    list(APPEND PLATFORM_TARGET_FILES
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/steamos_bus.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/steamos_bus.cpp"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/steamos_adapter.h"
+            "${CMAKE_SOURCE_DIR}/src/platform/linux/steamos_adapter.cpp")
 endif()
 if(GIO_FOUND AND GIO_UNIX_FOUND AND PIPEWIRE_FOUND)
     add_compile_definitions(POLARIS_BUILD_PORTAL)

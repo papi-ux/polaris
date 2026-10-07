@@ -2354,7 +2354,8 @@ namespace confighttp {
           app["launch-as"] = launch_as;
           app["launch-as-basis"] = proc::legacy_basis(app);
           // #204, response only and only for an app that opted in: the setting is on, and whether
-          // this build can act on it (it cannot yet), so the console never presents it as working.
+          // this host can act on it now (bounded support probe), so the console never presents an
+          // unsupported host as working. The session itself is bound by the launch.
           if (const auto leave = app.find(std::string {prelaunch::k_app_key}); leave != app.end() && leave->is_boolean() && leave->get<bool>()) {
             const auto readiness = prelaunch::coordinator().readiness(true);
             app["leave-game-mode-before-launch-readiness"] = {
@@ -2362,6 +2363,7 @@ namespace confighttp {
               {"adapter_implemented", readiness.adapter_implemented},
               {"command_present", readiness.command_present},
               {"ready", readiness.ready},
+              {"code", readiness.code},
               {"reason", readiness.reason},
             };
           }

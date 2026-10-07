@@ -3628,13 +3628,15 @@ namespace nvhttp {
         availability
       );
       if (app.leave_game_mode_before_launch) {
-        // #204, only for an app that opted in: the setting, and separately whether this build can
-        // act on it. No host probe runs here; the launch checks the host.
+        // #204, only for an app that opted in: the setting, and separately whether this host can act
+        // on it now. Support is probed within a bounded second without starting any service; the
+        // session itself is bound by the launch.
         const auto readiness = prelaunch::coordinator().readiness(true);
         contract["leave_game_mode_before_launch"] = {
           {"enabled", readiness.enabled},
           {"adapter_implemented", readiness.adapter_implemented},
           {"ready", readiness.ready},
+          {"code", readiness.code},
           {"reason", readiness.reason},
         };
       }

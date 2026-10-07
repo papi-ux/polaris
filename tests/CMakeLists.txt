@@ -764,8 +764,15 @@ if (BUILD_FULL_TESTS)
         ${CMAKE_SOURCE_DIR}/tests/unit/test_steam_shutdown_state_machine.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_launch_desktop_steam.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_prelaunch_transition.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_steamos_session.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_owned_child.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_desktop_steam_lifetime.cpp
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND GIO_FOUND AND GIO_UNIX_FOUND)
+        # #204: the GIO reader, the SteamOS adapter and the coordinator over a fake bus and child.
+        target_sources(test_polaris_steam_shutdown PRIVATE
+            ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_steamos_bus.cpp)
+    endif()
 
     configure_polaris_full_test_target(test_polaris_pairing
         ${TEST_PAIRING_SOURCES}

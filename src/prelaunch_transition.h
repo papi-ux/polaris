@@ -6,12 +6,21 @@
  * (GameStream /launch, the console's launch and Browser Stream) asks this coordinator after it has
  * authorised the request and reserved the launch, and before the launch decides its display mode.
  *
- * The coordinator never runs a host command itself. It drives a session-switch adapter. The
- * production adapter is not implemented in this build: it reports itself unavailable and is never
- * started, so an enabled app on a host in Game Mode is refused before any mode-changing effect.
- * Tests inject an adapter, a host and a clock that change nothing on the machine.
+ * The coordinator never runs a host command itself. It drives a session-switch adapter over a host
+ * that reports typed session records. On Linux builds with GIO the production adapter is the
+ * SteamOS one (src/platform/linux/steamos_adapter.h): it acts only when, on every launch, the fixed
+ * trusted command, the audited steamos-manager package and this account's own manager prove it
+ * supported, and the host's one SDDM-autologin graphical session is bound. Elsewhere the adapter is
+ * unavailable and an enabled app on a host in Game Mode is refused before any effect. Tests inject
+ * an adapter, a host and a clock that change nothing on the machine.
+ *
+ * steamos-manager's switch takes no session argument, so there is no compare-and-swap between the
+ * last check here and its StopUnit: a session that changes in that window is detected afterwards
+ * (the bound target generation is not the one that retired) and is never adopted or rolled back.
  */
 #pragma once
+
+#include "steamos_session.h"
 
 #include <atomic>
 #include <chrono>
@@ -23,15 +32,30 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 namespace prelaunch {
   /// The per-app key. Absent, or anything but JSON true, is off.
   inline constexpr std::string_view k_app_key = "leave-game-mode-before-launch";
-  /// The longest a transition or a restore may take. The production adapter is unavailable, so no
-  /// client timeout has been reconciled with it; this bounds the injected test engine only.
-  inline constexpr std::chrono::milliseconds k_max_deadline {std::chrono::seconds {45}};
+
+  /// Every wait is bounded, and the bounds add up: a launch spends at most forward + rollback (85 s)
+  /// here, inside the /launch reply's own 120 s. One run of the command is bounded by `child` within
+  /// whichever of those it belongs to. A session-end restore runs on its own worker, outside every
+  /// lifecycle lock, within `restore`.
+  struct budgets_t {
+    std::chrono::milliseconds forward {std::chrono::seconds {60}};
+    std::chrono::milliseconds rollback {std::chrono::seconds {25}};
+    std::chrono::milliseconds restore {std::chrono::seconds {45}};
+    std::chrono::milliseconds child {std::chrono::seconds {15}};
+    /// A readiness answer for an app list: no bus activation, never more than this.
+    std::chrono::milliseconds readiness {std::chrono::seconds {1}};
+  };
   inline constexpr std::chrono::milliseconds k_poll_period {50};
+
+  using steamos::mode_e;
+  using steamos::session_identity_t;
+  using steamos::verdict_t;
 
   enum class entry_e { rtsp, console, browser };
   enum class state_e {
@@ -61,45 +85,41 @@ namespace prelaunch {
   std::string_view name(state_e value);
   std::string_view name(restore_e value);
 
-  /// A graphical session, by its leader process: pid, its start time and its logind scope. A process
-  /// lookup alone is not proof of the current graphical session; it is only usable when unambiguous.
-  struct session_identity_t {
-    std::int64_t leader_pid = 0;
-    std::uint64_t leader_start_ticks = 0;
-    std::string logind_scope;  ///< e.g. "session-3.scope"; empty when the leader is in none
-
-    bool valid() const {
-      return leader_pid > 0 && leader_start_ticks > 0 && !logind_scope.empty();
-    }
-
-    friend bool operator==(const session_identity_t &, const session_identity_t &) = default;
-  };
-
-  /// The identity of `pid` under `proc_root`, from its stat start time and cgroup scope. Read twice
-  /// around the cgroup, so a pid reused meanwhile is refused rather than bound to another process.
-  std::optional<session_identity_t> process_identity(const std::filesystem::path &proc_root, std::int64_t pid);
-  /// The one process of `uid` under `proc_root` whose argv[0] basename is one of `names`, in a logind
-  /// session scope. None, more than one, or a replaced pid is nullopt: ambiguity is never resolved by
-  /// picking one.
-  std::optional<session_identity_t> find_session_leader(
-    const std::filesystem::path &proc_root,
-    std::uint32_t uid,
-    const std::vector<std::string_view> &names
-  );
   /// Whether `uid` has a Steam title open: a `reaper SteamLaunch AppId=` process of its own.
   bool steam_title_running(const std::filesystem::path &proc_root, std::uint32_t uid);
   /// Whether a /proc/self/cgroup text puts the process in polaris.service under the user manager,
   /// outside any login session scope, so ending a graphical session does not end it.
   bool cgroup_in_independent_service(std::string_view cgroup);
 
+  /// One wait's end: a deadline and the cancellations that end it sooner.
+  struct wait_t {
+    std::chrono::steady_clock::time_point deadline;
+    std::function<bool()> cancelled;
+  };
+
+  /// One fresh read of the host's sessions. Nothing here is a kept answer.
+  struct observation_t {
+    /// The read itself failed (unreachable, malformed, timed out, cancelled): nothing is known.
+    verdict_t read;
+    /// Read, but no one session of this account could be bound; why.
+    verdict_t bind;
+    /// The account's one graphical session, bound with its generation. Set only when both pass.
+    std::optional<session_identity_t> session;
+    /// With a `since` identity: that session and its target generation have both ended.
+    bool retired = false;
+    /// Polaris's own unit is not stopped with the graphical session.
+    verdict_t service;
+  };
+
   /// Host facts the coordinator reads. Production reads the host; tests inject.
   class host_t {
   public:
     virtual ~host_t() = default;
-    /// A Game Mode scan taken now, never a kept answer.
+    /// The product's Game Mode detector, fresh. It decides only whether anything is needed: an
+    /// effect additionally needs a bound session in Game Mode from observe().
     virtual bool game_mode_live_fresh() = 0;
-    virtual std::optional<session_identity_t> game_mode_session() = 0;
-    virtual std::optional<session_identity_t> desktop_session() = 0;
+    /// Reads the host's sessions now, within `wait`. With `since`, also whether it retired.
+    virtual observation_t observe(const session_identity_t *since, const wait_t &wait) = 0;
     virtual bool local_title_running() = 0;
     /// Polaris runs as an independent user service AND starts at boot; boot files alone are not enough.
     virtual bool service_independent(std::string &reason) = 0;
@@ -109,14 +129,20 @@ namespace prelaunch {
   class adapter_t {
   public:
     virtual ~adapter_t() = default;
-    /// False for the production adapter in this build: it must never be started.
+    /// False for a build without a session switch: it is never started.
     virtual bool implemented() const = 0;
-    virtual std::string unavailable_reason() const = 0;
-    /// An executable file is present at the adapter's one fixed path. Presence only: it says nothing
-    /// about the command's supported semantics, and nothing runs. Required before any start().
+    /// The trusted command is installed at the adapter's one fixed path. Says nothing about support.
     virtual bool command_present() const = 0;
+    /// Everything the command needs, proved now: called before every start, never cached.
+    virtual verdict_t support(const wait_t &wait) = 0;
+    /// The same answer for display only; it may be kept briefly while nothing it rests on changed.
+    virtual verdict_t readiness_support(const wait_t &wait) {
+      return support(wait);
+    }
     virtual bool start(direction_e direction) = 0;
+    /// running; succeeded when the command exited 0 (its request was sent, nothing more); failed.
     virtual step_e poll() = 0;
+    /// Stops and reaps the command. Whatever it had sent before stands: the outcome is unknown.
     virtual void abort() = 0;
   };
 
@@ -185,6 +211,12 @@ namespace prelaunch {
     std::optional<session_identity_t> post;
     bool changed_session = false;
     bool committed = false;
+    /// The command was stopped after it started, or its result could not be bound: what it sent, if
+    /// anything, stands, and nothing of it is adopted or undone.
+    bool outcome_unknown = false;
+    /// How this launch's own cancellation reaches the wait: "launch" when the entry passed one,
+    /// "unsupported" when it has none (console and Browser Stream have no cancel of their own).
+    std::string cancellation_transport;
   };
 
   /// What a client or the console may show: the setting, and whether this build can act on it.
@@ -193,12 +225,17 @@ namespace prelaunch {
     bool adapter_implemented = false;
     bool command_present = false;
     bool ready = false;
+    std::string code;  ///< the support refusal's code when not ready
     std::string reason;
   };
 
   class coordinator_t {
   public:
-    coordinator_t(host_t &host, adapter_t &adapter, clock_t &clock, std::chrono::milliseconds deadline = k_max_deadline);
+    coordinator_t(host_t &host, adapter_t &adapter, clock_t &clock, budgets_t budgets = {});
+    /// Shuts down: cancels and joins any restore still running.
+    ~coordinator_t();
+    coordinator_t(const coordinator_t &) = delete;
+    coordinator_t &operator=(const coordinator_t &) = delete;
 
     /**
      * @brief Decide, and when admitted run, the transition for one reserved launch.
@@ -213,12 +250,29 @@ namespace prelaunch {
     using others_t = std::function<bool(std::string &)>;
     /// The launch failed or was cancelled after a ready transition and before commit.
     restore_e rollback(std::uint64_t transition_generation, const others_t &others);
-    /// The committed session of `transition_generation` ended. Restores only on a purposeful end of
-    /// that same generation; a teardown naming another generation changes nothing.
+    /**
+     * @brief The committed session of `transition_generation` ended.
+     *
+     * Bookkeeping only, so a caller may hold its lifecycle lock: a restore is handed to this
+     * coordinator's own worker, which proves everything again and acts outside every lock, within
+     * the restore budget. Until it settles no new transition is admitted. Returns `owned` when a
+     * restore was handed over, `refused` for an end that may not restore, `none` for anything else.
+     * Restores only on a purposeful end of that same generation.
+     */
     restore_e on_session_end(std::uint64_t transition_generation, bool ended_on_request, bool daemon_shutdown, const others_t &others);
+    /// Waits for a handed-over restore to settle. Never call it holding a lock the restore may need.
+    void wait_for_restore();
+    /// Polaris is stopping: refuses new transitions and cancels the running one and any restore.
+    /// Atomics only, no lock and no wait, so a signal handler may call it.
+    void request_stop();
+    /// request_stop(), then joins the restore worker. Call it outside every lock. Idempotent.
+    void shutdown();
+    /// A session-end restore is still in flight: no launch of any app may be admitted until it settles.
+    bool restore_pending() const;
     /// /cancel from the requesting client while its transition runs. Another client changes nothing.
     bool cancel_for_client(std::string_view client_uuid);
     receipt_t receipt() const;
+    /// Support answered within the readiness budget; the session itself is checked at launch.
     readiness_t readiness(bool enabled) const;
 
   private:
@@ -229,27 +283,32 @@ namespace prelaunch {
     };
 
     outcome_t finish(const request_t &request, std::uint64_t generation, outcome_t outcome);
-    restore_e restore_owned(const session_identity_t &post, const others_t &others, std::string &reason);
+    /// Proves `post` is still this generation's desktop, then returns to Game Mode and proves a new
+    /// Game Mode session. `outcome_unknown` is set when the command was stopped after it started.
+    restore_e restore_owned(const session_identity_t &post, const others_t &others, const wait_t &wait, std::string &reason, bool &outcome_unknown);
+    bool stopping() const;
 
     host_t &host_;
     adapter_t &adapter_;
     clock_t &clock_;
-    std::chrono::milliseconds deadline_;
+    budgets_t budgets_;
 
     mutable std::mutex mutex_;
     std::uint64_t next_generation_ = 0;
     std::optional<active_t> active_;
     bool restoring_ = false;
+    std::atomic<bool> stopping_ {false};
+    std::thread worker_;
     receipt_t receipt_;
   };
 
-  /// The production adapter of this build: unavailable, never started.
+  /// The adapter of a build without a session switch (not Linux, or built without GIO): never started.
   class unavailable_adapter_t final: public adapter_t {
   public:
-    explicit unavailable_adapter_t(std::filesystem::path command = "/usr/bin/steamosctl");
+    explicit unavailable_adapter_t(std::filesystem::path command = std::string {steamos::k_steamosctl});
     bool implemented() const override;
-    std::string unavailable_reason() const override;
     bool command_present() const override;
+    verdict_t support(const wait_t &wait) override;
     bool start(direction_e direction) override;
     step_e poll() override;
     void abort() override;
@@ -261,7 +320,11 @@ namespace prelaunch {
   /// The process-wide coordinator over the production host, adapter and clock, or the test ones.
   coordinator_t &coordinator();
   /// Replaces the dependencies until called again with nulls. Tests only.
-  void set_dependencies_for_tests(host_t *host, adapter_t *adapter, clock_t *clock, std::chrono::milliseconds deadline = k_max_deadline);
+  void set_dependencies_for_tests(host_t *host, adapter_t *adapter, clock_t *clock, budgets_t budgets = {});
+  /// Polaris is stopping (signal-safe): see coordinator_t::request_stop().
+  void request_stop();
+  /// Polaris is stopping: shuts the production coordinator down (see coordinator_t::shutdown()).
+  void shutdown();
 
   /// Records launch stages in order while a test watches; production never sets a sink.
   void note_stage(std::string_view stage);
