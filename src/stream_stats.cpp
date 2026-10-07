@@ -82,14 +82,16 @@ namespace stream_stats {
     }
   }
 
-  bool encoder_time_fails_budget(double encode_time_ms, double target_fps) {
+  bool encoder_time_fails_budget(double encode_time_ms, double target_fps, bool source_time) {
+    // Source pacing's negotiated FPS is a ceiling, not a delivery deadline. Use the same measured
+    // encode threshold as the controller's neutral-cadence path; real age/jitter/loss stay separate.
     return std::isfinite(encode_time_ms) && encode_time_ms > 0.0 &&
-           encode_time_ms >= encoder_pressure_fail_threshold_ms(target_fps);
+           encode_time_ms >= (source_time ? 11.0 : encoder_pressure_fail_threshold_ms(target_fps));
   }
 
-  bool encoder_time_nears_budget(double encode_time_ms, double target_fps) {
+  bool encoder_time_nears_budget(double encode_time_ms, double target_fps, bool source_time) {
     return std::isfinite(encode_time_ms) && encode_time_ms > 0.0 &&
-           encode_time_ms >= encoder_pressure_watch_threshold_ms(target_fps);
+           encode_time_ms >= (source_time ? 11.0 : encoder_pressure_watch_threshold_ms(target_fps));
   }
 
   static std::mutex stats_mutex;
@@ -208,8 +210,12 @@ namespace stream_stats {
     bool video_policy_suppresses_quality_restore(
         const doctor_video_policy_state_t &sample) {
       const bool encoder_watch =
-        encoder_time_nears_budget(sample.encode_time_ms, sample.target_fps) ||
+        (sample.source_time ?
+          (std::isfinite(sample.encode_time_ms) && sample.encode_time_ms >= 9.9) :
+          encoder_time_nears_budget(sample.encode_time_ms, sample.target_fps)) ||
         sample.avg_frame_age_ms >= 18.0;
+      // Keep a restore margin below the source controller's 11 ms cut threshold. This holds a
+      // restoration near the threshold; it never turns the margin itself into pressure or a cut.
       // SHM is a supported compatibility path. It is capability context, not
       // pressure by itself; only measured encode/capture latency or confirmed
       // pacing trouble should block a guarded quality restore.
@@ -627,8 +633,8 @@ namespace stream_stats {
       if (j["effective"] == true) j["fallback_reason"] = nullptr;
       else if (runtime->ended) j["fallback_reason"] = "stream_ended";
       else if (runtime->authority_lost) j["fallback_reason"] = "authority_lost";
-      else if (!fresh) j["fallback_reason"] = "pacing_evidence_stale";
       else if (sample.mode == vrr_pacing::mode_e::unsupported) j["fallback_reason"] = vrr_pacing::name(sample.event);
+      else if (!fresh) j["fallback_reason"] = "pacing_evidence_stale";
       else j["fallback_reason"] = "source_time_unproven";
       nlohmann::json counts = nlohmann::json::object();
       for (std::size_t i = 0; i < runtime->event_counts.size(); ++i) {
@@ -637,7 +643,7 @@ namespace stream_stats {
       j["host_pacing"] = {{"state", vrr_pacing::name(sample.mode)}, {"last_event", vrr_pacing::name(sample.event)},
         {"fresh", fresh && !runtime->ended}, {"event_counts", std::move(counts)},
         {"receiver_presentation_verified", false}, {"physical_acceptance", false},
-        {"cadence_measurement_available", false}};
+        {"receiver_source_cadence_available", false}};
       return j;
     }
 
@@ -2896,12 +2902,12 @@ namespace stream_stats {
     // capture path, not the encoder — the old verdict here sent an SHM-bound
     // user to lower bitrate, which cannot recover capture throughput (issue
     // #367: encode at 5.8 ms of budget while frames arrived 26.5 ms old).
-    const bool encoder_time_fail = encoder_time_fails_budget(stats.encode_time_ms, target_fps);
+    const bool encoder_time_fail = encoder_time_fails_budget(stats.encode_time_ms, target_fps, stats.video_policy_source_time);
     const bool frame_age_counts_against_encoder = !capture_cpu_copy;
     const bool encoder_fail = encoder_time_fail ||
                               (frame_age_counts_against_encoder && stats.avg_frame_age_ms >= 22.0);
     const bool encoder_watch = !encoder_fail &&
-                               (encoder_time_nears_budget(stats.encode_time_ms, target_fps) ||
+                               (encoder_time_nears_budget(stats.encode_time_ms, target_fps, stats.video_policy_source_time) ||
                                 (frame_age_counts_against_encoder && stats.avg_frame_age_ms >= 18.0));
     const bool capture_latency_fail = capture_cpu_copy && !encoder_time_fail && stats.avg_frame_age_ms >= 22.0;
     const bool capture_latency_watch = capture_cpu_copy && !encoder_time_fail &&
@@ -4066,7 +4072,8 @@ namespace stream_stats {
     using mode = vrr_pacing::mode_e;
     using event = vrr_pacing::event_e;
     if (receipt.session_generation == 0 || vrr_pacing::name(receipt.mode) == "invalid_mode" ||
-        vrr_pacing::name(receipt.event) == "invalid_event" || receipt.observed_steady_ns < 0) return false;
+        vrr_pacing::name(receipt.event) == "invalid_event" ||
+        static_cast<std::size_t>(receipt.event) >= vrr_pacing::k_event_count || receipt.observed_steady_ns < 0) return false;
     const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::steady_clock::now().time_since_epoch()).count();
     if (receipt.observed_steady_ns > now_ns || now_ns - receipt.observed_steady_ns > 2'000'000'000) return false;

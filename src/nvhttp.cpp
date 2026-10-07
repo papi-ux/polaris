@@ -2674,8 +2674,10 @@ namespace nvhttp {
 
       // The judged verdict Doctor grades with, so the session status never contradicts it.
       const bool network_risk = stream_stats::judged_network(stats).risk;
+      const bool source_time_policy = stats.video_policy_source_time &&
+        (requester_generation == 0 || stats.video_policy_session_generation == requester_generation);
       const bool cadence_unavailable = stream_stats::source_pacing_evidence_unavailable(stats, requester_generation);
-      const bool pacing_risk = cadence_unavailable ? false : stats.video_policy_source_time ?
+      const bool pacing_risk = cadence_unavailable ? false : source_time_policy ?
         (stats.video_policy_cadence_available &&
          (stats.dropped_frame_ratio >= 0.04 || stats.frame_jitter_ms >= 2.2)) :
         (stats.dropped_frame_ratio >= 0.04 ||
@@ -2692,9 +2694,9 @@ namespace nvhttp {
         !build_has_cuda() &&
         capture_fallback;
       const bool encoder_time_fail =
-        stream_stats::encoder_time_fails_budget(stats.encode_time_ms, target_fps);
+        stream_stats::encoder_time_fails_budget(stats.encode_time_ms, target_fps, source_time_policy);
       const bool encoder_risk =
-        stream_stats::encoder_time_nears_budget(stats.encode_time_ms, target_fps) ||
+        stream_stats::encoder_time_nears_budget(stats.encode_time_ms, target_fps, source_time_policy) ||
         (!capture_fallback && stats.avg_frame_age_ms >= 18.0);
       const bool capture_latency_risk =
         capture_fallback && !encoder_time_fail && stats.avg_frame_age_ms >= 18.0;
@@ -2927,7 +2929,15 @@ namespace nvhttp {
         adaptive_bitrate::get_state(),
         stats.bitrate_kbps
       );
-      health["doctor"] = stream_stats::build_doctor_json(stats, health, app_uuid);
+      if (stats.video_policy_source_time && !source_time_policy) {
+        // A legacy requester cannot borrow another stream's source-mode pressure threshold.
+        auto requester_stats = stats;
+        requester_stats.video_policy_source_time = false;
+        requester_stats.video_policy_cadence_available = false;
+        health["doctor"] = stream_stats::build_doctor_json(requester_stats, health, app_uuid);
+      } else {
+        health["doctor"] = stream_stats::build_doctor_json(stats, health, app_uuid);
+      }
       return health;
     }
   }  // namespace

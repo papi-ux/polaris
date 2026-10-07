@@ -381,7 +381,13 @@ TEST(SourcePacingProductionTests, UnevenSourceFramesAreEncodedAtExactlyTheirMapp
     paced_stream_t stream {compositor, stream_config(120, opted_in(), 9101)};
     video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation};
     ASSERT_TRUE(epoch.opened().proof && epoch.opened().proof->clock_domain_verified);
-    for (const auto &packet : stream.drain(150ms)) EXPECT_FALSE(packet->source_time_paced) << "readiness never claims authority";
+    const auto readiness = stream.drain(150ms);
+    ASSERT_FALSE(readiness.empty()) << "no initial readiness";
+    for (const auto &packet : readiness) {
+      EXPECT_FALSE(packet->source_time_paced) << "readiness never claims authority";
+      // Its timestamp is still in the source-submission coordinates the source frames use.
+      EXPECT_TRUE(packet->source_clock_timestamp) << "readiness left the source-clock timestamp coordinates";
+    }
     std::uint64_t paced = 0;
     for (const auto gap : {11ms, 8ms, 14ms, 10ms, 16ms, 9ms}) {
       std::this_thread::sleep_for(gap);
@@ -395,6 +401,7 @@ TEST(SourcePacingProductionTests, UnevenSourceFramesAreEncodedAtExactlyTheirMapp
       // Causal marker (M2): exact mapped source time, never the grid or the capture handoff time.
       EXPECT_EQ(steady_ns(*packet->frame_timestamp), mapped_ns(*frame)) << "gap " << gap.count() << " ms";
       EXPECT_TRUE(packet->source_time_paced);
+      EXPECT_TRUE(packet->source_clock_timestamp);
       EXPECT_EQ(frame->frame_timestamp, original) << "the image's own timestamp is never rewritten";
       ++paced;
     }
@@ -525,6 +532,7 @@ TEST(SourcePacingProductionTests, ALeaseRetiredDuringConversionIsNeverEncodedAnd
       // Causal marker (M1): the post-conversion authority gate. Without it this frame goes at its time.
       EXPECT_NE(steady_ns(*packet->frame_timestamp), mapped_ns(*retired));
       EXPECT_FALSE(packet->source_time_paced);
+      EXPECT_TRUE(packet->source_clock_timestamp) << "a latched fallback left the source-clock coordinates";
     }
     // Republished and reopened (a new epoch): the generation stays in fallback.
     published->store(true);
@@ -536,6 +544,7 @@ TEST(SourcePacingProductionTests, ALeaseRetiredDuringConversionIsNeverEncodedAnd
       stream.raise(later);
       if (auto packet = stream.next_packet(200ms)) {
         EXPECT_FALSE(packet->source_time_paced) << "a latched fallback was promoted again";
+        EXPECT_TRUE(packet->source_clock_timestamp) << "a latched fallback left the source-clock coordinates";
         EXPECT_NE(steady_ns(*packet->frame_timestamp), mapped_ns(*later));
       }
     }
@@ -564,6 +573,7 @@ TEST(SourcePacingProductionTests, ALeaseRetiredWhileIdleBlocksAuthorisedRecovery
     for (const auto &packet : stream.drain(700ms)) {
       // Causal marker: the idle at-use authority check on the retained surface's own epoch.
       EXPECT_FALSE(packet->source_time_paced) << "a recovery or liveness frame claimed lost authority";
+      EXPECT_TRUE(packet->source_clock_timestamp) << "the latched recovery left the source-clock coordinates";
     }
     EXPECT_EQ(stream.count_reaching(event_e::authority_lost, 1u), 1u);
     // A valid new epoch after republish stays in fallback.
@@ -643,16 +653,23 @@ TEST(SourcePacingProductionTests, IneligibleSessionsAndUnsupportedRoutesKeepTheF
       SCOPED_TRACE(generation);
       paced_stream_t stream {compositor, stream_config(120, intent, generation++), source_route};
       video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation};
-      (void) stream.drain(100ms);
+      // None of these sessions ever records a source submission, so no packet carries either flag.
+      for (const auto &packet : stream.drain(100ms)) {
+        EXPECT_FALSE(packet->source_time_paced);
+        EXPECT_FALSE(packet->source_clock_timestamp);
+      }
       auto frame = stamped_frame(epoch, monotonic_now_ns());
       const auto original = *frame->frame_timestamp;
       stream.raise(frame);
       auto packet = stream.next_packet(400ms);
       ASSERT_TRUE(packet);
       EXPECT_FALSE(packet->source_time_paced);
+      EXPECT_FALSE(packet->source_clock_timestamp);
       // Exactly the fixed-rate loop: its pacer starts at the image's own capture timestamp.
       EXPECT_EQ(*packet->frame_timestamp, original);
-      EXPECT_GE(stream.drain(600ms).size(), 5u) << "legacy repeats changed";
+      const auto repeats = stream.drain(600ms);
+      EXPECT_GE(repeats.size(), 5u) << "legacy repeats changed";
+      for (const auto &repeat : repeats) EXPECT_FALSE(repeat->source_clock_timestamp);
       EXPECT_EQ(stream.count(event_e::accepted_source), 0u);
       if (intent.eligible()) EXPECT_EQ(stream.count_reaching(event_e::unsupported_route, 1u), 1u);
     }
@@ -677,8 +694,10 @@ TEST(SourcePacingProductionTests, OneStampedImageIsSourcePacedForAnEligibleConsu
     auto legacy = host_off.next_packet(400ms);
     ASSERT_TRUE(paced && legacy);
     EXPECT_TRUE(paced->source_time_paced);
+    EXPECT_TRUE(paced->source_clock_timestamp);
     EXPECT_EQ(steady_ns(*paced->frame_timestamp), mapped_ns(*frame));
     EXPECT_FALSE(legacy->source_time_paced);
+    EXPECT_FALSE(legacy->source_clock_timestamp) << "the concurrent legacy consumer took source-clock coordinates";
     EXPECT_EQ(*legacy->frame_timestamp, original);
     EXPECT_EQ(frame->frame_timestamp, original) << "the shared image was not rewritten by either consumer";
   });
@@ -694,7 +713,10 @@ TEST(SourcePacingProductionTests, ReadinessThenAnUnprovenEpochKeepsTheLegacyLoop
       video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation};
       const auto readiness = stream.drain(150ms);
       ASSERT_FALSE(readiness.empty()) << "no initial readiness";
-      for (const auto &packet : readiness) EXPECT_FALSE(packet->source_time_paced);
+      for (const auto &packet : readiness) {
+        EXPECT_FALSE(packet->source_time_paced);
+        EXPECT_TRUE(packet->source_clock_timestamp) << "readiness was submitted through the source-submission record";
+      }
       auto frame = stamped_frame(epoch, monotonic_now_ns());
       ASSERT_NE(frame->provenance.source_time.result, vrr_clock::source_time_e::mapped);
       const auto original = *frame->frame_timestamp;
@@ -702,6 +724,7 @@ TEST(SourcePacingProductionTests, ReadinessThenAnUnprovenEpochKeepsTheLegacyLoop
       auto packet = stream.next_packet(400ms);
       ASSERT_TRUE(packet);
       EXPECT_FALSE(packet->source_time_paced);
+      EXPECT_FALSE(packet->source_clock_timestamp) << "the pure legacy loop kept source-clock coordinates";
       EXPECT_EQ(*packet->frame_timestamp, original) << "readiness did not keep the session out of the legacy loop";
       EXPECT_EQ(stream.count_reaching(event_e::unsupported_route, 1u), 1u);
     }
@@ -719,7 +742,10 @@ TEST(SourcePacingProductionTests, ReadinessThenAnUnprovenEpochKeepsTheLegacyLoop
       std::this_thread::sleep_for(15ms);
       auto later = stamped_frame(unproven, monotonic_now_ns());
       stream.raise(later);
-      for (const auto &packet : stream.drain(200ms)) EXPECT_FALSE(packet->source_time_paced);
+      for (const auto &packet : stream.drain(200ms)) {
+        EXPECT_FALSE(packet->source_time_paced);
+        EXPECT_TRUE(packet->source_clock_timestamp) << "the latched fallback left the source-clock coordinates";
+      }
       EXPECT_EQ(stream.count_reaching(event_e::unsupported_route, 1u), 1u);
     }
   });
@@ -751,6 +777,82 @@ TEST(SourcePacingProductionTests, AFrameCarryingAnotherProofObjectIsNeverSourceP
     stream.raise(later);
     if (auto packet = stream.next_packet(300ms)) EXPECT_FALSE(packet->source_time_paced);
     EXPECT_EQ(stream.count_reaching(event_e::authority_lost, 1u), 1u);
+  });
+}
+
+TEST(SourcePacingProductionTests, ThePeriodicPolicySampleIsSourceRelativeForItsOwnGenerationAndAFixedTargetMissIsNotAWarning) {
+  pinned_compositor_t compositor;
+  REQUIRE_PRODUCTION_FIXTURE(compositor);
+  constexpr std::uint64_t generation = 9117;
+  constexpr double ceiling_fps = 120.0;
+  const bool host_flag = config::video.vrr_source_pacing;
+  with_h264([&] {
+    // Declared before the stream, so it runs after the stream's destructor joined the loop and removed
+    // its generation: this case's own stats and policy sample are reset on an ASSERT early return too.
+    auto reset_own_stats = util::fail_guard([] { stream_stats::update_stream_active(false); });
+    {
+      paced_stream_t stream {compositor, stream_config(static_cast<int>(ceiling_fps), opted_in(), generation)};
+      video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation};
+      ASSERT_TRUE(epoch.opened().proof && epoch.opened().proof->clock_domain_verified);
+      (void) stream.drain(150ms);
+      // The loop's own periodic branch, read through the published policy sample: this generation's
+      // source label, its source-handoff cadence, and a delivered rate measured over a full one-second
+      // window, so the fixed 120 FPS target is genuinely missed (~77 FPS of uneven source frames).
+      const auto sampled = [&](const stream_stats::stats_t &stats) {
+        return stats.video_policy_session_generation == generation && stats.video_policy_source_time &&
+               stats.video_policy_cadence_available && stats.fps > 0.0 && stats.fps < ceiling_fps * 0.88;
+      };
+      std::uint64_t paced = 0;
+      bool observed = false;
+      for (int index = 0; index < 220 && !(observed && paced >= 35); ++index) {
+        // The source feed itself: uneven 12/14 ms intervals, each longer than the ceiling's 8.33 ms, so
+        // the feed rate stays below the 120 FPS ceiling.
+        std::this_thread::sleep_for(index % 2 ? 14ms : 12ms);
+        auto frame = stamped_frame(epoch, monotonic_now_ns());
+        ASSERT_EQ(frame->provenance.source_time.result, vrr_clock::source_time_e::mapped);
+        stream.raise(frame);
+        while (auto packet = stream.next_packet(0ms)) {
+          if (packet->source_time_paced) ++paced;
+        }
+        observed = observed || sampled(stream_stats::get_current());
+      }
+      // Packets publish before their events; the sample may follow the last packet. Bounded.
+      for (auto deadline = std::chrono::steady_clock::now() + 2s; !observed && std::chrono::steady_clock::now() < deadline;) {
+        while (auto packet = stream.next_packet(10ms)) {
+          if (packet->source_time_paced) ++paced;
+        }
+        observed = sampled(stream_stats::get_current());
+      }
+      ASSERT_TRUE(observed) << "the periodic branch never published this generation's source-relative sample";
+      // Collect what the last raised frames still had in flight (well inside the 500 ms liveness floor).
+      for (const auto &packet : stream.drain(100ms)) {
+        if (packet->source_time_paced) ++paced;
+      }
+      EXPECT_GE(paced, 35u) << "fewer than 35 mapped source frames were actually emitted";
+      EXPECT_EQ(stream.count_reaching(event_e::accepted_source, paced), paced);
+
+      const auto stats = stream_stats::get_current();
+      EXPECT_EQ(stats.video_policy_session_generation, generation);
+      EXPECT_TRUE(stats.video_policy_source_time);
+      EXPECT_TRUE(stats.video_policy_cadence_available);
+      EXPECT_GE(stats.video_policy_sample_count, 1u);
+      // The delivered rate misses the fixed target by far more than the legacy shortfall threshold, yet a
+      // source-relative sample warns only on its own measured handoff jitter or involuntary drops.
+      EXPECT_LT(stats.fps, ceiling_fps * 0.88);
+      const bool measured_warning = stats.frame_jitter_ms >= 2.2 || stats.dropped_frame_ratio >= 0.04;
+      EXPECT_EQ(stats.pacing_warning_streak > 0, measured_warning)
+        << "fps=" << stats.fps << " jitter=" << stats.frame_jitter_ms << " dropped=" << stats.dropped_frame_ratio;
+      EXPECT_EQ(stream.vrr()["effective"], true);
+    }
+    // The owned thread joined and its generation was removed: end the test stream so nothing leaks.
+    stream_stats::update_stream_active(false);
+    const auto after = stream_stats::get_current();
+    EXPECT_EQ(after.video_policy_session_generation, 0u);
+    EXPECT_FALSE(after.video_policy_source_time);
+    EXPECT_EQ(after.video_policy_sample_count, 0u);
+    for (const auto &client : after.clients) EXPECT_NE(client.session_generation, generation);
+    EXPECT_TRUE(stream_stats::vrr_json(after, generation).is_null());
+    EXPECT_EQ(config::video.vrr_source_pacing, host_flag) << "the case changed the host opt-in";
   });
 }
 

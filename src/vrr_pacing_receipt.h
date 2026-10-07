@@ -3,6 +3,7 @@
  */
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string_view>
@@ -15,6 +16,8 @@ namespace vrr_pacing {
     stale_or_replayed, regressed_vs_emitted, tick_collision, source_stale,
     unsupported_route, unsupported_codec, unsupported_loop,
   };
+
+  inline constexpr std::size_t k_event_count = static_cast<std::size_t>(event_e::unsupported_loop) + 1;
 
   inline constexpr std::string_view name(mode_e value) {
     switch (value) {

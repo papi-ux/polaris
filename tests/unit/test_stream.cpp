@@ -1121,3 +1121,37 @@ TEST(StreamVrrAdmissionTests, PendingAndOtherGenerationsCadenceNeverBecomeHealth
   stats.clients.front().vrr->host_source_pacing = false;
   EXPECT_FALSE(stream_stats::source_pacing_evidence_unavailable(stats,7201));
 }
+
+TEST(StreamVrrAdmissionTests, SourceEncodePressureUsesMeasuredWorkRatherThanTheNegotiatedCeilingDeadline) {
+  auto stats = stable_gpu_native_stats(90,120);
+  stats.bitrate_kbps = 20000;
+  stats.video_policy_source_time = true;
+  stats.video_policy_cadence_available = true;
+  stats.encode_time_ms = 9;
+  auto health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control");
+  EXPECT_EQ(health["grade"], "good");
+  EXPECT_EQ(health["auto_action"], "none");
+  EXPECT_EQ(health["doctor"]["status"], "ok");
+  EXPECT_NE(health["doctor"]["primary_issue"], "encoder_load");
+  EXPECT_EQ(health["safe_bitrate_kbps"], stats.bitrate_kbps);
+
+  stats.encode_time_ms = 12;
+  health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control");
+  EXPECT_EQ(health["primary_issue"], "encoder_load");
+  EXPECT_EQ(health["doctor"]["status"], "needs_action");
+  EXPECT_EQ(health["doctor"]["traffic_light"], "red");
+
+  stats.video_policy_source_time = true;
+  stats.video_policy_session_generation = 7301;
+  stats.encode_time_ms = 9;
+  health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control",7302);
+  EXPECT_EQ(health["primary_issue"], "encoder_load") << "a legacy requester cannot borrow source pressure thresholds";
+  EXPECT_EQ(health["doctor"]["traffic_light"], "red");
+
+  // The same encode work retains the existing fixed-rate threshold when source pacing is off.
+  stats.video_policy_source_time = false;
+  stats.encode_time_ms = 9;
+  health = nvhttp::build_session_health_json_for_tests(stats,false,"Nova Client","Control");
+  EXPECT_EQ(health["primary_issue"], "encoder_load");
+  EXPECT_EQ(health["doctor"]["traffic_light"], "red");
+}

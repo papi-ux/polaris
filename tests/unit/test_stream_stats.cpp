@@ -9,6 +9,7 @@
 #include <src/configuration_store.h>
 #include <src/platform/common.h>
 #include <src/doctor_actions.h>
+#include <src/doctor_cadence.h>
 #include <src/adaptive_bitrate.h>
 #include <src/live_tuning.h>
 #include <src/private_state_file.h>
@@ -12008,7 +12009,7 @@ TEST_F(StreamStatsCaptureTimingTests, SourcePacingRuntimeNeedsItsOwnAcceptedMapp
   EXPECT_EQ(json["effective"], true);
   EXPECT_EQ(json["pacing_mode"], "source_time");
   EXPECT_EQ(json["host_pacing"]["receiver_presentation_verified"], false);
-  EXPECT_EQ(json["host_pacing"]["cadence_measurement_available"], false);
+  EXPECT_EQ(json["host_pacing"]["receiver_source_cadence_available"], false);
   EXPECT_EQ(json["host_pacing"]["event_counts"]["accepted_source"], 1u);
   for (const char *secret : {"emitted_source_ns", "observed_steady_ns", "pid", "lease", "source_sequence", "capture_epoch"}) {
     EXPECT_EQ(json.dump().find(secret), std::string::npos) << secret;
@@ -12033,6 +12034,30 @@ TEST_F(StreamStatsCaptureTimingTests, SourcePacingRuntimeNeedsItsOwnAcceptedMapp
   EXPECT_EQ(current_stats_json()["last_session"]["vrr"], ended);
 }
 
+TEST_F(StreamStatsCaptureTimingTests, UnsupportedPacingKeepsItsTerminalReasonWhenItsObservationAges) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto request = vrr_record(501, vrr_policy::requested_e::on);
+  request.host_source_pacing = true;
+  ASSERT_TRUE(stream_stats::record_vrr_session(request));
+  for (const auto reason : {vrr_pacing::event_e::unsupported_route, vrr_pacing::event_e::unsupported_codec,
+                           vrr_pacing::event_e::unsupported_loop}) {
+    ASSERT_TRUE(stream_stats::record_vrr_pacing_event({501,0,0,0,vrr_pacing::mode_e::unsupported,
+      reason,std::nullopt,pacing_now_ns()}));
+    auto stats = stream_stats::get_current();
+    stats.clients.front().vrr_pacing->last.observed_steady_ns -= 3'000'000'000;
+    const auto observed = stream_stats::vrr_json(stats,501);
+    EXPECT_FALSE(observed["effective"].get<bool>());
+    EXPECT_EQ(observed["pacing_mode"], "fixed_grid");
+    EXPECT_EQ(observed["fallback_reason"], vrr_pacing::name(reason));
+    EXPECT_FALSE(observed["host_pacing"]["fresh"].get<bool>());
+    const auto cadence = doctor_cadence::evaluate({{"vrr", observed}},501,10000,9000,10000,120);
+    EXPECT_TRUE(cadence.available);
+    EXPECT_EQ(cadence.observation["state"], "fixed_grid");
+    EXPECT_EQ(cadence.observation["reason"], vrr_pacing::name(reason));
+    EXPECT_FALSE(stream_stats::source_pacing_evidence_unavailable(stats,501));
+  }
+}
+
 TEST_F(StreamStatsCaptureTimingTests, RequestedVrrCannotLabelUnprovenPolicySamplesAsSourceRelative) {
   stream_stats::add_client("10.0.0.5", "Owner", 501);
   auto request = vrr_record(501, vrr_policy::requested_e::on); request.host_source_pacing = true;
@@ -12051,6 +12076,11 @@ TEST_F(StreamStatsCaptureTimingTests, RequestedVrrCannotLabelUnprovenPolicySampl
   EXPECT_TRUE(stats.video_policy_source_time);
   EXPECT_TRUE(stats.video_policy_cadence_available);
   EXPECT_EQ(stats.pacing_warning_streak, 0u) << "90 FPS under a 120 FPS ceiling is not pacing pressure";
+  stream_stats::note_doctor_video_policy_sample(120,90,0,0,0,0,9,501,true,true);
+  EXPECT_FALSE(adaptive_bitrate::doctor_policy_blocks_quality_restore());
+  stream_stats::note_doctor_video_policy_sample(120,90,0,0,0,0,9.9,501,true,true);
+  EXPECT_TRUE(adaptive_bitrate::doctor_policy_blocks_quality_restore()) << "restore keeps a margin below the 11 ms cut";
+  EXPECT_FALSE(stream_stats::encoder_time_nears_budget(9.9,120,true)) << "restore margin is not a cut finding";
   for (int i = 0; i < 8; ++i) stream_stats::note_doctor_video_policy_sample(120,90,0,0,0,3,1,501,true,true);
   EXPECT_GE(stream_stats::get_current().pacing_warning_streak, 2u) << "actual handoff jitter remains visible";
   stream_stats::note_doctor_video_policy_sample(120,90,0,0,0,99,1,501,true,false);

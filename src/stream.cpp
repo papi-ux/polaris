@@ -1880,7 +1880,7 @@ namespace stream {
       auto session = static_cast<session_t *>(delivery.get());
       auto lowseq = session->video.lowseq;
       std::optional<std::uint32_t> source_rtp_timestamp;
-      if (packet->source_time_paced) {
+      if (packet->source_clock_timestamp) {
         if (!packet->frame_timestamp) continue;
         source_rtp_timestamp = vrr_pacing::rtp_timestamp(
           std::chrono::duration_cast<std::chrono::nanoseconds>(packet->frame_timestamp->time_since_epoch()).count(),

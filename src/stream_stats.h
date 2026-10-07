@@ -36,7 +36,7 @@ namespace stream_stats {
 
   struct vrr_pacing_stats_t {
     vrr_pacing::receipt_t last;
-    std::array<std::uint64_t, 15> event_counts {};
+    std::array<std::uint64_t, vrr_pacing::k_event_count> event_counts {};
     bool authority_lost = false;
     bool ended = false;
     std::uint64_t last_source_epoch = 0;
@@ -74,8 +74,8 @@ namespace stream_stats {
    * assigning different pressure grades to the same encoder timing.
    */
   double encoder_pressure_frame_budget_ms(double target_fps);
-  bool encoder_time_fails_budget(double encode_time_ms, double target_fps);
-  bool encoder_time_nears_budget(double encode_time_ms, double target_fps);
+  bool encoder_time_fails_budget(double encode_time_ms, double target_fps, bool source_time = false);
+  bool encoder_time_nears_budget(double encode_time_ms, double target_fps, bool source_time = false);
 
   /** Sender-side evidence for encoded frames outside the protocol FEC envelope. */
   struct fec_protection_stats_t {

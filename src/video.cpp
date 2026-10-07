@@ -4095,6 +4095,7 @@ namespace video {
         }
         packet->frame_timestamp = steady_at_ns(emitted->emit_ns);
         packet->source_time_paced = emitted->source_time_paced;
+        packet->source_clock_timestamp = true;
         packet->encode_done_timestamp = std::chrono::steady_clock::now();
       } else if (av_packet && av_packet->pts == frame_nr) {
         packet->frame_timestamp = frame_timestamp;
@@ -4192,6 +4193,7 @@ namespace video {
       }
       frame_timestamp = steady_at_ns(emitted->emit_ns);
       packet->source_time_paced = emitted->source_time_paced;
+      packet->source_clock_timestamp = true;
     }
     packet->frame_timestamp = frame_timestamp;
     packet->encode_done_timestamp = encode_done_timestamp;

@@ -638,9 +638,15 @@ namespace video {
     // (T0->T1, T1->T2, T0->T2) from one thread without cross-thread
     // correlation.
     std::optional<std::chrono::steady_clock::time_point> encode_done_timestamp;
-    // Appended: true only for a packet submitted by an effective source-time paced session (source,
-    // recovery, readiness or liveness), whose frame_timestamp is that pacing's emitted time.
+    // Appended: true only for a source frame, or a recovery/liveness re-encode of a source frame's
+    // surface under its current authority, whose frame_timestamp is that pacing's emitted time.
+    // Readiness and any unproven surface are false.
     bool source_time_paced = false;
+    // Appended: true for every packet resolved through a session's source-submission record (readiness,
+    // source, recovery, liveness and a later latched fallback alike), whose frame_timestamp is therefore
+    // in that record's emitted-time coordinates. A timestamp-coordinate fact only: never proof,
+    // authority or receiver VRR. Sessions that never record source submissions keep it false.
+    bool source_clock_timestamp = false;
   };
 
   struct packet_raw_avcodec: packet_raw_t {
