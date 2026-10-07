@@ -19,6 +19,7 @@
 #include "src/capture_producer_binding.h"
 
 #include <array>
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <map>
@@ -66,7 +67,7 @@ namespace pipewire_producer_binding {
     for (const char ch : text) {
       if (ch < '0' || ch > '9') return std::nullopt;
       const auto digit = static_cast<std::uint64_t>(ch - '0');
-      if (value > (max - digit) / 10) return std::nullopt;
+      if (digit > max || value > (max - digit) / 10) return std::nullopt;
       value = value * 10 + digit;
     }
     return value;
@@ -107,14 +108,14 @@ namespace pipewire_producer_binding {
   }
 
   /**
-   * The oldest server whose credential, client.id and link semantics were audited. Older servers
-   * (0.3.x) differ in object.serial publication, so their graphs are refused rather than trusted.
+   * Exact server versions whose credential, client.id and link semantics were audited. A future
+   * or otherwise unaudited runtime version is unknown until its primary source is reviewed.
    */
-  inline constexpr std::array<std::uint64_t, 3> minimum_server_version {1, 0, 0};
+  inline constexpr std::array<std::array<std::uint64_t, 3>, 3> audited_server_versions {{{1, 0, 5}, {1, 6, 8}, {1, 6, 9}}};
 
   inline bool server_version_supported(std::string_view version) {
     const auto parsed = parse_version(version);
-    return parsed && *parsed >= minimum_server_version;
+    return parsed && std::find(audited_server_versions.begin(), audited_server_versions.end(), *parsed) != audited_server_versions.end();
   }
 
   enum class kind_e {

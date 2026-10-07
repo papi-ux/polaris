@@ -95,6 +95,8 @@ TEST(PipeWireProducerBindingTests, StrictDecimalRefusesEveryNonCanonicalForm) {
     EXPECT_FALSE(pb::parse_decimal(text, 1'000'000)) << text;
   }
   EXPECT_EQ(pb::parse_decimal("0", 10), 0u);
+  EXPECT_FALSE(pb::parse_decimal("9", 5));
+  EXPECT_FALSE(pb::parse_decimal("1", 0));
   EXPECT_EQ(pb::parse_decimal("18446744073709551615", UINT64_MAX), UINT64_MAX);
   EXPECT_FALSE(pb::parse_decimal("18446744073709551616", UINT64_MAX));
   EXPECT_FALSE(pb::parse_id("4294967295")) << "SPA_ID_INVALID is never a global";
@@ -108,8 +110,11 @@ TEST(PipeWireProducerBindingTests, StrictDecimalRefusesEveryNonCanonicalForm) {
 }
 
 TEST(PipeWireProducerBindingTests, ServerVersionMustParseAndBeAudited) {
-  EXPECT_TRUE(pb::server_version_supported("1.0.0"));
+  EXPECT_FALSE(pb::server_version_supported("1.0.0"));
+  EXPECT_FALSE(pb::server_version_supported("1.2.0"));
+  EXPECT_FALSE(pb::server_version_supported("2.0.0"));
   EXPECT_TRUE(pb::server_version_supported("1.0.5"));
+  EXPECT_TRUE(pb::server_version_supported("1.6.8"));
   EXPECT_TRUE(pb::server_version_supported("1.6.9"));
   for (const auto *version : {"0.3.81", "", "1.6", "1.6.9.1", "1.6.x", "v1.6.9", "1.06.9"}) {
     EXPECT_FALSE(pb::server_version_supported(version)) << version;

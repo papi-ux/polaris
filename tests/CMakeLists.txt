@@ -228,6 +228,7 @@ set(TEST_PLATFORM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_game_mode_host.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_game_mode_repaint.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_game_mode_feedback.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_pipewire_producer_graph.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_steam_title_process.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_user_unit_override.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_kms_enable.cpp

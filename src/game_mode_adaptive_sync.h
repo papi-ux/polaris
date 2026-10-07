@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -146,6 +147,12 @@ namespace game_mode_adaptive_sync {
     record_t read() const {
       std::lock_guard lock(mutex_);
       return record_;
+    }
+    std::shared_ptr<const store_t> retired_snapshot() const {
+      auto result = std::make_shared<store_t>();
+      result->record_ = read();
+      result->record_.ended = true;
+      return result;
     }
   private:
     mutable std::mutex mutex_;

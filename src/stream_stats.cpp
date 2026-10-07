@@ -756,7 +756,10 @@ namespace stream_stats {
       const auto evaluated = game_mode_adaptive_sync::evaluate(record, now);
       // Every reason is a fixed diagnostic code. Never export arbitrary producer/credential text.
       static constexpr std::array reasons {
-        "producer_unbound", "observer_disabled", "capture_stopping", "capture_not_running",
+        "producer_unbound", "producer_tracking_disabled", "producer_tracking_unavailable", "capture_stopping", "capture_not_running",
+        "binding_on_pipewire_thread", "read_cancelled", "read_timeout", "pipewire_core_error",
+        "server_version_unsupported", "graph_identity_invalid", "capture_client_unknown",
+        "capture_credentials_absent", "capture_node_unknown", "capture_node_not_owned",
         "source_not_linked", "source_ambiguous", "source_unattributed", "producer_credentials_absent",
         "producer_uid_mismatch", "producer_restarted", "producer_exe_unreadable", "pid_namespace_mismatch",
         "producer_client_not_visible", "pipewire_graph_changed", "pipewire_read_timeout",
@@ -3826,6 +3829,10 @@ namespace stream_stats {
           .capture_timing = ending->capture_timing,
         };
         if (last_ended_session->vrr_pacing) last_ended_session->vrr_pacing->ended = true;
+        if (last_ended_session->capture_timing && last_ended_session->capture_timing->last_accepted.host_adaptive_sync) {
+          auto &observer = last_ended_session->capture_timing->last_accepted.host_adaptive_sync;
+          observer = observer->retired_snapshot();
+        }
       }
     }
 
