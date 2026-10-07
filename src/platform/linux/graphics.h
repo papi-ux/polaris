@@ -302,6 +302,7 @@ namespace egl {
       }
 
       dmabuf_buffer_key = 0;
+      requires_producer_lease = false;
       capture_owner.reset();
     }
 
@@ -310,6 +311,9 @@ namespace egl {
     // Increment sequence when new rgb_t needs to be created
     std::uint64_t sequence;
     std::uint64_t dmabuf_buffer_key {0};
+    // PipeWire marks frames whose buffer must not return to its producer until
+    // the consumer has finished. wlroots also has keys, without this contract.
+    bool requires_producer_lease {false};
     // An isolated conversion image must retain the published capture owner,
     // including a PipeWire buffer lease wrapped around the pooled image.
     // The original image never points back to its conversion clone.

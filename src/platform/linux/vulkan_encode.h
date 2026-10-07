@@ -14,6 +14,12 @@ extern "C" struct AVBufferRef;
 namespace vk {
 
   /**
+   * @brief Release discovery's instance before driver global teardown.
+   * Call only after all capture and encoder users have stopped. Idempotent.
+   */
+  void shutdown_discovery();
+
+  /**
    * @brief Initialize Vulkan hardware device for FFmpeg encoding.
    * @param encode_device The encode device (vk_t).
    * @param hw_device_buf Output hardware device buffer.

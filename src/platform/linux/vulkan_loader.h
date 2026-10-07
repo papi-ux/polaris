@@ -80,6 +80,7 @@
   X(GetPhysicalDeviceExternalBufferProperties) \
   X(GetPhysicalDeviceFormatProperties) \
   X(GetPhysicalDeviceFormatProperties2) \
+  X(GetPhysicalDeviceImageFormatProperties2) \
   X(GetPhysicalDeviceMemoryProperties) \
   X(GetPhysicalDeviceProperties) \
   X(GetPhysicalDeviceProperties2) \

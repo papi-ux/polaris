@@ -1222,6 +1222,9 @@ TEST(PipeWireCapturePolicyTests, DmaBufDescriptorDuplicatesFdAndNormalizesChunkO
   EXPECT_EQ(descriptor.sd.offsets[0], 0u);
   EXPECT_EQ(descriptor.sd.pitches[0], 16u);
   EXPECT_EQ(descriptor.sd.fourcc, DRM_FORMAT_XRGB8888);
+  EXPECT_TRUE(descriptor.requires_producer_lease);
+  descriptor.reset();
+  EXPECT_FALSE(descriptor.requires_producer_lease);
 
   close(pipe_fds[0]);
   close(pipe_fds[1]);
