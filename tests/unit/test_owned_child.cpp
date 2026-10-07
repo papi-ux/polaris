@@ -16,6 +16,7 @@
   #include <fcntl.h>
   #include <filesystem>
   #include <fstream>
+  #include <iostream>
   #include <random>
   #include <set>
   #include <sstream>
