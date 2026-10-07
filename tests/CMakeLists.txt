@@ -178,6 +178,8 @@ set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_clock_proof.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_compositor_identity.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_source_time.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_source_pacing.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_vrr_epoch_authority.cpp
 )
 
 if (NOT WIN32 AND NOT APPLE)
@@ -329,6 +331,7 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_stats.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_pyrowave_advice.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_capture_provenance.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_video_source_pacing.cpp
 )
 
 if (NOT WIN32 AND NOT APPLE)

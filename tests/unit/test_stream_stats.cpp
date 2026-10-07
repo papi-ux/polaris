@@ -11976,3 +11976,101 @@ TEST_F(StreamStatsCaptureTimingTests, UnknownIdentityReasonsCannotExposeProcessF
   EXPECT_EQ(current_stats_json()["last_session"]["capture_timing"], live);
   EXPECT_EQ(current_stats_json()["clients"][0]["capture_timing"]["clock"]["producer_identity_reason"], "not_probed");
 }
+
+namespace {
+  std::int64_t pacing_now_ns() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
+}
+
+TEST_F(StreamStatsCaptureTimingTests, SourcePacingRuntimeNeedsItsOwnAcceptedMappedFrame) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto request = vrr_record(501, vrr_policy::requested_e::on);
+  request.host_source_pacing = true;
+  ASSERT_TRUE(stream_stats::record_vrr_session(request));
+  auto frame = image(); frame.clock_proof = proof(71, true);
+  const auto now = pacing_now_ns();
+  frame.ready_at = std::chrono::steady_clock::time_point {std::chrono::nanoseconds {now}};
+  frame.presentation.ns = now - 1'000'000;
+  frame.source_time = {vrr_clock::source_time_e::mapped, 0, frame.presentation.ns, 100, now};
+  vrr_pacing::receipt_t receipt {501, 901, 71, 1, vrr_pacing::mode_e::source_time,
+    vrr_pacing::event_e::accepted_source, frame.presentation.ns, now};
+  EXPECT_FALSE(stream_stats::record_vrr_pacing_event(receipt)) << "no accepted capture frame";
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  auto wrong = receipt; wrong.source_sequence = 2;
+  EXPECT_FALSE(stream_stats::record_vrr_pacing_event(wrong));
+  wrong = receipt; ++*wrong.emitted_source_ns;
+  EXPECT_FALSE(stream_stats::record_vrr_pacing_event(wrong));
+  ASSERT_TRUE(stream_stats::record_vrr_pacing_event(receipt));
+  EXPECT_FALSE(stream_stats::record_vrr_pacing_event(receipt)) << "replay";
+  auto json = stream_stats::vrr_json(stream_stats::get_current(), 501);
+  EXPECT_EQ(json["effective"], true);
+  EXPECT_EQ(json["pacing_mode"], "source_time");
+  EXPECT_EQ(json["host_pacing"]["receiver_presentation_verified"], false);
+  EXPECT_EQ(json["host_pacing"]["cadence_measurement_available"], false);
+  EXPECT_EQ(json["host_pacing"]["event_counts"]["accepted_source"], 1u);
+  for (const char *secret : {"emitted_source_ns", "observed_steady_ns", "pid", "lease", "source_sequence", "capture_epoch"}) {
+    EXPECT_EQ(json.dump().find(secret), std::string::npos) << secret;
+  }
+  auto stats = stream_stats::get_current();
+  stats.clients.front().vrr_pacing->last.observed_steady_ns -= 3'000'000'000;
+  EXPECT_EQ(stream_stats::vrr_json(stats, 501)["effective"], false);
+  EXPECT_EQ(stream_stats::vrr_json(stats, 501)["fallback_reason"], "pacing_evidence_stale");
+
+  receipt.mode = vrr_pacing::mode_e::latched_fallback;
+  receipt.event = vrr_pacing::event_e::authority_lost; receipt.emitted_source_ns.reset();
+  receipt.observed_steady_ns = pacing_now_ns();
+  ASSERT_TRUE(stream_stats::record_vrr_pacing_event(receipt));
+  EXPECT_EQ(stream_stats::vrr_json(stream_stats::get_current(), 501)["effective"], false);
+  receipt.mode = vrr_pacing::mode_e::source_time; receipt.event = vrr_pacing::event_e::liveness;
+  EXPECT_FALSE(stream_stats::record_vrr_pacing_event(receipt)) << "cannot re-promote a lost generation";
+  stream_stats::remove_client("10.0.0.5", 501);
+  const auto ended = current_stats_json()["last_session"]["vrr"];
+  EXPECT_EQ(ended["effective"], false);
+  EXPECT_EQ(ended["fallback_reason"], "stream_ended");
+  EXPECT_FALSE(stream_stats::record_vrr_pacing_event(receipt));
+  EXPECT_EQ(current_stats_json()["last_session"]["vrr"], ended);
+}
+
+TEST_F(StreamStatsCaptureTimingTests, RequestedVrrCannotLabelUnprovenPolicySamplesAsSourceRelative) {
+  stream_stats::add_client("10.0.0.5", "Owner", 501);
+  auto request = vrr_record(501, vrr_policy::requested_e::on); request.host_source_pacing = true;
+  ASSERT_TRUE(stream_stats::record_vrr_session(request));
+  stream_stats::note_doctor_video_policy_sample(120, 90, 0, 0, 0, 0, 1, 501, true, true);
+  EXPECT_FALSE(stream_stats::get_current().video_policy_source_time);
+  auto frame = image(); frame.clock_proof = proof(71, true);
+  const auto now = pacing_now_ns(); frame.presentation.ns = now - 1'000'000;
+  frame.ready_at = std::chrono::steady_clock::time_point {std::chrono::nanoseconds {now}};
+  frame.source_time = {vrr_clock::source_time_e::mapped, 0, frame.presentation.ns, 100, now};
+  ASSERT_TRUE(stream_stats::record_accepted_capture(501, frame));
+  ASSERT_TRUE(stream_stats::record_vrr_pacing_event({501,901,71,1,vrr_pacing::mode_e::source_time,
+    vrr_pacing::event_e::accepted_source,frame.presentation.ns,now}));
+  for (int i = 0; i < 8; ++i) stream_stats::note_doctor_video_policy_sample(120,90,0,0,0,0,1,501,true,true);
+  auto stats = stream_stats::get_current();
+  EXPECT_TRUE(stats.video_policy_source_time);
+  EXPECT_TRUE(stats.video_policy_cadence_available);
+  EXPECT_EQ(stats.pacing_warning_streak, 0u) << "90 FPS under a 120 FPS ceiling is not pacing pressure";
+  for (int i = 0; i < 8; ++i) stream_stats::note_doctor_video_policy_sample(120,90,0,0,0,3,1,501,true,true);
+  EXPECT_GE(stream_stats::get_current().pacing_warning_streak, 2u) << "actual handoff jitter remains visible";
+  stream_stats::note_doctor_video_policy_sample(120,90,0,0,0,99,1,501,true,false);
+  EXPECT_FALSE(stream_stats::get_current().video_policy_cadence_available);
+  EXPECT_EQ(stream_stats::get_current().pacing_warning_streak, 0u) << "missing measurements cannot grade cadence";
+  stream_stats::note_doctor_video_policy_sample(120,90,0,0,0,3,1,999,false,true);
+  EXPECT_FALSE(stream_stats::get_current().video_policy_source_time) << "mixed legacy session clears the source label";
+}
+
+TEST(StreamStatsVrrTests, RuntimeCannotActivateDefaultOffWatchOrMalformedGenerations) {
+  stream_stats::update_stream_active(false);
+  auto reset = util::fail_guard([] { stream_stats::update_stream_active(false); });
+  for (std::uint64_t generation = 601; generation < 604; ++generation) {
+    stream_stats::add_client("10.0.0.5", "Client", generation);
+    auto request = vrr_record(generation, generation == 603 ? vrr_policy::requested_e::malformed : vrr_policy::requested_e::on,
+                              generation == 602);
+    request.host_source_pacing = generation != 601;
+    ASSERT_TRUE(stream_stats::record_vrr_session(request));
+    EXPECT_FALSE(stream_stats::record_vrr_pacing_event({generation,0,0,0,vrr_pacing::mode_e::waiting,
+      vrr_pacing::event_e::readiness,std::nullopt,pacing_now_ns()}));
+    EXPECT_EQ(stream_stats::vrr_json(stream_stats::get_current(),generation)["effective"],false);
+  }
+}

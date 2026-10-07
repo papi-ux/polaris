@@ -9,9 +9,8 @@
  *
  * The request is only an input. Effective source-time pacing needs a capture route proven to belong to
  * the generation, frames carrying the compositor's presentation time, a clock proven to be the one
- * that time is in, and an encode loop that keeps it. None of those gates exists yet, so every session
- * reports `effective: false` with the first reason that applies. A request, a `source_driven` capture
- * label or host counts of valid presentation times never turn that into a source-time claim.
+ * that time is in, and an encode loop that keeps it. Default policy alone never grants that claim;
+ * the private opt-in encode loop reports its generation-bound runtime observations separately.
  */
 #pragma once
 
@@ -124,6 +123,18 @@ namespace vrr_policy {
     requested_e requested = requested_e::absent;
     admission_e admission = admission_e::launch;
     bool watch_or_input_only = false;
+    // Private host opt-in, snapshotted at authenticated admission.
+    bool host_source_pacing = false;
+  };
+
+  struct pacing_intent_t {
+    bool host_opt_in = false;
+    requested_e requested = requested_e::absent;
+    bool watch_or_input_only = false;
+
+    constexpr bool eligible() const {
+      return host_opt_in && requested == requested_e::on && !watch_or_input_only;
+    }
   };
 
   /**

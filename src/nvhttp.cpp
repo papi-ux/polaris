@@ -2674,11 +2674,14 @@ namespace nvhttp {
 
       // The judged verdict Doctor grades with, so the session status never contradicts it.
       const bool network_risk = stream_stats::judged_network(stats).risk;
-      const bool pacing_risk =
-        stats.dropped_frame_ratio >= 0.04 ||
-        (!static_or_duplicate_content &&
-         (stats.frame_jitter_ms >= 2.2 ||
-          (meaningful_fps_shortfall && source_cadence_confirms_motion)));
+      const bool cadence_unavailable = stream_stats::source_pacing_evidence_unavailable(stats, requester_generation);
+      const bool pacing_risk = cadence_unavailable ? false : stats.video_policy_source_time ?
+        (stats.video_policy_cadence_available &&
+         (stats.dropped_frame_ratio >= 0.04 || stats.frame_jitter_ms >= 2.2)) :
+        (stats.dropped_frame_ratio >= 0.04 ||
+         (!static_or_duplicate_content &&
+          (stats.frame_jitter_ms >= 2.2 ||
+           (meaningful_fps_shortfall && source_cadence_confirms_motion))));
       const bool capture_fallback =
         stream_stats::capture_path_uses_cpu_copy(stats);
       const auto capture_path = stream_stats::capture_path_summary(stats);
@@ -2813,6 +2816,9 @@ namespace nvhttp {
         grade = "degraded";
       } else if (concern_count == 1) {
         grade = "watch";
+      } else if (cadence_unavailable) {
+        grade = "collecting";
+        primary_issue = "cadence_collecting";
       }
 
       const int current_bitrate_kbps =
@@ -2821,7 +2827,7 @@ namespace nvhttp {
         current_bitrate_kbps > 0 ? current_bitrate_kbps :
           (device_profile ? device_profile->ideal_bitrate_kbps : 15000),
         device_profile,
-        grade != "good",
+        concern_count > 0,
         active_codec_family == "pyrowave"
       );
       const double safe_target_fps =
@@ -2832,7 +2838,7 @@ namespace nvhttp {
           0.0,
           0.0,
           mobile_client,
-          grade != "good",
+          concern_count > 0,
           pacing_risk || host_render_limited
         );
       if (safe_target_fps > 0.0) {
@@ -2862,6 +2868,7 @@ namespace nvhttp {
       health["grade"] = grade;
       health["primary_issue"] = primary_issue;
       health["summary"] =
+        grade == "collecting" ? "Cadence evidence is pending or stale; keep streaming while Polaris collects it." :
         grade == "good" ? "Session looks steady." :
         network_risk ? "Network jitter is the most likely source of the hitching." :
         hdr_source_missing ? hdr_downgrade_message :
@@ -2873,6 +2880,9 @@ namespace nvhttp {
         host_render_limited ? "Host render is missing the stream FPS target; lower game render settings or stream FPS before tuning bitrate." :
         "The stream needs a safer pacing or encode path.";
       health["issues"] = std::move(issues);
+      if (stats.video_policy_source_time || cadence_unavailable) {
+        health["frame_pacing_measurement_available"] = !cadence_unavailable;
+      }
       health["recommendations"] = std::move(recommendations);
       health["safe_bitrate_kbps"] = safe_bitrate_kbps;
       health["safe_display_mode"] = (virtual_display_risk || host_prefers_headless()) ? "headless" : (current_virtual_display ? "virtual_display" : "headless");

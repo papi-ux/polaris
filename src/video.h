@@ -76,7 +76,9 @@ namespace video {
     std::uint64_t session_generation = 0;  // Host-owned identity for source-frame diagnostics
     // What this session's capture request is measured against, taken as the session starts.
     capture_generation::request_context_t capture_request;
-
+    // Source-time pacing intent, frozen for this session generation at authenticated admission:
+    // the host's private opt-in and the client's request. Default: ineligible, so pacing is unchanged.
+    vrr_policy::pacing_intent_t vrr_pacing;
   };
 
   inline AVRational framerate_to_rational(const config_t &config) {
@@ -636,6 +638,9 @@ namespace video {
     // (T0->T1, T1->T2, T0->T2) from one thread without cross-thread
     // correlation.
     std::optional<std::chrono::steady_clock::time_point> encode_done_timestamp;
+    // Appended: true only for a packet submitted by an effective source-time paced session (source,
+    // recovery, readiness or liveness), whose frame_timestamp is that pacing's emitted time.
+    bool source_time_paced = false;
   };
 
   struct packet_raw_avcodec: packet_raw_t {
@@ -1077,6 +1082,25 @@ namespace video {
   void encode_published_display_for_tests(const safe::mail_t &mail, config_t config,
                                           const std::shared_ptr<platf::display_t> &display,
                                           const stream_packets::destination_t &channel_data);
+
+  /**
+   * The same real parallel encode loop, fed by @p images instead of an empty queue, so a test can
+   * raise stamped images exactly as the capture thread would and read the packets it produces.
+   */
+  void encode_published_display_for_tests(const safe::mail_t &mail, config_t config,
+                                          const std::shared_ptr<platf::display_t> &display,
+                                          const stream_packets::destination_t &channel_data,
+                                          const img_event_t &images);
+
+  /// Run body with observer called right after each successful conversion in the parallel encode loop.
+  void with_after_convert_observer_for_tests(const std::function<void()> &observer,
+                                             const std::function<void()> &body);
+
+  /**
+   * Run body with the real software H.264 encoder selected, as a probe would select it, then restore
+   * the previous selection. False (body not run) when this build has no software H.264 encoder.
+   */
+  bool with_software_h264_for_tests(const std::function<void()> &body);
 
   int hevc_profile_for_input_for_tests(int bit_depth, int chroma_sampling_type);
 

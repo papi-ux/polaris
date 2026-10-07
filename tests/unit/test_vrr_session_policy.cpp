@@ -3,6 +3,9 @@
  * @brief A variable-refresh request is an input, never an effective source-time claim.
  */
 #include <src/vrr_session_policy.h>
+#include <src/vrr_rtp_timestamp.h>
+#include <chrono>
+#include <limits>
 
 #include <gtest/gtest.h>
 
@@ -96,4 +99,28 @@ TEST(VrrSessionPolicy, ReportsOnlyKnownCapturePacingLabels) {
   EXPECT_EQ(vrr_policy::reported_capture_pacing("fixed_interval"), "fixed_interval");
   EXPECT_EQ(vrr_policy::reported_capture_pacing(""), "unknown");
   EXPECT_EQ(vrr_policy::reported_capture_pacing("vrr"), "unknown");
+}
+
+TEST(VrrRtpTimestamp, SignedDeltasKeepProtocolWrapWithoutMovingTheSource) {
+  EXPECT_EQ(vrr_pacing::rtp_timestamp(1'000'000'000, 0), 90000u);
+  EXPECT_EQ(vrr_pacing::rtp_timestamp(0, 1'000'000'000), 0u - 90000u);
+  EXPECT_EQ(vrr_pacing::rtp_timestamp(50'000, 0), 4u);  // ties to even
+  EXPECT_EQ(vrr_pacing::rtp_timestamp(150'000, 0), 14u);
+  EXPECT_EQ(vrr_pacing::rtp_timestamp(0, 50'000), 0u - 4u);
+  EXPECT_FALSE(vrr_pacing::rtp_timestamp(INT64_MIN, 1));
+  EXPECT_FALSE(vrr_pacing::rtp_timestamp(INT64_MAX, -1));
+  EXPECT_TRUE(vrr_pacing::rtp_timestamp(INT64_MIN, 0));
+  EXPECT_TRUE(vrr_pacing::rtp_timestamp(INT64_MAX, 0));
+}
+
+TEST(VrrRtpTimestamp, AgreesWithSignedChronoAcrossOrdinaryWireTimesAndWrap) {
+  using ticks = std::chrono::duration<std::int64_t, std::ratio<1, 90000>>;
+  for (std::int64_t ns = -100'000'000'000; ns <= 100'000'000'000; ns += 97'319'711) {
+    const auto expected = std::chrono::round<ticks>(std::chrono::nanoseconds {ns}).count();
+    ASSERT_EQ(vrr_pacing::rtp_timestamp(ns, 0), static_cast<std::uint32_t>(expected)) << ns;
+  }
+  const auto before = vrr_pacing::rtp_timestamp(47'721'858'844'444, 0);
+  const auto after = vrr_pacing::rtp_timestamp(47'721'858'855'556, 0);
+  ASSERT_TRUE(before); ASSERT_TRUE(after);
+  EXPECT_EQ(std::uint32_t(*after - *before), 1u);
 }

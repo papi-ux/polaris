@@ -70,6 +70,9 @@ namespace doctor_cadence {
       result.observation["session_generation"] = generation;
       if (!vrr.at("effective").get<bool>()) {
         const auto fallback = vrr.at("fallback_reason").get<std::string>();
+        if (requested == "true" && (fallback == "source_time_unproven" || fallback == "pacing_evidence_stale")) {
+          return unavailable(fallback.c_str());
+        }
         // Admission chooses the first applicable reason. A named reason alone
         // cannot validate a contradictory request or capture-route observation.
         const bool consistent_fallback = fallback == "watch_or_input_only" ||
@@ -79,7 +82,10 @@ namespace doctor_cadence {
            ((fallback == "route_unreported" && capture == "unknown") ||
             (fallback == "route_fixed_interval" && capture == "fixed_interval") ||
             ((fallback == "clock_domain_unverified" || fallback == "presentation_time_missing" ||
-              fallback == "presentation_time_invalid") && capture == "source_driven")));
+              fallback == "presentation_time_invalid" || fallback == "authority_lost") && capture == "source_driven") ||
+            (fallback == "unsupported_route") ||
+            (fallback == "unsupported_codec" || fallback == "unsupported_loop" ||
+             fallback == "source_time_unproven" || fallback == "pacing_evidence_stale" || fallback == "stream_ended")));
         if (pacing != "fixed_grid" || !consistent_fallback) {
           return unavailable("inconsistent_fixed_grid_policy");
         }
