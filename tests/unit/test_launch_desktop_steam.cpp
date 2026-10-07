@@ -25,6 +25,7 @@
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/xml_parser.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -926,7 +927,12 @@ TEST_F(LaunchDesktopSteamTest, TheAppKeyIsStrictInTheRealLoaderAndValidator) {
   ASSERT_EQ(file_handler::write_file(path.string().c_str(), nlohmann::json {{"version", 15}, {"apps", apps}}.dump()), 0);
   const auto parsed = proc::parse(path.string());
   ASSERT_TRUE(parsed);
-  for (const auto &app : parsed->get_apps()) {
+  const auto parsed_apps = parsed->get_apps();
+  for (const auto &[label, value] : values) {
+    const auto fixture = std::find_if(parsed_apps.begin(), parsed_apps.end(), [&](const auto &app) { return app.name == label; });
+    ASSERT_NE(fixture, parsed_apps.end()) << label << ": every fixture must reach the actual loader assertions";
+  }
+  for (const auto &app : parsed_apps) {
     EXPECT_EQ(app.leave_game_mode_before_launch, app.name == "true") << app.name << ": only JSON true turns it on";
   }
 

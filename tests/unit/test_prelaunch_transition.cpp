@@ -631,9 +631,9 @@ TEST(PrelaunchTransitionTests, AnOpenSteamTitleIsSteamsOwnReaperForThisAccount) 
   scratch_proc_t proc;
   proc.add(500, 1000, {"/bin/sh", "-c", "echo SteamLaunch AppId=1"}, 1, "");
   EXPECT_FALSE(prelaunch::steam_title_running(proc.root, 1000)) << "a shell that mentions the words is not a title";
-  proc.add(501, 1001, {"/home/b/.steam/ubuntu12_32/reaper", "SteamLaunch", "AppId=620", "--", "game"}, 1, "");
+  proc.add(501, 1001, {"/fixture/other-account/steam/reaper", "SteamLaunch", "AppId=620", "--", "game"}, 1, "");
   EXPECT_FALSE(prelaunch::steam_title_running(proc.root, 1000)) << "another account's title";
-  proc.add(502, 1000, {"/home/a/.steam/ubuntu12_32/reaper", "SteamLaunch", "AppId=620", "--", "game"}, 1, "");
+  proc.add(502, 1000, {"/fixture/own-account/steam/reaper", "SteamLaunch", "AppId=620", "--", "game"}, 1, "");
   EXPECT_TRUE(prelaunch::steam_title_running(proc.root, 1000));
 }
 
