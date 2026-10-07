@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures/mocked.js'
 import { readFileSync } from 'node:fs'
 
 const cases = JSON.parse(readFileSync(new URL('../fixtures/live-tuning-v1.json', import.meta.url), 'utf8'))
