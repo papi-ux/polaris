@@ -26,6 +26,7 @@
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <thread>
 
 /**
@@ -365,6 +366,31 @@ namespace {
     return img.provenance.source_time.source_steady_ns.value_or(-1);
   }
 
+  /// Diagnostic for a stamped frame's per-frame receipt and its epoch proof: names the first failing
+  /// gate (the receipt result) and the proof's own mapping evidence. Read-only; asserts nothing.
+  std::string receipt_diagnostic(const char *frame, const platf::img_t &img) {
+    const auto &receipt = img.provenance.source_time;
+    std::string out = std::string {frame} + ": receipt=" + std::string {vrr_clock::name(receipt.result)} +
+                      " receipt_uncertainty_ns=" + std::to_string(receipt.uncertainty_ns) +
+                      " observed_steady_ns=" + std::to_string(receipt.observed_steady_ns) +
+                      " epoch=" + std::to_string(img.provenance.capture_epoch_id) +
+                      " presentation_ns=" + (img.provenance.presentation.ns ? std::to_string(*img.provenance.presentation.ns) : std::string {"none"});
+    const auto &proof = img.provenance.clock_proof;
+    if (!proof) return out + " proof=none";
+    return out + " proof.epoch=" + std::to_string(proof->capture_epoch_id) +
+           " proof.mapping.valid=" + std::to_string(proof->mapping.valid) +
+           " proof.mapping.reason=" + std::string {proof->mapping.reason} +
+           " proof.mapping.samples=" + std::to_string(proof->mapping.samples) +
+           " proof.mapping.max_bracket_ns=" + std::to_string(proof->mapping.max_bracket_ns) +
+           " proof.mapping.max_delta_ns=" + std::to_string(proof->mapping.max_delta_ns) +
+           " proof.mapping.uncertainty_ns=" + std::to_string(proof->mapping.uncertainty_ns) +
+           " proof.clock_domain_verified=" + std::to_string(proof->clock_domain_verified) +
+           " proof.namespace_reason=" + std::string {proof->namespace_reason} +
+           " proof.producer_identity_verified=" + std::to_string(proof->producer_identity_verified) +
+           " proof.producer_identity_reason=" + std::string {proof->producer_identity_reason} +
+           " proof.epoch_start_mono_ns=" + std::to_string(proof->epoch_start_mono_ns);
+  }
+
   /// Run body with the real software H.264 encoder selected once for every loop in it, then restored.
   void with_h264(const std::function<void()> &body) {
     ASSERT_TRUE(video::with_software_h264_for_tests(body)) << "this build has no software H.264 encoder";
@@ -596,29 +622,37 @@ TEST(SourcePacingProductionTests, EmissionStaysOrderedAcrossReplayEqualTickRecov
     paced_stream_t stream {compositor, stream_config(120, opted_in(), 9105)};
     video::capture_epoch_stepper_for_tests_t epoch {*stream.display(), k_capture_generation};
     (void) stream.drain(150ms);
+    // Every frame this test relies on must carry a mapped receipt from the production stamp path; a
+    // refusal is a fatal, named precondition failure (never skipped, never an ignored frame).
     auto first = stamped_frame(epoch, monotonic_now_ns());
+    ASSERT_EQ(first->provenance.source_time.result, vrr_clock::source_time_e::mapped) << receipt_diagnostic("first", *first);
     stream.raise(first);
     auto first_packet = stream.next_packet(400ms);
     ASSERT_TRUE(first_packet);
+    ASSERT_TRUE(first_packet->frame_timestamp) << "first packet carries no frame timestamp";
     std::int64_t last = steady_ns(*first_packet->frame_timestamp);
     stream.raise(first);
     EXPECT_FALSE(stream.next_packet(150ms)) << "a replayed source frame was emitted again";
     std::this_thread::sleep_for(10ms);
     auto anchor = stamped_frame(epoch, monotonic_now_ns());
+    ASSERT_EQ(anchor->provenance.source_time.result, vrr_clock::source_time_e::mapped) << receipt_diagnostic("anchor", *anchor);
     stream.raise(anchor);
     auto anchor_packet = stream.next_packet(400ms);
     ASSERT_TRUE(anchor_packet);
+    ASSERT_TRUE(anchor_packet->frame_timestamp) << "anchor packet carries no frame timestamp";
     last = steady_ns(*anchor_packet->frame_timestamp);
     auto collision = stamped_frame(epoch, *anchor->provenance.presentation.ns + 5'000);
-    ASSERT_EQ(collision->provenance.source_time.result, vrr_clock::source_time_e::mapped);
+    ASSERT_EQ(collision->provenance.source_time.result, vrr_clock::source_time_e::mapped) << receipt_diagnostic("collision", *collision);
     stream.raise(collision);
     // Causal marker (M4): one 90 kHz tick of order between emissions.
     EXPECT_FALSE(stream.next_packet(150ms)) << "two emissions in one RTP tick";
     auto older = stamped_frame(epoch, monotonic_now_ns());
+    ASSERT_EQ(older->provenance.source_time.result, vrr_clock::source_time_e::mapped) << receipt_diagnostic("older", *older);
     std::this_thread::sleep_for(2ms);
     stream.request_idr();
     auto recovery = stream.next_packet(200ms);
     ASSERT_TRUE(recovery);
+    ASSERT_TRUE(recovery->frame_timestamp) << "recovery packet carries no frame timestamp";
     ASSERT_GT(steady_ns(*recovery->frame_timestamp), last);
     last = steady_ns(*recovery->frame_timestamp);
     stream.raise(older);
@@ -626,9 +660,13 @@ TEST(SourcePacingProductionTests, EmissionStaysOrderedAcrossReplayEqualTickRecov
     video::capture_epoch_stepper_for_tests_t reopened {*stream.display(), k_capture_generation};
     std::this_thread::sleep_for(10ms);
     auto after = stamped_frame(reopened, monotonic_now_ns());
+    ASSERT_EQ(after->provenance.source_time.result, vrr_clock::source_time_e::mapped) << receipt_diagnostic("after", *after);
     stream.raise(after);
     auto after_packet = stream.next_packet(400ms);
     ASSERT_TRUE(after_packet);
+    ASSERT_TRUE(after_packet->frame_timestamp) << "after packet carries no frame timestamp";
+    ASSERT_TRUE(after_packet->source_time_paced) << "the packet compared to after's mapped time was not a source-time emission; "
+                                                 << receipt_diagnostic("after", *after);
     EXPECT_EQ(steady_ns(*after_packet->frame_timestamp), mapped_ns(*after));
     EXPECT_GE(steady_ns(*after_packet->frame_timestamp) - last, vrr_pacing::k_tick_ns);
     EXPECT_EQ(stream.count_reaching(event_e::stale_or_replayed, 1u), 1u);

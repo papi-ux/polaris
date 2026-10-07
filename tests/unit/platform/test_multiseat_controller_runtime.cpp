@@ -25,6 +25,7 @@ extern "C" {
   #include <fstream>
   #include <functional>
   #include <future>
+  #include <gtest/gtest-spi.h>
   #include <gtest/gtest.h>
   #include <memory>
   #include <mutex>
@@ -34,6 +35,7 @@ extern "C" {
   #include <string>
   #include <string_view>
   #include <sys/stat.h>
+  #include <unistd.h>
   #include <utility>
   #include <vector>
 
@@ -669,6 +671,52 @@ namespace {
     return contents.str();
   }
 
+  std::string_view create_status_name(controller_runtime_create_status_e status) {
+    switch (status) {
+      case controller_runtime_create_status_e::ready_disabled: return "ready_disabled";
+      case controller_runtime_create_status_e::ready_enabled: return "ready_enabled";
+      case controller_runtime_create_status_e::invalid_factory: return "invalid_factory";
+      case controller_runtime_create_status_e::dependencies_unavailable: return "dependencies_unavailable";
+      case controller_runtime_create_status_e::invalid_dependencies: return "invalid_dependencies";
+      case controller_runtime_create_status_e::construction_failed: return "construction_failed";
+    }
+    return "unknown";
+  }
+
+  std::string_view authority_status_name(authority_status_e status) {
+    switch (status) {
+      case authority_status_e::applied: return "applied";
+      case authority_status_e::invalid_argument: return "invalid_argument";
+      case authority_status_e::unsafe_root: return "unsafe_root";
+      case authority_status_e::already_exists: return "already_exists";
+      case authority_status_e::random_failed: return "random_failed";
+      case authority_status_e::io_error: return "io_error";
+      case authority_status_e::integrity_violation: return "integrity_violation";
+      case authority_status_e::inactive: return "inactive";
+    }
+    return "unknown";
+  }
+
+  /**
+   * Why a fixture creation was refused, for the failure message only: the effective uid, the actual
+   * creation status, and the authority-store precondition re-checked read-only on the same root
+   * (the production store refuses euid 0 by design; nothing here changes or fakes that).
+   */
+  std::string creation_diagnostic(controller_runtime_create_status_e status, const std::filesystem::path &root) {
+    std::ostringstream out;
+    out << "status=" << static_cast<int>(status) << " (" << create_status_name(status) << ")"
+        << " euid=" << ::geteuid() << " uid=" << ::getuid();
+    const authority_store_t probe {root, deterministic_controller_capability()};
+    out << " authority_store_precondition=" << authority_status_name(probe.status());
+    struct stat metadata {};
+    if (::stat(root.c_str(), &metadata) == 0) {
+      out << " root_owner_uid=" << metadata.st_uid << " root_mode=0" << std::oct << (metadata.st_mode & 07777);
+    } else {
+      out << " root_stat_failed";
+    }
+    return out.str();
+  }
+
   class MultiseatControllerRuntimeTest : public testing::Test {
   protected:
     void create_ready_controller(bool media_enabled = false, std::vector<controller_profile_route_t> routes = {},
@@ -677,8 +725,8 @@ namespace {
       ASSERT_EQ(
         created.status,
         controller_runtime_create_status_e::ready_enabled
-      );
-      ASSERT_TRUE(created.runtime);
+      ) << creation_diagnostic(created.status, root_.path());
+      ASSERT_TRUE(created.runtime) << creation_diagnostic(created.status, root_.path());
       controller_ = std::move(created.runtime);
       const auto reconciled = controller_->reconcile();
       ASSERT_TRUE(reconciled.ready());
@@ -755,7 +803,7 @@ namespace {
     MultiseatControllerRuntimeTest,
     PreparesInputBeforeWorkerAndSelectsOnlyAuthenticatedPairedClient
   ) {
-    create_ready_controller();
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller());
     const auto seat = admit_and_bind();
     ASSERT_TRUE(seat.handle.valid());
 
@@ -818,8 +866,47 @@ namespace {
     };
   }
 
+  TEST_F(
+    MultiseatControllerRuntimeTest,
+    AFixtureCreationRefusalIsFatalForItsCallerAndNamesWhy
+  ) {
+    // A real production refusal that does not depend on the effective uid: profile routes require
+    // worker media, so create() refuses before it invokes any dependency or authority store.
+    testing::TestPartResultArray results;
+    bool caller_continued = false;
+    {
+      testing::ScopedFakeTestPartResultReporter intercept {
+        testing::ScopedFakeTestPartResultReporter::INTERCEPT_ONLY_CURRENT_THREAD,
+        &results
+      };
+      [&] {
+        ASSERT_NO_FATAL_FAILURE(create_ready_controller(false, {shared_profile_route()}));
+        caller_continued = true;  // where every test body would next dereference controller_
+      }();
+    }
+
+    EXPECT_FALSE(caller_continued) << "the caller kept running after the fixture's fatal failure";
+    EXPECT_FALSE(controller_) << "a refused creation left a runtime behind";
+    EXPECT_FALSE(input::moonlight_session_runtime_installed());
+    EXPECT_FALSE(input::moonlight_session_activation_gate_installed());
+    // The helper's own fatal failure, then the caller's propagated one; nothing non-fatal.
+    ASSERT_EQ(results.size(), 2);
+    bool named = false;
+    for (int index = 0; index < results.size(); ++index) {
+      const auto &result = results.GetTestPartResult(index);
+      EXPECT_TRUE(result.fatally_failed()) << result.message();
+      const std::string message = result.message();
+      if (message.find("status=4 (invalid_dependencies)") != std::string::npos &&
+          message.find(" euid=") != std::string::npos &&
+          message.find(" authority_store_precondition=") != std::string::npos) {
+        named = true;
+      }
+    }
+    EXPECT_TRUE(named) << "the fixture's refusal does not name its status, euid and authority precondition";
+  }
+
   TEST_F(MultiseatControllerRuntimeTest, EmptyRoutesAndUnmappedClientsPreserveHostLaunch) {
-    create_ready_controller();
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller());
     auto launch = controller_launch(2001, 3001);
     auto result = controller_->admit_authenticated_profile_launch(launch, {});
     EXPECT_TRUE(result.use_host_launch());
@@ -828,7 +915,7 @@ namespace {
     ASSERT_TRUE(controller_->shutdown().closed());
     controller_.reset();
 
-    create_ready_controller(true, {shared_profile_route()});
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller(true, {shared_profile_route()}));
     launch = controller_launch(2002, 3002, "unmapped-paired-client");
     // A display name or client launch-preset field cannot select another profile.
     launch->device_name = "paired-client";
@@ -841,7 +928,7 @@ namespace {
 
   TEST_F(MultiseatControllerRuntimeTest, ExplicitSpaceSelectionRequiresItsOwnAccessGrant) {
     auto route = shared_profile_route(); route.access_clients = {"extra-device"};
-    create_ready_controller(true, {route});
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller(true, {route}));
     auto denied = controller_launch(2001, 3001, "unmapped-device");
     denied->worker_profile_key = route.profile_key;
     auto rejected = controller_->admit_authenticated_profile_launch(denied, {1920, 1080, 60000, false});
@@ -860,7 +947,7 @@ namespace {
 
   TEST_F(MultiseatControllerRuntimeTest, SteamLibraryLaunchCarriesTheValidatedTitleIntoItsSeat) {
     auto route = shared_profile_route(); route.library_enabled = true;
-    create_ready_controller(true, {route});
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller(true, {route}));
     auto launch = controller_launch(2001, 3001);
     launch->worker_library_target = "870780";
     const auto admitted = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
@@ -871,7 +958,7 @@ namespace {
   }
 
   TEST_F(MultiseatControllerRuntimeTest, LegacyProfileNeverAcceptsAnAlternateLibraryTarget) {
-    create_ready_controller(true, {shared_profile_route()});
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller(true, {shared_profile_route()}));
     auto launch = controller_launch(2001, 3001);
     launch->worker_library_target = "870780";
     const auto rejected = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
@@ -880,7 +967,7 @@ namespace {
   }
 
   TEST_F(MultiseatControllerRuntimeTest, RoutesPairedDevicesToOneProfileAndReleasesItsReservation) {
-    create_ready_controller(true, {shared_profile_route()});
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller(true, {shared_profile_route()}));
     auto launch = controller_launch(2001, 3001);
     auto admitted = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
     ASSERT_TRUE(admitted.admitted());
@@ -922,7 +1009,7 @@ namespace {
   }
 
   TEST_F(MultiseatControllerRuntimeTest, RoutedLaunchRejectsInvalidAuthorityAndModeWithoutReserving) {
-    create_ready_controller(true, {shared_profile_route()});
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller(true, {shared_profile_route()}));
     const std::vector<std::function<void(rtsp_stream::launch_session_t &)>> changes {
       [](auto &launch) { launch.id = 0; },
       [](auto &launch) { launch.lifecycle_generation.reset(); },
@@ -995,7 +1082,7 @@ namespace {
   }
 
   TEST_F(MultiseatControllerRuntimeTest, CancelledAndAbandonedProfileReservationsAreReconciled) {
-    create_ready_controller(true, {shared_profile_route()});
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller(true, {shared_profile_route()}));
     auto launch = controller_launch(2101, 3101);
     auto admitted = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
     ASSERT_TRUE(admitted.admitted());
@@ -1023,7 +1110,7 @@ namespace {
     // The controller also reads its clock during fixture teardown, after the
     // test body returns. Keep that clock alive with the installed callback.
     auto now = std::make_shared<worker_broker_t::time_point_t>();
-    create_ready_controller(true, {shared_profile_route()}, [now] { return *now; });
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller(true, {shared_profile_route()}, [now] { return *now; }));
     auto launch = controller_launch(2103, 3103);
     ASSERT_TRUE(controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false}).admitted());
     *now += std::chrono::milliseconds {29999};
@@ -1043,7 +1130,7 @@ namespace {
   }
 
   TEST_F(MultiseatControllerRuntimeTest, CancelledProfileCannotCreateInputOrStartAWorker) {
-    create_ready_controller(true, {shared_profile_route()});
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller(true, {shared_profile_route()}));
     auto launch = controller_launch(2104, 3104);
     auto admitted = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
     ASSERT_TRUE(admitted.admitted());
@@ -1057,7 +1144,7 @@ namespace {
   }
 
   TEST_F(MultiseatControllerRuntimeTest, CancellationDuringInputPreparationPreventsWorkerLaunch) {
-    create_ready_controller(true, {shared_profile_route()});
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller(true, {shared_profile_route()}));
     auto launch = controller_launch(2105, 3105);
     auto admitted = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
     ASSERT_TRUE(admitted.admitted());
@@ -1074,7 +1161,7 @@ namespace {
   }
 
   TEST_F(MultiseatControllerRuntimeTest, CancellationDuringWorkerLaunchRetainsInputUntilProvenAbsent) {
-    create_ready_controller(true, {shared_profile_route()});
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller(true, {shared_profile_route()}));
     auto launch = controller_launch(2106, 3106);
     auto admitted = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
     ASSERT_TRUE(admitted.admitted());
@@ -1098,7 +1185,7 @@ namespace {
   }
 
   TEST_F(MultiseatControllerRuntimeTest, FailedProfileStartupAutomaticallyCleansItsReservation) {
-    create_ready_controller(true, {shared_profile_route()});
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller(true, {shared_profile_route()}));
     auto launch = controller_launch(2107, 3107);
     auto admitted = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
     ASSERT_TRUE(admitted.admitted());
@@ -1112,7 +1199,7 @@ namespace {
   }
 
   TEST_F(MultiseatControllerRuntimeTest, DuplicateStartAndLookalikeSelectionCannotCancelTheOwningLaunch) {
-    create_ready_controller(true, {shared_profile_route()});
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller(true, {shared_profile_route()}));
     auto launch = controller_launch(2108, 3108);
     auto admitted = controller_->admit_authenticated_profile_launch(launch, {1920, 1080, 60000, false});
     ASSERT_TRUE(admitted.admitted());
@@ -1137,7 +1224,7 @@ namespace {
   }
 
   TEST_F(MultiseatControllerRuntimeTest, MediaSelectionRequiresARealLeaseAndCannotFallBackToHostCapture) {
-    create_ready_controller(true);
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller(true));
     const auto seat = admit_and_bind();
     ASSERT_TRUE(seat.handle.valid());
     ASSERT_TRUE(controller_->start_seat(seat.handle, controller_input_plan()).started());
@@ -1163,7 +1250,7 @@ namespace {
   }
 
   TEST_F(MultiseatControllerRuntimeTest, ProductionLaunchDriverAllocatesSupportedInputsAndRequiresMediaLease) {
-    create_ready_controller(true, {shared_profile_route()});
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller(true, {shared_profile_route()}));
     auto *runtime = controller_.get();
     auto driver = make_profile_controller(std::move(controller_));
     auto cleanup = util::fail_guard([&] { state_->allow_cleanup(); EXPECT_TRUE(driver->shutdown()); });
@@ -1212,7 +1299,7 @@ namespace {
     MultiseatControllerRuntimeTest,
     InputFailureNeverLaunchesWorker
   ) {
-    create_ready_controller();
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller());
     const auto seat = admit_and_bind();
     ASSERT_TRUE(seat.handle.valid());
     state_->set_next_input_create(input::backend_result_e::rejected);
@@ -1236,7 +1323,7 @@ namespace {
     MultiseatControllerRuntimeTest,
     ProvenWorkerRejectionRollsBackInputAndSeat
   ) {
-    create_ready_controller();
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller());
     const auto seat = admit_and_bind();
     ASSERT_TRUE(seat.handle.valid());
     state_->set_next_worker_launch(worker_command_result_e::rejected);
@@ -1265,7 +1352,7 @@ namespace {
     MultiseatControllerRuntimeTest,
     IndeterminateWorkerRetainsInputUntilWorkerFirstReconcileProvesAbsence
   ) {
-    create_ready_controller();
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller());
     const auto seat = admit_and_bind();
     ASSERT_TRUE(seat.handle.valid());
     const auto identity = controller_worker_identity(seat);
@@ -1310,7 +1397,7 @@ namespace {
     MultiseatControllerRuntimeTest,
     ShutdownWaitsForWorkerAbsenceAndClaimedStream
   ) {
-    create_ready_controller();
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller());
     const auto seat = admit_and_bind();
     ASSERT_TRUE(seat.handle.valid());
     const auto identity = controller_worker_identity(seat);
@@ -1361,7 +1448,7 @@ namespace {
   }
 
   TEST_F(MultiseatControllerRuntimeTest, StopRetiresOnlyItsSeatWhileAnotherStreamKeepsInput) {
-    create_ready_controller();
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller());
     const auto a = admit_and_bind(controller_request("client-a", "profile-a"));
     const auto b = admit_and_bind(controller_request("client-b", "profile-b"));
     ASSERT_TRUE(controller_->start_seat(a.handle, controller_input_plan()).started());
@@ -1406,7 +1493,7 @@ namespace {
   }
 
   TEST_F(MultiseatControllerRuntimeTest, SeatStopQuiescesAnInFlightActivationWithoutBlockingOrStoppingWorker) {
-    create_ready_controller();
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller());
     const auto seat = admit_and_bind();
     ASSERT_TRUE(controller_->start_seat(seat.handle, controller_input_plan()).started());
     ASSERT_TRUE(state_->mark_worker_ready(controller_worker_identity(seat)));
@@ -1444,7 +1531,7 @@ namespace {
     MultiseatControllerRuntimeTest,
     ShutdownQuiesceWinsActivationRaceWithoutStoppingWorker
   ) {
-    create_ready_controller();
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller());
     const auto seat = admit_and_bind();
     ASSERT_TRUE(seat.handle.valid());
     const auto identity = controller_worker_identity(seat);
@@ -1518,7 +1605,7 @@ namespace {
     MultiseatControllerRuntimeTest,
     DirectDestructorDetachesMoonlightGlobalsAndRetainsGraphForBoundStream
   ) {
-    create_ready_controller();
+    ASSERT_NO_FATAL_FAILURE(create_ready_controller());
     const auto seat = admit_and_bind();
     ASSERT_TRUE(seat.handle.valid());
     const auto identity = controller_worker_identity(seat);
