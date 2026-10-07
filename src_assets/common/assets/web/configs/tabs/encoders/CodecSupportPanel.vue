@@ -1,7 +1,6 @@
 <script setup>
 import { computed, inject } from 'vue'
-import { describePyroWave, describeYuv444 } from '../../../codec-support-readout.js'
-import PyroWaveStreamReadout from './PyroWaveStreamReadout.vue'
+import { describeYuv444 } from '../../../codec-support-readout.js'
 
 const props = defineProps([
   'config',
@@ -27,10 +26,10 @@ const reasonKey = (reason, supported) => {
 const hevcReasonKey = computed(() => reasonKey(support.value?.hevc_reason, support.value?.hevc_supported))
 const av1ReasonKey = computed(() => reasonKey(support.value?.av1_reason, support.value?.av1_supported))
 
-// 4:4:4 follows the probe, so it waits for it like the other codec rows. PyroWave does not: a client
-// chooses it per stream, and the host answers for it whichever encoder the probe picks.
+// 4:4:4 follows the probe, so it waits for it like the other codec rows. PyroWave has its own card
+// above the encoder switcher (PyroWaveCard.vue): a client chooses it per stream, whichever profile
+// is open here, so it is not repeated in each profile.
 const yuv444 = computed(() => (ready.value ? describeYuv444(t, support.value) : null))
-const pyrowave = computed(() => describePyroWave(t, support.value))
 
 const YUV444_PILLS = {
   supported: { key: 'config.codec_support_supported', tone: 'border-success/30 bg-success/10 text-success' },
@@ -96,30 +95,6 @@ const yuv444Pill = computed(() => (yuv444.value ? YUV444_PILLS[yuv444.value.stat
       </div>
 
       <p class="mt-3 text-sm leading-relaxed text-storm">{{ $t('config.codec_support_note') }}</p>
-    </template>
-
-    <template v-if="pyrowave">
-      <div class="mt-3 flex items-center justify-between gap-3 border-t border-storm/20 pt-3" data-codec-row="pyrowave">
-        <span class="text-sm font-medium text-silver">{{ $t('config.codec_support_pyrowave') }}</span>
-        <div class="flex flex-wrap items-center gap-1.5">
-          <span v-if="pyrowave.available" class="meta-pill border-info/30 bg-info/10 text-info-bright">{{ $t('config.codec_support_yuv444') }}</span>
-          <span v-if="pyrowave.hdr" class="meta-pill border-info/30 bg-info/10 text-info-bright">{{ $t('config.codec_support_hdr') }}</span>
-          <span class="meta-pill" :class="pyrowave.available ? 'border-success/30 bg-success/10 text-success' : ''" data-codec-status>
-            {{ pyrowave.available ? $t('config.codec_support_available') : $t('config.codec_support_not_available') }}
-          </span>
-        </div>
-      </div>
-      <div class="mt-1 flex flex-col gap-1" data-codec-detail="pyrowave">
-        <p v-if="pyrowave.message" class="text-xs leading-relaxed text-storm" data-pyrowave-message>{{ pyrowave.message }}</p>
-        <p v-if="pyrowave.reason" class="text-xs leading-relaxed text-storm" data-pyrowave-reason>
-          {{ $t('config.codec_support_pyrowave_reason') }} <code>{{ pyrowave.reason }}</code>
-        </p>
-        <p v-for="line in pyrowave.lines" :key="line" class="text-xs leading-relaxed text-storm">{{ line }}</p>
-        <p v-if="pyrowave.refusal" class="text-xs leading-relaxed text-warning-bright" data-pyrowave-refusal>
-          {{ pyrowave.refusal.lead }} {{ pyrowave.refusal.message }} {{ pyrowave.refusal.action }}
-        </p>
-      </div>
-      <PyroWaveStreamReadout v-if="pyrowave.available" />
     </template>
   </div>
 </template>
