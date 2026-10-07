@@ -65,19 +65,54 @@ Polaris does not depend on labwc for this reason, and links nothing from it. Pri
 
 An app can opt in to leaving Game Mode before its own private launch with `"leave-game-mode-before-launch": true`. It is off for every app unless set, and it never applies to resume, watch-only, input-only, profile or Space launches. This build implements the switch on Linux builds with GIO. It has not been accepted on Steam Deck hardware, so it is a source implementation, not a certified feature.
 
-On every launch Polaris proves, without starting any service, that the host supports the switch. If any of the following cannot be read, or reads otherwise, the launch is refused with a fixed `prelaunch_*` code before anything changes:
+Whether anything is needed comes only from typed records: this account's `gamescope-session.service` as its own user manager reports it. If that unit is not loaded, inactive or failed, nothing is needed. If it is active, the launch must leave Game Mode. If it is anything else, or the records cannot be read, an opted-in launch is refused rather than treated as "not in Game Mode". Builds that cannot read the records (Linux without GIO) refuse opted-in launches. Platforms without Steam Game Mode need nothing.
+
+On every launch Polaris proves the following, without starting any service. If any of it cannot be read, or reads otherwise, the launch is refused with a fixed `prelaunch_*` code before anything changes:
 
 - `/usr/bin/steamosctl` is a root-owned regular file that nobody else can write, under root-owned directories.
 - Exactly one `steamos-manager` package record is installed. It names itself, is release 26.4.1 (the only release whose session switch was audited), and owns both `/usr/bin/steamosctl` and `/usr/lib/steamos-manager`.
-- This account's own user bus has SteamOS Manager. Its owner is this account's `steamos-manager.service`, running `/usr/lib/steamos-manager`, and it offers `SessionManagement1`'s two switch methods.
-- logind shows one active, local graphical session on seat0. That session belongs to this account, is its only graphical session, and was started by SDDM autologin. `graphical-session.target` is running, and `gamescope-session.service` says the session is in Game Mode.
-- `polaris.service` is not stopped with the graphical session.
+- SteamOS Manager on this account's own user bus:
+  - its name's owner is this account, running `/usr/lib/steamos-manager` in `steamos-manager.service` under this account's user manager;
+  - its introspection, parsed as D-Bus XML, declares `SessionManagement1` once, with `SwitchToDesktopMode` and `SwitchToGameMode` each declared once and without arguments;
+  - the name is still owned by that same connection and process afterwards.
+- logind and the user manager:
+  - logind is bound by its bus name's owner: root, in `systemd-logind.service`;
+  - this account's user manager is bound the same way: this account, in `user@UID.service/init.scope`;
+  - every read goes to those unique names, and they must still own their names, with the same processes, afterwards.
+- Two complete passes over the records agree field by field: the seat's active session, the session listing, every session record, the leader's start time, and each unit's state and generation. Within them, logind shows one active, local graphical session on seat0. That session belongs to this account, is its only graphical session, and was started by SDDM autologin. `graphical-session.target` is running. A property repeated in a record, of any type, is refused.
+- Polaris survives the switch:
+  - `polaris.service` is active and is this very process's unit (its control group);
+  - none of its stop dependencies names the session's units;
+  - the complete closure of units that stopping `graphical-session.target` stops does not contain it (RequiredBy, ConsistsOf, BoundBy, RequisiteOf and PropagatesStopTo, transitively, within 128 units);
+  - headless boot is enabled.
 
-Polaris then runs exactly `steamosctl switch-to-desktop-mode`, with only this account's bus address, `PATH` and `LANG` in its environment. The command runs as an owned child that is bounded, stopped and reaped. Its exit 0 means only that the request was sent. The launch continues once the old session and its target generation have both ended, a new desktop session of the same account is bound, and the stream's route is ready.
+Polaris then runs exactly `steamosctl switch-to-desktop-mode`, with only this account's bus address, `PATH` and `LANG` in its environment. The command runs as a child Polaris owns: in its own process group, with stdio on `/dev/null`, and every other descriptor closed by `close_range`. Where that is unavailable, descriptors are closed up to a bound proven before fork. If neither is possible, the command is not started. It is bounded, stopped and reaped. Its exit 0 means only that the request was sent. The launch continues once the old session and its target generation have both ended, a new desktop session of the same account is bound, and the stream's route is ready.
 
-If the launch fails before it reaches its client, Polaris returns that same desktop to Game Mode. It does the same when the client ends the session on request. Either way the desktop must still be the one this launch opened, and Polaris proves a new Game Mode session afterwards. If the switch was stopped after it started, or its result could not be bound, the receipt records the outcome as unknown and nothing is undone. The switch takes no session argument, so a session change between Polaris's last check and SteamOS Manager acting on it cannot be prevented, only detected afterwards. Such a change is never adopted or rolled back.
+If the launch fails before it reaches its client, Polaris returns that same desktop to Game Mode. It does the same when the client ends the session on request. Either way the desktop must still be the one this launch opened, and Polaris proves a new Game Mode session afterwards. The return after a session ends is queued under the session lock but runs on one worker owned by Polaris, outside every lock. From the moment it is queued until its outcome is recorded, no launch or stream setup of any app is admitted. A teardown that happens while a launch is being admitted does not return the host at all. If Polaris starts stopping, no new switch starts, including from a coordinator first created after the stop began.
 
-A launch spends at most 60 seconds leaving Game Mode and 25 more rolling back. A return after the session ends runs outside Polaris's session locks, within 45 seconds, and no launch is admitted until it settles. Console and Browser Stream launches have no cancellation of their own, and their receipts say so (`cancellation_transport: unsupported`).
+If the switch was stopped after it started, or its result could not be bound, the receipt records the outcome as unknown and nothing is undone. The switch takes no session argument, so a session change between Polaris's last check and SteamOS Manager acting on it cannot be prevented, only detected afterwards. Such a change is never adopted or rolled back.
+
+A launch spends at most 60 seconds leaving Game Mode and 25 more rolling back. A return after the session ends takes at most 45 seconds. Console and Browser Stream launches have no cancellation of their own, and their receipts say so (`cancellation_transport: unsupported`).
+
+The app list shows readiness within one second without starting a service. A positive answer is kept for up to five seconds, and only while the boot, the command, each package record's `desc` and `files`, the bus and the manager's connection are unchanged. A refusal or a timeout answers the rest of the list for two seconds and is never shown as ready. Launches never use these kept answers.
+
+### What is proved where
+
+Source and native fixtures cover all of the following:
+
+- the rules above over fixture records;
+- a GDBus peer server that stands in for logind, the user manager, the bus daemon and SteamOS Manager;
+- a `/bin/sh` stand-in for `steamosctl`;
+- descriptor closure, process group termination, the lifecycle gate's fence, and stop handling.
+
+These are physical SteamOS assumptions that remain unqualified until a Steam Deck run:
+
+- Game Mode and Desktop Mode are distinct logind sessions started by `sddm-autologin`.
+- `gamescope-session.service` marks Game Mode.
+- SteamOS Manager 26.4.1's switch stops `graphical-session.target` as its sources describe.
+- The cgroup paths of logind, the user manager and `steamos-manager.service`.
+- `/proc/<pid>/exe` of the manager is readable by the same account.
+- systemd v257's dependency properties and stop propagation behave as documented.
 
 ## Update
 

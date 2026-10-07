@@ -50,6 +50,7 @@ namespace prelaunch::steamos::bus {
     std::uint32_t uid = 0;
     std::filesystem::path proc_root = "/proc";
     std::filesystem::path boot_id = "/proc/sys/kernel/random/boot_id";
+    std::filesystem::path self_cgroup = "/proc/self/cgroup";
     std::filesystem::path runtime_root = "/run/user";
     std::filesystem::path pacman_local = "/var/lib/pacman/local";
     std::filesystem::path steamosctl = std::string {k_steamosctl};
@@ -105,10 +106,21 @@ namespace prelaunch::steamos::bus {
     GDBusConnection *connection_ = nullptr;
   };
 
-  /// A fresh read of seat0, this account's sessions, and its user manager's three units, with the
-  /// active seat and the leader's start time read again at the end. Any change in between, any
-  /// malformed record, timeout or cancellation is a refusal with a fixed code.
-  verdict_t read_snapshot(const sources_t &sources, const budget_t &budget, snapshot_t &out);
+  /**
+   * @brief A fresh read of seat0, this account's sessions and its user manager's units.
+   *
+   * logind and the user manager are first bound by their bus names' current owners: the expected
+   * account, a process start time and the cgroup systemd placed them in. Every call then goes to
+   * those unique names. Two complete passes are compared field by field (the seat's active session,
+   * the listing, every record, the leader's start, each unit's state, generation and, when asked,
+   * the stop closure of graphical-session.target), and the owners and the boot are checked again.
+   * Any difference, malformed record, timeout or cancellation is a refusal with a fixed code.
+   */
+  verdict_t read_snapshot(const sources_t &sources, const budget_t &budget, snapshot_t &out, bool with_closure = false);
+
+  /// Parsed as D-Bus introspection XML: exactly one SessionManagement1 interface declaring
+  /// SwitchToDesktopMode and SwitchToGameMode once each, without arguments. Malformed is refused.
+  verdict_t introspection_supports_switch(std::string_view xml);
 
   /// SteamOS Manager on this account's own user bus: owned by this account, by its steamos-manager
   /// unit running the packaged executable, and offering SessionManagement1's two switch methods.

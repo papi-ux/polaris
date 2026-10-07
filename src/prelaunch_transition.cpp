@@ -25,6 +25,12 @@
 #endif
 
 namespace prelaunch {
+  namespace {
+    /// Polaris is stopping. Latched once, lock-free, before any coordinator may exist: every
+    /// coordinator the registry makes, whenever it is made, reads it.
+    std::atomic<bool> process_stop {false};
+  }  // namespace
+
   std::string_view name(entry_e value) {
     switch (value) {
       case entry_e::rtsp: return "rtsp";
@@ -196,18 +202,19 @@ namespace prelaunch {
     }
   }  // namespace
 
-  coordinator_t::coordinator_t(host_t &host, adapter_t &adapter, clock_t &clock, budgets_t budgets):
+  coordinator_t::coordinator_t(host_t &host, adapter_t &adapter, clock_t &clock, budgets_t budgets, bool follow_process_stop):
       host_ {host},
       adapter_ {adapter},
       clock_ {clock},
-      budgets_ {budgets} {}
+      budgets_ {budgets},
+      follow_process_stop_ {follow_process_stop} {}
 
   coordinator_t::~coordinator_t() {
     shutdown();
   }
 
   bool coordinator_t::stopping() const {
-    return stopping_.load();
+    return stopping_.load() || (follow_process_stop_ && process_stop.load());
   }
 
   outcome_t coordinator_t::finish(const request_t &request, std::uint64_t generation, outcome_t outcome) {
@@ -282,10 +289,27 @@ namespace prelaunch {
         "End the other session first."));
     }
 
-    if (!host_.game_mode_live_fresh()) {
-      outcome_t outcome;
-      outcome.state = state_e::not_needed;
-      return finish(request, generation, outcome);
+    // Whether anything is needed is decided from the typed records alone: the account's Game Mode
+    // unit as its own user manager reports it. Not read, or in between, is a refusal for an app
+    // that opted in, never "not in Game Mode".
+    const auto seen = host_.observe(nullptr, forward, true);
+    if (!seen.read.ok()) {
+      return finish(request, generation, refusal(status_of(seen.read.code), seen.read.code,
+        "This app leaves Game Mode before it launches, and the host's sessions could not be read: " + seen.read.reason,
+        "Try again, or turn off \"Leave Game Mode before launch\" for this app."));
+    }
+    switch (seen.game_mode) {
+      case steamos::game_mode_e::absent:
+      case steamos::game_mode_e::inactive: {
+        outcome_t outcome;
+        outcome.state = state_e::not_needed;
+        return finish(request, generation, outcome);
+      }
+      case steamos::game_mode_e::active: break;
+      default:
+        return finish(request, generation, refusal(409, "prelaunch_session_mode_unknown",
+          "Whether the host is in Game Mode is not known right now (Game Mode is starting or stopping, or was not read).",
+          "Try again in a moment."));
     }
     if (!request.private_route) {
       return finish(request, generation, refusal(409, "prelaunch_private_route_required",
@@ -308,12 +332,6 @@ namespace prelaunch {
         "Polaris would not survive leaving Game Mode: " + reason,
         "Run Polaris as its user service with headless boot enabled (polaris --setup-host --enable-headless-boot)."));
     }
-    const auto seen = host_.observe(nullptr, forward);
-    if (!seen.read.ok()) {
-      return finish(request, generation, refusal(status_of(seen.read.code), seen.read.code,
-        "The host's sessions could not be read, so leaving Game Mode could not be tracked: " + seen.read.reason,
-        "Switch the host to Desktop Mode yourself."));
-    }
     if (!seen.service.ok()) {
       return finish(request, generation, refusal(503, "prelaunch_service_not_independent",
         "Polaris would not survive leaving Game Mode: " + seen.service.reason,
@@ -328,7 +346,7 @@ namespace prelaunch {
     }
     if (seen.session->mode != mode_e::game) {
       return finish(request, generation, refusal(409, "prelaunch_session_mode_unknown",
-        "Polaris sees Game Mode, but the host's session manager does not: the session's mode is not known.",
+        "Game Mode is running, but not in the session it would leave: the session's mode is not known.",
         "Switch the host to Desktop Mode yourself."));
     }
     const auto pre = *seen.session;
@@ -343,6 +361,12 @@ namespace prelaunch {
       receipt_.state = state_e::switching;
     }
 
+    if (is_cancelled()) {
+      // Checked again right before the effect: a cancellation or a stop during the proofs wins.
+      auto outcome = refusal(409, stopping() ? "prelaunch_shutting_down" : "prelaunch_cancelled", "The launch was cancelled.", "");
+      outcome.state = state_e::cancelled;
+      return finish(request, generation, outcome);
+    }
     note_stage("transition_start");
     if (!adapter_.start(direction_e::to_desktop)) {
       // Nothing ran.
@@ -457,7 +481,7 @@ namespace prelaunch {
               reason = now_seen.read.reason;
               return false;
             }
-            return now_seen.session && *now_seen.session == *post && !host_.game_mode_live_fresh();
+            return now_seen.session && *now_seen.session == *post && now_seen.game_mode == steamos::game_mode_e::inactive;
           };
           std::string read_reason;
           if (!same_desktop(read_reason)) {
@@ -543,13 +567,13 @@ namespace prelaunch {
       reason = "a game is open on the host";
       return restore_e::refused;
     }
-    if (host_.game_mode_live_fresh()) {
-      reason = "the host is already in Game Mode";
-      return restore_e::refused;
-    }
     const auto seen = host_.observe(nullptr, wait);
     if (!seen.read.ok()) {
       reason = "the host's session could not be read: " + seen.read.reason;
+      return restore_e::refused;
+    }
+    if (seen.game_mode != steamos::game_mode_e::inactive) {
+      reason = seen.game_mode == steamos::game_mode_e::active ? "the host is already in Game Mode" : "whether the host is in Game Mode is not known";
       return restore_e::refused;
     }
     if (!seen.session || *seen.session != post) {
@@ -562,6 +586,11 @@ namespace prelaunch {
     }
     if (const auto support = adapter_.support(wait); !support.ok()) {
       reason = "returning to Game Mode is not supported now: " + support.reason;
+      return restore_e::refused;
+    }
+    if (stopping() || (wait.cancelled && wait.cancelled())) {
+      // Checked again right before the effect: a stop that began during the proofs above wins.
+      reason = "Polaris is stopping";
       return restore_e::refused;
     }
     if (!adapter_.start(direction_e::to_game_mode)) {
@@ -641,61 +670,78 @@ namespace prelaunch {
     return result;
   }
 
-  restore_e coordinator_t::on_session_end(std::uint64_t transition_generation, bool ended_on_request, bool daemon_shutdown, const others_t &others) {
+  restore_e coordinator_t::on_session_end(std::uint64_t transition_generation, bool ended_on_request, bool daemon_shutdown, const others_t &others,
+                                          const admission_fence_t &fence) {
     const auto generation = transition_generation;
-    std::thread finished;
-    {
-      std::lock_guard lock {mutex_};
-      if (generation == 0 || receipt_.transition_generation != generation || !receipt_.committed ||
-          receipt_.restore != restore_e::owned || !receipt_.post || restoring_) {
-        return restore_e::none;
+    std::lock_guard lock {mutex_};
+    if (generation == 0 || receipt_.transition_generation != generation || !receipt_.committed ||
+        receipt_.restore != restore_e::owned || !receipt_.post || restoring_) {
+      return restore_e::none;
+    }
+    const auto settle = [&](std::string reason) {
+      // The host stays where the session left it.
+      receipt_.restore = restore_e::refused;
+      receipt_.restore_reason = std::move(reason);
+      receipt_.committed = false;
+      return restore_e::refused;
+    };
+    if (daemon_shutdown || stopping()) return settle("Polaris is stopping");
+    if (!ended_on_request) return settle("the session did not end on request");
+    // The fence is taken in the same step that claims the restore: from here no launch of any app
+    // is admitted until the worker releases it, and a launch already admitted refuses the claim.
+    if (fence.acquire && !fence.acquire()) return settle("a launch was being admitted when the session ended");
+    // Bookkeeping only under the caller's locks. The owned serial worker proves and acts without
+    // them; nothing here waits for or joins a thread.
+    restoring_ = true;
+    job_ = job_t {generation, *receipt_.post, others, fence.release};
+    if (!worker_.joinable()) worker_ = std::thread([this]() { worker_loop(); });
+    work_cv_.notify_one();
+    return restore_e::owned;
+  }
+
+  void coordinator_t::worker_loop() {
+    for (;;) {
+      job_t job;
+      {
+        std::unique_lock lock {mutex_};
+        work_cv_.wait(lock, [this]() { return job_.has_value() || worker_exit_; });
+        if (!job_) return;
+        job = std::move(*job_);
+        job_.reset();
       }
-      if (daemon_shutdown || !ended_on_request || stopping()) {
-        // Only a purposeful End Session restores. The host stays where the session left it.
-        receipt_.restore = restore_e::refused;
-        receipt_.restore_reason = daemon_shutdown || stopping() ? "Polaris is stopping" : "the session did not end on request";
-        receipt_.committed = false;
-        return restore_e::refused;
+      std::string reason;
+      bool unknown = false;
+      auto result = restore_e::failed;
+      try {
+        const wait_t wait {clock_.now() + budgets_.restore, [this]() {
+                             return stopping();
+                           }};
+        result = restore_owned(job.post, job.others, wait, reason, unknown);
+      } catch (...) {
+        reason = "the restore stopped on an internal error";
       }
-      // Bookkeeping only under the caller's locks: the worker proves and acts without them. Until it
-      // settles, `restoring_` keeps every new transition out.
-      const auto post = *receipt_.post;
-      restoring_ = true;
-      finished = std::move(worker_);
-      worker_ = std::thread([this, generation, post, others]() {
-        std::string reason;
-        bool unknown = false;
-        auto result = restore_e::failed;
-        try {
-          const wait_t wait {clock_.now() + budgets_.restore, [this]() {
-                               return stopping();
-                             }};
-          result = restore_owned(post, others, wait, reason, unknown);
-        } catch (...) {
-          reason = "the restore stopped on an internal error";
-        }
+      {
         std::lock_guard lock {mutex_};
-        restoring_ = false;
-        if (receipt_.transition_generation == generation) {
+        if (receipt_.transition_generation == job.generation) {
           receipt_.restore = result;
           receipt_.restore_reason = reason;
           receipt_.committed = false;
           receipt_.outcome_unknown = receipt_.outcome_unknown || unknown;
         }
-      });
+      }
+      // Launches are admitted again only once the outcome is recorded, outside the coordinator lock.
+      if (job.release_fence) job.release_fence();
+      {
+        std::lock_guard lock {mutex_};
+        restoring_ = false;
+      }
+      done_cv_.notify_all();
     }
-    // A previous worker had already settled (restoring_ was clear): this only collects its thread.
-    if (finished.joinable()) finished.join();
-    return restore_e::owned;
   }
 
   void coordinator_t::wait_for_restore() {
-    std::thread worker;
-    {
-      std::lock_guard lock {mutex_};
-      worker = std::move(worker_);
-    }
-    if (worker.joinable()) worker.join();
+    std::unique_lock lock {mutex_};
+    done_cv_.wait(lock, [this]() { return !restoring_; });
   }
 
   void coordinator_t::request_stop() {
@@ -705,7 +751,15 @@ namespace prelaunch {
 
   void coordinator_t::shutdown() {
     request_stop();
-    wait_for_restore();
+    std::thread worker;
+    {
+      std::lock_guard lock {mutex_};
+      worker_exit_ = true;
+      worker = std::move(worker_);
+    }
+    work_cv_.notify_all();
+    // A queued restore still runs once, refuses at once (stopping) and releases its fence.
+    if (worker.joinable()) worker.join();
   }
 
   bool coordinator_t::restore_pending() const {
@@ -786,14 +840,10 @@ namespace prelaunch {
     };
 
 #ifdef __linux__
-    /// The account's own process facts that are not session records: an open Steam title and
-    /// Polaris's own service placement.
+    /// The account's own process facts that are not session records: an open Steam title (a
+    /// conservative refusal only, never proof of anything) and Polaris's own service placement.
     class linux_host_base_t: public host_t {
     public:
-      bool game_mode_live_fresh() override {
-        return platf::game_mode_host::session_live_fresh();
-      }
-
       bool local_title_running() override {
         return steam_title_running("/proc", ::getuid());
       }
@@ -823,8 +873,8 @@ namespace prelaunch {
     /// Sessions from logind and this account's user manager, read on explicit buses within the wait.
     class production_host_t final: public linux_host_base_t {
     public:
-      observation_t observe(const session_identity_t *since, const wait_t &wait) override {
-        return steamos::observe(steamos::production_sources(), since, {wait.deadline, wait.cancelled});
+      observation_t observe(const session_identity_t *since, const wait_t &wait, bool prove_service) override {
+        return steamos::observe(steamos::production_sources(), since, {wait.deadline, wait.cancelled}, prove_service);
       }
     };
 
@@ -832,7 +882,8 @@ namespace prelaunch {
 #elif defined(__linux__)
     class production_host_t final: public linux_host_base_t {
     public:
-      observation_t observe(const session_identity_t *, const wait_t &) override {
+      observation_t observe(const session_identity_t *, const wait_t &, bool) override {
+        // Unknown, so an app that opted in is refused rather than told Game Mode is not running.
         observation_t out;
         out.read = verdict_t::fail("prelaunch_session_identity_unavailable", "this Polaris build cannot read the host's sessions.");
         return out;
@@ -843,13 +894,11 @@ namespace prelaunch {
 #else
     class production_host_t final: public host_t {
     public:
-      bool game_mode_live_fresh() override {
-        return false;
-      }
-
-      observation_t observe(const session_identity_t *, const wait_t &) override {
+      observation_t observe(const session_identity_t *, const wait_t &, bool) override {
+        // A platform without Steam Game Mode: known absent, so nothing is ever needed here.
         observation_t out;
-        out.read = verdict_t::fail("prelaunch_session_identity_unavailable", "this platform has no Steam Game Mode.");
+        out.game_mode = steamos::game_mode_e::absent;
+        out.bind = verdict_t::fail("prelaunch_session_identity_unavailable", "this platform has no Steam Game Mode.");
         return out;
       }
 
@@ -894,7 +943,7 @@ namespace prelaunch {
     std::lock_guard lock {value.mutex};
     if (value.test) return *value.test;
     if (!value.production) {
-      value.production = std::make_unique<coordinator_t>(value.host, value.adapter, value.clock);
+      value.production = std::make_unique<coordinator_t>(value.host, value.adapter, value.clock, budgets_t {}, true);
       production_coordinator.store(value.production.get());
     }
     return *value.production;
@@ -906,19 +955,27 @@ namespace prelaunch {
       auto &value = registry();
       std::lock_guard lock {value.mutex};
       previous = std::move(value.test);
-      if (host && adapter && clock) value.test = std::make_unique<coordinator_t>(*host, *adapter, *clock, budgets);
+      if (host && adapter && clock) value.test = std::make_unique<coordinator_t>(*host, *adapter, *clock, budgets, true);
     }
     // Its restore worker, if any, is cancelled and joined outside the registry's lock.
     previous.reset();
   }
 
   void request_stop() {
-    // No lock: a signal handler calls this. The pointer is published once, when the coordinator is made.
-    if (auto *production = production_coordinator.load()) production->request_stop();
+    // No lock and no allocation: a signal handler calls this. A coordinator made later is stopped
+    // from birth, because stopping() reads the latch.
+    process_stop.store(true);
   }
 
   void shutdown() {
+    request_stop();
+    // The coordinator itself stays alive for request handlers until the servers are joined; only its
+    // restore worker is collected here.
     if (auto *production = production_coordinator.load()) production->shutdown();
+  }
+
+  void reset_process_stop_for_tests() {
+    process_stop.store(false);
   }
 
   void note_stage(std::string_view stage) {

@@ -274,12 +274,10 @@ namespace prelaunch::steamos {
       return unavailable("The account's graphical session target is not active.");
     }
     session_identity_t identity;
-    if (!snapshot.game_mode.loaded || snapshot.game_mode.active_state == "inactive" || snapshot.game_mode.active_state == "failed") {
-      identity.mode = mode_e::desktop;
-    } else if (snapshot.game_mode.active_state == "active") {
-      identity.mode = mode_e::game;
-    } else {
-      return verdict_t::fail("prelaunch_session_mode_unknown", "Game Mode is starting or stopping.");
+    switch (game_mode_of(snapshot.game_mode)) {
+      case game_mode_e::inactive: identity.mode = mode_e::desktop; break;
+      case game_mode_e::active: identity.mode = mode_e::game; break;
+      default: return verdict_t::fail("prelaunch_session_mode_unknown", "Game Mode is starting or stopping.");
     }
     identity.boot_id = snapshot.boot_id;
     identity.logind_id = session.id;
@@ -307,16 +305,50 @@ namespace prelaunch::steamos {
     return session_gone && target_moved;
   }
 
-  verdict_t polaris_independent_of_session(const unit_record_t &polaris) {
-    if (!polaris.loaded) {
-      return verdict_t::fail("prelaunch_service_not_independent", "Polaris is not running as its polaris.service user unit.");
+  game_mode_e game_mode_of(const unit_record_t &unit) {
+    if (!unit.loaded || unit.active_state == "inactive" || unit.active_state == "failed") return game_mode_e::inactive;
+    if (unit.active_state == "active") return game_mode_e::active;
+    return game_mode_e::transitional;
+  }
+
+  std::string cgroup_v2_path(std::string_view cgroup) {
+    while (!cgroup.empty() && (cgroup.back() == '\n' || cgroup.back() == '\r')) cgroup.remove_suffix(1);
+    if (!cgroup.starts_with("0::/") || cgroup.find('\n') != std::string_view::npos) return {};
+    return std::string {cgroup.substr(3)};
+  }
+
+  bool cgroup_is_logind(std::string_view cgroup) {
+    return cgroup_v2_path(cgroup) == "/system.slice/systemd-logind.service";
+  }
+
+  bool cgroup_is_user_manager(std::string_view cgroup, std::uint32_t uid) {
+    const auto id = std::to_string(uid);
+    return cgroup_v2_path(cgroup) == "/user.slice/user-" + id + ".slice/user@" + id + ".service/init.scope";
+  }
+
+  verdict_t polaris_independent_of_session(const snapshot_t &snapshot) {
+    const auto refuse = [](std::string reason) {
+      return verdict_t::fail("prelaunch_service_not_independent", std::move(reason));
+    };
+    const auto &polaris = snapshot.polaris;
+    if (!polaris.loaded || polaris.active_state != "active") return refuse("polaris.service is not active in this account's user manager.");
+    const auto self = cgroup_v2_path(snapshot.self_cgroup);
+    if (self.empty() || polaris.control_group != self) {
+      return refuse("This Polaris process is not the running polaris.service.");
     }
     for (const auto *list : {&polaris.part_of, &polaris.binds_to, &polaris.requisite, &polaris.stop_propagated_from}) {
       for (const auto &unit : *list) {
         if (unit == k_graphical_target || unit == k_game_mode_unit || unit == "graphical-session-pre.target") {
-          return verdict_t::fail("prelaunch_service_not_independent", "polaris.service would stop with the graphical session (" + unit + ").");
+          return refuse("polaris.service would stop with the graphical session (" + unit + ").");
         }
       }
+    }
+    if (!snapshot.stop_closure.complete) {
+      return refuse("What stopping the graphical session would also stop could not be established.");
+    }
+    const auto &closure = snapshot.stop_closure.units;
+    if (std::find(closure.begin(), closure.end(), std::string {k_polaris_unit}) != closure.end()) {
+      return refuse("Stopping the graphical session would also stop polaris.service.");
     }
     return verdict_t::pass();
   }
@@ -351,38 +383,10 @@ namespace prelaunch::steamos {
 #endif
   }
 
-  verdict_t introspection_supports_switch(std::string_view xml) {
-    const auto unsupported = verdict_t::fail("prelaunch_session_management_unavailable",
-      "SteamOS Manager does not offer session switching on this host.");
-    const std::string open = "<interface name=\"" + std::string {k_session_management} + "\"";
-    const auto start = xml.find(open);
-    if (start == std::string_view::npos || xml.find(open, start + 1) != std::string_view::npos) return unsupported;
-    const auto close = xml.find("</interface>", start);
-    if (close == std::string_view::npos) return unsupported;
-    const auto body = xml.substr(start, close - start);
-    for (const std::string_view method : {"SwitchToDesktopMode", "SwitchToGameMode"}) {
-      const std::string tag = "<method name=\"" + std::string {method} + "\"";
-      const auto at = body.find(tag);
-      if (at == std::string_view::npos || body.find(tag, at + 1) != std::string_view::npos) return unsupported;
-      auto rest = body.substr(at + tag.size());
-      // Either self-closing, or closed before any argument: the audited methods take none.
-      const auto end = rest.find('>');
-      if (end == std::string_view::npos) return unsupported;
-      if (end == 0 || rest[end - 1] != '/') {
-        const auto method_close = rest.find("</method>");
-        if (method_close == std::string_view::npos || rest.substr(0, method_close).find("<arg") != std::string_view::npos) {
-          return unsupported;
-        }
-      }
-    }
-    return verdict_t::pass();
-  }
-
   bool cgroup_is_manager_unit(std::string_view cgroup, std::uint32_t uid) {
     // cgroup v2: a single "0::<path>" line. The path is assigned by systemd, not by the process.
-    while (!cgroup.empty() && (cgroup.back() == '\n' || cgroup.back() == '\r')) cgroup.remove_suffix(1);
-    if (!cgroup.starts_with("0::") || cgroup.find('\n') != std::string_view::npos) return false;
-    const auto path = cgroup.substr(3);
+    const auto owned = cgroup_v2_path(cgroup);
+    const std::string_view path {owned};
     const auto user = "/user.slice/user-" + std::to_string(uid) + ".slice/user@" + std::to_string(uid) + ".service/";
     return path.starts_with(user) && path.ends_with("/steamos-manager.service") && path.find("/session-") == std::string_view::npos;
   }

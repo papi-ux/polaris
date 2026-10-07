@@ -4,6 +4,8 @@
  */
 #include "steamos_adapter.h"
 
+#include <algorithm>
+
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -14,12 +16,13 @@ namespace prelaunch::steamos {
     return sources;
   }
 
-  observation_t observe(const bus::sources_t &sources, const session_identity_t *since, const bus::budget_t &budget) {
+  observation_t observe(const bus::sources_t &sources, const session_identity_t *since, const bus::budget_t &budget, bool prove_service) {
     observation_t out;
     snapshot_t snapshot;
-    out.read = bus::read_snapshot(sources, budget, snapshot);
+    out.read = bus::read_snapshot(sources, budget, snapshot, prove_service);
     if (!out.read.ok()) return out;
-    out.service = polaris_independent_of_session(snapshot.polaris);
+    out.game_mode = game_mode_of(snapshot.game_mode);
+    if (prove_service) out.service = polaris_independent_of_session(snapshot);
     session_identity_t bound;
     out.bind = bind_session(snapshot, bound);
     if (out.bind.ok()) out.session = bound;
@@ -60,8 +63,22 @@ namespace prelaunch::steamos {
     const auto boot = read_text_limited(sources_.boot_id, 64);
     if (!boot) return {};
     key += *boot + '|';
-    // The command, the package database (an install or removal touches the directory) and the bus.
+    // The command, the package database (an install or removal touches the directory), and the
+    // exact desc and files of every record that could be steamos-manager's, so an in-place edit of
+    // a record changes the key.
     if (!add_stat(sources_.steamosctl) || !add_stat(sources_.pacman_local)) return {};
+    std::vector<std::filesystem::path> records;
+    std::error_code ec;
+    const std::string prefix = std::string {k_package} + "-";
+    for (std::filesystem::directory_iterator it {sources_.pacman_local, ec}, end; !ec && it != end; it.increment(ec)) {
+      if (it->path().filename().string().starts_with(prefix)) records.push_back(it->path());
+    }
+    if (ec) return {};
+    std::sort(records.begin(), records.end());
+    for (const auto &record : records) {
+      key += record.filename().string() + '|';
+      if (!add_stat(record) || !add_stat(record / "desc") || !add_stat(record / "files")) return {};
+    }
     if (sources_.user.address.empty()) {
       if (!add_stat(sources_.runtime_root / std::to_string(sources_.uid) / "bus")) return {};
     } else {
@@ -77,21 +94,34 @@ namespace prelaunch::steamos {
     const bus::budget_t budget {wait.deadline, wait.cancelled};
     // The executable is checked every time: it is cheap and local.
     if (auto trusted = executable_trusted(sources_.steamosctl, sources_.trusted_owner_uid, sources_.trusted_root); !trusted.ok()) return trusted;
+    {
+      // A refusal or an unknown (a stalled bus) answers the rest of an app list at once, briefly; it
+      // is never a positive answer and never makes a later positive one.
+      std::lock_guard lock {cache_mutex_};
+      if (!refusal_.ok() && std::chrono::steady_clock::now() - refusal_at_ < k_refusal_cache) return refusal_;
+    }
     const auto key = fingerprint(budget);
-    const auto now = std::chrono::steady_clock::now();
     {
       std::lock_guard lock {cache_mutex_};
-      if (!key.empty() && key == cache_key_ && now - cache_at_ < k_readiness_cache) return cache_verdict_;
+      if (!key.empty() && key == cache_key_ && std::chrono::steady_clock::now() - cache_at_ < k_readiness_cache) return cache_verdict_;
     }
-    auto verdict = bus::probe_support(sources_, budget);
+    auto verdict = key.empty() && budget.stop() ?
+                     verdict_t::fail(budget.expired() ? "prelaunch_session_read_timeout" : "prelaunch_cancelled",
+                       "Whether this host supports leaving Game Mode could not be read in time.") :
+                     bus::probe_support(sources_, budget);
     std::lock_guard lock {cache_mutex_};
-    // Only a complete answer is kept: a timeout or cancellation says nothing about the host.
-    if (!key.empty() && verdict.code != "prelaunch_session_read_timeout" && verdict.code != "prelaunch_cancelled") {
-      cache_key_ = key;
-      cache_verdict_ = verdict;
-      cache_at_ = now;
+    if (verdict.ok()) {
+      // A positive answer is kept only under the full key it was proved with.
+      if (!key.empty()) {
+        cache_key_ = key;
+        cache_verdict_ = verdict;
+        cache_at_ = std::chrono::steady_clock::now();
+      }
+      refusal_ = {};
     } else {
       cache_key_.clear();
+      refusal_ = verdict;
+      refusal_at_ = std::chrono::steady_clock::now();
     }
     return verdict;
   }

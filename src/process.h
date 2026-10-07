@@ -1063,6 +1063,12 @@ namespace proc {
     void finish_launch(const std::function<void()> &before_release = {});
     void finish_stop(bool committed = true);
     bool stop_in_progress() const;
+    /// #204: closes admission for a restore to Game Mode that runs after this gate's lock is gone.
+    /// Fails, changing nothing, while a launch or an RTSP setup is admitted; until released every
+    /// launch and setup is refused (or, for begin_launch(), waits).
+    bool try_fence_restore();
+    void release_restore_fence();
+    bool restore_fenced() const;
 
   private:
     enum class state_e {
@@ -1078,6 +1084,7 @@ namespace proc {
     bool _stop_waiting = false;
     bool _launch_to_stop_handoff = false;
     bool _last_stop_committed = false;
+    bool _restore_fenced = false;
     std::uint32_t _rtsp_setups_in_flight = 0;
     std::uint64_t _generation = 1;
   };

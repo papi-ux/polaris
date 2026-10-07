@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -107,7 +108,9 @@ namespace prelaunch {
     std::optional<session_identity_t> session;
     /// With a `since` identity: that session and its target generation have both ended.
     bool retired = false;
-    /// Polaris's own unit is not stopped with the graphical session.
+    /// The account's Game Mode unit, from the same records. `unknown` unless a read said otherwise.
+    steamos::game_mode_e game_mode = steamos::game_mode_e::unknown;
+    /// Polaris's own unit survives the graphical session (asked for with `prove_service`).
     verdict_t service;
   };
 
@@ -115,11 +118,9 @@ namespace prelaunch {
   class host_t {
   public:
     virtual ~host_t() = default;
-    /// The product's Game Mode detector, fresh. It decides only whether anything is needed: an
-    /// effect additionally needs a bound session in Game Mode from observe().
-    virtual bool game_mode_live_fresh() = 0;
-    /// Reads the host's sessions now, within `wait`. With `since`, also whether it retired.
-    virtual observation_t observe(const session_identity_t *since, const wait_t &wait) = 0;
+    /// Reads the host's sessions now, within `wait`: every decision, positive or not, comes from
+    /// here. With `since`, also whether it retired; with `prove_service`, whether Polaris survives.
+    virtual observation_t observe(const session_identity_t *since, const wait_t &wait, bool prove_service = false) = 0;
     virtual bool local_title_running() = 0;
     /// Polaris runs as an independent user service AND starts at boot; boot files alone are not enough.
     virtual bool service_independent(std::string &reason) = 0;
@@ -229,9 +230,18 @@ namespace prelaunch {
     std::string reason;
   };
 
+  /// Closes admission of every launch while a restore is owned. `acquire` must fail when a launch
+  /// is already admitted, and runs in the same step that claims the restore; `release` reopens it.
+  struct admission_fence_t {
+    std::function<bool()> acquire;
+    std::function<void()> release;
+  };
+
   class coordinator_t {
   public:
-    coordinator_t(host_t &host, adapter_t &adapter, clock_t &clock, budgets_t budgets = {});
+    /// `follow_process_stop`: also stopped by prelaunch::request_stop() (every coordinator the
+    /// process-wide registry makes, whenever it is made).
+    coordinator_t(host_t &host, adapter_t &adapter, clock_t &clock, budgets_t budgets = {}, bool follow_process_stop = false);
     /// Shuts down: cancels and joins any restore still running.
     ~coordinator_t();
     coordinator_t(const coordinator_t &) = delete;
@@ -253,19 +263,22 @@ namespace prelaunch {
     /**
      * @brief The committed session of `transition_generation` ended.
      *
-     * Bookkeeping only, so a caller may hold its lifecycle lock: a restore is handed to this
-     * coordinator's own worker, which proves everything again and acts outside every lock, within
-     * the restore budget. Until it settles no new transition is admitted. Returns `owned` when a
-     * restore was handed over, `refused` for an end that may not restore, `none` for anything else.
-     * Restores only on a purposeful end of that same generation.
+     * Bookkeeping only, so a caller may hold its lifecycle lock: it never waits for or joins a
+     * thread. The restore is queued to this coordinator's one owned serial worker, which proves
+     * everything again and acts outside every lock, within the restore budget. `fence` is acquired
+     * in the same step: a launch already admitted refuses the restore, and no launch is admitted
+     * until the worker has recorded the outcome and released it. Returns `owned` when a restore was
+     * queued, `refused` for an end that may not restore, `none` for anything else. Restores only on
+     * a purposeful end of that same generation.
      */
-    restore_e on_session_end(std::uint64_t transition_generation, bool ended_on_request, bool daemon_shutdown, const others_t &others);
+    restore_e on_session_end(std::uint64_t transition_generation, bool ended_on_request, bool daemon_shutdown, const others_t &others,
+                             const admission_fence_t &fence = {});
     /// Waits for a handed-over restore to settle. Never call it holding a lock the restore may need.
     void wait_for_restore();
     /// Polaris is stopping: refuses new transitions and cancels the running one and any restore.
     /// Atomics only, no lock and no wait, so a signal handler may call it.
     void request_stop();
-    /// request_stop(), then joins the restore worker. Call it outside every lock. Idempotent.
+    /// request_stop(), then ends and joins the serial restore worker. Call it outside every lock.
     void shutdown();
     /// A session-end restore is still in flight: no launch of any app may be admitted until it settles.
     bool restore_pending() const;
@@ -296,9 +309,24 @@ namespace prelaunch {
     mutable std::mutex mutex_;
     std::uint64_t next_generation_ = 0;
     std::optional<active_t> active_;
+    struct job_t {
+      std::uint64_t generation = 0;
+      session_identity_t post;
+      others_t others;
+      std::function<void()> release_fence;
+    };
+
+    void worker_loop();
+
+    bool follow_process_stop_ = false;
     bool restoring_ = false;
     std::atomic<bool> stopping_ {false};
+    /// The one owned serial restore worker, started by the first restore and joined by shutdown().
     std::thread worker_;
+    std::optional<job_t> job_;
+    bool worker_exit_ = false;
+    std::condition_variable work_cv_;
+    std::condition_variable done_cv_;
     receipt_t receipt_;
   };
 
@@ -321,8 +349,11 @@ namespace prelaunch {
   coordinator_t &coordinator();
   /// Replaces the dependencies until called again with nulls. Tests only.
   void set_dependencies_for_tests(host_t *host, adapter_t *adapter, clock_t *clock, budgets_t budgets = {});
-  /// Polaris is stopping (signal-safe): see coordinator_t::request_stop().
+  /// Polaris is stopping (signal-safe): latches a process-wide flag every registry coordinator reads,
+  /// including one made after this call.
   void request_stop();
+  /// Clears that latch. Tests only.
+  void reset_process_stop_for_tests();
   /// Polaris is stopping: shuts the production coordinator down (see coordinator_t::shutdown()).
   void shutdown();
 

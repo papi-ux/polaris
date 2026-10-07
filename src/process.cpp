@@ -216,7 +216,7 @@ namespace proc {
     std::unique_lock lock(_mutex);
     _changed.wait(lock, [this]() {
       return _state == state_e::idle && !_stop_waiting && !_launch_to_stop_handoff &&
-             _rtsp_setups_in_flight == 0;
+             _rtsp_setups_in_flight == 0 && !_restore_fenced;
     });
     _state = state_e::launching;
     if (on_admitted) {
@@ -230,7 +230,7 @@ namespace proc {
       return _state != state_e::snapshotting && !_launch_to_stop_handoff &&
              _rtsp_setups_in_flight == 0;
     });
-    if (_state != state_e::idle || _stop_waiting) {
+    if (_state != state_e::idle || _stop_waiting || _restore_fenced) {
       return std::nullopt;
     }
     return _generation;
@@ -242,7 +242,7 @@ namespace proc {
       return _state != state_e::snapshotting && !_launch_to_stop_handoff &&
              _rtsp_setups_in_flight == 0;
     });
-    if (_state != state_e::idle || _stop_waiting) {
+    if (_state != state_e::idle || _stop_waiting || _restore_fenced) {
       return false;
     }
     _state = state_e::launching;
@@ -256,7 +256,7 @@ namespace proc {
       return _state != state_e::snapshotting && !_launch_to_stop_handoff &&
              _rtsp_setups_in_flight == 0;
     });
-    if (_state != state_e::idle || _stop_waiting || _generation != expected_generation) {
+    if (_state != state_e::idle || _stop_waiting || _restore_fenced || _generation != expected_generation) {
       return false;
     }
     _state = state_e::launching;
@@ -272,7 +272,7 @@ namespace proc {
     _changed.wait(lock, [this]() {
       return _state != state_e::snapshotting && !_launch_to_stop_handoff;
     });
-    if (_state != state_e::idle || _stop_waiting ||
+    if (_state != state_e::idle || _stop_waiting || _restore_fenced ||
         _generation != expected_generation) {
       return false;
     }
@@ -442,6 +442,28 @@ namespace proc {
   bool session_lifecycle_gate_t::stop_in_progress() const {
     std::lock_guard lock(_mutex);
     return _state == state_e::stopping || _stop_waiting || _launch_to_stop_handoff;
+  }
+
+  bool session_lifecycle_gate_t::try_fence_restore() {
+    std::lock_guard lock(_mutex);
+    // Claimed under the same lock every admission takes, so there is no moment in which a launch
+    // was admitted but the restore does not know, or the restore was claimed but a launch gets in.
+    if (_state == state_e::launching || _launch_to_stop_handoff || _rtsp_setups_in_flight > 0 || _restore_fenced) {
+      return false;
+    }
+    _restore_fenced = true;
+    return true;
+  }
+
+  void session_lifecycle_gate_t::release_restore_fence() {
+    std::lock_guard lock(_mutex);
+    _restore_fenced = false;
+    _changed.notify_all();
+  }
+
+  bool session_lifecycle_gate_t::restore_fenced() const {
+    std::lock_guard lock(_mutex);
+    return _restore_fenced;
   }
 
   launcher_identity_t launcher_identity_from_lutris_runner(const std::string &runner) {
@@ -8557,13 +8579,8 @@ namespace proc {
       finish_session_launch();
       return false;
     }
-    // #204: a session-end restore runs outside the lifecycle lock, so it fences admission instead:
-    // until the host is back in Game Mode, or the restore settled otherwise, no launch of any app
-    // starts. Checked while the reservation is held, so a restore claimed before it is always seen.
-    if (prelaunch::coordinator().restore_pending()) {
-      finish_session_launch();
-      return false;
-    }
+    // #204: a session-end restore that runs outside the lifecycle lock holds the gate's restore
+    // fence, so try_begin_rtsp_launch() above already refused this launch while it is owned.
     // A late cancellation fence from an earlier request cannot poison this
     // launch, even when both requests refer to the same running app.
     return true;
@@ -12789,16 +12806,28 @@ namespace proc {
     // #204: a session that left Game Mode for its launch returns the host only once its cleanup is
     // complete, only on a purposeful end, and only for the generation this session committed. A
     // teardown that retained cleanup above keeps the binding for its retry. Under this lock the
-    // coordinator only claims the restore; its own worker proves and acts after the lock is gone,
-    // and refuses every launch until it settles (try_begin_session_launch).
+    // coordinator only claims the restore, together with the lifecycle gate's restore fence: a
+    // launch already admitted (this teardown may run inside one) refuses the claim, and no launch
+    // or RTSP setup of any app is admitted until the worker, acting after this lock is gone, has
+    // recorded the outcome and released the fence.
     if (cleanup_complete) {
       if (const auto prelaunch_generation = std::exchange(_prelaunch_transition_generation, 0)) {
+        // Shared, so the worker's release cannot outlive the gate it reopens.
+        const auto gate = _session_lifecycle_gate;
         (void) prelaunch::coordinator().on_session_end(
           prelaunch_generation,
           session_lifecycle_sync().stop_ends_session.load(),
           daemon_shutdown_requested(),
           [](std::string &reason) {
             return prelaunch_other_sessions_now(reason);
+          },
+          {
+            [gate]() {
+              return gate->try_fence_restore();
+            },
+            [gate]() {
+              gate->release_restore_fence();
+            },
           }
         );
       }

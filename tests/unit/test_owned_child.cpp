@@ -20,6 +20,7 @@
   #include <set>
   #include <sstream>
   #include <string>
+  #include <sys/resource.h>
   #include <sys/stat.h>
   #include <sys/wait.h>
   #include <thread>
@@ -116,6 +117,96 @@ TEST(OwnedChildTests, TheChildGetsExactlyItsArgvAndEnvironmentAndNoInheritedDesc
   EXPECT_NE(std::find(env.begin(), env.end(), "LANG=C"), env.end());
   EXPECT_EQ(std::count_if(env.begin(), env.end(), [](const auto &e) { return e.starts_with("DBUS_") || e.starts_with("HOME=") || e.starts_with("DISPLAY="); }), 0);
   EXPECT_EQ(fds, (std::set<std::string> {"0", "1", "2"})) << "stdio on /dev/null only";
+}
+
+namespace {
+  /// The descriptors the child's own `ls` sees, minus the one `ls` opens for the listing.
+  std::set<int> child_descriptors(const scratch_t &scratch, const owned_child::options_t &options) {
+    const auto out = (scratch.root / "fds").string();
+    child_t child {options};
+    EXPECT_TRUE(child.start({"/bin/sh", "-c", "/bin/ls /dev/fd/ > \"$OUT\""}, {"OUT=" + out}));
+    EXPECT_EQ(wait_done(child), state_e::exited);
+    EXPECT_EQ(child.exit_code(), 0);
+    std::set<int> fds;
+    std::istringstream text {scratch.read("fds")};
+    for (std::string line; std::getline(text, line);) {
+      if (!line.empty()) fds.insert(std::stoi(line));
+    }
+    return fds;
+  }
+
+  /// A descriptor at `number` without close-on-exec, closed when the holder goes.
+  struct held_fd_t {
+    int fd = -1;
+
+    explicit held_fd_t(int number) {
+      const int opened = ::open("/dev/null", O_RDONLY);
+      fd = ::dup2(opened, number);
+      ::close(opened);
+    }
+
+    ~held_fd_t() {
+      if (fd >= 0) ::close(fd);
+    }
+  };
+}  // namespace
+
+TEST(OwnedChildTests, AHighNumberedDescriptorIsClosedByCloseRangeAndByTheBoundedFallback) {
+  scratch_t scratch;
+  struct rlimit limit {};
+  ASSERT_EQ(::getrlimit(RLIMIT_NOFILE, &limit), 0);
+  const int high = static_cast<int>(std::min<rlim_t>(limit.rlim_cur - 1, 4000));
+  held_fd_t held {high};
+  ASSERT_EQ(held.fd, high);
+  for (const bool allow_close_range : {true, false}) {
+    owned_child::options_t options;
+    options.allow_close_range = allow_close_range;
+    const auto plan = owned_child::plan_descriptor_closure(options);
+    ASSERT_TRUE(plan) << allow_close_range;
+    if (!allow_close_range) {
+      EXPECT_FALSE(plan->close_range);
+      EXPECT_GT(plan->bound, high) << "the fallback reaches the highest open descriptor";
+    }
+    const auto fds = child_descriptors(scratch, options);
+    EXPECT_FALSE(fds.contains(high)) << allow_close_range;
+    EXPECT_TRUE(fds.contains(0) && fds.contains(1) && fds.contains(2));
+    // Beyond stdio only the few low descriptors `ls` opens for itself: nothing inherited survives.
+    EXPECT_TRUE(std::all_of(fds.begin(), fds.end(), [](int fd) { return fd < 10; })) << allow_close_range;
+  }
+}
+
+TEST(OwnedChildTests, ADescriptorAboveALoweredLimitIsStillInsideTheFallbackBound) {
+  scratch_t scratch;
+  struct rlimit limit {};
+  ASSERT_EQ(::getrlimit(RLIMIT_NOFILE, &limit), 0);
+  ASSERT_GT(limit.rlim_cur, 250u);
+  held_fd_t held {240};
+  ASSERT_EQ(held.fd, 240);
+  struct rlimit lowered = limit;
+  lowered.rlim_cur = 64;
+  ASSERT_EQ(::setrlimit(RLIMIT_NOFILE, &lowered), 0);
+  owned_child::options_t options;
+  options.allow_close_range = false;
+  const auto plan = owned_child::plan_descriptor_closure(options);
+  const auto fds = child_descriptors(scratch, options);
+  ASSERT_EQ(::setrlimit(RLIMIT_NOFILE, &limit), 0);
+  ASSERT_TRUE(plan);
+  EXPECT_GT(plan->bound, 240) << "from the listing, not only the lowered limit";
+  EXPECT_FALSE(fds.contains(240));
+}
+
+TEST(OwnedChildTests, WithoutAProvableClosureNothingIsStarted) {
+  scratch_t scratch;
+  owned_child::options_t options;
+  options.allow_close_range = false;
+  options.fallback_cap = 8;  // below any real limit: no bound can be proven
+  EXPECT_FALSE(owned_child::plan_descriptor_closure(options));
+  child_t child {options};
+  const auto marker = (scratch.root / "ran").string();
+  EXPECT_FALSE(child.start({"/bin/sh", "-c", "echo ran > \"$M\""}, {"M=" + marker}));
+  EXPECT_EQ(child.state(), state_e::failed);
+  std::this_thread::sleep_for(100ms);
+  EXPECT_FALSE(std::filesystem::exists(marker)) << "refused before fork";
 }
 
 TEST(OwnedChildTests, ExitStatusIsReportedOnlyFromItsOwnReap) {
@@ -217,6 +308,9 @@ TEST(OwnedChildTests, DestroyingARunningChildStopsAndReapsIt) {
 TEST(OwnedChildTests, RegisteredCasesAreFrozen) {
   const std::set<std::string> expected {
     "TheChildGetsExactlyItsArgvAndEnvironmentAndNoInheritedDescriptor",
+    "AHighNumberedDescriptorIsClosedByCloseRangeAndByTheBoundedFallback",
+    "ADescriptorAboveALoweredLimitIsStillInsideTheFallbackBound",
+    "WithoutAProvableClosureNothingIsStarted",
     "ExitStatusIsReportedOnlyFromItsOwnReap",
     "AbortStopsTheChildsWholeGroupAndReapsOnlyIt",
     "DestroyingARunningChildStopsAndReapsIt",

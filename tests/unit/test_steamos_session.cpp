@@ -95,9 +95,9 @@ namespace {
     snapshot.rows.push_back({"2", 1000, "deck", "seat0", "/org/freedesktop/login1/session/_32"});
     snapshot.records["2"] = record_of("2", 1000, 1234, 5000000);
     snapshot.leader_start_ticks = 777;
-    snapshot.target = {true, "active", game_target, {}, {}, {}, {}};
-    snapshot.game_mode = {true, "active", "fedcba9876543210fedcba9876543210", {}, {}, {}, {}};
-    snapshot.polaris = {true, "active", "00112233445566778899aabbccddeeff", {}, {}, {}, {}};
+    snapshot.target = {true, "active", game_target, {}, {}, {}, {}, ""};
+    snapshot.game_mode = {true, "active", "fedcba9876543210fedcba9876543210", {}, {}, {}, {}, ""};
+    snapshot.polaris = {true, "active", "00112233445566778899aabbccddeeff", {}, {}, {}, {}, ""};
     return snapshot;
   }
 
@@ -414,44 +414,60 @@ TEST(SteamosSessionTests, TheCommandIsTheFixedPathAndOneVerbWithAMinimalEnvironm
   EXPECT_EQ(std::string {steamos::k_system_bus_address}, "unix:path=/run/dbus/system_bus_socket");
 }
 
-TEST(SteamosSessionTests, PolarisMustNotBeStoppedWithTheGraphicalSession) {
-  steamos::unit_record_t polaris {true, "active", "00112233445566778899aabbccddeeff", {}, {}, {}, {}};
-  EXPECT_TRUE(steamos::polaris_independent_of_session(polaris).ok());
-  EXPECT_FALSE(steamos::polaris_independent_of_session({}).ok()) << "not running as its unit";
-  for (int list = 0; list < 4; ++list) {
-    for (const auto *unit : {"graphical-session.target", "gamescope-session.service", "graphical-session-pre.target"}) {
-      auto bound = polaris;
-      auto &target = list == 0 ? bound.part_of : list == 1 ? bound.binds_to : list == 2 ? bound.requisite : bound.stop_propagated_from;
-      target.emplace_back(unit);
-      EXPECT_EQ(steamos::polaris_independent_of_session(bound).code, "prelaunch_service_not_independent") << list << unit;
-    }
+TEST(SteamosSessionTests, PolarisSurvivesOnlyAsThisActiveUnitOutsideTheProvenStopClosure) {
+  const auto self = std::string {"0::/user.slice/user-1000.slice/user@1000.service/app.slice/polaris.service\n"};
+  const auto surviving = [&]() {
+    auto snapshot = game_mode_snapshot();
+    snapshot.self_cgroup = self;
+    snapshot.polaris.control_group = "/user.slice/user-1000.slice/user@1000.service/app.slice/polaris.service";
+    snapshot.stop_closure = {true, {"gamescope-session.service", "graphical-session.target", "steam.service"}};
+    return snapshot;
+  };
+  EXPECT_TRUE(steamos::polaris_independent_of_session(surviving()).ok());
+  struct case_t {
+    std::string name;
+    std::function<void(snapshot_t &)> change;
+  };
+  const std::vector<case_t> cases {
+    {"not loaded", [](auto &s) { s.polaris = {}; }},
+    {"loaded but inactive (a stale unit)", [](auto &s) { s.polaris.active_state = "inactive"; }},
+    {"another process's unit", [](auto &s) { s.self_cgroup = "0::/user.slice/user-1000.slice/session-2.scope\n"; }},
+    {"this process's cgroup unread", [](auto &s) { s.self_cgroup.clear(); }},
+    {"a cgroup v1 host", [](auto &s) { s.self_cgroup = "1:name=systemd:/x\n0::/user.slice/user-1000.slice/user@1000.service/app.slice/polaris.service\n"; }},
+    {"PartOf the target", [](auto &s) { s.polaris.part_of = {"graphical-session.target"}; }},
+    {"BindsTo Game Mode", [](auto &s) { s.polaris.binds_to = {"gamescope-session.service"}; }},
+    {"Requisite of the pre target", [](auto &s) { s.polaris.requisite = {"graphical-session-pre.target"}; }},
+    {"stop propagated from the target", [](auto &s) { s.polaris.stop_propagated_from = {"graphical-session.target"}; }},
+    {"reached indirectly by the stop", [](auto &s) { s.stop_closure.units.insert(s.stop_closure.units.begin() + 1, "polaris.service"); }},
+    {"the closure was not walked or overflowed", [](auto &s) { s.stop_closure.complete = false; }},
+  };
+  for (const auto &c : cases) {
+    auto snapshot = surviving();
+    c.change(snapshot);
+    EXPECT_EQ(steamos::polaris_independent_of_session(snapshot).code, "prelaunch_service_not_independent") << c.name;
   }
-  polaris.part_of = {"default.target"};
-  EXPECT_TRUE(steamos::polaris_independent_of_session(polaris).ok());
 }
 
-TEST(SteamosSessionTests, TheManagerMustOfferBothArgumentlessSwitchMethods) {
-  const std::string good = R"(<node>
-  <interface name="com.steampowered.SteamOSManager1.SessionManagement1">
-    <method name="SwitchToGameMode"/>
-    <method name="SwitchToDesktopMode">
-    </method>
-  </interface>
-</node>)";
-  EXPECT_TRUE(steamos::introspection_supports_switch(good).ok());
-  const std::vector<std::string> bad {
-    "<node/>",
-    R"(<node><interface name="com.steampowered.SteamOSManager1.SessionManagement1"><method name="SwitchToGameMode"/></interface></node>)",
-    R"(<node><interface name="com.steampowered.SteamOSManager1.SessionManagement1"><method name="SwitchToGameMode"/>)"
-    R"(<method name="SwitchToDesktopMode"><arg type="s" direction="in"/></method></interface></node>)",
-    // The methods on another interface do not count.
-    R"(<node><interface name="com.steampowered.SteamOSManager1.Manager"><method name="SwitchToGameMode"/>)"
-    R"(<method name="SwitchToDesktopMode"/></interface></node>)",
-    good + good,
-    R"(<node><interface name="com.steampowered.SteamOSManager1.SessionManagement1"><method name="SwitchToGameMode"/>)"
-    R"(<method name="SwitchToDesktopMode"/>)",
-  };
-  for (const auto &xml : bad) EXPECT_EQ(steamos::introspection_supports_switch(xml).code, "prelaunch_session_management_unavailable") << xml;
+TEST(SteamosSessionTests, GameModeIsReadFromItsUnitAndAnythingInBetweenIsTransitional) {
+  using steamos::game_mode_e;
+  EXPECT_EQ(steamos::game_mode_of({}), game_mode_e::inactive) << "not loaded";
+  for (const auto *state : {"inactive", "failed"}) EXPECT_EQ(steamos::game_mode_of({true, state, "", {}, {}, {}, {}, ""}), game_mode_e::inactive);
+  EXPECT_EQ(steamos::game_mode_of({true, "active", "", {}, {}, {}, {}, ""}), game_mode_e::active);
+  for (const auto *state : {"activating", "deactivating", "reloading", "maintenance", ""}) {
+    EXPECT_EQ(steamos::game_mode_of({true, state, "", {}, {}, {}, {}, ""}), game_mode_e::transitional) << state;
+  }
+}
+
+TEST(SteamosSessionTests, BusOwnersMustSitInTheCgroupsSystemdGaveThem) {
+  EXPECT_TRUE(steamos::cgroup_is_logind("0::/system.slice/systemd-logind.service\n"));
+  EXPECT_FALSE(steamos::cgroup_is_logind("0::/user.slice/user-1000.slice/user@1000.service/app.slice/systemd-logind.service\n"));
+  EXPECT_FALSE(steamos::cgroup_is_logind("0::/system.slice/systemd-logind.service/extra\n"));
+  EXPECT_TRUE(steamos::cgroup_is_user_manager("0::/user.slice/user-1000.slice/user@1000.service/init.scope\n", 1000));
+  EXPECT_FALSE(steamos::cgroup_is_user_manager("0::/user.slice/user-1001.slice/user@1001.service/init.scope\n", 1000));
+  EXPECT_FALSE(steamos::cgroup_is_user_manager("0::/user.slice/user-1000.slice/user@1000.service/app.slice/fake.service\n", 1000));
+  EXPECT_EQ(steamos::cgroup_v2_path("0::/a/b\n"), "/a/b");
+  EXPECT_EQ(steamos::cgroup_v2_path("0::relative\n"), "");
+  EXPECT_EQ(steamos::cgroup_v2_path("0::/a\n0::/b\n"), "");
 }
 
 TEST(SteamosSessionTests, TheManagerProcessMustBeThisAccountsUnitBySystemdsCgroup) {
@@ -499,8 +515,9 @@ TEST(SteamosSessionTests, RegisteredCasesAreFrozen) {
     "ASessionRetiresOnlyWhenItAndItsTargetGenerationHaveBothEnded",
     "IdentityEqualityCatchesAReusedPidARestartedTargetAndAModeChange",
     "TheCommandIsTheFixedPathAndOneVerbWithAMinimalEnvironment",
-    "PolarisMustNotBeStoppedWithTheGraphicalSession",
-    "TheManagerMustOfferBothArgumentlessSwitchMethods",
+    "PolarisSurvivesOnlyAsThisActiveUnitOutsideTheProvenStopClosure",
+    "GameModeIsReadFromItsUnitAndAnythingInBetweenIsTransitional",
+    "BusOwnersMustSitInTheCgroupsSystemdGaveThem",
     "TheManagerProcessMustBeThisAccountsUnitBySystemdsCgroup",
     "InvocationIdsAndProcessStartTimesAreReadExactly",
     "RegisteredCasesAreFrozen",

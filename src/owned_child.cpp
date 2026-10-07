@@ -4,6 +4,9 @@
  */
 #include "owned_child.h"
 
+#include <algorithm>
+#include <climits>
+#include <filesystem>
 #include <thread>
 
 #ifndef _WIN32
@@ -20,6 +23,10 @@
 
 namespace owned_child {
 #ifdef _WIN32
+  std::optional<close_plan_t> plan_descriptor_closure(const options_t &) {
+    return std::nullopt;
+  }
+
   child_t::~child_t() = default;
 
   bool child_t::start(const std::vector<std::string> &, const std::vector<std::string> &) {
@@ -34,19 +41,65 @@ namespace owned_child {
   void child_t::abort(std::chrono::milliseconds) {}
 #else
   namespace {
-    /// Closes every descriptor from `first` up, in the child after fork: async-signal-safe only.
-    void close_from(int first) {
+    /// Exit statuses of a child that never reached execve.
+    constexpr int k_exit_no_group = 121;
+    constexpr int k_exit_no_null = 122;
+    constexpr int k_exit_no_stdio = 123;
+    constexpr int k_exit_no_closure = 124;
+
+    /// Closes every descriptor above stderr, in the child after fork: async-signal-safe calls only.
+    /// False when nothing proven could close them; the child then never executes.
+    bool close_above_stderr(const close_plan_t &plan) {
   #if defined(__linux__) && defined(SYS_close_range)
-      if (::syscall(SYS_close_range, first, ~0U, 0) == 0) return;
+      if (plan.close_range && ::syscall(SYS_close_range, 3U, ~0U, 0U) == 0) return true;
   #endif
-      struct rlimit limit {};
-      int max = 1024;
-      if (::getrlimit(RLIMIT_NOFILE, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY && limit.rlim_cur < 1048576) {
-        max = static_cast<int>(limit.rlim_cur);
-      }
-      for (int fd = first; fd < max; ++fd) ::close(fd);
+      if (plan.bound < 0) return false;
+      for (int fd = 3; fd < plan.bound; ++fd) ::close(fd);
+      return true;
     }
   }  // namespace
+
+  std::optional<close_plan_t> plan_descriptor_closure(const options_t &options) {
+    close_plan_t plan;
+  #if defined(__linux__) && defined(SYS_close_range)
+    // Closing a range above any descriptor this process can hold closes nothing and says whether
+    // the kernel (and any seccomp filter) allows the call.
+    plan.close_range = options.allow_close_range && ::syscall(SYS_close_range, ~0U - 1, ~0U, 0U) == 0;
+  #endif
+    struct rlimit limit {};
+    if (::getrlimit(RLIMIT_NOFILE, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY &&
+        limit.rlim_cur <= static_cast<rlim_t>(options.fallback_cap)) {
+      int highest = -1;
+      std::error_code ec;
+      bool listed = false;
+      for (const auto *dir : {"/proc/self/fd", "/dev/fd"}) {
+        ec.clear();
+        highest = -1;
+        for (std::filesystem::directory_iterator it {dir, ec}, end; !ec && it != end; it.increment(ec)) {
+          const auto name = it->path().filename().string();
+          int fd = 0;
+          bool digits = !name.empty();
+          for (const char c : name) {
+            if (c < '0' || c > '9' || fd > (INT_MAX - 9) / 10) {
+              digits = false;
+              break;
+            }
+            fd = fd * 10 + (c - '0');
+          }
+          if (digits && fd > highest) highest = fd;
+        }
+        if (!ec) {
+          listed = true;
+          break;
+        }
+      }
+      if (listed && highest < options.fallback_cap) {
+        plan.bound = std::max(static_cast<int>(limit.rlim_cur), highest + 1);
+      }
+    }
+    if (!plan.close_range && plan.bound < 0) return std::nullopt;
+    return plan;
+  }
 
   child_t::~child_t() {
     abort();
@@ -58,6 +111,12 @@ namespace owned_child {
       return false;
     }
     // Everything the child needs is built before fork: after it, only async-signal-safe calls.
+    const auto plan = plan_descriptor_closure(options_);
+    if (!plan) {
+      // No closure bound can be proven: nothing is started rather than leaking a descriptor.
+      state_ = state_e::failed;
+      return false;
+    }
     std::vector<char *> args;
     std::vector<char *> envp;
     for (const auto &arg : argv) args.push_back(const_cast<char *>(arg.c_str()));
@@ -75,14 +134,15 @@ namespace owned_child {
       return false;
     }
     if (pid == 0) {
-      // Own process group, so a cancellation stops anything the command itself starts.
-      ::setpgid(0, 0);
+      // Own process group, so a cancellation stops anything the command itself starts. A child that
+      // cannot lead its own group, or set up its descriptors, never executes.
+      if (::setpgid(0, 0) != 0) ::_exit(k_exit_no_group);
       const int null_fd = ::open("/dev/null", O_RDWR);
-      if (null_fd < 0) ::_exit(127);
-      ::dup2(null_fd, STDIN_FILENO);
-      ::dup2(null_fd, STDOUT_FILENO);
-      ::dup2(null_fd, STDERR_FILENO);
-      close_from(3);
+      if (null_fd < 0) ::_exit(k_exit_no_null);
+      if (::dup2(null_fd, STDIN_FILENO) < 0 || ::dup2(null_fd, STDOUT_FILENO) < 0 || ::dup2(null_fd, STDERR_FILENO) < 0) {
+        ::_exit(k_exit_no_stdio);
+      }
+      if (!close_above_stderr(*plan)) ::_exit(k_exit_no_closure);
       // Default signal dispositions and an empty mask: nothing the daemon set leaks into the child.
       sigset_t empty;
       sigemptyset(&empty);  // a macro on some libcs

@@ -112,6 +112,7 @@ namespace prelaunch::steamos {
     std::string user;
     std::string seat;
     std::string path;
+    bool operator==(const session_row_t &) const = default;
   };
 
   /// The login1 Session properties this transition reads (types as in org.freedesktop.login1(5)).
@@ -127,6 +128,7 @@ namespace prelaunch::steamos {
     bool remote = false;                   ///< b Remote
     std::uint32_t leader = 0;              ///< u Leader
     std::uint64_t timestamp_monotonic = 0; ///< t TimestampMonotonic
+    bool operator==(const session_record_t &) const = default;
   };
 
   /// A user-manager unit: s ActiveState, ay InvocationID, as PartOf/BindsTo/Requisite/StopPropagatedFrom.
@@ -138,7 +140,19 @@ namespace prelaunch::steamos {
     std::vector<std::string> binds_to;
     std::vector<std::string> requisite;
     std::vector<std::string> stop_propagated_from;
+    std::string control_group;  ///< s ControlGroup of a service (read for polaris.service only)
+    bool operator==(const unit_record_t &) const = default;
   };
+
+  /// The units a stop of graphical-session.target reaches, following systemd's stop propagation in
+  /// reverse: RequiredBy, ConsistsOf (PartOf), BoundBy, RequisiteOf and PropagatesStopTo, transitively.
+  struct stop_closure_t {
+    bool complete = false;  ///< false when it was not walked, or exceeded its bound
+    std::vector<std::string> units;  ///< sorted
+    bool operator==(const stop_closure_t &) const = default;
+  };
+  /// The most units a closure walk visits before it is called unproven.
+  inline constexpr std::size_t k_max_closure_units = 128;
 
   /// Hex of a 16-byte InvocationID. Any other length, or all zeros, is empty (no invocation).
   std::string invocation_hex(const std::vector<std::uint8_t> &bytes);
@@ -154,7 +168,21 @@ namespace prelaunch::steamos {
     unit_record_t target;
     unit_record_t game_mode;
     unit_record_t polaris;
+    stop_closure_t stop_closure;  ///< walked only when the caller asked for it
+    /// This process's own cgroup v2 path (from /proc/self/cgroup); empty when unread. Not bracketed.
+    std::string self_cgroup;
+    bool operator==(const snapshot_t &) const = default;
   };
+
+  /// What a Game Mode unit says about the host, from typed records only.
+  enum class game_mode_e {
+    unknown,  ///< not read
+    absent,  ///< this platform has no Game Mode
+    inactive,  ///< not loaded, inactive or failed
+    active,
+    transitional,  ///< activating, deactivating, reloading or anything else
+  };
+  game_mode_e game_mode_of(const unit_record_t &unit);
 
   enum class mode_e { game, desktop };
 
@@ -200,8 +228,21 @@ namespace prelaunch::steamos {
   /// A small file's whole text, refused (not truncated) when larger than `limit`.
   std::optional<std::string> read_text_limited(const std::filesystem::path &path, std::size_t limit);
 
-  /// Polaris survives a logout only if its unit is not stopped with the graphical session.
-  verdict_t polaris_independent_of_session(const unit_record_t &polaris);
+  /**
+   * @brief Polaris survives the switch: the active polaris.service is this very process's unit and
+   * no stop that graphical-session.target propagates reaches it.
+   *
+   * Requires: polaris.service active, its ControlGroup equal to this process's own cgroup, none of
+   * its direct stop dependencies naming the session's units, and a complete stop closure of
+   * graphical-session.target that does not contain it. An unwalked or oversized closure is unproven.
+   */
+  verdict_t polaris_independent_of_session(const snapshot_t &snapshot);
+  /// The path of a cgroup v2 /proc/<pid>/cgroup text ("0::<path>", one line), or empty.
+  std::string cgroup_v2_path(std::string_view cgroup);
+  /// The system bus's logind: systemd-logind.service in the system slice.
+  bool cgroup_is_logind(std::string_view cgroup);
+  /// This account's own systemd user manager: user@<uid>.service/init.scope.
+  bool cgroup_is_user_manager(std::string_view cgroup, std::uint32_t uid);
 
   // ---------------------------------------------------------------- the command
 
@@ -218,8 +259,6 @@ namespace prelaunch::steamos {
   /// The account's runtime directory and bus socket belong to it (owner uid, 0700 directory, socket).
   verdict_t user_bus_trusted(const std::filesystem::path &runtime_dir, std::uint32_t uid);
 
-  /// Introspection XML lists SessionManagement1 with the two argument-less switch methods.
-  verdict_t introspection_supports_switch(std::string_view xml);
   /// The bus owner's cgroup is this account's steamos-manager.service under its own user manager.
   bool cgroup_is_manager_unit(std::string_view cgroup, std::uint32_t uid);
 }  // namespace prelaunch::steamos

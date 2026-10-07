@@ -26,6 +26,7 @@ using prelaunch::restore_e;
 using prelaunch::session_identity_t;
 using prelaunch::state_e;
 using prelaunch::step_e;
+namespace steamos = prelaunch::steamos;
 
 namespace {
   session_identity_t identity(std::string id, prelaunch::mode_e mode, char generation, std::uint32_t leader, std::uint64_t ticks) {
@@ -60,19 +61,22 @@ namespace {
     std::function<void()> on_scan;
     std::vector<std::string> *log = nullptr;
 
-    bool game_mode_live_fresh() override {
+    /// Overrides the Game Mode unit's state; otherwise it follows `live`.
+    std::optional<steamos::game_mode_e> mode_state;
+    int service_proofs = 0;
+
+    prelaunch::observation_t observe(const session_identity_t *since, const prelaunch::wait_t &, bool prove_service) override {
       ++scans;
       if (log) log->push_back("scan");
       if (on_scan) on_scan();
-      return live;
-    }
-
-    prelaunch::observation_t observe(const session_identity_t *since, const prelaunch::wait_t &) override {
-      ++probes;
       prelaunch::observation_t out;
       out.read = read_failure;
       if (!out.read.ok()) return out;
-      out.service = service;
+      out.game_mode = mode_state.value_or(live ? steamos::game_mode_e::active : steamos::game_mode_e::inactive);
+      if (prove_service) {
+        ++service_proofs;
+        out.service = service;
+      }
       if (!bind_failure.ok()) {
         out.bind = bind_failure;
       } else if (session) {
@@ -211,8 +215,9 @@ namespace {
     }
 
     /// A session end, with its handed-over restore waited for.
-    restore_e end_session(std::uint64_t generation, bool on_request, bool shutdown, const prelaunch::coordinator_t::others_t &others) {
-      const auto handed = coordinator.on_session_end(generation, on_request, shutdown, others);
+    restore_e end_session(std::uint64_t generation, bool on_request, bool shutdown, const prelaunch::coordinator_t::others_t &others,
+                          const prelaunch::admission_fence_t &fence = {}) {
+      const auto handed = coordinator.on_session_end(generation, on_request, shutdown, others, fence);
       if (handed != restore_e::owned) return handed;
       coordinator.wait_for_restore();
       return coordinator.receipt().restore;
@@ -263,7 +268,8 @@ TEST(PrelaunchTransitionTests, TheProductionAdapterIsRefusedBeforeAnyEffectEvenW
   EXPECT_EQ(outcome.state, state_e::refused);
   EXPECT_FALSE(outcome.changed_session);
   EXPECT_EQ(clock.slept, 0ms) << "no wait, no switch";
-  EXPECT_EQ(host.probes, 0) << "refused before the title/service/identity probes";
+  EXPECT_EQ(host.probes, 0) << "refused before the title and service probes";
+  EXPECT_EQ(host.scans, 1) << "one typed observation said Game Mode is running";
 
   const auto off = coordinator.readiness(false);
   EXPECT_FALSE(off.enabled);
@@ -277,12 +283,25 @@ TEST(PrelaunchTransitionTests, TheProductionAdapterIsRefusedBeforeAnyEffectEvenW
 }
 
 TEST(PrelaunchTransitionTests, AHostNotInGameModeNeedsNothing) {
+  for (const auto state : {steamos::game_mode_e::inactive, steamos::game_mode_e::absent}) {
+    fixture_t f;
+    f.host.mode_state = state;
+    const auto outcome = f.coordinator.run(launch_request());
+    EXPECT_TRUE(outcome.proceed());
+    EXPECT_EQ(outcome.state, state_e::not_needed);
+    EXPECT_EQ(f.host.scans, 1) << "one fresh typed observation, never a kept answer";
+    EXPECT_TRUE(f.adapter.starts.empty());
+  }
+}
+
+TEST(PrelaunchTransitionTests, AnUnreadHostIsRefusedNeverTreatedAsNotInGameMode) {
   fixture_t f;
-  f.host.live = false;
+  f.host.live = false;  // whatever any other detector would say
+  f.host.read_failure = prelaunch::verdict_t::fail("prelaunch_session_identity_unavailable", "no user manager");
   const auto outcome = f.coordinator.run(launch_request());
-  EXPECT_TRUE(outcome.proceed());
-  EXPECT_EQ(outcome.state, state_e::not_needed);
-  EXPECT_EQ(f.host.scans, 1) << "one fresh scan, never a kept answer";
+  EXPECT_FALSE(outcome.proceed());
+  EXPECT_EQ(outcome.code, "prelaunch_session_identity_unavailable");
+  EXPECT_EQ(outcome.state, state_e::refused);
   EXPECT_TRUE(f.adapter.starts.empty());
 }
 
@@ -351,6 +370,8 @@ TEST(PrelaunchTransitionTests, AnOpenTitleMissingServiceIndependenceOrUnprovenSe
     {"the detector and the records disagree", [](auto &f) { f.host.session = desktop_leader; }, 409, "prelaunch_session_mode_unknown"},
     {"an incomplete identity", [](auto &f) { f.host.session->target_invocation.clear(); }, 503, "prelaunch_session_identity_unavailable"},
     {"an unaudited manager", [](auto &f) { f.adapter.supported = false; }, 503, "prelaunch_adapter_version_unaudited"},
+    {"Game Mode starting or stopping", [](auto &f) { f.host.mode_state = steamos::game_mode_e::transitional; }, 409, "prelaunch_session_mode_unknown"},
+    {"a read that says nothing about Game Mode", [](auto &f) { f.host.mode_state = steamos::game_mode_e::unknown; }, 409, "prelaunch_session_mode_unknown"},
   };
   for (const auto &c : cases) {
     fixture_t f;
@@ -540,6 +561,7 @@ TEST(PrelaunchTransitionTests, OnlyAPurposefulEndOfTheCommittedGenerationRestore
     {"another session", true, false, true, {}, restore_e::refused},
     {"a game opened on the host since", true, false, false, [](auto &h) { h.title = true; }, restore_e::refused},
     {"user went back to Game Mode", true, false, false, [](auto &h) { h.live = true; }, restore_e::refused},
+    {"Game Mode starting", true, false, false, [](auto &h) { h.mode_state = steamos::game_mode_e::transitional; }, restore_e::refused},
     {"a different desktop session", true, false, false, [](auto &h) { h.session = identity("5", prelaunch::mode_e::desktop, 'd', 201, 9100); }, restore_e::refused},
     {"a restarted desktop leader with a reused pid", true, false, false, [](auto &h) { h.session->leader_start_ticks = 9999; }, restore_e::refused},
     {"a restarted graphical target", true, false, false, [](auto &h) { h.session->target_invocation = std::string(32, 'e'); }, restore_e::refused},
@@ -808,12 +830,137 @@ TEST(PrelaunchTransitionTests, TheEntrysOwnCancellationTransportIsRecordedHonest
   }
 }
 
+TEST(PrelaunchTransitionTests, TheSurvivalProofIsAskedForOnceBeforeTheSwitch) {
+  fixture_t f;
+  ASSERT_TRUE(f.coordinator.run(launch_request()).proceed());
+  EXPECT_EQ(f.host.service_proofs, 1) << "proved on the admission observation, not left to the waits";
+}
+
+/// A fence standing in for the lifecycle gate: it records what the coordinator did with it.
+struct recording_fence_t {
+  std::atomic<bool> launch_admitted {false};
+  std::atomic<bool> fenced {false};
+  std::atomic<int> releases {0};
+  std::function<void()> on_release;
+
+  prelaunch::admission_fence_t fence() {
+    return {
+      [this]() {
+        if (launch_admitted || fenced) return false;
+        fenced = true;
+        return true;
+      },
+      [this]() {
+        if (on_release) on_release();
+        fenced = false;
+        ++releases;
+      },
+    };
+  }
+};
+
+TEST(PrelaunchTransitionTests, ARestoreIsNeverClaimedWhileALaunchIsAdmitted) {
+  fixture_t f;
+  const auto outcome = f.coordinator.run(launch_request());
+  ASSERT_TRUE(outcome.proceed());
+  f.coordinator.commit(outcome.transition_generation);
+  recording_fence_t gate;
+  gate.launch_admitted = true;  // e.g. this teardown runs inside a new launch's admission
+  EXPECT_EQ(f.coordinator.on_session_end(outcome.transition_generation, true, false, nobody_else, gate.fence()), restore_e::refused);
+  EXPECT_EQ(f.coordinator.receipt().restore_reason, "a launch was being admitted when the session ended");
+  EXPECT_FALSE(f.coordinator.restore_pending());
+  EXPECT_EQ(gate.releases.load(), 0) << "nothing was acquired";
+  EXPECT_EQ(f.adapter.starts.size(), 1u);
+}
+
+TEST(PrelaunchTransitionTests, TheAdmissionFenceIsHeldFromTheClaimUntilTheOutcomeIsRecorded) {
+  fixture_t f;
+  const auto outcome = f.coordinator.run(launch_request());
+  ASSERT_TRUE(outcome.proceed());
+  f.coordinator.commit(outcome.transition_generation);
+  recording_fence_t gate;
+  restore_e recorded_at_release = restore_e::none;
+  gate.on_release = [&]() {
+    recorded_at_release = f.coordinator.receipt().restore;
+  };
+  std::promise<void> unstall;
+  auto unstalled = unstall.get_future().share();
+  const prelaunch::coordinator_t::others_t stalled = [unstalled](std::string &) {
+    unstalled.wait();  // the restore stalls in its proofs
+    return false;
+  };
+  EXPECT_EQ(f.coordinator.on_session_end(outcome.transition_generation, true, false, stalled, gate.fence()), restore_e::owned);
+  EXPECT_TRUE(gate.fenced) << "taken in the same step as the claim";
+  // While it stalls, a policy-off launch cannot get past the fence, and the gate's claim stays.
+  EXPECT_FALSE(gate.fence().acquire()) << "already fenced";
+  EXPECT_EQ(f.coordinator.run(launch_request("client-b")).code, "prelaunch_transition_busy");
+  unstall.set_value();
+  f.coordinator.wait_for_restore();
+  EXPECT_FALSE(gate.fenced);
+  EXPECT_EQ(gate.releases.load(), 1);
+  EXPECT_EQ(recorded_at_release, restore_e::restored) << "released only after the outcome was recorded";
+}
+
+TEST(PrelaunchTransitionTests, OneSerialWorkerServesSuccessiveRestores) {
+  fixture_t f;
+  recording_fence_t gate;
+  for (int round = 0; round < 3; ++round) {
+    f.host.live = true;
+    f.host.session = game_mode_leader;
+    const auto outcome = f.coordinator.run(launch_request());
+    ASSERT_TRUE(outcome.proceed()) << round << outcome.code;
+    f.coordinator.commit(outcome.transition_generation);
+    EXPECT_EQ(f.end_session(outcome.transition_generation, true, false, nobody_else, gate.fence()), restore_e::restored) << round;
+  }
+  EXPECT_EQ(gate.releases.load(), 3);
+}
+
+TEST(PrelaunchTransitionTests, AStopDuringTheRestoreProofsWinsOverTheEffect) {
+  fixture_t f;
+  const auto outcome = f.coordinator.run(launch_request());
+  ASSERT_TRUE(outcome.proceed());
+  f.coordinator.commit(outcome.transition_generation);
+  recording_fence_t gate;
+  std::promise<void> in_proofs;
+  auto reached = in_proofs.get_future();
+  const prelaunch::coordinator_t::others_t stop_now = [&](std::string &) {
+    f.coordinator.request_stop();  // Polaris starts stopping after the claim, during the proofs
+    in_proofs.set_value();
+    return false;
+  };
+  EXPECT_EQ(f.coordinator.on_session_end(outcome.transition_generation, true, false, stop_now, gate.fence()), restore_e::owned);
+  // The worker really is past its first stop check: the stop lands inside the proofs.
+  ASSERT_EQ(reached.wait_for(std::chrono::seconds {5}), std::future_status::ready);
+  f.coordinator.wait_for_restore();
+  EXPECT_EQ(f.coordinator.receipt().restore_reason, "Polaris is stopping");
+  f.coordinator.shutdown();
+  EXPECT_EQ(f.coordinator.receipt().restore, restore_e::refused);
+  EXPECT_EQ(f.adapter.starts.size(), 1u) << "the return to Game Mode never started";
+  EXPECT_EQ(gate.releases.load(), 1) << "shutdown still releases the fence";
+}
+
+TEST(PrelaunchTransitionTests, AProcessStopLatchedBeforeTheCoordinatorExistsStopsItFromBirth) {
+  scripted_host_t host;
+  scripted_adapter_t adapter;
+  adapter.host = &host;
+  fake_clock_t clock;
+  prelaunch::request_stop();  // before the registry has made this coordinator
+  prelaunch::set_dependencies_for_tests(&host, &adapter, &clock);
+  const auto outcome = prelaunch::coordinator().run(launch_request());
+  prelaunch::set_dependencies_for_tests(nullptr, nullptr, nullptr);
+  prelaunch::reset_process_stop_for_tests();
+  EXPECT_EQ(outcome.code, "prelaunch_shutting_down");
+  EXPECT_TRUE(adapter.starts.empty());
+  EXPECT_EQ(host.scans, 0);
+}
+
 TEST(PrelaunchTransitionTests, RegisteredCasesAreFrozen) {
   const std::set<std::string> expected {
     "AnAppWithTheSettingOffNeverScansProbesOrSwitches",
     "ResumeWatchAndInputOnlyBindTheirGenerationAndNeverSwitch",
     "TheProductionAdapterIsRefusedBeforeAnyEffectEvenWithTheSettingOn",
     "AHostNotInGameModeNeedsNothing",
+    "AnUnreadHostIsRefusedNeverTreatedAsNotInGameMode",
     "ProfileSpaceAndOccupiedHostsAreRefusedBeforeTheScan",
     "AMirrorRouteIsRefusedRatherThanLeavingGameModeForNothing",
     "AnOpenTitleMissingServiceIndependenceOrUnprovenSessionRefusesWithoutSwitching",
@@ -842,6 +989,12 @@ TEST(PrelaunchTransitionTests, RegisteredCasesAreFrozen) {
     "ATransitionRunningWhenPolarisStopsEndsAtItsNextCheck",
     "ASessionEndOnlyClaimsTheRestoreTheWorkerActsAfterTheCallerReturns",
     "TheEntrysOwnCancellationTransportIsRecordedHonestly",
+    "TheSurvivalProofIsAskedForOnceBeforeTheSwitch",
+    "ARestoreIsNeverClaimedWhileALaunchIsAdmitted",
+    "TheAdmissionFenceIsHeldFromTheClaimUntilTheOutcomeIsRecorded",
+    "OneSerialWorkerServesSuccessiveRestores",
+    "AStopDuringTheRestoreProofsWinsOverTheEffect",
+    "AProcessStopLatchedBeforeTheCoordinatorExistsStopsItFromBirth",
     "RegisteredCasesAreFrozen",
   };
   std::set<std::string> registered;

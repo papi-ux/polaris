@@ -44,6 +44,7 @@ using prelaunch::state_e;
 namespace {
   constexpr const char *k_boot = "6c1b5f3e-2a4d-4c8e-9f10-0123456789ab";
   constexpr std::uint32_t k_manager_pid = 4242;
+  constexpr const char *k_polaris_cgroup = "/user.slice/user-1000.slice/user@1000.service/app.slice/polaris.service";
 
   struct scratch_t {
     std::filesystem::path root;
@@ -102,16 +103,42 @@ namespace {
       std::string active_state = "active";
       std::vector<std::uint8_t> invocation;
       std::vector<std::string> part_of;
+      std::string control_group;
+      /// systemd's reverse stop edges, as the Unit interface reports them.
+      std::vector<std::string> required_by;
+      std::vector<std::string> consists_of;
+      std::vector<std::string> bound_by;
+      std::vector<std::string> requisite_of;
+      std::vector<std::string> propagates_stop_to;
+    };
+
+    /// A bus name's owner: its unique name, account and process.
+    struct owner_t {
+      std::string unique;
+      std::uint32_t uid = 0;
+      std::uint32_t pid = 0;
     };
 
     std::uint32_t uid = 1000;
     std::vector<session_t> sessions;
     std::string active;
-    unit_t target;
-    unit_t game_mode;
-    unit_t polaris;
+    std::map<std::string, unit_t> units;
+    owner_t logind {":1.1", 0, 11};
+    owner_t systemd {":1.2", 1000, 22};
     std::string manager_owner = ":1.42";
     std::uint32_t manager_uid = 1000;
+
+    unit_t &target() {
+      return units["graphical-session.target"];
+    }
+
+    unit_t &game_mode() {
+      return units["gamescope-session.service"];
+    }
+
+    unit_t &polaris() {
+      return units["polaris.service"];
+    }
     std::string manager_xml = R"(<node><interface name="com.steampowered.SteamOSManager1.SessionManagement1">)"
                               R"(<method name="SwitchToDesktopMode"/><method name="SwitchToGameMode"/></interface></node>)";
     /// Methods that are received and never answered.
@@ -237,19 +264,38 @@ namespace {
       g_object_unref(reply);
     }
 
+    static GVariant *strv(const std::vector<std::string> &items) {
+      std::vector<const gchar *> pointers;
+      for (const auto &item : items) pointers.push_back(item.c_str());
+      return g_variant_new_strv(pointers.data(), static_cast<gssize>(pointers.size()));
+    }
+
     static GVariant *unit_props(const host_script_t::unit_t &unit) {
       GVariantBuilder builder;
       g_variant_builder_init(&builder, G_VARIANT_TYPE("a{sv}"));
       g_variant_builder_add(&builder, "{sv}", "ActiveState", g_variant_new_string(unit.active_state.c_str()));
       g_variant_builder_add(&builder, "{sv}", "InvocationID",
         g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, unit.invocation.data(), unit.invocation.size(), 1));
-      std::vector<const gchar *> part_of;
-      for (const auto &u : unit.part_of) part_of.push_back(u.c_str());
-      g_variant_builder_add(&builder, "{sv}", "PartOf", g_variant_new_strv(part_of.data(), static_cast<gssize>(part_of.size())));
-      g_variant_builder_add(&builder, "{sv}", "BindsTo", g_variant_new_strv(nullptr, 0));
-      g_variant_builder_add(&builder, "{sv}", "Requisite", g_variant_new_strv(nullptr, 0));
-      g_variant_builder_add(&builder, "{sv}", "StopPropagatedFrom", g_variant_new_strv(nullptr, 0));
+      g_variant_builder_add(&builder, "{sv}", "PartOf", strv(unit.part_of));
+      g_variant_builder_add(&builder, "{sv}", "BindsTo", strv({}));
+      g_variant_builder_add(&builder, "{sv}", "Requisite", strv({}));
+      g_variant_builder_add(&builder, "{sv}", "StopPropagatedFrom", strv({}));
+      g_variant_builder_add(&builder, "{sv}", "RequiredBy", strv(unit.required_by));
+      g_variant_builder_add(&builder, "{sv}", "ConsistsOf", strv(unit.consists_of));
+      g_variant_builder_add(&builder, "{sv}", "BoundBy", strv(unit.bound_by));
+      g_variant_builder_add(&builder, "{sv}", "RequisiteOf", strv(unit.requisite_of));
+      g_variant_builder_add(&builder, "{sv}", "PropagatesStopTo", strv(unit.propagates_stop_to));
       return g_variant_new("(a{sv})", &builder);
+    }
+
+    /// Unit object paths by position in the (ordered) unit map.
+    std::string unit_object(const std::string &name) const {
+      std::size_t index = 0;
+      for (const auto &[unit, _] : script_.units) {
+        if (unit == name) break;
+        ++index;
+      }
+      return "/org/freedesktop/systemd1/unit/u" + std::to_string(index);
     }
 
     /// The scripted host's answer. Under the lock.
@@ -263,14 +309,23 @@ namespace {
         return out;
       };
       if (method == "GetNameOwner") {
-        if (s.manager_owner.empty()) {
+        const auto name = arg_string(0);
+        const auto &owner = name == "org.freedesktop.login1" ? s.logind.unique : name == "org.freedesktop.systemd1" ? s.systemd.unique : s.manager_owner;
+        if (owner.empty()) {
           error_name = "org.freedesktop.DBus.Error.NameHasNoOwner";
           return nullptr;
         }
-        return g_variant_new("(s)", s.manager_owner.c_str());
+        return g_variant_new("(s)", owner.c_str());
       }
-      if (method == "GetConnectionUnixUser") return g_variant_new("(u)", s.manager_uid);
-      if (method == "GetConnectionUnixProcessID") return g_variant_new("(u)", k_manager_pid);
+      if (method == "GetConnectionUnixUser" || method == "GetConnectionUnixProcessID") {
+        const auto unique = arg_string(0);
+        const bool user = method == "GetConnectionUnixUser";
+        if (unique == s.logind.unique) return g_variant_new("(u)", user ? s.logind.uid : s.logind.pid);
+        if (unique == s.systemd.unique) return g_variant_new("(u)", user ? s.systemd.uid : s.systemd.pid);
+        if (unique == s.manager_owner) return g_variant_new("(u)", user ? s.manager_uid : k_manager_pid);
+        error_name = "org.freedesktop.DBus.Error.NameHasNoOwner";
+        return nullptr;
+      }
       if (method == "Introspect") return g_variant_new("(s)", s.manager_xml.c_str());
       if (method == "GetSeat") return g_variant_new("(o)", "/org/freedesktop/login1/seat/seat0");
       if (method == "ListSessions") {
@@ -288,18 +343,26 @@ namespace {
       }
       if (method == "GetUnit") {
         const auto name = arg_string(0);
-        const auto *unit = name == "graphical-session.target" ? &s.target : name == "gamescope-session.service" ? &s.game_mode :
-                           name == "polaris.service"          ? &s.polaris :
-                                                                nullptr;
-        if (!unit || !unit->loaded) {
+        const auto found = s.units.find(name);
+        if (found == s.units.end() || !found->second.loaded) {
           error_name = "org.freedesktop.systemd1.NoSuchUnit";
           return nullptr;
         }
-        return g_variant_new("(o)", ("/org/freedesktop/systemd1/unit/" + std::to_string(unit == &s.target ? 1 : unit == &s.game_mode ? 2 : 3)).c_str());
+        return g_variant_new("(o)", unit_object(name).c_str());
       }
       if (method == "GetAll" && path.starts_with("/org/freedesktop/systemd1/unit/")) {
-        const auto which = path.back();
-        return unit_props(which == '1' ? s.target : which == '2' ? s.game_mode : s.polaris);
+        for (const auto &[name, unit] : s.units) {
+          if (unit_object(name) != path) continue;
+          if (arg_string(0) == "org.freedesktop.systemd1.Service") {
+            GVariantBuilder builder;
+            g_variant_builder_init(&builder, G_VARIANT_TYPE("a{sv}"));
+            g_variant_builder_add(&builder, "{sv}", "ControlGroup", g_variant_new_string(unit.control_group.c_str()));
+            return g_variant_new("(a{sv})", &builder);
+          }
+          return unit_props(unit);
+        }
+        error_name = "org.freedesktop.DBus.Error.UnknownObject";
+        return nullptr;
       }
       if (method == "GetAll" && path.starts_with("/org/freedesktop/login1/session/_")) {
         const auto id = path.substr(std::string {"/org/freedesktop/login1/session/_"}.size());
@@ -358,6 +421,12 @@ namespace {
       sources.pacman_local = scratch.root / "pacman";
       sources.trusted_owner_uid = static_cast<std::uint32_t>(::getuid());
       sources.trusted_root = scratch.root / "root";
+      sources.self_cgroup = scratch.write("self_cgroup", "0::" + std::string {k_polaris_cgroup} + "\n");
+      // logind and this account's user manager, where systemd places them.
+      scratch.write("proc/11/stat", stat_line(11, 5));
+      scratch.write("proc/11/cgroup", "0::/system.slice/systemd-logind.service\n");
+      scratch.write("proc/22/stat", stat_line(22, 6));
+      scratch.write("proc/22/cgroup", "0::/user.slice/user-1000.slice/user@1000.service/init.scope\n");
       scratch.write("pacman/steamos-manager-26.4.1-1/desc", "%NAME%\nsteamos-manager\n\n%VERSION%\n26.4.1-1\n\n");
       scratch.write("pacman/steamos-manager-26.4.1-1/files", "%FILES%\nusr/bin/steamosctl\nusr/lib/steamos-manager\n\n");
       // The manager process: this account's unit, the packaged executable.
@@ -374,9 +443,13 @@ exit 0
       fake->edit([&](host_script_t &s) {
         s.sessions = {{"2", 1000, 1234, 5000000}};
         s.active = "2";
-        s.target.invocation = invocation(0x10);
-        s.game_mode.invocation = invocation(0x20);
-        s.polaris.invocation = invocation(0x30);
+        s.target().invocation = invocation(0x10);
+        s.target().consists_of = {"gamescope-session.service", "steam.service"};
+        s.game_mode().invocation = invocation(0x20);
+        s.game_mode().bound_by = {"steam.service"};
+        s.polaris().invocation = invocation(0x30);
+        s.polaris().control_group = k_polaris_cgroup;
+        s.units["steam.service"].invocation = invocation(0x50);
       });
       scratch.write("proc/1234/stat", stat_line(1234, 777));
       // The fake steamosctl only writes the mode it was asked for; the fake bus moves the session.
@@ -413,8 +486,8 @@ exit 0
       fake->edit([&](host_script_t &s) {
         s.sessions = {{id, 1000, leader, 6000000ull + next_session}};
         s.active = id;
-        s.target.invocation = target;
-        s.game_mode.active_state = requested == "game" ? "active" : "inactive";
+        s.target().invocation = target;
+        s.game_mode().active_state = requested == "game" ? "active" : "inactive";
       });
     }
 
@@ -434,21 +507,15 @@ exit 0
     return bus::read_snapshot(world.sources, world.budget(within), snapshot);
   }
 
-  /// The production observation over the fake bus, with the product's detector answered from it.
+  /// The production observation over the fake bus: every decision, Game Mode included, comes from
+  /// the typed records. Only the open-title refusal and headless-boot readiness stand apart.
   class bus_host_t final: public prelaunch::host_t {
   public:
     explicit bus_host_t(world_t &world):
         world_ {world} {}
 
-    /// The product's own detector stands apart from the bus records; here it reads the script.
-    bool game_mode_live_fresh() override {
-      bool live = false;
-      world_.fake->edit([&](host_script_t &s) { live = s.game_mode.loaded && s.game_mode.active_state == "active"; });
-      return live;
-    }
-
-    prelaunch::observation_t observe(const steamos::session_identity_t *since, const prelaunch::wait_t &wait) override {
-      return steamos::observe(world_.sources, since, {wait.deadline, wait.cancelled});
+    prelaunch::observation_t observe(const steamos::session_identity_t *since, const prelaunch::wait_t &wait, bool prove_service) override {
+      return steamos::observe(world_.sources, since, {wait.deadline, wait.cancelled}, prove_service);
     }
 
     bool local_title_running() override {
@@ -531,13 +598,14 @@ TEST(SteamosBusTests, ATypedSnapshotBindsTheGameModeSessionWithoutStartingAnySer
   EXPECT_EQ(snapshot.seat0_active_id, "2");
   EXPECT_EQ(snapshot.leader_start_ticks, 777u);
   EXPECT_EQ(snapshot.target.invocation, "101112131415161718191a1b1c1d1e1f");
+  EXPECT_EQ(snapshot.polaris.control_group, k_polaris_cgroup);
   steamos::session_identity_t identity;
   ASSERT_TRUE(steamos::bind_session(snapshot, identity).ok());
   EXPECT_EQ(identity.mode, steamos::mode_e::game);
   EXPECT_EQ(identity.logind_started, 5000000u);
   EXPECT_TRUE(world.fake->all_no_auto_start());
 
-  world.fake->edit([](host_script_t &s) { s.game_mode.loaded = false; });
+  world.fake->edit([](host_script_t &s) { s.game_mode().loaded = false; });
   ASSERT_TRUE(read(world, snapshot).ok());
   ASSERT_TRUE(steamos::bind_session(snapshot, identity).ok());
   EXPECT_EQ(identity.mode, steamos::mode_e::desktop) << "NoSuchUnit is a unit that is not loaded, not an error";
@@ -854,7 +922,7 @@ TEST(SteamosBusTests, ATargetGenerationThatChangesBeforeTheHandOffIsNeverOwned) 
   auto request = launch_request();
   request.capture_ready = [&](std::string &) {
     // Something restarted graphical-session.target after the desktop was bound.
-    rig.world.fake->edit([](host_script_t &s) { s.target.invocation = invocation(0x77); });
+    rig.world.fake->edit([](host_script_t &s) { s.target().invocation = invocation(0x77); });
     return true;
   };
   const auto outcome = rig.coordinator->run(request);
@@ -895,12 +963,15 @@ TEST(SteamosBusTests, AKeptReadinessAnswerNeverHidesAChangedManager) {
   const auto changed = rig.coordinator->readiness(true);
   EXPECT_FALSE(changed.ready);
   EXPECT_EQ(changed.code, "prelaunch_session_management_unavailable");
-  // A removed command is seen at once, cache or not.
+  // Restored, the refusal still answers for a moment: it is never turned into a positive answer.
   rig.world.fake->edit([](host_script_t &s) {
     s.manager_owner = ":1.42";
     s.manager_uid = 1000;
   });
-  ASSERT_TRUE(rig.coordinator->readiness(true).ready);
+  EXPECT_FALSE(rig.coordinator->readiness(true).ready);
+  std::this_thread::sleep_for(steamos::steamos_adapter_t::k_refusal_cache + 100ms);
+  ASSERT_TRUE(rig.coordinator->readiness(true).ready) << "proved again once the refusal lapsed";
+  // A removed command is seen at once, cache or not.
   std::filesystem::remove(rig.world.sources.steamosctl);
   EXPECT_EQ(rig.coordinator->readiness(true).code, "prelaunch_command_unavailable");
 }
@@ -924,6 +995,245 @@ TEST(SteamosBusTests, ShutdownCancelsAStalledRestoreAndJoinsItWithoutRunningTheC
   EXPECT_EQ(rig.coordinator->run(launch_request()).code, "prelaunch_shutting_down");
 }
 
+TEST(SteamosBusTests, ASecondPassThatDiffersInAnyRecordIsRefused) {
+  struct case_t {
+    std::string name;
+    std::function<void(world_t &)> change;  // applied as the second pass begins
+  };
+  const std::vector<case_t> cases {
+    {"graphical-session.target restarted (seat and leader unchanged)", [](world_t &w) {
+       w.fake->edit([](host_script_t &s) { s.target().invocation = invocation(0x66); });
+     }},
+    {"the logind record reused by a new session", [](world_t &w) {
+       w.fake->edit([](host_script_t &s) { s.sessions[0].started += 1; });
+     }},
+    {"another graphical session of this account appeared", [](world_t &w) {
+       w.scratch.write("proc/3000/stat", stat_line(3000, 4));
+       w.fake->edit([](host_script_t &s) { s.sessions.push_back({"8", 1000, 3000, 7000000}); });
+     }},
+    {"Game Mode stopped", [](world_t &w) { w.fake->edit([](host_script_t &s) { s.game_mode().active_state = "deactivating"; }); }},
+    {"polaris.service moved", [](world_t &w) { w.fake->edit([](host_script_t &s) { s.polaris().control_group = "/elsewhere"; }); }},
+  };
+  for (const auto &c : cases) {
+    world_t world;
+    int seats = 0;
+    world.fake->edit([&](host_script_t &s) {
+      s.on_call = [&](const std::string &method) {
+        if (method == "GetSeat" && ++seats == 2) c.change(world);
+      };
+    });
+    steamos::snapshot_t snapshot;
+    const auto verdict = read(world, snapshot);
+    EXPECT_EQ(verdict.code, "prelaunch_session_identity_unavailable") << c.name;
+    EXPECT_NE(verdict.reason.find("changed while it was read"), std::string::npos) << c.name << ": " << verdict.reason;
+  }
+}
+
+TEST(SteamosBusTests, LogindAndTheUserManagerAreBoundByOwnerAccountProcessAndPlacement) {
+  struct case_t {
+    std::string name;
+    std::function<void(world_t &)> change;
+  };
+  const std::vector<case_t> cases {
+    {"the user manager name owned by another account", [](world_t &w) { w.fake->edit([](host_script_t &s) { s.systemd.uid = 1001; }); }},
+    {"the user manager name owned by an ordinary service", [](world_t &w) {
+       w.scratch.write("proc/22/cgroup", "0::/user.slice/user-1000.slice/user@1000.service/app.slice/impostor.service\n");
+     }},
+    {"no user manager on the bus", [](world_t &w) { w.fake->edit([](host_script_t &s) { s.systemd.unique.clear(); }); }},
+    {"the user manager's process unreadable", [](world_t &w) { std::filesystem::remove(w.scratch.root / "proc/22/stat"); }},
+    {"logind owned by a user", [](world_t &w) { w.fake->edit([](host_script_t &s) { s.logind.uid = 1000; }); }},
+    {"logind's name owned outside systemd-logind.service", [](world_t &w) {
+       w.scratch.write("proc/11/cgroup", "0::/system.slice/other.service\n");
+     }},
+  };
+  for (const auto &c : cases) {
+    world_t world;
+    c.change(world);
+    steamos::snapshot_t snapshot;
+    EXPECT_EQ(read(world, snapshot).code, "prelaunch_session_identity_unavailable") << c.name;
+  }
+  // A name that passes to another connection, or a process that restarts, during the read.
+  for (const bool restart : {false, true}) {
+    world_t world;
+    int lists = 0;
+    world.fake->edit([&](host_script_t &s) {
+      s.on_call = [&](const std::string &method) {
+        if (method != "ListSessions" || ++lists != 2) return;
+        if (restart) {
+          world.scratch.write("proc/22/stat", stat_line(22, 60));
+        } else {
+          world.fake->edit([](host_script_t &h) { h.systemd.unique = ":1.9"; });
+        }
+      };
+    });
+    steamos::snapshot_t snapshot;
+    const auto verdict = read(world, snapshot);
+    EXPECT_EQ(verdict.code, "prelaunch_session_identity_unavailable") << restart;
+    EXPECT_NE(verdict.reason.find("owner changed"), std::string::npos) << verdict.reason;
+  }
+}
+
+TEST(SteamosBusTests, ARepeatedPropertyIsRefusedWhateverItsTypes) {
+  for (const bool same_type : {false, true}) {
+    world_t world;
+    world.fake->edit([&](host_script_t &s) {
+      s.override_body = [same_type](const std::string &path, const std::string &method) -> GVariant * {
+        if (method != "GetAll" || !path.starts_with("/org/freedesktop/login1/session/")) return nullptr;
+        GVariantBuilder builder;
+        g_variant_builder_init(&builder, G_VARIANT_TYPE("a{sv}"));
+        g_variant_builder_add(&builder, "{sv}", "Id", g_variant_new_string("2"));
+        g_variant_builder_add(&builder, "{sv}", "Leader", g_variant_new_uint32(1234));
+        g_variant_builder_add(&builder, "{sv}", "Leader", same_type ? g_variant_new_uint32(1) : g_variant_new_string("1234"));
+        return g_variant_new("(a{sv})", &builder);
+      };
+    });
+    steamos::snapshot_t snapshot;
+    const auto verdict = read(world, snapshot);
+    EXPECT_EQ(verdict.code, "prelaunch_session_record_malformed") << same_type;
+    EXPECT_NE(verdict.reason.find("Leader"), std::string::npos) << verdict.reason;
+  }
+}
+
+TEST(SteamosBusTests, IntrospectionIsParsedAsXmlNotSearchedAsText) {
+  const std::string upstream = R"(<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node>
+  <interface name="org.freedesktop.DBus.Introspectable"><method name="Introspect"><arg type="s" direction="out"/></method></interface>
+  <interface name="com.steampowered.SteamOSManager1.SessionManagement1">
+    <method name="SwitchToDesktopMode"><annotation name="org.freedesktop.DBus.Method.NoReply" value="false"/></method>
+    <method name="SwitchToGameMode">
+    </method>
+    <property name="Version" type="u" access="read"/>
+  </interface>
+</node>)";
+  EXPECT_TRUE(bus::introspection_supports_switch(upstream).ok());
+  const std::vector<std::pair<std::string, std::string>> refused {
+    {"only inside a comment", R"(<node><!-- <interface name="com.steampowered.SteamOSManager1.SessionManagement1">)"
+                              R"(<method name="SwitchToDesktopMode"/><method name="SwitchToGameMode"/></interface> --></node>)"},
+    {"malformed markup", R"(<node><interface name="com.steampowered.SteamOSManager1.SessionManagement1">)"
+                         R"(<method name="SwitchToDesktopMode"/><method name="SwitchToGameMode"/></node>)"},
+    {"in an attribute value", R"(<node><interface name="x.Other" doc='<interface name="com.steampowered.SteamOSManager1.SessionManagement1">)"
+                              R"(<method name="SwitchToDesktopMode"/><method name="SwitchToGameMode"/>'/></node>)"},
+    {"declared twice", R"(<node><interface name="com.steampowered.SteamOSManager1.SessionManagement1"><method name="SwitchToDesktopMode"/>)"
+                       R"(<method name="SwitchToGameMode"/></interface><interface name="com.steampowered.SteamOSManager1.SessionManagement1">)"
+                       R"(<method name="SwitchToDesktopMode"/><method name="SwitchToGameMode"/></interface></node>)"},
+    {"a method declared twice", R"(<node><interface name="com.steampowered.SteamOSManager1.SessionManagement1"><method name="SwitchToDesktopMode"/>)"
+                                R"(<method name="SwitchToDesktopMode"/><method name="SwitchToGameMode"/></interface></node>)"},
+    {"an input argument", R"(<node><interface name="com.steampowered.SteamOSManager1.SessionManagement1"><method name="SwitchToDesktopMode">)"
+                          R"(<arg type="s" direction="in"/></method><method name="SwitchToGameMode"/></interface></node>)"},
+    {"an output argument", R"(<node><interface name="com.steampowered.SteamOSManager1.SessionManagement1"><method name="SwitchToDesktopMode"/>)"
+                           R"(<method name="SwitchToGameMode"><arg type="b" direction="out"/></method></interface></node>)"},
+    {"a missing method", R"(<node><interface name="com.steampowered.SteamOSManager1.SessionManagement1"><method name="SwitchToGameMode"/></interface></node>)"},
+    {"on another interface", R"(<node><interface name="com.steampowered.SteamOSManager1.Manager"><method name="SwitchToDesktopMode"/>)"
+                             R"(<method name="SwitchToGameMode"/></interface></node>)"},
+    {"empty", ""},
+  };
+  for (const auto &[name, xml] : refused) {
+    EXPECT_EQ(bus::introspection_supports_switch(xml).code, "prelaunch_session_management_unavailable") << name;
+  }
+  // The same through the manager probe: a comment never stands in for the interface.
+  world_t world;
+  world.fake->edit([&](host_script_t &s) { s.manager_xml = refused.front().second; });
+  EXPECT_EQ(bus::probe_support(world.sources, world.budget()).code, "prelaunch_session_management_unavailable");
+}
+
+TEST(SteamosBusTests, TheManagerNameMustStillBeTheIntrospectedConnection) {
+  world_t world;
+  world.fake->edit([&](host_script_t &s) {
+    s.on_call = [&](const std::string &method) {
+      if (method == "Introspect") world.fake->edit([](host_script_t &h) { h.manager_owner = ":1.43"; });
+    };
+  });
+  const auto verdict = bus::probe_support(world.sources, world.budget());
+  EXPECT_EQ(verdict.code, "prelaunch_session_management_unavailable");
+  EXPECT_NE(verdict.reason.find("owner changed"), std::string::npos) << verdict.reason;
+}
+
+TEST(SteamosBusTests, PolarisMustProvablySurviveTheStopBeforeAnyCommandRuns) {
+  struct case_t {
+    std::string name;
+    std::function<void(world_t &)> change;
+  };
+  const std::vector<case_t> cases {
+    {"reached through a unit bound to Game Mode", [](world_t &w) {
+       w.fake->edit([](host_script_t &s) {
+         s.game_mode().bound_by.push_back("session-helper.service");
+         s.units["session-helper.service"].required_by = {"polaris.service"};
+       });
+     }},
+    {"PartOf the target, reported as ConsistsOf", [](world_t &w) {
+       w.fake->edit([](host_script_t &s) { s.target().consists_of.push_back("polaris.service"); });
+     }},
+    {"reached by PropagatesStopTo", [](world_t &w) {
+       w.fake->edit([](host_script_t &s) { s.units["steam.service"].propagates_stop_to = {"polaris.service"}; });
+     }},
+    {"a closure too large to prove", [](world_t &w) {
+       w.fake->edit([](host_script_t &s) {
+         for (int i = 0; i < 200; ++i) s.target().consists_of.push_back("extra-" + std::to_string(i) + ".service");
+       });
+     }},
+    {"an inactive, stale polaris.service", [](world_t &w) { w.fake->edit([](host_script_t &s) { s.polaris().active_state = "inactive"; }); }},
+    {"polaris.service is another process", [](world_t &w) { w.scratch.write("self_cgroup", "0::/user.slice/user-1000.slice/session-2.scope\n"); }},
+  };
+  for (const auto &c : cases) {
+    rig_t rig;
+    c.change(rig.world);
+    const auto outcome = rig.coordinator->run(launch_request());
+    EXPECT_EQ(outcome.code, "prelaunch_service_not_independent") << c.name << ": " << outcome.message;
+    EXPECT_TRUE(rig.world.command_lines().empty()) << c.name;
+  }
+}
+
+TEST(SteamosBusTests, TheModeDecisionComesOnlyFromTheTypedRecords) {
+  {
+    rig_t rig;
+    rig.world.fake->edit([](host_script_t &s) { s.game_mode().active_state = "activating"; });
+    EXPECT_EQ(rig.coordinator->run(launch_request()).code, "prelaunch_session_mode_unknown");
+    EXPECT_TRUE(rig.world.command_lines().empty());
+  }
+  {
+    rig_t rig;
+    rig.world.fake->edit([](host_script_t &s) { s.game_mode().active_state = "inactive"; });
+    const auto outcome = rig.coordinator->run(launch_request());
+    EXPECT_EQ(outcome.state, state_e::not_needed);
+    EXPECT_TRUE(rig.world.command_lines().empty());
+  }
+  {
+    // Unread is not "not in Game Mode".
+    rig_t rig;
+    rig.world.fake->edit([](host_script_t &s) { s.systemd.unique.clear(); });
+    const auto outcome = rig.coordinator->run(launch_request());
+    EXPECT_EQ(outcome.state, state_e::refused);
+    EXPECT_EQ(outcome.code, "prelaunch_session_identity_unavailable");
+    EXPECT_TRUE(rig.world.command_lines().empty());
+  }
+}
+
+TEST(SteamosBusTests, AKeptReadinessAnswerFollowsAnInPlaceEditOfThePackageRecord) {
+  rig_t rig;
+  ASSERT_TRUE(rig.coordinator->readiness(true).ready);
+  // Same directory, same name: the desc now records a release that was not audited.
+  std::this_thread::sleep_for(20ms);
+  rig.world.scratch.write("pacman/steamos-manager-26.4.1-1/desc", "%NAME%\nsteamos-manager\n\n%VERSION%\n26.4.1-2\n\n");
+  const auto edited = rig.coordinator->readiness(true);
+  EXPECT_FALSE(edited.ready);
+  EXPECT_EQ(edited.code, "prelaunch_adapter_package_malformed");
+}
+
+TEST(SteamosBusTests, AStalledBusCostsOneReadinessBudgetPerAppListAndIsNeverHealth) {
+  rig_t rig;
+  rig.world.fake->edit([](host_script_t &s) { s.stalled = {"GetNameOwner"}; });
+  const auto start = std::chrono::steady_clock::now();
+  for (int app = 0; app < 6; ++app) {
+    const auto readiness = rig.coordinator->readiness(true);
+    EXPECT_FALSE(readiness.ready) << app;
+    EXPECT_EQ(readiness.code, "prelaunch_session_read_timeout") << app;
+  }
+  EXPECT_LT(std::chrono::steady_clock::now() - start, prelaunch::budgets_t {}.readiness + 600ms) << "one budget for the whole list";
+  rig.world.fake->edit([](host_script_t &s) { s.stalled.clear(); });
+  EXPECT_FALSE(rig.coordinator->readiness(true).ready) << "the unknown is not replaced by a remembered positive";
+}
+
 TEST(SteamosBusTests, RegisteredCasesAreFrozen) {
   const std::set<std::string> expected {
     "ATypedSnapshotBindsTheGameModeSessionWithoutStartingAnyService",
@@ -941,6 +1251,15 @@ TEST(SteamosBusTests, RegisteredCasesAreFrozen) {
     "AnUnsupportedHostIsRefusedBeforeAnyCommandRuns",
     "AKeptReadinessAnswerNeverHidesAChangedManager",
     "ShutdownCancelsAStalledRestoreAndJoinsItWithoutRunningTheCommand",
+    "ASecondPassThatDiffersInAnyRecordIsRefused",
+    "LogindAndTheUserManagerAreBoundByOwnerAccountProcessAndPlacement",
+    "ARepeatedPropertyIsRefusedWhateverItsTypes",
+    "IntrospectionIsParsedAsXmlNotSearchedAsText",
+    "TheManagerNameMustStillBeTheIntrospectedConnection",
+    "PolarisMustProvablySurviveTheStopBeforeAnyCommandRuns",
+    "TheModeDecisionComesOnlyFromTheTypedRecords",
+    "AKeptReadinessAnswerFollowsAnInPlaceEditOfThePackageRecord",
+    "AStalledBusCostsOneReadinessBudgetPerAppListAndIsNeverHealth",
     "RegisteredCasesAreFrozen",
   };
   std::set<std::string> registered;

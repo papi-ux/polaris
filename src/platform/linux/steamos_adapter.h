@@ -23,7 +23,7 @@ namespace prelaunch::steamos {
   bus::sources_t production_sources();
 
   /// One fresh read of the host's sessions, bound and checked against `since` (see host_t::observe()).
-  observation_t observe(const bus::sources_t &sources, const session_identity_t *since, const bus::budget_t &budget);
+  observation_t observe(const bus::sources_t &sources, const session_identity_t *since, const bus::budget_t &budget, bool prove_service = false);
 
   class steamos_adapter_t final: public adapter_t {
   public:
@@ -33,14 +33,22 @@ namespace prelaunch::steamos {
     bool implemented() const override;
     bool command_present() const override;
     verdict_t support(const wait_t &wait) override;
-    /// Kept for at most k_readiness_cache while the boot, the command, the package database, the
-    /// account's bus socket and the manager's bus owner are all unchanged; refreshed otherwise.
+    /**
+     * @brief Support for display, within the readiness budget.
+     *
+     * A positive answer is kept for at most k_readiness_cache while the boot, the command, the
+     * package database and the exact desc/files of each steamos-manager record, the account's bus
+     * socket and the manager's unique bus name are all unchanged. A refusal or an unknown (timeout)
+     * answers for k_refusal_cache without any read, so one app list costs at most one budget, and
+     * is never turned into a positive answer. Launches never use this: they call support().
+     */
     verdict_t readiness_support(const wait_t &wait) override;
     bool start(direction_e direction) override;
     step_e poll() override;
     void abort() override;
 
     static constexpr std::chrono::seconds k_readiness_cache {5};
+    static constexpr std::chrono::seconds k_refusal_cache {2};
 
   private:
     /// The facts a kept readiness answer rests on; empty when they could not be read.
@@ -53,5 +61,7 @@ namespace prelaunch::steamos {
     std::string cache_key_;
     verdict_t cache_verdict_;
     std::chrono::steady_clock::time_point cache_at_;
+    verdict_t refusal_;
+    std::chrono::steady_clock::time_point refusal_at_;
   };
 }  // namespace prelaunch::steamos

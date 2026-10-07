@@ -30,9 +30,34 @@ namespace owned_child {
     failed,  ///< could not be started
   };
 
+  /// How a child closes every descriptor above stderr, decided before fork.
+  struct close_plan_t {
+    bool close_range = false;  ///< the kernel's close_range(3, ~0) answered here, so the child uses it
+    int bound = -1;  ///< else (or if it fails) close [3, bound); -1: no bound could be proven
+  };
+
+  struct options_t {
+    /// Tests turn this off to exercise the bounded fallback on a kernel that has close_range.
+    bool allow_close_range = true;
+    /// The largest descriptor bound the fallback loop accepts; above it the start is refused.
+    int fallback_cap = 1 << 20;
+  };
+
+  /**
+   * @brief The closure plan for this process now, or nullopt when no closure can be proven.
+   *
+   * The fallback bound is the larger of a finite RLIMIT_NOFILE soft limit and one past the highest
+   * descriptor listed in /proc/self/fd (or /dev/fd). A descriptor opened later by another thread is
+   * the lowest free number, so it is below the limit; one above the limit (opened before the limit
+   * was lowered) is in the listing. An infinite or oversized limit, or an unreadable listing, is no
+   * bound.
+   */
+  std::optional<close_plan_t> plan_descriptor_closure(const options_t &options = {});
+
   class child_t {
   public:
-    child_t() = default;
+    explicit child_t(options_t options = {}):
+        options_ {options} {}
     ~child_t();
     child_t(const child_t &) = delete;
     child_t &operator=(const child_t &) = delete;
@@ -58,6 +83,7 @@ namespace owned_child {
 #endif
 
   private:
+    options_t options_;
     state_e state_ = state_e::idle;
     std::optional<int> exit_code_;
 #ifndef _WIN32
