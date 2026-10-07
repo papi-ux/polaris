@@ -128,6 +128,11 @@ namespace {
       // Gamescope Stream is a private stream, which cannot start beside desktop Steam, and it starts
       // nothing until a launch is admitted.
       previous_linux_display = config::video.linux_display;
+      previous_capture = config::video.capture;
+      previous_output_name = config::video.output_name;
+      // A Game Mode hold is process state that an earlier test (or suite) may have taken while it
+      // pinned Game Mode live: this fixture starts from none, as a freshly loaded config does.
+      stream_display_policy::forget_game_mode_hold();
       config::video.linux_display.headless_mode = false;
       config::video.linux_display.use_cage_compositor = false;
       config::video.linux_display.stream_mode = "gamescope_stream";
@@ -144,6 +149,8 @@ namespace {
 
       platf::game_mode_host::set_session_live_for_tests(false);
       proc::set_desktop_steam_double_for_tests(&steam);
+      ASSERT_TRUE(stream_display_policy::game_mode_held_selection().empty()) << "the fixture starts with no Game Mode hold";
+      ASSERT_EQ(config::video.linux_display.stream_mode, "gamescope_stream");
 
       // Without the device's switch, a private launch of the Steam game is refused while desktop
       // Steam runs. Every test below starts from that.
@@ -161,7 +168,13 @@ namespace {
       config::input.enable_input_only_mode = previous_input_only;
       config::stream.lan_encryption_mode = previous_lan_encryption;
       config::stream.wan_encryption_mode = previous_wan_encryption;
+      // A launch that reconciled while this test pinned Game Mode live took a hold and rewrote the
+      // mode and capture in memory. Drop that hold first, the way a config reload does, then put the
+      // configured values back, so no hold outlives the test and none restores stale values later.
+      stream_display_policy::forget_game_mode_hold();
       config::video.linux_display = previous_linux_display;
+      config::video.capture = previous_capture;
+      config::video.output_name = previous_output_name;
 
       nvhttp::reset_pairing_state_for_tests();
       config::sunshine.flags.set(config::flag::FRESH_STATE, previous_fresh_state);
@@ -237,6 +250,8 @@ namespace {
     std::string previous_state_path;
     std::filesystem::path state_path;
     config::video_t::linux_display_t previous_linux_display;
+    std::string previous_capture;
+    std::string previous_output_name;
     int previous_lan_encryption = 0;
     int previous_wan_encryption = 0;
     bool previous_input_only = false;
