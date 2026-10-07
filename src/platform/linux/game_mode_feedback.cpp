@@ -189,7 +189,10 @@ namespace platf::game_mode_feedback {
       const auto deadline = steady_clock_t::now() + 250ms;
       std::error_code error;
       std::vector<std::filesystem::path> sockets;
+      unsigned scanned = 0;
       for (std::filesystem::directory_iterator entry(probe.socket_dir, error), end; !error && entry != end; entry.increment(error)) {
+        if (++scanned > 64) { value.reason = "root_display_ambiguous"; return value; }
+        if (steady_clock_t::now() >= deadline) { value.reason = "x_read_timeout"; return value; }
         const auto name = entry->path().filename().string();
         std::uint32_t number = 0;
         if (name.size() > 1 && name.front() == 'X' && decimal(std::string_view(name).substr(1), number)) sockets.push_back(entry->path());

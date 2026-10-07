@@ -90,6 +90,13 @@ TEST_F(GameModeFeedbackTests, CaptureObserverIsJoinableAndRetiresItsAcceptedImag
 }
 
 #ifdef POLARIS_BUILD_X11_XCB
+TEST_F(GameModeFeedbackTests, MoreThanEightDisplayCandidatesAreAmbiguousWithoutOpeningAny) {
+  for (unsigned index = 0; index < 9; ++index) std::ofstream(scratch / ("X" + std::to_string(index))) << "fixture";
+  const auto result = platf::game_mode_feedback::collect_once([](auto) { return binding(getpid()); }, probe);
+  EXPECT_EQ(result.reason, "root_display_ambiguous");
+  EXPECT_FALSE(result.route_bound);
+}
+
 TEST_F(GameModeFeedbackTests, StalledXSetupIsInterruptedAtTheSocketAndNeverDetachesAReader) {
   const auto socket_path = (scratch / "X777").string();
   const int listener = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);

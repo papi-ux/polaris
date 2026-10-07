@@ -2,9 +2,9 @@
  * Producer binding on a real, private, in-process PipeWire graph (tests/fixtures/pipewire-pool.conf).
  *
  * The fixture's producer stream and the capture stream share one in-process core, so the producer
- * client IS the capture client here and its credentials are this process's. That proves the actual
- * mechanics (own registry on the capture core, bounded core sync, bound client id, server-set
- * client.id/link/sec.* keys, link removal, cancellation) without a user daemon. It is not a
+ * client IS the capture client here and its credentials are this process's. A late observer lacks runtime Core version evidence on this non-daemon fixture, so it must
+ * remain unbound. These tests cover that refusal, opt-in cost, cancellation and wrong-thread
+ * handling. The separate-process fixture covers actual credential binding and link removal. It is not a
  * cross-process producer, display, compositor or physical acceptance.
  */
 #include "../../tests_common.h"
@@ -44,54 +44,33 @@ TEST(PipeWireProducerGraphTests, DisabledTrackingCostsNothingAndSaysSo) {
   EXPECT_EQ(binding.reason, "producer_tracking_disabled");
 }
 
-TEST(PipeWireProducerGraphTests, BindsTheLinkedSourceThroughTheCaptureCoresOwnRegistry) {
+TEST(PipeWireProducerGraphTests, LateInProcessObserverCannotInventAMissingRuntimeVersion) {
   test_utils::pipewire_producer_graph_t graph {false, 64, 64};
   ASSERT_TRUE(graph.start());
   ASSERT_TRUE(tracking::track(*graph.capture));
-
+  // This non-daemon fixture already completed hello before tracking was installed. It publishes
+  // no Core global version and does not replay core.info to the late listener. Never substitute
+  // the linked library version for a server observation. The remote fixture tests real binding.
   const auto binding = graph.capture->producer_binding(2s);
-  ASSERT_TRUE(binding.verified) << binding.reason;
-  EXPECT_EQ(binding.reason, "verified");
-  EXPECT_FALSE(binding.server_version.empty());
-  pw_thread_loop_lock(access::loop(*graph.capture));
-  const auto source_node = pw_stream_get_node_id(graph.source);
-  const auto capture_node = access::node(*graph.capture);
-  pw_thread_loop_unlock(access::loop(*graph.capture));
-  EXPECT_EQ(binding.source_node.id, source_node);
-  EXPECT_EQ(binding.capture_node.id, capture_node);
-  EXPECT_NE(binding.source_node.serial, 0u);
-  EXPECT_NE(binding.capture_node.serial, 0u);
-  ASSERT_FALSE(binding.links.empty());
-  for (const auto &link : binding.links) {
-    EXPECT_EQ(link.source, source_node);
-    EXPECT_EQ(link.sink, capture_node);
-  }
-  // One in-process core owns both streams, so the producer is this process's own client.
-  EXPECT_EQ(binding.producer_client, binding.capture_client);
-  EXPECT_EQ(binding.producer_pid, static_cast<std::int64_t>(getpid()));
-  EXPECT_EQ(binding.producer_uid, static_cast<std::uint64_t>(getuid()));
-
-  // A second read of an unchanged graph is the same observation.
-  EXPECT_EQ(graph.capture->producer_binding(2s), binding);
+  EXPECT_FALSE(binding.verified);
+  EXPECT_TRUE(binding.server_version.empty());
+  EXPECT_EQ(binding.reason, "server_version_unsupported");
+  EXPECT_EQ(binding.producer_pid, 0);
 }
 
-TEST(PipeWireProducerGraphTests, RemovingTheLinkUnbindsTheSource) {
+TEST(PipeWireProducerGraphTests, RemovingAnInProcessLinkCannotManufactureProducerIdentity) {
   test_utils::pipewire_producer_graph_t graph {false, 64, 64};
   ASSERT_TRUE(graph.start());
   ASSERT_TRUE(tracking::track(*graph.capture));
-  ASSERT_TRUE(graph.capture->producer_binding(2s).verified);
-
+  EXPECT_EQ(graph.capture->producer_binding(2s).reason, "server_version_unsupported");
   pw_thread_loop_lock(access::loop(*graph.capture));
   pw_proxy_destroy(graph.link);
   graph.link = nullptr;
   pw_thread_loop_unlock(access::loop(*graph.capture));
-  // The read's own core sync orders it after the server processed the destroy.
   const auto binding = graph.capture->producer_binding(2s);
   EXPECT_FALSE(binding.verified);
   EXPECT_EQ(binding.producer_pid, 0);
-  // An unlinked consumer pauses; should this PipeWire end the stream instead, the capture is no
-  // longer running. Either way nothing is bound, and the reason says which.
-  EXPECT_TRUE(binding.reason == "source_not_linked" || binding.reason == "capture_not_running") << binding.reason;
+  EXPECT_TRUE(binding.reason == "server_version_unsupported" || binding.reason == "capture_not_running") << binding.reason;
 }
 
 TEST(PipeWireProducerGraphTests, StopAndShutdownEndReadsWithoutWaitingForTheTimeout) {
