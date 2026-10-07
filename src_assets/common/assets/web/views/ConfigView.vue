@@ -44,7 +44,7 @@
           </button>
         </div>
         <!-- Said before the action, not in a confirmation after it: restarting ends every stream. -->
-        <p id="settings-restart-disclosure" class="settings-command-note" data-restart-disclosure>{{ $t('config.save_and_restart_disclosure') }}</p>
+        <p id="settings-restart-disclosure" class="settings-command-note sm:col-span-full" data-restart-disclosure>{{ $t('config.save_and_restart_disclosure') }}</p>
       </div>
     </section>
 

@@ -493,9 +493,7 @@ function updateDisplayPlannerSource(event) {
               class="overflow-hidden rounded-lg border transition"
               :class="[
                 streamDisplayMode === mode.id ? 'border-ice bg-ice/12 shadow-[0_0_0_1px_rgba(224,230,237,0.18)]' : 'border-storm/40 bg-deep/40',
-                mode.available === false
-                  ? 'opacity-60'
-                  : 'hover:border-storm/70',
+                mode.available !== false ? 'hover:border-storm/70' : '',
               ]"
             >
               <SelectableCard

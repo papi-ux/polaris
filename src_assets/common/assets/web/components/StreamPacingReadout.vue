@@ -7,8 +7,12 @@ const now = ref(Date.now())
 let timer
 onMounted(() => { timer = setInterval(() => { now.value = Date.now() }, 500) })
 onUnmounted(() => clearInterval(timer))
-const current = computed(() => props.connected && props.observedAt > 0 &&
-  now.value - props.observedAt >= 0 && now.value - props.observedAt <= 2000)
+const current = computed(() => {
+  // A new receipt can arrive between timer ticks. Compare it to the current
+  // clock, while retaining the timer dependency that retires silent receipts.
+  const age = Math.max(now.value, Date.now()) - props.observedAt
+  return props.connected && props.observedAt > 0 && age >= 0 && age <= 2000
+})
 const rows = computed(() => streamPacingReadouts(props.stats, current.value))
 </script>
 

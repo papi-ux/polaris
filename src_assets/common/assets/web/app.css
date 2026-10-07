@@ -1925,7 +1925,7 @@ textarea {
 }
 
 .settings-command-tools {
-  @apply grid min-w-0 gap-2 sm:grid-cols-[auto_minmax(180px,1fr)_auto] sm:items-center;
+  @apply grid min-w-0 gap-2 sm:grid-cols-[auto_minmax(180px,1fr)] sm:items-center;
 }
 
 .settings-command-meta {
@@ -1937,11 +1937,11 @@ textarea {
 }
 
 .settings-command-actions {
-  @apply flex flex-wrap items-center gap-2 sm:flex-nowrap sm:justify-end;
+  @apply flex flex-wrap items-center gap-2 sm:col-span-full sm:justify-end;
 }
 
 .settings-action-button {
-  @apply inline-flex h-10 items-center justify-center rounded-xl px-4 text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
+  @apply inline-flex min-h-10 items-center justify-center whitespace-nowrap rounded-xl px-4 py-2 text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 .settings-action-button-secondary {

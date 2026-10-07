@@ -1,17 +1,17 @@
 import { test, expect } from '@playwright/test'
 
 const vrr = { schema: 1, stream_instance_id: 'stream-1', requested: 'true', effective: true,
-  pacing_mode: 'source_time', fallback_reason: null, host_pacing: { state: 'source_time', fresh: true } }
+  pacing_mode: 'source_time', fallback_reason: null, host_permission: true, host_pacing: { state: 'source_time', fresh: true } }
 const live = { streaming: true, fps: 90, session_target_fps: 90, width: 1920, height: 1080,
-  bitrate_kbps: 140000, codec: 'pyrowave', capture_path: 'cpu_copy', capture_gpu_native: false,
+  bitrate_kbps: 140000, codec: 'hevc', encoder_backend: 'nvenc', capture_path: 'cpu_copy', capture_gpu_native: false,
   capture_cpu_copy: true, capture_transport: 'shm', capture_path_reason: 'headless_shm_default',
   stream_display_mode: 'Private Stream', runtime_backend: 'labwc', runtime_effective_headless: true,
-  encode_time_ms: 2, latency_ms: 4, clients: [{ name: 'Pixel', codec: 'pyrowave', stream_instance_id: 'stream-1',
+  encode_time_ms: 2, latency_ms: 4, clients: [{ name: 'Pixel', codec: 'hevc', stream_instance_id: 'stream-1',
     vrr, pyrowave_route: 'gpu_upload' }],
   pyrowave_bitrate: { width: 1920, height: 1080, fps: 90, chroma: '444', request_kbps: 140000, encoder_kbps: 125000 },
   doctor: { primary_issue: 'none', traffic_light: 'green', summary: 'Stream is running' } }
 
-async function mockHost(page, { stats = live, systemMissing = false } = {}) {
+async function mockHost(page, { stats = live, systemMissing = false, mode = 'headless_stream' } = {}) {
   const writes = []
   await page.addInitScript(initial => {
     window.__mockStats = initial
@@ -26,7 +26,7 @@ async function mockHost(page, { stats = live, systemMissing = false } = {}) {
     }
   }, stats)
   let config = { status: true, platform: 'linux', version: '1.4.14-beta.2', configuration_revision: 'a'.repeat(64),
-    linux_stream_mode: 'headless_stream', headless_mode: 'enabled', linux_use_cage_compositor: 'enabled',
+    linux_stream_mode: mode, headless_mode: 'enabled', linux_use_cage_compositor: 'enabled',
     linux_prefer_gpu_native_capture: 'disabled', vrr_source_pacing: 'disabled', vdisplayAvailable: false,
     vdisplayBackend: 'kscreen-doctor', stream_audio: 'enabled',
     stream_display_mode_options: [
@@ -74,7 +74,7 @@ async function fits(page, locator, width) {
 for (const width of [390, 1280]) {
   test(`pacing permission, save impact and available launch alternative at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 960 })
-    const writes = await mockHost(page)
+    const writes = await mockHost(page, { mode: 'desktop_display' })
     await page.goto('/#/config#vrr_source_pacing')
     const pacing = page.locator('[data-stream-pacing-settings]')
     const control = pacing.getByRole('checkbox', { name: /^Allow source-paced VRR \(experimental\)/ })
@@ -90,9 +90,12 @@ for (const width of [390, 1280]) {
     await expect(virtual).toContainText('kscreen-doctor')
     await expect(virtual).toContainText('this provider does not add a new display')
     await expect(virtual.getByRole('button', { name: /Host Virtual Display/ })).toBeDisabled()
+    await expect(page.locator('[data-selected-stream-path]')).toContainText('Mirror Desktop')
+    await expect(virtual.locator('[data-launch-mode-alternative]')).toBeEnabled()
     await virtual.locator('[data-launch-mode-alternative]').click()
     await expect(page.locator('[data-selected-stream-path]')).toContainText('Private Stream')
     await fits(page, pacing, width)
+    await fits(page, page.locator('.settings-command-bar'), width)
     await pacing.screenshot({ path: `test-results/polaris-pacing-settings-${width}.png` })
     await virtual.screenshot({ path: `test-results/polaris-launch-provider-${width}.png` })
     await page.locator('.settings-command-bar').screenshot({ path: `test-results/polaris-save-restart-${width}.png` })
@@ -100,7 +103,7 @@ for (const width of [390, 1280]) {
 
   test(`PyroWave stays visible across encoder profiles at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 960 })
-    await mockHost(page)
+    await mockHost(page, { stats: { ...live, codec: 'pyrowave', encoder_backend: 'pyrowave', clients: [{ ...live.clients[0], codec: 'pyrowave', vrr: { ...vrr, effective: false, pacing_mode: 'fixed_grid', fallback_reason: 'unsupported_codec' } }] } })
     await page.goto('/#/config#pyrowave')
     const card = page.locator('[data-pyrowave-card]')
     await expect(card).toHaveCount(1)
@@ -131,6 +134,9 @@ for (const width of [390, 1280]) {
     await page.evaluate(() => { window.__holdStats = true })
     await expect(pacing).not.toContainText('Source-paced', { timeout: 4000 })
     await expect(pacing).toContainText('Not verified')
+    await page.evaluate(() => { window.__holdStats = false; window.__mockStats.clients[0].vrr = { ...window.__mockStats.clients[0].vrr, host_permission: false, effective: false, pacing_mode: 'fixed_grid', fallback_reason: 'route_unreported' } })
+    await expect(pacing).toContainText('Source pacing was not allowed when this stream started')
+    await expect(pacing).toContainText('Fixed-rate')
   })
 
   test(`idle and missing data stay neutral but failed starts remain visible at ${width}px`, async ({ page }) => {
