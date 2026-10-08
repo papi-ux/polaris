@@ -322,8 +322,8 @@ namespace stream_stats {
       receipt.host_end = received_at;
       const auto host_elapsed = received_at - previous.received_at;
       receipt.host_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(host_elapsed).count();
-      // The legacy gap test converts the unsigned client difference to a signed duration, so a huge
-      // difference can pass it. A receipt never claims coverage the bounds cannot represent.
+      // Ingest resets coverage for any client difference over the gap, so this only guards the bound. A
+      // receipt never claims coverage the bounds cannot represent.
       if (receipt.client_duration_ms > max_interval_ms) {
         receipt.interval_measured = false;
         receipt.interval_unavailable_reason = "client_interval_unrepresentable";
@@ -5299,11 +5299,13 @@ namespace stream_stats {
         return result;
       }
 
-      const auto client_gap = std::chrono::milliseconds(
-        sample.client_monotonic_ms - previous.client_monotonic_ms
-      );
+      // The client difference is untrusted and unsigned. Compare it as unsigned milliseconds: a signed
+      // duration would turn a difference of 2^63 ms or more negative, and so let it count.
+      constexpr std::uint64_t max_client_gap_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        CLIENT_MEDIA_COUNTER_MAX_GAP).count();
+      const std::uint64_t client_gap_ms = sample.client_monotonic_ms - previous.client_monotonic_ms;
       if (received_at - previous_epoch.received_at > CLIENT_MEDIA_COUNTER_MAX_GAP ||
-          client_gap > CLIENT_MEDIA_COUNTER_MAX_GAP) {
+          client_gap_ms > max_client_gap_ms) {
         last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
         result.state = client_media_ingest_state_e::coverage_gap_reset;
         result.accepted = true;
