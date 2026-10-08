@@ -799,6 +799,11 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_stream
         ${TEST_STREAM_SOURCES}
     )
+    # Recorder mode publication uses the real configuration path without opening a recording.
+    add_test(NAME polaris_recorder_mode_publication
+        COMMAND test_polaris_stream --gtest_filter=StreamRecorderModeTests.*)
+    set_tests_properties(polaris_recorder_mode_publication PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND POLARIS_ENABLE_PYROWAVE)
         # These exercise the actual encode loop with an in-memory display and
         # deterministic session refusals. No GPU, compositor or stream is opened.
