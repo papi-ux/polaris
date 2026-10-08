@@ -25,6 +25,7 @@
 #include <nlohmann/json_fwd.hpp>
 
 // local includes
+#include "adaptive_bitrate.h"
 #include "platform/common.h"
 #include "pyrowave_advice.h"
 #include "stream_bitrate.h"
@@ -560,6 +561,10 @@ namespace stream_stats {
     /// Live Tuning's floor for this stream, and what set it: adaptive_bitrate_min or pyrowave_advice.
     int adaptive_min_bitrate_kbps = 0;
     std::string adaptive_floor_source;
+    /// Live Tuning's history, copied by get_current() from the same controller snapshot as the
+    /// adaptive fields above. Serialized only for the stream scope it was recorded in; a snapshot built
+    /// any other way carries none.
+    adaptive_bitrate::history_t live_tuning_history;
 
     // System
     double gpu_usage = 0;
@@ -1540,6 +1545,15 @@ namespace stream_stats {
 
   /** @brief The verdict as the JSON the session status and stream stats serve. */
   nlohmann::json network_verdict_json(const network_verdict_t &verdict);
+
+  /**
+   * @brief Live Tuning's history as the stream stats and Doctor's advanced evidence serve it.
+   *
+   * Reads only @p stats: entries appear only when its history was recorded for the same stream
+   * generation and session the snapshot describes, while it streams. Times are host steady-clock
+   * milliseconds; no entry says which bitrate any client media interval was encoded at.
+   */
+  nlohmann::json live_tuning_history_json(const stats_t &stats);
 
   /**
    * @brief Update runtime mode metadata exposed to the dashboard.

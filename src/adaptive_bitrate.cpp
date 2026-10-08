@@ -9,6 +9,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <optional>
 
 // local includes
 #include "adaptive_bitrate.h"
@@ -111,6 +112,165 @@ namespace adaptive_bitrate {
     controller_state = state;
     controller_reason = reason;
   }
+
+  struct effective_status_t {
+    bool enabled = false;
+    bool active = false;
+    std::string state;
+    std::string reason;
+  };
+
+  // The state and reason get_state() reports. Requires state_mutex.
+  static effective_status_t effective_status_locked() {
+    effective_status_t status;
+    status.enabled = enabled.load(std::memory_order_relaxed);
+    const bool supported = runtime_update_supported.load(std::memory_order_relaxed);
+    const bool doctor_override = doctor_override_active.load(std::memory_order_relaxed);
+    const bool explicit_live_override =
+      explicit_live_override_active.load(std::memory_order_relaxed);
+    const bool rollback_pending =
+      pending_live_update_active.load(std::memory_order_relaxed);
+    status.active = (status.enabled || doctor_override || explicit_live_override || rollback_pending) &&
+      supported;
+    status.state = doctor_override && status.active ? "doctor_override" :
+      explicit_live_override && status.active ? "explicit_live_target" :
+      rollback_pending && status.active ? "rollback_pending" :
+      !status.enabled ? "disabled" : status.active ? controller_state : "unavailable";
+    status.reason = doctor_override && status.active ? "doctor_action" :
+      explicit_live_override && status.active ? "paired_client_action" :
+      rollback_pending && status.active ? "doctor_rollback" :
+      !status.enabled ? "disabled" : status.active ? controller_reason : runtime_update_reason;
+    return status;
+  }
+
+  // Live Tuning history: an observational record of target/reason transitions and encoder
+  // acknowledgements, so a once-a-second reader cannot miss a short-lived one. Nothing here feeds
+  // a controller decision. Protected by state_mutex.
+  static history_t history;
+  static std::uint64_t history_next_sequence = 1;
+  static std::chrono::steady_clock::time_point history_started_at = std::chrono::steady_clock::now();
+  struct decision_key_t {
+    int requested_bitrate_kbps = 0;
+    std::string state;
+    std::string reason;
+  };
+  static std::optional<decision_key_t> last_history_decision;
+  // The newest network feedback sample that reached the controller, for diagnosing a decision.
+  static bool last_input_available = false;
+  static double last_input_packet_loss_percent = 0.0;
+  static double last_input_rtt_ms = 0.0;
+
+  static std::int64_t history_elapsed_ms_locked(std::chrono::steady_clock::time_point now) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now - history_started_at).count();
+  }
+
+  // Forget every entry. Requires state_mutex. The sequence keeps counting across scopes.
+  static void clear_history_locked() {
+    history.entries.clear();
+    history.dropped = 0;
+    history.scoped = false;
+    history.session_generation = 0;
+    history.app_session_id.clear();
+    history_started_at = std::chrono::steady_clock::now();
+    last_history_decision.reset();
+  }
+
+  static bool folds_into(const history_entry_t &last, const history_entry_t &next) {
+    if (last.kind != next.kind || next.kind == "decision" || next.kind == "scope_started") {
+      return false;
+    }
+    return last.cause == next.cause && last.state == next.state && last.reason == next.reason &&
+      last.requested_bitrate_kbps == next.requested_bitrate_kbps &&
+      last.applied_known == next.applied_known &&
+      last.applied_bitrate_kbps == next.applied_bitrate_kbps &&
+      last.callback_bitrate_kbps == next.callback_bitrate_kbps &&
+      // A reaffirmation only moves the revision. Encoder callbacks for a newer revision stay apart.
+      (next.kind == "revision_reaffirmed" || last.callback_revision == next.callback_revision);
+  }
+
+  // Append one entry from the current locked state. Requires state_mutex. The history is
+  // observational, so a failure to record it never reaches the caller.
+  static void append_history_locked(history_entry_t entry) noexcept {
+    try {
+      const auto elapsed = history_elapsed_ms_locked(std::chrono::steady_clock::now());
+      auto status = effective_status_locked();
+      entry.state = std::move(status.state);
+      entry.reason = std::move(status.reason);
+      entry.requested_bitrate_kbps = target_bitrate_kbps.load(std::memory_order_relaxed);
+      entry.applied_known = encoder_applied_bitrate_kbps > 0;
+      entry.applied_bitrate_kbps = entry.applied_known ? encoder_applied_bitrate_kbps : 0;
+      entry.operator_revision = operator_revision;
+      entry.applied_revision = encoder_applied_revision;
+      entry.feedback_initialized = initialized;
+      entry.ewma_packet_loss = ewma_packet_loss;
+      entry.ewma_rtt_ms = ewma_rtt;
+      entry.input_available = last_input_available;
+      entry.input_packet_loss_percent = last_input_packet_loss_percent;
+      entry.input_rtt_ms = last_input_rtt_ms;
+      entry.host_elapsed_ms = elapsed;
+      entry.last_host_elapsed_ms = elapsed;
+      if (!history.entries.empty() && folds_into(history.entries.back(), entry)) {
+        auto &last = history.entries.back();
+        ++last.repeat_count;
+        last.last_host_elapsed_ms = elapsed;
+        last.operator_revision = entry.operator_revision;
+        last.applied_revision = entry.applied_revision;
+        last.callback_revision = entry.callback_revision;
+        last.feedback_initialized = entry.feedback_initialized;
+        last.ewma_packet_loss = entry.ewma_packet_loss;
+        last.ewma_rtt_ms = entry.ewma_rtt_ms;
+        last.input_available = entry.input_available;
+        last.input_packet_loss_percent = entry.input_packet_loss_percent;
+        last.input_rtt_ms = entry.input_rtt_ms;
+        return;
+      }
+      entry.sequence = history_next_sequence++;
+      if (history.entries.size() >= HISTORY_CAPACITY) {
+        history.entries.erase(history.entries.begin());
+        ++history.dropped;
+      }
+      history.entries.push_back(std::move(entry));
+    } catch (...) {
+    }
+  }
+
+  static void record_history_locked(const char *kind, const char *cause,
+                                    int callback_bitrate_kbps = 0,
+                                    std::uint64_t callback_revision = 0) noexcept {
+    try {
+      history_entry_t entry;
+      entry.kind = kind;
+      entry.cause = cause;
+      entry.callback_bitrate_kbps = callback_bitrate_kbps;
+      entry.callback_revision = callback_revision;
+      append_history_locked(std::move(entry));
+    } catch (...) {
+    }
+  }
+
+  // Record a decision when the requested target, state or reason differs from the last recorded
+  // decision. Requires state_mutex.
+  static void note_decision_locked(const char *cause) noexcept {
+    try {
+      auto status = effective_status_locked();
+      const int requested = target_bitrate_kbps.load(std::memory_order_relaxed);
+      if (last_history_decision && last_history_decision->requested_bitrate_kbps == requested &&
+          last_history_decision->state == status.state && last_history_decision->reason == status.reason) {
+        return;
+      }
+      last_history_decision = decision_key_t {requested, std::move(status.state), std::move(status.reason)};
+      record_history_locked("decision", cause);
+    } catch (...) {
+    }
+  }
+
+  // Declared after a writer's lock_guard so it records the writer's outcome before the lock is released.
+  struct decision_note_t {
+    const char *cause;
+    ~decision_note_t() {
+      note_decision_locked(cause);
+    }
+  };
 
   static void normalize_config_bounds(config_t &config) {
     if (config.max_bitrate_kbps >= config.min_bitrate_kbps) {
@@ -224,10 +384,15 @@ namespace adaptive_bitrate {
     }
 
     std::lock_guard<std::mutex> lock(state_mutex);
+    decision_note_t note {"network_feedback"};
     if (doctor_override_active.load(std::memory_order_relaxed) ||
         pending_live_update_active.load(std::memory_order_relaxed)) {
       return;
     }
+    // Kept for the history only; the decision below reads its arguments as before.
+    last_input_available = true;
+    last_input_packet_loss_percent = packet_loss_percent;
+    last_input_rtt_ms = rtt_ms;
     auto now = std::chrono::steady_clock::now();
 
     if (!initialized) {
@@ -358,6 +523,7 @@ namespace adaptive_bitrate {
     }
 
     std::lock_guard<std::mutex> lock(state_mutex);
+    decision_note_t note {"stream_health"};
     if (doctor_override_active.load(std::memory_order_relaxed) ||
         pending_live_update_active.load(std::memory_order_relaxed)) {
       return;
@@ -435,8 +601,7 @@ namespace adaptive_bitrate {
     return target_bitrate_kbps.load(std::memory_order_relaxed);
   }
 
-  state_t get_state() {
-    std::lock_guard<std::mutex> lock(state_mutex);
+  static state_t get_state_locked() {
     state_t state;
     state.session_generation = scope_generation;
     state.app_session_id = scope_app_session_id;
@@ -444,15 +609,10 @@ namespace adaptive_bitrate {
     state.configured_enabled = current_config.enabled;
     state.feedback_initialized = initialized;
     state.applied_bitrate_kbps = encoder_applied_bitrate_kbps;
-    state.enabled = enabled.load(std::memory_order_relaxed);
     state.runtime_update_supported = runtime_update_supported.load(std::memory_order_relaxed);
-    const bool doctor_override = doctor_override_active.load(std::memory_order_relaxed);
-    const bool explicit_live_override =
-      explicit_live_override_active.load(std::memory_order_relaxed);
-    const bool rollback_pending =
-      pending_live_update_active.load(std::memory_order_relaxed);
-    state.active = (state.enabled || doctor_override || explicit_live_override || rollback_pending) &&
-      state.runtime_update_supported;
+    auto status = effective_status_locked();
+    state.enabled = status.enabled;
+    state.active = status.active;
     state.base_bitrate_kbps = base_bitrate_kbps.load(std::memory_order_relaxed);
     state.target_bitrate_kbps = state.active ? target_bitrate_kbps.load(std::memory_order_relaxed) : 0;
     state.min_bitrate_kbps = current_config.min_bitrate_kbps;
@@ -461,14 +621,21 @@ namespace adaptive_bitrate {
     state.paused_for_stream = paused_for_stream;
     state.ewma_packet_loss = ewma_packet_loss;
     state.ewma_rtt_ms = ewma_rtt;
-    state.state = doctor_override && state.active ? "doctor_override" :
-      explicit_live_override && state.active ? "explicit_live_target" :
-      rollback_pending && state.active ? "rollback_pending" :
-      !state.enabled ? "disabled" : state.active ? controller_state : "unavailable";
-    state.reason = doctor_override && state.active ? "doctor_action" :
-      explicit_live_override && state.active ? "paired_client_action" :
-      rollback_pending && state.active ? "doctor_rollback" :
-      !state.enabled ? "disabled" : state.active ? controller_reason : runtime_update_reason;
+    state.state = std::move(status.state);
+    state.reason = std::move(status.reason);
+    return state;
+  }
+
+  state_t get_state() {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    return get_state_locked();
+  }
+
+  state_t get_state_with_history() {
+    std::lock_guard<std::mutex> lock(state_mutex);
+    auto state = get_state_locked();
+    state.history = history;
+    state.history.host_elapsed_ms_at_copy = history_elapsed_ms_locked(std::chrono::steady_clock::now());
     return state;
   }
 
@@ -492,6 +659,7 @@ namespace adaptive_bitrate {
       int target,
       std::optional<int> temporary_max_bitrate_kbps,
       bool require_quality_policy_clear) {
+    decision_note_t note {"doctor_action"};
     if (operator_revision != expected_revision ||
         !runtime_update_supported.load(std::memory_order_relaxed)) {
       return {
@@ -572,6 +740,7 @@ namespace adaptive_bitrate {
       std::uint64_t expected_revision,
       const doctor_state_t &previous_state) {
     std::lock_guard<std::mutex> lock(state_mutex);
+    decision_note_t note {"doctor_rollback"};
     if (operator_revision != expected_revision) {
       return std::nullopt;
     }
@@ -616,6 +785,7 @@ namespace adaptive_bitrate {
     if (already_applied) {
       encoder_applied_revision = revision;
       encoder_applied_at = std::chrono::steady_clock::now();
+      record_history_locked("revision_reaffirmed", "doctor_rollback");
     }
     state_changed.notify_all();
     return revision;
@@ -640,6 +810,8 @@ namespace adaptive_bitrate {
       encoder_applied_revision = operator_revision;
       encoder_applied_at = std::chrono::steady_clock::now();
       pending_live_update_active.store(false, std::memory_order_relaxed);
+      record_history_locked("revision_reaffirmed", "encoder_poll");
+      note_decision_locked("encoder_poll");
       state_changed.notify_all();
     }
     return live_bitrate_request_t {target, operator_revision};
@@ -650,15 +822,25 @@ namespace adaptive_bitrate {
     std::lock_guard<std::mutex> lock(state_mutex);
     if (request.revision != operator_revision ||
         request.target_bitrate_kbps != target_bitrate_kbps.load(std::memory_order_relaxed) ||
-        !runtime_update_supported.load(std::memory_order_relaxed)) return false;
+        !runtime_update_supported.load(std::memory_order_relaxed)) {
+      record_history_locked("stale_encoder_request", "encoder_callback",
+        request.target_bitrate_kbps, request.revision);
+      return false;
+    }
     if (apply()) {
       encoder_applied_bitrate_kbps = request.target_bitrate_kbps;
       last_confirmed_bitrate_kbps = request.target_bitrate_kbps;
       encoder_applied_revision = request.revision;
       encoder_applied_at = std::chrono::steady_clock::now();
       pending_live_update_active.store(false, std::memory_order_relaxed);
+      record_history_locked("encoder_applied", "runtime_update",
+        request.target_bitrate_kbps, request.revision);
       state_changed.notify_all();
+    } else {
+      record_history_locked("encoder_update_not_applied", "runtime_update",
+        request.target_bitrate_kbps, request.revision);
     }
+    note_decision_locked("encoder_callback");
     return true;
   }
 
@@ -668,6 +850,28 @@ namespace adaptive_bitrate {
     scope_generation = generation;
     scope_app_session_id = app_session_id;
     scope_exclusive = exclusive;
+    if (history.scoped && generation != 0 && history.session_generation == generation &&
+        history.app_session_id == app_session_id) {
+      return;
+    }
+    // Any other scope identity starts over. Nothing recorded before it, unscoped or under another
+    // scope (including another owner of the same generation), is proven to belong to it, so none of it
+    // is kept, and neither is the diagnostic copy of the newest network input. Controller state is not
+    // touched. An ended stream (scope 0) keeps no history.
+    clear_history_locked();
+    last_input_available = false;
+    last_input_packet_loss_percent = 0.0;
+    last_input_rtt_ms = 0.0;
+    if (generation == 0) {
+      return;
+    }
+    history.scoped = true;
+    history.session_generation = generation;
+    history.app_session_id = app_session_id;
+    // One explicit snapshot of the controller as this scope finds it, then only changes after it.
+    const auto status = effective_status_locked();
+    last_history_decision = decision_key_t {target_bitrate_kbps.load(std::memory_order_relaxed), status.state, status.reason};
+    record_history_locked("scope_started", "initial_scope_snapshot");
   }
 
   bool begin_live_bitrate_session_recreation(
@@ -677,6 +881,7 @@ namespace adaptive_bitrate {
     if (revision != operator_revision ||
         bitrate_kbps != target_bitrate_kbps.load(std::memory_order_relaxed) ||
         !runtime_update_supported.load(std::memory_order_relaxed)) {
+      record_history_locked("recreation_superseded", "encoder_recreation", bitrate_kbps, revision);
       return false;
     }
 
@@ -688,6 +893,8 @@ namespace adaptive_bitrate {
     encoder_applied_revision = 0;
     encoder_applied_at = {};
     pending_live_update_active.store(true, std::memory_order_relaxed);
+    record_history_locked("applied_proof_invalidated", "encoder_recreation", bitrate_kbps, revision);
+    note_decision_locked("encoder_recreation");
     state_changed.notify_all();
     return true;
   }
@@ -698,13 +905,24 @@ namespace adaptive_bitrate {
     std::lock_guard<std::mutex> lock(state_mutex);
     if (revision != operator_revision ||
         bitrate_kbps != target_bitrate_kbps.load(std::memory_order_relaxed)) {
+      record_history_locked("stale_acknowledgement", "encoder_callback", bitrate_kbps, revision);
       return;
     }
+    // The encoder thread confirms an unchanged rate every frame. Only a confirmation that proves
+    // something new becomes history.
+    const bool already_proven = encoder_applied_bitrate_kbps == bitrate_kbps &&
+      encoder_applied_revision == revision;
+    const bool proof_was_unknown = encoder_applied_bitrate_kbps <= 0;
     encoder_applied_bitrate_kbps = bitrate_kbps;
     last_confirmed_bitrate_kbps = bitrate_kbps;
     encoder_applied_revision = revision;
     encoder_applied_at = std::chrono::steady_clock::now();
     pending_live_update_active.store(false, std::memory_order_relaxed);
+    if (!already_proven) {
+      record_history_locked("encoder_acknowledged",
+        proof_was_unknown ? "applied_proof_was_unknown" : "encoder_running_at_rate", bitrate_kbps, revision);
+      note_decision_locked("encoder_callback");
+    }
     state_changed.notify_all();
   }
 
@@ -735,6 +953,7 @@ namespace adaptive_bitrate {
 
   void set_base_bitrate(int kbps) {
     std::lock_guard<std::mutex> lock(state_mutex);
+    decision_note_t note {"base_bitrate"};
     retire_doctor_override_locked();
     explicit_live_override_active.store(false, std::memory_order_relaxed);
     pending_live_update_active.store(false, std::memory_order_relaxed);
@@ -757,11 +976,13 @@ namespace adaptive_bitrate {
 
   void set_live_bitrate(int kbps) {
     std::lock_guard<std::mutex> lock(state_mutex);
+    decision_note_t note {"live_bitrate"};
     apply_live_bitrate_locked(kbps);
   }
 
   void set_live_bitrate_for_stream(int kbps) {
     std::lock_guard<std::mutex> lock(state_mutex);
+    decision_note_t note {"live_bitrate_for_stream"};
     // Only a stream that had Live Tuning running has anything to put back when it ends.
     paused_for_stream = paused_for_stream || enabled.load(std::memory_order_relaxed);
     enabled.store(false, std::memory_order_relaxed);
@@ -770,6 +991,7 @@ namespace adaptive_bitrate {
 
   void end_stream_override() {
     std::lock_guard<std::mutex> lock(state_mutex);
+    decision_note_t note {"stream_override_ended"};
     if (!paused_for_stream) {
       return;
     }
@@ -807,6 +1029,7 @@ namespace adaptive_bitrate {
       return;
     }
     std::lock_guard<std::mutex> lock(state_mutex);
+    decision_note_t note {"session_floor"};
     const int base = base_bitrate_kbps.load(std::memory_order_relaxed);
     const int floor = std::max(
       current_config.min_bitrate_kbps,
@@ -826,6 +1049,7 @@ namespace adaptive_bitrate {
 
   void set_max_bitrate(int kbps) {
     std::lock_guard<std::mutex> lock(state_mutex);
+    decision_note_t note {"max_bitrate"};
     retire_doctor_override_locked();
     explicit_live_override_active.store(false, std::memory_order_relaxed);
     pending_live_update_active.store(false, std::memory_order_relaxed);
@@ -848,6 +1072,7 @@ namespace adaptive_bitrate {
 
   void set_enabled(bool enable) {
     std::lock_guard<std::mutex> lock(state_mutex);
+    decision_note_t note {"enabled_changed"};
     retire_doctor_override_locked();
     explicit_live_override_active.store(false, std::memory_order_relaxed);
     // Disabling holds what the encoder actually applied, never an unacknowledged
@@ -867,12 +1092,14 @@ namespace adaptive_bitrate {
     if (!needs_encoder_update && target > 0) {
       encoder_applied_revision = revision;
       encoder_applied_at = std::chrono::steady_clock::now();
+      record_history_locked("revision_reaffirmed", "enabled_changed");
     }
     state_changed.notify_all();
   }
 
   void set_runtime_enabled(bool enable) {
     std::lock_guard<std::mutex> lock(state_mutex);
+    decision_note_t note {"runtime_enabled"};
     retire_doctor_override_locked();
     paused_for_stream = false;
     explicit_live_override_active.store(false, std::memory_order_relaxed);
@@ -891,6 +1118,7 @@ namespace adaptive_bitrate {
                                     const std::string &reason,
                                     int initial_encoder_bitrate_kbps) {
     std::lock_guard<std::mutex> lock(state_mutex);
+    decision_note_t note {"runtime_support"};
     runtime_update_supported.store(supported, std::memory_order_relaxed);
     runtime_update_reason = supported ? "supported" :
       (reason.empty() ? "encoder_runtime_update_unsupported" : reason);
@@ -902,10 +1130,17 @@ namespace adaptive_bitrate {
         encoder_applied_at = std::chrono::steady_clock::now();
       }
       set_controller_status("steady", "encoder_ready");
+      if (initial_encoder_bitrate_kbps > 0) {
+        record_history_locked("encoder_initialized", "encoder_ready", initial_encoder_bitrate_kbps);
+      }
     } else {
+      const bool was_known = encoder_applied_bitrate_kbps > 0;
       encoder_applied_bitrate_kbps = 0;
       encoder_applied_revision = 0;
       encoder_applied_at = {};
+      if (was_known) {
+        record_history_locked("applied_unknown", "runtime_update_stopped");
+      }
     }
     state_changed.notify_all();
   }
@@ -920,6 +1155,7 @@ namespace adaptive_bitrate {
 
   void load_config() {
     std::lock_guard<std::mutex> lock(state_mutex);
+    decision_note_t note {"load_config"};
     doctor_override_active.store(false, std::memory_order_relaxed);
     doctor_previous_max_bitrate_kbps = 0;
     doctor_video_policy_regressed_during_override = false;
@@ -975,6 +1211,13 @@ namespace adaptive_bitrate {
     doctor_network_policy_regressed_during_override = false;
     ++operator_revision;
     ++action_authority_revision;
+    // A reset starts a new stream's controller. Nothing recorded before it may be read as that
+    // stream's history, so the history starts over, unscoped until set_session_scope() names it.
+    last_input_available = false;
+    last_input_packet_loss_percent = 0.0;
+    last_input_rtt_ms = 0.0;
+    clear_history_locked();
+    note_decision_locked("reset");
     state_changed.notify_all();
   }
 

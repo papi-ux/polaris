@@ -12229,3 +12229,143 @@ TEST(StreamStatsVrrTests, RuntimeCannotActivateDefaultOffWatchOrMalformedGenerat
     EXPECT_EQ(stream_stats::vrr_json(stream_stats::get_current(),generation)["effective"],false);
   }
 }
+
+namespace {
+  adaptive_bitrate::history_entry_t live_tuning_history_entry(std::uint64_t sequence, std::string kind,
+                                                              bool applied_known, int applied_kbps) {
+    adaptive_bitrate::history_entry_t entry;
+    entry.sequence = sequence;
+    entry.host_elapsed_ms = static_cast<std::int64_t>(sequence) * 100;
+    entry.last_host_elapsed_ms = entry.host_elapsed_ms;
+    entry.kind = std::move(kind);
+    entry.cause = "runtime_update";
+    entry.state = "steady";
+    entry.reason = "healthy";
+    entry.requested_bitrate_kbps = 15000;
+    entry.applied_known = applied_known;
+    entry.applied_bitrate_kbps = applied_kbps;
+    entry.operator_revision = sequence + 100;
+    entry.applied_revision = applied_known ? sequence + 100 : 0;
+    return entry;
+  }
+
+  stream_stats::stats_t stats_with_live_tuning_history() {
+    stream_stats::stats_t stats {};
+    stats.streaming = true;
+    stats.session_generation = 7;
+    stats.app_session_id = "launch-instance-7";
+    auto &history = stats.live_tuning_history;
+    history.scoped = true;
+    history.session_generation = 7;
+    history.app_session_id = "launch-instance-7";
+    history.dropped = 3;
+    history.host_elapsed_ms_at_copy = 5000;
+    auto applied = live_tuning_history_entry(10, "encoder_applied", true, 15000);
+    applied.callback_bitrate_kbps = 15000;
+    applied.callback_revision = 110;
+    history.entries.push_back(applied);
+    history.entries.push_back(live_tuning_history_entry(11, "applied_proof_invalidated", false, 0));
+    auto reaffirmed = live_tuning_history_entry(12, "revision_reaffirmed", true, 15000);
+    reaffirmed.repeat_count = 4;
+    reaffirmed.last_host_elapsed_ms = 1900;
+    reaffirmed.input_available = true;
+    reaffirmed.input_packet_loss_percent = 0.0;
+    reaffirmed.input_rtt_ms = 8.0;
+    history.entries.push_back(reaffirmed);
+    return stats;
+  }
+}  // namespace
+
+TEST(StreamStatsLiveTuningHistory, SerializesTheSnapshotsOwnScopeWithHostClockAndUnknownMediaRate) {
+  const auto stats = stats_with_live_tuning_history();
+  const auto history = stream_stats::live_tuning_history_json(stats);
+
+  EXPECT_TRUE(history.at("available").get<bool>());
+  EXPECT_EQ(history.at("reason"), "recorded");
+  EXPECT_EQ(history.at("clock"), "host_steady_ms");
+  EXPECT_EQ(history.at("actual_media_rate_attribution"), "unknown");
+  EXPECT_EQ(history.at("capacity"), adaptive_bitrate::HISTORY_CAPACITY);
+  EXPECT_EQ(history.at("dropped"), 3);
+  EXPECT_TRUE(history.at("truncated").get<bool>());
+  EXPECT_EQ(history.at("host_elapsed_ms_at_snapshot"), 5000);
+  const auto &entries = history.at("entries");
+  ASSERT_EQ(entries.size(), 3u);
+  EXPECT_EQ(entries[0].at("sequence"), 10);
+  EXPECT_EQ(entries[0].at("kind"), "encoder_applied");
+  EXPECT_EQ(entries[0].at("applied_proof"), "encoder_confirmed");
+  EXPECT_EQ(entries[0].at("applied_bitrate_kbps"), 15000);
+  EXPECT_EQ(entries[0].at("callback").at("revision"), 110);
+  EXPECT_TRUE(entries[0].at("input").is_null());
+  EXPECT_EQ(entries[1].at("kind"), "applied_proof_invalidated");
+  EXPECT_EQ(entries[1].at("applied_proof"), "unknown");
+  EXPECT_TRUE(entries[1].at("applied_bitrate_kbps").is_null());
+  EXPECT_FALSE(entries[1].contains("callback"));
+  EXPECT_EQ(entries[2].at("kind"), "revision_reaffirmed");
+  EXPECT_EQ(entries[2].at("repeat_count"), 4);
+  EXPECT_EQ(entries[2].at("last_host_elapsed_ms"), 1900);
+  EXPECT_EQ(entries[2].at("input").at("rtt_ms"), 8.0);
+
+  // No session identity, address, path or wall-clock time is exported.
+  const auto text = history.dump();
+  EXPECT_EQ(text.find("launch-instance-7"), std::string::npos);
+  EXPECT_FALSE(history.contains("app_session_id"));
+  EXPECT_FALSE(entries[0].contains("app_session_id"));
+
+  // The stream stats and Doctor's advanced evidence serialize the same snapshot, not the live controller.
+  EXPECT_EQ(nlohmann::json::parse(stats.to_json()).at("live_tuning_history"), history);
+  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  EXPECT_EQ(doctor.at("advanced_evidence").at("live_tuning_history"), history);
+}
+
+TEST(StreamStatsLiveTuningHistory, WithholdsAnotherOwnersHistoryForTheSameGeneration) {
+  auto stats = stats_with_live_tuning_history();
+  stats.app_session_id = "launch-instance-7-replacement";
+  const auto history = stream_stats::live_tuning_history_json(stats);
+  EXPECT_FALSE(history.at("available").get<bool>());
+  EXPECT_EQ(history.at("reason"), "session_scope_unavailable");
+  EXPECT_TRUE(history.at("entries").empty());
+  EXPECT_EQ(history.at("dropped"), 0);
+  EXPECT_FALSE(history.at("truncated").get<bool>());
+
+  auto unscoped = stats_with_live_tuning_history();
+  unscoped.live_tuning_history.scoped = false;
+  EXPECT_TRUE(stream_stats::live_tuning_history_json(unscoped).at("entries").empty());
+}
+
+TEST(StreamStatsLiveTuningHistory, WithholdsHistoryFromASnapshotThatIsNotStreaming) {
+  auto stats = stats_with_live_tuning_history();
+  stats.streaming = false;
+  const auto history = stream_stats::live_tuning_history_json(stats);
+  EXPECT_FALSE(history.at("available").get<bool>());
+  EXPECT_EQ(history.at("reason"), "no_stream");
+  EXPECT_TRUE(history.at("entries").empty());
+}
+
+TEST(StreamStatsLiveTuningHistory, GetCurrentCopiesTheControllerHistoryWithItsAdaptiveFields) {
+  config::video.adaptive_bitrate.enabled = true;
+  config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+  config::video.adaptive_bitrate.max_bitrate_kbps = 50000;
+  adaptive_bitrate::load_config();
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_runtime_update_supported(true);
+  adaptive_bitrate::set_base_bitrate(20000);
+  adaptive_bitrate::set_session_scope(9001, "history-copy-owner", true);
+  adaptive_bitrate::set_live_bitrate(15000);
+
+  const auto controller = adaptive_bitrate::get_state_with_history();
+  const auto stats = stream_stats::get_current();
+  ASSERT_FALSE(controller.history.entries.empty());
+  ASSERT_EQ(stats.live_tuning_history.entries.size(), controller.history.entries.size());
+  EXPECT_EQ(stats.live_tuning_history.entries.back().sequence, controller.history.entries.back().sequence);
+  EXPECT_EQ(stats.live_tuning_history.session_generation, 9001u);
+  EXPECT_EQ(stats.adaptive_target_bitrate_kbps, controller.target_bitrate_kbps);
+
+  // A copy of the snapshot keeps its own history after the controller moves on.
+  adaptive_bitrate::set_live_bitrate(16000);
+  EXPECT_EQ(stats.live_tuning_history.entries.back().requested_bitrate_kbps, 15000);
+
+  adaptive_bitrate::set_session_scope(0, {}, false);
+  adaptive_bitrate::reset();
+  adaptive_bitrate::set_enabled(false);
+  config::video.adaptive_bitrate.enabled = false;
+}

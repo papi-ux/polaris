@@ -12,6 +12,8 @@
 #include <chrono>
 #include <initializer_list>
 #include <optional>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <future>
 #include <limits>
@@ -1185,4 +1187,302 @@ TEST(AdaptiveBitrateController, AnRttSpikeCutsTenPercentEachSecondItLasts) {
   EXPECT_EQ(state.state, "network_pressure");
   EXPECT_EQ(state.reason, "rtt_spike");
   leave_live_tuning_clean();
+}
+
+namespace {
+  constexpr std::uint64_t k_history_generation = 41;
+
+  // A stream scope as stream start leaves it: load_config(), reset(), base bitrate, then the scope.
+  void start_history_scope(int base_bitrate_kbps = 20000) {
+    enable_controller(base_bitrate_kbps);
+    adaptive_bitrate::set_session_scope(k_history_generation, "history-owner-a", true);
+  }
+
+  adaptive_bitrate::history_t history_now() {
+    return adaptive_bitrate::get_state_with_history().history;
+  }
+
+  std::vector<adaptive_bitrate::history_entry_t> entries_of(const adaptive_bitrate::history_t &history,
+                                                            std::string_view kind) {
+    std::vector<adaptive_bitrate::history_entry_t> out;
+    for (const auto &entry : history.entries) {
+      if (entry.kind == kind) out.push_back(entry);
+    }
+    return out;
+  }
+
+  // Ask for the current encoder request and apply it the way the encoder thread does.
+  adaptive_bitrate::live_bitrate_request_t apply_current_request(bool backend_applies) {
+    const auto request = adaptive_bitrate::get_live_bitrate_request();
+    EXPECT_TRUE(request.has_value());
+    if (!request) return {};
+    EXPECT_TRUE(adaptive_bitrate::apply_live_bitrate_request(*request, [&] { return backend_applies; }));
+    return *request;
+  }
+
+  void leave_history_clean() {
+    adaptive_bitrate::set_session_scope(0, {}, false);
+    leave_live_tuning_clean();
+  }
+}  // namespace
+
+TEST(AdaptiveBitrateHistory, KeepsATransitionAndItsReversalThatOneReadWouldMiss) {
+  start_history_scope();
+  apply_current_request(true);
+  const auto before = adaptive_bitrate::get_state();
+  const auto first = history_now();
+
+  // Turned off and back on, and a target moved and put back, all between two reads.
+  adaptive_bitrate::set_runtime_enabled(false);
+  adaptive_bitrate::set_runtime_enabled(true);
+  adaptive_bitrate::set_live_bitrate(15000);
+  adaptive_bitrate::set_live_bitrate(20000);
+
+  const auto after = adaptive_bitrate::get_state();
+  EXPECT_EQ(after.target_bitrate_kbps, before.target_bitrate_kbps);
+  const auto history = history_now();
+  const auto decisions = entries_of(history, "decision");
+  ASSERT_GE(decisions.size(), 4u);
+  const auto tail = std::vector<adaptive_bitrate::history_entry_t>(decisions.end() - 4, decisions.end());
+  EXPECT_EQ(tail[0].state, "disabled");
+  EXPECT_EQ(tail[0].cause, "runtime_enabled");
+  EXPECT_EQ(tail[1].state, before.state);
+  EXPECT_EQ(tail[1].cause, "runtime_enabled");
+  EXPECT_EQ(tail[2].requested_bitrate_kbps, 15000);
+  EXPECT_EQ(tail[2].reason, "paired_client_action");
+  EXPECT_EQ(tail[3].requested_bitrate_kbps, 20000);
+  for (std::size_t i = 1; i < tail.size(); ++i) {
+    EXPECT_GT(tail[i].sequence, tail[i - 1].sequence);
+    EXPECT_GE(tail[i].host_elapsed_ms, tail[i - 1].host_elapsed_ms);
+  }
+  EXPECT_GT(history.entries.size(), first.entries.size());
+  leave_history_clean();
+}
+
+TEST(AdaptiveBitrateHistory, SeparatesAnAppliedUpdateFromARefusedOrStaleEncoderCallback) {
+  start_history_scope();
+  const auto applied = apply_current_request(true);
+  adaptive_bitrate::set_live_bitrate(15000);
+  const auto refused = apply_current_request(false);
+
+  bool backend_called = false;
+  EXPECT_FALSE(adaptive_bitrate::apply_live_bitrate_request(applied, [&] {
+    backend_called = true;
+    return true;
+  }));
+  EXPECT_FALSE(backend_called);
+
+  const auto history = history_now();
+  const auto applied_entries = entries_of(history, "encoder_applied");
+  ASSERT_EQ(applied_entries.size(), 1u);
+  EXPECT_EQ(applied_entries[0].callback_bitrate_kbps, 20000);
+  EXPECT_EQ(applied_entries[0].callback_revision, applied.revision);
+  EXPECT_TRUE(applied_entries[0].applied_known);
+  EXPECT_EQ(applied_entries[0].applied_bitrate_kbps, 20000);
+
+  const auto refused_entries = entries_of(history, "encoder_update_not_applied");
+  ASSERT_EQ(refused_entries.size(), 1u);
+  EXPECT_EQ(refused_entries[0].callback_bitrate_kbps, 15000);
+  EXPECT_EQ(refused_entries[0].callback_revision, refused.revision);
+  EXPECT_EQ(refused_entries[0].requested_bitrate_kbps, 15000);
+  // The refused request is not an applied rate; the encoder still runs at the earlier one.
+  EXPECT_EQ(refused_entries[0].applied_bitrate_kbps, 20000);
+
+  const auto stale_entries = entries_of(history, "stale_encoder_request");
+  ASSERT_EQ(stale_entries.size(), 1u);
+  EXPECT_EQ(stale_entries[0].callback_revision, applied.revision);
+  EXPECT_LT(applied_entries[0].sequence, refused_entries[0].sequence);
+  EXPECT_LT(refused_entries[0].sequence, stale_entries[0].sequence);
+  leave_history_clean();
+}
+
+TEST(AdaptiveBitrateHistory, RecreationLeavesTheAppliedRateUnknownUntilTheEncoderAcknowledges) {
+  start_history_scope();
+  const auto first = apply_current_request(true);
+  adaptive_bitrate::set_live_bitrate(15000);
+  const auto request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(request.has_value());
+
+  EXPECT_FALSE(adaptive_bitrate::begin_live_bitrate_session_recreation(first.revision, first.target_bitrate_kbps));
+  ASSERT_TRUE(adaptive_bitrate::begin_live_bitrate_session_recreation(request->revision, request->target_bitrate_kbps));
+  EXPECT_EQ(adaptive_bitrate::get_state().applied_bitrate_kbps, 0);
+  adaptive_bitrate::acknowledge_live_bitrate_applied(first.revision, first.target_bitrate_kbps);
+  adaptive_bitrate::acknowledge_live_bitrate_applied(request->revision, request->target_bitrate_kbps);
+  const auto settled = history_now().entries.size();
+  // The encoder confirms an unchanged rate every frame; that proves nothing new.
+  adaptive_bitrate::acknowledge_live_bitrate_applied(request->revision, request->target_bitrate_kbps);
+
+  const auto history = history_now();
+  EXPECT_EQ(history.entries.size(), settled);
+  ASSERT_EQ(entries_of(history, "recreation_superseded").size(), 1u);
+  const auto invalidated = entries_of(history, "applied_proof_invalidated");
+  ASSERT_EQ(invalidated.size(), 1u);
+  EXPECT_FALSE(invalidated[0].applied_known);
+  EXPECT_EQ(invalidated[0].applied_bitrate_kbps, 0);
+  EXPECT_EQ(invalidated[0].requested_bitrate_kbps, 15000);
+  ASSERT_EQ(entries_of(history, "stale_acknowledgement").size(), 1u);
+  const auto acknowledged = entries_of(history, "encoder_acknowledged");
+  ASSERT_EQ(acknowledged.size(), 1u);
+  EXPECT_EQ(acknowledged[0].cause, "applied_proof_was_unknown");
+  EXPECT_TRUE(acknowledged[0].applied_known);
+  EXPECT_EQ(acknowledged[0].applied_bitrate_kbps, 15000);
+  EXPECT_EQ(acknowledged[0].applied_revision, request->revision);
+  EXPECT_GT(acknowledged[0].sequence, invalidated[0].sequence);
+  // Recreation is not a backend update of the running encoder.
+  EXPECT_EQ(entries_of(history, "encoder_applied").size(), 1u);
+  leave_history_clean();
+}
+
+TEST(AdaptiveBitrateHistory, LabelsARevisionOnlyReaffirmationApartFromABackendUpdate) {
+  start_history_scope();
+  apply_current_request(true);
+  adaptive_bitrate::note_network_evidence_arrival(false);
+  const auto request = adaptive_bitrate::get_live_bitrate_request();
+  ASSERT_TRUE(request.has_value());
+
+  auto history = history_now();
+  const auto reaffirmed = entries_of(history, "revision_reaffirmed");
+  ASSERT_EQ(reaffirmed.size(), 1u);
+  EXPECT_EQ(reaffirmed[0].cause, "encoder_poll");
+  EXPECT_EQ(reaffirmed[0].applied_bitrate_kbps, 20000);
+  EXPECT_EQ(reaffirmed[0].applied_revision, request->revision);
+  EXPECT_EQ(reaffirmed[0].callback_revision, 0u);
+  EXPECT_EQ(entries_of(history, "encoder_applied").size(), 1u);
+  EXPECT_NE(entries_of(history, "encoder_applied")[0].applied_revision, reaffirmed[0].applied_revision);
+  leave_history_clean();
+}
+
+TEST(AdaptiveBitrateHistory, RepeatedUnchangedPollsFoldInsteadOfFillingTheHistory) {
+  start_history_scope();
+  apply_current_request(true);
+  adaptive_bitrate::update_network_stats(0.0, 8.0);
+  const auto before = history_now();
+  for (int poll = 0; poll < 500; ++poll) {
+    adaptive_bitrate::update_network_stats(0.0, 8.0);
+    adaptive_bitrate::note_network_evidence_arrival(false);
+    const auto request = adaptive_bitrate::get_live_bitrate_request();
+    ASSERT_TRUE(request.has_value());
+    adaptive_bitrate::acknowledge_live_bitrate_applied(request->revision, request->target_bitrate_kbps);
+  }
+  const auto after = history_now();
+  EXPECT_EQ(after.dropped, 0u);
+  EXPECT_LE(after.entries.size(), before.entries.size() + 1);
+  const auto &last = after.entries.back();
+  EXPECT_EQ(last.kind, "revision_reaffirmed");
+  EXPECT_EQ(last.repeat_count, 500u);
+  EXPECT_GE(last.last_host_elapsed_ms, last.host_elapsed_ms);
+  EXPECT_TRUE(last.input_available);
+  EXPECT_EQ(last.input_rtt_ms, 8.0);
+  EXPECT_TRUE(entries_of(after, "encoder_acknowledged").empty());
+  leave_history_clean();
+}
+
+TEST(AdaptiveBitrateHistory, OverflowDropsTheOldestEntriesAndCountsThem) {
+  start_history_scope();
+  const auto start = history_now();
+  for (int change = 0; change < 100; ++change) {
+    adaptive_bitrate::set_live_bitrate(change % 2 == 0 ? 15000 : 16000);
+  }
+  const auto history = history_now();
+  const auto recorded = start.entries.size() + 100;
+  ASSERT_EQ(history.entries.size(), adaptive_bitrate::HISTORY_CAPACITY);
+  EXPECT_EQ(history.capacity, adaptive_bitrate::HISTORY_CAPACITY);
+  EXPECT_EQ(history.dropped, recorded - adaptive_bitrate::HISTORY_CAPACITY);
+  for (std::size_t i = 1; i < history.entries.size(); ++i) {
+    EXPECT_EQ(history.entries[i].sequence, history.entries[i - 1].sequence + 1);
+  }
+  EXPECT_EQ(history.entries.back().requested_bitrate_kbps, 16000);
+  EXPECT_EQ(history.entries.front().sequence, history.entries.back().sequence - (adaptive_bitrate::HISTORY_CAPACITY - 1));
+  leave_history_clean();
+}
+
+TEST(AdaptiveBitrateHistory, AnotherStreamScopeNeverInheritsEntries) {
+  start_history_scope();
+  apply_current_request(true);
+  adaptive_bitrate::set_live_bitrate(15000);
+  auto history = history_now();
+  ASSERT_TRUE(history.scoped);
+  EXPECT_EQ(history.session_generation, k_history_generation);
+  const auto last_sequence = history.entries.back().sequence;
+
+  // The same stream scope again keeps its history.
+  adaptive_bitrate::set_session_scope(k_history_generation, "history-owner-a", false);
+  EXPECT_EQ(history_now().entries.size(), history.entries.size());
+
+  // Another owner of the same generation starts over.
+  adaptive_bitrate::set_session_scope(k_history_generation, "history-owner-b", true);
+  history = history_now();
+  ASSERT_EQ(history.entries.size(), 1u);
+  EXPECT_EQ(history.entries[0].kind, "scope_started");
+  EXPECT_GT(history.entries[0].sequence, last_sequence);
+  EXPECT_EQ(history.app_session_id, "history-owner-b");
+  EXPECT_EQ(history.dropped, 0u);
+
+  // A reset leaves the history unscoped, and an ended stream keeps nothing.
+  adaptive_bitrate::reset();
+  history = history_now();
+  EXPECT_FALSE(history.scoped);
+  ASSERT_EQ(history.entries.size(), 1u);
+  EXPECT_EQ(history.entries[0].cause, "reset");
+  adaptive_bitrate::set_session_scope(0, {}, false);
+  history = history_now();
+  EXPECT_FALSE(history.scoped);
+  EXPECT_TRUE(history.entries.empty());
+  leave_history_clean();
+}
+
+TEST(AdaptiveBitrateHistory, RecordingLeavesTheControllerSnapshotUnchanged) {
+  start_history_scope();
+  apply_current_request(true);
+  adaptive_bitrate::set_live_bitrate(15000);
+  const auto plain = adaptive_bitrate::get_state();
+  const auto with_history = adaptive_bitrate::get_state_with_history();
+  EXPECT_TRUE(plain.history.entries.empty());
+  EXPECT_FALSE(with_history.history.entries.empty());
+  EXPECT_EQ(plain.target_bitrate_kbps, with_history.target_bitrate_kbps);
+  EXPECT_EQ(plain.applied_bitrate_kbps, with_history.applied_bitrate_kbps);
+  EXPECT_EQ(plain.base_bitrate_kbps, with_history.base_bitrate_kbps);
+  EXPECT_EQ(plain.state, with_history.state);
+  EXPECT_EQ(plain.reason, with_history.reason);
+  EXPECT_EQ(plain.active, with_history.active);
+  EXPECT_EQ(adaptive_bitrate::get_doctor_state().revision, with_history.history.entries.back().operator_revision);
+  leave_history_clean();
+}
+
+TEST(AdaptiveBitrateHistory, ANewScopeWithoutAResetKeepsNothingRecordedBeforeIt) {
+  start_history_scope();
+  apply_current_request(true);
+  adaptive_bitrate::update_network_stats(0.0, 9.0);
+
+  // The stream ends, the controller keeps moving unscoped, and a new scope begins with no reset.
+  adaptive_bitrate::set_session_scope(0, {}, false);
+  adaptive_bitrate::set_live_bitrate(15000);
+  adaptive_bitrate::set_live_bitrate(16000);
+  EXPECT_TRUE(history_now().entries.size() >= 2u);
+  EXPECT_FALSE(history_now().scoped);
+  const auto before_scope = adaptive_bitrate::get_state();
+  adaptive_bitrate::set_session_scope(k_history_generation + 1, "history-owner-c", true);
+
+  const auto history = history_now();
+  ASSERT_TRUE(history.scoped);
+  EXPECT_EQ(history.session_generation, k_history_generation + 1);
+  ASSERT_EQ(history.entries.size(), 1u);
+  const auto &snapshot = history.entries[0];
+  EXPECT_EQ(snapshot.kind, "scope_started");
+  EXPECT_EQ(snapshot.cause, "initial_scope_snapshot");
+  EXPECT_EQ(snapshot.requested_bitrate_kbps, 16000);
+  EXPECT_EQ(snapshot.state, before_scope.state);
+  EXPECT_EQ(snapshot.reason, before_scope.reason);
+  // The previous scope's input is not this scope's input; the controller's own EWMA is untouched.
+  EXPECT_FALSE(snapshot.input_available);
+  EXPECT_EQ(adaptive_bitrate::get_state().ewma_rtt_ms, before_scope.ewma_rtt_ms);
+  EXPECT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, before_scope.target_bitrate_kbps);
+
+  // Only a later change is recorded after the snapshot.
+  adaptive_bitrate::set_live_bitrate(16000);
+  EXPECT_EQ(history_now().entries.size(), 1u);
+  adaptive_bitrate::set_live_bitrate(17000);
+  ASSERT_EQ(history_now().entries.size(), 2u);
+  EXPECT_EQ(history_now().entries[1].requested_bitrate_kbps, 17000);
+  leave_history_clean();
 }
