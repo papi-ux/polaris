@@ -14,5 +14,5 @@ export default async function setup(config) {
   await fs.mkdir(config.projects[0].outputDir, { recursive: true })
   await fs.writeFile(path.join(config.projects[0].outputDir, 'frontend-identity.json'),
     JSON.stringify({ ...expected, nodeVersion: process.version }, null, 2) + '\n')
-  console.log(`[Polaris mocked E2E] checkout=${expected.sourceSha} frontend=${expected.sourceFingerprint}`)
+  console.error(`[Polaris mocked E2E] checkout=${expected.sourceSha} frontend=${expected.sourceFingerprint}`)
 }

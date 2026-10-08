@@ -5,5 +5,5 @@ export default async function setup(config) {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
     throw new Error('Live-host tests require an HTTP(S) URL; supply credentials through POLARIS_USER and POLARIS_PASS')
   }
-  console.log(`[Polaris live E2E] frontend=host-served origin=${url.origin}; checkout assets are not tested in this lane`)
+  console.error(`[Polaris live E2E] frontend=host-served origin=${url.origin}; checkout assets are not tested in this lane`)
 }
