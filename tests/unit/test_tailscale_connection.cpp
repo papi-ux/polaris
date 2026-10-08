@@ -3,8 +3,11 @@
 #include <chrono>
 #include <thread>
 #include <algorithm>
+#include <condition_variable>
 #include <cstdlib>
+#include <mutex>
 #include <stdexcept>
+#include <vector>
 #ifdef __linux__
 #include <atomic>
 #include <filesystem>
@@ -95,6 +98,7 @@ TEST(TailscaleConnection, OfflineStoppedDuplicateAndMalformedPeersRemainUnknown)
   auto s = status();
   peer(s)["Online"] = false;
   EXPECT_FALSE(evaluate(s)["tailscale"]["confirmed"]);
+  EXPECT_EQ(evaluate(s)["tailscale"]["reason"], "peer_not_confirmed");
   s = status(); s["BackendState"] = "Stopped";
   EXPECT_FALSE(evaluate(s)["tailscale"]["confirmed"]);
   s = status(); s["Peer"]["second-peer"] = peer(s);
@@ -104,6 +108,189 @@ TEST(TailscaleConnection, OfflineStoppedDuplicateAndMalformedPeersRemainUnknown)
   EXPECT_FALSE(tailscale_connection::from_status("{", "100.64.0.2", "100.64.0.1", now_ms)["tailscale"]["confirmed"]);
   EXPECT_FALSE(tailscale_connection::from_status(std::string(tailscale_connection::max_status_bytes + 1, ' '), "100.64.0.2", "100.64.0.1", now_ms)["tailscale"]["confirmed"]);
 }
+
+// A daemon that is not running is unavailable, and a status without a usable peer map is
+// malformed: neither is a peer that failed to match.
+TEST(TailscaleConnection, DaemonStatesCarryTheirOwnReasons) {
+  for (const auto *state : {"Stopped", "NeedsLogin", "Starting", "NoState"}) {
+    auto s = status(); s["BackendState"] = state;
+    const auto result = evaluate(s);
+    EXPECT_EQ(result["status"], "unknown") << state;
+    EXPECT_EQ(result["tailscale"]["reason"], "localapi_unavailable") << state;
+  }
+  auto s = status(); s.erase("BackendState");
+  EXPECT_EQ(evaluate(s)["tailscale"]["reason"], "localapi_unavailable");
+  s = status(); s.erase("Peer");
+  EXPECT_EQ(evaluate(s)["tailscale"]["reason"], "malformed_status");
+  s = status(); s["Peer"] = nlohmann::json::array();
+  EXPECT_EQ(evaluate(s)["tailscale"]["reason"], "malformed_status");
+  EXPECT_EQ(tailscale_connection::from_status("[]", "100.64.0.2", "100.64.0.1", now_ms)["tailscale"]["reason"], "malformed_status");
+  EXPECT_EQ(tailscale_connection::from_status("{", "100.64.0.2", "100.64.0.1", now_ms)["tailscale"]["reason"], "malformed_status");
+  // No read at all (missing socket, refusal, deadline, overload) is the daemon being unavailable.
+#ifdef __linux__
+  EXPECT_EQ(tailscale_connection::evaluate(std::nullopt, now_ms, "100.64.0.2", "100.64.0.1")["tailscale"]["reason"], "localapi_unavailable");
+  EXPECT_EQ(tailscale_connection::evaluate(status().dump(), now_ms, "100.64.0.2", "100.64.0.1")["status"], "tailscale");
+#else
+  EXPECT_EQ(tailscale_connection::evaluate(status().dump(), now_ms, "100.64.0.2", "100.64.0.1")["tailscale"]["reason"], "unsupported_platform");
+#endif
+}
+
+namespace {
+  /// A daemon read that blocks until released, counting reads and reporting when one starts.
+  struct gated_reader_t {
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool open = false;
+    int entered = 0;
+    std::string body = status().dump();
+
+    std::optional<std::string> read() {
+      std::unique_lock lock {mutex};
+      ++entered;
+      changed.notify_all();
+      // Bounded, so a failed assertion cannot leave a collector joining forever.
+      if (!changed.wait_for(lock, std::chrono::seconds(10), [this] { return open; })) return std::nullopt;
+      return body;
+    }
+
+    bool wait_entered(int count) {
+      std::unique_lock lock {mutex};
+      return changed.wait_for(lock, std::chrono::seconds(5), [&] { return entered >= count; });
+    }
+
+    void release() {
+      std::lock_guard lock {mutex};
+      open = true;
+      changed.notify_all();
+    }
+  };
+
+  struct answers_t {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::vector<nlohmann::json> received;
+
+    tailscale_connection::status_collector_t::waiter_t waiter(std::string remote = "100.64.0.2", std::string local = "100.64.0.1",
+                                                              std::string scope = "control_connection") {
+      return [this, remote, local, scope](const std::optional<std::string> &status, std::int64_t observed_at_ms) {
+        auto evidence = tailscale_connection::evaluate(status, observed_at_ms, remote, local, scope);
+        std::lock_guard lock {mutex};
+        received.push_back(std::move(evidence));
+        changed.notify_all();
+      };
+    }
+
+    bool wait_for(std::size_t count) {
+      std::unique_lock lock {mutex};
+      return changed.wait_for(lock, std::chrono::seconds(5), [&] { return received.size() >= count; });
+    }
+
+    std::size_t size() {
+      std::lock_guard lock {mutex};
+      return received.size();
+    }
+  };
+}  // namespace
+
+#ifdef __linux__
+// The cross-route try_lock answered "unavailable" to whichever caller lost a race. Overlapping
+// callers now wait for a real read: every one of them gets the daemon's answer.
+TEST(TailscaleCollector, OverlappingCallersAllGetTheDaemonsAnswerNeverAFalseUnavailable) {
+  gated_reader_t daemon;
+  answers_t answers;
+  tailscale_connection::status_collector_t collector {[&] { return daemon.read(); }, [] { return now_ms; }};
+  ASSERT_TRUE(collector.submit(answers.waiter()));
+  ASSERT_TRUE(daemon.wait_entered(1));
+  // Two routes (paired and admin) and several clients ask while the first read is still running.
+  std::vector<std::thread> callers;
+  for (int i = 0; i < 8; ++i) callers.emplace_back([&] { EXPECT_TRUE(collector.submit(answers.waiter())); });
+  for (auto &caller : callers) caller.join();
+  EXPECT_EQ(answers.size(), 0u);
+  daemon.release();
+  ASSERT_TRUE(answers.wait_for(9));
+  for (const auto &answer : answers.received) {
+    EXPECT_EQ(answer["status"], "tailscale");
+    EXPECT_EQ(answer["tailscale"]["reason"], "observed");
+  }
+  // One read for the first caller, and one shared by everyone who arrived during it.
+  EXPECT_EQ(collector.reads(), 2u);
+}
+
+// Two servers' collectors read independently; neither turns the other's read into "unavailable".
+TEST(TailscaleCollector, IndependentRouteCollectorsDoNotContend) {
+  gated_reader_t daemon;
+  answers_t paired, admin;
+  tailscale_connection::status_collector_t paired_collector {[&] { return daemon.read(); }, [] { return now_ms; }};
+  tailscale_connection::status_collector_t admin_collector {[&] { return daemon.read(); }, [] { return now_ms; }};
+  ASSERT_TRUE(paired_collector.submit(paired.waiter()));
+  ASSERT_TRUE(admin_collector.submit(admin.waiter("100.64.0.2", {}, "peer_status")));
+  ASSERT_TRUE(daemon.wait_entered(2));
+  daemon.release();
+  ASSERT_TRUE(paired.wait_for(1));
+  ASSERT_TRUE(admin.wait_for(1));
+  EXPECT_EQ(paired.received.front()["status"], "tailscale");
+  EXPECT_EQ(admin.received.front()["status"], "tailscale");
+  EXPECT_EQ(admin.received.front()["tailscale"]["scope"], "peer_status");
+}
+
+// Waiting is bounded: past max_waiters the caller is refused at once and answers unknown itself.
+TEST(TailscaleCollector, OverloadIsRefusedImmediatelyAndBounded) {
+  gated_reader_t daemon;
+  answers_t answers;
+  tailscale_connection::status_collector_t collector {[&] { return daemon.read(); }, [] { return now_ms; }};
+  ASSERT_TRUE(collector.submit(answers.waiter()));
+  ASSERT_TRUE(daemon.wait_entered(1));
+  for (std::size_t i = 0; i < tailscale_connection::status_collector_t::max_waiters; ++i)
+    ASSERT_TRUE(collector.submit(answers.waiter())) << i;
+  const auto start = std::chrono::steady_clock::now();
+  EXPECT_FALSE(collector.submit(answers.waiter()));
+  EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(100));
+  EXPECT_FALSE(collector.submit({}));
+  daemon.release();
+  ASSERT_TRUE(answers.wait_for(1 + tailscale_connection::status_collector_t::max_waiters));
+  EXPECT_EQ(collector.reads(), 2u);
+}
+
+// Stopping answers every waiting request (unknown) and the in-flight batch (its read), joins the
+// worker, and refuses anything after.
+TEST(TailscaleCollector, StopAnswersEveryoneAndJoins) {
+  gated_reader_t daemon;
+  answers_t answers;
+  tailscale_connection::status_collector_t collector {[&] { return daemon.read(); }, [] { return now_ms; }};
+  ASSERT_TRUE(collector.submit(answers.waiter()));
+  ASSERT_TRUE(daemon.wait_entered(1));
+  ASSERT_TRUE(collector.submit(answers.waiter()));
+  // stop() takes the waiting request at once, then joins the worker, which is still reading;
+  // the daemon answers a little later.
+  std::thread releaser {[&] { std::this_thread::sleep_for(std::chrono::milliseconds(100)); daemon.release(); }};
+  collector.stop();
+  releaser.join();
+  ASSERT_EQ(answers.size(), 2u);
+  int confirmed = 0, unavailable = 0;
+  for (const auto &answer : answers.received) {
+    confirmed += answer["status"] == "tailscale";
+    unavailable += answer["tailscale"]["reason"] == "localapi_unavailable";
+  }
+  EXPECT_EQ(confirmed, 1);
+  EXPECT_EQ(unavailable, 1);
+  EXPECT_FALSE(collector.submit(answers.waiter()));
+  EXPECT_EQ(collector.reads(), 1u);
+  collector.stop();  // idempotent
+}
+
+// Nothing is kept between reads: each new request after an answer causes a new daemon read.
+TEST(TailscaleCollector, EveryAnswerComesFromAReadAfterItsRequest) {
+  int reads = 0;
+  answers_t answers;
+  tailscale_connection::status_collector_t collector {[&] { ++reads; return std::optional<std::string> {status().dump()}; }, [] { return now_ms; }};
+  for (std::size_t i = 1; i <= 3; ++i) {
+    ASSERT_TRUE(collector.submit(answers.waiter()));
+    ASSERT_TRUE(answers.wait_for(i));
+  }
+  EXPECT_EQ(collector.reads(), 3u);
+  EXPECT_EQ(reads, 3);
+}
+#endif
 
 TEST(TailscaleConnection, PeerObservationCannotBecomeControlOrMediaRouteProof) {
   auto result = evaluate(status(), "100.64.0.2", {}, "peer_status");

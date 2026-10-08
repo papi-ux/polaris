@@ -18,6 +18,7 @@
 #include <src/nvhttp.h>
 #include <src/prelaunch_transition.h>
 #include <src/process.h>
+#include <src/tailscale_connection.h>
 #include <src/utility.h>
 #include <src/uuid.h>
 
@@ -31,6 +32,10 @@
 #include <fstream>
 #include <future>
 #include <memory>
+#include <chrono>
+#include <condition_variable>
+#include <ctime>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -164,6 +169,7 @@ namespace {
 
     void TearDown() override {
       route.reset();
+      tailscale_connection::set_default_status_reader_for_tests({});
       proc::set_desktop_steam_double_for_tests(nullptr);
       platf::game_mode_host::set_session_live_for_tests(std::nullopt);
       proc::proc.reload_configuration(proc::proc_t {boost::process::v1::environment {}, std::move(previous_apps)});
@@ -223,6 +229,14 @@ namespace {
       std::istringstream body {response->content.string()};
       boost::property_tree::read_xml(body, tree);
       return read_reply(tree);
+    }
+
+    /// network_reply on its own thread, for a request that waits on a stalled daemon.
+    std::future<std::pair<std::string, std::string>> network_reply_async(const credentials_t &client) {
+      if (!route) {
+        route = std::make_unique<nvhttp::launch_route_for_tests_t>(host.cert.string(), host.key.string());
+      }
+      return std::async(std::launch::async, [this, &client] { return network_reply(client); });
     }
 
     std::pair<std::string, std::string> network_reply(const credentials_t &client) {
@@ -1163,5 +1177,131 @@ TEST_F(LaunchDesktopSteamTest, UnpairedCertificateCannotReadNetworkEvidence) {
   pair_moonlight(false);
   const auto [status, body] = network_reply(stranger);
   EXPECT_TRUE(status.starts_with("401"));
+  EXPECT_EQ(body.find("tailscale"), std::string::npos);
+}
+
+namespace {
+  /// The daemon's status as the test route's TLS connection sees it: both ends are 127.0.0.1.
+  std::string loopback_tailnet_status(std::string_view self_ip = "127.0.0.1", std::string_view peer_ip = "127.0.0.1") {
+    const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm utc {};
+    gmtime_r(&now, &utc);
+    char written[32] {};
+    std::strftime(written, sizeof(written), "%Y-%m-%dT%H:%M:%SZ", &utc);
+    return nlohmann::json {
+      {"BackendState", "Running"}, {"TailscaleIPs", {self_ip}},
+      {"Peer", {{"nodekey:fixture", {{"TailscaleIPs", {peer_ip}}, {"Online", true}, {"Active", true},
+        {"LastWrite", written}, {"CurAddr", "198.51.100.7:41641"}, {"Relay", "fixture-region"}, {"PeerRelay", ""},
+        {"HostName", "fixture-host"}}}}},
+    }.dump();
+  }
+
+  /// A daemon read that blocks until released and says when it has started.
+  struct stalled_daemon_t {
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool entered = false, open = false;
+    std::string body = loopback_tailnet_status();
+
+    std::optional<std::string> read() {
+      std::unique_lock lock {mutex};
+      entered = true;
+      changed.notify_all();
+      if (!changed.wait_for(lock, std::chrono::seconds(10), [this] { return open; })) return std::nullopt;
+      return body;
+    }
+
+    bool wait_entered() {
+      std::unique_lock lock {mutex};
+      return changed.wait_for(lock, std::chrono::seconds(5), [this] { return entered; });
+    }
+
+    void release() {
+      std::lock_guard lock {mutex};
+      open = true;
+      changed.notify_all();
+    }
+  };
+}  // namespace
+
+// The production handler on a real TLS connection: confirmation comes from that connection's own
+// endpoints (both 127.0.0.1 here), never from the request's parameters.
+TEST_F(LaunchDesktopSteamTest, PairedNetworkEvidenceConfirmsFromTheActualTlsEndpoints) {
+  pair_moonlight(false, crypto::PERM::_default);
+  tailscale_connection::set_default_status_reader_for_tests([] { return std::optional<std::string> {loopback_tailnet_status()}; });
+  auto [status, body] = network_reply(moonlight);
+  ASSERT_TRUE(status.starts_with("200")) << status;
+  auto evidence = nlohmann::json::parse(body);
+  EXPECT_EQ(evidence.at("schema_version"), 1);
+  EXPECT_EQ(evidence.at("status"), "tailscale");
+  EXPECT_EQ(evidence.at("tailscale").at("confirmed"), true);
+  EXPECT_EQ(evidence.at("tailscale").at("scope"), "control_connection");
+  EXPECT_EQ(evidence.at("tailscale").at("source"), "tailscaled_localapi");
+  EXPECT_EQ(evidence.at("tailscale").at("transport"), "direct");
+  EXPECT_EQ(evidence.at("tailscale").at("reason"), "observed");
+  EXPECT_GT(evidence.at("tailscale").at("observed_at_ms").get<std::int64_t>(), 0);
+  EXPECT_EQ(evidence.size(), 4u);
+  for (const auto *secret : {"127.0.0.1", "198.51.100.7", "nodekey", "fixture-host", "fixture-region", "100.64.0.2", "private.example.ts.net"})
+    EXPECT_EQ(body.find(secret), std::string::npos) << secret;
+
+  // The host's own tailnet address is not the address this connection reached: unknown.
+  tailscale_connection::set_default_status_reader_for_tests([] { return std::optional<std::string> {loopback_tailnet_status("100.64.0.1")}; });
+  std::tie(status, body) = network_reply(moonlight);
+  EXPECT_EQ(nlohmann::json::parse(body).at("status"), "unknown");
+  // The peer the query names (100.64.0.2) is not the peer that connected: unknown.
+  tailscale_connection::set_default_status_reader_for_tests([] { return std::optional<std::string> {loopback_tailnet_status("127.0.0.1", "100.64.0.2")}; });
+  std::tie(status, body) = network_reply(moonlight);
+  EXPECT_EQ(nlohmann::json::parse(body).at("status"), "unknown");
+  // A stopped daemon says so.
+  tailscale_connection::set_default_status_reader_for_tests([] {
+    auto stopped = nlohmann::json::parse(loopback_tailnet_status());
+    stopped["BackendState"] = "Stopped";
+    return std::optional<std::string> {stopped.dump()};
+  });
+  std::tie(status, body) = network_reply(moonlight);
+  EXPECT_EQ(nlohmann::json::parse(body).at("tailscale").at("reason"), "localapi_unavailable");
+}
+
+// F1: a daemon that does not answer must not hold the paired server. While one client's evidence
+// request waits on the daemon, another request on the same server is answered.
+TEST_F(LaunchDesktopSteamTest, StalledDaemonDoesNotHoldThePairedServer) {
+  pair_moonlight(true, crypto::PERM::_default);
+  stalled_daemon_t daemon;
+  tailscale_connection::set_default_status_reader_for_tests([&daemon] { return daemon.read(); });
+  auto release = util::fail_guard([&] { daemon.release(); });
+
+  auto evidence = network_reply_async(moonlight);
+  ASSERT_TRUE(daemon.wait_entered());
+  const auto started = std::chrono::steady_clock::now();
+  const auto refused = launch(moonlight, moonlight_launch(steam_game_id));
+  EXPECT_EQ(refused.status, 403);
+  EXPECT_LT(std::chrono::steady_clock::now() - started, std::chrono::seconds(2));
+  EXPECT_EQ(evidence.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout)
+    << "the evidence request should still be waiting on the daemon";
+
+  daemon.release();
+  release.disable();
+  ASSERT_EQ(evidence.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  const auto [status, body] = evidence.get();
+  ASSERT_TRUE(status.starts_with("200")) << status;
+  EXPECT_EQ(nlohmann::json::parse(body).at("status"), "tailscale");
+}
+
+// Authorization is checked again before the answer is written: a device unpaired while the daemon
+// was being read gets no evidence.
+TEST_F(LaunchDesktopSteamTest, DeviceUnpairedDuringTheReadGetsNoEvidence) {
+  pair_moonlight(false, crypto::PERM::_default);
+  stalled_daemon_t daemon;
+  tailscale_connection::set_default_status_reader_for_tests([&daemon] { return daemon.read(); });
+  auto release = util::fail_guard([&] { daemon.release(); });
+
+  auto evidence = network_reply_async(moonlight);
+  ASSERT_TRUE(daemon.wait_entered());
+  nvhttp::reset_pairing_state_for_tests();
+  daemon.release();
+  release.disable();
+  ASSERT_EQ(evidence.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  const auto [status, body] = evidence.get();
+  EXPECT_TRUE(status.starts_with("401")) << status;
   EXPECT_EQ(body.find("tailscale"), std::string::npos);
 }

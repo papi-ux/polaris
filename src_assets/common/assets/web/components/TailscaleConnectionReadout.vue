@@ -26,24 +26,32 @@ const evidence = computed(() => normalizeTailscalePeer(
 ))
 const label = computed(() => i18n.t(`troubleshooting.tailscale_peer_${evidence.value.confirmed ? evidence.value.transport : 'unverified'}`))
 
-async function refresh() {
-  if (disposed || activeRequest) return
+async function refresh({ restart = false } = {}) {
+  if (disposed) return
+  if (activeRequest) {
+    // A periodic refresh waits for the request already out; a new stream does not.
+    if (!restart) return
+    activeRequest.abort()
+    activeRequest = null
+  }
   if (!props.stats?.streaming) { raw.value = null; return }
   const controller = new AbortController()
   activeRequest = controller
+  const current = () => !disposed && activeRequest === controller
   const timeout = setTimeout(() => controller.abort(), 3000)
   try {
     const response = await fetch('./api/network/connection', { credentials: 'include', signal: controller.signal, cache: 'no-store' })
     const value = response.ok ? await response.json() : null
-    if (!disposed) { raw.value = value; receivedAt = performance.now(); now.value = Date.now() }
+    if (current()) { raw.value = value; receivedAt = performance.now(); now.value = Date.now() }
   } catch {
-    if (!disposed) raw.value = null
+    if (current()) raw.value = null
   } finally {
     clearTimeout(timeout)
-    activeRequest = null
+    if (activeRequest === controller) activeRequest = null
   }
 }
-watch(() => [props.stats?.streaming, props.stats?.stream_instance_id], () => { raw.value = null; refresh() }, { immediate: true })
+// A stream change abandons any request made for the previous stream and asks again at once.
+watch(() => [props.stats?.streaming, props.stats?.stream_instance_id], () => { raw.value = null; refresh({ restart: true }) }, { immediate: true })
 const refreshTimer = setInterval(refresh, 5000)
 const expiryTimer = setInterval(() => { now.value = Date.now() }, 1000)
 onBeforeUnmount(() => {

@@ -10442,21 +10442,46 @@ namespace confighttp {
     return augment_stream_stats_json(stream_stats_json(stats), stats).dump();
   }
 
-  void getNetworkConnection(resp_https_t response, req_https_t request) {
-    if (!authenticate(response, request)) return;
-    const auto before = stream_stats::get_current();
-    auto output = tailscale_connection::unknown("peer_status", "no_active_stream");
-    if (before.streaming && !before.client_ip.empty()) {
-      output = tailscale_connection::observe(before.client_ip, {}, "peer_status");
+  namespace {
+    void write_network_connection(const resp_https_t &response, nlohmann::json output, std::uint64_t session_generation) {
+      output["stream_instance_id"] = stream_stats::stream_instance_id(session_generation);
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_json_security_headers(headers);
+      headers.emplace("Cache-Control", "no-store");
+      response->write(output.dump(), headers);
+    }
+
+    /// The admin peer_status answer for the stream `before` named, unless that stream ended or
+    /// changed while the daemon was read.
+    nlohmann::json fenced_peer_status(const stream_stats::stats_t &before,
+                                      const std::optional<std::string> &status, std::int64_t observed_at_ms) {
+      auto output = tailscale_connection::evaluate(status, observed_at_ms, before.client_ip, {}, "peer_status");
       const auto after = stream_stats::get_current();
       if (!after.streaming || before.session_generation != after.session_generation || before.client_ip != after.client_ip)
         output = tailscale_connection::unknown("peer_status", "stream_changed");
+      return output;
     }
-    output["stream_instance_id"] = stream_stats::stream_instance_id(before.session_generation);
-    SimpleWeb::CaseInsensitiveMultimap headers;
-    append_json_security_headers(headers);
-    headers.emplace("Cache-Control", "no-store");
-    response->write(output.dump(), headers);
+  }  // namespace
+
+  /**
+   * The admin peer_status readout. Authenticated before the daemon is asked and again before the
+   * answer is written; the daemon read runs on `collector`'s worker, not on this server's thread.
+   */
+  void getNetworkConnection(tailscale_connection::status_collector_t &collector, resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+    const auto before = stream_stats::get_current();
+    if (!before.streaming || before.client_ip.empty()) {
+      write_network_connection(response, tailscale_connection::unknown("peer_status", "no_active_stream"), before.session_generation);
+      return;
+    }
+    const bool accepted = collector.submit([response, request, before](const std::optional<std::string> &status, std::int64_t observed_at_ms) {
+      if (!authenticate(response, request)) return;
+      write_network_connection(response, fenced_peer_status(before, status, observed_at_ms), before.session_generation);
+    });
+    if (!accepted) {
+      // Too many reads already waiting, or the server is stopping: say so now rather than queue.
+      write_network_connection(response, fenced_peer_status(before, std::nullopt, 0), before.session_generation);
+    }
   }
 
   void getStreamStats(resp_https_t response, req_https_t request) {
@@ -10535,10 +10560,13 @@ namespace confighttp {
     });
   }
 
-  void register_apps_stats_routes(https_server_t &server) {
+  /// `collector` must outlive `server` and be stopped once the server has stopped.
+  void register_apps_stats_routes(https_server_t &server, tailscale_connection::status_collector_t &collector) {
     server.resource["^/api/apps$"]["GET"] = getApps;
     server.resource["^/api/stats/stream$"]["GET"] = getStreamStats;
-    server.resource["^/api/network/connection$"]["GET"] = getNetworkConnection;
+    server.resource["^/api/network/connection$"]["GET"] = [&collector](resp_https_t response, req_https_t request) {
+      getNetworkConnection(collector, std::move(response), std::move(request));
+    };
   }
 
 #ifdef POLARIS_TESTS
@@ -10548,9 +10576,11 @@ namespace confighttp {
     const std::function<void()> &before_apps
   ) {
     https_server_t server {cert, key};
+    tailscale_connection::status_collector_t network_collector;
+    auto stop_collector = util::fail_guard([&]() { network_collector.stop(); });
     server.config.address = "127.0.0.1";
     server.config.port = 0;
-    register_apps_stats_routes(server);
+    register_apps_stats_routes(server, network_collector);
     const auto apps = server.resource["^/api/apps$"]["GET"];
     server.resource["^/api/apps$"]["GET"] = [apps, before_apps](resp_https_t response, req_https_t request) {
       before_apps();
@@ -10603,6 +10633,8 @@ namespace confighttp {
     auto address_family = net::af_from_enum_string(config::sunshine.address_family);
     cover_lookup::workers_t cover_lookups;
     https_server_t server { config::nvhttp.cert, config::nvhttp.pkey };
+    // Declared after the server so it is destroyed first; stopped explicitly below as well.
+    tailscale_connection::status_collector_t network_collector;
 
     server.verify = [](req_https_t request, SSL *ssl) {
       if (auto named_cert_p = nvhttp::verify_client_cert(ssl)) {
@@ -10776,7 +10808,7 @@ namespace confighttp {
     server.resource["^/api/pin$"]["POST"] = withCsrf(savePin);
     server.resource["^/api/pin$"]["DELETE"] = withCsrf(cancelPairing);
     server.resource["^/api/otp$"]["POST"] = withCsrf(getOTP);
-    register_apps_stats_routes(server);
+    register_apps_stats_routes(server, network_collector);
     server.resource["^/api/apps$"]["POST"] = withCsrf(saveApp);
     server.resource["^/api/apps/reorder$"]["POST"] = withCsrf(reorderApps);
     server.resource["^/api/apps/delete$"]["POST"] = withCsrf(deleteApp);
@@ -10966,6 +10998,8 @@ namespace confighttp {
     wait_for_background_tasks();
 
     tcp.join();
+    // Any network-evidence request still waiting is answered unknown before the server goes.
+    network_collector.stop();
     cover_lookups.shutdown();
   }
   static std::atomic<session_state_e> s_session_state{session_state_e::idle};

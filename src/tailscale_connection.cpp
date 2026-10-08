@@ -3,6 +3,8 @@
 #include <charconv>
 #include <chrono>
 #include <mutex>
+#include <utility>
+#include <vector>
 #include <boost/asio/ip/address.hpp>
 #include <curl/curl.h>
 #include "network.h"
@@ -92,8 +94,11 @@ namespace tailscale_connection {
     if (!remote || observed_at_ms <= 0) return output;
     try {
       const auto data = nlohmann::json::parse(status);
-      if (!data.is_object() || data.value("BackendState", "") != "Running" ||
-          !data.contains("Peer") || !data["Peer"].is_object()) return output;
+      if (!data.is_object()) return unknown(scope, "malformed_status", kind);
+      // A daemon that is stopped, logged out or still starting cannot confirm anything: that is
+      // the daemon being unavailable, not a peer that failed to match.
+      if (data.value("BackendState", "") != "Running") return unknown(scope, "localapi_unavailable", kind);
+      if (!data.contains("Peer") || !data["Peer"].is_object()) return unknown(scope, "malformed_status", kind);
       if (scope == "control_connection") {
         // An IPv4 range or matched peer alone cannot prove this TLS connection
         // used Tailscale; it must have reached the host's own tailnet address.
@@ -158,21 +163,118 @@ namespace tailscale_connection {
 #endif
   }
 
-  nlohmann::json observe(std::string_view remote_ip, std::string_view local_ip, std::string_view scope) {
+#ifdef POLARIS_TESTS
+  namespace {
+    std::mutex test_reader_mutex;
+    status_collector_t::reader_t test_reader;
+  }  // namespace
+
+  void set_default_status_reader_for_tests(status_collector_t::reader_t reader) {
+    std::lock_guard lock {test_reader_mutex};
+    test_reader = std::move(reader);
+  }
+#endif
+
+  std::optional<std::string> read_default_status() {
+#ifdef POLARIS_TESTS
+    {
+      std::unique_lock lock {test_reader_mutex};
+      if (test_reader) {
+        auto reader = test_reader;
+        lock.unlock();
+        return reader();
+      }
+    }
+#endif
+    // No child process, privilege escalation or caller-selected socket.
+    return read_status_socket(default_socket_path);
+  }
+
+  std::int64_t wall_clock_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+  }
+
+  nlohmann::json evaluate(const std::optional<std::string> &status, std::int64_t observed_at_ms,
+                          std::string_view remote_ip, std::string_view local_ip, std::string_view scope) {
     const auto kind = net::describe_client_network_path(remote_ip);
 #ifdef __linux__
-    // No frame/statistics lock, child process, cached peer inventory or privilege
-    // escalation. Concurrent callers get unknown rather than a queued daemon read.
-    static std::mutex probe_mutex;
-    std::unique_lock lock {probe_mutex, std::try_to_lock};
-    if (!lock.owns_lock()) return unknown(scope, "localapi_unavailable", kind);
-    const auto status = read_status_socket("/var/run/tailscale/tailscaled.sock");
     if (!status) return unknown(scope, "localapi_unavailable", kind);
-    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::system_clock::now().time_since_epoch()).count();
-    return from_status(*status, remote_ip, local_ip, now, scope);
+    return from_status(*status, remote_ip, local_ip, observed_at_ms, scope);
 #else
+    (void) status;
+    (void) observed_at_ms;
+    (void) local_ip;
     return unknown(scope, "unsupported_platform", kind);
 #endif
+  }
+
+  status_collector_t::status_collector_t(reader_t reader_, wall_clock_t clock_):
+      reader {std::move(reader_)}, clock {std::move(clock_)}, worker {[this] { run(); }} {}
+
+  status_collector_t::~status_collector_t() {
+    stop();
+  }
+
+  bool status_collector_t::submit(waiter_t waiter) {
+    {
+      std::lock_guard lock {mutex};
+      if (stopping || !waiter || waiting.size() >= max_waiters) return false;
+      waiting.push_back(std::move(waiter));
+    }
+    wake.notify_one();
+    return true;
+  }
+
+  void status_collector_t::stop() {
+    std::deque<waiter_t> unanswered;
+    {
+      std::lock_guard lock {mutex};
+      if (stopping && !worker.joinable()) return;
+      stopping = true;
+      unanswered.swap(waiting);
+    }
+    wake.notify_all();
+    // A read already under way finishes (bounded by the socket deadline) and answers its batch.
+    if (worker.joinable() && worker.get_id() != std::this_thread::get_id()) worker.join();
+    for (auto &waiter : unanswered) {
+      try {
+        waiter(std::nullopt, 0);
+      } catch (...) {
+      }
+    }
+  }
+
+  std::size_t status_collector_t::reads() const {
+    std::lock_guard lock {mutex};
+    return read_count;
+  }
+
+  void status_collector_t::run() {
+    for (;;) {
+      std::deque<waiter_t> batch;
+      {
+        std::unique_lock lock {mutex};
+        wake.wait(lock, [this] { return stopping || !waiting.empty(); });
+        if (stopping) return;
+        batch.swap(waiting);
+        ++read_count;
+      }
+      std::optional<std::string> status;
+      std::int64_t observed_at_ms = 0;
+      try {
+        status = reader ? reader() : std::nullopt;
+        observed_at_ms = clock ? clock() : 0;
+      } catch (...) {
+        status.reset();
+      }
+      for (auto &waiter : batch) {
+        try {
+          waiter(status, observed_at_ms);
+        } catch (...) {
+        }
+      }
+      // The status (the daemon's peer inventory) goes out of scope here, unkept.
+    }
   }
 }  // namespace tailscale_connection

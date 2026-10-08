@@ -70,6 +70,28 @@ describe('mounted Doctor Tailscale evidence', () => {
     expect(status()).toBe('tailscale_peer_unverified')
   })
 
+  it('abandons the previous stream request and asks again at once for the new stream', async () => {
+    const calls = []
+    vi.stubGlobal('fetch', vi.fn().mockImplementation((_url, options) => new Promise((resolve, reject) => {
+      calls.push({ signal: options.signal, resolve })
+      options.signal.addEventListener('abort', () => reject(new Error('aborted')))
+    })))
+    render(stats())
+    await vi.advanceTimersByTimeAsync(0)
+    expect(calls).toHaveLength(1)
+    await wrapper.setProps({ stats: stats('process.stream.43') })
+    await vi.advanceTimersByTimeAsync(0)
+    // No five-second wait for the next poll: the old request is aborted and a new one is out.
+    expect(calls[0].signal.aborted).toBe(true)
+    expect(calls).toHaveLength(2)
+    calls[1].resolve(response(answer('process.stream.43')))
+    await vi.advanceTimersByTimeAsync(0)
+    expect(status()).toBe('tailscale_peer_direct')
+    // The abandoned request's late failure does not erase the new stream's answer.
+    await vi.advanceTimersByTimeAsync(0)
+    expect(status()).toBe('tailscale_peer_direct')
+  })
+
   it('cancels the in-flight request and polling when the Doctor card leaves the page', async () => {
     let signal
     const fetch = vi.fn().mockImplementation((_url, options) => {

@@ -697,6 +697,24 @@ cannot select a different peer. Shared CGNAT addresses, MagicDNS names and an in
 alone are insufficient. Other hosts/platforms and Android split tunneling retain an unknown
 fallback. Existing access restrictions and encryption policies are unchanged.
 
+Both readouts ask the host's Tailscale daemon through its fixed local socket,
+`/var/run/tailscale/tailscaled.sock`, and stay **unknown** when that is not possible:
+
+- the daemon is stopped, logged out or still starting, or does not answer within about a second;
+- the daemon uses a different socket path (a custom `--socket`, a userspace or containerized
+  daemon), or Polaris runs sandboxed without access to that socket;
+- the daemon's status is larger than 512 KiB, which a tailnet of several hundred devices can reach;
+- many readouts are already waiting for the daemon at once.
+
+Reading the daemon never holds Polaris's other requests: a slow daemon delays only these readouts,
+and several readouts at once share one read instead of one of them reporting it unavailable.
+Nothing read from the daemon is kept after the answer.
+
+The Doctor's **Tailscale peer** readout is an administrator view of the current stream's peer
+(`/api/network/connection`, scope `peer_status`). It is not the paired route Nova uses and does not
+describe a TLS connection; when the stream ends or changes while the daemon is being read, it says
+so (`stream_changed`) rather than describing a stream that is no longer current.
+
 You can also run `tailscale ping` with the host's name on the client. The answer distinguishes
 direct, DERP and peer-relay connections. Tailscale may upgrade a relay to a direct connection
 after negotiation, so one startup answer is not a permanent description of the stream.
