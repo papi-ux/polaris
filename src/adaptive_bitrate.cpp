@@ -850,25 +850,28 @@ namespace adaptive_bitrate {
     scope_generation = generation;
     scope_app_session_id = app_session_id;
     scope_exclusive = exclusive;
-    if (generation == 0) {
-      // The stream ended. Its history is not kept: no later snapshot can be attributed to it.
-      clear_history_locked();
-      return;
-    }
-    if (history.scoped && history.session_generation == generation &&
+    if (history.scoped && generation != 0 && history.session_generation == generation &&
         history.app_session_id == app_session_id) {
       return;
     }
-    if (history.scoped) {
-      // Another stream scope, including another owner of the same generation, never inherits
-      // this one's entries.
-      clear_history_locked();
+    // Any other scope identity starts over. Nothing recorded before it, unscoped or under another
+    // scope (including another owner of the same generation), is proven to belong to it, so none of it
+    // is kept, and neither is the diagnostic copy of the newest network input. Controller state is not
+    // touched. An ended stream (scope 0) keeps no history.
+    clear_history_locked();
+    last_input_available = false;
+    last_input_packet_loss_percent = 0.0;
+    last_input_rtt_ms = 0.0;
+    if (generation == 0) {
+      return;
     }
-    // Entries recorded since the last reset belong to the stream this scope starts.
     history.scoped = true;
     history.session_generation = generation;
     history.app_session_id = app_session_id;
-    record_history_locked("scope_started", "session_scope");
+    // One explicit snapshot of the controller as this scope finds it, then only changes after it.
+    const auto status = effective_status_locked();
+    last_history_decision = decision_key_t {target_bitrate_kbps.load(std::memory_order_relaxed), status.state, status.reason};
+    record_history_locked("scope_started", "initial_scope_snapshot");
   }
 
   bool begin_live_bitrate_session_recreation(

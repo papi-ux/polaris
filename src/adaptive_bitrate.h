@@ -54,7 +54,8 @@ namespace adaptive_bitrate {
    *   reached the encoder backend;
    * - encoder_initialized: a new encoder reported its initial rate;
    * - applied_unknown: live updates stopped or the controller reset, so no applied rate is proven;
-   * - scope_started: this history began for its stream scope.
+   * - scope_started: this history began for its stream scope. It is a snapshot of the controller as the
+   *   scope found it; nothing recorded before the scope began is kept or attributed to it.
    */
   struct history_entry_t {
     std::uint64_t sequence = 0;

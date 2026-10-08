@@ -1418,7 +1418,7 @@ TEST(AdaptiveBitrateHistory, AnotherStreamScopeNeverInheritsEntries) {
   EXPECT_EQ(history.app_session_id, "history-owner-b");
   EXPECT_EQ(history.dropped, 0u);
 
-  // A reset leaves nothing a later scope could read as its own, and an ended stream keeps nothing.
+  // A reset leaves the history unscoped, and an ended stream keeps nothing.
   adaptive_bitrate::reset();
   history = history_now();
   EXPECT_FALSE(history.scoped);
@@ -1446,5 +1446,43 @@ TEST(AdaptiveBitrateHistory, RecordingLeavesTheControllerSnapshotUnchanged) {
   EXPECT_EQ(plain.reason, with_history.reason);
   EXPECT_EQ(plain.active, with_history.active);
   EXPECT_EQ(adaptive_bitrate::get_doctor_state().revision, with_history.history.entries.back().operator_revision);
+  leave_history_clean();
+}
+
+TEST(AdaptiveBitrateHistory, ANewScopeWithoutAResetKeepsNothingRecordedBeforeIt) {
+  start_history_scope();
+  apply_current_request(true);
+  adaptive_bitrate::update_network_stats(0.0, 9.0);
+
+  // The stream ends, the controller keeps moving unscoped, and a new scope begins with no reset.
+  adaptive_bitrate::set_session_scope(0, {}, false);
+  adaptive_bitrate::set_live_bitrate(15000);
+  adaptive_bitrate::set_live_bitrate(16000);
+  EXPECT_TRUE(history_now().entries.size() >= 2u);
+  EXPECT_FALSE(history_now().scoped);
+  const auto before_scope = adaptive_bitrate::get_state();
+  adaptive_bitrate::set_session_scope(k_history_generation + 1, "history-owner-c", true);
+
+  const auto history = history_now();
+  ASSERT_TRUE(history.scoped);
+  EXPECT_EQ(history.session_generation, k_history_generation + 1);
+  ASSERT_EQ(history.entries.size(), 1u);
+  const auto &snapshot = history.entries[0];
+  EXPECT_EQ(snapshot.kind, "scope_started");
+  EXPECT_EQ(snapshot.cause, "initial_scope_snapshot");
+  EXPECT_EQ(snapshot.requested_bitrate_kbps, 16000);
+  EXPECT_EQ(snapshot.state, before_scope.state);
+  EXPECT_EQ(snapshot.reason, before_scope.reason);
+  // The previous scope's input is not this scope's input; the controller's own EWMA is untouched.
+  EXPECT_FALSE(snapshot.input_available);
+  EXPECT_EQ(adaptive_bitrate::get_state().ewma_rtt_ms, before_scope.ewma_rtt_ms);
+  EXPECT_EQ(adaptive_bitrate::get_state().target_bitrate_kbps, before_scope.target_bitrate_kbps);
+
+  // Only a later change is recorded after the snapshot.
+  adaptive_bitrate::set_live_bitrate(16000);
+  EXPECT_EQ(history_now().entries.size(), 1u);
+  adaptive_bitrate::set_live_bitrate(17000);
+  ASSERT_EQ(history_now().entries.size(), 2u);
+  EXPECT_EQ(history_now().entries[1].requested_bitrate_kbps, 17000);
   leave_history_clean();
 }
