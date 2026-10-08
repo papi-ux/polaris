@@ -754,6 +754,10 @@ namespace stream_recorder {
     return detail::save_replay_at(std::chrono::steady_clock::now());
   }
 
+  detail::save_result_t save_replay_result() {
+    return detail::save_replay_result_at(std::chrono::steady_clock::now());
+  }
+
   std::string detail::save_replay_at(std::chrono::steady_clock::time_point now) {
     auto result = save_replay_result_at(now);
     return result.status == save_status_e::saved ? std::move(result.path) : std::string {};
@@ -810,6 +814,7 @@ namespace stream_recorder {
           snapshot.keyframes = snapshot_keyframes;
           snapshot.span = snapshot_span;
           lease.admitted = true;
+          result.admitted = true;
         }
       }
     } catch (...) {
@@ -944,8 +949,9 @@ namespace stream_recorder {
     return detail::replay_stats_at(std::chrono::steady_clock::now());
   }
 
-  replay_stats_t detail::replay_stats_at(std::chrono::steady_clock::time_point now) {
-    std::lock_guard lock(mutex);
+  /// The replay statistics; the caller holds `mutex`. Shared by replay_stats_at() and
+  /// recorder_status_at() so each takes the (non-recursive) lock exactly once.
+  static replay_stats_t replay_stats_locked(std::chrono::steady_clock::time_point now) {
     // A status read is a freshness boundary too: expired packets are released here, so an
     // idle buffer frees its memory and stale packets cannot reappear on a later read.
     expire_replay(now);
@@ -989,6 +995,27 @@ namespace stream_recorder {
     stats.snapshot_keyframes = snapshot_keyframes;
     stats.snapshot_span = snapshot_span;
     return stats;
+  }
+
+  replay_stats_t detail::replay_stats_at(std::chrono::steady_clock::time_point now) {
+    std::lock_guard lock(mutex);
+    return replay_stats_locked(now);
+  }
+
+  recorder_status_t recorder_status() {
+    return detail::recorder_status_at(std::chrono::steady_clock::now());
+  }
+
+  recorder_status_t detail::recorder_status_at(std::chrono::steady_clock::time_point now) {
+    recorder_status_t status;
+    std::lock_guard lock(mutex);
+    // One critical section: start/stop_recording() and load_config() change these under the
+    // same lock, so the combination reported is one that existed. No filesystem access here.
+    status.mode = cfg.mode;
+    status.recording = recording.load();
+    status.file = recording_file;
+    status.replay = replay_stats_locked(now);
+    return status;
   }
 
 #ifdef POLARIS_TESTS

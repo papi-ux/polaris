@@ -20,6 +20,7 @@
 // local includes
 #include "artwork_sweep.h"
 #include "process.h"
+#include "stream_recorder.h"
 #include "thread_safe.h"
 
 namespace stream_stats {
@@ -96,7 +97,32 @@ namespace confighttp {
     const std::string &cert, const std::string &key,
     const std::function<void(unsigned short, std::function<void()>)> &ready
   );
+  // Serve the production recording routes, registered by the same function start() uses (CSRF
+  // wrapper and handler authentication included), on an owned loopback TLS listener.
+  void run_recording_routes_for_tests(
+    const std::string &cert, const std::string &key,
+    const std::function<void(unsigned short, std::function<void()>)> &ready
+  );
 #endif
+
+  /**
+   * @brief Assemble the GET /api/recording/status payload from one recorder snapshot.
+   *
+   * The legacy keys (status, recording, mode, file) keep their meaning; `replay` is additive.
+   * `recording` and `mode` are independent facts. Durations are whole milliseconds by arrival
+   * time, not presentation time; a buffered run is stored raw video starting at a keyframe, not
+   * a save guarantee or a playable clip. No session identity, output directory or error text.
+   */
+  nlohmann::json build_recording_status_json(const stream_recorder::recorder_status_t &status);
+
+  /**
+   * @brief Assemble the POST /api/recording/save-replay payload.
+   *
+   * The legacy keys (status, file) keep their meaning. `outcome` is always present; `captured`
+   * is the admitted snapshot or null; `kind` is present only when a raw video file was saved.
+   * No error text, errno or session identity.
+   */
+  nlohmann::json build_save_replay_json(const stream_recorder::detail::save_result_t &result);
 
   /**
    * @brief Assemble the GET /api/settings/metadata payload.

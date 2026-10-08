@@ -9426,12 +9426,7 @@ namespace confighttp {
 
     print_req(request);
 
-    auto file = stream_recorder::save_replay();
-
-    nlohmann::json tree;
-    tree["status"] = !file.empty();
-    tree["file"] = file;
-    send_response(response, tree);
+    send_response(response, build_save_replay_json(stream_recorder::save_replay_result()));
   }
 
   /**
@@ -9447,15 +9442,163 @@ namespace confighttp {
 
     print_req(request);
 
-    auto mode = stream_recorder::current_mode();
+    send_response(response, build_recording_status_json(stream_recorder::recorder_status()));
+  }
+
+  namespace {
+    std::int64_t whole_ms(std::chrono::steady_clock::duration duration) {
+      // Recorder durations are never negative, so truncation is the floor.
+      return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+    }
+
+    const char *recording_mode_name(stream_recorder::mode_t mode) {
+      return mode == stream_recorder::mode_t::disabled   ? "disabled" :
+             mode == stream_recorder::mode_t::continuous ? "continuous" :
+                                                           "replay_buffer";
+    }
+
+    const char *window_limit_name(stream_recorder::window_limit_e limit) {
+      switch (limit) {
+        case stream_recorder::window_limit_e::duration:
+          return "duration";
+        case stream_recorder::window_limit_e::payload_cap:
+          return "payload_cap";
+        case stream_recorder::window_limit_e::entry_cap:
+          return "entry_cap";
+        case stream_recorder::window_limit_e::configuration:
+          return "configuration";
+        case stream_recorder::window_limit_e::selection:
+          return "selection";
+        case stream_recorder::window_limit_e::codec:
+          return "codec";
+        case stream_recorder::window_limit_e::discontinuity:
+          return "discontinuity";
+        case stream_recorder::window_limit_e::none:
+          break;
+      }
+      return "none";
+    }
+
+    nlohmann::json codec_name(int video_format) {
+      switch (video_format) {
+        case 0:
+          return "h264";
+        case 1:
+          return "hevc";
+        case 2:
+          return "av1";
+        case 3:
+          return "pyrowave";
+        default:
+          return nullptr;
+      }
+    }
+
+    const char *save_outcome_name(stream_recorder::detail::save_status_e status) {
+      using stream_recorder::detail::save_status_e;
+      switch (status) {
+        case save_status_e::saved:
+          return "saved";
+        case save_status_e::busy:
+          return "busy";
+        case save_status_e::disabled:
+          return "disabled";
+        case save_status_e::empty:
+          return "empty";
+        case save_status_e::storage_error:
+          break;
+      }
+      return "storage_error";
+    }
+  }  // namespace
+
+  nlohmann::json build_recording_status_json(const stream_recorder::recorder_status_t &status) {
+    const auto &replay = status.replay;
     nlohmann::json tree;
+    // Legacy keys, unchanged in meaning. `recording` is the continuous writer, independent of `mode`.
     tree["status"] = true;
-    tree["recording"] = stream_recorder::is_recording();
-    tree["mode"] = (mode == stream_recorder::mode_t::disabled      ? "disabled" :
-                    mode == stream_recorder::mode_t::continuous     ? "continuous" :
-                                                                      "replay_buffer");
-    tree["file"] = stream_recorder::current_file();
-    send_response(response, tree);
+    tree["recording"] = status.recording;
+    tree["mode"] = recording_mode_name(status.mode);
+    tree["file"] = status.file;
+
+    nlohmann::json run;
+    run["present"] = replay.keyframe_start_run;
+    run["packets"] = replay.packets;
+    run["bytes"] = replay.bytes;
+    run["keyframes"] = replay.run_keyframes;
+    run["arrival_span_ms"] = whole_ms(replay.run_span);
+    run["front_age_ms"] = whole_ms(replay.run_front_age);
+
+    nlohmann::json snapshot;
+    snapshot["packets"] = replay.snapshot_packets;
+    snapshot["bytes"] = replay.snapshot_bytes;
+    snapshot["keyframes"] = replay.snapshot_keyframes;
+    snapshot["arrival_span_ms"] = whole_ms(replay.snapshot_span);
+
+    nlohmann::json save;
+    save["in_progress"] = replay.save_in_progress;
+    save["snapshot"] = std::move(snapshot);
+    save["completed"] = replay.saves_completed;
+    save["failed"] = replay.saves_failed;
+    save["refused_busy"] = replay.saves_refused_busy;
+
+    nlohmann::json budgets;
+    budgets["max_payload_bytes"] = replay.max_bytes;
+    budgets["max_entries"] = replay.max_packets;
+    budgets["max_unique_payload_bytes"] = replay.max_unique_payload_bytes;
+    budgets["max_metadata_entries"] = replay.max_metadata_entries;
+    budgets["unique_payload_bytes"] = replay.unique_payload_bytes;
+    budgets["metadata_entries"] = replay.metadata_entries;
+
+    nlohmann::json window;
+    window["configured_duration_s"] = std::chrono::duration_cast<std::chrono::seconds>(replay.duration).count();
+    window["buffered_run"] = std::move(run);
+    window["last_accepted_keyframe_age_ms"] = replay.last_accepted_keyframe_age ?
+                                                nlohmann::json(whole_ms(*replay.last_accepted_keyframe_age)) :
+                                                nlohmann::json(nullptr);
+    window["awaiting_keyframe"] = replay.awaiting_keyframe;
+    window["last_window_limit"] = window_limit_name(replay.last_window_limit);
+    window["session_selected"] = replay.selected_generation != 0;
+    window["save"] = std::move(save);
+    window["budgets"] = std::move(budgets);
+    tree["replay"] = std::move(window);
+    return tree;
+  }
+
+  nlohmann::json build_save_replay_json(const stream_recorder::detail::save_result_t &result) {
+    const bool saved = result.status == stream_recorder::detail::save_status_e::saved;
+    nlohmann::json tree;
+    // Legacy keys, unchanged in meaning: true and the published path only when saved.
+    tree["status"] = saved;
+    tree["file"] = saved ? result.path : std::string {};
+    tree["outcome"] = save_outcome_name(result.status);
+    if (result.admitted) {
+      nlohmann::json captured;
+      captured["packets"] = result.packets;
+      captured["bytes"] = result.bytes;
+      captured["keyframes"] = result.keyframes;
+      captured["arrival_span_ms"] = whole_ms(result.span);
+      captured["codec"] = codec_name(result.video_format);
+      tree["captured"] = std::move(captured);
+    } else {
+      tree["captured"] = nullptr;
+    }
+    if (saved) {
+      // The codec's elementary video stream as captured: no container, no audio.
+      tree["kind"] = "raw_video_bitstream";
+    }
+    return tree;
+  }
+
+  /**
+   * @brief Register the host-admin recording routes: start() and the test listener share this.
+   * Mutating routes keep the CSRF wrapper; every handler authenticates itself.
+   */
+  static void register_recording_routes(https_server_t &server) {
+    server.resource["^/api/recording/start$"]["POST"] = withCsrf(startRecording);
+    server.resource["^/api/recording/stop$"]["POST"] = withCsrf(stopRecording);
+    server.resource["^/api/recording/save-replay$"]["POST"] = withCsrf(saveReplay);
+    server.resource["^/api/recording/status$"]["GET"] = getRecordingStatus;
   }
 
 
@@ -10595,6 +10738,18 @@ namespace confighttp {
     server.start([&](unsigned short port) { ready(port, [&]() { server.stop(); }); });
   }
 
+  void run_recording_routes_for_tests(
+    const std::string &cert, const std::string &key,
+    const std::function<void(unsigned short, std::function<void()>)> &ready
+  ) {
+    // Exactly the production recording route table: same wrappers, same handlers.
+    https_server_t server {cert, key};
+    server.config.address = "127.0.0.1";
+    server.config.port = 0;
+    register_recording_routes(server);
+    server.start([&](unsigned short port) { ready(port, [&]() { server.stop(); }); });
+  }
+
   void run_console_app_routes_for_tests(
     const std::string &cert, const std::string &key,
     const std::function<void(unsigned short, std::function<void()>)> &ready
@@ -10904,10 +11059,7 @@ namespace confighttp {
     server.resource["^/api/support/network-path-probe$"]["GET"] = getNetworkPathProbe;
     server.resource["^/api/host/power$"]["GET"] = getHostPower;
     server.resource["^/api/support/gamescope-helper$"]["GET"] = getGamescopeHelperProbe;
-    server.resource["^/api/recording/start$"]["POST"] = withCsrf(startRecording);
-    server.resource["^/api/recording/stop$"]["POST"] = withCsrf(stopRecording);
-    server.resource["^/api/recording/save-replay$"]["POST"] = withCsrf(saveReplay);
-    server.resource["^/api/recording/status$"]["GET"] = getRecordingStatus;
+    register_recording_routes(server);
 #ifdef __linux__
     server.resource["^/api/browser-stream/status$"]["GET"] = getBrowserStreamStatus;
     server.resource["^/api/browser-stream/session/start$"]["POST"] = withCsrf(postBrowserStreamStart);
