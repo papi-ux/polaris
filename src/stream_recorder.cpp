@@ -304,7 +304,10 @@ namespace stream_recorder {
   }
 
   mode_t current_mode() {
-    return cfg.mode;
+    // The mode load_config() last published. cfg.mode is mutex-only state; this is
+    // called per encoded packet on the broadcast thread, so it reads the atomic
+    // hint (as push_packet's fast path does) instead of taking the lock.
+    return mode_hint.load(std::memory_order_relaxed);
   }
 
   std::string current_file() {
