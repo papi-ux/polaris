@@ -8,9 +8,11 @@
 // - an unmocked same-origin /api request is refused and recorded;
 // - the exact GitHub Polaris release endpoints get a deterministic "no update";
 // - every other request is refused before it leaves the browser, and recorded.
-// Every main-document HTML response must carry the served build's source identity.
-// Violations and pending checks are reconciled in the case's own teardown, where any
-// of them fails the case.
+// Every main-document HTML response must carry the served build's source identity,
+// and a passing case must have loaded at least one such document.
+// The fixture owns the context's close: guards stay installed until the context has
+// actually closed, and only then are violations and pending checks reconciled in the
+// case's own teardown, where any of them fails the case.
 import { test as base, expect } from '@playwright/test'
 
 const SOURCE_META = 'polaris-e2e-source'
@@ -22,6 +24,12 @@ const NO_UPDATE_RELEASE = {
   html_url: 'https://example.invalid/polaris-e2e-no-update', assets: [],
 }
 const SETTLE_TIMEOUT_MS = 10000
+const CLOSE_DRAIN_TIMEOUT_MS = 5000
+
+// scripts/e2e-frontend-identity.mjs encodes schema 1 exactly like this.
+function schemaOneIdentity({ sourceSha, sourceFingerprint }) {
+  return Buffer.from(JSON.stringify({ schema: 1, sourceSha, sourceFingerprint })).toString('base64url')
+}
 
 function mockedFrontendMetadata(testInfo) {
   const metadata = testInfo.config.metadata?.mockedFrontend
@@ -42,8 +50,14 @@ function mockedFrontendMetadata(testInfo) {
     if (typeof metadata.identity !== 'string' || !/^[A-Za-z0-9_-]+$/.test(metadata.identity)) {
       problems.push('identity is not a base64url token')
     }
-    for (const key of ['sourceSha', 'sourceFingerprint']) {
-      if (typeof metadata[key] !== 'string' || !metadata[key]) problems.push(`${key} is missing`)
+    if (typeof metadata.sourceSha !== 'string' || !/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(metadata.sourceSha)) {
+      problems.push('sourceSha is not a full Git object id')
+    }
+    if (typeof metadata.sourceFingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(metadata.sourceFingerprint)) {
+      problems.push('sourceFingerprint is not a sha256 hex digest')
+    }
+    if (!problems.length && metadata.identity !== schemaOneIdentity(metadata)) {
+      problems.push('identity is not the schema 1 token for this sourceSha and sourceFingerprint')
     }
   }
   if (problems.length) {
@@ -84,15 +98,28 @@ export const test = base.extend({
     const metadata = mockedFrontendMetadata(testInfo)
     const violations = []
     const pending = new Set()
-    let finalized = false
-    const violation = (message) => {
-      if (!finalized) violations.push(message)
-    }
-    // Every asynchronous check is tracked and can only resolve; teardown awaits them.
+    const observed = { verifiedDocuments: 0, releaseResponses: { releases: 0, latest: 0 } }
+    const violation = (message) => violations.push(message)
+    // Every asynchronous check and route handler is tracked and can only resolve;
+    // teardown awaits them.
     const track = (work) => {
       const promise = Promise.resolve().then(work).catch((error) => violation(`internal check failed: ${error?.message || error}`))
       pending.add(promise)
       promise.finally(() => pending.delete(promise))
+      return promise
+    }
+    // Wait (bounded) until nothing is pending; work tracked meanwhile is waited for too.
+    const drain = async (timeoutMs, stage) => {
+      const deadline = Date.now() + timeoutMs
+      while (pending.size && Date.now() < deadline) {
+        let timer
+        await Promise.race([
+          Promise.allSettled([...pending]),
+          new Promise((resolve) => { timer = setTimeout(resolve, Math.min(100, deadline - Date.now())) }),
+        ])
+        clearTimeout(timer)
+      }
+      if (pending.size) violation(`${pending.size} check(s) did not settle within ${timeoutMs} ms ${stage}`)
     }
 
     if (serviceWorkers !== 'block') {
@@ -100,7 +127,7 @@ export const test = base.extend({
     }
     testInfo.annotations.push({ type: 'mocked-frontend-source', description: `${metadata.sourceSha} ${metadata.sourceFingerprint}` })
 
-    await context.route('**/*', async (route) => {
+    await context.route('**/*', (route) => track(async () => {
       const request = route.request()
       const method = request.method()
       let url
@@ -124,7 +151,9 @@ export const test = base.extend({
           }
         } else if (url.origin === RELEASES_ORIGIN && method === 'GET' && !url.search
             && (url.pathname === RELEASES_PATH || url.pathname === `${RELEASES_PATH}/latest`)) {
-          await route.fulfill({ json: url.pathname === RELEASES_PATH ? [] : NO_UPDATE_RELEASE })
+          const list = url.pathname === RELEASES_PATH
+          await route.fulfill({ json: list ? [] : NO_UPDATE_RELEASE })
+          observed.releaseResponses[list ? 'releases' : 'latest'] += 1
         } else {
           violation(`external request refused ${method} ${url.origin}${url.pathname}`)
           await route.abort('blockedbyclient')
@@ -135,7 +164,7 @@ export const test = base.extend({
           violation(`routing ${method} ${url.origin}${url.pathname} failed: ${error?.message || error}`)
         }
       }
-    })
+    }))
     // WebSocket traffic is not HTTP routing; refuse it the same way, without connecting.
     await context.routeWebSocket(/.*/, (socket) => {
       violation(`WebSocket refused ${socket.url()}`)
@@ -169,20 +198,32 @@ export const test = base.extend({
           violation(`main document ${response.url()} has ${identities.length} ${SOURCE_META} meta tags (expected 1)`)
         } else if (identities[0] !== metadata.identity) {
           violation(`main document ${response.url()} was built from ${identities[0]}, not this checkout's ${metadata.identity}`)
+        } else {
+          observed.verifiedDocuments += 1
         }
       })
     })
 
     await use(context)
 
-    // Reconcile in the case itself: settle every pending check (bounded), then fail on
-    // anything recorded. Requests after this point are still refused, but not reported.
-    const deadline = Date.now() + SETTLE_TIMEOUT_MS
-    while (pending.size && Date.now() < deadline) {
-      await Promise.race([Promise.allSettled([...pending]), new Promise((resolve) => setTimeout(resolve, 100))])
+    // The fixture, not the base fixture, closes the context, so guards stay active until
+    // close completes. The base close that follows is then a no-op apart from its video
+    // handling (BrowserContext.close returns at once on a closed context).
+    await drain(SETTLE_TIMEOUT_MS, 'before the context closed')
+    try {
+      await context.close({ reason: testInfo.status === 'timedOut'
+        ? `Test timeout of ${testInfo.timeout}ms exceeded.` : 'Test ended.' })
+    } catch (error) {
+      violation(`closing the context failed: ${error?.message || error}`)
     }
-    if (pending.size) violation(`${pending.size} source identity check(s) did not settle within ${SETTLE_TIMEOUT_MS} ms`)
-    finalized = true
+    await drain(CLOSE_DRAIN_TIMEOUT_MS, 'after the context closed')
+
+    // A passing case is source-verified only if it loaded at least one checked document.
+    if (testInfo.status === 'passed' && observed.verifiedDocuments === 0 && !violations.length) {
+      violation('no main HTML document was loaded and verified, so the case is not source-verified')
+    }
+    testInfo.annotations.push({ type: 'mocked-frontend-observed', description: JSON.stringify({
+      ...observed, violations: violations.length, unsettled: pending.size }) })
     if (violations.length) {
       throw new Error(`Mocked frontend lane violations:\n- ${violations.join('\n- ')}`)
     }
