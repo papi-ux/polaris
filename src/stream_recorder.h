@@ -215,6 +215,9 @@ namespace stream_recorder {
       std::size_t bytes = 0;           ///< Their payload bytes
       int video_format = -1;           ///< The snapshot run's codec
       std::uint64_t generation = 0;    ///< The session selected when the save was admitted
+      /// A run was captured under the lock (saved, or a storage error after capture). Busy,
+      /// disabled, empty and a failed admission leave it false and capture nothing.
+      bool admitted = false;
       std::size_t keyframes = 0;       ///< Keyframes in the admitted snapshot
       std::chrono::steady_clock::duration span {0};  ///< Its arrival span (not presentation duration)
       std::string error;               ///< What failed, for storage errors
@@ -251,6 +254,34 @@ namespace stream_recorder {
     int native_close(int fd);
     std::error_code native_publish(const std::filesystem::path &staging, const std::filesystem::path &final_path);
 #endif
+  }  // namespace detail
+
+  /**
+   * @brief Save the replay buffer and say how it ended (host-admin use; no new permission).
+   * Same save as save_replay(); the result also says why nothing was published.
+   */
+  detail::save_result_t save_replay_result();
+
+  /**
+   * @brief The recorder's state as one consistent read, taken under the recorder lock.
+   *
+   * `mode` is the configured mode and `recording` whether a continuous writer is open: they are
+   * independent facts (a continuous writer can stay open in any mode). `file` is that writer's
+   * path. `replay` is replay_stats() taken in the same critical section, including a save
+   * snapshot that stays in progress after the mode changes.
+   */
+  struct recorder_status_t {
+    mode_t mode = mode_t::disabled;
+    bool recording = false;
+    std::string file;
+    replay_stats_t replay;
+  };
+
+  recorder_status_t recorder_status();
+
+  namespace detail {
+    /// recorder_status() at an explicit steady-clock time (the replay expiry boundary).
+    recorder_status_t recorder_status_at(std::chrono::steady_clock::time_point now);
   }  // namespace detail
 
   /**

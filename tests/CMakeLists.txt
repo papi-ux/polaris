@@ -298,6 +298,7 @@ set(TEST_PAIRING_SOURCES
 )
 
 set(TEST_HTTP_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_recording_status_http.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_apps_stats_contention.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_lookup_routes.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_nvhttp_tls_close.cpp
