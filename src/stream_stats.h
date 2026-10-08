@@ -409,6 +409,51 @@ namespace stream_stats {
     std::int64_t risk_held_ms = -1;
   };
 
+  /** Declared in full with client media ingest below; the receipt only stores a value of it. */
+  enum class client_media_ingest_state_e;
+
+  /**
+   * Observational receipt for the newest accepted client media counter report.
+   *
+   * Diagnostic only: nothing reads it to decide anything. It keeps the two monotonic clocks apart.
+   * The host clock bounds are when the reports arrived here; the client clock bounds are the client's
+   * own counter timestamps. Neither says when the frames were encoded or sent, so which bitrate
+   * produced them stays unknown. Only the latest receipt is kept.
+   */
+  struct client_media_interval_receipt_t {
+    /// A receipt exists for the scope below.
+    bool available = false;
+    /// Epochs start at a counter baseline, a coverage gap, a counter regression or a new scope.
+    std::uint64_t epoch = 0;
+    /// 0 for the report that starts an epoch; each later accepted report adds one.
+    std::uint64_t sequence = 0;
+    /// The legacy ingest state of the report that produced this receipt.
+    client_media_ingest_state_e state {};
+    /// The legacy ingest has finished publishing this report as network evidence (observed reports only).
+    /// Set only after that publication completes, never while it is still in progress.
+    bool network_evidence_published = false;
+    /// An interval between two reports of one epoch, with both clocks representable and within the
+    /// legacy five-second coverage bound. False for an epoch start and for an unrepresentable interval.
+    bool interval_measured = false;
+    /// epoch_start, client_interval_unrepresentable or host_interval_unrepresentable when not measured.
+    std::string interval_unavailable_reason;
+    std::uint64_t frames_expected = 0;
+    std::uint64_t frames_received = 0;
+    std::uint64_t frames_lost = 0;
+    std::uint64_t client_start_ms = 0;
+    std::uint64_t client_end_ms = 0;
+    std::uint64_t client_duration_ms = 0;
+    std::chrono::steady_clock::time_point host_start {};
+    std::chrono::steady_clock::time_point host_end {};
+    std::int64_t host_duration_ms = 0;
+    /// Host steady-clock milliseconds since host_end, set only when a stats snapshot copies the receipt.
+    std::int64_t host_receipt_age_ms = 0;
+    /// Scope fence; never serialized.
+    std::string owner_uuid;
+    std::string app_session_id;
+    std::uint64_t session_generation = 0;
+  };
+
   struct stats_t {
     std::uint64_t session_generation = 0;
     std::string app_session_id;
@@ -561,6 +606,9 @@ namespace stream_stats {
     /// Live Tuning's floor for this stream, and what set it: adaptive_bitrate_min or pyrowave_advice.
     int adaptive_min_bitrate_kbps = 0;
     std::string adaptive_floor_source;
+    /// The newest client media interval receipt, copied by get_current() as an as-of diagnostic. Served
+    /// only for the scope it was recorded in; a snapshot built any other way carries none.
+    client_media_interval_receipt_t client_media_interval_receipt;
     /// Live Tuning's history, copied by get_current() from the same controller snapshot as the
     /// adaptive fields above. Serialized only for the stream scope it was recorded in; a snapshot built
     /// any other way carries none.
@@ -1278,6 +1326,8 @@ namespace stream_stats {
     /// The frames this report covers since the one before it, and how many of them were lost.
     std::uint64_t frames_expected = 0;
     std::uint64_t frames_lost = 0;
+    /// The diagnostic receipt this report produced, if it was accepted. Never a policy input.
+    std::optional<client_media_interval_receipt_t> receipt;
   };
 
   /**
@@ -1545,6 +1595,15 @@ namespace stream_stats {
 
   /** @brief The verdict as the JSON the session status and stream stats serve. */
   nlohmann::json network_verdict_json(const network_verdict_t &verdict);
+
+  /**
+   * @brief The client media interval receipt as stream stats and Doctor's advanced evidence serve it.
+   *
+   * Reads only @p stats, an as-of snapshot. The receipt appears only while that snapshot streams and its
+   * stream generation and app session match the receipt's. It carries no identity, is not action
+   * authority or a stream-health verdict, and its media-rate attribution is always unknown.
+   */
+  nlohmann::json client_media_interval_json(const stats_t &stats);
 
   /**
    * @brief Live Tuning's history as the stream stats and Doctor's advanced evidence serve it.

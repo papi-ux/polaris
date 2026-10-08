@@ -258,6 +258,104 @@ namespace stream_stats {
     std::mutex client_media_counter_mutex;
     std::optional<client_media_counter_epoch_t> last_client_media_counter_epoch;
 
+    // The newest client media interval receipt. Observational only: nothing reads it to decide
+    // anything, and it never changes the legacy counter epoch above. Guarded by
+    // client_media_counter_mutex, which is never held while taking another lock.
+    struct client_media_receipt_state_t {
+      /// An epoch is open for receipt's scope. Any invalidation clears it, so the next accepted
+      /// report starts a new epoch instead of measuring across the invalidation.
+      bool armed = false;
+      client_media_interval_receipt_t receipt;
+    };
+    client_media_receipt_state_t client_media_receipt_state;
+    std::uint64_t client_media_receipt_epochs = 0;
+
+    bool client_media_receipt_scope_matches_locked(const client_media_counters_t &sample) {
+      const auto &receipt = client_media_receipt_state.receipt;
+      return client_media_receipt_state.armed && receipt.available &&
+        receipt.owner_uuid == sample.owner_uuid && receipt.app_session_id == sample.app_session_id &&
+        receipt.session_generation == sample.session_generation;
+    }
+
+    // Caller holds client_media_counter_mutex. A baseline, coverage gap, counter regression or new
+    // scope starts an epoch; its first report measures nothing.
+    client_media_interval_receipt_t start_client_media_receipt_epoch_locked(
+        const client_media_counters_t &sample, client_media_ingest_state_e state,
+        std::chrono::steady_clock::time_point received_at) {
+      client_media_interval_receipt_t receipt;
+      receipt.available = true;
+      receipt.epoch = ++client_media_receipt_epochs;
+      receipt.sequence = 0;
+      receipt.state = state;
+      receipt.interval_unavailable_reason = "epoch_start";
+      receipt.client_end_ms = sample.client_monotonic_ms;
+      receipt.host_end = received_at;
+      receipt.owner_uuid = sample.owner_uuid;
+      receipt.app_session_id = sample.app_session_id;
+      receipt.session_generation = sample.session_generation;
+      client_media_receipt_state = client_media_receipt_state_t {true, receipt};
+      return receipt;
+    }
+
+    // Caller holds client_media_counter_mutex. Records one accepted legacy interval (observed or
+    // waiting_for_frames) between two reports of the same scope. The receipt starts unpublished; only
+    // mark_client_media_receipt_published_locked() says otherwise, once publication has completed.
+    client_media_interval_receipt_t record_client_media_receipt_interval_locked(
+        const client_media_counters_t &sample, const client_media_counter_epoch_t &previous,
+        client_media_ingest_state_e state, std::chrono::steady_clock::time_point received_at) {
+      if (!client_media_receipt_scope_matches_locked(sample)) {
+        return start_client_media_receipt_epoch_locked(sample, state, received_at);
+      }
+      constexpr std::uint64_t max_interval_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        CLIENT_MEDIA_COUNTER_MAX_GAP).count();
+      auto receipt = client_media_receipt_state.receipt;
+      receipt.sequence += 1;
+      receipt.state = state;
+      receipt.network_evidence_published = false;
+      receipt.frames_expected = sample.frames_expected - previous.sample.frames_expected;
+      receipt.frames_received = sample.frames_received - previous.sample.frames_received;
+      receipt.frames_lost = sample.frames_lost - previous.sample.frames_lost;
+      receipt.client_start_ms = previous.sample.client_monotonic_ms;
+      receipt.client_end_ms = sample.client_monotonic_ms;
+      receipt.client_duration_ms = sample.client_monotonic_ms - previous.sample.client_monotonic_ms;
+      receipt.host_start = previous.received_at;
+      receipt.host_end = received_at;
+      const auto host_elapsed = received_at - previous.received_at;
+      receipt.host_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(host_elapsed).count();
+      // The legacy gap test converts the unsigned client difference to a signed duration, so a huge
+      // difference can pass it. A receipt never claims coverage the bounds cannot represent.
+      if (receipt.client_duration_ms > max_interval_ms) {
+        receipt.interval_measured = false;
+        receipt.interval_unavailable_reason = "client_interval_unrepresentable";
+      } else if (host_elapsed < std::chrono::steady_clock::duration::zero() ||
+                 host_elapsed > CLIENT_MEDIA_COUNTER_MAX_GAP) {
+        receipt.interval_measured = false;
+        receipt.interval_unavailable_reason = "host_interval_unrepresentable";
+      } else {
+        receipt.interval_measured = true;
+        receipt.interval_unavailable_reason.clear();
+      }
+      client_media_receipt_state.receipt = receipt;
+      return receipt;
+    }
+
+    // Caller holds client_media_counter_mutex. The legacy path has finished publishing the report
+    // @p recorded describes. Marks the latest receipt only while it is still that same record (scope,
+    // epoch and sequence); a newer or invalidated receipt is left alone.
+    void mark_client_media_receipt_published_locked(const client_media_interval_receipt_t &recorded) {
+      auto &latest = client_media_receipt_state.receipt;
+      if (latest.available && latest.epoch == recorded.epoch && latest.sequence == recorded.sequence &&
+          latest.owner_uuid == recorded.owner_uuid && latest.app_session_id == recorded.app_session_id &&
+          latest.session_generation == recorded.session_generation) {
+        latest.network_evidence_published = true;
+      }
+    }
+
+    // Caller holds client_media_counter_mutex.
+    void invalidate_client_media_receipt_locked() {
+      client_media_receipt_state = client_media_receipt_state_t {};
+    }
+
     struct primary_network_observation_t {
       std::uint64_t revision = 0;
       std::chrono::steady_clock::time_point received_at {};
@@ -377,6 +475,7 @@ namespace stream_stats {
       {
         std::lock_guard<std::mutex> media_lock(client_media_counter_mutex);
         last_client_media_counter_epoch.reset();
+        invalidate_client_media_receipt_locked();
       }
       hot_network_risk.store(false, std::memory_order_relaxed);
       hot_bytes_sent.store(0, std::memory_order_relaxed);
@@ -1144,6 +1243,7 @@ namespace stream_stats {
     j["adaptive_bitrate_active"] = adaptive_bitrate_active;
     j["adaptive_bitrate_state"] = adaptive_bitrate_state;
     j["adaptive_runtime_update_supported"] = adaptive_runtime_update_supported;
+    j["client_media_interval"] = client_media_interval_json(*this);
     j["live_tuning_history"] = live_tuning_history_json(*this);
     j["doctor_live_action_scope_available"] = doctor_live_action_scope_available;
     j["idr_requests_total"] = idr_requests_total;
@@ -3515,6 +3615,7 @@ namespace stream_stats {
       advanced["recent_issue_codes"].push_back("steam_input_conflict");
     }
     advanced["network_verdict"] = network_verdict_json(verdict);
+    advanced["client_media_interval"] = client_media_interval_json(stats);
     advanced["live_tuning_history"] = live_tuning_history_json(stats);
     advanced["pacing_coverage"] = {
       {"sample_count", stats.video_policy_sample_count},
@@ -4922,6 +5023,52 @@ namespace stream_stats {
     return out;
   }
 
+  nlohmann::json client_media_interval_json(const stats_t &stats) {
+    const auto &receipt = stats.client_media_interval_receipt;
+    const bool same_scope = receipt.available && receipt.session_generation != 0 &&
+      receipt.session_generation == stats.session_generation &&
+      !receipt.app_session_id.empty() && receipt.app_session_id == stats.app_session_id;
+    const bool available = stats.streaming && same_scope;
+    nlohmann::json out = {
+      {"version", 1},
+      {"available", available},
+      {"reason", !stats.streaming ? "no_stream" : !receipt.available ? "no_receipt" :
+                 !same_scope ? "session_scope_unavailable" : "recorded"},
+      // An as-of copy of a diagnostic receipt. It decides nothing and is no verdict on the stream.
+      {"snapshot", "as_of_diagnostic"},
+      {"action_authority", false},
+      // Host arrival and client counter clocks do not locate encode or send time.
+      {"media_rate_attribution", {{"state", "unknown"}, {"reason", "unmeasured_report_timing"}}},
+    };
+    if (!available) return out;
+    out["epoch"] = receipt.epoch;
+    out["sequence"] = receipt.sequence;
+    out["ingest_state"] = std::string {from_client_media_ingest_state(receipt.state)};
+    out["network_evidence_published"] = receipt.network_evidence_published;
+    out["host_receipt_age_ms"] = receipt.host_receipt_age_ms;
+    nlohmann::json interval = {{"measured", receipt.interval_measured}};
+    if (!receipt.interval_measured) {
+      interval["unavailable_reason"] = receipt.interval_unavailable_reason;
+    } else {
+      interval["frames"] = {
+        {"expected", receipt.frames_expected},
+        {"received", receipt.frames_received},
+        {"lost", receipt.frames_lost},
+      };
+      // No frames in the interval means no loss figure, not zero loss.
+      interval["loss_available"] = receipt.frames_expected > 0;
+      interval["host_arrival"] = {{"clock", "host_steady_arrival"}, {"duration_ms", receipt.host_duration_ms}};
+      interval["client_counter"] = {
+        {"clock", "client_monotonic_counter"},
+        {"start_ms", receipt.client_start_ms},
+        {"end_ms", receipt.client_end_ms},
+        {"duration_ms", receipt.client_duration_ms},
+      };
+    }
+    out["interval"] = std::move(interval);
+    return out;
+  }
+
   nlohmann::json network_verdict_json(const network_verdict_t &verdict) {
     return {
       {"loss_basis", "video_frames_lost_after_fec"},
@@ -5141,6 +5288,7 @@ namespace stream_stats {
         last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
         result.state = client_media_ingest_state_e::baseline;
         result.accepted = true;
+        result.receipt = start_client_media_receipt_epoch_locked(sample, result.state, received_at);
         return result;
       }
 
@@ -5159,6 +5307,7 @@ namespace stream_stats {
         last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
         result.state = client_media_ingest_state_e::coverage_gap_reset;
         result.accepted = true;
+        result.receipt = start_client_media_receipt_epoch_locked(sample, result.state, received_at);
         // Accepted and never counted: reports spaced this far apart carry no loss Doctor can use,
         // and nothing else would say so.
         if (logged_media_gap_generation.exchange(sample.session_generation) != sample.session_generation) {
@@ -5176,6 +5325,7 @@ namespace stream_stats {
         last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
         result.state = client_media_ingest_state_e::counter_epoch_reset;
         result.accepted = true;
+        result.receipt = start_client_media_receipt_epoch_locked(sample, result.state, received_at);
         return result;
       }
 
@@ -5190,12 +5340,17 @@ namespace stream_stats {
       result.accepted = true;
       if (expected_delta == 0) {
         result.state = client_media_ingest_state_e::waiting_for_frames;
+        result.receipt = record_client_media_receipt_interval_locked(
+          sample, previous_epoch, result.state, received_at);
         return result;
       }
       result.media_loss_pct = packet_loss_percent(lost_delta, expected_delta);
       result.frames_expected = expected_delta;
       result.frames_lost = lost_delta;
       result.state = client_media_ingest_state_e::observed;
+      // Recorded unpublished: publication happens below, and the receipt says so only after it has.
+      result.receipt = record_client_media_receipt_interval_locked(
+        sample, previous_epoch, result.state, received_at);
     }
 
     // Serialize counter advancement with evidence publication so concurrent
@@ -5230,6 +5385,13 @@ namespace stream_stats {
       adaptive_bitrate::update_network_stats(result.media_loss_pct, host.latency_ms);
     }
     result.observation_published = true;
+    if (result.receipt) {
+      // Publication above has completed. Only now do this report's receipt, and the latest receipt if it
+      // is still this one, say so. Taken alone; nothing else is called under it.
+      std::lock_guard<std::mutex> counter_lock(client_media_counter_mutex);
+      result.receipt->network_evidence_published = true;
+      mark_client_media_receipt_published_locked(*result.receipt);
+    }
     if (logged_media_report_generation.exchange(sample.session_generation) != sample.session_generation) {
       BOOST_LOG(info) << "Doctor: client media reports reach this host for stream generation "sv
                       << sample.session_generation << "; the first counted one covered "sv
@@ -5798,7 +5960,7 @@ namespace stream_stats {
                             std::uint64_t session_generation,
                             std::string session_token) {
     std::lock_guard<std::mutex> ingest_lock(client_media_ingest_mutex);
-    std::lock_guard<std::mutex> lock(frame_timing_mutex);
+    std::unique_lock<std::mutex> lock(frame_timing_mutex);
     session_timings.erase(
       std::remove_if(session_timings.begin(), session_timings.end(),
         [&device_uuid](const session_timing_state_t &s) { return s.device_uuid == device_uuid; }),
@@ -5809,17 +5971,33 @@ namespace stream_stats {
     state.session_generation = session_generation;
     state.session_token = std::move(session_token);
     session_timings.push_back(std::move(state));
+    // Taken alone, after frame_timing_mutex is released.
+    lock.unlock();
+    std::lock_guard<std::mutex> counter_lock(client_media_counter_mutex);
+    // A new lifecycle for this owner: no earlier receipt of it is proof for this one. The legacy
+    // counter baseline is left exactly as it was.
+    if (client_media_receipt_state.receipt.owner_uuid == device_uuid) {
+      invalidate_client_media_receipt_locked();
+    }
   }
 
   void stop_session_timing(const std::string &device_uuid, std::uint64_t session_generation) {
     std::lock_guard<std::mutex> ingest_lock(client_media_ingest_mutex);
-    std::lock_guard<std::mutex> lock(frame_timing_mutex);
+    std::unique_lock<std::mutex> lock(frame_timing_mutex);
     session_timings.erase(
       std::remove_if(session_timings.begin(), session_timings.end(),
         [&device_uuid, session_generation](const session_timing_state_t &s) {
           return s.device_uuid == device_uuid && s.session_generation == session_generation;
         }),
       session_timings.end());
+    // Taken alone, after frame_timing_mutex is released. Only the ending lifecycle's receipt goes;
+    // the legacy counter baseline is left exactly as it was.
+    lock.unlock();
+    std::lock_guard<std::mutex> counter_lock(client_media_counter_mutex);
+    const auto &receipt = client_media_receipt_state.receipt;
+    if (receipt.owner_uuid == device_uuid && receipt.session_generation == session_generation) {
+      invalidate_client_media_receipt_locked();
+    }
   }
 
   void record_frame_timing(const std::string &device_uuid,
@@ -6470,6 +6648,16 @@ namespace stream_stats {
     if (const auto identity = get_single_active_session_identity()) {
       result.session_generation = identity->session_generation;
       result.app_session_id = identity->session_token;
+    }
+    {
+      // A coherent copy of the newest receipt, taken alone after the other locks are released. The
+      // serializer reads only this copy; it is an as-of diagnostic, never authority.
+      std::lock_guard<std::mutex> counter_lock(client_media_counter_mutex);
+      result.client_media_interval_receipt = client_media_receipt_state.receipt;
+    }
+    if (result.client_media_interval_receipt.available) {
+      result.client_media_interval_receipt.host_receipt_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - result.client_media_interval_receipt.host_end).count();
     }
 
     // Doctor-policy video fields are read under the same narrow lock used to

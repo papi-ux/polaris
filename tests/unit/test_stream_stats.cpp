@@ -12369,3 +12369,354 @@ TEST(StreamStatsLiveTuningHistory, GetCurrentCopiesTheControllerHistoryWithItsAd
   adaptive_bitrate::set_enabled(false);
   config::video.adaptive_bitrate.enabled = false;
 }
+
+namespace {
+  // One authenticated stream scope with the timing lifecycle the production route uses.
+  struct media_receipt_scope_t {
+    std::string owner;
+    std::uint64_t generation;
+    std::string token;
+
+    media_receipt_scope_t(std::string owner_uuid, std::uint64_t session_generation, std::string session_token):
+        owner(std::move(owner_uuid)), generation(session_generation), token(std::move(session_token)) {
+      adaptive_bitrate::set_enabled(false);
+      stream_stats::update_stream_active(false);
+      stream_stats::start_session_timing(owner, generation, token);
+      stream_stats::update_stream_active(true);
+    }
+
+    ~media_receipt_scope_t() {
+      stream_stats::stop_session_timing(owner, generation);
+      stream_stats::update_stream_active(false);
+    }
+
+    stream_stats::client_media_counters_t sample(std::uint64_t client_ms, std::uint64_t expected, std::uint64_t received) const {
+      return {
+        .owner_uuid = owner, .app_session_id = token, .session_generation = generation,
+        .client_monotonic_ms = client_ms, .frames_expected = expected, .frames_received = received,
+        .frames_lost = expected - received
+      };
+    }
+  };
+
+  stream_stats::client_media_interval_receipt_t current_receipt() {
+    return stream_stats::get_current().client_media_interval_receipt;
+  }
+}  // namespace
+
+TEST(StreamStatsMediaIntervalReceipt, KeepsExactFrameDeltasAndTheTwoClocksApart) {
+  media_receipt_scope_t scope("receipt-owner-a", 71, "receipt-launch-a");
+  const auto baseline = stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100));
+  ASSERT_EQ(baseline.state, stream_stats::client_media_ingest_state_e::baseline);
+  ASSERT_TRUE(baseline.receipt.has_value());
+  EXPECT_EQ(baseline.receipt->sequence, 0u);
+  EXPECT_FALSE(baseline.receipt->interval_measured);
+  EXPECT_EQ(baseline.receipt->interval_unavailable_reason, "epoch_start");
+
+  const auto observed = stream_stats::ingest_client_media_counters(scope.sample(2'250, 200, 196));
+  // The legacy result is unchanged by the receipt.
+  EXPECT_EQ(observed.state, stream_stats::client_media_ingest_state_e::observed);
+  EXPECT_TRUE(observed.accepted);
+  EXPECT_TRUE(observed.observation_published);
+  EXPECT_DOUBLE_EQ(observed.media_loss_pct, 4.0);
+  EXPECT_EQ(observed.frames_expected, 100u);
+  EXPECT_EQ(observed.frames_lost, 4u);
+
+  ASSERT_TRUE(observed.receipt.has_value());
+  const auto &receipt = *observed.receipt;
+  EXPECT_EQ(receipt.epoch, baseline.receipt->epoch);
+  EXPECT_EQ(receipt.sequence, 1u);
+  EXPECT_TRUE(receipt.interval_measured);
+  EXPECT_TRUE(receipt.network_evidence_published);
+  EXPECT_EQ(receipt.frames_expected, 100u);
+  EXPECT_EQ(receipt.frames_received, 96u);
+  EXPECT_EQ(receipt.frames_lost, 4u);
+  EXPECT_EQ(receipt.client_start_ms, 1'000u);
+  EXPECT_EQ(receipt.client_end_ms, 2'250u);
+  EXPECT_EQ(receipt.client_duration_ms, 1'250u);
+  // Host arrival is measured on the host's own clock, not derived from the client's.
+  EXPECT_GE(receipt.host_duration_ms, 0);
+  EXPECT_LE(receipt.host_duration_ms, 5'000);
+  EXPECT_EQ(receipt.host_duration_ms,
+            std::chrono::duration_cast<std::chrono::milliseconds>(receipt.host_end - receipt.host_start).count());
+
+  const auto stats = stream_stats::get_current();
+  EXPECT_DOUBLE_EQ(stats.packet_loss, 4.0);
+  const auto json = stream_stats::client_media_interval_json(stats);
+  EXPECT_TRUE(json.at("available").get<bool>());
+  EXPECT_EQ(json.at("sequence"), 1);
+  EXPECT_EQ(json.at("ingest_state"), "observed");
+  EXPECT_FALSE(json.at("action_authority").get<bool>());
+  EXPECT_EQ(json.at("media_rate_attribution").at("state"), "unknown");
+  EXPECT_EQ(json.at("media_rate_attribution").at("reason"), "unmeasured_report_timing");
+  const auto &interval = json.at("interval");
+  EXPECT_EQ(interval.at("frames").at("expected"), 100);
+  EXPECT_EQ(interval.at("frames").at("received"), 96);
+  EXPECT_EQ(interval.at("frames").at("lost"), 4);
+  EXPECT_EQ(interval.at("client_counter").at("clock"), "client_monotonic_counter");
+  EXPECT_EQ(interval.at("client_counter").at("duration_ms"), 1'250);
+  EXPECT_EQ(interval.at("host_arrival").at("clock"), "host_steady_arrival");
+  EXPECT_FALSE(interval.contains("encode"));
+  // No owner, app session or stream generation leaves in the receipt.
+  const auto text = json.dump();
+  EXPECT_EQ(text.find("receipt-owner-a"), std::string::npos);
+  EXPECT_EQ(text.find("receipt-launch-a"), std::string::npos);
+  EXPECT_FALSE(json.contains("session_generation"));
+}
+
+TEST(StreamStatsMediaIntervalReceipt, AZeroFrameIntervalIsRecordedButStaysANonObservation) {
+  media_receipt_scope_t scope("receipt-owner-b", 72, "receipt-launch-b");
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'000, 50, 50)).state,
+            stream_stats::client_media_ingest_state_e::baseline);
+  const auto waiting = stream_stats::ingest_client_media_counters(scope.sample(1'400, 50, 50));
+  EXPECT_EQ(waiting.state, stream_stats::client_media_ingest_state_e::waiting_for_frames);
+  EXPECT_TRUE(waiting.accepted);
+  EXPECT_FALSE(waiting.observation_published);
+  ASSERT_TRUE(waiting.receipt.has_value());
+  EXPECT_TRUE(waiting.receipt->interval_measured);
+  EXPECT_EQ(waiting.receipt->frames_expected, 0u);
+  EXPECT_FALSE(waiting.receipt->network_evidence_published);
+
+  const auto stats = stream_stats::get_current();
+  EXPECT_FALSE(stats.packet_loss_available) << "a zero-frame interval is not network evidence";
+  const auto interval = stream_stats::client_media_interval_json(stats).at("interval");
+  EXPECT_FALSE(interval.at("loss_available").get<bool>());
+}
+
+TEST(StreamStatsMediaIntervalReceipt, BaselineGapAndCounterRegressionEachStartAnEpochWithoutAnInterval) {
+  using namespace std::chrono_literals;
+  media_receipt_scope_t scope("receipt-owner-c", 73, "receipt-launch-c");
+  const auto first = stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100));
+  const auto counted = stream_stats::ingest_client_media_counters(scope.sample(2'000, 160, 160));
+  ASSERT_TRUE(first.receipt && counted.receipt);
+  EXPECT_EQ(counted.receipt->sequence, 1u);
+
+  const auto regressed = stream_stats::ingest_client_media_counters(scope.sample(3'000, 10, 10));
+  EXPECT_EQ(regressed.state, stream_stats::client_media_ingest_state_e::counter_epoch_reset);
+  ASSERT_TRUE(regressed.receipt.has_value());
+  EXPECT_GT(regressed.receipt->epoch, counted.receipt->epoch);
+  EXPECT_EQ(regressed.receipt->sequence, 0u);
+  EXPECT_FALSE(regressed.receipt->interval_measured);
+
+  stream_stats::age_client_media_counter_baseline_for_tests(6s);
+  const auto gapped = stream_stats::ingest_client_media_counters(scope.sample(3'500, 20, 20));
+  EXPECT_EQ(gapped.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+  ASSERT_TRUE(gapped.receipt.has_value());
+  EXPECT_GT(gapped.receipt->epoch, regressed.receipt->epoch);
+  EXPECT_EQ(gapped.receipt->sequence, 0u);
+  EXPECT_FALSE(gapped.receipt->interval_measured);
+  EXPECT_EQ(gapped.receipt->interval_unavailable_reason, "epoch_start");
+
+  const auto resumed = stream_stats::ingest_client_media_counters(scope.sample(4'000, 80, 79));
+  ASSERT_TRUE(resumed.receipt.has_value());
+  EXPECT_EQ(resumed.receipt->epoch, gapped.receipt->epoch);
+  EXPECT_EQ(resumed.receipt->sequence, 1u);
+  EXPECT_EQ(resumed.receipt->frames_expected, 60u);
+  EXPECT_EQ(resumed.receipt->frames_lost, 1u);
+}
+
+TEST(StreamStatsMediaIntervalReceipt, RejectedReportsKeepThePreviousReceiptAndItsTime) {
+  media_receipt_scope_t scope("receipt-owner-d", 74, "receipt-launch-d");
+  stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100));
+  const auto counted = stream_stats::ingest_client_media_counters(scope.sample(2'000, 200, 190));
+  ASSERT_TRUE(counted.receipt.has_value());
+  const auto before = current_receipt();
+
+  auto duplicate = scope.sample(2'000, 200, 190);
+  auto earlier = scope.sample(1'500, 210, 200);
+  auto impossible = scope.sample(2'500, 210, 200);
+  impossible.frames_received = 230;  // more received than expected
+  impossible.frames_lost = 0;
+  auto malformed = scope.sample(2'600, 210, 200);
+  malformed.frames_lost = 3;  // does not add up
+  auto other_token = scope.sample(2'700, 210, 200);
+  other_token.app_session_id = "receipt-launch-other";
+  auto other_generation = scope.sample(2'800, 210, 200);
+  other_generation.session_generation = scope.generation + 1;
+  for (const auto &sample : {duplicate, earlier, impossible, malformed, other_token, other_generation}) {
+    const auto rejected = stream_stats::ingest_client_media_counters(sample);
+    EXPECT_FALSE(rejected.accepted);
+    EXPECT_FALSE(rejected.receipt.has_value());
+  }
+  const auto after = current_receipt();
+  EXPECT_EQ(after.epoch, before.epoch);
+  EXPECT_EQ(after.sequence, before.sequence);
+  EXPECT_EQ(after.host_end, before.host_end) << "a rejected report must not refresh the receipt's age";
+  EXPECT_EQ(after.client_end_ms, 2'000u);
+}
+
+TEST(StreamStatsMediaIntervalReceipt, ALifecycleChangeNeverServesThePreviousScope) {
+  {
+    media_receipt_scope_t scope("receipt-owner-e", 75, "receipt-launch-e");
+    stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100));
+    ASSERT_TRUE(stream_stats::ingest_client_media_counters(scope.sample(2'000, 150, 150)).receipt.has_value());
+
+    // The same lifecycle starts again: the legacy baseline continues, but no receipt crosses it.
+    stream_stats::start_session_timing(scope.owner, scope.generation, scope.token);
+    EXPECT_FALSE(current_receipt().available);
+    const auto continued = stream_stats::ingest_client_media_counters(scope.sample(3'000, 200, 200));
+    EXPECT_EQ(continued.state, stream_stats::client_media_ingest_state_e::observed);
+    EXPECT_TRUE(continued.observation_published);
+    ASSERT_TRUE(continued.receipt.has_value());
+    EXPECT_EQ(continued.receipt->sequence, 0u);
+    EXPECT_FALSE(continued.receipt->interval_measured);
+
+    // Another owner's snapshot, an idle snapshot and an ended one never serve this receipt.
+    auto snapshot = stream_stats::get_current();
+    ASSERT_TRUE(stream_stats::client_media_interval_json(snapshot).at("available").get<bool>());
+    auto other_owner = snapshot;
+    other_owner.app_session_id = "receipt-launch-replacement";
+    EXPECT_EQ(stream_stats::client_media_interval_json(other_owner).at("reason"), "session_scope_unavailable");
+    EXPECT_FALSE(stream_stats::client_media_interval_json(other_owner).at("available").get<bool>());
+    EXPECT_FALSE(stream_stats::client_media_interval_json(other_owner).contains("interval"));
+    auto other_generation = snapshot;
+    other_generation.session_generation = scope.generation + 1;
+    EXPECT_FALSE(stream_stats::client_media_interval_json(other_generation).at("available").get<bool>());
+    auto idle = snapshot;
+    idle.streaming = false;
+    EXPECT_EQ(stream_stats::client_media_interval_json(idle).at("reason"), "no_stream");
+    EXPECT_FALSE(stream_stats::client_media_interval_json(idle).contains("interval"));
+
+    stream_stats::stop_session_timing(scope.owner, scope.generation);
+    EXPECT_FALSE(current_receipt().available);
+  }
+  {
+    // The stream ending clears the receipt even while the timing lifecycle is still registered.
+    media_receipt_scope_t scope("receipt-owner-e1", 74, "receipt-launch-e1");
+    stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100));
+    ASSERT_TRUE(current_receipt().available);
+    stream_stats::update_stream_active(false);
+    EXPECT_FALSE(current_receipt().available);
+  }
+  // A new generation for the same owner inherits nothing.
+  media_receipt_scope_t next("receipt-owner-e", 76, "receipt-launch-e2");
+  EXPECT_FALSE(current_receipt().available);
+  const auto first = stream_stats::ingest_client_media_counters(next.sample(5'000, 10, 10));
+  EXPECT_EQ(first.state, stream_stats::client_media_ingest_state_e::baseline);
+  ASSERT_TRUE(first.receipt.has_value());
+  EXPECT_EQ(first.receipt->session_generation, 76u);
+  EXPECT_FALSE(first.receipt->interval_measured);
+}
+
+TEST(StreamStatsMediaIntervalReceipt, AnUnrepresentableIntervalIsNeverReportedAsMeasured) {
+  using namespace std::chrono_literals;
+  {
+    // The legacy gap test converts this unsigned client difference to a signed duration. Whatever
+    // state it reaches is inherited and left alone; the receipt never claims the interval.
+    // The difference converts to a negative signed duration, so the legacy path counts it: an inherited
+    // edge case this change records but does not alter.
+    media_receipt_scope_t scope("receipt-owner-f", 77, "receipt-launch-f");
+    stream_stats::ingest_client_media_counters(scope.sample(1, 100, 100));
+    const auto huge = stream_stats::ingest_client_media_counters(scope.sample(1 + (1ull << 63) + 10, 120, 120));
+    EXPECT_EQ(huge.state, stream_stats::client_media_ingest_state_e::observed);
+    ASSERT_TRUE(huge.receipt.has_value());
+    EXPECT_EQ(huge.receipt->sequence, 1u);
+    EXPECT_FALSE(huge.receipt->interval_measured);
+    EXPECT_EQ(huge.receipt->interval_unavailable_reason, "client_interval_unrepresentable");
+    const auto json = stream_stats::client_media_interval_json(stream_stats::get_current());
+    EXPECT_FALSE(json.at("interval").at("measured").get<bool>());
+    EXPECT_FALSE(json.at("interval").contains("frames"));
+    EXPECT_FALSE(json.at("interval").contains("client_counter"));
+  }
+  {
+    // A host arrival that precedes the report before it cannot be a measured interval.
+    media_receipt_scope_t scope("receipt-owner-g", 78, "receipt-launch-g");
+    stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100));
+    stream_stats::age_client_media_counter_baseline_for_tests(-1h);
+    const auto backwards = stream_stats::ingest_client_media_counters(scope.sample(2'000, 160, 160));
+    EXPECT_EQ(backwards.state, stream_stats::client_media_ingest_state_e::observed);
+    ASSERT_TRUE(backwards.receipt.has_value());
+    EXPECT_EQ(backwards.receipt->sequence, 1u);
+    EXPECT_FALSE(backwards.receipt->interval_measured);
+    EXPECT_EQ(backwards.receipt->interval_unavailable_reason, "host_interval_unrepresentable");
+  }
+}
+
+TEST(StreamStatsMediaIntervalReceipt, TheSerializerReadsItsOwnSnapshotAndAgreesInStatsAndDoctor) {
+  media_receipt_scope_t scope("receipt-owner-h", 79, "receipt-launch-h");
+  stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100));
+  stream_stats::ingest_client_media_counters(scope.sample(2'000, 130, 128));
+  const auto snapshot = stream_stats::get_current();
+  const auto as_of = stream_stats::client_media_interval_json(snapshot);
+  ASSERT_EQ(as_of.at("sequence"), 1);
+  EXPECT_EQ(as_of.at("interval").at("frames").at("expected"), 30);
+  EXPECT_EQ(as_of.at("interval").at("frames").at("lost"), 2);
+
+  // Cumulative loss must not fall (2 -> 3), or the legacy validation would correctly start a counter-reset epoch
+  // and this case would no longer test a later receipt in the same epoch.
+  const auto later = stream_stats::ingest_client_media_counters(scope.sample(3'000, 190, 187));
+  ASSERT_EQ(later.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(later.observation_published);
+  EXPECT_EQ(later.frames_expected, 60u);
+  EXPECT_EQ(later.frames_lost, 1u);
+  ASSERT_TRUE(later.receipt.has_value());
+  EXPECT_EQ(later.receipt->epoch, as_of.at("epoch").get<std::uint64_t>());
+  EXPECT_EQ(later.receipt->sequence, 2u);
+  EXPECT_TRUE(later.receipt->interval_measured);
+  EXPECT_TRUE(later.receipt->network_evidence_published);
+  EXPECT_EQ(later.receipt->frames_expected, 60u);
+  EXPECT_EQ(later.receipt->frames_received, 59u);
+  EXPECT_EQ(later.receipt->frames_lost, 1u);
+
+  EXPECT_EQ(stream_stats::client_media_interval_json(snapshot), as_of) << "an old snapshot stays as of its copy";
+  const auto current = stream_stats::client_media_interval_json(stream_stats::get_current());
+  EXPECT_EQ(current.at("sequence"), 2);
+  EXPECT_EQ(current.at("epoch"), as_of.at("epoch"));
+  EXPECT_EQ(current.at("interval").at("frames").at("lost"), 1);
+
+  EXPECT_EQ(nlohmann::json::parse(snapshot.to_json()).at("client_media_interval"), as_of);
+  const auto doctor = stream_stats::build_doctor_json(snapshot, nlohmann::json::object());
+  EXPECT_EQ(doctor.at("advanced_evidence").at("client_media_interval"), as_of);
+
+  stream_stats::stats_t empty {};
+  empty.streaming = true;
+  empty.session_generation = scope.generation;
+  empty.app_session_id = scope.token;
+  const auto none = stream_stats::client_media_interval_json(empty);
+  EXPECT_FALSE(none.at("available").get<bool>());
+  EXPECT_EQ(none.at("reason"), "no_receipt");
+  EXPECT_EQ(none.at("media_rate_attribution").at("state"), "unknown");
+}
+
+TEST(StreamStatsMediaIntervalReceipt, PublicationIsMarkedExactlyWhenTheLegacyResultPublished) {
+  media_receipt_scope_t scope("receipt-owner-p", 80, "receipt-launch-p");
+  const auto expect_marker_matches = [](const stream_stats::client_media_ingest_result_t &result) {
+    ASSERT_TRUE(result.receipt.has_value());
+    EXPECT_EQ(result.receipt->network_evidence_published, result.observation_published);
+    const auto latest = current_receipt();
+    EXPECT_EQ(latest.epoch, result.receipt->epoch);
+    EXPECT_EQ(latest.sequence, result.receipt->sequence);
+    EXPECT_EQ(latest.network_evidence_published, result.observation_published);
+  };
+
+  const auto baseline = stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100));
+  EXPECT_FALSE(baseline.observation_published);
+  expect_marker_matches(baseline);
+
+  const auto observed = stream_stats::ingest_client_media_counters(scope.sample(2'000, 150, 149));
+  ASSERT_EQ(observed.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(observed.observation_published);
+  expect_marker_matches(observed);
+  EXPECT_TRUE(stream_stats::client_media_interval_json(stream_stats::get_current()).at("network_evidence_published").get<bool>());
+
+  const auto waiting = stream_stats::ingest_client_media_counters(scope.sample(2'500, 150, 149));
+  ASSERT_EQ(waiting.state, stream_stats::client_media_ingest_state_e::waiting_for_frames);
+  EXPECT_FALSE(waiting.observation_published);
+  expect_marker_matches(waiting);
+
+  // The same lifecycle starts again: the legacy report is still counted and published, and the receipt
+  // that starts the new diagnostic epoch says so, although it measures no interval.
+  stream_stats::start_session_timing(scope.owner, scope.generation, scope.token);
+  const auto rearmed = stream_stats::ingest_client_media_counters(scope.sample(3'000, 200, 198));
+  ASSERT_EQ(rearmed.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(rearmed.observation_published);
+  ASSERT_TRUE(rearmed.receipt.has_value());
+  EXPECT_EQ(rearmed.receipt->sequence, 0u);
+  EXPECT_FALSE(rearmed.receipt->interval_measured);
+  expect_marker_matches(rearmed);
+
+  const auto regressed = stream_stats::ingest_client_media_counters(scope.sample(3'500, 10, 10));
+  ASSERT_EQ(regressed.state, stream_stats::client_media_ingest_state_e::counter_epoch_reset);
+  EXPECT_FALSE(regressed.observation_published);
+  expect_marker_matches(regressed);
+}
