@@ -42,6 +42,9 @@ namespace {
               listening.set_value(port);
             }, [&]() {
               if (!entered.exchange(true)) apps_entered.set_value();
+            }, [&](std::function<bool(std::size_t, std::chrono::milliseconds)> wait) {
+              // Set before the listener is ready, so it happens-before the test's first use.
+              wait_network_queued = std::move(wait);
             });
         } catch (...) {
           if (!stop_server) listening.set_exception(std::current_exception());
@@ -54,6 +57,8 @@ namespace {
     void TearDown() override {
       if (stop_server) stop_server();
       if (server.valid()) server.get();
+      // The wait referred to the server's own collector, which is gone now.
+      wait_network_queued = nullptr;
       tailscale_connection::set_default_status_reader_for_tests({});
       proc::proc.clear_running_app_for_tests();
       config::sunshine.username = old_username;
@@ -86,6 +91,8 @@ namespace {
     std::promise<void> apps_entered;
     std::atomic<bool> entered {false};
     std::function<void()> stop_server;
+    /// True once that many accepted network readouts are queued for a read not yet started.
+    std::function<bool(std::size_t, std::chrono::milliseconds)> wait_network_queued;
     std::future<void> server;
     unsigned short port = 0;
   };
@@ -282,6 +289,11 @@ TEST_F(apps_stats_contention, OverlappingReadoutsShareTheDaemonAndDoNotHoldTheSe
   ASSERT_TRUE(daemon.wait_entered());
   auto second = request("/api/network/connection");
   auto third = request("/api/network/connection");
+  // Declared after the futures above, so a failed check below frees the daemon before they join.
+  auto release_before_join = util::fail_guard([&] { daemon.release(); });
+  // Both overlapping readouts are accepted waiters while the first read is held, so they must
+  // share the next read; within the requests' own 2 s client deadlines.
+  ASSERT_TRUE(wait_network_queued(2, 1s));
   // The admin server still answers other requests while the daemon is stalled.
   auto stats = request("/api/stats/stream");
   ASSERT_EQ(stats.wait_for(1s), std::future_status::ready);
@@ -290,6 +302,7 @@ TEST_F(apps_stats_contention, OverlappingReadoutsShareTheDaemonAndDoNotHoldTheSe
 
   daemon.release();
   release.disable();
+  release_before_join.disable();
   for (auto *reply : {&first, &second, &third}) {
     const auto [status, body] = reply->get();
     ASSERT_TRUE(status.starts_with("200")) << status;

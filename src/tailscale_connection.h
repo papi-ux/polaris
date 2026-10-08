@@ -1,6 +1,7 @@
 /** Read-only, address-free Tailscale evidence. Never a media-quality or trust policy. */
 #pragma once
 
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -67,6 +68,11 @@ namespace tailscale_connection {
     void stop();
     /// Daemon reads performed so far.
     std::size_t reads() const;
+#ifdef POLARIS_TESTS
+    /// Tests only: true once at least `count` accepted waiters are queued for a read that has not
+    /// started, within `timeout`; false on timeout or once stopped. Never wakes the worker.
+    bool wait_queued_for_tests(std::size_t count, std::chrono::milliseconds timeout);
+#endif
 
   private:
     void run();
@@ -80,6 +86,10 @@ namespace tailscale_connection {
     /// Waiters taken by the worker and not yet answered; counts toward max_waiters.
     std::size_t in_flight = 0;
     std::size_t read_count = 0;
+#ifdef POLARIS_TESTS
+    /// Separate from `wake`, so a test waiting on the queue never takes the worker's wakeup.
+    std::condition_variable queued_for_tests;
+#endif
     std::thread worker;
   };
 

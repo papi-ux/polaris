@@ -10573,10 +10573,16 @@ namespace confighttp {
   void run_apps_stats_server_for_tests(
     const std::string &cert, const std::string &key,
     const std::function<void(unsigned short, std::function<void()>)> &ready,
-    const std::function<void()> &before_apps
+    const std::function<void()> &before_apps,
+    const std::function<void(std::function<bool(std::size_t, std::chrono::milliseconds)>)> &network_queued
   ) {
     https_server_t server {cert, key};
     tailscale_connection::status_collector_t network_collector;
+    if (network_queued) {
+      network_queued([&network_collector](std::size_t count, std::chrono::milliseconds timeout) {
+        return network_collector.wait_queued_for_tests(count, timeout);
+      });
+    }
     auto stop_collector = util::fail_guard([&]() { network_collector.stop(); });
     server.config.address = "127.0.0.1";
     server.config.port = 0;

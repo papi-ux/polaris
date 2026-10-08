@@ -223,6 +223,9 @@ namespace tailscale_connection {
       waiting.push_back(std::move(waiter));
     }
     wake.notify_one();
+#ifdef POLARIS_TESTS
+    queued_for_tests.notify_all();
+#endif
     return true;
   }
 
@@ -235,6 +238,9 @@ namespace tailscale_connection {
       unanswered.swap(waiting);
     }
     wake.notify_all();
+#ifdef POLARIS_TESTS
+    queued_for_tests.notify_all();
+#endif
     // A read already under way finishes (bounded by the socket deadline) and answers its batch.
     if (worker.joinable() && worker.get_id() != std::this_thread::get_id()) worker.join();
     for (auto &waiter : unanswered) {
@@ -249,6 +255,14 @@ namespace tailscale_connection {
     std::lock_guard lock {mutex};
     return read_count;
   }
+
+#ifdef POLARIS_TESTS
+  bool status_collector_t::wait_queued_for_tests(std::size_t count, std::chrono::milliseconds timeout) {
+    std::unique_lock lock {mutex};
+    queued_for_tests.wait_for(lock, timeout, [&] { return stopping || waiting.size() >= count; });
+    return !stopping && waiting.size() >= count;
+  }
+#endif
 
   void status_collector_t::run() {
     for (;;) {

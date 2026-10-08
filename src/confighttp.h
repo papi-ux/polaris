@@ -80,11 +80,15 @@ namespace confighttp {
   void start();
 
 #ifdef POLARIS_TESTS
-  // Serve the production read-only handlers on an owned loopback TLS listener.
+  // Serve the production read-only handlers on an owned loopback TLS listener. Before `ready`,
+  // `network_queued` (when given) receives a wait on this server's own network collector: true
+  // once that many accepted readouts are queued for a read not yet started. It is valid only until
+  // this function returns.
   void run_apps_stats_server_for_tests(
     const std::string &cert, const std::string &key,
     const std::function<void(unsigned short, std::function<void()>)> &ready,
-    const std::function<void()> &before_apps
+    const std::function<void()> &before_apps,
+    const std::function<void(std::function<bool(std::size_t, std::chrono::milliseconds)>)> &network_queued = {}
   );
   // Serve the production console app list, save and launch handlers (#204 entry tests) on an owned
   // loopback TLS listener.
