@@ -12737,6 +12737,21 @@ TEST(StreamStatsMediaIntervalReceipt, LargeClientTimestampsWithSmallDeltasStillC
       EXPECT_EQ(next.receipt->sequence, 0u);
       EXPECT_FALSE(next.receipt->interval_measured);
     }
+    if (span.to == UINT64_MAX) {
+      // A wrapped counter is a rejected older timestamp, even when unsigned subtraction alone
+      // would produce a small gap. It must not replace or refresh the last accepted receipt.
+      const auto before_wrap = current_receipt();
+      const auto wrapped = stream_stats::ingest_client_media_counters(scope.sample(1, 220, 217));
+      EXPECT_EQ(wrapped.state, stream_stats::client_media_ingest_state_e::non_monotonic);
+      EXPECT_FALSE(wrapped.accepted);
+      EXPECT_FALSE(wrapped.observation_published);
+      EXPECT_FALSE(wrapped.receipt.has_value());
+      const auto after_wrap = current_receipt();
+      EXPECT_EQ(after_wrap.epoch, before_wrap.epoch);
+      EXPECT_EQ(after_wrap.sequence, before_wrap.sequence);
+      EXPECT_EQ(after_wrap.host_end, before_wrap.host_end);
+      EXPECT_EQ(after_wrap.client_end_ms, UINT64_MAX);
+    }
   }
 }
 
