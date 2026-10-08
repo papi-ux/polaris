@@ -11230,6 +11230,208 @@ TEST(BenchmarkRunReconnectTests, ACurrentOlderCallerNeverAbortsANewerRow) {
   EXPECT_FALSE(snapshot_benchmark_run("reconnect-newer-row-caller").has_value());
 }
 
+namespace {
+  // Registers one more timing generation for a device and stops exactly that generation on scope exit,
+  // even after a fatal ASSERT. ArmedRunFixture only stops the generation it registered itself.
+  struct TimingRegistrationGuard {
+    std::string device_uuid;
+    std::uint64_t session_generation;
+
+    TimingRegistrationGuard(std::string device_uuid_in, std::uint64_t session_generation_in):
+        device_uuid(std::move(device_uuid_in)), session_generation(session_generation_in) {
+      stream_stats::start_session_timing(device_uuid, session_generation);
+    }
+
+    ~TimingRegistrationGuard() {
+      stream_stats::stop_session_timing(device_uuid, session_generation);
+    }
+  };
+
+  // One more stats client for the scope of a test; it changes the population revision both ways.
+  struct ExtraClientGuard {
+    std::string ip;
+
+    ExtraClientGuard(std::string ip_in, const std::string &name): ip(std::move(ip_in)) {
+      stream_stats::add_client(ip, name);
+    }
+
+    ~ExtraClientGuard() {
+      stream_stats::remove_client(ip);
+    }
+  };
+
+  // Everything start_benchmark_run could change on a run it rejects.
+  struct ArmedStateSnapshot {
+    stream_stats::benchmark_run_state_e state;
+    stream_stats::benchmark_abort_reason_e abort_reason;
+    std::uint64_t owning_session_generation;
+    std::chrono::steady_clock::time_point armed_monotonic;
+    std::optional<std::chrono::steady_clock::time_point> started_monotonic;
+    std::optional<std::chrono::steady_clock::time_point> stopped_monotonic;
+    std::optional<std::chrono::steady_clock::time_point> frozen_monotonic;
+    std::uint64_t client_population_revision_at_arm;
+    std::vector<std::size_t> stage_sizes;
+    std::vector<std::size_t> stage_capacities;
+    std::vector<std::size_t> stage_counts;
+
+    bool operator==(const ArmedStateSnapshot &) const = default;
+  };
+
+  std::optional<ArmedStateSnapshot> armed_state_of(const std::string &run_id) {
+    std::optional<ArmedStateSnapshot> snapshot;
+    stream_stats::with_benchmark_run(run_id, [&](stream_stats::benchmark_run_t &run) {
+      ArmedStateSnapshot s {run.state, run.abort_reason, run.owning_session_generation, run.armed_monotonic,
+                            run.started_monotonic, run.stopped_monotonic, run.frozen_monotonic,
+                            run.client_population_revision_at_arm, {}, {}, {}};
+      for (const auto *stage : {&run.capture_to_encode, &run.encode_to_send_release, &run.capture_to_send_release}) {
+        for (const auto *samples : {&stage->start_offset_us, &stage->end_offset_us, &stage->duration_us}) {
+          s.stage_sizes.push_back(samples->size());
+          s.stage_capacities.push_back(samples->capacity());
+        }
+        for (const auto count : {stage->accepted_count, stage->excluded_started_before_window,
+                                 stage->excluded_completed_after_window, stage->overflow_count, stage->invalid_count}) {
+          s.stage_counts.push_back(count);
+        }
+      }
+      snapshot = std::move(s);
+    });
+    return snapshot;
+  }
+}  // namespace
+
+TEST(BenchmarkRunStartGenerationTests, AStaleGenerationAfterAReconnectIsRejectedAndLeavesTheArmUntouched) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("192.0.2.40", "device-start-stale-generation", 2, "start-stale-generation");
+  const auto before = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(before.has_value());
+  ASSERT_EQ(before->state, stream_stats::benchmark_run_state_e::armed);
+
+  // The same device reconnects: generation 3 replaces generation 2. A session for this device is
+  // active, but it is not the run's session.
+  TimingRegistrationGuard reconnect(fixture.device_uuid, 3);
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 2, true),
+            stream_stats::benchmark_run_start_result_e::rejected_session_no_longer_active);
+
+  const auto after = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(after.has_value());
+  EXPECT_TRUE(*after == *before) << "a rejected start changes nothing on the armed run";
+  EXPECT_FALSE(after->started_monotonic.has_value());
+}
+
+TEST(BenchmarkRunStartGenerationTests, TheCurrentGenerationOnAnOlderArmKeepsWrongSessionPrecedence) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("192.0.2.41", "device-start-current-on-old", 2, "start-current-on-old");
+  TimingRegistrationGuard reconnect(fixture.device_uuid, 3);
+  const auto before = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(before.has_value());
+
+  // The route passes the current identity; the run's owner check still answers first.
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 3, true),
+            stream_stats::benchmark_run_start_result_e::rejected_wrong_session);
+  const auto after = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(after.has_value());
+  EXPECT_TRUE(*after == *before);
+}
+
+TEST(BenchmarkRunStartGenerationTests, TheExactRegisteredGenerationStartsEvenWhenItIsNotTheLargestSeen) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("192.0.2.42", "device-start-exact-generation", 5, "start-exact-generation");
+  {
+    TimingRegistrationGuard newer(fixture.device_uuid, 6);
+    EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 5, true),
+              stream_stats::benchmark_run_start_result_e::rejected_session_no_longer_active);
+  }
+  // Test-only order: generation 5 registered again after 6. The check is exact equality with the
+  // registered scope, not "newest generation wins".
+  TimingRegistrationGuard exact(fixture.device_uuid, 5);
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 5, true),
+            stream_stats::benchmark_run_start_result_e::started);
+}
+
+TEST(BenchmarkRunStartGenerationTests, AnotherDeviceRegisteredAtTheSameGenerationDoesNotCount) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("192.0.2.43", "device-start-missing-timing", 9, "start-missing-timing");
+  stream_stats::stop_session_timing(fixture.device_uuid, 9);
+  // A different device holds a timing scope with the very same generation number.
+  TimingRegistrationGuard other(fixture.device_uuid + "-other", 9);
+  const auto before = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(before.has_value());
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 9, true),
+            stream_stats::benchmark_run_start_result_e::rejected_session_no_longer_active);
+  const auto after = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(after.has_value());
+  EXPECT_TRUE(*after == *before);
+}
+
+TEST(BenchmarkRunStartGenerationTests, AGenerationMismatchIsRejectedInEitherDirectionUpToTheMaximum) {
+  BenchmarkControlPlaneGuard guard(true);
+  constexpr std::uint64_t max_generation = UINT64_MAX;
+  {
+    // Registered generation newer than the run's.
+    ArmedRunFixture fixture("192.0.2.44", "device-start-mismatch-newer", max_generation - 1, "start-mismatch-newer");
+    TimingRegistrationGuard registered(fixture.device_uuid, max_generation);
+    EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, max_generation - 1, true),
+              stream_stats::benchmark_run_start_result_e::rejected_session_no_longer_active);
+    EXPECT_EQ(armed_state_of(fixture.run_id)->state, stream_stats::benchmark_run_state_e::armed);
+  }
+  {
+    // Registered generation older than the run's (test-only order).
+    ArmedRunFixture fixture("192.0.2.45", "device-start-mismatch-older", max_generation, "start-mismatch-older");
+    TimingRegistrationGuard registered(fixture.device_uuid, max_generation - 1);
+    EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, max_generation, true),
+              stream_stats::benchmark_run_start_result_e::rejected_session_no_longer_active);
+    EXPECT_EQ(armed_state_of(fixture.run_id)->state, stream_stats::benchmark_run_state_e::armed);
+  }
+  {
+    // The maximum itself, registered exactly, starts.
+    ArmedRunFixture fixture("192.0.2.46", "device-start-maximum", max_generation, "start-maximum");
+    EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, max_generation, true),
+              stream_stats::benchmark_run_start_result_e::started);
+  }
+}
+
+TEST(BenchmarkRunStartGenerationTests, EarlierRejectionsKeepPrecedenceOverAStaleGeneration) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("192.0.2.47", "device-start-precedence", 2, "start-precedence");
+  TimingRegistrationGuard reconnect(fixture.device_uuid, 3);
+  const auto before = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(before.has_value());
+
+  stream_stats::set_benchmark_control_plane_enabled(false);
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 2, true),
+            stream_stats::benchmark_run_start_result_e::rejected_control_plane_not_enabled);
+  stream_stats::set_benchmark_control_plane_enabled(true);
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 2, false),
+            stream_stats::benchmark_run_start_result_e::rejected_caller_not_authorized_as_harness);
+  EXPECT_EQ(stream_stats::start_benchmark_run("start-precedence-missing", fixture.device_uuid, 2, true),
+            stream_stats::benchmark_run_start_result_e::rejected_run_not_found);
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid + "-other", 2, true),
+            stream_stats::benchmark_run_start_result_e::rejected_wrong_session);
+  {
+    ExtraClientGuard second_client("192.0.2.48", "device-start-precedence-second");
+    EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 2, true),
+              stream_stats::benchmark_run_start_result_e::rejected_population_changed_since_arm);
+  }
+  const auto after = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(after.has_value());
+  EXPECT_TRUE(*after == *before) << "no earlier rejection mutates the armed run either";
+}
+
+TEST(BenchmarkRunStartGenerationTests, ANonArmedRunAnswersNotArmedBeforeTheGenerationCheck) {
+  BenchmarkControlPlaneGuard guard(true);
+  ArmedRunFixture fixture("192.0.2.49", "device-start-not-armed", 2, "start-not-armed");
+  ASSERT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 2, true),
+            stream_stats::benchmark_run_start_result_e::started);
+  TimingRegistrationGuard reconnect(fixture.device_uuid, 3);
+  // The active run is reconciled first (aborted for the generation change), so it is no longer armed.
+  EXPECT_EQ(stream_stats::start_benchmark_run(fixture.run_id, fixture.device_uuid, 2, true),
+            stream_stats::benchmark_run_start_result_e::rejected_run_not_in_armed_state);
+  const auto after = armed_state_of(fixture.run_id);
+  ASSERT_TRUE(after.has_value());
+  EXPECT_EQ(after->state, stream_stats::benchmark_run_state_e::aborted);
+  EXPECT_EQ(after->abort_reason, stream_stats::benchmark_abort_reason_e::session_generation_changed);
+}
+
 #ifdef __linux__
 TEST(StreamStatsDoctorTests, ForecastStaysSilentUntilCaptureSourcesWereEvaluated) {
   // Nothing has been looked at: no backend, no forecast, no finding. The Doctor must never
