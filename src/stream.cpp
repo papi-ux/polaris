@@ -1898,6 +1898,7 @@ namespace stream {
           true,  // is_video
           packet->is_idr(),
           packet->frame_index(),
+          session->session_generation,
           session->config.monitor.videoFormat
         );
       }
@@ -3078,6 +3079,12 @@ namespace stream {
         stream_generation_boundary_mutex
       };
 
+      // Producers have joined and packet_owner.close_and_wait() has drained
+      // admitted deliveries. Retire replay input here so late queued packets
+      // cannot repopulate this generation's buffer. Admission uses this same
+      // generation boundary lock.
+      stream_recorder::session_ended(session.session_generation);
+
       // Remove this client from multi-client stats
       doctor_actions::session_ended(session.device_uuid, session.session_generation);
       stream_stats::remove_client(
@@ -3289,6 +3296,14 @@ namespace stream {
         }
       }
 
+      // Select replay input from admitted lifecycle state before a producer can
+      // publish a packet. This is host recorder policy, not client permission.
+      // Watchers/input-only sessions are never the sole eligible replay source;
+      // any overlap suspends replay until only one eligible session remains.
+      stream_recorder::session_started(
+        session.session_generation,
+        !session.watch_only && !session.vrr.watch_or_input_only
+      );
       session.audioThread = std::thread {audioThread, &session};
       session.videoThread = std::thread {videoThread, &session};
 
