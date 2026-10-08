@@ -324,6 +324,7 @@ set(TEST_HTTP_SOURCES
 
 set(TEST_NETWORK_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_network.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_tailscale_connection.cpp
 )
 
 set(TEST_AUDIO_SOURCES

@@ -61,6 +61,7 @@
 
 // local includes
 #include "config.h"
+#include "tailscale_connection.h"
 #include "configuration_store.h"
 #include "live_tuning.h"
 #include "config_file_update.h"
@@ -6561,6 +6562,52 @@ namespace nvhttp {
     return get_verified_cert(candidate, request->path);
   }
 
+  namespace {
+    /// The paired caller's permission to read its own connection evidence: view, as before.
+    std::optional<SimpleWeb::StatusCode> network_connection_refusal(const crypto::p_named_cert_t &named_cert) {
+      if (!named_cert) return SimpleWeb::StatusCode::client_error_unauthorized;
+      if (!(named_cert->perm & PERM::_allow_view)) return SimpleWeb::StatusCode::client_error_forbidden;
+      return std::nullopt;
+    }
+
+    void write_network_connection(const resp_https_t &response, const nlohmann::json &output) {
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      headers.emplace("Content-Type", "application/json");
+      headers.emplace("Cache-Control", "no-store");
+      response->write(output.dump(), headers);
+    }
+  }  // namespace
+
+  /**
+   * The paired route. Authorization is checked before the daemon is asked, and again before the
+   * answer is written, since a device can be unpaired while the read is under way. The daemon read
+   * happens on `collector`'s worker, never on this server's thread.
+   */
+  void networkConnection(tailscale_connection::status_collector_t &collector, resp_https_t response, req_https_t request) {
+    const auto candidate = std::static_pointer_cast<crypto::named_cert_t>(request->userp);
+    const std::string path = request->path;
+    if (const auto refusal = network_connection_refusal(get_verified_cert(candidate, path))) {
+      response->write(*refusal);
+      return;
+    }
+    // Query/body parameters cannot choose another peer. This describes this
+    // paired TLS connection only; it never claims to have observed video UDP.
+    auto remote = net::addr_to_normalized_string(request->remote_endpoint().address());
+    auto local = net::addr_to_normalized_string(request->local_endpoint().address());
+    const bool accepted = collector.submit(
+      [response, candidate, path, remote, local](const std::optional<std::string> &status, std::int64_t observed_at_ms) {
+        if (const auto refusal = network_connection_refusal(get_verified_cert(candidate, path))) {
+          response->write(*refusal);
+          return;
+        }
+        write_network_connection(response, tailscale_connection::evaluate(status, observed_at_ms, remote, local));
+      });
+    if (!accepted) {
+      // Too many reads already waiting, or the server is stopping: say so now rather than queue.
+      write_network_connection(response, tailscale_connection::evaluate(std::nullopt, 0, remote, local));
+    }
+  }
+
   bool record_client_seen(const crypto::p_named_cert_t &candidate,
                           std::int64_t seen_at,
                           bool persist = true,
@@ -8587,6 +8634,8 @@ namespace nvhttp {
     bool host_audio {};
 
     https_server_t https_server {config::nvhttp.cert, config::nvhttp.pkey};
+    // Declared after the server so it is destroyed first; stopped explicitly below as well.
+    tailscale_connection::status_collector_t network_collector;
     http_server_t http_server;
 
     https_server.verify = verify_https_client;
@@ -8718,6 +8767,8 @@ namespace nvhttp {
       features["artwork_choices_v1"] = nonblank_artwork_api_key(
         config::steamgriddb_api_key());
       features["support_client_report_v1"] = true;
+      // Route availability, not proof of a running/accessible Tailscale daemon.
+      features["network_connection_v1"] = true;
       features["session_lifecycle"] = true;
       features["session_stop_v1"] = true;
       features["device_profiles"] = true;
@@ -12556,6 +12607,9 @@ namespace nvhttp {
 
     https_server.resource["^/polaris/v1/session/report$"]["POST"] = polarisSessionReport;
     https_server.resource["^/polaris/v1/support/client-report$"]["POST"] = polarisClientSupportReport;
+    https_server.resource["^/polaris/v1/network/connection$"]["GET"] = [&network_collector](resp_https_t response, req_https_t request) {
+      networkConnection(network_collector, std::move(response), std::move(request));
+    };
     https_server.resource["^/polaris/v1/optimizer/profile/clear$"]["POST"] = polarisClearOptimizerProfile;
     https_server.resource["^/polaris/v1/optimizer/profiles$"]["GET"] = polarisOptimizerProfiles;
     https_server.resource["^/polaris/v1/optimizer/profiles/clear$"]["POST"] = polarisClearOptimizerProfiles;
@@ -12638,6 +12692,8 @@ namespace nvhttp {
 
     ssl.join();
     tcp.join();
+    // Any network-evidence request still waiting is answered unknown before the server goes.
+    network_collector.stop();
 
     // Configuration API requests can still access pending sessions here.
     std::lock_guard lock {client_state_mutex};
@@ -12785,6 +12841,8 @@ namespace nvhttp {
         server {cert_file, key_file} {}
 
     https_server_t server;
+    // After the server: destroyed first. The test reader hook replaces the daemon read.
+    tailscale_connection::status_collector_t network_collector;
     bool host_audio = false;
     std::atomic<unsigned short> port {0};
     std::thread worker;
@@ -12804,6 +12862,9 @@ namespace nvhttp {
     // The production /resume handler too (#204: a refused resume changes nothing on the host).
     state->server.resource["^/resume$"]["GET"] = [state](resp_https_t response, req_https_t request) {
       resume(state->host_audio, std::move(response), std::move(request));
+    };
+    state->server.resource["^/polaris/v1/network/connection$"]["GET"] = [state](resp_https_t response, req_https_t request) {
+      networkConnection(state->network_collector, std::move(response), std::move(request));
     };
     state->worker = std::thread([state]() {
       try {
@@ -12825,6 +12886,7 @@ namespace nvhttp {
     if (impl->worker.joinable()) {
       impl->worker.join();
     }
+    impl->network_collector.stop();
   }
 
   unsigned short launch_route_for_tests_t::port() const {

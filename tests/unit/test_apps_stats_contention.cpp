@@ -7,9 +7,13 @@
 #include <src/crypto.h>
 #include <src/process.h>
 #include <src/stream_stats.h>
+#include <src/tailscale_connection.h>
 #include <src/utility.h>
 
 #include <atomic>
+#include <condition_variable>
+#include <ctime>
+#include <mutex>
 #include <fstream>
 #include <future>
 
@@ -50,6 +54,7 @@ namespace {
     void TearDown() override {
       if (stop_server) stop_server();
       if (server.valid()) server.get();
+      tailscale_connection::set_default_status_reader_for_tests({});
       proc::proc.clear_running_app_for_tests();
       config::sunshine.username = old_username;
       config::sunshine.api_key = old_key;
@@ -141,4 +146,158 @@ TEST_F(apps_stats_contention, BothReadOnlyHandlersStillRequireAuthentication) {
       EXPECT_EQ(body.find("Fixture A"), std::string::npos);
     }
   });
+}
+
+TEST_F(apps_stats_contention, NetworkEvidenceRequiresAuthenticationBeforeReadingTheDaemon) {
+  proc::proc.with_session_lifecycle_lock_for_tests([&]() {
+    auto reply = request("/api/network/connection", "wrong-fixture-key");
+    ASSERT_EQ(reply.wait_for(500ms), std::future_status::ready);
+    const auto [status, body] = reply.get();
+    EXPECT_TRUE(status.starts_with("401"));
+    EXPECT_EQ(body.find("tailscaled"), std::string::npos);
+  });
+}
+
+TEST_F(apps_stats_contention, IdleNetworkEvidenceCannotBeSelectedWithQueryParameters) {
+  ASSERT_FALSE(stream_stats::get_current().streaming);
+  const auto [status, body] = request("/api/network/connection?peer=100.64.0.2&hostname=private.example.ts.net").get();
+  ASSERT_TRUE(status.starts_with("200"));
+  const auto evidence = nlohmann::json::parse(body);
+  EXPECT_EQ(evidence.at("schema_version"), 1);
+  EXPECT_EQ(evidence.at("status"), "unknown");
+  EXPECT_EQ(evidence.at("tailscale").at("scope"), "peer_status");
+  EXPECT_EQ(evidence.at("tailscale").at("confirmed"), false);
+  EXPECT_EQ(evidence.at("tailscale").at("reason"), "no_active_stream");
+  EXPECT_EQ(body.find("100.64.0.2"), std::string::npos);
+  EXPECT_EQ(body.find("private.example.ts.net"), std::string::npos);
+  const auto stats = nlohmann::json::parse(request("/api/stats/stream").get().second);
+  EXPECT_EQ(stats.at("stream_instance_id"), "");
+}
+
+namespace {
+  constexpr auto fence_client_ip = "127.0.0.168";
+  constexpr auto fence_device = "tailscale-fence-device";
+
+  /// A running daemon that knows the stream's client as one online, recently active peer.
+  std::string admin_tailnet_status() {
+    const auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::tm utc {};
+    gmtime_r(&now, &utc);
+    char written[32] {};
+    std::strftime(written, sizeof(written), "%Y-%m-%dT%H:%M:%SZ", &utc);
+    return nlohmann::json {
+      {"BackendState", "Running"}, {"TailscaleIPs", {"100.64.0.1"}},
+      {"Peer", {{"nodekey:admin-fixture", {{"TailscaleIPs", {fence_client_ip}}, {"Online", true}, {"Active", true},
+        {"LastWrite", written}, {"CurAddr", ""}, {"Relay", "fixture-region"}, {"PeerRelay", ""}}}}},
+    }.dump();
+  }
+
+  /// A daemon read that blocks until released, counting how many reads began.
+  struct stalled_admin_daemon_t {
+    std::mutex mutex;
+    std::condition_variable changed;
+    int entered = 0;
+    bool open = false;
+
+    std::optional<std::string> read() {
+      std::unique_lock lock {mutex};
+      ++entered;
+      changed.notify_all();
+      if (!changed.wait_for(lock, std::chrono::seconds(10), [this] { return open; })) return std::nullopt;
+      return admin_tailnet_status();
+    }
+
+    bool wait_entered(int count = 1) {
+      std::unique_lock lock {mutex};
+      return changed.wait_for(lock, std::chrono::seconds(5), [&] { return entered >= count; });
+    }
+
+    void release() {
+      std::lock_guard lock {mutex};
+      open = true;
+      changed.notify_all();
+    }
+  };
+
+  /// An active stream from fence_client_ip under `generation`, ended when the guard goes.
+  auto start_fixture_stream(std::uint64_t generation) {
+    stream_stats::add_client(fence_client_ip, "Tailscale fence fixture", generation);
+    stream_stats::start_session_timing(fence_device, generation);
+    return util::fail_guard([generation]() {
+      stream_stats::stop_session_timing(fence_device, generation);
+      stream_stats::remove_client(fence_client_ip, generation);
+    });
+  }
+}  // namespace
+
+// An active stream's peer evidence, read off the admin server's thread, for that stream only.
+TEST_F(apps_stats_contention, ActiveStreamPeerEvidenceNamesItsStreamAndNoAddress) {
+  auto stream = start_fixture_stream(920168);
+  tailscale_connection::set_default_status_reader_for_tests([] { return std::optional<std::string> {admin_tailnet_status()}; });
+  const auto [status, body] = request("/api/network/connection").get();
+  ASSERT_TRUE(status.starts_with("200")) << status;
+  const auto evidence = nlohmann::json::parse(body);
+  EXPECT_EQ(evidence.at("status"), "tailscale");
+  EXPECT_EQ(evidence.at("tailscale").at("scope"), "peer_status");
+  EXPECT_EQ(evidence.at("tailscale").at("transport"), "derp");
+  EXPECT_EQ(evidence.at("stream_instance_id"), stream_stats::stream_instance_id(920168));
+  for (const auto *secret : {fence_client_ip, "nodekey", "fixture-region", "100.64.0.1"})
+    EXPECT_EQ(body.find(secret), std::string::npos) << secret;
+}
+
+// The generation fence: the stream changes generation while the daemon is being read, so the
+// answer is about a stream that is no longer current and is withheld.
+TEST_F(apps_stats_contention, AGenerationChangeDuringTheReadIsFenced) {
+  auto stream = start_fixture_stream(920168);
+  stalled_admin_daemon_t daemon;
+  tailscale_connection::set_default_status_reader_for_tests([&daemon] { return daemon.read(); });
+  auto release = util::fail_guard([&] { daemon.release(); });
+
+  auto reply = request("/api/network/connection");
+  ASSERT_TRUE(daemon.wait_entered());
+  // The same client reconnects: a new generation, the same address.
+  stream_stats::start_session_timing(fence_device, 920169);
+  auto newer = util::fail_guard([] { stream_stats::stop_session_timing(fence_device, 920169); });
+  daemon.release();
+  release.disable();
+
+  const auto [status, body] = reply.get();
+  ASSERT_TRUE(status.starts_with("200")) << status;
+  const auto evidence = nlohmann::json::parse(body);
+  EXPECT_EQ(evidence.at("status"), "unknown");
+  EXPECT_EQ(evidence.at("tailscale").at("confirmed"), false);
+  EXPECT_EQ(evidence.at("tailscale").at("reason"), "stream_changed");
+  EXPECT_EQ(evidence.at("stream_instance_id"), stream_stats::stream_instance_id(920168));
+}
+
+// F1 and F2 on the admin server: overlapping readouts wait for the daemon instead of one of them
+// reading "unavailable", and a stalled daemon does not hold other admin requests.
+TEST_F(apps_stats_contention, OverlappingReadoutsShareTheDaemonAndDoNotHoldTheServer) {
+  auto stream = start_fixture_stream(920170);
+  stalled_admin_daemon_t daemon;
+  tailscale_connection::set_default_status_reader_for_tests([&daemon] { return daemon.read(); });
+  auto release = util::fail_guard([&] { daemon.release(); });
+
+  auto first = request("/api/network/connection");
+  ASSERT_TRUE(daemon.wait_entered());
+  auto second = request("/api/network/connection");
+  auto third = request("/api/network/connection");
+  // The admin server still answers other requests while the daemon is stalled.
+  auto stats = request("/api/stats/stream");
+  ASSERT_EQ(stats.wait_for(1s), std::future_status::ready);
+  EXPECT_TRUE(stats.get().first.starts_with("200"));
+  EXPECT_EQ(first.wait_for(0ms), std::future_status::timeout);
+
+  daemon.release();
+  release.disable();
+  for (auto *reply : {&first, &second, &third}) {
+    const auto [status, body] = reply->get();
+    ASSERT_TRUE(status.starts_with("200")) << status;
+    const auto evidence = nlohmann::json::parse(body);
+    EXPECT_EQ(evidence.at("status"), "tailscale");
+    EXPECT_NE(evidence.at("tailscale").at("reason"), "localapi_unavailable");
+  }
+  // The first read, and at most one more shared by the requests that arrived during it.
+  std::lock_guard lock {daemon.mutex};
+  EXPECT_LE(daemon.entered, 2);
 }

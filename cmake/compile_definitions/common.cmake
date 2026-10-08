@@ -206,6 +206,8 @@ set(POLARIS_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/posix_child_reaper.h"
         "${CMAKE_SOURCE_DIR}/src/network.cpp"
         "${CMAKE_SOURCE_DIR}/src/network.h"
+        "${CMAKE_SOURCE_DIR}/src/tailscale_connection.cpp"
+        "${CMAKE_SOURCE_DIR}/src/tailscale_connection.h"
         "${CMAKE_SOURCE_DIR}/src/wol.h"
         "${CMAKE_SOURCE_DIR}/src/wol.cpp"
         "${CMAKE_SOURCE_DIR}/src/move_by_copy.h"

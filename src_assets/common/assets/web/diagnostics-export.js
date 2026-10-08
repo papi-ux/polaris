@@ -1,5 +1,6 @@
 import { NetworkAddressBook, pseudonymizeNetworkAddresses } from './network-address-pseudonyms.js'
 import { doctorIsWaitingForStream } from './doctor-observation.js'
+import { safeTailscalePeerSnapshot, tailscalePeerSummary } from './tailscale-connection-readout.js'
 
 // Words that mean "secret" wherever they appear as a whole segment of a name.
 const SENSITIVE_SEGMENT_WORDS = [
@@ -1004,6 +1005,7 @@ export function buildGithubIssueDraft(input = {}, { addresses = new NetworkAddre
     issueDraftLine('Encoder', firstNonEmpty(stats.encoder, stats.encode_target_device, config.encoder)),
     issueDraftLine('Capture', capture),
     issueDraftLine('Network path', stats.client_network_path),
+    ...(safeInput.network_connection ? [issueDraftLine('Tailscale peer', tailscalePeerSummary(safeInput.network_connection))] : []),
     issueDraftLine('Display mode', formatDisplayModeDecision(stats.display_mode_decision)),
     ...gpuDiagnosticLines,
     issueDraftLine('Active stream', summarizeActiveStream(stats, safeInput.stream_stats_connected)),
@@ -1644,6 +1646,7 @@ export function buildAnonymizedDiagnosticsBundle(input = {}, { addresses = creat
     // 6: the log fields are lines, like kernel_gpu_messages already was.
     support_bundle_version: 6,
     ...input,
+    ...(input.network_connection ? { network_connection: safeTailscalePeerSnapshot(input.network_connection) } : {}),
     stream_evidence: streamEvidence,
     issue_draft: issueDraft,
   }, new WeakSet(), addresses))

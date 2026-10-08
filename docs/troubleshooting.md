@@ -680,10 +680,44 @@ support bundles carry the same thing as `client_network_path`: `lan`, `cgnat` (t
 `public` or `loopback`. It stays after the stream ends, so a support bundle exported afterwards
 still has it, and it never records the address itself.
 
-A tailnet stream is fine while Tailscale connects the two machines directly. When it cannot, it
-relays the traffic through its DERP servers, and the stream stutters and its latency climbs. Run
-`tailscale ping` with the host's name on the client: `via DERP` in the answer means the stream is
-relayed, an address and port mean it is direct.
+The **Tailscale peer** readout checks the active client's address against the host's local
+Tailscale daemon. It distinguishes direct, DERP relay and peer relay when recent peer activity
+supports that answer. A missing or inaccessible daemon, stale activity or ambiguous match stays
+unknown. It does not verify the route taken by video and audio, and it never changes bitrate or
+grades a stream merely because the connection is relayed. Use measured latency and confirmed
+video frame loss to assess quality. The readout is included in redacted support exports without
+peer names, addresses or keys.
+
+Nova's **Host connection** readout describes its paired HTTPS connection, which can differ from
+the media route. `GET /polaris/v1/network/connection` is advertised by
+`features.network_connection_v1`; this flag means the read-only route exists, not that Tailscale
+is installed or available. Confirmation requires the actual request's local address to belong
+to this host's tailnet node and its remote address to match one online peer. Request parameters
+cannot select a different peer. Shared CGNAT addresses, MagicDNS names and an installed VPN app
+alone are insufficient. Other hosts/platforms and Android split tunneling retain an unknown
+fallback. Existing access restrictions and encryption policies are unchanged.
+
+Both readouts ask the host's Tailscale daemon through its fixed local socket,
+`/var/run/tailscale/tailscaled.sock`, and stay **unknown** when that is not possible:
+
+- the daemon is stopped, logged out or still starting, or does not answer within about a second;
+- the daemon uses a different socket path (a custom `--socket`, a userspace or containerized
+  daemon), or Polaris runs sandboxed without access to that socket;
+- the daemon's status is larger than 512 KiB, which a tailnet of several hundred devices can reach;
+- many readouts are already waiting for the daemon at once.
+
+Reading the daemon never holds Polaris's other requests: a slow daemon delays only these readouts,
+and several readouts at once share one read instead of one of them reporting it unavailable.
+Nothing read from the daemon is kept after the answer.
+
+The Doctor's **Tailscale peer** readout is an administrator view of the current stream's peer
+(`/api/network/connection`, scope `peer_status`). It is not the paired route Nova uses and does not
+describe a TLS connection; when the stream ends or changes while the daemon is being read, it says
+so (`stream_changed`) rather than describing a stream that is no longer current.
+
+You can also run `tailscale ping` with the host's name on the client. The answer distinguishes
+direct, DERP and peer-relay connections. Tailscale may upgrade a relay to a direct connection
+after negotiation, so one startup answer is not a permanent description of the stream.
 
 ## A launch was refused
 

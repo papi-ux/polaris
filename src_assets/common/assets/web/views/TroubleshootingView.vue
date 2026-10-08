@@ -129,6 +129,7 @@
     </section>
 
     <StreamPacingReadout v-if="streamStats?.streaming" :stats="streamStats" :connected="streamStatsConnected" :observed-at="streamStatsReceivedAt" />
+    <TailscaleConnectionReadout :stats="streamStats" />
 
     <SpacesDiagnostics v-if="platform === 'linux'" />
 
@@ -544,6 +545,8 @@ import { groupRecentIssueLogs } from '../recent-issues.js'
 import { statusTone } from '../status-tones.js'
 import { doctorIsWaitingForStream } from '../doctor-observation.js'
 import StreamPacingReadout from '../components/StreamPacingReadout.vue'
+import TailscaleConnectionReadout from '../components/TailscaleConnectionReadout.vue'
+import { normalizeTailscalePeer } from '../tailscale-connection-readout.js'
 
 const { toast: showToast } = useToast()
 const i18n = inject('i18n')
@@ -1132,7 +1135,7 @@ function cleanupStaleVirtualDisplay() {
 }
 
 async function collectSupportContext() {
-  const [systemStats, aiStatus, aiCache, aiHistory, config, previousRunLogs, olderRunLogs, kernelGpuMessages] = await Promise.all([
+  const [systemStats, aiStatus, aiCache, aiHistory, config, previousRunLogs, olderRunLogs, kernelGpuMessages, networkConnection] = await Promise.all([
     safeFetchJson('./api/stats/system'),
     safeFetchJson('./api/ai/status'),
     safeFetchJson('./api/ai/cache'),
@@ -1144,7 +1147,8 @@ async function collectSupportContext() {
     // restart used to overwrite the run that had been streaming.
     safeFetchText('./polaris/v1/diagnostics/logs/previous?generation=1'),
     // The kernel's own GPU lines for this boot and the previous one, when readable.
-    safeFetchJson('./polaris/v1/diagnostics/kernel-gpu')
+    safeFetchJson('./polaris/v1/diagnostics/kernel-gpu'),
+    safeFetchJson('./api/network/connection')
   ])
 
   return {
@@ -1165,6 +1169,9 @@ async function collectSupportContext() {
     } : null,
     fix_my_stream_checklist: fixMyStreamChecklist.value,
     session_snapshot: streamStats.value,
+    network_connection: normalizeTailscalePeer(networkConnection, {
+      generation: streamStats.value?.stream_instance_id, streaming: streamStats.value?.streaming === true,
+    }),
     client: {
       type: streamStats.value?.client_type || streamClientFamilyLabel(streamStats.value?.client_family) ||
         streamStats.value?.client_name || 'unknown',
