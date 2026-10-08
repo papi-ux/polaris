@@ -12639,10 +12639,30 @@ TEST(StreamStatsMediaIntervalReceipt, TheSerializerReadsItsOwnSnapshotAndAgreesI
   const auto snapshot = stream_stats::get_current();
   const auto as_of = stream_stats::client_media_interval_json(snapshot);
   ASSERT_EQ(as_of.at("sequence"), 1);
+  EXPECT_EQ(as_of.at("interval").at("frames").at("expected"), 30);
+  EXPECT_EQ(as_of.at("interval").at("frames").at("lost"), 2);
 
-  stream_stats::ingest_client_media_counters(scope.sample(3'000, 190, 190));
+  // Cumulative loss must not fall (2 -> 3), or the legacy validation would correctly start a counter-reset epoch
+  // and this case would no longer test a later receipt in the same epoch.
+  const auto later = stream_stats::ingest_client_media_counters(scope.sample(3'000, 190, 187));
+  ASSERT_EQ(later.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(later.observation_published);
+  EXPECT_EQ(later.frames_expected, 60u);
+  EXPECT_EQ(later.frames_lost, 1u);
+  ASSERT_TRUE(later.receipt.has_value());
+  EXPECT_EQ(later.receipt->epoch, as_of.at("epoch").get<std::uint64_t>());
+  EXPECT_EQ(later.receipt->sequence, 2u);
+  EXPECT_TRUE(later.receipt->interval_measured);
+  EXPECT_TRUE(later.receipt->network_evidence_published);
+  EXPECT_EQ(later.receipt->frames_expected, 60u);
+  EXPECT_EQ(later.receipt->frames_received, 59u);
+  EXPECT_EQ(later.receipt->frames_lost, 1u);
+
   EXPECT_EQ(stream_stats::client_media_interval_json(snapshot), as_of) << "an old snapshot stays as of its copy";
-  EXPECT_EQ(stream_stats::client_media_interval_json(stream_stats::get_current()).at("sequence"), 2);
+  const auto current = stream_stats::client_media_interval_json(stream_stats::get_current());
+  EXPECT_EQ(current.at("sequence"), 2);
+  EXPECT_EQ(current.at("epoch"), as_of.at("epoch"));
+  EXPECT_EQ(current.at("interval").at("frames").at("lost"), 1);
 
   EXPECT_EQ(nlohmann::json::parse(snapshot.to_json()).at("client_media_interval"), as_of);
   const auto doctor = stream_stats::build_doctor_json(snapshot, nlohmann::json::object());
