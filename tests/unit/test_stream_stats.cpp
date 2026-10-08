@@ -12601,18 +12601,22 @@ TEST(StreamStatsMediaIntervalReceipt, ALifecycleChangeNeverServesThePreviousScop
 TEST(StreamStatsMediaIntervalReceipt, AnUnrepresentableIntervalIsNeverReportedAsMeasured) {
   using namespace std::chrono_literals;
   {
-    // The legacy gap test converts this unsigned client difference to a signed duration. Whatever
-    // state it reaches is inherited and left alone; the receipt never claims the interval.
-    // The difference converts to a negative signed duration, so the legacy path counts it: an inherited
-    // edge case this change records but does not alter.
+    // A client difference past the signed range is still a gap over the bound: it resets coverage,
+    // publishes nothing and starts a new epoch, so the receipt never claims the interval.
     media_receipt_scope_t scope("receipt-owner-f", 77, "receipt-launch-f");
-    stream_stats::ingest_client_media_counters(scope.sample(1, 100, 100));
+    const auto baseline = stream_stats::ingest_client_media_counters(scope.sample(1, 100, 100));
+    ASSERT_TRUE(baseline.receipt.has_value());
     const auto huge = stream_stats::ingest_client_media_counters(scope.sample(1 + (1ull << 63) + 10, 120, 120));
-    EXPECT_EQ(huge.state, stream_stats::client_media_ingest_state_e::observed);
+    EXPECT_EQ(huge.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+    EXPECT_TRUE(huge.accepted);
+    EXPECT_FALSE(huge.observation_published);
     ASSERT_TRUE(huge.receipt.has_value());
-    EXPECT_EQ(huge.receipt->sequence, 1u);
+    EXPECT_GT(huge.receipt->epoch, baseline.receipt->epoch);
+    EXPECT_EQ(huge.receipt->sequence, 0u);
     EXPECT_FALSE(huge.receipt->interval_measured);
-    EXPECT_EQ(huge.receipt->interval_unavailable_reason, "client_interval_unrepresentable");
+    EXPECT_EQ(huge.receipt->interval_unavailable_reason, "epoch_start");
+    EXPECT_FALSE(huge.receipt->network_evidence_published);
+    EXPECT_FALSE(stream_stats::get_current().packet_loss_available);
     const auto json = stream_stats::client_media_interval_json(stream_stats::get_current());
     EXPECT_FALSE(json.at("interval").at("measured").get<bool>());
     EXPECT_FALSE(json.at("interval").contains("frames"));
@@ -12629,6 +12633,110 @@ TEST(StreamStatsMediaIntervalReceipt, AnUnrepresentableIntervalIsNeverReportedAs
     EXPECT_EQ(backwards.receipt->sequence, 1u);
     EXPECT_FALSE(backwards.receipt->interval_measured);
     EXPECT_EQ(backwards.receipt->interval_unavailable_reason, "host_interval_unrepresentable");
+  }
+}
+
+TEST(StreamStatsMediaIntervalReceipt, AClientGapOverTheBoundResetsCoverageAtEveryUnsignedMagnitude) {
+  // The bound is 5000 ms inclusive. The difference is unsigned and untrusted, so every magnitude past
+  // the bound resets, including both sides of the signed range and the unsigned maximum.
+  const std::uint64_t signed_max = (1ull << 63) - 1;
+  const std::uint64_t gaps[] = {4'999, 5'000, 5'001, 6'000, signed_max, signed_max + 1, signed_max + 11, UINT64_MAX - 1};
+  std::uint64_t generation = 90;
+  for (const auto gap : gaps) {
+    SCOPED_TRACE(gap);
+    media_receipt_scope_t scope("receipt-owner-gap", generation++, "receipt-launch-gap");
+    const auto baseline = stream_stats::ingest_client_media_counters(scope.sample(1, 100, 100));
+    ASSERT_EQ(baseline.state, stream_stats::client_media_ingest_state_e::baseline);
+    ASSERT_TRUE(baseline.receipt.has_value());
+    const auto next = stream_stats::ingest_client_media_counters(scope.sample(1 + gap, 200, 180));
+    EXPECT_TRUE(next.accepted);
+    ASSERT_TRUE(next.receipt.has_value());
+    if (gap <= 5'000) {
+      EXPECT_EQ(next.state, stream_stats::client_media_ingest_state_e::observed);
+      EXPECT_TRUE(next.observation_published);
+      EXPECT_EQ(next.frames_expected, 100u);
+      EXPECT_EQ(next.frames_lost, 20u);
+      EXPECT_EQ(next.receipt->epoch, baseline.receipt->epoch);
+      EXPECT_EQ(next.receipt->sequence, 1u);
+      EXPECT_TRUE(next.receipt->interval_measured);
+      EXPECT_EQ(next.receipt->client_duration_ms, gap);
+      EXPECT_TRUE(stream_stats::get_current().packet_loss_available);
+    } else {
+      EXPECT_EQ(next.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+      EXPECT_FALSE(next.observation_published);
+      EXPECT_GT(next.receipt->epoch, baseline.receipt->epoch);
+      EXPECT_EQ(next.receipt->sequence, 0u);
+      EXPECT_FALSE(next.receipt->interval_measured);
+      EXPECT_EQ(next.receipt->interval_unavailable_reason, "epoch_start");
+      EXPECT_FALSE(next.receipt->network_evidence_published);
+      EXPECT_FALSE(stream_stats::get_current().packet_loss_available);
+    }
+  }
+}
+
+TEST(StreamStatsMediaIntervalReceipt, AValidReportAfterAHugeClientGapCountsOnlyFromTheNewBaseline) {
+  media_receipt_scope_t scope("receipt-owner-recover", 99, "receipt-launch-recover");
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1, 100, 100)).state,
+            stream_stats::client_media_ingest_state_e::baseline);
+  const std::uint64_t reset_ms = 1 + (1ull << 63) + 10;
+  const auto reset = stream_stats::ingest_client_media_counters(scope.sample(reset_ms, 200, 180));
+  ASSERT_EQ(reset.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+  ASSERT_TRUE(reset.receipt.has_value());
+
+  // Counted against the reset report (60 expected, 1 lost), never against the first one (160, 21).
+  const auto resumed = stream_stats::ingest_client_media_counters(scope.sample(reset_ms + 1'000, 260, 239));
+  EXPECT_EQ(resumed.state, stream_stats::client_media_ingest_state_e::observed);
+  EXPECT_TRUE(resumed.observation_published);
+  EXPECT_EQ(resumed.frames_expected, 60u);
+  EXPECT_EQ(resumed.frames_lost, 1u);
+  ASSERT_TRUE(resumed.receipt.has_value());
+  EXPECT_EQ(resumed.receipt->epoch, reset.receipt->epoch);
+  EXPECT_EQ(resumed.receipt->sequence, 1u);
+  EXPECT_TRUE(resumed.receipt->interval_measured);
+  EXPECT_TRUE(resumed.receipt->network_evidence_published);
+  EXPECT_EQ(resumed.receipt->frames_expected, 60u);
+  EXPECT_EQ(resumed.receipt->frames_received, 59u);
+  EXPECT_EQ(resumed.receipt->frames_lost, 1u);
+  EXPECT_EQ(resumed.receipt->client_start_ms, reset_ms);
+  EXPECT_EQ(resumed.receipt->client_duration_ms, 1'000u);
+  EXPECT_TRUE(stream_stats::get_current().packet_loss_available);
+}
+
+TEST(StreamStatsMediaIntervalReceipt, LargeClientTimestampsWithSmallDeltasStillCount) {
+  // Only the difference is bounded, never the absolute counter value.
+  const std::uint64_t signed_bound = 1ull << 63;
+  struct span_t { std::uint64_t from; std::uint64_t to; bool counted; };
+  const span_t spans[] = {
+    {signed_bound - 500, signed_bound + 500, true},   // crosses the signed bound
+    {signed_bound - 1, signed_bound, true},
+    {UINT64_MAX - 3'000, UINT64_MAX - 1'000, true},   // near the unsigned maximum
+    {UINT64_MAX - 5'000, UINT64_MAX, true},           // exactly the bound, ending at the maximum
+    {UINT64_MAX - 5'001, UINT64_MAX, false},          // one past the bound
+  };
+  std::uint64_t generation = 100;
+  for (const auto &span : spans) {
+    SCOPED_TRACE(span.from);
+    media_receipt_scope_t scope("receipt-owner-large", generation++, "receipt-launch-large");
+    ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(span.from, 100, 100)).state,
+              stream_stats::client_media_ingest_state_e::baseline);
+    const auto next = stream_stats::ingest_client_media_counters(scope.sample(span.to, 160, 157));
+    ASSERT_TRUE(next.receipt.has_value());
+    if (span.counted) {
+      EXPECT_EQ(next.state, stream_stats::client_media_ingest_state_e::observed);
+      EXPECT_TRUE(next.observation_published);
+      EXPECT_EQ(next.frames_expected, 60u);
+      EXPECT_EQ(next.frames_lost, 3u);
+      EXPECT_EQ(next.receipt->sequence, 1u);
+      EXPECT_TRUE(next.receipt->interval_measured);
+      EXPECT_EQ(next.receipt->client_start_ms, span.from);
+      EXPECT_EQ(next.receipt->client_end_ms, span.to);
+      EXPECT_EQ(next.receipt->client_duration_ms, span.to - span.from);
+    } else {
+      EXPECT_EQ(next.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+      EXPECT_FALSE(next.observation_published);
+      EXPECT_EQ(next.receipt->sequence, 0u);
+      EXPECT_FALSE(next.receipt->interval_measured);
+    }
   }
 }
 
