@@ -741,7 +741,7 @@ namespace stream_recorder {
 
     // Declared after the gate, so it is released (payloads, accounting) before the gate opens.
     snapshot_lease_t lease;
-    {
+    try {
       std::lock_guard lock(mutex);
       if (cfg.mode != mode_t::replay_buffer) {
         result.status = save_status_e::disabled;
@@ -758,6 +758,11 @@ namespace stream_recorder {
           for (const auto &packet : replay_buffer) {
             snapshot.payloads.push_back(packet.data);
           }
+#ifdef POLARIS_TESTS
+          if (save_hooks.after_snapshot_payloads) {
+            save_hooks.after_snapshot_payloads();
+          }
+#endif
           snapshot.bytes = replay_bytes;
           snapshot.video_format = replay_video_format;
           snapshot.generation = replay_selected;
@@ -772,6 +777,11 @@ namespace stream_recorder {
           lease.admitted = true;
         }
       }
+    } catch (...) {
+      // Admission allocations precede all accounting and I/O. An incomplete snapshot
+      // releases its references as the lease unwinds and cannot escape the admin request.
+      result.status = save_status_e::storage_error;
+      return result;
     }
     if (!lease.admitted) {
       BOOST_LOG(warning) << (result.status == save_status_e::disabled ? "stream_recorder: replay buffer is not enabled"sv :

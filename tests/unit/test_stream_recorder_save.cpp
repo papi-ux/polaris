@@ -405,6 +405,27 @@ TEST_F(StreamRecorderReplaySaveTests, EmptyOrStaleSaveCreatesNothing) {
   const auto s = stats(t0);
   EXPECT_EQ(s.saves_completed + s.saves_failed, 0u);
   EXPECT_FALSE(s.save_in_progress);
+
+  // Refusing a failed admission must also create nothing, after the real pointer snapshot
+  // was copied but before its configuration/accounting is published.
+  publish(true, true);
+  push_run(t0);
+  hooks.after_snapshot_payloads = [] { throw std::bad_alloc {}; };
+  install();
+  const auto failed_admission = save(t0);
+  EXPECT_EQ(failed_admission.status, save_status_e::storage_error);
+  EXPECT_TRUE(failed_admission.path.empty());
+  EXPECT_FALSE(fs::exists(output_dir));
+  const auto after_admission = stats(t0);
+  EXPECT_FALSE(after_admission.save_in_progress);
+  EXPECT_EQ(after_admission.snapshot_packets + after_admission.snapshot_bytes + after_admission.snapshot_only_bytes, 0u);
+  EXPECT_EQ(after_admission.bytes, 7u);
+  EXPECT_EQ(after_admission.unique_payload_bytes, 7u);
+  hooks.after_snapshot_payloads = {};
+  install();
+  const auto recovered = save(t0);
+  ASSERT_EQ(recovered.status, save_status_e::saved);
+  EXPECT_EQ(read_file(recovered.path), "AAAABBB");
 }
 
 TEST_F(StreamRecorderReplaySaveTests, ExclusiveStagingNeverClobbersAnExistingFile) {

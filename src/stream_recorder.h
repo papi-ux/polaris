@@ -196,6 +196,7 @@ namespace stream_recorder {
      */
     struct save_hooks_t {
       std::function<std::string()> name_stamp;
+      std::function<void()> after_snapshot_payloads;  ///< Admission fault boundary, under the lock
       std::function<void(const std::filesystem::path &staging)> before_write;
       std::function<long long(int fd, const std::uint8_t *data, std::size_t size)> write;
       std::function<int(int fd)> sync;
