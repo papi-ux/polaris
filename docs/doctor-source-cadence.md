@@ -2,12 +2,13 @@
 
 Doctor v2 keeps fixed-grid grading for older hosts and for a valid `vrr` policy
 whose `effective` value is false. A VRR request or capture capability alone does
-not change that grading. The admission/timestamp foundation currently reports
-`effective: false`; it does not enable source-time pacing.
+not change that grading. `effective` is false by default. It is true only while
+the host's opt-in `vrr_source_pacing` encode loop reports a fresh source-time
+observation for the same stream generation.
 
 This consumer also reserves an optional, host-only `source_cadence` aggregate
-for a future source-time producer. The current foundation does not emit this
-aggregate. Missing, stale, malformed or differently scoped evidence leaves the
+for a future source-time producer. The host does not emit this aggregate yet.
+Missing, stale, malformed or differently scoped evidence leaves the
 diagnosis collecting rather than reporting a healthy source-time stream.
 
 ## Policy identity
@@ -74,3 +75,13 @@ receiver-presentation acceptance. Its observation explicitly reports
 The private JSONL trace checker remains a separate contract. This aggregate
 consumer does not replace correlated source/send/presentation traces, queue
 growth and latency measurements, or the physical VRR acceptance gates.
+
+## Design credit
+
+The `clientVrrRequested` launch request and variable-cadence presentation for
+Moonlight clients follow Nonary's VRR work on
+[moonlight-qt](https://github.com/Nonary/moonlight-qt), released in
+[v6.1.0-vrr18](https://github.com/Nonary/moonlight-qt/releases/tag/v6.1.0-vrr18)
+([launch flag](https://github.com/Nonary/moonlight-qt/commit/052457f2c02b1985ddc846975963c39a0cf8db25)).
+Polaris reuses the design and protocol only; no code is copied from it. Thanks
+to Nonary; see also his [Vibeshine](https://github.com/Nonary/vibeshine) host.
