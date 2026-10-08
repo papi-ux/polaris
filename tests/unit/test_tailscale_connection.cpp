@@ -233,22 +233,29 @@ TEST(TailscaleCollector, IndependentRouteCollectorsDoNotContend) {
   EXPECT_EQ(admin.received.front()["tailscale"]["scope"], "peer_status");
 }
 
-// Waiting is bounded: past max_waiters the caller is refused at once and answers unknown itself.
+// Bounded: the request being read and those waiting together never exceed max_waiters. Past
+// that the caller is refused at once and answers unknown itself.
 TEST(TailscaleCollector, OverloadIsRefusedImmediatelyAndBounded) {
+  constexpr auto cap = tailscale_connection::status_collector_t::max_waiters;
   gated_reader_t daemon;
   answers_t answers;
   tailscale_connection::status_collector_t collector {[&] { return daemon.read(); }, [] { return now_ms; }};
   ASSERT_TRUE(collector.submit(answers.waiter()));
   ASSERT_TRUE(daemon.wait_entered(1));
-  for (std::size_t i = 0; i < tailscale_connection::status_collector_t::max_waiters; ++i)
+  // One in the read under way, so cap - 1 more may wait.
+  for (std::size_t i = 1; i < cap; ++i)
     ASSERT_TRUE(collector.submit(answers.waiter())) << i;
   const auto start = std::chrono::steady_clock::now();
   EXPECT_FALSE(collector.submit(answers.waiter()));
   EXPECT_LT(std::chrono::steady_clock::now() - start, std::chrono::milliseconds(100));
   EXPECT_FALSE(collector.submit({}));
   daemon.release();
-  ASSERT_TRUE(answers.wait_for(1 + tailscale_connection::status_collector_t::max_waiters));
+  ASSERT_TRUE(answers.wait_for(cap));
   EXPECT_EQ(collector.reads(), 2u);
+  // Every accepted request was answered exactly once, and the cap frees again afterwards.
+  EXPECT_EQ(answers.size(), cap);
+  ASSERT_TRUE(collector.submit(answers.waiter()));
+  ASSERT_TRUE(answers.wait_for(cap + 1));
 }
 
 // Stopping answers every waiting request (unknown) and the in-flight batch (its read), joins the

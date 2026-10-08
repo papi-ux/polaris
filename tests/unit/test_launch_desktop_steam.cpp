@@ -1287,6 +1287,26 @@ TEST_F(LaunchDesktopSteamTest, StalledDaemonDoesNotHoldThePairedServer) {
   EXPECT_EQ(nlohmann::json::parse(body).at("status"), "tailscale");
 }
 
+// A device whose view permission is withdrawn while the daemon is read gets no evidence either.
+TEST_F(LaunchDesktopSteamTest, ViewPermissionWithdrawnDuringTheReadGetsNoEvidence) {
+  pair_moonlight(false, crypto::PERM::_default);
+  stalled_daemon_t daemon;
+  tailscale_connection::set_default_status_reader_for_tests([&daemon] { return daemon.read(); });
+  auto release = util::fail_guard([&] { daemon.release(); });
+
+  auto evidence = network_reply_async(moonlight);
+  ASSERT_TRUE(daemon.wait_entered());
+  // The same device, paired again without view permission.
+  nvhttp::reset_pairing_state_for_tests();
+  pair_moonlight(false, crypto::PERM::_reserved);
+  daemon.release();
+  release.disable();
+  ASSERT_EQ(evidence.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+  const auto [status, body] = evidence.get();
+  EXPECT_TRUE(status.starts_with("403")) << status;
+  EXPECT_EQ(body.find("tailscale"), std::string::npos);
+}
+
 // Authorization is checked again before the answer is written: a device unpaired while the daemon
 // was being read gets no evidence.
 TEST_F(LaunchDesktopSteamTest, DeviceUnpairedDuringTheReadGetsNoEvidence) {

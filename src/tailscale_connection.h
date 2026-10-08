@@ -44,8 +44,9 @@ namespace tailscale_connection {
    * is never older than its request. The raw status is handed to the waiters and then dropped:
    * no peer inventory, address or identity outlives the read.
    *
-   * Bounded: at most max_waiters wait. A full or stopped collector refuses the waiter and the
-   * caller answers unknown now. stop() answers every waiter that has not been answered with no
+   * Bounded: at most max_waiters requests are accepted and unanswered at once, waiting and in the
+   * read under way together. A full or stopped collector refuses the waiter and the caller answers
+   * unknown now. Every accepted waiter is called exactly once, never under the collector's lock. stop() answers every waiter that has not been answered with no
    * status (unknown) and joins the worker; the owner calls it before tearing its server down.
    */
   class status_collector_t {
@@ -76,6 +77,8 @@ namespace tailscale_connection {
     std::condition_variable wake;
     std::deque<waiter_t> waiting;
     bool stopping = false;
+    /// Waiters taken by the worker and not yet answered; counts toward max_waiters.
+    std::size_t in_flight = 0;
     std::size_t read_count = 0;
     std::thread worker;
   };

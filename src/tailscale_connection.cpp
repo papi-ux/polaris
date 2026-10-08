@@ -219,7 +219,7 @@ namespace tailscale_connection {
   bool status_collector_t::submit(waiter_t waiter) {
     {
       std::lock_guard lock {mutex};
-      if (stopping || !waiter || waiting.size() >= max_waiters) return false;
+      if (stopping || !waiter || waiting.size() + in_flight >= max_waiters) return false;
       waiting.push_back(std::move(waiter));
     }
     wake.notify_one();
@@ -258,6 +258,7 @@ namespace tailscale_connection {
         wake.wait(lock, [this] { return stopping || !waiting.empty(); });
         if (stopping) return;
         batch.swap(waiting);
+        in_flight = batch.size();
         ++read_count;
       }
       std::optional<std::string> status;
@@ -273,6 +274,10 @@ namespace tailscale_connection {
           waiter(status, observed_at_ms);
         } catch (...) {
         }
+      }
+      {
+        std::lock_guard lock {mutex};
+        in_flight = 0;
       }
       // The status (the daemon's peer inventory) goes out of scope here, unkept.
     }
