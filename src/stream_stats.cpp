@@ -6349,10 +6349,10 @@ namespace stream_stats {
 
     std::lock_guard<std::mutex> lock(benchmark_run_mutex);
 
-    // A reconnect gives the same owner a new, strictly larger generation. When the caller's exact
-    // generation is the registered timing scope, that owner's open runs from older generations can never
-    // start or record again, so they no longer block this create; they are aborted below, only once the
-    // new run has been inserted. Nothing is mutated before every existing rejection has been decided.
+    // With the caller's exact generation registered, an accepted create may supersede that owner's
+    // strictly older open runs. Decide every rejection before changing any row, and abort older runs only
+    // after insertion so allocation failure leaves existing rows intact. This probe is a snapshot; the
+    // route identity and population prechecks are not atomic with insertion.
     // Lock order: benchmark_run_mutex, then frame_timing_mutex inside the probe only.
     const bool caller_is_current = session_timing_is_current(device_uuid, session_generation);
     const auto is_open = [](const benchmark_run_t &r) {

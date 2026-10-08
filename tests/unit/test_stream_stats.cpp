@@ -11219,8 +11219,8 @@ TEST(BenchmarkRunReconnectTests, ACurrentOlderCallerNeverAbortsANewerRow) {
   BenchmarkControlPlaneGuard guard(true);
   BenchmarkReconnectFixture fixture("192.0.2.19", "device-reconnect-newer-row");
   fixture.register_generation(82);
-  // Test-only state: production cannot arm a newer generation before it is registered. Only strictly
-  // older generations are ever superseded, so this row must survive a positively current older caller.
+  // Insert a newer row directly to bound the strictly-older rule: it must survive a positively current
+  // older caller, regardless of how the fixture arrived at this state.
   insert_test_row("reconnect-newer-row", fixture.device_uuid, 83, stream_stats::benchmark_run_state_e::armed);
   fixture.own_row("reconnect-newer-row");
 
