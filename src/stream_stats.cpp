@@ -6056,6 +6056,16 @@ namespace stream_stats {
     };
   }
 
+  namespace {
+    // Whether this exact owner and generation is the registered timing scope right now. Cheap and
+    // allocation-free: no ring copies, percentiles or sorting, and the lock is held for this lookup only.
+    bool session_timing_is_current(const std::string &device_uuid, std::uint64_t session_generation) {
+      std::lock_guard<std::mutex> lock(frame_timing_mutex);
+      const auto *state = find_session_timing_locked(device_uuid);
+      return state && state->session_generation == session_generation;
+    }
+  }  // namespace
+
   void bind_doctor_action_scope(nlohmann::json &doctor,
                                 std::string_view app_session_id,
                                 std::uint64_t session_generation,
@@ -6339,13 +6349,26 @@ namespace stream_stats {
 
     std::lock_guard<std::mutex> lock(benchmark_run_mutex);
 
+    // With the caller's exact generation registered, an accepted create may supersede that owner's
+    // strictly older open runs. Decide every rejection before changing any row, and abort older runs only
+    // after insertion so allocation failure leaves existing rows intact. This probe is a snapshot; the
+    // route identity and population prechecks are not atomic with insertion.
+    // Lock order: benchmark_run_mutex, then frame_timing_mutex inside the probe only.
+    const bool caller_is_current = session_timing_is_current(device_uuid, session_generation);
+    const auto is_open = [](const benchmark_run_t &r) {
+      return r.state == benchmark_run_state_e::armed ||
+             r.state == benchmark_run_state_e::active ||
+             r.state == benchmark_run_state_e::draining;
+    };
+    const auto is_superseded = [&](const benchmark_run_t &r) {
+      return caller_is_current && is_open(r) && r.owning_device_uuid == device_uuid &&
+             r.owning_session_generation < session_generation;
+    };
+
     const bool session_already_has_active_run = std::any_of(
       benchmark_runs.begin(), benchmark_runs.end(),
-      [&device_uuid](const benchmark_run_t &r) {
-        return r.owning_device_uuid == device_uuid &&
-               (r.state == benchmark_run_state_e::armed ||
-                r.state == benchmark_run_state_e::active ||
-                r.state == benchmark_run_state_e::draining);
+      [&](const benchmark_run_t &r) {
+        return r.owning_device_uuid == device_uuid && is_open(r) && !is_superseded(r);
       });
     if (session_already_has_active_run) {
       return benchmark_run_create_result_e::rejected_session_already_has_an_active_run;
@@ -6373,7 +6396,18 @@ namespace stream_stats {
     run.armed_monotonic = std::chrono::steady_clock::now();
     run.client_population_revision_at_arm = client_population_revision();
 
+    // If allocation fails above or here, no existing row has been touched yet.
     benchmark_runs.push_back(std::move(run));
+
+    // The new run has the caller's generation, so it is never superseded.
+    const auto superseded_at = std::chrono::steady_clock::now();
+    for (auto &r : benchmark_runs) {
+      if (is_superseded(r)) {
+        r.state = benchmark_run_state_e::aborted;
+        r.abort_reason = benchmark_abort_reason_e::session_generation_changed;
+        r.frozen_monotonic = superseded_at;
+      }
+    }
     enforce_terminal_retention_locked(benchmark_runs);
 
     return benchmark_run_create_result_e::created;

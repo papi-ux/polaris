@@ -10973,6 +10973,263 @@ TEST(BenchmarkRunRetentionTests, DisabledGetCannotExpirePayloadOrInvokeItsVisito
   }));
 }
 
+namespace {
+  // One owner's stats client and timing scopes. Removes exactly what this test made on scope exit,
+  // including after a failed assertion: its runs, every timing generation it registered and its client.
+  struct BenchmarkReconnectFixture {
+    std::string ip;
+    std::string device_uuid;
+    std::vector<std::uint64_t> generations;
+    std::vector<std::string> run_ids;
+
+    BenchmarkReconnectFixture(std::string ip_in, std::string device_uuid_in):
+        ip(std::move(ip_in)), device_uuid(std::move(device_uuid_in)) {
+      stream_stats::add_client(ip, device_uuid);
+    }
+
+    void register_generation(std::uint64_t generation) {
+      stream_stats::start_session_timing(device_uuid, generation);
+      generations.push_back(generation);
+    }
+
+    stream_stats::benchmark_run_create_result_e create(const std::string &run_id, std::uint64_t generation,
+                                                       bool authorized = true) {
+      return create(make_valid_create_request(run_id), generation, authorized);
+    }
+
+    stream_stats::benchmark_run_create_result_e create(const stream_stats::benchmark_run_create_request_t &request,
+                                                       std::uint64_t generation, bool authorized = true) {
+      run_ids.push_back(request.run_id);
+      return stream_stats::create_benchmark_run(request, device_uuid, generation, authorized);
+    }
+
+    void own_row(const std::string &run_id) {
+      run_ids.push_back(run_id);
+    }
+
+    ~BenchmarkReconnectFixture() {
+      for (const auto &run_id : run_ids) {
+        stream_stats::erase_benchmark_run(run_id);
+      }
+      for (const auto generation : generations) {
+        stream_stats::stop_session_timing(device_uuid, generation);
+      }
+      stream_stats::remove_client(ip);
+    }
+  };
+
+  struct BenchmarkRunSnapshot {
+    stream_stats::benchmark_run_state_e state;
+    stream_stats::benchmark_abort_reason_e abort_reason;
+    std::optional<std::chrono::steady_clock::time_point> frozen_monotonic;
+    std::uint64_t owning_session_generation;
+  };
+
+  std::optional<BenchmarkRunSnapshot> snapshot_benchmark_run(const std::string &run_id) {
+    std::optional<BenchmarkRunSnapshot> snapshot;
+    stream_stats::with_benchmark_run(run_id, [&](stream_stats::benchmark_run_t &run) {
+      snapshot = BenchmarkRunSnapshot {run.state, run.abort_reason, run.frozen_monotonic, run.owning_session_generation};
+    });
+    return snapshot;
+  }
+
+  void expect_open_and_untouched(const std::string &run_id, stream_stats::benchmark_run_state_e state) {
+    const auto snapshot = snapshot_benchmark_run(run_id);
+    ASSERT_TRUE(snapshot.has_value()) << run_id;
+    EXPECT_EQ(snapshot->state, state) << run_id;
+    EXPECT_EQ(snapshot->abort_reason, stream_stats::benchmark_abort_reason_e::none) << run_id;
+    EXPECT_FALSE(snapshot->frozen_monotonic.has_value()) << run_id;
+  }
+
+  void insert_test_row(const std::string &run_id, const std::string &device_uuid, std::uint64_t generation,
+                       stream_stats::benchmark_run_state_e state) {
+    stream_stats::benchmark_run_t run {4};
+    run.run_id = run_id;
+    run.state = state;
+    run.owning_device_uuid = device_uuid;
+    run.owning_session_generation = generation;
+    if (state == stream_stats::benchmark_run_state_e::frozen || state == stream_stats::benchmark_run_state_e::aborted) {
+      run.frozen_monotonic = std::chrono::steady_clock::now();
+    }
+    stream_stats::insert_benchmark_run(std::move(run));
+  }
+}  // namespace
+
+TEST(BenchmarkRunReconnectTests, ANewerGenerationArmsAndAbortsTheSupersededArmedRun) {
+  BenchmarkControlPlaneGuard guard(true);
+  BenchmarkReconnectFixture fixture("192.0.2.10", "device-reconnect-armed");
+  fixture.register_generation(11);
+  ASSERT_EQ(fixture.create("reconnect-armed-old", 11), stream_stats::benchmark_run_create_result_e::created);
+  // Another owner's open row is outside this change and must stay exactly as it is.
+  insert_test_row("reconnect-armed-other-owner", "device-reconnect-armed-other", 5, stream_stats::benchmark_run_state_e::armed);
+  fixture.own_row("reconnect-armed-other-owner");
+
+  fixture.register_generation(12);  // the reconnect: start_session_timing replaces this owner's scope
+  const auto before = std::chrono::steady_clock::now();
+  ASSERT_EQ(fixture.create("reconnect-armed-new", 12), stream_stats::benchmark_run_create_result_e::created);
+  const auto after = std::chrono::steady_clock::now();
+
+  const auto old_run = snapshot_benchmark_run("reconnect-armed-old");
+  ASSERT_TRUE(old_run.has_value());
+  EXPECT_EQ(old_run->state, stream_stats::benchmark_run_state_e::aborted);
+  EXPECT_EQ(old_run->abort_reason, stream_stats::benchmark_abort_reason_e::session_generation_changed);
+  ASSERT_TRUE(old_run->frozen_monotonic.has_value()) << "the abort is a terminal transition";
+  EXPECT_GE(*old_run->frozen_monotonic, before);
+  EXPECT_LE(*old_run->frozen_monotonic, after);
+  EXPECT_EQ(old_run->owning_session_generation, 11u);
+
+  expect_open_and_untouched("reconnect-armed-new", stream_stats::benchmark_run_state_e::armed);
+  expect_open_and_untouched("reconnect-armed-other-owner", stream_stats::benchmark_run_state_e::armed);
+  EXPECT_EQ(stream_stats::start_benchmark_run("reconnect-armed-new", fixture.device_uuid, 12, true),
+            stream_stats::benchmark_run_start_result_e::started);
+}
+
+TEST(BenchmarkRunReconnectTests, AnUntouchedActiveOrDrainingOldGenerationNoLongerBlocks) {
+  BenchmarkControlPlaneGuard guard(true);
+  for (const bool draining : {false, true}) {
+    SCOPED_TRACE(draining ? "draining" : "active");
+    const std::string suffix = draining ? "draining" : "active";
+    BenchmarkReconnectFixture fixture(draining ? "192.0.2.12" : "192.0.2.11", "device-reconnect-" + suffix);
+    fixture.register_generation(21);
+    ASSERT_EQ(fixture.create("reconnect-" + suffix + "-old", 21), stream_stats::benchmark_run_create_result_e::created);
+    ASSERT_EQ(stream_stats::start_benchmark_run("reconnect-" + suffix + "-old", fixture.device_uuid, 21, true),
+              stream_stats::benchmark_run_start_result_e::started);
+    if (draining) {
+      // Draining needs either a full-length run or its deadline; set the state directly, as storage tests do.
+      ASSERT_TRUE(stream_stats::with_benchmark_run("reconnect-draining-old", [](stream_stats::benchmark_run_t &run) {
+        run.state = stream_stats::benchmark_run_state_e::draining;
+        run.stopped_monotonic = std::chrono::steady_clock::now();
+      }));
+    }
+
+    fixture.register_generation(22);  // nobody reads the old run between the reconnect and the create
+    ASSERT_EQ(fixture.create("reconnect-" + suffix + "-new", 22), stream_stats::benchmark_run_create_result_e::created);
+    const auto old_run = snapshot_benchmark_run("reconnect-" + suffix + "-old");
+    ASSERT_TRUE(old_run.has_value());
+    EXPECT_EQ(old_run->state, stream_stats::benchmark_run_state_e::aborted);
+    EXPECT_EQ(old_run->abort_reason, stream_stats::benchmark_abort_reason_e::session_generation_changed);
+    EXPECT_TRUE(old_run->frozen_monotonic.has_value());
+    EXPECT_EQ(stream_stats::start_benchmark_run("reconnect-" + suffix + "-new", fixture.device_uuid, 22, true),
+              stream_stats::benchmark_run_start_result_e::started);
+  }
+}
+
+TEST(BenchmarkRunReconnectTests, AReusedRunIdIsRejectedWithoutTouchingTheSupersededRun) {
+  BenchmarkControlPlaneGuard guard(true);
+  BenchmarkReconnectFixture fixture("192.0.2.13", "device-reconnect-reused-id");
+  fixture.register_generation(31);
+  ASSERT_EQ(fixture.create("reconnect-reused-old", 31), stream_stats::benchmark_run_create_result_e::created);
+  insert_test_row("reconnect-reused-unrelated-terminal", "device-reconnect-reused-other", 3,
+                  stream_stats::benchmark_run_state_e::frozen);
+  fixture.own_row("reconnect-reused-unrelated-terminal");
+  fixture.register_generation(32);
+
+  // The superseded run's own ID, then an unrelated terminal row's ID: both rejected, nothing changed.
+  EXPECT_EQ(stream_stats::create_benchmark_run(make_valid_create_request("reconnect-reused-old"), fixture.device_uuid, 32, true),
+            stream_stats::benchmark_run_create_result_e::rejected_run_id_already_used);
+  expect_open_and_untouched("reconnect-reused-old", stream_stats::benchmark_run_state_e::armed);
+  EXPECT_EQ(stream_stats::create_benchmark_run(make_valid_create_request("reconnect-reused-unrelated-terminal"),
+                                               fixture.device_uuid, 32, true),
+            stream_stats::benchmark_run_create_result_e::rejected_run_id_already_used);
+  expect_open_and_untouched("reconnect-reused-old", stream_stats::benchmark_run_state_e::armed);
+  const auto unrelated = snapshot_benchmark_run("reconnect-reused-unrelated-terminal");
+  ASSERT_TRUE(unrelated.has_value());
+  EXPECT_EQ(unrelated->state, stream_stats::benchmark_run_state_e::frozen);
+  EXPECT_EQ(unrelated->abort_reason, stream_stats::benchmark_abort_reason_e::none);
+}
+
+TEST(BenchmarkRunReconnectTests, ASameGenerationDuplicateIsStillRejectedAndTheLiveArmStillStarts) {
+  BenchmarkControlPlaneGuard guard(true);
+  BenchmarkReconnectFixture fixture("192.0.2.14", "device-reconnect-same-generation");
+  fixture.register_generation(41);
+  ASSERT_EQ(fixture.create("reconnect-same-generation-live", 41), stream_stats::benchmark_run_create_result_e::created);
+
+  EXPECT_EQ(fixture.create("reconnect-same-generation-second", 41),
+            stream_stats::benchmark_run_create_result_e::rejected_session_already_has_an_active_run);
+  // Both conflicts at once keep the existing precedence: the session check comes first.
+  EXPECT_EQ(fixture.create("reconnect-same-generation-live", 41),
+            stream_stats::benchmark_run_create_result_e::rejected_session_already_has_an_active_run);
+  expect_open_and_untouched("reconnect-same-generation-live", stream_stats::benchmark_run_state_e::armed);
+  EXPECT_FALSE(snapshot_benchmark_run("reconnect-same-generation-second").has_value());
+  EXPECT_EQ(stream_stats::start_benchmark_run("reconnect-same-generation-live", fixture.device_uuid, 41, true),
+            stream_stats::benchmark_run_start_result_e::started);
+}
+
+TEST(BenchmarkRunReconnectTests, RejectedPreconditionsNeverReconcile) {
+  BenchmarkControlPlaneGuard guard(true);
+  BenchmarkReconnectFixture fixture("192.0.2.15", "device-reconnect-preconditions");
+  fixture.register_generation(51);
+  ASSERT_EQ(fixture.create("reconnect-preconditions-old", 51), stream_stats::benchmark_run_create_result_e::created);
+  fixture.register_generation(52);
+
+  EXPECT_EQ(fixture.create("reconnect-preconditions-unauthorized", 52, /*authorized=*/false),
+            stream_stats::benchmark_run_create_result_e::rejected_caller_not_authorized_as_harness);
+  expect_open_and_untouched("reconnect-preconditions-old", stream_stats::benchmark_run_state_e::armed);
+
+  stream_stats::set_benchmark_control_plane_enabled(false);
+  EXPECT_EQ(fixture.create("reconnect-preconditions-disabled", 52),
+            stream_stats::benchmark_run_create_result_e::rejected_control_plane_not_enabled);
+  stream_stats::set_benchmark_control_plane_enabled(true);
+  expect_open_and_untouched("reconnect-preconditions-old", stream_stats::benchmark_run_state_e::armed);
+
+  auto invalid = make_valid_create_request("reconnect-preconditions-invalid");
+  invalid.target_fps = 1;
+  EXPECT_EQ(fixture.create(invalid, 52), stream_stats::benchmark_run_create_result_e::rejected_target_fps_out_of_range);
+  expect_open_and_untouched("reconnect-preconditions-old", stream_stats::benchmark_run_state_e::armed);
+
+  stream_stats::add_client("192.0.2.16", "device-reconnect-preconditions-second-client");
+  const auto two_clients = fixture.create("reconnect-preconditions-two-clients", 52);
+  stream_stats::remove_client("192.0.2.16");
+  EXPECT_EQ(two_clients, stream_stats::benchmark_run_create_result_e::rejected_not_exactly_one_active_session);
+  expect_open_and_untouched("reconnect-preconditions-old", stream_stats::benchmark_run_state_e::armed);
+
+  for (const auto *run_id : {"reconnect-preconditions-unauthorized", "reconnect-preconditions-disabled",
+                             "reconnect-preconditions-invalid", "reconnect-preconditions-two-clients"}) {
+    EXPECT_FALSE(snapshot_benchmark_run(run_id).has_value()) << run_id;
+  }
+}
+
+TEST(BenchmarkRunReconnectTests, WithoutARegisteredTimingScopeTheOldRejectionStands) {
+  BenchmarkControlPlaneGuard guard(true);
+  // No start_session_timing at all, like the existing create tests: nothing proves which generation is
+  // current, so nothing is reconciled.
+  BenchmarkReconnectFixture fixture("192.0.2.17", "device-reconnect-untimed");
+  ASSERT_EQ(fixture.create("reconnect-untimed-old", 61), stream_stats::benchmark_run_create_result_e::created);
+  EXPECT_EQ(fixture.create("reconnect-untimed-new", 62),
+            stream_stats::benchmark_run_create_result_e::rejected_session_already_has_an_active_run);
+  expect_open_and_untouched("reconnect-untimed-old", stream_stats::benchmark_run_state_e::armed);
+  EXPECT_FALSE(snapshot_benchmark_run("reconnect-untimed-new").has_value());
+}
+
+TEST(BenchmarkRunReconnectTests, AStaleCallerNeverAbortsTheNewerLiveArm) {
+  BenchmarkControlPlaneGuard guard(true);
+  BenchmarkReconnectFixture fixture("192.0.2.18", "device-reconnect-stale-caller");
+  fixture.register_generation(73);
+  ASSERT_EQ(fixture.create("reconnect-stale-caller-live", 73), stream_stats::benchmark_run_create_result_e::created);
+
+  // A caller still holding generation 72 is not the registered scope.
+  EXPECT_EQ(fixture.create("reconnect-stale-caller-old", 72),
+            stream_stats::benchmark_run_create_result_e::rejected_session_already_has_an_active_run);
+  expect_open_and_untouched("reconnect-stale-caller-live", stream_stats::benchmark_run_state_e::armed);
+  EXPECT_EQ(stream_stats::start_benchmark_run("reconnect-stale-caller-live", fixture.device_uuid, 73, true),
+            stream_stats::benchmark_run_start_result_e::started);
+}
+
+TEST(BenchmarkRunReconnectTests, ACurrentOlderCallerNeverAbortsANewerRow) {
+  BenchmarkControlPlaneGuard guard(true);
+  BenchmarkReconnectFixture fixture("192.0.2.19", "device-reconnect-newer-row");
+  fixture.register_generation(82);
+  // Insert a newer row directly to bound the strictly-older rule: it must survive a positively current
+  // older caller, regardless of how the fixture arrived at this state.
+  insert_test_row("reconnect-newer-row", fixture.device_uuid, 83, stream_stats::benchmark_run_state_e::armed);
+  fixture.own_row("reconnect-newer-row");
+
+  EXPECT_EQ(fixture.create("reconnect-newer-row-caller", 82),
+            stream_stats::benchmark_run_create_result_e::rejected_session_already_has_an_active_run);
+  expect_open_and_untouched("reconnect-newer-row", stream_stats::benchmark_run_state_e::armed);
+  EXPECT_FALSE(snapshot_benchmark_run("reconnect-newer-row-caller").has_value());
+}
+
 #ifdef __linux__
 TEST(StreamStatsDoctorTests, ForecastStaysSilentUntilCaptureSourcesWereEvaluated) {
   // Nothing has been looked at: no backend, no forecast, no finding. The Doctor must never
