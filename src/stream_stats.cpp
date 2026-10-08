@@ -1144,6 +1144,7 @@ namespace stream_stats {
     j["adaptive_bitrate_active"] = adaptive_bitrate_active;
     j["adaptive_bitrate_state"] = adaptive_bitrate_state;
     j["adaptive_runtime_update_supported"] = adaptive_runtime_update_supported;
+    j["live_tuning_history"] = live_tuning_history_json(*this);
     j["doctor_live_action_scope_available"] = doctor_live_action_scope_available;
     j["idr_requests_total"] = idr_requests_total;
     j["invalidate_ref_frames_requests_total"] = invalidate_ref_frames_requests_total;
@@ -3514,6 +3515,7 @@ namespace stream_stats {
       advanced["recent_issue_codes"].push_back("steam_input_conflict");
     }
     advanced["network_verdict"] = network_verdict_json(verdict);
+    advanced["live_tuning_history"] = live_tuning_history_json(stats);
     advanced["pacing_coverage"] = {
       {"sample_count", stats.video_policy_sample_count},
       {"required_sample_count", DOCTOR_PACING_WARMUP_SAMPLES},
@@ -4865,6 +4867,59 @@ namespace stream_stats {
       return "collecting";
     }
     return verdict.rtt_elevated ? "elevated" : "clean";
+  }
+
+  nlohmann::json live_tuning_history_json(const stats_t &stats) {
+    const auto &history = stats.live_tuning_history;
+    const bool same_scope = history.scoped && history.session_generation != 0 &&
+      history.session_generation == stats.session_generation &&
+      !history.app_session_id.empty() && history.app_session_id == stats.app_session_id;
+    const bool available = stats.streaming && same_scope;
+    nlohmann::json out = {
+      {"version", 1},
+      {"clock", "host_steady_ms"},
+      {"capacity", history.capacity},
+      {"available", available},
+      {"reason", !stats.streaming ? "no_stream" : !same_scope ? "session_scope_unavailable" : "recorded"},
+      // These are controller and encoder transitions. Which bitrate a client media interval was
+      // encoded at is not known from them.
+      {"actual_media_rate_attribution", "unknown"},
+      {"session_generation", available ? stats.session_generation : 0},
+      {"dropped", available ? history.dropped : 0},
+      {"truncated", available && history.dropped > 0},
+      {"host_elapsed_ms_at_snapshot", available ? history.host_elapsed_ms_at_copy : 0},
+      {"entries", nlohmann::json::array()},
+    };
+    if (!available) return out;
+    for (const auto &entry : history.entries) {
+      nlohmann::json e = {
+        {"sequence", entry.sequence},
+        {"host_elapsed_ms", entry.host_elapsed_ms},
+        {"kind", entry.kind},
+        {"cause", entry.cause},
+        {"state", entry.state},
+        {"reason", entry.reason},
+        {"requested_bitrate_kbps", entry.requested_bitrate_kbps},
+        {"applied_proof", entry.applied_known ? "encoder_confirmed" : "unknown"},
+        {"applied_bitrate_kbps", entry.applied_known ? nlohmann::json(entry.applied_bitrate_kbps) : nlohmann::json(nullptr)},
+        {"operator_revision", entry.operator_revision},
+        {"applied_revision", entry.applied_revision},
+        {"repeat_count", entry.repeat_count},
+        {"feedback_initialized", entry.feedback_initialized},
+        {"ewma_packet_loss_percent", entry.ewma_packet_loss},
+        {"ewma_rtt_ms", entry.ewma_rtt_ms},
+      };
+      if (entry.repeat_count > 1) e["last_host_elapsed_ms"] = entry.last_host_elapsed_ms;
+      if (entry.callback_revision != 0 || entry.callback_bitrate_kbps != 0) {
+        e["callback"] = {{"bitrate_kbps", entry.callback_bitrate_kbps}, {"revision", entry.callback_revision}};
+      }
+      e["input"] = entry.input_available ? nlohmann::json {
+        {"packet_loss_percent", entry.input_packet_loss_percent},
+        {"rtt_ms", entry.input_rtt_ms},
+      } : nlohmann::json(nullptr);
+      out["entries"].push_back(std::move(e));
+    }
+    return out;
   }
 
   nlohmann::json network_verdict_json(const network_verdict_t &verdict) {
@@ -6390,7 +6445,7 @@ namespace stream_stats {
 
   stats_t get_current() {
     stats_t result;
-    const auto adaptive_state = adaptive_bitrate::get_state();
+    const auto adaptive_state = adaptive_bitrate::get_state_with_history();
     {
       std::lock_guard<std::mutex> lock(stats_mutex);
       const auto target_bitrate = adaptive_state.target_bitrate_kbps;
@@ -6409,6 +6464,8 @@ namespace stream_stats {
 
       result = current_stats;
       result.last_session = last_ended_session;
+      // Only this snapshot carries the history; current_stats never holds a copy that could go stale.
+      result.live_tuning_history = adaptive_state.history;
     }
     if (const auto identity = get_single_active_session_identity()) {
       result.session_generation = identity->session_generation;
