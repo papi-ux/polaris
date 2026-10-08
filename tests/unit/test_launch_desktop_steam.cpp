@@ -225,6 +225,20 @@ namespace {
       return read_reply(tree);
     }
 
+    std::pair<std::string, std::string> network_reply(const credentials_t &client) {
+      if (!route) {
+        route = std::make_unique<nvhttp::launch_route_for_tests_t>(host.cert.string(), host.key.string());
+      }
+      SimpleWeb::Client<SimpleWeb::HTTPS> https {
+        "127.0.0.1:" + std::to_string(route->port()), false,
+        client.cert.string(), client.key.string()
+      };
+      https.config.timeout = 5;
+      const auto response = https.request("GET",
+        "/polaris/v1/network/connection?peer=100.64.0.2&hostname=private.example.ts.net");
+      return {response->status_code, response->content.string()};
+    }
+
     /// Runs the route's desktop Steam step for a launch of `app` with `args`.
     launch_reply_t admit(const nvhttp::args_t &args, const proc::ctx_t &app, bool device_closes_desktop_steam, bool &admitted) {
       boost::property_tree::ptree tree;
@@ -1121,3 +1135,33 @@ TEST_F(LaunchDesktopSteamTest, AStalledOwnedRestoreFencesEveryAdmissionOfTheReal
   platf::game_mode_host::set_session_live_for_tests(false);
 }
 #endif
+
+
+// Real TLS verification and the production read-only handler: query parameters
+// cannot substitute for the actual authenticated connection's endpoints.
+TEST_F(LaunchDesktopSteamTest, PairedNetworkEvidenceDescribesOnlyItsOwnControlConnection) {
+  pair_moonlight(false, crypto::PERM::_default);
+  const auto [status, body] = network_reply(moonlight);
+  ASSERT_TRUE(status.starts_with("200"));
+  const auto evidence = nlohmann::json::parse(body);
+  EXPECT_EQ(evidence.at("schema_version"), 1);
+  EXPECT_EQ(evidence.at("status"), "unknown");
+  EXPECT_EQ(evidence.at("tailscale").at("scope"), "control_connection");
+  EXPECT_EQ(evidence.at("tailscale").at("confirmed"), false);
+  EXPECT_EQ(body.find("100.64.0.2"), std::string::npos);
+  EXPECT_EQ(body.find("private.example.ts.net"), std::string::npos);
+}
+
+TEST_F(LaunchDesktopSteamTest, PairedNetworkEvidenceRequiresViewPermission) {
+  pair_moonlight(false, crypto::PERM::_reserved);
+  const auto [status, body] = network_reply(moonlight);
+  EXPECT_TRUE(status.starts_with("403"));
+  EXPECT_EQ(body.find("tailscale"), std::string::npos);
+}
+
+TEST_F(LaunchDesktopSteamTest, UnpairedCertificateCannotReadNetworkEvidence) {
+  pair_moonlight(false);
+  const auto [status, body] = network_reply(stranger);
+  EXPECT_TRUE(status.starts_with("401"));
+  EXPECT_EQ(body.find("tailscale"), std::string::npos);
+}

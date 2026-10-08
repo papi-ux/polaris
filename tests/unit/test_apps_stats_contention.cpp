@@ -142,3 +142,29 @@ TEST_F(apps_stats_contention, BothReadOnlyHandlersStillRequireAuthentication) {
     }
   });
 }
+
+TEST_F(apps_stats_contention, NetworkEvidenceRequiresAuthenticationBeforeReadingTheDaemon) {
+  proc::proc.with_session_lifecycle_lock_for_tests([&]() {
+    auto reply = request("/api/network/connection", "wrong-fixture-key");
+    ASSERT_EQ(reply.wait_for(500ms), std::future_status::ready);
+    const auto [status, body] = reply.get();
+    EXPECT_TRUE(status.starts_with("401"));
+    EXPECT_EQ(body.find("tailscaled"), std::string::npos);
+  });
+}
+
+TEST_F(apps_stats_contention, IdleNetworkEvidenceCannotBeSelectedWithQueryParameters) {
+  ASSERT_FALSE(stream_stats::get_current().streaming);
+  const auto [status, body] = request("/api/network/connection?peer=100.64.0.2&hostname=private.example.ts.net").get();
+  ASSERT_TRUE(status.starts_with("200"));
+  const auto evidence = nlohmann::json::parse(body);
+  EXPECT_EQ(evidence.at("schema_version"), 1);
+  EXPECT_EQ(evidence.at("status"), "unknown");
+  EXPECT_EQ(evidence.at("tailscale").at("scope"), "peer_status");
+  EXPECT_EQ(evidence.at("tailscale").at("confirmed"), false);
+  EXPECT_EQ(evidence.at("tailscale").at("reason"), "no_active_stream");
+  EXPECT_EQ(body.find("100.64.0.2"), std::string::npos);
+  EXPECT_EQ(body.find("private.example.ts.net"), std::string::npos);
+  const auto stats = nlohmann::json::parse(request("/api/stats/stream").get().second);
+  EXPECT_EQ(stats.at("stream_instance_id"), "");
+}

@@ -67,6 +67,7 @@
 #include "logging.h"
 #include "log_tail_api.h"
 #include "network.h"
+#include "tailscale_connection.h"
 #include "nvhttp.h"
 #include "platform/common.h"
 #include "process.h"
@@ -10441,6 +10442,23 @@ namespace confighttp {
     return augment_stream_stats_json(stream_stats_json(stats), stats).dump();
   }
 
+  void getNetworkConnection(resp_https_t response, req_https_t request) {
+    if (!authenticate(response, request)) return;
+    const auto before = stream_stats::get_current();
+    auto output = tailscale_connection::unknown("peer_status", "no_active_stream");
+    if (before.streaming && !before.client_ip.empty()) {
+      output = tailscale_connection::observe(before.client_ip, {}, "peer_status");
+      const auto after = stream_stats::get_current();
+      if (!after.streaming || before.session_generation != after.session_generation || before.client_ip != after.client_ip)
+        output = tailscale_connection::unknown("peer_status", "stream_changed");
+    }
+    output["stream_instance_id"] = stream_stats::stream_instance_id(before.session_generation);
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    append_json_security_headers(headers);
+    headers.emplace("Cache-Control", "no-store");
+    response->write(output.dump(), headers);
+  }
+
   void getStreamStats(resp_https_t response, req_https_t request) {
     if (!authenticate(response, request))
       return;
@@ -10520,6 +10538,7 @@ namespace confighttp {
   void register_apps_stats_routes(https_server_t &server) {
     server.resource["^/api/apps$"]["GET"] = getApps;
     server.resource["^/api/stats/stream$"]["GET"] = getStreamStats;
+    server.resource["^/api/network/connection$"]["GET"] = getNetworkConnection;
   }
 
 #ifdef POLARIS_TESTS

@@ -1121,6 +1121,8 @@ namespace stream_stats {
     nlohmann::json j;
 
     j["streaming"] = streaming;
+    // Match separately collected network evidence to this process and stream.
+    j["stream_instance_id"] = streaming ? stream_instance_id(session_generation) : std::string {};
     j["client_name"] = client_name;
     j["client_ip"] = client_ip;
     // "nova" or "moonlight" for the stream client_name names; empty when nothing says which.
@@ -3395,8 +3397,9 @@ namespace stream_stats {
     if (!stats.client_network_path.empty()) {
       const auto &path = stats.client_network_path;
       constexpr auto relay_hint =
-        " That is fine when the connection is direct. When Tailscale relays it instead, expect stutter "
-        "and extra latency; running tailscale ping with this host's name on the client says which.";
+        " This address label does not verify a direct or relay connection. Check the Tailscale peer "
+        "status or run tailscale ping with this host's name on the client. Measured latency and video "
+        "frame loss determine stream quality.";
       std::string detail;
       if (path == "lan") {
         detail = "The client is on the same local network as this host.";

@@ -2359,6 +2359,21 @@ TEST(StreamStatsDoctorTests, PointsATailnetClientAtTheRelayCheck) {
   EXPECT_EQ(row->at("value"), "cgnat");
   EXPECT_EQ(row->at("status"), "info");
   EXPECT_NE(row->at("detail").get<std::string>().find("tailscale ping"), std::string::npos);
+  EXPECT_NE(row->at("detail").get<std::string>().find("does not verify"), std::string::npos);
+}
+
+TEST(StreamStatsDoctorTests, CurrentStreamIdentityIsOpaqueStableAndRetiredAtDisconnect) {
+  stream_stats::stats_t stats {};
+  stats.streaming = true;
+  stats.session_generation = 920001;
+  const auto first = nlohmann::json::parse(stats.to_json()).at("stream_instance_id").get<std::string>();
+  EXPECT_FALSE(first.empty());
+  EXPECT_EQ(first, stream_stats::stream_instance_id(stats.session_generation));
+  EXPECT_EQ(nlohmann::json::parse(stats.to_json()).at("stream_instance_id"), first);
+  stats.session_generation = 920002;
+  EXPECT_NE(nlohmann::json::parse(stats.to_json()).at("stream_instance_id"), first);
+  stats.streaming = false;
+  EXPECT_EQ(nlohmann::json::parse(stats.to_json()).at("stream_instance_id"), "");
 }
 
 namespace {

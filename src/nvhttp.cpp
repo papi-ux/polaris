@@ -61,6 +61,7 @@
 
 // local includes
 #include "config.h"
+#include "tailscale_connection.h"
 #include "configuration_store.h"
 #include "live_tuning.h"
 #include "config_file_update.h"
@@ -6561,6 +6562,27 @@ namespace nvhttp {
     return get_verified_cert(candidate, request->path);
   }
 
+  void networkConnection(resp_https_t response, req_https_t request) {
+    const auto named_cert = get_verified_cert(request);
+    if (!named_cert) {
+      response->write(SimpleWeb::StatusCode::client_error_unauthorized);
+      return;
+    }
+    if (!(named_cert->perm & PERM::_allow_view)) {
+      response->write(SimpleWeb::StatusCode::client_error_forbidden);
+      return;
+    }
+    // Query/body parameters cannot choose another peer. This describes this
+    // paired TLS connection only; it never claims to have observed video UDP.
+    const auto output = tailscale_connection::observe(
+      net::addr_to_normalized_string(request->remote_endpoint().address()),
+      net::addr_to_normalized_string(request->local_endpoint().address()));
+    SimpleWeb::CaseInsensitiveMultimap headers;
+    headers.emplace("Content-Type", "application/json");
+    headers.emplace("Cache-Control", "no-store");
+    response->write(output.dump(), headers);
+  }
+
   bool record_client_seen(const crypto::p_named_cert_t &candidate,
                           std::int64_t seen_at,
                           bool persist = true,
@@ -8718,6 +8740,8 @@ namespace nvhttp {
       features["artwork_choices_v1"] = nonblank_artwork_api_key(
         config::steamgriddb_api_key());
       features["support_client_report_v1"] = true;
+      // Route availability, not proof of a running/accessible Tailscale daemon.
+      features["network_connection_v1"] = true;
       features["session_lifecycle"] = true;
       features["session_stop_v1"] = true;
       features["device_profiles"] = true;
@@ -12556,6 +12580,7 @@ namespace nvhttp {
 
     https_server.resource["^/polaris/v1/session/report$"]["POST"] = polarisSessionReport;
     https_server.resource["^/polaris/v1/support/client-report$"]["POST"] = polarisClientSupportReport;
+    https_server.resource["^/polaris/v1/network/connection$"]["GET"] = networkConnection;
     https_server.resource["^/polaris/v1/optimizer/profile/clear$"]["POST"] = polarisClearOptimizerProfile;
     https_server.resource["^/polaris/v1/optimizer/profiles$"]["GET"] = polarisOptimizerProfiles;
     https_server.resource["^/polaris/v1/optimizer/profiles/clear$"]["POST"] = polarisClearOptimizerProfiles;
@@ -12805,6 +12830,7 @@ namespace nvhttp {
     state->server.resource["^/resume$"]["GET"] = [state](resp_https_t response, req_https_t request) {
       resume(state->host_audio, std::move(response), std::move(request));
     };
+    state->server.resource["^/polaris/v1/network/connection$"]["GET"] = networkConnection;
     state->worker = std::thread([state]() {
       try {
         state->server.start([state](unsigned short assigned) {
