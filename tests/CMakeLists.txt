@@ -346,6 +346,7 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_stats.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_save.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_window.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_pyrowave_advice.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_capture_provenance.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_game_mode_adaptive_sync.cpp
@@ -814,6 +815,12 @@ if (BUILD_FULL_TESTS)
     add_test(NAME polaris_recorder_replay_save
         COMMAND test_polaris_stream --gtest_filter=StreamRecorderReplaySaveTests.*)
     set_tests_properties(polaris_recorder_replay_save PROPERTIES
+      WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+
+    # Replay-window accounting uses controlled arrival times and immutable save snapshots.
+    add_test(NAME polaris_recorder_replay_window
+        COMMAND test_polaris_stream --gtest_filter=StreamRecorderReplayWindowTests.*)
+    set_tests_properties(polaris_recorder_replay_window PROPERTIES
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND POLARIS_ENABLE_PYROWAVE)
         # These exercise the actual encode loop with an in-memory display and
