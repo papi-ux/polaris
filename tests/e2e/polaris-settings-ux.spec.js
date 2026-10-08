@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures/mocked.js'
 
 const vrr = { schema: 1, stream_instance_id: 'stream-1', requested: 'true', effective: true,
   pacing_mode: 'source_time', fallback_reason: null, host_permission: true, host_pacing: { state: 'source_time', fresh: true } }

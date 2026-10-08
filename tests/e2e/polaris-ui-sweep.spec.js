@@ -6,7 +6,7 @@ import { POLARIS_VIEWPORTS } from './polaris-viewports.js'
 const screenshotDir = process.env.POLARIS_UI_SWEEP_SCREENSHOT_DIR || path.resolve('.hermes/artifacts/polaris-ui-ux-sweep/screenshots')
 
 // Themes to sweep, e.g. POLARIS_UI_SWEEP_THEMES=polaris,portable-chrome,oled,miami,high-contrast.
-// Defaults to the default skin so the standard matrix stays 48 tests.
+// Defaults to the default skin: eight viewports across seven routes (56 tests).
 const sweepThemes = (process.env.POLARIS_UI_SWEEP_THEMES || 'polaris').split(',').map((theme) => theme.trim()).filter(Boolean)
 
 async function applyTheme(page, themeId) {
