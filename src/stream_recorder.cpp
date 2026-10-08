@@ -15,14 +15,31 @@
 
 // standard includes
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
+#include <climits>
+#include <cstdint>
 #include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <sstream>
+#include <utility>
+
+// platform includes
+#ifdef _WIN32
+  #include <fcntl.h>
+  #include <io.h>
+  #include <share.h>
+  #include <sys/stat.h>
+#else
+  #include <fcntl.h>
+  #include <sys/stat.h>
+  #include <unistd.h>
+#endif
 
 // local includes
 #include "config.h"
@@ -37,12 +54,17 @@ namespace stream_recorder {
 
   // ---- Internal state ----
 
+  // Replay payloads are immutable once stored, so a save can share them with the live run
+  // instead of copying their bytes.
+  using payload_t = std::shared_ptr<const std::vector<uint8_t>>;
+
   struct buffered_packet_t {
-    std::vector<uint8_t> data;
+    payload_t data;
     bool is_video;
     bool is_keyframe;
     int64_t pts;
     std::chrono::steady_clock::time_point timestamp;
+    std::uint64_t sequence;  ///< Increases with every stored packet; tells a snapshot's entries apart
   };
 
   static config_t cfg;
@@ -79,6 +101,27 @@ namespace stream_recorder {
   static std::map<std::uint64_t, bool> replay_sessions;
   static std::uint64_t replay_selected = 0;
   static replay_stats_t replay_counters;
+  static std::uint64_t replay_next_sequence = 1;
+
+  // The save in progress, as the recorder accounts for it (guarded by `mutex`). Its snapshot
+  // holds the stored packets whose sequence lies in [first, last]; when the live run drops one
+  // of those, its bytes stay alive only through the snapshot and count as snapshot-only.
+  static bool snapshot_active = false;
+  static std::uint64_t snapshot_first_sequence = 0;
+  static std::uint64_t snapshot_last_sequence = 0;
+  static std::size_t snapshot_packets = 0;
+  static std::size_t snapshot_bytes = 0;
+  static std::size_t snapshot_only_bytes = 0;
+
+  // One save at a time. Taken with try_lock, never while holding `mutex`, so a request
+  // during a save is refused at once and no packet, status or lifecycle call waits for it.
+  static std::mutex save_mutex;
+  // Counted without any lock, so a busy refusal never waits on the recorder either.
+  static std::atomic<std::uint64_t> saves_refused_busy {0};
+
+#ifdef POLARIS_TESTS
+  static detail::save_hooks_t save_hooks;
+#endif
 
   /**
    * @brief Generate a timestamped filename for a recording.
@@ -162,10 +205,18 @@ namespace stream_recorder {
     return std::chrono::minutes {std::clamp(cfg.replay_buffer_minutes, 1, 60)};
   }
 
-  /**
-   * @brief Clear the run. A lifecycle or config clear also forgets its codec.
-   */
+  /// The live run is dropping `packet`: if a save's snapshot holds it, it now lives only there.
+  static void note_live_release(const buffered_packet_t &packet) {
+    if (snapshot_active && packet.sequence >= snapshot_first_sequence && packet.sequence <= snapshot_last_sequence) {
+      snapshot_only_bytes += packet.data->size();
+    }
+  }
+
+  /// Clear the run. A lifecycle or config clear also forgets its codec.
   static void clear_replay_run(bool forget_codec) {
+    for (const auto &packet : replay_buffer) {
+      note_live_release(packet);
+    }
     replay_buffer.clear();
     replay_bytes = 0;
     if (forget_codec) {
@@ -174,7 +225,8 @@ namespace stream_recorder {
   }
 
   static void pop_replay_front() {
-    replay_bytes -= replay_buffer.front().data.size();
+    note_live_release(replay_buffer.front());
+    replay_bytes -= replay_buffer.front().data->size();
     replay_buffer.pop_front();
     ++replay_counters.trimmed;
   }
@@ -276,12 +328,14 @@ namespace stream_recorder {
       replay_video_format = video_format;
     }
 
+    // The one copy of the packet's bytes, made immutable so a save can share it.
     replay_buffer.push_back(buffered_packet_t {
-      std::vector<uint8_t>(data, data + size),
+      std::make_shared<const std::vector<uint8_t>>(data, data + size),
       true,
       is_keyframe,
       pts,
       now,
+      replay_next_sequence++,
     });
     replay_bytes += size;
   }
@@ -355,65 +409,422 @@ namespace stream_recorder {
     return recording.load();
   }
 
+  // ---- Replay save: a snapshot under the lock, storage with no recorder lock ----
+
+  namespace {
+    /// Bounded attempts for unique staging and final names; only "already exists" moves on.
+    constexpr int k_save_name_attempts = 100;
+
+    /// What an admitted save captured under the lock. It owns its share of the payloads.
+    struct replay_snapshot_t {
+      std::vector<payload_t> payloads;
+      std::size_t bytes = 0;
+      int video_format = -1;
+      std::uint64_t generation = 0;
+      std::string output_dir;  ///< As configured when admitted; empty means the default directory
+      std::chrono::system_clock::time_point wall_time;
+    };
+
+    /**
+     * Ends an admitted save on every path out of it, exceptions included: drops the snapshot's
+     * payload references before taking the lock (so no payload is freed under it), then clears
+     * the accounting and counts the outcome.
+     */
+    class snapshot_lease_t {
+    public:
+      snapshot_lease_t() = default;
+      snapshot_lease_t(const snapshot_lease_t &) = delete;
+      snapshot_lease_t &operator=(const snapshot_lease_t &) = delete;
+
+      ~snapshot_lease_t() {
+        if (!admitted) {
+          return;
+        }
+        // Releasing references neither allocates nor throws; the pointer array itself is freed
+        // when the lease is destroyed, after the lock below is released.
+        snapshot.payloads.clear();
+        std::lock_guard lock(mutex);
+        snapshot_active = false;
+        snapshot_first_sequence = 0;
+        snapshot_last_sequence = 0;
+        snapshot_packets = 0;
+        snapshot_bytes = 0;
+        snapshot_only_bytes = 0;
+        ++(published ? replay_counters.saves_completed : replay_counters.saves_failed);
+      }
+
+      replay_snapshot_t snapshot;
+      bool admitted = false;
+      bool published = false;
+    };
+
+    long long native_write_impl(int fd, const std::uint8_t *data, std::size_t size) {
+#ifdef _WIN32
+      return _write(fd, data, static_cast<unsigned>(std::min<std::size_t>(size, INT_MAX)));
+#else
+      return ::write(fd, data, size);
+#endif
+    }
+
+    int native_sync_impl(int fd) {
+#ifdef _WIN32
+      return _commit(fd);
+#else
+      return ::fsync(fd);
+#endif
+    }
+
+    int native_close_impl(int fd) {
+#ifdef _WIN32
+      return _close(fd);
+#else
+      return ::close(fd);
+#endif
+    }
+
+    // Native removal has no allocating path conversion, including in noexcept cleanup.
+    int native_remove_impl(const fs::path &path) noexcept {
+#ifdef _WIN32
+      return _wunlink(path.c_str());
+#else
+      return ::unlink(path.c_str());
+#endif
+    }
+
+    /// A hard link fails when the final name exists, so publication never replaces a file.
+    /// A filesystem without hard links fails here, closed, rather than falling back to a rename.
+    std::error_code native_publish_impl(const fs::path &staging, const fs::path &final_path) {
+#ifdef _WIN32
+      std::error_code ec;
+      fs::create_hard_link(staging, final_path, ec);
+      return ec;
+#else
+      // All allocations precede the no-replace side effect. A completed link cannot be
+      // followed by a filesystem wrapper allocation turning it into a reported failure.
+      if (::link(staging.c_str(), final_path.c_str()) == 0) {
+        return {};
+      }
+      return {errno, std::generic_category()};
+#endif
+    }
+
+    /// Create `path` only if absent. POSIX uses 0600; Windows inherits directory ACLs.
+    int open_exclusive(const fs::path &path) {
+#ifdef _WIN32
+      int fd = -1;
+      const errno_t error = _wsopen_s(&fd, path.c_str(), _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY | _O_NOINHERIT,
+                                      _SH_DENYRW, _S_IREAD | _S_IWRITE);
+      if (error) {
+        errno = error;
+        return -1;
+      }
+      return fd;
+#else
+      int fd;
+      do {
+        fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, S_IRUSR | S_IWUSR);
+      } while (fd < 0 && errno == EINTR);
+      return fd;
+#endif
+    }
+
+    long long save_write(int fd, const std::uint8_t *data, std::size_t size) {
+#ifdef POLARIS_TESTS
+      if (save_hooks.write) {
+        return save_hooks.write(fd, data, size);
+      }
+#endif
+      return native_write_impl(fd, data, size);
+    }
+
+    int save_sync(int fd) {
+#ifdef POLARIS_TESTS
+      if (save_hooks.sync) {
+        return save_hooks.sync(fd);
+      }
+#endif
+      return native_sync_impl(fd);
+    }
+
+    int save_close(int fd) {
+#ifdef POLARIS_TESTS
+      if (save_hooks.close) {
+        return save_hooks.close(fd);
+      }
+#endif
+      return native_close_impl(fd);
+    }
+
+    std::error_code save_publish(const fs::path &staging, const fs::path &final_path) {
+#ifdef POLARIS_TESTS
+      if (save_hooks.publish) {
+        return save_hooks.publish(staging, final_path);
+      }
+#endif
+      return native_publish_impl(staging, final_path);
+    }
+
+    std::string errno_message(int error) {
+      return std::error_code(error, std::generic_category()).message();
+    }
+
+    std::string wall_stamp(std::chrono::system_clock::time_point when) {
+#ifdef POLARIS_TESTS
+      if (save_hooks.name_stamp) {
+        return save_hooks.name_stamp();
+      }
+#endif
+      const auto time = std::chrono::system_clock::to_time_t(when);
+      std::tm local {};
+#ifdef _WIN32
+      localtime_s(&local, &time);
+#else
+      localtime_r(&time, &local);
+#endif
+      std::ostringstream stamp;
+      stamp << std::put_time(&local, "%Y%m%d_%H%M%S");
+      return stamp.str();
+    }
+
+    /// The staging file this save created. Closes it and removes it unless it was published.
+    class staging_file_t {
+    public:
+      staging_file_t() = default;
+      staging_file_t(const staging_file_t &) = delete;
+      staging_file_t &operator=(const staging_file_t &) = delete;
+
+      ~staging_file_t() {
+        if (fd >= 0) {
+          native_close_impl(fd);
+        }
+        if (!path.empty()) {
+          native_remove_impl(path);
+        }
+      }
+
+      fs::path path;  ///< Set only once this save created it exclusively
+      int fd = -1;
+    };
+
+    /**
+     * Write the snapshot to a private staging file in its captured directory, check every
+     * write, the sync and the close, then publish it under a final name that did not exist.
+     * Runs with no recorder lock and reads no configuration.
+     */
+    bool store_snapshot(const replay_snapshot_t &snapshot, detail::save_result_t &result, bool &staging_left) {
+      const auto fail = [&result](std::string what) {
+        result.status = detail::save_status_e::storage_error;
+        result.error = std::move(what);
+        return false;
+      };
+
+      const fs::path dir = snapshot.output_dir.empty() ? platf::appdata() / "recordings" : fs::path {snapshot.output_dir};
+      std::error_code ec;
+      fs::create_directories(dir, ec);
+      if (ec) {
+        return fail("output directory [" + dir.string() + "]: " + ec.message());
+      }
+      if (!fs::is_directory(dir, ec)) {
+        return fail("output directory [" + dir.string() + "] is not a directory");
+      }
+
+      const std::string stem = "polaris_" + wall_stamp(snapshot.wall_time) + "_replay";
+      const std::string ext = extension_for(snapshot.video_format);
+
+      staging_file_t staging;
+      for (int attempt = 0; attempt < k_save_name_attempts; ++attempt) {
+        auto candidate = dir / ("." + stem + ext + ".staging-" + std::to_string(attempt));
+        const int fd = open_exclusive(candidate);
+        if (fd >= 0) {
+          staging.fd = fd;
+          // Moving a preallocated path cannot orphan the exclusive file through a copy failure.
+          staging.path = std::move(candidate);
+          break;
+        }
+        const int error = errno;
+        if (error != EEXIST) {
+          return fail("staging [" + candidate.string() + "]: " + errno_message(error));
+        }
+      }
+      if (staging.fd < 0) {
+        return fail("staging: every candidate name already exists");
+      }
+
+#ifdef POLARIS_TESTS
+      if (save_hooks.before_write) {
+        save_hooks.before_write(staging.path);
+      }
+#endif
+
+      for (const auto &payload : snapshot.payloads) {
+        const std::uint8_t *data = payload->data();
+        std::size_t left = payload->size();
+        while (left > 0) {
+          const auto written = save_write(staging.fd, data, left);
+          if (written < 0) {
+            const int error = errno;
+            if (error == EINTR) {
+              continue;
+            }
+            return fail("write: " + errno_message(error));
+          }
+          if (written == 0 || static_cast<unsigned long long>(written) > left) {
+            return fail("write made no valid progress");
+          }
+          data += written;
+          left -= static_cast<std::size_t>(written);
+        }
+      }
+
+      int synced;
+      do {
+        synced = save_sync(staging.fd);
+      } while (synced != 0 && errno == EINTR);
+      if (synced != 0) {
+        return fail("sync: " + errno_message(errno));
+      }
+
+      // Whatever close returns, the descriptor is released and is not closed again.
+      const int fd = std::exchange(staging.fd, -1);
+      if (save_close(fd) != 0) {
+        return fail("close: " + errno_message(errno));
+      }
+
+      const auto first_final = dir / (stem + ext);
+#ifdef POLARIS_TESTS
+      if (save_hooks.before_publish) {
+        save_hooks.before_publish(staging.path, first_final);
+      }
+#endif
+
+      for (int attempt = 0; attempt < k_save_name_attempts; ++attempt) {
+        const auto final_path = attempt == 0 ? first_final : dir / (stem + "-" + std::to_string(attempt) + ext);
+        // Everything the success path needs is allocated before publishing, so nothing after a
+        // successful publication can throw and turn a published file into a reported failure.
+        std::string final_string = final_path.string();
+        const auto error = save_publish(staging.path, final_path);
+        if (!error) {
+          // Published; the staging name is only a second link to the same complete file now.
+          staging_left = native_remove_impl(staging.path) != 0;
+          staging.path.clear();
+          result.status = detail::save_status_e::saved;
+          result.path = std::move(final_string);
+          return true;
+        }
+        if (error != std::errc::file_exists) {
+          return fail("publish [" + final_path.string() + "]: " + error.message());
+        }
+      }
+      return fail("publish: every candidate name already exists");
+    }
+  }  // namespace
+
   std::string save_replay() {
     return detail::save_replay_at(std::chrono::steady_clock::now());
   }
 
   std::string detail::save_replay_at(std::chrono::steady_clock::time_point now) {
-    std::lock_guard lock(mutex);
-
-    if (cfg.mode != mode_t::replay_buffer) {
-      BOOST_LOG(warning) << "stream_recorder: replay buffer is not enabled"sv;
-      return {};
-    }
-
-    // Nothing older than the duration is saved, even when no packet arrived since.
-    expire_replay(now);
-    if (replay_buffer.empty()) {
-      BOOST_LOG(warning) << "stream_recorder: replay buffer is empty"sv;
-      return {};
-    }
-
-    // Find the first keyframe in the buffer to start from
-    auto it = replay_buffer.begin();
-    for (; it != replay_buffer.end(); ++it) {
-      if (it->is_video && it->is_keyframe) {
-        break;
-      }
-    }
-
-    if (it == replay_buffer.end()) {
-      BOOST_LOG(warning) << "stream_recorder: no keyframe found in replay buffer"sv;
-      return {};
-    }
-
-    // The run's own codec, not whichever session last set the global one.
-    auto ext = extension_for(replay_video_format);
-    auto filename = generate_filename("_replay" + ext);
-
-    std::ofstream out(filename, std::ios::binary | std::ios::trunc);
-    if (!out.is_open()) {
-      BOOST_LOG(error) << "stream_recorder: failed to open replay file ["sv << filename << "]"sv;
-      return {};
-    }
-
-    size_t total_bytes = 0;
-    size_t packet_count = 0;
-    for (; it != replay_buffer.end(); ++it) {
-      if (it->is_video) {
-        out.write(reinterpret_cast<const char *>(it->data.data()), it->data.size());
-        total_bytes += it->data.size();
-        packet_count++;
-      }
-    }
-
-    out.close();
-
-    BOOST_LOG(info) << "stream_recorder: saved replay ("sv << packet_count << " packets, "sv
-                    << (total_bytes / 1024 / 1024) << " MiB) to ["sv << filename << "]"sv;
-
-    return filename;
+    auto result = save_replay_result_at(now);
+    return result.status == save_status_e::saved ? std::move(result.path) : std::string {};
   }
+
+  detail::save_result_t detail::save_replay_result_at(std::chrono::steady_clock::time_point now) {
+    save_result_t result;
+    std::unique_lock gate(save_mutex, std::try_to_lock);
+    if (!gate.owns_lock()) {
+      // Refused at once: no recorder lock, no waiting on the running save.
+      saves_refused_busy.fetch_add(1, std::memory_order_relaxed);
+      result.status = save_status_e::busy;
+      BOOST_LOG(warning) << "stream_recorder: a replay save is already running"sv;
+      return result;
+    }
+
+    // Declared after the gate, so it is released (payloads, accounting) before the gate opens.
+    snapshot_lease_t lease;
+    {
+      std::lock_guard lock(mutex);
+      if (cfg.mode != mode_t::replay_buffer) {
+        result.status = save_status_e::disabled;
+      } else {
+        // Nothing older than the duration is saved, even when no packet arrived since.
+        expire_replay(now);
+        if (replay_buffer.empty() || !replay_buffer.front().is_keyframe || replay_video_format < 0 ||
+            replay_video_format > 3) {
+          result.status = save_status_e::empty;
+        } else {
+          // Pointers and metadata only: the payload bytes are shared, not copied.
+          auto &snapshot = lease.snapshot;
+          snapshot.payloads.reserve(replay_buffer.size());
+          for (const auto &packet : replay_buffer) {
+            snapshot.payloads.push_back(packet.data);
+          }
+          snapshot.bytes = replay_bytes;
+          snapshot.video_format = replay_video_format;
+          snapshot.generation = replay_selected;
+          snapshot.output_dir = cfg.output_dir;
+          snapshot.wall_time = std::chrono::system_clock::now();
+          snapshot_active = true;
+          snapshot_first_sequence = replay_buffer.front().sequence;
+          snapshot_last_sequence = replay_buffer.back().sequence;
+          snapshot_packets = replay_buffer.size();
+          snapshot_bytes = replay_bytes;
+          snapshot_only_bytes = 0;
+          lease.admitted = true;
+        }
+      }
+    }
+    if (!lease.admitted) {
+      BOOST_LOG(warning) << (result.status == save_status_e::disabled ? "stream_recorder: replay buffer is not enabled"sv :
+                                                                         "stream_recorder: replay buffer is empty"sv);
+      return result;
+    }
+
+    result.packets = lease.snapshot.payloads.size();
+    result.bytes = lease.snapshot.bytes;
+    result.video_format = lease.snapshot.video_format;
+    result.generation = lease.snapshot.generation;
+    bool staging_left = false;
+    try {
+      lease.published = store_snapshot(lease.snapshot, result, staging_left);
+    } catch (...) {
+      // All throwing storage work precedes publication; owned staging cleanup already ran.
+      // Do not allocate another diagnostic string while handling an allocation failure.
+      result.status = save_status_e::storage_error;
+      result.path.clear();
+    }
+    // Reporting must not change the outcome: a published file stays a reported success.
+    try {
+      if (lease.published) {
+        if (staging_left) {
+          BOOST_LOG(warning) << "stream_recorder: published replay, but could not remove its staging link"sv;
+        }
+        BOOST_LOG(info) << "stream_recorder: saved replay ("sv << result.packets << " packets, "sv
+                        << (result.bytes / 1024 / 1024) << " MiB) to ["sv << result.path << "]"sv;
+      } else {
+        BOOST_LOG(error) << "stream_recorder: replay save failed, nothing published: "sv << result.error;
+      }
+    } catch (...) {
+    }
+    return result;
+  }
+
+#ifdef POLARIS_TESTS
+  long long detail::native_write(int fd, const std::uint8_t *data, std::size_t size) {
+    return native_write_impl(fd, data, size);
+  }
+
+  int detail::native_sync(int fd) {
+    return native_sync_impl(fd);
+  }
+
+  int detail::native_close(int fd) {
+    return native_close_impl(fd);
+  }
+
+  std::error_code detail::native_publish(const fs::path &staging, const fs::path &final_path) {
+    return native_publish_impl(staging, final_path);
+  }
+#endif
 
   void push_packet(const uint8_t *data, size_t size, bool is_video, bool is_keyframe, int64_t pts,
                    std::uint64_t session_generation, int video_format) {
@@ -500,6 +911,18 @@ namespace stream_recorder {
     stats.duration = replay_duration();
     stats.max_bytes = replay_max_bytes;
     stats.max_packets = replay_max_packets;
+    stats.saves_refused_busy = saves_refused_busy.load(std::memory_order_relaxed);
+    stats.save_in_progress = snapshot_active;
+    stats.snapshot_packets = snapshot_packets;
+    stats.snapshot_bytes = snapshot_bytes;
+    stats.snapshot_only_bytes = snapshot_only_bytes;
+    stats.unique_payload_bytes = replay_bytes + snapshot_only_bytes;
+    stats.metadata_entries = replay_buffer.size() + snapshot_packets;
+    // A snapshot is a copy of one admitted live run, which the live caps already bound.
+    stats.max_snapshot_bytes = replay_max_bytes;
+    stats.max_snapshot_packets = replay_max_packets;
+    stats.max_unique_payload_bytes = replay_max_bytes + stats.max_snapshot_bytes;
+    stats.max_metadata_entries = replay_max_packets + stats.max_snapshot_packets;
     return stats;
   }
 
@@ -519,7 +942,14 @@ namespace stream_recorder {
     replay_sessions.clear();
     replay_selected = 0;
     replay_counters = {};
+    replay_next_sequence = 1;
+    saves_refused_busy.store(0, std::memory_order_relaxed);
     active_video_format.store(-1, std::memory_order_relaxed);
+    save_hooks = {};
+  }
+
+  void detail::set_save_hooks_for_tests(save_hooks_t hooks) {
+    save_hooks = std::move(hooks);
   }
 #endif
 
