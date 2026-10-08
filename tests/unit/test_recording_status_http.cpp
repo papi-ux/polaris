@@ -371,6 +371,7 @@ TEST(RecordingStatusJsonTests, StatusKeepsTheLegacyKeysAndReportsTheWindowInWhol
   // An unknown marker is null; it is the only nullable field.
   replay.last_accepted_keyframe_age.reset();
   replay.keyframe_start_run = false;
+  replay.awaiting_keyframe = true;
   replay.packets = 0;
   replay.bytes = 0;
   replay.run_keyframes = 0;
@@ -381,6 +382,7 @@ TEST(RecordingStatusJsonTests, StatusKeepsTheLegacyKeysAndReportsTheWindowInWhol
   EXPECT_TRUE(unknown["replay"]["last_accepted_keyframe_age_ms"].is_null());
   EXPECT_EQ(unknown["mode"], "replay_buffer");
   status.mode = stream_recorder::mode_t::continuous;
+  replay.awaiting_keyframe = false;
   EXPECT_EQ(confighttp::build_recording_status_json(status)["mode"], "continuous");
   status.mode = stream_recorder::mode_t::disabled;
   EXPECT_EQ(confighttp::build_recording_status_json(status)["mode"], "disabled");
@@ -444,7 +446,7 @@ TEST(RecordingStatusJsonTests, SaveOutcomesSayWhatWasCapturedAndOnlyASavedFileIs
   EXPECT_EQ(json["captured"]["packets"], 3);
   EXPECT_EQ(json["captured"]["codec"], "hevc");
   const auto text = json.dump();
-  for (const auto *absent : {"secret", "Input/output", "never-published", "generation", "77", "error\""}) {
+  for (const auto *absent : {"secret", "Input/output", "never-published", "generation", "77", "\"error\":", "\"errno\":"}) {
     EXPECT_EQ(text.find(absent), std::string::npos) << absent;
   }
 
