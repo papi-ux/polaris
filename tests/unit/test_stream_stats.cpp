@@ -10870,6 +10870,109 @@ TEST(BenchmarkRunHotPathTests, RecordDuringDrainAcceptsInWindowStartsAndExcludes
   EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::found);
 }
 
+namespace {
+  struct BenchmarkTtlRunFixture {
+    std::string run_id;
+
+    BenchmarkTtlRunFixture(std::string id, stream_stats::benchmark_run_state_e state,
+                          std::chrono::steady_clock::time_point terminal_time):
+        run_id {std::move(id)} {
+      stream_stats::benchmark_run_t run {2};
+      run.run_id = run_id;
+      run.state = state;
+      run.frozen_monotonic = terminal_time;
+      run.label = "retained-ttl-metadata";
+      run.owning_device_uuid = "ttl-fixture-owner";
+      run.owning_session_generation = 8101;
+      for (auto *stage : {&run.capture_to_encode, &run.encode_to_send_release, &run.capture_to_send_release}) {
+        stage->record(1, 5, 1000);
+      }
+      stream_stats::insert_benchmark_run(std::move(run));
+    }
+
+    ~BenchmarkTtlRunFixture() {
+      stream_stats::erase_benchmark_run(run_id);
+    }
+  };
+
+  void expect_ttl_payload(const stream_stats::benchmark_run_t &run, bool present) {
+    EXPECT_EQ(run.label, "retained-ttl-metadata");
+    EXPECT_EQ(run.owning_device_uuid, "ttl-fixture-owner");
+    EXPECT_EQ(run.owning_session_generation, 8101u);
+    for (const auto *stage : {&run.capture_to_encode, &run.encode_to_send_release, &run.capture_to_send_release}) {
+      EXPECT_EQ(stage->accepted_count, 1u) << "expiry preserves the tombstone counts";
+      EXPECT_EQ(stage->start_offset_us.size(), present ? 1u : 0u);
+      EXPECT_EQ(stage->end_offset_us.size(), present ? 1u : 0u);
+      EXPECT_EQ(stage->duration_us.size(), present ? 1u : 0u);
+    }
+  }
+}  // namespace
+
+TEST(BenchmarkRunRetentionTests, AuthorizedGetExpiresStaleTerminalPayloadBeforeItsVisitor) {
+  BenchmarkControlPlaneGuard guard {true};
+  const auto terminal_time = std::chrono::steady_clock::now() - std::chrono::minutes(31);
+  for (const auto state : {stream_stats::benchmark_run_state_e::frozen, stream_stats::benchmark_run_state_e::aborted}) {
+    BenchmarkTtlRunFixture fixture {"ttl-get-old-" + std::to_string(static_cast<int>(state)), state, terminal_time};
+    bool visited = false;
+    const auto result = stream_stats::get_benchmark_run(fixture.run_id, true, [&](stream_stats::benchmark_run_t &run) {
+      visited = true;
+      EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::expired);
+      EXPECT_EQ(run.frozen_monotonic, terminal_time);
+      expect_ttl_payload(run, false);
+    });
+    EXPECT_EQ(result, stream_stats::benchmark_run_get_result_e::found);
+    EXPECT_TRUE(visited) << "the expired tombstone remains readable";
+  }
+}
+
+TEST(BenchmarkRunRetentionTests, AuthorizedGetPreservesFreshTerminalAndArmedPayloads) {
+  BenchmarkControlPlaneGuard guard {true};
+  for (const auto state : {stream_stats::benchmark_run_state_e::frozen, stream_stats::benchmark_run_state_e::aborted,
+                           stream_stats::benchmark_run_state_e::armed}) {
+    // A stale timestamp alone cannot expire an armed row: terminal state is required.
+    const auto age = state == stream_stats::benchmark_run_state_e::armed ? std::chrono::minutes(31) : std::chrono::minutes(1);
+    BenchmarkTtlRunFixture fixture {"ttl-get-fresh-" + std::to_string(static_cast<int>(state)), state,
+                                   std::chrono::steady_clock::now() - age};
+    bool visited = false;
+    EXPECT_EQ(stream_stats::get_benchmark_run(fixture.run_id, true, [&](stream_stats::benchmark_run_t &run) {
+      visited = true;
+      EXPECT_EQ(run.state, state);
+      expect_ttl_payload(run, true);
+    }), stream_stats::benchmark_run_get_result_e::found);
+    EXPECT_TRUE(visited);
+  }
+}
+
+TEST(BenchmarkRunRetentionTests, UnauthorizedGetCannotExpirePayloadOrInvokeItsVisitor) {
+  BenchmarkControlPlaneGuard guard {true};
+  BenchmarkTtlRunFixture fixture {"ttl-get-unauthorized", stream_stats::benchmark_run_state_e::frozen,
+                                 std::chrono::steady_clock::now() - std::chrono::minutes(31)};
+  bool visited = false;
+  EXPECT_EQ(stream_stats::get_benchmark_run(fixture.run_id, false, [&](stream_stats::benchmark_run_t &) {
+    visited = true;
+  }), stream_stats::benchmark_run_get_result_e::rejected_caller_not_authorized_as_harness);
+  EXPECT_FALSE(visited);
+  ASSERT_TRUE(stream_stats::with_benchmark_run(fixture.run_id, [](stream_stats::benchmark_run_t &run) {
+    EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::frozen);
+    expect_ttl_payload(run, true);
+  }));
+}
+
+TEST(BenchmarkRunRetentionTests, DisabledGetCannotExpirePayloadOrInvokeItsVisitor) {
+  BenchmarkControlPlaneGuard guard {false};
+  BenchmarkTtlRunFixture fixture {"ttl-get-disabled", stream_stats::benchmark_run_state_e::aborted,
+                                 std::chrono::steady_clock::now() - std::chrono::minutes(31)};
+  bool visited = false;
+  EXPECT_EQ(stream_stats::get_benchmark_run(fixture.run_id, true, [&](stream_stats::benchmark_run_t &) {
+    visited = true;
+  }), stream_stats::benchmark_run_get_result_e::rejected_control_plane_not_enabled);
+  EXPECT_FALSE(visited);
+  ASSERT_TRUE(stream_stats::with_benchmark_run(fixture.run_id, [](stream_stats::benchmark_run_t &run) {
+    EXPECT_EQ(run.state, stream_stats::benchmark_run_state_e::aborted);
+    expect_ttl_payload(run, true);
+  }));
+}
+
 #ifdef __linux__
 TEST(StreamStatsDoctorTests, ForecastStaysSilentUntilCaptureSourcesWereEvaluated) {
   // Nothing has been looked at: no backend, no forecast, no finding. The Doctor must never

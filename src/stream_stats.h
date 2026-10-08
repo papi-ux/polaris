@@ -2160,7 +2160,8 @@ namespace stream_stats {
   /**
    * @brief Expire every frozen/aborted run whose frozen_monotonic is older
    * than the 30-minute TTL (measurement-spec-v1.md 6.4). Intended to be
-   * called lazily (e.g. from a future get_benchmark_run()), not on a timer.
+   * called lazily by get_benchmark_run() after its mode and authorization
+   * guards, not on a timer.
    */
   void expire_stale_benchmark_runs();
 
