@@ -344,6 +344,7 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_display_policy.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_recovery_doctor_actions.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_stats.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_pyrowave_advice.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_capture_provenance.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_game_mode_adaptive_sync.cpp
