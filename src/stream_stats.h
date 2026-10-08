@@ -429,7 +429,8 @@ namespace stream_stats {
     std::uint64_t sequence = 0;
     /// The legacy ingest state of the report that produced this receipt.
     client_media_ingest_state_e state {};
-    /// The legacy ingest published this report as network evidence (observed reports only).
+    /// The legacy ingest has finished publishing this report as network evidence (observed reports only).
+    /// Set only after that publication completes, never while it is still in progress.
     bool network_evidence_published = false;
     /// An interval between two reports of one epoch, with both clocks representable and within the
     /// legacy five-second coverage bound. False for an epoch start and for an unrepresentable interval.

@@ -12657,3 +12657,46 @@ TEST(StreamStatsMediaIntervalReceipt, TheSerializerReadsItsOwnSnapshotAndAgreesI
   EXPECT_EQ(none.at("reason"), "no_receipt");
   EXPECT_EQ(none.at("media_rate_attribution").at("state"), "unknown");
 }
+
+TEST(StreamStatsMediaIntervalReceipt, PublicationIsMarkedExactlyWhenTheLegacyResultPublished) {
+  media_receipt_scope_t scope("receipt-owner-p", 80, "receipt-launch-p");
+  const auto expect_marker_matches = [](const stream_stats::client_media_ingest_result_t &result) {
+    ASSERT_TRUE(result.receipt.has_value());
+    EXPECT_EQ(result.receipt->network_evidence_published, result.observation_published);
+    const auto latest = current_receipt();
+    EXPECT_EQ(latest.epoch, result.receipt->epoch);
+    EXPECT_EQ(latest.sequence, result.receipt->sequence);
+    EXPECT_EQ(latest.network_evidence_published, result.observation_published);
+  };
+
+  const auto baseline = stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100));
+  EXPECT_FALSE(baseline.observation_published);
+  expect_marker_matches(baseline);
+
+  const auto observed = stream_stats::ingest_client_media_counters(scope.sample(2'000, 150, 149));
+  ASSERT_EQ(observed.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(observed.observation_published);
+  expect_marker_matches(observed);
+  EXPECT_TRUE(stream_stats::client_media_interval_json(stream_stats::get_current()).at("network_evidence_published").get<bool>());
+
+  const auto waiting = stream_stats::ingest_client_media_counters(scope.sample(2'500, 150, 149));
+  ASSERT_EQ(waiting.state, stream_stats::client_media_ingest_state_e::waiting_for_frames);
+  EXPECT_FALSE(waiting.observation_published);
+  expect_marker_matches(waiting);
+
+  // The same lifecycle starts again: the legacy report is still counted and published, and the receipt
+  // that starts the new diagnostic epoch says so, although it measures no interval.
+  stream_stats::start_session_timing(scope.owner, scope.generation, scope.token);
+  const auto rearmed = stream_stats::ingest_client_media_counters(scope.sample(3'000, 200, 198));
+  ASSERT_EQ(rearmed.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(rearmed.observation_published);
+  ASSERT_TRUE(rearmed.receipt.has_value());
+  EXPECT_EQ(rearmed.receipt->sequence, 0u);
+  EXPECT_FALSE(rearmed.receipt->interval_measured);
+  expect_marker_matches(rearmed);
+
+  const auto regressed = stream_stats::ingest_client_media_counters(scope.sample(3'500, 10, 10));
+  ASSERT_EQ(regressed.state, stream_stats::client_media_ingest_state_e::counter_epoch_reset);
+  EXPECT_FALSE(regressed.observation_published);
+  expect_marker_matches(regressed);
+}

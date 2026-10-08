@@ -298,10 +298,11 @@ namespace stream_stats {
     }
 
     // Caller holds client_media_counter_mutex. Records one accepted legacy interval (observed or
-    // waiting_for_frames) between two reports of the same scope.
+    // waiting_for_frames) between two reports of the same scope. The receipt starts unpublished; only
+    // mark_client_media_receipt_published_locked() says otherwise, once publication has completed.
     client_media_interval_receipt_t record_client_media_receipt_interval_locked(
         const client_media_counters_t &sample, const client_media_counter_epoch_t &previous,
-        client_media_ingest_state_e state, bool published, std::chrono::steady_clock::time_point received_at) {
+        client_media_ingest_state_e state, std::chrono::steady_clock::time_point received_at) {
       if (!client_media_receipt_scope_matches_locked(sample)) {
         return start_client_media_receipt_epoch_locked(sample, state, received_at);
       }
@@ -310,7 +311,7 @@ namespace stream_stats {
       auto receipt = client_media_receipt_state.receipt;
       receipt.sequence += 1;
       receipt.state = state;
-      receipt.network_evidence_published = published;
+      receipt.network_evidence_published = false;
       receipt.frames_expected = sample.frames_expected - previous.sample.frames_expected;
       receipt.frames_received = sample.frames_received - previous.sample.frames_received;
       receipt.frames_lost = sample.frames_lost - previous.sample.frames_lost;
@@ -336,6 +337,18 @@ namespace stream_stats {
       }
       client_media_receipt_state.receipt = receipt;
       return receipt;
+    }
+
+    // Caller holds client_media_counter_mutex. The legacy path has finished publishing the report
+    // @p recorded describes. Marks the latest receipt only while it is still that same record (scope,
+    // epoch and sequence); a newer or invalidated receipt is left alone.
+    void mark_client_media_receipt_published_locked(const client_media_interval_receipt_t &recorded) {
+      auto &latest = client_media_receipt_state.receipt;
+      if (latest.available && latest.epoch == recorded.epoch && latest.sequence == recorded.sequence &&
+          latest.owner_uuid == recorded.owner_uuid && latest.app_session_id == recorded.app_session_id &&
+          latest.session_generation == recorded.session_generation) {
+        latest.network_evidence_published = true;
+      }
     }
 
     // Caller holds client_media_counter_mutex.
@@ -5328,16 +5341,16 @@ namespace stream_stats {
       if (expected_delta == 0) {
         result.state = client_media_ingest_state_e::waiting_for_frames;
         result.receipt = record_client_media_receipt_interval_locked(
-          sample, previous_epoch, result.state, false, received_at);
+          sample, previous_epoch, result.state, received_at);
         return result;
       }
       result.media_loss_pct = packet_loss_percent(lost_delta, expected_delta);
       result.frames_expected = expected_delta;
       result.frames_lost = lost_delta;
       result.state = client_media_ingest_state_e::observed;
-      // Every observed report is published below; the receipt only records that it was.
+      // Recorded unpublished: publication happens below, and the receipt says so only after it has.
       result.receipt = record_client_media_receipt_interval_locked(
-        sample, previous_epoch, result.state, true, received_at);
+        sample, previous_epoch, result.state, received_at);
     }
 
     // Serialize counter advancement with evidence publication so concurrent
@@ -5372,6 +5385,13 @@ namespace stream_stats {
       adaptive_bitrate::update_network_stats(result.media_loss_pct, host.latency_ms);
     }
     result.observation_published = true;
+    if (result.receipt) {
+      // Publication above has completed. Only now do this report's receipt, and the latest receipt if it
+      // is still this one, say so. Taken alone; nothing else is called under it.
+      std::lock_guard<std::mutex> counter_lock(client_media_counter_mutex);
+      result.receipt->network_evidence_published = true;
+      mark_client_media_receipt_published_locked(*result.receipt);
+    }
     if (logged_media_report_generation.exchange(sample.session_generation) != sample.session_generation) {
       BOOST_LOG(info) << "Doctor: client media reports reach this host for stream generation "sv
                       << sample.session_generation << "; the first counted one covered "sv
