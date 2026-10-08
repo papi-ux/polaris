@@ -26,6 +26,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <utility>
 
@@ -112,6 +113,16 @@ namespace stream_recorder {
   static std::size_t snapshot_packets = 0;
   static std::size_t snapshot_bytes = 0;
   static std::size_t snapshot_only_bytes = 0;
+  // The admitted snapshot's window, fixed at admission (guarded by `mutex`).
+  static std::size_t snapshot_keyframes = 0;
+  static std::chrono::steady_clock::duration snapshot_span {0};
+
+  // Window accounting for the live run (guarded by `mutex`), all kept incrementally.
+  static std::size_t replay_run_keyframes = 0;
+  // Arrival of the last keyframe the selected run accepted. Set only when a keyframe is stored,
+  // kept by trimming and expiry, and forgotten by every reset of the run (clear_replay_run).
+  static std::optional<std::chrono::steady_clock::time_point> replay_last_accepted_keyframe;
+  static window_limit_e replay_last_limit = window_limit_e::none;
 
   // One save at a time. Taken with try_lock, never while holding `mutex`, so a request
   // during a save is refused at once and no packet, status or lifecycle call waits for it.
@@ -212,13 +223,17 @@ namespace stream_recorder {
     }
   }
 
-  /// Clear the run. A lifecycle or config clear also forgets its codec.
-  static void clear_replay_run(bool forget_codec) {
+  /// Clear the run for `reason`. A lifecycle or config clear also forgets its codec. Every clear is
+  /// a reset of the run, so it also forgets the accepted-keyframe marker.
+  static void clear_replay_run(bool forget_codec, window_limit_e reason) {
     for (const auto &packet : replay_buffer) {
       note_live_release(packet);
     }
     replay_buffer.clear();
     replay_bytes = 0;
+    replay_run_keyframes = 0;
+    replay_last_accepted_keyframe.reset();
+    replay_last_limit = reason;
     if (forget_codec) {
       replay_video_format = -1;
     }
@@ -227,6 +242,9 @@ namespace stream_recorder {
   static void pop_replay_front() {
     note_live_release(replay_buffer.front());
     replay_bytes -= replay_buffer.front().data->size();
+    if (replay_buffer.front().is_keyframe) {
+      --replay_run_keyframes;
+    }
     replay_buffer.pop_front();
     ++replay_counters.trimmed;
   }
@@ -251,6 +269,7 @@ namespace stream_recorder {
       pop_replay_front();
     }
     align_replay_to_keyframe();
+    replay_last_limit = window_limit_e::duration;
   }
 
   /// Recompute the selected session after a lifecycle change; any change of selection clears the run.
@@ -260,7 +279,7 @@ namespace stream_recorder {
       selected = replay_sessions.begin()->first;
     }
     if (selected != replay_selected) {
-      clear_replay_run(true);
+      clear_replay_run(true, window_limit_e::selection);
       replay_selected = selected;
       BOOST_LOG(debug) << "stream_recorder: replay session "sv
                        << (selected ? std::to_string(selected) : std::string {"none"})
@@ -269,8 +288,8 @@ namespace stream_recorder {
   }
 
   /// A frame of the selected session was dropped: later frames would depend on it, so restart at a keyframe.
-  static void replay_discontinuity() {
-    clear_replay_run(false);
+  static void replay_discontinuity(window_limit_e reason = window_limit_e::discontinuity) {
+    clear_replay_run(false, reason);
     ++replay_counters.discontinuities;
   }
 
@@ -303,12 +322,15 @@ namespace stream_recorder {
     }
     if (!replay_buffer.empty() && video_format != replay_video_format) {
       // A new codec cannot continue the old one's frames.
-      replay_discontinuity();
+      replay_discontinuity(window_limit_e::codec);
     }
     expire_replay(now);
 
     // Make room under both caps. replay_bytes <= replay_max_bytes and size <= replay_max_bytes
     // hold here, so neither comparison can overflow.
+    // When both caps call for room, the payload cap is the recorded cause (fixed precedence).
+    const auto cap_reason = !replay_buffer.empty() && size > replay_max_bytes - replay_bytes ? window_limit_e::payload_cap :
+                                                                                               window_limit_e::entry_cap;
     bool trimmed = false;
     while (!replay_buffer.empty() &&
            (size > replay_max_bytes - replay_bytes || replay_buffer.size() >= replay_max_packets)) {
@@ -317,6 +339,7 @@ namespace stream_recorder {
     }
     if (trimmed) {
       align_replay_to_keyframe();
+      replay_last_limit = cap_reason;
     }
 
     // A run starts only at a keyframe: a dependent frame with nothing before it cannot decode.
@@ -338,6 +361,10 @@ namespace stream_recorder {
       replay_next_sequence++,
     });
     replay_bytes += size;
+    if (is_keyframe) {
+      ++replay_run_keyframes;
+      replay_last_accepted_keyframe = now;
+    }
   }
 
   // ---- Public API ----
@@ -357,7 +384,7 @@ namespace stream_recorder {
     // sessions stay, so replay enabled during an admitted stream applies to that stream.
     if (cfg.mode != mode_t::replay_buffer || previous_mode != mode_t::replay_buffer ||
         cfg.replay_buffer_minutes != previous_minutes) {
-      clear_replay_run(true);
+      clear_replay_run(true, window_limit_e::configuration);
     }
     mode_hint.store(cfg.mode, std::memory_order_relaxed);
 
@@ -423,6 +450,8 @@ namespace stream_recorder {
       std::uint64_t generation = 0;
       std::string output_dir;  ///< As configured when admitted; empty means the default directory
       std::chrono::system_clock::time_point wall_time;
+      std::size_t keyframes = 0;  ///< Keyframes in the captured run, fixed at admission
+      std::chrono::steady_clock::duration span {0};  ///< Its arrival span, fixed at admission
     };
 
     /**
@@ -450,6 +479,8 @@ namespace stream_recorder {
         snapshot_packets = 0;
         snapshot_bytes = 0;
         snapshot_only_bytes = 0;
+        snapshot_keyframes = 0;
+        snapshot_span = std::chrono::steady_clock::duration::zero();
         ++(published ? replay_counters.saves_completed : replay_counters.saves_failed);
       }
 
@@ -774,6 +805,10 @@ namespace stream_recorder {
           snapshot_packets = replay_buffer.size();
           snapshot_bytes = replay_bytes;
           snapshot_only_bytes = 0;
+          snapshot_keyframes = replay_run_keyframes;
+          snapshot_span = replay_buffer.back().timestamp - replay_buffer.front().timestamp;
+          snapshot.keyframes = snapshot_keyframes;
+          snapshot.span = snapshot_span;
           lease.admitted = true;
         }
       }
@@ -793,6 +828,8 @@ namespace stream_recorder {
     result.bytes = lease.snapshot.bytes;
     result.video_format = lease.snapshot.video_format;
     result.generation = lease.snapshot.generation;
+    result.keyframes = lease.snapshot.keyframes;
+    result.span = lease.snapshot.span;
     bool staging_left = false;
     try {
       lease.published = store_snapshot(lease.snapshot, result, staging_left);
@@ -888,7 +925,7 @@ namespace stream_recorder {
       }
       // The same session changing eligibility is a transition: its earlier packets go.
       it->second = replay_eligible;
-      clear_replay_run(true);
+      clear_replay_run(true, window_limit_e::selection);
     }
     reselect_replay_session();
   }
@@ -899,7 +936,7 @@ namespace stream_recorder {
       return;
     }
     // The ended session's packets go even if it was not the selected one.
-    clear_replay_run(true);
+    clear_replay_run(true, window_limit_e::selection);
     reselect_replay_session();
   }
 
@@ -933,6 +970,24 @@ namespace stream_recorder {
     stats.max_snapshot_packets = replay_max_packets;
     stats.max_unique_payload_bytes = replay_max_bytes + stats.max_snapshot_bytes;
     stats.max_metadata_entries = replay_max_packets + stats.max_snapshot_packets;
+    // A read stamped before a stored arrival reports an age of zero, never a negative one; the
+    // expiry above already ran, so an earlier read cannot bring released packets back.
+    const auto age = [now](std::chrono::steady_clock::time_point at) {
+      return now > at ? now - at : std::chrono::steady_clock::duration::zero();
+    };
+    stats.keyframe_start_run = !replay_buffer.empty();
+    stats.run_keyframes = replay_run_keyframes;
+    if (!replay_buffer.empty()) {
+      stats.run_span = replay_buffer.back().timestamp - replay_buffer.front().timestamp;
+      stats.run_front_age = age(replay_buffer.front().timestamp);
+    }
+    if (replay_last_accepted_keyframe) {
+      stats.last_accepted_keyframe_age = age(*replay_last_accepted_keyframe);
+    }
+    stats.awaiting_keyframe = cfg.mode == mode_t::replay_buffer && replay_selected != 0 && replay_buffer.empty();
+    stats.last_window_limit = replay_last_limit;
+    stats.snapshot_keyframes = snapshot_keyframes;
+    stats.snapshot_span = snapshot_span;
     return stats;
   }
 
@@ -941,12 +996,12 @@ namespace stream_recorder {
     std::lock_guard lock(mutex);
     replay_max_bytes = max_bytes;
     replay_max_packets = max_packets;
-    clear_replay_run(true);
+    clear_replay_run(true, window_limit_e::configuration);
   }
 
   void detail::reset_replay_for_tests() {
     std::lock_guard lock(mutex);
-    clear_replay_run(true);
+    clear_replay_run(true, window_limit_e::none);
     replay_max_bytes = k_replay_max_payload_bytes;
     replay_max_packets = k_replay_max_packets;
     replay_sessions.clear();

@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <system_error>
 #include <string>
 #include <vector>
@@ -107,6 +108,24 @@ namespace stream_recorder {
                    std::uint64_t session_generation, int video_format);
 
   /**
+   * @brief The cause of the most recent change that removed live replay packets or reset the run.
+   *
+   * It records what happened, not what the buffer is waiting for: whether a run is buffered and
+   * whether replay is waiting for a keyframe are reported separately. It persists until another
+   * such change replaces it.
+   */
+  enum class window_limit_e {
+    none,           ///< Nothing has trimmed or reset the run since the process (or test) started
+    duration,       ///< Expiry past the configured duration removed packets
+    payload_cap,    ///< Making room under the payload cap removed packets
+    entry_cap,      ///< Making room under the packet cap removed packets (payload_cap wins when both applied)
+    configuration,  ///< A mode, duration or cap reconfiguration reset the run
+    selection,      ///< A session start, end or eligibility change reset the run
+    codec,          ///< The selected session's codec changed, so its earlier frames went
+    discontinuity,  ///< A dropped owner frame (invalid or oversized) or a clock regression reset the run
+  };
+
+  /**
    * @brief Status of the replay buffer, as fresh as the moment it is taken.
    * Taking it releases packets older than the configured duration (and the dependent
    * frames before the next keyframe), even when no packet has arrived since.
@@ -143,6 +162,25 @@ namespace stream_recorder {
     std::uint64_t saves_completed = 0;        ///< Saves published
     std::uint64_t saves_failed = 0;           ///< Admitted saves that failed in storage (nothing published)
     std::uint64_t saves_refused_busy = 0;     ///< Requests refused because a save was running
+    // The buffered window, by arrival time. A run is the stored packets of the selected session;
+    // it is either empty or starts at a keyframe. That is stored-run evidence only: it is not save
+    // eligibility (mode, busy gate, storage), not media decodability, and arrival span is not
+    // presentation duration.
+    bool keyframe_start_run = false;          ///< The live run is non-empty (and so starts at a keyframe)
+    std::size_t run_keyframes = 0;            ///< Keyframes in the live run
+    std::chrono::steady_clock::duration run_span {0};       ///< Newest minus front arrival time; 0 when empty
+    std::chrono::steady_clock::duration run_front_age {0};  ///< Read time minus front arrival; never negative
+    /// Read time minus the arrival of the last keyframe the selected run accepted; never negative.
+    /// Unknown (empty) until one is accepted, and after any reset of the run (configuration,
+    /// selection, codec or discontinuity). Trimming and expiry keep it, so it still reports how
+    /// long ago the last keyframe arrived even after the run becomes empty.
+    std::optional<std::chrono::steady_clock::duration> last_accepted_keyframe_age;
+    /// Replay is enabled, one eligible session is selected, and no run is buffered: the next
+    /// packet the run can start with is a keyframe. Independent of any refused-packet history.
+    bool awaiting_keyframe = false;
+    window_limit_e last_window_limit = window_limit_e::none;  ///< See window_limit_e
+    std::size_t snapshot_keyframes = 0;       ///< Keyframes in the save in progress, fixed at admission
+    std::chrono::steady_clock::duration snapshot_span {0};  ///< Its arrival span, fixed at admission
   };
 
   /**
@@ -177,6 +215,8 @@ namespace stream_recorder {
       std::size_t bytes = 0;           ///< Their payload bytes
       int video_format = -1;           ///< The snapshot run's codec
       std::uint64_t generation = 0;    ///< The session selected when the save was admitted
+      std::size_t keyframes = 0;       ///< Keyframes in the admitted snapshot
+      std::chrono::steady_clock::duration span {0};  ///< Its arrival span (not presentation duration)
       std::string error;               ///< What failed, for storage errors
     };
 
