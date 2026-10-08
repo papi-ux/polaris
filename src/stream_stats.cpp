@@ -6541,6 +6541,10 @@ namespace stream_stats {
       return benchmark_run_get_result_e::rejected_caller_not_authorized_as_harness;
     }
 
+    // The authorized cold read enforces retention before exposing any payload. The helper takes
+    // benchmark_run_mutex itself, so call it before entering the locked visitor below.
+    expire_stale_benchmark_runs();
+
     const bool found = with_benchmark_run(run_id, [&](benchmark_run_t &run) {
       apply_lazy_transitions_locked(run);
       fn(run);
