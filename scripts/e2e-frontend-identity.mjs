@@ -13,7 +13,16 @@ export function frontendSourceIdentity(root) {
     .split('\0').filter(Boolean))].sort()
   const hash = createHash('sha256')
   for (const name of files) {
-    hash.update(name).update('\0').update(fs.readFileSync(resolve(root, name))).update('\0')
+    hash.update(name).update('\0')
+    try {
+      hash.update('present\0').update(fs.readFileSync(resolve(root, name)))
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+      // Git still lists an unstaged deletion. Give absence its own fingerprint,
+      // rather than crashing or borrowing the clean checkout's identity.
+      hash.update('missing\0')
+    }
+    hash.update('\0')
   }
   const sourceSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
   const sourceFingerprint = hash.digest('hex')

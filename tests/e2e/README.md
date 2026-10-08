@@ -25,7 +25,8 @@ Host API calls must be fulfilled by a case's mocks. A shared fixture supplies
 deterministic GitHub release responses when a case does not override them, and
 fails unexpected external or unmocked API requests. Service workers are blocked
 so they cannot bypass request interception. The mocked lane uses zero retries,
-including in CI; an initial failure is a failure.
+including in CI; an initial failure is a failure. Its trace is retained on that
+first failure instead of waiting for a retry.
 
 This checks browser behavior with synthetic API evidence. Host APIs, streaming,
 capture and a packaged host need separate acceptance. Existing assertions and

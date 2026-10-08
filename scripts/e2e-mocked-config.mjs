@@ -13,7 +13,7 @@ export function mockedFrontendConfig({ testMatch, port = 49386, outputDir = './t
     outputDir,
     metadata: { mockedFrontend: { origin, ...frontendSourceIdentity(root) } },
     globalSetup: fileURLToPath(new URL('../tests/e2e/fixtures/mocked-setup.js', import.meta.url)),
-    use: { baseURL: origin, serviceWorkers: 'block', trace: 'on-first-retry',
+    use: { baseURL: origin, serviceWorkers: 'block', trace: 'retain-on-failure',
       screenshot: 'only-on-failure', video: 'retain-on-failure' },
     projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
     webServer: {
