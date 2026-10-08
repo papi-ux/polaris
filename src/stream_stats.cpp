@@ -6499,7 +6499,9 @@ namespace stream_stats {
         result = benchmark_run_start_result_e::rejected_population_changed_since_arm;
         return;
       }
-      if (!get_session_timing(device_uuid).session_active) {
+      // The run's own generation must still be the registered timing scope, not merely some
+      // session for this device: a reconnect replaces the generation, and the old one never returns.
+      if (!session_timing_is_current(device_uuid, session_generation)) {
         result = benchmark_run_start_result_e::rejected_session_no_longer_active;
         return;
       }
