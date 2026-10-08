@@ -13,7 +13,9 @@ export function mockedFrontendConfig({ testMatch, port = 49386, outputDir = './t
     outputDir,
     metadata: { mockedFrontend: { origin, ...frontendSourceIdentity(root) } },
     globalSetup: fileURLToPath(new URL('../tests/e2e/fixtures/mocked-setup.js', import.meta.url)),
-    use: { baseURL: origin, serviceWorkers: 'block', trace: 'retain-on-failure',
+    // Guards reconcile after context close. Playwright decides whether to save
+    // the browser trace before that verdict, so retain the chunk for every case.
+    use: { baseURL: origin, serviceWorkers: 'block', trace: 'on',
       screenshot: 'only-on-failure', video: 'retain-on-failure' },
     projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
     webServer: {
