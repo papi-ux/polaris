@@ -10,7 +10,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
+#include <functional>
 #include <mutex>
+#include <system_error>
 #include <string>
 #include <vector>
 
@@ -47,7 +50,14 @@ namespace stream_recorder {
 
   /**
    * @brief Save the replay buffer to a file.
-   * @return The path of the saved file, or empty string on failure.
+   *
+   * One save runs at a time; a request while one is running is refused at once. The save
+   * snapshots the current run under the recorder lock (shared payload pointers, no byte copy)
+   * and then writes, syncs and publishes it with no recorder lock held, so packets, status
+   * and session changes never wait for storage. A save admitted this way finishes its captured
+   * run, codec and output directory even if the session, mode or configuration changes while
+   * it writes; that is host recorder policy, not a client or paired permission.
+   * @return The path of the published file, or empty string on any refusal or failure.
    */
   std::string save_replay();
 
@@ -117,6 +127,22 @@ namespace stream_recorder {
     std::uint64_t trimmed = 0;                ///< Packets dropped for duration, bytes, count or GOP alignment
     std::uint64_t discontinuities = 0;        ///< Runs cleared by a dropped owner frame, a clock regression or a codec change
     std::uint64_t refused_lifecycle = 0;      ///< session_started() calls refused (generation 0)
+    // A save in progress holds an immutable snapshot of the run it admitted. Its payloads are
+    // shared with the live run until the live run drops them, so the unique replay payload is
+    // the live bytes plus the snapshot bytes no longer live: at most max_bytes + max_snapshot_bytes.
+    bool save_in_progress = false;            ///< One save at a time
+    std::size_t snapshot_packets = 0;         ///< Entries the save in progress holds
+    std::size_t snapshot_bytes = 0;           ///< Payload bytes those entries reference
+    std::size_t snapshot_only_bytes = 0;      ///< Of those, bytes the live run no longer holds
+    std::size_t unique_payload_bytes = 0;     ///< bytes + snapshot_only_bytes
+    std::size_t metadata_entries = 0;         ///< packets + snapshot_packets
+    std::size_t max_snapshot_bytes = 0;       ///< A snapshot is one admitted run: never above max_bytes
+    std::size_t max_snapshot_packets = 0;     ///< ... and never above max_packets
+    std::size_t max_unique_payload_bytes = 0; ///< max_bytes + max_snapshot_bytes
+    std::size_t max_metadata_entries = 0;     ///< max_packets + max_snapshot_packets
+    std::uint64_t saves_completed = 0;        ///< Saves published
+    std::uint64_t saves_failed = 0;           ///< Admitted saves that failed in storage (nothing published)
+    std::uint64_t saves_refused_busy = 0;     ///< Requests refused because a save was running
   };
 
   /**
@@ -135,11 +161,55 @@ namespace stream_recorder {
     /// save_replay() at an explicit steady-clock time.
     std::string save_replay_at(std::chrono::steady_clock::time_point now);
 
+    /// Why a save published nothing, or that it published. Internal: no endpoint shape changes.
+    enum class save_status_e {
+      saved,          ///< Published at `path`
+      busy,           ///< Another save was running; refused without waiting
+      disabled,       ///< Replay mode is not enabled
+      empty,          ///< No fresh run to save; nothing was created
+      storage_error,  ///< Directory, staging, write, sync, close or publication failed; nothing published
+    };
+
+    struct save_result_t {
+      save_status_e status = save_status_e::empty;
+      std::string path;                ///< The published file, only when saved
+      std::size_t packets = 0;         ///< Packets in the admitted snapshot
+      std::size_t bytes = 0;           ///< Their payload bytes
+      int video_format = -1;           ///< The snapshot run's codec
+      std::uint64_t generation = 0;    ///< The session selected when the save was admitted
+      std::string error;               ///< What failed, for storage errors
+    };
+
+    /// save_replay_at() with its outcome. save_replay_at() returns `path` only when saved.
+    save_result_t save_replay_result_at(std::chrono::steady_clock::time_point now);
+
 #ifdef POLARIS_TESTS
     /// Replace the hard caps (tests only); clears the run.
     void set_replay_limits_for_tests(std::size_t max_bytes, std::size_t max_packets);
-    /// Restore every replay buffer state to its process start: caps, sessions, run and counters.
+    /// Restore every replay buffer state to its process start: caps, sessions, run, counters and save hooks.
     void reset_replay_for_tests();
+
+    /**
+     * Storage seams for tests. Each one left empty uses the real operation. A seam that
+     * replaces an operation should normally call the matching native_* function, so the
+     * production file flow still runs; the stamp replaces the wall-clock part of the names.
+     */
+    struct save_hooks_t {
+      std::function<std::string()> name_stamp;
+      std::function<void()> after_snapshot_payloads;  ///< Admission fault boundary, under the lock
+      std::function<void(const std::filesystem::path &staging)> before_write;
+      std::function<long long(int fd, const std::uint8_t *data, std::size_t size)> write;
+      std::function<int(int fd)> sync;
+      std::function<int(int fd)> close;
+      std::function<void(const std::filesystem::path &staging, const std::filesystem::path &final_path)> before_publish;
+      std::function<std::error_code(const std::filesystem::path &staging, const std::filesystem::path &final_path)> publish;
+    };
+    /// Install seams for the next saves; set them before starting a save, not during one.
+    void set_save_hooks_for_tests(save_hooks_t hooks);
+    long long native_write(int fd, const std::uint8_t *data, std::size_t size);
+    int native_sync(int fd);
+    int native_close(int fd);
+    std::error_code native_publish(const std::filesystem::path &staging, const std::filesystem::path &final_path);
 #endif
   }  // namespace detail
 
