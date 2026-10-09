@@ -301,6 +301,7 @@ set(TEST_PAIRING_SOURCES
 set(TEST_HTTP_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_recording_async_http.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_recording_status_http.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_recording_continuous_http.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_apps_stats_contention.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_lookup_routes.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_nvhttp_tls_close.cpp
@@ -336,6 +337,7 @@ set(TEST_AUDIO_SOURCES
 
 set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_async.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_continuous.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_packet_owner.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_packet_session.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_live_tuning.cpp
@@ -830,6 +832,11 @@ if (BUILD_FULL_TESTS)
     add_test(NAME polaris_recorder_replay_async
         COMMAND test_polaris_stream --gtest_filter=RecorderAsyncSaveTests.*)
     set_tests_properties(polaris_recorder_replay_async PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    # Continuous ownership and exclusive output use synthetic packets and owned files.
+    add_test(NAME polaris_recorder_continuous_ownership
+        COMMAND test_polaris_stream --gtest_filter=StreamRecorderContinuousOwnershipTests.*)
+    set_tests_properties(polaris_recorder_continuous_ownership PROPERTIES
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND POLARIS_ENABLE_PYROWAVE)
         # These exercise the actual encode loop with an in-memory display and
