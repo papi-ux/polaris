@@ -3302,7 +3302,8 @@ namespace stream {
       // any overlap suspends replay until only one eligible session remains.
       stream_recorder::session_started(
         session.session_generation,
-        !session.watch_only && !session.vrr.watch_or_input_only
+        !session.watch_only && !session.vrr.watch_or_input_only,
+        session.config.monitor.videoFormat
       );
       session.audioThread = std::thread {audioThread, &session};
       session.videoThread = std::thread {videoThread, &session};

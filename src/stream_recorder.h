@@ -35,14 +35,75 @@ namespace stream_recorder {
   };
 
   /**
-   * @brief Start continuous recording to a file.
+   * @brief Start continuous recording to a file (host-admin action; no client permission).
+   *
+   * Opens a new private file at once, in any mode, and never replaces or follows an existing
+   * name: `polaris_<stamp><ext>`, then `polaris_<stamp>-N<ext>` on a collision. The directory
+   * and the extension's codec are fixed for this file. When exactly one eligible session is
+   * selected and its codec is known, the file is bound to that session now; otherwise the
+   * extension falls back to the last known stream codec (or the configured allow-lists) and
+   * the file is bound later, at a keyframe, to a selected eligible session of that codec.
+   * One file holds at most one session's video, in one codec, starting at a keyframe: raw
+   * elementary video only (no container, audio or timestamps). An overlap suspends all input
+   * and only the same owner may resume, at a keyframe; once its owner ends or violates the
+   * codec, the file takes nothing more. The file stays open until stop_recording(). Writes are
+   * synchronous on the caller's thread with no fsync. Repeating a start changes nothing.
    */
   void start_recording();
 
   /**
-   * @brief Stop continuous recording.
+   * @brief Stop continuous recording: close the file and forget its owner. Repeating it changes nothing.
    */
   void stop_recording();
+
+  /// Packets larger than this are refused before they are read, whatever the recorder mode.
+  inline constexpr std::size_t k_continuous_max_packet_bytes = std::size_t {128} * 1024 * 1024;
+
+  /// What the continuous file is doing. Internal diagnostics; no endpoint shape changes.
+  enum class continuous_state_e {
+    idle,               ///< No file is open
+    awaiting_owner,     ///< Open; no selected eligible session of the file's codec has sent a keyframe
+    awaiting_keyframe,  ///< Bound; the owner's next keyframe starts (or resumes) the file
+    writing,            ///< Bound; the owner's packets are written
+    suspended,          ///< Open; nothing is written for the reason in `cause`
+    failed,             ///< Open; a write failed, and nothing more is written until stop
+  };
+
+  /// The most recent reason the continuous file left `writing` (or could not start it).
+  enum class continuous_cause_e {
+    none,
+    selection,      ///< The owner is not the sole eligible session (overlap or ineligible)
+    owner_ended,    ///< The owner ended; the file never takes another session
+    codec,          ///< A codec differs from the file's; permanent once the file is bound
+    discontinuity,  ///< An invalid, oversized or clock-regressed owner packet was dropped
+    storage,        ///< A write failed or made no progress
+  };
+
+  enum class continuous_error_e {
+    none,
+    write,        ///< write() failed; see error_number
+    no_progress,  ///< write() returned zero or more than was asked
+  };
+
+  /**
+   * @brief The continuous file's ownership and accounting, taken under the recorder lock.
+   * Defaults describe no open file. Packets of unregistered, zero, retired or other sessions
+   * are not counted here: they never change the file or this state.
+   */
+  struct continuous_status_t {
+    continuous_state_e state = continuous_state_e::idle;
+    continuous_cause_e cause = continuous_cause_e::none;
+    std::uint64_t owner_generation = 0;  ///< The bound session, or 0 while unbound
+    int file_video_format = -1;          ///< The codec the file's extension names
+    std::uint64_t packets_written = 0;   ///< Owner packets written whole
+    std::uint64_t bytes_written = 0;     ///< Bytes write() accepted, including a failed packet's prefix
+    std::uint64_t refused_invalid = 0;   ///< Owner (or candidate) packets with no data, no size, an unknown codec or above the cap
+    std::uint64_t refused_codec = 0;     ///< Packets of a codec other than the file's
+    std::uint64_t refused_awaiting_keyframe = 0;  ///< Dependent frames with no keyframe to follow
+    std::uint64_t discontinuities = 0;   ///< Owner clock regressions and dropped owner frames
+    continuous_error_e error = continuous_error_e::none;
+    int error_number = 0;                ///< errno of a failed write
+  };
 
   /**
    * @brief Check if continuous recording is active.
@@ -79,10 +140,15 @@ namespace stream_recorder {
    * admitted stream takes effect. Generation 0 is refused. Repeating an identical
    * call changes nothing; changing a session's eligibility is a transition.
    * Call before the session's encoders can produce packets.
+   *
+   * The continuous file uses the same selection. `video_format` is the session's codec
+   * (0=H.264, 1=HEVC, 2=AV1, 3=PyroWave); any other value is unknown and never replaces a
+   * codec already known for the session. A codec change alone does not reset the replay run.
    * @param session_generation The session's process-unique generation (nonzero).
    * @param replay_eligible True when the host selects this session as replay-eligible.
+   * @param video_format The session's codec, or -1 when not known.
    */
-  void session_started(std::uint64_t session_generation, bool replay_eligible);
+  void session_started(std::uint64_t session_generation, bool replay_eligible, int video_format = -1);
 
   /**
    * @brief Unregister a session. Unknown or repeated generations change nothing.
@@ -312,6 +378,28 @@ namespace stream_recorder {
     int native_sync(int fd);
     int native_close(int fd);
     std::error_code native_publish(const std::filesystem::path &staging, const std::filesystem::path &final_path);
+
+    /**
+     * Continuous-file seams for tests, separate from the save seams. Each one left empty uses
+     * the real operation. All run under the recorder lock and may call no recorder function,
+     * except `close`, which stop_recording() calls with no lock held after the file's
+     * descriptor, name and state are released.
+     */
+    struct continuous_hooks_t {
+      std::function<std::string()> name_stamp;  ///< Replaces the wall-clock part of the name
+      /// Before each candidate is opened; may throw (nothing has been created yet).
+      std::function<void(const std::filesystem::path &candidate)> before_open;
+      /// Replaces the exclusive open; should normally call native_open_exclusive().
+      std::function<int(const std::filesystem::path &candidate)> open;
+      /// After a successful open, before the file is committed; a throw must leave no file behind.
+      std::function<void(const std::filesystem::path &path)> after_open;
+      std::function<long long(int fd, const std::uint8_t *data, std::size_t size)> write;
+      std::function<int(int fd)> close;
+    };
+    /// Install continuous seams; set them while no file is open. reset_replay_for_tests() clears them.
+    void set_continuous_hooks_for_tests(continuous_hooks_t hooks);
+    /// The real exclusive, no-follow, private (0600 on POSIX) creation.
+    int native_open_exclusive(const std::filesystem::path &path);
 #endif
   }  // namespace detail
 
@@ -334,6 +422,7 @@ namespace stream_recorder {
     bool recording = false;
     std::string file;
     replay_stats_t replay;
+    continuous_status_t continuous;  ///< The open file's ownership; idle defaults when none
   };
 
   recorder_status_t recorder_status();

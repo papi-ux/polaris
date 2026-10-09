@@ -78,10 +78,17 @@ namespace stream_recorder {
   // writer. This mirror is the only thing the fast path reads unlocked.
   static std::atomic<mode_t> mode_hint {mode_t::disabled};
 
-  // Continuous recording state
+  // Continuous recording state. `recording` is true exactly while `continuous_fd` is open and
+  // `recording_file` names it; all three, and everything below, change only under `mutex`.
   static std::atomic<bool> recording {false};
   static std::string recording_file;
-  static std::ofstream recording_stream;
+  static int continuous_fd = -1;
+  // The open file's ownership. One file holds at most one owner generation in one codec.
+  static continuous_status_t continuous;
+  // The bound owner can never write again: it ended, or it violated the file's codec.
+  static bool continuous_owner_fenced = false;
+  // Arrival of the owner's last valid packet, to refuse a clock regression inside the file.
+  static std::optional<std::chrono::steady_clock::time_point> continuous_last_arrival;
 
   // Active stream codec (0=H.264, 1=HEVC, 2=AV1). Prefer over conf hevc/av1_mode
   // flags, which only mean "allowed", not "what this session encodes".
@@ -98,8 +105,13 @@ namespace stream_recorder {
   static int replay_video_format = -1;
   static std::size_t replay_max_bytes = k_replay_max_payload_bytes;
   static std::size_t replay_max_packets = k_replay_max_packets;
-  // Registered sessions and whether each is replay-eligible. Selection is derived only from this.
-  static std::map<std::uint64_t, bool> replay_sessions;
+  // Registered sessions: whether each is replay-eligible, and its codec when known (-1 when not).
+  // Selection is derived only from this, for the replay buffer and the continuous file alike.
+  struct registered_session_t {
+    bool eligible = false;
+    int video_format = -1;
+  };
+  static std::map<std::uint64_t, registered_session_t> replay_sessions;
   static std::uint64_t replay_selected = 0;
   static replay_stats_t replay_counters;
   static std::uint64_t replay_next_sequence = 1;
@@ -133,40 +145,8 @@ namespace stream_recorder {
 
 #ifdef POLARIS_TESTS
   static detail::save_hooks_t save_hooks;
+  static detail::continuous_hooks_t continuous_hooks;
 #endif
-
-  /**
-   * @brief Generate a timestamped filename for a recording.
-   * @param suffix File extension (e.g. ".hevc", ".h264", ".av1").
-   * @return Full file path.
-   */
-  static std::string generate_filename(const std::string &suffix) {
-    auto now = std::chrono::system_clock::now();
-    auto time_t_now = std::chrono::system_clock::to_time_t(now);
-    std::tm tm_now {};
-#ifdef _WIN32
-    localtime_s(&tm_now, &time_t_now);
-#else
-    localtime_r(&time_t_now, &tm_now);
-#endif
-
-    std::ostringstream oss;
-    oss << std::put_time(&tm_now, "%Y%m%d_%H%M%S");
-
-    std::string dir = cfg.output_dir;
-    if (dir.empty()) {
-      dir = (platf::appdata() / "recordings").string();
-    }
-
-    // Ensure the output directory exists
-    std::error_code ec;
-    fs::create_directories(dir, ec);
-    if (ec) {
-      BOOST_LOG(warning) << "stream_recorder: failed to create output directory ["sv << dir << "]: "sv << ec.message();
-    }
-
-    return dir + "/polaris_" + oss.str() + suffix;
-  }
 
   /**
    * @brief Determine the file extension for a video codec.
@@ -197,11 +177,25 @@ namespace stream_recorder {
   }
 
   /**
-   * @brief Determine the file extension for the current video codec.
-   * Prefer the active session's videoFormat; fall back to conf allow-lists.
+   * @brief The codec a continuous file is named for when no selected session's codec is known:
+   * the last stream codec seen, else the conf allow-lists (the same choice extension_for(-1) makes).
    */
-  static std::string codec_extension() {
-    return extension_for(active_video_format.load(std::memory_order_relaxed));
+  static int fallback_video_format() {
+    const int fmt = active_video_format.load(std::memory_order_relaxed);
+    if (fmt >= 0 && fmt <= 3) {
+      return fmt;
+    }
+    if (config::video.av1_mode > 0 && config::video.hevc_mode <= 0) {
+      return 2;
+    }
+    if (config::video.hevc_mode > 0 && config::video.av1_mode <= 0) {
+      return 1;
+    }
+    return 0;
+  }
+
+  static bool known_video_format(int video_format) {
+    return video_format >= 0 && video_format <= 3;
   }
 
   void set_active_video_format(int video_format) {
@@ -276,16 +270,73 @@ namespace stream_recorder {
   /// Recompute the selected session after a lifecycle change; any change of selection clears the run.
   static void reselect_replay_session() {
     std::uint64_t selected = 0;
-    if (replay_sessions.size() == 1 && replay_sessions.begin()->second) {
+    if (replay_sessions.size() == 1 && replay_sessions.begin()->second.eligible) {
       selected = replay_sessions.begin()->first;
     }
     if (selected != replay_selected) {
       clear_replay_run(true, window_limit_e::selection);
       replay_selected = selected;
-      BOOST_LOG(debug) << "stream_recorder: replay session "sv
-                       << (selected ? std::to_string(selected) : std::string {"none"})
-                       << " ("sv << replay_sessions.size() << " registered)"sv;
+      // The selection is committed; a failed diagnostic cannot undo or interrupt it.
+      try {
+        BOOST_LOG(debug) << "stream_recorder: replay session "sv
+                         << (selected ? std::to_string(selected) : std::string {"none"})
+                         << " ("sv << replay_sessions.size() << " registered)"sv;
+      } catch (...) {
+      }
     }
+  }
+
+  // ---- Continuous file ownership (all helpers require `mutex`; none allocates) ----
+
+  static void continuous_suspend(continuous_cause_e cause) {
+    continuous.state = continuous_state_e::suspended;
+    continuous.cause = cause;
+  }
+
+  /// The owner can never write to this file again.
+  static void continuous_fence(continuous_cause_e cause) {
+    continuous_owner_fenced = true;
+    continuous_suspend(cause);
+  }
+
+  /// Follow a committed lifecycle change: which session (if any) may feed the open file now.
+  static void continuous_follow_selection() {
+    if (continuous_fd < 0 || continuous.state == continuous_state_e::failed) {
+      return;
+    }
+    const auto owner = continuous.owner_generation;
+    if (owner != 0) {
+      if (continuous_owner_fenced) {
+        return;
+      }
+      const auto it = replay_sessions.find(owner);
+      if (it == replay_sessions.end()) {
+        continuous_fence(continuous_cause_e::owner_ended);
+        return;
+      }
+      if (known_video_format(it->second.video_format) && it->second.video_format != continuous.file_video_format) {
+        continuous_fence(continuous_cause_e::codec);
+        return;
+      }
+      if (replay_selected != owner) {
+        // An overlap, or the owner made ineligible: nothing from anyone until it is sole again.
+        continuous_suspend(continuous_cause_e::selection);
+      } else if (continuous.state == continuous_state_e::suspended) {
+        // The same owner is sole and eligible again; frames were missed, so restart at a keyframe.
+        continuous.state = continuous_state_e::awaiting_keyframe;
+      }
+      return;
+    }
+    // Unbound: a selected eligible session of the file's codec may bind at its keyframe.
+    if (replay_selected != 0) {
+      const auto format = replay_sessions.find(replay_selected)->second.video_format;
+      if (known_video_format(format) && format != continuous.file_video_format) {
+        continuous_suspend(continuous_cause_e::codec);
+        return;
+      }
+    }
+    continuous.state = continuous_state_e::awaiting_owner;
+    continuous.cause = continuous_cause_e::none;
   }
 
   /// A frame of the selected session was dropped: later frames would depend on it, so restart at a keyframe.
@@ -395,42 +446,6 @@ namespace stream_recorder {
                                                            "replay_buffer"sv)
                     << " output_dir=["sv << cfg.output_dir << "]"sv
                     << " replay_minutes="sv << cfg.replay_buffer_minutes;
-  }
-
-  void start_recording() {
-    std::lock_guard lock(mutex);
-
-    if (recording.load()) {
-      BOOST_LOG(warning) << "stream_recorder: already recording"sv;
-      return;
-    }
-
-    auto ext = codec_extension();
-    recording_file = generate_filename(ext);
-
-    recording_stream.open(recording_file, std::ios::binary | std::ios::trunc);
-    if (!recording_stream.is_open()) {
-      BOOST_LOG(error) << "stream_recorder: failed to open file ["sv << recording_file << "]"sv;
-      recording_file.clear();
-      return;
-    }
-
-    recording.store(true);
-    BOOST_LOG(info) << "stream_recorder: started recording to ["sv << recording_file << "]"sv;
-  }
-
-  void stop_recording() {
-    std::lock_guard lock(mutex);
-
-    if (!recording.load()) {
-      BOOST_LOG(warning) << "stream_recorder: not recording"sv;
-      return;
-    }
-
-    recording.store(false);
-    recording_stream.close();
-    BOOST_LOG(info) << "stream_recorder: stopped recording ["sv << recording_file << "]"sv;
-    recording_file.clear();
   }
 
   bool is_recording() {
@@ -600,12 +615,7 @@ namespace stream_recorder {
       return std::error_code(error, std::generic_category()).message();
     }
 
-    std::string wall_stamp(std::chrono::system_clock::time_point when) {
-#ifdef POLARIS_TESTS
-      if (save_hooks.name_stamp) {
-        return save_hooks.name_stamp();
-      }
-#endif
+    std::string local_stamp(std::chrono::system_clock::time_point when) {
       const auto time = std::chrono::system_clock::to_time_t(when);
       std::tm local {};
 #ifdef _WIN32
@@ -616,6 +626,15 @@ namespace stream_recorder {
       std::ostringstream stamp;
       stamp << std::put_time(&local, "%Y%m%d_%H%M%S");
       return stamp.str();
+    }
+
+    std::string wall_stamp(std::chrono::system_clock::time_point when) {
+#ifdef POLARIS_TESTS
+      if (save_hooks.name_stamp) {
+        return save_hooks.name_stamp();
+      }
+#endif
+      return local_stamp(when);
     }
 
     /// The staging file this save created. Closes it and removes it unless it was published.
@@ -750,6 +769,292 @@ namespace stream_recorder {
       return fail("publish: every candidate name already exists");
     }
   }  // namespace
+
+  // ---- Continuous file: exclusive creation, owned synchronous writes, release before reporting ----
+
+  namespace {
+    std::string continuous_stamp() {
+#ifdef POLARIS_TESTS
+      if (continuous_hooks.name_stamp) {
+        return continuous_hooks.name_stamp();
+      }
+#endif
+      return local_stamp(std::chrono::system_clock::now());
+    }
+
+    int continuous_open(const fs::path &path) {
+#ifdef POLARIS_TESTS
+      if (continuous_hooks.open) {
+        return continuous_hooks.open(path);
+      }
+#endif
+      return open_exclusive(path);
+    }
+
+    long long continuous_write_call(int fd, const std::uint8_t *data, std::size_t size) {
+#ifdef POLARIS_TESTS
+      if (continuous_hooks.write) {
+        return continuous_hooks.write(fd, data, size);
+      }
+#endif
+      return native_write_impl(fd, data, size);
+    }
+
+    int continuous_close_call(int fd) {
+#ifdef POLARIS_TESTS
+      if (continuous_hooks.close) {
+        return continuous_hooks.close(fd);
+      }
+#endif
+      return native_close_impl(fd);
+    }
+
+    /// A file this start created exclusively: closed and removed unless the writer takes it.
+    class created_file_t {
+    public:
+      created_file_t(int fd, const fs::path &path) noexcept:
+          fd_ {fd}, path_ {&path} {}
+
+      created_file_t(const created_file_t &) = delete;
+      created_file_t &operator=(const created_file_t &) = delete;
+
+      ~created_file_t() {
+        if (fd_ >= 0) {
+          native_close_impl(fd_);
+          native_remove_impl(*path_);
+        }
+      }
+
+      /// The writer owns the descriptor and the name from here on.
+      int release() noexcept {
+        return std::exchange(fd_, -1);
+      }
+
+    private:
+      int fd_;
+      const fs::path *path_;
+    };
+
+    /// Forget the file's ownership and accounting (requires `mutex`; does not allocate).
+    void continuous_reset_locked() noexcept {
+      continuous = continuous_status_t {};
+      continuous_owner_fenced = false;
+      continuous_last_arrival.reset();
+    }
+
+    /// Write every byte, retrying interrupted and partial writes; the first error is recorded.
+    bool continuous_write_all(const std::uint8_t *data, std::size_t size) {
+      std::size_t left = size;
+      while (left > 0) {
+        const auto written = continuous_write_call(continuous_fd, data, left);
+        if (written < 0) {
+          const int error = errno;
+          if (error == EINTR) {
+            continue;
+          }
+          continuous.error = continuous_error_e::write;
+          continuous.error_number = error;
+          return false;
+        }
+        if (written == 0 || static_cast<unsigned long long>(written) > left) {
+          continuous.error = continuous_error_e::no_progress;
+          return false;
+        }
+        data += written;
+        left -= static_cast<std::size_t>(written);
+        continuous.bytes_written += static_cast<std::uint64_t>(written);
+      }
+      return true;
+    }
+
+    /// The owner's frame was dropped: later frames would depend on it, so restart at a keyframe.
+    void continuous_discontinuity() {
+      ++continuous.discontinuities;
+      continuous.state = continuous_state_e::awaiting_keyframe;
+      continuous.cause = continuous_cause_e::discontinuity;
+    }
+
+    /**
+     * Offer one video packet to the open file (requires `mutex`). Only the sole eligible
+     * session may feed it: packets of a zero, unregistered, retired or other generation return
+     * before anything is read or counted. Size and codec are checked before the bytes are read.
+     */
+    void continuous_offer(const uint8_t *data, size_t size, bool is_keyframe, std::uint64_t generation,
+                          int video_format, std::chrono::steady_clock::time_point now) {
+      if (continuous_fd < 0 || generation == 0 || generation != replay_selected ||
+          continuous.state == continuous_state_e::failed) {
+        return;
+      }
+      const bool invalid = data == nullptr || size == 0 || size > k_continuous_max_packet_bytes ||
+                           !known_video_format(video_format);
+      if (continuous.owner_generation == 0) {
+        // Unbound: the sole eligible session binds at a keyframe of the file's codec.
+        if (invalid) {
+          ++continuous.refused_invalid;
+          return;
+        }
+        if (video_format != continuous.file_video_format) {
+          ++continuous.refused_codec;
+          continuous_suspend(continuous_cause_e::codec);
+          return;
+        }
+        if (!is_keyframe) {
+          ++continuous.refused_awaiting_keyframe;
+          return;
+        }
+        continuous.owner_generation = generation;
+        continuous.state = continuous_state_e::awaiting_keyframe;
+      } else {
+        if (generation != continuous.owner_generation || continuous_owner_fenced) {
+          return;
+        }
+        if (invalid) {
+          ++continuous.refused_invalid;
+          continuous_discontinuity();
+          return;
+        }
+        if (video_format != continuous.file_video_format) {
+          // One file is one codec: the owner can never continue it.
+          ++continuous.refused_codec;
+          continuous_fence(continuous_cause_e::codec);
+          return;
+        }
+        if (continuous_last_arrival && now < *continuous_last_arrival) {
+          // Time must not run backwards inside the file: drop this packet unread, take its time
+          // as the new reference, and restart at the next keyframe.
+          continuous_last_arrival = now;
+          continuous_discontinuity();
+          return;
+        }
+      }
+      continuous_last_arrival = now;
+      if (continuous.state != continuous_state_e::writing && !is_keyframe) {
+        ++continuous.refused_awaiting_keyframe;
+        return;
+      }
+      if (!continuous_write_all(data, size)) {
+        continuous.state = continuous_state_e::failed;
+        continuous.cause = continuous_cause_e::storage;
+        try {
+          BOOST_LOG(error) << "stream_recorder: continuous write to ["sv << recording_file << "] failed; "sv
+                           << "nothing more is written until recording stops"sv;
+        } catch (...) {
+        }
+        return;
+      }
+      ++continuous.packets_written;
+      continuous.state = continuous_state_e::writing;
+    }
+  }  // namespace
+
+  void start_recording() {
+    std::lock_guard lock(mutex);
+
+    if (recording.load()) {
+      try {
+        BOOST_LOG(warning) << "stream_recorder: already recording"sv;
+      } catch (...) {
+      }
+      return;
+    }
+
+    try {
+      // Everything the open file needs is decided and allocated before anything is created.
+      std::uint64_t owner = 0;
+      int format = -1;
+      if (replay_selected != 0) {
+        const int selected_format = replay_sessions.find(replay_selected)->second.video_format;
+        if (known_video_format(selected_format)) {
+          owner = replay_selected;
+          format = selected_format;
+        }
+      }
+      if (format < 0) {
+        format = fallback_video_format();
+      }
+      const std::string dir = cfg.output_dir.empty() ? (platf::appdata() / "recordings").string() : cfg.output_dir;
+      std::error_code ec;
+      fs::create_directories(dir, ec);
+      if (ec) {
+        BOOST_LOG(warning) << "stream_recorder: failed to create output directory ["sv << dir << "]: "sv << ec.message();
+      }
+      const std::string stem = dir + "/polaris_" + continuous_stamp();
+      const std::string ext = extension_for(format);
+
+      for (int attempt = 0; attempt < k_save_name_attempts; ++attempt) {
+        std::string name = attempt == 0 ? stem + ext : stem + "-" + std::to_string(attempt) + ext;
+        const fs::path path {name};
+#ifdef POLARIS_TESTS
+        if (continuous_hooks.before_open) {
+          continuous_hooks.before_open(path);
+        }
+#endif
+        const int fd = continuous_open(path);
+        if (fd < 0) {
+          const int error = errno;
+          if (error == EEXIST) {
+            continue;
+          }
+          BOOST_LOG(error) << "stream_recorder: failed to open file ["sv << name << "]: "sv << errno_message(error);
+          return;
+        }
+        created_file_t created {fd, path};
+#ifdef POLARIS_TESTS
+        if (continuous_hooks.after_open) {
+          continuous_hooks.after_open(path);
+        }
+#endif
+        // Commit. Nothing from here allocates or throws, so the file cannot be orphaned.
+        continuous_fd = created.release();
+        recording_file = std::move(name);
+        continuous_reset_locked();
+        continuous.file_video_format = format;
+        continuous.owner_generation = owner;
+        continuous.state = owner != 0 ? continuous_state_e::awaiting_keyframe : continuous_state_e::awaiting_owner;
+        recording.store(true);
+        try {
+          BOOST_LOG(info) << "stream_recorder: started recording to ["sv << recording_file << "]"sv;
+        } catch (...) {
+        }
+        return;
+      }
+      BOOST_LOG(error) << "stream_recorder: failed to open a file: every candidate name already exists"sv;
+    } catch (...) {
+      // Nothing was committed, and a file this start created was closed and removed by its guard.
+      try {
+        BOOST_LOG(error) << "stream_recorder: could not start recording"sv;
+      } catch (...) {
+      }
+    }
+  }
+
+  void stop_recording() {
+    int fd = -1;
+    std::string file;
+    {
+      std::lock_guard lock(mutex);
+      if (recording.load()) {
+        // Release the descriptor, the name and the ownership before anything can fail.
+        fd = std::exchange(continuous_fd, -1);
+        file = std::move(recording_file);
+        recording_file.clear();
+        continuous_reset_locked();
+        recording.store(false);
+      }
+    }
+    // The descriptor is closed exactly once, whatever close reports, with no recorder lock held.
+    const bool closed = fd < 0 || continuous_close_call(fd) == 0;
+    try {
+      if (fd < 0) {
+        BOOST_LOG(warning) << "stream_recorder: not recording"sv;
+      } else if (!closed) {
+        BOOST_LOG(warning) << "stream_recorder: stopped recording ["sv << file << "]; close reported an error"sv;
+      } else {
+        BOOST_LOG(info) << "stream_recorder: stopped recording ["sv << file << "]"sv;
+      }
+    } catch (...) {
+    }
+  }
 
   std::string save_replay() {
     return detail::save_replay_at(std::chrono::steady_clock::now());
@@ -1014,9 +1319,9 @@ namespace stream_recorder {
 
     std::lock_guard lock(mutex);
 
-    // Continuous recording: write directly to file
-    if (recording.load() && recording_stream.is_open()) {
-      recording_stream.write(reinterpret_cast<const char *>(data), size);
+    // Continuous recording: only the open file's owner (or a candidate at a keyframe) is written.
+    if (recording.load()) {
+      continuous_offer(data, size, is_keyframe, session_generation, video_format, now);
     }
 
     // Replay buffer: store packet in memory
@@ -1025,23 +1330,34 @@ namespace stream_recorder {
     }
   }
 
-  void session_started(std::uint64_t session_generation, bool replay_eligible) {
+  void session_started(std::uint64_t session_generation, bool replay_eligible, int video_format) {
     std::lock_guard lock(mutex);
     if (session_generation == 0) {
       ++replay_counters.refused_lifecycle;
       BOOST_LOG(warning) << "stream_recorder: refused a session with no generation"sv;
       return;
     }
-    auto [it, inserted] = replay_sessions.try_emplace(session_generation, replay_eligible);
+    const int known = known_video_format(video_format) ? video_format : -1;
+    // The only allocation (a new registration) precedes every state change.
+    auto [it, inserted] = replay_sessions.try_emplace(session_generation, registered_session_t {replay_eligible, known});
     if (!inserted) {
-      if (it->second == replay_eligible) {
+      auto &session = it->second;
+      // An unknown codec never erases a known one.
+      const int format = known >= 0 ? known : session.video_format;
+      if (session.eligible == replay_eligible && session.video_format == format) {
         return;
       }
-      // The same session changing eligibility is a transition: its earlier packets go.
-      it->second = replay_eligible;
-      clear_replay_run(true, window_limit_e::selection);
+      const bool eligibility_changed = session.eligible != replay_eligible;
+      session.eligible = replay_eligible;
+      session.video_format = format;
+      if (eligibility_changed) {
+        // The same session changing eligibility is a transition: its earlier packets go.
+        // A codec learned for a session does not reset the replay run: packets carry theirs.
+        clear_replay_run(true, window_limit_e::selection);
+      }
     }
     reselect_replay_session();
+    continuous_follow_selection();
   }
 
   void session_ended(std::uint64_t session_generation) {
@@ -1052,6 +1368,7 @@ namespace stream_recorder {
     // The ended session's packets go even if it was not the selected one.
     clear_replay_run(true, window_limit_e::selection);
     reselect_replay_session();
+    continuous_follow_selection();
   }
 
   replay_stats_t replay_stats() {
@@ -1124,6 +1441,7 @@ namespace stream_recorder {
     status.recording = recording.load();
     status.file = recording_file;
     status.replay = replay_stats_locked(now);
+    status.continuous = continuous;
     return status;
   }
 
@@ -1136,17 +1454,38 @@ namespace stream_recorder {
   }
 
   void detail::reset_replay_for_tests() {
+    int fd = -1;
+    {
+      std::lock_guard lock(mutex);
+      clear_replay_run(true, window_limit_e::none);
+      replay_max_bytes = k_replay_max_payload_bytes;
+      replay_max_packets = k_replay_max_packets;
+      replay_sessions.clear();
+      replay_selected = 0;
+      replay_counters = {};
+      replay_next_sequence = 1;
+      saves_refused_busy.store(0, std::memory_order_relaxed);
+      active_video_format.store(-1, std::memory_order_relaxed);
+      save_hooks = {};
+      // An open continuous file is released like stop_recording() releases it.
+      fd = std::exchange(continuous_fd, -1);
+      recording_file.clear();
+      continuous_reset_locked();
+      recording.store(false);
+      continuous_hooks = {};
+    }
+    if (fd >= 0) {
+      native_close_impl(fd);
+    }
+  }
+
+  void detail::set_continuous_hooks_for_tests(continuous_hooks_t hooks) {
     std::lock_guard lock(mutex);
-    clear_replay_run(true, window_limit_e::none);
-    replay_max_bytes = k_replay_max_payload_bytes;
-    replay_max_packets = k_replay_max_packets;
-    replay_sessions.clear();
-    replay_selected = 0;
-    replay_counters = {};
-    replay_next_sequence = 1;
-    saves_refused_busy.store(0, std::memory_order_relaxed);
-    active_video_format.store(-1, std::memory_order_relaxed);
-    save_hooks = {};
+    continuous_hooks = std::move(hooks);
+  }
+
+  int detail::native_open_exclusive(const fs::path &path) {
+    return open_exclusive(path);
   }
 
   void detail::set_save_hooks_for_tests(save_hooks_t hooks) {
