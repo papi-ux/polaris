@@ -398,6 +398,7 @@ set(TEST_VIDEO_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video_lifecycle_hardware.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_video.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cbs.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_media_capabilities.cpp
 )
 
 # Copy files needed for config consistency tests to build directory
@@ -906,6 +907,11 @@ if (BUILD_FULL_TESTS)
     configure_polaris_full_test_target(test_polaris_video
         ${TEST_VIDEO_SOURCES}
     )
+    # Linked FFmpeg codec registration inventory (#361): lookups only, nothing opened or decoded.
+    add_test(NAME polaris_recorder_media_capabilities
+        COMMAND test_polaris_video --gtest_filter=RecorderMediaCapabilitiesTests.*)
+    set_tests_properties(polaris_recorder_media_capabilities PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         # Deterministic capture ownership checks use the production conversion
         # adapter without opening a GPU, display or PipeWire daemon.
