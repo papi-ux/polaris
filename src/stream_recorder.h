@@ -275,6 +275,61 @@ namespace stream_recorder {
                    std::uint64_t session_generation, int video_format);
 
   /**
+   * @brief Passive provenance of one encoded video packet, kept as evidence only (version 1, #359).
+   *
+   * Nothing here is a presentation timestamp. The recorder copies it beside the replay entry and
+   * the save snapshot, marks what is missing, duplicated, regressed or gapped, and acts on none of
+   * it: retention, refusals, resets, caps, trimming, keyframe alignment, continuous writes and saved
+   * bytes are exactly those of push_packet(). See docs/recorder_media.md.
+   */
+  struct packet_provenance_t {
+    static constexpr std::uint16_t k_version = 1;
+    /// The encoder's frame index as the tap read it; empty when the caller supplied none. An
+    /// index of 0 is a real index, never "unknown".
+    std::optional<std::int64_t> frame_index;
+    /// The packet's frame_timestamp as it was at the tap (capture or pacing time), if it had one.
+    /// Evidence only: it is not a presentation time and is never replaced by the arrival time.
+    std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
+    /// Copied from the packet: a timestamp-coordinate fact, never authority, proof or VRR.
+    bool source_clock_timestamp = false;
+    /// Copied from the packet: never authority, proof or VRR.
+    bool source_time_paced = false;
+  };
+
+  /**
+   * @brief push_packet() for one video packet, with its provenance kept as evidence.
+   *
+   * The same admission as push_packet(data, size, true, is_keyframe, index, session_generation,
+   * video_format), where index is provenance.frame_index or 0, plus the provenance record.
+   */
+  void push_video(const uint8_t *data, size_t size, bool is_keyframe, std::uint64_t session_generation,
+                  int video_format, const packet_provenance_t &provenance);
+
+  namespace detail {
+    /// Evidence marks of one replay entry, computed once at admission against the adjacent retained
+    /// entry (the buffer's back after this admission's expiry, trimming and alignment). An empty
+    /// buffer means no comparison; a coordinate unknown on either side is not compared. A mark
+    /// never refuses, trims, resets or cuts anything.
+    struct provenance_marks_t {
+      bool index_unsupplied = false;  ///< No frame index was supplied (legacy push_packet())
+      bool index_duplicate = false;   ///< Equal to the adjacent retained entry's supplied index
+      bool index_regressed = false;   ///< Lower than the adjacent retained entry's supplied index
+      bool index_gap = false;         ///< Higher than the adjacent retained entry's index by more than one
+      bool time_missing = false;      ///< No frame_timestamp at the tap (untimed)
+      bool time_duplicate = false;    ///< Equal to the adjacent retained entry's frame_timestamp
+      bool time_regressed = false;    ///< Earlier than the adjacent retained entry's frame_timestamp
+      bool operator==(const provenance_marks_t &) const = default;
+    };
+
+    /// What the recorder keeps beside each replay payload, live and in a held save snapshot.
+    struct provenance_record_t {
+      std::uint16_t version = packet_provenance_t::k_version;
+      packet_provenance_t supplied;  ///< As supplied; all empty for push_packet()
+      provenance_marks_t marks;
+    };
+  }  // namespace detail
+
+  /**
    * @brief The cause of the most recent change that removed live replay packets or reset the run.
    *
    * It records what happened, not what the buffer is waiting for: whether a run is buffered and
@@ -367,6 +422,10 @@ namespace stream_recorder {
     void push_packet_at(const uint8_t *data, size_t size, bool is_video, bool is_keyframe, int64_t pts,
                         std::uint64_t session_generation, int video_format,
                         std::chrono::steady_clock::time_point now);
+    /// push_video() at an explicit steady-clock time, with push_packet_at()'s bounded writer wait.
+    void push_video_at(const uint8_t *data, size_t size, bool is_keyframe, std::uint64_t session_generation,
+                       int video_format, const packet_provenance_t &provenance,
+                       std::chrono::steady_clock::time_point now);
     /// replay_stats() at an explicit steady-clock time.
     replay_stats_t replay_stats_at(std::chrono::steady_clock::time_point now);
     /// save_replay() at an explicit steady-clock time.
@@ -400,6 +459,9 @@ namespace stream_recorder {
     save_result_t save_replay_result_at(std::chrono::steady_clock::time_point now);
 
     struct save_admission_t;
+#ifdef POLARIS_TESTS
+    struct snapshot_provenance_t;
+#endif
 
     /**
      * Move-only owner of one admitted replay save: its captured snapshot (payload references
@@ -426,6 +488,9 @@ namespace stream_recorder {
 
       friend save_admission_t admit_replay_save(std::chrono::steady_clock::time_point now);
       friend save_result_t complete_replay_save(admitted_save_t save);
+#ifdef POLARIS_TESTS
+      friend snapshot_provenance_t snapshot_provenance_for_tests(const admitted_save_t &save);
+#endif
     };
 
     /// The outcome of admission. `save` owns the captured run only when `result.admitted`.
@@ -458,6 +523,40 @@ namespace stream_recorder {
     /// Restore every replay buffer state to its process start: caps, sessions, run, counters and save hooks.
     void reset_replay_for_tests();
 
+    /// One live or held replay entry: its payload (copied for inspection) and its provenance.
+    struct provenance_entry_t {
+      std::uint64_t sequence = 0;  ///< The live entry's sequence; 0 for a snapshot entry
+      std::vector<std::uint8_t> payload;
+      provenance_record_t record;
+    };
+
+    /// The live run's entries in order (tests only; no route, status or JSON exposes them).
+    std::vector<provenance_entry_t> replay_provenance_for_tests();
+
+    /// A held save's captured entries, paired by position, and its capacities (tests only).
+    struct snapshot_provenance_t {
+      std::vector<provenance_entry_t> entries;  ///< Paired entries, up to the shorter array
+      std::size_t payload_count = 0;        ///< Payload references held
+      std::size_t provenance_count = 0;     ///< Provenance records held (equals payload_count)
+      std::size_t payload_capacity = 0;     ///< The snapshot's payload-reference array capacity
+      std::size_t provenance_capacity = 0;  ///< The snapshot's provenance array capacity
+    };
+
+    /// Inspect a held admitted save without changing it; empty for an empty handle.
+    snapshot_provenance_t snapshot_provenance_for_tests(const admitted_save_t &save);
+
+    /// Compiled sizes of the replay bookkeeping (bounded accounting, not allocator or RSS cost).
+    struct provenance_sizes_t {
+      std::size_t packet_provenance = 0;   ///< sizeof(packet_provenance_t)
+      std::size_t provenance_record = 0;   ///< sizeof(provenance_record_t), per live entry and per snapshot entry
+      std::size_t live_entry = 0;          ///< sizeof the live replay entry, provenance included
+      /// sizeof a mirror of the pre-#359 live entry (same members, same order, same build): a
+      /// same-compiler baseline for the per-entry delta, not the removed type itself.
+      std::size_t pre_provenance_entry_mirror = 0;
+      std::size_t snapshot_payload_ref = 0;  ///< sizeof one snapshot payload reference
+    };
+    provenance_sizes_t provenance_sizes_for_tests();
+
     /**
      * Storage seams for tests. Each one left empty uses the real operation. A seam that
      * replaces an operation should normally call the matching native_* function, so the
@@ -469,6 +568,9 @@ namespace stream_recorder {
       /// Before the capture state of an eligible run is allocated, under the recorder lock (call
       /// no recorder function from it). Never reached for busy, disabled or empty refusals.
       std::function<void()> before_admission_allocation;
+      /// After the snapshot's payload array was reserved and before its provenance array is
+      /// reserved (#359), under the recorder lock (call no recorder function from it). May throw.
+      std::function<void()> before_snapshot_provenance_allocation;
       /// Just before the save reservation is released, with no recorder lock held; must not throw.
       std::function<void()> before_save_reservation_release;
       std::function<void(const std::filesystem::path &staging)> before_write;

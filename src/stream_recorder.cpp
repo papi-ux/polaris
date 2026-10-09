@@ -71,6 +71,7 @@ namespace stream_recorder {
     int64_t pts;
     std::chrono::steady_clock::time_point timestamp;
     std::uint64_t sequence;  ///< Increases with every stored packet; tells a snapshot's entries apart
+    detail::provenance_record_t provenance;  ///< Evidence only (#359); never read by any decision
   };
 
   static config_t cfg;
@@ -672,11 +673,49 @@ namespace stream_recorder {
   }
 
   /**
+   * @brief The provenance record for an entry about to be stored (requires `mutex`).
+   *
+   * Called after this admission's expiry, trimming and keyframe alignment, just before the entry
+   * is stored. Marks compare it, once, with the adjacent retained entry (the buffer's back); an
+   * empty buffer means no comparison, and a coordinate unknown on either side is not compared.
+   * The marks are fixed at admission. Nothing here allocates, throws or decides.
+   */
+  static detail::provenance_record_t replay_provenance_record(const packet_provenance_t *supplied) noexcept {
+    detail::provenance_record_t record;
+    if (supplied) {
+      record.supplied = *supplied;
+    }
+    auto &marks = record.marks;
+    const auto &index = record.supplied.frame_index;
+    marks.index_unsupplied = !index;
+    const auto *adjacent = replay_buffer.empty() ? nullptr : &replay_buffer.back().provenance.supplied;
+    if (index && adjacent && adjacent->frame_index) {
+      const auto previous = *adjacent->frame_index;
+      marks.index_duplicate = *index == previous;
+      marks.index_regressed = *index < previous;
+      // The unsigned difference is exact whenever index > previous, so no signed overflow occurs
+      // at either end of the int64 range.
+      marks.index_gap = *index > previous &&
+                        static_cast<std::uint64_t>(*index) - static_cast<std::uint64_t>(previous) > 1;
+    }
+    const auto &time = record.supplied.frame_timestamp;
+    marks.time_missing = !time;
+    if (time && adjacent && adjacent->frame_timestamp) {
+      marks.time_duplicate = *time == *adjacent->frame_timestamp;
+      marks.time_regressed = *time < *adjacent->frame_timestamp;
+    }
+    return record;
+  }
+
+  /**
    * @brief Admit one video packet to the replay buffer, or refuse it without copying.
+   *
+   * `provenance` (null for push_packet()) is recorded beside the entry and decides nothing.
    */
   static void append_replay_packet(const uint8_t *data, size_t size, bool is_keyframe, int64_t pts,
                                    std::uint64_t session_generation, int video_format,
-                                   std::chrono::steady_clock::time_point now) {
+                                   std::chrono::steady_clock::time_point now,
+                                   const packet_provenance_t *provenance) {
     // Packets of any session but the selected one are refused before anything else, so a
     // foreign, retired, zero or malformed generation cannot change the selected run.
     if (session_generation == 0 || session_generation != replay_selected) {
@@ -729,7 +768,9 @@ namespace stream_recorder {
       replay_video_format = video_format;
     }
 
-    // The one copy of the packet's bytes, made immutable so a save can share it.
+    // The one copy of the packet's bytes, made immutable so a save can share it. Its provenance
+    // is stored in the same entry, so the two are kept, trimmed and released together.
+    const auto record = replay_provenance_record(provenance);
     replay_buffer.push_back(buffered_packet_t {
       std::make_shared<const std::vector<uint8_t>>(data, data + size),
       true,
@@ -737,6 +778,7 @@ namespace stream_recorder {
       pts,
       now,
       replay_next_sequence++,
+      record,
     });
     replay_bytes += size;
     if (is_keyframe) {
@@ -787,6 +829,9 @@ namespace stream_recorder {
     /// What an admitted save captured under the lock. It owns its share of the payloads.
     struct replay_snapshot_t {
       std::vector<payload_t> payloads;
+      /// Each payload's provenance, by position (#359). Reserved with the payloads at admission and
+      /// freed with the lease, after its lock, like the payload array.
+      std::vector<detail::provenance_record_t> provenance;
       std::size_t bytes = 0;
       int video_format = -1;
       std::uint64_t generation = 0;
@@ -1864,8 +1909,15 @@ namespace stream_recorder {
           // Pointers and metadata only: the payload bytes are shared, not copied.
           auto &snapshot = state->lease.snapshot;
           snapshot.payloads.reserve(replay_buffer.size());
+#ifdef POLARIS_TESTS
+          if (save_hooks.before_snapshot_provenance_allocation) {
+            save_hooks.before_snapshot_provenance_allocation();
+          }
+#endif
+          snapshot.provenance.reserve(replay_buffer.size());
           for (const auto &packet : replay_buffer) {
             snapshot.payloads.push_back(packet.data);
+            snapshot.provenance.push_back(packet.provenance);
           }
 #ifdef POLARIS_TESTS
           if (save_hooks.after_snapshot_payloads) {
@@ -1992,12 +2044,13 @@ namespace stream_recorder {
     };
 
     /**
-     * The one admission path of both packet entries. It never waits for storage: a continuous
+     * The one admission path of every packet entry. It never waits for storage: a continuous
      * packet is only copied into its file's queue.
      */
     continuous_admitted_t push_packet_core(const uint8_t *data, size_t size, bool is_video, bool is_keyframe, int64_t pts,
                                            std::uint64_t session_generation, int video_format,
-                                           std::chrono::steady_clock::time_point now) {
+                                           std::chrono::steady_clock::time_point now,
+                                           const packet_provenance_t *provenance = nullptr) {
       // Fast path: nothing to do if disabled and not recording. Reads
       // mode_hint, not cfg.mode, so this stays lock-free and race-free on
       // the send thread in the default (disabled) configuration.
@@ -2031,7 +2084,7 @@ namespace stream_recorder {
 
       // Replay buffer: store packet in memory
       if (cfg.mode == mode_t::replay_buffer) {
-        append_replay_packet(data, size, is_keyframe, pts, session_generation, video_format, now);
+        append_replay_packet(data, size, is_keyframe, pts, session_generation, video_format, now, provenance);
       }
       return admitted;
     }
@@ -2047,19 +2100,42 @@ namespace stream_recorder {
     keyframe_dispatch(std::move(admitted.keyframe));
   }
 
+  void push_video(const uint8_t *data, size_t size, bool is_keyframe, std::uint64_t session_generation,
+                  int video_format, const packet_provenance_t &provenance) {
+    // push_packet() with the same arguments the tap gave it, plus the evidence record.
+    auto admitted = push_packet_core(data, size, true, is_keyframe, provenance.frame_index.value_or(0),
+                                     session_generation, video_format, std::chrono::steady_clock::now(), &provenance);
+    keyframe_dispatch(std::move(admitted.keyframe));
+  }
+
+  namespace {
+    /// Diagnostic entries only: wait (bounded) for the writer to finish the one packet admitted.
+    void wait_admitted_packet(const continuous_admitted_t &admitted) {
+      if (admitted.sequence == 0) {
+        return;
+      }
+      std::unique_lock guard(admitted.writer->lock);
+      admitted.writer->changed.wait_for(guard, std::chrono::seconds {10}, [&admitted] {
+        return admitted.writer->completed_sequence >= admitted.sequence;
+      });
+    }
+  }  // namespace
+
   void detail::push_packet_at(const uint8_t *data, size_t size, bool is_video, bool is_keyframe, int64_t pts,
                               std::uint64_t session_generation, int video_format,
                               std::chrono::steady_clock::time_point now) {
     auto admitted = push_packet_core(data, size, is_video, is_keyframe, pts, session_generation, video_format, now);
     keyframe_dispatch(std::move(admitted.keyframe));  // push_packet_core()'s lock is gone, as above
-    if (admitted.sequence == 0) {
-      return;
-    }
-    // Diagnostic only: wait (bounded) for the writer to finish this one packet.
-    std::unique_lock guard(admitted.writer->lock);
-    admitted.writer->changed.wait_for(guard, std::chrono::seconds {10}, [&admitted] {
-      return admitted.writer->completed_sequence >= admitted.sequence;
-    });
+    wait_admitted_packet(admitted);
+  }
+
+  void detail::push_video_at(const uint8_t *data, size_t size, bool is_keyframe, std::uint64_t session_generation,
+                             int video_format, const packet_provenance_t &provenance,
+                             std::chrono::steady_clock::time_point now) {
+    auto admitted = push_packet_core(data, size, true, is_keyframe, provenance.frame_index.value_or(0),
+                                     session_generation, video_format, now, &provenance);
+    keyframe_dispatch(std::move(admitted.keyframe));  // push_packet_core()'s lock is gone, as above
+    wait_admitted_packet(admitted);
   }
 
   namespace {
@@ -2269,6 +2345,54 @@ namespace stream_recorder {
     replay_max_bytes = max_bytes;
     replay_max_packets = max_packets;
     clear_replay_run(true, window_limit_e::configuration);
+  }
+
+  std::vector<detail::provenance_entry_t> detail::replay_provenance_for_tests() {
+    std::vector<provenance_entry_t> entries;
+    std::lock_guard lock(mutex);
+    entries.reserve(replay_buffer.size());
+    for (const auto &packet : replay_buffer) {
+      entries.push_back(provenance_entry_t {packet.sequence, *packet.data, packet.provenance});
+    }
+    return entries;
+  }
+
+  detail::snapshot_provenance_t detail::snapshot_provenance_for_tests(const admitted_save_t &save) {
+    snapshot_provenance_t out;
+    if (!save) {
+      return out;
+    }
+    // The snapshot is immutable while held, and only its owner may complete or drop it.
+    const auto &snapshot = save.state_->lease.snapshot;
+    out.payload_count = snapshot.payloads.size();
+    out.provenance_count = snapshot.provenance.size();
+    out.payload_capacity = snapshot.payloads.capacity();
+    out.provenance_capacity = snapshot.provenance.capacity();
+    const auto count = std::min(snapshot.payloads.size(), snapshot.provenance.size());
+    out.entries.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+      out.entries.push_back(provenance_entry_t {0, *snapshot.payloads[i], snapshot.provenance[i]});
+    }
+    return out;
+  }
+
+  detail::provenance_sizes_t detail::provenance_sizes_for_tests() {
+    // The live entry's members before #359, in the same order: a same-build baseline only.
+    struct pre_provenance_entry_mirror_t {
+      payload_t data;
+      bool is_video;
+      bool is_keyframe;
+      int64_t pts;
+      std::chrono::steady_clock::time_point timestamp;
+      std::uint64_t sequence;
+    };
+    provenance_sizes_t sizes;
+    sizes.packet_provenance = sizeof(packet_provenance_t);
+    sizes.provenance_record = sizeof(provenance_record_t);
+    sizes.live_entry = sizeof(buffered_packet_t);
+    sizes.pre_provenance_entry_mirror = sizeof(pre_provenance_entry_mirror_t);
+    sizes.snapshot_payload_ref = sizeof(payload_t);
+    return sizes;
   }
 
   void detail::reset_replay_for_tests() {

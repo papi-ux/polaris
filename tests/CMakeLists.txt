@@ -347,6 +347,7 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_continuous.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_continuous_async.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_keyframe_recovery.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_provenance.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_packet_owner.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_packet_session.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_live_tuning.cpp
@@ -856,6 +857,11 @@ if (BUILD_FULL_TESTS)
     add_test(NAME polaris_recorder_keyframe_recovery
         COMMAND test_polaris_stream --gtest_filter=StreamRecorderKeyframeRecoveryTests.*)
     set_tests_properties(polaris_recorder_keyframe_recovery PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    # Passive replay provenance (#359): evidence beside each payload, fixture-owned files only.
+    add_test(NAME polaris_recorder_provenance
+        COMMAND test_polaris_stream --gtest_filter=StreamRecorderProvenanceTests.*)
+    set_tests_properties(polaris_recorder_provenance PROPERTIES
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     if(POLARIS_ENABLE_RECORDER_COST_PROBE)
         # Report-only recorder cost probe (#357, docs/recorder_cost.md), opted in above. Its own

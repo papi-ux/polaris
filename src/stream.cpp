@@ -1893,13 +1893,19 @@ namespace stream {
       // Feed raw encoded frame to the stream recorder (before any header modifications).
       // Path-agnostic (labwc / gamescope / portal): same post-encode tap.
       if (stream_recorder::is_recording() || stream_recorder::current_mode() == stream_recorder::mode_t::replay_buffer) {
-        stream_recorder::push_packet(
+        // Passive provenance (#359): the index and frame_timestamp exactly as they are here,
+        // before the send path below may fill a missing timestamp. Evidence only, never PTS.
+        stream_recorder::packet_provenance_t provenance;
+        provenance.frame_index = packet->frame_index();
+        provenance.frame_timestamp = packet->frame_timestamp;
+        provenance.source_clock_timestamp = packet->source_clock_timestamp;
+        provenance.source_time_paced = packet->source_time_paced;
+        stream_recorder::push_video(
           packet->data(), packet->data_size(),
-          true,  // is_video
           packet->is_idr(),
-          packet->frame_index(),
           session->session_generation,
-          session->config.monitor.videoFormat
+          session->config.monitor.videoFormat,
+          provenance
         );
       }
 
