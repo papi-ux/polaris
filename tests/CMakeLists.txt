@@ -815,9 +815,20 @@ if (BUILD_FULL_TESTS)
             ${CMAKE_SOURCE_DIR}/tests/unit/platform/test_audio_process_id.cpp)
     endif()
 
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # In-process libx264/libx265 CPU encoder fixtures (#363): Linux only, where the pinned
+        # archive's registrations were observed. Kept out of test_polaris_video's codec wrappers.
+        list(APPEND TEST_STREAM_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_encoder_fixture.cpp)
+    endif()
     configure_polaris_full_test_target(test_polaris_stream
         ${TEST_STREAM_SOURCES}
     )
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_test(NAME polaris_recorder_encoder_fixture
+            COMMAND test_polaris_stream --gtest_filter=RecorderEncoderFixtureTests.*)
+        set_tests_properties(polaris_recorder_encoder_fixture PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    endif()
     # Recorder mode publication uses the real configuration path without opening a recording.
     add_test(NAME polaris_recorder_mode_publication
         COMMAND test_polaris_stream --gtest_filter=StreamRecorderModeTests.*)
