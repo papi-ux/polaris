@@ -54,6 +54,11 @@ The synthetic train is encoded video frame payloads, **before RTP fragmentation*
 - dependent frames cycling 16/32/48/64 KiB;
 - HEVC-labelled bytes that are never decoded.
 
+The 60 fps interval is an artificial arrival-clock step used by replay fixtures. Calls are
+unpaced when measuring wall-clock cost. Keyframe comparisons use fixed 32 KiB dependent payloads;
+each fixture-dispatch loss follows an untimed 256 KiB recovery keyframe. Their subrecords state
+these overrides and use the actual steady clock.
+
 | Case | Subrecords |
 |---|---|
 | `DisabledTap` | `production_tap_reads`: the exact `is_recording() \|\| current_mode() == replay_buffer` check `src/stream.cpp` makes per frame (it never calls `push_packet` while disabled). `direct_disabled_push`: a direct `push_packet` call on the disabled fast path, which the real tap never makes. |
