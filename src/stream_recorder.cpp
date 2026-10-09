@@ -1520,13 +1520,16 @@ namespace stream_recorder {
           outcome = keyframe_channel_access_t::request(*pending.channel, after_raise);
         }
       }
+      {
+        std::lock_guard lock(mutex);
+        keyframe_complete(pending.token, outcome);
+      }
 #ifdef POLARIS_TESTS
+      // Observers see completed bookkeeping, with both the recorder lock and request gate released.
       if (pending.hooks.after_dispatch) {
         pending.hooks.after_dispatch(detail::keyframe_token_t {pending.token.incarnation, pending.token.generation, pending.token.sequence}, outcome);
       }
 #endif
-      std::lock_guard lock(mutex);
-      keyframe_complete(pending.token, outcome);
     }
 
     /**
