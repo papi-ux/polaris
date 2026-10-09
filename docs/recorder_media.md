@@ -134,6 +134,29 @@ registered codec may still fail to open, and a registered decoder proves nothing
 recorded file. These are runtime facts of the linked library as this binary sees them. Which
 prepared archive supplied that library is recorded separately, by CI.
 
+## CPU encoder fixtures (#363)
+
+`RecorderEncoderFixtureTests` (2 cases, Linux only, in `test_polaris_stream`, CTest
+`polaris_recorder_encoder_fixture`) opens the named `libx264` and `libx265` encoders from the linked
+FFmpeg. Each case then:
+- feeds 8 deterministic 64×64 YUV420P frames, with explicit single-threaded operation, no B-frames,
+  a key frame every 4 frames and scene cut disabled;
+- drains the encoder with bounded send, receive and flush calls;
+- checks a positive baseline on the first run: 8 non-empty, size-capped packets in input order,
+  with key frames exactly at 0 and 4;
+- only then repeats the identical run, and requires byte-identical packets.
+
+For both runs, it records the options and every dictionary-set, open, send, receive and flush result,
+plus each packet's size, flags, DTS and SHA-256, as GTest XML
+properties and in one console line, `POLARIS_RECORDER_ENCODER_FIXTURE_JSON {...}`. Each packet's PTS
+is recorded too. It is the fixture's own synthetic frame counter: not producer provenance and not a
+presentation time.
+
+A missing encoder or a failed open is a test **failure**: a dependency finding, never a skip. The
+fixture proves only that these encoders open and produce repeatable packets in this build. It does
+not decode or parse bitstream structure, does not touch the recorder, and makes no claim about
+playable output.
+
 ## Not covered
 
 This slice proves none of the following:
