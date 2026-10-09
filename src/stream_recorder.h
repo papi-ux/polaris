@@ -583,7 +583,7 @@ namespace stream_recorder {
     /**
      * Keyframe request seams for tests: they only pause or observe a request, never change it.
      * before_dispatch runs after the recorder lock is released and before the request gate;
-     * after_dispatch runs after the gate is released and before the recorder lock is retaken.
+     * after_dispatch runs after completion is counted, with the recorder lock and gate released.
      * Both hold no recorder lock: they may wait on test state and call keyframe_stats_for_tests()
      * or recorder_status(), and nothing else of the recorder.
      * after_raise runs inside the real request, right after the event was raised, while the
