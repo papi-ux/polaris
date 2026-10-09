@@ -296,6 +296,7 @@ set(TEST_CONFIG_SOURCES
 
 set(TEST_PAIRING_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_http_pairing.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_recording_authorization.cpp
 )
 
 set(TEST_HTTP_SOURCES

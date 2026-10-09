@@ -4929,6 +4929,7 @@ namespace nvhttp {
         named_cert_node["allow_client_commands"] = named_cert_p->allow_client_commands;
         named_cert_node["always_use_virtual_display"] = named_cert_p->always_use_virtual_display;
         named_cert_node["close_desktop_steam"] = named_cert_p->close_desktop_steam;
+        named_cert_node["recording_authorized"] = named_cert_p->recording_authorized;
 
         // Add "do" commands if available.
         if (!named_cert_p->do_cmds.empty()) {
@@ -5117,6 +5118,8 @@ namespace nvhttp {
           named_cert->allow_client_commands = entry.value("allow_client_commands", true);
           named_cert->always_use_virtual_display = entry.value("always_use_virtual_display", false);
           named_cert->close_desktop_steam = entry.value("close_desktop_steam", crypto::close_desktop_steam_default);
+          // Absent in records written before the setting existed: off.
+          named_cert->recording_authorized = entry.value("recording_authorized", crypto::recording_authorized_default);
           named_cert->do_cmds = extract_command_entries(entry, "do");
           named_cert->undo_cmds = extract_command_entries(entry, "undo");
           register_identity(named_cert);
@@ -5173,6 +5176,7 @@ namespace nvhttp {
     clone->allow_client_commands = source->allow_client_commands;
     clone->always_use_virtual_display = source->always_use_virtual_display;
     clone->close_desktop_steam = source->close_desktop_steam;
+    clone->recording_authorized = source->recording_authorized;
     clone->temporary_authorization = source->temporary_authorization;
     return clone;
   }
@@ -5205,6 +5209,9 @@ namespace nvhttp {
       // their saved permissions through the duplicate branch above.
       named_cert->perm = PERM::_game_control;
     }
+    // Pairing never grants recording, and re-pairing a certificate never carries an earlier
+    // approval over: only a host admin's later update of this permanent record can.
+    named_cert->recording_authorized = crypto::recording_authorized_default;
 
     if (duplicate != previous_clients.end()) {
       if ((*duplicate)->paired_at > 0) {
@@ -5947,6 +5954,7 @@ namespace nvhttp {
       named_cert_p->allow_client_commands = true;
       named_cert_p->always_use_virtual_display = false;
       named_cert_p->close_desktop_steam = crypto::close_desktop_steam_default;
+      named_cert_p->recording_authorized = crypto::recording_authorized_default;
       named_cert_p->temporary_authorization = sess.temporary_authorization;
 
       if (add_authorized_client(named_cert_p, sess.pairing_perm)) {
@@ -7224,6 +7232,7 @@ namespace nvhttp {
       named_cert_node["allow_client_commands"] = named_cert->allow_client_commands;
       named_cert_node["always_use_virtual_display"] = named_cert->always_use_virtual_display;
       named_cert_node["close_desktop_steam"] = named_cert->close_desktop_steam;
+      named_cert_node["recording_authorized"] = named_cert->recording_authorized;
       named_cert_node["temporary_authorization"] = named_cert->temporary_authorization;
 
       // Add "do" commands if available
@@ -12952,7 +12961,8 @@ namespace nvhttp {
     const bool allow_client_commands,
     const bool always_use_virtual_display,
     const std::optional<bool> temporary_authorization,
-    const std::optional<bool> close_desktop_steam
+    const std::optional<bool> close_desktop_steam,
+    const std::optional<bool> recording_authorized
   ) {
     std::shared_ptr<rtsp_stream::launch_session_t> cancelled_launch;
     {
@@ -12979,6 +12989,12 @@ namespace nvhttp {
       replacement->always_use_virtual_display = always_use_virtual_display;
       replacement->temporary_authorization = temporary_authorization.value_or(previous->temporary_authorization);
       replacement->close_desktop_steam = close_desktop_steam.value_or(previous->close_desktop_steam);
+      replacement->recording_authorized = recording_authorized.value_or(previous->recording_authorized);
+      if (replacement->temporary_authorization) {
+        // A guest never holds a recording approval, even one granted in the same request, and
+        // making the device permanent again later does not bring an earlier approval back.
+        replacement->recording_authorized = false;
+      }
       *it = replacement;
       if (!save_state()) {
         *it = previous;

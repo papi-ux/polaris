@@ -479,6 +479,44 @@ credentials separately from the state file. The defaults are listed under [Files
 | **Private Key** (`pkey`) | The private key used for the web UI and Moonlight client pairing. For best compatibility, this should be an RSA-2048 private key. |
 | **Certificate** (`cert`) | The certificate used for the web UI and Moonlight client pairing. For best compatibility, this should have an RSA-2048 public key. |
 
+### Recording tab
+
+Experimental and host only. Polaris saves the stream's raw elementary video: no audio, no
+container, no timestamps, and playback is not qualified. Every file stays on the host. Keys:
+`recording_enabled`, `recording_replay_buffer`, `recording_replay_buffer_minutes`,
+`recording_output_dir`. These settings take effect after Polaris restarts.
+
+The tab offers one **Recording policy** over the first two keys:
+
+| Policy | Keys | What it does |
+| --- | --- | --- |
+| **Off** (default) | `recording_enabled = disabled` | No replay buffer is kept. A signed-in host admin can still start a continuous file on purpose through the host recording API; Off does not block that. |
+| **Manual continuous** | `recording_enabled = enabled`, `recording_replay_buffer = disabled` | Choosing it does not start a file. A file is written only after a signed-in host admin starts one. |
+| **Replay buffer** | `recording_enabled = enabled`, `recording_replay_buffer = enabled` | Keeps the most recent video of the one eligible stream in memory. Nothing is written until a signed-in host admin saves it. |
+
+| Field | What it does |
+| --- | --- |
+| **Replay length (minutes)** (`recording_replay_buffer_minutes`) | 1 to 60 minutes, default 5, best effort: the buffer also stops at 128 MiB or 32,768 packets, whichever comes first, and always starts at a keyframe. |
+| **Output directory** (`recording_output_dir`) | Where saved files are written. Empty means the `recordings` folder in the Polaris data directory. |
+
+The settings page has no start, stop or save button, and choosing a policy or opening the tab
+never calls the recorder. Starting, stopping and saving stay host-admin requests to
+`/api/recording/start`, `/api/recording/stop` and `/api/recording/save-replay`.
+
+#### Device recording approval
+
+Each paired device can carry a stored **Approve recordings for this device** choice, edited in the
+device editor on the pairing page. It is a host admin's approval and nothing more:
+
+- No client can ask Polaris to record yet. The approval is stored for a later, separately
+  negotiated feature and changes nothing today.
+- It is separate from device permissions. No access preset (including Full Control), pairing,
+  re-pairing the same certificate, or a one-time PIN grants it, and it grants no launch, view,
+  input or command permission.
+- A temporary (guest) device cannot hold it. Making a device temporary clears it, and making it
+  permanent again does not bring it back.
+- Saved devices keep it across restarts; devices saved before the setting existed load with it off.
+
 ### AI and Encoder Profiles tabs
 
 The AI tab is covered under [AI provider settings](#ai-provider-settings); the encoder tabs under

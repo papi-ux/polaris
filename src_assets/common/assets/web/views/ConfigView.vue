@@ -275,6 +275,12 @@
           :platform="platform">
         </files>
 
+        <recording
+          v-if="shouldShowTab('recording')"
+          :config="config"
+          :platform="platform">
+        </recording>
+
         <advanced
           v-if="shouldShowTab('advanced')"
           :config="config"
@@ -305,6 +311,7 @@ import General from '../configs/tabs/General.vue'
 import Inputs from '../configs/tabs/Inputs.vue'
 import Network from '../configs/tabs/Network.vue'
 import Files from '../configs/tabs/Files.vue'
+import Recording from '../configs/tabs/Recording.vue'
 import Advanced from '../configs/tabs/Advanced.vue'
 import AudioVideo from '../configs/tabs/AudioVideo.vue'
 import AiOptimizer from '../configs/tabs/AiOptimizer.vue'
@@ -490,6 +497,20 @@ const tabs = ref([
       "pkey": "",
       "cert": "",
       "file_state": "",
+    },
+  },
+  {
+    id: "recording",
+    name: "Recording",
+    group: "host",
+    groupLabel: "Host & Runtime",
+    summary: "Experimental host-only raw video: the recording policy, replay length, and where files are written.",
+    searchAliases: ["replay buffer", "raw video", "record stream", "recording policy"],
+    options: {
+      "recording_enabled": "disabled",
+      "recording_replay_buffer": "disabled",
+      "recording_replay_buffer_minutes": 5,
+      "recording_output_dir": "",
     },
   },
   {

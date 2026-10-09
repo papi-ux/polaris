@@ -610,6 +610,14 @@
                       default="false"
                     />
                   </div>
+
+                  <!-- A stored host approval, kept apart from the permission presets and groups above. -->
+                  <RecordingApprovalToggle
+                    class="mt-4"
+                    :id-suffix="client.uuid"
+                    v-model:approved="client.editRecordingAuthorized"
+                    :guest="client.editTemporaryAuthorization === true"
+                  />
                 </section>
 
                 <section class="rounded-2xl border border-storm/20 bg-void/40 p-4">
@@ -988,6 +996,7 @@ import { computed, inject, nextTick, onUnmounted, ref, watch } from 'vue'
 import { validSnapshot } from '../spaces-access.js'
 import { useRoute, useRouter } from 'vue-router'
 import Checkbox from '../Checkbox.vue'
+import RecordingApprovalToggle from '../components/RecordingApprovalToggle.vue'
 import Skeleton from '../components/Skeleton.vue'
 import SelectableCard from '../components/SelectableCard.vue'
 import StatTile from '../components/StatTile.vue'
@@ -1625,6 +1634,7 @@ function editClient(client) {
   client.editAlwaysUseVirtualDisplay = client.always_use_virtual_display
   client.editCloseDesktopSteam = client.close_desktop_steam
   client.editTemporaryAuthorization = client.temporary_authorization
+  client.editRecordingAuthorized = client.recording_authorized === true
   client.editDisplayMode = client.display_mode
   client.edit_do = JSON.parse(JSON.stringify(client.do || []))
   client.edit_undo = JSON.parse(JSON.stringify(client.undo || []))
@@ -1653,6 +1663,7 @@ function cancelEdit(client) {
   client.editAlwaysUseVirtualDisplay = client.always_use_virtual_display
   client.editCloseDesktopSteam = client.close_desktop_steam
   client.editTemporaryAuthorization = client.temporary_authorization
+  client.editRecordingAuthorized = client.recording_authorized === true
   dismissSuggestion()
   nextTick(() => {
     lastFocusedElement?.focus?.()
