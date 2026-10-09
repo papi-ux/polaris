@@ -124,9 +124,10 @@ namespace stream_recorder {
   static std::optional<std::chrono::steady_clock::time_point> replay_last_accepted_keyframe;
   static window_limit_e replay_last_limit = window_limit_e::none;
 
-  // One save at a time. Taken with try_lock, never while holding `mutex`, so a request
-  // during a save is refused at once and no packet, status or lifecycle call waits for it.
-  static std::mutex save_mutex;
+  // One save at a time. Taken with a compare-exchange, never waited on, so a request during a
+  // save is refused at once and no packet, status or lifecycle call waits for it. Unlike a
+  // mutex, the owner of an admitted save may release it from any thread.
+  static std::atomic<bool> save_reserved {false};
   // Counted without any lock, so a busy refusal never waits on the recorder either.
   static std::atomic<std::uint64_t> saves_refused_busy {0};
 
@@ -763,19 +764,89 @@ namespace stream_recorder {
     return result.status == save_status_e::saved ? std::move(result.path) : std::string {};
   }
 
-  detail::save_result_t detail::save_replay_result_at(std::chrono::steady_clock::time_point now) {
-    save_result_t result;
-    std::unique_lock gate(save_mutex, std::try_to_lock);
-    if (!gate.owns_lock()) {
+  namespace {
+    /// Holds the save reservation taken by admission and releases it once, from any thread.
+    class save_reservation_t {
+    public:
+      save_reservation_t() noexcept = default;
+
+      static save_reservation_t taken() noexcept {
+        save_reservation_t reservation;
+        reservation.held_ = true;
+        return reservation;
+      }
+
+      save_reservation_t(save_reservation_t &&other) noexcept:
+          held_ {std::exchange(other.held_, false)} {}
+
+      save_reservation_t &operator=(save_reservation_t &&other) noexcept {
+        if (this != &other) {
+          release();
+          held_ = std::exchange(other.held_, false);
+        }
+        return *this;
+      }
+
+      save_reservation_t(const save_reservation_t &) = delete;
+      save_reservation_t &operator=(const save_reservation_t &) = delete;
+
+      ~save_reservation_t() {
+        release();
+      }
+
+    private:
+      void release() noexcept {
+        if (!std::exchange(held_, false)) {
+          return;
+        }
+#ifdef POLARIS_TESTS
+        if (save_hooks.before_save_reservation_release) {
+          save_hooks.before_save_reservation_release();
+        }
+#endif
+        save_reserved.store(false, std::memory_order_release);
+      }
+
+      bool held_ = false;
+    };
+  }  // namespace
+
+  /// What an admitted save owns. Members are destroyed in reverse order: the lease (payload
+  /// references, then accounting under the recorder lock) before the reservation.
+  struct detail::admitted_save_t::state_t {
+    save_reservation_t reservation;
+    snapshot_lease_t lease;
+  };
+
+  detail::admitted_save_t::admitted_save_t() noexcept = default;
+  detail::admitted_save_t::admitted_save_t(admitted_save_t &&other) noexcept = default;
+  detail::admitted_save_t &detail::admitted_save_t::operator=(admitted_save_t &&other) noexcept = default;
+  detail::admitted_save_t::~admitted_save_t() = default;
+
+  detail::admitted_save_t::admitted_save_t(std::unique_ptr<state_t> state) noexcept:
+      state_ {std::move(state)} {}
+
+  detail::admitted_save_t::operator bool() const noexcept {
+    return state_ != nullptr;
+  }
+
+  detail::save_admission_t detail::admit_replay_save(std::chrono::steady_clock::time_point now) {
+    save_admission_t admission;
+    auto &result = admission.result;
+    bool expected = false;
+    if (!save_reserved.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
       // Refused at once: no recorder lock, no waiting on the running save.
       saves_refused_busy.fetch_add(1, std::memory_order_relaxed);
       result.status = save_status_e::busy;
       BOOST_LOG(warning) << "stream_recorder: a replay save is already running"sv;
-      return result;
+      return admission;
     }
+    // Owns the reservation on every path out of admission until an admitted state takes it.
+    auto reservation = save_reservation_t::taken();
 
-    // Declared after the gate, so it is released (payloads, accounting) before the gate opens.
-    snapshot_lease_t lease;
+    // Declared after the reservation and outside the locked scope: on any refusal or failure
+    // the state is destroyed after the recorder lock is released, and before the reservation.
+    std::unique_ptr<admitted_save_t::state_t> state;
     try {
       std::lock_guard lock(mutex);
       if (cfg.mode != mode_t::replay_buffer) {
@@ -787,8 +858,15 @@ namespace stream_recorder {
             replay_video_format > 3) {
           result.status = save_status_e::empty;
         } else {
+          // An eligible run: allocate its capture state, then capture, before any accounting.
+#ifdef POLARIS_TESTS
+          if (save_hooks.before_admission_allocation) {
+            save_hooks.before_admission_allocation();
+          }
+#endif
+          state = std::make_unique<admitted_save_t::state_t>();
           // Pointers and metadata only: the payload bytes are shared, not copied.
-          auto &snapshot = lease.snapshot;
+          auto &snapshot = state->lease.snapshot;
           snapshot.payloads.reserve(replay_buffer.size());
           for (const auto &packet : replay_buffer) {
             snapshot.payloads.push_back(packet.data);
@@ -798,11 +876,12 @@ namespace stream_recorder {
             save_hooks.after_snapshot_payloads();
           }
 #endif
+          snapshot.output_dir = cfg.output_dir;
           snapshot.bytes = replay_bytes;
           snapshot.video_format = replay_video_format;
           snapshot.generation = replay_selected;
-          snapshot.output_dir = cfg.output_dir;
           snapshot.wall_time = std::chrono::system_clock::now();
+          // From here nothing throws: the accounting becomes active with its owner in place.
           snapshot_active = true;
           snapshot_first_sequence = replay_buffer.front().sequence;
           snapshot_last_sequence = replay_buffer.back().sequence;
@@ -813,22 +892,41 @@ namespace stream_recorder {
           snapshot_span = replay_buffer.back().timestamp - replay_buffer.front().timestamp;
           snapshot.keyframes = snapshot_keyframes;
           snapshot.span = snapshot_span;
-          lease.admitted = true;
+          state->lease.admitted = true;
           result.admitted = true;
+          result.packets = snapshot.payloads.size();
+          result.bytes = snapshot.bytes;
+          result.video_format = snapshot.video_format;
+          result.generation = snapshot.generation;
+          result.keyframes = snapshot.keyframes;
+          result.span = snapshot.span;
         }
       }
     } catch (...) {
-      // Admission allocations precede all accounting and I/O. An incomplete snapshot
-      // releases its references as the lease unwinds and cannot escape the admin request.
+      // Every throwing step precedes the accounting, so nothing was admitted. The lock is
+      // released by unwinding; the unadmitted state, then the reservation, release here.
+      result = save_result_t {};
+      result.status = save_status_e::storage_error;
+      return admission;
+    }
+    if (!state) {
+      BOOST_LOG(warning) << (result.status == save_status_e::disabled ? "stream_recorder: replay buffer is not enabled"sv :
+                                                                         "stream_recorder: replay buffer is empty"sv);
+      return admission;
+    }
+    state->reservation = std::move(reservation);
+    admission.save = admitted_save_t {std::move(state)};
+    return admission;
+  }
+
+  detail::save_result_t detail::complete_replay_save(admitted_save_t save) {
+    save_result_t result;
+    if (!save) {
       result.status = save_status_e::storage_error;
       return result;
     }
-    if (!lease.admitted) {
-      BOOST_LOG(warning) << (result.status == save_status_e::disabled ? "stream_recorder: replay buffer is not enabled"sv :
-                                                                         "stream_recorder: replay buffer is empty"sv);
-      return result;
-    }
-
+    auto &lease = save.state_->lease;
+    result.admitted = true;
     result.packets = lease.snapshot.payloads.size();
     result.bytes = lease.snapshot.bytes;
     result.video_format = lease.snapshot.video_format;
@@ -844,9 +942,12 @@ namespace stream_recorder {
       result.status = save_status_e::storage_error;
       result.path.clear();
     }
+    const bool published = lease.published;
+    // Release the snapshot and accounting, then the reservation, before reporting.
+    save = admitted_save_t {};
     // Reporting must not change the outcome: a published file stays a reported success.
     try {
-      if (lease.published) {
+      if (published) {
         if (staging_left) {
           BOOST_LOG(warning) << "stream_recorder: published replay, but could not remove its staging link"sv;
         }
@@ -858,6 +959,14 @@ namespace stream_recorder {
     } catch (...) {
     }
     return result;
+  }
+
+  detail::save_result_t detail::save_replay_result_at(std::chrono::steady_clock::time_point now) {
+    auto admission = admit_replay_save(now);
+    if (!admission.save) {
+      return std::move(admission.result);
+    }
+    return complete_replay_save(std::move(admission.save));
   }
 
 #ifdef POLARIS_TESTS

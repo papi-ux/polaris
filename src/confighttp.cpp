@@ -6412,6 +6412,7 @@ namespace confighttp {
 
   namespace {
     using cover_post_t = std::function<void(std::function<void()>)>;
+    using recording_save_workers_t = cover_lookup::workers_t;
     using cover_work_t = std::function<std::function<void()>(const std::shared_ptr<cover_lookup::completion_t> &)>;
     struct cover_reply_t {
       resp_https_t response;
@@ -6422,6 +6423,9 @@ namespace confighttp {
 #ifdef POLARIS_TESTS
     cover_post_t cover_post_override;
     std::function<void()> cover_commit_observer;
+    cover_post_t recording_post_override;
+    std::function<void()> recording_commit_observer;
+    std::function<void()> recording_before_launch;
 #endif
     SimpleWeb::CaseInsensitiveMultimap cover_headers() {
       SimpleWeb::CaseInsensitiveMultimap headers;
@@ -6437,6 +6441,17 @@ namespace confighttp {
       return [executor](std::function<void()> completion) {
         auto io = executor.lock();
         if (!io) throw std::runtime_error("Cover executor unavailable");
+        boost::asio::post(*io, std::move(completion));
+      };
+    }
+    cover_post_t recording_post_for(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &server) {
+#ifdef POLARIS_TESTS
+      if (recording_post_override) return recording_post_override;
+#endif
+      const std::weak_ptr executor {server.io_service};
+      return [executor](std::function<void()> completion) {
+        auto io = executor.lock();
+        if (!io) throw std::runtime_error("Recording executor unavailable");
         boost::asio::post(*io, std::move(completion));
       };
     }
@@ -9420,13 +9435,53 @@ namespace confighttp {
    *
    * @api_examples{/api/recording/save-replay| POST| null}
    */
-  void saveReplay(resp_https_t response, req_https_t request) {
+  void saveReplay(resp_https_t response, req_https_t request,
+                  recording_save_workers_t &workers, https_server_t &server) {
     if (!authenticate(response, request))
       return;
 
     print_req(request);
 
-    send_response(response, build_save_replay_json(stream_recorder::save_replay_result()));
+    // Authorization and capture happen on this request's executor. Already
+    // admitted storage finishes its captured run even if credentials change;
+    // checking auth after publication could only change the reply, not the save.
+    auto admission = stream_recorder::detail::admit_replay_save(std::chrono::steady_clock::now());
+    if (!admission.save) {
+      send_response(response, build_save_replay_json(admission.result));
+      return;
+    }
+    auto failure = admission.result;
+    failure.status = stream_recorder::detail::save_status_e::storage_error;
+    failure.path.clear();
+    std::shared_ptr<stream_recorder::detail::admitted_save_t> owned;
+    try {
+      owned = std::make_shared<stream_recorder::detail::admitted_save_t>(std::move(admission.save));
+      const auto headers = cover_headers();
+      auto post = recording_post_for(server);
+#ifdef POLARIS_TESTS
+      const auto observer = recording_commit_observer;
+#else
+      const std::function<void()> observer;
+#endif
+      const auto accepted = workers.submit_completion(
+        [owned, response, post = std::move(post), headers, observer](const auto &ticket) {
+          auto result = stream_recorder::detail::complete_replay_save(std::move(*owned));
+          // Storage has finished and released its lease/reservation. A failed
+          // post, serialization or disconnected client cannot undo publication
+          // or truthfully turn this saved result into a storage failure.
+          ticket->handoff([response, result = std::move(result), headers, observer] {
+            if (observer) observer();
+            response->write(build_save_replay_json(result).dump(), headers);
+          }, post);
+        });
+      if (accepted == cover_lookup::admission_e::accepted) return;
+    } catch (...) {
+      // Bounded worker submission is transactional: exceptions precede launch.
+    }
+    // Release captured accounting before replying, including make_shared failure.
+    owned.reset();
+    admission.save = {};
+    send_response(response, build_save_replay_json(failure));
   }
 
   /**
@@ -9594,10 +9649,13 @@ namespace confighttp {
    * @brief Register the host-admin recording routes: start() and the test listener share this.
    * Mutating routes keep the CSRF wrapper; every handler authenticates itself.
    */
-  static void register_recording_routes(https_server_t &server) {
+  static void register_recording_routes(https_server_t &server, recording_save_workers_t &workers) {
     server.resource["^/api/recording/start$"]["POST"] = withCsrf(startRecording);
     server.resource["^/api/recording/stop$"]["POST"] = withCsrf(stopRecording);
-    server.resource["^/api/recording/save-replay$"]["POST"] = withCsrf(saveReplay);
+    server.resource["^/api/recording/save-replay$"]["POST"] = withCsrf(
+      [&server, &workers](resp_https_t response, req_https_t request) {
+        saveReplay(std::move(response), std::move(request), workers, server);
+      });
     server.resource["^/api/recording/status$"]["GET"] = getRecordingStatus;
   }
 
@@ -10746,8 +10804,13 @@ namespace confighttp {
     https_server_t server {cert, key};
     server.config.address = "127.0.0.1";
     server.config.port = 0;
-    register_recording_routes(server);
-    server.start([&](unsigned short port) { ready(port, [&]() { server.stop(); }); });
+    recording_save_workers_t recording_saves; // Drained before the server is destroyed.
+    recording_saves.set_before_launch_for_tests(recording_before_launch);
+    register_recording_routes(server, recording_saves);
+    server.start([&](unsigned short port) {
+      ready(port, [&]() { recording_saves.stop_accepting(); server.stop(); });
+    });
+    recording_saves.shutdown();
   }
 
   void run_console_app_routes_for_tests(
@@ -10794,6 +10857,7 @@ namespace confighttp {
     auto address_family = net::af_from_enum_string(config::sunshine.address_family);
     cover_lookup::workers_t cover_lookups;
     https_server_t server { config::nvhttp.cert, config::nvhttp.pkey };
+    recording_save_workers_t recording_saves; // Owns deferred responses while server lives.
     // Declared after the server so it is destroyed first; stopped explicitly below as well.
     tailscale_connection::status_collector_t network_collector;
 
@@ -11059,7 +11123,7 @@ namespace confighttp {
     server.resource["^/api/support/network-path-probe$"]["GET"] = getNetworkPathProbe;
     server.resource["^/api/host/power$"]["GET"] = getHostPower;
     server.resource["^/api/support/gamescope-helper$"]["GET"] = getGamescopeHelperProbe;
-    register_recording_routes(server);
+    register_recording_routes(server, recording_saves);
 #ifdef __linux__
     server.resource["^/api/browser-stream/status$"]["GET"] = getBrowserStreamStatus;
     server.resource["^/api/browser-stream/session/start$"]["POST"] = withCsrf(postBrowserStreamStart);
@@ -11152,6 +11216,7 @@ namespace confighttp {
     shutdown_event->view();
 
     cover_lookups.stop_accepting();
+    recording_saves.stop_accepting();
     server.stop();
     wait_for_background_tasks();
 
@@ -11159,6 +11224,7 @@ namespace confighttp {
     // Any network-evidence request still waiting is answered unknown before the server goes.
     network_collector.stop();
     cover_lookups.shutdown();
+    recording_saves.shutdown();
   }
   static std::atomic<session_state_e> s_session_state{session_state_e::idle};
 
@@ -11226,6 +11292,9 @@ namespace confighttp {
   }
 
   void set_cover_post_for_tests(cover_post_t post) { cover_post_override = std::move(post); }
+  void set_recording_post_for_tests(cover_post_t post) { recording_post_override = std::move(post); }
+  void set_recording_commit_observer_for_tests(std::function<void()> observer) { recording_commit_observer = std::move(observer); }
+  void set_recording_before_launch_for_tests(std::function<void()> hook) { recording_before_launch = std::move(hook); }
   void set_cover_commit_observer_for_tests(std::function<void()> observer) { cover_commit_observer = std::move(observer); }
   bool revoke_cover_cookie_for_tests(const std::string &cookie) { return invalidate_web_session_cookie(cookie); }
   void set_cover_csrf_for_tests(std::string csrf) { csrfToken = std::move(csrf); }
