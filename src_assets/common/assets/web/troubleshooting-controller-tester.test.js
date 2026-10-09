@@ -108,6 +108,33 @@ describe('controller tester in the production troubleshooting view', () => {
     expect(hint().text()).toBe(en.troubleshooting.controller_rumble_detect_first)
   })
 
+  it('detects a later controller without needing a browser connection event', async () => {
+    await mountView()
+    pads = [gamepad(true)]
+    await detect().trigger('click')
+    await flushPromises()
+    expect(rumble().attributes('disabled')).toBeUndefined()
+  })
+
+  it('uses a capable controller beyond the first slot and retires it when another remains', async () => {
+    await mountView()
+    pads = [gamepad(false), { ...gamepad(true), index: 1 }]
+    window.dispatchEvent(new Event('gamepadconnected'))
+    await detect().trigger('click')
+    await flushPromises()
+    expect(rumble().attributes('disabled')).toBeUndefined()
+    await rumble().trigger('click')
+    expect(pads[1].vibrationActuator.playEffect).toHaveBeenCalledTimes(1)
+    pads = [pads[0]]
+    window.dispatchEvent(new Event('gamepaddisconnected'))
+    await flushPromises()
+    expect(rumble().attributes('disabled')).toBeDefined()
+    expect(hint().text()).toBe(en.troubleshooting.controller_rumble_detect_first)
+    await detect().trigger('click')
+    await flushPromises()
+    expect(hint().text()).toBe(en.troubleshooting.controller_rumble_unsupported)
+  })
+
   it('stops listening for controllers when the page closes', async () => {
     const removed = vi.spyOn(window, 'removeEventListener')
     await mountView()

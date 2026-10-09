@@ -775,8 +775,8 @@ function readBrowserGamepads() {
 const browserGamepads = ref(readBrowserGamepads())
 function refreshBrowserGamepads() {
   browserGamepads.value = readBrowserGamepads()
-  // A controller that went away can no longer be pulsed; ask for Detect again.
-  if (!browserGamepads.value.length) controllerRumbleSupported.value = null
+  // Device changes retire the detected capability, even when another controller remains.
+  controllerRumbleSupported.value = null
 }
 window.addEventListener('gamepadconnected', refreshBrowserGamepads)
 window.addEventListener('gamepaddisconnected', refreshBrowserGamepads)
@@ -817,7 +817,8 @@ function refreshControllerSnapshot() {
   refreshBrowserGamepads()
   const pads = browserGamepads.value
   if (pads.length) {
-    controllerRumbleSupported.value = Boolean(navigator.getGamepads?.()[pads[0].index]?.vibrationActuator)
+    controllerRumbleSupported.value = Array.from(navigator.getGamepads?.() || [])
+      .some((pad) => typeof pad?.vibrationActuator?.playEffect === 'function')
     recordControllerEvent('Browser gamepad visible', pads[0].index + 1)
   } else {
     recordControllerEvent('Manual button sample', 1)
@@ -832,7 +833,6 @@ async function pulseControllerHaptics() {
     strongMagnitude: 0.35,
     weakMagnitude: 0.25,
   })
-  controllerRumbleSupported.value = true
   recordControllerEvent('Optional rumble pulse', pad.index + 1)
 }
 
