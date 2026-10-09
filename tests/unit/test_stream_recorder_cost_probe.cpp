@@ -364,11 +364,13 @@ namespace {
       invariants.push_back(json_object_t {}.str("name", name).flag("passed", passed).dump());
     }
 
-    json_object_t subrecord(std::string_view name, std::string_view measures, const std::vector<std::uint64_t> &ns) {
+    /// A subrecord with the warm-up it actually ran: the case's configured warm-up unless given.
+    json_object_t subrecord(std::string_view name, std::string_view measures, const std::vector<std::uint64_t> &ns,
+                            std::optional<std::uint64_t> warmup_run = std::nullopt) {
       return json_object_t {}
         .str("name", name)
         .str("measures", measures)
-        .num("warmup", warmup)
+        .num("warmup", warmup_run.value_or(warmup))
         .num("samples", ns.size())
         .raw("ns", json_numbers(ns));
     }
@@ -450,13 +452,14 @@ namespace {
       stream_recorder::push_packet(frame.bytes.data(), frame.bytes.size(), true, frame.keyframe, 0, generation, k_hevc);
     }
 
-    /// Fill and time the replay buffer with the synthetic train at explicit frame times.
-    std::vector<std::uint64_t> fill_replay(std::uint64_t generation, std::size_t count, clock_type::time_point base,
-                                           bool timed) {
+    /// Push frames [first, first + count) of the one synthetic train at their own frame times
+    /// (frame n arrives at base + n frame intervals), timing each push when asked.
+    std::vector<std::uint64_t> fill_replay(std::uint64_t generation, std::size_t first, std::size_t count,
+                                           clock_type::time_point base, bool timed) {
       std::vector<std::uint64_t> ns;
-      for (std::size_t i = 0; i < count; ++i) {
-        const auto frame = synthetic_frame(i);
-        const auto at = base + std::chrono::nanoseconds(i * k_frame_interval_ns);
+      for (std::size_t n = first; n < first + count; ++n) {
+        const auto frame = synthetic_frame(n);
+        const auto at = base + std::chrono::nanoseconds(n * k_frame_interval_ns);
         const auto elapsed = timed_ns([&] { push_at(generation, frame, at); });
         if (timed) {
           ns.push_back(elapsed);
@@ -526,9 +529,9 @@ TEST_F(StreamRecorderCostProbe, ReplayAdmission) {
   publish(true, true);
   stream_recorder::session_started(7002, true, k_hevc);
   const auto base = clock_type::now();
-  fill_replay(7002, warmup, base, false);
-  const auto ns = fill_replay(7002, samples, base + std::chrono::nanoseconds(warmup * k_frame_interval_ns), true);
-  // The warm-up frames are part of the same run: the window is one continuous train.
+  // Warm-up frames 0..warmup-1, then the timed frames continue the same train from frame `warmup`.
+  fill_replay(7002, 0, warmup, base, false);
+  const auto ns = fill_replay(7002, warmup, samples, base, true);
   const auto replay = stream_recorder::detail::replay_stats_at(base + std::chrono::nanoseconds((warmup + samples) * k_frame_interval_ns));
   invariant("every frame is held or trimmed exactly once", replay.packets + replay.trimmed == warmup + samples);
   invariant("held bytes stay within the cap", replay.bytes <= replay.max_bytes && replay.packets <= replay.max_packets);
@@ -652,13 +655,32 @@ TEST_F(StreamRecorderCostProbe, LockContention) {
   constexpr int readers = 2;
   const auto total = warmup + samples;
   std::vector<std::uint64_t> producer_ns;
+  producer_ns.reserve(samples);
   std::vector<std::vector<std::uint64_t>> reader_ns(readers);
+  for (auto &ns : reader_ns) {
+    ns.reserve(samples);  // No allocation inside the reader threads
+  }
   std::atomic<std::uint64_t> try_lock_failures {0};
-  std::latch start {readers + 1};
+  std::latch start {1};  // Opened once by this thread; readers wait on it
   const auto base = clock_type::now();
+  // Declared after everything the readers use, so it is destroyed (joining them) first. The opener
+  // is declared after it, so it opens the latch before any join, even when a launch throws.
+  std::vector<std::jthread> reader_threads;
+  struct opener_t {
+    std::latch &latch;
+    bool opened = false;
+    void open() {
+      if (!opened) {
+        opened = true;
+        latch.count_down();
+      }
+    }
+    ~opener_t() { open(); }
+  } opener {start};
+  reader_threads.reserve(readers);
   for (int r = 0; r < readers; ++r) {
-    threads.emplace_back([&, r] {
-      start.arrive_and_wait();
+    reader_threads.emplace_back([&, r] {
+      start.wait();
       for (std::uint64_t i = 0; i < total; ++i) {
         const auto elapsed = timed_ns([] { (void) stream_recorder::recorder_status(); });
         if (!stream_recorder::detail::recorder_mutex_try_lock_for_tests()) {
@@ -670,7 +692,7 @@ TEST_F(StreamRecorderCostProbe, LockContention) {
       }
     });
   }
-  start.arrive_and_wait();
+  opener.open();
   for (std::uint64_t i = 0; i < total; ++i) {
     const auto frame = synthetic_frame(i);
     const auto at = base + std::chrono::nanoseconds(i * k_frame_interval_ns);
@@ -679,7 +701,7 @@ TEST_F(StreamRecorderCostProbe, LockContention) {
       producer_ns.push_back(elapsed);
     }
   }
-  threads.clear();  // Joins the readers: every reader finished its fixed number of calls.
+  reader_threads.clear();  // Joins the readers: every reader finished its fixed number of calls.
   const auto replay = stream_recorder::detail::replay_stats_at(base + std::chrono::nanoseconds(total * k_frame_interval_ns));
   invariant("every producer frame is held or trimmed exactly once", replay.packets + replay.trimmed == total);
   invariant("nothing refused under contention", replay.refused_invalid == 0 && replay.refused_unselected == 0);
@@ -689,7 +711,7 @@ TEST_F(StreamRecorderCostProbe, LockContention) {
   }
   write_record(subrecords, json_object_t {}
                              .num("readers", readers).num("tryLockFailures", try_lock_failures.load())
-                             .str("overlapNote", "readers and producer start together; overlap is not guaranteed for every call"));
+                             .str("overlapNote", "readers start when the producer opens the latch; overlap is not guaranteed for every call"));
 }
 
 // 5. Keyframe reservation: unwired production shape, a fixture channel, and fixture dispatch.
@@ -705,24 +727,33 @@ TEST_F(StreamRecorderCostProbe, KeyframeReservation) {
   const auto keyframe = synthetic_frame(0);
   const auto dependent = synthetic_frame(1);
 
+  // Every timed push below is the production push_packet(); the storage-free writer is drained,
+  // untimed, before the next frame, so no measurement includes the writer or a full queue.
+  auto push_drained = [](std::uint64_t generation, const frame_t &frame) {
+    const auto elapsed = timed_ns([&] { push_now(generation, frame); });
+    EXPECT_TRUE(stream_recorder::detail::wait_continuous_drained_for_tests(k_bounded));
+    return elapsed;
+  };
+  constexpr std::string_view drained = "; production push_packet() timed, storage-free writer drained untimed before the next frame";
+
   // (a) No channel: production registers none, so keyframe_reserve returns after its early checks.
   storage_free();
   stream_recorder::session_started(7006, true, k_hevc);
   stream_recorder::start_recording();
   ASSERT_TRUE(stream_recorder::is_recording());
-  auto base = clock_type::now() + 1h;
-  push_at(7006, keyframe, base);
+  push_drained(7006, keyframe);
   std::vector<std::uint64_t> unwired_ns;
   for (std::uint64_t i = 0; i < warmup + samples; ++i) {
-    const auto at = base + std::chrono::nanoseconds((i + 1) * k_frame_interval_ns);
-    const auto elapsed = timed_ns([&] { push_at(7006, dependent, at); });
+    const auto elapsed = push_drained(7006, dependent);
     if (i >= warmup) {
       unwired_ns.push_back(elapsed);
     }
   }
   auto stats = stream_recorder::detail::keyframe_stats_for_tests();
   invariant("unwired: no reservation", stats.reservations == 0 && stats.attempted == 0);
-  subrecords.push_back(subrecord("unwired_owner_push", "owner frames in the writing state with no channel (production shape: early checks, no writer.lock)", unwired_ns).dump());
+  invariant("unwired: every frame admitted, none dropped",
+            stream_recorder::recorder_status().continuous.dropped_backpressure == 0);
+  subrecords.push_back(subrecord("unwired_owner_push", std::string {"owner frames in the writing state with no channel (production shape: early checks, no writer.lock)"} + std::string {drained}, unwired_ns).dump());
   stream_recorder::stop_recording();
   stream_recorder::detail::reset_replay_for_tests();
 
@@ -736,12 +767,10 @@ TEST_F(StreamRecorderCostProbe, KeyframeReservation) {
   stream_recorder::start_recording();
   ASSERT_TRUE(stream_recorder::is_recording());
   const bool start_request = event->try_pop();  // A file bound at start asks once
-  base = clock_type::now() + 1h;
-  push_at(7007, keyframe, base);
+  push_drained(7007, keyframe);
   std::vector<std::uint64_t> wired_ns;
   for (std::uint64_t i = 0; i < warmup + samples; ++i) {
-    const auto at = base + std::chrono::nanoseconds((i + 1) * k_frame_interval_ns);
-    const auto elapsed = timed_ns([&] { push_at(7007, dependent, at); });
+    const auto elapsed = push_drained(7007, dependent);
     if (i >= warmup) {
       wired_ns.push_back(elapsed);
     }
@@ -749,18 +778,18 @@ TEST_F(StreamRecorderCostProbe, KeyframeReservation) {
   stats = stream_recorder::detail::keyframe_stats_for_tests();
   const auto before_dispatch = stats.attempted;
   invariant("fixture channel: writing frames reserve nothing", stats.reservations == before_dispatch && !event->peek());
-  subrecords.push_back(subrecord("fixture_channel_owner_push", "owner frames in the writing state with a fixture channel (writer.lock per frame)", wired_ns).dump());
+  invariant("fixture channel: every frame admitted, none dropped",
+            stream_recorder::recorder_status().continuous.dropped_backpressure == 0);
+  subrecords.push_back(subrecord("fixture_channel_owner_push", std::string {"owner frames in the writing state with a fixture channel (writer.lock per frame)"} + std::string {drained}, wired_ns).dump());
 
-  // (c) Fixture dispatch: a lost frame reserves and raises the fixture event, after the lock.
+  // (c) Fixture dispatch: each recovery keyframe is admitted and drained untimed, then one lost
+  // frame is timed: its reservation and the raise of the fixture event, after the lock.
   std::vector<std::uint64_t> dispatch_ns;
   std::uint64_t latched = 0;
-  auto at = base + std::chrono::nanoseconds((warmup + samples + 1) * k_frame_interval_ns);
   for (std::uint64_t i = 0; i < warmup + samples; ++i) {
-    at += 2ms;
-    push_at(7007, keyframe, at);  // Recovery ends: the next loss may ask again at once
-    at += 1ms;
-    const auto elapsed = timed_ns([&] {
-      stream_recorder::detail::push_packet_at(nullptr, 0, true, false, 0, 7007, k_hevc, at);
+    push_drained(7007, keyframe);  // Recovery ends: the next loss may ask again at once
+    const auto elapsed = timed_ns([] {
+      stream_recorder::push_packet(nullptr, 0, true, false, 0, 7007, k_hevc);
     });
     latched += event->try_pop() ? 1 : 0;
     if (i >= warmup) {
@@ -771,7 +800,7 @@ TEST_F(StreamRecorderCostProbe, KeyframeReservation) {
   invariant("fixture dispatch: one attempted raise per loss", stats.attempted - before_dispatch == warmup + samples &&
                                                                 latched == warmup + samples);
   invariant("fixture dispatch: nothing expired, stopped or fenced", stats.expired == 0 && stats.stopped == 0 && stats.fenced == 0);
-  subrecords.push_back(subrecord("fixture_dispatch", "a lost owner frame: reservation plus raise of the fixture mail event (no encoder exists)", dispatch_ns).dump());
+  subrecords.push_back(subrecord("fixture_dispatch", "a lost owner frame through production push_packet(): reservation plus raise of the fixture mail event (no encoder exists); each recovery keyframe admitted and drained untimed first", dispatch_ns).dump());
   outcomes.flag("startRequestLatched", start_request).num("reservations", stats.reservations)
     .num("attempted", stats.attempted).num("fixtureEventsLatched", latched)
     .str("note", "fixture mail events only; no live keyframe request reaches an encoder or host");
@@ -784,7 +813,7 @@ TEST_F(StreamRecorderCostProbe, ReplaySaveSnapshot) {
   stream_recorder::session_started(7008, true, k_hevc);
   const auto base = clock_type::now();
   const auto frames = warmup + samples;
-  fill_replay(7008, frames, base, false);
+  fill_replay(7008, 0, frames, base, false);
   const auto now = base + std::chrono::nanoseconds(frames * k_frame_interval_ns);
   const auto buffered = stream_recorder::detail::replay_stats_at(now);
   ASSERT_GT(buffered.packets, 0u);
@@ -825,7 +854,7 @@ TEST_F(StreamRecorderCostProbe, ReplaySaveSnapshot) {
   invariant("dropped admissions and completions are all accounted",
             after.saves_completed == completions && after.saves_failed == warmup + samples && !after.save_in_progress);
   write_record({subrecord("admit_snapshot", "admit_replay_save(): snapshot of the buffered run under the recorder lock, then dropped", admit_ns).dump(),
-                subrecord("complete_to_owned_dir", "complete_replay_save(): write, sync and publish into the fixture's temporary directory", complete_ns)
+                subrecord("complete_to_owned_dir", "complete_replay_save(): write, sync and publish into the fixture's temporary directory", complete_ns, 0)
                   .num("completions", completions).str("completionsNote", "min(samples, 4): real files are written").dump()},
                json_object_t {}
                  .num("bufferedPackets", buffered.packets).num("bufferedBytes", buffered.bytes)

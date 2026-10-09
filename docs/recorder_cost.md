@@ -57,11 +57,11 @@ The synthetic train is encoded video frame payloads, **before RTP fragmentation*
 | Case | Subrecords |
 |---|---|
 | `DisabledTap` | `production_tap_reads`: the exact `is_recording() \|\| current_mode() == replay_buffer` check `src/stream.cpp` makes per frame (it never calls `push_packet` while disabled). `direct_disabled_push`: a direct `push_packet` call on the disabled fast path, which the real tap never makes. |
-| `ReplayAdmission` | `replay_push`: replay-mode admission for the owner session (one owned payload copy per frame under the recorder lock). |
+| `ReplayAdmission` | `replay_push`: replay-mode admission for the owner session (one owned payload copy per frame under the recorder lock). The timed frames continue the warm-up's train: frame numbers, keyframe positions and arrival times run on from the warm-up frames. |
 | `ContinuousAdmission` | `storage_free_writer` and `native_tmp_writer`: admission with the writer drained between frames, so a drop can only be a defect. `throttled_writer`: a small queue (512 KiB, 8 slots) whose writer completes one write call per permit granted every 4 frames. It reports the real admitted, dropped and refused counts and the peak queue. |
 | `LockContention` | `producer_push` and `reader_0`/`reader_1`: replay admission while readers call `recorder_status()`, plus try-lock failures. Overlap is not guaranteed for every call. |
-| `KeyframeReservation` | `unwired_owner_push`: no channel, the production shape (early checks, no writer lock, no dispatch). `fixture_channel_owner_push`: a fixture channel, with the writer lock taken per owner frame. `fixture_dispatch`: a lost frame's reservation plus a raise of the fixture event. |
-| `ReplaySaveSnapshot` | `admit_snapshot`: snapshot admission under the lock, then dropped. `complete_to_owned_dir`: completion into the temporary directory (`min(samples, 4)` real files). |
+| `KeyframeReservation` | `unwired_owner_push`: no channel, the production shape (early checks, no writer lock, no dispatch). `fixture_channel_owner_push`: a fixture channel, with the writer lock taken per owner frame. `fixture_dispatch`: a lost frame's reservation plus a raise of the fixture event. **Controlled condition:** each times only the production `push_packet`. The storage-free writer is drained, untimed, before the next frame, and each recovery keyframe is admitted and drained untimed before the timed lost frame. No measurement includes the writer or a full queue, at any sample count. |
+| `ReplaySaveSnapshot` | `admit_snapshot`: snapshot admission under the lock, then dropped. `complete_to_owned_dir`: completion into the temporary directory (`min(samples, 4)` real files, recorded with `warmup: 0` because no completion warm-up runs). |
 
 ## Record schema (`schema: 1`)
 
@@ -70,7 +70,7 @@ The synthetic train is encoded video frame payloads, **before RTP fragmentation*
 - **Inputs and environment:** `train`, `machine` (uname, CPU model or an explicit `null` with a
   note, hardware concurrency, uid), `build` (compiler `__VERSION__`, `__cplusplus`, NDEBUG,
   optimized) and `runner`.
-- **Measurements:** `subrecords[]` (name, what it measures, warm-up, sample count, raw `ns[]`),
+- **Measurements:** `subrecords[]` (name, what it measures, the warm-up that subrecord actually ran, sample count, raw `ns[]`),
   `outcomes` and `invariants[]` (name, passed).
 - **Memory:** `ru_maxrss` before and after.
 
