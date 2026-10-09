@@ -538,6 +538,9 @@ namespace nvhttp {
    *                                       omitted preserves the current choice
    * @param[in]  close_desktop_steam  Whether a launch from this device may quit desktop
    *                                   Steam; omitted preserves the current choice
+   * @param[in]  recording_authorized  The host admin's stored recording approval; omitted
+   *                                    preserves it. It is always stored off for a temporary
+   *                                    (guest) authorization, whatever was asked.
    * 
    * @return     Whether the update is successful
    */
@@ -553,7 +556,8 @@ namespace nvhttp {
     const bool allow_client_commands,
     const bool always_use_virtual_display,
     const std::optional<bool> temporary_authorization = std::nullopt,
-    const std::optional<bool> close_desktop_steam = std::nullopt
+    const std::optional<bool> close_desktop_steam = std::nullopt,
+    const std::optional<bool> recording_authorized = std::nullopt
   );
 
   bool update_device_info(

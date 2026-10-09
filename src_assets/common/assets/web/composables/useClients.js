@@ -103,6 +103,18 @@ export function isSuppressed(perm, permission, suppressed_by) {
 }
 
 /**
+ * The stored recording approval to send with a device update. It is separate from the permission
+ * mask and its presets. A guest (temporary authorization) is always sent as not approved, which is
+ * also what the host stores; an editor that never loaded the field sends nothing, so the host keeps
+ * the stored choice.
+ */
+export function recordingAuthorizationUpdate(client) {
+  if (client.editTemporaryAuthorization === true) return { recording_authorized: false }
+  if (typeof client.editRecordingAuthorized !== 'boolean') return {}
+  return { recording_authorized: client.editRecordingAuthorized }
+}
+
+/**
  * Composable for client management — fetching, updating, pairing, disconnecting.
  *
  * @returns Reactive client list and management functions.
@@ -121,12 +133,15 @@ export function useClients() {
           clients.value = data.named_certs.map(({
             name, friendly_name, client_family, uuid, display_mode, perm, connected,
             paired_at, last_seen_at, do: _do, undo, allow_client_commands,
-            always_use_virtual_display, close_desktop_steam, enable_legacy_ordering, temporary_authorization
+            always_use_virtual_display, close_desktop_steam, enable_legacy_ordering, temporary_authorization,
+            recording_authorized
           }) => ({
             name, friendly_name, client_family, uuid, display_mode, perm: parseInt(perm, 10), connected,
             paired_at, last_seen_at, editing: false, wolSending: false, do: _do, undo,
             allow_client_commands, enable_legacy_ordering, always_use_virtual_display,
-            close_desktop_steam, temporary_authorization
+            close_desktop_steam, temporary_authorization,
+            // Only an explicit true from the host counts: an older host omits the field.
+            recording_authorized: recording_authorized === true
           }))
         } else {
           clients.value = []
@@ -146,6 +161,7 @@ export function useClients() {
       always_use_virtual_display: client.editAlwaysUseVirtualDisplay,
       close_desktop_steam: client.editCloseDesktopSteam,
       temporary_authorization: client.editTemporaryAuthorization,
+      ...recordingAuthorizationUpdate(client),
       perm: client.editPerm & permissionMapping._all,
       do: (client.edit_do || []).reduce((filtered, { cmd: _cmd, elevated }) => {
         const cmd = _cmd.trim()

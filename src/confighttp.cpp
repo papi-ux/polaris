@@ -4490,11 +4490,14 @@ namespace confighttp {
    *   "do": [ { "cmd": "<command>", "elevated": false }, ... ],
    *   "undo": [ { "cmd": "<command>", "elevated": false }, ... ],
    *   "perm": <uint32_t>,
-   *   "close_desktop_steam": true
+   *   "close_desktop_steam": true,
+   *   "recording_authorized": false
    * }
    * @endcode
    *
-   * Leaving out close_desktop_steam or temporary_authorization keeps the device's current value.
+   * Leaving out close_desktop_steam, temporary_authorization or recording_authorized keeps the
+   * device's current value. recording_authorized is a stored host approval only: no client can use
+   * it yet, and it is always stored off for a temporary (guest) authorization.
    */
   void updateClient(resp_https_t response, req_https_t request) {
     if (!validateContentType(response, request, "application/json") || !authenticate(response, request)) {
@@ -4523,6 +4526,10 @@ namespace confighttp {
       if (input_tree.contains("close_desktop_steam")) {
         close_desktop_steam = input_tree.at("close_desktop_steam").get<bool>();
       }
+      std::optional<bool> recording_authorized;
+      if (input_tree.contains("recording_authorized")) {
+        recording_authorized = input_tree.at("recording_authorized").get<bool>();
+      }
       auto do_cmds = nvhttp::extract_command_entries(input_tree, "do");
       auto undo_cmds = nvhttp::extract_command_entries(input_tree, "undo");
       auto perm = static_cast<crypto::PERM>(input_tree.value("perm", static_cast<uint32_t>(crypto::PERM::_no)) & static_cast<uint32_t>(crypto::PERM::_all));
@@ -4538,7 +4545,8 @@ namespace confighttp {
         allow_client_commands,
         always_use_virtual_display,
         temporary_authorization,
-        close_desktop_steam
+        close_desktop_steam,
+        recording_authorized
       );
       output_tree["status"] = result == nvhttp::client_mutation_result_t::success;
       if (result == nvhttp::client_mutation_result_t::not_found) {

@@ -107,6 +107,10 @@ namespace crypto {
   /// setting: off, so a launch closes desktop Steam only once someone has turned this on.
   inline constexpr bool close_desktop_steam_default = false;
 
+  /// What a device gets for recording_authorized when it pairs, re-pairs or is a guest, and when
+  /// its record predates the setting: off. Only a host admin turns it on, for a permanent device.
+  inline constexpr bool recording_authorized_default = false;
+
   struct named_cert_t {
     std::string name;
     std::string uuid;
@@ -135,6 +139,11 @@ namespace crypto {
     /// Steam app can start, instead of being refused. It stands in for the closeDesktopSteamForPrivate
     /// launch parameter, which a stock Moonlight cannot send.
     bool close_desktop_steam = close_desktop_steam_default;
+    /// A host admin's stored approval for this device to record. It is separate from `perm`, so no
+    /// permission preset, mask or pairing grants it, and nothing reads it yet: no client can ask
+    /// the host to record. Pairing (including re-pairing the same certificate) and guest
+    /// authorization always leave it off.
+    bool recording_authorized = recording_authorized_default;
     // Temporary authorizations are intentionally memory-only. They expire
     // after the device's final stream disconnect or when Polaris restarts.
     bool temporary_authorization = false;
