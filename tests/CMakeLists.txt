@@ -7,6 +7,12 @@ include_directories("${CMAKE_SOURCE_DIR}")
 
 enable_testing()
 option(BUILD_FULL_TESTS "Build the full Polaris test suite" OFF)
+# Report-only recorder cost probe (#357, docs/recorder_cost.md): off unless asked for, and only
+# where it can run, so an explicit request elsewhere fails instead of building nothing.
+option(POLARIS_ENABLE_RECORDER_COST_PROBE "Build the report-only recorder cost probe (Linux, full tests)" OFF)
+if(POLARIS_ENABLE_RECORDER_COST_PROBE AND NOT (BUILD_FULL_TESTS AND CMAKE_SYSTEM_NAME STREQUAL "Linux"))
+    message(FATAL_ERROR "POLARIS_ENABLE_RECORDER_COST_PROBE requires Linux and BUILD_FULL_TESTS=ON")
+endif()
 
 # Add GoogleTest directory to the project
 set(GTEST_SOURCE_DIR "${CMAKE_SOURCE_DIR}/third-party/googletest")
@@ -851,6 +857,25 @@ if (BUILD_FULL_TESTS)
         COMMAND test_polaris_stream --gtest_filter=StreamRecorderKeyframeRecoveryTests.*)
     set_tests_properties(polaris_recorder_keyframe_recovery PROPERTIES
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    if(POLARIS_ENABLE_RECORDER_COST_PROBE)
+        # Report-only recorder cost probe (#357, docs/recorder_cost.md), opted in above. Its own
+        # executable over the shared full runtime, so no required suite's binary changes. Each case
+        # creates one new JSON record in the directory below and fails if it already exists.
+        configure_polaris_full_test_target(test_polaris_recorder_cost
+            ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_cost_probe.cpp
+        )
+        if(NOT POLARIS_RECORDER_COST_SOURCE_SHA)
+            execute_process(COMMAND git rev-parse HEAD
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                OUTPUT_VARIABLE POLARIS_RECORDER_COST_SOURCE_SHA
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                ERROR_QUIET)
+        endif()
+        set(POLARIS_RECORDER_COST_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/recorder-cost)
+        file(MAKE_DIRECTORY ${POLARIS_RECORDER_COST_OUTPUT_DIR})
+        set_tests_properties(test_polaris_recorder_cost PROPERTIES
+            ENVIRONMENT "POLARIS_RECORDER_COST_OUTPUT_DIR=${POLARIS_RECORDER_COST_OUTPUT_DIR};POLARIS_RECORDER_COST_SOURCE_SHA=${POLARIS_RECORDER_COST_SOURCE_SHA}")
+    endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND POLARIS_ENABLE_PYROWAVE)
         # These exercise the actual encode loop with an in-memory display and
         # deterministic session refusals. No GPU, compositor or stream is opened.
