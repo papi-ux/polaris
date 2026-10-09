@@ -301,6 +301,8 @@ TEST_F(StreamRecorderProvenanceTests, AnUnsuppliedIndexIsDistinctFromARealIndexZ
 // Duplicates, regressions and gaps are marked against the adjacent retained entry and change nothing:
 // an encoder may drop frames, so a gap is evidence, not a cut.
 TEST_F(StreamRecorderProvenanceTests, IndexDuplicatesRegressionsAndGapsAreMarkedWithoutCuttingTheRun) {
+  const auto before = stats(t0);
+  ASSERT_EQ(before.last_window_limit, stream_recorder::window_limit_e::selection);
   const std::vector<std::int64_t> indices {10, 11, 11, 9, 12, 13, 20};
   for (std::size_t i = 0; i < indices.size(); ++i) {
     video(i == 0, t0 + std::chrono::milliseconds(i), bytes(4, static_cast<std::uint8_t>('a' + i)), provenance(indices[i]));
@@ -319,7 +321,7 @@ TEST_F(StreamRecorderProvenanceTests, IndexDuplicatesRegressionsAndGapsAreMarked
   EXPECT_EQ(s.packets, indices.size());
   EXPECT_EQ(s.discontinuities, 0u);
   EXPECT_EQ(s.trimmed, 0u);
-  EXPECT_EQ(s.last_window_limit, stream_recorder::window_limit_e::none);
+  EXPECT_EQ(s.last_window_limit, before.last_window_limit);
 }
 
 // Comparisons at both ends of int64 never overflow and still classify exactly.
