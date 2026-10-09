@@ -19,6 +19,13 @@
 #include <string>
 #include <vector>
 
+namespace safe {
+  template<class T>
+  class event_t;
+  template<class T>
+  class post_t;
+}  // namespace safe
+
 namespace stream_recorder {
 
   enum class mode_t {
@@ -191,6 +198,57 @@ namespace stream_recorder {
    * @param video_format The session's codec, or -1 when not known.
    */
   void session_started(std::uint64_t session_generation, bool replay_eligible, int video_format = -1);
+
+  /// What one keyframe request did. Only `attempted` reached an event, and even that is not an
+  /// acknowledgment: the event's raise() returns nothing, and only an admitted owner keyframe is
+  /// recovery.
+  enum class keyframe_outcome_e {
+    attempted,  ///< The session's event was alive and running when checked, and was raised
+    expired,    ///< Every owner of the session's event (and so its mail) had released it
+    stopped,    ///< The session's event was stopped
+    retired,    ///< The session ended; its channel no longer requests
+    fenced,     ///< A stop, overlap, owner end, new file or keyframe withdrew the request first
+  };
+
+  /**
+   * @brief A session's keyframe request channel: a weak reference to that session's IDR event.
+   *
+   * It never keeps the event, or the session mail that owns it, alive, and never takes a
+   * recorder lock. Requests are host recorder policy, not client permission.
+   */
+  class keyframe_channel_t {
+  public:
+    using event_post_t = safe::post_t<safe::event_t<bool>>;  ///< safe::mail_raw_t::event_t<bool>::element_type
+
+    explicit keyframe_channel_t(std::weak_ptr<event_post_t> event) noexcept;
+    keyframe_channel_t(const keyframe_channel_t &) = delete;
+    keyframe_channel_t &operator=(const keyframe_channel_t &) = delete;
+
+    /// Raise the session's event once if it is still alive and running.
+    keyframe_outcome_e request() noexcept;
+    /// After this returns, request() never raises again.
+    void retire() noexcept;
+
+  private:
+    friend struct keyframe_channel_access_t;
+    keyframe_outcome_e request(const std::function<void()> *after_raise) noexcept;
+
+    std::mutex lock_;
+    bool retired_ = false;
+    std::weak_ptr<event_post_t> event_;
+  };
+
+  /**
+   * @brief Register an admitted session together with its keyframe request channel.
+   *
+   * The same as the three-argument form, plus the channel (null is allowed and changes nothing).
+   * A known generation keeps the channel it already has: a repeated or metadata-only call never
+   * replaces, clears or retires it, and a different channel for a generation that already has
+   * one is rejected as a whole (no eligibility or codec change). Production registration stays
+   * the three-argument form, so no production session has a channel and no request is made.
+   */
+  void session_started(std::uint64_t session_generation, bool replay_eligible, int video_format,
+                       std::shared_ptr<keyframe_channel_t> channel);
 
   /**
    * @brief Unregister a session. Unknown or repeated generations change nothing.
@@ -480,6 +538,67 @@ namespace stream_recorder {
      * and recorded until stop_recording(). True when a writer thread was joined.
      */
     bool finish_continuous_writer_for_tests();
+
+    /// The identity of one keyframe request: the file it serves, its owner and its sequence.
+    struct keyframe_token_t {
+      std::uint64_t incarnation = 0;
+      std::uint64_t generation = 0;
+      std::uint64_t sequence = 0;
+      bool operator==(const keyframe_token_t &) const = default;
+    };
+
+    /**
+     * Diagnostic-only keyframe request state (tests only; no route or JSON exposes it).
+     * Per-file fields reset at each start_recording commit and stay readable after stop until
+     * the next start. Process totals are zeroed only by reset_replay_for_tests(). The two
+     * monotonic counters never decrease, not even across reset_replay_for_tests().
+     */
+    struct keyframe_stats_t {
+      std::uint64_t file_incarnation = 0;  ///< 0 while no file is open, or when incarnations ran out
+      bool awaiting = false;               ///< The bound owner's file waits for a keyframe
+      bool keyframe_exceeds_queue = false;  ///< An owner keyframe was larger than the whole queue
+      std::optional<keyframe_token_t> in_flight;   ///< The one reservation not yet completed
+      std::optional<keyframe_token_t> authorized;  ///< The one dispatch still allowed to raise
+      std::optional<std::chrono::steady_clock::time_point> last_request_at;  ///< Rate anchor
+      std::size_t last_keyframe_bytes = 0;  ///< Size of this file's last admitted owner keyframe
+      std::uint64_t reservations = 0;
+      std::uint64_t attempted = 0;
+      std::uint64_t expired = 0;
+      std::uint64_t stopped = 0;
+      std::uint64_t retired = 0;
+      std::uint64_t fenced = 0;
+      std::uint64_t refused_rate = 0;
+      std::uint64_t refused_writer_unavailable = 0;
+      std::uint64_t refused_no_slot = 0;
+      std::uint64_t refused_queue_sequence_exhausted = 0;
+      std::uint64_t refused_bytes = 0;
+      std::uint64_t refused_request_sequence_exhausted = 0;
+      std::uint64_t keyframe_stale_completions_total = 0;
+      std::uint64_t keyframe_registration_conflicts = 0;
+      std::uint64_t continuous_incarnation = 0;
+      std::uint64_t keyframe_request_sequence = 0;
+    };
+    keyframe_stats_t keyframe_stats_for_tests();
+
+    /**
+     * Keyframe request seams for tests: they only pause or observe a request, never change it.
+     * before_dispatch runs after the recorder lock is released and before the request gate;
+     * after_raise runs inside the real request, right after the event was raised, while the
+     * request gate is held; after_dispatch runs with no lock held. None may call a recorder
+     * function except after_raise and after_dispatch, which run with no recorder lock.
+     */
+    struct keyframe_hooks_t {
+      std::function<void(const keyframe_token_t &)> before_dispatch;
+      std::function<void()> after_raise;
+      std::function<void(const keyframe_token_t &, keyframe_outcome_e)> after_dispatch;
+    };
+    void set_keyframe_hooks_for_tests(keyframe_hooks_t hooks);
+    /// Raise the monotonic counters to at least these values; never lowers them.
+    void set_keyframe_counters_for_tests(std::uint64_t incarnation_floor, std::uint64_t sequence_floor);
+    /// Set the open file's queue sequence (a queue counter, not ownership); false when no file is open.
+    bool set_continuous_next_sequence_for_tests(std::uint64_t value);
+    /// True when the recorder lock was free (taken and released at once, never waited for).
+    bool recorder_mutex_try_lock_for_tests();
 #endif
   }  // namespace detail
 

@@ -339,6 +339,7 @@ set(TEST_STREAM_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_async.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_continuous.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_continuous_async.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_keyframe_recovery.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_packet_owner.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_packet_session.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_live_tuning.cpp
@@ -843,6 +844,11 @@ if (BUILD_FULL_TESTS)
     add_test(NAME polaris_recorder_continuous_async
         COMMAND test_polaris_stream --gtest_filter=StreamRecorderContinuousAsyncTests.*)
     set_tests_properties(polaris_recorder_continuous_async PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    # Keyframe recovery requests use real session mail events and fixture-owned files.
+    add_test(NAME polaris_recorder_keyframe_recovery
+        COMMAND test_polaris_stream --gtest_filter=StreamRecorderKeyframeRecoveryTests.*)
+    set_tests_properties(polaris_recorder_keyframe_recovery PROPERTIES
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND POLARIS_ENABLE_PYROWAVE)
         # These exercise the actual encode loop with an in-memory display and
