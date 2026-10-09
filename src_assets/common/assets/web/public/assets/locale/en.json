@@ -2696,6 +2696,7 @@
     "controller_test_rumble": "Test rumble",
     "controller_rumble_detect_first": "Connect a controller to this browser, press any button on it, then choose Detect controller to enable the rumble test.",
     "controller_rumble_unsupported": "This browser cannot vibrate the detected controller, so the rumble test is unavailable.",
+    "controller_rumble_failed": "The browser did not play the rumble effect. Press a button on the controller and try again.",
     "post_session_report": "Post-session Stream Report",
     "post_session_next_launch": "Next launch: {profile}",
     "advanced_evidence": "Advanced evidence",

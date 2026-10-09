@@ -907,8 +907,25 @@ async function focusTopSearchMatch(event) {
   await focusSearchTarget(optionKey)
   const target = resolveSearchTarget(optionKey)
   if (!target) return
-  const control = target.matches?.(SEARCH_FOCUSABLE) ? target : target.querySelector?.(SEARCH_FOCUSABLE)
+  // Prefer the setting's own field; otherwise the first control in its block.
+  const field = settingsContentRef.value?.querySelector?.(`#${escapeSelector(optionKey)}`)
+  const control = field?.matches?.(SEARCH_FOCUSABLE) ? field
+    : target.matches?.(SEARCH_FOCUSABLE) ? target : target.querySelector?.(SEARCH_FOCUSABLE)
   control?.focus?.({ preventScroll: true })
+}
+
+/**
+ * Open every collapsed disclosure that encloses `target`, outermost first, so a matched setting
+ * can be seen and focused. Disclosures that do not contain it stay as they are.
+ */
+function openEnclosingDisclosures(target) {
+  const enclosing = []
+  for (let node = target?.closest?.('details'); node; node = node.parentElement?.closest('details')) {
+    enclosing.push(node)
+  }
+  for (const details of enclosing.reverse()) {
+    if (!details.open) details.open = true
+  }
 }
 
 function escapeSelector(value) {
@@ -977,6 +994,7 @@ async function focusSearchTarget(optionKey) {
   if (!target) return
 
   clearSearchHighlight()
+  openEnclosingDisclosures(target)
   highlightedSearchTarget = target
   target.classList.add('settings-search-hit')
   target.scrollIntoView?.({ behavior: 'smooth', block: 'center', inline: 'nearest' })

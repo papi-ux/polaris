@@ -20,7 +20,7 @@ const i18n = {
 
 let wrapper
 
-function mountConfigView() {
+function mountConfigView(stubOverrides = {}) {
   global.fetch = vi.fn(() => Promise.resolve({
     status: 200,
     json: () => Promise.resolve({ platform: 'linux', status: {}, version: 'test', sunshine_name: 'Host', max_bitrate: 0 }),
@@ -40,6 +40,7 @@ function mountConfigView() {
         Advanced: { template: '<div />' },
         AiOptimizer: { template: '<div />' },
         ContainerEncoders: { template: '<div />' },
+        ...stubOverrides,
       },
     },
   })
@@ -136,5 +137,50 @@ describe('settings search keyboard and accessibility', () => {
     await settle()
     expect(wrapper.vm.currentTab).toBe(tabBefore)
     expect(document.activeElement).toBe(input.element)
+  })
+
+  it('opens the closed disclosures around a matched setting, outermost first, and only those', async () => {
+    // The real Advanced tab keeps legacy_ordering inside a closed disclosure; this mirrors that shape.
+    const opened = []
+    mountConfigView({
+      Advanced: {
+        props: ['config'],
+        template: `<div>
+          <details data-outer><summary>Compatibility</summary>
+            <details data-inner><summary>Ordering</summary>
+              <label for="legacy_ordering"><input type="checkbox" id="legacy_ordering"></label>
+            </details>
+          </details>
+          <details data-unrelated><summary>Capture</summary><select id="capture"></select></details>
+        </div>`,
+      },
+    })
+    await settle()
+    const outer = wrapper.get('[data-outer]').element
+    const inner = wrapper.get('[data-inner]').element
+    for (const [name, node] of [['outer', outer], ['inner', inner]]) {
+      const descriptor = Object.getOwnPropertyDescriptor(HTMLDetailsElement.prototype, 'open')
+      Object.defineProperty(node, 'open', {
+        configurable: true,
+        get() { return descriptor.get.call(this) },
+        set(value) { if (value) opened.push(name); descriptor.set.call(this, value) },
+      })
+    }
+    expect(outer.open).toBe(false)
+    expect(inner.open).toBe(false)
+
+    const input = wrapper.get('[data-settings-search]')
+    input.element.focus()
+    await input.setValue(en.config.legacy_ordering)
+    await settle()
+    await input.trigger('keydown', { key: 'Enter' })
+    await settle()
+
+    expect(wrapper.vm.currentTab).toBe('advanced')
+    expect(outer.open).toBe(true)
+    expect(inner.open).toBe(true)
+    expect(opened).toEqual(['outer', 'inner'])
+    expect(wrapper.get('[data-unrelated]').element.open).toBe(false)
+    expect(document.activeElement?.id).toBe('legacy_ordering')
   })
 })

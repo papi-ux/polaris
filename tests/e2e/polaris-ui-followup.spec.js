@@ -1,4 +1,8 @@
 import { test, expect } from './fixtures/mocked.js'
+import { readFileSync } from 'node:fs'
+
+// The rendered English strings, so a locator can never drift from the real label again.
+const en = JSON.parse(readFileSync(new URL('../../src_assets/common/assets/web/public/assets/locale/en.json', import.meta.url), 'utf8'))
 
 async function mockHost(page, { activeSpace = false } = {}) {
   await page.addInitScript(() => {
@@ -67,6 +71,22 @@ for (const width of [390, 1280]) {
     await page.locator('.settings-command-bar').screenshot({ path: `test-results/polaris-search-keyboard-${width}.png` })
   })
 
+  test(`search reaches a setting inside a closed disclosure at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 960 })
+    await mockHost(page)
+    await page.goto('/#/config')
+    const search = page.getByRole('searchbox', { name: en.config.search_label, exact: true })
+    await search.fill(en.config.legacy_ordering)
+    await search.press('Enter')
+    const field = page.locator('#legacy_ordering')
+    await expect(field).toBeFocused()
+    await expect(field).toBeVisible()
+    // Only the disclosure that holds the setting opens; the other Advanced disclosure stays closed.
+    const disclosures = page.locator('details.settings-disclosure')
+    await expect(disclosures.filter({ has: field })).toHaveJSProperty('open', true)
+    await expect(disclosures.filter({ has: page.locator('#capture') })).toHaveJSProperty('open', false)
+  })
+
   test(`late controller detection and disabled rumble reasons at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 960 })
     await mockHost(page)
@@ -102,7 +122,7 @@ for (const width of [390, 1280]) {
     await page.setViewportSize({ width, height: 960 })
     await mockHost(page, { activeSpace: true })
     await page.goto('/#/')
-    const preview = page.getByRole('button', { name: 'Show display', exact: true })
+    const preview = page.getByRole('button', { name: en.dashboard.show_display, exact: true })
     await expect(preview).toBeDisabled()
     await expect(preview).toHaveAccessibleDescription(/Desktop preview is paused while a Space is active/)
     const reason = page.locator('[data-preview-hidden-reason]')

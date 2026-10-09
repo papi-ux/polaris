@@ -817,22 +817,32 @@ function refreshControllerSnapshot() {
   refreshBrowserGamepads()
   const pads = browserGamepads.value
   if (pads.length) {
-    controllerRumbleSupported.value = Array.from(navigator.getGamepads?.() || [])
-      .some((pad) => typeof pad?.vibrationActuator?.playEffect === 'function')
+    controllerRumbleSupported.value = Array.from(navigator.getGamepads?.() || []).some(canVibrate)
     recordControllerEvent('Browser gamepad visible', pads[0].index + 1)
   } else {
     recordControllerEvent('Manual button sample', 1)
   }
 }
 
+function canVibrate(pad) {
+  return typeof pad?.vibrationActuator?.playEffect === 'function'
+}
+
 async function pulseControllerHaptics() {
-  const pad = navigator.getGamepads?.().find((candidate) => candidate?.vibrationActuator)
-  if (!pad?.vibrationActuator?.playEffect) return
-  await pad.vibrationActuator.playEffect('dual-rumble', {
-    duration: 180,
-    strongMagnitude: 0.35,
-    weakMagnitude: 0.25,
-  })
+  // The same test Detect uses, so the button never enables for a controller this cannot pulse.
+  const pad = Array.from(navigator.getGamepads?.() || []).find(canVibrate)
+  if (!pad) return
+  try {
+    await pad.vibrationActuator.playEffect('dual-rumble', {
+      duration: 180,
+      strongMagnitude: 0.35,
+      weakMagnitude: 0.25,
+    })
+  } catch {
+    // The browser may refuse or interrupt the effect; say so instead of failing silently.
+    showToast(i18n.t('troubleshooting.controller_rumble_failed'), 'error')
+    return
+  }
   recordControllerEvent('Optional rumble pulse', pad.index + 1)
 }
 

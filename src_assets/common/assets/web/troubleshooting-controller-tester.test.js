@@ -8,7 +8,8 @@ import TroubleshootingView from './views/TroubleshootingView.vue'
 let channel
 let wrapper
 vi.mock('./composables/useStreamStats', () => ({ useStreamStats: () => channel }))
-vi.mock('./composables/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }))
+const toasts = vi.hoisted(() => ({ toast: null }))
+vi.mock('./composables/useToast', () => ({ useToast: () => ({ toast: (...args) => toasts.toast?.(...args) }) }))
 
 // The real English strings, so a missing locale key fails here instead of rendering a raw key.
 const en = JSON.parse(readFileSync('src_assets/common/assets/web/public/assets/locale/en.json', 'utf8'))
@@ -49,6 +50,7 @@ async function browserConnects(pad) {
 
 describe('controller tester in the production troubleshooting view', () => {
   beforeEach(() => {
+    toasts.toast = vi.fn()
     pads = []
     Object.defineProperty(navigator, 'getGamepads', { configurable: true, value: () => pads })
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({}), text: async () => '' })))
@@ -144,5 +146,41 @@ describe('controller tester in the production troubleshooting view', () => {
     expect(events).toContain('gamepadconnected')
     expect(events).toContain('gamepaddisconnected')
     removed.mockRestore()
+  })
+
+  it('pulses the controller that can play effects, not one with a bare actuator ahead of it', async () => {
+    await mountView()
+    const bare = { ...gamepad(false), id: 'Actuator Without Effects', vibrationActuator: {} }
+    pads = [bare, { ...gamepad(true), index: 1 }]
+    await detect().trigger('click')
+    await flushPromises()
+    expect(rumble().attributes('disabled')).toBeUndefined()
+    await rumble().trigger('click')
+    await flushPromises()
+    expect(pads[1].vibrationActuator.playEffect).toHaveBeenCalledTimes(1)
+    expect(toasts.toast).not.toHaveBeenCalled()
+  })
+
+  it('reports a refused rumble effect instead of leaving an unhandled rejection', async () => {
+    const unhandled = vi.fn()
+    process.on('unhandledRejection', unhandled)
+    try {
+      await mountView()
+      const pad = gamepad(true)
+      pad.vibrationActuator.playEffect = vi.fn(async () => { throw new DOMException('Not allowed', 'NotAllowedError') })
+      pads = [pad]
+      await detect().trigger('click')
+      await flushPromises()
+      await rumble().trigger('click')
+      await flushPromises()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(pad.vibrationActuator.playEffect).toHaveBeenCalledTimes(1)
+      expect(toasts.toast).toHaveBeenCalledWith(en.troubleshooting.controller_rumble_failed, 'error')
+      expect(unhandled).not.toHaveBeenCalled()
+      // A refused pulse leaves the detected capability as it was.
+      expect(rumble().attributes('disabled')).toBeUndefined()
+    } finally {
+      process.off('unhandledRejection', unhandled)
+    }
   })
 })
