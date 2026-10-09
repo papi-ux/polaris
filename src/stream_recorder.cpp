@@ -249,10 +249,6 @@ namespace stream_recorder {
   static std::uint64_t replay_selected = 0;
   static replay_stats_t replay_counters;
   static std::uint64_t replay_next_sequence = 1;
-  // Provenance baselines (#359): the run's most recent supplied frame index and frame_timestamp.
-  // Evidence only; a run clear forgets them, and nothing else reads them.
-  static std::optional<std::int64_t> replay_last_frame_index;
-  static std::optional<std::chrono::steady_clock::time_point> replay_last_frame_timestamp;
 
   // ---- Keyframe requests (guarded by `mutex` unless noted) ----
   //
@@ -439,8 +435,6 @@ namespace stream_recorder {
     replay_bytes = 0;
     replay_run_keyframes = 0;
     replay_last_accepted_keyframe.reset();
-    replay_last_frame_index.reset();
-    replay_last_frame_timestamp.reset();
     replay_last_limit = reason;
     if (forget_codec) {
       replay_video_format = -1;
@@ -681,8 +675,10 @@ namespace stream_recorder {
   /**
    * @brief The provenance record for an entry about to be stored (requires `mutex`).
    *
-   * Marks compare with the run's most recent supplied index and frame_timestamp, skipping any
-   * kind of evidence that is unknown on either side. Nothing here allocates, throws or decides.
+   * Called after this admission's expiry, trimming and keyframe alignment, just before the entry
+   * is stored. Marks compare it, once, with the adjacent retained entry (the buffer's back); an
+   * empty buffer means no comparison, and a coordinate unknown on either side is not compared.
+   * The marks are fixed at admission. Nothing here allocates, throws or decides.
    */
   static detail::provenance_record_t replay_provenance_record(const packet_provenance_t *supplied) noexcept {
     detail::provenance_record_t record;
@@ -692,8 +688,9 @@ namespace stream_recorder {
     auto &marks = record.marks;
     const auto &index = record.supplied.frame_index;
     marks.index_unsupplied = !index;
-    if (index && replay_last_frame_index) {
-      const auto previous = *replay_last_frame_index;
+    const auto *adjacent = replay_buffer.empty() ? nullptr : &replay_buffer.back().provenance.supplied;
+    if (index && adjacent && adjacent->frame_index) {
+      const auto previous = *adjacent->frame_index;
       marks.index_duplicate = *index == previous;
       marks.index_regressed = *index < previous;
       // The unsigned difference is exact whenever index > previous, so no signed overflow occurs
@@ -703,9 +700,9 @@ namespace stream_recorder {
     }
     const auto &time = record.supplied.frame_timestamp;
     marks.time_missing = !time;
-    if (time && replay_last_frame_timestamp) {
-      marks.time_duplicate = *time == *replay_last_frame_timestamp;
-      marks.time_regressed = *time < *replay_last_frame_timestamp;
+    if (time && adjacent && adjacent->frame_timestamp) {
+      marks.time_duplicate = *time == *adjacent->frame_timestamp;
+      marks.time_regressed = *time < *adjacent->frame_timestamp;
     }
     return record;
   }
@@ -783,12 +780,6 @@ namespace stream_recorder {
       replay_next_sequence++,
       record,
     });
-    if (record.supplied.frame_index) {
-      replay_last_frame_index = record.supplied.frame_index;
-    }
-    if (record.supplied.frame_timestamp) {
-      replay_last_frame_timestamp = record.supplied.frame_timestamp;
-    }
     replay_bytes += size;
     if (is_keyframe) {
       ++replay_run_keyframes;

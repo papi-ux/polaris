@@ -271,29 +271,34 @@ TEST_F(StreamRecorderProvenanceTests, ProvenanceLeavesRawRetentionRefusalsCapsRe
   EXPECT_EQ(facts[11], 4u);  // discontinuities: invalid, arrival regression, oversized, codec
 }
 
-// An unsupplied index (legacy push_packet(), whatever its pts) is not index 0, and 0 is a real index.
+// An unsupplied index (legacy push_packet(), whatever its pts) is not index 0, and 0 is a real
+// index. Marks compare only adjacent retained entries: an unsupplied neighbour is never compared.
 TEST_F(StreamRecorderProvenanceTests, AnUnsuppliedIndexIsDistinctFromARealIndexZero) {
   legacy(true, t0, bytes(4, 'a'));                                   // pts 0, but unsupplied
-  video(false, t0 + 1ms, bytes(4, 'b'), provenance(0));              // A real index 0
-  legacy(false, t0 + 2ms, bytes(4, 'c'));                            // Unsupplied: compared with nothing
-  video(false, t0 + 3ms, bytes(4, 'd'), provenance(0));              // Compared with the last supplied: 0
-  video(false, t0 + 4ms, bytes(4, 'e'), provenance(1));
+  video(false, t0 + 1ms, bytes(4, 'b'), provenance(0));              // Real 0; neighbour unsupplied: not compared
+  video(false, t0 + 2ms, bytes(4, 'c'), provenance(0));              // Real 0 after real 0: duplicate
+  legacy(false, t0 + 3ms, bytes(4, 'd'));                            // Unsupplied
+  video(false, t0 + 4ms, bytes(4, 'e'), provenance(0));              // Neighbour unsupplied: not compared
+  video(false, t0 + 5ms, bytes(4, 'f'), provenance(1));              // After 0: no mark
   const auto entries = live();
-  ASSERT_EQ(entries.size(), 5u);
+  ASSERT_EQ(entries.size(), 6u);
+  const auto untimed = &provenance_marks_t::time_missing;
   EXPECT_FALSE(entries[0].record.supplied.frame_index.has_value());
-  EXPECT_EQ(entries[0].record.marks, marks({&provenance_marks_t::index_unsupplied, &provenance_marks_t::time_missing}));
+  EXPECT_EQ(entries[0].record.marks, marks({&provenance_marks_t::index_unsupplied, untimed}));
   ASSERT_TRUE(entries[1].record.supplied.frame_index.has_value());
   EXPECT_EQ(*entries[1].record.supplied.frame_index, 0);
-  EXPECT_EQ(entries[1].record.marks, marks({&provenance_marks_t::time_missing}));
-  EXPECT_EQ(entries[2].record.marks, marks({&provenance_marks_t::index_unsupplied, &provenance_marks_t::time_missing}));
-  EXPECT_EQ(entries[3].record.marks, marks({&provenance_marks_t::index_duplicate, &provenance_marks_t::time_missing}));
-  EXPECT_EQ(entries[4].record.marks, marks({&provenance_marks_t::time_missing}));
+  EXPECT_EQ(entries[1].record.marks, marks({untimed}));
+  EXPECT_EQ(entries[2].record.marks, marks({&provenance_marks_t::index_duplicate, untimed}));
+  EXPECT_FALSE(entries[3].record.supplied.frame_index.has_value());
+  EXPECT_EQ(entries[3].record.marks, marks({&provenance_marks_t::index_unsupplied, untimed}));
+  EXPECT_EQ(entries[4].record.marks, marks({untimed}));  // Not a duplicate of the 0 two entries back
+  EXPECT_EQ(entries[5].record.marks, marks({untimed}));
   for (const auto &e : entries) {
     EXPECT_EQ(e.record.version, packet_provenance_t::k_version);
   }
 }
 
-// Duplicates, regressions and gaps are marked against the last supplied index and change nothing:
+// Duplicates, regressions and gaps are marked against the adjacent retained entry and change nothing:
 // an encoder may drop frames, so a gap is evidence, not a cut.
 TEST_F(StreamRecorderProvenanceTests, IndexDuplicatesRegressionsAndGapsAreMarkedWithoutCuttingTheRun) {
   const std::vector<std::int64_t> indices {10, 11, 11, 9, 12, 13, 20};
@@ -341,15 +346,15 @@ TEST_F(StreamRecorderProvenanceTests, IndexComparisonsAtTheSignedEndpointsNeverO
 }
 
 // The optional frame_timestamp and both source flags round-trip exactly; an absent time stays
-// absent (never the arrival time), and time marks compare only known times.
+// absent (never the arrival time), and time marks compare only adjacent known times.
 TEST_F(StreamRecorderProvenanceTests, TimestampsAndSourceFlagsRoundTripExactlyAndAbsentTimesStayAbsent) {
   const steady::time_point far = steady::time_point {} + 7h + 123ns;  // Not an arrival time
   const std::vector<packet_provenance_t> supplied {
     provenance(1, far, false, false),
-    provenance(2, std::nullopt, true, false),
-    provenance(3, far, false, true),                 // Same time as the last known one
-    provenance(4, far - 1ns, true, true),            // Earlier
-    provenance(5, std::nullopt, false, false),
+    provenance(2, far, false, true),                 // Same time as its neighbour: duplicate
+    provenance(3, std::nullopt, true, false),        // Untimed
+    provenance(4, far - 1ns, true, true),            // Earlier than far, but its neighbour is untimed
+    provenance(5, far - 2ns, false, false),          // Earlier than its neighbour: regressed
     provenance(6, far + 1s, true, false),
   };
   for (std::size_t i = 0; i < supplied.size(); ++i) {
@@ -366,14 +371,14 @@ TEST_F(StreamRecorderProvenanceTests, TimestampsAndSourceFlagsRoundTripExactlyAn
     EXPECT_EQ(got.source_time_paced, supplied[i].source_time_paced);
   }
   EXPECT_EQ(entries[0].record.marks, provenance_marks_t {});
-  EXPECT_EQ(entries[1].record.marks, marks({&provenance_marks_t::time_missing}));
-  EXPECT_EQ(entries[2].record.marks, marks({&provenance_marks_t::time_duplicate}));
-  EXPECT_EQ(entries[3].record.marks, marks({&provenance_marks_t::time_regressed}));
-  EXPECT_EQ(entries[4].record.marks, marks({&provenance_marks_t::time_missing}));
-  EXPECT_EQ(entries[5].record.marks, provenance_marks_t {});  // Later than far - 1ns
+  EXPECT_EQ(entries[1].record.marks, marks({&provenance_marks_t::time_duplicate}));
+  EXPECT_EQ(entries[2].record.marks, marks({&provenance_marks_t::time_missing}));
+  EXPECT_EQ(entries[3].record.marks, provenance_marks_t {});  // Neighbour untimed: not compared
+  EXPECT_EQ(entries[4].record.marks, marks({&provenance_marks_t::time_regressed}));
+  EXPECT_EQ(entries[5].record.marks, provenance_marks_t {});
 }
 
-// A run clear forgets the baselines: the next run's first entry is compared with nothing.
+// A run clear empties the buffer: the next run's first entry is compared with nothing.
 TEST_F(StreamRecorderProvenanceTests, ARunResetStartsFreshBaselinesWithoutChangingTheReset) {
   video(true, t0, bytes(4, 'a'), provenance(50, t0));
   video(false, t0 + 1ms, bytes(4, 'b'), provenance(51, t0 + 1ms));
@@ -383,6 +388,79 @@ TEST_F(StreamRecorderProvenanceTests, ARunResetStartsFreshBaselinesWithoutChangi
   ASSERT_EQ(entries.size(), 1u);
   EXPECT_EQ(entries[0].record.marks, provenance_marks_t {});
   EXPECT_EQ(stats(t0 + 3ms).discontinuities, 1u);
+}
+
+// Duration expiry that empties the buffer leaves nothing adjacent: the next entry is compared with
+// nothing, though its index and time are lower than the expired entry's. Raw facts are those of
+// the same pushes without provenance.
+TEST_F(StreamRecorderProvenanceTests, ExpiryThatEmptiesTheBufferLeavesTheNextEntryUncompared) {
+  const auto script = [&](bool with_provenance) {
+    start_replay();  // One-minute window
+    const auto push = [&](bool keyframe, steady::time_point at, char fill, const packet_provenance_t &p) {
+      with_provenance ? video(keyframe, at, bytes(6, fill), p) : legacy(keyframe, at, bytes(6, fill));
+    };
+    push(true, t0, 'a', provenance(10, t0));
+    push(false, t0 + 1ms, 'b', provenance(11, t0 + 1ms));
+    // Two minutes later both have expired before this keyframe is stored.
+    push(true, t0 + 2min, 'c', provenance(3, t0 - 1s));
+    push(false, t0 + 2min + 1ms, 'd', provenance(3, t0 - 1s));  // Adjacent duplicate, for contrast
+    return std::make_pair(raw_facts(stats(t0 + 2min + 1ms)), live());
+  };
+  const auto without = script(false);
+  const auto with = script(true);
+  EXPECT_EQ(with.first, without.first);
+  ASSERT_EQ(with.second.size(), 2u);
+  ASSERT_EQ(without.second.size(), 2u);
+  for (std::size_t i = 0; i < 2; ++i) {
+    EXPECT_EQ(with.second[i].payload, without.second[i].payload);
+  }
+  EXPECT_EQ(with.second[0].record.marks, provenance_marks_t {});  // Nothing adjacent after expiry
+  EXPECT_EQ(with.second[1].record.marks,
+            marks({&provenance_marks_t::index_duplicate, &provenance_marks_t::time_duplicate}));
+  const auto &facts = without.first;
+  EXPECT_EQ(facts[0], 2u);                // packets
+  EXPECT_EQ(facts[10], 2u);               // trimmed: both expired
+  EXPECT_EQ(facts[11], 0u);               // no discontinuity
+  EXPECT_EQ(facts[20], static_cast<std::uint64_t>(stream_recorder::window_limit_e::duration));
+}
+
+// A cap trim whose keyframe realignment empties the buffer leaves nothing adjacent either: the
+// next stored keyframe is compared with nothing, while an unemptied trim still compares.
+TEST_F(StreamRecorderProvenanceTests, ACapTrimThatRealignsToEmptyLeavesTheNextEntryUncompared) {
+  const auto script = [&](bool with_provenance) {
+    start_replay();
+    stream_recorder::detail::set_replay_limits_for_tests(1024, 3);
+    const auto push = [&](bool keyframe, int ms, char fill, const packet_provenance_t &p) {
+      const auto at = t0 + std::chrono::milliseconds(ms);
+      with_provenance ? video(keyframe, at, bytes(4, fill), p) : legacy(keyframe, at, bytes(4, fill));
+    };
+    push(true, 0, 'K', provenance(20, t0));
+    push(false, 1, 'a', provenance(21, t0 + 1ms));
+    push(false, 2, 'b', provenance(22, t0 + 2ms));
+    // The packet cap trims K, alignment drops a and b, and the dependent frame is refused.
+    push(false, 3, 'c', provenance(23, t0 + 3ms));
+    // Stored into the empty buffer: lower index and time than anything seen, yet unmarked.
+    push(true, 4, 'L', provenance(1, t0 - 1h));
+    // An adjacent entry exists: compared, and regressed.
+    push(false, 5, 'd', provenance(0, t0 - 2h));
+    return std::make_pair(raw_facts(stats(t0 + 5ms)), live());
+  };
+  const auto without = script(false);
+  const auto with = script(true);
+  EXPECT_EQ(with.first, without.first);
+  ASSERT_EQ(with.second.size(), 2u);
+  ASSERT_EQ(without.second.size(), 2u);
+  for (std::size_t i = 0; i < 2; ++i) {
+    EXPECT_EQ(with.second[i].payload, without.second[i].payload);
+  }
+  EXPECT_EQ(with.second[0].record.marks, provenance_marks_t {});
+  EXPECT_EQ(with.second[1].record.marks,
+            marks({&provenance_marks_t::index_regressed, &provenance_marks_t::time_regressed}));
+  const auto &facts = without.first;
+  EXPECT_EQ(facts[0], 2u);   // packets: L, d
+  EXPECT_EQ(facts[9], 1u);   // refused_awaiting_keyframe: c
+  EXPECT_EQ(facts[10], 3u);  // trimmed: K (cap), a and b (alignment)
+  EXPECT_EQ(facts[11], 0u);  // no discontinuity
 }
 
 // Trimming removes each payload together with its own provenance; the pairing is exact.
@@ -456,8 +534,10 @@ TEST_F(StreamRecorderProvenanceTests, AHeldSnapshotKeepsItsProvenanceAcrossReset
   EXPECT_EQ(stream_recorder::detail::snapshot_provenance_for_tests(admission.save).entries.size(), 0u);
 }
 
-// An admission that fails after its payload and provenance arrays were filled releases both and
-// leaves no accounting; the live run and its provenance are untouched, and a later save works.
+// An admission failure injected at the existing seams (a bad_alloc thrown before the capture state
+// is allocated, or after the payload and provenance arrays were reserved and filled; no real
+// allocation is made to fail) releases everything and leaves no accounting. The live run and its
+// provenance are untouched, and a later save works.
 TEST_F(StreamRecorderProvenanceTests, AFailedAdmissionReleasesItsProvenanceWithoutAccountingLeaks) {
   for (std::int64_t i = 0; i < 3; ++i) {
     video(i == 0, t0 + std::chrono::milliseconds(i), bytes(4, static_cast<std::uint8_t>('a' + i)), provenance(i, t0 + std::chrono::milliseconds(i)));
@@ -571,11 +651,24 @@ TEST_F(StreamRecorderProvenanceTests, ProvenanceStaysWithinThePacketCapAndRecord
   const auto held = stream_recorder::detail::snapshot_provenance_for_tests(admission.save);
   EXPECT_EQ(held.payload_count, k_cap);
   EXPECT_EQ(held.provenance_count, k_cap);
+  // Measured, not assumed: reserve() guarantees at least the requested capacity, not exactly it.
   EXPECT_GE(held.provenance_capacity, held.provenance_count);
   EXPECT_GE(held.payload_capacity, held.payload_count);
-  // The held snapshot plus the live run never hold more than max_packets entries each.
-  EXPECT_LE(held.provenance_count, s.max_snapshot_packets);
-  EXPECT_LE(s.metadata_entries, s.max_metadata_entries);
+
+  // The live run moves on while the save is held: the live entries change, the held ones do not.
+  for (std::int64_t i = 0; i < 3; ++i) {
+    video(true, t0 + 31ms + std::chrono::milliseconds(i), bytes(16, 0xA0), provenance(100 + i, t0 + 31ms));
+  }
+  const auto live_now = live();
+  const auto after = stats(t0 + 40ms);  // Read after admission and the later pushes
+  EXPECT_EQ(live_now.size(), k_cap);
+  EXPECT_EQ(after.packets, live_now.size());
+  EXPECT_TRUE(after.save_in_progress);
+  EXPECT_EQ(after.snapshot_packets, held.provenance_count);
+  // Logical entries: every live entry and every held entry has exactly one provenance record.
+  EXPECT_EQ(after.metadata_entries, live_now.size() + held.provenance_count);
+  EXPECT_LE(after.metadata_entries, after.max_metadata_entries);
+  EXPECT_LE(held.provenance_count, after.max_snapshot_packets);
 
   const auto sizes = stream_recorder::detail::provenance_sizes_for_tests();
   EXPECT_GT(sizes.packet_provenance, 0u);
@@ -585,6 +678,7 @@ TEST_F(StreamRecorderProvenanceTests, ProvenanceStaysWithinThePacketCapAndRecord
   const auto property = [](const char *key, std::size_t value) {
     ::testing::Test::RecordProperty(key, std::to_string(value));
   };
+  // Compiled sizes (this build only).
   property("sizeofPacketProvenance", sizes.packet_provenance);
   property("sizeofProvenanceRecord", sizes.provenance_record);
   property("sizeofLiveReplayEntry", sizes.live_entry);
@@ -592,13 +686,19 @@ TEST_F(StreamRecorderProvenanceTests, ProvenanceStaysWithinThePacketCapAndRecord
   property("sizeofPreProvenanceEntryMirror", sizes.pre_provenance_entry_mirror);
   property("liveEntryDeltaVsMirror", sizes.live_entry - sizes.pre_provenance_entry_mirror);
   property("sizeofSnapshotPayloadRef", sizes.snapshot_payload_ref);
-  property("packetCap", k_cap);
-  property("heldProvenanceCount", held.provenance_count);
+  // Logical counts (bounded by the caps), read after admission.
+  property("packetCap", after.max_packets);
+  property("liveEntries", live_now.size());
+  property("heldEntries", held.provenance_count);
+  property("metadataEntries", after.metadata_entries);
+  property("maxMetadataEntries", after.max_metadata_entries);
+  // Measured capacities of the held arrays (what this standard library actually reserved).
   property("heldProvenanceCapacity", held.provenance_capacity);
   property("heldPayloadCapacity", held.payload_capacity);
-  // Bounded accounting: live provenance is inside each live entry (at most max_packets of them);
-  // a held snapshot adds one provenance array of its reserved capacity.
-  property("liveEntryDeltaBoundBytes", s.max_packets * (sizes.live_entry - sizes.pre_provenance_entry_mirror));
-  property("heldProvenanceArrayBytes", held.provenance_capacity * sizes.provenance_record);
-  ::testing::Test::RecordProperty("sizingNote", "compiled sizeof and vector capacity only; not allocator overhead, heap totals or process RSS");
+  property("heldProvenanceCapacityBytes", held.provenance_capacity * sizes.provenance_record);
+  // Logical size only: the live entries' added bytes, not the deque's actual allocation.
+  property("liveEntryDeltaLogicalBytes", live_now.size() * (sizes.live_entry - sizes.pre_provenance_entry_mirror));
+  ::testing::Test::RecordProperty("sizingNote",
+                                  "compiled sizeof, logical entry counts and measured vector capacity for this build; "
+                                  "not allocator overhead, deque block allocation, heap totals or process RSS");
 }

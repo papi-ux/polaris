@@ -306,16 +306,18 @@ namespace stream_recorder {
                   int video_format, const packet_provenance_t &provenance);
 
   namespace detail {
-    /// Evidence marks of one replay entry, against the run's most recent entry that had the same
-    /// kind of evidence. A mark never refuses, trims, resets or cuts anything.
+    /// Evidence marks of one replay entry, computed once at admission against the adjacent retained
+    /// entry (the buffer's back after this admission's expiry, trimming and alignment). An empty
+    /// buffer means no comparison; a coordinate unknown on either side is not compared. A mark
+    /// never refuses, trims, resets or cuts anything.
     struct provenance_marks_t {
       bool index_unsupplied = false;  ///< No frame index was supplied (legacy push_packet())
-      bool index_duplicate = false;   ///< Equal to the previous supplied index in this run
-      bool index_regressed = false;   ///< Lower than the previous supplied index in this run
-      bool index_gap = false;         ///< Higher than the previous supplied index by more than one
+      bool index_duplicate = false;   ///< Equal to the adjacent retained entry's supplied index
+      bool index_regressed = false;   ///< Lower than the adjacent retained entry's supplied index
+      bool index_gap = false;         ///< Higher than the adjacent retained entry's index by more than one
       bool time_missing = false;      ///< No frame_timestamp at the tap (untimed)
-      bool time_duplicate = false;    ///< Equal to the previous frame_timestamp in this run
-      bool time_regressed = false;    ///< Earlier than the previous frame_timestamp in this run
+      bool time_duplicate = false;    ///< Equal to the adjacent retained entry's frame_timestamp
+      bool time_regressed = false;    ///< Earlier than the adjacent retained entry's frame_timestamp
       bool operator==(const provenance_marks_t &) const = default;
     };
 

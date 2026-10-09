@@ -21,25 +21,33 @@ timestamps.
 | `source_clock_timestamp`, `source_time_paced` | Copied from the packet. They are coordinate facts, never authority, proof of pacing, or VRR acceptance. |
 
 The recorder stores this, with its version, as `detail::provenance_record_t` inside the same live
-entry as the payload. Each record also gets **marks**:
+entry as the payload. Each record also gets **marks**, computed once, at admission, by comparing it
+with the **adjacent retained entry**. That is the buffer's last entry after this admission's own
+expiry, trimming and keyframe alignment, just before the new entry is stored:
 
 | Mark | Set when |
 |---|---|
 | `index_unsupplied` | No index was supplied |
-| `index_duplicate` / `index_regressed` / `index_gap` | The index is equal to, lower than, or more than one above the run's most recent *supplied* index |
+| `index_duplicate` / `index_regressed` / `index_gap` | The index is equal to, lower than, or more than one above the adjacent retained entry's index |
 | `time_missing` | No `frame_timestamp` at the tap |
-| `time_duplicate` / `time_regressed` | The time equals, or is earlier than, the run's most recent *known* `frame_timestamp` |
+| `time_duplicate` / `time_regressed` | The time equals, or is earlier than, the adjacent retained entry's `frame_timestamp` |
 
 How the comparisons work:
-- **Unknown values are skipped.** A comparison runs only when both sides are known. An unsupplied
-  index or a missing time is compared with nothing and does not move the baseline.
+- **Only adjacent known values are compared.** A coordinate is compared only when both the new
+  entry and its adjacent retained entry have it. An unsupplied index or a missing time on either
+  side means that coordinate is not compared. There is no earlier "last known" baseline that
+  reaches past an unknown neighbour.
 - **Overflow is impossible.** Index gaps are computed as an unsigned difference only when the index
   increased, so the comparison is exact at both ends of `int64`.
 - **Gaps are evidence, not errors.** Real encoders can drop or skip frames, so a gap is recorded,
   never treated as a fault.
-- **Baselines are per run.** Anything that already clears the run forgets them: a discontinuity, a
-  codec change, a selection or configuration reset. The next run's first entry is compared with
-  nothing.
+- **An empty buffer means no comparison.** Whatever leaves the buffer empty before the entry is
+  stored means the entry is compared with nothing:
+  - a run clear (discontinuity, codec change, selection or configuration reset);
+  - duration expiry;
+  - a cap trim whose keyframe realignment removed everything.
+- **Marks are fixed at admission.** Later trimming of a neighbour does not recompute them. A held
+  snapshot keeps them as admitted.
 
 ## What it never does
 
@@ -67,15 +75,23 @@ How the comparisons work:
   - The held snapshot stays valid across live resets, session end and configuration reloads until
     its own lease releases it, exactly like the payload references.
   - The array is freed with the lease.
-  - An admission that fails after the arrays were filled releases both with no accounting left
-    behind.
+  - Tests inject an admission failure (a `bad_alloc` thrown at the existing seams) before the
+    capture state is allocated, and after both arrays were reserved and filled. Each releases
+    everything with no accounting left behind. No real reserve allocation is made to fail.
 
-## Memory (bounded accounting, not allocator or RSS cost)
+## Memory (bounded logical entries, measured capacity; not allocator or RSS cost)
 
-- **Live:** each entry grows by the compiled size of the record plus any padding. There are at most
-  `max_packets` live entries.
-- **Held:** one array of `provenance_record_t` per held save, of its reserved capacity (at most one
-  save at a time, at most `max_packets` entries).
+- **Logical entries are bounded:**
+  - **Live:** every live entry holds one record, and there are at most `max_packets` live entries.
+  - **Held:** a held save holds one record per captured entry, at most `max_snapshot_packets`
+    (= `max_packets`), with at most one save at a time.
+  - **Total:** `metadata_entries` (live + held) stays within `max_metadata_entries`.
+- **Byte cost is not bounded by these counts:**
+  - **Live:** each entry grows by the compiled size of the record plus padding, but the live entries
+    sit in a `std::deque`. Its block allocation is not "count × sizeof".
+  - **Held:** the provenance array's capacity is **measured**. `reserve()` guarantees at least the
+    requested count, not exactly it, so no universal "`max_packets` × `sizeof`" allocation bound is
+    claimed.
 - **Measured, not assumed:** the actual sizes are reported by the test
   `StreamRecorderProvenanceTests.ProvenanceStaysWithinThePacketCapAndRecordsCompiledSizes` as GTest
   XML properties:
@@ -83,10 +99,15 @@ How the comparisons work:
     `sizeofLiveReplayEntry`, `sizeofSnapshotPayloadRef`);
   - a same-build mirror of the previous entry layout (`sizeofPreProvenanceEntryMirror`,
     `liveEntryDeltaVsMirror`);
-  - the held capacities and the bounds derived from them.
+  - logical counts read after admission (`liveEntries`, `heldEntries`, `metadataEntries`,
+    `maxMetadataEntries`, `packetCap`);
+  - measured held capacities (`heldProvenanceCapacity`, `heldPayloadCapacity`,
+    `heldProvenanceCapacityBytes`);
+  - the logical live delta (`liveEntryDeltaLogicalBytes`, which is count × the per-entry delta, not
+    an allocation).
 
-  These are `sizeof` and vector-capacity facts for one compiler and build. They do not cover
-  allocator overhead, heap totals or process RSS.
+  These are `sizeof`, logical-count and measured-capacity facts for one compiler and build. They
+  do not cover allocator overhead, deque block allocation, heap totals or process RSS.
 
 ## Not covered
 
