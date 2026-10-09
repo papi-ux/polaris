@@ -142,9 +142,12 @@ FFmpeg. Each case then:
 - feeds 8 deterministic 64×64 YUV420P frames, with explicit single-threaded operation, no B-frames,
   a key frame every 4 frames and scene cut disabled;
 - drains the encoder with bounded send, receive and flush calls;
-- repeats the identical run and requires byte-identical packets.
+- checks a positive baseline on the first run: 8 non-empty, size-capped packets in input order,
+  with key frames exactly at 0 and 4;
+- only then repeats the identical run, and requires byte-identical packets.
 
-It records the options, the return codes, and each packet's size, flags, DTS and SHA-256 as GTest XML
+For both runs, it records the options and every dictionary-set, open, send, receive and flush result,
+plus each packet's size, flags, DTS and SHA-256, as GTest XML
 properties and in one console line, `POLARIS_RECORDER_ENCODER_FIXTURE_JSON {...}`. Each packet's PTS
 is recorded too. It is the fixture's own synthetic frame counter: not producer provenance and not a
 presentation time.

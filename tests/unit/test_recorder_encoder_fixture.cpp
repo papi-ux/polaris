@@ -3,11 +3,13 @@
  * @brief Bounded in-process libx264/libx265 CPU encoder fixtures for the recorder's media work (#363).
  *
  * Each case opens one named software encoder from the linked FFmpeg, feeds it a fixed number of
- * deterministic YUV420P frames with explicit single-thread, no-B-frame, fixed closed-GOP and
- * scene-cut-disabled settings, drains it with a bounded send/receive/flush loop, and then repeats
- * the identical run and compares every packet's bytes. Every option-set return code, the open
- * result, leftover options and each packet's size, flags, synthetic PTS/DTS and SHA-256 are
- * recorded as GTest XML properties and in one matching console JSON line.
+ * deterministic YUV420P frames with explicit single-thread, no-B-frame, fixed key-frame interval and
+ * scene-cut-disabled settings, and drains it with a bounded send/receive/flush loop. The first run
+ * must pass a positive baseline (packet count, non-empty bounded payloads, order, key-frame
+ * placement, hashes) before an identical repeat run starts; the repeat must match byte for byte.
+ * Every dictionary-set, open, send, receive and flush result of both runs, and each packet's size,
+ * flags, synthetic PTS, DTS and SHA-256, is recorded as GTest XML properties and in one matching
+ * console JSON line, before any assertion, so a failing run still leaves its evidence.
  *
  * This is an encoder baseline only. Nothing here decodes, parses bitstream structure, touches the
  * recorder, or claims a playable file. The PTS values are the fixture's own frame counter, not
@@ -44,6 +46,8 @@ namespace {
   constexpr int k_gop = 4;     ///< keyint 4 with scene cut disabled: a key frame every 4 frames
   /// Upper bound on receive calls per run: one per frame, a few EAGAINs, the flush and EOF.
   constexpr int k_max_receive_calls = 4 * k_frames + 8;
+  /// Generous per-packet cap for 64x64 frames; a larger or empty payload is invalid here.
+  constexpr int k_max_packet_bytes = 1 << 20;
 
   struct encoder_spec_t {
     const char *name;     ///< The encoder looked up by name
@@ -101,15 +105,28 @@ namespace {
     std::vector<std::uint8_t> bytes;
   };
 
+  /// Everything one run observed. Codes are the raw FFmpeg return values.
   struct run_t {
-    std::vector<std::pair<std::string, int>> option_returns;  ///< av_dict_set results, in order
-    int open_return = 0;
+    bool attempted = false;
+    std::vector<std::pair<std::string, int>> dict_set_returns;  ///< av_dict_set results (dictionary only)
+    int open_return = 1;      ///< 1 until avcodec_open2 was called
     int leftover_options = -1;
+    int flush_return = 1;     ///< 1 until the flush was sent
+    int terminal_receive = 1; ///< The receive result that ended the final drain
     int receive_calls = 0;
-    int flush_return = 0;
-    int terminal_receive = 0;  ///< The receive result that ended the drain (AVERROR_EOF)
+    std::vector<std::string> calls;  ///< Every send/receive/flush, in order, with its result
     std::vector<packet_record_t> packets;
   };
+
+  std::string code_text(int code) {
+    if (code == AVERROR(EAGAIN)) {
+      return "EAGAIN";
+    }
+    if (code == AVERROR_EOF) {
+      return "EOF";
+    }
+    return std::to_string(code);
+  }
 
   std::string sha256_hex(const std::uint8_t *data, std::size_t size) {
     std::unique_ptr<AVSHA, sha_deleter> sha {av_sha_alloc()};
@@ -142,14 +159,23 @@ namespace {
     }
   }
 
-  /// Drain every packet available now; returns the receive result that stopped it.
+  /// Drain every packet available now. Returns the receive result that stopped it, or
+  /// AVERROR_INVALIDDATA for an invalid packet, or AVERROR(ERANGE) when the bound is reached.
   int drain(AVCodecContext *ctx, AVPacket *packet, run_t &run) {
     while (run.receive_calls < k_max_receive_calls) {
       ++run.receive_calls;
       const int ret = avcodec_receive_packet(ctx, packet);
       if (ret < 0) {
+        run.calls.push_back("receive=" + code_text(ret));
         return ret;  // AVERROR(EAGAIN), AVERROR_EOF or a real error
       }
+      // Validate before any pointer arithmetic or hashing.
+      if (!packet->data || packet->size <= 0 || packet->size > k_max_packet_bytes) {
+        run.calls.push_back("receive=invalid-packet size " + std::to_string(packet->size));
+        av_packet_unref(packet);
+        return AVERROR_INVALIDDATA;
+      }
+      run.calls.push_back("receive=0 size " + std::to_string(packet->size));
       packet_record_t record;
       record.size = packet->size;
       record.flags = packet->flags;
@@ -160,15 +186,22 @@ namespace {
       run.packets.push_back(std::move(record));
       av_packet_unref(packet);
     }
-    return AVERROR(ERANGE);  // The bound was reached: reported as a failure by the caller
+    run.calls.push_back("receive=bound reached");
+    return AVERROR(ERANGE);
   }
 
-  /// One complete bounded run of `spec`. Fatal problems are reported through gtest assertions.
-  void encode_run(const encoder_spec_t &spec, run_t &run) {
+  /// One complete bounded run of `spec`. Returns an empty string on success, else the reason.
+  /// It asserts nothing, so the caller can record the evidence first.
+  std::string encode_run(const encoder_spec_t &spec, run_t &run) {
+    run.attempted = true;
     const AVCodec *codec = avcodec_find_encoder_by_name(spec.name);
-    ASSERT_NE(codec, nullptr) << spec.name << " is not registered in the linked FFmpeg (dependency finding)";
+    if (!codec) {
+      return std::string {spec.name} + " is not registered in the linked FFmpeg (dependency finding)";
+    }
     std::unique_ptr<AVCodecContext, context_deleter> ctx {avcodec_alloc_context3(codec)};
-    ASSERT_NE(ctx, nullptr) << "context allocation failed";
+    if (!ctx) {
+      return "context allocation failed";
+    }
     ctx->width = k_width;
     ctx->height = k_height;
     ctx->pix_fmt = AV_PIX_FMT_YUV420P;
@@ -181,50 +214,104 @@ namespace {
     AVDictionary *raw = nullptr;
     for (const auto &[key, value] : {std::pair {"preset", spec.preset}, std::pair {"tune", spec.tune},
                                      std::pair {spec.params_key, spec.params_value}}) {
-      run.option_returns.emplace_back(key, av_dict_set(&raw, key, value, 0));
+      run.dict_set_returns.emplace_back(key, av_dict_set(&raw, key, value, 0));
     }
     std::unique_ptr<AVDictionary, dict_deleter> options {raw};
-    for (const auto &[key, ret] : run.option_returns) {
-      ASSERT_GE(ret, 0) << "av_dict_set " << key;
+    for (const auto &[key, ret] : run.dict_set_returns) {
+      if (ret < 0) {
+        return std::string {"av_dict_set "} + key + " returned " + std::to_string(ret);
+      }
     }
 
     AVDictionary *remaining = options.release();
     run.open_return = avcodec_open2(ctx.get(), codec, &remaining);
     options.reset(remaining);
     run.leftover_options = av_dict_count(options.get());
-    char error[AV_ERROR_MAX_STRING_SIZE] {};
-    av_strerror(run.open_return, error, sizeof error);
-    ASSERT_EQ(run.open_return, 0) << spec.name << " failed to open: " << error << " (dependency finding)";
-    ASSERT_EQ(run.leftover_options, 0) << "an option was not consumed by " << spec.name;
+    if (run.open_return != 0) {
+      char error[AV_ERROR_MAX_STRING_SIZE] {};
+      av_strerror(run.open_return, error, sizeof error);
+      return std::string {spec.name} + " failed to open: " + error + " (dependency finding)";
+    }
+    if (run.leftover_options != 0) {
+      return std::string {"an option was not consumed by "} + spec.name;
+    }
 
     std::unique_ptr<AVFrame, frame_deleter> frame {av_frame_alloc()};
     std::unique_ptr<AVPacket, packet_deleter> packet {av_packet_alloc()};
-    ASSERT_NE(frame, nullptr);
-    ASSERT_NE(packet, nullptr);
+    if (!frame || !packet) {
+      return "frame or packet allocation failed";
+    }
     frame->format = AV_PIX_FMT_YUV420P;
     frame->width = k_width;
     frame->height = k_height;
-    ASSERT_EQ(av_frame_get_buffer(frame.get(), 0), 0);
+    if (av_frame_get_buffer(frame.get(), 0) != 0) {
+      return "frame buffer allocation failed";
+    }
 
     for (int i = 0; i < k_frames; ++i) {
-      ASSERT_EQ(av_frame_make_writable(frame.get()), 0);
+      if (av_frame_make_writable(frame.get()) != 0) {
+        return "frame not writable at " + std::to_string(i);
+      }
       fill_frame(frame.get(), i);
       frame->pts = i;  // Synthetic fixture counter, not producer provenance or presentation time
       int sent = avcodec_send_frame(ctx.get(), frame.get());
+      run.calls.push_back("send" + std::to_string(i) + "=" + code_text(sent));
       if (sent == AVERROR(EAGAIN)) {
         // The encoder wants output read first: drain once, then the same frame must be accepted.
-        const int drained = drain(ctx.get(), packet.get(), run);
-        ASSERT_EQ(drained, AVERROR(EAGAIN)) << "unexpected receive result while making room";
+        const int made_room = drain(ctx.get(), packet.get(), run);
+        if (made_room != AVERROR(EAGAIN)) {
+          return "receive while making room ended with " + code_text(made_room);
+        }
         sent = avcodec_send_frame(ctx.get(), frame.get());
+        run.calls.push_back("resend" + std::to_string(i) + "=" + code_text(sent));
       }
-      ASSERT_EQ(sent, 0) << "send_frame " << i;
+      if (sent != 0) {
+        return "send_frame " + std::to_string(i) + " returned " + code_text(sent);
+      }
       const int drained = drain(ctx.get(), packet.get(), run);
-      ASSERT_EQ(drained, AVERROR(EAGAIN)) << "receive after frame " << i << " ended with " << drained;
+      if (drained != AVERROR(EAGAIN)) {
+        return "receive after frame " + std::to_string(i) + " ended with " + code_text(drained);
+      }
     }
     run.flush_return = avcodec_send_frame(ctx.get(), nullptr);
-    ASSERT_EQ(run.flush_return, 0) << "flush";
+    run.calls.push_back("flush=" + code_text(run.flush_return));
+    if (run.flush_return != 0) {
+      return "flush returned " + code_text(run.flush_return);
+    }
     run.terminal_receive = drain(ctx.get(), packet.get(), run);
-    ASSERT_EQ(run.terminal_receive, AVERROR_EOF) << "the drain must end at EOF within the bound";
+    if (run.terminal_receive != AVERROR_EOF) {
+      return "the final drain ended with " + code_text(run.terminal_receive) + " instead of EOF";
+    }
+    return {};
+  }
+
+  /// The positive baseline the configuration justifies: no B-frames and no dropped frames, so one
+  /// packet per input frame in input order; keyint 4 with scene cut off, so key frames exactly at
+  /// 0 and 4. DTS is only required to increase and not exceed PTS. Empty string when it holds.
+  std::string validate_baseline(const run_t &run) {
+    if (run.packets.size() != static_cast<std::size_t>(k_frames)) {
+      return "expected " + std::to_string(k_frames) + " packets, got " + std::to_string(run.packets.size());
+    }
+    for (int i = 0; i < k_frames; ++i) {
+      const auto &p = run.packets[i];
+      const std::string at = " at packet " + std::to_string(i);
+      if (p.size <= 0 || p.size > k_max_packet_bytes || static_cast<std::size_t>(p.size) != p.bytes.size()) {
+        return "invalid size" + at;
+      }
+      if (p.pts != i) {
+        return "synthetic PTS out of order" + at;
+      }
+      if (p.dts > p.pts || (i > 0 && p.dts <= run.packets[i - 1].dts)) {
+        return "DTS not increasing or above PTS" + at;
+      }
+      if (((p.flags & AV_PKT_FLAG_KEY) != 0) != (i % k_gop == 0)) {
+        return "key-frame flag not at the configured interval" + at;
+      }
+      if (p.sha256.size() != 64) {
+        return "missing SHA-256" + at;
+      }
+    }
+    return {};
   }
 
   std::string json_string(std::string_view text) {
@@ -244,15 +331,51 @@ namespace {
     return out + "\"";
   }
 
-  /// Record everything observed, identically as XML properties and one console JSON line. Called
-  /// before any positive assertion, so a failing run still leaves its evidence.
-  void record_evidence(const encoder_spec_t &spec, const run_t &first, const run_t *repeat, bool repeat_identical) {
+  void add_run(std::vector<std::pair<std::string, std::string>> &properties, const std::string &prefix, const run_t &run,
+               const std::string &result) {
+    const auto add = [&properties, &prefix](const std::string &key, std::string value) {
+      properties.emplace_back(prefix + key, std::move(value));
+    };
+    add("Attempted", run.attempted ? "1" : "0");
+    add("Result", result.empty() ? (run.attempted ? "ok" : "not run") : result);
+    for (std::size_t i = 0; i < 3; ++i) {
+      add("AvDictSetReturn" + std::to_string(i),
+          i < run.dict_set_returns.size() ? run.dict_set_returns[i].first + "=" + std::to_string(run.dict_set_returns[i].second) : "not reached");
+    }
+    add("OpenReturn", run.open_return == 1 ? "not reached" : std::to_string(run.open_return));
+    add("LeftoverOptions", run.leftover_options < 0 ? "not reached" : std::to_string(run.leftover_options));
+    add("FlushReturn", run.flush_return == 1 ? "not reached" : code_text(run.flush_return));
+    add("TerminalReceive", run.terminal_receive == 1 ? "not reached" : code_text(run.terminal_receive));
+    add("ReceiveCalls", std::to_string(run.receive_calls));
+    std::string calls;
+    for (std::size_t i = 0; i < run.calls.size(); ++i) {
+      calls += (i ? ";" : "") + run.calls[i];
+    }
+    add("CallSequence", calls);
+    add("PacketCount", std::to_string(run.packets.size()));
+    for (std::size_t i = 0; i < run.packets.size(); ++i) {
+      const auto &p = run.packets[i];
+      const std::string k = "Packet" + std::to_string(i);
+      add(k + "Size", std::to_string(p.size));
+      add(k + "Key", (p.flags & AV_PKT_FLAG_KEY) ? "1" : "0");
+      add(k + "Flags", std::to_string(p.flags));
+      add(k + "SyntheticPts", std::to_string(p.pts));
+      add(k + "Dts", std::to_string(p.dts));
+      add(k + "Sha256", p.sha256);
+    }
+  }
+
+  /// Record everything observed, identically as XML properties and one console JSON line.
+  void record_evidence(const encoder_spec_t &spec, const run_t &first, const std::string &first_result,
+                       const std::string &baseline, const run_t &repeat, const std::string &repeat_result,
+                       const std::string &comparison) {
     std::vector<std::pair<std::string, std::string>> properties;
     const auto add = [&properties](std::string key, std::string value) {
       properties.emplace_back(std::move(key), std::move(value));
     };
     add("scope", "in-process CPU encoder baseline; no decode, structure parse, recorder or playback claim");
     add("ptsNote", "fixture-assigned synthetic frame counter; not producer provenance or presentation time");
+    add("dictSetNote", "av_dict_set results only populate the options dictionary; the encoder validates them at open");
     add("encoder", spec.name);
     add("optionPreset", spec.preset);
     add("optionTune", spec.tune);
@@ -263,27 +386,12 @@ namespace {
     add("contextThreadCount", "1");
     add("inputFrames", std::to_string(k_frames));
     add("inputSize", std::to_string(k_width) + "x" + std::to_string(k_height) + " yuv420p");
-    for (std::size_t i = 0; i < first.option_returns.size(); ++i) {
-      add("optionSetReturn" + std::to_string(i), first.option_returns[i].first + "=" + std::to_string(first.option_returns[i].second));
-    }
-    add("openReturn", std::to_string(first.open_return));
-    add("leftoverOptions", std::to_string(first.leftover_options));
-    add("flushReturn", std::to_string(first.flush_return));
-    add("terminalReceive", first.terminal_receive == AVERROR_EOF ? "AVERROR_EOF" : std::to_string(first.terminal_receive));
-    add("receiveCalls", std::to_string(first.receive_calls));
-    add("packetCount", std::to_string(first.packets.size()));
-    for (std::size_t i = 0; i < first.packets.size(); ++i) {
-      const auto &p = first.packets[i];
-      const std::string k = "packet" + std::to_string(i);
-      add(k + "Size", std::to_string(p.size));
-      add(k + "Key", (p.flags & AV_PKT_FLAG_KEY) ? "1" : "0");
-      add(k + "Flags", std::to_string(p.flags));
-      add(k + "SyntheticPts", std::to_string(p.pts));
-      add(k + "Dts", std::to_string(p.dts));
-      add(k + "Sha256", p.sha256);
-    }
-    add("repeatRunPacketCount", repeat ? std::to_string(repeat->packets.size()) : "not run");
-    add("repeatRunIdentical", repeat ? (repeat_identical ? "1" : "0") : "not run");
+    add("maxReceiveCallsPerRun", std::to_string(k_max_receive_calls));
+    add("maxPacketBytes", std::to_string(k_max_packet_bytes));
+    add_run(properties, "run1", first, first_result);
+    add("baselineResult", !first.attempted || !first_result.empty() ? "not evaluated" : (baseline.empty() ? "ok" : baseline));
+    add_run(properties, "run2", repeat, repeat_result);
+    add("repeatComparison", comparison);
 
     std::set<std::string> keys;
     std::string json = "{";
@@ -298,41 +406,36 @@ namespace {
 
   void check_and_record(const encoder_spec_t &spec) {
     run_t first;
-    encode_run(spec, first);
-    if (::testing::Test::HasFatalFailure()) {
-      record_evidence(spec, first, nullptr, false);
-      return;
-    }
-    run_t repeat;
-    encode_run(spec, repeat);
-    // The repeated, identically configured run must produce the same packets, byte for byte.
-    bool repeat_identical = !::testing::Test::HasFatalFailure() && repeat.packets.size() == first.packets.size();
-    for (std::size_t i = 0; repeat_identical && i < first.packets.size(); ++i) {
-      const auto &a = first.packets[i];
-      const auto &b = repeat.packets[i];
-      repeat_identical = a.bytes == b.bytes && a.flags == b.flags && a.pts == b.pts && a.dts == b.dts;
-    }
-    record_evidence(spec, first, &repeat, repeat_identical);
-    if (::testing::Test::HasFatalFailure()) {
-      return;
-    }
-    EXPECT_TRUE(repeat_identical) << "the repeated run produced different packets";
-    EXPECT_EQ(repeat.packets.size(), first.packets.size());
+    const std::string first_result = encode_run(spec, first);
+    const std::string baseline = first_result.empty() ? validate_baseline(first) : std::string {};
 
-    // Justified by the configuration: no B-frames and no dropped frames, so one packet per input
-    // frame in input order; keyint 4 with scene cut off, so key frames exactly at 0 and 4.
-    ASSERT_EQ(first.packets.size(), static_cast<std::size_t>(k_frames));
-    for (int i = 0; i < k_frames; ++i) {
-      const auto &p = first.packets[i];
-      EXPECT_GT(p.size, 0) << "packet " << i;
-      EXPECT_EQ(p.pts, i) << "packet " << i;
-      EXPECT_LE(p.dts, p.pts) << "packet " << i;
-      if (i > 0) {
-        EXPECT_GT(p.dts, first.packets[i - 1].dts) << "packet " << i;
+    // The repeat starts only once the first run's positive baseline holds.
+    run_t repeat;
+    std::string repeat_result;
+    std::string comparison = "not run";
+    if (first_result.empty() && baseline.empty()) {
+      repeat_result = encode_run(spec, repeat);
+      if (repeat_result.empty()) {
+        comparison = "identical";
+        if (repeat.packets.size() != first.packets.size()) {
+          comparison = "packet count differs";
+        }
+        for (std::size_t i = 0; comparison == "identical" && i < first.packets.size(); ++i) {
+          const auto &a = first.packets[i];
+          const auto &b = repeat.packets[i];
+          if (a.bytes != b.bytes || a.flags != b.flags || a.pts != b.pts || a.dts != b.dts) {
+            comparison = "packet " + std::to_string(i) + " differs";
+          }
+        }
       }
-      EXPECT_EQ((p.flags & AV_PKT_FLAG_KEY) != 0, i % k_gop == 0) << "packet " << i;
-      EXPECT_EQ(p.sha256.size(), 64u) << "packet " << i;
     }
+
+    record_evidence(spec, first, first_result, baseline, repeat, repeat_result, comparison);
+
+    ASSERT_EQ(first_result, "") << "first run";
+    ASSERT_EQ(baseline, "") << "first-run positive baseline";
+    ASSERT_EQ(repeat_result, "") << "repeat run";
+    EXPECT_EQ(comparison, "identical") << "the repeated run must reproduce every packet byte for byte";
   }
 }  // namespace
 
