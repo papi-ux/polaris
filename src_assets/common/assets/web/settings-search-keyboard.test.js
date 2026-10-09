@@ -19,6 +19,7 @@ const i18n = {
 }
 
 let wrapper
+const NO_MATCH_QUERY = 'qxzvjkqp'
 
 function mountConfigView(stubOverrides = {}) {
   global.fetch = vi.fn(() => Promise.resolve({
@@ -130,8 +131,11 @@ describe('settings search keyboard and accessibility', () => {
     await settle()
     const input = wrapper.get('[data-settings-search]')
     input.element.focus()
-    await input.setValue('zzzz-no-such-setting')
+    // One token that appears in no tab, option, label or alias, so this really is a no-match.
+    await input.setValue(NO_MATCH_QUERY)
     await settle()
+    expect(wrapper.text()).toContain(en.config.search_empty_heading)
+    expect(wrapper.find('.settings-tab-content').exists()).toBe(false)
     const tabBefore = wrapper.vm.currentTab
     await input.trigger('keydown', { key: 'Enter' })
     await settle()
@@ -155,6 +159,9 @@ describe('settings search keyboard and accessibility', () => {
         </div>`,
       },
     })
+    await settle()
+    // The fixture lives on the Advanced tab, as legacy_ordering does; open that tab before reaching into it.
+    wrapper.vm.currentTab = 'advanced'
     await settle()
     const outer = wrapper.get('[data-outer]').element
     const inner = wrapper.get('[data-inner]').element

@@ -4,8 +4,12 @@ import { readFileSync } from 'node:fs'
 // The rendered English strings, so a locator can never drift from the real label again.
 const en = JSON.parse(readFileSync(new URL('../../src_assets/common/assets/web/public/assets/locale/en.json', import.meta.url), 'utf8'))
 
-async function mockHost(page, { activeSpace = false } = {}) {
-  await page.addInitScript(() => {
+const idleStats = { streaming: false }
+// A live host stream, as the dashboard sees one in production and in its mounted test.
+const liveStats = { streaming: true, fps: 60, bitrate_kbps: 10000, encode_time_ms: 2, latency_ms: 5, packet_loss: 0 }
+
+async function mockHost(page, { activeSpace = false, stats = idleStats } = {}) {
+  await page.addInitScript((initialStats) => {
     window.__pads = []
     window.__pulses = 0
     Object.defineProperty(navigator, 'getGamepads', { configurable: true, value: () => window.__pads })
@@ -13,12 +17,12 @@ async function mockHost(page, { activeSpace = false } = {}) {
       constructor() {
         this.timer = setInterval(() => {
           this.onopen?.({})
-          this.onmessage?.({ data: JSON.stringify({ streaming: false }) })
+          this.onmessage?.({ data: JSON.stringify(initialStats) })
         }, 250)
       }
       close() { clearInterval(this.timer) }
     }
-  })
+  }, stats)
   await page.route('**/api/**', async route => {
     const request = route.request(), path = new URL(request.url()).pathname
     // A UI-only smoke test has no reason to mutate even its mock host.
@@ -37,6 +41,7 @@ async function mockHost(page, { activeSpace = false } = {}) {
     if (path === '/api/apps') return route.fulfill({ json: { status: true, apps: [], current_app: '' } })
     if (path === '/api/logs') return route.fulfill({ body: '' })
     if (path === '/api/ai/history' || path === '/api/ai/cache') return route.fulfill({ json: [] })
+    if (path === '/api/stats/stream') return route.fulfill({ json: stats })
     return route.fulfill({ json: { status: true, streaming: false } })
   })
 }
@@ -63,9 +68,13 @@ for (const width of [390, 1280]) {
     await search.press('Escape')
     await expect(search).toHaveValue('')
     await expect(search).toBeFocused()
-    await search.fill('zzzz-no-such-setting')
+    // One token that appears in no setting; a broader made-up query can still match common words.
+    await search.fill('qxzvjkqp')
+    await expect(page.getByRole('heading', { name: en.config.search_empty_heading, exact: true })).toBeVisible()
+    await expect(page.locator('.settings-tab-content')).toHaveCount(0)
     await search.press('Enter')
     await expect(search).toBeFocused()
+    await expect(search).toHaveValue('qxzvjkqp')
     await search.fill('')
     await fits(page.locator('.settings-command-bar'), width)
     await page.locator('.settings-command-bar').screenshot({ path: `test-results/polaris-search-keyboard-${width}.png` })
@@ -120,7 +129,7 @@ for (const width of [390, 1280]) {
 
   test(`blocked display preview exposes its existing reason at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 960 })
-    await mockHost(page, { activeSpace: true })
+    await mockHost(page, { activeSpace: true, stats: liveStats })
     await page.goto('/#/')
     const preview = page.getByRole('button', { name: en.dashboard.show_display, exact: true })
     await expect(preview).toBeDisabled()

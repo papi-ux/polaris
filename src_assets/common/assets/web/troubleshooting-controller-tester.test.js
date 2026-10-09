@@ -19,6 +19,9 @@ const t = (key, params = {}) => {
   return value.replace(/\{(\w+)\}/g, (_, name) => String(params[name] ?? ''))
 }
 
+const emptyLogTail = { status: true, schema_version: 1, content_encoding: 'base64', content: '', content_bytes: 0,
+  start_offset: 0, end_offset: 0, generation: 0, truncated: false, reset: true }
+
 // The browser's own list, which only changes when a controller connects or disconnects.
 let pads = []
 const gamepad = (vibrates) => ({
@@ -53,7 +56,8 @@ describe('controller tester in the production troubleshooting view', () => {
     toasts.toast = vi.fn()
     pads = []
     Object.defineProperty(navigator, 'getGamepads', { configurable: true, value: () => pads })
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({}), text: async () => '' })))
+    // The log panel polls the log tail; answer it with a valid empty tail (log-tail-state.js schema 1).
+    vi.stubGlobal('fetch', vi.fn(async (url) => ({ ok: true, json: async () => (String(url).includes('/diagnostics/logs/tail') ? emptyLogTail : {}), text: async () => '' })))
   })
 
   afterEach(() => {
