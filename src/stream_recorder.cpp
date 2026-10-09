@@ -571,7 +571,8 @@ namespace stream_recorder {
     }
     auto &writer = *continuous_writer;
     {
-      // A failed or stopping writer refuses every decision for the owner, before anything else.
+      // A failed or stopping writer refuses every decision for the owner, before the awaiting and
+      // rate checks: a failed file records no discontinuity, so its refusal must be counted here.
       std::lock_guard guard(writer.lock);
       if (writer.failed || writer.stop_requested) {
         ++keyframe_file.refused_writer_unavailable;
@@ -1490,7 +1491,12 @@ namespace stream_recorder {
       return sequence;
     }
 
-    /// Raise a decided request (no recorder lock held), then count how it ended.
+    /**
+     * Raise a decided request (no recorder lock held), then count how it ended. Every caller
+     * holds `mutex` only in a scope that has ended before this call: push_packet_core()'s
+     * lock_guard (destroyed at its return), the braced lock_guard blocks of session_started()
+     * and session_ended(), and start_recording()'s explicit unlock.
+     */
     void keyframe_dispatch(keyframe_pending_t pending) {
       if (!pending.channel) {
         return;
@@ -2031,7 +2037,8 @@ namespace stream_recorder {
   void push_packet(const uint8_t *data, size_t size, bool is_video, bool is_keyframe, int64_t pts,
                    std::uint64_t session_generation, int video_format) {
     // Production: admission only, never a wait for the writer. A request (none in production,
-    // where no session has a channel) is raised after the recorder lock was released.
+    // where no session has a channel) is raised after the recorder lock was released: that lock
+    // is push_packet_core()'s scoped lock_guard, destroyed when push_packet_core() returns.
     auto admitted = push_packet_core(data, size, is_video, is_keyframe, pts, session_generation, video_format,
                                      std::chrono::steady_clock::now());
     keyframe_dispatch(std::move(admitted.keyframe));
@@ -2041,7 +2048,7 @@ namespace stream_recorder {
                               std::uint64_t session_generation, int video_format,
                               std::chrono::steady_clock::time_point now) {
     auto admitted = push_packet_core(data, size, is_video, is_keyframe, pts, session_generation, video_format, now);
-    keyframe_dispatch(std::move(admitted.keyframe));
+    keyframe_dispatch(std::move(admitted.keyframe));  // push_packet_core()'s lock is gone, as above
     if (admitted.sequence == 0) {
       return;
     }

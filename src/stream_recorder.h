@@ -583,9 +583,13 @@ namespace stream_recorder {
     /**
      * Keyframe request seams for tests: they only pause or observe a request, never change it.
      * before_dispatch runs after the recorder lock is released and before the request gate;
+     * after_dispatch runs after the gate is released and before the recorder lock is retaken.
+     * Both hold no recorder lock: they may wait on test state and call keyframe_stats_for_tests()
+     * or recorder_status(), and nothing else of the recorder.
      * after_raise runs inside the real request, right after the event was raised, while the
-     * request gate is held; after_dispatch runs with no lock held. None may call a recorder
-     * function except after_raise and after_dispatch, which run with no recorder lock.
+     * request gate and the channel's lock are held. It may only wait on test state and call
+     * recorder_status() or recorder_mutex_try_lock_for_tests(): keyframe_stats_for_tests() takes
+     * the request gate and would deadlock, and no lifecycle, start, stop or packet entry is safe.
      */
     struct keyframe_hooks_t {
       std::function<void(const keyframe_token_t &)> before_dispatch;
