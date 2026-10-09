@@ -103,6 +103,10 @@ namespace confighttp {
     const std::string &cert, const std::string &key,
     const std::function<void(unsigned short, std::function<void()>)> &ready
   );
+  // Configure only before starting a test listener; reset after its owned drain.
+  void set_recording_post_for_tests(std::function<void(std::function<void()>)> post);
+  void set_recording_commit_observer_for_tests(std::function<void()> observer);
+  void set_recording_before_launch_for_tests(std::function<void()> hook);
 #endif
 
   /**

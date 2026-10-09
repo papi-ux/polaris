@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <functional>
 #include <mutex>
+#include <memory>
 #include <optional>
 #include <system_error>
 #include <string>
@@ -226,6 +227,59 @@ namespace stream_recorder {
     /// save_replay_at() with its outcome. save_replay_at() returns `path` only when saved.
     save_result_t save_replay_result_at(std::chrono::steady_clock::time_point now);
 
+    struct save_admission_t;
+
+    /**
+     * Move-only owner of one admitted replay save: its captured snapshot (payload references
+     * and save accounting) and the one-save-at-a-time reservation. Any thread may own, move,
+     * complete or drop it. Dropping or completing it releases the snapshot and its accounting
+     * first, then the reservation, exactly once; a moved-from handle owns nothing.
+     */
+    class admitted_save_t {
+    public:
+      admitted_save_t() noexcept;
+      admitted_save_t(admitted_save_t &&other) noexcept;
+      admitted_save_t &operator=(admitted_save_t &&other) noexcept;
+      admitted_save_t(const admitted_save_t &) = delete;
+      admitted_save_t &operator=(const admitted_save_t &) = delete;
+      ~admitted_save_t();
+
+      /// True while it owns an admitted save.
+      explicit operator bool() const noexcept;
+
+    private:
+      struct state_t;
+      explicit admitted_save_t(std::unique_ptr<state_t> state) noexcept;
+      std::unique_ptr<state_t> state_;
+
+      friend save_admission_t admit_replay_save(std::chrono::steady_clock::time_point now);
+      friend save_result_t complete_replay_save(admitted_save_t save);
+    };
+
+    /// The outcome of admission. `save` owns the captured run only when `result.admitted`.
+    struct save_admission_t {
+      /// busy, disabled, empty or storage_error (admission failed) with admitted=false; or, when
+      /// admitted, the captured fields (packets, bytes, keyframes, span, codec, generation) with
+      /// admitted=true and no storage outcome yet.
+      save_result_t result;
+      admitted_save_t save;
+    };
+
+    /**
+     * Admit a save without storing it: refuse at once when another save holds the reservation,
+     * then, under the recorder lock, refuse a disabled or empty buffer and otherwise capture the
+     * run (payload references, accounting). Fast; no filesystem work.
+     */
+    save_admission_t admit_replay_save(std::chrono::steady_clock::time_point now);
+
+    /**
+     * Store an admitted save (any thread, no recorder lock), then release its snapshot and
+     * accounting and then its reservation. The result keeps the captured fields; once the file
+     * is published, later diagnostics cannot change it. An empty handle is a storage_error with
+     * admitted=false and touches nothing.
+     */
+    save_result_t complete_replay_save(admitted_save_t save);
+
 #ifdef POLARIS_TESTS
     /// Replace the hard caps (tests only); clears the run.
     void set_replay_limits_for_tests(std::size_t max_bytes, std::size_t max_packets);
@@ -240,6 +294,11 @@ namespace stream_recorder {
     struct save_hooks_t {
       std::function<std::string()> name_stamp;
       std::function<void()> after_snapshot_payloads;  ///< Admission fault boundary, under the lock
+      /// Before the capture state of an eligible run is allocated, under the recorder lock (call
+      /// no recorder function from it). Never reached for busy, disabled or empty refusals.
+      std::function<void()> before_admission_allocation;
+      /// Just before the save reservation is released, with no recorder lock held.
+      std::function<void()> before_save_reservation_release;
       std::function<void(const std::filesystem::path &staging)> before_write;
       std::function<long long(int fd, const std::uint8_t *data, std::size_t size)> write;
       std::function<int(int fd)> sync;

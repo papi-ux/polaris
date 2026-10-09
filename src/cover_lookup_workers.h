@@ -79,35 +79,49 @@ namespace cover_lookup {
 
     admission_e submit(std::function<void()> task) {
       std::lock_guard lock(mutex_);
-      return submit_locked(std::move(task));
+      const auto available = prepare_locked();
+      if (available != admission_e::accepted) return available;
+      launch_locked(std::move(task));
+      return admission_e::accepted;
     }
 
     admission_e submit_completion(std::function<void(std::shared_ptr<completion_t>)> task) {
       std::lock_guard lock(mutex_);
+      const auto available = prepare_locked();
+      if (available != admission_e::accepted) return available;
+      // Every potentially allocating piece of bookkeeping exists before launch.
+      // Once async returns, both vector insertions are nonthrowing moves into
+      // reserved storage, so an accepted task can never lose its drain owner.
+      std::erase_if(completions_, [](const auto &weak) { return weak.expired(); });
+      completions_.reserve(completions_.size() + 1);
       auto ticket = std::make_shared<completion_t>(completion_gate_);
-      const auto admitted = submit_locked([ticket, task = std::move(task)]() mutable { task(ticket); });
-      if (admitted == admission_e::accepted) {
-        std::erase_if(completions_, [](const auto &weak) { return weak.expired(); });
-        completions_.push_back(ticket);
-      }
-      return admitted;
+      std::weak_ptr<completion_t> tracked = ticket;
+      std::function<void()> owned = [ticket, task = std::move(task)]() mutable { task(ticket); };
+      launch_locked(std::move(owned));
+      completions_.push_back(std::move(tracked));
+      return admission_e::accepted;
     }
 
     void stop_accepting() {
-      std::vector<std::shared_ptr<completion_t>> pending;
+      std::vector<std::weak_ptr<completion_t>> pending;
       {
         std::lock_guard lock(mutex_);
         accepting_ = false;
-        for (const auto &weak : completions_) if (auto ticket = weak.lock()) pending.push_back(std::move(ticket));
+        pending.swap(completions_); // No allocating strong-ticket list during shutdown.
       }
       {
         std::lock_guard gate_lock(completion_gate_->mutex);
         completion_gate_->open = false;
       }
-      for (const auto &ticket : pending) ticket->cancel();
+      for (const auto &weak : pending) if (auto ticket = weak.lock()) ticket->cancel();
     }
 
 #ifdef POLARIS_TESTS
+    void set_before_launch_for_tests(std::function<void()> hook) {
+      std::lock_guard lock(mutex_);
+      before_launch_ = std::move(hook);
+    }
+
     bool pending_for_tests() {
       std::lock_guard lock(mutex_);
       return std::any_of(tasks_.begin(), tasks_.end(), [](auto &task) {
@@ -129,7 +143,7 @@ namespace cover_lookup {
     }
 
   private:
-    admission_e submit_locked(std::function<void()> task) {
+    admission_e prepare_locked() {
       if (!accepting_) return admission_e::stopping;
       for (auto it = tasks_.begin(); it != tasks_.end();) {
         if (it->wait_for(std::chrono::seconds {0}) == std::future_status::ready) {
@@ -138,11 +152,18 @@ namespace cover_lookup {
         } else { ++it; }
       }
       if (tasks_.size() == capacity) return admission_e::full;
-      tasks_.emplace_back(std::async(std::launch::async, [task = std::move(task)]() mutable {
+      tasks_.reserve(capacity);
+      return admission_e::accepted;
+    }
+    void launch_locked(std::function<void()> task) {
+#ifdef POLARIS_TESTS
+      if (before_launch_) before_launch_();
+#endif
+      auto started = std::async(std::launch::async, [task = std::move(task)]() mutable {
         auto owned = std::move(task); // Release captures before a later reap.
         owned();
-      }));
-      return admission_e::accepted;
+      });
+      tasks_.push_back(std::move(started));
     }
     static void consume(std::future<void> &task) noexcept {
       try {
@@ -158,5 +179,8 @@ namespace cover_lookup {
     std::shared_ptr<completion_gate_t> completion_gate_ = std::make_shared<completion_gate_t>();
     std::vector<std::weak_ptr<completion_t>> completions_;
     std::vector<std::future<void>> tasks_;
+#ifdef POLARIS_TESTS
+    std::function<void()> before_launch_;
+#endif
   };
 }  // namespace cover_lookup

@@ -127,6 +127,7 @@ endif()
 
 set(TEST_FAST_SOURCES
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_lookup_workers.cpp
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_lookup_worker_admission.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_packet_owner.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_bounded_log_file.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_benchmark_control_contract.cpp
@@ -298,6 +299,7 @@ set(TEST_PAIRING_SOURCES
 )
 
 set(TEST_HTTP_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_recording_async_http.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_recording_status_http.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_apps_stats_contention.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_cover_lookup_routes.cpp
@@ -333,6 +335,7 @@ set(TEST_AUDIO_SOURCES
 )
 
 set(TEST_STREAM_SOURCES
+    ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_recorder_async.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_packet_owner.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_stream_packet_session.cpp
     ${CMAKE_SOURCE_DIR}/tests/unit/test_live_tuning.cpp
@@ -822,6 +825,11 @@ if (BUILD_FULL_TESTS)
     add_test(NAME polaris_recorder_replay_window
         COMMAND test_polaris_stream --gtest_filter=StreamRecorderReplayWindowTests.*)
     set_tests_properties(polaris_recorder_replay_window PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+    # Cross-thread admitted-save ownership must remain a portable required gate.
+    add_test(NAME polaris_recorder_replay_async
+        COMMAND test_polaris_stream --gtest_filter=RecorderAsyncSaveTests.*)
+    set_tests_properties(polaris_recorder_replay_async PROPERTIES
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND POLARIS_ENABLE_PYROWAVE)
         # These exercise the actual encode loop with an in-memory display and
