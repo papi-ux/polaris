@@ -209,6 +209,8 @@ namespace {
     return json_object_t {}
       .str("unit", "encoded video frame payload bytes, before RTP fragmentation")
       .num("frameIntervalNs", k_frame_interval_ns)
+      .str("arrivalClockNote", "reference artificial replay-arrival step; timings are unpaced wall-clock calls, not 60 fps playback")
+      .str("patternNote", "reference train; fixed-payload keyframe subrecords override this pattern")
       .num("keyframePeriodFrames", k_keyframe_period)
       .num("keyframeBytes", k_keyframe_bytes)
       .raw("dependentBytesCycle", json_numbers(dependent))
@@ -332,6 +334,7 @@ namespace {
       output = fs::path {dir} / ("recorder-cost-" + case_name + ".json");
       ASSERT_FALSE(fs::exists(fs::symlink_status(output, ec))) << "refusing to replace an existing output " << output;
       rss_before = max_rss_kib();
+      ASSERT_GE(rss_before, 0) << "getrusage failed before measurement";
     }
 
     void TearDown() override {
@@ -402,6 +405,8 @@ namespace {
         .flag("optimized", false);
 #endif
       json_object_t record;
+      const auto rss_after = max_rss_kib();
+      ASSERT_GE(rss_after, rss_before) << "getrusage failed or process high-water memory regressed";
       record.num("schema", 1).str("probe", "polaris-recorder-cost").str("case", case_name)
         .str("sourceSha", source_sha)
         .str("sourceShaOrigin", "caller-reported via POLARIS_RECORDER_COST_SOURCE_SHA; not proof of the compiled source")
@@ -423,7 +428,7 @@ namespace {
         .obj("memory", json_object_t {}
                          .str("note", "process high-water ru_maxrss in KiB, not current RSS and not recorder-only memory")
                          .raw("maxRssKiBBefore", std::to_string(rss_before))
-                         .raw("maxRssKiBAfter", std::to_string(max_rss_kib())));
+                         .raw("maxRssKiBAfter", std::to_string(rss_after)));
       const auto text = record.dump() + "\n";
       const int fd = ::open(output.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
       ASSERT_GE(fd, 0) << "could not create " << output << " exclusively: " << std::strerror(errno);
@@ -753,7 +758,8 @@ TEST_F(StreamRecorderCostProbe, KeyframeReservation) {
   invariant("unwired: no reservation", stats.reservations == 0 && stats.attempted == 0);
   invariant("unwired: every frame admitted, none dropped",
             stream_recorder::recorder_status().continuous.dropped_backpressure == 0);
-  subrecords.push_back(subrecord("unwired_owner_push", std::string {"owner frames in the writing state with no channel (production shape: early checks, no writer.lock)"} + std::string {drained}, unwired_ns).dump());
+  subrecords.push_back(subrecord("unwired_owner_push", std::string {"owner frames in the writing state with no channel (production shape: early checks, no writer.lock)"} + std::string {drained}, unwired_ns)
+                        .num("payloadBytes", dependent.bytes.size()).str("arrivalClock", "actual steady clock, unpaced").dump());
   stream_recorder::stop_recording();
   stream_recorder::detail::reset_replay_for_tests();
 
@@ -780,7 +786,8 @@ TEST_F(StreamRecorderCostProbe, KeyframeReservation) {
   invariant("fixture channel: writing frames reserve nothing", stats.reservations == before_dispatch && !event->peek());
   invariant("fixture channel: every frame admitted, none dropped",
             stream_recorder::recorder_status().continuous.dropped_backpressure == 0);
-  subrecords.push_back(subrecord("fixture_channel_owner_push", std::string {"owner frames in the writing state with a fixture channel (writer.lock per frame)"} + std::string {drained}, wired_ns).dump());
+  subrecords.push_back(subrecord("fixture_channel_owner_push", std::string {"owner frames in the writing state with a fixture channel (writer.lock per frame)"} + std::string {drained}, wired_ns)
+                        .num("payloadBytes", dependent.bytes.size()).str("arrivalClock", "actual steady clock, unpaced").dump());
 
   // (c) Fixture dispatch: each recovery keyframe is admitted and drained untimed, then one lost
   // frame is timed: its reservation and the raise of the fixture event, after the lock.
@@ -800,7 +807,8 @@ TEST_F(StreamRecorderCostProbe, KeyframeReservation) {
   invariant("fixture dispatch: one attempted raise per loss", stats.attempted - before_dispatch == warmup + samples &&
                                                                 latched == warmup + samples);
   invariant("fixture dispatch: nothing expired, stopped or fenced", stats.expired == 0 && stats.stopped == 0 && stats.fenced == 0);
-  subrecords.push_back(subrecord("fixture_dispatch", "a lost owner frame through production push_packet(): reservation plus raise of the fixture mail event (no encoder exists); each recovery keyframe admitted and drained untimed first", dispatch_ns).dump());
+  subrecords.push_back(subrecord("fixture_dispatch", "a lost owner frame through production push_packet(): reservation plus raise of the fixture mail event (no encoder exists); each recovery keyframe admitted and drained untimed first", dispatch_ns)
+                        .num("payloadBytes", 0).num("recoveryKeyframeBytes", keyframe.bytes.size()).str("arrivalClock", "actual steady clock, unpaced").dump());
   outcomes.flag("startRequestLatched", start_request).num("reservations", stats.reservations)
     .num("attempted", stats.attempted).num("fixtureEventsLatched", latched)
     .str("note", "fixture mail events only; no live keyframe request reaches an encoder or host");
