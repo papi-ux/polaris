@@ -47,7 +47,8 @@ namespace {
       config::sunshine.flags.reset(config::flag::FRESH_STATE);
       nvhttp::set_pairing_state_write_fault_for_tests(nvhttp::pairing_state_write_fault_t::none);
       nvhttp::reset_pairing_state_for_tests();
-      http::uuid = uuid_util::uuid_t::parse("12345678-1234-1234-1234-1234567890ab");
+      std::string host_uuid = "12345678-1234-1234-1234-1234567890ab";
+      http::uuid = uuid_util::uuid_t::parse(host_uuid);
       http::unique_id = http::uuid.string();
     }
 
