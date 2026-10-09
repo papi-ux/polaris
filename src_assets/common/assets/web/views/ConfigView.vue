@@ -898,7 +898,7 @@ const SEARCH_FOCUSABLE = 'input:not([type="hidden"]):not([disabled]), select:not
 
 async function focusTopSearchMatch(event) {
   // Enter that confirms an input-method composition (for example CJK text) is not a request to jump.
-  if (event?.isComposing) return
+  if (event?.isComposing || !normalizeSettingsSearchQuery(searchQuery.value)) return
   const top = searchResults.value[0]
   if (!top) return
   event?.preventDefault?.()

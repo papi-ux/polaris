@@ -94,6 +94,10 @@ for (const width of [390, 1280]) {
     const disclosures = page.locator('details.settings-disclosure')
     await expect(disclosures.filter({ has: field })).toHaveJSProperty('open', true)
     await expect(disclosures.filter({ has: page.locator('#capture') })).toHaveJSProperty('open', false)
+    await search.fill('')
+    await search.press('Enter')
+    await expect(search).toBeFocused()
+    await expect(field).toBeVisible()
   })
 
   test(`late controller detection and disabled rumble reasons at ${width}px`, async ({ page }) => {

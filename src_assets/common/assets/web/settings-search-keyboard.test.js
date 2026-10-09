@@ -143,6 +143,19 @@ describe('settings search keyboard and accessibility', () => {
     expect(document.activeElement).toBe(input.element)
   })
 
+  it('keeps the current section when Enter is pressed in an empty search', async () => {
+    mountConfigView()
+    await settle()
+    wrapper.vm.currentTab = 'advanced'
+    await settle()
+    const input = wrapper.get('[data-settings-search]')
+    input.element.focus()
+    await input.trigger('keydown', { key: 'Enter' })
+    await settle()
+    expect(wrapper.vm.currentTab).toBe('advanced')
+    expect(document.activeElement).toBe(input.element)
+  })
+
   it('opens the closed disclosures around a matched setting, outermost first, and only those', async () => {
     // The real Advanced tab keeps legacy_ordering inside a closed disclosure; this mirrors that shape.
     const opened = []
