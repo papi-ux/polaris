@@ -416,6 +416,14 @@ namespace {
     if (first_result.empty() && baseline.empty()) {
       repeat_result = encode_run(spec, repeat);
       if (repeat_result.empty()) {
+        // The repeat must pass the same baseline as the first run (including a real SHA-256 for
+        // every packet), so a hash that could not be computed fails it exactly as it fails run 1.
+        const std::string repeat_baseline = validate_baseline(repeat);
+        if (!repeat_baseline.empty()) {
+          repeat_result = "repeat baseline: " + repeat_baseline;
+        }
+      }
+      if (repeat_result.empty()) {
         comparison = "identical";
         if (repeat.packets.size() != first.packets.size()) {
           comparison = "packet count differs";
@@ -423,7 +431,7 @@ namespace {
         for (std::size_t i = 0; comparison == "identical" && i < first.packets.size(); ++i) {
           const auto &a = first.packets[i];
           const auto &b = repeat.packets[i];
-          if (a.bytes != b.bytes || a.flags != b.flags || a.pts != b.pts || a.dts != b.dts) {
+          if (a.bytes != b.bytes || a.sha256 != b.sha256 || a.flags != b.flags || a.pts != b.pts || a.dts != b.dts) {
             comparison = "packet " + std::to_string(i) + " differs";
           }
         }
