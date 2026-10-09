@@ -51,6 +51,7 @@
 #include "logging.h"
 #include "platform/common.h"
 #include "stream_recorder.h"
+#include "thread_safe.h"
 
 using namespace std::literals;
 namespace fs = std::filesystem;
@@ -239,11 +240,88 @@ namespace stream_recorder {
   struct registered_session_t {
     bool eligible = false;
     int video_format = -1;
+    /// The session's keyframe request channel, if its registration supplied one. Kept for the
+    /// session's lifetime: metadata updates never replace or clear it; session_ended retires it.
+    std::shared_ptr<keyframe_channel_t> keyframe_channel;
   };
   static std::map<std::uint64_t, registered_session_t> replay_sessions;
   static std::uint64_t replay_selected = 0;
   static replay_stats_t replay_counters;
   static std::uint64_t replay_next_sequence = 1;
+
+  // ---- Keyframe requests (guarded by `mutex` unless noted) ----
+  //
+  // Lock order: `mutex`, then a writer's `lock` (taken and released), then
+  // `keyframe_request_gate`, then a channel's lock, then the session event's own lock. A request
+  // is decided under `mutex` and raised only after `mutex` is released.
+
+  struct keyframe_token_t {
+    std::uint64_t incarnation = 0;
+    std::uint64_t generation = 0;
+    std::uint64_t sequence = 0;
+    bool operator==(const keyframe_token_t &) const = default;
+  };
+
+  /// The open file's keyframe request state and counters, reset at each start commit.
+  struct keyframe_file_t {
+    std::uint64_t incarnation = 0;  ///< 0 while no file is open, or when incarnations ran out
+    bool exceeds_queue = false;     ///< An owner keyframe larger than the whole queue was dropped
+    std::optional<keyframe_token_t> in_flight;  ///< At most one reservation not yet completed
+    std::optional<std::chrono::steady_clock::time_point> last_request_at;  ///< Rate anchor
+    std::size_t last_keyframe_bytes = 0;  ///< Size of the last admitted owner keyframe
+    std::uint64_t reservations = 0;
+    std::uint64_t attempted = 0;
+    std::uint64_t expired = 0;
+    std::uint64_t stopped = 0;
+    std::uint64_t retired = 0;
+    std::uint64_t fenced = 0;
+    std::uint64_t refused_rate = 0;
+    std::uint64_t refused_writer_unavailable = 0;
+    std::uint64_t refused_no_slot = 0;
+    std::uint64_t refused_queue_sequence_exhausted = 0;
+    std::uint64_t refused_bytes = 0;
+    std::uint64_t refused_request_sequence_exhausted = 0;
+  };
+
+  static keyframe_file_t keyframe_file;
+  // Monotonic: never reset and never reused, so a token names one request of one file.
+  static std::uint64_t continuous_incarnation = 0;
+  static std::uint64_t keyframe_request_sequence = 0;
+  // Process diagnostics: completions for a file no longer open, and refused registrations.
+  static std::uint64_t keyframe_stale_completions_total = 0;
+  static std::uint64_t keyframe_registration_conflicts = 0;
+  // The one dispatch still allowed to raise (guarded by keyframe_request_gate).
+  static std::mutex keyframe_request_gate;
+  static std::optional<keyframe_token_t> keyframe_authorized;
+  // Proposals, unmeasured: the shortest gap between requests, and the least free queue space
+  // to ask for a keyframe when no owner keyframe size is known yet.
+  constexpr auto k_keyframe_request_interval = std::chrono::seconds {1};
+  constexpr std::size_t k_keyframe_request_floor_bytes = std::size_t {1024} * 1024;
+#ifdef POLARIS_TESTS
+  static detail::keyframe_hooks_t keyframe_hooks;
+#endif
+
+  /// A request decided under `mutex`, raised by keyframe_dispatch() after `mutex` is released.
+  struct keyframe_pending_t {
+    std::shared_ptr<keyframe_channel_t> channel;
+    keyframe_token_t token;
+#ifdef POLARIS_TESTS
+    detail::keyframe_hooks_t hooks;
+#endif
+  };
+
+  /// Withdraw the current request (requires `mutex`): no reservation stays held and no pending
+  /// dispatch may still raise. The rate anchor is kept unless `reset_anchor`.
+  static void keyframe_withdraw(bool reset_anchor) noexcept {
+    keyframe_file.in_flight.reset();
+    {
+      std::lock_guard gate(keyframe_request_gate);
+      keyframe_authorized.reset();
+    }
+    if (reset_anchor) {
+      keyframe_file.last_request_at.reset();
+    }
+  }
 
   // The save in progress, as the recorder accounts for it (guarded by `mutex`). Its snapshot
   // holds the stored packets whose sequence lies in [first, last]; when the live run drops one
@@ -419,12 +497,15 @@ namespace stream_recorder {
   static void continuous_suspend(continuous_cause_e cause) {
     continuous.state = continuous_state_e::suspended;
     continuous.cause = cause;
+    // Nothing is requested while suspended; the rate anchor is kept so flapping cannot burst.
+    keyframe_withdraw(false);
   }
 
   /// The owner can never write to this file again.
   static void continuous_fence(continuous_cause_e cause) {
     continuous_owner_fenced = true;
     continuous_suspend(cause);
+    keyframe_withdraw(true);
   }
 
   /// Follow a committed lifecycle change: which session (if any) may feed the open file now.
@@ -466,6 +547,122 @@ namespace stream_recorder {
     }
     continuous.state = continuous_state_e::awaiting_owner;
     continuous.cause = continuous_cause_e::none;
+  }
+
+  /**
+   * Decide one keyframe request for the open file's owner (requires `mutex`). Only a bound,
+   * unfenced, sole eligible owner with a registered channel, while its file awaits a keyframe,
+   * gets one reservation at a time, at most once per interval, and never into a writer that has
+   * failed, is stopping or has no room. An unbound file (owner 0) never requests.
+   */
+  static keyframe_pending_t keyframe_reserve(std::chrono::steady_clock::time_point now) {
+    keyframe_pending_t pending;
+    if (!recording.load() || continuous_fd < 0 || !continuous_writer ||
+        continuous.state == continuous_state_e::stopping || keyframe_file.incarnation == 0) {
+      return pending;
+    }
+    const auto owner = continuous.owner_generation;
+    if (owner == 0 || continuous_owner_fenced || replay_selected != owner) {
+      return pending;
+    }
+    const auto it = replay_sessions.find(owner);  // Never inserts
+    if (it == replay_sessions.end() || !it->second.keyframe_channel) {
+      return pending;
+    }
+    auto &writer = *continuous_writer;
+    {
+      // A failed or stopping writer refuses every decision for the owner, before the awaiting and
+      // rate checks: a failed file records no discontinuity, so its refusal must be counted here.
+      std::lock_guard guard(writer.lock);
+      if (writer.failed || writer.stop_requested) {
+        ++keyframe_file.refused_writer_unavailable;
+        return pending;
+      }
+    }
+    if (continuous.state != continuous_state_e::awaiting_keyframe || keyframe_file.in_flight ||
+        keyframe_file.exceeds_queue) {
+      return pending;
+    }
+    if (keyframe_file.last_request_at &&
+        !(now >= *keyframe_file.last_request_at && now - *keyframe_file.last_request_at >= k_keyframe_request_interval)) {
+      // Too soon, or the clock went backwards: no retry, and the anchor stays where it was.
+      ++keyframe_file.refused_rate;
+      return pending;
+    }
+    {
+      std::lock_guard guard(writer.lock);
+      if (writer.failed || writer.stop_requested) {
+        ++keyframe_file.refused_writer_unavailable;
+        return pending;
+      }
+      if (writer.slot_used == writer.slot_capacity) {
+        ++keyframe_file.refused_no_slot;
+        return pending;
+      }
+      if (writer.next_sequence == std::numeric_limits<std::uint64_t>::max()) {
+        ++keyframe_file.refused_queue_sequence_exhausted;
+        return pending;
+      }
+      const auto ring = writer.ring_bytes;
+      const auto last = keyframe_file.last_keyframe_bytes;
+      const std::size_t want = last == 0 ? std::min(ring, k_keyframe_request_floor_bytes) :
+                                           (last <= ring / 2 ? last * 2 : ring);
+      if (ring - writer.byte_used < want) {
+        ++keyframe_file.refused_bytes;
+        return pending;
+      }
+    }
+    if (keyframe_request_sequence == std::numeric_limits<std::uint64_t>::max()) {
+      ++keyframe_file.refused_request_sequence_exhausted;
+      return pending;
+    }
+    const keyframe_token_t token {keyframe_file.incarnation, owner, ++keyframe_request_sequence};
+    keyframe_file.in_flight = token;
+    keyframe_file.last_request_at = now;
+    ++keyframe_file.reservations;
+    {
+      std::lock_guard gate(keyframe_request_gate);
+      keyframe_authorized = token;
+    }
+    pending.channel = it->second.keyframe_channel;
+    pending.token = token;
+#ifdef POLARIS_TESTS
+    try {
+      pending.hooks = keyframe_hooks;
+    } catch (...) {
+      // Seams are optional; the request itself does not depend on them.
+    }
+#endif
+    return pending;
+  }
+
+  /// Count a finished dispatch (requires `mutex`). Only the exact token releases its reservation;
+  /// a completion for a file that is no longer open counts only as stale.
+  static void keyframe_complete(const keyframe_token_t &token, keyframe_outcome_e outcome) {
+    if (token.incarnation == 0 || token.incarnation != keyframe_file.incarnation) {
+      ++keyframe_stale_completions_total;
+      return;
+    }
+    switch (outcome) {
+      case keyframe_outcome_e::attempted:
+        ++keyframe_file.attempted;
+        break;
+      case keyframe_outcome_e::expired:
+        ++keyframe_file.expired;
+        break;
+      case keyframe_outcome_e::stopped:
+        ++keyframe_file.stopped;
+        break;
+      case keyframe_outcome_e::retired:
+        ++keyframe_file.retired;
+        break;
+      case keyframe_outcome_e::fenced:
+        ++keyframe_file.fenced;
+        break;
+    }
+    if (keyframe_file.in_flight == token) {
+      keyframe_file.in_flight.reset();
+    }
   }
 
   /// A frame of the selected session was dropped: later frames would depend on it, so restart at a keyframe.
@@ -899,6 +1096,49 @@ namespace stream_recorder {
     }
   }  // namespace
 
+  // ---- Keyframe request channel ----
+
+  keyframe_channel_t::keyframe_channel_t(std::weak_ptr<event_post_t> event) noexcept:
+      event_ {std::move(event)} {}
+
+  keyframe_outcome_e keyframe_channel_t::request() noexcept {
+    return request(nullptr);
+  }
+
+  keyframe_outcome_e keyframe_channel_t::request(const std::function<void()> *after_raise) noexcept {
+    std::lock_guard guard(lock_);
+    if (retired_) {
+      return keyframe_outcome_e::retired;
+    }
+    // A strong reference only for this call: post_t inherits event_t, so the arrow reaches
+    // running() and raise() exactly as production's idr_events->raise(true) does.
+    const auto event = event_.lock();
+    if (!event) {
+      return keyframe_outcome_e::expired;
+    }
+    if (!event->running()) {
+      return keyframe_outcome_e::stopped;
+    }
+    event->raise(true);  // Returns nothing; a stop() just before it is silently ignored
+    if (after_raise && *after_raise) {
+      (*after_raise)();
+    }
+    return keyframe_outcome_e::attempted;
+  }
+
+  void keyframe_channel_t::retire() noexcept {
+    std::lock_guard guard(lock_);
+    retired_ = true;
+    event_.reset();
+  }
+
+  /// Lets the recorder pass its test-only raise observer without making it public API.
+  struct keyframe_channel_access_t {
+    static keyframe_outcome_e request(keyframe_channel_t &channel, const std::function<void()> *after_raise) noexcept {
+      return channel.request(after_raise);
+    }
+  };
+
   // ---- Continuous file: exclusive creation, a bounded queue, one writer thread per file ----
 
   namespace {
@@ -1213,6 +1453,10 @@ namespace stream_recorder {
         // Dropped whole, unread: dependent frames wait for a keyframe that fits.
         ++continuous.dropped_backpressure;
         continuous_discontinuity(continuous_cause_e::backpressure);
+        if (is_keyframe && size > writer.ring_bytes) {
+          // No keyframe of this size can ever fit: asking for another would only repeat this.
+          keyframe_file.exceeds_queue = true;
+        }
         return 0;
       }
 
@@ -1238,7 +1482,54 @@ namespace stream_recorder {
       }
       writer.changed.notify_all();
       continuous.state = continuous_state_e::writing;
+      if (is_keyframe) {
+        // An admitted owner keyframe is the only recovery: any request is withdrawn and the
+        // rate anchor cleared. Its size sizes the room asked for before the next request.
+        keyframe_file.last_keyframe_bytes = size;
+        keyframe_withdraw(true);
+      }
       return sequence;
+    }
+
+    /**
+     * Raise a decided request (no recorder lock held), then count how it ended. Every caller
+     * holds `mutex` only in a scope that has ended before this call: push_packet_core()'s
+     * lock_guard (destroyed at its return), the braced lock_guard blocks of session_started()
+     * and session_ended(), and start_recording()'s explicit unlock.
+     */
+    void keyframe_dispatch(keyframe_pending_t pending) {
+      if (!pending.channel) {
+        return;
+      }
+      const std::function<void()> *after_raise = nullptr;
+#ifdef POLARIS_TESTS
+      if (pending.hooks.before_dispatch) {
+        pending.hooks.before_dispatch(detail::keyframe_token_t {pending.token.incarnation, pending.token.generation, pending.token.sequence});
+      }
+      if (pending.hooks.after_raise) {
+        after_raise = &pending.hooks.after_raise;
+      }
+#endif
+      keyframe_outcome_e outcome;
+      {
+        std::lock_guard gate(keyframe_request_gate);
+        if (keyframe_authorized != pending.token) {
+          outcome = keyframe_outcome_e::fenced;
+        } else {
+          keyframe_authorized.reset();  // One raise per reservation
+          outcome = keyframe_channel_access_t::request(*pending.channel, after_raise);
+        }
+      }
+      {
+        std::lock_guard lock(mutex);
+        keyframe_complete(pending.token, outcome);
+      }
+#ifdef POLARIS_TESTS
+      // Observers see completed bookkeeping, with both the recorder lock and request gate released.
+      if (pending.hooks.after_dispatch) {
+        pending.hooks.after_dispatch(detail::keyframe_token_t {pending.token.incarnation, pending.token.generation, pending.token.sequence}, outcome);
+      }
+#endif
     }
 
     /**
@@ -1254,6 +1545,7 @@ namespace stream_recorder {
           // Still reported as recording, with its file, until the writer has finished.
           continuous.state = continuous_state_e::stopping;
           writer = continuous_writer;
+          keyframe_withdraw(true);
         }
       }
       if (!writer) {
@@ -1282,6 +1574,10 @@ namespace stream_recorder {
         continuous_writer.reset();
         continuous_reset_locked();
         recording.store(false);
+        // The file is closed: a later completion for it counts only as stale. Its counters stay
+        // readable until the next start.
+        keyframe_withdraw(true);
+        keyframe_file.incarnation = 0;
       }
       // The descriptor is closed exactly once, after its only writer was joined, whatever close
       // reports, with no recorder lock held.
@@ -1393,17 +1689,30 @@ namespace stream_recorder {
         continuous_fd = created.release();
         recording_file = std::move(name);
         continuous_reset_locked();
+        // A new file: a never-reused incarnation (0 once exhausted: no requests) and fresh counters.
+        keyframe_file = keyframe_file_t {};
+        if (continuous_incarnation < std::numeric_limits<std::uint64_t>::max()) {
+          keyframe_file.incarnation = ++continuous_incarnation;
+        }
+        keyframe_withdraw(true);
         continuous.file_video_format = format;
         continuous.owner_generation = owner;
         continuous.state = owner != 0 ? continuous_state_e::awaiting_keyframe : continuous_state_e::awaiting_owner;
         // The selection may have changed since it was read: follow it, as for any later change.
         continuous_follow_selection();
         recording.store(true);
+        // A file bound at start asks its owner for a first keyframe; an unbound one never asks.
+        keyframe_pending_t pending;
+        try {
+          pending = keyframe_reserve(std::chrono::steady_clock::now());
+        } catch (...) {
+        }
         guard.unlock();
         try {
           BOOST_LOG(info) << "stream_recorder: started recording to ["sv << current_file() << "]"sv;
         } catch (...) {
         }
+        keyframe_dispatch(std::move(pending));
         return;
       }
       BOOST_LOG(error) << "stream_recorder: failed to open a file: every candidate name already exists"sv;
@@ -1679,6 +1988,7 @@ namespace stream_recorder {
     struct continuous_admitted_t {
       std::shared_ptr<continuous_writer_t> writer;
       std::uint64_t sequence = 0;
+      keyframe_pending_t keyframe;  ///< A keyframe request decided for the owner, raised after unlock
     };
 
     /**
@@ -1713,6 +2023,10 @@ namespace stream_recorder {
         if (admitted.sequence != 0) {
           admitted.writer = continuous_writer;
         }
+        // Only the owner's own packets decide its keyframe requests.
+        if (session_generation != 0 && session_generation == continuous.owner_generation) {
+          admitted.keyframe = keyframe_reserve(now);
+        }
       }
 
       // Replay buffer: store packet in memory
@@ -1725,15 +2039,19 @@ namespace stream_recorder {
 
   void push_packet(const uint8_t *data, size_t size, bool is_video, bool is_keyframe, int64_t pts,
                    std::uint64_t session_generation, int video_format) {
-    // Production: admission only, never a wait for the writer.
-    (void) push_packet_core(data, size, is_video, is_keyframe, pts, session_generation, video_format,
-                            std::chrono::steady_clock::now());
+    // Production: admission only, never a wait for the writer. A request (none in production,
+    // where no session has a channel) is raised after the recorder lock was released: that lock
+    // is push_packet_core()'s scoped lock_guard, destroyed when push_packet_core() returns.
+    auto admitted = push_packet_core(data, size, is_video, is_keyframe, pts, session_generation, video_format,
+                                     std::chrono::steady_clock::now());
+    keyframe_dispatch(std::move(admitted.keyframe));
   }
 
   void detail::push_packet_at(const uint8_t *data, size_t size, bool is_video, bool is_keyframe, int64_t pts,
                               std::uint64_t session_generation, int video_format,
                               std::chrono::steady_clock::time_point now) {
-    const auto admitted = push_packet_core(data, size, is_video, is_keyframe, pts, session_generation, video_format, now);
+    auto admitted = push_packet_core(data, size, is_video, is_keyframe, pts, session_generation, video_format, now);
+    keyframe_dispatch(std::move(admitted.keyframe));  // push_packet_core()'s lock is gone, as above
     if (admitted.sequence == 0) {
       return;
     }
@@ -1744,45 +2062,108 @@ namespace stream_recorder {
     });
   }
 
+  namespace {
+    /**
+     * Register or update a session (requires `mutex`). `channel` (may be null) is attached only
+     * to a new registration or one without a channel; a different channel for a session that
+     * has one rejects the whole call. Returns any keyframe request the change makes due.
+     */
+    keyframe_pending_t session_started_locked(std::uint64_t session_generation, bool replay_eligible, int video_format,
+                                              std::shared_ptr<keyframe_channel_t> channel) {
+      if (session_generation == 0) {
+        ++replay_counters.refused_lifecycle;
+        BOOST_LOG(warning) << "stream_recorder: refused a session with no generation"sv;
+        return {};
+      }
+      const auto existing = replay_sessions.find(session_generation);
+      if (channel && existing != replay_sessions.end() && existing->second.keyframe_channel &&
+          existing->second.keyframe_channel != channel) {
+        // Ambiguous: two channels for one session. Nothing changes, metadata included.
+        ++keyframe_registration_conflicts;
+        return {};
+      }
+      const int known = known_video_format(video_format) ? video_format : -1;
+      // The only allocation (a new registration) precedes every state change.
+      auto [it, inserted] = replay_sessions.try_emplace(session_generation, registered_session_t {replay_eligible, known, {}});
+      bool attached = false;
+      if (channel && !it->second.keyframe_channel) {
+        it->second.keyframe_channel = std::move(channel);
+        attached = !inserted;
+      }
+      if (!inserted) {
+        auto &session = it->second;
+        // An unknown codec never erases a known one.
+        const int format = known >= 0 ? known : session.video_format;
+        if (session.eligible == replay_eligible && session.video_format == format) {
+          // Metadata unchanged; a newly attached channel may still be owed a request.
+          return attached ? keyframe_reserve(std::chrono::steady_clock::now()) : keyframe_pending_t {};
+        }
+        const bool eligibility_changed = session.eligible != replay_eligible;
+        session.eligible = replay_eligible;
+        session.video_format = format;
+        if (eligibility_changed) {
+          // The same session changing eligibility is a transition: its earlier packets go.
+          // A codec learned for a session does not reset the replay run: packets carry theirs.
+          clear_replay_run(true, window_limit_e::selection);
+        }
+      }
+      reselect_replay_session();
+      continuous_follow_selection();
+      // The owner may be sole again after an overlap: it may be owed a request.
+      return keyframe_reserve(std::chrono::steady_clock::now());
+    }
+  }  // namespace
+
   void session_started(std::uint64_t session_generation, bool replay_eligible, int video_format) {
-    std::lock_guard lock(mutex);
-    if (session_generation == 0) {
-      ++replay_counters.refused_lifecycle;
-      BOOST_LOG(warning) << "stream_recorder: refused a session with no generation"sv;
-      return;
+    keyframe_pending_t pending;
+    {
+      std::lock_guard lock(mutex);
+      pending = session_started_locked(session_generation, replay_eligible, video_format, nullptr);
     }
-    const int known = known_video_format(video_format) ? video_format : -1;
-    // The only allocation (a new registration) precedes every state change.
-    auto [it, inserted] = replay_sessions.try_emplace(session_generation, registered_session_t {replay_eligible, known});
-    if (!inserted) {
-      auto &session = it->second;
-      // An unknown codec never erases a known one.
-      const int format = known >= 0 ? known : session.video_format;
-      if (session.eligible == replay_eligible && session.video_format == format) {
-        return;
-      }
-      const bool eligibility_changed = session.eligible != replay_eligible;
-      session.eligible = replay_eligible;
-      session.video_format = format;
-      if (eligibility_changed) {
-        // The same session changing eligibility is a transition: its earlier packets go.
-        // A codec learned for a session does not reset the replay run: packets carry theirs.
-        clear_replay_run(true, window_limit_e::selection);
-      }
+    keyframe_dispatch(std::move(pending));
+  }
+
+  void session_started(std::uint64_t session_generation, bool replay_eligible, int video_format,
+                       std::shared_ptr<keyframe_channel_t> channel) {
+    keyframe_pending_t pending;
+    {
+      std::lock_guard lock(mutex);
+      pending = session_started_locked(session_generation, replay_eligible, video_format, std::move(channel));
     }
-    reselect_replay_session();
-    continuous_follow_selection();
+    keyframe_dispatch(std::move(pending));
   }
 
   void session_ended(std::uint64_t session_generation) {
-    std::lock_guard lock(mutex);
-    if (replay_sessions.erase(session_generation) == 0) {
-      return;
+    keyframe_pending_t pending;
+    {
+      std::lock_guard lock(mutex);
+      const auto it = replay_sessions.find(session_generation);  // Unknown generations insert nothing
+      if (it == replay_sessions.end()) {
+        return;
+      }
+      // Withdraw anything still owed to this session, then retire its channel: after this no
+      // request raises its event, even one already decided.
+      const bool owed = (keyframe_file.in_flight && keyframe_file.in_flight->generation == session_generation);
+      bool authorized_for_it;
+      {
+        std::lock_guard gate(keyframe_request_gate);
+        authorized_for_it = keyframe_authorized && keyframe_authorized->generation == session_generation;
+      }
+      if (owed || authorized_for_it) {
+        keyframe_withdraw(false);
+      }
+      if (it->second.keyframe_channel) {
+        it->second.keyframe_channel->retire();
+      }
+      replay_sessions.erase(it);
+      // The ended session's packets go even if it was not the selected one.
+      clear_replay_run(true, window_limit_e::selection);
+      reselect_replay_session();
+      continuous_follow_selection();
+      // Another owner may now be sole again after an overlap.
+      pending = keyframe_reserve(std::chrono::steady_clock::now());
     }
-    // The ended session's packets go even if it was not the selected one.
-    clear_replay_run(true, window_limit_e::selection);
-    reselect_replay_session();
-    continuous_follow_selection();
+    keyframe_dispatch(std::move(pending));
   }
 
   replay_stats_t replay_stats() {
@@ -1900,8 +2281,19 @@ namespace stream_recorder {
       clear_replay_run(true, window_limit_e::none);
       replay_max_bytes = k_replay_max_payload_bytes;
       replay_max_packets = k_replay_max_packets;
+      for (auto &[generation, session] : replay_sessions) {
+        if (session.keyframe_channel) {
+          session.keyframe_channel->retire();
+        }
+      }
       replay_sessions.clear();
       replay_selected = 0;
+      // Per-file and process keyframe diagnostics restart; the monotonic counters never do.
+      keyframe_withdraw(true);
+      keyframe_file = keyframe_file_t {};
+      keyframe_stale_completions_total = 0;
+      keyframe_registration_conflicts = 0;
+      keyframe_hooks = {};
       replay_counters = {};
       replay_next_sequence = 1;
       saves_refused_busy.store(0, std::memory_order_relaxed);
@@ -1921,6 +2313,76 @@ namespace stream_recorder {
     if (fd >= 0) {
       native_close_impl(fd);
     }
+  }
+
+  detail::keyframe_stats_t detail::keyframe_stats_for_tests() {
+    keyframe_stats_t stats;
+    std::lock_guard lock(mutex);
+    const auto token = [](const ::stream_recorder::keyframe_token_t &t) {
+      return detail::keyframe_token_t {t.incarnation, t.generation, t.sequence};
+    };
+    stats.file_incarnation = keyframe_file.incarnation;
+    stats.awaiting = continuous_fd >= 0 && continuous.owner_generation != 0 && !continuous_owner_fenced &&
+                     continuous.state == continuous_state_e::awaiting_keyframe;
+    stats.keyframe_exceeds_queue = keyframe_file.exceeds_queue;
+    if (keyframe_file.in_flight) {
+      stats.in_flight = token(*keyframe_file.in_flight);
+    }
+    {
+      std::lock_guard gate(keyframe_request_gate);
+      if (keyframe_authorized) {
+        stats.authorized = token(*keyframe_authorized);
+      }
+    }
+    stats.last_request_at = keyframe_file.last_request_at;
+    stats.last_keyframe_bytes = keyframe_file.last_keyframe_bytes;
+    stats.reservations = keyframe_file.reservations;
+    stats.attempted = keyframe_file.attempted;
+    stats.expired = keyframe_file.expired;
+    stats.stopped = keyframe_file.stopped;
+    stats.retired = keyframe_file.retired;
+    stats.fenced = keyframe_file.fenced;
+    stats.refused_rate = keyframe_file.refused_rate;
+    stats.refused_writer_unavailable = keyframe_file.refused_writer_unavailable;
+    stats.refused_no_slot = keyframe_file.refused_no_slot;
+    stats.refused_queue_sequence_exhausted = keyframe_file.refused_queue_sequence_exhausted;
+    stats.refused_bytes = keyframe_file.refused_bytes;
+    stats.refused_request_sequence_exhausted = keyframe_file.refused_request_sequence_exhausted;
+    stats.keyframe_stale_completions_total = keyframe_stale_completions_total;
+    stats.keyframe_registration_conflicts = keyframe_registration_conflicts;
+    stats.continuous_incarnation = continuous_incarnation;
+    stats.keyframe_request_sequence = keyframe_request_sequence;
+    return stats;
+  }
+
+  void detail::set_keyframe_hooks_for_tests(keyframe_hooks_t hooks) {
+    std::lock_guard lock(mutex);
+    keyframe_hooks = std::move(hooks);
+  }
+
+  void detail::set_keyframe_counters_for_tests(std::uint64_t incarnation_floor, std::uint64_t sequence_floor) {
+    std::lock_guard lock(mutex);
+    // Raise only: a lower value would let a token name two requests.
+    continuous_incarnation = std::max(continuous_incarnation, incarnation_floor);
+    keyframe_request_sequence = std::max(keyframe_request_sequence, sequence_floor);
+  }
+
+  bool detail::set_continuous_next_sequence_for_tests(std::uint64_t value) {
+    std::lock_guard lock(mutex);
+    if (!continuous_writer) {
+      return false;
+    }
+    std::lock_guard guard(continuous_writer->lock);
+    continuous_writer->next_sequence = value;
+    return true;
+  }
+
+  bool detail::recorder_mutex_try_lock_for_tests() {
+    if (!mutex.try_lock()) {
+      return false;
+    }
+    mutex.unlock();
+    return true;
   }
 
   void detail::set_continuous_limits_for_tests(std::size_t bytes, std::size_t slots) {
