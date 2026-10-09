@@ -18,16 +18,20 @@
 #include <cerrno>
 #include <chrono>
 #include <climits>
+#include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <thread>
 #include <utility>
 
 // platform includes
@@ -78,11 +82,136 @@ namespace stream_recorder {
   // writer. This mirror is the only thing the fast path reads unlocked.
   static std::atomic<mode_t> mode_hint {mode_t::disabled};
 
+#ifdef POLARIS_TESTS
+  static detail::continuous_hooks_t continuous_hooks;
+#endif
+
+  /**
+   * One continuous file's writer: a queue of fixed, preallocated capacity and the state its
+   * writer thread shares with the recorder. The recorder (under `mutex`) and the writer thread
+   * each hold it; it holds no thread, closes no descriptor and refers to no recorder global.
+   *
+   * Lock order: the recorder `mutex`, then `lock`. The writer takes only `lock`.
+   *
+   * The queue is a byte ring plus a slot ring, both bounded indexes with "used" counts, so no
+   * position grows without bound. An entry stays counted until its write has finished, so the
+   * capacity always includes the packet being written. Only one thread admits (it holds the
+   * recorder `mutex`), and the writer only ever frees space.
+   */
+  struct continuous_writer_t {
+    struct slot_t {
+      std::size_t offset;
+      std::size_t size;
+      std::uint64_t sequence;
+    };
+
+    continuous_writer_t(std::size_t bytes, std::size_t slot_count):
+        ring {std::make_unique_for_overwrite<std::uint8_t[]>(bytes)},
+        ring_bytes {bytes},
+        slots {std::make_unique_for_overwrite<slot_t[]>(slot_count)},
+        slot_capacity {slot_count} {}
+
+    continuous_writer_t(const continuous_writer_t &) = delete;
+    continuous_writer_t &operator=(const continuous_writer_t &) = delete;
+
+    const std::unique_ptr<std::uint8_t[]> ring;
+    const std::size_t ring_bytes;
+    const std::unique_ptr<slot_t[]> slots;
+    const std::size_t slot_capacity;
+    int fd = -1;  ///< The file's descriptor, owned (and closed) by the recorder, never by this
+
+#ifdef POLARIS_TESTS
+    detail::continuous_hooks_t hooks;  ///< Copied at start; valid until the writer is joined
+#endif
+
+    std::mutex lock;
+    std::condition_variable changed;
+    // Guarded by `lock`.
+    std::size_t byte_head = 0;  ///< Ring offset of the oldest unfinished byte
+    std::size_t byte_used = 0;  ///< Bytes queued or being written
+    std::size_t slot_head = 0;
+    std::size_t slot_used = 0;
+    std::uint64_t next_sequence = 1;  ///< Admission stops before it would wrap (never in practice)
+    std::uint64_t completed_sequence = 0;
+    bool stop_requested = false;
+    bool failed = false;
+    continuous_error_e error = continuous_error_e::none;
+    int error_number = 0;
+    std::uint64_t packets_admitted = 0;
+    std::uint64_t bytes_admitted = 0;
+    std::uint64_t packets_written = 0;
+    std::uint64_t bytes_written = 0;
+    std::uint64_t discarded_packets = 0;
+    std::uint64_t discarded_bytes = 0;
+  };
+
+  /**
+   * Owns a running writer thread and its share of the writer. Ending it (destruction,
+   * finish() or move-assignment over it) tells the writer to stop, wakes it and joins it, using
+   * only what it owns: safe at static destruction, after the recorder's globals are gone.
+   */
+  class continuous_thread_t {
+  public:
+    continuous_thread_t() noexcept = default;
+
+    continuous_thread_t(std::thread thread, std::shared_ptr<continuous_writer_t> writer) noexcept:
+        thread_ {std::move(thread)},
+        writer_ {std::move(writer)} {}
+
+    continuous_thread_t(const continuous_thread_t &) = delete;
+    continuous_thread_t &operator=(const continuous_thread_t &) = delete;
+
+    continuous_thread_t(continuous_thread_t &&other) noexcept:
+        thread_ {std::move(other.thread_)},
+        writer_ {std::move(other.writer_)} {}
+
+    continuous_thread_t &operator=(continuous_thread_t &&other) noexcept {
+      if (this != &other) {
+        finish();
+        thread_ = std::move(other.thread_);
+        writer_ = std::move(other.writer_);
+      }
+      return *this;
+    }
+
+    ~continuous_thread_t() {
+      finish();
+    }
+
+    /// Signal stop and notify before joining, so an idle writer wakes and exits.
+    bool finish() noexcept {
+      if (!thread_.joinable()) {
+        writer_.reset();
+        return false;
+      }
+      {
+        std::lock_guard guard(writer_->lock);
+        writer_->stop_requested = true;
+      }
+      writer_->changed.notify_all();
+      thread_.join();
+      writer_.reset();
+      return true;
+    }
+
+  private:
+    std::thread thread_;
+    std::shared_ptr<continuous_writer_t> writer_;
+  };
+
   // Continuous recording state. `recording` is true exactly while `continuous_fd` is open and
   // `recording_file` names it; all three, and everything below, change only under `mutex`.
   static std::atomic<bool> recording {false};
   static std::string recording_file;
   static int continuous_fd = -1;
+  // The open file's writer (null while no file is open); its thread is `continuous_thread`.
+  static std::shared_ptr<continuous_writer_t> continuous_writer;
+  // Start, stop and shutdown take this, never the packet path or status; with it held:
+  static std::mutex continuous_control;
+  static continuous_thread_t continuous_thread;  // the open file's writer thread
+  static bool continuous_shut_down = false;      // shutdown() ran: no later start
+  static std::size_t continuous_limit_bytes = k_continuous_queue_bytes;  // guarded by `mutex`
+  static std::size_t continuous_limit_slots = k_continuous_queue_slots;
   // The open file's ownership. One file holds at most one owner generation in one codec.
   static continuous_status_t continuous;
   // The bound owner can never write again: it ended, or it violated the file's codec.
@@ -145,7 +274,6 @@ namespace stream_recorder {
 
 #ifdef POLARIS_TESTS
   static detail::save_hooks_t save_hooks;
-  static detail::continuous_hooks_t continuous_hooks;
 #endif
 
   /**
@@ -301,7 +429,8 @@ namespace stream_recorder {
 
   /// Follow a committed lifecycle change: which session (if any) may feed the open file now.
   static void continuous_follow_selection() {
-    if (continuous_fd < 0 || continuous.state == continuous_state_e::failed) {
+    // A stopping file takes nothing more; a failed one is reported failed whatever this sets.
+    if (continuous_fd < 0 || continuous.state == continuous_state_e::stopping) {
       return;
     }
     const auto owner = continuous.owner_generation;
@@ -770,62 +899,88 @@ namespace stream_recorder {
     }
   }  // namespace
 
-  // ---- Continuous file: exclusive creation, owned synchronous writes, release before reporting ----
+  // ---- Continuous file: exclusive creation, a bounded queue, one writer thread per file ----
 
   namespace {
-    std::string continuous_stamp() {
+    std::string continuous_stamp([[maybe_unused]] const continuous_writer_t &writer) {
 #ifdef POLARIS_TESTS
-      if (continuous_hooks.name_stamp) {
-        return continuous_hooks.name_stamp();
+      if (writer.hooks.name_stamp) {
+        return writer.hooks.name_stamp();
       }
 #endif
       return local_stamp(std::chrono::system_clock::now());
     }
 
-    int continuous_open(const fs::path &path) {
+    int continuous_open([[maybe_unused]] const continuous_writer_t &writer, const fs::path &path) {
 #ifdef POLARIS_TESTS
-      if (continuous_hooks.open) {
-        return continuous_hooks.open(path);
+      if (writer.hooks.open) {
+        return writer.hooks.open(path);
       }
 #endif
       return open_exclusive(path);
     }
 
-    long long continuous_write_call(int fd, const std::uint8_t *data, std::size_t size) {
+    long long continuous_write_call(const continuous_writer_t &writer, const std::uint8_t *data, std::size_t size) {
 #ifdef POLARIS_TESTS
-      if (continuous_hooks.write) {
-        return continuous_hooks.write(fd, data, size);
+      if (writer.hooks.write) {
+        return writer.hooks.write(writer.fd, data, size);
       }
 #endif
-      return native_write_impl(fd, data, size);
+      return native_write_impl(writer.fd, data, size);
     }
 
-    int continuous_close_call(int fd) {
+    int continuous_close_call([[maybe_unused]] const continuous_writer_t &writer, int fd) {
 #ifdef POLARIS_TESTS
-      if (continuous_hooks.close) {
-        return continuous_hooks.close(fd);
+      if (writer.hooks.close) {
+        return writer.hooks.close(fd);
       }
 #endif
       return native_close_impl(fd);
     }
 
-    /// A file this start created exclusively: closed and removed unless the writer takes it.
+    /// Run a test seam if set (POLARIS_TESTS builds only).
+#ifdef POLARIS_TESTS
+  #define CONTINUOUS_SEAM(hooks, name) \
+    do { \
+      if ((hooks).name) { \
+        (hooks).name(); \
+      } \
+    } while (false)
+#else
+  #define CONTINUOUS_SEAM(hooks, name) \
+    do { \
+    } while (false)
+#endif
+
+    /**
+     * A file this start created exclusively: closed once and removed unless the recording takes
+     * it. It holds the start's writer only to reach its copied test seams; the writer itself
+     * never owns or closes the descriptor.
+     */
     class created_file_t {
     public:
-      created_file_t(int fd, const fs::path &path) noexcept:
-          fd_ {fd}, path_ {&path} {}
+      created_file_t(int fd, const fs::path &path, std::shared_ptr<continuous_writer_t> writer) noexcept:
+          fd_ {fd}, path_ {&path}, writer_ {std::move(writer)} {}
 
       created_file_t(const created_file_t &) = delete;
       created_file_t &operator=(const created_file_t &) = delete;
 
       ~created_file_t() {
         if (fd_ >= 0) {
+#ifdef POLARIS_TESTS
+          if (writer_ && writer_->hooks.rollback_close) {
+            writer_->hooks.rollback_close(fd_);  // Documented not to throw
+          } else {
+            native_close_impl(fd_);
+          }
+#else
           native_close_impl(fd_);
+#endif
           native_remove_impl(*path_);
         }
       }
 
-      /// The writer owns the descriptor and the name from here on.
+      /// The recording owns the descriptor and the name from here on.
       int release() noexcept {
         return std::exchange(fd_, -1);
       }
@@ -833,6 +988,7 @@ namespace stream_recorder {
     private:
       int fd_;
       const fs::path *path_;
+      std::shared_ptr<continuous_writer_t> writer_;
     };
 
     /// Forget the file's ownership and accounting (requires `mutex`; does not allocate).
@@ -842,48 +998,147 @@ namespace stream_recorder {
       continuous_last_arrival.reset();
     }
 
-    /// Write every byte, retrying interrupted and partial writes; the first error is recorded.
-    bool continuous_write_all(const std::uint8_t *data, std::size_t size) {
+    /**
+     * Write one segment, retrying interrupted and partial writes. Every byte write() accepts is
+     * published to `bytes_written` at once, under the writer's lock, and also counted in `written`
+     * (this packet's accepted prefix). On the first error it returns false with `error` and
+     * `error_number` set. Writer thread only.
+     */
+    bool continuous_write_segment(continuous_writer_t &writer, const std::uint8_t *data, std::size_t size,
+                                  std::uint64_t &written, continuous_error_e &error, int &error_number) {
       std::size_t left = size;
       while (left > 0) {
-        const auto written = continuous_write_call(continuous_fd, data, left);
-        if (written < 0) {
-          const int error = errno;
-          if (error == EINTR) {
+        const auto result = continuous_write_call(writer, data, left);
+        if (result < 0) {
+          const int write_error = errno;
+          if (write_error == EINTR) {
             continue;
           }
-          continuous.error = continuous_error_e::write;
-          continuous.error_number = error;
+          error = continuous_error_e::write;
+          error_number = write_error;
           return false;
         }
-        if (written == 0 || static_cast<unsigned long long>(written) > left) {
-          continuous.error = continuous_error_e::no_progress;
+        if (result == 0 || static_cast<unsigned long long>(result) > left) {
+          error = continuous_error_e::no_progress;
+          error_number = 0;
           return false;
         }
-        data += written;
-        left -= static_cast<std::size_t>(written);
-        continuous.bytes_written += static_cast<std::uint64_t>(written);
+        data += result;
+        left -= static_cast<std::size_t>(result);
+        written += static_cast<std::uint64_t>(result);
+        std::lock_guard guard(writer.lock);
+        writer.bytes_written += static_cast<std::uint64_t>(result);
       }
       return true;
     }
 
+    /**
+     * The writer thread: writes the queue in order, then exits once stop is requested and the
+     * queue is empty. It touches only its writer (never a recorder global, lock or log). After
+     * the first failure it discards what remains, so every admitted packet still completes.
+     */
+    void continuous_writer_main(std::shared_ptr<continuous_writer_t> owned) noexcept {
+      auto &writer = *owned;
+      try {
+        CONTINUOUS_SEAM(writer.hooks, worker_started);
+      } catch (...) {
+      }
+      std::unique_lock guard(writer.lock);
+      for (;;) {
+        writer.changed.wait(guard, [&writer] {
+          return writer.slot_used > 0 || writer.stop_requested;
+        });
+        if (writer.slot_used == 0) {
+          break;  // Stop requested, and every admitted packet is finished.
+        }
+        const auto slot = writer.slots[writer.slot_head];
+        const bool discard = writer.failed;
+        guard.unlock();
+
+        std::uint64_t written = 0;
+        bool ok = true;
+        auto error = continuous_error_e::none;
+        int error_number = 0;
+        if (!discard) {
+          // The packet may wrap: its tail continues at the start of the ring.
+          const auto first = std::min(slot.size, writer.ring_bytes - slot.offset);
+          try {
+            ok = continuous_write_segment(writer, writer.ring.get() + slot.offset, first, written, error, error_number) &&
+                 continuous_write_segment(writer, writer.ring.get(), slot.size - first, written, error, error_number);
+          } catch (...) {
+            ok = false;
+            error = continuous_error_e::write;
+            error_number = 0;
+          }
+        }
+
+        guard.lock();
+        // One critical section publishes the outcome, the failure and the freed space together.
+        const bool newly_failed = !discard && !ok;
+        if (ok && !discard) {
+          ++writer.packets_written;
+        } else {
+          ++writer.discarded_packets;
+          writer.discarded_bytes += slot.size - written;
+        }
+        if (newly_failed) {
+          writer.failed = true;
+          writer.error = error;
+          writer.error_number = error_number;
+        }
+        writer.byte_head += slot.size;
+        if (writer.byte_head >= writer.ring_bytes) {
+          writer.byte_head -= writer.ring_bytes;
+        }
+        writer.byte_used -= slot.size;
+        writer.slot_head = writer.slot_head + 1 == writer.slot_capacity ? 0 : writer.slot_head + 1;
+        --writer.slot_used;
+        writer.completed_sequence = slot.sequence;
+        guard.unlock();
+        writer.changed.notify_all();
+        if (newly_failed) {
+          try {
+            CONTINUOUS_SEAM(writer.hooks, after_worker_failure);
+          } catch (...) {
+          }
+        }
+        guard.lock();
+      }
+      guard.unlock();
+      try {
+        CONTINUOUS_SEAM(writer.hooks, worker_exited);
+      } catch (...) {
+      }
+    }
+
     /// The owner's frame was dropped: later frames would depend on it, so restart at a keyframe.
-    void continuous_discontinuity() {
+    void continuous_discontinuity(continuous_cause_e cause = continuous_cause_e::discontinuity) {
       ++continuous.discontinuities;
       continuous.state = continuous_state_e::awaiting_keyframe;
-      continuous.cause = continuous_cause_e::discontinuity;
+      continuous.cause = cause;
     }
 
     /**
-     * Offer one video packet to the open file (requires `mutex`). Only the sole eligible
-     * session may feed it: packets of a zero, unregistered, retired or other generation return
-     * before anything is read or counted. Size and codec are checked before the bytes are read.
+     * Offer one video packet to the open file (requires `mutex`; never waits for storage and
+     * makes no filesystem call). Only the sole eligible session may feed it: packets of a zero,
+     * unregistered, retired or other generation return before anything is read or counted. Size
+     * and codec are checked before the bytes are read. An admitted packet is copied into the
+     * file's preallocated queue; one that does not fit is dropped, and the file waits for a
+     * keyframe that fits. Returns the admitted packet's sequence, or 0 when nothing was admitted.
      */
-    void continuous_offer(const uint8_t *data, size_t size, bool is_keyframe, std::uint64_t generation,
-                          int video_format, std::chrono::steady_clock::time_point now) {
-      if (continuous_fd < 0 || generation == 0 || generation != replay_selected ||
-          continuous.state == continuous_state_e::failed) {
-        return;
+    std::uint64_t continuous_offer(const uint8_t *data, size_t size, bool is_keyframe, std::uint64_t generation,
+                                   int video_format, std::chrono::steady_clock::time_point now) {
+      if (continuous_fd < 0 || !continuous_writer || generation == 0 || generation != replay_selected ||
+          continuous.state == continuous_state_e::stopping) {
+        return 0;
+      }
+      auto &writer = *continuous_writer;
+      {
+        // A failed or stopping file takes nothing more.
+        std::lock_guard guard(writer.lock);
+        if (writer.failed || writer.stop_requested) {
+          return 0;
+        }
       }
       const bool invalid = data == nullptr || size == 0 || size > k_continuous_max_packet_bytes ||
                            !known_video_format(video_format);
@@ -891,105 +1146,222 @@ namespace stream_recorder {
         // Unbound: the sole eligible session binds at a keyframe of the file's codec.
         if (invalid) {
           ++continuous.refused_invalid;
-          return;
+          return 0;
         }
         if (video_format != continuous.file_video_format) {
           ++continuous.refused_codec;
           continuous_suspend(continuous_cause_e::codec);
-          return;
+          return 0;
         }
         if (!is_keyframe) {
           ++continuous.refused_awaiting_keyframe;
-          return;
+          return 0;
         }
         continuous.owner_generation = generation;
         continuous.state = continuous_state_e::awaiting_keyframe;
       } else {
         if (generation != continuous.owner_generation || continuous_owner_fenced) {
-          return;
+          return 0;
         }
         if (invalid) {
           ++continuous.refused_invalid;
           continuous_discontinuity();
-          return;
+          return 0;
         }
         if (video_format != continuous.file_video_format) {
           // One file is one codec: the owner can never continue it.
           ++continuous.refused_codec;
           continuous_fence(continuous_cause_e::codec);
-          return;
+          return 0;
         }
         if (continuous_last_arrival && now < *continuous_last_arrival) {
           // Time must not run backwards inside the file: drop this packet unread, take its time
           // as the new reference, and restart at the next keyframe.
           continuous_last_arrival = now;
           continuous_discontinuity();
-          return;
+          return 0;
         }
       }
       continuous_last_arrival = now;
       if (continuous.state != continuous_state_e::writing && !is_keyframe) {
         ++continuous.refused_awaiting_keyframe;
-        return;
+        return 0;
       }
-      if (!continuous_write_all(data, size)) {
-        continuous.state = continuous_state_e::failed;
-        continuous.cause = continuous_cause_e::storage;
+
+      // Place it: free space is checked by subtraction from fixed capacities, with the packet
+      // being written still counted. The writer only frees space, so the place stays free.
+      std::size_t offset = 0;
+      std::size_t slot = 0;
+      bool fits;
+      {
+        std::lock_guard guard(writer.lock);
+        fits = size <= writer.ring_bytes - writer.byte_used && writer.slot_used < writer.slot_capacity &&
+               writer.next_sequence != std::numeric_limits<std::uint64_t>::max();
+        if (fits) {
+          // byte_head < ring_bytes and byte_used <= ring_bytes, so the sum cannot overflow.
+          offset = writer.byte_head + writer.byte_used;
+          if (offset >= writer.ring_bytes) {
+            offset -= writer.ring_bytes;
+          }
+          slot = writer.slot_head + writer.slot_used;
+          if (slot >= writer.slot_capacity) {
+            slot -= writer.slot_capacity;
+          }
+        }
+      }
+      if (!fits) {
+        // Dropped whole, unread: dependent frames wait for a keyframe that fits.
+        ++continuous.dropped_backpressure;
+        continuous_discontinuity(continuous_cause_e::backpressure);
+        return 0;
+      }
+
+      // Copy outside the writer's lock: the writer cannot see this place until it is published.
+      const auto first = std::min(size, writer.ring_bytes - offset);
+      std::memcpy(writer.ring.get() + offset, data, first);
+      std::memcpy(writer.ring.get(), data + first, size - first);
+      CONTINUOUS_SEAM(writer.hooks, before_publish);
+
+      std::uint64_t sequence;
+      {
+        std::lock_guard guard(writer.lock);
+        if (writer.failed || writer.stop_requested) {
+          // The file failed (or began stopping) while this was copied: leave it unpublished.
+          return 0;
+        }
+        sequence = writer.next_sequence++;
+        writer.slots[slot] = continuous_writer_t::slot_t {offset, size, sequence};
+        writer.byte_used += size;
+        ++writer.slot_used;
+        ++writer.packets_admitted;
+        writer.bytes_admitted += size;
+      }
+      writer.changed.notify_all();
+      continuous.state = continuous_state_e::writing;
+      return sequence;
+    }
+
+    /**
+     * Stop the open file (requires `continuous_control`): refuse new packets, let the writer
+     * finish every admitted packet, join it with no lock held, publish idle, then close once.
+     * The join has no time limit.
+     */
+    void stop_recording_locked() {
+      std::shared_ptr<continuous_writer_t> writer;
+      {
+        std::lock_guard guard(mutex);
+        if (recording.load()) {
+          // Still reported as recording, with its file, until the writer has finished.
+          continuous.state = continuous_state_e::stopping;
+          writer = continuous_writer;
+        }
+      }
+      if (!writer) {
         try {
-          BOOST_LOG(error) << "stream_recorder: continuous write to ["sv << recording_file << "] failed; "sv
-                           << "nothing more is written until recording stops"sv;
+          BOOST_LOG(warning) << "stream_recorder: not recording"sv;
         } catch (...) {
         }
         return;
       }
-      ++continuous.packets_written;
-      continuous.state = continuous_state_e::writing;
+      {
+        std::lock_guard guard(writer->lock);
+        writer->stop_requested = true;
+      }
+      writer->changed.notify_all();
+      CONTINUOUS_SEAM(writer->hooks, before_stop_join);
+      continuous_thread.finish();
+
+      int fd;
+      std::string file;
+      {
+        std::lock_guard guard(mutex);
+        // Release the descriptor, the name and the ownership before anything can fail.
+        fd = std::exchange(continuous_fd, -1);
+        file = std::move(recording_file);
+        recording_file.clear();
+        continuous_writer.reset();
+        continuous_reset_locked();
+        recording.store(false);
+      }
+      // The descriptor is closed exactly once, after its only writer was joined, whatever close
+      // reports, with no recorder lock held.
+      const bool closed = fd < 0 || continuous_close_call(*writer, fd) == 0;
+      try {
+        if (!closed) {
+          BOOST_LOG(warning) << "stream_recorder: stopped recording ["sv << file << "]; close reported an error"sv;
+        } else {
+          BOOST_LOG(info) << "stream_recorder: stopped recording ["sv << file << "]"sv;
+        }
+      } catch (...) {
+      }
     }
   }  // namespace
 
   void start_recording() {
-    std::lock_guard lock(mutex);
+    std::lock_guard control(continuous_control);
 
-    if (recording.load()) {
+    if (continuous_shut_down || recording.load()) {
       try {
-        BOOST_LOG(warning) << "stream_recorder: already recording"sv;
+        BOOST_LOG(warning) << (continuous_shut_down ? "stream_recorder: shutting down; recording not started"sv :
+                                                      "stream_recorder: already recording"sv);
       } catch (...) {
       }
       return;
     }
 
     try {
-      // Everything the open file needs is decided and allocated before anything is created.
+      // Decide under the recorder lock; allocate, create and open without it.
       std::uint64_t owner = 0;
       int format = -1;
-      if (replay_selected != 0) {
-        const int selected_format = replay_sessions.find(replay_selected)->second.video_format;
-        if (known_video_format(selected_format)) {
-          owner = replay_selected;
-          format = selected_format;
+      std::string dir;
+      std::size_t limit_bytes;
+      std::size_t limit_slots;
+#ifdef POLARIS_TESTS
+      detail::continuous_hooks_t seams;
+#endif
+      {
+        std::lock_guard guard(mutex);
+        if (replay_selected != 0) {
+          const int selected_format = replay_sessions.find(replay_selected)->second.video_format;
+          if (known_video_format(selected_format)) {
+            owner = replay_selected;
+            format = selected_format;
+          }
         }
+        dir = cfg.output_dir.empty() ? (platf::appdata() / "recordings").string() : cfg.output_dir;
+        limit_bytes = continuous_limit_bytes;
+        limit_slots = continuous_limit_slots;
+#ifdef POLARIS_TESTS
+        seams = continuous_hooks;
+#endif
       }
       if (format < 0) {
         format = fallback_video_format();
       }
-      const std::string dir = cfg.output_dir.empty() ? (platf::appdata() / "recordings").string() : cfg.output_dir;
+
+      CONTINUOUS_SEAM(seams, before_block_allocation);
+      auto writer = std::make_shared<continuous_writer_t>(limit_bytes, limit_slots);
+#ifdef POLARIS_TESTS
+      writer->hooks = std::move(seams);
+#endif
+
       std::error_code ec;
       fs::create_directories(dir, ec);
       if (ec) {
         BOOST_LOG(warning) << "stream_recorder: failed to create output directory ["sv << dir << "]: "sv << ec.message();
       }
-      const std::string stem = dir + "/polaris_" + continuous_stamp();
+      const std::string stem = dir + "/polaris_" + continuous_stamp(*writer);
       const std::string ext = extension_for(format);
 
       for (int attempt = 0; attempt < k_save_name_attempts; ++attempt) {
         std::string name = attempt == 0 ? stem + ext : stem + "-" + std::to_string(attempt) + ext;
         const fs::path path {name};
 #ifdef POLARIS_TESTS
-        if (continuous_hooks.before_open) {
-          continuous_hooks.before_open(path);
+        if (writer->hooks.before_open) {
+          writer->hooks.before_open(path);
         }
 #endif
-        const int fd = continuous_open(path);
+        const int fd = continuous_open(*writer, path);
         if (fd < 0) {
           const int open_error = errno;
           if (open_error == EEXIST) {
@@ -998,29 +1370,46 @@ namespace stream_recorder {
           BOOST_LOG(error) << "stream_recorder: failed to open file ["sv << name << "]: "sv << errno_message(open_error);
           return;
         }
-        created_file_t created {fd, path};
+        // Until the commit below, this guard alone owns the descriptor and the file.
+        created_file_t created {fd, path, writer};
 #ifdef POLARIS_TESTS
-        if (continuous_hooks.after_open) {
-          continuous_hooks.after_open(path);
+        if (writer->hooks.after_open) {
+          writer->hooks.after_open(path);
         }
 #endif
-        // Commit. Nothing from here allocates or throws, so the file cannot be orphaned.
+        writer->fd = fd;  // The value only: the writer never closes it.
+
+        CONTINUOUS_SEAM(writer->hooks, before_launch);
+        // Declared after `created`, so on any exception from here the writer is stopped, woken
+        // and joined first (nothing was published to it), and only then is the file closed and
+        // removed, once.
+        continuous_thread_t launched {std::thread {continuous_writer_main, writer}, writer};
+        CONTINUOUS_SEAM(writer->hooks, after_launch);
+
+        std::unique_lock guard(mutex);
+        // Commit. Nothing from here allocates or throws, so neither the file nor the thread can be lost.
+        continuous_thread = std::move(launched);
+        continuous_writer = writer;
         continuous_fd = created.release();
         recording_file = std::move(name);
         continuous_reset_locked();
         continuous.file_video_format = format;
         continuous.owner_generation = owner;
         continuous.state = owner != 0 ? continuous_state_e::awaiting_keyframe : continuous_state_e::awaiting_owner;
+        // The selection may have changed since it was read: follow it, as for any later change.
+        continuous_follow_selection();
         recording.store(true);
+        guard.unlock();
         try {
-          BOOST_LOG(info) << "stream_recorder: started recording to ["sv << recording_file << "]"sv;
+          BOOST_LOG(info) << "stream_recorder: started recording to ["sv << current_file() << "]"sv;
         } catch (...) {
         }
         return;
       }
       BOOST_LOG(error) << "stream_recorder: failed to open a file: every candidate name already exists"sv;
     } catch (...) {
-      // Nothing was committed, and a file this start created was closed and removed by its guard.
+      // Nothing was committed: a launched writer was joined, then a created file was closed and
+      // removed, by their guards.
       try {
         BOOST_LOG(error) << "stream_recorder: could not start recording"sv;
       } catch (...) {
@@ -1029,30 +1418,23 @@ namespace stream_recorder {
   }
 
   void stop_recording() {
-    int fd = -1;
-    std::string file;
+#ifdef POLARIS_TESTS
+    detail::continuous_hooks_t seams;
     {
-      std::lock_guard lock(mutex);
-      if (recording.load()) {
-        // Release the descriptor, the name and the ownership before anything can fail.
-        fd = std::exchange(continuous_fd, -1);
-        file = std::move(recording_file);
-        recording_file.clear();
-        continuous_reset_locked();
-        recording.store(false);
-      }
+      std::lock_guard guard(mutex);
+      seams = continuous_hooks;
     }
-    // The descriptor is closed exactly once, whatever close reports, with no recorder lock held.
-    const bool closed = fd < 0 || continuous_close_call(fd) == 0;
-    try {
-      if (fd < 0) {
-        BOOST_LOG(warning) << "stream_recorder: not recording"sv;
-      } else if (!closed) {
-        BOOST_LOG(warning) << "stream_recorder: stopped recording ["sv << file << "]; close reported an error"sv;
-      } else {
-        BOOST_LOG(info) << "stream_recorder: stopped recording ["sv << file << "]"sv;
-      }
-    } catch (...) {
+    CONTINUOUS_SEAM(seams, stop_entered);
+#endif
+    std::lock_guard control(continuous_control);
+    stop_recording_locked();
+  }
+
+  void shutdown() {
+    std::lock_guard control(continuous_control);
+    continuous_shut_down = true;
+    if (recording.load()) {
+      stop_recording_locked();
     }
   }
 
@@ -1292,42 +1674,74 @@ namespace stream_recorder {
   }
 #endif
 
+  namespace {
+    /// The continuous packet a push admitted, if any: its writer and sequence.
+    struct continuous_admitted_t {
+      std::shared_ptr<continuous_writer_t> writer;
+      std::uint64_t sequence = 0;
+    };
+
+    /**
+     * The one admission path of both packet entries. It never waits for storage: a continuous
+     * packet is only copied into its file's queue.
+     */
+    continuous_admitted_t push_packet_core(const uint8_t *data, size_t size, bool is_video, bool is_keyframe, int64_t pts,
+                                           std::uint64_t session_generation, int video_format,
+                                           std::chrono::steady_clock::time_point now) {
+      // Fast path: nothing to do if disabled and not recording. Reads
+      // mode_hint, not cfg.mode, so this stays lock-free and race-free on
+      // the send thread in the default (disabled) configuration.
+      if (mode_hint.load(std::memory_order_relaxed) == mode_t::disabled && !recording.load()) {
+        return {};
+      }
+
+      // Only record video packets (audio is not written to raw bitstream files)
+      if (!is_video) {
+        return {};
+      }
+
+      if (video_format >= 0 && video_format <= 3) {
+        active_video_format.store(video_format, std::memory_order_relaxed);
+      }
+
+      continuous_admitted_t admitted;
+      std::lock_guard lock(mutex);
+
+      // Continuous recording: only the open file's owner (or a candidate at a keyframe) is queued.
+      if (recording.load()) {
+        admitted.sequence = continuous_offer(data, size, is_keyframe, session_generation, video_format, now);
+        if (admitted.sequence != 0) {
+          admitted.writer = continuous_writer;
+        }
+      }
+
+      // Replay buffer: store packet in memory
+      if (cfg.mode == mode_t::replay_buffer) {
+        append_replay_packet(data, size, is_keyframe, pts, session_generation, video_format, now);
+      }
+      return admitted;
+    }
+  }  // namespace
+
   void push_packet(const uint8_t *data, size_t size, bool is_video, bool is_keyframe, int64_t pts,
                    std::uint64_t session_generation, int video_format) {
-    detail::push_packet_at(data, size, is_video, is_keyframe, pts, session_generation, video_format,
-                           std::chrono::steady_clock::now());
+    // Production: admission only, never a wait for the writer.
+    (void) push_packet_core(data, size, is_video, is_keyframe, pts, session_generation, video_format,
+                            std::chrono::steady_clock::now());
   }
 
   void detail::push_packet_at(const uint8_t *data, size_t size, bool is_video, bool is_keyframe, int64_t pts,
                               std::uint64_t session_generation, int video_format,
                               std::chrono::steady_clock::time_point now) {
-    // Fast path: nothing to do if disabled and not recording. Reads
-    // mode_hint, not cfg.mode, so this stays lock-free and race-free on
-    // the send thread in the default (disabled) configuration.
-    if (mode_hint.load(std::memory_order_relaxed) == mode_t::disabled && !recording.load()) {
+    const auto admitted = push_packet_core(data, size, is_video, is_keyframe, pts, session_generation, video_format, now);
+    if (admitted.sequence == 0) {
       return;
     }
-
-    // Only record video packets (audio is not written to raw bitstream files)
-    if (!is_video) {
-      return;
-    }
-
-    if (video_format >= 0 && video_format <= 3) {
-      active_video_format.store(video_format, std::memory_order_relaxed);
-    }
-
-    std::lock_guard lock(mutex);
-
-    // Continuous recording: only the open file's owner (or a candidate at a keyframe) is written.
-    if (recording.load()) {
-      continuous_offer(data, size, is_keyframe, session_generation, video_format, now);
-    }
-
-    // Replay buffer: store packet in memory
-    if (cfg.mode == mode_t::replay_buffer) {
-      append_replay_packet(data, size, is_keyframe, pts, session_generation, video_format, now);
-    }
+    // Diagnostic only: wait (bounded) for the writer to finish this one packet.
+    std::unique_lock guard(admitted.writer->lock);
+    admitted.writer->changed.wait_for(guard, std::chrono::seconds {10}, [&admitted] {
+      return admitted.writer->completed_sequence >= admitted.sequence;
+    });
   }
 
   void session_started(std::uint64_t session_generation, bool replay_eligible, int video_format) {
@@ -1442,6 +1856,29 @@ namespace stream_recorder {
     status.file = recording_file;
     status.replay = replay_stats_locked(now);
     status.continuous = continuous;
+    if (continuous_writer) {
+      // The writer's side, in the same snapshot (lock order: `mutex`, then the writer's lock).
+      auto &writer = *continuous_writer;
+      std::lock_guard guard(writer.lock);
+      auto &c = status.continuous;
+      c.packets_written = writer.packets_written;
+      c.bytes_written = writer.bytes_written;
+      c.packets_admitted = writer.packets_admitted;
+      c.bytes_admitted = writer.bytes_admitted;
+      c.queued_packets = writer.slot_used;
+      c.queued_bytes = writer.byte_used;
+      c.max_queue_packets = writer.slot_capacity;
+      c.max_queue_bytes = writer.ring_bytes;
+      c.discarded_packets = writer.discarded_packets;
+      c.discarded_bytes = writer.discarded_bytes;
+      if (writer.failed) {
+        // A storage failure outranks whatever the session did after it.
+        c.state = continuous_state_e::failed;
+        c.cause = continuous_cause_e::storage;
+        c.error = writer.error;
+        c.error_number = writer.error_number;
+      }
+    }
     return status;
   }
 
@@ -1454,6 +1891,9 @@ namespace stream_recorder {
   }
 
   void detail::reset_replay_for_tests() {
+    // Join any writer first, so no copied seam outlives the fixture that installed it.
+    std::lock_guard control(continuous_control);
+    continuous_thread.finish();
     int fd = -1;
     {
       std::lock_guard lock(mutex);
@@ -1470,13 +1910,46 @@ namespace stream_recorder {
       // An open continuous file is released like stop_recording() releases it.
       fd = std::exchange(continuous_fd, -1);
       recording_file.clear();
+      continuous_writer.reset();
       continuous_reset_locked();
       recording.store(false);
       continuous_hooks = {};
+      continuous_limit_bytes = k_continuous_queue_bytes;
+      continuous_limit_slots = k_continuous_queue_slots;
     }
+    continuous_shut_down = false;  // Tests only: a later test may start again.
     if (fd >= 0) {
       native_close_impl(fd);
     }
+  }
+
+  void detail::set_continuous_limits_for_tests(std::size_t bytes, std::size_t slots) {
+    std::lock_guard lock(mutex);
+    // Ring and slot arithmetic need head + used to fit in size_t.
+    continuous_limit_bytes = std::clamp<std::size_t>(bytes, 1, std::numeric_limits<std::size_t>::max() / 2);
+    continuous_limit_slots = std::clamp<std::size_t>(slots, 1, std::numeric_limits<std::size_t>::max() / 2);
+  }
+
+  bool detail::wait_continuous_drained_for_tests(std::chrono::milliseconds timeout) {
+    std::shared_ptr<continuous_writer_t> writer;
+    {
+      std::lock_guard lock(mutex);
+      writer = continuous_writer;
+    }
+    if (!writer) {
+      return true;
+    }
+    std::unique_lock guard(writer->lock);
+    return writer->changed.wait_for(guard, timeout, [&writer] {
+      return writer->slot_used == 0;
+    });
+  }
+
+  bool detail::finish_continuous_writer_for_tests() {
+    std::lock_guard control(continuous_control);
+    // The same owner that ends a writer at process exit, run now on a moved-out handle.
+    continuous_thread_t owner {std::move(continuous_thread)};
+    return owner.finish();
   }
 
   void detail::set_continuous_hooks_for_tests(continuous_hooks_t hooks) {

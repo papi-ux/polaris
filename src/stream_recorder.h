@@ -46,15 +46,38 @@ namespace stream_recorder {
    * One file holds at most one session's video, in one codec, starting at a keyframe: raw
    * elementary video only (no container, audio or timestamps). An overlap suspends all input
    * and only the same owner may resume, at a keyframe; once its owner ends or violates the
-   * codec, the file takes nothing more. The file stays open until stop_recording(). Writes are
-   * synchronous on the caller's thread with no fsync. Repeating a start changes nothing.
+   * codec, the file takes nothing more. The file stays open until stop_recording().
+   *
+   * Storage is asynchronous: an admitted packet is copied into the file's fixed, preallocated
+   * queue (k_continuous_queue_bytes, k_continuous_queue_slots, counting the packet being
+   * written) and one writer thread per file writes it; a packet push never waits for, or makes,
+   * a filesystem call. A packet that does not fit is dropped and the file waits for a keyframe
+   * that fits. Admitted packets are written even if the owner later ends or overlaps. There is
+   * no fsync. Starting, which creates the directory and opens the file, blocks its caller but
+   * never the packet path or status. Repeating a start changes nothing, and so does a start
+   * after shutdown().
    */
   void start_recording();
 
   /**
-   * @brief Stop continuous recording: close the file and forget its owner. Repeating it changes nothing.
+   * @brief Stop continuous recording: refuse new packets, write every admitted packet, then
+   * close the file and forget its owner. Repeating it changes nothing.
+   *
+   * It waits for the writer without a time limit: on a stalled filesystem it can wait
+   * indefinitely. While it waits, the status still reports the file, as `stopping`.
    */
   void stop_recording();
+
+  /**
+   * @brief Process exit: stop continuous recording as stop_recording() does, and refuse every
+   * later start. Like stop_recording(), it can wait indefinitely on a stalled filesystem.
+   */
+  void shutdown();
+
+  /// The bytes one continuous file may hold queued or being written; allocated once per file.
+  inline constexpr std::size_t k_continuous_queue_bytes = std::size_t {16} * 1024 * 1024;
+  /// The packets one continuous file may hold queued or being written.
+  inline constexpr std::size_t k_continuous_queue_slots = 256;
 
   /// Packets larger than this are refused before they are read, whatever the recorder mode.
   inline constexpr std::size_t k_continuous_max_packet_bytes = std::size_t {128} * 1024 * 1024;
@@ -67,6 +90,7 @@ namespace stream_recorder {
     writing,            ///< Bound; the owner's packets are written
     suspended,          ///< Open; nothing is written for the reason in `cause`
     failed,             ///< Open; a write failed, and nothing more is written until stop
+    stopping,           ///< Open; stop refuses new packets and writes the admitted ones
   };
 
   /// The most recent reason the continuous file left `writing` (or could not start it).
@@ -77,6 +101,7 @@ namespace stream_recorder {
     codec,          ///< A codec differs from the file's; permanent once the file is bound
     discontinuity,  ///< An invalid, oversized or clock-regressed owner packet was dropped
     storage,        ///< A write failed or made no progress
+    backpressure,   ///< An owner packet did not fit the file's queue and was dropped
   };
 
   enum class continuous_error_e {
@@ -89,6 +114,14 @@ namespace stream_recorder {
    * @brief The continuous file's ownership and accounting, taken under the recorder lock.
    * Defaults describe no open file. Packets of unregistered, zero, retired or other sessions
    * are not counted here: they never change the file or this state.
+   *
+   * Writer-side fields (written, discarded, queued, error) come from the file's writer in the
+   * same snapshot, and a storage failure is reported as `failed`/`storage` whatever happened to
+   * the session since. Every admitted packet is exactly one of written, discarded or queued:
+   * packets_admitted == packets_written + discarded_packets + queued_packets. bytes_written grows
+   * with every byte write() accepts, while the packet being written stays whole in queued_bytes
+   * until it finishes; so bytes_admitted == bytes_written + discarded_bytes + queued_bytes holds
+   * whenever no packet is being written (for example after the queue drains).
    */
   struct continuous_status_t {
     continuous_state_e state = continuous_state_e::idle;
@@ -103,6 +136,15 @@ namespace stream_recorder {
     std::uint64_t discontinuities = 0;   ///< Owner clock regressions and dropped owner frames
     continuous_error_e error = continuous_error_e::none;
     int error_number = 0;                ///< errno of a failed write
+    std::uint64_t packets_admitted = 0;  ///< Owner packets copied into the queue
+    std::uint64_t bytes_admitted = 0;    ///< Their bytes
+    std::size_t queued_packets = 0;      ///< Admitted packets not yet finished, the one being written included
+    std::size_t queued_bytes = 0;        ///< Their bytes
+    std::size_t max_queue_packets = 0;   ///< The file's queue capacity in packets
+    std::size_t max_queue_bytes = 0;     ///< The file's queue capacity in bytes
+    std::uint64_t dropped_backpressure = 0;  ///< Owner packets that did not fit the queue
+    std::uint64_t discarded_packets = 0;  ///< Admitted packets not written whole because the file had failed
+    std::uint64_t discarded_bytes = 0;    ///< Their bytes not written (a failed packet's written prefix excluded)
   };
 
   /**
@@ -257,7 +299,13 @@ namespace stream_recorder {
   replay_stats_t replay_stats();
 
   namespace detail {
-    /// push_packet() at an explicit steady-clock time; push_packet() passes now().
+    /**
+     * Diagnostic entry: the same admission as push_packet() at an explicit steady-clock time,
+     * and then, unlike push_packet(), a bounded wait (10 s) until the continuous writer has
+     * finished the one packet this call admitted (written, or discarded after a failure), if
+     * any. It keeps exact-byte checks possible right after a push; it says nothing about the
+     * production path, which never waits.
+     */
     void push_packet_at(const uint8_t *data, size_t size, bool is_video, bool is_keyframe, int64_t pts,
                         std::uint64_t session_generation, int video_format,
                         std::chrono::steady_clock::time_point now);
@@ -381,9 +429,18 @@ namespace stream_recorder {
 
     /**
      * Continuous-file seams for tests, separate from the save seams. Each one left empty uses
-     * the real operation. All run under the recorder lock and may call no recorder function,
-     * except `close`, which stop_recording() calls with no lock held after the file's
-     * descriptor, name and state are released.
+     * the real operation or does nothing. A start copies them into the file's writer, so later
+     * changes apply to the next file only. None may call a recorder function, except `close`,
+     * `stop_entered` and `before_stop_join`, which run with no recorder lock held.
+     * Where each runs:
+     * - name_stamp, before_block_allocation, before_open, open, after_open, before_launch,
+     *   after_launch: the starting thread, no recorder lock (a throw rolls the start back);
+     * - rollback_close: the starting thread, no lock, while a start rolls back its file;
+     * - before_publish: the pushing thread, under the recorder lock, after the packet is copied
+     *   into the queue and before it is published;
+     * - write, worker_started, worker_exited, after_worker_failure: the writer thread, no lock;
+     * - stop_entered: on entry to stop_recording(); before_stop_join: once `stopping` is
+     *   published, before the writer is joined; close: after idle is published.
      */
     struct continuous_hooks_t {
       std::function<std::string()> name_stamp;  ///< Replaces the wall-clock part of the name
@@ -395,11 +452,34 @@ namespace stream_recorder {
       std::function<void(const std::filesystem::path &path)> after_open;
       std::function<long long(int fd, const std::uint8_t *data, std::size_t size)> write;
       std::function<int(int fd)> close;
+      std::function<void()> before_block_allocation;  ///< May throw: nothing exists yet
+      std::function<void()> before_launch;  ///< May throw: the file exists, no writer thread yet
+      std::function<void()> after_launch;   ///< May throw: the writer runs, nothing is committed
+      std::function<void()> before_publish;
+      std::function<void()> worker_started;
+      std::function<void()> worker_exited;
+      std::function<void()> after_worker_failure;  ///< After the failure is published
+      std::function<void()> stop_entered;
+      std::function<void()> before_stop_join;
+      /// Replaces the native close when a start rolls back a file it created (the file is
+      /// removed afterwards either way). It must close `fd` exactly once and must not throw.
+      std::function<void(int fd)> rollback_close;
     };
     /// Install continuous seams; set them while no file is open. reset_replay_for_tests() clears them.
     void set_continuous_hooks_for_tests(continuous_hooks_t hooks);
     /// The real exclusive, no-follow, private (0600 on POSIX) creation.
     int native_open_exclusive(const std::filesystem::path &path);
+    /// Queue capacity for files started from now on (both nonzero); reset_replay_for_tests() restores the defaults.
+    void set_continuous_limits_for_tests(std::size_t bytes, std::size_t slots);
+    /// Wait, at most `timeout`, until the open file's writer has finished every admitted packet.
+    /// An explicit test drain: production paths never wait like this.
+    bool wait_continuous_drained_for_tests(std::chrono::milliseconds timeout);
+    /**
+     * Run the same owner mechanism that ends a writer still running at process exit: take the
+     * writer thread from the recorder, tell it to stop, wake it and join it. The file stays open
+     * and recorded until stop_recording(). True when a writer thread was joined.
+     */
+    bool finish_continuous_writer_for_tests();
 #endif
   }  // namespace detail
 
