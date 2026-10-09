@@ -991,11 +991,11 @@ namespace stream_recorder {
 #endif
         const int fd = continuous_open(path);
         if (fd < 0) {
-          const int error = errno;
-          if (error == EEXIST) {
+          const int open_error = errno;
+          if (open_error == EEXIST) {
             continue;
           }
-          BOOST_LOG(error) << "stream_recorder: failed to open file ["sv << name << "]: "sv << errno_message(error);
+          BOOST_LOG(error) << "stream_recorder: failed to open file ["sv << name << "]: "sv << errno_message(open_error);
           return;
         }
         created_file_t created {fd, path};
