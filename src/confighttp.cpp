@@ -9436,7 +9436,7 @@ namespace confighttp {
    * @api_examples{/api/recording/save-replay| POST| null}
    */
   void saveReplay(resp_https_t response, req_https_t request,
-                  recording_save_workers_t &workers, cover_post_t post) {
+                  recording_save_workers_t &workers, https_server_t &server) {
     if (!authenticate(response, request))
       return;
 
@@ -9457,6 +9457,7 @@ namespace confighttp {
     try {
       owned = std::make_shared<stream_recorder::detail::admitted_save_t>(std::move(admission.save));
       const auto headers = cover_headers();
+      auto post = recording_post_for(server);
 #ifdef POLARIS_TESTS
       const auto observer = recording_commit_observer;
 #else
@@ -9653,7 +9654,7 @@ namespace confighttp {
     server.resource["^/api/recording/stop$"]["POST"] = withCsrf(stopRecording);
     server.resource["^/api/recording/save-replay$"]["POST"] = withCsrf(
       [&server, &workers](resp_https_t response, req_https_t request) {
-        saveReplay(std::move(response), std::move(request), workers, recording_post_for(server));
+        saveReplay(std::move(response), std::move(request), workers, server);
       });
     server.resource["^/api/recording/status$"]["GET"] = getRecordingStatus;
   }

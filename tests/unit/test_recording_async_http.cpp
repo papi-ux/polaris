@@ -1,8 +1,7 @@
 /**
  * @file tests/unit/test_recording_async_http.cpp
- * @brief Test the host-admin recording status and replay-save results: the JSON the production
- * builders assemble, the one-lock recorder snapshot behind them, and the production recording
- * routes (CSRF wrapper and handler authentication) over a real loopback TLS listener.
+ * @brief Exercise asynchronous host-admin replay saves through production recording routes:
+ * request-executor responsiveness, admission, worker failure, shutdown and disconnect.
  *
  * Saved bytes are synthetic raw video; nothing here claims a playable clip, audio or container.
  */
@@ -26,6 +25,7 @@
 #include <functional>
 #include <future>
 #include <mutex>
+#include <memory>
 #include <new>
 #include <set>
 #include <string>
@@ -220,7 +220,9 @@ namespace {
             confighttp::run_recording_routes_for_tests(cert.string(), key.string(),
               [&](unsigned short assigned, std::function<void()> stop_server) {
                 std::lock_guard lock {ready_mutex};
-                stop = std::move(stop_server);
+                stop = [once = std::make_shared<std::atomic<bool>>(false), stop_server = std::move(stop_server)] {
+                  if (!once->exchange(true)) stop_server();
+                };
                 stop_listener = stop;
                 listener_thread = std::this_thread::get_id();
                 port = assigned;
@@ -483,9 +485,15 @@ TEST_F(RecordingAsyncHttpTests, DisconnectedAdmittedClientDoesNotCancelStorageOr
 
 TEST_F(RecordingAsyncHttpTests, FailedCompletionPostCannotReclassifyPublishedStorage) {
   push(true, 4);
-  confighttp::set_recording_post_for_tests([](auto) { throw std::bad_alloc {}; });
+  std::promise<void> post_attempted;
+  auto posted = post_attempted.get_future();
+  confighttp::set_recording_post_for_tests([&](auto) {
+    post_attempted.set_value();
+    throw std::bad_alloc {};
+  });
   with_server([&](const std::string &) {
     auto first = start_request(true, 1);
+    ASSERT_EQ(posted.wait_for(k_bounded_wait), std::future_status::ready);
     ASSERT_EQ(first.wait_for(k_bounded_wait), std::future_status::ready);
     first.get(); // No structured failure reply is invented after publication.
     auto status = request("GET", "/api/recording/status", bearer());
@@ -533,5 +541,9 @@ TEST_F(RecordingAsyncHttpTests, RejectedAuthAndCsrfNeverAdmitButValidBearerCanSa
     ASSERT_EQ(saved.code, 200);
     EXPECT_EQ(saved.body["outcome"], "saved");
     EXPECT_EQ(launches, 1);
+    auto session_save = request("POST", path, {{"Cookie", "auth=" + cookie}, {"X-CSRF-Token", k_csrf}});
+    ASSERT_EQ(session_save.code, 200);
+    EXPECT_EQ(session_save.body["outcome"], "saved");
+    EXPECT_EQ(launches, 2);
   });
 }

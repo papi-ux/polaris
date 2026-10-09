@@ -161,7 +161,7 @@ namespace stream_recorder {
     std::size_t max_unique_payload_bytes = 0; ///< max_bytes + max_snapshot_bytes
     std::size_t max_metadata_entries = 0;     ///< max_packets + max_snapshot_packets
     std::uint64_t saves_completed = 0;        ///< Saves published
-    std::uint64_t saves_failed = 0;           ///< Admitted saves that failed in storage (nothing published)
+    std::uint64_t saves_failed = 0;           ///< Admitted saves released without publication (abandoned, unsubmitted or failed)
     std::uint64_t saves_refused_busy = 0;     ///< Requests refused because a save was running
     // The buffered window, by arrival time. A run is the stored packets of the selected session;
     // it is either empty or starts at a keyframe. That is stored-run evidence only: it is not save
@@ -297,7 +297,7 @@ namespace stream_recorder {
       /// Before the capture state of an eligible run is allocated, under the recorder lock (call
       /// no recorder function from it). Never reached for busy, disabled or empty refusals.
       std::function<void()> before_admission_allocation;
-      /// Just before the save reservation is released, with no recorder lock held.
+      /// Just before the save reservation is released, with no recorder lock held; must not throw.
       std::function<void()> before_save_reservation_release;
       std::function<void(const std::filesystem::path &staging)> before_write;
       std::function<long long(int fd, const std::uint8_t *data, std::size_t size)> write;
