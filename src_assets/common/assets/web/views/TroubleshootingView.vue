@@ -178,8 +178,10 @@
           <div class="mt-3 flex flex-wrap gap-2">
             <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" @click="refreshControllerSnapshot">{{ $t('troubleshooting.controller_detect') }}</button>
             <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" @click="recordControllerEvent('A / primary button', 1)">{{ $t('troubleshooting.controller_log_a') }}</button>
-            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" :disabled="controllerRumbleSupported !== true" @click="pulseControllerHaptics">{{ $t('troubleshooting.controller_test_rumble') }}</button>
+            <button class="focus-ring troubleshooting-action-button troubleshooting-action-button-secondary" :disabled="controllerRumbleSupported !== true" :aria-describedby="controllerRumbleHint ? 'controller-rumble-hint' : undefined" data-controller-rumble @click="pulseControllerHaptics">{{ $t('troubleshooting.controller_test_rumble') }}</button>
           </div>
+          <!-- A disabled rumble test says why, where keyboard and screen-reader users reach it too. -->
+          <p v-if="controllerRumbleHint" id="controller-rumble-hint" class="mt-2 text-xs text-storm" data-controller-rumble-hint>{{ controllerRumbleHint }}</p>
           <details class="mt-3 text-xs text-storm">
             <summary class="cursor-pointer text-ice">{{ $t('troubleshooting.advanced_evidence') }}</summary>
             <div class="mt-2 space-y-2">
@@ -759,7 +761,9 @@ const networkPathReport = computed(() => buildNetworkPathTestReport({
   mdnsAvailable: window.location.hostname.endsWith('.local'),
 }))
 
-const browserGamepads = computed(() => {
+// navigator.getGamepads() is not reactive: a computed over it would keep the list it saw when the
+// page opened, before any controller was connected. Read it again on Detect and on connect events.
+function readBrowserGamepads() {
   if (!navigator.getGamepads) return []
   return Array.from(navigator.getGamepads()).filter(Boolean).map((pad) => ({
     index: pad.index,
@@ -767,6 +771,20 @@ const browserGamepads = computed(() => {
     buttons: pad.buttons?.length || 0,
     axes: pad.axes?.length || 0,
   }))
+}
+const browserGamepads = ref(readBrowserGamepads())
+function refreshBrowserGamepads() {
+  browserGamepads.value = readBrowserGamepads()
+  // Device changes retire the detected capability, even when another controller remains.
+  controllerRumbleSupported.value = null
+}
+window.addEventListener('gamepadconnected', refreshBrowserGamepads)
+window.addEventListener('gamepaddisconnected', refreshBrowserGamepads)
+
+const controllerRumbleHint = computed(() => {
+  if (controllerRumbleSupported.value === true) return ''
+  if (controllerRumbleSupported.value === false) return i18n.t('troubleshooting.controller_rumble_unsupported')
+  return i18n.t('troubleshooting.controller_rumble_detect_first')
 })
 
 const controllerNativeEvidence = computed(() => streamStats.value?.controller_input || {})
@@ -796,24 +814,35 @@ function recordControllerEvent(label, pad = 1) {
 }
 
 function refreshControllerSnapshot() {
+  refreshBrowserGamepads()
   const pads = browserGamepads.value
   if (pads.length) {
-    controllerRumbleSupported.value = Boolean(navigator.getGamepads?.()[pads[0].index]?.vibrationActuator)
+    controllerRumbleSupported.value = Array.from(navigator.getGamepads?.() || []).some(canVibrate)
     recordControllerEvent('Browser gamepad visible', pads[0].index + 1)
   } else {
     recordControllerEvent('Manual button sample', 1)
   }
 }
 
+function canVibrate(pad) {
+  return typeof pad?.vibrationActuator?.playEffect === 'function'
+}
+
 async function pulseControllerHaptics() {
-  const pad = navigator.getGamepads?.().find((candidate) => candidate?.vibrationActuator)
-  if (!pad?.vibrationActuator?.playEffect) return
-  await pad.vibrationActuator.playEffect('dual-rumble', {
-    duration: 180,
-    strongMagnitude: 0.35,
-    weakMagnitude: 0.25,
-  })
-  controllerRumbleSupported.value = true
+  // The same test Detect uses, so the button never enables for a controller this cannot pulse.
+  const pad = Array.from(navigator.getGamepads?.() || []).find(canVibrate)
+  if (!pad) return
+  try {
+    await pad.vibrationActuator.playEffect('dual-rumble', {
+      duration: 180,
+      strongMagnitude: 0.35,
+      weakMagnitude: 0.25,
+    })
+  } catch {
+    // The browser may refuse or interrupt the effect; say so instead of failing silently.
+    showToast(i18n.t('troubleshooting.controller_rumble_failed'), 'error')
+    return
+  }
   recordControllerEvent('Optional rumble pulse', pad.index + 1)
 }
 
@@ -1351,5 +1380,7 @@ projection.load()
 
 onBeforeUnmount(() => {
   clearInterval(logInterval)
+  window.removeEventListener('gamepadconnected', refreshBrowserGamepads)
+  window.removeEventListener('gamepaddisconnected', refreshBrowserGamepads)
 })
 </script>

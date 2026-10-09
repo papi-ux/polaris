@@ -161,7 +161,7 @@
                   <div class="eyebrow-label">{{ $t('dashboard.display_preview') }}</div>
                 </div>
                 <div class="dashboard-preview-actions">
-                  <button v-if="!showPreview" :disabled="spacesPreviewBlocked || previewStarting" data-start-preview @click="startPreview" class="focus-ring dashboard-action-button dashboard-action-button-primary disabled:cursor-not-allowed disabled:opacity-50">
+                  <button v-if="!showPreview" :disabled="spacesPreviewBlocked || previewStarting" :aria-describedby="spacesPreviewBlocked ? 'dashboard-preview-blocked-reason' : undefined" data-start-preview @click="startPreview" class="focus-ring dashboard-action-button dashboard-action-button-primary disabled:cursor-not-allowed disabled:opacity-50">
                     {{ $t('dashboard.show_display') }}
                   </button>
                   <template v-else>
@@ -215,7 +215,7 @@
                 </div>
               </template>
               <div v-else class="flex items-center justify-between gap-3 py-1">
-                <span class="text-xs text-storm">{{ spacesPreviewBlocked ? $t('dashboard_spaces.no_preview') : $t('dashboard.preview_hidden_title') }}</span>
+                <span :id="spacesPreviewBlocked ? 'dashboard-preview-blocked-reason' : undefined" class="text-xs text-storm" data-preview-hidden-reason>{{ spacesPreviewBlocked ? $t('dashboard_spaces.no_preview') : $t('dashboard.preview_hidden_title') }}</span>
                 <div class="dashboard-preview-meta">
                   <span class="data-pill">{{ viewerCountLabel }}</span>
                   <span class="data-pill">{{ qualitySummaryLabel }}</span>

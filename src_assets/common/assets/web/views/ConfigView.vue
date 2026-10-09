@@ -24,12 +24,20 @@
           <span class="meta-pill" :class="saveState.tone" data-save-badge>{{ saveState.badge }}</span>
         </div>
 
+        <!-- Escape clears; Enter moves focus to the top match's control instead of leaving it highlighted out of reach. -->
         <input
           v-model="searchQuery"
-          type="text"
+          type="search"
+          :aria-label="$t('config.search_label')"
           :placeholder="$t('config.search_placeholder')"
+          enterkeyhint="search"
+          autocomplete="off"
+          spellcheck="false"
           class="focus-ring settings-search-input"
+          data-settings-search
           @input="onSearch"
+          @keydown.escape="onSearchEscape"
+          @keydown.enter="focusTopSearchMatch"
         >
 
         <div class="settings-command-actions">
@@ -879,6 +887,47 @@ function clearSearch() {
   clearSearchHighlight()
 }
 
+function onSearchEscape(event) {
+  if (!searchQuery.value || event?.isComposing) return
+  // Only a non-empty search is consumed, so Escape still reaches anything else listening.
+  event.preventDefault()
+  clearSearch()
+}
+
+const SEARCH_FOCUSABLE = 'input:not([type="hidden"]):not([disabled]), select:not([disabled]), textarea:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+
+async function focusTopSearchMatch(event) {
+  // Enter that confirms an input-method composition (for example CJK text) is not a request to jump.
+  if (event?.isComposing || !normalizeSettingsSearchQuery(searchQuery.value)) return
+  const top = searchResults.value[0]
+  if (!top) return
+  event?.preventDefault?.()
+  currentTab.value = top.tab.id
+  const optionKey = matchedOptionByTab.value[top.tab.id]
+  await focusSearchTarget(optionKey)
+  const target = resolveSearchTarget(optionKey)
+  if (!target) return
+  // Prefer the setting's own field; otherwise the first control in its block.
+  const field = settingsContentRef.value?.querySelector?.(`#${escapeSelector(optionKey)}`)
+  const control = field?.matches?.(SEARCH_FOCUSABLE) ? field
+    : target.matches?.(SEARCH_FOCUSABLE) ? target : target.querySelector?.(SEARCH_FOCUSABLE)
+  control?.focus?.({ preventScroll: true })
+}
+
+/**
+ * Open every collapsed disclosure that encloses `target`, outermost first, so a matched setting
+ * can be seen and focused. Disclosures that do not contain it stay as they are.
+ */
+function openEnclosingDisclosures(target) {
+  const enclosing = []
+  for (let node = target?.closest?.('details'); node; node = node.parentElement?.closest('details')) {
+    enclosing.push(node)
+  }
+  for (const details of enclosing.reverse()) {
+    if (!details.open) details.open = true
+  }
+}
+
 function escapeSelector(value) {
   if (typeof window !== 'undefined' && window.CSS?.escape) {
     return window.CSS.escape(value)
@@ -945,6 +994,7 @@ async function focusSearchTarget(optionKey) {
   if (!target) return
 
   clearSearchHighlight()
+  openEnclosingDisclosures(target)
   highlightedSearchTarget = target
   target.classList.add('settings-search-hit')
   target.scrollIntoView?.({ behavior: 'smooth', block: 'center', inline: 'nearest' })
