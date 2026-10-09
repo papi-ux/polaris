@@ -113,6 +113,27 @@ How the comparisons work:
   These are `sizeof`, logical-count and measured-capacity facts for one compiler and build. They
   do not cover allocator overhead, deque block allocation, heap totals or process RSS.
 
+## Linked FFmpeg codec registration inventory (#361)
+
+`RecorderMediaCapabilitiesTests.LinkedFfmpegRegistrationInventory`, in `test_polaris_video` (CTest
+`polaris_recorder_media_capabilities`), records what the linked FFmpeg **registers**. It records:
+- `av_version_info()` and `avcodec_configuration()`;
+- the libavcodec and libavutil versions, both from the headers compiled against and from the
+  runtime;
+- for each of the `libx264`, `libx265` and `libsvtav1` encoders (looked up by name), and the H.264,
+  HEVC and AV1 decoders (looked up by id): present or not, and its name, codec id and media type.
+
+An absent registration is recorded as present `0`, an empty name, id `0` and an empty type. Every
+value is written both as a GTest XML property and in one console line,
+`POLARIS_RECORDER_MEDIA_CAPABILITIES_JSON {...}`, with identical strings. The test asserts only that
+any registration found is the codec it was looked up as, and that the recorded values are coherent.
+It assumes no availability set.
+
+**Registration is not media capability.** No codec is opened, allocated, encoded or decoded. A
+registered codec may still fail to open, and a registered decoder proves nothing about any
+recorded file. These are runtime facts of the linked library as this binary sees them. Which
+prepared archive supplied that library is recorded separately, by CI.
+
 ## Not covered
 
 This slice proves none of the following:
