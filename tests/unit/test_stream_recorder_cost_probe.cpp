@@ -733,13 +733,14 @@ TEST_F(StreamRecorderCostProbe, KeyframeReservation) {
   const auto dependent = synthetic_frame(1);
 
   // Every timed push below is the production push_packet(); the storage-free writer is drained,
-  // untimed, before the next frame, so no measurement includes the writer or a full queue.
+  // untimed, before the next frame. This excludes drain waits and backpressure; the woken
+  // writer can still contend for its mutex during the timed push.
   auto push_drained = [](std::uint64_t generation, const frame_t &frame) {
     const auto elapsed = timed_ns([&] { push_now(generation, frame); });
     EXPECT_TRUE(stream_recorder::detail::wait_continuous_drained_for_tests(k_bounded));
     return elapsed;
   };
-  constexpr std::string_view drained = "; production push_packet() timed, storage-free writer drained untimed before the next frame";
+  constexpr std::string_view drained = "; production push_packet() timed, storage-free writer drained untimed before the next frame; woken writer contention remains possible";
 
   // (a) No channel: production registers none, so keyframe_reserve returns after its early checks.
   storage_free();
@@ -756,14 +757,16 @@ TEST_F(StreamRecorderCostProbe, KeyframeReservation) {
   }
   auto stats = stream_recorder::detail::keyframe_stats_for_tests();
   invariant("unwired: no reservation", stats.reservations == 0 && stats.attempted == 0);
+  const auto unwired_status = stream_recorder::recorder_status().continuous;
   invariant("unwired: every frame admitted, none dropped",
-            stream_recorder::recorder_status().continuous.dropped_backpressure == 0);
-  subrecords.push_back(subrecord("unwired_owner_push", std::string {"owner frames in the writing state with no channel (production shape: early checks, no writer.lock)"} + std::string {drained}, unwired_ns)
+            unwired_status.dropped_backpressure == 0 && unwired_status.packets_admitted == 1 + warmup + samples &&
+              unwired_status.packets_written == unwired_status.packets_admitted);
+  subrecords.push_back(subrecord("unwired_owner_push", std::string {"owner frames in the writing state with no channel (production shape: continuous admission takes writer.lock; keyframe_reserve returns before its additional writer.lock)"} + std::string {drained}, unwired_ns)
                         .num("payloadBytes", dependent.bytes.size()).str("arrivalClock", "actual steady clock, unpaced").dump());
   stream_recorder::stop_recording();
   stream_recorder::detail::reset_replay_for_tests();
 
-  // (b) Fixture channel, writing state: every owner frame takes the writer's lock once (F3).
+  // (b) Fixture channel, writing state: keyframe_reserve takes one additional writer lock.
   storage_free();
   auto mail = std::make_shared<safe::mail_raw_t>();
   auto event = mail->event<bool>(::mail::idr);
@@ -784,17 +787,19 @@ TEST_F(StreamRecorderCostProbe, KeyframeReservation) {
   stats = stream_recorder::detail::keyframe_stats_for_tests();
   const auto before_dispatch = stats.attempted;
   invariant("fixture channel: writing frames reserve nothing", stats.reservations == before_dispatch && !event->peek());
+  const auto wired_status = stream_recorder::recorder_status().continuous;
   invariant("fixture channel: every frame admitted, none dropped",
-            stream_recorder::recorder_status().continuous.dropped_backpressure == 0);
-  subrecords.push_back(subrecord("fixture_channel_owner_push", std::string {"owner frames in the writing state with a fixture channel (writer.lock per frame)"} + std::string {drained}, wired_ns)
+            wired_status.dropped_backpressure == 0 && wired_status.packets_admitted == 1 + warmup + samples &&
+              wired_status.packets_written == wired_status.packets_admitted);
+  subrecords.push_back(subrecord("fixture_channel_owner_push", std::string {"owner frames in the writing state with a fixture channel (one additional keyframe_reserve writer.lock per frame beyond continuous admission)"} + std::string {drained}, wired_ns)
                         .num("payloadBytes", dependent.bytes.size()).str("arrivalClock", "actual steady clock, unpaced").dump());
 
-  // (c) Fixture dispatch: each recovery keyframe is admitted and drained untimed, then one lost
-  // frame is timed: its reservation and the raise of the fixture event, after the lock.
+  // (c) Fixture dispatch: each recovery keyframe is admitted and drained untimed, then one
+  // invalid-packet discontinuity is timed: its reservation and the fixture event raise.
   std::vector<std::uint64_t> dispatch_ns;
   std::uint64_t latched = 0;
   for (std::uint64_t i = 0; i < warmup + samples; ++i) {
-    push_drained(7007, keyframe);  // Recovery ends: the next loss may ask again at once
+    push_drained(7007, keyframe);  // Recovery ends: the next discontinuity may ask again at once
     const auto elapsed = timed_ns([] {
       stream_recorder::push_packet(nullptr, 0, true, false, 0, 7007, k_hevc);
     });
@@ -804,13 +809,15 @@ TEST_F(StreamRecorderCostProbe, KeyframeReservation) {
     }
   }
   stats = stream_recorder::detail::keyframe_stats_for_tests();
-  invariant("fixture dispatch: one attempted raise per loss", stats.attempted - before_dispatch == warmup + samples &&
+  const auto dispatch_invalid = stream_recorder::recorder_status().continuous.refused_invalid;
+  invariant("fixture dispatch: one attempted raise per invalid packet", stats.attempted - before_dispatch == warmup + samples &&
+                                                                dispatch_invalid == warmup + samples &&
                                                                 latched == warmup + samples);
   invariant("fixture dispatch: nothing expired, stopped or fenced", stats.expired == 0 && stats.stopped == 0 && stats.fenced == 0);
-  subrecords.push_back(subrecord("fixture_dispatch", "a lost owner frame through production push_packet(): reservation plus raise of the fixture mail event (no encoder exists); each recovery keyframe admitted and drained untimed first", dispatch_ns)
+  subrecords.push_back(subrecord("fixture_dispatch", "an invalid owner packet through production push_packet(), modelling a discontinuity rather than observed network loss: reservation plus raise of the fixture mail event (no encoder exists); each recovery keyframe admitted and drained untimed first", dispatch_ns)
                         .num("payloadBytes", 0).num("recoveryKeyframeBytes", keyframe.bytes.size()).str("arrivalClock", "actual steady clock, unpaced").dump());
   outcomes.flag("startRequestLatched", start_request).num("reservations", stats.reservations)
-    .num("attempted", stats.attempted).num("fixtureEventsLatched", latched)
+    .num("attempted", stats.attempted).num("fixtureEventsLatched", latched).num("refusedInvalid", dispatch_invalid)
     .str("note", "fixture mail events only; no live keyframe request reaches an encoder or host");
   write_record(subrecords, outcomes);
 }

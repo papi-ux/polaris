@@ -56,7 +56,7 @@ The synthetic train is encoded video frame payloads, **before RTP fragmentation*
 
 The 60 fps interval is an artificial arrival-clock step used by replay fixtures. Calls are
 unpaced when measuring wall-clock cost. Keyframe comparisons use fixed 32 KiB dependent payloads;
-each fixture-dispatch loss follows an untimed 256 KiB recovery keyframe. Their subrecords state
+each fixture-dispatch invalid packet follows an untimed 256 KiB recovery keyframe. Their subrecords state
 these overrides and use the actual steady clock.
 
 | Case | Subrecords |
@@ -65,7 +65,7 @@ these overrides and use the actual steady clock.
 | `ReplayAdmission` | `replay_push`: replay-mode admission for the owner session (one owned payload copy per frame under the recorder lock). The timed frames continue the warm-up's train: frame numbers, keyframe positions and arrival times run on from the warm-up frames. |
 | `ContinuousAdmission` | `storage_free_writer` and `native_tmp_writer`: admission with the writer drained between frames, so a drop can only be a defect. `throttled_writer`: a small queue (512 KiB, 8 slots) whose writer completes one write call per permit granted every 4 frames. It reports the real admitted, dropped and refused counts and the peak queue. |
 | `LockContention` | `producer_push` and `reader_0`/`reader_1`: replay admission while readers call `recorder_status()`, plus try-lock failures. Overlap is not guaranteed for every call. |
-| `KeyframeReservation` | `unwired_owner_push`: no channel, the production shape (early checks, no writer lock, no dispatch). `fixture_channel_owner_push`: a fixture channel, with the writer lock taken per owner frame. `fixture_dispatch`: a lost frame's reservation plus a raise of the fixture event. **Controlled condition:** each times only the production `push_packet`. The storage-free writer is drained, untimed, before the next frame, and each recovery keyframe is admitted and drained untimed before the timed lost frame. No measurement includes the writer or a full queue, at any sample count. |
+| `KeyframeReservation` | `unwired_owner_push`: no channel, the production shape (continuous admission takes the writer lock; keyframe reservation returns before its additional lock). `fixture_channel_owner_push`: a fixture channel, with one additional reservation lock per owner frame. `fixture_dispatch`: an invalid packet models a discontinuity, then reserves and raises the fixture event; this is not observed network loss. **Controlled condition:** each times only the production `push_packet`. The storage-free writer is drained, untimed, before the next frame, and each recovery keyframe is admitted and drained untimed before the invalid packet. Drain waits and backpressure are excluded; a woken writer can still contend for its mutex during the timed push. |
 | `ReplaySaveSnapshot` | `admit_snapshot`: snapshot admission under the lock, then dropped. `complete_to_owned_dir`: completion into the temporary directory (`min(samples, 4)` real files, recorded with `warmup: 0` because no completion warm-up runs). |
 
 ## Record schema (`schema: 1`)
@@ -84,7 +84,8 @@ these overrides and use the actual steady clock.
 - **Payload counts** are the recorder's ownership accounting, not allocator measurements.
 - **`ru_maxrss`** is the process's high-water mark, not current RSS and not recorder-only memory.
 - **The unwired production path** still runs `keyframe_reserve`'s early checks. It avoids the
-  writer lock and dispatch only because no channel is registered; it is not zero cost.
+  additional reservation lock and dispatch because no channel is registered; ordinary continuous
+  admission still takes the writer lock. The unwired path has a measurable cost.
 - **What synthetic runs on a CI runner cannot show:** the effect on real broadcast-thread pacing
   and client latency, real encoder frame sizes and rates, the user's disk and memory under real
   bitrates, or live IDR cost.
