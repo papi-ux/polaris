@@ -851,6 +851,9 @@ int main(int argc, char *argv[]) {
   configThread.join();
   rtspThread.join();
 
+  // Packet producers have stopped. Drain the recorder worker before its dependencies.
+  stream_recorder::shutdown();
+
 #ifdef __linux__
   if (profile_service && !profile_service->shutdown(5s)) {
     BOOST_LOG(error) << "Multiseat cleanup remains incomplete; retaining fenced authority until process exit"sv;
