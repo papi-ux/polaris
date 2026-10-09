@@ -1909,6 +1909,11 @@ namespace stream_recorder {
           // Pointers and metadata only: the payload bytes are shared, not copied.
           auto &snapshot = state->lease.snapshot;
           snapshot.payloads.reserve(replay_buffer.size());
+#ifdef POLARIS_TESTS
+          if (save_hooks.before_snapshot_provenance_allocation) {
+            save_hooks.before_snapshot_provenance_allocation();
+          }
+#endif
           snapshot.provenance.reserve(replay_buffer.size());
           for (const auto &packet : replay_buffer) {
             snapshot.payloads.push_back(packet.data);

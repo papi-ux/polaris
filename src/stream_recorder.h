@@ -568,6 +568,9 @@ namespace stream_recorder {
       /// Before the capture state of an eligible run is allocated, under the recorder lock (call
       /// no recorder function from it). Never reached for busy, disabled or empty refusals.
       std::function<void()> before_admission_allocation;
+      /// After the snapshot's payload array was reserved and before its provenance array is
+      /// reserved (#359), under the recorder lock (call no recorder function from it). May throw.
+      std::function<void()> before_snapshot_provenance_allocation;
       /// Just before the save reservation is released, with no recorder lock held; must not throw.
       std::function<void()> before_save_reservation_release;
       std::function<void(const std::filesystem::path &staging)> before_write;

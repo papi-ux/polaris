@@ -75,9 +75,13 @@ How the comparisons work:
   - The held snapshot stays valid across live resets, session end and configuration reloads until
     its own lease releases it, exactly like the payload references.
   - The array is freed with the lease.
-  - Tests inject an admission failure (a `bad_alloc` thrown at the existing seams) before the
-    capture state is allocated, and after both arrays were reserved and filled. Each releases
-    everything with no accounting left behind. No real reserve allocation is made to fail.
+  - Tests inject an admission failure (a `bad_alloc` thrown by a test-only save hook) at three
+    boundaries. Each releases everything, leaving no accounting or reservation behind. No real
+    allocation is made to fail. The boundaries are:
+    - before the capture state is allocated (`before_admission_allocation`);
+    - between the payload array's reserve and the provenance array's reserve
+      (`before_snapshot_provenance_allocation`, added for #359);
+    - after both arrays were reserved and filled (`after_snapshot_payloads`).
 
 ## Memory (bounded logical entries, measured capacity; not allocator or RSS cost)
 

@@ -534,56 +534,79 @@ TEST_F(StreamRecorderProvenanceTests, AHeldSnapshotKeepsItsProvenanceAcrossReset
   EXPECT_EQ(stream_recorder::detail::snapshot_provenance_for_tests(admission.save).entries.size(), 0u);
 }
 
-// An admission failure injected at the existing seams (a bad_alloc thrown before the capture state
-// is allocated, or after the payload and provenance arrays were reserved and filled; no real
-// allocation is made to fail) releases everything and leaves no accounting. The live run and its
-// provenance are untouched, and a later save works.
+// An admission failure injected at a seam (a bad_alloc thrown by a test hook; no real allocation
+// is made to fail) releases everything and leaves no accounting or reservation behind, at each of
+// three boundaries:
+// - before the capture state is allocated;
+// - between the payload array's reserve and the provenance array's reserve, the partial path the
+//   provenance array adds;
+// - after both arrays were reserved and filled.
+// The live run and its provenance are untouched, and a save admitted right after each one works.
 TEST_F(StreamRecorderProvenanceTests, AFailedAdmissionReleasesItsProvenanceWithoutAccountingLeaks) {
   for (std::int64_t i = 0; i < 3; ++i) {
     video(i == 0, t0 + std::chrono::milliseconds(i), bytes(4, static_cast<std::uint8_t>('a' + i)), provenance(i, t0 + std::chrono::milliseconds(i)));
   }
   const auto before = live();
-  for (const auto *boundary : {"allocation", "snapshot"}) {
-    SCOPED_TRACE(boundary);
+  const auto clear_hooks = [&] {
     hooks.before_admission_allocation = {};
+    hooks.before_snapshot_provenance_allocation = {};
     hooks.after_snapshot_payloads = {};
-    if (std::string {boundary} == "allocation") {
-      hooks.before_admission_allocation = [] {
-        throw std::bad_alloc {};
-      };
+  };
+  for (const std::string boundary : {"before_admission_allocation", "before_snapshot_provenance_allocation", "after_snapshot_payloads"}) {
+    SCOPED_TRACE(boundary);
+    int observed = 0;
+    const auto fail = [&observed] {
+      ++observed;
+      throw std::bad_alloc {};
+    };
+    clear_hooks();
+    if (boundary == "before_admission_allocation") {
+      hooks.before_admission_allocation = fail;
+    } else if (boundary == "before_snapshot_provenance_allocation") {
+      hooks.before_snapshot_provenance_allocation = fail;
     } else {
-      // Runs after both the payload and the provenance arrays were reserved and filled.
-      hooks.after_snapshot_payloads = [] {
-        throw std::bad_alloc {};
-      };
+      hooks.after_snapshot_payloads = fail;
     }
     install();
-    auto admission = stream_recorder::detail::admit_replay_save(t0 + 3ms);
-    EXPECT_FALSE(admission.result.admitted);
-    EXPECT_EQ(admission.result.status, save_status_e::storage_error);
-    EXPECT_FALSE(static_cast<bool>(admission.save));
+    const auto counted = stats(t0 + 3ms);
+    {
+      auto admission = stream_recorder::detail::admit_replay_save(t0 + 3ms);
+      EXPECT_EQ(observed, 1);
+      EXPECT_FALSE(admission.result.admitted);
+      EXPECT_EQ(admission.result.status, save_status_e::storage_error);
+      EXPECT_FALSE(static_cast<bool>(admission.save));
+    }
     const auto s = stats(t0 + 3ms);
     EXPECT_FALSE(s.save_in_progress);
     EXPECT_EQ(s.snapshot_packets, 0u);
     EXPECT_EQ(s.snapshot_bytes, 0u);
     EXPECT_EQ(s.snapshot_only_bytes, 0u);
     EXPECT_EQ(s.metadata_entries, before.size());
+    EXPECT_EQ(s.saves_failed, counted.saves_failed);            // Nothing was admitted
+    EXPECT_EQ(s.saves_refused_busy, counted.saves_refused_busy);
     const auto now_live = live();
     ASSERT_EQ(now_live.size(), before.size());
     for (std::size_t i = 0; i < before.size(); ++i) {
       EXPECT_EQ(now_live[i].sequence, before[i].sequence);
+      EXPECT_EQ(now_live[i].payload, before[i].payload);
       EXPECT_EQ(now_live[i].record.supplied.frame_index, before[i].record.supplied.frame_index);
+      EXPECT_EQ(now_live[i].record.supplied.frame_timestamp, before[i].record.supplied.frame_timestamp);
       EXPECT_EQ(now_live[i].record.marks, before[i].record.marks);
     }
-  }
-  hooks.before_admission_allocation = {};
-  hooks.after_snapshot_payloads = {};
-  install();
-  auto admission = stream_recorder::detail::admit_replay_save(t0 + 3ms);
-  ASSERT_TRUE(admission.result.admitted);
-  const auto held = stream_recorder::detail::snapshot_provenance_for_tests(admission.save);
-  EXPECT_EQ(held.provenance_count, before.size());
-  EXPECT_EQ(held.payload_count, before.size());
+    // The reservation was released: the next admission is not refused as busy, and captures
+    // matching payload and provenance arrays.
+    clear_hooks();
+    install();
+    auto admission = stream_recorder::detail::admit_replay_save(t0 + 3ms);
+    ASSERT_TRUE(admission.result.admitted);
+    const auto held = stream_recorder::detail::snapshot_provenance_for_tests(admission.save);
+    EXPECT_EQ(held.provenance_count, before.size());
+    EXPECT_EQ(held.payload_count, before.size());
+  }  // Each admitted save is dropped unsaved here, releasing its snapshot and reservation.
+  const auto end = stats(t0 + 3ms);
+  EXPECT_FALSE(end.save_in_progress);
+  EXPECT_EQ(end.snapshot_packets, 0u);
+  EXPECT_EQ(end.saves_refused_busy, 0u);
 }
 
 // Disabled mode keeps nothing: no entry, no provenance, no refusal count.
