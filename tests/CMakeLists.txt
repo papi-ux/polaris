@@ -819,6 +819,9 @@ if (BUILD_FULL_TESTS)
         # In-process libx264/libx265 CPU encoder fixtures (#363): Linux only, where the pinned
         # archive's registrations were observed. Kept out of test_polaris_video's codec wrappers.
         list(APPEND TEST_STREAM_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_encoder_fixture.cpp)
+        # Positive CBS stream reads and exact raw replay-save readback of the same real fixture
+        # packets (#365): Linux only, next to the #363 fixture whose encoder support it copies.
+        list(APPEND TEST_STREAM_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_bitstream.cpp)
     endif()
     configure_polaris_full_test_target(test_polaris_stream
         ${TEST_STREAM_SOURCES}
@@ -827,6 +830,10 @@ if (BUILD_FULL_TESTS)
         add_test(NAME polaris_recorder_encoder_fixture
             COMMAND test_polaris_stream --gtest_filter=RecorderEncoderFixtureTests.*)
         set_tests_properties(polaris_recorder_encoder_fixture PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+        add_test(NAME polaris_recorder_bitstream
+            COMMAND test_polaris_stream --gtest_filter=RecorderBitstreamTests.*)
+        set_tests_properties(polaris_recorder_bitstream PROPERTIES
             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
     endif()
     # Recorder mode publication uses the real configuration path without opening a recording.

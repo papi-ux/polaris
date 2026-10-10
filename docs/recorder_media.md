@@ -157,11 +157,53 @@ fixture proves only that these encoders open and produce repeatable packets in t
 not decode or parse bitstream structure, does not touch the recorder, and makes no claim about
 playable output.
 
+## CBS reads and raw replay-save readback of real fixture packets (#365)
+
+`RecorderBitstreamTests` (4 cases, Linux only, in `test_polaris_stream`, CTest
+`polaris_recorder_bitstream`) reuses a test-only copy of the #363 encoder support
+(`tests/unit/recorder_encoder_fixture_support.h`); the #363 file itself is unchanged. Each case first
+requires the frozen baseline: 8 packets, key flags at 0 and 4.
+
+**CBS stream observations (H.264 and HEVC).** The 8 packets are read in order through **one**
+coded-bitstream (CBS) context per codec and run, so parameter sets read from earlier packets remain
+available to later ones. The context decomposes the same units the product's own reads do
+(parameter sets and slice headers). For each packet the test records:
+- the read's return, unit count, unit types and unit byte sizes;
+- whether the reader holds an active SPS afterwards;
+- the packet's leading bytes;
+- the size and SHA-256 of the original packet and of a copy passed through the product's filler
+  strip.
+
+It asserts only that every read succeeded with at least one unit. Unit sequences, IDR and
+parameter-set placement, Annex B framing, filler absence and what a later key frame carries are
+recorded, not asserted, until an actual run freezes them. `cbs::validate_sps` is recorded for the
+first packet under its real meaning, active-SPS VUI presence; it is not a read-success test. CBS
+reading is structure reading only. It is not an `AVCodecParser`, a decoder or playback.
+
+**Raw replay-save readback (H.264 and HEVC).** The test registers one eligible session whose codec is
+known, then pushes the 8 packets with the default caps, at a controlled arrival clock (16 ms apart).
+Each push carries an explicit synthetic producer counter as its provenance frame index; this is
+deliberately not the packet PTS, and neither is a product clock or presentation time. It then saves
+into a directory the test created. It requires that:
+- the encoder packets equal the retained replay payloads, one for one;
+- the counters are kept as supplied;
+- the published file equals the packets concatenated in order, byte for byte, and its size equals
+  their total;
+- the save reports 8 packets, 2 key frames, the session and its codec.
+
+The saved file is raw elementary video: no container, timestamps or playability claim.
+
+Evidence for every case is recorded as GTest XML properties and in one console line,
+`POLARIS_RECORDER_BITSTREAM_JSON {...}`, including the process UID and byte hashes. A missing
+encoder or a failed open, read or save is a test **failure**, never a skip. Malformed input, fresh
+readers for later key frames, and seek or start structure are separate, later slices.
+
 ## Not covered
 
 This slice proves none of the following:
 - decoding, or which decoders and libraries are present;
-- the actual bitstream framing of any codec lane (AV1 and PyroWave included);
+- the bitstream framing of any live codec lane (AV1 and PyroWave included); #365 observes only the
+  CPU fixture's H.264 and HEVC packets;
 - presentation timestamps, cadence, ordering or seeking;
 - a container, audio, or A/V sync;
 - device, live or playback acceptance.
