@@ -258,3 +258,36 @@ This slice proves none of the following:
 - device, live or playback acceptance.
 
 Those are separate, reviewed slices. Recording remains off by default.
+
+## Replay cap trimming of real fixture packets (#371)
+
+`tests/unit/test_recorder_bitstream_window.cpp` (`RecorderBitstreamWindowTests`, Linux only, CTest
+`polaris_recorder_bitstream_window`) pushes the same CPU fixture's 8 real H.264 and HEVC packets
+(keys at 0 and 4) through test-only replay caps for one eligible session, at a controlled arrival
+clock, and saves into a directory the fixture created. Six cases, three per codec:
+
+- **Entry cap 6.** Room for packet 6 removes packet 0 and keyframe realignment removes 1–3. The live
+  run, the retained provenance and the saved file must be exactly packets 4–7, with
+  `last_window_limit` `entry_cap`.
+- **Payload cap of the run's total minus one byte.** Room for packet 7 removes packet 0 and
+  realignment removes 1–3; the same save, with `payload_cap`.
+- **Payload cap at the largest dependent packet, checked to be below both keys.** Both keys are
+  refused as oversized, the six dependent packets are refused while awaiting a keyframe, the cause
+  is `discontinuity`, and the save is empty with no file created.
+
+The saved file's first access unit must carry its parameter sets before an IDR slice (H.264 SPS and
+PPS; HEVC VPS, SPS and PPS); the exact NAL type lists are recorded. Each case isolates one cause:
+cap precedence when both caps apply and duration expiry are not covered. The cap values come from
+the run's own packet sizes after the fixture's key positions and size ordering are checked.
+
+**Evidence.** Each case records one closed property set as GTest XML properties and one identical
+console line, `POLARIS_RECORDER_WINDOW_JSON {...}`. CTest sets `POLARIS_RECORDER_WINDOW_EVIDENCE_DIR`
+to `build/tests/recorder-window-evidence`. Each case creates its own directory there exclusively and
+writes its 8 source packets, its published save (when one exists) and a manifest, each created
+exclusively, fully written, synced, closed and read back, before any assertion. A missing, relative,
+non-directory or symlinked root, an existing case directory or any write error fails the case.
+Raw evidence is never committed or published with shared preview artifacts.
+
+These are in-run byte and counter properties only. No packet hash is frozen in the test; whether a
+run's bytes match earlier runs, or what a decoder showed about them, is a separate readback's
+question. Nothing here is decode, playback, container, timing or memory-safety evidence.

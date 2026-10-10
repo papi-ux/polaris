@@ -825,6 +825,8 @@ if (BUILD_FULL_TESTS)
         # Negative and later-key inputs built from the same real fixture packets (#369 under #329):
         # Linux only; reuses the #365 support header unchanged.
         list(APPEND TEST_STREAM_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_bitstream_negative.cpp)
+        # Real-codec replay cap trim and keyframe realignment (test-only, under #329).
+        list(APPEND TEST_STREAM_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_bitstream_window.cpp)
     endif()
     configure_polaris_full_test_target(test_polaris_stream
         ${TEST_STREAM_SOURCES}
@@ -847,6 +849,13 @@ if (BUILD_FULL_TESTS)
         set_tests_properties(polaris_recorder_bitstream_negative PROPERTIES
             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
             ENVIRONMENT "POLARIS_RECORDER_NEGATIVE_EVIDENCE_DIR=${POLARIS_RECORDER_NEGATIVE_EVIDENCE_DIR}")
+        set(POLARIS_RECORDER_WINDOW_EVIDENCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/recorder-window-evidence)
+        file(MAKE_DIRECTORY ${POLARIS_RECORDER_WINDOW_EVIDENCE_DIR})
+        add_test(NAME polaris_recorder_bitstream_window
+            COMMAND test_polaris_stream --gtest_filter=RecorderBitstreamWindowTests.*)
+        set_tests_properties(polaris_recorder_bitstream_window PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            ENVIRONMENT "POLARIS_RECORDER_WINDOW_EVIDENCE_DIR=${POLARIS_RECORDER_WINDOW_EVIDENCE_DIR}")
     endif()
     # Recorder mode publication uses the real configuration path without opening a recording.
     add_test(NAME polaris_recorder_mode_publication
