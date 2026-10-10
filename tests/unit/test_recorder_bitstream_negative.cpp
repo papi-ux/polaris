@@ -76,6 +76,7 @@ namespace {
   constexpr std::uint64_t k_session = 369;   ///< The selected session
   constexpr std::uint64_t k_foreign = 370;   ///< Never registered
   constexpr std::uint64_t k_restarted = 371; ///< The session started after k_session ends (F3)
+  constexpr std::uint64_t k_overlap = 370;   ///< A second REGISTERED session in the overlap cases (F5)
   constexpr auto k_stamp = "20261010_170945";
   constexpr std::int64_t k_producer_counter_base = 36900;  ///< Synthetic producer counters, not the PTS
   constexpr auto k_arrival_step = 16ms;  ///< Controlled arrival clock, not a presentation time
@@ -272,6 +273,8 @@ namespace {
     end_selected,      ///< session_ended(k_session) before this push
     start_restarted,   ///< session_started(k_restarted, true, format) before this push
     admit_save,        ///< admit a held save (F4) before this push
+    start_overlap,     ///< session_started(k_overlap, true, format) before this push (F5)
+    end_overlap,       ///< session_ended(k_overlap) before this push (F5)
   };
 
   struct push_t {
@@ -287,6 +290,22 @@ namespace {
     bool in_save = false;  ///< Expected in the published file, in push order
     bool cbs = false;      ///< Read by the CBS observations
     session_event_e before = session_event_e::none;
+    std::string snapshot_before;  ///< Take a named replay snapshot after the event, before this push
+    std::string snapshot_after;   ///< Take a named replay snapshot right after this push
+  };
+
+  /// One intermediate replay snapshot a case expects. Every field is asserted.
+  struct snapshot_expect_t {
+    std::string label;
+    std::size_t registered_sessions = 0;
+    std::uint64_t selected_generation = 0;
+    std::size_t packets = 0;
+    std::uint64_t refused_unselected = 0;
+    std::uint64_t refused_awaiting_keyframe = 0;
+    std::uint64_t discontinuities = 0;
+    bool awaiting_keyframe = false;
+    bool keyframe_start_run = false;
+    stream_recorder::window_limit_e last_window_limit = stream_recorder::window_limit_e::none;
   };
 
   struct encoded_t {
@@ -360,6 +379,7 @@ namespace {
     std::vector<push_t> pushes;
     std::string recipe_error;  ///< A recipe precondition failure
     expect_t expect;
+    std::vector<snapshot_expect_t> snapshots;  ///< Intermediate snapshots, in the order they are taken
   };
 
   const char *limit_name(stream_recorder::window_limit_e l) {
@@ -602,7 +622,9 @@ namespace {
           read.unit_types += (u ? "," : "") + std::to_string(fragment.frag.units[u].type);
           read.unit_bytes += (u ? "," : "") + std::to_string(fragment.frag.units[u].data_size);
         }
-        read.active_sps = ret >= 0 && reader_active_sps(ctx.get(), c.codec_id);
+        // The persistent context stays initialized whatever this read returned, so its active-SPS
+        // state is observed after every call, independently of the return (recorded, never asserted).
+        read.active_sps = reader_active_sps(ctx.get(), c.codec_id);
         read.original_intact = guarded[n].original_intact(push.bytes);
         read.padding_intact = guarded[n].padding_intact();
         read.canary_intact = guarded[n].canary_intact();
@@ -731,6 +753,7 @@ namespace {
       stream_recorder::detail::save_result_t held_admission;
       bool used_held_save = false;
       std::vector<std::uint8_t> file;
+      std::vector<std::pair<std::string, stream_recorder::replay_stats_t>> snapshots;
       std::string push_result = "not run";
       const steady::time_point read_at = t0 + 1s + k_arrival_step * static_cast<int>(k.pushes.size());
       if (ready) {
@@ -748,6 +771,13 @@ namespace {
             held_admission = admission.result;
             held = std::move(admission.save);
             used_held_save = true;
+          } else if (p.before == session_event_e::start_overlap) {
+            stream_recorder::session_started(k_overlap, true, p.video_format);
+          } else if (p.before == session_event_e::end_overlap) {
+            stream_recorder::session_ended(k_overlap);
+          }
+          if (!p.snapshot_before.empty()) {
+            snapshots.emplace_back(p.snapshot_before, stream_recorder::detail::replay_stats_at(at));
           }
           if (p.null_payload) {
             stream_recorder::detail::push_packet_at(nullptr, k_invalid_size, true, p.key, 0, p.generation, p.video_format, at);
@@ -759,6 +789,9 @@ namespace {
             provenance.frame_index = k_producer_counter_base + static_cast<std::int64_t>(i);
             stream_recorder::detail::push_video_at(p.bytes.data(), p.bytes.size(), p.key, p.generation, p.video_format,
                                                    provenance, at);
+          }
+          if (!p.snapshot_after.empty()) {
+            snapshots.emplace_back(p.snapshot_after, stream_recorder::detail::replay_stats_at(at));
           }
           if (p.in_save) {
             expected.insert(expected.end(), p.bytes.begin(), p.bytes.end());
@@ -838,7 +871,11 @@ namespace {
         add(pk + "Recipe", p.recipe);
         add(pk + "BeforeEvent", p.before == session_event_e::end_selected ? "session_ended(selected)" :
                                 p.before == session_event_e::start_restarted ? "session_started(" + std::to_string(k_restarted) + ")" :
-                                p.before == session_event_e::admit_save ? "admit_replay_save" : "none");
+                                p.before == session_event_e::admit_save ? "admit_replay_save" :
+                                p.before == session_event_e::start_overlap ? "session_started(" + std::to_string(k_overlap) + ", eligible)" :
+                                p.before == session_event_e::end_overlap ? "session_ended(" + std::to_string(k_overlap) + ")" : "none");
+        add(pk + "SnapshotBefore", p.snapshot_before);
+        add(pk + "SnapshotAfter", p.snapshot_after);
         add(pk + "Payload", p.null_payload ? "null pointer, size " + std::to_string(k_invalid_size) : "bytes");
         add(pk + "Size", std::to_string(p.bytes.size()));
         add(pk + "Sha256", p.null_payload ? "" : sha(p.bytes));
@@ -887,6 +924,22 @@ namespace {
       add("refusedAwaitingKeyframe", std::to_string(stats.refused_awaiting_keyframe));
       add("discontinuities", std::to_string(stats.discontinuities));
       add("lastWindowLimit", limit_name(stats.last_window_limit));
+      add("snapshotCount", std::to_string(snapshots.size()));
+      for (std::size_t s = 0; s < snapshots.size(); ++s) {
+        const auto &[label, v] = snapshots[s];
+        const std::string pk = "snapshot" + std::to_string(s);
+        add(pk + "Label", label);
+        add(pk + "RegisteredSessions", std::to_string(v.registered_sessions));
+        add(pk + "SelectedGeneration", std::to_string(v.selected_generation));
+        add(pk + "Packets", std::to_string(v.packets));
+        add(pk + "RefusedUnselected", std::to_string(v.refused_unselected));
+        add(pk + "RefusedAwaitingKeyframe", std::to_string(v.refused_awaiting_keyframe));
+        add(pk + "Discontinuities", std::to_string(v.discontinuities));
+        add(pk + "AwaitingKeyframe", v.awaiting_keyframe ? "1" : "0");
+        add(pk + "KeyframeStartRun", v.keyframe_start_run ? "1" : "0");
+        add(pk + "RunVideoFormat", std::to_string(v.run_video_format));
+        add(pk + "LastWindowLimit", limit_name(v.last_window_limit));
+      }
       add("heldSave", used_held_save ? "1" : "0");
       add("heldAdmissionAdmitted", used_held_save ? (held_admission.admitted ? "1" : "0") : "");
       add("heldAdmissionPackets", used_held_save ? std::to_string(held_admission.packets) : "");
@@ -945,6 +998,21 @@ namespace {
       EXPECT_EQ(stats.discontinuities, x.discontinuities);
       if (x.assert_limit) {
         EXPECT_STREQ(limit_name(stats.last_window_limit), limit_name(x.last_window_limit));
+      }
+      ASSERT_EQ(snapshots.size(), k.snapshots.size()) << "every expected intermediate snapshot must be taken";
+      for (std::size_t s = 0; s < snapshots.size(); ++s) {
+        const auto &[label, v] = snapshots[s];
+        const auto &w = k.snapshots[s];
+        EXPECT_EQ(label, w.label);
+        EXPECT_EQ(v.registered_sessions, w.registered_sessions) << label;
+        EXPECT_EQ(v.selected_generation, w.selected_generation) << label;
+        EXPECT_EQ(v.packets, w.packets) << label;
+        EXPECT_EQ(v.refused_unselected, w.refused_unselected) << label;
+        EXPECT_EQ(v.refused_awaiting_keyframe, w.refused_awaiting_keyframe) << label;
+        EXPECT_EQ(v.discontinuities, w.discontinuities) << label;
+        EXPECT_EQ(v.awaiting_keyframe, w.awaiting_keyframe) << label;
+        EXPECT_EQ(v.keyframe_start_run, w.keyframe_start_run) << label;
+        EXPECT_STREQ(limit_name(v.last_window_limit), limit_name(w.last_window_limit)) << label;
       }
       if (used_held_save) {
         EXPECT_TRUE(held_admission.admitted) << "the held save must be admitted";
@@ -1162,6 +1230,76 @@ namespace {
     return k;
   }
 
+  /**
+   * F5 (root R4): a second REGISTERED eligible session overlaps the selected one. Source facts
+   * (src/stream_recorder.cpp at M): session_started() of a second session reselects to none and
+   * clears the run with cause `selection` (reselect_replay_session); packets of an unselected
+   * generation are refused as unselected before anything else (append_replay_packet);
+   * session_ended() clears the run with cause `selection` and reselects the sole remaining eligible
+   * session; an empty run refuses a dependent frame as awaiting a keyframe. None of these counts a
+   * discontinuity. Sequence: real 0-3 (selected), register k_overlap, first-owner real key 4 and
+   * second-owner real key 0 (both refused), end k_overlap, first-owner real dependent 3 (refused,
+   * awaiting a key), then first-owner real 4-7 from the fresh key 4: only those four are saved.
+   */
+  case_t registered_overlap(const encoded_t &e, std::string name) {
+    case_t k;
+    k.name = std::move(name);
+    k.ids = "F5";
+    k.summary = "a second registered session suspends replay (both owners refused); after it ends, a dependent frame is refused "
+                "and the first session recovers only from a fresh real key";
+    k.session_format = e.codec->video_format;
+    k.runs = {&e};
+    if (!e.ok) {
+      return k;
+    }
+    const int fmt = e.codec->video_format;
+    for (std::size_t i = 0; i < 4; ++i) {
+      k.pushes.push_back(real_push(e, i, false, false));
+    }
+    auto first_key = real_push(e, 4, false, false);
+    first_key.before = session_event_e::start_overlap;
+    first_key.snapshot_before = "overlapStarted";
+    first_key.expected = "refused-unselected";
+    k.pushes.push_back(first_key);
+    auto second_key = real_push(e, 0, false, false);
+    second_key.generation = k_overlap;
+    second_key.expected = "refused-unselected";
+    second_key.snapshot_after = "overlapRefusedBothOwners";
+    k.pushes.push_back(second_key);
+    auto dependent = real_push(e, 3, false, false);
+    dependent.before = session_event_e::end_overlap;
+    dependent.snapshot_before = "overlapEnded";
+    dependent.expected = "refused-awaiting-keyframe";
+    dependent.snapshot_after = "dependentRefused";
+    k.pushes.push_back(dependent);
+    for (std::size_t i = 4; i < e.run.packets.size(); ++i) {
+      auto p = real_push(e, i, true, false);
+      if (i == 4) {
+        p.snapshot_after = "freshKeyRecovered";
+      }
+      k.pushes.push_back(p);
+    }
+    using L = stream_recorder::window_limit_e;
+    k.snapshots = {
+      {"overlapStarted", 2, 0, 0, 0, 0, 0, false, false, L::selection},
+      {"overlapRefusedBothOwners", 2, 0, 0, 2, 0, 0, false, false, L::selection},
+      {"overlapEnded", 1, k_session, 0, 2, 0, 0, true, false, L::selection},
+      {"dependentRefused", 1, k_session, 0, 2, 1, 0, true, false, L::selection},
+      {"freshKeyRecovered", 1, k_session, 1, 2, 1, 0, false, true, L::selection},
+    };
+    k.expect.live_packets = 4;
+    k.expect.refused_unselected = 2;
+    k.expect.refused_awaiting_keyframe = 1;
+    k.expect.discontinuities = 0;
+    k.expect.run_video_format = fmt;
+    k.expect.assert_limit = true;
+    k.expect.last_window_limit = L::selection;
+    k.expect.save_packets = 4;
+    k.expect.save_keyframes = 1;
+    k.expect.save_video_format = fmt;
+    return k;
+  }
+
   /// F1: real H.264 0..7, then real HEVC 0..7, one session: the codec change keeps only HEVC.
   case_t codec_change(const encoded_t &h264, const encoded_t &hevc) {
     case_t k;
@@ -1373,6 +1511,16 @@ TEST_F(RecorderBitstreamNegativeTests, H264F2ForeignGenerationIsRefusedAroundThe
 TEST_F(RecorderBitstreamNegativeTests, HevcF2ForeignGenerationIsRefusedAroundTheSelectedRun) {
   const auto e = encode(k_hevc);
   run_case(foreign_generation(e, "HevcF2ForeignGenerationIsRefusedAroundTheSelectedRun"));
+}
+
+TEST_F(RecorderBitstreamNegativeTests, H264F5RegisteredOverlapRefusesBothOwnersThenRecoversAtAFreshKey) {
+  const auto e = encode(k_h264);
+  run_case(registered_overlap(e, "H264F5RegisteredOverlapRefusesBothOwnersThenRecoversAtAFreshKey"));
+}
+
+TEST_F(RecorderBitstreamNegativeTests, HevcF5RegisteredOverlapRefusesBothOwnersThenRecoversAtAFreshKey) {
+  const auto e = encode(k_hevc);
+  run_case(registered_overlap(e, "HevcF5RegisteredOverlapRefusesBothOwnersThenRecoversAtAFreshKey"));
 }
 
 TEST_F(RecorderBitstreamNegativeTests, F1H264ThenHevcInOneSessionSavesOnlyHevc) {
