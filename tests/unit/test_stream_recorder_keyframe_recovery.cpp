@@ -1125,16 +1125,39 @@ TEST_F(StreamRecorderKeyframeRecoveryTests, CodecFenceStopsRequestsPermanently) 
 }
 
 TEST_F(StreamRecorderKeyframeRecoveryTests, WriterFailedBeforeDecisionRefuses) {
-  fail_after_first_write(false);
+  // The failing write is held before it fails, so the admitted packet's own keyframe decision is
+  // always taken while the writer is still healthy: only the decision after the failure counts.
+  fail_after_first_write(true);
   const auto owner = make_idr();
   ASSERT_NO_FATAL_FAILURE(bind_unbound(owner->channel));
-  packet_at(k_owner, false, "p", base + 100ms);  // Admitted; its write fails
+  // Admitted; its write is held, then fails. packet_at waits for that write, so it runs on a helper.
+  const auto admitted = run([at = base + 100ms] {
+    packet_at(k_owner, false, "p", at);
+  });
+  ASSERT_TRUE(write_gate.wait_entered());
+  // The write was published inside the recorder lock that also took the packet's decision, and
+  // stats() takes that lock: the decision is complete, and the writer has not failed yet.
+  auto s = stats();
+  RecordProperty("refusedWriterUnavailableWhileWriteHeld", static_cast<int>(s.refused_writer_unavailable));
+  RecordProperty("writeCallsWhileWriteHeld", writes.load());
+  ASSERT_EQ(s.refused_writer_unavailable, 0u);
+  ASSERT_EQ(s.reservations, 0u);
+  ASSERT_FALSE(s.in_flight);
+  ASSERT_TRUE(dispatches.finished().empty());
+  ASSERT_FALSE(owner->event->peek());
+
+  write_gate.release();
   ASSERT_TRUE(failure_published.wait());
+  ASSERT_TRUE(admitted->wait());
   ASSERT_TRUE(drain());
   ASSERT_NE(continuous().error, continuous_error_e::none);
+  s = stats();
+  RecordProperty("refusedWriterUnavailableAfterFailureBeforeInvalid", static_cast<int>(s.refused_writer_unavailable));
+  ASSERT_EQ(s.refused_writer_unavailable, 0u);
 
   invalid_at(k_owner, base + 1s);
-  const auto s = stats();
+  s = stats();
+  RecordProperty("refusedWriterUnavailableAfterInvalid", static_cast<int>(s.refused_writer_unavailable));
   EXPECT_EQ(s.refused_writer_unavailable, 1u);
   EXPECT_EQ(s.reservations, 0u);
   EXPECT_FALSE(s.in_flight);
