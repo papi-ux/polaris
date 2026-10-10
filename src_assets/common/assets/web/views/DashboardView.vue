@@ -110,7 +110,7 @@
                 <div class="inline-flex" role="listitem">
                 </div>
               </div>
-              <p v-if="doctorRecommendation" class="mt-2 max-w-3xl text-sm leading-relaxed text-storm">{{ doctorRecommendation }}</p>
+              <p v-if="doctorRecommendation" class="mt-2 max-w-3xl text-sm leading-relaxed text-support">{{ doctorRecommendation }}</p>
               <p v-if="doctorExplanation" class="mt-3 max-w-3xl rounded-lg border border-accent/20 bg-accent/5 px-3 py-2 text-sm leading-relaxed text-silver">
                 {{ doctorExplanation }}
               </p>
@@ -308,7 +308,7 @@
           <div class="min-w-0">
             <div class="section-kicker">{{ $t('dashboard.stream_readiness') }}</div>
             <h2 class="mt-2 text-2xl font-semibold leading-tight" :class="readinessTone">{{ readinessLabel }}</h2>
-            <p class="mt-2 max-w-3xl text-sm leading-relaxed text-storm">{{ nextStep.title }} · {{ nextStep.desc }}</p>
+            <p class="mt-2 max-w-3xl text-sm leading-relaxed text-support">{{ nextStep.title }} · {{ nextStep.desc }}</p>
             <div class="mt-4 flex flex-wrap gap-2">
               <template v-if="pairedClientChips.length">
                 <span v-for="chip in pairedClientChips" :key="chip.name" class="data-pill">{{ chip.label }}</span>
@@ -316,7 +316,7 @@
               <span v-else class="data-pill">{{ pairedClients }} {{ $t('dashboard.clients_paired') }}</span>
               <span v-if="lastSessionChip" class="data-pill">{{ lastSessionChip }}</span>
               <span class="data-pill" :class="headlessEnabled ? 'text-accent' : ''">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }}</span>
-              <span class="data-pill" v-if="gpu">{{ gpu.temperature_c || '--' }}°C · {{ gpu.utilization_pct || 0 }}% · {{ gpu.power_draw_w?.toFixed(0) || '--' }}W</span>
+              <span class="data-pill" v-if="gpu">{{ gpu.temperature_c ?? '--' }}°C · {{ gpu.utilization_pct || 0 }}% · {{ gpu.power_draw_w?.toFixed(0) || '--' }}W</span>
               <span class="data-pill" :class="aiStatus?.enabled ? 'text-accent' : ''">{{ liveTuningLabel }} · {{ sessionHistory.length }} {{ $t('dashboard.sessions') }}</span>
             </div>
           </div>
@@ -343,18 +343,70 @@
       <!-- GPU Gauges + Quick Controls -->
       <div class="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
         <div class="min-w-0 space-y-4">
+        <!-- Recent Games: the landing page is a remote control, so rows launch. -->
+        <div class="section-card" data-dashboard-play-rail>
+          <div class="flex items-center justify-between gap-3 mb-3">
+            <div>
+              <div class="section-kicker">{{ $t('dashboard.recent_games') }}</div>
+              <div class="mt-2 text-sm text-support">{{ recentApps.length ? $t('dashboard.recent_ready', { count: recentApps.length }) : $t('dashboard.no_games') }}</div>
+            </div>
+            <router-link to="/apps" class="focus-ring inline-flex h-8 items-center gap-1.5 rounded-lg border border-storm px-3 text-xs font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice no-underline">
+              {{ $t('navbar.library') }}
+            </router-link>
+          </div>
+          <p v-if="!currentAppAvailable" role="status" class="mb-3 text-sm text-support">Waiting for current app status.</p>
+          <div v-if="recentApps.length" class="dashboard-play-grid grid gap-2">
+            <div v-for="app in recentApps" :key="app.uuid" class="dashboard-play-tile">
+              <PosterImage class="w-16 sm:w-20" :name="app.name" :src="app['image-path'] ? './api/covers/image?name=' + encodeURIComponent(app.name) : ''" />
+              <div class="mt-2 min-w-0">
+                <div class="truncate text-sm font-semibold text-silver" :title="app.name">{{ app.name }}</div>
+                <div class="truncate font-mono text-[11px] text-storm" v-if="app.source && app.source !== 'manual'">{{ app.source }}</div>
+              </div>
+              <button
+                type="button"
+                class="focus-ring dashboard-play-launch"
+                :disabled="launchingUuid === app.uuid || !currentAppAvailable"
+                :data-dashboard-launch-app="app.uuid"
+                @click="launchRecentApp(app)"
+              >
+                {{ launchingUuid === app.uuid ? $t('dashboard.launching') : $t('dashboard.launch') }}
+              </button>
+            </div>
+          </div>
+          <div v-else class="text-sm text-support py-6 text-center">{{ $t('dashboard.no_games') }}</div>
+          <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-storm/15 pt-3 text-[11px] text-silver">
+            <span class="eyebrow-label mr-1">{{ $t('dashboard.host_context') }}</span>
+            <span class="data-pill">
+              {{ sessionType ? sessionType : (headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed')) }}
+            </span>
+            <span class="data-pill">
+              {{ displays.length }} {{ displays.length === 1 ? 'display' : 'displays' }}
+            </span>
+            <span class="data-pill" v-if="audio?.sink">
+              {{ formatAudioName(audio.sink) }}
+            </span>
+            <span class="data-pill">
+              v{{ version }}
+            </span>
+          </div>
+        </div>
         <div class="section-card space-y-5">
           <div>
-            <div class="section-kicker">Host vitals</div>
-            <h2 class="section-title">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }} {{ $t('dashboard.mode') }}</h2>
+            <div class="section-kicker">{{ $t('dashboard.stream_readiness') }}</div>
+            <h2 class="section-title">Launch checks</h2>
           </div>
 
-          <div class="surface-subtle p-4" v-if="gpu">
-            <div class="mb-3 flex items-center justify-between">
-              <div class="eyebrow-label text-silver/80">{{ gpu.name }}</div>
-              <div class="text-[11px] text-storm">{{ gpu.power_draw_w?.toFixed(0) || '--' }}W · {{ gpu.clock_gpu_mhz || gpu.clock_mhz || '--' }} MHz</div>
-            </div>
-            <div class="grid grid-cols-2 gap-4 place-items-center xl:grid-cols-4">
+          <details class="surface-subtle p-4" v-if="gpu" data-dashboard-idle-vitals>
+            <summary class="focus-ring flex cursor-pointer flex-wrap items-center justify-between gap-3 text-sm text-silver">
+              <span>Host vitals · {{ gpu.name }}</span>
+              <span class="flex flex-wrap gap-x-3 gap-y-1 font-mono text-sm text-support" data-dashboard-vitals-summary>
+                <span :class="idleVitals.temperature.tone" data-vitals-temperature>{{ idleVitals.temperature.text }}</span>
+                <span :class="idleVitals.gpu.tone" data-vitals-gpu>{{ idleVitals.gpu.text }}</span>
+                <span :class="idleVitals.encoder.tone" data-vitals-encoder>{{ idleVitals.encoder.text }}</span>
+                <span :class="idleVitals.vram.tone" data-vitals-vram>{{ idleVitals.vram.text }}</span>
+              </span>
+            </summary>
+            <div class="mt-4 grid grid-cols-2 gap-4 place-items-center xl:grid-cols-4">
               <GaugeArc v-if="gpu.temperature_c != null" :value="gpu.temperature_c" :max="100" unit="°C" label="Temp" :size="112"
                         :thresholds="[{ at: 0, color: 'var(--color-success)' }, { at: 70, color: 'var(--color-warning)' }, { at: 85, color: 'var(--color-danger)' }]" />
               <GaugeArc v-if="gpu.utilization_pct != null" :value="gpu.utilization_pct" :max="100" unit="%" label="GPU" :size="112" />
@@ -363,7 +415,7 @@
               <GaugeArc v-if="gpu.vram_used_mb != null && gpu.vram_total_mb != null" :value="gpu.vram_used_mb / 1024" :max="gpu.vram_total_mb / 1024" unit="GB" label="VRAM" :size="112"
                         :thresholds="[{ at: 0, color: 'var(--color-ice)' }, { at: 70, color: 'var(--color-warning)' }, { at: 90, color: 'var(--color-danger)' }]" />
             </div>
-          </div>
+          </details>
           <div v-else class="dashboard-degraded-state">
             <div class="min-w-0">
               <div class="text-sm font-semibold text-silver">Host telemetry is warming up</div>
@@ -419,58 +471,6 @@
                 </router-link>
               </div>
             </div>
-          </div>
-        </div>
-        <!-- Recent Games: the landing page is a remote control, so rows launch. -->
-        <div class="section-card" data-dashboard-play-rail>
-          <div class="flex items-center justify-between gap-3 mb-3">
-            <div>
-              <div class="section-kicker">{{ $t('dashboard.recent_games') }}</div>
-              <div class="mt-2 text-sm text-storm">{{ recentApps.length ? $t('dashboard.recent_ready', { count: recentApps.length }) : $t('dashboard.no_games') }}</div>
-            </div>
-            <router-link to="/apps" class="focus-ring inline-flex h-8 items-center gap-1.5 rounded-lg border border-storm px-3 text-xs font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice no-underline">
-              {{ $t('navbar.library') }}
-            </router-link>
-          </div>
-          <p v-if="!currentAppAvailable" role="status" class="mb-3 text-sm text-storm">Waiting for current app status.</p>
-          <div v-if="recentApps.length" class="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-5">
-            <div v-for="app in recentApps" :key="app.uuid" class="dashboard-play-tile">
-              <div class="dashboard-play-cover">
-                <div class="dashboard-play-cover-fallback" aria-hidden="true">
-                  <svg class="h-7 w-7" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14.752 11.168l-3.197-2.132A1 1 0 0 0 10 9.87v4.263a1 1 0 0 0 1.555.832l3.197-2.132a1 1 0 0 0 0-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
-                </div>
-                <img v-if="app['image-path']" :src="'./api/covers/image?name=' + encodeURIComponent(app.name)" :alt="`${app.name} artwork`" class="relative h-full w-full object-cover" loading="lazy" @error="$event.target.style.display='none'" />
-              </div>
-              <div class="mt-2 min-w-0">
-                <div class="truncate text-xs font-semibold text-silver">{{ app.name }}</div>
-                <div class="truncate font-mono text-[11px] text-storm" v-if="app.source && app.source !== 'manual'">{{ app.source }}</div>
-              </div>
-              <button
-                type="button"
-                class="focus-ring dashboard-play-launch"
-                :disabled="launchingUuid === app.uuid || !currentAppAvailable"
-                :data-dashboard-launch-app="app.uuid"
-                @click="launchRecentApp(app)"
-              >
-                {{ launchingUuid === app.uuid ? $t('dashboard.launching') : $t('dashboard.launch') }}
-              </button>
-            </div>
-          </div>
-          <div v-else class="text-sm text-storm py-6 text-center">{{ $t('dashboard.no_games') }}</div>
-          <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-storm/15 pt-3 text-[11px] text-silver">
-            <span class="eyebrow-label mr-1">{{ $t('dashboard.host_context') }}</span>
-            <span class="data-pill">
-              {{ sessionType ? sessionType : (headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed')) }}
-            </span>
-            <span class="data-pill">
-              {{ displays.length }} {{ displays.length === 1 ? 'display' : 'displays' }}
-            </span>
-            <span class="data-pill" v-if="audio?.sink">
-              {{ formatAudioName(audio.sink) }}
-            </span>
-            <span class="data-pill">
-              v{{ version }}
-            </span>
           </div>
         </div>
         </div>
@@ -568,6 +568,7 @@ import DashboardSpaces from '../components/DashboardSpaces.vue'
 import { useSpacesSnapshot } from '../composables/useSpacesSnapshot.js'
 import { summarizeDashboardSpaces } from '../dashboard-spaces.js'
 import GaugeArc from '../components/GaugeArc.vue'
+import PosterImage from '../components/PosterImage.vue'
 import { onThemeTokensChange, readThemeTokens, withAlpha } from '../theme-bridge.js'
 import QuickControls from '../components/QuickControls.vue'
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
@@ -593,6 +594,24 @@ import {
 const { stats, connected: streamStatsConnected, receivedAt: streamStatsReceivedAt } = useStreamStats(1000)
 const { label: liveTuningLabel } = useLiveTuning()
 const { gpu, displays, audio, sessionType, readiness: systemReadiness, refresh: refreshSystemStats } = useSystemStats(3000)
+
+// Use the same percentage thresholds as the expanded gauges. State and missing
+// telemetry remain readable while collapsed, including without colour vision.
+const idleVitals = computed(() => {
+  const device = gpu.value || {}
+  const reading = (value, label, unit, warning, danger) => {
+    if (value == null) return { text: label + ' unknown', tone: '' }
+    const level = value >= danger ? 'high' : value >= warning ? 'elevated' : ''
+    return { text: Number(value.toFixed(1)) + unit + ' ' + label + (level ? ' · ' + level : ''),
+      tone: level === 'high' ? 'text-danger-bright' : level ? 'text-warning-bright' : '' }
+  }
+  const vramPercent = device.vram_used_mb != null && device.vram_total_mb > 0
+    ? device.vram_used_mb / device.vram_total_mb * 100 : null
+  return { temperature: reading(device.temperature_c, 'temperature', '°C', 70, 85),
+    gpu: reading(device.utilization_pct, 'GPU', '%', 60, 85),
+    encoder: reading(device.encoder_pct, 'encoder', '%', 60, 85),
+    vram: reading(vramPercent, 'VRAM', '%', 70, 90) }
+})
 const { sessions, clearHistory, activeStartedAt } = useSessionHistory(stats)
 
 // Apps catalog: recents for the play rail plus the running app for the hero.

@@ -1,0 +1,300 @@
+import { test, expect } from './fixtures/mocked.js'
+import { inflateSync } from 'node:zlib'
+
+const themes = ['polaris', 'portable-chrome', 'oled', 'miami', 'high-contrast']
+const catalog = [
+  { uuid: 'control', name: 'Control Ultimate Edition', cmd: 'control', favorite: true, 'image-path': 'control.png' },
+  { uuid: 'broken', name: 'Missing Artwork', cmd: 'game', 'image-path': 'missing.png' },
+  { uuid: 'long', name: 'A longer game title with additional edition information', cmd: 'game' },
+]
+const gpu = { name: 'Fixture GPU', vendor: 'nvidia', temperature_c: 0, utilization_pct: 0, encoder_pct: null,
+  vram_used_mb: 2048, vram_total_mb: 8192 }
+
+async function mockHost(page, theme = 'polaris', systemGpu = gpu) {
+  await page.addInitScript(skin => {
+    localStorage.setItem('polaris-theme', skin)
+    window.__mockStats = { streaming: false }
+    window.EventSource = class {
+      constructor() { this.timer = setInterval(() => { this.onopen?.({}); this.onmessage?.({ data: JSON.stringify(window.__mockStats) }) }, 250) }
+      close() { clearInterval(this.timer) }
+    }
+  }, theme)
+  let apps = structuredClone(catalog)
+  const writes = []
+  let config = { status: true, platform: 'linux', version: '1.4.14-beta.2', sunshine_name: 'Fixture Host',
+    configuration_revision: 'a'.repeat(64), linux_stream_mode: 'desktop_display', headless_mode: 'disabled',
+    encoder_codec_support: { ready: true, encoder: 'nvenc', hevc_supported: true, pyrowave: { available: true, hdr: false } } }
+  await page.route('**/api/**', async route => {
+    const request = route.request(), path = new URL(request.url()).pathname
+    if (request.method() !== 'GET') {
+      expect(request.method()).toBe('POST')
+      expect(['/api/apps/reorder', '/api/config']).toContain(path)
+      const body = request.postDataJSON(); writes.push({ path, body })
+      if (path === '/api/apps/reorder') apps = body.order.map(id => apps.find(app => app.uuid === id))
+      else config = { ...config, ...body, configuration_revision: 'b'.repeat(64) }
+      return route.fulfill({ json: { status: true, configuration_revision: config.configuration_revision, restart_required: true } })
+    }
+    if (path === '/api/configLocale') return route.fulfill({ json: { locale: 'en' } })
+    if (path === '/api/config') return route.fulfill({ json: config })
+    if (path === '/api/settings/metadata') return route.fulfill({ status: 404, json: { status: false } })
+    if (path === '/api/apps') return route.fulfill({ json: { status: true, apps, current_app: '', host_name: 'Fixture Host', host_uuid: 'fixture' } })
+    if (path === '/api/stats/system') return route.fulfill({ json: { gpu: systemGpu, displays: [], audio: { sink: 'default' }, session_type: 'wayland' } })
+    if (path === '/api/stats/stream') return route.fulfill({ json: { streaming: false } })
+    if (path === '/api/multiseat/profiles') return route.fulfill({ json: { enabled: false, available: true, profiles: [], activity: [] } })
+    if (path === '/api/clients/list') return route.fulfill({ json: { status: true, named_certs: [{ uuid: 'device', name: 'Fixture client' }] } })
+    if (path === '/api/covers/image') {
+      if (new URL(request.url()).searchParams.get('name') !== catalog[0].name) return route.fulfill({ status: 404, body: '' })
+      return route.fulfill({ contentType: 'image/svg+xml', body: '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="300"><rect width="200" height="300" fill="#34465f"/><circle cx="100" cy="140" r="60" fill="#8195a8"/></svg>' })
+    }
+    if (path === '/api/logs') return route.fulfill({ body: '' })
+    if (path === '/api/ai/history' || path === '/api/ai/cache') return route.fulfill({ json: [] })
+    return route.fulfill({ json: { status: true, streaming: false } })
+  })
+  return writes
+}
+
+async function fits(locator, width) {
+  const box = await locator.boundingBox()
+  expect(box).not.toBeNull()
+  expect(box.x).toBeGreaterThanOrEqual(-1)
+  expect(box.x + box.width).toBeLessThanOrEqual(width + 1)
+  const overflow = await locator.evaluate(node => ({ client: node.clientWidth, scroll: node.scrollWidth,
+    children: [...node.querySelectorAll('*')].filter(child => child.getBoundingClientRect().right > node.getBoundingClientRect().right + 1)
+      .map(child => ({ tag: child.tagName, classes: child.className, width: child.getBoundingClientRect().width, text: child.textContent.slice(0, 60) })) }))
+  expect(overflow.scroll, JSON.stringify(overflow)).toBeLessThanOrEqual(overflow.client + 1)
+}
+
+// Read Chromium's actual composited screenshot, including translucent/gradient
+// surfaces. PNG filters are reconstructed; unsupported formats fail explicitly.
+function pixels(png) {
+  expect(png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))).toBe(true)
+  const chunks = []; let width, height, channels
+  for (let at = 8; at < png.length;) {
+    const size = png.readUInt32BE(at), kind = png.toString('ascii', at + 4, at + 8), data = png.subarray(at + 8, at + 8 + size)
+    if (kind === 'IHDR') {
+      width = data.readUInt32BE(0); height = data.readUInt32BE(4)
+      expect(data[8]).toBe(8); expect([2, 6]).toContain(data[9]); expect(data[12]).toBe(0)
+      channels = data[9] === 6 ? 4 : 3
+    } else if (kind === 'IDAT') chunks.push(data)
+    at += size + 12
+  }
+  const raw = inflateSync(Buffer.concat(chunks)), stride = width * channels, out = Buffer.alloc(height * stride)
+  const paeth = (a, b, c) => { const p = a + b - c, x = Math.abs(p - a), y = Math.abs(p - b), z = Math.abs(p - c); return x <= y && x <= z ? a : y <= z ? b : c }
+  for (let y = 0; y < height; y++) {
+    const filter = raw[y * (stride + 1)]; expect(filter).toBeLessThanOrEqual(4)
+    for (let x = 0; x < stride; x++) {
+      const i = y * stride + x, a = x >= channels ? out[i - channels] : 0, b = y ? out[i - stride] : 0,
+        c = y && x >= channels ? out[i - stride - channels] : 0
+      out[i] = raw[y * (stride + 1) + x + 1] + [0, a, b, Math.floor((a + b) / 2), paeth(a, b, c)][filter]
+    }
+  }
+  return (x, y) => [...out.subarray(y * stride + x * channels, y * stride + x * channels + 3)]
+}
+
+const luminance = rgb => rgb.map(v => { const n = v / 255; return n <= 0.04045 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4 }).reduce((sum, n, i) => sum + n * [0.2126, 0.7152, 0.0722][i], 0)
+async function supportingCopyContrast(page, locator, testInfo, label) {
+  expect(await page.evaluate(() => devicePixelRatio)).toBe(1)
+  await locator.scrollIntoViewIfNeeded()
+  const style = await locator.evaluate(node => {
+    const css = getComputedStyle(node), rect = node.getBoundingClientRect(), canvas = document.createElement('canvas')
+    canvas.width = canvas.height = 1
+    const ctx = canvas.getContext('2d'); ctx.fillStyle = css.color; ctx.fillRect(0, 0, 1, 1)
+    return { foreground: [...ctx.getImageData(0, 0, 1, 1).data], fontSize: parseFloat(css.fontSize),
+      points: [rect.left + 1, rect.left + rect.width / 2, rect.right - 1].map(x => [Math.floor(x), Math.floor(rect.top + 1)]) }
+  })
+  expect(style.fontSize).toBeGreaterThanOrEqual(13)
+  expect(style.foreground[3]).toBe(255)
+  const sample = pixels(await page.screenshot({ animations: 'disabled' }))
+  const measurements = style.points.map(([x, y]) => {
+    const background = sample(x, y), a = luminance(style.foreground.slice(0, 3)), b = luminance(background)
+    return { x, y, background, contrast: (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05) }
+  })
+  // The blank leading row adjacent to this text samples the rendered background;
+  // this does not claim every text/hover state in the application is qualified.
+  for (const measurement of measurements) expect(measurement.contrast, `${label}: ${JSON.stringify(measurement)}`).toBeGreaterThanOrEqual(4.5)
+  await testInfo.attach(`${label}-rendered-contrast`, { body: JSON.stringify({ ...style, measurements }), contentType: 'application/json' })
+}
+
+for (const width of [390, 1280]) {
+  for (const theme of themes) {
+    test(`look and feel surfaces in ${theme} at ${width}px`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 960 })
+      await page.emulateMedia({ reducedMotion: 'reduce' })
+      const writes = await mockHost(page, theme)
+      await page.goto('/#/')
+      const rail = page.locator('[data-dashboard-play-rail]'), vitals = page.locator('[data-dashboard-idle-vitals]')
+      await expect(rail.locator('[data-dashboard-launch-app]')).toHaveCount(3)
+      await expect(vitals).toHaveJSProperty('open', false)
+      await expect(vitals.locator('summary')).toContainText('0°C temperature')
+      await expect(vitals.locator('summary')).toContainText('encoder unknown')
+      await supportingCopyContrast(page, vitals.locator('[data-vitals-gpu]'), testInfo, 'vitals-gpu')
+      expect(await rail.evaluate((node, selector) => Boolean(node.compareDocumentPosition(document.querySelector(selector)) & Node.DOCUMENT_POSITION_FOLLOWING), '[data-dashboard-idle-vitals]')).toBe(true)
+      await fits(rail, width)
+      await rail.screenshot({ path: `test-results/look-feel-dashboard-${theme}-${width}.png` })
+      await vitals.locator('summary').focus(); await page.keyboard.press('Enter')
+      await expect(vitals).toHaveJSProperty('open', true)
+      await page.goto('/#/apps')
+      const rows = page.locator('[data-library-app]')
+      await expect(rows).toHaveCount(3)
+      await expect(rows.nth(0).getByRole('img', { name: 'Control Ultimate Edition artwork', exact: true })).toBeVisible()
+      await expect(rows.nth(1).getByRole('img', { name: 'Missing Artwork artwork unavailable', exact: true })).toBeVisible()
+      await expect(rows.nth(2).getByRole('img', { name: `${catalog[2].name} artwork unavailable`, exact: true })).toBeVisible()
+      for (const row of await rows.all()) await fits(row, width)
+      await expect(rows.first().getByRole('button', { name: 'Delete Control Ultimate Edition', exact: true })).not.toBeVisible()
+      await supportingCopyContrast(page, page.locator('.page-subtitle').first(), testInfo, 'library-subtitle')
+      await page.screenshot({ path: `test-results/look-feel-library-${theme}-${width}.png`, animations: 'disabled' })
+      await page.goto('/#/config')
+      const bar = page.locator('.settings-command-bar')
+      await expect(page.locator('[data-command-note]')).toBeVisible()
+      await fits(bar, width)
+      await supportingCopyContrast(page, page.locator('[data-command-note]'), testInfo, 'settings-command-note')
+      if (width < 768) {
+        const header = page.locator('[data-mobile-header]')
+        await expect(header).toBeVisible()
+        expect((await header.boundingBox()).height).toBeLessThanOrEqual(72)
+        expect(await bar.evaluate(node => getComputedStyle(node).position)).toBe('static')
+        const menu = header.getByRole('button', { name: 'Toggle navigation' })
+        const size = await menu.boundingBox(); expect(size.width).toBeGreaterThanOrEqual(44); expect(size.height).toBeGreaterThanOrEqual(44)
+      }
+      await bar.screenshot({ path: `test-results/look-feel-settings-${theme}-${width}.png` })
+      await page.goto('/#/config#pyrowave')
+      await supportingCopyContrast(page, page.locator('[data-pyrowave-selection]'), testInfo, 'settings-helper')
+      await supportingCopyContrast(page, page.locator('[data-pyrowave-stream] > p').first(), testInfo, 'pyrowave-readout')
+      expect(writes).toEqual([])
+    })
+  }
+
+  test(`keyboard reorder stays local, preserves focus and refuses filtered moves at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 960 })
+    const writes = await mockHost(page)
+    await page.goto('/#/apps')
+    const rows = page.locator('[data-library-app]'), up = page.locator('[data-move-up="broken"]'), down = page.locator('[data-move-down="broken"]')
+    await up.focus(); await page.keyboard.press('Enter')
+    await expect(rows.first()).toHaveAttribute('data-library-app', 'broken')
+    await expect(up).toBeDisabled(); await expect(down).toBeFocused()
+    await expect(page.locator('[data-reorder-status]')).toContainText('Missing Artwork moved to position 1')
+    expect(writes).toEqual([])
+    await page.keyboard.press('Enter')
+    await expect(rows.nth(1)).toHaveAttribute('data-library-app', 'broken')
+    await expect(down).toBeFocused()
+    await up.focus(); await page.keyboard.press('Enter')
+    await expect(rows.first()).toHaveAttribute('data-library-app', 'broken')
+    await expect(down).toBeFocused()
+    const search = page.getByRole('searchbox', { name: 'Search library apps' })
+    await search.fill('Missing')
+    await expect(rows).toHaveCount(1)
+    await expect(up).toBeDisabled(); await expect(down).toBeDisabled()
+    await search.fill('')
+    await page.getByRole('button', { name: /Save order/i }).click()
+    await expect.poll(() => writes).toEqual([{ path: '/api/apps/reorder', body: { order: ['broken', 'control', 'long'] } }])
+    await expect(rows.first()).toHaveAttribute('data-library-app', 'broken')
+    await expect(page.getByRole('button', { name: /Save order/i })).toHaveCount(0)
+    const more = page.locator('[data-library-more="broken"]')
+    await more.locator('summary').focus(); await page.keyboard.press('Enter')
+    await expect(more.getByRole('button', { name: 'Delete Missing Artwork', exact: true })).toBeVisible()
+    const deletion = more.getByRole('button', { name: 'Delete Missing Artwork', exact: true })
+    await deletion.scrollIntoViewIfNeeded()
+    expect(await deletion.evaluate(node => { const r = node.getBoundingClientRect(); return node.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)) })).toBe(true)
+    page.once('dialog', dialog => dialog.dismiss())
+    await deletion.click()
+    await expect(more).toHaveJSProperty('open', false)
+    await expect(more.locator('summary')).toBeFocused()
+    await page.keyboard.press('Enter')
+    await page.keyboard.press('Escape')
+    await expect(more).toHaveJSProperty('open', false)
+    await expect(more.locator('summary')).toBeFocused()
+    await page.keyboard.press('Enter')
+    await search.click()
+    await expect(more).toHaveJSProperty('open', false)
+    expect(writes).toHaveLength(1)
+  })
+
+  test(`pending and saved settings keep one accessible restart consequence at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 960 })
+    const writes = await mockHost(page)
+    await page.goto('/#/config')
+    await page.locator('#sunshine_name').fill('Edited Fixture Host')
+    const bar = page.locator('.settings-command-bar'), restart = bar.getByRole('button', { name: 'Save and restart Polaris', exact: true })
+    const mentions = () => bar.locator('*').evaluateAll(nodes => nodes.filter(n => !n.children.length && /disconnects any active streams/.test(n.textContent)).length)
+    expect(await mentions()).toBe(1)
+    await expect(restart).toHaveAccessibleDescription(/disconnects any active streams/)
+    await expect(page.locator('[data-command-note]')).toHaveCount(0)
+    await bar.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(page.locator('[data-save-badge]')).toHaveText('Saved · restart needed')
+    expect(await mentions()).toBe(1)
+    await expect(page.locator('[data-command-note]')).toHaveText('Saved. Polaris uses these settings after it restarts.')
+    await expect(restart).toBeEnabled()
+    await expect(restart).toHaveAccessibleDescription(/disconnects any active streams/)
+    expect(writes).toHaveLength(1); expect(writes[0].path).toBe('/api/config')
+    expect(writes[0].body.sunshine_name).toBe('Edited Fixture Host')
+    await fits(bar, width)
+    await bar.screenshot({ path: `test-results/look-feel-saved-${width}.png` })
+  })
+
+  test(`settings and launch surfaces reflow at a 32px default font with reduced motion at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 960 })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const cdp = await page.context().newCDPSession(page)
+    await cdp.send('Page.setFontSizes', { fontSizes: { standard: 32 } })
+    await mockHost(page)
+    await page.goto('/#/config')
+    expect(await page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe('32px')
+    expect(await page.evaluate(() => matchMedia('(min-width:80rem)').matches)).toBe(false)
+    const bar = page.locator('.settings-command-bar')
+    await fits(bar, width)
+    for (const button of await bar.getByRole('button').all()) await fits(button, width)
+    const search = page.getByRole('searchbox', { name: 'Search settings', exact: true })
+    await search.fill('Server Name'); await search.press('Enter')
+    await expect(page.locator('#sunshine_name')).toBeFocused()
+    await search.fill(''); await search.press('Escape')
+    await expect(search).toBeFocused()
+    await bar.screenshot({ path: `test-results/look-feel-text-scale-settings-${width}.png` })
+    await page.goto('/#/apps')
+    const rows = page.locator('[data-library-app]')
+    await expect(rows).toHaveCount(3)
+    for (const row of await rows.all()) {
+      await fits(row, width)
+      expect((await row.locator('h3').boundingBox()).width).toBeGreaterThan(80)
+    }
+    for (const card of await page.locator('[data-quick-launch-app]').all()) {
+      await fits(card, width)
+      expect((await card.locator('h3').boundingBox()).width).toBeGreaterThan(80)
+      await fits(card.locator('.library-quick-launch-action'), width)
+    }
+    await rows.first().screenshot({ path: `test-results/look-feel-text-scale-library-${width}.png` })
+    const motion = await rows.first().evaluate(node => getComputedStyle(node).transitionDuration)
+    expect(motion.split(',').every(duration => parseFloat(duration) <= 0.01)).toBe(true)
+    await page.goto('/#/')
+    const tiles = page.locator('.dashboard-play-tile')
+    await expect(tiles).toHaveCount(3)
+    for (const tile of await tiles.all()) { await fits(tile, width); await fits(tile.locator('[data-poster-image]'), width) }
+    await page.locator('[data-dashboard-play-rail]').screenshot({ path: `test-results/look-feel-text-scale-dashboard-${width}.png` })
+  })
+}
+
+// 200% desktop zoom has a 640x480 CSS layout viewport. This models layout
+// reflow only; it is not an OS/browser zoom interaction acceptance claim.
+test('launch surfaces and settings reflow in a 640px zoom layout', async ({ page }) => {
+  await page.setViewportSize({ width: 640, height: 480 })
+  await mockHost(page)
+  for (const path of ['/#/', '/#/apps', '/#/config']) {
+    await page.goto(path)
+    if (path === '/#/') await expect(page.locator('[data-dashboard-launch-app]')).toHaveCount(3)
+    else if (path === '/#/apps') await expect(page.locator('[data-library-app]')).toHaveCount(3)
+    else await expect(page.locator('.settings-command-bar')).toBeVisible()
+    for (const surface of await page.locator('[data-dashboard-play-rail], [data-quick-launch-app], [data-library-app], .settings-command-bar').all()) await fits(surface, 640)
+  }
+})
+
+test('collapsed vitals keep pressure and missing readings legible without colour', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 960 })
+  await mockHost(page, 'polaris', { ...gpu, temperature_c: 85, utilization_pct: null, encoder_pct: 85, vram_used_mb: 7373 })
+  await page.goto('/#/')
+  const vitals = page.locator('[data-dashboard-idle-vitals]')
+  await expect(vitals).toHaveJSProperty('open', false)
+  await expect(vitals.locator('summary')).toContainText('85°C temperature · high')
+  await expect(vitals.locator('summary')).toContainText('GPU unknown')
+  await expect(vitals.locator('summary')).toContainText('85% encoder · high')
+  await expect(vitals.locator('summary')).toContainText('90% VRAM · high')
+  await fits(vitals, 390)
+})

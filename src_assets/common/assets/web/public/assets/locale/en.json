@@ -606,6 +606,7 @@
     "command_saved_note": "Search or choose a section. Save writes changes; Apply restarts Polaris.",
     "saved_live_note": "Saved. Polaris is already using these settings, so no restart is needed.",
     "saved_restart_needed_note": "Saved. Polaris uses these settings after it restarts; Save and restart Polaris disconnects any active streams.",
+    "saved_restart_needed_command_note": "Saved. Polaris uses these settings after it restarts.",
     "command_unsaved_restart_note": "Save writes your edits. Save and restart Polaris also restarts it, which disconnects any active streams, so wait until you are ready.",
     "command_saved_restart_note": "Search or choose a section. Save writes changes; Save and restart Polaris restarts it so they take effect.",
     "command_unsaved_note": "Save stages your current edits. Apply is the disruptive step and should wait until you are ready to restart Polaris.",

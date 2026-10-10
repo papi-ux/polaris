@@ -30,7 +30,7 @@
         >
           <div
             v-if="!sidebarCollapsed"
-            class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-eyebrow text-storm/70"
+            class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-eyebrow text-storm"
           >
             {{ section.label }}
           </div>
@@ -132,19 +132,17 @@
     <main id="polaris-main" tabindex="-1" class="relative flex-1 overflow-auto overflow-x-hidden bg-background">
       <SpaceParticles :dense="false" :absolute="true" />
       <!-- Mobile header -->
-      <div class="flex items-center gap-3 border-b border-storm/20 px-4 py-4 md:hidden">
-        <button type="button" aria-label="Toggle navigation" aria-controls="polaris-sidebar" :aria-expanded="sidebarOpen" @click="sidebarOpen = !sidebarOpen" class="focus-ring text-silver transition-colors duration-200 hover:text-ice">
-          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+      <!-- One compact row: a 44px menu target, the wordmark and the page name. The drawer
+           already groups pages by section, so the header does not repeat it. -->
+      <div data-mobile-header class="flex min-h-14 items-center gap-2 border-b border-storm/20 px-2 py-1.5 md:hidden">
+        <button type="button" aria-label="Toggle navigation" aria-controls="polaris-sidebar" :aria-expanded="sidebarOpen" @click="sidebarOpen = !sidebarOpen" class="focus-ring inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-silver transition-colors duration-200 hover:bg-twilight/50 hover:text-ice">
+          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
         </button>
-        <div class="min-w-0">
-          <h1 class="text-lg font-bold text-ice flex items-center gap-2 leading-none">
-            <img src="/images/polaris-wordmark.svg?v=20260726" class="h-6 w-auto shrink-0 align-middle" alt="Polaris">
-          </h1>
-          <div class="text-xs text-storm truncate">{{ currentPageLabel }}</div>
-        </div>
-        <div class="ml-auto rounded-full border border-storm/30 bg-deep/60 px-2.5 py-1 text-[10px] font-medium text-storm">
-          {{ currentPageSection }}
-        </div>
+        <h1 class="flex min-w-0 max-w-[160px] items-center text-lg font-bold leading-none text-ice">
+          <img src="/images/polaris-wordmark.svg?v=20260726" class="h-6 w-auto max-w-full object-contain align-middle" alt="Polaris">
+        </h1>
+        <span aria-hidden="true" class="text-storm/60">/</span>
+        <span data-mobile-page-label class="min-w-0 truncate text-sm font-medium text-silver">{{ currentPageLabel }}</span>
       </div>
 
       <div class="relative z-[1] mx-auto max-w-[1360px] px-5 py-5 md:px-6 md:py-6">
@@ -207,7 +205,6 @@ try {
 const navSections = computed(() => createNavSections(t, sidebarUpdateHost.value?.platform || ''))
 const currentNavItem = computed(() => getNavItemByPath(navSections.value, route.path))
 const currentPageLabel = computed(() => currentNavItem.value?.label || 'Polaris')
-const currentPageSection = computed(() => currentNavItem.value?.sectionLabel || 'Core')
 const paletteShortcut = computed(() => `${isMac ? '\u2318' : 'Ctrl+'}K ${i18nReady ? t('navbar.search_hint') : 'to search'}`)
 const displayVersion = computed(() => appVersion.value ? `v${appVersion.value}` : 'v...')
 const compactVersion = computed(() => appVersion.value ? appVersion.value.split('.')[0] : '...')

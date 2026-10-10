@@ -39,6 +39,10 @@
   --color-ice: #c8d6e5;
   --color-silver: #a8b0b8;
   --color-storm: #7a8e95;
+  /* Supporting copy a reader decides with: descriptions, help text, consequences.
+     Storm stays the meta and caption tier; this role holds 4.5:1 on both the
+     card base and deep, the lightest grounds copy sits on. */
+  --color-support: #a1abb3;
   --color-twilight: #4c5265;
   --color-deep: #393c51;
   --color-void: #2a2840;
@@ -116,6 +120,7 @@
   /* Nova's #555e66 sits at 2.99:1 on the solid card base; one step lighter
      clears the 3:1 large-text floor the theme suite enforces. */
   --color-storm: #5a636c;
+  --color-support: #818a92;
   --color-twilight: #1a1a22;
   --color-deep: #000000;
   --color-void: #000000;
@@ -195,6 +200,13 @@ textarea {
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--edge-glass);
+}
+
+/* A surface nested in another glass surface sits on an already blurred,
+   near-opaque ground, so a second backdrop blur only costs compositing. */
+:is(.glass, .card, .section-card, .config-page .settings-section) :is(.glass, .card, .section-card, .header-support-card, .config-page .settings-section) {
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 /* ── Card System ── */
@@ -297,7 +309,7 @@ textarea {
 }
 
 .page-subtitle {
-  @apply mt-2 max-w-3xl text-sm leading-relaxed text-storm;
+  @apply mt-2 max-w-3xl text-sm leading-relaxed text-support;
 }
 
 .page-meta {
@@ -356,7 +368,7 @@ textarea {
 }
 
 .header-support-copy {
-  @apply mt-1 text-xs leading-relaxed text-storm;
+  @apply mt-1 text-[13px] leading-relaxed text-support;
 }
 
 .security-header-card {
@@ -1006,7 +1018,7 @@ textarea {
 }
 
 .settings-field-label {
-  @apply block text-sm font-medium text-storm;
+  @apply block text-sm font-medium text-support;
 }
 
 .settings-toggle-row {
@@ -1189,7 +1201,7 @@ textarea {
   }
 
   .settings-summary-copy {
-    @apply mt-1 text-sm leading-relaxed text-storm;
+    @apply mt-1 text-sm leading-relaxed text-support;
   }
 
   /* Interactive choice cards: pointer + hover motion when enabled, inert when not.
@@ -1215,7 +1227,7 @@ textarea {
 }
 
 .stat-tile {
-  @apply rounded-2xl border border-storm/20 bg-deep/40 p-4;
+  @apply rounded-xl border border-storm/20 bg-deep/40 p-4;
 }
 
 .stat-kicker {
@@ -1227,11 +1239,11 @@ textarea {
 }
 
 .stat-copy {
-  @apply mt-2 text-sm leading-relaxed text-storm;
+  @apply mt-2 text-sm leading-relaxed text-support;
 }
 
 .section-card {
-  @apply p-5;
+  @apply p-4 sm:p-5;
   background: var(--surface-card);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -1301,6 +1313,10 @@ textarea {
 }
 
 /* Play rail: compact launchable game tiles. */
+.dashboard-play-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 7rem), 1fr));
+}
+
 .dashboard-play-tile {
   @apply flex min-w-0 flex-col rounded-xl border p-2.5;
   background: var(--surface-raised);
@@ -1319,7 +1335,7 @@ textarea {
 }
 
 .dashboard-play-launch {
-  @apply mt-2 inline-flex h-7 w-full items-center justify-center rounded-lg border border-accent/40 font-mono text-xs font-semibold text-accent transition-[background-color,border-color,color] duration-150 hover:bg-accent/15 disabled:cursor-not-allowed disabled:opacity-50;
+  @apply mt-2 inline-flex min-h-11 w-full items-center justify-center rounded-lg border border-accent/40 font-mono text-xs font-semibold text-accent transition-[background-color,border-color,color] duration-150 hover:bg-accent/15 disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 .section-title {
@@ -1327,7 +1343,7 @@ textarea {
 }
 
 .section-copy {
-  @apply mt-2 text-sm leading-relaxed text-storm;
+  @apply mt-2 text-sm leading-relaxed text-support;
 }
 
 .section-grid {
@@ -1335,7 +1351,7 @@ textarea {
 }
 
 .surface-subtle {
-  @apply rounded-2xl border;
+  @apply rounded-xl border;
   background: var(--surface-raised);
   border-color: var(--edge-raised);
 }
@@ -1345,7 +1361,7 @@ textarea {
 }
 
 .action-tile {
-  @apply rounded-2xl border p-4 no-underline;
+  @apply rounded-xl border p-4 no-underline;
   background: var(--surface-raised);
   border-color: var(--edge-raised);
   transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
@@ -1921,11 +1937,11 @@ textarea {
 }
 
 .settings-command-note {
-  @apply mt-1 max-w-2xl text-xs leading-relaxed text-storm;
+  @apply mt-1 max-w-2xl text-[13px] leading-relaxed text-support;
 }
 
 .settings-command-tools {
-  @apply grid min-w-0 gap-2 sm:grid-cols-[auto_minmax(180px,1fr)] sm:items-center;
+  @apply grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2 sm:grid-cols-[auto_minmax(180px,1fr)];
 }
 
 .settings-command-meta {
@@ -1937,11 +1953,11 @@ textarea {
 }
 
 .settings-command-actions {
-  @apply flex flex-wrap items-center gap-2 sm:col-span-full sm:justify-end;
+  @apply col-span-full flex flex-wrap items-center gap-2 sm:justify-end;
 }
 
 .settings-action-button {
-  @apply inline-flex min-h-10 items-center justify-center whitespace-nowrap rounded-xl px-4 py-2 text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
+  @apply inline-flex max-w-full min-h-11 sm:min-h-10 items-center justify-center whitespace-normal rounded-xl px-4 py-2 text-center text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
 }
 
 .settings-action-button-secondary {
@@ -2021,7 +2037,22 @@ textarea {
 }
 
 .settings-tab-copy {
-  @apply mt-1 max-w-3xl text-sm leading-relaxed text-storm;
+  @apply mt-1 max-w-3xl text-sm leading-relaxed text-support;
+}
+
+/* Settings panels write their help text with inline text-storm utilities.
+   Inside the panel that copy is what a reader decides with, so it takes the
+   supporting role; faded variants (text-storm/60 and the like) stay subdued,
+   and 12px help paragraphs step up to 13px. This rule is unlayered and so
+   outranks Tailwind's layered utilities: elements that carry their own state
+   colours (hover:, focus:, group-hover:, peer-) are left to them. */
+.settings-tab-content .text-storm:not([class*="hover:"], [class*="focus:"], [class*="group-"], [class*="peer-"]) {
+  color: var(--color-support);
+}
+
+.settings-tab-content p.text-xs.text-storm:not([class*=":text-"]) {
+  font-size: 0.8125rem;
+  line-height: 1.25rem;
 }
 
 .settings-tab-meta {
@@ -2059,7 +2090,7 @@ textarea {
 }
 
 .config-page .settings-section {
-  @apply p-5;
+  @apply p-4 sm:p-5;
   background: var(--surface-card);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -2081,7 +2112,7 @@ textarea {
 }
 
 .config-page .settings-section-copy {
-  @apply mt-1 text-sm leading-relaxed text-storm;
+  @apply mt-1 text-sm leading-relaxed text-support;
 }
 
 .config-page .settings-form-grid {
@@ -2292,7 +2323,7 @@ textarea {
 
 .pairing-flow-text {
   min-width: 0;
-  color: var(--color-storm);
+  color: var(--color-support);
   font-size: 0.8125rem;
   line-height: 1.5;
 }
@@ -2304,8 +2335,8 @@ textarea {
   gap: 0.375rem;
   border-left: 1px solid var(--edge-raised);
   padding-left: 1rem;
-  color: var(--color-storm);
-  font-size: 0.75rem;
+  color: var(--color-support);
+  font-size: 0.8125rem;
   line-height: 1.4;
 }
 
@@ -2417,6 +2448,8 @@ textarea {
   --color-ice: #fff1f7;
   --color-silver: #ffd3e2;
   --color-storm: #85c7d4;
+  /* Miami's cyan caption tier already clears 4.5:1, so supporting copy keeps it. */
+  --color-support: #85c7d4;
   --color-twilight: #6c3c6f;
   --color-deep: #241429;
   --color-void: #130817;
@@ -2444,6 +2477,7 @@ textarea {
   --color-ice: #c9d1d9;
   --color-silver: #9aa4af;
   --color-storm: #838d9c;
+  --color-support: #8e98a6;
   --color-twilight: #3a424c;
   --color-deep: #1e2228;
   --color-void: #14161a;
@@ -2468,6 +2502,7 @@ textarea {
   --color-ice: #ffffff;
   --color-silver: #e5e7eb;
   --color-storm: #cbd5e1;
+  --color-support: #cbd5e1;
   --color-twilight: #172033;
   --color-deep: #0f172a;
   --color-void: #05070c;

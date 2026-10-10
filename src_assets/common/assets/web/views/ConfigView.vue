@@ -14,9 +14,10 @@
 
     <section class="section-card settings-command-bar sticky top-4 z-20" role="region" :aria-label="$t('config.action_center')">
       <div class="settings-command-copy">
-        <div class="section-kicker">{{ $t('config.action_center') }}</div>
+        <!-- The region is already named Action Center, so phones drop the visible eyebrow. -->
+        <div class="section-kicker hidden sm:block">{{ $t('config.action_center') }}</div>
         <div class="settings-command-title">{{ commandCenterTitle }}</div>
-        <div class="settings-command-note">{{ commandCenterNote }}</div>
+        <div v-if="commandCenterNote" class="settings-command-note" data-command-note>{{ commandCenterNote }}</div>
       </div>
 
       <div class="settings-command-tools">
@@ -52,7 +53,7 @@
           </button>
         </div>
         <!-- Said before the action, not in a confirmation after it: restarting ends every stream. -->
-        <p id="settings-restart-disclosure" class="settings-command-note sm:col-span-full" data-restart-disclosure>{{ $t('config.save_and_restart_disclosure') }}</p>
+        <p id="settings-restart-disclosure" class="settings-command-note col-span-full" data-restart-disclosure>{{ $t('config.save_and_restart_disclosure') }}</p>
       </div>
     </section>
 
@@ -840,12 +841,15 @@ const commandCenterNote = computed(() => {
   if (searchQuery.value) {
     return i18n.t('config.search_focus_desc', { query: searchQuery.value, count: matchingTabs.value.length })
   }
-  if (hasUnsavedChanges.value) {
-    return i18n.t('config.command_unsaved_restart_note')
-  }
-  if (restartPending.value) return i18n.t('config.saved_restart_needed_note')
+  // Pending edits: the title says so and the restart consequence is the one
+  // disclosure under Save and restart Polaris, so no second copy of it here.
+  if (hasUnsavedChanges.value) return ''
+  // Restart needed: the disconnect consequence is the one disclosure under Save and
+  // restart Polaris, so this note says only that the restart is still to come. The
+  // save toast keeps the full note, because it carries its own Restart action.
+  if (restartPending.value) return i18n.t('config.saved_restart_needed_command_note')
   if (saved.value) {
-    return savedNeedsRestart.value ? i18n.t('config.saved_restart_needed_note') : i18n.t('config.saved_live_note')
+    return savedNeedsRestart.value ? i18n.t('config.saved_restart_needed_command_note') : i18n.t('config.saved_live_note')
   }
   return i18n.t('config.command_saved_restart_note')
 })

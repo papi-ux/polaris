@@ -34,9 +34,9 @@ const pyrowave = computed(() => (props.platform === 'linux' ? describePyroWave(t
     </div>
 
     <div class="mt-2 flex flex-col gap-1" data-codec-detail="pyrowave">
-      <p v-for="line in pyrowave.lines" :key="line" class="text-sm leading-relaxed text-storm">{{ line }}</p>
+      <p v-for="line in pyrowave.lines" :key="line" class="text-sm leading-relaxed text-support">{{ line }}</p>
       <!-- Polaris only reports here; Nova picks the codec and the bitrate for each stream. -->
-      <p class="text-sm leading-relaxed text-storm" data-pyrowave-selection>{{ $t('config.pyrowave_card_selection') }}</p>
+      <p class="text-sm leading-relaxed text-support" data-pyrowave-selection>{{ $t('config.pyrowave_card_selection') }}</p>
       <p v-if="pyrowave.message" class="text-sm leading-relaxed text-silver" data-pyrowave-message>{{ pyrowave.message }}</p>
       <p v-if="pyrowave.refusal" class="text-sm leading-relaxed text-warning-bright" data-pyrowave-refusal>
         {{ pyrowave.refusal.lead }} {{ pyrowave.refusal.message }} {{ pyrowave.refusal.action }}

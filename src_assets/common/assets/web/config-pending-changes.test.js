@@ -29,6 +29,7 @@ const messages = {
   'config.saved_live_badge': 'Saved · in use',
   'config.saved_restart_needed_badge': 'Saved · restart needed',
   'config.saved_restart_needed_note': 'Saved. Polaris uses these settings after it restarts.',
+  'config.saved_restart_needed_command_note': 'Saved. Polaris uses these settings after it restarts.',
   'config.saved_live_note': 'Saved. Polaris is already using these settings.',
   'config.save_and_restart': 'Save and restart Polaris',
   'config.save_and_restart_disclosure': 'Save and restart Polaris disconnects any active streams while Polaris restarts.',

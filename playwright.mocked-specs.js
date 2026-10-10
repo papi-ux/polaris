@@ -7,5 +7,6 @@ export const mockedFrontendSpecs = [
   '**/welcome-layout.spec.js',
   '**/polaris-settings-ux.spec.js',
   '**/polaris-ui-followup.spec.js',
+  '**/polaris-look-feel.spec.js',
   '**/recording-policy.spec.js',
 ]
