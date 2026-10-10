@@ -198,12 +198,56 @@ Evidence for every case is recorded as GTest XML properties and in one console l
 encoder or a failed open, read or save is a test **failure**, never a skip. Malformed input, fresh
 readers for later key frames, and seek or start structure are separate, later slices.
 
+## Negative and later-key inputs from real fixture packets (#369)
+
+`RecorderBitstreamNegativeTests` (23 cases, Linux only, in `test_polaris_stream`, CTest
+`polaris_recorder_bitstream_negative`) starts from the same unchanged 64x64 encoder support and its
+frozen baseline. Each case builds a closed input list from the real packets with a named,
+deterministic `recipe-v1` edit, or uses them unmodified, and labels every pushed packet `real`,
+`constructed-from-real` or `synthetic`:
+- `trunc-half` and `trunc-in-sps` of key packet 0 (N1, with its replay save as N2);
+- `strip-startcodes` of key packet 0 (N3) and seeded `garbage` of its length (N4);
+- a null-payload or zero-size owner frame between real packets (N5);
+- `drop-param-sets` on the later key packet 4 (L1) or the first key packet 0 (L3);
+- a real dependent packet pushed as a key (`flag-lie`, L4);
+- a never-registered generation interleaved with the selected run (F2);
+- a codec change inside one session (F1), a session restart (F3) and a save admitted before a
+  codec change, through the existing admit/complete seam (F4).
+
+A resolution or SPS change (the design's L2) is not part of this slice.
+
+**What is asserted.** The existing replay admission counters, the window-limit cause where a case is
+about it, the save status, packets, key frames, codec and generation, and byte transparency: the
+published file equals the admitted packets concatenated in push order. The recorder does not parse,
+repair or refuse content; a malformed packet that passes admission is saved as supplied.
+
+**What is only recorded.** CBS cases read every pushed packet in order through one persistent CBS
+context, call `cbs::validate_sps` on the first input and `cbs::strip_filler_data` on a copy of each.
+Their returns, unit lists and active-SPS state are observations, not a parser validity or refusal
+contract. The only CBS assertions are completion and test-owned integrity: each input sits in a
+buffer followed by FFmpeg's zeroed input padding (which FFmpeg may read) and a 64-byte canary, and
+the input, padding and canary must be unchanged after every call; the stripped copy must not grow.
+That catches stray writes into those test-owned bytes only. It is not a bounds, read-safety or
+memory-safety result: the test binary does not instrument the pinned FFmpeg archive, and no
+instrumented-library gate has run.
+
+**Evidence.** Each case records one closed property set as GTest XML properties and one identical
+console line, `POLARIS_RECORDER_NEGATIVE_JSON {...}`, with the FFmpeg and compiler identity, the
+real source packet hashes, each push's provenance, recipe, size and hash, every CBS observation, the
+counters and the save. CTest sets `POLARIS_RECORDER_NEGATIVE_EVIDENCE_DIR` to
+`build/tests/recorder-negative-evidence`. Each case creates its own directory there exclusively and
+writes the real source packets, every pushed packet, the admitted concatenation, the published file
+and a manifest, so a separate readback can rebuild each recipe and compare the saved bytes with the
+raw inputs. A missing directory, an existing case directory or any write error fails the case, so a
+rerun needs a fresh build or an emptied evidence directory. Raw evidence is never committed.
+
 ## Not covered
 
 This slice proves none of the following:
 - decoding, or which decoders and libraries are present;
-- the bitstream framing of any live codec lane (AV1 and PyroWave included); #365 observes only the
-  CPU fixture's H.264 and HEVC packets;
+- the bitstream framing of any live codec lane (AV1 and PyroWave included); #365 and #369 observe
+  only the CPU fixture's H.264 and HEVC packets and edits of them;
+- parser validity or refusal of malformed input, or FFmpeg read bounds and memory safety;
 - presentation timestamps, cadence, ordering or seeking;
 - a container, audio, or A/V sync;
 - device, live or playback acceptance.

@@ -822,6 +822,9 @@ if (BUILD_FULL_TESTS)
         # Positive CBS stream reads and exact raw replay-save readback of the same real fixture
         # packets (#365): Linux only, next to the #363 fixture whose encoder support it copies.
         list(APPEND TEST_STREAM_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_bitstream.cpp)
+        # Negative and later-key inputs built from the same real fixture packets (#369 under #329):
+        # Linux only; reuses the #365 support header unchanged.
+        list(APPEND TEST_STREAM_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_bitstream_negative.cpp)
     endif()
     configure_polaris_full_test_target(test_polaris_stream
         ${TEST_STREAM_SOURCES}
@@ -835,6 +838,15 @@ if (BUILD_FULL_TESTS)
             COMMAND test_polaris_stream --gtest_filter=RecorderBitstreamTests.*)
         set_tests_properties(polaris_recorder_bitstream PROPERTIES
             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})
+        # Raw per-case evidence (#369): each case creates its own directory under this one
+        # exclusively, so a run needs a fresh build directory or an emptied evidence directory.
+        set(POLARIS_RECORDER_NEGATIVE_EVIDENCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/recorder-negative-evidence)
+        file(MAKE_DIRECTORY ${POLARIS_RECORDER_NEGATIVE_EVIDENCE_DIR})
+        add_test(NAME polaris_recorder_bitstream_negative
+            COMMAND test_polaris_stream --gtest_filter=RecorderBitstreamNegativeTests.*)
+        set_tests_properties(polaris_recorder_bitstream_negative PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            ENVIRONMENT "POLARIS_RECORDER_NEGATIVE_EVIDENCE_DIR=${POLARIS_RECORDER_NEGATIVE_EVIDENCE_DIR}")
     endif()
     # Recorder mode publication uses the real configuration path without opening a recording.
     add_test(NAME polaris_recorder_mode_publication
