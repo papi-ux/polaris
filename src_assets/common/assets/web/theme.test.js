@@ -158,6 +158,24 @@ describe('theme skin registry', () => {
     }
   })
 
+  it('gives every skin a supporting-copy role readable on its card and deep grounds', () => {
+    // Descriptions, help text and consequences are read to make a decision, so
+    // their role holds the 4.5:1 body floor on both grounds that copy sits on.
+    // Storm keeps its own meta and caption role and the floor above.
+    const defaults = extractTokens(themeCss('polaris'))
+    for (const theme of THEMES) {
+      const own = extractTokens(themeCss(theme.id))
+      const tokens = { ...defaults, ...own }
+      expect(own.support, `${theme.id} declares --color-support`).toMatch(/^#[0-9a-f]{6}$/)
+      for (const ground of ['card-base', 'deep']) {
+        expect(
+          contrastRatio(tokens.support, tokens[ground]),
+          `${theme.id} --color-support on ${ground} ${tokens[ground]}`,
+        ).toBeGreaterThanOrEqual(4.5)
+      }
+    }
+  })
+
   it('applies non-default skins through the data-theme attribute', () => {
     setTheme('portable-chrome')
 

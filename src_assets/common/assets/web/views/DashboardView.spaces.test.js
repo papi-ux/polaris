@@ -5,10 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import DashboardView from './DashboardView.vue'
 
-const shared = vi.hoisted(() => ({ stats: null }))
+const shared = vi.hoisted(() => ({ stats: null, gpu: null }))
 vi.mock('../composables/useStreamStats', () => ({ useStreamStats: () => ({ stats: shared.stats }) }))
 vi.mock('../composables/useLiveTuning', () => ({ useLiveTuning: () => ({ label: ref('Off') }) }))
-vi.mock('../composables/useSystemStats', () => ({ useSystemStats: () => ({ gpu: ref(null), displays: ref([]), audio: ref(null), sessionType: ref(''), readiness: ref({ displays: 'unavailable', audio: 'unavailable' }), refresh: vi.fn(async () => {}) }) }))
+vi.mock('../composables/useSystemStats', () => ({ useSystemStats: () => ({ gpu: shared.gpu, displays: ref([]), audio: ref(null), sessionType: ref(''), readiness: ref({ displays: 'unavailable', audio: 'unavailable' }), refresh: vi.fn(async () => {}) }) }))
 vi.mock('../composables/useSessionHistory', () => ({ useSessionHistory: () => ({ sessions: ref([]), clearHistory: vi.fn(), activeStartedAt: ref(null) }), formatDuration: String }))
 vi.mock('../composables/useAiOptimizer', () => ({ useAiOptimizer: () => ({ status: ref(null), fetchStatus: vi.fn(), fetchDevices: vi.fn() }) }))
 vi.mock('../composables/useFavicon', () => ({ useFavicon: vi.fn() }))
@@ -21,6 +21,7 @@ let wrapper, spaces, platform, appPayload
 beforeEach(() => {
   vi.useFakeTimers()
   shared.stats = ref(null)
+  shared.gpu = ref(null)
   spaces = snapshot(); platform = 'linux'
   appPayload = { apps: [], current_app: '' }
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
@@ -46,6 +47,30 @@ async function render(streaming = true) {
 const spaceReads = () => fetch.mock.calls.filter(([url]) => url === './api/multiseat/profiles')
 
 describe('Mission Control with Space sessions', () => {
+  it('puts idle launches before collapsible vitals, preserving zero and unknown readings', async () => {
+    shared.gpu.value = { name: 'Fixture GPU', temperature_c: 0, utilization_pct: 0 }
+    appPayload = { apps: [{ uuid: 'game', name: 'Control', cmd: 'game' }], current_app: '' }
+    await render(false)
+    const rail = wrapper.get('[data-dashboard-play-rail]')
+    const vitals = wrapper.get('[data-dashboard-idle-vitals]')
+    expect(rail.element.compareDocumentPosition(vitals.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(vitals.element.open).toBe(false)
+    expect(wrapper.get('[data-dashboard-vitals-summary]').text()).toContain('0°C')
+    expect(wrapper.get('[data-dashboard-vitals-summary]').text()).toContain('0% GPU')
+    expect(wrapper.get('[data-dashboard-vitals-summary]').text()).toContain('encoder unknown')
+    expect(wrapper.get('[data-dashboard-launch-app="game"]').attributes('disabled')).toBeUndefined()
+    shared.gpu.value = { name: 'Fixture GPU', temperature_c: 85, utilization_pct: 0, encoder_pct: 85, vram_used_mb: 7373, vram_total_mb: 8192 }
+    await flushPromises()
+    expect(vitals.element.open).toBe(false)
+    expect(wrapper.get('[data-vitals-temperature]').text()).toBe('85°C temperature · high')
+    expect(wrapper.get('[data-vitals-temperature]').classes()).toContain('text-danger-bright')
+    expect(wrapper.get('[data-vitals-encoder]').classes()).toContain('text-danger-bright')
+    expect(wrapper.get('[data-vitals-vram]').text()).toBe('90% VRAM · high')
+    shared.stats.value = { streaming: true, fps: 60 }; await flushPromises()
+    expect(wrapper.find('[data-dashboard-idle-vitals]').exists()).toBe(false)
+    expect(wrapper.find('[data-dashboard-play-rail]').exists()).toBe(false)
+  })
+
   it('blocks recent launches while app identity is unavailable and restores the current catalog', async () => {
     appPayload = { apps: [{ uuid: 'app-a', name: 'Control A', cmd: 'run-a' }], current_app: 'app-a' }
     await render(false)
