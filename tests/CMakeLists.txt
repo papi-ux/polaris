@@ -829,6 +829,9 @@ if (BUILD_FULL_TESTS)
         list(APPEND TEST_STREAM_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_bitstream_window.cpp)
         # Real-codec replay duration expiry and keyframe realignment (test-only, #375 under #329).
         list(APPEND TEST_STREAM_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_bitstream_expiry.cpp)
+        # Supplied tap times kept beside real packets, live and held, through a byte-identical save
+        # (test-only, #377 under #329); reuses the #365 support header unchanged.
+        list(APPEND TEST_STREAM_SOURCES ${CMAKE_SOURCE_DIR}/tests/unit/test_recorder_bitstream_timing.cpp)
     endif()
     configure_polaris_full_test_target(test_polaris_stream
         ${TEST_STREAM_SOURCES}
@@ -865,6 +868,13 @@ if (BUILD_FULL_TESTS)
         set_tests_properties(polaris_recorder_bitstream_expiry PROPERTIES
             WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
             ENVIRONMENT "POLARIS_RECORDER_EXPIRY_EVIDENCE_DIR=${POLARIS_RECORDER_EXPIRY_EVIDENCE_DIR}")
+        set(POLARIS_RECORDER_TIMING_EVIDENCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/recorder-timing-evidence)
+        file(MAKE_DIRECTORY ${POLARIS_RECORDER_TIMING_EVIDENCE_DIR})
+        add_test(NAME polaris_recorder_bitstream_timing
+            COMMAND test_polaris_stream --gtest_filter=RecorderBitstreamTimingTests.*)
+        set_tests_properties(polaris_recorder_bitstream_timing PROPERTIES
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            ENVIRONMENT "POLARIS_RECORDER_TIMING_EVIDENCE_DIR=${POLARIS_RECORDER_TIMING_EVIDENCE_DIR}")
     endif()
     # Recorder mode publication uses the real configuration path without opening a recording.
     add_test(NAME polaris_recorder_mode_publication
