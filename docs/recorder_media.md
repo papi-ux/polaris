@@ -291,3 +291,48 @@ Raw evidence is never committed or published with shared preview artifacts.
 These are in-run byte and counter properties only. No packet hash is frozen in the test; whether a
 run's bytes match earlier runs, or what a decoder showed about them, is a separate readback's
 question. Nothing here is decode, playback, container, timing or memory-safety evidence.
+
+## Replay duration expiry of real fixture packets (#375)
+
+`tests/unit/test_recorder_bitstream_expiry.cpp` (`RecorderBitstreamExpiryTests`, Linux only, CTest
+`polaris_recorder_bitstream_expiry`) pushes the same CPU fixture's 8 real H.264 and HEVC packets
+(keys at 0 and 4) through the replay buffer's duration expiry for one eligible session, and saves
+into a directory the fixture created. The duration is one minute (D = 60 s) and the default hard
+caps stay in force, far above 8 packets, so no cap can remove anything. Packets 0–3 arrive at
+t0 + i × 16 ms and packets 4–7 at t0 + 30 s + (i − 4) × 16 ms on a controlled steady arrival clock.
+A packet expires when the read, append or save time minus its **arrival** is strictly greater than D.
+Every expectation follows from those arrival offsets and D; the packet PTS is recorded and never
+compared. Six cases, three per codec:
+
+- **Read-triggered expiry.** A read at exactly t0 + 60000 ms keeps all 8 packets: packet 0 is exactly
+  D old. A read at t0 + 60033 ms expires packets 0–2, and keyframe realignment removes packet 3,
+  which is still fresh: 4 packets, `trimmed` 4, cause `duration`. A later read stamped t0 + 60000 ms
+  restores nothing. The save is exactly packets 4–7.
+- **Append-triggered expiry.** Packets 0–6 arrive with no status read; packet 7 arrives at
+  t0 + 60033 ms. A read stamped earlier, at t0 + 30048 ms, when nothing could expire, already shows
+  packets 4–7 with cause `duration`, so the append performed the expiry. The save is exactly
+  packets 4–7.
+- **A fully stale run.** At t0 + 90049 ms every packet has expired. The save is `empty`, admits
+  nothing and creates no file; replay awaits a keyframe, the last accepted keyframe's age is
+  reported from packet 4's arrival, and a dependent packet is refused. Packet 4 then restarts the run.
+
+Each read records its packets, bytes, `trimmed`, keyframes, arrival span, front age, last accepted
+keyframe age, cause, `awaiting_keyframe` and refused dependent packets, and is compared exactly.
+Before the first trim the cause is `selection`, from the session start; no cap cause ever appears.
+The saved file must open with parameter sets before an IDR slice (H.264 SPS and PPS; HEVC VPS, SPS
+and PPS). The final live run's provenance must be the expected pushes' packets, producer counters
+and sequences. Each case isolates expiry as the only removal cause.
+
+**Evidence.** Each case records one closed property set as GTest XML properties and one identical
+console line, `POLARIS_RECORDER_EXPIRY_JSON {...}`. CTest sets `POLARIS_RECORDER_EXPIRY_EVIDENCE_DIR`
+to `build/tests/recorder-expiry-evidence`. Each case creates its own directory there exclusively and
+writes its 8 source packets, its published save (when one exists) and a manifest, each created
+exclusively, fully written, synced, closed and read back, before any assertion, and under 1 MiB in
+total. A missing, relative, non-directory or symlinked root, an existing case directory or any write
+error fails the case. Raw evidence is never committed or published with shared preview artifacts.
+
+These are in-run byte, counter and arrival-clock properties only. No packet hash is frozen in the
+test. A saved suffix may inherit earlier decoder readback only when its bytes are identical to the
+accepted inputs; that is a separate readback's question, with no decoder rerun here. Nothing here
+is decode, playback, container, presentation timing, cap precedence, production clock or
+memory-safety evidence. Recording remains off by default.
