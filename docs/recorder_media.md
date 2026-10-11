@@ -336,3 +336,61 @@ test. A saved suffix may inherit earlier decoder readback only when its bytes ar
 accepted inputs; that is a separate readback's question, with no decoder rerun here. Nothing here
 is decode, playback, container, presentation timing, cap precedence, production clock or
 memory-safety evidence. Recording remains off by default.
+
+## Supplied tap times beside real fixture packets (#377)
+
+`tests/unit/test_recorder_bitstream_timing.cpp` (`RecorderBitstreamTimingTests`, Linux only, CTest
+`polaris_recorder_bitstream_timing`) pushes the same CPU fixture's 8 real H.264 and HEVC packets
+(keys at 0 and 4) for one eligible session with three coordinates supplied and kept apart: the
+arrival clock passed to the push (t0 + i × 20 ms), a supplied tap time as `frame_timestamp`
+(t0 − 3 ms + i × 16 667 µs, before each packet's arrival; `tapToArrivalUs` = 3000 + 3333 × i) and
+explicit producer counters 37700 + i as `frame_index`. The encoder's PTS/DTS are recorded as
+unrelated fixture coordinates and never compared. The configured 5-minute duration and the default
+caps hold the whole 140 ms run, so nothing expires, trims or realigns. Four cases, two per codec:
+
+- **Steady tap times.** All 8 pushes are admitted. The live provenance read before the save and the
+  held snapshot provenance of the admitted save (`snapshot_provenance_for_tests`) both carry every
+  supplied field exactly, version 1, with no mark. The save is packets 0–7 byte for byte, 2
+  keyframes, arrival span exactly 140 ms, and the live run is unchanged afterwards. From the observed
+  held records alone the test derives `tapOffsetsUs`, normalized to the first held entry's tap time:
+  exactly 0, 16667, 33334, 50001, 66668, 83335, 100002, 116669, strictly increasing, `tapSpanUs`
+  116669. `ArrivalSpanIsNotTapSpan`: the observed arrival span (140 000 µs, from the save and the
+  run) differs from that tap span. The two coordinates are compared as complete vectors and final
+  spans; both are 0 at the first frame, so no offset-by-offset inequality is asserted.
+- **Missing, duplicate and regressed tap times.** Packet 2 is untimed, packet 5 repeats packet 4's
+  tap time and packet 6 is 1 µs earlier than packet 5. The run, the save and the bytes are those of
+  the steady case. The observed marks, live and held, are exactly none, none, `time_missing`, none,
+  none, `time_duplicate`, `time_regressed`, none (packet 3 is not compared because its neighbour is
+  untimed); the derived `tapOffsetsUs` are 0, 16667, null, 50001, 66668, 66668, 66667, 116669, not
+  strictly increasing, first violation at 5, untimed [2], with nothing substituted from the arrival
+  clock. A supplied tap-time regression never cuts the run; the recorder's own arrival-clock
+  regression rule is a different, untouched thing.
+
+The marks are also recomputed by the test from the observed supplied values with the adjacent-entry
+rule above and must equal the observed marks (valid here because nothing trims, so each entry's
+adjacent retained entry is the previous one). The saved file must open with parameter sets before
+an IDR slice; its first access unit's NAL types are recorded.
+
+**What this is not.** The supplied tap series is an injected test value standing where the production
+tap copies `packet->frame_timestamp`; it is not a presentation timestamp, a measured presentation
+duration, cadence, ordering, seeking, a container, audio or A/V sync, and the real cadence or jitter
+of production tap times is unmeasured. The before state of this slice is missing real-packet timing
+coverage, not a demonstrated product failure.
+
+**Evidence.** Each case records one closed property set as GTest XML properties and one identical
+console line, `POLARIS_RECORDER_TIMING_JSON {...}`, all durations in whole microseconds. CTest sets
+`POLARIS_RECORDER_TIMING_EVIDENCE_DIR` to `build/tests/recorder-timing-evidence`. Each case creates
+its own directory there exclusively and writes its 8 source packets, its published save and a
+`manifest.json` (schema version 1) whose `retained` and `held` sections serialize the provenance the
+recorder actually returned (sequence, payload size and hash, version, `frameIndex`, `tapOffsetUs`
+relative to t0, source flags, marks; a held entry's sequence is the snapshot API's sentinel 0 and
+its payload comes from the copied snapshot payload) and whose `derived` section is recomputed from
+those held records, separately from the declared inputs in `pushes` and the declared `expected`
+values. `tapToArrivalUs` is recomputed per entry from the observed held tap time, so the duplicate
+and regressed entries of the marks case carry their own values and the untimed entry is null. Each
+file is created exclusively, fully written, synced, closed and read back, before any assertion, and a
+case stays under 1 MiB. A missing, relative, non-directory or symlinked root, an existing case
+directory or any write error fails the case. Raw evidence is never committed or published with
+shared preview artifacts. No packet hash is frozen in the test; whether a save's bytes equal the
+inputs an earlier decoder readback accepted is a separate readback's question, with no decoder rerun
+here. Recording remains off by default.
