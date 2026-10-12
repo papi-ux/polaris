@@ -14253,9 +14253,18 @@ TEST(StreamStatsMediaReportCadence, ItChangesNoControllerOrVerdictTrajectory) {
   EXPECT_EQ(second.verdict.frames_lost, first.verdict.frames_lost);
   // The cadence was recorded in both, identically, and reached neither record the decisions use.
   ASSERT_FALSE(first.cadence.empty());
-  EXPECT_EQ(second.cadence, first.cadence);
-  EXPECT_EQ(first.cadence.at("accepted_reports"), 4);
-  EXPECT_EQ(first.cadence.at("gap_resets"), 1);
+  // Host arrival time is measured independently in each run; only the client counter and
+  // scope counters have identical inputs. Compare those facts and bound each actual host gap.
+  for (const auto *cadence : {&first.cadence, &second.cadence}) {
+    EXPECT_EQ(cadence->at("accepted_reports"), 4);
+    EXPECT_EQ(cadence->at("gap_resets"), 1);
+    EXPECT_EQ(cadence->at("last_gap_client_ms"), 500);
+    EXPECT_EQ(cadence->at("last_gap_preceding_ingest_state"), "observed");
+    const auto host_gap_ms = cadence->at("last_gap_host_ms").get<std::int64_t>();
+    EXPECT_GE(host_gap_ms, 6000);
+    EXPECT_LT(host_gap_ms, 7500);
+    EXPECT_EQ(cadence->at("max_host_interval_ms"), host_gap_ms);
+  }
   EXPECT_EQ(stream_stats::network_verdict_json(first.verdict).dump().find("cadence"), std::string::npos);
   EXPECT_EQ(stream_stats::network_verdict_json(first.verdict).dump().find("gap_resets"), std::string::npos);
 }
