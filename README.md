@@ -41,36 +41,40 @@ Polaris is the matched host for Nova. Together they make the whole player loop
 explicit:
 
 - **Where games run is a real choice.** Private Stream, Gamescope Stream, Host
-  Virtual Display, Headless Dongle, and Mirror Desktop are described by their
-  display and privacy impact, unavailable modes fail closed, each app can fix its own mode
-  with **Launch as**, and the displays Polaris creates for a stream go up to 240 FPS.
+  Virtual Display, Headless Dongle and Mirror Desktop are described by their
+  display and privacy impact, unavailable modes fail closed, each app can pin its
+  mode with **Launch as**, and stream displays go up to 240 FPS.
 - **Steam Game Mode is supported.** Stream a gamescope Steam session, launch a
-  Steam title from Nova, and end only the title the stream opened. Proven on
-  Steam Deck OLED; the [handhelds guide](https://papi-ux.com/docs/handhelds/)
-  covers switching between Desktop Mode and Game Mode.
-- **Spaces, an early preview.** Give a player their own sign-in, library and
-  saves with Steam, Heroic or Lutris. Host Setup installs the runtime; NVIDIA
-  Spaces use the host driver. One Space can be active at a time. Read
-  [Spaces](https://papi-ux.com/docs/spaces/) and
-  [Spaces or regular streaming](https://papi-ux.com/docs/spaces-or-regular/).
-- **Anyone can watch.** A second device can watch the stream that is running,
-  whatever its own resolution. The host says up front what there is to watch, so
-  Nova asks for exactly that stream; Moonlight still asks for the stream's mode.
-- **ROM folders become a library.** Import once and rescan for new games.
-  Emulator presets, local covers and launch-health checks explain what is
-  ready; the [emulators guide](https://papi-ux.com/docs/emulators/) covers setup.
-- **Refusals say why.** A refused launch carries what went wrong and the one
-  change that fixes it, with a code Nova shows, instead of error 503.
-- **Doctor acts only when it can prove the step is safe.** It can make one
-  reversible same-stream bitrate change, verify the encoder and fresh evidence,
-  and restore the previous target when verification fails. Other findings stay
-  read-only guidance, including the forecast, before any stream, of when capture
-  on this host would copy frames through system memory and why.
-- **Launches are deterministic.** Auto, Quality, High FPS, and Stability resolve
+  Steam title from Nova, and end only the title the stream opened; proven on
+  Steam Deck OLED ([handhelds guide](https://papi-ux.com/docs/handhelds/)).
+- **Desktop Steam stays yours.** On Host Virtual Display and Mirror Desktop,
+  End Session can close only the game it launched, and Nova can open or quit
+  Steam on the host.
+- **Spaces, an early preview.** A player's own sign-in, library and saves with
+  Steam, Heroic or Lutris. Host Setup installs the runtime, NVIDIA Spaces use the
+  host driver, and one Space runs at a time ([Spaces](https://papi-ux.com/docs/spaces/),
+  [Spaces or regular streaming](https://papi-ux.com/docs/spaces-or-regular/)).
+- **Anyone can watch.** A second device can watch the running stream at its own
+  resolution; Nova asks for the stream the host offers.
+- **ROM folders become a library.** Import once and rescan, with emulator
+  presets, local covers and launch-health checks
+  ([emulators guide](https://papi-ux.com/docs/emulators/)).
+- **Refusals say why.** A refused launch carries what went wrong, the one change
+  that fixes it and a code Nova shows, instead of error 503.
+- **Doctor acts only when it can prove the step is safe.** One reversible
+  bitrate change, verified against fresh encoder evidence and undone if it
+  fails. Everything else is read-only
+  guidance: before a stream, the host's configuration findings and whether
+  capture will copy frames through system memory; during one, a Tailscale peer
+  readout from the host's own tailscaled.
+- **Experimental and off by default.** Source-paced VRR, leaving Steam Deck Game
+  Mode before a private launch, and a host Recording tab. None is
+  hardware-verified yet ([release notes](docs/release-notes/v1.5.0.md)).
+- **Launches are deterministic.** Auto, Quality, High FPS and Stability resolve
   into one app- and topology-bound envelope that Nova sends back unchanged.
-- **The Library keeps identity intact.** Native and Flatpak Heroic GOG/Epic
-  imports retain their runner and installation identity, while built-in utility
-  entries keep their shipped artwork unless the player chooses a manual match.
+- **The Library keeps identity intact.** Heroic GOG and Epic imports keep their
+  runner and install identity, native or Flatpak, and built-in utilities keep
+  their artwork unless you pick another.
 
 Read the [changelog](docs/changelog.md) for the release-by-release change and
 validation record.
@@ -165,7 +169,7 @@ Nova reviews the launch plan before play.
 
 ![Nova Android 1.4.14-beta.1 candidate game page for Control Ultimate Edition, with the reviewed stream plan and matching secondary action buttons](docs/screenshots/nova-android-game-detail-v1.4.14-beta.1.webp)
 
-*Nova beta candidate; [exact source and screenshot hashes](docs/screenshots/beta1-readme-provenance.json).
+*Nova 1.4.14-beta.1 candidate; [exact source and screenshot hashes](docs/screenshots/beta1-readme-provenance.json).
 The Polaris console images above retain their labelled 1.3.8 provenance.*
 
 Standard Moonlight-compatible clients remain supported for pairing, browsing,
@@ -178,8 +182,8 @@ capture path, HDR mode, or experimental Browser Stream setup.
 ### PyroWave and Doctor
 
 PyroWave is experimental SDR and needs compatible host, client and network
-capabilities. Nova Linux includes it in the standard 1.5.0 bundle, with a device
-check on selection. Read the [PyroWave guide](https://papi-ux.com/docs/pyrowave/)
+capabilities. Nova Linux includes it in its standard bundle from 1.5.0, now in beta, with
+a device check on selection. Read the [PyroWave guide](https://papi-ux.com/docs/pyrowave/)
 for request versus encoder units and limits; a suggested target does not prove
 network capacity.
 

@@ -440,6 +440,16 @@ its saved value. `adaptive_bitrate_max` no longer limits anything. Polaris still
 it, so a settings file that sets it loads as before, and logs a warning that names `max_bitrate` as
 the cap to use. The settings page no longer shows it. See [Live Tuning](live-tuning.md#range).
 
+**Stream pacing** holds **Allow source-paced VRR (experimental)** (`vrr_source_pacing`), off by
+default. With it on, a client that asks for VRR on a Private Stream gets frames at the cadence the
+game produces them, when the capture path can prove its timing: a supported Private Stream capture
+path, H.264 or HEVC, SDR. AV1, HDR and PyroWave keep fixed-rate pacing, and so does any stream
+whose capture timing cannot be verified; the section names the reason for each client. The switch
+applies to streams started after a restart. It reports host frame pacing only: it does not verify
+VRR on the client's display or adaptive sync on the host's. Nothing about it has been checked on
+a VRR display yet. How Doctor grades these streams is in
+[Doctor source cadence evidence](doctor-source-cadence.md).
+
 ### Advanced tab
 
 Load handling (limit the capture frame rate to what the client asked for), compatibility switches

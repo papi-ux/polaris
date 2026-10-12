@@ -688,7 +688,7 @@ grades a stream merely because the connection is relayed. Use measured latency a
 video frame loss to assess quality. The readout is included in redacted support exports without
 peer names, addresses or keys.
 
-Nova's **Host connection** readout describes its paired HTTPS connection, which can differ from
+Nova for Android's **Host connection** readout in Play Setup describes its paired HTTPS connection, which can differ from
 the media route. `GET /polaris/v1/network/connection` is advertised by
 `features.network_connection_v1`; this flag means the read-only route exists, not that Tailscale
 is installed or available. Confirmation requires the actual request's local address to belong

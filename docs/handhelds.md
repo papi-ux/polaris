@@ -16,7 +16,7 @@ handheld edition, and any host that installs a gamescope Steam session next to i
 | Polaris staying reachable after switching to Game Mode | Works once Polaris starts at boot. See below. |
 | Streaming what Game Mode shows | Works, with keyboard, mouse, a controller and touch. See [Streaming from Game Mode](#streaming-from-game-mode). |
 | Launching a Steam title into Game Mode from a client | Works. The launch goes to the Steam that is running Game Mode. |
-| A Private Stream while Game Mode is running | Not possible. Game Mode owns the one screen and the one Steam. The configured mode comes back in Desktop Mode. |
+| A Private Stream while Game Mode is running | Not possible while Game Mode runs: it owns the one screen and the one Steam, and the configured mode comes back in Desktop Mode. From 1.5.0 an app can opt in to [leaving Game Mode before its launch](steamos.md#leave-game-mode-before-launch), not yet checked on a Deck. |
 
 ## Why Polaris disappears in Game Mode
 

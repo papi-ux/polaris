@@ -28,7 +28,9 @@ timing that only Nova for Android measures. PyroWave, Live Tuning from the clien
 launch mode per launch are Nova only, though Artemis can ask for Host Virtual Display on an app whose Launch as
 is Host default; Live Tuning on Mission Control still tunes the stream. Diagnostics carry `client_family` for the stream and for
 each client, and Session Snapshot on **Doctor & Support** shows it as **Client type** ([what each
-client gets](compatibility.md#clients)).
+client gets](compatibility.md#clients)). Its **Network path** tile and the **Tailscale peer** readout say
+how the client reached the host; the Tailscale readout asks the host's own tailscaled and describes the
+control connection, not the route video takes ([Stutter over Tailscale](troubleshooting.md#stutter-over-tailscale)).
 
 Static menus and repeated frames do not by themselves prove a pacing fault. Doctor collects six
 complete video telemetry windows after startup and requires a warning threshold in two consecutive
