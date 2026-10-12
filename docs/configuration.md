@@ -492,16 +492,37 @@ The tab offers one **Recording policy** over the first two keys:
 | --- | --- | --- |
 | **Off** (default) | `recording_enabled = disabled` | No replay buffer is kept. A signed-in host admin can still start a continuous file on purpose through the host recording API; Off does not block that. |
 | **Manual continuous** | `recording_enabled = enabled`, `recording_replay_buffer = disabled` | Choosing it does not start a file. A file is written only after a signed-in host admin starts one. |
-| **Replay buffer** | `recording_enabled = enabled`, `recording_replay_buffer = enabled` | Keeps the most recent video of the one eligible stream in memory. Nothing is written until a signed-in host admin saves it. |
+| **Replay buffer** | `recording_enabled = enabled`, `recording_replay_buffer = enabled` | Keeps recent video of the one eligible stream in memory, from a video keyframe onward. Nothing is written until a signed-in host admin saves it. See **Replay window and keyframes** below. |
 
 | Field | What it does |
 | --- | --- |
-| **Replay length (minutes)** (`recording_replay_buffer_minutes`) | 1 to 60 minutes, default 5, best effort: the buffer also stops at 128 MiB or 32,768 packets, whichever comes first, and always starts at a keyframe. |
+| **Replay length (minutes)** (`recording_replay_buffer_minutes`) | 1 to 60 minutes, default 5, best effort: the buffer also stops at 128 MiB or 32,768 packets, whichever comes first, and always starts at a keyframe. Reaching a limit can remove that starting keyframe and clear the buffer until the next keyframe arrives (see below). |
 | **Output directory** (`recording_output_dir`) | Where saved files are written. Empty means the `recordings` folder in the Polaris data directory. |
 
 The settings page has no start, stop or save button, and choosing a policy or opening the tab
 never calls the recorder. Starting, stopping and saving stay host-admin requests to
 `/api/recording/start`, `/api/recording/stop` and `/api/recording/save-replay`.
+
+#### Replay window and keyframes
+
+The replay buffer keeps one run of the selected stream's encoded video, and a run must begin at a
+video keyframe because the frames after it depend on it. Polaris's encoders produce keyframes on
+demand, at the start of a stream and when a client or the host asks for one, not at a fixed
+interval, so a stream can run for a long time without a new keyframe.
+
+When the replay length, the 128 MiB payload limit or the 32,768-packet limit removes the run's
+starting keyframe, the recorder also drops the dependent frames behind it. If the run held no later
+keyframe, that clears the whole buffer, and it stays empty until the stream sends a fresh keyframe;
+a save during that time reports the outcome `empty` and creates no file. As arithmetic on the fixed
+limit, not a measurement, 128 MiB holds about 54 seconds of a 20 Mbps stream, so at common bitrates
+the size limit is reached before a five-minute length. Polaris does not request a keyframe for the
+replay buffer.
+
+`GET /api/recording/status` reports this state: `replay.awaiting_keyframe` is true while replay is
+enabled, one stream is selected and the buffer is empty, and `replay.last_window_limit` names what
+last removed video or reset the run (`duration`, `payload_cap`, `entry_cap`, `configuration`,
+`selection`, `codec`, `discontinuity`, or `none`). These are packet-accounting facts about the
+host's buffer. They say nothing about playback, which remains unqualified.
 
 #### Device recording approval
 

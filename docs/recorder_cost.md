@@ -89,5 +89,9 @@ these overrides and use the actual steady clock.
 - **What synthetic runs on a CI runner cannot show:** the effect on real broadcast-thread pacing
   and client latency, real encoder frame sizes and rates, the user's disk and memory under real
   bitrates, or live IDR cost.
-- **Still open:** audio, a container with timestamps, decode and playback qualification, and a
-  reviewed permission-scoped Nova client contract. None of these probes completes a clip.
+- **Still open:** audio, a container with timestamps, decode and playback qualification, a
+  reviewed permission-scoped Nova client contract, and live keyframe recovery. Production registers
+  sessions without a keyframe request channel, so a bound continuous file that drops a frame waits
+  for the stream's next keyframe; the replay buffer has no request path at all, so a run that loses
+  its starting keyframe can stay empty until one arrives (see `docs/configuration.md`, "Replay
+  window and keyframes"). None of these probes completes a clip.
