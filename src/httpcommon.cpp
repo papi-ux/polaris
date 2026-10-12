@@ -230,6 +230,21 @@ namespace http {
   void set_credential_upgrade_reload_failure_for_tests(bool enabled) {
     fail_credential_upgrade_reload.store(enabled, std::memory_order_relaxed);
   }
+
+  namespace {
+    // Read only by download_file() on the thread that installed the guard; never shared across threads.
+    thread_local const download_transport_override_t *active_download_transport_override = nullptr;
+  }  // namespace
+
+  scoped_download_transport_override_t::scoped_download_transport_override_t(download_transport_override_t transport_override):
+      value_(std::move(transport_override)),
+      previous_(active_download_transport_override) {
+    active_download_transport_override = &value_;
+  }
+
+  scoped_download_transport_override_t::~scoped_download_transport_override_t() {
+    active_download_transport_override = previous_;
+  }
 #endif
 
   int create_creds(const std::string &pkey, const std::string &cert) {
@@ -358,6 +373,37 @@ namespace http {
 #endif
 #ifdef _WIN32
     curl_easy_setopt(curl, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
+#endif
+#ifdef POLARIS_TESTS
+    // Test-only transport override (see httpcommon.h): the fixture's trust anchor, an owned destination for
+    // the URL's host, no proxy for that host, and fixture bounds. The protocol list, FOLLOWLOCATION, strict
+    // peer and host-name verification, the allowlist and the redirect loop above are untouched. The
+    // CONNECT_TO list must outlive curl_easy_cleanup(), so the guard frees it at function exit on every path.
+    curl_slist *connect_to_list = nullptr;
+    auto release_connect_to = util::fail_guard([&connect_to_list]() {
+      curl_slist_free_all(connect_to_list);
+    });
+    if (const auto *transport = active_download_transport_override; transport != nullptr) {
+      curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+      if (!transport->ca_bundle_path.empty()) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, transport->ca_bundle_path.c_str());
+      }
+      for (const auto &entry : transport->connect_to) {
+        connect_to_list = curl_slist_append(connect_to_list, entry.c_str());
+      }
+      if (connect_to_list != nullptr) {
+        curl_easy_setopt(curl, CURLOPT_CONNECT_TO, connect_to_list);
+      }
+      if (!transport->no_proxy.empty()) {
+        curl_easy_setopt(curl, CURLOPT_NOPROXY, transport->no_proxy.c_str());
+      }
+      if (transport->connect_timeout_ms > 0) {
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, transport->connect_timeout_ms);
+      }
+      if (transport->total_timeout_ms > 0) {
+        curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, transport->total_timeout_ms);
+      }
+    }
 #endif
 
     const bool downloaded = redirect::follow(
