@@ -1243,7 +1243,7 @@
     "recording_policy_manual": "Manual continuous",
     "recording_policy_manual_desc": "Continuous recording stays manual: choosing this does not start a file. A file is written only after a signed-in host admin starts one.",
     "recording_policy_replay": "Replay buffer",
-    "recording_policy_replay_desc": "Keeps recent video of the one eligible stream in memory so a signed-in host admin can save it. Nothing is written until then. The buffer holds video from a keyframe onward: when the length or size limit removes that starting keyframe, the buffer can clear and stay empty until the stream sends a fresh keyframe.",
+    "recording_policy_replay_desc": "Keeps recent video of the one eligible stream in memory so a signed-in host admin can save it. Nothing is written until then.",
     "recording_replay_buffer": "Keep a replay buffer",
     "recording_replay_buffer_desc": "Part of the recording policy: keep recent video in memory instead of recording continuously.",
     "recording_replay_buffer_minutes": "Replay length (minutes)",

@@ -506,13 +506,13 @@ never calls the recorder. Starting, stopping and saving stay host-admin requests
 #### Replay window and keyframes
 
 The replay buffer keeps one run of the selected stream's encoded video, and a run must begin at a
-video keyframe because the frames after it depend on it. Polaris's encoders produce keyframes on
-demand, at the start of a stream and when a client or the host asks for one, not at a fixed
-interval, so a stream can run for a long time without a new keyframe.
+video keyframe because the frames after it depend on it. Polaris requests keyframes at the start
+of a stream and on demand. Its encoders use long or effectively unlimited keyframe intervals,
+so a stream can run for a long time without a fresh keyframe.
 
 When the replay length, the 128 MiB payload limit or the 32,768-packet limit removes the run's
-starting keyframe, the recorder also drops the dependent frames behind it. If the run held no later
-keyframe, that clears the whole buffer, and it stays empty until the stream sends a fresh keyframe;
+starting keyframe, the recorder also drops the dependent frames that followed it. If the run held no
+later keyframe, that clears the whole buffer, and it stays empty until the stream sends a fresh keyframe;
 a save during that time reports the outcome `empty` and creates no file. As arithmetic on the fixed
 limit, not a measurement, 128 MiB holds about 54 seconds of a 20 Mbps stream, so at common bitrates
 the size limit is reached before a five-minute length. Polaris does not request a keyframe for the
