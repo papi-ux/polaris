@@ -504,6 +504,14 @@ function formatDisplayModeDecision(decision = {}) {
   return decision.pinned_by_host ? `${applied} (Display Mode Override)` : applied
 }
 
+// A capture finding the host has not verified for its current settings. The capture evaluation
+// stands until the next launch, so after a capture or stream-mode change in Settings it describes
+// settings the host no longer has, or none at all; the host says so with `stale`. Such a finding
+// is shown as a note with the step that verifies it, never graded, and never given advice written
+// for the settings it was evaluated under.
+const STALE_CAPTURE_FINDING_NOTE = 'This capture finding has not been verified for the current settings. Polaris checks it again when the next stream starts.'
+const STALE_CAPTURE_FINDING_ACTION = 'Start a stream to recheck capture with the current settings.'
+
 // Every finding gets its own card: a host can have more than one thing wrong, and the Doctor
 // used to show only the first, so a second finding stayed out of sight until the first was fixed.
 // A fail comes first, then a warning, then a note; the first card keeps the plain key.
@@ -511,11 +519,17 @@ function hostConfigurationWarningItems(stats = {}) {
   const rank = { fail: 0, warning: 1, info: 2 }
   const items = linuxConfigurationWarnings(stats).map((warning, index) => {
     const severity = lower(warning?.severity)
-    const status = severity === 'fail' || severity === 'error'
-      ? 'fail'
-      : severity === 'info' ? 'info' : 'warning'
-    const detail = warning?.message || warning?.detail || 'Linux host configuration warning.'
-    const action = warning?.action || 'Review Linux streaming configuration before changing capture or encoder settings.'
+    const stale = warning?.stale === true
+    const status = stale
+      ? 'info'
+      : severity === 'fail' || severity === 'error'
+        ? 'fail'
+        : severity === 'info' ? 'info' : 'warning'
+    const message = warning?.message || warning?.detail || 'Linux host configuration warning.'
+    const detail = stale ? `${message} ${STALE_CAPTURE_FINDING_NOTE}` : message
+    const action = stale
+      ? STALE_CAPTURE_FINDING_ACTION
+      : warning?.action || 'Review Linux streaming configuration before changing capture or encoder settings.'
     return { index, status, id: String(warning?.id || index), detail, action }
   })
   items.sort((a, b) => rank[a.status] - rank[b.status] || a.index - b.index)

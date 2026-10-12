@@ -1068,6 +1068,94 @@ describe('Fix My Stream checklist', () => {
     expect(host.map((item) => item.key)).toEqual(['host-config', 'host-config-hvd_input_not_mapped', 'host-config-hvd_kwin_screen_unused'])
     expect(host[2].detail).toContain('used EVDI')
   })
+
+  // The Doctor's idle verdict, as the host serves it before any stream.
+  const waiting = { primary_issue: 'no_active_stream', status: 'unknown', severity: 'info', simple_state: 'Waiting for a stream' }
+  const substituted = {
+    id: 'capture_backend_substituted', severity: 'warning',
+    message: 'The capture backend this host is configured to use cannot capture anything in the current stream mode, so Polaris substituted another one (kms -> portal).',
+    action: 'Either set capture to the substituted backend so the configuration matches what is running, or go back to a private-compositor stream mode if you want the configured one.',
+  }
+  const STALE_NOTE = 'This capture finding has not been verified for the current settings. Polaris checks it again when the next stream starts.'
+  const STALE_ACTION = 'Start a stream to recheck capture with the current settings.'
+
+  it('marks a capture finding the host has not verified for the current settings as a note, not a grade', () => {
+    // The capture evaluation stands until the next launch, so after a capture or mode change in
+    // Settings its findings describe settings the host no longer has, or none at all. Grading
+    // them would tell a person to undo a change the host has not looked at yet.
+    const checklist = buildFixMyStreamChecklist({
+      statsConnected: true,
+      stats: { streaming: false, doctor: waiting, linux_gpu_profile: { configuration_warnings: [{ ...substituted, stale: true }] } },
+    })
+    const hostConfig = checklist.find((item) => item.key === 'host-config')
+    expect(hostConfig.status).toBe('info')
+    expect(hostConfig.detail).toBe(`${substituted.message} ${STALE_NOTE}`)
+    expect(hostConfig.action).toBe(STALE_ACTION)
+    expect(hostConfig.action).not.toContain('set capture')
+    for (const key of ['connection', 'packet-loss', 'capture-path', 'encoder-pressure']) {
+      expect(checklist.find((item) => item.key === key).status).toBe('info')
+    }
+    expect(checklist.filter((item) => item.key.startsWith('host-config'))).toHaveLength(1)
+  })
+
+  it.each([{ stale: false }, {}])('keeps a verified capture finding graded with its own advice: %j', (verified) => {
+    const hostConfig = buildFixMyStreamChecklist({
+      statsConnected: true,
+      stats: { streaming: false, doctor: waiting, linux_gpu_profile: { configuration_warnings: [{ ...substituted, ...verified }] } },
+    }).find((item) => item.key === 'host-config')
+    expect(hostConfig.status).toBe('warning')
+    expect(hostConfig.detail).toBe(substituted.message)
+    expect(hostConfig.action).toBe(substituted.action)
+  })
+
+  it('sorts a stale failure after current findings and keeps the plain key for whichever comes first', () => {
+    const noBackend = { id: 'no_capture_backend', severity: 'fail', message: 'This host has no working capture backend.', action: 'Check the capture setting against the stream mode.', stale: true }
+    const alone = buildFixMyStreamChecklist({ statsConnected: true, stats: { streaming: false, doctor: waiting, linux_gpu_profile: { configuration_warnings: [noBackend] } } })
+      .filter((item) => item.key.startsWith('host-config'))
+    expect(alone.map((item) => [item.key, item.status])).toEqual([['host-config', 'info']])
+    expect(alone[0].detail).toBe(`${noBackend.message} ${STALE_NOTE}`)
+    expect(alone[0].action).toBe(STALE_ACTION)
+
+    const unavailable = { id: 'stream_mode_unavailable', severity: 'warning', message: 'The configured stream mode cannot be entered on this host: labwc binary not found on PATH.', action: 'Install what the reason names, or choose another stream mode.' }
+    const beside = buildFixMyStreamChecklist({ statsConnected: true, stats: { streaming: false, doctor: waiting, linux_gpu_profile: { configuration_warnings: [noBackend, unavailable] } } })
+      .filter((item) => item.key.startsWith('host-config'))
+    expect(beside.map((item) => [item.key, item.status])).toEqual([['host-config', 'warning'], ['host-config-no_capture_backend', 'info']])
+  })
+
+  it('carries the configured-host findings an idle Doctor reports through the generic cards and the issue draft', () => {
+    // #152: the mode's own explanation of a set-aside backend is a note, and a mode the host
+    // cannot enter is the one warning; neither needs a stream, and neither needs an id list here.
+    const setAside = {
+      id: 'capture_set_aside_by_mode', severity: 'info',
+      message: 'capture override: stream mode [windowed_stream] asks for [wlr], not the configured [kms], because a private labwc session can only be captured through wlroots.',
+      action: 'No change is needed.',
+    }
+    const unavailable = {
+      id: 'stream_mode_unavailable', severity: 'warning',
+      message: 'The configured stream mode [windowed_stream] cannot be entered on this host: labwc binary not found on PATH.',
+      action: 'Install what the reason names, or choose a stream mode this host can enter in Settings.',
+    }
+    const stats = {
+      streaming: false, fps: 0, encode_time_ms: 0, doctor: waiting,
+      linux_gpu_profile: { configuration_warnings: [setAside, unavailable] },
+    }
+    const checklist = buildFixMyStreamChecklist({ statsConnected: true, stats })
+    const host = checklist.filter((item) => item.key.startsWith('host-config'))
+    expect(host.map((item) => [item.key, item.status])).toEqual([
+      ['host-config', 'warning'],
+      ['host-config-capture_set_aside_by_mode', 'info'],
+    ])
+    expect(host[0].detail).toBe(unavailable.message)
+    expect(host[1].detail).toBe(setAside.message)
+    for (const key of ['connection', 'packet-loss', 'capture-path', 'encoder-pressure']) {
+      expect(checklist.find((item) => item.key === key).status).toBe('info')
+    }
+    const draft = buildGithubIssueDraft({ session_snapshot: stats, fix_my_stream_checklist: checklist })
+    expect(draft).toContain('Waiting for a stream')
+    expect(draft).toContain('labwc binary not found on PATH')
+    expect(draft).toContain('asks for [wlr], not the configured [kms]')
+    expect(draft).not.toContain('0.0 FPS')
+  })
 })
 
 
