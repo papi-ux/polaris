@@ -1675,7 +1675,8 @@ TEST(StreamDisplayPolicyTests, DoctorNamesAConfiguredModeThisHostCannotEnter) {
   const auto findings = [](std::string_view id) {
     std::vector<nlohmann::json> found;
     stream_stats::stats_t stats {};
-    for (const auto &warning : stream_stats::linux_gpu_profile_json(stats).at("configuration_warnings")) {
+    const auto profile = stream_stats::linux_gpu_profile_json(stats);
+    for (const auto &warning : profile.at("configuration_warnings")) {
       if (warning.value("id", std::string {}) == id) {
         found.push_back(warning);
       }
