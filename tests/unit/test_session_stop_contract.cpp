@@ -2041,7 +2041,9 @@ TEST(SessionStopContractTests, CapturePreparationUsesProvisionalLaunchRateUntilA
     EXPECT_EQ(av_cmp_q(announced.encode_rate, {launch_rate, 1000}), 0);
     EXPECT_EQ(announced.encodingFramerate, launch_rate);
     EXPECT_EQ(announced.framerate, 60);
-    if (launch_rate != 60000) EXPECT_NE(av_cmp_q(announced.stream_rate, prepared.stream_rate), 0);
+    if (launch_rate != 60000) {
+      EXPECT_NE(av_cmp_q(announced.stream_rate, prepared.stream_rate), 0);
+    }
     ASSERT_TRUE(video::configure_announced_rates(announced, 60, 5994, launch_rate, false));
     EXPECT_EQ(av_cmp_q(announced.stream_rate, {60000, 1001}), 0);
     EXPECT_EQ(av_cmp_q(announced.encode_rate, announced.stream_rate), 0);

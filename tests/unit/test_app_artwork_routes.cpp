@@ -42,7 +42,7 @@ namespace {
 TEST(AppArtworkRoutes, ReadOnlyAnAppUuidFromASmallObject) {
   using confighttp::decode_app_artwork_request;
   EXPECT_EQ(decode_app_artwork_request(std::string(R"({"uuid":")") + APP_UUID + R"("})"), APP_UUID);
-  for (const std::string body : {
+  for (const std::string &body : {
          std::string {}, std::string {"null"}, std::string {"[]"}, std::string {"{}"}, std::string {"{"},
          std::string {R"({"uuid":7})"}, std::string {R"({"uuid":"not-a-uuid"})"},
          std::string(R"({"UUID":")") + APP_UUID + R"("})",

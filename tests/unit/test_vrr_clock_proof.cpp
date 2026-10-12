@@ -395,7 +395,7 @@ TEST(VrrClockProofTests, CollectFailsClosedOnReplacementMissingPeerAndFailedCloc
 }
 
 TEST(VrrClockProofTests, CollectClampsTheSampleCount) {
-  for (const auto [requested, taken] : {std::pair<std::uint64_t, std::size_t> {0, 2}, {1, 2}, {8, 8}, {1'000'000, 64}}) {
+  for (const auto &[requested, taken] : {std::pair<std::uint64_t, std::size_t> {0, 2}, {1, 2}, {8, 8}, {1'000'000, 64}}) {
     fake_system_t system;
     vrr_clock::mapping_limits_t limits;
     limits.min_samples = requested;

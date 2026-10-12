@@ -399,7 +399,7 @@ namespace vrr_pacing {
     bool next_source_time_paced = false;
 
     void put(std::int64_t index, std::int64_t emit_ns) {
-      times_[index] = entry_t {emit_ns, next_source_time_paced};
+      times_.insert_or_assign(index, entry_t {emit_ns, next_source_time_paced});
       while (times_.size() > k_capacity) times_.erase(times_.begin());
     }
 

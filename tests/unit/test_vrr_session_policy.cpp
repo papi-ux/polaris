@@ -34,7 +34,7 @@ TEST(VrrSessionPolicy, ParsesEachRequestFormAndRefusesToGuess) {
 }
 
 TEST(VrrSessionPolicy, WatchAndInputOnlySessionsNeverOwnTheCadence) {
-  for (const auto [watch, input] : {std::pair {true, false}, std::pair {false, true}, std::pair {true, true}}) {
+  for (const auto &[watch, input] : {std::pair {true, false}, std::pair {false, true}, std::pair {true, true}}) {
     const auto record = vrr_policy::make_record(7, requested_e::on, admission_e::launch, watch, input);
     EXPECT_TRUE(record.watch_or_input_only);
     const auto decision = vrr_policy::decide(record, "source_driven");
