@@ -230,6 +230,9 @@ if(WARM_PHASE STREQUAL "legacy")
       "${POLARIS_PREPARED_FFMPEG_RELEASE_ROOT_URL}/${POLARIS_PREPARED_FFMPEG_RELEASE_TAG}"
       CACHE STRING "Base URL for prepared FFmpeg release archives")
   message(STATUS "legacy phase cached ${POLARIS_PREPARED_FFMPEG_RELEASE_TAG}")
+elseif(WARM_PHASE STREQUAL "help-probe")
+  get_property(help CACHE WARM_HELP_PROBE PROPERTY HELPSTRING)
+  message(STATUS "WARM_HELP=[${help}]")
 else()
   set(CMAKE_SYSTEM_NAME Linux)
   set(CMAKE_SYSTEM_PROCESSOR x86_64)
@@ -405,35 +408,174 @@ assert_equal("${kept_result}" "0" "A chosen tag survives reconfigure: ${kept_std
 assert_contains("${kept_stdout}" "test-release-b is kept as this tree's override" "The reconfigure says the choice is kept")
 assert_contains("${kept_stdout}" "WARM_RESOLVED=${chosen_tree}/_deps/prepared-ffmpeg/test-release-b/Linux-x86_64/ffmpeg" "The chosen release is still resolved")
 
+# Case: the typed-default defect. A tag given typed and equal to today's default is still a choice:
+# when the source later moves its pin, that tree keeps what it was told. Before the help string was
+# read, the typed value read as an inherited default and was silently moved with the source.
+set(typed_default_tree "${warm_root}/trees/typed-default")
+configure_warm_tree("${typed_default_tree}" current "${module}" typed_default_result typed_default_stdout typed_default_stderr
+  "-DPOLARIS_PREPARED_FFMPEG_RELEASE_TAG:STRING=${source_tag}"
+  "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${current_sha256}")
+assert_equal("${typed_default_result}" "0" "A typed tag equal to the default resolves the pin: ${typed_default_stderr}")
+configure_warm_tree("${typed_default_tree}" current "${next_module}" typed_default_moved_result typed_default_moved_stdout typed_default_moved_stderr
+  "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${current_sha256}")
+assert_not_contains("${typed_default_moved_stdout}" "release tag moved from" "A typed choice is not migrated because its value equalled the default")
+assert_equal("${typed_default_moved_result}" "0" "A typed choice equal to the old default survives a moved pin: ${typed_default_moved_stderr}")
+read_cache_entries("${typed_default_tree}" typed_default_cache)
+assert_contains("${typed_default_cache}" "POLARIS_PREPARED_FFMPEG_CHOSEN_RELEASE_TAG:INTERNAL=${source_tag}" "The tree records that the typed tag was given")
+assert_contains("${typed_default_moved_stdout}" "${source_tag} is kept as this tree's override, given on its command line" "The reconfigure says the choice is kept")
+assert_contains("${typed_default_moved_stdout}" "WARM_RESOLVED=${typed_default_tree}/_deps/prepared-ffmpeg/${source_tag}/Linux-x86_64/ffmpeg" "The chosen archive is still resolved")
+read_cache_entries("${typed_default_tree}" typed_default_moved_cache)
+assert_contains("${typed_default_moved_cache}" "POLARIS_PREPARED_FFMPEG_RELEASE_TAG:STRING=${source_tag}" "The typed tag stays cached")
+assert_contains("${typed_default_moved_cache}" "POLARIS_PREPARED_FFMPEG_BASE_URL:STRING=${release_root}/${source_tag}" "The base URL stays with the chosen tag")
+
 # Case: a tag given with an explicit cache type (-D...:STRING=) is already typed when this file
-# runs, so on a tree with no record it cannot be told from an inherited value. It is stopped with
-# the cached value preserved and the untyped form named; given untyped once, it is recorded as a
-# choice and kept from then on.
+# runs, so its type cannot tell it from an inherited value. CMake stores where an entry came from in
+# its help string: every -D, typed or untyped, carries CMake's command-line literal until a
+# declaration or FORCE rewrites it. A typed tag on a tree with no record is therefore a choice, kept
+# and recorded, not stopped. (Before this provenance was read, the same configure was stopped with an
+# actionable message; the stop remains for entries whose origin the help string cannot establish.)
 set(typed_tree "${warm_root}/trees/typed")
 configure_warm_tree("${typed_tree}" current "${module}" typed_result typed_stdout typed_stderr
   -DPOLARIS_PREPARED_FFMPEG_RELEASE_TAG:STRING=test-release-b
   "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${next_sha256}")
-if(typed_result EQUAL 0)
-  message(FATAL_ERROR "A typed tag on a tree with no record must not configure silently")
-endif()
-assert_not_contains("${typed_stderr}" "HASH mismatch" "The stop is not a bare hash mismatch")
-assert_contains("${typed_stderr}" "caches prepared FFmpeg release tag test-release-b" "The stop names the typed tag")
-assert_contains("${typed_stderr}" "-DPOLARIS_PREPARED_FFMPEG_RELEASE_TAG=test-release-b" "The stop names the untyped form that records a choice")
-assert_not_exists("${typed_tree}/_deps/prepared-ffmpeg/test-release-b/Linux-x86_64-ffmpeg.tar.gz" "Nothing was downloaded for the typed tag")
+assert_equal("${typed_result}" "0" "A typed tag is a choice given on the command line: ${typed_stderr}")
+assert_contains("${typed_stdout}" "WARM_RESOLVED=${typed_tree}/_deps/prepared-ffmpeg/test-release-b/Linux-x86_64/ffmpeg" "The chosen release was resolved")
 read_cache_entries("${typed_tree}" typed_cache)
-assert_contains("${typed_cache}" "POLARIS_PREPARED_FFMPEG_RELEASE_TAG:STRING=test-release-b" "The stop preserves the cached value")
-assert_not_contains("${typed_cache}" "POLARIS_PREPARED_FFMPEG_TRACKED_DEFAULT_RELEASE_TAG" "A stopped tree records nothing")
-configure_warm_tree("${typed_tree}" current "${module}" untyped_result untyped_stdout untyped_stderr
-  -DPOLARIS_PREPARED_FFMPEG_RELEASE_TAG=test-release-b
-  "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${next_sha256}")
-assert_equal("${untyped_result}" "0" "The untyped form records the choice and resolves it: ${untyped_stderr}")
-assert_contains("${untyped_stdout}" "WARM_RESOLVED=${typed_tree}/_deps/prepared-ffmpeg/test-release-b/Linux-x86_64/ffmpeg" "The chosen release was resolved")
-read_cache_entries("${typed_tree}" untyped_cache)
-assert_contains("${untyped_cache}" "POLARIS_PREPARED_FFMPEG_TRACKED_DEFAULT_RELEASE_TAG:INTERNAL=${source_tag}" "The tree now records the source default beside the choice")
+assert_contains("${typed_cache}" "POLARIS_PREPARED_FFMPEG_RELEASE_TAG:STRING=test-release-b" "The typed value is preserved")
+assert_contains("${typed_cache}" "POLARIS_PREPARED_FFMPEG_CHOSEN_RELEASE_TAG:INTERNAL=test-release-b" "The tree records that the tag was given")
 configure_warm_tree("${typed_tree}" current "${module}" typed_kept_result typed_kept_stdout typed_kept_stderr
   "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${next_sha256}")
 assert_equal("${typed_kept_result}" "0" "The recorded choice survives reconfigure: ${typed_kept_stderr}")
-assert_contains("${typed_kept_stdout}" "test-release-b is kept as this tree's override" "The reconfigure says the choice is kept")
+assert_contains("${typed_kept_stdout}" "WARM_RESOLVED=${typed_tree}/_deps/prepared-ffmpeg/test-release-b/Linux-x86_64/ffmpeg" "The chosen release is still resolved")
+assert_not_contains("${typed_kept_stdout}" "moved from" "A choice moves nowhere")
+
+# Case: a typed override given on a tree that already tracks the default is a choice made now, and
+# it survives the next pin move like an untyped one.
+set(typed_tracked_tree "${warm_root}/trees/typed-tracked")
+configure_warm_tree("${typed_tracked_tree}" current "${module}" typed_tracked_first_result typed_tracked_first_stdout typed_tracked_first_stderr
+  "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${current_sha256}")
+assert_equal("${typed_tracked_first_result}" "0" "A fresh tree on the current source: ${typed_tracked_first_stderr}")
+configure_warm_tree("${typed_tracked_tree}" current "${module}" typed_tracked_result typed_tracked_stdout typed_tracked_stderr
+  -DPOLARIS_PREPARED_FFMPEG_RELEASE_TAG:STRING=v2026.724.203728
+  "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${legacy_sha256}")
+assert_equal("${typed_tracked_result}" "0" "A typed override on a tracked tree resolves that release: ${typed_tracked_stderr}")
+assert_contains("${typed_tracked_stdout}" "WARM_RESOLVED=${typed_tracked_tree}/_deps/prepared-ffmpeg/v2026.724.203728/Linux-x86_64/ffmpeg" "The overridden release was resolved")
+read_cache_entries("${typed_tracked_tree}" typed_tracked_cache)
+assert_contains("${typed_tracked_cache}" "POLARIS_PREPARED_FFMPEG_CHOSEN_RELEASE_TAG:INTERNAL=v2026.724.203728" "The typed override is recorded as a choice")
+assert_contains("${typed_tracked_cache}" "POLARIS_PREPARED_FFMPEG_BASE_URL:STRING=${release_root}/v2026.724.203728" "The derived base URL followed the typed tag")
+configure_warm_tree("${typed_tracked_tree}" current "${next_module}" typed_tracked_moved_result typed_tracked_moved_stdout typed_tracked_moved_stderr
+  "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${legacy_sha256}")
+assert_equal("${typed_tracked_moved_result}" "0" "The typed override survives a moved pin: ${typed_tracked_moved_stderr}")
+assert_not_contains("${typed_tracked_moved_stdout}" "release tag moved from" "A typed override is not migrated")
+assert_contains("${typed_tracked_moved_stdout}" "WARM_RESOLVED=${typed_tracked_tree}/_deps/prepared-ffmpeg/v2026.724.203728/Linux-x86_64/ffmpeg" "The overridden release is still resolved")
+
+# Case: a tag an initial cache file set with its own help is of an origin this file does not read.
+# Equal to the default it is accepted but leaves no record, so a later pin move stops and asks
+# instead of rewriting it; different from the default it is stopped at once.
+file(WRITE "${warm_root}/initial-default.cmake" "set(POLARIS_PREPARED_FFMPEG_RELEASE_TAG \"${source_tag}\" CACHE STRING \"set by an initial cache file\")\n")
+file(WRITE "${warm_root}/initial-other.cmake" "set(POLARIS_PREPARED_FFMPEG_RELEASE_TAG \"test-release-b\" CACHE STRING \"set by an initial cache file\")\n")
+set(initial_tree "${warm_root}/trees/initial-cache")
+configure_warm_tree("${initial_tree}" current "${module}" initial_result initial_stdout initial_stderr
+  -C "${warm_root}/initial-default.cmake"
+  "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${current_sha256}")
+assert_equal("${initial_result}" "0" "An initial cache file naming the default resolves the pin: ${initial_stderr}")
+read_cache_entries("${initial_tree}" initial_cache)
+assert_contains("${initial_cache}" "POLARIS_PREPARED_FFMPEG_RELEASE_TAG:STRING=${source_tag}" "The initial cache value is preserved")
+assert_not_contains("${initial_cache}" "POLARIS_PREPARED_FFMPEG_TRACKED_DEFAULT_RELEASE_TAG" "A value of unknown origin leaves no default record")
+assert_not_contains("${initial_cache}" "POLARIS_PREPARED_FFMPEG_CHOSEN_RELEASE_TAG" "Nor a choice record")
+configure_warm_tree("${initial_tree}" current "${next_module}" initial_moved_result initial_moved_stdout initial_moved_stderr
+  "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${next_sha256}")
+if(initial_moved_result EQUAL 0)
+  message(FATAL_ERROR "A moved pin over a tag of unknown origin must stop, not rewrite it")
+endif()
+assert_not_contains("${initial_moved_stderr}" "HASH mismatch" "The stop is not a bare hash mismatch")
+assert_contains("${initial_moved_stderr}" "caches prepared FFmpeg release tag ${source_tag}" "The stop names the cached tag")
+assert_contains("${initial_moved_stderr}" "the source pins test-release-b" "The stop names the moved source tag")
+read_cache_entries("${initial_tree}" initial_moved_cache)
+assert_contains("${initial_moved_cache}" "POLARIS_PREPARED_FFMPEG_RELEASE_TAG:STRING=${source_tag}" "The stop preserves the value")
+set(initial_other_tree "${warm_root}/trees/initial-cache-other")
+configure_warm_tree("${initial_other_tree}" current "${module}" initial_other_result initial_other_stdout initial_other_stderr
+  -C "${warm_root}/initial-other.cmake"
+  "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${next_sha256}")
+if(initial_other_result EQUAL 0)
+  message(FATAL_ERROR "A non-default tag of unknown origin must stop")
+endif()
+assert_contains("${initial_other_stderr}" "caches prepared FFmpeg release tag test-release-b" "The stop names the cached tag")
+assert_not_exists("${initial_other_tree}/_deps/prepared-ffmpeg/test-release-b/Linux-x86_64-ffmpeg.tar.gz" "Nothing was downloaded")
+
+# Case: a record cannot vouch for an entry whose help now says another origin. A tree that tracked
+# the default has that same value rewritten by an initial cache file (FORCE, its own help); when the
+# pin moves, the record no longer accounts for the entry, so the move stops instead of rewriting
+# what may have become a choice.
+file(WRITE "${warm_root}/rehelp-tag.cmake" "set(POLARIS_PREPARED_FFMPEG_RELEASE_TAG \"${source_tag}\" CACHE STRING \"rewritten by an initial cache file\" FORCE)\n")
+set(rehelp_tree "${warm_root}/trees/rehelp-tag")
+configure_warm_tree("${rehelp_tree}" current "${module}" rehelp_first_result rehelp_first_stdout rehelp_first_stderr
+  "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${current_sha256}")
+assert_equal("${rehelp_first_result}" "0" "A fresh tree on the current source: ${rehelp_first_stderr}")
+read_cache_entries("${rehelp_tree}" rehelp_tracked_cache)
+assert_contains("${rehelp_tracked_cache}" "POLARIS_PREPARED_FFMPEG_TRACKED_DEFAULT_RELEASE_TAG:INTERNAL=${source_tag}" "The tree tracks the default")
+configure_warm_tree("${rehelp_tree}" current "${module}" rehelp_result rehelp_stdout rehelp_stderr
+  -C "${warm_root}/rehelp-tag.cmake"
+  "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${current_sha256}")
+assert_equal("${rehelp_result}" "0" "The same default rewritten with another help still configures on the same source: ${rehelp_stderr}")
+assert_not_contains("${rehelp_stdout}" "moved from" "Nothing moves on the same source")
+configure_warm_tree("${rehelp_tree}" current "${next_module}" rehelp_moved_result rehelp_moved_stdout rehelp_moved_stderr
+  "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${next_sha256}")
+assert_not_contains("${rehelp_moved_stdout}" "release tag moved from" "A record cannot move an entry whose help says another origin")
+if(rehelp_moved_result EQUAL 0)
+  message(FATAL_ERROR "A moved pin over an entry of another origin must stop, even on a tree with a record")
+endif()
+assert_not_contains("${rehelp_moved_stderr}" "HASH mismatch" "The stop is not a bare hash mismatch")
+assert_contains("${rehelp_moved_stderr}" "caches prepared FFmpeg release tag ${source_tag}" "The stop names the cached tag")
+assert_contains("${rehelp_moved_stderr}" "the source pins test-release-b" "The stop names the moved source tag")
+assert_contains("${rehelp_moved_stderr}" "cmake --fresh" "The stop names the way out")
+assert_not_exists("${rehelp_tree}/_deps/prepared-ffmpeg/test-release-b/Linux-x86_64-ffmpeg.tar.gz" "Nothing was downloaded for the moved pin")
+read_cache_entries("${rehelp_tree}" rehelp_moved_cache)
+assert_contains("${rehelp_moved_cache}" "POLARIS_PREPARED_FFMPEG_RELEASE_TAG:STRING=${source_tag}" "The stop preserves the value")
+
+# Case: the same for the base URL. A tracked tree has its derived URL rewritten with another help;
+# a tag given later must not recompute it, so the pair stops.
+file(WRITE "${warm_root}/rehelp-url.cmake" "set(POLARIS_PREPARED_FFMPEG_BASE_URL \"${release_root}/${source_tag}\" CACHE STRING \"rewritten by an initial cache file\" FORCE)\n")
+set(rehelp_url_tree "${warm_root}/trees/rehelp-url")
+configure_warm_tree("${rehelp_url_tree}" current "${module}" rehelp_url_first_result rehelp_url_first_stdout rehelp_url_first_stderr
+  "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${current_sha256}")
+assert_equal("${rehelp_url_first_result}" "0" "A fresh tree on the current source: ${rehelp_url_first_stderr}")
+configure_warm_tree("${rehelp_url_tree}" current "${module}" rehelp_url_result rehelp_url_stdout rehelp_url_stderr
+  -C "${warm_root}/rehelp-url.cmake"
+  "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${current_sha256}")
+assert_equal("${rehelp_url_result}" "0" "The same derived URL rewritten with another help still configures: ${rehelp_url_stderr}")
+configure_warm_tree("${rehelp_url_tree}" current "${module}" rehelp_url_moved_result rehelp_url_moved_stdout rehelp_url_moved_stderr
+  -DPOLARIS_PREPARED_FFMPEG_RELEASE_TAG=test-release-b
+  "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${next_sha256}")
+assert_not_contains("${rehelp_url_moved_stdout}" "base URL moved from" "A record cannot recompute a URL whose help says another origin")
+if(rehelp_url_moved_result EQUAL 0)
+  message(FATAL_ERROR "A tag given over a base URL of another origin must stop, even on a tree with a record")
+endif()
+assert_contains("${rehelp_url_moved_stderr}" "names release ${source_tag} while POLARIS_PREPARED_FFMPEG_RELEASE_TAG is test-release-b" "The stop names both releases")
+assert_not_exists("${rehelp_url_tree}/_deps/prepared-ffmpeg/test-release-b/Linux-x86_64-ffmpeg.tar.gz" "Nothing was downloaded for the pair")
+read_cache_entries("${rehelp_url_tree}" rehelp_url_moved_cache)
+assert_contains("${rehelp_url_moved_cache}" "POLARIS_PREPARED_FFMPEG_BASE_URL:STRING=${release_root}/${source_tag}" "The rewritten URL is preserved")
+
+# Case: the help string this file relies on is what CMake actually writes for a -D, typed and
+# untyped, on this CMake. A change in CMake fails here, not in a user's build tree.
+set(help_tree "${warm_root}/trees/help-probe")
+configure_warm_tree("${help_tree}" help-probe "${module}" help_typed_result help_typed_stdout help_typed_stderr
+  -DWARM_HELP_PROBE:STRING=typed)
+assert_equal("${help_typed_result}" "0" "The help probe configures: ${help_typed_stderr}")
+assert_contains("${help_typed_stdout}" "WARM_HELP=[${POLARIS_PREPARED_FFMPEG_COMMAND_LINE_HELP}]" "A typed -D carries CMake's command-line help")
+set(help_untyped_tree "${warm_root}/trees/help-probe-untyped")
+configure_warm_tree("${help_untyped_tree}" help-probe "${module}" help_untyped_result help_untyped_stdout help_untyped_stderr
+  -DWARM_HELP_PROBE=untyped)
+assert_equal("${help_untyped_result}" "0" "The help probe configures: ${help_untyped_stderr}")
+assert_contains("${help_untyped_stdout}" "WARM_HELP=[${POLARIS_PREPARED_FFMPEG_COMMAND_LINE_HELP}]" "An untyped -D carries the same help")
+polaris_prepared_ffmpeg_cache_provenance(command_line_provenance "STRING" "${POLARIS_PREPARED_FFMPEG_COMMAND_LINE_HELP}" "${POLARIS_PREPARED_FFMPEG_RELEASE_TAG_HELP}")
+assert_equal("${command_line_provenance}" "command-line" "The literal reads as command-line provenance")
+polaris_prepared_ffmpeg_cache_provenance(declaration_provenance "STRING" "${POLARIS_PREPARED_FFMPEG_RELEASE_TAG_HELP}" "${POLARIS_PREPARED_FFMPEG_RELEASE_TAG_HELP}")
+assert_equal("${declaration_provenance}" "declaration" "This file's help reads as declaration provenance")
+polaris_prepared_ffmpeg_cache_provenance(other_provenance "STRING" "set by an initial cache file" "${POLARIS_PREPARED_FFMPEG_RELEASE_TAG_HELP}")
+assert_equal("${other_provenance}" "other" "Any other help reads as unknown provenance")
+polaris_prepared_ffmpeg_cache_provenance(no_entry_provenance "" "" "${POLARIS_PREPARED_FFMPEG_RELEASE_TAG_HELP}")
+assert_equal("${no_entry_provenance}" "" "No entry has no provenance")
 
 # Case: an explicit base URL that names no release, such as a mirror, is kept for the pinned tag.
 set(mirror_tree "${warm_root}/trees/mirror")
@@ -469,6 +611,28 @@ read_cache_entries("${same_url_tree}" same_url_moved_cache)
 assert_contains("${same_url_moved_cache}" "POLARIS_PREPARED_FFMPEG_BASE_URL:STRING=${release_root}/${source_tag}" "The chosen base URL is preserved")
 assert_contains("${same_url_moved_cache}" "POLARIS_PREPARED_FFMPEG_RELEASE_TAG:STRING=test-release-b" "The given tag is preserved too, for the person to reconcile")
 
+# Case: the typed base URL shape of the same defect. A base URL given typed and equal to the derived
+# URL is a choice; a tag given later must not rewrite it, so the pair stops. Before the help string
+# was read, the typed URL read as a derived one and was silently recomputed.
+set(typed_url_tree "${warm_root}/trees/typed-url")
+configure_warm_tree("${typed_url_tree}" current "${module}" typed_url_result typed_url_stdout typed_url_stderr
+  "-DPOLARIS_PREPARED_FFMPEG_BASE_URL:STRING=${release_root}/${source_tag}"
+  "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${current_sha256}")
+assert_equal("${typed_url_result}" "0" "A typed base URL equal to the derived one resolves the pin: ${typed_url_stderr}")
+read_cache_entries("${typed_url_tree}" typed_url_cache)
+assert_contains("${typed_url_cache}" "POLARIS_PREPARED_FFMPEG_CHOSEN_BASE_URL:INTERNAL=${release_root}/${source_tag}" "The tree records that the typed base URL was given")
+assert_not_contains("${typed_url_cache}" "POLARIS_PREPARED_FFMPEG_TRACKED_BASE_URL" "A typed base URL is not recorded as derived")
+configure_warm_tree("${typed_url_tree}" current "${module}" typed_url_moved_result typed_url_moved_stdout typed_url_moved_stderr
+  -DPOLARIS_PREPARED_FFMPEG_RELEASE_TAG=test-release-b
+  "-DPOLARIS_PREPARED_FFMPEG_SHA256_Linux_x86_64=${next_sha256}")
+if(typed_url_moved_result EQUAL 0)
+  message(FATAL_ERROR "A typed base URL must not be rewritten to follow a tag given later")
+endif()
+assert_not_contains("${typed_url_moved_stdout}" "base URL moved from" "The typed base URL is not recomputed")
+assert_contains("${typed_url_moved_stderr}" "names release ${source_tag} while POLARIS_PREPARED_FFMPEG_RELEASE_TAG is test-release-b" "The stop names both releases")
+read_cache_entries("${typed_url_tree}" typed_url_moved_cache)
+assert_contains("${typed_url_moved_cache}" "POLARIS_PREPARED_FFMPEG_BASE_URL:STRING=${release_root}/${source_tag}" "The typed base URL is preserved")
+
 # Case: a tag and a base URL that name different releases is a mixed override. It stops before
 # any download rather than letting the status line and the download disagree.
 set(mixed_tree "${warm_root}/trees/mixed")
@@ -490,6 +654,14 @@ list(LENGTH tag_declarations tag_declaration_count)
 assert_equal("${tag_declaration_count}" "1" "Exactly one literal release tag declaration")
 assert_contains("${tag_declarations}" "set(POLARIS_PREPARED_FFMPEG_RELEASE_TAG \"${source_tag}\" CACHE STRING" "The declaration carries the pin as a literal")
 polaris_prepared_ffmpeg_source_default_release_tag(parsed_default)
+file(READ "${module}" module_text_for_help)
+string(FIND "${module_text_for_help}" "set(POLARIS_PREPARED_FFMPEG_RELEASE_TAG \"${source_tag}\" CACHE STRING\n    \"${POLARIS_PREPARED_FFMPEG_RELEASE_TAG_HELP}\")" tag_help_position)
+if(tag_help_position EQUAL -1)
+  message(FATAL_ERROR "The release tag declaration must carry the help the provenance reads as this file's own")
+endif()
+file(STRINGS "${module}" url_help_lines REGEX "CACHE STRING \"${POLARIS_PREPARED_FFMPEG_BASE_URL_HELP}\"\\)$")
+list(LENGTH url_help_lines url_help_count)
+assert_equal("${url_help_count}" "1" "The base URL declaration carries the help the provenance reads as this file's own")
 assert_equal("${parsed_default}" "${source_tag}" "The module reads its own declaration")
 file(STRINGS "${module}" linux_hash_lines REGEX "66512409857d7c11c18875193c098a5131baec060169c8f8e6397387e7a1af7d")
 list(LENGTH linux_hash_lines linux_hash_count)
@@ -498,56 +670,84 @@ assert_equal("${linux_hash_count}" "1" "The Linux x86_64 hash of the pin is decl
 # The two decisions are pure functions. Each shape they can see has a case here, including the
 # ones a build tree cannot conveniently be put into.
 
-polaris_prepared_ffmpeg_classify_release_tag(fresh_case "${source_tag}" "" "" "" "")
+polaris_prepared_ffmpeg_classify_release_tag(fresh_case "${source_tag}" "" "" "" "" "")
 assert_equal("${fresh_case_ACTION}" "fresh" "No cache entry is a fresh tree")
 assert_equal("${fresh_case_TAG}" "${source_tag}" "A fresh tree takes the source default")
 
-polaris_prepared_ffmpeg_classify_release_tag(same_case "${source_tag}" "${source_tag}" "STRING" "${source_tag}" "")
+polaris_prepared_ffmpeg_classify_release_tag(same_case "${source_tag}" "${source_tag}" "STRING" "declaration" "${source_tag}" "")
 assert_equal("${same_case_ACTION}" "unchanged" "A cached tag equal to the source default is unchanged")
 
-polaris_prepared_ffmpeg_classify_release_tag(same_untracked_case "${source_tag}" "${source_tag}" "STRING" "" "")
+polaris_prepared_ffmpeg_classify_release_tag(same_untracked_case "${source_tag}" "${source_tag}" "STRING" "declaration" "" "")
 assert_equal("${same_untracked_case_ACTION}" "unchanged" "A cached tag equal to the source default needs no record")
 
-polaris_prepared_ffmpeg_classify_release_tag(tracked_case "test-release-b" "${source_tag}" "STRING" "${source_tag}" "")
+polaris_prepared_ffmpeg_classify_release_tag(tracked_case "test-release-b" "${source_tag}" "STRING" "declaration" "${source_tag}" "")
 assert_equal("${tracked_case_ACTION}" "migrated" "A cached tag equal to the recorded default moves with the source")
 assert_equal("${tracked_case_TAG}" "test-release-b" "It moves to the new source default")
 assert_contains("${tracked_case_MESSAGE}" "moved from ${source_tag} to test-release-b" "The move names both tags")
 
-polaris_prepared_ffmpeg_classify_release_tag(choice_case "${source_tag}" "my-pin" "STRING" "${source_tag}" "")
+polaris_prepared_ffmpeg_classify_release_tag(choice_case "${source_tag}" "my-pin" "STRING" "declaration" "${source_tag}" "")
 assert_equal("${choice_case_ACTION}" "override-kept" "A cached tag that differs from the recorded default is a choice")
 assert_equal("${choice_case_TAG}" "my-pin" "The choice is kept")
 
-polaris_prepared_ffmpeg_classify_release_tag(old_choice_case "${source_tag}" "v2026.724.203728" "STRING" "v2026.516.30821" "")
+polaris_prepared_ffmpeg_classify_release_tag(old_choice_case "${source_tag}" "v2026.724.203728" "STRING" "declaration" "v2026.516.30821" "")
 assert_equal("${old_choice_case_ACTION}" "override-kept" "An earlier pin chosen on a tracked tree is a choice, not a default to move")
 
-polaris_prepared_ffmpeg_classify_release_tag(legacy_case "${source_tag}" "v2026.724.203728" "STRING" "" "")
+polaris_prepared_ffmpeg_classify_release_tag(legacy_case "${source_tag}" "v2026.724.203728" "STRING" "declaration" "" "")
 assert_equal("${legacy_case_ACTION}" "refuse" "An untracked tree caching an earlier pin is stopped, not guessed about")
 assert_equal("${legacy_case_TAG}" "v2026.724.203728" "The cached tag is reported as the effective one")
 assert_contains("${legacy_case_MESSAGE}" "v2026.724.203728" "The stop names the cached tag")
 assert_contains("${legacy_case_MESSAGE}" "${source_tag}" "The stop names the source tag")
 assert_contains("${legacy_case_MESSAGE}" "cmake --fresh" "The stop names the way out")
 
-polaris_prepared_ffmpeg_classify_release_tag(typed_case "${source_tag}" "my-pin" "STRING" "" "")
-assert_equal("${typed_case_ACTION}" "refuse" "A typed override on an untracked tree is indistinguishable from an inherited value and is stopped")
+# The typed-input ambiguity, decided by provenance rather than type: a STRING entry with CMake's
+# command-line help was given on a command line and is a choice; one carrying this file's declaration
+# help with no record is the inherited case and is stopped; any other help is stopped as unknown.
+polaris_prepared_ffmpeg_classify_release_tag(typed_case "${source_tag}" "my-pin" "STRING" "command-line" "" "")
+assert_equal("${typed_case_ACTION}" "override-kept" "A typed tag with command-line provenance is a choice, kept")
+assert_equal("${typed_case_TAG}" "my-pin" "The typed tag is effective")
+assert_equal("${typed_case_GIVEN}" "TRUE" "It is recorded as given")
+assert_contains("${typed_case_MESSAGE}" "given on its command line" "The message says why it is kept")
 
-polaris_prepared_ffmpeg_classify_release_tag(given_case "${source_tag}" "my-pin" "UNINITIALIZED" "" "")
+polaris_prepared_ffmpeg_classify_release_tag(typed_default_case "${source_tag}" "${source_tag}" "STRING" "command-line" "" "")
+assert_equal("${typed_default_case_ACTION}" "explicit" "A typed tag equal to the default with command-line provenance is still a choice")
+assert_equal("${typed_default_case_GIVEN}" "TRUE" "It is recorded as given, so a later move keeps it")
+polaris_prepared_ffmpeg_classify_release_tag(not_given_case "${source_tag}" "${source_tag}" "STRING" "declaration" "" "")
+assert_equal("${not_given_case_GIVEN}" "FALSE" "A declared default is not a choice")
+
+polaris_prepared_ffmpeg_classify_release_tag(inherited_case "${source_tag}" "v2026.724.203728" "STRING" "declaration" "" "")
+assert_equal("${inherited_case_ACTION}" "refuse" "A declared value of an earlier Polaris with no record is stopped, not guessed about")
+
+polaris_prepared_ffmpeg_classify_release_tag(tracked_other_case "test-release-b" "${source_tag}" "STRING" "other" "${source_tag}" "")
+assert_equal("${tracked_other_case_ACTION}" "refuse" "A recorded default whose entry now carries another help is stopped, not moved")
+assert_equal("${tracked_other_case_TAG}" "${source_tag}" "The value is preserved")
+
+polaris_prepared_ffmpeg_classify_release_tag(tracked_declared_case "test-release-b" "${source_tag}" "STRING" "declaration" "${source_tag}" "")
+assert_equal("${tracked_declared_case_ACTION}" "migrated" "A recorded default still carrying this file's help moves with the source")
+
+polaris_prepared_ffmpeg_classify_release_tag(unknown_case "${source_tag}" "my-pin" "STRING" "other" "" "")
+assert_equal("${unknown_case_ACTION}" "refuse" "A value of unknown origin that differs from the default is stopped")
+
+polaris_prepared_ffmpeg_classify_release_tag(unknown_default_case "${source_tag}" "${source_tag}" "STRING" "other" "" "")
+assert_equal("${unknown_default_case_ACTION}" "unchanged" "A value of unknown origin equal to the default is accepted without a record")
+
+polaris_prepared_ffmpeg_classify_release_tag(given_case "${source_tag}" "my-pin" "UNINITIALIZED" "command-line" "" "")
 assert_equal("${given_case_ACTION}" "explicit" "A -D on this command line is a choice made now")
 assert_equal("${given_case_TAG}" "my-pin" "The given tag is effective")
 
-polaris_prepared_ffmpeg_classify_release_tag(given_tracked_case "${source_tag}" "my-pin" "UNINITIALIZED" "${source_tag}" "")
+polaris_prepared_ffmpeg_classify_release_tag(given_tracked_case "${source_tag}" "my-pin" "UNINITIALIZED" "command-line" "${source_tag}" "")
 assert_equal("${given_tracked_case_ACTION}" "explicit" "A -D on a tracked tree is a choice made now")
 
 # The URL helpers read the release root the warm trees were given above.
 set(POLARIS_PREPARED_FFMPEG_RELEASE_ROOT_URL "${release_root}")
-polaris_prepared_ffmpeg_classify_release_tag(chosen_same_case "test-release-b" "${source_tag}" "STRING" "${source_tag}" "${source_tag}")
+polaris_prepared_ffmpeg_classify_release_tag(chosen_same_case "test-release-b" "${source_tag}" "STRING" "declaration" "${source_tag}" "${source_tag}")
 assert_equal("${chosen_same_case_ACTION}" "override-kept" "A recorded choice equal to the old default stays a choice when the default moves")
 assert_equal("${chosen_same_case_TAG}" "${source_tag}" "The chosen tag stays effective")
 assert_contains("${chosen_same_case_MESSAGE}" "given on its command line" "The message says why it is kept")
 
-polaris_prepared_ffmpeg_classify_release_tag(chosen_current_case "${source_tag}" "${source_tag}" "STRING" "${source_tag}" "${source_tag}")
+polaris_prepared_ffmpeg_classify_release_tag(chosen_current_case "${source_tag}" "${source_tag}" "STRING" "declaration" "${source_tag}" "${source_tag}")
 assert_equal("${chosen_current_case_ACTION}" "unchanged" "A recorded choice equal to the current default needs no message")
 
-polaris_prepared_ffmpeg_classify_release_tag(chosen_stale_case "test-release-b" "${source_tag}" "STRING" "${source_tag}" "my-pin")
+polaris_prepared_ffmpeg_classify_release_tag(chosen_stale_case "test-release-b" "${source_tag}" "STRING" "declaration" "${source_tag}" "my-pin")
 assert_equal("${chosen_stale_case_ACTION}" "migrated" "A stale choice record for another value does not stop a recorded default from moving")
 
 polaris_prepared_ffmpeg_default_base_url(derived_url "${source_tag}")
@@ -559,38 +759,48 @@ assert_equal("${parsed_mirror}" "" "A URL outside the release root names no rele
 polaris_prepared_ffmpeg_base_url_release_tag(parsed_deep "${release_root}/v2026.724.203728/extra")
 assert_equal("${parsed_deep}" "" "A URL below a release directory names no release")
 
-polaris_prepared_ffmpeg_classify_base_url(url_fresh "${source_tag}" "" "" "" "")
+polaris_prepared_ffmpeg_classify_base_url(url_fresh "${source_tag}" "" "" "" "" "")
 assert_equal("${url_fresh_ACTION}" "fresh" "No cached base URL is a fresh tree")
 assert_equal("${url_fresh_URL}" "${derived_url}" "A fresh tree derives the base URL from the tag")
 
-polaris_prepared_ffmpeg_classify_base_url(url_same "${source_tag}" "${derived_url}" "STRING" "${derived_url}" "")
+polaris_prepared_ffmpeg_classify_base_url(url_same "${source_tag}" "${derived_url}" "STRING" "declaration" "${derived_url}" "")
 assert_equal("${url_same_ACTION}" "unchanged" "A cached base URL for the effective tag is unchanged")
 
-polaris_prepared_ffmpeg_classify_base_url(url_stale "${source_tag}" "${release_root}/v2026.724.203728" "STRING" "${release_root}/v2026.724.203728" "")
+polaris_prepared_ffmpeg_classify_base_url(url_stale "${source_tag}" "${release_root}/v2026.724.203728" "STRING" "declaration" "${release_root}/v2026.724.203728" "")
 assert_equal("${url_stale_ACTION}" "recomputed" "A base URL this file derived for the old tag follows the new tag")
 assert_equal("${url_stale_URL}" "${derived_url}" "It is recomputed from the effective tag")
 
-polaris_prepared_ffmpeg_classify_base_url(url_legacy "test-release-b" "${release_root}/v2026.724.203728" "STRING" "" "")
+polaris_prepared_ffmpeg_classify_base_url(url_legacy "test-release-b" "${release_root}/v2026.724.203728" "STRING" "declaration" "" "")
 assert_equal("${url_legacy_ACTION}" "recomputed" "An untracked derived base URL follows a tag given now")
 assert_equal("${url_legacy_URL}" "${release_root}/test-release-b" "It is recomputed for that tag")
 
-polaris_prepared_ffmpeg_classify_base_url(url_custom "${source_tag}" "file://${warm_root}/mirror" "STRING" "" "")
+polaris_prepared_ffmpeg_classify_base_url(url_custom "${source_tag}" "file://${warm_root}/mirror" "STRING" "declaration" "" "")
 assert_equal("${url_custom_ACTION}" "custom-kept" "A base URL that names no release is kept")
 assert_equal("${url_custom_URL}" "file://${warm_root}/mirror" "It is kept as set")
 
-polaris_prepared_ffmpeg_classify_base_url(url_mixed_now "test-release-b" "${release_root}/${source_tag}" "UNINITIALIZED" "" "")
+polaris_prepared_ffmpeg_classify_base_url(url_mixed_now "test-release-b" "${release_root}/${source_tag}" "UNINITIALIZED" "command-line" "" "")
 assert_equal("${url_mixed_now_ACTION}" "refuse-mixed" "A base URL given now for another release than the tag is stopped")
 assert_contains("${url_mixed_now_MESSAGE}" "names release ${source_tag}" "The stop names the URL's release")
 assert_contains("${url_mixed_now_MESSAGE}" "RELEASE_TAG is test-release-b" "The stop names the tag")
 
-polaris_prepared_ffmpeg_classify_base_url(url_mixed_kept "${source_tag}" "${release_root}/test-release-b" "STRING" "${release_root}/v2026.724.203728" "")
+polaris_prepared_ffmpeg_classify_base_url(url_typed_same "test-release-b" "${derived_url}" "STRING" "command-line" "" "")
+assert_equal("${url_typed_same_ACTION}" "refuse-mixed" "A typed base URL for another release than the tag is kept and the pair stopped, not rewritten")
+assert_equal("${url_typed_same_URL}" "${derived_url}" "The typed URL is preserved")
+
+polaris_prepared_ffmpeg_classify_base_url(url_tracked_other "test-release-b" "${derived_url}" "STRING" "other" "${derived_url}" "")
+assert_equal("${url_tracked_other_ACTION}" "refuse-mixed" "A recorded derived URL whose entry now carries another help is stopped, not recomputed")
+
+polaris_prepared_ffmpeg_classify_base_url(url_unknown "test-release-b" "${derived_url}" "STRING" "other" "" "")
+assert_equal("${url_unknown_ACTION}" "refuse-mixed" "A base URL of unknown origin for another release is stopped, not rewritten")
+
+polaris_prepared_ffmpeg_classify_base_url(url_mixed_kept "${source_tag}" "${release_root}/test-release-b" "STRING" "declaration" "${release_root}/v2026.724.203728" "")
 assert_equal("${url_mixed_kept_ACTION}" "refuse-mixed" "A persisted base URL somebody set to another release is stopped, not silently rewritten")
 
-polaris_prepared_ffmpeg_classify_base_url(url_chosen_same "test-release-b" "${derived_url}" "STRING" "${derived_url}" "${derived_url}")
+polaris_prepared_ffmpeg_classify_base_url(url_chosen_same "test-release-b" "${derived_url}" "STRING" "declaration" "${derived_url}" "${derived_url}")
 assert_equal("${url_chosen_same_ACTION}" "refuse-mixed" "A recorded base URL choice equal to the old derived URL is not rewritten when the tag moves")
 assert_equal("${url_chosen_same_URL}" "${derived_url}" "The chosen URL is preserved")
 
-polaris_prepared_ffmpeg_classify_base_url(url_chosen_current "${source_tag}" "${derived_url}" "STRING" "${derived_url}" "${derived_url}")
+polaris_prepared_ffmpeg_classify_base_url(url_chosen_current "${source_tag}" "${derived_url}" "STRING" "declaration" "${derived_url}" "${derived_url}")
 assert_equal("${url_chosen_current_ACTION}" "unchanged" "A recorded choice equal to the current derived URL needs nothing")
 
 polaris_prepared_ffmpeg_download_refusal(no_refusal "${source_tag}" "${derived_url}")
