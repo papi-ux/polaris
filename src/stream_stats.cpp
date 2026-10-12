@@ -277,11 +277,54 @@ namespace stream_stats {
         receipt.session_generation == sample.session_generation;
     }
 
+    // Caller holds client_media_counter_mutex. Folds one admitted report into its scope's cadence:
+    // the count, the host arrival interval since the admitted report before it (a gap included) and,
+    // for a coverage-gap reset, the host and client gap the legacy ingest reset on with the state of
+    // the report before it. @p previous is the legacy ingest's previous report, or null for a report
+    // with none; an interval only counts between two reports this cadence admitted. Diagnostic only:
+    // it reads what the ingest already computed and decides nothing.
+    void note_client_media_cadence_locked(
+        client_media_report_cadence_t &cadence, const client_media_counters_t &sample,
+        client_media_ingest_state_e state, std::chrono::steady_clock::time_point received_at,
+        const client_media_counter_epoch_t *previous) {
+      const bool previous_counted = previous != nullptr && cadence.accepted_reports > 0;
+      if (previous != nullptr) {
+        const auto host_elapsed = received_at - previous->received_at;
+        const auto host_ms = static_cast<std::int64_t>(
+          std::chrono::duration_cast<std::chrono::milliseconds>(host_elapsed).count());
+        // An arrival before the report before it is no interval; it folds into nothing.
+        if (previous_counted && host_elapsed >= std::chrono::steady_clock::duration::zero()) {
+          cadence.max_host_interval_ms = cadence.host_interval_recorded ?
+            std::max(cadence.max_host_interval_ms, host_ms) : host_ms;
+          cadence.host_interval_recorded = true;
+        }
+        if (state == client_media_ingest_state_e::coverage_gap_reset) {
+          cadence.gap_resets += 1;
+          cadence.last_gap_host_ms = host_ms;
+          // The same unsigned client difference the legacy ingest held against the bound.
+          cadence.last_gap_client_ms = sample.client_monotonic_ms - previous->sample.client_monotonic_ms;
+          cadence.last_gap_preceding_state_known = previous_counted;
+          cadence.last_gap_preceding_state =
+            previous_counted ? cadence.last_accepted_state : client_media_ingest_state_e {};
+        }
+      }
+      cadence.accepted_reports += 1;
+      cadence.last_accepted_state = state;
+    }
+
     // Caller holds client_media_counter_mutex. A baseline, coverage gap, counter regression or new
-    // scope starts an epoch; its first report measures nothing.
+    // scope starts an epoch; its first report measures nothing. The cadence carries over from the
+    // receipt this one replaces when that receipt is the same scope's, and @p previous, the legacy
+    // ingest's previous report when it had one, lets it keep the interval or the gap between them.
     client_media_interval_receipt_t start_client_media_receipt_epoch_locked(
         const client_media_counters_t &sample, client_media_ingest_state_e state,
-        std::chrono::steady_clock::time_point received_at) {
+        std::chrono::steady_clock::time_point received_at,
+        const client_media_counter_epoch_t *previous = nullptr) {
+      client_media_report_cadence_t cadence;
+      if (client_media_receipt_scope_matches_locked(sample)) {
+        cadence = client_media_receipt_state.receipt.cadence;
+      }
+      note_client_media_cadence_locked(cadence, sample, state, received_at, previous);
       client_media_interval_receipt_t receipt;
       receipt.available = true;
       receipt.epoch = ++client_media_receipt_epochs;
@@ -293,6 +336,7 @@ namespace stream_stats {
       receipt.owner_uuid = sample.owner_uuid;
       receipt.app_session_id = sample.app_session_id;
       receipt.session_generation = sample.session_generation;
+      receipt.cadence = cadence;
       client_media_receipt_state = client_media_receipt_state_t {true, receipt};
       return receipt;
     }
@@ -304,7 +348,7 @@ namespace stream_stats {
         const client_media_counters_t &sample, const client_media_counter_epoch_t &previous,
         client_media_ingest_state_e state, std::chrono::steady_clock::time_point received_at) {
       if (!client_media_receipt_scope_matches_locked(sample)) {
-        return start_client_media_receipt_epoch_locked(sample, state, received_at);
+        return start_client_media_receipt_epoch_locked(sample, state, received_at, &previous);
       }
       constexpr std::uint64_t max_interval_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         CLIENT_MEDIA_COUNTER_MAX_GAP).count();
@@ -322,6 +366,7 @@ namespace stream_stats {
       receipt.host_end = received_at;
       const auto host_elapsed = received_at - previous.received_at;
       receipt.host_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(host_elapsed).count();
+      note_client_media_cadence_locked(receipt.cadence, sample, state, received_at, &previous);
       // Ingest resets coverage for any client difference over the gap, so this only guards the bound. A
       // receipt never claims coverage the bounds cannot represent.
       if (receipt.client_duration_ms > max_interval_ms) {
@@ -5141,6 +5186,30 @@ namespace stream_stats {
       };
     }
     out["interval"] = std::move(interval);
+    // This scope's report cadence: how many reports the legacy ingest admitted, the host arrival and
+    // client counter gap of the newest coverage reset, and the longest host arrival interval between
+    // two admitted reports. Report timing on the two clocks only: no congestion, media-rate or
+    // capacity claim and no loss figure, so a cadence without gaps is not zero video loss.
+    const auto &cadence = receipt.cadence;
+    nlohmann::json cadence_json = {
+      {"host_clock", "host_steady_arrival"},
+      {"client_clock", "client_monotonic_counter"},
+      {"loss_evidence", false},
+      {"accepted_reports", cadence.accepted_reports},
+      {"gap_resets", cadence.gap_resets},
+    };
+    if (cadence.gap_resets > 0) {
+      cadence_json["last_gap_host_ms"] = cadence.last_gap_host_ms;
+      cadence_json["last_gap_client_ms"] = cadence.last_gap_client_ms;
+      if (cadence.last_gap_preceding_state_known) {
+        cadence_json["last_gap_preceding_ingest_state"] =
+          std::string {from_client_media_ingest_state(cadence.last_gap_preceding_state)};
+      }
+    }
+    if (cadence.host_interval_recorded) {
+      cadence_json["max_host_interval_ms"] = cadence.max_host_interval_ms;
+    }
+    out["cadence"] = std::move(cadence_json);
     return out;
   }
 
@@ -5384,7 +5453,7 @@ namespace stream_stats {
         last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
         result.state = client_media_ingest_state_e::coverage_gap_reset;
         result.accepted = true;
-        result.receipt = start_client_media_receipt_epoch_locked(sample, result.state, received_at);
+        result.receipt = start_client_media_receipt_epoch_locked(sample, result.state, received_at, &previous_epoch);
         // Accepted and never counted: reports spaced this far apart carry no loss Doctor can use,
         // and nothing else would say so.
         if (logged_media_gap_generation.exchange(sample.session_generation) != sample.session_generation) {
@@ -5402,7 +5471,7 @@ namespace stream_stats {
         last_client_media_counter_epoch = client_media_counter_epoch_t {sample, received_at};
         result.state = client_media_ingest_state_e::counter_epoch_reset;
         result.accepted = true;
-        result.receipt = start_client_media_receipt_epoch_locked(sample, result.state, received_at);
+        result.receipt = start_client_media_receipt_epoch_locked(sample, result.state, received_at, &previous_epoch);
         return result;
       }
 

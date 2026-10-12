@@ -413,12 +413,48 @@ namespace stream_stats {
   enum class client_media_ingest_state_e;
 
   /**
+   * Report cadence evidence for one stream scope's client media counter reports, carried with the
+   * receipt.
+   *
+   * Counts and host-arrival timings of the reports the legacy ingest admitted for one stream owner,
+   * app session and generation, the report that established or reset a baseline included. It is
+   * diagnostic only: nothing reads it to decide anything, it changes no admission rule, and a
+   * rejected report (non-monotonic, out of scope, invalid) leaves it exactly as it was. It starts
+   * over with its scope and whenever the receipt is invalidated, and it survives the coverage-gap
+   * and counter-regression epochs that start inside the same scope. Host figures are arrival times
+   * on the host's steady clock; client figures are the client's own counter clock. Neither locates
+   * encode or send time, so nothing here attributes a pause to congestion, to a media rate or to
+   * capacity, and a cadence without gaps is not a measured absence of video loss.
+   */
+  struct client_media_report_cadence_t {
+    /// Reports the legacy ingest admitted in this scope: the baseline and every reset included,
+    /// never a rejected report.
+    std::uint64_t accepted_reports = 0;
+    /// Admitted reports that reset coverage because the host or client gap exceeded the bound.
+    std::uint64_t gap_resets = 0;
+    /// The host arrival and client counter gap the newest coverage-gap reset was computed from.
+    /// Meaningful once gap_resets > 0; the client gap is the unsigned difference the ingest compared.
+    std::int64_t last_gap_host_ms = 0;
+    std::uint64_t last_gap_client_ms = 0;
+    /// The ingest state of the admitted report before that gap, when that report was in this scope.
+    bool last_gap_preceding_state_known = false;
+    client_media_ingest_state_e last_gap_preceding_state {};
+    /// The longest host arrival interval between two consecutive admitted reports of this scope,
+    /// gaps included. Meaningful once host_interval_recorded: a second report has been admitted.
+    bool host_interval_recorded = false;
+    std::int64_t max_host_interval_ms = 0;
+    /// The ingest state of the newest admitted report; it becomes a later gap's preceding state.
+    client_media_ingest_state_e last_accepted_state {};
+  };
+
+  /**
    * Observational receipt for the newest accepted client media counter report.
    *
    * Diagnostic only: nothing reads it to decide anything. It keeps the two monotonic clocks apart.
    * The host clock bounds are when the reports arrived here; the client clock bounds are the client's
    * own counter timestamps. Neither says when the frames were encoded or sent, so which bitrate
-   * produced them stays unknown. Only the latest receipt is kept.
+   * produced them stays unknown. Only the latest receipt is kept; the cadence it carries counts
+   * every report its scope admitted.
    */
   struct client_media_interval_receipt_t {
     /// A receipt exists for the scope below.
@@ -448,6 +484,9 @@ namespace stream_stats {
     std::int64_t host_duration_ms = 0;
     /// Host steady-clock milliseconds since host_end, set only when a stats snapshot copies the receipt.
     std::int64_t host_receipt_age_ms = 0;
+    /// This scope's report cadence, carried from the receipt this one replaced when that receipt was
+    /// the same scope's. Serialized beside the interval, and only with it.
+    client_media_report_cadence_t cadence;
     /// Scope fence; never serialized.
     std::string owner_uuid;
     std::string app_session_id;
