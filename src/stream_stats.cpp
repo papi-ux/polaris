@@ -1914,10 +1914,10 @@ namespace stream_stats {
 
       // The configured mode cannot be entered on this host, for a reason the host already names
       // to launches and to the mode selector: a private runtime binary missing from PATH, no
-      // virtual display backend, or no takeover support. Only an explicitly configured mode is
-      // read here; a mode derived from the legacy booleans is left to the launch refusal.
-      if (!linux_display.stream_mode.empty() &&
-          !configured_mode.empty() &&
+      // virtual display backend, or no takeover support. The mode is read as a launch reads it,
+      // from linux_stream_mode or, when that is unset, from the legacy booleans: a launch into
+      // either is refused the same way, and that refusal is what this finding says beforehand.
+      if (!configured_mode.empty() &&
           !stream_display_policy::selection_available(configured_mode)) {
         auto reason = stream_display_policy::selection_unavailable_reason(configured_mode);
         if (reason.empty()) {

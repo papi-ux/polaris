@@ -25,6 +25,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
@@ -32,6 +33,7 @@
 #include <regex>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -47,6 +49,63 @@
 #endif
 
 namespace {
+#ifdef __linux__
+  /**
+   * PATH holds only these stand-ins, labwc and wlr-randr unless a test names others, for as long
+   * as the object lives; the previous PATH comes back after. The Doctor reads the configured mode's
+   * availability from PATH, so a case about something else in a private mode makes the mode
+   * available here instead of depending on what the runner has installed. Same shape as the fixture
+   * in test_stream_display_policy.cpp; kept local so this file needs no new seam or dependency.
+   */
+  class ScopedPrivateRuntimePath {
+  public:
+    explicit ScopedPrivateRuntimePath(std::initializer_list<const char *> binaries = {"labwc", "wlr-randr"}) {
+      if (const char *current = std::getenv("PATH")) {
+        had_previous = true;
+        previous = current;
+      }
+
+      char path_template[] = "/tmp/polaris-stream-stats-runtime-XXXXXX";
+      const char *created = mkdtemp(path_template);
+      if (!created) {
+        throw std::runtime_error("failed to create stream-stats runtime test directory");
+      }
+      directory = created;
+
+      for (const char *binary : binaries) {
+        const auto path = std::filesystem::path {directory} / binary;
+        std::ofstream script {path};
+        script << "#!/bin/sh\nexit 0\n";
+        script.close();
+        if (!script || chmod(path.c_str(), 0700) != 0) {
+          throw std::runtime_error("failed to create stream-stats runtime test executable");
+        }
+      }
+      if (setenv("PATH", directory.c_str(), 1) != 0) {
+        throw std::runtime_error("failed to set stream-stats runtime test PATH");
+      }
+    }
+
+    ScopedPrivateRuntimePath(const ScopedPrivateRuntimePath &) = delete;
+    ScopedPrivateRuntimePath &operator=(const ScopedPrivateRuntimePath &) = delete;
+
+    ~ScopedPrivateRuntimePath() {
+      if (had_previous) {
+        setenv("PATH", previous.c_str(), 1);
+      } else {
+        unsetenv("PATH");
+      }
+      std::error_code ignored;
+      std::filesystem::remove_all(directory, ignored);
+    }
+
+  private:
+    bool had_previous = false;
+    std::string previous;
+    std::string directory;
+  };
+#endif
+
   struct LinuxDisplayConfigGuard {
     LinuxDisplayConfigGuard():
         adapter_name {config::video.adapter_name},
@@ -250,6 +309,11 @@ TEST(StreamStatsCapturePathTests, SerializesCaptureDecisionDiagnostics) {
 
 TEST(StreamStatsLinuxGpuProfileTests, WarnsWhenNvidiaTrueHeadlessDisablesGpuNativeCapture) {
   LinuxDisplayConfigGuard guard;
+#ifdef __linux__
+  // headless + cage is Private Stream, whose labwc runtime the Doctor looks for on PATH; this case
+  // is about the CUDA advice alone, so the runtime is there.
+  ScopedPrivateRuntimePath runtime_path;
+#endif
   config::video.encoder = "nvenc";
   config::video.linux_display.headless_mode = true;
   config::video.linux_display.use_cage_compositor = true;
@@ -2796,9 +2860,14 @@ TEST(StreamStatsDoctorTests, SaysNothingAboutTheKmsCapabilityUnlessKmsWasRefused
 
 #ifdef __linux__
 namespace {
-  /// polaris.conf as loaded, the mode's booleans, the capture evaluation's note, refusal and
-  /// evaluated-for record, a session's capture rewrite and the virtual display probe are all
-  /// process state the #152 findings read; a test that sets any of them puts every one back.
+  /**
+   * Process state the #152 findings read. Saved here and restored on exit: the live linux_display
+   * settings, capture and output_name, and polaris.conf's loaded capture setting (put back by
+   * loading it again, the only way it is written). Reset to the state a test binary starts in,
+   * not restored, through the existing seams: the substitution note (empty), the KMS refusal
+   * (false), the capture evaluation record (nothing evaluated), the virtual display test probe
+   * (none), and the held host default with any session capture rewrite (forgotten).
+   */
   struct DoctorHostConfigurationGuard {
     config::video_t::linux_display_t linux_display {config::video.linux_display};
     std::string capture {config::video.capture};
@@ -2810,13 +2879,14 @@ namespace {
     DoctorHostConfigurationGuard &operator=(const DoctorHostConfigurationGuard &) = delete;
 
     ~DoctorHostConfigurationGuard() {
+      // Reset, as a test binary starts: these seams have no "previous value" to put back.
       platf::set_capture_backend_substitution_for_tests("");
       platf::set_kms_capture_refused_for_tests(false);
-      // Leave the evaluation state as a test binary finds it: nothing evaluated.
       platf::set_capture_sources_missing_for_tests(false);
       virtual_display::set_host_stream_probe_for_tests(std::nullopt);
       stream_display_policy::forget_host_default();
-      // Only a load writes the loaded setting: load the old one, then put the live values back.
+      // Restored: only a load writes the loaded setting, so load the old one, then put the live
+      // values back as they were.
       config::video.linux_display = linux_display;
       config::video.capture = loaded;
       stream_display_policy::normalize_config_from_load();
@@ -2851,6 +2921,13 @@ namespace {
       }
     }
     return found;
+  }
+
+  /// A source without the field fails here as an assertion the report records, not as a JSON
+  /// exception thrown out of the test.
+  void expect_stale(const nlohmann::json &finding, bool expected, const std::string &context) {
+    ASSERT_TRUE(finding.contains("stale")) << context << ": the finding has no stale field";
+    EXPECT_EQ(finding.at("stale"), expected) << context;
   }
 }  // namespace
 
@@ -3012,12 +3089,12 @@ TEST(StreamStatsDoctorTests, MarksACaptureFindingTheHostHasNotVerifiedForTheCurr
 
   auto substituted = findings_with_id(idle_configuration_warnings(), "capture_backend_substituted");
   ASSERT_EQ(substituted.size(), 1u);
-  EXPECT_EQ(substituted.front().at("stale"), true) << "no recorded evaluation";
+  expect_stale(substituted.front(), true, "no recorded evaluation");
 
   platf::mark_capture_sources_evaluated_for_current_config_for_tests();
   substituted = findings_with_id(idle_configuration_warnings(), "capture_backend_substituted");
   ASSERT_EQ(substituted.size(), 1u);
-  EXPECT_EQ(substituted.front().at("stale"), false);
+  expect_stale(substituted.front(), false, "evaluated for these settings");
   EXPECT_EQ(substituted.front().at("severity"), "warning");
   const auto verified_message = substituted.front().at("message");
   const auto verified_action = substituted.front().at("action");
@@ -3025,7 +3102,7 @@ TEST(StreamStatsDoctorTests, MarksACaptureFindingTheHostHasNotVerifiedForTheCurr
   config::video.capture = "kms";
   substituted = findings_with_id(idle_configuration_warnings(), "capture_backend_substituted");
   ASSERT_EQ(substituted.size(), 1u);
-  EXPECT_EQ(substituted.front().at("stale"), true) << "the capture setting moved since the evaluation";
+  expect_stale(substituted.front(), true, "the capture setting moved since the evaluation");
   EXPECT_EQ(substituted.front().at("severity"), "warning") << "the host keeps the grade";
   EXPECT_EQ(substituted.front().at("message"), verified_message);
   EXPECT_EQ(substituted.front().at("action"), verified_action);
@@ -3033,12 +3110,12 @@ TEST(StreamStatsDoctorTests, MarksACaptureFindingTheHostHasNotVerifiedForTheCurr
   config::video.capture = "wlr";
   substituted = findings_with_id(idle_configuration_warnings(), "capture_backend_substituted");
   ASSERT_EQ(substituted.size(), 1u);
-  EXPECT_EQ(substituted.front().at("stale"), false) << "the settings the evaluation was built for are back";
+  expect_stale(substituted.front(), false, "the settings the evaluation was built for are back");
 
   config::video.linux_display.stream_mode = "headless_stream";
   substituted = findings_with_id(idle_configuration_warnings(), "capture_backend_substituted");
   ASSERT_EQ(substituted.size(), 1u);
-  EXPECT_EQ(substituted.front().at("stale"), true) << "the mode moved since the evaluation";
+  expect_stale(substituted.front(), true, "the mode moved since the evaluation");
 }
 
 TEST(StreamStatsDoctorTests, EveryCaptureEvaluationFindingSaysWhetherItIsVerifiedAndNothingElseDoes) {
@@ -3055,7 +3132,7 @@ TEST(StreamStatsDoctorTests, EveryCaptureEvaluationFindingSaysWhetherItIsVerifie
   for (const auto id : {"no_capture_backend", "kms_capture_needs_capability"}) {
     const auto found = findings_with_id(warnings, id);
     ASSERT_EQ(found.size(), 1u) << id;
-    EXPECT_EQ(found.front().at("stale"), false) << id;
+    expect_stale(found.front(), false, id);
     EXPECT_EQ(found.front().at("severity"), "fail") << id;
   }
   for (const auto &warning : warnings) {
@@ -3072,7 +3149,7 @@ TEST(StreamStatsDoctorTests, EveryCaptureEvaluationFindingSaysWhetherItIsVerifie
   for (const auto id : {"no_capture_backend", "kms_capture_needs_capability"}) {
     const auto found = findings_with_id(warnings, id);
     ASSERT_EQ(found.size(), 1u) << id;
-    EXPECT_EQ(found.front().at("stale"), true) << id;
+    expect_stale(found.front(), true, id);
     EXPECT_EQ(found.front().at("severity"), "fail") << id << " keeps its own grade";
   }
 
@@ -3084,14 +3161,14 @@ TEST(StreamStatsDoctorTests, EveryCaptureEvaluationFindingSaysWhetherItIsVerifie
   for (const auto id : {"no_capture_backend", "capture_backend_substituted", "kms_capture_needs_capability"}) {
     const auto found = findings_with_id(warnings, id);
     ASSERT_EQ(found.size(), 1u) << id;
-    EXPECT_EQ(found.front().at("stale"), false) << id;
+    expect_stale(found.front(), false, id);
   }
   config::video.linux_display.stream_mode = "desktop_takeover";
   warnings = idle_configuration_warnings();
   for (const auto id : {"no_capture_backend", "capture_backend_substituted", "kms_capture_needs_capability"}) {
     const auto found = findings_with_id(warnings, id);
     ASSERT_EQ(found.size(), 1u) << id;
-    EXPECT_EQ(found.front().at("stale"), true) << id << " goes stale with the others";
+    expect_stale(found.front(), true, std::string {id} + " goes stale with the others");
   }
 }
 #endif
@@ -7931,6 +8008,11 @@ TEST(StreamStatsDoctorTests, KeepsHealthyVaapiShmFallbackInformational) {
 
 TEST(StreamStatsDoctorTests, KeepsNvidiaHeadlessWarningsInAdvancedEvidence) {
   LinuxDisplayConfigGuard guard;
+#ifdef __linux__
+  // headless + cage is Private Stream, whose labwc runtime the Doctor looks for on PATH; this case
+  // reads the CUDA advice as the first finding, so the runtime is there.
+  ScopedPrivateRuntimePath runtime_path;
+#endif
   config::video.encoder = "nvenc";
   config::video.linux_display.headless_mode = true;
   config::video.linux_display.use_cage_compositor = true;

@@ -1706,13 +1706,18 @@ TEST(StreamDisplayPolicyTests, DoctorNamesAConfiguredModeThisHostCannotEnter) {
     EXPECT_EQ(findings("capture_set_aside_by_mode").size(), 1u);
   }
   {
-    // A mode the legacy booleans alone imply is left to the launch refusal: the finding reads
-    // the explicit setting, which every save of the console writes.
+    // A mode the legacy booleans alone imply is the configured host mode too: a launch reads it
+    // the same way and is refused the same way, so the finding says so for it as well.
     ScopedPrivateRuntimePath without_labwc {"wlr-randr"};
     d.stream_mode.clear();
     EXPECT_EQ(stream_display_policy::configured_selection(), "windowed_stream");
-    EXPECT_TRUE(findings("stream_mode_unavailable").empty());
-    EXPECT_EQ(findings("capture_set_aside_by_mode").size(), 1u) << "the mode rule still reads the booleans";
+    const auto unavailable = findings("stream_mode_unavailable");
+    ASSERT_EQ(unavailable.size(), 1u);
+    EXPECT_EQ(unavailable.front().at("severity"), "warning");
+    EXPECT_EQ(unavailable.front().at("stream_mode"), "windowed_stream");
+    EXPECT_EQ(unavailable.front().at("reason"), "labwc binary not found on PATH");
+    EXPECT_EQ(unavailable.front().at("reason"), stream_display_policy::selection_unavailable_reason("windowed_stream"));
+    EXPECT_EQ(findings("capture_set_aside_by_mode").size(), 1u) << "the mode rule reads the booleans too";
   }
 }
 
