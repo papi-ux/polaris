@@ -14,6 +14,7 @@
   #include <cstdlib>
   #include <cstring>
   #include <functional>
+  #include <iostream>
   #include <limits>
   #include <memory>
   #include <sstream>
@@ -1619,6 +1620,14 @@ namespace {
     return graph.capture->fill_frame(image) ? image : nullptr;
   }
 
+  /**
+   * One locked reading of the real graph into the retained test output, on
+   * success as well as on failure: states and counts only, never pixels.
+   */
+  void print_graph_snapshot(const char *label, test_utils::pipewire_producer_graph_t &graph) {
+    std::cout << "[ graph    ] " << label << ": " << graph.snapshot() << std::endl;
+  }
+
   struct forwarding_graph_device_t: platf::avcodec_encode_device_t {
     forwarding_graph_device_t(platf::avcodec_encode_device_t &device, std::shared_ptr<platf::img_t> &clone): device(device), clone(clone) {}
     int convert(platf::img_t &image) override {
@@ -1639,12 +1648,18 @@ namespace {
 
 TEST(PipeWireProducerPoolTests, ProducerWithoutModifierNegotiatesUsableShmAndReusesPixels) {
   test_utils::pipewire_producer_graph_t graph {false, frame_width, frame_height};
-  ASSERT_TRUE(graph.start());
+  ASSERT_TRUE(graph.start()) << graph.snapshot();
+  print_graph_snapshot("shm reuse: started", graph);
   EXPECT_FALSE(graph.capture->negotiated_dmabuf());
   auto image = std::make_shared<host_frame_t>(0);
+  bool first_step = true;
   for (const std::uint8_t marker : {10, 30, 50, 70, 90, 110, 130, 150}) {
-    ASSERT_TRUE(graph.step(marker));
-    ASSERT_EQ(graph.capture->wait_for_frame(std::chrono::seconds(1)), pipewire_capture::wait_result_e::frame);
+    if (first_step) print_graph_snapshot("shm reuse: before first step", graph);
+    ASSERT_TRUE(graph.step(marker)) << "marker " << static_cast<int>(marker) << ' ' << graph.snapshot();
+    ASSERT_EQ(graph.capture->wait_for_frame(std::chrono::seconds(1)), pipewire_capture::wait_result_e::frame)
+      << "marker " << static_cast<int>(marker) << ' ' << graph.snapshot();
+    if (first_step) print_graph_snapshot("shm reuse: after first frame", graph);
+    first_step = false;
     std::shared_ptr<platf::img_t> filled = image;
     ASSERT_TRUE(graph.capture->fill_frame(filled));
     EXPECT_TRUE(std::all_of(image->pixels.begin(), image->pixels.end(), [&](auto p) { return p == marker; }));
@@ -1806,17 +1821,20 @@ TEST(PipeWireProducerPoolTests, NewGraphGenerationReadsNewPixelsWhileOldPublicat
 
 TEST(PipeWireProducerPoolTests, RealShmSizeChangeRequestsReinitAndNewCaptureReadsNewPixels) {
   test_utils::pipewire_producer_graph_t graph {false, frame_width, frame_height};
-  ASSERT_TRUE(graph.start());
+  ASSERT_TRUE(graph.start()) << graph.snapshot();
+  print_graph_snapshot("shm size change: started", graph);
   auto image = std::make_shared<host_frame_t>(17);
-  ASSERT_TRUE(graph.step(255));
-  ASSERT_EQ(graph.capture->wait_for_frame(std::chrono::seconds(1)), pipewire_capture::wait_result_e::frame);
+  print_graph_snapshot("shm size change: before first step", graph);
+  ASSERT_TRUE(graph.step(255)) << graph.snapshot();
+  ASSERT_EQ(graph.capture->wait_for_frame(std::chrono::seconds(1)), pipewire_capture::wait_result_e::frame) << graph.snapshot();
+  print_graph_snapshot("shm size change: after first frame", graph);
   std::shared_ptr<platf::img_t> filled = image;
   ASSERT_TRUE(graph.capture->fill_frame(filled));
   ASSERT_TRUE(std::all_of(image->pixels.begin(), image->pixels.end(), [](auto p) { return p == 255; }));
   // Leave another old-size frame at the capture front when the real producer
   // updates EnumFormat; no capture callback is called directly by the test.
-  ASSERT_TRUE(graph.step(85));
-  ASSERT_EQ(graph.capture->wait_for_frame(std::chrono::seconds(1)), pipewire_capture::wait_result_e::frame);
+  ASSERT_TRUE(graph.step(85)) << graph.snapshot();
+  ASSERT_EQ(graph.capture->wait_for_frame(std::chrono::seconds(1)), pipewire_capture::wait_result_e::frame) << graph.snapshot();
   ASSERT_TRUE(graph.renegotiate_size(128, 72));
   ASSERT_TRUE(graph.wait([&] { return !graph.capture->running(); }));
   ASSERT_EQ(graph.capture->wait_for_frame(std::chrono::seconds(2)), pipewire_capture::wait_result_e::reinit);
@@ -1829,10 +1847,13 @@ TEST(PipeWireProducerPoolTests, RealShmSizeChangeRequestsReinitAndNewCaptureRead
   EXPECT_EQ(graph.destroyed, 1);
 
   test_utils::pipewire_producer_graph_t next {false, 128, 72};
-  ASSERT_TRUE(next.start());
+  ASSERT_TRUE(next.start()) << next.snapshot();
+  print_graph_snapshot("shm size change: next started", next);
   auto replacement = std::make_shared<host_frame_t>(255, 128, 72);
-  ASSERT_TRUE(next.step(0));
-  ASSERT_EQ(next.capture->wait_for_frame(std::chrono::seconds(1)), pipewire_capture::wait_result_e::frame);
+  print_graph_snapshot("shm size change: next before first step", next);
+  ASSERT_TRUE(next.step(0)) << next.snapshot();
+  ASSERT_EQ(next.capture->wait_for_frame(std::chrono::seconds(1)), pipewire_capture::wait_result_e::frame) << next.snapshot();
+  print_graph_snapshot("shm size change: next after first frame", next);
   filled = replacement;
   ASSERT_TRUE(next.capture->fill_frame(filled));
   EXPECT_TRUE(std::all_of(replacement->pixels.begin(), replacement->pixels.end(), [](auto p) { return p == 0; }));

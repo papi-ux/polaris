@@ -7,10 +7,13 @@
 
 #include <chrono>
 #include <array>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <map>
 #include <mutex>
+#include <sstream>
+#include <string>
 #include <thread>
 #include "src/utility.h"
 #include <pipewire/impl.h>
@@ -46,6 +49,11 @@ namespace pipewire_capture {
       std::lock_guard lock(capture.frame_mtx_);
       return capture.active_dmabuf_leases_;
     }
+    /** The capture stream state exactly as the real on_state_changed recorded it. */
+    static pw_stream_state stream_state(capture_t &capture) {
+      std::lock_guard lock(capture.frame_mtx_);
+      return capture.stream_state_;
+    }
   };
 }
 
@@ -59,6 +67,21 @@ namespace test_utils {
     pw_stream *source = nullptr;
     pw_proxy *link = nullptr;
     spa_hook listener {};
+    // Both link hooks are added together under the owned loop lock and leave
+    // together (remove_link_listeners) before any proxy, core or callback
+    // state they could reach is destroyed. link_state and link_infos are
+    // written only by the owned loop thread, from the real link info events,
+    // and read under the owned loop lock like every other counter here.
+    spa_hook link_listener {};
+    spa_hook link_proxy_listener {};
+    bool link_listeners_added = false;
+    pw_link_state link_state = PW_LINK_STATE_INIT;
+    std::size_t link_infos = 0;
+    // Milliseconds after link creation at which start() first observed the
+    // previous readiness (negotiated, driving, two buffers) and the full one
+    // (plus link ACTIVE and capture STREAMING); -1 while unobserved. Plain
+    // numbers written inside the one wait() predicate, under the loop lock.
+    std::int64_t old_ready_ms = -1, ready_ms = -1;
     allocation_t allocate;
     write_t write;
     remove_t remove;
@@ -93,6 +116,38 @@ namespace test_utils {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       } while (std::chrono::steady_clock::now() < end);
       return false;
+    }
+
+    /**
+     * A bounded, locked reading for diagnostics: the owned loop lock first,
+     * then the capture's own state under its frame mutex, the order the real
+     * callbacks and the wait() predicates already use. Never call it from a
+     * wait() predicate, which holds the loop lock. Safe before prepare(), after
+     * a failed start() and after close(), when there is no loop to lock. A null
+     * source or link with a live loop is a partial lifecycle and is reported as
+     * such. It is called only by the thread that owns this graph, the same one
+     * that calls close() and shutdown_capture(), so it never races shutdown.
+     */
+    std::string snapshot() {
+      auto *loop = access::loop(*capture);
+      if (loop) pw_thread_loop_lock(loop);
+      auto unlock = util::fail_guard([&] { if (loop) pw_thread_loop_unlock(loop); });
+      const auto capture_state = access::stream_state(*capture);
+      std::size_t write_total = 0;
+      for (const auto &[buffer, times] : writes) write_total += times;
+      std::ostringstream out;
+      out << "loop=" << (loop != nullptr) << " link=" << (link != nullptr) << " source=" << (source != nullptr)
+          << " link_listeners=" << link_listeners_added << " link_infos=" << link_infos
+          << " link_state=" << static_cast<int>(link_state) << '/' << pw_link_state_as_string(link_state)
+          << " stream_state=" << static_cast<int>(capture_state) << '/' << pw_stream_state_as_string(capture_state)
+          << " driving=" << (source && pw_stream_is_driving(source))
+          << " negotiated=" << capture->negotiated() << " running=" << capture->running()
+          << " completed=" << completed << " submitted=" << submitted << " empty=" << empty
+          << " added=" << added << " removed=" << removed
+          << " writes=" << writes.size() << '/' << write_total
+          << " formats=" << formats << " destroyed=" << destroyed << " failed=" << failed
+          << " old_ready_ms=" << old_ready_ms << " ready_ms=" << ready_ms;
+      return out.str();
     }
 
     const spa_pod *build_format(spa_pod_builder &builder, int w, int h) const {
@@ -157,8 +212,53 @@ namespace test_utils {
       pw_properties_setf(props, PW_KEY_LINK_INPUT_NODE, "%u", access::node(*capture));
       link = static_cast<pw_proxy *>(pw_core_create_object(access::core(*capture), "link-factory", PW_TYPE_INTERFACE_Link, PW_VERSION_LINK, &props->dict, 0));
       pw_properties_free(props);
+      if (link) add_link_listeners();
       pw_thread_loop_unlock(access::loop(*capture));
-      return link && wait([&] { return capture->negotiated() && pw_stream_is_driving(source) && added == 2; }) && !failed;
+      // Ready means the graph the capture will actually read from: the real
+      // link reports ACTIVE and the capture stream reports STREAMING, within
+      // the same two-second budget as the negotiated/driving/two-buffer
+      // conditions. The predicate also keeps, as plain milliseconds, when each
+      // stage was first seen; it formats and prints nothing and takes no lock
+      // beyond the one wait() already holds and the capture's own frame mutex.
+      const auto created = std::chrono::steady_clock::now();
+      const auto elapsed = [&] {
+        return static_cast<std::int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - created).count());
+      };
+      return link && wait([&] {
+        const bool old_ready = capture->negotiated() && pw_stream_is_driving(source) && added == 2;
+        if (old_ready && old_ready_ms < 0) old_ready_ms = elapsed();
+        const bool ready = old_ready && link_state == PW_LINK_STATE_ACTIVE && access::stream_state(*capture) == PW_STREAM_STATE_STREAMING;
+        if (ready && ready_ms < 0) ready_ms = elapsed();
+        return ready;
+      }) && !failed;
+    }
+
+    /** Caller holds the owned loop lock and link is a live proxy. */
+    void add_link_listeners() {
+      static const pw_proxy_events proxy_events {
+        .version = PW_VERSION_PROXY_EVENTS,
+        .destroy = link_destroy,
+      };
+      static const pw_link_events link_events {
+        .version = PW_VERSION_LINK_EVENTS,
+        .info = link_info,
+      };
+      // The proxy hook learns of any destruction (ours, the owned core's at
+      // shutdown, or a test's); the object hook receives the real link info
+      // events, which is what pw_link_add_listener does for a client proxy on
+      // every PipeWire this builds against. Both are attached before the
+      // first server reply can arrive.
+      pw_proxy_add_listener(link, &link_proxy_listener, &proxy_events, this);
+      pw_proxy_add_object_listener(link, &link_listener, &link_events, this);
+      link_listeners_added = true;
+    }
+
+    /** Caller holds the owned loop lock or the loop is stopped. Idempotent. */
+    void remove_link_listeners() {
+      if (!link_listeners_added) return;
+      spa_hook_remove(&link_listener);
+      spa_hook_remove(&link_proxy_listener);
+      link_listeners_added = false;
     }
 
     bool step(std::uint8_t next_marker) {
@@ -205,7 +305,14 @@ namespace test_utils {
     void shutdown_capture() {
       // Exercise production shutdown with this live graph still present. The
       // owned core destroys its producer and link; the stream destroy event
-      // clears our pointer before the callback state can be destroyed.
+      // clears our pointer before the callback state can be destroyed. Our
+      // link hooks leave first, under the loop lock, so that teardown never
+      // reaches fixture memory through the link proxy.
+      if (access::loop(*capture)) {
+        pw_thread_loop_lock(access::loop(*capture));
+        remove_link_listeners();
+        pw_thread_loop_unlock(access::loop(*capture));
+      }
       capture->shutdown();
       link = nullptr;
     }
@@ -260,6 +367,20 @@ namespace test_utils {
       g.failed |= pw_stream_queue_buffer(g.source, buffer) < 0;
     }
     static void trigger_done(void *opaque) { ++static_cast<pipewire_producer_graph_t *>(opaque)->completed; }
+    static void link_info(void *opaque, const pw_link_info *info) {
+      if (!info) return;
+      auto &g = *static_cast<pipewire_producer_graph_t *>(opaque);
+      ++g.link_infos;
+      g.link_state = info->state;
+    }
+    static void link_destroy(void *opaque) {
+      // Whoever destroys the proxy (close, the owned core at shutdown, a test)
+      // does so under the loop lock; both hooks leave before the proxy is freed
+      // and nothing can reach this fixture through the link afterwards.
+      auto &g = *static_cast<pipewire_producer_graph_t *>(opaque);
+      g.remove_link_listeners();
+      g.link = nullptr;
+    }
 
     void close() {
       if (!access::loop(*capture)) return;
@@ -268,6 +389,9 @@ namespace test_utils {
       // callback state. No user daemon or default core participates.
       pw_thread_loop_stop(access::loop(*capture));
       pw_thread_loop_lock(access::loop(*capture));
+      // Same order as before; only the link hooks leave first, ahead of the
+      // proxy they are attached to. The stream hook stays for its destroy event.
+      remove_link_listeners();
       if (link) { pw_proxy_destroy(link); link = nullptr; }
       if (source) { pw_stream_destroy(source); source = nullptr; }
       pw_thread_loop_unlock(access::loop(*capture));
