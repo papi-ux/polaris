@@ -40,7 +40,7 @@ beta you are running, and the release a beta precedes counts as newer.
 The 1.4.13 betas are the exception. They report `1.4.13`, the same version as the
 1.4.13 release, so on those hosts Update Center shows **Current release** and never
 offers 1.4.13. Replace one by hand as described in
-[Leave a 1.4.13 beta](#leave-a-1413-beta). A later stable release, such as 1.4.14,
+[Leave a 1.4.13 beta](#leave-a-1413-beta). A later stable release, such as 1.5.0,
 is offered as usual.
 
 An upgrade keeps the existing account, paired devices, settings and library.
@@ -67,7 +67,7 @@ in the folder they were downloaded to. If `polaris-kms` is installed, reinstall
 it in the same command from the same release: a command that names only
 `polaris` leaves the beta's helper in place. Without the helper, leave out the
 `polaris-kms` package or file. Restart Polaris afterwards. Once a later stable
-release such as 1.4.14 is out, none of this is needed: an ordinary upgrade replaces
+release such as 1.5.0 is out, none of this is needed: an ordinary upgrade replaces
 a 1.4.13 beta, and the repository commands below stop working because the
 repository then carries only that newer release.
 
