@@ -101,7 +101,7 @@ TEST(VrrCompositorIdentityTests, StableReusedPidIsStillADifferentProcess) {
 TEST(VrrCompositorIdentityTests, ReplacementBetweenReadsCannotQualify) {
   const auto lease = std::make_shared<fake_lease_t>();
   const vrr_clock::compositor_identity_check_t check {lease};
-  for (const auto pair : {std::pair {77u, 99u}, std::pair {99u, 77u}, std::pair {0u, 77u}}) {
+  for (const auto &pair : {std::pair {77u, 99u}, std::pair {99u, 77u}, std::pair {0u, 77u}}) {
     const auto match = check.verify(4242, 1000, pair.first, pair.second);
     EXPECT_FALSE(match.verified);
     EXPECT_EQ(match.reason, "compositor_peer_starttime_mismatch");

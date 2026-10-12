@@ -297,7 +297,9 @@ TEST(AppLaunchAsCatalogueTests, EachFixedPinOwnsTheAnswerIncludingUnavailableAnd
       EXPECT_FALSE(contract.at("follows_host_default").get<bool>());
       const auto reason = contract.at("mode_reason").get<std::string>();
       EXPECT_NE(reason.find(available ? "so every client gets" : "which this host cannot run right now"), std::string::npos);
-      if (!available) EXPECT_NE(reason.find("The required backend is missing."), std::string::npos);
+      if (!available) {
+        EXPECT_NE(reason.find("The required backend is missing."), std::string::npos);
+      }
     }
   }
 }

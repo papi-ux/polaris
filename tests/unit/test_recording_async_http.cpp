@@ -52,7 +52,7 @@ namespace {
   constexpr auto k_stamp = "20261008_230000";
   constexpr auto k_bounded_wait = 10s;
 
-  std::set<std::string> keys_of(const nlohmann::json &object) {
+  [[maybe_unused]] std::set<std::string> keys_of(const nlohmann::json &object) {
     std::set<std::string> keys;
     for (auto it = object.begin(); it != object.end(); ++it) {
       keys.insert(it.key());
@@ -60,7 +60,7 @@ namespace {
     return keys;
   }
 
-  steady::duration from_us(std::int64_t microseconds) {
+  [[maybe_unused]] steady::duration from_us(std::int64_t microseconds) {
     return std::chrono::duration_cast<steady::duration>(std::chrono::microseconds {microseconds});
   }
 
