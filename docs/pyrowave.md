@@ -14,8 +14,8 @@ It suits you if fast decoding, or sharp text on a streamed desktop (Nova for And
 4:4:4), matters more to you than bandwidth. It does not work in a [Space](spaces.md), which exists
 only if you set one up. You will need:
 
-- **The Polaris 1.4.13 release on a Linux host**, not a Polaris beta, which reports the same
-  version. If you install from the package repositories and never installed a beta by hand, you
+- **The Polaris 1.4.13 release or the 1.5.0 beta on a Linux host**, not a 1.4.13 beta, which
+  reports the same version as the release. If you install from the package repositories and never installed a beta by hand, you
   have the release ([otherwise, check](pyrowave-reference.md#a-host-that-ran-a-polaris-1413-beta)).
 - **Nova for Android 1.4.13-beta.3 or newer on the phone or handheld**, a beta that installs beside
   stable Nova ([below](#nova-for-android)). So: the Polaris release on the host, a Nova beta on

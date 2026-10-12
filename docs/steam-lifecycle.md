@@ -14,7 +14,7 @@ Private streams keep their existing lifecycle: Disconnect preserves a resumable 
 
 ## Nova controls
 
-Nova's selected PC menu and Command Center offer **Steam** on Android and Linux, including the native Frame interface. Open Steam, Open Big Picture, and Quit Steam use the selected paired host. Status is observed from the host. Quit requires an additional confirmation when a game is running. These controls are unavailable for viewers, another client's session, private runtimes, and Game Mode.
+Nova's selected PC menu and Command Center offer **Steam** on Android and Linux. Open Steam, Open Big Picture, and Quit Steam use the selected paired host. Status is observed from the host. Quit requires an additional confirmation when a game is running. These controls are unavailable for viewers, another client's session, private runtimes, and Game Mode.
 
 Moonlight users can use the host's keep-running policy without Nova. Play Setup in Nova displays the policy for the selected display mode.
 
