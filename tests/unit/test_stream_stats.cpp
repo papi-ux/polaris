@@ -13859,12 +13859,13 @@ TEST(StreamStatsMediaReportCadence, CountsAdmittedReportsFromTheBaselineAndKeeps
   }
 
   stream_stats::age_client_media_counter_baseline_for_tests(1s);
-  const auto third = stream_stats::ingest_client_media_counters(scope.sample(3'000, 300, 297));
+  // Loss is cumulative too: four lost frames at the second report become six, not three.
+  const auto third = stream_stats::ingest_client_media_counters(scope.sample(3'000, 300, 294));
   ASSERT_EQ(third.state, stream_stats::client_media_ingest_state_e::observed);
   ASSERT_TRUE(third.receipt.has_value());
   EXPECT_GE(third.receipt->host_duration_ms, 1'000);
   EXPECT_LT(third.receipt->host_duration_ms, longest);
-  const auto waiting = stream_stats::ingest_client_media_counters(scope.sample(3'400, 300, 297));
+  const auto waiting = stream_stats::ingest_client_media_counters(scope.sample(3'400, 300, 294));
   ASSERT_EQ(waiting.state, stream_stats::client_media_ingest_state_e::waiting_for_frames);
   {
     const auto json = current_media_interval_json();
@@ -14135,10 +14136,20 @@ TEST(StreamStatsMediaReportCadence, ItIsOmittedWithoutAReceiptAndAgreesInStatsAn
   EXPECT_EQ(stats_json.at("client_media_interval").at("cadence"), as_of.at("cadence"));
   const auto doctor = stream_stats::build_doctor_json(snapshot, nlohmann::json::object());
   EXPECT_EQ(doctor.at("advanced_evidence").at("client_media_interval").at("cadence"), as_of.at("cadence"));
+  EXPECT_EQ(stats_json.at("doctor").at("advanced_evidence").at("client_media_interval").at("cadence"), as_of.at("cadence"));
+  // Stats already embeds Doctor, so both existing receipt paths carry the same cadence.
+  // Check the exact locations rather than a substring count that mistakes the embed for duplication.
+  std::set<std::string> cadence_locations;
+  const auto flattened = stats_json.flatten();
+  for (const auto &entry : flattened.items()) {
+    if (entry.key().ends_with("/gap_resets")) cadence_locations.insert(entry.key());
+  }
+  const std::set<std::string> expected_cadence_locations {
+    "/client_media_interval/cadence/gap_resets",
+    "/doctor/advanced_evidence/client_media_interval/cadence/gap_resets",
+  };
+  EXPECT_EQ(cadence_locations, expected_cadence_locations) << "cadence appears only beside the existing receipts";
   const auto text = stats_json.dump();
-  std::size_t mentions = 0;
-  for (auto at = text.find("\"gap_resets\""); at != std::string::npos; at = text.find("\"gap_resets\"", at + 1)) ++mentions;
-  EXPECT_EQ(mentions, 1u) << "the cadence is served beside the receipt and nowhere else";
   EXPECT_EQ(text.find("cadence-owner-g"), std::string::npos);
   EXPECT_EQ(text.find("cadence-launch-g"), std::string::npos);
 
