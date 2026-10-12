@@ -108,9 +108,9 @@
           </div>
         </div>
       </div>
-      <div v-if="!doctorDiagnosisIdle" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3" data-doctor-checklist>
+      <div v-if="visibleChecklist.length" class="grid gap-3 md:grid-cols-2 xl:grid-cols-3" data-doctor-checklist>
         <div
-          v-for="item in fixMyStreamChecklist"
+          v-for="item in visibleChecklist"
           :key="item.key"
           class="surface-subtle border p-4"
           :class="statusTone(item.status).card"
@@ -545,7 +545,7 @@ import { streamClientFamilyLabel } from '../client-family.js'
 import { createLogTailState, fetchLogTail } from '../log-tail-state.js'
 import { groupRecentIssueLogs } from '../recent-issues.js'
 import { statusTone } from '../status-tones.js'
-import { doctorIsWaitingForStream } from '../doctor-observation.js'
+import { doctorIsWaitingForStream, idleHostFindings } from '../doctor-observation.js'
 import StreamPacingReadout from '../components/StreamPacingReadout.vue'
 import TailscaleConnectionReadout from '../components/TailscaleConnectionReadout.vue'
 import { normalizeTailscalePeer } from '../tailscale-connection-readout.js'
@@ -679,6 +679,12 @@ const fixMyStreamChecklist = computed(() => buildFixMyStreamChecklist({
 
 const doctorPayload = computed(() => streamStats.value?.doctor || null)
 const doctorDiagnosisIdle = computed(() => doctorIsWaitingForStream(doctorPayload.value, streamStats.value) || (!streamStats.value?.streaming && !doctorPayload.value))
+// Before a stream only the host's current configuration findings are shown (#152); the live rows
+// have nothing to measure, and a payload kept from a dropped connection is not current. The
+// support bundle still carries the whole checklist.
+const visibleChecklist = computed(() => doctorDiagnosisIdle.value
+  ? (streamStatsConnected.value ? idleHostFindings(fixMyStreamChecklist.value) : [])
+  : fixMyStreamChecklist.value)
 const aiDoctorCategoriesText = computed(() => `${i18n.t('troubleshooting.ai_doctor_categories_prefix')} ${AI_DOCTOR_EXPLANATION_CATEGORIES.join(', ')}`)
 const doctorPlainDiagnosis = computed(() => {
   if (doctorIsWaitingForStream(doctorPayload.value, streamStats.value)) return {

@@ -1759,6 +1759,13 @@ namespace stream_stats {
     nlohmann::json configuration_warnings = nlohmann::json::array();
     nlohmann::json capture_forecast = nullptr;
 #ifdef __linux__
+    // The three findings the capture evaluation produces stand until the next evaluation, which a
+    // launch runs when the capture or stream-mode setting has moved since. Until then, or before
+    // any evaluation has run, they describe settings the host no longer has, or nothing at all, so
+    // each says whether it has been verified for the settings the host holds now. The console
+    // shows an unverified one as a note with the step that verifies it (#152).
+    const bool capture_evaluation_stale = platf::capture_sources_stale();
+
     // No capture at all. Polaris logs this fatally at startup and then carries on serving, so a
     // host in this state pairs normally, accepts launches and advertises H.264 as the only codec
     // it has, while Doctor reports nothing. The log line is the only trace and it scrolls past
@@ -1767,6 +1774,7 @@ namespace stream_stats {
       configuration_warnings.push_back({
         {"id", "no_capture_backend"},
         {"severity", "fail"},
+        {"stale", capture_evaluation_stale},
         {"message", "This host has no working capture backend, so no encoder could be probed and "
                     "it is advertising H.264 as the only codec it has. Streams will connect and "
                     "look far worse than this hardware can manage, or fail outright."},
@@ -1814,6 +1822,7 @@ namespace stream_stats {
       configuration_warnings.push_back({
         {"id", "capture_backend_substituted"},
         {"severity", "warning"},
+        {"stale", capture_evaluation_stale},
         {"message", kms_for_capability ?
            "This host is configured for KMS capture, but the Polaris binary does not hold "
            "CAP_SYS_ADMIN, so it could not read a framebuffer and Polaris substituted another "
@@ -1854,6 +1863,7 @@ namespace stream_stats {
       configuration_warnings.push_back({
         {"id", "kms_capture_needs_capability"},
         {"severity", nothing_else ? "fail" : "warning"},
+        {"stale", capture_evaluation_stale},
         {"message", "KMS capture found the display but could not read a DRM framebuffer handle, "
                     "because the Polaris binary does not hold CAP_SYS_ADMIN. That capability is "
                     "opt-in: the polaris-kms package carries it on a helper of its own, which updates "
@@ -1861,6 +1871,68 @@ namespace stream_stats {
         {"action", std::string {"Run "} + enable_kms_command + " once and do what it prints, since it may ask for a new "
                    "login first, then restart Polaris."}
       });
+    }
+
+    // #152: what the configured stream mode does to an explicit capture backend, said before any
+    // stream. polaris.conf's capture is measured against the mode's own rule, so a host set to kms
+    // in a private labwc mode learns up front that the mode captures through wlroots and keeps
+    // kms saved for the modes that use it. This is information: the pairing is valid, and nothing
+    // here refuses it. A substitution is the capture evaluation's finding, reported above, and an
+    // unset or auto capture asked the host to choose, so neither is a backend set aside. A per-app
+    // or per-session mode is that launch's own choice and is never measured here.
+    {
+      const auto configured_mode = stream_display_policy::configured_selection();
+      auto set_aside = stream_display_policy::capture_mode_override_for_current_mode();
+      if (!set_aside &&
+          (configured_mode == stream_display_policy::k_host_virtual_display ||
+           configured_mode == stream_display_policy::k_desktop_takeover)) {
+        // A Host Virtual Display load already rewrote the live setting to what its backend
+        // exposes, so the mode rule sees no difference; the load's own rule, asked again for the
+        // loaded setting, says what it set aside.
+        set_aside = stream_display_policy::capture_host_virtual_display_override(
+          virtual_display::detect_backend(),
+          stream_display_policy::loaded_capture_setting()
+        );
+      }
+      if (set_aside && set_aside->reason != stream_display_policy::k_capture_override_substituted) {
+        const auto effective = set_aside->effective.empty() ? std::string {"auto"} : set_aside->effective;
+        configuration_warnings.push_back({
+          {"id", "capture_set_aside_by_mode"},
+          {"severity", "info"},
+          {"stream_mode", configured_mode},
+          {"configured_capture", set_aside->configured},
+          {"effective_capture", effective},
+          {"reason", set_aside->reason},
+          {"message", stream_display_policy::describe_capture_override(*set_aside, configured_mode) +
+                      ". Nothing is wrong with this pairing: capture = " + set_aside->configured +
+                      " stays saved for the modes that use it, and a stream in this mode captures through " +
+                      effective + "."},
+          {"action", "No change is needed. Keep capture = " + set_aside->configured +
+                     " if a later mode switch should use it, or leave capture unset to let each mode choose."}
+        });
+      }
+
+      // The configured mode cannot be entered on this host, for a reason the host already names
+      // to launches and to the mode selector: a private runtime binary missing from PATH, no
+      // virtual display backend, or no takeover support. Only an explicitly configured mode is
+      // read here; a mode derived from the legacy booleans is left to the launch refusal.
+      if (!linux_display.stream_mode.empty() &&
+          !configured_mode.empty() &&
+          !stream_display_policy::selection_available(configured_mode)) {
+        auto reason = stream_display_policy::selection_unavailable_reason(configured_mode);
+        if (reason.empty()) {
+          reason = "the host reports it unavailable without naming a reason";
+        }
+        configuration_warnings.push_back({
+          {"id", "stream_mode_unavailable"},
+          {"severity", "warning"},
+          {"stream_mode", configured_mode},
+          {"reason", reason},
+          {"message", "The configured stream mode [" + configured_mode + "] cannot be entered on this host: " +
+                      reason + ". A launch into it is refused with the same reason until the host has what it needs."},
+          {"action", "Install what the reason names, or choose a stream mode this host can enter in Settings."}
+        });
+      }
     }
 
     // Without CUDA the GPU-native advice below is a dead end; the capture forecast names the

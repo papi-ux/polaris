@@ -1651,6 +1651,71 @@ TEST(StreamDisplayPolicyTests, CurrentModeOverrideReadsWhatCurrentModeCaptureRea
     << "an owned output keeps the configured backend";
 }
 
+TEST(StreamDisplayPolicyTests, DoctorNamesAConfiguredModeThisHostCannotEnter) {
+  // #152: a mode the host cannot enter is the one configured-host finding that is a warning, said
+  // before any stream. Its reason is the one the mode selector and a launch refusal already give,
+  // read from PATH here, which is why the case lives beside the PATH stand-ins.
+  LinuxDisplayPolicyGuard guard;
+  LoadedCaptureGuard loaded_guard;
+  struct EvaluationGuard {
+    ~EvaluationGuard() {
+      platf::set_capture_backend_substitution_for_tests("");
+      platf::set_capture_sources_missing_for_tests(false);
+    }
+  } evaluation_guard;
+  platf::set_capture_backend_substitution_for_tests("");
+  auto &d = config::video.linux_display;
+  set_loaded_capture_setting("kms");
+  d.stream_mode = "windowed_stream";
+  d.headless_mode = false;
+  d.use_cage_compositor = true;
+  d.private_runtime = "labwc";
+  config::video.capture = "kms";
+
+  const auto findings = [](std::string_view id) {
+    std::vector<nlohmann::json> found;
+    stream_stats::stats_t stats {};
+    for (const auto &warning : stream_stats::linux_gpu_profile_json(stats).at("configuration_warnings")) {
+      if (warning.value("id", std::string {}) == id) {
+        found.push_back(warning);
+      }
+    }
+    return found;
+  };
+
+  {
+    ScopedPrivateRuntimePath without_labwc {"wlr-randr"};
+    ASSERT_FALSE(stream_display_policy::selection_available("windowed_stream"));
+    const auto unavailable = findings("stream_mode_unavailable");
+    ASSERT_EQ(unavailable.size(), 1u);
+    const auto &finding = unavailable.front();
+    EXPECT_EQ(finding.at("severity"), "warning");
+    EXPECT_EQ(finding.at("stream_mode"), "windowed_stream");
+    EXPECT_EQ(finding.at("reason"), stream_display_policy::selection_unavailable_reason("windowed_stream"));
+    EXPECT_EQ(finding.at("reason"), "labwc binary not found on PATH");
+    const auto message = finding.at("message").get<std::string>();
+    EXPECT_NE(message.find("stream mode [windowed_stream] cannot be entered on this host: labwc binary not found on PATH"), std::string::npos);
+    EXPECT_NE(finding.at("action").get<std::string>().find("Install what the reason names"), std::string::npos);
+    EXPECT_FALSE(finding.contains("stale")) << "read from PATH now, not from the capture evaluation";
+    EXPECT_EQ(findings("capture_set_aside_by_mode").size(), 1u) << "the mode's own explanation stands beside it";
+  }
+  {
+    ScopedPrivateRuntimePath with_runtime;
+    ASSERT_TRUE(stream_display_policy::selection_available("windowed_stream"));
+    EXPECT_TRUE(findings("stream_mode_unavailable").empty());
+    EXPECT_EQ(findings("capture_set_aside_by_mode").size(), 1u);
+  }
+  {
+    // A mode the legacy booleans alone imply is left to the launch refusal: the finding reads
+    // the explicit setting, which every save of the console writes.
+    ScopedPrivateRuntimePath without_labwc {"wlr-randr"};
+    d.stream_mode.clear();
+    EXPECT_EQ(stream_display_policy::configured_selection(), "windowed_stream");
+    EXPECT_TRUE(findings("stream_mode_unavailable").empty());
+    EXPECT_EQ(findings("capture_set_aside_by_mode").size(), 1u) << "the mode rule still reads the booleans";
+  }
+}
+
 TEST(StreamDisplayPolicyTests, SessionTransitionOverrideNamesTheExplicitChoiceItDiscards) {
   using stream_display_policy::capture_session_transition_override;
 

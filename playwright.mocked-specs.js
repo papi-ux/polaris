@@ -9,4 +9,7 @@ export const mockedFrontendSpecs = [
   '**/polaris-ui-followup.spec.js',
   '**/polaris-look-feel.spec.js',
   '**/recording-policy.spec.js',
+  // Doctor & Support before a stream: its cases need their own stats stream per case (connected,
+  // dropped, live), which the look-and-feel fixture's fixed idle EventSource cannot express.
+  '**/doctor-idle-host-findings.spec.js',
 ]

@@ -27,12 +27,15 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <optional>
 #include <regex>
 #include <set>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 #ifdef __linux__
   #include <src/platform/linux/kms_capture_readiness.h>
   #include <src/platform/linux/misc.h>
@@ -2790,6 +2793,308 @@ TEST(StreamStatsDoctorTests, SaysNothingAboutTheKmsCapabilityUnlessKmsWasRefused
 
   platf::set_capture_backend_substitution_for_tests("");
 }
+
+#ifdef __linux__
+namespace {
+  /// polaris.conf as loaded, the mode's booleans, the capture evaluation's note, refusal and
+  /// evaluated-for record, a session's capture rewrite and the virtual display probe are all
+  /// process state the #152 findings read; a test that sets any of them puts every one back.
+  struct DoctorHostConfigurationGuard {
+    config::video_t::linux_display_t linux_display {config::video.linux_display};
+    std::string capture {config::video.capture};
+    std::string output_name {config::video.output_name};
+    std::string loaded {stream_display_policy::loaded_capture_setting()};
+
+    DoctorHostConfigurationGuard() = default;
+    DoctorHostConfigurationGuard(const DoctorHostConfigurationGuard &) = delete;
+    DoctorHostConfigurationGuard &operator=(const DoctorHostConfigurationGuard &) = delete;
+
+    ~DoctorHostConfigurationGuard() {
+      platf::set_capture_backend_substitution_for_tests("");
+      platf::set_kms_capture_refused_for_tests(false);
+      // Leave the evaluation state as a test binary finds it: nothing evaluated.
+      platf::set_capture_sources_missing_for_tests(false);
+      virtual_display::set_host_stream_probe_for_tests(std::nullopt);
+      stream_display_policy::forget_host_default();
+      // Only a load writes the loaded setting: load the old one, then put the live values back.
+      config::video.linux_display = linux_display;
+      config::video.capture = loaded;
+      stream_display_policy::normalize_config_from_load();
+      stream_display_policy::log_config_load_notes();
+      config::video.linux_display = linux_display;
+      config::video.capture = capture;
+      config::video.output_name = output_name;
+    }
+  };
+
+  /// Load a host configuration the way a polaris.conf read does: the capture setting becomes the
+  /// loaded one, and the mode's booleans and any rewrite the load makes follow the mode.
+  void load_host_configuration(std::string_view stream_mode, std::string_view capture) {
+    config::video.linux_display.stream_mode = std::string {stream_mode};
+    config::video.capture = std::string {capture};
+    stream_display_policy::normalize_config_from_load();
+    stream_display_policy::log_config_load_notes();
+  }
+
+  /// The Doctor's configuration findings for a host that is not streaming.
+  nlohmann::json idle_configuration_warnings() {
+    stream_stats::stats_t stats {};
+    return stream_stats::build_doctor_json(stats, nlohmann::json::object())
+      .at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings");
+  }
+
+  std::vector<nlohmann::json> findings_with_id(const nlohmann::json &warnings, std::string_view id) {
+    std::vector<nlohmann::json> found;
+    for (const auto &warning : warnings) {
+      if (warning.value("id", std::string {}) == id) {
+        found.push_back(warning);
+      }
+    }
+    return found;
+  }
+}  // namespace
+
+TEST(StreamStatsDoctorTests, DoctorExplainsACaptureTheHostModeSetsAsideBeforeAnyStream) {
+  // #152: capture = kms with linux_stream_mode = windowed_stream is a valid pair that a private
+  // labwc session resolves to wlroots. Until now the host said so only while a stream was being
+  // set up, in the log, and the Doctor read clean before that.
+  DoctorHostConfigurationGuard guard;
+  load_host_configuration("windowed_stream", "kms");
+  platf::set_capture_backend_substitution_for_tests("");
+
+  stream_stats::stats_t stats {};
+  const auto doctor = stream_stats::build_doctor_json(stats, nlohmann::json::object());
+  EXPECT_EQ(doctor.at("primary_issue"), "no_active_stream");
+  EXPECT_EQ(doctor.at("simple_state"), "Waiting for a stream");
+  EXPECT_EQ(doctor.at("status"), "unknown");
+  EXPECT_EQ(doctor.at("severity"), "info");
+
+  const auto &warnings = doctor.at("advanced_evidence").at("linux_gpu_profile").at("configuration_warnings");
+  const auto found = findings_with_id(warnings, "capture_set_aside_by_mode");
+  ASSERT_EQ(found.size(), 1u);
+  const auto &finding = found.front();
+  EXPECT_EQ(finding.at("severity"), "info");
+  EXPECT_EQ(finding.at("stream_mode"), "windowed_stream");
+  EXPECT_EQ(finding.at("configured_capture"), "kms");
+  EXPECT_EQ(finding.at("effective_capture"), "wlr");
+  EXPECT_EQ(finding.at("reason").get<std::string>(), stream_display_policy::k_capture_override_private_compositor);
+  const auto message = finding.at("message").get<std::string>();
+  EXPECT_NE(message.find("stream mode [windowed_stream] asks for [wlr], not the configured [kms]"), std::string::npos);
+  EXPECT_NE(message.find("a private labwc session can only be captured through wlroots"), std::string::npos);
+  EXPECT_NE(message.find("Nothing is wrong with this pairing"), std::string::npos);
+  EXPECT_NE(finding.at("action").get<std::string>().find("Keep capture = kms"), std::string::npos);
+  EXPECT_FALSE(finding.contains("stale")) << "a mode rule is read from configuration, not from the capture evaluation";
+  EXPECT_TRUE(findings_with_id(warnings, "capture_backend_substituted").empty());
+  EXPECT_TRUE(findings_with_id(warnings, "kms_capture_needs_capability").empty());
+}
+
+TEST(StreamStatsDoctorTests, DoctorExplainsACaptureTheHostModeSetsAsideNotForAnUnsetOrAutoCapture) {
+  // Auto asked the host to choose, so the host choosing is no override, and a capture the dongle
+  // or a Gamescope launch fills with the portal was never an explicit choice either.
+  DoctorHostConfigurationGuard guard;
+  for (const auto &[mode, capture] : std::initializer_list<std::pair<const char *, const char *>> {
+         {"windowed_stream", ""},
+         {"windowed_stream", "auto"},
+         {"headless_stream", ""},
+         {"gamescope_stream", ""},
+         {"headless_dongle", ""},
+         {"headless_dongle", "auto"},
+       }) {
+    load_host_configuration(mode, capture);
+    EXPECT_TRUE(findings_with_id(idle_configuration_warnings(), "capture_set_aside_by_mode").empty())
+      << mode << " capture=[" << capture << "]";
+  }
+}
+
+TEST(StreamStatsDoctorTests, DoctorExplainsACaptureTheHostModeSetsAsideNotWhereTheModeKeepsKms) {
+  // The finding agrees with the launch rule: where a launch keeps kms, there is nothing to say.
+  DoctorHostConfigurationGuard guard;
+  for (const auto mode : {"desktop_display", "headless_dongle", "gamescope_stream"}) {
+    load_host_configuration(mode, "kms");
+    EXPECT_TRUE(platf::kms_readiness::kms_possible_in_mode(mode)) << mode;
+    EXPECT_EQ(config::video.capture, "kms") << mode << " keeps the explicit backend";
+    EXPECT_TRUE(findings_with_id(idle_configuration_warnings(), "capture_set_aside_by_mode").empty()) << mode;
+  }
+  for (const auto mode : {"windowed_stream", "headless_stream"}) {
+    load_host_configuration(mode, "kms");
+    EXPECT_FALSE(platf::kms_readiness::kms_possible_in_mode(mode)) << mode;
+    const auto found = findings_with_id(idle_configuration_warnings(), "capture_set_aside_by_mode");
+    ASSERT_EQ(found.size(), 1u) << mode;
+    EXPECT_EQ(found.front().at("stream_mode"), mode);
+    EXPECT_EQ(found.front().at("effective_capture"), "wlr") << mode;
+  }
+}
+
+TEST(StreamStatsDoctorTests, DoctorExplainsACaptureTheHostModeSetsAsideMeasuresAgainstPolarisConfNotTheLoadsReplacement) {
+  // A Host Virtual Display load rewrites the live capture setting to what its backend exposes, so
+  // by the time Doctor reads it the live value already is the replacement. The finding names what
+  // polaris.conf chose, as the load note does, rather than telling a host set to kms that it had
+  // chosen portal.
+  DoctorHostConfigurationGuard guard;
+  virtual_display::set_host_stream_probe_for_tests(virtual_display::host_stream_probe_for_tests_t {
+    .backend = virtual_display::backend_e::EVDI,
+  });
+  load_host_configuration("host_virtual_display", "kms");
+  EXPECT_EQ(stream_display_policy::loaded_capture_setting(), "kms");
+  EXPECT_EQ(config::video.capture, "portal") << "the load captures the EVDI output through the portal";
+
+  const auto found = findings_with_id(idle_configuration_warnings(), "capture_set_aside_by_mode");
+  ASSERT_EQ(found.size(), 1u);
+  const auto &finding = found.front();
+  EXPECT_EQ(finding.at("severity"), "info");
+  EXPECT_EQ(finding.at("stream_mode"), "host_virtual_display");
+  EXPECT_EQ(finding.at("configured_capture"), "kms");
+  EXPECT_EQ(finding.at("effective_capture"), "portal");
+  EXPECT_EQ(finding.at("reason").get<std::string>(), stream_display_policy::k_capture_override_virtual_display_backend);
+  EXPECT_NE(finding.at("message").get<std::string>().find("asks for [portal], not the configured [kms]"), std::string::npos);
+
+  // polaris.conf naming what the backend exposes is no override, and neither is leaving it unset.
+  for (const auto capture : {"portal", ""}) {
+    load_host_configuration("host_virtual_display", capture);
+    EXPECT_TRUE(findings_with_id(idle_configuration_warnings(), "capture_set_aside_by_mode").empty())
+      << "capture=[" << capture << "]";
+  }
+}
+
+TEST(StreamStatsDoctorTests, DoctorExplainsACaptureTheHostModeSetsAsideAndASubstitutionAreSeparateFindings) {
+  // A mode rule and a capture evaluation are two different things to know. The private mode
+  // sets kms aside whatever the evaluation found; the substitution is what the evaluation found.
+  DoctorHostConfigurationGuard guard;
+  load_host_configuration("windowed_stream", "kms");
+  platf::set_capture_backend_substitution_for_tests("kms -> portal");
+
+  const auto warnings = idle_configuration_warnings();
+  const auto substituted = findings_with_id(warnings, "capture_backend_substituted");
+  const auto set_aside = findings_with_id(warnings, "capture_set_aside_by_mode");
+  ASSERT_EQ(substituted.size(), 1u);
+  ASSERT_EQ(set_aside.size(), 1u);
+  EXPECT_EQ(substituted.front().at("severity"), "warning");
+  EXPECT_EQ(set_aside.front().at("severity"), "info");
+  EXPECT_EQ(set_aside.front().at("reason").get<std::string>(), stream_display_policy::k_capture_override_private_compositor);
+  EXPECT_NE(substituted.front().at("message"), set_aside.front().at("message"));
+  EXPECT_EQ(set_aside.front().at("message").get<std::string>().find("substitut"), std::string::npos)
+    << "the mode's explanation does not describe the evaluation";
+  EXPECT_TRUE(substituted.front().contains("stale"));
+  EXPECT_FALSE(set_aside.front().contains("stale"));
+}
+
+TEST(StreamStatsDoctorTests, DoctorExplainsACaptureTheHostModeSetsAsideStaysSilentForAPinnedAppMode) {
+  // An app pinned to Private Stream on a Mirror Desktop host set to kms streams through wlroots for
+  // that launch. That is the launch's own choice, carried on the session as its mode override
+  // reason, and the host finding does not report it as the host's configuration.
+  DoctorHostConfigurationGuard guard;
+  load_host_configuration("desktop_display", "kms");
+  EXPECT_TRUE(findings_with_id(idle_configuration_warnings(), "capture_set_aside_by_mode").empty());
+
+  stream_display_policy::apply_capture_for_session_transition("desktop_display", "windowed_stream");
+  EXPECT_EQ(config::video.capture, "wlr") << "the launch's rewrite stands for the session";
+  EXPECT_EQ(stream_display_policy::loaded_capture_setting(), "kms");
+  EXPECT_TRUE(findings_with_id(idle_configuration_warnings(), "capture_set_aside_by_mode").empty())
+    << "a per-app or per-session mode is that launch's own choice";
+
+  // The host setting comes back at teardown, and the finding stays silent.
+  config::video.capture = "kms";
+  stream_display_policy::forget_host_default();
+  EXPECT_TRUE(findings_with_id(idle_configuration_warnings(), "capture_set_aside_by_mode").empty());
+}
+
+TEST(StreamStatsDoctorTests, MarksACaptureFindingTheHostHasNotVerifiedForTheCurrentSettings) {
+  // The capture evaluation stands until the next launch. After a capture or mode change in
+  // Settings its findings describe settings the host no longer has, and before any evaluation
+  // they describe nothing at all, so each one says whether it was verified for the settings the
+  // host holds now. The host keeps the finding's own grade and text; the console decides how to
+  // show an unverified one.
+  DoctorHostConfigurationGuard guard;
+  load_host_configuration("desktop_display", "wlr");
+  platf::set_capture_backend_substitution_for_tests("wlr -> portal");
+  platf::set_capture_sources_missing_for_tests(false);
+  EXPECT_TRUE(platf::capture_sources_stale()) << "nothing has been evaluated yet";
+
+  auto substituted = findings_with_id(idle_configuration_warnings(), "capture_backend_substituted");
+  ASSERT_EQ(substituted.size(), 1u);
+  EXPECT_EQ(substituted.front().at("stale"), true) << "no recorded evaluation";
+
+  platf::mark_capture_sources_evaluated_for_current_config_for_tests();
+  substituted = findings_with_id(idle_configuration_warnings(), "capture_backend_substituted");
+  ASSERT_EQ(substituted.size(), 1u);
+  EXPECT_EQ(substituted.front().at("stale"), false);
+  EXPECT_EQ(substituted.front().at("severity"), "warning");
+  const auto verified_message = substituted.front().at("message");
+  const auto verified_action = substituted.front().at("action");
+
+  config::video.capture = "kms";
+  substituted = findings_with_id(idle_configuration_warnings(), "capture_backend_substituted");
+  ASSERT_EQ(substituted.size(), 1u);
+  EXPECT_EQ(substituted.front().at("stale"), true) << "the capture setting moved since the evaluation";
+  EXPECT_EQ(substituted.front().at("severity"), "warning") << "the host keeps the grade";
+  EXPECT_EQ(substituted.front().at("message"), verified_message);
+  EXPECT_EQ(substituted.front().at("action"), verified_action);
+
+  config::video.capture = "wlr";
+  substituted = findings_with_id(idle_configuration_warnings(), "capture_backend_substituted");
+  ASSERT_EQ(substituted.size(), 1u);
+  EXPECT_EQ(substituted.front().at("stale"), false) << "the settings the evaluation was built for are back";
+
+  config::video.linux_display.stream_mode = "headless_stream";
+  substituted = findings_with_id(idle_configuration_warnings(), "capture_backend_substituted");
+  ASSERT_EQ(substituted.size(), 1u);
+  EXPECT_EQ(substituted.front().at("stale"), true) << "the mode moved since the evaluation";
+}
+
+TEST(StreamStatsDoctorTests, EveryCaptureEvaluationFindingSaysWhetherItIsVerifiedAndNothingElseDoes) {
+  // The three findings the evaluation produces go stale together; a finding read from
+  // configuration or from a stream has no evaluation to be stale against.
+  DoctorHostConfigurationGuard guard;
+  load_host_configuration("desktop_display", "kms");
+  platf::set_capture_backend_substitution_for_tests("");
+  platf::set_capture_sources_missing_for_tests(true);
+  platf::set_kms_capture_refused_for_tests(true);
+  platf::mark_capture_sources_evaluated_for_current_config_for_tests();
+
+  auto warnings = idle_configuration_warnings();
+  for (const auto id : {"no_capture_backend", "kms_capture_needs_capability"}) {
+    const auto found = findings_with_id(warnings, id);
+    ASSERT_EQ(found.size(), 1u) << id;
+    EXPECT_EQ(found.front().at("stale"), false) << id;
+    EXPECT_EQ(found.front().at("severity"), "fail") << id;
+  }
+  for (const auto &warning : warnings) {
+    const auto id = warning.value("id", std::string {});
+    const bool evaluation_finding = id == "no_capture_backend" ||
+                                    id == "capture_backend_substituted" ||
+                                    id == "kms_capture_needs_capability";
+    EXPECT_EQ(warning.contains("stale"), evaluation_finding) << id;
+  }
+
+  // drm is kms under another name to dispatch, and another setting to the evaluation record.
+  config::video.capture = "drm";
+  warnings = idle_configuration_warnings();
+  for (const auto id : {"no_capture_backend", "kms_capture_needs_capability"}) {
+    const auto found = findings_with_id(warnings, id);
+    ASSERT_EQ(found.size(), 1u) << id;
+    EXPECT_EQ(found.front().at("stale"), true) << id;
+    EXPECT_EQ(found.front().at("severity"), "fail") << id << " keeps its own grade";
+  }
+
+  // A substitution noted by the same evaluation is verified with it. (The test seams record an
+  // evaluation that found nothing, so the missing-backend finding stands beside these two here.)
+  platf::set_capture_backend_substitution_for_tests("kms -> portal");
+  platf::mark_capture_sources_evaluated_for_current_config_for_tests();
+  warnings = idle_configuration_warnings();
+  for (const auto id : {"no_capture_backend", "capture_backend_substituted", "kms_capture_needs_capability"}) {
+    const auto found = findings_with_id(warnings, id);
+    ASSERT_EQ(found.size(), 1u) << id;
+    EXPECT_EQ(found.front().at("stale"), false) << id;
+  }
+  config::video.linux_display.stream_mode = "desktop_takeover";
+  warnings = idle_configuration_warnings();
+  for (const auto id : {"no_capture_backend", "capture_backend_substituted", "kms_capture_needs_capability"}) {
+    const auto found = findings_with_id(warnings, id);
+    ASSERT_EQ(found.size(), 1u) << id;
+    EXPECT_EQ(found.front().at("stale"), true) << id << " goes stale with the others";
+  }
+}
+#endif
 
 TEST(StreamStatsDoctorTests, HdrFindingNamesTheRecipeAndTheCapabilityWhenKmsWasRefused) {
   // Explaining why HDR did not engage is only half of it; the person wants to know what to
