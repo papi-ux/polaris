@@ -144,6 +144,17 @@ each answered about their own whichever started first, and a reconnect is answer
 stream before that stream's first frame. Asked from the host, the reason gives the route every
 stream that reported one shares, and says so when they differ.
 
+A stream's `client_media_interval`, under the Doctor's `advanced_evidence` and in the stream stats, is
+the host's receipt for the newest client media counter report it admitted: the frames that report
+covered and how long it was since the one before it, on the host's arrival clock and on the client's
+own counter clock, kept apart. Beside it, `cadence` counts the reports admitted for that stream owner,
+app session and generation, the baseline and every reset included, keeps the host and client gap of
+the newest coverage reset with the state of the report before it, and the longest host arrival
+interval between two admitted reports. Rejected reports change none of it, it starts over with the
+stream's scope, and it is absent whenever the receipt is. All of it is report timing only: it does not
+say when frames were encoded or sent, so it attributes nothing to congestion, a media rate or
+capacity, and a cadence without gaps is not a measurement of zero video loss.
+
 The session health served beside it, and by the other paired endpoints, takes the same stream's
 codec and encoder for `active_encoder` and `encoder_selection`, for the AV1 part of `decoder_risk`,
 for `safe_codec` and for the CUDA-disabled NVENC finding. What follows from those follows the same

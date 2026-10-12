@@ -13807,3 +13807,455 @@ TEST(StreamStatsMediaIntervalReceipt, PublicationIsMarkedExactlyWhenTheLegacyRes
   EXPECT_FALSE(regressed.observation_published);
   expect_marker_matches(regressed);
 }
+
+namespace {
+  nlohmann::json current_media_interval_json() {
+    return stream_stats::client_media_interval_json(stream_stats::get_current());
+  }
+}  // namespace
+
+// Report cadence evidence beside the receipt: counts and host-arrival timings of the reports the
+// legacy ingest admitted for one scope, through the public ingest, snapshot and JSON interfaces only.
+// On a source without it the receipt is still served and `cadence` is absent, so each case goes red
+// at its first `contains("cadence")` assertion rather than failing to compile.
+TEST(StreamStatsMediaReportCadence, CountsAdmittedReportsFromTheBaselineAndKeepsTheLongestHostInterval) {
+  using namespace std::chrono_literals;
+  media_receipt_scope_t scope("cadence-owner-a", 201, "cadence-launch-a");
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100)).state,
+            stream_stats::client_media_ingest_state_e::baseline);
+  {
+    const auto json = current_media_interval_json();
+    ASSERT_TRUE(json.at("available").get<bool>());
+    ASSERT_TRUE(json.contains("cadence")) << json.dump();
+    const auto &cadence = json.at("cadence");
+    EXPECT_EQ(cadence.at("accepted_reports"), 1) << "the baseline is an admitted report";
+    EXPECT_EQ(cadence.at("gap_resets"), 0);
+    EXPECT_FALSE(cadence.contains("max_host_interval_ms")) << "one report has no interval";
+    EXPECT_FALSE(cadence.contains("last_gap_host_ms"));
+    EXPECT_FALSE(cadence.contains("last_gap_client_ms"));
+    EXPECT_EQ(cadence.at("host_clock"), "host_steady_arrival");
+    EXPECT_EQ(cadence.at("client_clock"), "client_monotonic_counter");
+    EXPECT_FALSE(cadence.at("loss_evidence").get<bool>());
+  }
+
+  // Three seconds of host arrival before the second report, one before the third: the longest stays.
+  stream_stats::age_client_media_counter_baseline_for_tests(3s);
+  const auto second = stream_stats::ingest_client_media_counters(scope.sample(2'000, 200, 196));
+  ASSERT_EQ(second.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(second.receipt.has_value());
+  EXPECT_TRUE(second.receipt->interval_measured);
+  std::int64_t longest = 0;
+  {
+    const auto json = current_media_interval_json();
+    ASSERT_TRUE(json.contains("cadence")) << json.dump();
+    const auto &cadence = json.at("cadence");
+    EXPECT_EQ(cadence.at("accepted_reports"), 2);
+    EXPECT_EQ(cadence.at("gap_resets"), 0);
+    ASSERT_TRUE(cadence.contains("max_host_interval_ms"));
+    longest = cadence.at("max_host_interval_ms").get<std::int64_t>();
+    EXPECT_GE(longest, 3'000);
+    EXPECT_LT(longest, 4'500);
+    EXPECT_EQ(longest, second.receipt->host_duration_ms) << "the only interval so far is the longest";
+  }
+
+  stream_stats::age_client_media_counter_baseline_for_tests(1s);
+  const auto third = stream_stats::ingest_client_media_counters(scope.sample(3'000, 300, 297));
+  ASSERT_EQ(third.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(third.receipt.has_value());
+  EXPECT_GE(third.receipt->host_duration_ms, 1'000);
+  EXPECT_LT(third.receipt->host_duration_ms, longest);
+  const auto waiting = stream_stats::ingest_client_media_counters(scope.sample(3'400, 300, 297));
+  ASSERT_EQ(waiting.state, stream_stats::client_media_ingest_state_e::waiting_for_frames);
+  {
+    const auto json = current_media_interval_json();
+    ASSERT_TRUE(json.contains("cadence")) << json.dump();
+    const auto &cadence = json.at("cadence");
+    EXPECT_EQ(cadence.at("accepted_reports"), 4) << "a zero-frame report is admitted too";
+    EXPECT_EQ(cadence.at("gap_resets"), 0);
+    EXPECT_EQ(cadence.at("max_host_interval_ms").get<std::int64_t>(), longest) << "a shorter interval never lowers it";
+    EXPECT_FALSE(cadence.contains("last_gap_host_ms"));
+  }
+  // The receipt's own interval fields keep their latest-report meaning.
+  EXPECT_EQ(current_media_interval_json().at("interval").at("frames").at("expected"), 0);
+  EXPECT_EQ(current_media_interval_json().at("sequence"), 3);
+}
+
+TEST(StreamStatsMediaReportCadence, AHostGapOverTheBoundIsRecordedAndTheCountersSurviveTheEpochReset) {
+  using namespace std::chrono_literals;
+  media_receipt_scope_t scope("cadence-owner-b", 202, "cadence-launch-b");
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100)).state,
+            stream_stats::client_media_ingest_state_e::baseline);
+  const auto observed = stream_stats::ingest_client_media_counters(scope.sample(2'000, 200, 196));
+  ASSERT_EQ(observed.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(observed.receipt.has_value());
+
+  stream_stats::age_client_media_counter_baseline_for_tests(6s);
+  const auto gapped = stream_stats::ingest_client_media_counters(scope.sample(2'500, 260, 256));
+  ASSERT_EQ(gapped.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+  ASSERT_TRUE(gapped.receipt.has_value());
+  EXPECT_GT(gapped.receipt->epoch, observed.receipt->epoch);
+  EXPECT_EQ(gapped.receipt->sequence, 0u);
+  EXPECT_FALSE(gapped.receipt->interval_measured);
+  std::int64_t gap_host_ms = 0;
+  {
+    const auto json = current_media_interval_json();
+    ASSERT_TRUE(json.contains("cadence")) << json.dump();
+    const auto &cadence = json.at("cadence");
+    EXPECT_EQ(cadence.at("accepted_reports"), 3) << "the reset is an admitted report and the count survives the epoch";
+    EXPECT_EQ(cadence.at("gap_resets"), 1);
+    ASSERT_TRUE(cadence.contains("last_gap_host_ms"));
+    ASSERT_TRUE(cadence.contains("last_gap_client_ms"));
+    gap_host_ms = cadence.at("last_gap_host_ms").get<std::int64_t>();
+    EXPECT_GE(gap_host_ms, 6'000) << "the aged host gap that reset coverage";
+    EXPECT_LT(gap_host_ms, 7'500);
+    EXPECT_EQ(cadence.at("last_gap_client_ms").get<std::uint64_t>(), 500u) << "the client's own small difference";
+    EXPECT_EQ(cadence.at("last_gap_preceding_ingest_state"), "observed");
+    ASSERT_TRUE(cadence.contains("max_host_interval_ms"));
+    EXPECT_EQ(cadence.at("max_host_interval_ms").get<std::int64_t>(), gap_host_ms) << "the gap is the longest arrival interval";
+    // Still the receipt of a reset: no interval, no loss figure, nothing published.
+    EXPECT_FALSE(json.at("interval").at("measured").get<bool>());
+    EXPECT_EQ(json.at("ingest_state"), "coverage_gap_reset");
+    EXPECT_FALSE(json.at("network_evidence_published").get<bool>());
+  }
+
+  // The next report measures in the new epoch; the cadence it carries is the scope's, not the epoch's.
+  const auto resumed = stream_stats::ingest_client_media_counters(scope.sample(3'500, 320, 315));
+  ASSERT_EQ(resumed.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(resumed.receipt.has_value());
+  EXPECT_EQ(resumed.receipt->epoch, gapped.receipt->epoch);
+  EXPECT_EQ(resumed.receipt->sequence, 1u);
+  EXPECT_EQ(resumed.receipt->frames_expected, 60u);
+  {
+    const auto json = current_media_interval_json();
+    ASSERT_TRUE(json.contains("cadence")) << json.dump();
+    const auto &cadence = json.at("cadence");
+    EXPECT_EQ(cadence.at("accepted_reports"), 4);
+    EXPECT_EQ(cadence.at("gap_resets"), 1);
+    EXPECT_EQ(cadence.at("last_gap_host_ms").get<std::int64_t>(), gap_host_ms) << "a measured interval does not rewrite the gap";
+    EXPECT_EQ(cadence.at("last_gap_client_ms").get<std::uint64_t>(), 500u);
+    EXPECT_EQ(cadence.at("last_gap_preceding_ingest_state"), "observed");
+    EXPECT_EQ(cadence.at("max_host_interval_ms").get<std::int64_t>(), gap_host_ms);
+    EXPECT_TRUE(json.at("interval").at("measured").get<bool>());
+    EXPECT_EQ(json.at("interval").at("frames").at("expected"), 60);
+  }
+}
+
+TEST(StreamStatsMediaReportCadence, AnUnsignedClientGapIsRecordedBesideItsSmallHostGap) {
+  {
+    // The client difference past the signed range: the legacy ingest resets coverage on it, and the
+    // cadence keeps that unsigned magnitude beside a host gap that was well inside the bound.
+    media_receipt_scope_t scope("cadence-owner-c", 203, "cadence-launch-c");
+    ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1, 100, 100)).state,
+              stream_stats::client_media_ingest_state_e::baseline);
+    const std::uint64_t client_gap = (1ull << 63) + 10;
+    const auto huge = stream_stats::ingest_client_media_counters(scope.sample(1 + client_gap, 120, 120));
+    ASSERT_EQ(huge.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+    EXPECT_FALSE(huge.observation_published);
+    const auto json = current_media_interval_json();
+    ASSERT_TRUE(json.contains("cadence")) << json.dump();
+    const auto &cadence = json.at("cadence");
+    EXPECT_EQ(cadence.at("accepted_reports"), 2);
+    EXPECT_EQ(cadence.at("gap_resets"), 1);
+    EXPECT_EQ(cadence.at("last_gap_client_ms").get<std::uint64_t>(), client_gap);
+    const auto host_gap = cadence.at("last_gap_host_ms").get<std::int64_t>();
+    EXPECT_GE(host_gap, 0);
+    EXPECT_LT(host_gap, 5'000) << "the host saw no pause; only the client's counter jumped";
+    EXPECT_EQ(cadence.at("last_gap_preceding_ingest_state"), "baseline");
+    EXPECT_EQ(cadence.at("max_host_interval_ms").get<std::int64_t>(), host_gap);
+    EXPECT_FALSE(stream_stats::get_current().packet_loss_available);
+  }
+  {
+    // The largest difference the counter can express is kept exactly.
+    media_receipt_scope_t scope("cadence-owner-c2", 204, "cadence-launch-c2");
+    ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1, 100, 100)).state,
+              stream_stats::client_media_ingest_state_e::baseline);
+    ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(UINT64_MAX, 120, 120)).state,
+              stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+    const auto json = current_media_interval_json();
+    ASSERT_TRUE(json.contains("cadence")) << json.dump();
+    EXPECT_EQ(json.at("cadence").at("last_gap_client_ms").get<std::uint64_t>(), UINT64_MAX - 1);
+    EXPECT_EQ(json.at("cadence").at("gap_resets"), 1);
+  }
+}
+
+TEST(StreamStatsMediaReportCadence, ACounterRegressionKeepsTheCountersAndRecordsNoGap) {
+  using namespace std::chrono_literals;
+  media_receipt_scope_t scope("cadence-owner-d", 205, "cadence-launch-d");
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100)).state,
+            stream_stats::client_media_ingest_state_e::baseline);
+  stream_stats::age_client_media_counter_baseline_for_tests(1s);
+  const auto counted = stream_stats::ingest_client_media_counters(scope.sample(2'000, 160, 160));
+  ASSERT_EQ(counted.state, stream_stats::client_media_ingest_state_e::observed);
+  ASSERT_TRUE(counted.receipt.has_value());
+  const auto before = current_media_interval_json();
+  ASSERT_TRUE(before.contains("cadence")) << before.dump();
+  const auto longest = before.at("cadence").at("max_host_interval_ms").get<std::int64_t>();
+  EXPECT_GE(longest, 1'000);
+
+  const auto regressed = stream_stats::ingest_client_media_counters(scope.sample(3'000, 10, 10));
+  ASSERT_EQ(regressed.state, stream_stats::client_media_ingest_state_e::counter_epoch_reset);
+  ASSERT_TRUE(regressed.receipt.has_value());
+  EXPECT_GT(regressed.receipt->epoch, counted.receipt->epoch);
+  const auto json = current_media_interval_json();
+  ASSERT_TRUE(json.contains("cadence")) << json.dump();
+  const auto &cadence = json.at("cadence");
+  EXPECT_EQ(cadence.at("accepted_reports"), 3) << "a counter regression is admitted and keeps the scope's count";
+  EXPECT_EQ(cadence.at("gap_resets"), 0) << "a regression is not a coverage gap";
+  EXPECT_FALSE(cadence.contains("last_gap_host_ms"));
+  EXPECT_FALSE(cadence.contains("last_gap_client_ms"));
+  EXPECT_FALSE(cadence.contains("last_gap_preceding_ingest_state"));
+  EXPECT_EQ(cadence.at("max_host_interval_ms").get<std::int64_t>(), longest) << "its short arrival interval does not lower the longest";
+
+  const auto resumed = stream_stats::ingest_client_media_counters(scope.sample(4'000, 70, 69));
+  ASSERT_EQ(resumed.state, stream_stats::client_media_ingest_state_e::observed);
+  EXPECT_EQ(current_media_interval_json().at("cadence").at("accepted_reports"), 4);
+  EXPECT_EQ(current_media_interval_json().at("cadence").at("gap_resets"), 0);
+}
+
+TEST(StreamStatsMediaReportCadence, RejectedReportsChangeNoCounter) {
+  using namespace std::chrono_literals;
+  media_receipt_scope_t scope("cadence-owner-e", 206, "cadence-launch-e");
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100)).state,
+            stream_stats::client_media_ingest_state_e::baseline);
+  stream_stats::age_client_media_counter_baseline_for_tests(6s);
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(2'000, 200, 190)).state,
+            stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(3'000, 300, 290)).state,
+            stream_stats::client_media_ingest_state_e::observed);
+  const auto before = current_media_interval_json();
+  ASSERT_TRUE(before.contains("cadence")) << before.dump();
+  EXPECT_EQ(before.at("cadence").at("accepted_reports"), 3);
+  EXPECT_EQ(before.at("cadence").at("gap_resets"), 1);
+
+  auto duplicate = scope.sample(3'000, 300, 290);
+  auto earlier = scope.sample(2'500, 310, 300);
+  auto impossible = scope.sample(3'500, 310, 300);
+  impossible.frames_received = 330;  // more received than expected
+  impossible.frames_lost = 0;
+  auto malformed = scope.sample(3'600, 310, 300);
+  malformed.frames_lost = 3;  // does not add up
+  auto other_token = scope.sample(3'700, 310, 300);
+  other_token.app_session_id = "cadence-launch-other";
+  auto other_generation = scope.sample(3'800, 310, 300);
+  other_generation.session_generation = scope.generation + 1;
+  auto other_owner = scope.sample(3'900, 310, 300);
+  other_owner.owner_uuid = "cadence-owner-unknown";
+  auto zero_clock = scope.sample(4'000, 310, 300);
+  zero_clock.client_monotonic_ms = 0;
+  for (const auto &sample : {duplicate, earlier, impossible, malformed, other_token, other_generation, other_owner, zero_clock}) {
+    const auto rejected = stream_stats::ingest_client_media_counters(sample);
+    EXPECT_FALSE(rejected.accepted);
+    EXPECT_FALSE(rejected.receipt.has_value());
+  }
+  const auto after = current_media_interval_json();
+  ASSERT_TRUE(after.contains("cadence")) << after.dump();
+  EXPECT_EQ(after.at("cadence"), before.at("cadence")) << "no rejected report counts, gaps or extends an interval";
+  EXPECT_EQ(after, before) << "the receipt is untouched too";
+
+  // The next admitted report counts from where the scope left off.
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(4'100, 320, 310)).state,
+            stream_stats::client_media_ingest_state_e::observed);
+  EXPECT_EQ(current_media_interval_json().at("cadence").at("accepted_reports"), 4);
+  EXPECT_EQ(current_media_interval_json().at("cadence").at("gap_resets"), 1);
+}
+
+TEST(StreamStatsMediaReportCadence, ANewScopeStartsOverAndNeverServesTheOldScopesValues) {
+  using namespace std::chrono_literals;
+  nlohmann::json old_snapshot_json;
+  stream_stats::stats_t old_snapshot;
+  {
+    media_receipt_scope_t scope("cadence-owner-f", 207, "cadence-launch-f");
+    ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100)).state,
+              stream_stats::client_media_ingest_state_e::baseline);
+    stream_stats::age_client_media_counter_baseline_for_tests(6s);
+    ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(2'000, 200, 200)).state,
+              stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+    old_snapshot = stream_stats::get_current();
+    old_snapshot_json = stream_stats::client_media_interval_json(old_snapshot);
+    ASSERT_TRUE(old_snapshot_json.contains("cadence")) << old_snapshot_json.dump();
+    EXPECT_EQ(old_snapshot_json.at("cadence").at("gap_resets"), 1);
+    EXPECT_EQ(old_snapshot_json.at("cadence").at("accepted_reports"), 2);
+
+    // The same lifecycle registered again: the receipt starts over, and so does the cadence it carries.
+    stream_stats::start_session_timing(scope.owner, scope.generation, scope.token);
+    EXPECT_FALSE(current_receipt().available);
+    EXPECT_FALSE(current_media_interval_json().contains("cadence"));
+    const auto continued = stream_stats::ingest_client_media_counters(scope.sample(3'000, 260, 260));
+    ASSERT_EQ(continued.state, stream_stats::client_media_ingest_state_e::observed);
+    const auto restarted = current_media_interval_json();
+    ASSERT_TRUE(restarted.contains("cadence")) << restarted.dump();
+    EXPECT_EQ(restarted.at("cadence").at("accepted_reports"), 1);
+    EXPECT_EQ(restarted.at("cadence").at("gap_resets"), 0);
+    EXPECT_FALSE(restarted.at("cadence").contains("last_gap_host_ms"));
+    EXPECT_FALSE(restarted.at("cadence").contains("max_host_interval_ms"));
+  }
+  // A new generation of the same owner inherits nothing.
+  media_receipt_scope_t next("cadence-owner-f", 208, "cadence-launch-f2");
+  EXPECT_FALSE(current_receipt().available);
+  EXPECT_FALSE(current_media_interval_json().contains("cadence"));
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(next.sample(5'000, 10, 10)).state,
+            stream_stats::client_media_ingest_state_e::baseline);
+  const auto fresh = current_media_interval_json();
+  ASSERT_TRUE(fresh.contains("cadence")) << fresh.dump();
+  EXPECT_EQ(fresh.at("cadence").at("accepted_reports"), 1);
+  EXPECT_EQ(fresh.at("cadence").at("gap_resets"), 0);
+  EXPECT_FALSE(fresh.at("cadence").contains("last_gap_host_ms"));
+  EXPECT_FALSE(fresh.at("cadence").contains("last_gap_client_ms"));
+  EXPECT_FALSE(fresh.at("cadence").contains("max_host_interval_ms"));
+
+  // The old scope's snapshot, served as if it were this generation's, shows nothing of either.
+  auto relabelled = old_snapshot;
+  relabelled.session_generation = next.generation;
+  relabelled.app_session_id = next.token;
+  const auto served = stream_stats::client_media_interval_json(relabelled);
+  EXPECT_FALSE(served.at("available").get<bool>());
+  EXPECT_EQ(served.at("reason"), "session_scope_unavailable");
+  EXPECT_FALSE(served.contains("cadence"));
+  EXPECT_FALSE(served.contains("interval"));
+  // And the old snapshot itself still reads as of its own copy.
+  EXPECT_EQ(stream_stats::client_media_interval_json(old_snapshot), old_snapshot_json);
+}
+
+TEST(StreamStatsMediaReportCadence, ItIsOmittedWithoutAReceiptAndAgreesInStatsAndDoctor) {
+  using namespace std::chrono_literals;
+  media_receipt_scope_t scope("cadence-owner-g", 209, "cadence-launch-g");
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100)).state,
+            stream_stats::client_media_ingest_state_e::baseline);
+  stream_stats::age_client_media_counter_baseline_for_tests(6s);
+  ASSERT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'500, 150, 150)).state,
+            stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+  const auto snapshot = stream_stats::get_current();
+  const auto as_of = stream_stats::client_media_interval_json(snapshot);
+  ASSERT_TRUE(as_of.at("available").get<bool>());
+  ASSERT_TRUE(as_of.contains("cadence")) << as_of.dump();
+  EXPECT_EQ(as_of.at("cadence").at("gap_resets"), 1);
+
+  // The same object wherever the receipt is served, and only there.
+  const auto stats_json = nlohmann::json::parse(snapshot.to_json());
+  EXPECT_EQ(stats_json.at("client_media_interval").at("cadence"), as_of.at("cadence"));
+  const auto doctor = stream_stats::build_doctor_json(snapshot, nlohmann::json::object());
+  EXPECT_EQ(doctor.at("advanced_evidence").at("client_media_interval").at("cadence"), as_of.at("cadence"));
+  const auto text = stats_json.dump();
+  std::size_t mentions = 0;
+  for (auto at = text.find("\"gap_resets\""); at != std::string::npos; at = text.find("\"gap_resets\"", at + 1)) ++mentions;
+  EXPECT_EQ(mentions, 1u) << "the cadence is served beside the receipt and nowhere else";
+  EXPECT_EQ(text.find("cadence-owner-g"), std::string::npos);
+  EXPECT_EQ(text.find("cadence-launch-g"), std::string::npos);
+
+  // Unavailable receipts carry no cadence: not for an idle snapshot, another app session, another
+  // generation, or a scope with no receipt at all.
+  auto idle = snapshot;
+  idle.streaming = false;
+  EXPECT_EQ(stream_stats::client_media_interval_json(idle).at("reason"), "no_stream");
+  EXPECT_FALSE(stream_stats::client_media_interval_json(idle).contains("cadence"));
+  auto other_session = snapshot;
+  other_session.app_session_id = "cadence-launch-replacement";
+  EXPECT_FALSE(stream_stats::client_media_interval_json(other_session).contains("cadence"));
+  auto other_generation = snapshot;
+  other_generation.session_generation = scope.generation + 1;
+  EXPECT_FALSE(stream_stats::client_media_interval_json(other_generation).contains("cadence"));
+  stream_stats::stats_t empty {};
+  empty.streaming = true;
+  empty.session_generation = scope.generation;
+  empty.app_session_id = scope.token;
+  const auto none = stream_stats::client_media_interval_json(empty);
+  EXPECT_FALSE(none.at("available").get<bool>());
+  EXPECT_EQ(none.at("reason"), "no_receipt");
+  EXPECT_FALSE(none.contains("cadence"));
+  EXPECT_EQ(none.at("media_rate_attribution").at("state"), "unknown");
+
+  // The stream ending clears the receipt, and the cadence with it.
+  stream_stats::update_stream_active(false);
+  EXPECT_FALSE(current_receipt().available);
+  const auto ended = current_media_interval_json();
+  EXPECT_FALSE(ended.at("available").get<bool>());
+  EXPECT_FALSE(ended.contains("cadence"));
+}
+
+TEST(StreamStatsMediaReportCadence, ItChangesNoControllerOrVerdictTrajectory) {
+  using namespace std::chrono_literals;
+  struct run_t {
+    adaptive_bitrate::state_t controller;
+    stream_stats::network_verdict_t verdict;
+    nlohmann::json cadence;
+  };
+  // One identical report sequence per scope, with the controller hearing the published reports.
+  const auto run = [](std::uint64_t generation, const std::string &token) {
+    config::video.adaptive_bitrate.enabled = true;
+    config::video.adaptive_bitrate.min_bitrate_kbps = 2000;
+    config::video.adaptive_bitrate.max_bitrate_kbps = 50000;
+    adaptive_bitrate::load_config();
+    adaptive_bitrate::reset();
+    run_t out;
+    {
+      media_receipt_scope_t scope("cadence-owner-pin", generation, token);
+      adaptive_bitrate::set_enabled(true);
+      adaptive_bitrate::set_runtime_update_supported(true);
+      adaptive_bitrate::set_base_bitrate(20000);
+      adaptive_bitrate::set_session_scope(generation, token, true);
+      EXPECT_EQ(stream_stats::ingest_client_media_counters(scope.sample(1'000, 100, 100)).state,
+                stream_stats::client_media_ingest_state_e::baseline);
+      const auto observed = stream_stats::ingest_client_media_counters(scope.sample(2'000, 200, 196));
+      EXPECT_EQ(observed.state, stream_stats::client_media_ingest_state_e::observed);
+      EXPECT_TRUE(observed.observation_published);
+      const auto controller_before_gap = adaptive_bitrate::get_state();
+      const auto verdict_before_gap = stream_stats::current_network_verdict();
+
+      // A coverage reset publishes nothing: the controller and the verdict stand exactly as they were,
+      // whatever the cadence recorded about the gap.
+      stream_stats::age_client_media_counter_baseline_for_tests(6s);
+      const auto gapped = stream_stats::ingest_client_media_counters(scope.sample(2'500, 260, 256));
+      EXPECT_EQ(gapped.state, stream_stats::client_media_ingest_state_e::coverage_gap_reset);
+      EXPECT_FALSE(gapped.observation_published);
+      const auto controller_after_gap = adaptive_bitrate::get_state();
+      EXPECT_DOUBLE_EQ(controller_after_gap.ewma_packet_loss, controller_before_gap.ewma_packet_loss);
+      EXPECT_DOUBLE_EQ(controller_after_gap.ewma_rtt_ms, controller_before_gap.ewma_rtt_ms);
+      EXPECT_EQ(controller_after_gap.target_bitrate_kbps, controller_before_gap.target_bitrate_kbps);
+      EXPECT_EQ(controller_after_gap.state, controller_before_gap.state);
+      EXPECT_EQ(controller_after_gap.reason, controller_before_gap.reason);
+      const auto verdict_after_gap = stream_stats::current_network_verdict();
+      EXPECT_EQ(verdict_after_gap.media_samples, verdict_before_gap.media_samples);
+      EXPECT_DOUBLE_EQ(verdict_after_gap.loss_pct, verdict_before_gap.loss_pct);
+      EXPECT_EQ(verdict_after_gap.loss_available, verdict_before_gap.loss_available);
+      EXPECT_EQ(verdict_after_gap.frames_expected, verdict_before_gap.frames_expected);
+      EXPECT_EQ(verdict_after_gap.frames_lost, verdict_before_gap.frames_lost);
+
+      const auto resumed = stream_stats::ingest_client_media_counters(scope.sample(3'500, 360, 350));
+      EXPECT_EQ(resumed.state, stream_stats::client_media_ingest_state_e::observed);
+      EXPECT_TRUE(resumed.observation_published);
+      out.controller = adaptive_bitrate::get_state();
+      out.verdict = stream_stats::current_network_verdict();
+      const auto json = current_media_interval_json();
+      EXPECT_TRUE(json.contains("cadence")) << json.dump();
+      out.cadence = json.value("cadence", nlohmann::json::object());
+      adaptive_bitrate::set_session_scope(0, {}, false);
+      adaptive_bitrate::set_enabled(false);
+    }
+    adaptive_bitrate::reset();
+    config::video.adaptive_bitrate.enabled = false;
+    adaptive_bitrate::load_config();
+    return out;
+  };
+
+  const auto first = run(210, "cadence-launch-pin-1");
+  const auto second = run(211, "cadence-launch-pin-2");
+  // Identical inputs, identical controller and verdict figures, whatever the cadence holds.
+  EXPECT_DOUBLE_EQ(second.controller.ewma_packet_loss, first.controller.ewma_packet_loss);
+  EXPECT_DOUBLE_EQ(second.controller.ewma_rtt_ms, first.controller.ewma_rtt_ms);
+  EXPECT_EQ(second.controller.target_bitrate_kbps, first.controller.target_bitrate_kbps);
+  EXPECT_EQ(second.controller.state, first.controller.state);
+  EXPECT_EQ(second.controller.reason, first.controller.reason);
+  EXPECT_EQ(second.verdict.media_samples, first.verdict.media_samples);
+  EXPECT_DOUBLE_EQ(second.verdict.loss_pct, first.verdict.loss_pct);
+  EXPECT_EQ(second.verdict.loss_available, first.verdict.loss_available);
+  EXPECT_EQ(second.verdict.loss_elevated, first.verdict.loss_elevated);
+  EXPECT_EQ(second.verdict.frames_expected, first.verdict.frames_expected);
+  EXPECT_EQ(second.verdict.frames_lost, first.verdict.frames_lost);
+  // The cadence was recorded in both, identically, and reached neither record the decisions use.
+  ASSERT_FALSE(first.cadence.empty());
+  EXPECT_EQ(second.cadence, first.cadence);
+  EXPECT_EQ(first.cadence.at("accepted_reports"), 4);
+  EXPECT_EQ(first.cadence.at("gap_resets"), 1);
+  EXPECT_EQ(stream_stats::network_verdict_json(first.verdict).dump().find("cadence"), std::string::npos);
+  EXPECT_EQ(stream_stats::network_verdict_json(first.verdict).dump().find("gap_resets"), std::string::npos);
+}
