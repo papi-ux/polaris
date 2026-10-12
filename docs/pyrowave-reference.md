@@ -10,7 +10,7 @@ PyroWave cannot stream the desktop at all, SDR included, when capture goes throu
 HDR frames in a format PyroWave cannot read. This happens with **Request HDR when host supports it**
 on or off in Nova. The format check comes before any HDR decision, so both end the same way.
 
-From Polaris 1.4.14 the host reads the display's format before the stream starts and refuses it. A
+From Polaris 1.5.0 the host reads the display's format before the stream starts and refuses it. A
 Nova that tells the host at launch that it will ask for PyroWave shows the reason, which names HDR;
 an older Nova shows an RTSP handshake failure with error 503. Polaris 1.4.13 lets Nova connect, show
 no picture, then end the stream. If the host can run Private Stream, which captures its own session
@@ -172,7 +172,7 @@ Polaris encodes PyroWave with Vulkan compute rather than with the GPU's video en
 encoder needs a Vulkan 1.3 GPU with the features its shaders use. The host checks its GPU once per
 Polaris run, the first time a client or the web console asks what it serves.
 
-From Polaris 1.4.14 the web console answers without a stream. Open **Settings > Encoder Profiles**;
+From Polaris 1.5.0 the web console answers without a stream. Open **Settings > Encoder Profiles**;
 on a Linux host every encoder tab starts with **Advertised codec support**, and its PyroWave row says
 **Available** or **Not available**. When it is not available, the row shows the host's reason and
 message, the same ones a client is given. When the host offers PyroWave only to stream modes with
@@ -250,7 +250,7 @@ SDR 4:2:0 only.
 
 ### Bitrate advice
 
-In Nova's 1.4.14 beta, use the host's recommendation for the selected resolution, frame rate,
+In Nova's 1.5.0 beta, use the host's recommendation for the selected resolution, frame rate,
 colour format and audio. The shared fallback uses the same handheld 31 dB model: at 1080p120
 4:4:4, 10% FEC and stereo audio it asks for 214.898 Mbps, leaving 192.396 Mbps of video. Auto
 and Use recommended stay at or below 300 Mbps. A number entered by hand can reach a host's
@@ -273,7 +273,7 @@ A **Quality Preset**, the first item in Client Stream Defaults, sets resolution,
 together, and some presets set 10, 20 or 50 Mbps. After any change of preset, set the bitrate and
 the codec again.
 
-That advice is Nova 1.4.13's, a flat 0.73 bits per pixel judged by eye. From Polaris 1.4.14 the host
+That advice is Nova 1.4.13's, a flat 0.73 bits per pixel judged by eye. From Polaris 1.5.0 the host
 quotes the codec author's own model instead, which asks for more at small sizes and less at 4K
 ([How Polaris advises and tunes PyroWave](#how-polaris-advises-and-tunes-pyrowave)).
 
@@ -296,7 +296,7 @@ it shows the codec as PYRO, and a long press on it opens Command Center.
 
 ## Nova for Linux
 
-The standard Nova Linux 1.4.14 beta includes PyroWave; it does not need the separate experimental
+The standard Nova Linux 1.5.0 beta includes PyroWave; it does not need the separate experimental
 bundle used by 1.4.13. Play Setup checks the host profile, local decoder and selected stream size
 before launch, and explains a refusal. It uses host advice first and the calibrated model as its
 fallback, for the stream's actual colour format and mode. Auto and Use recommended stay at or
@@ -306,7 +306,7 @@ fall back to another codec.
 
 ### The separate 1.4.13 Alpha
 
-The instructions below apply to the old 1.4.13 packages, not the standard 1.4.14 beta.
+The instructions below apply to the old 1.4.13 packages, not the standard 1.5.0 beta.
 
 Nova 1.4.13 attaches an experimental PyroWave build of Nova for Linux to
 [its release](https://github.com/papi-ux/nova/releases/tag/v1.4.13):
@@ -421,7 +421,7 @@ their code in brackets; every other line below contains `PyroWave:`.
 | `POLARIS_PYROWAVE_GPU_INPUT is off, so frames are converted on the CPU` | That environment variable forced the CPU converter. If this run's log has no such line, it is not set. |
 | `Refusing launch [pyrowave_capture_unreadable]: PyroWave cannot ...`, or the same after `Refusing resume` or `Refusing RTSP setup` | The display capture would read is in a format PyroWave cannot read, so the stream was refused before it started; the rest of the line says which. See [A KDE host with a display in HDR](#a-kde-host-with-a-display-in-hdr). |
 | `Refusing resume [capture_in_use_by_other_codec]: Another stream on this host is running ...`, or the same after `Refusing RTSP setup` | Another stream on the host is capturing for a different codec, one PyroWave and the other not, and one capture cannot serve both. |
-| `Error: PyroWave: capture is handing over a dmabuf in a format this codec cannot read (fourcc ...)` | Capture hands over a format PyroWave cannot read, identified by its fourcc (the four character code of a pixel format), and the stream ends. From Polaris 1.4.14 this is a backstop for a display whose format changed after the stream started. See [A KDE host with a display in HDR](#a-kde-host-with-a-display-in-hdr). |
+| `Error: PyroWave: capture is handing over a dmabuf in a format this codec cannot read (fourcc ...)` | Capture hands over a format PyroWave cannot read, identified by its fourcc (the four character code of a pixel format), and the stream ends. From Polaris 1.5.0 this is a backstop for a display whose format changed after the stream started. See [A KDE host with a display in HDR](#a-kde-host-with-a-display-in-hdr). |
 | `this client negotiated HDR and the captured display is not in HDR` | The client asked for HDR and the captured display is not in HDR, or its HDR metadata could not be read, so the stream is refused, whatever the capture route. See [Limits](#limits). |
 | `over 300 frames, ... ms and encode ... ms a frame` | The average cost of a frame, after 300 frames (five seconds at 60 fps), then every 18,000 frames (five minutes). |
 
@@ -430,7 +430,7 @@ means the largest frames went out without their error correction (see [Limits](#
 
 ## How Polaris advises and tunes PyroWave
 
-From Polaris 1.4.14 the host carries PyroWave's own bitrate model. The codec's author ran four
+From Polaris 1.5.0 the host carries PyroWave's own bitrate model. The codec's author ran four
 lossless game clips through it at every 16:9 size from 1280x720 to 3840x2160, scored the results
 with PSNR-HVS-M-H, an objective metric weighted for how far away the picture is watched, and fitted
 the bitrate each quality needed. Polaris reads that fit at two distances, each with its own quality:
@@ -443,7 +443,7 @@ the bitrate each quality needed. Polaris reads that fit at two distances, each w
   author calls good quality, until it is checked on a big screen.
 
 The host computes these figures itself, and a fixture in Polaris's tests pins them at both
-targets. Nova's 1.4.14 beta reads the host advice first and mirrors the 31 dB handheld target in
+targets. Nova's 1.5.0 beta reads the host advice first and mirrors the 31 dB handheld target in
 its fallback. At 1920x1080, 120 fps and 4:4:4, with default FEC and stereo audio, the exact
 request is 214.898 Mbps and the encoder figure is 192.396 Mbps. Older clients may still show the
 35 dB estimate, about 400 Mbps; it is not the current handheld recommendation.
@@ -559,7 +559,7 @@ outgrow its error correction ([Frame budget and FEC](#frame-budget-and-fec)).
 - **Other clients are unaffected.** Polaris adds PyroWave to the codecs it offers every client, when
   its GPU can run the encoder and the session is not a Space. Moonlight and stable Nova ignore it and
   keep using H.264, HEVC or AV1.
-- **It costs bandwidth.** It is intra only, so every frame is a key frame. From Polaris 1.4.14 the
+- **It costs bandwidth.** It is intra only, so every frame is a key frame. From Polaris 1.5.0 the
   host quotes the codec author's own model, which asks about 101 to 761 Mbps across the modes in
   [How Polaris advises and tunes PyroWave](#how-polaris-advises-and-tunes-pyrowave), and recommends
   no more than 300 Mbps on its own. Nova 1.4.13
@@ -638,7 +638,7 @@ fewer, or with 1024-byte packets, a frame that fills its budget outgrows it and 
 parity. The encoder accepts bitrate changes live, without restarting the stream. A frame that leaves
 at 99% of its budget or more counts toward `ceiling_frame_share` in session status. The encode
 happens where the frame is handed to the codec,
-and from Polaris 1.4.14 that time counts in `encode_time_ms`. Live Tuning does not cut the bitrate
+and from Polaris 1.5.0 that time counts in `encode_time_ms`. Live Tuning does not cut the bitrate
 for it, since a lower bitrate does not shorten it.
 
 ### Capture routes and the `capture` setting
@@ -670,7 +670,7 @@ for as long as the display keeps its mode. A KDE display in HDR scans out `ABGR1
 `Error: PyroWave: capture is handing over a dmabuf in a format this codec cannot read (fourcc
 1211384385); ending the stream, because that does not change while the display keeps its mode`.
 This check runs before any dynamic range decision, so an SDR request ends the same way.
-Polaris 1.4.13's diagnostics and its `kms:` log line label that format `bgra8`. From Polaris 1.4.14
+Polaris 1.4.13's diagnostics and its `kms:` log line label that format `bgra8`. From Polaris 1.5.0
 the log names it `AB4H`, Doctor raises `capture_format_unreadable_by_pyrowave`, and the host reads
 the scanout's format before the stream and refuses it with `pyrowave_capture_unreadable`. That
 refuses earlier and says why; it is not a fix, because the conversion for sixteen bit float is not

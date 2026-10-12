@@ -226,7 +226,7 @@ namespace output_layout {
     /// What absolute input spans. Only its width and height reach input.
     rect_t extents;
     /// Whether each absolute point counts from the screen's corner. When it does not, every point
-    /// counts from the desktop's corner, as it did on Linux before 1.4.14, whatever the corner.
+    /// counts from the desktop's corner, as it did on Linux before 1.5.0, whatever the corner.
     bool counts_from_screen = true;
   };
 

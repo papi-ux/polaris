@@ -178,7 +178,7 @@ capture path, HDR mode, or experimental Browser Stream setup.
 ### PyroWave and Doctor
 
 PyroWave is experimental SDR and needs compatible host, client and network
-capabilities. Nova Linux includes it in the standard 1.4.14 bundle, with a device
+capabilities. Nova Linux includes it in the standard 1.5.0 bundle, with a device
 check on selection. Read the [PyroWave guide](https://papi-ux.com/docs/pyrowave/)
 for request versus encoder units and limits; a suggested target does not prove
 network capacity.
