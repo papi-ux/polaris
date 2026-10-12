@@ -1,8 +1,274 @@
+# The release tag and base URL below are cache entries so a person can override them, which also
+# means a build tree keeps whatever they were when it was first configured, while the archive
+# hashes further down are read from this file every time. That is how a warm tree broke (#203,
+# GitHub #791): a tree first configured on an older pin kept that pin's tag and base URL,
+# downloaded the old archive and failed the new hash check, and overriding only the tag still
+# fetched from the cached base URL. The resolution below runs before anything is downloaded:
+# a cached tag still equal to the default this file recorded on an earlier configure moves with
+# the source, a tag a person chose stays, and a cached tag this tree cannot account for stops
+# with both tags and `cmake --fresh` in the message. The base URL follows the effective tag
+# unless it was set to something else on purpose.
+
+# Where a release's assets live. Only the tests point this elsewhere.
+if(NOT DEFINED POLARIS_PREPARED_FFMPEG_RELEASE_ROOT_URL)
+  set(POLARIS_PREPARED_FFMPEG_RELEASE_ROOT_URL
+      "https://github.com/LizardByte/build-deps/releases/download")
+endif()
+
+# The tag this file pins, read from its own declaration below with the same anchored pattern the
+# media provenance collector uses, so the pin is declared exactly once.
+function(polaris_prepared_ffmpeg_source_default_release_tag out_var)
+  file(STRINGS "${CMAKE_CURRENT_FUNCTION_LIST_FILE}" declarations
+      REGEX "^set\\(POLARIS_PREPARED_FFMPEG_RELEASE_TAG \"[^\"]+\"")
+  list(LENGTH declarations count)
+  if(NOT count EQUAL 1)
+    message(FATAL_ERROR
+        "prepared_ffmpeg.cmake must declare POLARIS_PREPARED_FFMPEG_RELEASE_TAG exactly once; "
+        "found ${count} declarations")
+  endif()
+  string(REGEX REPLACE "^set\\(POLARIS_PREPARED_FFMPEG_RELEASE_TAG \"([^\"]+)\".*$" "\\1"
+      tag "${declarations}")
+  set("${out_var}" "${tag}" PARENT_SCOPE)
+endfunction()
+
+function(polaris_prepared_ffmpeg_default_base_url out_var release_tag)
+  string(REGEX REPLACE "/$" "" root "${POLARIS_PREPARED_FFMPEG_RELEASE_ROOT_URL}")
+  set("${out_var}" "${root}/${release_tag}" PARENT_SCOPE)
+endfunction()
+
+# The release tag a base URL in the default form names, or "" for any other URL (a mirror, a
+# local directory, anything not directly under the release root).
+function(polaris_prepared_ffmpeg_base_url_release_tag out_var base_url)
+  string(REGEX REPLACE "/$" "" root "${POLARIS_PREPARED_FFMPEG_RELEASE_ROOT_URL}")
+  string(REGEX REPLACE "/$" "" url "${base_url}")
+  set(prefix "${root}/")
+  string(FIND "${url}" "${prefix}" position)
+  if(NOT position EQUAL 0)
+    set("${out_var}" "" PARENT_SCOPE)
+    return()
+  endif()
+  string(LENGTH "${prefix}" prefix_length)
+  string(SUBSTRING "${url}" ${prefix_length} -1 remainder)
+  if(remainder MATCHES "^[^/]+$")
+    set("${out_var}" "${remainder}" PARENT_SCOPE)
+  else()
+    set("${out_var}" "" PARENT_SCOPE)
+  endif()
+endfunction()
+
+# What the cached release tag means on this tree. Pure, so every shape has a test. Sets
+# <prefix>_TAG (the effective tag), <prefix>_ACTION and <prefix>_MESSAGE.
+#   cached_tag   the cache entry's value before this file's declaration ran, or ""
+#   cached_type  its TYPE, or "" when there was no entry. A -D given on this command line is
+#                still UNINITIALIZED here, which tells a choice made now from a value an
+#                earlier configure left behind.
+#   tracked_tag  the source default an earlier configure of this file recorded, or ""
+#   chosen_tag   the tag an earlier configure recorded as given on the command line, or "". A
+#                choice equal to the default of its day stays a choice when the default moves.
+function(polaris_prepared_ffmpeg_classify_release_tag prefix source_default cached_tag cached_type
+         tracked_tag chosen_tag)
+  set(tag "${source_default}")
+  set(message "")
+  if(cached_type STREQUAL "")
+    set(action "fresh")
+  elseif(cached_type STREQUAL "UNINITIALIZED")
+    set(action "explicit")
+    set(tag "${cached_tag}")
+  elseif(cached_tag STREQUAL source_default)
+    set(action "unchanged")
+  elseif(NOT chosen_tag STREQUAL "" AND cached_tag STREQUAL chosen_tag)
+    set(action "override-kept")
+    set(tag "${cached_tag}")
+    string(CONCAT message
+        "Prepared FFmpeg release tag ${cached_tag} is kept as this tree's override, given on its "
+        "command line; the source default is ${source_default}.")
+  elseif(tracked_tag STREQUAL "")
+    # A tree configured before this file recorded its default: the cached value may be the
+    # stale default the reporter hit or a choice somebody typed. Nobody can tell, so say so.
+    set(action "refuse")
+    set(tag "${cached_tag}")
+    string(CONCAT message
+        "This build tree caches prepared FFmpeg release tag ${cached_tag}, but the source pins "
+        "${source_default} and the tree carries no record of how ${cached_tag} was chosen. "
+        "Nothing was downloaded. To adopt the pinned release, reconfigure with cmake --fresh "
+        "(or delete CMakeCache.txt). To keep ${cached_tag} deliberately, pass "
+        "-DPOLARIS_PREPARED_FFMPEG_RELEASE_TAG=${cached_tag} on the command line once so it is "
+        "recorded as your choice.")
+  elseif(cached_tag STREQUAL tracked_tag)
+    set(action "migrated")
+    string(CONCAT message
+        "Prepared FFmpeg release tag moved from ${cached_tag} to ${source_default}: the cached "
+        "value was the source default this tree was last configured with, and the source now "
+        "pins ${source_default}.")
+  else()
+    set(action "override-kept")
+    set(tag "${cached_tag}")
+    string(CONCAT message
+        "Prepared FFmpeg release tag ${cached_tag} is kept as this tree's override; the source "
+        "default is ${source_default}.")
+  endif()
+  set("${prefix}_TAG" "${tag}" PARENT_SCOPE)
+  set("${prefix}_ACTION" "${action}" PARENT_SCOPE)
+  set("${prefix}_MESSAGE" "${message}" PARENT_SCOPE)
+endfunction()
+
+# What the cached base URL means for the effective tag. Pure, like the tag decision. Sets
+# <prefix>_URL, <prefix>_ACTION and <prefix>_MESSAGE.
+#   cached_url   the cache entry's value before this file's declaration ran, or ""
+#   cached_type  its TYPE, or ""
+#   tracked_url  the derived URL an earlier configure of this file wrote, or ""
+#   chosen_url   the URL an earlier configure recorded as given on the command line, or "". A
+#                choice equal to the derived URL of its day stays a choice when the tag moves.
+function(polaris_prepared_ffmpeg_classify_base_url prefix effective_tag cached_url cached_type
+         tracked_url chosen_url)
+  polaris_prepared_ffmpeg_default_base_url(derived "${effective_tag}")
+  set(url "${derived}")
+  set(message "")
+  if(cached_type STREQUAL "")
+    set(action "fresh")
+  else()
+    polaris_prepared_ffmpeg_base_url_release_tag(url_tag "${cached_url}")
+    if(url_tag STREQUAL "")
+      set(action "custom-kept")
+      set(url "${cached_url}")
+      string(CONCAT message
+          "Prepared FFmpeg archives come from ${cached_url}, which is not a release URL; it is "
+          "kept as set for release tag ${effective_tag}.")
+    elseif(url_tag STREQUAL effective_tag)
+      set(action "unchanged")
+      set(url "${cached_url}")
+    elseif(cached_type STREQUAL "UNINITIALIZED"
+           OR (NOT chosen_url STREQUAL "" AND cached_url STREQUAL chosen_url)
+           OR (NOT tracked_url STREQUAL "" AND NOT cached_url STREQUAL tracked_url))
+      # Given now, or chosen on an earlier configure: a base URL for one release with a tag
+      # for another is a contradiction to report, not to resolve quietly.
+      set(action "refuse-mixed")
+      set(url "${cached_url}")
+      string(CONCAT message
+          "POLARIS_PREPARED_FFMPEG_BASE_URL names release ${url_tag} while "
+          "POLARIS_PREPARED_FFMPEG_RELEASE_TAG is ${effective_tag}, so the status line and the "
+          "download would name different releases. Nothing was downloaded. Set only the tag and "
+          "the base URL follows it, set both to the same release, or reconfigure with "
+          "cmake --fresh.")
+    else()
+      # Derived by this file (or by the file as it was before it recorded anything) from a tag
+      # that has since moved: follow the tag.
+      set(action "recomputed")
+      string(CONCAT message
+          "Prepared FFmpeg base URL moved from ${cached_url} to ${derived} to follow release tag "
+          "${effective_tag}.")
+    endif()
+  endif()
+  set("${prefix}_URL" "${url}" PARENT_SCOPE)
+  set("${prefix}_ACTION" "${action}" PARENT_SCOPE)
+  set("${prefix}_MESSAGE" "${message}" PARENT_SCOPE)
+endfunction()
+
+# Capture what the cache held before the declarations below create or type the entries.
+set(_polaris_prepared_ffmpeg_cached_tag "")
+set(_polaris_prepared_ffmpeg_cached_tag_type "")
+if(DEFINED CACHE{POLARIS_PREPARED_FFMPEG_RELEASE_TAG})
+  get_property(_polaris_prepared_ffmpeg_cached_tag CACHE POLARIS_PREPARED_FFMPEG_RELEASE_TAG
+      PROPERTY VALUE)
+  get_property(_polaris_prepared_ffmpeg_cached_tag_type CACHE POLARIS_PREPARED_FFMPEG_RELEASE_TAG
+      PROPERTY TYPE)
+endif()
+set(_polaris_prepared_ffmpeg_tracked_tag "")
+if(DEFINED CACHE{POLARIS_PREPARED_FFMPEG_TRACKED_DEFAULT_RELEASE_TAG})
+  get_property(_polaris_prepared_ffmpeg_tracked_tag
+      CACHE POLARIS_PREPARED_FFMPEG_TRACKED_DEFAULT_RELEASE_TAG PROPERTY VALUE)
+endif()
+set(_polaris_prepared_ffmpeg_chosen_tag "")
+if(DEFINED CACHE{POLARIS_PREPARED_FFMPEG_CHOSEN_RELEASE_TAG})
+  get_property(_polaris_prepared_ffmpeg_chosen_tag
+      CACHE POLARIS_PREPARED_FFMPEG_CHOSEN_RELEASE_TAG PROPERTY VALUE)
+endif()
+set(_polaris_prepared_ffmpeg_cached_url "")
+set(_polaris_prepared_ffmpeg_cached_url_type "")
+if(DEFINED CACHE{POLARIS_PREPARED_FFMPEG_BASE_URL})
+  get_property(_polaris_prepared_ffmpeg_cached_url CACHE POLARIS_PREPARED_FFMPEG_BASE_URL
+      PROPERTY VALUE)
+  get_property(_polaris_prepared_ffmpeg_cached_url_type CACHE POLARIS_PREPARED_FFMPEG_BASE_URL
+      PROPERTY TYPE)
+endif()
+set(_polaris_prepared_ffmpeg_tracked_url "")
+if(DEFINED CACHE{POLARIS_PREPARED_FFMPEG_TRACKED_BASE_URL})
+  get_property(_polaris_prepared_ffmpeg_tracked_url CACHE POLARIS_PREPARED_FFMPEG_TRACKED_BASE_URL
+      PROPERTY VALUE)
+endif()
+
 set(POLARIS_PREPARED_FFMPEG_RELEASE_TAG "v2026.713.132551" CACHE STRING
     "LizardByte/build-deps release tag used for prepared FFmpeg archives")
+polaris_prepared_ffmpeg_source_default_release_tag(_polaris_prepared_ffmpeg_source_default)
+polaris_prepared_ffmpeg_classify_release_tag(_polaris_prepared_ffmpeg_tag
+    "${_polaris_prepared_ffmpeg_source_default}"
+    "${_polaris_prepared_ffmpeg_cached_tag}"
+    "${_polaris_prepared_ffmpeg_cached_tag_type}"
+    "${_polaris_prepared_ffmpeg_tracked_tag}"
+    "${_polaris_prepared_ffmpeg_chosen_tag}")
+set(POLARIS_PREPARED_FFMPEG_RELEASE_TAG_STATE "${_polaris_prepared_ffmpeg_tag_ACTION}")
+set(POLARIS_PREPARED_FFMPEG_RELEASE_TAG_DIAGNOSTIC "${_polaris_prepared_ffmpeg_tag_MESSAGE}")
+set(POLARIS_PREPARED_FFMPEG_REFUSED_RELEASE_TAG "")
+if(_polaris_prepared_ffmpeg_tag_ACTION STREQUAL "explicit")
+  set(POLARIS_PREPARED_FFMPEG_CHOSEN_RELEASE_TAG "${_polaris_prepared_ffmpeg_tag_TAG}" CACHE INTERNAL
+      "Release tag given on this tree's command line; it stays a choice even when the source default moves")
+elseif(_polaris_prepared_ffmpeg_tag_ACTION STREQUAL "migrated")
+  set(POLARIS_PREPARED_FFMPEG_RELEASE_TAG "${_polaris_prepared_ffmpeg_tag_TAG}" CACHE STRING
+      "LizardByte/build-deps release tag used for prepared FFmpeg archives" FORCE)
+  unset(POLARIS_PREPARED_FFMPEG_CHOSEN_RELEASE_TAG CACHE)
+  message(STATUS "${_polaris_prepared_ffmpeg_tag_MESSAGE}")
+elseif(_polaris_prepared_ffmpeg_tag_ACTION STREQUAL "override-kept")
+  message(STATUS "${_polaris_prepared_ffmpeg_tag_MESSAGE}")
+elseif(_polaris_prepared_ffmpeg_tag_ACTION STREQUAL "refuse")
+  # Refused where a download would start, so a local FFMPEG_PREPARED_BINARIES or disabled
+  # downloads still work on this tree.
+  set(POLARIS_PREPARED_FFMPEG_REFUSED_RELEASE_TAG "${_polaris_prepared_ffmpeg_cached_tag}")
+endif()
+if(NOT _polaris_prepared_ffmpeg_tag_ACTION STREQUAL "refuse")
+  set(POLARIS_PREPARED_FFMPEG_TRACKED_DEFAULT_RELEASE_TAG
+      "${_polaris_prepared_ffmpeg_source_default}" CACHE INTERNAL
+      "Source default release tag when this tree was last configured; a cached tag equal to it moves with the source, any other cached tag is kept as a choice")
+endif()
+
 set(POLARIS_PREPARED_FFMPEG_BASE_URL
-    "https://github.com/LizardByte/build-deps/releases/download/${POLARIS_PREPARED_FFMPEG_RELEASE_TAG}"
+    "${POLARIS_PREPARED_FFMPEG_RELEASE_ROOT_URL}/${POLARIS_PREPARED_FFMPEG_RELEASE_TAG}"
     CACHE STRING "Base URL for prepared FFmpeg release archives")
+set(_polaris_prepared_ffmpeg_chosen_url "")
+if(DEFINED CACHE{POLARIS_PREPARED_FFMPEG_CHOSEN_BASE_URL})
+  get_property(_polaris_prepared_ffmpeg_chosen_url CACHE POLARIS_PREPARED_FFMPEG_CHOSEN_BASE_URL
+      PROPERTY VALUE)
+endif()
+polaris_prepared_ffmpeg_classify_base_url(_polaris_prepared_ffmpeg_url
+    "${POLARIS_PREPARED_FFMPEG_RELEASE_TAG}"
+    "${_polaris_prepared_ffmpeg_cached_url}"
+    "${_polaris_prepared_ffmpeg_cached_url_type}"
+    "${_polaris_prepared_ffmpeg_tracked_url}"
+    "${_polaris_prepared_ffmpeg_chosen_url}")
+if(_polaris_prepared_ffmpeg_url_ACTION STREQUAL "recomputed")
+  set(POLARIS_PREPARED_FFMPEG_BASE_URL "${_polaris_prepared_ffmpeg_url_URL}" CACHE STRING
+      "Base URL for prepared FFmpeg release archives" FORCE)
+  unset(POLARIS_PREPARED_FFMPEG_CHOSEN_BASE_URL CACHE)
+  message(STATUS "${_polaris_prepared_ffmpeg_url_MESSAGE}")
+elseif(_polaris_prepared_ffmpeg_url_ACTION STREQUAL "custom-kept")
+  message(STATUS "${_polaris_prepared_ffmpeg_url_MESSAGE}")
+endif()
+if(_polaris_prepared_ffmpeg_cached_url_type STREQUAL "UNINITIALIZED"
+    AND (_polaris_prepared_ffmpeg_url_ACTION STREQUAL "unchanged"
+         OR _polaris_prepared_ffmpeg_url_ACTION STREQUAL "custom-kept"))
+  # Given on this command line and accepted: a choice, even when it equals the derived URL.
+  set(POLARIS_PREPARED_FFMPEG_CHOSEN_BASE_URL "${_polaris_prepared_ffmpeg_url_URL}" CACHE INTERNAL
+      "Base URL given on this tree's command line; it stays a choice even when the release tag moves")
+elseif(_polaris_prepared_ffmpeg_url_ACTION STREQUAL "fresh")
+  unset(POLARIS_PREPARED_FFMPEG_CHOSEN_BASE_URL CACHE)
+endif()
+if(_polaris_prepared_ffmpeg_url_ACTION STREQUAL "fresh"
+    OR _polaris_prepared_ffmpeg_url_ACTION STREQUAL "unchanged"
+    OR _polaris_prepared_ffmpeg_url_ACTION STREQUAL "recomputed")
+  set(POLARIS_PREPARED_FFMPEG_TRACKED_BASE_URL "${_polaris_prepared_ffmpeg_url_URL}" CACHE INTERNAL
+      "Base URL this file derived from the release tag when this tree was last configured; a cached URL equal to it follows the tag, any other cached URL is kept as a choice")
+endif()
+# A mixed tag and base URL is refused where the download would start, with the message above.
+
 set(POLARIS_PREPARED_FFMPEG_CACHE_DIR
     "${CMAKE_BINARY_DIR}/_deps/prepared-ffmpeg"
     CACHE PATH "Directory for downloaded prepared FFmpeg archives")
@@ -153,6 +419,24 @@ function(polaris_validate_prepared_ffmpeg_dir prepared_dir)
   endif()
 endfunction()
 
+# Why a download must not start with the current tag and base URL, or "" when it may. Checked
+# where a download would begin, so a local prepared directory or disabled downloads still work
+# on a tree whose cached tag cannot be accounted for.
+function(polaris_prepared_ffmpeg_download_refusal out_var release_tag base_url)
+  if(POLARIS_PREPARED_FFMPEG_RELEASE_TAG_STATE STREQUAL "refuse"
+      AND release_tag STREQUAL "${POLARIS_PREPARED_FFMPEG_REFUSED_RELEASE_TAG}")
+    set("${out_var}" "${POLARIS_PREPARED_FFMPEG_RELEASE_TAG_DIAGNOSTIC}" PARENT_SCOPE)
+    return()
+  endif()
+  polaris_prepared_ffmpeg_base_url_release_tag(url_tag "${base_url}")
+  if(NOT url_tag STREQUAL "" AND NOT url_tag STREQUAL release_tag)
+    polaris_prepared_ffmpeg_classify_base_url(mixed "${release_tag}" "${base_url}" "UNINITIALIZED" "" "")
+    set("${out_var}" "${mixed_MESSAGE}" PARENT_SCOPE)
+    return()
+  endif()
+  set("${out_var}" "" PARENT_SCOPE)
+endfunction()
+
 function(polaris_resolve_prepared_ffmpeg out_var)
   if(DEFINED FFMPEG_PREPARED_BINARIES)
     polaris_validate_prepared_ffmpeg_dir("${FFMPEG_PREPARED_BINARIES}")
@@ -174,6 +458,12 @@ function(polaris_resolve_prepared_ffmpeg out_var)
     endif()
 
     if(asset_name AND asset_sha256)
+      polaris_prepared_ffmpeg_download_refusal(refusal
+          "${POLARIS_PREPARED_FFMPEG_RELEASE_TAG}" "${POLARIS_PREPARED_FFMPEG_BASE_URL}")
+      if(NOT refusal STREQUAL "")
+        message(FATAL_ERROR "${refusal}")
+      endif()
+
       string(REGEX REPLACE "-ffmpeg\\.tar\\.gz$" "" asset_key "${asset_name}")
       set(download_dir "${POLARIS_PREPARED_FFMPEG_CACHE_DIR}/${POLARIS_PREPARED_FFMPEG_RELEASE_TAG}")
       set(extract_dir "${download_dir}/${asset_key}")
