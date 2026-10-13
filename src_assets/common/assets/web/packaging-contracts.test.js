@@ -1,6 +1,6 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { describe, expect, it } from 'vitest'
 
@@ -1102,6 +1102,48 @@ describe('Linux packaging contracts', () => {
     expect(pkgbuild).not.toContain('-D POLARIS_ENABLE_CUDA=OFF')
   })
 
+  for (const target of ['3.8', '3.9']) {
+    it(`configures the GCC runtime dependencies for SteamOS ${target}`, () => {
+      const fixture = mkdtempSync(join(tmpdir(), 'polaris-steamos-runtime-'))
+      try {
+        for (const path of [
+          'packaging/linux/dev.polaris-stream.app.Polaris.desktop',
+          'packaging/linux/dev.polaris-stream.app.Polaris.terminal.desktop',
+          'packaging/linux/dev.polaris-stream.app.Polaris.metainfo.xml',
+          'packaging/linux/polaris.service.in',
+          'packaging/linux/SteamOS/PKGBUILD',
+          'packaging/linux/SteamOS/polaris.install',
+          'packaging/linux/SteamOS/polaris-kms.install',
+        ]) {
+          mkdirSync(dirname(join(fixture, path)), { recursive: true })
+          writeFileSync(join(fixture, path), readSource(path))
+        }
+        const driver = join(fixture, 'configure.cmake')
+        writeFileSync(driver, `set(UNIX TRUE)
+set(APPLE FALSE)
+set(PROJECT_FQDN "dev.polaris-stream.app.Polaris")
+set(POLARIS_CONFIGURE_STEAMOS_PKGBUILD ON)
+set(POLARIS_CONFIGURE_ONLY ON)
+set(POLARIS_STEAMOS_TARGET "${target}")
+set(CMAKE_BINARY_DIR "${fixture}")
+include("${join(process.cwd(), 'cmake/prep/special_package_configuration.cmake')}")
+`)
+        const result = spawnSync('cmake', ['-P', driver], { encoding: 'utf8', cwd: fixture })
+        expect(result.status, result.stderr).toBe(0)
+        const generated = readFileSync(join(fixture, 'packaging/linux/SteamOS/PKGBUILD'), 'utf8')
+        const depends = generated.match(/^depends=\(\n([\s\S]*?)\n\)/m)[1]
+        const dependencies = [...depends.matchAll(/'([^']+)'/g)].map((match) => match[1])
+        // SteamOS 3.9's gcc-libs is an empty umbrella; namcap needs the actual library owners.
+        // Keep the 3.8 runtime dependency, whose package still owns both libraries.
+        const runtimeNames = dependencies.filter((name) => ['gcc-libs', 'libgcc', 'libstdc++'].includes(name))
+        expect(runtimeNames).toEqual(target === '3.8' ? ['gcc-libs'] : ['libgcc', 'libstdc++'])
+        expect(generated).not.toContain('@POLARIS_STEAMOS_RUNTIME_DEPENDS@')
+      } finally {
+        rmSync(fixture, { force: true, recursive: true })
+      }
+    })
+  }
+
   it('validates exact SteamOS source identity, package metadata, dependencies, and payload', () => {
     const workflow = readSource('.github/workflows/build.yml')
     const steamOs = section(workflow, '  steamos-build:', '  ubuntu-build:')
@@ -1143,7 +1185,7 @@ describe('Linux packaging contracts', () => {
     expect(buildScript).toContain('HOST_BINARIES=("$RECEIPT_ROOT"/usr/bin/polaris-[0-9]*)')
     expect(commonTargets).toContain('-buildmode=pie')
     expect(commonTargets).toContain('-ldflags=-linkmode=external -extldflags=-Wl,-z,relro,-z,now')
-    for (const dependency of ['gcc-libs', 'glib2', 'glibc', 'gtk3', 'hicolor-icon-theme', 'libei', 'libpipewire', 'libxkbcommon']) {
+    for (const dependency of ['glib2', 'glibc', 'gtk3', 'hicolor-icon-theme', 'libei', 'libpipewire', 'libxkbcommon']) {
       expect(pkgbuild).toContain(`'${dependency}'`)
     }
     expect(buildScript).toContain('PATH=/usr/bin:/bin namcap "$PACKAGE_PATH" > "$RECEIPT_PREFIX-namcap-all.txt"')
@@ -1178,6 +1220,9 @@ describe('Linux packaging contracts', () => {
     expect(reviewedWarnings.every((warning) => warning.startsWith('polaris W: '))).toBe(true)
     // SteamOS 3.9 has its own toolchain and its own reviewed list, gated the same way.
     const reviewedWarnings39 = reviewedNamcap39.trim().split('\n')
+    // namcap 3.6 disables its SHSTK rule; the binaries still lack SHSTK. Retiring these
+    // two warnings records a linter change, not a change in binary hardening.
+    expect(reviewedWarnings39).toEqual(reviewedWarnings.filter((warning) => !warning.includes('GNU_PROPERTY_X86_FEATURE_1_SHSTK')))
     expect(new Set(reviewedWarnings39).size).toBe(reviewedWarnings39.length)
     expect(reviewedWarnings39.every((warning) => warning.startsWith('polaris W: '))).toBe(true)
     // Boost renames its libraries every release. Each soname entry becomes an exact dependency on the

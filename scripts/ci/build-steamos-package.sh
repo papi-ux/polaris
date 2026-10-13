@@ -239,6 +239,9 @@ done < "$RECEIPT_PREFIX-boost-sonames.txt"
 # cgo links libresolv through runtime-selected resolver paths, and namcap cannot
 # see command/runtime-discovered dependencies. Every exception remains exact;
 # additions, removals, or wording changes fail the candidate gate.
+# SteamOS 3.9's namcap 3.6 disables the SHSTK rule, so its separate reviewed list
+# omits those two messages. The archived host and browser ELF notes still lack
+# SHSTK; the missing diagnostics do not establish additional binary hardening.
 #
 # libvulkan is the same class. Polaris resolves every Vulkan entry point it calls from the loader by
 # name at runtime (src/platform/linux/vulkan_loader.cpp), and the compute codec's volk does the same,

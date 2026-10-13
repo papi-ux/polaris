@@ -33,10 +33,12 @@ trap - EXIT
 systemctl --user enable --now polaris
 ```
 
-On SteamOS 3.9, run the same command with the 3.9 package:
+On SteamOS 3.9, use the matching package from `v1.5.0-beta.2`. This command
+requires that prerelease to have been published. Beta releases do not replace
+the latest stable release, so `releases/latest/download` does not select it.
 
 ```bash
-wget --output-document=./Polaris-steamos3.9-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-steamos3.9-x86_64.pkg.tar.zst &&
+wget --output-document=./Polaris-steamos3.9-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/download/v1.5.0-beta.2/Polaris-steamos3.9-x86_64.pkg.tar.zst &&
 (
 set -e
 trap 'sudo steamos-readonly enable' EXIT

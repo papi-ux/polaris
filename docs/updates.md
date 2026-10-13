@@ -100,6 +100,8 @@ sudo pacman -Syu polaris polaris-kms
 with: reinstall the package for the host's SteamOS release, `Polaris-steamos3.8-x86_64.pkg.tar.zst`
 or `Polaris-steamos3.9-x86_64.pkg.tar.zst`, and its `Polaris-kms-` helper beside it when the host has one. This reinstall was
 checked with pacman on Arch, not on a Steam Deck.
+The 3.9 packages begin with `v1.5.0-beta.2`: use that tagged prerelease after
+publication, as the SteamOS guide shows, rather than the latest stable download.
 
 **Bazzite** layers the package with `rpm-ostree`, and no step that replaces a
 1.4.13 beta with the release there has been verified yet.

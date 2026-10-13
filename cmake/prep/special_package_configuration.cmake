@@ -37,9 +37,13 @@ elseif(UNIX)
         # repositories (scripts/ci/run-steamos-build.sh). labwc is known not to install on 3.8 and
         # has not been tried on 3.9, so the optional dependency says only what is known.
         if(POLARIS_STEAMOS_TARGET STREQUAL "3.8")
+            set(POLARIS_STEAMOS_RUNTIME_DEPENDS "'gcc-libs'")
             set(POLARIS_STEAMOS_LABWC_OPTDEPEND
                     "labwc: Private Stream paths; not installable on SteamOS 3.8, see docs/steamos.md")
         elseif(POLARIS_STEAMOS_TARGET STREQUAL "3.9")
+            # GCC 16's runtime libraries have separate owners on SteamOS 3.9. gcc-libs is
+            # only an umbrella there; declaring the owners also lets namcap verify the links.
+            set(POLARIS_STEAMOS_RUNTIME_DEPENDS "'libgcc'\n  'libstdc++'")
             set(POLARIS_STEAMOS_LABWC_OPTDEPEND
                     "labwc: Private Stream paths; not verified on SteamOS 3.9, see docs/steamos.md")
         else()
