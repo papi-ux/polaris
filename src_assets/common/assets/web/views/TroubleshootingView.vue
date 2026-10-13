@@ -435,7 +435,7 @@
     </section>
 
     <section class="section-card">
-      <div class="flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
+      <div class="troubleshooting-log-header flex flex-col gap-3 xl:flex-row xl:items-end xl:justify-between">
         <div>
           <h2 id="logs" class="text-xl font-semibold text-silver">{{ $t('troubleshooting.logs') }}</h2>
           <p class="mt-2 text-sm text-storm">{{ $t('troubleshooting.logs_desc') }}</p>

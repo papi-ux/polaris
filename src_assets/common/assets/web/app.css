@@ -2401,6 +2401,22 @@ textarea {
   @apply cursor-pointer rounded-xl border border-ice/25 bg-ice/5 p-3 text-left transition-[border-color,color,background-color,transform] duration-200 hover:border-ice hover:bg-ice/10 hover:text-ice active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50 disabled:active:translate-y-0;
 }
 
+/* The log toolbar shares a card with its heading; viewport breakpoints alone
+   cannot account for an expanded sidebar or enlarged text. */
+.troubleshooting-log-header,
+.troubleshooting-filter-panel {
+  flex-wrap: wrap;
+}
+.troubleshooting-log-header > div,
+.troubleshooting-filter-panel {
+  min-width: 0;
+  max-width: 100%;
+}
+.troubleshooting-filter-panel .settings-input {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .troubleshooting-filter-button {
   @apply h-7 rounded-md border border-storm/30 px-2.5 text-xs font-medium text-storm transition-[border-color,color,background-color] duration-150 hover:border-storm hover:text-silver;
 }
