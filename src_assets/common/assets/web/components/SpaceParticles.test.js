@@ -277,6 +277,23 @@ describe('space field lifecycle and draw bounds', () => {
     expect(queued.size).toBe(1)
   })
 
+  it('draws once when the window and the pane observer report the same change', () => {
+    motion.matches = true
+    let width = 1280
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(() => width)
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(800)
+    mounted({ absolute: true })
+    const draws = contexts[0].clearRect.mock.calls.length
+    width = 900
+    window.dispatchEvent(new Event('resize'))
+    frame(16)
+    expect(contexts[0].clearRect).toHaveBeenCalledTimes(draws + 1)
+    observer.callback() // delivered after layout, one frame later, with the same size
+    frame(32)
+    expect(contexts[0].clearRect).toHaveBeenCalledTimes(draws + 1)
+    expect(queued.size).toBe(0)
+  })
+
   it('cancels a queued resize frame on unmount', () => {
     motion.matches = true
     const wrapper = mounted()

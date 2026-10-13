@@ -378,9 +378,12 @@ function scheduleResize() {
   resizeFrame = requestAnimationFrame(flushResize)
 }
 
+// The window resize event and the pane observer can both report one change; only
+// a size that differs from the last applied one draws again.
 function flushResize() {
   resizeFrame = null
-  if (animId === null) restartAnimation()
+  if (animId !== null || !applyPendingResize()) return
+  restartAnimation()
 }
 
 // Ambient layers are static depth, cached on resize/theme/mode changes. Each
