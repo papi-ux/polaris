@@ -1,7 +1,7 @@
 import { test, expect } from './fixtures/mocked.js'
 import { inflateSync } from 'node:zlib'
 
-const themes = ['polaris', 'portable-chrome', 'oled', 'miami', 'high-contrast']
+const themes = ['polaris', 'portable-chrome', 'oled', 'miami', 'director', 'high-contrast']
 const catalog = [
   { uuid: 'control', name: 'Control Ultimate Edition', cmd: 'control', favorite: true, 'image-path': 'control.png' },
   { uuid: 'broken', name: 'Missing Artwork', cmd: 'game', 'image-path': 'missing.png' },
@@ -10,7 +10,7 @@ const catalog = [
 const gpu = { name: 'Fixture GPU', vendor: 'nvidia', temperature_c: 0, utilization_pct: 0, encoder_pct: null,
   vram_used_mb: 2048, vram_total_mb: 8192 }
 
-async function mockHost(page, theme = 'polaris', systemGpu = gpu) {
+async function mockHost(page, theme = 'polaris', systemGpu = gpu, fixtures = {}) {
   await page.addInitScript(skin => {
     localStorage.setItem('polaris-theme', skin)
     window.__mockStats = { streaming: false }
@@ -48,6 +48,7 @@ async function mockHost(page, theme = 'polaris', systemGpu = gpu) {
     }
     if (path === '/api/logs') return route.fulfill({ body: '' })
     if (path === '/api/ai/history' || path === '/api/ai/cache') return route.fulfill({ json: [] })
+    if (path in fixtures) return route.fulfill({ json: fixtures[path] })
     return route.fulfill({ json: { status: true, streaming: false } })
   })
   return writes
@@ -62,6 +63,45 @@ async function fits(locator, width) {
     children: [...node.querySelectorAll('*')].filter(child => child.getBoundingClientRect().right > node.getBoundingClientRect().right + 1)
       .map(child => ({ tag: child.tagName, classes: child.className, width: child.getBoundingClientRect().width, text: child.textContent.slice(0, 60) })) }))
   expect(overflow.scroll, JSON.stringify(overflow)).toBeLessThanOrEqual(overflow.client + 1)
+}
+
+// A control may break a word only when the word is wider than its card could ever
+// give it. Words that fit stay on one line. Compound words may still break after
+// a hyphen joining two letters, as in print ("self-" / "test"); version labels,
+// whose hyphen follows a digit ("v1.5.0-beta.2"), may not.
+async function wholeWords(locator) {
+  const cuts = await locator.evaluate(node => {
+    const box = node.closest('.section-card, .page-header, main')
+    const outer = getComputedStyle(box), own = getComputedStyle(node)
+    const room = box.clientWidth - parseFloat(outer.paddingLeft) - parseFloat(outer.paddingRight)
+      - parseFloat(own.paddingLeft) - parseFloat(own.paddingRight) - parseFloat(own.borderLeftWidth) - parseFloat(own.borderRightWidth)
+    const found = []
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT)
+    for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+      for (const match of text.data.matchAll(/\S+/g)) {
+        const word = match[0]
+        let start = 0
+        const segments = []
+        for (let i = 1; i < word.length - 1; i++) {
+          if (word[i] === '-' && /\p{L}/u.test(word[i - 1]) && /\p{L}/u.test(word[i + 1])) {
+            segments.push([start, i + 1]); start = i + 1
+          }
+        }
+        segments.push([start, word.length])
+        for (const [from, to] of segments) {
+          const range = document.createRange()
+          range.setStart(text, match.index + from)
+          range.setEnd(text, match.index + to)
+          const rects = [...range.getClientRects()].filter(rect => rect.width > 0)
+          const lines = new Set(rects.map(rect => Math.round(rect.top))).size
+          const width = rects.reduce((sum, rect) => sum + rect.width, 0)
+          if (lines > 1 && width <= room) found.push({ word: word.slice(from, to), lines, width: Math.round(width), room: Math.round(room) })
+        }
+      }
+    }
+    return found
+  })
+  expect(cuts, await locator.evaluate(node => node.textContent.trim())).toEqual([])
 }
 
 // Read Chromium's actual composited screenshot, including translucent/gradient
@@ -298,3 +338,85 @@ test('collapsed vitals keep pressure and missing readings legible without colour
   await expect(vitals.locator('summary')).toContainText('90% VRAM · high')
   await fits(vitals, 390)
 })
+
+for (const width of [390, 1280]) {
+  for (const theme of ['polaris', 'director', 'oled', 'high-contrast']) {
+    test(`Doctor cards and controls reflow with 32px text in ${theme} at ${width}px`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 960 })
+      await page.emulateMedia({ reducedMotion: 'reduce' })
+      const cdp = await page.context().newCDPSession(page)
+      await cdp.send('Page.setFontSizes', { fontSizes: { standard: 32 } })
+      const writes = await mockHost(page, theme)
+      await page.goto('/#/troubleshooting')
+      await expect(page.getByRole('heading', { name: 'Doctor & Support', exact: true })).toBeVisible()
+      expect(await page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe('32px')
+      // Check both a browser font preference and CSS-root text scaling. The latter
+      // enlarges controls without changing the media-query initial font size.
+      for (const cssScale of [false, true]) {
+        if (cssScale) {
+          await cdp.send('Page.setFontSizes', { fontSizes: { standard: 16 } })
+          await page.evaluate(() => { document.documentElement.style.fontSize = '32px' })
+        }
+        await fits(page.locator('main'), width)
+        for (const card of await page.locator('main .section-card, [data-support-self-tests] .surface-subtle').all()) await fits(card, width)
+        for (const control of await page.locator('[data-fix-my-stream] .troubleshooting-action-button, [data-session-snapshot] .meta-pill, .troubleshooting-page-header .meta-pill').all()) await fits(control, width)
+        for (const control of await page.locator('main .troubleshooting-action-button, [data-session-snapshot] .meta-pill, .troubleshooting-page-header .meta-pill').all()) await wholeWords(control)
+      }
+      await supportingCopyContrast(page, page.locator('.page-subtitle').first(), testInfo, 'doctor-subtitle')
+      expect(writes).toEqual([])
+      await page.screenshot({ path: `test-results/look-feel-doctor-text-${theme}-${width}.png`, animations: 'disabled' })
+    })
+  }
+}
+
+// A launcher can be one 255-character file name, and a folder's first warning can name a long
+// path. Both wrap inside the ROM folder and readiness cards instead of widening the page, while an
+// ordinary folder at normal text size keeps its label and status side by side.
+const longLauncher = `/synthetic/Applications/Eden_${'X'.repeat(241)}.AppImage`
+const romSources = { status: true, presets: [], sources: [
+  { id: 'long', path: '/synthetic/ROMs', emulator: 'eden', label: 'Eden', install: { kind: 'launcher', location: longLauncher },
+    prerequisites: [{ id: 'keys', severity: 'warning', message: `Eden has no prod.keys in /synthetic/keys/${'K'.repeat(200)}, so no game will boot.`, action: 'Add prod.keys' }],
+    rom_count: 1 },
+  { id: 'ready', path: '/synthetic/Games', emulator: 'eden', label: 'Eden', install: { kind: 'native', location: '/usr/bin/eden' },
+    prerequisites: [], rom_count: 3 },
+] }
+
+for (const width of [390, 1280]) {
+  for (const font of [16, 32]) {
+    test(`ROM folders and readiness keep long launcher and status text inside their cards at ${width}px with ${font}px text`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 960 })
+      await page.emulateMedia({ reducedMotion: 'reduce' })
+      const writes = await mockHost(page, 'director', gpu, { '/api/library/sources': romSources })
+      await page.addInitScript(size => document.addEventListener('DOMContentLoaded', () => { document.documentElement.style.fontSize = `${size}px` }), font)
+      await page.goto('/#/apps')
+      await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible()
+      await page.getByRole('button', { name: 'Import Games', exact: true }).click()
+      const rows = page.locator('[data-rom-readiness] .grid > div')
+      await expect(rows).toHaveCount(2)
+      await expect(page.locator('[data-rom-folder]')).toHaveCount(2)
+      expect(await page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe(`${font}px`)
+      await fits(page.locator('main'), width)
+      for (const card of await page.locator('[data-rom-folders], [data-rom-folder], [data-rom-readiness], [data-rom-readiness] .grid > div').all()) await fits(card, width)
+      for (const text of await page.locator('[data-rom-folder] .text-sm.font-semibold, [data-rom-readiness] .grid > div > span').all()) {
+        await fits(text, width)
+        await wholeWords(text)
+      }
+      await expect(rows.first().locator('span').first()).toHaveText(`Eden at ${longLauncher}`)
+      if (font === 16) {
+        // The ordinary folder reads as before: label on the left, status on the same line at the right.
+        const [label, status, row] = await Promise.all([rows.nth(1).locator('span').first().boundingBox(),
+          rows.nth(1).locator('span').last().boundingBox(), rows.nth(1).boundingBox()])
+        expect(Math.abs(label.y - status.y)).toBeLessThan(4)
+        expect(row.x + row.width - (status.x + status.width)).toBeLessThan(20)
+        const folder = page.locator('[data-rom-folder]').nth(1)
+        const [name, count] = await Promise.all([folder.locator('.text-sm.font-semibold').boundingBox(), folder.locator('.control-chip').boundingBox()])
+        expect(Math.abs(name.y + name.height / 2 - (count.y + count.height / 2))).toBeLessThan(4)
+      }
+      expect(writes).toEqual([])
+      // A taller viewport only, so a card that wraps a long path is captured whole; widths are unchanged.
+      await page.setViewportSize({ width, height: 4800 })
+      await page.locator('[data-rom-folders]').screenshot({ path: `test-results/look-feel-rom-folders-${width}-${font}.png`, animations: 'disabled' })
+      await page.locator('[data-rom-readiness]').screenshot({ path: `test-results/look-feel-rom-readiness-${width}-${font}.png`, animations: 'disabled' })
+    })
+  }
+}

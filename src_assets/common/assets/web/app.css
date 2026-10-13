@@ -1243,6 +1243,7 @@ textarea {
 }
 
 .section-card {
+  min-width: 0;
   @apply p-4 sm:p-5;
   background: var(--surface-card);
   backdrop-filter: blur(12px);
@@ -1351,6 +1352,9 @@ textarea {
 }
 
 .surface-subtle {
+  min-width: 0;
+  /* Whole words first; only a token longer than the card (a path or hash) breaks. */
+  overflow-wrap: break-word;
   @apply rounded-xl border;
   background: var(--surface-raised);
   border-color: var(--edge-raised);
@@ -1389,6 +1393,9 @@ textarea {
 /* ── Theme Picker ── */
 .theme-picker-panel {
   @apply absolute bottom-full left-0 z-[120] mb-2 flex min-w-[264px] flex-col gap-1 rounded-xl p-2;
+  max-height: min(30rem, 70dvh);
+  overflow-y: auto;
+  max-width: calc(100vw - 2rem);
   background: var(--surface-card);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -2294,8 +2301,74 @@ textarea {
   @apply grid gap-3 md:grid-cols-2 xl:grid-cols-3;
 }
 
+/* Status copy and controls must stay inside their cards when text is enlarged. */
+[data-session-snapshot] > .flex {
+  flex-wrap: wrap;
+}
+[data-session-snapshot] > .flex > div {
+  min-width: 0;
+  max-width: 100%;
+}
+[data-session-snapshot] .meta-pill {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: break-word;
+  /* A pill that does wrap keeps readable lines and a shape that fits them. */
+  line-height: 1.25;
+  border-radius: 1rem;
+}
+
 .troubleshooting-action-button {
-  @apply inline-flex h-9 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-4 text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
+  @apply inline-flex min-h-9 max-w-full items-center justify-center gap-2 whitespace-normal rounded-lg px-4 py-2 text-center text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
+  overflow-wrap: break-word;
+}
+
+/* Doctor headings share a row with their controls. When enlarged text leaves no
+   room for both, the controls drop below the copy as whole words instead of
+   squeezing into a column one syllable wide. Rows only wrap where they run
+   horizontally, so the stacked phone layout is unchanged. */
+@media (min-width: 64rem) {
+  .troubleshooting-action-row {
+    flex-wrap: wrap;
+  }
+  .troubleshooting-action-row > :first-child {
+    flex: 1 1 24rem;
+    min-width: 0;
+  }
+  .troubleshooting-action-row > :not(:first-child) {
+    flex: 0 1 auto;
+    max-width: 100%;
+  }
+}
+@media (min-width: 80rem) {
+  .troubleshooting-page-header {
+    flex-wrap: wrap;
+  }
+  .troubleshooting-page-header > .page-heading {
+    flex: 1 1 24rem;
+  }
+  .troubleshooting-page-header > .page-meta {
+    flex: 0 1 auto;
+    max-width: 100%;
+  }
+}
+.troubleshooting-page-header .meta-pill {
+  max-width: 100%;
+  overflow-wrap: break-word;
+}
+
+/* A card title and its status badge share a line until enlarged text needs both;
+   then the badge drops below and neither can push past the card. */
+.troubleshooting-card-header > * {
+  max-width: 100%;
+}
+
+/* Self-test cards keep three columns at desktop sizes, measured in text units so
+   enlarged text falls back to a single readable column instead of three slivers. */
+@media (min-width: 80rem) {
+  .troubleshooting-card-grid {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, max(16rem, 30%)), 1fr));
+  }
 }
 
 .pairing-flow-strip {
@@ -2385,6 +2458,22 @@ textarea {
   /* Action cards are buttons: the ice tint, pointer, and press state separate
      them from the read-only tiles that share their shape. */
   @apply cursor-pointer rounded-xl border border-ice/25 bg-ice/5 p-3 text-left transition-[border-color,color,background-color,transform] duration-200 hover:border-ice hover:bg-ice/10 hover:text-ice active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50 disabled:active:translate-y-0;
+}
+
+/* The log toolbar shares a card with its heading; viewport breakpoints alone
+   cannot account for an expanded sidebar or enlarged text. */
+.troubleshooting-log-header,
+.troubleshooting-filter-panel {
+  flex-wrap: wrap;
+}
+.troubleshooting-log-header > div,
+.troubleshooting-filter-panel {
+  min-width: 0;
+  max-width: 100%;
+}
+.troubleshooting-filter-panel .settings-input {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .troubleshooting-filter-button {
@@ -2493,6 +2582,62 @@ textarea {
   --surface-card-base: #1e2228;
   --sidebar-active-bg: color-mix(in srgb, var(--color-accent) 14%, transparent);
   --sidebar-active-bar: color-mix(in srgb, var(--color-accent) 90%, transparent);
+}
+
+/* ── Director Skin (Nova "director": crimson stage, warm copy, black chrome) ── */
+[data-theme="director"] {
+  --color-ice: #fff5e8;
+  --color-silver: #f1d9cd;
+  --color-storm: #dec0b5;
+  --color-support: #dec0b5;
+  --color-twilight: #9a1b2e;
+  --color-deep: #5e0a14;
+  --color-void: #6e0b17;
+  --color-accent: #fff5e8;
+  --color-accent-2: #dec0b5;
+  --color-foreground: #f1d9cd;
+  --color-danger: #ffb7ac;
+  /* The shared #38bdf8 info sits at 4.49:1 on the crimson card; this lighter sky
+     keeps the info role readable (5.78:1 card, 4.90:1 raised tile). */
+  --color-info: #7dd3fc;
+  --surface-card-base: #881525;
+  --surface-card: #881525;
+  --surface-glass: #7b1020;
+  /* Nova keeps tiles crimson (its elevated surface) with black dividers; black is
+     reserved for controls: pills, chips, inputs and the active navigation item.
+     The hover lift is a small step that keeps every text role, success included,
+     at 4.5:1 or better (4.54 at its lowest). */
+  --surface-raised: #9a1b2e;
+  --surface-raised-hover: #9d1d30;
+  --surface-pill: #261015;
+  --surface-chip: #261015;
+  --surface-shimmer: #9a1b2e;
+  --edge-glass: #12090b;
+  --edge-card: #12090b;
+  --edge-raised: #12090b;
+  --edge-raised-hover: color-mix(in srgb, var(--color-ice) 60%, transparent);
+  --edge-pill: color-mix(in srgb, var(--color-ice) 28%, transparent);
+  --edge-chip: color-mix(in srgb, var(--color-ice) 28%, transparent);
+  --sidebar-fg: var(--color-silver);
+  --sidebar-active-bg: #12090b;
+  --sidebar-active-bar: var(--color-ice);
+}
+[data-theme="director"] .settings-input {
+  background: #12090b;
+  border-color: color-mix(in srgb, var(--color-ice) 28%, transparent);
+}
+/* The muted 80% kicker measures 4.10:1 on the crimson card; Director uses the
+   full storm tone (5.65:1). Hero kickers keep their own accent rule. */
+:where([data-theme="director"]) .section-kicker {
+  color: var(--color-storm);
+}
+[data-theme="director"] .settings-input:focus {
+  border-color: var(--color-ice);
+  outline: 2px solid var(--color-ice);
+  outline-offset: 2px;
+}
+[data-theme="director"] .focus-ring {
+  @apply focus-visible:ring-ice focus-visible:ring-offset-void;
 }
 
 /* ── High Contrast Skin ── */
