@@ -6,6 +6,7 @@
 #include <optional>
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace {
   class doctor_v2_flag_t {
@@ -122,6 +123,181 @@ TEST(DoctorV2Tests, RejectsClientDiagnosisAndLaunchPolicy) {
 
   EXPECT_FALSE(result.at("status").get<bool>());
   EXPECT_EQ(result.at("code"), "invalid_evidence");
+}
+
+TEST(DoctorV2ProvenanceTests, UnavailableDecodeIsNotAMeasuredZero) {
+  doctor_v2_flag_t enabled;
+  auto payload = sample(1000, 1);
+  payload["sample"].update({{"decode_latency_ms", 0.0}, {"decode_latency_available", false}});
+  ASSERT_TRUE(ingest_at("owner", "app", payload).at("status").get<bool>());
+
+  const auto status = doctor_v2::status("owner", "app", host_evidence());
+  const auto &measurements = status.at("stages").at("receive_decode_render").at("measurements");
+  EXPECT_TRUE(measurements.at("decode_latency_ms").is_null());
+  EXPECT_FALSE(measurements.at("decode_latency_available").get<bool>());
+  EXPECT_TRUE(status.at("trial_metrics").at("decode_latency_ms").is_null());
+}
+
+TEST(DoctorV2ProvenanceTests, LegacyMeasuredZeroRemainsAvailable) {
+  doctor_v2_flag_t enabled;
+  auto payload = sample(1000, 1);
+  payload["sample"]["decode_latency_ms"] = 0.0;
+  ASSERT_TRUE(ingest_at("owner", "app", payload).at("status").get<bool>());
+  const auto status = doctor_v2::status("owner", "app", host_evidence());
+  const auto &measurements = status.at("stages").at("receive_decode_render").at("measurements");
+  EXPECT_EQ(measurements.at("decode_latency_ms"), 0.0);
+  EXPECT_TRUE(measurements.at("decode_latency_available").get<bool>());
+  EXPECT_EQ(measurements.at("frame_output_source"), "renderer_output");
+}
+
+TEST(DoctorV2ProvenanceTests, MissingOrMixedDecodeCannotBecomeACompleteMeasurement) {
+  doctor_v2_flag_t enabled;
+  auto first = sample(1000, 1);
+  first["sample"]["decode_latency_ms"] = 4.0;
+  ASSERT_TRUE(ingest_at("owner", "app", first).at("status").get<bool>());
+  auto second = sample(2000, 2);
+  second["sample"].erase("decode_latency_ms");
+  ASSERT_TRUE(ingest_at("owner", "app", second).at("status").get<bool>());
+  const auto status = doctor_v2::status("owner", "app", host_evidence());
+  EXPECT_TRUE(status.at("stages").at("receive_decode_render").at("measurements").at("decode_latency_ms").is_null());
+  EXPECT_TRUE(status.at("trial_metrics").at("decode_latency_ms").is_null());
+}
+
+TEST(DoctorV2ProvenanceTests, PresentRequestsRemainRawCountersAndCannotQualifyRendering) {
+  doctor_v2_flag_t enabled(true);
+  for (std::int64_t i = 0; i <= 75; ++i) {
+    auto payload = sample(1000 + i * 1000, i, 120.0, 60.0);
+    payload["sample"].update({{"decode_latency_ms", 0.0}, {"decode_latency_available", false},
+                              {"frame_output_source", "present_request"}});
+    ASSERT_TRUE(ingest_at("owner", "app", payload).at("status").get<bool>());
+  }
+  const auto status = doctor_v2::status("owner", "app", host_evidence());
+  const auto &measurements = status.at("stages").at("receive_decode_render").at("measurements");
+  EXPECT_EQ(measurements.at("frame_output_source"), "present_request");
+  EXPECT_EQ(measurements.at("frame_output_fps"), 60.0);
+  EXPECT_EQ(measurements.at("frames_output"), 75 * 120);
+  EXPECT_TRUE(measurements.at("rendered_fps").is_null());
+  EXPECT_TRUE(measurements.at("frames_rendered").is_null());
+  EXPECT_FALSE(status.at("stable").get<bool>());
+  EXPECT_FALSE(status.at("coverage_adequate").get<bool>());
+  EXPECT_FALSE(status.at("trial_metrics").at("ready").get<bool>());
+  EXPECT_TRUE(status.at("trial_metrics").at("rendered_fps").is_null());
+  EXPECT_TRUE(status.at("trial_metrics").at("pacing_error_pct").is_null());
+  for (const auto &hypothesis : status.at("hypotheses")) {
+    EXPECT_NE(hypothesis.at("id"), "decoder_or_render_pressure");
+    EXPECT_NE(hypothesis.at("id"), "source_or_capture_cadence");
+  }
+}
+
+TEST(DoctorV2ProvenanceTests, RejectsMalformedAvailabilityAndOutputProvenance) {
+  doctor_v2_flag_t enabled;
+  for (const auto &value : std::vector<nlohmann::json> {nullptr, 0, "false", nlohmann::json::object()}) {
+    auto payload = sample(1000, 1);
+    payload["sample"]["decode_latency_available"] = value;
+    const auto result = ingest_at("owner", "app", payload);
+    EXPECT_FALSE(result.at("status").get<bool>()) << value;
+    EXPECT_EQ(result.at("code"), "invalid_evidence") << value;
+  }
+  for (const auto &value : std::vector<nlohmann::json> {nullptr, true, 1, "scanout", "mixed"}) {
+    auto payload = sample(1000, 1);
+    payload["sample"]["frame_output_source"] = value;
+    const auto result = ingest_at("owner", "app", payload);
+    EXPECT_FALSE(result.at("status").get<bool>()) << value;
+    EXPECT_EQ(result.at("code"), "invalid_evidence") << value;
+  }
+  auto missing = sample(1000, 1);
+  missing["sample"].erase("decode_latency_ms");
+  missing["sample"]["decode_latency_available"] = true;
+  EXPECT_FALSE(ingest_at("owner", "app", missing).at("status").get<bool>());
+}
+
+TEST(DoctorV2ProvenanceTests, ExplicitMeasuredZeroAndRendererOutputRetainLegacyClassification) {
+  doctor_v2_flag_t enabled;
+  for (std::int64_t i = 0; i <= 75; ++i) {
+    auto payload = sample(1000 + i * 1000, i);
+    payload["sample"].update({{"decode_latency_ms", 0.0}, {"decode_latency_available", true},
+                              {"frame_output_source", "renderer_output"}});
+    ASSERT_TRUE(ingest_at("owner", "app", payload).at("status").get<bool>());
+  }
+  const auto status = doctor_v2::status("owner", "app", host_evidence());
+  EXPECT_TRUE(status.at("stable").get<bool>());
+  EXPECT_EQ(status.at("trial_metrics").at("decode_latency_ms"), 0.0);
+  EXPECT_TRUE(status.at("trial_metrics").at("decode_latency_available").get<bool>());
+  EXPECT_EQ(status.at("trial_metrics").at("rendered_fps"), 120.0);
+}
+
+TEST(DoctorV2ProvenanceTests, LatestPresentRequestCannotBorrowAnEarlierMeasuredWindow) {
+  doctor_v2_flag_t enabled;
+  for (std::int64_t i = 0; i < 75; ++i) {
+    ASSERT_TRUE(ingest_at("owner", "app", sample(1000 + i * 1000, i)).at("status").get<bool>());
+  }
+  auto latest = sample(76000, 75);
+  latest["sample"].update({{"decode_latency_ms", 0.0}, {"decode_latency_available", false},
+                           {"frame_output_source", "present_request"}});
+  ASSERT_TRUE(ingest_at("owner", "app", latest).at("status").get<bool>());
+  const auto status = doctor_v2::status("owner", "app", host_evidence());
+  const auto &measurements = status.at("stages").at("receive_decode_render").at("measurements");
+  EXPECT_EQ(measurements.at("frame_output_source"), "mixed");
+  EXPECT_TRUE(measurements.at("rendered_fps").is_null());
+  EXPECT_TRUE(measurements.at("decode_latency_ms").is_null());
+  EXPECT_FALSE(status.at("stable").get<bool>());
+  EXPECT_FALSE(status.at("trial_metrics").at("ready").get<bool>());
+}
+
+TEST(DoctorV2ProvenanceTests, UnavailableWirePlaceholderStillRequiresAFiniteNonnegativeNumber) {
+  doctor_v2_flag_t enabled;
+  for (const auto &value : std::vector<nlohmann::json> {nullptr, "0", -1.0, std::numeric_limits<double>::infinity()}) {
+    auto payload = sample(1000, 1);
+    payload["sample"].update({{"decode_latency_available", false}, {"decode_latency_ms", value}});
+    const auto result = ingest_at("owner", "app", payload);
+    EXPECT_FALSE(result.at("status").get<bool>()) << value;
+    EXPECT_EQ(result.at("code"), "invalid_evidence") << value;
+  }
+  auto ignored = sample(1000, 1);
+  ignored["sample"].update({{"decode_latency_available", false}, {"decode_latency_ms", 12.0}});
+  ASSERT_TRUE(ingest_at("owner", "app", ignored).at("status").get<bool>());
+  EXPECT_TRUE(doctor_v2::status("owner", "app", host_evidence()).at("trial_metrics").at("decode_latency_ms").is_null());
+}
+
+TEST(DoctorV2ProvenanceTests, LegacyPyroWaveCpuReturnCannotBecomeMeasuredRendering) {
+  doctor_v2_flag_t enabled;
+  for (const char *codec : {"PyroWave", "pyrowave", " PyroWave ", "PYRO"}) {
+    doctor_v2::clear_for_tests();
+    for (std::int64_t i = 0; i <= 75; ++i) {
+      auto payload = sample(1000 + i * 1000, i);
+      payload["sample"].update({{"codec", codec}, {"decode_latency_ms", 7.0}});
+      ASSERT_TRUE(ingest_at("owner", "app", payload).at("status").get<bool>());
+    }
+    const auto status = doctor_v2::status("owner", "app", host_evidence());
+    const auto &measurements = status.at("stages").at("receive_decode_render").at("measurements");
+    EXPECT_EQ(measurements.at("frame_output_source"), "present_request") << codec;
+    EXPECT_TRUE(measurements.at("decode_latency_ms").is_null()) << codec;
+    EXPECT_TRUE(measurements.at("rendered_fps").is_null()) << codec;
+    EXPECT_FALSE(status.at("stable").get<bool>()) << codec;
+  }
+}
+
+TEST(DoctorV2ProvenanceTests, TwoWindowsCannotBorrowTheSecondWindowsMeasuredProvenance) {
+  doctor_v2_flag_t enabled(true);
+  for (double output_fps : {60.0, 120.0}) {
+    doctor_v2::clear_for_tests();
+    for (std::int64_t i = 0; i <= 75; ++i) {
+      auto payload = sample(1000 + i * 1000, i, output_fps, output_fps);
+      if (i < 45) {
+        payload["sample"].update({{"decode_latency_ms", 0.0}, {"decode_latency_available", false},
+                                  {"frame_output_source", "present_request"}});
+      }
+      ASSERT_TRUE(ingest_at("owner", "app", payload).at("status").get<bool>());
+    }
+    const auto status = doctor_v2::status("owner", "app", host_evidence());
+    ASSERT_TRUE(status.at("window").at("two_consecutive_complete").get<bool>());
+    EXPECT_EQ(status.at("stages").at("receive_decode_render").at("measurements").at("frame_output_source"), "renderer_output");
+    EXPECT_FALSE(status.at("coverage_adequate").get<bool>());
+    EXPECT_FALSE(status.at("stable").get<bool>());
+    EXPECT_EQ(status.at("state"), "collecting");
+    EXPECT_FALSE(status.at("actions_exposed").get<bool>());
+    EXPECT_FALSE(status.at("trial_metrics").at("ready").get<bool>());
+  }
 }
 
 TEST(DoctorV2Tests, RequiresMonotonicSamplesWithinGeneration) {
