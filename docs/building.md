@@ -2,8 +2,8 @@
 
 Build Polaris from source when no package fits your host. Polaris is a Linux-first host today, and
 the most validated install paths are the Fedora RPM and Arch package from the [latest release](https://github.com/papi-ux/polaris/releases/latest). CachyOS and
-most pacman-compatible Arch derivatives should start with the Arch package path. SteamOS 3.8 uses a
-dedicated package built against Valve's versioned repositories, not the rolling Arch asset. Bazzite can use the
+most pacman-compatible Arch derivatives should start with the Arch package path. SteamOS 3.8 and 3.9 each use a
+dedicated package built against Valve's versioned repositories for that release, not the rolling Arch asset. Bazzite can use the
 Fedora 44 RPM through `rpm-ostree`, and Ubuntu 24.04 has a DEB package, but those package paths
 need broader real-hardware validation. openSUSE Tumbleweed is source-build supported with a dedicated
 [openSUSE guide](openSUSE.md); other distros remain source-build/community-validation oriented.
@@ -24,7 +24,10 @@ sudo -H polaris --setup-host &&
 polaris
 ```
 
-SteamOS 3.8 installation must temporarily disable the read-only root and restore it before service startup:
+SteamOS installation must temporarily disable the read-only root and restore it before service startup. This is the
+SteamOS 3.8 command; the [SteamOS guide](steamos.md) has the SteamOS 3.9 command
+for the `v1.5.0-beta.2` prerelease and explains each step. The 3.9 command
+requires that beta to be published; it does not use the latest stable download:
 
 ```bash
 wget --output-document=./Polaris-steamos3.8-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-steamos3.8-x86_64.pkg.tar.zst &&
@@ -62,7 +65,7 @@ The web UI will be available at `https://localhost:47990`. **Fresh install:** us
 **Upgrade or reinstall:** use `https://localhost:47990/#/login` with the existing account;
 package replacement and source reinstall do not clear `~/.config/polaris`.
 
-See [Install on SteamOS 3.8](steamos.md), [Install on Bazzite](bazzite.md), [Install on Ubuntu 24.04](ubuntu.md), and
+See [Install on SteamOS](steamos.md), [Install on Bazzite](bazzite.md), [Install on Ubuntu 24.04](ubuntu.md), and
 [Build on openSUSE Tumbleweed](openSUSE.md) for caveats, fallback paths, and validation notes before using
 those less-turnkey paths.
 
@@ -74,6 +77,7 @@ those less-turnkey paths.
 | Arch Linux | Published `pkg.tar.zst` asset | Recommended rolling-release path. |
 | CachyOS / Arch derivatives | Start with the Arch package | Pacman-compatible derivatives should work from the Arch asset first; use source/local package fallback if dependency names or runtime helpers drift. |
 | SteamOS 3.8 x86_64 | Dedicated published `pkg.tar.zst` asset | Proven in Desktop Mode and in Game Mode on a Steam Deck OLED; not a rolling Arch package. |
+| SteamOS 3.9 x86_64 | Dedicated `v1.5.0-beta.2` prerelease `pkg.tar.zst` asset, once published | Built against Valve's SteamOS 3.9 repositories; not yet run on a Deck. Not interchangeable with the 3.8 package. |
 | Bazzite 44 | Fedora 44 RPM layered with `rpm-ostree` | Experimental; Desktop Mode has NVIDIA Headless Stream coverage and growing AMD/Mesa VAAPI validation, Steam/Game Mode needs more reports. |
 | Ubuntu 24.04 | Published DEB asset | Experimental tester package; broader desktop/GPU coverage needed. |
 | openSUSE Tumbleweed | Source build | Dedicated guide and CI build coverage; no published release asset yet. |
@@ -237,11 +241,12 @@ The public release assets are currently:
 - `Polaris-ubuntu24.04-x86_64.deb`
 - `Polaris-arch-x86_64.pkg.tar.zst`
 - `Polaris-steamos3.8-x86_64.pkg.tar.zst`
+- `Polaris-steamos3.9-x86_64.pkg.tar.zst`
 
 Bazzite installs use the matching Fedora RPM through `rpm-ostree`, as described in the
 [Bazzite guide](bazzite.md). The standalone system extension was withdrawn because it did not include
-the runtime dependencies required by Bazzite; do not use cached copies. SteamOS 3.8 uses its dedicated
-package through the [SteamOS guide](steamos.md); the package is not interchangeable with the rolling
-Arch artifact. Ubuntu 24.04 has a direct DEB package. openSUSE Tumbleweed has source-build guidance and
+the runtime dependencies required by Bazzite; do not use cached copies. SteamOS 3.8 and 3.9 each use their own
+dedicated package through the [SteamOS guide](steamos.md); neither is interchangeable with the rolling
+Arch artifact or with the other. Ubuntu 24.04 has a direct DEB package. openSUSE Tumbleweed has source-build guidance and
 CI build coverage but no published release package asset yet. CachyOS should start with the Arch package
 path. Other distro paths are still source-build/community-validation oriented.

@@ -75,6 +75,7 @@ describe('release channel', () => {
       '      - name: Generate Arch package files',
       '      - name: Smoke test Arch package',
       '      - name: Build and validate SteamOS 3.8 package',
+      '      - name: Build and validate SteamOS 3.9 package',
     ]) {
       expect(section(start, '\n      - name: '), start).toContain(labelEnv)
     }

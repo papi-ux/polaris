@@ -1,18 +1,20 @@
-# Install on SteamOS 3.8
+# Install on SteamOS 3.8 and 3.9
 
-Polaris provides a dedicated x86_64 package for SteamOS 3.8, `Polaris-steamos3.8-x86_64.pkg.tar.zst`. It is built against Valve's versioned SteamOS 3.8 package repositories and is not built against rolling Arch Linux; the rolling Arch package is not a supported substitute on SteamOS.
+Polaris provides a dedicated x86_64 package for each supported SteamOS release: `Polaris-steamos3.8-x86_64.pkg.tar.zst` for SteamOS 3.8 and `Polaris-steamos3.9-x86_64.pkg.tar.zst` for SteamOS 3.9. The 3.8 package is built against Valve's versioned SteamOS 3.8 package repositories and the 3.9 package against the SteamOS 3.9 ones. These packages are not built against rolling Arch Linux; the rolling Arch package is not a supported substitute on SteamOS.
+
+Install the package for the release your Deck runs, which `VERSION_ID` in `/etc/os-release` names. Each package depends on the exact Boost libraries of its own release, so pacman refuses the other release's package instead of installing a Polaris that cannot start.
 
 ## Validation Status
 
-This package is proven on a Steam Deck OLED on SteamOS 3.8.16, in Desktop Mode and in Game Mode. In Game Mode the host streams the Game Mode screen: a Steam title launched from a client opens there, a controller reaches it as a virtual DualSense, touch lands where it is aimed, and ending the session closes only the title the stream opened. The Steam Deck LCD, OLED 90 Hz behavior, suspend and resume, and persistence across SteamOS updates are not certified yet; those claims need their own hardware evidence. [Handhelds and Game Mode](handhelds.md) explains what a Deck can do in each mode and how to keep Polaris reachable when it returns to Game Mode.
+The SteamOS 3.8 package is proven on a Steam Deck OLED on SteamOS 3.8.16, in Desktop Mode and in Game Mode. In Game Mode the host streams the Game Mode screen: a Steam title launched from a client opens there, a controller reaches it as a virtual DualSense, touch lands where it is aimed, and ending the session closes only the title the stream opened. The Steam Deck LCD, OLED 90 Hz behavior, suspend and resume, and persistence across SteamOS updates are not certified yet; those claims need their own hardware evidence. The SteamOS 3.9 package has not been run on a Deck yet. [Handhelds and Game Mode](handhelds.md) explains what a Deck can do in each mode and how to keep Polaris reachable when it returns to Game Mode.
 
-Continuous integration builds and validates this package inside a clean SteamOS 3.8 root bootstrapped from Valve's repositories. A clean root has none of the packages a shipped SteamOS image already carries, so that gate proves the package builds and its libraries resolve. It does not prove the install transaction is conflict-free on a device, and it did not catch the `libdisplay-info` conflict described under Stream Paths on SteamOS.
+Continuous integration builds and validates each package inside a clean root of its own SteamOS release, bootstrapped from Valve's repositories. A clean root has none of the packages a shipped SteamOS image already carries, so that gate proves the package builds and its libraries resolve. It does not prove the install transaction is conflict-free on a device, and it did not catch the `libdisplay-info` conflict described under Stream Paths on SteamOS.
 
 SteamOS uses a read-only root by default. Polaris installation and `sudo -H polaris --setup-host` must run while the root is writable. Read-only mode must be restored before the user service starts.
 
 ## Install
 
-Open a terminal in Desktop Mode and run:
+Open a terminal in Desktop Mode. On SteamOS 3.8, run:
 
 ```bash
 wget --output-document=./Polaris-steamos3.8-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/latest/download/Polaris-steamos3.8-x86_64.pkg.tar.zst &&
@@ -24,6 +26,27 @@ sudo pacman-key --init || exit $?
 sudo pacman-key --populate || exit $?
 sudo pacman -Sy || exit $?
 sudo pacman -U ./Polaris-steamos3.8-x86_64.pkg.tar.zst || exit $?
+sudo -H polaris --setup-host --enable-headless-boot || exit $?
+sudo steamos-readonly enable || exit $?
+trap - EXIT
+) &&
+systemctl --user enable --now polaris
+```
+
+On SteamOS 3.9, use the matching package from `v1.5.0-beta.2`. This command
+requires that prerelease to have been published. Beta releases do not replace
+the latest stable release, so `releases/latest/download` does not select it.
+
+```bash
+wget --output-document=./Polaris-steamos3.9-x86_64.pkg.tar.zst https://github.com/papi-ux/polaris/releases/download/v1.5.0-beta.2/Polaris-steamos3.9-x86_64.pkg.tar.zst &&
+(
+set -e
+trap 'sudo steamos-readonly enable' EXIT
+sudo steamos-readonly disable || exit $?
+sudo pacman-key --init || exit $?
+sudo pacman-key --populate || exit $?
+sudo pacman -Sy || exit $?
+sudo pacman -U ./Polaris-steamos3.9-x86_64.pkg.tar.zst || exit $?
 sudo -H polaris --setup-host --enable-headless-boot || exit $?
 sudo steamos-readonly enable || exit $?
 trap - EXIT
@@ -57,13 +80,15 @@ announcements", and **Settings > Internet** on the Deck shows it too. Then pair 
 
 Polaris defaults to Mirror Desktop, which streams the visible Desktop Mode session through the portal and needs nothing beyond this package. Gamescope Stream is also available, because SteamOS ships gamescope.
 
-The Private Stream paths need `labwc` on `PATH`, and labwc cannot be installed on SteamOS 3.8 without breaking the system. labwc 0.9.0 in `extra-3.8.1x` depends on wlroots0.19, which requires `libdisplay-info.so.2` from libdisplay-info 0.2.0. SteamOS installs libdisplay-info 0.3.0 from `holo-3.8.1x`, which provides `libdisplay-info.so.3`, and KWin, Mesa, and Vulkan link against that. Installing labwc therefore downgrades a library the desktop depends on and breaks Desktop Mode.
+The Private Stream paths need `labwc` on `PATH`, and labwc cannot be installed on SteamOS 3.8 without breaking the system. labwc 0.9.0 in `extra-3.8.1x` depends on wlroots0.19, which requires `libdisplay-info.so.2` from libdisplay-info 0.2.0. SteamOS installs libdisplay-info 0.3.0 from `holo-3.8.1x`, which provides `libdisplay-info.so.3`, and KWin, Mesa, and Vulkan link against that. Installing labwc therefore downgrades a library the desktop depends on and breaks Desktop Mode. labwc has not been tried on SteamOS 3.9.
 
 Polaris does not depend on labwc for this reason, and links nothing from it. Private Stream cards are greyed out on SteamOS and name the missing `labwc` tool; a pre-existing Private Stream configuration also fails closed at launch. Use Mirror Desktop or Gamescope Stream instead.
 
 ## Leave Game Mode Before Launch
 
 An app can opt in to leaving Game Mode before its own private launch with `"leave-game-mode-before-launch": true`. It is off for every app unless set, and it never applies to resume, watch-only, input-only, profile or Space launches. This build implements the switch on Linux builds with GIO. It has not been accepted on Steam Deck hardware, so it is a source implementation, not a certified feature.
+
+The switch needs SteamOS Manager 26.4.1, which ships with SteamOS 3.9. SteamOS 3.8 carries 26.2.1, so on SteamOS 3.8 an opted-in launch is refused before anything changes.
 
 Whether anything is needed comes only from typed records: this account's `gamescope-session.service` as its own user manager reports it. If that unit is not loaded, inactive or failed, nothing is needed. If it is active, the launch must leave Game Mode. If it is anything else, or the records cannot be read, an opted-in launch is refused rather than treated as "not in Game Mode". Builds that cannot read the records (Linux without GIO) refuse opted-in launches. Platforms without Steam Game Mode need nothing.
 
@@ -116,11 +141,11 @@ These are physical SteamOS assumptions that remain unqualified until a Steam Dec
 
 ## Update
 
-Download the new `Polaris-steamos3.8-x86_64.pkg.tar.zst` artifact and repeat the failure-safe install command. The package manager replaces the prior Polaris files, host setup refreshes required integration, and read-only mode is restored before service startup.
+Download the new package for your SteamOS release, `Polaris-steamos3.8-x86_64.pkg.tar.zst` or `Polaris-steamos3.9-x86_64.pkg.tar.zst`, and repeat its failure-safe install command. The package manager replaces the prior Polaris files, host setup refreshes required integration, and read-only mode is restored before service startup.
 
-A SteamOS operating-system update may remove packages layered into the mutable root. If Polaris disappears after an OS update, return to Desktop Mode and reinstall the current SteamOS 3.8 artifact. Do not substitute the rolling Arch package.
+A SteamOS operating-system update may remove packages layered into the mutable root. If Polaris disappears after an OS update, return to Desktop Mode and reinstall the current package for the SteamOS release the Deck now runs. After an update from SteamOS 3.8 to 3.9, that is the 3.9 package. Do not substitute the rolling Arch package.
 
-The release also carries `Polaris-kms-steamos3.8-x86_64.pkg.tar.zst`, the optional DRM/KMS capture helper. Mirror Desktop, Gamescope Stream and Game Mode streaming do not need it, and it has not been validated on a Deck. If you installed it, download it from the same release each time and add `./Polaris-kms-steamos3.8-x86_64.pkg.tar.zst` to the `pacman -U` line, including the reinstall after a SteamOS update. On a host that ran 1.4.13-beta.2 or beta.3, the Polaris package named alone replaces Polaris but leaves the beta's helper in place.
+The release also carries `Polaris-kms-steamos3.8-x86_64.pkg.tar.zst` and `Polaris-kms-steamos3.9-x86_64.pkg.tar.zst`, the optional DRM/KMS capture helper for each release. Mirror Desktop, Gamescope Stream and Game Mode streaming do not need it, and it has not been validated on a Deck. If you installed it, download the one for your SteamOS release from the same release each time and add it to the `pacman -U` line, for example `./Polaris-kms-steamos3.8-x86_64.pkg.tar.zst`, including the reinstall after a SteamOS update. On a host that ran 1.4.13-beta.2 or beta.3, the Polaris package named alone replaces Polaris but leaves the beta's helper in place.
 
 After Polaris restarts, return to `https://localhost:47990/#/login` with the existing web credentials.
 

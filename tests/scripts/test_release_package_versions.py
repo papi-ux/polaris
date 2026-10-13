@@ -65,7 +65,7 @@ class ReleasePackageVersions(unittest.TestCase):
             filename = f"Polaris{component}-ubuntu24.04-x86_64.deb"
             version = release["deb"] if filename == lost else deb
             (self.final / filename).write_text(f"Package: {name}\nVersion: {version}\n")
-        for platform in ("arch", "steamos3.8"):
+        for platform in ("arch", "steamos3.8", "steamos3.9"):
             for component in ("", "-kms", "-debug"):
                 filename = f"Polaris{component}-{platform}-x86_64.pkg.tar.zst"
                 version = release["pacman"] if filename == lost else pacman
@@ -88,7 +88,7 @@ class ReleasePackageVersions(unittest.TestCase):
         self.assets(rpm="1.4.13~beta.3", deb="1.4.13~beta.3", pacman="1.4.13beta.3-1")
         result = self.check("v1.4.13-beta.3")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(result.stdout.splitlines()), 10, result.stdout)
+        self.assertEqual(len(result.stdout.splitlines()), 13, result.stdout)
         self.assertIn("Polaris-kms-fedora44-x86_64.rpm: polaris-kms 1.4.13~beta.3-1", result.stdout)
         self.assertIn("Polaris-debug-steamos3.8-x86_64.pkg.tar.zst: polaris-debug 1.4.13beta.3-1", result.stdout)
 
@@ -113,6 +113,9 @@ class ReleasePackageVersions(unittest.TestCase):
             "Polaris-steamos3.8-x86_64.pkg.tar.zst",
             "Polaris-kms-steamos3.8-x86_64.pkg.tar.zst",
             "Polaris-debug-steamos3.8-x86_64.pkg.tar.zst",
+            "Polaris-steamos3.9-x86_64.pkg.tar.zst",
+            "Polaris-kms-steamos3.9-x86_64.pkg.tar.zst",
+            "Polaris-debug-steamos3.9-x86_64.pkg.tar.zst",
         ):
             with self.subTest(lost=lost):
                 self.assets(rpm="1.4.13~beta.3", deb="1.4.13~beta.3", pacman="1.4.13beta.3-1", lost=lost)
@@ -126,13 +129,13 @@ class ReleasePackageVersions(unittest.TestCase):
         self.assets(rpm="1.4.13", deb="1.4.13", pacman="1.4.13-1")
         result = self.check("v1.4.13-beta.3")
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(result.stderr.count(" needs "), 10, result.stderr)
+        self.assertEqual(result.stderr.count(" needs "), 13, result.stderr)
 
     def test_a_stable_release_refuses_prerelease_packages(self):
         self.assets(rpm="1.4.13~beta.3", deb="1.4.13~beta.3", pacman="1.4.13beta.3-1")
         result = self.check("v1.4.13", prerelease="false", label="")
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(result.stderr.count(" needs "), 10, result.stderr)
+        self.assertEqual(result.stderr.count(" needs "), 13, result.stderr)
 
     def test_other_spellings_of_a_beta_are_refused(self):
         # Each sorts above the release in the format that would carry it.
