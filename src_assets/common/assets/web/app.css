@@ -2301,6 +2301,13 @@ textarea {
 }
 
 /* Status copy and controls must stay inside their cards when text is enlarged. */
+[data-session-snapshot] > .flex {
+  flex-wrap: wrap;
+}
+[data-session-snapshot] > .flex > div {
+  min-width: 0;
+  max-width: 100%;
+}
 [data-session-snapshot] .meta-pill {
   max-width: 100%;
   white-space: normal;
