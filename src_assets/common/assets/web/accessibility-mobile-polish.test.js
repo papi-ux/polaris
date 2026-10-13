@@ -90,7 +90,7 @@ describe('cross-cutting accessibility and mobile polish', () => {
     expect(css).toContain('top: auto')
   })
 
-  it('keeps compact actions and state labels readable instead of wrapping them into tall pills', () => {
+  it('keeps compact state labels readable while Doctor actions can wrap within their cards', () => {
     const css = webSource('app.css')
     const audioVideo = webSource('configs/tabs/AudioVideo.vue')
 
