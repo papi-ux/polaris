@@ -1118,19 +1118,25 @@ describe('Linux packaging contracts', () => {
           mkdirSync(dirname(join(fixture, path)), { recursive: true })
           writeFileSync(join(fixture, path), readSource(path))
         }
+        const output = join(fixture, 'output')
+        mkdirSync(output)
         const driver = join(fixture, 'configure.cmake')
-        writeFileSync(driver, `set(UNIX TRUE)
+        // The real project sets CMake's policies before including this module. A bare -P
+        // script otherwise treats if(ON) differently on CMake 3.x and 4.x (CMP0012).
+        const minimum = readSource('CMakeLists.txt').match(/^cmake_minimum_required\([^\n]+\)$/m)[0]
+        writeFileSync(driver, `${minimum}
+set(UNIX TRUE)
 set(APPLE FALSE)
 set(PROJECT_FQDN "dev.polaris-stream.app.Polaris")
 set(POLARIS_CONFIGURE_STEAMOS_PKGBUILD ON)
 set(POLARIS_CONFIGURE_ONLY ON)
 set(POLARIS_STEAMOS_TARGET "${target}")
-set(CMAKE_BINARY_DIR "${fixture}")
+set(CMAKE_BINARY_DIR "${output}")
 include("${join(process.cwd(), 'cmake/prep/special_package_configuration.cmake')}")
 `)
         const result = spawnSync('cmake', ['-P', driver], { encoding: 'utf8', cwd: fixture })
         expect(result.status, result.stderr).toBe(0)
-        const generated = readFileSync(join(fixture, 'packaging/linux/SteamOS/PKGBUILD'), 'utf8')
+        const generated = readFileSync(join(output, 'packaging/linux/SteamOS/PKGBUILD'), 'utf8')
         const depends = generated.match(/^depends=\(\n([\s\S]*?)\n\)/m)[1]
         const dependencies = [...depends.matchAll(/'([^']+)'/g)].map((match) => match[1])
         // SteamOS 3.9's gcc-libs is an empty umbrella; namcap needs the actual library owners.
