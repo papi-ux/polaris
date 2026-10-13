@@ -1243,6 +1243,7 @@ textarea {
 }
 
 .section-card {
+  min-width: 0;
   @apply p-4 sm:p-5;
   background: var(--surface-card);
   backdrop-filter: blur(12px);
@@ -1351,6 +1352,8 @@ textarea {
 }
 
 .surface-subtle {
+  min-width: 0;
+  overflow-wrap: anywhere;
   @apply rounded-xl border;
   background: var(--surface-raised);
   border-color: var(--edge-raised);
@@ -2297,8 +2300,16 @@ textarea {
   @apply grid gap-3 md:grid-cols-2 xl:grid-cols-3;
 }
 
+/* Status copy and controls must stay inside their cards when text is enlarged. */
+[data-session-snapshot] .meta-pill {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .troubleshooting-action-button {
-  @apply inline-flex h-9 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg px-4 text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
+  @apply inline-flex min-h-9 max-w-full items-center justify-center gap-2 whitespace-normal rounded-lg px-4 py-2 text-center text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
+  overflow-wrap: anywhere;
 }
 
 .pairing-flow-strip {

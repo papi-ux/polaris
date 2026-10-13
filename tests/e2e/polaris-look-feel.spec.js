@@ -298,3 +298,32 @@ test('collapsed vitals keep pressure and missing readings legible without colour
   await expect(vitals.locator('summary')).toContainText('90% VRAM · high')
   await fits(vitals, 390)
 })
+
+for (const width of [390, 1280]) {
+  for (const theme of ['polaris', 'director', 'oled', 'high-contrast']) {
+    test(`Doctor cards and controls reflow with 32px text in ${theme} at ${width}px`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 960 })
+      await page.emulateMedia({ reducedMotion: 'reduce' })
+      const cdp = await page.context().newCDPSession(page)
+      await cdp.send('Page.setFontSizes', { fontSizes: { standard: 32 } })
+      const writes = await mockHost(page, theme)
+      await page.goto('/#/troubleshooting')
+      await expect(page.getByRole('heading', { name: 'Doctor & Support', exact: true })).toBeVisible()
+      expect(await page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe('32px')
+      // Check both a browser font preference and CSS-root text scaling. The latter
+      // enlarges controls without changing the media-query initial font size.
+      for (const cssScale of [false, true]) {
+        if (cssScale) {
+          await cdp.send('Page.setFontSizes', { fontSizes: { standard: 16 } })
+          await page.evaluate(() => { document.documentElement.style.fontSize = '32px' })
+        }
+        await fits(page.locator('main'), width)
+        for (const card of await page.locator('main .section-card, [data-support-self-tests] .surface-subtle').all()) await fits(card, width)
+        for (const control of await page.locator('[data-fix-my-stream] .troubleshooting-action-button, [data-session-snapshot] .meta-pill').all()) await fits(control, width)
+      }
+      await supportingCopyContrast(page, page.locator('.page-subtitle').first(), testInfo, 'doctor-subtitle')
+      expect(writes).toEqual([])
+      await page.screenshot({ path: `test-results/look-feel-doctor-text-${theme}-${width}.png`, animations: 'disabled' })
+    })
+  }
+}
