@@ -91,7 +91,7 @@ namespace prelaunch::steamos {
   /// The %FILES% section of a `files` text. Missing section or empty is nullopt.
   std::optional<std::vector<std::string>> parse_package_files(std::string_view files);
 
-  /// Exactly one installed record of `name` under `local_db` (pacman's /var/lib/pacman/local), whose
+  /// Exactly one installed record of `name` under `local_db` (the selected pacman local database), whose
   /// directory name is `name-version` and whose desc names it. Zero or several is a refusal.
   verdict_t read_installed_package(const std::filesystem::path &local_db, std::string_view name, package_record_t &out);
   /// The installed release is one of the audited ones (epoch 0) and owns both fixed paths.

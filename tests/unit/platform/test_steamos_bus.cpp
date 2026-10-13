@@ -1172,6 +1172,32 @@ TEST(SteamosBusTests, TheManagerNameMustStillBeTheIntrospectedConnection) {
   EXPECT_NE(verdict.reason.find("owner changed"), std::string::npos) << verdict.reason;
 }
 
+TEST(SteamosBusTests, ProductionDatabaseLookupUsesTheSteamOSLayoutAndKeepsPackageGuards) {
+  world_t world;
+  // Populate the actual SteamOS layout independently of the production default. Mapping that
+  // default under our owned fixture catches the missing-Arch-DB refusal seen on the real Deck.
+  const auto db = world.scratch.root / "usr/lib/holo/pacmandb/local";
+  std::filesystem::create_directories(db.parent_path());
+  std::filesystem::rename(world.sources.pacman_local, db);
+  world.sources.pacman_local = world.scratch.root / bus::sources_t {}.pacman_local.relative_path();
+  ASSERT_FALSE(std::filesystem::exists(world.scratch.root / "var/lib/pacman/local"));
+  const auto supported = bus::probe_support(world.sources, world.budget());
+  ASSERT_TRUE(supported.ok()) << supported.code << ": " << supported.reason;
+  EXPECT_TRUE(world.fake->all_no_auto_start());
+  EXPECT_TRUE(world.command_lines().empty());
+
+  const auto record = "usr/lib/holo/pacmandb/local/steamos-manager-26.4.1-1/"s;
+  world.scratch.write(record + "files", "%FILES%\nusr/bin/steamosctl\n\n");
+  EXPECT_EQ(bus::probe_support(world.sources, world.budget()).code, "prelaunch_adapter_package_malformed");
+  world.scratch.write(record + "files", "%FILES%\nusr/bin/steamosctl\nusr/lib/steamos-manager\n\n");
+  world.scratch.write(record + "desc", "%NAME%\nsteamos-manager\n\n%VERSION%\n26.4.2-1\n\n");
+  std::filesystem::rename(db / "steamos-manager-26.4.1-1", db / "steamos-manager-26.4.2-1");
+  EXPECT_EQ(bus::probe_support(world.sources, world.budget()).code, "prelaunch_adapter_version_unaudited");
+  std::filesystem::remove(db / "steamos-manager-26.4.2-1/files");
+  EXPECT_EQ(bus::probe_support(world.sources, world.budget()).code, "prelaunch_adapter_package_unreadable");
+  EXPECT_TRUE(world.command_lines().empty());
+}
+
 TEST(SteamosBusTests, PolarisMustProvablySurviveTheStopBeforeAnyCommandRuns) {
   struct case_t {
     std::string name;
@@ -1280,6 +1306,7 @@ TEST(SteamosBusTests, RegisteredCasesAreFrozen) {
     "ARepeatedPropertyIsRefusedWhateverItsTypes",
     "IntrospectionIsParsedAsXmlNotSearchedAsText",
     "TheManagerNameMustStillBeTheIntrospectedConnection",
+    "ProductionDatabaseLookupUsesTheSteamOSLayoutAndKeepsPackageGuards",
     "PolarisMustProvablySurviveTheStopBeforeAnyCommandRuns",
     "TheModeDecisionComesOnlyFromTheTypedRecords",
     "AKeptReadinessAnswerFollowsAnInPlaceEditOfThePackageRecord",
