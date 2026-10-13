@@ -294,6 +294,28 @@ describe('space field lifecycle and draw bounds', () => {
     expect(queued.size).toBe(0)
   })
 
+  it('drops a resize frame queued before the tab hid and applies the size on return', () => {
+    motion.matches = true
+    vi.stubGlobal('devicePixelRatio', 1)
+    viewport(1280, 800)
+    const wrapper = mounted()
+    viewport(800, 600)
+    window.dispatchEvent(new Event('resize'))
+    expect(queued.size).toBe(1)
+    hidden = true; document.dispatchEvent(new Event('visibilitychange'))
+    const draws = contexts[0].clearRect.mock.calls.length
+    const gradients = contexts[1].createRadialGradient.mock.calls.length
+    while (queued.size) frame(16)
+    // Nothing is reallocated or repainted while hidden.
+    expect(wrapper.element.width).toBe(1280)
+    expect(contexts[1].createRadialGradient).toHaveBeenCalledTimes(gradients)
+    expect(contexts[0].clearRect).toHaveBeenCalledTimes(draws)
+    hidden = false; document.dispatchEvent(new Event('visibilitychange'))
+    expect(wrapper.element.width).toBe(800)
+    expect(contexts[0].clearRect).toHaveBeenCalledTimes(draws + 1)
+    expect(queued.size).toBe(0)
+  })
+
   it('cancels a queued resize frame on unmount', () => {
     motion.matches = true
     const wrapper = mounted()

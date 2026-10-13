@@ -567,6 +567,11 @@ function handleVisibilityChange() {
       cancelAnimationFrame(animId)
       animId = null
     }
+    // A size queued while visible waits too; it is applied when the tab returns.
+    if (resizeFrame !== null) {
+      cancelAnimationFrame(resizeFrame)
+      resizeFrame = null
+    }
     return
   }
   restartAnimation()
