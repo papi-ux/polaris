@@ -259,6 +259,47 @@ TEST(DoctorV2ProvenanceTests, UnavailableWirePlaceholderStillRequiresAFiniteNonn
   EXPECT_TRUE(doctor_v2::status("owner", "app", host_evidence()).at("trial_metrics").at("decode_latency_ms").is_null());
 }
 
+TEST(DoctorV2ProvenanceTests, LegacyPyroWaveCpuReturnCannotBecomeMeasuredRendering) {
+  doctor_v2_flag_t enabled;
+  for (const char *codec : {"PyroWave", "pyrowave", " PyroWave ", "PYRO"}) {
+    doctor_v2::clear_for_tests();
+    for (std::int64_t i = 0; i <= 75; ++i) {
+      auto payload = sample(1000 + i * 1000, i);
+      payload["sample"].update({{"codec", codec}, {"decode_latency_ms", 7.0}});
+      ASSERT_TRUE(ingest_at("owner", "app", payload).at("status").get<bool>());
+    }
+    const auto status = doctor_v2::status("owner", "app", host_evidence());
+    const auto &measurements = status.at("stages").at("receive_decode_render").at("measurements");
+    EXPECT_EQ(measurements.at("frame_output_source"), "present_request") << codec;
+    EXPECT_TRUE(measurements.at("decode_latency_ms").is_null()) << codec;
+    EXPECT_TRUE(measurements.at("rendered_fps").is_null()) << codec;
+    EXPECT_FALSE(status.at("stable").get<bool>()) << codec;
+  }
+}
+
+TEST(DoctorV2ProvenanceTests, TwoWindowsCannotBorrowTheSecondWindowsMeasuredProvenance) {
+  doctor_v2_flag_t enabled(true);
+  for (double output_fps : {60.0, 120.0}) {
+    doctor_v2::clear_for_tests();
+    for (std::int64_t i = 0; i <= 75; ++i) {
+      auto payload = sample(1000 + i * 1000, i, output_fps, output_fps);
+      if (i < 45) {
+        payload["sample"].update({{"decode_latency_ms", 0.0}, {"decode_latency_available", false},
+                                  {"frame_output_source", "present_request"}});
+      }
+      ASSERT_TRUE(ingest_at("owner", "app", payload).at("status").get<bool>());
+    }
+    const auto status = doctor_v2::status("owner", "app", host_evidence());
+    ASSERT_TRUE(status.at("window").at("two_consecutive_complete").get<bool>());
+    EXPECT_EQ(status.at("stages").at("receive_decode_render").at("measurements").at("frame_output_source"), "renderer_output");
+    EXPECT_FALSE(status.at("coverage_adequate").get<bool>());
+    EXPECT_FALSE(status.at("stable").get<bool>());
+    EXPECT_EQ(status.at("state"), "collecting");
+    EXPECT_FALSE(status.at("actions_exposed").get<bool>());
+    EXPECT_FALSE(status.at("trial_metrics").at("ready").get<bool>());
+  }
+}
+
 TEST(DoctorV2Tests, RequiresMonotonicSamplesWithinGeneration) {
   doctor_v2_flag_t enabled;
   EXPECT_TRUE(ingest_at("owner", "app", sample(1000, 1)).at("status").get<bool>());

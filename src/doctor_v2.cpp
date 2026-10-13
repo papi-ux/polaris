@@ -116,6 +116,18 @@ namespace doctor_v2 {
       sample.target_fps = raw.value("target_fps", 0.0);
       sample.refresh_rate_hz = raw.value("refresh_rate_hz", 0.0);
       sample.rtt_ms = raw.value("rtt_ms", 0.0);
+      sample.codec = raw.value("codec", std::string {});
+      auto codec = sample.codec;
+      const auto first = codec.find_first_not_of(" \t\r\n");
+      codec = first == std::string::npos ? std::string {} :
+        codec.substr(first, codec.find_last_not_of(" \t\r\n") - first + 1);
+      std::transform(codec.begin(), codec.end(), codec.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+      });
+      // Older Nova versions sent CPU API-return timing and accepted present
+      // counts without the new metadata. Their raw codec and HUD label are
+      // known aliases, so missing provenance must not upgrade those readings.
+      const bool legacy_pyrowave = codec == "pyrowave" || codec == "pyro";
       if ((raw.contains("decode_latency_available") && !raw["decode_latency_available"].is_boolean()) ||
           (raw.contains("decode_latency_ms") && !raw["decode_latency_ms"].is_number()) ||
           (raw.contains("frame_output_source") && !raw["frame_output_source"].is_string())) {
@@ -123,13 +135,15 @@ namespace doctor_v2 {
         return std::nullopt;
       }
       const double decode_wire_ms = raw.value("decode_latency_ms", 0.0);
-      const bool decode_available = raw.value("decode_latency_available", raw.contains("decode_latency_ms"));
+      const bool decode_available = raw.value("decode_latency_available",
+        !legacy_pyrowave && raw.contains("decode_latency_ms"));
       if (decode_available && !raw.contains("decode_latency_ms")) {
         error = "available decode latency requires a measurement";
         return std::nullopt;
       }
       if (decode_available) sample.decode_ms = decode_wire_ms;
-      sample.frame_output_source = raw.value("frame_output_source", std::string {"renderer_output"});
+      sample.frame_output_source = raw.value("frame_output_source",
+        std::string {legacy_pyrowave ? "present_request" : "renderer_output"});
       if (sample.frame_output_source != "renderer_output" && sample.frame_output_source != "present_request") {
         error = "invalid frame output provenance";
         return std::nullopt;
@@ -140,7 +154,6 @@ namespace doctor_v2 {
       sample.width = raw.value("width", 0);
       sample.height = raw.value("height", 0);
       sample.bitrate_kbps = raw.value("bitrate_kbps", 0);
-      sample.codec = raw.value("codec", std::string {});
       sample.topology = raw.value("topology", std::string {});
       sample.hdr = raw.value("hdr", false);
 
@@ -490,7 +503,8 @@ namespace doctor_v2 {
     const auto cadence = doctor_cadence::evaluate(
       host_evidence, generation, now_ms(), current.front().received_ms, current.back().received_ms, target_fps
     );
-    const bool diagnostic_evidence_adequate = core_evidence_adequate && cadence.available;
+    const bool diagnostic_evidence_adequate = core_evidence_adequate && cadence.available &&
+      trial_decode_ms.has_value() && trial_rendered_measured;
     if (!cadence.observation.is_null()) result["observations"].push_back(cadence.observation);
     if (cadence.source_time) {
       result["trial_metrics"]["pacing_error_pct"] = nullptr;
@@ -553,8 +567,8 @@ namespace doctor_v2 {
     result["missing_evidence"] = nlohmann::json::array();
     if (!cadence.available) result["missing_evidence"].push_back("verified_source_cadence_policy_or_measurements");
     if (retransmissions.is_null()) result["missing_evidence"].push_back("retransmissions");
-    if (!decode_ms) result["missing_evidence"].push_back("decode_latency");
-    if (!rendered_output_measured) result["missing_evidence"].push_back("renderer_output_counter");
+    if (!decode_ms || !trial_decode_ms) result["missing_evidence"].push_back("decode_latency");
+    if (!rendered_output_measured || !trial_rendered_measured) result["missing_evidence"].push_back("renderer_output_counter");
     if (!receive_decode_render_complete) {
       result["missing_evidence"].push_back("decoded_frame_counter");
       result["missing_evidence"].push_back("queue_latency");
