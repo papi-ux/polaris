@@ -8,7 +8,7 @@
 // and the default-means-no-attribute rule. theme.test.js pins the two files
 // together, so change them in lockstep.
 (function () {
-  var KNOWN_THEMES = ['polaris', 'portable-chrome', 'oled', 'miami', 'high-contrast']
+  var KNOWN_THEMES = ['polaris', 'portable-chrome', 'oled', 'miami', 'director', 'high-contrast']
   try {
     var theme = localStorage.getItem('polaris-theme')
     if (theme && theme !== 'polaris' && KNOWN_THEMES.indexOf(theme) !== -1) {

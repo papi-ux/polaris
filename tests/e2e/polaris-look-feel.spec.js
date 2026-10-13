@@ -1,7 +1,7 @@
 import { test, expect } from './fixtures/mocked.js'
 import { inflateSync } from 'node:zlib'
 
-const themes = ['polaris', 'portable-chrome', 'oled', 'miami', 'high-contrast']
+const themes = ['polaris', 'portable-chrome', 'oled', 'miami', 'director', 'high-contrast']
 const catalog = [
   { uuid: 'control', name: 'Control Ultimate Edition', cmd: 'control', favorite: true, 'image-path': 'control.png' },
   { uuid: 'broken', name: 'Missing Artwork', cmd: 'game', 'image-path': 'missing.png' },

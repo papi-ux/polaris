@@ -1,4 +1,4 @@
-// Polaris Theme System. Five skins matching the Nova client's theme catalog
+// Polaris Theme System. Six skins matching the Nova client's theme catalog
 // (labels, ordering, and palettes from Nova's colors_nova.xml / arrays.xml);
 // Nova's Material You is Android-only and has no web analogue.
 
@@ -35,6 +35,13 @@ export const THEMES = [
     shortLabel: 'Miami',
     subtitle: 'Miami neon · flamingo pink glow · cyan night drive',
     preview: { window: '#130817', card: '#241429', accent: '#ff5cab' },
+  },
+  {
+    id: 'director',
+    label: 'Director',
+    shortLabel: 'Director',
+    subtitle: 'Crimson stage · warm white copy · black controls',
+    preview: { window: '#6e0b17', card: '#881525', accent: '#fff5e8' },
   },
   {
     id: 'high-contrast',

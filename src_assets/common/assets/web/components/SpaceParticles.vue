@@ -1,5 +1,5 @@
 <template>
-  <canvas ref="canvas" class="space-particles inset-0 pointer-events-none" :class="absolute ? 'absolute' : 'fixed'" :style="{ zIndex: absolute ? 0 : 0 }" />
+  <canvas aria-hidden="true" ref="canvas" class="space-particles inset-0 pointer-events-none" :class="absolute ? 'absolute' : 'fixed'" :style="{ zIndex: absolute ? 0 : 0 }" />
 </template>
 
 <script setup>
@@ -16,6 +16,16 @@ const props = defineProps({
 const canvas = ref(null)
 let ctx = null
 let animId = null
+let backdrop = null
+let backdropCtx = null
+let pixelRatio = 1
+let lastFrameTime = null
+// Two canvases at most, each capped at four million pixels / 8192 per side.
+// Fixed object counts and 30 Hz draws keep the field independent of refresh rate.
+const MAX_DPR = 2
+const MAX_PIXELS = 4_000_000
+const MAX_SIDE = 8192
+const FRAME_INTERVAL = 1000 / 30
 let particles = []
 let shootingStars = []
 let nebulae = []
@@ -54,8 +64,8 @@ function getModeConfig(mode) {
       twinkle: [0.004, 0.012],
       nebulaCount: 9,
       galaxyCount: 6,
-      shootingChance: 0.01,
-      maxShootingStars: 5,
+      shootingChance: 0.0025,
+      maxShootingStars: 2,
       sparkleThreshold: 0.76,
     }
   }
@@ -73,8 +83,8 @@ function getModeConfig(mode) {
       twinkle: [0.004, 0.01],
       nebulaCount: 7,
       galaxyCount: 5,
-      shootingChance: 0.008,
-      maxShootingStars: 4,
+      shootingChance: 0.002,
+      maxShootingStars: 2,
       sparkleThreshold: 0.78,
     }
   }
@@ -91,19 +101,20 @@ function getModeConfig(mode) {
     twinkle: [0.0035, 0.008],
     nebulaCount: 6,
     galaxyCount: 4,
-    shootingChance: 0.005,
-    maxShootingStars: 3,
+    shootingChance: 0.001,
+    maxShootingStars: 1,
     sparkleThreshold: 0.8,
   }
 }
 
 // Per-theme particle strength, mirroring Nova's librarySurfaces particle
-// table: OLED disables the field entirely for true black.
+// table: OLED stays true black; Director keeps its opaque crimson stage.
 const THEME_PARTICLE_ALPHA = {
   polaris: 1,
   'portable-chrome': 0.44,
   oled: 0,
   miami: 0.68,
+  director: 0,
   'high-contrast': 0.28,
 }
 
@@ -131,7 +142,7 @@ function brighten(rgb, factor) {
 const THEME_ART = {
   polaris: {
     nebulae: (glow) => [glow, [98, 132, 190], [88, 116, 146]],
-    nebulaOpacity: [0.012, 0.028],
+    nebulaOpacity: [0.025, 0.055],
     nebulaRadius: [120, 300],
     galaxyRadius: [66, 150],
     galaxyGlow: [0.04, 0.08],
@@ -141,7 +152,7 @@ const THEME_ART = {
   },
   miami: {
     nebulae: (glow, accent2) => [glow, accent2, [190, 84, 150], [108, 60, 111]],
-    nebulaOpacity: [0.014, 0.032],
+    nebulaOpacity: [0.026, 0.06],
     nebulaRadius: [130, 320],
     galaxyRadius: [70, 160],
     galaxyGlow: [0.05, 0.09],
@@ -153,7 +164,7 @@ const THEME_ART = {
     // The four PlayStation face-button hues (--portable-* tokens), Nova's
     // ambient accents for this theme.
     nebulae: () => [[90, 147, 214], [181, 131, 181], [212, 131, 138], [111, 191, 138]],
-    nebulaOpacity: [0.01, 0.024],
+    nebulaOpacity: [0.022, 0.048],
     nebulaRadius: [120, 280],
     galaxyRadius: [60, 130],
     galaxyGlow: [0.03, 0.06],
@@ -195,6 +206,10 @@ function getThemePalette(theme) {
   }
 }
 
+function mixStar(tint) {
+  return currentPalette.starRgb.map((channel, i) => Math.round(channel * 0.8 + tint[i] * 0.2))
+}
+
 function createParticle() {
   const isBright = Math.random() < currentConfig.brightChance
   return {
@@ -208,6 +223,9 @@ function createParticle() {
     opacity: isBright
       ? randomBetween(currentConfig.brightOpacity[0], currentConfig.brightOpacity[1])
       : randomBetween(currentConfig.dimOpacity[0], currentConfig.dimOpacity[1]),
+    // Warm/cool stars are a restrained mix of the theme's own primary text.
+    color: [currentPalette.starRgb, mixStar([255, 211, 170]), mixStar([165, 195, 255])][Math.floor(Math.random() * 3)],
+    sparkle: isBright && Math.random() < 0.16,
     twinkleSpeed: prefersReducedMotion ? 0 : randomBetween(currentConfig.twinkle[0], currentConfig.twinkle[1]),
     twinklePhase: Math.random() * Math.PI * 2,
     isBright,
@@ -219,7 +237,7 @@ function createShootingStar() {
   return {
     x: Math.random() * w * 0.8,
     y: Math.random() * h * 0.4,
-    speed: Math.random() * 4 + 3,
+    speed: randomBetween(1.5, 2.5),
     angle,
     dx: Math.cos(angle),
     dy: Math.sin(angle),
@@ -236,7 +254,8 @@ function createNebula() {
     radius: randomBetween(currentPalette.nebulaRadius[0], currentPalette.nebulaRadius[1]),
     color: currentPalette.nebulae[Math.floor(Math.random() * currentPalette.nebulae.length)],
     opacity: randomBetween(currentPalette.nebulaOpacity[0], currentPalette.nebulaOpacity[1]),
-    drift: prefersReducedMotion ? 0 : (Math.random() - 0.5) * 0.02,
+    squash: randomBetween(0.45, 0.85),
+    rotation: Math.random() * Math.PI,
   }
 }
 
@@ -248,8 +267,7 @@ function createGalaxyObject() {
     radius,
     squash: randomBetween(0.42, 0.76),
     rotation: Math.random() * Math.PI,
-    driftX: prefersReducedMotion ? 0 : (Math.random() - 0.5) * 0.018,
-    driftY: prefersReducedMotion ? 0 : (Math.random() - 0.5) * 0.012,
+    spiral: Math.random() < 0.6,
     glowOpacity: randomBetween(currentPalette.galaxyGlow[0], currentPalette.galaxyGlow[1]),
     coreOpacity: randomBetween(currentPalette.galaxyCore[0], currentPalette.galaxyCore[1]),
     ringOpacity: randomBetween(currentPalette.galaxyRing[0], currentPalette.galaxyRing[1]),
@@ -262,6 +280,7 @@ function rebuild() {
   nebulae = Array.from({ length: currentConfig.nebulaCount }, createNebula)
   galaxyObjects = Array.from({ length: currentConfig.galaxyCount }, createGalaxyObject)
   shootingStars = []
+  paintBackdrop()
 }
 
 function syncVisualMode() {
@@ -281,92 +300,100 @@ function syncReducedMotionPreference() {
 }
 
 function resize() {
-  if (!canvas.value) return
+  if (!canvas.value || !ctx) return
   if (props.absolute && canvas.value.parentElement) {
-    w = canvas.value.parentElement.clientWidth
-    h = canvas.value.parentElement.scrollHeight || canvas.value.parentElement.clientHeight
+    w = Math.max(1, canvas.value.parentElement.clientWidth)
+    h = Math.max(1, canvas.value.parentElement.scrollHeight || canvas.value.parentElement.clientHeight)
   } else {
-    w = window.innerWidth
-    h = window.innerHeight
+    w = Math.max(1, window.innerWidth)
+    h = Math.max(1, window.innerHeight)
   }
-  const pixelRatio = window.devicePixelRatio || 1
+  pixelRatio = Math.min(window.devicePixelRatio || 1, MAX_DPR,
+    Math.sqrt(MAX_PIXELS / (w * h)), MAX_SIDE / w, MAX_SIDE / h)
   canvas.value.width = Math.max(1, Math.floor(w * pixelRatio))
   canvas.value.height = Math.max(1, Math.floor(h * pixelRatio))
   canvas.value.style.width = `${w}px`
   canvas.value.style.height = `${h}px`
-  if (ctx) {
-    ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
+  ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
+  rebuild()
+  restartAnimation()
+}
+
+// Ambient layers are static depth, cached on resize/theme/mode changes. Each
+// frame blits one image rather than rebuilding large translucent gradients.
+function paintBackdrop() {
+  if (!backdropCtx || !canvas.value) return
+  backdrop.width = canvas.value.width
+  backdrop.height = canvas.value.height
+  const c = backdropCtx
+  c.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
+  c.clearRect(0, 0, w, h)
+  for (const n of nebulae) {
+    c.save()
+    c.translate(n.x, n.y)
+    c.rotate(n.rotation)
+    c.scale(1, n.squash)
+    const grad = c.createRadialGradient(0, 0, 0, 0, 0, n.radius)
+    grad.addColorStop(0, `rgba(${n.color.join(',')}, ${n.opacity})`)
+    grad.addColorStop(0.4, `rgba(${n.color.join(',')}, ${n.opacity * 0.5})`)
+    grad.addColorStop(1, 'rgba(0, 0, 0, 0)')
+    c.fillStyle = grad
+    c.fillRect(-n.radius, -n.radius, n.radius * 2, n.radius * 2)
+    c.restore()
   }
-  if (prefersReducedMotion && ctx) {
-    restartAnimation()
+  for (const galaxy of galaxyObjects) {
+    c.save()
+    c.translate(galaxy.x, galaxy.y)
+    c.rotate(galaxy.rotation)
+    c.scale(1, galaxy.squash)
+    const grad = c.createRadialGradient(0, 0, 0, 0, 0, galaxy.radius)
+    grad.addColorStop(0, `rgba(${currentPalette.headRgb.join(',')}, ${galaxy.coreOpacity})`)
+    grad.addColorStop(0.12, `rgba(${currentPalette.glowRgb.join(',')}, ${galaxy.glowOpacity})`)
+    grad.addColorStop(0.45, `rgba(${galaxy.color.join(',')}, ${galaxy.glowOpacity * 0.4})`)
+    grad.addColorStop(1, 'rgba(0, 0, 0, 0)')
+    c.fillStyle = grad
+    c.beginPath()
+    c.arc(0, 0, galaxy.radius, 0, Math.PI * 2)
+    c.fill()
+    // Sparse, faint spiral arms or an elliptical halo; no bright orbit rings.
+    if (galaxy.spiral) {
+      c.strokeStyle = `rgba(${galaxy.color.join(',')}, ${galaxy.ringOpacity * 0.35})`
+      c.lineWidth = 1
+      for (let arm = 0; arm < 2; arm++) {
+        c.beginPath()
+        for (let i = 0; i <= 24; i++) {
+          const t = i / 24
+          const angle = t * Math.PI * 1.6 + arm * Math.PI
+          const radius = galaxy.radius * (0.08 + t * 0.62)
+          const x = Math.cos(angle) * radius, y = Math.sin(angle) * radius
+          if (i === 0) c.moveTo(x, y)
+          else c.lineTo(x, y)
+        }
+        c.stroke()
+      }
+    }
+    c.restore()
   }
 }
 
-function animate(staticFrame = false) {
-  if (!ctx || !pageVisible) return
+function animate(timestamp = 0, staticFrame = false) {
+  animId = null
+  if (!ctx || !pageVisible || getThemeParticleAlpha(currentTheme) === 0) return
+  if (!staticFrame && lastFrameTime !== null && timestamp - lastFrameTime < FRAME_INTERVAL) {
+    animId = requestAnimationFrame(animate)
+    return
+  }
+  // Capped elapsed time prevents a catch-up jump after a stalled/hidden tab.
+  const step = staticFrame || lastFrameTime === null ? 0 : Math.min(50, timestamp - lastFrameTime) / (1000 / 60)
+  lastFrameTime = timestamp
   ctx.clearRect(0, 0, w, h)
-
-  for (const n of nebulae) {
-    if (!staticFrame) {
-      n.x += n.drift
-    }
-    const grad = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, n.radius)
-    grad.addColorStop(0, `rgba(${n.color[0]}, ${n.color[1]}, ${n.color[2]}, ${n.opacity})`)
-    grad.addColorStop(1, 'rgba(0, 0, 0, 0)')
-    ctx.fillStyle = grad
-    ctx.fillRect(n.x - n.radius, n.y - n.radius, n.radius * 2, n.radius * 2)
-  }
-
-  for (const galaxy of galaxyObjects) {
-    if (!staticFrame) {
-      galaxy.x += galaxy.driftX
-      galaxy.y += galaxy.driftY
-    }
-
-    if (galaxy.x < -galaxy.radius) galaxy.x = w + galaxy.radius
-    if (galaxy.x > w + galaxy.radius) galaxy.x = -galaxy.radius
-    if (galaxy.y < -galaxy.radius) galaxy.y = h + galaxy.radius
-    if (galaxy.y > h + galaxy.radius) galaxy.y = -galaxy.radius
-
-    ctx.save()
-    ctx.translate(galaxy.x, galaxy.y)
-    ctx.rotate(galaxy.rotation)
-    ctx.scale(1, galaxy.squash)
-
-    const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, galaxy.radius)
-    grad.addColorStop(0, `rgba(${currentPalette.glowRgb[0]}, ${currentPalette.glowRgb[1]}, ${currentPalette.glowRgb[2]}, ${galaxy.coreOpacity})`)
-    grad.addColorStop(0.35, `rgba(${galaxy.color[0]}, ${galaxy.color[1]}, ${galaxy.color[2]}, ${galaxy.glowOpacity})`)
-    grad.addColorStop(1, 'rgba(0, 0, 0, 0)')
-    ctx.fillStyle = grad
-    ctx.beginPath()
-    ctx.arc(0, 0, galaxy.radius, 0, Math.PI * 2)
-    ctx.fill()
-
-    ctx.fillStyle = `rgba(${currentPalette.headRgb[0]}, ${currentPalette.headRgb[1]}, ${currentPalette.headRgb[2]}, ${galaxy.coreOpacity * 0.95})`
-    ctx.beginPath()
-    ctx.arc(0, 0, galaxy.radius * 0.08, 0, Math.PI * 2)
-    ctx.fill()
-
-    ctx.strokeStyle = `rgba(${currentPalette.starRgb[0]}, ${currentPalette.starRgb[1]}, ${currentPalette.starRgb[2]}, ${galaxy.ringOpacity})`
-    ctx.lineWidth = 0.75
-    ctx.beginPath()
-    ctx.ellipse(0, 0, galaxy.radius * 0.7, galaxy.radius * 0.2, 0, 0, Math.PI * 2)
-    ctx.stroke()
-
-    ctx.strokeStyle = `rgba(${currentPalette.glowRgb[0]}, ${currentPalette.glowRgb[1]}, ${currentPalette.glowRgb[2]}, ${galaxy.ringOpacity * 0.5})`
-    ctx.lineWidth = 0.5
-    ctx.beginPath()
-    ctx.ellipse(0, 0, galaxy.radius * 0.48, galaxy.radius * 0.14, 0, 0, Math.PI * 2)
-    ctx.stroke()
-
-    ctx.restore()
-  }
+  if (backdropCtx) ctx.drawImage(backdrop, 0, 0, w, h)
 
   // Stars
   for (const p of particles) {
     if (!staticFrame) {
-      p.x += p.speedX
-      p.y += p.speedY
+      p.x += p.speedX * step
+      p.y += p.speedY * step
     }
 
     if (p.x < -5) p.x = w + 5
@@ -375,14 +402,14 @@ function animate(staticFrame = false) {
     if (p.y > h + 5) p.y = -5
 
     if (!staticFrame) {
-      p.twinklePhase += p.twinkleSpeed
+      p.twinklePhase += p.twinkleSpeed * step
     }
     const twinkle = staticFrame ? 1 : Math.sin(p.twinklePhase) * 0.3 + 0.7
     const alpha = p.opacity * twinkle
 
     ctx.beginPath()
     ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2)
-    ctx.fillStyle = `rgba(${currentPalette.starRgb[0]}, ${currentPalette.starRgb[1]}, ${currentPalette.starRgb[2]}, ${alpha})`
+    ctx.fillStyle = `rgba(${p.color.join(',')}, ${alpha})`
     ctx.fill()
 
     if (p.isBright && alpha > 0.3) {
@@ -391,7 +418,7 @@ function animate(staticFrame = false) {
       ctx.fillStyle = `rgba(${currentPalette.glowRgb[0]}, ${currentPalette.glowRgb[1]}, ${currentPalette.glowRgb[2]}, ${alpha * currentPalette.starBloom})`
       ctx.fill()
 
-      if (p.size > 1.3 && twinkle > currentConfig.sparkleThreshold) {
+      if (p.sparkle && p.size > 1.3 && twinkle > currentConfig.sparkleThreshold) {
         ctx.strokeStyle = `rgba(${currentPalette.starRgb[0]}, ${currentPalette.starRgb[1]}, ${currentPalette.starRgb[2]}, ${alpha * 0.32})`
         ctx.lineWidth = 0.5
         const len = p.size * 4
@@ -405,16 +432,16 @@ function animate(staticFrame = false) {
     }
   }
 
-  if (!staticFrame && Math.random() < currentConfig.shootingChance && shootingStars.length < currentConfig.maxShootingStars) {
+  if (!staticFrame && Math.random() < 1 - (1 - currentConfig.shootingChance) ** step && shootingStars.length < currentConfig.maxShootingStars) {
     shootingStars.push(createShootingStar())
   }
 
   for (let i = shootingStars.length - 1; i >= 0; i--) {
     const s = shootingStars[i]
     if (!staticFrame) {
-      s.x += s.dx * s.speed
-      s.y += s.dy * s.speed
-      s.life++
+      s.x += s.dx * s.speed * step
+      s.y += s.dy * s.speed * step
+      s.life += step
     }
 
     const progress = s.life / s.maxLife
@@ -442,24 +469,25 @@ function animate(staticFrame = false) {
   }
 
   if (!staticFrame) {
-    animId = requestAnimationFrame(() => animate(false))
+    animId = requestAnimationFrame(animate)
   }
 }
 
 function restartAnimation() {
-  if (animId) {
+  if (animId !== null) {
     cancelAnimationFrame(animId)
     animId = null
   }
+  lastFrameTime = null
   if (!pageVisible) return
   if (getThemeParticleAlpha(currentTheme) === 0) return
-  animate(prefersReducedMotion)
+  animate(0, prefersReducedMotion)
 }
 
 function handleVisibilityChange() {
   pageVisible = typeof document === 'undefined' || !document.hidden
   if (!pageVisible) {
-    if (animId) {
+    if (animId !== null) {
       cancelAnimationFrame(animId)
       animId = null
     }
@@ -480,12 +508,14 @@ let unsubscribeTheme = null
 onMounted(() => {
   if (!canvas.value) return
   ctx = canvas.value.getContext('2d')
+  if (!ctx) return
+  backdrop = document.createElement('canvas')
+  backdropCtx = backdrop.getContext('2d')
   pageVisible = typeof document === 'undefined' || !document.hidden
   motionMediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
   syncReducedMotionPreference()
   syncVisualMode()
   resize()
-  rebuild()
   window.addEventListener('resize', resize)
   document.addEventListener('visibilitychange', handleVisibilityChange)
   motionMediaQuery.addEventListener('change', handleReducedMotionChange)
@@ -503,7 +533,11 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (unsubscribeTheme) unsubscribeTheme()
-  if (animId) cancelAnimationFrame(animId)
+  if (animId !== null) cancelAnimationFrame(animId)
+  animId = null
+  backdrop = null
+  backdropCtx = null
+  ctx = null
   window.removeEventListener('resize', resize)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   motionMediaQuery?.removeEventListener('change', handleReducedMotionChange)

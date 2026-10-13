@@ -35,6 +35,7 @@ const BLOCK_MARKERS = {
   oled: '/* ── Console OLED Theme',
   miami: '/* ── Miami Nebula Skin',
   'portable-chrome': '/* ── Portable Chrome Skin',
+  director: '/* ── Director Skin',
   'high-contrast': '/* ── High Contrast Skin',
 }
 
@@ -63,13 +64,14 @@ describe('theme skin registry', () => {
     document.documentElement.removeAttribute('data-theme')
   })
 
-  it('registers the five Nova-matched skins in Nova ordering', () => {
-    expect(THEMES.map((theme) => theme.id)).toEqual(['polaris', 'portable-chrome', 'oled', 'miami', 'high-contrast'])
+  it('registers the six Nova-matched skins in Nova ordering', () => {
+    expect(THEMES.map((theme) => theme.id)).toEqual(['polaris', 'portable-chrome', 'oled', 'miami', 'director', 'high-contrast'])
     expect(THEMES.map((theme) => theme.label)).toEqual([
       'Polaris Aurora',
       'Portable Chrome',
       'Console OLED',
       'Miami Nebula',
+      'Director',
       'High Contrast',
     ])
     for (const theme of THEMES) {
@@ -116,6 +118,18 @@ describe('theme skin registry', () => {
     expect(miami).toContain('--color-info: #47f3ff')
     expect(miami).toContain('--color-void: #130817')
     expect(themeCss('portable-chrome')).not.toContain('#ff5cab')
+  })
+
+  it('uses Nova Director crimson surfaces, warm copy and black controls', () => {
+    const director = themeCss('director')
+    for (const value of ['#6e0b17', '#881525', '#9a1b2e', '#5e0a14', '#7b1020', '#261015', '#12090b', '#fff5e8', '#f1d9cd', '#dec0b5', '#ffb7ac']) {
+      expect(director).toContain(value)
+    }
+    expect(director).toContain('--surface-card: #881525')
+    expect(director).toContain('--surface-raised: #261015')
+    expect(director).toContain('outline: 2px solid var(--color-ice)')
+    // The shared success/warning/info roles stay semantic, rather than turning crimson.
+    expect(director).not.toMatch(/--color-(success|warning|info):/)
   })
 
   it('ships High Contrast with near-opaque surfaces and no glass blur', () => {
@@ -205,6 +219,18 @@ describe('theme skin registry', () => {
     for (const theme of THEMES) {
       expect(boot, `boot id list includes ${theme.id}`).toContain(`'${theme.id}'`)
     }
+  })
+
+  it('executes the first-paint boot allowlist for every theme and refuses unknown storage', () => {
+    const boot = readFileSync('src_assets/common/assets/web/public/assets/theme-boot.js', 'utf8')
+    const run = new Function('localStorage', 'document', boot)
+    for (const id of [...THEMES.map(theme => theme.id), 'unregistered', null]) {
+      document.documentElement.removeAttribute('data-theme')
+      run({ getItem: () => id }, document)
+      expect(document.documentElement.getAttribute('data-theme')).toBe(id && id !== 'polaris' && THEMES.some(theme => theme.id === id) ? id : null)
+    }
+    expect(() => run({ getItem: () => { throw new Error('Storage blocked') } }, document)).not.toThrow()
+    expect(document.documentElement.hasAttribute('data-theme')).toBe(false)
   })
 
   it('re-applying the active skin is a no-op for subscribers', () => {
