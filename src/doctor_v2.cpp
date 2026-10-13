@@ -40,7 +40,8 @@ namespace doctor_v2 {
       double target_fps = 0.0;
       double refresh_rate_hz = 0.0;
       double rtt_ms = 0.0;
-      double decode_ms = 0.0;
+      std::optional<double> decode_ms;
+      std::string frame_output_source = "renderer_output";
       std::optional<double> host_processing_ms;
       int width = 0;
       int height = 0;
@@ -115,7 +116,24 @@ namespace doctor_v2 {
       sample.target_fps = raw.value("target_fps", 0.0);
       sample.refresh_rate_hz = raw.value("refresh_rate_hz", 0.0);
       sample.rtt_ms = raw.value("rtt_ms", 0.0);
-      sample.decode_ms = raw.value("decode_latency_ms", 0.0);
+      if ((raw.contains("decode_latency_available") && !raw["decode_latency_available"].is_boolean()) ||
+          (raw.contains("decode_latency_ms") && !raw["decode_latency_ms"].is_number()) ||
+          (raw.contains("frame_output_source") && !raw["frame_output_source"].is_string())) {
+        error = "invalid decode availability or frame output provenance";
+        return std::nullopt;
+      }
+      const double decode_wire_ms = raw.value("decode_latency_ms", 0.0);
+      const bool decode_available = raw.value("decode_latency_available", raw.contains("decode_latency_ms"));
+      if (decode_available && !raw.contains("decode_latency_ms")) {
+        error = "available decode latency requires a measurement";
+        return std::nullopt;
+      }
+      if (decode_available) sample.decode_ms = decode_wire_ms;
+      sample.frame_output_source = raw.value("frame_output_source", std::string {"renderer_output"});
+      if (sample.frame_output_source != "renderer_output" && sample.frame_output_source != "present_request") {
+        error = "invalid frame output provenance";
+        return std::nullopt;
+      }
       if (raw.contains("host_processing_latency_ms") && raw["host_processing_latency_ms"].is_number()) {
         sample.host_processing_ms = raw["host_processing_latency_ms"].get<double>();
       }
@@ -132,7 +150,7 @@ namespace doctor_v2 {
           !finite_nonnegative(sample.source_fps) || !finite_nonnegative(sample.received_fps) ||
           !finite_nonnegative(sample.rendered_fps) || !finite_nonnegative(sample.target_fps) ||
           !finite_nonnegative(sample.refresh_rate_hz) ||
-          !finite_nonnegative(sample.rtt_ms) || !finite_nonnegative(sample.decode_ms) ||
+          !finite_nonnegative(sample.rtt_ms) || !finite_nonnegative(decode_wire_ms) ||
           (sample.host_processing_ms && !finite_nonnegative(*sample.host_processing_ms))) {
         error = "sample contains invalid monotonic counters or measurements";
         return std::nullopt;
@@ -181,6 +199,25 @@ namespace doctor_v2 {
         ++count;
       }
       return count > 0 ? std::optional {sum / static_cast<double>(count)} : std::nullopt;
+    }
+
+    std::optional<double> average_decode(const std::vector<sample_t> &samples) {
+      if (samples.empty()) return std::nullopt;
+      double sum = 0.0;
+      for (const auto &sample : samples) {
+        // A finite wire placeholder is not a measurement. A mixed window
+        // cannot silently turn its measured subset into complete coverage.
+        if (!sample.decode_ms) return std::nullopt;
+        sum += *sample.decode_ms;
+      }
+      return sum / static_cast<double>(samples.size());
+    }
+
+    std::string output_source(const std::vector<sample_t> &samples, const sample_t &latest) {
+      for (const auto &sample : samples) {
+        if (sample.frame_output_source != latest.frame_output_source) return "mixed";
+      }
+      return latest.frame_output_source;
     }
 
     nlohmann::json stage(std::string state,
@@ -344,7 +381,9 @@ namespace doctor_v2 {
     const double rendered_fps = average(current, &sample_t::rendered_fps);
     const double target_fps = average(current, &sample_t::target_fps);
     const double rtt_ms = average(current, &sample_t::rtt_ms);
-    const double decode_ms = average(current, &sample_t::decode_ms);
+    const auto decode_ms = latest.decode_ms ? average_decode(current) : std::nullopt;
+    const auto frame_output_source = output_source(current, latest);
+    const bool rendered_output_measured = frame_output_source == "renderer_output";
     double loss_pct = 0.0;
     if (current.size() >= 2) {
       const auto expected_delta = current.back().frames_expected - current.front().frames_expected;
@@ -365,18 +404,24 @@ namespace doctor_v2 {
       }
     }
     const auto trial_host_processing = average_host_processing(trial_samples);
+    const auto trial_decode_ms = latest.decode_ms ? average_decode(trial_samples) : std::nullopt;
+    const auto trial_output_source = output_source(trial_samples, latest);
+    const bool trial_rendered_measured = trial_output_source == "renderer_output";
     result["trial_metrics"] = {
       {"ready", windows_complete},
       {"duration_seconds", windows_complete ? 60 : 0},
       {"coverage", std::min(first.coverage, second.coverage)},
       {"session_generation", generation},
       {"target_fps", trial_target_fps},
-      {"rendered_fps", trial_rendered_fps},
-      {"pacing_error_pct", trial_target_fps > 0.0 ?
-        100.0 * std::max(0.0, trial_target_fps - trial_rendered_fps) / trial_target_fps : 0.0},
+      {"rendered_fps", trial_rendered_measured ? nlohmann::json(trial_rendered_fps) : nlohmann::json(nullptr)},
+      {"frame_output_fps", trial_rendered_fps},
+      {"frame_output_source", trial_output_source},
+      {"pacing_error_pct", !trial_rendered_measured ? nlohmann::json(nullptr) : nlohmann::json(trial_target_fps > 0.0 ?
+        100.0 * std::max(0.0, trial_target_fps - trial_rendered_fps) / trial_target_fps : 0.0)},
       {"confirmed_media_loss_pct", trial_loss_pct},
       {"rtt_ms", average(trial_samples, &sample_t::rtt_ms)},
-      {"decode_latency_ms", average(trial_samples, &sample_t::decode_ms)},
+      {"decode_latency_ms", trial_decode_ms ? nlohmann::json(*trial_decode_ms) : nlohmann::json(nullptr)},
+      {"decode_latency_available", trial_decode_ms.has_value()},
       {"host_processing_latency_ms", trial_host_processing ?
         nlohmann::json(*trial_host_processing) : nlohmann::json(nullptr)}
     };
@@ -432,6 +477,7 @@ namespace doctor_v2 {
       host_evidence.contains("receive_decode_render") && host_evidence["receive_decode_render"].is_object() ?
         host_evidence["receive_decode_render"] : nlohmann::json::object();
     const bool receive_decode_render_complete =
+      rendered_output_measured && decode_ms.has_value() &&
       presentation_evidence.contains("decoded_fps") && presentation_evidence["decoded_fps"].is_number() &&
       presentation_evidence["decoded_fps"].get<double>() >= 0.0 &&
       presentation_evidence.contains("queue_latency_ms") && presentation_evidence["queue_latency_ms"].is_number() &&
@@ -467,13 +513,17 @@ namespace doctor_v2 {
     stages["receive_decode_render"] = stage(receive_decode_render_complete ? "measured" : "partial", {
       {"received_fps", received_fps},
       {"decoded_fps", receive_decode_render_complete ? presentation_evidence["decoded_fps"] : nlohmann::json(nullptr)},
-      {"rendered_fps", rendered_fps},
-      {"decode_latency_ms", decode_ms},
+      {"rendered_fps", rendered_output_measured ? nlohmann::json(rendered_fps) : nlohmann::json(nullptr)},
+      {"frame_output_fps", rendered_fps},
+      {"frame_output_source", frame_output_source},
+      {"decode_latency_ms", decode_ms ? nlohmann::json(*decode_ms) : nlohmann::json(nullptr)},
+      {"decode_latency_available", decode_ms.has_value()},
       {"queue_latency_ms", receive_decode_render_complete ? presentation_evidence["queue_latency_ms"] : nlohmann::json(nullptr)},
       {"render_latency_ms", receive_decode_render_complete ? presentation_evidence["render_latency_ms"] : nlohmann::json(nullptr)},
       {"host_processing_latency_ms", latest.host_processing_ms ? nlohmann::json(*latest.host_processing_ms) : nlohmann::json(nullptr)},
       {"frames_received", latest.frames_received},
-      {"frames_rendered", latest.frames_rendered}
+      {"frames_rendered", rendered_output_measured ? nlohmann::json(latest.frames_rendered) : nlohmann::json(nullptr)},
+      {"frames_output", latest.frames_rendered}
     }, "nova_decoder_monotonic");
     if (effective_settings_measured) {
       auto effective_settings = effective_settings_evidence;
@@ -496,12 +546,15 @@ namespace doctor_v2 {
     }
     result["stages"] = stages;
     result["coverage_adequate"] = windows_complete && diagnostic_evidence_adequate;
-    result["trial_metrics"]["ready"] = windows_complete && diagnostic_evidence_adequate && !cadence.source_time;
-    if (!diagnostic_evidence_adequate || cadence.source_time) result["trial_metrics"]["duration_seconds"] = 0;
+    result["trial_metrics"]["ready"] = windows_complete && diagnostic_evidence_adequate &&
+      trial_decode_ms.has_value() && trial_rendered_measured && !cadence.source_time;
+    if (!result["trial_metrics"]["ready"].get<bool>()) result["trial_metrics"]["duration_seconds"] = 0;
 
     result["missing_evidence"] = nlohmann::json::array();
     if (!cadence.available) result["missing_evidence"].push_back("verified_source_cadence_policy_or_measurements");
     if (retransmissions.is_null()) result["missing_evidence"].push_back("retransmissions");
+    if (!decode_ms) result["missing_evidence"].push_back("decode_latency");
+    if (!rendered_output_measured) result["missing_evidence"].push_back("renderer_output_counter");
     if (!receive_decode_render_complete) {
       result["missing_evidence"].push_back("decoded_frame_counter");
       result["missing_evidence"].push_back("queue_latency");
@@ -521,7 +574,8 @@ namespace doctor_v2 {
     if (bytes_sent.is_null()) result["missing_evidence"].push_back("transport_bytes");
     result["observations"].push_back({
       {"id", "delivery_cadence"}, {"received_fps", received_fps},
-      {"rendered_fps", rendered_fps}, {"target_fps", target_fps},
+      {"rendered_fps", rendered_output_measured ? nlohmann::json(rendered_fps) : nlohmann::json(nullptr)},
+      {"frame_output_fps", rendered_fps}, {"frame_output_source", frame_output_source}, {"target_fps", target_fps},
       {"provenance", "nova_decoder_monotonic"}
     });
     result["observations"].push_back({
@@ -531,8 +585,8 @@ namespace doctor_v2 {
 
     const bool network_warning = loss_pct > 2.0 || rtt_ms >= 45.0;
     const double cadence_reference = cadence.source_time && cadence.available ? cadence.source_fps : target_fps;
-    const bool render_gap = cadence_reference > 0.0 && rendered_fps + 1.0 < cadence_reference * 0.90;
-    const bool decoder_gap = received_fps > 0.0 && rendered_fps + 3.0 < received_fps;
+    const bool render_gap = rendered_output_measured && cadence_reference > 0.0 && rendered_fps + 1.0 < cadence_reference * 0.90;
+    const bool decoder_gap = rendered_output_measured && received_fps > 0.0 && rendered_fps + 3.0 < received_fps;
     const auto &source_capture = source_capture_evidence;
     const double source_fps = source_capture.value("source_fps", 0.0);
     const double duplicate_ratio = source_capture.value("duplicate_frame_ratio", 0.0);
@@ -595,7 +649,7 @@ namespace doctor_v2 {
         missing.push_back("render_latency");
       }
       result["hypotheses"].push_back({
-        {"id", "decoder_or_render_pressure"}, {"confidence", windows_complete && decode_ms > 0.0 ? "medium" : "low"},
+        {"id", "decoder_or_render_pressure"}, {"confidence", windows_complete && decode_ms && *decode_ms > 0.0 ? "medium" : "low"},
         {"evidence_for", nlohmann::json::array({"rendered cadence trails received cadence"})},
         {"evidence_against", nlohmann::json::array()},
         {"missing_measurements", std::move(missing)}
