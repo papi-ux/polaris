@@ -95,7 +95,9 @@ describe('cross-cutting accessibility and mobile polish', () => {
     const audioVideo = webSource('configs/tabs/AudioVideo.vue')
 
     expect(css).toMatch(/\.system-footer-link\s*\{[^}]*gap:\s*0\.375rem[^}]*white-space:\s*nowrap/s)
-    expect(css).toMatch(/\.troubleshooting-action-button\s*\{[^}]*whitespace-nowrap/s)
+    // Long translated or enlarged Doctor actions must stay inside their card.
+    // The browser regressions check both font preferences and CSS-root scaling.
+    expect(css).toMatch(/\.troubleshooting-action-button\s*\{[^}]*min-h-9 max-w-full[^}]*whitespace-normal/s)
     expect(audioVideo).toContain('class="shrink-0 whitespace-nowrap rounded-full')
   })
 
