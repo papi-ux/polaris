@@ -57,18 +57,20 @@ class DebugPackageAssets(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.raw = self.root / "release-assets/raw"
         self.arch = self.raw / "arch"
-        self.steam = self.raw / "steamos3.8"
+        # One SteamOS package per release, each published with its helper and symbols.
+        self.steam = {release: self.raw / release for release in ("steamos3.8", "steamos3.9")}
         self.arch.mkdir(parents=True)
-        self.steam.mkdir()
+        for directory in self.steam.values():
+            directory.mkdir()
         self.archives = {}
-        for directory, platform in ((self.arch, "arch"), (self.steam, "steamos3.8")):
+        for directory, platform in ((self.arch, "arch"), *((directory, release) for release, directory in self.steam.items())):
             for name, payload in (
                 ("polaris", {"usr/bin/polaris-1.4.13": self.host}),
                 ("polaris-kms", {"usr/libexec/polaris/polaris-kms": self.host}),
                 ("polaris-debug", {"usr/lib/debug/usr/bin/polaris-1.4.13.debug": self.symbols}),
             ):
                 suffix = name.removeprefix("polaris")
-                filename = f"{name}-1.4.13-1-x86_64.pkg.tar.zst" if platform == "arch" else f"Polaris{suffix}-steamos3.8-x86_64.pkg.tar.zst"
+                filename = f"{name}-1.4.13-1-x86_64.pkg.tar.zst" if platform == "arch" else f"Polaris{suffix}-{platform}-x86_64.pkg.tar.zst"
                 path = directory / filename
                 archive(path, name, payload)
                 self.archives[platform, name] = path
@@ -143,17 +145,17 @@ class DebugPackageAssets(unittest.TestCase):
         result = self.stage()
         self.assertEqual(result.returncode, 0, result.stderr)
         final = self.root / "release-assets/final"
-        for platform in ("arch", "steamos3.8"):
+        for platform in ("arch", "steamos3.8", "steamos3.9"):
             for name in ("polaris", "polaris-kms", "polaris-debug"):
                 output = final / f"Polaris{name.removeprefix('polaris')}-{platform}-x86_64.pkg.tar.zst"
                 self.assertEqual(output.read_bytes(), self.archives[platform, name].read_bytes())
-        self.assertEqual(len(list(final.iterdir())), 10)
+        self.assertEqual(len(list(final.iterdir())), 13)
 
     def test_prerelease_packages_keep_the_release_binary_name_and_stage(self):
         # A prerelease's pkgver carries its label joined straight onto the number, 1.4.13beta.3, the
         # spelling pacman sorts below 1.4.13. The binary inside is still named for the release number
         # alone, so the debug check and release assembly have to accept that pair.
-        for directory, platform in ((self.arch, "arch"), (self.steam, "steamos3.8")):
+        for directory, platform in ((self.arch, "arch"), *((directory, release) for release, directory in self.steam.items())):
             for name, payload in (
                 ("polaris", {"usr/bin/polaris-1.4.13": self.host}),
                 ("polaris-kms", {"usr/libexec/polaris/polaris-kms": self.host}),
@@ -165,7 +167,7 @@ class DebugPackageAssets(unittest.TestCase):
                     path = directory / f"{name}-1.4.13beta.3-1-x86_64.pkg.tar.zst"
                 archive(path, name, payload, version="1.4.13beta.3-1")
                 self.archives[platform, name] = path
-        for platform in ("arch", "steamos3.8"):
+        for platform in ("arch", "steamos3.8", "steamos3.9"):
             with self.subTest(platform=platform):
                 result = self.validate(platform)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -173,13 +175,13 @@ class DebugPackageAssets(unittest.TestCase):
         result = self.stage()
         self.assertEqual(result.returncode, 0, result.stderr)
         final = self.root / "release-assets/final"
-        for platform in ("arch", "steamos3.8"):
+        for platform in ("arch", "steamos3.8", "steamos3.9"):
             for name in ("polaris", "polaris-kms", "polaris-debug"):
                 output = final / f"Polaris{name.removeprefix('polaris')}-{platform}-x86_64.pkg.tar.zst"
                 self.assertEqual(output.read_bytes(), self.archives[platform, name].read_bytes())
 
     def test_missing_or_duplicate_debug_package_stops_release_assembly(self):
-        for platform in ("arch", "steamos3.8"):
+        for platform in ("arch", "steamos3.8", "steamos3.9"):
             with self.subTest(platform=platform):
                 path = self.archives[platform, "polaris-debug"]
                 data = path.read_bytes()
@@ -192,11 +194,14 @@ class DebugPackageAssets(unittest.TestCase):
                 duplicate.unlink()
 
     def test_wrong_steamos_symbols_fail_before_writing_staged_packages(self):
-        self.replace_debug(symbols=self.other_symbols, platform="steamos3.8")
-        result = self.stage()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("different ELF build IDs", result.stderr)
-        self.assertEqual(list((self.root / "release-assets/final").iterdir()), [])
+        for platform in ("steamos3.8", "steamos3.9"):
+            with self.subTest(platform=platform):
+                self.replace_debug(symbols=self.other_symbols, platform=platform)
+                result = self.stage()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("different ELF build IDs", result.stderr)
+                self.assertEqual(list((self.root / "release-assets/final").iterdir()), [])
+                self.replace_debug(platform=platform)
 
     def test_signatures_follow_their_own_archives(self):
         # A debug/KMS signature must never be renamed as the absent host signature.
@@ -211,34 +216,41 @@ class DebugPackageAssets(unittest.TestCase):
 
     def test_debug_assets_are_required_in_upload_and_readback(self):
         workflow = WORKFLOW.read_text()
-        upload = workflow.split("      - name: Upload SteamOS 3.8 package\n", 1)[1].split("\n      - name:", 1)[0]
-        self.assertIn("polaris-steamos-output/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst", upload)
+        for release in ("3.8", "3.9"):
+            upload = workflow.split(f"      - name: Upload SteamOS {release} package\n", 1)[1].split("\n      - name:", 1)[0]
+            self.assertIn(f"polaris-steamos-output/Polaris-debug-steamos{release}-x86_64.pkg.tar.zst", upload)
         required = workflow.split("          required_binary_assets=(\n", 1)[1].split("\n          )", 1)[0]
         self.assertIn("Polaris-debug-arch-x86_64.pkg.tar.zst", required)
         self.assertIn("Polaris-debug-steamos3.8-x86_64.pkg.tar.zst", required)
+        self.assertIn("Polaris-debug-steamos3.9-x86_64.pkg.tar.zst", required)
 
     def test_steamos_producer_validates_and_copies_debug_output(self):
         script = (ROOT / "scripts/ci/build-steamos-package.sh").read_text()
         block = script.split("# makepkg splits", 1)[1].split("FINAL_COMMIT=", 1)[0]
         block = "# makepkg splits" + block
-        output = self.root / "producer-output"
-        output.mkdir()
         tools = self.root / "tools"
         tools.mkdir()
         pacman = tools / "pacman"
         pacman.write_text("#!/bin/sh\nprintf 'fixture package receipt\\n'\n")
         pacman.chmod(0o755)
-        environment = dict(os.environ, SOURCE_ROOT=str(ROOT), OUTPUT_ROOT=str(output),
-                           PACKAGE_PATH=str(self.archives["arch", "polaris"]),
-                           KMS_PACKAGE_PATH=str(self.archives["arch", "polaris-kms"]),
-                           PATH=str(tools) + os.pathsep + os.environ["PATH"])
-        result = subprocess.run(["bash", "-e", "-c", "shopt -s nullglob\n" + block], cwd=self.arch,
-                                env=environment, text=True, capture_output=True, timeout=30)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        copied = output / "Polaris-debug-steamos3.8-x86_64.pkg.tar.zst"
-        self.assertEqual(copied.read_bytes(), self.archives["arch", "polaris-debug"].read_bytes())
-        self.assertIn("ELF build ID", (output / "steamos3.8-debug-build-id.txt").read_text())
-        self.assertTrue((output / "steamos3.8-debug-package-sha256.txt").is_file())
+        for release in ("steamos3.8", "steamos3.9"):
+            with self.subTest(release=release):
+                output = self.root / f"producer-output-{release}"
+                output.mkdir()
+                # The script names each receipt and package for the SteamOS release it built.
+                environment = dict(os.environ, SOURCE_ROOT=str(ROOT), OUTPUT_ROOT=str(output),
+                                   RECEIPT_PREFIX=str(output / release),
+                                   STEAMOS_DEBUG_PACKAGE=f"Polaris-debug-{release}-x86_64.pkg.tar.zst",
+                                   PACKAGE_PATH=str(self.archives["arch", "polaris"]),
+                                   KMS_PACKAGE_PATH=str(self.archives["arch", "polaris-kms"]),
+                                   PATH=str(tools) + os.pathsep + os.environ["PATH"])
+                result = subprocess.run(["bash", "-e", "-c", "shopt -s nullglob\n" + block], cwd=self.arch,
+                                        env=environment, text=True, capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                copied = output / f"Polaris-debug-{release}-x86_64.pkg.tar.zst"
+                self.assertEqual(copied.read_bytes(), self.archives["arch", "polaris-debug"].read_bytes())
+                self.assertIn("ELF build ID", (output / f"{release}-debug-build-id.txt").read_text())
+                self.assertTrue((output / f"{release}-debug-package-sha256.txt").is_file())
 
 
 if __name__ == "__main__":

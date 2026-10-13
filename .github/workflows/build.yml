@@ -976,6 +976,10 @@ jobs:
         run: ctest --test-dir build/tests --output-on-failure -R '^test_polaris$'
 
   steamos-build:
+    # One package per SteamOS release: each links the Boost and other libraries of its own release's
+    # repositories, so a 3.8 package installs on 3.9 and then cannot start. Separate jobs rather than
+    # a matrix: a skipped matrix job reports one check with its name unexpanded, which would leave the
+    # required "SteamOS 3.8 build" check unreported on a pull request that builds no native package.
     name: SteamOS 3.8 build
     needs: [resolve-source, web-checks, cpp-sanitizer-tests, arch-build]
     if: needs.resolve-source.outputs.native_required == 'true'
@@ -1008,11 +1012,13 @@ jobs:
       - name: Build and validate SteamOS 3.8 package
         env:
           POLARIS_PRERELEASE_LABEL: ${{ needs.resolve-source.outputs.prerelease_label }}
+          POLARIS_STEAMOS_TARGET: '3.8'
         run: |
           mkdir -p "$RUNNER_TEMP/polaris-steamos-output"
           sudo docker run --privileged --rm \
             --env "POLARIS_BUILD_COMMIT=$POLARIS_BUILD_COMMIT" \
             --env "POLARIS_PRERELEASE_LABEL=$POLARIS_PRERELEASE_LABEL" \
+            --env "POLARIS_STEAMOS_TARGET=$POLARIS_STEAMOS_TARGET" \
             --volume "$GITHUB_WORKSPACE:/workspace:rw" \
             --volume "$RUNNER_TEMP/polaris-steamos-output:/output:rw" \
             archlinux:latest \
@@ -1038,6 +1044,74 @@ jobs:
         with:
           name: Polaris-steamos3.8-receipts
           path: ${{ runner.temp }}/polaris-steamos-output/steamos3.8-*.txt
+          if-no-files-found: error
+
+  steamos-3-9-build:
+    # The same build for SteamOS 3.9, from Valve's 3.9 repositories. See steamos-build.
+    name: SteamOS 3.9 build
+    needs: [resolve-source, web-checks, cpp-sanitizer-tests, arch-build]
+    if: needs.resolve-source.outputs.native_required == 'true'
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve-source.outputs.commit }}
+
+      - name: Resolve exact SteamOS source commit
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ needs.resolve-source.outputs.commit }}
+        run: |
+          # The branch may advance while prerequisite jobs run. Build the same
+          # resolved source as every other package; release publication still
+          # revalidates the release tag against that exact source.
+          POLARIS_BUILD_COMMIT="$(git rev-parse 'HEAD^{commit}')"
+          test "$POLARIS_BUILD_COMMIT" = "$EXPECTED_SOURCE_COMMIT"
+          printf 'POLARIS_BUILD_COMMIT=%s\n' "$POLARIS_BUILD_COMMIT" >> "$GITHUB_ENV"
+
+      - name: Initialize submodules
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git submodule sync --recursive
+          # Trees from before the build-deps submodule removal still pin its
+          # dead commit; skip it instead of gambling on the orphaned object.
+          git -c submodule.third-party/build-deps.update=none submodule update --init --recursive
+
+      - name: Build and validate SteamOS 3.9 package
+        env:
+          POLARIS_PRERELEASE_LABEL: ${{ needs.resolve-source.outputs.prerelease_label }}
+          POLARIS_STEAMOS_TARGET: '3.9'
+        run: |
+          mkdir -p "$RUNNER_TEMP/polaris-steamos-output"
+          sudo docker run --privileged --rm \
+            --env "POLARIS_BUILD_COMMIT=$POLARIS_BUILD_COMMIT" \
+            --env "POLARIS_PRERELEASE_LABEL=$POLARIS_PRERELEASE_LABEL" \
+            --env "POLARIS_STEAMOS_TARGET=$POLARIS_STEAMOS_TARGET" \
+            --volume "$GITHUB_WORKSPACE:/workspace:rw" \
+            --volume "$RUNNER_TEMP/polaris-steamos-output:/output:rw" \
+            archlinux:latest \
+            bash /workspace/scripts/ci/run-steamos-build.sh
+
+      - name: Upload SteamOS 3.9 package
+        uses: actions/upload-artifact@v7
+        with:
+          name: Polaris-steamos3.9-package
+          # All three, or the release job has nothing to publish from. Naming one file here is
+          # what broke the first tag build after the polaris-kms split: the script builds the helper,
+          # asserts it carries exactly two files, and the upload dropped it. The debug symbols joined
+          # the same list for the same reason, so the host, the KMS helper and the matching symbols
+          # travel through release assembly together.
+          path: |
+            ${{ runner.temp }}/polaris-steamos-output/Polaris-steamos3.9-x86_64.pkg.tar.zst
+            ${{ runner.temp }}/polaris-steamos-output/Polaris-kms-steamos3.9-x86_64.pkg.tar.zst
+            ${{ runner.temp }}/polaris-steamos-output/Polaris-debug-steamos3.9-x86_64.pkg.tar.zst
+          if-no-files-found: error
+
+      - name: Upload SteamOS 3.9 validation receipts
+        uses: actions/upload-artifact@v7
+        with:
+          name: Polaris-steamos3.9-receipts
+          path: ${{ runner.temp }}/polaris-steamos-output/steamos3.9-*.txt
           if-no-files-found: error
 
   ubuntu-build:
@@ -1888,6 +1962,7 @@ jobs:
       - arch-build
       - arch-current-compatibility
       - steamos-build
+      - steamos-3-9-build
       - ubuntu-build
       - ubuntu-minimal-install
       - fedora-rpm-build
@@ -1926,6 +2001,12 @@ jobs:
         with:
           name: Polaris-steamos3.8-package
           path: release-assets/raw/steamos3.8
+
+      - name: Download SteamOS 3.9 package
+        uses: actions/download-artifact@v8
+        with:
+          name: Polaris-steamos3.9-package
+          path: release-assets/raw/steamos3.9
       - name: Prepare release asset names
         run: |
           mkdir -p release-assets/staged release-assets/final
@@ -1933,6 +2014,10 @@ jobs:
             --main release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst \
             --kms release-assets/raw/steamos3.8/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst \
             --debug release-assets/raw/steamos3.8/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst
+          python3 scripts/ci/validate-pacman-debug.py \
+            --main release-assets/raw/steamos3.9/Polaris-steamos3.9-x86_64.pkg.tar.zst \
+            --kms release-assets/raw/steamos3.9/Polaris-kms-steamos3.9-x86_64.pkg.tar.zst \
+            --debug release-assets/raw/steamos3.9/Polaris-debug-steamos3.9-x86_64.pkg.tar.zst
           shopt -s nullglob
           steamos_packages=(release-assets/raw/steamos3.8/*.pkg.tar.zst)
           if [ "${#steamos_packages[@]}" -ne 3 ]; then
@@ -1942,6 +2027,14 @@ jobs:
           cp "release-assets/raw/steamos3.8/Polaris-steamos3.8-x86_64.pkg.tar.zst" "release-assets/final/Polaris-steamos3.8-x86_64.pkg.tar.zst"
           cp "release-assets/raw/steamos3.8/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst" "release-assets/final/Polaris-kms-steamos3.8-x86_64.pkg.tar.zst"
           cp "release-assets/raw/steamos3.8/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst" "release-assets/final/Polaris-debug-steamos3.8-x86_64.pkg.tar.zst"
+          steamos_packages=(release-assets/raw/steamos3.9/*.pkg.tar.zst)
+          if [ "${#steamos_packages[@]}" -ne 3 ]; then
+            exit 1
+          fi
+          cp "release-assets/raw/steamos3.9/Polaris-steamos3.9-x86_64.pkg.tar.zst" "release-assets/staged/Polaris-steamos3.9-x86_64.pkg.tar.zst"
+          cp "release-assets/raw/steamos3.9/Polaris-steamos3.9-x86_64.pkg.tar.zst" "release-assets/final/Polaris-steamos3.9-x86_64.pkg.tar.zst"
+          cp "release-assets/raw/steamos3.9/Polaris-kms-steamos3.9-x86_64.pkg.tar.zst" "release-assets/final/Polaris-kms-steamos3.9-x86_64.pkg.tar.zst"
+          cp "release-assets/raw/steamos3.9/Polaris-debug-steamos3.9-x86_64.pkg.tar.zst" "release-assets/final/Polaris-debug-steamos3.9-x86_64.pkg.tar.zst"
 
           arch_packages=()
           arch_kms_packages=()
@@ -2203,13 +2296,16 @@ jobs:
             Polaris-arch-x86_64.pkg.tar.zst
             Polaris-fedora44-x86_64.rpm
             Polaris-steamos3.8-x86_64.pkg.tar.zst
+            Polaris-steamos3.9-x86_64.pkg.tar.zst
             Polaris-ubuntu24.04-x86_64.deb
             Polaris-kms-arch-x86_64.pkg.tar.zst
             Polaris-kms-fedora44-x86_64.rpm
             Polaris-kms-steamos3.8-x86_64.pkg.tar.zst
+            Polaris-kms-steamos3.9-x86_64.pkg.tar.zst
             Polaris-kms-ubuntu24.04-x86_64.deb
             Polaris-debug-arch-x86_64.pkg.tar.zst
             Polaris-debug-steamos3.8-x86_64.pkg.tar.zst
+            Polaris-debug-steamos3.9-x86_64.pkg.tar.zst
           )
           for required_asset in "${required_binary_assets[@]}"; do
             if [[ ! " ${expected_assets[*]} " =~ " ${required_asset} " ]]; then

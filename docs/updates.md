@@ -97,8 +97,8 @@ sudo pacman -Syu polaris polaris-kms
 ```
 
 **SteamOS** takes the same `pacman -U` its [SteamOS guide](steamos.md) installs
-with: reinstall `Polaris-steamos3.8-x86_64.pkg.tar.zst`, and
-`Polaris-kms-steamos3.8-x86_64.pkg.tar.zst` with the helper. This reinstall was
+with: reinstall the package for the host's SteamOS release, `Polaris-steamos3.8-x86_64.pkg.tar.zst`
+or `Polaris-steamos3.9-x86_64.pkg.tar.zst`, and its `Polaris-kms-` helper beside it when the host has one. This reinstall was
 checked with pacman on Arch, not on a Steam Deck.
 
 **Bazzite** layers the package with `rpm-ostree`, and no step that replaces a
