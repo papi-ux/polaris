@@ -10,7 +10,7 @@ const catalog = [
 const gpu = { name: 'Fixture GPU', vendor: 'nvidia', temperature_c: 0, utilization_pct: 0, encoder_pct: null,
   vram_used_mb: 2048, vram_total_mb: 8192 }
 
-async function mockHost(page, theme = 'polaris', systemGpu = gpu) {
+async function mockHost(page, theme = 'polaris', systemGpu = gpu, fixtures = {}) {
   await page.addInitScript(skin => {
     localStorage.setItem('polaris-theme', skin)
     window.__mockStats = { streaming: false }
@@ -48,6 +48,7 @@ async function mockHost(page, theme = 'polaris', systemGpu = gpu) {
     }
     if (path === '/api/logs') return route.fulfill({ body: '' })
     if (path === '/api/ai/history' || path === '/api/ai/cache') return route.fulfill({ json: [] })
+    if (path in fixtures) return route.fulfill({ json: fixtures[path] })
     return route.fulfill({ json: { status: true, streaming: false } })
   })
   return writes
@@ -364,6 +365,58 @@ for (const width of [390, 1280]) {
       await supportingCopyContrast(page, page.locator('.page-subtitle').first(), testInfo, 'doctor-subtitle')
       expect(writes).toEqual([])
       await page.screenshot({ path: `test-results/look-feel-doctor-text-${theme}-${width}.png`, animations: 'disabled' })
+    })
+  }
+}
+
+// A launcher can be one 255-character file name, and a folder's first warning can name a long
+// path. Both wrap inside the ROM folder and readiness cards instead of widening the page, while an
+// ordinary folder at normal text size keeps its label and status side by side.
+const longLauncher = `/synthetic/Applications/Eden_${'X'.repeat(241)}.AppImage`
+const romSources = { status: true, presets: [], sources: [
+  { id: 'long', path: '/synthetic/ROMs', emulator: 'eden', label: 'Eden', install: { kind: 'launcher', location: longLauncher },
+    prerequisites: [{ id: 'keys', severity: 'warning', message: `Eden has no prod.keys in /synthetic/keys/${'K'.repeat(200)}, so no game will boot.`, action: 'Add prod.keys' }],
+    rom_count: 1 },
+  { id: 'ready', path: '/synthetic/Games', emulator: 'eden', label: 'Eden', install: { kind: 'native', location: '/usr/bin/eden' },
+    prerequisites: [], rom_count: 3 },
+] }
+
+for (const width of [390, 1280]) {
+  for (const font of [16, 32]) {
+    test(`ROM folders and readiness keep long launcher and status text inside their cards at ${width}px with ${font}px text`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 960 })
+      await page.emulateMedia({ reducedMotion: 'reduce' })
+      const writes = await mockHost(page, 'director', gpu, { '/api/library/sources': romSources })
+      await page.addInitScript(size => document.addEventListener('DOMContentLoaded', () => { document.documentElement.style.fontSize = `${size}px` }), font)
+      await page.goto('/#/apps')
+      await expect(page.getByRole('heading', { name: 'Library', exact: true })).toBeVisible()
+      await page.getByRole('button', { name: 'Import Games', exact: true }).click()
+      const rows = page.locator('[data-rom-readiness] .grid > div')
+      await expect(rows).toHaveCount(2)
+      await expect(page.locator('[data-rom-folder]')).toHaveCount(2)
+      expect(await page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe(`${font}px`)
+      await fits(page.locator('main'), width)
+      for (const card of await page.locator('[data-rom-folders], [data-rom-folder], [data-rom-readiness], [data-rom-readiness] .grid > div').all()) await fits(card, width)
+      for (const text of await page.locator('[data-rom-folder] .text-sm.font-semibold, [data-rom-readiness] .grid > div > span').all()) {
+        await fits(text, width)
+        await wholeWords(text)
+      }
+      await expect(rows.first().locator('span').first()).toHaveText(`Eden at ${longLauncher}`)
+      if (font === 16) {
+        // The ordinary folder reads as before: label on the left, status on the same line at the right.
+        const [label, status, row] = await Promise.all([rows.nth(1).locator('span').first().boundingBox(),
+          rows.nth(1).locator('span').last().boundingBox(), rows.nth(1).boundingBox()])
+        expect(Math.abs(label.y - status.y)).toBeLessThan(4)
+        expect(row.x + row.width - (status.x + status.width)).toBeLessThan(20)
+        const folder = page.locator('[data-rom-folder]').nth(1)
+        const [name, count] = await Promise.all([folder.locator('.text-sm.font-semibold').boundingBox(), folder.locator('.control-chip').boundingBox()])
+        expect(Math.abs(name.y + name.height / 2 - (count.y + count.height / 2))).toBeLessThan(4)
+      }
+      expect(writes).toEqual([])
+      // A taller viewport only, so a card that wraps a long path is captured whole; widths are unchanged.
+      await page.setViewportSize({ width, height: 4800 })
+      await page.locator('[data-rom-folders]').screenshot({ path: `test-results/look-feel-rom-folders-${width}-${font}.png`, animations: 'disabled' })
+      await page.locator('[data-rom-readiness]').screenshot({ path: `test-results/look-feel-rom-readiness-${width}-${font}.png`, animations: 'disabled' })
     })
   }
 }

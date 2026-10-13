@@ -151,7 +151,7 @@
           <article v-for="source in romSourceCards" :key="source.id" class="library-import-review-row" data-rom-folder>
             <div class="min-w-0">
               <div class="flex flex-wrap items-center gap-2">
-                <span class="text-sm font-semibold text-silver">{{ romSourceInstallLabel(source) }}</span>
+                <span class="min-w-0 max-w-full break-words text-sm font-semibold text-silver">{{ romSourceInstallLabel(source) }}</span>
                 <span class="control-chip">{{ romSourceCountLabel(source) }}</span>
               </div>
               <div class="mt-1 break-all font-mono text-xs text-storm">{{ source.path }}</div>
@@ -695,10 +695,13 @@
             <div class="section-title-row">
               <div class="text-sm font-semibold text-silver">Emulator readiness</div>
             </div>
-            <div class="mt-3 grid gap-2">
-              <div v-for="source in romSourceCards" :key="source.id" class="flex items-start justify-between gap-3 rounded-xl border border-storm/15 bg-void/40 px-3 py-2">
-                <span class="text-sm text-silver">{{ romSourceInstallLabel(source) }}</span>
-                <span class="text-right text-xs" :class="romSourceReady(source) ? 'text-success' : 'text-warning-bright'">{{ romSourceStatus(source) }}</span>
+            <!-- A launcher path or a warning can be one long token: the single bounded column, the
+                 shrinkable row and spans keep it inside the card, and a status that cannot fit
+                 beside its label moves to its own line, still at the right. -->
+            <div class="mt-3 grid grid-cols-1 gap-2">
+              <div v-for="source in romSourceCards" :key="source.id" class="flex min-w-0 flex-wrap items-start justify-between gap-x-3 gap-y-1 rounded-xl border border-storm/15 bg-void/40 px-3 py-2">
+                <span class="min-w-0 max-w-full grow basis-40 break-words text-sm text-silver">{{ romSourceInstallLabel(source) }}</span>
+                <span class="ml-auto min-w-0 max-w-full break-words text-right text-xs" :class="romSourceReady(source) ? 'text-success' : 'text-warning-bright'">{{ romSourceStatus(source) }}</span>
               </div>
             </div>
           </article>
