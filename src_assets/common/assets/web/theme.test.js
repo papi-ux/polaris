@@ -120,16 +120,47 @@ describe('theme skin registry', () => {
     expect(themeCss('portable-chrome')).not.toContain('#ff5cab')
   })
 
-  it('uses Nova Director crimson surfaces, warm copy and black controls', () => {
+  it('uses Nova Director crimson surfaces and tiles, warm copy and black controls', () => {
     const director = themeCss('director')
     for (const value of ['#6e0b17', '#881525', '#9a1b2e', '#5e0a14', '#7b1020', '#261015', '#12090b', '#fff5e8', '#f1d9cd', '#dec0b5', '#ffb7ac']) {
       expect(director).toContain(value)
     }
     expect(director).toContain('--surface-card: #881525')
-    expect(director).toContain('--surface-raised: #261015')
+    // Nova keeps tiles on its crimson elevated surface with black dividers;
+    // black stays on controls.
+    expect(director).toContain('--surface-raised: #9a1b2e')
+    expect(director).toContain('--edge-raised: #12090b')
+    expect(director).toContain('--surface-pill: #261015')
+    expect(director).toContain('--surface-chip: #261015')
     expect(director).toContain('outline: 2px solid var(--color-ice)')
-    // The shared success/warning/info roles stay semantic, rather than turning crimson.
-    expect(director).not.toMatch(/--color-(success|warning|info):/)
+    // Success and warning stay the shared semantic roles. Info keeps its sky hue,
+    // lifted only enough to read on crimson.
+    expect(director).not.toMatch(/--color-(success|warning):/)
+    expect(director).toContain('--color-info: #7dd3fc')
+  })
+
+  it('keeps Director text roles at 4.5:1 on its cards, tiles and hovered tiles', () => {
+    const tokens = { ...extractTokens(themeCss('polaris')), ...extractTokens(themeCss('director')) }
+    const grounds = ['card-base', 'raised', 'raised-hover']
+    const roles = ['ice', 'silver', 'storm', 'support', 'info', 'danger', 'success', 'warning']
+    for (const ground of grounds) {
+      for (const role of roles) {
+        expect(
+          contrastRatio(tokens[role], tokens[ground]),
+          `director --color-${role} on --surface-${ground} ${tokens[ground]}`,
+        ).toBeGreaterThanOrEqual(4.5)
+      }
+    }
+  })
+
+  it('gives Director section kickers the full storm tone without moving other kickers', () => {
+    const director = themeCss('director')
+    // The shared muted kicker measures 4.10:1 on the crimson card.
+    expect(appCss).toMatch(/\.section-kicker\s*\{[^}]*text-storm\/80/)
+    expect(director).toMatch(/:where\(\[data-theme="director"\]\) \.section-kicker\s*\{\s*color: var\(--color-storm\);\s*\}/)
+    // Hero and console kickers keep their own higher-specificity colours.
+    expect(appCss).toMatch(/\[data-dashboard-idle-hero\] \.section-kicker,\s*\.dashboard-live-shell \.section-kicker\s*\{\s*color: var\(--color-accent\);/)
+    expect(appCss).toMatch(/\.system-console \.section-kicker\s*\{\s*color: var\(--color-silver\);/)
   })
 
   it('ships High Contrast with near-opaque surfaces and no glass blur', () => {

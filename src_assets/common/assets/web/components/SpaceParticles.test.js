@@ -31,6 +31,23 @@ function frame(time) {
   callback(time)
 }
 
+// mulberry32: a fixed sequence so the field's identity can be compared exactly.
+function seeded(seed) {
+  return () => {
+    seed = (seed + 0x6D2B79F5) | 0
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
+function viewport(width, height) {
+  vi.stubGlobal('innerWidth', width)
+  vi.stubGlobal('innerHeight', height)
+}
+
+const points = calls => calls.map(([x, y, radius]) => [x, y, radius])
+
 describe('space field lifecycle and draw bounds', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -104,8 +121,13 @@ describe('space field lifecycle and draw bounds', () => {
     expect(queued.size).toBe(1)
     motion.matches = true; motion.dispatchEvent(new Event('change'))
     expect(queued.size).toBe(0)
+    // A resize burst queues one frame, which draws one static frame and stops.
     const draws = contexts[0].clearRect.mock.calls.length
-    window.dispatchEvent(new Event('resize'))
+    viewport(800, 600)
+    for (let i = 0; i < 3; i++) window.dispatchEvent(new Event('resize'))
+    expect(contexts[0].clearRect).toHaveBeenCalledTimes(draws)
+    expect(queued.size).toBe(1)
+    frame(16)
     expect(contexts[0].clearRect).toHaveBeenCalledTimes(draws + 1)
     expect(queued.size).toBe(0)
   })
@@ -138,6 +160,9 @@ describe('space field lifecycle and draw bounds', () => {
   })
 
   it('rebuilds mode counts without adding another loop and releases listeners/observer on unmount', async () => {
+    // The 1280x800 reference surface draws each mode's full star count.
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(1280)
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(800)
     const wrapper = mounted({ absolute: true })
     contexts[0].arc.mockClear()
     await wrapper.setProps({ dense: true })
@@ -152,6 +177,114 @@ describe('space field lifecycle and draw bounds', () => {
     motion.dispatchEvent(new Event('change'))
     setTheme('miami')
     expect(contexts[0].clearRect).toHaveBeenCalledTimes(draws)
+  })
+
+  it('keeps every star, nebula and galaxy across resizes and scales their positions', () => {
+    Math.random.mockImplementation(seeded(404))
+    motion.matches = true // static frames: no drift or twinkle between captures
+    viewport(1280, 800)
+    const wrapper = mounted()
+    const stars = points(contexts[0].arc.mock.calls)
+    const ambient = contexts[1].translate.mock.calls.map(call => [...call])
+    const randomCalls = Math.random.mock.calls.length
+    expect(stars.length).toBeGreaterThanOrEqual(280)
+
+    contexts[0].arc.mockClear(); contexts[1].translate.mockClear()
+    viewport(640, 400)
+    window.dispatchEvent(new Event('resize'))
+    expect(wrapper.element.style.width).toBe('640px') // the CSS box never lags layout
+    frame(16)
+    const halved = points(contexts[0].arc.mock.calls)
+    // A quarter of the area draws the first quarter of the same stars, at half scale.
+    expect(halved.length).toBeLessThan(stars.length)
+    expect(halved).toEqual(stars.slice(0, halved.length).map(([x, y, radius]) => [x / 2, y / 2, radius]))
+    expect(contexts[1].translate.mock.calls).toEqual(ambient.map(([x, y]) => [x / 2, y / 2]))
+
+    contexts[0].arc.mockClear()
+    viewport(1280, 800)
+    window.dispatchEvent(new Event('resize'))
+    frame(32)
+    expect(points(contexts[0].arc.mock.calls)).toEqual(stars)
+    expect(Math.random).toHaveBeenCalledTimes(randomCalls) // nothing was re-randomized
+  })
+
+  it('draws star density by surface area within each mode\'s bounds', () => {
+    const cases = [
+      [{}, 390, 844, 90],
+      [{ dense: true }, 390, 844, 135],
+      [{}, 1280, 800, 280],
+      [{}, 3840, 2160, 280],
+      [{}, 320, 200, 70],
+    ]
+    for (const [props, width, height, stars] of cases) {
+      viewport(width, height)
+      contexts = []
+      const wrapper = mounted(props)
+      expect(contexts[0].arc).toHaveBeenCalledTimes(stars)
+      wrapper.unmount(); wrappers = []
+    }
+  })
+
+  it('coalesces a resize burst into one backing store, backdrop and draw on the running loop', () => {
+    let width = 1280
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(() => width)
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(800)
+    const wrapper = mounted({ absolute: true })
+    const draws = contexts[0].clearRect.mock.calls.length
+    const transforms = contexts[0].setTransform.mock.calls.length
+    const gradients = contexts[1].createRadialGradient.mock.calls.length
+    width = 900
+    for (let i = 0; i < 5; i++) {
+      window.dispatchEvent(new Event('resize'))
+      observer.callback()
+    }
+    expect(wrapper.element.style.width).toBe('900px')
+    expect(wrapper.element.classList.contains('max-w-full')).toBe(true) // never wider than its pane
+    expect(queued.size).toBe(1) // still only the loop
+    expect(contexts[0].clearRect).toHaveBeenCalledTimes(draws)
+    frame(5) // inside the 30 Hz gate, but a resized surface draws now
+    expect(contexts[0].clearRect).toHaveBeenCalledTimes(draws + 1)
+    expect(contexts[0].setTransform).toHaveBeenCalledTimes(transforms + 1)
+    expect(contexts[1].createRadialGradient).toHaveBeenCalledTimes(gradients + 6 + 4) // balanced nebulae + galaxies
+    expect(queued.size).toBe(1)
+    frame(10)
+    expect(contexts[0].clearRect).toHaveBeenCalledTimes(draws + 1) // the gate holds again
+  })
+
+  it('defers hidden and particle-free resizes until the field draws again', () => {
+    vi.stubGlobal('devicePixelRatio', 1)
+    viewport(1280, 800)
+    const wrapper = mounted()
+    hidden = true; document.dispatchEvent(new Event('visibilitychange'))
+    const draws = contexts[0].clearRect.mock.calls.length
+    viewport(800, 600)
+    window.dispatchEvent(new Event('resize'))
+    expect(queued.size).toBe(0)
+    expect(contexts[0].clearRect).toHaveBeenCalledTimes(draws)
+    expect(wrapper.element.width).toBe(1280)
+    hidden = false; document.dispatchEvent(new Event('visibilitychange'))
+    expect(wrapper.element.width).toBe(800)
+    expect(contexts[0].clearRect).toHaveBeenCalledTimes(draws + 1)
+    expect(queued.size).toBe(1)
+
+    setTheme('director')
+    viewport(640, 400)
+    window.dispatchEvent(new Event('resize'))
+    expect(queued.size).toBe(0)
+    expect(wrapper.element.width).toBe(800)
+    setTheme('polaris')
+    expect(wrapper.element.width).toBe(640)
+    expect(queued.size).toBe(1)
+  })
+
+  it('cancels a queued resize frame on unmount', () => {
+    motion.matches = true
+    const wrapper = mounted()
+    viewport(800, 600)
+    window.dispatchEvent(new Event('resize'))
+    expect(queued.size).toBe(1)
+    wrapper.unmount(); wrappers = []
+    expect(queued.size).toBe(0)
   })
 
   it('stays inert when a 2D context is unavailable', () => {

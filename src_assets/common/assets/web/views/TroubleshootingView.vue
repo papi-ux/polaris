@@ -1,6 +1,6 @@
 <template>
   <div class="page-shell pb-2">
-    <section class="page-header">
+    <section class="page-header troubleshooting-page-header">
       <div class="page-heading">
         <h1 class="page-title">{{ $t('navbar.troubleshoot') }}</h1>
         <p class="page-subtitle">{{ $t('troubleshooting.overview') }}</p>
@@ -22,7 +22,7 @@
       data-previous-run-banner
       :data-previous-run-outcome="previousRunBanner.crashed ? 'crashed' : 'unclean'"
     >
-      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+      <div class="troubleshooting-action-row flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <div class="section-kicker">{{ $t('troubleshooting.previous_run') }}</div>
           <h2 class="section-title">{{ previousRunBanner.title }}</h2>
@@ -48,7 +48,7 @@
     </section>
 
     <section class="section-card space-y-4" data-fix-my-stream>
-      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+      <div class="troubleshooting-action-row flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <div class="section-kicker">{{ $t('troubleshooting.fix_my_stream_mode') }}</div>
           <h2 class="section-title">{{ $t('troubleshooting.fix_my_stream') }}</h2>
@@ -77,7 +77,7 @@
           </div>
         </details>
         <div v-if="!doctorDiagnosisIdle" class="mt-4 rounded-xl border border-info/20 bg-info/10 p-3" data-ai-doctor-explanation :data-ai-readiness="aiReadiness.state">
-          <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div class="troubleshooting-action-row flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
               <div class="text-[11px] font-semibold uppercase tracking-eyebrow text-info-bright">{{ $t('troubleshooting.ai_doctor_explanation') }}</div>
               <p class="mt-1 text-xs leading-relaxed text-info-bright">{{ aiReadinessText }}</p>
@@ -116,7 +116,7 @@
           :class="statusTone(item.status).card"
           data-readonly
         >
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <div class="text-sm font-semibold text-silver">{{ item.label }}</div>
             <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(item.status).badge">
               {{ fixMyStreamStatusLabel(item.status) }}
@@ -134,7 +134,7 @@
     <SpacesDiagnostics v-if="platform === 'linux'" />
 
     <section class="section-card space-y-4" data-support-self-tests>
-      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+      <div class="troubleshooting-action-row flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <div class="section-kicker">{{ $t('troubleshooting.self_tests_kicker') }}</div>
           <h2 class="section-title">{{ $t('troubleshooting.self_tests_title') }}</h2>
@@ -148,9 +148,9 @@
         </button>
       </div>
 
-      <div class="grid gap-3 xl:grid-cols-3">
+      <div class="troubleshooting-card-grid grid gap-3">
         <div class="surface-subtle border p-4" :class="statusTone(networkPathReport.status).card" data-readonly>
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <div class="text-sm font-semibold text-silver">{{ $t('troubleshooting.network_path_tester') }}</div>
             <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(networkPathReport.status).badge">{{ statusTone(networkPathReport.status).label }}</span>
           </div>
@@ -170,7 +170,7 @@
         </div>
 
         <div class="surface-subtle border p-4" :class="statusTone(controllerInputReport.status).card">
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <div class="text-sm font-semibold text-silver">{{ $t('troubleshooting.controller_tester') }}</div>
             <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(controllerInputReport.status).badge">{{ statusTone(controllerInputReport.status).label }}</span>
           </div>
@@ -195,7 +195,7 @@
         </div>
 
         <div v-if="gamescopeHelperReport" class="surface-subtle border p-4" :class="statusTone(gamescopeHelperReport.status).card" data-readonly>
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <div class="text-sm font-semibold text-silver">{{ $t('troubleshooting.gamescope_helper_tester') }}</div>
             <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(gamescopeHelperReport.status).badge">{{ statusTone(gamescopeHelperReport.status).label }}</span>
           </div>
@@ -213,7 +213,7 @@
         </div>
 
         <div class="surface-subtle border p-4" :class="statusTone(postSessionReport.status).card" data-readonly>
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <div class="text-sm font-semibold text-silver">{{ $t('troubleshooting.post_session_report') }}</div>
             <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="statusTone(postSessionReport.status).badge">{{ postSessionReport.issueOwner }}</span>
           </div>
@@ -229,7 +229,7 @@
     </section>
 
     <section class="section-card space-y-4">
-      <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+      <div class="troubleshooting-action-row flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div>
           <div class="section-kicker">{{ $t('troubleshooting.recovery_ladder') }}</div>
           <h2 class="section-title">{{ $t('troubleshooting.quick_recovery') }}</h2>
@@ -244,7 +244,7 @@
       </div>
       <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <div class="surface-subtle flex h-full flex-col border-success/15 p-4">
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <span class="rounded-full bg-success/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-success">{{ $t('troubleshooting.recovery_rank_1') }}</span>
             <span class="text-[10px] uppercase tracking-eyebrow text-storm">{{ $t('troubleshooting.recovery_rank_1_label') }}</span>
           </div>
@@ -264,7 +264,7 @@
         </div>
 
         <div class="surface-subtle flex h-full flex-col border-warning/15 p-4">
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <span class="rounded-full bg-warning/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-warning-bright">{{ $t('troubleshooting.recovery_rank_2') }}</span>
             <span class="text-[10px] uppercase tracking-eyebrow text-storm">{{ $t('troubleshooting.recovery_rank_2_label') }}</span>
           </div>
@@ -281,7 +281,7 @@
         </div>
 
         <div class="surface-subtle flex h-full flex-col border-danger/15 p-4">
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <span class="rounded-full bg-danger/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-danger">{{ $t('troubleshooting.recovery_rank_3') }}</span>
             <span class="text-[10px] uppercase tracking-eyebrow text-storm">{{ $t('troubleshooting.recovery_rank_3_label') }}</span>
           </div>
@@ -301,7 +301,7 @@
         </div>
 
         <div class="surface-subtle flex h-full flex-col border-info/15 p-4" v-if="platform === 'windows'">
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <span class="rounded-full bg-info/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow text-info-bright">{{ $t('troubleshooting.recovery_optional') }}</span>
             <span class="text-[10px] uppercase tracking-eyebrow text-storm">{{ $t('troubleshooting.recovery_display_reset') }}</span>
           </div>
@@ -355,7 +355,7 @@
         <h2 id="diagnostics" class="text-xl font-semibold text-silver">{{ $t('troubleshooting.diagnostics') }}</h2>
         <p class="mt-2 text-sm text-storm">{{ $t('troubleshooting.diagnostics_desc') }}</p>
         <div v-if="groupedRecentIssues.length" class="mt-4 rounded-xl border border-storm/20 bg-deep/40 p-4" data-readonly>
-          <div class="flex items-center justify-between gap-3">
+          <div class="troubleshooting-card-header flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
             <div class="text-sm font-medium text-silver">{{ $t('troubleshooting.recent_incidents') }}</div>
             <div class="text-xs text-storm">{{ groupedRecentIssues.length }} {{ $t('troubleshooting.visible_now') }}</div>
           </div>

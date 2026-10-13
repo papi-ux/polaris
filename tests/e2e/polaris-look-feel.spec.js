@@ -64,6 +64,45 @@ async function fits(locator, width) {
   expect(overflow.scroll, JSON.stringify(overflow)).toBeLessThanOrEqual(overflow.client + 1)
 }
 
+// A control may break a word only when the word is wider than its card could ever
+// give it. Words that fit stay on one line. Compound words may still break after
+// a hyphen joining two letters, as in print ("self-" / "test"); version labels,
+// whose hyphen follows a digit ("v1.5.0-beta.2"), may not.
+async function wholeWords(locator) {
+  const cuts = await locator.evaluate(node => {
+    const box = node.closest('.section-card, .page-header, main')
+    const outer = getComputedStyle(box), own = getComputedStyle(node)
+    const room = box.clientWidth - parseFloat(outer.paddingLeft) - parseFloat(outer.paddingRight)
+      - parseFloat(own.paddingLeft) - parseFloat(own.paddingRight) - parseFloat(own.borderLeftWidth) - parseFloat(own.borderRightWidth)
+    const found = []
+    const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT)
+    for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+      for (const match of text.data.matchAll(/\S+/g)) {
+        const word = match[0]
+        let start = 0
+        const segments = []
+        for (let i = 1; i < word.length - 1; i++) {
+          if (word[i] === '-' && /\p{L}/u.test(word[i - 1]) && /\p{L}/u.test(word[i + 1])) {
+            segments.push([start, i + 1]); start = i + 1
+          }
+        }
+        segments.push([start, word.length])
+        for (const [from, to] of segments) {
+          const range = document.createRange()
+          range.setStart(text, match.index + from)
+          range.setEnd(text, match.index + to)
+          const rects = [...range.getClientRects()].filter(rect => rect.width > 0)
+          const lines = new Set(rects.map(rect => Math.round(rect.top))).size
+          const width = rects.reduce((sum, rect) => sum + rect.width, 0)
+          if (lines > 1 && width <= room) found.push({ word: word.slice(from, to), lines, width: Math.round(width), room: Math.round(room) })
+        }
+      }
+    }
+    return found
+  })
+  expect(cuts, await locator.evaluate(node => node.textContent.trim())).toEqual([])
+}
+
 // Read Chromium's actual composited screenshot, including translucent/gradient
 // surfaces. PNG filters are reconstructed; unsupported formats fail explicitly.
 function pixels(png) {
@@ -319,7 +358,8 @@ for (const width of [390, 1280]) {
         }
         await fits(page.locator('main'), width)
         for (const card of await page.locator('main .section-card, [data-support-self-tests] .surface-subtle').all()) await fits(card, width)
-        for (const control of await page.locator('[data-fix-my-stream] .troubleshooting-action-button, [data-session-snapshot] .meta-pill').all()) await fits(control, width)
+        for (const control of await page.locator('[data-fix-my-stream] .troubleshooting-action-button, [data-session-snapshot] .meta-pill, .troubleshooting-page-header .meta-pill').all()) await fits(control, width)
+        for (const control of await page.locator('main .troubleshooting-action-button, [data-session-snapshot] .meta-pill, .troubleshooting-page-header .meta-pill').all()) await wholeWords(control)
       }
       await supportingCopyContrast(page, page.locator('.page-subtitle').first(), testInfo, 'doctor-subtitle')
       expect(writes).toEqual([])

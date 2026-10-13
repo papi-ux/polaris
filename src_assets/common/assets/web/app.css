@@ -1353,7 +1353,8 @@ textarea {
 
 .surface-subtle {
   min-width: 0;
-  overflow-wrap: anywhere;
+  /* Whole words first; only a token longer than the card (a path or hash) breaks. */
+  overflow-wrap: break-word;
   @apply rounded-xl border;
   background: var(--surface-raised);
   border-color: var(--edge-raised);
@@ -2311,12 +2312,63 @@ textarea {
 [data-session-snapshot] .meta-pill {
   max-width: 100%;
   white-space: normal;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+  /* A pill that does wrap keeps readable lines and a shape that fits them. */
+  line-height: 1.25;
+  border-radius: 1rem;
 }
 
 .troubleshooting-action-button {
   @apply inline-flex min-h-9 max-w-full items-center justify-center gap-2 whitespace-normal rounded-lg px-4 py-2 text-center text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
+}
+
+/* Doctor headings share a row with their controls. When enlarged text leaves no
+   room for both, the controls drop below the copy as whole words instead of
+   squeezing into a column one syllable wide. Rows only wrap where they run
+   horizontally, so the stacked phone layout is unchanged. */
+@media (min-width: 64rem) {
+  .troubleshooting-action-row {
+    flex-wrap: wrap;
+  }
+  .troubleshooting-action-row > :first-child {
+    flex: 1 1 24rem;
+    min-width: 0;
+  }
+  .troubleshooting-action-row > :not(:first-child) {
+    flex: 0 1 auto;
+    max-width: 100%;
+  }
+}
+@media (min-width: 80rem) {
+  .troubleshooting-page-header {
+    flex-wrap: wrap;
+  }
+  .troubleshooting-page-header > .page-heading {
+    flex: 1 1 24rem;
+  }
+  .troubleshooting-page-header > .page-meta {
+    flex: 0 1 auto;
+    max-width: 100%;
+  }
+}
+.troubleshooting-page-header .meta-pill {
+  max-width: 100%;
+  overflow-wrap: break-word;
+}
+
+/* A card title and its status badge share a line until enlarged text needs both;
+   then the badge drops below and neither can push past the card. */
+.troubleshooting-card-header > * {
+  max-width: 100%;
+}
+
+/* Self-test cards keep three columns at desktop sizes, measured in text units so
+   enlarged text falls back to a single readable column instead of three slivers. */
+@media (min-width: 80rem) {
+  .troubleshooting-card-grid {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, max(16rem, 30%)), 1fr));
+  }
 }
 
 .pairing-flow-strip {
@@ -2545,17 +2597,24 @@ textarea {
   --color-accent-2: #dec0b5;
   --color-foreground: #f1d9cd;
   --color-danger: #ffb7ac;
+  /* The shared #38bdf8 info sits at 4.49:1 on the crimson card; this lighter sky
+     keeps the info role readable (5.78:1 card, 4.90:1 raised tile). */
+  --color-info: #7dd3fc;
   --surface-card-base: #881525;
   --surface-card: #881525;
   --surface-glass: #7b1020;
-  --surface-raised: #261015;
-  --surface-raised-hover: #12090b;
+  /* Nova keeps tiles crimson (its elevated surface) with black dividers; black is
+     reserved for controls: pills, chips, inputs and the active navigation item.
+     The hover lift is a small step that keeps every text role, success included,
+     at 4.5:1 or better (4.54 at its lowest). */
+  --surface-raised: #9a1b2e;
+  --surface-raised-hover: #9d1d30;
   --surface-pill: #261015;
   --surface-chip: #261015;
   --surface-shimmer: #9a1b2e;
   --edge-glass: #12090b;
   --edge-card: #12090b;
-  --edge-raised: color-mix(in srgb, var(--color-ice) 28%, transparent);
+  --edge-raised: #12090b;
   --edge-raised-hover: color-mix(in srgb, var(--color-ice) 60%, transparent);
   --edge-pill: color-mix(in srgb, var(--color-ice) 28%, transparent);
   --edge-chip: color-mix(in srgb, var(--color-ice) 28%, transparent);
@@ -2565,7 +2624,12 @@ textarea {
 }
 [data-theme="director"] .settings-input {
   background: #12090b;
-  border-color: var(--edge-raised);
+  border-color: color-mix(in srgb, var(--color-ice) 28%, transparent);
+}
+/* The muted 80% kicker measures 4.10:1 on the crimson card; Director uses the
+   full storm tone (5.65:1). Hero kickers keep their own accent rule. */
+:where([data-theme="director"]) .section-kicker {
+  color: var(--color-storm);
 }
 [data-theme="director"] .settings-input:focus {
   border-color: var(--color-ice);

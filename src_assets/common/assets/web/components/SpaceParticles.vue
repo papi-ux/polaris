@@ -1,5 +1,5 @@
 <template>
-  <canvas aria-hidden="true" ref="canvas" class="space-particles inset-0 pointer-events-none" :class="absolute ? 'absolute' : 'fixed'" :style="{ zIndex: absolute ? 0 : 0 }" />
+  <canvas aria-hidden="true" ref="canvas" class="space-particles inset-0 pointer-events-none" :class="absolute ? 'absolute max-w-full' : 'fixed'" :style="{ zIndex: absolute ? 0 : 0 }" />
 </template>
 
 <script setup>
@@ -21,11 +21,15 @@ let backdropCtx = null
 let pixelRatio = 1
 let lastFrameTime = null
 // Two canvases at most, each capped at four million pixels / 8192 per side.
-// Fixed object counts and 30 Hz draws keep the field independent of refresh rate.
+// Bounded object counts and 30 Hz draws keep the field independent of refresh rate.
 const MAX_DPR = 2
 const MAX_PIXELS = 4_000_000
 const MAX_SIDE = 8192
 const FRAME_INTERVAL = 1000 / 30
+// A mode's star count is its density over a 1280x800 surface. Smaller surfaces
+// draw proportionally fewer stars, never below a quarter of the mode's count.
+const REFERENCE_AREA = 1280 * 800
+const MIN_DENSITY_SHARE = 0.25
 let particles = []
 let shootingStars = []
 let nebulae = []
@@ -37,6 +41,10 @@ let currentTheme = 'polaris'
 let currentConfig = null
 let currentPalette = null
 let resizeObserver = null
+let resizeFrame = null
+let resizePending = false
+let pendingW = 0
+let pendingH = 0
 let motionMediaQuery = null
 let prefersReducedMotion = false
 let pageVisible = true
@@ -275,6 +283,12 @@ function createGalaxyObject() {
   }
 }
 
+// Every mode keeps its full star set; the surface area decides how many draw.
+function activeParticleCount() {
+  const scaled = Math.round(currentConfig.count * (w * h) / REFERENCE_AREA)
+  return Math.max(Math.round(currentConfig.count * MIN_DENSITY_SHARE), Math.min(currentConfig.count, scaled))
+}
+
 function rebuild() {
   particles = Array.from({ length: currentConfig.count }, () => createParticle())
   nebulae = Array.from({ length: currentConfig.nebulaCount }, createNebula)
@@ -299,24 +313,74 @@ function syncReducedMotionPreference() {
   prefersReducedMotion = !!motionMediaQuery?.matches
 }
 
-function resize() {
-  if (!canvas.value || !ctx) return
+// Size events only measure and keep the CSS box exact; the pane canvas is also
+// clamped to its pane, so a size still in flight never widens the layout. The
+// backing store, backdrop and draw wait for one animation frame.
+function measure() {
   if (props.absolute && canvas.value.parentElement) {
-    w = Math.max(1, canvas.value.parentElement.clientWidth)
-    h = Math.max(1, canvas.value.parentElement.scrollHeight || canvas.value.parentElement.clientHeight)
+    pendingW = Math.max(1, canvas.value.parentElement.clientWidth)
+    pendingH = Math.max(1, canvas.value.parentElement.scrollHeight || canvas.value.parentElement.clientHeight)
   } else {
-    w = Math.max(1, window.innerWidth)
-    h = Math.max(1, window.innerHeight)
+    pendingW = Math.max(1, window.innerWidth)
+    pendingH = Math.max(1, window.innerHeight)
   }
-  pixelRatio = Math.min(window.devicePixelRatio || 1, MAX_DPR,
-    Math.sqrt(MAX_PIXELS / (w * h)), MAX_SIDE / w, MAX_SIDE / h)
-  canvas.value.width = Math.max(1, Math.floor(w * pixelRatio))
-  canvas.value.height = Math.max(1, Math.floor(h * pixelRatio))
-  canvas.value.style.width = `${w}px`
-  canvas.value.style.height = `${h}px`
+  canvas.value.style.width = `${pendingW}px`
+  canvas.value.style.height = `${pendingH}px`
+  resizePending = true
+}
+
+// Applies a measured size to the main backing store. Returns the previous size
+// when anything changed, otherwise null.
+function applyCanvasSize() {
+  if (!resizePending || !canvas.value || !ctx) return null
+  resizePending = false
+  const ratio = Math.min(window.devicePixelRatio || 1, MAX_DPR,
+    Math.sqrt(MAX_PIXELS / (pendingW * pendingH)), MAX_SIDE / pendingW, MAX_SIDE / pendingH)
+  const width = Math.max(1, Math.floor(pendingW * ratio))
+  const height = Math.max(1, Math.floor(pendingH * ratio))
+  if (pendingW === w && pendingH === h && ratio === pixelRatio &&
+    canvas.value.width === width && canvas.value.height === height) return null
+  const previous = { w, h }
+  w = pendingW
+  h = pendingH
+  pixelRatio = ratio
+  canvas.value.width = width
+  canvas.value.height = height
   ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
-  rebuild()
-  restartAnimation()
+  return previous
+}
+
+// A resize keeps every star, nebula and galaxy. Positions scale with the surface,
+// so the field stretches instead of reshuffling, and only the drawn share of the
+// star set follows the new area.
+function applyPendingResize() {
+  const previous = applyCanvasSize()
+  if (!previous) return false
+  const sx = w / previous.w
+  const sy = h / previous.h
+  for (const list of [particles, nebulae, galaxyObjects, shootingStars]) {
+    for (const item of list) {
+      item.x *= sx
+      item.y *= sy
+    }
+  }
+  paintBackdrop()
+  return true
+}
+
+function scheduleResize() {
+  if (!canvas.value || !ctx) return
+  measure()
+  // Hidden tabs and particle-free themes apply the size when they draw again.
+  if (!pageVisible || getThemeParticleAlpha(currentTheme) === 0) return
+  // A running loop applies it on its next frame; otherwise one frame is queued.
+  if (animId !== null || resizeFrame !== null) return
+  resizeFrame = requestAnimationFrame(flushResize)
+}
+
+function flushResize() {
+  resizeFrame = null
+  if (animId === null) restartAnimation()
 }
 
 // Ambient layers are static depth, cached on resize/theme/mode changes. Each
@@ -379,7 +443,9 @@ function paintBackdrop() {
 function animate(timestamp = 0, staticFrame = false) {
   animId = null
   if (!ctx || !pageVisible || getThemeParticleAlpha(currentTheme) === 0) return
-  if (!staticFrame && lastFrameTime !== null && timestamp - lastFrameTime < FRAME_INTERVAL) {
+  // A resized surface draws on this frame rather than waiting out the 30 Hz gate.
+  const resized = applyPendingResize()
+  if (!resized && !staticFrame && lastFrameTime !== null && timestamp - lastFrameTime < FRAME_INTERVAL) {
     animId = requestAnimationFrame(animate)
     return
   }
@@ -390,7 +456,9 @@ function animate(timestamp = 0, staticFrame = false) {
   if (backdropCtx) ctx.drawImage(backdrop, 0, 0, w, h)
 
   // Stars
-  for (const p of particles) {
+  const activeCount = activeParticleCount()
+  for (let i = 0; i < activeCount; i++) {
+    const p = particles[i]
     if (!staticFrame) {
       p.x += p.speedX * step
       p.y += p.speedY * step
@@ -478,6 +546,11 @@ function restartAnimation() {
     cancelAnimationFrame(animId)
     animId = null
   }
+  // The frame drawn below applies any pending size itself.
+  if (resizeFrame !== null) {
+    cancelAnimationFrame(resizeFrame)
+    resizeFrame = null
+  }
   lastFrameTime = null
   if (!pageVisible) return
   if (getThemeParticleAlpha(currentTheme) === 0) return
@@ -496,11 +569,16 @@ function handleVisibilityChange() {
   restartAnimation()
 }
 
-watch(() => [props.dense, props.mode], () => {
+// Mode, theme and motion changes recreate the field, so a pending size is applied
+// first and the new field is built at the surface it will draw on.
+function rebuildField() {
   syncVisualMode()
+  applyCanvasSize()
   rebuild()
   restartAnimation()
-})
+}
+
+watch(() => [props.dense, props.mode], rebuildField)
 
 // The field re-skins itself on theme swaps; no prop threading needed.
 let unsubscribeTheme = null
@@ -515,19 +593,17 @@ onMounted(() => {
   motionMediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
   syncReducedMotionPreference()
   syncVisualMode()
-  resize()
-  window.addEventListener('resize', resize)
+  measure()
+  applyCanvasSize()
+  rebuild()
+  window.addEventListener('resize', scheduleResize)
   document.addEventListener('visibilitychange', handleVisibilityChange)
   motionMediaQuery.addEventListener('change', handleReducedMotionChange)
   if (props.absolute && canvas.value.parentElement && typeof ResizeObserver !== 'undefined') {
-    resizeObserver = new ResizeObserver(() => resize())
+    resizeObserver = new ResizeObserver(() => scheduleResize())
     resizeObserver.observe(canvas.value.parentElement)
   }
-  unsubscribeTheme = onThemeChange(() => {
-    syncVisualMode()
-    rebuild()
-    restartAnimation()
-  })
+  unsubscribeTheme = onThemeChange(rebuildField)
   restartAnimation()
 })
 
@@ -535,10 +611,12 @@ onUnmounted(() => {
   if (unsubscribeTheme) unsubscribeTheme()
   if (animId !== null) cancelAnimationFrame(animId)
   animId = null
+  if (resizeFrame !== null) cancelAnimationFrame(resizeFrame)
+  resizeFrame = null
   backdrop = null
   backdropCtx = null
   ctx = null
-  window.removeEventListener('resize', resize)
+  window.removeEventListener('resize', scheduleResize)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   motionMediaQuery?.removeEventListener('change', handleReducedMotionChange)
   if (resizeObserver) resizeObserver.disconnect()
@@ -546,7 +624,6 @@ onUnmounted(() => {
 
 function handleReducedMotionChange() {
   syncReducedMotionPreference()
-  rebuild()
-  restartAnimation()
+  rebuildField()
 }
 </script>
