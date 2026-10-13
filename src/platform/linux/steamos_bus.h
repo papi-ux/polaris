@@ -52,7 +52,9 @@ namespace prelaunch::steamos::bus {
     std::filesystem::path boot_id = "/proc/sys/kernel/random/boot_id";
     std::filesystem::path self_cgroup = "/proc/self/cgroup";
     std::filesystem::path runtime_root = "/run/user";
-    std::filesystem::path pacman_local = "/var/lib/pacman/local";
+    // SteamOS relocates pacman's DBPath to /usr/lib/holo/pacmandb.
+    // The support probe and readiness fingerprint must read the same installed records.
+    std::filesystem::path pacman_local = "/usr/lib/holo/pacmandb/local";
     std::filesystem::path steamosctl = std::string {k_steamosctl};
     std::uint32_t trusted_owner_uid = 0;  ///< owner of the executable and its directories
     std::filesystem::path trusted_root = "/";  ///< directories are checked up to and including this
