@@ -1263,11 +1263,6 @@ textarea {
   color: var(--color-accent);
 }
 
-[data-dashboard-idle-hero],
-.dashboard-live-shell {
-  box-shadow: var(--shadow-glow-lg);
-}
-
 /* Doctor verdict card: the traffic light paints the left stripe. */
 .dashboard-doctor-card {
   @apply rounded-xl border p-4;
@@ -1277,7 +1272,7 @@ textarea {
 
 /* Strip grade badge and stage LIVE badge. */
 .dashboard-grade-badge {
-  @apply inline-flex h-9 min-w-9 items-center justify-center rounded-lg border-2 border-current px-2 font-mono text-xl font-bold leading-none;
+  @apply inline-flex h-7 min-w-7 items-center justify-center self-center rounded-md border-[1.5px] border-current px-1.5 font-mono text-base font-bold leading-none;
 }
 
 .dashboard-preview-live-badge {
@@ -1305,7 +1300,7 @@ textarea {
 
 /* Sparkline slot inside each instrument-strip tile. */
 .dashboard-strip-spark {
-  @apply h-8 w-36;
+  @apply h-8 w-full;
 }
 
 /* Inert Doctor advice: unmistakably not a button. */
@@ -1324,19 +1319,11 @@ textarea {
   border-color: var(--edge-raised);
 }
 
-.dashboard-play-cover {
-  @apply relative h-24 w-full overflow-hidden rounded-lg bg-void/60;
-}
-
-.dashboard-play-cover-fallback {
-  @apply absolute inset-0 flex items-center justify-center text-storm/45;
-  background:
-    radial-gradient(circle at 50% 20%, color-mix(in srgb, var(--color-ice) 10%, transparent), transparent 58%),
-    color-mix(in srgb, var(--color-deep) 82%, var(--color-void));
-}
-
+/* Neutral warm outlines, level at the bottom of each card whatever the title's length; accent
+   red stays for live, focus and the title rule. */
 .dashboard-play-launch {
-  @apply mt-2 inline-flex min-h-11 w-full items-center justify-center rounded-lg border border-accent/40 font-mono text-xs font-semibold text-accent transition-[background-color,border-color,color] duration-150 hover:bg-accent/15 disabled:cursor-not-allowed disabled:opacity-50;
+  @apply mt-auto inline-flex min-h-11 w-full items-center justify-center rounded-lg border font-mono text-xs font-semibold text-silver transition-[background-color,border-color,color] duration-150 hover:border-silver disabled:cursor-not-allowed disabled:opacity-50;
+  border-color: var(--edge-raised);
 }
 
 .section-title {
@@ -1603,9 +1590,7 @@ textarea {
   @apply rounded-lg border border-storm/15 bg-deep/35 px-3 py-2;
 }
 
-.operator-console .dashboard-preview-panel,
 .operator-console .dashboard-preview-frame,
-.operator-console .dashboard-client-row,
 .operator-console .settings-subtle-surface {
   border-radius: 0.5rem;
 }
@@ -2167,70 +2152,6 @@ textarea {
   @apply rounded-2xl border border-warning/25 bg-warning/5 p-4 text-sm text-warning-bright;
 }
 
-.dashboard-live-shell {
-  @apply space-y-5;
-}
-
-.dashboard-live-header {
-  @apply flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between;
-}
-
-.dashboard-live-header-copy {
-  @apply min-w-0;
-}
-
-.dashboard-live-header-meta {
-  @apply flex flex-wrap gap-2 xl:justify-end;
-}
-
-.dashboard-live-summary-grid {
-  /* Instrument strip: bare figures over mono labels, no tile boxes. */
-  @apply flex flex-wrap items-start gap-x-10 gap-y-4;
-}
-
-.dashboard-live-summary-tile {
-  @apply flex min-w-[5.5rem] flex-col-reverse gap-1 border-0 bg-transparent p-0;
-}
-
-.dashboard-live-summary-label {
-  @apply font-mono text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
-}
-
-.dashboard-live-summary-value {
-  @apply truncate font-mono text-[1.65rem] font-bold leading-none tracking-tight tabular-nums;
-}
-
-/* One shrinkable column below xl: an implicit auto track would grow to its widest unbreakable
-   content and push the live panels past a phone's screen (enlarged text). */
-.dashboard-live-stage {
-  @apply grid grid-cols-[minmax(0,1fr)] gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.95fr)];
-  align-items: start;
-}
-
-.dashboard-live-stage.is-preview-expanded {
-  @apply xl:grid-cols-[minmax(0,1.8fr)_minmax(320px,0.85fr)];
-}
-
-.dashboard-live-stage.is-preview-hidden {
-  @apply xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,1fr)];
-}
-
-.dashboard-preview-panel {
-  @apply rounded-2xl border border-storm/20 bg-deep/35 p-4;
-}
-
-.dashboard-live-main {
-  @apply space-y-4;
-}
-
-.dashboard-preview-header {
-  @apply flex flex-col gap-3 md:flex-row md:items-start md:justify-between;
-}
-
-.dashboard-preview-actions {
-  @apply flex flex-wrap items-center gap-2 md:justify-end;
-}
-
 .dashboard-action-button {
   @apply inline-flex h-9 items-center justify-center rounded-xl px-3.5 text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
 }
@@ -2252,7 +2173,7 @@ textarea {
 }
 
 .dashboard-preview-frame {
-  @apply relative mt-4 aspect-video overflow-hidden rounded-2xl border border-storm/20 bg-void/80;
+  @apply relative aspect-video overflow-hidden rounded-2xl border border-storm/20 bg-void/80;
 }
 
 .dashboard-preview-frame.has-error {
@@ -2271,65 +2192,981 @@ textarea {
   @apply text-silver;
 }
 
-.dashboard-preview-footer {
-  @apply mt-3 space-y-3;
-}
-
 .dashboard-preview-meta {
   @apply flex flex-wrap gap-2;
-}
-
-.dashboard-live-side {
-  @apply space-y-4;
-  align-self: start;
-}
-
-.dashboard-runtime-grid {
-  @apply mt-3 grid gap-3 sm:grid-cols-2;
-}
-
-.dashboard-runtime-row {
-  @apply rounded-xl border border-storm/15 bg-void/35 px-3 py-2.5;
-}
-
-.dashboard-runtime-label {
-  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
-}
-
-.dashboard-runtime-pill-grid {
-  @apply mt-3 flex flex-wrap gap-2;
-}
-
-.dashboard-runtime-pill {
-  @apply inline-flex items-center gap-2 rounded-full border border-storm/15 bg-void/35 px-3 py-1.5;
-}
-
-.dashboard-client-row {
-  @apply flex items-center justify-between gap-3 rounded-xl border border-storm/15 bg-void/35 px-3 py-2;
-}
-
-.dashboard-live-support-grid {
-  @apply grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)];
-}
-
-.dashboard-context-card {
-  @apply space-y-4;
-}
-
-.dashboard-context-section {
-  @apply space-y-3 border-t border-storm/15 pt-4 first:border-t-0 first:pt-0;
-}
-
-.dashboard-context-header {
-  @apply flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
 }
 
 .dashboard-rail-footnote {
   @apply mt-3 text-[11px] text-storm;
 }
 
-.dashboard-telemetry-grid {
-  @apply grid gap-3 md:grid-cols-2 xl:grid-cols-3;
+/* ── Mission Control: one stage per state, then the deck ──
+   The stage is a title card: library artwork behind a stable dark scrim, the title, one main
+   action, the route and the readings on its lower edge. Every colour is a theme token, so each
+   theme keeps its own identity; Director stays near-black with no particles or glow. Component
+   rules sit in the components layer so tone utilities (text-success, text-warning-bright) still
+   colour them; the unlayered rules after it only adjust the existing unlayered dashboard rules. */
+@layer components {
+  .mc-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+
+  /* Eyebrow labels share one mono, tracked, uppercase voice; each rule sets only size and tone. */
+  .mc-stage-top,
+  .mc-kicker,
+  .mc-panel-label,
+  .mc-node-role,
+  .mc-signal-label,
+  .mc-diag-section-title {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
+  }
+
+  .mc-stage {
+    container: mc-stage / inline-size;
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    border: 1px solid var(--edge-card);
+    border-radius: 0.75rem;
+    background: var(--color-deep);
+    color: var(--color-ice);
+    box-shadow: 0 2rem 4rem -2rem rgb(0 0 0 / 0.75);
+  }
+
+  /* The stage sizes to its content. Only the loading stage holds a height, so the first report
+     does not collapse the page. */
+  .mc-stage.is-loading {
+    min-height: 18rem;
+  }
+
+  .mc-stage-art {
+    position: absolute;
+    inset: 0;
+    z-index: -2;
+    background: linear-gradient(160deg, var(--color-deep), var(--color-void));
+  }
+
+  /* A decorative copy of the cover, blurred and darkened; never a stretched poster. */
+  .mc-stage-backdrop {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scale(1.15);
+    filter: blur(32px) saturate(0.7) brightness(0.42);
+    opacity: 0;
+    transition: opacity 180ms ease;
+  }
+
+  .mc-stage-backdrop.is-loaded {
+    opacity: 1;
+  }
+
+  .mc-stage-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      linear-gradient(90deg, var(--color-void) 25%, transparent),
+      linear-gradient(0deg, var(--color-void) 5%, transparent 75%);
+    opacity: 0.92;
+  }
+
+  .mc-frame-marks {
+    display: none;
+  }
+
+  .mc-frame-marks i {
+    position: absolute;
+    width: 1rem;
+    height: 1rem;
+    border: 0 solid var(--edge-raised);
+    pointer-events: none;
+  }
+
+  .mc-frame-marks i:nth-child(-n+2) { top: 0.75rem; border-top-width: 1.5px; }
+  .mc-frame-marks i:nth-child(n+3) { bottom: 0.75rem; border-bottom-width: 1.5px; }
+  .mc-frame-marks i:nth-child(odd) { left: 0.75rem; border-left-width: 1.5px; }
+  .mc-frame-marks i:nth-child(even) { right: 0.75rem; border-right-width: 1.5px; }
+
+  .mc-stage-top {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.4rem 1rem;
+    padding: 1rem 1.25rem 0;
+    font-size: 0.75rem;
+    line-height: 1.3;
+    color: var(--color-silver);
+  }
+
+  .mc-slate {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .mc-marker {
+    flex: none;
+    width: 0.6rem;
+    height: 0.6rem;
+    border: 1.5px solid var(--color-storm);
+    border-radius: 9999px;
+  }
+
+  /* The live marker is the page's only motion: a 2.4 s pulse, static under reduced motion. */
+  .mc-marker.is-live {
+    background: var(--color-accent);
+    border-color: var(--color-accent);
+    animation: mc-live-pulse 2.4s ease-out infinite;
+  }
+
+  .mc-marker.is-unavailable {
+    border-style: dashed;
+    border-color: var(--color-warning);
+  }
+
+  .mc-marker.is-loading {
+    border-style: dotted;
+  }
+
+  /* Durations and ages keep their own case: "12 min", not "12 MIN". */
+  .mc-timecode {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.04em;
+    text-transform: none;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  /* Copy, key art and route centre on each other, so a taller route never leaves a dead band
+     above the title. */
+  .mc-stage-body {
+    flex: 1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    align-content: center;
+    gap: 1.25rem 2rem;
+    padding: 1.25rem;
+  }
+
+  .mc-keyart {
+    flex: none;
+    width: 6rem;
+    aspect-ratio: 2 / 3;
+    overflow: hidden;
+    border: 1px solid var(--edge-raised);
+    border-radius: 0.5rem;
+    background: var(--color-deep);
+    box-shadow: 0 1.25rem 2.5rem -1.25rem rgb(0 0 0 / 0.85);
+    opacity: 0;
+    transition: opacity 180ms ease;
+  }
+
+  .mc-keyart.is-loaded {
+    opacity: 1;
+  }
+
+  .mc-keyart img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .mc-stage-copy {
+    flex: 999 1 20rem;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .mc-stage-aside {
+    flex: 1 1 18rem;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .mc-kicker {
+    font-size: 0.8125rem;
+    line-height: 1.3;
+    color: var(--color-support);
+  }
+
+  /* Titles step down by length and wrap; they are never truncated. Sizes are in rem, so
+     enlarged text enlarges them too. */
+  .mc-stage-title {
+    margin: 0.45rem 0 0;
+    font-family: var(--font-sans);
+    font-size: clamp(2.25rem, 1.5rem + 3.2cqi, 4.75rem);
+    font-weight: 800;
+    line-height: 0.95;
+    letter-spacing: -0.035em;
+    color: var(--color-ice);
+    text-wrap: balance;
+    overflow-wrap: break-word;
+    hyphens: auto;
+  }
+
+  .mc-stage-title.is-full {
+    text-transform: uppercase;
+    letter-spacing: -0.04em;
+    line-height: 0.9;
+  }
+
+  .mc-stage-title.is-medium {
+    font-size: clamp(1.85rem, 1.25rem + 2.4cqi, 3.5rem);
+  }
+
+  .mc-stage-title.is-long {
+    font-size: clamp(1.5rem, 1.1rem + 1.6cqi, 2.6rem);
+    line-height: 1.05;
+  }
+
+  .mc-rule {
+    display: block;
+    width: 3rem;
+    height: 3px;
+    margin: 1rem 0 0.85rem;
+    background: var(--color-accent);
+  }
+
+  .mc-stage-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    line-height: 1.4;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  /* Each separator stays with the item before it, so a wrapped line never starts with "/". */
+  .mc-stage-meta span:not(:last-child)::after {
+    content: "/";
+    margin: 0 0.6rem;
+    color: var(--color-storm);
+  }
+
+  .mc-stage-note {
+    margin: 0.75rem 0 0;
+    max-width: 42rem;
+    font-size: 0.9375rem;
+    line-height: 1.55;
+    color: var(--color-silver);
+  }
+
+  .mc-stage-reason {
+    margin: 0.5rem 0 0;
+    max-width: 42rem;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    color: var(--color-support);
+  }
+
+  .mc-signals-loading {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.25rem), 1fr));
+    gap: 0.75rem;
+    padding: 0 1.25rem 1.25rem;
+  }
+
+  /* The live preview takes the key art's place inside the stage, only on request: the whole
+     captured frame at its own aspect ratio, never cropped, blurred or used as a backdrop. */
+  .mc-stage-preview {
+    flex: 1 1 22rem;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .mc-stage-preview.is-expanded {
+    flex-basis: 100%;
+    order: 4;
+  }
+
+  /* Route: host, then stream, then client. */
+  .mc-route {
+    min-width: 0;
+    padding: 1rem 1.1rem;
+    border: 1px solid var(--edge-raised);
+    border-radius: 0.5rem;
+    background: var(--surface-card);
+  }
+
+  .mc-panel-label {
+    font-size: 0.75rem;
+    line-height: 1.3;
+    color: var(--color-storm);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-bracket {
+    font-weight: 400;
+    color: var(--color-accent);
+  }
+
+  .mc-route-list {
+    margin: 0.85rem 0 0;
+  }
+
+  .mc-node {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1rem minmax(0, 1fr);
+    gap: 0.65rem;
+    padding-bottom: 0.85rem;
+  }
+
+  .mc-node::before {
+    content: "";
+    position: absolute;
+    top: 1.15rem;
+    bottom: 0;
+    left: 0.31rem;
+    width: 1px;
+    background: var(--edge-raised);
+  }
+
+  .mc-node:last-child {
+    padding-bottom: 0;
+  }
+
+  .mc-node:last-child::before {
+    display: none;
+  }
+
+  .mc-node-marker {
+    width: 0.65rem;
+    height: 0.65rem;
+    margin-top: 0.3rem;
+    border: 1.5px solid var(--color-silver);
+    background: var(--color-deep);
+    transform: rotate(45deg);
+  }
+
+  .mc-node.is-live .mc-node-marker {
+    border-color: var(--color-accent);
+    background: var(--color-accent);
+  }
+
+  .mc-node.is-unknown .mc-node-marker {
+    border-style: dashed;
+    border-color: var(--color-storm);
+  }
+
+  .mc-node-role {
+    font-size: 0.6875rem;
+    line-height: 1.3;
+    color: var(--color-storm);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-node-name {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0.25rem 0 0.2rem;
+    font-size: 1.05rem;
+    font-weight: 700;
+    line-height: 1.25;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-node-badge {
+    padding: 0.05rem 0.4rem;
+    border: 1px solid currentColor;
+    border-radius: 9999px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: var(--color-accent);
+  }
+
+  .mc-node-detail {
+    font-size: 0.8125rem;
+    line-height: 1.5;
+  }
+
+  .mc-node-detail + .mc-node-detail {
+    margin-top: 0.15rem;
+  }
+
+  .mc-route-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    margin-top: 1rem;
+    padding-top: 0.85rem;
+    border-top: 1px solid var(--edge-card);
+  }
+
+  /* Signal strip: compact and truthful; a missing value is a dash with its reason. */
+  /* Small supporting copy: the readable support tone, wrapping anywhere rather than overflowing. */
+  .mc-node-detail,
+  .mc-signal-sub,
+  .mc-check-detail,
+  .mc-diag-summary {
+    color: var(--color-support);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-signals-wrap {
+    position: relative;
+    border-top: 1px solid var(--edge-raised);
+    background: linear-gradient(180deg, transparent, var(--color-void) 70%);
+  }
+
+  .mc-signals {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.25rem), 1fr));
+  }
+
+  .mc-signal {
+    min-width: 0;
+    margin: -1px 0 0 -1px;
+    padding: 0.85rem 1.1rem 0.95rem;
+    border-top: 1px solid var(--edge-card);
+    border-left: 1px solid var(--edge-card);
+  }
+
+  .mc-signal-label {
+    font-size: 0.6875rem;
+    line-height: 1.25;
+    color: var(--color-storm);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-signal-value {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.15rem 0.35rem;
+    margin: 0.4rem 0 0;
+    font-size: 1.6rem;
+    font-weight: 750;
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-signal-value.is-word {
+    font-size: 1.15rem;
+    line-height: 1.2;
+    letter-spacing: 0;
+  }
+
+  .mc-signal-unit {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--color-silver);
+  }
+
+  .mc-signal-tag {
+    align-self: center;
+    padding: 0.05rem 0.35rem;
+    border: 1px solid currentColor;
+    font-family: var(--font-mono);
+    font-size: 0.625rem;
+    font-weight: 700;
+    line-height: 1.4;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  .mc-signal-sub {
+    margin: 0.35rem 0 0;
+    font-size: 0.8125rem;
+    line-height: 1.4;
+  }
+
+  .mc-signal-spark {
+    margin: 0.45rem 0 0;
+  }
+
+  /* The deck: the Doctor note or the recent titles, then Diagnostics, with controls beside. */
+  .mc-deck {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+
+  .mc-deck-main {
+    display: flex;
+    flex: 999 1 34rem;
+    flex-direction: column;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+
+  .mc-deck-side {
+    display: flex;
+    flex: 1 1 20rem;
+    flex-direction: column;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+
+  .mc-panel {
+    position: relative;
+    min-width: 0;
+    padding: 1.1rem 1.25rem;
+    border: 1px solid var(--edge-card);
+    border-radius: 0.75rem;
+    background: var(--surface-card);
+  }
+
+  .mc-doctor-headline {
+    font-size: 1.25rem;
+    font-weight: 700;
+    line-height: 1.3;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-film {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 8.5rem), 1fr));
+    gap: 0.85rem;
+    margin-top: 1rem;
+  }
+
+  .mc-film-name {
+    font-size: 0.9375rem;
+    font-weight: 700;
+    line-height: 1.25;
+    color: var(--color-silver);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-film-source {
+    margin-top: 0.2rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.3;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-storm);
+    overflow-wrap: anywhere;
+  }
+
+  /* Diagnostics: one disclosure, its summary readable while closed. */
+  .mc-diag {
+    min-width: 0;
+    border: 1px solid var(--edge-card);
+    border-radius: 0.75rem;
+    background: var(--surface-card);
+  }
+
+  .mc-diag-toggle {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.35rem 1rem;
+    width: 100%;
+    min-height: 2.75rem;
+    padding: 0.9rem 1.25rem;
+    border: 0;
+    border-radius: 0.75rem;
+    background: transparent;
+    color: var(--color-ice);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .mc-diag-toggle:hover {
+    background: var(--surface-raised);
+  }
+
+  .mc-diag-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    font-size: 1rem;
+    font-weight: 700;
+    line-height: 1.3;
+  }
+
+  .mc-diag-chevron {
+    flex: none;
+    width: 1rem;
+    height: 1rem;
+    transition: transform 180ms ease;
+  }
+
+  .mc-diag-toggle[aria-expanded="true"] .mc-diag-chevron {
+    transform: rotate(180deg);
+  }
+
+  .mc-diag-summary {
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    line-height: 1.45;
+  }
+
+  .mc-diag-body {
+    padding: 0.25rem 1.25rem 1.35rem;
+    border-top: 1px solid var(--edge-card);
+  }
+
+  .mc-diag-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+    gap: 1.25rem 1.75rem;
+  }
+
+  .mc-diag-wide {
+    grid-column: 1 / -1;
+  }
+
+  .mc-diag-section-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.25rem 1rem;
+  }
+
+  .mc-diag-section-title {
+    margin: 0.9rem 0 0.55rem;
+    font-size: 0.75rem;
+    line-height: 1.3;
+    color: var(--color-storm);
+  }
+
+  .mc-inline-link {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--color-ice);
+    text-decoration: underline;
+    text-decoration-color: var(--edge-raised);
+    text-underline-offset: 0.25em;
+  }
+
+  /* Rows wrap as label and value pairs; the value drops below the label when it must. */
+  .mc-kv {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    font-size: 0.875rem;
+  }
+
+  .mc-kv > div {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.1rem 1rem;
+  }
+
+  .mc-kv dt {
+    flex: 1 1 7rem;
+    min-width: 0;
+    color: var(--color-support);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-kv dd {
+    flex: 0 1 auto;
+    max-width: 100%;
+    margin: 0 0 0 auto;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    text-align: right;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  /* Launch checks wrap as badge plus name, with the detail below. */
+  .mc-checks {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+    gap: 0.6rem;
+  }
+
+  .mc-check {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.25rem 0.6rem;
+    min-height: 2.75rem;
+    padding: 0.7rem 0.85rem;
+    border: 1px solid var(--edge-card);
+    border-radius: 0.6rem;
+  }
+
+  .mc-check-state {
+    flex: none;
+    padding: 0.1rem 0.45rem;
+    border-radius: 9999px;
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .mc-check-name {
+    flex: 1 1 6rem;
+    min-width: 0;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    color: var(--color-silver);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-check-detail {
+    flex: 1 1 100%;
+    font-size: 0.8125rem;
+    line-height: 1.45;
+  }
+
+  .mc-check-link {
+    flex: 1 1 100%;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--color-ice);
+  }
+
+  .mc-history {
+  }
+
+  .mc-history li {
+    display: grid;
+    grid-template-columns: 2rem minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.6rem 0;
+    border-top: 1px solid var(--edge-card);
+    font-size: 0.875rem;
+  }
+
+  .mc-history li:first-child {
+    border-top: 0;
+  }
+
+  .mc-history-grade {
+    display: grid;
+    width: 2rem;
+    height: 2rem;
+    place-items: center;
+    border: 1px solid var(--edge-raised);
+    font-weight: 800;
+  }
+
+  .mc-history-who {
+    display: block;
+    font-weight: 600;
+    color: var(--color-silver);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-history-detail,
+  .mc-history-when {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.45;
+    color: var(--color-support);
+  }
+
+  .mc-history-when {
+    text-align: right;
+  }
+
+  @container mc-stage (min-width: 40rem) {
+    .mc-stage-top {
+      padding: 1.25rem 2rem 0;
+    }
+
+    .mc-stage-body {
+      padding: 1.75rem 2rem 1.5rem;
+    }
+
+    /* Capped and framed, so a bright cover never outshines the title. */
+    .mc-keyart {
+      width: clamp(6.5rem, 12cqi, 9rem);
+    }
+
+    .mc-signals-loading {
+      padding: 0 2rem 1.5rem;
+    }
+  }
+
+  /* The key art sits beside the copy on a wide stage, the route at the far edge. */
+  @container mc-stage (min-width: 52rem) {
+    .mc-keyart {
+      order: 2;
+    }
+
+    .mc-stage-preview:not(.is-expanded) {
+      order: 2;
+      max-width: 36rem;
+    }
+
+    .mc-stage-aside {
+      order: 3;
+    }
+  }
+
+  /* Wide enough for copy, key art and route on one line: the route keeps a reading width. */
+  @container mc-stage (min-width: 56rem) {
+    .mc-stage-aside {
+      max-width: 26rem;
+    }
+  }
+
+  @container mc-stage (min-width: 48rem) {
+    .mc-frame-marks {
+      display: block;
+    }
+  }
+
+  /* Short landscape: a compact stage that starts at the top. */
+  @media (max-height: 500px) {
+    .mc-stage {
+      min-height: 0;
+    }
+
+    .mc-stage-body {
+      align-items: flex-start;
+      align-content: flex-start;
+      padding-top: 1rem;
+    }
+
+    .mc-signals,
+    .mc-signals-loading {
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 7.5rem), 1fr));
+    }
+  }
+
+  /* A mid-width stage reads its six readings as three and three rather than four and two. */
+  @container mc-stage (min-width: 30rem) and (max-width: 55.99rem) {
+    .mc-signals {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+  }
+
+  @keyframes mc-live-pulse {
+    0% { box-shadow: 0 0 0 0 var(--color-accent); }
+    70%, 100% { box-shadow: 0 0 0 0.5rem transparent; }
+  }
+}
+
+/* Adjustments to the existing unlayered dashboard rules inside Mission Control. */
+/* Director's greeting replaces the console subtitle, whose 13 px size would not grow with
+   enlarged text; the greeting is sized in rem so it does. Only on a narrow shell with enlarged text
+   does the width cap apply, so "Congratulations," stays one whole word on a 360 px phone. */
+.operator-console .page-subtitle.mc-greeting {
+  font-size: min(clamp(1.15rem, 1rem + 0.8cqi, 1.6rem), 9cqi);
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--color-ice);
+  overflow-wrap: break-word;
+}
+
+.mission-control-view .dashboard-action-button {
+  height: auto;
+  min-height: 2.25rem;
+  max-width: 100%;
+  padding-block: 0.45rem;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.mc-stage-actions .dashboard-action-button {
+  min-height: 2.75rem;
+  padding: 0.6rem 1.1rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.mc-film .dashboard-play-tile > .min-w-0 {
+  margin-bottom: 0.6rem;
+}
+
+/* Disconnect is the page's one destructive action: a salmon outline, never the loudest fill. */
+.mission-control-view .mc-action-danger {
+  border: 1px solid var(--color-danger);
+  background: transparent;
+  color: var(--color-danger);
+}
+
+.mission-control-view .mc-action-danger:hover {
+  background: var(--surface-raised);
+}
+
+.mc-film .poster-image {
+  width: 100%;
+}
+
+/* Coarse pointers get 44 px targets for every Mission Control action, including the controls the
+   page hosts (Spaces, Quick Controls) and the links inside its panels. */
+@media (pointer: coarse) {
+  .mission-control-view :is(.dashboard-action-button, .dashboard-play-launch, .dashboard-degraded-action, .mc-inline-link, .mc-docs-link a, .mc-deck-side a[href]) {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .mission-control-view :is(.dashboard-action-button, .dashboard-play-launch, .dashboard-degraded-action, .mc-inline-link, .mc-docs-link a, .mc-deck-side a[href], [data-dashboard-idle-vitals] > summary, .mc-deck-side button, .mc-deck-side [role="switch"]) {
+    min-height: 2.75rem;
+    touch-action: manipulation;
+  }
+
+  .mission-control-view :is(.mc-docs-link a, .mc-deck-side a[href]) {
+    min-width: 2.75rem;
+  }
+}
+
+/* The global reduced-motion rule already stills transitions; the live marker stops pulsing too. */
+@media (prefers-reduced-motion: reduce) {
+  .mc-marker.is-live {
+    animation: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .mc-stage,
+  .mc-route,
+  .mc-signal,
+  .mc-panel,
+  .mc-diag {
+    border: 1px solid CanvasText;
+  }
+
+  .mc-marker,
+  .mc-node-marker {
+    forced-color-adjust: none;
+  }
 }
 
 /* Status copy and controls must stay inside their cards when text is enlarged. */
@@ -2552,14 +3389,8 @@ textarea {
     -webkit-backdrop-filter: none;
   }
 
-  .dashboard-live-shell,
-  .dashboard-preview-panel,
-  .dashboard-live-summary-tile {
+  .mc-stage {
     box-shadow: none;
-  }
-
-  .dashboard-telemetry-grid {
-    @apply grid-cols-2;
   }
 }
 

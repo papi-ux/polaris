@@ -124,6 +124,8 @@ for (const width of [390, 1280]) {
     await page.setViewportSize({ width, height: 960 })
     await mockHost(page)
     await page.goto('/#/')
+    // Issue #408 moved stream pacing into Mission Control's Diagnostics disclosure; open it first.
+    await page.getByRole('button', { name: 'Diagnostics', exact: true }).click()
     const pacing = page.locator('[data-stream-pacing-readout]')
     await expect(pacing).toContainText('Source-paced')
     const capture = page.locator('.meta-pill').filter({ hasText: /^CPU Copy$/ }).first()

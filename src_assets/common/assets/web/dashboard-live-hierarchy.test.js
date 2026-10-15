@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { liveSignalCells } from './mission-control.js'
 
 function webSource(relativePath) {
   return readFileSync(join(process.cwd(), 'src_assets/common/assets/web', relativePath), 'utf8')
@@ -15,17 +16,21 @@ function expectBefore(source, first, second) {
 }
 
 describe('DashboardView hierarchy', () => {
-  it('starts live mode with one metrics strip, then the Doctor verdict, then the preview', () => {
+  it('leads live mode with the stage and its opt-in preview, then one readings strip, then the Doctor note', () => {
     const dashboard = webSource('views/DashboardView.vue')
 
-    expectBefore(dashboard, 'dashboard-live-summary-grid', 'data-dashboard-doctor')
-    expectBefore(dashboard, 'data-dashboard-doctor', 'dashboard-preview-panel')
+    // Issue #408 deliberately reorders this (it was strip, Doctor, preview): the preview now
+    // replaces the artwork inside the stage on request, the strip runs along the stage's lower
+    // edge, and the Doctor note follows the stage.
+    expectBefore(dashboard, '<MissionStage', 'data-start-preview')
+    expectBefore(dashboard, 'data-start-preview', 'dashboard-preview-frame')
+    expectBefore(dashboard, 'dashboard-preview-frame', '<SignalStrip')
+    expectBefore(dashboard, '<SignalStrip', 'data-dashboard-doctor')
 
-    // The strip says each stream number exactly once; path and runtime moved
-    // to chips and the session context rail.
-    for (const label of ['Quality', 'Latency', 'FPS', 'Loss', 'Bitrate', 'Encode']) {
-      expect(dashboard).toContain(`data-live-summary-metric="${label}"`)
-    }
+    // The strip says each stream number exactly once; path and runtime are on the route.
+    const metrics = liveSignalCells({ stats: { streaming: true } }).map(cell => cell.attrs['data-live-summary-metric'])
+    expect(metrics).toEqual(['Quality', 'Latency', 'FPS', 'Loss', 'Bitrate', 'Encode'])
+    expect(webSource('components/SignalStrip.vue')).toContain('v-bind="cell.attrs"')
     expect(dashboard).not.toContain('data-live-summary-metric="Capture path"')
     expect(dashboard).not.toContain('data-live-summary-metric="Runtime mode"')
   })

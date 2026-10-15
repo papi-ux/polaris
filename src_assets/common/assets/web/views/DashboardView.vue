@@ -1,6 +1,6 @@
 <template>
   <div class="page-shell operator-console mission-control-view relative">
-    <p class="-mt-3 text-right text-xs text-storm" data-tab-docs-link>
+    <p class="mc-docs-link -mt-3 text-right text-xs text-storm" data-tab-docs-link>
       <a href="https://papi-ux.com/docs/mission-control/" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ t('dashboard.docs_link') }}</a>
     </p>
 
@@ -9,515 +9,439 @@
         <div class="section-title-row">
           <h1 class="page-title">{{ $t('dashboard.title') }}</h1>
         </div>
-        <div class="page-subtitle">{{ actionSummary }}</div>
+        <!-- Director's own greeting is its exact theme name; every other theme keeps the summary. -->
+        <p v-if="directorGreeting" class="page-subtitle mc-greeting" data-director-greeting><span class="mc-bracket">&lt;</span> {{ directorGreeting }} <span class="mc-bracket">&gt;</span></p>
+        <div v-else class="page-subtitle">{{ actionSummary }}</div>
       </div>
       <div class="page-meta" role="status" aria-live="polite" aria-atomic="true">
-        <span v-if="stats?.streaming" class="pulse-dot"></span>
-        <span class="meta-pill" :class="stats?.streaming ? 'border-success/30 bg-success/10 text-success' : ''">
-          {{ dashboardSpaces.hasActivity ? $t('dashboard_spaces.active_title') : stats?.streaming ? $t('dashboard.live') : $t('dashboard.standby') }}
+        <span v-if="stats?.streaming && !streamStatusIsUnavailable" class="pulse-dot"></span>
+        <span class="meta-pill" :class="stats?.streaming && !streamStatusIsUnavailable ? 'border-success/30 bg-success/10 text-success' : ''">
+          {{ streamStatusIsUnavailable ? t('mission_control.status_unavailable') : stageMode === 'loading' ? t('mission_control.connecting') : dashboardSpaces.hasActivity ? $t('dashboard_spaces.active_title') : stats?.streaming ? $t('dashboard.live') : $t('dashboard.standby') }}
         </span>
       </div>
     </section>
 
     <DashboardSpaces v-if="hostPlatform === 'linux' && dashboardSpaces.visible" :model="dashboardSpaces" :loading="spacesLoading" @refresh="refreshSpaces" />
 
-    <!-- Loading skeleton state -->
-    <template v-if="!statsLoaded">
-      <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Skeleton type="card" v-for="n in 4" :key="n" />
-      </div>
-    </template>
+    <div class="mc-shell" :class="{ 'dashboard-live-shell': stageMode === 'live', 'is-preview-expanded': stageMode === 'live' && showPreview && previewExpanded }">
+      <!-- The stage: what is playing (or next up), its main action, the route, then the readings.
+           Space sessions keep their own section above and no stage. -->
+      <MissionStage
+        v-if="stageMode !== 'spaces'"
+        :mode="stageMode"
+        :data-dashboard-idle-hero="stageMode === 'idle' ? '' : undefined"
+        :slate="stageView.slate"
+        :timecode="stageView.timecode"
+        :kicker="stageView.kicker"
+        :title="stageView.title"
+        :meta="stageView.meta"
+        :note="stageView.note"
+        :note-tone="stageView.noteTone"
+        :art-src="stageView.artSrc"
+        :hide-art="stageMode === 'live' && showPreview"
+        :preview-expanded="previewExpanded"
+      >
+        <template v-if="stageMode === 'live' || stageMode === 'idle'" #reason>
+          <!-- Only a blocked preview needs a reason; the stage note already says it starts on request. -->
+          <p v-if="stageMode === 'live' && !showPreview && spacesPreviewBlocked" id="dashboard-preview-blocked-reason" class="mc-stage-reason" data-preview-hidden-reason>{{ $t('dashboard_spaces.no_preview') }}</p>
+          <p v-if="stageMode === 'idle' && featuredApp && !currentAppAvailable" id="mission-stage-launch-reason" class="mc-stage-reason">Waiting for current app status.</p>
+        </template>
 
-    <template v-else-if="stats?.streaming">
-      <section class="section-card gradient-border-top gradient-border-top-accent dashboard-live-shell" :class="{ 'is-preview-expanded': showPreview && previewExpanded }">
-        <div class="dashboard-live-header">
-          <div class="dashboard-live-header-copy">
-            <div class="section-kicker">{{ dashboardSpaces.hasActivity ? $t('dashboard_spaces.host_telemetry') : $t('dashboard.live_session') }}</div>
-            <div class="section-title-row">
-              <h2 class="section-title">{{ liveSessionTitle }}</h2>
-            </div>
-            <div v-if="currentAppName || sessionDurationLabel" class="mt-1.5 font-mono text-[11px] text-storm">
-              <template v-if="currentAppName">{{ currentAppName }}</template><template v-if="currentAppName && sessionDurationLabel"> · </template><template v-if="sessionDurationLabel">{{ sessionDurationLabel }}</template>
-            </div>
-          </div>
-          <div class="dashboard-live-header-meta">
-            <span class="meta-pill">{{ viewerCountLabel }}</span>
-            <span class="meta-pill" :class="captureGpuNativeTone">{{ capturePathLabel }}</span>
-          </div>
-        </div>
+        <template v-if="stageMode !== 'loading'" #actions>
+          <template v-if="stageMode === 'live'">
+            <button v-if="!showPreview" :disabled="spacesPreviewBlocked || previewStarting" :aria-describedby="spacesPreviewBlocked ? 'dashboard-preview-blocked-reason' : undefined" data-start-preview @click="showPreviewFromStage" class="focus-ring dashboard-action-button dashboard-action-button-primary disabled:cursor-not-allowed disabled:opacity-50">
+              {{ $t('dashboard.show_display') }}
+            </button>
+            <template v-else>
+              <button type="button" class="focus-ring dashboard-action-button dashboard-action-button-primary" data-stop-preview @click="hidePreviewFromStage">
+                {{ $t('dashboard.hide_display') }}
+              </button>
+              <button type="button" class="focus-ring dashboard-action-button dashboard-action-button-ghost" :aria-pressed="previewExpanded ? 'true' : 'false'" @click="togglePreviewExpanded">
+                {{ previewExpanded ? $t('dashboard.collapse_display') : $t('dashboard.expand_display') }}
+              </button>
+            </template>
+            <button type="button" class="focus-ring dashboard-action-button dashboard-action-button-ghost" data-open-diagnostics @click="openDiagnostics">
+              {{ t('mission_control.session_diagnostics') }}
+            </button>
+          </template>
+          <template v-else-if="stageMode === 'idle'">
+            <!-- A launch check that needs attention outranks Launch, so a warning is never behind a disclosure. -->
+            <router-link v-if="readyCheckDisplay.primaryIssue" :to="readyCheckDisplay.primaryIssue.to" class="focus-ring dashboard-action-button dashboard-action-button-primary no-underline" data-stage-priority-fix>
+              {{ $t('dashboard.open_priority_fix') }}
+            </router-link>
+            <button
+              v-if="featuredApp"
+              type="button"
+              class="focus-ring dashboard-action-button"
+              :class="readyCheckDisplay.primaryIssue ? 'dashboard-action-button-ghost' : 'dashboard-action-button-primary'"
+              :aria-label="t('mission_control.launch_title', { name: featuredApp.app.name })"
+              :aria-disabled="!currentAppAvailable || Boolean(launchingUuid) ? 'true' : undefined"
+              :aria-describedby="!currentAppAvailable ? 'mission-stage-launch-reason' : undefined"
+              data-stage-launch
+              @click="launchRecentApp(featuredApp.app)"
+            >
+              {{ launchingUuid === featuredApp.app.uuid ? $t('dashboard.launching') : $t('dashboard.launch') }}
+            </button>
+            <router-link to="/apps" class="focus-ring dashboard-action-button no-underline" :class="featuredApp || readyCheckDisplay.primaryIssue ? 'dashboard-action-button-ghost' : 'dashboard-action-button-primary'">
+              {{ $t('navbar.library') }}
+            </router-link>
+          </template>
+          <router-link v-else to="/troubleshooting" class="focus-ring dashboard-action-button dashboard-action-button-primary no-underline" data-stage-troubleshoot>
+            {{ $t('navbar.troubleshoot') }}
+          </router-link>
+        </template>
 
-        <!-- Instrument cluster: figure, label, and trend per metric; the old
-             Live stream trends drawer lives here now as sparklines. -->
-        <section class="dashboard-live-summary-grid" role="status" aria-live="polite" aria-atomic="true" aria-label="Live stream telemetry summary">
-          <div class="dashboard-live-summary-tile dashboard-live-summary-tile-primary" data-live-summary-metric="Quality">
-            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="qualityChartEl"></div>
-            <div class="dashboard-live-summary-label">Quality</div>
-            <div class="flex items-center gap-2">
-              <span class="dashboard-grade-badge" :class="liveSummary.qualityTone">{{ qualityGrade }}</span>
-              <span class="dashboard-live-summary-value" :class="liveSummary.qualityTone">{{ qualityScore }}</span>
-            </div>
-          </div>
-          <div class="dashboard-live-summary-tile" data-live-summary-metric="Latency">
-            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="latencyChartEl"></div>
-            <div class="dashboard-live-summary-label">Latency</div>
-            <div class="dashboard-live-summary-value" :class="liveSummary.latencyTone">{{ liveSummary.latency }}</div>
-          </div>
-          <div class="dashboard-live-summary-tile" data-live-summary-metric="FPS">
-            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="fpsChartEl"></div>
-            <div class="dashboard-live-summary-label">FPS</div>
-            <div class="dashboard-live-summary-value" :class="liveSummary.fpsTone">{{ liveSummary.fps }}</div>
-          </div>
-          <div class="dashboard-live-summary-tile" data-live-summary-metric="Loss">
-            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="lossChartEl"></div>
-            <div class="dashboard-live-summary-label">Loss</div>
-            <div class="dashboard-live-summary-value" :class="liveSummary.lossTone" :title="liveSummary.lossTitle">{{ liveSummary.loss }}</div>
-          </div>
-          <div class="dashboard-live-summary-tile" data-live-summary-metric="Bitrate">
-            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="bitrateChartEl"></div>
-            <div class="dashboard-live-summary-label">Bitrate</div>
-            <div class="dashboard-live-summary-value text-silver">{{ liveSummary.bitrate }}</div>
-          </div>
-          <div class="dashboard-live-summary-tile" data-live-summary-metric="Encode">
-            <div v-if="!prefersReducedMotion" class="dashboard-strip-spark" ref="encodeChartEl"></div>
-            <div class="dashboard-live-summary-label">Encode</div>
-            <div class="dashboard-live-summary-value text-silver">{{ stats.encode_time_ms?.toFixed(1) || '--' }} ms</div>
-          </div>
-          <div class="ml-auto flex flex-col items-end justify-end gap-1.5 self-end" data-dashboard-frame-health>
-            <div class="flex flex-wrap justify-end gap-1.5">
-              <span class="data-pill" :class="frameHealth.droppedTone">{{ frameHealth.dropped }} dropped</span>
-              <span class="data-pill" :class="frameHealth.duplicateTone">{{ frameHealth.duplicate }} duped</span>
-              <span class="data-pill" :class="frameHealth.intervalErrorTone">{{ frameHealth.intervalError }} target interval error</span>
-            </div>
-            <span v-if="prefersReducedMotion" class="font-mono text-[10px] text-storm">Live charts are paused while reduced motion is enabled.</span>
-          </div>
-        </section>
+        <template v-if="stageMode !== 'loading'" #aside>
+          <RoutePanel v-if="stageMode === 'live'" :title="t('mission_control.route')" :nodes="liveRouteNodes">
+            <template #foot>
+              <span class="meta-pill">{{ viewerCountLabel }}</span>
+              <button
+                v-if="connectedClientUuid"
+                type="button"
+                :disabled="disconnectingClient"
+                @click="disconnectConfirmOpen = true"
+                class="focus-ring dashboard-action-button mc-action-danger disabled:cursor-wait disabled:opacity-70"
+                data-disconnect-client
+              >
+                {{ $t('dashboard.disconnect_client') }}
+              </button>
+            </template>
+          </RoutePanel>
+          <RoutePanel v-else-if="stageMode === 'idle'" :title="t('mission_control.host')" :nodes="idleRouteNodes">
+            <template #foot>
+              <template v-if="readinessSources.config === 'ready'">
+                <span class="meta-pill">{{ discoveryEnabled ? t('mission_control.discovery_on') : t('mission_control.discovery_off') }}</span>
+                <span class="meta-pill">{{ pairingEnabled ? t('mission_control.pairing_open') : t('mission_control.pairing_closed') }}</span>
+              </template>
+              <button type="button" class="focus-ring dashboard-action-button dashboard-action-button-ghost" :disabled="refreshingReadiness" @click="refreshLaunchChecks">{{ $t('dashboard.refresh_checks') }}</button>
+            </template>
+          </RoutePanel>
+          <RoutePanel v-else :title="t('mission_control.route')" :nodes="unavailableRouteNodes" />
+        </template>
 
-        <StreamPacingReadout :stats="stats || {}" :connected="streamStatsConnected" :observed-at="streamStatsReceivedAt" />
-
-        <!-- Doctor: the host's own per-second diagnosis replaces the old
-             Auto Quality panel, stream-path notices, and priority guidance. -->
-        <section class="dashboard-doctor-card" :class="doctorPanelClass" data-dashboard-doctor>
-          <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-            <div class="min-w-0">
-              <div class="section-kicker">{{ $t('dashboard.doctor') }}</div>
-              <div class="mt-2 flex min-w-0 items-start gap-2">
-                <span class="mt-1.5 inline-block h-2.5 w-2.5 shrink-0 rounded-full" :class="doctorLightClass" aria-hidden="true"></span>
-                <h3 class="text-xl font-semibold leading-tight text-silver">{{ doctorHeadline }}</h3>
+        <!-- The live display replaces the artwork only when the viewer asks for it. -->
+        <template v-if="stageMode === 'live' && showPreview" #preview>
+          <div class="dashboard-preview-frame" :class="{ 'has-error': previewError, 'is-expanded': previewExpanded }" data-stage-preview-frame>
+            <img
+              :src="previewUrl"
+              :alt="t('mission_control.preview_alt')"
+              class="dashboard-preview-image"
+              :class="{ 'opacity-0': !previewLoaded || previewError }"
+              @load="handlePreviewLoad"
+              @error="handlePreviewError"
+            />
+            <div v-if="!previewLoaded && !previewError" class="dashboard-preview-overlay" role="status" aria-live="polite">
+              <svg class="h-7 w-7 animate-spin text-storm" fill="none" viewBox="0 0 24 24" aria-hidden="true">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+              </svg>
+              <span>{{ $t('dashboard.preview_capturing') }}</span>
+            </div>
+            <div v-if="previewError" class="dashboard-preview-overlay dashboard-preview-overlay-error" role="alert">
+              <div class="text-sm font-medium text-silver">{{ $t('dashboard.preview_error') }}</div>
+              <button @click="retryPreviewNow" class="focus-ring dashboard-action-button dashboard-action-button-secondary">
+                {{ $t('dashboard.preview_retry') }}
+              </button>
+            </div>
+            <span v-if="previewLoaded && !previewError" class="dashboard-preview-live-badge">
+              <span class="text-success" aria-hidden="true">●</span>
+              {{ previewMode === 'mjpeg' ? 'LIVE' : 'PREVIEW' }}
+            </span>
+            <!-- Stream facts ride the stage as overlays instead of chrome around it. -->
+            <div v-if="previewLoaded && !previewError" class="dashboard-preview-hud">
+              <div class="dashboard-preview-meta">
+                <span v-if="streamFormat" class="data-pill">{{ streamFormat }}</span>
+                <span v-if="hdrChipLabel" class="data-pill text-accent-2" :title="stats.hdr_downgrade_message || ''">{{ hdrChipLabel }}</span>
+                <span class="data-pill">{{ capturePathLabel }}</span>
               </div>
-              <div class="mt-3 flex flex-wrap items-center gap-2" data-dashboard-doctor-meta role="list" aria-label="Doctor confidence and Live Tuning status">
-                <div v-if="doctorConfidenceLabel" class="control-chip" role="listitem">{{ doctorConfidenceLabel }}</div>
-                <div class="meta-pill" :class="autoQuality.toneClass" role="listitem">{{ autoQuality.compactLabel }}</div>
-                <div class="inline-flex" role="listitem">
+              <span class="dashboard-preview-hud-status">{{ previewStatusText }}</span>
+            </div>
+          </div>
+        </template>
+
+        <template #signals>
+          <div v-if="stageMode === 'loading'" class="mc-signals-loading" aria-hidden="true">
+            <Skeleton type="card" v-for="n in 4" :key="n" />
+          </div>
+          <SignalStrip
+            v-else-if="stageMode === 'live'"
+            aria-label="Live stream telemetry summary"
+            :cells="liveCells"
+            charts
+            :prefers-reduced-motion="prefersReducedMotion"
+            :history="chartHistory"
+            :history-revision="historyRevision"
+          />
+          <SignalStrip v-else-if="stageMode === 'idle'" :aria-label="t('mission_control.idle_signals_label')" :cells="idleCells" />
+          <SignalStrip v-else :aria-label="t('mission_control.unavailable_signals_label')" :cells="unavailableCells" />
+        </template>
+      </MissionStage>
+
+      <div v-if="stageMode !== 'loading'" class="mc-deck">
+        <div class="mc-deck-main">
+          <!-- Doctor: the host's own per-second diagnosis, written as a note with its guarded fix. -->
+          <section v-if="stageMode === 'live'" class="dashboard-doctor-card mc-panel mc-doctor" :class="doctorPanelClass" data-dashboard-doctor>
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div class="min-w-0">
+                <h3 class="mc-panel-label"><span class="mc-bracket" aria-hidden="true">&lt;</span> {{ $t('dashboard.doctor') }} <span class="mc-bracket" aria-hidden="true">&gt;</span></h3>
+                <div class="mt-2 flex min-w-0 items-start gap-2">
+                  <span class="mt-2 inline-block h-2.5 w-2.5 shrink-0 rounded-full" :class="doctorLightClass" aria-hidden="true"></span>
+                  <p class="mc-doctor-headline">{{ doctorHeadline }}</p>
                 </div>
+                <div class="mt-3 flex flex-wrap items-center gap-2" data-dashboard-doctor-meta role="list" aria-label="Doctor confidence and Live Tuning status">
+                  <div v-if="doctorConfidenceLabel" class="control-chip" role="listitem">{{ doctorConfidenceLabel }}</div>
+                  <div class="meta-pill" :class="autoQuality.toneClass" role="listitem">{{ autoQuality.compactLabel }}</div>
+                  <div class="inline-flex" role="listitem">
+                  </div>
+                </div>
+                <p v-if="doctorRecommendation" class="mt-3 max-w-3xl text-sm leading-relaxed text-support">{{ doctorRecommendation }}</p>
+                <p v-if="doctorExplanation" class="mt-3 max-w-3xl rounded-lg border border-accent/20 bg-accent/5 px-3 py-2 text-sm leading-relaxed text-silver">
+                  {{ doctorExplanation }}
+                </p>
               </div>
-              <p v-if="doctorRecommendation" class="mt-2 max-w-3xl text-sm leading-relaxed text-support">{{ doctorRecommendation }}</p>
-              <p v-if="doctorExplanation" class="mt-3 max-w-3xl rounded-lg border border-accent/20 bg-accent/5 px-3 py-2 text-sm leading-relaxed text-silver">
-                {{ doctorExplanation }}
-              </p>
+              <div class="flex shrink-0 flex-wrap items-center gap-2">
+                <button
+                  v-if="doctorSafeAction && doctorActionExecutable"
+                  type="button"
+                  class="focus-ring dashboard-action-button dashboard-action-button-secondary disabled:cursor-wait disabled:opacity-70"
+                  :disabled="doctorActionPending"
+                  @click="requestDoctorSafeAction"
+                >
+                  {{ doctorActionPending ? $t('dashboard.doctor_action_working') : doctorSafeAction.label }}
+                </button>
+                <span v-else-if="doctorSafeAction" class="dashboard-doctor-advice" :title="doctorSafeAction.rollback || ''">
+                  Suggested: {{ doctorSafeAction.label }}
+                </span>
+                <button
+                  v-if="aiStatus?.enabled && doctor"
+                  type="button"
+                  class="focus-ring dashboard-action-button dashboard-action-button-ghost disabled:cursor-wait disabled:opacity-70"
+                  :disabled="doctorExplainPending"
+                  @click="explainDoctorVerdict"
+                >
+                  {{ doctorExplainPending ? $t('dashboard.doctor_explaining') : $t('dashboard.doctor_explain') }}
+                </button>
+                <button
+                  v-if="doctorActionUndoAvailable"
+                  type="button"
+                  class="focus-ring dashboard-action-button dashboard-action-button-ghost disabled:cursor-wait disabled:opacity-70"
+                  :disabled="doctorActionPending"
+                  @click="undoDoctorAction"
+                >
+                  {{ $t('dashboard.doctor_action_undo') }}
+                </button>
+              </div>
             </div>
-            <div class="flex shrink-0 flex-wrap items-center gap-2 lg:justify-end">
-              <button
-                v-if="doctorSafeAction && doctorActionExecutable"
-                type="button"
-                class="focus-ring dashboard-action-button dashboard-action-button-secondary disabled:cursor-wait disabled:opacity-70"
-                :disabled="doctorActionPending"
-                @click="requestDoctorSafeAction"
-              >
-                {{ doctorActionPending ? $t('dashboard.doctor_action_working') : doctorSafeAction.label }}
-              </button>
-              <span v-else-if="doctorSafeAction" class="dashboard-doctor-advice" :title="doctorSafeAction.rollback || ''">
-                Suggested: {{ doctorSafeAction.label }}
-              </span>
-              <button
-                v-if="aiStatus?.enabled && doctor"
-                type="button"
-                class="focus-ring dashboard-action-button dashboard-action-button-ghost disabled:cursor-wait disabled:opacity-70"
-                :disabled="doctorExplainPending"
-                @click="explainDoctorVerdict"
-              >
-                {{ doctorExplainPending ? $t('dashboard.doctor_explaining') : $t('dashboard.doctor_explain') }}
-              </button>
-              <button
-                v-if="doctorActionUndoAvailable"
-                type="button"
-                class="focus-ring dashboard-action-button dashboard-action-button-ghost disabled:cursor-wait disabled:opacity-70"
-                :disabled="doctorActionPending"
-                @click="undoDoctorAction"
-              >
+            <p v-if="doctorActionStatus" class="mt-3 text-xs leading-relaxed text-storm" role="status" aria-live="polite">
+              {{ doctorActionStatus }}
+            </p>
+          </section>
+
+          <!-- Without a current report Doctor waits instead of judging old numbers; an applied fix can still be undone. -->
+          <section v-else-if="stageMode === 'unavailable'" class="mc-panel mc-doctor is-waiting" data-dashboard-doctor-waiting>
+            <h3 class="mc-panel-label"><span class="mc-bracket" aria-hidden="true">&lt;</span> {{ $t('dashboard.doctor') }} <span class="mc-bracket" aria-hidden="true">&gt;</span></h3>
+            <p class="mc-doctor-headline mt-2">{{ t('mission_control.doctor_waiting_title') }}</p>
+            <p class="mt-2 max-w-3xl text-sm leading-relaxed text-support">{{ t('mission_control.doctor_waiting_body') }}</p>
+            <div v-if="doctorActionUndoAvailable" class="mt-3 flex shrink-0 flex-wrap items-center gap-2">
+              <button type="button" class="focus-ring dashboard-action-button dashboard-action-button-ghost disabled:cursor-wait disabled:opacity-70" :disabled="doctorActionPending" @click="undoDoctorAction">
                 {{ $t('dashboard.doctor_action_undo') }}
               </button>
             </div>
-          </div>
-          <p v-if="doctorActionStatus" class="mt-3 text-xs leading-relaxed text-storm" role="status" aria-live="polite">
-            {{ doctorActionStatus }}
-          </p>
-        </section>
+            <p v-if="doctorActionStatus" class="mt-3 text-xs leading-relaxed text-storm" role="status" aria-live="polite">{{ doctorActionStatus }}</p>
+          </section>
 
-        <div class="dashboard-live-stage" :class="{ 'is-preview-expanded': showPreview && previewExpanded, 'is-preview-hidden': !showPreview }">
-          <div class="dashboard-live-main">
-            <section class="dashboard-preview-panel">
-              <div class="dashboard-preview-header items-center">
-                <div class="flex min-w-0 items-center gap-2">
-                  <div class="eyebrow-label">{{ $t('dashboard.display_preview') }}</div>
-                </div>
-                <div class="dashboard-preview-actions">
-                  <button v-if="!showPreview" :disabled="spacesPreviewBlocked || previewStarting" :aria-describedby="spacesPreviewBlocked ? 'dashboard-preview-blocked-reason' : undefined" data-start-preview @click="startPreview" class="focus-ring dashboard-action-button dashboard-action-button-primary disabled:cursor-not-allowed disabled:opacity-50">
-                    {{ $t('dashboard.show_display') }}
-                  </button>
-                  <template v-else>
-                    <button @click="togglePreviewExpanded" class="focus-ring dashboard-action-button dashboard-action-button-secondary">
-                      {{ previewExpanded ? $t('dashboard.collapse_display') : $t('dashboard.expand_display') }}
-                    </button>
-                    <button @click="stopPreview" class="focus-ring dashboard-action-button dashboard-action-button-ghost">
-                      {{ $t('dashboard.hide_display') }}
-                    </button>
-                  </template>
-                </div>
+          <!-- Recent titles: the landing page is a remote control, so each one launches. -->
+          <section v-if="stageMode === 'idle'" class="mc-panel" data-dashboard-play-rail>
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div class="min-w-0">
+                <h3 class="mc-panel-label"><span class="mc-bracket" aria-hidden="true">&lt;</span> {{ $t('dashboard.recent_games') }} <span class="mc-bracket" aria-hidden="true">&gt;</span></h3>
+                <p class="mt-1 text-sm text-support">{{ recentApps.length ? $t('dashboard.recent_ready', { count: recentApps.length }) : $t('dashboard.no_games') }}</p>
               </div>
+              <router-link to="/apps" class="focus-ring dashboard-action-button dashboard-action-button-ghost no-underline">
+                {{ $t('navbar.library') }}
+              </router-link>
+            </div>
+            <p v-if="!currentAppAvailable" role="status" class="mt-3 text-sm text-support">Waiting for current app status.</p>
+            <div v-if="recentApps.length" class="dashboard-play-grid mc-film">
+              <div v-for="app in recentApps" :key="app.uuid" class="dashboard-play-tile">
+                <PosterImage class="w-full" :name="app.name" :src="app['image-path'] ? './api/covers/image?name=' + encodeURIComponent(app.name) : ''" />
+                <div class="mt-2 min-w-0">
+                  <div class="mc-film-name" :title="app.name">{{ app.name }}</div>
+                  <div class="mc-film-source" v-if="app.source && app.source !== 'manual'">{{ app.source }}</div>
+                </div>
+                <button
+                  type="button"
+                  class="focus-ring dashboard-play-launch"
+                  :aria-label="t('mission_control.launch_title', { name: app.name })"
+                  :disabled="launchingUuid === app.uuid || !currentAppAvailable"
+                  :data-dashboard-launch-app="app.uuid"
+                  @click="launchRecentApp(app)"
+                >
+                  {{ launchingUuid === app.uuid ? $t('dashboard.launching') : $t('dashboard.launch') }}
+                </button>
+              </div>
+            </div>
+            <div v-else class="py-6 text-center text-sm text-support">{{ $t('dashboard.no_games') }}</div>
+          </section>
 
-              <template v-if="showPreview">
-                <div class="dashboard-preview-frame" :class="{ 'has-error': previewError }">
-                  <img
-                    :src="previewUrl"
-                    alt=""
-                    class="dashboard-preview-image"
-                    :class="{ 'opacity-0': !previewLoaded || previewError }"
-                    @load="handlePreviewLoad"
-                    @error="handlePreviewError"
-                  />
-                  <div v-if="!previewLoaded && !previewError" class="dashboard-preview-overlay" role="status" aria-live="polite">
-                    <svg class="h-7 w-7 animate-spin text-storm" fill="none" viewBox="0 0 24 24" aria-hidden="true">
-                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
-                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                    </svg>
-                    <span>{{ $t('dashboard.preview_capturing') }}</span>
-                  </div>
-                  <div v-if="previewError" class="dashboard-preview-overlay dashboard-preview-overlay-error" role="alert">
-                    <div class="text-sm font-medium text-silver">{{ $t('dashboard.preview_error') }}</div>
-                    <button @click="retryPreviewNow" class="focus-ring dashboard-action-button dashboard-action-button-secondary">
-                      {{ $t('dashboard.preview_retry') }}
-                    </button>
-                  </div>
-                  <span v-if="previewLoaded && !previewError" class="dashboard-preview-live-badge">
-                    <span class="text-success">●</span>
-                    {{ previewMode === 'mjpeg' ? 'LIVE' : 'PREVIEW' }}
-                  </span>
-                  <!-- Stream facts ride the stage as overlays instead of chrome around it. -->
-                  <div v-if="previewLoaded && !previewError" class="dashboard-preview-hud">
-                    <div class="dashboard-preview-meta">
-                      <span class="data-pill">{{ stats.width }}×{{ stats.height }}</span>
-                      <span class="data-pill">{{ stats.codec?.toUpperCase() || '--' }}</span>
-                      <span v-if="hdrChipLabel" class="data-pill text-accent-2" :title="stats.hdr_downgrade_message || ''">{{ hdrChipLabel }}</span>
-                      <span class="data-pill">{{ capturePathLabel }}</span>
-                    </div>
-                    <span class="dashboard-preview-hud-status">{{ previewStatusText }}</span>
-                  </div>
-                </div>
-              </template>
-              <div v-else class="flex items-center justify-between gap-3 py-1">
-                <span :id="spacesPreviewBlocked ? 'dashboard-preview-blocked-reason' : undefined" class="text-xs text-storm" data-preview-hidden-reason>{{ spacesPreviewBlocked ? $t('dashboard_spaces.no_preview') : $t('dashboard.preview_hidden_title') }}</span>
-                <div class="dashboard-preview-meta">
-                  <span class="data-pill">{{ viewerCountLabel }}</span>
-                  <span class="data-pill">{{ qualitySummaryLabel }}</span>
-                </div>
+          <!-- Host vitals stay readable while collapsed, including without colour vision. -->
+          <template v-if="stageMode === 'idle'">
+            <details class="mc-panel mc-vitals" v-if="gpu" data-dashboard-idle-vitals>
+              <summary class="focus-ring flex cursor-pointer flex-wrap items-center justify-between gap-3 text-sm text-silver">
+                <span>Host vitals · {{ gpu.name }}</span>
+                <span class="flex flex-wrap gap-x-3 gap-y-1 font-mono text-sm text-support" data-dashboard-vitals-summary>
+                  <span :class="idleVitals.temperature.tone" data-vitals-temperature>{{ idleVitals.temperature.text }}</span>
+                  <span :class="idleVitals.gpu.tone" data-vitals-gpu>{{ idleVitals.gpu.text }}</span>
+                  <span :class="idleVitals.encoder.tone" data-vitals-encoder>{{ idleVitals.encoder.text }}</span>
+                  <span :class="idleVitals.vram.tone" data-vitals-vram>{{ idleVitals.vram.text }}</span>
+                </span>
+              </summary>
+              <div class="mt-4 grid grid-cols-2 gap-4 place-items-center xl:grid-cols-4">
+                <GaugeArc v-if="gpu.temperature_c != null" :value="gpu.temperature_c" :max="100" unit="°C" label="Temp" :size="112"
+                          :thresholds="[{ at: 0, color: 'var(--color-success)' }, { at: 70, color: 'var(--color-warning)' }, { at: 85, color: 'var(--color-danger)' }]" />
+                <GaugeArc v-if="gpu.utilization_pct != null" :value="gpu.utilization_pct" :max="100" unit="%" label="GPU" :size="112" />
+                <GaugeArc v-if="gpu.encoder_pct != null" :value="gpu.encoder_pct" :max="100" unit="%" :label="gpu.vendor === 'nvidia' ? 'NVENC' : 'VCN'" :size="112"
+                          :thresholds="[{ at: 0, color: 'var(--color-ice)' }, { at: 60, color: 'var(--color-warning)' }, { at: 85, color: 'var(--color-danger)' }]" />
+                <GaugeArc v-if="gpu.vram_used_mb != null && gpu.vram_total_mb != null" :value="gpu.vram_used_mb / 1024" :max="gpu.vram_total_mb / 1024" unit="GB" label="VRAM" :size="112"
+                          :thresholds="[{ at: 0, color: 'var(--color-ice)' }, { at: 70, color: 'var(--color-warning)' }, { at: 90, color: 'var(--color-danger)' }]" />
               </div>
-            </section>
+            </details>
+            <div v-else class="dashboard-degraded-state">
+              <div class="min-w-0">
+                <div class="text-sm font-semibold text-silver">Host telemetry is warming up</div>
+                <div class="mt-1 text-sm leading-relaxed text-support">GPU temperature, encoder load, and VRAM gauges will appear after the host reports system stats.</div>
+              </div>
+              <router-link to="/troubleshooting" class="focus-ring dashboard-degraded-action">
+                Troubleshoot
+              </router-link>
+            </div>
+          </template>
 
-          </div>
+          <!-- One disclosure for the dense detail; opening it is the viewer's choice and survives updates. -->
+          <MissionDiagnostics ref="diagnosticsPanel" v-model="diagnosticsOpen" :title="t('mission_control.diagnostics')" :summary="diagnosticsSummary">
+            <div class="mc-diag-grid">
+              <section v-if="stageMode === 'live' || stageMode === 'unavailable'" class="min-w-0" data-diagnostics-stream-status>
+                <h4 class="mc-diag-section-title">{{ t('mission_control.diag_stream_status') }}</h4>
+                <dl class="mc-kv">
+                  <div><dt>{{ t('mission_control.diag_connection') }}</dt><dd>{{ streamStatusIsUnavailable ? t('mission_control.diag_disconnected') : t('mission_control.diag_connected') }}</dd></div>
+                  <div><dt>{{ t('mission_control.diag_last_report') }}</dt><dd>{{ reportAgeLabel ? t('mission_control.age_ago', { age: reportAgeLabel }) : t('mission_control.no_report_received') }}</dd></div>
+                </dl>
+              </section>
 
-          <div class="dashboard-live-side">
-            <section class="surface-subtle p-4 dashboard-context-card">
-              <div class="flex items-center justify-between gap-3">
-                <div class="eyebrow-label">Session context</div>
-                <span class="meta-pill" :class="runtimeModeTone">{{ runtimeEffectiveMode }}</span>
-              </div>
-              <div v-if="gpu" class="mt-2 font-mono text-[11px] tabular-nums text-storm">
-                {{ gpu.name }} · {{ gpu.temperature_c ?? '--' }}°C · {{ gpu.utilization_pct ?? 0 }}% · {{ gpu.encoder_pct ?? 0 }}% enc · {{ gpu.vram_used_mb ? (gpu.vram_used_mb / 1024).toFixed(1) : '--' }}G
-              </div>
-              <div class="dashboard-context-section">
-                <div class="dashboard-context-header">
-                  <span>{{ $t('dashboard.connected_clients') }}</span>
-                  <button
-                    v-if="connectedClientUuid"
-                    :disabled="disconnectingClient"
-                    @click="disconnectConfirmOpen = true"
-                    class="focus-ring dashboard-action-button dashboard-action-button-danger disabled:cursor-wait disabled:opacity-70"
-                  >
-                    {{ $t('dashboard.disconnect_client') }}
-                  </button>
+              <section v-if="stageMode === 'live'" class="min-w-0">
+                <h4 class="mc-diag-section-title">{{ t('mission_control.diag_frame_health') }}</h4>
+                <div class="flex flex-wrap gap-1.5" data-dashboard-frame-health>
+                  <span class="data-pill" :class="frameHealth.droppedTone">{{ frameHealth.dropped }} dropped</span>
+                  <span class="data-pill" :class="frameHealth.duplicateTone">{{ frameHealth.duplicate }} duped</span>
+                  <span class="data-pill" :class="frameHealth.intervalErrorTone">{{ frameHealth.intervalError }} target interval error</span>
                 </div>
-                <div class="space-y-2">
-                  <div
-                    v-for="(client, index) in connectedClients"
-                    :key="`${client.name}-${client.ip}-${index}`"
-                    class="dashboard-client-row"
-                  >
-                    <div class="min-w-0">
-                      <div class="truncate text-sm font-medium text-silver">
-                        {{ client.name }}
-                        <span v-if="isClientAiOptimized(client.name)" class="ml-1 inline-flex items-center gap-0.5 rounded-full bg-accent/15 px-1.5 py-0.5 text-[9px] font-medium text-accent">AI</span>
-                      </div>
-                      <div class="mt-1 text-[11px] text-storm">{{ client.ip || '--' }}<template v-if="liveClientFamily(client)"> · {{ liveClientFamily(client) }}</template></div>
-                    </div>
-                    <div class="text-right text-[11px] text-storm tabular-nums">
-                      <div>{{ client.latency_ms?.toFixed(0) || '--' }} ms</div>
-                      <div v-if="client.fps" class="mt-0.5">
-                        {{ client.fps.toFixed(0) }} fps<template v-if="client.bitrate_kbps"> · {{ (client.bitrate_kbps / 1000).toFixed(1) }} Mbps</template>
-                      </div>
-                      <div v-if="client.codec || client.width" class="mt-0.5">
-                        <template v-if="client.codec">{{ client.codec.toUpperCase() }}</template><template v-if="client.width"> · {{ client.width }}×{{ client.height }}</template><template v-if="client.packet_loss_available && Number.isFinite(client.packet_loss)"> · {{ client.packet_loss.toFixed(1) }}%</template>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div class="dashboard-context-section">
-                <div class="dashboard-context-header">
-                  <span>{{ $t('dashboard.runtime_path') }}</span>
-                  <router-link to="/troubleshooting" class="focus-ring text-[11px] font-semibold text-ice no-underline hover:text-ice/80">
+                <p v-if="prefersReducedMotion" class="mt-2 text-sm text-support">Live charts are paused while reduced motion is enabled.</p>
+              </section>
+
+              <section v-if="stageMode === 'live'" class="mc-diag-wide min-w-0">
+                <StreamPacingReadout :stats="stats || {}" :connected="streamStatsConnected" :observed-at="streamStatsReceivedAt" />
+              </section>
+
+              <section v-if="stageMode === 'live'" class="min-w-0">
+                <div class="mc-diag-section-head">
+                  <h4 class="mc-diag-section-title">{{ $t('dashboard.runtime_path') }}</h4>
+                  <router-link to="/troubleshooting" class="focus-ring mc-inline-link">
                     {{ $t('dashboard.runtime_detail_link') }}
                   </router-link>
                 </div>
-                <div class="dashboard-runtime-pill-grid">
-                  <div class="dashboard-runtime-pill">
-                    <span class="dashboard-runtime-label">{{ $t('dashboard.capture') }}</span>
-                    <span class="text-sm font-medium" :class="captureGpuNativeTone">{{ capturePathLabel }}</span>
+                <dl class="mc-kv">
+                  <div><dt>{{ $t('dashboard.capture') }}</dt><dd :class="captureGpuNativeTone">{{ capturePathLabel }}</dd></div>
+                  <div><dt>{{ t('mission_control.diag_runtime') }}</dt><dd>{{ runtimeEffectiveMode }}</dd></div>
+                </dl>
+                <p v-if="runtimePathNote" class="dashboard-rail-footnote mt-2 text-sm" :class="runtimePathNoteTone">{{ runtimePathNote }}</p>
+              </section>
+
+              <section v-if="stageMode === 'live' || stageMode === 'unavailable'" class="min-w-0">
+                <h4 class="mc-diag-section-title">{{ t('mission_control.diag_host_vitals') }}</h4>
+                <dl v-if="gpu" class="mc-kv">
+                  <div v-for="row in gpuRows" :key="row.label"><dt>{{ row.label }}</dt><dd>{{ row.value }}</dd></div>
+                </dl>
+                <p v-else class="text-sm text-support">Host telemetry is warming up. GPU temperature, encoder load, and VRAM gauges will appear after the host reports system stats.</p>
+              </section>
+
+              <section v-if="stageMode === 'idle' || stageMode === 'spaces' || stageMode === 'unavailable'" class="mc-diag-wide min-w-0">
+                <h4 class="mc-diag-section-title">{{ t('mission_control.diag_launch_checks') }}</h4>
+                <div v-if="readyChecksAllPassing" class="ready-check-summary">
+                  <div>
+                    <div class="text-sm font-semibold text-success">All launch checks are ready</div>
+                    <div class="mt-1 text-sm text-support">Pairing, library, discovery, displays, and audio are clear.</div>
                   </div>
+                  <span class="rounded-full border border-success/30 bg-success/10 px-2.5 py-1 text-xs font-semibold uppercase tracking-eyebrow text-success">
+                    {{ readyChecksPassing }}/{{ readyCheckDisplay.total }} {{ $t('dashboard.ready_checks_pass') }}
+                  </span>
                 </div>
-                <div v-if="runtimePathNote" class="dashboard-rail-footnote" :class="runtimePathNoteTone">
-                  {{ runtimePathNote }}
-                </div>
-              </div>
-            </section>
-
-            <section class="card p-4">
-              <QuickControls compact @change="handleQuickControlChange" />
-            </section>
-          </div>
-        </div>
-
-      </section>
-    </template>
-
-    <!-- ═══ IDLE LAYOUT ═══ -->
-    <template v-else-if="!dashboardSpaces.hasActivity">
-      <!-- Status hero: one band answering "can I stream right now, and if
-           not, what fixes it" (absorbs the old strip, triptych, and quad). -->
-      <section class="section-card gradient-border-top gradient-border-top-accent" data-dashboard-idle-hero>
-        <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-          <div class="min-w-0">
-            <div class="section-kicker">{{ $t('dashboard.stream_readiness') }}</div>
-            <h2 class="mt-2 text-2xl font-semibold leading-tight" :class="readinessTone">{{ readinessLabel }}</h2>
-            <p class="mt-2 max-w-3xl text-sm leading-relaxed text-support">{{ nextStep.title }} · {{ nextStep.desc }}</p>
-            <div class="mt-4 flex flex-wrap gap-2">
-              <template v-if="pairedClientChips.length">
-                <span v-for="chip in pairedClientChips" :key="chip.name" class="data-pill">{{ chip.label }}</span>
-              </template>
-              <span v-else class="data-pill">{{ pairedClients }} {{ $t('dashboard.clients_paired') }}</span>
-              <span v-if="lastSessionChip" class="data-pill">{{ lastSessionChip }}</span>
-              <span class="data-pill" :class="headlessEnabled ? 'text-accent' : ''">{{ headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed') }}</span>
-              <span class="data-pill" v-if="gpu">{{ gpu.temperature_c ?? '--' }}°C · {{ gpu.utilization_pct || 0 }}% · {{ gpu.power_draw_w?.toFixed(0) || '--' }}W</span>
-              <span class="data-pill" :class="aiStatus?.enabled ? 'text-accent' : ''">{{ liveTuningLabel }} · {{ sessionHistory.length }} {{ $t('dashboard.sessions') }}</span>
-            </div>
-          </div>
-          <div class="flex shrink-0 flex-col items-end gap-3">
-            <span
-              class="inline-flex items-center gap-2 rounded-full border px-3 py-1 font-mono text-[10px] font-semibold uppercase tracking-eyebrow"
-              :class="readyCheckDisplay.allPassing ? 'border-success/35 text-success' : readyCheckDisplay.attention ? 'border-warning/35 text-warning' : 'border-storm/35 text-storm'"
-            >
-              <span class="pulse-dot" :class="readyCheckDisplay.allPassing ? '' : readyCheckDisplay.attention ? '!bg-warning' : '!bg-storm'"></span>
-              {{ $t(readyCheckDisplay.allPassing ? 'dashboard.check_state_ready' : readyCheckDisplay.attention ? 'dashboard.check_state_attention' : 'dashboard.check_state_not_checked') }}
-            </span>
-            <router-link
-              v-if="readyCheckDisplay.primaryIssue"
-              :to="readyCheckDisplay.primaryIssue.to"
-              class="focus-ring dashboard-action-button dashboard-action-button-primary shrink-0 no-underline"
-            >
-              {{ $t('dashboard.open_priority_fix') }}
-            </router-link>
-          </div>
-        </div>
-      </section>
-
-      <button class="focus-ring dashboard-action-button dashboard-action-button-secondary" :disabled="refreshingReadiness" @click="refreshLaunchChecks">{{ $t('dashboard.refresh_checks') }}</button>
-      <!-- GPU Gauges + Quick Controls -->
-      <div class="grid grid-cols-1 items-start gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-        <div class="min-w-0 space-y-4">
-        <!-- Recent Games: the landing page is a remote control, so rows launch. -->
-        <div class="section-card" data-dashboard-play-rail>
-          <div class="flex items-center justify-between gap-3 mb-3">
-            <div>
-              <div class="section-kicker">{{ $t('dashboard.recent_games') }}</div>
-              <div class="mt-2 text-sm text-support">{{ recentApps.length ? $t('dashboard.recent_ready', { count: recentApps.length }) : $t('dashboard.no_games') }}</div>
-            </div>
-            <router-link to="/apps" class="focus-ring inline-flex h-8 items-center gap-1.5 rounded-lg border border-storm px-3 text-xs font-medium text-silver transition-[border-color,color,background-color] duration-200 hover:border-ice hover:text-ice no-underline">
-              {{ $t('navbar.library') }}
-            </router-link>
-          </div>
-          <p v-if="!currentAppAvailable" role="status" class="mb-3 text-sm text-support">Waiting for current app status.</p>
-          <div v-if="recentApps.length" class="dashboard-play-grid grid gap-2">
-            <div v-for="app in recentApps" :key="app.uuid" class="dashboard-play-tile">
-              <PosterImage class="w-16 sm:w-20" :name="app.name" :src="app['image-path'] ? './api/covers/image?name=' + encodeURIComponent(app.name) : ''" />
-              <div class="mt-2 min-w-0">
-                <div class="truncate text-sm font-semibold text-silver" :title="app.name">{{ app.name }}</div>
-                <div class="truncate font-mono text-[11px] text-storm" v-if="app.source && app.source !== 'manual'">{{ app.source }}</div>
-              </div>
-              <button
-                type="button"
-                class="focus-ring dashboard-play-launch"
-                :disabled="launchingUuid === app.uuid || !currentAppAvailable"
-                :data-dashboard-launch-app="app.uuid"
-                @click="launchRecentApp(app)"
-              >
-                {{ launchingUuid === app.uuid ? $t('dashboard.launching') : $t('dashboard.launch') }}
-              </button>
-            </div>
-          </div>
-          <div v-else class="text-sm text-support py-6 text-center">{{ $t('dashboard.no_games') }}</div>
-          <div class="mt-4 flex flex-wrap items-center gap-2 border-t border-storm/15 pt-3 text-[11px] text-silver">
-            <span class="eyebrow-label mr-1">{{ $t('dashboard.host_context') }}</span>
-            <span class="data-pill">
-              {{ sessionType ? sessionType : (headlessEnabled ? $t('dashboard.headless') : $t('dashboard.windowed')) }}
-            </span>
-            <span class="data-pill">
-              {{ displays.length }} {{ displays.length === 1 ? 'display' : 'displays' }}
-            </span>
-            <span class="data-pill" v-if="audio?.sink">
-              {{ formatAudioName(audio.sink) }}
-            </span>
-            <span class="data-pill">
-              v{{ version }}
-            </span>
-          </div>
-        </div>
-        <div class="section-card space-y-5">
-          <div>
-            <div class="section-kicker">{{ $t('dashboard.stream_readiness') }}</div>
-            <h2 class="section-title">Launch checks</h2>
-          </div>
-
-          <details class="surface-subtle p-4" v-if="gpu" data-dashboard-idle-vitals>
-            <summary class="focus-ring flex cursor-pointer flex-wrap items-center justify-between gap-3 text-sm text-silver">
-              <span>Host vitals · {{ gpu.name }}</span>
-              <span class="flex flex-wrap gap-x-3 gap-y-1 font-mono text-sm text-support" data-dashboard-vitals-summary>
-                <span :class="idleVitals.temperature.tone" data-vitals-temperature>{{ idleVitals.temperature.text }}</span>
-                <span :class="idleVitals.gpu.tone" data-vitals-gpu>{{ idleVitals.gpu.text }}</span>
-                <span :class="idleVitals.encoder.tone" data-vitals-encoder>{{ idleVitals.encoder.text }}</span>
-                <span :class="idleVitals.vram.tone" data-vitals-vram>{{ idleVitals.vram.text }}</span>
-              </span>
-            </summary>
-            <div class="mt-4 grid grid-cols-2 gap-4 place-items-center xl:grid-cols-4">
-              <GaugeArc v-if="gpu.temperature_c != null" :value="gpu.temperature_c" :max="100" unit="°C" label="Temp" :size="112"
-                        :thresholds="[{ at: 0, color: 'var(--color-success)' }, { at: 70, color: 'var(--color-warning)' }, { at: 85, color: 'var(--color-danger)' }]" />
-              <GaugeArc v-if="gpu.utilization_pct != null" :value="gpu.utilization_pct" :max="100" unit="%" label="GPU" :size="112" />
-              <GaugeArc v-if="gpu.encoder_pct != null" :value="gpu.encoder_pct" :max="100" unit="%" :label="gpu.vendor === 'nvidia' ? 'NVENC' : 'VCN'" :size="112"
-                        :thresholds="[{ at: 0, color: 'var(--color-ice)' }, { at: 60, color: 'var(--color-warning)' }, { at: 85, color: 'var(--color-danger)' }]" />
-              <GaugeArc v-if="gpu.vram_used_mb != null && gpu.vram_total_mb != null" :value="gpu.vram_used_mb / 1024" :max="gpu.vram_total_mb / 1024" unit="GB" label="VRAM" :size="112"
-                        :thresholds="[{ at: 0, color: 'var(--color-ice)' }, { at: 70, color: 'var(--color-warning)' }, { at: 90, color: 'var(--color-danger)' }]" />
-            </div>
-          </details>
-          <div v-else class="dashboard-degraded-state">
-            <div class="min-w-0">
-              <div class="text-sm font-semibold text-silver">Host telemetry is warming up</div>
-              <div class="mt-1 text-xs leading-relaxed text-storm">GPU temperature, encoder load, and VRAM gauges will appear after the host reports system stats.</div>
-            </div>
-            <router-link to="/troubleshooting" class="dashboard-degraded-action">
-              Troubleshoot
-            </router-link>
-          </div>
-
-          <div>
-            <div v-if="readyChecksAllPassing" class="ready-check-summary">
-              <div>
-                <div class="text-sm font-semibold text-success">All launch checks are ready</div>
-                <div class="mt-1 text-xs text-storm">Pairing, library, discovery, displays, and audio are clear.</div>
-              </div>
-              <span class="rounded-full border border-success/30 bg-success/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-eyebrow text-success">
-                {{ readyChecksPassing }}/{{ readyCheckDisplay.total }} {{ $t('dashboard.ready_checks_pass') }}
-              </span>
-            </div>
-            <div v-else class="space-y-3">
-              <div :class="readyChecksAttentionCount ? 'ready-check-summary ready-check-summary-attention' : 'ready-check-summary'">
-                <div>
-                  <div :class="readyChecksAttentionCount ? 'text-sm font-semibold text-warning-bright' : 'text-sm font-semibold text-storm'">{{ readyChecksAttentionCount ? $t('dashboard.checks_attention', { count: readyChecksAttentionCount }) : $t('dashboard.checks_waiting') }}</div>
-                  <div class="mt-1 text-xs text-storm">
-                    {{ readyChecksPrimaryIssue ? $t('dashboard.checks_start_with', { check: readyChecksPrimaryIssue.label }) : $t('dashboard.check_waiting') }}
+                <div v-else class="space-y-3">
+                  <div :class="readyChecksAttentionCount ? 'ready-check-summary ready-check-summary-attention' : 'ready-check-summary'">
+                    <div>
+                      <div :class="readyChecksAttentionCount ? 'text-sm font-semibold text-warning-bright' : 'text-sm font-semibold text-storm'">{{ readyChecksAttentionCount ? $t('dashboard.checks_attention', { count: readyChecksAttentionCount }) : $t('dashboard.checks_waiting') }}</div>
+                      <div class="mt-1 text-sm text-support">
+                        {{ readyChecksPrimaryIssue ? $t('dashboard.checks_start_with', { check: readyChecksPrimaryIssue.label }) : $t('dashboard.check_waiting') }}
+                      </div>
+                    </div>
+                    <router-link
+                      v-if="readyChecksPrimaryIssue"
+                      :to="readyChecksPrimaryIssue.to"
+                      class="focus-ring dashboard-degraded-action"
+                    >
+                      Open priority fix
+                    </router-link>
                   </div>
+                  <ul class="mc-checks">
+                    <li v-for="check in visibleReadyChecks" :key="check.key">
+                      <router-link :to="check.to" class="focus-ring mc-check no-underline" :class="check.cardClass">
+                        <span class="mc-check-state" :class="check.badgeClass">{{ check.state }}</span>
+                        <span class="mc-check-name">{{ check.label }}</span>
+                        <span class="mc-check-detail">{{ check.detail }}</span>
+                        <span class="mc-check-link">{{ $t(check.status === 'attention' ? 'dashboard.open_fix' : 'dashboard.review_check') }}</span>
+                      </router-link>
+                    </li>
+                  </ul>
                 </div>
-                <router-link
-                  v-if="readyChecksPrimaryIssue"
-                  :to="readyChecksPrimaryIssue.to"
-                  class="focus-ring dashboard-degraded-action"
-                >
-                  Open priority fix
-                </router-link>
-              </div>
-              <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-                <router-link
-                  v-for="check in visibleReadyChecks"
-                  :key="check.key"
-                  :to="check.to"
-                  class="focus-ring rounded-xl border px-3 py-3 no-underline transition-[border-color,background-color,transform] duration-200 hover:-translate-y-0.5"
-                  :class="check.cardClass"
-                >
-                  <div class="flex items-center justify-between gap-3">
-                    <div class="text-sm font-medium text-silver">{{ check.label }}</div>
-                    <span class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-eyebrow" :class="check.badgeClass">
-                      {{ check.state }}
+              </section>
+
+              <!-- Session history: the host's recorded outcomes, or this browser's richer local list. -->
+              <section v-if="(stageMode === 'idle' || stageMode === 'spaces') && !sessions.length && hostHistoryRows.length" class="mc-diag-wide min-w-0" data-session-history-host>
+                <div class="mc-diag-section-head">
+                  <h4 class="mc-diag-section-title">{{ t('dashboard.session_history') }}</h4>
+                  <button type="button" class="focus-ring mc-inline-link" data-clear-session-history @click="clearHistoryConfirmOpen = true">{{ t('dashboard.clear_history') }}</button>
+                </div>
+                <ul class="mc-history">
+                  <li v-for="(s, i) in hostHistoryRows" :key="i">
+                    <span class="mc-history-grade" :class="gradeColor(s.quality_grade)">{{ s.quality_grade || '·' }}</span>
+                    <span class="mc-history-who">{{ s.key }}</span>
+                  </li>
+                </ul>
+              </section>
+              <section v-if="(stageMode === 'idle' || stageMode === 'spaces') && sessions.length" class="mc-diag-wide min-w-0" data-session-history-local>
+                <div class="mc-diag-section-head">
+                  <h4 class="mc-diag-section-title">{{ t('dashboard.session_history') }}</h4>
+                  <button type="button" class="focus-ring mc-inline-link" data-clear-session-history @click="clearHistoryConfirmOpen = true">{{ t('dashboard.clear_history') }}</button>
+                </div>
+                <ul class="mc-history">
+                  <li v-for="(s, i) in sessions.slice(0, 8)" :key="i">
+                    <span class="mc-history-grade" :class="gradeColor(s.quality_grade)">{{ s.quality_grade }}</span>
+                    <span class="min-w-0">
+                      <span class="mc-history-who">{{ s.client_name }}</span>
+                      <span class="mc-history-detail">{{ s.codec }} {{ s.width }}x{{ s.height }} · {{ formatDuration(s.duration_s) }}</span>
                     </span>
-                  </div>
-                  <div class="mt-2 text-[11px] text-storm">{{ check.detail }}</div>
-                  <div class="mt-3 text-[11px] font-medium text-ice/80">{{ $t(check.status === 'attention' ? 'dashboard.open_fix' : 'dashboard.review_check') }}</div>
-                </router-link>
-              </div>
+                    <span class="mc-history-when">{{ s.avg_fps }}fps · {{ (s.avg_bitrate_kbps / 1000).toFixed(1) }}Mbps<br>{{ formatSessionDate(s.started_at) }}</span>
+                  </li>
+                </ul>
+              </section>
             </div>
-          </div>
+          </MissionDiagnostics>
         </div>
-        </div>
-        <div class="section-card">
-          <QuickControls @change="handleQuickControlChange" />
-        </div>
-      </div>
 
-    </template>
-
-    <!-- Session History (idle): one list; this browser's rich local history,
-         with the host's session log as the fallback source. -->
-    <div v-if="statsLoaded && !stats?.streaming && !sessions.length && hostHistoryRows.length" class="card p-4" data-session-history-host>
-      <div class="flex items-center justify-between mb-3">
-        <div class="eyebrow-label">{{ t('dashboard.session_history') }}</div>
-        <button type="button" class="focus-ring text-[10px] text-storm hover:text-ice transition-colors" data-clear-session-history @click="clearHistoryConfirmOpen = true">{{ t('dashboard.clear_history') }}</button>
-      </div>
-      <div class="space-y-2">
-        <div v-for="(s, i) in hostHistoryRows" :key="i" class="flex items-center gap-3 rounded-xl border border-storm/15 bg-void/35 px-3 py-2">
-          <span class="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full font-mono text-[10px] font-bold" :class="{
-            'bg-success/20 text-success': s.quality_grade === 'A',
-            'bg-info/20 text-info': s.quality_grade === 'B',
-            'bg-warning/20 text-warning': s.quality_grade === 'C' || s.quality_grade === 'D',
-            'bg-danger/20 text-danger': s.quality_grade === 'F'
-          }">{{ s.quality_grade || '·' }}</span>
-          <div class="min-w-0 flex-1 truncate text-sm text-silver">{{ s.key }}</div>
-        </div>
-      </div>
-    </div>
-    <div v-if="statsLoaded && !stats?.streaming && sessions.length" class="card p-4" data-session-history-local>
-      <div class="flex items-center justify-between mb-3">
-        <div class="eyebrow-label">{{ t('dashboard.session_history') }}</div>
-        <button type="button" class="focus-ring text-[10px] text-storm hover:text-ice transition-colors" data-clear-session-history @click="clearHistoryConfirmOpen = true">{{ t('dashboard.clear_history') }}</button>
-      </div>
-      <div class="space-y-0">
-        <div v-for="(s, i) in sessions.slice(0, 8)" :key="i"
-             class="flex items-center gap-3 py-2 text-sm" :class="i > 0 ? 'border-t border-storm/15' : ''">
-          <div class="text-base font-bold w-6 text-center" :class="gradeColor(s.quality_grade)">{{ s.quality_grade }}</div>
-          <div class="flex-1 min-w-0">
-            <div class="text-silver font-medium text-sm">{{ s.client_name }}</div>
-            <div class="text-[10px] text-storm">{{ s.codec }} {{ s.width }}x{{ s.height }} · {{ formatDuration(s.duration_s) }}</div>
-          </div>
-          <div class="text-right text-[10px] text-storm shrink-0">
-            <div>{{ s.avg_fps }}fps · {{ (s.avg_bitrate_kbps / 1000).toFixed(1) }}Mbps</div>
-            <div>{{ formatSessionDate(s.started_at) }}</div>
-          </div>
-        </div>
+        <aside v-if="stageMode === 'live' || stageMode === 'idle' || stageMode === 'unavailable'" class="mc-deck-side">
+          <section class="mc-panel">
+            <QuickControls :compact="stageMode === 'live'" @change="handleQuickControlChange" />
+          </section>
+        </aside>
       </div>
     </div>
 
@@ -569,7 +493,11 @@ import { useSpacesSnapshot } from '../composables/useSpacesSnapshot.js'
 import { summarizeDashboardSpaces } from '../dashboard-spaces.js'
 import GaugeArc from '../components/GaugeArc.vue'
 import PosterImage from '../components/PosterImage.vue'
-import { onThemeTokensChange, readThemeTokens, withAlpha } from '../theme-bridge.js'
+import MissionStage from '../components/MissionStage.vue'
+import SignalStrip from '../components/SignalStrip.vue'
+import RoutePanel from '../components/RoutePanel.vue'
+import MissionDiagnostics from '../components/MissionDiagnostics.vue'
+import { getThemeMeta, onThemeChange } from '../theme.js'
 import QuickControls from '../components/QuickControls.vue'
 import ConfirmActionDialog from '../components/ConfirmActionDialog.vue'
 import { useToast } from '../composables/useToast'
@@ -590,6 +518,20 @@ import {
   buildQualityScore,
   dashboardLossPct,
 } from '../dashboard-summary'
+import {
+  appCoverSrc,
+  dynamicRangeLabel,
+  featuredLibraryApp,
+  formatReportAge,
+  idleSignalCells,
+  liveSignalCells,
+  missionStageMode,
+  reading,
+  relativeDay,
+  streamFormatLabel,
+  streamStatusUnavailable,
+  unavailableSignalCells,
+} from '../mission-control.js'
 
 const { stats, connected: streamStatsConnected, receivedAt: streamStatsReceivedAt } = useStreamStats(1000)
 const { label: liveTuningLabel } = useLiveTuning()
@@ -626,7 +568,8 @@ async function refreshApps() {
       readinessSources.value.apps = Array.isArray(data.apps) ? 'ready' : 'unavailable'
       currentAppAvailable.value = data.current_app_available !== false && typeof data.current_app === 'string'
       currentAppUuid.value = currentAppAvailable.value ? data.current_app : ''
-      allAppsById.value = Object.fromEntries((data.apps || []).filter(a => a.uuid).map(a => [a.uuid, a.name]))
+      // The whole catalog, so the running app (Desktop included) resolves whether or not it is recent.
+      allAppsById.value = Object.fromEntries((data.apps || []).filter(a => a.uuid).map(a => [a.uuid, a]))
       const apps = (data.apps || []).filter(a => a.uuid && a.name !== 'Desktop')
       apps.sort((a, b) => (b['last-launched'] || 0) - (a['last-launched'] || 0))
       appCatalogCount.value = apps.length
@@ -648,13 +591,9 @@ async function refreshApps() {
 // with the /api/apps payload; duration ticks against the SSE stats clock.
 const currentAppUuid = ref('')
 const currentAppAvailable = ref(false)
-const currentAppName = computed(() => {
-  if (!currentAppUuid.value) return ''
-  return recentApps.value.find((app) => app.uuid === currentAppUuid.value)?.name
-    || allAppsById.value[currentAppUuid.value]
-    || ''
-})
 const allAppsById = ref({})
+const currentApp = computed(() => (currentAppUuid.value ? allAppsById.value[currentAppUuid.value] || null : null))
+const currentAppName = computed(() => currentApp.value?.name || '')
 
 const sessionDurationLabel = computed(() => {
   // Touch stats so the label re-computes on every SSE tick.
@@ -667,17 +606,6 @@ const sessionDurationLabel = computed(() => {
   return `${Math.floor(minutes / 60)} h ${minutes % 60} min`
 })
 
-// Last-session recap for the idle hero.
-const lastSessionChip = computed(() => {
-  const last = sessions.value[0]
-  if (!last) return ''
-  const bits = [
-    last.quality_grade ? `${last.quality_grade}` : '',
-    Number.isFinite(last.duration_s) ? formatDuration(last.duration_s) : '',
-    last.client_name || '',
-  ].filter(Boolean)
-  return bits.length ? `Last: ${bits.join(' · ')}` : ''
-})
 const { status: aiStatus, fetchStatus: fetchAiStatus, fetchDevices: fetchAiDevices } = useAiOptimizer()
 
 // AI optimization state for current stream
@@ -729,13 +657,6 @@ const readinessLabel = computed(() => {
 const readinessTone = computed(() => {
   if (stats.value?.streaming || readyCheckDisplay.value.allPassing) return 'text-success'
   return readyCheckDisplay.value.attention > 0 ? 'text-warning' : 'text-storm'
-})
-
-const nextStep = computed(() => {
-  if (stats.value?.streaming) return { title: t('dashboard.next_step_monitor'), desc: t('dashboard.next_step_monitor_desc') }
-  if (!readyCheckDisplay.value.allPassing && !readyCheckDisplay.value.attention) return { title: t('dashboard.checks_waiting'), desc: t('dashboard.check_waiting') }
-  if (!pairedClients.value) return { title: t('dashboard.next_step_pair'), desc: t('dashboard.next_step_pair_desc') }
-  return { title: t('dashboard.next_step_launch'), desc: t('dashboard.next_step_launch_desc') }
 })
 
 const readyChecks = computed(() => {
@@ -893,11 +814,13 @@ const connectedClients = computed(() => {
     return stats.value.clients
   }
 
+  // A host that names no clients still has one viewer; its readings are the stream's own, and a
+  // reading the host did not send stays missing rather than becoming 0.
   return [{
     name: stats.value.client_name || t('dashboard.unknown_client'),
     ip: stats.value.client_ip || '--',
-    fps: stats.value.fps || 0,
-    latency_ms: stats.value.latency_ms || 0,
+    fps: stats.value.fps,
+    latency_ms: stats.value.latency_ms,
   }]
 })
 
@@ -920,7 +843,7 @@ const hdrChipLabel = computed(() => {
   if (!mode || mode.startsWith('sdr')) return ''
   return mode.toUpperCase()
 })
-const currentClientName = computed(() => connectedClients.value[0]?.name || t('dashboard.unknown_client'))
+const currentClientName = computed(() => connectedClientName.value || connectedClients.value[0]?.name || t('dashboard.unknown_client'))
 
 function titleizeToken(value) {
   if (!value) return '--'
@@ -1011,11 +934,6 @@ const runtimeEffectiveMode = computed(() => {
   return streamDisplayModeLabel(stats.value)
 })
 
-const runtimeModeTone = computed(() => {
-  if (!stats.value?.streaming) return 'bg-storm/20 text-storm'
-  return 'bg-storm/20 text-storm'
-})
-
 const nestedLabwcShmFallbackActive = computed(() => {
   if (!stats.value?.streaming) return false
 
@@ -1080,11 +998,6 @@ const liveSessionTitle = computed(() => (
     : t('dashboard.live_session_single', { client: currentClientName.value })
 ))
 
-
-const qualitySummaryLabel = computed(() => t('dashboard.quality_summary', {
-  grade: qualityGrade.value,
-  score: qualityScore.value,
-}))
 
 const liveSummary = computed(() => {
   return buildLiveSummary({
@@ -1257,6 +1170,21 @@ function togglePreviewExpanded() {
   previewExpanded.value = !previewExpanded.value
 }
 
+// Showing or hiding the preview swaps the button the viewer pressed, so focus moves to its
+// counterpart instead of falling back to the page.
+async function showPreviewFromStage() {
+  await startPreview()
+  if (!showPreview.value) return
+  await nextTick()
+  document.querySelector('[data-stop-preview]')?.focus({ preventScroll: true })
+}
+
+async function hidePreviewFromStage() {
+  stopPreview()
+  await nextTick()
+  document.querySelector('[data-start-preview]')?.focus({ preventScroll: true })
+}
+
 function stopPreview() {
   ++previewAttempt
   previewStarting.value = false
@@ -1321,16 +1249,6 @@ function relativeSeen(value) {
   return `seen ${Math.round(deltaS / 86400)} d ago`
 }
 
-const pairedClientChips = computed(() => {
-  const chips = pairedClientList.value.slice(0, 3).map((cert) => {
-    const displayName = cert.name || cert.uuid || ''
-    const seen = relativeSeen(cert.last_seen_at)
-    return { name: displayName, label: seen ? `${displayName} · ${seen}` : displayName }
-  }).filter((chip) => chip.name)
-  const extra = pairedClientList.value.length - chips.length
-  if (extra > 0) chips.push({ name: '+extra', label: `+${extra} more` })
-  return chips
-})
 
 // Doctor "Explain": same AI flow Troubleshooting uses, loaded on demand so
 // the initial bundle stays inside budget.
@@ -1595,6 +1513,8 @@ async function launchRecentApp(app) {
 
 // Connected client disconnect
 const connectedClientUuid = ref(null)
+// The client the UUID was resolved for, so the confirmation names the device it will disconnect.
+const connectedClientName = ref('')
 const disconnectConfirmOpen = ref(false)
 const clearHistoryConfirmOpen = ref(false)
 const clearingHistory = ref(false)
@@ -1628,17 +1548,55 @@ const disconnectClientImpactItems = computed(() => [
   t('dashboard.disconnect_client_impact_reconnect'),
 ])
 
+// The stream and the client it names. Disconnect belongs to exactly this pair.
+const streamClientKey = computed(() => (stats.value?.streaming
+  ? `${stats.value.stream_instance_id || ''}\u0000${typeof stats.value.client_name === 'string' ? stats.value.client_name : ''}`
+  : ''))
+let clientResolveRevision = 0
+
+// GET /api/clients/list answers {named_certs, platform, status}. The stream names its client, and
+// the stats payload carries no pairing UUID, so the name must match exactly one valid pairing
+// record. Two devices sharing a name, a missing name or a malformed record select nothing, and a
+// reply that arrives after the stream or its client changed is discarded rather than retargeted.
 async function resolveConnectedClient() {
-  if (!stats.value?.streaming) return
+  const revision = ++clientResolveRevision
+  const key = streamClientKey.value
+  const name = stats.value?.client_name
+  connectedClientUuid.value = null
+  connectedClientName.value = ''
+  if (!key || typeof name !== 'string' || !name) return
   try {
     const res = await fetch('./api/clients/list', { credentials: 'include' })
-    if (res.ok) {
-      const clients = await res.json()
-      const connected = clients.find(c => c.name === stats.value.client_name)
-      if (connected) connectedClientUuid.value = connected.uuid
-    }
+    if (!res.ok) return
+    const data = await res.json()
+    if (revision !== clientResolveRevision || key !== streamClientKey.value) return
+    const certs = Array.isArray(data?.named_certs) ? data.named_certs : []
+    // Count every record with the name first: a malformed twin is still ambiguity, not a filter.
+    const named = certs.filter(cert => cert && typeof cert === 'object' && cert.name === name)
+    if (named.length !== 1) return
+    const uuid = named[0].uuid
+    if (typeof uuid !== 'string' || !uuid.trim()) return
+    connectedClientUuid.value = uuid
+    connectedClientName.value = name
   } catch {}
 }
+
+// Immediate: the stats channel is shared, so this page can open on a stream that is already live
+// and whose key never changes afterwards.
+watch(streamClientKey, (key) => {
+  if (key) {
+    resolveConnectedClient()
+  } else {
+    ++clientResolveRevision
+    connectedClientUuid.value = null
+    connectedClientName.value = ''
+  }
+}, { immediate: true })
+
+// A confirmation left open for a client that is no longer the resolved one closes untouched.
+watch(connectedClientUuid, (uuid) => {
+  if (!uuid && disconnectConfirmOpen.value && !disconnectingClient.value) disconnectConfirmOpen.value = false
+})
 
 async function disconnectClient() {
   if (!connectedClientUuid.value) return
@@ -1651,6 +1609,7 @@ async function disconnectClient() {
     })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
     connectedClientUuid.value = null
+    connectedClientName.value = ''
     disconnectConfirmOpen.value = false
     showToast(t('dashboard.disconnect_client_success'), 'success')
   } catch (e) {
@@ -1675,29 +1634,12 @@ function formatAudioName(sink) {
 // Dynamic favicon
 useFavicon(stats)
 
-// Lazy-load uPlot
-let uPlotLib = null
-
-async function loadUPlot() {
-  if (!uPlotLib) {
-    const mod = await import('uplot')
-    await import('uplot/dist/uPlot.min.css')
-    uPlotLib = mod.default
-  }
-  return uPlotLib
-}
-
 const prefersReducedMotion = ref(false)
 let reducedMotionQuery = null
 
+// The signal strip owns its sparklines and drops them when this flips.
 function updateReducedMotionPreference(event) {
-  const next = Boolean(event?.matches)
-  if (next !== prefersReducedMotion.value) {
-    // The spark slots remount on this flip; stale uPlot instances would keep
-    // drawing into detached nodes, so drop them and let the next tick rebuild.
-    destroyChartInstances()
-  }
-  prefersReducedMotion.value = next
+  prefersReducedMotion.value = Boolean(event?.matches)
 }
 
 // Track whether we've gotten at least one stats response
@@ -1719,23 +1661,7 @@ async function fetchSystemInfo() {
   }
 }
 
-// Chart refs
-const qualityChartEl = ref(null)
-const fpsChartEl = ref(null)
-const bitrateChartEl = ref(null)
-const encodeChartEl = ref(null)
-const latencyChartEl = ref(null)
-const lossChartEl = ref(null)
-
-// Chart instances
-let qualityChart = null
-let fpsChart = null
-let bitrateChart = null
-let encodeChart = null
-let latencyChart = null
-let lossChart = null
-
-// Rolling data (60 seconds)
+// Rolling data (60 seconds) for the strip's sparklines.
 const MAX_POINTS = 60
 const timestamps = ref([])
 const qualityHistory = ref([])
@@ -1744,124 +1670,20 @@ const bitrateHistory = ref([])
 const encodeHistory = ref([])
 const latencyHistory = ref([])
 const lossHistory = ref([])
-
-// Chart colors resolve from the active theme's tokens at build time; charts
-// are rebuilt on theme swaps because canvas cannot follow CSS variables.
-function makeChartOpts(title, suffix, tokenName = 'ice') {
-  const tokens = readThemeTokens(['ice', 'twilight', 'storm', tokenName])
-  const color = tokens[tokenName] || tokens.ice
-  return {
-    width: 144,
-    height: 32,
-    cursor: { show: false },
-    legend: { show: false },
-    // Sparkline mode: no axes, no grid; the strip label carries the meaning.
-    axes: [{ show: false }, { show: false }],
-    scales: {
-      // Pad the y-range so the line breathes instead of hugging the edges,
-      // and hold a visible centered line when the metric is flat.
-      y: {
-        range: (u, min, max) => {
-          const span = max - min
-          const pad = span > 0 ? span * 0.2 : (Math.abs(max) * 0.15 || 1)
-          return [min - pad, max + pad]
-        },
-      },
-    },
-    series: [
-      {},
-      {
-        // De-emphasized smooth line with the current value emphasized: the
-        // endpoint dot carries the metric hue at full strength.
-        stroke: withAlpha(color, 0.65),
-        width: 2,
-        ...(uPlotLib?.paths?.spline ? { paths: uPlotLib.paths.spline() } : {}),
-        points: {
-          show: true,
-          filter: (u, seriesIdx) => {
-            const len = u.data[seriesIdx]?.length || 0
-            return len ? [len - 1] : []
-          },
-          size: 6,
-          width: 0,
-          fill: color,
-        },
-        fill: (u) => {
-          const gradient = u.ctx.createLinearGradient(0, u.bbox.top, 0, u.bbox.top + u.bbox.height)
-          gradient.addColorStop(0, withAlpha(color, 0.28))
-          gradient.addColorStop(1, withAlpha(color, 0))
-          return gradient
-        },
-      },
-    ],
-  }
-}
-
-function initChart(el, opts) {
-  if (!el || !uPlotLib) return null
-  const actualWidth = el.clientWidth || 300
-  opts.width = actualWidth
-  const data = [[], []]
-  return new uPlotLib(opts, data, el)
-}
-
-function updateChartData(chart, ts, values) {
-  if (!chart) return
-  chart.setData([ts, values])
-}
-
-function resizeCharts() {
-  const charts = [
-    { chart: qualityChart, el: qualityChartEl.value },
-    { chart: fpsChart, el: fpsChartEl.value },
-    { chart: bitrateChart, el: bitrateChartEl.value },
-    { chart: encodeChart, el: encodeChartEl.value },
-    { chart: latencyChart, el: latencyChartEl.value },
-    { chart: lossChart, el: lossChartEl.value },
-  ]
-  for (const { chart, el } of charts) {
-    if (chart && el) {
-      chart.setSize({ width: el.clientWidth, height: 32 })
-    }
-  }
-}
-
-let resizeObserver = null
-
-async function setupCharts() {
-  await loadUPlot()
-  await nextTick()
-  if (qualityChartEl.value && !qualityChart) {
-    qualityChart = initChart(qualityChartEl.value, makeChartOpts('Quality', '', 'ice'))
-  }
-  if (fpsChartEl.value && !fpsChart) {
-    fpsChart = initChart(fpsChartEl.value, makeChartOpts('FPS', 'fps', 'success'))
-  }
-  if (bitrateChartEl.value && !bitrateChart) {
-    bitrateChart = initChart(bitrateChartEl.value, makeChartOpts('Bitrate', 'Mbps', 'info'))
-  }
-  if (latencyChartEl.value && !latencyChart) {
-    latencyChart = initChart(latencyChartEl.value, makeChartOpts('Latency', 'ms', 'warning'))
-  }
-  if (lossChartEl.value && !lossChart) {
-    lossChart = initChart(lossChartEl.value, makeChartOpts('Loss', '%', 'danger'))
-  }
-  if (encodeChartEl.value && !encodeChart) {
-    encodeChart = initChart(encodeChartEl.value, makeChartOpts('Encode', 'ms'))
-  }
-}
-
-function destroyChartInstances() {
-  if (qualityChart) { qualityChart.destroy(); qualityChart = null }
-  if (fpsChart) { fpsChart.destroy(); fpsChart = null }
-  if (bitrateChart) { bitrateChart.destroy(); bitrateChart = null }
-  if (encodeChart) { encodeChart.destroy(); encodeChart = null }
-  if (latencyChart) { latencyChart.destroy(); latencyChart = null }
-  if (lossChart) { lossChart.destroy(); lossChart = null }
+const historyRevision = ref(0)
+const chartHistory = {
+  get timestamps() { return timestamps.value },
+  series: {
+    get quality() { return qualityHistory.value },
+    get fps() { return fpsHistory.value },
+    get bitrate() { return bitrateHistory.value },
+    get encode() { return encodeHistory.value },
+    get latency() { return latencyHistory.value },
+    get loss() { return lossHistory.value },
+  },
 }
 
 function destroyCharts() {
-  destroyChartInstances()
   timestamps.value = []
   qualityHistory.value = []
   fpsHistory.value = []
@@ -1869,21 +1691,273 @@ function destroyCharts() {
   encodeHistory.value = []
   latencyHistory.value = []
   lossHistory.value = []
+  historyRevision.value++
 }
 
-// Rebuild live charts with the new theme's colors, keeping their history.
-async function refreshChartTheme() {
-  const hadCharts = Boolean(qualityChart || fpsChart || bitrateChart || encodeChart || latencyChart || lossChart)
-  if (!hadCharts) return
-  destroyChartInstances()
-  await setupCharts()
-  const ts = [...timestamps.value]
-  updateChartData(qualityChart, ts, [...qualityHistory.value])
-  updateChartData(fpsChart, ts, [...fpsHistory.value])
-  updateChartData(bitrateChart, ts, [...bitrateHistory.value])
-  updateChartData(encodeChart, ts, [...encodeHistory.value])
-  updateChartData(latencyChart, ts, [...latencyHistory.value])
-  updateChartData(lossChart, ts, [...lossHistory.value])
+// ── Stream status freshness ──
+// useStreamStats reconnects on its own. The page calls the status unavailable only after the
+// channel has been disconnected for a grace period, including before any first report, and it
+// quotes the age of the last report only when one actually arrived.
+const nowMs = ref(Date.now())
+let statusClock = null
+const disconnectedSince = ref(Date.now())
+const lastReportAt = ref(0)
+watch(() => streamStatsConnected?.value, (value) => {
+  if (value === false) {
+    if (!disconnectedSince.value) disconnectedSince.value = Date.now()
+  } else {
+    disconnectedSince.value = 0
+  }
+}, { immediate: true })
+watch(() => streamStatsReceivedAt?.value, (value) => { if (value > 0) lastReportAt.value = value }, { immediate: true })
+const streamStatusIsUnavailable = computed(() => streamStatusUnavailable({
+  connected: streamStatsConnected?.value, disconnectedSince: disconnectedSince.value, now: nowMs.value,
+}))
+const reportAgeLabel = computed(() => (lastReportAt.value > 0 ? formatReportAge(nowMs.value - lastReportAt.value) : ''))
+// A tab returning from the background reconnects first; give it the same grace as any other gap.
+function handleStatusVisibility() {
+  if (!document.hidden && disconnectedSince.value) disconnectedSince.value = Date.now()
+}
+
+const stageMode = computed(() => missionStageMode({
+  unavailable: streamStatusIsUnavailable.value,
+  statsLoaded: statsLoaded.value,
+  streaming: Boolean(stats.value?.streaming),
+  spacesActive: dashboardSpaces.value.hasActivity,
+}))
+
+// ── Director greeting ──
+const activeTheme = ref(typeof document !== 'undefined' ? document.documentElement.getAttribute('data-theme') || 'polaris' : 'polaris')
+let unsubscribeThemeChange = null
+const directorGreeting = computed(() => {
+  if (activeTheme.value !== 'director') return ''
+  // The exact theme name, "< Congratulations, Director >"; the brackets are drawn as styled text.
+  const label = getThemeMeta('director').label || ''
+  return label.replace(/^<\s*/, '').replace(/\s*>$/, '')
+})
+
+// ── Stage content ──
+const hostDisplayName = computed(() => String(readinessConfig.value?.sunshine_name || '').trim() || t('mission_control.this_host'))
+const featuredApp = computed(() => featuredLibraryApp(recentApps.value))
+const streamFormat = computed(() => streamFormatLabel(stats.value || {}))
+
+const liveCells = computed(() => liveSignalCells({
+  stats: stats.value || {}, summary: liveSummary.value, grade: qualityGrade.value, score: qualityScore.value, t,
+}))
+const unavailableCells = computed(() => unavailableSignalCells({ t }))
+// The mode new sessions start in: the configured stream path on Linux, Private Stream or Windowed
+// elsewhere. Nothing is claimed until the host's settings have been read.
+const newSessionModeLabel = computed(() => {
+  if (readinessSources.value.config !== 'ready' || !readinessConfig.value) return ''
+  if (readinessConfig.value.platform === 'linux') return humanizeStreamPathId(resolveStreamDisplayMode(readinessConfig.value))
+  return headlessEnabled.value ? t('dashboard.headless') : t('dashboard.windowed')
+})
+
+const idleCells = computed(() => {
+  const last = sessions.value[0]
+  return idleSignalCells({
+    readiness: {
+      label: readinessLabel.value, tone: readinessTone.value,
+      passing: readyCheckDisplay.value.passing, total: readyCheckDisplay.value.total,
+    },
+    clientsKnown: readinessSources.value.clients === 'ready',
+    pairedClients: pairedClients.value,
+    lastSession: last ? {
+      duration: Number.isFinite(last.duration_s) ? formatDuration(last.duration_s) : '',
+      grade: last.quality_grade || '', tone: last.quality_grade ? gradeColor(last.quality_grade) : '',
+      detail: [last.client_name, last.started_at ? formatSessionDate(last.started_at) : ''].filter(Boolean).join(' · '),
+    } : null,
+    modeLabel: newSessionModeLabel.value,
+    gpu: gpu.value,
+    liveTuningLabel: liveTuningLabel.value,
+    sessionCount: sessionHistory.value.length,
+    t,
+  })
+})
+
+// Only real numbers are readings; a value the host did not send is left out, never shown as 0.
+const shown = value => Number(value.toFixed(1))
+
+function gpuParts(device) {
+  if (!device) return []
+  const temperature = reading(device.temperature_c)
+  const load = reading(device.utilization_pct)
+  const encoder = reading(device.encoder_pct)
+  return [
+    device.name || '',
+    temperature === null ? '' : `${shown(temperature)} °C`,
+    load === null ? '' : `GPU ${shown(load)}%`,
+    encoder === null ? '' : `encoder ${shown(encoder)}%`,
+  ].filter(Boolean)
+}
+
+const gpuRows = computed(() => {
+  const device = gpu.value
+  if (!device) return []
+  const missing = t('mission_control.not_reported')
+  const temperature = reading(device.temperature_c)
+  const load = reading(device.utilization_pct)
+  const encoder = reading(device.encoder_pct)
+  const used = reading(device.vram_used_mb)
+  const total = reading(device.vram_total_mb)
+  return [
+    { label: 'GPU', value: device.name || missing },
+    { label: 'Temperature', value: temperature === null ? missing : `${shown(temperature)} °C` },
+    { label: 'GPU load', value: load === null ? missing : `${shown(load)}%` },
+    { label: 'Encoder', value: encoder === null ? missing : `${shown(encoder)}%` },
+    { label: 'VRAM', value: used === null || total === null ? missing : `${(used / 1024).toFixed(1)} / ${(total / 1024).toFixed(1)} GB` },
+  ]
+})
+
+const liveRouteNodes = computed(() => {
+  const s = stats.value || {}
+  const host = {
+    key: 'host', role: t('mission_control.route_host'), name: hostDisplayName.value,
+    details: [
+      gpuParts(gpu.value).join(' · '),
+      { text: capturePathLabel.value, pill: true, tone: captureGpuNativeTone.value },
+      runtimeEffectiveMode.value !== '--' ? runtimeEffectiveMode.value : '',
+    ],
+  }
+  const format = streamFormat.value
+  const bitrate = reading(s.bitrate_kbps)
+  const stream = {
+    key: 'stream', role: t('mission_control.route_stream'), name: format || t('mission_control.not_reported_title'),
+    state: format ? '' : 'unknown',
+    details: [[dynamicRangeLabel(s), bitrate === null ? '' : `${(bitrate / 1000).toFixed(1)} Mbps`].filter(Boolean).join(' · ')],
+  }
+  const clients = connectedClients.value.map((client, index) => {
+    const latency = reading(client.latency_ms)
+    const fps = reading(client.fps)
+    const clientBitrate = reading(client.bitrate_kbps)
+    return {
+      key: `client-${index}`, role: t('mission_control.route_client'), name: client.name || t('dashboard.unknown_client'),
+      badge: isClientAiOptimized(client.name) ? 'AI' : '', state: 'live',
+      details: [
+        [client.ip && client.ip !== '--' ? client.ip : '', liveClientFamily(client)].filter(Boolean).join(' · '),
+        [latency === null ? '' : t('mission_control.round_trip_ms', { ms: latency.toFixed(0) }),
+          fps ? `${fps.toFixed(0)} fps` : '',
+          clientBitrate ? `${(clientBitrate / 1000).toFixed(1)} Mbps` : ''].filter(Boolean).join(' · '),
+        [client.codec ? String(client.codec).toUpperCase() : '', client.width ? `${client.width}×${client.height}` : '',
+          client.packet_loss_available && Number.isFinite(client.packet_loss) ? `${client.packet_loss.toFixed(1)}% loss` : ''].filter(Boolean).join(' · '),
+      ],
+    }
+  })
+  return [host, stream, ...clients]
+})
+
+const idleRouteNodes = computed(() => {
+  const hostMode = sessionType.value || (readinessSources.value.config === 'ready' ? (headlessEnabled.value ? t('dashboard.headless') : t('dashboard.windowed')) : '')
+  const nodes = [{
+    key: 'host', role: t('mission_control.route_host'), name: hostDisplayName.value,
+    details: [
+      [hostMode, systemReadiness.value.displays === 'ready' ? `${displays.value.length} ${displays.value.length === 1 ? 'display' : 'displays'}` : ''].filter(Boolean).join(' · '),
+      gpuParts(gpu.value).join(' · '),
+      [audio.value?.sink ? formatAudioName(audio.value.sink) : '', version.value ? `v${version.value}` : ''].filter(Boolean).join(' · '),
+    ],
+  }]
+  if (readinessSources.value.clients !== 'ready') {
+    nodes.push({ key: 'paired', role: t('mission_control.route_paired'), name: t('mission_control.not_read_title'), state: 'unknown' })
+  } else if (!pairedClientList.value.length) {
+    nodes.push({ key: 'paired', role: t('mission_control.route_paired'), name: t('mission_control.no_paired'), state: 'unknown' })
+  } else {
+    for (const cert of pairedClientList.value.slice(0, 3)) {
+      const name = cert.name || cert.uuid || ''
+      if (!name) continue
+      nodes.push({ key: `paired-${cert.uuid || name}`, role: t('mission_control.route_paired'), name,
+        details: [[streamClientFamilyLabel(cert.client_family), relativeSeen(cert.last_seen_at)].filter(Boolean).join(' · ')] })
+    }
+    const extra = pairedClientList.value.length - 3
+    if (extra > 0) nodes.push({ key: 'paired-more', role: t('mission_control.route_paired'), name: t('mission_control.paired_more', { count: extra }) })
+  }
+  return nodes
+})
+
+const unavailableRouteNodes = computed(() => [
+  { key: 'host', role: t('mission_control.route_host'), name: hostDisplayName.value, state: 'unknown',
+    details: [reportAgeLabel.value ? t('mission_control.no_report_for', { age: reportAgeLabel.value }) : t('mission_control.no_report_received'), t('mission_control.stream_status_unknown')] },
+  { key: 'stream', role: t('mission_control.route_stream'), name: t('mission_control.not_reported_title'), state: 'unknown' },
+  { key: 'client', role: t('mission_control.route_client'), name: t('mission_control.not_reported_title'), state: 'unknown' },
+])
+
+const idleNote = computed(() => {
+  const display = readyCheckDisplay.value
+  if (display.attention > 0) {
+    return [t('dashboard.checks_attention', { count: display.attention }),
+      display.primaryIssue ? t('dashboard.checks_start_with', { check: display.primaryIssue.label }) : ''].filter(Boolean).join('. ')
+  }
+  if (display.allPassing) return t('mission_control.idle_ready_note', { total: display.total })
+  return `${t('dashboard.checks_waiting')}. ${t('dashboard.check_waiting')}`
+})
+
+const stageView = computed(() => {
+  const mode = stageMode.value
+  if (mode === 'loading') {
+    return { slate: t('mission_control.connecting'), timecode: '', kicker: '', title: t('dashboard.loading_summary'), meta: [], note: t('dashboard.loading_summary'), noteTone: '', artSrc: '' }
+  }
+  if (mode === 'unavailable') {
+    const age = reportAgeLabel.value
+    return {
+      slate: t('mission_control.status_unavailable'),
+      timecode: age ? t('mission_control.no_report_age', { age }) : t('mission_control.no_report_yet'),
+      kicker: t('mission_control.status_unavailable'),
+      title: t('mission_control.waiting_for_host'),
+      meta: [age ? t('mission_control.last_report_ago', { age }) : t('mission_control.no_report_received'), t('mission_control.retrying')],
+      note: t('mission_control.unavailable_note'), noteTone: '', artSrc: '',
+    }
+  }
+  if (mode === 'live') {
+    const app = currentApp.value
+    const artSrc = appCoverSrc(app)
+    return {
+      slate: dashboardSpaces.value.hasActivity ? t('dashboard_spaces.host_telemetry') : t('mission_control.live'),
+      timecode: sessionDurationLabel.value,
+      kicker: t('mission_control.now_streaming'),
+      title: currentAppName.value || liveSessionTitle.value,
+      meta: [app?.source && app.source !== 'manual' ? app.source : '', runtimeEffectiveMode.value !== '--' ? runtimeEffectiveMode.value : '', viewerCountLabel.value],
+      note: showPreview.value ? '' : [currentAppName.value ? liveSessionTitle.value : '', artSrc ? t('mission_control.art_note') : t('mission_control.capture_note')].filter(Boolean).join(' '),
+      noteTone: '', artSrc,
+    }
+  }
+  const featured = featuredApp.value
+  const display = readyCheckDisplay.value
+  return {
+    slate: t('mission_control.standby'),
+    timecode: t(display.allPassing ? 'dashboard.check_state_ready' : display.attention ? 'dashboard.check_state_attention' : 'dashboard.check_state_not_checked'),
+    kicker: featured ? (featured.launchedAt ? t('mission_control.next_up') : t('mission_control.from_library')) : t('dashboard.stream_readiness'),
+    title: featured ? featured.app.name : t('dashboard.no_games'),
+    meta: featured ? [featured.app.source && featured.app.source !== 'manual' ? featured.app.source : '',
+      featured.launchedAt ? t('mission_control.last_launched', { when: relativeDay(featured.launchedAt, nowMs.value) }) : ''] : [],
+    note: idleNote.value,
+    noteTone: display.attention > 0 ? 'text-warning-bright' : display.allPassing ? 'text-success' : '',
+    artSrc: appCoverSrc(featured?.app),
+  }
+})
+
+// ── Diagnostics disclosure ──
+const diagnosticsOpen = ref(false)
+const diagnosticsPanel = ref(null)
+const diagnosticsSummary = computed(() => {
+  const mode = stageMode.value
+  if (mode === 'live') {
+    return t('mission_control.diag_live_summary', { dropped: frameHealth.value.dropped, duplicate: frameHealth.value.duplicate, interval: frameHealth.value.intervalError })
+  }
+  if (mode === 'unavailable') {
+    return reportAgeLabel.value ? t('mission_control.diag_unavailable_summary', { age: reportAgeLabel.value }) : t('mission_control.no_report_received')
+  }
+  const count = sessions.value.length || hostHistoryRows.value.length
+  return t('mission_control.diag_idle_summary', { passing: readyCheckDisplay.value.passing, total: readyCheckDisplay.value.total, count })
+})
+
+// The stage's Session diagnostics action opens the disclosure and moves there. Nothing else in
+// Mission Control moves focus: telemetry updates never do.
+async function openDiagnostics() {
+  diagnosticsOpen.value = true
+  await nextTick()
+  const toggle = diagnosticsPanel.value?.toggle
+  if (!toggle) return
+  toggle.scrollIntoView?.({ block: 'start', behavior: prefersReducedMotion.value ? 'auto' : 'smooth' })
+  toggle.focus({ preventScroll: true })
 }
 
 watch(stats, (newStats, oldStats) => {
@@ -1893,20 +1967,19 @@ watch(stats, (newStats, oldStats) => {
     if (oldStats?.streaming) {
       stopPreview()
     }
-    destroyCharts()
+    if (timestamps.value.length) destroyCharts()
     connectedClientUuid.value = null
     return
   }
 
-  // Resolve client UUID, running app, and auto-show preview when streaming starts
+  // Read the running app when streaming starts (the client UUID follows streamClientKey). The
+  // display preview stays opt-in: a new stream never starts a capture on its own; Show display does.
   if (newStats.streaming && (!oldStats || !oldStats.streaming)) {
-    resolveConnectedClient()
     refreshApps()
-    if (!showPreview.value && !prefersReducedMotion.value) startPreview()
   }
 
   if (prefersReducedMotion.value) {
-    destroyCharts()
+    if (timestamps.value.length) destroyCharts()
     return
   }
 
@@ -1931,33 +2004,8 @@ watch(stats, (newStats, oldStats) => {
     latencyHistory.value.shift()
     lossHistory.value.shift()
   }
-
-  // Initialize charts if needed
-  if (!qualityChart || !fpsChart || !bitrateChart || !encodeChart || !latencyChart || !lossChart) {
-    setupCharts()
-  }
-
-  // Update chart data
-  nextTick(() => {
-    const ts = [...timestamps.value]
-    updateChartData(qualityChart, ts, [...qualityHistory.value])
-    updateChartData(fpsChart, ts, [...fpsHistory.value])
-    updateChartData(bitrateChart, ts, [...bitrateHistory.value])
-    updateChartData(encodeChart, ts, [...encodeHistory.value])
-    updateChartData(latencyChart, ts, [...latencyHistory.value])
-    updateChartData(lossChart, ts, [...lossHistory.value])
-  })
+  historyRevision.value++
 })
-
-watch(prefersReducedMotion, (isReduced) => {
-  if (isReduced) {
-    destroyCharts()
-  } else if (stats.value?.streaming) {
-    setupCharts()
-  }
-})
-
-let unsubscribeThemeTokens = null
 
 onMounted(async () => {
   if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
@@ -1965,8 +2013,11 @@ onMounted(async () => {
     updateReducedMotionPreference(reducedMotionQuery)
     reducedMotionQuery.addEventListener?.('change', updateReducedMotionPreference)
   }
-  unsubscribeThemeTokens = onThemeTokensChange(() => { refreshChartTheme() })
+  unsubscribeThemeChange = onThemeChange((theme) => { activeTheme.value = theme })
+  activeTheme.value = document.documentElement.getAttribute('data-theme') || 'polaris'
   document.addEventListener('visibilitychange', handlePreviewVisibility)
+  document.addEventListener('visibilitychange', handleStatusVisibility)
+  statusClock = setInterval(() => { nowMs.value = Date.now() }, 1000)
 
   fetchSystemInfo()
   fetchAiStatus()
@@ -1990,31 +2041,17 @@ onMounted(async () => {
   } catch {}
 
   await refreshLaunchChecks()
-
-  resizeObserver = new ResizeObserver(() => {
-    resizeCharts()
-  })
-  // Observe the parent container for resize
-  const parent = fpsChartEl.value?.parentElement?.parentElement
-  if (parent) {
-    resizeObserver.observe(parent)
-  }
 })
 
 onUnmounted(() => {
   stopPreview()
   document.removeEventListener('visibilitychange', handlePreviewVisibility)
-  destroyCharts()
+  document.removeEventListener('visibilitychange', handleStatusVisibility)
+  if (statusClock) { clearInterval(statusClock); statusClock = null }
   if (doctorVerificationTimer) clearTimeout(doctorVerificationTimer)
-  if (unsubscribeThemeTokens) {
-    unsubscribeThemeTokens()
-    unsubscribeThemeTokens = null
-  }
+  unsubscribeThemeChange?.()
+  unsubscribeThemeChange = null
   reducedMotionQuery?.removeEventListener?.('change', updateReducedMotionPreference)
   reducedMotionQuery = null
-  if (resizeObserver) {
-    resizeObserver.disconnect()
-    resizeObserver = null
-  }
 })
 </script>

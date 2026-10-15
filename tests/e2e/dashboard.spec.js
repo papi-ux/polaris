@@ -154,9 +154,10 @@ test.describe('dashboard', () => {
 
     await loggedInPage.reload({ waitUntil: 'domcontentloaded' })
 
-    // Wait for the Host vitals card to render with AMD GPU data: the gauges
-    // that have a value show, the ones without a value are not rendered at all.
-    const vitals = loggedInPage.locator('.section-card', { hasText: 'Host vitals' })
+    // Wait for the Host vitals disclosure to render with AMD GPU data and open it: the
+    // gauges that have a value show, the ones without a value are not rendered at all.
+    const vitals = loggedInPage.locator('[data-dashboard-idle-vitals]')
+    await vitals.locator('summary').click({ timeout: 10000 })
     await expect(vitals.getByText('GPU', { exact: true })).toBeVisible({ timeout: 10000 })
     await expect(vitals.getByText('VRAM', { exact: true })).toBeVisible({ timeout: 10000 })
 
@@ -164,9 +165,14 @@ test.describe('dashboard', () => {
     await expect(vitals.getByText(/^(NVENC|VCN)$/)).toHaveCount(0)
     await expect(vitals.getByText('Temp', { exact: true })).toHaveCount(0)
 
-    // Missing temperature and power draw render as '--', not raw numbers
-    await expect(vitals.getByText(/--W/)).toBeVisible()
-    await expect(loggedInPage.locator('[data-dashboard-idle-hero]').getByText(/--°C/)).toBeVisible()
+    // Missing temperature and power draw render as '--', not raw numbers (Mission Control's
+    // idle stage carries the host GPU reading since issue #408)
+    const gpuReading = loggedInPage.locator('[data-dashboard-idle-hero] [data-idle-signal="gpu"]')
+    await expect(gpuReading).toContainText('--°C')
+    await expect(gpuReading).toContainText('55%')
+    await expect(gpuReading.getByText(/--W/)).toBeVisible()
+    // Missing power is never invented as a measured zero.
+    await expect(gpuReading).not.toContainText(/(^|\D)0W|NaN|undefined/)
 
     // No raw undefined or NaN values anywhere on the page
     const bodyText = await loggedInPage.locator('body').innerText()
