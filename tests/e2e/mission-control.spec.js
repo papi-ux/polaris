@@ -20,11 +20,13 @@ const gpu = { name: 'Fixture GPU', vendor: 'nvidia', temperature_c: 54, utilizat
 const cover = (fill, mark) => `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="600"><rect width="400" height="600" fill="${fill}"/><circle cx="200" cy="250" r="120" fill="${mark}"/><rect y="440" width="400" height="160" fill="#ffffff"/></svg>`
 const covers = { [catalog[0].name]: cover('#e8e4dc', '#c8261d'), [catalog[1].name]: cover('#f2d27a', '#2a4a5a') }
 // Steam backgrounds and logos from the host artwork cache. Control's pale background is the worst
-// case for copy over it; Hades has no background and a logo too dark for the stage.
-const heroes = { control: '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="620"><rect width="1920" height="620" fill="#ece8df"/><rect x="1100" width="820" height="620" fill="#b8231b"/></svg>' }
+// case for copy over it; Hades has no background and a logo too dark for the stage; Balatro has a
+// pale background and a mid-tone logo that would not hold 3:1 over it.
+const paleHero = '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="620"><rect width="1920" height="620" fill="#ece8df"/><rect x="1100" width="820" height="620" fill="#b8231b"/></svg>'
+const heroes = { control: paleHero, balatro: paleHero }
 const logo = fill => `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="200"><rect x="20" y="40" width="600" height="120" rx="24" fill="${fill}"/></svg>`
 // The long title's logo is white at 2% opacity: present, but too faint to stand in for its name.
-const logos = { control: logo('#f4f1ea'), hades: logo('#15110f'), long: logo('#ffffff" fill-opacity="0.02') }
+const logos = { control: logo('#f4f1ea'), hades: logo('#15110f'), long: logo('#ffffff" fill-opacity="0.02'), balatro: logo('#808080') }
 const live = {
   streaming: true, fps: 119.6, session_target_fps: 120, latency_ms: 11, bitrate_kbps: 48000, encode_time_ms: 3.1,
   codec: 'hevc', width: 1920, height: 1080, hdr_effective_mode: 'sdr_8bit', hdr_downgrade_reason: 'none',
@@ -459,11 +461,21 @@ test.describe('Mission Control stage', () => {
     await expect(hero.locator('[data-stage-logo]')).toHaveCount(0)
     await expect(hero.locator('.mc-stage-title span')).toBeVisible()
     await expect(hero.locator('.mc-stage-title span')).not.toHaveClass(/sr-only/)
-    // A title whose cover is missing gets a typographic stage.
+    // Without a cover or a background, that title's stage is typographic.
+    await expect(hero.locator('[data-stage-artwork]')).toHaveCount(0)
+    await expect(hero.locator('.mc-stage-backdrop')).toHaveCount(0)
+    // A pale background with a mid-tone logo: the logo would not hold 3:1 over the background, so
+    // the name stays visible; the missing cover leaves no key art.
     await page.locator('[data-dashboard-feature-app="balatro"]').click()
     await expect(hero.locator('.mc-stage-title')).toHaveText('Balatro')
     await expect(hero.locator('[data-stage-artwork]')).toHaveCount(0)
-    await expect(hero.locator('.mc-stage-backdrop')).toHaveCount(0)
+    await expect(hero.locator('[data-stage-hero]')).toHaveAttribute('src', './api/apps/balatro/artwork/hero')
+    await expect(hero.locator('[data-stage-hero]')).toHaveClass(/is-loaded/)
+    await expect(hero.locator('[data-stage-logo]')).toHaveCount(0)
+    await expect(hero.locator('.mc-stage-title span')).toBeVisible()
+    await expect(hero.locator('.mc-stage-title span')).not.toHaveClass(/sr-only/)
+    await readableOverArt(page, hero.locator('.mc-kicker'), 'pale background kicker')
+    await shot(page, testInfo, 'idle-featured-balatro-pale-midtone.png')
     expect(host.writes).toEqual([])
     // Play is the one shelf control that launches.
     await page.locator('[data-dashboard-feature-app="long"]').hover()
