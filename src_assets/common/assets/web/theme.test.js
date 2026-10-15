@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { nextTick } from 'vue'
 import ThemeToggle from './ThemeToggle.vue'
 import {
   applyTheme,
@@ -71,7 +72,7 @@ describe('theme skin registry', () => {
       'Portable Chrome',
       'Console OLED',
       'Miami Nebula',
-      'Director',
+      '< Congratulations, Director >',
       'High Contrast',
     ])
     for (const theme of THEMES) {
@@ -120,23 +121,54 @@ describe('theme skin registry', () => {
     expect(themeCss('portable-chrome')).not.toContain('#ff5cab')
   })
 
-  it('uses Nova Director crimson surfaces and tiles, warm copy and black controls', () => {
+  it('keeps the Director id and names it for Control on Polaris', () => {
+    // The visible name is exact text; the id, storage key and boot allowlist stay 'director'.
+    expect(getThemeMeta('director')).toMatchObject({
+      id: 'director',
+      label: '< Congratulations, Director >',
+      shortLabel: '< Congratulations, Director >',
+    })
+    setTheme('director')
+    expect(localStorage.getItem('polaris-theme')).toBe('director')
+    expect(document.documentElement.getAttribute('data-theme')).toBe('director')
+  })
+
+  it('makes Director charcoal-dominant with red kept to signals and focus', () => {
     const director = themeCss('director')
-    for (const value of ['#6e0b17', '#881525', '#9a1b2e', '#5e0a14', '#7b1020', '#261015', '#12090b', '#fff5e8', '#f1d9cd', '#dec0b5', '#ffb7ac']) {
-      expect(director).toContain(value)
+    const tokens = { ...extractTokens(themeCss('polaris')), ...extractTokens(director) }
+    const channels = (hex) => hexToRgb(hex).map((channel) => Math.round(channel * 255))
+    // Every stage, card, tile and control surface is near-black and nearly neutral, so the page
+    // reads dark rather than tinted.
+    for (const surface of ['void', 'deep', 'card-base', 'raised', 'raised-hover', 'pill', 'chip']) {
+      const rgb = channels(tokens[surface])
+      expect(relativeLuminance(tokens[surface]), `${surface} ${tokens[surface]} is near-black`).toBeLessThanOrEqual(0.02)
+      expect(Math.max(...rgb) - Math.min(...rgb), `${surface} ${tokens[surface]} is near-neutral`).toBeLessThanOrEqual(12)
     }
-    expect(director).toContain('--surface-card: #881525')
-    // Nova keeps tiles on its crimson elevated surface with black dividers;
-    // black stays on controls.
-    expect(director).toContain('--surface-raised: #9a1b2e')
-    expect(director).toContain('--edge-raised: #12090b')
-    expect(director).toContain('--surface-pill: #261015')
-    expect(director).toContain('--surface-chip: #261015')
-    expect(director).toContain('outline: 2px solid var(--color-ice)')
-    // Success and warning stay the shared semantic roles. Info keeps its sky hue,
-    // lifted only enough to read on crimson.
+    // Copy is warm white, never cool.
+    for (const role of ['ice', 'silver']) {
+      const [red, , blue] = channels(tokens[role])
+      expect(red, `${role} is warm`).toBeGreaterThan(blue)
+    }
+    // The accent is a clear red that reads as a focus ring or toggle on the darkest stage and
+    // on cards (3:1 non-text), while danger is set apart from it by lightness.
+    const [red, green, blue] = channels(tokens.accent)
+    expect(red).toBeGreaterThan(2.5 * green)
+    expect(red).toBeGreaterThan(2.5 * blue)
+    for (const ground of ['void', 'card-base', 'raised']) {
+      expect(contrastRatio(tokens.accent, tokens[ground]), `accent on ${ground}`).toBeGreaterThanOrEqual(3)
+    }
+    expect(relativeLuminance(tokens.danger)).toBeGreaterThanOrEqual(1.5 * relativeLuminance(tokens.accent))
+    expect(director).toMatch(/\.settings-input:focus\s*\{[^}]*outline: 2px solid var\(--color-accent\)/)
+    expect(director).toMatch(/\.focus-ring\s*\{\s*@apply focus-visible:ring-accent/)
+    // An input's own edge stays a visible boundary (3:1) on the card it sits on.
+    const edge = /\.settings-input\s*\{[^}]*border-color: color-mix\(in srgb, var\(--color-ice\) (\d+)%, transparent\)/.exec(director)
+    expect(edge).not.toBeNull()
+    const share = Number(edge[1]) / 100
+    const composite = '#' + channels(tokens.ice).map((channel, index) => Math.round(share * channel + (1 - share) * channels(tokens['card-base'])[index])
+      .toString(16).padStart(2, '0')).join('')
+    expect(contrastRatio(composite, tokens['card-base']), `input edge ${composite}`).toBeGreaterThanOrEqual(3)
+    // Success and warning stay the shared semantic roles.
     expect(director).not.toMatch(/--color-(success|warning):/)
-    expect(director).toContain('--color-info: #7dd3fc')
   })
 
   it('keeps Director text roles at 4.5:1 on its cards, tiles and hovered tiles', () => {
@@ -155,7 +187,7 @@ describe('theme skin registry', () => {
 
   it('gives Director section kickers the full storm tone without moving other kickers', () => {
     const director = themeCss('director')
-    // The shared muted kicker measures 4.10:1 on the crimson card.
+    // The shared kicker is muted to 80%; Director keeps the full storm tone.
     expect(appCss).toMatch(/\.section-kicker\s*\{[^}]*text-storm\/80/)
     expect(director).toMatch(/:where\(\[data-theme="director"\]\) \.section-kicker\s*\{\s*color: var\(--color-storm\);\s*\}/)
     // Hero and console kickers keep their own higher-specificity colours.
@@ -302,37 +334,57 @@ describe('theme picker', () => {
     document.documentElement.removeAttribute('data-theme')
   })
 
+  // The open list is rendered on <body> (so a scrolling sidebar cannot clip it) and anchored to its
+  // button's on-screen box, so these cases give the button real geometry and look for the list there.
+  function placeButton(wrapper, box = { top: 600, bottom: 640, left: 12, right: 244 }) {
+    const button = wrapper.find('button[aria-haspopup="listbox"]').element
+    button.getBoundingClientRect = () => ({ ...box, x: box.left, y: box.top, width: box.right - box.left, height: box.bottom - box.top })
+  }
+
   it('opens a listbox with every registered skin and marks the current one', async () => {
     setTheme('miami')
     const wrapper = mount(ThemeToggle, { attachTo: document.body })
+    placeButton(wrapper)
 
     expect(wrapper.find('button[aria-haspopup="listbox"]').text()).toContain('Appearance')
 
-    expect(wrapper.find('[role="listbox"]').exists()).toBe(false)
+    expect(document.querySelector('[role="listbox"]')).toBeNull()
     await wrapper.find('button[aria-haspopup="listbox"]').trigger('click')
 
-    const options = wrapper.findAll('[role="option"]')
+    const options = [...document.querySelectorAll('[role="option"]')]
     expect(options).toHaveLength(THEMES.length)
     for (const theme of THEMES) {
-      expect(options.some((option) => option.text().includes(theme.label)), theme.label).toBe(true)
+      expect(options.some((option) => option.textContent.includes(theme.label)), theme.label).toBe(true)
     }
-    const current = wrapper.find('[role="option"][aria-selected="true"]')
-    expect(current.text()).toContain('Miami Nebula')
-    expect(current.text()).toContain('Current')
+    const current = document.querySelector('[role="option"][aria-selected="true"]')
+    expect(current.textContent).toContain('Miami Nebula')
+    expect(current.textContent).toContain('Current')
     wrapper.unmount()
+    expect(document.querySelector('[role="listbox"]')).toBeNull()
   })
 
   it('applies a chosen skin and closes the listbox', async () => {
     const wrapper = mount(ThemeToggle, { attachTo: document.body })
+    placeButton(wrapper)
 
     await wrapper.find('button[aria-haspopup="listbox"]').trigger('click')
-    const oledOption = wrapper.findAll('[role="option"]').find((option) => option.text().includes('Console OLED'))
-    await oledOption.trigger('click')
+    const oledOption = [...document.querySelectorAll('[role="option"]')].find((option) => option.textContent.includes('Console OLED'))
+    oledOption.click()
+    await nextTick()
 
     expect(getTheme()).toBe('oled')
     expect(document.documentElement.getAttribute('data-theme')).toBe('oled')
-    expect(wrapper.find('[role="listbox"]').exists()).toBe(false)
+    expect(document.querySelector('[role="listbox"]')).toBeNull()
     expect(wrapper.find('button[aria-haspopup="listbox"]').text()).toContain('OLED')
+    wrapper.unmount()
+  })
+
+  it('does not float the list once its button is off screen', async () => {
+    const wrapper = mount(ThemeToggle, { attachTo: document.body })
+    placeButton(wrapper, { top: window.innerHeight + 40, bottom: window.innerHeight + 80, left: 12, right: 244 })
+    await wrapper.find('button[aria-haspopup="listbox"]').trigger('click')
+    expect(document.querySelector('[role="listbox"]')).toBeNull()
+    expect(wrapper.find('button[aria-haspopup="listbox"]').attributes('aria-expanded')).toBe('false')
     wrapper.unmount()
   })
 
