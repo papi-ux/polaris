@@ -6419,6 +6419,211 @@ namespace confighttp {
   }
 
   namespace {
+#ifdef POLARIS_TESTS
+    game_artwork::providers::transport_t library_artwork_transport_override;
+    std::optional<fs::path> library_artwork_appdata_override;
+#endif
+
+    fs::path library_artwork_appdata() {
+#ifdef POLARIS_TESTS
+      if (library_artwork_appdata_override) return *library_artwork_appdata_override;
+#endif
+      return platf::appdata();
+    }
+
+    // Without a key: a fill only ever asks Steam's public CDN, whatever SteamGridDB key is set.
+    game_artwork::providers::transport_t library_artwork_transport() {
+#ifdef POLARIS_TESTS
+      if (library_artwork_transport_override) return library_artwork_transport_override;
+#endif
+      return nvhttp::artwork_transport({});
+    }
+
+    // A Steam title without a background or logo on Steam's CDN is asked again an hour later, not on
+    // every view; a fill that got everything leaves no window. Past the bound, expired windows go
+    // first, then the rest.
+    constexpr std::int64_t library_artwork_retry_milliseconds = 60 * 60 * 1000;
+    constexpr std::size_t library_artwork_retry_bound = 256;
+
+    struct library_artwork_fills_t {
+      std::mutex mutex;
+      std::set<std::string> running;
+      std::unordered_map<std::string, std::int64_t> retry_after;
+    };
+
+    library_artwork_fills_t &library_artwork_fills() {
+      static library_artwork_fills_t fills;
+      return fills;
+    }
+
+    void forget_library_artwork_fill(const std::string &uuid, bool retry_window) {
+      auto &fills = library_artwork_fills();
+      std::lock_guard lock(fills.mutex);
+      fills.running.erase(uuid);
+      if (retry_window) fills.retry_after.erase(uuid);
+    }
+
+    /**
+     * @brief Start fetching a Steam title's missing background and logo, unless a fill for it is
+     *        running or came back incomplete within the hour.
+     *
+     * Never waits: the console's one request thread hands the downloads to `workers` and answers at
+     * once. Remove artwork is checked again before each download and at publication, so one made
+     * while a fill runs still wins. A fill refused by the full or stopping workers is forgotten, and
+     * the next view tries again.
+     */
+    void schedule_library_artwork_fill(cover_lookup::workers_t &workers, const fs::path &appdata, const proc::ctx_t &app) {
+      auto plan = library_artwork_fill_plan(appdata, app);
+      if (plan.empty()) return;
+      const auto now = nvhttp::artwork_clock_milliseconds();
+      {
+        auto &fills = library_artwork_fills();
+        std::lock_guard lock(fills.mutex);
+        if (fills.running.contains(app.uuid)) return;
+        if (const auto retry = fills.retry_after.find(app.uuid); retry != fills.retry_after.end() && now < retry->second) return;
+        if (fills.retry_after.size() >= library_artwork_retry_bound) {
+          std::erase_if(fills.retry_after, [now](const auto &entry) { return entry.second <= now; });
+          if (fills.retry_after.size() >= library_artwork_retry_bound) fills.retry_after.clear();
+        }
+        fills.running.insert(app.uuid);
+        fills.retry_after[app.uuid] = now + library_artwork_retry_milliseconds;
+      }
+
+      auto fill = [appdata, uuid = app.uuid, plan = std::move(plan), transport = library_artwork_transport()](
+                    const std::shared_ptr<cover_lookup::completion_t> &ticket) {
+        bool complete = false;
+        auto finished = util::fail_guard([&uuid, &complete] { forget_library_artwork_fill(uuid, complete); });
+        // Shutdown cancels the ticket; a download not yet started then never starts.
+        const game_artwork::providers::transport_t cancellable = [&ticket, &transport](
+          const game_artwork::providers::request_t &request, std::uintmax_t maximum_bytes
+        ) -> std::optional<game_artwork::providers::transport_response_t> {
+          if (ticket->cancelled()) return std::nullopt;
+          return transport(request, maximum_bytes);
+        };
+        try {
+          (void) game_artwork::providers::execute_download_plan(appdata, uuid, plan, cancellable);
+          // Everything arrived, so the window has nothing to hold back: if Remove artwork and Find
+          // artwork again take the images away, the next view fills them at once.
+          complete = std::all_of(plan.begin(), plan.end(), [&](const game_artwork::providers::request_t &request) {
+            return game_artwork::find_cached_asset(appdata, uuid, *request.kind).has_value();
+          });
+        } catch (...) {
+          // A failed fill keeps every valid cached image and waits out its retry window.
+        }
+      };
+      try {
+        if (workers.submit_completion(std::move(fill)) == cover_lookup::admission_e::accepted) return;
+      } catch (...) {
+      }
+      forget_library_artwork_fill(app.uuid, true);
+    }
+
+    void write_library_artwork_miss(resp_https_t response) {
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_common_security_headers(headers);
+      headers.emplace("Content-Type", "text/plain");
+      headers.emplace("Cache-Control", "no-store");
+      response->write(SimpleWeb::StatusCode::client_error_not_found, "No artwork", headers);
+    }
+  }  // namespace
+
+  std::vector<game_artwork::providers::request_t> library_artwork_fill_plan(const fs::path &appdata, const proc::ctx_t &app) {
+    if (!game_artwork::is_valid_uuid(app.uuid) || proc::uses_bundled_utility_artwork(app) ||
+        !game_artwork::is_valid_steam_appid(app.steam_appid) ||
+        !game_artwork::automatic_artwork_lookup_enabled(appdata, app.uuid)) {
+      return {};
+    }
+    auto plan = game_artwork::providers::plan_steam_assets(app.steam_appid);
+    std::erase_if(plan, [&](const game_artwork::providers::request_t &request) {
+      return !request.kind || (*request.kind != game_artwork::kind_e::hero && *request.kind != game_artwork::kind_e::logo) ||
+             game_artwork::find_cached_asset(appdata, app.uuid, *request.kind).has_value();
+    });
+    return plan;
+  }
+
+  /**
+   * @brief Serve an entry's background (hero) or logo from the host artwork cache Nova reads.
+   *
+   * The image Nova shows for the entry, chosen the same way: a pick made in Nova first, then the
+   * entry's own art, then Steam's, then SteamGridDB's, except that a Desktop or utility entry never
+   * shows a SteamGridDB match. The URL names the entry, not the image, so the browser revalidates
+   * with the image's entity tag and an unchanged image answers 304 without its bytes.
+   *
+   * A Steam title missing either image answers 404 at once and fetches what it lacks from Steam's
+   * public CDN in the background, so the next view shows it. No fill runs for an entry after Remove
+   * artwork, for a Desktop or utility entry, or against SteamGridDB, and the browser only ever loads
+   * the image from the host.
+   *
+   * @api_examples{/api/apps/<uuid>/artwork/hero| GET| null}
+   */
+  void getLibraryArtwork(resp_https_t response, req_https_t request, cover_lookup::workers_t &fills) {
+    if (!authenticate(response, request)) return;
+
+    const std::string uuid = request->path_match.size() > 1 ? request->path_match[1].str() : std::string {};
+    const auto kind = game_artwork::parse_kind(request->path_match.size() > 2 ? request->path_match[2].str() : std::string {});
+    if (!game_artwork::is_valid_uuid(uuid) || !kind) {
+      bad_request(response, request, "Artwork needs an app uuid");
+      return;
+    }
+
+    const auto apps = proc::proc.get_apps();
+    const auto app = std::find_if(apps.begin(), apps.end(), [&](const proc::ctx_t &candidate) {
+      return boost::iequals(candidate.uuid, uuid);
+    });
+    if (app == apps.end()) {
+      write_library_artwork_miss(response);
+      return;
+    }
+
+    const auto appdata = library_artwork_appdata();
+    if (!game_artwork::recover_interrupted_artwork_override(appdata, app->uuid)) {
+      SimpleWeb::CaseInsensitiveMultimap headers;
+      append_common_security_headers(headers);
+      headers.emplace("Content-Type", "text/plain");
+      headers.emplace("Cache-Control", "no-store");
+      response->write(SimpleWeb::StatusCode::server_error_internal_server_error, "Artwork unavailable", headers);
+      return;
+    }
+    {
+      auto artwork_lock = game_artwork::acquire_artwork_override_read_lock();
+      auto asset = game_artwork::find_cached_asset(appdata, app->uuid, *kind);
+      // As in Nova: a utility or desktop entry never shows an automatic SteamGridDB match, even one
+      // whose file outlived its removal.
+      if (asset && asset->source == game_artwork::source_e::steamgriddb && proc::uses_bundled_utility_artwork(*app)) {
+        asset.reset();
+      }
+      if (asset) {
+        const auto etag = cover_image_etag(asset->path);
+        SimpleWeb::CaseInsensitiveMultimap headers;
+        append_common_security_headers(headers);
+        headers.emplace("Cache-Control", "private, no-cache");
+        if (etag) headers.emplace("ETag", *etag);
+        const auto seen = request->header.find("If-None-Match");
+        if (etag && seen != request->header.end() && seen->second == *etag) {
+          response->write(SimpleWeb::StatusCode::redirection_not_modified, headers);
+          return;
+        }
+        std::ifstream input(asset->path, std::ios::binary);
+        if (input) {
+          headers.emplace("Content-Type", asset->mime_type);
+          response->write(SimpleWeb::StatusCode::success_ok, input, headers);
+          return;
+        }
+      }
+    }
+
+    schedule_library_artwork_fill(fills, appdata, *app);
+    write_library_artwork_miss(response);
+  }
+
+  // The fill owner lives until server shutdown has joined every accepted fill.
+  void registerLibraryArtwork(SimpleWeb::ServerBase<SimpleWeb::HTTPS> &server, cover_lookup::workers_t &fills) {
+    server.resource["^/api/apps/([^/]+)/artwork/(hero|logo)$"]["GET"] = [&fills](resp_https_t response, req_https_t request) {
+      getLibraryArtwork(response, request, fills);
+    };
+  }
+
+  namespace {
     using cover_post_t = std::function<void(std::function<void()>)>;
     using recording_save_workers_t = cover_lookup::workers_t;
     using cover_work_t = std::function<std::function<void()>(const std::shared_ptr<cover_lookup::completion_t> &)>;
@@ -10821,6 +11026,23 @@ namespace confighttp {
     recording_saves.shutdown();
   }
 
+  void run_library_artwork_routes_for_tests(
+    const std::string &cert, const std::string &key,
+    const std::function<void(unsigned short, std::function<void()>)> &ready
+  ) {
+    // The production route with the console's 404 for any other GET, as start() serves them.
+    https_server_t server {cert, key};
+    server.config.address = "127.0.0.1";
+    server.config.port = 0;
+    cover_lookup::workers_t fills; // Drained before the server is destroyed.
+    server.default_resource["GET"] = not_found;
+    registerLibraryArtwork(server, fills);
+    server.start([&](unsigned short port) {
+      ready(port, [&]() { fills.stop_accepting(); server.stop(); });
+    });
+    fills.shutdown();
+  }
+
   void run_console_app_routes_for_tests(
     const std::string &cert, const std::string &key,
     const std::function<void(unsigned short, std::function<void()>)> &ready
@@ -10864,6 +11086,7 @@ namespace confighttp {
     auto port_https = net::map_port(PORT_HTTPS);
     auto address_family = net::af_from_enum_string(config::sunshine.address_family);
     cover_lookup::workers_t cover_lookups;
+    cover_lookup::workers_t library_artwork_fills; // Background Steam fills; never a cover lookup's slot.
     https_server_t server { config::nvhttp.cert, config::nvhttp.pkey };
     recording_save_workers_t recording_saves; // Owns deferred responses while server lives.
     // Declared after the server so it is destroyed first; stopped explicitly below as well.
@@ -11062,6 +11285,7 @@ namespace confighttp {
     server.resource["^/api/apps/close$"]["POST"] = withCsrf(closeApp);
     server.resource["^/api/apps/artwork/remove$"]["POST"] = withCsrf(removeAppArtwork);
     server.resource["^/api/apps/artwork/find$"]["POST"] = withCsrf(findAppArtwork);
+    registerLibraryArtwork(server, library_artwork_fills);
     server.resource["^/api/games/scan$"]["GET"] = scanGames;
     server.resource["^/api/games/import$"]["POST"] = withCsrf(importGames);
     server.resource["^/api/library/sources$"]["GET"] = getLibrarySources;
@@ -11224,6 +11448,7 @@ namespace confighttp {
     shutdown_event->view();
 
     cover_lookups.stop_accepting();
+    library_artwork_fills.stop_accepting();
     recording_saves.stop_accepting();
     server.stop();
     wait_for_background_tasks();
@@ -11232,6 +11457,7 @@ namespace confighttp {
     // Any network-evidence request still waiting is answered unknown before the server goes.
     network_collector.stop();
     cover_lookups.shutdown();
+    library_artwork_fills.shutdown();
     recording_saves.shutdown();
   }
   static std::atomic<session_state_e> s_session_state{session_state_e::idle};
@@ -11325,6 +11551,31 @@ namespace confighttp {
   void set_cover_apply_for_tests(game_artwork::providers::transport_t transport, std::optional<fs::path> appdata) {
     cover_apply_transport_override = std::move(transport);
     cover_apply_appdata_override = std::move(appdata);
+  }
+
+  void set_library_artwork_for_tests(game_artwork::providers::transport_t transport, std::optional<fs::path> appdata) {
+    library_artwork_transport_override = std::move(transport);
+    library_artwork_appdata_override = std::move(appdata);
+  }
+
+  bool wait_for_library_artwork_fills_for_tests(std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (true) {
+      {
+        auto &fills = library_artwork_fills();
+        std::lock_guard lock(fills.mutex);
+        if (fills.running.empty()) return true;
+      }
+      if (std::chrono::steady_clock::now() >= deadline) return false;
+      std::this_thread::sleep_for(std::chrono::milliseconds {5});
+    }
+  }
+
+  void forget_library_artwork_fills_for_tests() {
+    auto &fills = library_artwork_fills();
+    std::lock_guard lock(fills.mutex);
+    fills.running.clear();
+    fills.retry_after.clear();
   }
 
   void set_cover_sweep_lookup_for_tests(artwork_sweep::lookup_fn_t lookup) {

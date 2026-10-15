@@ -131,6 +131,10 @@ used, so an entry SteamGridDB does not know keeps its own image. Desktop, Low Re
 other entry that streams the desktop never look anything up, and artwork an earlier version
 downloaded for them is removed.
 
+The host serves Mission Control the same background and logo for its stage. A request for a Steam title's missing one
+fetches it from Steam in the background, never from SteamGridDB, so it is there the next time;
+Desktop entries and entries after **Remove artwork** fetch nothing.
+
 **Remove artwork** deletes every picture Polaris downloaded for a saved entry, and any you picked
 in Nova, and stops Polaris looking up new ones. The entry's own image stays, and Nova shows it the
 next time its library loads. **Find artwork again** turns the lookup back on; it does not bring the

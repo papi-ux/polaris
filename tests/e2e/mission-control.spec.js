@@ -19,6 +19,15 @@ const gpu = { name: 'Fixture GPU', vendor: 'nvidia', temperature_c: 54, utilizat
 // A pale cover is the hardest case for text over artwork: the scrim must keep copy readable.
 const cover = (fill, mark) => `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="600"><rect width="400" height="600" fill="${fill}"/><circle cx="200" cy="250" r="120" fill="${mark}"/><rect y="440" width="400" height="160" fill="#ffffff"/></svg>`
 const covers = { [catalog[0].name]: cover('#e8e4dc', '#c8261d'), [catalog[1].name]: cover('#f2d27a', '#2a4a5a') }
+// Steam backgrounds and logos from the host artwork cache. Control's pale background is the worst
+// case for copy over it; Hades has no background and a logo too dark for the stage; Balatro has a
+// pale background and a light grey logo that holds 3:1 only if no more than half of a bright
+// background shows through the scrim.
+const paleHero = '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="620"><rect width="1920" height="620" fill="#ece8df"/><rect x="1100" width="820" height="620" fill="#b8231b"/></svg>'
+const heroes = { control: paleHero, balatro: paleHero }
+const logo = fill => `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="200"><rect x="20" y="40" width="600" height="120" rx="24" fill="${fill}"/></svg>`
+// The long title's logo is white at 2% opacity: present, but too faint to stand in for its name.
+const logos = { control: logo('#f4f1ea'), hades: logo('#15110f'), long: logo('#ffffff" fill-opacity="0.02'), balatro: logo('#c8c8c8') }
 const live = {
   streaming: true, fps: 119.6, session_target_fps: 120, latency_ms: 11, bitrate_kbps: 48000, encode_time_ms: 3.1,
   codec: 'hevc', width: 1920, height: 1080, hdr_effective_mode: 'sdr_8bit', hdr_downgrade_reason: 'none',
@@ -87,6 +96,11 @@ async function mockHost(page, { theme = 'director', stats = idle, certs = [{ uui
     }
     if (path === '/api/multiseat/profiles') return route.fulfill({ json: host.spaces })
     if (path === '/api/clients/list') return route.fulfill({ json: { status: true, platform: 'linux', named_certs: certs } })
+    const artwork = path.match(/^\/api\/apps\/([^/]+)\/artwork\/(hero|logo)$/)
+    if (artwork) {
+      const svg = (artwork[2] === 'hero' ? heroes : logos)[artwork[1]]
+      return svg ? route.fulfill({ contentType: 'image/svg+xml', body: svg }) : route.fulfill({ status: 404, body: '' })
+    }
     if (path === '/api/covers/image') {
       const svg = covers[url.searchParams.get('name')]
       return svg ? route.fulfill({ contentType: 'image/svg+xml', body: svg }) : route.fulfill({ status: 404, body: '' })
@@ -263,6 +277,12 @@ test.describe('Mission Control stage', () => {
     await expect(art).toHaveAttribute('src', './api/covers/image?name=Control%20Ultimate%20Edition')
     await expect.poll(() => art.evaluate(img => img.complete && img.naturalWidth)).toBeGreaterThan(0)
     await expect(stage(page).locator('.mc-stage-backdrop')).toHaveCount(1)
+    // The title's Steam background fills the stage, and its logo stands in for the title text,
+    // which stays the heading.
+    await expect(stage(page).locator('[data-stage-hero]')).toHaveAttribute('src', './api/apps/control/artwork/hero')
+    await expect(stage(page).locator('[data-stage-hero]')).toHaveClass(/is-loaded/)
+    await expect(stage(page).locator('[data-stage-logo]')).toBeVisible()
+    await expect(title.locator('span')).toHaveClass(/sr-only/)
     for (const metric of ['Quality', 'Latency', 'FPS', 'Loss', 'Bitrate', 'Encode']) {
       await expect(page.locator(`[data-live-summary-metric="${metric}"]`)).toBeVisible()
     }
@@ -425,6 +445,10 @@ test.describe('Mission Control stage', () => {
     await expect(keyart.locator('img')).toHaveCount(1)
     await expect(keyart.locator('img')).toHaveAttribute('src', './api/covers/image?name=Hades%20II')
     await expect(hero.locator('.mc-stage-backdrop.is-loaded')).toHaveCount(1)
+    // No Steam background: the softened cover stands in. A logo too dark for the stage keeps the text.
+    await expect(hero.locator('[data-stage-hero]')).toHaveCount(0)
+    await expect(hero.locator('[data-stage-logo]')).toHaveCount(0)
+    await expect(hero.locator('.mc-stage-title span')).not.toHaveClass(/sr-only/)
     const after = await placed()
     for (const side of ['x', 'y', 'width', 'height']) expect(Math.abs(after[side] - before[side]), `${side} ${JSON.stringify({ before, after })}`).toBeLessThanOrEqual(1)
     // The crossfade animates opacity and the settle transform only, never layout or the blur.
@@ -432,11 +456,29 @@ test.describe('Mission Control stage', () => {
     await readableOverArt(page, hero.locator('.mc-kicker'), 'featured kicker')
     await readableOverArt(page, hero.locator('.mc-stage-meta'), 'featured meta')
     await shot(page, testInfo, 'idle-featured-hades.png')
-    // A title whose cover is missing gets a typographic stage.
+    // A logo too faint to read keeps the title's name on the stage.
+    await page.locator('[data-dashboard-feature-app="long"]').click()
+    await expect(hero.locator('.mc-stage-title')).toHaveText(catalog[2].name)
+    await expect(hero.locator('[data-stage-logo]')).toHaveCount(0)
+    await expect(hero.locator('.mc-stage-title span')).toBeVisible()
+    await expect(hero.locator('.mc-stage-title span')).not.toHaveClass(/sr-only/)
+    // Without a cover or a background, that title's stage is typographic.
+    await expect(hero.locator('[data-stage-artwork]')).toHaveCount(0)
+    await expect(hero.locator('.mc-stage-backdrop')).toHaveCount(0)
+    // A pale background with a light grey logo: the logo would not hold 3:1 where the scrim is
+    // thinnest, so the name stays visible; the missing cover leaves no key art.
     await page.locator('[data-dashboard-feature-app="balatro"]').click()
     await expect(hero.locator('.mc-stage-title')).toHaveText('Balatro')
     await expect(hero.locator('[data-stage-artwork]')).toHaveCount(0)
-    await expect(hero.locator('.mc-stage-backdrop')).toHaveCount(0)
+    // The crossfade briefly holds the leaving and entering layers; wait for it to settle.
+    await expect(hero.locator('[data-stage-hero]')).toHaveCount(1)
+    await expect(hero.locator('[data-stage-hero]')).toHaveAttribute('src', './api/apps/balatro/artwork/hero')
+    await expect(hero.locator('[data-stage-hero]')).toHaveClass(/is-loaded/)
+    await expect(hero.locator('[data-stage-logo]')).toHaveCount(0)
+    await expect(hero.locator('.mc-stage-title span')).toBeVisible()
+    await expect(hero.locator('.mc-stage-title span')).not.toHaveClass(/sr-only/)
+    await readableOverArt(page, hero.locator('.mc-kicker'), 'pale background kicker')
+    await shot(page, testInfo, 'idle-featured-balatro-pale-midtone.png')
     expect(host.writes).toEqual([])
     // Play is the one shelf control that launches.
     await page.locator('[data-dashboard-feature-app="long"]').hover()
@@ -491,6 +533,33 @@ test.describe('Mission Control stage', () => {
     evidence.writesAfterPlayClick = [...host.writes]
     writeFileSync(testInfo.outputPath('hybrid-touch-evidence.json'), JSON.stringify(evidence, null, 2))
     await testInfo.attach('hybrid-touch-evidence', { path: testInfo.outputPath('hybrid-touch-evidence.json'), contentType: 'application/json' })
+  })
+
+  test('a weak logo keeps the name on a medium-width stage', async ({ page }, testInfo) => {
+    // A 40 to 52rem stage is where the copy column reaches furthest into the thinner scrim.
+    await page.setViewportSize({ width: 1024, height: 768 })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const host = await mockHost(page)
+    await page.goto('/#/')
+    await stageMode(page, 'idle')
+    const hero = page.locator('[data-dashboard-idle-hero]')
+    const width = await hero.evaluate(node => node.getBoundingClientRect().width / parseFloat(getComputedStyle(document.documentElement).fontSize))
+    expect(width, 'stage width in rem').toBeGreaterThanOrEqual(40)
+    expect(width, 'stage width in rem').toBeLessThan(52)
+    await page.locator('[data-dashboard-feature-app="balatro"]').click()
+    await expect(hero.locator('.mc-stage-title')).toHaveText('Balatro')
+    // The crossfade briefly holds the leaving and entering layers; wait for it to settle.
+    await expect(hero.locator('[data-stage-hero]')).toHaveCount(1)
+    await expect(hero.locator('[data-stage-hero]')).toHaveAttribute('src', './api/apps/balatro/artwork/hero')
+    await expect(hero.locator('[data-stage-hero]')).toHaveClass(/is-loaded/)
+    await expect(hero.locator('[data-stage-logo]')).toHaveCount(0)
+    await expect(hero.locator('.mc-stage-title span')).toBeVisible()
+    await expect(hero.locator('.mc-stage-title span')).not.toHaveClass(/sr-only/)
+    // Control's light logo still stands in for its name at this width.
+    await page.locator('[data-dashboard-feature-app="control"]').click()
+    await expect(hero.locator('[data-stage-logo]')).toBeVisible()
+    await shot(page, testInfo, 'idle-medium-stage-control-logo.png')
+    expect(host.writes).toEqual([])
   })
 
   test('Spaces appears only when it needs attention or a Space is running', async ({ page }, testInfo) => {
@@ -600,6 +669,8 @@ test.describe('Mission Control stage', () => {
       await stageMode(page, 'idle')
       const hero = page.locator('[data-dashboard-idle-hero]')
       await expect(hero.locator('.mc-stage-backdrop.is-loaded')).toHaveCount(1)
+      // Control's light logo passes the logo screen against this theme's scrim and brightest backdrop.
+      await expect(hero.locator('[data-stage-logo]')).toBeVisible()
       await readableOverArt(page, hero.locator('.mc-kicker'), `${theme} idle kicker`)
       await readableOverArt(page, hero.locator('.mc-stage-meta'), `${theme} idle meta`)
       await page.screenshot({ path: testInfo.outputPath(`theme-idle-${theme}.png`), animations: 'disabled' })
@@ -643,11 +714,12 @@ test.describe('Mission Control stage', () => {
     await stageMode(page, 'idle')
     await noSidewaysPage(page, '320 idle')
     await reachable(page.locator('[data-stage-launch]'), '320 idle Launch')
+    // A fine pointer that is not over the poster leaves Play hidden and taking no hits, so keyboard
+    // focus reveals it before its hit test; where the mouse happens to rest must not matter.
     const firstPlay = page.locator('[data-dashboard-launch-app]').first()
-    await reachable(firstPlay, '320 idle rail launch')
-    // Without hover, keyboard focus is what reveals Play.
     await firstPlay.focus()
     await expect(firstPlay).toHaveCSS('opacity', '1')
+    await reachable(firstPlay, '320 idle rail launch')
     await shot(page, testInfo, 'reflow-320-idle.png', { deck: true })
   })
 })

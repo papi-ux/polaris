@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  MISSING, STATUS_GRACE_MS, appCoverSrc, reading, dynamicRangeLabel, featuredLibraryApp, formatReportAge,
+  MISSING, STATUS_GRACE_MS, appArtworkSrc, appCoverSrc, reading, dynamicRangeLabel, featuredLibraryApp, formatReportAge,
   graphemeCount, idleSignalCells, liveSignalCells, missionStageMode, streamFormatLabel,
   streamStatusUnavailable, titleStep, unavailableSignalCells,
 } from './mission-control.js'
@@ -29,6 +29,14 @@ describe('Mission Control stage helpers', () => {
     expect(appCoverSrc({ name: 'Control Ultimate Edition', 'image-path': 'control.png' })).toBe('./api/covers/image?name=Control%20Ultimate%20Edition')
     expect(appCoverSrc({ name: 'No Cover' })).toBe('')
     expect(appCoverSrc(null)).toBe('')
+  })
+
+  it('asks the host for a background or logo by uuid, never by name', () => {
+    expect(appArtworkSrc({ uuid: 'C0FFEE00-0000-4000-8000-000000000001', name: 'Control' }, 'hero'))
+      .toBe('./api/apps/C0FFEE00-0000-4000-8000-000000000001/artwork/hero')
+    expect(appArtworkSrc({ uuid: 'a/b', name: 'Odd' }, 'logo')).toBe('./api/apps/a%2Fb/artwork/logo')
+    expect(appArtworkSrc({ name: 'No uuid' }, 'hero')).toBe('')
+    expect(appArtworkSrc(null, 'logo')).toBe('')
   })
 
   it('names SDR only when the host reports it and keeps a downgrade visible', () => {
