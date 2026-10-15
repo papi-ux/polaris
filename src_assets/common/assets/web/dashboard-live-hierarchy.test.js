@@ -63,6 +63,17 @@ describe('DashboardView hierarchy', () => {
     const dashboard = webSource('views/DashboardView.vue')
 
     expectBefore(dashboard, 'data-dashboard-idle-hero', 'data-dashboard-play-rail')
+    // The shelf sits right under the stage, ahead of the deck and the host vitals.
+    expectBefore(dashboard, 'data-dashboard-play-rail', 'class="mc-deck"')
+    expectBefore(dashboard, 'data-dashboard-play-rail', 'data-dashboard-idle-vitals')
+    expect(dashboard).toContain('featureApp(app)')
+    // Hidden Play takes no hits and shows for any touch input; only a press that began on it launches.
+    const css = webSource('app.css')
+    expect(css).toContain('pointer-events: var(--play-hit, none);')
+    expect(css).toMatch(/@media \(hover: none\), \(any-pointer: coarse\) \{\s*\.mc-film \{\s*--play: 1;\s*--play-hit: auto;/)
+    expect(dashboard).toContain('@pointerdown.capture="notePlayPress"')
+    expect(dashboard).toContain('@click="playClicked(app, $event)"')
+    expect(dashboard).toContain(':data-dashboard-feature-app="app.uuid"')
     expect(dashboard).toContain('launchRecentApp(app)')
     expect(dashboard).toContain("$t('dashboard.open_priority_fix')")
     expect(dashboard).toContain('<PosterImage')

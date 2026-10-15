@@ -136,12 +136,14 @@ describe('Mission Control stage helpers', () => {
     expect(byKey.gpu).toMatchObject({ value: MISSING, sub: 'mission_control.telemetry_warming' })
     expect(byKey.last).toBeUndefined()
     const read = idleSignalCells({ readiness: { label: 'Ready for clients', tone: 'text-success', passing: 6, total: 6 },
-      clientsKnown: true, pairedClients: 2, modeLabel: 'Private Stream', liveTuningLabel: 'Live Tuning On — stable', sessionCount: 4,
+      clientsKnown: true, pairedClients: 2, modeLabel: 'Private Stream', liveTuningLabel: 'Live Tuning On — stable',
       gpu: { name: 'GPU', utilization_pct: 3 }, lastSession: { duration: '1 h 12 m', grade: 'A', detail: 'Deck' }, t })
     const known = Object.fromEntries(read.map(cell => [cell.key, cell]))
     expect(known.paired.value).toBe('2')
     expect(known.mode.value).toBe('Private Stream')
     expect(known.tuning.value).toBe('On — stable')
+    // A known reading needs no caption repeating its label; only gaps explain themselves.
+    expect([known.paired.sub, known.mode.sub, known.tuning.sub]).toEqual(['', '', ''])
     // No temperature reported: the reading says so instead of a number.
     expect(`${known.gpu.value}${known.gpu.unit}`).toBe('--°C')
     expect(known.gpu.sub).toBe('3% · --W')
@@ -167,5 +169,15 @@ describe('Mission Control stage helpers', () => {
     expect(featuredLibraryApp([])).toBeNull()
     expect(featuredLibraryApp([{ uuid: 'a', name: 'A', 'last-launched': 1700000000 }]).launchedAt).toBe(1700000000000)
     expect(featuredLibraryApp([{ uuid: 'a', name: 'A' }]).launchedAt).toBe(0)
+  })
+
+  it('features a title picked from the shelf while it is still there', () => {
+    const shelf = [{ uuid: 'a', name: 'A', 'last-launched': 3 }, { uuid: 'b', name: 'B', 'last-launched': 2 }, { uuid: 'c', name: 'C' }]
+    expect(featuredLibraryApp(shelf, 'b')).toMatchObject({ app: { uuid: 'b' }, launchedAt: 2000, chosen: true })
+    // A pick without a launch record still reads as next up rather than "from your library".
+    expect(featuredLibraryApp(shelf, 'c')).toMatchObject({ app: { uuid: 'c' }, launchedAt: 0, chosen: true })
+    // A pick that left the shelf falls back to the most recent title.
+    expect(featuredLibraryApp(shelf, 'gone')).toMatchObject({ app: { uuid: 'a' }, chosen: false })
+    expect(featuredLibraryApp(shelf)).toMatchObject({ app: { uuid: 'a' }, chosen: false })
   })
 })

@@ -9,6 +9,15 @@ describe('Spaces on Mission Control', () => {
   it('keeps disabled Spaces out of the normal dashboard and permits desktop preview', () => {
     expect(model({ enabled: false })).toMatchObject({ visible: false, previewBlocked: false, attention: false })
   })
+  it('shows Spaces on Mission Control only for a session, a change or a problem', () => {
+    // Healthy and idle, or idle with activity not yet reported: nothing to act on here.
+    expect(model({}).visible).toBe(false)
+    expect(model({ activity: null }).visible).toBe(false)
+    expect(model({ activity: [{ profile_id: 'one', client_id: 'c1', state: 'running' }] }).visible).toBe(true)
+    expect(model({ changing: true }).visible).toBe(true)
+    expect(model({}, { error: true }).visible).toBe(true)
+    expect(model({ enabled: false }, { error: true }).visible).toBe(true)
+  })
   it('blocks preview until activity is known, including old hosts and failed refreshes', () => {
     expect(model({}, { loaded: false }).previewBlocked).toBe(true)
     expect(model({ activity: null }).previewBlocked).toBe(true)
@@ -35,7 +44,7 @@ describe('Spaces on Mission Control', () => {
   it.each([
     { failed: true }, { available: false }, { runtime_move_job: { state: 'failed' } },
     { profiles: [{ id: 'one', runtime_mismatch: true }] }, { profiles: [{ id: 'one', family: '' }] },
-  ])('flags actionable reported state %j', extra => { expect(model(extra).attention).toBe(true) })
+  ])('flags actionable reported state %j', extra => { expect(model(extra)).toMatchObject({ attention: true, visible: true }) })
   it('bounds rendering without undercounting sessions and ignores duplicate observations', () => {
     const activity = Array.from({ length: 102 }, (_, i) => ({ profile_id: 'one', client_id: `c${i}`, state: 'running' }))
     const result = model({ activity: [...activity, activity[0]] })

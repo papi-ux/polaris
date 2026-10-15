@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, reactive, watch } from 'vue'
 import { titleStep } from '../mission-control.js'
 
 // The Mission Control stage: one title card per state, library artwork behind it, the main action
@@ -21,10 +21,16 @@ const props = defineProps({
 })
 
 const titleId = `mission-stage-title-${Math.random().toString(36).slice(2)}`
-const artFailed = ref(false)
-const artLoaded = ref(false)
-watch(() => props.artSrc, () => { artFailed.value = false; artLoaded.value = false })
-const showArt = computed(() => Boolean(props.artSrc) && !artFailed.value && !props.hideArt)
+// Load state is kept per image, so a title the viewer features again fades back in at once and a
+// cover that failed is retried only when it is featured anew.
+const loadedArt = reactive(new Set())
+const failedArt = reactive(new Set())
+watch(() => props.artSrc, src => { failedArt.delete(src) })
+// The artwork the stage is built from. Each change of image crossfades: the new layer fades in over
+// the one leaving.
+const art = computed(() => ({ kind: 'poster', src: props.artSrc }))
+const showArt = computed(() => Boolean(art.value.src) && !failedArt.has(art.value.src) && !props.hideArt)
+const artLayers = computed(() => (showArt.value ? [art.value.src] : []))
 const step = computed(() => titleStep(props.title))
 const metaItems = computed(() => props.meta.filter(Boolean))
 </script>
@@ -32,11 +38,12 @@ const metaItems = computed(() => props.meta.filter(Boolean))
 <template>
   <section class="mc-stage" :class="[`is-${mode}`, { 'has-art': showArt }]" :aria-labelledby="titleId" :aria-busy="mode === 'loading' ? 'true' : undefined" data-mission-stage :data-stage-mode="mode">
     <div class="mc-stage-art" aria-hidden="true">
-      <img v-if="showArt" class="mc-stage-backdrop" :class="{ 'is-loaded': artLoaded }" :src="artSrc" alt=""
-        @load="artLoaded = true" @error="artFailed = true" />
+      <TransitionGroup name="mc-xfade">
+        <img v-for="src in artLayers" :key="src" class="mc-stage-backdrop" :class="{ 'is-loaded': loadedArt.has(src) }" :src="src" alt=""
+          @load="loadedArt.add(src)" @error="failedArt.add(src)" />
+      </TransitionGroup>
     </div>
     <div class="mc-stage-scrim" aria-hidden="true"></div>
-    <div class="mc-frame-marks" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
 
     <div class="mc-stage-top">
       <span class="mc-slate"><span class="mc-marker" :class="`is-${mode}`" aria-hidden="true"></span>{{ slate }}</span>
@@ -44,8 +51,11 @@ const metaItems = computed(() => props.meta.filter(Boolean))
     </div>
 
     <div class="mc-stage-body">
-      <div v-if="showArt" class="mc-keyart" :class="{ 'is-loaded': artLoaded }" aria-hidden="true" data-stage-artwork>
-        <img :src="artSrc" alt="" @load="artLoaded = true" @error="artFailed = true" />
+      <div v-if="showArt" class="mc-keyart" aria-hidden="true" data-stage-artwork>
+        <TransitionGroup name="mc-xfade">
+          <img v-for="src in artLayers" :key="src" :class="{ 'is-loaded': loadedArt.has(src) }" :src="src" alt=""
+            @load="loadedArt.add(src)" @error="failedArt.add(src)" />
+        </TransitionGroup>
       </div>
       <!-- The opted-in preview sits where the key art was, whole and uncropped, inside the composition. -->
       <div v-if="$slots.preview" class="mc-stage-preview" :class="{ 'is-expanded': previewExpanded }"><slot name="preview" /></div>

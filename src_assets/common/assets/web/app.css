@@ -1308,24 +1308,6 @@ textarea {
   @apply font-mono text-[11px] text-storm underline decoration-dashed decoration-storm/50 underline-offset-4;
 }
 
-/* Play rail: compact launchable game tiles. */
-.dashboard-play-grid {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 7rem), 1fr));
-}
-
-.dashboard-play-tile {
-  @apply flex min-w-0 flex-col rounded-xl border p-2.5;
-  background: var(--surface-raised);
-  border-color: var(--edge-raised);
-}
-
-/* Neutral warm outlines, level at the bottom of each card whatever the title's length; accent
-   red stays for live, focus and the title rule. */
-.dashboard-play-launch {
-  @apply mt-auto inline-flex min-h-11 w-full items-center justify-center rounded-lg border font-mono text-xs font-semibold text-silver transition-[background-color,border-color,color] duration-150 hover:border-silver disabled:cursor-not-allowed disabled:opacity-50;
-  border-color: var(--edge-raised);
-}
-
 .section-title {
   @apply mt-2 text-xl font-semibold text-silver text-balance;
 }
@@ -2255,50 +2237,46 @@ textarea {
     background: linear-gradient(160deg, var(--color-deep), var(--color-void));
   }
 
-  /* A decorative copy of the cover, blurred and darkened; never a stretched poster. */
-  .mc-stage-backdrop {
+  /* Each artwork layer fades in once loaded, over the one leaving. The backdrop is a softened,
+     darkened copy of the cover that settles once as it arrives; nothing loops. */
+  .mc-stage-backdrop,
+  .mc-keyart img {
     position: absolute;
     inset: 0;
     width: 100%;
     height: 100%;
     object-fit: cover;
-    transform: scale(1.15);
-    filter: blur(32px) saturate(0.7) brightness(0.42);
     opacity: 0;
-    transition: opacity 180ms ease;
+    transition: opacity 0.35s ease, transform 1.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  .mc-stage-backdrop {
+    transform: scale(1.1);
+    filter: blur(14px) saturate(1.05) brightness(0.55);
   }
 
   .mc-stage-backdrop.is-loaded {
+    transform: scale(1.04);
+  }
+
+  .mc-stage-backdrop.is-loaded,
+  .mc-keyart img.is-loaded {
     opacity: 1;
   }
 
+  .mc-stage img.mc-xfade-enter-from,
+  .mc-stage img.mc-xfade-leave-to {
+    opacity: 0;
+  }
+
+  /* The copy sits under the art on a narrow stage, so the scrim darkens from the bottom. */
   .mc-stage-scrim {
     position: absolute;
     inset: 0;
     z-index: -1;
     pointer-events: none;
-    background:
-      linear-gradient(90deg, var(--color-void) 25%, transparent),
-      linear-gradient(0deg, var(--color-void) 5%, transparent 75%);
-    opacity: 0.92;
+    background: linear-gradient(0deg, var(--color-void) 50%, color-mix(in srgb, var(--color-void) 72%, transparent));
   }
-
-  .mc-frame-marks {
-    display: none;
-  }
-
-  .mc-frame-marks i {
-    position: absolute;
-    width: 1rem;
-    height: 1rem;
-    border: 0 solid var(--edge-raised);
-    pointer-events: none;
-  }
-
-  .mc-frame-marks i:nth-child(-n+2) { top: 0.75rem; border-top-width: 1.5px; }
-  .mc-frame-marks i:nth-child(n+3) { bottom: 0.75rem; border-bottom-width: 1.5px; }
-  .mc-frame-marks i:nth-child(odd) { left: 0.75rem; border-left-width: 1.5px; }
-  .mc-frame-marks i:nth-child(even) { right: 0.75rem; border-right-width: 1.5px; }
 
   .mc-stage-top {
     display: flex;
@@ -2328,7 +2306,7 @@ textarea {
     border-radius: 9999px;
   }
 
-  /* The live marker is the page's only motion: a 2.4 s pulse, static under reduced motion. */
+  /* The live marker is the page's only looping motion: a 2.4 s pulse, static under reduced motion. */
   .mc-marker.is-live {
     background: var(--color-accent);
     border-color: var(--color-accent);
@@ -2366,27 +2344,15 @@ textarea {
   }
 
   .mc-keyart {
+    position: relative;
     flex: none;
-    width: 6rem;
+    width: min(8rem, 36cqi, 26vh);
     aspect-ratio: 2 / 3;
     overflow: hidden;
     border: 1px solid var(--edge-raised);
     border-radius: 0.5rem;
     background: var(--color-deep);
     box-shadow: 0 1.25rem 2.5rem -1.25rem rgb(0 0 0 / 0.85);
-    opacity: 0;
-    transition: opacity 180ms ease;
-  }
-
-  .mc-keyart.is-loaded {
-    opacity: 1;
-  }
-
-  .mc-keyart img {
-    display: block;
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
   }
 
   .mc-stage-copy {
@@ -2750,29 +2716,54 @@ textarea {
     overflow-wrap: anywhere;
   }
 
+  /* The shelf: posters in one scrolling row, the next one always peeking in. Its padding keeps
+     the hover lift, the featured outline and the focus ring inside the scroller. */
   .mc-film {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(min(100%, 8.5rem), 1fr));
-    gap: 0.85rem;
-    margin-top: 1rem;
+    grid-auto-flow: column;
+    grid-auto-columns: clamp(9rem, 19%, 13rem);
+    gap: 1rem;
+    margin-top: 0.25rem;
+    padding: 0.75rem 0.375rem 1rem;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x mandatory;
+    scroll-padding-inline: 0.375rem;
+    scrollbar-width: thin;
+  }
+
+  .dashboard-play-tile {
+    min-width: 0;
+    scroll-snap-align: start;
+  }
+
+  .mc-film-art {
+    position: relative;
+    transition: transform 0.16s ease;
+  }
+
+  .mc-film-art:hover {
+    transform: translateY(-4px);
+  }
+
+  .mc-film-pick {
+    position: absolute;
+    inset: 0;
+    border-radius: 0.5rem;
+    cursor: pointer;
+  }
+
+  .mc-film-pick[aria-pressed="true"] {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 3px;
   }
 
   .mc-film-name {
+    margin-top: 0.6rem;
     font-size: 0.9375rem;
     font-weight: 700;
     line-height: 1.25;
     color: var(--color-silver);
-    overflow-wrap: anywhere;
-  }
-
-  .mc-film-source {
-    margin-top: 0.2rem;
-    font-family: var(--font-mono);
-    font-size: 0.75rem;
-    line-height: 1.3;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--color-storm);
     overflow-wrap: anywhere;
   }
 
@@ -3012,9 +3003,22 @@ textarea {
       padding: 1.75rem 2rem 1.5rem;
     }
 
-    /* Capped and framed, so a bright cover never outshines the title. */
+    /* Framed beside the copy: large on the idle stage, smaller beside a live route. */
     .mc-keyart {
-      width: clamp(6.5rem, 12cqi, 9rem);
+      width: clamp(7rem, 14cqi, 10rem);
+    }
+
+    .is-idle .mc-keyart {
+      order: 2;
+      width: clamp(10rem, 26cqi, 16rem);
+      margin-left: auto;
+    }
+
+    /* Beside the art the copy keeps a dark scrim behind it, thinning toward the art on the right. */
+    .mc-stage-scrim {
+      background:
+        linear-gradient(0deg, var(--color-void) 2%, transparent 40%),
+        linear-gradient(90deg, var(--color-void) 25%, color-mix(in srgb, var(--color-void) 65%, transparent) 55%, color-mix(in srgb, var(--color-void) 15%, transparent));
     }
 
     .mc-signals-loading {
@@ -3026,6 +3030,10 @@ textarea {
   @container mc-stage (min-width: 52rem) {
     .mc-keyart {
       order: 2;
+    }
+
+    .mc-stage-copy {
+      max-width: 38rem;
     }
 
     .mc-stage-preview:not(.is-expanded) {
@@ -3045,12 +3053,6 @@ textarea {
     }
   }
 
-  @container mc-stage (min-width: 48rem) {
-    .mc-frame-marks {
-      display: block;
-    }
-  }
-
   /* Short landscape: a compact stage that starts at the top. */
   @media (max-height: 500px) {
     .mc-stage {
@@ -3061,6 +3063,10 @@ textarea {
       align-items: flex-start;
       align-content: flex-start;
       padding-top: 1rem;
+    }
+
+    .mc-keyart {
+      display: none;
     }
 
     .mc-signals,
@@ -3110,10 +3116,6 @@ textarea {
   font-weight: 600;
 }
 
-.mc-film .dashboard-play-tile > .min-w-0 {
-  margin-bottom: 0.6rem;
-}
-
 /* Disconnect is the page's one destructive action: a salmon outline, never the loudest fill. */
 .mission-control-view .mc-action-danger {
   border: 1px solid var(--color-danger);
@@ -3125,24 +3127,49 @@ textarea {
   background: var(--surface-raised);
 }
 
-.mc-film .poster-image {
-  width: 100%;
+/* Play rides the poster: shown on hover or keyboard focus, and always when any touch input
+   exists. Hidden, it takes no hits, and the shelf only launches a press that began on it. */
+.mc-film .mc-film-play {
+  position: absolute;
+  left: 0.5rem;
+  bottom: 0.5rem;
+  gap: 0.4rem;
+  max-width: calc(100% - 1rem);
+  opacity: var(--play, 0);
+  pointer-events: var(--play-hit, none);
+  transition: opacity 0.12s ease, background-color 0.2s ease;
+}
+
+.mc-film-art:is(:hover, :focus-within) {
+  --play: 1;
+  --play-hit: auto;
+}
+
+.mc-film .mc-film-play:disabled {
+  opacity: calc(var(--play, 0) * 0.5);
+}
+
+@media (hover: none), (any-pointer: coarse) {
+  .mc-film {
+    --play: 1;
+    --play-hit: auto;
+  }
 }
 
 /* Coarse pointers get 44 px targets for every Mission Control action, including the controls the
    page hosts (Spaces, Quick Controls) and the links inside its panels. */
 @media (pointer: coarse) {
-  .mission-control-view :is(.dashboard-action-button, .dashboard-play-launch, .dashboard-degraded-action, .mc-inline-link, .mc-docs-link a, .mc-deck-side a[href]) {
+  .mission-control-view :is(.dashboard-action-button, .dashboard-degraded-action, .mc-inline-link, .mc-deck-side a[href]) {
     display: inline-flex;
     align-items: center;
   }
 
-  .mission-control-view :is(.dashboard-action-button, .dashboard-play-launch, .dashboard-degraded-action, .mc-inline-link, .mc-docs-link a, .mc-deck-side a[href], [data-dashboard-idle-vitals] > summary, .mc-deck-side button, .mc-deck-side [role="switch"]) {
+  .mission-control-view :is(.dashboard-action-button, .dashboard-degraded-action, .mc-inline-link, .mc-deck-side a[href], [data-dashboard-idle-vitals] > summary, .mc-deck-side button, .mc-deck-side [role="switch"]) {
     min-height: 2.75rem;
     touch-action: manipulation;
   }
 
-  .mission-control-view :is(.mc-docs-link a, .mc-deck-side a[href]) {
+  .mission-control-view .mc-deck-side a[href] {
     min-width: 2.75rem;
   }
 }
@@ -3374,7 +3401,8 @@ textarea {
 
   .card-interactive:hover,
   .action-tile:hover,
-  .settings-nav-button:hover {
+  .settings-nav-button:hover,
+  .mc-film-art:hover {
     transform: none;
   }
 }

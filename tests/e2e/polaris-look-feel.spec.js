@@ -307,7 +307,8 @@ for (const width of [390, 1280]) {
     await page.goto('/#/')
     const tiles = page.locator('.dashboard-play-tile')
     await expect(tiles).toHaveCount(3)
-    for (const tile of await tiles.all()) { await fits(tile, width); await fits(tile.locator('[data-poster-image]'), width) }
+    // The shelf scrolls sideways; each poster fits the page once it is scrolled to.
+    for (const tile of await tiles.all()) { await tile.scrollIntoViewIfNeeded(); await fits(tile, width); await fits(tile.locator('[data-poster-image]'), width) }
     await page.locator('[data-dashboard-play-rail]').screenshot({ path: `test-results/look-feel-text-scale-dashboard-${width}.png` })
   })
 }

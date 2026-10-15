@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures/mocked.js'
+import { writeFileSync } from 'node:fs'
 import { inflateSync } from 'node:zlib'
 
 // Mission Control's stage, readings, route, Doctor note and Diagnostics in a browser, against a
@@ -36,10 +37,13 @@ const live = {
   },
 }
 const idle = { streaming: false }
+const spacesState = extra => ({ enabled: true, available: true, changing: false, failed: false,
+  profiles: [{ id: 'living', name: 'Living room', family: 'steam', clients: ['device'] }], activity: [], ...extra })
+const spacesOff = { enabled: false, available: true, changing: false, failed: false, profiles: [], activity: [] }
 
 async function mockHost(page, { theme = 'director', stats = idle, certs = [{ uuid: 'device', name: 'Fixture handheld', client_family: 'nova', last_seen_at: 0 }],
-  currentApp = '', systemGpu = gpu, history = [] } = {}) {
-  const host = { stats, streamDown: false, systemDown: false, requests: [], writes: [] }
+  currentApp = '', systemGpu = gpu, history = [], spaces = spacesOff } = {}) {
+  const host = { stats, spaces, streamDown: false, systemDown: false, requests: [], writes: [] }
   await page.addInitScript(({ skin, initial }) => {
     localStorage.setItem('polaris-theme', skin)
     window.__mockStats = initial
@@ -81,7 +85,7 @@ async function mockHost(page, { theme = 'director', stats = idle, certs = [{ uui
       if (host.streamDown) return route.fulfill({ status: 503, json: { status: false } })
       return route.fulfill({ json: host.stats })
     }
-    if (path === '/api/multiseat/profiles') return route.fulfill({ json: { enabled: false, available: true, changing: false, failed: false, profiles: [], activity: [] } })
+    if (path === '/api/multiseat/profiles') return route.fulfill({ json: host.spaces })
     if (path === '/api/clients/list') return route.fulfill({ json: { status: true, platform: 'linux', named_certs: certs } })
     if (path === '/api/covers/image') {
       const svg = covers[url.searchParams.get('name')]
@@ -360,13 +364,154 @@ test.describe('Mission Control stage', () => {
     const launch = hero.locator('[data-stage-launch]')
     await expect(launch).toHaveAccessibleName('Launch Control Ultimate Edition')
     await expect(launch).toHaveClass(/dashboard-action-button-primary/)
-    await expect(page.locator('[data-dashboard-play-rail] [data-dashboard-launch-app]')).toHaveCount(4)
+    const shelf = page.locator('[data-dashboard-play-rail]')
+    await expect(shelf.locator('[data-dashboard-launch-app]')).toHaveCount(4)
+    await expect(shelf.locator('[data-dashboard-feature-app]')).toHaveCount(4)
+    await expect(shelf.locator('[data-dashboard-feature-app="control"]')).toHaveAttribute('aria-pressed', 'true')
+    // One way to the Library, on the shelf; the stage keeps to the title and its launch.
+    await expect(hero.getByRole('link', { name: 'Library' })).toHaveCount(0)
+    await expect(shelf.getByRole('link', { name: /^Library/ })).toHaveCount(1)
     await expect(page.locator('[data-dashboard-idle-vitals]')).toHaveJSProperty('open', false)
-    await readableOverArt(page, hero.locator('.mc-stage-note'), 'idle stage note')
+    // Every check passes, so the stage carries no note: the readiness reading already says so.
+    await expect(hero.locator('.mc-stage-note')).toHaveCount(0)
+    await expect(hero.locator('.mc-stage-backdrop.is-loaded')).toHaveCount(1)
+    await readableOverArt(page, hero.locator('.mc-kicker'), 'idle stage kicker')
+    await readableOverArt(page, hero.locator('.mc-stage-meta'), 'idle stage meta')
+    // The header is the title and its guide; the state is the stage slate's, announced once.
+    await expect(page.locator('[data-tab-docs-link]')).toHaveAttribute('href', 'https://papi-ux.com/docs/mission-control/')
+    await expect(page.locator('[data-mission-status]')).toHaveText('STANDBY')
+    await expect(page.locator('[data-mission-status]')).toHaveClass(/sr-only/)
     const toggle = page.locator('[data-mission-diagnostics-toggle]')
     await toggle.click()
     await expect(page.locator('[data-session-history-host]')).toContainText('Fixture tablet')
     await shot(page, testInfo, 'idle-desktop-director.png', { deck: true })
+  })
+
+  test('the shelf features a poster on click and launches only from Play', async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: 1440, height: 1000 })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const host = await mockHost(page)
+    await page.goto('/#/')
+    await stageMode(page, 'idle')
+    const hero = page.locator('[data-dashboard-idle-hero]')
+    const keyart = hero.locator('[data-stage-artwork]')
+    await expect(hero.locator('.mc-stage-backdrop.is-loaded')).toHaveCount(1)
+    // The key art's place on the stage, independent of how far the page has scrolled.
+    const placed = () => keyart.evaluate(node => {
+      const art = node.getBoundingClientRect(), on = node.closest('[data-mission-stage]').getBoundingClientRect()
+      return { x: art.x - on.x, y: art.y - on.y, width: art.width, height: art.height }
+    })
+    const before = await placed()
+    // Play stays out of the way until its poster is hovered or focused.
+    const pick = page.locator('[data-dashboard-feature-app="hades"]')
+    const play = page.locator('[data-dashboard-launch-app="hades"]')
+    await expect(play).toHaveCSS('opacity', '0')
+    await pick.hover()
+    await expect(play).toHaveCSS('opacity', '1')
+    await page.mouse.move(1, 1)
+    await expect(play).toHaveCSS('opacity', '0')
+    await pick.focus()
+    await expect(play).toHaveCSS('opacity', '1')
+    await page.keyboard.press('Tab')
+    await expect(play).toBeFocused()
+    await expect(play).toHaveCSS('opacity', '1')
+    // Featuring swaps the stage, in place, without launching anything.
+    await pick.focus()
+    await page.keyboard.press('Enter')
+    await expect(pick).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator('[data-dashboard-feature-app="control"]')).toHaveAttribute('aria-pressed', 'false')
+    await expect(hero.locator('.mc-stage-title')).toHaveText('Hades II')
+    await expect(hero.locator('[data-stage-launch]')).toHaveAccessibleName('Launch Hades II')
+    await expect(keyart.locator('img')).toHaveCount(1)
+    await expect(keyart.locator('img')).toHaveAttribute('src', './api/covers/image?name=Hades%20II')
+    await expect(hero.locator('.mc-stage-backdrop.is-loaded')).toHaveCount(1)
+    const after = await placed()
+    for (const side of ['x', 'y', 'width', 'height']) expect(Math.abs(after[side] - before[side]), `${side} ${JSON.stringify({ before, after })}`).toBeLessThanOrEqual(1)
+    // The crossfade animates opacity and the settle transform only, never layout or the blur.
+    expect((await hero.locator('.mc-stage-backdrop').evaluate(node => getComputedStyle(node).transitionProperty)).split(/,\s*/).sort()).toEqual(['opacity', 'transform'])
+    await readableOverArt(page, hero.locator('.mc-kicker'), 'featured kicker')
+    await readableOverArt(page, hero.locator('.mc-stage-meta'), 'featured meta')
+    await shot(page, testInfo, 'idle-featured-hades.png')
+    // A title whose cover is missing gets a typographic stage.
+    await page.locator('[data-dashboard-feature-app="balatro"]').click()
+    await expect(hero.locator('.mc-stage-title')).toHaveText('Balatro')
+    await expect(hero.locator('[data-stage-artwork]')).toHaveCount(0)
+    await expect(hero.locator('.mc-stage-backdrop')).toHaveCount(0)
+    expect(host.writes).toEqual([])
+    // Play is the one shelf control that launches.
+    await page.locator('[data-dashboard-feature-app="long"]').hover()
+    await page.locator('[data-dashboard-launch-app="long"]').click()
+    await expect.poll(() => host.writes).toEqual(['POST /api/apps/launch'])
+  })
+
+  test('a tap where Play is hidden features the poster and never launches', async ({ page }, testInfo) => {
+    // A fine, hovering primary pointer receiving real touch input, as on a touchscreen laptop.
+    // Chromium cannot report any-pointer: coarse beside a fine primary pointer, so this is the case
+    // where Play stays hidden until the tap lands. Every measurement is attached to the result.
+    await page.setViewportSize({ width: 1440, height: 1000 })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const host = await mockHost(page)
+    await page.goto('/#/')
+    await stageMode(page, 'idle')
+    const evidence = {}
+    evidence.media = await page.evaluate(() => Object.fromEntries(['(pointer: fine)', '(pointer: coarse)', '(any-pointer: fine)', '(any-pointer: coarse)', '(hover: hover)', '(hover: none)', '(any-hover: hover)']
+      .map(query => [query, matchMedia(query).matches])))
+    expect(evidence.media).toMatchObject({ '(pointer: fine)': true, '(hover: hover)': true, '(any-pointer: coarse)': false })
+    const pick = page.locator('[data-dashboard-feature-app="hades"]')
+    const play = page.locator('[data-dashboard-launch-app="hades"]')
+    await pick.scrollIntoViewIfNeeded()
+    await page.mouse.move(1, 1)
+    const style = () => play.evaluate(node => ({ opacity: getComputedStyle(node).opacity, pointerEvents: getComputedStyle(node).pointerEvents }))
+    evidence.hiddenPlay = await style()
+    expect(evidence.hiddenPlay).toEqual({ opacity: '0', pointerEvents: 'none' })
+    const box = await play.boundingBox()
+    evidence.tapPoint = { x: Math.round(box.x + box.width / 2), y: Math.round(box.y + box.height / 2) }
+    // Nothing unseen sits under the finger: the poster's feature button takes the hit.
+    evidence.hitAtPlayCentre = await page.evaluate(({ x, y }) => {
+      const node = document.elementFromPoint(x, y)
+      return { feature: node?.getAttribute('data-dashboard-feature-app') || null, launch: node?.getAttribute('data-dashboard-launch-app') || null }
+    }, evidence.tapPoint)
+    expect(evidence.hitAtPlayCentre).toEqual({ feature: 'hades', launch: null })
+    const cdp = await page.context().newCDPSession(page)
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [evidence.tapPoint] })
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    await expect(pick).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator('[data-dashboard-idle-hero] .mc-stage-title')).toHaveText('Hades II')
+    await page.waitForTimeout(500)
+    evidence.writesAfterTap = [...host.writes]
+    expect(evidence.writesAfterTap).toEqual([])
+    // Revealed by the pointer, Play is the explicit control that launches.
+    await pick.hover()
+    await expect(play).toHaveCSS('opacity', '1')
+    evidence.revealedPlay = await style()
+    expect(evidence.revealedPlay).toEqual({ opacity: '1', pointerEvents: 'auto' })
+    await page.screenshot({ path: testInfo.outputPath('shelf-play-revealed-desktop.png'), animations: 'disabled' })
+    await play.click()
+    await expect.poll(() => host.writes).toEqual(['POST /api/apps/launch'])
+    evidence.writesAfterPlayClick = [...host.writes]
+    writeFileSync(testInfo.outputPath('hybrid-touch-evidence.json'), JSON.stringify(evidence, null, 2))
+    await testInfo.attach('hybrid-touch-evidence', { path: testInfo.outputPath('hybrid-touch-evidence.json'), contentType: 'application/json' })
+  })
+
+  test('Spaces appears only when it needs attention or a Space is running', async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const host = await mockHost(page, { spaces: spacesState() })
+    await page.goto('/#/')
+    await stageMode(page, 'idle')
+    await expect(page.locator('[data-dashboard-spaces]')).toHaveCount(0)
+    host.spaces = spacesState({ failed: true })
+    await page.reload()
+    await stageMode(page, 'idle')
+    await expect(page.locator('[data-spaces-attention]')).toHaveText('Needs attention')
+    await shot(page, testInfo, 'spaces-attention-idle.png')
+    host.spaces = spacesState({ activity: [{ profile_id: 'living', client_id: 'device', state: 'running' }] })
+    await page.reload()
+    await expect(page.locator('[data-space-session]')).toContainText('Living room')
+    await expect(page.locator('[data-space-session]')).toContainText('Fixture handheld')
+    await expect(page.locator('[data-mission-stage]')).toHaveCount(0)
+    await shot(page, testInfo, 'spaces-active.png', { deck: true })
+    expect(host.writes).toEqual([])
   })
 
   test('idle stage puts a launch check that needs attention before Launch', async ({ page }, testInfo) => {
@@ -453,8 +598,18 @@ test.describe('Mission Control stage', () => {
       await page.screenshot({ path: testInfo.outputPath(`theme-live-${theme}.png`), animations: 'disabled' })
       await host.setStats(idle)
       await stageMode(page, 'idle')
-      await readableOverArt(page, page.locator('[data-dashboard-idle-hero] .mc-stage-note'), `${theme} idle note`)
+      const hero = page.locator('[data-dashboard-idle-hero]')
+      await expect(hero.locator('.mc-stage-backdrop.is-loaded')).toHaveCount(1)
+      await readableOverArt(page, hero.locator('.mc-kicker'), `${theme} idle kicker`)
+      await readableOverArt(page, hero.locator('.mc-stage-meta'), `${theme} idle meta`)
       await page.screenshot({ path: testInfo.outputPath(`theme-idle-${theme}.png`), animations: 'disabled' })
+      // The palest cover, featured from the shelf, still leaves the copy readable.
+      await page.locator('[data-dashboard-feature-app="hades"]').click()
+      await expect(hero.locator('.mc-stage-title')).toHaveText('Hades II')
+      await expect(hero.locator('.mc-stage-backdrop.is-loaded')).toHaveCount(1)
+      await readableOverArt(page, hero.locator('.mc-kicker'), `${theme} featured kicker`)
+      await readableOverArt(page, hero.locator('.mc-stage-meta'), `${theme} featured meta`)
+      await page.screenshot({ path: testInfo.outputPath(`theme-idle-featured-${theme}.png`), animations: 'disabled' })
     })
   }
 
@@ -488,7 +643,11 @@ test.describe('Mission Control stage', () => {
     await stageMode(page, 'idle')
     await noSidewaysPage(page, '320 idle')
     await reachable(page.locator('[data-stage-launch]'), '320 idle Launch')
-    await reachable(page.locator('[data-dashboard-launch-app]').first(), '320 idle rail launch')
+    const firstPlay = page.locator('[data-dashboard-launch-app]').first()
+    await reachable(firstPlay, '320 idle rail launch')
+    // Without hover, keyboard focus is what reveals Play.
+    await firstPlay.focus()
+    await expect(firstPlay).toHaveCSS('opacity', '1')
     await shot(page, testInfo, 'reflow-320-idle.png', { deck: true })
   })
 })
@@ -521,6 +680,11 @@ test.describe('Mission Control on phones and tablets', () => {
         await noSidewaysPage(page, `${label} idle`)
         await reachable(page.locator('[data-stage-launch]'), `${label} idle Launch`)
         await reachable(page.locator('[data-dashboard-launch-app]').first(), `${label} idle rail launch`)
+        // Touch has no hover, so Play is always shown and takes the tap.
+        await expect(page.locator('[data-dashboard-launch-app]').first()).toHaveCSS('opacity', '1')
+        await expect(page.locator('[data-dashboard-launch-app]').first()).toHaveCSS('pointer-events', 'auto')
+        await page.locator('[data-dashboard-play-rail]').scrollIntoViewIfNeeded()
+        await page.screenshot({ path: testInfo.outputPath(`shelf-${width}x${height}-${text}.png`), animations: 'disabled' })
         await touchTargets(page, `${label} idle`)
         await shot(page, testInfo, `idle-${width}x${height}-${text}.png`, { deck: true })
 
