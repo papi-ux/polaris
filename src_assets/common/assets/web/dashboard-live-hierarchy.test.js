@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { liveSignalCells } from './mission-control.js'
@@ -72,6 +72,16 @@ describe('DashboardView hierarchy', () => {
     expect(css).toContain('pointer-events: var(--play-hit, none);')
     expect(css).toMatch(/@media \(hover: none\), \(any-pointer: coarse\) \{\s*\.mc-film \{\s*--play: 1;\s*--play-hit: auto;/)
     expect(dashboard).toContain('@pointerdown.capture="notePlayPress"')
+    // Inside Nova's Host Console every page's guide control is hidden; contextual help stays.
+    const pages = ['views', 'components'].flatMap(dir => readdirSync(`src_assets/common/assets/web/${dir}`)
+      .filter(name => name.endsWith('.vue')).map(name => `${dir}/${name}`))
+    const guided = pages.filter(page => webSource(page).includes('data-tab-docs-link'))
+    expect(guided).toEqual(expect.arrayContaining(['views/AppsView.vue', 'views/DashboardView.vue']))
+    for (const page of guided) {
+      const source = webSource(page)
+      const guides = source.split('data-tab-docs-link').length - 1
+      expect(source.match(/<[a-z]+ v-if="!inNova"[^>]*data-tab-docs-link/g)?.length, page).toBe(guides)
+    }
     expect(dashboard).toContain('@click="playClicked(app, $event)"')
     expect(dashboard).toContain(':data-dashboard-feature-app="app.uuid"')
     expect(dashboard).toContain('launchRecentApp(app)')

@@ -11,7 +11,8 @@ import {
   onThemeChange,
   THEMES,
 } from './theme.js'
-import { embeddedTheme, initClientEmbed } from './client-embed.js'
+import { vi } from 'vitest'
+import { embeddedClient, embeddedTheme, initClientEmbed } from './client-embed.js'
 
 function hexToRgb(hex) {
   return hex.replace('#', '').match(/.{2}/g).map((channel) => Number.parseInt(channel, 16) / 255)
@@ -335,10 +336,9 @@ describe('theme skin registry', () => {
       document.documentElement.removeAttribute('data-theme')
       run(stored, document)
       expect(document.documentElement.getAttribute('data-theme')).toBe('director')
-      // Nova's own Aurora shows as Aurora, whatever the browser saved.
+      // Nova's own Aurora is the default theme, which the page shows with no attribute at all,
+      // whatever the browser saved.
       history.replaceState(null, '', '/?client=nova&theme=polaris#/')
-      run(stored, document)
-      expect(document.documentElement.getAttribute('data-theme')).toBe('director')
       document.documentElement.removeAttribute('data-theme')
       run(stored, document)
       expect(document.documentElement.hasAttribute('data-theme')).toBe(false)
@@ -354,6 +354,58 @@ describe('theme skin registry', () => {
       history.replaceState(null, '', '/')
       sessionStorage.clear()
       document.documentElement.removeAttribute('data-theme')
+    }
+  })
+
+  it('keeps a theme picked in the console across a reload of the address the page is on', () => {
+    const ids = THEMES.map(theme => theme.id)
+    const boot = readFileSync('src_assets/common/assets/web/public/assets/theme-boot.js', 'utf8')
+    const run = new Function('localStorage', 'document', boot)
+    localStorage.setItem('polaris-theme', 'miami')
+    try {
+      history.replaceState(null, '', '/?client=nova&theme=director&lang=en#/apps')
+      initClientEmbed({ themes: ids })
+      expect(getTheme()).toBe('director')
+      setTheme('oled')
+      // A reload starts again from the address the page is on now.
+      initClientEmbed({ themes: ids })
+      expect([embeddedClient(), getTheme()]).toEqual(['nova', 'oled'])
+      document.documentElement.removeAttribute('data-theme')
+      run(localStorage, document)
+      expect(document.documentElement.getAttribute('data-theme')).toBe('oled')
+      // The rest of the address stays.
+      expect(new URLSearchParams(location.search).get('lang')).toBe('en')
+      expect(location.hash).toBe('#/apps')
+    } finally {
+      history.replaceState(null, '', '/')
+      initClientEmbed({ search: '', storage: null, themes: ids })
+      sessionStorage.clear()
+      applyTheme('polaris')
+    }
+  })
+
+  it('keeps Nova mode and a picked theme across a reload when session storage is refused', () => {
+    const ids = THEMES.map(theme => theme.id)
+    const boot = readFileSync('src_assets/common/assets/web/public/assets/theme-boot.js', 'utf8')
+    const run = new Function('localStorage', 'document', boot)
+    const refuse = vi.spyOn(sessionStorage, 'setItem').mockImplementation(() => { throw new Error('blocked') })
+    localStorage.setItem('polaris-theme', 'miami')
+    try {
+      history.replaceState(null, '', '/?client=nova&theme=director#/')
+      initClientEmbed({ themes: ids })
+      expect(getTheme()).toBe('director')
+      setTheme('oled')
+      initClientEmbed({ themes: ids })
+      expect([embeddedClient(), getTheme()]).toEqual(['nova', 'oled'])
+      document.documentElement.removeAttribute('data-theme')
+      run(localStorage, document)
+      expect(document.documentElement.getAttribute('data-theme')).toBe('oled')
+    } finally {
+      refuse.mockRestore()
+      history.replaceState(null, '', '/')
+      initClientEmbed({ search: '', storage: null, themes: ids })
+      sessionStorage.clear()
+      applyTheme('polaris')
     }
   })
 

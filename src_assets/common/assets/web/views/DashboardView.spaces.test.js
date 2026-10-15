@@ -317,13 +317,18 @@ describe('Mission Control header, Spaces and shelf', () => {
       await stage().get('[data-stage-launch]').trigger('click')
       expect(followClientLink).toHaveBeenLastCalledWith('art://launch?host_uuid=host-1&host_name=Living%20Room&app_uuid=a&app_name=Alpha')
       expect(launches()).toHaveLength(0)
-      // Without the host's id Nova could not take the link, so the host starts it as in a browser.
+      // Without the host's id Nova could not take the link: Play and Launch wait, say why, and
+      // nothing starts on the host behind the player's back.
       followClientLink.mockClear()
       appPayload = { apps: shelf, current_app: '' }
       await wrapper.vm.refreshApps(); await flushPromises()
+      expect(wrapper.get('[data-dashboard-launch-app="b"]').attributes('disabled')).toBeDefined()
+      expect(stage().get('[data-stage-launch]').attributes('aria-disabled')).toBe('true')
+      expect(wrapper.get('[data-nova-launch-reason]').text()).toBe(messages.mission_control.nova_launch_waiting)
       await wrapper.get('[data-dashboard-launch-app="b"]').trigger('click'); await flushPromises()
+      await stage().get('[data-stage-launch]').trigger('click'); await flushPromises()
       expect(followClientLink).not.toHaveBeenCalled()
-      expect(launches()).toHaveLength(1)
+      expect(launches()).toHaveLength(0)
     } finally {
       initClientEmbed({ search: '', storage: null, themes: [] })
       followClientLink.mockClear()

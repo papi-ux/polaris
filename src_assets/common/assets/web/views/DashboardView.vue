@@ -40,6 +40,7 @@
           <!-- Only a blocked preview needs a reason; the stage note already says it starts on request. -->
           <p v-if="stageMode === 'live' && !showPreview && spacesPreviewBlocked" id="dashboard-preview-blocked-reason" class="mc-stage-reason" data-preview-hidden-reason>{{ $t('dashboard_spaces.no_preview') }}</p>
           <p v-if="stageMode === 'idle' && featuredApp && !currentAppAvailable" id="mission-stage-launch-reason" class="mc-stage-reason">Waiting for current app status.</p>
+          <p v-if="stageMode === 'idle' && featuredApp && novaLaunchWaiting" id="mission-stage-nova-reason" class="mc-stage-reason" data-nova-launch-reason>{{ t('mission_control.nova_launch_waiting') }}</p>
         </template>
 
         <template v-if="stageMode !== 'loading'" #actions>
@@ -70,8 +71,8 @@
               class="focus-ring dashboard-action-button"
               :class="readyCheckDisplay.primaryIssue ? 'dashboard-action-button-ghost' : 'dashboard-action-button-primary'"
               :aria-label="t('mission_control.launch_title', { name: featuredApp.app.name })"
-              :aria-disabled="!currentAppAvailable || Boolean(launchingUuid) ? 'true' : undefined"
-              :aria-describedby="!currentAppAvailable ? 'mission-stage-launch-reason' : undefined"
+              :aria-disabled="!currentAppAvailable || Boolean(launchingUuid) || novaLaunchWaiting ? 'true' : undefined"
+              :aria-describedby="!currentAppAvailable ? 'mission-stage-launch-reason' : novaLaunchWaiting ? 'mission-stage-nova-reason' : undefined"
               data-stage-launch
               @click="launchRecentApp(featuredApp.app)"
             >
@@ -188,7 +189,8 @@
                 type="button"
                 class="focus-ring dashboard-action-button dashboard-action-button-primary mc-film-play"
                 :aria-label="t('mission_control.launch_title', { name: app.name })"
-                :disabled="launchingUuid === app.uuid || !currentAppAvailable"
+                :disabled="launchingUuid === app.uuid || !currentAppAvailable || novaLaunchWaiting"
+                :aria-describedby="novaLaunchWaiting ? 'mission-stage-nova-reason' : undefined"
                 :data-dashboard-launch-app="app.uuid"
                 @click="playClicked(app, $event)"
               >
@@ -1501,11 +1503,14 @@ const launchingUuid = ref('')
 const inNova = embeddedClient() === 'nova'
 const hostUuid = ref('')
 const hostName = ref('')
+// Nova takes a launch only for the host it knows; without this host's id, Play waits rather than
+// starting the title on the host behind the player's back.
+const novaLaunchWaiting = computed(() => inNova && !hostUuid.value)
 
 async function launchRecentApp(app) {
   if (launchingUuid.value || !currentAppAvailable.value) return
-  if (inNova && hostUuid.value) {
-    followClientLink(artLaunchHref({ hostUuid: hostUuid.value, hostName: hostName.value, app }))
+  if (inNova) {
+    if (hostUuid.value) followClientLink(artLaunchHref({ hostUuid: hostUuid.value, hostName: hostName.value, app }))
     return
   }
   launchingUuid.value = app.uuid

@@ -588,6 +588,33 @@ test.describe('Mission Control stage', () => {
     expect(host.writes).toEqual([])
   })
 
+  test('inside Nova, a theme picked in the console survives a reload of the address it is on', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    // The browser's saved theme is OLED; Nova asks for Director for this visit.
+    const host = await mockHost(page, { theme: 'oled' })
+    await page.goto('/?client=nova&theme=director&lang=en#/')
+    await stageMode(page, 'idle')
+    const theme = () => page.evaluate(() => document.documentElement.getAttribute('data-theme'))
+    expect(await theme()).toBe('director')
+    // Once the visit holds Nova's word, the address no longer carries it; the rest stays.
+    const address = new URL(page.url())
+    expect([address.searchParams.get('client'), address.searchParams.get('theme'), address.searchParams.get('lang'), address.hash]).toEqual([null, null, 'en', '#/'])
+    await page.reload()
+    await stageMode(page, 'idle')
+    expect(await theme()).toBe('director')
+    await expect(page.locator('[data-tab-docs-link]')).toHaveCount(0)
+    // The player picks a theme in the console; a reload keeps it, and keeps Nova's mode.
+    await page.getByRole('button', { name: 'Choose theme' }).click()
+    await page.getByRole('option', { name: /OLED/ }).click()
+    expect(await theme()).toBe('oled')
+    await page.reload()
+    await stageMode(page, 'idle')
+    expect(await theme()).toBe('oled')
+    await expect(page.locator('[data-tab-docs-link]')).toHaveCount(0)
+    expect(host.writes).toEqual([])
+  })
+
   test('Spaces appears only when it needs attention or a Space is running', async ({ page }, testInfo) => {
     await page.setViewportSize({ width: 1280, height: 900 })
     await page.emulateMedia({ reducedMotion: 'reduce' })

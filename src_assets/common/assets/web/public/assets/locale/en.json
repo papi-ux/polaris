@@ -1683,6 +1683,7 @@
     "from_library": "From your library",
     "last_launched": "Last launched {when}",
     "launch_title": "Launch {name}",
+    "nova_launch_waiting": "Nova can't start this here until the host says which PC it is. Refresh to try again.",
     "feature_title": "Feature {name}",
     "status_unavailable": "Status unavailable",
     "waiting_for_host": "Waiting for host",
