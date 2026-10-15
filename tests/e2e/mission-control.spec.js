@@ -613,6 +613,8 @@ test.describe('Mission Control stage', () => {
       await stageMode(page, 'idle')
       const hero = page.locator('[data-dashboard-idle-hero]')
       await expect(hero.locator('.mc-stage-backdrop.is-loaded')).toHaveCount(1)
+      // Control's light logo passes the logo screen against this theme's scrim and brightest backdrop.
+      await expect(hero.locator('[data-stage-logo]')).toBeVisible()
       await readableOverArt(page, hero.locator('.mc-kicker'), `${theme} idle kicker`)
       await readableOverArt(page, hero.locator('.mc-stage-meta'), `${theme} idle meta`)
       await page.screenshot({ path: testInfo.outputPath(`theme-idle-${theme}.png`), animations: 'disabled' })

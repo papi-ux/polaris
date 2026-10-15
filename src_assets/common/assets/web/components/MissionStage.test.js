@@ -112,9 +112,22 @@ describe('MissionStage artwork', () => {
     view.unmount()
   })
 
-  it('judges the logo against the theme scrim it is drawn on', async () => {
-    // A mid grey holds 3:1 on a black scrim but not on the lighter Polaris one.
+  it('keeps the title text for white at 40/255 and for a mid tone the old 0.12 average accepted', async () => {
+    scrim('#0b0a0a')
+    solid([255, 255, 255, 40])
+    const faint = stage()
+    expect(await loadLogo(faint)).toBe(false)
+    faint.unmount()
+    // Relative luminance 0.127: about 1.3:1 once the scrim lets a bright background through.
     solid([100, 100, 100, 255])
+    const midTone = stage()
+    expect(await loadLogo(midTone)).toBe(false)
+    midTone.unmount()
+  })
+
+  it('judges the logo against the theme scrim it is drawn on', async () => {
+    // A light grey holds 3:1 against the black scrim and its brightest backdrop, not the Polaris ones.
+    solid([170, 170, 170, 255])
     scrim('#000000')
     const black = stage()
     expect(await loadLogo(black)).toBe(true)
@@ -123,6 +136,18 @@ describe('MissionStage artwork', () => {
     const polaris = stage()
     expect(await loadLogo(polaris)).toBe(false)
     polaris.unmount()
+  })
+
+  it('reads the shortened hex the built stylesheet writes for a scrim, such as OLED\'s #000', async () => {
+    solid([240, 240, 240, 255])
+    scrim('#000')
+    const oled = stage()
+    expect(await loadLogo(oled)).toBe(true)
+    oled.unmount()
+    scrim('black')
+    const named = stage()
+    expect(await loadLogo(named)).toBe(false)
+    named.unmount()
   })
 
   it.each([

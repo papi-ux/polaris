@@ -53,17 +53,26 @@ function logoLoaded(src, event) {
 
 const channel = value => { const n = value / 255; return n <= 0.04045 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4 }
 const luminance = (r, g, b) => 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+// The brightest a background can be on the stage: white at its 0.6 brightness.
+const BRIGHTEST_ART = 0.6 * 255
+// Where the logo can sit, the scrim lets through at most about half of that background (the widest
+// logo at a 40 to 52rem stage reaches the thinner part of the scrim).
+const ART_THROUGH = 0.5
 
-// A screen for faint or dark logos, not a contrast guarantee: the artwork behind the scrim varies.
-// Each pixel of a small copy of the logo is composed over the theme's scrim colour as the browser
-// draws it. The logo passes when solid ink (at least half opaque) covers a useful share of it and
-// nearly all of that ink, so composed, reaches 3:1 against the scrim. No context, unreadable
-// pixels or an unknown scrim colour fail the screen.
+// A screen for faint, dark and mid-tone logos, not a contrast guarantee: real artwork varies. Each
+// solid-ink pixel (at least half opaque) of a small copy of the logo is composed, as the browser
+// draws it, over the darkest backdrop the logo can sit on (the theme's scrim) and over the
+// brightest (the scrim letting the brightest background through). The logo passes when ink covers
+// at least a tenth of the copy and at least 80% of the ink reaches 3:1 against both backdrops. No
+// context, unreadable pixels or an unknown scrim colour fail the screen.
 function logoReadable(img, scrimColor) {
-  const scrim = /^#([0-9a-f]{6})$/i.exec(String(scrimColor || '').trim())
+  // The built stylesheet shortens hex where it can (OLED's #000000 is #000); anything else is unknown.
+  const scrim = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(String(scrimColor || '').trim())
   if (!scrim) return false
-  const [sr, sg, sb] = [0, 2, 4].map(at => parseInt(scrim[1].slice(at, at + 2), 16))
-  const scrimLight = luminance(sr, sg, sb)
+  const hex = scrim[1].length === 3 ? scrim[1].replace(/./g, digit => digit + digit) : scrim[1]
+  const darkest = [0, 2, 4].map(at => parseInt(hex.slice(at, at + 2), 16))
+  const brightest = darkest.map(value => value * (1 - ART_THROUGH) + BRIGHTEST_ART * ART_THROUGH)
+  const backdrops = [darkest, brightest].map(rgb => ({ rgb, light: luminance(...rgb) }))
   try {
     const canvas = document.createElement('canvas')
     canvas.width = 96; canvas.height = 32
@@ -76,10 +85,13 @@ function logoReadable(img, scrimColor) {
       const alpha = pixels[i + 3] / 255
       if (alpha < 0.5) continue
       ink++
-      const light = luminance(...[sr, sg, sb].map((under, c) => pixels[i + c] * alpha + under * (1 - alpha)))
-      if ((Math.max(light, scrimLight) + 0.05) / (Math.min(light, scrimLight) + 0.05) >= 3) clear++
+      const readable = backdrops.every(({ rgb, light }) => {
+        const shown = luminance(...rgb.map((under, c) => pixels[i + c] * alpha + under * (1 - alpha)))
+        return (Math.max(shown, light) + 0.05) / (Math.min(shown, light) + 0.05) >= 3
+      })
+      if (readable) clear++
     }
-    return ink >= (pixels.length / 4) * 0.04 && clear >= ink * 0.8
+    return ink >= (pixels.length / 4) * 0.1 && clear >= ink * 0.8
   } catch {
     return false
   }
