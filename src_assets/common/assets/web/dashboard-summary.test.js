@@ -7,6 +7,7 @@ import {
   buildQualityScore,
   dashboardLossPct,
 } from './dashboard-summary'
+import { liveSignalCells } from './mission-control.js'
 
 // A second of the Retroid Pocket 6's HEVC run: the newest report lost 7.38% of its frames, while the
 // host's window, which Doctor judges, holds 1.87%, light and below the 2% that makes pressure.
@@ -80,7 +81,11 @@ describe('Mission Control dashboard summary helpers', () => {
     expect(dashboard).toContain('lossHistory.value.push(dashboardLossPct(newStats))')
     expect(dashboard).not.toContain('newStats.packet_loss')
     expect(dashboard).toContain('client.packet_loss_available && Number.isFinite(client.packet_loss)')
-    expect(dashboard).toContain(':title="liveSummary.lossTitle"')
+    // The loss reading keeps the judged-loss explanation as its title, now through the stage strip.
+    expect(readFileSync(join(process.cwd(), 'src_assets/common/assets/web/components/SignalStrip.vue'), 'utf8')).toContain(':title="cell.title || undefined"')
+    const unjudged = { streaming: true }
+    const lossCell = liveSignalCells({ stats: unjudged, summary: buildLiveSummary({ stats: unjudged }) }).find(cell => cell.key === 'loss')
+    expect(lossCell.title).toBe('Video frame loss is not judged yet')
   })
 
 

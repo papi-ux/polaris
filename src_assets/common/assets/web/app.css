@@ -2332,6 +2332,1127 @@ textarea {
   @apply grid gap-3 md:grid-cols-2 xl:grid-cols-3;
 }
 
+/* ── Mission Control: one stage per state, then the deck ──
+   The stage is a title card: library artwork behind a stable dark scrim, the title, one main
+   action, the route and the readings on its lower edge. Every colour is a theme token, so each
+   theme keeps its own identity; Director stays near-black with no particles or glow. Component
+   rules sit in the components layer so tone utilities (text-success, text-warning-bright) still
+   colour them; the unlayered rules after it only adjust the existing unlayered dashboard rules. */
+@layer components {
+  .mc-shell {
+    container: mc-shell / inline-size;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+
+  .mc-stage {
+    container: mc-stage / inline-size;
+    position: relative;
+    isolation: isolate;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    border: 1px solid var(--edge-card);
+    border-radius: 0.75rem;
+    background: var(--color-deep);
+    color: var(--color-ice);
+  }
+
+  /* The stage sizes to its content. Only the loading stage holds a height, so the first report
+     does not collapse the page. */
+  .mc-stage.is-loading {
+    min-height: 18rem;
+  }
+
+  .mc-stage-art {
+    position: absolute;
+    inset: 0;
+    z-index: -2;
+    background: linear-gradient(160deg, var(--color-deep), var(--color-void));
+  }
+
+  /* A decorative copy of the cover, blurred and darkened; never a stretched poster. */
+  .mc-stage-backdrop {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scale(1.15);
+    filter: blur(32px) saturate(0.7) brightness(0.42);
+    opacity: 0;
+    transition: opacity 180ms ease;
+  }
+
+  .mc-stage-backdrop.is-loaded {
+    opacity: 1;
+  }
+
+  .mc-stage-scrim {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      linear-gradient(90deg, color-mix(in srgb, var(--color-void) 94%, transparent) 0%, color-mix(in srgb, var(--color-void) 72%, transparent) 45%, color-mix(in srgb, var(--color-void) 15%, transparent) 100%),
+      linear-gradient(0deg, color-mix(in srgb, var(--color-void) 94%, transparent) 0%, color-mix(in srgb, var(--color-void) 30%, transparent) 45%, transparent 75%);
+  }
+
+  .mc-frame-marks {
+    display: none;
+  }
+
+  .mc-frame-marks i {
+    position: absolute;
+    width: 1rem;
+    height: 1rem;
+    border: 0 solid var(--edge-raised);
+    pointer-events: none;
+  }
+
+  .mc-frame-marks i:nth-child(1) { top: 0.75rem; left: 0.75rem; border-top-width: 1.5px; border-left-width: 1.5px; }
+  .mc-frame-marks i:nth-child(2) { top: 0.75rem; right: 0.75rem; border-top-width: 1.5px; border-right-width: 1.5px; }
+  .mc-frame-marks i:nth-child(3) { bottom: 0.75rem; left: 0.75rem; border-bottom-width: 1.5px; border-left-width: 1.5px; }
+  .mc-frame-marks i:nth-child(4) { bottom: 0.75rem; right: 0.75rem; border-bottom-width: 1.5px; border-right-width: 1.5px; }
+
+  .mc-stage-top {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.4rem 1rem;
+    padding: 1rem 1.25rem 0;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
+    color: var(--color-silver);
+  }
+
+  .mc-slate {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .mc-marker {
+    flex: none;
+    width: 0.6rem;
+    height: 0.6rem;
+    border: 1.5px solid var(--color-storm);
+    border-radius: 9999px;
+  }
+
+  /* The live marker is the page's only motion: a 2.4 s pulse, static under reduced motion. */
+  .mc-marker.is-live {
+    background: var(--color-accent);
+    border-color: var(--color-accent);
+    animation: mc-live-pulse 2.4s ease-out infinite;
+  }
+
+  .mc-marker.is-unavailable {
+    border-style: dashed;
+    border-color: var(--color-warning);
+  }
+
+  .mc-marker.is-loading {
+    border-style: dotted;
+  }
+
+  /* Durations and ages keep their own case: "12 min", not "12 MIN". */
+  .mc-timecode {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.04em;
+    text-transform: none;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  /* Copy, key art and route centre on each other, so a taller route never leaves a dead band
+     above the title. */
+  .mc-stage-body {
+    flex: 1;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    align-content: center;
+    gap: 1.25rem 2rem;
+    padding: 1.25rem;
+  }
+
+  .mc-keyart {
+    flex: none;
+    width: 6rem;
+    aspect-ratio: 2 / 3;
+    overflow: hidden;
+    border: 1px solid var(--edge-raised);
+    border-radius: 0.5rem;
+    background: var(--color-deep);
+    box-shadow: 0 1.25rem 2.5rem -1.25rem rgb(0 0 0 / 0.85);
+    opacity: 0;
+    transition: opacity 180ms ease;
+  }
+
+  .mc-keyart.is-loaded {
+    opacity: 1;
+  }
+
+  .mc-keyart img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .mc-stage-copy {
+    flex: 999 1 20rem;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .mc-stage-aside {
+    flex: 1 1 18rem;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .mc-kicker {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
+    color: var(--color-support);
+  }
+
+  /* Titles step down by length and wrap; they are never truncated. Sizes are in rem, so
+     enlarged text enlarges them too. */
+  .mc-stage-title {
+    margin: 0.45rem 0 0;
+    font-family: var(--font-sans);
+    font-size: clamp(2.25rem, 1.5rem + 3.2cqi, 4.75rem);
+    font-weight: 800;
+    line-height: 0.95;
+    letter-spacing: -0.035em;
+    color: var(--color-ice);
+    text-wrap: balance;
+    overflow-wrap: break-word;
+    hyphens: auto;
+  }
+
+  .mc-stage-title.is-full {
+    text-transform: uppercase;
+    letter-spacing: -0.04em;
+    line-height: 0.9;
+  }
+
+  .mc-stage-title.is-medium {
+    font-size: clamp(1.85rem, 1.25rem + 2.4cqi, 3.5rem);
+  }
+
+  .mc-stage-title.is-long {
+    font-size: clamp(1.5rem, 1.1rem + 1.6cqi, 2.6rem);
+    line-height: 1.05;
+  }
+
+  .mc-rule {
+    display: block;
+    width: 3rem;
+    height: 3px;
+    margin: 1rem 0 0.85rem;
+    background: var(--color-accent);
+  }
+
+  .mc-stage-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0;
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    line-height: 1.4;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  /* Each separator stays with the item before it, so a wrapped line never starts with "/". */
+  .mc-stage-meta span:not(:last-child)::after {
+    content: "/";
+    margin: 0 0.6rem;
+    color: var(--color-storm);
+  }
+
+  .mc-stage-note {
+    margin: 0.75rem 0 0;
+    max-width: 42rem;
+    font-size: 0.9375rem;
+    line-height: 1.55;
+    color: var(--color-silver);
+  }
+
+  .mc-stage-reason {
+    margin: 0.5rem 0 0;
+    max-width: 42rem;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    color: var(--color-support);
+  }
+
+  .mc-stage-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin-top: 1.1rem;
+  }
+
+  .mc-stage-loading {
+    display: grid;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+  }
+
+  .mc-loading-title {
+    height: 3.25rem;
+    width: min(100%, 24rem);
+    border-radius: 0.5rem;
+  }
+
+  .mc-loading-line {
+    height: 1rem;
+    width: min(100%, 16rem);
+    border-radius: 0.375rem;
+  }
+
+  .mc-signals-loading {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.25rem), 1fr));
+    gap: 0.75rem;
+    padding: 0 1.25rem 1.25rem;
+  }
+
+  /* The live preview takes the key art's place inside the stage, only on request: the whole
+     captured frame at its own aspect ratio, never cropped, blurred or used as a backdrop. */
+  .mc-stage-preview {
+    flex: 1 1 22rem;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .mc-stage-preview .dashboard-preview-frame {
+    margin-top: 0;
+  }
+
+  .mc-stage-preview.is-expanded {
+    flex-basis: 100%;
+    order: 4;
+  }
+
+  /* Route: host, then stream, then client. */
+  .mc-route {
+    min-width: 0;
+    padding: 1rem 1.1rem;
+    border: 1px solid var(--edge-raised);
+    border-radius: 0.5rem;
+    background: color-mix(in srgb, var(--color-void) 84%, transparent);
+  }
+
+  .mc-panel-label {
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
+    color: var(--color-storm);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-bracket {
+    font-weight: 400;
+    color: var(--color-accent);
+  }
+
+  .mc-route-list {
+    margin: 0.85rem 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .mc-node {
+    position: relative;
+    display: grid;
+    grid-template-columns: 1rem minmax(0, 1fr);
+    gap: 0.65rem;
+    padding-bottom: 0.85rem;
+  }
+
+  .mc-node::before {
+    content: "";
+    position: absolute;
+    top: 1.15rem;
+    bottom: 0;
+    left: 0.31rem;
+    width: 1px;
+    background: var(--edge-raised);
+  }
+
+  .mc-node:last-child {
+    padding-bottom: 0;
+  }
+
+  .mc-node:last-child::before {
+    display: none;
+  }
+
+  .mc-node-marker {
+    width: 0.65rem;
+    height: 0.65rem;
+    margin-top: 0.3rem;
+    border: 1.5px solid var(--color-silver);
+    background: var(--color-deep);
+    transform: rotate(45deg);
+  }
+
+  .mc-node.is-live .mc-node-marker {
+    border-color: var(--color-accent);
+    background: var(--color-accent);
+  }
+
+  .mc-node.is-unknown .mc-node-marker {
+    border-style: dashed;
+    border-color: var(--color-storm);
+  }
+
+  .mc-node-role {
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
+    color: var(--color-storm);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-node-name {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0.25rem 0 0.2rem;
+    font-size: 1.05rem;
+    font-weight: 700;
+    line-height: 1.25;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-node-badge {
+    padding: 0.05rem 0.4rem;
+    border: 1px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
+    border-radius: 9999px;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: var(--color-accent);
+  }
+
+  .mc-node-detail {
+    font-size: 0.8125rem;
+    line-height: 1.5;
+    color: var(--color-support);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-node-detail + .mc-node-detail {
+    margin-top: 0.15rem;
+  }
+
+  .mc-route-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    margin-top: 1rem;
+    padding-top: 0.85rem;
+    border-top: 1px solid var(--edge-card);
+  }
+
+  /* Signal strip: compact and truthful; a missing value is a dash with its reason. */
+  .mc-signals-wrap {
+    position: relative;
+    border-top: 1px solid var(--edge-raised);
+    background: linear-gradient(180deg, color-mix(in srgb, var(--color-void) 72%, transparent), color-mix(in srgb, var(--color-void) 94%, transparent));
+  }
+
+  .mc-signals {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.25rem), 1fr));
+    margin: 0;
+  }
+
+  .mc-signal {
+    min-width: 0;
+    margin: -1px 0 0 -1px;
+    padding: 0.85rem 1.1rem 0.95rem;
+    border-top: 1px solid var(--edge-card);
+    border-left: 1px solid var(--edge-card);
+  }
+
+  .mc-signal-label {
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    line-height: 1.25;
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
+    color: var(--color-storm);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-signal-value {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.15rem 0.35rem;
+    margin: 0.4rem 0 0;
+    font-size: 1.6rem;
+    font-weight: 750;
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-signal-value.is-word {
+    font-size: 1.15rem;
+    line-height: 1.2;
+    letter-spacing: 0;
+  }
+
+  .mc-signal-unit {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--color-silver);
+  }
+
+  .mc-signal-tag {
+    align-self: center;
+    padding: 0.05rem 0.35rem;
+    border: 1px solid currentColor;
+    font-family: var(--font-mono);
+    font-size: 0.625rem;
+    font-weight: 700;
+    line-height: 1.4;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  .mc-signal-sub {
+    margin: 0.35rem 0 0;
+    font-size: 0.8125rem;
+    line-height: 1.4;
+    color: var(--color-support);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-signal-spark {
+    margin: 0.45rem 0 0;
+  }
+
+  /* The deck: the Doctor note or the recent titles, then Diagnostics, with controls beside. */
+  .mc-deck {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+
+  .mc-deck-main {
+    display: flex;
+    flex: 999 1 34rem;
+    flex-direction: column;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+
+  .mc-deck-side {
+    display: flex;
+    flex: 1 1 20rem;
+    flex-direction: column;
+    gap: 1.25rem;
+    min-width: 0;
+  }
+
+  .mc-panel {
+    position: relative;
+    min-width: 0;
+    padding: 1.1rem 1.25rem;
+    border: 1px solid var(--edge-card);
+    border-radius: 0.75rem;
+    background: var(--surface-card);
+  }
+
+  .mc-panel-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.6rem 1rem;
+  }
+
+  .mc-doctor-headline {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 700;
+    line-height: 1.3;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-doctor-actions {
+    display: flex;
+    flex-shrink: 0;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .mc-film {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 8.5rem), 1fr));
+    gap: 0.85rem;
+    margin-top: 1rem;
+  }
+
+  .mc-film-name {
+    font-size: 0.9375rem;
+    font-weight: 700;
+    line-height: 1.25;
+    color: var(--color-silver);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-film-source {
+    margin-top: 0.2rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.3;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--color-storm);
+    overflow-wrap: anywhere;
+  }
+
+  /* Diagnostics: one disclosure, its summary readable while closed. */
+  .mc-diag {
+    min-width: 0;
+    border: 1px solid var(--edge-card);
+    border-radius: 0.75rem;
+    background: color-mix(in srgb, var(--surface-card-base) 70%, var(--color-void));
+  }
+
+  .mc-diag-heading {
+    margin: 0;
+    font: inherit;
+  }
+
+  .mc-diag-toggle {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.35rem 1rem;
+    width: 100%;
+    min-height: 2.75rem;
+    padding: 0.9rem 1.25rem;
+    border: 0;
+    border-radius: 0.75rem;
+    background: transparent;
+    color: var(--color-ice);
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .mc-diag-toggle:hover {
+    background: color-mix(in srgb, var(--color-ice) 4%, transparent);
+  }
+
+  .mc-diag-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    font-size: 1rem;
+    font-weight: 700;
+    line-height: 1.3;
+  }
+
+  .mc-diag-chevron {
+    flex: none;
+    width: 1rem;
+    height: 1rem;
+    transition: transform 180ms ease;
+  }
+
+  .mc-diag-toggle[aria-expanded="true"] .mc-diag-chevron {
+    transform: rotate(180deg);
+  }
+
+  .mc-diag-summary {
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    line-height: 1.45;
+    color: var(--color-support);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-diag-body {
+    padding: 0.25rem 1.25rem 1.35rem;
+    border-top: 1px solid var(--edge-card);
+  }
+
+  .mc-diag-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr));
+    gap: 1.25rem 1.75rem;
+  }
+
+  .mc-diag-wide {
+    grid-column: 1 / -1;
+  }
+
+  .mc-diag-section {
+    min-width: 0;
+  }
+
+  .mc-diag-section-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.25rem 1rem;
+  }
+
+  .mc-diag-section-title {
+    margin: 0.9rem 0 0.55rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
+    color: var(--color-storm);
+  }
+
+  .mc-inline-link {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--color-ice);
+    text-decoration: underline;
+    text-decoration-color: var(--edge-raised);
+    text-underline-offset: 0.25em;
+  }
+
+  /* Rows wrap as label and value pairs; the value drops below the label when it must. */
+  .mc-kv {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    margin: 0;
+    font-size: 0.875rem;
+  }
+
+  .mc-kv > div {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.1rem 1rem;
+  }
+
+  .mc-kv dt {
+    flex: 1 1 7rem;
+    min-width: 0;
+    color: var(--color-support);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-kv dd {
+    flex: 0 1 auto;
+    max-width: 100%;
+    margin: 0 0 0 auto;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    text-align: right;
+    color: var(--color-ice);
+    overflow-wrap: anywhere;
+  }
+
+  /* Launch checks wrap as badge plus name, with the detail below. */
+  .mc-checks {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+    gap: 0.6rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .mc-check {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.25rem 0.6rem;
+    min-height: 2.75rem;
+    padding: 0.7rem 0.85rem;
+    border: 1px solid var(--edge-card);
+    border-radius: 0.6rem;
+  }
+
+  .mc-check-state {
+    flex: none;
+    padding: 0.1rem 0.45rem;
+    border-radius: 9999px;
+    font-family: var(--font-mono);
+    font-size: 0.6875rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .mc-check-name {
+    flex: 1 1 6rem;
+    min-width: 0;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    color: var(--color-silver);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-check-detail {
+    flex: 1 1 100%;
+    font-size: 0.8125rem;
+    line-height: 1.45;
+    color: var(--color-support);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-check-link {
+    flex: 1 1 100%;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--color-ice);
+  }
+
+  .mc-history {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .mc-history li {
+    display: grid;
+    grid-template-columns: 2rem minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.6rem 0;
+    border-top: 1px solid var(--edge-card);
+    font-size: 0.875rem;
+  }
+
+  .mc-history li:first-child {
+    border-top: 0;
+  }
+
+  .mc-history-grade {
+    display: grid;
+    width: 2rem;
+    height: 2rem;
+    place-items: center;
+    border: 1px solid var(--edge-raised);
+    font-weight: 800;
+  }
+
+  .mc-history-who {
+    display: block;
+    font-weight: 600;
+    color: var(--color-silver);
+    overflow-wrap: anywhere;
+  }
+
+  .mc-history-detail,
+  .mc-history-when {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.45;
+    color: var(--color-support);
+  }
+
+  .mc-history-when {
+    text-align: right;
+  }
+
+  @container mc-stage (min-width: 40rem) {
+    .mc-stage-top {
+      padding: 1.25rem 2rem 0;
+    }
+
+    .mc-stage-body {
+      padding: 1.75rem 2rem 1.5rem;
+    }
+
+    /* Capped and framed, so a bright cover never outshines the title. */
+    .mc-keyart {
+      width: clamp(6.5rem, 12cqi, 9rem);
+    }
+
+    .mc-signals-loading {
+      padding: 0 2rem 1.5rem;
+    }
+  }
+
+  /* The key art sits beside the copy on a wide stage, the route at the far edge. */
+  @container mc-stage (min-width: 52rem) {
+    .mc-keyart {
+      order: 2;
+    }
+
+    .mc-stage-preview:not(.is-expanded) {
+      order: 2;
+      max-width: 36rem;
+    }
+
+    .mc-stage-aside {
+      order: 3;
+    }
+  }
+
+  /* Wide enough for copy, key art and route on one line: the route keeps a reading width. */
+  @container mc-stage (min-width: 56rem) {
+    .mc-stage-aside {
+      max-width: 26rem;
+    }
+  }
+
+  @container mc-stage (min-width: 48rem) {
+    .mc-frame-marks {
+      display: block;
+    }
+  }
+
+  /* Short landscape: a compact stage that starts at the top. */
+  @media (max-height: 500px) {
+    .mc-stage {
+      min-height: 0;
+    }
+
+    .mc-stage-body {
+      align-items: flex-start;
+      align-content: flex-start;
+      padding-top: 1rem;
+    }
+
+    .mc-signals,
+    .mc-signals-loading {
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, 7.5rem), 1fr));
+    }
+  }
+
+  /* A mid-width stage reads its six readings as three and three rather than four and two. */
+  @container mc-stage (min-width: 30rem) and (max-width: 55.99rem) {
+    .mc-signals {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+  }
+
+  @keyframes mc-live-pulse {
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 45%, transparent); }
+    70% { box-shadow: 0 0 0 0.5rem transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+}
+
+/* Adjustments to the existing unlayered dashboard rules inside Mission Control. */
+/* Director's greeting replaces the console subtitle, whose 13 px size would not grow with
+   enlarged text; the greeting is sized in rem so it does. Only on a narrow shell with enlarged text
+   does the width cap apply, so "Congratulations," stays one whole word on a 360 px phone. */
+.operator-console .page-subtitle.mc-greeting {
+  font-size: min(clamp(1.15rem, 1rem + 0.8cqi, 1.6rem), 9cqi);
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--color-ice);
+  overflow-wrap: break-word;
+}
+
+.mc-greeting .mc-bracket {
+  font-weight: 400;
+  color: var(--color-accent);
+}
+
+.mc-shell.dashboard-live-shell {
+  box-shadow: none;
+}
+
+.mc-shell.dashboard-live-shell > * {
+  margin-block: 0;
+}
+
+.mc-stage[data-dashboard-idle-hero],
+.mc-stage {
+  box-shadow: 0 2rem 4rem -2rem rgb(0 0 0 / 0.75);
+}
+
+.mission-control-view .dashboard-action-button {
+  height: auto;
+  min-height: 2.25rem;
+  max-width: 100%;
+  padding-block: 0.45rem;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.mc-stage-actions .dashboard-action-button {
+  min-height: 2.75rem;
+  padding: 0.6rem 1.1rem;
+  font-size: 0.9375rem;
+  font-weight: 600;
+}
+
+.mc-signal-value .mc-signal-grade {
+  height: 1.75rem;
+  min-width: 1.75rem;
+  padding: 0 0.35rem;
+  border-width: 1.5px;
+  font-size: 1rem;
+  align-self: center;
+}
+
+.mc-signal-spark .dashboard-strip-spark {
+  width: 100%;
+  height: 2rem;
+}
+
+.mc-film .dashboard-play-tile {
+  background: var(--surface-raised);
+}
+
+/* Rail launches are neutral warm outlines, level at the bottom of each card whatever the title's
+   length; accent red stays for live, focus and the title rule. */
+.mc-film .dashboard-play-tile > .min-w-0 {
+  margin-bottom: 0.6rem;
+}
+
+.mc-film .dashboard-play-launch {
+  margin-top: auto;
+  border-color: var(--edge-raised);
+  color: var(--color-silver);
+}
+
+.mc-film .dashboard-play-launch:hover {
+  border-color: var(--color-silver);
+  background: color-mix(in srgb, var(--color-ice) 6%, transparent);
+}
+
+/* Disconnect is the page's one destructive action: a salmon outline, never the loudest fill. */
+.mission-control-view .mc-action-danger {
+  border: 1px solid color-mix(in srgb, var(--color-danger) 70%, transparent);
+  background: transparent;
+  color: var(--color-danger);
+}
+
+.mission-control-view .mc-action-danger:hover {
+  border-color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+}
+
+.mc-film .poster-image {
+  width: 100%;
+}
+
+/* Coarse pointers get 44 px targets for every Mission Control action, including the controls the
+   page hosts (Spaces, Quick Controls) and the links inside its panels. */
+@media (pointer: coarse) {
+  .mission-control-view .dashboard-action-button,
+  .mission-control-view .dashboard-play-launch,
+  .mission-control-view .dashboard-degraded-action,
+  .mission-control-view .mc-inline-link,
+  .mission-control-view .mc-docs-link a,
+  .mission-control-view [data-dashboard-idle-vitals] > summary {
+    display: inline-flex;
+    align-items: center;
+    min-height: 2.75rem;
+    touch-action: manipulation;
+  }
+
+  .mission-control-view [data-dashboard-idle-vitals] > summary {
+    display: flex;
+  }
+
+  .mission-control-view .mc-docs-link a {
+    min-width: 2.75rem;
+  }
+
+  /* The switches Mission Control hosts (Quick Controls, Live Tuning) keep their look and gain height. */
+  .mission-control-view .mc-deck-side [role="switch"],
+  .mission-control-view .mc-deck-side button {
+    min-height: 2.75rem;
+    touch-action: manipulation;
+  }
+
+  .mission-control-view .mc-deck-side a[href] {
+    display: inline-flex;
+    align-items: center;
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    touch-action: manipulation;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mc-marker.is-live,
+  .mc-stage-backdrop,
+  .mc-keyart,
+  .mc-diag-chevron {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+@media (forced-colors: active) {
+  .mc-stage,
+  .mc-route,
+  .mc-signal,
+  .mc-panel,
+  .mc-diag {
+    border: 1px solid CanvasText;
+  }
+
+  .mc-marker,
+  .mc-node-marker {
+    forced-color-adjust: none;
+  }
+}
+
 /* Status copy and controls must stay inside their cards when text is enlarged. */
 [data-session-snapshot] > .flex {
   flex-wrap: wrap;
