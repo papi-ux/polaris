@@ -18,6 +18,11 @@ const gpu = { name: 'Fixture GPU', vendor: 'nvidia', temperature_c: 54, utilizat
 // A pale cover is the hardest case for text over artwork: the scrim must keep copy readable.
 const cover = (fill, mark) => `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="600"><rect width="400" height="600" fill="${fill}"/><circle cx="200" cy="250" r="120" fill="${mark}"/><rect y="440" width="400" height="160" fill="#ffffff"/></svg>`
 const covers = { [catalog[0].name]: cover('#e8e4dc', '#c8261d'), [catalog[1].name]: cover('#f2d27a', '#2a4a5a') }
+// Steam backgrounds and logos from the host artwork cache. Control's pale background is the worst
+// case for copy over it; Hades has no background and a logo too dark for the stage.
+const heroes = { control: '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="620"><rect width="1920" height="620" fill="#ece8df"/><rect x="1100" width="820" height="620" fill="#b8231b"/></svg>' }
+const logo = fill => `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="200"><rect x="20" y="40" width="600" height="120" rx="24" fill="${fill}"/></svg>`
+const logos = { control: logo('#f4f1ea'), hades: logo('#15110f') }
 const live = {
   streaming: true, fps: 119.6, session_target_fps: 120, latency_ms: 11, bitrate_kbps: 48000, encode_time_ms: 3.1,
   codec: 'hevc', width: 1920, height: 1080, hdr_effective_mode: 'sdr_8bit', hdr_downgrade_reason: 'none',
@@ -83,6 +88,11 @@ async function mockHost(page, { theme = 'director', stats = idle, certs = [{ uui
     }
     if (path === '/api/multiseat/profiles') return route.fulfill({ json: { enabled: false, available: true, changing: false, failed: false, profiles: [], activity: [] } })
     if (path === '/api/clients/list') return route.fulfill({ json: { status: true, platform: 'linux', named_certs: certs } })
+    const artwork = path.match(/^\/api\/apps\/([^/]+)\/artwork\/(hero|logo)$/)
+    if (artwork) {
+      const svg = (artwork[2] === 'hero' ? heroes : logos)[artwork[1]]
+      return svg ? route.fulfill({ contentType: 'image/svg+xml', body: svg }) : route.fulfill({ status: 404, body: '' })
+    }
     if (path === '/api/covers/image') {
       const svg = covers[url.searchParams.get('name')]
       return svg ? route.fulfill({ contentType: 'image/svg+xml', body: svg }) : route.fulfill({ status: 404, body: '' })
@@ -259,6 +269,12 @@ test.describe('Mission Control stage', () => {
     await expect(art).toHaveAttribute('src', './api/covers/image?name=Control%20Ultimate%20Edition')
     await expect.poll(() => art.evaluate(img => img.complete && img.naturalWidth)).toBeGreaterThan(0)
     await expect(stage(page).locator('.mc-stage-backdrop')).toHaveCount(1)
+    // The title's Steam background fills the stage, and its logo stands in for the title text,
+    // which stays the heading.
+    await expect(stage(page).locator('[data-stage-hero]')).toHaveAttribute('src', './api/apps/control/artwork/hero')
+    await expect(stage(page).locator('[data-stage-hero]')).toHaveClass(/is-loaded/)
+    await expect(stage(page).locator('[data-stage-logo]')).toBeVisible()
+    await expect(title.locator('span')).toHaveClass(/sr-only/)
     for (const metric of ['Quality', 'Latency', 'FPS', 'Loss', 'Bitrate', 'Encode']) {
       await expect(page.locator(`[data-live-summary-metric="${metric}"]`)).toBeVisible()
     }
@@ -421,6 +437,10 @@ test.describe('Mission Control stage', () => {
     await expect(keyart.locator('img')).toHaveCount(1)
     await expect(keyart.locator('img')).toHaveAttribute('src', './api/covers/image?name=Hades%20II')
     await expect(hero.locator('.mc-stage-backdrop.is-loaded')).toHaveCount(1)
+    // No Steam background: the softened cover stands in. A logo too dark for the stage keeps the text.
+    await expect(hero.locator('[data-stage-hero]')).toHaveCount(0)
+    await expect(hero.locator('[data-stage-logo]')).toHaveCount(0)
+    await expect(hero.locator('.mc-stage-title span')).not.toHaveClass(/sr-only/)
     const after = await placed()
     for (const side of ['x', 'y', 'width', 'height']) expect(Math.abs(after[side] - before[side]), `${side} ${JSON.stringify({ before, after })}`).toBeLessThanOrEqual(1)
     // The crossfade animates opacity and the settle transform only, never layout or the blur.

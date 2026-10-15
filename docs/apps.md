@@ -131,7 +131,7 @@ used, so an entry SteamGridDB does not know keeps its own image. Desktop, Low Re
 other entry that streams the desktop never look anything up, and artwork an earlier version
 downloaded for them is removed.
 
-The host serves the console the same background and logo. A request for a Steam title's missing one
+The host serves Mission Control the same background and logo for its stage. A request for a Steam title's missing one
 fetches it from Steam in the background, never from SteamGridDB, so it is there the next time;
 Desktop entries and entries after **Remove artwork** fetch nothing.
 

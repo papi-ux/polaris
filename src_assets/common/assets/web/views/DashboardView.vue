@@ -31,6 +31,8 @@
         :note="stageView.note"
         :note-tone="stageView.noteTone"
         :art-src="stageView.artSrc"
+        :hero-src="stageView.heroSrc"
+        :logo-src="stageView.logoSrc"
         :hide-art="stageMode === 'live' && showPreview"
         :preview-expanded="previewExpanded"
       >
@@ -519,6 +521,7 @@ import {
   dashboardLossPct,
 } from '../dashboard-summary'
 import {
+  appArtworkSrc,
   appCoverSrc,
   dynamicRangeLabel,
   featuredLibraryApp,
@@ -1912,7 +1915,7 @@ const idleNote = computed(() => {
 const stageView = computed(() => {
   const mode = stageMode.value
   if (mode === 'loading') {
-    return { slate: t('mission_control.connecting'), timecode: '', kicker: '', title: t('dashboard.loading_summary'), meta: [], note: t('dashboard.loading_summary'), noteTone: '', artSrc: '' }
+    return { slate: t('mission_control.connecting'), timecode: '', kicker: '', title: t('dashboard.loading_summary'), meta: [], note: t('dashboard.loading_summary'), noteTone: '', artSrc: '', heroSrc: '', logoSrc: '' }
   }
   if (mode === 'unavailable') {
     const age = reportAgeLabel.value
@@ -1922,7 +1925,7 @@ const stageView = computed(() => {
       kicker: t('mission_control.status_unavailable'),
       title: t('mission_control.waiting_for_host'),
       meta: [age ? t('mission_control.last_report_ago', { age }) : t('mission_control.no_report_received'), t('mission_control.retrying')],
-      note: t('mission_control.unavailable_note'), noteTone: '', artSrc: '',
+      note: t('mission_control.unavailable_note'), noteTone: '', artSrc: '', heroSrc: '', logoSrc: '',
     }
   }
   if (mode === 'live') {
@@ -1935,7 +1938,7 @@ const stageView = computed(() => {
       title: currentAppName.value || liveSessionTitle.value,
       meta: [app?.source && app.source !== 'manual' ? app.source : '', runtimeEffectiveMode.value !== '--' ? runtimeEffectiveMode.value : '', viewerCountLabel.value],
       note: showPreview.value ? '' : [currentAppName.value ? liveSessionTitle.value : '', artSrc ? t('mission_control.art_note') : t('mission_control.capture_note')].filter(Boolean).join(' '),
-      noteTone: '', artSrc,
+      noteTone: '', artSrc, heroSrc: appArtworkSrc(app, 'hero'), logoSrc: appArtworkSrc(app, 'logo'),
     }
   }
   const featured = featuredApp.value
@@ -1950,6 +1953,8 @@ const stageView = computed(() => {
     note: idleNote.value,
     noteTone: display.attention > 0 ? 'text-warning-bright' : '',
     artSrc: appCoverSrc(featured?.app),
+    heroSrc: appArtworkSrc(featured?.app, 'hero'),
+    logoSrc: appArtworkSrc(featured?.app, 'logo'),
   }
 })
 

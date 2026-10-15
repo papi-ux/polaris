@@ -61,6 +61,13 @@ export function appCoverSrc(app) {
   return './api/covers/image?name=' + encodeURIComponent(app.name)
 }
 
+// An app's background (hero) or logo from the host artwork cache, by uuid. The host answers 404
+// when it has none yet, and the stage then keeps the cover and the title text.
+export function appArtworkSrc(app, kind) {
+  if (!app?.uuid) return ''
+  return `./api/apps/${encodeURIComponent(app.uuid)}/artwork/${kind}`
+}
+
 // SDR is named only when the host reports an SDR mode; a missing mode stays unnamed.
 export function dynamicRangeLabel(stats = {}) {
   const reason = String(stats?.hdr_downgrade_reason || 'none')

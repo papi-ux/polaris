@@ -257,10 +257,12 @@ describe('Mission Control header, Spaces and shelf', () => {
     expect(wrapper.get('[data-dashboard-feature-app="a"]').attributes('aria-pressed')).toBe('false')
     expect(launches()).toHaveLength(0)
 
-    // A pick with no launch record is still next up; without a cover the stage is typographic.
+    // A pick with no launch record is still next up; without a cover or a Steam background the
+    // stage is typographic.
     await wrapper.get('[data-dashboard-feature-app="c"]').trigger('click')
     expect(stage().get('.mc-kicker').text()).toBe(messages.mission_control.next_up)
     expect(stage().find('[data-stage-artwork]').exists()).toBe(false)
+    await stage().get('[data-stage-hero]').trigger('error')
     expect(stage().find('.mc-stage-backdrop').exists()).toBe(false)
 
     // A refresh that drops the pick returns the stage to the most recent title.
@@ -374,8 +376,13 @@ describe('Mission Control stage', () => {
     const stage = wrapper.get('[data-mission-stage]')
     expect(stage.get('.mc-stage-title').text()).toBe('Control Ultimate Edition')
     expect(stage.get('[data-stage-artwork] img').attributes('src')).toBe('./api/covers/image?name=Control%20Ultimate%20Edition')
+    expect(stage.get('[data-stage-hero]').attributes('src')).toBe('./api/apps/app-6/artwork/hero')
+    expect(stage.get('[data-stage-logo]').attributes('src')).toBe('./api/apps/app-6/artwork/logo')
     expect(stage.get('.mc-stage-title').attributes('data-title-step')).toBe('medium')
-    // A cover that fails to load leaves a typographic stage: no backdrop, no key art.
+    // Without a Steam background the softened cover stands in; a cover that fails as well leaves a
+    // typographic stage: no backdrop, no key art.
+    await stage.get('[data-stage-hero]').trigger('error')
+    expect(stage.get('.mc-stage-backdrop').attributes('src')).toBe('./api/covers/image?name=Control%20Ultimate%20Edition')
     await stage.get('.mc-stage-backdrop').trigger('error')
     expect(stage.find('.mc-stage-backdrop').exists()).toBe(false)
     expect(stage.find('[data-stage-artwork]').exists()).toBe(false)
@@ -395,6 +402,8 @@ describe('Mission Control stage', () => {
     await render(false)
     const stage = wrapper.get('[data-dashboard-idle-hero]')
     expect(stage.get('.mc-stage-title').text()).toBe('Plain Game')
+    // The host has no Steam background for it either.
+    await stage.get('[data-stage-hero]').trigger('error')
     expect(stage.find('.mc-stage-backdrop').exists()).toBe(false)
     expect(stage.find('[data-stage-artwork]').exists()).toBe(false)
   })

@@ -2259,6 +2259,11 @@ textarea {
     transform: scale(1.04);
   }
 
+  /* A Steam background is composed to sit behind a title: shown sharp, only darkened. */
+  .mc-stage-backdrop.is-hero {
+    filter: saturate(1.05) brightness(0.6);
+  }
+
   .mc-stage-backdrop.is-loaded,
   .mc-keyart img.is-loaded {
     opacity: 1;
@@ -2401,6 +2406,16 @@ textarea {
   .mc-stage-title.is-long {
     font-size: clamp(1.5rem, 1.1rem + 1.6cqi, 2.6rem);
     line-height: 1.05;
+  }
+
+  /* A logo keeps its own proportions, growing with the stage and with enlarged text. */
+  .mc-stage-logo {
+    display: block;
+    max-width: min(28rem, 100%);
+    max-height: clamp(4.5rem, 2.5rem + 9cqi, 8.5rem);
+    object-fit: contain;
+    object-position: left bottom;
+    filter: drop-shadow(0 0.25rem 1rem rgb(0 0 0 / 0.55));
   }
 
   .mc-rule {
