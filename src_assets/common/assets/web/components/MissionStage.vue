@@ -1,6 +1,7 @@
 <script setup>
 import { computed, reactive, watch } from 'vue'
 import { titleStep } from '../mission-control.js'
+import { readThemeTokens } from '../theme-bridge.js'
 
 // The Mission Control stage: one title card per state, library artwork behind it, the main action
 // on it and the readings along its lower edge. It only lays out what the dashboard passes in.
@@ -40,34 +41,47 @@ const backdropLayers = computed(() => {
   return showArt.value ? [{ kind: 'poster', src: props.artSrc }] : []
 })
 const keyartLayers = computed(() => (showArt.value ? [props.artSrc] : []))
-// The logo stands in for the title text once it has loaded, the text staying the heading for
-// assistive technology. A logo too dark to read on the stage's dark scrim keeps the text instead.
+// The logo stands in for the title text once it has loaded and passed the screen below; the text
+// stays the heading for assistive technology. Until then, and whenever the logo fails the screen
+// or the screen cannot run, the text title stays visible.
 const showLogo = computed(() => props.mode !== 'loading' && usable(props.logoSrc))
 const logoShown = computed(() => showLogo.value && loadedArt.has(props.logoSrc))
 function logoLoaded(src, event) {
-  if (logoReadable(event.target)) loadedArt.add(src)
+  if (logoReadable(event.target, readThemeTokens(['void']).void)) loadedArt.add(src)
   else failedArt.add(src)
 }
-// Alpha-weighted relative luminance of a small copy of the logo: at least 0.12 holds 3:1 against
-// the near-black scrim, the contrast a large graphic needs.
-function logoReadable(img) {
+
+const channel = value => { const n = value / 255; return n <= 0.04045 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4 }
+const luminance = (r, g, b) => 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+
+// A screen for faint or dark logos, not a contrast guarantee: the artwork behind the scrim varies.
+// Each pixel of a small copy of the logo is composed over the theme's scrim colour as the browser
+// draws it. The logo passes when solid ink (at least half opaque) covers a useful share of it and
+// nearly all of that ink, so composed, reaches 3:1 against the scrim. No context, unreadable
+// pixels or an unknown scrim colour fail the screen.
+function logoReadable(img, scrimColor) {
+  const scrim = /^#([0-9a-f]{6})$/i.exec(String(scrimColor || '').trim())
+  if (!scrim) return false
+  const [sr, sg, sb] = [0, 2, 4].map(at => parseInt(scrim[1].slice(at, at + 2), 16))
+  const scrimLight = luminance(sr, sg, sb)
   try {
     const canvas = document.createElement('canvas')
-    canvas.width = 32; canvas.height = 12
+    canvas.width = 96; canvas.height = 32
     const context = canvas.getContext('2d')
-    if (!context) return true
+    if (!context) return false
     context.drawImage(img, 0, 0, canvas.width, canvas.height)
     const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data
-    const linear = value => { const n = value / 255; return n <= 0.04045 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4 }
-    let weight = 0, light = 0
+    let ink = 0, clear = 0
     for (let i = 0; i < pixels.length; i += 4) {
       const alpha = pixels[i + 3] / 255
-      weight += alpha
-      light += alpha * (0.2126 * linear(pixels[i]) + 0.7152 * linear(pixels[i + 1]) + 0.0722 * linear(pixels[i + 2]))
+      if (alpha < 0.5) continue
+      ink++
+      const light = luminance(...[sr, sg, sb].map((under, c) => pixels[i + c] * alpha + under * (1 - alpha)))
+      if ((Math.max(light, scrimLight) + 0.05) / (Math.min(light, scrimLight) + 0.05) >= 3) clear++
     }
-    return weight > 0 && light / weight >= 0.12
+    return ink >= (pixels.length / 4) * 0.04 && clear >= ink * 0.8
   } catch {
-    return true
+    return false
   }
 }
 const step = computed(() => titleStep(props.title))

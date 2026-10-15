@@ -22,7 +22,8 @@ const covers = { [catalog[0].name]: cover('#e8e4dc', '#c8261d'), [catalog[1].nam
 // case for copy over it; Hades has no background and a logo too dark for the stage.
 const heroes = { control: '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="620"><rect width="1920" height="620" fill="#ece8df"/><rect x="1100" width="820" height="620" fill="#b8231b"/></svg>' }
 const logo = fill => `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="200"><rect x="20" y="40" width="600" height="120" rx="24" fill="${fill}"/></svg>`
-const logos = { control: logo('#f4f1ea'), hades: logo('#15110f') }
+// The long title's logo is white at 2% opacity: present, but too faint to stand in for its name.
+const logos = { control: logo('#f4f1ea'), hades: logo('#15110f'), long: logo('#ffffff" fill-opacity="0.02') }
 const live = {
   streaming: true, fps: 119.6, session_target_fps: 120, latency_ms: 11, bitrate_kbps: 48000, encode_time_ms: 3.1,
   codec: 'hevc', width: 1920, height: 1080, hdr_effective_mode: 'sdr_8bit', hdr_downgrade_reason: 'none',
@@ -448,6 +449,12 @@ test.describe('Mission Control stage', () => {
     await readableOverArt(page, hero.locator('.mc-kicker'), 'featured kicker')
     await readableOverArt(page, hero.locator('.mc-stage-meta'), 'featured meta')
     await shot(page, testInfo, 'idle-featured-hades.png')
+    // A logo too faint to read keeps the title's name on the stage.
+    await page.locator('[data-dashboard-feature-app="long"]').click()
+    await expect(hero.locator('.mc-stage-title')).toHaveText(catalog[2].name)
+    await expect(hero.locator('[data-stage-logo]')).toHaveCount(0)
+    await expect(hero.locator('.mc-stage-title span')).toBeVisible()
+    await expect(hero.locator('.mc-stage-title span')).not.toHaveClass(/sr-only/)
     // A title whose cover is missing gets a typographic stage.
     await page.locator('[data-dashboard-feature-app="balatro"]').click()
     await expect(hero.locator('.mc-stage-title')).toHaveText('Balatro')
