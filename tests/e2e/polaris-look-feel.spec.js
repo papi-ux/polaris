@@ -369,6 +369,104 @@ for (const width of [390, 1280]) {
   }
 }
 
+// Director's Polaris name is a nod to Control and the longest theme name. Every name must read in
+// full, as text, in the open picker at phone and desktop widths and with doubled text; the sidebar
+// shows the whole current name too, on its own line when it cannot share one with "Appearance".
+const themeNames = ['Polaris Aurora', 'Portable Chrome', 'Console OLED', 'Miami Nebula', '< Congratulations, Director >', 'High Contrast']
+async function openDirectorSidebar(page, width, font) {
+  await page.setViewportSize({ width, height: 960 })
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  const writes = await mockHost(page, 'director')
+  await page.addInitScript(size => document.addEventListener('DOMContentLoaded', () => { document.documentElement.style.fontSize = `${size}px` }), font)
+  await page.goto('/#/')
+  await expect(page.locator('[data-dashboard-play-rail]')).toBeVisible()
+  expect(await page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe(`${font}px`)
+  expect(await page.evaluate(() => document.documentElement.getAttribute('data-theme'))).toBe('director')
+  if (width < 768) await page.locator('[data-mobile-header]').getByRole('button', { name: 'Toggle navigation' }).click()
+  const toggle = page.getByRole('button', { name: 'Choose theme' })
+  await expect(toggle).toBeVisible()
+  return { writes, toggle }
+}
+
+for (const width of [390, 1280]) {
+  for (const font of [16, 32]) {
+    test(`sidebar names the current theme whole at ${width}px with ${font}px text`, async ({ page }) => {
+      const { writes, toggle } = await openDirectorSidebar(page, width, font)
+      await expect(toggle).toHaveAttribute('title', 'Theme: < Congratulations, Director >')
+      const current = toggle.getByText('< Congratulations, Director >', { exact: true })
+      await expect(current).toBeVisible()
+      const clipped = await current.evaluate(node => ({ scroll: node.scrollWidth, client: node.clientWidth, text: node.textContent }))
+      expect(clipped.scroll, JSON.stringify(clipped)).toBeLessThanOrEqual(clipped.client + 1)
+      // The phone drawer is sized in rem and is wider than a 390px viewport with 32px text; that
+      // predates this name, so the drawer itself is only required to fit at desktop widths.
+      if (width >= 768) await fits(toggle, width)
+      // The fixture host runs ahead of the newest release, an informational state whose light
+      // borrows the accent. Director's accent is red, so that light must not read as an alarm.
+      const light = page.locator('[data-sidebar-update-status-light]')
+      await expect(light).toHaveClass(/\bbg-accent\b/)
+      const colors = await light.evaluate(node => {
+        const probe = document.createElement('span')
+        probe.style.color = 'var(--color-accent)'; document.body.append(probe)
+        const accent = getComputedStyle(probe).color; probe.remove()
+        return { light: getComputedStyle(node).backgroundColor, accent }
+      })
+      expect(colors.light, JSON.stringify(colors)).not.toBe(colors.accent)
+      expect(writes).toEqual([])
+    })
+
+    test(`theme picker shows every theme name whole at ${width}px with ${font}px text`, async ({ page }) => {
+      const { writes, toggle } = await openDirectorSidebar(page, width, font)
+      await toggle.click()
+      const listbox = page.getByRole('listbox', { name: 'Theme' })
+      await expect(listbox).toBeVisible()
+      await expect(listbox.getByRole('option')).toHaveCount(themeNames.length)
+      await expect(listbox.getByRole('option', { selected: true })).toContainText('< Congratulations, Director >')
+      await fits(listbox, width)
+      // The open list stays on screen above its button; a longer list scrolls inside it.
+      const list = await listbox.boundingBox()
+      expect(list.y, JSON.stringify(list)).toBeGreaterThanOrEqual(0)
+      expect(list.y + list.height, JSON.stringify(list)).toBeLessThanOrEqual(960)
+      for (const name of themeNames) {
+        const label = listbox.getByRole('option').getByText(name, { exact: true })
+        await expect(label).toBeVisible()
+        const box = await label.evaluate(node => ({ scroll: node.scrollWidth, client: node.clientWidth, text: node.textContent,
+          overflow: getComputedStyle(node).textOverflow, rendered: node.innerText }))
+        expect(box.text).toBe(name)
+        expect(box.rendered.replace(/\s+/g, ' ').trim(), JSON.stringify(box)).toBe(name)
+        expect(box.scroll, JSON.stringify(box)).toBeLessThanOrEqual(box.client + 1)
+        // A word may break only when it is wider than the option could ever give a name: its
+        // content box less the fixed swatch and its gap.
+        const cuts = await label.evaluate(node => {
+          const option = node.closest('[role="option"]'), swatch = option.querySelector('.theme-picker-swatch')
+          const style = getComputedStyle(option)
+          const room = option.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
+            - swatch.getBoundingClientRect().width - parseFloat(style.columnGap)
+          const text = node.firstChild, found = []
+          for (const match of text.data.matchAll(/\S+/g)) {
+            const range = document.createRange()
+            range.setStart(text, match.index); range.setEnd(text, match.index + match[0].length)
+            const rects = [...range.getClientRects()].filter(rect => rect.width > 0)
+            const width = rects.reduce((sum, rect) => sum + rect.width, 0)
+            if (new Set(rects.map(rect => Math.round(rect.top))).size > 1 && width <= room) found.push({ word: match[0], width, room })
+          }
+          return found
+        })
+        expect(cuts, name).toEqual([])
+        // The name stays beside its swatch: the option never wraps its text below the preview.
+        const side = await label.evaluate(node => {
+          const swatch = node.closest('[role="option"]').querySelector('.theme-picker-swatch').getBoundingClientRect()
+          const text = node.getBoundingClientRect()
+          return { swatchRight: swatch.right, textLeft: text.left, swatchTop: swatch.top, textBottom: text.bottom }
+        })
+        expect(side.textLeft, `${name} ${JSON.stringify(side)}`).toBeGreaterThanOrEqual(side.swatchRight)
+        expect(side.textBottom, `${name} ${JSON.stringify(side)}`).toBeGreaterThan(side.swatchTop)
+      }
+      expect(writes).toEqual([])
+      await page.screenshot({ path: `test-results/look-feel-theme-picker-director-${width}-${font}.png`, animations: 'disabled' })
+    })
+  }
+}
+
 // A launcher can be one 255-character file name, and a folder's first warning can name a long
 // path. Both wrap inside the ROM folder and readiness cards instead of widening the page, while an
 // ordinary folder at normal text size keeps its label and status side by side.

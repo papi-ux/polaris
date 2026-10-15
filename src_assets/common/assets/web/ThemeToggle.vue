@@ -10,6 +10,13 @@ const open = ref(false)
 const activeTheme = ref(getThemeMeta(getTheme()))
 const rootEl = ref(null)
 const optionRefs = ref([])
+// Room above the button when the list opens. Names wrap rather than truncate, so with
+// enlarged text the list can be taller than that room; it then scrolls inside instead of
+// running off the top of the screen.
+const panelRoom = ref(0)
+const panelStyle = computed(() => (panelRoom.value > 0
+  ? { maxHeight: `min(30rem, 70dvh, calc(${panelRoom.value}px - 1rem))` }
+  : null))
 
 const activeIndex = computed(() => THEMES.findIndex((theme) => theme.id === activeTheme.value.id))
 
@@ -37,6 +44,7 @@ function onDocumentPointerDown(event) {
 async function togglePicker() {
   open.value = !open.value
   if (open.value) {
+    panelRoom.value = Math.floor(rootEl.value?.getBoundingClientRect().top ?? 0)
     await nextTick()
     const target = optionRefs.value[Math.max(activeIndex.value, 0)]
     target?.focus()
@@ -71,7 +79,7 @@ function moveFocus(delta) {
       aria-label="Choose theme"
       aria-haspopup="listbox"
       :aria-expanded="open"
-      class="focus-ring flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm transition-[background-color,color,border-color] duration-200"
+      class="focus-ring flex w-full flex-wrap items-center gap-x-2 gap-y-0.5 rounded-lg px-3 py-2 text-sm transition-[background-color,color,border-color] duration-200"
       :class="open ? 'text-ice bg-ice/10' : 'text-storm hover:text-silver hover:bg-twilight/50'"
       :title="`Theme: ${activeTheme.label}`"
     >
@@ -81,7 +89,8 @@ function moveFocus(delta) {
         aria-hidden="true"
       ></span>
       <span v-if="!props.collapsed" class="truncate font-medium">Appearance</span>
-      <span v-if="!props.collapsed" class="ml-auto truncate text-[11px] text-storm">{{ activeTheme.shortLabel }}</span>
+      <!-- A long name (Director's) takes its own line rather than an ellipsis. -->
+      <span v-if="!props.collapsed" class="ml-auto max-w-full truncate text-[11px] text-storm">{{ activeTheme.shortLabel }}</span>
       <svg v-if="!props.collapsed" class="ml-1 h-3 w-3 shrink-0 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"/></svg>
     </button>
 
@@ -90,6 +99,7 @@ function moveFocus(delta) {
       role="listbox"
       aria-label="Theme"
       class="theme-picker-panel"
+      :style="panelStyle"
       @keydown.escape.stop.prevent="close()"
       @keydown.down.stop.prevent="moveFocus(1)"
       @keydown.up.stop.prevent="moveFocus(-1)"
@@ -110,11 +120,13 @@ function moveFocus(delta) {
           <span class="theme-picker-swatch-dot" :style="{ background: theme.preview.accent }"></span>
           <span class="theme-picker-swatch-bar" :style="{ background: theme.preview.accent }"></span>
         </span>
-        <span class="min-w-0 flex-1 text-left">
-          <span class="block truncate text-sm font-semibold text-silver">{{ theme.label }}</span>
+        <span class="theme-picker-text">
+          <span class="theme-picker-heading">
+            <span class="theme-picker-label">{{ theme.label }}</span>
+            <span v-if="theme.id === activeTheme.id" class="theme-picker-current">Current</span>
+          </span>
           <span class="block truncate text-[10px] leading-tight text-storm">{{ theme.subtitle }}</span>
         </span>
-        <span v-if="theme.id === activeTheme.id" class="theme-picker-current">Current</span>
       </button>
     </div>
   </div>

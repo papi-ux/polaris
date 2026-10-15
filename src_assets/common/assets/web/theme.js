@@ -1,6 +1,9 @@
 // Polaris Theme System. Six skins matching the Nova client's theme catalog
-// (labels, ordering, and palettes from Nova's colors_nova.xml / arrays.xml);
-// Nova's Material You is Android-only and has no web analogue.
+// (ids, ordering, and most labels and palettes from Nova's colors_nova.xml /
+// arrays.xml); Nova's Material You is Android-only and has no web analogue.
+// Director is the deliberate exception: on Polaris it is named for Control's
+// "< Congratulations, Director >" and runs charcoal rather than Nova's crimson.
+// Its id stays 'director', so stored choices and the first-paint boot still match.
 
 const STORAGE_KEY = 'polaris-theme'
 
@@ -38,10 +41,10 @@ export const THEMES = [
   },
   {
     id: 'director',
-    label: 'Director',
-    shortLabel: 'Director',
-    subtitle: 'Crimson stage · warm white copy · black controls',
-    preview: { window: '#6e0b17', card: '#881525', accent: '#fff5e8' },
+    label: '< Congratulations, Director >',
+    shortLabel: '< Congratulations, Director >',
+    subtitle: 'Charcoal stage · warm white copy · red signals',
+    preview: { window: '#0b0a0a', card: '#191716', accent: '#f04e4b' },
   },
   {
     id: 'high-contrast',

@@ -71,7 +71,7 @@ describe('theme skin registry', () => {
       'Portable Chrome',
       'Console OLED',
       'Miami Nebula',
-      'Director',
+      '< Congratulations, Director >',
       'High Contrast',
     ])
     for (const theme of THEMES) {
@@ -120,23 +120,54 @@ describe('theme skin registry', () => {
     expect(themeCss('portable-chrome')).not.toContain('#ff5cab')
   })
 
-  it('uses Nova Director crimson surfaces and tiles, warm copy and black controls', () => {
+  it('keeps the Director id and names it for Control on Polaris', () => {
+    // The visible name is exact text; the id, storage key and boot allowlist stay 'director'.
+    expect(getThemeMeta('director')).toMatchObject({
+      id: 'director',
+      label: '< Congratulations, Director >',
+      shortLabel: '< Congratulations, Director >',
+    })
+    setTheme('director')
+    expect(localStorage.getItem('polaris-theme')).toBe('director')
+    expect(document.documentElement.getAttribute('data-theme')).toBe('director')
+  })
+
+  it('makes Director charcoal-dominant with red kept to signals and focus', () => {
     const director = themeCss('director')
-    for (const value of ['#6e0b17', '#881525', '#9a1b2e', '#5e0a14', '#7b1020', '#261015', '#12090b', '#fff5e8', '#f1d9cd', '#dec0b5', '#ffb7ac']) {
-      expect(director).toContain(value)
+    const tokens = { ...extractTokens(themeCss('polaris')), ...extractTokens(director) }
+    const channels = (hex) => hexToRgb(hex).map((channel) => Math.round(channel * 255))
+    // Every stage, card, tile and control surface is near-black and nearly neutral, so the page
+    // reads dark rather than tinted.
+    for (const surface of ['void', 'deep', 'card-base', 'raised', 'raised-hover', 'pill', 'chip']) {
+      const rgb = channels(tokens[surface])
+      expect(relativeLuminance(tokens[surface]), `${surface} ${tokens[surface]} is near-black`).toBeLessThanOrEqual(0.02)
+      expect(Math.max(...rgb) - Math.min(...rgb), `${surface} ${tokens[surface]} is near-neutral`).toBeLessThanOrEqual(12)
     }
-    expect(director).toContain('--surface-card: #881525')
-    // Nova keeps tiles on its crimson elevated surface with black dividers;
-    // black stays on controls.
-    expect(director).toContain('--surface-raised: #9a1b2e')
-    expect(director).toContain('--edge-raised: #12090b')
-    expect(director).toContain('--surface-pill: #261015')
-    expect(director).toContain('--surface-chip: #261015')
-    expect(director).toContain('outline: 2px solid var(--color-ice)')
-    // Success and warning stay the shared semantic roles. Info keeps its sky hue,
-    // lifted only enough to read on crimson.
+    // Copy is warm white, never cool.
+    for (const role of ['ice', 'silver']) {
+      const [red, , blue] = channels(tokens[role])
+      expect(red, `${role} is warm`).toBeGreaterThan(blue)
+    }
+    // The accent is a clear red that reads as a focus ring or toggle on the darkest stage and
+    // on cards (3:1 non-text), while danger is set apart from it by lightness.
+    const [red, green, blue] = channels(tokens.accent)
+    expect(red).toBeGreaterThan(2.5 * green)
+    expect(red).toBeGreaterThan(2.5 * blue)
+    for (const ground of ['void', 'card-base', 'raised']) {
+      expect(contrastRatio(tokens.accent, tokens[ground]), `accent on ${ground}`).toBeGreaterThanOrEqual(3)
+    }
+    expect(relativeLuminance(tokens.danger)).toBeGreaterThanOrEqual(1.5 * relativeLuminance(tokens.accent))
+    expect(director).toMatch(/\.settings-input:focus\s*\{[^}]*outline: 2px solid var\(--color-accent\)/)
+    expect(director).toMatch(/\.focus-ring\s*\{\s*@apply focus-visible:ring-accent/)
+    // An input's own edge stays a visible boundary (3:1) on the card it sits on.
+    const edge = /\.settings-input\s*\{[^}]*border-color: color-mix\(in srgb, var\(--color-ice\) (\d+)%, transparent\)/.exec(director)
+    expect(edge).not.toBeNull()
+    const share = Number(edge[1]) / 100
+    const composite = '#' + channels(tokens.ice).map((channel, index) => Math.round(share * channel + (1 - share) * channels(tokens['card-base'])[index])
+      .toString(16).padStart(2, '0')).join('')
+    expect(contrastRatio(composite, tokens['card-base']), `input edge ${composite}`).toBeGreaterThanOrEqual(3)
+    // Success and warning stay the shared semantic roles.
     expect(director).not.toMatch(/--color-(success|warning):/)
-    expect(director).toContain('--color-info: #7dd3fc')
   })
 
   it('keeps Director text roles at 4.5:1 on its cards, tiles and hovered tiles', () => {
@@ -155,7 +186,7 @@ describe('theme skin registry', () => {
 
   it('gives Director section kickers the full storm tone without moving other kickers', () => {
     const director = themeCss('director')
-    // The shared muted kicker measures 4.10:1 on the crimson card.
+    // The shared kicker is muted to 80%; Director keeps the full storm tone.
     expect(appCss).toMatch(/\.section-kicker\s*\{[^}]*text-storm\/80/)
     expect(director).toMatch(/:where\(\[data-theme="director"\]\) \.section-kicker\s*\{\s*color: var\(--color-storm\);\s*\}/)
     // Hero and console kickers keep their own higher-specificity colours.
