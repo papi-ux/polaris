@@ -470,6 +470,8 @@ test.describe('Mission Control stage', () => {
     await page.locator('[data-dashboard-feature-app="balatro"]').click()
     await expect(hero.locator('.mc-stage-title')).toHaveText('Balatro')
     await expect(hero.locator('[data-stage-artwork]')).toHaveCount(0)
+    // The crossfade briefly holds the leaving and entering layers; wait for it to settle.
+    await expect(hero.locator('[data-stage-hero]')).toHaveCount(1)
     await expect(hero.locator('[data-stage-hero]')).toHaveAttribute('src', './api/apps/balatro/artwork/hero')
     await expect(hero.locator('[data-stage-hero]')).toHaveClass(/is-loaded/)
     await expect(hero.locator('[data-stage-logo]')).toHaveCount(0)
@@ -546,6 +548,9 @@ test.describe('Mission Control stage', () => {
     expect(width, 'stage width in rem').toBeLessThan(52)
     await page.locator('[data-dashboard-feature-app="balatro"]').click()
     await expect(hero.locator('.mc-stage-title')).toHaveText('Balatro')
+    // The crossfade briefly holds the leaving and entering layers; wait for it to settle.
+    await expect(hero.locator('[data-stage-hero]')).toHaveCount(1)
+    await expect(hero.locator('[data-stage-hero]')).toHaveAttribute('src', './api/apps/balatro/artwork/hero')
     await expect(hero.locator('[data-stage-hero]')).toHaveClass(/is-loaded/)
     await expect(hero.locator('[data-stage-logo]')).toHaveCount(0)
     await expect(hero.locator('.mc-stage-title span')).toBeVisible()
@@ -709,11 +714,12 @@ test.describe('Mission Control stage', () => {
     await stageMode(page, 'idle')
     await noSidewaysPage(page, '320 idle')
     await reachable(page.locator('[data-stage-launch]'), '320 idle Launch')
+    // A fine pointer that is not over the poster leaves Play hidden and taking no hits, so keyboard
+    // focus reveals it before its hit test; where the mouse happens to rest must not matter.
     const firstPlay = page.locator('[data-dashboard-launch-app]').first()
-    await reachable(firstPlay, '320 idle rail launch')
-    // Without hover, keyboard focus is what reveals Play.
     await firstPlay.focus()
     await expect(firstPlay).toHaveCSS('opacity', '1')
+    await reachable(firstPlay, '320 idle rail launch')
     await shot(page, testInfo, 'reflow-320-idle.png', { deck: true })
   })
 })
