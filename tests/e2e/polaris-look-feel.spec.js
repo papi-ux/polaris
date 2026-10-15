@@ -382,7 +382,10 @@ async function openDirectorSidebar(page, width, font) {
   await expect(page.locator('[data-dashboard-play-rail]')).toBeVisible()
   expect(await page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe(`${font}px`)
   expect(await page.evaluate(() => document.documentElement.getAttribute('data-theme'))).toBe('director')
-  if (width < 768) await page.locator('[data-mobile-header]').getByRole('button', { name: 'Toggle navigation' }).click()
+  // The phone shell (a drawer behind the menu button) is chosen by the shell's width in rem, so
+  // doubled text can use it at desktop widths too.
+  const menu = page.locator('[data-mobile-header]').getByRole('button', { name: 'Toggle navigation' })
+  if (await menu.isVisible()) await menu.click()
   const toggle = page.getByRole('button', { name: 'Choose theme' })
   await expect(toggle).toBeVisible()
   return { writes, toggle }
@@ -397,9 +400,7 @@ for (const width of [390, 1280]) {
       await expect(current).toBeVisible()
       const clipped = await current.evaluate(node => ({ scroll: node.scrollWidth, client: node.clientWidth, text: node.textContent }))
       expect(clipped.scroll, JSON.stringify(clipped)).toBeLessThanOrEqual(clipped.client + 1)
-      // The phone drawer is sized in rem and is wider than a 390px viewport with 32px text; that
-      // predates this name, so the drawer itself is only required to fit at desktop widths.
-      if (width >= 768) await fits(toggle, width)
+      await fits(toggle, width)
       // The fixture host runs ahead of the newest release, an informational state whose light
       // borrows the accent. Director's accent is red, so that light must not read as an alarm.
       const light = page.locator('[data-sidebar-update-status-light]')
@@ -466,6 +467,263 @@ for (const width of [390, 1280]) {
     })
   }
 }
+
+// Phones and tablets in portrait and landscape, with touch emulation: the app shell, its drawer
+// and the theme picker stay inside the viewport, every navigation and footer control can be
+// reached, and the picker works by touch and keyboard. Text is normal, doubled through the root
+// font size, or doubled through the browser's font preference (which also moves the breakpoints).
+// These are software browser checks, not physical device acceptance.
+const shellViewports = [[360, 800], [800, 360], [390, 844], [844, 390], [768, 1024], [1024, 768]]
+const shellLive = { streaming: true, fps: 60, bitrate_kbps: 10000, encode_time_ms: 2, latency_ms: 5, packet_loss: 0 }
+
+async function withinViewport(locator, label) {
+  const box = await locator.boundingBox()
+  const view = await locator.page().evaluate(() => ({ width: innerWidth, height: innerHeight }))
+  expect(box, label).not.toBeNull()
+  const detail = `${label} ${JSON.stringify({ box, view })}`
+  expect(box.x, detail).toBeGreaterThanOrEqual(-1)
+  expect(box.y, detail).toBeGreaterThanOrEqual(-1)
+  expect(box.x + box.width, detail).toBeLessThanOrEqual(view.width + 1)
+  expect(box.y + box.height, detail).toBeLessThanOrEqual(view.height + 1)
+  return { box, view }
+}
+
+async function noSidewaysPage(page, label) {
+  const sizes = await page.evaluate(() => {
+    const main = document.querySelector('#polaris-main'), right = main.getBoundingClientRect().left + main.clientWidth
+    // main hides sideways overflow, so anything past its right edge would be cut off: name it.
+    const over = [...main.querySelectorAll('*')].filter(node => node.getBoundingClientRect().right > right + 1)
+    const cut = over.filter(node => !over.some(other => other !== node && node.contains(other)))
+      .slice(0, 4).map(node => `${node.tagName}.${String(node.className).slice(0, 60)} ${Math.round(node.getBoundingClientRect().width)}`)
+    return { doc: document.documentElement.scrollWidth, body: document.body.scrollWidth, view: innerWidth, main: main.scrollWidth, mainClient: main.clientWidth, cut }
+  })
+  expect(sizes.doc, `${label} ${JSON.stringify(sizes)}`).toBeLessThanOrEqual(sizes.view)
+  expect(sizes.body, `${label} ${JSON.stringify(sizes)}`).toBeLessThanOrEqual(sizes.view)
+  expect(sizes.main, `${label} ${JSON.stringify(sizes)}`).toBeLessThanOrEqual(sizes.mainClient + 1)
+}
+
+// An essential control can be scrolled into view, sits inside the viewport (a control taller than
+// the screen starts on it and fills it), is the element a tap in its visible part lands on, and
+// its label fits inside it.
+async function reachable(locator, label) {
+  await locator.scrollIntoViewIfNeeded()
+  const view = await locator.page().evaluate(() => ({ width: innerWidth, height: innerHeight }))
+  const box = await locator.boundingBox()
+  if (box && box.height > view.height) {
+    const detail = `${label} ${JSON.stringify({ box, view })}`
+    expect(box.x, detail).toBeGreaterThanOrEqual(-1)
+    expect(box.x + box.width, detail).toBeLessThanOrEqual(view.width + 1)
+    expect(box.y, detail).toBeLessThanOrEqual(1)
+    expect(box.y + box.height, detail).toBeGreaterThanOrEqual(view.height - 1)
+  } else {
+    await withinViewport(locator, label)
+  }
+  const hit = await locator.evaluate(node => {
+    const rect = node.getBoundingClientRect()
+    const y = (Math.max(rect.top, 0) + Math.min(rect.bottom, innerHeight)) / 2
+    const top = document.elementFromPoint(rect.left + rect.width / 2, y)
+    // A label cut short with an ellipsis is not shown whole, even when the control itself fits.
+    const ellipsized = [node, ...node.querySelectorAll('*')].filter(el => getComputedStyle(el).textOverflow === 'ellipsis' && el.scrollWidth > el.clientWidth + 1)
+      .map(el => `${el.tagName} "${el.textContent.trim().slice(0, 40)}" ${el.scrollWidth}/${el.clientWidth}`)
+    return { hit: Boolean(top && (top === node || node.contains(top))), at: top ? `${top.tagName}.${String(top.className).slice(0, 60)}` : null,
+      scroll: node.scrollWidth, client: node.clientWidth, ellipsized }
+  })
+  expect(hit.hit, `${label} ${JSON.stringify(hit)}`).toBe(true)
+  expect(hit.scroll, `${label} ${JSON.stringify(hit)}`).toBeLessThanOrEqual(hit.client + 1)
+  expect(hit.ellipsized, `${label} ${JSON.stringify(hit)}`).toEqual([])
+}
+
+test.describe('phone and tablet orientations', () => {
+  test.use({ hasTouch: true, isMobile: true })
+  for (const [width, height] of shellViewports) {
+    for (const text of ['normal', 'root-200', 'browser-200']) {
+      test(`app shell, drawer and theme picker at ${width}x${height} with ${text} text`, async ({ page }, testInfo) => {
+        const label = `${width}x${height} ${text}`
+        const measured = {}
+        await page.setViewportSize({ width, height })
+        await page.emulateMedia({ reducedMotion: 'reduce' })
+        if (text === 'browser-200') await (await page.context().newCDPSession(page)).send('Page.setFontSizes', { fontSizes: { standard: 32 } })
+        const writes = await mockHost(page, 'director')
+        let statsUnavailable = false
+        await page.route('**/api/stats/system', route => statsUnavailable
+          ? route.fulfill({ status: 503, json: { status: false, error: 'unavailable' } }) : route.fallback())
+        await page.addInitScript(() => {
+          const Mocked = window.EventSource
+          window.EventSource = class {
+            constructor(...args) {
+              if (!window.__mockStatsUnavailable) return new Mocked(...args)
+              this.timer = setTimeout(() => this.onerror?.({}), 50)
+            }
+            close() { clearTimeout(this.timer) }
+          }
+        })
+        if (text === 'root-200') await page.addInitScript(() => document.addEventListener('DOMContentLoaded', () => { document.documentElement.style.fontSize = '32px' }))
+        await page.goto('/#/')
+        await expect(page.locator('[data-dashboard-play-rail]')).toBeVisible()
+        expect(await page.evaluate(() => getComputedStyle(document.documentElement).fontSize)).toBe(text === 'normal' ? '16px' : '32px')
+        await noSidewaysPage(page, `${label} idle Mission Control`)
+        await reachable(page.locator('[data-dashboard-launch-app]').first(), `${label} idle Mission Control launch`)
+        await page.evaluate(live => { window.__mockStats = live }, shellLive)
+        await expect(page.locator('.dashboard-live-shell')).toBeVisible()
+        await noSidewaysPage(page, `${label} live Mission Control`)
+        await page.evaluate(() => { window.__mockStats = { streaming: false } })
+        await expect(page.locator('[data-dashboard-play-rail]')).toBeVisible()
+
+        const menu = page.locator('[data-mobile-header]').getByRole('button', { name: 'Toggle navigation' })
+        const drawer = page.locator('#polaris-sidebar')
+        const drawerMode = await menu.isVisible()
+        measured.drawerMode = drawerMode
+        const openDrawer = async () => {
+          if (!drawerMode) return
+          await menu.tap()
+          await expect(menu).toHaveAttribute('aria-expanded', 'true')
+        }
+        if (drawerMode) {
+          const target = await menu.boundingBox()
+          expect(target.width, label).toBeGreaterThanOrEqual(44)
+          expect(target.height, label).toBeGreaterThanOrEqual(44)
+        }
+        await openDrawer()
+        measured.drawer = (await withinViewport(drawer, `${label} drawer`)).box
+        const controls = [...await drawer.getByRole('link').all(), drawer.getByRole('button', { name: 'Choose theme' }),
+          drawer.locator('[data-sidebar-sign-out]'), drawer.getByRole('button', { name: /^Open command palette/ }),
+          drawer.getByRole('button', { name: /^(Collapse|Expand) sidebar$/ })]
+        for (const control of controls) {
+          await reachable(control, `${label} drawer control ${await control.getAttribute('aria-label') || (await control.textContent()).trim()}`)
+        }
+
+        // Touch opens the picker; it sits wholly on screen and every full name can be scrolled to.
+        const appearance = drawer.getByRole('button', { name: 'Choose theme' })
+        await appearance.scrollIntoViewIfNeeded()
+        await appearance.tap()
+        const listbox = page.getByRole('listbox', { name: 'Theme' })
+        await expect(listbox).toBeVisible()
+        measured.picker = (await withinViewport(listbox, `${label} open picker`)).box
+        await page.screenshot({ path: `test-results/mobile-shell-${width}x${height}-${text}.png`, animations: 'disabled' })
+        for (const name of themeNames) {
+          const option = listbox.getByRole('option').filter({ has: page.getByText(name, { exact: true }) })
+          await option.scrollIntoViewIfNeeded()
+          await withinViewport(option, `${label} option ${name}`)
+          const shown = await option.getByText(name, { exact: true }).evaluate(node => ({ scroll: node.scrollWidth, client: node.clientWidth, text: node.innerText }))
+          expect(shown.text.replace(/\s+/g, ' ').trim(), `${label} ${JSON.stringify(shown)}`).toBe(name)
+          expect(shown.scroll, `${label} ${name} ${JSON.stringify(shown)}`).toBeLessThanOrEqual(shown.client + 1)
+        }
+        // Keyboard: focus starts on the current skin, Up and Down move it, Escape closes only the
+        // picker and returns focus to its button, and Enter reopens and chooses.
+        const current = listbox.getByRole('option', { selected: true })
+        await expect(current).toBeFocused()
+        await page.keyboard.press('ArrowDown')
+        await expect(listbox.getByRole('option').filter({ has: page.getByText('High Contrast', { exact: true }) })).toBeFocused()
+        await page.keyboard.press('ArrowUp')
+        await expect(current).toBeFocused()
+        await page.keyboard.press('Escape')
+        await expect(listbox).toHaveCount(0)
+        await expect(appearance).toBeFocused()
+        if (drawerMode) await expect(menu).toHaveAttribute('aria-expanded', 'true')
+        await page.keyboard.press('Enter')
+        await expect(listbox).toBeVisible()
+        await expect(current).toBeFocused()
+        await page.keyboard.press('Enter')
+        await expect(listbox).toHaveCount(0)
+        await expect(appearance).toBeFocused()
+        expect(await page.evaluate(() => document.documentElement.getAttribute('data-theme'))).toBe('director')
+
+        // Touch: tapping an option chooses it and closes the list (the teleported list counts as
+        // inside the picker), and a tap outside the list and its button closes an open list.
+        const theme = () => page.evaluate(() => document.documentElement.getAttribute('data-theme'))
+        await appearance.tap()
+        await listbox.getByRole('option').filter({ has: page.getByText('High Contrast', { exact: true }) }).tap()
+        await expect(listbox).toHaveCount(0)
+        expect(await theme()).toBe('high-contrast')
+        await appearance.tap()
+        await listbox.getByRole('option').filter({ has: page.getByText('< Congratulations, Director >', { exact: true }) }).tap()
+        await expect(listbox).toHaveCount(0)
+        expect(await theme()).toBe('director')
+        await appearance.tap()
+        await expect(listbox).toBeVisible()
+        const list = await listbox.boundingBox(), drawerBox = await drawer.boundingBox()
+        const outside = [[drawerBox.x + 12, drawerBox.y + 12], [width - 6, height - 6], [width - 6, 6]]
+          .find(([x, y]) => x < list.x || x > list.x + list.width || y < list.y || y > list.y + list.height)
+        await page.touchscreen.tap(outside[0], outside[1])
+        await expect(listbox).toHaveCount(0)
+        expect(await theme()).toBe('director')
+        if (drawerMode && await menu.getAttribute('aria-expanded') !== 'true') await openDrawer()
+
+        // Rotating with the picker open keeps it (or closes it) inside the new viewport.
+        await appearance.scrollIntoViewIfNeeded()
+        await appearance.tap()
+        await expect(listbox).toBeVisible()
+        await page.setViewportSize({ width: height, height: width })
+        await page.waitForTimeout(250)
+        if (await listbox.count()) measured.rotatedPicker = (await withinViewport(listbox, `${label} picker after rotation`)).box
+        // The menu button is display:none in the side-by-side shell, so read it only when shown.
+        if (await menu.isVisible() && await menu.getAttribute('aria-expanded') === 'true') await withinViewport(drawer, `${label} drawer after rotation`)
+        await page.setViewportSize({ width, height })
+        await page.keyboard.press('Escape')
+        await expect(listbox).toHaveCount(0)
+
+        if (drawerMode) {
+          // Escape closes the drawer and returns focus to the menu button; Enter on the menu button
+          // opens it with focus inside; a tap beside it closes it too.
+          if (await menu.getAttribute('aria-expanded') !== 'true') await openDrawer()
+          // Leave the drawer scrolled down at its footer, as after choosing a theme, then close it.
+          await appearance.focus()
+          await page.keyboard.press('Escape')
+          await expect(menu).toHaveAttribute('aria-expanded', 'false')
+          await expect(menu).toBeFocused()
+          await page.keyboard.press('Enter')
+          await expect(menu).toHaveAttribute('aria-expanded', 'true')
+          // The drawer was last scrolled down to its footer. Measured straight after opening, before
+          // any helper scrolls: the link that receives focus is on screen and takes a tap.
+          await expect.poll(() => page.evaluate(() => document.querySelector('#polaris-sidebar').getBoundingClientRect().left)).toBeGreaterThanOrEqual(-1)
+          const focused = await page.evaluate(() => {
+            const node = document.activeElement, rect = node.getBoundingClientRect()
+            const top = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+            return { inDrawer: Boolean(node.closest('#polaris-sidebar')), text: node.textContent.trim().slice(0, 40), top: rect.top, bottom: rect.bottom,
+              left: rect.left, right: rect.right, view: innerHeight, width: innerWidth, hit: Boolean(top && (top === node || node.contains(top))) }
+          })
+          expect(focused.inDrawer, `${label} focus moved into the drawer ${JSON.stringify(focused)}`).toBe(true)
+          expect(focused.top >= -1 && focused.bottom <= focused.view + 1 && focused.left >= -1 && focused.right <= focused.width + 1 && focused.hit,
+            `${label} focused drawer link on screen ${JSON.stringify(focused)}`).toBe(true)
+          await page.keyboard.press('Escape')
+          await expect(menu).toBeFocused()
+          await openDrawer()
+          const box = await drawer.boundingBox()
+          expect(box.x + box.width, `${label} room to tap beside the drawer`).toBeLessThanOrEqual(width - 24)
+          await page.touchscreen.tap(width - 12, Math.round(height / 2))
+          await expect(menu).toHaveAttribute('aria-expanded', 'false')
+        }
+
+        // Navigate through the shell to Library, Settings and Devices, then an unavailable host.
+        const essentials = {
+          Library: [page.getByRole('button', { name: 'Import Games', exact: true }), page.getByRole('button', { name: 'Add New', exact: true })],
+          Settings: [page.getByRole('button', { name: 'Save', exact: true }), page.getByRole('button', { name: 'Save and restart Polaris', exact: true })],
+          Devices: [page.getByRole('radiogroup', { name: 'Access for this device' }).getByRole('radio').first()],
+        }
+        for (const [name, marker] of [['Library', '[data-library-app]'], ['Settings', '.settings-command-bar'], ['Devices', '.page-title']]) {
+          await openDrawer()
+          await drawer.getByRole('link', { name, exact: true }).tap()
+          await expect(page.locator(marker).first()).toBeVisible()
+          if (drawerMode) await expect(menu).toHaveAttribute('aria-expanded', 'false')
+          await noSidewaysPage(page, `${label} ${name}`)
+          for (const control of essentials[name]) await reachable(control, `${label} ${name} essential action`)
+        }
+        statsUnavailable = true
+        await page.evaluate(() => { window.__mockStatsUnavailable = true })
+        await openDrawer()
+        await drawer.getByRole('link', { name: 'Mission Control', exact: true }).tap()
+        // System stats answer 503 and the stats stream errors: Mission Control shows its degraded
+        // host-telemetry state, whose Troubleshoot link stays reachable.
+        const degraded = page.locator('.dashboard-degraded-state')
+        await expect(degraded).toContainText('Host telemetry is warming up')
+        await noSidewaysPage(page, `${label} unavailable Mission Control`)
+        await reachable(degraded.getByRole('link', { name: 'Troubleshoot' }), `${label} unavailable Mission Control troubleshoot`)
+        expect(writes).toEqual([])
+        await testInfo.attach('shell-measurements', { body: JSON.stringify(measured), contentType: 'application/json' })
+      })
+    }
+  }
+})
 
 // A launcher can be one 255-character file name, and a folder's first warning can name a long
 // path. Both wrap inside the ROM folder and readiness cards instead of widening the page, while an

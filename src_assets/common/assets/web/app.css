@@ -1392,9 +1392,11 @@ textarea {
 
 /* ── Theme Picker ── */
 .theme-picker-panel {
-  @apply absolute bottom-full left-0 z-[120] mb-2 flex min-w-[264px] flex-col gap-1 rounded-xl p-2;
+  /* Placed by ThemeToggle from its button; these limits are the fallback before the first placement. */
+  @apply fixed bottom-4 left-4 z-[120] flex min-w-[264px] flex-col gap-1 rounded-xl p-2;
   max-height: min(30rem, 70dvh);
   overflow-y: auto;
+  overscroll-behavior: contain;
   max-width: calc(100vw - 2rem);
   background: var(--surface-card);
   backdrop-filter: blur(12px);
@@ -1956,6 +1958,16 @@ textarea {
   @apply min-w-0;
 }
 
+/* On a short screen (a landscape phone, or enlarged text) a pinned action bar can be taller than
+   the viewport and hide its own buttons, so it scrolls with the page there too. */
+@media (max-height: 40rem) {
+  .settings-command-bar.sticky {
+    position: static;
+    top: auto;
+    z-index: auto;
+  }
+}
+
 .settings-command-title {
   @apply mt-1 text-sm font-semibold text-silver;
 }
@@ -2188,8 +2200,10 @@ textarea {
   @apply truncate font-mono text-[1.65rem] font-bold leading-none tracking-tight tabular-nums;
 }
 
+/* One shrinkable column below xl: an implicit auto track would grow to its widest unbreakable
+   content and push the live panels past a phone's screen (enlarged text). */
 .dashboard-live-stage {
-  @apply grid gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.95fr)];
+  @apply grid grid-cols-[minmax(0,1fr)] gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.95fr)];
   align-items: start;
 }
 

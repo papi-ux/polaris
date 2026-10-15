@@ -9,14 +9,54 @@ const props = defineProps({
 const open = ref(false)
 const activeTheme = ref(getThemeMeta(getTheme()))
 const rootEl = ref(null)
+const panelEl = ref(null)
 const optionRefs = ref([])
-// Room above the button when the list opens. Names wrap rather than truncate, so with
-// enlarged text the list can be taller than that room; it then scrolls inside instead of
-// running off the top of the screen.
-const panelRoom = ref(0)
-const panelStyle = computed(() => (panelRoom.value > 0
-  ? { maxHeight: `min(30rem, 70dvh, calc(${panelRoom.value}px - 1rem))` }
-  : null))
+// The list is rendered on <body> with fixed coordinates taken from the button, so a scrolling
+// sidebar or phone drawer can neither clip nor hide it. It opens on the side with more room,
+// stays inside the viewport, scrolls inside when names wrap with enlarged text, and follows the
+// button when the viewport rotates or the drawer scrolls.
+const panelStyle = ref(null)
+
+function placePanel() {
+  const button = rootEl.value?.querySelector('button')
+  if (!button) return
+  const rect = button.getBoundingClientRect()
+  const width = document.documentElement.clientWidth || window.innerWidth
+  const height = window.innerHeight
+  // Once the button itself has left the screen there is nothing to anchor to: close instead of
+  // floating the list off it, keeping focus on the picker's own button.
+  if (rect.bottom <= 0 || rect.top >= height || rect.right <= 0 || rect.left >= width) {
+    const hadFocus = panelEl.value?.contains(document.activeElement)
+    open.value = false
+    if (hadFocus) button.focus({ preventScroll: true })
+    return
+  }
+  const gap = 8
+  const clamp = (value, low, high) => Math.min(Math.max(value, low), high)
+  // A partly visible button anchors at its visible edge, so the list is always on screen.
+  const anchorTop = clamp(rect.top, gap, height - gap)
+  const anchorBottom = clamp(rect.bottom, gap, height - gap)
+  const above = anchorTop - 2 * gap
+  const below = height - anchorBottom - 2 * gap
+  const up = above >= below
+  const left = clamp(rect.left, gap, Math.max(gap, width - gap - 264))
+  panelStyle.value = {
+    left: `${left}px`,
+    right: 'auto',
+    maxWidth: `${Math.max(width - left - gap, 0)}px`,
+    maxHeight: `min(30rem, ${Math.max(Math.floor(up ? above : below), 0)}px)`,
+    // Set both insets, so the stylesheet's fallback corner never stretches the list.
+    top: up ? 'auto' : `${anchorBottom + gap}px`,
+    bottom: up ? `${height - anchorTop + gap}px` : 'auto',
+  }
+}
+
+function followViewport(event) {
+  if (!open.value) return
+  // A rotation or resize can move the button out of the scrolled sidebar: bring it back first.
+  if (event?.type === 'resize') rootEl.value?.querySelector('button')?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  placePanel()
+}
 
 const activeIndex = computed(() => THEMES.findIndex((theme) => theme.id === activeTheme.value.id))
 
@@ -28,15 +68,19 @@ onMounted(() => {
     activeTheme.value = getThemeMeta(theme)
   })
   document.addEventListener('pointerdown', onDocumentPointerDown, true)
+  window.addEventListener('resize', followViewport)
+  document.addEventListener('scroll', followViewport, true)
 })
 
 onBeforeUnmount(() => {
   if (unsubscribe) unsubscribe()
   document.removeEventListener('pointerdown', onDocumentPointerDown, true)
+  window.removeEventListener('resize', followViewport)
+  document.removeEventListener('scroll', followViewport, true)
 })
 
 function onDocumentPointerDown(event) {
-  if (open.value && rootEl.value && !rootEl.value.contains(event.target)) {
+  if (open.value && rootEl.value && !rootEl.value.contains(event.target) && !panelEl.value?.contains(event.target)) {
     open.value = false
   }
 }
@@ -44,7 +88,7 @@ function onDocumentPointerDown(event) {
 async function togglePicker() {
   open.value = !open.value
   if (open.value) {
-    panelRoom.value = Math.floor(rootEl.value?.getBoundingClientRect().top ?? 0)
+    placePanel()
     await nextTick()
     const target = optionRefs.value[Math.max(activeIndex.value, 0)]
     target?.focus()
@@ -94,8 +138,10 @@ function moveFocus(delta) {
       <svg v-if="!props.collapsed" class="ml-1 h-3 w-3 shrink-0 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"/></svg>
     </button>
 
+    <Teleport to="body">
     <div
       v-if="open"
+      ref="panelEl"
       role="listbox"
       aria-label="Theme"
       class="theme-picker-panel"
@@ -129,5 +175,6 @@ function moveFocus(delta) {
         </span>
       </button>
     </div>
+    </Teleport>
   </div>
 </template>
