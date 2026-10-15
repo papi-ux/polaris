@@ -1,5 +1,8 @@
 <script setup>
+import { embeddedClient } from '../../client-embed.js'
 import { ref } from 'vue'
+
+const inNova = embeddedClient() === 'nova'
 
 const props = defineProps([
   'platform',
@@ -11,7 +14,7 @@ const config = ref(props.config)
 
 <template>
   <div id="files" class="config-page">
-    <p class="-mt-3 text-right text-xs text-storm" data-tab-docs-link>
+    <p v-if="!inNova" class="-mt-3 text-right text-xs text-storm" data-tab-docs-link>
       <a href="https://papi-ux.com/docs/configuration/#files" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">{{ $t('config.files_docs_link') }}</a>
     </p>
     <section class="settings-section">

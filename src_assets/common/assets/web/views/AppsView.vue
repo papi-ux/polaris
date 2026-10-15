@@ -1,6 +1,6 @@
 <template>
   <div class="page-shell operator-console library-view" @pointerdown="dismissLibraryMore" @keydown.esc="closeLibraryMore($event, true)">
-    <p class="-mt-3 text-right text-xs text-storm" data-tab-docs-link>
+    <p v-if="!inNova" class="-mt-3 text-right text-xs text-storm" data-tab-docs-link>
       <a href="https://papi-ux.com/docs/apps/" target="_blank" rel="noopener" class="focus-ring text-ice hover:underline">Library and app editor guide</a>
     </p>
     <section v-if="!showEditForm" class="page-header">
@@ -1359,6 +1359,7 @@ import Button from '../components/Button.vue'
 import PosterImage from '../components/PosterImage.vue'
 import AppArtworkControls from '../components/AppArtworkControls.vue'
 import { artworkLookupOffSet } from '../app-artwork.js'
+import { artLaunchHref, embeddedClient } from '../client-embed.js'
 import { useToast } from '../composables/useToast'
 import { useGameScanner } from '../composables/useGameScanner'
 import { filterLibraryApps } from '../library-filters'
@@ -1569,6 +1570,8 @@ const currentApp = ref("")
 const currentAppAvailable = ref(false)
 const draggingApp = ref(-1)
 const hostName = ref("")
+// Inside Nova's Host Console the guide link is hidden: Nova opens outside pages in the browser.
+const inNova = embeddedClient() === 'nova'
 const hostUUID = ref("")
 const listReordered = ref(false)
 const reorderStatus = ref('')
@@ -1776,7 +1779,7 @@ function unstageImportGame(game) {
 }
 
 function launchHref(app) {
-  return `art://launch?host_uuid=${hostUUID.value}&host_name=${hostName.value}&app_uuid=${app.uuid}&app_name=${app.name}`
+  return artLaunchHref({ hostUuid: hostUUID.value, hostName: hostName.value, app })
 }
 
 function scrollEditorToTop() {

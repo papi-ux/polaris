@@ -3492,7 +3492,7 @@ textarea {
 /* ── Director Skin (Polaris "< Congratulations, Director >", a nod to Control) ── */
 /* Charcoal and near-black dominate, copy stays warm white, and red is a signal rather
    than a surface: current and active markers, toggles, kickers and focus. Nova's Director
-   keeps its own crimson; Polaris diverges on purpose. Ratios are on the solid card:
+   matches it from Nova #311. Ratios are on the solid card:
    ice 15.2, silver 11.8, storm 7.5, support 9.0, accent 5.0 (4.6 on a tile). */
 [data-theme="director"] {
   --color-ice: #f4ebe1;

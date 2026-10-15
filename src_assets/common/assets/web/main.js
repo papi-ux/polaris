@@ -12,6 +12,12 @@ import {
 } from './router-helpers.js'
 import { initializeWebUiAuthState } from './auth-state.js'
 import { createWebUiAuthGuard } from './router-auth.js'
+import { initClientEmbed } from './client-embed.js'
+import { THEMES } from './theme.js'
+
+// What an app that opened the console inside itself said (Nova's Host Console), read before the
+// shell asks for its theme or a view decides where Play goes.
+initClientEmbed({ themes: THEMES.map(theme => theme.id) })
 
 // CSRF token from server-injected meta tag
 const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || ''
