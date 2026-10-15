@@ -1263,11 +1263,6 @@ textarea {
   color: var(--color-accent);
 }
 
-[data-dashboard-idle-hero],
-.dashboard-live-shell {
-  box-shadow: var(--shadow-glow-lg);
-}
-
 /* Doctor verdict card: the traffic light paints the left stripe. */
 .dashboard-doctor-card {
   @apply rounded-xl border p-4;
@@ -1277,7 +1272,7 @@ textarea {
 
 /* Strip grade badge and stage LIVE badge. */
 .dashboard-grade-badge {
-  @apply inline-flex h-9 min-w-9 items-center justify-center rounded-lg border-2 border-current px-2 font-mono text-xl font-bold leading-none;
+  @apply inline-flex h-7 min-w-7 items-center justify-center self-center rounded-md border-[1.5px] border-current px-1.5 font-mono text-base font-bold leading-none;
 }
 
 .dashboard-preview-live-badge {
@@ -1305,7 +1300,7 @@ textarea {
 
 /* Sparkline slot inside each instrument-strip tile. */
 .dashboard-strip-spark {
-  @apply h-8 w-36;
+  @apply h-8 w-full;
 }
 
 /* Inert Doctor advice: unmistakably not a button. */
@@ -1324,19 +1319,11 @@ textarea {
   border-color: var(--edge-raised);
 }
 
-.dashboard-play-cover {
-  @apply relative h-24 w-full overflow-hidden rounded-lg bg-void/60;
-}
-
-.dashboard-play-cover-fallback {
-  @apply absolute inset-0 flex items-center justify-center text-storm/45;
-  background:
-    radial-gradient(circle at 50% 20%, color-mix(in srgb, var(--color-ice) 10%, transparent), transparent 58%),
-    color-mix(in srgb, var(--color-deep) 82%, var(--color-void));
-}
-
+/* Neutral warm outlines, level at the bottom of each card whatever the title's length; accent
+   red stays for live, focus and the title rule. */
 .dashboard-play-launch {
-  @apply mt-2 inline-flex min-h-11 w-full items-center justify-center rounded-lg border border-accent/40 font-mono text-xs font-semibold text-accent transition-[background-color,border-color,color] duration-150 hover:bg-accent/15 disabled:cursor-not-allowed disabled:opacity-50;
+  @apply mt-auto inline-flex min-h-11 w-full items-center justify-center rounded-lg border font-mono text-xs font-semibold text-silver transition-[background-color,border-color,color] duration-150 hover:border-silver disabled:cursor-not-allowed disabled:opacity-50;
+  border-color: var(--edge-raised);
 }
 
 .section-title {
@@ -1603,9 +1590,7 @@ textarea {
   @apply rounded-lg border border-storm/15 bg-deep/35 px-3 py-2;
 }
 
-.operator-console .dashboard-preview-panel,
 .operator-console .dashboard-preview-frame,
-.operator-console .dashboard-client-row,
 .operator-console .settings-subtle-surface {
   border-radius: 0.5rem;
 }
@@ -2167,70 +2152,6 @@ textarea {
   @apply rounded-2xl border border-warning/25 bg-warning/5 p-4 text-sm text-warning-bright;
 }
 
-.dashboard-live-shell {
-  @apply space-y-5;
-}
-
-.dashboard-live-header {
-  @apply flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between;
-}
-
-.dashboard-live-header-copy {
-  @apply min-w-0;
-}
-
-.dashboard-live-header-meta {
-  @apply flex flex-wrap gap-2 xl:justify-end;
-}
-
-.dashboard-live-summary-grid {
-  /* Instrument strip: bare figures over mono labels, no tile boxes. */
-  @apply flex flex-wrap items-start gap-x-10 gap-y-4;
-}
-
-.dashboard-live-summary-tile {
-  @apply flex min-w-[5.5rem] flex-col-reverse gap-1 border-0 bg-transparent p-0;
-}
-
-.dashboard-live-summary-label {
-  @apply font-mono text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
-}
-
-.dashboard-live-summary-value {
-  @apply truncate font-mono text-[1.65rem] font-bold leading-none tracking-tight tabular-nums;
-}
-
-/* One shrinkable column below xl: an implicit auto track would grow to its widest unbreakable
-   content and push the live panels past a phone's screen (enlarged text). */
-.dashboard-live-stage {
-  @apply grid grid-cols-[minmax(0,1fr)] gap-4 xl:grid-cols-[minmax(0,1.5fr)_minmax(320px,0.95fr)];
-  align-items: start;
-}
-
-.dashboard-live-stage.is-preview-expanded {
-  @apply xl:grid-cols-[minmax(0,1.8fr)_minmax(320px,0.85fr)];
-}
-
-.dashboard-live-stage.is-preview-hidden {
-  @apply xl:grid-cols-[minmax(0,1.2fr)_minmax(320px,1fr)];
-}
-
-.dashboard-preview-panel {
-  @apply rounded-2xl border border-storm/20 bg-deep/35 p-4;
-}
-
-.dashboard-live-main {
-  @apply space-y-4;
-}
-
-.dashboard-preview-header {
-  @apply flex flex-col gap-3 md:flex-row md:items-start md:justify-between;
-}
-
-.dashboard-preview-actions {
-  @apply flex flex-wrap items-center gap-2 md:justify-end;
-}
-
 .dashboard-action-button {
   @apply inline-flex h-9 items-center justify-center rounded-xl px-3.5 text-sm font-medium transition-[background-color,border-color,color,box-shadow] duration-200 disabled:cursor-not-allowed disabled:opacity-50;
 }
@@ -2252,7 +2173,7 @@ textarea {
 }
 
 .dashboard-preview-frame {
-  @apply relative mt-4 aspect-video overflow-hidden rounded-2xl border border-storm/20 bg-void/80;
+  @apply relative aspect-video overflow-hidden rounded-2xl border border-storm/20 bg-void/80;
 }
 
 .dashboard-preview-frame.has-error {
@@ -2271,65 +2192,12 @@ textarea {
   @apply text-silver;
 }
 
-.dashboard-preview-footer {
-  @apply mt-3 space-y-3;
-}
-
 .dashboard-preview-meta {
   @apply flex flex-wrap gap-2;
 }
 
-.dashboard-live-side {
-  @apply space-y-4;
-  align-self: start;
-}
-
-.dashboard-runtime-grid {
-  @apply mt-3 grid gap-3 sm:grid-cols-2;
-}
-
-.dashboard-runtime-row {
-  @apply rounded-xl border border-storm/15 bg-void/35 px-3 py-2.5;
-}
-
-.dashboard-runtime-label {
-  @apply text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
-}
-
-.dashboard-runtime-pill-grid {
-  @apply mt-3 flex flex-wrap gap-2;
-}
-
-.dashboard-runtime-pill {
-  @apply inline-flex items-center gap-2 rounded-full border border-storm/15 bg-void/35 px-3 py-1.5;
-}
-
-.dashboard-client-row {
-  @apply flex items-center justify-between gap-3 rounded-xl border border-storm/15 bg-void/35 px-3 py-2;
-}
-
-.dashboard-live-support-grid {
-  @apply grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)];
-}
-
-.dashboard-context-card {
-  @apply space-y-4;
-}
-
-.dashboard-context-section {
-  @apply space-y-3 border-t border-storm/15 pt-4 first:border-t-0 first:pt-0;
-}
-
-.dashboard-context-header {
-  @apply flex items-center justify-between gap-3 text-[10px] font-semibold uppercase tracking-eyebrow text-storm;
-}
-
 .dashboard-rail-footnote {
   @apply mt-3 text-[11px] text-storm;
-}
-
-.dashboard-telemetry-grid {
-  @apply grid gap-3 md:grid-cols-2 xl:grid-cols-3;
 }
 
 /* ── Mission Control: one stage per state, then the deck ──
@@ -2340,11 +2208,23 @@ textarea {
    colour them; the unlayered rules after it only adjust the existing unlayered dashboard rules. */
 @layer components {
   .mc-shell {
-    container: mc-shell / inline-size;
     display: flex;
     flex-direction: column;
     gap: 1.25rem;
     min-width: 0;
+  }
+
+  /* Eyebrow labels share one mono, tracked, uppercase voice; each rule sets only size and tone. */
+  .mc-stage-top,
+  .mc-kicker,
+  .mc-panel-label,
+  .mc-node-role,
+  .mc-signal-label,
+  .mc-diag-section-title {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    letter-spacing: var(--tracking-eyebrow);
+    text-transform: uppercase;
   }
 
   .mc-stage {
@@ -2359,6 +2239,7 @@ textarea {
     border-radius: 0.75rem;
     background: var(--color-deep);
     color: var(--color-ice);
+    box-shadow: 0 2rem 4rem -2rem rgb(0 0 0 / 0.75);
   }
 
   /* The stage sizes to its content. Only the loading stage holds a height, so the first report
@@ -2397,8 +2278,9 @@ textarea {
     z-index: -1;
     pointer-events: none;
     background:
-      linear-gradient(90deg, color-mix(in srgb, var(--color-void) 94%, transparent) 0%, color-mix(in srgb, var(--color-void) 72%, transparent) 45%, color-mix(in srgb, var(--color-void) 15%, transparent) 100%),
-      linear-gradient(0deg, color-mix(in srgb, var(--color-void) 94%, transparent) 0%, color-mix(in srgb, var(--color-void) 30%, transparent) 45%, transparent 75%);
+      linear-gradient(90deg, var(--color-void) 25%, transparent),
+      linear-gradient(0deg, var(--color-void) 5%, transparent 75%);
+    opacity: 0.92;
   }
 
   .mc-frame-marks {
@@ -2413,10 +2295,10 @@ textarea {
     pointer-events: none;
   }
 
-  .mc-frame-marks i:nth-child(1) { top: 0.75rem; left: 0.75rem; border-top-width: 1.5px; border-left-width: 1.5px; }
-  .mc-frame-marks i:nth-child(2) { top: 0.75rem; right: 0.75rem; border-top-width: 1.5px; border-right-width: 1.5px; }
-  .mc-frame-marks i:nth-child(3) { bottom: 0.75rem; left: 0.75rem; border-bottom-width: 1.5px; border-left-width: 1.5px; }
-  .mc-frame-marks i:nth-child(4) { bottom: 0.75rem; right: 0.75rem; border-bottom-width: 1.5px; border-right-width: 1.5px; }
+  .mc-frame-marks i:nth-child(-n+2) { top: 0.75rem; border-top-width: 1.5px; }
+  .mc-frame-marks i:nth-child(n+3) { bottom: 0.75rem; border-bottom-width: 1.5px; }
+  .mc-frame-marks i:nth-child(odd) { left: 0.75rem; border-left-width: 1.5px; }
+  .mc-frame-marks i:nth-child(even) { right: 0.75rem; border-right-width: 1.5px; }
 
   .mc-stage-top {
     display: flex;
@@ -2425,12 +2307,8 @@ textarea {
     justify-content: space-between;
     gap: 0.4rem 1rem;
     padding: 1rem 1.25rem 0;
-    font-family: var(--font-mono);
     font-size: 0.75rem;
-    font-weight: 600;
     line-height: 1.3;
-    letter-spacing: var(--tracking-eyebrow);
-    text-transform: uppercase;
     color: var(--color-silver);
   }
 
@@ -2524,13 +2402,8 @@ textarea {
   }
 
   .mc-kicker {
-    margin: 0;
-    font-family: var(--font-mono);
     font-size: 0.8125rem;
-    font-weight: 600;
     line-height: 1.3;
-    letter-spacing: var(--tracking-eyebrow);
-    text-transform: uppercase;
     color: var(--color-support);
   }
 
@@ -2576,7 +2449,6 @@ textarea {
     display: flex;
     flex-wrap: wrap;
     gap: 0.25rem 0;
-    margin: 0;
     font-family: var(--font-mono);
     font-size: 0.8125rem;
     font-weight: 600;
@@ -2610,31 +2482,6 @@ textarea {
     color: var(--color-support);
   }
 
-  .mc-stage-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.6rem;
-    margin-top: 1.1rem;
-  }
-
-  .mc-stage-loading {
-    display: grid;
-    gap: 0.75rem;
-    margin-top: 0.75rem;
-  }
-
-  .mc-loading-title {
-    height: 3.25rem;
-    width: min(100%, 24rem);
-    border-radius: 0.5rem;
-  }
-
-  .mc-loading-line {
-    height: 1rem;
-    width: min(100%, 16rem);
-    border-radius: 0.375rem;
-  }
-
   .mc-signals-loading {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.25rem), 1fr));
@@ -2650,10 +2497,6 @@ textarea {
     max-width: 100%;
   }
 
-  .mc-stage-preview .dashboard-preview-frame {
-    margin-top: 0;
-  }
-
   .mc-stage-preview.is-expanded {
     flex-basis: 100%;
     order: 4;
@@ -2665,17 +2508,12 @@ textarea {
     padding: 1rem 1.1rem;
     border: 1px solid var(--edge-raised);
     border-radius: 0.5rem;
-    background: color-mix(in srgb, var(--color-void) 84%, transparent);
+    background: var(--surface-card);
   }
 
   .mc-panel-label {
-    margin: 0;
-    font-family: var(--font-mono);
     font-size: 0.75rem;
-    font-weight: 600;
     line-height: 1.3;
-    letter-spacing: var(--tracking-eyebrow);
-    text-transform: uppercase;
     color: var(--color-storm);
     overflow-wrap: anywhere;
   }
@@ -2687,8 +2525,6 @@ textarea {
 
   .mc-route-list {
     margin: 0.85rem 0 0;
-    padding: 0;
-    list-style: none;
   }
 
   .mc-node {
@@ -2737,12 +2573,8 @@ textarea {
   }
 
   .mc-node-role {
-    font-family: var(--font-mono);
     font-size: 0.6875rem;
-    font-weight: 600;
     line-height: 1.3;
-    letter-spacing: var(--tracking-eyebrow);
-    text-transform: uppercase;
     color: var(--color-storm);
     overflow-wrap: anywhere;
   }
@@ -2762,7 +2594,7 @@ textarea {
 
   .mc-node-badge {
     padding: 0.05rem 0.4rem;
-    border: 1px solid color-mix(in srgb, var(--color-accent) 45%, transparent);
+    border: 1px solid currentColor;
     border-radius: 9999px;
     font-size: 0.6875rem;
     font-weight: 600;
@@ -2772,8 +2604,6 @@ textarea {
   .mc-node-detail {
     font-size: 0.8125rem;
     line-height: 1.5;
-    color: var(--color-support);
-    overflow-wrap: anywhere;
   }
 
   .mc-node-detail + .mc-node-detail {
@@ -2792,16 +2622,24 @@ textarea {
   }
 
   /* Signal strip: compact and truthful; a missing value is a dash with its reason. */
+  /* Small supporting copy: the readable support tone, wrapping anywhere rather than overflowing. */
+  .mc-node-detail,
+  .mc-signal-sub,
+  .mc-check-detail,
+  .mc-diag-summary {
+    color: var(--color-support);
+    overflow-wrap: anywhere;
+  }
+
   .mc-signals-wrap {
     position: relative;
     border-top: 1px solid var(--edge-raised);
-    background: linear-gradient(180deg, color-mix(in srgb, var(--color-void) 72%, transparent), color-mix(in srgb, var(--color-void) 94%, transparent));
+    background: linear-gradient(180deg, transparent, var(--color-void) 70%);
   }
 
   .mc-signals {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 9.25rem), 1fr));
-    margin: 0;
   }
 
   .mc-signal {
@@ -2813,12 +2651,8 @@ textarea {
   }
 
   .mc-signal-label {
-    font-family: var(--font-mono);
     font-size: 0.6875rem;
-    font-weight: 600;
     line-height: 1.25;
-    letter-spacing: var(--tracking-eyebrow);
-    text-transform: uppercase;
     color: var(--color-storm);
     overflow-wrap: anywhere;
   }
@@ -2868,8 +2702,6 @@ textarea {
     margin: 0.35rem 0 0;
     font-size: 0.8125rem;
     line-height: 1.4;
-    color: var(--color-support);
-    overflow-wrap: anywhere;
   }
 
   .mc-signal-spark {
@@ -2910,29 +2742,12 @@ textarea {
     background: var(--surface-card);
   }
 
-  .mc-panel-head {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 0.6rem 1rem;
-  }
-
   .mc-doctor-headline {
-    margin: 0;
     font-size: 1.25rem;
     font-weight: 700;
     line-height: 1.3;
     color: var(--color-ice);
     overflow-wrap: anywhere;
-  }
-
-  .mc-doctor-actions {
-    display: flex;
-    flex-shrink: 0;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem;
   }
 
   .mc-film {
@@ -2966,12 +2781,7 @@ textarea {
     min-width: 0;
     border: 1px solid var(--edge-card);
     border-radius: 0.75rem;
-    background: color-mix(in srgb, var(--surface-card-base) 70%, var(--color-void));
-  }
-
-  .mc-diag-heading {
-    margin: 0;
-    font: inherit;
+    background: var(--surface-card);
   }
 
   .mc-diag-toggle {
@@ -2992,7 +2802,7 @@ textarea {
   }
 
   .mc-diag-toggle:hover {
-    background: color-mix(in srgb, var(--color-ice) 4%, transparent);
+    background: var(--surface-raised);
   }
 
   .mc-diag-title {
@@ -3020,8 +2830,6 @@ textarea {
     font-family: var(--font-mono);
     font-size: 0.8125rem;
     line-height: 1.45;
-    color: var(--color-support);
-    overflow-wrap: anywhere;
   }
 
   .mc-diag-body {
@@ -3039,10 +2847,6 @@ textarea {
     grid-column: 1 / -1;
   }
 
-  .mc-diag-section {
-    min-width: 0;
-  }
-
   .mc-diag-section-head {
     display: flex;
     flex-wrap: wrap;
@@ -3053,12 +2857,8 @@ textarea {
 
   .mc-diag-section-title {
     margin: 0.9rem 0 0.55rem;
-    font-family: var(--font-mono);
     font-size: 0.75rem;
-    font-weight: 600;
     line-height: 1.3;
-    letter-spacing: var(--tracking-eyebrow);
-    text-transform: uppercase;
     color: var(--color-storm);
   }
 
@@ -3076,7 +2876,6 @@ textarea {
     display: flex;
     flex-direction: column;
     gap: 0.45rem;
-    margin: 0;
     font-size: 0.875rem;
   }
 
@@ -3112,9 +2911,6 @@ textarea {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
     gap: 0.6rem;
-    margin: 0;
-    padding: 0;
-    list-style: none;
   }
 
   .mc-check {
@@ -3152,8 +2948,6 @@ textarea {
     flex: 1 1 100%;
     font-size: 0.8125rem;
     line-height: 1.45;
-    color: var(--color-support);
-    overflow-wrap: anywhere;
   }
 
   .mc-check-link {
@@ -3164,9 +2958,6 @@ textarea {
   }
 
   .mc-history {
-    margin: 0;
-    padding: 0;
-    list-style: none;
   }
 
   .mc-history li {
@@ -3286,9 +3077,8 @@ textarea {
   }
 
   @keyframes mc-live-pulse {
-    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-accent) 45%, transparent); }
-    70% { box-shadow: 0 0 0 0.5rem transparent; }
-    100% { box-shadow: 0 0 0 0 transparent; }
+    0% { box-shadow: 0 0 0 0 var(--color-accent); }
+    70%, 100% { box-shadow: 0 0 0 0.5rem transparent; }
   }
 }
 
@@ -3302,24 +3092,6 @@ textarea {
   line-height: 1.2;
   color: var(--color-ice);
   overflow-wrap: break-word;
-}
-
-.mc-greeting .mc-bracket {
-  font-weight: 400;
-  color: var(--color-accent);
-}
-
-.mc-shell.dashboard-live-shell {
-  box-shadow: none;
-}
-
-.mc-shell.dashboard-live-shell > * {
-  margin-block: 0;
-}
-
-.mc-stage[data-dashboard-idle-hero],
-.mc-stage {
-  box-shadow: 0 2rem 4rem -2rem rgb(0 0 0 / 0.75);
 }
 
 .mission-control-view .dashboard-action-button {
@@ -3338,51 +3110,19 @@ textarea {
   font-weight: 600;
 }
 
-.mc-signal-value .mc-signal-grade {
-  height: 1.75rem;
-  min-width: 1.75rem;
-  padding: 0 0.35rem;
-  border-width: 1.5px;
-  font-size: 1rem;
-  align-self: center;
-}
-
-.mc-signal-spark .dashboard-strip-spark {
-  width: 100%;
-  height: 2rem;
-}
-
-.mc-film .dashboard-play-tile {
-  background: var(--surface-raised);
-}
-
-/* Rail launches are neutral warm outlines, level at the bottom of each card whatever the title's
-   length; accent red stays for live, focus and the title rule. */
 .mc-film .dashboard-play-tile > .min-w-0 {
   margin-bottom: 0.6rem;
 }
 
-.mc-film .dashboard-play-launch {
-  margin-top: auto;
-  border-color: var(--edge-raised);
-  color: var(--color-silver);
-}
-
-.mc-film .dashboard-play-launch:hover {
-  border-color: var(--color-silver);
-  background: color-mix(in srgb, var(--color-ice) 6%, transparent);
-}
-
 /* Disconnect is the page's one destructive action: a salmon outline, never the loudest fill. */
 .mission-control-view .mc-action-danger {
-  border: 1px solid color-mix(in srgb, var(--color-danger) 70%, transparent);
+  border: 1px solid var(--color-danger);
   background: transparent;
   color: var(--color-danger);
 }
 
 .mission-control-view .mc-action-danger:hover {
-  border-color: var(--color-danger);
-  background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+  background: var(--surface-raised);
 }
 
 .mc-film .poster-image {
@@ -3392,49 +3132,25 @@ textarea {
 /* Coarse pointers get 44 px targets for every Mission Control action, including the controls the
    page hosts (Spaces, Quick Controls) and the links inside its panels. */
 @media (pointer: coarse) {
-  .mission-control-view .dashboard-action-button,
-  .mission-control-view .dashboard-play-launch,
-  .mission-control-view .dashboard-degraded-action,
-  .mission-control-view .mc-inline-link,
-  .mission-control-view .mc-docs-link a,
-  .mission-control-view [data-dashboard-idle-vitals] > summary {
+  .mission-control-view :is(.dashboard-action-button, .dashboard-play-launch, .dashboard-degraded-action, .mc-inline-link, .mc-docs-link a, .mc-deck-side a[href]) {
     display: inline-flex;
     align-items: center;
+  }
+
+  .mission-control-view :is(.dashboard-action-button, .dashboard-play-launch, .dashboard-degraded-action, .mc-inline-link, .mc-docs-link a, .mc-deck-side a[href], [data-dashboard-idle-vitals] > summary, .mc-deck-side button, .mc-deck-side [role="switch"]) {
     min-height: 2.75rem;
     touch-action: manipulation;
   }
 
-  .mission-control-view [data-dashboard-idle-vitals] > summary {
-    display: flex;
-  }
-
-  .mission-control-view .mc-docs-link a {
+  .mission-control-view :is(.mc-docs-link a, .mc-deck-side a[href]) {
     min-width: 2.75rem;
-  }
-
-  /* The switches Mission Control hosts (Quick Controls, Live Tuning) keep their look and gain height. */
-  .mission-control-view .mc-deck-side [role="switch"],
-  .mission-control-view .mc-deck-side button {
-    min-height: 2.75rem;
-    touch-action: manipulation;
-  }
-
-  .mission-control-view .mc-deck-side a[href] {
-    display: inline-flex;
-    align-items: center;
-    min-width: 2.75rem;
-    min-height: 2.75rem;
-    touch-action: manipulation;
   }
 }
 
+/* The global reduced-motion rule already stills transitions; the live marker stops pulsing too. */
 @media (prefers-reduced-motion: reduce) {
-  .mc-marker.is-live,
-  .mc-stage-backdrop,
-  .mc-keyart,
-  .mc-diag-chevron {
-    animation: none !important;
-    transition: none !important;
+  .mc-marker.is-live {
+    animation: none;
   }
 }
 
@@ -3673,14 +3389,8 @@ textarea {
     -webkit-backdrop-filter: none;
   }
 
-  .dashboard-live-shell,
-  .dashboard-preview-panel,
-  .dashboard-live-summary-tile {
+  .mc-stage {
     box-shadow: none;
-  }
-
-  .dashboard-telemetry-grid {
-    @apply grid-cols-2;
   }
 }
 

@@ -53,9 +53,9 @@ const metaItems = computed(() => props.meta.filter(Boolean))
         <p v-if="kicker" class="mc-kicker">{{ kicker }}</p>
         <template v-if="mode === 'loading'">
           <h2 :id="titleId" class="sr-only">{{ title }}</h2>
-          <div class="mc-stage-loading" aria-hidden="true">
-            <div class="skeleton-shimmer mc-loading-title"></div>
-            <div class="skeleton-shimmer mc-loading-line"></div>
+          <div class="mt-3 grid gap-3" aria-hidden="true">
+            <div class="skeleton-shimmer h-12 w-full max-w-sm rounded-lg"></div>
+            <div class="skeleton-shimmer h-4 w-full max-w-64 rounded-md"></div>
           </div>
         </template>
         <h2 v-else :id="titleId" class="mc-stage-title" :class="`is-${step}`" :data-title-step="step">{{ title }}</h2>
@@ -65,7 +65,7 @@ const metaItems = computed(() => props.meta.filter(Boolean))
         </p>
         <p v-if="note" class="mc-stage-note" :class="noteTone">{{ note }}</p>
         <slot name="reason" />
-        <div v-if="$slots.actions" class="mc-stage-actions"><slot name="actions" /></div>
+        <div v-if="$slots.actions" class="mc-stage-actions mt-4 flex flex-wrap gap-2.5"><slot name="actions" /></div>
       </div>
       <div v-if="$slots.aside" class="mc-stage-aside"><slot name="aside" /></div>
     </div>

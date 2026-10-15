@@ -199,7 +199,7 @@
                   {{ doctorExplanation }}
                 </p>
               </div>
-              <div class="mc-doctor-actions">
+              <div class="flex shrink-0 flex-wrap items-center gap-2">
                 <button
                   v-if="doctorSafeAction && doctorActionExecutable"
                   type="button"
@@ -242,7 +242,7 @@
             <h3 class="mc-panel-label"><span class="mc-bracket" aria-hidden="true">&lt;</span> {{ $t('dashboard.doctor') }} <span class="mc-bracket" aria-hidden="true">&gt;</span></h3>
             <p class="mc-doctor-headline mt-2">{{ t('mission_control.doctor_waiting_title') }}</p>
             <p class="mt-2 max-w-3xl text-sm leading-relaxed text-support">{{ t('mission_control.doctor_waiting_body') }}</p>
-            <div v-if="doctorActionUndoAvailable" class="mc-doctor-actions mt-3">
+            <div v-if="doctorActionUndoAvailable" class="mt-3 flex shrink-0 flex-wrap items-center gap-2">
               <button type="button" class="focus-ring dashboard-action-button dashboard-action-button-ghost disabled:cursor-wait disabled:opacity-70" :disabled="doctorActionPending" @click="undoDoctorAction">
                 {{ $t('dashboard.doctor_action_undo') }}
               </button>
@@ -252,7 +252,7 @@
 
           <!-- Recent titles: the landing page is a remote control, so each one launches. -->
           <section v-if="stageMode === 'idle'" class="mc-panel" data-dashboard-play-rail>
-            <div class="mc-panel-head">
+            <div class="flex flex-wrap items-start justify-between gap-3">
               <div class="min-w-0">
                 <h3 class="mc-panel-label"><span class="mc-bracket" aria-hidden="true">&lt;</span> {{ $t('dashboard.recent_games') }} <span class="mc-bracket" aria-hidden="true">&gt;</span></h3>
                 <p class="mt-1 text-sm text-support">{{ recentApps.length ? $t('dashboard.recent_ready', { count: recentApps.length }) : $t('dashboard.no_games') }}</p>
@@ -320,7 +320,7 @@
           <!-- One disclosure for the dense detail; opening it is the viewer's choice and survives updates. -->
           <MissionDiagnostics ref="diagnosticsPanel" v-model="diagnosticsOpen" :title="t('mission_control.diagnostics')" :summary="diagnosticsSummary">
             <div class="mc-diag-grid">
-              <section v-if="stageMode === 'live' || stageMode === 'unavailable'" class="mc-diag-section" data-diagnostics-stream-status>
+              <section v-if="stageMode === 'live' || stageMode === 'unavailable'" class="min-w-0" data-diagnostics-stream-status>
                 <h4 class="mc-diag-section-title">{{ t('mission_control.diag_stream_status') }}</h4>
                 <dl class="mc-kv">
                   <div><dt>{{ t('mission_control.diag_connection') }}</dt><dd>{{ streamStatusIsUnavailable ? t('mission_control.diag_disconnected') : t('mission_control.diag_connected') }}</dd></div>
@@ -328,7 +328,7 @@
                 </dl>
               </section>
 
-              <section v-if="stageMode === 'live'" class="mc-diag-section">
+              <section v-if="stageMode === 'live'" class="min-w-0">
                 <h4 class="mc-diag-section-title">{{ t('mission_control.diag_frame_health') }}</h4>
                 <div class="flex flex-wrap gap-1.5" data-dashboard-frame-health>
                   <span class="data-pill" :class="frameHealth.droppedTone">{{ frameHealth.dropped }} dropped</span>
@@ -338,11 +338,11 @@
                 <p v-if="prefersReducedMotion" class="mt-2 text-sm text-support">Live charts are paused while reduced motion is enabled.</p>
               </section>
 
-              <section v-if="stageMode === 'live'" class="mc-diag-section mc-diag-wide">
+              <section v-if="stageMode === 'live'" class="mc-diag-wide min-w-0">
                 <StreamPacingReadout :stats="stats || {}" :connected="streamStatsConnected" :observed-at="streamStatsReceivedAt" />
               </section>
 
-              <section v-if="stageMode === 'live'" class="mc-diag-section">
+              <section v-if="stageMode === 'live'" class="min-w-0">
                 <div class="mc-diag-section-head">
                   <h4 class="mc-diag-section-title">{{ $t('dashboard.runtime_path') }}</h4>
                   <router-link to="/troubleshooting" class="focus-ring mc-inline-link">
@@ -356,7 +356,7 @@
                 <p v-if="runtimePathNote" class="dashboard-rail-footnote mt-2 text-sm" :class="runtimePathNoteTone">{{ runtimePathNote }}</p>
               </section>
 
-              <section v-if="stageMode === 'live' || stageMode === 'unavailable'" class="mc-diag-section">
+              <section v-if="stageMode === 'live' || stageMode === 'unavailable'" class="min-w-0">
                 <h4 class="mc-diag-section-title">{{ t('mission_control.diag_host_vitals') }}</h4>
                 <dl v-if="gpu" class="mc-kv">
                   <div v-for="row in gpuRows" :key="row.label"><dt>{{ row.label }}</dt><dd>{{ row.value }}</dd></div>
@@ -364,7 +364,7 @@
                 <p v-else class="text-sm text-support">Host telemetry is warming up. GPU temperature, encoder load, and VRAM gauges will appear after the host reports system stats.</p>
               </section>
 
-              <section v-if="stageMode === 'idle' || stageMode === 'spaces' || stageMode === 'unavailable'" class="mc-diag-section mc-diag-wide">
+              <section v-if="stageMode === 'idle' || stageMode === 'spaces' || stageMode === 'unavailable'" class="mc-diag-wide min-w-0">
                 <h4 class="mc-diag-section-title">{{ t('mission_control.diag_launch_checks') }}</h4>
                 <div v-if="readyChecksAllPassing" class="ready-check-summary">
                   <div>
@@ -405,7 +405,7 @@
               </section>
 
               <!-- Session history: the host's recorded outcomes, or this browser's richer local list. -->
-              <section v-if="(stageMode === 'idle' || stageMode === 'spaces') && !sessions.length && hostHistoryRows.length" class="mc-diag-section mc-diag-wide" data-session-history-host>
+              <section v-if="(stageMode === 'idle' || stageMode === 'spaces') && !sessions.length && hostHistoryRows.length" class="mc-diag-wide min-w-0" data-session-history-host>
                 <div class="mc-diag-section-head">
                   <h4 class="mc-diag-section-title">{{ t('dashboard.session_history') }}</h4>
                   <button type="button" class="focus-ring mc-inline-link" data-clear-session-history @click="clearHistoryConfirmOpen = true">{{ t('dashboard.clear_history') }}</button>
@@ -417,7 +417,7 @@
                   </li>
                 </ul>
               </section>
-              <section v-if="(stageMode === 'idle' || stageMode === 'spaces') && sessions.length" class="mc-diag-section mc-diag-wide" data-session-history-local>
+              <section v-if="(stageMode === 'idle' || stageMode === 'spaces') && sessions.length" class="mc-diag-wide min-w-0" data-session-history-local>
                 <div class="mc-diag-section-head">
                   <h4 class="mc-diag-section-title">{{ t('dashboard.session_history') }}</h4>
                   <button type="button" class="focus-ring mc-inline-link" data-clear-session-history @click="clearHistoryConfirmOpen = true">{{ t('dashboard.clear_history') }}</button>

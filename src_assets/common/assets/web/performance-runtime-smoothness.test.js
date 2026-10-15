@@ -44,6 +44,9 @@ describe('web performance runtime smoothness guardrails', () => {
     expect(css).toContain('.dashboard-preview-overlay .animate-spin')
     expect(css).toContain('@media (orientation: landscape) and (max-height: 32rem) and (max-width: 64rem)')
     expect(css).toContain('backdrop-filter: none;')
-    expect(css).toContain('.dashboard-live-summary-tile')
+    // Issue #408 replaced the live summary tiles and preview panel with the Mission Control stage,
+    // which drops its shadow in the same short-landscape rule.
+    const landscape = css.slice(css.indexOf('@media (orientation: landscape) and (max-height: 32rem) and (max-width: 64rem)'))
+    expect(landscape.slice(0, landscape.indexOf('\n}\n'))).toMatch(/\.mc-stage \{\s*box-shadow: none;/)
   })
 })

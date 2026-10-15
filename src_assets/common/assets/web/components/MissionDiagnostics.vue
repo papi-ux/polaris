@@ -20,7 +20,7 @@ defineExpose({ toggle })
 
 <template>
   <section class="mc-diag" data-mission-diagnostics>
-    <h3 class="mc-diag-heading">
+    <h3 class="text-base font-normal">
       <button ref="toggle" type="button" class="focus-ring mc-diag-toggle" :aria-expanded="modelValue ? 'true' : 'false'" :aria-controls="bodyId"
         :aria-labelledby="titleId" :aria-describedby="summary ? summaryId : undefined" data-mission-diagnostics-toggle
         @click="$emit('update:modelValue', !modelValue)">
