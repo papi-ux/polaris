@@ -1,7 +1,7 @@
 <script setup>
-import { computed, reactive, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { titleStep } from '../mission-control.js'
-import { readThemeTokens } from '../theme-bridge.js'
+import { onThemeTokensChange, readThemeTokens } from '../theme-bridge.js'
 
 // The Mission Control stage: one title card per state, library artwork behind it, the main action
 // on it and the readings along its lower edge. It only lays out what the dashboard passes in.
@@ -50,14 +50,25 @@ function logoLoaded(src, event) {
   if (logoReadable(event.target, readThemeTokens(['void']).void)) loadedArt.add(src)
   else failedArt.add(src)
 }
+// A new theme brings a new scrim: forget the logo's verdict and mount it again, so the title text
+// shows until the logo has passed the screen against the new scrim.
+const logoCheck = ref(0)
+let stopThemeWatch = null
+onMounted(() => {
+  stopThemeWatch = onThemeTokensChange(() => {
+    loadedArt.delete(props.logoSrc)
+    failedArt.delete(props.logoSrc)
+    logoCheck.value++
+  })
+})
+onUnmounted(() => stopThemeWatch?.())
 
 const channel = value => { const n = value / 255; return n <= 0.04045 ? n / 12.92 : ((n + 0.055) / 1.055) ** 2.4 }
 const luminance = (r, g, b) => 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
 // The brightest a background can be on the stage: white at its 0.6 brightness.
 const BRIGHTEST_ART = 0.6 * 255
-// Where the logo can sit, the scrim lets through at most about half of that background (the widest
-// logo at a 40 to 52rem stage reaches the thinner part of the scrim).
-const ART_THROUGH = 0.5
+// The most of that background the scrim lets through anywhere: its thinnest edge is 15% scrim.
+const ART_THROUGH = 0.85
 
 // A screen for faint, dark and mid-tone logos, not a contrast guarantee: real artwork varies. Each
 // solid-ink pixel (at least half opaque) of a small copy of the logo is composed, as the browser
@@ -134,7 +145,7 @@ const metaItems = computed(() => props.meta.filter(Boolean))
           </div>
         </template>
         <h2 v-else :id="titleId" class="mc-stage-title" :class="`is-${step}`" :data-title-step="step">
-          <img v-if="showLogo" v-show="logoShown" :key="logoSrc" class="mc-stage-logo" :src="logoSrc" alt="" data-stage-logo
+          <img v-if="showLogo" v-show="logoShown" :key="`${logoSrc}#${logoCheck}`" class="mc-stage-logo" :src="logoSrc" alt="" data-stage-logo
             @load="logoLoaded(logoSrc, $event)" @error="failedArt.add(logoSrc)" />
           <span :class="{ 'sr-only': logoShown }">{{ title }}</span>
         </h2>

@@ -21,12 +21,13 @@ const cover = (fill, mark) => `<svg xmlns="http://www.w3.org/2000/svg" width="40
 const covers = { [catalog[0].name]: cover('#e8e4dc', '#c8261d'), [catalog[1].name]: cover('#f2d27a', '#2a4a5a') }
 // Steam backgrounds and logos from the host artwork cache. Control's pale background is the worst
 // case for copy over it; Hades has no background and a logo too dark for the stage; Balatro has a
-// pale background and a mid-tone logo that would not hold 3:1 over it.
+// pale background and a light grey logo that holds 3:1 only if no more than half of a bright
+// background shows through the scrim.
 const paleHero = '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="620"><rect width="1920" height="620" fill="#ece8df"/><rect x="1100" width="820" height="620" fill="#b8231b"/></svg>'
 const heroes = { control: paleHero, balatro: paleHero }
 const logo = fill => `<svg xmlns="http://www.w3.org/2000/svg" width="640" height="200"><rect x="20" y="40" width="600" height="120" rx="24" fill="${fill}"/></svg>`
 // The long title's logo is white at 2% opacity: present, but too faint to stand in for its name.
-const logos = { control: logo('#f4f1ea'), hades: logo('#15110f'), long: logo('#ffffff" fill-opacity="0.02'), balatro: logo('#808080') }
+const logos = { control: logo('#f4f1ea'), hades: logo('#15110f'), long: logo('#ffffff" fill-opacity="0.02'), balatro: logo('#c8c8c8') }
 const live = {
   streaming: true, fps: 119.6, session_target_fps: 120, latency_ms: 11, bitrate_kbps: 48000, encode_time_ms: 3.1,
   codec: 'hevc', width: 1920, height: 1080, hdr_effective_mode: 'sdr_8bit', hdr_downgrade_reason: 'none',
@@ -464,8 +465,8 @@ test.describe('Mission Control stage', () => {
     // Without a cover or a background, that title's stage is typographic.
     await expect(hero.locator('[data-stage-artwork]')).toHaveCount(0)
     await expect(hero.locator('.mc-stage-backdrop')).toHaveCount(0)
-    // A pale background with a mid-tone logo: the logo would not hold 3:1 over the background, so
-    // the name stays visible; the missing cover leaves no key art.
+    // A pale background with a light grey logo: the logo would not hold 3:1 where the scrim is
+    // thinnest, so the name stays visible; the missing cover leaves no key art.
     await page.locator('[data-dashboard-feature-app="balatro"]').click()
     await expect(hero.locator('.mc-stage-title')).toHaveText('Balatro')
     await expect(hero.locator('[data-stage-artwork]')).toHaveCount(0)
@@ -530,6 +531,30 @@ test.describe('Mission Control stage', () => {
     evidence.writesAfterPlayClick = [...host.writes]
     writeFileSync(testInfo.outputPath('hybrid-touch-evidence.json'), JSON.stringify(evidence, null, 2))
     await testInfo.attach('hybrid-touch-evidence', { path: testInfo.outputPath('hybrid-touch-evidence.json'), contentType: 'application/json' })
+  })
+
+  test('a weak logo keeps the name on a medium-width stage', async ({ page }, testInfo) => {
+    // A 40 to 52rem stage is where the copy column reaches furthest into the thinner scrim.
+    await page.setViewportSize({ width: 1024, height: 768 })
+    await page.emulateMedia({ reducedMotion: 'reduce' })
+    const host = await mockHost(page)
+    await page.goto('/#/')
+    await stageMode(page, 'idle')
+    const hero = page.locator('[data-dashboard-idle-hero]')
+    const width = await hero.evaluate(node => node.getBoundingClientRect().width / parseFloat(getComputedStyle(document.documentElement).fontSize))
+    expect(width, 'stage width in rem').toBeGreaterThanOrEqual(40)
+    expect(width, 'stage width in rem').toBeLessThan(52)
+    await page.locator('[data-dashboard-feature-app="balatro"]').click()
+    await expect(hero.locator('.mc-stage-title')).toHaveText('Balatro')
+    await expect(hero.locator('[data-stage-hero]')).toHaveClass(/is-loaded/)
+    await expect(hero.locator('[data-stage-logo]')).toHaveCount(0)
+    await expect(hero.locator('.mc-stage-title span')).toBeVisible()
+    await expect(hero.locator('.mc-stage-title span')).not.toHaveClass(/sr-only/)
+    // Control's light logo still stands in for its name at this width.
+    await page.locator('[data-dashboard-feature-app="control"]').click()
+    await expect(hero.locator('[data-stage-logo]')).toBeVisible()
+    await shot(page, testInfo, 'idle-medium-stage-control-logo.png')
+    expect(host.writes).toEqual([])
   })
 
   test('Spaces appears only when it needs attention or a Space is running', async ({ page }, testInfo) => {

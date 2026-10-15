@@ -1,6 +1,7 @@
 import { mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import MissionStage from './MissionStage.vue'
+import { applyTheme } from '../theme.js'
 
 const cover = './api/covers/image?name=Control'
 const hero = './api/apps/control/artwork/hero'
@@ -28,7 +29,11 @@ function stage(props = {}) {
   return mount(MissionStage, { props: { mode: 'idle', title: 'Control', artSrc: cover, heroSrc: hero, logoSrc: logo, ...props } })
 }
 
-afterEach(() => { vi.restoreAllMocks(); document.documentElement.style.removeProperty('--color-void') })
+afterEach(() => {
+  vi.restoreAllMocks()
+  document.documentElement.style.removeProperty('--color-void')
+  applyTheme('polaris')
+})
 
 describe('MissionStage artwork', () => {
   it('puts the Steam background behind the stage and falls back to the softened cover, then to none', async () => {
@@ -125,9 +130,20 @@ describe('MissionStage artwork', () => {
     midTone.unmount()
   })
 
+  it('keeps the title text for a light grey that would pass only if half the background showed through', async () => {
+    // Grey 200 holds 4.7:1 when half of a white background shows; the scrim's thinnest edge lets
+    // 85% through, and there it reaches only 2.25:1.
+    scrim('#0b0a0a')
+    solid([200, 200, 200, 255])
+    const view = stage()
+    expect(await loadLogo(view)).toBe(false)
+    view.unmount()
+  })
+
   it('judges the logo against the theme scrim it is drawn on', async () => {
-    // A light grey holds 3:1 against the black scrim and its brightest backdrop, not the Polaris ones.
-    solid([170, 170, 170, 255])
+    // Grey 230 holds 3:1 against the black scrim and its brightest backdrop (3.08:1), not the
+    // Polaris ones (2.83:1).
+    solid([230, 230, 230, 255])
     scrim('#000000')
     const black = stage()
     expect(await loadLogo(black)).toBe(true)
@@ -136,6 +152,28 @@ describe('MissionStage artwork', () => {
     const polaris = stage()
     expect(await loadLogo(polaris)).toBe(false)
     polaris.unmount()
+  })
+
+  it('checks the logo again when the theme changes, showing the text while it does', async () => {
+    solid([230, 230, 230, 255])
+    scrim('#000')
+    applyTheme('oled')
+    const view = stage()
+    expect(await loadLogo(view)).toBe(true)
+    expect(view.get('h2 span').classes()).toContain('sr-only')
+    // Polaris's lighter scrim: the same logo no longer passes, so the name shows again.
+    scrim('#2a2840')
+    applyTheme('polaris')
+    await view.vm.$nextTick()
+    expect(view.get('h2 span').classes()).not.toContain('sr-only')
+    expect(await loadLogo(view)).toBe(false)
+    expect(view.get('h2 span').classes()).not.toContain('sr-only')
+    // Back on a dark scrim it passes again.
+    scrim('#000')
+    applyTheme('oled')
+    await view.vm.$nextTick()
+    expect(await loadLogo(view)).toBe(true)
+    view.unmount()
   })
 
   it('reads the shortened hex the built stylesheet writes for a scrim, such as OLED\'s #000', async () => {
